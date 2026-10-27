@@ -231,6 +231,8 @@ grep -q '^Server' /etc/pacman.d/mirrorlist || die "/etc/pacman.d/mirrorlist has 
 if [ -n "$resumed" ]; then
     echo "== $level: build on mounted target $root, where the installation stopped (work: $work)"
     rm -f "$root/var/lib/pacman/db.lck" # its run's processes have all ended (a PID namespace of their own)
+    # Its databases are fetched again (-Syy), each with its signature: the
+    # system's own pacman synchronised them since, from its mirrors.
 elif [ -n "$target" ]; then
     echo "== $level: build mounted target $root (work: $work)"
 else
@@ -371,7 +373,7 @@ echo "== install: ${packages[*]}"
 pacman --root "$root" --dbpath "$root/var/lib/pacman" \
     --cachedir "$cache" --cachedir /var/cache/pacman/pkg \
     --gpgdir "$gnupg" --hookdir "$root/etc/pacman.d/hooks" --config "$work/pacman.conf" \
-    --noconfirm --needed --assume-installed initramfs -Sy "${packages[@]}" 2>&1 | tee "$work/pacman.log" |
+    --noconfirm --needed --assume-installed initramfs "-Sy${resumed:+y}" "${packages[@]}" 2>&1 | tee "$work/pacman.log" |
     awk '/^Packages \([0-9]+\)/ { total = substr($2, 2, length($2) - 2) }
          total && $2 == "downloading..." { printf "(%d/%s) downloading %s\n", ++fetched, total, $1; fflush() }
          $1 == "installing" { sub(/\.\.\.$/, "", $2); printf "(%d/%s) installing %s\n", ++installed, total, $2; fflush() }' ||

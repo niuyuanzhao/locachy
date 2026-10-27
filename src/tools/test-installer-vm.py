@@ -249,11 +249,17 @@ def install_guest(args, iso, out, kernel, initrd):
     return disk
 
 
+# The kernel log as the journal keeps it: dmesg's ring drops early lines
+# during an installation, and counts taken from it go down. (Its short form:
+# the journal takes "installer:" for the sender, which -o cat leaves out.)
+KLOG = "journalctl -k -o short --no-pager"
+
+
 def wait_kmsg(guest, pattern, seconds, fail=None):
     """Until the guest's kernel log has pattern (grep -E), read over the
     serial shell; fail: a pattern that ends the wait as a failure."""
-    stop = "" if fail is None else "dmesg | grep -qE '" + fail + "' && exit 3; "
-    guest.shell("timeout " + str(seconds) + " sh -c \"until dmesg | grep -qE '" + pattern + "'; do " + stop +
+    stop = "" if fail is None else KLOG + " | grep -qE '" + fail + "' && exit 3; "
+    guest.shell("timeout " + str(seconds) + " sh -c \"until " + KLOG + " | grep -qE '" + pattern + "'; do " + stop +
                 "sleep 2; done\"")
 
 
@@ -264,7 +270,7 @@ def guest_state(guest, command):
 
 
 def kmsg_count(pattern):
-    return "$(dmesg | grep -cE '" + pattern + "')"
+    return "$(" + KLOG + " | grep -cE '" + pattern + "')"
 
 
 def trust_keys(guest, screenshots, round_):
@@ -293,8 +299,14 @@ def trust_keys(guest, screenshots, round_):
     screenshots[f"trusted-{round_}"] = guest.shot(f"tui-trusted-{round_}")
     guest.type("exit")
     guest.key("ret")
-    guest.shell("timeout 30 sh -c \"until [ " + kmsg_count("installer: /usr/local/bin/term ended") + " -gt " +
-                str(terms) + " ]; do sleep 1; done\"")
+    ended = guest_state(guest, "timeout 30 sh -c \"until [ " + kmsg_count("installer: /usr/local/bin/term ended") +
+                        " -gt " + str(terms) + " ]; do sleep 1; done\" && s=yes || s=no")
+    if ended != "yes":
+        # The terminal ends when nothing holds its tty: what does.
+        guest.shell("for p in /proc/[0-9]*; do ls -l $p/fd 2>/dev/null | grep -q /dev/pts/ && "
+                    "echo \"holds a pty: ${p#/proc/} $(tr '\\0' ' ' <$p/cmdline)\"; done; true")
+        screenshots[f"not-ended-{round_}"] = guest.shot(f"tui-not-ended-{round_}")
+        raise RuntimeError("The terminal did not end after exit")
     guest.pump(2)
 
 
@@ -390,12 +402,12 @@ def install_tui(args, iso, out, kernel, initrd, stops=False):
             guest.command("set_link", {"name": "nic0", "up": True})
             guest.shell("nm-online -q -t 180")
             guest.key("c")
-            guest.shell("timeout 30 sh -c \"until dmesg | grep -q 'installer: continuing'; do sleep 1; done\"")
+            guest.shell("timeout 30 sh -c \"until " + KLOG + " | grep -q 'installer: continuing'; do sleep 1; done\"")
             rounds.append("network")
         while True:
-            state = guest_state(guest, "until dmesg | grep -q 'installer: installation completed' || [ " +
+            state = guest_state(guest, "until " + KLOG + " | grep -q 'installer: installation completed' || [ " +
                                 kmsg_count("installer: installation failed") + " -gt " + str(stopped) + " ]; do sleep 5; done; "
-                                "if dmesg | grep -q 'installer: installation completed'; then s=done; "
+                                "if " + KLOG + " | grep -q 'installer: installation completed'; then s=done; "
                                 "elif [ -s " + target + "/var/lib/locachy/builder/untrusted-keys ]; then s=keys; else s=failed; fi")
             if state == "done":
                 break

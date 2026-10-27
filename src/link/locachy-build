@@ -41,8 +41,10 @@
 # /var/lib/locachy/builder/untrusted-keys), exit status 3. A person checks
 # each with its upstream project and adds it:
 # locachy-build --trust-key FINGERPRINT...: each key fetched by its full
-# fingerprint into a keyring of its own, shown (fingerprint, owner), and
-# added to the build user's keyring only when answered y.
+# fingerprint from every keyserver into a keyring of its own (their copies
+# merged: one may keep a key's old expiry and miss its newer subkeys),
+# shown (fingerprint, owner, subkeys), and added to the build user's
+# keyring only when answered y. One trusted already is brought up to date.
 set -euo pipefail
 
 bdir=/var/lib/locachy/builder
@@ -589,21 +591,22 @@ if [ "${1:-}" = --trust-key ]; then
     status=0
     for key in "$@"; do
         key=${key^^}
-        if as_user gpg --batch --list-keys "$key" >/dev/null 2>&1; then
-            echo "$key: trusted already"
+        known=
+        ! as_user gpg --batch --list-keys "$key" >/dev/null 2>&1 || known=1
+        from=
+        for server in hkps://keys.openpgp.org hkps://keyserver.ubuntu.com; do
+            if "${net[@]}" timeout 60 gpg --homedir "$keyring" --batch --keyserver "$server" --recv-keys "$key" \
+                >/dev/null 2>&1; then
+                from="${from:+$from, }${server#hkps://}"
+            fi
+        done
+        if [ -z "$from" ] && [ -n "$known" ]; then
+            echo "$key: trusted already (no keyserver gave a newer copy)"
             [ ! -f "$bdir/untrusted-keys" ] || sed -i "/ $key\$/d" "$bdir/untrusted-keys"
             continue
         fi
-        from=
-        for server in hkps://keyserver.ubuntu.com hkps://keys.openpgp.org; do
-            if "${net[@]}" timeout 60 gpg --homedir "$keyring" --batch --keyserver "$server" --recv-keys "$key" \
-                >/dev/null 2>&1; then
-                from=$server
-                break
-            fi
-        done
         if [ -z "$from" ]; then
-            echo "$key: no keyserver gave it (keyserver.ubuntu.com, keys.openpgp.org)"
+            echo "$key: no keyserver gave it (keys.openpgp.org, keyserver.ubuntu.com)"
             status=1
             continue
         fi
@@ -613,8 +616,15 @@ if [ "${1:-}" = --trust-key ]; then
             status=1
             continue
         fi
+        if [ -n "$known" ]; then
+            # The same key, newer: its own signatures bind what is new.
+            gpg --homedir "$keyring" --batch --export "$key" | as_user gpg --batch --quiet --import
+            echo "$key: trusted already; brought up to date from $from"
+            [ ! -f "$bdir/untrusted-keys" ] || sed -i "/ $key\$/d" "$bdir/untrusted-keys"
+            continue
+        fi
         echo "$key, from $from:"
-        gpg --homedir "$keyring" --batch --fingerprint "$key"
+        gpg --homedir "$keyring" --batch --list-options show-unusable-subkeys --fingerprint "$key"
         printf 'Trust this key to sign the sources LOCachy builds? [y/N] '
         answer=
         read -r answer || true

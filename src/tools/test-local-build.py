@@ -154,6 +154,16 @@ class LocalBuild(unittest.TestCase):
         self.assertIn(other + ": not trusted", result.stdout)
         self.assertEqual(self.keyring.read_text().split(), [key])
         self.assertEqual((self.bdir / "untrusted-keys").read_text(), f"lyrebird-proxy {other}\n")
+        calls = self.log.read_text()
+        for server in ("keys.openpgp.org", "keyserver.ubuntu.com"):  # every copy, merged
+            self.assertIn(f"--keyserver hkps://{server} --recv-keys {key}", calls)
+        # Trusted already: brought up to date (the same key's newer copy), not asked again.
+        result = subprocess.run(["bash", str(self.script), "--trust-key", key],
+                                env=env, text=True, capture_output=True, input="")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(key + ": trusted already; brought up to date from keys.openpgp.org, keyserver.ubuntu.com",
+                      result.stdout)
+        self.assertNotIn("[y/N]", result.stdout)
         result = subprocess.run(["bash", str(self.script), "--trust-key", "B467F0BF"],
                                 env=env, text=True, capture_output=True, input="y\n")
         self.assertNotEqual(result.returncode, 0)
