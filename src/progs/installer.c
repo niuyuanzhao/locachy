@@ -92,6 +92,8 @@ static char levels[8][16], level_auto[16], cpu_model[48], repo_names[4][16];
 static int nlevels, nrepos;
 static int tpm_usable, net_profiles;
 static char tpm_advice[512];
+static char source_text[512]; /* the LOCachy source locachy-install is, as it said */
+static int source_not_newest;
 static long long memory_bytes, esp_bytes, min_root_bytes;
 static struct {
     char user[32], hostname[64], keymap[48], timezone[64], update_repo[256], update_branch[128];
@@ -375,6 +377,9 @@ static int load_description(void)
     o = jget(d, "tpm");
     tpm_usable = json_object_get_boolean(jget(o, "usable"));
     copy(tpm_advice, sizeof tpm_advice, jstr(o, "advice"));
+    o = jget(d, "source");
+    copy(source_text, sizeof source_text, jstr(o, "text"));
+    source_not_newest = json_object_get_boolean(jget(o, "not_newest"));
     net_profiles = (int)jint(d, "network_profiles");
     memory_bytes = jint(d, "memory_bytes");
     esp_bytes = jint(d, "esp_bytes");
@@ -912,8 +917,19 @@ static void build_summary(int width)
     add_item(E_NOTE, _("Repositories"), line);
     snprintf(line, sizeof line, "%s (%s)", c.update_repo, c.update_branch);
     add_item(E_NOTE, _("Updates from"), line);
+    /* The live entry fetches the newest source from there when it installs. */
+    if (strcmp(c.update_repo, "off") == 0) {
+        snprintf(line, sizeof line, "%s", _("this medium's own (updates are off)"));
+    } else {
+        snprintf(line, sizeof line, _("the newest of %s (%s), fetched when it installs"), c.update_repo,
+                 c.update_branch);
+    }
+    add_item(E_NOTE, _("LOCachy source"), line);
+    if (source_text[0]) {
+        snprintf(line, sizeof line, _("Now: %s"), source_text);
+        add_wrapped(source_not_newest ? E_WARN : E_NOTE, line, width);
+    }
     add(E_GAP, " ");
-    (void)width;
     add(R_INSTALL, "%s", _("Install"));
 }
 
@@ -1312,7 +1328,8 @@ static const char *const stage_names[NSTAGES] = {
 static pid_t job;
 static int stage = -1, completed, pkg_done, pkg_fetched, pkg_total;
 static double started, stage_at[NSTAGES], ended;
-static char last_line[256], error_line[512];
+static char last_line[256], error_line[512], run_source[512];
+static int run_source_not_newest;
 static off_t log_read;
 static char log_part[512];
 
@@ -1351,6 +1368,12 @@ static void progress_line(const char *s)
         stage_go(G_FINISH);
     } else if (strncmp(s, "Installation completed.", 23) == 0) {
         completed = 1;
+    } else if (strncmp(s, "Source: ", 8) == 0) {
+        copy(run_source, sizeof run_source, s + 8);
+        run_source_not_newest = 0;
+    } else if (strncmp(s, "Source (not the newest): ", 25) == 0) {
+        copy(run_source, sizeof run_source, s + 25);
+        run_source_not_newest = 1;
     } else if (sscanf(s, "(%d/%d) ", &n, &m) == 2 && strstr(s, ") installing ")) {
         pkg_done = n;
         pkg_total = m;
@@ -1421,7 +1444,7 @@ static void start_install(char *const argv[])
     started = now();
     if (stage == G_DISK) stage_at[G_DISK] = started;
     completed = pkg_done = pkg_fetched = pkg_total = 0;
-    last_line[0] = error_line[0] = log_part[0] = '\0';
+    last_line[0] = error_line[0] = log_part[0] = run_source[0] = '\0';
     log_read = 0;
     tell(0, "%s", "");
     say("installer: installing");
@@ -1685,6 +1708,10 @@ static void draw_progress(void)
     } else {
         screen_text(2, r, _("The installation failed. Nothing more is written; the output below says why."), ERROR, BG);
         if (error_line[0]) screen_text(4, ++r, error_line, ERROR, BG);
+    }
+    if (run_source[0]) {
+        snprintf(line, sizeof line, _("LOCachy source: %s"), run_source);
+        screen_text(4, ++r, line, run_source_not_newest ? WARN : DIM, BG);
     }
     r += 2;
     for (int s = 0; s < NSTAGES; s++, r++) {

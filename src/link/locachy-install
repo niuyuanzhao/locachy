@@ -268,6 +268,34 @@ def detect_source_git(source_dir=None, origin_file=SOURCE_ORIGIN):
             branch if valid_branch(branch) else DEFAULT_UPDATE_BRANCH, commit)
 
 
+def source_line():
+    """(text, not_newest): which LOCachy source this run is, for the
+    installation's log and the full-screen installer: its commit, repository
+    and branch, and how the live entry got it (LOCACHY_SOURCE: fetched now,
+    fetched before, or the medium's own, and why). not_newest: the newest
+    was to be fetched and was not."""
+    repo, branch, commit = detect_source_git()
+    how = os.environ.get("LOCACHY_SOURCE", "")
+    short = commit[:12] if commit else "unknown commit"
+    if how == "bundled: updates are off":
+        return f"this medium's own, {short} (updates are off)", False
+    if how.startswith("bundled: "):
+        return f"this medium's own, {short}; {how[len('bundled: '):]}", True
+    line = f"{short} of {repo} ({branch})"
+    if how == "fetched":
+        return line + ", the newest, fetched now", False
+    if how == "fetched earlier":
+        return line + ", fetched earlier", False
+    if how.startswith("fetched before: "):
+        return line + ", fetched before; " + how[len("fetched before: "):], True
+    return line, False
+
+
+def print_source():
+    text, not_newest = source_line()
+    print(("Source (not the newest): " if not_newest else "Source: ") + text, flush=True)
+
+
 def update_source(args):
     """(repo, branch, commit) the installed system takes updates from: what
     was given (--update-repo, --update-branch; repo "off" disables), else
@@ -516,6 +544,7 @@ def describe(parser):
         "network_profiles": len(live_nm_connections()),
         "memory_bytes": memory, "esp_bytes": ESP_BYTES, "min_root_bytes": MIN_ROOT_BYTES,
         "disks": disks(),
+        "source": dict(zip(("text", "not_newest"), source_line())),
     }
 
 
@@ -1140,6 +1169,8 @@ def main():
             check_targets(args)
     except (OSError, ValueError, subprocess.SubprocessError) as e:
         parser.error(str(e))
+    if not args.private:
+        print_source()
     try:
         level = cpu_level(args.level)
         if args.check and (args.disk or args.format_root):

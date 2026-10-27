@@ -357,6 +357,29 @@ class LocalPackages(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "signature verification"):
             pkg.plan()
 
+    def test_unreachable_source_repo_is_a_note_in_the_plan(self):
+        self.record()
+        self.patch("in_net", lambda cmd: cmd)
+        gone = self.root / "gone"
+        self.rc.write_text(f'update_repo="file://{gone}"\n')
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rows = pkg.plan()
+        self.assertEqual(len(rows), 1, rows)
+        target, kind, what, old, new = rows[0]
+        self.assertEqual((target, kind, old, new), ("locachy", "note", "", ""))
+        self.assertTrue(what.startswith(f"source not checked: could not fetch file://{gone} (main): "), what)
+        self.assertIn("locachy-pkg: LOCachy source not checked: could not fetch", err.getvalue())
+        self.assertEqual(pkg.targets_of(rows), [])  # nothing to apply
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            pkg.print_plan(rows, "2026-10-27 10:00")
+        self.assertIn("Note: locachy " + what + "\n", out.getvalue())
+        self.assertIn("Everything is up to date.", out.getvalue())
+        with mock.patch.dict(os.environ, {"LOCACHY_UPDATE_STRICT": "1"}), contextlib.redirect_stderr(io.StringIO()), \
+             self.assertRaisesRegex(RuntimeError, "source repo fetch failed"):
+            pkg.plan()
+
     def test_tracked_overlay_is_discovered_without_placeholder_recipe(self):
         (self.recipe / "PKGBUILD").unlink()
         (self.recipe / "upstream.json").write_text('{"schema":1}\n')

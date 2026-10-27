@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-27 03:58+0800\n"
+"POT-Creation-Date: 2026-10-27 18:14+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -5344,6 +5344,24 @@ msgid "Repositories"
 msgstr ""
 
 #: progs/installer.c
+msgid "this medium's own (updates are off)"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "the newest of %s (%s), fetched when it installs"
+msgstr ""
+
+#: progs/installer.c
+msgid "LOCachy source"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "Now: %s"
+msgstr ""
+
+#: progs/installer.c
 msgid "Install"
 msgstr ""
 
@@ -5467,6 +5485,11 @@ msgstr ""
 #: progs/installer.c
 msgid ""
 "The installation failed. Nothing more is written; the output below says why."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "LOCachy source: %s"
 msgstr ""
 
 #: progs/installer.c

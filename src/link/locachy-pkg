@@ -784,9 +784,15 @@ def recorded_source_commit():
         return ""
 
 
+class SourceNotChecked(Exception):
+    """update_repo could not be fetched: the plan says so and goes on."""
+
+
 def check_source_update():
     """Fetch update_branch of update_repo into SOURCE_REPO_DIR and return
-    (old_short, new_commit, new_label) when the remote src/ tree differs from SRC."""
+    (old_short, new_commit, new_label) when the remote src/ tree differs from SRC.
+    SourceNotChecked when it cannot be fetched (RuntimeError with
+    LOCACHY_UPDATE_STRICT=1)."""
     url = source_repo_url()
     if not url or not shutil.which("git"):
         return None
@@ -796,14 +802,16 @@ def check_source_update():
     if not os.path.isfile(os.path.join(SOURCE_REPO_DIR, "HEAD")):
         subprocess.run(["git", "init", "--bare", "--quiet", SOURCE_REPO_DIR], check=True)
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
-    p = subprocess.run(in_net(["git", "-C", SOURCE_REPO_DIR, "fetch", "--depth=1", "--quiet", "--", url, branch]),
-                       capture_output=True, text=True, env=env, timeout=30)
-    if p.returncode != 0:
-        msg = (p.stderr or "fetch failed").strip().splitlines()[-1] if (p.stderr or "").strip() else "fetch failed"
+    try:
+        p = subprocess.run(in_net(["git", "-C", SOURCE_REPO_DIR, "fetch", "--depth=1", "--quiet", "--", url, branch]),
+                           capture_output=True, text=True, env=env, timeout=300)
+        msg = "" if p.returncode == 0 else ((p.stderr or "").strip().splitlines() or ["git fetch failed"])[-1]
+    except subprocess.TimeoutExpired:
+        msg = "no answer in 300 s"
+    if msg:
         if os.environ.get("LOCACHY_UPDATE_STRICT") == "1":
             raise RuntimeError(f"source repo fetch failed: {msg}")
-        print(f"locachy-pkg: source repo check skipped ({msg})", file=sys.stderr)
-        return None
+        raise SourceNotChecked(f"could not fetch {url} ({branch}): {msg}".replace("\t", " "))
     commit = subprocess.run(["git", "-C", SOURCE_REPO_DIR, "rev-parse", "FETCH_HEAD"],
                             check=True, capture_output=True, text=True).stdout.strip()
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
@@ -1215,7 +1223,12 @@ def plan():
             rows.append(("host", "local", n, host[n], reason))
     host_changes = any(r[0] == "host" for r in rows)
     current = host_hash()
-    src_upd = check_source_update()
+    try:
+        src_upd = check_source_update()
+    except SourceNotChecked as e:
+        print(f"locachy-pkg: LOCachy source not checked: {e}", file=sys.stderr)
+        rows.append(("locachy", "note", f"source not checked: {e}", "", ""))
+        src_upd = None
     if src_upd:
         old_short, new_commit, new_label, branch = src_upd
         rows.append(("locachy", "repo", "locachy-src", old_short, new_label))
@@ -1290,13 +1303,16 @@ def targets_of(rows):
     """The targets with something to do, in the order they are applied."""
     order = []
     for t in ["host", "locachy"] + containers():
-        if any(r[0] == t and r[1] != "state" for r in rows):
+        if any(r[0] == t and r[1] not in ("state", "note") for r in rows):
             order.append(t)
     return order
 
 
 def print_plan(rows, checked):
     print(f"Checked {checked}." if checked else "Not checked yet.")
+    for target, kind, what, _, _ in rows:
+        if kind == "note":
+            print(f"Note: {target} {what}")
     todo = targets_of(rows)
     if not todo:
         print("Everything is up to date.")
@@ -1304,7 +1320,7 @@ def print_plan(rows, checked):
         state = next((r[2] for r in rows if r[0] == t and r[1] == "state"), "")
         print(f"\n== {t}{f' ({state})' if state and state != 'closed' else ''}")
         for target, kind, what, old, new in rows:
-            if target != t or kind == "state":
+            if target != t or kind in ("state", "note"):
                 continue
             if kind == "rebuild":
                 print(f"  rebuild: {what}" + (f" ({old} -> {new})" if old or new else ""))

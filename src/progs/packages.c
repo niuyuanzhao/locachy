@@ -89,7 +89,7 @@ static int nrows;
 static char checked[40];
 
 struct target {
-    char name[64], state[16], why[200];
+    char name[64], state[16], why[200], note[200]; /* note: what the check could not do */
     int repo, aur, rebuild, marked;
 };
 static struct target targets[MAX_TARGETS];
@@ -200,6 +200,8 @@ static void load_plan(void)
             }
         } else if (strcmp(r->kind, "state") == 0) {
             snprintf(t->state, sizeof t->state, "%s", r->what);
+        } else if (strcmp(r->kind, "note") == 0) {
+            snprintf(t->note, sizeof t->note, "%s", r->what);
         }
     }
     if (in) {
@@ -519,7 +521,7 @@ static void row_text(int i, char *line, size_t size, int *dim)
     *dim = 0;
     if (page == UPDATES) {
         struct target *t = &targets[i];
-        char what[300] = "";
+        char what[512] = "";
         int total = t->repo + t->aur;
         if (total) {
             snprintf(what, sizeof what, !t->aur ? P_("%d update", "%d updates", total) :
@@ -529,6 +531,11 @@ static void row_text(int i, char *line, size_t size, int *dim)
         if (t->rebuild) {
             size_t n = strlen(what);
             snprintf(what + n, sizeof what - n, n ? _("; rebuild: %s") : _("rebuild: %s"), t->why);
+        }
+        if (t->note[0]) { /* first: the rest of the row may not fit */
+            char rest[300];
+            memcpy(rest, what, sizeof rest);
+            snprintf(what, sizeof what, "%.200s%s%.290s", t->note, rest[0] ? "; " : "", rest);
         }
         if (!what[0]) {
             snprintf(what, sizeof what, "%s", checked[0] ? _("up to date") : _("not checked yet"));
@@ -624,6 +631,10 @@ static void draw_lower(int top, int height)
         for (int i = 0; i < nrows && r < top + height; i++) {
             struct row *w = &rows[i];
             if (strcmp(w->target, t->name) != 0 || strcmp(w->kind, "state") == 0) {
+                continue;
+            }
+            if (strcmp(w->kind, "note") == 0) {
+                screen_text(2, r++, w->what, WARN, PANE);
                 continue;
             }
             if (strcmp(w->kind, "local") == 0) {

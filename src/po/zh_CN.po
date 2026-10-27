@@ -2,7 +2,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-27 03:58+0800\n"
+"POT-Creation-Date: 2026-10-27 18:14+0800\n"
 "PO-Revision-Date: 2026-10-24 22:38+0000\n"
 "Last-Translator: LOCachy <38998838+niuyuanzhao@users.noreply.github.com>\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -5388,6 +5388,24 @@ msgid "Repositories"
 msgstr "软件源"
 
 #: progs/installer.c
+msgid "this medium's own (updates are off)"
+msgstr "安装介质自带的（已关闭更新）"
+
+#: progs/installer.c
+#, c-format
+msgid "the newest of %s (%s), fetched when it installs"
+msgstr "%s（%s）的最新版本，开始安装时拉取"
+
+#: progs/installer.c
+msgid "LOCachy source"
+msgstr "LOCachy 源码"
+
+#: progs/installer.c
+#, c-format
+msgid "Now: %s"
+msgstr "目前：%s"
+
+#: progs/installer.c
 msgid "Install"
 msgstr "安装"
 
@@ -5514,6 +5532,11 @@ msgstr "LOCachy 已安装（%s）。拔出安装介质，然后重启。"
 msgid ""
 "The installation failed. Nothing more is written; the output below says why."
 msgstr "安装失败。不会再写入任何东西；原因见下面的输出。"
+
+#: progs/installer.c
+#, c-format
+msgid "LOCachy source: %s"
+msgstr "LOCachy 源码：%s"
 
 #: progs/installer.c
 #, c-format
@@ -7095,7 +7118,9 @@ msgstr "标点全半角键"
 msgid ""
 "%s: press it, alone if it types nothing (Henkan_Mode), else with Ctrl, Alt "
 "or Super   Esc: keep %.40s"
-msgstr "%s：请按键；不打字的键（如 Henkan_Mode）可单独按，其他键需含 Ctrl、Alt 或 Super   Esc: 保留 %.40s"
+msgstr ""
+"%s：请按键；不打字的键（如 Henkan_Mode）可单独按，其他键需含 Ctrl、Alt 或 "
+"Super   Esc: 保留 %.40s"
 
 #: progs/settings.c
 #, c-format
@@ -7117,7 +7142,9 @@ msgstr "该按键已用于 rc.conf 的其他功能；请换一个   Esc: 保留 
 msgid ""
 "A key that types nothing (Henkan_Mode), or Ctrl, Alt or Super with a letter, "
 "digit, Space, Enter or Tab"
-msgstr "请按不打字的键（如 Henkan_Mode），或将 Ctrl、Alt 或 Super 与字母、数字、Space、Enter 或 Tab 组合"
+msgstr ""
+"请按不打字的键（如 Henkan_Mode），或将 Ctrl、Alt 或 Super 与字母、数字、"
+"Space、Enter 或 Tab 组合"
 
 #: progs/settings.c
 msgid "Ctrl, Alt or Super with a letter, digit, Space, Enter or Tab"

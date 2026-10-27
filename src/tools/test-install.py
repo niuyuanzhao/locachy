@@ -5,6 +5,7 @@
 import importlib.machinery
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -355,6 +356,28 @@ class Install(unittest.TestCase):
         with mock.patch.object(i, "detect_source_git", return_value=(i.DEFAULT_UPDATE_REPO, "main", "")):
             i.apply_customizations(type("A", (), base)(), self.root)
         self.assertNotIn("update_branch=", rc.read_text())
+
+    def test_source_line_says_which_source_and_why(self):
+        url, commit = "https://example.org/locachy.git", "0123456789ab" + "c" * 28
+        with mock.patch.object(i, "detect_source_git", return_value=(url, "main", commit)):
+            for how, said in (("fetched", (f"0123456789ab of {url} (main), the newest, fetched now", False)),
+                              ("fetched earlier", (f"0123456789ab of {url} (main), fetched earlier", False)),
+                              ("fetched before: could not fetch x (main): fatal: no",
+                               (f"0123456789ab of {url} (main), fetched before; could not fetch x (main): fatal: no",
+                                True)),
+                              ("bundled: updates are off", ("this medium's own, 0123456789ab (updates are off)", False)),
+                              ("bundled: could not fetch x (main): fatal: no",
+                               ("this medium's own, 0123456789ab; could not fetch x (main): fatal: no", True)),
+                              ("", (f"0123456789ab of {url} (main)", False))):
+                with mock.patch.dict(os.environ, {"LOCACHY_SOURCE": how}):
+                    self.assertEqual(i.source_line(), said, how)
+            with mock.patch.dict(os.environ, {"LOCACHY_SOURCE": "bundled: could not fetch x (main): fatal: no"}), \
+                 mock.patch.object(i, "output", self.block_output), \
+                 mock.patch.object(i, "cpu_model", lambda level: "ivybridge"), \
+                 mock.patch.object(i, "tpm_advice", lambda: (False, "off", "no TPM")):
+                self.assertEqual(i.describe(i.make_parser())["source"],
+                                 {"text": "this medium's own, 0123456789ab; could not fetch x (main): fatal: no",
+                                  "not_newest": True})
 
     def test_running_root_rejected_before_any_build(self):
         with self.assertRaisesRegex(ValueError, "running installation"):

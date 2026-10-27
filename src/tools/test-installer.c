@@ -2,9 +2,11 @@
  * Drive installer (the live medium's full-screen installation) by its keys,
  * with the screen and keyboard as test doubles and locachy-install, term
  * and systemctl as scripts: locachy-install answers --describe-json from a
- * fixed description, writes down how it was called (and what its secret
- * files hold, and their modes), and prints the progress lines of an
- * installation, or a refusal or a failure when told to; keytable writes a
+ * fixed description (the medium's own source: the newest was not fetched),
+ * writes down how it was called (and what its secret files hold, and their
+ * modes), and prints the progress lines of an installation (the newest
+ * source), or a refusal or a failure (the medium's own) when told to;
+ * keytable writes a
  * table of two keys, or fails when told to.
  *   test-installer DIR   (DIR: a new directory for the doubles' files)
  * Build with base/ui.c and json-c.
@@ -207,6 +209,7 @@ static const char describe[] =
     " \"machines\": [{\"name\": \"generic\", \"description\": \"Generic PC\"}, {\"name\": \"x230-agan\", \"description\": \"X230\"}],"
     " \"repo_sections\": [\"core\", \"extra\", \"multilib\"], \"keymaps\": [\"de\", \"us\"], \"timezones\": [\"UTC\", \"Asia/Shanghai\"],"
     " \"tpm\": {\"usable\": false, \"advice\": \"TPM 1.2 off in the firmware: a passphrase\"},"
+    " \"source\": {\"text\": \"this medium's own, 0123456789ab; could not fetch\", \"not_newest\": true},"
     " \"network_profiles\": 0, \"memory_bytes\": 17179869184, \"esp_bytes\": 536870912, \"min_root_bytes\": 17179869184,"
     " \"disks\": [{\"path\": \"/dev/sda\", \"size\": 256060514304, \"model\": \"Samsung SSD\", \"tran\": \"sata\","
     " \"removable\": false, \"in_use\": \"\", \"children\": [{\"path\": \"/dev/sda1\", \"type\": \"part\", \"size\": 536870912,"
@@ -230,6 +233,9 @@ static const char fake_install[] =
     " echo 'locachy-install: error: test refusal' >&2; exit 2; fi\n"
     "  echo 'Would partition'; exit 0\n"
     "fi\n"
+    "if [ -e \"$d/install-fail\" ]; then\n"
+    "  echo \"Source (not the newest): this medium's own, 0123456789ab; could not fetch\"\n"
+    "else echo 'Source: 89abcdef0123 of https://github.com/niuyuanzhao/locachy.git (main), the newest, fetched now'; fi\n"
     "echo 'Root: /dev/sda3 at /run/locachy-install-target'\n"
     "echo 'Ranking the mirrors (reflector, rate-mirrors)...'\n"
     "echo '== x86-64-v2: build mounted target'\n"
@@ -338,10 +344,13 @@ int main(int argc, char **argv)
     assert(snapped("erased: /dev/sda1"));
     assert(snapped("erased: /dev/sda3"));
     assert(snapped("Nothing is missing."));
+    assert(snapped("the newest of https://github.com/niuyuanzhao/locachy.git (main), fetched when it installs"));
+    assert(snapped("Now: this medium's own, 0123456789ab; could not fetch"));
     assert(snapped("Erase /dev/sda and install LOCachy on it?"));
     assert(snapped("Nothing was written."));
     assert(snapped("LOCachy is installed"));
     assert(snapped("[x] Download and install the packages") && snapped("fetched 1, installed 3 of 3"));
+    assert(snapped("LOCachy source: 89abcdef0123 of https://github.com/niuyuanzhao/locachy.git (main), the newest"));
     assert(strstr(said, "installer: installation completed"));
     const char *calls = slurp(D("calls"));
     printf("%s", calls);
@@ -408,6 +417,7 @@ int main(int argc, char **argv)
     run("installation failed");
     assert(snapped("The installation failed."));
     assert(snapped("locachy-install: Target build failed; see the log"));
+    assert(snapped("LOCachy source: this medium's own, 0123456789ab; could not fetch"));
     assert(snapped("Summary"));
     assert(strstr(said, "installer: installation failed (1)"));
     unlink(D("install-fail"));

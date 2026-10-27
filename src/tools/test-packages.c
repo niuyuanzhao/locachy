@@ -234,6 +234,7 @@ int main(int argc, char **argv)
     put("plan.txt", "checked\t2026-10-20 09:57\n"
                     "host\trepo\tmesa\t1:26.2.4-1.1\t1:26.2.5-1.1\n"
                     "host\taur\trime-wanxiang-gram-zh-hans\t2:1-1\t2:2-1\n"
+                    "locachy\tnote\tsource not checked: could not fetch https://example.org/l.git (main): fatal: no\t\t\n"
                     "locachy\trebuild\tits programs, against the updated host (make.sh --boot)\t\t\n"
                     "edge\tstate\tclosed\t\t\n"
                     "edge\trepo\tlibxi\t1.8.3-1.1\t1.8.4-1.2\n"
@@ -274,6 +275,7 @@ int main(int argc, char **argv)
     run("the plan: a row each, marked but the running one", (const int[]){ END });
     assert(on_screen("[x] host") && on_screen("2 updates, some from the AUR"));
     assert(on_screen("[x] locachy") && on_screen("rebuild: its programs"));
+    assert(on_screen("source not checked: could not fetch https://example.org/l.git (main): fatal: no; rebuild"));
     assert(on_screen("[x] edge") && on_screen("1 update; rebuild: the host is updated"));
     assert(on_screen("[ ] hello") && on_screen("running"));
     assert(on_screen("checked 2026-10-20 09:57"));

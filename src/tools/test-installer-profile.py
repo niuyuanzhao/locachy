@@ -125,7 +125,8 @@ class InstallerProfile(unittest.TestCase):
             self.assertEqual((payload / directory / "data").read_text(), "trusted " + directory)
         for name in ("make-root.sh", "make.sh", "packages", "rc.conf"):
             self.assertEqual((payload / name).read_bytes(), (self.src / name).read_bytes())
-        self.assertIn("exec python3 -I /usr/local/src/locachy/link/locachy-install", (root / "usr/local/bin/locachy-install").read_text())
+        self.assertEqual((root / "usr/local/bin/locachy-install").read_bytes(),
+                         (SOURCE / "installer/locachy-install").read_bytes())
         definition = (profile / "profiledef.sh").read_text()
         for name in ("make-root.sh", "make.sh", "link/locachy-install", "link/gestures"):
             self.assertIn('["/usr/local/src/locachy/' + name + '"]="0:0:755"', definition)
@@ -218,6 +219,86 @@ class InstallerProfile(unittest.TestCase):
         self.assertIn("source installer entry is missing", result.stderr)
         self.assertFalse(self.work.exists())
         self.assertFalse(self.out.exists())
+
+
+class LiveEntry(unittest.TestCase):
+    """installer/locachy-install, the live entry: the newest source from the
+    update repository (here a local one, reached at an https URL through
+    git's insteadOf), else what was fetched from there before, else the
+    medium's own; LOCACHY_SOURCE says which and why."""
+    URL = "https://example.invalid/locachy.git"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="live-entry-", dir=SCRATCH)
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.git_env = dict(os.environ, HOME=str(self.root), GIT_CONFIG_NOSYSTEM="1",
+                            GIT_AUTHOR_NAME="test", GIT_AUTHOR_EMAIL="test@example.invalid",
+                            GIT_COMMITTER_NAME="test", GIT_COMMITTER_EMAIL="test@example.invalid")
+        self.repo = self.root / "repo"
+        self.git("init", "-q", "-b", "main", str(self.repo))
+        self.commit("v1")
+        bundled = self.root / "bundled"
+        self.fake(bundled / "link/locachy-install", "bundled")
+        origin = self.root / "source-origin.json"
+        origin.write_text(json.dumps({"repo": self.URL, "branch": "main", "commit": "0" * 40}))
+        self.fetched = self.root / "run/locachy-source"
+        self.fetched.parent.mkdir()
+        self.env = dict(self.git_env, LOCACHY_SOURCE_BUNDLED=str(bundled), LOCACHY_SOURCE_FETCHED=str(self.fetched),
+                        LOCACHY_SOURCE_ORIGIN=str(origin), GIT_ALLOW_PROTOCOL="file", GIT_CONFIG_COUNT="1",
+                        GIT_CONFIG_KEY_0=f"url.file://{self.repo}.insteadOf", GIT_CONFIG_VALUE_0=self.URL)
+
+    def git(self, *args):
+        subprocess.run(["git", *args], check=True, capture_output=True, env=self.git_env)
+
+    @staticmethod
+    def fake(path, tag):
+        """A locachy-install that says which it is, how it was got, its arguments."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"import os, sys\nprint({tag!r}, os.environ.get('LOCACHY_SOURCE'), *sys.argv[1:])\n")
+
+    def commit(self, tag):
+        self.fake(self.repo / "src/link/locachy-install", tag)
+        self.git("-C", str(self.repo), "add", "-A")
+        self.git("-C", str(self.repo), "commit", "-q", "-m", tag)
+
+    def entry(self, *args):
+        result = subprocess.run(["bash", str(SOURCE / "installer/locachy-install"), *args], env=self.env,
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip(), result.stderr
+
+    def test_installs_from_the_newest_then_the_one_before_then_the_medium_own(self):
+        out, err = self.entry("--describe-json")
+        self.assertEqual(out, "v1 fetched --describe-json")
+        self.assertIn(f"Fetching the newest LOCachy source: {self.URL} (main)", err)
+        self.commit("v2")
+        out, err = self.entry("--check", "--disk=/dev/sda")
+        self.assertEqual(out, "v1 fetched earlier --check --disk=/dev/sda")
+        self.assertEqual(err, "")
+        out, _ = self.entry("--yes", "--disk=/dev/sda")
+        self.assertEqual(out, "v2 fetched --yes --disk=/dev/sda")
+        out, _ = self.entry("--yes", "--update-branch", "other")
+        self.assertTrue(out.startswith(f"bundled bundled: could not fetch {self.URL} (other): "), out)
+        shutil.rmtree(self.repo)
+        out, _ = self.entry("--yes")
+        self.assertTrue(out.startswith(f"v2 fetched before: could not fetch {self.URL} (main): "), out)
+        self.assertEqual(sorted(p.name for p in self.fetched.parent.iterdir()),
+                         ["locachy-source", "locachy-source.from"])
+
+    def test_updates_off_or_no_repository_run_the_medium_own(self):
+        out, _ = self.entry("--yes", "--update-repo=off")
+        self.assertEqual(out, "bundled bundled: updates are off --yes --update-repo=off")
+        out, _ = self.entry("--update-repo", "/somewhere/locachy", "--yes")
+        self.assertEqual(out, "bundled bundled: no repository to fetch from (/somewhere/locachy, main) "
+                              "--update-repo /somewhere/locachy --yes")
+        self.assertFalse(self.fetched.exists())
+
+    def test_fetches_over_https_and_ssh_only(self):
+        del self.env["GIT_ALLOW_PROTOCOL"]
+        out, _ = self.entry("--yes")
+        self.assertTrue(out.startswith(f"bundled bundled: could not fetch {self.URL} (main): "), out)
+        self.assertIn("transport 'file' not allowed", out)
 
 
 if __name__ == "__main__":
