@@ -3,6 +3,12 @@
 
 smoke ISO NEW_TEST_DIRECTORY [--firmware bios|uefi]
 install ISO NEW_TEST_DIRECTORY [--level x86-64-v2] [--timeout 14400]
+tui ISO NEW_TEST_DIRECTORY        the full-screen installer, by its keys
+tui-stops ISO NEW_TEST_DIRECTORY  the same with the Tor module, the network
+                                  cut while the packages download (it stops,
+                                  then goes on); both trust the source keys
+                                  it stops for as a person does (y copies the
+                                  command, t a terminal, pasted, y each)
 
 No host block devices, privileged mounts, SSH service, guest test hook or
 prebuilt target root are used. Only the test VM partitions its new disk.
@@ -117,8 +123,9 @@ def launch(out, seconds, *, iso=None, disk=None, firmware="uefi", smoke=False, n
     if iso is not None:
         command += ["-drive", "if=none,id=iso,media=cdrom,readonly=on,format=raw,file=" + str(iso),
                     "-device", "ide-cd,drive=iso,bus=ide.1", "-boot", "order=d,menu=on"]
-    command += ["-nic", "user,model=e1000" if network else "none",
-                "-chardev", "socket,id=com1,path=" + str(out / "com1.sock") + ",server=on,wait=on",
+    # The network card as nic0: QMP set_link takes it away and back.
+    command += ["-netdev", "user,id=net0", "-device", "e1000,netdev=net0,id=nic0"] if network else ["-nic", "none"]
+    command += ["-chardev", "socket,id=com1,path=" + str(out / "com1.sock") + ",server=on,wait=on",
                 "-serial", "chardev:com1", "-qmp", "unix:" + str(out / "qmp.sock") + ",server=on,wait=off"]
     (out / "qemu-command.json").write_text(json.dumps(command, indent=2) + "\n")
     error = (out / "qemu.err").open("wb")
@@ -250,9 +257,53 @@ def wait_kmsg(guest, pattern, seconds, fail=None):
                 "sleep 2; done\"")
 
 
-def install_tui(args, iso, out, kernel, initrd):
+def guest_state(guest, command):
+    """What command (shell, sets s) found, through the serial shell."""
+    guest.send(command + "; printf '\\nLOCACHY-STATE-%s\\n' \"$s\"\n")
+    return guest.any(rb"(?:\r?\n)LOCACHY-STATE-([a-z0-9]+)\r?\n").group(1).decode()
+
+
+def kmsg_count(pattern):
+    return "$(dmesg | grep -cE '" + pattern + "')"
+
+
+def trust_keys(guest, screenshots, round_):
+    """As a person: y copies the command the page shows, t opens the
+    terminal, the command pasted (Ctrl+Shift+V) and run, y to each key it
+    shows; then the terminal closed."""
+    target = "/run/locachy-install-target"
+    keys = int(guest_state(guest, "s=$(awk '{print $2}' " + target + "/var/lib/locachy/builder/untrusted-keys | sort -u | wc -l)"))
+    guest.shell("cat " + target + "/var/lib/locachy/builder/untrusted-keys")
+    terms = int(guest_state(guest, "s=" + kmsg_count("installer: running /usr/local/bin/term")))
+    guest.key("y")
+    guest.key("t")
+    guest.shell("timeout 30 sh -c \"until [ " + kmsg_count("installer: running /usr/local/bin/term") + " -gt " +
+                str(terms) + " ]; do sleep 1; done\"")
+    guest.pump(3)
+    guest.key("ctrl", "shift", "v")
+    guest.pump(1)
+    screenshots[f"trust-{round_}"] = guest.shot(f"tui-trust-{round_}")
+    guest.key("ret")
+    for _ in range(keys):
+        guest.pump(2)
+        guest.type("y")
+        guest.key("ret")
+    guest.shell("timeout 600 sh -c 'while [ -s " + target + "/var/lib/locachy/builder/untrusted-keys ]; do sleep 2; done'")
+    guest.pump(2)
+    screenshots[f"trusted-{round_}"] = guest.shot(f"tui-trusted-{round_}")
+    guest.type("exit")
+    guest.key("ret")
+    guest.shell("timeout 30 sh -c \"until [ " + kmsg_count("installer: /usr/local/bin/term ended") + " -gt " +
+                str(terms) + " ]; do sleep 1; done\"")
+    guest.pump(2)
+
+
+def install_tui(args, iso, out, kernel, initrd, stops=False):
     """The full-screen installer on tty1, driven by its keys alone: the
-    terminal (and back), then the whole disk, a passphrase and a user."""
+    terminal (and back), then the whole disk, a passphrase and a user.
+    Where it stops it is continued (c): for source signing keys, trusted as
+    a person does (trust_keys); stops: with the Tor module (its own key),
+    and the network cut while the packages download."""
     disk = out / "target.img"
     subprocess.run(["qemu-img", "create", "-f", "raw", str(disk), "32G"], check=True)
     process, guest, error = launch(out / "install", args.timeout, iso=iso, disk=disk, network=True)
@@ -302,7 +353,17 @@ def install_tui(args, iso, out, kernel, initrd):
         guest.key("ret")
         guest.type(PASSWORD)
         guest.key("ret")
-        for _ in range(4):                                # Region, Software, System: as they are
+        for _ in range(2):                                # Region: as it is
+            guest.key("end")
+            guest.key("ret")
+        if stops:                                         # Software: the Tor module too
+            modules = list(json.loads((SOURCE.parent / "link/modules.json").read_text()))
+            guest.key("home")
+            for _ in range(modules.index("tor")):
+                guest.key("down")
+            guest.key("ret")
+            screenshots["software"] = guest.shot("tui-software")
+        for _ in range(2):                                # Software, System: next
             guest.key("end")
             guest.key("ret")
         guest.pump(1)
@@ -315,16 +376,51 @@ def install_tui(args, iso, out, kernel, initrd):
         wait_kmsg(guest, "installer: installing", 60)
         guest.pump(60)
         screenshots["progress"] = guest.shot("tui-progress")
-        try:
-            wait_kmsg(guest, "installer: installation completed", args.timeout, fail="installer: installation failed")
-        except RuntimeError:
+        target = "/run/locachy-install-target"
+        stopped, retried, rounds = 0, 0, []
+        if stops:
+            # The network gone while the packages download: it stops; back,
+            # and it goes on from there.
+            guest.shell("timeout 3600 sh -c \"until grep -q ') downloading ' /run/locachy-installer/install.log; do sleep 1; done\"")
+            guest.command("set_link", {"name": "nic0", "up": False})
+            wait_kmsg(guest, "installer: installation failed", 3600)
+            stopped += 1
+            guest.pump(2)
+            screenshots["stopped-network"] = guest.shot("tui-stopped-network")
+            guest.command("set_link", {"name": "nic0", "up": True})
+            guest.shell("nm-online -q -t 180")
+            guest.key("c")
+            guest.shell("timeout 30 sh -c \"until dmesg | grep -q 'installer: continuing'; do sleep 1; done\"")
+            rounds.append("network")
+        while True:
+            state = guest_state(guest, "until dmesg | grep -q 'installer: installation completed' || [ " +
+                                kmsg_count("installer: installation failed") + " -gt " + str(stopped) + " ]; do sleep 5; done; "
+                                "if dmesg | grep -q 'installer: installation completed'; then s=done; "
+                                "elif [ -s " + target + "/var/lib/locachy/builder/untrusted-keys ]; then s=keys; else s=failed; fi")
+            if state == "done":
+                break
+            stopped += 1
+            guest.pump(2)
+            screenshots[f"stopped-{stopped}"] = guest.shot(f"tui-stopped-{stopped}")
             # Why, from its log (the guest's /run goes with it), into serial.log.
-            screenshots["failed"] = guest.shot("tui-failed")
-            guest.shell("tail -n 80 /run/locachy-installer/install.log; true")
-            raise
+            guest.shell("tail -n 40 /run/locachy-installer/install.log; true")
+            if state == "keys":
+                trust_keys(guest, screenshots, stopped)
+                rounds.append("keys")
+            else:
+                retried += 1
+                if retried > 2:
+                    raise RuntimeError("The installation failed, and again when continued")
+                rounds.append("failed")
+            continuing = int(guest_state(guest, "s=" + kmsg_count("installer: continuing")))
+            guest.key("c")
+            guest.shell("timeout 30 sh -c \"until [ " + kmsg_count("installer: continuing") + " -gt " +
+                        str(continuing) + " ]; do sleep 1; done\"")
+        print("stops: " + (", ".join(rounds) or "none"), flush=True)
+        if stops and "keys" not in rounds:
+            raise RuntimeError("The installation never stopped for a source signing key")
         guest.pump(2)
         screenshots["done"] = guest.shot("tui-done")
-        target = "/run/locachy-install-target"
         # The live entry fetched the newest source, and that one is installed.
         guest.shell("grep -m1 '^Source' /run/locachy-installer/install.log && "
                     "grep -q '^Source: .*, the newest, fetched now$' /run/locachy-installer/install.log && "
@@ -435,7 +531,7 @@ def target_boot(args, disk, out, passphrase=None, devices=rb"root: /dev/sda2, es
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("smoke", "install", "tui"))
+    parser.add_argument("mode", choices=("smoke", "install", "tui", "tui-stops"))
     parser.add_argument("iso", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("--firmware", choices=("bios", "uefi"), default="uefi")
@@ -457,11 +553,11 @@ def main():
         kernel, initrd = iso_commands(iso, out)
         if args.mode == "smoke":
             smoke_test(args, iso, out, kernel, initrd)
-        elif args.mode == "tui":
-            disk, screenshots = install_tui(args, iso, out, kernel, initrd)
+        elif args.mode in ("tui", "tui-stops"):
+            disk, screenshots = install_tui(args, iso, out, kernel, initrd, stops=args.mode == "tui-stops")
             # The whole disk: ESP, swap, root, both encrypted (locachy-install --disk).
             screenshots.update(target_boot(args, disk, out, PASSWORD, rb"esp: /dev/sda1"))
-            (out / "result.json").write_text(json.dumps({"passed": True, "mode": "tui", "iso": str(iso), "disk": str(disk),
+            (out / "result.json").write_text(json.dumps({"passed": True, "mode": args.mode, "iso": str(iso), "disk": str(disk),
                                                          "screenshots": screenshots}, indent=2) + "\n")
             print("PASS full-screen installer: terminal and back, whole encrypted disk, target PAM/home/terminal")
         else:

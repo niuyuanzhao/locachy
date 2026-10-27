@@ -100,6 +100,9 @@ sh "$live_build" "$src" "$root"
 mkdir -p "$root/etc/systemd/system/getty@tty1.service.d" "$root/root"
 install -m 644 "$src/installer/autologin.conf" "$root/etc/systemd/system/getty@tty1.service.d/autologin.conf"
 install -m 644 "$src/installer/bash_profile" "$root/root/.bash_profile"
+install -m 644 "$src/installer/locachy-clipboard.service" "$root/etc/systemd/system/locachy-clipboard.service"
+mkdir -p "$root/etc/systemd/system/multi-user.target.wants"
+ln -sfn ../locachy-clipboard.service "$root/etc/systemd/system/multi-user.target.wants/locachy-clipboard.service"
 
 # Only local console access is enabled by the live image. Do not carry the
 # baseline's passwordless-root SSH service or cloud-config provisioning path.
@@ -121,7 +124,8 @@ ln -sfn /run/systemd/resolve/stub-resolv.conf "$root/etc/resolv.conf"
 # Preserve executable source entry points without granting execute to data/code.
 printf '\nfile_permissions+=(\n  ["/usr/local/bin/locachy-install"]="0:0:755"\n' >>"$profile/profiledef.sh"
 printf '  ["/usr/local/bin/installer"]="0:0:755"\n  ["/usr/local/bin/term"]="0:0:755"\n' >>"$profile/profiledef.sh"
-printf '  ["/usr/local/lib/locachy/keytable"]="0:0:755"\n' >>"$profile/profiledef.sh"
+printf '  ["/usr/local/lib/locachy/keytable"]="0:0:755"\n  ["/usr/local/lib/locachy/clipboard"]="0:0:755"\n' \
+    >>"$profile/profiledef.sh"
 while IFS= read -r file; do
     IFS= read -r first <"$file" || true
     case "$first" in

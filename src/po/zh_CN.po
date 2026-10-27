@@ -2,7 +2,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-27 18:14+0800\n"
+"POT-Creation-Date: 2026-10-28 04:50+0800\n"
 "PO-Revision-Date: 2026-10-24 22:38+0000\n"
 "Last-Translator: LOCachy <38998838+niuyuanzhao@users.noreply.github.com>\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -5518,6 +5518,27 @@ msgstr "抹掉并安装？"
 
 #: progs/installer.c
 #, c-format
+msgid "Not copied: %s"
+msgstr "未复制：%s"
+
+#: progs/installer.c
+#, c-format
+msgid "Copied: %.200s"
+msgstr "已复制：%.200s"
+
+#: progs/installer.c
+msgid ""
+"Nothing selected: drag over text, or double-click a word, or triple-click a "
+"line."
+msgstr "没有选中内容：用鼠标拖过文字，或双击选一个词、三击选一行。"
+
+#: progs/installer.c
+#, c-format
+msgid "Continuing the installation   %s"
+msgstr "正在继续安装   %s"
+
+#: progs/installer.c
+#, c-format
 msgid "Installing LOCachy   %s"
 msgstr "正在安装 LOCachy   %s"
 
@@ -5529,8 +5550,28 @@ msgstr "LOCachy 已安装（%s）。拔出安装介质，然后重启。"
 
 #: progs/installer.c
 msgid ""
+"Waiting for you: source signing keys to trust. None is trusted by itself."
+msgstr "等你决定：有源码签名密钥待信任。没有哪一把会被自动信任。"
+
+#: progs/installer.c
+msgid ""
+"Check each with its upstream project; then trust them in the terminal (t):"
+msgstr "请逐一到其上游项目核对；然后在终端（t）里信任它们："
+
+#: progs/installer.c
+msgid "y copies the command; c then continues where the installation stopped."
+msgstr "y 复制这条命令；之后按 c 从安装停下的地方继续。"
+
+#: progs/installer.c
+msgid ""
 "The installation failed. Nothing more is written; the output below says why."
 msgstr "安装失败。不会再写入任何东西；原因见下面的输出。"
+
+#: progs/installer.c
+msgid ""
+"Deal with the cause (t: a terminal); then c continues where the installation "
+"stopped."
+msgstr "先排除原因（t：终端）；然后按 c 从安装停下的地方继续。"
 
 #: progs/installer.c
 #, c-format
@@ -5574,6 +5615,10 @@ msgid "t: terminal"
 msgstr "t：终端"
 
 #: progs/installer.c
+msgid "y: copy"
+msgstr "y: 复制"
+
+#: progs/installer.c
 msgid "p: power off"
 msgstr "p：关机"
 
@@ -5584,6 +5629,10 @@ msgstr "r：重启"
 #: progs/installer.c
 msgid "b: back to the summary"
 msgstr "b：回到摘要"
+
+#: progs/installer.c
+msgid "c: continue"
+msgstr "c: 继续"
 
 #: progs/installer.c
 msgid "Looking at this computer: its disks, its TPM, its CPU..."
@@ -5824,6 +5873,12 @@ msgstr "%s：已结束；下方为其输出。"
 #, c-format
 msgid "%s: done."
 msgstr "%s：已完成。"
+
+#: progs/packages.c
+#, c-format
+msgid ""
+"Trust the keys below as root, after checking them: %s; then apply again."
+msgstr "核对下面的密钥后，以 root 信任它们：%s；然后再应用一次。"
 
 #: progs/packages.c
 #, c-format

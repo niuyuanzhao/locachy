@@ -39,7 +39,7 @@ jobs:
               # The image leaves out most locales (NoExtract); the installer
               # needs zh_CN (installer/make-live.sh): glibc with all of them.
               sed -i "/^NoExtract/d" /etc/pacman.conf
-              pacman -Syu --noconfirm archiso git python glibc base-devel freetype2 libinput libnm json-c libxkbcommon terminus-font
+              pacman -Syu --noconfirm archiso git python glibc base-devel freetype2 libinput libnm json-c libxkbcommon wayland terminus-font
               bash /repo/src/make-installer.sh /var/tmp/locachy-work /out/iso
               cd /out/iso
               sha256sum *.iso > SHA256SUMS

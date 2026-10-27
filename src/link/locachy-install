@@ -2,6 +2,9 @@
 """Build a local LOCachy target from the generic live installer.
 The caller prepares and mounts empty ext4/FAT32 filesystems. No partitioning,
 formatting, NVRAM changes or reboot is performed here.
+An installation that stops (a failure, or source signing keys for a person to
+trust) can be continued where it stopped, on its target as it is:
+--resume, in the same live session (RESUME_RECORD).
 """
 import argparse
 import getpass
@@ -14,12 +17,20 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 
 _HERE_SRC = Path(__file__).resolve().parents[1]
 SOURCE = _HERE_SRC if (_HERE_SRC / "make-root.sh").is_file() else Path("/usr/local/src/locachy")
 DEFAULT_UPDATE_REPO = "https://github.com/niuyuanzhao/locachy.git"
 DEFAULT_UPDATE_BRANCH = "main"
 SOURCE_ORIGIN = "/etc/locachy/source-origin.json" # written into the live image by make-installer.sh
+# An installation started in this live session: its ID (also in its target's
+# work directory), its target's mounts, its options (never its secrets).
+RESUME_RECORD = Path("/run/locachy-install/resume.json")
+# The source signing keys a build of the target stopped for (locachy-build).
+UNTRUSTED_KEYS = "var/lib/locachy/builder/untrusted-keys"
+# What the installation writes to the ESP, and nothing else.
+ESP_FILES = {"EFI", "EFI/locachy", "EFI/locachy/locachy.efi", "EFI/BOOT", "EFI/BOOT/BOOTX64.EFI"}
 sys.dont_write_bytecode = True
 
 MODULES = json.loads((SOURCE / "link/modules.json").read_text(encoding="utf-8"))
@@ -155,6 +166,55 @@ def empty_root(root):
         if entry.name == "efi" and entry.is_dir() and not entry.is_symlink():
             continue
         raise ValueError("Target root is not empty: " + str(entry))
+
+
+def esp_ours_only(esp):
+    """The ESP holds nothing but what an installation writes there."""
+    return all(str(p.relative_to(esp)) in ESP_FILES for p in esp.rglob("*"))
+
+
+def read_resume_record():
+    try:
+        record = json.loads(RESUME_RECORD.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise ValueError("Nothing to continue: no installation was started in this live session")
+    if not isinstance(record, dict) or not re.fullmatch(r"[0-9a-f]{32}", str(record.get("install_id", ""))) or \
+            not isinstance(record.get("argv"), list) or not all(isinstance(a, str) for a in record["argv"]):
+        raise ValueError("The record of the installation to continue is damaged: " + str(RESUME_RECORD))
+    return record
+
+
+def write_resume_record(install_id, root, argv, args):
+    RESUME_RECORD.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    new = RESUME_RECORD.with_name(RESUME_RECORD.name + ".new")
+    new.write_text(json.dumps({"install_id": install_id, "root": str(root), "argv": argv,
+                               "update_repo": args.update_repo or "", "update_branch": args.update_branch or ""},
+                              indent=1) + "\n", encoding="utf-8")
+    os.chmod(new, 0o600)
+    os.replace(new, RESUME_RECORD)
+
+
+def resumed_target(record):
+    """The target of the recorded installation, still mounted and still its."""
+    root = Path(record["root"])
+    marker = root / ".locachy-installer/install-id"
+    try:
+        if not os.path.ismount(root) or marker.read_text(encoding="utf-8").strip() != record["install_id"]:
+            raise OSError
+    except OSError:
+        raise ValueError(f"{root} is not that installation's target (not mounted, or another's)")
+    return root
+
+
+def untrusted_keys(root):
+    """(name, fingerprint) of each source signing key the target's build
+    stopped for, for a person to check and trust."""
+    try:
+        lines = (Path(root) / UNTRUSTED_KEYS).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    return [tuple(parts) for parts in (line.split() for line in lines)
+            if len(parts) == 2 and re.fullmatch(r"[0-9A-F]{40}|[0-9A-F]{64}", parts[1])]
 
 
 def partition_child(disk, number):
@@ -684,7 +744,9 @@ def apply_customizations(args, root):
     return manifest_changed
 
 
-def validate(root_path, esp_path):
+def validate(root_path, esp_path, install_id=None):
+    """The target's mounts; empty, or (install_id: an installation continued)
+    marked as that installation's, with an ESP holding only what it writes."""
     root = canonical(root_path)
     if root == Path("/") or root in (Path("/boot"), Path("/efi")) or root.is_relative_to(Path("/run/archiso")) or SOURCE.is_relative_to(root):
         raise ValueError("The running installation environment cannot be the target")
@@ -706,9 +768,16 @@ def validate(root_path, esp_path):
     esp_version = output(["blkid", "-p", "-s", "VERSION", "-o", "value", esp_fs["source"]])
     if esp_version != "FAT32":
         raise ValueError("The ESP must be FAT32")
-    empty_root(root)
-    if any(esp.iterdir()):
-        raise ValueError("The ESP must be empty; no existing boot files are overwritten")
+    marker = root / ".locachy-installer/install-id"
+    if install_id and marker.is_file():
+        if marker.read_text(encoding="utf-8").strip() != install_id:
+            raise ValueError("The target is another installation's; it is not built on")
+        if not esp_ours_only(esp):
+            raise ValueError("The ESP has files no installation of LOCachy wrote; left untouched")
+    else:
+        empty_root(root)
+        if any(esp.iterdir()):
+            raise ValueError("The ESP must be empty; no existing boot files are overwritten")
     mounts = json.loads(output(["findmnt", "--json", "--list", "--output", "TARGET,SOURCE,FSTYPE,MAJ:MIN"]))
     target_ids = {root_fs["maj:min"], esp_fs["maj:min"]}
     target_disks = ancestors(root_fs["source"]) | ancestors(esp_fs["source"])
@@ -778,6 +847,8 @@ def install(args, root, esp, root_fs, esp_fs, level):
                 print("Some mirror lists were not ranked; they stay as they are.", flush=True)
         command = ["bash", str(SOURCE / "make-root.sh"), "--target-root", str(root),
                    "--work-dir", str(work), "--cache-dir", str(cache), "--cpu", cpu, level]
+        if getattr(args, "install_id", None):
+            command[2:2] = ["--install-id", args.install_id] + (["--resume"] if getattr(args, "resume", False) else [])
         build_log = saved.parent / (saved.name + ".build.log")
         with build_log.open("w") as log:
             # tee preserves progress in the live console and the failure log.
@@ -796,7 +867,11 @@ def install(args, root, esp, root_fs, esp_fs, level):
         if getattr(args, "full_name", ""):
             useradd_cmd.extend(["--comment", args.full_name])
         useradd_cmd.append(args.user)
-        run(useradd_cmd)
+        passwd = root / "etc/passwd"
+        users = {line.split(":", 1)[0] for line in passwd.read_text(encoding="utf-8").splitlines()} \
+            if passwd.is_file() else set()
+        if args.user not in users:  # a continued installation may have made it
+            run(useradd_cmd)
         if getattr(args, "password_file", None):
             args.password_stdin = read_secret(args.password_file)
         if getattr(args, "password_stdin", None) is not None:
@@ -828,7 +903,7 @@ def install(args, root, esp, root_fs, esp_fs, level):
         # entry is needed: use the standard removable-media fallback path.
         if filesystem(saved)["maj:min"] != esp_fs["maj:min"] or filesystem(root)["maj:min"] != root_fs["maj:min"]:
             raise RuntimeError("Target mount identities changed during installation")
-        if any(saved.iterdir()):
+        if any(saved.iterdir()) and not (getattr(args, "resume", False) and esp_ours_only(saved)):
             raise RuntimeError("The target ESP changed during the build; left untouched")
         # The unified kernel image (locachy-boot): the firmware starts it from
         # the fallback path; EFI/locachy keeps it for locachy-boot's updates.
@@ -836,10 +911,10 @@ def install(args, root, esp, root_fs, esp_fs, level):
         if not image.is_file():
             raise RuntimeError("The completed target has no boot image (locachy.efi)")
         destination = saved / "EFI/locachy"
-        destination.mkdir(parents=True)
+        destination.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(image, destination / "locachy.efi")
         fallback = saved / "EFI/BOOT"
-        fallback.mkdir()
+        fallback.mkdir(exist_ok=True)
         shutil.copyfile(image, fallback / "BOOTX64.EFI")
         os.sync()
         state = root / "var/lib/locachy/install.json"
@@ -1129,6 +1204,13 @@ def make_parser():
     parser.add_argument("--check", action="store_true", help="validate and show targets without writing")
     parser.add_argument("--describe-json", action="store_true",
                         help="print the choices, their defaults and the disks as JSON, and exit")
+    parser.add_argument("--resume", action="store_true",
+                        help="continue the installation this live session started, where it stopped, "
+                             "on its disk as it is (secrets again: --password-file, --luks-passphrase-file)")
+    parser.add_argument("--trust-key", nargs="+", metavar="FINGERPRINT",
+                        help="source signing keys the installation stopped for: each shown, and trusted "
+                             "when answered y (locachy-build --trust-key, in its target); then --resume")
+    parser.add_argument("--install-id", help=argparse.SUPPRESS)
     parser.add_argument("--private", action="store_true", help=argparse.SUPPRESS)
     return parser
 
@@ -1139,6 +1221,21 @@ def main():
     if args.describe_json:
         print(json.dumps(describe(parser), indent=1))
         return 0
+    if (args.resume or args.trust_key) and not args.private:
+        if os.geteuid() != 0:
+            parser.error("Run from the live installer as root")
+        try:
+            record = read_resume_record()
+            root = resumed_target(record)
+        except ValueError as e:
+            parser.error(str(e))
+        if args.trust_key:
+            return subprocess.run(["arch-chroot", str(root), "/usr/local/bin/locachy-build", "--trust-key"] +
+                                  args.trust_key).returncode
+        # Its options as recorded; those given now (its secrets) after them.
+        args = parser.parse_args(record["argv"] + [a for a in sys.argv[1:] if a != "--resume"])
+        args.resume, args.install_id = True, record["install_id"]
+        print("Continuing the installation on " + str(root) + ", where it stopped.", flush=True)
     if args.copy_network is None:
         args.copy_network = bool(live_nm_connections())
     if os.geteuid() != 0:
@@ -1196,7 +1293,7 @@ def main():
                 return 0
             prepare_partitions(args, passphrase)
             args.yes = True
-        root, esp, root_fs, esp_fs = validate(args.root, args.esp)
+        root, esp, root_fs, esp_fs = validate(args.root, args.esp, args.install_id if args.resume else None)
         print("Root: " + root_fs["source"] + " at " + str(root), flush=True)
         print("ESP:  " + esp_fs["source"] + " at " + str(esp), flush=True)
         print("Target CPU: " + level + "; input method: " + effective_ime(args) +
@@ -1206,9 +1303,12 @@ def main():
         if args.check:
             return 0
         if not args.private:
-            if not args.yes and input("Type INSTALL to build into these empty filesystems: ") != "INSTALL":
+            if not args.yes and not args.resume and \
+                    input("Type INSTALL to build into these empty filesystems: ") != "INSTALL":
                 print("Nothing changed.")
                 return 0
+            if not args.resume:
+                args.install_id = uuid.uuid4().hex
             fwd = []
             for k, v in (("--root", str(root)), ("--esp", str(esp)), ("--level", args.level),
                          ("--cpu", args.cpu), ("--repos", args.repos),
@@ -1233,22 +1333,35 @@ def main():
                 fwd.append("--encrypt")
             if args.tpm:
                 fwd.append("--tpm")
-            if args.luks_passphrase_file:
-                fwd += ["--luks-passphrase-file", args.luks_passphrase_file]
-            if args.password_file:
-                fwd += ["--password-file", args.password_file]
             if args.hibernate_after is not None:
                 fwd += ["--hibernate-after", str(args.hibernate_after)]
             if args.work_dir:
                 fwd += ["--work-dir", args.work_dir]
             if args.cache_dir:
                 fwd += ["--cache-dir", args.cache_dir]
+            write_resume_record(args.install_id, root, fwd, args)
+            secrets = []
+            if args.luks_passphrase_file:
+                secrets += ["--luks-passphrase-file", args.luks_passphrase_file]
+            if args.password_file:
+                secrets += ["--password-file", args.password_file]
             done = run(["unshare", "--mount", "--propagation", "private", "--pid", "--fork", "--kill-child", "--mount-proc",
-                        "--cgroup", sys.executable, os.path.realpath(__file__)] + fwd + ["--private", "--yes"], check=False)
+                        "--cgroup", sys.executable, os.path.realpath(__file__)] + fwd + secrets +
+                       ["--install-id", args.install_id] + (["--resume"] if args.resume else []) +
+                       ["--private", "--yes"], check=False)
             if done.returncode < 0:
                 print(f"locachy-install: the installation was stopped by signal {-done.returncode}", file=sys.stderr)
             if done.returncode:
-                return 1  # its own last line says why
+                # Its own last line said why. What it waits for, and the way on.
+                keys = untrusted_keys(root)
+                if keys:
+                    for name, key in keys:
+                        print(f"Source key to trust: {name} {key}")
+                    print("Check each with its upstream project, then trust it (none is trusted by itself):")
+                    print("Trust them: locachy-install --trust-key " + " ".join(sorted({k for _, k in keys})))
+                print("Continue with: locachy-install --resume", flush=True)
+                return 1
+            RESUME_RECORD.unlink(missing_ok=True)
 
         else:
             install(args, root, esp, root_fs, esp_fs, level)

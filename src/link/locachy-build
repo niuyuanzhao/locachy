@@ -34,6 +34,15 @@
 # target root and runs each contract there before any host transaction.
 # locachy-build --run COMMAND...: COMMAND in a build root, as the build user
 # (what a build sees; for the tests).
+# Source signing keys: makepkg checks a recipe's signed sources against its
+# validpgpkeys, with the build user's keyring. No key is ever added to it by
+# a build: one that is not there yet stops the build before anything is
+# built, with "Source key to trust: NAME FINGERPRINT" lines (and in
+# /var/lib/locachy/builder/untrusted-keys), exit status 3. A person checks
+# each with its upstream project and adds it:
+# locachy-build --trust-key FINGERPRINT...: each key fetched by its full
+# fingerprint into a keyring of its own, shown (fingerprint, owner), and
+# added to the build user's keyring only when answered y.
 set -euo pipefail
 
 bdir=/var/lib/locachy/builder
@@ -65,6 +74,59 @@ if [ "${LOCACHY_BUILD_STAGE:-}" = chroot ]; then
         setpriv --reuid="$user" --regid="$user" --init-groups --reset-env "$@"
     }
     tool=$(command -v pikaur || command -v pikaur-static || true)
+    # "NAME FINGERPRINT" lines: the keys not in the build user's keyring are
+    # written down for the caller; keys_stop ends the run if there was one.
+    untrusted=0
+    check_keys() {
+        local name key
+        while read -r name key; do
+            [ -n "$key" ] || continue
+            [[ "$key" =~ ^[[:xdigit:]]{40}$ || "$key" =~ ^[[:xdigit:]]{64}$ ]] ||
+                die "$name: invalid source PGP fingerprint $key (validpgpkeys takes full fingerprints)"
+            key=${key^^}
+            if ! as_builder gpg --batch --list-keys "$key" >/dev/null 2>&1; then
+                printf '%s %s\n' "$name" "$key" >>"$handover/untrusted-keys"
+                untrusted=1
+            fi
+        done
+    }
+    keys_stop() {
+        [ "$untrusted" = 0 ] || exit 3
+    }
+    # The validpgpkeys of the AUR packages NAME... and of those of their
+    # dependencies the AUR has to give (neither installed nor in a
+    # repository): "BASE FINGERPRINT" lines, from each one's .SRCINFO.
+    aur_keys() {
+        python3 -I - "$@" <<'PY'
+import re, subprocess, sys, urllib.parse, urllib.request
+def found(*cmd):
+    return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+def get(url):
+    with urllib.request.urlopen(url, timeout=30) as r:
+        return r.read().decode("utf-8", "replace")
+def info(batch):
+    import json
+    return json.loads(get("https://aur.archlinux.org/rpc/v5/info?" +
+                          urllib.parse.urlencode([("arg[]", n) for n in batch])))["results"]
+seen, bases, todo = set(), set(), list(sys.argv[1:])
+while todo:
+    batch = sorted(set(todo) - seen)
+    todo = []
+    if not batch:
+        break
+    seen |= set(batch)
+    for pkg in info(batch):
+        bases.add(pkg["PackageBase"])
+        for dep in pkg.get("Depends", []) + pkg.get("MakeDepends", []) + pkg.get("CheckDepends", []):
+            if not found("pacman", "-T", dep) and not found("pacman", "-Sp", dep):
+                todo.append(re.split(r"[<>=]", dep, maxsplit=1)[0])
+for base in sorted(bases):
+    for line in get("https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h=" + urllib.parse.quote(base)).splitlines():
+        key, _, value = line.strip().partition(" = ")
+        if key == "validpgpkeys":
+            print(base, value.strip())
+PY
+    }
     if [ -n "$prepare" ]; then
         # Every candidate starts from the same repository target. Only this
         # disposable root temporarily lacks the old local packages; dependents
@@ -146,6 +208,13 @@ PY
             $1 == "depends_" arch || $1 == "makedepends_" arch || $1 == "checkdepends_" arch {print $3}' \
             /run/locachy-local.srcinfo | sort -u)
         [ "${#repo_deps[@]}" -eq 0 ] || pacman -S --needed --noconfirm --asdeps "${repo_deps[@]}"
+        # Every key this build checks with, before anything is built.
+        if [ "${#aur_deps[@]}" -gt 0 ]; then
+            keys=$(aur_keys "${aur_deps[@]}") || die "the AUR did not answer for: ${aur_deps[*]}"
+            check_keys <<<"$keys"
+        fi
+        check_keys < <(awk -v name="$name" '$1 == "validpgpkeys" {print name, $3}' /run/locachy-local.srcinfo | sort -u)
+        keys_stop
         if [ "${#aur_deps[@]}" -gt 0 ]; then
             [ -n "$tool" ] || die "local recipe dependencies require pikaur: ${aur_deps[*]}"
             rm -rf "$home/.cache/pikaur/pkg"
@@ -156,14 +225,8 @@ PY
                 [ ! -f "$f" ] || cp -f "$f" "$handover/"
             done
         fi
-        # A clean build identity has no source-signing keys yet. Import only
-        # full fingerprints declared by this recipe; makepkg still verifies
-        # the source signatures against validpgpkeys (never --skippgpcheck).
-        while read -r key; do
-            [[ "$key" =~ ^[[:xdigit:]]{40}$ || "$key" =~ ^[[:xdigit:]]{64}$ ]] || die "invalid source PGP fingerprint"
-            as_builder gpg --batch --list-keys "$key" >/dev/null 2>&1 || \
-                as_builder timeout 45 gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys "$key"
-        done < <(awk '$1 == "validpgpkeys" {print $3}' /run/locachy-local.srcinfo | sort -u)
+        # makepkg verifies the source signatures against validpgpkeys with the
+        # keys checked above (never --skippgpcheck).
         as_builder env LANG=C.UTF-8 PKGDEST="$handover" bash -c 'cd "$1"; makepkg --force --noconfirm' bash "$src"
         exit 0
     fi
@@ -235,6 +298,9 @@ PY
                 [ -f "$f" ] && pacman -U --noconfirm --ask 4 --asdeps "$f"
             done
         }
+        keys=$(aur_keys "$@") || die "the AUR did not answer for: $*"
+        check_keys <<<"$keys"
+        keys_stop
         asked=$(aur_patched asked "$@") || die "the AUR did not answer for: $*"
         rest=()
         for name in "$@"; do
@@ -262,13 +328,15 @@ PY
         ls -t "$out/$1"-[0-9]*.pkg.tar.zst "$handover/$1"-[0-9]*.pkg.tar.zst 2>/dev/null | head -1 || true
     }
     build_one() {
-        local pkg=$1 d f deps repo_deps=() aur_deps=() src="$home/bootstrap/$1"
+        local pkg=$1 d f deps info repo_deps=() aur_deps=() src="$home/bootstrap/$1"
         echo "== locachy-build: $pkg ($(date +%T))"
         rm -rf "$src"
         as_builder mkdir -p "$home/bootstrap"
         as_builder git clone -q --depth=1 "https://aur.archlinux.org/$pkg.git" "$src"
-        deps=$(as_builder bash -c "cd '$src' && makepkg --printsrcinfo" |
-            awk '$1 == "depends" || $1 == "makedepends" {print $3}' | sed 's/[<>=].*//' | sort -u)
+        info=$(as_builder bash -c "cd '$src' && makepkg --printsrcinfo")
+        check_keys < <(awk -v name="$pkg" '$1 == "validpgpkeys" {print name, $3}' <<<"$info" | sort -u)
+        keys_stop
+        deps=$(awk '$1 == "depends" || $1 == "makedepends" {print $3}' <<<"$info" | sed 's/[<>=].*//' | sort -u)
         for d in $deps; do
             pacman -T "$d" >/dev/null 2>&1 && continue
             if pacman -Sp "$d" >/dev/null 2>&1; then
@@ -501,10 +569,71 @@ if [ "${1:-}" = --files ]; then
     exit 0
 fi
 
+if [ "${1:-}" = --trust-key ]; then
+    shift
+    [ $# -gt 0 ] || die "--trust-key takes full fingerprints"
+    getent passwd "$user" >/dev/null && [ -d "$home" ] || die "no build user $user with its home $home: make.sh makes them"
+    for key in "$@"; do
+        [[ "$key" =~ ^[[:xdigit:]]{40}$ || "$key" =~ ^[[:xdigit:]]{64}$ ]] || die "not a full fingerprint: $key"
+    done
+    as_user() {
+        setpriv --reuid="$user" --regid="$user" --init-groups --reset-env "$@"
+    }
+    net=()
+    [ ! -e /run/netns/locachy-net ] || net=(ip netns exec locachy-net)
+    keyring=$(mktemp -d -t locachy-trust-key.XXXXXX)
+    # No daemon of either keyring outlives this (keyboxd, dirmngr): one would
+    # hold the mounts of the root it runs in (arch-chroot's, at installation).
+    trap 'gpgconf --homedir "$keyring" --kill all 2>/dev/null || true; as_user gpgconf --kill all 2>/dev/null || true
+          rm -rf "$keyring"' EXIT
+    status=0
+    for key in "$@"; do
+        key=${key^^}
+        if as_user gpg --batch --list-keys "$key" >/dev/null 2>&1; then
+            echo "$key: trusted already"
+            [ ! -f "$bdir/untrusted-keys" ] || sed -i "/ $key\$/d" "$bdir/untrusted-keys"
+            continue
+        fi
+        from=
+        for server in hkps://keyserver.ubuntu.com hkps://keys.openpgp.org; do
+            if "${net[@]}" timeout 60 gpg --homedir "$keyring" --batch --keyserver "$server" --recv-keys "$key" \
+                >/dev/null 2>&1; then
+                from=$server
+                break
+            fi
+        done
+        if [ -z "$from" ]; then
+            echo "$key: no keyserver gave it (keyserver.ubuntu.com, keys.openpgp.org)"
+            status=1
+            continue
+        fi
+        if ! gpg --homedir "$keyring" --batch --with-colons --fingerprint "$key" | awk -F: '$1 == "fpr" {print $10}' |
+            grep -qx "$key"; then
+            echo "$key: $from gave another key; not trusted"
+            status=1
+            continue
+        fi
+        echo "$key, from $from:"
+        gpg --homedir "$keyring" --batch --fingerprint "$key"
+        printf 'Trust this key to sign the sources LOCachy builds? [y/N] '
+        answer=
+        read -r answer || true
+        case $answer in
+        y|Y|yes) ;;
+        *) echo "$key: not trusted"; status=1; continue ;;
+        esac
+        gpg --homedir "$keyring" --batch --export "$key" | as_user gpg --batch --quiet --import
+        as_user gpg --batch --list-keys "$key" >/dev/null 2>&1 || die "$key: not added to the build user's keyring"
+        [ ! -f "$bdir/untrusted-keys" ] || sed -i "/ $key\$/d" "$bdir/untrusted-keys"
+        echo "$key: trusted"
+    done
+    exit "$status"
+fi
+
 bg=0
 inst=0
 local_recipe=0
-usage="usage: locachy-build [-b] [-i] [-r] [--local] PKG... | --files ROOT PKG... | --run COMMAND..."
+usage="usage: locachy-build [-b] [-i] [-r] [--local] PKG... | --files ROOT PKG... | --run COMMAND... | --trust-key FINGERPRINT..."
 if [ "${1:-}" != --run ]; then
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -622,6 +751,19 @@ fi
 modprobe overlay 2>/dev/null || true
 status=0
 unshare --mount --propagation private env LOCACHY_BUILD_STAGE=ns "$0" "$@" || status=$?
+if [ -s "$run/out/untrusted-keys" ]; then
+    sort -u "$run/out/untrusted-keys" >"$bdir/untrusted-keys"
+    chmod 0644 "$bdir/untrusted-keys"
+    echo "locachy-build: source signing keys not trusted yet; none is added by itself. Nothing was built:"
+    while read -r name key; do
+        echo "Source key to trust: $name $key"
+    done <"$bdir/untrusted-keys"
+    echo "locachy-build: check each with its upstream project, then (as root):"
+    echo "Trust them: locachy-build --trust-key $(awk '{print $2}' "$bdir/untrusted-keys" | sort -u | tr '\n' ' ' | sed 's/ $//')"
+    status=3
+elif [ "$status" = 0 ]; then
+    rm -f "$bdir/untrusted-keys"
+fi
 if [ -n "$prepare" ]; then
     if [ "$status" != 0 ]; then
         failed=$prepare/failed/${2:-contracts}

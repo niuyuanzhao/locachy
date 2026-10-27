@@ -50,6 +50,10 @@ class Install(unittest.TestCase):
         patch = mock.patch.object(i.os, "stat", stat)
         patch.start()
         self.addCleanup(patch.stop)
+        self.record = Path(self.tmp.name) / "run/resume.json"
+        patch = mock.patch.object(i, "RESUME_RECORD", self.record)
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def output(self, command):
         if command[0] == "findmnt":
@@ -67,6 +71,28 @@ class Install(unittest.TestCase):
 
     def validate(self):
         return i.validate(str(self.root), str(self.esp))
+
+    def test_continued_target_is_that_installations_only(self):
+        work = self.root / ".locachy-installer"
+        work.mkdir()
+        (work / "install-id").write_text("a" * 32 + "\n")
+        (self.root / "usr").mkdir()
+        with self.assertRaisesRegex(ValueError, "Target root is not empty"):
+            self.validate()  # not continued: empty only
+        self.assertEqual(i.validate(str(self.root), str(self.esp), "a" * 32)[:2], (self.root, self.esp))
+        with self.assertRaisesRegex(ValueError, "another installation's"):
+            i.validate(str(self.root), str(self.esp), "b" * 32)
+        # The ESP: what an installation writes there, else nothing.
+        (self.esp / "EFI/BOOT").mkdir(parents=True)
+        (self.esp / "EFI/BOOT/BOOTX64.EFI").write_text("image")
+        i.validate(str(self.root), str(self.esp), "a" * 32)
+        (self.esp / "EFI/Microsoft").mkdir()
+        with self.assertRaisesRegex(ValueError, "no installation of LOCachy wrote"):
+            i.validate(str(self.root), str(self.esp), "a" * 32)
+        # No mark yet (it stopped before the build began): empty, as at first.
+        (work / "install-id").unlink()
+        with self.assertRaisesRegex(ValueError, "Target root is not empty"):
+            i.validate(str(self.root), str(self.esp), "a" * 32)
 
     def test_empty_explicit_target_and_fat32_esp(self):
         (self.root / "lost+found").mkdir()
@@ -241,19 +267,21 @@ class Install(unittest.TestCase):
         argv = ["locachy-install", "--root", str(self.root), "--esp", str(self.esp), "--yes",
                 "--password-file", str(secret), "--user", "boot-test"]
         with mock.patch.object(sys, "argv", argv), mock.patch.object(i.os, "geteuid", lambda: 0), \
-             mock.patch.object(i, "validate", lambda r, e: (self.root, self.esp, self.root_fs, self.esp_fs)), \
-             mock.patch.object(i, "run", lambda cmd, **kw: calls.append(cmd) or subprocess.CompletedProcess(cmd, 0)):
+             mock.patch.object(i, "validate", lambda r, e, install_id=None: (self.root, self.esp, self.root_fs, self.esp_fs)), \
+             mock.patch.object(i, "run", lambda cmd, **kw: calls.append(cmd) or subprocess.CompletedProcess(cmd, 0)), \
+             contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(i.main(), 0)
         inner = calls[-1]
         self.assertEqual(inner[0], "unshare")
         self.assertEqual(inner[inner.index("--password-file") + 1], str(secret))
         self.assertFalse(any("Locachy123" in a for a in inner))
+        self.assertFalse(self.record.exists())  # done: nothing to continue
         # The inner run fails: its own last line said why, nothing is added;
         # stopped by a signal, that is said.
         for status, said in ((1, ""), (-9, "locachy-install: the installation was stopped by signal 9\n")):
             err = io.StringIO()
             with mock.patch.object(sys, "argv", argv), mock.patch.object(i.os, "geteuid", lambda: 0), \
-                 mock.patch.object(i, "validate", lambda r, e: (self.root, self.esp, self.root_fs, self.esp_fs)), \
+                 mock.patch.object(i, "validate", lambda r, e, install_id=None: (self.root, self.esp, self.root_fs, self.esp_fs)), \
                  mock.patch.object(i, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, status)), \
                  contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
                 self.assertEqual(i.main(), 1)
@@ -390,6 +418,75 @@ class Install(unittest.TestCase):
                 self.assertEqual(i.describe(i.make_parser())["source"],
                                  {"text": "this medium's own, 0123456789ab; could not fetch x (main): fatal: no",
                                   "not_newest": True})
+
+    def test_a_stopped_installation_is_continued_where_it_stopped(self):
+        first, again = Path(self.tmp.name) / "password", Path(self.tmp.name) / "password-again"
+        first.write_text("Locachy123\n")
+        again.write_text("Locachy123\n")
+        key = "40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C"
+        calls, checked = [], []
+        def validate(r, e, install_id=None):
+            checked.append(install_id)
+            return self.root, self.esp, self.root_fs, self.esp_fs
+        def stopped(cmd, **kw):
+            calls.append(cmd)
+            # The build stopped for a key (locachy-build wrote it down).
+            keys = self.root / i.UNTRUSTED_KEYS
+            keys.parent.mkdir(parents=True, exist_ok=True)
+            keys.write_text(f"lyrebird-proxy {key}\n")
+            return subprocess.CompletedProcess(cmd, 1)
+        out = io.StringIO()
+        argv = ["locachy-install", "--root", str(self.root), "--esp", str(self.esp), "--yes", "--user", "boot-test",
+                "--features", "tor", "--password-file", str(first), "--update-repo", "https://example.org/l.git"]
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(i.os, "geteuid", lambda: 0), \
+             mock.patch.object(i, "validate", validate), mock.patch.object(i, "run", stopped), \
+             contextlib.redirect_stdout(out):
+            self.assertEqual(i.main(), 1)
+        said = out.getvalue()
+        self.assertIn(f"Source key to trust: lyrebird-proxy {key}", said)
+        self.assertIn(f"Trust them: locachy-install --trust-key {key}\n", said)
+        self.assertIn("Continue with: locachy-install --resume\n", said)
+        record = json.loads(self.record.read_text())
+        install_id = record["install_id"]
+        self.assertRegex(install_id, "^[0-9a-f]{32}$")
+        self.assertEqual(oct(self.record.stat().st_mode & 0o777), "0o600")
+        self.assertEqual(record["update_repo"], "https://example.org/l.git")
+        self.assertIn("--features", record["argv"])
+        self.assertNotIn("--password-file", record["argv"])  # never a secret, nor where it was
+        self.assertEqual(calls[-1][calls[-1].index("--install-id") + 1], install_id)
+        self.assertNotIn("--resume", calls[-1])
+        self.assertEqual(checked, [None])
+        # --trust-key: the keys, in that target (its locachy-build asks).
+        chroot = []
+        with mock.patch.object(sys, "argv", ["locachy-install", "--trust-key", key]), \
+             mock.patch.object(i.os, "geteuid", lambda: 0), \
+             mock.patch.object(i, "resumed_target", lambda record: Path(record["root"])), \
+             mock.patch.object(i.subprocess, "run", lambda cmd, **kw: chroot.append(cmd) or subprocess.CompletedProcess(cmd, 0)):
+            self.assertEqual(i.main(), 0)
+        self.assertEqual(chroot, [["arch-chroot", str(self.root), "/usr/local/bin/locachy-build", "--trust-key", key]])
+        # --resume: its options as recorded, the password again; the same ID.
+        calls.clear()
+        with mock.patch.object(sys, "argv", ["locachy-install", "--resume", "--yes", "--password-file", str(again)]), \
+             mock.patch.object(i.os, "geteuid", lambda: 0), \
+             mock.patch.object(i, "resumed_target", lambda record: Path(record["root"])), \
+             mock.patch.object(i, "validate", validate), \
+             mock.patch.object(i, "run", lambda cmd, **kw: calls.append(cmd) or subprocess.CompletedProcess(cmd, 0)), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(i.main(), 0)
+        inner = calls[-1]
+        self.assertEqual(inner[inner.index("--install-id") + 1], install_id)
+        self.assertIn("--resume", inner)
+        self.assertEqual(inner[inner.index("--password-file") + 1], str(again))
+        self.assertEqual(inner[inner.index("--features") + 1], "tor")
+        self.assertEqual(inner[inner.index("--update-repo") + 1], "https://example.org/l.git")
+        self.assertEqual(checked[-1], install_id)
+        self.assertFalse(self.record.exists())
+        # Nothing to continue now.
+        with mock.patch.object(sys, "argv", ["locachy-install", "--resume"]), \
+             mock.patch.object(i.os, "geteuid", lambda: 0), contextlib.redirect_stderr(io.StringIO()) as err, \
+             self.assertRaises(SystemExit):
+            i.main()
+        self.assertIn("Nothing to continue", err.getvalue())
 
     def test_running_root_rejected_before_any_build(self):
         with self.assertRaisesRegex(ValueError, "running installation"):

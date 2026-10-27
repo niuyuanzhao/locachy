@@ -148,7 +148,14 @@ class InstallerProfile(unittest.TestCase):
         self.assertIn('if [ "$(tty)" = /dev/tty1 ]; then', login)
         self.assertLess(login.index("/usr/local/bin/installer\n"), login.index("/usr/local/bin/installer --text"))
         packages = set((profile / "packages.x86_64").read_text().splitlines())
-        self.assertTrue({"freetype2", "libinput", "json-c", "ttf-dejavu", "noto-fonts-cjk"} <= packages)
+        self.assertTrue({"freetype2", "libinput", "json-c", "ttf-dejavu", "noto-fonts-cjk", "wayland"} <= packages)
+        # The clipboard the installer copies to and its terminal pastes from.
+        unit = (root / "etc/systemd/system/locachy-clipboard.service").read_text()
+        self.assertIn("ExecStart=/usr/local/lib/locachy/clipboard --serve", unit)
+        self.assertIn("RuntimeDirectory=locachy", unit)
+        wants = root / "etc/systemd/system/multi-user.target.wants/locachy-clipboard.service"
+        self.assertEqual(os.readlink(wants), "../locachy-clipboard.service")
+        self.assertIn('["/usr/local/lib/locachy/clipboard"]="0:0:755"', definition)
 
     def test_source_origin_records_repository_and_branch(self):
         self.env.update(LOCACHY_REPO="https://github.com/me/locachy.git", LOCACHY_BRANCH="next", LOCACHY_COMMIT="b" * 40)
@@ -293,6 +300,22 @@ class LiveEntry(unittest.TestCase):
         self.assertEqual(out, "bundled bundled: no repository to fetch from (/somewhere/locachy, main) "
                               "--update-repo /somewhere/locachy --yes")
         self.assertFalse(self.fetched.exists())
+
+    def test_continuing_fetches_from_where_that_installation_did(self):
+        fork = "https://example.invalid/fork.git"
+        self.git("-C", str(self.repo), "branch", "next")
+        record = self.root / "resume.json"
+        record.write_text(json.dumps({"install_id": "a" * 32, "update_repo": fork, "update_branch": "next"}))
+        self.env.update(LOCACHY_RESUME_RECORD=str(record), GIT_CONFIG_COUNT="2",
+                        GIT_CONFIG_KEY_1=f"url.file://{self.repo}.insteadOf", GIT_CONFIG_VALUE_1=fork)
+        out, err = self.entry("--resume", "--yes")
+        self.assertEqual(out, "v1 fetched --resume --yes")
+        self.assertIn(f"Fetching the newest LOCachy source: {fork} (next)", err)
+        out, err = self.entry("--trust-key", "40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C")
+        self.assertEqual(out, "v1 fetched earlier --trust-key 40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C")
+        self.assertEqual(err, "")
+        out, err = self.entry("--yes")  # not continuing: the medium's update repository
+        self.assertIn(f"Fetching the newest LOCachy source: {self.URL} (main)", err)
 
     def test_fetches_over_https_and_ssh_only(self):
         del self.env["GIT_ALLOW_PROTOCOL"]

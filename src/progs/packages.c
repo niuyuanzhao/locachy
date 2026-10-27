@@ -440,6 +440,26 @@ static void find_job(void)
     }
 }
 
+/* The command that trusts the source signing keys a build stopped for
+ * (locachy-build's "Trust them: ..." in the job's output), or "". */
+static void trust_command(char *out, size_t size)
+{
+    char buf[65536];
+    out[0] = '\0';
+    int fd = open(JOB_LOG, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    off_t end = lseek(fd, 0, SEEK_END);
+    ssize_t got = pread(fd, buf, sizeof buf - 1, end > (off_t)sizeof buf - 1 ? end - (off_t)sizeof buf + 1 : 0);
+    close(fd);
+    if (got <= 0) return;
+    buf[got] = '\0';
+    for (char *s = strstr(buf, "Trust them: "); s; s = strstr(s + 1, "Trust them: ")) {
+        if (s != buf && s[-1] != '\n') continue;
+        size_t n = strcspn(s + 12, "\r\n");
+        snprintf(out, size, "%.*s", (int)n, s + 12);
+    }
+}
+
 static void check_job(void)
 {
     int status = 0;
@@ -456,7 +476,14 @@ static void check_job(void)
     } else if (ok) {
         say_notice(0, _("%s: done."), job_label);
     } else {
-        say_notice(1, _("%s: failed; its output is below (and in %s)."), job_label, JOB_LOG);
+        char trust[512];
+        trust_command(trust, sizeof trust);
+        if (trust[0]) {
+            /* Not trusted by anything but a person: the keys are in the output. */
+            say_notice(1, _("Trust the keys below as root, after checking them: %s; then apply again."), trust);
+        } else {
+            say_notice(1, _("%s: failed; its output is below (and in %s)."), job_label, JOB_LOG);
+        }
     }
     job = 0;
     unlink(JOB_PID);

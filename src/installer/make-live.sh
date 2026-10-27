@@ -6,6 +6,7 @@
 #   /usr/local/bin/installer             the full-screen installation (progs/installer.c)
 #   /usr/local/bin/term                  its terminal: a root shell, for repairs
 #   /usr/local/lib/locachy/keytable      the key table of the layout chosen (libxkbcommon)
+#   /usr/local/lib/locachy/clipboard     the clipboard they copy and paste with (its socket)
 #   /usr/local/share/locachy/font.psf, terminus/   their text (Terminus)
 #   /usr/local/share/locale/LL_CC/       their translations (po/LINGUAS)
 #   /usr/lib/locale/LL_CC.utf8/          the locales those need (localedef)
@@ -28,6 +29,11 @@ $gcc $(pkg-config --cflags json-c) -o "$root/usr/local/bin/installer" "$src/prog
 $gcc -o "$root/usr/local/bin/term" "$src/progs/term.c" "$b"/base-*.o $libs
 mkdir -p "$root/usr/local/lib/locachy"
 $gcc -o "$root/usr/local/lib/locachy/keytable" "$src/progs/keytable.c" $(pkg-config --cflags --libs xkbcommon)
+p=ext-data-control-v1
+wayland-scanner client-header "$src/base/protocols/$p.xml" "$b/$p-client-protocol.h"
+wayland-scanner private-code "$src/base/protocols/$p.xml" "$b/$p-protocol.c"
+$gcc -I"$b" -o "$root/usr/local/lib/locachy/clipboard" "$src/progs/clipboard.c" "$b/$p-protocol.c" \
+    "$b/base-clipboard.o" -lwayland-client
 
 gzip -dc /usr/share/kbd/consolefonts/ter-u16b.psf.gz >"$root/usr/local/share/locachy/font.psf"
 for size in 12 14 16 18 20 22 24 28 32; do

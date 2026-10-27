@@ -248,14 +248,19 @@ int main(int argc, char **argv)
     put("commands.txt", "/usr/bin/microsoft-edge-stable\t--new-window\tMicrosoft Edge\n/usr/bin/sl\t\t\n");
     put("search.txt", "firefox\trecipe\tfirefox\tlibnotify\t/usr/bin/firefox\t\t1\tMozilla Firefox\n");
     /* The doubles: they answer, and write down their arguments in calls. */
-    char script_text[2048];
+    char script_text[4096];
     snprintf(script_text, sizeof script_text,
              "#!/bin/sh\necho \"pkg $*\" >>%s/calls\n"
              "case \"$*\" in \"plan --cached --machine\") cat %s/plan.txt ;;\n"
              "\"status --machine\") cat %s/status.txt ;; info\\ *) cat %s/info.txt ;;\n"
              "search\\ *) cat %s/search.txt ;; plan) seq 1 60; sleep 0.2 ;;\n"
-             "commands\\ *) cat %s/commands.txt ;; *) echo working; sleep 0.2 ;; esac\n",
-             dir, dir, dir, dir, dir, dir);
+             "commands\\ *) cat %s/commands.txt ;;\n"
+             "apply\\ *) if [ -e %s/keys-wanted ]; then\n"
+             "  echo 'Source key to trust: lyrebird-proxy 40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C'\n"
+             "  echo 'Trust them: locachy-build --trust-key 40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C'; exit 3\n"
+             "  fi; echo working; sleep 0.2 ;;\n"
+             "*) echo working; sleep 0.2 ;; esac\n",
+             dir, dir, dir, dir, dir, dir, dir);
     put("pkg", script_text);
     snprintf(script_text, sizeof script_text, "#!/bin/sh\necho \"app $*\" >>%s/calls\necho done\n", dir);
     put("app", script_text);
@@ -286,6 +291,14 @@ int main(int argc, char **argv)
         (const int[]){ K_DOWN, K_DOWN, ' ', 'a', 'y', WAIT, WAIT, WAIT, END });
     assert(has("calls", "pkg apply host locachy\n"));
     assert(on_screen("done"));
+
+    put("keys-wanted", "");
+    run("apply stopped for a source signing key: which, and what a person does",
+        (const int[]){ 'a', 'y', WAIT, WAIT, WAIT, END });
+    assert(on_screen("Source key to trust: lyrebird-proxy 40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C"));
+    assert(on_screen("Trust the keys below as root, after checking them: "
+                     "locachy-build --trust-key 40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C; then apply again."));
+    unlink(D("keys-wanted"));
 
     run("check: its output in the pane, how it ended, which lines; PgUp scrolls it back",
         (const int[]){ 'c', WAIT, WAIT, WAIT, SNAP, K_PGUP, END });

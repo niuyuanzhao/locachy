@@ -1,0 +1,13 @@
+# The live medium's clipboard: what the full-screen installer copies, and
+# what its terminal pastes (the host clipboard of an installed system, its
+# socket /run/locachy/clipboard.sock; no Wayland display here).
+[Unit]
+Description=LOCachy clipboard (copy and paste between the installer and its terminal)
+
+[Service]
+ExecStart=/usr/local/lib/locachy/clipboard --serve
+RuntimeDirectory=locachy
+RuntimeDirectoryPreserve=yes
+
+[Install]
+WantedBy=multi-user.target

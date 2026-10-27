@@ -5,9 +5,9 @@
  * fixed description (the medium's own source: the newest was not fetched),
  * writes down how it was called (and what its secret files hold, and their
  * modes), and prints the progress lines of an installation (the newest
- * source), or a refusal or a failure (the medium's own) when told to;
- * keytable writes a
- * table of two keys, or fails when told to.
+ * source), or a refusal or a failure (the medium's own) when told to, or
+ * a stop for a source signing key to trust (then --resume goes on);
+ * keytable writes a table of two keys, or fails when told to.
  *   test-installer DIR   (DIR: a new directory for the doubles' files)
  * Build with base/ui.c and json-c.
  */
@@ -49,7 +49,7 @@ static char *dir_path(const char *rel)
 /* The screen: what was last flushed, a text line per row. */
 #define COLS 150
 #define ROWS 48
-static char grid[ROWS][COLS + 1], shown[ROWS][COLS + 1];
+static char grid[ROWS][COLS + 1], shown_grid[ROWS][COLS + 1];
 static char said[16384];
 
 void say(const char *fmt, ...)
@@ -107,7 +107,7 @@ void screen_text(int col, int row, const char *s, uint32_t fg, uint32_t bg)
 }
 void screen_flush(void)
 {
-    memcpy(shown, grid, sizeof shown);
+    memcpy(shown_grid, grid, sizeof shown_grid);
 }
 
 /* The keys: a script, built with k() and type(); WAIT lets time pass (the
@@ -122,6 +122,26 @@ static int nsnaps;
 static jmp_buf quit;
 static struct pointer_event mouse;
 const struct pointer_event *pointer_last(void) { return &mouse; }
+/* PTR in the keys: the next of these pointer events (ptr() adds one). */
+#define PTR (-4)
+static struct pointer_event ptrs[16];
+static int nptrs, at_ptr;
+static void k(int key);
+static void ptr(int col, int row, int button, int pressed, int clicks)
+{
+    assert(nptrs < 16);
+    ptrs[nptrs++] = (struct pointer_event){ .col = col, .row = row, .button = button, .pressed = pressed,
+                                            .clicks = clicks, .buttons = pressed || !button ? 1 : 0 };
+    k(PTR);
+}
+/* The clipboard: what was copied last, and to which selection. */
+static char copied[2][2048];
+int clipboard_set(int primary, const void *text, size_t size)
+{
+    snprintf(copied[primary ? 1 : 0], sizeof copied[0], "%.*s", (int)size, (const char *)text);
+    return CLIPBOARD_OK;
+}
+const char *clipboard_error(int status) { return status == CLIPBOARD_OK ? "ok" : "failed"; }
 /* K_TEXT's text: a character beyond ASCII, as keys.c gives it (de: ü). */
 const char *keys_text(void) { return "ü"; }
 
@@ -150,8 +170,13 @@ int key_poll_timeout(int fd, int ms)
     }
     if (key == SNAP) {
         assert(nsnaps < 16);
-        memcpy(snaps[nsnaps++], shown, sizeof shown);
+        memcpy(snaps[nsnaps++], shown_grid, sizeof shown_grid);
         return 0;
+    }
+    if (key == PTR) {
+        assert(at_ptr < nptrs);
+        mouse = ptrs[at_ptr++];
+        return K_POINTER;
     }
     return key;
 }
@@ -233,6 +258,15 @@ static const char fake_install[] =
     " echo 'locachy-install: error: test refusal' >&2; exit 2; fi\n"
     "  echo 'Would partition'; exit 0\n"
     "fi\n"
+    "if [ -e \"$d/keys-wanted\" ] && [ \"$1\" != --resume ]; then\n"
+    "  echo '== x86-64-v2: build mounted target'\n"
+    "  echo 'Source key to trust: lyrebird-proxy 40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C'\n"
+    "  echo 'Trust them: locachy-build --trust-key 40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C'\n"
+    "  echo 'locachy-install: Target build failed; see the log' >&2\n"
+    "  echo 'Source key to trust: lyrebird-proxy 40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C'\n"
+    "  echo 'Trust them: locachy-install --trust-key 40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C'\n"
+    "  echo 'Continue with: locachy-install --resume'; exit 1\n"
+    "fi\n"
     "if [ -e \"$d/install-fail\" ]; then\n"
     "  echo \"Source (not the newest): this medium's own, 0123456789ab; could not fetch\"\n"
     "else echo 'Source: 89abcdef0123 of https://github.com/niuyuanzhao/locachy.git (main), the newest, fetched now'; fi\n"
@@ -277,6 +311,8 @@ static void run(const char *what)
     assert(keys[at] == END);
     nkeys = 0;
     keys[0] = END;
+    nptrs = at_ptr = 0;
+    sel.active = sel.dragging = 0;
 }
 
 /* From the start to the summary: the whole disk sda, a passphrase, the
@@ -421,6 +457,44 @@ int main(int argc, char **argv)
     assert(snapped("Summary"));
     assert(strstr(said, "installer: installation failed (1)"));
     unlink(D("install-fail"));
+
+    /* A source signing key to trust: the installation waits, says which and
+     * the command (y copies it); text is selected with the pointer and
+     * copied; c goes on where it stopped (--resume), the secrets again. */
+    write_file(D("keys-wanted"), "", 0644);
+    to_summary("correct horse");
+    k(K_EOL); k('\n'); k('y');
+    for (int i = 0; i < 6; i++) k(WAIT);
+    k(SNAP); k('y'); k(SNAP);
+    ptr(2, PAGE_TOP, BTN_LEFT, 1, 1); ptr(12, PAGE_TOP + 1, 0, 0, 0); ptr(12, PAGE_TOP + 1, BTN_LEFT, 0, 0);
+    k('y');
+    ptr(10, PAGE_TOP + 1, BTN_LEFT, 1, 3); ptr(10, PAGE_TOP + 1, BTN_LEFT, 0, 0);
+    k('c');
+    for (int i = 0; i < 10; i++) k(WAIT);
+    k(SNAP);
+    run("keys to trust, copying, continuing");
+    assert(snapped("Waiting for you: source signing keys to trust. None is trusted by itself."));
+    assert(snapped("lyrebird-proxy") && snapped("40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C"));
+    assert(snapped("locachy-install --trust-key 40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C"));
+    assert(snapped("c: continue") && !snapped("b: back to the summary"));
+    assert(snapped("Copied: locachy-install --trust-key 40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C"));
+    printf("copied: [%s] [%s]\n", copied[0], copied[1]);
+    fflush(stdout);
+    assert(strncmp(copied[0], "Waiting for you: source signing keys", 36) == 0);
+    assert(strstr(copied[0], "None is trusted by itself.\n    lyrebird-") && !strstr(copied[0], "lyrebird-p"));
+    assert(strncmp(copied[1], "lyrebird-proxy ", 15) == 0);
+    assert(strcmp(copied[1] + strlen(copied[1]) - 41, " 40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C") == 0);
+    assert(snapped("LOCachy is installed"));
+    assert(strstr(said, "installer: continuing") && strstr(said, "installer: installation completed"));
+    calls = slurp(D("calls"));
+    printf("%s", calls);
+    assert(strstr(calls, "--resume --yes --luks-passphrase-file="));
+    assert(strstr(calls, "--update-repo=https://github.com/niuyuanzhao/locachy.git --update-branch=main"));
+    secrets = slurp(D("secrets"));
+    assert(strstr(strstr(secrets, "--password-file 600 Locachy123\n") + 1, "--password-file 600 Locachy123\n"));
+    const char *log = slurp(D("run/install.log"));
+    assert(strstr(log, "Continue with: locachy-install --resume") && strstr(log, "Installation completed."));
+    unlink(D("keys-wanted"));
 
     printf("PASS installer\n");
     return 0;

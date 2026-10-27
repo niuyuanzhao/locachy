@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-27 18:55+0800\n"
+"POT-Creation-Date: 2026-10-28 04:50+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -5472,6 +5472,27 @@ msgstr ""
 
 #: progs/installer.c
 #, c-format
+msgid "Not copied: %s"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "Copied: %.200s"
+msgstr ""
+
+#: progs/installer.c
+msgid ""
+"Nothing selected: drag over text, or double-click a word, or triple-click a "
+"line."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "Continuing the installation   %s"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
 msgid "Installing LOCachy   %s"
 msgstr ""
 
@@ -5483,7 +5504,27 @@ msgstr ""
 
 #: progs/installer.c
 msgid ""
+"Waiting for you: source signing keys to trust. None is trusted by itself."
+msgstr ""
+
+#: progs/installer.c
+msgid ""
+"Check each with its upstream project; then trust them in the terminal (t):"
+msgstr ""
+
+#: progs/installer.c
+msgid "y copies the command; c then continues where the installation stopped."
+msgstr ""
+
+#: progs/installer.c
+msgid ""
 "The installation failed. Nothing more is written; the output below says why."
+msgstr ""
+
+#: progs/installer.c
+msgid ""
+"Deal with the cause (t: a terminal); then c continues where the installation "
+"stopped."
 msgstr ""
 
 #: progs/installer.c
@@ -5528,6 +5569,10 @@ msgid "t: terminal"
 msgstr ""
 
 #: progs/installer.c
+msgid "y: copy"
+msgstr ""
+
+#: progs/installer.c
 msgid "p: power off"
 msgstr ""
 
@@ -5537,6 +5582,10 @@ msgstr ""
 
 #: progs/installer.c
 msgid "b: back to the summary"
+msgstr ""
+
+#: progs/installer.c
+msgid "c: continue"
 msgstr ""
 
 #: progs/installer.c
@@ -5776,6 +5825,12 @@ msgstr ""
 #: progs/packages.c
 #, c-format
 msgid "%s: done."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid ""
+"Trust the keys below as root, after checking them: %s; then apply again."
 msgstr ""
 
 #: progs/packages.c

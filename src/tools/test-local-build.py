@@ -64,6 +64,14 @@ class LocalBuild(unittest.TestCase):
         self.command("pikaur", 'echo "pikaur $*" >>"$TEST_LOG"; '
                                 'mkdir -p "$TEST_HOME/.cache/pikaur/pkg"; '
                                 'echo dependency >"$TEST_HOME/.cache/pikaur/pkg/aur-tool-1-1-x86_64.pkg.tar.zst"')
+        # aur_keys (the AUR's .SRCINFO of the AUR dependencies): TEST_AUR_KEYS.
+        self.command("python3", 'cat >/dev/null; echo "aur_keys $*" >>"$TEST_LOG"; printf "%b" "${TEST_AUR_KEYS:-}"')
+        # The build user's keyring: the keys listed in TEST_KEYRING.
+        self.keyring = self.root / "keyring"
+        self.keyring.write_text("")
+        self.env["TEST_KEYRING"] = str(self.keyring)
+        self.command("gpg", 'echo "gpg $*" >>"$TEST_LOG"; case "$*" in *--list-keys*) '
+                            'for k do :; done; grep -qx "$k" "$TEST_KEYRING" ;; esac')
 
     def command(self, name, body):
         path = self.bin / name
@@ -86,22 +94,70 @@ class LocalBuild(unittest.TestCase):
         self.assertTrue((self.handover / "example-1-1-x86_64.pkg.tar.zst").is_file())
         self.assertTrue((self.handover / "aur-tool-1-1-x86_64.pkg.tar.zst").is_file())
         self.assertIn("makepkg --printsrcinfo", calls)
+        self.assertIn("aur_keys -I - aur-tool", calls)
 
-    def test_source_key_is_imported_by_builder_and_invalid_fingerprint_stops(self):
-        fingerprint = "3C2C43D9447D5938EF4551EBE23B7E70B467F0BF"
-        self.info.write_text(self.info.read_text() + "\tvalidpgpkeys = " + fingerprint + "\n")
-        self.command("gpg", 'echo "gpg $*" >>"$TEST_LOG"; case "$*" in *--list-keys*) exit 1 ;; esac')
+    def test_untrusted_source_keys_stop_before_anything_is_built(self):
+        own, dependency = "3C2C43D9447D5938EF4551EBE23B7E70B467F0BF", "07948FFA64160A425BCD27EAC732B1D1C28F4E2F"
+        self.info.write_text(self.info.read_text() + "\tvalidpgpkeys = " + own.lower() + "\n")
+        self.env["TEST_AUR_KEYS"] = "aur-tool " + dependency + "\\n"
+        result = self.run_stage()
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertEqual(sorted((self.handover / "untrusted-keys").read_text().splitlines()),
+                         ["aur-tool " + dependency, "example " + own])
+        calls = self.log.read_text()
+        self.assertNotIn("--recv-keys", calls)  # nothing is fetched, let alone trusted, by a build
+        self.assertNotIn("pikaur -S", calls)
+        self.assertNotIn("makepkg --force", calls)
+        self.assertFalse((self.handover / "example-1-1-x86_64.pkg.tar.zst").exists())
+        # Trusted (in the build user's keyring): built, and checked with them.
+        (self.handover / "untrusted-keys").unlink()
+        self.log.unlink()
+        self.keyring.write_text(own + "\n" + dependency + "\n")
         result = self.run_stage()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = self.log.read_text()
-        self.assertIn("gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys " + fingerprint, calls)
+        self.assertIn("makepkg --force --noconfirm", calls)
         self.assertNotIn("--skippgpcheck", calls)
+        self.assertFalse((self.handover / "untrusted-keys").exists())
+        # Not a full fingerprint: refused.
         self.log.unlink()
-        self.info.write_text(self.info.read_text().replace(fingerprint, "short-key"))
+        self.info.write_text(self.info.read_text().replace(own.lower(), "B467F0BF"))
         result = self.run_stage()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("invalid source PGP fingerprint", result.stderr)
+        self.assertIn("invalid source PGP fingerprint B467F0BF", result.stderr)
         self.assertNotIn("makepkg --force", self.log.read_text())
+
+    def test_trust_key_asks_and_adds_only_what_is_answered_y(self):
+        key, other = "40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C", "07948FFA64160A425BCD27EAC732B1D1C28F4E2F"
+        (self.bdir / "untrusted-keys").write_text(f"lyrebird-proxy {key}\nlyrebird-proxy {other}\n")
+        self.command("getent", 'exit 0')
+        # A separate keyring per call (--homedir) gets what the keyserver has;
+        # the build user's (no --homedir) is TEST_KEYRING.
+        self.command("gpg", 'echo "gpg $*" >>"$TEST_LOG"; for k do :; done\n'
+                            'case "$*" in\n'
+                            '*--recv-keys*) exit 0 ;;\n'
+                            '*--with-colons*) echo "fpr:::::::::$k:" ;;\n'
+                            '*--homedir*--fingerprint*) echo "pub   ed25519 2023-01-01"; echo "uid   Upstream Maintainer" ;;\n'
+                            '*--export*) echo "key $k" ;;\n'
+                            '*--import*) sed "s/^key //" >>"$TEST_KEYRING" ;;\n'
+                            '*--list-keys*) grep -qx "$k" "$TEST_KEYRING" ;;\n'
+                            '*--kill*) ;;\n'
+                            'esac')
+        self.command("gpgconf", ':')
+        env = dict(self.env)
+        env.pop("LOCACHY_BUILD_STAGE")
+        result = subprocess.run(["bash", str(self.script), "--trust-key", key.lower(), other],
+                                env=env, text=True, capture_output=True, input="y\nn\n")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)  # one was not trusted
+        self.assertIn("Upstream Maintainer", result.stdout)
+        self.assertIn(key + ": trusted", result.stdout)
+        self.assertIn(other + ": not trusted", result.stdout)
+        self.assertEqual(self.keyring.read_text().split(), [key])
+        self.assertEqual((self.bdir / "untrusted-keys").read_text(), f"lyrebird-proxy {other}\n")
+        result = subprocess.run(["bash", str(self.script), "--trust-key", "B467F0BF"],
+                                env=env, text=True, capture_output=True, input="y\n")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not a full fingerprint: B467F0BF", result.stderr)
 
     def test_makepkg_failure_is_propagated(self):
         self.env["TEST_FAIL_BUILD"] = "1"

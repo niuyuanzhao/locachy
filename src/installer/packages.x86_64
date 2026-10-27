@@ -36,5 +36,6 @@ libinput
 json-c
 libxkbcommon
 libx11
+wayland
 ttf-dejavu
 noto-fonts-cjk

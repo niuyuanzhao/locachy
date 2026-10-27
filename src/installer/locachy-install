@@ -2,8 +2,9 @@
 # The live entry: locachy-install of the newest LOCachy source, as the packages
 # come from their mirrors. The source is fetched (git, shallow) from the update
 # repository and branch given (--update-repo, --update-branch), else those the
-# medium's own source came from. A call that may install fetches it again;
-# --describe-json, --check and --help use what was fetched, or fetch it the
+# medium's own source came from (--resume, --trust-key: those of the
+# installation they continue). A call that may install fetches it again; --describe-json,
+# --check, --trust-key and --help use what was fetched, or fetch it the
 # first time. When it cannot be fetched, what was fetched before from there
 # runs, else the medium's own source (also with updates off). LOCACHY_SOURCE
 # tells locachy-install which, and why: fetched, fetched earlier (not fetched
@@ -12,9 +13,10 @@ set -uo pipefail
 bundled=${LOCACHY_SOURCE_BUNDLED:-/usr/local/src/locachy}
 fetched=${LOCACHY_SOURCE_FETCHED:-/run/locachy-source}
 origin=${LOCACHY_SOURCE_ORIGIN:-/etc/locachy/source-origin.json}
+record=${LOCACHY_RESUME_RECORD:-/run/locachy-install/resume.json}
 export GIT_ALLOW_PROTOCOL=${GIT_ALLOW_PROTOCOL:-https:ssh} GIT_TERMINAL_PROMPT=0
 
-repo= branch= again=1 prev=
+repo= branch= again=1 prev= continued=0
 for a in "$@"; do
     case $prev in
     --update-repo) repo=$a ;;
@@ -24,16 +26,23 @@ for a in "$@"; do
     --update-repo=*) repo=${a#*=} ;;
     --update-branch=*) branch=${a#*=} ;;
     --describe-json | --check | --help | -h) again=0 ;;
+    --trust-key) again=0 continued=1 ;;
+    --resume) continued=1 ;;
     esac
     prev=$a
 done
 if [ -z "$repo" ] || [ -z "$branch" ]; then
+    [ "$continued" = 1 ] || record=
     read -r o_repo o_branch < <(python3 -I -c 'import json, sys
-try:
-    o = json.load(open(sys.argv[1], encoding="utf-8"))
-except (OSError, ValueError):
-    o = {}
-print(o.get("repo") or "-", o.get("branch") or "main")' "$origin")
+def read(path, repo, branch):
+    try:
+        o = json.load(open(path, encoding="utf-8"))
+        return o.get(repo) or "", o.get(branch) or ""
+    except (OSError, ValueError, AttributeError):
+        return "", ""
+r_repo, r_branch = read(sys.argv[2], "update_repo", "update_branch") if sys.argv[2] else ("", "")
+o_repo, o_branch = read(sys.argv[1], "repo", "branch")
+print(r_repo or o_repo or "-", r_branch or o_branch or "main")' "$origin" "$record")
     [ -n "$repo" ] || repo=$o_repo
     [ -n "$branch" ] || branch=$o_branch
 fi

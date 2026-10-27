@@ -11,6 +11,10 @@
 # With --target-root, DIR is an empty mounted ext4 root labelled locachy-root;
 # no disk is formatted, no root/ESP is selected, and no archive is made. Boot
 # files stay in DIR/usr/local/lib/locachy/boot for the installer to commit.
+# --install-id ID marks the target as that installation's (in its work
+# directory); with --resume, a target so marked is built on where a run of
+# that installation stopped: what is there stays (packages, builds), each
+# step is done again and finds its part done.
 # A root caller uses private mount/PID/cgroup namespaces; an unprivileged
 # caller maps their /etc/subuid range, as pacstrap -N does.
 #
@@ -40,9 +44,13 @@ die() {
 }
 
 arguments=("$@")
-target= work_arg= cache_arg= level= cpu=
+target= work_arg= cache_arg= level= cpu= install_id= resume=
 while [ "$#" -gt 0 ]; do
     case $1 in
+    --install-id)
+        [ "$#" -ge 2 ] || die "--install-id needs an ID"
+        install_id=$2; shift 2 ;;
+    --resume) resume=1; shift ;;
     --target-root|--work-dir|--cache-dir)
         [ "$#" -ge 2 ] || die "$1 needs an absolute directory"
         case $1 in
@@ -67,6 +75,8 @@ x86-64|x86-64-v2|x86-64-v3|x86-64-v4) ;;
 esac
 cpu=${cpu:-$level}
 [[ $cpu =~ ^[a-z0-9][a-z0-9._+-]*$ ]] || die "--cpu: not a CPU name: $cpu"
+[ -z "$install_id" ] || [[ $install_id =~ ^[0-9a-f]{32}$ ]] || die "--install-id: not an installation ID"
+[ -z "$resume" ] || { [ -n "$target" ] && [ -n "$install_id" ]; } || die "--resume needs --target-root and --install-id"
 # Package scripts execute target code too. Refuse unsupported hardware before
 # creating namespaces, touching output directories or downloading packages.
 if [ "$level" != x86-64 ] && ! /usr/lib/ld-linux-x86-64.so.2 --help | grep -q "$level (supported"; then
@@ -91,7 +101,15 @@ if [ -n "$target" ]; then
     [ "$(findmnt -rn --mountpoint "$target" -o FSTYPE)" = ext4 ] || die "target root must be ext4"
     [ "$(findmnt -rn --mountpoint "$target" -o LABEL)" = locachy-root ] || die "target root must be labelled locachy-root"
     [ "$(stat -c %d "$target")" != "$(stat -c %d /)" ] || die "target is the running root filesystem"
+    # The installation this target is (its mark), to be built on; else empty.
+    resumed=
+    if [ -n "$resume" ] && [ -f "$target/.locachy-installer/install-id" ]; then
+        [ "$(cat "$target/.locachy-installer/install-id")" = "$install_id" ] ||
+            die "the target is another installation's; it is not built on"
+        resumed=1
+    fi
     for entry in "$target"/* "$target"/.[!.]* "$target"/..?*; do
+        [ -z "$resumed" ] || break
         [ -e "$entry" ] || [ -L "$entry" ] || continue
         case ${entry##*/} in
         lost+found) [ -d "$entry" ] && [ ! -L "$entry" ] || die "invalid lost+found in target"
@@ -131,7 +149,8 @@ if [ -n "$target" ]; then
     esac
     # Never reset an existing work directory. The empty-root check happens
     # before either reserved directory is created, including namespace reexec.
-    [ ! -e "$work" ] || [ -z "$(find "$work" -mindepth 1 -maxdepth 1 -print -quit)" ] || die "target work directory must be empty"
+    [ -n "$resumed" ] || [ ! -e "$work" ] || [ -z "$(find "$work" -mindepth 1 -maxdepth 1 -print -quit)" ] ||
+        die "target work directory must be empty"
 else
     case "$cache/" in "$root/"*) die "cache directory must be outside target root" ;; esac
     canonical_directory "$out"
@@ -209,7 +228,10 @@ alhp_b2sum=1d12ae599d9da533aff66304f3111a19a80c1d132c933488549dd7fc7964a660d58e4
 
 grep -q '^Server' /etc/pacman.d/mirrorlist || die "/etc/pacman.d/mirrorlist has no Arch mirror"
 
-if [ -n "$target" ]; then
+if [ -n "$resumed" ]; then
+    echo "== $level: build on mounted target $root, where the installation stopped (work: $work)"
+    rm -f "$root/var/lib/pacman/db.lck" # its run's processes have all ended (a PID namespace of their own)
+elif [ -n "$target" ]; then
     echo "== $level: build mounted target $root (work: $work)"
 else
     echo "== $level: start over in $work"
@@ -218,7 +240,8 @@ else
     rm -rf "$work" "$out"
 fi
 mkdir -p "$root" "$cache" "$out/esp" "$work/mirrors"
-mkdir -m 700 "$gnupg"
+mkdir -p -m 700 "$gnupg"
+[ -z "$install_id" ] || printf '%s\n' "$install_id" >"$work/install-id"
 
 # This build's mirror lists: this machine's (the installer ranks the live
 # system's first), else the projects' own: CachyOS's is its mirrorlist
@@ -332,7 +355,7 @@ for d in full null random tty urandom zero; do
     mount --bind "/dev/$d" "$root/dev/$d"
     owned_mounts+=("$root/dev/$d")
 done
-ln -s /proc/self/fd "$root/dev/fd"
+ln -sfn /proc/self/fd "$root/dev/fd"
 mkdir -p "$root/dev/shm"
 mount -t tmpfs shm "$root/dev/shm" -o mode=1777,nosuid,nodev
 owned_mounts+=("$root/dev/shm")
@@ -348,7 +371,7 @@ echo "== install: ${packages[*]}"
 pacman --root "$root" --dbpath "$root/var/lib/pacman" \
     --cachedir "$cache" --cachedir /var/cache/pacman/pkg \
     --gpgdir "$gnupg" --hookdir "$root/etc/pacman.d/hooks" --config "$work/pacman.conf" \
-    --noconfirm --assume-installed initramfs -Sy "${packages[@]}" 2>&1 | tee "$work/pacman.log" |
+    --noconfirm --needed --assume-installed initramfs -Sy "${packages[@]}" 2>&1 | tee "$work/pacman.log" |
     awk '/^Packages \([0-9]+\)/ { total = substr($2, 2, length($2) - 2) }
          total && $2 == "downloading..." { printf "(%d/%s) downloading %s\n", ++fetched, total, $1; fflush() }
          $1 == "installing" { sub(/\.\.\.$/, "", $2); printf "(%d/%s) installing %s\n", ++installed, total, $2; fflush() }' ||
@@ -395,6 +418,7 @@ echo
 
 echo "== sources and package helpers in /usr/local/src/locachy"
 s=$root/usr/local/src/locachy
+rm -rf "$s" # this run's source, all of it (a run continued may have newer)
 mkdir -p "$s"
 cp -r "$here/base" "$here/init" "$here/progs" "$here/edit" "$here/link" "$here/tools" "$here/containers" \
     "$here/pkgbuilds" "$here/aur-patches" "$here/make.sh" "$here/make-root.sh" "$here/rc.conf" "$here/packages" "$s/"
@@ -499,7 +523,7 @@ chroot "$root" sh /usr/local/src/locachy/link/install-pkg-tools /usr/local/src/l
 # AUR builds need an unprivileged identity. The first run can bootstrap
 # pikaur without either helper already installed; its dependencies stay in
 # the disposable build root. No LOCachy package hooks are installed yet.
-chroot "$root" /usr/local/bin/locachy-build -i pikaur-static
+chroot "$root" pacman -Q pikaur-static >/dev/null 2>&1 || chroot "$root" /usr/local/bin/locachy-build -i pikaur-static
 chroot "$root" /usr/local/bin/locachy-pkg sync
 chroot "$root" /usr/local/bin/locachy-pkg status
 
