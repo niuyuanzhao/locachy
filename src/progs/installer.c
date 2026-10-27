@@ -921,8 +921,7 @@ static void build_summary(int width)
     if (strcmp(c.update_repo, "off") == 0) {
         snprintf(line, sizeof line, "%s", _("this medium's own (updates are off)"));
     } else {
-        snprintf(line, sizeof line, _("the newest of %s (%s), fetched when it installs"), c.update_repo,
-                 c.update_branch);
+        snprintf(line, sizeof line, "%s", _("the newest from the repository above, fetched when it installs"));
     }
     add_item(E_NOTE, _("LOCachy source"), line);
     if (source_text[0]) {

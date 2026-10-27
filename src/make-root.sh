@@ -269,7 +269,8 @@ else
 fi
 if [ -n "$alhp" ]; then
     t=$work/$alhp_keyring.tar.gz
-    curl -fsSL -o "$t" "https://f.alhp.dev/alhp-keyring/$alhp_keyring.tar.gz"
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o "$t" "https://f.alhp.dev/alhp-keyring/$alhp_keyring.tar.gz" ||
+        die "ALHP's keyring: not fetched"
     echo "$alhp_b2sum  $t" | b2sum -c --quiet || die "$t: wrong checksum"
     mkdir -p "$work/keyrings"
     bsdtar -xf "$t" -C "$work/keyrings" --strip-components 1 "$alhp_keyring/alhp.gpg" "$alhp_keyring/alhp-trusted"

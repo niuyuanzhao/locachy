@@ -325,6 +325,11 @@ def install_tui(args, iso, out, kernel, initrd):
         guest.pump(2)
         screenshots["done"] = guest.shot("tui-done")
         target = "/run/locachy-install-target"
+        # The live entry fetched the newest source, and that one is installed.
+        guest.shell("grep -m1 '^Source' /run/locachy-installer/install.log && "
+                    "grep -q '^Source: .*, the newest, fetched now$' /run/locachy-installer/install.log && "
+                    "test \"$(git -C /run/locachy-source rev-parse HEAD)\" = \"$(cat " + target +
+                    "/usr/local/lib/locachy/source-commit)\"")
         guest.shell("test -s " + target + "/var/lib/locachy/install.json && grep -q '\"encrypted\": true' " + target +
                     "/var/lib/locachy/install.json && test -s " + target + "/efi/EFI/BOOT/BOOTX64.EFI && "
                     "test ! -e /run/locachy-installer/passphrase && test ! -e /run/locachy-installer/password && "

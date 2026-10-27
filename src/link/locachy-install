@@ -43,8 +43,8 @@ def host_preset_packages(containers, presets_dir=None):
     return pkgs
 
 
-def run(command, **kwargs):
-    return subprocess.run(command, check=True, **kwargs)
+def run(command, check=True, **kwargs):
+    return subprocess.run(command, check=check, **kwargs)
 
 
 def output(command):
@@ -1243,8 +1243,13 @@ def main():
                 fwd += ["--work-dir", args.work_dir]
             if args.cache_dir:
                 fwd += ["--cache-dir", args.cache_dir]
-            run(["unshare", "--mount", "--propagation", "private", "--pid", "--fork", "--kill-child", "--mount-proc", "--cgroup",
-                 sys.executable, os.path.realpath(__file__)] + fwd + ["--private", "--yes"])
+            done = run(["unshare", "--mount", "--propagation", "private", "--pid", "--fork", "--kill-child", "--mount-proc",
+                        "--cgroup", sys.executable, os.path.realpath(__file__)] + fwd + ["--private", "--yes"], check=False)
+            if done.returncode < 0:
+                print(f"locachy-install: the installation was stopped by signal {-done.returncode}", file=sys.stderr)
+            if done.returncode:
+                return 1  # its own last line says why
+
         else:
             install(args, root, esp, root_fs, esp_fs, level)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:

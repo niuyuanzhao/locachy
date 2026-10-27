@@ -2,8 +2,10 @@
 """Installer mount/CPU boundaries without root, mounts or package execution.
   python3 -B tools/test-install.py SCRATCH_PARENT
 """
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -240,12 +242,22 @@ class Install(unittest.TestCase):
                 "--password-file", str(secret), "--user", "boot-test"]
         with mock.patch.object(sys, "argv", argv), mock.patch.object(i.os, "geteuid", lambda: 0), \
              mock.patch.object(i, "validate", lambda r, e: (self.root, self.esp, self.root_fs, self.esp_fs)), \
-             mock.patch.object(i, "run", lambda cmd, **kw: calls.append(cmd)):
+             mock.patch.object(i, "run", lambda cmd, **kw: calls.append(cmd) or subprocess.CompletedProcess(cmd, 0)):
             self.assertEqual(i.main(), 0)
         inner = calls[-1]
         self.assertEqual(inner[0], "unshare")
         self.assertEqual(inner[inner.index("--password-file") + 1], str(secret))
         self.assertFalse(any("Locachy123" in a for a in inner))
+        # The inner run fails: its own last line said why, nothing is added;
+        # stopped by a signal, that is said.
+        for status, said in ((1, ""), (-9, "locachy-install: the installation was stopped by signal 9\n")):
+            err = io.StringIO()
+            with mock.patch.object(sys, "argv", argv), mock.patch.object(i.os, "geteuid", lambda: 0), \
+                 mock.patch.object(i, "validate", lambda r, e: (self.root, self.esp, self.root_fs, self.esp_fs)), \
+                 mock.patch.object(i, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, status)), \
+                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                self.assertEqual(i.main(), 1)
+            self.assertEqual(err.getvalue(), said)
         # Without --esp: an error, not a traceback.
         with mock.patch.object(sys, "argv", ["locachy-install", "--root", str(self.root), "--yes"]), \
              mock.patch.object(i.os, "geteuid", lambda: 0), self.assertRaises(SystemExit):

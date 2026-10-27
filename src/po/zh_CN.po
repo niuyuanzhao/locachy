@@ -5392,9 +5392,8 @@ msgid "this medium's own (updates are off)"
 msgstr "安装介质自带的（已关闭更新）"
 
 #: progs/installer.c
-#, c-format
-msgid "the newest of %s (%s), fetched when it installs"
-msgstr "%s（%s）的最新版本，开始安装时拉取"
+msgid "the newest from the repository above, fetched when it installs"
+msgstr "上面仓库的最新版本，开始安装时拉取"
 
 #: progs/installer.c
 msgid "LOCachy source"

@@ -344,7 +344,7 @@ int main(int argc, char **argv)
     assert(snapped("erased: /dev/sda1"));
     assert(snapped("erased: /dev/sda3"));
     assert(snapped("Nothing is missing."));
-    assert(snapped("the newest of https://github.com/niuyuanzhao/locachy.git (main), fetched when it installs"));
+    assert(snapped("LOCachy source") && snapped("the newest from the repository above, fetched when it installs"));
     assert(snapped("Now: this medium's own, 0123456789ab; could not fetch"));
     assert(snapped("Erase /dev/sda and install LOCachy on it?"));
     assert(snapped("Nothing was written."));
