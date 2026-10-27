@@ -1,0 +1,7 @@
+#!/bin/sh
+# Ask process 1 (init) for a clean system reboot (SIGTERM -> shut_down(RB_AUTOBOOT)).
+set -eu
+if [ "$(id -u)" -ne 0 ]; then
+    exec sudo /usr/local/bin/reboot "$@"
+fi
+exec kill -TERM 1

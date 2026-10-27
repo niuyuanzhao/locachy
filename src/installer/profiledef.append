@@ -1,0 +1,14 @@
+
+# LOCachy: a generic installation environment. The installed archiso baseline
+# owns the live kernel/initramfs and bootloader implementation.
+iso_name="locachy-installer"
+iso_label="LOCACHY_$(date --date="@${SOURCE_DATE_EPOCH:-$(date +%s)}" +%Y%m)"
+iso_publisher="LOCachy"
+iso_application="LOCachy generic x86-64 installer"
+arch="x86_64"
+buildmodes=('iso')
+# UEFI through systemd-boot (archiso's uefi.systemd-boot, configured by the
+# baseline's efiboot/): its files come from the live system's own systemd, so
+# the build host needs no GRUB. BIOS through the baseline's Syslinux.
+bootmodes=('bios.syslinux' 'uefi.systemd-boot')
+pacman_conf="pacman.conf"

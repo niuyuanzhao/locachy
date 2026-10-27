@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""The shared display's gestures, using libinput-gestures and lisgd.
+Seat owns this process group: all children inherit it and end on release.
+pyudev watches completed input-device events, before enumerating devices.
+"""
+import shlex
+import shutil
+import signal
+import subprocess
+
+OVERVIEW = "/usr/local/bin/locachy-overview"
+CONFIG = "/etc/locachy/libinput-gestures.conf"
+
+
+def stop_child(child):
+    if child.poll() is None:
+        try:
+            child.terminate()
+        except ProcessLookupError:
+            pass
+    try:
+        child.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        try:
+            child.kill()
+        except ProcessLookupError:
+            pass
+        child.wait()
+
+
+class Gestures:
+    def __init__(self, popen=subprocess.Popen, which=shutil.which):
+        self.popen = popen
+        self.touchpad_tool = which("libinput-gestures")
+        self.touchscreen_tool = which("lisgd")
+        self.touchpad = None
+        self.screens = {}
+
+    def remove(self, path):
+        item = self.screens.pop(path, None)
+        if item:
+            # Stop only lisgd itself, not an overview its command opened.
+            stop_child(item[2])
+
+    def sync(self, context):
+        if self.touchpad_tool and (self.touchpad is None or self.touchpad.poll() is not None):
+            if self.touchpad is not None:
+                self.touchpad.wait()
+            self.touchpad = self.popen([self.touchpad_tool, "-c", CONFIG], stdin=subprocess.DEVNULL)
+        if not self.touchscreen_tool:
+            return
+        devices = {}
+        for device in context.list_devices(subsystem="input"):
+            node = device.device_node
+            if node and node.startswith("/dev/input/event") and node[len("/dev/input/event"):].isdigit() and \
+                    device.get("ID_INPUT_TOUCHSCREEN") == "1":
+                # udev's initialization timestamp distinguishes unplug/replug
+                # even when both the sysfs path and event number are reused.
+                devices[device.sys_path] = (node, device.get("USEC_INITIALIZED"))
+        for path, (node, initialized, child) in list(self.screens.items()):
+            if devices.get(path) != (node, initialized) or child.poll() is not None:
+                self.remove(path)
+        for path, (node, initialized) in devices.items():
+            if path not in self.screens:
+                # lisgd uses system(): background the overview so it keeps
+                # reading gestures, including down while the overview is up.
+                command = shlex.quote(OVERVIEW)
+                child = self.popen([self.touchscreen_tool, "-d", node,
+                                    "-g", f"3,DU,*,*,R,{command} --show &",
+                                    "-g", f"3,UD,*,*,R,{command} --hide &"], stdin=subprocess.DEVNULL)
+                self.screens[path] = (node, initialized, child)
+
+    def close(self):
+        for path in list(self.screens):
+            self.remove(path)
+        if self.touchpad is not None:
+            stop_child(self.touchpad)
+            self.touchpad = None
+
+
+def run(context, monitor, stopped, popen=subprocess.Popen, which=shutil.which):
+    gestures = Gestures(popen, which)
+    monitor.filter_by(subsystem="input")
+    monitor.start()  # Subscribe before taking the initial snapshot.
+    try:
+        while not stopped():
+            gestures.sync(context)
+            if stopped():
+                break
+            monitor.poll(timeout=1)
+            # Events wake the loop; only current state decides what ends.
+            # A queued remove can belong to an older device at the same path.
+            # The timeout also reaps/restarts a tool that exited on its own.
+    finally:
+        gestures.close()
+
+
+def main():
+    import pyudev
+    stopping = False
+
+    def stop(signum, frame):
+        nonlocal stopping
+        stopping = True
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    context = pyudev.Context()
+    run(context, pyudev.Monitor.from_netlink(context, source="udev"), lambda: stopping)
+
+
+if __name__ == "__main__":
+    main()

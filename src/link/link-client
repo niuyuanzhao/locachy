@@ -1,0 +1,19 @@
+#!/bin/bash
+# link-client ADDRESS PORT: debug shell on the explicitly reserved wired port.
+# No listening service; disabled ports belong to NetworkManager in locachy-net.
+set -eu
+
+RC=/etc/locachy/rc.conf
+if ! grep -qE '^[[:space:]]*service_link=' "$RC"; then
+    exec sleep infinity
+fi
+
+dev=$(sed -n 's/^[[:space:]]*debug_link_interface="\([^"]*\)".*/\1/p' "$RC" | tail -n 1)
+[ -n "$dev" ] && [ -e "/sys/class/net/$dev" ] || {
+    echo "link-client: configure debug_link_interface in $RC" >&2
+    exit 1
+}
+[ ! -d "/sys/class/net/$dev/phy80211" ] && [ "$(cat "/sys/class/net/$dev/type")" = 1 ] || exit 1
+ip link set "$dev" up
+ip -6 addr replace fe80::230/64 dev "$dev" nodad
+exec /usr/local/lib/locachy/link-connect "$1%$dev" "$2" bash

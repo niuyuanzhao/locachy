@@ -1,0 +1,23 @@
+#!/bin/sh
+# Tailscale client service (service_tailscale, which settings adds and
+# removes with its switch): tailscaled inside the locachy-net namespace. The
+# switch installs the package after adding the service: until it is there,
+# wait for it rather than failing every 5 s.
+set -eu
+
+until command -v tailscaled >/dev/null 2>&1; do
+    sleep 2
+done
+
+mkdir -p /var/lib/tailscale /dev/net
+if [ ! -c /dev/net/tun ]; then
+    mknod /dev/net/tun c 10 200 2>/dev/null || true
+fi
+modprobe tun 2>/dev/null || true
+
+# Ensure locachy-net namespace exists before starting tailscaled
+if [ ! -e /run/netns/locachy-net ]; then
+    exit 0
+fi
+
+exec ip netns exec locachy-net tailscaled --statedir=/var/lib/tailscale

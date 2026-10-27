@@ -1,0 +1,12 @@
+[Desktop Entry]
+# view, the framebuffer programs' document viewer (rc.conf program_view):
+# what home's files and the containers' xdg-open open with it. The types are
+# those of Okular's generators (their okularApplication_*.desktop files):
+# comicbook, djvu, dvi, epub, fax, fictionbook, kimgio, markdown,
+# mobipocket, poppler, spectre, tiff, txt, xps (and zipped FictionBook,
+# which the fictionbook generator reads); of kimgio's, all but DDS, EXR and
+# HDR, which view-render does not read.
+Type=Application
+Name=Document viewer
+Exec=/usr/local/bin/view %f
+MimeType=application/x-cbz;application/x-cbr;application/x-cbt;application/x-cb7;image/vnd.djvu;application/x-dvi;application/x-gzdvi;application/x-bzdvi;application/epub+zip;image/fax-g3;image/g3fax;application/x-fictionbook+xml;application/x-zip-compressed-fb2;image/bmp;image/x-eps;image/gif;image/jp2;image/jpeg;image/x-portable-bitmap;image/x-portable-graymap;image/png;image/x-portable-pixmap;image/x-psd;image/tiff;image/x-ico;video/x-mng;image/x-pcx;image/x-rgb;image/x-tga;image/x-xbitmap;image/x-xcf;image/x-xpixmap;image/x-gzeps;image/x-bzeps;image/avif;image/heif;image/webp;image/jxl;text/markdown;application/x-mobipocket-ebook;application/pdf;application/x-gzpdf;application/x-bzpdf;application/x-wwf;application/postscript;application/x-gzpostscript;application/x-bzpostscript;text/plain;application/oxps;application/vnd.ms-xpsdocument;

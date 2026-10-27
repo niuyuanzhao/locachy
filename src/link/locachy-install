@@ -1,0 +1,1226 @@
+#!/usr/bin/env python3
+"""Build a local LOCachy target from the generic live installer.
+The caller prepares and mounts empty ext4/FAT32 filesystems. No partitioning,
+formatting, NVRAM changes or reboot is performed here.
+"""
+import argparse
+import getpass
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+_HERE_SRC = Path(__file__).resolve().parents[1]
+SOURCE = _HERE_SRC if (_HERE_SRC / "make-root.sh").is_file() else Path("/usr/local/src/locachy")
+DEFAULT_UPDATE_REPO = "https://github.com/niuyuanzhao/locachy.git"
+DEFAULT_UPDATE_BRANCH = "main"
+SOURCE_ORIGIN = "/etc/locachy/source-origin.json" # written into the live image by make-installer.sh
+sys.dont_write_bytecode = True
+
+MODULES = json.loads((SOURCE / "link/modules.json").read_text(encoding="utf-8"))
+FEATURE_PACKAGES = {k: list(v.get("packages") or []) for k, v in MODULES.items()}
+FEATURE_RC_MAP = {k: dict(v.get("rc") or {}) for k, v in MODULES.items()}
+FEATURE_RC = {k: next(iter(rc.items())) for k, rc in FEATURE_RC_MAP.items() if rc}
+
+
+def host_preset_packages(containers, presets_dir=None):
+    base = Path(presets_dir) if presets_dir else (SOURCE / "containers")
+    pkgs = []
+    for cname in containers:
+        p = base / f"{cname}.conf"
+        if not p.is_file():
+            continue
+        text = p.read_text(encoding="utf-8")
+        if re.search(r'^host="1"\s*$', text, re.M):
+            m = re.search(r'^package="([^"]+)"\s*$', text, re.M)
+            if m and m.group(1) not in pkgs:
+                pkgs.append(m.group(1))
+    return pkgs
+
+
+def run(command, **kwargs):
+    return subprocess.run(command, check=True, **kwargs)
+
+
+def output(command):
+    return subprocess.check_output(command, text=True).strip()
+
+
+def supported_levels():
+    loader = output(["/usr/lib/ld-linux-x86-64.so.2", "--help"])
+    supported = {"x86-64"}
+    supported.update(re.findall(r"(x86-64-v[234]) \(supported", loader))
+    return supported
+
+
+def cpu_level(requested):
+    supported = supported_levels()
+    if requested == "auto":
+        return next(level for level in ("x86-64-v4", "x86-64-v3", "x86-64-v2", "x86-64") if level in supported)
+    level = "x86-64" if requested == "x86-64-v1" else requested
+    if level not in supported:
+        raise ValueError("This machine cannot execute " + level)
+    return level
+
+
+def cpu_macros(march):
+    """gcc's feature macros for -march=MARCH (__AVX2__, __AES__...), as
+    make-root.sh compares them."""
+    out = output(["gcc", "-march=" + march, "-dM", "-E", "-x", "c", "/dev/null"])
+    return set(re.findall(r"^#define (__[A-Z0-9_]+__) 1$", out, re.M))
+
+
+def cpu_model(level):
+    """What gcc calls this machine's CPU (its -march=native: ivybridge,
+    znver3, ...), for the system's own builds. "native" itself when that name
+    has more than this CPU (a feature the firmware turned off, or a virtual
+    machine's CPU: skylake without SGX); the level if gcc cannot say."""
+    try:
+        out = output(["gcc", "-march=native", "-Q", "--help=target"])
+        m = re.search(r"^\s*-march=\s+(\S+)\s*$", out, re.M)
+        if not m or not valid_cpu(m.group(1)):
+            return level
+        return m.group(1) if cpu_macros(m.group(1)) <= cpu_macros("native") else "native"
+    except (OSError, subprocess.SubprocessError):
+        return level
+
+
+def valid_cpu(name):
+    return bool(re.fullmatch(r"[a-z0-9][a-z0-9._+-]{0,40}", name or ""))
+
+
+# What this machine's TPM can do for the disk (locachy-tpm status), and so
+# what to choose with encryption on: (usable, recommended, why). TPM
+# auto-unlock opens the disk at power-on with nothing typed; as it is bound
+# (TPM 1.2: PCR 0, TPM 2.0: PCRs 0+7, and LOCachy's boot image unsigned) it
+# guards a disk taken out of the machine only.
+def tpm_advice():
+    try:
+        st = json.loads(output([sys.executable, "-I", str(SOURCE / "link/locachy-tpm"), "status", "--json"]))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        st = {}
+    ver, active, sb = st.get("tpm_version", 0), st.get("tpm_active", False), st.get("secure_boot")
+    if not ver:
+        return False, "passphrase", "no TPM: a passphrase"
+    if not active:
+        return False, "passphrase", f"TPM {'1.2' if ver == 1 else '2.0'} off in the firmware: a passphrase"
+    if ver == 1:
+        return True, "passphrase", ("TPM 1.2: a passphrase recommended (TPM auto-unlock binds the firmware only, "
+                                    "with no PIN: it guards a removed disk only)")
+    return True, "passphrase", ("TPM 2.0: a passphrase recommended (TPM auto-unlock binds PCRs 0+7"
+                                + (", Secure Boot off" if not sb else "") + ", the boot image unsigned: "
+                                "it guards a removed disk only)")
+
+
+REPO_SECTIONS = ("core", "extra", "multilib")
+
+
+def repo_sections(raw):
+    chosen = parse_csv_items(raw)
+    for s in chosen:
+        if s not in REPO_SECTIONS:
+            raise ValueError(f"--repos: {s} is not one of {', '.join(REPO_SECTIONS)}")
+    return [s for s in REPO_SECTIONS if s in chosen]
+
+
+def canonical(path):
+    absolute = Path(os.path.abspath(path))
+    if absolute.resolve(strict=True) != absolute:
+        raise ValueError("Mount paths must not contain symlinks: " + str(absolute))
+    return absolute
+
+
+def filesystem(path):
+    data = json.loads(output(["findmnt", "--json", "--mountpoint", str(path),
+                              "--output", "TARGET,SOURCE,FSTYPE,OPTIONS,MAJ:MIN"]))
+    entries = data.get("filesystems", [])
+    if len(entries) != 1 or Path(entries[0]["target"]) != path:
+        raise ValueError("An explicit filesystem mount is required: " + str(path))
+    return entries[0]
+
+
+def ancestors(source):
+    return set(output(["lsblk", "--inverse", "--noheadings", "--raw", "--output", "MAJ:MIN", source]).splitlines())
+
+
+def empty_root(root):
+    for entry in root.iterdir():
+        if entry.name == "lost+found" and entry.is_dir() and not entry.is_symlink() and not any(entry.iterdir()):
+            continue
+        if entry.name == "efi" and entry.is_dir() and not entry.is_symlink():
+            continue
+        raise ValueError("Target root is not empty: " + str(entry))
+
+
+def partition_child(disk, number):
+    sep = "p" if re.search(r"[0-9]$", disk) else ""
+    return f"{disk}{sep}{number}"
+
+
+def prepare_partitions(args, passphrase=None):
+    """Partition/format target block devices when --disk or --format-root/--format-esp
+    are given, optionally wrapping root and swap in LUKS2 (locachy-crypt and
+    locachy-swap-crypt), and mount them at target_dir and target_dir/efi."""
+    if getattr(args, "disk", None):
+        disk = args.disk
+        if not disk.startswith("/dev/"):
+            raise ValueError("Disk must be a /dev/ block device: " + disk)
+        swap_gib = getattr(args, "swap_gib", 8)
+        sfdisk_script = f"label: gpt\n,512M,U\n"
+        if swap_gib and swap_gib > 0:
+            sfdisk_script += f",{int(swap_gib)}G,S\n,+,L\n"
+            esp_part, swap_part, root_part = partition_child(disk, 1), partition_child(disk, 2), partition_child(disk, 3)
+        else:
+            sfdisk_script += ",+,L\n"
+            esp_part, swap_part, root_part = partition_child(disk, 1), None, partition_child(disk, 2)
+        run(["sfdisk", "--wipe", "always", disk], input=sfdisk_script, text=True)
+        run(["udevadm", "settle"])
+    else:
+        esp_part = getattr(args, "format_esp", None)
+        root_part = getattr(args, "format_root", None)
+        swap_part = getattr(args, "format_swap", None)
+        if not esp_part or not root_part:
+            raise ValueError("Both --format-esp and --format-root are required when formatting partitions")
+
+    run(["mkfs.fat", "-F", "32", "-n", "LOCACHY_EFI", esp_part])
+    if getattr(args, "encrypt", False):
+        if not passphrase:
+            raise ValueError("A passphrase is required for LUKS2 Full Disk Encryption")
+        # As a key file (--key-file -), every byte is the key: no newline, as
+        # the boot prompt (init) and locachy-tpm give it.
+        key_input = passphrase.rstrip("\r\n")
+        run(["cryptsetup", "luksFormat", "--batch-mode", "--type", "luks2",
+             "--label", "locachy-crypt", "--key-file", "-", root_part], input=key_input, text=True)
+        run(["cryptsetup", "open", "--type", "luks", "--key-file", "-",
+             root_part, "locachy-crypt"], input=key_input, text=True)
+        root_formatting_dev = "/dev/mapper/locachy-crypt"
+        if swap_part:
+            run(["cryptsetup", "luksFormat", "--batch-mode", "--type", "luks2",
+                 "--label", "locachy-swap-crypt", "--key-file", "-", swap_part], input=key_input, text=True)
+            run(["cryptsetup", "open", "--type", "luks", "--key-file", "-",
+                 swap_part, "locachy-swap-crypt"], input=key_input, text=True)
+            swap_formatting_dev = "/dev/mapper/locachy-swap-crypt"
+        else:
+            swap_formatting_dev = None
+    else:
+        root_formatting_dev = root_part
+        swap_formatting_dev = swap_part
+
+    run(["mkfs.ext4", "-F", "-L", "locachy-root", root_formatting_dev])
+    if swap_formatting_dev:
+        run(["mkswap", "-L", "locachy-swap", swap_formatting_dev])
+
+    target = Path(getattr(args, "root", None) or "/run/locachy-install-target")
+    target.mkdir(parents=True, exist_ok=True)
+    run(["mount", root_formatting_dev, str(target)])
+    esp = target / "efi"
+    esp.mkdir(parents=True, exist_ok=True)
+    run(["mount", esp_part, str(esp)])
+    args.root = str(target)
+    args.esp = str(esp)
+    return root_formatting_dev, esp_part, swap_formatting_dev
+
+
+def parse_csv_items(raw):
+    if not raw:
+        return []
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def valid_repo_url(url):
+    return bool(url) and url.startswith(("https://", "ssh://", "git@")) and not re.search(r'[\s"\\$`]', url)
+
+
+def valid_branch(name):
+    """A branch name git accepts and that is safe as one fetch argument."""
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,127}", name or "")) and ".." not in name \
+        and "//" not in name and not name.endswith(("/", ".", ".lock"))
+
+
+def detect_source_git(source_dir=None, origin_file=SOURCE_ORIGIN):
+    """Return (remote_url, branch, head_commit) of the source: from its git
+    checkout, else from the origin the installer image recorded."""
+    src = Path(source_dir or SOURCE)
+    remote = branch = commit = ""
+
+    def git(*args):
+        try:
+            return subprocess.run(["git", "-C", str(src), *args], check=True, capture_output=True,
+                                  text=True, timeout=5).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return ""
+    commit = git("rev-parse", "HEAD")
+    if commit:
+        remote = git("remote", "get-url", "origin")
+        branch = git("symbolic-ref", "--short", "HEAD")
+    else:
+        try:
+            origin = json.loads(Path(origin_file).read_text(encoding="utf-8"))
+            remote, branch, commit = (str(origin.get(k) or "") for k in ("repo", "branch", "commit"))
+        except (OSError, ValueError, AttributeError):
+            pass
+    return (remote if valid_repo_url(remote) else DEFAULT_UPDATE_REPO,
+            branch if valid_branch(branch) else DEFAULT_UPDATE_BRANCH, commit)
+
+
+def update_source(args):
+    """(repo, branch, commit) the installed system takes updates from: what
+    was given (--update-repo, --update-branch; repo "off" disables), else
+    where this source came from."""
+    repo, branch, commit = detect_source_git()
+    want_repo = (getattr(args, "update_repo", "") or "").strip()
+    want_branch = (getattr(args, "update_branch", "") or "").strip()
+    if want_repo and want_repo != "off" and not valid_repo_url(want_repo):
+        raise ValueError("Update repository must be an https://, ssh:// or git@ URL, or off: " + want_repo)
+    if want_branch and not valid_branch(want_branch):
+        raise ValueError("Invalid update branch name: " + want_branch)
+    return want_repo or repo, want_branch or branch, commit
+
+
+def valid_hostname(name):
+    return bool(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", name or ""))
+
+
+def live_nm_connections():
+    nm_dir = Path("/etc/NetworkManager/system-connections")
+    if not nm_dir.is_dir():
+        return []
+    return sorted(p for p in nm_dir.glob("*.nmconnection") if p.is_file() and not p.is_symlink())
+
+
+# The choices and their defaults, one place for the wizard, the full-screen
+# installer (--describe-json) and the checks.
+IME_LABELS = {
+    "off": "OFF (no Rime packages)",
+    "en": "English completion only (librime + words)",
+    "zh": "Chinese Pinyin + English (librime + rime-frost)",
+}
+ESP_BYTES = 512 << 20
+# The root's least size: measured once built, a core install 4.1 GiB, the
+# default modules 5.4 GiB with 1.3 GiB of package cache;
+# the build's workspace comes on top while it runs.
+MIN_ROOT_BYTES = 16 << 30
+KEYMAPS = "/usr/share/kbd/keymaps"
+ZONEINFO = "/usr/share/zoneinfo"
+
+
+def default_features(language):
+    features = {k for k, v in MODULES.items() if v.get("default_wizard")}
+    if (language or "").startswith("zh"):
+        features.add("cjk-fonts")
+    return features
+
+
+def default_containers(features):
+    return {"foot"} if "desktop" in features else set()
+
+
+def container_presets():
+    """(name, host program) of each preset in containers/."""
+    cdir = SOURCE / "containers"
+    return [(p.stem, bool(re.search(r'^host="1"\s*$', p.read_text(encoding="utf-8"), re.M)))
+            for p in sorted(cdir.glob("*.conf"))] if cdir.is_dir() else []
+
+
+def machine_profiles():
+    """(name, description) of each machine profile, generic first."""
+    found = [("generic", "Generic PC")]
+    mdir = SOURCE / "machines"
+    for p in sorted(mdir.glob("*.conf")) if mdir.is_dir() else []:
+        m = re.search(r'^description="([^"]*)"\s*$', p.read_text(encoding="utf-8"), re.M)
+        found.append((p.stem, m.group(1) if m else p.stem))
+    return found
+
+
+def keymaps():
+    """The console keymaps kbd has (as localectl list-keymaps)."""
+    return sorted({p.name.split(".map")[0] for p in Path(KEYMAPS).rglob("*.map*")}) if Path(KEYMAPS).is_dir() else []
+
+
+def timezones():
+    """UTC and the zones of zone1970.tab, as settings lists them."""
+    zones = []
+    try:
+        for line in Path(ZONEINFO, "zone1970.tab").read_text(encoding="utf-8").splitlines():
+            fields = line.split("\t")
+            if not line.startswith("#") and len(fields) >= 3:
+                zones.append(fields[2])
+    except OSError:
+        pass
+    return ["UTC"] + sorted(zones)
+
+
+def read_secret(path):
+    """A passphrase or password file: every byte but a final newline."""
+    return Path(path).read_text(encoding="utf-8").rstrip("\r\n")
+
+
+def live_disks():
+    """MAJ:MIN of the running system's and the live medium's devices and of
+    the disks they are on: never a target."""
+    mounts = json.loads(output(["findmnt", "--json", "--list", "--output", "TARGET,SOURCE"]))
+    used = set()
+    for item in mounts.get("filesystems", []):
+        device = item.get("source", "")
+        if (item["target"] == "/" or item["target"].startswith("/run/archiso/")) and device.startswith("/dev/"):
+            used |= ancestors(device)
+    return used
+
+
+LSBLK_COLUMNS = "PATH,MAJ:MIN,TYPE,SIZE,MODEL,TRAN,RM,RO,FSTYPE,LABEL,PARTTYPENAME,MOUNTPOINTS"
+
+
+def block_devices(path=None):
+    return json.loads(output(["lsblk", "--json", "--bytes", "--tree", "--output", LSBLK_COLUMNS]
+                             + ([path] if path else []))).get("blockdevices", [])
+
+
+def in_use(device):
+    """Why DEVICE or a part of it cannot be written now (mounted, swap, an
+    open LUKS or LVM on it), or ""."""
+    def walk(node):
+        yield node
+        for child in node.get("children") or []:
+            yield from walk(child)
+    for node in walk(device):
+        points = [p for p in node.get("mountpoints") or [] if p]
+        if points:
+            return f"{node['path']} is in use ({', '.join(points)})"
+        if node is not device and node.get("type") != "part":
+            return f"{node['path']} is open ({node.get('type')}): close it first"
+    return ""
+
+
+def disks():
+    """The disks to install on: not the live medium, a loop, an optical
+    drive, zram or read-only; each with what is on it now."""
+    live = live_disks()
+    found = []
+    for d in block_devices():
+        if d.get("type") != "disk" or d.get("ro") or d["path"].startswith("/dev/zram") or d.get("maj:min") in live:
+            continue
+        found.append({"path": d["path"], "size": int(d.get("size") or 0), "model": (d.get("model") or "").strip(),
+                      "tran": d.get("tran") or "", "removable": bool(d.get("rm")), "in_use": in_use(d),
+                      "children": [{"path": c["path"], "type": c.get("type") or "", "size": int(c.get("size") or 0),
+                                    "fstype": c.get("fstype") or "", "label": c.get("label") or "",
+                                    "parttypename": c.get("parttypename") or "",
+                                    "mountpoints": [p for p in c.get("mountpoints") or [] if p]}
+                                   for c in d.get("children") or []]})
+    return found
+
+
+def check_targets(args):
+    """The block devices given, before anything is written: whole disks or
+    partitions that are not the live system's, not in use and large enough."""
+    live = live_disks()
+
+    def device(path, kind):
+        if not (path or "").startswith("/dev/"):
+            raise ValueError(f"{path}: not a /dev/ block device")
+        try:
+            dev = block_devices(path)[0]
+        except (IndexError, subprocess.SubprocessError, ValueError):
+            raise ValueError(f"{path}: no such block device")
+        if dev.get("type") != kind:
+            raise ValueError(f"{path}: not a {'whole disk' if kind == 'disk' else 'partition'}")
+        if dev.get("ro"):
+            raise ValueError(f"{path}: read-only")
+        if ancestors(path) & live:
+            raise ValueError(f"{path}: on the running system's or the live medium's disk")
+        why = in_use(dev)
+        if why:
+            raise ValueError(why)
+        return dev
+    if args.disk:
+        dev = device(args.disk, "disk")
+        need = ESP_BYTES + max(args.swap_gib, 0) * (1 << 30) + MIN_ROOT_BYTES
+        if int(dev.get("size") or 0) < need:
+            raise ValueError(f"{args.disk}: {int(dev.get('size') or 0) >> 30} GiB, at least {need >> 30} GiB are needed")
+    elif args.format_root:
+        paths = [p for p in (args.format_esp, args.format_root, args.format_swap) if p]
+        if len(set(paths)) != len(paths):
+            raise ValueError("The ESP, root and swap partitions must be different")
+        for path in paths:
+            dev = device(path, "part")
+            if path == args.format_root and int(dev.get("size") or 0) < MIN_ROOT_BYTES:
+                raise ValueError(f"{path}: the root needs at least {MIN_ROOT_BYTES >> 30} GiB")
+
+
+def check_choices(args):
+    """Every choice that the build would otherwise reject hours later."""
+    if not valid_hostname(args.hostname):
+        raise ValueError("Invalid hostname (use 1-63 letters, digits or hyphens): " + args.hostname)
+    known = keymaps()
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", args.keymap) or (known and args.keymap not in known):
+        raise ValueError("Unknown keymap: " + args.keymap)
+    if args.timezone != "auto" and (".." in args.timezone or not re.fullmatch(r"[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)*", args.timezone)
+                                    or (Path(ZONEINFO).is_dir() and not Path(ZONEINFO, args.timezone).is_file())):
+        raise ValueError("Unknown timezone: " + args.timezone)
+    for feat in parse_csv_items(args.features):
+        if feat not in MODULES:
+            raise ValueError("Unknown module: " + feat)
+    for cname in parse_csv_items(args.containers):
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}", cname):
+            raise ValueError("Invalid container name: " + cname)
+    if args.machine and args.machine not in {name for name, _ in machine_profiles()}:
+        raise ValueError("Unknown machine profile: " + args.machine)
+    if re.search(r"[:\n]", args.full_name or ""):
+        raise ValueError("The full name cannot have a colon or a line break")
+    if args.hibernate_after is not None and args.hibernate_after < 0:
+        raise ValueError("--hibernate-after: not a number of seconds")
+    if args.tpm and not args.encrypt:
+        raise ValueError("--tpm needs --encrypt: the TPM unlocks an encrypted disk")
+    for option, path in (("--luks-passphrase-file", args.luks_passphrase_file), ("--password-file", args.password_file)):
+        if path:
+            secret = read_secret(path)
+            if not secret or "\n" in secret:
+                raise ValueError(f"{option}: empty, or more than one line")
+
+
+def describe(parser):
+    """What the full-screen installer offers: choices, defaults, disks."""
+    default = parser.get_default
+    repo, branch, _ = detect_source_git()
+    try:
+        levels = sorted(supported_levels())
+        auto = cpu_level("auto")
+        model = cpu_model(auto)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        levels, auto, model = ["x86-64"], "x86-64", "x86-64"
+    try:
+        memory = int(re.search(r"^MemTotal:\s+(\d+) kB", Path("/proc/meminfo").read_text(), re.M).group(1)) * 1024
+    except (OSError, AttributeError):
+        memory = 0
+    usable, _, advice = tpm_advice()
+    return {
+        "defaults": {"user": default("user"), "hostname": default("hostname"), "keymap": default("keymap"),
+                     "timezone": default("timezone"), "swap_gib": default("swap_gib"), "level": default("level"),
+                     "cpu": default("cpu"), "repos": repo_sections(default("repos")),
+                     "update_repo": repo, "update_branch": branch, "copy_network": bool(live_nm_connections())},
+        "languages": ["en_US.UTF-8", "zh_CN.UTF-8"],
+        "levels": {"supported": levels, "auto": auto, "cpu_model": model},
+        "ime": [{"name": k, "label": v} for k, v in IME_LABELS.items()],
+        "modules": [{"name": k, "description": v.get("description", "")} for k, v in MODULES.items()],
+        "module_defaults": {lang: sorted(default_features(lang)) for lang in ("en_US.UTF-8", "zh_CN.UTF-8")},
+        "containers": [{"name": n, "host": h} for n, h in container_presets()],
+        "container_defaults": sorted(default_containers({"desktop"})),
+        "machines": [{"name": n, "description": d} for n, d in machine_profiles()],
+        "repo_sections": list(REPO_SECTIONS),
+        "keymaps": keymaps(), "timezones": timezones(),
+        "tpm": {"usable": usable, "advice": advice},
+        "network_profiles": len(live_nm_connections()),
+        "memory_bytes": memory, "esp_bytes": ESP_BYTES, "min_root_bytes": MIN_ROOT_BYTES,
+        "disks": disks(),
+    }
+
+
+def apply_customizations(args, root):
+    """Apply standard OS identity (hostname, hosts, locale.conf, vconsole.conf,
+    timezone, NTP, NetworkManager profiles), optional modules, LUKS marker and
+    selected container presets into the target root before make.sh/locachy-boot."""
+    features = parse_csv_items(getattr(args, "features", ""))
+    for feat in features:
+        if feat not in FEATURE_PACKAGES:
+            raise ValueError("Unknown feature: " + feat)
+    containers = parse_csv_items(getattr(args, "containers", ""))
+    for cname in containers:
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}", cname):
+            raise ValueError("Invalid container name: " + cname)
+    hname = (getattr(args, "hostname", "locachy") or "locachy").strip()
+    if not valid_hostname(hname):
+        raise ValueError("Invalid hostname (use 1-63 letters, digits or hyphens): " + hname)
+    kmap = (getattr(args, "keymap", "us") or "us").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", kmap):
+        raise ValueError("Invalid keymap name: " + kmap)
+    tzone = (getattr(args, "timezone", "auto") or "auto").strip()
+    if tzone != "auto":
+        if ".." in tzone or tzone.startswith("/") or not re.fullmatch(r"[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)*", tzone):
+            raise ValueError("Invalid timezone: " + tzone)
+        zroot = root / "usr/share/zoneinfo"
+        if zroot.is_dir() and not (zroot / tzone).is_file():
+            raise ValueError("Unknown timezone in zoneinfo: " + tzone)
+
+    presets_dir = root / "usr/local/src/locachy/containers"
+    host_pkgs = host_preset_packages(containers, presets_dir if presets_dir.is_dir() else None)
+    manifest_changed = False
+    manifest = root / "etc/locachy/packages"
+    if manifest.is_file():
+        existing = set(
+            line.split("#", 1)[0].strip()
+            for line in manifest.read_text().splitlines()
+            if line.split("#", 1)[0].strip()
+        )
+        added = []
+        if getattr(args, "encrypt", False) and "cryptsetup" not in existing:
+            added.append("cryptsetup")
+            existing.add("cryptsetup")
+        for feat in features:
+            for pkg in FEATURE_PACKAGES[feat]:
+                if pkg not in existing:
+                    added.append(pkg)
+                    existing.add(pkg)
+        for pkg in host_pkgs:
+            if pkg not in existing:
+                added.append(pkg)
+                existing.add(pkg)
+        if added:
+            with manifest.open("a", encoding="utf-8") as f:
+                f.write("\n# Selected during installation\n")
+                for pkg in added:
+                    f.write(pkg + "\n")
+            manifest_changed = True
+
+    if getattr(args, "encrypt", False):
+        (root / "etc/locachy/luks").write_text("1\n", encoding="utf-8")
+
+    # Standard /etc/hostname, /etc/hosts, /etc/locale.conf, /etc/vconsole.conf, /etc/localtime
+    etc = root / "etc"
+    etc.mkdir(parents=True, exist_ok=True)
+    (etc / "hostname").write_text(hname + "\n", encoding="utf-8")
+    (etc / "hosts").write_text(
+        f"# Static table lookup for hostnames.\n127.0.0.1\tlocalhost\n::1\t\tlocalhost\n127.0.1.1\t{hname}.localdomain {hname}\n",
+        encoding="utf-8",
+    )
+    eff_lang = getattr(args, "language", "en_US.UTF-8") or "en_US.UTF-8"
+    (etc / "locale.conf").write_text(f"LANG={eff_lang}\n", encoding="utf-8")
+    (etc / "vconsole.conf").write_text(f"KEYMAP={kmap}\n", encoding="utf-8")
+    lt = etc / "localtime"
+    if lt.exists() or lt.is_symlink():
+        lt.unlink()
+    lt.symlink_to("/usr/share/zoneinfo/" + ("UTC" if tzone == "auto" else tzone))
+
+    if getattr(args, "copy_network", False):
+        src_conns = live_nm_connections()
+        if src_conns:
+            dst_nm = etc / "NetworkManager/system-connections"
+            dst_nm.mkdir(parents=True, exist_ok=True)
+            for cf in src_conns:
+                dest_cf = dst_nm / cf.name
+                shutil.copyfile(cf, dest_cf)
+                os.chmod(dest_cf, 0o600)
+
+    rc = root / "etc/locachy/rc.conf"
+    lines = [s for s in rc.read_text().splitlines()
+             if not s.startswith(("service_link=", "debug_link_interface=", "login_skip=",
+                                  "language=", "update_repo=", "update_branch=", "machine=", "keymap="))]
+    if tzone != "auto":
+        lines = [s for s in lines if not s.startswith("service_timezone=")]
+    if getattr(args, "no_ntp", False):
+        lines = [s for s in lines if not s.startswith("service_ntp=")]
+    if kmap != "us":
+        lines.append(f'keymap="{kmap}"')
+    mach = getattr(args, "machine", "") or ""
+    if mach and mach != "generic":
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}", mach):
+            raise ValueError("Invalid machine profile name: " + mach)
+        lines.append(f'machine="{mach}"')
+    repo_url, branch, detected_commit = update_source(args)
+    lines.append(f'update_repo="{repo_url}"')
+    if branch != DEFAULT_UPDATE_BRANCH:
+        lines.append(f'update_branch="{branch}"')
+    if detected_commit and re.fullmatch(r"[0-9a-f]{40}", detected_commit):
+        lib_dir = root / "usr/local/lib/locachy"
+        lib_dir.mkdir(parents=True, exist_ok=True)
+        (lib_dir / "source-commit").write_text(detected_commit + "\n", encoding="utf-8")
+    lang = getattr(args, "language", "")
+    if lang and lang not in ("en_US.UTF-8", "C.UTF-8"):
+        lines.append(f'language="{lang}"')
+    if getattr(args, "login_skip", False):
+        lines.append('login_skip="1"')
+    if getattr(args, "hibernate_after", None) is not None:
+        lines = [s for s in lines if not s.startswith("hibernate_after=")]
+        lines.insert(0, f'hibernate_after="{int(args.hibernate_after)}"')
+    for feat in features:
+        for k, v in FEATURE_RC_MAP.get(feat, {}).items():
+            lines = [s for s in lines if not s.startswith(k + "=")]
+            lines.append(f'{k}="{v}"')
+    rc.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    conf_dir = root / "etc/locachy/containers"
+    conf_dir.mkdir(parents=True, exist_ok=True)
+    for cname in containers:
+        preset = presets_dir / f"{cname}.conf"
+        if preset.is_file():
+            shutil.copyfile(preset, conf_dir / f"{cname}.conf")
+        else:
+            (conf_dir / f"{cname}.conf").write_text(
+                f'package="{cname}"\nextras=""\ncommand="/usr/bin/{cname}"\narguments=""\nnetwork="1"\ndirectories=""\n',
+                encoding="utf-8"
+            )
+    return manifest_changed
+
+
+def validate(root_path, esp_path):
+    root = canonical(root_path)
+    if root == Path("/") or root in (Path("/boot"), Path("/efi")) or root.is_relative_to(Path("/run/archiso")) or SOURCE.is_relative_to(root):
+        raise ValueError("The running installation environment cannot be the target")
+    esp = canonical(esp_path)
+    if esp != root / "efi":
+        raise ValueError("The ESP must be mounted at TARGET_ROOT/efi")
+    root_fs, esp_fs = filesystem(root), filesystem(esp)
+    if os.stat(root).st_dev == os.stat("/").st_dev:
+        raise ValueError("The target is a bind mount of the running root filesystem")
+    if root_fs["fstype"] != "ext4" or esp_fs["fstype"] != "vfat":
+        raise ValueError("Target root must be ext4 and ESP must be FAT32 (vfat)")
+    for item in (root_fs, esp_fs):
+        if "rw" not in item["options"].split(",") or not item["source"].startswith("/dev/"):
+            raise ValueError("Writable block-device mounts are required")
+    if root_fs["maj:min"] == esp_fs["maj:min"]:
+        raise ValueError("Root and ESP must be different filesystems")
+    if output(["blkid", "-p", "-s", "LABEL", "-o", "value", root_fs["source"]]) != "locachy-root":
+        raise ValueError("The prepared ext4 root must have label locachy-root")
+    esp_version = output(["blkid", "-p", "-s", "VERSION", "-o", "value", esp_fs["source"]])
+    if esp_version != "FAT32":
+        raise ValueError("The ESP must be FAT32")
+    empty_root(root)
+    if any(esp.iterdir()):
+        raise ValueError("The ESP must be empty; no existing boot files are overwritten")
+    mounts = json.loads(output(["findmnt", "--json", "--list", "--output", "TARGET,SOURCE,FSTYPE,MAJ:MIN"]))
+    target_ids = {root_fs["maj:min"], esp_fs["maj:min"]}
+    target_disks = ancestors(root_fs["source"]) | ancestors(esp_fs["source"])
+    for item in mounts.get("filesystems", []):
+        where = Path(item["target"])
+        if where in (root, esp):
+            continue
+        if item.get("maj:min") in target_ids:
+            raise ValueError("Target filesystem is also mounted at " + str(where))
+        if where.is_relative_to(root):
+            raise ValueError("Unexpected nested mount below target: " + str(where))
+        if where == Path("/") or str(where).startswith("/run/archiso/"):
+            device = item.get("source", "")
+            if device.startswith("/dev/") and target_disks & ancestors(device):
+                raise ValueError("A target disk is used by the running system or live medium")
+    return root, esp, root_fs, esp_fs
+
+
+def effective_ime(args):
+    if getattr(args, "no_ime", False):
+        return "off"
+    choice = getattr(args, "ime", "auto") or "auto"
+    if choice == "auto":
+        return "zh" if (getattr(args, "language", "") or "").startswith("zh") else "off"
+    return choice
+
+
+def install(args, root, esp, root_fs, esp_fs, level):
+    # A private mount namespace keeps the original ESP mount intact for the
+    # live shell, while no build or package script can reach it through root.
+    saved = Path(tempfile.mkdtemp(prefix="locachy-install-esp-", dir="/run"))
+    run(["mount", "--bind", str(esp), str(saved)])
+    try:
+        run(["umount", str(esp)])
+        work = Path(args.work_dir).absolute() if args.work_dir else root / ".locachy-installer"
+        cache = Path(args.cache_dir).absolute() if args.cache_dir else root / "var/cache/pacman/pkg"
+        for path in (work, cache):
+            if path == Path("/") or path == root or path.is_relative_to(esp):
+                raise ValueError("Work/cache directories must not be the root or ESP")
+        # The shared builder creates target-local scratch only after checking
+        # the empty root; do not consume the live RAM overlay for compilation.
+        ime_mode = effective_ime(args)
+        chosen_features = parse_csv_items(getattr(args, "features", ""))
+        chosen_containers = parse_csv_items(getattr(args, "containers", ""))
+        extra_pkgs = []
+        if getattr(args, "encrypt", False):
+            extra_pkgs.append("cryptsetup")
+        for hp in host_preset_packages(chosen_containers):
+            if hp not in extra_pkgs:
+                extra_pkgs.append(hp)
+        env = dict(
+            os.environ,
+            LOCACHY_INSTALLER="1",
+            WITH_IME="0" if ime_mode == "off" else ime_mode,
+            WITH_FEATURES=",".join(chosen_features),
+            WITH_EXTRA_PACKAGES=",".join(extra_pkgs),
+            WITH_REPOS=",".join(repo_sections(getattr(args, "repos", ",".join(REPO_SECTIONS)))),
+        )
+        cpu = getattr(args, "cpu", "auto")
+        cpu = cpu if cpu != "auto" else cpu_model(level)
+        # The live system's mirror lists ranked from here first: the build
+        # takes them, and so does the installed system.
+        if not getattr(args, "no_rank_mirrors", False):
+            print("Ranking the mirrors (reflector, rate-mirrors)...", flush=True)
+            if subprocess.run([sys.executable, "-I", str(SOURCE / "link/locachy-repos"), "rank",
+                               "--cachyos-levels", "v3,v4"]).returncode != 0:
+                print("Some mirror lists were not ranked; they stay as they are.", flush=True)
+        command = ["bash", str(SOURCE / "make-root.sh"), "--target-root", str(root),
+                   "--work-dir", str(work), "--cache-dir", str(cache), "--cpu", cpu, level]
+        build_log = saved.parent / (saved.name + ".build.log")
+        with build_log.open("w") as log:
+            # tee preserves progress in the live console and the failure log.
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, text=True)
+            for line in process.stdout:
+                print(line, end="", flush=True)
+                log.write(line)
+            if process.wait() != 0:
+                raise RuntimeError("Target build failed; see " + str(build_log))
+        log_copy = root / "var/log/locachy/install-build.log"
+        log_copy.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(build_log, log_copy)
+        build_log.unlink()
+        useradd_cmd = ["arch-chroot", str(root), "useradd", "--uid", "1000", "--create-home",
+                       "--groups", "wheel,video,audio", "--shell", "/bin/bash"]
+        if getattr(args, "full_name", ""):
+            useradd_cmd.extend(["--comment", args.full_name])
+        useradd_cmd.append(args.user)
+        run(useradd_cmd)
+        if getattr(args, "password_file", None):
+            args.password_stdin = read_secret(args.password_file)
+        if getattr(args, "password_stdin", None) is not None:
+            run(["arch-chroot", str(root), "chpasswd"],
+                input=f"{args.user}:{args.password_stdin}\n", text=True)
+        else:
+            print("Set the installed user's password (standard passwd; not recorded in the build log).", flush=True)
+            run(["arch-chroot", str(root), "passwd", args.user])
+        run(["arch-chroot", str(root), "passwd", "-l", "root"])
+        if apply_customizations(args, root):
+            run(["arch-chroot", str(root), "/usr/local/bin/locachy-pkg", "sync"])
+        run(["arch-chroot", str(root), "sh", "/usr/local/src/locachy/make.sh", level, cpu])
+        if getattr(args, "encrypt", False) and getattr(args, "tpm", False):
+            if getattr(args, "luks_passphrase_file", None):
+                pw = read_secret(args.luks_passphrase_file) + "\n"
+                run(["arch-chroot", str(root), "/usr/local/bin/locachy-tpm", "enroll", "--passphrase-stdin"],
+                    input=pw, text=True)
+            else:
+                print("Bind LUKS2 disk auto-unlock to this computer's TPM chip:", flush=True)
+                run(["arch-chroot", str(root), "/usr/local/bin/locachy-tpm", "enroll"])
+        boot_cmd = ["arch-chroot", str(root), "/usr/local/bin/locachy-boot"]
+        if getattr(args, "encrypt", False):
+            boot_cmd.append("--luks")
+        run(boot_cmd)
+        run(["arch-chroot", str(root), "/usr/local/bin/locachy-pkg", "status"])
+        (root / "etc/resolv.conf").unlink(missing_ok=True)
+        (root / "etc/resolv.conf").touch()
+        # Recheck block identities before the first boot-file write. No NVRAM
+        # entry is needed: use the standard removable-media fallback path.
+        if filesystem(saved)["maj:min"] != esp_fs["maj:min"] or filesystem(root)["maj:min"] != root_fs["maj:min"]:
+            raise RuntimeError("Target mount identities changed during installation")
+        if any(saved.iterdir()):
+            raise RuntimeError("The target ESP changed during the build; left untouched")
+        # The unified kernel image (locachy-boot): the firmware starts it from
+        # the fallback path; EFI/locachy keeps it for locachy-boot's updates.
+        image = root / "usr/local/lib/locachy/boot/locachy.efi"
+        if not image.is_file():
+            raise RuntimeError("The completed target has no boot image (locachy.efi)")
+        destination = saved / "EFI/locachy"
+        destination.mkdir(parents=True)
+        shutil.copyfile(image, destination / "locachy.efi")
+        fallback = saved / "EFI/BOOT"
+        fallback.mkdir()
+        shutil.copyfile(image, fallback / "BOOTX64.EFI")
+        os.sync()
+        state = root / "var/lib/locachy/install.json"
+        repo, branch, _ = update_source(args)
+        state.write_text(json.dumps({"cpu_level": level, "cpu": cpu,
+                                     "repos": repo_sections(getattr(args, "repos", ",".join(REPO_SECTIONS))),
+                                     "ime": effective_ime(args), "user": args.user,
+                                     "hostname": getattr(args, "hostname", "locachy") or "locachy",
+                                     "timezone": getattr(args, "timezone", "auto") or "auto",
+                                     "keymap": getattr(args, "keymap", "us") or "us",
+                                     "encrypted": bool(getattr(args, "encrypt", False)),
+                                     "language": getattr(args, "language", "en_US.UTF-8") or "en_US.UTF-8",
+                                     "features": parse_csv_items(getattr(args, "features", "")),
+                                     "containers": parse_csv_items(getattr(args, "containers", "")),
+                                     "update_repo": repo, "update_branch": branch,
+                                     "root": root_fs["source"], "esp": esp_fs["source"],
+                                     "completed": time.strftime("%Y-%m-%d %H:%M:%S")}, indent=2) + "\n")
+        os.sync()
+        print("Installation completed. Packages for " + level + ", own builds for " + cpu +
+              ". No reboot was requested.", flush=True)
+    finally:
+        run(["umount", str(saved)])
+        saved.rmdir()
+
+
+def interactive_wizard(args):
+    """Interactive menu-driven installer for partitioning, LUKS2 encryption,
+    CPU level, user/security settings, optional system modules and containers."""
+    all_features = list(MODULES.keys())
+    all_containers = [name for name, _ in container_presets()]
+    tpm = None # tpm_advice(), once encryption is on
+    if getattr(args, "minimal", False):
+        features = set()
+    elif args.features:
+        features = set(parse_csv_items(args.features))
+    else:
+        features = default_features(args.language)
+    if args.containers:
+        containers = set(parse_csv_items(args.containers))
+    elif getattr(args, "minimal", False):
+        containers = set()
+    else:
+        containers = default_containers(features)
+
+    while True:
+        print("\n=== LOCachy Interactive Installer ===")
+        print(f"  1. Target disk / mounts : " + (
+            f"auto-partition {args.disk} (swap {args.swap_gib}G)" if args.disk else
+            f"format ESP={args.format_esp} Root={args.format_root} Swap={args.format_swap or 'none'}" if args.format_root else
+            f"mounted Root={args.root or '(not set)'} ESP={args.esp or '(not set)'}"
+        ))
+        fde_desc = ("ON (LUKS2 + TPM auto-unlock: guards a removed disk only)" if args.tpm
+                    else "ON (LUKS2 passphrase)") if args.encrypt else "OFF"
+        if args.encrypt and tpm is None:
+            tpm = tpm_advice()
+        print(f"  2. Full Disk Encryption : {fde_desc}")
+        if args.encrypt:
+            print(f"                            {tpm[2]}")
+        detected = cpu_level("auto")
+        print(f"  3. CPU                  : packages {args.level} (detected: {detected}); own builds "
+              + (f"{cpu_model(detected)} (detected)" if args.cpu == "auto" else args.cpu))
+        print(f"  4. Language & keymap    : {args.language}, keymap={args.keymap}")
+        print(f"  5. Host, user & lock    : host={args.hostname}, user={args.user}"
+              + (f" ({args.full_name})" if getattr(args, "full_name", "") else "")
+              + f", boot lock={'OFF' if args.login_skip else 'ON'}")
+        print(f"  6. Input method         : {IME_LABELS[effective_ime(args)]}")
+        print(f"  7. Optional modules     : {', '.join(sorted(features)) or 'none (minimal core)'}")
+        print(f"  8. Containers/host apps : {', '.join(sorted(containers)) or 'none'}")
+        print(f"  9. Machine profile      : {args.machine or 'generic PC'}")
+        print(f" 10. Timezone, NTP & Wi-Fi: tz={args.timezone}, ntp={'OFF' if args.no_ntp else 'ON'}, "
+              f"copy live Wi-Fi={'ON' if args.copy_network else 'OFF'} ({len(live_nm_connections())} profile(s))")
+        repo, branch, _ = update_source(args)
+        print(f" 11. Updates from         : " + ("off (no source updates)" if repo == "off" else f"{repo}, branch {branch}"))
+        print(f" 12. Repositories         : {', '.join(repo_sections(args.repos)) or 'none'}; mirrors "
+              + ("kept as they are" if args.no_rank_mirrors else "ranked from here first"))
+        print("  i. Start installation")
+        print("  q. Cancel")
+        choice = input("Choose [1-12, i, q]: ").strip().lower()
+        if choice == "q":
+            return False
+        elif choice == "1":
+            mode = input("Partition mode: [a]uto whole disk, [p]ick partitions to format, [m]ounted paths [a/p/m]: ").strip().lower()
+            if mode == "a":
+                subprocess.run(["lsblk", "-d", "-o", "NAME,SIZE,MODEL,TYPE"])
+                args.disk = input("Whole disk to partition (e.g. /dev/sda or /dev/nvme0n1): ").strip()
+                sg = input(f"Swap size in GiB for hibernation [{args.swap_gib}]: ").strip()
+                if sg.isdigit():
+                    args.swap_gib = int(sg)
+                args.format_esp = args.format_root = args.format_swap = None
+            elif mode == "p":
+                subprocess.run(["lsblk", "-o", "NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT"])
+                args.disk = None
+                args.format_esp = input("ESP partition to format FAT32 (e.g. /dev/sda1): ").strip()
+                args.format_root = input("Root partition to format ext4/LUKS2 (e.g. /dev/sda2): ").strip()
+                args.format_swap = input("Swap partition to format (optional, Enter for none): ").strip() or None
+            else:
+                args.disk = args.format_esp = args.format_root = args.format_swap = None
+                args.root = input("Mounted empty ext4 root (e.g. /mnt): ").strip()
+                args.esp = input("Mounted empty FAT32 ESP (e.g. /mnt/efi): ").strip()
+        elif choice == "2":
+            # off, then a passphrase, then a passphrase and TPM auto-unlock
+            # (that one only on request, and only with a TPM that is on:
+            # see tpm_advice)
+            tpm = tpm or tpm_advice()
+            if not args.encrypt:
+                args.encrypt = True
+                args.tpm = False
+            elif not args.tpm and tpm[0]:
+                args.tpm = True
+            else:
+                args.encrypt = args.tpm = False
+        elif choice == "3":
+            lvl = input("Packages' CPU level [auto / x86-64-v1 / x86-64-v2 / x86-64-v3 / x86-64-v4]: ").strip()
+            if lvl in ("auto", "x86-64", "x86-64-v1", "x86-64-v2", "x86-64-v3", "x86-64-v4"):
+                args.level = lvl
+            cm = input(f"Own builds' CPU (gcc -march: auto = this CPU, or a name) [{args.cpu}]: ").strip()
+            if cm == "auto" or valid_cpu(cm):
+                args.cpu = cm
+        elif choice == "4":
+            sub = input(f"[l] toggle language ({args.language}), [k] set keyboard layout ({args.keymap}) [l/k]: ").strip().lower() or "l"
+            if sub == "k":
+                km = input(f"Keyboard layout (e.g. us, dvorak, colemak, gb, de, fr, jp) [{args.keymap}]: ").strip()
+                if km and re.fullmatch(r"[A-Za-z0-9._-]+", km):
+                    args.keymap = km
+            else:
+                args.language = "zh_CN.UTF-8" if args.language == "en_US.UTF-8" else "en_US.UTF-8"
+                if args.language.startswith("zh"):
+                    features.add("cjk-fonts")
+        elif choice == "5":
+            hn = input(f"Hostname [{args.hostname}]: ").strip()
+            if hn:
+                if valid_hostname(hn):
+                    args.hostname = hn
+                else:
+                    print("Invalid hostname (use 1-63 letters, digits or hyphens).")
+            u = input(f"User name [{args.user}]: ").strip()
+            if u:
+                args.user = u
+            fn = input(f"Full name (optional) [{args.full_name}]: ").strip()
+            if fn or args.full_name:
+                args.full_name = fn
+            lk = input("Ask for password at boot? [Y/n]: ").strip().lower()
+            args.login_skip = lk == "n"
+        elif choice == "6":
+            args.no_ime = False
+            cur = effective_ime(args)
+            args.ime = "en" if cur == "off" else "zh" if cur == "en" else "off"
+            if args.ime == "zh":
+                features.add("cjk-fonts")
+        elif choice == "7":
+            print("\nOptional system modules:")
+            for idx, m in enumerate(all_features, 1):
+                mark = "x" if m in features else " "
+                print(f"  [{mark}] {idx:2d}. {m:<11s} {MODULES[m].get('description', '')}")
+            t = input("Toggle by number/name (comma-separated), or 'all' / 'none': ").strip().lower()
+            if t in ("none", "minimal"):
+                features.clear()
+            elif t == "all":
+                features = set(all_features)
+            else:
+                for tok in parse_csv_items(t):
+                    name = all_features[int(tok) - 1] if tok.isdigit() and 1 <= int(tok) <= len(all_features) else tok
+                    if name in all_features:
+                        if name in features:
+                            features.remove(name)
+                        else:
+                            features.add(name)
+            args.features = ",".join(sorted(features))
+        elif choice == "8":
+            print("\nAvailable container & host app presets:")
+            for idx, c in enumerate(all_containers, 1):
+                mark = "x" if c in containers else " "
+                print(f"  [{mark}] {idx:2d}. {c}")
+            t = input("Toggle by number/name (comma-separated), or 'all' / 'none': ").strip().lower()
+            if t == "none":
+                containers.clear()
+            elif t == "all":
+                containers = set(all_containers)
+            else:
+                for tok in parse_csv_items(t):
+                    name = all_containers[int(tok) - 1] if tok.isdigit() and 1 <= int(tok) <= len(all_containers) else tok
+                    if name in all_containers:
+                        if name in containers:
+                            containers.remove(name)
+                        else:
+                            containers.add(name)
+            args.containers = ",".join(sorted(containers))
+        elif choice == "9":
+            print("Available machine profiles: " + ", ".join(name for name, _ in machine_profiles()))
+            m = input("Machine profile [generic]: ").strip() or "generic"
+            args.machine = "" if m == "generic" else m
+        elif choice == "10":
+            tz = input(f"Timezone ('auto' for network GeoIP, or Region/City e.g. Asia/Shanghai, America/New_York, UTC) [{args.timezone}]: ").strip()
+            if tz:
+                args.timezone = tz
+            nt = input(f"Enable NTP network clock sync? [{'Y/n' if not args.no_ntp else 'y/N'}]: ").strip().lower()
+            if nt in ("y", "yes"):
+                args.no_ntp = False
+            elif nt in ("n", "no"):
+                args.no_ntp = True
+            cn = input(f"Copy live Wi-Fi / NetworkManager profiles to installed system? [{'Y/n' if args.copy_network else 'y/N'}]: ").strip().lower()
+            if cn in ("y", "yes"):
+                args.copy_network = True
+            elif cn in ("n", "no"):
+                args.copy_network = False
+        elif choice == "11":
+            rp = input(f"Git repository for LOCachy source updates ('off' disables) [{repo}]: ").strip()
+            if rp and rp != "off" and not valid_repo_url(rp):
+                print("Not an https://, ssh:// or git@ URL.")
+            elif rp:
+                args.update_repo = rp
+            br = input(f"Branch to follow [{branch}]: ").strip()
+            if br and not valid_branch(br):
+                print("Invalid branch name.")
+            elif br:
+                args.update_branch = br
+        elif choice == "12":
+            on = repo_sections(args.repos)
+            t = input(f"Toggle sections (comma-separated: {', '.join(REPO_SECTIONS)}; Enter keeps) [{','.join(on)}]: ").strip().lower()
+            for tok in parse_csv_items(t):
+                if tok in REPO_SECTIONS:
+                    on = [x for x in on if x != tok] if tok in on else on + [tok]
+            args.repos = ",".join(x for x in REPO_SECTIONS if x in on)
+            rk = input(f"Rank the mirrors before building? [{'Y/n' if not args.no_rank_mirrors else 'y/N'}]: ").strip().lower()
+            if rk in ("y", "yes"):
+                args.no_rank_mirrors = False
+            elif rk in ("n", "no"):
+                args.no_rank_mirrors = True
+        elif choice == "i":
+            args.features = ",".join(sorted(features))
+            args.containers = ",".join(sorted(containers))
+            return True
+
+
+def make_parser():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root")
+    parser.add_argument("--esp")
+    parser.add_argument("--disk", help="auto-partition this disk (GPT: ESP + swap + root)")
+    parser.add_argument("--swap-gib", type=int, default=8, help="swap size in GiB when --disk is used")
+    parser.add_argument("--format-esp", help="format this partition as FAT32 ESP")
+    parser.add_argument("--format-root", help="format this partition as ext4 (or LUKS2+ext4) locachy-root")
+    parser.add_argument("--format-swap", help="format this partition as swap (or LUKS2+swap) locachy-swap")
+    parser.add_argument("--encrypt", action="store_true", help="encrypt root (and swap) with LUKS2")
+    parser.add_argument("--tpm", action="store_true", help="bind LUKS2 auto-unlock to TPM 2.0 or TPM 1.2 (unlocks into boot lock screen)")
+    parser.add_argument("--luks-passphrase-file", help="file holding the LUKS2 passphrase")
+    parser.add_argument("--password-file", help="file holding the installed user's password (else passwd asks)")
+    parser.add_argument("--level", default="auto", choices=("auto", "x86-64", "x86-64-v1", "x86-64-v2", "x86-64-v3", "x86-64-v4"),
+                        help="the packages' CPU level (the repositories stacked for it)")
+    parser.add_argument("--cpu", default="auto",
+                        help="what the system's own builds are for (gcc -march): auto, this CPU's model; or a name")
+    parser.add_argument("--repos", default="core,extra,multilib",
+                        help="the repositories' sections used, in every layer (core,extra,multilib)")
+    parser.add_argument("--no-rank-mirrors", action="store_true",
+                        help="do not rank the mirror lists (reflector, rate-mirrors) before building")
+    parser.add_argument("--language", default="en_US.UTF-8", choices=("en_US.UTF-8", "zh_CN.UTF-8"))
+    parser.add_argument("--ime", default="auto", choices=("auto", "off", "en", "zh"),
+                        help="input method packages: off (default for English), en (librime+words), zh (rime-frost)")
+    parser.add_argument("--no-ime", action="store_true", help="same as --ime off")
+    parser.add_argument("--login-skip", action="store_true", help="do not lock the screen at boot")
+    parser.add_argument("--hibernate-after", type=int, help="seconds asleep with the lid closed before hibernation (on mains power too)")
+    parser.add_argument("--features", default="",
+                        help="comma-separated optional modules (" + ",".join(MODULES.keys()) + ")")
+    parser.add_argument("--minimal", action="store_true",
+                        help="start the wizard with no optional modules or containers preselected")
+    parser.add_argument("--containers", default="", help="comma-separated container presets to add (foot,code,edge,firefox,...)")
+    parser.add_argument("--machine", default="", help="hardware profile from machines/ (e.g. x230-agan; default: generic PC)")
+    parser.add_argument("--update-repo", default="",
+                        help="Git URL for LOCachy source updates, or off (default: where this source came from, "
+                             "else github.com/niuyuanzhao/locachy)")
+    parser.add_argument("--update-branch", default="",
+                        help="branch of the update repository to follow (default: this source's branch, else main)")
+    parser.add_argument("--hostname", default="locachy", help="system hostname (/etc/hostname and /etc/hosts)")
+    parser.add_argument("--keymap", default="us", help="keyboard layout (e.g. us, dvorak, colemak, gb, de, fr, jp)")
+    parser.add_argument("--timezone", default="auto",
+                        help="IANA timezone (e.g. Asia/Shanghai, America/New_York, UTC) or 'auto' for GeoIP")
+    parser.add_argument("--no-ntp", action="store_true", help="disable automatic NTP network time sync")
+    parser.add_argument("--copy-network", dest="copy_network", action="store_true", default=None,
+                        help="copy live /etc/NetworkManager/system-connections into the installed system")
+    parser.add_argument("--no-copy-network", dest="copy_network", action="store_false")
+    parser.add_argument("--user", default="user")
+    parser.add_argument("--full-name", default="", help="optional display name for the installed user")
+    parser.add_argument("--work-dir", help="build workspace; default TARGET_ROOT/.locachy-installer")
+    parser.add_argument("--cache-dir", help="package cache; default TARGET_ROOT/var/cache/pacman/pkg")
+    parser.add_argument("--wizard", action="store_true", help="run the interactive configuration wizard")
+    parser.add_argument("--yes", action="store_true", help="confirm the explicitly supplied empty target mounts")
+    parser.add_argument("--check", action="store_true", help="validate and show targets without writing")
+    parser.add_argument("--describe-json", action="store_true",
+                        help="print the choices, their defaults and the disks as JSON, and exit")
+    parser.add_argument("--private", action="store_true", help=argparse.SUPPRESS)
+    return parser
+
+
+def main():
+    parser = make_parser()
+    args = parser.parse_args()
+    if args.describe_json:
+        print(json.dumps(describe(parser), indent=1))
+        return 0
+    if args.copy_network is None:
+        args.copy_network = bool(live_nm_connections())
+    if os.geteuid() != 0:
+        parser.error("Run from the live installer as root")
+    if (args.wizard or (not args.root and not args.esp and not args.disk and not args.format_root)) and not args.private:
+        if not interactive_wizard(args):
+            print("Nothing changed.")
+            return 0
+    if not args.root and not args.disk and not args.format_root:
+        parser.error("Specify --root and --esp, --disk, --format-root/--format-esp, or --wizard")
+    if not args.disk and not args.format_root and not (args.root and args.esp):
+        parser.error("--root and --esp go together")
+    if not args.disk and bool(args.format_root) != bool(args.format_esp):
+        parser.error("--format-root and --format-esp go together")
+    if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,30}", args.user) or args.user in ("root", "locachy-builder"):
+        parser.error("Invalid installed user name")
+    if args.cpu != "auto" and not valid_cpu(args.cpu):
+        parser.error("--cpu: not a CPU name (gcc -march)")
+    if args.tpm and args.login_skip:
+        parser.error("--tpm with --login-skip: the TPM opens the disk at power-on, so the lock at boot must stay")
+    if args.tpm and not args.private and not tpm_advice()[0]:
+        parser.error("--tpm: " + tpm_advice()[2])
+    try:
+        update_source(args)
+        repo_sections(args.repos)
+        if not args.private:
+            check_choices(args)
+            check_targets(args)
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        parser.error(str(e))
+    try:
+        level = cpu_level(args.level)
+        if args.check and (args.disk or args.format_root):
+            # --check writes nothing: what would be partitioned and formatted.
+            print("Would " + (f"partition {args.disk} (all of it) and format it" if args.disk else
+                              "format " + ", ".join(p for p in (args.format_esp, args.format_root, args.format_swap) if p)) +
+                  ("; LUKS2" + (" + TPM" if args.tpm else "") if args.encrypt else "") +
+                  f"; CPU {level}, own builds for {args.cpu}", flush=True)
+            return 0
+        if not args.private and (args.disk or args.format_root):
+            passphrase = None
+            if args.encrypt:
+                if args.luks_passphrase_file:
+                    passphrase = read_secret(args.luks_passphrase_file)
+                else:
+                    p1 = getpass.getpass("LUKS2 disk encryption passphrase: ")
+                    p2 = getpass.getpass("Confirm LUKS2 passphrase: ")
+                    if not p1 or p1 != p2:
+                        raise ValueError("LUKS2 passphrases did not match or were empty")
+                    passphrase = p1
+            if not args.yes and input("Type INSTALL to partition/format and install LOCachy: ") != "INSTALL":
+                print("Nothing changed.")
+                return 0
+            prepare_partitions(args, passphrase)
+            args.yes = True
+        root, esp, root_fs, esp_fs = validate(args.root, args.esp)
+        print("Root: " + root_fs["source"] + " at " + str(root), flush=True)
+        print("ESP:  " + esp_fs["source"] + " at " + str(esp), flush=True)
+        print("Target CPU: " + level + "; input method: " + effective_ime(args) +
+              "; encryption: " + ("LUKS2" + (" + TPM" if args.tpm else "") if args.encrypt else "off"), flush=True)
+        if args.encrypt and not args.private:
+            print("TPM: " + tpm_advice()[2], flush=True)
+        if args.check:
+            return 0
+        if not args.private:
+            if not args.yes and input("Type INSTALL to build into these empty filesystems: ") != "INSTALL":
+                print("Nothing changed.")
+                return 0
+            fwd = []
+            for k, v in (("--root", str(root)), ("--esp", str(esp)), ("--level", args.level),
+                         ("--cpu", args.cpu), ("--repos", args.repos),
+                         ("--language", args.language), ("--ime", effective_ime(args)), ("--user", args.user),
+                         ("--full-name", args.full_name), ("--hostname", args.hostname), ("--keymap", args.keymap),
+                         ("--timezone", args.timezone),
+                         ("--features", args.features), ("--containers", args.containers),
+                         ("--machine", args.machine), ("--update-repo", args.update_repo),
+                         ("--update-branch", args.update_branch)):
+                if v:
+                    fwd += [k, v]
+            fwd.append("--copy-network" if args.copy_network else "--no-copy-network")
+            if args.no_ntp:
+                fwd.append("--no-ntp")
+            if args.no_rank_mirrors:
+                fwd.append("--no-rank-mirrors")
+            if args.no_ime:
+                fwd.append("--no-ime")
+            if args.login_skip:
+                fwd.append("--login-skip")
+            if args.encrypt:
+                fwd.append("--encrypt")
+            if args.tpm:
+                fwd.append("--tpm")
+            if args.luks_passphrase_file:
+                fwd += ["--luks-passphrase-file", args.luks_passphrase_file]
+            if args.password_file:
+                fwd += ["--password-file", args.password_file]
+            if args.hibernate_after is not None:
+                fwd += ["--hibernate-after", str(args.hibernate_after)]
+            if args.work_dir:
+                fwd += ["--work-dir", args.work_dir]
+            if args.cache_dir:
+                fwd += ["--cache-dir", args.cache_dir]
+            run(["unshare", "--mount", "--propagation", "private", "--pid", "--fork", "--kill-child", "--mount-proc", "--cgroup",
+                 sys.executable, os.path.realpath(__file__)] + fwd + ["--private", "--yes"])
+        else:
+            install(args, root, esp, root_fs, esp_fs, level)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+        print("locachy-install: " + str(error), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

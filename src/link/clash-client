@@ -1,0 +1,284 @@
+#!/bin/bash
+# clash-client: the Clash proxy (mihomo, Clash.Meta) in the locachy-net
+# namespace: service_clash, which settings adds and removes with its switch
+# (and installs and removes the package with). Its mode is clash_mode in
+# rc.conf:
+#   tun     (the default) mihomo's virtual interface takes all of locachy-net:
+#           every container on the network goes through it, nothing to set
+#   proxy   its port only, 127.0.0.1:7890 in locachy-net, which locachy-app
+#           gives the containers it starts then (http_proxy and the like):
+#           the programs that honour them use it
+# Under full-system Tor (service_tor, tor-client), tor_front in rc.conf:
+#   mihomo    mihomo is Tor's front: a port for Tor only (127.0.0.1:7891),
+#             which sends Tor through the fastest of its proxies, never
+#             direct; its own connections (FRONT_MARK) go out (tor-enforce),
+#             nobody else's reach it. The first fetch of a subscription is
+#             left to the daily one: it goes through Tor, which needs mihomo
+#   bridges   mihomo is above Tor: its own connections (OVER_TOR_MARK) take
+#             locachy-net's main routes, not its TUN or an interface, so they
+#             go through Tor as everyone's do (UDP is dropped there)
+# and its TUN leaves the tor user's connections alone.
+# What it keeps is in STATE, which containers do not see (it has the
+# subscription's token):
+#   subscription       the subscription's URL (settings writes it)
+#   secret             the controller's, made once
+#   subscription.yaml  what the URL gave, last
+#   config.yaml        made from it (make_config); mihomo's own files beside
+# It waits for the package and the subscription. It ends when the mode or the
+# subscription or Tor's arrangement changes, or a day on when the subscription
+# gives something new: process 1 starts it again. Its routes go with it, those
+# of an mihomo that was killed too.
+#   clash-client --config FILE MODE SECRET [TOR]   the configuration it would
+#                     make from what a subscription gave (TOR: none, mihomo
+#                     or bridges, as above)
+set -u
+
+STATE=${LOCACHY_CLASH_STATE:-/var/lib/locachy/clash}
+NS=${LOCACHY_CLASH_NETNS:-locachy-net}
+MIHOMO=${LOCACHY_MIHOMO:-/usr/bin/mihomo}
+RC=${LOCACHY_CLASH_RC:-/etc/locachy/rc.conf}
+DEVICE=mihomo
+TABLE=2022 # mihomo's routing table, and the first of its rules (auto-route)
+RULE=9000
+# Under Tor (tor-enforce has the same numbers): mihomo's port for Tor, the
+# mark of its connections as Tor's front, and of its connections above Tor,
+# which a rule before its own gives the main routes.
+TOR_PORT=7891
+FRONT_MARK=2023
+OVER_TOR_MARK=2024
+OVER_TOR_RULE=8999
+TOR_GROUP=LOCachy-Tor-front
+
+# The keys LOCachy sets: the subscription's own are left out.
+OWN_KEYS="port socks-port redir-port tproxy-port mixed-port allow-lan bind-address lan-allowed-ips
+    lan-disallowed-ips authentication skip-auth-prefixes external-controller external-controller-tls
+    external-controller-unix external-controller-pipe external-controller-cors secret external-ui
+    external-ui-name external-ui-url tun dns profile interface-name routing-mark listeners"
+# Rules before the subscription's: tailscaled itself, the time zone guessed
+# from the address (timezone-client) and network time keep away from proxies.
+FIRST_RULES="PROCESS-NAME,tailscaled,DIRECT
+DOMAIN,ipinfo.io,DIRECT
+DST-PORT,123,DIRECT"
+
+mode() {
+    local m
+    m=$(sed -n 's/^[[:space:]]*clash_mode="\([^"]*\)".*/\1/p' "$RC" 2>/dev/null | tail -n 1)
+    [ "$m" = proxy ] && echo proxy || echo tun
+}
+
+# Tor's arrangement: none (Tor off), mihomo (its front) or bridges (below it).
+tor() {
+    local f
+    grep -qE '^[[:space:]]*service_tor=' "$RC" 2>/dev/null || { echo none; return; }
+    f=$(sed -n 's/^[[:space:]]*tor_front="\([^"]*\)".*/\1/p' "$RC" 2>/dev/null | tail -n 1)
+    case $f in mihomo | bridges) echo "$f" ;; *) echo none ;; esac
+}
+
+# The configuration from what the subscription gave (FILE): a Clash
+# configuration (it has proxies:) with LOCachy's keys in place of its own and
+# FIRST_RULES before its rules; anything else (links, base64) is left to
+# mihomo as a provider of proxies, with a group to choose from and one by
+# speed, everything through them. As Tor's front, a group of all its proxies
+# (the fastest, never DIRECT) comes first among the groups, for Tor's port.
+make_config() { # FILE MODE SECRET [TOR]
+    local file=$1 mode=$2 secret=$3 tor=${4:-none} url group= uid
+    echo "# Made by clash-client from the subscription; changes here are lost."
+    if [ "$tor" = mihomo ]; then
+        group="{ name: $TOR_GROUP, type: url-test, include-all: true, exclude-type: direct, url: 'https://www.gstatic.com/generate_204', interval: 600 }"
+    fi
+    if grep -q '^proxies:' "$file"; then
+        awk -v own=" $(echo $OWN_KEYS) " -v first="$FIRST_RULES" -v group="$group" '
+            BEGIN { n = split(first, add, "\n") }
+            function insert(indent) { for (i = 1; i <= n; i++) print indent "- " add[i]; pending = 0 }
+            function put_group(indent) { print indent "- " group; grouping = 0 }
+            /^[A-Za-z0-9_-]+:/ {
+                if (pending) insert("  ")
+                if (grouping) put_group("  ")
+                key = $0
+                sub(/:.*/, "", key)
+                skip = index(own, " " key " ") > 0
+                if (key == "rules") { seen = 1; pending = 1 }
+                if (key == "proxy-groups" && group != "") { grouped = 1; grouping = 1 }
+                if (!skip) print
+                next
+            }
+            skip { next }
+            pending && /^[ \t]*- / { indent = $0; sub(/-.*/, "", indent); insert(indent) }
+            grouping && /^[ \t]*- / { indent = $0; sub(/-.*/, "", indent); put_group(indent) }
+            { print }
+            END {
+                if (pending) insert("  ")
+                if (grouping) put_group("  ")
+                if (!seen) { print "rules:"; insert("  ") }
+                if (group != "" && !grouped) { print "proxy-groups:"; put_group("  ") }
+            }' "$file"
+    else
+        url=$(cat "$STATE/subscription")
+        url=${url//"'"/"''"} # in single quotes in YAML
+        cat <<EOF
+proxy-providers:
+  subscription:
+    type: http
+    url: '$url'
+    path: ./providers/subscription.yaml
+    interval: 86400
+    health-check: { enable: true, url: 'https://www.gstatic.com/generate_204', interval: 600 }
+proxy-groups:
+EOF
+        [ -z "$group" ] || echo "  - $group"
+        cat <<EOF
+  - { name: Proxy, type: select, proxies: [Auto], use: [subscription] }
+  - { name: Auto, type: url-test, use: [subscription], url: 'https://www.gstatic.com/generate_204', interval: 600 }
+rules:
+EOF
+        printf '  - %s\n' $FIRST_RULES "MATCH,Proxy"
+    fi
+    cat <<EOF
+# ---- LOCachy (clash-client): these keys replace the subscription's ----
+mixed-port: 7890
+allow-lan: false
+external-controller: 127.0.0.1:9090
+external-controller-unix: $STATE/controller.sock
+secret: '$secret'
+external-ui: ui
+external-ui-name: zashboard
+external-ui-url: 'https://github.com/Zephyruso/zashboard/releases/latest/download/dist.zip'
+profile:
+  store-selected: true
+dns:
+  enable: true
+  ipv6: true
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  fake-ip-filter: ['+.lan', '+.local', '+.ts.net', 'localhost.ptlogin2.qq.com']
+  nameserver: [system]
+  nameserver-policy:
+    '+.ts.net': '100.100.100.100#tailscale0'
+EOF
+    if [ "$tor" = mihomo ]; then
+        cat <<EOF
+# Tor's front (tor-client): its port, through $TOR_GROUP only; its own
+# connections marked, which tor-enforce lets out.
+routing-mark: $FRONT_MARK
+listeners:
+  - { name: locachy-tor, type: socks, listen: 127.0.0.1, port: $TOR_PORT, udp: false, users: [], proxy: $TOR_GROUP }
+EOF
+    elif [ "$tor" = bridges ]; then
+        cat <<EOF
+# Above Tor (tor-client): its own connections marked, which the main routes
+# take (rule $OVER_TOR_RULE), and with them Tor's TransPort.
+routing-mark: $OVER_TOR_MARK
+EOF
+    fi
+    if [ "$mode" = tun ]; then
+        cat <<EOF
+tun:
+  enable: true
+  device: $DEVICE
+  stack: mixed
+  auto-route: true
+  auto-detect-interface: $([ "$tor" = bridges ] && echo false || echo true)
+  iproute2-table-index: $TABLE
+  iproute2-rule-index: $RULE
+  dns-hijack: ['any:53']
+  route-exclude-address: [100.64.0.0/10, 'fd7a:115c:a1e0::/48']
+EOF
+        if [ "$tor" != none ] && uid=$(id -u "${LOCACHY_TOR_USER:-tor}" 2>/dev/null); then
+            echo "  exclude-uid: [$uid]"
+        fi
+    fi
+}
+
+if [ "${1:-}" = --config ]; then
+    [ $# -eq 4 ] || [ $# -eq 5 ] || { echo "usage: clash-client --config FILE MODE SECRET [TOR]" >&2; exit 2; }
+    make_config "$2" "$3" "$4" "${5:-none}"
+    exit 0
+fi
+
+in_ns() {
+    ip netns exec "$NS" "$@"
+}
+
+# What auto-route leaves when mihomo is killed: its rules, its table, its
+# interface; and the rule of its connections above Tor.
+clean() {
+    local family p
+    for family in -4 -6; do
+        in_ns ip "$family" rule show 2>/dev/null | sed -n 's/^\([0-9]*\):.*/\1/p' | while read -r p; do
+            if [ "$p" -ge "$RULE" ] && [ "$p" -lt $((RULE + 100)) ] || [ "$p" = "$OVER_TOR_RULE" ]; then
+                in_ns ip "$family" rule del priority "$p"
+            fi
+        done
+        in_ns ip "$family" route flush table "$TABLE" 2>/dev/null
+    done
+    in_ns ip link del "$DEVICE" 2>/dev/null
+    true
+}
+
+# The subscription, asked as a Clash client (which most give their
+# configuration to), into subscription.yaml.
+fetch() {
+    in_ns curl -fsSL --max-time 60 -A "clash.meta" -o "$STATE/subscription.yaml.new" "$(cat "$STATE/subscription")" &&
+        [ -s "$STATE/subscription.yaml.new" ] && mv "$STATE/subscription.yaml.new" "$STATE/subscription.yaml"
+}
+
+until [ -x "$MIHOMO" ] && [ -s "$STATE/subscription" ] && [ -e "/run/netns/$NS" ]; do
+    sleep 2
+done
+umask 077
+mkdir -p "$STATE"
+[ -s "$STATE/secret" ] || od -An -tx1 -N16 /dev/urandom | tr -d ' \n' >"$STATE/secret"
+mode=$(mode)
+tor=$(tor)
+sub_time=$(stat -c %Y "$STATE/subscription")
+# As Tor's front, a fetch now would wait for Tor, which waits for mihomo.
+if [ "$tor" = mihomo ] && [ -s "$STATE/subscription.yaml" ]; then
+    :
+elif ! fetch && [ ! -s "$STATE/subscription.yaml" ]; then
+    echo "clash-client: the subscription gave nothing; again in a while" >&2
+    exit 1
+fi
+make_config "$STATE/subscription.yaml" "$mode" "$(cat "$STATE/secret")" "$tor" >"$STATE/config.yaml.new"
+if ! in_ns timeout 120 "$MIHOMO" -t -d "$STATE" -f "$STATE/config.yaml.new" >"$STATE/test.log" 2>&1; then
+    echo "clash-client: mihomo refuses the configuration (see $STATE/test.log); the last one is kept" >&2
+    [ -s "$STATE/config.yaml" ] || exit 1
+else
+    mv "$STATE/config.yaml.new" "$STATE/config.yaml"
+fi
+
+clean
+if [ "$tor" = bridges ] && [ "$mode" = tun ]; then
+    in_ns ip -4 rule add fwmark "$OVER_TOR_MARK" lookup main priority "$OVER_TOR_RULE"
+fi
+# Not through in_ns: in the background, a function is a shell of its own, and
+# $! would be that shell, not mihomo (ip netns exec becomes mihomo).
+ip netns exec "$NS" "$MIHOMO" -d "$STATE" -f "$STATE/config.yaml" &
+pid=$!
+trap 'kill "$pid" 2>/dev/null; wait "$pid"; clean; exit 0' TERM INT
+echo "clash-client: mihomo running ($mode) in $NS (pid $pid)"
+
+fetched=$(date +%s)
+while kill -0 "$pid" 2>/dev/null; do
+    sleep 5 & wait $!
+    changed=
+    [ "$(mode)" = "$mode" ] || changed="the mode"
+    [ "$(tor)" = "$tor" ] || changed="Tor's arrangement"
+    [ "$(stat -c %Y "$STATE/subscription" 2>/dev/null)" = "$sub_time" ] || changed="the subscription"
+    if [ -z "$changed" ] && [ $(($(date +%s) - fetched)) -ge 86400 ]; then
+        fetched=$(date +%s)
+        old=$(sha256sum <"$STATE/subscription.yaml")
+        fetch && [ "$(sha256sum <"$STATE/subscription.yaml")" != "$old" ] && changed="what the subscription gives"
+    fi
+    if [ -n "$changed" ]; then
+        echo "clash-client: $changed changed: starting again"
+        kill "$pid"
+        wait "$pid"
+        clean
+        exit 0
+    fi
+done
+wait "$pid"
+status=$?
+clean
+echo "clash-client: mihomo ended (status $status)" >&2
+exit 1

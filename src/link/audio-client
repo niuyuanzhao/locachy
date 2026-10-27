@@ -1,0 +1,75 @@
+#!/bin/bash
+# Host PipeWire + WirePlumber + PulseAudio service for LOCachy (no systemd).
+# Its runtime directory and home are process 1's (XDG_RUNTIME_DIR, HOME), the
+# session bus is service_session_bus's (bus-client); its state and
+# configuration are its own, in /var/lib/locachy/audio.
+set -eu
+
+mkdir -p -m 0755 /var/lib/locachy/audio
+
+# The sound cards described by udevd (udev-client) before WirePlumber looks
+# for them; their device files are root's and the audio group's (udev's
+# rules): PipeWire runs as root, and containers get its sockets (pipewire-0,
+# pulse/native), not the devices.
+for _ in $(seq 1 100); do
+    [ -S /run/udev/control ] && break
+    sleep 0.1
+done
+if [ -S /run/udev/control ]; then
+    timeout 30 udevadm trigger --action=add --subsystem-match=sound --settle || true
+else
+    printf '<4>audio-client: no udevd (service_udev): no sound card will be found\n' >/dev/kmsg
+fi
+
+export XDG_STATE_HOME="/var/lib/locachy/audio"
+export XDG_CONFIG_HOME="/var/lib/locachy/audio"
+
+# WirePlumber cannot keep its devices after losing its session bus. Wait for
+# it, and watch the connection below: process 1 restarts this group if the
+# bus disconnects. Nothing here starts or stops the bus itself.
+for _ in $(seq 1 100); do
+    [ -S "$XDG_RUNTIME_DIR/bus" ] && break
+    sleep 0.1
+done
+[ -S "$XDG_RUNTIME_DIR/bus" ] || {
+    printf '<4>audio-client: no session bus (service_session_bus) yet\n' >/dev/kmsg
+    exit 1
+}
+
+children=()
+cleanup() {
+    if [ "${#children[@]}" -gt 0 ]; then
+        kill "${children[@]}" 2>/dev/null || true
+        wait "${children[@]}" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+trap 'exit 0' TERM INT
+dbus-monitor --address "unix:path=$XDG_RUNTIME_DIR/bus" \
+    'type=signal,interface=org.freedesktop.DBus.Local,member=Disconnected' >/dev/null 2>&1 &
+children+=("$!")
+rm -f /run/user/0/pipewire-0 /run/user/0/pipewire-0.lock /run/user/0/pulse/native /run/user/0/pulse/pid
+
+/usr/bin/pipewire >/dev/null 2>&1 &
+children+=("$!")
+
+for _ in $(seq 1 40); do
+    [ -S /run/user/0/pipewire-0 ] && break
+    sleep 0.05
+done
+chmod 0666 /run/user/0/pipewire-0 2>/dev/null || true
+
+/usr/bin/wireplumber >/dev/null 2>&1 &
+children+=("$!")
+
+/usr/bin/pipewire-pulse >/dev/null 2>&1 &
+children+=("$!")
+
+for _ in $(seq 1 40); do
+    [ -S /run/user/0/pulse/native ] && break
+    sleep 0.05
+done
+chmod 0755 /run/user/0/pulse 2>/dev/null || true
+chmod 0666 /run/user/0/pulse/native 2>/dev/null || true
+
+wait -n "${children[@]}"

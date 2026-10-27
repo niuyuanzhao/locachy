@@ -1,0 +1,396 @@
+#!/usr/bin/env python3
+"""locachy-tpm: hardware-bound LUKS2 auto-unlock for TPM 2.0 and TPM 1.2.
+
+Supports both modern PCs (TPM 2.0 via systemd-cryptenroll + systemd-tpm2 LUKS2
+token) and older machines such as ThinkPad X230 (TPM 1.2 via TCG TakeOwnership +
+PCR composite + TPM_Seal + locachy-tpm12 LUKS2 token).
+
+Usage:
+  locachy-tpm status [--json]
+  locachy-tpm enroll [--pcrs LIST] [--passphrase-stdin] [DEVICE...]
+  locachy-tpm clear [DEVICE...]
+"""
+import argparse
+import getpass
+import hashlib
+import hmac
+import json
+import os
+from pathlib import Path
+import secrets
+import struct
+import subprocess
+import sys
+import tempfile
+
+sys.dont_write_bytecode = True
+
+
+def find_luks_targets():
+    targets = []
+    for label in ("locachy-crypt", "locachy-swap-crypt"):
+        p = subprocess.run(["blkid", "-t", f"LABEL={label}", "-o", "device"],
+                           capture_output=True, text=True)
+        for line in p.stdout.splitlines():
+            dev = line.strip()
+            if dev and dev not in targets:
+                targets.append(dev)
+    return targets
+
+
+def tpm_info():
+    override = os.environ.get("LOCACHY_TPM_DEV")
+    if override:
+        ver = int(os.environ.get("LOCACHY_TPM_VER", "1"))
+        return ver, override
+    for base in sorted(Path("/sys/class/tpm").glob("tpm*")):
+        vmaj = base / "tpm_version_major"
+        if vmaj.is_file():
+            v = vmaj.read_text().strip()
+            if v in ("1", "2"):
+                return int(v), "/dev/" + base.name
+    return 0, ""
+
+
+def tpm12_sysfs_flags():
+    roots = (Path("/sys/class/tpm/tpm0"), Path("/sys/class/tpm/tpm0/device"))
+    def rd(name, default=1):
+        for base in roots:
+            p = base / name
+            if p.is_file():
+                try:
+                    return int(p.read_text().strip())
+                except ValueError:
+                    pass
+        return default
+    enabled = bool(rd("enabled", 1))
+    active = bool(rd("active", 1)) and not bool(rd("temp_deactivated", 0))
+    return enabled, active, bool(rd("owned", 0))
+
+
+def secure_boot():
+    """Whether the firmware enforces Secure Boot (its SecureBoot variable: 4
+    bytes of attributes, then 1 or 0); None without EFI variables."""
+    p = Path("/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c")
+    try:
+        data = p.read_bytes()
+    except OSError:
+        return None
+    return len(data) >= 5 and data[4] == 1
+
+
+def luks_meta(dev):
+    p = subprocess.run(["cryptsetup", "luksDump", "--dump-json-metadata", dev],
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        return {}
+    try:
+        return json.loads(p.stdout)
+    except ValueError:
+        return {}
+
+
+def device_tpm_tokens(dev):
+    meta = luks_meta(dev)
+    out = []
+    for tid, tok in sorted((meta.get("tokens") or {}).items(), key=lambda kv: int(kv[0])):
+        if isinstance(tok, dict) and tok.get("type") in ("systemd-tpm2", "locachy-tpm12"):
+            out.append((int(tid), tok))
+    return out
+
+
+# --- TCG TPM 1.2 wire protocol ---
+
+def tpm12_tx(tfd, pkt):
+    os.write(tfd, pkt)
+    resp = os.read(tfd, 4096)
+    if len(resp) < 10:
+        raise RuntimeError("short response from TPM 1.2")
+    _, sz, rc = struct.unpack(">HII", resp[:10])
+    return rc, resp[10:sz]
+
+
+def mgf1_sha1(seed, length):
+    out = bytearray()
+    c = 0
+    while len(out) < length:
+        out.extend(hashlib.sha1(seed + struct.pack(">I", c)).digest())
+        c += 1
+    return bytes(out[:length])
+
+
+def rsa_oaep_sha1(modulus, exponent, msg, label=b"TCPA"):
+    k = len(modulus)
+    h = 20
+    lh = hashlib.sha1(label).digest()
+    db = lh + b"\x00" * (k - len(msg) - 2 * h - 2) + b"\x01" + msg
+    seed = secrets.token_bytes(h)
+    mdb = bytes(a ^ b for a, b in zip(db, mgf1_sha1(seed, len(db))))
+    msd = bytes(a ^ b for a, b in zip(seed, mgf1_sha1(mdb, h)))
+    em = b"\x00" + msd + mdb
+    e = int.from_bytes(exponent, "big") if exponent else 65537
+    return pow(int.from_bytes(em, "big"), e, int.from_bytes(modulus, "big")).to_bytes(k, "big")
+
+
+def tpm12_oiap(tfd):
+    rc, b = tpm12_tx(tfd, struct.pack(">HII", 0x00C1, 10, 0x0000000A))
+    if rc != 0:
+        raise RuntimeError(f"TPM_OIAP failed (0x{rc:x})")
+    return struct.unpack(">I", b[:4])[0], b[4:24]
+
+
+def tpm12_osap(tfd, etype, evalue, secret):
+    nodd = secrets.token_bytes(20)
+    pkt = struct.pack(">HIIHI", 0x00C1, 36, 0x0000000B, etype, evalue) + nodd
+    rc, b = tpm12_tx(tfd, pkt)
+    if rc != 0:
+        raise RuntimeError(f"TPM_OSAP failed (0x{rc:x}; if TPM 1.2 was owned with a password in another OS, clear TPM in BIOS)")
+    ah = struct.unpack(">I", b[:4])[0]
+    neven, even_osap = b[4:24], b[24:44]
+    shared = hmac.new(secret, even_osap + nodd, hashlib.sha1).digest()
+    return ah, neven, shared
+
+
+def tpm12_startup_and_own(tfd):
+    # TPM_Startup(CLEAR); 0x26 = already started
+    rc, _ = tpm12_tx(tfd, struct.pack(">HIIH", 0x00C1, 12, 0x00000099, 0x0001))
+    if rc == 0x07:
+        raise RuntimeError("TPM 1.2 is disabled in BIOS (enable Security -> Security Chip)")
+    if rc == 0x06:
+        raise RuntimeError("TPM 1.2 is deactivated in BIOS (set Security Chip to Active)")
+
+    _, _, owned = tpm12_sysfs_flags()
+    if owned:
+        return
+    # ReadPubek (0x7C); if 0x23 (no EK), CreateEndorsementKeyPair (0x78); if 0x22 (disabled), already owned!
+    rc, b = tpm12_tx(tfd, struct.pack(">HII", 0x00C1, 30, 0x0000007C) + secrets.token_bytes(20))
+    if rc == 0x22:
+        return
+    if rc == 0x23:
+        kp = struct.pack(">IHHI", 1, 3, 1, 12) + struct.pack(">III", 2048, 2, 0)
+        cb = secrets.token_bytes(20) + kp
+        rc2, _ = tpm12_tx(tfd, struct.pack(">HII", 0x00C1, 10 + len(cb), 0x00000078) + cb)
+        if rc2 != 0:
+            raise RuntimeError(f"TPM_CreateEndorsementKeyPair failed (0x{rc2:x})")
+        rc, b = tpm12_tx(tfd, struct.pack(">HII", 0x00C1, 30, 0x0000007C) + secrets.token_bytes(20))
+    if rc != 0:
+        raise RuntimeError(f"TPM_ReadPubek failed (0x{rc:x})")
+
+    _, _, _, psz = struct.unpack(">IHHI", b[:12])
+    _, _, esz = struct.unpack(">III", b[12:24])
+    exp = b[24:24 + esz] if esz else b""
+    klen = struct.unpack(">I", b[12 + psz:16 + psz])[0]
+    mod = b[16 + psz:16 + psz + klen]
+
+    zero = b"\x00" * 20
+    eo = rsa_oaep_sha1(mod, exp, zero)
+    es = rsa_oaep_sha1(mod, exp, zero)
+    ah, neven = tpm12_oiap(tfd)
+    kp = struct.pack(">IHHI", 1, 3, 1, 12) + struct.pack(">III", 2048, 2, 0)
+    srk = b"\x01\x01\x00\x00" + struct.pack(">HIB", 0x0011, 0, 1) + kp + struct.pack(">III", 0, 0, 0)
+    in_p = struct.pack(">HI", 5, len(eo)) + eo + struct.pack(">I", len(es)) + es + srk
+    nodd = secrets.token_bytes(20)
+    mac = hmac.new(zero, hashlib.sha1(struct.pack(">I", 0x0D) + in_p).digest() + neven + nodd + b"\x00",
+                   hashlib.sha1).digest()
+    tr = struct.pack(">I", ah) + nodd + b"\x00" + mac
+    rc, _ = tpm12_tx(tfd, struct.pack(">HII", 0x00C2, 10 + len(in_p) + len(tr), 0x0D) + in_p + tr)
+    if rc not in (0, 0x14):
+        raise RuntimeError(f"TPM_TakeOwnership failed (0x{rc:x})")
+
+
+def tpm12_seal_secret(dev_path, secret_bytes, pcr_list):
+    zero = b"\x00" * 20
+    tfd = os.open(dev_path, os.O_RDWR | os.O_CLOEXEC)
+    try:
+        tpm12_startup_and_own(tfd)
+        rc, cap = tpm12_tx(tfd, struct.pack(">HIIII", 0x00C1, 22, 0x65, 5, 4) + struct.pack(">I", 0x101))
+        npcrs = struct.unpack(">II", cap[:8])[1] if (rc == 0 and len(cap) >= 8) else 24
+        if pcr_list:
+            sel = bytearray(npcrs // 8)
+            vals = bytearray()
+            for idx in sorted(set(pcr_list)):
+                if idx < 0 or idx >= npcrs:
+                    raise ValueError(f"PCR {idx} out of range")
+                sel[idx >> 3] |= 1 << (idx & 7)
+                rc, pv = tpm12_tx(tfd, struct.pack(">HIII", 0x00C1, 14, 0x15, idx))
+                if rc != 0 or len(pv) < 20:
+                    raise RuntimeError(f"TPM_PCRRead({idx}) failed (0x{rc:x})")
+                vals.extend(pv[:20])
+            psel = struct.pack(">H", len(sel)) + bytes(sel)
+            comp = psel + struct.pack(">I", len(vals)) + bytes(vals)
+            pcr_info = psel + hashlib.sha1(comp).digest() + b"\x00" * 20
+        else:
+            pcr_info = b""
+
+        ah, neven, shared = tpm12_osap(tfd, 0x0004, 0x40000000, zero)
+        nodd = secrets.token_bytes(20)
+        xor_key = hashlib.sha1(shared + neven).digest()
+        enc_auth = bytes(a ^ b for a, b in zip(zero, xor_key))
+        seal_in = (enc_auth + struct.pack(">I", len(pcr_info)) + pcr_info +
+                   struct.pack(">I", len(secret_bytes)) + secret_bytes)
+        mac = hmac.new(shared, hashlib.sha1(struct.pack(">I", 0x17) + seal_in).digest() + neven + nodd + b"\x00",
+                       hashlib.sha1).digest()
+        tr = struct.pack(">I", ah) + nodd + b"\x00" + mac
+        pkt = struct.pack(">HIII", 0x00C2, 14 + len(seal_in) + len(tr), 0x17, 0x40000000) + seal_in + tr
+        rc, body = tpm12_tx(tfd, pkt)
+        if rc != 0 or len(body) <= 41:
+            raise RuntimeError(f"TPM_Seal failed (0x{rc:x})")
+        return body[:-41]
+    finally:
+        os.close(tfd)
+
+
+def clear_device_tpm(dev):
+    for tid, tok in device_tpm_tokens(dev):
+        subprocess.run(["cryptsetup", "token", "remove", "--token-id", str(tid), dev], check=True)
+        for slot in tok.get("keyslots", []):
+            subprocess.run(["cryptsetup", "luksKillSlot", "--batch-mode", dev, str(slot)], check=False)
+
+
+def enroll_tpm2(dev, passphrase, pcrs):
+    clear_device_tpm(dev)
+    pcr_arg = "+".join(str(x) for x in pcrs) if pcrs else "0+7"
+    env = dict(os.environ, PASSWORD=passphrase)
+    p = subprocess.run(["systemd-cryptenroll", "--tpm2-device=auto", f"--tpm2-pcrs={pcr_arg}", dev],
+                       env=env, text=True)
+    if p.returncode != 0:
+        raise RuntimeError(f"systemd-cryptenroll failed on {dev}")
+
+
+def enroll_tpm12(dev, tpm_dev, passphrase, pcrs):
+    clear_device_tpm(dev)
+    raw_key = secrets.token_bytes(32)
+    sealed = tpm12_seal_secret(tpm_dev, raw_key, pcrs)
+
+    before_slots = set((luks_meta(dev).get("keyslots") or {}).keys())
+    with tempfile.NamedTemporaryFile(prefix="locachy-pw-", delete=True) as pwf, \
+         tempfile.NamedTemporaryFile(prefix="locachy-nk-", delete=True) as nkf:
+        pwf.write(passphrase.encode("utf-8"))
+        pwf.flush()
+        nkf.write(raw_key)
+        nkf.flush()
+        p = subprocess.run(["cryptsetup", "luksAddKey", "--batch-mode",
+                            "--key-file", pwf.name, dev, nkf.name])
+        if p.returncode != 0:
+            raise RuntimeError(f"cryptsetup luksAddKey failed on {dev} (wrong passphrase?)")
+
+    after_slots = set((luks_meta(dev).get("keyslots") or {}).keys())
+    new_slots = sorted(after_slots - before_slots, key=int)
+    if not new_slots:
+        raise RuntimeError("could not identify new LUKS2 keyslot")
+    token_obj = {
+        "type": "locachy-tpm12",
+        "keyslots": [str(new_slots[0])],
+        "blob": sealed.hex(),
+        "pcrs": list(pcrs),
+    }
+    p = subprocess.run(["cryptsetup", "token", "import", dev],
+                       input=json.dumps(token_obj), text=True)
+    if p.returncode != 0:
+        raise RuntimeError(f"cryptsetup token import failed on {dev}")
+
+
+def cmd_status(args):
+    ver, tdev = tpm_info()
+    targets = find_luks_targets()
+    enrolled = {d: [tok.get("type") for _, tok in device_tpm_tokens(d)] for d in targets}
+    active = True
+    if ver == 1:
+        en, act, _ = tpm12_sysfs_flags()
+        active = en and act
+    data = {
+        "tpm_version": ver,
+        "tpm_device": tdev,
+        "tpm_active": active if ver else False,
+        "secure_boot": secure_boot(),
+        "luks_devices": targets,
+        "enrolled": enrolled,
+    }
+    if args.json:
+        print(json.dumps(data))
+        return 0
+    if ver == 0:
+        print("TPM: none detected")
+    elif ver == 1:
+        print(f"TPM: 1.2 ({tdev}, {'active' if active else 'disabled/deactivated in BIOS'})")
+    else:
+        print(f"TPM: 2.0 ({tdev})")
+    if not targets:
+        print("LUKS2: no locachy-crypt partition on this system")
+    for d in targets:
+        kinds = enrolled[d]
+        print(f"  {d}: {'enrolled (' + ', '.join(kinds) + ')' if kinds else 'passphrase only'}")
+    return 0
+
+
+def parse_pcrs(raw, ver):
+    if not raw:
+        return [0, 7] if ver == 2 else [0]
+    if raw in ("none", "srk"):
+        return []
+    return [int(x) for x in raw.replace("+", ",").split(",") if x.strip()]
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    p_st = sub.add_parser("status")
+    p_st.add_argument("--json", action="store_true")
+    p_en = sub.add_parser("enroll")
+    p_en.add_argument("--pcrs", default="", help="PCRs to bind (default: 0+7 on TPM 2.0, 0 on TPM 1.2: the firmware only, "
+                           "not what it starts)")
+    p_en.add_argument("--passphrase-stdin", action="store_true")
+    p_en.add_argument("devices", nargs="*")
+    p_cl = sub.add_parser("clear")
+    p_cl.add_argument("devices", nargs="*")
+    args = parser.parse_args()
+
+    if args.cmd == "status":
+        return cmd_status(args)
+    if os.geteuid() != 0:
+        print("locachy-tpm: must run as root", file=sys.stderr)
+        return 1
+    devs = args.devices or find_luks_targets()
+    if not devs:
+        print("locachy-tpm: no LUKS2 locachy-crypt partitions found", file=sys.stderr)
+        return 1
+
+    if args.cmd == "clear":
+        for d in devs:
+            clear_device_tpm(d)
+            print(f"Cleared TPM auto-unlock token from {d}")
+        if Path("/usr/local/bin/locachy-boot").is_file():
+            subprocess.run(["/usr/local/bin/locachy-boot", "--luks"], check=False)
+        return 0
+
+    ver, tdev = tpm_info()
+    if ver == 0:
+        print("locachy-tpm: no TPM 2.0 or TPM 1.2 chip found", file=sys.stderr)
+        return 1
+    pcrs = parse_pcrs(args.pcrs, ver)
+    if args.passphrase_stdin:
+        pw = sys.stdin.read().rstrip("\r\n")
+    else:
+        pw = getpass.getpass("Current LUKS2 recovery passphrase: ")
+    if not pw:
+        print("locachy-tpm: empty passphrase", file=sys.stderr)
+        return 1
+
+    try:
+        for d in devs:
+            if ver == 2:
+                enroll_tpm2(d, pw, pcrs)
+            else:
+                enroll_tpm12(d, tdev, pw, pcrs)
+            vstr = "2.0" if ver == 2 else "1.2"
+            print(f"Enrolled TPM {vstr} auto-unlock on {d} (PCRs: {'+'.join(map(str, pcrs)) or 'SRK'})")
+        if Path("/usr/local/bin/locachy-boot").is_file():
+            subprocess.run(["/usr/local/bin/locachy-boot", "--luks"], check=False)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+        print(f"locachy-tpm: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

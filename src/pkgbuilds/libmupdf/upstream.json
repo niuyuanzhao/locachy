@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "name": "libmupdf",
+  "package": "libmupdf",
+  "pkgbase": "mupdf",
+  "packages": ["libmupdf", "mupdf", "mupdf-gl", "mupdf-tools", "python-mupdf"],
+  "provider": "arch-gitlab",
+  "repository": "https://gitlab.archlinux.org/archlinux/packaging/packages/mupdf.git",
+  "api": "https://gitlab.archlinux.org/api/v4/projects/archlinux%2Fpackaging%2Fpackages%2Fmupdf",
+  "patch_revision": 2,
+  "adapter": "adapter.sh",
+  "inputs": ["bundled-cmark-gfm.patch"],
+  "source_directory": "mupdf",
+  "gate": "libmupdf-markdown-v1"
+}

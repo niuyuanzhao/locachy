@@ -1,0 +1,16 @@
+#!/bin/sh
+# BlueZ on the host system bus, in the foreground for process 1 to watch.
+# The distribution keeps the configuration and /var/lib/bluetooth pairings.
+# Nothing here starts the bus, scans, pairs or changes rfkill state.
+set -eu
+
+for _ in $(seq 1 20); do
+    if timeout 2 dbus-send --system --print-reply --reply-timeout=1000 \
+        --dest=org.freedesktop.DBus /org/freedesktop/DBus \
+        org.freedesktop.DBus.ListNames >/dev/null 2>&1; then
+        exec /usr/lib/bluetooth/bluetoothd -n
+    fi
+    sleep 0.1
+done
+printf '%s\n' 'bluetooth-client: no system bus (service_system_bus) yet' >&2
+exit 1

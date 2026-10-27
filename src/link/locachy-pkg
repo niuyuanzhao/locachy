@@ -1,0 +1,1562 @@
+#!/usr/bin/env python3
+"""locachy-pkg: declarative package alignment for LOCachy.
+Directly implements the set-reconciliation model of MacOSConfigs (Brewfile + update.sh):
+  - SEL       = Declared leaf packages in /etc/locachy/packages
+  - DEP       = Transitive dependency closure computed from SEL
+  - KEEP      = SEL ∪ DEP (the authoritative set of packages allowed to exist)
+  - INSTALLED = All packages currently installed on the system
+  - MISSING   = SEL - INSTALLED (declared packages not installed)
+  - UNMANAGED = INSTALLED - KEEP (drift packages not declared and not required by any leaf)
+
+Commands:
+  locachy-pkg [sync]       reconcile system to manifest: install missing, mark SEL explicit,
+                           mark DEP as dependencies, purge UNMANAGED (INSTALLED - KEEP)
+  locachy-pkg status|list  inspect drift without changing anything (reports SEL, DEP, MISS, DEL);
+                           --machine: lines leaf TAB NAME TAB VERSION TAB BYTES (both empty
+                           when missing), missing|drift|orphan|local-rebuild TAB NAME, then
+                           closure|installed|foreign|bytes TAB COUNT
+  locachy-pkg install PKG  install package(s) and register as leaf in manifest
+  locachy-pkg remove PKG   remove package(s), unregister from manifest, and prune closure
+
+Updates of the host, LOCachy and the containers (see the part below):
+  locachy-pkg plan [--cached] [--machine]   check, and show what an update would do
+  locachy-pkg apply [TARGET...]             do the last plan (all of it, or TARGET...)
+  locachy-pkg update [--yes]                plan, show it, ask once, apply all
+  locachy-pkg rebuild [--force]             LOCachy's programs built again (make.sh --boot)
+                                            unless built against the host as it is; pacman's
+                                            hook runs it after every transaction
+
+What a container's form (packages) shows:
+  locachy-pkg info PKG...        where each package is: lines NAME TAB KIND TAB REPO
+                                 TAB VERSION TAB DESCRIPTION TAB HOST_VERSION
+  locachy-pkg commands NAME      what NAME's build can run: lines PROGRAM TAB
+                                 ARGUMENTS TAB TITLE
+"""
+import glob
+import importlib.util
+import hashlib
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.parse
+
+sys.dont_write_bytecode = True
+
+MANIFEST = "/etc/locachy/packages"
+LOCAL_DB = "/var/lib/pacman/local"
+
+
+def load_manifest(path=MANIFEST):
+    if not os.path.isfile(path):
+        sys.exit(f"locachy-pkg: manifest {path} does not exist")
+    leaves = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.split("#", 1)[0].strip()
+            if line:
+                leaves.append(line)
+    return sorted(set(leaves))
+
+
+def load_installed_db(db_path=LOCAL_DB):
+    """Parses local pacman DB to extract (name -> deps) and (provides -> name)."""
+    packages = {}
+    provides_map = {}
+    explicit_set = set()
+
+    for desc in glob.glob(os.path.join(db_path, "*/desc")):
+        name = None
+        deps = []
+        provides = []
+        reason = "0" # pacman omits %REASON% for an explicitly installed package.
+        with open(desc, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+        i = 0
+        while i < len(lines):
+            tag = lines[i].strip()
+            if tag == "%NAME%":
+                name = lines[i + 1].strip()
+                i += 2
+            elif tag == "%REASON%":
+                reason = lines[i + 1].strip()
+                i += 2
+            elif tag == "%DEPENDS%":
+                i += 1
+                while i < len(lines) and lines[i] and not lines[i].startswith("%"):
+                    d = lines[i].strip().split("<")[0].split(">")[0].split("=")[0].split(":")[0]
+                    deps.append(d)
+                    i += 1
+            elif tag == "%PROVIDES%":
+                i += 1
+                while i < len(lines) and lines[i] and not lines[i].startswith("%"):
+                    p = lines[i].strip().split("<")[0].split(">")[0].split("=")[0]
+                    provides.append(p)
+                    i += 1
+            else:
+                i += 1
+        if name:
+            packages[name] = deps
+            provides_map.setdefault(name, []).append(name)
+            for p in provides:
+                provides_map.setdefault(p, []).append(name)
+            if reason == "0":
+                explicit_set.add(name)
+
+    return packages, provides_map, explicit_set
+
+
+def compute_closure(leaves, packages, provides_map):
+    """Computes the full transitive dependency closure (KEEP set)."""
+    leaf_set = set(leaves)
+    visited = set()
+    stack = [pkg for pkg in leaves if pkg in packages]
+
+    while stack:
+        curr = stack.pop()
+        if curr in visited or curr not in packages:
+            continue
+        visited.add(curr)
+        for dep in packages.get(curr, []):
+            if dep in packages:
+                real_dep = dep
+            else:
+                provs = provides_map.get(dep, [])
+                chosen = [p for p in provs if p in leaf_set or p in visited]
+                real_dep = chosen[0] if chosen else (sorted(provs)[0] if provs else None)
+            if real_dep and real_dep in packages and real_dep not in visited:
+                stack.append(real_dep)
+
+    sel_installed = leaf_set & set(packages.keys())
+    dep_closure = visited - leaf_set
+    return sel_installed, dep_closure, visited
+
+
+def local_details(db):
+    """name -> (version, installed bytes) of a pacman local database directory."""
+    details = {}
+    for desc in glob.glob(os.path.join(db, "*/desc")):
+        name, version, size = None, "", 0
+        with open(desc, encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+        for i, line in enumerate(lines[:-1]):
+            if line == "%NAME%":
+                name = lines[i + 1]
+            elif line == "%VERSION%":
+                version = lines[i + 1]
+            elif line == "%SIZE%" and lines[i + 1].isdigit():
+                size = int(lines[i + 1])
+        if name:
+            details[name] = (version, size)
+    return details
+
+
+def get_installed_size(pkg_name):
+    desc = glob.glob(os.path.join(LOCAL_DB, f"{pkg_name}-*", "desc"))
+    if not desc:
+        return ""
+    with open(desc[0], "r", encoding="utf-8", errors="replace") as f:
+        lines = f.read().splitlines()
+    for i, l in enumerate(lines):
+        if l.strip() == "%SIZE%":
+            try:
+                b = int(lines[i + 1].strip())
+                if b > 1048576:
+                    return f"{b / 1048576:.1f}M"
+                if b > 1024:
+                    return f"{b / 1024:.0f}K"
+                return f"{b}B"
+            except (IndexError, ValueError):
+                return ""
+    return ""
+
+
+def run_pacman(cmd):
+    if os.path.exists("/run/netns/locachy-net"):
+        cmd = f"ip netns exec locachy-net {cmd}"
+    p = subprocess.run(cmd, shell=True)
+    return p.returncode == 0
+
+
+def cmd_status(machine=False):
+    leaves = load_manifest()
+    packages, provides_map, explicit_set = load_installed_db()
+    sel_ins, dep_closure, keep = compute_closure(leaves, packages, provides_map)
+
+    installed_all = set(packages.keys())
+    missing_leaves = sorted(set(leaves) - installed_all)
+    unmanaged = sorted(installed_all - keep)
+
+    # Orphaned dependencies: packages installed as dependency that have no dependent
+    orphans = []
+    try:
+        out = subprocess.check_output(["pacman", "-Qtdq"], text=True, stderr=subprocess.DEVNULL)
+        orphans = sorted([l.strip() for l in out.splitlines() if l.strip()])
+    except Exception:
+        pass
+
+    recipes = local_recipes()
+    local_dirty = local_rebuilds(recipes, local_packages(LOCAL_DB)) if local_names(recipes) else []
+    if machine:
+        details = local_details(LOCAL_DB)
+        for p in leaves:
+            version, size = details.get(p, ("", ""))
+            print(f"leaf\t{p}\t{version}\t{size}")
+        for kind, names in (("missing", missing_leaves), ("drift", unmanaged),
+                            ("orphan", orphans), ("local-rebuild", [n for n, _ in local_dirty])):
+            for p in names:
+                print(f"{kind}\t{p}")
+        # Foreign: in no sync repository (the AUR's, LOCachy's own builds).
+        try:
+            foreign = subprocess.check_output(["pacman", "-Qqm"], text=True, stderr=subprocess.DEVNULL).split()
+        except Exception:
+            foreign = []
+        print(f"closure\t{len(keep)}")
+        print(f"installed\t{len(installed_all)}")
+        print(f"foreign\t{len(foreign)}")
+        print(f"bytes\t{sum(size for _, size in details.values())}")
+        return 0
+
+    print(f"=== Selection / Declared Leaves (SEL: {len(leaves)}) ===")
+    for p in leaves:
+        mark = "[x]" if p in installed_all else "[ ]"
+        sz = get_installed_size(p)
+        print(f"  {mark} {p:<30} {sz}")
+
+    print(f"\n=== Transitive Dependencies (DEP: {len(dep_closure)}) ===")
+    print(f"  ({len(dep_closure)} valid transitive dependencies in closure)")
+
+    print(f"\n=== Missing Leaves (MISS: {len(missing_leaves)}) ===")
+    if missing_leaves:
+        for p in missing_leaves:
+            print(f"  - {p}")
+    else:
+        echo_indent("(none)")
+
+    print(f"\n=== Unmanaged / Drift (DEL: {len(unmanaged)}) ===")
+    if unmanaged:
+        for p in unmanaged:
+            sz = get_installed_size(p)
+            print(f"  + {p:<30} {sz}")
+    else:
+        echo_indent("(none)")
+
+    if orphans:
+        print(f"\n=== Orphaned Dependencies (ORPHANS: {len(orphans)}) ===")
+        for p in orphans:
+            print(f"  ? {p}")
+
+    if local_dirty:
+        print("\n=== Local packages needing a build ===")
+        for name, reason in local_dirty:
+            print(f"  {name}: {reason}")
+
+    is_clean = not missing_leaves and not unmanaged and not orphans and not local_dirty
+    if is_clean:
+        print("\nStatus: Clean (100% converged to leaf manifest)")
+        return 0
+    else:
+        print("\nStatus: Drift detected (run 'locachy-pkg sync' to align)")
+        return 1
+
+
+def echo_indent(msg):
+    print(f"  {msg}")
+
+
+def cmd_sync():
+    leaves = load_manifest()
+    print(f"===> Reconciling system to /etc/locachy/packages ({len(leaves)} declared leaves)...")
+
+    packages, provides_map, explicit_set = load_installed_db()
+    installed_all = set(packages.keys())
+    missing = sorted(set(leaves) - installed_all)
+    baseline = baseline_recipes()
+    tracked = tracked_recipes(baseline)
+    if tracked:
+        effective = local_recipes()
+        installed_versions = local_packages(LOCAL_DB)
+        dirty_tracked = [n for n, _ in local_rebuilds(effective, installed_versions) if n in tracked]
+        if dirty_tracked:
+            print("locachy-pkg: tracked patched packages need a validated update: use plan/apply, not an unchecked sync rebuild", file=sys.stderr)
+            return 1
+
+    # 1. Install missing declared leaves and their dependencies
+    if missing:
+        print(f"===> [1/4] Installing missing declared packages ({len(missing)}): {' '.join(missing)}")
+        repo_pkgs, aur_pkgs, local_pkgs = [], [], []
+        recipes = local_recipes()
+        local = local_names(recipes)
+        for p in missing:
+            if p in local:
+                if p not in recipes:
+                    print(f"locachy-pkg: local recipe for {p} is missing; not replaced from the AUR", file=sys.stderr)
+                    return 1
+                local_pkgs.append(p)
+            elif subprocess.run(["pacman", "-Sp", p], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL).returncode == 0:
+                repo_pkgs.append(p)
+            else:
+                aur_pkgs.append(p)
+        # Complete the repository ABI before compiling local/AUR packages.
+        # Kernel packages use LOCachy's initramfs, not a second generator.
+        if repo_pkgs and not run_pacman("pacman -S --needed --noconfirm --assume-installed initramfs " +
+                                        shlex.join(repo_pkgs)):
+            return 1
+        missing_tracked = set(local_pkgs) & set(tracked)
+        if missing_tracked:
+            try:
+                if not install_tracked(missing_tracked):
+                    return 1
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+                print(f"locachy-pkg: initial tracked install failed: {e}", file=sys.stderr)
+                return 1
+        for p in local_pkgs:
+            if p not in tracked and not run([BUILD_TOOL, "-i", "--local", p]):
+                return 1
+        if aur_pkgs:
+            if not os.path.isfile(BUILD_TOOL):
+                sys.stderr.write(f"locachy-pkg: cannot build AUR packages: {' '.join(aur_pkgs)}\n")
+                return 1
+            if not run([BUILD_TOOL, "-i"] + aur_pkgs, net=True):
+                return 1
+        # Reload after installs
+        packages, provides_map, explicit_set = load_installed_db()
+
+    if set(leaves) - set(packages):
+        print("locachy-pkg: install left declared packages missing; nothing is pruned", file=sys.stderr)
+        return 1
+    recipes = local_recipes()
+    dirty = local_rebuilds(recipes, local_packages(LOCAL_DB)) if local_names(recipes) else []
+    if any(name in tracked for name, _ in dirty):
+        print("locachy-pkg: installed tracked inputs changed; use plan/apply before pruning", file=sys.stderr)
+        return 1
+    for name, reason in dirty:
+        print(f"===> Rebuilding local package {name}: {reason}")
+        if name not in recipes:
+            print(f"locachy-pkg: local recipe for {name} is missing", file=sys.stderr)
+            return 1
+        if not run([BUILD_TOOL, "-i", "-r", "--local", name]):
+            return 1
+    if dirty:
+        packages, provides_map, explicit_set = load_installed_db()
+
+    # 2. Recompute closure
+    sel_ins, dep_closure, keep = compute_closure(leaves, packages, provides_map)
+    installed_all = set(packages.keys())
+    unmanaged = sorted(installed_all - keep)
+
+    # 3. Synchronize explicit / dependency install reasons
+    to_asexplicit = [p for p in sel_ins if p not in explicit_set]
+    to_asdeps = [p for p in dep_closure if p in explicit_set]
+
+    if to_asexplicit:
+        print(f"===> [2/4] Marking declared leaves explicit ({len(to_asexplicit)})...")
+        if not run_pacman(f"pacman -D --asexplicit {' '.join(to_asexplicit)} >/dev/null 2>&1"):
+            return 1
+    if to_asdeps:
+        print(f"===> [2/4] Marking closure packages as dependencies ({len(to_asdeps)})...")
+        if not run_pacman(f"pacman -D --asdeps {' '.join(to_asdeps)} >/dev/null 2>&1"):
+            return 1
+
+    # 4. Remove all packages not in the keep set (DEL = INSTALLED \ KEEP)
+    if unmanaged:
+        print(f"===> [3/4] Purging unmanaged drift packages ({len(unmanaged)}): {' '.join(unmanaged)}")
+        if not run_pacman(f"pacman -D --asdeps {' '.join(unmanaged)} >/dev/null 2>&1"):
+            return 1
+        if not run_pacman(f"pacman -Rns --noconfirm {' '.join(unmanaged)}"):
+            return 1
+
+    # 5. Prune any lingering orphaned dependencies
+    print("===> [4/4] Pruning orphaned dependencies...")
+    while True:
+        try:
+            out = subprocess.check_output(["pacman", "-Qtdq"], text=True, stderr=subprocess.DEVNULL)
+            orphans = [l.strip() for l in out.splitlines() if l.strip()]
+        except Exception:
+            orphans = []
+        if not orphans:
+            break
+        print(f"  Pruning orphan: {' '.join(orphans)}")
+        if not run_pacman(f"pacman -Rns --noconfirm {' '.join(orphans)} >/dev/null 2>&1"):
+            return 1
+
+    # Final verification
+    packages, provides_map, explicit_set = load_installed_db()
+    sel_ins, dep_closure, keep = compute_closure(leaves, packages, provides_map)
+    final_unmanaged = set(packages.keys()) - keep
+    final_missing = set(leaves) - set(packages.keys())
+
+    if not final_unmanaged and not final_missing:
+        print(f"===> Fully converged! (leaves: {len(leaves)}, closure: {len(keep)}, drift: 0)")
+        return 0
+    else:
+        sys.stderr.write(f"locachy-pkg: sync warning: {len(final_missing)} missing, {len(final_unmanaged)} unmanaged\n")
+        return 1
+
+
+def write_manifest(lines):
+    """Replace the manifest atomically, keeping its comments and order."""
+    tmp = MANIFEST + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+    os.replace(tmp, MANIFEST)
+
+
+def manifest_lines():
+    load_manifest()  # exits if there is none
+    with open(MANIFEST, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    return lines
+
+
+def cmd_install(pkgs):
+    if not pkgs:
+        sys.exit("usage: locachy-pkg install PKG...")
+    leaves = load_manifest()
+    lines = manifest_lines()
+    for p in pkgs:
+        if p not in leaves:
+            lines.append(f"{p}\n")
+            print(f"===> Registering leaf: {p}")
+    write_manifest(lines)
+    return cmd_sync()
+
+
+def cmd_remove(pkgs):
+    if not pkgs:
+        sys.exit("usage: locachy-pkg remove PKG...")
+    lines = []
+    for line in manifest_lines():
+        if line.split("#", 1)[0].strip() in pkgs:
+            print(f"===> Unregistering leaf: {line.strip()}")
+        else:
+            lines.append(line)
+    write_manifest(lines)
+    return cmd_sync()
+
+
+# ---------------------------------------------------------------------------
+# Updates of the host and the containers: a plan, shown before anything is
+# done, and its application, target by target.
+#
+#   host       the repositories' updates (checkupdates: found without
+#              touching pacman's own database) and the AUR's (its RPC, for
+#              the packages pacman calls foreign); applied with pacman -Syu
+#              and locachy-build -i (pikaur)
+#   locachy    LOCachy's own programs built again against the updated host
+#              (make.sh --boot), whatever package changed: the compiler, C
+#              libraries, headers or any library they link. pacman's hook
+#              (91-locachy-rebuild) does it after every transaction, however
+#              it was started; here it is done unless that hook already has.
+#              (The boot files for a new kernel or microcode: its own hook.)
+#   NAME       a container (/etc/locachy/containers/NAME.conf): built anew
+#              (locachy-app build) when its own packages have updates, when
+#              its configuration names other packages, or when the host has
+#              changed since it was built; never while it runs
+#
+# Plan lines for programs (packages, the TUI): TARGET TAB KIND TAB WHAT TAB
+# OLD TAB NEW, KIND one of repo, aur, local (WHAT: package, NEW: why),
+# rebuild (WHAT says why), state (WHAT:
+# closed, running, frozen; containers only). The last plan is kept in
+# PLAN_FILE, with the time of its check.
+
+CONF_DIR = "/etc/locachy/containers"
+RC_CONF = "/etc/locachy/rc.conf"
+STATE_DIR = "/var/lib/locachy/containers"
+SRC = "/usr/local/src/locachy"
+SOURCE_REPO_DIR = "/var/lib/locachy/repo"
+SOURCE_COMMIT_FILE = "/usr/local/lib/locachy/source-commit"
+TRUSTED_SIGNERS = "/etc/locachy/trusted-signers"
+DEFAULT_UPDATE_REPO = "https://github.com/niuyuanzhao/locachy.git"
+LEVEL_FILE = "/usr/local/lib/locachy/level"
+CPU_FILE = "/usr/local/lib/locachy/cpu"  # what -march it is built for (make.sh)
+BUILT_HOST_FILE = "/usr/local/lib/locachy/built-host" # host_hash() of make.sh --boot's last build
+INIT = "/usr/local/lib/locachy/init"
+PLAN_FILE = "/var/lib/locachy/plan"
+CHECK_DB = "/var/tmp/locachy-checkupdates"
+AUR_RPC = "https://aur.archlinux.org/rpc/v5/info"
+LOCAL_RECORDS = "/var/lib/locachy/local-packages"
+BUILD_TOOL = "/usr/local/bin/locachy-build"
+PACMAN_CONFIG = "/etc/pacman.conf"
+_pending_plan_lock = None
+
+
+def helper_module(name):
+    """Source-tree tests and installed tools use the same explicit helper.
+    Never import a module from the current working directory."""
+    for base in (os.path.dirname(os.path.realpath(__file__)), "/usr/local/lib/locachy"):
+        path = os.path.join(base, name + ".py")
+        if os.path.isfile(path):
+            spec = importlib.util.spec_from_file_location("locachy_" + name, path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+    raise RuntimeError(f"locachy-pkg: required helper {name} is not installed")
+
+
+def transaction_reference():
+    transaction = helper_module("locachy_transaction")
+    reference = transaction.read_json(PLAN_FILE + ".lock.json")
+    if reference.get("plan_sha256") != transaction.file_hash(PLAN_FILE):
+        raise RuntimeError("locachy-pkg: plan and candidate lock differ; check again")
+    return reference
+
+
+def transaction_host_hash():
+    out = subprocess.run(["pacman", "-Q"], check=True, capture_output=True).stdout
+    return hashlib.sha256(out).hexdigest()
+
+
+def tracked_recipes(recipes):
+    return {n: p for n, p in recipes.items() if os.path.isfile(os.path.join(p, "upstream.json"))}
+
+
+def fetch_upstream(url, *, max_bytes, timeout):
+    """The host's Internet lives in locachy-net. Bound both response bytes and
+    time before handing opaque recipe data to the upstream validator."""
+    command = in_net(["curl", "--fail", "--silent", "--show-error", "--location",
+                      "--proto", "=https", "--proto-redir", "=https", "--max-redirs", "0",
+                      "--max-time", str(timeout), "--max-filesize", str(max_bytes), url])
+    p = subprocess.run(command, capture_output=True, timeout=timeout + 2)
+    if p.returncode or len(p.stdout) > max_bytes:
+        raise RuntimeError("stable upstream did not answer within the response budget")
+    return p.stdout
+
+
+def checked_local_candidates(recipes, installed):
+    """Check pins the official stable recipe independently of the target's
+    optimized packages. Apply never re-resolves or executes recipe code."""
+    upstream = helper_module("locachy_upstream")
+    selected, pins = {}, {}
+    for name, baseline in sorted(tracked_recipes(recipes).items()):
+        if name not in installed:
+            continue
+        with open(os.path.join(baseline, "upstream.json"), encoding="utf-8") as f:
+            track = json.load(f)
+        stable = repo_info("extra/" + track["package"])
+        if not stable or stable[0] != "extra":
+            raise RuntimeError(f"{name}: official extra stable source is unavailable")
+        info = repo_info(track["package"])
+        if not info:
+            raise RuntimeError(f"{name}: target package is not in the selected repositories")
+        repo, version, _ = info
+        lock_path = upstream.prepare_candidate(name, baseline, repo, version, LOCAL_RECORDS,
+                                               stable_version=stable[1], fetch=fetch_upstream)
+        candidate = upstream.validate_candidate(lock_path, name, baseline, LOCAL_RECORDS)
+        selected[name] = {"baseline_dir": baseline, "recipe_dir": str(os.path.join(os.path.dirname(lock_path), "recipe")),
+                          "candidate": candidate}
+        pins[name] = str(lock_path)
+    return selected, pins
+
+
+def baseline_recipes():
+    """Trusted overlay inputs in the source tree; never source PKGBUILD here."""
+    recipes = {}
+    for marker in ("upstream.json", "PKGBUILD"):
+        for path in glob.glob(os.path.join(SRC, "pkgbuilds", "*", marker)):
+            name = os.path.basename(os.path.dirname(path))
+            if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9@._+\-]*", name) and not os.path.islink(os.path.dirname(path)):
+                recipes[name] = os.path.dirname(path)
+    return recipes
+
+
+def local_recipes():
+    """Use the same promoted effective recipe for info/status/sync as builds.
+    Baseline files remain authoritative overlay inputs, not a forever pin."""
+    recipes = baseline_recipes()
+    tracked = tracked_recipes(recipes)
+    if tracked:
+        upstream = helper_module("locachy_upstream")
+        for name, baseline in tracked.items():
+            recipes[name] = str(upstream.effective_recipe(name, baseline, LOCAL_RECORDS))
+    return recipes
+
+
+def local_names(recipes=None):
+    """Records keep a package local even if its source recipe disappears. It
+    must fail explicitly, not silently fall back to an unrelated AUR name."""
+    names = set(local_recipes() if recipes is None else recipes)
+    for path in glob.glob(os.path.join(LOCAL_RECORDS, "*.json")):
+        name = os.path.basename(path)[:-5]
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9@._+\-]*", name) and not name.endswith(".build"):
+            names.add(name)
+    return names
+
+
+def recipe_hash(path):
+    """The exact recipe tree, including patches; same encoding as the builder."""
+    h = hashlib.sha256()
+    for base, dirs, files in os.walk(path):
+        dirs.sort()
+        if any(os.path.islink(os.path.join(base, d)) for d in dirs):
+            raise RuntimeError(f"local recipe contains a directory symlink: {base}")
+        for filename in sorted(files):
+            full = os.path.join(base, filename)
+            if os.path.islink(full):
+                raise RuntimeError(f"local recipe contains a symlink: {full}")
+            h.update(os.path.relpath(full, path).encode() + b"\0")
+            with open(full, "rb") as f:
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    h.update(chunk)
+            h.update(b"\0")
+    return h.hexdigest()
+
+
+def recipe_info(name, path):
+    """Version/description without running recipe code on the host. A checked-in
+    .SRCINFO is preferred. Literal scalar PKGBUILD fields are a display fallback;
+    the actual build always obtains makepkg's metadata as the build user."""
+    fields = {}
+    try:
+        with open(os.path.join(path, ".SRCINFO"), encoding="utf-8") as f:
+            for line in f:
+                if " = " in line:
+                    key, value = line.strip().split(" = ", 1)
+                    fields.setdefault(key, value)
+    except FileNotFoundError:
+        recipe = os.path.join(path, "PKGBUILD")
+        if os.path.isfile(recipe):
+            with open(recipe, encoding="utf-8") as f:
+                for line in f:
+                    match = re.fullmatch(r"\s*(pkgver|pkgrel|epoch|pkgdesc)=(?:'([^']*)'|\"([^\"$`\\]*)\"|([A-Za-z0-9_.+:\-]+))\s*", line.rstrip())
+                    if match:
+                        fields[match[1]] = next(v for v in match.groups()[1:] if v is not None)
+    version = fields.get("pkgver", "")
+    if version and fields.get("pkgrel"):
+        version += "-" + fields["pkgrel"]
+    if version and fields.get("epoch", "0") != "0":
+        version = fields["epoch"] + ":" + version
+    return version, fields.get("pkgdesc", f"LOCachy local package {name}")
+
+
+def local_record(name):
+    try:
+        with open(os.path.join(LOCAL_RECORDS, name + ".json"), encoding="utf-8") as f:
+            value = json.load(f)
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def build_host_hash(path, recipes=None):
+    """The installed versions of what the recipe at path builds and runs
+    against (locachy_upstream.build_fingerprint), local outputs excluded: an
+    unrelated package installed does not ask for a rebuild."""
+    return helper_module("locachy_upstream").build_fingerprint(path, local_names(recipes), LOCAL_DB)
+
+
+def local_rebuild_reason(name, path, installed_version, recipes=None):
+    record = local_record(name)
+    if not record:
+        return "no recorded local build"
+    if record.get("version") != installed_version:
+        return "installed version differs from the recorded local build"
+    if record.get("recipe") != recipe_hash(path):
+        return "local recipe or patch changed"
+    if record.get("host") != build_host_hash(path, recipes):
+        return "host libraries or build tools changed"
+    return ""
+
+
+def local_rebuilds(recipes, installed):
+    result = []
+    for name in sorted(local_names(recipes) & set(installed)):
+        reason = local_rebuild_reason(name, recipes[name], installed[name], recipes) if name in recipes else "local recipe is missing"
+        if reason:
+            result.append((name, reason))
+    return result
+
+
+def in_net(cmd):
+    if os.path.exists("/run/netns/locachy-net"):
+        return ["ip", "netns", "exec", "locachy-net"] + cmd
+    return cmd
+
+
+def read_conf(path):
+    """NAME="VALUE" lines, as in rc.conf."""
+    values = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                values[key.strip()] = value.strip().strip('"')
+    except OSError:
+        pass
+    return values
+
+
+def source_repo_url():
+    """Git repository URL for LOCachy source and recipe updates; '' when disabled."""
+    env = os.environ.get("LOCACHY_UPDATE_REPO")
+    if env is not None:
+        return "" if env in ("", "0", "off") else env
+    rc = read_conf(RC_CONF)
+    if "update_repo" in rc:
+        val = rc["update_repo"]
+        return "" if val in ("", "0", "off") else val
+    return DEFAULT_UPDATE_REPO if on_host_root() else ""
+
+
+def source_branch():
+    """The branch of update_repo to follow (rc.conf update_branch, default
+    main); refused unless it is one plain branch name, never an option."""
+    branch = os.environ.get("LOCACHY_UPDATE_BRANCH") or read_conf(RC_CONF).get("update_branch", "") or "main"
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,127}", branch) or ".." in branch or "//" in branch \
+            or branch.endswith(("/", ".", ".lock")):
+        raise RuntimeError(f"update_branch {branch!r} in {RC_CONF} is not a branch name")
+    return branch
+
+
+def source_tree_digest(path):
+    """Canonical SHA-256 over a LOCachy src/ directory (files, symlinks, exec bit)."""
+    if not os.path.isdir(path):
+        return ""
+    h = hashlib.sha256()
+    skip_dirs = {".git", "__pycache__", "out"}
+    for base, dirs, files in os.walk(path):
+        dirs[:] = sorted(d for d in dirs if d not in skip_dirs and not d.startswith(".mc-"))
+        for d in dirs:
+            full_d = os.path.join(base, d)
+            if os.path.islink(full_d):
+                rel = os.path.relpath(full_d, path)
+                h.update(f"L\0{rel}\0{os.readlink(full_d)}\0".encode())
+        for filename in sorted(files):
+            if filename == ".DS_Store":
+                continue
+            full = os.path.join(base, filename)
+            rel = os.path.relpath(full, path)
+            if os.path.islink(full):
+                h.update(f"L\0{rel}\0{os.readlink(full)}\0".encode())
+            elif os.path.isfile(full):
+                mode = "X" if (os.stat(full).st_mode & 0o111) else "F"
+                h.update(f"{mode}\0{rel}\0".encode())
+                with open(full, "rb") as f:
+                    for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                        h.update(chunk)
+                h.update(b"\0")
+    return h.hexdigest()
+
+
+def verify_source_commit(commit):
+    """When /etc/locachy/trusted-signers exists and is non-empty, require a valid
+    SSH signature on commit."""
+    if not os.path.isfile(TRUSTED_SIGNERS) or os.path.getsize(TRUSTED_SIGNERS) == 0:
+        return
+    p = subprocess.run(["git", "-C", SOURCE_REPO_DIR, "-c", "gpg.format=ssh",
+                        "-c", f"gpg.ssh.allowedSignersFile={TRUSTED_SIGNERS}",
+                        "verify-commit", commit], capture_output=True, text=True)
+    if p.returncode != 0:
+        raise RuntimeError(f"commit {commit[:12]} failed signature verification against {TRUSTED_SIGNERS}")
+
+
+def extract_commit_src(commit, dest_dir):
+    """Extract the src/ subtree (or repo root if flat) of commit into dest_dir."""
+    os.makedirs(dest_dir, exist_ok=True)
+    has_sub = subprocess.run(["git", "-C", SOURCE_REPO_DIR, "cat-file", "-e", f"{commit}:src/make.sh"],
+                             capture_output=True).returncode == 0
+    tree_ref = f"{commit}:src" if has_sub else commit
+    arch = subprocess.Popen(["git", "-C", SOURCE_REPO_DIR, "archive", "--format=tar", tree_ref],
+                            stdout=subprocess.PIPE)
+    tar = subprocess.Popen(["tar", "-xf", "-", "-C", dest_dir], stdin=arch.stdout)
+    arch.stdout.close()
+    if tar.wait() != 0 or arch.wait() != 0 or not os.path.isfile(os.path.join(dest_dir, "make.sh")):
+        raise RuntimeError(f"failed to extract LOCachy source from {commit[:12]}")
+
+
+def recorded_source_commit():
+    try:
+        with open(SOURCE_COMMIT_FILE, encoding="utf-8") as f:
+            c = f.read().strip()
+            return c if re.fullmatch(r"[0-9a-f]{40}", c) else ""
+    except OSError:
+        return ""
+
+
+def check_source_update():
+    """Fetch update_branch of update_repo into SOURCE_REPO_DIR and return
+    (old_short, new_commit, new_label) when the remote src/ tree differs from SRC."""
+    url = source_repo_url()
+    if not url or not shutil.which("git"):
+        return None
+    branch = source_branch()
+    print(f"locachy-pkg: source updates from {url} ({branch})", file=sys.stderr)
+    os.makedirs(SOURCE_REPO_DIR, exist_ok=True)
+    if not os.path.isfile(os.path.join(SOURCE_REPO_DIR, "HEAD")):
+        subprocess.run(["git", "init", "--bare", "--quiet", SOURCE_REPO_DIR], check=True)
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    p = subprocess.run(in_net(["git", "-C", SOURCE_REPO_DIR, "fetch", "--depth=1", "--quiet", "--", url, branch]),
+                       capture_output=True, text=True, env=env, timeout=30)
+    if p.returncode != 0:
+        msg = (p.stderr or "fetch failed").strip().splitlines()[-1] if (p.stderr or "").strip() else "fetch failed"
+        if os.environ.get("LOCACHY_UPDATE_STRICT") == "1":
+            raise RuntimeError(f"source repo fetch failed: {msg}")
+        print(f"locachy-pkg: source repo check skipped ({msg})", file=sys.stderr)
+        return None
+    commit = subprocess.run(["git", "-C", SOURCE_REPO_DIR, "rev-parse", "FETCH_HEAD"],
+                            check=True, capture_output=True, text=True).stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        return None
+    verify_source_commit(commit)
+    subject = subprocess.run(["git", "-C", SOURCE_REPO_DIR, "log", "-1", "--format=%s", commit],
+                             check=True, capture_output=True, text=True).stdout.strip()
+    with tempfile.TemporaryDirectory(prefix="locachy-src-check-") as tmp:
+        extract_commit_src(commit, tmp)
+        if source_tree_digest(SRC) == source_tree_digest(tmp):
+            if recorded_source_commit() != commit:
+                try:
+                    os.makedirs(os.path.dirname(SOURCE_COMMIT_FILE), exist_ok=True)
+                    with open(SOURCE_COMMIT_FILE, "w", encoding="utf-8") as f:
+                        f.write(commit + "\n")
+                except OSError:
+                    pass
+            return None
+    old = recorded_source_commit()
+    old_short = old[:7] if old else "local"
+    label = f"{commit[:7]} ({subject[:48]})" if subject else commit[:7]
+    return old_short, commit, label, branch
+
+
+def apply_source_update(commit):
+    """Verify and atomically install commit's src/ tree into SRC."""
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise RuntimeError("invalid target source commit in plan")
+    verify_source_commit(commit)
+    staging = SRC + ".new"
+    backup = SRC + ".old"
+    shutil.rmtree(staging, ignore_errors=True)
+    shutil.rmtree(backup, ignore_errors=True)
+    extract_commit_src(commit, staging)
+    if os.path.exists(SRC):
+        os.rename(SRC, backup)
+    try:
+        os.rename(staging, SRC)
+    except OSError:
+        if os.path.exists(backup) and not os.path.exists(SRC):
+            os.rename(backup, SRC)
+        raise
+    shutil.rmtree(backup, ignore_errors=True)
+    os.makedirs(os.path.dirname(SOURCE_COMMIT_FILE), exist_ok=True)
+    with open(SOURCE_COMMIT_FILE, "w", encoding="utf-8") as f:
+        f.write(commit + "\n")
+
+
+def conf_packages(conf):
+    """A container's packages: its package and its extras."""
+    return (conf.get("package", "") + " " + conf.get("extras", "")).split()
+
+
+def containers():
+    """The containers, not the host programs (host="1"): their packages are the host's."""
+    names = []
+    for path in glob.glob(os.path.join(CONF_DIR, "*.conf")):
+        if read_conf(path).get("host") != "1":
+            names.append(os.path.basename(path)[:-5])
+    return sorted(names)
+
+
+def container_state(name):
+    try:
+        with open(f"/sys/fs/cgroup/app_{name}/cgroup.events", encoding="utf-8") as f:
+            events = f.read()
+    except OSError:
+        return "closed"
+    if "populated 1" not in events:
+        return "closed"
+    return "frozen" if "frozen 1" in events else "running"
+
+
+def host_hash():
+    """As locachy-app records it when it builds a container."""
+    out = subprocess.run(["pacman", "-Q"], capture_output=True).stdout
+    return hashlib.sha256(out).hexdigest()[:16]
+
+
+def vercmp(a, b):
+    out = subprocess.run(["vercmp", a, b], capture_output=True, text=True).stdout.strip()
+    return int(out or "0")
+
+
+def repo_updates():
+    """The host's repository updates and every repository package's newest
+    version, from a copy of the sync databases updated aside."""
+    env = dict(os.environ, CHECKUPDATES_DB=CHECK_DB)
+    p = subprocess.run(in_net(["env", f"CHECKUPDATES_DB={CHECK_DB}", "checkupdates"]),
+                       capture_output=True, text=True, env=env)
+    if p.returncode not in (0, 2):
+        raise RuntimeError(f"checkupdates failed: {p.stderr.strip()}")
+    updates = []
+    for line in p.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 4 and parts[2] == "->":
+            updates.append((parts[0], parts[1], parts[3]))
+    newest = {}
+    out = subprocess.run(["pacman", "-Sl", "--dbpath", CHECK_DB], capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[1] not in newest:
+            newest[parts[1]] = parts[2]
+    return updates, newest
+
+
+def aur_info(names):
+    """name -> (version, description) of the AUR's packages among names."""
+    info = {}
+    names = sorted(set(names))
+    for i in range(0, len(names), 100):
+        query = "&".join("arg[]=" + urllib.parse.quote(n) for n in names[i:i + 100])
+        p = subprocess.run(in_net(["curl", "-fsS", "--max-time", "20", f"{AUR_RPC}?{query}"]),
+                           capture_output=True, text=True)
+        if p.returncode != 0:
+            raise RuntimeError(f"the AUR did not answer: {p.stderr.strip()}")
+        for r in json.loads(p.stdout).get("results", []):
+            info[r["Name"]] = (r["Version"], r.get("Description") or "")
+    return info
+
+
+def aur_versions(names):
+    return {n: v for n, (v, _) in aur_info(names).items()}
+
+
+def repo_info(name):
+    """(repository, version, description) of name in the sync databases (the
+    copy plan updates, if there is one: it is the fresher), None if none has it."""
+    cmd = ["pacman", "-Si"]
+    if os.path.isdir(os.path.join(CHECK_DB, "sync")):
+        cmd += ["--dbpath", CHECK_DB]
+    p = subprocess.run(cmd + ["--", name], capture_output=True, text=True,
+                       env=dict(os.environ, LC_ALL="C"))
+    if p.returncode != 0:
+        return None
+    fields = {}
+    for line in p.stdout.splitlines():
+        if " : " in line:
+            key, value = line.split(" : ", 1)
+            fields.setdefault(key.strip(), value.strip())
+    return fields.get("Repository", ""), fields.get("Version", ""), fields.get("Description", "")
+
+
+def cmd_info(names):
+    """KIND: local (LOCachy's recipe), repo, aur, none (neither has it),
+    unknown (not in the repositories, and the AUR did not answer)."""
+    host = local_packages(LOCAL_DB)
+    recipes = local_recipes()
+    local_owned = local_names(recipes)
+    repo, rest = {}, []
+    for n in names:
+        if n in local_owned:
+            continue
+        r = repo_info(n)
+        if r:
+            repo[n] = r
+        else:
+            rest.append(n)
+    local = {n: recipe_info(n, recipes[n]) if n in recipes else
+             (local_record(n).get("version", host.get(n, "")), "local recipe is missing")
+             for n in names if n in local_owned}
+    rest = [n for n in rest if n not in local]
+    aur, aur_answered = {}, True
+    if rest:
+        try:
+            aur = aur_info(rest)
+        except RuntimeError:
+            aur_answered = False
+    for n in names:
+        if n in local:
+            kind, where, (version, description) = "local", "LOCachy", local[n]
+        elif n in repo:
+            kind, (where, version, description) = "repo", repo[n]
+        elif n in aur:
+            kind, where, (version, description) = "aur", "", aur[n]
+        else:
+            kind, where, version, description = "none" if aur_answered else "unknown", "", "", ""
+        print("\t".join([n, kind, where, version, description.replace("\t", " "), host.get(n, "")]))
+    return 0
+
+
+def cmd_search(terms):
+    """Search LOCachy container recipes (/usr/local/share/locachy/containers),
+    official sync repositories (pacman -Ss) and the AUR RPC for terms.
+    Output rows: NAME<TAB>KIND<TAB>PACKAGE<TAB>EXTRAS<TAB>COMMAND<TAB>ARGUMENTS<TAB>NETWORK<TAB>DESCRIPTION."""
+    q = " ".join(terms).strip()
+    if not q:
+        return 0
+    ql = q.lower()
+    presets_dir = os.environ.get("LOCACHY_PRESETS", "/usr/local/share/locachy/containers")
+    for path in sorted(glob.glob(os.path.join(presets_dir, "*.conf"))):
+        conf = read_conf(path)
+        if conf.get("host") == "1":
+            continue
+        name = os.path.basename(path)[:-5]
+        desc = ""
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                comments = [l.lstrip("# ").strip() for l in f if l.startswith("#")]
+                if comments:
+                    desc = comments[0]
+        except OSError:
+            pass
+        pkg = conf.get("package", "")
+        extras = conf.get("extras", "")
+        hay = f"{name} {pkg} {extras} {desc}".lower()
+        if all(w in hay for w in ql.split()):
+            print("\t".join([
+                name, "recipe", pkg, extras, conf.get("command", ""),
+                conf.get("arguments", ""), conf.get("network", "1"), desc.replace("\t", " ")
+            ]))
+    cmd = ["pacman", "-Ss"]
+    if os.path.isdir(os.path.join(CHECK_DB, "sync")):
+        cmd += ["--dbpath", CHECK_DB]
+    p = subprocess.run(cmd + ["--"] + terms, capture_output=True, text=True,
+                       env=dict(os.environ, LC_ALL="C"))
+    repo_rows = []
+    lines = p.stdout.splitlines() if p.returncode == 0 else []
+    for i in range(0, len(lines) - 1, 2):
+        head = lines[i].strip()
+        desc = lines[i + 1].strip() if i + 1 < len(lines) else ""
+        if "/" not in head:
+            continue
+        repo_pkg = head.split()[0]
+        ver = head.split()[1] if len(head.split()) > 1 else ""
+        repo, pkg = repo_pkg.split("/", 1)
+        exact = 0 if pkg == ql else (1 if pkg.startswith(ql) else 2)
+        repo_rows.append((exact, pkg, f"{repo} {ver}  {desc}"))
+    repo_rows.sort(key=lambda r: (r[0], r[1]))
+    seen = set()
+    for _, pkg, summary in repo_rows[:30]:
+        if pkg in seen:
+            continue
+        seen.add(pkg)
+        print("\t".join([pkg, "repo", pkg, "", f"/usr/bin/{pkg}", "", "1", summary.replace("\t", " ")]))
+    if len(q) >= 2:
+        url = "https://aur.archlinux.org/rpc/v5/search/" + urllib.parse.quote(q)
+        pa = subprocess.run(in_net(["curl", "-fsS", "--max-time", "10", url]),
+                            capture_output=True, text=True)
+        if pa.returncode == 0:
+            try:
+                results = json.loads(pa.stdout).get("results", [])
+                results.sort(key=lambda r: (0 if r.get("Name") == ql else 1, -(r.get("Popularity") or 0)))
+                for r in results[:20]:
+                    pkg = r.get("Name", "")
+                    if not pkg or pkg in seen:
+                        continue
+                    seen.add(pkg)
+                    ver = r.get("Version", "")
+                    desc = r.get("Description") or ""
+                    print("\t".join([pkg, "aur", pkg, "", f"/usr/bin/{pkg}", "", "1",
+                                     f"AUR {ver}  {desc}".replace("\t", " ")]))
+            except ValueError:
+                pass
+    return 0
+
+
+def desktop_entry(path):
+    """The keys of a desktop file's [Desktop Entry] (not its actions')."""
+    entry, section = {}, None
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("["):
+                section = line
+            elif section == "[Desktop Entry]" and "=" in line and not line.startswith("#"):
+                key, value = line.split("=", 1)
+                entry.setdefault(key.strip(), value.strip())
+    return entry
+
+
+def package_files(name, roots):
+    """The files of package name (paths in its root, without the leading
+    slash) and that root: from the first of roots whose pacman database has
+    it; [] from none."""
+    for root in roots:
+        for desc in glob.glob(os.path.join(root, "var/lib/pacman/local", glob.escape(name) + "-*", "desc")):
+            with open(desc, encoding="utf-8", errors="replace") as f:
+                lines = f.read().splitlines()
+            if "%NAME%" not in lines or lines[lines.index("%NAME%") + 1:][:1] != [name]:
+                continue
+            with open(os.path.join(os.path.dirname(desc), "files"), encoding="utf-8", errors="replace") as f:
+                files = f.read().splitlines()
+            start = files.index("%FILES%") + 1 if "%FILES%" in files else len(files)
+            out = []
+            for p in files[start:]:
+                if not p:
+                    break
+                out.append((root, p))
+            return out
+    return []
+
+
+def cmd_commands(name):
+    """From its packages (its package and extras, not what they need): their
+    desktop entries (Exec, without its field codes: the file or URL goes after
+    the arguments), then their other programs in /usr/bin. Its upper's pacman
+    database has the packages it brought; the host's, those it has from the
+    host."""
+    upper = os.path.join(STATE_DIR, name, "upper")
+    path_dirs = ["/usr/local/sbin", "/usr/local/bin", "/usr/bin"]  # as locachy-app sets PATH
+    files = []
+    for pkg in conf_packages(read_conf(os.path.join(CONF_DIR, name + ".conf"))):
+        files += package_files(pkg, [upper, "/"])
+    seen = set()
+    for root, p in files:
+        if not (p.startswith("usr/share/applications/") and p.endswith(".desktop")):
+            continue
+        try:
+            entry = desktop_entry(os.path.join(root, p))
+        except OSError:
+            continue
+        if entry.get("Type") != "Application" or entry.get("NoDisplay") == "true" or not entry.get("Exec"):
+            continue
+        try:
+            words = shlex.split(entry["Exec"])
+        except ValueError:
+            words = entry["Exec"].split()
+        words = [w for w in words if not (len(w) == 2 and w[0] == "%")]
+        if not words:
+            continue
+        program = words[0]
+        if "/" not in program:
+            for d in path_dirs:
+                if os.path.lexists(upper + d + "/" + program) or os.path.lexists(d + "/" + program):
+                    program = d + "/" + program
+                    break
+        seen.add(program)
+        print("\t".join([program, " ".join(words[1:]), entry.get("Name", "")]))
+    for _, p in files:
+        program = "/" + p
+        if p.startswith("usr/bin/") and not p.endswith("/") and program not in seen:
+            print(f"{program}\t\t")
+    return 0
+
+
+def local_packages(db):
+    """name -> version of a pacman local database directory."""
+    packages = {}
+    for desc in glob.glob(os.path.join(db, "*/desc")):
+        name = version = None
+        with open(desc, encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+        for i, line in enumerate(lines[:-1]):
+            if line == "%NAME%":
+                name = lines[i + 1]
+            elif line == "%VERSION%":
+                version = lines[i + 1]
+        if name and version:
+            packages[name] = version
+    return packages
+
+
+def plan():
+    """The plan: (target, kind, what, old, new) rows."""
+    global _pending_plan_lock
+    _pending_plan_lock = None
+    rows = []
+    updates, newest = repo_updates()
+    host = local_packages(LOCAL_DB)
+    baselines = baseline_recipes()
+    candidates, candidate_locks = checked_local_candidates(baselines, host) if tracked_recipes(baselines) else ({}, {})
+    # Check must be able to replace a stale promotion after local inputs
+    # change. Resolve the new locked candidate before reading the old recipe.
+    recipes = dict(baselines)
+    upstream = helper_module("locachy_upstream") if tracked_recipes(baselines) else None
+    for name, baseline in tracked_recipes(baselines).items():
+        if name in candidates:
+            recipes[name] = candidates[name]["recipe_dir"]
+        else:
+            recipes[name] = str(upstream.effective_recipe(name, baseline, LOCAL_RECORDS))
+    local_owned = local_names(recipes)
+    if candidates:
+        transaction = helper_module("locachy_transaction")
+        prepared_recipes = dict(candidates)
+        for name in sorted(local_owned & set(host)):
+            if name not in recipes:
+                raise RuntimeError(f"{name}: local recipe is missing; update cannot be prepared")
+            prepared_recipes.setdefault(name, {"baseline_dir": baselines[name], "recipe_dir": recipes[name]})
+        _pending_plan_lock = transaction.snapshot(LOCAL_RECORDS, os.path.join(CHECK_DB, "sync"), PACMAN_CONFIG,
+                                                   transaction_host_hash(), prepared_recipes, candidate_locks, test_source=SRC)
+    foreign = {n: v for n, v in host.items() if n not in newest and n not in local_owned}
+    owned = {}
+    for name in containers():
+        owned[name] = local_packages(os.path.join(STATE_DIR, name, "upper/var/lib/pacman/local"))
+    aur_names = set(foreign)
+    for pkgs in owned.values():
+        aur_names |= {n for n in pkgs if n not in newest and n not in local_owned}
+    aur = aur_versions(aur_names) if aur_names else {}
+
+    for n, old, new in updates:
+        if n not in local_owned:
+            rows.append(("host", "repo", n, old, new))
+    for n, v in sorted(foreign.items()):
+        if n in aur and vercmp(aur[n], v) > 0:
+            rows.append(("host", "aur", n, v, aur[n]))
+    host_changes = any(r[0] == "host" for r in rows)
+    for n in sorted(local_owned & set(host)):
+        reason = local_rebuild_reason(n, recipes[n], host[n], recipes) if n in recipes else "local recipe is missing"
+        if n in candidates:
+            candidate = candidates[n]["candidate"]
+            record = local_record(n)
+            target = candidate["package_version"]
+            if record.get("upstream_candidate") != candidate["candidate_id"]:
+                reason = f"{target}: stable {candidate['source_version']} ({candidate['upstream_tag']})"
+        if not reason and host_changes:
+            reason = "host packages are updated before this build"
+        if reason:
+            rows.append(("host", "local", n, host[n], reason))
+    host_changes = any(r[0] == "host" for r in rows)
+    current = host_hash()
+    src_upd = check_source_update()
+    if src_upd:
+        old_short, new_commit, new_label, branch = src_upd
+        rows.append(("locachy", "repo", "locachy-src", old_short, new_label))
+        rows.append(("locachy", "rebuild", f"new source and recipes from branch {branch} (make.sh --boot)",
+                     old_short, new_commit))
+    elif host_changes:
+        rows.append(("locachy", "rebuild", "its programs, against the updated host (make.sh --boot)", "", ""))
+    elif locachy_built_host() != current:
+        rows.append(("locachy", "rebuild", "its programs: the host has changed since they were built (make.sh --boot)", "", ""))
+
+    for name in containers():
+        conf = read_conf(os.path.join(CONF_DIR, name + ".conf"))
+        built = read_conf(os.path.join(STATE_DIR, name, "built"))
+        rows.append((name, "state", container_state(name), "", ""))
+        for n, v in sorted(owned[name].items()):
+            if n in local_owned:
+                reason = local_rebuild_reason(n, recipes[n], v, recipes) if n in recipes else "local recipe is missing"
+                if reason or host_changes:
+                    rows.append((name, "local", n, v, reason or "the host is updated"))
+            elif n in newest and vercmp(newest[n], v) > 0:
+                rows.append((name, "repo", n, v, newest[n]))
+            elif n in aur and vercmp(aur[n], v) > 0:
+                rows.append((name, "aur", n, v, aur[n]))
+        if not built:
+            rows.append((name, "rebuild", "not built from its configuration yet", "", ""))
+        else:
+            if sorted(conf_packages(conf)) != sorted(built.get("packages", "").split()):
+                rows.append((name, "rebuild", "its configuration names other packages",
+                             built.get("packages", ""), " ".join(conf_packages(conf))))
+            if built.get("host") != current:
+                rows.append((name, "rebuild", f"the host has changed since it was built ({built.get('date', '?')})", "", ""))
+            elif host_changes:
+                rows.append((name, "rebuild", "the host is updated", "", ""))
+    return rows
+
+
+def save_plan(rows):
+    os.makedirs(os.path.dirname(PLAN_FILE), exist_ok=True)
+    with open(PLAN_FILE + ".tmp", "w", encoding="utf-8") as f:
+        f.write(f"# checked {time.strftime('%Y-%m-%d %H:%M')}\n")
+        for r in rows:
+            f.write("\t".join(r) + "\n")
+    # Write the lock reference before replacing the TSV. A mismatched pair
+    # fails validation instead of silently applying a different candidate.
+    transaction = helper_module("locachy_transaction")
+    if _pending_plan_lock is not None:
+        reference = dict(_pending_plan_lock, plan_sha256=transaction.file_hash(PLAN_FILE + ".tmp"))
+        transaction.write_json(PLAN_FILE + ".lock.json", reference)
+    else:
+        try:
+            os.unlink(PLAN_FILE + ".lock.json")
+        except FileNotFoundError:
+            pass
+    os.replace(PLAN_FILE + ".tmp", PLAN_FILE)
+
+
+def load_plan():
+    rows, checked = [], ""
+    try:
+        with open(PLAN_FILE, encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("# checked "):
+                    checked = line[10:].strip()
+                elif line.strip():
+                    rows.append(tuple((line.rstrip("\n").split("\t") + [""] * 5)[:5]))
+    except OSError:
+        pass
+    return rows, checked
+
+
+def targets_of(rows):
+    """The targets with something to do, in the order they are applied."""
+    order = []
+    for t in ["host", "locachy"] + containers():
+        if any(r[0] == t and r[1] != "state" for r in rows):
+            order.append(t)
+    return order
+
+
+def print_plan(rows, checked):
+    print(f"Checked {checked}." if checked else "Not checked yet.")
+    todo = targets_of(rows)
+    if not todo:
+        print("Everything is up to date.")
+    for t in todo:
+        state = next((r[2] for r in rows if r[0] == t and r[1] == "state"), "")
+        print(f"\n== {t}{f' ({state})' if state and state != 'closed' else ''}")
+        for target, kind, what, old, new in rows:
+            if target != t or kind == "state":
+                continue
+            if kind == "rebuild":
+                print(f"  rebuild: {what}" + (f" ({old} -> {new})" if old or new else ""))
+            elif kind == "local":
+                print(f"  local {what}: {new} (installed {old})")
+            else:
+                print(f"  {kind:<5} {what:<32} {old} -> {new}")
+
+
+def run(cmd, net=False):
+    print("===> " + " ".join(cmd), flush=True)
+    return subprocess.run(in_net(cmd) if net else cmd).returncode == 0
+
+
+def install_tracked(missing):
+    """First installs use the same locked upstream and contracts as updates.
+    Include existing tracked packages so every local output sees one target."""
+    repo_updates()  # Refresh the private Check snapshot, not the live databases.
+    baselines = baseline_recipes()
+    installed = local_packages(LOCAL_DB)
+    selected = set(installed) | set(missing)
+    candidates, pins = checked_local_candidates(baselines, selected)
+    transaction = helper_module("locachy_transaction")
+    reference = transaction.snapshot(LOCAL_RECORDS, os.path.join(CHECK_DB, "sync"), PACMAN_CONFIG,
+                                     transaction_host_hash(), candidates, pins, test_source=SRC)
+    return install_prepared_host(reference, baselines)
+
+
+def install_prepared_host(reference, recipes):
+    """Prepare, install and promote the exact tested artifacts together."""
+    transaction = helper_module("locachy_transaction")
+    upstream = helper_module("locachy_upstream")
+    directory, data, results = transaction.prepare(reference, BUILD_TOOL, transaction_host_hash)
+    for name, path in data.get("candidate_locks", {}).items():
+        upstream.validate_candidate(path, name, recipes[name], LOCAL_RECORDS)
+    transaction.preserve_installed(results, LOCAL_RECORDS)
+    transaction.install(reference, directory, data, results, transaction_host_hash,
+                        db_path=os.path.dirname(LOCAL_DB), net=in_net)
+    installed = local_packages(LOCAL_DB)
+    for name, result in results.items():
+        if installed.get(name) != result["version"]:
+            raise RuntimeError(f"{name}: package transaction did not install the tested version")
+        if name in data.get("candidate_locks", {}):
+            result["record"]["upstream_candidate"] = data["recipes"][name]["candidate"]["candidate_id"]
+        result["record"]["host"] = build_host_hash(data["recipes"][name]["recipe_dir"], recipes)
+    def promote(name, result):
+        if name in data.get("candidate_locks", {}):
+            upstream.promote_candidate(data["candidate_locks"][name], name, recipes[name], LOCAL_RECORDS,
+                                       artifact_sha256=result["sha256"], gate=result["tests"])
+    transaction.publish_records(results, LOCAL_RECORDS, transaction_host_hash(), promote)
+    return True
+
+
+def apply_prepared_host(rows, recipes):
+    """No raw -Syu may run when a tracked local package exists."""
+    if not install_prepared_host(transaction_reference(), recipes):
+        return False
+    aur = [r[2] for r in rows if r[0] == "host" and r[1] == "aur"]
+    if aur:
+        # AUR updates are not part of pacman's repository transaction. Keep
+        # that distinction explicit; failure must stop dependent updates.
+        return run([BUILD_TOOL, "-i"] + aur)
+    return True
+
+
+def apply_target(t, rows):
+    mine = [r for r in rows if r[0] == t]
+    if t == "host":
+        installed = local_packages(LOCAL_DB)
+        baselines = baseline_recipes()
+        tracked = tracked_recipes(baselines)
+        if set(tracked) & set(installed):
+            try:
+                return apply_prepared_host(rows, baselines)
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+                print(f"locachy-pkg: prepared host update failed: {e}", file=sys.stderr)
+                return False
+        ok = run(["pacman", "-Syu", "--noconfirm"], net=True)
+        aur = [r[2] for r in mine if r[1] == "aur"]
+        if ok and aur:
+            ok = run([BUILD_TOOL, "-i"] + aur)
+        # Re-evaluate after pacman and AUR updates: the old plan may not know
+        # every library/toolchain package that the new transaction changed.
+        recipes = local_recipes()
+        installed = local_packages(LOCAL_DB)
+        local = {r[2] for r in mine if r[1] == "local"}
+        if ok and local_names(recipes):
+            local |= {n for n, _ in local_rebuilds(recipes, installed)}
+        for name in sorted(local):
+            if not ok:
+                break
+            if name not in recipes:
+                print(f"locachy-pkg: local recipe for {name} disappeared; not replaced from the AUR", file=sys.stderr)
+                return False
+            ok = run([BUILD_TOOL, "-i", "-r", "--local", name])
+        return ok
+    if t == "locachy":
+        commits = [r[4] for r in mine if r[1] == "rebuild" and re.fullmatch(r"[0-9a-f]{40}", r[4])]
+        if commits:
+            try:
+                apply_source_update(commits[-1])
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+                print(f"locachy-pkg: source update failed: {e}", file=sys.stderr)
+                return False
+            return rebuild_locachy(force=True)
+        return rebuild_locachy()
+    state = container_state(t)
+    if state != "closed":
+        print(f"===> {t} is {state}: stop it first; left as it is", flush=True)
+        return False
+    aur = [r[2] for r in mine if r[1] == "aur"]
+    if aur and not run([BUILD_TOOL] + aur):
+        return False
+    for name in sorted({r[2] for r in mine if r[1] == "local"}):
+        if name not in local_recipes() or not run([BUILD_TOOL, "-r", "--local", name]):
+            return False
+    return run(["/usr/local/bin/locachy-app", "build", t])
+
+
+def locachy_built_host():
+    try:
+        with open(BUILT_HOST_FILE, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def on_host_root():
+    """The host itself, not a container's or a build's root (which see the
+    host's pacman hooks): process 1 is LOCachy's, and its root is ours. On a
+    booted system process 1 is the initramfs's copy (/init, which stays
+    behind switch_root); INIT is its copy on the root."""
+    try:
+        here, init_root = os.stat("/"), os.stat("/proc/1/root/")
+        return (os.readlink("/proc/1/exe") in (INIT, "/init") and
+                (here.st_dev, here.st_ino) == (init_root.st_dev, init_root.st_ino))
+    except OSError:
+        return False
+
+
+def rebuild_locachy(force=False):
+    """LOCachy's programs (make.sh --boot) built again against the host as it
+    is now, unless they already are."""
+    if not on_host_root():
+        print("locachy-pkg: not the host's root; LOCachy's programs left as they are", flush=True)
+        return True
+    if not force and locachy_built_host() == host_hash():
+        print("locachy-pkg: LOCachy's programs are built against the host as it is", flush=True)
+        return True
+    try:
+        with open(LEVEL_FILE, encoding="utf-8") as f:
+            level = f.read().strip()
+    except OSError:
+        print(f"locachy-pkg: no {LEVEL_FILE}: which CPU level was LOCachy built for?", file=sys.stderr)
+        return False
+    try:
+        with open(CPU_FILE, encoding="utf-8") as f:
+            cpu = f.read().strip() or level
+    except OSError:
+        cpu = level
+    return run(["sh", os.path.join(SRC, "make.sh"), "--boot", level, cpu])
+
+
+def cmd_plan(args):
+    if "--cached" in args:
+        rows, checked = load_plan()
+    else:
+        rows = plan()
+        save_plan(rows)
+        rows, checked = load_plan()
+    if "--machine" in args:
+        print(f"checked\t{checked}")
+        for r in rows:
+            print("\t".join(r))
+    else:
+        print_plan(rows, checked)
+    return 0
+
+
+def cmd_apply(targets):
+    rows, _ = load_plan()
+    if not rows:
+        sys.exit("locachy-pkg: no plan: run locachy-pkg plan first")
+    order = [t for t in targets_of(rows) if not targets or t in targets]
+    failed = []
+    for t in order:
+        print(f"===> {t}", flush=True)
+        if not apply_target(t, rows):
+            failed.append(t)
+            print(f"===> {t}: not done", flush=True)
+            if t == "host":
+                print("===> stopping: LOCachy and container updates depend on the host", flush=True)
+                break
+        else:
+            print(f"===> {t}: done", flush=True)
+    if failed:
+        # Preserve the exact failed plan/candidate for diagnosis; a fresh
+        # network check must not hide the failure or overwrite its lock.
+        print("===> not done: " + " ".join(failed), flush=True)
+        return 1
+    rows = plan()
+    save_plan(rows)
+    print("===> all done", flush=True)
+    return 0
+
+
+def cmd_update(args):
+    rows = plan()
+    save_plan(rows)
+    rows, checked = load_plan()
+    print_plan(rows, checked)
+    if not targets_of(rows):
+        return 0
+    if "--yes" not in args:
+        answer = input("\nApply all of it? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("Nothing done.")
+            return 0
+    return cmd_apply([])
+
+
+def main():
+    if len(sys.argv) < 2:
+        sys.exit(cmd_sync())
+
+    action = sys.argv[1]
+    if action in ("status", "list", "check"):
+        sys.exit(cmd_status("--machine" in sys.argv[2:]))
+    elif action == "sync":
+        sys.exit(cmd_sync())
+    elif action in ("install", "add"):
+        sys.exit(cmd_install(sys.argv[2:]))
+    elif action in ("remove", "uninstall"):
+        sys.exit(cmd_remove(sys.argv[2:]))
+    elif action == "plan":
+        sys.exit(cmd_plan(sys.argv[2:]))
+    elif action == "apply":
+        sys.exit(cmd_apply(sys.argv[2:]))
+    elif action == "update":
+        sys.exit(cmd_update(sys.argv[2:]))
+    elif action == "rebuild":
+        sys.exit(0 if rebuild_locachy("--force" in sys.argv[2:]) else 1)
+    elif action == "info" and len(sys.argv) > 2:
+        sys.exit(cmd_info(sys.argv[2:]))
+    elif action == "search" and len(sys.argv) > 2:
+        sys.exit(cmd_search(sys.argv[2:]))
+    elif action == "commands" and len(sys.argv) == 3:
+        sys.exit(cmd_commands(sys.argv[2]))
+    else:
+        print(__doc__)
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()

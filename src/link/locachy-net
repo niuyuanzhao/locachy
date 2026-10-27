@@ -1,0 +1,19 @@
+#!/bin/bash
+# locachy-net [CMD...]: run CMD inside the isolated network namespace (locachy-net).
+# The host root namespace has no wireless interfaces, no default route, and no
+# public DNS. Any process that needs internet access (pacman, git, browsers)
+# runs under locachy-net.
+# If no command is given, launches an interactive shell.
+set -euo pipefail
+
+NS="locachy-net"
+if [ ! -e "/run/netns/$NS" ]; then
+    echo "locachy-net: network namespace '$NS' is not active (is service_network running?)" >&2
+    exit 1
+fi
+
+if [ $# -eq 0 ]; then
+    exec ip netns exec "$NS" "${SHELL:-/bin/bash}"
+else
+    exec ip netns exec "$NS" "$@"
+fi

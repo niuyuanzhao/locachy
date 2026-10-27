@@ -1,0 +1,81 @@
+name: Release Installer ISO
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  installer-iso:
+    name: Build x86_64 Installer ISO
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run installer unit tests
+        run: |
+          python3 -I src/tools/test-installer-profile.py /tmp
+          python3 -I src/tools/test-build-matrix.py /tmp
+          python3 -I src/tools/test-install.py /tmp
+
+      - name: Free runner disk space and build ISO in Arch Linux
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          mkdir -p /tmp/locachy-iso-out
+          docker run --rm --privileged \
+            -e LOCACHY_REPO="https://github.com/${{ github.repository }}.git" \
+            -e LOCACHY_BRANCH="${{ github.ref_type == 'branch' && github.ref_name || 'main' }}" \
+            -e LOCACHY_COMMIT="${{ github.sha }}" \
+            -v "$GITHUB_WORKSPACE:/repo:ro" \
+            -v /tmp/locachy-iso-out:/out \
+            archlinux:latest bash -euc '
+              pacman-key --init
+              pacman-key --populate archlinux
+              # The image leaves out most locales (NoExtract); the installer
+              # needs zh_CN (installer/make-live.sh): glibc with all of them.
+              sed -i "/^NoExtract/d" /etc/pacman.conf
+              pacman -Syu --noconfirm archiso git python glibc base-devel freetype2 libinput libnm json-c libxkbcommon terminus-font
+              bash /repo/src/make-installer.sh /var/tmp/locachy-work /out/iso
+              cd /out/iso
+              sha256sum *.iso > SHA256SUMS
+              ls -lh /out/iso
+            '
+
+      # A run by hand: the ISO in a draft release of its commit, seen only by
+      # the repository's collaborators. Release files do not count against
+      # the account's free Actions storage, which one artifact of 1.5 GB
+      # fills; the draft is deleted once the ISO is downloaded.
+      - name: Publish draft release on a run by hand
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }} # gh runs outside the checkout
+        run: |
+          cd /tmp/locachy-iso-out/iso
+          tag="build-${GITHUB_SHA::7}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" *.iso SHA256SUMS --clobber
+          else
+            gh release create "$tag" *.iso SHA256SUMS --draft --target "$GITHUB_SHA" \
+              --title "LOCachy build ${GITHUB_SHA::7}" --notes "Installer ISO of ${GITHUB_SHA}, built by hand."
+          fi
+
+      - name: Publish GitHub Release on tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }} # gh runs outside the checkout
+        run: |
+          cd /tmp/locachy-iso-out/iso
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" *.iso SHA256SUMS --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" *.iso SHA256SUMS \
+              --title "LOCachy $GITHUB_REF_NAME" \
+              --generate-notes
+          fi

@@ -1,0 +1,5 @@
+# LOCachy preset (/usr/local/lib/udev/rules.d): a camera that comes or goes
+# reaches the running containers with camera="1", whose /dev is their own
+# (locachy-app cameras). Turned off by a link to /dev/null of the same name in
+# /etc/udev/rules.d.
+SUBSYSTEM=="video4linux|media", ACTION=="add|remove", RUN+="/usr/local/bin/locachy-app cameras"

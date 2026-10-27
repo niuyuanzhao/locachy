@@ -1,0 +1,447 @@
+#!/usr/bin/env python3
+"""locachy-repos: LOCachy's pacman repositories and their mirror lists.
+
+The repositories are stacked by what each includes, the most optimised
+first, each falling back to the next (as ALHP's README stacks its levels):
+CachyOS's optimised builds for this CPU and each level below it (znver4 on
+AMD Zen 4/5, x86-64-v4, x86-64-v3), then ALHP's (x86-64-v4, -v3, -v2), then
+[cachyos] (CachyOS's kernel and pacman), then Arch's. Which sections are
+used is rc.conf's: core (repo_core), extra (repo_extra), multilib
+(repo_multilib), each on unless "0", in every layer that has it. No section
+is held on by name: turning one off is refused while a declared package
+(with what it needs) would have no repository then, as the repositories are
+at that moment (upstream may move packages between sections); its packages
+are to be dealt with first.
+
+  locachy-repos config [--level L] [--cpu C] [--mirrors DIR] [--rc FILE]
+      the pacman.conf, on standard output
+  locachy-repos apply [--set SECTION=on|off]... [--check-only]
+      /etc/pacman.conf again from rc.conf (with the sections set, which
+      rc.conf then keeps), when every declared package is still in the
+      repositories it lists; the next update moves packages
+  locachy-repos rank [--country CC] [--dir DIR] [--cachyos-levels v3,v4]
+      the mirror lists ranked from here: Arch's with reflector, CachyOS's
+      and ALHP's with rate-mirrors (as cachyos-rate-mirrors does: one list
+      for CachyOS, its v3/v4 copies made from it); a list is replaced only
+      when its ranking gave mirrors. Like all that goes out, it runs in
+      locachy-net, through the network layers that are on. The country is
+      where geoip.kde.org places this machine; while Tor or Clash's TUN is
+      on that would be their exit's, so the last ranking's country is kept
+  locachy-repos status
+      the stack and the lists' ages, for settings: lines KEY TAB VALUE
+  locachy-repos cachyos-levels --level L --cpu C   (for make-root.sh)
+      the CachyOS mirror lists the stack uses: v3, v4
+  locachy-repos alhp-mirrors                       (for make-root.sh)
+      ALHP's known mirrors as a list, before any ranking
+"""
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+sys.dont_write_bytecode = True
+
+RC_CONF = "/etc/locachy/rc.conf"
+LIB = "/usr/local/lib/locachy"
+MANIFEST = "/etc/locachy/packages"
+PACMAN_CONF = "/etc/pacman.conf"
+LEVELS = ("x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4")
+ZEN4 = ("znver4", "znver5")  # CachyOS's znver4 repositories are for these
+SECTIONS = ("core", "extra", "multilib")
+# ALHP ships its mirror list only in the AUR (alhp-mirrorlist): its mirrors,
+# the CDN first, as candidates for ranking.
+ALHP_MIRRORS = (
+    "https://cdn.alhp.dev/",
+    "https://mirrors.shanghaitech.edu.cn/alhp/",
+    "https://mirror.nju.edu.cn/alhp/",
+    "https://mirror.sjtu.edu.cn/alhp/",
+    "https://alhp.dev/",
+)
+
+
+def read_conf(path):
+    """NAME="VALUE" lines, as in rc.conf; the last of a name counts."""
+    values = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                m = re.match(r'\s*([A-Za-z_][A-Za-z0-9_]*)="(.*)"\s*$', line)
+                if m:
+                    values[m.group(1)] = m.group(2)
+    except OSError:
+        pass
+    return values
+
+
+def conf_set(path, name, value):
+    """As base/rc.c's conf_set: NAME="VALUE" in place of NAME's line, or
+    added; None removes it."""
+    lines, done = [], False
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                if line.lstrip(" \t").startswith(name + "="):
+                    if value is not None and not done:
+                        lines.append(f'{name}="{value}"\n')
+                    done = True
+                    continue
+                lines.append(line)
+    except FileNotFoundError:
+        pass
+    if value is not None and not done:
+        lines.append(f'{name}="{value}"\n')
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        f.writelines(lines)
+    os.replace(path + ".tmp", path)
+
+
+def sections(rc):
+    return [s for s in SECTIONS if rc.get("repo_" + s, "1") != "0"]
+
+
+def stack(level, cpu, secs):
+    """The repositories in pacman's order: (name, mirror list file)."""
+    if level not in LEVELS:
+        raise ValueError(f"level {level!r} is not one of {', '.join(LEVELS)}")
+    n = LEVELS.index(level)
+    out = []
+    cachy = []
+    if n >= 3 and cpu in ZEN4:
+        cachy.append(("znver4", "v4"))
+    if n >= 3:
+        cachy.append(("v4", "v4"))
+    if n >= 2:
+        cachy.append(("v3", "v3"))
+    for tag, mirrors in cachy:
+        out.append((f"cachyos-{tag}", f"cachyos-{mirrors}-mirrorlist"))
+        for s in ("core", "extra"):
+            if s in secs:
+                out.append((f"cachyos-{s}-{tag}", f"cachyos-{mirrors}-mirrorlist"))
+    for i in range(n, 0, -1):
+        for s in secs:
+            out.append((f"{s}-{LEVELS[i]}", "alhp-mirrorlist"))
+    out.append(("cachyos", "cachyos-mirrorlist"))
+    for s in secs:
+        out.append((s, "mirrorlist"))
+    return out
+
+
+def architectures(level):
+    n = LEVELS.index(level)
+    return " ".join(["x86_64"] + (["x86_64_v3"] if n >= 2 else []) + (["x86_64_v4"] if n >= 3 else []))
+
+
+def cachyos_mirror_levels(level, cpu):
+    """The CachyOS level lists (v3, v4) the stack includes."""
+    return sorted({f.split("-")[1] for _, f in stack(level, cpu, SECTIONS)
+                   if re.fullmatch(r"cachyos-v\d-mirrorlist", f)})
+
+
+def config(level, cpu, mirrors, rc):
+    lines = [
+        "# Written by locachy-repos (settings: Software Sources); rc.conf's",
+        "# repo_extra and repo_multilib choose the sections. Not to be edited here.",
+        "[options]",
+        "HoldPkg = pacman glibc",
+        f"Architecture = {architectures(level)}",
+        "CheckSpace",
+        "SigLevel = Required DatabaseOptional",
+        "LocalFileSigLevel = Optional",
+    ]
+    for name, mirrorlist in stack(level, cpu, sections(rc)):
+        lines += ["", f"[{name}]", f"Include = {mirrors}/{mirrorlist}"]
+    return "\n".join(lines) + "\n"
+
+
+def recorded(name, default=""):
+    try:
+        with open(os.path.join(LIB, name), encoding="utf-8") as f:
+            return f.read().strip() or default
+    except OSError:
+        return default
+
+
+def in_net(cmd):
+    if os.path.exists("/run/netns/locachy-net"):
+        return ["ip", "netns", "exec", "locachy-net"] + cmd
+    return cmd
+
+
+def declared():
+    leaves = []
+    with open(MANIFEST, encoding="utf-8") as f:
+        for line in f:
+            line = line.split("#", 1)[0].strip()
+            if line:
+                leaves.append(line)
+    return leaves
+
+
+def resolvable(conf_text, leaves, dbpath):
+    """The leaves (with their dependencies) that the repositories of
+    conf_text have, from a sync of their databases into dbpath."""
+    with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as f:
+        f.write(conf_text)
+        conf = f.name
+    try:
+        os.makedirs(os.path.join(dbpath, "local"), exist_ok=True)
+        base = ["pacman", "--config", conf, "--dbpath", dbpath, "--logfile", "/dev/null"]
+        if subprocess.run(in_net(base + ["-Sy"]), stdout=subprocess.DEVNULL).returncode != 0:
+            raise RuntimeError("the repositories' databases could not be fetched")
+        if subprocess.run(base + ["-Sp", "--print-format", "%n"] + list(leaves),
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+            return set(leaves)
+        have = set()
+        for leaf in leaves:
+            p = subprocess.run(base + ["-Sp", "--print-format", "%n", leaf],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if p.returncode == 0:
+                have.add(leaf)
+        return have
+    finally:
+        os.unlink(conf)
+
+
+def system():
+    level, cpu = recorded("level"), recorded("cpu")
+    if level not in LEVELS:
+        raise RuntimeError(f"no CPU level recorded in {LIB}/level")
+    return level, cpu or level
+
+
+def cmd_apply(args):
+    level, cpu = system()
+    rc = read_conf(RC_CONF)
+    changes = {}
+    for item in args.set:
+        m = re.fullmatch(r"([a-z]+)=(on|off)", item)
+        if not m or m.group(1) not in SECTIONS:
+            raise ValueError(f"--set {item}: SECTION=on|off, a section of {', '.join(SECTIONS)}")
+        changes["repo_" + m.group(1)] = None if m.group(2) == "on" else "0"
+        rc["repo_" + m.group(1)] = "1" if m.group(2) == "on" else "0"
+    new = config(level, cpu, "/etc/pacman.d", rc)
+    with open(PACMAN_CONF, encoding="utf-8") as f:
+        old = f.read()
+    if new == old:
+        if not args.check_only:
+            for name, value in changes.items():
+                conf_set(RC_CONF, name, value)
+        print(f"locachy-repos: {PACMAN_CONF} is as rc.conf says")
+        return 0
+    leaves = declared()
+    with tempfile.TemporaryDirectory(prefix="locachy-repos-") as d:
+        before = resolvable(old, leaves, os.path.join(d, "old"))
+        after = resolvable(new, leaves, os.path.join(d, "new"))
+    lost = sorted(before - after)
+    if lost:
+        print("locachy-repos: not changed: these declared packages need what would be turned off "
+              "(remove them first): " + " ".join(lost), file=sys.stderr)
+        return 1
+    if args.check_only:
+        print("locachy-repos: the change keeps every declared package")
+        return 0
+    shutil.copyfile(PACMAN_CONF, PACMAN_CONF + ".locachy-old")
+    with open(PACMAN_CONF + ".locachy-new", "w", encoding="utf-8") as f:
+        f.write(new)
+    os.replace(PACMAN_CONF + ".locachy-new", PACMAN_CONF)
+    for name, value in changes.items():
+        conf_set(RC_CONF, name, value)
+    print(f"locachy-repos: {PACMAN_CONF} written; the next update moves the packages")
+    return 0
+
+
+def exit_layer(rc):
+    """The network layer that is on and puts the way out elsewhere: Tor, or
+    Clash with its TUN (in proxy mode only programs that ask use it)."""
+    if "service_tor" in rc:
+        return "Tor"
+    if "service_clash" in rc and rc.get("clash_mode", "tun") != "proxy":
+        return "Clash (TUN)"
+    return ""
+
+
+def last_country(d):
+    try:
+        with open(os.path.join(d, ".locachy-ranked"), encoding="utf-8") as f:
+            return json.load(f).get("country", "")
+    except (OSError, ValueError):
+        return ""
+
+
+def detect_country():
+    """The country to rank from, as cachyos-rate-mirrors finds it (in
+    locachy-net, as all that goes out)."""
+    text = run_tool(["curl", "-fsS", "--max-time", "10", "https://geoip.kde.org/v1/ubiquity"], timeout=20)
+    m = re.search(r"<CountryCode>([A-Z]{2})</CountryCode>", text)
+    return m.group(1) if m else ""
+
+
+def servers(text):
+    return [line for line in text.splitlines() if re.match(r"\s*Server\s*=\s*https://", line)]
+
+
+def install_list(path, text, what):
+    """text replaces the list at path when it has mirrors (the old one is
+    kept as PATH.locachy-old). Whether it did."""
+    if not servers(text):
+        print(f"locachy-repos: {what}: no mirror ranked; {path} left as it is", file=sys.stderr)
+        return False
+    if os.path.exists(path):
+        shutil.copyfile(path, path + ".locachy-old")
+    with open(path + ".locachy-new", "w", encoding="utf-8") as f:
+        f.write(f"# {what}, ranked by locachy-repos {time.strftime('%Y-%m-%d %H:%M')}\n" + text)
+    os.replace(path + ".locachy-new", path)
+    print(f"locachy-repos: {what}: {len(servers(text))} mirrors in {path}")
+    return True
+
+
+def run_tool(cmd, env=None, timeout=600, stdin=None):
+    try:
+        p = subprocess.run(in_net(cmd), input=stdin, capture_output=True, text=True, env=env, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"locachy-repos: {cmd[0]}: {e}", file=sys.stderr)
+        return ""
+    if p.returncode != 0:
+        print(f"locachy-repos: {cmd[0]} failed: {p.stderr.strip()[-300:]}", file=sys.stderr)
+    return p.stdout if p.returncode == 0 else ""
+
+
+def rank_arch(d, country):
+    base = ["reflector", "--protocol", "https", "--latest", "20", "--sort", "rate",
+            "--download-timeout", "15", "--threads", "10"]
+    text = run_tool(base + (["--country", country] if country else []))
+    if not servers(text) and country:
+        text = run_tool(base)
+    return install_list(os.path.join(d, "mirrorlist"), text, "Arch")
+
+
+def rate_mirrors_env(country):
+    env = dict(os.environ, RATE_MIRRORS_PROTOCOL="https", RATE_MIRRORS_ALLOW_ROOT="true",
+               RATE_MIRRORS_FETCH_MIRRORS_TIMEOUT="30000", RATE_MIRRORS_MAX_DELAY="10000")
+    if country:
+        env["RATE_MIRRORS_ENTRY_COUNTRY"] = country
+    if country == "CN":
+        # As cachyos-rate-mirrors: from China, its own mirrors only, more of them.
+        env["RATE_MIRRORS_COUNTRY_NEIGHBORS_PER_COUNTRY"] = "0"
+        env["RATE_MIRRORS_COUNTRY_TEST_MIRRORS_PER_COUNTRY"] = "50"
+    return env
+
+
+def rank_cachyos(d, country, levels):
+    text = run_tool(["rate-mirrors", "cachyos"], env=rate_mirrors_env(country))
+    text = "\n".join(line for line in text.splitlines() if not line.startswith("#")) + "\n"
+    if not install_list(os.path.join(d, "cachyos-mirrorlist"), text, "CachyOS"):
+        return False
+    for lv in levels:
+        install_list(os.path.join(d, f"cachyos-{lv}-mirrorlist"), text.replace("/$arch/", f"/$arch_{lv}/"),
+                     f"CachyOS {lv}")
+    return True
+
+
+def rank_alhp(d, country):
+    path = os.path.join(d, "alhp-mirrorlist")
+    known = list(ALHP_MIRRORS)
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in servers(f.read()):
+                url = line.split("=", 1)[1].strip().split("$repo")[0]
+                if url not in known:
+                    known.append(url)
+    except OSError:
+        pass
+    text = run_tool(["rate-mirrors", "stdin", "--path-to-test", "extra-x86-64-v2/os/x86_64/extra-x86-64-v2.db",
+                     "--path-to-return", "$repo/os/$arch/", "--output-prefix", "Server = "],
+                    env=rate_mirrors_env(country), stdin="\n".join(known) + "\n")
+    text = "\n".join(line for line in text.splitlines() if not line.startswith("#")) + "\n"
+    return install_list(path, text, "ALHP")
+
+
+def cmd_rank(args):
+    layer = exit_layer(read_conf(RC_CONF))
+    if args.country is not None:
+        country = args.country
+    elif layer:
+        country = last_country(args.dir)
+        print(f"locachy-repos: {layer} is on: the country of the last ranking, not its exit's")
+    else:
+        country = detect_country()
+    print(f"locachy-repos: ranking from {country or 'anywhere'}"
+          + (f", through {layer}" if layer else ""))
+    levels = [lv for lv in (args.cachyos_levels or "").split(",") if lv]
+    if args.cachyos_levels is None:
+        levels = [lv for lv in ("v3", "v4") if os.path.exists(os.path.join(args.dir, f"cachyos-{lv}-mirrorlist"))]
+    done = [rank_arch(args.dir, country), rank_cachyos(args.dir, country, levels), rank_alhp(args.dir, country)]
+    with open(os.path.join(args.dir, ".locachy-ranked"), "w", encoding="utf-8") as f:
+        json.dump({"at": time.strftime("%Y-%m-%d %H:%M"), "country": country,
+                   "arch": done[0], "cachyos": done[1], "alhp": done[2]}, f)
+        f.write("\n")
+    return 0 if all(done) else 1
+
+
+def cmd_status(args):
+    level, cpu = recorded("level", "?"), recorded("cpu", "")
+    rc = read_conf(RC_CONF)
+    print(f"level\t{level}")
+    print(f"cpu\t{cpu or level}")
+    for s in SECTIONS:
+        print(f"{s}\t{'on' if s in sections(rc) else 'off'}")
+    if level in LEVELS:
+        print("stack\t" + " ".join(name for name, _ in stack(level, cpu or level, sections(rc))))
+    try:
+        with open("/etc/pacman.d/.locachy-ranked", encoding="utf-8") as f:
+            r = json.load(f)
+        print(f"ranked\t{r.get('at', '')}\t{r.get('country', '')}")
+    except (OSError, ValueError):
+        print("ranked\t")
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+    c = sub.add_parser("config")
+    c.add_argument("--level")
+    c.add_argument("--cpu")
+    c.add_argument("--mirrors", default="/etc/pacman.d")
+    c.add_argument("--rc", default=RC_CONF)
+    a = sub.add_parser("apply")
+    a.add_argument("--set", action="append", default=[], metavar="SECTION=on|off")
+    a.add_argument("--check-only", action="store_true")
+    r = sub.add_parser("rank")
+    r.add_argument("--country")
+    r.add_argument("--dir", default="/etc/pacman.d")
+    r.add_argument("--cachyos-levels")
+    sub.add_parser("status")
+    cl = sub.add_parser("cachyos-levels")
+    cl.add_argument("--level", required=True)
+    cl.add_argument("--cpu", required=True)
+    sub.add_parser("alhp-mirrors")
+    args = parser.parse_args()
+    try:
+        if args.command == "config":
+            level = args.level or recorded("level")
+            sys.stdout.write(config(level, args.cpu or recorded("cpu", level) or level, args.mirrors, read_conf(args.rc)))
+            return 0
+        if args.command == "apply":
+            return cmd_apply(args)
+        if args.command == "rank":
+            return cmd_rank(args)
+        if args.command == "cachyos-levels":
+            print(" ".join(cachyos_mirror_levels(args.level, args.cpu)))
+            return 0
+        if args.command == "alhp-mirrors":
+            print("\n".join(f"Server = {url}$repo/os/$arch/" for url in ALHP_MIRRORS))
+            return 0
+        return cmd_status(args)
+    except (OSError, ValueError, RuntimeError) as e:
+        print(f"locachy-repos: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

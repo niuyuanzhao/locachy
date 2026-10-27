@@ -1,0 +1,29 @@
+#!/bin/sh
+# bus-client session|system: one of the host's D-Bus buses, a service of its
+# own (service_session_bus, service_system_bus), which process 1 starts again
+# when it ends; the services that use one wait for its socket.
+#   session   root's session bus, at $XDG_RUNTIME_DIR/bus (process 1's
+#             runtime directory), where its clients find it by themselves
+#             (libdbus, GDBus and sd-bus look there when
+#             DBUS_SESSION_BUS_ADDRESS is not set): PipeWire, WirePlumber
+#   system    the system bus, /run/dbus/system_bus_socket: NetworkManager and
+#             wpa_supplicant
+# In the foreground, so that it is process 1's to watch; a socket left by one
+# that was killed is removed first.
+set -eu
+
+case "${1:-}" in
+session)
+    rm -f "$XDG_RUNTIME_DIR/bus"
+    exec dbus-daemon --session --address="unix:path=$XDG_RUNTIME_DIR/bus" --nofork --nopidfile
+    ;;
+system)
+    mkdir -p /run/dbus
+    rm -f /run/dbus/system_bus_socket
+    exec dbus-daemon --system --nofork --nopidfile
+    ;;
+*)
+    echo "usage: bus-client session|system" >&2
+    exit 2
+    ;;
+esac

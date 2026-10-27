@@ -1,0 +1,9 @@
+# make-root.sh work, package cache and output
+/src/build/
+/src/cache/
+/src/out/
+# macOS metadata
+.DS_Store
+._*
+# Python bytecode
+__pycache__/

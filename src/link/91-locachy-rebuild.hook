@@ -1,0 +1,17 @@
+# /etc/pacman.d/hooks/91-locachy-rebuild.hook (make.sh): whatever package was
+# installed, upgraded or removed may be what LOCachy's programs are built
+# against (the compiler, C libraries, headers, a library they link), so they
+# are all built again (locachy-pkg rebuild: make.sh --boot), however the
+# transaction was started. Only in the host's root, not in a container's or a
+# build's (which see this hook too).
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Target = *
+
+[Action]
+Description = LOCachy: building its programs again against the changed packages...
+When = PostTransaction
+Exec = /usr/local/bin/locachy-pkg rebuild

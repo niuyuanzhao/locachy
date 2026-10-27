@@ -1,0 +1,21 @@
+#!/bin/sh
+# user-shell: the terminal's shell (program_term) as the user (uid 1000), not
+# root: no supplementary group, the user's own environment (setpriv
+# --reset-env), in its home. On the network (locachy-net, through the network
+# layers that are on) unless rc.conf has term_network="0" (settings: Network in
+# the terminal). root is sudo's, with the user's password; the admin terminal
+# (program_admin) is root's, without the network.
+set -eu
+entry=$(getent passwd 1000) || { echo "user-shell: no user with uid 1000" >&2; exit 1; }
+gid=$(printf '%s\n' "$entry" | cut -d: -f4)
+home=$(printf '%s\n' "$entry" | cut -d: -f6)
+shell=$(printf '%s\n' "$entry" | cut -d: -f7)
+net=$(sed -n 's/^[[:space:]]*term_network="\([^"]*\)".*/\1/p' /etc/locachy/rc.conf 2>/dev/null | tail -n 1)
+cd "$home"
+if [ "$net" != 0 ] && [ -e /run/netns/locachy-net ]; then
+    # As locachy-net does: the namespace, and its resolv.conf over /etc's.
+    set -- ip netns exec locachy-net
+else
+    set --
+fi
+exec "$@" setpriv --reuid=1000 --regid="$gid" --clear-groups --reset-env -- "${shell:-/bin/bash}" -l

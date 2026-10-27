@@ -1,0 +1,102 @@
+<?xml version="1.0"?>
+<!-- /etc/locachy/labwc/rc.xml: the shared compositor. Programs and containers
+     are opened, frozen and stopped from home, never from here. settings
+     writes a copy with the pointer acceleration, touch screen and terminal
+     key of rc.conf, which labwc uses (locachy-seat passes it with -c). -->
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <libinput>
+    <device>
+      <pointerAcceleration>0.4</pointerAcceleration>
+      <naturalScroll>no</naturalScroll>
+    </device>
+  </libinput>
+  <keyboard>
+    <default />
+    <!-- locachy-bar handles the input method and volume keys of rc.conf
+         itself; labwc's defaults for them are taken away ("None" removes a
+         keybind: the key goes on to the application). -->
+    <keybind key="C-space">
+      <action name="None" />
+    </keybind>
+    <keybind key="XF86AudioRaiseVolume">
+      <action name="None" />
+    </keybind>
+    <keybind key="XF86AudioLowerVolume">
+      <action name="None" />
+    </keybind>
+    <keybind key="XF86AudioMute">
+      <action name="None" />
+    </keybind>
+    <keybind key="XF86AudioMicMute">
+      <action name="None" />
+    </keybind>
+    <keybind key="XF86MonBrightnessUp">
+      <action name="None" />
+    </keybind>
+    <keybind key="XF86MonBrightnessDown">
+      <action name="None" />
+    </keybind>
+    <!-- rc.conf's key_terminal, whose keys settings writes in: a window of
+         foot, a host program with the lifecycle of the others (labwc's own
+         Super+Return would start a terminal itself, outside it). -->
+    <keybind key="TERMINAL-KEY"><action name="Execute" command="/usr/local/bin/locachy-app new foot" /></keybind>
+    <keybind key="W-Return">
+      <action name="None" />
+    </keybind>
+    <!-- Super+w: the overview of the windows on every screen, as KDE's
+         Meta+W (again: it closes). -->
+    <keybind key="W-w">
+      <action name="Execute" command="/usr/local/bin/locachy-overview" />
+    </keybind>
+    <!-- Screenshots (locachy-shot), on KDE Spectacle's keys: Print and
+         Super+Shift+s: the rectangular region overlay (Enter copies the
+         image, Ctrl+S saves it); Super+Shift+Print: the region too;
+         Shift+Print: the whole desktop, Super+Print: the active window,
+         straight to the clipboard (Spectacle shows them in its window,
+         which there is not here); Super+Ctrl+Print: the window under the
+         cursor, picked with a click. -->
+    <keybind key="Print">
+      <action name="Execute" command="/usr/local/bin/locachy-shot" />
+    </keybind>
+    <keybind key="W-S-s">
+      <action name="Execute" command="/usr/local/bin/locachy-shot" />
+    </keybind>
+    <keybind key="W-S-Print">
+      <action name="Execute" command="/usr/local/bin/locachy-shot -r" />
+    </keybind>
+    <keybind key="S-Print">
+      <action name="Execute" command="/usr/local/bin/locachy-shot -f -b -c" />
+    </keybind>
+    <keybind key="W-Print">
+      <action name="Execute" command="/usr/local/bin/locachy-shot -a -b -c" />
+    </keybind>
+    <keybind key="W-C-Print">
+      <action name="Execute" command="/usr/local/bin/locachy-shot -u" />
+    </keybind>
+  </keyboard>
+  <!-- Touch screens and screens' pens: on the internal screen, whose name
+       settings writes in (or the only one; left out: all of them). -->
+  <touch>
+    <mapToOutput></mapToOutput>
+    <mouseEmulation>no</mouseEmulation>
+  </touch>
+  <tablet rotate="0" mouseEmulation="no">
+    <mapToOutput></mapToOutput>
+  </tablet>
+  <mouse>
+    <default />
+    <!-- Any click on the background: the window list. labwc's own root menu
+         offers Exit, which would close every container's display. -->
+    <context name="Root">
+      <mousebind button="Left" action="Press">
+        <action name="ShowMenu" menu="client-list-combined-menu" />
+      </mousebind>
+      <mousebind button="Right" action="Press">
+        <action name="ShowMenu" menu="client-list-combined-menu" />
+      </mousebind>
+      <mousebind button="Middle" action="Press">
+        <action name="ShowMenu" menu="client-list-combined-menu" />
+      </mousebind>
+    </context>
+  </mouse>
+</openbox_config>

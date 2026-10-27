@@ -1,0 +1,9 @@
+LOCachy generic x86-64 installation environment
+
+The full-screen installer runs on this console (tty1); to start it again:
+  installer
+Without it: nmtui (the network), then locachy-install (asks on the console)
+or locachy-install --help (every option).
+The running installation environment is separate from the target root.
+SSH and cloud provisioning are disabled; this console is local root.
+

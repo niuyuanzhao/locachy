@@ -1,0 +1,62 @@
+--- a/PKGBUILD
++++ b/PKGBUILD
+@@ -22,19 +22,13 @@
+   systemd-libs
+ )
+ makedepends=(
+-  cairo
+   check
+   git
+-  glib2
+-  gtk4
+-  libx11
+   meson
+   python
+   python-libevdev
+   python-pyudev
+   python-yaml
+-  wayland
+-  wayland-protocols
+ )
+ checkdepends=(python-pytest)
+ source=(
+@@ -49,6 +43,7 @@
+   local meson_options=(
+     # upstream recommends not building docs
+     -D documentation=false
++    -D debug-gui=false
+   )
+
+   arch-meson libinput build "${meson_options[@]}"
+@@ -88,22 +83,26 @@
+ }
+
+ package_libinput-tools() {
++  # Keep the upstream split staging, but emit only the tools package.
++  rm -rf -- "$srcdir/tools"
++  (
++    pkgname=libinput
++    pkgdir="$srcdir/.locachy-library"
++    rm -rf "$pkgdir"
++    mkdir -p "$pkgdir"
++    package_libinput
++  ) || return
+   pkgdesc+=" (debug utilities)"
+   depends=(
+-    cairo
+-    glib2
+     glibc
+-    gtk4
+     libevdev
+     libgcc
+     libinput
+-    libx11
+     python
+     python-libevdev
+     python-pyudev
+     python-yaml
+     systemd-libs
+-    wayland
+   )
+
+   mv tools/* "$pkgdir"

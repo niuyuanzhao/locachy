@@ -1,0 +1,4 @@
+#!/bin/bash
+# The live entry uses the bundled sources, not a second installer implementation.
+set -euo pipefail
+exec python3 -I /usr/local/src/locachy/link/locachy-install "$@"

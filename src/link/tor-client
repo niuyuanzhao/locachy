@@ -1,0 +1,254 @@
+#!/bin/bash
+# tor-client: full-system Tor, layer 1 of the network (below mihomo's TUN,
+# its port and Tailscale), in the locachy-net namespace as the tor user:
+# service_tor, which settings adds and removes with its Tor row (and installs
+# and removes tor and lyrebird with). Tor never connects directly: tor_front
+# in rc.conf is the only way it goes out:
+#   mihomo    through Clash (clash-client): mihomo's port for Tor, which
+#             sends it through one of its proxies, never direct
+#   bridges   through the bridges of STATE/bridges (obfs4 or WebTunnel, by
+#             lyrebird), Tor's Bridge lines, which settings writes
+# Everyone else's TCP goes to Tor's TransPort and DNS to its DNSPort; the rest
+# is refused (tor-enforce, loaded first). The rules stay while service_tor is
+# in rc.conf, whatever becomes of tor: when it ends, or this ends or starts
+# again, nothing goes out until tor is back. They go when service_tor has gone
+# (Tor off). What it keeps:
+#   STATE/bridges        the bridge lines (settings'), which containers do not see
+#   RUN/torrc            tor's configuration, made from rc.conf and them
+#   RUN/state            what it waits for, or does (tor-client --status)
+#   RUN/notices.log      tor's log (its Bootstrapped lines), RUN/tor.pid its pid
+# It ends when the front or the bridges change: process 1 starts it again.
+#   tor-client --torrc FRONT [BRIDGES]   the configuration it would make
+#   tor-client --status                  what Tor does, in one line (settings)
+set -u
+
+STATE=${LOCACHY_TOR_STATE:-/var/lib/locachy/tor}
+RUN=${LOCACHY_TOR_RUN:-/run/locachy/tor}
+DATA=${LOCACHY_TOR_DATA:-/var/lib/tor}
+RC=${LOCACHY_TOR_RC:-/etc/locachy/rc.conf}
+TOR=${LOCACHY_TOR:-/usr/bin/tor}
+LYREBIRD=${LOCACHY_LYREBIRD:-/usr/bin/lyrebird}
+ENFORCE=${LOCACHY_TOR_ENFORCE:-/usr/local/lib/locachy/tor-enforce}
+export LOCACHY_TOR_NETNS=${LOCACHY_TOR_NETNS:-locachy-net} LOCACHY_TOR_USER=${LOCACHY_TOR_USER:-tor}
+NS=$LOCACHY_TOR_NETNS
+USER_=$LOCACHY_TOR_USER
+# What tor-enforce sends where, and mihomo's port for Tor (clash-client).
+TRANS=127.0.0.1:9040
+DNS=127.0.0.1:5353
+MIHOMO_TOR=127.0.0.1:7891
+
+on() {
+    grep -qE '^[[:space:]]*service_tor=' "$RC" 2>/dev/null
+}
+
+rc_value() {
+    sed -n "s/^[[:space:]]*$1=\"\([^\"]*\)\".*/\1/p" "$RC" 2>/dev/null | tail -n 1
+}
+
+front() {
+    local f
+    f=$(rc_value tor_front)
+    case $f in mihomo | bridges) echo "$f" ;; *) echo none ;; esac
+}
+
+# The bridge lines of FILE that Tor takes from us: obfs4 or WebTunnel ones
+# (with a leading "Bridge" or not), an address, a fingerprint, their
+# arguments. Plain bridges are left out: they do not hide Tor.
+bridges() { # FILE
+    sed -e 's/\r$//' -e 's/^[[:space:]]*//' -e 's/^[Bb]ridge[[:space:]]\+//' -e 's/[[:space:]]\+/ /g' \
+        -e 's/ $//' "$1" 2>/dev/null |
+        grep -E '^(obfs4|webtunnel) (\[[0-9A-Fa-f:.]+\]|[0-9]{1,3}(\.[0-9]{1,3}){3}):[0-9]{1,5}( [0-9A-Fa-f]{40})?( [^ =]+=[^ ]*)*$'
+}
+
+make_torrc() { # FRONT [BRIDGES]
+    local front=$1 file=${2:-$STATE/bridges}
+    cat <<EOF
+# Made by tor-client from rc.conf (tor_front) and the bridges; changes here are lost.
+DataDirectory $DATA
+PidFile $RUN/tor.pid
+Log notice file $RUN/notices.log
+TruncateLogFile 1
+# Every program's TCP comes transparently (tor-enforce), DNS to the DNSPort;
+# no program speaks SOCKS to it.
+SocksPort 0
+TransPort $TRANS IsolateDestAddr IsolateDestPort
+DNSPort $DNS
+AutomapHostsOnResolve 1
+EOF
+    if [ "$front" = mihomo ]; then
+        echo "Socks5Proxy $MIHOMO_TOR"
+    elif [ "$front" = bridges ]; then
+        echo "UseBridges 1"
+        echo "ClientTransportPlugin obfs4,webtunnel exec $LYREBIRD"
+        bridges "$file" | sed 's/^/Bridge /'
+    fi
+}
+
+# What tor-client does, its last line in RUN/state, for --status.
+state() {
+    printf '%s\n' "$*" >"$RUN/state.new" && mv "$RUN/state.new" "$RUN/state"
+}
+
+status() {
+    local pid comm last
+    if ! on; then
+        echo "off: the network goes direct"
+        return
+    fi
+    if [ ! -x "$TOR" ]; then
+        echo "tor is not installed: nothing goes out"
+        return
+    fi
+    if [ -e "/run/netns/$NS" ] && ! "$ENFORCE" loaded; then
+        echo "its firewall is not loaded (nftables): the network is not held back"
+        return
+    fi
+    pid=$(cat "$RUN/tor.pid" 2>/dev/null)
+    comm=$(cat "/proc/${pid:-0}/comm" 2>/dev/null)
+    if [ -n "$pid" ] && [ "$comm" = tor ]; then
+        last=$(sed -n 's/.*\] Bootstrapped \([0-9]*%\) ([^)]*): \(.*\)$/\1 \2/p' "$RUN/notices.log" 2>/dev/null |
+            tail -n 1)
+        case $last in
+        100%*) echo "connected through $(front_name)" ;;
+        "") echo "starting, through $(front_name)" ;;
+        *) echo "connecting through $(front_name): $last" ;;
+        esac
+        return
+    fi
+    last=$(cat "$RUN/state" 2>/dev/null)
+    case $last in
+    waiting* | "no front"* | "starting tor") echo "$last: nothing goes out" ;;
+    *) echo "not running (${last:-not started}): the kill switch holds the network, nothing goes out" ;;
+    esac
+}
+
+front_name() {
+    case $(front) in
+    mihomo) echo "Clash (mihomo)" ;;
+    bridges) echo "bridges" ;;
+    *) echo "no front" ;;
+    esac
+}
+
+case "${1:-}" in
+--torrc)
+    [ $# -ge 2 ] || { echo "usage: tor-client --torrc FRONT [BRIDGES]" >&2; exit 2; }
+    make_torrc "$2" "${3:-}"
+    exit 0
+    ;;
+--status)
+    status
+    exit 0
+    ;;
+esac
+
+umask 022
+install -d -m 0700 "$STATE" "$RUN"
+front=$(front)
+# The rules first: from here until Tor is off nothing goes out but Tor.
+if ! "$ENFORCE" load "$front"; then
+    state "its firewall cannot be loaded (nftables; see the system log)"
+    printf '<3>tor-client: its firewall cannot be loaded\n' 2>/dev/null >/dev/kmsg
+    exit 1
+fi
+# Ended while it waits: the rules go only if Tor is off.
+trap 'on || "$ENFORCE" remove; exit 0' TERM INT
+
+# What it waits for, saying so (RUN/state): tor, its front, locachy-net.
+ready() {
+    if [ ! -x "$TOR" ] || ! id -u "$USER_" >/dev/null 2>&1; then
+        echo "waiting for tor to be installed"
+    elif [ "$front" = none ]; then
+        echo "no front chosen (tor_front)"
+    elif [ "$front" = mihomo ] && ! grep -qE '^[[:space:]]*service_clash=' "$RC"; then
+        echo "waiting for Clash, its front"
+    elif [ "$front" = bridges ] && [ -z "$(bridges "$STATE/bridges")" ]; then
+        echo "waiting for a bridge line (obfs4 or WebTunnel)"
+    elif [ "$front" = bridges ] && [ ! -x "$LYREBIRD" ]; then
+        echo "waiting for lyrebird, the bridges' transports"
+    elif [ ! -e "/run/netns/$NS" ]; then
+        echo "waiting for the network ($NS)"
+    fi
+}
+bridges_time() {
+    stat -c %Y "$STATE/bridges" 2>/dev/null || echo 0
+}
+sub_time=$(bridges_time)
+while why=$(ready) && [ -n "$why" ]; do
+    state "$why"
+    sleep 2
+    if ! on || [ "$(front)" != "$front" ] || [ "$(bridges_time)" != "$sub_time" ]; then
+        on || "$ENFORCE" remove
+        exit 0
+    fi
+done
+
+# Again, now that the tor user is there (installed while it waited).
+"$ENFORCE" load "$front" || exit 1
+# A tor of an earlier run (this one was killed) holds its ports: end it.
+old=$(cat "$RUN/tor.pid" 2>/dev/null)
+if [ -n "$old" ] && [ "$(cat "/proc/$old/comm" 2>/dev/null)" = tor ]; then
+    kill "$old"
+    for _ in $(seq 50); do kill -0 "$old" 2>/dev/null || break; sleep 0.1; done
+fi
+rm -f "$RUN/tor.pid"
+chown "$USER_:$USER_" "$RUN"
+install -d -m 0700 -o "$USER_" -g "$USER_" "$DATA"
+make_torrc "$front" >"$RUN/torrc.new"
+chown "root:$USER_" "$RUN/torrc.new"
+chmod 0640 "$RUN/torrc.new"
+mv "$RUN/torrc.new" "$RUN/torrc"
+if ! ip netns exec "$NS" timeout 60 setpriv --reuid="$USER_" --regid="$USER_" --init-groups --no-new-privs \
+    --inh-caps=-all --bounding-set=-all "$TOR" --verify-config -f "$RUN/torrc" >"$RUN/verify.log" 2>&1; then
+    state "tor refuses its configuration (see $RUN/verify.log)"
+    sleep 30 # not every 5 s
+    exit 1
+fi
+state "starting tor"
+# Not through a function: $! must be tor (ip netns exec and setpriv become it).
+ip netns exec "$NS" setpriv --reuid="$USER_" --regid="$USER_" --init-groups --no-new-privs --inh-caps=-all \
+    --bounding-set=-all "$TOR" -f "$RUN/torrc" >/dev/null 2>&1 &
+pid=$!
+stop() {
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    rm -f "$RUN/tor.pid"
+    if on; then
+        state "tor-client ended"
+    else
+        "$ENFORCE" remove
+        state "off"
+    fi
+}
+trap 'stop; exit 0' TERM INT
+printf '<6>tor-client: tor running in %s through %s (pid %d)\n' "$NS" "$front" "$pid" 2>/dev/null >/dev/kmsg
+echo "tor-client: tor running in $NS through $front (pid $pid)"
+
+routes() {
+    ip netns exec "$NS" ip -4 -o route show table main proto kernel scope link 2>/dev/null
+}
+seen=$(routes)
+while kill -0 "$pid" 2>/dev/null; do
+    sleep 5 & wait $!
+    changed=
+    on || changed="Tor (off)"
+    [ "$(front)" = "$front" ] || changed="its front"
+    [ "$(bridges_time)" = "$sub_time" ] || changed="the bridges"
+    if [ -n "$changed" ]; then
+        echo "tor-client: $changed changed: starting again"
+        stop
+        exit 0
+    fi
+    now=$(routes)
+    if [ "$now" != "$seen" ]; then
+        seen=$now
+        "$ENFORCE" lan
+    fi
+done
+wait "$pid"
+status=$?
+rm -f "$RUN/tor.pid"
+state "tor ended (status $status)"
+printf '<4>tor-client: tor ended (status %d); nothing goes out until it is back\n' "$status" 2>/dev/null >/dev/kmsg
+echo "tor-client: tor ended (status $status)" >&2
+exit 1

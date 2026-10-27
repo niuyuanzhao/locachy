@@ -1,0 +1,779 @@
+#!/bin/bash
+# locachy-build [-b] [-i] [-r] PKG...: build AUR packages, with pikaur, in a
+# build root of their own, as a container is: an overlay over / made for this
+# run and thrown away after it, in locachy-net, where builds run as the build
+# user, locachy-builder (make.sh makes it). Its home, /var/lib/locachy/builder/
+# home, is all that stays from one run to the next: its clones and caches
+# (pikaur's, Go's, cargo's, npm's: whatever a build keeps in its home). Of the
+# host's own state the build root shows nothing (/var/lib/locachy but that
+# home, /var/log/locachy, /root, /home); its /dev has the few devices builds
+# use, its /run and /tmp are its own, its environment too (none of the
+# caller's variables). What a build needs is installed in its
+# root only. The packages it makes are handed over in a directory of their
+# own (/var/lib/locachy/builder/out there), from which root takes them into
+# /var/cache/locachy-pkgs: root's, read-only in the build root, so that no
+# build can change what the host and the containers install. pikaur-static
+# builds pikaur itself; with neither, makepkg builds what is asked (to
+# bootstrap them). An AUR package LOCachy changes is the AUR's recipe with a
+# sed script of LOCachy's applied (aur-patches/NAME.sed), whether asked for
+# or needed by another. One run at a time.
+#   -b   run detached in the root cgroup (idle priority, never frozen on switch;
+#        logs to /var/log/locachy/build.log)
+#   -i   install the built package(s) into the system root when done
+#   -r   build again even an AUR package already built (pikaur --rebuild)
+# locachy-build --files ROOT PKG...: the files of /var/cache/locachy-pkgs to
+# install for PKG... into ROOT: each one's newest package, and those of the
+# dependencies that neither ROOT nor the repositories have.
+# locachy-build [-b] [-i] [-r] --local NAME: the local recipe
+# /usr/local/src/locachy/pkgbuilds/NAME, copied into this build root and run
+# as the build user (never sourced by root). Dependencies are installed only
+# in that root. Its root-owned build record follows the packages into the
+# cache; locachy-pkg uses it to notice recipe/patch and host-library changes.
+# locachy-build --prepare DIR --local NAME: build and seal one pinned output;
+# --validate-prepared DIR installs all sealed outputs together in a disposable
+# target root and runs each contract there before any host transaction.
+# locachy-build --run COMMAND...: COMMAND in a build root, as the build user
+# (what a build sees; for the tests).
+set -euo pipefail
+
+bdir=/var/lib/locachy/builder
+home=$bdir/home    # the build user's
+run=$bdir/run      # this run's root (upper, work, the root itself, tmp, out)
+handover=$bdir/out # in the build root: what it made
+out=/var/cache/locachy-pkgs
+user=locachy-builder
+recipes=/usr/local/src/locachy/pkgbuilds
+patches=/usr/local/src/locachy/aur-patches
+records=/var/lib/locachy/local-packages
+prepare=${LOCACHY_BUILD_PREPARE:-}
+validate=0
+
+die() {
+    echo "locachy-build: $*" >&2
+    exit 1
+}
+
+if [ "${LOCACHY_BUILD_STAGE:-}" = chroot ]; then
+    if [ "${1:-}" = --run ]; then
+        shift
+        cd "$home"
+        exec setpriv --reuid="$user" --regid="$user" --init-groups --reset-env "$@"
+    fi
+    uid=$(id -u "$user")
+    gid=$(id -g "$user")
+    as_builder() {
+        setpriv --reuid="$user" --regid="$user" --init-groups --reset-env "$@"
+    }
+    tool=$(command -v pikaur || command -v pikaur-static || true)
+    if [ -n "$prepare" ]; then
+        # Every candidate starts from the same repository target. Only this
+        # disposable root temporarily lacks the old local packages; dependents
+        # stay installed and all exact replacements are restored before tests.
+        local_names=()
+        while read -r name; do local_names+=("$name"); done < <(python3 -I - "$prepare/plan.json" <<'PY'
+import json, re, sys
+with open(sys.argv[1]) as f: names = sorted(json.load(f)['recipes'])
+if not names or any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9@._+\-]*', n) for n in names):
+    raise RuntimeError('invalid prepared package names')
+print('\n'.join(names))
+PY
+        )
+        [ "${#local_names[@]}" -gt 0 ] || die "prepared update has no package names"
+        remove=()
+        installed=$(pacman -Qq)
+        for name in "${local_names[@]}"; do
+            grep -Fxq "$name" <<<"$installed" && remove+=("$name")
+        done
+        # Bootstrap may still have the stock provider. It is not part of
+        # the common base once its selected patched replacement is in plan.
+        while read -r provider; do
+            [ -n "$provider" ] || continue
+            # Some pacman variants resolve a queried provider to its local
+            # replacement; remove only exact installed identities.
+            grep -Fxq "$provider" <<<"$installed" && remove+=("$provider")
+        done < <(python3 -I - "$prepare/plan.json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f: recipes=json.load(f)['recipes']
+for name, entry in sorted(recipes.items()):
+    provider=entry.get('candidate', {}).get('upstream_package')
+    if provider and provider != name: print(provider)
+PY
+        )
+        [ "${#remove[@]}" -eq 0 ] || pacman -Rdd --noscriptlet --noconfirm "${remove[@]}"
+        ignored=$(IFS=,; echo "${local_names[*]}")
+        # LOCachy generates its own initramfs after package reconciliation.
+        assume=(--assume-installed initramfs)
+        while read -r package; do
+            [ -z "$package" ] || assume+=(--assume-installed "$package")
+        done < <(python3 -I - "$prepare/plan.json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f: recipes=json.load(f)['recipes']
+for name, entry in sorted(recipes.items()):
+    candidate=entry.get('candidate', {})
+    version=candidate.get('package_version')
+    print(name + ('=' + version if version else ''))
+    provider=candidate.get('upstream_package')
+    if provider and provider != name:
+        version=candidate.get('source_version')
+        print(provider + ('=' + version if version else ''))
+PY
+        )
+        pacman -Su --noscriptlet --noconfirm --ignore "$ignored" "${assume[@]}"
+        pacman -Q >"$handover/target-base-packages.txt"
+        [ "${1:-}" != --validate-prepared ] || exit 0
+    fi
+    if [ "${1:-}" = --local ]; then
+        name=${2:?local recipe name required}
+        src="$home/local/$name"
+        install -d -m 0755 -o "$user" -g "$user" "$home/local"
+        rm -rf "$src"
+        cp -a -- "/run/locachy-recipe/." "$src"
+        chown -hR "$user:$user" "$src"
+        # Even --printsrcinfo sources PKGBUILD: only the build user runs it,
+        # in the isolated root. No host-side shell evaluation of recipes.
+        as_builder bash -c 'cd "$1"; makepkg --printsrcinfo' bash "$src" > /run/locachy-local.srcinfo
+        repo_deps=() aur_deps=()
+        while read -r dep; do
+            [ -n "$dep" ] || continue
+            pacman -T "$dep" >/dev/null 2>&1 && continue
+            bare=${dep%%[\<\>\=]*}
+            if pacman -Sp "$dep" >/dev/null 2>&1; then
+                repo_deps+=("$dep")
+            else
+                aur_deps+=("$bare")
+            fi
+        done < <(awk -v arch="$(uname -m)" '$1 == "depends" || $1 == "makedepends" || $1 == "checkdepends" || \
+            $1 == "depends_" arch || $1 == "makedepends_" arch || $1 == "checkdepends_" arch {print $3}' \
+            /run/locachy-local.srcinfo | sort -u)
+        [ "${#repo_deps[@]}" -eq 0 ] || pacman -S --needed --noconfirm --asdeps "${repo_deps[@]}"
+        if [ "${#aur_deps[@]}" -gt 0 ]; then
+            [ -n "$tool" ] || die "local recipe dependencies require pikaur: ${aur_deps[*]}"
+            rm -rf "$home/.cache/pikaur/pkg"
+            mkdir -p "$home/.cache/pikaur"
+            find "$home" \( ! -user "$user" -o ! -group "$user" \) -exec chown -h "$user:$user" {} +
+            "$tool" -S --aur --noconfirm --user-id "$uid" --group-id "$gid" --home-dir "$home" "${aur_deps[@]}"
+            for f in "$home"/.cache/pikaur/pkg/*.pkg.tar.zst; do
+                [ ! -f "$f" ] || cp -f "$f" "$handover/"
+            done
+        fi
+        # A clean build identity has no source-signing keys yet. Import only
+        # full fingerprints declared by this recipe; makepkg still verifies
+        # the source signatures against validpgpkeys (never --skippgpcheck).
+        while read -r key; do
+            [[ "$key" =~ ^[[:xdigit:]]{40}$ || "$key" =~ ^[[:xdigit:]]{64}$ ]] || die "invalid source PGP fingerprint"
+            as_builder gpg --batch --list-keys "$key" >/dev/null 2>&1 || \
+                as_builder timeout 45 gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys "$key"
+        done < <(awk '$1 == "validpgpkeys" {print $3}' /run/locachy-local.srcinfo | sort -u)
+        as_builder env LANG=C.UTF-8 PKGDEST="$handover" bash -c 'cd "$1"; makepkg --force --noconfirm' bash "$src"
+        exit 0
+    fi
+    if [ -n "$tool" ]; then
+        # pikaur makes some of the build user's home as root: the user's again.
+        rm -rf "$home/.cache/pikaur/pkg" "$home/patched"
+        mkdir -p "$home/.local/share/pikaur/aur_repos" "$home/.cache/pikaur" "$home/patched"
+        find "$home" \( ! -user "$user" -o ! -group "$user" \) -exec chown -h "$user:$user" {} +
+        # AUR packages LOCachy changes: aur-patches/NAME.sed, a sed script for
+        # the AUR's PKGBUILD (a line or two: the Arch Wiki's Patching
+        # packages). Each, asked for or needed through others (the AUR's RPC
+        # lists their dependencies), is the AUR's recipe of the moment
+        # (pikaur -G) with its script applied, built by pikaur (-P) and put
+        # in this root, so that pikaur then builds the rest against it. A
+        # script that no longer changes the recipe stops the build: the AUR
+        # changed what it was written for, and it needs a look.
+        aur_patched() { # MODE NAME...: "NAME BASE" lines (asked: those of NAME...; deps: of their dependencies)
+            python3 -I - "$patches" "$@" <<'PY'
+import json, os, re, subprocess, sys, urllib.parse, urllib.request
+patches, mode, names = sys.argv[1], sys.argv[2], sys.argv[3:]
+patched = {f[:-4] for f in (os.listdir(patches) if os.path.isdir(patches) else []) if f.endswith(".sed")}
+def found(*cmd):
+    return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+def info(batch):
+    query = urllib.parse.urlencode([("arg[]", n) for n in batch])
+    with urllib.request.urlopen("https://aur.archlinux.org/rpc/v5/info?" + query, timeout=30) as r:
+        return json.load(r)["results"]
+if mode == "asked":
+    want = [n for n in names if n in patched]
+    for pkg in info(want) if want else []:
+        print(pkg["Name"], pkg["PackageBase"])
+    sys.exit(0)
+seen, need, todo = set(), set(), list(names)
+while todo:
+    batch = sorted(set(todo) - seen)
+    todo = []
+    if not batch:
+        break
+    seen |= set(batch)
+    for pkg in info(batch):
+        for dep in pkg.get("Depends", []) + pkg.get("MakeDepends", []):
+            name = re.split(r"[<>=]", dep, maxsplit=1)[0]
+            if found("pacman", "-T", dep):
+                continue  # in this root already (or a variant providing it)
+            if name in patched:
+                need.add(name)
+            elif not found("pacman", "-Sp", dep):
+                todo.append(name)
+for pkg in info(sorted(need)) if need else []:
+    print(pkg["Name"], pkg["PackageBase"])
+PY
+        }
+        build_patched() { # NAME BASE
+            local name=$1 base=$2 dir="$home/patched/$2" f
+            rm -rf "$dir"
+            (cd "$home/patched" && as_builder "$tool" -G --home-dir "$home" "$base") >/dev/null
+            [ -f "$dir/PKGBUILD" ] || die "$name: the AUR has no recipe $base"
+            cp "$dir/PKGBUILD" "$dir/PKGBUILD.aur"
+            sed -i -f "$patches/$name.sed" "$dir/PKGBUILD"
+            if cmp -s "$dir/PKGBUILD" "$dir/PKGBUILD.aur"; then
+                die "$name: $patches/$name.sed no longer changes the AUR's PKGBUILD of $base: it changed, review it"
+            fi
+            echo "== locachy-build: $name: the AUR's $base with $name.sed:"
+            diff -u "$dir/PKGBUILD.aur" "$dir/PKGBUILD" || true
+            chown -R "$user:$user" "$dir"
+            "$tool" -P --noedit --noconfirm --user-id "$uid" --group-id "$gid" --home-dir "$home" "$dir/PKGBUILD"
+            for f in "$home"/.cache/pikaur/pkg/*.pkg.tar.zst; do
+                case $f in *-debug-*) continue ;; esac
+                [ -f "$f" ] && pacman -U --noconfirm --ask 4 --asdeps "$f"
+            done
+        }
+        asked=$(aur_patched asked "$@") || die "the AUR did not answer for: $*"
+        rest=()
+        for name in "$@"; do
+            case $'\n'"$asked"$'\n' in
+                *$'\n'"$name "*) ;;
+                *) rest+=("$name") ;;
+            esac
+        done
+        while read -r name base; do
+            [ -z "$name" ] || build_patched "$name" "$base"
+        done <<<"$asked"
+        deps=$(aur_patched deps "$@") || die "the AUR did not answer for the dependencies of: $*"
+        while read -r name base; do
+            [ -z "$name" ] || build_patched "$name" "$base"
+        done <<<"$deps"
+        if [ "${#rest[@]}" -gt 0 ]; then
+            "$tool" -Sw --aur --noconfirm --user-id "$uid" --group-id "$gid" --home-dir "$home" \
+                ${LOCACHY_BUILD_REBUILD:+--rebuild} "${rest[@]}"
+        fi
+        cp -f "$home"/.cache/pikaur/pkg/*.pkg.tar.zst "$handover"/
+        exit 0
+    fi
+    # The newest file of package $1, built before (root's cache) or now.
+    built() {
+        ls -t "$out/$1"-[0-9]*.pkg.tar.zst "$handover/$1"-[0-9]*.pkg.tar.zst 2>/dev/null | head -1 || true
+    }
+    build_one() {
+        local pkg=$1 d f deps repo_deps=() aur_deps=() src="$home/bootstrap/$1"
+        echo "== locachy-build: $pkg ($(date +%T))"
+        rm -rf "$src"
+        as_builder mkdir -p "$home/bootstrap"
+        as_builder git clone -q --depth=1 "https://aur.archlinux.org/$pkg.git" "$src"
+        deps=$(as_builder bash -c "cd '$src' && makepkg --printsrcinfo" |
+            awk '$1 == "depends" || $1 == "makedepends" {print $3}' | sed 's/[<>=].*//' | sort -u)
+        for d in $deps; do
+            pacman -T "$d" >/dev/null 2>&1 && continue
+            if pacman -Sp "$d" >/dev/null 2>&1; then
+                repo_deps+=("$d")
+            else
+                aur_deps+=("$d")
+            fi
+        done
+        if [ "${#repo_deps[@]}" -gt 0 ]; then
+            pacman --noconfirm -S --needed --asdeps "${repo_deps[@]}"
+        fi
+        for d in "${aur_deps[@]}"; do
+            [ -n "$(built "$d")" ] || build_one "$d"
+            f=$(built "$d")
+            [ -n "$f" ] && pacman -U --noconfirm --asdeps "$f"
+        done
+        if [ "$pkg" = "pikaur-static" ]; then
+            # pikaur-static as root builds as the build user unless told otherwise.
+            sed -i '/make standalone/i sed -i '\''s/mode="r|gz"/mode="r|*"/'\'' pikaur_static/pypyalpm.py; sed -i '\''/import os/a import sys\\nif os.geteuid() == 0 and not any(a.startswith("--user-id") for a in sys.argv): sys.argv[1:1] = ["--user-id='"$uid"'", "--group-id='"$gid"'"]'\'' pikaur_static/pikaur-static.py' "$src/PKGBUILD"
+        fi
+        as_builder env PKGDEST="$handover" bash -c "cd '$src' && makepkg -f --noconfirm --nocheck"
+    }
+    for pkg in "$@"; do
+        build_one "$pkg"
+    done
+    exit 0
+fi
+
+if [ "${LOCACHY_BUILD_STAGE:-}" = ns ]; then
+    root=$run/root
+    # userxattr lets mapped root create overlay whiteouts without trusted.*
+    # xattrs, so package removal and build-root cleanup work rootlessly.
+    mount -t overlay overlay -o "lowerdir=/,upperdir=$run/upper,workdir=$run/work,userxattr" "$root"
+    # Its own /proc, /sys (read-only), /run and /tmp; of /dev, what builds use.
+    mount -t proc proc "$root/proc" -o nosuid,noexec,nodev
+    # A fresh sysfs mount is refused in a mapped user namespace. Clone the
+    # existing tree recursively read-only, including any cgroup mounts.
+    mount -o rbind,ro=recursive /sys "$root/sys"
+    mount -t tmpfs run "$root/run" -o mode=0755,nosuid,nodev
+    if [ "${1:-}" = --local ]; then
+        mkdir -p "$root/run/locachy-recipe"
+        mount --bind -o ro "$run/recipe" "$root/run/locachy-recipe"
+    fi
+    if [ -n "$prepare" ]; then
+        mkdir -p "$root/run/locachy-update"
+        mount --bind -o ro "$prepare" "$root/run/locachy-update"
+        rm -rf "$root/var/lib/pacman/sync"
+        mkdir -p "$root/var/lib/pacman/sync"
+        cp -a "$prepare/sync/." "$root/var/lib/pacman/sync/"
+        cp "$prepare/pacman.conf" "$root/etc/pacman.conf"
+        # This root is for compilation/contracts, not a running installation.
+        # Repository and candidate hooks must not rebuild boot files here.
+        for hooks in usr/share/libalpm/hooks etc/pacman.d/hooks; do
+            mkdir -p "$root/$hooks"
+            mount -t tmpfs -o mode=0755,nosuid,nodev,noexec tmpfs "$root/$hooks"
+        done
+    fi
+    mount --bind "$run/tmp" "$root/tmp"
+    mount -t tmpfs dev "$root/dev" -o mode=0755,nosuid
+    for d in null zero full random urandom tty; do
+        [ -e "/dev/$d" ] || continue
+        touch "$root/dev/$d"
+        mount --bind "/dev/$d" "$root/dev/$d"
+    done
+    mkdir -p "$root/dev/pts" "$root/dev/shm"
+    mount -t devpts devpts "$root/dev/pts" -o mode=0620,gid=5,ptmxmode=0666
+    mount -t tmpfs shm "$root/dev/shm" -o mode=1777,nosuid,nodev
+    ln -sf pts/ptmx "$root/dev/ptmx"
+    ln -sf /proc/self/fd "$root/dev/fd"
+    ln -sf /proc/self/fd/0 "$root/dev/stdin"
+    ln -sf /proc/self/fd/1 "$root/dev/stdout"
+    ln -sf /proc/self/fd/2 "$root/dev/stderr"
+    # The host's own state out of sight; then the build user's home, the
+    # hand-over, and root's cache read-only.
+    mount -t tmpfs -o mode=0755,nosuid,nodev,size=1m hidden "$root/var/lib/locachy"
+    [ ! -d "$root/var/log/locachy" ] || mount -t tmpfs -o mode=0755,nosuid,nodev,size=1m hidden "$root/var/log/locachy"
+    mount -t tmpfs -o mode=0755,nosuid,nodev,size=1m hidden "$root/home"
+    mount -t tmpfs -o mode=0700,nosuid,nodev hidden "$root/root" # root's home, for pikaur run as root
+    mkdir -p "$root$home" "$root$handover"
+    mount --bind "$home" "$root$home"
+    mount --bind "$run/out" "$root$handover"
+    mkdir -p "$root$out"
+    mount --bind -o ro "$out" "$root$out"
+    mount --bind /var/cache/pacman/pkg "$root/var/cache/pacman/pkg"
+    if [ -f /etc/netns/locachy-net/resolv.conf ]; then
+        cp -f /etc/netns/locachy-net/resolv.conf "$root/etc/resolv.conf" 2>/dev/null || true
+    else
+        cp -f /etc/resolv.conf "$root/etc/resolv.conf" 2>/dev/null || true
+    fi
+    cp -f "$0" "$root/usr/local/bin/locachy-build"
+    # Its own environment, none of the caller's: root's home there (pikaur
+    # runs as root first; the build user's is set when it becomes it).
+    env=(env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/bin HOME=/root LANG=C.UTF-8 TERM="${TERM:-dumb}"
+        LOCACHY_BUILD_STAGE=chroot ${LOCACHY_BUILD_REBUILD:+LOCACHY_BUILD_REBUILD=1}
+        ${prepare:+LOCACHY_BUILD_PREPARE=/run/locachy-update})
+    net=()
+    [ ! -e /run/netns/locachy-net ] || net=(ip netns exec locachy-net)
+    # A build cannot leave descendants running to rewrite its hand-over.
+    # This also keeps package scripts away from the host process tree.
+    "${net[@]}" unshare --pid --fork --kill-child --mount-proc="$root/proc" \
+        chroot "$root" "${env[@]}" /usr/local/bin/locachy-build "$@"
+    if [ -n "$prepare" ]; then
+        install -d -m 0700 -o root -g root "$run/sealed"
+        if [ "${1:-}" = --local ]; then
+            # The split recipe may also build a library. Seal only the exact
+            # requested output, never a sibling that could replace distro code.
+            artifact=
+            for f in "$run"/out/*.pkg.tar.zst; do
+                [ -f "$f" ] && [ ! -L "$f" ] || continue
+                built_name=$(bsdtar -xOf "$f" .PKGINFO | sed -n 's/^pkgname = //p')
+                [ "$built_name" = "$2" ] || continue
+                [ -z "$artifact" ] || die "prepared build produced duplicate $2 outputs"
+                install -m 0600 -o root -g root "$f" "$run/sealed/"
+                artifact=$run/sealed/${f##*/}
+            done
+            [ -n "$artifact" ] || die "prepared build did not produce $2"
+            bsdtar -xOf "$artifact" .BUILDINFO >"$run/out/BUILDINFO"
+        else
+            # All unprivileged builds have ended. Copy their sealed exact
+            # outputs, checking bytes and the common repository base first.
+            python3 -B - "$prepare" "$run" <<'PY'
+import hashlib, json, os, pathlib, shutil, sys
+plan, run = map(pathlib.Path, sys.argv[1:])
+data = json.loads((plan / 'plan.json').read_text())
+base = hashlib.sha256((run / 'out/target-base-packages.txt').read_bytes()).hexdigest()
+builds = {}
+for name in sorted(data['recipes']):
+    directory = plan / 'prepared' / name
+    item = json.loads((directory / 'build.json').read_text())
+    artifact = pathlib.Path(item['artifact'])
+    if item.get('name') != name or item.get('source_host_sha256') != data['host_sha256'] or \
+            item.get('recipe_sha256') != data['recipes'][name]['recipe_sha256'] or \
+            item.get('target_base_sha256') != base:
+        raise RuntimeError(name + ': build differs from the common target')
+    if artifact.is_symlink() or not artifact.is_file() or artifact.parent.resolve() != directory.resolve():
+        raise RuntimeError(name + ': artifact outside prepared directory')
+    if hashlib.sha256(artifact.read_bytes()).hexdigest() != item['sha256']:
+        raise RuntimeError(name + ': built artifact changed')
+    target = run / 'sealed' / artifact.name
+    if target.exists(): raise RuntimeError('duplicate prepared artifact filename')
+    shutil.copyfile(artifact, target)
+    target.chmod(0o600)
+    builds[name] = item
+(run / 'sealed/builds.json').write_text(json.dumps(builds, sort_keys=True))
+(run / 'sealed/artifacts.list').write_text(''.join('/run/locachy-sealed/' + pathlib.Path(x['artifact']).name + '\n' for x in builds.values()))
+PY
+            mkdir -p "$root/run/locachy-sealed"
+            mount --bind -o ro "$run/sealed" "$root/run/locachy-sealed"
+            # Install all candidate outputs together; no scripts or hooks run
+            # before their independent contracts have passed in this same root.
+            for hooks in usr/share/libalpm/hooks etc/pacman.d/hooks; do
+                mkdir -p "$root/$hooks"
+                mount -t tmpfs -o mode=0755,nosuid,nodev,noexec tmpfs "$root/$hooks"
+            done
+            mapfile -t artifacts <"$run/sealed/artifacts.list"
+            [ "${#artifacts[@]}" -gt 0 ] || die "no prepared artifacts"
+            "${net[@]}" unshare --pid --fork --kill-child --mount-proc="$root/proc" \
+                chroot "$root" env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/bin HOME=/root LANG=C.UTF-8 \
+                pacman -U --noscriptlet --noconfirm --ask 4 --assume-installed initramfs --asdeps "${artifacts[@]}"
+            chroot "$root" pacman -Q >"$run/out/target-packages.txt"
+            test_source=$(python3 -I - "$prepare/plan.json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f: plan=json.load(f)
+source=plan.get('test_source',{}).get('snapshot')
+if not source: raise RuntimeError('update plan has no pinned test sources')
+print(source)
+PY
+            )
+            gate=$test_source/link/local-package-gate
+            [ -f "$gate" ] || die "no trusted test gate"
+            mapfile -t names < <(python3 -I - "$prepare/plan.json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f: print('\n'.join(sorted(json.load(f)['recipes'])))
+PY
+            )
+            for name in "${names[@]}"; do
+                mkdir -p "$run/gate/$name"
+                timeout 600 bash -x "$gate" "$name" "$root" "$test_source" "$run/gate/$name" \
+                    >"$run/gate/$name/runner.log" 2>&1 || {
+                    tail -n 50 "$run/gate/$name/runner.log"; exit 1;
+                }
+            done
+            chroot "$root" pacman -Q >"$run/out/target-after-tests.txt"
+            cmp -s "$run/out/target-packages.txt" "$run/out/target-after-tests.txt" || die "contracts changed the tested package set"
+        fi
+    fi
+    exit 0
+fi
+
+# The newest file of each package in $out: "NAME FILE" lines.
+newest() {
+    local f name version
+    declare -A have=() file=()
+    for f in "$out"/*.pkg.tar.zst; do
+        [ -f "$f" ] || continue
+        name=$(bsdtar -xOf "$f" .PKGINFO | sed -n 's/^pkgname = //p')
+        version=$(bsdtar -xOf "$f" .PKGINFO | sed -n 's/^pkgver = //p')
+        case "$name" in *-debug) continue ;; esac
+        if [ -z "${have[$name]:-}" ] || [ "$(vercmp "$version" "${have[$name]}")" -gt 0 ]; then
+            have[$name]=$version
+            file[$name]=$f
+        fi
+    done
+    for name in "${!file[@]}"; do
+        printf '%s %s\n' "$name" "${file[$name]}"
+    done
+}
+
+if [ "${1:-}" = --files ]; then
+    root=$2
+    shift 2
+    declare -A files=() seen=()
+    while read -r name f; do
+        files[$name]=$f
+    done < <(newest)
+    queue=("$@")
+    while [ "${#queue[@]}" -gt 0 ]; do
+        p=${queue[0]}
+        queue=("${queue[@]:1}")
+        [ -z "${seen[$p]:-}" ] || continue
+        seen[$p]=1
+        [ -n "${files[$p]:-}" ] || { echo "locachy-build: $p is not built in $out" >&2; exit 1; }
+        echo "${files[$p]}"
+        for dep in $(bsdtar -xOf "${files[$p]}" .PKGINFO | sed -n 's/^depend = //p' | sed 's/[<>=].*//'); do
+            chroot "$root" pacman -T "$dep" >/dev/null 2>&1 && continue
+            pacman -Sp "$dep" >/dev/null 2>&1 && continue
+            queue+=("$dep")
+        done
+    done
+    exit 0
+fi
+
+bg=0
+inst=0
+local_recipe=0
+usage="usage: locachy-build [-b] [-i] [-r] [--local] PKG... | --files ROOT PKG... | --run COMMAND..."
+if [ "${1:-}" != --run ]; then
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        -b) bg=1; shift ;;
+        -i) inst=1; shift ;;
+        -r) export LOCACHY_BUILD_REBUILD=1; shift ;;
+        --local) local_recipe=1; shift ;;
+        --prepare)
+            [ $# -ge 2 ] || die "--prepare needs a pinned update directory"
+            prepare=$2
+            shift 2
+            ;;
+        --validate-prepared)
+            [ $# -eq 2 ] || die "--validate-prepared needs a pinned update directory"
+            prepare=$2
+            validate=1
+            shift 2
+            break
+            ;;
+        --) shift; break ;;
+        -*) echo "$usage" >&2; exit 2 ;;
+        *) break ;;
+        esac
+    done
+fi
+if [ "$validate" = 1 ]; then set -- --validate-prepared; fi
+[ $# -gt 0 ] || { echo "$usage" >&2; exit 2; }
+if [ -n "$prepare" ]; then
+    { [ "$local_recipe" = 1 ] || [ "$validate" = 1 ]; } && [ "$inst" = 0 ] && [ "$bg" = 0 ] || die "--prepare needs --local without -i or -b"
+    [[ "$prepare" = /* ]] && [ -d "$prepare" ] && [ ! -L "$prepare" ] || die "prepare directory must be an absolute pinned directory"
+    prepare=$(realpath -e -- "$prepare")
+    export LOCACHY_BUILD_PREPARE=$prepare
+fi
+if [ "$local_recipe" = 1 ]; then
+    [ $# -eq 1 ] && [[ "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9@._+-]*$ ]] || die "--local takes one package name"
+    [ -d "$recipes/$1" ] && [ ! -L "$recipes/$1" ] &&
+        { [ -f "$recipes/$1/PKGBUILD" ] || [ -f "$recipes/$1/upstream.json" ]; } || die "no local recipe or tracked overlay $recipes/$1"
+    set -- --local "$1"
+fi
+
+if [ "$bg" = 1 ]; then
+    mkdir -p /var/log/locachy
+    args=()
+    [ "$inst" = 1 ] && args+=(-i)
+    (
+        echo 0 >/sys/fs/cgroup/cgroup.procs 2>/dev/null || true
+        exec nice -n 19 ionice -c 3 "$0" "${args[@]}" "$@"
+    ) >>/var/log/locachy/build.log 2>&1 </dev/null &
+    echo "locachy-build: building $* in background (pid $!, log /var/log/locachy/build.log)"
+    exit 0
+fi
+
+getent passwd "$user" >/dev/null && [ -d "$home" ] || die "no build user $user with its home $home: make.sh makes them"
+install -d -m 0755 -o root -g root "$out"
+exec {lock}>"$bdir/lock"
+flock -x "$lock"
+rm -rf "$run" # what a run that was cut short left
+mkdir -p "$run/upper" "$run/work" "$run/root"
+install -d -m 1777 "$run/tmp"
+install -d -m 0755 -o "$user" -g "$user" "$run/out"
+if [ "${1:-}" = --local ]; then
+    # Freeze the exact trusted inputs before entering the disposable root;
+    # the compiler cannot change the recipe used for the build record.
+    [ -z "$(find "$recipes/$2" -type l -print -quit)" ] || die "local recipes must not contain symlinks"
+    recipe=$recipes/$2
+    if [ -n "$prepare" ]; then
+        recipe=$(python3 -B - "$prepare" "$2" <<'PY'
+import json, os, sys
+lock, name = sys.argv[1:]
+with open(os.path.join(lock, "plan.json")) as f: data=json.load(f)
+item=data["recipes"][name]
+print(item["recipe_dir"])
+PY
+        )
+        [ -d "$recipe" ] && [ ! -L "$recipe" ] || die "pinned recipe disappeared"
+    elif [ -f "$recipe/upstream.json" ]; then
+        recipe=$(python3 -B - "$recipes" "$records" "$2" <<'PY'
+import importlib.util, os, sys
+recipes, state, name=sys.argv[1:]
+p='/usr/local/src/locachy/link/locachy_upstream.py'
+s=importlib.util.spec_from_file_location('locachy_upstream',p)
+m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+print(m.effective_recipe(name,os.path.join(recipes,name),state))
+PY
+        )
+    fi
+    [ -z "$(find "$recipe" -type l -print -quit)" ] || die "effective recipe must not contain symlinks"
+    [ -f "$recipe/PKGBUILD" ] || die "effective recipe has no PKGBUILD; prepare the tracked upstream candidate first"
+    cp -a -- "$recipe" "$run/recipe"
+    python3 -B - "$run/recipe" "$recipes" "$records" "$2" >"$run/local-record.json" <<'PY'
+import hashlib, json, os, subprocess, sys, time
+path, recipes, record_dir, name = sys.argv[1:]
+h = hashlib.sha256()
+for base, dirs, files in os.walk(path):
+    dirs.sort()
+    for filename in sorted(files):
+        full = os.path.join(base, filename)
+        h.update(os.path.relpath(full, path).encode() + b"\0")
+        with open(full, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        h.update(b"\0")
+local = {n for n in os.listdir(recipes)
+         if any(os.path.isfile(os.path.join(recipes, n, marker)) for marker in ("PKGBUILD", "upstream.json"))}
+if os.path.isdir(record_dir):
+    local |= {n[:-5] for n in os.listdir(record_dir) if n.endswith(".json") and not n.endswith(".build.json")}
+import importlib.util
+spec = importlib.util.spec_from_file_location("locachy_upstream", "/usr/local/src/locachy/link/locachy_upstream.py")
+upstream = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(upstream)
+json.dump({"name": name, "recipe": h.hexdigest(), "host": upstream.build_fingerprint(path, local),
+           "date": time.strftime("%Y-%m-%d %H:%M:%S")}, sys.stdout)
+PY
+fi
+modprobe overlay 2>/dev/null || true
+status=0
+unshare --mount --propagation private env LOCACHY_BUILD_STAGE=ns "$0" "$@" || status=$?
+if [ -n "$prepare" ]; then
+    if [ "$status" != 0 ]; then
+        failed=$prepare/failed/${2:-contracts}
+        install -d -m 0700 -o root -g root "$failed"
+        if [ -d "$run/gate" ]; then cp -a "$run/gate/." "$failed/"; fi
+        rm -rf "$run"
+        exit "$status"
+    fi
+    if [ "$validate" = 1 ]; then
+        python3 -B - "$prepare" "$run" <<'PY'
+import importlib.util, json, pathlib, shutil, sys
+plan, run = map(pathlib.Path, sys.argv[1:])
+data = json.loads((plan / 'plan.json').read_text())
+source = pathlib.Path(data['test_source']['snapshot'])
+spec = importlib.util.spec_from_file_location('locachy_transaction', source / 'link/locachy_transaction.py')
+tx = importlib.util.module_from_spec(spec); spec.loader.exec_module(tx)
+if tx.test_source_hash(source) != data['test_source']['sha256']:
+    raise RuntimeError('trusted test sources changed')
+builds = json.loads((run / 'sealed/builds.json').read_text())
+# Every proof binds the entire co-installed set. Changing any candidate
+# invalidates every contract, even if its own archive is still unchanged.
+artifacts = {name: item['sha256'] for name, item in builds.items()}
+for name, item in builds.items():
+    directory = plan / 'prepared' / name
+    artifact = pathlib.Path(item['artifact'])
+    if tx.file_hash(artifact) != item['sha256'] or tx.file_hash(run / 'sealed' / artifact.name) != item['sha256']:
+        raise RuntimeError(name + ': artifact changed while testing')
+    gate = json.loads((run / 'gate' / name / 'gate.json').read_text())
+    expected = data['recipes'][name].get('candidate', {}).get('gate')
+    if not expected or gate.get('name') != name or gate.get('id') != expected or gate.get('passed') is not True:
+        raise RuntimeError(name + ': package contract did not pass')
+    for filename in ('target-packages.txt', 'target-base-packages.txt'):
+        shutil.copyfile(run / 'out' / filename, directory / filename)
+    old = directory / 'gate'
+    if old.exists(): shutil.rmtree(old)
+    shutil.copytree(run / 'gate' / name, old)
+    gate.update(artifact_sha256=item['sha256'], artifacts=artifacts,
+                test_hash=data['test_source']['sha256'], source_sha256=data['test_source']['sha256'])
+    item.update(tests=gate, target_packages_sha256=tx.file_hash(directory / 'target-packages.txt'),
+                target_base_sha256=tx.file_hash(directory / 'target-base-packages.txt'))
+    tx.write_json(directory / 'result.json', item)
+PY
+        echo "== locachy-build: all prepared outputs tested together (host packages unchanged)"
+    else
+        destination=$prepare/prepared/$2
+        install -d -m 0700 -o root -g root "$destination"
+        rm -f "$destination/result.json" "$destination/build.json"
+        find "$destination" -maxdepth 1 -type f -name '*.pkg.tar.zst' -delete
+        cp -a "$run/sealed/"*.pkg.tar.zst "$destination/"
+        for metadata in target-base-packages.txt BUILDINFO; do
+            cp "$run/out/$metadata" "$destination/$metadata"
+        done
+        cp "$run/local-record.json" "$destination/build-record.json"
+        python3 -B - "$destination" "$2" "$prepare" <<'PY'
+import glob, hashlib, json, os, subprocess, sys
+out, name, lock = sys.argv[1:]
+with open(os.path.join(lock, 'plan.json')) as f: plan=json.load(f)
+matching = []
+for path in glob.glob(os.path.join(out, '*.pkg.tar.zst')):
+    text = subprocess.run(['bsdtar', '-xOf', path, '.PKGINFO'], check=True, capture_output=True, text=True).stdout
+    fields = dict(line.split(' = ', 1) for line in text.splitlines() if ' = ' in line)
+    if fields.get('pkgname') == name: matching.append((path, fields['pkgver']))
+if len(matching) != 1: raise RuntimeError('prepared exact artifact is missing or duplicated')
+artifact, version = matching[0]
+def digest(path):
+    with open(path, 'rb') as f: return hashlib.file_digest(f, 'sha256').hexdigest()
+item = {'name': name, 'version': version, 'artifact': artifact, 'sha256': digest(artifact),
+        'source_host_sha256': plan['host_sha256'], 'recipe': plan['recipes'][name],
+        'recipe_sha256': plan['recipes'][name]['recipe_sha256'],
+        'target_base_sha256': digest(os.path.join(out, 'target-base-packages.txt')),
+        'record': json.load(open(os.path.join(out, 'build-record.json')))}
+with open(os.path.join(out, 'build.json.new'), 'w') as f: json.dump(item, f, sort_keys=True)
+os.replace(os.path.join(out, 'build.json.new'), os.path.join(out, 'build.json'))
+PY
+        echo "== locachy-build: sealed $2; waiting for combined contracts (host packages unchanged)"
+    fi
+    rm -rf "$run"
+    exit 0
+fi
+# Only a successful local build may replace the package that its record
+# describes. Failed local builds leave the previous cache and record intact.
+if [ "$status" = 0 ] || [ "$local_recipe" = 0 ]; then
+    for f in "$run"/out/*.pkg.tar.zst; do
+        [ ! -f "$f" ] || install -m 0644 -o root -g root "$f" "$out/"
+    done
+fi
+if [ "$status" = 0 ] && [ "$local_recipe" = 1 ]; then
+    name=$2
+    artifact=
+    for f in "$run"/out/*.pkg.tar.zst; do
+        [ -f "$f" ] || continue
+        pkg=$(bsdtar -xOf "$f" .PKGINFO | sed -n 's/^pkgname = //p')
+        [ "$pkg" != "$name" ] || artifact=$out/${f##*/}
+    done
+    [ -n "$artifact" ] || { rm -rf "$run"; die "local recipe did not produce $name"; }
+    install -d -m 0755 -o root -g root "$records"
+    python3 - "$run/local-record.json" "$artifact" "$records/$name.build.json" <<'PY'
+import hashlib, json, os, subprocess, sys
+record, artifact, target = sys.argv[1:]
+with open(record) as f:
+    data = json.load(f)
+h = hashlib.sha256()
+with open(artifact, "rb") as f:
+    for chunk in iter(lambda: f.read(1024 * 1024), b""):
+        h.update(chunk)
+info = subprocess.run(["bsdtar", "-xOf", artifact, ".PKGINFO"], check=True, capture_output=True, text=True).stdout
+fields = dict(line.split(" = ", 1) for line in info.splitlines() if " = " in line)
+data.update(artifact=os.path.basename(artifact), sha256=h.hexdigest(), version=fields["pkgver"])
+with open(target + ".new", "w") as f:
+    json.dump(data, f, sort_keys=True)
+os.chmod(target + ".new", 0o644)
+os.replace(target + ".new", target)
+PY
+fi
+rm -rf "$run"
+[ "$status" = 0 ] || exit "$status"
+[ "$1" != --run ] || exit 0
+
+if [ "$local_recipe" = 1 ]; then
+    name=$2
+    if [ "$inst" = 1 ]; then
+        # Install this exact result, not a higher-version stale cache entry
+        # (a deliberate recipe rollback is valid). pacman -U resolves missing
+        # runtime dependencies from sync repositories; only AUR deps need
+        # additional package files. Keep version constraints for the checks.
+        files=("$artifact")
+        for dep in $(bsdtar -xOf "$artifact" .PKGINFO | sed -n 's/^depend = //p'); do
+            pacman -T "$dep" >/dev/null 2>&1 && continue
+            pacman -Sp "$dep" >/dev/null 2>&1 && continue
+            bare=${dep%%[\<\>\=]*}
+            listing=$("$0" --files / "$bare") || die "cannot resolve built files for $bare"
+            [ -n "$listing" ] || die "no built files for $bare"
+            mapfile -t deps <<<"$listing"
+            files+=("${deps[@]}")
+        done
+        # The host has no Internet namespace: -U may download those runtime
+        # dependencies even though the local artifact itself is on disk.
+        net=()
+        [ ! -e /run/netns/locachy-net ] || net=(ip netns exec locachy-net)
+        # Reinstall even the same version: a changed local patch is meaningful.
+        "${net[@]}" pacman -U --noconfirm --asdeps "${files[@]}"
+        pacman -D --asexplicit "$name" >/dev/null
+        install -m 0644 -o root -g root "$records/$name.build.json" "$records/$name.json.new"
+        mv -f "$records/$name.json.new" "$records/$name.json"
+    fi
+elif [ "$inst" = 1 ]; then
+    listing=$("$0" --files / "$@") || die "cannot resolve built package files"
+    [ -n "$listing" ] || die "no built package files"
+    mapfile -t files <<<"$listing"
+    # --ask 4: yes to removing a package one of these conflicts with (asked
+    # for: a variant in place of another, python-dlib-cuda for python-dlib).
+    pacman -U --needed --noconfirm --ask 4 --asdeps "${files[@]}"
+    pacman -D --asexplicit "$@" >/dev/null
+fi
+echo "== locachy-build: done ($*): $(ls -t "$out"/*.pkg.tar.zst 2>/dev/null | head -3 | tr '\n' ' ')"

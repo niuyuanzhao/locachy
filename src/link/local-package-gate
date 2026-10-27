@@ -1,0 +1,79 @@
+#!/bin/bash
+# The trusted outer test gate for a locally patched package. Run only after
+# the unprivileged build has ended. ROOT is the upgraded disposable root,
+# SOURCE our trusted sources (not the downloaded PKGBUILD), OUT a private
+# result directory. Never run tests against the live display or host labwc.
+set -euo pipefail
+name=${1:?usage: local-package-gate NAME ROOT SOURCE OUT}
+root=${2:?}
+source=${3:?}
+out=${4:?}
+case "$name" in
+labwc-locachy|libinput|libinput-tools|libmupdf) ;;
+*) echo "local-package-gate: no test contract for $name" >&2; exit 1 ;;
+esac
+for path in "$root" "$source" "$out"; do
+    [[ "$path" = /* ]] && [ -d "$path" ] || exit 1
+done
+export root source out name
+# Contracts without cgroups: tools/test-NAME.sh in the target root.
+if [ "$name" != labwc-locachy ]; then
+    exec unshare --mount --propagation private --pid --fork --kill-child --mount-proc bash -euc '
+        install -d "$root/run/locachy-gate-source" "$root/run/locachy-gate-results"
+        mount --bind -o ro "$source" "$root/run/locachy-gate-source"
+        mount --bind "$out" "$root/run/locachy-gate-results"
+        mount -t proc proc "$root/proc" -o nosuid,noexec,nodev
+        chroot "$root" env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/bin HOME=/root LANG=C.UTF-8 \
+            bash "/run/locachy-gate-source/tools/test-$name.sh" /run/locachy-gate-results
+    '
+fi
+exec unshare --mount --propagation private --pid --fork --kill-child --mount-proc bash -euc '
+    # Sysfs stays recursively read-only. Only this trusted freezer contract
+    # receives a fresh cgroup2 view in the caller-provided cgroup namespace.
+    mount -t cgroup2 -o nosuid,noexec,nodev cgroup2 "$root/sys/fs/cgroup"
+    mount -t proc proc "$root/proc" -o nosuid,noexec,nodev
+    install -d "$root/run/locachy-gate-source" "$root/run/locachy-gate-results"
+    mount --bind -o ro "$source" "$root/run/locachy-gate-source"
+    mount --bind "$out" "$root/run/locachy-gate-results"
+    chroot "$root" env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/bin HOME=/root LANG=C.UTF-8 \
+        bash -euc '\''
+        src=/run/locachy-gate-source
+        result=/run/locachy-gate-results
+        out=/var/tmp/locachy-gate-build
+        mkdir -p "$out" /run/user /run/locachy /usr/local/lib/locachy \
+            /etc/locachy/labwc /var/lib/locachy/rime /usr/local/share/locachy
+        # A first root has no installed LOCachy runtime yet. Install only
+        # the trusted test configuration, never run make.sh or its boot path.
+        install -m 644 "$src/link/labwc-rc.xml" /etc/locachy/labwc/rc.xml
+        sed -i s/TERMINAL-KEY/C-A-t/ /etc/locachy/labwc/rc.xml
+        install -m 644 "$src/rc.conf" /etc/locachy/rc.conf
+        printf '\''lock_after="0"\n'\'' >>/etc/locachy/rc.conf
+        : >/etc/locachy/monitors.conf
+        install -m 644 "$src/base/rime/mode-labels.conf" /usr/local/share/locachy/ime-mode-labels.conf
+        # Rebuild our host clients against the target libraries, not the old
+        # host ABI. Only our trusted sources are compiled as root here.
+        sh "$src/tools/build-check.sh" "$out" >"$result/host-clients-build.log" 2>&1
+        test -x /usr/bin/labwc
+        for p in security-context-v1 wlr-foreign-toplevel-management-unstable-v1 wlr-output-management-unstable-v1 ext-idle-notify-v1; do
+            wayland-scanner client-header "$src/base/protocols/$p.xml" "$out/$p-client-protocol.h"
+            wayland-scanner private-code "$src/base/protocols/$p.xml" "$out/$p-protocol.c"
+        done
+        ar rcs "$out/base.a" "$out"/obj/base-*.o
+        gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -DCONFIG_FREETYPE -DCONFIG_NETWORKMANAGER \
+            $(pkg-config --cflags freetype2 libnm) -I"$src/base/include" -I"$out" \
+            "$src/progs/labwc-control.c" "$out"/security-context-v1-protocol.c \
+            "$out"/wlr-foreign-toplevel-management-unstable-v1-protocol.c \
+            "$out"/wlr-output-management-unstable-v1-protocol.c "$out"/ext-idle-notify-v1-protocol.c "$out/base.a" \
+            $(pkg-config --libs freetype2 libnm) -lwayland-client -lm -o "$out/labwc-control"
+        install -m 755 "$out/labwc-control" /usr/local/lib/locachy/labwc-control
+        # Each test uses its own mount/PID namespace, runtime sockets and
+        # nested cgroup. No uinput or real input/display is exposed.
+        export LOCACHY_CLIPBOARD_TEST_OUT=/var/tmp/locachy-gate-clipboard
+        export LOCACHY_TEST_CLIPBOARD=$out/clipboard LOCACHY_TEST_LABWC=/usr/bin/labwc
+        timeout 180 bash "$src/tools/test-clipboard.sh" >"$result/clipboard.log" 2>&1
+        timeout 60 bash "$src/tools/test-clipboard-restricted.sh" >"$result/restricted.log" 2>&1
+        timeout 180 bash "$src/tools/test-clipboard-guard.sh" /usr/bin/labwc >"$result/guard.log" 2>&1
+        timeout 130 bash "$src/tools/test-clipboard-cgroup.sh" /usr/bin/labwc >"$result/cgroup.log" 2>&1
+        python3 -B -c "import json; json.dump({\"name\":\"labwc-locachy\",\"id\":\"labwc-clipboard-freeze-v1\",\"passed\":True,\"tests\":[\"clipboard\",\"restricted\",\"guard\",\"cgroup\"]},open(\"$result/gate.json\",\"w\"))"
+        '\''
+'

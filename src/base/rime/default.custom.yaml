@@ -1,0 +1,44 @@
+patch:
+  schema_list:
+    - schema: rime_frost
+    - schema: easy_en
+  menu/page_size: 20
+  # Caps Lock as Rime's own default.yaml has it: the key ends the composition
+  # (clear) and, while locked, every key goes on as typed (letters in
+  # capitals); the front end gives Rime the lock (base/ime.c).
+  ascii_composer/good_old_caps_lock: true
+  ascii_composer/switch_key/Caps_Lock: clear
+  # Chinese mode's punctuation at full width (where it starts; ascii_punct
+  # off): rime-frost / rime-ice's Chinese punctuation from half_shape, each
+  # committed at once with no menu; ASCII symbols (/ | ` ~ @ # % & * - + =)
+  # stay as typed. At half width (Ctrl+. or Shift+Space) every key is as typed.
+  punctuator/half_shape:
+    ",": { commit: "，" }
+    ".": { commit: "。" }
+    "<": { commit: "《" }
+    ">": { commit: "》" }
+    "?": { commit: "？" }
+    ";": { commit: "；" }
+    ":": { commit: "：" }
+    "'": { pair: ["‘", "’"] }
+    "\"": { pair: ["“", "”"] }
+    "\\": { commit: "、" }
+    "!": { commit: "！" }
+    "$": { commit: "¥" }
+    "^": { commit: "……" }
+    "(": { commit: "（" }
+    ")": { commit: "）" }
+    "_": { commit: "——" }
+    "[": { commit: "【" }
+    "]": { commit: "】" }
+    "{": { commit: "「" }
+    "}": { commit: "」" }
+  key_binder/bindings:
+    - { when: has_menu, accept: bracketleft, send: Page_Up }
+    - { when: has_menu, accept: bracketright, send: Page_Down }
+    - { when: has_menu, accept: minus, send: Page_Up }
+    - { when: has_menu, accept: equal, send: Page_Down }
+    - { when: has_menu, accept: Left, send: Up }
+    - { when: has_menu, accept: Right, send: Down }
+    - { when: has_menu, accept: Tab, send: Down }
+    - { when: has_menu, accept: ISO_Left_Tab, send: Up }

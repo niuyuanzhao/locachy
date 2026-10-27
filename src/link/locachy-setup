@@ -1,0 +1,127 @@
+#!/bin/bash
+# locachy-setup: configure host password, container user/password, and debug link.
+# Usage:
+#   locachy-setup                         interactive setup wizard
+#   locachy-setup status                  show current setup state
+#   locachy-setup debug-link on [ADDR [PORT [IFACE]]] reserve one debug port
+#                                         (ADDR PORT: as last time, if not given)
+#   locachy-setup debug-link off          return the port to NetworkManager
+# Process 1 starts or ends the service when it reads rc.conf again (kill -HUP
+# 1, as settings does after its Debug cable link switch).
+set -euo pipefail
+
+RC="/etc/locachy/rc.conf"
+
+show_status() {
+    local link_state="off"
+    if grep -qE '^[[:space:]]*service_link=' "$RC" 2>/dev/null; then
+        link_state="on ($(sed -n 's/^[[:space:]]*service_link="\([^"]*\)".*/\1/p' "$RC"))"
+    fi
+    local root_status
+    root_status=$(passwd -S root 2>/dev/null | awk '{print $2}' || echo "?")
+    echo "=== LOCachy System Setup Status ==="
+    echo "  Host root password : $root_status (P=set, NP=empty, L=locked)"
+    echo "  Debug cable link   : $link_state"
+    local debug_dev
+    debug_dev=$(sed -n 's/^debug_link_interface="\([^"]*\)".*/\1/p' "$RC" | tail -n 1)
+    echo "  Debug interface    : ${debug_dev:--}"
+    echo "  Containers dir     : /var/lib/locachy/containers"
+}
+
+set_debug_link() {
+    local mode="$1" saved
+    # The address and port of the line as it was (commented out when off).
+    saved=$(sed -n 's/^[[:space:]]*#*[[:space:]]*service_link="[^ "]* \([^ "]*\) \([0-9]*\)".*/\1 \2/p' "$RC" | tail -n 1)
+    local addr="${2:-${saved% *}}"
+    local port="${3:-${saved#* }}"
+    local dev="${4:-}"
+    addr="${addr:-fe80::14f0:c576:56c1:631f}"
+    port="${port:-2300}"
+    [ -n "$dev" ] || dev=$(sed -n 's/^debug_link_interface="\([^"]*\)".*/\1/p' "$RC" | tail -n 1)
+    if [ "$mode" = on ]; then
+        [ -n "$dev" ] && [[ "$dev" =~ ^[a-zA-Z0-9_.:-]+$ ]] || {
+            echo "locachy-setup: specify the debug interface: on ADDR PORT IFACE" >&2
+            return 2
+        }
+        if grep -q '^debug_link_interface=' "$RC"; then
+            sed -i "s/^debug_link_interface=.*/debug_link_interface=\"$dev\"/" "$RC"
+        else
+            printf '\ndebug_link_interface="%s"\n' "$dev" >>"$RC"
+        fi
+        if grep -qE '^[[:space:]]*#?[[:space:]]*service_link=' "$RC"; then
+            sed -i "s|^[[:space:]]*#*[[:space:]]*service_link=.*|service_link=\"/usr/local/lib/locachy/link-client $addr $port\"|" "$RC"
+        else
+            printf '\nservice_link="/usr/local/lib/locachy/link-client %s %s"\n' "$addr" "$port" >>"$RC"
+        fi
+        if [ ! -e "/sys/class/net/$dev" ] && [ -e /run/netns/locachy-net ]; then
+            nmcli device disconnect "$dev" >/dev/null 2>&1 || true
+            local host_pid=$$
+            ip netns exec locachy-net ip addr flush dev "$dev"
+            ip netns exec locachy-net ip link set "$dev" netns "$host_pid"
+        fi
+        echo "locachy-setup: $dev reserved for debug; other ports remain managed by NetworkManager"
+        echo "locachy-setup: kill -HUP 1 (or a reboot) starts the debug service"
+    elif [ "$mode" = off ]; then
+        sed -i 's/^[[:space:]]*service_link=/#service_link=/' "$RC"
+        echo "locachy-setup: returning the debug interface to NetworkManager (debug connection will close)"
+        /usr/local/lib/locachy/network-client --interfaces
+    else
+        echo "usage: locachy-setup debug-link [on [ADDR [PORT [IFACE]]] | off]" >&2
+        return 2
+    fi
+}
+
+if [ $# -gt 0 ]; then
+    case "$1" in
+    status) show_status; exit 0 ;;
+    debug-link) shift; set_debug_link "${1:-}" "${2:-}" "${3:-}" "${4:-}"; exit 0 ;;
+    *) echo "usage: locachy-setup [status | debug-link on|off]" >&2; exit 2 ;;
+    esac
+fi
+
+echo "=== LOCachy Interactive Setup ==="
+show_status
+echo
+
+read -r -p "1. Set host (outside) root password now? [y/N]: " ans
+if [[ "${ans:-N}" =~ ^[Yy]$ ]]; then
+    passwd root
+fi
+
+# The user is uid 1000: programs in containers run as it, and its home
+# /home/NAME holds the files every container and the host share.
+read -r -p "2. User name (owns /home/NAME, the shared files; default: nyz): " cuser
+cuser="${cuser:-nyz}"
+current=$(getent passwd 1000 | cut -d: -f1 || true)
+if [ -n "$current" ] && [ "$current" != "$cuser" ]; then
+    old_home=$(getent passwd 1000 | cut -d: -f6)
+    if [ -d "$old_home" ] && [ "${old_home#/home/}" != "$old_home" ]; then
+        usermod -l "$cuser" -d "/home/$cuser" -m "$current"
+    else
+        usermod -l "$cuser" -d "/home/$cuser" "$current"
+        install -d -o 1000 -g 1000 -m 0700 "/home/$cuser"
+    fi
+    groupmod -n "$cuser" "$current" 2>/dev/null || true
+    echo "Renamed user '$current' (uid 1000) to '$cuser'."
+elif [ -z "$current" ]; then
+    useradd -u 1000 -m -G wheel,video,audio -s /bin/bash "$cuser"
+    echo "Created user '$cuser'."
+fi
+
+# Its own password (sudo asks for it): never root's, which would make any
+# program of the user's that learns it root.
+read -r -p "3. Password of '$cuser': [c]hange, or [k]eep current? [c/K]: " pmode
+case "${pmode:-k}" in
+[Cc])
+    passwd "$cuser"
+    ;;
+esac
+
+read -r -p "4. Debug cable link (service_link): [k]eep current, [o]n, or [f]off? [K/o/f]: " lmode
+case "${lmode:-k}" in
+[Oo]) set_debug_link on ;;
+[Ff]) set_debug_link off ;;
+esac
+
+echo
+show_status

@@ -1,0 +1,9 @@
+# /etc/pam.d/locachy-lock-face (make.sh): the lock screen's face (and sudo's,
+# through pam_locachy_any.so), beside its password, when rc.conf has
+# unlock_face="1" (settings, once howdy is installed): the camera's infrared
+# emitter switched on first by linux-enable-ir-emitter (as it documents, set
+# up by settings as root), then howdy's module, then the account checked as
+# for a local login.
+auth      optional  pam_exec.so quiet /usr/bin/linux-enable-ir-emitter run --config /root/.config/linux-enable-ir-emitter.toml
+auth      required  pam_howdy.so
+account   include   system-local-login

@@ -1,0 +1,1099 @@
+#!/bin/bash
+# Daemonless per-app OverlayFS roots and root-level cgroup v2 control.
+#
+#   locachy-app run|start NAME [COMMAND...]  COMMAND: this once, not its own
+#   locachy-app [-n] NAME [COMMAND...]       legacy start; -n: network="1" in NAME's
+#                                            configuration
+#   locachy-app resume|freeze|stop NAME      kill is an alias for stop
+#   locachy-app install NAME PKG...          PKG... added to NAME's extras, then build
+#   locachy-app build NAME                   NAME's upper made anew from its packages
+#                                            (the old one kept as upper.prev)
+#   locachy-app rollback NAME                upper.prev back in its place
+#   locachy-app remove NAME [--data]         its configuration and state gone; its
+#                                            home (data) too only with --data
+#   locachy-app list [--machine]             name<TAB>state<TAB>ram_bytes<TAB>swap_bytes
+#   locachy-app open NAME TARGET             NAME's command with TARGET (path or URL),
+#                                            in it if it runs, else starting it
+#   locachy-app again NAME                   NAME's command once more, in it (asked
+#                                            first: it may start a second copy)
+#   locachy-app new NAME                     a window of it: started, or its command
+#                                            once more if it runs (the terminal key)
+#   locachy-app cameras                      the cameras there are now into the running
+#                                            containers with camera="1" (udev, as they
+#                                            come and go: 91-locachy-cameras.rules)
+#
+# All launcher/reaper/app processes belong to /sys/fs/cgroup/app_NAME, a
+# sibling of the host compositor. Controls must run outside the target group.
+# Resume only thaws: showing the window is the compositor's job.
+#
+# A container is its configuration, /etc/locachy/containers/NAME.conf (lines
+# NAME="VALUE"), and its state, /var/lib/locachy/containers/NAME (the
+# overlay's upper and work, its home in data). The configuration:
+#   package       its program's package (the repositories' or the AUR's)
+#   extras        more packages, separated by spaces
+#   command       the program it runs
+#   arguments     the program's arguments, separated by spaces (no quoting); a
+#                 file or URL it opens goes after them
+#   network       "1": on locachy-net
+#   camera        "1": the cameras (/dev/video*, /dev/media*: V4L2, as video calls
+#                 use them), the user's in it, as they come and go; its sound
+#                 (and so the microphone) it has whatever this says
+#   directories   more directories of the user's home, separated by colons, at
+#                 the same paths in it (not the home itself, not in Drives,
+#                 not in the shared user directories, which it has already)
+#   host          "1": a host program, no container: the host's own package (the
+#                 manifest), the real root and home; still its own namespaces,
+#                 cgroup, display socket (locachy-0) and bus, so that home starts,
+#                 freezes and stops it like a container
+#   desktop       a host program's .desktop files in /usr/share/applications,
+#                 separated by spaces: its windows, and what it opens
+# A container sees the host root through its overlay, minus the host's own
+# state (/var/lib/locachy, /var/log/locachy). Its programs run as the user
+# (uid 1000, made by locachy-setup) with a home of their own, in which the
+# shared user directories of the host home (USER_DIRS) are mounted at the
+# same paths. Of the host runtime they get the display (locachy-0) and sound
+# (PipeWire, Pulse) sockets only; of the devices, the GPU render nodes, and
+# with camera="1" the cameras (nodes of its own /dev, the user's). A
+# container has a session bus of its own, none of the host; locachy-bar is
+# the tray watcher on it.
+set -euo pipefail
+
+die() {
+    printf 'locachy-app: %s\n' "$*" >&2
+    exit 1
+}
+
+CGROUP_BASE="/sys/fs/cgroup"
+APP_UID=1000
+# The user directories every container shares with the host (XDG names).
+USER_DIRS="Documents Downloads Music Pictures Videos"
+CONT_BASE="${LOCACHY_CONT_BASE:-/var/lib/locachy/containers}"
+CONT_CONF="${LOCACHY_CONT_CONF:-/etc/locachy/containers}"
+APP_RUNTIME="${LOCACHY_APP_RUNTIME:-/run/locachy/apps}"
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/0}"
+APP_INIT="${LOCACHY_APP_INIT:-/usr/local/lib/locachy/app-init}"
+CLIPBOARD="${LOCACHY_CLIPBOARD_TOOL:-/usr/local/lib/locachy/clipboard}"
+
+# These overrides are intentionally a root-only integration-test seam. They
+# cannot be used to redirect a normal unprivileged invocation, and all paths
+# must be absolute so the test namespace cannot be selected accidentally.
+for override_name in LOCACHY_CONT_BASE LOCACHY_CONT_CONF LOCACHY_APP_RUNTIME LOCACHY_APP_INIT LOCACHY_CLIPBOARD_TOOL; do
+    if [ -n "${!override_name+x}" ]; then
+        [ "$(id -u)" = 0 ] || die "${override_name} override requires root"
+        override_value=${!override_name}
+        case "$override_value" in
+        /*) ;;
+        *) die "${override_name} must be an absolute path" ;;
+        esac
+    fi
+done
+case "$RUNTIME_DIR" in
+/*) ;;
+*) die 'XDG_RUNTIME_DIR must be an absolute path' ;;
+esac
+export XDG_RUNTIME_DIR="$RUNTIME_DIR"
+umask 077
+
+# The value of KEY in NAME's configuration, "" if it has none.
+is_host() { # NAME: a host program (host="1"), not a container
+    [ "$(conf_value "$1" host)" = 1 ]
+}
+
+conf_value() {
+    sed -n "s/^[[:space:]]*$2=\"\([^\"]*\)\".*/\1/p" "$CONT_CONF/$1.conf" 2>/dev/null | tail -n 1
+}
+
+# KEY="VALUE" in NAME's configuration, in place of its line (VALUE: no quote,
+# no newline).
+conf_set() {
+    local file="$CONT_CONF/$1.conf"
+    mkdir -p "$CONT_CONF"
+    {
+        grep -v "^[[:space:]]*$2=" "$file" 2>/dev/null || true
+        printf '%s="%s"\n' "$2" "$3"
+    } >"$file.new"
+    mv -f "$file.new" "$file"
+}
+
+# NAME's command and arguments, into the array saved_cmd.
+saved_command() {
+    read -r -a saved_cmd <<<"$(conf_value "$1" command) $(conf_value "$1" arguments)" || true
+    [ "${#saved_cmd[@]}" -gt 0 ] || die "$1 has no command (command= in $CONT_CONF/$1.conf)"
+}
+
+# NAME's packages: its package and extras, into the array packages.
+saved_packages() {
+    read -r -a packages <<<"$(conf_value "$1" package) $(conf_value "$1" extras)" || true
+}
+
+# Why DIR (of NAME's directories) cannot be given to a container whose user
+# has the home UHOME; nothing if it can.
+directory_refused() { # DIR UHOME
+    local d=${1%/} rel shared
+    case "$d" in
+    "$2"/?*) ;;
+    *) printf '%s is not in %s\n' "$1" "$2"; return ;;
+    esac
+    [ -d "$d" ] || { printf '%s is not a directory\n' "$1"; return; }
+    # No link, . or .. on the way: it is where it says.
+    [ "$(realpath -e -- "$d")" = "$d" ] || { printf '%s goes through a link\n' "$1"; return; }
+    rel=${d#"$2"/}
+    case "${rel%%/*}" in
+    Drives) printf '%s is in Drives, which it has already (as a whole: a drive in it could not be ejected)\n' "$1"; return ;;
+    esac
+    for shared in $USER_DIRS; do
+        [ "${rel%%/*}" != "$shared" ] || { printf '%s is in %s, which it has already\n' "$1" "$shared"; return; }
+    done
+}
+
+valid_name() {
+    [[ "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$ ]]
+}
+
+check_name() {
+    valid_name "$1" || die "invalid app name (use 1-64 letters, digits, dots, underscores or hyphens; start with a letter or digit)"
+}
+
+cg_path() {
+    printf '%s/app_%s\n' "$CGROUP_BASE" "$1"
+}
+
+cg_event() {
+    local key value
+    [ -r "$1/cgroup.events" ] || return 1
+    while read -r key value; do
+        if [ "$key" = "$2" ]; then
+            printf '%s\n' "$value"
+            return 0
+        fi
+    done <"$1/cgroup.events"
+    return 1
+}
+
+is_running() {
+    [ "$(cg_event "$(cg_path "$1")" populated || true)" = 1 ]
+}
+
+is_frozen() {
+    [ "$(cg_event "$(cg_path "$1")" frozen || true)" = 1 ]
+}
+
+# cgroup.events accounts for the entire subtree, even with no direct procs.
+# Sixty 50ms polls bound each kernel transition to approximately three seconds.
+wait_event() {
+    local cg="$1" key="$2" expected="$3" i
+    for ((i = 0; i < 60; ++i)); do
+        [ "$(cg_event "$cg" "$key" || true)" = "$expected" ] && return 0
+        sleep 0.05
+    done
+    [ "$(cg_event "$cg" "$key" || true)" = "$expected" ]
+}
+
+bytes_of() {
+    local value=0
+    if [ -r "$1" ]; then
+        read -r value <"$1" || value=0
+    fi
+    [[ "$value" =~ ^[0-9]+$ ]] || value=0
+    printf '%s\n' "$value"
+}
+
+mib_of() {
+    bytes_of "$1" | awk '{printf "%.1f", $1 / 1048576}'
+}
+
+# One short control/start/install lock; never held for an app's lifetime, so
+# freeze/stop remain possible. flock comes from the existing util-linux tools.
+lock_app() {
+    command -v flock >/dev/null 2>&1 || die "flock is required"
+    mkdir -p -m 0700 "$APP_RUNTIME/$1"
+    exec {APP_LOCK_FD}>"$APP_RUNTIME/$1/control.lock"
+    flock -x "$APP_LOCK_FD"
+}
+
+unlock_app() {
+    flock -u "$APP_LOCK_FD"
+    exec {APP_LOCK_FD}>&-
+}
+
+# The memory of a frozen container going out to swap (do_freeze), stopped:
+# the container runs again, or goes.
+stop_reclaim() {
+    local pid=
+    if [ -r "$APP_RUNTIME/$1/reclaim.pid" ]; then
+        read -r pid <"$APP_RUNTIME/$1/reclaim.pid" || true
+        [[ "$pid" =~ ^[1-9][0-9]*$ ]] && kill "$pid" 2>/dev/null || true
+        rm -f "$APP_RUNTIME/$1/reclaim.pid"
+    fi
+}
+do_resume() {
+    local name="$1" cg
+    cg=$(cg_path "$name")
+    is_running "$name" || die "$name is not running"
+    stop_reclaim "$name"
+    printf '0\n' >"$cg/cgroup.freeze"
+    wait_event "$cg" frozen 0 || die "timed out resuming $name"
+    is_running "$name" || die "$name exited while resuming"
+}
+
+do_freeze() {
+    local name="$1" cg bytes clipboard=$CLIPBOARD
+    cg=$(cg_path "$name")
+    is_running "$name" || die "$name is not running"
+    is_frozen "$name" && return 0
+    # The operation runs outside app_NAME, not in process 1. Its pending job
+    # keeps the shared display active until the clipboard owns all bytes.
+    [ -x "$clipboard" ] || die "clipboard service is not installed; $name was not frozen"
+    # The compositor gates this cgroup before capture and keeps it gated
+    # until the kernel reports thaw. No cross-client sync guesswork.
+    "$clipboard" freeze "$cg" || die "clipboard handover failed; $name was not frozen"
+    is_running "$name" || die "$name exited while freezing"
+    bytes=$(bytes_of "$cg/memory.current")
+    if [ "$bytes" -gt 0 ] && [ -w "$cg/memory.reclaim" ]; then
+        # Its memory out to swap, in the background: frozen it is already, and
+        # gigabytes take longer to write than process 1 waits for a freeze.
+        # Best effort (EAGAIN may mean only part); a resume stops it.
+        stop_reclaim "$name"
+        (
+            exec {APP_LOCK_FD}>&-
+            { printf '%s\n' "$bytes" >"$cg/memory.reclaim"; } 2>/dev/null || true
+            rm -f "$APP_RUNTIME/$name/reclaim.pid"
+        ) </dev/null >/dev/null 2>&1 &
+        printf '%s\n' "$!" >"$APP_RUNTIME/$name/reclaim.pid"
+    fi
+}
+
+request_term() {
+    local name="$1" pid= ticks= stat_line fields
+    if [ -r "$APP_RUNTIME/$name/reaper.pid" ]; then
+        read -r pid ticks <"$APP_RUNTIME/$name/reaper.pid" || true
+    fi
+    # Verify cgroup and start time rather than trusting a reusable host PID.
+    if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && [[ "$ticks" =~ ^[0-9]+$ ]] &&
+       grep -qxF "0::/app_$name" "/proc/$pid/cgroup" 2>/dev/null &&
+       { read -r stat_line <"/proc/$pid/stat"; } 2>/dev/null; then
+        fields=${stat_line##*) }
+        read -r -a fields <<<"$fields"
+        if [ "${fields[19]:-}" = "$ticks" ]; then
+            kill -TERM "$pid" 2>/dev/null || true
+        fi
+    fi
+}
+
+do_stop() {
+    local name="$1" cg
+    cg=$(cg_path "$name")
+    stop_reclaim "$name"
+    if is_running "$name"; then
+        [ -w "$cg/cgroup.kill" ] || die "cgroup.kill is required to stop $name safely"
+        # A frozen PID 1 must run before it can process TERM. cgroup.kill
+        # below also covers frozen descendants and separate sessions.
+        printf '0\n' >"$cg/cgroup.freeze"
+        # Stopping remains possible if the source or clipboard service is
+        # broken; warn rather than keeping an unwanted application alive.
+        if [ -x "$CLIPBOARD" ]; then
+            "$CLIPBOARD" sync >/dev/null ||
+                printf 'locachy-app: %s: clipboard was not saved before stopping\n' "$name" >&2
+        fi
+        request_term "$name"
+        # Allow up to three seconds for the reaper and launcher to exit.
+        wait_event "$cg" populated 0 || true
+        printf '1\n' >"$cg/cgroup.kill"
+        wait_event "$cg" populated 0 || die "timed out stopping $name after cgroup.kill"
+    fi
+    rm -f "$APP_RUNTIME/$name/reaper.pid" "$APP_RUNTIME/$name.ready"
+    # No host mounts to unmount: the private mount namespace dies with the
+    # subtree. Leave upper, work and data untouched.
+}
+
+# Run COMMAND... TARGET in the running container NAME as its programs run:
+# its namespaces and root, the user, the environment its reaper was given,
+# its cgroup (so freezing and stopping include it). In the background: a
+# program that is not single-instance keeps its window.
+do_open_running() { # NAME TARGET COMMAND...
+    local name=$1 target=$2 pid= ticks= kv uid= gid= home=/ nnp=
+    shift 2
+    if [ -r "$APP_RUNTIME/$name/reaper.pid" ]; then
+        read -r pid ticks <"$APP_RUNTIME/$name/reaper.pid" || true
+    fi
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] && grep -qxF "0::/app_$name" "/proc/$pid/cgroup" 2>/dev/null ||
+        die "the reaper of $name is not running"
+    local env=()
+    while IFS= read -r -d '' kv; do
+        case "$kv" in
+        LOCACHY_APP_UID=*) uid=${kv#*=} ;;
+        LOCACHY_APP_GID=*) gid=${kv#*=} ;;
+        LOCACHY_APP_NO_NEW_PRIVS=1) nnp=--no-new-privs ;;
+        HOME=*) home=${kv#*=}; env+=("$kv") ;;
+        LOCACHY_*) ;;
+        *) env+=("$kv") ;;
+        esac
+    done <"/proc/$pid/environ"
+    [ -n "$uid" ] && [ -n "$gid" ] || die "cannot tell the user of $name"
+    (
+        exec {APP_LOCK_FD}>&- # the program may outlive this command: not the lock
+        printf '%s\n' "$BASHPID" >"$(cg_path "$name")/cgroup.procs"
+        exec nsenter --target "$pid" --mount --pid --net --root --wd -- \
+            setpriv --reuid="$uid" --regid="$gid" --clear-groups $nnp -- \
+            env -i -C "$home" "${env[@]}" "$@" ${target:+"$target"}
+    ) </dev/null >>"$APP_RUNTIME/$name.log" 2>&1 &
+}
+
+# The container built anew from its configuration (package, extras): a fresh upper
+# over the host root (upper.new), with the repositories' packages (pacman, in
+# it) and the AUR's (built by locachy-build into /var/cache/locachy-pkgs);
+# what the host has comes from the host. The programs of its AUR packages
+# (ELF files with a program interpreter: not the libraries, some of which are
+# optional plugins, as Edge's Qt shims) are checked for the libraries they
+# need: an AUR package whose program misses one is built again, once.
+# Only then does it take the place of the old upper, which is kept as
+# upper.prev (locachy-app rollback). Its home (data) is not touched.
+do_build() {
+    local name="$1" attempt cbase="$CONT_BASE/$name" pkg_cache=/var/cache/locachy-pkgs
+    local packages repo_pkgs=() aur_pkgs=() p missing command
+    if is_host "$name"; then
+        # A host program: its package is the host's (locachy-pkg install), so
+        # nothing is built; its command is only looked for.
+        command=$(conf_value "$name" command)
+        [ -x "$command" ] || die "$name: $command is not installed (locachy-pkg install $(conf_value "$name" package))"
+        mkdir -p "$cbase"
+        printf 'date="%s"\npackages="%s"\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$(conf_value "$name" package)" >"$cbase/built"
+        printf 'locachy-app: %s is a host program: nothing to build\n' "$name"
+        return 0
+    fi
+    saved_packages "$name"
+    [ "${#packages[@]}" -gt 0 ] || die "$name has no package (package= in $CONT_CONF/$name.conf)"
+    for p in "${packages[@]}"; do
+        if pacman -Sp "$p" >/dev/null 2>&1; then
+            repo_pkgs+=("$p")
+        else
+            aur_pkgs+=("$p")
+        fi
+    done
+    mkdir -p "$cbase/merged" "$cbase/data" "$pkg_cache"
+    modprobe overlay 2>/dev/null || true
+
+    # AUR packages not built yet.
+    local unbuilt=()
+    for p in "${aur_pkgs[@]}"; do
+        /usr/local/bin/locachy-build --files / "$p" >/dev/null 2>&1 || unbuilt+=("$p")
+    done
+    [ "${#unbuilt[@]}" -eq 0 ] || /usr/local/bin/locachy-build "${unbuilt[@]}"
+
+    local net_prefix=()
+    [ -e /run/netns/locachy-net ] && net_prefix=(ip netns exec locachy-net)
+    for attempt in 1 2; do
+        rm -rf "$cbase/upper.new" "$cbase/work.new" "$cbase/missing"
+        mkdir -p "$cbase/upper.new" "$cbase/work.new"
+        "${net_prefix[@]}" unshare --mount --propagation private bash -euc '
+            cbase=$1; n_repo=$2; shift 2
+            root=$cbase/merged
+            mount -t overlay overlay -o "lowerdir=/,upperdir=$cbase/upper.new,workdir=$cbase/work.new" "$root"
+            # Package installation needs proc and basic devices, not the host
+            # runtime sockets, input devices, disks or DRM card nodes.
+            mkdir -p "$root"/{dev,proc,sys,run,tmp}
+            mount -t proc proc "$root/proc" -o nosuid,noexec,nodev
+            mount -t sysfs sys "$root/sys" -o nosuid,noexec,nodev,ro
+            mount -t tmpfs run "$root/run" -o mode=0755,nosuid,nodev
+            mount -t tmpfs tmp "$root/tmp" -o mode=1777,nosuid,nodev
+            mount -t tmpfs dev "$root/dev" -o mode=0755,nosuid
+            for d in null zero full random urandom tty; do
+                [ -e "/dev/$d" ] || continue
+                touch "$root/dev/$d"
+                mount --bind "/dev/$d" "$root/dev/$d"
+            done
+            mkdir -p "$root/dev/pts" "$root/dev/shm"
+            mount -t devpts devpts "$root/dev/pts" -o mode=0620,gid=5,ptmxmode=0666
+            mount -t tmpfs shm "$root/dev/shm" -o mode=1777,nosuid,nodev
+            ln -sf pts/ptmx "$root/dev/ptmx"
+            ln -sf /proc/self/fd "$root/dev/fd"
+            ln -sf /proc/self/fd/0 "$root/dev/stdin"
+            ln -sf /proc/self/fd/1 "$root/dev/stdout"
+            ln -sf /proc/self/fd/2 "$root/dev/stderr"
+            mkdir -p "$root/var/cache/pacman/pkg" "$root/var/cache/locachy-pkgs"
+            mount --bind /var/cache/pacman/pkg "$root/var/cache/pacman/pkg"
+            mount --bind /var/cache/locachy-pkgs "$root/var/cache/locachy-pkgs"
+            if [ -f /etc/netns/locachy-net/resolv.conf ]; then
+                cp -f /etc/netns/locachy-net/resolv.conf "$root/etc/resolv.conf" 2>/dev/null || true
+            fi
+            if [ "$n_repo" -gt 0 ]; then
+                chroot "$root" pacman -S --needed --noconfirm --asexplicit "${@:1:$n_repo}"
+                shift "$n_repo"
+            fi
+            if [ $# -gt 0 ]; then
+                mapfile -t files < <(/usr/local/bin/locachy-build --files "$root" "$@")
+                chroot "$root" pacman -U --needed --noconfirm --asdeps "${files[@]}"
+                chroot "$root" pacman -D --asexplicit "$@" >/dev/null
+                # The libraries its AUR programs need (the host may have moved
+                # on since they were built): "PACKAGE LIBRARY" for each missing.
+                for p in $(for f in "${files[@]}"; do bsdtar -xOf "$f" .PKGINFO | sed -n "s/^pkgname = //p"; done); do
+                    chroot "$root" pacman -Qlq "$p" | while read -r f; do
+                        [ -f "$root$f" ] && [ ! -L "$root$f" ] || continue
+                        [ "$(head -c 4 "$root$f" | od -An -c | tr -d " ")" = 177ELF ] || continue
+                        readelf -lW "$root$f" 2>/dev/null | grep -q "program interpreter" || continue
+                        chroot "$root" ldd "$f" 2>/dev/null | sed -n "s/^[[:space:]]*\([^ ]*\) => not found.*/$p \1/p"
+                    done
+                done | sort -u >"$cbase/missing"
+            fi
+        ' bash "$cbase" "${#repo_pkgs[@]}" "${repo_pkgs[@]}" "${aur_pkgs[@]}"
+        [ -s "$cbase/missing" ] || break
+        missing=$(cut -d" " -f1 "$cbase/missing" | sort -u | tr '\n' ' ')
+        printf 'locachy-app: %s: libraries missing: %s\n' "$name" "$(tr '\n' ',' <"$cbase/missing")" >&2
+        if [ "$attempt" != 1 ]; then
+            rm -rf "$cbase/upper.new" "$cbase/work.new"
+            die "$name: still missing libraries after building $missing again; its old upper is kept"
+        fi
+        # shellcheck disable=SC2086
+        /usr/local/bin/locachy-build -r $missing
+    done
+    rm -f "$cbase/missing"
+    rm -rf "$cbase/upper.prev"
+    [ ! -d "$cbase/upper" ] || mv "$cbase/upper" "$cbase/upper.prev"
+    mv "$cbase/upper.new" "$cbase/upper"
+    rm -rf "$cbase/work"
+    mv "$cbase/work.new" "$cbase/work"
+    [ ! -f "$cbase/built" ] || mv "$cbase/built" "$cbase/built.prev"
+    {
+        printf 'date="%s"\n' "$(date +%F\ %T)"
+        printf 'packages="%s"\n' "${packages[*]}"
+        printf 'host="%s"\n' "$(pacman -Q | sha256sum | cut -c1-16)"
+    } >"$cbase/built"
+    command=$(conf_value "$name" command)
+    if [ -z "$command" ] || { [ ! -x "$cbase/upper$command" ] && [ ! -x "$command" ]; }; then
+        local first_line found_cmd found_args
+        first_line=$(/usr/local/bin/locachy-pkg commands "$name" 2>/dev/null | head -n 1 || true)
+        IFS=$'\t' read -r found_cmd found_args _ <<<"$first_line" || true
+        if [ -n "${found_cmd:-}" ]; then
+            conf_set "$name" command "$found_cmd"
+            if [ -z "$(conf_value "$name" arguments)" ] && [ -n "${found_args:-}" ]; then
+                conf_set "$name" arguments "$found_args"
+            fi
+            printf 'locachy-app: %s: command set to %s from its package\n' "$name" "$found_cmd"
+        fi
+    fi
+    printf 'locachy-app: %s built: %s (the previous one is upper.prev)\n' "$name" "${packages[*]}"
+}
+
+# The previous upper back (upper.prev), the current one kept in its place.
+do_rollback() {
+    local cbase="$CONT_BASE/$1"
+    [ -d "$cbase/upper.prev" ] || die "$1 has no previous build"
+    mv "$cbase/upper" "$cbase/upper.swap"
+    mv "$cbase/upper.prev" "$cbase/upper"
+    mv "$cbase/upper.swap" "$cbase/upper.prev"
+    rm -rf "$cbase/work"
+    mkdir -p "$cbase/work"
+    [ ! -f "$cbase/built" ] || mv "$cbase/built" "$cbase/built.swap"
+    [ ! -f "$cbase/built.prev" ] || mv "$cbase/built.prev" "$cbase/built"
+    [ ! -f "$cbase/built.swap" ] || mv "$cbase/built.swap" "$cbase/built.prev"
+    printf 'locachy-app: %s rolled back (the other one is upper.prev)\n' "$1"
+}
+
+# The container gone: its configuration, its builds; its home only if asked.
+do_remove() {
+    local name="$1" cbase="$CONT_BASE/$1"
+    rm -f "$CONT_CONF/$name.conf"
+    if [ "${2:-}" = --data ]; then
+        rm -rf "$cbase"
+    elif [ -d "$cbase" ]; then
+        find "$cbase" -mindepth 1 -maxdepth 1 ! -name data -exec rm -rf {} +
+    fi
+    rmdir "$(cg_path "$name")" 2>/dev/null || true
+    printf 'locachy-app: %s removed%s\n' "$name" "$([ "${2:-}" = --data ] && echo ", its home too" || echo "; its home is kept in $cbase/data")"
+}
+
+# PKG... added to the container's extras, and the container built anew.
+do_install() {
+    local name="$1"; shift
+    [ $# -gt 0 ] || { echo "usage: locachy-app install NAME PKG..." >&2; exit 2; }
+    local extras
+    extras=$(printf '%s\n' $(conf_value "$name" extras) "$@" | sort -u | tr '\n' ' ')
+    conf_set "$name" extras "${extras% }"
+    do_build "$name"
+}
+
+do_list() {
+    local machine="${1:-}" d name cg state mark
+    local names=()
+    for d in "$CONT_CONF"/*.conf; do
+        [ -f "$d" ] || continue
+        name=${d##*/}
+        name=${name%.conf}
+        valid_name "$name" && names+=("$name")
+    done
+    for d in "$CGROUP_BASE"/app_*; do
+        [ -d "$d" ] || continue
+        name=${d##*/app_}
+        valid_name "$name" && names+=("$name")
+    done
+    [ "${#names[@]}" -gt 0 ] || return 0
+    while IFS= read -r name; do
+        cg=$(cg_path "$name")
+        state=closed; mark=' '
+        if is_running "$name"; then
+            state=running; mark='*'
+            if is_frozen "$name"; then
+                state=frozen; mark='~'
+            fi
+        fi
+        if [ "$machine" = --machine ]; then
+            printf '%s\t%s\t%s\t%s\n' "$name" "$state" \
+                "$(bytes_of "$cg/memory.current")" "$(bytes_of "$cg/memory.swap.current")"
+        elif [ "$state" = closed ]; then
+            printf '[ ] %-14s closed\n' "$name"
+        else
+            printf '[%s] %-14s %-8s (%s MiB RAM, %s MiB swap)\n' "$mark" "$name" "$state" \
+                "$(mib_of "$cg/memory.current")" "$(mib_of "$cg/memory.swap.current")"
+        fi
+    done < <(printf '%s\n' "${names[@]}" | sort -u)
+}
+
+# Screen sharing for its programs: xdg-desktop-portal (the container's own,
+# started on its bus when a program asks, as portals.conf says) has its
+# backend, xdg-desktop-portal-wlr, started here from the host on the
+# container's bus and on the shared display itself (wayland-0: capturing the
+# screen is of the interfaces locachy-0 hides). In the container's cgroup:
+# frozen and stopped with it. Asking which screen: slurp, as it does.
+start_screencast() {
+    local name=$1 bus="$APP_RUNTIME/$1/bus/bus" backend=/usr/lib/xdg-desktop-portal-wlr
+    [ -x "$backend" ] && [ -S "$bus" ] && [ -S "$RUNTIME_DIR/wayland-0" ] || return 0
+    (
+        exec {APP_LOCK_FD}>&-
+        export DBUS_SESSION_BUS_ADDRESS="unix:path=$bus" WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR="$RUNTIME_DIR"
+        exec "$backend"
+    ) </dev/null >>"$APP_RUNTIME/$name.log" 2>&1 &
+}
+
+# The cameras of the host now, in each running container with camera="1":
+# its /dev made to have the same (a node of its own for each, the user's),
+# no more. udev runs it as cameras come and go (91-locachy-cameras.rules).
+do_cameras() {
+    local conf name pid ticks node major minor nodes=() uid gid
+    IFS=: read -r _ _ uid gid _ <<<"$(getent passwd "$APP_UID" || true)"
+    [ -n "${uid:-}" ] || return 0
+    for node in /dev/video* /dev/media*; do
+        [ -c "$node" ] || continue
+        read -r major minor < <(stat -c "%t %T" "$node")
+        nodes+=("${node##*/}" "$((16#$major))" "$((16#$minor))")
+    done
+    for conf in "$CONT_CONF"/*.conf; do
+        [ -f "$conf" ] || continue
+        name=$(basename "$conf" .conf)
+        [ "$(conf_value "$name" camera)" = 1 ] && ! is_host "$name" && is_running "$name" || continue
+        pid=
+        read -r pid ticks <"$APP_RUNTIME/$name/reaper.pid" 2>/dev/null || continue
+        [[ "$pid" =~ ^[1-9][0-9]*$ ]] && grep -qxF "0::/app_$name" "/proc/$pid/cgroup" 2>/dev/null || continue
+        nsenter --target "$pid" --mount --root -- /bin/bash -c '
+            uid=$1; gid=$2; shift 2
+            declare -A want=()
+            while [ $# -ge 3 ]; do
+                want[$1]="$2 $3"
+                if [ ! -c "/dev/$1" ] || [ "$(stat -c "%t %T" "/dev/$1" | { read -r a b; echo "$((16#$a)) $((16#$b))"; })" != "$2 $3" ]; then
+                    rm -f "/dev/$1"
+                    mknod -m 0600 "/dev/$1" c "$2" "$3"
+                    chown "$uid:$gid" "/dev/$1"
+                fi
+                shift 3
+            done
+            for node in /dev/video* /dev/media*; do
+                [ -e "$node" ] || continue
+                [ -n "${want[${node##*/}]:-}" ] || rm -f "$node"
+            done
+        ' bash "$uid" "$gid" "${nodes[@]}" || printf 'locachy-app: cameras: %s not updated\n' "$name" >&2
+    done
+}
+
+operation=start
+want_net=0
+case "${1:-}" in
+run|start) shift ;;
+resume|freeze|stop|kill|install|-S|build|rollback|remove|open|again|new) operation=$1; shift ;;
+cameras)
+    [ $# -eq 1 ] || die 'usage: locachy-app cameras'
+    do_cameras
+    exit 0
+    ;;
+list|status)
+    shift
+    [ $# -eq 0 ] || { [ $# -eq 1 ] && [ "$1" = --machine ]; } || die 'usage: locachy-app list [--machine]'
+    do_list "${1:-}"
+    exit 0
+    ;;
+esac
+if [ "$operation" = start ] && [ "${1:-}" = -n ]; then
+    want_net=1
+    shift
+fi
+name="${1:-}"
+[ -n "$name" ] || die 'usage: locachy-app run|start|resume|freeze|stop|install NAME [ARG...]'
+check_name "$name"
+shift
+if [ "$operation" = open ]; then
+    [ $# -eq 1 ] && [ -n "$1" ] || die "usage: locachy-app open NAME TARGET"
+elif [ "$operation" = remove ]; then
+    [ $# -eq 0 ] || { [ $# -eq 1 ] && [ "$1" = --data ]; } || die "usage: locachy-app remove NAME [--data]"
+elif [ "$operation" != start ] && [ "$operation" != install ] && [ "$operation" != -S ]; then
+    [ $# -eq 0 ] || die "usage: locachy-app $operation NAME"
+fi
+lock_app "$name"
+case "$operation" in
+resume) do_resume "$name"; exit 0 ;;
+freeze) do_freeze "$name"; exit 0 ;;
+stop|kill) do_stop "$name"; exit 0 ;;
+install|-S)
+    is_host "$name" && die "$name is a host program: its packages are the host's (locachy-pkg install)"
+    is_running "$name" && die "stop $name before installing packages"
+    do_install "$name" "$@"
+    exit 0
+    ;;
+build|rollback)
+    [ "$operation" = rollback ] && is_host "$name" && die "$name is a host program: it has no build to roll back"
+    is_running "$name" && die "stop $name before it is built or rolled back"
+    "do_$operation" "$name"
+    exit 0
+    ;;
+remove)
+    is_running "$name" && die "stop $name before it is removed"
+    do_remove "$name" "$@"
+    exit 0
+    ;;
+again)
+    # Its own command once more, in the running container: asked first by
+    # locachy-bar, since a program that runs more than once starts a second
+    # copy rather than showing its window.
+    saved_command "$name"
+    is_running "$name" || die "$name is not running"
+    is_frozen "$name" && do_resume "$name"
+    do_open_running "$name" "" "${saved_cmd[@]}"
+    exit 0
+    ;;
+new)
+    # A window of it, as the shared display's terminal key asks: its command
+    # once more in it if it runs (a terminal: another one), else it starts.
+    exec >>"$APP_RUNTIME/$name.log" 2>&1
+    saved_command "$name"
+    if is_running "$name"; then
+        is_frozen "$name" && do_resume "$name"
+        do_open_running "$name" "" "${saved_cmd[@]}"
+        exit 0
+    fi
+    operation=start
+    ;;
+open)
+    # The container's own command with TARGET (a path or URL): run in the
+    # container if it runs (a single-instance program hands it to its
+    # window), else the container starts with it, below.
+    target=$1
+    saved_command "$name"
+    if is_running "$name"; then
+        is_frozen "$name" && do_resume "$name"
+        do_open_running "$name" "$target" "${saved_cmd[@]}"
+        exit 0
+    fi
+    set -- "${saved_cmd[@]}" "$target"
+    operation=start
+    ;;
+esac
+
+if is_running "$name"; then
+    printf 'locachy-app: %s is already running; window activation is not requested\n' "$name" >&2
+    exit 0
+fi
+
+# locachy-0 is the compositor's socket for containers (labwc-control): it
+# hides the privileged interfaces; wayland-0 is for host programs only.
+shared_wayland=${LOCACHY_WAYLAND_DISPLAY:-locachy-0}
+[[ "$shared_wayland" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,107}$ ]] || die 'invalid LOCACHY_WAYLAND_DISPLAY socket name'
+[ "$shared_wayland" != bus ] || die 'Wayland socket name conflicts with the session bus'
+[ -S "$RUNTIME_DIR/$shared_wayland" ] || die "Wayland socket is not available: $RUNTIME_DIR/$shared_wayland"
+[ -x "$APP_INIT" ] || die "container reaper is not installed: $APP_INIT"
+for tool in unshare chroot mount mkfifo; do
+    command -v "$tool" >/dev/null 2>&1 || die "$tool is required"
+done
+cbase="$CONT_BASE/$name"
+cg=$(cg_path "$name")
+host=0
+is_host "$name" && host=1
+if [ "$host" = 1 ]; then
+    mkdir -p "$cg"
+else
+    mkdir -p "$cbase/upper" "$cbase/work" "$cbase/merged" "$cbase/data" "$cg"
+fi
+[ -w "$cg/cgroup.freeze" ] && [ -w "$cg/cgroup.kill" ] || die 'a writable cgroup v2 freezer and cgroup.kill are required'
+modprobe overlay 2>/dev/null || true
+
+# Programs in containers run as the user (made by locachy-setup), whose home
+# holds the files shared by every container and the host.
+IFS=: read -r user _ uid gid _ uhome _ <<<"$(getent passwd "$APP_UID" || true)"
+[ -n "${uid:-}" ] || die "there is no user with uid $APP_UID: create it with locachy-setup"
+case "$uhome" in
+/home/?*) ;;
+*) die "the home of $user is $uhome, not under /home: fix it (usermod -d /home/$user -m $user)" ;;
+esac
+install -d -o "$uid" -g "$gid" -m 0700 "$uhome"
+for d in $USER_DIRS; do
+    install -d -o "$uid" -g "$gid" "$uhome/$d"
+done
+if [ "$host" = 1 ]; then
+    # Mount points of its namespace, empty on the host.
+    install -d -o "$uid" -g "$gid" -m 0700 "/run/user/$uid"
+    mkdir -p /run/locachy-bus
+fi
+
+if [ "$want_net" = 1 ] && [ -f "$CONT_CONF/$name.conf" ]; then
+    conf_set "$name" network 1
+elif [ "$(conf_value "$name" network)" = 1 ]; then
+    want_net=1
+fi
+if [ $# -eq 0 ]; then
+    saved_command "$name"
+    set -- "${saved_cmd[@]}"
+fi
+# Its directories (of the home), refused before anything is started.
+IFS=: read -r -a directories <<<"$(conf_value "$name" directories)" || true
+for d in "${directories[@]}"; do
+    [ -n "$d" ] || continue
+    why=$(directory_refused "$d" "$uhome")
+    [ -z "$why" ] || die "$name cannot have $d: $why (directories= in $CONT_CONF/$name.conf)"
+done
+
+net_prefix=()
+net_args=(--net)
+if [ "$want_net" = 1 ] && [ -e /run/netns/locachy-net ]; then
+    net_prefix=(nsenter --net=/run/netns/locachy-net)
+    net_args=()
+fi
+# The Clash proxy with only its port (clash-client, clash_mode="proxy"): a
+# container on the network is told of it; its programs that honour these use it.
+if [ "$want_net" = 1 ] && grep -q '^[[:space:]]*service_clash=' /etc/locachy/rc.conf 2>/dev/null &&
+    grep -q '^[[:space:]]*clash_mode="proxy"' /etc/locachy/rc.conf; then
+    export http_proxy=http://127.0.0.1:7890 https_proxy=http://127.0.0.1:7890 all_proxy=socks5://127.0.0.1:7890
+    export no_proxy=localhost,127.0.0.1,::1,.local,.ts.net
+    export HTTP_PROXY=$http_proxy HTTPS_PROXY=$https_proxy ALL_PROXY=$all_proxy NO_PROXY=$no_proxy
+fi
+
+# Keep the lock only until C PID 1 is ready (or setup fails). The FIFO FD
+# survives exec/unshare/chroot but is closed before the app's exec. Its path
+# is private host bookkeeping, not a bind-mounted host runtime directory.
+ready_dir=$(mktemp -d "$APP_RUNTIME/$name/.start.XXXXXXXX")
+trap 'rm -f "$ready_dir/ready"; rmdir "$ready_dir" 2>/dev/null || true' EXIT
+mkfifo -m 0600 "$ready_dir/ready"
+exec {READY_FD}<>"$ready_dir/ready"
+# Only the inherited descriptor is needed; leave no files on forced stop.
+rm -f "$ready_dir/ready"
+rmdir "$ready_dir"
+trap - EXIT
+[ "$host" = 1 ] || rm -f "$cbase/data"/.config/*/SingletonLock \
+      "$cbase/data"/.config/*/SingletonSocket \
+      "$cbase/data"/.config/*/SingletonCookie 2>/dev/null || true
+rm -f "$APP_RUNTIME/$name/reaper.pid" "$APP_RUNTIME/$name.ready"
+
+# Move the launcher itself before ANY namespace child is forked. From here
+# every helper, unshare parent, PID 1 and descendant inherits app_NAME.
+# An empty cgroup can retain a previous freeze request after forced teardown.
+printf '0\n' >"$cg/cgroup.freeze"
+printf '%s\n' "$$" >"$cg/cgroup.procs"
+# Slave: the one shared mount of the host, ~/Drives (the drives service),
+# passes its USB drives on to the container as they come and go; nothing
+# passes back.
+"${net_prefix[@]}" unshare --mount --pid --fork --kill-child --propagation slave "${net_args[@]}" bash -euc '
+    cbase=$1; want_net=$2; display=$3; init=$4; ready_fd=$5; host_runtime=$6; state_dir=$7
+    user=$8; uid=$9; gid=${10}; uhome=${11}; USER_DIRS=${12}; directories=${13}; host=${14}; camera=${15}; shift 15
+    # Record host PID before mounting the namespace-local /proc. This bash
+    # becomes the C reaper via exec, so its host PID stays unchanged.
+    host_pid=; start_ticks=
+    while read -r key value rest; do
+        if [ "$key" = Pid: ]; then host_pid=$value; break; fi
+    done </proc/self/status
+    read -r stat_line </proc/self/stat
+    stat_fields=${stat_line##*) }
+    read -r -a stat_fields <<<"$stat_fields"
+    start_ticks=${stat_fields[19]}
+    [ -n "$host_pid" ] && [ -n "$start_ticks" ] || { printf "locachy-app: cannot read reaper identity\n" >&2; exit 125; }
+    printf "%s %s\n" "$host_pid" "$start_ticks" >"$state_dir/reaper.pid"
+    ip link set lo up 2>/dev/null || true
+    if [ "$host" = 1 ]; then
+        # A host program (host="1"): the real root and home, hidden by nothing
+        # but file permissions. Of its own it has /proc (its PID namespace), a
+        # runtime directory with the display, sound and its bus, and the
+        # resolver of the network.
+        mount -t proc proc /proc -o nosuid,noexec,nodev
+        touch "$host_runtime/$display"
+        chmod 0666 "$host_runtime/$display"
+        run=/run/user/$uid
+        mount -t tmpfs -o "mode=0700,uid=$uid,gid=$gid,nosuid,nodev" runtime "$run"
+        touch "$run/$display"
+        mount --bind "$host_runtime/$display" "$run/$display"
+        unset DBUS_SESSION_BUS_ADDRESS
+        if [ -S "$host_runtime/pipewire-0" ]; then
+            touch "$run/pipewire-0"
+            mount --bind "$host_runtime/pipewire-0" "$run/pipewire-0"
+        fi
+        if [ -S "$host_runtime/pulse/native" ]; then
+            install -d -o "$uid" -g "$gid" -m 0700 "$run/pulse"
+            touch "$run/pulse/native"
+            mount --bind "$host_runtime/pulse/native" "$run/pulse/native"
+            export PULSE_SERVER="unix:$run/pulse/native"
+        fi
+        bus_dir="$state_dir/bus"
+        rm -rf "$bus_dir"
+        install -d -o "$uid" -g "$gid" -m 0700 "$bus_dir"
+        mount --bind "$bus_dir" /run/locachy-bus
+        tray_bar=0
+        [ -S "$host_runtime/locachy-bar.sock" ] && tray_bar=1
+        if [ "$want_net" = 1 ] && [ -f /etc/netns/locachy-net/resolv.conf ]; then
+            mount --bind -o ro /etc/netns/locachy-net/resolv.conf /etc/resolv.conf
+        fi
+        cd "$uhome"
+        app_init=$init
+        # The LOCachy xdg-open first: it hands paths and URLs to locachy-bar.
+        path=/usr/local/lib/locachy/host-bin:/usr/local/sbin:/usr/local/bin:/usr/bin
+    else
+        # nosuid: setuid programs of the host (sudo, su) give no root in here;
+        # with no_new_privs (app-init) nothing the container runs gains rights.
+        mount -t overlay overlay -o "lowerdir=/,upperdir=$cbase/upper,workdir=$cbase/work,nosuid,nodev" "$cbase/merged"
+        nnp=--no-new-privs
+        export LOCACHY_APP_NO_NEW_PRIVS=1
+
+        umask 022
+        chmod 0755 "$cbase" "$cbase/upper" "$cbase/merged"
+        mkdir -p "$cbase/merged"/{dev,proc,sys,tmp,run,etc}
+        # The user as on the host: its passwd and group lines replace any with the
+        # same name or id in the container (whose packages may have added other
+        # users). The host files are never written.
+        set_entry() { # FILE ID LINE
+            { [ ! -f "$1" ] || awk -F: -v id="$2" -v n="${3%%:*}" "\$3 != id && \$1 != n" "$1"
+              printf "%s\n" "$3"; } >"$1.new"
+            mv "$1.new" "$1"
+        }
+        set_entry "$cbase/merged/etc/passwd" "$uid" "$(getent passwd "$uid")"
+        set_entry "$cbase/merged/etc/group" "$gid" "$(getent group "$gid")"
+        chown -R "$uid:$gid" "$cbase/data"
+        touch "$host_runtime/$display"
+        chmod 0666 "$host_runtime/$display"
+        mount -t proc proc "$cbase/merged/proc" -o nosuid,noexec,nodev
+        mount -t sysfs sys "$cbase/merged/sys" -o nosuid,noexec,nodev,ro
+        mount -t tmpfs tmp "$cbase/merged/tmp" -o mode=1777,nosuid,nodev
+        mount -t tmpfs run "$cbase/merged/run" -o mode=0755,nosuid,nodev
+        # The host runtime gives the container its display and sound only: no
+        # session bus of root (it gets one of its own, below), no devices but the
+        # render nodes.
+        run="$cbase/merged/run/user/$uid"
+        mkdir -p -m 0700 "$run"
+        touch "$run/$display"
+        mount --bind "$host_runtime/$display" "$run/$display"
+        unset DBUS_SESSION_BUS_ADDRESS
+        if [ -S "$host_runtime/pipewire-0" ]; then
+            touch "$run/pipewire-0"
+            mount --bind "$host_runtime/pipewire-0" "$run/pipewire-0"
+        fi
+        if [ -S "$host_runtime/pulse/native" ]; then
+            mkdir -p -m 0700 "$run/pulse"
+            touch "$run/pulse/native"
+            mount --bind "$host_runtime/pulse/native" "$run/pulse/native"
+            export PULSE_SERVER="unix:/run/user/$uid/pulse/native"
+        fi
+        chown -R "$uid:$gid" "$run"
+        # The session bus of this container: its socket in a directory of the
+        # host runtime of the container, where locachy-bar finds it to be the
+        # tray watcher. Waited for below only when the bar is there.
+        bus_dir="$state_dir/bus"
+        rm -rf "$bus_dir"
+        install -d -o "$uid" -g "$gid" -m 0700 "$bus_dir"
+        mkdir -p "$cbase/merged/run/locachy-bus"
+        mount --bind "$bus_dir" "$cbase/merged/run/locachy-bus"
+        tray_bar=0
+        [ -S "$host_runtime/locachy-bar.sock" ] && tray_bar=1
+
+        # Home: private to this container (configuration, cookies, caches, in
+        # $cbase/data), with the shared user directories of the host home on it
+        # at the same paths, so that a path means the same file everywhere.
+        mkdir -p "$cbase/merged$uhome"
+        mount --bind "$cbase/data" "$cbase/merged$uhome"
+        for d in $USER_DIRS; do
+            install -d -o "$uid" -g "$gid" "$cbase/data/$d"
+            mount --bind "$uhome/$d" "$cbase/merged$uhome/$d"
+        done
+        # USB drives and memory cards, mounted by the drives service in its
+        # shared mount point: with the drives in it now, and the ones to come.
+        if mountpoint -q "$uhome/Drives"; then
+            install -d -o "$uid" -g "$gid" "$cbase/data/Drives"
+            mount --rbind "$uhome/Drives" "$cbase/merged$uhome/Drives"
+            mount --make-rslave "$cbase/merged$uhome/Drives"
+        fi
+        # Its own directories of the home (directories=, checked before), at the
+        # same paths. Their mount points are made in its home, which its programs
+        # write: a link there is not followed.
+        IFS=: read -r -a dirs <<<"$directories" || true
+        for d in "${dirs[@]}"; do
+            [ -n "$d" ] || continue
+            d=${d%/}
+            IFS=/ read -r -a parts <<<"${d#"$uhome"/}"
+            p=$cbase/data
+            for part in "${parts[@]}"; do
+                p=$p/$part
+                if [ -L "$p" ]; then
+                    printf "locachy-app: %s is a link in its home: %s not given\n" "${p#"$cbase"/data/}" "$d" >&2
+                    continue 2
+                fi
+                [ -d "$p" ] || install -d -o "$uid" -g "$gid" "$p"
+            done
+            mount --bind "$d" "$cbase/merged$d"
+        done
+        if [ ! -e "$cbase/data/.config/user-dirs.dirs" ]; then
+            install -d -o "$uid" -g "$gid" "$cbase/data/.config"
+            for d in $USER_DIRS; do
+                key=$(printf "%s" "$d" | tr a-z A-Z)
+                [ "$key" = DOWNLOADS ] && key=DOWNLOAD
+                printf "XDG_%s_DIR=\"\$HOME/%s\"\n" "$key" "$d"
+            done >"$cbase/data/.config/user-dirs.dirs"
+            chown "$uid:$gid" "$cbase/data/.config/user-dirs.dirs"
+        fi
+        # GSettings in a file of the home (GSETTINGS_BACKEND=keyfile below): dconf
+        # needs a session bus, which a container has not, so nothing was kept.
+        # Its first contents: windows that draw their own title bar (GTK,
+        # Chromium) show minimize and maximize, not only close.
+        keyfile="$cbase/data/.config/glib-2.0/settings/keyfile"
+        if [ ! -e "$keyfile" ]; then
+            install -d -o "$uid" -g "$gid" "$cbase/data/.config/glib-2.0" "${keyfile%/*}"
+            printf "[org/gnome/desktop/wm/preferences]\nbutton-layout=\047appmenu:minimize,maximize,close\047\n" >"$keyfile"
+            chown "$uid:$gid" "$keyfile"
+        fi
+        # Host state stays out of sight: the private data of every container, the
+        # words the input method has learned, the logs.
+        mount -t tmpfs -o mode=0755,nosuid,nodev,size=1m hidden "$cbase/merged/var/lib/locachy"
+        if [ -d "$cbase/merged/var/log/locachy" ]; then
+            mount -t tmpfs -o mode=0755,nosuid,nodev,size=1m hidden "$cbase/merged/var/log/locachy"
+        fi
+        if [ -d /usr/share/fonts ]; then
+            mkdir -p "$cbase/merged/usr/share/fonts"
+            mount --bind -o ro /usr/share/fonts "$cbase/merged/usr/share/fonts"
+        fi
+        if [ -d /var/cache/fontconfig ]; then
+            mkdir -p "$cbase/merged/var/cache/fontconfig"
+            mount --bind -o ro /var/cache/fontconfig "$cbase/merged/var/cache/fontconfig"
+        fi
+        # The resolver file of the namespace itself, read-only: openresolv rewrites it
+        # in place, so a new network or the MagicDNS of Tailscale reaches a
+        # running container.
+        if [ "$want_net" = 1 ] && [ -f /etc/netns/locachy-net/resolv.conf ]; then
+            rm -f "$cbase/merged/etc/resolv.conf"
+            touch "$cbase/merged/etc/resolv.conf"
+            mount --bind -o ro /etc/netns/locachy-net/resolv.conf "$cbase/merged/etc/resolv.conf"
+        fi
+
+        mount -t tmpfs dev "$cbase/merged/dev" -o mode=0755,nosuid
+        for d in null zero full random urandom tty; do
+            [ -e "/dev/$d" ] || continue
+            touch "$cbase/merged/dev/$d"
+            mount --bind "/dev/$d" "$cbase/merged/dev/$d"
+        done
+        mkdir -p "$cbase/merged/dev/pts" "$cbase/merged/dev/shm" "$cbase/merged/dev/dri"
+        mount -t devpts devpts "$cbase/merged/dev/pts" -o mode=0620,gid=5,ptmxmode=0666
+        mount -t tmpfs shm "$cbase/merged/dev/shm" -o mode=1777,nosuid,nodev
+        ln -sf pts/ptmx "$cbase/merged/dev/ptmx"
+        # The render nodes, for everyone (0666) by the rules of udev.
+        for node in /dev/dri/renderD*; do
+            [ -c "$node" ] || continue
+            touch "$cbase/merged/dev/dri/${node##*/}"
+            mount --bind "$node" "$cbase/merged/dev/dri/${node##*/}"
+        done
+        # The cameras (camera="1"): nodes of its own, the user its owner, the
+        # host nodes as they were (root, video); more as they come (cameras).
+        if [ "$camera" = 1 ]; then
+            for node in /dev/video* /dev/media*; do
+                [ -c "$node" ] || continue
+                read -r major minor < <(stat -c "%t %T" "$node")
+                mknod -m 0600 "$cbase/merged/dev/${node##*/}" c $((16#$major)) $((16#$minor))
+                chown "$uid:$gid" "$cbase/merged/dev/${node##*/}"
+            done
+        fi
+        ln -sf /proc/self/fd "$cbase/merged/dev/fd"
+        ln -sf /proc/self/fd/0 "$cbase/merged/dev/stdin"
+        ln -sf /proc/self/fd/1 "$cbase/merged/dev/stdout"
+        ln -sf /proc/self/fd/2 "$cbase/merged/dev/stderr"
+
+        # Pin the host-built init even if a previous overlay has a stale copy.
+        touch "$cbase/merged/run/locachy-app-init"
+        mount --bind -o ro "$init" "$cbase/merged/run/locachy-app-init"
+        # xdg-open hands paths and URLs to the host (locachy-bar), which opens
+        # them in the container chosen for their type. The directory, not the
+        # socket, so that a new bar socket reaches running containers too.
+        if [ -x /usr/local/lib/locachy/xdg-open ]; then
+            mkdir -p "$cbase/merged/usr/local/bin" "$cbase/merged/run/locachy-open" /run/locachy/open
+            touch "$cbase/merged/usr/local/bin/xdg-open"
+            mount --bind -o ro /usr/local/lib/locachy/xdg-open "$cbase/merged/usr/local/bin/xdg-open"
+            mount --bind -o ro /run/locachy/open "$cbase/merged/run/locachy-open"
+        fi
+        mkdir -p "$cbase/merged/tmp/.oldroot"
+        cd "$cbase/merged"
+        pivot_root . tmp/.oldroot
+        cd /
+        umount -l /tmp/.oldroot
+        rmdir /tmp/.oldroot
+        app_init=/run/locachy-app-init
+        path=/usr/local/sbin:/usr/local/bin:/usr/bin
+    fi
+    export LOCACHY_APP_READY_FD="$ready_fd"
+    export LOCACHY_APP_UID="$uid"
+    export LOCACHY_APP_GID="$gid"
+    export USER="$user"
+    export LOGNAME="$user"
+    export XDG_RUNTIME_DIR="/run/user/$uid"
+    export WAYLAND_DISPLAY="$display"
+    unset WAYLAND_SOCKET DISPLAY SEATD_SOCK
+    export HOME="$uhome"
+    export XDG_CONFIG_HOME="$uhome/.config"
+    export XDG_CACHE_HOME="$uhome/.cache"
+    export XDG_DATA_HOME="$uhome/.local/share"
+    sys_lang=$(sed -n '\''s/^[[:space:]]*language="\([^"]*\)".*/\1/p'\'' /etc/locachy/rc.conf 2>/dev/null | tail -n 1)
+    if [ -n "$sys_lang" ]; then
+        export LANG="$sys_lang"
+        export LANGUAGE="${sys_lang%%.*}:en_US"
+    fi
+    export GSETTINGS_BACKEND="keyfile"
+    export OZONE_PLATFORM="wayland"
+    export ELECTRON_OZONE_PLATFORM_HINT="wayland"
+    export PATH="$path"
+    if command -v dbus-daemon >/dev/null && [ -r /usr/local/share/locachy/container-bus.conf ] &&
+        setpriv --reuid="$uid" --regid="$gid" --clear-groups ${nnp:-} -- dbus-daemon \
+            --config-file=/usr/local/share/locachy/container-bus.conf --fork --nopidfile >/dev/null 2>&1; then
+        export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/locachy-bus/bus"
+        # The tray watcher first (locachy-bar, up to 2 s), so that a program
+        # that lives on in a tray finds one when it starts.
+        for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+            [ "$tray_bar" = 1 ] || break
+            dbus-send --session --print-reply=literal --dest=org.freedesktop.DBus /org/freedesktop/DBus \
+                org.freedesktop.DBus.NameHasOwner string:org.kde.StatusNotifierWatcher 2>/dev/null |
+                grep -q true && break
+            sleep 0.1
+        done
+    fi
+    exec "$app_init" "$@"
+' bash "$cbase" "$want_net" "$shared_wayland" "$APP_INIT" "$READY_FD" "$RUNTIME_DIR" "$APP_RUNTIME/$name" \
+    "$user" "$uid" "$gid" "$uhome" "$USER_DIRS" "$(conf_value "$name" directories)" "$host" \
+    "$(conf_value "$name" camera)" "$@" {APP_LOCK_FD}>&- &
+launcher=$!
+
+# A bounded readiness handshake serializes start against controls. Once ready,
+# the host caller waits for the real application status without holding a lock.
+ready=
+for ((attempt = 0; attempt < 120; ++attempt)); do
+    if IFS= read -r -t 0.05 -u "$READY_FD" ready; then
+        break
+    fi
+    kill -0 "$launcher" 2>/dev/null || break
+done
+exec {READY_FD}>&-
+if [ "$ready" != ready ]; then
+    printf 'locachy-app: %s failed to initialize within six seconds\n' "$name" >&2
+    printf '1\n' >"$cg/cgroup.kill"
+    exit 125
+fi
+touch "$APP_RUNTIME/$name.ready"
+start_screencast "$name"
+unlock_app
+status=0
+wait "$launcher" || status=$?
+rm -f "$APP_RUNTIME/$name.ready" "$APP_RUNTIME/$name/reaper.pid"
+exit "$status"

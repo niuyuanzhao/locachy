@@ -1,0 +1,8 @@
+#!/bin/sh
+# Code - OSS in the foreground, for its host program (code.conf): /usr/bin/code-oss
+# starts its Electron in the background and returns, and app-init ends a
+# program with its first process. The Electron that script names, with the
+# same application, here in the foreground; a second one hands over to the
+# first (a window more) and returns.
+electron=$(sed -n 's/^name=\(electron[0-9]*\) *$/\1/p' /usr/bin/code-oss)
+exec "/usr/lib/${electron:-electron}/electron" /usr/lib/code/code.mjs "$@"

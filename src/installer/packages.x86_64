@@ -1,0 +1,40 @@
+# Only official Arch packages; retain the complete baseline package set.
+# In particular, the live kernel is linux, not an optimized target kernel.
+linux
+linux-firmware
+linux-firmware-marvell
+sof-firmware
+intel-ucode
+amd-ucode
+base-devel
+git
+python
+curl
+pacman-contrib
+reflector
+rate-mirrors
+arch-install-scripts
+networkmanager
+wpa_supplicant
+iw
+wireless-regdb
+rsync
+dosfstools
+e2fsprogs
+efibootmgr
+parted
+btrfs-progs
+cryptsetup
+nvme-cli
+flashrom
+kbd
+nano
+# The full-screen installer and its terminal (installer/make-live.sh): their
+# libraries, and the fonts of their text beside Terminus (symbols, Chinese).
+freetype2
+libinput
+json-c
+libxkbcommon
+libx11
+ttf-dejavu
+noto-fonts-cjk

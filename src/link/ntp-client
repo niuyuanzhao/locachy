@@ -1,0 +1,13 @@
+#!/bin/sh
+# Network time (service_ntp, which settings' Network time switch adds and
+# removes): systemd-timesyncd as packaged, run on its own, in locachy-net where
+# the network is. The clock it sets is the system's; the kernel copies it to
+# the hardware clock once it is synchronized.
+set -eu
+
+if [ ! -e /run/netns/locachy-net ]; then
+    exit 0 # started again in 5 s
+fi
+# Its last time, which it starts from when the network is not there yet.
+mkdir -p /var/lib/systemd/timesync
+exec ip netns exec locachy-net /usr/lib/systemd/systemd-timesyncd

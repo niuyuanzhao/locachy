@@ -1,0 +1,56 @@
+# /etc/locachy/packages: authoritative leaf package manifest for LOCachy.
+# Core system base only; optional modules (desktop, audio, view, view-dvi,
+# edit, cjk-fonts, bluetooth, fwupd, flashrom, fprintd, howdy, tailscale,
+# clash, tor, rclone, IME, and container/host app presets) are appended from
+# link/modules.json at install time or toggled later in settings / packages.
+# Run 'locachy-pkg' to reconcile the system to this manifest.
+# Run 'locachy-pkg status' to inspect drift without modifying the system.
+
+# Core system & boot: locachy-boot makes one unified kernel image (ukify,
+# with systemd's stub; the CPUs' microcode loaded first) that the firmware
+# starts; no boot loader
+base
+linux-cachyos-bore
+linux-firmware
+intel-ucode
+amd-ucode
+systemd-ukify
+efibootmgr
+e2fsprogs
+
+# Base fonts & pointer input for framebuffer programs
+terminus-font
+noto-fonts
+ttf-dejavu
+ttf-liberation
+libinput
+adwaita-cursors
+# The key table of rc.conf's keymap (keytable), as the X layout has it, and
+# its dead keys' sequences (libX11's compose tables)
+libxkbcommon
+libx11
+
+# The system at a glance (its logo: CachyOS's, from /etc/os-release)
+fastfetch
+
+# Repositories & build toolchain
+archlinux-keyring
+cachyos-keyring
+cachyos-mirrorlist
+base-devel
+git
+musl
+pikaur-static
+pikaur
+pacman-contrib
+# Mirror ranking (locachy-repos rank; settings: Software Sources)
+reflector
+rate-mirrors
+
+# Core network & Wi-Fi (NetworkManager + nmtui inside isolated locachy-net)
+networkmanager
+openresolv
+wpa_supplicant
+iw
+wireless-regdb
+nftables

@@ -1,0 +1,10138 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) YEAR THE PACKAGE'S COPYRIGHT HOLDER
+# This file is distributed under the same license as the LOCachy package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LOCachy\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-27 03:58+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=INTEGER; plural=EXPRESSION;\n"
+
+#: base/backlight.c
+#, c-format
+msgid " [Brightness %d%%] "
+msgstr ""
+
+#: base/clipboard.c
+msgid "clipboard is empty"
+msgstr ""
+
+#: base/clipboard.c
+msgid "clipboard has no text"
+msgstr ""
+
+#: base/clipboard.c
+msgid "clipboard transfer is not complete"
+msgstr ""
+
+#: base/clipboard.c
+msgid "clipboard service unavailable or transfer failed"
+msgstr ""
+
+#. TRANSLATORS: status bar: keep short.
+#. TRANSLATORS: %d is the number of frozen containers; keep short: bar field.
+#: base/screen.c progs/bar.c
+#, c-format
+msgid "%d frozen"
+msgid_plural "%d frozen"
+msgstr[0] ""
+msgstr[1] ""
+
+#. TRANSLATORS: status bar: keep short.
+#: base/status.c
+msgid "Network: --"
+msgstr ""
+
+#: base/status.c
+msgid "Bat: --"
+msgstr ""
+
+#. TRANSLATORS: status bar: keep short.
+#: base/status.c
+msgid "Vol: --"
+msgstr ""
+
+#: base/status.c
+msgid "Bat --"
+msgstr ""
+
+#: base/status.c progs/installer.c progs/packages.c
+msgid "Network"
+msgstr ""
+
+#: base/status.c
+msgid "Vol --"
+msgstr ""
+
+#: base/status.c
+msgid "CPU --"
+msgstr ""
+
+#: base/status.c
+msgid "RAM --"
+msgstr ""
+
+#. TRANSLATORS: status bar: keep short.
+#: base/status.c
+msgid "Network: disconnected"
+msgstr ""
+
+#: base/status.c
+msgid "disconnected"
+msgstr ""
+
+#. TRANSLATORS: status bar: keep short.
+#: base/status.c
+msgid "Ethernet"
+msgstr ""
+
+#: base/status.c
+msgid "Wi-Fi"
+msgstr ""
+
+#. TRANSLATORS: status bar: keep short.
+#: base/status.c
+msgid "no address"
+msgstr ""
+
+#: base/status.c
+msgid "AC: off"
+msgstr ""
+
+#. TRANSLATORS: status bar: keep short.
+#: base/status.c
+msgid "AC: on"
+msgstr ""
+
+#: base/status.c
+msgid "AC off"
+msgstr ""
+
+#: base/status.c
+msgid "AC on"
+msgstr ""
+
+#. TRANSLATORS: status bar: keep short.
+#: base/status.c
+#, c-format
+msgid "Bat %d%%"
+msgstr ""
+
+#. TRANSLATORS: status bar: keep short.
+#: base/status.c
+#, c-format
+msgid "Bat: %d%% (AC)"
+msgstr ""
+
+#: base/status.c
+#, c-format
+msgid "charging"
+msgstr ""
+
+#. TRANSLATORS: status bar: keep short.
+#: base/status.c
+#, c-format
+msgid "charging, %.1f W"
+msgstr ""
+
+#: base/status.c
+msgid "AC"
+msgstr ""
+
+#: base/status.c
+msgid "AC, full"
+msgstr ""
+
+#. TRANSLATORS: status bar: keep short.
+#: base/status.c
+#, c-format
+msgid "Bat: %d%% (%.1fW, %ldh%02ldm)"
+msgstr ""
+
+#: base/status.c
+#, c-format
+msgid "%.1f W, %ldh%02ldm"
+msgstr ""
+
+#. TRANSLATORS: status bar: keep short.
+#: base/status.c
+#, c-format
+msgid "Bat: %d%% (%.1fW)"
+msgstr ""
+
+#. TRANSLATORS: status bar: keep short.
+#: base/status.c
+#, c-format
+msgid "Bat: %d%%"
+msgstr ""
+
+#. TRANSLATORS: status bar: keep short.
+#: base/status.c
+#, c-format
+msgid "Vol: MUTE(%d%%)"
+msgstr ""
+
+#: base/status.c
+msgid "Vol muted"
+msgstr ""
+
+#. TRANSLATORS: status bar: keep short.
+#: base/status.c
+#, c-format
+msgid "Vol: %d%%"
+msgstr ""
+
+#: base/status.c
+#, c-format
+msgid "Vol %d%%"
+msgstr ""
+
+#: base/status.c
+#, c-format
+msgid "Mic %d%%"
+msgstr ""
+
+#. TRANSLATORS: status bar: keep short.
+#: base/status.c
+#, c-format
+msgid "Mic muted"
+msgstr ""
+
+#. TRANSLATORS: status bar: keep short.
+#: base/status.c
+#, c-format
+msgid "RAM %.1f/%.1fG"
+msgstr ""
+
+#. TRANSLATORS: status bar: keep short.
+#: base/status.c
+#, c-format
+msgid "Swap %.1f/%.1fG"
+msgstr ""
+
+#. TRANSLATORS: status bar: keep short.
+#: base/status.c
+msgid "Swap none"
+msgstr ""
+
+#. TRANSLATORS: status bar: keep short.
+#: base/status.c
+#, c-format
+msgid "CPU %d%%"
+msgstr ""
+
+#. TRANSLATORS: status bar: keep short.
+#: base/status.c
+msgid "BT off"
+msgstr ""
+
+#: base/status.c progs/home.c
+msgid "starting"
+msgstr ""
+
+#: base/status.c
+msgid "BT: off"
+msgstr ""
+
+#: base/status.c
+msgid "no adapter"
+msgstr ""
+
+#: base/status.c
+msgid "unpowered"
+msgstr ""
+
+#. TRANSLATORS: status bar: keep short.
+#: base/status.c
+msgid "BT on"
+msgstr ""
+
+#: base/status.c
+msgid "idle"
+msgstr ""
+
+#: base/status.c
+msgid "BT: on"
+msgstr ""
+
+#. TRANSLATORS: status bar: keep short.
+#: base/status.c
+#, c-format
+msgid "BT %d%%"
+msgstr ""
+
+#. TRANSLATORS: status bar: keep short.
+#: base/status.c
+#, c-format
+msgid "BT (%d)"
+msgstr ""
+
+#: base/status.c
+msgid "connected"
+msgstr ""
+
+#: base/status.c
+#, c-format
+msgid "BT: %s"
+msgstr ""
+
+#: base/status.c
+msgid "enabled"
+msgstr ""
+
+#: base/status.c
+msgid "IME"
+msgstr ""
+
+#: progs/archive-proto.h
+msgid "Tar archive (gzip-compressed)"
+msgstr ""
+
+#: progs/archive-proto.h
+msgid "Tar archive (bzip-compressed)"
+msgstr ""
+
+#: progs/archive-proto.h
+msgid "Tar archive (XZ-compressed)"
+msgstr ""
+
+#: progs/archive-proto.h
+msgid "Tar archive (Zstandard-compressed)"
+msgstr ""
+
+#: progs/archive-proto.h
+msgid "Tar archive (LZ4-compressed)"
+msgstr ""
+
+#: progs/archive-proto.h
+msgid "Tar archive (LZMA-compressed)"
+msgstr ""
+
+#: progs/archive-proto.h
+msgid "Tar archive (lzip-compressed)"
+msgstr ""
+
+#: progs/archive-proto.h
+msgid "Tar archive (compressed)"
+msgstr ""
+
+#: progs/archive-proto.h
+msgid "Tar archive"
+msgstr ""
+
+#: progs/archive-proto.h
+msgid "Zip archive"
+msgstr ""
+
+#: progs/archive-proto.h
+msgid "7-zip archive"
+msgstr ""
+
+#: progs/archive.c
+msgid "archive"
+msgstr ""
+
+#. TRANSLATORS: Esc is the key; keep it.
+#: progs/archive.c progs/files.c progs/shot.c
+msgid "Esc: cancel"
+msgstr ""
+
+#: progs/archive.c
+#, c-format
+msgid "Password for %s:"
+msgstr ""
+
+#: progs/archive.c
+#, c-format
+msgid "Wrong password. Password for %s:"
+msgstr ""
+
+#: progs/archive.c
+#, c-format
+msgid "Cannot start archive-worker: %s."
+msgstr ""
+
+#. TRANSLATORS: the question when Esc is pressed while the archive is worked on.
+#: progs/archive.c
+msgid "Cancel it?"
+msgstr ""
+
+#: progs/archive.c
+#, c-format
+msgid "archive-worker stopped (status %d)."
+msgstr ""
+
+#. TRANSLATORS: y and N are the keys answering; keep them.
+#: progs/archive.c
+#, c-format
+msgid "%s [y/N]"
+msgstr ""
+
+#: progs/archive.c
+#, c-format
+msgid ""
+"%s is there and not a folder: o overwrite  O all  s skip  S all  Esc cancel"
+msgstr ""
+
+#: progs/archive.c
+#, c-format
+msgid ""
+"%s is there already: o overwrite  O all  s skip  S all  r another name  Esc "
+"cancel"
+msgstr ""
+
+#: progs/archive.c
+msgid "Another name:"
+msgstr ""
+
+#: progs/archive.c
+#, c-format
+msgid "and %d more"
+msgid_plural "and %d more"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/archive.c
+msgid "Any key: back"
+msgstr ""
+
+#: progs/archive.c
+#, c-format
+msgid "Loading %s..."
+msgstr ""
+
+#: progs/archive.c
+msgid "no password: not opened."
+msgstr ""
+
+#: progs/archive.c progs/edit-documents.inc progs/files.c progs/home.c
+msgid "Open"
+msgstr ""
+
+#: progs/archive.c progs/edit-actions.inc progs/edit-documents.inc
+msgid "New"
+msgstr ""
+
+#. TRANSLATORS: key names; keep them.
+#: progs/archive.c progs/files.c
+msgid "Extract"
+msgstr ""
+
+#: progs/archive.c
+msgid "Preview"
+msgstr ""
+
+#: progs/archive.c
+msgid "Add Files"
+msgstr ""
+
+#: progs/archive.c
+msgid "Remove"
+msgstr ""
+
+#: progs/archive.c
+msgid "Test"
+msgstr ""
+
+#: progs/archive.c progs/files.c progs/view-pdf-ui.inc progs/view.c
+msgid "Properties"
+msgstr ""
+
+#: progs/archive.c progs/files.c
+#, c-format
+msgid "%d item"
+msgid_plural "%d items"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/archive.c
+#, c-format
+msgid "%d entry marked (%s)"
+msgid_plural "%d entries marked (%s)"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/archive.c
+msgid "   encrypted"
+msgstr ""
+
+#: progs/archive.c
+#, c-format
+msgid "%d files, %d folders: %s (%s packed)"
+msgstr ""
+
+#: progs/archive.c
+msgid "   read-only"
+msgstr ""
+
+#: progs/archive.c
+msgid "No archive: Ctrl+O opens one, Ctrl+N makes a new one."
+msgstr ""
+
+#: progs/archive.c
+#, c-format
+msgid "Find: %s"
+msgstr ""
+
+#: progs/archive.c progs/files.c progs/packages.c
+msgid "Name"
+msgstr ""
+
+#: progs/archive.c progs/files.c progs/packages.c
+msgid "Size"
+msgstr ""
+
+#: progs/archive.c progs/edit.c progs/files.c progs/view.c
+msgid "Modified"
+msgstr ""
+
+#: progs/archive.c
+msgid "Permissions"
+msgstr ""
+
+#: progs/archive.c progs/files.c
+msgid "Owner"
+msgstr ""
+
+#: progs/archive.c progs/installer.c
+msgid "Nothing has that in its name."
+msgstr ""
+
+#: progs/archive.c
+msgid "The archive is empty."
+msgstr ""
+
+#. TRANSLATORS: key names (Enter, Ctrl+E, Alt+A, Del, Alt+T, Alt+Return, q); keep them.
+#: progs/archive.c
+msgid ""
+"Enter preview  o open  Ctrl+E extract  Alt+A add  Del remove  Alt+T test  "
+"Alt+Return properties  Ctrl+F find  q quit"
+msgstr ""
+
+#: progs/archive.c
+msgid "No archive is open."
+msgstr ""
+
+#: progs/archive.c
+msgid "The archive can only be read."
+msgstr ""
+
+#: progs/archive.c
+#, c-format
+msgid "Extracting %s..."
+msgstr ""
+
+#: progs/archive.c
+msgid "It could not be extracted."
+msgstr ""
+
+#. TRANSLATORS: o is the key; keep it.
+#: progs/archive.c
+#, c-format
+msgid "Nothing here previews %s: o opens it in its application."
+msgstr ""
+
+#: progs/archive.c
+#, c-format
+msgid "Cannot ask home to open %s."
+msgstr ""
+
+#: progs/archive.c
+#, c-format
+msgid "Opened %s."
+msgstr ""
+
+#: progs/archive.c progs/edit-filesearch-ui.inc progs/packages.c progs/shot.c
+msgid "Cancel"
+msgstr ""
+
+#: progs/archive.c
+msgid "Destination:"
+msgstr ""
+
+#: progs/archive.c
+msgid "Extraction into subfolder:"
+msgstr ""
+
+#: progs/archive.c
+msgid "Extract:"
+msgstr ""
+
+#: progs/archive.c
+msgid "Preserve paths when extracting:"
+msgstr ""
+
+#: progs/archive.c
+msgid "Close after extraction:"
+msgstr ""
+
+#: progs/archive.c
+msgid "All files"
+msgstr ""
+
+#: progs/archive.c
+msgid "Selected files only"
+msgstr ""
+
+#: progs/archive.c
+msgid ""
+"Up/Down: line   Enter: choose or edit   Space: switch   F2: type the "
+"destination   Esc: cancel"
+msgstr ""
+
+#: progs/archive.c
+msgid "Where to? No destination."
+msgstr ""
+
+#: progs/archive.c
+msgid "The subfolder needs a name (without /)."
+msgstr ""
+
+#: progs/archive.c
+msgid "Extract to: o chooses the selected folder."
+msgstr ""
+
+#: progs/archive.c
+msgid "Subfolder:"
+msgstr ""
+
+#: progs/archive.c
+#, c-format
+msgid "Extracted to %s."
+msgstr ""
+
+#: progs/archive.c
+msgid "Extraction cancelled."
+msgstr ""
+
+#: progs/archive.c
+msgid "No password: nothing extracted."
+msgstr ""
+
+#: progs/archive.c
+msgid "Extraction failed."
+msgstr ""
+
+#: progs/archive.c
+msgid "Create"
+msgstr ""
+
+#: progs/archive.c
+msgid "Folder:"
+msgstr ""
+
+#: progs/archive.c
+msgid "Filename:"
+msgstr ""
+
+#: progs/archive.c progs/files.c
+msgid "Type:"
+msgstr ""
+
+#: progs/archive.c
+msgid "Compression level:"
+msgstr ""
+
+#: progs/archive.c progs/packages.c
+msgid "(none)"
+msgstr ""
+
+#: progs/archive.c progs/lock.c
+msgid "Password:"
+msgstr ""
+
+#: progs/archive.c
+msgid "Encrypt the file list too:"
+msgstr ""
+
+#: progs/archive.c
+msgid "Encryption method:"
+msgstr ""
+
+#: progs/archive.c
+msgid "Multi-volume archive:"
+msgstr ""
+
+#: progs/archive.c
+#, c-format
+msgid "[x] volumes of %lld MB"
+msgstr ""
+
+#: progs/archive.c
+msgid ""
+"Up/Down: line   Enter: edit or choose   Left/Right: type, level   Space: "
+"switch   Esc: cancel"
+msgstr ""
+
+#: progs/archive.c
+msgid "The archive needs a name (without /)."
+msgstr ""
+
+#: progs/archive.c
+#, c-format
+msgid "%s is there already."
+msgstr ""
+
+#: progs/archive.c
+msgid ""
+"A 7z archive with a password needs 7-Zip (settings: Optional Components)."
+msgstr ""
+
+#: progs/archive.c
+msgid "Create in: o chooses the selected folder."
+msgstr ""
+
+#: progs/archive.c
+msgid "Confirm password:"
+msgstr ""
+
+#: progs/archive.c
+msgid "The passwords do not match."
+msgstr ""
+
+#: progs/archive.c
+msgid "Volume size (MB):"
+msgstr ""
+
+#: progs/archive.c
+#, c-format
+msgid "Compressing into %s..."
+msgstr ""
+
+#: progs/archive.c
+msgid "The archive could not be made."
+msgstr ""
+
+#: progs/archive.c
+msgid "Add a file..."
+msgstr ""
+
+#: progs/archive.c
+msgid "Add a folder..."
+msgstr ""
+
+#: progs/archive.c
+msgid "Add: o chooses the selected folder."
+msgstr ""
+
+#: progs/archive.c
+msgid "Add: Enter chooses the selected file."
+msgstr ""
+
+#: progs/archive.c progs/files.c
+msgid "Archive"
+msgstr ""
+
+#: progs/archive.c
+msgid "New archive"
+msgstr ""
+
+#: progs/archive.c
+msgid "Nothing added: no archive made."
+msgstr ""
+
+#: progs/archive.c
+#, c-format
+msgid "Adding %s..."
+msgstr ""
+
+#: progs/archive.c
+#, c-format
+msgid "%s added."
+msgstr ""
+
+#: progs/archive.c
+msgid "Nothing was added."
+msgstr ""
+
+#: progs/archive.c
+#, c-format
+msgid "Remove %d entry from the archive?"
+msgid_plural "Remove %d entries from the archive?"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/archive.c
+msgid "Removing..."
+msgstr ""
+
+#: progs/archive.c
+#, c-format
+msgid "%d entry removed."
+msgid_plural "%d entries removed."
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/archive.c
+msgid "Nothing was removed."
+msgstr ""
+
+#: progs/archive.c
+msgid "Testing the archive..."
+msgstr ""
+
+#: progs/archive.c
+msgid "The archive passed the integrity test."
+msgstr ""
+
+#: progs/archive.c
+msgid "The archive failed the integrity test."
+msgstr ""
+
+#: progs/archive.c
+msgid "Reading the archive..."
+msgstr ""
+
+#: progs/archive.c
+#, c-format
+msgid "%d (%d files, %d folders)"
+msgstr ""
+
+#: progs/archive.c
+msgid "Archive name:"
+msgstr ""
+
+#: progs/archive.c
+msgid "Archive type:"
+msgstr ""
+
+#: progs/archive.c
+msgid "Mime-type:"
+msgstr ""
+
+#: progs/archive.c
+msgid "Opened by:"
+msgstr ""
+
+#: progs/archive.c
+msgid "Opened read-only:"
+msgstr ""
+
+#: progs/archive.c progs/installer.c progs/packages.c
+msgid "no"
+msgstr ""
+
+#: progs/archive.c progs/installer.c progs/packages.c
+msgid "yes"
+msgstr ""
+
+#: progs/archive.c
+msgid "Password-protected:"
+msgstr ""
+
+#: progs/archive.c
+msgid "Number of entries:"
+msgstr ""
+
+#: progs/archive.c
+msgid "Unpacked size:"
+msgstr ""
+
+#: progs/archive.c
+msgid "Packed size:"
+msgstr ""
+
+#: progs/archive.c
+msgid "Compression ratio:"
+msgstr ""
+
+#: progs/archive.c
+msgid "Last modified:"
+msgstr ""
+
+#: progs/archive.c
+msgid "Multi-volume:"
+msgstr ""
+
+#: progs/archive.c
+msgid "Number of volumes:"
+msgstr ""
+
+#: progs/archive.c
+msgid "MD5 hash:"
+msgstr ""
+
+#: progs/archive.c
+msgid "SHA-1 hash:"
+msgstr ""
+
+#: progs/archive.c
+msgid "SHA-256 hash:"
+msgstr ""
+
+#: progs/archive.c progs/edit.c progs/view.c
+msgid "Find:"
+msgstr ""
+
+#: progs/archive.c
+msgid "Open an archive: Enter chooses it."
+msgstr ""
+
+#: progs/archive.c
+msgid "Open in External Application"
+msgstr ""
+
+#: progs/archive.c
+msgid "Open With..."
+msgstr ""
+
+#: progs/archive.c
+msgid "Extract..."
+msgstr ""
+
+#: progs/archive.c
+msgid "Extract All..."
+msgstr ""
+
+#: progs/archive.c
+msgid "Add Files..."
+msgstr ""
+
+#: progs/archive.c
+msgid "Remove from Archive"
+msgstr ""
+
+#: progs/archive.c
+msgid "Test Integrity"
+msgstr ""
+
+#: progs/archive.c
+msgid "The archive could not be opened."
+msgstr ""
+
+#: progs/archive.c
+msgid "The files to compress are to be in one folder."
+msgstr ""
+
+#: progs/archive.c
+msgid "Nothing was compressed."
+msgstr ""
+
+#: progs/archive.c
+msgid "Compressing..."
+msgstr ""
+
+#: progs/archive.c
+#, c-format
+msgid "%s: not a kind of archive that can be written."
+msgstr ""
+
+#: progs/archive.c progs/files.c
+msgid "Compress"
+msgstr ""
+
+#: progs/bar.c
+msgid "Its tray item would not show a window."
+msgstr ""
+
+#: progs/bar.c
+msgid "(untitled)"
+msgstr ""
+
+#. TRANSLATORS: %s is the container name or app id; keep short: bar button.
+#: progs/bar.c
+#, c-format
+msgid "%s, minimized"
+msgstr ""
+
+#: progs/bar.c
+#, c-format
+msgid "%s, in the tray"
+msgstr ""
+
+#. TRANSLATORS: %s is the container name; keep short: bar button.
+#: progs/bar.c
+#, c-format
+msgid "%s, needs attention"
+msgstr ""
+
+#. TRANSLATORS: keep short: bar field.
+#: progs/bar.c
+msgid "no container"
+msgstr ""
+
+#. TRANSLATORS: %s is RAM size (e.g. "320M"), %d is the number of frozen containers; keep short: bar field.
+#: progs/bar.c
+#, c-format
+msgid "RAM %s, %d frozen"
+msgid_plural "RAM %s, %d frozen"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/bar.c
+msgid "Its tray item did not show a window."
+msgstr ""
+
+#: progs/bar.c
+msgid "Nothing of it is in the tray to show one."
+msgstr ""
+
+#: progs/bar.c progs/files.c
+msgid "default"
+msgstr ""
+
+#. TRANSLATORS: %s is the container name.
+#: progs/bar.c
+#, c-format
+msgid "%s runs without a window."
+msgstr ""
+
+#: progs/bar.c
+msgid "Start its program again? One that runs only once shows its"
+msgstr ""
+
+#: progs/bar.c
+msgid "window; any other starts a second copy."
+msgstr ""
+
+#. TRANSLATORS: Enter and Esc are keys; keep them.
+#: progs/bar.c
+msgid "Enter: start it again   Esc: leave it"
+msgstr ""
+
+#. TRANSLATORS: %s is a file name or URL.
+#: progs/bar.c
+#, c-format
+msgid "Open %s with:"
+msgstr ""
+
+#: progs/bar.c progs/files.c
+msgid "Other container..."
+msgstr ""
+
+#. TRANSLATORS: Enter, A and Esc are keys; keep them.
+#: progs/bar.c
+msgid "Enter: open   A: always use it   Esc: cancel"
+msgstr ""
+
+#: progs/edit-actions.inc progs/view.c
+msgid "File"
+msgstr ""
+
+#: progs/edit-actions.inc progs/view.c
+msgid "Edit"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Selection"
+msgstr ""
+
+#: progs/edit-actions.inc progs/view.c
+msgctxt "menu"
+msgid "Go"
+msgstr ""
+
+#: progs/edit-actions.inc progs/view.c
+msgctxt "menu"
+msgid "View"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "LSP Client"
+msgstr ""
+
+#: progs/edit-actions.inc progs/view.c
+msgid "Tools"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Sessions"
+msgstr ""
+
+#: progs/edit-actions.inc progs/edit-documents.inc progs/view.c
+msgid "Open..."
+msgstr ""
+
+#: progs/edit-actions.inc progs/edit-documents.inc progs/packages.c
+#: progs/shot.c progs/view-pdf-ui.inc
+msgid "Save"
+msgstr ""
+
+#: progs/edit-actions.inc progs/view-pdf-ui.inc
+msgid "Save As..."
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Save All"
+msgstr ""
+
+#: progs/edit-actions.inc progs/edit-documents.inc progs/view.c
+msgid "Reload"
+msgstr ""
+
+#: progs/edit-actions.inc progs/edit-documents.inc progs/edit-filesearch-ui.inc
+#: progs/view.c
+msgid "Close"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Close All"
+msgstr ""
+
+#: progs/edit-actions.inc progs/view.c
+msgid "Quit"
+msgstr ""
+
+#: progs/edit-actions.inc progs/files.c progs/shot.c progs/view.c
+msgid "Undo"
+msgstr ""
+
+#: progs/edit-actions.inc progs/view.c
+msgid "Redo"
+msgstr ""
+
+#: progs/edit-actions.inc progs/files.c
+msgid "Cut"
+msgstr ""
+
+#: progs/edit-actions.inc progs/files.c progs/shot.c progs/view.c
+msgid "Copy"
+msgstr ""
+
+#: progs/edit-actions.inc progs/files.c
+msgid "Paste"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Paste Selection"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Overwrite Mode"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Read Only Mode"
+msgstr ""
+
+#: progs/edit-actions.inc progs/view.c
+msgid "Find..."
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Find Variants"
+msgstr ""
+
+#: progs/edit-actions.inc progs/edit.c
+msgid "Replace..."
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Find in Files..."
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Find in Files Results..."
+msgstr ""
+
+#: progs/edit-actions.inc progs/view.c
+msgid "Find Next"
+msgstr ""
+
+#: progs/edit-actions.inc progs/view.c
+msgid "Find Previous"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Find Selected"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Find Selected Backwards"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Select All"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Deselect"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Block Selection Mode"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Toggle Comment"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Comment"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Uncomment"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Add Caret above Cursor"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Add Caret below Cursor"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Add Cursors to Line Ends"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Find and Select Next Occurrence"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Find and Select All Occurrences"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Mark Currently Selected Occurrence as Skipped"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Remove Cursors from Empty Lines"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Remove Additional Cursors"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Quick Open"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Last Used Views"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Last Used Views (Reverse)"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Go to Line..."
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Previous Document"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Next Document"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Next Tab"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Previous Tab"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Go to Previous Modified Line"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Go to Next Modified Line"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Go to Matching Bracket"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Select to Matching Bracket"
+msgstr ""
+
+#: progs/edit-actions.inc progs/view.c
+msgid "Bookmarks"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Toggle Bookmark"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Clear All Bookmarks"
+msgstr ""
+
+#. TRANSLATORS: %ld is the bookmark's line number, %s is the start of that line's text.
+#: progs/edit-actions.inc
+#, c-format
+msgid "Previous: %ld - \"%s\""
+msgstr ""
+
+#. TRANSLATORS: %ld is the bookmark's line number, %s is the start of that line's text.
+#: progs/edit-actions.inc
+#, c-format
+msgid "Next: %ld - \"%s\""
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Split View"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Tool Views"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Enlarge Font"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Shrink Font"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Reset Font Size"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Word Wrap"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Borders"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Code Folding"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Previous Split View"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Next Split View"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Split Vertical"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Split Horizontal"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Toggle Orientation"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Close Current View"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Close Inactive Views"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Show Sidebars"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Show Documents"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Show Projects"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Dynamic Word Wrap"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Show Icon Border"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Show Line Numbers"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Show Scrollbar Marks"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Show Scrollbar Mini-Map"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Fold Current Node"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Unfold Current Node"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Fold Toplevel Nodes"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Unfold Toplevel Nodes"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Fold All Recursively"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Unfold All Recursively"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Language Server..."
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Reopen with Encoding..."
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Indent"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Unindent"
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid "Manage Sessions..."
+msgstr ""
+
+#: progs/edit-actions.inc
+msgid " (unavailable)"
+msgstr ""
+
+#: progs/edit-documents.inc progs/edit.c progs/view.c
+msgid "Next"
+msgstr ""
+
+#: progs/edit-documents.inc
+msgid "Prev"
+msgstr ""
+
+#: progs/edit-documents.inc
+msgid "Save As"
+msgstr ""
+
+#: progs/edit-documents.inc
+msgid "Copy Location"
+msgstr ""
+
+#: progs/edit-documents.inc
+msgid "Close Other"
+msgstr ""
+
+#: progs/edit-documents.inc
+msgid "Expand Recursively"
+msgstr ""
+
+#: progs/edit-documents.inc
+msgid "Collapse Recursively"
+msgstr ""
+
+#: progs/edit-documents.inc
+msgid "Tree Mode"
+msgstr ""
+
+#: progs/edit-documents.inc
+msgid "List Mode"
+msgstr ""
+
+#: progs/edit-documents.inc
+msgid "Sort By Document Name"
+msgstr ""
+
+#: progs/edit-documents.inc
+msgid "Sort By Document Path"
+msgstr ""
+
+#: progs/edit-documents.inc
+msgid "Sort By Opening Order"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+#, c-format
+msgid "Find in Files: %.*s"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+#, c-format
+msgid "Find in Files: %zu match (Search menu: results)"
+msgid_plural "Find in Files: %zu matches (Search menu: results)"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/edit-filesearch-ui.inc
+msgid "Not enough memory for open-document snapshots."
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+msgid "There is no current project. Choose Folder or Open Documents."
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+msgid "Find in Files: searching in background"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+msgid ""
+"Wait for a successful completed search before replacing checked matches."
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+msgid "No checked matches."
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+msgid "Replace checked with:"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+#, c-format
+msgid ""
+"Replace %zu checked match?\n"
+"Open documents become unsaved undoable edits. Other files are saved "
+"atomically, preserving encoding and line endings. Changed snapshots are "
+"refused."
+msgid_plural ""
+"Replace %zu checked matches?\n"
+"Open documents become unsaved undoable edits. Other files are saved "
+"atomically, preserving encoding and line endings. Changed snapshots are "
+"refused."
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/edit-filesearch-ui.inc progs/edit-language.inc
+#: progs/edit-session-ui.inc progs/edit.c
+msgid "&Cancel"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+msgid "&Replace Checked"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+msgid "Replace in Files"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+msgid ""
+"The document was closed, changed, wrapped or made read-only. Search again; "
+"no overwrite was performed."
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+#, c-format
+msgid "Replacement refused for %.*s: %s"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+#, c-format
+msgid "Replaced %zu match; search again"
+msgid_plural "Replaced %zu matches; search again"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/edit-filesearch-ui.inc
+msgid "Start a Find in Files search first."
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+msgid "Results"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc progs/view.c
+msgid "Searching..."
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+#, c-format
+msgid "%.*s: %zu match"
+msgid_plural "%.*s: %zu matches"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/edit-filesearch-ui.inc progs/edit-session-ui.inc
+msgid "Previous page"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc progs/edit-session-ui.inc
+msgid "Next page"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+msgid "Toggle all checked"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+msgid "Replace checked..."
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+msgid "Open result"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+msgid "Toggle checked"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+#, c-format
+msgid "Find: %.*s"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+msgid "Current Project"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+msgid "Folder"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+msgid "Open Documents"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+#, c-format
+msgid "Scope: %s"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+#, c-format
+msgid "Folder: %.*s"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+#, c-format
+msgid "Include: %.*s"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+#, c-format
+msgid "Exclude: %.*s"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+#, c-format
+msgid "Mode: %s"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc progs/edit.c
+msgid "Match case"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+msgid "Recursive"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+msgid "Hidden files"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+msgid "Follow symbolic links"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+msgid "Start search"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+#, c-format
+msgid "Results (%zu)"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+#, c-format
+msgid "Results (%zu) - searching"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+msgid "Cancel running search"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+msgid "Find in Files:"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+msgid "Search folder:"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+msgid "Include globs (; separated):"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+msgid "Exclude globs (; separated):"
+msgstr ""
+
+#: progs/edit-filesearch-ui.inc
+msgid "Find in Files cancelled"
+msgstr ""
+
+#: progs/edit-filesearch.c
+msgid "Search result limit reached (100000 matches / 64 MiB)"
+msgstr ""
+
+#: progs/edit-filesearch.c progs/edit-search.c
+msgid "No memory"
+msgstr ""
+
+#: progs/edit-filesearch.c
+msgid "Directory limit reached (100000)"
+msgstr ""
+
+#: progs/edit-filesearch.c
+msgid "Directory queue limit reached"
+msgstr ""
+
+#: progs/edit-filesearch.c
+msgid "Cannot permanently switch file search to uid 1000"
+msgstr ""
+
+#: progs/edit-filesearch.c
+msgid "Invalid open-document overlay"
+msgstr ""
+
+#: progs/edit-filesearch.c
+msgid "Open document without a path"
+msgstr ""
+
+#: progs/edit-filesearch.c
+msgid "Invalid or empty search pattern"
+msgstr ""
+
+#: progs/edit-filesearch.c
+msgid "Malformed glob filter or pattern too long"
+msgstr ""
+
+#: progs/edit-filesearch.c
+msgid "Choose a search folder or open-document scope"
+msgstr ""
+
+#: progs/edit-filesearch.c
+msgid "File search worker stopped before completing"
+msgstr ""
+
+#: progs/edit-filesearch.c
+msgid "Malformed or oversized file search result"
+msgstr ""
+
+#: progs/edit-filesearch.c
+msgid "No search"
+msgstr ""
+
+#: progs/edit-filesearch.c
+msgid "Wait for a successful search before replacing"
+msgstr ""
+
+#: progs/edit-filesearch.c
+msgid "No checked matches for this file"
+msgstr ""
+
+#: progs/edit-filesearch.c
+msgid "Open-document snapshot must be replaced in its buffer"
+msgstr ""
+
+#: progs/edit-filesearch.c
+msgid "File or buffer changed since the search; search again"
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Cannot save language settings: %s"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Save this document before starting its language server."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "No language server configured for %s. Use Configure Server Command."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Cannot start %s: %s"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "unknown error"
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid ""
+"Language server '%s' is not installed. Configure an existing server; no "
+"server is installed automatically."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid ""
+"Language server unavailable for %s. Configure a command or restart after "
+"installing it."
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Language server stopped. Use Restart Current Server."
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Language server requires valid UTF-8 text without NUL bytes."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Cannot open language document: %s"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "invalid URI"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Language server is initializing; try again shortly."
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Language request failed"
+msgstr ""
+
+#. TRANSLATORS: Keep key names (Enter, Esc, Up/Down/PgUp/PgDn) as is.
+#: progs/edit-language.inc
+msgid "Enter: choose   Esc: cancel   Up/Down/PgUp/PgDn: select"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "The server location no longer matches this document."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Cannot edit %s: not a local file."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Cannot edit %s: %s."
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "it does not exist"
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Cannot edit %s: unavailable or read-only."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Stale edit for %s; no changes applied."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Invalid workspace edit: %s"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "invalid edit"
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Cannot create %s: it already exists."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Cannot overwrite %s: it is a folder."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Cannot overwrite %s: it is open with unsaved changes."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Cannot overwrite %s: %s."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Cannot create %s: %s."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Cannot create %s: it is open with unsaved changes."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Cannot rename %s: %s."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Cannot move the folder %s into itself."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Cannot rename %s to %s: the target already exists."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Cannot rename onto %s: it is a folder."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Cannot replace %s: it is open with unsaved changes."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Cannot replace %s: %s."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Cannot rename %s to %s: %s."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Cannot rename %s: the new name of %s is too long."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Cannot delete %s: %s."
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "the folder is not empty"
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Deleting %s was cancelled; no changes were applied."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid " %s was not removed."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid " %s was not renamed back to %s."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid " %s is kept as %s."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid " Could not undo everything:%s"
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Applied, but %s could not be removed: %s"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Workspace changed; request this edit again."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid ""
+"Confirmation required: %s\n"
+"%s\n"
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid ""
+"Invalid workspace edit: change %u is malformed or not a local file; no "
+"changes were applied."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Create %s\n"
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Rename %s to %s\n"
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Delete %s\n"
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Delete %s (with its contents)\n"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "&Apply"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Apply Workspace Edit"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "The user did not apply the edit."
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Workspace edit failed; all changed documents were rolled back."
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "The editor rejected the edit."
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Locations"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "No completions."
+msgstr ""
+
+#. TRANSLATORS: Keep key names (Enter/Tab, F1, Esc) as is.
+#: progs/edit-language.inc
+msgid "Enter/Tab: insert   F1: selected documentation   Esc: cancel"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Completion"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Completion (more results after typing)"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "No documentation."
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Server returned an unrequested snippet; no text inserted."
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "Language server: %s"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "request failed"
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid ""
+"Parameter %d: %s\n"
+"%s\n"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "No signature information."
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Signature Help"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Hover"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Hover (Markdown)"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "No hover information."
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "No locations found."
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Project Symbols"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Symbol Outline"
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "%s%s (disabled: %s)"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Code Actions / Quick Fix"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "No diagnostics."
+msgstr ""
+
+#: progs/edit-language.inc progs/edit.c
+msgid "Error"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Info"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Warning"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Diagnostics"
+msgstr ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "%u:%u: %s (%u diagnostic)"
+msgid_plural "%u:%u: %s (%u diagnostics)"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/edit-language.inc
+#, c-format
+msgid "%s server stopped: %s. Use Restart Current Server. %s"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "process exited"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Language server command (argv, no shell):"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Invalid command"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "New symbol name:"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Project symbol:"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Complete"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Configure Server Command..."
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Find Implementations"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Find References (including declaration)"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Format Document / Selection"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Go to Declaration"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Go to Definition"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Go to Type Definition"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Highlight References"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Project Symbols..."
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Quick Fix / Code Actions"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Rename Symbol..."
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Restart All Servers"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Restart Current Server"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Show Diagnostics"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Switch Source / Header"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Automatic Completion"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Automatic Signature Help"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Diagnostic Notifications"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Format on Save"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Format on Typing"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Hover Information"
+msgstr ""
+
+#: progs/edit-language.inc
+msgid "Language Server"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Invalid or stale text edit"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Invalid text edit range or UTF-8"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Overlapping text edits"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "LSP output queue limit exceeded"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Server did not negotiate UTF-16 positions"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Invalid text document synchronization capability"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Language server initialized"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Invalid JSON-RPC message"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Invalid JSON-RPC response"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Language server initialization failed"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Document changed while request was pending"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "LSP header exceeds limit"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Invalid LSP header"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Invalid or oversized Content-Length"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "NUL in JSON-RPC body"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Malformed JSON-RPC body"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Invalid or excessively nested JSON-RPC value"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Language server command is required"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Request cancelled"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Language server is not running"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Invalid or already open document"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Invalid document change or version"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Document exceeds message limit"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Document is not open"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Server is not ready or request limit reached"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Invalid UTF-8 request offset"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Invalid UTF-8 request range"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Resolve requires an object payload"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Command is required"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Command arguments must be an array"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Rename requires a new name"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Workspace edit request has expired"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Stopped before initialization completed"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Server shutting down"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Language server shutting down"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Language server initialization timed out"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Language server request timed out"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "LSP event queue limit exceeded"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Polling language server failed"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Language server stdin closed"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Language server exited"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Language server exited unexpectedly"
+msgstr ""
+
+#: progs/edit-lsp.c
+msgid "Language server stdout closed"
+msgstr ""
+
+#. TRANSLATORS: %1$s is the document's path or "Untitled", %2$s is the session name.
+#: progs/edit-session-ui.inc
+#, c-format
+msgid "Unsaved changes to %s were restored from session '%s'."
+msgstr ""
+
+#: progs/edit-session-ui.inc
+#, c-format
+msgid ""
+"The file '%s' was deleted or moved on disk after these unsaved changes were "
+"recorded."
+msgstr ""
+
+#: progs/edit-session-ui.inc
+#, c-format
+msgid ""
+"The file '%s' was changed on disk after these unsaved changes were recorded."
+msgstr ""
+
+#: progs/edit-session-ui.inc
+#, c-format
+msgid ""
+"Could not save (recovery is protected) session '%s': %s.\n"
+"The existing checkpoint has been kept. Use another session name to continue "
+"without replacing it."
+msgstr ""
+
+#: progs/edit-session-ui.inc
+#, c-format
+msgid ""
+"Could not save session '%s': %s.\n"
+"The existing checkpoint has been kept. Use another session name to continue "
+"without replacing it."
+msgstr ""
+
+#: progs/edit-session-ui.inc
+#, c-format
+msgid ""
+"Could not read selected session '%s': %s.\n"
+"The existing checkpoint has been kept. Use another session name to continue "
+"without replacing it."
+msgstr ""
+
+#: progs/edit-session-ui.inc
+#, c-format
+msgid ""
+"Could not load session '%s': %s.\n"
+"The existing checkpoint has been kept. Use another session name to continue "
+"without replacing it."
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid "&Keep Recovery and Start Empty"
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid "&Restore"
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid "Recover Session"
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid ""
+"The editor did not finish its last session cleanly.\n"
+"Restore its documents, unsaved changes and views?\n"
+"Starting empty keeps the recovery checkpoint protected until another session "
+"is chosen."
+msgstr ""
+
+#: progs/edit-session-ui.inc
+#, c-format
+msgid ""
+"Could not restore session '%s': %s.\n"
+"The existing checkpoint has been kept. Use another session name to continue "
+"without replacing it."
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid "Recovered unsaved documents and views"
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid "&Quit Without Replacing Recovery"
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid "Protected Recovery"
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid ""
+"This session's previous recovery is protected.\n"
+"Use Save Session As to preserve current work in another session before "
+"quitting."
+msgstr ""
+
+#: progs/edit-session-ui.inc
+#, c-format
+msgid ""
+"Could not list session '%s': %s.\n"
+"The existing checkpoint has been kept. Use another session name to continue "
+"without replacing it."
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid "No saved sessions"
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid "Session name:"
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid "A session name must contain 1 to 128 UTF-8 bytes."
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid ""
+"A session with that name already exists. Switch to it or choose another name."
+msgstr ""
+
+#: progs/edit-session-ui.inc
+#, c-format
+msgid ""
+"Could not create session '%s': %s.\n"
+"The existing checkpoint has been kept. Use another session name to continue "
+"without replacing it."
+msgstr ""
+
+#: progs/edit-session-ui.inc
+#, c-format
+msgid ""
+"Could not remember selected session '%s': %s.\n"
+"The existing checkpoint has been kept. Use another session name to continue "
+"without replacing it."
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid "Session saved under the new name"
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid ""
+"The previous recovery is protected. Use Save Session As to preserve current "
+"work first."
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid "New session"
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid "Switch session"
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid ""
+"This session has an unclean checkpoint. Restore all its unsaved documents?"
+msgstr ""
+
+#: progs/edit-session-ui.inc
+#, c-format
+msgid ""
+"Could not switch session '%s': %s.\n"
+"The existing checkpoint has been kept. Use another session name to continue "
+"without replacing it."
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid "Session switched"
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid "Delete saved session"
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid "The active session cannot be deleted. Switch to another session first."
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid "&Delete Session"
+msgstr ""
+
+#: progs/edit-session-ui.inc
+#, c-format
+msgid ""
+"Delete session '%s', including its unsaved recovery buffers?\n"
+"This does not delete any document files."
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid "Delete Session"
+msgstr ""
+
+#: progs/edit-session-ui.inc
+#, c-format
+msgid ""
+"Could not delete session '%s': %s.\n"
+"The existing checkpoint has been kept. Use another session name to continue "
+"without replacing it."
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid "Session deleted"
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid "Delete Session..."
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid "New Session..."
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid "Save Session"
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid "Save Session As..."
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid "Switch Session..."
+msgstr ""
+
+#: progs/edit-session-ui.inc
+msgid "Session saved"
+msgstr ""
+
+#: progs/edit.c
+msgid "&Reload"
+msgstr ""
+
+#: progs/edit.c
+msgid "Enable Auto Reload"
+msgstr ""
+
+#: progs/edit.c
+msgid "&Ignore"
+msgstr ""
+
+#: progs/edit.c
+msgid "&Close File"
+msgstr ""
+
+#: progs/edit.c
+msgid "&Save As..."
+msgstr ""
+
+#: progs/edit.c
+msgid "Temporarily raise limit and reload file"
+msgstr ""
+
+#: progs/edit.c
+msgid "&Close"
+msgstr ""
+
+#: progs/edit.c
+msgid "Try Again"
+msgstr ""
+
+#: progs/edit.c
+msgid "Reopen with &Encoding..."
+msgstr ""
+
+#: progs/edit.c
+msgid "Enable Read-&Write Mode"
+msgstr ""
+
+#: progs/edit.c
+#, c-format
+msgid "Untitled (%s)"
+msgstr ""
+
+#: progs/edit.c
+msgid "Untitled"
+msgstr ""
+
+#: progs/edit.c
+msgid "Escape sequences"
+msgstr ""
+
+#: progs/edit.c
+msgid "Plain text"
+msgstr ""
+
+#: progs/edit.c
+msgid "Regular expression"
+msgstr ""
+
+#: progs/edit.c
+msgid "Whole words"
+msgstr ""
+
+#: progs/edit.c
+#, c-format
+msgid "%zu cursor [BLOCK]"
+msgid_plural "%zu cursors [BLOCK]"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/edit.c
+#, c-format
+msgid "%zu cursor"
+msgid_plural "%zu cursors"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/edit.c
+#, c-format
+msgid "Soft Tabs: %d"
+msgstr ""
+
+#: progs/edit.c
+msgid "INSERT"
+msgstr ""
+
+#: progs/edit.c
+msgid "OVERWRITE"
+msgstr ""
+
+#: progs/edit.c
+msgid "Reached top, continued from bottom"
+msgstr ""
+
+#: progs/edit.c
+msgid "Reached bottom, continued from top"
+msgstr ""
+
+#: progs/edit.c
+msgid "Not found"
+msgstr ""
+
+#: progs/edit.c
+msgid "Line:"
+msgstr ""
+
+#. TRANSLATORS: Total line count in Go to Line bar, e.g. "Line: [12] of 100".
+#: progs/edit.c
+#, c-format
+msgid "of %zu"
+msgstr ""
+
+#: progs/edit.c
+msgid "Go to"
+msgstr ""
+
+#: progs/edit.c
+msgid "Replace:"
+msgstr ""
+
+#: progs/edit.c progs/view.c
+msgid "Previous"
+msgstr ""
+
+#: progs/edit.c
+#, c-format
+msgid "&Mode: %s"
+msgstr ""
+
+#: progs/edit.c
+msgid "Selection only"
+msgstr ""
+
+#: progs/edit.c
+msgid "&Replace"
+msgstr ""
+
+#: progs/edit.c
+msgid "Replace &All"
+msgstr ""
+
+#: progs/edit.c
+msgid "&Find All"
+msgstr ""
+
+#: progs/edit.c
+#, c-format
+msgid "Projects: %s"
+msgstr ""
+
+#: progs/edit.c
+msgid "Documents"
+msgstr ""
+
+#: progs/edit.c
+msgid "No document is open."
+msgstr ""
+
+#: progs/edit.c
+msgid "New File"
+msgstr ""
+
+#: progs/edit.c
+msgid "Open File..."
+msgstr ""
+
+#: progs/edit.c
+#, c-format
+msgid "Invalid regular expression: %.120s"
+msgstr ""
+
+#: progs/edit.c
+msgid "Search wrapped"
+msgstr ""
+
+#: progs/edit.c
+#, c-format
+msgid "%zu match found"
+msgid_plural "%zu matches found"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/edit.c
+#, c-format
+msgid "%zu replacement made"
+msgid_plural "%zu replacements made"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/edit.c
+msgid "&OK"
+msgstr ""
+
+#: progs/edit.c
+#, c-format
+msgid ""
+"The file %s could not be loaded, as it was not possible to read from it.<br /"
+">Check if you have read access to this file."
+msgstr ""
+
+#: progs/edit.c
+#, c-format
+msgid "No memory to load %s."
+msgstr ""
+
+#: progs/edit.c
+msgid "New file"
+msgstr ""
+
+#: progs/edit.c
+#, c-format
+msgid ""
+"The file %s was opened with %s encoding but contained invalid characters."
+"<br />It is set to read-only mode, as saving might destroy its content.<br /"
+">Reopen with the correct encoding, or explicitly enable read-write mode to "
+"edit these bytes."
+msgstr ""
+
+#: progs/edit.c
+#, c-format
+msgid ""
+"The file %s was opened and contained lines longer than the configured Line "
+"Length Limit (%zu characters).<br />The longest of those lines was %zu "
+"characters long<br/>Those lines were wrapped and the document is set to read-"
+"only mode, as saving will modify its content."
+msgstr ""
+
+#: progs/edit.c
+msgid ""
+"Reopen encoding: Auto, UTF-8, UTF-16LE, UTF-16BE, GB18030, ISO-8859-1, "
+"WINDOWS-1252"
+msgstr ""
+
+#: progs/edit.c
+msgid "Unknown encoding. Choose one of the encodings listed in the prompt."
+msgstr ""
+
+#: progs/edit.c
+msgid "&Discard Changes and Reload"
+msgstr ""
+
+#: progs/edit.c
+msgid "Reloading discards unsaved changes. Continue?"
+msgstr ""
+
+#: progs/edit.c
+msgid "Reopen with Encoding"
+msgstr ""
+
+#: progs/edit.c
+msgid "Possible Data Loss"
+msgstr ""
+
+#: progs/edit.c
+msgid ""
+"This document contains invalid encoded bytes or lines wrapped while "
+"loading.\n"
+"Saving may change its content. Reopen with the correct encoding or raise the "
+"line limit instead.\n"
+"Enable editing anyway?"
+msgstr ""
+
+#: progs/edit.c
+msgid "Save Nevertheless"
+msgstr ""
+
+#: progs/edit.c
+#, c-format
+msgid ""
+"The file '%s' was deleted or moved on disk.\n"
+"\n"
+"Do you really want to save this file? Both your open file and the file on "
+"disk were changed. There could be some data lost."
+msgstr ""
+
+#: progs/edit.c
+#, c-format
+msgid ""
+"The file '%s' was deleted or moved on disk.\n"
+"\n"
+"Do you really want to save this unmodified file? You could overwrite changed "
+"data in the file on disk."
+msgstr ""
+
+#: progs/edit.c
+#, c-format
+msgid ""
+"The file '%s' was modified on disk.\n"
+"\n"
+"Do you really want to save this file? Both your open file and the file on "
+"disk were changed. There could be some data lost."
+msgstr ""
+
+#: progs/edit.c
+#, c-format
+msgid ""
+"The file '%s' was modified on disk.\n"
+"\n"
+"Do you really want to save this unmodified file? You could overwrite changed "
+"data in the file on disk."
+msgstr ""
+
+#: progs/edit.c
+msgid "Trying to Save Unmodified File"
+msgstr ""
+
+#: progs/edit.c
+#, c-format
+msgid ""
+"The document could not be saved, as it was not possible to write to %s.\n"
+"Check that you have write access to this file or that enough disk space is "
+"available.\n"
+"The original file may be lost or damaged. Don't quit the application until "
+"the file is successfully written."
+msgstr ""
+
+#: progs/edit.c
+msgid "&Save Copy"
+msgstr ""
+
+#: progs/edit.c
+msgid ""
+"This document contains invalid encoded bytes or lines wrapped while "
+"loading.\n"
+"The saved copy may differ from the original. Reopen with the correct "
+"encoding or raise the line limit for an intact copy. Continue?"
+msgstr ""
+
+#. TRANSLATORS: (o) is the key to choose a folder in the file picker; keep it.
+#: progs/edit.c
+msgid "Save As: choose the folder (o), then type the name."
+msgstr ""
+
+#: progs/edit.c
+msgid "File name:"
+msgstr ""
+
+#: progs/edit.c
+msgid "Close Other && Save"
+msgstr ""
+
+#: progs/edit.c
+#, c-format
+msgid ""
+"The file %s is already open in another document.\n"
+"\n"
+"Saving this document there would leave two documents for the same file, "
+"saving one of them would overwrite the changes of the other one.\n"
+"\n"
+"Close the other document and save?"
+msgstr ""
+
+#: progs/edit.c
+msgid "File Already Open"
+msgstr ""
+
+#: progs/edit.c
+msgid "&Overwrite"
+msgstr ""
+
+#: progs/edit.c
+#, c-format
+msgid "The file \"%s\" already exists. Do you wish to overwrite it?"
+msgstr ""
+
+#: progs/edit.c
+msgid "Overwrite File?"
+msgstr ""
+
+#: progs/edit.c
+msgid "Close Nevertheless"
+msgstr ""
+
+#: progs/edit.c
+#, c-format
+msgid ""
+"The file '%s' was deleted or moved on disk.\n"
+"\n"
+"Do you really want to continue to close this file? Data loss may occur."
+msgstr ""
+
+#: progs/edit.c
+#, c-format
+msgid ""
+"The file '%s' was modified on disk.\n"
+"\n"
+"Do you really want to continue to close this file? Data loss may occur."
+msgstr ""
+
+#: progs/edit.c
+msgid "&Discard"
+msgstr ""
+
+#: progs/edit.c
+msgid "&Save"
+msgstr ""
+
+#: progs/edit.c
+#, c-format
+msgid ""
+"The document \"%s\" has been modified.\n"
+"Do you want to save your changes or discard them?"
+msgstr ""
+
+#: progs/edit.c
+msgid "Close Document"
+msgstr ""
+
+#: progs/edit.c
+msgid "&Ignore Changes"
+msgstr ""
+
+#: progs/edit.c progs/view.c
+msgid "Created"
+msgstr ""
+
+#: progs/edit.c progs/files.c
+msgid "Deleted"
+msgstr ""
+
+#: progs/edit.c
+#, c-format
+msgid ""
+"The documents listed below have changed on disk.\n"
+"\n"
+"%s   %s"
+msgstr ""
+
+#: progs/edit.c
+msgid "Documents Modified on Disk"
+msgstr ""
+
+#: progs/edit.c
+msgid ""
+"The following documents have been modified. Do you want to save them before "
+"closing?\n"
+msgstr ""
+
+#: progs/edit.c
+#, c-format
+msgid ""
+"The document \"%s\" has been modified. Do you want to save your changes or "
+"discard them?"
+msgstr ""
+
+#: progs/edit.c
+msgid "Save Documents"
+msgstr ""
+
+#: progs/edit.c
+#, c-format
+msgid "The file '%s' was deleted or moved on disk."
+msgstr ""
+
+#: progs/edit.c
+#, c-format
+msgid "The file '%s' was modified on disk."
+msgstr ""
+
+#. TRANSLATORS: (Enter) is the key to choose a file in the file picker; keep it.
+#: progs/edit.c
+msgid "Open File: choose a file (Enter)."
+msgstr ""
+
+#: progs/edit.c
+msgid "C&ontinue"
+msgstr ""
+
+#: progs/edit.c
+msgid "Stop"
+msgstr ""
+
+#: progs/edit.c
+#, c-format
+msgid ""
+"You are attempting to open one or more large files:\n"
+"  %s (%lldMB)\n"
+"Do you want to proceed?\n"
+"Beware that edit may stop responding for some time when opening large files."
+msgstr ""
+
+#: progs/edit.c
+msgid "Opening Large File"
+msgstr ""
+
+#: progs/edit.c
+msgid "The content font could not be loaded."
+msgstr ""
+
+#: progs/edit.c
+msgid "Bookmark"
+msgstr ""
+
+#: progs/files.c progs/firmware.c
+#, c-format
+msgid "Cannot read %s."
+msgstr ""
+
+#. TRANSLATORS: first %s is a folder path, second %s is the system error.
+#: progs/files.c
+#, c-format
+msgid "Cannot open %s: %s."
+msgstr ""
+
+#: progs/files.c
+msgid "Nothing to go back to."
+msgstr ""
+
+#: progs/files.c
+msgid "Nothing to go forward to."
+msgstr ""
+
+#. TRANSLATORS: Alt+Left is the key; keep it.
+#: progs/files.c
+msgid "The Trash is a place of its own: Alt+Left goes back."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "There is %d tab already."
+msgid_plural "There are %d tabs already."
+msgstr[0] ""
+msgstr[1] ""
+
+#. TRANSLATORS: first %d is the current tab number, second %d is the total number of tabs.
+#: progs/files.c
+#, c-format
+msgid "Tab %d of %d."
+msgstr ""
+
+#: progs/files.c
+msgid "This is the only tab."
+msgstr ""
+
+#. TRANSLATORS: first %d is the current tab number, second %d is the total number of tabs.
+#: progs/files.c
+#, c-format
+msgid "Tab closed; tab %d of %d."
+msgstr ""
+
+#. TRANSLATORS: Tab and F3 are keys; keep them.
+#: progs/files.c
+msgid "Split: Tab goes from pane to pane, F3 closes the active one."
+msgstr ""
+
+#: progs/files.c
+msgid "One pane."
+msgstr ""
+
+#: progs/files.c
+msgid "moved back from the Trash"
+msgstr ""
+
+#: progs/files.c
+msgid "renamed back"
+msgstr ""
+
+#: progs/files.c
+msgid "deleted the copies"
+msgstr ""
+
+#: progs/files.c
+msgid "removed the new folder"
+msgstr ""
+
+#: progs/files.c
+msgid "moved back"
+msgstr ""
+
+#: progs/files.c
+msgid "removed the created file"
+msgstr ""
+
+#: progs/files.c
+msgid "Nothing to undo."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Undo the copy: delete the %d copied item permanently?"
+msgid_plural "Undo the copy: delete the %d copied items permanently?"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/files.c
+msgid "Nothing undone."
+msgstr ""
+
+#. TRANSLATORS: %s is the undone action, %d is the count of items undone.
+#: progs/files.c
+#, c-format
+msgid "Undone: %s (%d item); some could not be (is something there now?)."
+msgid_plural ""
+"Undone: %s (%d items); some could not be (is something there now?)."
+msgstr[0] ""
+msgstr[1] ""
+
+#. TRANSLATORS: %s is the undone action, %d is the count of items undone.
+#: progs/files.c
+#, c-format
+msgid "Undone: %s (%d item)."
+msgid_plural "Undone: %s (%d items)."
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/files.c
+#, c-format
+msgid "Moved %d item; some could not be."
+msgid_plural "Moved %d items; some could not be."
+msgstr[0] ""
+msgstr[1] ""
+
+#. TRANSLATORS: Ctrl+Z is the key; keep it.
+#: progs/files.c
+#, c-format
+msgid "Moved %d item (Ctrl+Z to undo)."
+msgid_plural "Moved %d items (Ctrl+Z to undo)."
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/files.c
+#, c-format
+msgid "Copied %d item; some could not be."
+msgid_plural "Copied %d items; some could not be."
+msgstr[0] ""
+msgstr[1] ""
+
+#. TRANSLATORS: Ctrl+Z is the key; keep it.
+#: progs/files.c
+#, c-format
+msgid "Copied %d item (Ctrl+Z to undo)."
+msgid_plural "Copied %d items (Ctrl+Z to undo)."
+msgstr[0] ""
+msgstr[1] ""
+
+#. TRANSLATORS: Delete is the key; keep it.
+#: progs/files.c
+msgid "Nothing is pasted into the Trash: Delete moves items there."
+msgstr ""
+
+#. TRANSLATORS: r is the key; keep it.
+#: progs/files.c
+msgid "Items in the Trash are restored (r), not copied."
+msgstr ""
+
+#. TRANSLATORS: v is the key; keep it.
+#: progs/files.c
+#, c-format
+msgid "Cut %d item; v puts it in the folder shown."
+msgid_plural "Cut %d items; v puts them in the folder shown."
+msgstr[0] ""
+msgstr[1] ""
+
+#. TRANSLATORS: v is the key; keep it.
+#: progs/files.c
+#, c-format
+msgid "Copied %d item; v puts it in the folder shown."
+msgid_plural "Copied %d items; v puts them in the folder shown."
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/files.c
+#, c-format
+msgid "the %d item"
+msgid_plural "the %d items"
+msgstr[0] ""
+msgstr[1] ""
+
+#. TRANSLATORS: %s is a file name or "the N items"; Ctrl+Z is the key; keep it.
+#: progs/files.c
+#, c-format
+msgid "Moved %s to Trash (Ctrl+Z to undo)."
+msgstr ""
+
+#. TRANSLATORS: %d is the count moved, first %s is "the N items", second %s is the system error; Ctrl+Z is the key.
+#: progs/files.c
+#, c-format
+msgid "Moved %d of %s to Trash (Ctrl+Z to undo); the others could not be: %s."
+msgstr ""
+
+#. TRANSLATORS: first %s is a file name or "the N items", second %s is the system error.
+#: progs/files.c
+#, c-format
+msgid "Cannot move %s to Trash: %s."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Delete %s permanently?"
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Delete the %d marked item permanently?"
+msgid_plural "Delete the %d marked items permanently?"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/files.c
+msgid "Nothing deleted."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Deleted %d item; some could not be deleted."
+msgid_plural "Deleted %d items; some could not be deleted."
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/files.c
+#, c-format
+msgid "Deleted %d item."
+msgid_plural "Deleted %d items."
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/files.c
+#, c-format
+msgid "%s is there already: not restored"
+msgstr ""
+
+#. TRANSLATORS: first %s is a path, second %s is the system error.
+#: progs/files.c
+#, c-format
+msgid "cannot restore %s: %s"
+msgstr ""
+
+#. TRANSLATORS: %d is the count restored, %s is why another item could not be restored.
+#: progs/files.c
+#, c-format
+msgid "Restored %d item; %s."
+msgid_plural "Restored %d items; %s."
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/files.c
+#, c-format
+msgid "Restored %d item to where it was."
+msgid_plural "Restored %d items to where they were."
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/files.c
+msgid "The Trash is empty."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Empty the Trash: delete its %d item permanently?"
+msgid_plural "Empty the Trash: delete its %d items permanently?"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/files.c
+msgid "The Trash is emptied, but for what could not be deleted."
+msgstr ""
+
+#. TRANSLATORS: r is the key; keep it.
+#: progs/files.c
+msgid "Items in the Trash are restored (r), not moved."
+msgstr ""
+
+#: progs/files.c
+msgid "No folder is made in the Trash."
+msgstr ""
+
+#: progs/files.c
+msgid "New folder:"
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Cannot make %s."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Made %s."
+msgstr ""
+
+#. TRANSLATORS: r is the key; keep it.
+#: progs/files.c
+msgid "Items in the Trash are restored (r), not renamed."
+msgstr ""
+
+#: progs/files.c
+msgid "Rename to:"
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Cannot rename to %s (taken?)."
+msgstr ""
+
+#. TRANSLATORS: %s is the new name; Ctrl+Z is the key; keep it.
+#: progs/files.c
+#, c-format
+msgid "Renamed to %s (Ctrl+Z to undo)."
+msgstr ""
+
+#: progs/files.c
+msgid "No file is created here."
+msgstr ""
+
+#: progs/files.c
+msgid "New empty file:"
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Cannot create %s."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Created %s (Ctrl+Z to undo)."
+msgstr ""
+
+#: progs/files.c
+msgid "Symbolic link name:"
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Cannot create link %s."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Created link %s (Ctrl+Z to undo)."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Copied %d path to the clipboard."
+msgid_plural "Copied %d paths to the clipboard."
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/files.c
+msgid "Cannot copy path to the clipboard."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Inverted selection: %d item marked."
+msgid_plural "Inverted selection: %d items marked."
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/files.c
+#, c-format
+msgid "Terminal closed (%s)."
+msgstr ""
+
+#: progs/files.c
+msgid "Find files (part of name or *glob*):"
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Found %d match in %s."
+msgid_plural "Found %d matches in %s."
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/files.c
+msgid "Only a folder on disk can be bookmarked."
+msgstr ""
+
+#: progs/files.c
+msgid "Cannot update bookmarks."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Removed bookmark: %s."
+msgstr ""
+
+#. TRANSLATORS: Ctrl+D is the key; keep it.
+#: progs/files.c
+#, c-format
+msgid "Bookmarked %s (Ctrl+D removes it)."
+msgstr ""
+
+#: progs/files.c
+msgid "Ext"
+msgstr ""
+
+#: progs/files.c
+msgid "Perms"
+msgstr ""
+
+#: progs/files.c
+msgid "Location"
+msgstr ""
+
+#: progs/files.c
+msgid "Original Location"
+msgstr ""
+
+#: progs/files.c
+msgid "Type"
+msgstr ""
+
+#: progs/files.c
+msgid "(nothing matches the filter)"
+msgstr ""
+
+#: progs/files.c
+msgid "(Trash is empty)"
+msgstr ""
+
+#: progs/files.c
+msgid "(empty)"
+msgstr ""
+
+#: progs/files.c
+msgid "(no matching files found)"
+msgstr ""
+
+#: progs/files.c
+msgid "Compact"
+msgstr ""
+
+#: progs/files.c progs/packages.c
+msgid "Details"
+msgstr ""
+
+#: progs/files.c
+msgid "Icons"
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Search '%s' in %s"
+msgstr ""
+
+#. TRANSLATORS: v is the key; keep it.
+#: progs/files.c
+msgid "   filter: "
+msgstr ""
+
+#: progs/files.c
+msgid "   (copied: v pastes here)"
+msgstr ""
+
+#: progs/files.c
+msgid "   (cut: v moves here)"
+msgstr ""
+
+#: progs/files.c
+msgid "Search"
+msgstr ""
+
+#: progs/files.c
+msgid "Trash"
+msgstr ""
+
+#: progs/files.c
+msgid "Home"
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "%d selected (%s)"
+msgid_plural "%d selected (%s)"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/files.c
+#, c-format
+msgid "%d items (%d hidden) | %s free"
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "%d item | %s free"
+msgid_plural "%d items | %s free"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/files.c
+msgid "+ copy"
+msgstr ""
+
+#: progs/files.c
+msgid "-> move"
+msgstr ""
+
+#. TRANSLATORS: the part before the colon is a key; keep it and ": ".
+#: progs/files.c progs/installer.c
+msgid "Enter: choose"
+msgstr ""
+
+#. TRANSLATORS: o and Enter are keys; keep them.
+#: progs/files.c
+msgid "o: choose this folder"
+msgstr ""
+
+#. TRANSLATORS: / is the key; keep it.
+#: progs/files.c
+msgid "/: filter"
+msgstr ""
+
+#. TRANSLATORS: . is the key; keep it.
+#: progs/files.c
+msgid ".: hidden"
+msgstr ""
+
+#. TRANSLATORS: s is the key; keep it.
+#: progs/files.c
+msgid "s: sort"
+msgstr ""
+
+#. TRANSLATORS: q is the key; keep it.
+#: progs/files.c
+msgid "q: back, nothing chosen"
+msgstr ""
+
+#. TRANSLATORS: Enter and Tab are keys; keep them.
+#: progs/files.c
+msgid "Enter or a double click: go in   Tab: places"
+msgstr ""
+
+#: progs/files.c
+msgid "a double click: choose (a folder: go in)   Tab: places"
+msgstr ""
+
+#. TRANSLATORS: r is the key; keep it.
+#: progs/files.c
+msgid "r: restore"
+msgstr ""
+
+#. TRANSLATORS: d is the key; keep it.
+#: progs/files.c
+msgid "d: delete permanently"
+msgstr ""
+
+#. TRANSLATORS: e is the key; keep it.
+#: progs/files.c
+msgid "e: empty Trash"
+msgstr ""
+
+#. TRANSLATORS: u is the key; keep it.
+#: progs/files.c
+msgid "u: undo"
+msgstr ""
+
+#. TRANSLATORS: i is the key; keep it.
+#: progs/files.c
+msgid "i: properties"
+msgstr ""
+
+#. TRANSLATORS: Enter is the key; keep it.
+#. TRANSLATORS: Enter, Space, R, F, K are key names; keep them.
+#: progs/files.c progs/home.c
+msgid "Enter: open"
+msgstr ""
+
+#. TRANSLATORS: o is the key; keep it.
+#: progs/files.c
+msgid "o: open with"
+msgstr ""
+
+#. TRANSLATORS: c is the key; keep it.
+#: progs/files.c
+msgid "c: copy"
+msgstr ""
+
+#. TRANSLATORS: x is the key; keep it.
+#: progs/files.c
+msgid "x: cut"
+msgstr ""
+
+#. TRANSLATORS: v is the key; keep it.
+#: progs/files.c
+msgid "v: paste"
+msgstr ""
+
+#. TRANSLATORS: r is the key; keep it.
+#: progs/files.c
+msgid "r: rename"
+msgstr ""
+
+#. TRANSLATORS: d is the key; keep it.
+#: progs/files.c
+msgid "d: trash"
+msgstr ""
+
+#. TRANSLATORS: n is the key; keep it.
+#: progs/files.c
+msgid "n: new folder"
+msgstr ""
+
+#. TRANSLATORS: i is the key; keep it.
+#: progs/files.c
+msgid "i: props"
+msgstr ""
+
+#. TRANSLATORS: F3 is the key; keep it.
+#: progs/files.c
+msgid "F3: split"
+msgstr ""
+
+#. TRANSLATORS: w is the key; keep it.
+#: progs/files.c
+msgid "w: wallpaper"
+msgstr ""
+
+#. TRANSLATORS: e is the key; keep it.
+#: progs/files.c
+msgid "e: eject"
+msgstr ""
+
+#. TRANSLATORS: q is the key; keep it.
+#. TRANSLATORS: q is the q key; keep "q: ".
+#: progs/files.c progs/packages.c
+msgid "q: back"
+msgstr ""
+
+#: progs/files.c
+msgid "Space: mark  Tab: panes  Ctrl+1/2/3: view"
+msgstr ""
+
+#. TRANSLATORS: Y is the key; keep it.
+#. TRANSLATORS: Y and N are the keys; keep "Y: " and "N: ".
+#. TRANSLATORS: Y is the Y key; keep "Y: ".
+#: progs/files.c progs/installer.c progs/packages.c
+msgid "Y: yes"
+msgstr ""
+
+#. TRANSLATORS: N is the key; keep it.
+#. TRANSLATORS: N is the N key; keep "N: ".
+#: progs/files.c progs/installer.c progs/packages.c
+msgid "N: no"
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "%d file"
+msgid_plural "%d files"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/files.c
+#, c-format
+msgid "%d folder"
+msgid_plural "%d folders"
+msgstr[0] ""
+msgstr[1] ""
+
+#. TRANSLATORS: first %s is human size (e.g. "12 KiB"), second %s is "%d file(s)", third %s is "%d folder(s)".
+#: progs/files.c
+#, c-format
+msgid "%s (%s, %s)"
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid " (%lld B, %s on disk)"
+msgstr ""
+
+#: progs/files.c
+msgid "Folder Properties"
+msgstr ""
+
+#: progs/files.c
+msgid "Name:"
+msgstr ""
+
+#: progs/files.c
+msgid "Location:"
+msgstr ""
+
+#: progs/files.c
+msgid "Original:"
+msgstr ""
+
+#: progs/files.c
+msgid "Deleted:"
+msgstr ""
+
+#: progs/files.c
+msgid "Points to:"
+msgstr ""
+
+#: progs/files.c
+msgid "Size:"
+msgstr ""
+
+#: progs/files.c
+msgid "Modified:"
+msgstr ""
+
+#: progs/files.c
+msgid "Accessed:"
+msgstr ""
+
+#: progs/files.c
+msgid "Changed:"
+msgstr ""
+
+#: progs/files.c
+msgid "Created:"
+msgstr ""
+
+#: progs/files.c
+msgid "Owner:"
+msgstr ""
+
+#: progs/files.c
+msgid "Permissions:"
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "%s%s free of %s"
+msgstr ""
+
+#: progs/files.c
+msgid "Filesystem:"
+msgstr ""
+
+#: progs/files.c
+msgid "x: +exec"
+msgstr ""
+
+#. TRANSLATORS: x is the key; keep it.
+#: progs/files.c
+msgid "x: -exec"
+msgstr ""
+
+#. TRANSLATORS: m is the key; keep it.
+#: progs/files.c
+msgid "m: chmod..."
+msgstr ""
+
+#. TRANSLATORS: Enter and Esc are keys; keep them.
+#: progs/files.c
+msgid "Enter / Esc: close"
+msgstr ""
+
+#: progs/files.c
+msgid "Octal permissions (e.g. 644 or 755):"
+msgstr ""
+
+#. TRANSLATORS: Drives is the folder name ~/Drives; keep it.
+#: progs/files.c
+#, c-format
+msgid "%s is not a drive (only those in Drives are ejected)."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "%s is in use: close the files open on it first."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid ""
+"%s is still in use in a container: stop it before pulling the drive out."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "%s can be pulled out now."
+msgstr ""
+
+#: progs/files.c
+msgid "There is no container to open it with."
+msgstr ""
+
+#. TRANSLATORS: first %s is a file name or URL, second %s is its MIME type.
+#: progs/files.c
+#, c-format
+msgid "Open %s (%s) with:"
+msgstr ""
+
+#. TRANSLATORS: A is the key; keep it.
+#: progs/files.c
+msgid "A: always use it"
+msgstr ""
+
+#: progs/files.c
+msgid "Not opened."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Cannot tell what %s is."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Opened with %s."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "There is no program %s."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "%.400s: containers cannot see it."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Opened in %s."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Only the home (%s) is shown for a container."
+msgstr ""
+
+#. TRANSLATORS: Enter and o are keys; keep them.
+#: progs/files.c
+msgid "Shown for a container: Enter or o opens the selected file."
+msgstr ""
+
+#: progs/files.c
+msgid "By Name (Ctrl+Alt+1)"
+msgstr ""
+
+#: progs/files.c
+msgid "By Modification Time (Ctrl+Alt+2)"
+msgstr ""
+
+#: progs/files.c
+msgid "By Size (Ctrl+Alt+3)"
+msgstr ""
+
+#: progs/files.c
+msgid "By File Type (Ctrl+Alt+4)"
+msgstr ""
+
+#: progs/files.c
+msgid "By Extension (Ctrl+Alt+5)"
+msgstr ""
+
+#: progs/files.c
+msgid "By Permissions"
+msgstr ""
+
+#: progs/files.c
+msgid "By Owner"
+msgstr ""
+
+#: progs/files.c
+msgid "Descending order"
+msgstr ""
+
+#: progs/files.c
+msgid "Mingle files and folders"
+msgstr ""
+
+#: progs/files.c
+msgid "Case-sensitive name sort"
+msgstr ""
+
+#: progs/files.c
+msgid "Size / folder item count"
+msgstr ""
+
+#: progs/files.c
+msgid "Modified time"
+msgstr ""
+
+#: progs/files.c
+msgid "Extension"
+msgstr ""
+
+#: progs/files.c
+msgid "Permissions (rwx)"
+msgstr ""
+
+#: progs/files.c
+msgid "Owner (user:group)"
+msgstr ""
+
+#: progs/files.c
+msgid "Type / Location"
+msgstr ""
+
+#: progs/files.c
+msgid "Extract here"
+msgstr ""
+
+#: progs/files.c
+msgid "Extract and trash archive"
+msgstr ""
+
+#: progs/files.c
+msgid "Extract to..."
+msgstr ""
+
+#. TRANSLATORS: %s is the archive's file name.
+#: progs/files.c
+#, c-format
+msgid "Compress to \"%s\""
+msgstr ""
+
+#: progs/files.c
+msgid "Compress to..."
+msgstr ""
+
+#: progs/files.c
+msgid "Compressed."
+msgstr ""
+
+#: progs/files.c
+msgid "Extracted."
+msgstr ""
+
+#: progs/files.c
+msgid "Cancelled."
+msgstr ""
+
+#. TRANSLATORS: %d is the program's exit status.
+#: progs/files.c
+#, c-format
+msgid "archive did not finish (status %d)."
+msgstr ""
+
+#: progs/files.c
+msgid "Choose"
+msgstr ""
+
+#: progs/files.c
+msgid "Go in"
+msgstr ""
+
+#: progs/files.c
+msgid "Choose this folder"
+msgstr ""
+
+#: progs/files.c
+msgid "Restore"
+msgstr ""
+
+#: progs/files.c
+msgid "Delete permanently..."
+msgstr ""
+
+#: progs/files.c
+msgid "Empty Trash..."
+msgstr ""
+
+#: progs/files.c
+msgid "Open with..."
+msgstr ""
+
+#: progs/files.c
+msgid "Rename..."
+msgstr ""
+
+#: progs/files.c
+msgid "Move to Trash"
+msgstr ""
+
+#: progs/files.c
+msgid "Set as wallpaper"
+msgstr ""
+
+#: progs/files.c
+msgid "Eject"
+msgstr ""
+
+#: progs/files.c
+msgid "Duplicate (Ctrl+U)"
+msgstr ""
+
+#: progs/files.c
+msgid "Create link... (L)"
+msgstr ""
+
+#: progs/files.c
+msgid "Copy path(s) (Ctrl+Shift+C)"
+msgstr ""
+
+#: progs/files.c
+msgid "New folder..."
+msgstr ""
+
+#: progs/files.c
+msgid "New empty file... (N)"
+msgstr ""
+
+#: progs/files.c
+msgid "Bookmark folder (Ctrl+D)"
+msgstr ""
+
+#: progs/files.c
+msgid "Open in terminal (F4)"
+msgstr ""
+
+#: progs/files.c
+msgid "Find files... (Ctrl+Shift+F)"
+msgstr ""
+
+#: progs/files.c
+msgid "Folder properties (I)"
+msgstr ""
+
+#: progs/files.c
+msgid "Sort files... (s)"
+msgstr ""
+
+#: progs/files.c
+msgid "Columns... (C)"
+msgstr ""
+
+#: progs/files.c
+msgid "Hide hidden files"
+msgstr ""
+
+#: progs/files.c
+msgid "Show hidden files"
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Icons: %d px."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Compact zoom: %d."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Details zoom: %d."
+msgstr ""
+
+#: progs/files.c
+msgid "Filter (part of the name):"
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Marked %d item."
+msgid_plural "Marked all %d items."
+msgstr[0] ""
+msgstr[1] ""
+
+#. TRANSLATORS: r and i are keys; keep them. %s is a file name.
+#: progs/files.c
+#, c-format
+msgid "In the Trash: r restores %s, i shows its properties."
+msgstr ""
+
+#: progs/files.c
+msgid "The path is too long."
+msgstr ""
+
+#. TRANSLATORS: first %s is a file name, second %s is a MIME type prefix (e.g. "image/").
+#: progs/files.c
+#, c-format
+msgid "%s cannot be chosen here: not %s*."
+msgstr ""
+
+#. TRANSLATORS: w is the key; keep it. %s is a file name.
+#: progs/files.c
+#, c-format
+msgid "w makes an image the wallpaper; %s is not one."
+msgstr ""
+
+#: progs/files.c progs/installer.c progs/packages.c progs/settings.c
+#, c-format
+msgid "Cannot write %s."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Wallpaper: %s; the shared display shows it when it is next shown."
+msgstr ""
+
+#. TRANSLATORS: e is the key and Drives is the folder name ~/Drives; keep them.
+#: progs/files.c
+msgid "e ejects a drive in Drives (or empties the Trash)."
+msgstr ""
+
+#: progs/firmware.c
+msgid "full chip"
+msgstr ""
+
+#: progs/firmware.c
+msgid "IFD: fd + gbe + bios (skip locked ME)"
+msgstr ""
+
+#: progs/firmware.c
+msgid "IFD: bios region only"
+msgstr ""
+
+#: progs/firmware.c
+msgid "IFD: flash descriptor (fd) only"
+msgstr ""
+
+#: progs/firmware.c
+msgid "IFD: Ethernet NVM (gbe) only"
+msgstr ""
+
+#: progs/firmware.c progs/packages.c
+#, c-format
+msgid "Wait: %s is still running."
+msgstr ""
+
+#: progs/firmware.c progs/packages.c
+#, c-format
+msgid "Cannot start %s."
+msgstr ""
+
+#: progs/firmware.c
+#, c-format
+msgid "Running: %s..."
+msgstr ""
+
+#: progs/firmware.c
+#, c-format
+msgid "%s (+%d more: set Chip model -c)"
+msgstr ""
+
+#: progs/firmware.c
+#, c-format
+msgid "%s completed."
+msgstr ""
+
+#: progs/firmware.c
+#, c-format
+msgid "%s failed (status %d); check the output pane below."
+msgstr ""
+
+#: progs/firmware.c
+#, c-format
+msgid " Output: %.120s (running...) "
+msgstr ""
+
+#: progs/firmware.c
+#, c-format
+msgid " Release %s notes "
+msgstr ""
+
+#: progs/firmware.c
+#, c-format
+msgid " Output (%s) "
+msgstr ""
+
+#: progs/firmware.c
+msgid "firmware"
+msgstr ""
+
+#: progs/firmware.c
+msgid "BIOS Settings"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Devices (fwupd)"
+msgstr ""
+
+#: progs/firmware.c
+msgid "SPI Flash (flashrom)"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Device"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Vendor"
+msgstr ""
+
+#: progs/firmware.c progs/packages.c progs/view.c
+msgid "Version"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Status"
+msgstr ""
+
+#. TRANSLATORS: P is the key; keep it.
+#: progs/firmware.c
+msgid "fwupd is not installed. Press P to install fwupd with locachy-pkg."
+msgstr ""
+
+#. TRANSLATORS: R is the key; keep it.
+#: progs/firmware.c
+msgid "No updatable devices reported yet (press R to refresh LVFS metadata)."
+msgstr ""
+
+#: progs/firmware.c
+#, c-format
+msgid " Releases for %.50s (current %s) — Esc: back "
+msgstr ""
+
+#: progs/firmware.c
+msgid ""
+"No LVFS releases listed for this device (refresh metadata with R first)."
+msgstr ""
+
+#: progs/firmware.c
+msgid "BIOS Setting"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Current Value"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Allowed Values"
+msgstr ""
+
+#: progs/firmware.c
+msgid "No kernel firmware-attributes exposed on this machine."
+msgstr ""
+
+#: progs/firmware.c
+msgid ""
+" SPI Flash Programmer (flashrom) — always take a 3x verified backup before "
+"writing "
+msgstr ""
+
+#: progs/firmware.c
+msgid ""
+"flashrom is not installed. Press P to install flashrom with locachy-pkg."
+msgstr ""
+
+#: progs/firmware.c
+msgid "Programmer (-p)"
+msgstr ""
+
+#: progs/firmware.c
+msgid " [USB connected]"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Chip model (-c)"
+msgstr ""
+
+#: progs/firmware.c
+msgid "auto-detect (Enter to specify)"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Target region"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Last probed chip"
+msgstr ""
+
+#: progs/firmware.c
+msgid "   IFD readable: "
+msgstr ""
+
+#. TRANSLATORS: p is the key; keep it.
+#: progs/firmware.c
+msgid "not probed yet (press p to probe)"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Backup directory"
+msgstr ""
+
+#. TRANSLATORS: Y and N are the confirmation keys; keep them.
+#: progs/firmware.c progs/home.c
+msgid "Y: confirm"
+msgstr ""
+
+#: progs/firmware.c progs/home.c
+msgid "N: cancel"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Flashing firmware is irreversible; any other key cancels."
+msgstr ""
+
+#: progs/firmware.c
+msgid "Enter: install release"
+msgstr ""
+
+#: progs/firmware.c
+msgid "l: output"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Esc: back to devices"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Tab: switch page   Up/Down: select release"
+msgstr ""
+
+#: progs/firmware.c
+msgid "P: install fwupd"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Enter: releases"
+msgstr ""
+
+#: progs/firmware.c
+msgid "r: refresh LVFS"
+msgstr ""
+
+#: progs/firmware.c
+msgid "u: update all"
+msgstr ""
+
+#: progs/firmware.c
+msgid "i: install .cab"
+msgstr ""
+
+#: progs/firmware.c
+msgid "v: verify"
+msgstr ""
+
+#: progs/firmware.c
+msgid "k: unlock"
+msgstr ""
+
+#: progs/firmware.c
+msgid "q: home"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Tab: BIOS Settings / SPI Flash"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Enter: choose value"
+msgstr ""
+
+#: progs/firmware.c
+msgid "r: reload"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Left/Right: cycle option   Tab: switch page"
+msgstr ""
+
+#: progs/firmware.c
+msgid "P: install flashrom"
+msgstr ""
+
+#: progs/firmware.c
+msgid "p: probe chip"
+msgstr ""
+
+#: progs/firmware.c
+msgid "b: 3x backup"
+msgstr ""
+
+#: progs/firmware.c
+msgid "v: verify file"
+msgstr ""
+
+#: progs/firmware.c
+msgid "w: write image"
+msgstr ""
+
+#: progs/firmware.c
+msgid "c: custom -p"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Left/Right/Enter: configure programmer & region   Tab: switch page"
+msgstr ""
+
+#: progs/firmware.c
+#, c-format
+msgid "Set %.80s to:"
+msgstr ""
+
+#: progs/firmware.c
+msgid "BIOS setting updated."
+msgstr ""
+
+#: progs/firmware.c
+#, c-format
+msgid "Could not change %s."
+msgstr ""
+
+#: progs/firmware.c
+msgid "Cancelled; nothing written."
+msgstr ""
+
+#: progs/firmware.c
+msgid "fwupd update all"
+msgstr ""
+
+#: progs/firmware.c
+msgid "fwupd local-install"
+msgstr ""
+
+#: progs/firmware.c
+msgid "fwupd unlock"
+msgstr ""
+
+#: progs/firmware.c
+msgid "SPI write & verify"
+msgstr ""
+
+#: progs/firmware.c
+msgid ""
+"Tab switches between fwupd Devices, BIOS Settings and SPI Flash (flashrom)."
+msgstr ""
+
+#: progs/firmware.c
+msgid "Install fwupd"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Refresh LVFS metadata"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Y/N: Apply all pending LVFS firmware updates?"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Choose a .cab firmware archive (Enter):"
+msgstr ""
+
+#: progs/firmware.c
+#, c-format
+msgid "Y/N: Install firmware archive %.180s?"
+msgstr ""
+
+#: progs/firmware.c
+msgid "fwupd verify"
+msgstr ""
+
+#: progs/firmware.c
+#, c-format
+msgid "Y/N: Unlock device %.80s for firmware updates?"
+msgstr ""
+
+#: progs/firmware.c
+#, c-format
+msgid "Y/N: %s %.60s to version %s?"
+msgstr ""
+
+#: progs/firmware.c
+msgid "BIOS settings reloaded."
+msgstr ""
+
+#: progs/firmware.c
+msgid "Install flashrom"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Custom flashrom -p programmer:"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Chip name (-c, empty for auto):"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Choose backup folder (o on folder):"
+msgstr ""
+
+#: progs/firmware.c
+msgid "SPI probe"
+msgstr ""
+
+#: progs/firmware.c
+msgid "SPI 3x verified backup"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Choose ROM/BIN image (Enter):"
+msgstr ""
+
+#: progs/firmware.c
+msgid "SPI verify"
+msgstr ""
+
+#: progs/firmware.c
+#, c-format
+msgid "Refused: image is %lld B, but probed chip is %lld B."
+msgstr ""
+
+#: progs/firmware.c
+#, c-format
+msgid "Y/N: Write %.100s (%lld KiB) to %s [%s]?"
+msgstr ""
+
+#: progs/home.c
+msgid "Container actions stay here; state refreshes every 500 ms."
+msgstr ""
+
+#: progs/home.c progs/packages.c
+msgid "closed"
+msgstr ""
+
+#: progs/home.c
+msgid "opening"
+msgstr ""
+
+#: progs/home.c progs/packages.c
+msgid "running"
+msgstr ""
+
+#: progs/home.c
+msgid "freezing"
+msgstr ""
+
+#: progs/home.c progs/packages.c
+msgid "frozen"
+msgstr ""
+
+#: progs/home.c
+msgid "stopping"
+msgstr ""
+
+#: progs/home.c progs/packages.c
+msgid "failed"
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "Cannot refresh containers: out of memory."
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "Cannot refresh containers: list too large."
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "Cannot refresh containers: too many rows."
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "Ignored %d invalid container record."
+msgid_plural "Ignored %d invalid container records."
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/home.c
+msgid "not running"
+msgstr ""
+
+#: progs/home.c
+msgid "home"
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "%d containers   %d marked (operation targets only)"
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "Y/N: Stop %d container completely?"
+msgid_plural "Y/N: Stop %d containers completely?"
+msgstr[0] ""
+msgstr[1] ""
+
+#. TRANSLATORS: Y and N are the confirmation keys; keep them. %s is a host program name.
+#: progs/home.c
+#, c-format
+msgid "Y/N: Close host program %s?"
+msgstr ""
+
+#. TRANSLATORS: Y and N are the confirmation keys; keep them.
+#: progs/home.c
+#, c-format
+msgid "Y/N: Reboot the host?"
+msgstr ""
+
+#. TRANSLATORS: Y and N are the confirmation keys; keep them.
+#: progs/home.c
+#, c-format
+msgid "Y/N: Power off the host?"
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "... %d more container"
+msgid_plural "... %d more containers"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/home.c
+msgid "Container"
+msgstr ""
+
+#: progs/home.c
+msgid "State"
+msgstr ""
+
+#: progs/home.c
+msgid "RAM MiB"
+msgstr ""
+
+#: progs/home.c
+msgid "Swap MiB"
+msgstr ""
+
+#: progs/home.c
+msgid "-- Host programs (no containers) --"
+msgstr ""
+
+#: progs/home.c
+msgid "-- Host programs --"
+msgstr ""
+
+#: progs/home.c
+msgid "home and the shared folders"
+msgstr ""
+
+#: progs/home.c
+msgid "reboot"
+msgstr ""
+
+#: progs/home.c
+msgid "power off"
+msgstr ""
+
+#: progs/home.c
+msgid "No failure reason reported."
+msgstr ""
+
+#: progs/home.c
+msgid "Any other key cancels without acting."
+msgstr ""
+
+#: progs/home.c progs/packages.c
+msgid "Space: mark"
+msgstr ""
+
+#: progs/home.c
+msgid "R: start/resume"
+msgstr ""
+
+#: progs/home.c
+msgid "F: freeze"
+msgstr ""
+
+#: progs/home.c
+msgid "K: stop/close"
+msgstr ""
+
+#. TRANSLATORS: Up/Down/PgUp/PgDn and Super+Esc are key names; keep them.
+#: progs/home.c
+msgid ""
+"Up/Down/PgUp/PgDn or the wheel: move   double click: open   right click: "
+"actions   Super+Esc: home"
+msgstr ""
+
+#: progs/home.c
+msgid "Request failed without a reason."
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "Select a container or mark containers first."
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "Start/resume: %d accepted, %d error(s); state is refreshed from base."
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "Freeze: %d accepted, %d error(s); state is refreshed from base."
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "%s is part of home: nothing to close."
+msgstr ""
+
+#. TRANSLATORS: K is the key name; keep it.
+#: progs/home.c
+#, c-format
+msgid "K does not power off the host."
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "Cannot prepare stop confirmation: out of memory."
+msgstr ""
+
+#: progs/home.c
+msgid "Reboot cancelled."
+msgstr ""
+
+#: progs/home.c
+msgid "Power off cancelled."
+msgstr ""
+
+#: progs/home.c
+msgid "Stop cancelled."
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "Stop: %d accepted, %d error(s); state is refreshed from base."
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "Close requested for host program %s."
+msgstr ""
+
+#: progs/home.c
+msgid "Freeze"
+msgstr ""
+
+#: progs/home.c
+msgid "Mark / unmark"
+msgstr ""
+
+#: progs/home.c
+msgid "Start / resume"
+msgstr ""
+
+#: progs/home.c
+msgid "Stop..."
+msgstr ""
+
+#: progs/home.c
+msgid "Close..."
+msgstr ""
+
+#: progs/home.c
+msgid "Reboot..."
+msgstr ""
+
+#: progs/home.c
+msgid "Power off..."
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "open %s: accepted"
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "open %s: error"
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "opening %s..."
+msgstr ""
+
+#: progs/installer.c
+msgid "(no model name)"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "  in use: %s"
+msgstr ""
+
+#: progs/installer.c
+msgid "Disk"
+msgstr ""
+
+#: progs/installer.c progs/view.c
+msgid "Encryption"
+msgstr ""
+
+#: progs/installer.c
+msgid "Region"
+msgstr ""
+
+#: progs/installer.c
+msgid "Software"
+msgstr ""
+
+#: progs/installer.c progs/settings.c
+msgid "System"
+msgstr ""
+
+#: progs/installer.c
+msgid "User"
+msgstr ""
+
+#: progs/installer.c
+msgid "Summary"
+msgstr ""
+
+#: progs/installer.c
+msgid "Choose the disk to install on."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "%s is too small: %s are needed."
+msgstr ""
+
+#: progs/installer.c
+msgid "Choose the EFI system partition and the root partition."
+msgstr ""
+
+#: progs/installer.c
+msgid "The partitions must be different ones."
+msgstr ""
+
+#: progs/installer.c
+msgid "Set the disk passphrase."
+msgstr ""
+
+#: progs/installer.c
+msgid "The user name: small letters, digits, - and _, starting with a letter."
+msgstr ""
+
+#: progs/installer.c
+msgid "Set the user's password."
+msgstr ""
+
+#: progs/installer.c
+msgid "The computer's name: letters, digits and -, up to 63."
+msgstr ""
+
+#: progs/installer.c progs/settings.c
+msgid "off"
+msgstr ""
+
+#: progs/installer.c
+msgid "passphrase and TPM auto-unlock"
+msgstr ""
+
+#: progs/installer.c
+msgid "with a passphrase"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "auto (%s)"
+msgstr ""
+
+#: progs/installer.c
+msgid "automatic (from the network)"
+msgstr ""
+
+#: progs/installer.c
+msgid "not set"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "set (%d character)"
+msgid_plural "set (%d characters)"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/installer.c
+#, c-format
+msgid "Next: %s"
+msgstr ""
+
+#: progs/installer.c
+msgid "The installation downloads its packages: it needs the network."
+msgstr ""
+
+#: progs/installer.c
+msgid "not connected"
+msgstr ""
+
+#: progs/installer.c
+msgid "Now"
+msgstr ""
+
+#: progs/installer.c
+msgid "Enter: nmtui"
+msgstr ""
+
+#: progs/installer.c
+msgid "Set up Wi-Fi or a wire"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "%s (%d network saved here)"
+msgid_plural "%s (%d networks saved here)"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/installer.c
+msgid "Saved networks for the system"
+msgstr ""
+
+#: progs/installer.c
+msgid "partitions chosen here"
+msgstr ""
+
+#: progs/installer.c
+msgid "the whole of a disk"
+msgstr ""
+
+#: progs/installer.c
+msgid "filesystems mounted at /mnt"
+msgstr ""
+
+#: progs/installer.c
+msgid "Install on"
+msgstr ""
+
+#: progs/installer.c
+msgid ""
+"Everything on the chosen disk is erased; it gets an EFI system partition, "
+"swap and the root."
+msgstr ""
+
+#: progs/installer.c
+msgid "  removable"
+msgstr ""
+
+#: progs/installer.c
+msgid "  in use"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "      erased: %s"
+msgstr ""
+
+#: progs/installer.c
+msgid "no partitions on it"
+msgstr ""
+
+#: progs/installer.c
+msgid "No disk to install on was found (the live medium is not one)."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "%d GiB"
+msgid_plural "%d GiB"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/installer.c
+msgid "Swap"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "Hibernation writes the memory into the swap: this computer has %s."
+msgstr ""
+
+#: progs/installer.c
+msgid "EFI system partition"
+msgstr ""
+
+#: progs/installer.c
+msgid "Root partition"
+msgstr ""
+
+#: progs/installer.c
+msgid "Swap partition"
+msgstr ""
+
+#: progs/installer.c progs/packages.c progs/settings.c
+msgid "none"
+msgstr ""
+
+#: progs/installer.c
+msgid "Each of them is formatted: what is on it is lost."
+msgstr ""
+
+#: progs/installer.c
+msgid ""
+"Prepared in the terminal: an empty ext4 labelled locachy-root at /mnt, an "
+"empty FAT32 at /mnt/efi."
+msgstr ""
+
+#: progs/installer.c
+msgid "Enter: open it"
+msgstr ""
+
+#: progs/installer.c progs/settings.c
+msgid "Terminal"
+msgstr ""
+
+#: progs/installer.c
+msgid "Disks changed"
+msgstr ""
+
+#: progs/installer.c
+msgid "Enter: look again"
+msgstr ""
+
+#: progs/installer.c
+msgid "Encrypt the disk"
+msgstr ""
+
+#: progs/installer.c
+msgid "Passphrase"
+msgstr ""
+
+#: progs/installer.c
+msgid ""
+"Typed at every power-on, with the keyboard as here (the US layout). Ten "
+"characters or more."
+msgstr ""
+
+#: progs/installer.c
+msgid "User name"
+msgstr ""
+
+#: progs/installer.c
+msgid "Full name"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/installer.c progs/lock.c progs/settings.c
+msgid "Password"
+msgstr ""
+
+#: progs/installer.c
+msgid "Computer name"
+msgstr ""
+
+#: progs/installer.c
+msgid "Lock the screen at power-on"
+msgstr ""
+
+#: progs/installer.c
+msgid "yes (the TPM opens the disk)"
+msgstr ""
+
+#: progs/installer.c progs/settings.c
+msgid "Language"
+msgstr ""
+
+#: progs/installer.c progs/settings.c
+msgid "Time zone"
+msgstr ""
+
+#: progs/installer.c progs/settings.c
+msgid "Network time"
+msgstr ""
+
+#: progs/installer.c
+msgid "Input method"
+msgstr ""
+
+#: progs/installer.c
+msgid "Modules"
+msgstr ""
+
+#: progs/installer.c
+msgid "Programs"
+msgstr ""
+
+#: progs/installer.c
+msgid "a host program"
+msgstr ""
+
+#: progs/installer.c
+msgid "in a container"
+msgstr ""
+
+#: progs/installer.c progs/settings.c
+msgid "Machine profile"
+msgstr ""
+
+#: progs/installer.c
+msgid "Packages' CPU level"
+msgstr ""
+
+#: progs/installer.c
+msgid "Own builds for the CPU"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "Repository section %s"
+msgstr ""
+
+#: progs/installer.c
+msgid "Rank the mirrors first"
+msgstr ""
+
+#: progs/installer.c
+msgid "Updates from"
+msgstr ""
+
+#: progs/installer.c
+msgid "Branch"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "%d second"
+msgid_plural "%d seconds"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/installer.c
+msgid "Hibernate after"
+msgstr ""
+
+#: progs/installer.c
+msgid "as the system has it"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "    erased: %s"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "    formatted: %s"
+msgstr ""
+
+#: progs/installer.c
+msgid "Nothing is missing. Install asks once more before it writes anything."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "all of %s; swap %d GiB"
+msgid_plural "all of %s; swap %d GiB"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/installer.c
+msgid "not chosen"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "EFI %s, root %s, swap %s"
+msgstr ""
+
+#: progs/installer.c
+msgid "the filesystems mounted at /mnt and /mnt/efi"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "%s%s%s%s on %s; lock at power-on: %s"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "%s; keyboard %s; time zone %s; network time %s"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "%s; packages for %s; own builds for %s"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "%s; mirrors %s"
+msgstr ""
+
+#: progs/installer.c
+msgid "as they are"
+msgstr ""
+
+#: progs/installer.c
+msgid "ranked first"
+msgstr ""
+
+#: progs/installer.c
+msgid "Repositories"
+msgstr ""
+
+#: progs/installer.c
+msgid "Install"
+msgstr ""
+
+#: progs/installer.c
+msgid "Install LOCachy on this computer"
+msgstr ""
+
+#: progs/installer.c
+msgid "Keyboard layout"
+msgstr ""
+
+#: progs/installer.c
+msgid "Install LOCachy"
+msgstr ""
+
+#: progs/installer.c
+msgid "Terminal (a root shell, for repairs)"
+msgstr ""
+
+#: progs/installer.c
+msgid "Reboot"
+msgstr ""
+
+#: progs/installer.c
+msgid "Power off"
+msgstr ""
+
+#: progs/installer.c
+msgid ""
+"The terminal is a root shell on this live system: nmtui, cryptsetup, arch-"
+"chroot, locachy-install --help. exit comes back here."
+msgstr ""
+
+#: progs/installer.c
+msgid "The two were not the same; nothing changed."
+msgstr ""
+
+#: progs/installer.c
+msgid "installer"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "Filter: %s_   (type to filter; Enter: choose; Esc: back)"
+msgstr ""
+
+#: progs/installer.c
+msgid "No partitions were found: make them in the terminal, then look again."
+msgstr ""
+
+#: progs/installer.c
+msgid "Download and install the packages"
+msgstr ""
+
+#: progs/installer.c
+msgid "Partition and format"
+msgstr ""
+
+#: progs/installer.c
+msgid "Rank the mirrors"
+msgstr ""
+
+#: progs/installer.c
+msgid "Build LOCachy's own programs"
+msgstr ""
+
+#: progs/installer.c
+msgid "Package helpers and the AUR"
+msgstr ""
+
+#: progs/installer.c
+msgid "User, settings and boot files"
+msgstr ""
+
+#: progs/installer.c
+msgid "Cannot start locachy-install."
+msgstr ""
+
+#: progs/installer.c
+msgid "Checking the choices with locachy-install --check..."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "locachy-install does not take it: %s"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "Erase %s and install LOCachy on it?"
+msgstr ""
+
+#: progs/installer.c
+msgid "Format these partitions and install LOCachy on them?"
+msgstr ""
+
+#: progs/installer.c
+msgid "Install LOCachy into the filesystems mounted at /mnt?"
+msgstr ""
+
+#: progs/installer.c
+msgid ""
+"This cannot be undone. Y erases and installs; N goes back to the summary."
+msgstr ""
+
+#: progs/installer.c
+msgid "Erase and install?"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "Installing LOCachy   %s"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid ""
+"LOCachy is installed (%s). Take the installation medium out, then reboot."
+msgstr ""
+
+#: progs/installer.c
+msgid ""
+"The installation failed. Nothing more is written; the output below says why."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "%s %8s   fetched %d, installed %d of %d"
+msgstr ""
+
+#: progs/installer.c progs/packages.c
+#, c-format
+msgid "lines %d-%d of %d"
+msgstr ""
+
+#. TRANSLATORS: PgUp/PgDn are key names; keep them.
+#: progs/installer.c
+#, c-format
+msgid "Output: %s   %s   PgUp/PgDn: scroll"
+msgstr ""
+
+#: progs/installer.c
+msgid "PgUp: back"
+msgstr ""
+
+#: progs/installer.c
+msgid "Tab: steps"
+msgstr ""
+
+#: progs/installer.c
+msgid "Esc: start"
+msgstr ""
+
+#: progs/installer.c
+msgid "PgDn: next"
+msgstr ""
+
+#: progs/installer.c
+msgid "t: terminal"
+msgstr ""
+
+#: progs/installer.c
+msgid "p: power off"
+msgstr ""
+
+#: progs/installer.c
+msgid "r: reboot"
+msgstr ""
+
+#: progs/installer.c
+msgid "b: back to the summary"
+msgstr ""
+
+#: progs/installer.c
+msgid "Looking at this computer: its disks, its TPM, its CPU..."
+msgstr ""
+
+#: progs/installer.c
+msgid "locachy-install --describe-json failed; the terminal shows why."
+msgstr ""
+
+#: progs/installer.c
+msgid ""
+"Keyboard layout: this installer, the disk passphrase at boot and the system "
+"type with it"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "No key table for %s: %s"
+msgstr ""
+
+#: progs/installer.c
+msgid ""
+"The passphrase and the password were typed with the other layout: set them "
+"again."
+msgstr ""
+
+#: progs/installer.c
+msgid "Nothing was written."
+msgstr ""
+
+#: progs/installer.c
+msgid "Reboot now?"
+msgstr ""
+
+#: progs/installer.c
+msgid "Power off now?"
+msgstr ""
+
+#: progs/installer.c
+msgid "Swap in GiB (0: none):"
+msgstr ""
+
+#: progs/installer.c
+msgid "The EFI system partition (formatted FAT32)"
+msgstr ""
+
+#: progs/installer.c
+msgid "The root partition (formatted ext4)"
+msgstr ""
+
+#: progs/installer.c
+msgid "The swap partition (formatted)"
+msgstr ""
+
+#: progs/installer.c
+msgid "Disk passphrase:"
+msgstr ""
+
+#: progs/installer.c
+msgid "The same again:"
+msgstr ""
+
+#: progs/installer.c
+msgid "User name:"
+msgstr ""
+
+#: progs/installer.c
+msgid "Full name:"
+msgstr ""
+
+#: progs/installer.c
+msgid "The user's password:"
+msgstr ""
+
+#: progs/installer.c
+msgid "Computer name:"
+msgstr ""
+
+#: progs/installer.c
+msgid "Own builds for the CPU (gcc -march; auto: this one):"
+msgstr ""
+
+#: progs/installer.c
+msgid "Updates from (a git URL, or off):"
+msgstr ""
+
+#: progs/installer.c
+msgid "Branch:"
+msgstr ""
+
+#: progs/installer.c
+msgid "Hibernate after (seconds asleep; empty: as the system has it):"
+msgstr ""
+
+#: progs/lock.c
+msgid "Fingerprint"
+msgstr ""
+
+#: progs/lock.c
+msgid "Face"
+msgstr ""
+
+#: progs/lock.c
+msgid "waiting for the system bus"
+msgstr ""
+
+#: progs/lock.c
+msgid "cannot start (PAM)"
+msgstr ""
+
+#: progs/lock.c
+msgid "locked"
+msgstr ""
+
+#: progs/lock.c
+msgid "New password:"
+msgstr ""
+
+#: progs/lock.c
+msgid "Click or press a key"
+msgstr ""
+
+#: progs/lock.c
+msgid "starting again"
+msgstr ""
+
+#: progs/lock.c
+msgid "waiting"
+msgstr ""
+
+#. TRANSLATORS: Enter and Esc are key names; keep them.
+#: progs/lock.c
+msgid "There is no password yet: type one, then again.   Esc: clear"
+msgstr ""
+
+#: progs/lock.c
+msgid "Enter: unlock   Esc: clear"
+msgstr ""
+
+#: progs/lock.c
+msgid "Not set; again."
+msgstr ""
+
+#: progs/lock.c
+msgid "Wrong password."
+msgstr ""
+
+#: progs/lock.c
+msgid "Checking..."
+msgstr ""
+
+#: progs/lock.c
+msgid "There is no user (uid 1000) to unlock for."
+msgstr ""
+
+#. TRANSLATORS: Ctrl+Alt+Esc is a key name; keep it.
+#: progs/note.c
+#, c-format
+msgid "note %s (pid %d): Ctrl+Alt+Esc for the menu"
+msgstr ""
+
+#: progs/note.c
+#, c-format
+msgid "shown %d times; %zu MiB: BAD"
+msgstr ""
+
+#: progs/note.c
+#, c-format
+msgid "shown %d times; %zu MiB: intact"
+msgstr ""
+
+#: progs/note.c
+#, c-format
+msgid "x returned %d"
+msgstr ""
+
+#: progs/overview.c
+msgid "Search..."
+msgstr ""
+
+#: progs/overview.c
+msgid "Drag Down To Close"
+msgstr ""
+
+#: progs/overview.c
+msgid "No matching windows"
+msgstr ""
+
+#: progs/packages.c
+msgid "Containers"
+msgstr ""
+
+#: progs/packages.c
+msgid "Host"
+msgstr ""
+
+#: progs/packages.c
+msgid "Updates"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "local package %.180s"
+msgstr ""
+
+#: progs/packages.c
+msgid "Installed: unknown (locachy-pkg status gave nothing)"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid ""
+"Installed: %lld package, %s   %d declared, %s with what they need, %lld "
+"foreign (AUR, LOCachy)   drift %d, missing %d"
+msgid_plural ""
+"Installed: %lld packages, %s   %d declared, %s with what they need, %lld "
+"foreign (AUR, LOCachy)   drift %d, missing %d"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/packages.c
+#, c-format
+msgid "%s: running; it goes on if you leave."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "%s: still running."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "%s: ended; its output is below."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "%s: done."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "%s: failed; its output is below (and in %s)."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "build %s"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/packages.c
+#, c-format
+msgid ""
+"%s built; its command is not set: Enter, then Command, lists what its "
+"packages run."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "%d update"
+msgid_plural "%d updates"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/packages.c
+#, c-format
+msgid "%d update, some from the AUR"
+msgid_plural "%d updates, some from the AUR"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/packages.c
+#, c-format
+msgid "%d update, from the AUR"
+msgid_plural "%d updates, from the AUR"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/packages.c
+#, c-format
+msgid "; rebuild: %s"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "rebuild: %s"
+msgstr ""
+
+#: progs/packages.c
+msgid "not checked yet"
+msgstr ""
+
+#: progs/packages.c
+msgid "up to date"
+msgstr ""
+
+#: progs/packages.c
+msgctxt "row"
+msgid "network"
+msgstr ""
+
+#: progs/packages.c
+msgctxt "row"
+msgid "camera"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "built %s"
+msgstr ""
+
+#: progs/packages.c progs/settings.c
+msgid "never"
+msgstr ""
+
+#: progs/packages.c
+msgid " (previous kept)"
+msgstr ""
+
+#: progs/packages.c progs/settings.c
+msgid "not installed"
+msgstr ""
+
+#: progs/packages.c
+msgid "done"
+msgstr ""
+
+#: progs/packages.c
+msgid "ended"
+msgstr ""
+
+#. TRANSLATORS: PgUp/PgDn and l are key names; keep them.
+#: progs/packages.c
+#, c-format
+msgid "Output: %s%s%s%s   %s   PgUp/PgDn: scroll   l: %s"
+msgstr ""
+
+#: progs/packages.c
+msgid "no job yet"
+msgstr ""
+
+#: progs/packages.c
+msgid "the last job"
+msgstr ""
+
+#: progs/packages.c
+msgid "details"
+msgstr ""
+
+#: progs/packages.c
+msgid "the manifest"
+msgstr ""
+
+#. TRANSLATORS: l is the l key; keep it.
+#: progs/packages.c
+#, c-format
+msgid "%s: %d declared, %s installed with what they need   l: output"
+msgid_plural "%s: %d declared, %s installed with what they need   l: output"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/packages.c
+msgid "The system is as the manifest says."
+msgstr ""
+
+#. TRANSLATORS: l is the l key; keep it.
+#: progs/packages.c
+#, c-format
+msgid "Details: %s   l: output"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "local %-30.100s %.200s (installed %.80s)"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "rebuild: %s (%s -> %s)"
+msgstr ""
+
+#. TRANSLATORS: l is the l key; keep it.
+#: progs/packages.c
+#, c-format
+msgid "Details: %s (%s/%s.conf)   l: output"
+msgstr ""
+
+#: progs/packages.c
+msgid "extras"
+msgstr ""
+
+#: progs/packages.c
+msgid "package"
+msgstr ""
+
+#: progs/packages.c
+msgid "arguments"
+msgstr ""
+
+#: progs/packages.c
+msgid "command"
+msgstr ""
+
+#: progs/packages.c
+msgctxt "detail"
+msgid "network"
+msgstr ""
+
+#: progs/packages.c
+msgid "yes (locachy-net)"
+msgstr ""
+
+#: progs/packages.c
+msgctxt "detail"
+msgid "camera"
+msgstr ""
+
+#: progs/packages.c
+msgid "yes (the cameras, as they come and go)"
+msgstr ""
+
+#: progs/packages.c
+msgid "directories"
+msgstr ""
+
+#: progs/packages.c
+msgid "built"
+msgstr ""
+
+#: progs/packages.c
+msgid "state"
+msgstr ""
+
+#: progs/packages.c
+msgid "kept (r rolls back to it)"
+msgstr ""
+
+#: progs/packages.c
+msgid "previous build"
+msgstr ""
+
+#: progs/packages.c
+msgid "Details: nothing selected"
+msgstr ""
+
+#: progs/packages.c
+msgid "a: apply the marked"
+msgstr ""
+
+#: progs/packages.c
+msgid "c: check"
+msgstr ""
+
+#: progs/packages.c
+msgid "l: output/details"
+msgstr ""
+
+#: progs/packages.c
+msgid "/: search & install"
+msgstr ""
+
+#: progs/packages.c
+msgid "Enter: edit"
+msgstr ""
+
+#: progs/packages.c
+msgid "b: build"
+msgstr ""
+
+#: progs/packages.c
+msgid "n: new"
+msgstr ""
+
+#: progs/packages.c
+msgid "d: remove"
+msgstr ""
+
+#: progs/packages.c
+msgid "r: roll back"
+msgstr ""
+
+#: progs/packages.c
+msgid "/: search"
+msgstr ""
+
+#: progs/packages.c
+msgid "i: add a package"
+msgstr ""
+
+#: progs/packages.c
+msgid "x: remove the selected one"
+msgstr ""
+
+#: progs/packages.c
+msgid "s: bring the system to the manifest"
+msgstr ""
+
+#: progs/packages.c
+msgid "packages"
+msgstr ""
+
+#. TRANSLATORS: c is the c key; keep it.
+#: progs/packages.c
+#, c-format
+msgid "checked %s"
+msgstr ""
+
+#: progs/packages.c
+msgid "never (c checks)"
+msgstr ""
+
+#: progs/packages.c
+msgid "Declared package"
+msgstr ""
+
+#: progs/packages.c
+msgid "(nothing)"
+msgstr ""
+
+#. TRANSLATORS: n is the n key; keep it.
+#: progs/packages.c
+msgid "No container yet: n makes one."
+msgstr ""
+
+#. TRANSLATORS: Tab is the Tab key; keep "Tab: ".
+#: progs/packages.c
+msgid "Tab: page"
+msgstr ""
+
+#. TRANSLATORS: Up/Down, Enter and Esc are key names; keep them.
+#: progs/packages.c
+msgid "Up/Down or the wheel   Enter or a double click: choose   Esc: back"
+msgstr ""
+
+#: progs/packages.c
+msgid "Arguments"
+msgstr ""
+
+#: progs/packages.c
+msgid "Camera"
+msgstr ""
+
+#: progs/packages.c
+msgid "Command"
+msgstr ""
+
+#: progs/packages.c
+msgid "Extras"
+msgstr ""
+
+#: progs/packages.c
+msgid "Package"
+msgstr ""
+
+#: progs/packages.c
+msgid "Preset"
+msgstr ""
+
+#: progs/packages.c
+msgid "Always"
+msgstr ""
+
+#: progs/packages.c
+msgid "Directories"
+msgstr ""
+
+#: progs/packages.c
+msgid "Save and build"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid ", the host has %.80s"
+msgstr ""
+
+#: progs/packages.c
+msgid "not looked up"
+msgstr ""
+
+#: progs/packages.c
+msgid "not in the repositories; the AUR did not answer (no network?)"
+msgstr ""
+
+#: progs/packages.c
+msgid "neither the repositories nor the AUR have it"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/packages.c
+msgid "not set: Enter lists what its packages run"
+msgstr ""
+
+#: progs/packages.c
+msgid "not set: once it is built, Enter lists what its packages run"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/packages.c
+msgid "in its build   Enter: what its packages run"
+msgstr ""
+
+#: progs/packages.c
+msgid "the host's"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/packages.c
+msgid "the host's   Enter: what its packages run"
+msgstr ""
+
+#: progs/packages.c
+msgid "neither in its build nor on the host"
+msgstr ""
+
+#: progs/packages.c
+msgid "not on the host: from its build?"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/packages.c
+msgid "Enter: choose one; it fills the lines below"
+msgstr ""
+
+#: progs/packages.c
+msgid "fixed once made"
+msgstr ""
+
+#: progs/packages.c
+msgid "letters, digits, . _ - (from a letter or digit)"
+msgstr ""
+
+#: progs/packages.c
+msgid "its program's: from the repositories or the AUR"
+msgstr ""
+
+#: progs/packages.c
+msgid "more packages, separated by spaces"
+msgstr ""
+
+#: progs/packages.c
+msgid "separated by spaces; a file or URL it opens goes after them"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/packages.c
+msgid "Enter: switch"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/packages.c
+msgid ""
+"Enter: switch; the cameras (video calls), as they come and go; sound it has "
+"always"
+msgstr ""
+
+#: progs/packages.c
+msgid "(add one)"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/packages.c
+msgid "Enter: a folder of your home, chosen in files"
+msgstr ""
+
+#. TRANSLATORS: Delete is the Delete key; keep it.
+#: progs/packages.c
+msgid "at the same path in it   Delete: remove"
+msgstr ""
+
+#: progs/packages.c
+msgid "display, sound, GPU, fonts, its own bus"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "and of your home: %s"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "A new container: %s   %s/%s.conf"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "Container %s   %s/%s.conf"
+msgstr ""
+
+#: progs/packages.c
+msgid "(no name yet)"
+msgstr ""
+
+#. TRANSLATORS: Up/Down, Enter, Delete, Left/Right and Esc are key names; keep them.
+#: progs/packages.c
+msgid ""
+"Up/Down: line   Enter: edit, choose or switch   Delete: remove a directory   "
+"Left/Right: button   Esc: back, not saved"
+msgstr ""
+
+#: progs/packages.c
+msgid "Its packages are not package names: not looked up."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "Looking up %s %s in the repositories and the AUR..."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "Neither the repositories nor the AUR have %s."
+msgstr ""
+
+#: progs/packages.c
+msgid "(blank)"
+msgstr ""
+
+#: progs/packages.c
+msgid ""
+"A new container: from a preset (its lines filled in; then it is yours), or "
+"blank"
+msgstr ""
+
+#: progs/packages.c
+msgid "The command is one program; its arguments go on the next line."
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/packages.c
+msgid "Once it is built, Enter here lists what its packages run."
+msgstr ""
+
+#: progs/packages.c
+msgid "(type one)"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "The command of %s: what its packages run, as last built"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "%.200s is not in your home (%.60s)."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "%.200s has a : or a \" in its path."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "%.200s goes through a link."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid ""
+"%.200s is in %s, which every container has already (as a whole: a drive in "
+"it could not be ejected)."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "%.200s is in %s, which every container has already."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "%d directory at most."
+msgid_plural "%d directories at most."
+msgstr[0] ""
+msgstr[1] ""
+
+#. TRANSLATORS: o is the o key; keep it.
+#: progs/packages.c
+#, c-format
+msgid "A folder of your home for %.60s: o on it."
+msgstr ""
+
+#: progs/packages.c
+msgid "the container"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "%.200s: its path is too long."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "%.200s is there already."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "%.200s: at the same path in it, from its next start."
+msgstr ""
+
+#: progs/packages.c
+msgid "A name is letters, digits, . _ - (from a letter or digit)."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "There is a container %s already."
+msgstr ""
+
+#: progs/packages.c
+msgid "Its package is not set."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid ""
+"Its directories are more than a configuration line holds (%d character)."
+msgid_plural ""
+"Its directories are more than a configuration line holds (%d characters)."
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/packages.c
+#, c-format
+msgid ""
+"%s saved (%s): it is so from its next start, its packages from its next "
+"build."
+msgstr ""
+
+#: progs/packages.c
+msgid "The name of a container is fixed once it is made."
+msgstr ""
+
+#: progs/packages.c
+msgid "One package: letters, digits and @ . _ + -."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid ""
+"Packages separated by spaces, %d at most: letters, digits and @ . _ + -."
+msgid_plural ""
+"Packages separated by spaces, %d at most: letters, digits and @ . _ + -."
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/packages.c
+#, c-format
+msgid "%s: not saved."
+msgstr ""
+
+#: progs/packages.c
+msgid "The new container"
+msgstr ""
+
+#. TRANSLATORS: b is the b key; keep it.
+#: progs/packages.c
+#, c-format
+msgid "%s saved; it is %s: stop it (home), then b builds it."
+msgstr ""
+
+#: progs/packages.c
+msgid "Search terms: letters, digits and @ . _ + -."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "Searching recipes, repositories and the AUR for %s..."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "Nothing matched %s."
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/packages.c
+#, c-format
+msgid "Search results for \"%s\" (Enter: choose)"
+msgstr ""
+
+#: progs/packages.c
+msgid "Search container recipes, repositories and the AUR:"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "roll back %s"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "%s is %s: stop it (home) first."
+msgstr ""
+
+#: progs/packages.c
+msgid "Roll back to its previous build?"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "Remove %s (its configuration and builds)?"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "Its home too (%s/%s/data: its settings, its files)?"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "remove %s"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "remove %s and its home"
+msgstr ""
+
+#: progs/packages.c
+msgid "Search repositories and the AUR:"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "add %s to the host"
+msgstr ""
+
+#: progs/packages.c
+msgid "Package to add (repositories or the AUR):"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "Remove %s from the host (and what only it needs)?"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "remove %s from the host"
+msgstr ""
+
+#: progs/packages.c
+msgid "Install what the manifest names and remove what it does not?"
+msgstr ""
+
+#: progs/packages.c
+msgid "bring the host to its manifest"
+msgstr ""
+
+#: progs/packages.c
+msgid "check for updates"
+msgstr ""
+
+#: progs/packages.c
+msgid "Apply:"
+msgstr ""
+
+#. TRANSLATORS: Space is the Space key; keep it.
+#: progs/packages.c
+msgid "Nothing is marked (Space marks)."
+msgstr ""
+
+#: progs/packages.c
+msgid "Not checked yet: c checks."
+msgstr ""
+
+#. TRANSLATORS: c is the c key; keep it.
+#: progs/packages.c
+msgid "The last check is shown; c checks again."
+msgstr ""
+
+#: progs/settings.c
+msgid "a new one each time"
+msgstr ""
+
+#: progs/settings.c
+msgid "its own, the same each time"
+msgstr ""
+
+#: progs/settings.c
+msgid "the card's real one"
+msgstr ""
+
+#: progs/settings.c
+msgid "Above"
+msgstr ""
+
+#: progs/settings.c
+msgid "Below"
+msgstr ""
+
+#: progs/settings.c
+msgid "Left"
+msgstr ""
+
+#: progs/settings.c
+msgid "Origin"
+msgstr ""
+
+#: progs/settings.c
+msgid "Right"
+msgstr ""
+
+#. TRANSLATORS: Up/Down, Enter, Left/Right, Tab, / and q are key names; keep them.
+#: progs/settings.c
+msgid ""
+"Up/Down: choose   Enter: open   Left/Right: change   Tab: categories or "
+"settings   /: find   q: back to home"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Cannot save %s."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Saved; the shared display applies the layout when it is shown."
+msgstr ""
+
+#: progs/settings.c
+msgid "no LUKS2 disk"
+msgstr ""
+
+#: progs/settings.c
+msgid "no TPM chip"
+msgstr ""
+
+#: progs/settings.c
+msgid "TPM 1.2 disabled in BIOS"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "TPM 1.2 bound (Delete: unbind)"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "TPM 2.0 bound (Delete: unbind)"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "TPM 1.2 (Enter: bind auto-unlock)"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "TPM 2.0 (Enter: bind auto-unlock)"
+msgstr ""
+
+#: progs/settings.c
+msgid "left index finger"
+msgstr ""
+
+#: progs/settings.c
+msgid "left thumb"
+msgstr ""
+
+#: progs/settings.c
+msgid "right index finger"
+msgstr ""
+
+#: progs/settings.c
+msgid "right thumb"
+msgstr ""
+
+#: progs/settings.c
+msgid "left middle finger"
+msgstr ""
+
+#: progs/settings.c
+msgid "left ring finger"
+msgstr ""
+
+#: progs/settings.c
+msgid "right middle finger"
+msgstr ""
+
+#: progs/settings.c
+msgid "right ring finger"
+msgstr ""
+
+#: progs/settings.c
+msgid "left little finger"
+msgstr ""
+
+#: progs/settings.c
+msgid "right little finger"
+msgstr ""
+
+#: progs/settings.c
+msgid "no user (uid 1000)"
+msgstr ""
+
+#: progs/settings.c
+msgid "no fingerprint reader found"
+msgstr ""
+
+#: progs/settings.c
+msgid "none yet"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%d recorded"
+msgid_plural "%d recorded"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/settings.c
+msgid "Audio (PipeWire)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Wayland display (labwc)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Document viewer (view)"
+msgstr ""
+
+#: progs/settings.c
+msgid "TeX DVI support (texlive)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Text editor (edit)"
+msgstr ""
+
+#: progs/settings.c
+msgid "7-Zip (encrypted 7z, RAR)"
+msgstr ""
+
+#: progs/settings.c
+msgid "CJK fonts (noto-cjk)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Firmware updates (fwupd)"
+msgstr ""
+
+#: progs/settings.c
+msgid "SPI programmer (flashrom)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Clash (mihomo)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Tor (tor, lyrebird)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Bluetooth tools"
+msgstr ""
+
+#: progs/settings.c
+msgid "Cloud drives (rclone)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Input method (Rime)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Fingerprint reader (fprintd)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Face recognition (howdy)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Faces are computed on the CPU now."
+msgstr ""
+
+#: progs/settings.c
+msgid "Faces are computed on the NVIDIA GPU now."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%s installed; switch it on below."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%s removed."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Could not install %s; see %s."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Could not switch %s; see %s."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Could not remove %s; see %s."
+msgstr ""
+
+#: progs/settings.c
+msgid "Core repositories"
+msgstr ""
+
+#: progs/settings.c
+msgid "Extra repositories"
+msgstr ""
+
+#: progs/settings.c
+msgid "Multilib (32-bit) repositories"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Mirrors ranked."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Some mirror lists were not ranked; see %s."
+msgstr ""
+
+#: progs/settings.c
+msgid "Repositories changed: the next update moves the packages."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Could not change the repositories; see %s."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "installing: %s"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "removing: %s"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "connected, %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "no address yet"
+msgstr ""
+
+#. TRANSLATORS: Right is the Right arrow key; keep it.
+#: progs/settings.c
+msgid "logged out  (Right: log in with a QR code)"
+msgstr ""
+
+#. TRANSLATORS: Right is the Right arrow key; keep it.
+#: progs/settings.c
+msgid "stopped  (Right: connect)"
+msgstr ""
+
+#: progs/settings.c
+msgid "starting (tailscaled is not answering yet)"
+msgstr ""
+
+#: progs/settings.c
+msgid "off: the network goes direct"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "waiting for the subscription (Enter on the line above)"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "running %s; panel http://127.0.0.1:9090/ui (Edge), secret %s"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "starting (or refused: %s/test.log)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Subscription URL (from the provider): "
+msgstr ""
+
+#: progs/settings.c
+msgid "Subscription unchanged."
+msgstr ""
+
+#: progs/settings.c
+msgid "A subscription is an http(s) address."
+msgstr ""
+
+#: progs/settings.c
+msgid "Subscription saved: Clash takes it within seconds."
+msgstr ""
+
+#. TRANSLATORS: Delete is the Delete key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "Already %d bridge line: Delete removes them all."
+msgid_plural "Already %d bridge lines: Delete removes them all."
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/settings.c
+msgid "Bridge line (obfs4 or webtunnel, from bridges.torproject.org): "
+msgstr ""
+
+#: progs/settings.c
+msgid "Bridges unchanged."
+msgstr ""
+
+#. TRANSLATORS: Keep obfs4|webtunnel ADDRESS:PORT [FINGERPRINT] KEY=VALUE... as written.
+#: progs/settings.c
+msgid ""
+"Not an obfs4 or WebTunnel bridge line: obfs4|webtunnel ADDRESS:PORT "
+"[FINGERPRINT] KEY=VALUE..."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Cannot write %s/bridges."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Bridge added (%d now): Tor takes it within seconds."
+msgid_plural "Bridge added (%d now): Tor takes it within seconds."
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/settings.c
+#, c-format
+msgid "Bridge added (%d now)."
+msgid_plural "Bridge added (%d now)."
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/settings.c
+msgid "Tor goes out through these bridges: put it through Clash or off first."
+msgstr ""
+
+#. TRANSLATORS: Delete is the Delete key; keep it.
+#: progs/settings.c
+msgid "Delete again: remove every bridge line."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Cannot remove %s/bridges."
+msgstr ""
+
+#: progs/settings.c
+msgid "Bridge lines removed."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Cannot load Tor's firewall (%s): Tor left as it was."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Tor off, but its firewall is still there: nothing goes out (%s remove)."
+msgstr ""
+
+#: progs/settings.c
+msgid "Tor off: the network goes direct."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Tor through Clash: all the network goes through Tor; Clash carries Tor only."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Tor through bridges: all the network goes through Tor, Tor through the "
+"bridges."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "no answer from %s"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Could not change %.60s (nmcli)."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%.60s: a new MAC address each time, from when it next connects."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%.60s: the card's real MAC address, from when it next connects."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid ""
+"%.60s: its own MAC address, the same each time, from when it next connects."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid ""
+"New networks, and saved ones that name none: %s, from when they next connect."
+msgstr ""
+
+#: progs/settings.c
+msgid "Tailscale login"
+msgstr ""
+
+#: progs/settings.c
+msgid "Scan the code with a phone, or open the address on another device:"
+msgstr ""
+
+#: progs/settings.c
+msgid "(the screen is too small for the code: use the address)"
+msgstr ""
+
+#. TRANSLATORS: q and Esc are key names; keep them.
+#: progs/settings.c
+msgid "q / Esc: cancel"
+msgstr ""
+
+#: progs/settings.c
+msgid "Tailscale login cancelled."
+msgstr ""
+
+#: progs/settings.c
+msgid "Tailscale: logged in."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Tailscale login failed (status %d)."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Fingerprint: %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "Touch or swipe the finger on the reader, again each time it asks."
+msgstr ""
+
+#: progs/settings.c
+msgid "Fingerprint not added."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Fingerprint added: %s."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Fingerprint not added: %.100s"
+msgstr ""
+
+#: progs/settings.c
+msgid "fprintd-enroll failed"
+msgstr ""
+
+#: progs/settings.c
+msgid "fprintd-enroll was killed"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "none   Enter: configure (rclone config)"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "%d (%s%s)   Enter: configure (rclone config)"
+msgid_plural "%d (%s%s)   Enter: configure (rclone config)"
+msgstr[0] ""
+msgstr[1] ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "The wallpaper: Enter on a picture."
+msgstr ""
+
+#: progs/settings.c
+msgid "Wallpaper left as it is."
+msgstr ""
+
+#: progs/settings.c
+msgid "Wallpaper saved; the shared display shows it when it is next shown."
+msgstr ""
+
+#: progs/settings.c
+msgid "Chinese input key"
+msgstr ""
+
+#: progs/settings.c
+msgid "Direct input key"
+msgstr ""
+
+#: progs/settings.c
+msgid "Input method key"
+msgstr ""
+
+#: progs/settings.c
+msgid "Punctuation width key"
+msgstr ""
+
+#. TRANSLATORS: %s is a row's label (Lock key); Ctrl, Alt, Super and Esc are key names; keep them.
+#: progs/settings.c
+#, c-format
+msgid ""
+"%s: press it, alone if it types nothing (Henkan_Mode), else with Ctrl, Alt "
+"or Super   Esc: keep %.40s"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%s: press it, with Ctrl, Alt or Super   Esc: keep %.40s"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%s left as it is."
+msgstr ""
+
+#. TRANSLATORS: Esc is the Esc key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "That key is another of rc.conf's; press another   Esc: keep %.40s"
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"A key that types nothing (Henkan_Mode), or Ctrl, Alt or Super with a letter, "
+"digit, Space, Enter or Tab"
+msgstr ""
+
+#: progs/settings.c
+msgid "Ctrl, Alt or Super with a letter, digit, Space, Enter or Tab"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%s: %s, saved and applied."
+msgstr ""
+
+#: progs/settings.c
+msgid "Cannot change the password (no user, or PAM)."
+msgstr ""
+
+#: progs/settings.c
+msgid "Password left as it was."
+msgstr ""
+
+#: progs/settings.c
+msgid "Password left as it was (PAM did not answer)."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Password of %.40s changed."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Password left as it was: %.100s"
+msgstr ""
+
+#: progs/settings.c
+msgid "refused"
+msgstr ""
+
+#: progs/settings.c
+msgid "ask every time"
+msgstr ""
+
+#: progs/settings.c
+msgid "no rule"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Saved to %s."
+msgstr ""
+
+#: progs/settings.c
+msgid "(a file of its own)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Time zone: automatic, from where the network is (asked of ipinfo.io)."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Cannot set the time zone %s."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Time zone %s: programs started from now on use it."
+msgstr ""
+
+#: progs/settings.c
+msgid "settings"
+msgstr ""
+
+#. TRANSLATORS: Up/Down/PgUp/PgDn, Enter and Esc are key names; keep them.
+#: progs/settings.c
+msgid ""
+"Time zone: type to filter   Up/Down/PgUp/PgDn   Enter: choose   Esc: back"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Filter: %s_"
+msgstr ""
+
+#: progs/settings.c
+msgid "No time zone has that in its name."
+msgstr ""
+
+#: progs/settings.c
+msgid "Automatic: from where the network is"
+msgstr ""
+
+#: progs/settings.c
+msgid "   (now)"
+msgstr ""
+
+#. TRANSLATORS: Left/Right are the Left and Right arrow keys; keep them.
+#: progs/settings.c
+msgid "Network time sets the clock: turn it off (Left/Right) to set it here."
+msgstr ""
+
+#. TRANSLATORS: Enter and Esc are key names; keep them and YYYY-MM-DD HH:MM.
+#: progs/settings.c
+msgid "Date and time (YYYY-MM-DD HH:MM), Enter: set, Esc: leave it: "
+msgstr ""
+
+#: progs/settings.c
+msgid "Date and time left as they are."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Not a date and time as YYYY-MM-DD HH:MM: %.40s"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Cannot set the clock: %s"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Clock set to %s; not the hardware clock: %s"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Clock set to %s, the hardware clock too."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "locachy-setup debug-link %s failed (status %d)."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Debug cable link on: %.20s is kept for it."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid ""
+"Debug cable link off: %.20s is NetworkManager's again (the network restarts)."
+msgstr ""
+
+#: progs/settings.c
+msgid "the port"
+msgstr ""
+
+#: progs/settings.c
+msgid "[Above]"
+msgstr ""
+
+#: progs/settings.c
+msgid "[Below]"
+msgstr ""
+
+#: progs/settings.c
+msgid "[Left]"
+msgstr ""
+
+#: progs/settings.c
+msgid "[Right]"
+msgstr ""
+
+#: progs/settings.c
+msgid "settings: screens"
+msgstr ""
+
+#: progs/settings.c
+msgid "Arrange screens"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Selected: %.31s  %s of %.31s"
+msgstr ""
+
+#: progs/settings.c
+msgid "origin"
+msgstr ""
+
+#: progs/settings.c
+msgid "No external screens connected"
+msgstr ""
+
+#: progs/settings.c
+msgid "No screens connected"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Screen: %.31s"
+msgstr ""
+
+#: progs/settings.c
+msgid " (origin)"
+msgstr ""
+
+#. TRANSLATORS: Enter and Esc are key names; keep them.
+#: progs/settings.c
+msgid "Enter: apply  Esc: back"
+msgstr ""
+
+#: progs/settings.c
+msgid "Arrows: select  Enter: apply  Esc: back"
+msgstr ""
+
+#: progs/settings.c
+msgid "Text programs mirror; this layout is for the shared graphical display."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Bluetooth tools are not installed: the Bluetooth tools line installs them."
+msgstr ""
+
+#: progs/settings.c
+msgid "Bluetooth service is off: switch it on above before opening devices."
+msgstr ""
+
+#: progs/settings.c
+msgid "Bluetooth devices: bluetui closed."
+msgstr ""
+
+#: progs/settings.c
+msgid "Bluetooth devices: bluetui did not finish."
+msgstr ""
+
+#: progs/settings.c
+msgid "Appearance"
+msgstr ""
+
+#: progs/settings.c
+msgid "Connected Devices"
+msgstr ""
+
+#: progs/settings.c
+msgid "Input & Output"
+msgstr ""
+
+#: progs/settings.c
+msgid "Networking"
+msgstr ""
+
+#: progs/settings.c
+msgid "Apps & Windows"
+msgstr ""
+
+#: progs/settings.c
+msgid "Language & Time"
+msgstr ""
+
+#: progs/settings.c
+msgid "Security & Privacy"
+msgstr ""
+
+#: progs/settings.c
+msgid "Mouse & Touchpad"
+msgstr ""
+
+#: progs/settings.c
+msgid "Keyboard"
+msgstr ""
+
+#: progs/settings.c
+msgid "Display & Monitor"
+msgstr ""
+
+#: progs/settings.c
+msgid "Bluetooth"
+msgstr ""
+
+#: progs/settings.c
+msgid "Wi-Fi & Internet"
+msgstr ""
+
+#: progs/settings.c
+msgid "No saved network yet."
+msgstr ""
+
+#: progs/settings.c
+msgid "Tailscale"
+msgstr ""
+
+#: progs/settings.c
+msgid "Clash"
+msgstr ""
+
+#: progs/settings.c
+msgid "Tor"
+msgstr ""
+
+#: progs/settings.c
+msgid "Cloud Drives"
+msgstr ""
+
+#: progs/settings.c
+msgid "Wallpaper"
+msgstr ""
+
+#: progs/settings.c
+msgid "Default Applications"
+msgstr ""
+
+#. TRANSLATORS: A is the A key; keep it.
+#: progs/settings.c
+msgid "None yet: A in an open-with chooser makes one."
+msgstr ""
+
+#: progs/settings.c
+msgid "Shortcuts"
+msgstr ""
+
+#: progs/settings.c
+msgid "Screen Locking"
+msgstr ""
+
+#: progs/settings.c
+msgid "Disk Encryption"
+msgstr ""
+
+#: progs/settings.c
+msgid "Region & Language"
+msgstr ""
+
+#: progs/settings.c
+msgid "Date & Time"
+msgstr ""
+
+#: progs/settings.c
+msgid "About This System"
+msgstr ""
+
+#: progs/settings.c
+msgid "Users"
+msgstr ""
+
+#: progs/settings.c
+msgid "Power Management"
+msgstr ""
+
+#: progs/settings.c
+msgid "Boot"
+msgstr ""
+
+#: progs/settings.c
+msgid "Software Update"
+msgstr ""
+
+#: progs/settings.c
+msgid "Software Sources"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Packages for %s; own builds for %s. In order:"
+msgstr ""
+
+#: progs/settings.c
+msgid "Optional Components"
+msgstr ""
+
+#: progs/settings.c
+msgid "Debug Cable"
+msgstr ""
+
+#: progs/settings.c
+msgid "Hostname (letters, digits, hyphens): "
+msgstr ""
+
+#: progs/settings.c
+msgid "Hostname unchanged."
+msgstr ""
+
+#: progs/settings.c
+msgid "Invalid hostname: use 1-63 letters, digits or hyphens."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Hostname set to %s."
+msgstr ""
+
+#: progs/settings.c
+msgid "Update repository (git URL, or off): "
+msgstr ""
+
+#: progs/settings.c
+msgid "Update repository unchanged."
+msgstr ""
+
+#: progs/settings.c
+msgid "Not an https://, ssh:// or git@ URL (or off)."
+msgstr ""
+
+#. TRANSLATORS: packages is the program's name, c the c key; keep them.
+#: progs/settings.c
+#, c-format
+msgid "Source updates off."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Source updates from %.120s: c in packages checks it."
+msgstr ""
+
+#: progs/settings.c
+msgid "Branch to follow: "
+msgstr ""
+
+#: progs/settings.c
+msgid "Update branch unchanged."
+msgstr ""
+
+#: progs/settings.c
+msgid "Not a branch name: letters, digits, . _ / - (from a letter or digit)."
+msgstr ""
+
+#. TRANSLATORS: packages is the program's name, c the c key; keep them.
+#: progs/settings.c
+#, c-format
+msgid "Following branch %.100s: c in packages checks it."
+msgstr ""
+
+#: progs/settings.c
+msgid "Making the boot image (locachy-boot)..."
+msgstr ""
+
+#: progs/settings.c
+msgid "Boot image made: the next start uses it."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Could not make the boot image; see %s."
+msgstr ""
+
+#: progs/settings.c
+msgid "Kernel options (added to the command line; empty: none): "
+msgstr ""
+
+#: progs/settings.c
+msgid "Kernel options unchanged."
+msgstr ""
+
+#: progs/settings.c
+msgid "Kernel options: letters, digits, spaces and . , : = / + - _ @ only."
+msgstr ""
+
+#: progs/settings.c
+msgid "Find a setting: "
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "No setting has \"%.40s\"."
+msgstr ""
+
+#. TRANSLATORS: Esc is the Esc key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "Settings with \"%.40s\"   Esc: back to the categories"
+msgstr ""
+
+#: progs/settings.c
+msgid "TrackPoint Sensitivity"
+msgstr ""
+
+#: progs/settings.c
+msgid "TrackPoint Speed"
+msgstr ""
+
+#: progs/settings.c
+msgid "TrackPoint Press-to-Select"
+msgstr ""
+
+#: progs/settings.c
+msgid "OFF"
+msgstr ""
+
+#: progs/settings.c
+msgid "ON "
+msgstr ""
+
+#: progs/settings.c
+msgid "Pointer Acceleration"
+msgstr ""
+
+#: progs/settings.c
+msgid "Hibernate Timeout"
+msgstr ""
+
+#: progs/settings.c
+msgid "Tailscale installed"
+msgstr ""
+
+#: progs/settings.c
+msgid "NO "
+msgstr ""
+
+#: progs/settings.c
+msgid "YES"
+msgstr ""
+
+#: progs/settings.c
+msgid "Tailscale VPN"
+msgstr ""
+
+#: progs/settings.c
+msgid "  (not installed)"
+msgstr ""
+
+#: progs/settings.c
+msgid "  (Tor is on: no way around it, its UDP is dropped)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Tailscale account"
+msgstr ""
+
+#: progs/settings.c
+msgid "Clash (mihomo) installed"
+msgstr ""
+
+#: progs/settings.c
+msgid "Clash proxy"
+msgstr ""
+
+#: progs/settings.c
+msgid "off: direct"
+msgstr ""
+
+#: progs/settings.c
+msgid "off: through Tor alone"
+msgstr ""
+
+#: progs/settings.c
+msgid "TUN: every container on the network"
+msgstr ""
+
+#: progs/settings.c
+msgid "its port only: 127.0.0.1:7890"
+msgstr ""
+
+#: progs/settings.c
+msgid "  Tor's front: carries Tor only"
+msgstr ""
+
+#: progs/settings.c
+msgid "  over Tor: no UDP (UDP-only proxies fail)"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Clash subscription"
+msgstr ""
+
+#: progs/settings.c
+msgid "not set (Enter)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Clash status"
+msgstr ""
+
+#: progs/settings.c
+msgid "Tor installed (tor, lyrebird)"
+msgstr ""
+
+#: progs/settings.c
+msgid "  lyrebird (for bridges) not installed"
+msgstr ""
+
+#: progs/settings.c
+msgid "through Clash (mihomo)"
+msgstr ""
+
+#: progs/settings.c
+msgid "through bridges"
+msgstr ""
+
+#: progs/settings.c
+msgid "Tor for the whole system"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%s   Enter: add one"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%s   Enter: add one   Delete: remove all"
+msgstr ""
+
+#: progs/settings.c
+msgid "Tor bridges"
+msgstr ""
+
+#: progs/settings.c
+msgid "Tor status"
+msgstr ""
+
+#: progs/settings.c
+msgid "Bluetooth tools installed"
+msgstr ""
+
+#: progs/settings.c
+msgid "Bluetooth service"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Bluetooth devices"
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter: open bluetui"
+msgstr ""
+
+#: progs/settings.c
+msgid "service off"
+msgstr ""
+
+#: progs/settings.c
+msgid "MAC on new networks"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "MAC on %.24s"
+msgstr ""
+
+#: progs/settings.c
+msgid "Terminal key (shared display)"
+msgstr ""
+
+#: progs/settings.c
+msgid "  (foot is not installed)"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Automatic: %.60s"
+msgstr ""
+
+#: progs/settings.c
+msgid "Date and time"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "[%s]  on %.20s"
+msgstr ""
+
+#: progs/settings.c
+msgid "Debug cable link"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%d min"
+msgid_plural "%d min"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/settings.c
+msgid "[Enter: change]"
+msgstr ""
+
+#: progs/settings.c
+msgid "Password at boot"
+msgstr ""
+
+#: progs/settings.c
+msgid "Lock key"
+msgstr ""
+
+#: progs/settings.c
+msgid "Lock when idle"
+msgstr ""
+
+#: progs/settings.c
+msgid "Unlock with a fingerprint"
+msgstr ""
+
+#: progs/settings.c
+msgid "Fingerprints"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "< %s >  Enter: add"
+msgstr ""
+
+#: progs/settings.c
+msgid "Add a fingerprint"
+msgstr ""
+
+#: progs/settings.c
+msgid "Faces computed on"
+msgstr ""
+
+#: progs/settings.c
+msgid "Unlock with your face"
+msgstr ""
+
+#: progs/settings.c
+msgid "Add a face"
+msgstr ""
+
+#: progs/settings.c
+msgid "Camera for faces"
+msgstr ""
+
+#: progs/settings.c
+msgid "Faces"
+msgstr ""
+
+#: progs/settings.c
+msgid "Infrared emitter"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "switching: %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "the CPU (no NVIDIA driver here)"
+msgstr ""
+
+#: progs/settings.c
+msgid "< the CPU >"
+msgstr ""
+
+#: progs/settings.c
+msgid "< the NVIDIA GPU (CUDA) >"
+msgstr ""
+
+#: progs/settings.c
+msgid "none set"
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter: in a terminal (howdy add)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter: set it up (linux-enable-ir-emitter)"
+msgstr ""
+
+#: progs/settings.c
+msgid "linux-enable-ir-emitter not installed"
+msgstr ""
+
+#: progs/settings.c
+msgid "Cloud drives installed (rclone)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Cloud drives (in ~/Drives)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Cloud remotes (iCloud, Drive)"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Hostname"
+msgstr ""
+
+#: progs/settings.c
+msgid "(Enter: change)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Input method (Rime, English)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Chinese Pinyin (rime-frost)"
+msgstr ""
+
+#: progs/settings.c
+msgid "  (installs Rime too)"
+msgstr ""
+
+#: progs/settings.c
+msgid "TPM disk auto-unlock"
+msgstr ""
+
+#: progs/settings.c
+msgid "not supported"
+msgstr ""
+
+#: progs/settings.c
+msgid "Screen brightness"
+msgstr ""
+
+#: progs/settings.c
+msgid "generic PC"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Update repository"
+msgstr ""
+
+#: progs/settings.c
+msgid "Update branch"
+msgstr ""
+
+#: progs/settings.c
+msgid "(updates off)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Boot messages"
+msgstr ""
+
+#: progs/settings.c
+msgid "hidden (quiet)"
+msgstr ""
+
+#: progs/settings.c
+msgid "shown"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Kernel options"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "made %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "not made yet"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Boot image"
+msgstr ""
+
+#: progs/settings.c
+msgid "(Enter: make it again)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Network in the terminal"
+msgstr ""
+
+#: progs/settings.c
+msgid "on"
+msgstr ""
+
+#: progs/settings.c
+msgid "Touchpad Circular Scrolling"
+msgstr ""
+
+#: progs/settings.c
+msgid "round touchpads"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "checking: %s"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "ranking: %s"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Mirrors"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "ranked %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "not ranked here yet"
+msgstr ""
+
+#: progs/settings.c
+msgid "(Enter: rank them again)"
+msgstr ""
+
+#: progs/settings.c
+msgid "installed"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Arrange screens...  [Enter]"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Screen %-12.12s (disconnected)"
+msgstr ""
+
+#: progs/settings.c
+msgid "preferred"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Laptop %-10.10s Resolution:"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Screen %-10.10s Resolution:"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Laptop %-10.10s Scale:"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Screen %-10.10s Scale:"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "  %.95s < %3d%% >  (text and windows)"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Wait: %s is still being installed."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Wait: %s is still being removed."
+msgstr ""
+
+#: progs/settings.c
+msgid "Tailscale: installing it; switch it on below when it is in."
+msgstr ""
+
+#: progs/settings.c
+msgid "Tailscale: switched off; removing it."
+msgstr ""
+
+#: progs/settings.c
+msgid "Tailscale: cannot run locachy-pkg."
+msgstr ""
+
+#: progs/settings.c
+msgid "Tailscale is not installed: the line above installs it."
+msgstr ""
+
+#: progs/settings.c
+msgid "Tailscale off."
+msgstr ""
+
+#: progs/settings.c
+msgid "Tailscale on."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Tailscale: %.140s."
+msgstr ""
+
+#: progs/settings.c
+msgid "Clash is Tor's front: put Tor through bridges or off first."
+msgstr ""
+
+#: progs/settings.c
+msgid "Clash: installing it; choose its mode below when it is in."
+msgstr ""
+
+#: progs/settings.c
+msgid "Clash: switched off; removing it."
+msgstr ""
+
+#: progs/settings.c
+msgid "Clash: cannot run locachy-pkg."
+msgstr ""
+
+#: progs/settings.c
+msgid "Clash is not installed: the line above installs it."
+msgstr ""
+
+#: progs/settings.c
+msgid "Clash off: the network goes through Tor alone."
+msgstr ""
+
+#: progs/settings.c
+msgid "Clash off: the network goes direct."
+msgstr ""
+
+#: progs/settings.c
+msgid "Clash TUN: every container on the network goes through it."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Clash, its port only: containers started from now on are told of it (start "
+"running ones again)."
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: type the subscription's URL"
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"The panel: open its address in Edge (on the network), with the secret shown."
+msgstr ""
+
+#: progs/settings.c
+msgid "Tor is on: switch it off on the line below before removing it."
+msgstr ""
+
+#: progs/settings.c
+msgid "Tor: cannot run locachy-pkg."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Tor: installing it (lyrebird is built from the AUR: a while); choose its way "
+"out below when it is in."
+msgstr ""
+
+#: progs/settings.c
+msgid "Tor: removing it."
+msgstr ""
+
+#: progs/settings.c
+msgid "Tor is not installed: the line above installs it."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Tor never goes out directly: switch Clash on, or add a bridge line (obfs4 or "
+"WebTunnel) with lyrebird installed."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Enter: add a bridge line (bridges.torproject.org)   Delete: remove them all"
+msgstr ""
+
+#: progs/settings.c
+msgid "Tor's state: tor-client --status"
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Bluetooth tools: installing them; switch the service on below when they are "
+"in."
+msgstr ""
+
+#: progs/settings.c
+msgid "Bluetooth tools: service off; removing them."
+msgstr ""
+
+#: progs/settings.c
+msgid "Bluetooth tools: cannot run locachy-pkg."
+msgstr ""
+
+#: progs/settings.c
+msgid "Bluetooth tools are not installed: the line above installs them."
+msgstr ""
+
+#: progs/settings.c
+msgid "Bluetooth service off."
+msgstr ""
+
+#: progs/settings.c
+msgid "Bluetooth service on."
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: open Bluetooth devices in bluetui (the service must be on)."
+msgstr ""
+
+#. TRANSLATORS: Enter and Delete are key names; keep them.
+#: progs/settings.c
+msgid "Enter: choose a picture in the file manager   Delete: no wallpaper"
+msgstr ""
+
+#. TRANSLATORS: Enter and Delete are key names; keep them.
+#: progs/settings.c
+msgid "Enter: press a new key (a window of foot, the terminal)   Delete: none"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Network time on: the clock is set from the network."
+msgstr ""
+
+#: progs/settings.c
+msgid "Network time off: Enter on Date and time sets the clock."
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: a new password for the user (it unlocks the screen, and sudo)."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Not changed: the TPM opens the disk at power-on, so the lock at boot must "
+"stay. Unbind the TPM first."
+msgstr ""
+
+#: progs/settings.c
+msgid "At boot: home at once (the lock key and the lid still lock)."
+msgstr ""
+
+#: progs/settings.c
+msgid "At boot: the lock screen first, the password to go on."
+msgstr ""
+
+#. TRANSLATORS: Enter and Delete are key names; keep them.
+#: progs/settings.c
+msgid "Enter: press a new lock key   Delete: none (the lid still locks)"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Wait: %s is still being switched."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"No camera: face recognition needs one (an infrared one, as for Windows "
+"Hello)."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Face recognition: building dlib, howdy and linux-enable-ir-emitter (it takes "
+"long); then add a face."
+msgstr ""
+
+#: progs/settings.c
+msgid "Face recognition: switched off; removing them."
+msgstr ""
+
+#: progs/settings.c
+msgid "Face recognition: cannot run locachy-pkg."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"CUDA needs an NVIDIA GPU with NVIDIA's driver loaded (nvidia or nvidia-"
+"open); here faces are computed on the CPU."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid ""
+"Faces on the NVIDIA GPU: building %s (with cuda and cudnn: about 2.9 GiB to "
+"download)."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Faces on the CPU: building %s."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Faces will be computed on the NVIDIA GPU (cuda and cudnn: about 2.9 GiB to "
+"download when installed)."
+msgstr ""
+
+#: progs/settings.c
+msgid "Faces will be computed on the CPU."
+msgstr ""
+
+#: progs/settings.c
+msgid "howdy is not installed: the Face recognition line installs it."
+msgstr ""
+
+#: progs/settings.c
+msgid "The lock screen and sudo take your face as well as the password."
+msgstr ""
+
+#: progs/settings.c
+msgid "Your face no longer unlocks."
+msgstr ""
+
+#. TRANSLATORS: Delete is the Delete key; keep it.
+#: progs/settings.c
+msgid "Delete: forget these faces (asks once more)."
+msgstr ""
+
+#: progs/settings.c
+msgid "howdy is not installed."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "No camera in %s, or howdy could not set it."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "howdy uses %.100s (its infrared one, where there are two)."
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter: record your face (howdy add)."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Enter: find and switch on the camera's infrared emitter (linux-enable-ir-"
+"emitter configure)."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Cloud drives (rclone): installing rclone and fuse3; configure remotes below "
+"when they are in."
+msgstr ""
+
+#: progs/settings.c
+msgid "Cloud drives (rclone): unmounted; removing rclone."
+msgstr ""
+
+#: progs/settings.c
+msgid "Cloud drives (rclone): cannot run locachy-pkg."
+msgstr ""
+
+#: progs/settings.c
+msgid "rclone is not installed: the line above installs it."
+msgstr ""
+
+#: progs/settings.c
+msgid "Cloud drives mounted under ~/Drives/<remote>."
+msgstr ""
+
+#: progs/settings.c
+msgid "Cloud drives unmounted."
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid ""
+"Enter: open rclone config in a terminal (iCloud, Google Drive, OneDrive, "
+"WebDAV)."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Language: %s."
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: set this computer's hostname (/etc/hostname)."
+msgstr ""
+
+#: progs/settings.c
+msgid "Input method: installing librime and English words, then rebuilding."
+msgstr ""
+
+#: progs/settings.c
+msgid "Input method: removing Rime and its dictionaries, then rebuilding."
+msgstr ""
+
+#: progs/settings.c
+msgid "Input method: cannot run locachy-pkg."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Chinese Pinyin: installing rime-frost and grammar model, then rebuilding."
+msgstr ""
+
+#: progs/settings.c
+msgid "Chinese Pinyin: removing rime-frost (English completion kept)."
+msgstr ""
+
+#: progs/settings.c
+msgid "Chinese Pinyin: cannot run locachy-pkg."
+msgstr ""
+
+#. TRANSLATORS: Enter and Delete are key names; keep them.
+#: progs/settings.c
+msgid "Enter: bind LUKS2 auto-unlock to TPM (1.2 or 2.0)   Delete: unbind"
+msgstr ""
+
+#: progs/settings.c
+msgid "No controllable backlight on this display."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Screen brightness: %d%%."
+msgstr ""
+
+#: progs/settings.c
+msgid "Cannot set screen brightness."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Machine profile: %s."
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter: the git repository LOCachy's source updates come from (or off)."
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter: the branch of that repository to follow (main by default)."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Enter: options added to the kernel's command line, made into the boot image."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Enter: make the boot image again (locachy-boot), as pacman's hooks do after "
+"updates."
+msgstr ""
+
+#: progs/settings.c
+msgid "The terminal's shell is on the network from its next start."
+msgstr ""
+
+#: progs/settings.c
+msgid "The terminal's shell has no network from its next start."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Every touchpad scrolls around its edge: programs after home, the shared "
+"display from its next start."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Every touchpad scrolls with two fingers: programs after home, the shared "
+"display from its next start."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Round touchpads scroll around their edge: programs after home, the shared "
+"display from its next start."
+msgstr ""
+
+#: progs/settings.c
+msgid "Wait: the repositories' job is still running."
+msgstr ""
+
+#: progs/settings.c
+msgid "Wait: a package job is still running."
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: rank the mirrors from here again (reflector, rate-mirrors)."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Checking the declared packages against the repositories..."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Cannot run %s."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%s: installing packages in background."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%s: removing packages in background."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%s: cannot run locachy-pkg."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Fingerprint reader: installing fprintd; switch it on below when it is in."
+msgstr ""
+
+#: progs/settings.c
+msgid "Fingerprint reader: switched off; removing fprintd."
+msgstr ""
+
+#: progs/settings.c
+msgid "Fingerprint reader: cannot run locachy-pkg."
+msgstr ""
+
+#: progs/settings.c
+msgid "fprintd is not installed: the line above installs it."
+msgstr ""
+
+#: progs/settings.c
+msgid "The lock screen and sudo take a fingerprint as well as the password."
+msgstr ""
+
+#: progs/settings.c
+msgid "Only the password unlocks, and sudo asks only for it."
+msgstr ""
+
+#. TRANSLATORS: Delete is the Delete key; keep it.
+#: progs/settings.c
+msgid "Delete: delete these fingerprints (asks once more)."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid ""
+"Locked after %d min without input (on the shared display, not while a video "
+"plays)."
+msgid_plural ""
+"Locked after %d min without input (on the shared display, not while a video "
+"plays)."
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/settings.c
+msgid "Never locked for want of input (the lock key and the lid still lock)."
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: choose the time zone."
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter: set the date and time."
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: arrange the screens with the direction buttons."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Saved to %s and applied."
+msgstr ""
+
+#: progs/settings.c
+msgid "No wallpaper; the shared display shows that when it is next shown."
+msgstr ""
+
+#: progs/settings.c
+msgid "No terminal key: saved and applied."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%s: none, saved and applied."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Ranking the mirrors (reflector, rate-mirrors)..."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%s is not installed."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Not bound: with no lock at boot, anyone who turns it on would be in. Turn "
+"the boot lock on first."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%s did not finish."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%s done."
+msgstr ""
+
+#. TRANSLATORS: Delete is the Delete key; keep it.
+#: progs/settings.c
+msgid "Delete again: unbind TPM disk auto-unlock (boot will ask passphrase)."
+msgstr ""
+
+#: progs/settings.c
+msgid "TPM disk auto-unlock unbound."
+msgstr ""
+
+#: progs/settings.c
+msgid "fprintd is not installed: the Fingerprint reader line installs it."
+msgstr ""
+
+#. TRANSLATORS: Delete is the Delete key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "Delete again: forget every face of %.40s."
+msgstr ""
+
+#: progs/settings.c
+msgid "the user"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Faces: %.100s."
+msgstr ""
+
+#. TRANSLATORS: Delete is the Delete key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "Delete again: delete every fingerprint of %.40s."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Fingerprints: %.100s."
+msgstr ""
+
+#: progs/settings.c
+msgid "No lock key: the lid still locks."
+msgstr ""
+
+#: progs/settings.c
+msgid "rclone is not installed: the Cloud drives installed line installs it."
+msgstr ""
+
+#: progs/settings.c
+msgid "rclone config did not finish."
+msgstr ""
+
+#: progs/settings.c
+msgid "rclone config done."
+msgstr ""
+
+#: progs/shot.c
+msgid "Could not copy to the clipboard"
+msgstr ""
+
+#: progs/shot.c
+msgid "Could not save the file"
+msgstr ""
+
+#. TRANSLATORS: view is the document viewer program; keep its name.
+#: progs/shot.c
+msgid "Open in view"
+msgstr ""
+
+#: progs/shot.c
+msgid "Rectangular region"
+msgstr ""
+
+#: progs/shot.c
+msgid "Full screen"
+msgstr ""
+
+#: progs/shot.c
+msgid "Current screen"
+msgstr ""
+
+#: progs/shot.c
+msgid "Active window"
+msgstr ""
+
+#: progs/shot.c
+msgid "Window under cursor"
+msgstr ""
+
+#: progs/shot.c
+msgid "Arrow"
+msgstr ""
+
+#: progs/shot.c progs/view-pdf-ui.inc
+msgid "Rectangle"
+msgstr ""
+
+#: progs/shot.c
+msgid "Freehand"
+msgstr ""
+
+#: progs/shot.c progs/view-pdf-ui.inc
+msgid "Highlighter"
+msgstr ""
+
+#: progs/shot.c
+msgid "Number"
+msgstr ""
+
+#: progs/shot.c
+msgid "Click a window to capture it"
+msgstr ""
+
+#. TRANSLATORS: Enter is the key; keep it.
+#: progs/shot.c
+msgid "Enter or double-click: copy"
+msgstr ""
+
+#. TRANSLATORS: Ctrl+S is the key; keep it.
+#: progs/shot.c
+msgid "Ctrl+S: save"
+msgstr ""
+
+#: progs/shot.c
+msgid "Drag the handles: resize"
+msgstr ""
+
+#. TRANSLATORS: Esc is the key; keep it.
+#: progs/shot.c
+msgid "Esc: clear"
+msgstr ""
+
+#: progs/shot.c
+msgid "Drag: select a region"
+msgstr ""
+
+#. TRANSLATORS: Enter is the key; keep it.
+#: progs/shot.c
+msgid "Enter: copy the whole desktop"
+msgstr ""
+
+#: progs/term.c
+#, c-format
+msgid " %d/%d lines back "
+msgstr ""
+
+#: progs/term.c
+msgid "No selection"
+msgstr ""
+
+#: progs/term.c
+msgid "Copied"
+msgstr ""
+
+#: progs/term.c
+msgid "Paste exceeds memory budget"
+msgstr ""
+
+#: progs/term.c
+msgid "Cannot allocate paste"
+msgstr ""
+
+#: progs/term.c
+msgid "Cannot queue paste"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Underline"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Squiggle"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Strike Out"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Typewriter"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Inline Note"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Popup Note"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Freehand Line"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Straight Line"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Ellipse"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Polygon"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Stamp"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Green"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Orange"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Red"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Yellow"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Blue"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Cyan"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Magenta"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "White"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Black"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Gray"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "Color: %s"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "Width: %g"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Width: -"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "Opacity: %d%%"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Opacity: -"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "Stamp: %s"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Keep Active"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Hide"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "check box"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "combo box"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "list box"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "radio button"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "text"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "field"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "push button"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "signature"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "checked"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "not checked"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "not selected"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "selected"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid ", at most %d character"
+msgid_plural ", at most %d characters"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/view-pdf-ui.inc
+msgid ", required"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid ", read-only"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Show Forms"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "This document has XFA forms, which are currently unsupported."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid ""
+"This document has forms. Click on the button to interact with them, or use "
+"View -> Show Forms."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Show Signatures Panel"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid ""
+"This document is digitally signed. Some of the signatures could not be "
+"validated properly."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "This document has signature placeholder fields."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Pop-up Note"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Highlight"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Caret"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "File Attachment"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Movie"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Sound"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Rich Media"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Screen"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Annotation"
+msgstr ""
+
+#. TRANSLATORS: %.200s is the file name.
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "The document renderer stopped: the unsaved changes to %.200s were lost."
+msgstr ""
+
+#. TRANSLATORS: %.80s is the rejected value; %.200s is the reason from the renderer.
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "\"%.80s\" was not accepted, the field keeps its value: %.200s"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "Cannot add the annotation: %.200s"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "Cannot change the annotation: %.200s"
+msgstr ""
+
+#. TRANSLATORS: %.300s is the file name; y and N are keys; keep y/N.
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid ""
+"Saving the changes will invalidate the digital signatures of %.300s. Save "
+"anyway? y/N"
+msgstr ""
+
+#. TRANSLATORS: the first %.200s is the file path; the second is the reason.
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid ""
+"File could not be saved in '%.200s': %.200s. Try to save it to another "
+"location."
+msgstr ""
+
+#. TRANSLATORS: %.200s is the file name.
+#: progs/view-pdf-ui.inc progs/view.c
+#, c-format
+msgid "Saved %.200s."
+msgstr ""
+
+#. TRANSLATORS: %.200s is the file path.
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "The path %.200s is too long."
+msgstr ""
+
+#. TRANSLATORS: %.300s is the file name; s, d and Esc are keys; keep them.
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid ""
+"Do you want to save your changes to \"%.300s\" or discard them? s: Save, d: "
+"Discard, Esc: Cancel"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "This document does not allow filling in its forms."
+msgstr ""
+
+#. TRANSLATORS: %.200s is the form field's name.
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "The values of %.200s are too long to set."
+msgstr ""
+
+#. TRANSLATORS: %.200s is the form field's name.
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "The options of %.200s are too long to choose here."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "Only the first 23 of the %d options are listed."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Other value..."
+msgstr ""
+
+#. TRANSLATORS: %.200s is the form field's name.
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "%.200s is read-only."
+msgstr ""
+
+#. TRANSLATORS: %.200s is the form field's name.
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "The text of %.200s is too long to edit here."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Push buttons and their actions are not run here."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "No fields to fill in yet."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Drag to place the text's corners."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Inline Note text:"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Pop-up Note text:"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Typewriter text:"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "This document does not allow annotations."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "This annotation cannot be deleted."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "The text of this annotation cannot be changed."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "This annotation's text is too long to edit here."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Unknown"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Author:"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "This annotation cannot be changed here."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "Contents: %.60s"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "Author: %.60s"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "Icon: %.60s"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "Stamp symbol: %.60s"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "Width %g"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Open Pop-up Note"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Copy Text to Clipboard"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Delete"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Annotations can be added to PDF documents."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Choose an annotation tool first."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Only a PDF's changes can be saved."
+msgstr ""
+
+#. TRANSLATORS: o is the key in the file manager; keep it.
+#: progs/view-pdf-ui.inc
+msgid "Choose the folder to save the document into (o on it)."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Save As, the file's name:"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "There is nothing to redo."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "There is nothing to undo."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "This document has no forms."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "The Arrow tool needs line endings, which cannot be set yet."
+msgstr ""
+
+#. TRANSLATORS: %.200s is the invalid file name typed by the user.
+#: progs/view-pdf-ui.inc progs/view.c
+#, c-format
+msgid "%.200s cannot be a file's name here."
+msgstr ""
+
+#. TRANSLATORS: %.300s is the file name; y and N are keys; keep y/N.
+#: progs/view-pdf-ui.inc progs/view.c
+#, c-format
+msgid "A file named %.300s already exists. Overwrite it? y/N"
+msgstr ""
+
+#: progs/view-pdf-ui.inc progs/view.c
+msgid "Not saved."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Validity: unavailable (no signature verifier here: not checked)"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Validity: the check failed"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "The signature is cryptographically valid."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Digest Mismatch occurred."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "The requested signature is not present in the document."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "The signature could not be verified."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Certificate has not yet been verified."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Certificate is Trusted."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Certificate issuer isn't Trusted."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Certificate issuer is unknown."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Unknown issue with Certificate or corrupted data."
+msgstr ""
+
+#. TRANSLATORS: %d is the page number where the signature field is located.
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "on page %d"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "not on a page"
+msgstr ""
+
+#. TRANSLATORS: %d is the signature placeholder number (1, 2, ...).
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "Signature placeholder %d"
+msgstr ""
+
+#. TRANSLATORS: %.200s is the signature field name; %s is "on page N" or "not on a page".
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "Field: %.200s %s"
+msgstr ""
+
+#. TRANSLATORS: %d is the signature revision number; %.200s is the signer's name.
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "Rev. %d: Signed By %.200s"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "(the name the document gives, not verified)"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid ""
+"Changes: unchanged (no disallowed changes since signing; not a cryptographic "
+"check)"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "Changes: changed (by the revision saved %d later)"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Changes: changed (by the unsaved changes)"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Changes: unavailable"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "The document has unsaved changes."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "Signing Time: %.60s"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "Reason: %.200s"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "Location: %.200s"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+#, c-format
+msgid "Error: %.200s"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Annotations"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Signatures"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Not a PDF"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "No signatures"
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Reading the signatures..."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "Looking for annotations..."
+msgstr ""
+
+#: progs/view-pdf-ui.inc
+msgid "No annotations"
+msgstr ""
+
+#. TRANSLATORS: %d is the page number (default bookmark title).
+#: progs/view-pdf-ui.inc progs/view.c
+#, c-format
+msgid "Page %d"
+msgstr ""
+
+#. TRANSLATORS: %s is the system error message (strerror).
+#: progs/view.c
+#, c-format
+msgid "Cannot start the document renderer: %s."
+msgstr ""
+
+#: progs/view.c
+msgid "The document renderer keeps stopping; the document is closed."
+msgstr ""
+
+#: progs/view.c
+msgid "The document renderer stopped; it was started again."
+msgstr ""
+
+#. TRANSLATORS: %.300s is the file name of the document.
+#: progs/view.c
+#, c-format
+msgid "Incorrect password. Try again: %.300s"
+msgstr ""
+
+#: progs/view.c
+#, c-format
+msgid "Please enter the password to read the document: %.300s"
+msgstr ""
+
+#. TRANSLATORS: the first %.200s is the file name; the second is the reason from the renderer.
+#: progs/view.c
+#, c-format
+msgid "Could not open %.200s. Reason: %.200s"
+msgstr ""
+
+#: progs/view.c
+msgid "it has no pages"
+msgstr ""
+
+#. TRANSLATORS: %.200s is the file name; %d is the page count.
+#: progs/view.c
+#, c-format
+msgid "Could not open %.200s. Reason: no memory for %d page"
+msgid_plural "Could not open %.200s. Reason: no memory for %d pages"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/view.c
+msgid "Continuing search from beginning"
+msgstr ""
+
+#: progs/view.c
+msgid "Continuing search from bottom"
+msgstr ""
+
+#: progs/view.c
+msgid "Only a reflowed document's text size can change."
+msgstr ""
+
+#: progs/view.c
+msgid "Author"
+msgstr ""
+
+#: progs/view.c
+msgid "Format"
+msgstr ""
+
+#: progs/view.c
+msgid "Title"
+msgstr ""
+
+#: progs/view.c
+msgid "Creator"
+msgstr ""
+
+#: progs/view.c
+msgid "Keywords"
+msgstr ""
+
+#: progs/view.c
+msgid "Subject"
+msgstr ""
+
+#: progs/view.c
+msgid "Producer"
+msgstr ""
+
+#: progs/view.c
+msgid "Pages"
+msgstr ""
+
+#: progs/view.c
+msgid "Page size"
+msgstr ""
+
+#: progs/view.c
+msgid "Resolution"
+msgstr ""
+
+#: progs/view.c
+msgid "Document type"
+msgstr ""
+
+#: progs/view.c
+msgid "Language level"
+msgstr ""
+
+#. TRANSLATORS: the first %s is the embedded file's name; the second is its size in bytes.
+#: progs/view.c
+#, c-format
+msgid "%s   (%s bytes)"
+msgstr ""
+
+#: progs/view.c
+msgid "Fonts"
+msgstr ""
+
+#. TRANSLATORS: %.200s is the file name.
+#: progs/view.c
+#, c-format
+msgid "Exported to %.200s."
+msgstr ""
+
+#. TRANSLATORS: %.200s is the file path; %s is the system error message.
+#: progs/view.c
+#, c-format
+msgid "Cannot write %.200s: %s."
+msgstr ""
+
+#. TRANSLATORS: %.200s is the reason from the renderer.
+#: progs/view.c
+#, c-format
+msgid "Cannot lay the document out again: %.200s"
+msgstr ""
+
+#: progs/view.c
+#, c-format
+msgid "No memory for %d page."
+msgid_plural "No memory for %d pages."
+msgstr[0] ""
+msgstr[1] ""
+
+#. TRANSLATORS: %d is the page number; %.200s is the reason from the renderer.
+#: progs/view.c
+#, c-format
+msgid "Page %d cannot be shown: %.200s"
+msgstr ""
+
+#. TRANSLATORS: %d is the page number; %.200s is the reason from the renderer.
+#: progs/view.c
+#, c-format
+msgid "Cannot find the margins of page %d: %.200s"
+msgstr ""
+
+#: progs/view.c
+#, c-format
+msgid "No properties: %.200s"
+msgstr ""
+
+#: progs/view.c
+#, c-format
+msgid "No embedded files: %.200s"
+msgstr ""
+
+#: progs/view.c
+msgid "This document has no embedded files."
+msgstr ""
+
+#: progs/view.c
+#, c-format
+msgid "Cannot export: %.200s"
+msgstr ""
+
+#. TRANSLATORS: the first %.200s is the file name; the second is the reason from the renderer.
+#: progs/view.c
+#, c-format
+msgid "Cannot save %.200s: %.200s"
+msgstr ""
+
+#. TRANSLATORS: %.200s is the link URI.
+#: progs/view.c
+#, c-format
+msgid "Cannot follow the link %.200s."
+msgstr ""
+
+#: progs/view.c
+msgid "This page cannot be shown."
+msgstr ""
+
+#: progs/view.c
+msgid "Contents"
+msgstr ""
+
+#: progs/view.c
+msgid "Thumbnails"
+msgstr ""
+
+#: progs/view.c
+msgid "Thumbs"
+msgstr ""
+
+#: progs/view.c
+msgid "No bookmarks"
+msgstr ""
+
+#: progs/view.c
+msgid "Settings"
+msgstr ""
+
+#: progs/view.c
+msgid "Hide Sidebar"
+msgstr ""
+
+#: progs/view.c
+msgid "Show Sidebar"
+msgstr ""
+
+#. TRANSLATORS: %.255s is the document title or file name.
+#: progs/view.c
+#, c-format
+msgid "%.255s [modified]"
+msgstr ""
+
+#. TRANSLATORS: the first %d is the current page number; the second is the total page count.
+#: progs/view.c
+#, c-format
+msgid "Page %d of %d"
+msgstr ""
+
+#: progs/view.c
+msgid "No matches found"
+msgstr ""
+
+#: progs/view.c
+msgid "Embedded Files"
+msgstr ""
+
+#: progs/view.c
+msgid "Save..."
+msgstr ""
+
+#. TRANSLATORS: %.300s is the file name.
+#: progs/view.c
+#, c-format
+msgid "Opening %.300s ..."
+msgstr ""
+
+#. TRANSLATORS: Ctrl+O and Ctrl+Q are key shortcuts; keep them.
+#: progs/view.c
+#, c-format
+msgid "No document.   Ctrl+O: open a file   Ctrl+Q: quit"
+msgstr ""
+
+#. TRANSLATORS: %.200s is the file name.
+#: progs/view.c
+#, c-format
+msgid "Exporting to %.200s ..."
+msgstr ""
+
+#. TRANSLATORS: %.200s is the file name.
+#: progs/view.c
+#, c-format
+msgid "%.200s was not opened."
+msgstr ""
+
+#. TRANSLATORS: %.20s is the page number typed; %d is the total page count.
+#: progs/view.c
+#, c-format
+msgid "There is no page %.20s (1 to %d)."
+msgstr ""
+
+#. TRANSLATORS: o is the key in the file manager; keep it.
+#: progs/view.c
+msgid "Choose the folder to export the text into (o on it)."
+msgstr ""
+
+#: progs/view.c
+msgid "Export as plain text, the file's name:"
+msgstr ""
+
+#. TRANSLATORS: o is the key in the file manager; keep it.
+#: progs/view.c
+msgid "Choose the folder to save the file into (o on it)."
+msgstr ""
+
+#: progs/view.c
+msgid "Save the embedded file as:"
+msgstr ""
+
+#. TRANSLATORS: %.200s is the external URL or target.
+#: progs/view.c
+#, c-format
+msgid "Cannot open %.200s."
+msgstr ""
+
+#: progs/view.c
+msgid "Open Recent..."
+msgstr ""
+
+#: progs/view.c
+msgid "Embedded Files..."
+msgstr ""
+
+#: progs/view.c
+msgid "Export As Plain Text..."
+msgstr ""
+
+#: progs/view.c
+msgid "Open Containing Folder"
+msgstr ""
+
+#: progs/view.c
+msgid "Close Tab"
+msgstr ""
+
+#: progs/view.c
+msgid "Undo Close Tab"
+msgstr ""
+
+#: progs/view.c
+msgid "Zoom In"
+msgstr ""
+
+#: progs/view.c
+msgid "Zoom Out"
+msgstr ""
+
+#: progs/view.c
+msgid "Zoom to 100%"
+msgstr ""
+
+#: progs/view.c
+msgid "Fit Width"
+msgstr ""
+
+#: progs/view.c
+msgid "Fit Page"
+msgstr ""
+
+#: progs/view.c
+msgid "Single Page"
+msgstr ""
+
+#: progs/view.c
+msgid "Facing Pages"
+msgstr ""
+
+#: progs/view.c
+msgid "Rotate Right"
+msgstr ""
+
+#: progs/view.c
+msgid "Rotate Left"
+msgstr ""
+
+#: progs/view.c
+msgid "Original Orientation"
+msgstr ""
+
+#: progs/view.c
+msgid "Invert Colors"
+msgstr ""
+
+#: progs/view.c
+msgid "Larger Text"
+msgstr ""
+
+#: progs/view.c
+msgid "Smaller Text"
+msgstr ""
+
+#: progs/view.c
+msgid "Trim Margins"
+msgstr ""
+
+#: progs/view.c
+msgid "Trim To Selection"
+msgstr ""
+
+#: progs/view.c
+msgid "Auto Fit"
+msgstr ""
+
+#: progs/view.c
+msgid "Facing Pages (Center First Page)"
+msgstr ""
+
+#: progs/view.c
+msgid "Overview"
+msgstr ""
+
+#: progs/view.c
+msgid "Continuous"
+msgstr ""
+
+#: progs/view.c
+msgid "Previous Page"
+msgstr ""
+
+#: progs/view.c
+msgid "Next Page"
+msgstr ""
+
+#: progs/view.c
+msgid "Beginning of the document"
+msgstr ""
+
+#: progs/view.c
+msgid "End of the document"
+msgstr ""
+
+#: progs/view.c
+msgid "Back"
+msgstr ""
+
+#: progs/view.c
+msgid "Forward"
+msgstr ""
+
+#: progs/view.c
+msgid "Go to Page..."
+msgstr ""
+
+#: progs/view.c
+msgid "Add/Remove Bookmark"
+msgstr ""
+
+#: progs/view.c
+msgid "Previous Bookmark"
+msgstr ""
+
+#: progs/view.c
+msgid "Next Bookmark"
+msgstr ""
+
+#: progs/view.c
+msgid "Rename Bookmark..."
+msgstr ""
+
+#: progs/view.c
+msgid "Browse"
+msgstr ""
+
+#: progs/view.c
+msgid "Zoom"
+msgstr ""
+
+#: progs/view.c
+msgid "Area Selection"
+msgstr ""
+
+#: progs/view.c
+msgid "Text Selection"
+msgstr ""
+
+#: progs/view.c
+msgid "Table Selection"
+msgstr ""
+
+#: progs/view.c
+msgid "Magnifier"
+msgstr ""
+
+#: progs/view.c
+msgid "Presentation"
+msgstr ""
+
+#: progs/view.c
+msgid "Color Mode..."
+msgstr ""
+
+#: progs/view.c
+msgid "Change Colors"
+msgstr ""
+
+#: progs/view.c
+msgid "Overview Columns..."
+msgstr ""
+
+#: progs/view.c
+msgid "Use Right to Left Reading Direction"
+msgstr ""
+
+#: progs/view.c
+msgid "Follow This Link"
+msgstr ""
+
+#: progs/view.c
+msgid "Copy Link Address"
+msgstr ""
+
+#: progs/view.c
+msgid "Copy Text"
+msgstr ""
+
+#: progs/view.c
+msgid "Close a document tab before opening another."
+msgstr ""
+
+#: progs/view.c
+msgid "Choose a document to open."
+msgstr ""
+
+#: progs/view.c
+msgid "Clear List"
+msgstr ""
+
+#. TRANSLATORS: %.200s is the folder path; %s is the system error message.
+#: progs/view.c
+#, c-format
+msgid "Cannot open the folder %.200s: %s."
+msgstr ""
+
+#. TRANSLATORS: %.200s is the folder path.
+#: progs/view.c
+#, c-format
+msgid "%.200s shown in the file manager."
+msgstr ""
+
+#. TRANSLATORS: follows the current page number in the presentation bar; %d is the total page count.
+#: progs/view.c
+#, c-format
+msgid "of %d"
+msgstr ""
+
+#: progs/view.c
+msgid "Pause"
+msgstr ""
+
+#: progs/view.c
+msgid "Play"
+msgstr ""
+
+#: progs/view.c
+msgid "Exit Presentation Mode"
+msgstr ""
+
+#. TRANSLATORS: %d is the total page count.
+#: progs/view.c
+#, c-format
+msgid "Go to page (1 to %d):"
+msgstr ""
+
+#: progs/view.c
+msgid "Change Dark & Light Colors"
+msgstr ""
+
+#: progs/view.c
+msgid "Change Paper Color"
+msgstr ""
+
+#: progs/view.c
+msgid "Convert to Black & White"
+msgstr ""
+
+#: progs/view.c
+msgid "Invert Lightness"
+msgstr ""
+
+#: progs/view.c
+msgid "Invert Luma (sRGB Linear)"
+msgstr ""
+
+#: progs/view.c
+msgid "Invert Luma (Symmetric)"
+msgstr ""
+
+#: progs/view.c
+msgid "Shift Hue Negative"
+msgstr ""
+
+#: progs/view.c
+msgid "Shift Hue Positive"
+msgstr ""
+
+#: progs/view.c
+#, c-format
+msgid "Paper Color: #%06X"
+msgstr ""
+
+#: progs/view.c
+#, c-format
+msgid "Dark Color: #%06X"
+msgstr ""
+
+#: progs/view.c
+#, c-format
+msgid "Light Color: #%06X"
+msgstr ""
+
+#: progs/view.c
+#, c-format
+msgid "Threshold: %d"
+msgstr ""
+
+#: progs/view.c
+#, c-format
+msgid "Contrast: %d"
+msgstr ""
+
+#: progs/view.c
+msgid "Dark color (#RRGGBB):"
+msgstr ""
+
+#: progs/view.c
+msgid "Light color (#RRGGBB):"
+msgstr ""
+
+#: progs/view.c
+msgid "Paper color (#RRGGBB):"
+msgstr ""
+
+#: progs/view.c
+msgid "Contrast (2 to 6):"
+msgstr ""
+
+#: progs/view.c
+msgid "Threshold (2 to 253):"
+msgstr ""
+
+#. TRANSLATORS: %.100s is the invalid value typed by the user.
+#: progs/view.c
+#, c-format
+msgid "%.100s is not a colour (#RRGGBB)."
+msgstr ""
+
+#: progs/view.c
+#, c-format
+msgid "%.100s is not a value in the range."
+msgstr ""
+
+#: progs/view.c
+msgid "Normal Colors"
+msgstr ""
+
+#: progs/view.c
+msgid "Configure Color Modes..."
+msgstr ""
+
+#: progs/view.c
+msgid "Bookmark name:"
+msgstr ""
+
+#: progs/view.c
+msgid "Draw a rectangle on the page to trim to selection. Escape cancels."
+msgstr ""
+
+#: progs/view.c
+msgid "Remove Bookmark"
+msgstr ""
+
+#: progs/view.c
+msgid "Rename Bookmark"
+msgstr ""
+
+#. TRANSLATORS: the two %d values are the image width and height in pixels.
+#: progs/view.c
+#, c-format
+msgid "Image [%d x %d] saved to PNG file."
+msgstr ""
+
+#. TRANSLATORS: %.200s is the file path; %s is the system error message.
+#: progs/view.c
+#, c-format
+msgid "File not saved: %.200s: %s."
+msgstr ""
+
+#. TRANSLATORS: %.200s is the invalid file name typed by the user.
+#: progs/view.c
+#, c-format
+msgid "File not saved: %.200s cannot be a file's name here."
+msgstr ""
+
+#: progs/view.c
+#, c-format
+msgid "Text (1 character)"
+msgid_plural "Text (%d characters)"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/view.c
+msgid "Copy to Clipboard"
+msgstr ""
+
+#: progs/view.c
+msgid "Copy Text (Without line breaks)"
+msgstr ""
+
+#. TRANSLATORS: %s is the selected text preview.
+#: progs/view.c
+#, c-format
+msgid "Search for '%s...' in this document"
+msgstr ""
+
+#: progs/view.c
+#, c-format
+msgid "Search for '%s' in this document"
+msgstr ""
+
+#. TRANSLATORS: the two %d values are the image width and height in pixels.
+#: progs/view.c
+#, c-format
+msgid "Image (%d x %d pixels)"
+msgstr ""
+
+#: progs/view.c
+msgid "Save to File..."
+msgstr ""
+
+#. TRANSLATORS: the two %d values are the image width and height in pixels.
+#: progs/view.c
+#, c-format
+msgid "The clipboard takes text only: the image [%d x %d] was not copied."
+msgstr ""
+
+#. TRANSLATORS: o is the key in the file manager; keep it.
+#: progs/view.c
+msgid "Choose the folder to save the image into (o on it)."
+msgstr ""
+
+#: progs/view.c
+msgid "File not saved."
+msgstr ""
+
+#: progs/view.c
+msgid "Save the image as:"
+msgstr ""
+
+#: progs/view.c
+msgid "Copy Table Contents to Clipboard"
+msgstr ""
+
+#: progs/view.c
+msgid "Select text"
+msgstr ""
+
+#: progs/view.c
+msgid "Select zooming area. Right-click to zoom out."
+msgstr ""
+
+#: progs/view.c
+msgid "Draw a rectangle around the text/graphics to copy."
+msgstr ""
+
+#. TRANSLATORS: Esc is the Escape key; keep it.
+#: progs/view.c
+msgid ""
+"Draw a rectangle around the table, then click near edges to divide up; press "
+"Esc to clear."
+msgstr ""
+
+#: progs/view.c
+msgid "Click to see the magnified view."
+msgstr ""

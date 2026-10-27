@@ -1,0 +1,9 @@
+# /etc/os-release: the system's name, which fastfetch and the like read. It
+# takes the place of the symlink to Arch's /usr/lib/os-release, which no
+# package owns. Like CachyOS (its kernel; fastfetch shows its logo) and Arch.
+NAME="LOCachy"
+PRETTY_NAME="LOCachy"
+ID=locachy
+ID_LIKE="cachyos arch"
+BUILD_ID=rolling
+ANSI_COLOR="38;2;23;147;209"

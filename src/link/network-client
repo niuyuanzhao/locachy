@@ -1,0 +1,141 @@
+#!/bin/bash
+# network-client: NetworkManager in locachy-net for wired and wireless links,
+# with a udevd of its own there: network interfaces are numbered per
+# namespace, so the database of locachy-net (a /run/udev of its own) is not
+# the host's (udev-client). The interfaces of devices go to locachy-net, all
+# but debug_link_interface when service_link is on: those there are when it
+# starts, and each one that appears later (the preset rule
+# 90-locachy-network.rules runs network-client --interface NAME on the host).
+set -eu
+
+NS=locachy-net
+RC=/etc/locachy/rc.conf
+
+rc_value() {
+    sed -n "s/^[[:space:]]*$1=\"\([^\"]*\)\".*/\1/p" "$RC" | tail -n 1
+}
+
+# Interface dev of the host to locachy-net (a wireless one with its phy),
+# unless it is the debug link's.
+move_interface() {
+    local dev=$1 path=/sys/class/net/$1 debug_dev= phy
+    [ -e "$path" ] && [ "$dev" != lo ] || return 0
+    if grep -qE '^[[:space:]]*service_link=' "$RC"; then
+        debug_dev=$(rc_value debug_link_interface)
+    fi
+    [ "$dev" != "$debug_dev" ] || return 0
+    if [ -d "$path/phy80211" ]; then
+        phy=$(readlink -f "$path/phy80211")
+        iw phy "${phy##*/}" set netns name "$NS"
+    elif [ "$(<"$path/type")" = 1 ]; then
+        ip link set "$dev" netns "$NS"
+    fi
+}
+
+move_interfaces() {
+    for path in /sys/class/net/*; do
+        move_interface "${path##*/}"
+    done
+}
+
+# On the host, with locachy-net there (the udevd of locachy-net runs the same
+# rules; before locachy-net is made, its start moves them all).
+on_host() {
+    [ -e /run/netns/"$NS" ] &&
+        [ "$(stat -L -c %i /proc/self/ns/net)" != "$(stat -L -c %i /run/netns/"$NS")" ]
+}
+
+case "${1:-}" in
+--interface) # an interface that appeared (90-locachy-network.rules)
+    if on_host; then
+        move_interface "$2" || printf '<4>network-client: cannot move %s to %s\n' "$2" "$NS" >/dev/kmsg
+    fi
+    exit 0
+    ;;
+--interfaces) # after a change of the debug link's port (locachy-setup)
+    move_interfaces
+    exit 0
+    ;;
+esac
+
+mkdir -p /etc/netns/"$NS" /run/NetworkManager /run/udev
+: >/etc/resolv.conf
+ip netns list | grep -qw "^$NS" || ip netns add "$NS"
+# ip netns exec bind-mounts this resolver, never the host's empty resolver.
+# A file of its own (it was a link to NetworkManager's, which NetworkManager
+# replaces at each change): openresolv writes it in place for NetworkManager
+# and tailscaled, so the bind mounts of it (ip netns exec, containers) follow.
+# Its header tells tailscaled to use openresolv too.
+[ ! -L /etc/netns/"$NS"/resolv.conf ] || rm -f /etc/netns/"$NS"/resolv.conf
+touch /etc/netns/"$NS"/resolv.conf
+ip netns exec "$NS" resolvconf -u
+ip netns exec "$NS" ip link set lo up
+# Full-system Tor (service_tor, tor-client): its firewall before any interface
+# is here, or none comes, so that nothing ever goes out past Tor.
+if grep -qE '^[[:space:]]*service_tor=' "$RC" &&
+    ! /usr/local/lib/locachy/tor-enforce load "$(rc_value tor_front)"; then
+    printf '<3>network-client: Tor is on and its firewall cannot be loaded: no network\n' >/dev/kmsg
+    exit 1
+fi
+
+for r in /sys/class/rfkill/rfkill*; do
+    [ "$(cat "$r/type" 2>/dev/null)" != wlan ] || printf '0\n' >"$r/soft"
+done
+
+move_interfaces
+
+# The system bus, service_system_bus's (bus-client): NetworkManager and
+# wpa_supplicant cannot do without it; until it is there, process 1 starts
+# this again.
+for _ in $(seq 1 100); do
+    [ -S /run/dbus/system_bus_socket ] && break
+    sleep 0.1
+done
+[ -S /run/dbus/system_bus_socket ] || {
+    printf '<4>network-client: no system bus (service_system_bus) yet\n' >/dev/kmsg
+    exit 1
+}
+
+printf '<6>network-client: starting udevd, wpa_supplicant and NetworkManager in %s\n' "$NS" >/dev/kmsg
+# udevd of locachy-net and NetworkManager, sharing a /run/udev of their own,
+# and wpa_supplicant, which NetworkManager drives on the system bus (started
+# here, in locachy-net with the wireless cards: the bus would start it on the
+# host). Its interfaces are announced to udevd (net only: the other devices
+# are the host's udevd's). If any one ends, end the others: process 1 starts
+# the group again.
+exec ip netns exec "$NS" unshare --mount --propagation slave bash -euc '
+    mount -t tmpfs -o mode=0755 tmpfs /run/udev
+    /usr/lib/systemd/systemd-udevd &
+    udevd=$!
+    wpa_supplicant -u -s &
+    wpa=$!
+    nm=
+    cleanup() {
+        kill "$udevd" "$wpa" ${nm:+"$nm"} 2>/dev/null || true
+        wait "$udevd" "$wpa" ${nm:+"$nm"} 2>/dev/null || true
+    }
+    trap cleanup EXIT
+    trap "exit 0" TERM INT
+    until [ -S /run/udev/control ]; do
+        kill -0 "$udevd" 2>/dev/null || exit 1
+        sleep 0.05
+    done
+    timeout 30 udevadm trigger --action=add --subsystem-match=net --settle || true
+    # Do not let the bus activate wpa_supplicant in the host namespace.
+    ready=0
+    for _ in $(seq 1 100); do
+        kill -0 "$wpa" 2>/dev/null || exit 1
+        if dbus-send --system --print-reply --reply-timeout=1000 \
+            --dest=org.freedesktop.DBus /org/freedesktop/DBus \
+            org.freedesktop.DBus.NameHasOwner string:fi.w1.wpa_supplicant1 2>/dev/null |
+            grep -q "boolean true"; then
+            ready=1
+            break
+        fi
+        sleep 0.1
+    done
+    [ "$ready" = 1 ] || exit 1
+    NetworkManager --no-daemon &
+    nm=$!
+    wait -n "$udevd" "$wpa" "$nm"
+'

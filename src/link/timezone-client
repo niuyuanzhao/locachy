@@ -1,0 +1,25 @@
+#!/bin/bash
+# The time zone of where the network is (service_timezone: settings' Time zone
+# "Automatic"; choosing a zone there removes it): asked of ipinfo.io, which
+# tells it from the address the network has, each time the network's way out
+# changes, and made /etc/localtime. Programs started afterwards (containers
+# too) use it; the bars follow it at once.
+set -u
+
+NS=locachy-net
+ZONES=/usr/share/zoneinfo
+last=
+while :; do
+    route=$(ip netns exec "$NS" ip route show default 2>/dev/null | head -n 1) || route=
+    if [ -n "$route" ] && [ "$route" != "$last" ]; then
+        zone=$(ip netns exec "$NS" curl -fsS --max-time 10 https://ipinfo.io/timezone 2>/dev/null) || zone=
+        if [[ "$zone" =~ ^[A-Za-z]+(/[A-Za-z0-9_+-]+)*$ ]] && [ -f "$ZONES/$zone" ]; then
+            if [ "$(readlink /etc/localtime 2>/dev/null)" != "$ZONES/$zone" ]; then
+                ln -sfn "$ZONES/$zone" /etc/localtime.new && mv -fT /etc/localtime.new /etc/localtime
+                echo "timezone-client: $zone"
+            fi
+            last=$route
+        fi
+    fi
+    sleep 30
+done

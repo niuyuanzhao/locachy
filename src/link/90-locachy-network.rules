@@ -1,0 +1,7 @@
+# LOCachy preset (/usr/local/lib/udev/rules.d): a network interface of a
+# device (not a virtual one) that appears on the host goes to locachy-net,
+# where NetworkManager has the network; the debug link's port stays, if the
+# link is on (network-client decides). Turned off by a link to /dev/null of
+# the same name in /etc/udev/rules.d.
+ACTION=="add", SUBSYSTEM=="net", KERNEL!="lo", DEVPATH!="/devices/virtual/*", \
+    RUN+="/usr/local/lib/locachy/network-client --interface $kernel"

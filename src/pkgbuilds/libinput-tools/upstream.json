@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "name": "libinput-tools",
+  "package": "libinput-tools",
+  "pkgbase": "libinput",
+  "packages": ["libinput", "libinput-tools"],
+  "provider": "arch-gitlab",
+  "repository": "https://gitlab.archlinux.org/archlinux/packaging/packages/libinput.git",
+  "api": "https://gitlab.archlinux.org/api/v4/projects/archlinux%2Fpackaging%2Fpackages%2Flibinput",
+  "patch_revision": 2,
+  "adapter": "adapter.sh",
+  "inputs": ["cli.patch"],
+  "source_directory": "libinput",
+  "gate": "libinput-tools-cli-v1"
+}

@@ -1,0 +1,8 @@
+# root's login on the live medium. On tty1 (the screen, logged in by
+# itself): the full-screen installer, then the console as it was, however
+# the installer ended. Elsewhere (the serial console): a shell, as before.
+[ -f ~/.bashrc ] && . ~/.bashrc
+if [ "$(tty)" = /dev/tty1 ]; then
+    /usr/local/bin/installer
+    /usr/local/bin/installer --text
+fi

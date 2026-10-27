@@ -1,0 +1,203 @@
+#!/bin/sh
+# locachy-boot: the boot files, made from what is installed, and put on the
+# ESP. Run by make.sh --boot (a new process 1; pacman's 91-locachy-rebuild.hook
+# runs it after every transaction), by 90-locachy-boot.hook (a new kernel,
+# microcode or systemd stub) and by settings (its Boot rows), so that the
+# kernel the ESP starts always has its modules in the root and the command
+# line settings has.
+#   /usr/local/lib/locachy/boot/
+#     initramfs.img    process 1 (/usr/local/lib/locachy/init) and the font
+#                      (and what a LUKS2 root needs)
+#     locachy.efi      the unified kernel image, made by ukify (systemd-stub):
+#                      the packaged kernel (linux-cachyos-bore), the CPUs'
+#                      microcode first (each one only if its package is
+#                      there; the kernel takes the one of its CPU), then
+#                      initramfs.img, and the command line (net.ifnames=0:
+#                      udevd keeps the kernel's names of network interfaces,
+#                      eth0, wlan0, which rc.conf names). The firmware starts
+#                      it itself: no boot loader (the X230's firmware cannot
+#                      pass an initrd= to the kernel's own EFI stub; the
+#                      image carries it)
+# Then, when the ESP is mounted (/efi; not in make-root.sh's chroot, which
+# takes the image from there): EFI/locachy/locachy.efi and the firmware's
+# fallback EFI/BOOT/BOOTX64.EFI become the new image, the one in use kept as
+# EFI/locachy/locachy-prev.efi.
+set -eu
+
+lib=/usr/local/lib/locachy
+boot=$lib/boot
+esp=/efi/EFI
+rc=/etc/locachy/rc.conf
+
+# The command line, from rc.conf (settings' Boot rows) each time the image is
+# made: boot_verbose="1" shows the kernel's messages (else quiet), and
+# boot_cmdline="..." is added as it is; a value with anything but letters,
+# digits and . , : = / + - _ @ and spaces is left out (and said).
+rc_value() {
+    if [ -f "$rc" ]; then
+        sed -n "s/^$1=\"\(.*\)\"\$/\1/p" "$rc" | tail -n 1
+    fi
+}
+# intel_iommu=on: devices reach only the memory given to them (DMA through
+# ExpressCard or PCIe), when the firmware has VT-d on (AMD: on by default).
+cmdline="printk.devkmsg=on net.ifnames=0 intel_iommu=on"
+if [ "$(rc_value boot_verbose)" = 1 ]; then
+    cmdline="loglevel=7 $cmdline"
+else
+    cmdline="quiet loglevel=0 vt.global_cursor_default=0 $cmdline"
+fi
+extra=$(rc_value boot_cmdline)
+case "$extra" in
+*[!A-Za-z0-9.,:=/+_@\ -]*) echo "locachy-boot: boot_cmdline in $rc has other characters; left out" >&2 ;;
+?*) cmdline="$cmdline $extra" ;;
+esac
+mkdir -p "$boot"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+[ -x "$lib/init" ] || { echo "locachy-boot: no $lib/init (make.sh --boot builds it)" >&2; exit 1; }
+kernel=$(pacman -Qlq linux-cachyos-bore | grep '/vmlinuz$')
+version=$(basename "$(dirname "$kernel")")
+
+microcode=
+for u in intel-ucode amd-ucode; do
+    if [ -f "/boot/$u.img" ]; then
+        microcode="$microcode /boot/$u.img"
+    fi
+done
+
+cat >"$work/initramfs.list" <<EOF
+dir /dev 0755 0 0
+nod /dev/console 0600 0 0 c 5 1
+dir /proc 0755 0 0
+dir /sys 0755 0 0
+dir /mnt 0755 0 0
+dir /run 0755 0 0
+file /init $lib/init 0755 0 0
+file /font.psf /usr/local/share/locachy/font.psf 0644 0 0
+EOF
+
+want_luks=0
+if [ -x /usr/bin/cryptsetup ] && { [ "${1:-}" = "--luks" ] || [ -f /etc/locachy/luks ] ||
+   blkid -t LABEL=locachy-crypt >/dev/null 2>&1 || blkid -t LABEL=locachy-swap-crypt >/dev/null 2>&1; }; then
+    want_luks=1
+fi
+
+if [ -x /usr/bin/kmod ] && [ -d "/usr/lib/modules/$version" ]; then
+    cat >>"$work/initramfs.list" <<EOF
+dir /sbin 0755 0 0
+dir /usr 0755 0 0
+dir /usr/bin 0755 0 0
+dir /usr/lib 0755 0 0
+dir /usr/lib/modules 0755 0 0
+dir /usr/lib/modules/$version 0755 0 0
+slink /bin /usr/bin 0777 0 0
+slink /lib /usr/lib 0777 0 0
+slink /lib64 /usr/lib 0777 0 0
+file /usr/bin/kmod /usr/bin/kmod 0755 0 0
+slink /sbin/modprobe /usr/bin/kmod 0777 0 0
+EOF
+    bins="/usr/bin/kmod"
+    mods="nvme vmd mmc_block sdhci_pci virtio_scsi"
+    if [ "$want_luks" = 1 ]; then
+        printf 'file /sbin/cryptsetup /usr/bin/cryptsetup 0755 0 0\n' >>"$work/initramfs.list"
+        printf 'dir /usr/lib/cryptsetup 0755 0 0\n' >>"$work/initramfs.list"
+        printf 'dir /usr/lib/systemd 0755 0 0\n' >>"$work/initramfs.list"
+        bins="$bins /usr/bin/cryptsetup"
+        mods="$mods dm_crypt algif_skcipher aesni_intel"
+        for tok in /usr/lib/cryptsetup/libcryptsetup-token-systemd-tpm2.so \
+                   /usr/lib/cryptsetup/libcryptsetup-token-locachy-tpm12.so; do
+            [ -f "$tok" ] || continue
+            printf 'file /usr/lib/cryptsetup/%s %s 0755 0 0\n' "$(basename "$tok")" "$(realpath "$tok")" >>"$work/initramfs.list"
+            bins="$bins $tok"
+        done
+        for sdlib in /usr/lib/systemd/libsystemd-shared-*.so; do
+            [ -f "$sdlib" ] || continue
+            printf 'file /usr/lib/systemd/%s %s 0755 0 0\n' "$(basename "$sdlib")" "$(realpath "$sdlib")" >>"$work/initramfs.list"
+            bins="$bins $sdlib"
+        done
+        for tss in /usr/lib/libtss2-esys.so.0 /usr/lib/libtss2-mu.so.0 /usr/lib/libtss2-rc.so.0 \
+                   /usr/lib/libtss2-sys.so.1 /usr/lib/libtss2-tctildr.so.0 /usr/lib/libtss2-tcti-device.so.0; do
+            [ -f "$tss" ] || continue
+            printf 'file /usr/lib/%s %s 0755 0 0\n' "$(basename "$tss")" "$(realpath "$tss")" >>"$work/initramfs.list"
+            bins="$bins $tss"
+        done
+    fi
+    ldd $bins 2>/dev/null | sed -n 's/.*=> \([^ ]*\) (.*/\1/p; s/^[[:space:]]*\(\/[^ ]*\) (.*/\1/p' | sort -u |
+    while read -r so; do
+        [ -f "$so" ] || continue
+        case "$so" in /usr/lib/systemd/*) continue ;; esac
+        grep -qxF "file /usr/lib/$(basename "$so") $(realpath "$so") 0755 0 0" "$work/initramfs.list" ||
+            printf 'file /usr/lib/%s %s 0755 0 0\n' "$(basename "$so")" "$(realpath "$so")" >>"$work/initramfs.list"
+    done
+    for idx in modules.order modules.builtin modules.builtin.bin modules.builtin.modinfo \
+               modules.dep modules.dep.bin modules.alias.bin modules.symbols.bin modules.softdep; do
+        [ -f "/usr/lib/modules/$version/$idx" ] || continue
+        printf 'file /usr/lib/modules/%s/%s /usr/lib/modules/%s/%s 0644 0 0\n' \
+            "$version" "$idx" "$version" "$idx" >>"$work/initramfs.list"
+    done
+    for m in $mods; do
+        modprobe -S "$version" -D "$m" 2>/dev/null || true
+    done | awk '$1 == "insmod" {print $2}' | sort -u |
+    while read -r ko; do
+        rel=${ko#/lib/modules/"$version"/}
+        rel=${rel#/usr/lib/modules/"$version"/}
+        src_ko="/usr/lib/modules/$version/$rel"
+        [ -f "$src_ko" ] || continue
+        d=$(dirname "$rel")
+        cur="/usr/lib/modules/$version"
+        IFS=/
+        for part in $d; do
+            [ -n "$part" ] && [ "$part" != "." ] || continue
+            cur="$cur/$part"
+            grep -qxF "dir $cur 0755 0 0" "$work/initramfs.list" ||
+                printf 'dir %s 0755 0 0\n' "$cur" >>"$work/initramfs.list"
+        done
+        unset IFS
+        printf 'file /usr/lib/modules/%s/%s %s 0644 0 0\n' "$version" "$rel" "$src_ko" >>"$work/initramfs.list"
+    done
+fi
+# The key table (make.sh: rc.conf's keymap), at its own path: process 1's
+# passphrase prompt types as the system does.
+if [ -f /usr/local/share/locachy/keymap.table ]; then
+    for d in /usr /usr/local /usr/local/share /usr/local/share/locachy; do
+        grep -qxF "dir $d 0755 0 0" "$work/initramfs.list" || printf 'dir %s 0755 0 0\n' "$d" >>"$work/initramfs.list"
+    done
+    printf 'file %s %s 0644 0 0\n' /usr/local/share/locachy/keymap.table /usr/local/share/locachy/keymap.table \
+        >>"$work/initramfs.list"
+fi
+"$lib/gen_init_cpio" "$work/initramfs.list" | gzip -9 >"$boot/initramfs.img.new"
+
+# The unified image, as the Arch Wiki's ukify section makes it: the microcode
+# initrds before the initramfs; unsigned (no Secure Boot keys here).
+set --
+for u in $microcode; do
+    set -- "$@" --initrd="$u"
+done
+ukify build --linux="$kernel" "$@" --initrd="$boot/initramfs.img.new" --cmdline="$cmdline" \
+    --uname="$version" --output="$boot/locachy.efi.new" >"$work/ukify.log" 2>&1 ||
+    { cat "$work/ukify.log" >&2; echo "locachy-boot: ukify failed; the boot files are left as they are" >&2; exit 1; }
+for f in initramfs.img locachy.efi; do
+    mv -f "$boot/$f.new" "$boot/$f"
+done
+# What the boot loader era left (GRUB's files): not made any more.
+rm -f "$boot/vmlinuz.efi" "$boot/grub.cfg" "$boot/grubx64.efi" "$boot/intel-ucode.img" "$boot/amd-ucode.img"
+echo "locachy-boot: kernel $version, microcode:${microcode:- none}, command line: $cmdline"
+
+if [ ! -d "$esp/locachy" ]; then
+    echo "locachy-boot: no $esp/locachy mounted: the image is in $boot"
+    exit 0
+fi
+[ -d "/usr/lib/modules/$version" ] || { echo "locachy-boot: no modules for $version; the ESP is left as it is" >&2; exit 1; }
+if [ -f "$esp/locachy/locachy.efi" ]; then
+    cp -p "$esp/locachy/locachy.efi" "$esp/locachy/locachy-prev.efi"
+fi
+mkdir -p "$esp/BOOT"
+for to in "$esp/locachy/locachy.efi" "$esp/BOOT/BOOTX64.EFI"; do
+    cp "$boot/locachy.efi" "$to.new" && mv -f "$to.new" "$to"
+done
+for f in vmlinuz initramfs grub grubx64 intel-ucode amd-ucode; do
+    rm -f "$esp/locachy/$f".* "$esp/locachy/$f"-prev.*
+done
+sync
+echo "locachy-boot: $esp: $(cd "$esp" && ls locachy BOOT | tr '\n' ' ')"

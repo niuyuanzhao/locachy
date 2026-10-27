@@ -1,0 +1,55 @@
+schema:
+  schema_id: easy_en
+  name: "English"
+  version: "0.1"
+
+engine:
+  processors:
+    - ascii_composer
+    - key_binder
+    - speller
+    - selector
+    - navigator
+    - express_editor
+  segmentors:
+    - abc_segmentor
+    - fallback_segmentor
+  translators:
+    - table_translator
+  filters:
+    - uniquifier
+
+# Caps Lock as in the Chinese schema (default.custom.yaml): it ends the
+# composition, and while it is locked the keys go on as typed, in capitals.
+ascii_composer:
+  good_old_caps_lock: true
+  switch_key:
+    Caps_Lock: clear
+    Shift_L: noop
+    Shift_R: noop
+    Control_L: noop
+    Control_R: noop
+
+speller:
+  alphabet: "zyxwvutsrqponmlkjihgfedcbaABCDEFGHIJKLMNOPQRSTUVWXYZ"
+  auto_select: false
+
+translator:
+  dictionary: easy_en
+  enable_sentence: false
+  enable_completion: true
+  initial_quality: 1000
+
+menu:
+  page_size: 20
+
+key_binder:
+  bindings:
+    - { when: has_menu, accept: bracketleft, send: Page_Up }
+    - { when: has_menu, accept: bracketright, send: Page_Down }
+    - { when: has_menu, accept: minus, send: Page_Up }
+    - { when: has_menu, accept: equal, send: Page_Down }
+    - { when: has_menu, accept: Left, send: Up }
+    - { when: has_menu, accept: Right, send: Down }
+    - { when: has_menu, accept: Tab, send: Down }
+    - { when: has_menu, accept: ISO_Left_Tab, send: Up }

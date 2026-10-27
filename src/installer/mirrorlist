@@ -1,0 +1,3 @@
+# Official Arch mirror endpoint for the generic live environment and bootstrap.
+# Never inherit a proxy or optimized-repository mirror from the build machine.
+Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch

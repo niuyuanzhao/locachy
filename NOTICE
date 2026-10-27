@@ -1,0 +1,16 @@
+LOCachy
+Copyright (C) 2026 Yuanzhao Niu
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option)
+any later version. See LICENSE.
+
+SPDX-License-Identifier: GPL-3.0-or-later
+
+Parts that come from other projects keep their own licenses:
+  src/pkgbuilds/, src/aur-patches/  patches and build recipes for upstream
+                                    packages, under those packages' licenses
+  src/edit/queries/                 tree-sitter highlight queries, under the
+                                    licenses of the projects they come from
+                                    (see the LICENSE files there)

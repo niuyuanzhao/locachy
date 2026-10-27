@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "name": "libinput",
+  "package": "libinput",
+  "pkgbase": "libinput",
+  "packages": ["libinput", "libinput-tools"],
+  "provider": "arch-gitlab",
+  "repository": "https://gitlab.archlinux.org/archlinux/packaging/packages/libinput.git",
+  "api": "https://gitlab.archlinux.org/api/v4/projects/archlinux%2Fpackaging%2Fpackages%2Flibinput",
+  "patch_revision": 1,
+  "adapter": "adapter.sh",
+  "inputs": ["library.patch", "circular-scroll.patch"],
+  "source_directory": "libinput",
+  "gate": "libinput-circular-scroll-v1"
+}

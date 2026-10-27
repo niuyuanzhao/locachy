@@ -1,0 +1,70 @@
+--- a/src/input/cursor.c
++++ b/src/input/cursor.c
+@@ -29,6 +29,7 @@
+ #include "input/tablet.h"
+ #include "input/touch.h"
+ #include "labwc.h"
++#include "locachy-clipboard.h"
+ #include "layers.h"
+ #include "menu/menu.h"
+ #include "output.h"
+@@ -254,6 +255,12 @@
+ 	struct seat *seat = wl_container_of(
+ 		listener, seat, request_set_selection);
+ 	struct wlr_seat_request_set_selection_event *event = data;
++	if (!locachy_clipboard_allowed(false)) {
++		if (event->source && event->source != seat->wlr_seat->selection_source) {
++			wlr_data_source_destroy(event->source);
++		}
++		return;
++	}
+ 	wlr_seat_set_selection(seat->wlr_seat, event->source,
+ 		event->serial);
+ }
+@@ -264,6 +271,12 @@
+ 	struct seat *seat = wl_container_of(
+ 		listener, seat, request_set_primary_selection);
+ 	struct wlr_seat_request_set_primary_selection_event *event = data;
++	if (!locachy_clipboard_allowed(true)) {
++		if (event->source && event->source != seat->wlr_seat->primary_selection_source) {
++			wlr_primary_selection_source_destroy(event->source);
++		}
++		return;
++	}
+ 	wlr_seat_set_primary_selection(seat->wlr_seat, event->source,
+ 		event->serial);
+ }
+--- a/src/server.c
++++ b/src/server.c
+@@ -63,6 +63,7 @@
+ #include "idle.h"
+ #include "input/keyboard.h"
+ #include "labwc.h"
++#include "locachy-clipboard.h"
+ #include "layers.h"
+ #include "magnifier.h"
+ #include "menu/menu.h"
+@@ -490,6 +491,7 @@
+ 
+ 	wl_display_set_global_filter(server.wl_display, server_global_filter, NULL);
+ 	server.wl_event_loop = wl_display_get_event_loop(server.wl_display);
++	locachy_clipboard_init();
+ 
+ 	wlr_fixes_create(server.wl_display, 1);
+ 
+@@ -887,6 +889,7 @@
+ 	wl_event_source_remove(server.sigterm_source);
+ 	wl_event_source_remove(server.sigchld_source);
+ 
++	locachy_clipboard_finish();
+ 	wl_display_destroy_clients(server.wl_display);
+ 
+ 	nag_finish();
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -1,4 +1,5 @@
+ labwc_sources = files(
++  'locachy-clipboard.c',
+   'action.c',
+   'buffer.c',
+   'debug.c',

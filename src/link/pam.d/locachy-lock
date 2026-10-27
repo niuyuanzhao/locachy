@@ -1,0 +1,5 @@
+# /etc/pam.d/locachy-lock (make.sh): the lock screen's password, checked as
+# a local login is (system-local-login: pam_unix, with pam_faillock's limit
+# on wrong tries).
+auth      include   system-local-login
+account   include   system-local-login

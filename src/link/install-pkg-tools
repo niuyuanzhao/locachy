@@ -1,0 +1,24 @@
+#!/bin/sh
+# The package helpers and their build identity, before compiling LOCachy or
+# installing its hooks. Used by make.sh and the fresh-root bootstrap alike.
+set -eu
+src=${1:?usage: install-pkg-tools SOURCE}
+lib=/usr/local/lib/locachy
+install -d /usr/local/bin "$lib" /etc/locachy
+for tool in locachy-build locachy-pkg locachy-repos; do
+    install -m 755 "$src/link/$tool" "/usr/local/bin/$tool"
+done
+for module in locachy_upstream.py locachy_transaction.py; do
+    install -m 644 "$src/link/$module" "$lib/$module"
+done
+install -m 755 "$src/link/local-package-gate" "$lib/local-package-gate"
+[ -e /etc/locachy/packages ] || install -m 644 "$src/packages" /etc/locachy/packages
+if ! getent passwd locachy-builder >/dev/null; then
+    useradd --system --user-group --home-dir /var/lib/locachy/builder/home --no-create-home \
+        --shell /usr/bin/nologin --comment "LOCachy builds" locachy-builder
+fi
+install -d -m 0755 /var/lib/locachy/builder
+install -d -m 0700 -o locachy-builder -g locachy-builder /var/lib/locachy/builder/home
+install -d -m 0755 -o root -g root /var/cache/locachy-pkgs
+find /var/cache/locachy-pkgs -mindepth 1 \( ! -user root -o ! -group root \) -exec chown root:root {} +
+find /var/cache/locachy-pkgs -mindepth 1 -type f ! -perm 0644 -exec chmod 0644 {} +

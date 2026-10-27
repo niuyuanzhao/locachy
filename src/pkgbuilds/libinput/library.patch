@@ -1,0 +1,30 @@
+--- a/PKGBUILD
++++ b/PKGBUILD
+@@ -22,19 +22,13 @@
+   systemd-libs
+ )
+ makedepends=(
+-  cairo
+   check
+   git
+-  glib2
+-  gtk4
+-  libx11
+   meson
+   python
+   python-libevdev
+   python-pyudev
+   python-yaml
+-  wayland
+-  wayland-protocols
+ )
+ checkdepends=(python-pytest)
+ source=(
+@@ -49,6 +43,7 @@
+   local meson_options=(
+     # upstream recommends not building docs
+     -D documentation=false
++    -D debug-gui=false
+   )
+ 
+   arch-meson libinput build "${meson_options[@]}"

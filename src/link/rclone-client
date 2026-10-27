@@ -1,0 +1,127 @@
+#!/bin/bash
+# rclone-client: mounts each remote in ~/.config/rclone/rclone.conf under
+# ~/Drives/<remote> inside locachy-net as the user (uid 1000), so both the
+# framebuffer file manager and every container (which receives ~/Drives as a
+# shared rslave mount) can read and write iCloud Drive, Google Drive, OneDrive,
+# WebDAV, S3 and other rclone remotes.
+#
+#   rclone-client            run as a service (process 1 supervises it)
+#   rclone-client --config   run "rclone config" as the user (in locachy-net
+#                            when active, so OAuth/iCloud login reaches the net)
+set -euo pipefail
+
+user_line=$(getent passwd 1000 || true)
+if [ -z "$user_line" ]; then
+    echo "rclone-client: no user with uid 1000" >&2
+    exit 1
+fi
+user=${user_line%%:*}
+rest=${user_line#*:}; rest=${rest#*:}; rest=${rest#*:}
+gid=${rest%%:*}
+rest=${rest#*:}; rest=${rest#*:}
+uhome=${rest%%:*}
+conf="$uhome/.config/rclone/rclone.conf"
+drives="$uhome/Drives"
+
+as_user() {
+    HOME="$uhome" USER="$user" LOGNAME="$user" XDG_CONFIG_HOME="$uhome/.config" \
+        XDG_CACHE_HOME="$uhome/.cache" \
+        setpriv --reuid=1000 --regid="$gid" --clear-groups -- "$@"
+}
+
+if [ "${1:-}" = "--config" ]; then
+    install -d -o 1000 -g "$gid" -m 0700 "$uhome/.config" "$uhome/.config/rclone" "$uhome/.cache"
+    if [ -e /run/netns/locachy-net ]; then
+        exec ip netns exec locachy-net env HOME="$uhome" USER="$user" LOGNAME="$user" \
+            XDG_CONFIG_HOME="$uhome/.config" XDG_CACHE_HOME="$uhome/.cache" \
+            setpriv --reuid=1000 --regid="$gid" --clear-groups -- /usr/bin/rclone config
+    else
+        exec env HOME="$uhome" USER="$user" LOGNAME="$user" \
+            XDG_CONFIG_HOME="$uhome/.config" XDG_CACHE_HOME="$uhome/.cache" \
+            setpriv --reuid=1000 --regid="$gid" --clear-groups -- /usr/bin/rclone config
+    fi
+fi
+
+if [ ! -x /usr/bin/rclone ] || [ ! -x /usr/bin/fusermount3 ]; then
+    echo "rclone-client: rclone or fusermount3 is not installed" >&2
+    sleep 5
+    exit 1
+fi
+
+for _ in $(seq 1 50); do
+    [ -e /run/netns/locachy-net ] && [ -e /dev/fuse ] && break
+    sleep 0.2
+done
+if [ ! -e /run/netns/locachy-net ] || [ ! -e /dev/fuse ]; then
+    echo "rclone-client: waiting for locachy-net and /dev/fuse" >&2
+    sleep 5
+    exit 1
+fi
+
+install -d -o 1000 -g "$gid" -m 0755 "$drives"
+if ! mountpoint -q "$drives"; then
+    mount --bind "$drives" "$drives"
+fi
+mount --make-shared "$drives"
+
+grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo "user_allow_other" >>/etc/fuse.conf
+
+declare -A pids=()
+declare -A mpoints=()
+
+list_remotes() {
+    [ -r "$conf" ] || return 0
+    sed -n 's/^\[\([A-Za-z0-9._-][A-Za-z0-9._-]*\)\][[:space:]]*$/\1/p' "$conf"
+}
+
+unmount_one() {
+    local r=$1
+    local mp=${mpoints[$r]:-"$drives/$r"}
+    if [ -n "${pids[$r]:-}" ]; then
+        kill "${pids[$r]}" 2>/dev/null || true
+        wait "${pids[$r]}" 2>/dev/null || true
+        unset "pids[$r]"
+    fi
+    if mountpoint -q "$mp" 2>/dev/null; then
+        fusermount3 -u -z "$mp" 2>/dev/null || umount -l "$mp" 2>/dev/null || true
+    fi
+    rmdir "$mp" 2>/dev/null || true
+    unset "mpoints[$r]"
+}
+
+cleanup() {
+    for r in "${!mpoints[@]}"; do
+        unmount_one "$r"
+    done
+}
+trap cleanup EXIT
+trap "exit 0" TERM INT
+
+while :; do
+    declare -A wanted=()
+    while IFS= read -r r; do
+        [ -n "$r" ] || continue
+        wanted[$r]=1
+        if [ -n "${pids[$r]:-}" ] && kill -0 "${pids[$r]}" 2>/dev/null; then
+            continue
+        fi
+        mp="$drives/$r"
+        install -d -o 1000 -g "$gid" -m 0755 "$mp"
+        install -d -o 1000 -g "$gid" -m 0700 "$uhome/.cache/rclone"
+        ip netns exec locachy-net env HOME="$uhome" USER="$user" LOGNAME="$user" \
+            XDG_CONFIG_HOME="$uhome/.config" XDG_CACHE_HOME="$uhome/.cache" \
+            setpriv --reuid=1000 --regid="$gid" --clear-groups -- \
+            /usr/bin/rclone mount "$r:" "$mp" \
+            --vfs-cache-mode writes --dir-cache-time 60s --allow-other >/dev/null 2>&1 &
+        pids[$r]=$!
+        mpoints[$r]=$mp
+    done < <(list_remotes)
+
+    for r in "${!mpoints[@]}"; do
+        if [ -z "${wanted[$r]:-}" ]; then
+            unmount_one "$r"
+        fi
+    done
+    unset wanted
+    sleep 3
+done

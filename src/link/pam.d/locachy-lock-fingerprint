@@ -1,0 +1,6 @@
+# /etc/pam.d/locachy-lock-fingerprint (make.sh): the lock screen's
+# fingerprint, beside its password (locachy-lock), when rc.conf has
+# unlock_fingerprint="1" (settings, once fprintd is installed): fprintd's
+# module, then the account checked as for a local login.
+auth      required  pam_fprintd.so
+account   include   system-local-login

@@ -1,0 +1,9 @@
+[Desktop Entry]
+# edit, the framebuffer programs' text editor (rc.conf program_edit): what
+# home's files and the containers' xdg-open open with it. As KWrite's
+# org.kde.kwrite.desktop: plain text, and so every kind of it (source code,
+# scripts, configuration).
+Type=Application
+Name=Text editor
+Exec=/usr/local/bin/edit %f
+MimeType=text/plain;

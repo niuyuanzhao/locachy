@@ -1,0 +1,598 @@
+#!/usr/bin/env python3
+"""locachy-firmware: backend helper for LOCachy's /usr/local/bin/firmware TUI.
+
+Provides structured TSV queries and safe execution wrappers around:
+  1. fwupd (fwupdmgr --json): devices, releases (upgrade/downgrade/reinstall),
+     LVFS remotes, metadata refresh, local .cab install, verify, unlock.
+  2. Firmware attributes (/sys/class/firmware-attributes/* such as ThinkPad
+     think-lmi, Dell/HP/Framework BIOS attributes, with fwupdmgr fallback):
+     listing and modifying BIOS Setup settings from Linux.
+  3. flashrom: programmer detection (internal + USB programmers such as
+     CH341A / FT2232 / Dediprog), Intel iTCO_wdt unload/restore guard, chip &
+     IFD region probing, mandatory 3-read SHA-256 verified backup, verify,
+     and size/AC-checked write.
+"""
+import argparse
+import hashlib
+import html
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+
+sys.dont_write_bytecode = True
+
+USB_PROGRAMMERS = [
+    ("ch341a_spi", {("1a86", "5512")}, "WCH CH341A USB SPI programmer"),
+    ("ft2232_spi", {("0403", "6010"), ("0403", "6014")}, "FTDI FT2232H / FT4232H SPI"),
+    ("dediprog", {("0483", "dada")}, "Dediprog SF100 / SF600"),
+    ("stlinkv3_spi", {("0483", "374e"), ("0483", "374f"), ("0483", "3753")}, "STLINK-V3 SPI"),
+    ("dirtyjtag_spi", {("1209", "c0ca")}, "DirtyJTAG SPI"),
+    ("buspirate_spi:dev=/dev/ttyUSB0", set(), "Bus Pirate SPI (/dev/ttyUSB0)"),
+    ("serprog:dev=/dev/ttyACM0:115200", set(), "serprog (/dev/ttyACM0)"),
+    ("linux_spi:dev=/dev/spidev0.0", set(), "Linux spidev (/dev/spidev0.0)"),
+]
+
+
+def clean_tsv(val) -> str:
+    if val is None:
+        return ""
+    s = str(val).replace("\t", " ").replace("\r", " ").replace("\n", " ")
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def strip_xml(text: str) -> str:
+    if not text:
+        return ""
+    no_tags = re.sub(r"<[^>]+>", " ", str(text))
+    return clean_tsv(html.unescape(no_tags))
+
+
+def fwupdmgr_bin() -> str:
+    override = os.environ.get("LOCACHY_FWUPD_BIN")
+    if override:
+        return override if Path(override).is_file() else ""
+    return shutil.which("fwupdmgr") or ""
+
+
+def flashrom_bin() -> str:
+    override = os.environ.get("LOCACHY_FLASHROM_BIN")
+    if override:
+        return override if Path(override).is_file() else ""
+    return shutil.which("flashrom") or ""
+
+
+def run_json(cmd):
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    out = p.stdout.strip()
+    if not out:
+        if p.returncode != 0:
+            raise RuntimeError(p.stderr.strip() or f"{cmd[0]} exited with {p.returncode}")
+        return {}
+    # fwupdmgr may emit warnings before the JSON object on some locales
+    idx = out.find("{")
+    if idx > 0:
+        out = out[idx:]
+    return json.loads(out)
+
+
+def cmp_ver(a: str, b: str) -> int:
+    if a == b:
+        return 0
+    pa = [int(x) if x.isdigit() else x for x in re.split(r"([0-9]+)", a or "")]
+    pb = [int(x) if x.isdigit() else x for x in re.split(r"([0-9]+)", b or "")]
+    for x, y in zip(pa, pb):
+        if type(x) is type(y):
+            if x != y:
+                return -1 if x < y else 1
+        else:
+            sx, sy = str(x), str(y)
+            if sx != sy:
+                return -1 if sx < sy else 1
+    return 0 if len(pa) == len(pb) else (-1 if len(pa) < len(pb) else 1)
+
+
+def flatten_fwupd_devices(nodes, out):
+    for d in nodes or []:
+        if not isinstance(d, dict):
+            continue
+        dev_id = d.get("DeviceId") or ""
+        flags = set(d.get("Flags") or [])
+        ver = d.get("Version") or ""
+        if dev_id and (ver or "updatable" in flags or "updatable-hidden" in flags or "locked" in flags):
+            rels = d.get("Releases") or []
+            up_ver = ""
+            for r in rels:
+                rv = r.get("Version") or ""
+                if rv and cmp_ver(rv, ver) > 0:
+                    up_ver = rv
+                    break
+            tags = []
+            if up_ver:
+                tags.append(f"update:{up_ver}")
+            elif "updatable" in flags:
+                tags.append("updatable")
+            if "locked" in flags:
+                tags.append("locked")
+            if "can-verify" in flags or d.get("Checksums"):
+                tags.append("verifiable")
+            if "needs-reboot" in flags:
+                tags.append("needs-reboot")
+            out.append((
+                clean_tsv(dev_id),
+                clean_tsv(d.get("Name") or d.get("Summary") or dev_id[:12]),
+                clean_tsv(d.get("Vendor") or "-"),
+                clean_tsv(ver or "-"),
+                clean_tsv(up_ver),
+                clean_tsv(",".join(tags) or "read-only"),
+            ))
+        flatten_fwupd_devices(d.get("Children"), out)
+
+
+def cmd_fwupd_devices(_args):
+    exe = fwupdmgr_bin()
+    if not exe:
+        print("fwupdmgr is not installed", file=sys.stderr)
+        return 10
+    data = run_json([exe, "get-devices", "--json"])
+    rows = []
+    flatten_fwupd_devices(data.get("Devices") or [], rows)
+    # Also check get-updates --json to catch available LVFS updates not inline in get-devices
+    try:
+        up = run_json([exe, "get-updates", "--json"])
+        up_map = {}
+        for ud in up.get("Devices") or []:
+            did = ud.get("DeviceId") or ""
+            rels = ud.get("Releases") or []
+            if did and rels and rels[0].get("Version"):
+                up_map[did] = clean_tsv(rels[0]["Version"])
+        for i, r in enumerate(rows):
+            if r[0] in up_map and not r[4]:
+                uv = up_map[r[0]]
+                rest = [t for t in r[5].split(",") if t and t != "updatable" and not t.startswith("update:")]
+                flags = ",".join([f"update:{uv}"] + rest)
+                rows[i] = (r[0], r[1], r[2], r[3], uv, flags)
+    except Exception:
+        pass
+    for r in rows:
+        print("\t".join(r))
+    return 0
+
+
+def cmd_fwupd_releases(args):
+    exe = fwupdmgr_bin()
+    if not exe:
+        print("fwupdmgr is not installed", file=sys.stderr)
+        return 10
+    cur_ver = args.current_version or ""
+    data = run_json([exe, "get-releases", args.device_id, "--json"])
+    for rel in data.get("Releases") or []:
+        rver = clean_tsv(rel.get("Version") or "")
+        if not rver:
+            continue
+        if not cur_ver or cur_ver == "-":
+            kind = "install"
+        else:
+            c = cmp_ver(rver, cur_ver)
+            kind = "upgrade" if c > 0 else ("downgrade" if c < 0 else "reinstall")
+        remote = clean_tsv(rel.get("RemoteId") or "lvfs")
+        locs = rel.get("Locations") or ([rel["Uri"]] if rel.get("Uri") else [])
+        uri = clean_tsv(locs[0] if locs else "")
+        desc = strip_xml(rel.get("Description") or rel.get("Summary") or "")
+        print("\t".join([rver, kind, remote, uri, desc[:240]]))
+    return 0
+
+
+def cmd_fwupd_action(args):
+    exe = fwupdmgr_bin()
+    if not exe:
+        print("fwupdmgr is not installed; install the fwupd package first.", file=sys.stderr)
+        return 10
+    act = args.action
+    if act == "refresh":
+        try:
+            rem = run_json([exe, "get-remotes", "--json"])
+            for r in rem.get("Remotes") or []:
+                if r.get("Id") == "lvfs" and not r.get("Enabled", True):
+                    print("Enabling LVFS firmware remote...", flush=True)
+                    subprocess.run([exe, "enable-remote", "lvfs", "--assume-yes"], check=False)
+        except Exception:
+            pass
+        return subprocess.call([exe, "refresh", "--force"])
+    if act == "update":
+        return subprocess.call([exe, "update", "--assume-yes", "--no-reboot-check"])
+    if act == "verify":
+        return subprocess.call([exe, "verify", args.target])
+    if act == "unlock":
+        return subprocess.call([exe, "unlock", args.target, "--assume-yes"])
+    if act == "local-install":
+        return subprocess.call([
+            exe, "local-install", args.target,
+            "--allow-reinstall", "--allow-older", "--assume-yes", "--no-reboot-check"
+        ])
+    if act == "install-release":
+        uri = args.extra
+        if uri and uri.startswith(("https://", "http://")):
+            with tempfile.TemporaryDirectory(prefix="locachy-cab-") as td:
+                cab = Path(td) / "firmware.cab"
+                print(f"Downloading {uri} ...", flush=True)
+                with urllib.request.urlopen(uri, timeout=120) as resp, cab.open("wb") as out:
+                    shutil.copyfileobj(resp, out)
+                print(f"Installing {cab.stat().st_size} byte archive with fwupdmgr...", flush=True)
+                return subprocess.call([
+                    exe, "local-install", str(cab),
+                    "--allow-reinstall", "--allow-older", "--assume-yes", "--no-reboot-check"
+                ])
+        kind = args.extra or "reinstall"
+        sub = "reinstall" if kind == "reinstall" else ("downgrade" if kind == "downgrade" else "update")
+        return subprocess.call([exe, sub, args.target, "--assume-yes", "--no-reboot-check"])
+    print(f"Unknown fwupd action: {act}", file=sys.stderr)
+    return 2
+
+
+def bios_attrs_dirs():
+    override = os.environ.get("LOCACHY_BIOS_ATTRS_DIR")
+    if override:
+        p = Path(override)
+        return [p] if p.is_dir() else []
+    root = Path("/sys/class/firmware-attributes")
+    if not root.is_dir() or not any(root.iterdir()):
+        subprocess.run(["modprobe", "think-lmi"], capture_output=True)
+    if not root.is_dir():
+        return []
+    out = []
+    for drv in sorted(root.iterdir()):
+        ad = drv / "attributes"
+        if ad.is_dir():
+            out.append(ad)
+    return out
+
+
+def rd_text(p: Path) -> str:
+    try:
+        return p.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+
+
+def cmd_bios_list(_args):
+    dirs = bios_attrs_dirs()
+    emitted = 0
+    for ad in dirs:
+        for entry in sorted(ad.iterdir(), key=lambda x: x.name.lower()):
+            if not entry.is_dir():
+                continue
+            cur_f = entry / "current_value"
+            if not cur_f.is_file():
+                continue
+            atype = rd_text(entry / "type") or "enumeration"
+            cur = clean_tsv(rd_text(cur_f))
+            poss = clean_tsv(rd_text(entry / "possible_values"))
+            disp = clean_tsv(rd_text(entry / "display_name") or entry.name)
+            print("\t".join([clean_tsv(entry.name), cur or "-", poss, clean_tsv(atype), disp]))
+            emitted += 1
+    if emitted > 0:
+        return 0
+
+    exe = fwupdmgr_bin()
+    if exe:
+        try:
+            data = run_json([exe, "get-bios-settings", "--json"])
+            for item in data.get("BiosSettings") or []:
+                if item.get("ReadOnly"):
+                    continue
+                name = clean_tsv(item.get("Name") or item.get("Id") or "")
+                cur = clean_tsv(item.get("CurrentValue") or "-")
+                poss = clean_tsv(";".join(item.get("PossibleValues") or []))
+                atype = clean_tsv(str(item.get("Type") or "enumeration"))
+                desc = clean_tsv(item.get("Description") or item.get("Summary") or name)
+                if name:
+                    print("\t".join([name, cur, poss, atype, desc]))
+            return 0
+        except Exception:
+            pass
+    return 0
+
+
+def cmd_bios_set(args):
+    for ad in bios_attrs_dirs():
+        target = ad / args.name / "current_value"
+        if target.is_file():
+            try:
+                target.write_text(args.value + "\n", encoding="utf-8")
+                save_f = ad / "save_settings"
+                if save_f.is_file() and rd_text(save_f) == "bulk":
+                    save_f.write_text("save\n", encoding="utf-8")
+                pend = rd_text(ad / "pending_reboot")
+                print(f"{args.name} = {args.value}" + (" (takes effect on next reboot)" if pend == "1" else ""))
+                return 0
+            except OSError as e:
+                print(f"Cannot set {args.name} to {args.value}: {e}", file=sys.stderr)
+                return 1
+    exe = fwupdmgr_bin()
+    if exe:
+        return subprocess.call([exe, "set-bios-setting", args.name, args.value, "--no-reboot-check"])
+    print("No firmware-attributes driver or fwupdmgr available.", file=sys.stderr)
+    return 1
+
+
+def connected_usb_ids() -> set:
+    usb_dir = Path(os.environ.get("LOCACHY_USB_SYSFS_DIR") or "/sys/bus/usb/devices")
+    found = set()
+    if not usb_dir.is_dir():
+        return found
+    for d in usb_dir.iterdir():
+        vf, pf = d / "idVendor", d / "idProduct"
+        if vf.is_file() and pf.is_file():
+            found.add((rd_text(vf).lower(), rd_text(pf).lower()))
+    return found
+
+
+def cmd_spi_programmers(_args):
+    usb = connected_usb_ids()
+    print("internal\t1\tInternal mainboard SPI controller")
+    for spec, ids, label in USB_PROGRAMMERS:
+        det = "1" if (ids and (ids & usb)) else "0"
+        if spec.startswith("linux_spi:") and Path("/dev/spidev0.0").exists():
+            det = "1"
+        print(f"{spec}\t{det}\t{label}")
+    return 0
+
+
+class ItcoGuard:
+    """Temporarily unload Intel iTCO_wdt when running internal flashrom under
+    CONFIG_IO_STRICT_DEVMEM, and unconditionally reload it on exit."""
+    def __init__(self, prog: str):
+        self.active = (prog == "internal" or prog.startswith("internal:"))
+        self.unloaded = False
+
+    def __enter__(self):
+        if not self.active or os.environ.get("LOCACHY_FLASHROM_NO_MODPROBE") == "1":
+            return self
+        mods = Path("/proc/modules")
+        if mods.is_file() and any(ln.startswith("iTCO_wdt ") for ln in mods.read_text().splitlines()):
+            r = subprocess.run(["rmmod", "iTCO_wdt"], capture_output=True, text=True)
+            if r.returncode == 0:
+                self.unloaded = True
+                print("[locachy-firmware] Temporarily unloaded iTCO_wdt for RCBA/SPI access.", flush=True)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.unloaded:
+            subprocess.run(["modprobe", "iTCO_wdt"], capture_output=True)
+            print("[locachy-firmware] Restored iTCO_wdt watchdog module.", flush=True)
+        return False
+
+
+def build_region_args(regions_csv: str, for_write: bool = False) -> list:
+    regs = [r.strip() for r in (regions_csv or "").split(",") if r.strip() and r.strip() != "full"]
+    if not regs:
+        return []
+    out = ["--ifd"]
+    for r in regs:
+        out.extend(["-i", r])
+    if for_write:
+        out.append("--noverify-all")
+    return out
+
+
+def sha256_file(p: Path) -> str:
+    h = hashlib.sha256()
+    with p.open("rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def ac_power_ok() -> bool:
+    override = os.environ.get("LOCACHY_AC_ONLINE_FILE")
+    if override:
+        p = Path(override)
+        return not p.is_file() or rd_text(p) == "1"
+    ps = Path("/sys/class/power_supply")
+    if not ps.is_dir():
+        return True
+    ac_Supplies = [d for d in ps.iterdir() if rd_text(d / "type").lower() == "mains"]
+    if not ac_Supplies:
+        return True
+    return any(rd_text(d / "online") == "1" for d in ac_Supplies)
+
+
+def cmd_spi_probe(args):
+    exe = flashrom_bin()
+    if not exe:
+        print("flashrom is not installed", file=sys.stderr)
+        return 10
+    cmd = [exe, "-p", args.programmer]
+    if args.chip:
+        cmd.extend(["-c", args.chip])
+    with ItcoGuard(args.programmer):
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    combined = (p.stdout or "") + ("\n" + p.stderr if p.stderr else "")
+    chips = []
+    for m in re.finditer(r'Found [^\n]*flash chip "([^"]+)" \((\d+) kB', combined):
+        chips.append((m.group(1), int(m.group(2)) * 1024))
+    readable_regs = []
+    for m in re.finditer(r"FREG\d+:\s+([A-Za-z ]+) region \([^)]+\) is (read-only|read-write|locked)", combined):
+        rname_raw, perm = m.group(1).strip().lower(), m.group(2)
+        short = ("fd" if "descriptor" in rname_raw else
+                 "bios" if "bios" in rname_raw else
+                 "me" if "management" in rname_raw else
+                 "gbe" if "ethernet" in rname_raw else "")
+        if short and perm != "locked" and short not in readable_regs:
+            readable_regs.append(short)
+    for cname, sz in chips:
+        print(f"CHIP\t{clean_tsv(cname)}\t{sz}\t{','.join(readable_regs)}")
+    print(combined.strip(), flush=True)
+    return 0 if chips else (p.returncode or 1)
+
+
+def cmd_spi_backup(args):
+    exe = flashrom_bin()
+    if not exe:
+        print("flashrom is not installed; install flashrom first.", file=sys.stderr)
+        return 10
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    reg_args = build_region_args(args.regions, for_write=False)
+
+    digests = []
+    with tempfile.TemporaryDirectory(prefix="locachy-spi-read-", dir=str(out_dir)) as td:
+        tdir = Path(td)
+        with ItcoGuard(args.programmer):
+            for i in range(1, 4):
+                dump = tdir / f"read{i}.bin"
+                cmd = [exe, "-p", args.programmer]
+                if args.chip:
+                    cmd.extend(["-c", args.chip])
+                cmd.extend(reg_args)
+                cmd.extend(["-r", str(dump)])
+                print(f"=== Reading SPI flash pass {i}/3: {' '.join(cmd)} ===", flush=True)
+                rc = subprocess.call(cmd)
+                if rc != 0 or not dump.is_file() or dump.stat().st_size == 0:
+                    print(f"ERROR: flashrom read pass {i}/3 failed (exit {rc}).", file=sys.stderr, flush=True)
+                    return rc or 1
+                d = sha256_file(dump)
+                digests.append(d)
+                print(f"Pass {i}/3 SHA-256: {d} ({dump.stat().st_size} bytes)", flush=True)
+
+        if len(set(digests)) != 1:
+            print("ERROR: The 3 SPI reads produced DIFFERENT SHA-256 hashes!", file=sys.stderr)
+            for idx, d in enumerate(digests, 1):
+                print(f"  Pass {idx}: {d}", file=sys.stderr)
+            print("Check SOIC clip contact / wire length; refusing to save corrupt image.", file=sys.stderr)
+            return 2
+
+        safe_prog = re.sub(r"[^A-Za-z0-9._-]+", "_", args.programmer.split(":")[0])
+        reg_tag = ("-" + args.regions.replace(",", "-")) if args.regions and args.regions != "full" else ""
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        dest = out_dir / f"spi-{safe_prog}{reg_tag}-{stamp}.bin"
+        shutil.move(str(tdir / "read1.bin"), str(dest))
+        sha_file = Path(str(dest) + ".sha256")
+        sha_file.write_text(f"{digests[0]}  {dest.name}\n", encoding="utf-8")
+        if str(dest).startswith("/home/"):
+            try:
+                os.chown(dest, 1000, 1000)
+                os.chown(sha_file, 1000, 1000)
+            except OSError:
+                pass
+        print(f"VERIFIED 3/3 IDENTICAL READS -> saved {dest} ({dest.stat().st_size} bytes)", flush=True)
+        print(f"SHA-256: {digests[0]}", flush=True)
+    return 0
+
+
+def cmd_spi_verify(args):
+    exe = flashrom_bin()
+    if not exe:
+        print("flashrom is not installed", file=sys.stderr)
+        return 10
+    img = Path(args.image)
+    if not img.is_file():
+        print(f"Image not found: {img}", file=sys.stderr)
+        return 1
+    cmd = [exe, "-p", args.programmer]
+    if args.chip:
+        cmd.extend(["-c", args.chip])
+    cmd.extend(build_region_args(args.regions, for_write=False))
+    cmd.extend(["-v", str(img)])
+    print(f"Verifying flash against {img} (SHA-256 {sha256_file(img)})...", flush=True)
+    with ItcoGuard(args.programmer):
+        return subprocess.call(cmd)
+
+
+def cmd_spi_write(args):
+    exe = flashrom_bin()
+    if not exe:
+        print("flashrom is not installed", file=sys.stderr)
+        return 10
+    img = Path(args.image)
+    if not img.is_file() or img.stat().st_size == 0:
+        print(f"Invalid or empty image: {img}", file=sys.stderr)
+        return 1
+    if (args.programmer == "internal" or args.programmer.startswith("internal:")) and not ac_power_ok():
+        print("ERROR: AC adapter is offline. Connect AC power before internal SPI flashing.", file=sys.stderr)
+        return 3
+    if args.expected_size and img.stat().st_size != args.expected_size:
+        print(f"ERROR: Image size ({img.stat().st_size} bytes) does not match detected chip size "
+              f"({args.expected_size} bytes).", file=sys.stderr)
+        return 4
+    cmd = [exe, "-p", args.programmer]
+    if args.chip:
+        cmd.extend(["-c", args.chip])
+    cmd.extend(build_region_args(args.regions, for_write=True))
+    cmd.extend(["-w", str(img)])
+    print(f"Writing {img} ({img.stat().st_size} bytes, SHA-256 {sha256_file(img)})...", flush=True)
+    with ItcoGuard(args.programmer):
+        return subprocess.call(cmd)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("fwupd-devices")
+    pr = sub.add_parser("fwupd-releases")
+    pr.add_argument("device_id")
+    pr.add_argument("--current-version", default="")
+
+    pa = sub.add_parser("fwupd-action")
+    pa.add_argument("action", choices=("refresh", "update", "verify", "unlock", "local-install", "install-release"))
+    pa.add_argument("target", nargs="?", default="")
+    pa.add_argument("extra", nargs="?", default="")
+
+    sub.add_parser("bios-list")
+    bs = sub.add_parser("bios-set")
+    bs.add_argument("name")
+    bs.add_argument("value")
+
+    sub.add_parser("spi-programmers")
+    sp = sub.add_parser("spi-probe")
+    sp.add_argument("programmer")
+    sp.add_argument("--chip", default="")
+
+    sb = sub.add_parser("spi-backup")
+    sb.add_argument("programmer")
+    sb.add_argument("out_dir")
+    sb.add_argument("--chip", default="")
+    sb.add_argument("--regions", default="")
+
+    sv = sub.add_parser("spi-verify")
+    sv.add_argument("programmer")
+    sv.add_argument("image")
+    sv.add_argument("--chip", default="")
+    sv.add_argument("--regions", default="")
+
+    sw = sub.add_parser("spi-write")
+    sw.add_argument("programmer")
+    sw.add_argument("image")
+    sw.add_argument("--chip", default="")
+    sw.add_argument("--regions", default="")
+    sw.add_argument("--expected-size", type=int, default=0)
+
+    args = p.parse_args()
+    dispatch = {
+        "fwupd-devices": cmd_fwupd_devices,
+        "fwupd-releases": cmd_fwupd_releases,
+        "fwupd-action": cmd_fwupd_action,
+        "bios-list": cmd_bios_list,
+        "bios-set": cmd_bios_set,
+        "spi-programmers": cmd_spi_programmers,
+        "spi-probe": cmd_spi_probe,
+        "spi-backup": cmd_spi_backup,
+        "spi-verify": cmd_spi_verify,
+        "spi-write": cmd_spi_write,
+    }
+    return dispatch[args.cmd](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

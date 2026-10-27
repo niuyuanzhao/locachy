@@ -1,0 +1,205 @@
+{
+  "desktop": {
+    "description": "Shared Wayland compositor & container display (labwc, gestures, notifications, screen sharing)",
+    "packages": [
+      "labwc-locachy",
+      "swaybg",
+      "libnotify",
+      "xdg-desktop-portal",
+      "xdg-desktop-portal-wlr",
+      "libinput-tools",
+      "libinput-gestures",
+      "lisgd",
+      "python-pyudev",
+      "noto-fonts-emoji"
+    ],
+    "rc": {
+      "service_clipboard": "/usr/local/lib/locachy/clipboard --serve"
+    },
+    "default_standalone": true,
+    "default_wizard": true
+  },
+  "audio": {
+    "description": "Audio server & mixer (PipeWire, WirePlumber, wiremix)",
+    "packages": [
+      "pipewire",
+      "pipewire-alsa",
+      "pipewire-pulse",
+      "wireplumber",
+      "wiremix"
+    ],
+    "rc": {
+      "service_audio": "/usr/local/lib/locachy/audio-client",
+      "program_mixer": "/usr/local/bin/term /usr/bin/wiremix"
+    },
+    "default_standalone": true,
+    "default_wizard": true
+  },
+  "view": {
+    "description": "Framebuffer document & image viewer (PDF, EPUB, Markdown, DjVu, PostScript, WebP/AVIF/JXL)",
+    "packages": [
+      "libmupdf",
+      "djvulibre",
+      "libspectre",
+      "libwebp",
+      "libheif",
+      "libjxl",
+      "imagemagick",
+      "openexr",
+      "libarchive"
+    ],
+    "rc": {},
+    "default_standalone": true,
+    "default_wizard": true
+  },
+  "view-dvi": {
+    "description": "TeX DVI document support in viewer (texlive-bin, texlive-basic)",
+    "packages": [
+      "texlive-bin",
+      "texlive-basic"
+    ],
+    "rc": {},
+    "default_standalone": true,
+    "default_wizard": false
+  },
+  "edit": {
+    "description": "Framebuffer code editor with syntax highlighting & LSP (tree-sitter, PCRE2)",
+    "packages": [
+      "tree-sitter",
+      "tree-sitter-bash",
+      "tree-sitter-c",
+      "tree-sitter-cpp",
+      "tree-sitter-javascript",
+      "tree-sitter-lua",
+      "tree-sitter-markdown",
+      "tree-sitter-python",
+      "tree-sitter-query",
+      "tree-sitter-rust",
+      "tree-sitter-vim",
+      "tree-sitter-vimdoc",
+      "pcre2",
+      "json-glib"
+    ],
+    "rc": {},
+    "default_standalone": true,
+    "default_wizard": true
+  },
+  "7zip": {
+    "description": "7-Zip for the archive manager: encrypted 7z and RAR, 7z with a password (7zip)",
+    "packages": [
+      "7zip"
+    ],
+    "rc": {},
+    "default_standalone": false,
+    "default_wizard": false
+  },
+  "cjk-fonts": {
+    "description": "CJK fonts (noto-fonts-cjk)",
+    "packages": [
+      "noto-fonts-cjk"
+    ],
+    "rc": {},
+    "default_standalone": true,
+    "default_wizard": false
+  },
+  "bluetooth": {
+    "description": "Bluetooth stack & TUI manager (BlueZ, bluetui)",
+    "packages": [
+      "bluez",
+      "bluez-utils",
+      "bluetui"
+    ],
+    "rc": {
+      "service_bluetooth": "/usr/local/lib/locachy/bluetooth-client",
+      "program_bluetooth": "/usr/local/bin/term /usr/bin/bluetui"
+    },
+    "default_standalone": true,
+    "default_wizard": false
+  },
+  "fwupd": {
+    "description": "LVFS device firmware update daemon (fwupd)",
+    "packages": [
+      "fwupd"
+    ],
+    "rc": {},
+    "default_standalone": true,
+    "default_wizard": true
+  },
+  "flashrom": {
+    "description": "SPI flash chip programmer (flashrom)",
+    "packages": [
+      "flashrom"
+    ],
+    "rc": {},
+    "default_standalone": true,
+    "default_wizard": true
+  },
+  "fprintd": {
+    "description": "Fingerprint reader unlock (fprintd)",
+    "packages": [
+      "fprintd"
+    ],
+    "rc": {
+      "unlock_fingerprint": "1"
+    },
+    "default_standalone": false,
+    "default_wizard": false
+  },
+  "howdy": {
+    "description": "Infrared face recognition unlock (howdy)",
+    "packages": [
+      "python-dlib",
+      "howdy-git",
+      "linux-enable-ir-emitter-git"
+    ],
+    "rc": {
+      "unlock_face": "1"
+    },
+    "default_standalone": false,
+    "default_wizard": false
+  },
+  "tailscale": {
+    "description": "Tailscale mesh VPN",
+    "packages": [
+      "tailscale"
+    ],
+    "rc": {
+      "service_tailscale": "/usr/local/lib/locachy/tailscale-client"
+    },
+    "default_standalone": false,
+    "default_wizard": false
+  },
+  "clash": {
+    "description": "Clash TUN/HTTP proxy (mihomo)",
+    "packages": [
+      "mihomo"
+    ],
+    "rc": {
+      "service_clash": "/usr/local/lib/locachy/clash-client"
+    },
+    "default_standalone": false,
+    "default_wizard": false
+  },
+  "tor": {
+    "description": "Full-system Tor anonymity layer (tor, lyrebird-proxy)",
+    "packages": [
+      "tor",
+      "lyrebird-proxy"
+    ],
+    "rc": {},
+    "default_standalone": false,
+    "default_wizard": false
+  },
+  "rclone": {
+    "description": "Cloud drive mounts under ~/Drives (rclone, fuse3)",
+    "packages": [
+      "rclone",
+      "fuse3"
+    ],
+    "rc": {
+      "service_rclone": "/usr/local/lib/locachy/rclone-client"
+    },
+    "default_standalone": false,
+    "default_wizard": false
+  }
+}

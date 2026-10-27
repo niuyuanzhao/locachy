@@ -1,0 +1,15 @@
+# /etc/pacman.d/hooks/90-locachy-boot.hook (make.sh): a new kernel, microcode
+# or systemd stub makes a new unified kernel image on the ESP (locachy-boot),
+# so that the kernel started has its modules.
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Target = usr/lib/modules/*/vmlinuz
+Target = boot/*-ucode.img
+Target = usr/lib/systemd/boot/efi/linuxx64.efi.stub
+
+[Action]
+Description = LOCachy: making the boot image (kernel, microcode, stub)...
+When = PostTransaction
+Exec = /usr/local/bin/locachy-boot
