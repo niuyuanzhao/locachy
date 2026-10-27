@@ -519,16 +519,30 @@ def tracked_recipes(recipes):
     return {n: p for n, p in recipes.items() if os.path.isfile(os.path.join(p, "upstream.json"))}
 
 
-def fetch_upstream(url, *, max_bytes, timeout):
+def fetch_upstream(url, *, max_bytes, timeout, attempts=3):
     """The host's Internet lives in locachy-net. Bound both response bytes and
-    time before handing opaque recipe data to the upstream validator."""
+    time before handing opaque recipe data to the upstream validator. A
+    request that fails (a dropped connection) is made again, each within the
+    same bounds; the error says what the last one got."""
     command = in_net(["curl", "--fail", "--silent", "--show-error", "--location",
                       "--proto", "=https", "--proto-redir", "=https", "--max-redirs", "0",
                       "--max-time", str(timeout), "--max-filesize", str(max_bytes), url])
-    p = subprocess.run(command, capture_output=True, timeout=timeout + 2)
-    if p.returncode or len(p.stdout) > max_bytes:
-        raise RuntimeError("stable upstream did not answer within the response budget")
-    return p.stdout
+    why = ""
+    for attempt in range(attempts):
+        if attempt:
+            time.sleep(3)
+        try:
+            p = subprocess.run(command, capture_output=True, timeout=timeout + 2)
+        except subprocess.TimeoutExpired:
+            why = f"no answer in {timeout} s"
+            continue
+        if p.returncode == 63 or len(p.stdout) > max_bytes:
+            why = f"more than {max_bytes} bytes"
+            break
+        if p.returncode == 0:
+            return p.stdout
+        why = (p.stderr.decode(errors="replace").strip().splitlines() or [f"curl failed ({p.returncode})"])[-1]
+    raise RuntimeError(f"stable upstream did not answer within the response budget: {url}: {why}")
 
 
 def checked_local_candidates(recipes, installed):

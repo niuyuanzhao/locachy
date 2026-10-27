@@ -357,6 +357,27 @@ class LocalPackages(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "signature verification"):
             pkg.plan()
 
+    def test_upstream_requests_are_made_again_and_say_why_they_failed(self):
+        self.patch("in_net", lambda cmd: cmd)
+        self.patch("time", types.SimpleNamespace(sleep=lambda s: None))
+        answers = []
+
+        def curl(command, **kwargs):
+            self.assertEqual(command[0], "curl")
+            self.assertIn("--max-time", command)
+            return answers.pop(0)
+        self.patch("subprocess", types.SimpleNamespace(run=curl, TimeoutExpired=subprocess.TimeoutExpired))
+        dropped = subprocess.CompletedProcess([], 35, b"", b"curl: (35) TLS connect error\n")
+        answers[:] = [dropped, dropped, subprocess.CompletedProcess([], 0, b"{}", b"")]
+        self.assertEqual(pkg.fetch_upstream("https://example.org/a", max_bytes=10, timeout=5), b"{}")
+        answers[:] = [dropped, dropped, dropped]
+        with self.assertRaisesRegex(RuntimeError, "https://example.org/a: curl: \\(35\\) TLS connect error"):
+            pkg.fetch_upstream("https://example.org/a", max_bytes=10, timeout=5)
+        answers[:] = [subprocess.CompletedProcess([], 63, b"", b"curl: (63) too big\n"), dropped]
+        with self.assertRaisesRegex(RuntimeError, "more than 10 bytes"):
+            pkg.fetch_upstream("https://example.org/a", max_bytes=10, timeout=5)
+        self.assertEqual(len(answers), 1)  # too big: not asked again
+
     def test_unreachable_source_repo_is_a_note_in_the_plan(self):
         self.record()
         self.patch("in_net", lambda cmd: cmd)
