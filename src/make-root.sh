@@ -526,7 +526,7 @@ chroot "$root" sh /usr/local/src/locachy/link/install-pkg-tools /usr/local/src/l
 # pikaur without either helper already installed; its dependencies stay in
 # the disposable build root. No LOCachy package hooks are installed yet.
 chroot "$root" pacman -Q pikaur-static >/dev/null 2>&1 || chroot "$root" /usr/local/bin/locachy-build -i pikaur-static
-chroot "$root" /usr/local/bin/locachy-pkg sync
+chroot "$root" /usr/local/bin/locachy-pkg sync --first-install
 chroot "$root" /usr/local/bin/locachy-pkg status
 
 echo "== our part: built against the complete package set"

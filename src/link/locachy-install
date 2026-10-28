@@ -882,7 +882,7 @@ def install(args, root, esp, root_fs, esp_fs, level):
             run(["arch-chroot", str(root), "passwd", args.user])
         run(["arch-chroot", str(root), "passwd", "-l", "root"])
         if apply_customizations(args, root):
-            run(["arch-chroot", str(root), "/usr/local/bin/locachy-pkg", "sync"])
+            run(["arch-chroot", str(root), "/usr/local/bin/locachy-pkg", "sync", "--first-install"])
         run(["arch-chroot", str(root), "sh", "/usr/local/src/locachy/make.sh", level, cpu])
         if getattr(args, "encrypt", False) and getattr(args, "tpm", False):
             if getattr(args, "luks_passphrase_file", None):

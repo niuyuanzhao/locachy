@@ -84,10 +84,22 @@ class Sync(unittest.TestCase):
         self.installed["arbitrary-aur-name"] = []
         return True
 
-    def sync(self):
+    def sync(self, first_install=False):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
                 mock.patch.object(pkg.os.path, "isfile", return_value=True):
-            return pkg.cmd_sync()
+            return pkg.cmd_sync(first_install)
+
+    def aur_changes_tracked_inputs(self):
+        """libinput-tools' recorded inputs stop matching once the AUR package
+        (and what it depends on) is installed, until it is built again."""
+        rebuilt = []
+        def tracked(names):
+            rebuilt.append("arbitrary-aur-name" in self.installed)
+            return self.tracked(names)
+        self.patch("install_tracked", tracked)
+        self.patch("local_rebuilds", lambda *args: [("libinput-tools", "host libraries or build tools changed")]
+                   if "arbitrary-aur-name" in self.installed and not (rebuilt and rebuilt[-1]) else [])
+        return rebuilt
 
     def test_repo_then_validated_tools_then_aur_then_prune(self):
         self.assertEqual(self.sync(), 0)
@@ -131,6 +143,50 @@ class Sync(unittest.TestCase):
         self.patch("local_rebuilds", lambda *args: [("libinput-tools", "patch changed")])
         self.assertEqual(self.sync(), 1)
         self.assertEqual(self.calls, [])
+
+    def test_installed_system_never_prunes_after_tracked_inputs_changed(self):
+        self.aur_changes_tracked_inputs()
+        self.assertEqual(self.sync(), 1)
+        self.assertEqual([c for c in self.calls if isinstance(c, tuple) and c[0] == "tracked"],
+                         [("tracked", {"libinput-tools"})])
+        self.assertIn("bootstrap-only", self.installed)
+
+    def test_first_install_builds_tracked_again_after_aur_then_prunes(self):
+        rebuilt = self.aur_changes_tracked_inputs()
+        self.assertEqual(self.sync(first_install=True), 0)
+        self.assertEqual(rebuilt, [False, True])
+        again = [i for i, c in enumerate(self.calls) if c == ("tracked", {"libinput-tools"})][1]
+        aur = self.calls.index(([pkg.BUILD_TOOL, "-i", "arbitrary-aur-name"], True))
+        prune = next(i for i, c in enumerate(self.calls) if isinstance(c, str) and "pacman -Rns " in c)
+        self.assertLess(aur, again)
+        self.assertLess(again, prune)
+        self.assertNotIn("bootstrap-only", self.installed)
+
+    def test_continued_first_install_builds_dirty_tracked_first(self):
+        self.installed.update({"libinput-tools": [], "repo-program": [], "arbitrary-aur-name": []})
+        rebuilt = self.aur_changes_tracked_inputs()
+        self.assertEqual(self.sync(first_install=True), 0)
+        self.assertEqual(rebuilt, [True])
+        self.assertEqual(self.calls[0], ("tracked", {"libinput-tools"}))
+
+    def test_failed_tracked_rebuild_stops_the_installation(self):
+        self.installed.update({"libinput-tools": [], "repo-program": [], "arbitrary-aur-name": []})
+        self.patch("local_rebuilds", lambda *args: [("libinput-tools", "host libraries or build tools changed")])
+        self.patch("install_tracked", lambda names: (_ for _ in ()).throw(RuntimeError("tests failed")))
+        self.assertEqual(self.sync(first_install=True), 1)
+        self.assertIn("bootstrap-only", self.installed)
+
+    def test_only_the_installer_asks_for_first_install(self):
+        script = (SOURCE / "make-root.sh").read_text()
+        self.assertIn('chroot "$root" /usr/local/bin/locachy-pkg sync --first-install\n', script)
+        installer = (SOURCE / "link/locachy-install").read_text()
+        self.assertIn('"/usr/local/bin/locachy-pkg", "sync", "--first-install"]', installer)
+        hooks = "".join(p.read_text() for p in (SOURCE / "link").glob("*.hook"))
+        self.assertNotIn("--first-install", hooks)
+        with mock.patch.object(pkg, "cmd_sync", lambda first=False: first), \
+                mock.patch.object(sys, "argv", ["locachy-pkg", "sync"]), self.assertRaises(SystemExit) as end:
+            pkg.main()
+        self.assertIs(end.exception.code, False)
 
     def test_first_tracked_install_locks_existing_and_missing_outputs(self):
         self.installed["labwc-locachy"] = []

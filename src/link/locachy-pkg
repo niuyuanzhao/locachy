@@ -10,7 +10,9 @@ Directly implements the set-reconciliation model of MacOSConfigs (Brewfile + upd
 
 Commands:
   locachy-pkg [sync]       reconcile system to manifest: install missing, mark SEL explicit,
-                           mark DEP as dependencies, purge UNMANAGED (INSTALLED - KEEP)
+                           mark DEP as dependencies, purge UNMANAGED (INSTALLED - KEEP);
+                           --first-install (the installer's): tracked packages whose inputs
+                           changed are built again the validated way, as at their first install
   locachy-pkg status|list  inspect drift without changing anything (reports SEL, DEP, MISS, DEL);
                            --machine: lines leaf TAB NAME TAB VERSION TAB BYTES (both empty
                            when missing), missing|drift|orphan|local-rebuild TAB NAME, then
@@ -269,7 +271,30 @@ def echo_indent(msg):
     print(f"  {msg}")
 
 
-def cmd_sync():
+def settle_tracked(tracked, first_install, refusal):
+    """Tracked packages whose recorded inputs no longer match. On an installed
+    system that is an update, for plan/apply. During the first installation
+    the packages installed after them (AUR dependencies) change what they were
+    built against; they are built again through the validated path of their
+    first install, and the installation goes on."""
+    if not tracked:
+        return True
+    dirty = [n for n, _ in local_rebuilds(local_recipes(), local_packages(LOCAL_DB)) if n in tracked]
+    if not dirty:
+        return True
+    if not first_install:
+        print(refusal, file=sys.stderr)
+        return False
+    print(f"===> Building tracked packages again, their inputs changed during the installation: {' '.join(dirty)}",
+          flush=True)
+    try:
+        return install_tracked(dirty)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+        print(f"locachy-pkg: tracked rebuild failed: {e}", file=sys.stderr)
+        return False
+
+
+def cmd_sync(first_install=False):
     leaves = load_manifest()
     print(f"===> Reconciling system to /etc/locachy/packages ({len(leaves)} declared leaves)...")
 
@@ -278,13 +303,9 @@ def cmd_sync():
     missing = sorted(set(leaves) - installed_all)
     baseline = baseline_recipes()
     tracked = tracked_recipes(baseline)
-    if tracked:
-        effective = local_recipes()
-        installed_versions = local_packages(LOCAL_DB)
-        dirty_tracked = [n for n, _ in local_rebuilds(effective, installed_versions) if n in tracked]
-        if dirty_tracked:
-            print("locachy-pkg: tracked patched packages need a validated update: use plan/apply, not an unchecked sync rebuild", file=sys.stderr)
-            return 1
+    if not settle_tracked(tracked, first_install, "locachy-pkg: tracked patched packages need a validated update: "
+                          "use plan/apply, not an unchecked sync rebuild"):
+        return 1
 
     # 1. Install missing declared leaves and their dependencies
     if missing:
@@ -331,11 +352,12 @@ def cmd_sync():
     if set(leaves) - set(packages):
         print("locachy-pkg: install left declared packages missing; nothing is pruned", file=sys.stderr)
         return 1
+    if not settle_tracked(tracked, first_install,
+                          "locachy-pkg: installed tracked inputs changed; use plan/apply before pruning"):
+        return 1
     recipes = local_recipes()
     dirty = local_rebuilds(recipes, local_packages(LOCAL_DB)) if local_names(recipes) else []
-    if any(name in tracked for name, _ in dirty):
-        print("locachy-pkg: installed tracked inputs changed; use plan/apply before pruning", file=sys.stderr)
-        return 1
+    dirty = [(name, reason) for name, reason in dirty if name not in tracked]
     for name, reason in dirty:
         print(f"===> Rebuilding local package {name}: {reason}")
         if name not in recipes:
@@ -385,6 +407,9 @@ def cmd_sync():
         print(f"  Pruning orphan: {' '.join(orphans)}")
         if not run_pacman(f"pacman -Rns --noconfirm {' '.join(orphans)} >/dev/null 2>&1"):
             return 1
+    # What was pruned may have been part of what tracked packages were built against.
+    if first_install and not settle_tracked(tracked, True, ""):
+        return 1
 
     # Final verification
     packages, provides_map, explicit_set = load_installed_db()
@@ -1564,7 +1589,7 @@ def main():
     if action in ("status", "list", "check"):
         sys.exit(cmd_status("--machine" in sys.argv[2:]))
     elif action == "sync":
-        sys.exit(cmd_sync())
+        sys.exit(cmd_sync("--first-install" in sys.argv[2:]))
     elif action in ("install", "add"):
         sys.exit(cmd_install(sys.argv[2:]))
     elif action in ("remove", "uninstall"):
