@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-28 00:54-0400\n"
+"POT-Creation-Date: 2026-10-28 08:21-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -6751,6 +6751,10 @@ msgid "SPI programmer (flashrom)"
 msgstr ""
 
 #: progs/settings.c
+msgid "Kernel packages"
+msgstr ""
+
+#: progs/settings.c
 msgid "Clash (mihomo)"
 msgstr ""
 
@@ -6776,6 +6780,16 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Face recognition (howdy)"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Kernel package choice applied."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Kernel package choice did not finish; see %s."
 msgstr ""
 
 #: progs/settings.c
@@ -7992,6 +8006,26 @@ msgid "Kernel options"
 msgstr ""
 
 #: progs/settings.c
+msgid "Boot kernel"
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter: apply"
+msgstr ""
+
+#: progs/settings.c
+msgid "working..."
+msgstr ""
+
+#: progs/settings.c
+msgid "Kernel headers"
+msgstr ""
+
+#: progs/settings.c
+msgid "installed"
+msgstr ""
+
+#: progs/settings.c
 #, c-format
 msgid "made %s"
 msgstr ""
@@ -8051,10 +8085,6 @@ msgstr ""
 
 #: progs/settings.c
 msgid "(Enter: rank them again)"
-msgstr ""
-
-#: progs/settings.c
-msgid "installed"
 msgstr ""
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
@@ -8487,6 +8517,19 @@ msgid "Enter: the branch of that repository to follow (main by default)."
 msgstr ""
 
 #: progs/settings.c
+msgid "Wait: a package job is still running."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Enter: install and select this kernel; the previous kernel stays available."
+msgstr ""
+
+#: progs/settings.c
+msgid "Applying the headers choice through the host package manifest..."
+msgstr ""
+
+#: progs/settings.c
 msgid ""
 "Enter: options added to the kernel's command line, made into the boot image."
 msgstr ""
@@ -8525,10 +8568,6 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Wait: the repositories' job is still running."
-msgstr ""
-
-#: progs/settings.c
-msgid "Wait: a package job is still running."
 msgstr ""
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
@@ -8636,6 +8675,10 @@ msgstr ""
 #: progs/settings.c
 #, c-format
 msgid "%s: none, saved and applied."
+msgstr ""
+
+#: progs/settings.c
+msgid "Applying the kernel choice through the host package manifest..."
 msgstr ""
 
 #: progs/settings.c

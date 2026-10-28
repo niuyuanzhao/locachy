@@ -19,6 +19,8 @@ Commands:
                            closure|installed|foreign|bytes TAB COUNT
   locachy-pkg install PKG  install package(s) and register as leaf in manifest
   locachy-pkg remove PKG   remove package(s), unregister from manifest, and prune closure
+  locachy-pkg kernel list|select PACKAGE   available kernels, or install/select one
+  locachy-pkg kernel headers on|off        declare/remove the selected kernel's headers
 
 Updates of the host, LOCachy and the containers (see the part below):
   locachy-pkg plan [--cached] [--machine]   check, and show what an update would do
@@ -453,6 +455,83 @@ def cmd_install(pkgs):
             print(f"===> Registering leaf: {p}")
     write_manifest(lines)
     return cmd_sync()
+
+
+def selected_kernel():
+    name = read_conf(RC_CONF).get("boot_kernel", "linux-cachyos-bore")
+    if not re.fullmatch(r"linux(?:-[a-z0-9][a-z0-9+._-]*)?", name) or name.endswith("-headers"):
+        raise ValueError("boot_kernel is not a kernel package name")
+    return name
+
+
+def kernel_packages():
+    """Repository kernels have a matching headers package; no module add-ons."""
+    result = subprocess.run(["pacman", "-Slq"], capture_output=True, text=True, timeout=20, check=True)
+    names = set(result.stdout.splitlines())
+    return sorted(name for name in names if re.fullmatch(r"linux(?:-[a-z0-9][a-z0-9+._-]*)?", name)
+                  and name + "-headers" in names)
+
+
+def set_boot_kernel(name):
+    with open(RC_CONF, encoding="utf-8") as f:
+        lines = f.readlines()
+    lines = [line for line in lines if not re.match(r"\s*boot_kernel\s*=", line)]
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    lines.append(f'boot_kernel="{name}"\n')
+    tmp = RC_CONF + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+    os.replace(tmp, RC_CONF)
+
+
+def cmd_kernel(args):
+    """Settings use the same manifest and reconciliation as the Host page."""
+    try:
+        old = selected_kernel()
+        if args == ["list"]:
+            print("\n".join(kernel_packages()))
+            return 0
+        if len(args) != 2 or args[0] not in ("headers", "select"):
+            raise ValueError("usage: locachy-pkg kernel list|headers on|off|select PACKAGE")
+        if args[0] == "headers":
+            if args[1] not in ("on", "off"):
+                raise ValueError("headers must be on or off")
+            header = old + "-headers"
+            if args[1] == "on" and old not in kernel_packages():
+                raise ValueError(f"{old}: matching headers are not in the enabled repositories")
+            return cmd_install([header]) if args[1] == "on" else cmd_remove([header])
+        name = args[1]
+        if name not in kernel_packages():
+            raise ValueError(f"{name}: not an available kernel with matching headers")
+        leaves = load_manifest()
+        packages = [name]
+        if old + "-headers" in leaves:
+            packages.append(name + "-headers")
+        elif name + "-headers" in leaves:
+            # Revisiting a previously selected kernel must retain OFF rather
+            # than resurrect its old headers declaration.
+            write_manifest([line for line in manifest_lines()
+                            if line.split("#", 1)[0].strip() != name + "-headers"])
+        if cmd_install(packages) != 0:
+            return 1
+        # Keep the existing kernel as a fallback. Select only after the new
+        # package and optional headers have been reconciled successfully.
+        set_boot_kernel(name)
+        try:
+            made = run(["/usr/local/bin/locachy-boot"])
+        except (OSError, subprocess.SubprocessError):
+            set_boot_kernel(old)
+            raise
+        if made:
+            print(f"locachy-pkg: next boot uses {name}; previous kernels remain declared", flush=True)
+            return 0
+        set_boot_kernel(old)
+        print("locachy-pkg: boot image failed; previous kernel selection restored", file=sys.stderr)
+        return 1
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        print(f"locachy-pkg: {e}", file=sys.stderr)
+        return 1
 
 
 def cmd_remove(pkgs):
@@ -1594,6 +1673,8 @@ def main():
         sys.exit(cmd_install(sys.argv[2:]))
     elif action in ("remove", "uninstall"):
         sys.exit(cmd_remove(sys.argv[2:]))
+    elif action == "kernel":
+        sys.exit(cmd_kernel(sys.argv[2:]))
     elif action == "plan":
         sys.exit(cmd_plan(sys.argv[2:]))
     elif action == "apply":

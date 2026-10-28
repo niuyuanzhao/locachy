@@ -96,6 +96,13 @@ static char update_repo[256], update_branch[128];
 #define BOOT_LOG "/run/locachy/boot.log"
 static int boot_verbose;
 static char boot_cmdline[256];
+static char boot_kernel[64] = "linux-cachyos-bore";
+#ifndef KERNEL_MANIFEST
+#define KERNEL_MANIFEST "/etc/locachy/packages"
+#endif
+static int kernel_headers_declared, kernel_headers_installed;
+static char kernel_choices[64][64];
+static int nkernel_choices, kernel_choice;
 
 static void find_machines(void)
 {
@@ -708,6 +715,8 @@ static void on_rc(const char *name, const char *value, void *arg)
         boot_verbose = strcmp(value, "1") == 0;
     } else if (strcmp(name, "boot_cmdline") == 0) {
         snprintf(boot_cmdline, sizeof boot_cmdline, "%s", value);
+    } else if (strcmp(name, "boot_kernel") == 0) {
+        snprintf(boot_kernel, sizeof boot_kernel, "%s", value);
     } else if (strcmp(name, "service_clash") == 0) {
         clash_on = 1;
     } else if (strcmp(name, "clash_mode") == 0) {
@@ -1180,7 +1189,7 @@ static void face_camera_label(char *out, size_t size)
     if (i >= 0) {
         snprintf(out, size, "%s  %s%s", cams[i].path, cams[i].name, cams[i].ir ? _(" (infrared)") : "");
     } else {
-        snprintf(out, size, "%s", face_camera[0] ? face_camera : _("none set"));
+        snprintf(out, size, "%.*s", (int)(size ? size - 1 : 0), face_camera[0] ? face_camera : _("none set"));
     }
 }
 
@@ -1296,6 +1305,49 @@ static int opt_module_installed(int i)
     return access(opt_modules[i].probe, R_OK) == 0;
 }
 
+/* The manifest is the headers switch; installed state may lag a failed job. */
+static void load_kernel_state(void)
+{
+    char header[80], line[512];
+    snprintf(header, sizeof header, "%s-headers", boot_kernel);
+    kernel_headers_declared = kernel_headers_installed = 0;
+    FILE *f = fopen(KERNEL_MANIFEST, "r");
+    while (f && fgets(line, sizeof line, f)) {
+        line[strcspn(line, "#\r\n")] = '\0';
+        char *s = line + strspn(line, " \t");
+        s[strcspn(s, " \t")] = '\0';
+        if (strcmp(s, header) == 0) kernel_headers_declared = 1;
+    }
+    if (f) fclose(f);
+    DIR *d = opendir(PACMAN_LOCAL);
+    struct dirent *e;
+    size_t len = strlen(header);
+    while (d && (e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, header, len) == 0 && e->d_name[len] == '-') {
+            kernel_headers_installed = 1;
+            break;
+        }
+    }
+    if (d) closedir(d);
+}
+
+static void load_kernel_choices(void)
+{
+    char buf[8192];
+    char *const argv[] = { "/usr/local/bin/locachy-pkg", "kernel", "list", NULL };
+    command_output(argv, buf, sizeof buf);
+    nkernel_choices = 1;
+    kernel_choice = 0;
+    snprintf(kernel_choices[0], sizeof kernel_choices[0], "%s", boot_kernel);
+    char *save;
+    for (char *s = strtok_r(buf, "\n", &save); s && nkernel_choices < 64; s = strtok_r(NULL, "\n", &save)) {
+        if (strlen(s) >= sizeof kernel_choices[0] || strncmp(s, "linux", 5) != 0 ||
+            strspn(s, "abcdefghijklmnopqrstuvwxyz0123456789+._-") != strlen(s) ||
+            strcmp(s, boot_kernel) == 0) continue;
+        snprintf(kernel_choices[nkernel_choices++], sizeof kernel_choices[0], "%s", s);
+    }
+}
+
 static const char *opt_job_title(void)
 {
     for (int i = 0; i < NOPT_MODULES; i++) {
@@ -1308,6 +1360,7 @@ static const char *opt_job_title(void)
 
 static const char *pkg_title(void)
 {
+    if (strcmp(pkg_action, "kernel") == 0) return _("Kernel packages");
     const char *opt = opt_job_title();
     if (opt) {
         return opt;
@@ -1413,6 +1466,15 @@ static void pkg_check(void)
         return;
     }
     pkg_job = 0;
+    if (strcmp(pkg_action, "kernel") == 0) {
+        snprintf(boot_kernel, sizeof boot_kernel, "linux-cachyos-bore");
+        rc_read(on_rc, NULL);
+        load_kernel_state();
+        load_kernel_choices();
+        snprintf(notice, sizeof notice, WIFEXITED(status) && WEXITSTATUS(status) == 0 ?
+                 _("Kernel package choice applied.") : _("Kernel package choice did not finish; see %s."), PKG_LOG);
+        return;
+    }
     if (strcmp(pkg_name, "fprintd") == 0) {
         load_fingers();
     } else if (face_job()) {
@@ -2462,7 +2524,7 @@ static int boot_index(void)
 
 static int opt_index(void)
 {
-    return boot_index() + 3;
+    return boot_index() + 5;
 }
 
 /* Software sources: a row for each section, the mirrors. */
@@ -3543,7 +3605,7 @@ static void category_entries(int cat)
         add_title(_("Power Management"));
         add_items(tp_present ? 4 : 1, 1);
         add_title(_("Boot"));
-        add_items(boot_index(), 3);
+        add_items(boot_index(), 5);
         add_title(_("Software Update"));
         add_items(upd_index(), 2);
         add_title(_("Software Sources"));
@@ -3919,7 +3981,8 @@ static int enter_row(int idx)
 {
     return idx == num_hw_items() || idx == cl_index() + 2 || idx == tr_index() + 2 || idx == bt_index() + 2 ||
            idx == wp_index() || idx == tk_index() || idx == host_index() || idx == upd_index() || idx == upd_index() + 1 ||
-           idx == boot_index() + 1 || idx == boot_index() + 2 || idx == repo_index() + NREPO_SECTIONS ||
+           idx == boot_index() + 1 || idx == boot_index() + 2 || idx == boot_index() + 3 ||
+           idx == repo_index() + NREPO_SECTIONS ||
            idx == sec_index() || idx == sec_index() + 2 || idx == fp_index() + 3 || idx == fc_index() + 5 ||
            idx == fc_index() + 6 || idx == rclone_index() + 2 || idx == tpm_index() ||
            idx == tz_index() || idx == tz_index() + 2 || (idx >= imek_index() && idx < imek_index() + NIME_KEYS);
@@ -4359,7 +4422,7 @@ static void item_text(int idx, char *line, size_t size)
         }
         return;
     }
-    if ((i = idx - boot_index()) >= 0 && i < 3) {
+    if ((i = idx - boot_index()) >= 0 && i < 5) {
         if (i == 0) {
             snprintf(line, size, "%.95s < %s >", ui_pad(label, sizeof label, _("Boot messages"), 32),
                      boot_verbose ? _("shown") : _("hidden (quiet)"));
@@ -4367,6 +4430,16 @@ static void item_text(int idx, char *line, size_t size)
             /* TRANSLATORS: Enter is the Enter key; keep it. */
             snprintf(line, size, "%.95s %.120s   %s", ui_pad(label, sizeof label, _("Kernel options"), 32),
                      boot_cmdline[0] ? boot_cmdline : _("none"), _("(Enter: change)"));
+        } else if (i == 3) {
+            snprintf(line, size, "%.95s < %.63s >  %s", ui_pad(label, sizeof label, _("Boot kernel"), 32),
+                     nkernel_choices ? kernel_choices[kernel_choice] : boot_kernel,
+                     pkg_job && strcmp(pkg_action, "kernel") == 0 ? _("working...") : _("Enter: apply"));
+        } else if (i == 4) {
+            load_kernel_state();
+            snprintf(line, size, "%.95s [%s]  %s", ui_pad(label, sizeof label, _("Kernel headers"), 32),
+                     kernel_headers_declared ? _("ON ") : _("OFF"),
+                     pkg_job && strcmp(pkg_action, "kernel") == 0 ? _("working...") :
+                     kernel_headers_installed ? _("installed") : kernel_headers_declared ? _("not installed") : "");
         } else {
             struct stat st;
             char made[48] = "";
@@ -5047,6 +5120,22 @@ static void adjust(int dir)
                  _("Enter: the branch of that repository to follow (main by default)."));
         return;
     }
+    if (selected == boot_index() + 3 || selected == boot_index() + 4) {
+        if (pkg_job || repos_job) {
+            snprintf(notice, sizeof notice, "%s", _("Wait: a package job is still running."));
+            return;
+        }
+        if (selected == boot_index() + 3) {
+            if (!nkernel_choices) load_kernel_choices();
+            kernel_choice = (kernel_choice + dir + nkernel_choices) % nkernel_choices;
+            snprintf(notice, sizeof notice, "%s", _("Enter: install and select this kernel; the previous kernel stays available."));
+        } else {
+            load_kernel_state();
+            start_pkg_job("kernel", kernel_headers_declared ? "headers off" : "headers on");
+            snprintf(notice, sizeof notice, "%s", _("Applying the headers choice through the host package manifest..."));
+        }
+        return;
+    }
     if (selected == boot_index()) {
         if (rc_set("boot_verbose", boot_verbose ? NULL : "1") < 0) {
             snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
@@ -5295,6 +5384,8 @@ int main(int argc, char **argv)
     load_bridges();
     load_tpm_status();
     load_repos();
+    load_kernel_state();
+    load_kernel_choices();
     draw();
 
     for (;;) {
@@ -5412,6 +5503,16 @@ int main(int argc, char **argv)
             draw();
         } else if (key == '\n' && selected == upd_index() + 1) {
             change_update_branch();
+            draw();
+        } else if (key == '\n' && selected == boot_index() + 3) {
+            if (pkg_job || repos_job) {
+                snprintf(notice, sizeof notice, "%s", _("Wait: a package job is still running."));
+            } else {
+                char args[96];
+                snprintf(args, sizeof args, "select %s", nkernel_choices ? kernel_choices[kernel_choice] : boot_kernel);
+                start_pkg_job("kernel", args);
+                snprintf(notice, sizeof notice, "%s", _("Applying the kernel choice through the host package manifest..."));
+            }
             draw();
         } else if (key == '\n' && selected == boot_index() + 1) {
             change_boot_cmdline();

@@ -78,6 +78,12 @@ static const char *map_path(const char *path, char *out, size_t size)
         snprintf(out, size, "%s/sudo%s", root, path + strlen(SUDO_PAM));
     else if (strcmp(path, PACMAN_LOCAL) == 0)
         snprintf(out, size, "%s/pacman-local", root);
+    else if (strcmp(path, KERNEL_MANIFEST) == 0)
+        snprintf(out, size, "%s/packages", root);
+    else if (strncmp(path, "/home/", 6) == 0 && strstr(path, "/.config/rclone/rclone.conf"))
+        snprintf(out, size, "%s/rclone.conf", root);
+    else if (strcmp(path, HOWDY_CONF) == 0)
+        snprintf(out, size, "%s/howdy.ini", root);
     else if (strcmp(path, CLASH_STATE "/subscription") == 0)
         snprintf(out, size, "%s/subscription", root);
     else if (strcmp(path, LOCALE_DIR) == 0) /* the Language row: no catalog here, English only */
@@ -183,7 +189,7 @@ static int fixture_access(const char *path, int mode)
     if (!strcmp(path, "/usr/lib/fprintd") || !strcmp(path, "/usr/bin/fprintd-enroll")) return fake_fprintd ? 0 : -1;
     if (!strcmp(path, "/usr/lib/librime.so") || !strcmp(path, "/usr/bin/rime_deployer")) return fake_rime ? 0 : -1;
     if (!strcmp(path, "/usr/share/rime-data/rime_frost.schema.yaml")) return fake_rime_zh ? 0 : -1;
-    if (!strcmp(path, "/usr/local/bin/locachy-tpm")) return -1;
+    if (!strcmp(path, "/usr/local/bin/locachy-tpm") || !strcmp(path, HOWDY)) return -1;
     if (!strcmp(path, NVIDIA_DRIVER)) return fake_nvidia ? 0 : -1;
     if (!strcmp(path, "/etc/libinput")) return 0; /* its file is the fixture's */
     for (int i = 0; i < NOPT_MODULES; i++) {
@@ -712,7 +718,7 @@ static void test_bluetooth(void)
 
     /* Boot: the kernel's messages and options in rc.conf, and the image made
      * at once (locachy-boot), as pacman's hooks make it after updates. */
-    assert(boot_index() == upd_index() + 2 && opt_index() == boot_index() + 3);
+    assert(boot_index() == upd_index() + 2 && opt_index() == boot_index() + 5);
     assert(valid_boot_cmdline("i915.enable_psr=0 mitigations=off") && valid_boot_cmdline(""));
     assert(!valid_boot_cmdline("a\"b") && !valid_boot_cmdline("$(id)") && !valid_boot_cmdline("a;b") &&
            !valid_boot_cmdline("a\nb") && !valid_boot_cmdline("a\\b"));
@@ -720,8 +726,14 @@ static void test_bluetooth(void)
     boot_cmdline[0] = notice[0] = '\0';
     selected = boot_index() + 2;
     draw();
-    assert(category == CAT_SYSTEM && canvas_has("Boot messages") && canvas_has("hidden (quiet)"));
-    assert(canvas_has("Kernel options") && canvas_has("Boot image") && canvas_has("Enter: make it again"));
+    assert(category == CAT_SYSTEM);
+    char boot_line[512];
+    item_text(boot_index(), boot_line, sizeof boot_line);
+    assert(strstr(boot_line, "Boot messages") && strstr(boot_line, "hidden (quiet)"));
+    item_text(boot_index() + 1, boot_line, sizeof boot_line);
+    assert(strstr(boot_line, "Kernel options"));
+    item_text(boot_index() + 2, boot_line, sizeof boot_line);
+    assert(strstr(boot_line, "Boot image") && strstr(boot_line, "Enter: make it again"));
     assert(enter_row(boot_index() + 1) && enter_row(boot_index() + 2) && !enter_row(boot_index()));
     int forks_boot = forks;
     events[0] = rc_log[0] = '\0';
@@ -736,6 +748,36 @@ static void test_bluetooth(void)
     draw();
     assert(canvas_has("i915.enable_psr=0"));
     boot_cmdline[0] = '\0';
+
+    /* Headers are declared in the manifest independently of installed state. */
+    file_text("packages", "base\nlinux-cachyos-bore\n");
+    load_kernel_state();
+    assert(!kernel_headers_declared && !kernel_headers_installed);
+    nkernel_choices = 2;
+    kernel_choice = 0;
+    snprintf(kernel_choices[0], sizeof kernel_choices[0], "linux-cachyos-bore");
+    snprintf(kernel_choices[1], sizeof kernel_choices[1], "linux-lts");
+    selected = boot_index() + 4;
+    draw();
+    assert(canvas_has("Kernel headers") && canvas_has("[OFF]"));
+    forks_boot = forks;
+    adjust(+1);
+    assert(forks == forks_boot + 1 && !strcmp(pkg_action, "kernel") && !strcmp(pkg_name, "headers on"));
+    pkg_job = 0;
+    file_text("packages", "base\nlinux-cachyos-bore\nlinux-cachyos-bore-headers\n");
+    load_kernel_state();
+    assert(kernel_headers_declared && !kernel_headers_installed);
+    draw();
+    assert(canvas_has("[ON ]") && canvas_has("not installed"));
+    adjust(-1);
+    assert(!strcmp(pkg_action, "kernel") && !strcmp(pkg_name, "headers off"));
+    pkg_job = 0;
+    selected = boot_index() + 3;
+    adjust(+1);
+    assert(kernel_choice == 1 && !strcmp(kernel_choices[kernel_choice], "linux-lts"));
+    assert(enter_row(selected));
+    file_text("packages", "base\nlinux-cachyos-bore\n");
+    puts("PASS kernel headers ON/OFF follows manifest, jobs use normal package control; kernel choice is separate");
 
     track_events = settings_page = 0;
     puts("PASS Bluetooth rows, clicks and Enter; all tools required, install separate from service, bluetui in term "
@@ -1168,7 +1210,7 @@ int main(int argc, char **argv)
            lang_index() == rclone_index() + 3 && host_index() == lang_index() + 1 &&
            ime_index() == host_index() + 1 && tpm_index() == ime_index() + 2 &&
            bri_index() == tpm_index() + 1 && mach_index() == bri_index() + 1 &&
-           upd_index() == mach_index() + 1 && boot_index() == upd_index() + 2 && opt_index() == boot_index() + 3 &&
+           upd_index() == mach_index() + 1 && boot_index() == upd_index() + 2 && opt_index() == boot_index() + 5 &&
            repo_index() == opt_index() + NOPT_MODULES && tnet_index() == repo_index() + NREPO_SECTIONS + 1 &&
            circ_index() == tnet_index() + 1 && imek_index() == circ_index() + 1 &&
            num_hw_items() == imek_index() + NIME_KEYS);

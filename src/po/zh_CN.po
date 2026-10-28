@@ -2,7 +2,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-28 00:54-0400\n"
+"POT-Creation-Date: 2026-10-28 08:21-0400\n"
 "PO-Revision-Date: 2026-10-24 22:38+0000\n"
 "Last-Translator: LOCachy <38998838+niuyuanzhao@users.noreply.github.com>\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -6797,6 +6797,10 @@ msgid "SPI programmer (flashrom)"
 msgstr "SPI 编程器 (flashrom)"
 
 #: progs/settings.c
+msgid "Kernel packages"
+msgstr "内核软件包"
+
+#: progs/settings.c
 msgid "Clash (mihomo)"
 msgstr "Clash (mihomo)"
 
@@ -6823,6 +6827,16 @@ msgstr "指纹识别 (fprintd)"
 #: progs/settings.c
 msgid "Face recognition (howdy)"
 msgstr "人脸识别 (howdy)"
+
+#: progs/settings.c
+#, c-format
+msgid "Kernel package choice applied."
+msgstr "内核软件包选择已应用。"
+
+#: progs/settings.c
+#, c-format
+msgid "Kernel package choice did not finish; see %s."
+msgstr "内核软件包选择未完成；请查看 %s。"
 
 #: progs/settings.c
 msgid "Faces are computed on the CPU now."
@@ -8039,6 +8053,26 @@ msgid "Kernel options"
 msgstr "内核参数"
 
 #: progs/settings.c
+msgid "Boot kernel"
+msgstr "启动内核"
+
+#: progs/settings.c
+msgid "Enter: apply"
+msgstr "Enter: 应用"
+
+#: progs/settings.c
+msgid "working..."
+msgstr "正在处理…"
+
+#: progs/settings.c
+msgid "Kernel headers"
+msgstr "内核头文件"
+
+#: progs/settings.c
+msgid "installed"
+msgstr "已安装"
+
+#: progs/settings.c
 #, c-format
 msgid "made %s"
 msgstr "生成于 %s"
@@ -8099,10 +8133,6 @@ msgstr "尚未在本机排序"
 #: progs/settings.c
 msgid "(Enter: rank them again)"
 msgstr "（Enter：重新排序）"
-
-#: progs/settings.c
-msgid "installed"
-msgstr "已安装"
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
@@ -8549,6 +8579,19 @@ msgid "Enter: the branch of that repository to follow (main by default)."
 msgstr "Enter: 设置要跟随的该仓库分支（默认 main）。"
 
 #: progs/settings.c
+msgid "Wait: a package job is still running."
+msgstr "请稍候：软件包任务仍在运行。"
+
+#: progs/settings.c
+msgid ""
+"Enter: install and select this kernel; the previous kernel stays available."
+msgstr "Enter: 安装并选择此内核；保留之前的内核。"
+
+#: progs/settings.c
+msgid "Applying the headers choice through the host package manifest..."
+msgstr "正在通过宿主软件清单应用内核头文件选择…"
+
+#: progs/settings.c
 msgid ""
 "Enter: options added to the kernel's command line, made into the boot image."
 msgstr "Enter: 设置追加到内核命令行的参数，并写入启动镜像。"
@@ -8589,10 +8632,6 @@ msgstr "圆形触摸板沿边缘绕圈滚动：直连程序回 home 后、共享
 #: progs/settings.c
 msgid "Wait: the repositories' job is still running."
 msgstr "请稍候：仓库任务仍在运行。"
-
-#: progs/settings.c
-msgid "Wait: a package job is still running."
-msgstr "请稍候：软件包任务仍在运行。"
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
@@ -8699,6 +8738,10 @@ msgstr "已取消终端快捷键：已保存并生效。"
 #, c-format
 msgid "%s: none, saved and applied."
 msgstr "%s：无，已保存并生效。"
+
+#: progs/settings.c
+msgid "Applying the kernel choice through the host package manifest..."
+msgstr "正在通过宿主软件清单应用内核选择…"
 
 #: progs/settings.c
 #, c-format

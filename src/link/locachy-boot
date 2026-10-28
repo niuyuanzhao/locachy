@@ -9,7 +9,7 @@
 #     initramfs.img    process 1 (/usr/local/lib/locachy/init) and the font
 #                      (and what a LUKS2 root needs)
 #     locachy.efi      the unified kernel image, made by ukify (systemd-stub):
-#                      the packaged kernel (linux-cachyos-bore), the CPUs'
+#                      the selected packaged kernel (rc.conf boot_kernel), the CPUs'
 #                      microcode first (each one only if its package is
 #                      there; the kernel takes the one of its CPU), then
 #                      initramfs.img, and the command line (net.ifnames=0:
@@ -56,7 +56,19 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 [ -x "$lib/init" ] || { echo "locachy-boot: no $lib/init (make.sh --boot builds it)" >&2; exit 1; }
-kernel=$(pacman -Qlq linux-cachyos-bore | grep '/vmlinuz$')
+kernel_package=$(rc_value boot_kernel)
+[ -n "$kernel_package" ] || kernel_package=linux-cachyos-bore
+case "$kernel_package" in
+linux|linux-*) ;;
+*) echo "locachy-boot: boot_kernel is not a kernel package" >&2; exit 1 ;;
+esac
+case "$kernel_package" in
+*[!a-z0-9+._-]*|*-headers) echo "locachy-boot: invalid boot_kernel" >&2; exit 1 ;;
+esac
+kernel=$(pacman -Qlq "$kernel_package" | grep '/vmlinuz$')
+[ "$(printf '%s\n' "$kernel" | wc -l)" -eq 1 ] && [ -f "$kernel" ] || {
+    echo "locachy-boot: $kernel_package must provide one installed kernel image" >&2; exit 1;
+}
 version=$(basename "$(dirname "$kernel")")
 
 microcode=
