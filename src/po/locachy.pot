@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-28 04:50+0800\n"
+"POT-Creation-Date: 2026-10-28 00:54-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -6700,6 +6700,14 @@ msgid "none yet"
 msgstr ""
 
 #: progs/settings.c
+msgid " (infrared)"
+msgstr ""
+
+#: progs/settings.c
+msgid "none set"
+msgstr ""
+
+#: progs/settings.c
 #, c-format
 msgid "%d recorded"
 msgid_plural "%d recorded"
@@ -7893,10 +7901,6 @@ msgid "< the NVIDIA GPU (CUDA) >"
 msgstr ""
 
 #: progs/settings.c
-msgid "none set"
-msgstr ""
-
-#: progs/settings.c
 msgid "Enter: in a terminal (howdy add)"
 msgstr ""
 
@@ -8365,13 +8369,12 @@ msgid "howdy is not installed."
 msgstr ""
 
 #: progs/settings.c
-#, c-format
-msgid "No camera in %s, or howdy could not set it."
+msgid "No camera (/dev/video*), or howdy could not set it."
 msgstr ""
 
 #: progs/settings.c
 #, c-format
-msgid "howdy uses %.100s (its infrared one, where there are two)."
+msgid "howdy uses %.100s. Face recognition wants the infrared one."
 msgstr ""
 
 #: progs/settings.c

@@ -26,6 +26,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <glob.h>
+#include <limits.h>
 #include <poll.h>
 #include <pwd.h>
 #include <signal.h>
@@ -1096,12 +1097,49 @@ static int camera(char *out, size_t size)
     return 0;
 }
 
-/* howdy's camera: device_path in its configuration, a name in
- * /dev/v4l/by-path (howdy's configuration and the Arch Wiki: unlike
- * /dev/videoN, it stays when devices are plugged in or out). */
+/* howdy's camera: device_path in its configuration, a /dev/videoN, as
+ * howdy's own setup and the Arch Wiki take it. The capture devices are
+ * listed with V4L2's name for each, the infrared one marked: its frames are
+ * grey only (the second function of a Windows Hello camera). */
 #define HOWDY_CONF "/etc/howdy/config.ini"
-#define V4L_BY_PATH "/dev/v4l/by-path"
 static char face_camera[160];
+struct face_cam {
+    char path[24], name[40];
+    int ir;
+};
+
+static int face_cameras(struct face_cam *out, int max)
+{
+    int n = 0;
+    for (int i = 0; i < 64 && n < max; i++) {
+        char path[24];
+        snprintf(path, sizeof path, "/dev/video%d", i);
+        int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+        if (fd < 0) {
+            continue;
+        }
+        struct v4l2_capability cap;
+        if (ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0 &&
+            ((cap.device_caps ? cap.device_caps : cap.capabilities) & V4L2_CAP_VIDEO_CAPTURE)) {
+            struct v4l2_fmtdesc f = { .type = V4L2_BUF_TYPE_VIDEO_CAPTURE };
+            int grey = 0, colour = 0;
+            for (f.index = 0; f.index < 64 && ioctl(fd, VIDIOC_ENUM_FMT, &f) == 0; f.index++) {
+                if (f.pixelformat == V4L2_PIX_FMT_GREY || f.pixelformat == V4L2_PIX_FMT_Y10 ||
+                    f.pixelformat == V4L2_PIX_FMT_Y12 || f.pixelformat == V4L2_PIX_FMT_Y16) {
+                    grey = 1;
+                } else {
+                    colour = 1;
+                }
+            }
+            snprintf(out[n].path, sizeof out[n].path, "%s", path);
+            snprintf(out[n].name, sizeof out[n].name, "%.39s", (const char *)cap.card);
+            out[n].ir = grey && !colour;
+            n++;
+        }
+        close(fd);
+    }
+    return n;
+}
 
 static void load_face_camera(void)
 {
@@ -1120,46 +1158,55 @@ static void load_face_camera(void)
     }
 }
 
-static int by_name(const void *a, const void *b);
+/* Which of cams howdy's device_path is (a /dev/v4l link set before is the
+ * node it points to); -1 for none. */
+static int face_camera_index(const struct face_cam *cams, int ncams)
+{
+    char real[PATH_MAX];
+    const char *at = face_camera[0] && realpath(face_camera, real) ? real : face_camera;
+    for (int i = 0; i < ncams; i++) {
+        if (strcmp(cams[i].path, at) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* What the camera row shows: the node, its name, infrared or not. */
+static void face_camera_label(char *out, size_t size)
+{
+    struct face_cam cams[16];
+    int ncams = face_cameras(cams, 16), i = face_camera_index(cams, ncams);
+    if (i >= 0) {
+        snprintf(out, size, "%s  %s%s", cams[i].path, cams[i].name, cams[i].ir ? _(" (infrared)") : "");
+    } else {
+        snprintf(out, size, "%s", face_camera[0] ? face_camera : _("none set"));
+    }
+}
 
 /* The next (dir 1) or previous capture device after the one howdy has, set
- * as its device_path by howdy itself (howdy set). 0 if set. */
+ * as its device_path by howdy itself (howdy set); with none set yet, the
+ * first infrared one. 0 if set. */
 static int next_face_camera(int dir)
 {
-    char cams[16][160], path[160], out[256];
-    struct dirent *e;
-    int ncams = 0, at = -1;
-    DIR *d = opendir(V4L_BY_PATH);
-    while (d && (e = readdir(d)) != NULL && ncams < 16) {
-        if (e->d_name[0] == '.') {
-            continue;
-        }
-        snprintf(path, sizeof path, "%s/%.120s", V4L_BY_PATH, e->d_name);
-        int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-        struct v4l2_capability cap;
-        if (fd >= 0 && ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0 &&
-            ((cap.device_caps ? cap.device_caps : cap.capabilities) & V4L2_CAP_VIDEO_CAPTURE)) {
-            snprintf(cams[ncams++], sizeof cams[0], "%s", path);
-        }
-        if (fd >= 0) {
-            close(fd);
-        }
-    }
-    if (d) {
-        closedir(d);
-    }
+    struct face_cam cams[16];
+    char out[256];
+    int ncams = face_cameras(cams, 16);
     if (ncams == 0) {
         return -1;
     }
-    qsort(cams, (size_t)ncams, sizeof cams[0], by_name);
-    for (int i = 0; i < ncams; i++) {
-        at = strcmp(cams[i], face_camera) == 0 ? i : at;
+    int at = face_camera_index(cams, ncams), to = 0;
+    if (at >= 0) {
+        to = (at + dir + ncams) % ncams;
+    } else {
+        for (int i = ncams - 1; i >= 0; i--) {
+            to = cams[i].ir ? i : to;
+        }
     }
-    char *to = cams[((at < 0 ? (dir > 0 ? -1 : 0) : at) + dir + ncams) % ncams];
-    char *const argv[] = { HOWDY, "set", "device_path", to, NULL };
+    char *const argv[] = { HOWDY, "set", "device_path", cams[to].path, NULL };
     command_output(argv, out, sizeof out);
     load_face_camera();
-    return strcmp(face_camera, to) == 0 ? 0 : -1;
+    return strcmp(face_camera, cams[to].path) == 0 ? 0 : -1;
 }
 
 static char face_models[160]; /* howdy -U USER list: how many, or why none */
@@ -4197,9 +4244,9 @@ static void item_text(int idx, char *line, size_t size)
         } else if (i == 3) {
             snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _(labels[3]), 30), face_models);
         } else if (i == 4) {
-            snprintf(line, size, "  %.95s < %.60s >", ui_pad(label, sizeof label, _(labels[4]), 30), face_camera[0] ?
-                     face_camera + (strncmp(face_camera, V4L_BY_PATH "/", sizeof V4L_BY_PATH) ? 0 : sizeof V4L_BY_PATH) :
-                     _("none set"));
+            char cam[96];
+            face_camera_label(cam, sizeof cam);
+            snprintf(line, size, "  %.95s < %.80s >", ui_pad(label, sizeof label, _(labels[4]), 30), cam);
         } else if (i == 5) {
             /* TRANSLATORS: Enter is the Enter key; keep it. */
             snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _(labels[5]), 30),
@@ -4838,9 +4885,11 @@ static void adjust(int dir)
         if (!howdy_installed()) {
             snprintf(notice, sizeof notice, "%s", _("howdy is not installed."));
         } else if (next_face_camera(dir) < 0) {
-            snprintf(notice, sizeof notice, _("No camera in %s, or howdy could not set it."), V4L_BY_PATH);
+            snprintf(notice, sizeof notice, "%s", _("No camera (/dev/video*), or howdy could not set it."));
         } else {
-            snprintf(notice, sizeof notice, _("howdy uses %.100s (its infrared one, where there are two)."), face_camera);
+            char cam[96];
+            face_camera_label(cam, sizeof cam);
+            snprintf(notice, sizeof notice, _("howdy uses %.100s. Face recognition wants the infrared one."), cam);
         }
         return;
     }

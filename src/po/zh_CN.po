@@ -2,7 +2,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-28 04:50+0800\n"
+"POT-Creation-Date: 2026-10-28 00:54-0400\n"
 "PO-Revision-Date: 2026-10-24 22:38+0000\n"
 "Last-Translator: LOCachy <38998838+niuyuanzhao@users.noreply.github.com>\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -6747,6 +6747,14 @@ msgid "none yet"
 msgstr "尚未录入"
 
 #: progs/settings.c
+msgid " (infrared)"
+msgstr "（红外）"
+
+#: progs/settings.c
+msgid "none set"
+msgstr "未设置"
+
+#: progs/settings.c
 #, c-format
 msgid "%d recorded"
 msgid_plural "%d recorded"
@@ -7940,10 +7948,6 @@ msgid "< the NVIDIA GPU (CUDA) >"
 msgstr "< NVIDIA GPU (CUDA) >"
 
 #: progs/settings.c
-msgid "none set"
-msgstr "未设置"
-
-#: progs/settings.c
 msgid "Enter: in a terminal (howdy add)"
 msgstr "Enter: 在终端中录入 (howdy add)"
 
@@ -8425,14 +8429,13 @@ msgid "howdy is not installed."
 msgstr "howdy 未安装。"
 
 #: progs/settings.c
-#, c-format
-msgid "No camera in %s, or howdy could not set it."
-msgstr "%s 中无摄像头，或 howdy 无法设置摄像头。"
+msgid "No camera (/dev/video*), or howdy could not set it."
+msgstr "没有摄像头（/dev/video*），或 howdy 无法设置它。"
 
 #: progs/settings.c
 #, c-format
-msgid "howdy uses %.100s (its infrared one, where there are two)."
-msgstr "howdy 使用 %.100s（如有两个摄像头，请选择红外摄像头）。"
+msgid "howdy uses %.100s. Face recognition wants the infrared one."
+msgstr "howdy 现在用 %.100s。人脸识别要用红外的那个。"
 
 #: progs/settings.c
 msgid "Enter: record your face (howdy add)."
