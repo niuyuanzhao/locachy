@@ -2,7 +2,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-28 08:21-0400\n"
+"POT-Creation-Date: 2026-10-28 10:00-0400\n"
 "PO-Revision-Date: 2026-10-24 22:38+0000\n"
 "Last-Translator: LOCachy <38998838+niuyuanzhao@users.noreply.github.com>\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -6747,18 +6747,30 @@ msgid "none yet"
 msgstr "尚未录入"
 
 #: progs/settings.c
-msgid " (infrared)"
-msgstr "（红外）"
+msgid " (infrared candidate)"
+msgstr "（红外候选）"
 
 #: progs/settings.c
-msgid "none set"
-msgstr "未设置"
+msgid "Automatic (infrared candidates)"
+msgstr "自动（红外候选）"
 
 #: progs/settings.c
 #, c-format
 msgid "%d recorded"
 msgid_plural "%d recorded"
 msgstr[0] "已录入 %d 个"
+
+#: progs/settings.c
+msgid "Face camera tools are not installed."
+msgstr "人脸摄像头工具尚未安装。"
+
+#: progs/settings.c
+msgid "Camera tested and saved through howdy."
+msgstr "摄像头已通过测试，并由 howdy 保存。"
+
+#: progs/settings.c
+msgid "Camera test or save failed; check the reported result."
+msgstr "摄像头测试或保存失败；请查看输出结果。"
 
 #: progs/settings.c
 msgid "Audio (PipeWire)"
@@ -7087,27 +7099,7 @@ msgid ""
 msgstr "新网络及未单独设置的已保存网络：%s，下次连接时生效。"
 
 #: progs/settings.c
-msgid "Tailscale login"
-msgstr "Tailscale 登录"
-
-#: progs/settings.c
-msgid "Scan the code with a phone, or open the address on another device:"
-msgstr "使用手机扫码，或在另一台设备上打开以下地址："
-
-#: progs/settings.c
-msgid "(the screen is too small for the code: use the address)"
-msgstr "（显示器过小无法显示二维码：请使用上方地址）"
-
-#. TRANSLATORS: q and Esc are key names; keep them.
-#: progs/settings.c
-msgid "q / Esc: cancel"
-msgstr "q / Esc: 取消"
-
-#: progs/settings.c
-msgid "Tailscale login cancelled."
-msgstr "Tailscale 登录已取消。"
-
-#: progs/settings.c
+#, c-format
 msgid "Tailscale: logged in."
 msgstr "Tailscale：已登录。"
 
@@ -7124,6 +7116,10 @@ msgstr "指纹：%s"
 #: progs/settings.c
 msgid "Touch or swipe the finger on the reader, again each time it asks."
 msgstr "请按提示反复在指纹识别器上按压或滑过手指。"
+
+#: progs/settings.c
+msgid "q / Esc: cancel"
+msgstr "q / Esc: 取消"
 
 #: progs/settings.c
 msgid "Fingerprint not added."
@@ -7962,6 +7958,10 @@ msgid "< the NVIDIA GPU (CUDA) >"
 msgstr "< NVIDIA GPU (CUDA) >"
 
 #: progs/settings.c
+msgid "Enter: test"
+msgstr "Enter: 测试"
+
+#: progs/settings.c
 msgid "Enter: in a terminal (howdy add)"
 msgstr "Enter: 在终端中录入 (howdy add)"
 
@@ -8459,13 +8459,14 @@ msgid "howdy is not installed."
 msgstr "howdy 未安装。"
 
 #: progs/settings.c
-msgid "No camera (/dev/video*), or howdy could not set it."
-msgstr "没有摄像头（/dev/video*），或 howdy 无法设置它。"
+msgid "No V4L2 capture camera found."
+msgstr "未找到可采集图像的 V4L2 摄像头。"
 
 #: progs/settings.c
-#, c-format
-msgid "howdy uses %.100s. Face recognition wants the infrared one."
-msgstr "howdy 现在用 %.100s。人脸识别要用红外的那个。"
+msgid ""
+"Enter: test this camera and save it if usable; Automatic tests infrared "
+"candidates."
+msgstr "Enter: 测试此摄像头，可用后保存；“自动”会测试红外候选设备。"
 
 #: progs/settings.c
 msgid "Enter: record your face (howdy add)."
@@ -10317,6 +10318,28 @@ msgstr "框选表格区域，再点击边缘附近划分行列；按 Esc 清除�
 #: progs/view.c
 msgid "Click to see the magnified view."
 msgstr "点击查看放大视图。"
+
+#~ msgid "Tailscale login"
+#~ msgstr "Tailscale 登录"
+
+#~ msgid "Scan the code with a phone, or open the address on another device:"
+#~ msgstr "使用手机扫码，或在另一台设备上打开以下地址："
+
+#~ msgid "(the screen is too small for the code: use the address)"
+#~ msgstr "（显示器过小无法显示二维码：请使用上方地址）"
+
+#~ msgid "Tailscale login cancelled."
+#~ msgstr "Tailscale 登录已取消。"
+
+#~ msgid "none set"
+#~ msgstr "未设置"
+
+#~ msgid "No camera (/dev/video*), or howdy could not set it."
+#~ msgstr "没有摄像头（/dev/video*），或 howdy 无法设置它。"
+
+#, c-format
+#~ msgid "howdy uses %.100s. Face recognition wants the infrared one."
+#~ msgstr "howdy 现在用 %.100s。人脸识别要用红外的那个。"
 
 #~ msgid "Keyboard layout (the system's console; this installer types US)"
 #~ msgstr "键盘布局（新系统的控制台；本安装器按美式输入）"

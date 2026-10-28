@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+"""Discover V4L2 capture devices and test them with howdy, without saving images."""
+import argparse
+import configparser
+import fcntl
+import glob
+import json
+import os
+import re
+import signal
+import stat
+import struct
+import subprocess
+import sys
+
+HOWDY = "/usr/bin/howdy"
+HOWDY_LIB = "/usr/lib/howdy"
+HOWDY_CONF = "/etc/howdy/config.ini"
+EMITTER = "/usr/bin/linux-enable-ir-emitter"
+PROBE_TIMEOUT = 12
+
+
+def capture_device(path):
+    """Linux videodev2.h: QUERYCAP and ENUM_FMT, never start streaming here."""
+    if not stat.S_ISCHR(os.stat(path).st_mode):
+        return None
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        capability = bytearray(104)
+        fcntl.ioctl(fd, 0x80685600, capability, True)  # VIDIOC_QUERYCAP
+        _, card, _, _, caps, device_caps, *_ = struct.unpack("=16s32s32s6I", capability)
+        caps = device_caps if caps & 0x80000000 else caps
+        if not caps & (0x00000001 | 0x00001000):  # VIDEO_CAPTURE / VIDEO_CAPTURE_MPLANE
+            return None
+        buffer_type = 1 if caps & 1 else 9
+        formats = []
+        for index in range(256):
+            fmt = bytearray(struct.pack("=3I32s5I", index, buffer_type, 0, b"", 0, 0, 0, 0, 0))
+            try:
+                fcntl.ioctl(fd, 0xc0405602, fmt, True)  # VIDIOC_ENUM_FMT
+            except OSError:
+                break
+            formats.append(bytes(fmt[44:48]).decode("ascii", "replace"))
+        grey = bool(formats) and all(fmt in ("GREY", "Y10 ", "Y12 ", "Y14 ", "Y16 ") for fmt in formats)
+        name = card.split(b"\0", 1)[0].decode("utf-8", "replace")
+        name = " ".join(name.split())
+        return {"path": path, "name": name, "candidate": grey, "formats": formats}
+    finally:
+        os.close(fd)
+
+
+def devices():
+    found = []
+    paths = [p for p in glob.glob("/dev/video*") if re.fullmatch(r"/dev/video[0-9]+", p)]
+    for path in sorted(paths, key=lambda p: int(p[10:])):
+        try:
+            device = capture_device(path)
+            if device:
+                found.append(device)
+        except OSError:
+            continue
+    return found
+
+
+def configured_device():
+    config = configparser.ConfigParser()
+    config.read(HOWDY_CONF)
+    return config.get("video", "device_path", fallback="")
+
+
+def resolve_device(path, found):
+    real = os.path.realpath(path)
+    return next((d for d in found if d["path"] == real), None)
+
+
+def probe_frame(path):
+    """A separate process bounds both camera open/grab and backend imports."""
+    command = [sys.executable, "-I", "-B", os.path.realpath(__file__), "--probe", path]
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        out, err = process.communicate(timeout=PROBE_TIMEOUT)
+    except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate()
+        if isinstance(error, KeyboardInterrupt):
+            raise
+        return {"status": "timeout", "detail": "capture timed out"}
+    if process.returncode:
+        detail = (err.strip() or out.strip() or "capture failed").splitlines()[-1]
+        return {"status": "error", "detail": detail[:300]}
+    try:
+        result = json.loads(out.splitlines()[-1])
+        if result["width"] <= 0 or result["height"] <= 0:
+            raise ValueError("empty frame")
+        result["status"] = "dark" if result["darkness"] > result["dark_threshold"] else "ok"
+        return result
+    except (ValueError, KeyError, IndexError, TypeError):
+        return {"status": "error", "detail": "capture backend returned no valid frame"}
+
+
+def probe_child(path):
+    sys.path.insert(0, HOWDY_LIB)
+    from recorders.video_capture import VideoCapture
+    import cv2
+    config = configparser.ConfigParser()
+    config.read(HOWDY_CONF)
+    if not config.has_section("video"):
+        raise RuntimeError("howdy video configuration is missing")
+    config.set("video", "device_path", path)
+    capture = None
+    try:
+        capture = VideoCapture(config)
+        _, gray = capture.read_frame()
+        # The same eight-bin histogram and threshold used by howdy compare.
+        histogram = cv2.calcHist([gray], [0], None, [8], [0, 256])
+        darkness = float(histogram[0][0]) * 100.0 / float(histogram.sum())
+        print(json.dumps({"width": int(gray.shape[1]), "height": int(gray.shape[0]),
+                          "mean": float(gray.mean()), "std": float(gray.std()), "darkness": darkness,
+                          "dark_threshold": config.getfloat("video", "dark_threshold", fallback=60)}), flush=True)
+    finally:
+        if capture is not None:
+            capture.release()
+
+
+def report(device, result):
+    label = f'{device["path"]}  {device["name"]}'
+    if result["status"] in ("ok", "dark"):
+        print(f'{label}: {result["width"]}x{result["height"]}, mean {result["mean"]:.1f}, '
+              f'contrast {result["std"]:.1f}, dark pixels {result["darkness"]:.1f}%, {result["status"]}', flush=True)
+        if result["status"] == "dark":
+            print("The frame is dark or uniform. Check the privacy shutter and configure the infrared emitter.", flush=True)
+    else:
+        print(f'{label}: {result["status"]}: {result["detail"]}', flush=True)
+
+
+def automatic(found):
+    # The packaged emitter discovers grey UVC devices. This is candidacy,
+    # not proof of infrared sensitivity or successful face authentication.
+    listing = subprocess.run([EMITTER, "--grey-devices"], capture_output=True, text=True, timeout=15, check=True)
+    paths = {line.strip() for line in listing.stdout.splitlines() if re.fullmatch(r"/dev/video[0-9]+", line.strip())}
+    candidates = [d for d in found if d["path"] in paths]
+    print(f"Infrared candidates: {len(candidates)}", flush=True)
+    good = []
+    current = resolve_device(configured_device(), candidates)
+    if current:
+        candidates = [current] + [d for d in candidates if d != current]
+    for device in candidates:
+        result = probe_frame(device["path"])
+        report(device, result)
+        if result["status"] == "ok":
+            good.append(device)
+            if device == current:
+                return device
+    if len(good) == 1:
+        return good[0]
+    if len(good) > 1:
+        raise RuntimeError("More than one infrared candidate works. Select a camera and test it explicitly.")
+    raise RuntimeError("No usable infrared candidate. Configure the emitter or select and test a camera; no colour fallback was selected.")
+
+
+def apply_device(device, user):
+    if not user:
+        raise ValueError("--user is required to apply the camera choice")
+    subprocess.run([HOWDY, "-U", user, "set", "device_path", device["path"]], check=True, timeout=10)
+    if os.path.realpath(configured_device()) != device["path"]:
+        raise RuntimeError("howdy did not retain the camera choice")
+    print(f'howdy camera: {device["path"]}', flush=True)
+
+
+def run(args):
+    found = devices()
+    if args.command == "list":
+        for device in found:
+            print(f'{device["path"]}\t{int(device["candidate"])}\t{device["name"]}')
+        return 0
+    if args.command == "test":
+        device = resolve_device(args.device, found)
+        if not device:
+            raise ValueError("Not an available V4L2 video capture device")
+        result = probe_frame(device["path"])
+        report(device, result)
+        if result["status"] != "ok":
+            return 1
+    elif args.command == "add":
+        device = resolve_device(configured_device(), found)
+        if device:
+            result = probe_frame(device["path"])
+            report(device, result)
+            if result["status"] != "ok":
+                raise RuntimeError("The configured camera failed. Test a different camera or configure the emitter before enrolling.")
+        else:
+            device = automatic(found)
+            apply_device(device, args.user)
+        return subprocess.call([HOWDY, "-U", args.user, "add"])
+    else:
+        device = automatic(found)
+    if args.apply:
+        apply_device(device, args.user)
+    print("Capture test passed; face recognition and infrared sensitivity are not verified by this test.", flush=True)
+    return 0
+
+
+def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--probe":
+        probe_child(sys.argv[2])
+        return 0
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=("list", "auto", "test", "add"))
+    parser.add_argument("device", nargs="?")
+    parser.add_argument("--user")
+    parser.add_argument("--apply", action="store_true", help="save a successfully tested device through howdy")
+    parser.add_argument("--interactive", action="store_true", help="wait for Enter after reporting the result")
+    args = parser.parse_args()
+    if args.command == "test" and not args.device:
+        parser.error("test requires a device")
+    if args.command != "test" and args.device:
+        parser.error("only test takes a device")
+    if (args.apply or args.command == "add") and not args.user:
+        parser.error("--user is required")
+    status = 1
+    try:
+        status = run(args)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+        print(f"locachy-face-camera: {error}", file=sys.stderr, flush=True)
+    if args.interactive and sys.stdin.isatty():
+        try:
+            input("Press Enter to return.")
+        except EOFError:
+            pass
+    return status
+
+
+if __name__ == "__main__":
+    sys.exit(main())

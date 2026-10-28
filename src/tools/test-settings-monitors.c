@@ -10,6 +10,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +28,8 @@ static int fixture_unlink(const char *);
 static int fixture_fclose(FILE *);
 static int fixture_kill(pid_t, int);
 static int fixture_sethostname(const char *, size_t);
+static struct passwd *fixture_getpwuid(uid_t);
+#define getpwuid fixture_getpwuid
 #define fopen fixture_fopen
 #define opendir fixture_opendir
 #define rename fixture_rename
@@ -38,6 +41,7 @@ static int fixture_sethostname(const char *, size_t);
 #define fork fixture_fork
 #define waitpid fixture_waitpid
 #define main settings_main
+#define SETTINGS_COMMAND_OUTPUT
 #define PACMAN_LOCAL "/fixture/pacman-local"
 #include "../progs/settings.c"
 #include "../base/ui.c"
@@ -53,6 +57,13 @@ static int fixture_sethostname(const char *, size_t);
 #undef rename
 #undef opendir
 #undef fopen
+#undef getpwuid
+
+static struct passwd *fixture_getpwuid(uid_t uid)
+{
+    static struct passwd user = { .pw_name = "testuser", .pw_uid = 1000, .pw_gid = 1000, .pw_dir = "/home/testuser" };
+    return uid == 1000 ? &user : NULL;
+}
 
 static char root[1024];
 static int fail_open, fail_close, fail_rename;
@@ -63,6 +74,26 @@ static uint32_t colors[100][256];
 static int keys[64], nkeys, keypos;
 static struct pointer_event mouse;
 static char snapshot[32];
+static const char *camera_listing = "", *pending_command;
+static int camera_commands;
+
+static void command_output(char *const argv[], char *buf, size_t size)
+{
+    buf[0] = '\0';
+    if (strcmp(argv[0], FACE_CAMERA_TOOL) == 0) {
+        assert(argv[1] && !strcmp(argv[1], "list") && argv[2] == NULL);
+        camera_commands++;
+        snprintf(buf, size, "%s", camera_listing);
+    } else {
+        pending_command = argv[0];
+        pid_t pid = fixture_fork();
+        if (pid > 0) {
+            fixture_kill(pid, SIGKILL);
+            fixture_waitpid(pid, NULL, 0);
+        }
+        pending_command = NULL;
+    }
+}
 
 static const char *map_path(const char *path, char *out, size_t size)
 {
@@ -148,7 +179,9 @@ static int fixture_fclose(FILE *f)
 /* Service rows (allow_rc): rc.conf's lines written, process 1 told,
  * packages "installed" by flags, locachy-pkg and nmcli not run. */
 static int allow_rc, hups, bar_hups, forks, fake_tailscale, fake_mihomo, fake_fprintd, fake_nvidia;
-static int fake_bluetooth, fake_rime, fake_rime_zh, fake_opt, fail_rc, term_calls, term_status, track_events;
+static int fake_bluetooth, fake_rime, fake_rime_zh, fake_opt, fake_howdy, fail_rc, term_calls, term_status, track_events;
+static int face_term_calls, tailscale_term_calls;
+static char face_term_args[512];
 static char rc_log[1024], events[32];
 
 static void event(char what)
@@ -169,6 +202,7 @@ static int fixture_sethostname(const char *name, size_t len)
 
 static int fixture_kill(pid_t pid, int signal)
 {
+    if (allow_rc && pending_command && signal == SIGKILL) return 0;
     if (allow_rc && pid == 4242 && signal == SIGHUP) { /* the fixture's locachy-bar */
         bar_hups++;
         return 0;
@@ -189,7 +223,8 @@ static int fixture_access(const char *path, int mode)
     if (!strcmp(path, "/usr/lib/fprintd") || !strcmp(path, "/usr/bin/fprintd-enroll")) return fake_fprintd ? 0 : -1;
     if (!strcmp(path, "/usr/lib/librime.so") || !strcmp(path, "/usr/bin/rime_deployer")) return fake_rime ? 0 : -1;
     if (!strcmp(path, "/usr/share/rime-data/rime_frost.schema.yaml")) return fake_rime_zh ? 0 : -1;
-    if (!strcmp(path, "/usr/local/bin/locachy-tpm") || !strcmp(path, HOWDY)) return -1;
+    if (!strcmp(path, HOWDY) || !strcmp(path, FACE_CAMERA_TOOL)) return fake_howdy ? 0 : -1;
+    if (!strcmp(path, "/usr/local/bin/locachy-tpm")) return -1;
     if (!strcmp(path, NVIDIA_DRIVER)) return fake_nvidia ? 0 : -1;
     if (!strcmp(path, "/etc/libinput")) return 0; /* its file is the fixture's */
     for (int i = 0; i < NOPT_MODULES; i++) {
@@ -201,6 +236,7 @@ static int fixture_access(const char *path, int mode)
 /* Elsewhere (load_nets' nmcli in the UI loop): no process, no networks. */
 static pid_t fixture_fork(void)
 {
+    if (!allow_rc && pending_command) return -1;
     event('F');
     return allow_rc ? 4000 + ++forks : -1;
 }
@@ -235,6 +271,20 @@ int rc_set(const char *name, const char *value)
 int base_call(char *const argv[])
 {
     assert(!strcmp(argv[0], "/usr/local/bin/term"));
+    if (!strcmp(argv[1], FACE_CAMERA_TOOL)) {
+        face_term_args[0] = '\0';
+        for (int i = 2; argv[i]; i++) {
+            size_t n = strlen(face_term_args);
+            snprintf(face_term_args + n, sizeof face_term_args - n, "%s%s", n ? " " : "", argv[i]);
+        }
+        face_term_calls++;
+        return term_status;
+    }
+    if (!strcmp(argv[1], "/usr/bin/tailscale")) {
+        assert(!strcmp(argv[2], "up") && !strcmp(argv[3], "--qr") && argv[4] == NULL);
+        tailscale_term_calls++;
+        return term_status;
+    }
     assert(!strcmp(argv[1], "/usr/bin/bluetui") && argv[2] == NULL);
     term_calls++;
     return term_status;
@@ -689,6 +739,14 @@ static void test_bluetooth(void)
     assert(!strcmp(pkg_action, "remove") && strstr(rc_log, "service_audio=(none)") && strstr(rc_log, "program_mixer=(none)"));
     pkg_check();
     fake_opt = 0;
+
+    tailscale_login();
+    assert(tailscale_term_calls == 1 && strstr(notice, "logged in"));
+    term_status = 7;
+    tailscale_login();
+    assert(tailscale_term_calls == 2 && strstr(notice, "failed (status 7)"));
+    term_status = 0;
+    puts("PASS Tailscale login runs the original CLI in term, no QR output parsing or layout");
 
     /* Source updates: the repository and branch rows, as locachy-pkg takes them. */
     assert(valid_update_repo("https://example.org/me/locachy.git") && valid_update_repo("git@example.org:me/l.git"));
@@ -1204,8 +1262,39 @@ int main(int argc, char **argv)
     assert(!strcmp(sudo_text, "#%PAM-1.0\nauth\t\tinclude\t\tsystem-auth\naccount\t\tinclude\t\tsystem-auth\n"));
     pkg_job = 0;
     fake_fprintd = 0;
-    /* Faces: installing needs a camera (the X230 has none), and with both on,
-     * sudo's line names both services. */
+    /* Faces use capture capabilities; enumeration never starts streaming. */
+    struct face_cam candidates[8];
+    camera_listing = "/dev/video0\t0\tColour Camera\n/dev/video128\t1\tIR Camera\n/dev/videobad\t1\tInvalid\n";
+    int ncam = face_cameras(candidates, 8);
+    assert(ncam == 2 && !candidates[0].ir && candidates[1].ir);
+    assert(!strcmp(candidates[1].path, "/dev/video128"));
+    face_choice[0] = '\0';
+    assert(next_face_camera(+1) == 0 && !strcmp(face_choice, "/dev/video0"));
+    assert(next_face_camera(+1) == 0 && !strcmp(face_choice, "/dev/video128"));
+    assert(next_face_camera(+1) == 0 && !face_choice[0]);
+    assert(next_face_camera(-1) == 0 && !strcmp(face_choice, "/dev/video128"));
+    assert(enter_row(fc_index() + 4));
+    file_text("howdy.ini", "[video]\ndevice_path=/dev/missing\n");
+    face_choice_loaded = 0;
+    load_face_camera();
+    assert(!face_choice[0]);
+    file_text("howdy.ini", "[video]\ndevice_path=/dev/video128\n");
+    face_choice_loaded = 0;
+    load_face_camera();
+    assert(!strcmp(face_choice, "/dev/video128") && camera_commands > 0);
+    fake_howdy = 1;
+    test_face_camera();
+    assert(face_term_calls == 1 && strstr(face_term_args, "test /dev/video128 --user ") &&
+           strstr(face_term_args, "--apply --interactive") && strstr(notice, "tested and saved"));
+    face_choice[0] = '\0';
+    term_status = 1;
+    test_face_camera();
+    assert(face_term_calls == 2 && strstr(face_term_args, "auto --user ") && strstr(notice, "failed"));
+    term_status = fake_howdy = 0;
+    camera_listing = "";
+    face_choice[0] = '\0';
+    puts("PASS camera candidates from capture enumeration, automatic choice and preview without configuration writes");
+    /* With both unlock ways on, sudo names both PAM services. */
     assert(fc_index() == fp_index() + 4 && rclone_index() == fc_index() + 7 &&
            lang_index() == rclone_index() + 3 && host_index() == lang_index() + 1 &&
            ime_index() == host_index() + 1 && tpm_index() == ime_index() + 2 &&

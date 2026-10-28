@@ -41,7 +41,6 @@
 #include <unistd.h>
 #include <linux/rtc.h>
 #include <linux/input-event-codes.h>
-#include <linux/videodev2.h>
 
 #include "base.h"
 #include "auth.h"
@@ -1085,70 +1084,47 @@ static int howdy_installed(void)
     return access(HOWDY, X_OK) == 0;
 }
 
-/* A V4L2 video capture device (a camera); its path into out. */
-static int camera(char *out, size_t size)
-{
-    char path[32];
-    for (int i = 0; i < 16; i++) {
-        snprintf(path, sizeof path, "/dev/video%d", i);
-        int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-        struct v4l2_capability cap;
-        int capture = fd >= 0 && ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0 &&
-                      ((cap.device_caps ? cap.device_caps : cap.capabilities) & V4L2_CAP_VIDEO_CAPTURE);
-        if (fd >= 0) {
-            close(fd);
-        }
-        if (capture) {
-            snprintf(out, size, "%s", path);
-            return 1;
-        }
-    }
-    return 0;
-}
-
-/* howdy's camera: device_path in its configuration, a /dev/videoN, as
- * howdy's own setup and the Arch Wiki take it. The capture devices are
- * listed with V4L2's name for each, the infrared one marked: its frames are
- * grey only (the second function of a Windows Hello camera). */
 #define HOWDY_CONF "/etc/howdy/config.ini"
-static char face_camera[160];
+#define FACE_CAMERA_TOOL "/usr/local/bin/locachy-face-camera"
+static char face_camera[160], face_choice[160];
+static int face_choice_loaded;
 struct face_cam {
-    char path[24], name[40];
+    char path[64], name[96];
     int ir;
 };
 
+/* Capability enumeration only: painting settings never starts streaming. */
 static int face_cameras(struct face_cam *out, int max)
 {
+    char buf[8192], *save;
+    char *const argv[] = { FACE_CAMERA_TOOL, "list", NULL };
+    command_output(argv, buf, sizeof buf);
     int n = 0;
-    for (int i = 0; i < 64 && n < max; i++) {
-        char path[24];
-        snprintf(path, sizeof path, "/dev/video%d", i);
-        int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-        if (fd < 0) {
-            continue;
-        }
-        struct v4l2_capability cap;
-        if (ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0 &&
-            ((cap.device_caps ? cap.device_caps : cap.capabilities) & V4L2_CAP_VIDEO_CAPTURE)) {
-            struct v4l2_fmtdesc f = { .type = V4L2_BUF_TYPE_VIDEO_CAPTURE };
-            int grey = 0, colour = 0;
-            for (f.index = 0; f.index < 64 && ioctl(fd, VIDIOC_ENUM_FMT, &f) == 0; f.index++) {
-                if (f.pixelformat == V4L2_PIX_FMT_GREY || f.pixelformat == V4L2_PIX_FMT_Y10 ||
-                    f.pixelformat == V4L2_PIX_FMT_Y12 || f.pixelformat == V4L2_PIX_FMT_Y16) {
-                    grey = 1;
-                } else {
-                    colour = 1;
-                }
-            }
-            snprintf(out[n].path, sizeof out[n].path, "%s", path);
-            snprintf(out[n].name, sizeof out[n].name, "%.39s", (const char *)cap.card);
-            out[n].ir = grey && !colour;
-            n++;
-        }
-        close(fd);
+    for (char *line = strtok_r(buf, "\n", &save); line && n < max; line = strtok_r(NULL, "\n", &save)) {
+        char *candidate = strchr(line, '\t');
+        if (!candidate) continue;
+        *candidate++ = '\0';
+        char *name = strchr(candidate, '\t');
+        if (!name) continue;
+        *name++ = '\0';
+        if (strncmp(line, "/dev/video", 10) || !line[10] ||
+            strspn(line + 10, "0123456789") != strlen(line + 10) || strlen(line) >= sizeof out[n].path) continue;
+        snprintf(out[n].path, sizeof out[n].path, "%s", line);
+        snprintf(out[n].name, sizeof out[n].name, "%.95s", name);
+        out[n++].ir = strcmp(candidate, "1") == 0;
     }
     return n;
 }
+
+static int camera(char *out, size_t size)
+{
+    struct face_cam cam;
+    if (!face_cameras(&cam, 1)) return 0;
+    snprintf(out, size, "%.*s", (int)(size ? size - 1 : 0), cam.path);
+    return 1;
+}
+
+static int face_camera_index(const struct face_cam *cams, int ncams);
 
 static void load_face_camera(void)
 {
@@ -1165,14 +1141,20 @@ static void load_face_camera(void)
     if (f) {
         fclose(f);
     }
+    if (!face_choice_loaded) {
+        struct face_cam cams[16];
+        snprintf(face_choice, sizeof face_choice, "%s", face_camera);
+        int n = face_cameras(cams, 16);
+        if (face_camera_index(cams, n) < 0) face_choice[0] = '\0';
+        face_choice_loaded = 1;
+    }
 }
 
-/* Which of cams howdy's device_path is (a /dev/v4l link set before is the
- * node it points to); -1 for none. */
+/* Match a configured path or a stable device link to a capture node. */
 static int face_camera_index(const struct face_cam *cams, int ncams)
 {
     char real[PATH_MAX];
-    const char *at = face_camera[0] && realpath(face_camera, real) ? real : face_camera;
+    const char *at = face_choice[0] && realpath(face_choice, real) ? real : face_choice;
     for (int i = 0; i < ncams; i++) {
         if (strcmp(cams[i].path, at) == 0) {
             return i;
@@ -1187,40 +1169,24 @@ static void face_camera_label(char *out, size_t size)
     struct face_cam cams[16];
     int ncams = face_cameras(cams, 16), i = face_camera_index(cams, ncams);
     if (i >= 0) {
-        snprintf(out, size, "%s  %s%s", cams[i].path, cams[i].name, cams[i].ir ? _(" (infrared)") : "");
+        char label[256];
+        snprintf(label, sizeof label, "%s  %s%s", cams[i].path, cams[i].name, cams[i].ir ? _(" (infrared candidate)") : "");
+        snprintf(out, size, "%.*s", (int)(size ? size - 1 : 0), label);
     } else {
-        snprintf(out, size, "%.*s", (int)(size ? size - 1 : 0), face_camera[0] ? face_camera : _("none set"));
+        snprintf(out, size, "%.*s", (int)(size ? size - 1 : 0), face_choice[0] ? face_choice : _("Automatic (infrared candidates)"));
     }
 }
 
-/* The next (dir 1) or previous capture device after the one howdy has, set
- * as its device_path by howdy itself (howdy set); with none set yet, the
- * first infrared one. 0 if set. */
+/* Selection is a preview; Enter tests it before howdy saves the choice. */
 static int next_face_camera(int dir)
 {
     struct face_cam cams[16];
-    char out[256];
     int ncams = face_cameras(cams, 16);
-    if (ncams == 0) {
-        return -1;
-    }
-    int at = face_camera_index(cams, ncams), to = 0;
-    if (at >= 0) {
-        to = (at + dir + ncams) % ncams;
-    } else {
-        for (int i = ncams - 1; i >= 0; i--) {
-            to = cams[i].ir ? i : to;
-        }
-    }
-    /* howdy takes no command from root without a user (-U), set included. */
-    const char *user = user_name();
-    if (!user) {
-        return -1;
-    }
-    char *const argv[] = { HOWDY, "-U", (char *)user, "set", "device_path", cams[to].path, NULL };
-    command_output(argv, out, sizeof out);
-    load_face_camera();
-    return strcmp(face_camera, cams[to].path) == 0 ? 0 : -1;
+    if (ncams == 0) return -1;
+    int at = face_camera_index(cams, ncams) + 1;
+    int to = (at + dir + ncams + 1) % (ncams + 1);
+    snprintf(face_choice, sizeof face_choice, "%s", to ? cams[to - 1].path : "");
+    return 0;
 }
 
 static char face_models[160]; /* howdy -U USER list: how many, or why none */
@@ -1260,6 +1226,22 @@ static int in_term(char *const argv[])
     }
     call[n] = NULL;
     return base_call(call);
+}
+
+static void test_face_camera(void)
+{
+    const char *user = user_name();
+    if (!howdy_installed() || !user || access(FACE_CAMERA_TOOL, X_OK) != 0) {
+        snprintf(notice, sizeof notice, "%s", _("Face camera tools are not installed."));
+        return;
+    }
+    char *const auto_cam[] = { FACE_CAMERA_TOOL, "auto", "--user", (char *)user, "--apply", "--interactive", NULL };
+    char *const test_cam[] = { FACE_CAMERA_TOOL, "test", face_choice, "--user", (char *)user, "--apply", "--interactive", NULL };
+    int status = in_term(face_choice[0] ? test_cam : auto_cam);
+    face_choice_loaded = 0;
+    load_face_camera();
+    snprintf(notice, sizeof notice, "%s", status == 0 ? _("Camera tested and saved through howdy.") :
+             _("Camera test or save failed; check the reported result."));
 }
 
 struct opt_module {
@@ -1599,6 +1581,8 @@ static void repos_check(void)
 
 /* What a command (argv[0] a full path) writes on its output within 1.5 s,
  * into buf. */
+#ifndef SETTINGS_COMMAND_OUTPUT
+#define SETTINGS_COMMAND_OUTPUT
 static void command_output(char *const argv[], char *buf, size_t size)
 {
     int p[2];
@@ -1634,6 +1618,7 @@ static void command_output(char *const argv[], char *buf, size_t size)
     }
     buf[len] = '\0';
 }
+#endif
 
 /* What tailscaled says: BackendState, and the address when connected. */
 static void tailscale_state(char *state, size_t ssize, char *ip, size_t isize)
@@ -2206,94 +2191,13 @@ static void set_mac_default(int mac)
              _(mac_labels[mac_default]));
 }
 
-/* tailscale up --qr: its address and code on the screen until it has logged
- * in (or failed), or q / Esc cancels it. The code's lines are "##" for a
- * light module and "  " for a dark one: a 12x24 cell pair is one square. */
+/* Keep the CLI output intact, including its QR code and login instructions. */
 static void tailscale_login(void)
 {
-    int p[2];
-    if (pipe2(p, O_CLOEXEC | O_NONBLOCK) < 0) {
-        return;
-    }
-    pid_t pid = fork();
-    if (pid == 0) {
-        setsid();
-        int null = open("/dev/null", O_RDONLY);
-        if (null >= 0) {
-            dup2(null, STDIN_FILENO);
-        }
-        dup2(p[1], STDOUT_FILENO);
-        dup2(p[1], STDERR_FILENO);
-        execl("/usr/bin/tailscale", "tailscale", "up", "--qr", (char *)NULL);
-        _exit(127);
-    }
-    close(p[1]);
-    if (pid < 0) {
-        close(p[0]);
-        return;
-    }
-    static char out[32768];
-    size_t len = 0;
-    int status = -1, cancelled = 0;
-    for (;;) {
-        ssize_t n;
-        while (len < sizeof out - 1 && (n = read(p[0], out + len, sizeof out - 1 - len)) > 0) {
-            len += (size_t)n;
-        }
-        out[len] = '\0';
-        if (waitpid(pid, &status, WNOHANG) == pid) {
-            break;
-        }
-        /* The screen: title, address, code, the other lines, the keys. */
-        char copy[sizeof out];
-        memcpy(copy, out, len + 1);
-        screen_fill(0, 0, screen_cols(), screen_rows(), BG);
-        screen_bar(_("Tailscale login"), NULL);
-        screen_text(2, 2, _("Scan the code with a phone, or open the address on another device:"), FG, BG);
-        int r = 6, qr_rows = 0;
-        for (char *s = copy, *end; *s; s = end) {
-            end = s + strcspn(s, "\n");
-            int last = *end == '\0';
-            *end = '\0';
-            end = last ? end : end + 1;
-            char *t = s + strspn(s, " \t");
-            int code = strlen(s) >= 20 && strspn(s, "# ") == strlen(s);
-            if (strncmp(t, "https://", 8) == 0) {
-                screen_text(4, 3, t, ACCENT, BG);
-            } else if (code) {
-                if (r + qr_rows < screen_rows() - 4) {
-                    for (int c = 0; s[c] && 2 + c < screen_cols(); c++) {
-                        screen_fill(2 + c, r + qr_rows, 1, 1, s[c] == '#' ? 0xFFFFFF : 0x000000);
-                    }
-                }
-                qr_rows++;
-            } else if (*t && strncmp(t, "To authenticate", 15) != 0) {
-                screen_text(2, screen_rows() - 3, t, DIM, BG);
-            }
-        }
-        if (qr_rows && r + qr_rows >= screen_rows() - 4) {
-            screen_text(2, r, _("(the screen is too small for the code: use the address)"), DIM, BG);
-        }
-        /* TRANSLATORS: q and Esc are key names; keep them. */
-        screen_text(2, screen_rows() - 2, _("q / Esc: cancel"), ACCENT, BG);
-        screen_flush();
-        int key = key_poll_timeout(p[0], 500);
-        if (key == 'q' || key == 27) {
-            kill(-pid, SIGTERM);
-            waitpid(pid, &status, 0);
-            cancelled = 1;
-            break;
-        }
-    }
-    close(p[0]);
-    if (cancelled) {
-        snprintf(notice, sizeof notice, "%s", _("Tailscale login cancelled."));
-    } else if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-        snprintf(notice, sizeof notice, "%s", _("Tailscale: logged in."));
-    } else {
-        snprintf(notice, sizeof notice, _("Tailscale login failed (status %d)."),
-                 WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status));
-    }
+    char *const argv[] = { "/usr/bin/tailscale", "up", "--qr", NULL };
+    int status = in_term(argv);
+    snprintf(notice, sizeof notice, status == 0 ? _("Tailscale: logged in.") :
+             _("Tailscale login failed (status %d)."), status);
 }
 
 /* fprintd-enroll -f FINGER USER: what it says, until it ends or q / Esc
@@ -3983,7 +3887,7 @@ static int enter_row(int idx)
            idx == wp_index() || idx == tk_index() || idx == host_index() || idx == upd_index() || idx == upd_index() + 1 ||
            idx == boot_index() + 1 || idx == boot_index() + 2 || idx == boot_index() + 3 ||
            idx == repo_index() + NREPO_SECTIONS ||
-           idx == sec_index() || idx == sec_index() + 2 || idx == fp_index() + 3 || idx == fc_index() + 5 ||
+           idx == sec_index() || idx == sec_index() + 2 || idx == fp_index() + 3 || idx == fc_index() + 4 || idx == fc_index() + 5 ||
            idx == fc_index() + 6 || idx == rclone_index() + 2 || idx == tpm_index() ||
            idx == tz_index() || idx == tz_index() + 2 || (idx >= imek_index() && idx < imek_index() + NIME_KEYS);
 }
@@ -4314,7 +4218,8 @@ static void item_text(int idx, char *line, size_t size)
         } else if (i == 4) {
             char cam[96];
             face_camera_label(cam, sizeof cam);
-            snprintf(line, size, "  %.95s < %.80s >", ui_pad(label, sizeof label, _(labels[4]), 30), cam);
+            snprintf(line, size, "  %.95s < %.80s >  %s", ui_pad(label, sizeof label, _(labels[4]), 30), cam,
+                     _("Enter: test"));
         } else if (i == 5) {
             /* TRANSLATORS: Enter is the Enter key; keep it. */
             snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _(labels[5]), 30),
@@ -4963,11 +4868,9 @@ static void adjust(int dir)
         if (!howdy_installed()) {
             snprintf(notice, sizeof notice, "%s", _("howdy is not installed."));
         } else if (next_face_camera(dir) < 0) {
-            snprintf(notice, sizeof notice, "%s", _("No camera (/dev/video*), or howdy could not set it."));
+            snprintf(notice, sizeof notice, "%s", _("No V4L2 capture camera found."));
         } else {
-            char cam[96];
-            face_camera_label(cam, sizeof cam);
-            snprintf(notice, sizeof notice, _("howdy uses %.100s. Face recognition wants the infrared one."), cam);
+            snprintf(notice, sizeof notice, "%s", _("Enter: test this camera and save it if usable; Automatic tests infrared candidates."));
         }
         return;
     }
@@ -5564,13 +5467,16 @@ int main(int argc, char **argv)
                 snprintf(notice, sizeof notice, "%s", _("fprintd is not installed: the Fingerprint reader line installs it."));
             }
             draw();
+        } else if (key == '\n' && selected == fc_index() + 4) {
+            test_face_camera();
+            draw();
         } else if (key == '\n' && (selected == fc_index() + 5 || selected == fc_index() + 6)) {
             const char *user = user_name();
             int add = selected == fc_index() + 5;
             if (!howdy_installed() || !user || (!add && access(IR_EMITTER, X_OK) != 0)) {
                 snprintf(notice, sizeof notice, _("%s is not installed."), add ? "howdy" : "linux-enable-ir-emitter");
             } else {
-                char *const howdy_add[] = { HOWDY, "-U", (char *)user, "add", NULL };
+                char *const howdy_add[] = { FACE_CAMERA_TOOL, "add", "--user", (char *)user, "--interactive", NULL };
                 char *const emitter[] = { IR_EMITTER, "configure", NULL };
                 int status = in_term(add ? howdy_add : emitter);
                 snprintf(notice, sizeof notice, status == 0 ? _("%s done.") : _("%s did not finish."),

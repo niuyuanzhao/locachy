@@ -366,6 +366,15 @@ migrate_conf() { # CONF
             echo "make: $1: its command is now command ($first) and arguments (${words#* })"
         fi
     fi
+    # Repair the shipped Edge default, never replace custom arguments.
+    if grep -qx 'package="microsoft-edge-stable-bin"' "$1" &&
+       grep -qx 'command="/usr/bin/microsoft-edge-stable"' "$1" &&
+       { ! grep -q '^arguments=' "$1" || grep -qx 'arguments=""' "$1"; } &&
+       ! grep '^arguments=' "$1" | grep -qv '^arguments=""$'; then
+        { grep -v '^arguments=' "$1"; printf 'arguments="--ozone-platform=wayland"\n'; } >"$1.new"
+        mv "$1.new" "$1"
+        echo "make: $1: Edge uses the native Wayland platform"
+    fi
 }
 for conf in /etc/locachy/containers/*.conf; do
     if [ -f "$conf" ]; then
@@ -409,6 +418,7 @@ install -m 755 "$src/link/tor-client" "$lib/tor-client"
 install -m 755 "$src/link/tor-enforce" "$lib/tor-enforce"
 install -m 755 "$src/link/rclone-client" "$lib/rclone-client"
 install -m 755 "$src/link/locachy-tpm" /usr/local/bin/locachy-tpm
+install -m 755 "$src/link/locachy-face-camera" /usr/local/bin/locachy-face-camera
 install -m 755 "$src/link/locachy-firmware" /usr/local/bin/locachy-firmware
 install -m 755 "$src/link/reboot" /usr/local/bin/reboot
 install -m 755 "$src/link/poweroff" /usr/local/bin/poweroff

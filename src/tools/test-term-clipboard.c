@@ -74,6 +74,15 @@ static void choose_text(int a, int b, const char *expected)
 
 int main(void)
 {
+    setup_grid(120, 80);
+    feed_text("To authenticate, visit:\r\nhttps://example.invalid/login\r\n"
+              "  \xe2\x96\x88\xe2\x96\x88  \r\n"
+              "  \xe2\x96\x80\xe2\x96\x84  \r\n");
+    assert(grid[2 * cols + 2].ch == 0x2588 && grid[2 * cols + 3].ch == 0x2588);
+    assert(grid[3 * cols + 2].ch == 0x2580 && grid[3 * cols + 3].ch == 0x2584);
+    assert(cy == 4 && hist_len == 0);
+    puts("PASS sequential login output preserves Unicode QR rows and spaces");
+
     setup_grid(8, 4);
     feed_text("abcdefghij\r\n中文🌍");
     assert(soft[0] == 1 && soft[1] == 0);

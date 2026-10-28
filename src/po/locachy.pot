@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-28 08:21-0400\n"
+"POT-Creation-Date: 2026-10-28 10:00-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -6700,11 +6700,11 @@ msgid "none yet"
 msgstr ""
 
 #: progs/settings.c
-msgid " (infrared)"
+msgid " (infrared candidate)"
 msgstr ""
 
 #: progs/settings.c
-msgid "none set"
+msgid "Automatic (infrared candidates)"
 msgstr ""
 
 #: progs/settings.c
@@ -6713,6 +6713,18 @@ msgid "%d recorded"
 msgid_plural "%d recorded"
 msgstr[0] ""
 msgstr[1] ""
+
+#: progs/settings.c
+msgid "Face camera tools are not installed."
+msgstr ""
+
+#: progs/settings.c
+msgid "Camera tested and saved through howdy."
+msgstr ""
+
+#: progs/settings.c
+msgid "Camera test or save failed; check the reported result."
+msgstr ""
 
 #: progs/settings.c
 msgid "Audio (PipeWire)"
@@ -7042,27 +7054,7 @@ msgid ""
 msgstr ""
 
 #: progs/settings.c
-msgid "Tailscale login"
-msgstr ""
-
-#: progs/settings.c
-msgid "Scan the code with a phone, or open the address on another device:"
-msgstr ""
-
-#: progs/settings.c
-msgid "(the screen is too small for the code: use the address)"
-msgstr ""
-
-#. TRANSLATORS: q and Esc are key names; keep them.
-#: progs/settings.c
-msgid "q / Esc: cancel"
-msgstr ""
-
-#: progs/settings.c
-msgid "Tailscale login cancelled."
-msgstr ""
-
-#: progs/settings.c
+#, c-format
 msgid "Tailscale: logged in."
 msgstr ""
 
@@ -7078,6 +7070,10 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Touch or swipe the finger on the reader, again each time it asks."
+msgstr ""
+
+#: progs/settings.c
+msgid "q / Esc: cancel"
 msgstr ""
 
 #: progs/settings.c
@@ -7915,6 +7911,10 @@ msgid "< the NVIDIA GPU (CUDA) >"
 msgstr ""
 
 #: progs/settings.c
+msgid "Enter: test"
+msgstr ""
+
+#: progs/settings.c
 msgid "Enter: in a terminal (howdy add)"
 msgstr ""
 
@@ -8399,12 +8399,13 @@ msgid "howdy is not installed."
 msgstr ""
 
 #: progs/settings.c
-msgid "No camera (/dev/video*), or howdy could not set it."
+msgid "No V4L2 capture camera found."
 msgstr ""
 
 #: progs/settings.c
-#, c-format
-msgid "howdy uses %.100s. Face recognition wants the infrared one."
+msgid ""
+"Enter: test this camera and save it if usable; Automatic tests infrared "
+"candidates."
 msgstr ""
 
 #: progs/settings.c
