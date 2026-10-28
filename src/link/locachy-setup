@@ -33,11 +33,13 @@ show_status() {
 # (locachy-net) or here.
 wired_interface() {
     local list='for d in /sys/class/net/*; do
-        [ -e "$d/device" ] && [ ! -e "$d/wireless" ] && [ ! -e "$d/phy80211" ] &&
-            [ "$(cat "$d/type" 2>/dev/null)" = 1 ] && echo "${d##*/}"
+        if [ -e "$d/device" ] && [ ! -e "$d/wireless" ] && [ ! -e "$d/phy80211" ] &&
+            [ "$(cat "$d/type" 2>/dev/null)" = 1 ]; then echo "${d##*/}"; fi
     done'
-    { [ ! -e /run/netns/locachy-net ] || ip netns exec locachy-net sh -c "$list"; sh -c "$list"; } 2>/dev/null |
-        sort -u | head -n 1
+    {
+        if [ -e /run/netns/locachy-net ]; then ip netns exec locachy-net sh -c "$list" || true; fi
+        sh -c "$list" || true
+    } 2>/dev/null | sort -u | sed -n 1p
 }
 
 set_debug_link() {
@@ -68,9 +70,10 @@ set_debug_link() {
         fi
         if [ ! -e "/sys/class/net/$dev" ] && [ -e /run/netns/locachy-net ]; then
             nmcli device disconnect "$dev" >/dev/null 2>&1 || true
-            local host_pid=$$
+            # Into process 1's network, where it starts link-client: not the
+            # caller's, which may be a terminal without the network.
             ip netns exec locachy-net ip addr flush dev "$dev"
-            ip netns exec locachy-net ip link set "$dev" netns "$host_pid"
+            ip netns exec locachy-net ip link set "$dev" netns 1
         fi
         echo "locachy-setup: $dev reserved for debug; other ports remain managed by NetworkManager"
         echo "locachy-setup: kill -HUP 1 (or a reboot) starts the debug service"
