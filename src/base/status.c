@@ -4,6 +4,8 @@
 #ifdef CONFIG_NETWORKMANAGER
 #include <NetworkManager.h>
 #endif
+#include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -90,34 +92,108 @@ static void update_network(void)
 #endif
 }
 
+#ifndef POWER_SUPPLY_DIR
+#define POWER_SUPPLY_DIR "/sys/class/power_supply"
+#endif
+
+static int supply_text(const char *name, const char *attribute, char *out, size_t size)
+{
+    char path[512];
+    int n = snprintf(path, sizeof path, "%s/%s/%s", POWER_SUPPLY_DIR, name, attribute);
+    return n > 0 && (size_t)n < sizeof path ? read_first_line(path, out, size) : -1;
+}
+
+/* Negative means unavailable, not zero: missing energy must not imply empty. */
+static double supply_number(const char *name, const char *attribute)
+{
+    char text[64], *end;
+    if (supply_text(name, attribute, text, sizeof text) != 0) return -1;
+    errno = 0;
+    long long n = strtoll(text, &end, 10);
+    return errno || end == text || *end || n < 0 ? -1 : (double)n;
+}
+
 static void update_battery(void)
 {
-    char cap_s[16], ac_s[16], pwr_s[32], eng_s[32], state[32] = "";
-    int cap = -1, ac = 0;
-    double w = 0;
-    long mins = 0;
+    DIR *dir = opendir(POWER_SUPPLY_DIR);
+    struct dirent *entry;
+    int ac = 0, online_known = 0, charging = 0, full = 0;
+    int batteries = 0, capacities = 0, energies = 0, weighted = 0, powers = 0;
+    double capacity = 0, energy = 0, energy_full = 0, power = 0;
+    char type[32], scope[32], state[32] = "";
 
-    if (read_first_line("/sys/class/power_supply/BAT0/capacity", cap_s, sizeof cap_s) == 0) {
-        cap = atoi(cap_s);
+    while (dir && (entry = readdir(dir)) != NULL) {
+        const char *name = entry->d_name;
+        if (name[0] == '.' || supply_text(name, "type", type, sizeof type) != 0) continue;
+        if (supply_text(name, "scope", scope, sizeof scope) == 0 && strcmp(scope, "Device") == 0) continue;
+        if (strcmp(type, "Battery") != 0) {
+            double online = supply_number(name, "online");
+            if (online >= 0) {
+                online_known = 1;
+                ac |= online > 0;
+            }
+            continue;
+        }
+        if (supply_number(name, "present") == 0) continue;
+        batteries++;
+        if (supply_text(name, "status", state, sizeof state) == 0) {
+            charging += strcmp(state, "Charging") == 0;
+            full += strcmp(state, "Full") == 0;
+        }
+        double now = supply_number(name, "energy_now");
+        double total = supply_number(name, "energy_full");
+        double volts = supply_number(name, "voltage_now");
+        /* Charge-only drivers need a common voltage to compare battery energy. */
+        if (now < 0 || total <= 0) {
+            double charge = supply_number(name, "charge_now");
+            double charge_full = supply_number(name, "charge_full");
+            double reference = supply_number(name, "voltage_min_design");
+            if (reference <= 0) reference = volts;
+            if (charge >= 0 && charge_full > 0 && reference > 0) {
+                now = charge * reference / 1e6;
+                total = charge_full * reference / 1e6;
+            }
+        }
+        double cap = supply_number(name, "capacity");
+        if (cap < 0 && now >= 0 && total > 0) cap = now * 100.0 / total;
+        if (cap >= 0 && cap <= 100) {
+            capacity += cap;
+            capacities++;
+        }
+        if (now >= 0) {
+            energy += now;
+            energies++;
+            if (total > 0) {
+                energy_full += total;
+                weighted++;
+            }
+        }
+        double rate = supply_number(name, "power_now");
+        if (rate < 0) {
+            double current = supply_number(name, "current_now");
+            if (current >= 0 && volts > 0) rate = current * volts / 1e6;
+        }
+        if (rate >= 0) {
+            power += rate;
+            powers++;
+        }
     }
-    if (read_first_line("/sys/class/power_supply/AC/online", ac_s, sizeof ac_s) == 0) {
-        ac = atoi(ac_s);
-    }
+    if (dir) closedir(dir);
+    if (!online_known) ac = charging || (batteries > 0 && full == batteries);
+    snprintf(state, sizeof state, "%s", charging ? "Charging" :
+             batteries > 0 && full == batteries ? "Full" : "");
+    int cap = weighted == batteries && batteries > 0 && energy_full > 0 ?
+        (int)(energy * 100.0 / energy_full + 0.5) :
+        capacities > 0 ? (int)(capacity / capacities + 0.5) : -1;
+    if (cap > 100) cap = 100;
+    double w = powers == batteries ? power / 1e6 : 0;
+    long mins = !ac && w > 0.1 && energies == batteries ? (long)(energy * 60.0 / power + 0.5) : 0;
     if (cap < 0) {
         /* TRANSLATORS: status bar: keep short. */
         snprintf(cached_bat, sizeof cached_bat, "%s", ac ? _("AC: on") : _("AC: off"));
         snprintf(fields.battery, sizeof fields.battery, "%s", ac ? _("AC on") : _("AC off"));
         fields.power[0] = '\0';
         return;
-    }
-    read_first_line("/sys/class/power_supply/BAT0/status", state, sizeof state);
-    if (read_first_line("/sys/class/power_supply/BAT0/power_now", pwr_s, sizeof pwr_s) == 0) {
-        long long pwr_uw = atoll(pwr_s);
-        w = pwr_uw / 1e6;
-        if (!ac && w > 0.1 &&
-            read_first_line("/sys/class/power_supply/BAT0/energy_now", eng_s, sizeof eng_s) == 0) {
-            mins = (long)((atoll(eng_s) * 60.0) / (double)pwr_uw + 0.5);
-        }
     }
     /* TRANSLATORS: status bar: keep short. */
     snprintf(fields.battery, sizeof fields.battery, _("Bat %d%%"), cap);
