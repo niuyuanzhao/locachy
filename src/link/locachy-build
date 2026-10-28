@@ -46,6 +46,10 @@
 # shown (fingerprint, owner, subkeys), and added to the build user's
 # keyring only when answered y. One trusted already is brought up to date.
 set -euo pipefail
+# Its files are made as packages' are, whatever the caller's umask (locachy-app
+# has 077): with it the build root's / would be root's alone, closed to the
+# build user, whose every program then fails to load its libraries.
+umask 022
 
 bdir=/var/lib/locachy/builder
 home=$bdir/home    # the build user's
