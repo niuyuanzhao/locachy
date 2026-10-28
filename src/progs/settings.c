@@ -1203,7 +1203,12 @@ static int next_face_camera(int dir)
             to = cams[i].ir ? i : to;
         }
     }
-    char *const argv[] = { HOWDY, "set", "device_path", cams[to].path, NULL };
+    /* howdy takes no command from root without a user (-U), set included. */
+    const char *user = user_name();
+    if (!user) {
+        return -1;
+    }
+    char *const argv[] = { HOWDY, "-U", (char *)user, "set", "device_path", cams[to].path, NULL };
     command_output(argv, out, sizeof out);
     load_face_camera();
     return strcmp(face_camera, cams[to].path) == 0 ? 0 : -1;
