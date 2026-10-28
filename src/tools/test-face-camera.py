@@ -151,7 +151,8 @@ class Camera(unittest.TestCase):
         module = types.SimpleNamespace(VideoCapture=backend)
         class Histogram(list):
             def sum(self): return 100
-        cv2 = types.SimpleNamespace(calcHist=lambda *args: Histogram([[10]]))
+            def ravel(self): return self
+        cv2 = types.SimpleNamespace(calcHist=lambda *args: Histogram([10]))
         before = self.config.read_bytes()
         with mock.patch.dict(sys.modules, {"recorders": types.ModuleType("recorders"), "recorders.video_capture": module, "cv2": cv2}), \
                 mock.patch.object(sys, "path", sys.path.copy()), contextlib.redirect_stdout(io.StringIO()) as out:
@@ -188,7 +189,8 @@ class Camera(unittest.TestCase):
         recorders.mkdir(parents=True)
         (recorders / "__init__.py").write_text("")
         (library / "cv2.py").write_text('class Histogram(list):\n    def sum(self): return 100\n'
-                                         'def calcHist(*args): return Histogram([[10]])\n')
+                                         '    def ravel(self): return self\n'
+                                         'def calcHist(*args): return Histogram([10])\n')
         (recorders / "video_capture.py").write_text(
             'class Frame:\n    shape=(360,480)\n    def mean(self): return 64.0\n    def std(self): return 30.0\n'
             'class VideoCapture:\n    def __init__(self,config):\n'
@@ -206,6 +208,24 @@ class Camera(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)["width"], 480)
         self.assertEqual(before, self.config.read_bytes())
         self.assertFalse(list(library.rglob("*.pyc")))
+
+    def test_probe_handles_real_opencv_histogram_shape(self):
+        try:
+            import cv2
+            import numpy
+        except ImportError:
+            self.skipTest("OpenCV is not installed in this test environment")
+        frame = numpy.full((360, 480), 64, dtype=numpy.uint8)
+        capture = mock.Mock()
+        capture.read_frame.return_value = (frame, frame)
+        module = types.SimpleNamespace(VideoCapture=mock.Mock(return_value=capture))
+        with mock.patch.dict(sys.modules, {"recorders": types.ModuleType("recorders"), "recorders.video_capture": module}), \
+                mock.patch.object(sys, "path", sys.path.copy()), contextlib.redirect_stdout(io.StringIO()) as out:
+            cam.probe_child("/dev/video128")
+        result = json.loads(out.getvalue())
+        self.assertEqual(result["width"], 480)
+        self.assertEqual(result["darkness"], 0)
+        capture.release.assert_called_once()
 
     def test_apply_uses_howdy_and_verifies_persisted_choice(self):
         def write_config(command, **kwargs):

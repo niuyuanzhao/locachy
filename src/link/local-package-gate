@@ -40,6 +40,15 @@ exec unshare --mount --propagation private --pid --fork --kill-child --mount-pro
         src=/run/locachy-gate-source
         result=/run/locachy-gate-results
         out=/var/tmp/locachy-gate-build
+        name=labwc-locachy
+        run_logged() {
+            local logfile=$1 status
+            shift
+            if "$@" >"$result/$logfile" 2>&1; then return 0; else status=$?; fi
+            printf "local-package-gate: %s failed (status %s); log: %s/%s\n" "$name" "$status" "$result" "$logfile" >&2
+            tail -n 60 "$result/$logfile" >&2
+            return "$status"
+        }
         mkdir -p "$out" /run/user /run/locachy /usr/local/lib/locachy \
             /etc/locachy/labwc /var/lib/locachy/rime /usr/local/share/locachy
         # A first root has no installed LOCachy runtime yet. Install only
@@ -52,7 +61,7 @@ exec unshare --mount --propagation private --pid --fork --kill-child --mount-pro
         install -m 644 "$src/base/rime/mode-labels.conf" /usr/local/share/locachy/ime-mode-labels.conf
         # Rebuild our host clients against the target libraries, not the old
         # host ABI. Only our trusted sources are compiled as root here.
-        sh "$src/tools/build-check.sh" "$out" >"$result/host-clients-build.log" 2>&1
+        run_logged host-clients-build.log sh "$src/tools/build-check.sh" "$out"
         test -x /usr/bin/labwc
         for p in security-context-v1 wlr-foreign-toplevel-management-unstable-v1 wlr-output-management-unstable-v1 ext-idle-notify-v1; do
             wayland-scanner client-header "$src/base/protocols/$p.xml" "$out/$p-client-protocol.h"
@@ -70,10 +79,10 @@ exec unshare --mount --propagation private --pid --fork --kill-child --mount-pro
         # nested cgroup. No uinput or real input/display is exposed.
         export LOCACHY_CLIPBOARD_TEST_OUT=/var/tmp/locachy-gate-clipboard
         export LOCACHY_TEST_CLIPBOARD=$out/clipboard LOCACHY_TEST_LABWC=/usr/bin/labwc
-        timeout 180 bash "$src/tools/test-clipboard.sh" >"$result/clipboard.log" 2>&1
-        timeout 60 bash "$src/tools/test-clipboard-restricted.sh" >"$result/restricted.log" 2>&1
-        timeout 180 bash "$src/tools/test-clipboard-guard.sh" /usr/bin/labwc >"$result/guard.log" 2>&1
-        timeout 130 bash "$src/tools/test-clipboard-cgroup.sh" /usr/bin/labwc >"$result/cgroup.log" 2>&1
+        run_logged clipboard.log timeout 180 bash "$src/tools/test-clipboard.sh"
+        run_logged restricted.log timeout 60 bash "$src/tools/test-clipboard-restricted.sh"
+        run_logged guard.log timeout 180 bash "$src/tools/test-clipboard-guard.sh" /usr/bin/labwc
+        run_logged cgroup.log timeout 130 bash "$src/tools/test-clipboard-cgroup.sh" /usr/bin/labwc
         python3 -B -c "import json; json.dump({\"name\":\"labwc-locachy\",\"id\":\"labwc-clipboard-freeze-v1\",\"passed\":True,\"tests\":[\"clipboard\",\"restricted\",\"guard\",\"cgroup\"]},open(\"$result/gate.json\",\"w\"))"
         '\''
 '

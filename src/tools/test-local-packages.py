@@ -25,6 +25,7 @@ loader = importlib.machinery.SourceFileLoader("local_package_tool", str(SOURCE))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 pkg = importlib.util.module_from_spec(spec)
 loader.exec_module(pkg)
+ON_HOST_ROOT = pkg.on_host_root
 SCRATCH = sys.argv.pop(1) if len(sys.argv) > 1 else None
 
 
@@ -73,6 +74,7 @@ class LocalPackages(unittest.TestCase):
         self.patch("aur_versions", lambda names: self.fail(f"AUR must not be queried for {names}"))
         self.patch("host_hash", lambda: "host-current")
         self.patch("build_host_hash", lambda path, recipes=None: "build-current")
+        self.patch("on_host_root", lambda: False)
 
     def patch(self, name, value):
         p = mock.patch.object(pkg, name, value)
@@ -130,6 +132,49 @@ class LocalPackages(unittest.TestCase):
         rows = pkg.plan()
         self.assertIn(("host", "local", "labwc-locachy", "0.20.2-1.1",
                        "1:0.21.0-1: stable 0.21.0-1 (0.21.0-1)"), rows)
+
+    def test_host_contract_uses_pending_source_update_not_old_compiler_input(self):
+        self.record()
+        (self.recipe / "upstream.json").write_text('{"schema":1}\n')
+        commit = "a" * 40
+        candidate = {"baseline_dir": str(self.recipe), "recipe_dir": str(self.recipe),
+                     "candidate": {"candidate_id": "new", "package_version": "1:0.20.2-1",
+                                   "source_version": "0.20.2-1", "upstream_tag": "0.20.2-1"}}
+        self.patch("check_source_update", lambda: ("old", commit, "new sources", "main"))
+        self.patch("checked_local_candidates", lambda *args: ({"labwc-locachy": candidate}, {}))
+        snapshots = []
+        transaction = types.SimpleNamespace(snapshot=lambda *args, **kwargs:
+                                            snapshots.append(kwargs) or {"directory": "plan"})
+        self.patch("helper_module", lambda _: transaction)
+        self.patch("staged_test_source", lambda update: str(self.root / update[1]))
+        self.patch("transaction_host_hash", lambda: "current")
+        pkg.plan()
+        self.assertEqual(snapshots[0]["test_source"], str(self.root / commit))
+
+    def test_staged_sources_are_verified_and_do_not_replace_live_tree(self):
+        commit = "a" * 40
+        calls = []
+        self.patch("verify_source_commit", lambda c: calls.append(("verify", c)))
+        def extract(c, target):
+            calls.append(("extract", c))
+            (Path(target) / "make.sh").write_text("candidate\n")
+        self.patch("extract_commit_src", extract)
+        self.patch("helper_module", lambda _: types.SimpleNamespace(test_source_hash=lambda path: "digest"))
+        path = pkg.staged_test_source(("old", commit, "new", "main"))
+        self.assertEqual(calls, [("verify", commit), ("extract", commit)])
+        self.assertEqual((Path(path) / "make.sh").read_text(), "candidate\n")
+        self.assertFalse((self.src / "make.sh").exists())
+        self.assertEqual(pkg.staged_test_source(None), str(self.src))
+
+    def test_invalid_or_unverified_pending_sources_are_never_staged(self):
+        with self.assertRaisesRegex(RuntimeError, "invalid source commit"):
+            pkg.staged_test_source(("old", "--bad", "new", "main"))
+        def rejected(_):
+            raise RuntimeError("signature verification failed")
+        self.patch("verify_source_commit", rejected)
+        self.patch("extract_commit_src", lambda *args: self.fail("unverified source extracted"))
+        with self.assertRaisesRegex(RuntimeError, "signature verification"):
+            pkg.staged_test_source(("old", "a" * 40, "new", "main"))
 
     def test_check_uses_official_stable_recipe_not_optimized_build_release(self):
         (self.recipe / "upstream.json").write_text('{"package":"labwc"}\n')
@@ -211,7 +256,7 @@ class LocalPackages(unittest.TestCase):
                                      (pkg.INIT, (other, root), False), ("/init", (other, root), False)):
             with mock.patch.object(pkg.os, "readlink", lambda path, exe=exe: exe), \
                  mock.patch.object(pkg.os, "stat", lambda path, stats=stats: stats[0] if path == "/" else stats[1]):
-                self.assertEqual(pkg.on_host_root(), expected, exe)
+                self.assertEqual(ON_HOST_ROOT(), expected, exe)
 
     def test_plan_toolchain_change_and_version_mismatch(self):
         self.record(host="older-build-host")

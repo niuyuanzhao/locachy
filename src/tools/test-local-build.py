@@ -39,7 +39,8 @@ class LocalBuild(unittest.TestCase):
         self.log = self.root / "calls"
         self.env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ["PATH"],
                         LOCACHY_BUILD_STAGE="chroot", TEST_ROOT=str(self.root),
-                        TEST_HOME=str(self.home), TEST_INFO=str(self.info), TEST_LOG=str(self.log))
+                        TEST_HOME=str(self.home), TEST_INFO=str(self.info), TEST_LOG=str(self.log),
+                        TEST_PYTHON=sys.executable)
         text = SOURCE.read_text().replace("bdir=/var/lib/locachy/builder", f"bdir={self.bdir}")
         text = text.replace("out=/var/cache/locachy-pkgs", f"out={self.root / 'cache'}")
         text = text.replace("/run/locachy-recipe", str(self.recipe))
@@ -65,7 +66,9 @@ class LocalBuild(unittest.TestCase):
                                 'mkdir -p "$TEST_HOME/.cache/pikaur/pkg"; '
                                 'echo dependency >"$TEST_HOME/.cache/pikaur/pkg/aur-tool-1-1-x86_64.pkg.tar.zst"')
         # aur_keys (the AUR's .SRCINFO of the AUR dependencies): TEST_AUR_KEYS.
-        self.command("python3", 'cat >/dev/null; echo "aur_keys $*" >>"$TEST_LOG"; printf "%b" "${TEST_AUR_KEYS:-}"')
+        self.command("python3", 'case "$*" in *"${LOCACHY_BUILD_PREPARE:-/no-plan}/plan.json"*) '
+                     'exec "$TEST_PYTHON" "$@";; esac; '
+                     'cat >/dev/null; echo "aur_keys $*" >>"$TEST_LOG"; printf "%b" "${TEST_AUR_KEYS:-}"')
         # The build user's keyring: the keys listed in TEST_KEYRING.
         self.keyring = self.root / "keyring"
         self.keyring.write_text("")

@@ -116,7 +116,7 @@ def probe_child(path):
         _, gray = capture.read_frame()
         # The same eight-bin histogram and threshold used by howdy compare.
         histogram = cv2.calcHist([gray], [0], None, [8], [0, 256])
-        darkness = float(histogram[0][0]) * 100.0 / float(histogram.sum())
+        darkness = float(histogram.ravel()[0]) * 100.0 / float(histogram.sum())
         print(json.dumps({"width": int(gray.shape[1]), "height": int(gray.shape[0]),
                           "mean": float(gray.mean()), "std": float(gray.std()), "darkness": darkness,
                           "dark_threshold": config.getfloat("video", "dark_threshold", fallback=60)}), flush=True)

@@ -954,6 +954,29 @@ def check_source_update():
     return old_short, commit, label, branch
 
 
+def staged_test_source(update):
+    """Validate a pending source update against target libraries before install.
+    Keeping the old sources for contracts would prevent their own compiler
+    fixes from ever reaching a host whose package update runs first.
+    """
+    if update is None:
+        return SRC
+    commit = update[1]
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise RuntimeError("invalid source commit for target validation")
+    verify_source_commit(commit)
+    parent = os.path.join(LOCAL_RECORDS, "source-tests")
+    os.makedirs(parent, exist_ok=True)
+    directory = tempfile.mkdtemp(prefix=commit[:12] + "-", dir=parent)
+    try:
+        extract_commit_src(commit, directory)
+        helper_module("locachy_transaction").test_source_hash(directory)
+    except Exception:
+        shutil.rmtree(directory)
+        raise
+    return directory
+
+
 def apply_source_update(commit):
     """Verify and atomically install commit's src/ tree into SRC."""
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
@@ -1289,6 +1312,12 @@ def plan():
     _pending_plan_lock = None
     rows = []
     updates, newest = repo_updates()
+    try:
+        src_upd = check_source_update()
+    except SourceNotChecked as e:
+        print(f"locachy-pkg: LOCachy source not checked: {e}", file=sys.stderr)
+        rows.append(("locachy", "note", f"source not checked: {e}", "", ""))
+        src_upd = None
     host = local_packages(LOCAL_DB)
     baselines = baseline_recipes()
     candidates, candidate_locks = checked_local_candidates(baselines, host) if tracked_recipes(baselines) else ({}, {})
@@ -1309,8 +1338,9 @@ def plan():
             if name not in recipes:
                 raise RuntimeError(f"{name}: local recipe is missing; update cannot be prepared")
             prepared_recipes.setdefault(name, {"baseline_dir": baselines[name], "recipe_dir": recipes[name]})
+        test_source = staged_test_source(src_upd)
         _pending_plan_lock = transaction.snapshot(LOCAL_RECORDS, os.path.join(CHECK_DB, "sync"), PACMAN_CONFIG,
-                                                   transaction_host_hash(), prepared_recipes, candidate_locks, test_source=SRC)
+                                                   transaction_host_hash(), prepared_recipes, candidate_locks, test_source=test_source)
     foreign = {n: v for n, v in host.items() if n not in newest and n not in local_owned}
     owned = {}
     for name in containers():
@@ -1341,12 +1371,6 @@ def plan():
             rows.append(("host", "local", n, host[n], reason))
     host_changes = any(r[0] == "host" for r in rows)
     current = host_hash()
-    try:
-        src_upd = check_source_update()
-    except SourceNotChecked as e:
-        print(f"locachy-pkg: LOCachy source not checked: {e}", file=sys.stderr)
-        rows.append(("locachy", "note", f"source not checked: {e}", "", ""))
-        src_upd = None
     if src_upd:
         old_short, new_commit, new_label, branch = src_upd
         rows.append(("locachy", "repo", "locachy-src", old_short, new_label))
