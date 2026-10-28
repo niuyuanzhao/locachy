@@ -76,6 +76,11 @@ if [ "${LOCACHY_BUILD_STAGE:-}" = chroot ]; then
         setpriv --reuid="$user" --regid="$user" --init-groups --reset-env "$@"
     }
     tool=$(command -v pikaur || command -v pikaur-static || true)
+    # One keyring checks every source signature: the build user's, which
+    # --trust-key keeps. pikaur run as root would take pacman's
+    # (/etc/pacman.d/gnupg, the packages' signers) unless told this one.
+    as_builder install -d -m 0700 "$home/.gnupg"
+    keyring=(--build-gpgdir "$home/.gnupg")
     # "NAME FINGERPRINT" lines: the keys not in the build user's keyring are
     # written down for the caller; keys_stop ends the run if there was one.
     untrusted=0
@@ -222,7 +227,8 @@ PY
             rm -rf "$home/.cache/pikaur/pkg"
             mkdir -p "$home/.cache/pikaur"
             find "$home" \( ! -user "$user" -o ! -group "$user" \) -exec chown -h "$user:$user" {} +
-            "$tool" -S --aur --noconfirm --user-id "$uid" --group-id "$gid" --home-dir "$home" "${aur_deps[@]}"
+            "$tool" -S --aur --noconfirm --user-id "$uid" --group-id "$gid" --home-dir "$home" "${keyring[@]}" \
+                "${aur_deps[@]}"
             for f in "$home"/.cache/pikaur/pkg/*.pkg.tar.zst; do
                 [ ! -f "$f" ] || cp -f "$f" "$handover/"
             done
@@ -294,7 +300,8 @@ PY
             echo "== locachy-build: $name: the AUR's $base with $name.sed:"
             diff -u "$dir/PKGBUILD.aur" "$dir/PKGBUILD" || true
             chown -R "$user:$user" "$dir"
-            "$tool" -P --noedit --noconfirm --user-id "$uid" --group-id "$gid" --home-dir "$home" "$dir/PKGBUILD"
+            "$tool" -P --noedit --noconfirm --user-id "$uid" --group-id "$gid" --home-dir "$home" "${keyring[@]}" \
+                "$dir/PKGBUILD"
             for f in "$home"/.cache/pikaur/pkg/*.pkg.tar.zst; do
                 case $f in *-debug-*) continue ;; esac
                 [ -f "$f" ] && pacman -U --noconfirm --ask 4 --asdeps "$f"
@@ -319,7 +326,7 @@ PY
             [ -z "$name" ] || build_patched "$name" "$base"
         done <<<"$deps"
         if [ "${#rest[@]}" -gt 0 ]; then
-            "$tool" -Sw --aur --noconfirm --user-id "$uid" --group-id "$gid" --home-dir "$home" \
+            "$tool" -Sw --aur --noconfirm --user-id "$uid" --group-id "$gid" --home-dir "$home" "${keyring[@]}" \
                 ${LOCACHY_BUILD_REBUILD:+--rebuild} "${rest[@]}"
         fi
         cp -f "$home"/.cache/pikaur/pkg/*.pkg.tar.zst "$handover"/

@@ -170,7 +170,9 @@ def boot_live(guest, firmware, kernel, initrd):
         guest.key("e")
         guest.pump(0.3)
         guest.key("end")
-        guest.type(" console=ttyS0,115200")
+        # printk.devkmsg=on, as LOCachy boots: the installer's lines in the
+        # kernel log (what the test follows) are not dropped in a burst.
+        guest.type(" console=ttyS0,115200 printk.devkmsg=on")
         guest.pending = b""
         guest.key("ret")
     else:
@@ -178,7 +180,7 @@ def boot_live(guest, firmware, kernel, initrd):
         guest.key("esc")
         guest.any(rb"boot:")
         guest.pending = b""
-        guest.type(kernel + " initrd=" + initrd + " console=ttyS0,115200")
+        guest.type(kernel + " initrd=" + initrd + " console=ttyS0,115200 printk.devkmsg=on")
         guest.key("ret")
     match = guest.any(rb"(?:login: ?|root@[^\r\n]*[#] ?)")
     if b"login:" in match.group(0).lower():
@@ -299,14 +301,17 @@ def trust_keys(guest, screenshots, round_):
     screenshots[f"trusted-{round_}"] = guest.shot(f"tui-trusted-{round_}")
     guest.type("exit")
     guest.key("ret")
-    ended = guest_state(guest, "timeout 30 sh -c \"until [ " + kmsg_count("installer: /usr/local/bin/term ended") +
-                        " -gt " + str(terms) + " ]; do sleep 1; done\" && s=yes || s=no")
-    if ended != "yes":
-        # The terminal ends when nothing holds its tty: what does.
-        guest.shell("for p in /proc/[0-9]*; do ls -l $p/fd 2>/dev/null | grep -q /dev/pts/ && "
-                    "echo \"holds a pty: ${p#/proc/} $(tr '\\0' ' ' <$p/cmdline)\"; done; true")
+    # When the terminal's process is gone, and when the installer has the
+    # screen again (its "ended" line): each within seconds, as a person sees.
+    gone = int(guest_state(guest, "s=0; while pgrep -x term >/dev/null && [ $s -lt 120 ]; do sleep 1; s=$((s + 1)); done"))
+    back = int(guest_state(guest, "s=0; until [ " + kmsg_count("installer: /usr/local/bin/term ended") + " -gt " +
+                           str(terms) + " ] || [ $s -ge 120 ]; do sleep 1; s=$((s + 1)); done"))
+    print(f"exit: the terminal gone after {gone} s, the installer back {back} s later", flush=True)
+    guest.shell(KLOG.replace("-o short", "-o short-precise") + " | grep -E 'installer:|term:|screen:|keys:|pointer:' | tail -12; date +%T.%N")
+    if gone >= 120 or back >= 10:
         screenshots[f"not-ended-{round_}"] = guest.shot(f"tui-not-ended-{round_}")
-        raise RuntimeError("The terminal did not end after exit")
+        guest.shell("ps -eo pid,ppid,pgid,sid,tty,stat,etimes,args | awk '$5 != \"?\"'; true")
+        raise RuntimeError(f"After exit: the terminal gone after {gone} s, the installer back {back} s later")
     guest.pump(2)
 
 

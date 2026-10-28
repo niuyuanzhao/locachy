@@ -87,7 +87,8 @@ class LocalBuild(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = self.log.read_text()
         self.assertIn("pacman -S --needed --noconfirm --asdeps repo-lib repo-tool>=2", calls)
-        self.assertIn("pikaur -S --aur --noconfirm --user-id 123 --group-id 123", calls)
+        self.assertIn("pikaur -S --aur --noconfirm --user-id 123 --group-id 123 --home-dir " + str(self.home) +
+                      " --build-gpgdir " + str(self.home) + "/.gnupg aur-tool", calls)
         self.assertIn("makepkg --force --noconfirm HOME=" + str(self.home), calls)
         self.assertNotIn("wrong-arch", calls)
         self.assertEqual((self.home / "local/example/guard.patch").read_text(), "patch data\n")
