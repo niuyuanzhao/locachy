@@ -28,6 +28,18 @@ show_status() {
     echo "  Containers dir     : /var/lib/locachy/containers"
 }
 
+# The wired port, when none was chosen: the first Ethernet interface that is
+# a device (not a virtual one) and not wireless, where NetworkManager has it
+# (locachy-net) or here.
+wired_interface() {
+    local list='for d in /sys/class/net/*; do
+        [ -e "$d/device" ] && [ ! -e "$d/wireless" ] && [ ! -e "$d/phy80211" ] &&
+            [ "$(cat "$d/type" 2>/dev/null)" = 1 ] && echo "${d##*/}"
+    done'
+    { [ ! -e /run/netns/locachy-net ] || ip netns exec locachy-net sh -c "$list"; sh -c "$list"; } 2>/dev/null |
+        sort -u | head -n 1
+}
+
 set_debug_link() {
     local mode="$1" saved
     # The address and port of the line as it was (commented out when off).
@@ -39,8 +51,9 @@ set_debug_link() {
     port="${port:-2300}"
     [ -n "$dev" ] || dev=$(sed -n 's/^debug_link_interface="\([^"]*\)".*/\1/p' "$RC" | tail -n 1)
     if [ "$mode" = on ]; then
+        [ -n "$dev" ] || dev=$(wired_interface)
         [ -n "$dev" ] && [[ "$dev" =~ ^[a-zA-Z0-9_.:-]+$ ]] || {
-            echo "locachy-setup: specify the debug interface: on ADDR PORT IFACE" >&2
+            echo "locachy-setup: no wired port found; name it: on ADDR PORT IFACE" >&2
             return 2
         }
         if grep -q '^debug_link_interface=' "$RC"; then
