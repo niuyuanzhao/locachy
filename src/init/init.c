@@ -1899,6 +1899,47 @@ static void hibernate(void)
     say("init: back from hibernation");
 }
 
+#ifndef RTC_CLASS
+#define RTC_CLASS "/sys/class/rtc"
+#endif
+
+static int rtc_alarm_clear(const char *path)
+{
+    if (path[0] && write_file(path, "0") < 0) {
+        say("init: cannot clear wake alarm %s: %s", path, strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+static int rtc_alarm_set(char *path, size_t size, const char *when)
+{
+    if (path[0]) {
+        if (rtc_alarm_clear(path) == 0 && write_file(path, when) == 0) return 0;
+        say("init: cannot arm wake alarm %s: %s", path, strerror(errno));
+        path[0] = '\0';
+    }
+    DIR *d = opendir(RTC_CLASS);
+    struct dirent *e;
+    while (d && (e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, "rtc", 3) || !e->d_name[3] ||
+            strspn(e->d_name + 3, "0123456789") != strlen(e->d_name + 3)) continue;
+        char alarm[320];
+        int n = snprintf(alarm, sizeof alarm, "%s/%s/wakealarm", RTC_CLASS, e->d_name);
+        if (n < 0 || n >= (int)sizeof alarm || access(alarm, W_OK) != 0) continue;
+        if (write_file(alarm, "0") == 0 && write_file(alarm, when) == 0) {
+            snprintf(path, size, "%s", alarm);
+            closedir(d);
+            say("init: suspend-to-hibernate wake alarm %s at %s", path, when);
+            return 0;
+        }
+        say("init: cannot arm wake alarm %s: %s", alarm, strerror(errno));
+    }
+    if (d) closedir(d);
+    say("init: no usable RTC wake alarm; timed hibernation could not be armed");
+    return -1;
+}
+
 /* Suspend to RAM (ACPI S3) until something wakes the machine: opening the
  * lid, the power button, or the RTC alarm. Everything stays in memory as it
  * was, frozen programs and the screen included; the kernel suspends and
@@ -1911,24 +1952,29 @@ static void hibernate(void)
 static double suspend(int lid)
 {
     struct timespec a, b;
-    char when[24];
+    char when[24], alarm[320] = "";
 
     save_log();
     sync();
-    write_file("/sys/power/mem_sleep", "deep");
+    if (write_file("/sys/power/mem_sleep", "deep") < 0)
+        say("init: deep sleep unavailable; using the kernel-selected sleep mode");
     clock_gettime(CLOCK_REALTIME, &a); /* the boot-time clock stops in S3 */
     time_t hibernate_at = a.tv_sec + hibernate_after;
     int try_hibernate = lid && resume_dev[0];
+    if (lid && !resume_dev[0]) say("init: timed hibernation unavailable: no resume device");
     for (;;) {
         if (try_hibernate) {
             clock_gettime(CLOCK_REALTIME, &b);
             snprintf(when, sizeof when, "+%lld", (long long)(hibernate_at > b.tv_sec ? hibernate_at - b.tv_sec : 1));
-            write_file("/sys/class/rtc/rtc0/wakealarm", "0");
-            write_file("/sys/class/rtc/rtc0/wakealarm", when);
+            if (rtc_alarm_set(alarm, sizeof alarm, when) < 0) {
+                say("init: timed hibernation unavailable; sleeping until woken");
+                try_hibernate = 0;
+            }
         }
         say("init: going to sleep");
         if (write_file("/sys/power/state", "mem") < 0) {
             say("init: cannot sleep: %s", strerror(errno));
+            rtc_alarm_clear(alarm);
             return 0;
         }
         clock_gettime(CLOCK_REALTIME, &b);
@@ -1944,7 +1990,7 @@ static double suspend(int lid)
              * machine must not stay up with the lid closed either way).
              * The alarm that just woke the machine goes first: still
              * pending, it would wake it again at once from hibernation. */
-            write_file("/sys/class/rtc/rtc0/wakealarm", "0");
+            rtc_alarm_clear(alarm);
             lid_wake(lid_wakes_from_disk);
             hibernate();
             if (lid_wakes_from_disk && lid_closed()) {
@@ -1966,9 +2012,7 @@ static double suspend(int lid)
         }
         say("init: woke up with the lid still closed; back to sleep");
     }
-    if (lid) {
-        write_file("/sys/class/rtc/rtc0/wakealarm", "0");
-    }
+    if (lid) rtc_alarm_clear(alarm);
     clock_gettime(CLOCK_REALTIME, &b);
     double slept = (double)(b.tv_sec - a.tv_sec) + (double)(b.tv_nsec - a.tv_nsec) / 1e9;
     say("init: woke up after %.1f s asleep", slept);
@@ -2461,9 +2505,12 @@ int main(void)
             }
             if (who[j] == NULL && (p[j].revents & POLLIN)) {
                 int key = keys_event(p[j].fd);
-                if (key == K_HOME && !locked) {
+                /* The compositor consumes its own global keybinds before
+                 * notifying us; acting on this observer would race delivery. */
+                int shared = fg && fg->shared_display;
+                if (key == K_HOME && !locked && !shared) {
                     go_home();
-                } else if (key == K_ACT_LOCK) {
+                } else if (key == K_ACT_LOCK && !shared) {
                     lock();
                 }
                 break;

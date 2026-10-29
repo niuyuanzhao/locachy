@@ -36,6 +36,8 @@ int monitor_internal(const char *name) { (void)name; return 0; }
 int control_fd(void) { return -1; }
 void control_wait_take(void) { abort(); }
 
+void base_language_reload(void) {}
+
 static void die(const char *what)
 {
     perror(what);
@@ -428,8 +430,32 @@ int main(void)
     verify_outputs(2);
     CHECK(shadow == original && width == w && height == h);
     close(events);
+    CHECK(screen_extended(1) == 1 && screen_output_count() == 2);
+    CHECK(screen_output_select(0) >= 0);
+    screen_fill_px(0, 0, (int)width, (int)height, 0xCC2200);
+    CHECK(screen_output_select(1) >= 0);
+    screen_fill_px(0, 0, (int)width, (int)height, 0x0066CC);
+    screen_flush();
+    for (uint32_t i = 0; i < noutputs; i++) {
+        uint32_t want = i == 0 ? 0xCC2200 : 0x0066CC;
+        CHECK(*(uint32_t *)outputs[i].map == want);
+        CHECK(*(uint32_t *)(outputs[i].map + (outputs[i].mode.vdisplay - 1) * outputs[i].pitch) == want);
+    }
+    crc_capture(crc);
+    CHECK(strcmp(crc[0], crc[1]) != 0);
+    struct screen_output out;
+    CHECK(screen_output_get(1, &out) == 0);
+    screen_cursor_move(out.x + out.width / 2, out.y + out.height / 2);
+    screen_cursor_visible(1);
+    CHECK(outputs[0].cursor_at.x1 == outputs[0].cursor_at.x2 &&
+          outputs[1].cursor_at.x1 != outputs[1].cursor_at.x2);
+    screen_cursor_visible(0);
     screen_release();
-    say("PASS screen-vkms: real KMS, CRCs, cursor planes, lease, master, uevents, disconnect/reconnect");
+    CHECK(screen_refresh() == 1 && screen_output_count() == 2);
+    CHECK(*(uint32_t *)outputs[0].map == 0xCC2200 && *(uint32_t *)outputs[1].map == 0x0066CC);
+    CHECK(screen_extended(0) == 1);
+    screen_release();
+    say("PASS screen-vkms: real KMS, CRCs, cursor planes, lease, master, uevents, disconnect/reconnect, extended outputs");
     sync();
     CHECK(reboot(RB_POWER_OFF) == 0);
     return 0;

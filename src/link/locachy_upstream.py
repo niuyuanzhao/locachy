@@ -214,7 +214,7 @@ def _config(name, baseline_dir):
                          ["clipboard-guard.patch", "locachy-clipboard.c", "locachy-clipboard.h"],
                          "labwc-clipboard-freeze-v1"),
         "libinput": ("libinput", "libinput", ["libinput", "libinput-tools"],
-                     ["library.patch", "circular-scroll.patch"], "libinput-circular-scroll-v1"),
+                     ["library.patch", "circular-scroll.patch"], "libinput-circular-scroll-v2"),
         "libinput-tools": ("libinput-tools", "libinput", ["libinput", "libinput-tools"],
                           ["cli.patch"], "libinput-tools-cli-v1"),
         "libmupdf": ("libmupdf", "mupdf", ["libmupdf", "mupdf", "mupdf-gl", "mupdf-tools", "python-mupdf"],

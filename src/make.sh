@@ -300,6 +300,7 @@ if [ -x /usr/bin/bluetui ] && ! grep -q '^[[:space:]]*program_bluetooth=' /etc/l
     echo "make: rc.conf: program_bluetooth added"
 fi
 [ -e /etc/locachy/packages ] || install -D -m 644 "$src/packages" /etc/locachy/packages
+python3 -I "$src/link/migrate-audio-packages" /etc/locachy/packages
 # Containers: their configurations (/etc/locachy/containers/NAME.conf, the
 # user's) and the presets to choose from (ours, replaced each time).
 mkdir -p /etc/locachy/containers
@@ -512,6 +513,18 @@ lang=$(sed -n 's/^LANG="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' /etc/locale.conf 2>/dev/
 if ! LC_ALL=${lang:-C} "$lib/keytable" "${keymap:-us}" /usr/local/share/locachy/keymap.table; then
     rm -f /usr/local/share/locachy/keymap.table
     echo "make: no key table for keymap ${keymap:-us}: keys type US" >&2
+fi
+# The tables of the keymaps keyboards have of their own (settings writes
+# keyboards.conf; keys.c reads it), made again as the system's is. A keyboard
+# whose table cannot be made types as the system's (keys.c says so).
+mkdir -p /usr/local/share/locachy/keymaps
+rm -f /usr/local/share/locachy/keymaps/*.table
+if [ -f /etc/locachy/keyboards.conf ]; then
+    for k in $(awk '!/^#/ && NF >= 2 { print $2 }' /etc/locachy/keyboards.conf | sort -u); do
+        case $k in .*|*[!A-Za-z0-9._-]*) continue ;; esac
+        LC_ALL=${lang:-C} "$lib/keytable" "$k" "/usr/local/share/locachy/keymaps/$k.table" ||
+            echo "make: no key table for keymap $k (keyboards.conf)" >&2
+    done
 fi
 
 if [ "$boot_mode" -eq 1 ]; then

@@ -178,6 +178,18 @@ if [ -f /usr/local/share/locachy/keymap.table ]; then
     printf 'file %s %s 0644 0 0\n' /usr/local/share/locachy/keymap.table /usr/local/share/locachy/keymap.table \
         >>"$work/initramfs.list"
 fi
+# Keyboards with a keymap of their own (keyboards.conf) and those keymaps'
+# tables: the passphrase prompt types on each as the system does.
+if [ -f /etc/locachy/keyboards.conf ]; then
+    for d in /etc /etc/locachy /usr /usr/local /usr/local/share /usr/local/share/locachy \
+        /usr/local/share/locachy/keymaps; do
+        grep -qxF "dir $d 0755 0 0" "$work/initramfs.list" || printf 'dir %s 0755 0 0\n' "$d" >>"$work/initramfs.list"
+    done
+    printf 'file %s %s 0644 0 0\n' /etc/locachy/keyboards.conf /etc/locachy/keyboards.conf >>"$work/initramfs.list"
+    for t in /usr/local/share/locachy/keymaps/*.table; do
+        [ -f "$t" ] && printf 'file %s %s 0644 0 0\n' "$t" "$t" >>"$work/initramfs.list"
+    done
+fi
 "$lib/gen_init_cpio" "$work/initramfs.list" | gzip -9 >"$boot/initramfs.img.new"
 
 # The unified image, as the Arch Wiki's ukify section makes it: the microcode

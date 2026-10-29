@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-28 10:00-0400\n"
+"POT-Creation-Date: 2026-10-28 21:45-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -3656,7 +3656,7 @@ msgid "-> move"
 msgstr ""
 
 #. TRANSLATORS: the part before the colon is a key; keep it and ": ".
-#: progs/files.c progs/installer.c
+#: progs/files.c progs/installer.c progs/settings.c
 msgid "Enter: choose"
 msgstr ""
 
@@ -4757,31 +4757,11 @@ msgstr[0] ""
 msgstr[1] ""
 
 #: progs/home.c
-msgid "Container"
-msgstr ""
-
-#: progs/home.c
-msgid "State"
-msgstr ""
-
-#: progs/home.c
-msgid "RAM MiB"
-msgstr ""
-
-#: progs/home.c
-msgid "Swap MiB"
-msgstr ""
-
-#: progs/home.c
-msgid "-- Host programs (no containers) --"
-msgstr ""
-
-#: progs/home.c
-msgid "-- Host programs --"
-msgstr ""
-
-#: progs/home.c
 msgid "home and the shared folders"
+msgstr ""
+
+#: progs/home.c
+msgid "power off"
 msgstr ""
 
 #: progs/home.c
@@ -4789,7 +4769,7 @@ msgid "reboot"
 msgstr ""
 
 #: progs/home.c
-msgid "power off"
+msgid "Containers: state, RAM / swap MiB"
 msgstr ""
 
 #: progs/home.c
@@ -4819,7 +4799,7 @@ msgstr ""
 #. TRANSLATORS: Up/Down/PgUp/PgDn and Super+Esc are key names; keep them.
 #: progs/home.c
 msgid ""
-"Up/Down/PgUp/PgDn or the wheel: move   double click: open   right click: "
+"Arrows/PgUp/PgDn or the wheel: move   double click: open   right click: "
 "actions   Super+Esc: home"
 msgstr ""
 
@@ -5874,6 +5854,13 @@ msgstr[1] ""
 
 #: progs/packages.c
 #, c-format
+msgid "%d declared to install"
+msgid_plural "%d declared to install"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/packages.c
+#, c-format
 msgid "; rebuild: %s"
 msgstr ""
 
@@ -5963,6 +5950,11 @@ msgstr ""
 #: progs/packages.c
 #, c-format
 msgid "Details: %s   l: output"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "install %-36.100s declared, not installed"
 msgstr ""
 
 #: progs/packages.c
@@ -6564,6 +6556,10 @@ msgstr ""
 #. TRANSLATORS: c is the c key; keep it.
 #: progs/packages.c
 msgid "The last check is shown; c checks again."
+msgstr ""
+
+#: progs/settings.c
+msgid "generic PC"
 msgstr ""
 
 #: progs/settings.c
@@ -7263,6 +7259,44 @@ msgstr ""
 msgid "   (now)"
 msgstr ""
 
+#. TRANSLATORS: %s is a keyboard layout's name (a console keymap's).
+#: progs/settings.c
+#, c-format
+msgid "No key table for layout %s; nothing changed."
+msgstr ""
+
+#. TRANSLATORS: the first %s is a keyboard's name, the second a keyboard layout's (us).
+#: progs/settings.c
+#, c-format
+msgid ""
+"%.60s: layout %s from now on; the boot unlock takes it from the next boot "
+"image."
+msgstr ""
+
+#. TRANSLATORS: %s is a keyboard's name.
+#: progs/settings.c
+#, c-format
+msgid "%.60s: the system's layout again."
+msgstr ""
+
+#. TRANSLATORS: %s is a keyboard's name; Up/Down/PgUp/PgDn, Enter and Esc are key names; keep them.
+#: progs/settings.c
+#, c-format
+msgid ""
+"Layout of %.60s: type to filter   Up/Down/PgUp/PgDn   Enter: choose   Esc: "
+"back"
+msgstr ""
+
+#: progs/settings.c
+msgid "No layout has that in its name."
+msgstr ""
+
+#. TRANSLATORS: %s is the system's keyboard layout (jp106).
+#: progs/settings.c
+#, c-format
+msgid "The system's: %s"
+msgstr ""
+
 #. TRANSLATORS: Left/Right are the Left and Right arrow keys; keep them.
 #: progs/settings.c
 msgid "Network time sets the clock: turn it off (Left/Right) to set it here."
@@ -7318,6 +7352,14 @@ msgid "the port"
 msgstr ""
 
 #: progs/settings.c
+msgid "Position X,Y (logical pixels): "
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter X,Y coordinates between -65536 and 65536."
+msgstr ""
+
+#: progs/settings.c
 msgid "[Above]"
 msgstr ""
 
@@ -7339,6 +7381,11 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Arrange screens"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Selected: %.31s  X %d  Y %d"
 msgstr ""
 
 #: progs/settings.c
@@ -7369,15 +7416,16 @@ msgstr ""
 
 #. TRANSLATORS: Enter and Esc are key names; keep them.
 #: progs/settings.c
-msgid "Enter: apply  Esc: back"
+msgid "Drag; p: X,Y; Esc: back"
 msgstr ""
 
 #: progs/settings.c
-msgid "Arrows: select  Enter: apply  Esc: back"
+msgid ""
+"Drag: move  p: X,Y  Hold Shift and arrows: move  Enter: preset  Esc: back"
 msgstr ""
 
 #: progs/settings.c
-msgid "Text programs mirror; this layout is for the shared graphical display."
+msgid "Drag a screen to position it; p edits its exact X,Y coordinates."
 msgstr ""
 
 #: progs/settings.c
@@ -7523,11 +7571,6 @@ msgid "Software Sources"
 msgstr ""
 
 #: progs/settings.c
-#, c-format
-msgid "Packages for %s; own builds for %s. In order:"
-msgstr ""
-
-#: progs/settings.c
 msgid "Optional Components"
 msgstr ""
 
@@ -7616,6 +7659,19 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Kernel options: letters, digits, spaces and . , : = / + - _ @ only."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Machine profile: %s."
+msgstr ""
+
+#: progs/settings.c
+msgid "Machine profile: arrows to select; Enter: apply; Esc: back"
+msgstr ""
+
+#: progs/settings.c
+msgid "No matching machine profile."
 msgstr ""
 
 #: progs/settings.c
@@ -7802,6 +7858,24 @@ msgstr ""
 msgid "MAC on %.24s"
 msgstr ""
 
+#. TRANSLATORS: %s is a keyboard layout's name (jp106, a console keymap's).
+#: progs/settings.c
+#, c-format
+msgid "%s, the system's"
+msgstr ""
+
+#. TRANSLATORS: %s is a keyboard layout's name (us, a console keymap's).
+#: progs/settings.c
+#, c-format
+msgid "%s, its own: no key table, types as the system's"
+msgstr ""
+
+#. TRANSLATORS: %s is a keyboard layout's name (us, a console keymap's).
+#: progs/settings.c
+#, c-format
+msgid "%s, its own"
+msgstr ""
+
 #: progs/settings.c
 msgid "Terminal key (shared display)"
 msgstr ""
@@ -7971,10 +8045,6 @@ msgstr ""
 msgid "Screen brightness"
 msgstr ""
 
-#: progs/settings.c
-msgid "generic PC"
-msgstr ""
-
 #. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
 msgid "Update repository"
@@ -8057,6 +8127,14 @@ msgstr ""
 
 #: progs/settings.c
 msgid "round touchpads"
+msgstr ""
+
+#: progs/settings.c
+msgid "Edge activation dwell"
+msgstr ""
+
+#: progs/settings.c
+msgid "Edge activation range"
 msgstr ""
 
 #: progs/settings.c
@@ -8505,8 +8583,7 @@ msgid "Cannot set screen brightness."
 msgstr ""
 
 #: progs/settings.c
-#, c-format
-msgid "Machine profile: %s."
+msgid "Enter: choose a machine profile by brand."
 msgstr ""
 
 #: progs/settings.c
@@ -8547,6 +8624,10 @@ msgstr ""
 
 #: progs/settings.c
 msgid "The terminal's shell has no network from its next start."
+msgstr ""
+
+#: progs/settings.c
+msgid "Saved in libinput; applies when the pointer context next opens."
 msgstr ""
 
 #: progs/settings.c

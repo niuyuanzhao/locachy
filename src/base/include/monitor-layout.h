@@ -14,6 +14,7 @@ struct monitor_rect {
     int width, height;
     int place;
     int x, y;
+    int has_position;
 };
 
 static inline int monitor_before(const struct monitor_rect *r, size_t a, size_t b)
@@ -33,8 +34,14 @@ static inline size_t monitor_layout(struct monitor_rect *r, size_t n)
             ((r[i].place == MONITOR_ORIGIN) == (r[anchor].place == MONITOR_ORIGIN) &&
              monitor_before(r, i, anchor))) anchor = i;
     }
-    int min_x = 0, min_y = 0;
+    int min_x = 0, min_y = 0, explicit = 0;
+    for (size_t i = 0; i < n; i++) explicit |= r[i].has_position;
     for (size_t i = 0; i < n; i++) {
+        if (r[i].has_position) {
+            if (r[i].x < min_x) min_x = r[i].x;
+            if (r[i].y < min_y) min_y = r[i].y;
+            continue;
+        }
         r[i].x = r[i].y = 0;
         if (i == anchor) continue;
         int side = r[i].place;
@@ -43,8 +50,9 @@ static inline size_t monitor_layout(struct monitor_rect *r, size_t n)
         else if (side == MONITOR_ABOVE) r[i].y = -r[i].height;
         else if (side == MONITOR_BELOW) r[i].y = r[anchor].height;
         else r[i].x = r[anchor].width;
+        if (r[anchor].has_position) { r[i].x += r[anchor].x; r[i].y += r[anchor].y; }
         for (size_t j = 0; j < n; j++) {
-            if (j == anchor || !monitor_before(r, j, i)) continue;
+            if (j == anchor || r[j].has_position || !monitor_before(r, j, i)) continue;
             int other = r[j].place;
             if (other < MONITOR_RIGHT || other > MONITOR_BELOW) other = MONITOR_RIGHT;
             if (other != side) continue;
@@ -56,7 +64,7 @@ static inline size_t monitor_layout(struct monitor_rect *r, size_t n)
         if (r[i].x < min_x) min_x = r[i].x;
         if (r[i].y < min_y) min_y = r[i].y;
     }
-    for (size_t i = 0; i < n; i++) {
+    if (!explicit) for (size_t i = 0; i < n; i++) {
         r[i].x -= min_x;
         r[i].y -= min_y;
     }

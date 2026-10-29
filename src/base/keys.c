@@ -4,7 +4,10 @@
  * key_ime_width, key_volume_up, key_volume_down, key_volume_mute,
  * key_mic_mute). Keys type as the layout's key table has them (keytable):
  * with Shift, Caps Lock and AltGr, any character (K_TEXT beyond ASCII), and
- * the dead keys' sequences of libxkbcommon's compose table.
+ * the dead keys' sequences of libxkbcommon's compose table. A keyboard named
+ * in keyboards.conf types with its own keymap's table, the others with the
+ * system's (rc.conf's keymap); every keyboard's modifiers count together,
+ * each by its own table's roles, and Caps Lock is one.
  */
 #include <ctype.h>
 #include <errno.h>
@@ -36,24 +39,23 @@ static const char shifted[] = "\0\033!@#$%^&*()_+\b\tQWERTYUIOP{}\n\0ASDFGHJKL:\
 #ifndef KEYS_TABLE
 #define KEYS_TABLE "/usr/local/share/locachy/keymap.table"
 #endif
+/* Keyboards with a keymap of their own: "IDENTIFIER KEYMAP" lines (the
+ * identifier as keys_device_id gives it, the keymap a console keymap name as
+ * rc.conf's), and their keymaps' tables, KEYS_TABLES/KEYMAP.table (make.sh
+ * and settings write them with keytable). */
+#ifndef KEYS_DEVICES
+#define KEYS_DEVICES "/etc/locachy/keyboards.conf"
+#endif
+#ifndef KEYS_TABLES
+#define KEYS_TABLES "/usr/local/share/locachy/keymaps"
+#endif
 #define NSTATES 8
 #define MAX_SEQUENCE 6
 #define MAX_RESULT 4
-static uint32_t syms[NSTATES][256], chars[NSTATES][256];
-static char keysym[256][24];
-static unsigned char altgr_key[256];
 struct sequence {
     uint32_t keys[MAX_SEQUENCE], out[MAX_RESULT];
     unsigned char n, nout;
 };
-static struct sequence *sequences;
-static int nsequences;
-static uint32_t pending[MAX_SEQUENCE]; /* the dead keys' sequence being typed */
-static int npending;
-static char typed_text[4 * MAX_RESULT + 1]; /* K_TEXT's */
-static char layout_names[5][64]; /* console, layout, model, variant, options */
-static const char *const layout_fields[5] = { "console", "layout", "model", "variant", "options" };
-static int table_read;
 
 struct binding {
     int code;
@@ -61,18 +63,39 @@ struct binding {
     int action;
 };
 
-static struct binding bindings[MAX_BINDINGS];
-static int nbindings;
-static int bindings_loaded;
+/* A key table, and rc.conf's keys bound to its keys. */
+struct table {
+    uint32_t syms[NSTATES][256], chars[NSTATES][256];
+    char keysym[256][24];
+    unsigned char altgr_key[256], modifier_role[256];
+    struct sequence *sequences;
+    int nsequences;
+    char layout_names[5][64]; /* console, layout, model, variant, options */
+    char keymap[64];          /* keyboards.conf's name of it; the system's: "" */
+    struct binding bindings[MAX_BINDINGS];
+    int nbindings, bindings_loaded;
+};
+/* The system's first, then those keyboards use. */
+#define MAX_TABLES (MAX_KEYBOARDS + 1)
+static struct table tables[MAX_TABLES];
+static int ntables = 1;
+static uint32_t pending[MAX_SEQUENCE]; /* the dead keys' sequence being typed */
+static int npending;
+static char typed_text[4 * MAX_RESULT + 1]; /* K_TEXT's */
+static const char *const layout_fields[5] = { "console", "layout", "model", "variant", "options" };
+static int table_read;
 
 static int keyboards[MAX_KEYBOARDS];
 static char paths[MAX_KEYBOARDS][32]; /* process 1: to open them again */
+static signed char device_table[MAX_KEYBOARDS]; /* each one's table; -1: not looked up yet */
 static int count;
-/* Left/right Shift, Ctrl, Alt, Super per device; 0x100 another AltGr key. */
-static unsigned short modifiers[MAX_KEYBOARDS];
+/* Track physical keys independently even when two share a modifier role. */
+static unsigned char modifiers[MAX_KEYBOARDS][256], unowned_modifiers[256];
 static int shift, ctrl, alt, meta, altgr;
 static int caps; /* Caps Lock locked: letters in capitals (with Shift, small) */
+static int caps_code; /* a key that was Caps Lock only with Shift when pressed (jp's Eisu) */
 static int last_code; /* the last key pressed, not a modifier */
+static struct table *last_table = &tables[0]; /* that key's keyboard's */
 static int name_any;  /* keys_name_any */
 
 /* The input method (ime.c), in the programs that have it: Caps Lock's key
@@ -80,17 +103,18 @@ static int name_any;  /* keys_name_any */
 __attribute__((weak)) void ime_caps_key(int pressed, int locked);
 __attribute__((weak)) void ime_set_caps(int locked);
 
+
 static int has(const unsigned long *bits, int n)
 {
     return (bits[n / (8 * sizeof(long))] >> (n % (8 * sizeof(long)))) & 1;
 }
 
-static void add_binding(int code, int c, int a, int s, int m, int action)
+static void add_binding(struct table *tb, int code, int c, int a, int s, int m, int action)
 {
-    if (nbindings >= MAX_BINDINGS) {
+    if (tb->nbindings >= MAX_BINDINGS) {
         return;
     }
-    bindings[nbindings++] = (struct binding){
+    tb->bindings[tb->nbindings++] = (struct binding){
         .code = code,
         .ctrl = (uint8_t)c,
         .alt = (uint8_t)a,
@@ -102,38 +126,50 @@ static void add_binding(int code, int c, int a, int s, int m, int action)
 
 /* US, without a table: Caps Lock turns letters only, as xkb's Lock does;
  * no AltGr, no dead keys. */
-static void us_states(void)
+static void us_states(struct table *tb)
 {
+    tb->modifier_role[KEY_LEFTSHIFT] = tb->modifier_role[KEY_RIGHTSHIFT] = KEYS_SHIFT;
+    tb->modifier_role[KEY_LEFTCTRL] = tb->modifier_role[KEY_RIGHTCTRL] = KEYS_CTRL;
+    tb->modifier_role[KEY_LEFTALT] = tb->modifier_role[KEY_RIGHTALT] = KEYS_ALT;
+    tb->modifier_role[KEY_LEFTMETA] = tb->modifier_role[KEY_RIGHTMETA] = KEYS_META;
+    tb->modifier_role[KEY_CAPSLOCK] = KEYS_CAPS;
     for (size_t i = 0; i < sizeof normal - 1; i++) {
         uint32_t n = (unsigned char)normal[i], u = (unsigned char)shifted[i];
         int letter = isalpha((int)n);
         for (int st = 0; st < NSTATES; st++) {
             int up = !!(st & 1) != (letter && (st & 2));
-            chars[st][i] = up ? u : n;
+            tb->chars[st][i] = up ? u : n;
         }
     }
 }
 
-int keys_layout_load(const char *path)
+static int modifier_keysym(uint32_t sym)
 {
-    table_read = 1;
-    bindings_loaded = 0; /* names resolve through the new table */
-    memset(syms, 0, sizeof syms);
-    memset(chars, 0, sizeof chars);
-    memset(keysym, 0, sizeof keysym);
-    memset(altgr_key, 0, sizeof altgr_key);
-    memset(layout_names, 0, sizeof layout_names);
-    free(sequences);
-    sequences = NULL;
-    nsequences = npending = 0;
-    us_states();
+    switch (sym) {
+    case 0xffe1: case 0xffe2: return KEYS_SHIFT;
+    case 0xffe3: case 0xffe4: return KEYS_CTRL;
+    case 0xffe7: case 0xffe8: case 0xffe9: case 0xffea: return KEYS_ALT;
+    case 0xffeb: case 0xffec: case 0xffed: case 0xffee: return KEYS_META;
+    case 0xfe03: case 0xfe11: case 0xff7e: return KEYS_ALTGR;
+    case 0xffe5: case 0xffe6: return KEYS_CAPS;
+    default: return 0;
+    }
+}
+
+/* The table at path into tb: 0, or -1 when there is none (tb types US). */
+static int load_table(struct table *tb, const char *path)
+{
+    free(tb->sequences);
+    memset(tb, 0, sizeof *tb);
+    us_states(tb);
     FILE *f = path ? fopen(path, "re") : NULL;
     if (!f) return -1;
     static uint32_t got_syms[NSTATES][256], got_chars[NSTATES][256];
     memset(got_syms, 0, sizeof got_syms);
     memset(got_chars, 0, sizeof got_chars);
     char names[256][24] = { { 0 } }, line[512];
-    int keys = 0, size = 0;
+    unsigned char roles[256] = { 0 };
+    int keys = 0, size = 0, explicit_roles = 0;
     while (fgets(line, sizeof line, f)) {
         int code, at;
         char name[24], field[16], value[64];
@@ -149,8 +185,13 @@ int keys_layout_load(const char *path)
             }
             memcpy(names[code], name, sizeof name);
             keys++;
+        } else if (sscanf(line, "modifier %d %d", &code, &at) == 2) {
+            if (code > 0 && code < 256 && at >= 0 && at < 64) {
+                roles[code] = (unsigned char)at;
+                explicit_roles = 1;
+            }
         } else if (sscanf(line, "altgr %d", &code) == 1) {
-            if (code > 0 && code < 256) altgr_key[code] = 1;
+            if (code > 0 && code < 256) tb->altgr_key[code] = 1;
         } else if (strncmp(line, "compose ", 8) == 0) {
             struct sequence q = { .n = 0 };
             char *t = line + 8, *end;
@@ -165,33 +206,58 @@ int keys_layout_load(const char *path)
                 q.out[q.nout++] = v < 0x110000 ? (uint32_t)v : 0xFFFD;
             }
             if (q.nout == 0) continue;
-            if (nsequences == size) {
+            if (tb->nsequences == size) {
                 size = size ? 2 * size : 256;
-                struct sequence *more = realloc(sequences, (size_t)size * sizeof *sequences);
+                struct sequence *more = realloc(tb->sequences, (size_t)size * sizeof *tb->sequences);
                 if (!more) continue;
-                sequences = more;
+                tb->sequences = more;
             }
-            sequences[nsequences++] = q;
+            tb->sequences[tb->nsequences++] = q;
         } else if (sscanf(line, "%15s %63s", field, value) == 2) {
             for (int i = 0; i < 5; i++) {
                 if (strcmp(field, layout_fields[i]) == 0 && strcmp(value, "-") != 0) {
-                    snprintf(layout_names[i], sizeof layout_names[i], "%s", value);
+                    snprintf(tb->layout_names[i], sizeof tb->layout_names[i], "%s", value);
                 }
             }
         }
     }
     fclose(f);
     if (keys == 0) { /* US, as without a table */
-        memset(altgr_key, 0, sizeof altgr_key);
-        free(sequences);
-        sequences = NULL;
-        nsequences = 0;
+        memset(tb->altgr_key, 0, sizeof tb->altgr_key);
+        free(tb->sequences);
+        tb->sequences = NULL;
+        tb->nsequences = 0;
         return -1;
     }
-    memcpy(syms, got_syms, sizeof syms);
-    memcpy(chars, got_chars, sizeof chars);
-    memcpy(keysym, names, sizeof keysym);
+    memcpy(tb->syms, got_syms, sizeof tb->syms);
+    memcpy(tb->chars, got_chars, sizeof tb->chars);
+    memcpy(tb->keysym, names, sizeof tb->keysym);
+    memset(tb->modifier_role, 0, sizeof tb->modifier_role);
+    for (int code = 1; code < 256; code++) {
+        tb->modifier_role[code] = explicit_roles ? roles[code] :
+                                  (unsigned char)(tb->altgr_key[code] ? KEYS_ALTGR : modifier_keysym(tb->syms[0][code]));
+    }
     return 0;
+}
+
+/* The keyboards' own tables go; each keyboard's is looked up again. */
+static void drop_device_tables(void)
+{
+    for (int t = 1; t < ntables; t++) {
+        free(tables[t].sequences);
+        tables[t].sequences = NULL;
+    }
+    ntables = 1;
+    memset(device_table, -1, sizeof device_table);
+    last_table = &tables[0];
+}
+
+int keys_layout_load(const char *path)
+{
+    table_read = 1;
+    npending = 0;
+    drop_device_tables();
+    return load_table(&tables[0], path);
 }
 
 static void read_table(void)
@@ -199,20 +265,132 @@ static void read_table(void)
     if (!table_read) keys_layout_load(KEYS_TABLE);
 }
 
+int keys_device_id(int fd, char *out, size_t size)
+{
+    struct input_id id;
+    char name[256] = "";
+    if (ioctl(fd, EVIOCGID, &id) < 0 || ioctl(fd, EVIOCGNAME(sizeof name - 1), name) < 0) {
+        return -1;
+    }
+    /* As sway names input devices: the name without white space around it,
+     * its spaces and unprintable bytes as _. */
+    char *s = name, *e = name + strlen(name);
+    while (isspace((unsigned char)*s)) s++;
+    while (e > s && isspace((unsigned char)e[-1])) *--e = '\0';
+    for (char *p = s; *p; p++) {
+        if (*p == ' ' || !isprint((unsigned char)*p)) *p = '_';
+    }
+    snprintf(out, size, "%u:%u:%s", id.vendor, id.product, s);
+    return 0;
+}
+
+/* A console keymap's name as keyboards.conf and the tables' file names have
+ * it: letters, digits, . _ -, not first a dot. */
+static int keymap_name(const char *s)
+{
+    if (!s[0] || s[0] == '.' || strlen(s) >= sizeof tables[0].keymap) return 0;
+    for (; *s; s++) {
+        if (!isalnum((unsigned char)*s) && !strchr("._-", *s)) return 0;
+    }
+    return 1;
+}
+
+/* keyboards.conf's keymap for the keyboard id: 0, or -1 when it has none. */
+static int device_keymap(const char *id, char *keymap, size_t size)
+{
+    FILE *f = fopen(KEYS_DEVICES, "re");
+    char line[512], name[KEYS_ID_SIZE], map[64];
+    int found = -1;
+    while (f && found < 0 && fgets(line, sizeof line, f)) {
+        if (line[0] == '#' || sscanf(line, "%299s %63s", name, map) != 2) continue;
+        if (strcmp(name, id) == 0 && keymap_name(map)) {
+            snprintf(keymap, size, "%s", map);
+            found = 0;
+        }
+    }
+    if (f) fclose(f);
+    return found;
+}
+
+/* Keyboard fd's table: its own keymap's (keyboards.conf), read once for all
+ * keyboards with that keymap; the system's for the others, and when its own
+ * table is missing. */
+static int resolve(int fd)
+{
+    char id[KEYS_ID_SIZE], keymap[64], path[sizeof KEYS_TABLES + 72];
+    if (keys_device_id(fd, id, sizeof id) < 0 || device_keymap(id, keymap, sizeof keymap) < 0 ||
+        strcmp(keymap, tables[0].layout_names[0]) == 0) {
+        return 0;
+    }
+    for (int t = 1; t < ntables; t++) {
+        if (strcmp(tables[t].keymap, keymap) == 0) return t;
+    }
+    snprintf(path, sizeof path, "%s/%s.table", KEYS_TABLES, keymap);
+    if (ntables == MAX_TABLES || load_table(&tables[ntables], path) < 0) {
+        say("keys: no key table %s for keyboard %s; it types as the system's", path, id);
+        return 0;
+    }
+    snprintf(tables[ntables].keymap, sizeof tables[0].keymap, "%s", keymap);
+    return ntables++;
+}
+
+static struct table *device_table_of(int i)
+{
+    read_table();
+    if (device_table[i] < 0) device_table[i] = (signed char)resolve(keyboards[i]);
+    return &tables[device_table[i]];
+}
+
+/* The table fd types with (one not among the keyboards: the system's). */
+static struct table *table_of(int fd)
+{
+    for (int i = 0; i < count; i++) {
+        if (keyboards[i] == fd) return device_table_of(i);
+    }
+    read_table();
+    return &tables[0];
+}
+
+int keys_modifier(int code)
+{
+    read_table();
+    return code > 0 && code < 256 ? tables[0].modifier_role[code] : 0;
+}
+
+static const char *layout_name(const struct table *tb, const char *field)
+{
+    for (int i = 0; i < 5; i++) {
+        if (strcmp(field, layout_fields[i]) == 0) return tb->layout_names[i][0] ? tb->layout_names[i] : NULL;
+    }
+    return NULL;
+}
+
 const char *keys_layout_name(const char *field)
 {
     read_table();
-    for (int i = 0; i < 5; i++) {
-        if (strcmp(field, layout_fields[i]) == 0) return layout_names[i][0] ? layout_names[i] : NULL;
-    }
-    return NULL;
+    return layout_name(&tables[0], field);
+}
+
+const char *keys_device_layout(int fd, const char *field)
+{
+    return layout_name(table_of(fd), field);
+}
+
+static int table_char(const struct table *tb, int code, int with_shift)
+{
+    uint32_t c = code > 0 && code < 256 ? tb->chars[!!with_shift][code] : 0;
+    return c < 0x80 ? (int)c : 0;
 }
 
 int keys_char(int code, int with_shift)
 {
     read_table();
-    uint32_t c = code > 0 && code < 256 ? chars[!!with_shift][code] : 0;
-    return c < 0x80 ? (int)c : 0;
+    return table_char(&tables[0], code, with_shift);
+}
+
+int keys_device_char(int fd, int code, int with_shift)
+{
+    return table_char(table_of(fd), code, with_shift);
 }
 
 const char *keys_text(void)
@@ -232,7 +410,7 @@ static int modifier_name(const char *name)
     return 0;
 }
 
-static int parse_key_name(const char *name)
+static int parse_key_name(const struct table *tb, const char *name)
 {
     if (strcasecmp(name, "Esc") == 0 || strcasecmp(name, "Escape") == 0) return KEY_ESC;
     if (strcasecmp(name, "Space") == 0) return KEY_SPACE;
@@ -256,21 +434,21 @@ static int parse_key_name(const char *name)
     if (name[0] != '\0' && name[1] == '\0') {
         uint32_t ch = (uint32_t)tolower((unsigned char)name[0]);
         for (int i = 1; i < 256; i++) {
-            if (chars[0][i] == ch) {
+            if (tb->chars[0][i] == ch) {
                 return i;
             }
         }
     }
     /* The layout's keys without a character, by keysym name (Henkan_Mode). */
     for (int i = 1; i < 256; i++) {
-        if (keysym[i][0] && !chars[0][i] && strcasecmp(keysym[i], name) == 0) {
+        if (tb->keysym[i][0] && !tb->chars[0][i] && strcasecmp(tb->keysym[i], name) == 0) {
             return i;
         }
     }
     return -1;
 }
 
-static void parse_binding_spec(const char *spec, int action)
+static void parse_binding_spec(struct table *tb, const char *spec, int action)
 {
     char buf[256];
     snprintf(buf, sizeof buf, "%s", spec);
@@ -295,16 +473,16 @@ static void parse_binding_spec(const char *spec, int action)
                        strcasecmp(part, "Win") == 0) {
                 m = 1;
             } else {
-                code = parse_key_name(part);
+                code = parse_key_name(tb, part);
             }
             part = plus ? plus + 1 : NULL;
         }
         if (code == -1 && (c || a || s || m)) {
-            add_binding(0, c, a, s, m, action);
+            add_binding(tb, 0, c, a, s, m, action);
         } else if (code >= 0) {
-            add_binding(code, c, a, s, m, action);
+            add_binding(tb, code, c, a, s, m, action);
             if (code == KEY_VENDOR) {
-                add_binding(KEY_PROG1, c, a, s, m, action);
+                add_binding(tb, KEY_PROG1, c, a, s, m, action);
             }
         }
     }
@@ -342,63 +520,71 @@ static void on_key_rc(const char *name, const char *value, void *arg)
     else if (strcmp(name, "key_brightness_down") == 0) snprintf(cfg->bri_down, sizeof cfg->bri_down, "%s", value);
 }
 
-static void load_keybindings(void)
+/* rc.conf's keys, read once (again after keys_reload), bound to the keys of
+ * each table that names them. */
+static struct key_cfg key_cfg;
+static int key_cfg_read;
+
+static void load_keybindings(struct table *tb)
 {
-    if (bindings_loaded) {
+    read_table();
+    if (tb->bindings_loaded) {
         return;
     }
-    read_table();
-    bindings_loaded = 1;
-    /* The input method's keys on a JIS keyboard, by keysym name (keyboards
-     * without these keys bind nothing): Henkan, right of the space bar,
-     * Chinese; Muhenkan, left of it, direct input; Zenkaku_Hankaku, left of
-     * 1 in the jp layout, the width of Chinese mode's punctuation. */
-    struct key_cfg cfg = {
-        .home = "Super+Esc Ctrl+Alt+Esc Ctrl+Alt+Super ThinkVantage",
-        .lock = "Super+L",
-        .ime = "Ctrl+Space",
-        .ime_cn = "Henkan_Mode",
-        .ime_raw = "Muhenkan",
-        .ime_width = "Zenkaku_Hankaku",
-        .vol_up = "VolumeUp",
-        .vol_down = "VolumeDown",
-        .vol_mute = "Mute",
-        .mic_mute = "MicMute",
-        .bri_up = "BrightnessUp",
-        .bri_down = "BrightnessDown",
-    };
-    rc_read(on_key_rc, &cfg);
-    nbindings = 0;
-    parse_binding_spec(cfg.home, K_ACT_HOME);
-    parse_binding_spec(cfg.lock, K_ACT_LOCK);
-    parse_binding_spec(cfg.ime, K_CTRL_SPACE);
-    parse_binding_spec(cfg.ime_cn, K_ACT_IME_CN);
-    parse_binding_spec(cfg.ime_raw, K_ACT_IME_RAW);
-    parse_binding_spec(cfg.ime_width, K_ACT_IME_WIDTH);
-    parse_binding_spec(cfg.vol_up, K_VOL_UP);
-    parse_binding_spec(cfg.vol_down, K_VOL_DOWN);
-    parse_binding_spec(cfg.vol_mute, K_VOL_MUTE);
-    parse_binding_spec(cfg.mic_mute, K_MIC_MUTE);
-    parse_binding_spec(cfg.bri_up, K_BRI_UP);
-    parse_binding_spec(cfg.bri_down, K_BRI_DOWN);
+    tb->bindings_loaded = 1;
+    if (!key_cfg_read) {
+        /* The input method's keys on a JIS keyboard, by keysym name (keyboards
+         * without these keys bind nothing): Henkan, right of the space bar,
+         * Chinese; Muhenkan, left of it, direct input; Zenkaku_Hankaku, left of
+         * 1 in the jp layout, the width of Chinese mode's punctuation. */
+        key_cfg = (struct key_cfg){
+            .home = "Super+Esc Ctrl+Alt+Esc Ctrl+Alt+Super ThinkVantage",
+            .lock = "Super+L",
+            .ime = "Ctrl+Space",
+            .ime_cn = "Henkan_Mode",
+            .ime_raw = "Muhenkan",
+            .ime_width = "Zenkaku_Hankaku",
+            .vol_up = "VolumeUp",
+            .vol_down = "VolumeDown",
+            .vol_mute = "Mute",
+            .mic_mute = "MicMute",
+            .bri_up = "BrightnessUp",
+            .bri_down = "BrightnessDown",
+        };
+        rc_read(on_key_rc, &key_cfg);
+        key_cfg_read = 1;
+    }
+    tb->nbindings = 0;
+    parse_binding_spec(tb, key_cfg.home, K_ACT_HOME);
+    parse_binding_spec(tb, key_cfg.lock, K_ACT_LOCK);
+    parse_binding_spec(tb, key_cfg.ime, K_CTRL_SPACE);
+    parse_binding_spec(tb, key_cfg.ime_cn, K_ACT_IME_CN);
+    parse_binding_spec(tb, key_cfg.ime_raw, K_ACT_IME_RAW);
+    parse_binding_spec(tb, key_cfg.ime_width, K_ACT_IME_WIDTH);
+    parse_binding_spec(tb, key_cfg.vol_up, K_VOL_UP);
+    parse_binding_spec(tb, key_cfg.vol_down, K_VOL_DOWN);
+    parse_binding_spec(tb, key_cfg.vol_mute, K_VOL_MUTE);
+    parse_binding_spec(tb, key_cfg.mic_mute, K_MIC_MUTE);
+    parse_binding_spec(tb, key_cfg.bri_up, K_BRI_UP);
+    parse_binding_spec(tb, key_cfg.bri_down, K_BRI_DOWN);
 }
 
 void keys_reload(void)
 {
-    bindings_loaded = 0;
+    key_cfg_read = 0;
+    tables[0].bindings_loaded = 0;
     table_read = 0;
     npending = 0;
+    drop_device_tables();
 }
 
-int keys_match_action(int ev_code, int c, int a, int s, int m)
+static int match_action(struct table *tb, int ev_code, int c, int a, int s, int m)
 {
-    load_keybindings();
-    int is_mod_key = (ev_code == KEY_LEFTCTRL || ev_code == KEY_RIGHTCTRL ||
-                      ev_code == KEY_LEFTALT || ev_code == KEY_RIGHTALT ||
-                      ev_code == KEY_LEFTSHIFT || ev_code == KEY_RIGHTSHIFT ||
-                      ev_code == KEY_LEFTMETA || ev_code == KEY_RIGHTMETA);
-    for (int i = 0; i < nbindings; i++) {
-        const struct binding *b = &bindings[i];
+    load_keybindings(tb);
+    int is_mod_key = ev_code > 0 && ev_code < 256 &&
+                     (tb->modifier_role[ev_code] & (KEYS_CTRL | KEYS_ALT | KEYS_SHIFT | KEYS_META));
+    for (int i = 0; i < tb->nbindings; i++) {
+        const struct binding *b = &tb->bindings[i];
         if (b->code == 0) {
             if (is_mod_key && b->ctrl == !!c && b->alt == !!a &&
                 b->shift == !!s && b->meta == !!m) {
@@ -416,9 +602,20 @@ int keys_match_action(int ev_code, int c, int a, int s, int m)
     return 0;
 }
 
+int keys_match_action(int ev_code, int c, int a, int s, int m)
+{
+    read_table();
+    return match_action(&tables[0], ev_code, c, a, s, m);
+}
+
+int keys_device_action(int fd, int ev_code, int c, int a, int s, int m)
+{
+    return match_action(table_of(fd), ev_code, c, a, s, m);
+}
+
 int keys_open(void)
 {
-    load_keybindings();
+    load_keybindings(&tables[0]);
     if (control_fd() >= 0) {
         control_wait_take(); /* keys_take does the rest */
         pointer_open();      /* and the pointer comes after each take */
@@ -428,24 +625,29 @@ int keys_open(void)
     return count;
 }
 
-/* Right Alt is AltGr where the layout makes it so (de, fr, gb), not Alt:
- * AltGr+Q types @ and is no Alt binding. */
+/* Layout roles, held independently by every key and every device, each by
+ * its keyboard's table. */
 static void update_modifiers(void)
 {
-    unsigned short held = 0;
-    for (int i = 0; i < count; i++) held |= modifiers[i];
-    shift = !!(held & 0x03);
-    ctrl = !!(held & 0x0c);
-    alt = !!(held & (altgr_key[KEY_RIGHTALT] ? 0x10 : 0x30));
-    meta = !!(held & 0xc0);
-    altgr = (held & 0x100) || (altgr_key[KEY_RIGHTALT] && (held & 0x20));
+    int held = 0;
+    for (int code = 1; code < 256; code++) {
+        if (unowned_modifiers[code]) held |= tables[0].modifier_role[code];
+        for (int i = 0; i < count; i++) {
+            if (modifiers[i][code]) held |= device_table_of(i)->modifier_role[code];
+        }
+    }
+    shift = !!(held & KEYS_SHIFT);
+    ctrl = !!(held & KEYS_CTRL);
+    alt = !!(held & KEYS_ALT);
+    meta = !!(held & KEYS_META);
+    altgr = !!(held & KEYS_ALTGR);
 }
 
 /* Preserve live queues: reopening every device on an unrelated uevent loses
  * unread keys, and a path alone cannot distinguish a reconnected device. */
 void keys_refresh(void)
 {
-    load_keybindings();
+    load_keybindings(&tables[0]);
     for (int i = 0; i < count;) {
         int version;
         if (ioctl(keyboards[i], EVIOCGVERSION, &version) >= 0) { i++; continue; }
@@ -454,6 +656,7 @@ void keys_refresh(void)
         memmove(keyboards + i, keyboards + i + 1, (size_t)(count - i) * sizeof *keyboards);
         memmove(paths + i, paths + i + 1, (size_t)(count - i) * sizeof *paths);
         memmove(modifiers + i, modifiers + i + 1, (size_t)(count - i) * sizeof *modifiers);
+        memmove(device_table + i, device_table + i + 1, (size_t)(count - i) * sizeof *device_table);
     }
     update_modifiers();
     for (int i = 0; i < 64 && count < MAX_KEYBOARDS; i++) {
@@ -472,15 +675,16 @@ void keys_refresh(void)
             if (has(bits, KEY_A) && has(bits, KEY_ENTER)) {
                 wanted = 1;
             }
-            for (int b = 0; !wanted && b < nbindings; b++) {
-                if (bindings[b].code >= KEY_MUTE && has(bits, bindings[b].code)) {
+            for (int b = 0; !wanted && b < tables[0].nbindings; b++) {
+                if (tables[0].bindings[b].code >= KEY_MUTE && has(bits, tables[0].bindings[b].code)) {
                     wanted = 1;
                 }
             }
         }
         if (wanted) {
             snprintf(paths[count], sizeof paths[count], "%s", path);
-            modifiers[count] = 0;
+            memset(modifiers[count], 0, sizeof modifiers[count]);
+            device_table[count] = -1;
             keyboards[count++] = fd;
         } else {
             close(fd);
@@ -493,6 +697,7 @@ void keys_take(const int *fds, int n)
     keys_release();
     for (int i = 0; i < n; i++) {
         if (count < MAX_KEYBOARDS) {
+            device_table[count] = -1;
             keyboards[count++] = fds[i];
         } else {
             close(fds[i]);
@@ -505,9 +710,11 @@ void keys_take(const int *fds, int n)
 void keys_update(const int *fds, int n)
 {
     int old[MAX_KEYBOARDS], used[MAX_KEYBOARDS] = { 0 }, old_count = count;
-    unsigned short old_modifiers[MAX_KEYBOARDS];
+    unsigned char old_modifiers[MAX_KEYBOARDS][256];
+    signed char old_tables[MAX_KEYBOARDS];
     memcpy(old, keyboards, (size_t)old_count * sizeof *old);
     memcpy(old_modifiers, modifiers, (size_t)old_count * sizeof *modifiers);
+    memcpy(old_tables, device_table, (size_t)old_count * sizeof *device_table);
     count = 0;
     for (int i = 0; i < n; i++) {
         if (count == MAX_KEYBOARDS) { close(fds[i]); continue; }
@@ -517,12 +724,14 @@ void keys_update(const int *fds, int n)
         }
         if (k < old_count) {
             keyboards[count] = old[k];
-            modifiers[count++] = old_modifiers[k];
+            device_table[count] = old_tables[k];
+            memcpy(modifiers[count++], old_modifiers[k], sizeof modifiers[0]);
             used[k] = 1;
             close(fds[i]);
         } else {
             keyboards[count] = fds[i];
-            modifiers[count++] = 0;
+            device_table[count] = -1;
+            memset(modifiers[count++], 0, sizeof modifiers[0]);
         }
     }
     for (int i = 0; i < old_count; i++) if (!used[i]) close(old[i]);
@@ -536,6 +745,7 @@ void keys_release(void)
     }
     count = 0;
     memset(modifiers, 0, sizeof modifiers);
+    memset(unowned_modifiers, 0, sizeof unowned_modifiers);
     shift = ctrl = alt = meta = altgr = 0;
     npending = 0;
 }
@@ -588,6 +798,60 @@ int keys_fds(int *fds, int max)
     return n;
 }
 
+int keys_keyboards(struct keys_keyboard *out, int max)
+{
+    int n = 0;
+    read_table();
+    for (int i = 0; i < count && n < max; i++) {
+        unsigned long bits[KEY_MAX / (8 * sizeof(long)) + 1] = { 0 };
+        struct keys_keyboard *k = &out[n];
+        memset(k, 0, sizeof *k);
+        if (ioctl(keyboards[i], EVIOCGBIT(EV_KEY, sizeof bits), bits) < 0 || !has(bits, KEY_A) ||
+            !has(bits, KEY_ENTER) || keys_device_id(keyboards[i], k->id, sizeof k->id) < 0) {
+            continue;
+        }
+        if (ioctl(keyboards[i], EVIOCGNAME(sizeof k->name - 1), k->name) < 0) k->name[0] = '\0';
+        int own = device_keymap(k->id, k->keymap, sizeof k->keymap) == 0;
+        if (!own) snprintf(k->keymap, sizeof k->keymap, "%s", tables[0].layout_names[0]);
+        k->own = own;
+        k->missing = own && strcmp(k->keymap, tables[0].layout_names[0]) != 0 && device_table_of(i) == &tables[0];
+        int seen = 0;
+        for (int j = 0; j < n; j++) seen |= strcmp(out[j].id, k->id) == 0;
+        if (!seen) n++;
+    }
+    return n;
+}
+
+int keys_set_keyboard(const char *id, const char *keymap)
+{
+    if (!id[0] || strpbrk(id, " \t\r\n") || (keymap && !keymap_name(keymap))) {
+        errno = EINVAL;
+        return -1;
+    }
+    char tmp[sizeof KEYS_DEVICES + 8], line[512], name[KEYS_ID_SIZE];
+    snprintf(tmp, sizeof tmp, "%s.new", KEYS_DEVICES);
+    FILE *in = fopen(KEYS_DEVICES, "re"), *out = fopen(tmp, "we");
+    if (!out) {
+        if (in) fclose(in);
+        return -1;
+    }
+    if (!in) {
+        fputs("# Keyboards with a keymap of their own (settings: Input & Output, Keyboard):\n"
+              "# the keyboard as vendor:product:name, a console keymap as rc.conf's keymap.\n", out);
+    }
+    while (in && fgets(line, sizeof line, in)) {
+        if (line[0] != '#' && sscanf(line, "%299s", name) == 1 && strcmp(name, id) == 0) continue;
+        fputs(line, out);
+    }
+    if (keymap) fprintf(out, "%s %s\n", id, keymap);
+    if (in) fclose(in);
+    if (fclose(out) != 0 || rename(tmp, KEYS_DEVICES) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    return 0;
+}
+
 /* What chars types: the character itself when it is one in ASCII, else
  * K_TEXT with its UTF-8 (keys_text). */
 static int text_key(const uint32_t *c, int n)
@@ -617,10 +881,10 @@ static int text_key(const uint32_t *c, int n)
 }
 
 /* A dead key (or Multi_key) begins one of the compose sequences. */
-static int compose_starts(uint32_t sym)
+static int compose_starts(const struct table *tb, uint32_t sym)
 {
-    for (int i = 0; sym && i < nsequences; i++) {
-        if (sequences[i].keys[0] == sym) return 1;
+    for (int i = 0; sym && i < tb->nsequences; i++) {
+        if (tb->sequences[i].keys[0] == sym) return 1;
     }
     return 0;
 }
@@ -629,13 +893,13 @@ static int compose_starts(uint32_t sym)
  * takes it: the sequence's text when it is complete, 0 while it goes on, and
  * 0 when no sequence goes this way: the sequence and that key are dropped
  * (XKB_COMPOSE_CANCELLED, as foot and GTK's front ends drop it). */
-static int compose_feed(uint32_t sym)
+static int compose_feed(const struct table *tb, uint32_t sym)
 {
     const struct sequence *done = NULL;
     int longer = 0;
     pending[npending++] = sym;
-    for (int i = 0; i < nsequences; i++) {
-        const struct sequence *q = &sequences[i];
+    for (int i = 0; i < tb->nsequences; i++) {
+        const struct sequence *q = &tb->sequences[i];
         if (q->n < npending || memcmp(q->keys, pending, (size_t)npending * sizeof *pending) != 0) continue;
         if (q->n == npending) done = q;
         else longer = 1;
@@ -645,10 +909,11 @@ static int compose_feed(uint32_t sym)
     return done ? text_key(done->out, done->nout) : 0;
 }
 
-/* The key for a press (or repeat) of code, or 0 if it gives none. */
-static int translate(int code, int repeat)
+/* The key for a press (or repeat) of code on a keyboard with table tb, or 0
+ * if it gives none. */
+static int translate(struct table *tb, int code, int repeat)
 {
-    int act = keys_match_action(code, ctrl, alt, shift, meta);
+    int act = match_action(tb, code, ctrl, alt, shift, meta);
     if (act != 0) {
         if ((act == K_ACT_HOME || act == K_ACT_LOCK || act == K_CTRL_SPACE || act == K_ACT_IME_CN ||
              act == K_ACT_IME_RAW || act == K_ACT_IME_WIDTH || act == K_VOL_MUTE || act == K_MIC_MUTE) && repeat) {
@@ -658,7 +923,7 @@ static int translate(int code, int repeat)
     }
     int bare = !ctrl && !alt && !meta && !name_any, st = (shift ? 1 : 0) | (caps ? 2 : 0) | (altgr ? 4 : 0);
     if (bare && npending > 0 && code > 0 && code < 256) {
-        return compose_feed(syms[st][code]); /* any key goes on with the sequence, or ends it */
+        return compose_feed(tb, tb->syms[st][code]); /* any key goes on with the sequence, or ends it */
     }
     switch (code) {
     case KEY_UP:
@@ -697,17 +962,17 @@ static int translate(int code, int repeat)
     if (ctrl && !alt && !shift && code >= KEY_1 && code <= KEY_0) {
         return K_CTRL_0 + (code == KEY_0 ? 0 : code - KEY_1 + 1);
     }
-    uint32_t c = chars[st & ~2][code];
+    uint32_t c = tb->chars[st & ~2][code];
     if (ctrl && (((c | 0x20) >= 'a' && (c | 0x20) <= 'z') || (c >= '[' && c <= '_'))) {
         return (int)(c & 0x1F);
     }
-    c = chars[st][code];
-    if (c == 0 && bare && compose_starts(syms[st][code])) {
-        pending[0] = syms[st][code];
+    c = tb->chars[st][code];
+    if (c == 0 && bare && compose_starts(tb, tb->syms[st][code])) {
+        pending[0] = tb->syms[st][code];
         npending = 1;
         return 0;
     }
-    if (c == 0 && name_any && keysym[code][0] && !modifier_name(keysym[code])) {
+    if (c == 0 && name_any && tb->keysym[code][0] && !modifier_name(tb->keysym[code])) {
         return K_NAMED;
     }
     if (c < 0x80) {
@@ -724,14 +989,16 @@ void keys_name_any(int on)
 int keys_last_name(char *out, size_t size)
 {
     char key[32];
+    const struct table *tb = last_table;
     read_table();
     if (last_code == KEY_SPACE || last_code == KEY_ENTER || last_code == KEY_TAB) {
         snprintf(key, sizeof key, "%s", last_code == KEY_SPACE ? "Space" : last_code == KEY_ENTER ? "Enter" : "Tab");
-    } else if (last_code > 0 && last_code < 256 && chars[0][last_code] < 0x80 && isalnum((int)chars[0][last_code])) {
-        snprintf(key, sizeof key, "%c", toupper((int)chars[0][last_code]));
-    } else if (last_code > 0 && last_code < 256 && keysym[last_code][0] && !chars[0][last_code] &&
-               !modifier_name(keysym[last_code]) && parse_key_name(keysym[last_code]) == last_code) {
-        snprintf(key, sizeof key, "%s", keysym[last_code]); /* Henkan_Mode */
+    } else if (last_code > 0 && last_code < 256 && tb->chars[0][last_code] < 0x80 &&
+               isalnum((int)tb->chars[0][last_code])) {
+        snprintf(key, sizeof key, "%c", toupper((int)tb->chars[0][last_code]));
+    } else if (last_code > 0 && last_code < 256 && tb->keysym[last_code][0] && !tb->chars[0][last_code] &&
+               !modifier_name(tb->keysym[last_code]) && parse_key_name(tb, tb->keysym[last_code]) == last_code) {
+        snprintf(key, sizeof key, "%s", tb->keysym[last_code]); /* Henkan_Mode */
     } else {
         return -1;
     }
@@ -749,54 +1016,30 @@ int keys_event(int fd)
 {
     struct input_event ev;
 
-    if (read(fd, &ev, sizeof ev) != sizeof ev || ev.type != EV_KEY) {
+    if (read(fd, &ev, sizeof ev) != sizeof ev || ev.type != EV_KEY || ev.value < 0 || ev.value > 2) {
         return 0;
+    }
+    int device = -1;
+    for (int i = 0; i < count; i++) {
+        if (keyboards[i] == fd) { device = i; break; }
     }
     read_table();
-    static const int mod_codes[] = { KEY_LEFTSHIFT, KEY_RIGHTSHIFT, KEY_LEFTCTRL, KEY_RIGHTCTRL,
-                                     KEY_LEFTALT, KEY_RIGHTALT, KEY_LEFTMETA, KEY_RIGHTMETA };
-    int level3 = ev.code < 256 && altgr_key[ev.code] && ev.code != KEY_RIGHTALT; /* AltGr on another key */
-    for (int i = 0; i < count; i++) {
-        if (keyboards[i] != fd) continue;
-        if (level3) {
-            if (ev.value) modifiers[i] |= 0x100;
-            else modifiers[i] &= (unsigned short)~0x100u;
-            update_modifiers();
-            return 0;
-        }
-        for (int k = 0; k < 8; k++) {
-            if (ev.code != mod_codes[k]) continue;
-            if (ev.value) modifiers[i] |= (unsigned short)(1u << k);
-            else modifiers[i] &= (unsigned short)~(1u << k);
-            update_modifiers();
-            return ev.value == 1 ? keys_match_action(ev.code, ctrl, alt, shift, meta) : 0;
-        }
-        break;
+    struct table *tb = device >= 0 ? device_table_of(device) : &tables[0];
+    int role = ev.code > 0 && ev.code < 256 ? tb->modifier_role[ev.code] : 0;
+    if (!role && ev.code > 0 && ev.code < 256 && ev.value == 1 && tb->syms[shift ? 1 : 0][ev.code] == 0xffe5) {
+        caps_code = ev.code; /* Caps_Lock at this level: the lock, as xkb has it */
     }
-    int is_mod = 0;
-    if (level3 || (ev.code == KEY_RIGHTALT && altgr_key[KEY_RIGHTALT])) {
-        altgr = ev.value != 0;
-        return 0;
-    } else if (ev.code == KEY_LEFTSHIFT || ev.code == KEY_RIGHTSHIFT) {
-        shift = ev.value != 0;
-        is_mod = 1;
-    } else if (ev.code == KEY_LEFTCTRL || ev.code == KEY_RIGHTCTRL) {
-        ctrl = ev.value != 0;
-        is_mod = 1;
-    } else if (ev.code == KEY_LEFTALT || ev.code == KEY_RIGHTALT) {
-        alt = ev.value != 0;
-        is_mod = 1;
-    } else if (ev.code == KEY_LEFTMETA || ev.code == KEY_RIGHTMETA) {
-        meta = ev.value != 0;
-        is_mod = 1;
+    if (!role && ev.code == caps_code && caps_code) {
+        role = KEYS_CAPS;
+        if (ev.value == 0) caps_code = 0;
     }
-    if (is_mod) {
-        if (ev.value == 1) {
-            return keys_match_action(ev.code, ctrl, alt, shift, meta);
-        }
-        return 0;
+    if (role && role != KEYS_CAPS) {
+        unsigned char *held = device >= 0 ? modifiers[device] : unowned_modifiers;
+        held[ev.code] = ev.value != 0;
+        update_modifiers();
+        return ev.value == 1 ? match_action(tb, ev.code, ctrl, alt, shift, meta) : 0;
     }
-    if (ev.code == KEY_CAPSLOCK) { /* locks at a press, unlocks at the next */
+    if (role == KEYS_CAPS) { /* locks at a press, unlocks at the next */
         if (ev.value != 2 && ime_caps_key) {
             ime_caps_key(ev.value == 1, caps);
         }
@@ -810,7 +1053,8 @@ int keys_event(int fd)
     }
     if (ev.value != 0) { /* 1 press, 2 repeat, 0 release */
         last_code = ev.code;
-        return translate(ev.code, ev.value == 2);
+        last_table = tb;
+        return translate(tb, ev.code, ev.value == 2);
     }
     return 0;
 }

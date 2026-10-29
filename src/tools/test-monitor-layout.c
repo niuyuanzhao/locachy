@@ -52,6 +52,19 @@ int main(void)
     missing[0].place = MONITOR_BELOW;
     monitor_layout(missing, 2);
     assert(missing[0].x == 0 && missing[0].y == 400);
+    struct monitor_rect free_xy[] = {
+        { .name = "eDP-1", .width = 1280, .height = 720, .place = MONITOR_ORIGIN,
+          .has_position = 1, .x = 120, .y = 240 },
+        { .name = "DP-1", .width = 1920, .height = 1080, .place = MONITOR_RIGHT,
+          .has_position = 1, .x = -1800, .y = -80 },
+        { .name = "HDMI-A-1", .width = 800, .height = 600, .place = MONITOR_BELOW },
+    };
+    assert(monitor_layout(free_xy, 3) == 0);
+    assert(free_xy[0].x == 120 && free_xy[0].y == 240 && free_xy[1].x == -1800 && free_xy[1].y == -80);
+    assert(free_xy[2].x == 120 && free_xy[2].y == 960);
+    monitor_layout(free_xy, 3);
+    assert(free_xy[0].x == 120 && free_xy[1].x == -1800 && free_xy[2].y == 960);
+    puts("PASS explicit positive/negative XY survive layout and legacy outputs remain relative to origin");
     printf("monitor layout: %d discovery permutations, empty, fallback, duplicate origin and below passed.\n", permutations);
     return 0;
 }

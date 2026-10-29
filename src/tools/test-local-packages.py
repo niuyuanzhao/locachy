@@ -464,6 +464,73 @@ class LocalPackages(unittest.TestCase):
             self.assertEqual(pkg.cmd_sync(), 1)
         self.assertEqual(calls, [[pkg.BUILD_TOOL, "-i", "--local", "labwc-locachy"]])
 
+    def apply_host(self, rows):
+        """Apply with pacman doubled: (commands, package queries, result)."""
+        calls, queries = [], []
+        def pacman(command):
+            calls.append(command)
+            self.host["sof-firmware"] = "1"
+            return True
+        self.patch("run", lambda cmd, net=False: calls.append(cmd) or True)
+        self.patch("run_pacman", pacman)
+        query = lambda cmd, **kwargs: queries.append(cmd) or types.SimpleNamespace(returncode=0)
+        with mock.patch.object(pkg.subprocess, "run", query), contextlib.redirect_stdout(io.StringIO()):
+            result = pkg.apply_target("host", rows)
+        return calls, queries, result
+
+    def test_declared_missing_leaf_is_planned_shown_and_installed_by_apply(self):
+        self.record()
+        self.patch("repo_updates", lambda: ([], {"base": "1", "sof-firmware": "1"}))
+        self.manifest.write_text("# keep this\nlabwc-locachy\nsof-firmware\n")
+        rows = pkg.plan()
+        missing = ("host", "missing", "sof-firmware", "", "declared, not installed")
+        self.assertIn(missing, rows)
+        self.assertEqual(pkg.targets_of(rows)[0], "host")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            pkg.print_plan(rows, "2026-10-28 10:00")
+        self.assertIn("  install sof-firmware: declared, not installed\n", out.getvalue())
+        calls, queries, result = self.apply_host(rows)
+        self.assertTrue(result)
+        # The host update first, then the leaf through sync's own repository path.
+        self.assertEqual(calls, [["pacman", "-Syu", "--noconfirm"],
+                                 "pacman -S --needed --noconfirm --assume-installed initramfs sof-firmware"])
+        self.assertEqual(queries, [["pacman", "-Sp", "sof-firmware"]])
+        self.assertNotIn(missing, pkg.plan())
+
+    def test_apply_installs_nothing_when_no_declared_leaf_is_missing(self):
+        self.record()
+        self.assertFalse(any(r[1] == "missing" for r in pkg.plan()))
+        calls, queries, result = self.apply_host([("host", "repo", "base", "1", "2")])
+        self.assertTrue(result)
+        self.assertEqual(calls, [["pacman", "-Syu", "--noconfirm"]])
+        self.assertEqual(queries, [])
+        # Planned, then no longer declared (removed) or already installed: left alone.
+        rows = [("host", "missing", "sof-firmware", "", "declared, not installed")]
+        calls, queries, result = self.apply_host(rows)
+        self.assertTrue(result)
+        self.assertEqual((calls, queries), ([["pacman", "-Syu", "--noconfirm"]], []))
+        self.manifest.write_text("labwc-locachy\nsof-firmware\n")
+        self.host["sof-firmware"] = "1"
+        calls, queries, result = self.apply_host(rows)
+        self.assertEqual((calls, queries, result), ([["pacman", "-Syu", "--noconfirm"]], [], True))
+
+    def test_prepared_host_installs_missing_leaf_only_after_its_transaction(self):
+        (self.recipe / "upstream.json").write_text('{"schema":1}\n')
+        self.manifest.write_text("labwc-locachy\nsof-firmware\n")
+        self.patch("local_recipes", lambda: {"labwc-locachy": str(self.recipe)})
+        rows = [("host", "missing", "sof-firmware", "", "declared, not installed")]
+        done = []
+        self.patch("apply_prepared_host", lambda rows, recipes: done.append("prepared") or True)
+        calls, queries, result = self.apply_host(rows)
+        self.assertTrue(result)
+        self.assertEqual(done + calls, ["prepared",
+                                        "pacman -S --needed --noconfirm --assume-installed initramfs sof-firmware"])
+        del self.host["sof-firmware"]
+        self.patch("apply_prepared_host", lambda rows, recipes: False)
+        calls, queries, result = self.apply_host(rows)
+        self.assertEqual((calls, queries, result), ([], [], False))
+
 
 LocalPackages.original_build_hash = staticmethod(pkg.build_host_hash)
 if __name__ == "__main__":

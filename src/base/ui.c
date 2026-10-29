@@ -14,14 +14,20 @@
 #define MENU_ON   0x80C0FF
 
 struct hit {
-    int col, row, ncols, nrows, id;
+    int col, row, ncols, nrows, id, output;
 };
 static struct hit *hits;
 static int nhits, hits_size;
 
 void ui_hits_clear(void)
 {
-    nhits = 0;
+    int output = screen_is_extended && screen_is_extended() && screen_output_current ? screen_output_current() : -1;
+    if (output < 0) { nhits = 0; return; }
+    for (int i = nhits - 1; i >= 0; i--) {
+        if (hits[i].output != output) continue;
+        memmove(hits + i, hits + i + 1, (size_t)(nhits - i - 1) * sizeof *hits);
+        nhits--;
+    }
 }
 
 void ui_hit(int col, int row, int ncols, int nrows, int id)
@@ -34,14 +40,17 @@ void ui_hit(int col, int row, int ncols, int nrows, int id)
         hits = h;
         hits_size = size;
     }
-    hits[nhits++] = (struct hit){ col, row, ncols, nrows, id };
+    int output = screen_is_extended && screen_is_extended() && screen_output_current ? screen_output_current() : -1;
+    hits[nhits++] = (struct hit){ col, row, ncols, nrows, id, output };
 }
 
 /* The last added wins: it was drawn over the others. */
 int ui_hit_at(int col, int row)
 {
+    int output = screen_is_extended && screen_is_extended() && screen_output_current ? screen_output_current() : -1;
     for (int i = nhits - 1; i >= 0; i--) {
         const struct hit *h = &hits[i];
+        if (h->output != output) continue;
         if (col >= h->col && col < h->col + h->ncols && row >= h->row && row < h->row + h->nrows) {
             return h->id;
         }
@@ -98,6 +107,8 @@ int ui_menu(int col, int row, const char *const *items)
     }
     if (n == 0) return -1;
     w += 2;
+    /* Drawn on the selected output: a press on another is outside. */
+    int output = screen_is_extended && screen_is_extended() && screen_output_current ? screen_output_current() : 0;
     int cols = screen_cols(), rows = screen_rows();
     if (col + w > cols) col = cols - w;
     if (row + n > rows) row = rows - n;
@@ -121,7 +132,8 @@ int ui_menu(int col, int row, const char *const *items)
             return -1;
         } else if (key == K_POINTER) {
             const struct pointer_event *e = pointer_last();
-            int inside = e->col >= col && e->col < col + w && e->row >= row && e->row < row + n;
+            int inside = e->output == output && e->col >= col && e->col < col + w &&
+                         e->row >= row && e->row < row + n;
             if (!e->button && !e->wheel) {
                 armed = 1;
                 if (inside) sel = e->row - row; /* follows the pointer */

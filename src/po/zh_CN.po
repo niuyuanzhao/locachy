@@ -2,7 +2,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-28 10:00-0400\n"
+"POT-Creation-Date: 2026-10-28 21:35-0400\n"
 "PO-Revision-Date: 2026-10-24 22:38+0000\n"
 "Last-Translator: LOCachy <38998838+niuyuanzhao@users.noreply.github.com>\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -3707,7 +3707,7 @@ msgid "-> move"
 msgstr "-> 移动"
 
 #. TRANSLATORS: the part before the colon is a key; keep it and ": ".
-#: progs/files.c progs/installer.c
+#: progs/files.c progs/installer.c progs/settings.c
 msgid "Enter: choose"
 msgstr "Enter: 选择"
 
@@ -4803,40 +4803,20 @@ msgid_plural "... %d more containers"
 msgstr[0] "……另有 %d 个容器"
 
 #: progs/home.c
-msgid "Container"
-msgstr "容器"
-
-#: progs/home.c
-msgid "State"
-msgstr "状态"
-
-#: progs/home.c
-msgid "RAM MiB"
-msgstr "内存 MiB"
-
-#: progs/home.c
-msgid "Swap MiB"
-msgstr "交换 MiB"
-
-#: progs/home.c
-msgid "-- Host programs (no containers) --"
-msgstr "-- 宿主程序（无容器） --"
-
-#: progs/home.c
-msgid "-- Host programs --"
-msgstr "-- 宿主程序 --"
-
-#: progs/home.c
 msgid "home and the shared folders"
 msgstr "主目录与共享文件夹"
+
+#: progs/home.c
+msgid "power off"
+msgstr "关机"
 
 #: progs/home.c
 msgid "reboot"
 msgstr "重启"
 
 #: progs/home.c
-msgid "power off"
-msgstr "关机"
+msgid "Containers: state, RAM / swap MiB"
+msgstr "容器：状态、内存 / 交换空间 MiB"
 
 #: progs/home.c
 msgid "No failure reason reported."
@@ -4865,10 +4845,10 @@ msgstr "K: 停止/关闭"
 #. TRANSLATORS: Up/Down/PgUp/PgDn and Super+Esc are key names; keep them.
 #: progs/home.c
 msgid ""
-"Up/Down/PgUp/PgDn or the wheel: move   double click: open   right click: "
+"Arrows/PgUp/PgDn or the wheel: move   double click: open   right click: "
 "actions   Super+Esc: home"
 msgstr ""
-"Up/Down/PgUp/PgDn 或滚轮: 移动   双击: 打开   右键: 操作   Super+Esc: 主页"
+"Arrows/PgUp/PgDn 或滚轮: 移动   双击: 打开   右键: 操作   Super+Esc: 主页"
 
 #: progs/home.c
 msgid "Request failed without a reason."
@@ -5919,6 +5899,12 @@ msgstr[0] "%d 项更新，来自 AUR"
 
 #: progs/packages.c
 #, c-format
+msgid "%d declared to install"
+msgid_plural "%d declared to install"
+msgstr[0] "%d 个已声明待安装"
+
+#: progs/packages.c
+#, c-format
 msgid "; rebuild: %s"
 msgstr "；重新构建：%s"
 
@@ -6008,6 +5994,11 @@ msgstr "当前系统与软件清单一致。"
 #, c-format
 msgid "Details: %s   l: output"
 msgstr "详细信息：%s   l: 输出"
+
+#: progs/packages.c
+#, c-format
+msgid "install %-36.100s declared, not installed"
+msgstr "安装 %-36.100s 已声明，未安装"
 
 #: progs/packages.c
 #, c-format
@@ -6610,6 +6601,10 @@ msgstr "尚未检查更新：按 c 检查更新。"
 #: progs/packages.c
 msgid "The last check is shown; c checks again."
 msgstr "当前显示上次检查结果；按 c 重新检查更新。"
+
+#: progs/settings.c
+msgid "generic PC"
+msgstr "通用 PC"
 
 #: progs/settings.c
 msgid "a new one each time"
@@ -7311,6 +7306,44 @@ msgstr "自动：根据网络所在位置"
 msgid "   (now)"
 msgstr "   （当前）"
 
+#. TRANSLATORS: %s is a keyboard layout's name (a console keymap's).
+#: progs/settings.c
+#, c-format
+msgid "No key table for layout %s; nothing changed."
+msgstr "布局 %s 没有键位表；未作改动。"
+
+#. TRANSLATORS: the first %s is a keyboard's name, the second a keyboard layout's (us).
+#: progs/settings.c
+#, c-format
+msgid ""
+"%.60s: layout %s from now on; the boot unlock takes it from the next boot "
+"image."
+msgstr "%.60s：此后使用布局 %s；开机解锁在下次生成引导镜像后使用。"
+
+#. TRANSLATORS: %s is a keyboard's name.
+#: progs/settings.c
+#, c-format
+msgid "%.60s: the system's layout again."
+msgstr "%.60s：恢复使用系统的布局。"
+
+#. TRANSLATORS: %s is a keyboard's name; Up/Down/PgUp/PgDn, Enter and Esc are key names; keep them.
+#: progs/settings.c
+#, c-format
+msgid ""
+"Layout of %.60s: type to filter   Up/Down/PgUp/PgDn   Enter: choose   Esc: "
+"back"
+msgstr "%.60s 的布局：输入以筛选   Up/Down/PgUp/PgDn   Enter: 选择   Esc: 返回"
+
+#: progs/settings.c
+msgid "No layout has that in its name."
+msgstr "没有名称含此内容的布局。"
+
+#. TRANSLATORS: %s is the system's keyboard layout (jp106).
+#: progs/settings.c
+#, c-format
+msgid "The system's: %s"
+msgstr "系统的：%s"
+
 #. TRANSLATORS: Left/Right are the Left and Right arrow keys; keep them.
 #: progs/settings.c
 msgid "Network time sets the clock: turn it off (Left/Right) to set it here."
@@ -7366,6 +7399,14 @@ msgid "the port"
 msgstr "该网口"
 
 #: progs/settings.c
+msgid "Position X,Y (logical pixels): "
+msgstr "位置 X,Y（逻辑像素）："
+
+#: progs/settings.c
+msgid "Enter X,Y coordinates between -65536 and 65536."
+msgstr "请输入 -65536 到 65536 之间的 X,Y 坐标。"
+
+#: progs/settings.c
 msgid "[Above]"
 msgstr "[上方]"
 
@@ -7388,6 +7429,11 @@ msgstr "设置：显示器"
 #: progs/settings.c
 msgid "Arrange screens"
 msgstr "排列显示器"
+
+#: progs/settings.c
+#, c-format
+msgid "Selected: %.31s  X %d  Y %d"
+msgstr "已选：%.31s  X %d  Y %d"
 
 #: progs/settings.c
 #, c-format
@@ -7417,16 +7463,17 @@ msgstr " (主屏)"
 
 #. TRANSLATORS: Enter and Esc are key names; keep them.
 #: progs/settings.c
-msgid "Enter: apply  Esc: back"
-msgstr "Enter: 应用  Esc: 返回"
+msgid "Drag; p: X,Y; Esc: back"
+msgstr "拖动；p: X,Y；Esc: 返回"
 
 #: progs/settings.c
-msgid "Arrows: select  Enter: apply  Esc: back"
-msgstr "Arrows: 选择  Enter: 应用  Esc: 返回"
+msgid ""
+"Drag: move  p: X,Y  Hold Shift and arrows: move  Enter: preset  Esc: back"
+msgstr "拖动: 移动  p: X,Y  按住 Shift 和方向键: 移动  Enter: 预设  Esc: 返回"
 
 #: progs/settings.c
-msgid "Text programs mirror; this layout is for the shared graphical display."
-msgstr "文本程序为镜像显示；此布局用于共享图形桌面。"
+msgid "Drag a screen to position it; p edits its exact X,Y coordinates."
+msgstr "拖动屏幕调整位置；p 编辑精确 X,Y 坐标。"
 
 #: progs/settings.c
 msgid ""
@@ -7571,11 +7618,6 @@ msgid "Software Sources"
 msgstr "软件源"
 
 #: progs/settings.c
-#, c-format
-msgid "Packages for %s; own builds for %s. In order:"
-msgstr "软件包面向 %s；本机编译面向 %s。顺序："
-
-#: progs/settings.c
 msgid "Optional Components"
 msgstr "可选组件"
 
@@ -7665,6 +7707,19 @@ msgstr "内核参数未更改。"
 #: progs/settings.c
 msgid "Kernel options: letters, digits, spaces and . , : = / + - _ @ only."
 msgstr "内核参数只能包含字母、数字、空格和 . , : = / + - _ @。"
+
+#: progs/settings.c
+#, c-format
+msgid "Machine profile: %s."
+msgstr "机型配置：%s。"
+
+#: progs/settings.c
+msgid "Machine profile: arrows to select; Enter: apply; Esc: back"
+msgstr "机型配置：方向键选择；Enter: 应用；Esc: 返回"
+
+#: progs/settings.c
+msgid "No matching machine profile."
+msgstr "没有匹配的机型配置。"
 
 #: progs/settings.c
 msgid "Find a setting: "
@@ -7850,6 +7905,24 @@ msgstr "新网络的 MAC"
 msgid "MAC on %.24s"
 msgstr "%.24s 的 MAC"
 
+#. TRANSLATORS: %s is a keyboard layout's name (jp106, a console keymap's).
+#: progs/settings.c
+#, c-format
+msgid "%s, the system's"
+msgstr "%s（系统的）"
+
+#. TRANSLATORS: %s is a keyboard layout's name (us, a console keymap's).
+#: progs/settings.c
+#, c-format
+msgid "%s, its own: no key table, types as the system's"
+msgstr "%s（自己的；没有键位表，按系统的输入）"
+
+#. TRANSLATORS: %s is a keyboard layout's name (us, a console keymap's).
+#: progs/settings.c
+#, c-format
+msgid "%s, its own"
+msgstr "%s（自己的）"
+
 #: progs/settings.c
 msgid "Terminal key (shared display)"
 msgstr "终端快捷键（共享桌面）"
@@ -8018,10 +8091,6 @@ msgstr "不支持"
 msgid "Screen brightness"
 msgstr "屏幕亮度"
 
-#: progs/settings.c
-msgid "generic PC"
-msgstr "通用 PC"
-
 #. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
 msgid "Update repository"
@@ -8105,6 +8174,14 @@ msgstr "触摸板绕边滚动"
 #: progs/settings.c
 msgid "round touchpads"
 msgstr "圆形触摸板"
+
+#: progs/settings.c
+msgid "Edge activation dwell"
+msgstr "边缘触发停留时间"
+
+#: progs/settings.c
+msgid "Edge activation range"
+msgstr "边缘触发范围参数"
 
 #: progs/settings.c
 #, c-format
@@ -8567,9 +8644,8 @@ msgid "Cannot set screen brightness."
 msgstr "无法调节屏幕亮度。"
 
 #: progs/settings.c
-#, c-format
-msgid "Machine profile: %s."
-msgstr "机型配置：%s。"
+msgid "Enter: choose a machine profile by brand."
+msgstr "Enter: 按品牌选择机型配置。"
 
 #: progs/settings.c
 msgid "Enter: the git repository LOCachy's source updates come from (or off)."
@@ -8611,6 +8687,10 @@ msgstr "终端的 shell 下次启动时联网。"
 #: progs/settings.c
 msgid "The terminal's shell has no network from its next start."
 msgstr "终端的 shell 下次启动时不联网。"
+
+#: progs/settings.c
+msgid "Saved in libinput; applies when the pointer context next opens."
+msgstr "已保存到 libinput；下次打开指针上下文时生效。"
 
 #: progs/settings.c
 msgid ""
@@ -10318,6 +10398,32 @@ msgstr "框选表格区域，再点击边缘附近划分行列；按 Esc 清除�
 #: progs/view.c
 msgid "Click to see the magnified view."
 msgstr "点击查看放大视图。"
+
+#~ msgid "Container"
+#~ msgstr "容器"
+
+#~ msgid "State"
+#~ msgstr "状态"
+
+#~ msgid "RAM MiB"
+#~ msgstr "内存 MiB"
+
+#~ msgid "Swap MiB"
+#~ msgstr "交换 MiB"
+
+#~ msgid "-- Host programs (no containers) --"
+#~ msgstr "-- 宿主程序（无容器） --"
+
+#~ msgid "-- Host programs --"
+#~ msgstr "-- 宿主程序 --"
+
+#~ msgid ""
+#~ "Text programs mirror; this layout is for the shared graphical display."
+#~ msgstr "文本程序为镜像显示；此布局用于共享图形桌面。"
+
+#, c-format
+#~ msgid "Packages for %s; own builds for %s. In order:"
+#~ msgstr "软件包面向 %s；本机编译面向 %s。顺序："
 
 #~ msgid "Tailscale login"
 #~ msgstr "Tailscale 登录"

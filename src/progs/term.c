@@ -1085,6 +1085,49 @@ static void send_key(int pty, int key)
         return;
     }
     scroll_view(-view); /* typing shows the screen again */
+    int mods = keys_modifiers();
+    if ((mods & KEYS_ALT) && (key < 0x80 || key == K_TEXT ||
+                              (key >= K_CTRL_0 && key <= K_CTRL_0 + 9))) queue_output("\033", 1);
+    if (key == K_CTRL_0 + 2) { queue_output("\0", 1); return; }
+    if (key == K_CTRL_0 + 3) { queue_output("\033", 1); return; }
+    if (key == K_CTRL_0 + 4) { queue_output("\034", 1); return; }
+    if (key == K_CTRL_0 + 5) { queue_output("\035", 1); return; }
+    if (key == K_CTRL_0 + 6) { queue_output("\036", 1); return; }
+    if (key == K_CTRL_0 + 7) { queue_output("\037", 1); return; }
+    if (key == K_CTRL_0 + 8) { queue_output("\177", 1); return; }
+    if ((mods & KEYS_CTRL) && (key == '@' || key == ' ')) { queue_output("\0", 1); return; }
+    if ((mods & KEYS_CTRL) && (key == '^' || key == '~')) { queue_output("\036", 1); return; }
+    if ((mods & KEYS_CTRL) && key == '?') { queue_output("\177", 1); return; }
+    if ((mods & KEYS_CTRL) && key == '\b') { queue_output("\b", 1); return; }
+    if (key == '\t' && (mods & KEYS_SHIFT)) { queue_output("\033[Z", 3); return; }
+    int modifier = 1 + !!(mods & KEYS_SHIFT) + 2 * !!(mods & KEYS_ALT) + 4 * !!(mods & KEYS_CTRL);
+    if (modifier > 1) {
+        const char *final = key == K_UP ? "A" : key == K_DOWN ? "B" : key == K_RIGHT ? "C" :
+                            key == K_LEFT ? "D" : key == K_BOL ? "H" : key == K_EOL ? "F" : NULL;
+        if (final) {
+            char sequence[24];
+            int n = snprintf(sequence, sizeof sequence, "\033[1;%d%s", modifier, final);
+            queue_output(sequence, (size_t)n);
+            return;
+        }
+        int number = key == K_INS ? 2 : key == K_DEL ? 3 : key == K_PGUP ? 5 : key == K_PGDN ? 6 : 0;
+        if (key >= K_F1 && key < K_F1 + 12) {
+            static const int numbers[] = { 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 23, 24 };
+            number = numbers[key - K_F1];
+            if (key < K_F1 + 4) {
+                char sequence[24];
+                int n = snprintf(sequence, sizeof sequence, "\033[1;%d%c", modifier, 'P' + key - K_F1);
+                queue_output(sequence, (size_t)n);
+                return;
+            }
+        }
+        if (number) {
+            char sequence[24];
+            int n = snprintf(sequence, sizeof sequence, "\033[%d;%d~", number, modifier);
+            queue_output(sequence, (size_t)n);
+            return;
+        }
+    }
 
     switch (key) {
     case '\n':

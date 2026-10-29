@@ -25,7 +25,48 @@ int control_send_fields(int sock, const char *const *fields)
     snprintf(sent[nsent++], sizeof sent[0], "%s%s%s", fields[0], fields[1] ? " " : "", fields[1] ? fields[1] : "");
     return 0;
 }
-void screen_pixels(int *w, int *h) { *w = 1000; *h = 800; }
+static int extended_fixture, selected_fixture;
+/* Two outputs side by side, as screen.c lays them out: desktop rectangles,
+ * native pixels. At first the second has twice the pixels. */
+static struct screen_output outs[2] = {
+    { .x = 0, .width = 1000, .height = 800, .pixel_width = 1000, .pixel_height = 800, .scale = 1 },
+    { .x = 1000, .width = 800, .height = 800, .pixel_width = 1600, .pixel_height = 1600, .scale = 2 },
+};
+int screen_is_extended(void) { return extended_fixture; }
+int screen_output_select(int index) { int old=selected_fixture;selected_fixture=index;return old; }
+int screen_output_get(int index, struct screen_output *out)
+{ if (index < 0 || index > 1) return -1; *out = outs[index]; return 0; }
+int screen_output_at(int x, int y, int *lx, int *ly)
+{
+    for (int i = 0; i < 2; i++) {
+        const struct screen_output *o = &outs[i];
+        if (x < o->x || x >= o->x + o->width || y < o->y || y >= o->y + o->height) continue;
+        if (lx) *lx = (x - o->x) * o->pixel_width / o->width;
+        if (ly) *ly = (y - o->y) * o->pixel_height / o->height;
+        return i;
+    }
+    return -1;
+}
+/* The nearest point of either rectangle. */
+void screen_output_project(int *x, int *y)
+{
+    long best = -1;
+    int nx = *x, ny = *y;
+    for (int i = 0; i < 2; i++) {
+        const struct screen_output *o = &outs[i];
+        int cx = *x < o->x ? o->x : *x > o->x + o->width - 1 ? o->x + o->width - 1 : *x;
+        int cy = *y < o->y ? o->y : *y > o->y + o->height - 1 ? o->y + o->height - 1 : *y;
+        long d = (long)(cx - *x) * (cx - *x) + (long)(cy - *y) * (cy - *y);
+        if (best < 0 || d < best) { best = d; nx = cx; ny = cy; }
+    }
+    *x = nx; *y = ny;
+}
+/* Extended, the canvas drawn on: the selected output's native pixels. */
+void screen_pixels(int *w, int *h)
+{
+    if (extended_fixture) { *w = outs[selected_fixture].pixel_width; *h = outs[selected_fixture].pixel_height; }
+    else { *w = 1000; *h = 800; }
+}
 void screen_cell_at(int x, int y, int *col, int *row) { *col = x / 10; *row = y / 20 - 1; }
 void screen_cursor_move(int x, int y) { cursor_x = x; cursor_y = y; }
 void screen_cursor_visible(int on) { cursor_shown = on; }
@@ -215,6 +256,55 @@ int main(void)
     assert(nsent == 3 && !strcmp(sent[0], "home") && !strcmp(sent[1], "switch next") &&
            !strcmp(sent[2], "switch prev"));
     puts("PASS touchpad: pinches in steps; three or more fingers swipe home, to the next and previous task");
+    extended_fixture = 1;
+    px = 1100; py = 200; moved();
+    e = next();
+    assert(e.output == 1 && e.x == 1100 && e.col == 20 && e.row == 19 && selected_fixture == 0);
+    px = 2000; py = 900; moved();
+    e = next();
+    assert(e.output == 1 && e.x == 1799 && e.y == 799 && cursor_x == 1799 && cursor_y == 799);
+    extended_fixture = 0;
+    puts("PASS extended pointer crosses outputs, maps local scaled cells and clamps desktop projection");
+    /* Motions of less than a pixel add up when extended too. */
+    extended_fixture = 1;
+    px = 1100; py = 200; moved(); next();
+    for (int i = 1; i <= 8; i++) {
+        px += 0.25; py -= 0.25; moved();
+        assert(cursor_x == 1100 + i / 4 && cursor_y == 200 - (i + 3) / 4);
+    }
+    e = next();
+    assert(e.output == 1 && e.x == 1102 && e.y == 198 && !pointer_next());
+    puts("PASS extended pointer keeps sub-pixel motions inside the outputs");
+    /* Absolute devices point at the internal panel, the first output, in its
+     * desktop coordinates, whatever output is drawn on: 1920x1080 at scale 2
+     * (960 wide), the other output from 960 on. */
+    outs[0] = (struct screen_output){ .width = 960, .height = 540, .pixel_width = 1920,
+                                      .pixel_height = 1080, .scale = 2 };
+    outs[1] = (struct screen_output){ .x = 960, .width = 1000, .height = 800, .pixel_width = 1000,
+                                      .pixel_height = 800, .scale = 1 };
+    selected_fixture = 1;
+    int ax, ay, aw, ah;
+    absolute_area(&ax, &ay, &aw, &ah);
+    assert(ax == 0 && ay == 0 && aw == 960 && ah == 540);
+    touch_ppmm = 10;
+    touch_down(0, ax + 0.5 * aw, ay + 0.5 * ah, 50, 50); /* the panel's centre */
+    touch_up(0);
+    e = next();
+    assert(e.button == BTN_LEFT && e.pressed && e.output == 0 && e.x == 480 && e.y == 270);
+    assert(e.col == 96 && e.row == 26 && cursor_x == 480 && cursor_y == 270 && selected_fixture == 1);
+    next();
+    touch_down(0, 100, 100, 10, 10);
+    touch_motion(0, 100, 140, 10, 14); /* 80 of the panel's pixels: 4 of its rows */
+    e = next();
+    assert(e.wheel == 4 && e.hwheel == 0 && e.output == 0 && e.x == 100 && e.y == 100);
+    touch_up(0);
+    assert(!pointer_next() && selected_fixture == 1);
+    px = ax + 0.75 * aw; py = ay + 0.5 * ah; moved(); /* an absolute mouse or pen */
+    e = next();
+    assert(e.output == 0 && e.x == 720 && e.y == 270 && cursor_x == 720);
+    extended_fixture = 0;
+    selected_fixture = 0;
+    puts("PASS extended touch, pen and absolute mice stay on the internal output with its own cells");
 
     pointer_release();
     assert(ndevices == 0 && cursor_shown == 0);

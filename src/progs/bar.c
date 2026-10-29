@@ -66,6 +66,7 @@
 #include "viewporter-client-protocol.h"
 #include "relative-pointer-unstable-v1-client-protocol.h"
 #include "base.h"
+#include "internal.h"
 #include "ime.h"
 
 #define FG_COLOR   0xFFD0D0D0u
@@ -81,7 +82,6 @@ static struct wl_shm *shm;
 static struct wl_seat *wl_seat_obj;
 static struct zwlr_layer_shell_v1 *layer_shell;
 static struct zwp_virtual_keyboard_manager_v1 *vkbd_mgr;
-static struct zwp_virtual_keyboard_v1 *vkbd;
 
 /* The top bar: a layer surface on each screen (wl_output), made when the
  * screen appears and destroyed when it goes. labwc closes one that has no
@@ -1647,20 +1647,56 @@ static void render_bot_bar(void)
     overlay_end(o);
 }
 
-/* Virtual keyboard + XKB keymap handling */
+/* The keyboards (evdev), each with its layout. */
+#define MAX_KBDS 8
+static int kbds[MAX_KBDS];
+static int nkbds;
+static int kbd_layout[MAX_KBDS];
+static volatile sig_atomic_t sig_regrab, sig_release, active = 1;
+static void set_grab(int on);
+
+/* Virtual keyboard + XKB keymap handling. A virtual keyboard for each
+ * keyboard layout in use, the system's first: a keyboard with a keymap of its
+ * own (keyboards.conf, keys.c) types through its layout's, as sway gives each
+ * keyboard its keymap; the seat sends the focused client the keymap and
+ * modifiers of the keyboard a key comes from. Each layout's xkb state has the
+ * keys of its keyboards and the modifier keys held on all of them, as that
+ * layout's key of the same role (Shift on one keyboard, 2 on another); the
+ * locks are one (share_locks). */
+#define MAX_LAYOUTS 8
+#define ROLE_NUM 64 /* Num Lock, besides keys.c's KEYS_* roles */
+#define NROLES 7
+struct layout {
+    char names[4][128]; /* layout, model, variant, options: keys.c's table's */
+    struct xkb_keymap *map;
+    struct xkb_state *st;
+    int keymap_fd, keymap_sent;
+    size_t keymap_len;
+    struct zwp_virtual_keyboard_v1 *vkbd; /* kept when the layout is made again */
+    xkb_mod_mask_t sent[3];               /* the modifiers last sent: depressed, latched, locked */
+    xkb_layout_index_t sent_group;
+    int sent_valid;
+    uint8_t fed[KEY_MAX + 1];  /* presses in st, by keycode */
+    uint8_t down[KEY_MAX + 1]; /* presses passed on to vkbd, by keycode */
+    unsigned char role[256];   /* each key's modifier role */
+    int role_key[NROLES];      /* the layout's first key of each role */
+};
 static struct xkb_context *xkb_ctx;
-static struct xkb_keymap *xkb_map;
-static struct xkb_state *xkb_st;
+static struct layout layouts[MAX_LAYOUTS];
+static int nlayouts, active_layout, cur_layout; /* the seat's; the last key's keyboard's */
 /* The dead keys while the keyboard is the input method's: libxkbcommon's
  * compose for the locale, as the programs would have them. */
 static struct xkb_compose_state *compose_st;
-static int passthrough_keymap_fd = -1;
-static size_t passthrough_keymap_len;
+static struct zwp_virtual_keyboard_v1 *text_vkbd;
+static int input_epoch;
+static void reset_keyboard_state(void);
+static void clear_virtual_keys(void);
 
 /* Caps Lock locked, as the keyboard's xkb state has it. */
 static int caps_locked(void)
 {
-    return xkb_st && xkb_state_mod_name_is_active(xkb_st, XKB_MOD_NAME_CAPS, XKB_STATE_MODS_LOCKED) > 0;
+    struct xkb_state *st = layouts[cur_layout].st;
+    return st && xkb_state_mod_name_is_active(st, XKB_MOD_NAME_CAPS, XKB_STATE_MODS_LOCKED) > 0;
 }
 
 static uint32_t now_ms32(void)
@@ -1670,50 +1706,231 @@ static uint32_t now_ms32(void)
     return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
 }
 
+/* Layout l, its keymap from the X names (missing: us, pc105), as labwc would
+ * make it from them; 0, or -1 when it cannot be made. */
+static int layout_init(struct layout *l, const char *const names[4])
+{
+    struct xkb_rule_names rmlvo = {
+        .rules = "evdev",
+        .layout = names[0] && names[0][0] ? names[0] : "us",
+        .model = names[1] && names[1][0] ? names[1] : "pc105",
+        .variant = names[2],
+        .options = names[3],
+    };
+    struct xkb_keymap *map = xkb_ctx ? xkb_keymap_new_from_names(xkb_ctx, &rmlvo, XKB_KEYMAP_COMPILE_NO_FLAGS) : NULL;
+    struct xkb_state *st = map ? xkb_state_new(map) : NULL;
+    char *str = map ? xkb_keymap_get_as_string(map, XKB_KEYMAP_FORMAT_TEXT_V1) : NULL;
+    size_t size = str ? strlen(str) + 1 : 0;
+    int fd = str ? memfd_create("locachy-xkb", MFD_CLOEXEC) : -1;
+    if (!st || fd < 0 || write(fd, str, size) != (ssize_t)size) {
+        if (fd >= 0) close(fd);
+        free(str);
+        xkb_state_unref(st);
+        xkb_keymap_unref(map);
+        return -1;
+    }
+    free(str);
+    for (int i = 0; i < 4; i++) snprintf(l->names[i], sizeof l->names[i], "%s", names[i] ? names[i] : "");
+    l->map = map;
+    l->st = st;
+    l->keymap_fd = fd;
+    l->keymap_len = size;
+    l->keymap_sent = l->sent_valid = 0;
+    /* The roles as keytable gives them keys.c, and Num Lock. */
+    for (int code = 1; code < 256; code++) {
+        struct xkb_state *press = xkb_state_new(map);
+        if (!press) break;
+        xkb_state_update_key(press, (xkb_keycode_t)code + 8, XKB_KEY_DOWN);
+        static const struct { const char *name; enum xkb_state_component kind; int role; } mods[] = {
+            { XKB_MOD_NAME_SHIFT, XKB_STATE_MODS_DEPRESSED, KEYS_SHIFT },
+            { XKB_MOD_NAME_CTRL, XKB_STATE_MODS_DEPRESSED, KEYS_CTRL },
+            { XKB_MOD_NAME_ALT, XKB_STATE_MODS_DEPRESSED, KEYS_ALT },
+            { XKB_MOD_NAME_LOGO, XKB_STATE_MODS_DEPRESSED, KEYS_META },
+            { "Mod5", XKB_STATE_MODS_DEPRESSED, KEYS_ALTGR },
+            { XKB_MOD_NAME_CAPS, XKB_STATE_MODS_LOCKED, KEYS_CAPS },
+            { XKB_MOD_NAME_NUM, XKB_STATE_MODS_LOCKED, ROLE_NUM },
+        };
+        int role = 0;
+        for (size_t m = 0; m < sizeof mods / sizeof mods[0]; m++) {
+            if (xkb_state_mod_name_is_active(press, mods[m].name, mods[m].kind) > 0) role |= mods[m].role;
+        }
+        xkb_state_unref(press);
+        l->role[code] = (unsigned char)role;
+        for (int r = 0; r < NROLES; r++) {
+            if ((role & (1 << r)) && !l->role_key[r]) l->role_key[r] = code;
+        }
+    }
+    return 0;
+}
+
+/* Layout l gone; its virtual keyboard stays for the next one in its place. */
+static void layout_free(struct layout *l)
+{
+    struct zwp_virtual_keyboard_v1 *kept = l->vkbd;
+    xkb_state_unref(l->st);
+    xkb_keymap_unref(l->map);
+    if (l->keymap_fd >= 0) close(l->keymap_fd);
+    memset(l, 0, sizeof *l);
+    l->keymap_fd = -1;
+    l->vkbd = kept;
+}
+
+static int same_names(const struct layout *l, const char *const names[4])
+{
+    for (int i = 0; i < 4; i++) {
+        if (strcmp(l->names[i], names[i] ? names[i] : "") != 0) return 0;
+    }
+    return 1;
+}
+
+/* The layout of keyboard fd (keys.c's table for it): one there is with the
+ * same names, or a new one; the system's when it cannot be made. */
+static int layout_of(int fd)
+{
+    const char *names[4] = { keys_device_layout(fd, "layout"), keys_device_layout(fd, "model"),
+                             keys_device_layout(fd, "variant"), keys_device_layout(fd, "options") };
+    for (int l = 0; l < nlayouts; l++) {
+        if (same_names(&layouts[l], names)) return l;
+    }
+    if (nlayouts == MAX_LAYOUTS || layout_init(&layouts[nlayouts], names) < 0) {
+        say("locachy-bar: cannot load keyboard layout %s; that keyboard types as the system's",
+            names[0] ? names[0] : "us");
+        return 0;
+    }
+    say("locachy-bar: a keyboard of its own layout, %s", names[0] ? names[0] : "us");
+    return nlayouts++;
+}
+
+/* The layouts made again: the system's (keys.c's table: rc.conf's keymap,
+ * as locachy-seat gives labwc), then each keyboard's. */
 static void init_xkb(void)
 {
-    xkb_ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
-    /* The keys passed on while the input method has the keyboard type as
-     * labwc's own do: the layout of the key table (locachy-seat gives labwc
-     * the same names). */
-    const char *layout = keys_layout_name("layout"), *model = keys_layout_name("model");
-    struct xkb_rule_names names = {
-        .rules = "evdev",
-        .model = model ? model : "pc105",
-        .layout = layout ? layout : "us",
-        .variant = keys_layout_name("variant"),
-        .options = keys_layout_name("options"),
-    };
-    xkb_map = xkb_keymap_new_from_names(xkb_ctx, &names, XKB_KEYMAP_COMPILE_NO_FLAGS);
-    xkb_st = xkb_state_new(xkb_map);
+    if (!xkb_ctx) xkb_ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+    if (!xkb_ctx) return;
+    const char *names[4] = { keys_layout_name("layout"), keys_layout_name("model"), keys_layout_name("variant"),
+                             keys_layout_name("options") };
+    struct layout fresh;
+    memset(&fresh, 0, sizeof fresh);
+    if (layout_init(&fresh, names) < 0) {
+        say("locachy-bar: cannot load the selected keyboard layout");
+        return;
+    }
+    for (int l = 0; l < MAX_LAYOUTS; l++) {
+        if (l < nlayouts || layouts[l].vkbd) layout_free(&layouts[l]);
+    }
+    fresh.vkbd = layouts[0].vkbd;
+    layouts[0] = fresh;
+    nlayouts = 1;
+    active_layout = cur_layout = 0;
+    for (int i = 0; i < nkbds; i++) kbd_layout[i] = layout_of(kbds[i]);
     const char *locale = getenv("LC_ALL");
     if (!locale || !*locale) locale = getenv("LC_CTYPE");
     if (!locale || !*locale) locale = getenv("LANG");
     struct xkb_compose_table *compose = xkb_compose_table_new_from_locale(xkb_ctx, locale && *locale ? locale : "C",
                                                                           XKB_COMPOSE_COMPILE_NO_FLAGS);
+    xkb_compose_state_unref(compose_st);
+    compose_st = NULL;
     if (compose) {
         compose_st = xkb_compose_state_new(compose, XKB_COMPOSE_STATE_NO_FLAGS);
         xkb_compose_table_unref(compose);
     }
-
-    char *str = xkb_keymap_get_as_string(xkb_map, XKB_KEYMAP_FORMAT_TEXT_V1);
-    passthrough_keymap_len = strlen(str) + 1;
-    passthrough_keymap_fd = memfd_create("locachy-xkb", MFD_CLOEXEC);
-    if (write(passthrough_keymap_fd, str, passthrough_keymap_len) < 0) {
-    }
-    free(str);
 }
 
+/* Layout l's virtual keyboard, made and given its keymap when first used. */
+static struct zwp_virtual_keyboard_v1 *layout_vkbd(struct layout *l)
+{
+    if (!l->vkbd && vkbd_mgr && wl_seat_obj) {
+        l->vkbd = zwp_virtual_keyboard_manager_v1_create_virtual_keyboard(vkbd_mgr, wl_seat_obj);
+    }
+    if (l->vkbd && !l->keymap_sent && l->keymap_fd >= 0) {
+        zwp_virtual_keyboard_v1_keymap(l->vkbd, WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1, l->keymap_fd,
+                                       (uint32_t)l->keymap_len);
+        l->keymap_sent = 1;
+        l->sent_valid = 0;
+    }
+    return l->vkbd;
+}
+
+/* The seat's keyboard becomes layout l's, with the modifiers as they are now:
+ * labwc gives the seat the virtual keyboard a key or modifiers come from. */
+static struct zwp_virtual_keyboard_v1 *use_layout(int l)
+{
+    struct layout *y = &layouts[l];
+    struct zwp_virtual_keyboard_v1 *k = y->st ? layout_vkbd(y) : NULL;
+    if (!k) return NULL;
+    xkb_mod_mask_t dep = xkb_state_serialize_mods(y->st, XKB_STATE_MODS_DEPRESSED);
+    xkb_mod_mask_t lat = xkb_state_serialize_mods(y->st, XKB_STATE_MODS_LATCHED);
+    xkb_mod_mask_t lck = xkb_state_serialize_mods(y->st, XKB_STATE_MODS_LOCKED);
+    xkb_layout_index_t grp = xkb_state_serialize_layout(y->st, XKB_STATE_LAYOUT_EFFECTIVE);
+    if (l != active_layout || !y->sent_valid || y->sent[0] != dep || y->sent[1] != lat || y->sent[2] != lck ||
+        y->sent_group != grp) {
+        zwp_virtual_keyboard_v1_modifiers(k, dep, lat, lck, grp);
+        y->sent[0] = dep;
+        y->sent[1] = lat;
+        y->sent[2] = lck;
+        y->sent_group = grp;
+        y->sent_valid = 1;
+    }
+    active_layout = l;
+    return k;
+}
+
+/* The seat's layout's keymap again (after text typed with keymaps of its
+ * own), and its modifiers. */
 static void restore_passthrough_keymap(void)
 {
-    if (!vkbd || passthrough_keymap_fd < 0) return;
-    zwp_virtual_keyboard_v1_keymap(vkbd, WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1,
-                                   passthrough_keymap_fd, (uint32_t)passthrough_keymap_len);
-    xkb_mod_mask_t dep = xkb_state_serialize_mods(xkb_st, XKB_STATE_MODS_DEPRESSED);
-    xkb_mod_mask_t lat = xkb_state_serialize_mods(xkb_st, XKB_STATE_MODS_LATCHED);
-    xkb_mod_mask_t lck = xkb_state_serialize_mods(xkb_st, XKB_STATE_MODS_LOCKED);
-    xkb_layout_index_t grp = xkb_state_serialize_layout(xkb_st, XKB_STATE_LAYOUT_EFFECTIVE);
-    zwp_virtual_keyboard_v1_modifiers(vkbd, dep, lat, lck, grp);
+    struct layout *y = &layouts[active_layout];
+    if (!y->st) return;
+    y->keymap_sent = 0;
+    if (layout_vkbd(y)) use_layout(active_layout);
+}
+
+/* A key of a keyboard of layout l, down or up: into l's state; a modifier
+ * held also as its role's key into the other layouts' states (the locks: see
+ * share_locks). Each state counts the presses of a key (the same keycode on
+ * two keyboards). */
+static void feed(struct layout *y, int code, int down)
+{
+    if (!y->st || code < 1 || code > KEY_MAX) return;
+    if (down ? y->fed[code]++ == 0 : (y->fed[code] && --y->fed[code] == 0)) {
+        xkb_state_update_key(y->st, (xkb_keycode_t)code + 8, down ? XKB_KEY_DOWN : XKB_KEY_UP);
+    }
+}
+
+static void feed_key(int l, int code, int down)
+{
+    feed(&layouts[l], code, down);
+    int role = code > 0 && code < 256 ? layouts[l].role[code] & (KEYS_SHIFT | KEYS_CTRL | KEYS_ALT | KEYS_META | KEYS_ALTGR) : 0;
+    for (int m = 0; role && m < nlayouts; m++) {
+        for (int r = 0; m != l && r < NROLES; r++) {
+            if ((role & (1 << r)) && layouts[m].role_key[r]) feed(&layouts[m], layouts[m].role_key[r], down);
+        }
+    }
+}
+
+/* Caps Lock and Num Lock as layout l has them now, in the other layouts'
+ * states too: one lock, however a layout reaches it (jp's Shift+Eisu). */
+static void share_locks(int l)
+{
+    static const char *const locks[] = { XKB_MOD_NAME_CAPS, XKB_MOD_NAME_NUM };
+    for (int m = 0; m < nlayouts; m++) {
+        struct xkb_state *st = layouts[m].st;
+        if (m == l || !st || !layouts[l].st) continue;
+        xkb_mod_mask_t locked = xkb_state_serialize_mods(st, XKB_STATE_MODS_LOCKED), was = locked;
+        for (size_t i = 0; i < sizeof locks / sizeof locks[0]; i++) {
+            xkb_mod_index_t k = xkb_keymap_mod_get_index(layouts[m].map, locks[i]);
+            if (k == XKB_MOD_INVALID) continue;
+            if (xkb_state_mod_name_is_active(layouts[l].st, locks[i], XKB_STATE_MODS_LOCKED) > 0) locked |= 1u << k;
+            else locked &= ~(1u << k);
+        }
+        if (locked != was) {
+            xkb_state_update_mask(st, xkb_state_serialize_mods(st, XKB_STATE_MODS_DEPRESSED),
+                                  xkb_state_serialize_mods(st, XKB_STATE_MODS_LATCHED), locked,
+                                  xkb_state_serialize_layout(st, XKB_STATE_LAYOUT_DEPRESSED),
+                                  xkb_state_serialize_layout(st, XKB_STATE_LAYOUT_LATCHED),
+                                  xkb_state_serialize_layout(st, XKB_STATE_LAYOUT_LOCKED));
+        }
+    }
 }
 
 /* The keys text is typed on: letters and digits only. Applications go by the
@@ -1757,12 +1974,12 @@ static void vkbd_type_chunk(const uint32_t *cps, int n)
         close(fd);
         return;
     }
-    zwp_virtual_keyboard_v1_modifiers(vkbd, 0, 0, 0, 0);
-    zwp_virtual_keyboard_v1_keymap(vkbd, WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1, fd, (uint32_t)(len + 1));
+    zwp_virtual_keyboard_v1_keymap(text_vkbd, WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1, fd, (uint32_t)(len + 1));
+    zwp_virtual_keyboard_v1_modifiers(text_vkbd, 0, 0, 0, 0);
     uint32_t t = now_ms32();
     for (int i = 0; i < n; i++) {
-        zwp_virtual_keyboard_v1_key(vkbd, t, text_keys[i], WL_KEYBOARD_KEY_STATE_PRESSED);
-        zwp_virtual_keyboard_v1_key(vkbd, t, text_keys[i], WL_KEYBOARD_KEY_STATE_RELEASED);
+        zwp_virtual_keyboard_v1_key(text_vkbd, t, text_keys[i], WL_KEYBOARD_KEY_STATE_PRESSED);
+        zwp_virtual_keyboard_v1_key(text_vkbd, t, text_keys[i], WL_KEYBOARD_KEY_STATE_RELEASED);
     }
     wl_display_roundtrip(display);
     close(fd);
@@ -1785,72 +2002,173 @@ static uint32_t decode_utf8(const uint8_t **p, const uint8_t *end)
 
 static void vkbd_type_utf8(const char *s)
 {
-    if (!vkbd || !s || !s[0]) return;
+    if (!text_vkbd || !s || !s[0]) return;
+    int epoch = input_epoch;
     uint32_t cps[128];
     int ncps = 0;
     const uint8_t *p = (const uint8_t *)s, *end = p + strlen(s);
     while (p < end && ncps < 120) {
         cps[ncps++] = decode_utf8(&p, end);
     }
-    for (int i = 0; i < ncps; i += NTEXT_KEYS) {
+    for (int i = 0; i < ncps && epoch == input_epoch; i += NTEXT_KEYS) {
         vkbd_type_chunk(cps + i, ncps - i < NTEXT_KEYS ? ncps - i : NTEXT_KEYS);
     }
-    restore_passthrough_keymap();
+    if (epoch == input_epoch) restore_passthrough_keymap();
     wl_display_flush(display);
 }
 
 /* Evdev keyboard monitoring & EVIOCGRAB */
-#define MAX_KBDS 8
-static int kbds[MAX_KBDS];
-static int nkbds;
+static uint8_t kbd_down[MAX_KBDS][KEY_MAX + 1];
+static uint8_t kbd_forwarded[MAX_KBDS][KEY_MAX + 1]; /* the layout it went through, + 1; 0: not passed on */
 static int grabbed, want_grab;
 static int keys_down;
 static int shift, ctrl, alt, meta, altgr; /* altgr: right Alt where the layout makes it AltGr */
-static uint8_t forwarded_down[KEY_MAX + 1];
 
-static int has_bit(const unsigned long *bits, int n)
+static void update_xkb_modifiers(void)
 {
-    return (bits[n / (8 * sizeof(long))] >> (n % (8 * sizeof(long)))) & 1;
+    struct xkb_state *st = layouts[cur_layout].st;
+    shift = st && xkb_state_mod_name_is_active(st, XKB_MOD_NAME_SHIFT, XKB_STATE_MODS_EFFECTIVE) > 0;
+    ctrl = st && xkb_state_mod_name_is_active(st, XKB_MOD_NAME_CTRL, XKB_STATE_MODS_EFFECTIVE) > 0;
+    alt = st && xkb_state_mod_name_is_active(st, XKB_MOD_NAME_ALT, XKB_STATE_MODS_EFFECTIVE) > 0;
+    meta = st && xkb_state_mod_name_is_active(st, XKB_MOD_NAME_LOGO, XKB_STATE_MODS_EFFECTIVE) > 0;
+    altgr = st && xkb_state_mod_name_is_active(st, "Mod5", XKB_STATE_MODS_EFFECTIVE) > 0;
+}
+
+/* The keyboard is the bar's in the input method's modes; in direct input too
+ * while a keyboard types in a layout not the system's, else the compositor
+ * would give it the system's. */
+static int grab_wanted(void)
+{
+    for (int i = 0; i < nkbds; i++) {
+        if (kbd_layout[i] != 0) return 1;
+    }
+    return ime_mode() != IME_MODE_RAW;
+}
+
+static void reset_keyboard_state(void)
+{
+    input_epoch++;
+    clear_virtual_keys();
+    for (int l = 0; l < nlayouts; l++) {
+        struct layout *y = &layouts[l];
+        for (int code = 1; code <= KEY_MAX; code++) {
+            if (y->fed[code]) xkb_state_update_key(y->st, (xkb_keycode_t)code + 8, XKB_KEY_UP);
+        }
+        memset(y->fed, 0, sizeof y->fed);
+        xkb_state_update_mask(y->st, 0, 0, xkb_state_serialize_mods(y->st, XKB_STATE_MODS_LOCKED), 0, 0, 0);
+    }
+    memset(kbd_down, 0, sizeof kbd_down);
+    keys_down = 0;
+    if (compose_st) xkb_compose_state_reset(compose_st);
+    update_xkb_modifiers();
+}
+
+static void reconcile_keyboards(const int *next, int nnext)
+{
+    int old[MAX_KBDS], old_layout[MAX_KBDS], nold = nkbds;
+    struct stat identity[MAX_KBDS];
+    uint8_t held[MAX_KBDS][KEY_MAX + 1], forwarded[MAX_KBDS][KEY_MAX + 1];
+    memset(identity, 0, sizeof identity);
+    for (int i = 0; i < nold; i++) fstat(kbds[i], &identity[i]);
+    memcpy(old, kbds, sizeof old);
+    memcpy(old_layout, kbd_layout, sizeof old_layout);
+    memcpy(held, kbd_down, sizeof held);
+    memcpy(forwarded, kbd_forwarded, sizeof forwarded);
+    if (next) {
+        nkbds = nnext > MAX_KBDS ? MAX_KBDS : nnext;
+        memcpy(kbds, next, (size_t)nkbds * sizeof *kbds);
+    } else {
+        keys_refresh(); /* Includes separate brightness, audio and vendor devices. */
+        nkbds = keys_fds(kbds, MAX_KBDS);
+    }
+    memset(kbd_down, 0, sizeof kbd_down);
+    memset(kbd_forwarded, 0, sizeof kbd_forwarded);
+    int changed = nold != nkbds, removed[MAX_KBDS] = { 0 }, kept[MAX_KBDS] = { 0 };
+    for (int i = 0; i < nold; i++) {
+        int found = 0;
+        for (int j = 0; j < nkbds; j++) {
+            struct stat current;
+            if (old[i] == kbds[j] && fstat(kbds[j], &current) == 0 &&
+                identity[i].st_dev == current.st_dev && identity[i].st_ino == current.st_ino &&
+                identity[i].st_rdev == current.st_rdev) {
+                memcpy(kbd_down[j], held[i], sizeof held[i]);
+                memcpy(kbd_forwarded[j], forwarded[i], sizeof forwarded[i]);
+                kbd_layout[j] = old_layout[i];
+                kept[j] = found = 1;
+                break;
+            }
+        }
+        if (!found) removed[i] = changed = 1;
+    }
+    for (int j = 0; j < nkbds; j++) {
+        if (!kept[j]) kbd_layout[j] = layout_of(kbds[j]);
+    }
+    for (int i = 0; i < nold; i++) {
+        if (!removed[i]) continue;
+        for (int code = 1; code <= KEY_MAX; code++) {
+            if (held[i][code]) feed_key(old_layout[i], code, 0);
+            int fl = forwarded[i][code] - 1;
+            if (fl >= 0 && layouts[fl].down[code] && --layouts[fl].down[code] == 0 && layouts[fl].vkbd)
+                zwp_virtual_keyboard_v1_key(use_layout(fl), now_ms32(), (uint32_t)code, WL_KEYBOARD_KEY_STATE_RELEASED);
+        }
+    }
+    update_xkb_modifiers();
+    if (changed && layouts[active_layout].vkbd) {
+        restore_passthrough_keymap();
+        wl_display_flush(display);
+    }
+    if (changed) say("locachy-bar: watching %d keyboard and function-key devices", nkbds);
+    keys_down = 0;
+    for (int i = 0; i < nkbds; i++) {
+        for (int code = 1; code <= KEY_MAX; code++) keys_down += kbd_down[i][code];
+        ioctl(kbds[i], EVIOCGRAB, grabbed ? (void *)1 : NULL);
+    }
+    want_grab = grab_wanted();
+    if (keys_down == 0 && active && grabbed != want_grab) {
+        set_grab(want_grab);
+    }
 }
 
 static void open_keyboards(void)
 {
-    for (int i = 0; i < 32 && nkbds < MAX_KBDS; i++) {
-        unsigned long bits[KEY_MAX / (8 * sizeof(long)) + 1] = { 0 };
-        char path[32];
-        snprintf(path, sizeof path, "/dev/input/event%d", i);
-        int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-        if (fd < 0) continue;
-        if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof bits), bits) >= 0 &&
-            has_bit(bits, KEY_A) && has_bit(bits, KEY_ENTER)) {
-            kbds[nkbds++] = fd;
-        } else {
-            close(fd);
+    reconcile_keyboards(NULL, 0);
+}
+
+/* Each layout's keys passed on, released; its modifiers none; the seat's
+ * layout last, so that the seat keeps it. */
+static void clear_virtual_keys(void)
+{
+    memset(kbd_forwarded, 0, sizeof kbd_forwarded);
+    uint32_t t = now_ms32();
+    for (int n = 0; n < nlayouts; n++) {
+        int l = (active_layout + 1 + n) % nlayouts;
+        struct layout *y = &layouts[l];
+        if (!y->vkbd) {
+            memset(y->down, 0, sizeof y->down);
+            continue;
         }
+        for (int c = 0; c <= KEY_MAX; c++) {
+            if (y->down[c]) {
+                y->down[c] = 0;
+                zwp_virtual_keyboard_v1_key(y->vkbd, t, (uint32_t)c, WL_KEYBOARD_KEY_STATE_RELEASED);
+            }
+        }
+        zwp_virtual_keyboard_v1_modifiers(y->vkbd, 0, 0, 0, 0);
+        y->sent_valid = 0;
+        wl_display_flush(display);
     }
 }
 
 static void set_grab(int on)
 {
+    if (!on) clear_virtual_keys();
     if (grabbed == on) return;
-    if (!on && vkbd) {
-        uint32_t t = now_ms32();
-        for (int c = 0; c <= KEY_MAX; c++) {
-            if (forwarded_down[c]) {
-                forwarded_down[c] = 0;
-                zwp_virtual_keyboard_v1_key(vkbd, t, (uint32_t)c, WL_KEYBOARD_KEY_STATE_RELEASED);
-            }
-        }
-        zwp_virtual_keyboard_v1_modifiers(vkbd, 0, 0, 0, 0);
-        wl_display_flush(display);
-    }
     for (int i = 0; i < nkbds; i++) {
         ioctl(kbds[i], EVIOCGRAB, on ? (void *)1 : NULL);
     }
     grabbed = on;
 }
 
-static volatile sig_atomic_t sig_regrab, active = 1;
 
 /* locachy-seat: the seat has been released (home is on the screen). */
 static void on_sigusr2(int sig)
@@ -1860,6 +2178,7 @@ static void on_sigusr2(int sig)
         ioctl(kbds[i], EVIOCGRAB, NULL);
     }
     grabbed = 0;
+    sig_release = 1;
     active = 0;
 }
 
@@ -1871,7 +2190,7 @@ static void on_sigusr1(int sig)
     active = 1;
 }
 
-static int translate_code(int code)
+static int translate_code(int fd, int code)
 {
     switch (code) {
     case KEY_UP:       return K_UP;
@@ -1888,7 +2207,7 @@ static int translate_code(int code)
     if (ctrl && !alt && !shift && code >= KEY_1 && code <= KEY_0) {
         return K_CTRL_0 + (code == KEY_0 ? 0 : code - KEY_1 + 1);
     }
-    int c = keys_char(code, shift); /* the key table's, as in the direct programs */
+    int c = keys_device_char(fd, code, shift); /* the keyboard's key table's, as in the direct programs */
     if (ctrl && (((c | 0x20) >= 'a' && (c | 0x20) <= 'z') || (c >= '[' && c <= '_'))) {
         return c & 0x1F;
     }
@@ -2760,37 +3079,26 @@ static void handle_kbd_event(int fd)
 {
     struct input_event ev;
     while (read(fd, &ev, sizeof ev) == sizeof ev) {
-        if (ev.type != EV_KEY || !active) continue;
-        if (ev.value == 1) keys_down++;
-        else if (ev.value == 0 && keys_down > 0) keys_down--;
-
-        int is_mod = 0;
-        if (ev.code == KEY_LEFTSHIFT || ev.code == KEY_RIGHTSHIFT) {
-            shift = ev.value != 0;
-            is_mod = 1;
-        } else if (ev.code == KEY_LEFTCTRL || ev.code == KEY_RIGHTCTRL) {
-            ctrl = ev.value != 0;
-            is_mod = 1;
-        } else if (ev.code == KEY_RIGHTALT && xkb_st &&
-                   xkb_state_key_get_one_sym(xkb_st, KEY_RIGHTALT + 8) == XKB_KEY_ISO_Level3_Shift) {
-            altgr = ev.value != 0; /* de, fr: AltGr+Q types @, and is no Alt */
-            is_mod = 1;
-        } else if (ev.code == KEY_LEFTALT || ev.code == KEY_RIGHTALT) {
-            alt = ev.value != 0;
-            is_mod = 1;
-        } else if (ev.code == KEY_LEFTMETA || ev.code == KEY_RIGHTMETA) {
-            meta = ev.value != 0;
-            is_mod = 1;
-        } else if (ev.code == KEY_CAPSLOCK) {
-            is_mod = 1;
-        }
-
-        int caps_before = caps_locked();
+        if (ev.type != EV_KEY || !active || ev.code > KEY_MAX || !nlayouts || ev.value < 0 || ev.value > 2) continue;
+        int device = -1;
+        for (int i = 0; i < nkbds; i++) if (kbds[i] == fd) device = i;
+        if (device < 0) continue;
+        int dl = kbd_layout[device];
+        cur_layout = dl;
+        int caps_before = caps_locked(), was_down = kbd_down[device][ev.code];
         if (ev.value != 2) {
-            xkb_state_update_key(xkb_st, (xkb_keycode_t)(ev.code + 8),
-                                 ev.value ? XKB_KEY_DOWN : XKB_KEY_UP);
+            int down = ev.value != 0;
+            keys_down += down - was_down;
+            kbd_down[device][ev.code] = (uint8_t)down;
+            if (down != was_down) {
+                feed_key(dl, ev.code, down);
+                share_locks(dl);
+            }
         }
-        if (ev.code == KEY_CAPSLOCK && ev.value != 2) {
+        /* Num Lock passes on as a key, as before; its lock is in every layout's state. */
+        int role = ev.code < 256 ? layouts[dl].role[ev.code] : 0, is_mod = (role & ~ROLE_NUM) != 0;
+        update_xkb_modifiers();
+        if ((role & KEYS_CAPS) && ev.value != 2) {
             /* Rime as its front ends tell it: the key with the lock before
              * it, then the lock after; it ends what is being composed. */
             if (grabbed) {
@@ -2802,20 +3110,21 @@ static void handle_kbd_event(int fd)
             }
         }
 
-        if (grabbed && is_mod && vkbd) {
-            xkb_mod_mask_t dep = xkb_state_serialize_mods(xkb_st, XKB_STATE_MODS_DEPRESSED);
-            xkb_mod_mask_t lat = xkb_state_serialize_mods(xkb_st, XKB_STATE_MODS_LATCHED);
-            xkb_mod_mask_t lck = xkb_state_serialize_mods(xkb_st, XKB_STATE_MODS_LOCKED);
-            xkb_layout_index_t grp = xkb_state_serialize_layout(xkb_st, XKB_STATE_LAYOUT_EFFECTIVE);
-            zwp_virtual_keyboard_v1_modifiers(vkbd, dep, lat, lck, grp);
+        /* The modifiers, to the seat's layout; another layout gets them
+         * with its next key. */
+        if (grabbed && is_mod && layouts[active_layout].vkbd) {
+            use_layout(active_layout);
             wl_display_flush(display);
         }
 
         if (ev.value == 0) {
-            if (grabbed && ev.code <= KEY_MAX && forwarded_down[ev.code] && vkbd) {
-                forwarded_down[ev.code] = 0;
-                zwp_virtual_keyboard_v1_key(vkbd, now_ms32(), ev.code, WL_KEYBOARD_KEY_STATE_RELEASED);
-                wl_display_flush(display);
+            int fl = kbd_forwarded[device][ev.code] - 1;
+            if (fl >= 0) {
+                kbd_forwarded[device][ev.code] = 0;
+                if (layouts[fl].down[ev.code] && --layouts[fl].down[ev.code] == 0 && layouts[fl].vkbd) {
+                    zwp_virtual_keyboard_v1_key(use_layout(fl), now_ms32(), ev.code, WL_KEYBOARD_KEY_STATE_RELEASED);
+                    wl_display_flush(display);
+                }
             }
             if (keys_down == 0 && grabbed != want_grab) {
                 set_grab(want_grab);
@@ -2830,7 +3139,7 @@ static void handle_kbd_event(int fd)
             continue;
         }
 
-        int act = keys_match_action(ev.code, ctrl, alt, shift, meta);
+        int act = keys_device_action(fd, ev.code, ctrl, alt, shift, meta);
         if (act == K_ACT_HOME || act == K_ACT_LOCK) {
             /* Process 1 sees the key itself unless it is grabbed here. */
             if (ev.value == 1 && grabbed) {
@@ -2843,7 +3152,7 @@ static void handle_kbd_event(int fd)
         if (act == K_CTRL_SPACE || act == K_ACT_IME_CN || act == K_ACT_IME_RAW || act == K_ACT_IME_WIDTH) {
             const char *msg;
             if (ev.value == 1 && ime_action(act, &msg)) {
-                want_grab = (ime_mode() != IME_MODE_RAW);
+                want_grab = grab_wanted();
                 if (keys_down == 0) {
                     set_grab(want_grab);
                 }
@@ -2884,9 +3193,11 @@ static void handle_kbd_event(int fd)
 
         /* A dead key and what follows it: composed here, as fcitx5 does
          * before Rime, and typed; while composing, and when the sequence
-         * goes nowhere, the keys are dropped (libxkbcommon's cancel). */
-        if (compose_st && ev.value == 1 && !ctrl && !alt && !meta &&
-            xkb_compose_state_feed(compose_st, xkb_state_key_get_one_sym(xkb_st, (xkb_keycode_t)ev.code + 8)) ==
+         * goes nowhere, the keys are dropped (libxkbcommon's cancel). In
+         * direct input the keys pass on, and the application composes. */
+        if (compose_st && ev.value == 1 && !ctrl && !alt && !meta && ime_mode() != IME_MODE_RAW &&
+            xkb_compose_state_feed(compose_st, xkb_state_key_get_one_sym(layouts[dl].st,
+                                                                         (xkb_keycode_t)ev.code + 8)) ==
                 XKB_COMPOSE_FEED_ACCEPTED) {
             enum xkb_compose_status status = xkb_compose_state_get_status(compose_st);
             if (status == XKB_COMPOSE_COMPOSED) {
@@ -2901,23 +3212,30 @@ static void handle_kbd_event(int fd)
             }
         }
 
-        int k = translate_code(ev.code);
-        int taken = k > 0 && !alt && !meta && !altgr && ime_process_key(k);
+        int epoch = input_epoch;
+        int k = translate_code(fd, ev.code);
+        int taken = k > 0 && !alt && !meta && !altgr &&
+                    (!ctrl || (k >= K_CTRL_0 && k <= K_CTRL_0 + 9)) && ime_process_key(k);
         const char *commit = ime_get_commit(); /* before the key, if it passes on */
         if (commit != NULL && commit[0] != '\0') {
             vkbd_type_utf8(commit);
         }
+        if (epoch != input_epoch) continue;
         if (taken) {
             render_bot_bar();
             wl_display_flush(display);
-        } else if (vkbd && ev.code <= KEY_MAX) {
+        } else if (ev.code <= KEY_MAX && layout_vkbd(&layouts[dl])) {
+            /* Through the keyboard's layout's virtual keyboard; released
+             * and repeated through the one it was pressed on. */
             uint32_t t = now_ms32();
-            if (ev.value == 1) {
-                forwarded_down[ev.code] = 1;
-                zwp_virtual_keyboard_v1_key(vkbd, t, ev.code, WL_KEYBOARD_KEY_STATE_PRESSED);
-            } else if (ev.value == 2 && forwarded_down[ev.code]) {
-                zwp_virtual_keyboard_v1_key(vkbd, t, ev.code, WL_KEYBOARD_KEY_STATE_RELEASED);
-                zwp_virtual_keyboard_v1_key(vkbd, t, ev.code, WL_KEYBOARD_KEY_STATE_PRESSED);
+            if (ev.value == 1 && !kbd_forwarded[device][ev.code]) {
+                kbd_forwarded[device][ev.code] = (uint8_t)(dl + 1);
+                if (layouts[dl].down[ev.code]++ == 0)
+                    zwp_virtual_keyboard_v1_key(use_layout(dl), t, ev.code, WL_KEYBOARD_KEY_STATE_PRESSED);
+            } else if (ev.value == 2 && kbd_forwarded[device][ev.code]) {
+                struct zwp_virtual_keyboard_v1 *k = use_layout(kbd_forwarded[device][ev.code] - 1);
+                zwp_virtual_keyboard_v1_key(k, t, ev.code, WL_KEYBOARD_KEY_STATE_RELEASED);
+                zwp_virtual_keyboard_v1_key(k, t, ev.code, WL_KEYBOARD_KEY_STATE_PRESSED);
             }
             render_bot_bar();
             wl_display_flush(display);
@@ -2973,10 +3291,27 @@ static void reg_remove(void *data, struct wl_registry *reg, uint32_t name)
         struct bar *b = *p;
         if (b->name == name) {
             say("locachy-bar: screen %u went away", name);
+            reset_keyboard_state();
             *p = b->next;
+            struct overlay *all[] = { &ime_bar, &question, &notes_ovl };
+            for (int i = 0; i < 3; i++) {
+                if (all[i]->output == b->output) {
+                    overlay_destroy(all[i]);
+                    all[i]->output = NULL;
+                }
+            }
+            for (struct window *w = windows; w; w = w->next) {
+                for (int i = w->noutputs - 1; i >= 0; i--) {
+                    if (w->outputs[i] != b->output) continue;
+                    memmove(w->outputs + i, w->outputs + i + 1, (size_t)(w->noutputs - i - 1) * sizeof *w->outputs);
+                    w->noutputs--;
+                }
+                if (w->last == b->output) w->last = NULL;
+            }
             destroy_bar_surface(b);
             wl_output_destroy(b->output);
             free(b);
+            bars_dirty = 1;
             return;
         }
     }
@@ -3004,6 +3339,7 @@ int main(void)
     cursor_theme = wl_cursor_theme_load(NULL, 24, shm);
     cursor_surface = wl_compositor_create_surface(compositor);
     init_xkb();
+    if (!nlayouts) return 1;
     ime_init(NULL, NULL);
     open_keyboards();
     signal(SIGUSR2, on_sigusr2);
@@ -3011,8 +3347,8 @@ int main(void)
     signal(SIGHUP, on_sigusr1); /* settings changed rc.conf (language, keys) */
 
     if (vkbd_mgr && wl_seat_obj) {
-        vkbd = zwp_virtual_keyboard_manager_v1_create_virtual_keyboard(vkbd_mgr, wl_seat_obj);
-        restore_passthrough_keymap();
+        text_vkbd = zwp_virtual_keyboard_manager_v1_create_virtual_keyboard(vkbd_mgr, wl_seat_obj);
+        restore_passthrough_keymap(); /* the system's layout's virtual keyboard */
     }
 
     check_bars();
@@ -3021,20 +3357,29 @@ int main(void)
     bar_listen();
 
     int wl_fd = wl_display_get_fd(display);
-    double last_top = 0;
+    double last_top = 0, last_keyboards = 0;
     /* GLib's sources (the tray's D-Bus connections) are polled here too. */
     GMainContext *gctx = g_main_context_default();
     g_main_context_acquire(gctx);
 
     for (;;) {
+        if (sig_release) {
+            sig_release = 0;
+            reset_keyboard_state();
+        }
+        if (active && uptime() - last_keyboards >= 1.0) {
+            open_keyboards();
+            last_keyboards = uptime();
+        }
         if (sig_regrab) {
             sig_regrab = 0;
-            keys_down = 0;
-            shift = ctrl = alt = meta = altgr = 0;
-            if (compose_st) xkb_compose_state_reset(compose_st);
+            reset_keyboard_state();
             base_language_reload(); /* settings may have changed the language or keys */
             keys_reload();
+            init_xkb(); /* the keyboards' layouts too (keyboards.conf) */
+            restore_passthrough_keymap();
             bars_dirty = 1;
+            want_grab = grab_wanted();
             set_grab(want_grab);
         }
         wl_display_flush(display);
@@ -3103,6 +3448,8 @@ int main(void)
     }
 
     set_grab(0);
+    if (text_vkbd) zwp_virtual_keyboard_v1_destroy(text_vkbd);
+    keys_release();
     ime_done();
     if (open_fd >= 0) {
         unlink(OPEN_SOCKET);

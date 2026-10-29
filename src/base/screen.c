@@ -3,7 +3,9 @@
  * screen_flush mirrors what changed into a dumb buffer for each connected
  * output on one DRM card and tells the driver (DIRTYFB). The first selected
  * output fixes the logical size; other sizes fit that picture with black
- * borders. A program keeps its picture while it does not have the screen.
+ * borders. Programs may opt into extended mode: each connector then keeps an
+ * independent native canvas, text scale and desktop rectangle. A program keeps
+ * its pictures while it does not have the screen.
  *
  * Process 1 opens the first card with a connected output itself (it is the
  * DRM master) and lends its connectors and CRTCs in one DRM lease (which
@@ -17,6 +19,7 @@
 #include <drm/drm_mode.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,18 +34,24 @@
 #endif
 
 #include "internal.h"
+#include "monitor-layout.h"
 
 #define PSF1_MAGIC 0x0436u     /* bytes 36 04 */
 #define PSF2_MAGIC 0x864AB572u /* bytes 72 b5 4a 86 */
 
-static uint32_t *shadow;             /* what has been drawn, width x height */
+struct output_surface;
+static uint32_t *shadow;             /* the current drawing target */
 static uint32_t width, height;
+static int extended, selected_output = -1;
+static struct output_surface *surfaces, *drawing_surface;
 static int card = -1;                /* the DRM fd the shadow is shown on */
 struct output {
     char name[32];                   /* as the kernel names it: DP-3, eDP-1, HDMI-A-1 */
     uint32_t conn_id, crtc_id;
     uint32_t possible_crtcs, preferred_crtc;
     int internal;
+    int x, y, logical_width, logical_height;
+    struct output_surface *surface;
     struct drm_mode_modeinfo mode;
     uint8_t *map;
     uint64_t map_size;
@@ -67,6 +76,23 @@ static uint32_t top;                 /* pixels above row 0: bar_h - glyph_h, row
 static uint32_t bar_h = PANEL_H;     /* the top bar: one and a half text rows */
 static double scale;                 /* the first output's; 0 until it is known */
 static char font_fallback[256];      /* when no Terminus of the size can be read */
+
+/* A connector keeps its canvas while its lease is released or it disconnects. */
+struct output_surface {
+    char name[32];
+    uint32_t *pixels, width, height;
+    double scale;
+    int redraw;
+    struct drm_clip_rect dirty;
+    uint8_t *font;
+    const uint8_t *glyphs;
+    uint32_t glyph_count, glyph_w, glyph_h, glyph_bytes, row_bytes, glyph_mag;
+    struct { uint32_t cp, g; } utab[1024];
+    int nutab, cols, rows;
+    uint32_t top, bar_h;
+    struct output_surface *next;
+};
+static struct output_surface mirrored;
 
 /* The kernel's names of connector types (drm_connector_enum_list). */
 static const char *const connector_types[] = {
@@ -345,6 +371,139 @@ static void layout(void)
 #endif
 }
 
+static void save_surface(struct output_surface *s)
+{
+    s->pixels = shadow;
+    s->width = width; s->height = height; s->scale = scale; s->dirty = dirty;
+    s->font = font; s->glyphs = glyphs;
+    s->glyph_count = glyph_count; s->glyph_w = glyph_w; s->glyph_h = glyph_h;
+    s->glyph_bytes = glyph_bytes; s->row_bytes = row_bytes; s->glyph_mag = glyph_mag;
+    memcpy(s->utab, utab, sizeof utab);
+    s->nutab = nutab; s->cols = cols; s->rows = rows; s->top = top; s->bar_h = bar_h;
+}
+
+static void use_surface(struct output_surface *s)
+{
+    shadow = s->pixels;
+    width = s->width; height = s->height; scale = s->scale; dirty = s->dirty;
+    font = s->font; glyphs = s->glyphs;
+    glyph_count = s->glyph_count; glyph_w = s->glyph_w; glyph_h = s->glyph_h;
+    glyph_bytes = s->glyph_bytes; row_bytes = s->row_bytes; glyph_mag = s->glyph_mag;
+    memcpy(utab, s->utab, sizeof utab);
+    nutab = s->nutab; cols = s->cols; rows = s->rows; top = s->top; bar_h = s->bar_h;
+#ifdef CONFIG_FREETYPE
+    ft_size();
+#endif
+}
+
+static void save_drawing_surface(void)
+{
+    save_surface(drawing_surface ? drawing_surface : &mirrored);
+}
+
+static const char *surface_for_output(struct output *o)
+{
+    struct monitor_conf conf;
+    double s = monitor_conf(o->name, &conf) && conf.scale > 0 ? conf.scale : 1.0;
+    struct output_surface *surface;
+    for (surface = surfaces; surface; surface = surface->next) {
+        if (strcmp(surface->name, o->name) == 0) break;
+    }
+    if (surface && surface->width == o->mode.hdisplay && surface->height == o->mode.vdisplay &&
+        s > surface->scale - 0.001 && s < surface->scale + 0.001) {
+        o->surface = surface;
+        return NULL;
+    }
+    struct output_surface fresh = { .width = o->mode.hdisplay, .height = o->mode.vdisplay, .scale = s, .redraw = 1 };
+    if ((uint64_t)fresh.width * fresh.height > SIZE_MAX / sizeof *fresh.pixels ||
+        !(fresh.pixels = calloc((size_t)fresh.width * fresh.height, sizeof *fresh.pixels))) {
+        return "no memory for the output canvas";
+    }
+    save_drawing_surface();
+    use_surface(&fresh);
+    const char *why = scaled_font(s);
+    if (why == NULL) {
+        layout();
+        dirty = (struct drm_clip_rect){ 0, 0, (unsigned short)width, (unsigned short)height };
+        save_surface(&fresh);
+    }
+    if (why != NULL) fresh.font = font;
+    use_surface(drawing_surface ? drawing_surface : &mirrored);
+    if (why != NULL) { free(fresh.pixels); free(fresh.font); return why; }
+    if (surface) {
+        uint32_t copy_w = surface->width < fresh.width ? surface->width : fresh.width;
+        uint32_t copy_h = surface->height < fresh.height ? surface->height : fresh.height;
+        for (uint32_t y = 0; y < copy_h; y++) {
+            memcpy(fresh.pixels + (size_t)y * fresh.width, surface->pixels + (size_t)y * surface->width,
+                   (size_t)copy_w * sizeof *fresh.pixels);
+        }
+        free(surface->pixels); free(surface->font);
+        fresh.next = surface->next;
+        *surface = fresh;
+    } else {
+        surface = malloc(sizeof *surface);
+        if (!surface) { free(fresh.pixels); free(fresh.font); return "no memory for the output canvas"; }
+        *surface = fresh;
+        surface->next = surfaces;
+        surfaces = surface;
+    }
+    snprintf(surface->name, sizeof surface->name, "%s", o->name);
+    o->surface = surface;
+    if (drawing_surface == surface) use_surface(surface);
+    return NULL;
+}
+
+static const char *extended_layout(void)
+{
+    struct monitor_rect rects[32];
+    if (noutputs > 32) return "too many output rectangles";
+    for (uint32_t i = 0; i < noutputs; i++) {
+        const char *why = surface_for_output(&outputs[i]);
+        if (why) return why;
+        struct output *o = &outputs[i];
+        struct monitor_conf conf;
+        int configured = monitor_conf(o->name, &conf), place = i == 0 ? MONITOR_ORIGIN : MONITOR_RIGHT;
+        if (configured) {
+            if (!strcmp(conf.place, "origin")) place = MONITOR_ORIGIN;
+            else if (!strcmp(conf.place, "left")) place = MONITOR_LEFT;
+            else if (!strcmp(conf.place, "above")) place = MONITOR_ABOVE;
+            else if (!strcmp(conf.place, "below")) place = MONITOR_BELOW;
+            else place = MONITOR_RIGHT;
+        }
+        o->logical_width = (int)(o->surface->width / o->surface->scale);
+        o->logical_height = (int)(o->surface->height / o->surface->scale);
+        if (o->logical_width < 1) o->logical_width = 1;
+        if (o->logical_height < 1) o->logical_height = 1;
+        if (configured && conf.has_position &&
+            ((int64_t)conf.x + o->logical_width - 1 > INT_MAX ||
+             (int64_t)conf.y + o->logical_height - 1 > INT_MAX)) return "output rectangle exceeds coordinate limits";
+        rects[i] = (struct monitor_rect){ .name = o->name, .width = o->logical_width,
+            .height = o->logical_height, .place = place,
+            .has_position = configured && conf.has_position, .x = configured ? conf.x : 0,
+            .y = configured ? conf.y : 0 };
+    }
+    monitor_layout(rects, noutputs);
+    for (uint32_t i = 0; i < noutputs; i++) {
+        if (outputs[i].x != rects[i].x || outputs[i].y != rects[i].y) outputs[i].surface->redraw = 1;
+        outputs[i].x = rects[i].x; outputs[i].y = rects[i].y;
+    }
+    return NULL;
+}
+
+static void select_available_surface(void)
+{
+    selected_output = noutputs ? 0 : -1;
+    if (drawing_surface) {
+        for (uint32_t i = 0; i < noutputs; i++) {
+            if (strcmp(drawing_surface->name, outputs[i].name) == 0) selected_output = (int)i;
+        }
+    }
+    if (selected_output >= 0) {
+        drawing_surface = outputs[selected_output].surface;
+        use_surface(drawing_surface);
+    }
+}
+
 static void *array(uint32_t count, size_t each)
 {
     return calloc(count ? count : 1, each);
@@ -370,6 +529,7 @@ static void destroy_output(int fd, struct output *o)
 
 static void clear_outputs(int fd)
 {
+    if (extended) save_drawing_surface();
     cursor_drop(fd);
     for (uint32_t i = 0; i < noutputs; i++) {
         destroy_output(fd, &outputs[i]);
@@ -457,6 +617,8 @@ static int read_output(int fd, uint32_t id, struct output *o)
         snprintf(o->name, sizeof o->name, "%s-%u", c.connector_type < NCONNECTOR_TYPES ?
                  connector_types[c.connector_type] : "Unknown", c.connector_type_id);
         o->internal = monitor_internal(o->name);
+        struct monitor_conf conf;
+        int configured = monitor_conf(o->name, &conf);
         for (uint32_t m = 0; m < c.count_modes; m++) {
             if (modes[m].hdisplay == 0 || modes[m].vdisplay == 0) {
                 continue;
@@ -464,6 +626,14 @@ static int read_output(int fd, uint32_t id, struct output *o)
             if (o->mode.hdisplay == 0 || (modes[m].type & DRM_MODE_TYPE_PREFERRED)) {
                 o->mode = modes[m];
                 if (modes[m].type & DRM_MODE_TYPE_PREFERRED) {
+                    break;
+                }
+            }
+        }
+        if (configured && conf.width > 0 && conf.height > 0) {
+            for (uint32_t m = 0; m < c.count_modes; m++) {
+                if (modes[m].hdisplay == conf.width && modes[m].vdisplay == conf.height) {
+                    o->mode = modes[m];
                     break;
                 }
             }
@@ -633,6 +803,12 @@ static void describe_card(int fd, const char *path)
 static void mark_all(void)
 {
     dirty = (struct drm_clip_rect){ 0, 0, (unsigned short)width, (unsigned short)height };
+    if (extended) {
+        for (uint32_t i = 0; i < noutputs; i++) {
+            struct output_surface *s = outputs[i].surface;
+            if (s) s->dirty = (struct drm_clip_rect){ 0, 0, (unsigned short)s->width, (unsigned short)s->height };
+        }
+    }
 }
 
 static int set_crtc(int fd, struct output *o)
@@ -731,8 +907,11 @@ static const char *show(int fd)
         const char *error = create_output(fd, o);
         if (error == NULL) {
             /* Populate scanout and black borders before enabling its CRTC. */
+            struct output_surface *s = extended ? o->surface : NULL;
+            struct drm_clip_rect clip = s ? (struct drm_clip_rect){ 0, 0,
+                (unsigned short)s->width, (unsigned short)s->height } : full;
             copy_picture(o->map, o->pitch, o->mode.hdisplay, o->mode.vdisplay,
-                         shadow, width, height, full);
+                         s ? s->pixels : shadow, s ? s->width : width, s ? s->height : height, clip);
             if (set_crtc(fd, o) < 0) error = "DRM_IOCTL_MODE_SETCRTC failed";
         }
         if (error != NULL) {
@@ -751,6 +930,7 @@ static const char *show(int fd)
     }
     card = fd;
     lent = 0;
+    if (extended) select_available_surface();
     mark_all();
     screen_flush();
     cursor_put(fd);
@@ -762,6 +942,25 @@ static const char *prepare(int fd)
 {
     const char *why = find_outputs(fd);
     if (why != NULL) {
+        return why;
+    }
+    if (extended) {
+        /* Never an output without a canvas: one whose canvas cannot be made
+         * is dropped, as show drops one without a buffer; other errors leave
+         * none. */
+        uint32_t used = 0;
+        for (uint32_t i = 0; i < noutputs; i++) {
+            const char *error = surface_for_output(&outputs[i]);
+            if (error != NULL) {
+                why = error;
+                say("screen: %s unavailable: %s", outputs[i].name, error);
+                continue;
+            }
+            outputs[used++] = outputs[i];
+        }
+        noutputs = used;
+        if (used > 0) why = extended_layout();
+        if (why != NULL) clear_outputs(fd);
         return why;
     }
     if (shadow == NULL) {
@@ -1036,6 +1235,116 @@ int screen_refresh(void)
     return 1;
 }
 
+int screen_extended(int on)
+{
+    on = !!on;
+    if (on == extended) return 0;
+    for (uint32_t i = 0; i < noutputs; i++) soft_cursor_flush(&outputs[i], 0);
+    if (on) {
+        save_surface(&mirrored);
+        const char *why = extended_layout();
+        if (why) { say("screen: cannot extend outputs: %s", why); return -1; }
+        extended = 1;
+        selected_output = noutputs ? 0 : -1;
+        drawing_surface = noutputs ? outputs[0].surface : NULL;
+        if (drawing_surface) use_surface(drawing_surface);
+    } else {
+        save_drawing_surface();
+        extended = 0;
+        selected_output = -1;
+        drawing_surface = NULL;
+        use_surface(&mirrored);
+    }
+    mark_all();
+    cursor_put(card);
+    screen_flush();
+    return 1;
+}
+
+int screen_is_extended(void)
+{
+    return extended;
+}
+
+int screen_output_current(void)
+{
+    return noutputs ? extended ? selected_output : 0 : -1;
+}
+
+int screen_output_count(void)
+{
+    return extended ? (int)noutputs : noutputs ? 1 : 0;
+}
+
+int screen_output_get(int index, struct screen_output *out)
+{
+    if (!out || index < 0 || index >= screen_output_count()) return -1;
+    const struct output *o = &outputs[index];
+    const struct output_surface *s = extended ? o->surface : NULL;
+    memset(out, 0, sizeof *out);
+    snprintf(out->name, sizeof out->name, "%s", o->name);
+    out->x = extended ? o->x : 0; out->y = extended ? o->y : 0;
+    out->width = extended ? o->logical_width : (int)width;
+    out->height = extended ? o->logical_height : (int)height;
+    out->pixel_width = s ? (int)s->width : (int)width;
+    out->pixel_height = s ? (int)s->height : (int)height;
+    out->scale = s ? s->scale : scale;
+    out->cols = s ? s->cols : cols; out->rows = s ? s->rows : rows;
+    return 0;
+}
+
+int screen_output_select(int index)
+{
+    if (index < 0 || index >= screen_output_count()) return -1;
+    int previous = extended ? selected_output : 0;
+    if (extended) {
+        save_drawing_surface();
+        selected_output = index;
+        drawing_surface = outputs[index].surface;
+        use_surface(drawing_surface);
+    }
+    return previous;
+}
+
+int screen_output_at(int x, int y, int *local_x, int *local_y)
+{
+    if (!extended) {
+        if (x < 0 || y < 0 || x >= (int)width || y >= (int)height) return -1;
+        if (local_x) *local_x = x;
+        if (local_y) *local_y = y;
+        return noutputs ? 0 : -1;
+    }
+    for (uint32_t i = 0; i < noutputs; i++) {
+        struct output *o = &outputs[i];
+        if (x < o->x || y < o->y || (int64_t)x >= (int64_t)o->x + o->logical_width ||
+            (int64_t)y >= (int64_t)o->y + o->logical_height) continue;
+        if (local_x) *local_x = (int)((int64_t)(x - o->x) * o->surface->width / o->logical_width);
+        if (local_y) *local_y = (int)((int64_t)(y - o->y) * o->surface->height / o->logical_height);
+        return (int)i;
+    }
+    return -1;
+}
+
+void screen_output_project(int *x, int *y)
+{
+    if (!x || !y || screen_output_at(*x, *y, NULL, NULL) >= 0 || !noutputs) return;
+    int64_t best = INT64_MAX;
+    int nx = *x, ny = *y;
+    for (uint32_t i = 0; i < (extended ? noutputs : 1); i++) {
+        struct output *o = &outputs[i];
+        int ox = extended ? o->x : 0, oy = extended ? o->y : 0;
+        int ow = extended ? o->logical_width : (int)width, oh = extended ? o->logical_height : (int)height;
+        int64_t right = (int64_t)ox + ow - 1, bottom = (int64_t)oy + oh - 1;
+        int px = *x < ox ? ox : (int64_t)*x > right ? (int)right : *x;
+        int py = *y < oy ? oy : (int64_t)*y > bottom ? (int)bottom : *y;
+        int64_t dx = (int64_t)*x - px, dy = (int64_t)*y - py;
+        uint64_t ax = (uint64_t)(dx < 0 ? -dx : dx), ay = (uint64_t)(dy < 0 ? -dy : dy);
+        int64_t distance = ax > INT32_MAX || ay > INT32_MAX ? INT64_MAX : dx * dx + dy * dy;
+        if (distance < best) { best = distance; nx = px; ny = py; }
+    }
+    *x = nx; *y = ny;
+}
+
 int screen_cols(void)
 {
     return cols;
@@ -1048,8 +1357,9 @@ int screen_rows(void)
 
 void screen_describe(void)
 {
-    say("screen: %ux%u logical (%s), scale %.2f, font %ux%u, %dx%d cells, %u mirrored outputs",
-        width, height, noutputs ? outputs[0].name : "-", scale, glyph_w, glyph_h, cols, rows, noutputs);
+    say("screen: %ux%u canvas (%s), scale %.2f, font %ux%u, %dx%d cells, %u %s outputs",
+        width, height, noutputs ? outputs[0].name : "-", scale, glyph_w, glyph_h, cols, rows, noutputs,
+        extended ? "extended" : "mirrored");
 }
 
 int screen_rescale(void)
@@ -1057,6 +1367,18 @@ int screen_rescale(void)
     base_language_reload(); /* settings changed the language, or anything else */
     if (shadow == NULL || noutputs == 0) {
         return 0;
+    }
+    if (extended) {
+        save_drawing_surface();
+        if (extended_layout() != NULL) return 0;
+        int changed = 0;
+        for (uint32_t i = 0; i < noutputs; i++) {
+            changed |= outputs[i].surface->redraw;
+            outputs[i].surface->redraw = 0;
+        }
+        select_available_surface();
+        if (changed) mark_all();
+        return changed;
     }
     double s = output_scale();
     if (s > scale - 0.001 && s < scale + 0.001) {
@@ -1090,6 +1412,25 @@ static void touch(uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1)
  * scanout drivers ignore DIRTYFB. Keep logical damage while lent/released. */
 void screen_flush(void)
 {
+    if (extended) {
+        save_drawing_surface();
+        if (card < 0 || !noutputs || lent) return;
+        for (uint32_t i = 0; i < noutputs; i++) {
+            struct output *o = &outputs[i];
+            struct output_surface *s = o->surface;
+            if (!o->map || !s || s->dirty.x1 == s->dirty.x2) continue;
+            soft_cursor_flush(o, 0);
+            struct drm_clip_rect clip = copy_picture(o->map, o->pitch, o->mode.hdisplay,
+                o->mode.vdisplay, s->pixels, s->width, s->height, s->dirty);
+            struct drm_mode_fb_dirty_cmd cmd = { .fb_id = o->fb_id, .num_clips = 1,
+                .clips_ptr = (uintptr_t)&clip };
+            ioctl(card, DRM_IOCTL_MODE_DIRTYFB, &cmd);
+            s->dirty.x2 = s->dirty.x1;
+            soft_cursor_flush(o, 1);
+        }
+        if (drawing_surface) dirty = drawing_surface->dirty;
+        return;
+    }
     if (card < 0 || noutputs == 0 || shadow == NULL || lent || dirty.x1 == dirty.x2) {
         return;
     }
@@ -1423,6 +1764,11 @@ static void load_cursor(void)
 static void cursor_place(const struct output *o, int *x, int *y)
 {
     uint32_t dw = o->mode.hdisplay, dh = o->mode.vdisplay;
+    if (extended) {
+        *x = (int)((int64_t)(cursor_x - o->x) * dw / o->logical_width);
+        *y = (int)((int64_t)(cursor_y - o->y) * dh / o->logical_height);
+        return;
+    }
     if (dw == width && dh == height) {
         *x = cursor_x;
         *y = cursor_y;
@@ -1440,12 +1786,21 @@ static void soft_cursor_flush(struct output *o, int draw)
     struct drm_clip_rect *r = &o->cursor_at;
     uint32_t dw = o->mode.hdisplay, dh = o->mode.vdisplay;
     if (r->x1 != r->x2) {
-        struct drm_clip_rect back = copy_picture(o->map, o->pitch, dw, dh, shadow, width, height, *r);
+        struct output_surface *s = extended ? o->surface : NULL;
+        struct drm_clip_rect back = copy_picture(o->map, o->pitch, dw, dh,
+            s ? s->pixels : shadow, s ? s->width : width, s ? s->height : height, *r);
         struct drm_mode_fb_dirty_cmd cmd = { .fb_id = o->fb_id, .num_clips = 1, .clips_ptr = (uintptr_t)&back };
         ioctl(card, DRM_IOCTL_MODE_DIRTYFB, &cmd);
         *r = (struct drm_clip_rect){ 0 };
     }
     if (!draw || !cursor_on || lent) return;
+    if (extended) {
+        if (screen_output_at(cursor_x, cursor_y, NULL, NULL) != (int)(o - outputs)) return;
+        double saved_scale = scale;
+        scale = o->surface->scale;
+        load_cursor();
+        scale = saved_scale;
+    }
     int ox, oy;
     cursor_place(o, &ox, &oy);
     int x0 = ox - hot_x, y0 = oy - hot_y;
@@ -1467,7 +1822,7 @@ static void soft_cursor_flush(struct output *o, int draw)
         }
     }
     /* Logical damage for the scaled copy is the whole frame anyway. */
-    *r = dw == width && dh == height ? (struct drm_clip_rect){ (unsigned short)x1, (unsigned short)y1,
+    *r = extended || (dw == width && dh == height) ? (struct drm_clip_rect){ (unsigned short)x1, (unsigned short)y1,
                                                                 (unsigned short)x2, (unsigned short)y2 }
                                      : (struct drm_clip_rect){ 0, 0, (unsigned short)width, (unsigned short)height };
     struct drm_clip_rect on = { (unsigned short)x1, (unsigned short)y1, (unsigned short)x2, (unsigned short)y2 };
@@ -1496,6 +1851,19 @@ static void cursor_drop(int fd)
 static void cursor_put(int fd)
 {
     if (fd < 0 || lent || noutputs == 0) return;
+    if (extended) {
+        for (uint32_t i = 0; i < noutputs; i++) soft_cursor_flush(&outputs[i], 0);
+        cursor_drop(fd);
+        for (uint32_t i = 0; i < noutputs; i++) {
+            struct output *o = &outputs[i];
+            struct drm_mode_cursor2 c = { .flags = DRM_MODE_CURSOR_BO, .crtc_id = o->crtc_id };
+            ioctl(fd, DRM_IOCTL_MODE_CURSOR2, &c);
+            o->soft_cursor = 1;
+            soft_cursor_flush(o, cursor_on && cursor_shape != CURSOR_NONE);
+        }
+        cursor_put_on = cursor_on && cursor_shape != CURSOR_NONE;
+        return;
+    }
     if (!cursor_on || cursor_shape == CURSOR_NONE) {
         if (!cursor_put_on) return;
         cursor_put_on = 0;

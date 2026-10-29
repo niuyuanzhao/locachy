@@ -12,12 +12,15 @@
   </libinput>
   <keyboard>
     <default />
-    <!-- locachy-bar handles the input method and volume keys of rc.conf
-         itself; labwc's defaults for them are taken away ("None" removes a
-         keybind: the key goes on to the application). -->
-    <keybind key="C-space">
-      <action name="None" />
-    </keybind>
+    <!-- Consuming compositor bindings; settings writes rc.conf keys here. -->
+    <keybind key="HOME-KEY"><action name="Execute" command="/usr/local/lib/locachy/labwc-control --action home" /></keybind>
+    <keybind key="LOCK-KEY"><action name="Execute" command="/usr/local/lib/locachy/labwc-control --action lock" /></keybind>
+    <!-- locachy-bar handles the input method keys of rc.conf itself; labwc
+         only consumes them, so the focused application never gets them. -->
+    <keybind key="IME-KEY"><action name="Execute" command="/usr/bin/true" /></keybind>
+    <!-- locachy-bar handles the volume and brightness keys too; labwc's
+         defaults for them are taken away ("None" removes a keybind: the key
+         goes on to the application). -->
     <keybind key="XF86AudioRaiseVolume">
       <action name="None" />
     </keybind>

@@ -184,6 +184,31 @@ static void local_quirks(const char *text)
     assert(f && fputs(text, f) >= 0 && fclose(f) == 0);
 }
 
+static int two_finger_scroll(int fd, int horizontal, int direction)
+{
+    ngot = 0;
+    touch(fd, 0, 280, 260, 1);
+    touch(fd, 1, 450, 260, 1);
+    emit(fd, EV_KEY, BTN_TOUCH, 1); emit(fd, EV_KEY, BTN_TOOL_DOUBLETAP, 1);
+    emit(fd, EV_ABS, ABS_X, 280); emit(fd, EV_ABS, ABS_Y, 260); syn(fd);
+    collect(20);
+    for (int i = 1; i <= 12; i++) {
+        int offset = direction * 12 * i;
+        int x = horizontal ? offset : 0, y = horizontal ? 0 : offset;
+        touch(fd, 0, 280 + x, 260 + y, 0);
+        touch(fd, 1, 450 + x, 260 + y, 0);
+        emit(fd, EV_ABS, ABS_X, 280 + x); emit(fd, EV_ABS, ABS_Y, 260 + y); syn(fd);
+        collect(10);
+    }
+    lift(fd, 0); lift(fd, 1);
+    emit(fd, EV_KEY, BTN_TOUCH, 0); emit(fd, EV_KEY, BTN_TOOL_DOUBLETAP, 0); syn(fd);
+    collect(300);
+    int amount = 0;
+    for (int i = 0; i < ngot; i++) amount += horizontal ? got[i].hwheel : got[i].wheel;
+    assert(!buttons());
+    return amount;
+}
+
 /* A finger once round a square pad's middle c (in device units), r from it,
  * clockwise or not, with tap to click on as configure() sets it; the wheel
  * steps it gave. */
@@ -199,7 +224,7 @@ static int circle(int fd, int c, int r, int clockwise)
             emit(fd, EV_KEY, BTN_TOOL_FINGER, 1);
         }
         emit(fd, EV_ABS, ABS_X, x); emit(fd, EV_ABS, ABS_Y, y); syn(fd);
-        collect(10);
+        collect(i == 0 ? 350 : 10);
     }
     lift(fd, 0);
     emit(fd, EV_KEY, BTN_TOUCH, 0); emit(fd, EV_KEY, BTN_TOOL_FINGER, 0); syn(fd);
@@ -616,14 +641,15 @@ int main(void)
                           (const int[]){ INPUT_PROP_POINTER, INPUT_PROP_BUTTONPAD, -1 }, wheelpad_node,
                           sizeof wheelpad_node);
     take(wheelpad_node);
-    int plain = circle(wheelpad, 600, 450, 1);
+    int plain = circle(wheelpad, 600, 500, 1);
     printf("round touchpad without the quirk, once round clockwise: %d wheel steps\n", plain);
     assert(!(scroll_methods() & LIBINPUT_CONFIG_SCROLL_CIRCULAR) && plain == 0 && ngot > 0 && !buttons());
     pointer_release();
     local_quirks(CIRCULAR_QUIRK("1"));
     take(wheelpad_node);
-    assert(scroll_methods() == LIBINPUT_CONFIG_SCROLL_CIRCULAR);
-    int down = circle(wheelpad, 600, 450, 1), up = circle(wheelpad, 600, 450, 0);
+    assert((scroll_methods() & (LIBINPUT_CONFIG_SCROLL_CIRCULAR | LIBINPUT_CONFIG_SCROLL_2FG)) ==
+           (LIBINPUT_CONFIG_SCROLL_CIRCULAR | LIBINPUT_CONFIG_SCROLL_2FG));
+    int down = circle(wheelpad, 600, 500, 1), up = circle(wheelpad, 600, 500, 0);
     printf("round touchpad with settings' section on, once round clockwise: %d, counterclockwise: %d wheel steps\n",
            down, up);
     assert(down < 0 && up > 0 && !buttons()); /* down is negative, as the mouse wheel's */
@@ -664,16 +690,22 @@ int main(void)
                                                 { -1, 0, 0, 0 } },
                          (const int[]){ INPUT_PROP_POINTER, -1 }, fv1_node, sizeof fv1_node);
     take(fv1_node);
-    assert(scroll_methods() == LIBINPUT_CONFIG_SCROLL_CIRCULAR);
-    down = circle(fv1, 385, 280, 1);
-    up = circle(fv1, 385, 280, 0);
+    assert((scroll_methods() & (LIBINPUT_CONFIG_SCROLL_CIRCULAR | LIBINPUT_CONFIG_SCROLL_2FG)) ==
+           (LIBINPUT_CONFIG_SCROLL_CIRCULAR | LIBINPUT_CONFIG_SCROLL_2FG));
+    down = circle(fv1, 385, 330, 1);
+    up = circle(fv1, 385, 330, 0);
     printf("CF-FV1 as libinput knows it, once round clockwise: %d, counterclockwise: %d wheel steps\n", down, up);
     assert(down < 0 && up > 0 && !buttons());
+    int vertical_down = two_finger_scroll(fv1, 0, 1), vertical_up = two_finger_scroll(fv1, 0, -1);
+    int horizontal_right = two_finger_scroll(fv1, 1, 1), horizontal_left = two_finger_scroll(fv1, 1, -1);
+    printf("CF-FV1 circular mode two-finger: vertical %d/%d horizontal %d/%d\n",
+           vertical_down, vertical_up, horizontal_right, horizontal_left);
+    assert(vertical_down < 0 && vertical_up > 0 && horizontal_right > 0 && horizontal_left < 0);
     pointer_release();
     local_quirks(CIRCULAR_QUIRK("0"));
     take(fv1_node);
     assert(!(scroll_methods() & LIBINPUT_CONFIG_SCROLL_CIRCULAR) && (scroll_methods() & LIBINPUT_CONFIG_SCROLL_2FG));
-    plain = circle(fv1, 385, 280, 1);
+    plain = circle(fv1, 385, 330, 1);
     ngot = 0;
     touch(fv1, 0, 300, 250, 1);
     touch(fv1, 1, 470, 250, 1);

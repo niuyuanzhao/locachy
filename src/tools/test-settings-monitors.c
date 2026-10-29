@@ -69,6 +69,8 @@ static char root[1024];
 static int fail_open, fail_close, fail_rename;
 static FILE *writing;
 static int test_cols = 100, test_rows = 35, frames, settings_page;
+int screen_is_extended(void) { return 0; }
+int screen_output_current(void) { return 0; }
 static char canvas[100][256];
 static uint32_t colors[100][256];
 static int keys[64], nkeys, keypos;
@@ -115,12 +117,16 @@ static const char *map_path(const char *path, char *out, size_t size)
         snprintf(out, size, "%s/rclone.conf", root);
     else if (strcmp(path, HOWDY_CONF) == 0)
         snprintf(out, size, "%s/howdy.ini", root);
+    else if (strcmp(path, "/etc/locachy/labwc/rc.xml") == 0)
+        snprintf(out, size, "%s/absent-labwc.xml", root);
     else if (strcmp(path, CLASH_STATE "/subscription") == 0)
         snprintf(out, size, "%s/subscription", root);
     else if (strcmp(path, LOCALE_DIR) == 0) /* the Language row: no catalog here, English only */
         snprintf(out, size, "%s/locale", root);
     else if (strcmp(path, MACHINES_DIR) == 0)
         snprintf(out, size, "%s/machines", root);
+    else if (strncmp(path, MACHINES_DIR "/", sizeof MACHINES_DIR) == 0)
+        snprintf(out, size, "%s/machines/%s", root, path + sizeof MACHINES_DIR);
     else if (strcmp(path, "/etc/hostname") == 0 || strcmp(path, "/etc/hostname.tmp") == 0)
         snprintf(out, size, "%s/hostname%s", root, path + 13);
     else if (strcmp(path, "/etc/hosts") == 0 || strcmp(path, "/etc/hosts.tmp") == 0)
@@ -475,8 +481,8 @@ static void test_circular(void)
     static const char on[] = CIRCULAR_TEXT("1"), off[] = CIRCULAR_TEXT("0");
     char text[1024], path[1400];
     snprintf(path, sizeof path, "%s/local-overrides.quirks", root);
-    assert(circ_index() == tnet_index() + 1 && imek_index() == circ_index() + 1 &&
-           num_hw_items() == imek_index() + NIME_KEYS);
+    assert(circ_index() == tnet_index() + 1 && imek_index() == circ_index() + 3 &&
+           kb_index() == imek_index() + NIME_KEYS && num_hw_items() == kb_index() + nkeyboards_seen);
     on_rc("touchpad_circular", "0", NULL);
     assert(circular == 0);
     on_rc("touchpad_circular", "yes", NULL);
@@ -505,8 +511,27 @@ static void test_circular(void)
            canvas_has("< round touchpads >"));
     in_page = 0;
     settings_page = page_before;
+    assert(circular_width == 25 && circular_delay == 300);
+    selected = circ_index() + 1;
+    adjust(-1);
+    assert(circular_width == 24 && circular_width_set);
+    quirks_text(text, sizeof text);
+    assert(strstr(text, "AttrCircularScrollRingWidth=24") && !strstr(text, "ModelCircularTouchpad="));
+    selected = circ_index() + 2;
+    adjust(+1);
+    assert(circular_delay == 350 && circular_delay_set);
+    quirks_text(text, sizeof text);
+    assert(strstr(text, "AttrCircularScrollDwell=350") && strstr(text, "AttrCircularScrollRingWidth=24"));
+    selected = circ_index() + 1;
+    fail_open = 1;
+    adjust(+1);
+    fail_open = 0;
+    assert(circular_width == 24 && circular_width_set && strstr(notice, "Cannot write"));
+    circular_width = 25; circular_delay = 300;
+    circular_width_set = circular_delay_set = 0;
+    assert(apply_circular() == 0);
     puts("PASS touchpad circular scrolling: round touchpads (none written), on, off; a section of libinput's "
-         "local quirks, the rest kept");
+         "local quirks, the rest kept; width and dwell independently adjustable");
 }
 
 /* key_get for choose_key: keys[] with the modifiers held at each and the
@@ -602,6 +627,70 @@ static void test_ime_keys(void)
     nkeys = keypos = 0;
     puts("PASS input method keys: Henkan_Mode, Muhenkan, Zenkaku_Hankaku unless rc.conf says; a key that types "
          "nothing alone (bound to nothing too), not another setting's, not a letter alone; the bar told");
+}
+
+/* keys.c's keyboards (doubles): the built-in one types the system's keymap,
+ * a USB one its own; what keyboards.conf was given. */
+static struct keys_keyboard fake_keyboards[2] = {
+    { .id = "1:1:AT_Translated_Set_2_keyboard", .name = "AT Translated Set 2 keyboard", .keymap = "jp106" },
+    { .id = "1133:49948:USB_Keyboard", .name = "USB Keyboard", .keymap = "us", .own = 1 },
+};
+static char keyboard_log[256];
+static int keys_reloads;
+int keys_keyboards(struct keys_keyboard *out, int max)
+{
+    int n = max < 2 ? max : 2;
+    memcpy(out, fake_keyboards, (size_t)n * sizeof *out);
+    return n;
+}
+int keys_set_keyboard(const char *id, const char *keymap)
+{
+    size_t n = strlen(keyboard_log);
+    snprintf(keyboard_log + n, sizeof keyboard_log - n, "%s=%s;", id, keymap ? keymap : "");
+    for (int i = 0; i < 2; i++) {
+        if (strcmp(fake_keyboards[i].id, id) != 0) continue;
+        fake_keyboards[i].own = keymap != NULL;
+        snprintf(fake_keyboards[i].keymap, sizeof fake_keyboards[i].keymap, "%s", keymap ? keymap : "jp106");
+    }
+    return 0;
+}
+void keys_reload(void) { keys_reloads++; }
+const char *keys_layout_name(const char *field) { return strcmp(field, "console") == 0 ? "jp106" : NULL; }
+
+/* A row for each keyboard with the keymap it types in; one of its own, or
+ * the system's again (Delete, or the system's chosen); process 1 and the
+ * shared display's bar told, this program's keys read again. */
+static void test_keyboards(void)
+{
+    int page_before = settings_page, hups_before = hups, bar_before = bar_hups;
+    settings_page = 1;
+    selected = kb_index() + 1;
+    in_page = 1;
+    draw();
+    assert(nkeyboards_seen == 2 && category == CAT_INPUT);
+    assert(canvas_has("AT Translated Set 2 keyboard") && canvas_has("jp106, the system's"));
+    assert(canvas_has("USB Keyboard") && canvas_has("us, its own"));
+    set_keyboard_keymap(&keyboards_seen[1], NULL);
+    assert(!strcmp(keyboard_log, "1133:49948:USB_Keyboard=;") && keys_reloads == 1);
+    assert(hups == hups_before + 1 && bar_hups == bar_before + 1);
+    assert(!strcmp(notice, "USB Keyboard: the system's layout again."));
+    draw();
+    assert(canvas_has("USB Keyboard") && !canvas_has("us, its own"));
+    set_keyboard_keymap(&keyboards_seen[1], "us"); /* its table made (keytable), then keyboards.conf */
+    assert(strstr(keyboard_log, "1133:49948:USB_Keyboard=us;") && keys_reloads == 2);
+    assert(!strcmp(notice, "USB Keyboard: layout us from now on; the boot unlock takes it from the next boot image."));
+    set_keyboard_keymap(&keyboards_seen[0], "jp106"); /* the system's: none of its own */
+    assert(strstr(keyboard_log, "1:1:AT_Translated_Set_2_keyboard=;"));
+    fake_keyboards[1].missing = 1;
+    test_cols = 160;
+    draw();
+    assert(canvas_has("us, its own: no key table, types as the system's"));
+    test_cols = 100;
+    fake_keyboards[1].missing = 0;
+    in_page = 0;
+    settings_page = page_before;
+    puts("PASS keyboards: a row each with the keymap it types in (the system's, its own, its own without a "
+         "table); chosen or the system's again; process 1 and the bar told");
 }
 
 static void test_bluetooth(void)
@@ -837,6 +926,40 @@ static void test_bluetooth(void)
     file_text("packages", "base\nlinux-cachyos-bore\n");
     puts("PASS kernel headers ON/OFF follows manifest, jobs use normal package control; kernel choice is separate");
 
+    char machine_dir[1400];
+    snprintf(machine_dir, sizeof machine_dir, "%s/machines", root);
+    assert(mkdir(machine_dir, 0700) == 0 || errno == EEXIST);
+    file_text("machines/lenovo-test.conf", "# Brand: Lenovo\ndescription=\"ThinkPad fixture\"\n");
+    file_text("machines/panasonic-test.conf", "# Brand: Panasonic\ndescription=\"Let us note fixture\"\n");
+    find_machines();
+    assert(nmachines == 3 && !machine_profiles[0][0] && !strcmp(machine_brands[0], "Generic"));
+    assert(!strcmp(machine_brands[1], "Lenovo") && !strcmp(machine_labels[1], "ThinkPad fixture"));
+    selected = mach_index(); rc_log[0] = '\0';
+    adjust(+1);
+    assert(!rc_log[0] && enter_row(selected));
+    int matches[] = { 0, 1, 2 };
+    test_cols = 160; machine_grid(matches, 3); assert(machine_columns() == 5);
+    assert(machine_cells[0].row < machine_cells[1].row && machine_cells[1].row < machine_cells[2].row);
+    test_cols = 110; assert(machine_columns() == 4);
+    test_cols = 24; assert(machine_columns() == 1);
+    test_cols = 100;
+    nkeys = keypos = 0; keys[nkeys++] = 'P'; keys[nkeys++] = 27;
+    pick_machine();
+    assert(!rc_log[0] && canvas_has("Panasonic") && !canvas_has("ThinkPad fixture"));
+    nkeys = keypos = 0; keys[nkeys++] = 27;
+    pick_machine();
+    assert(canvas_has("generic PC") && canvas_has("[*]"));
+    nkeys = keypos = 0; keys[nkeys++] = 'P'; keys[nkeys++] = 'a'; keys[nkeys++] = 'n'; keys[nkeys++] = '\n';
+    pick_machine();
+    assert(!strcmp(active_machine, "panasonic-test") && strstr(rc_log, "machine=panasonic-test;"));
+    active_machine[0] = rc_log[0] = '\0';
+    mouse = (struct pointer_event){ .col = 4, .row = 8, .button = BTN_LEFT, .pressed = 1, .clicks = 2 };
+    nkeys = keypos = 0; keys[nkeys++] = -2;
+    pick_machine();
+    assert(!strcmp(active_machine, "lenovo-test") && strstr(rc_log, "machine=lenovo-test;"));
+    active_machine[0] = '\0';
+    puts("PASS machine profile Enter picker: generic retained, brand groups, search, responsive columns, pointer and apply/cancel");
+
     track_events = settings_page = 0;
     puts("PASS Bluetooth rows, clicks and Enter; all tools required, install separate from service, bluetui in term "
          "without arguments; remove writes off and reloads before packages, failed writes abort");
@@ -916,7 +1039,86 @@ int main(int argc, char **argv)
                                          .button = BTN_LEFT, .pressed = 1, .clicks = 1 };
     arrangement_pointer(&select_event);
     assert(arrangement_selected == monitor_index("HEADLESS-2") && hit_n == 2);
+    select_event.pressed = 0;
+    arrangement_pointer(&select_event);
+    assert(arrangement_drag < 0);
     puts("PASS synthetic pointer clicks through live loop, screen-box selection and visible pointer");
+    arrangement_selected = monitor_index("HEADLESS-2");
+    arrangement_draw();
+    for (int i = 0; i < narrangement_hits; i++)
+        if (arrangement_hits[i].monitor == arrangement_selected) external_hit = arrangement_hits[i];
+    select_event = (struct pointer_event){ .col = external_hit.x + external_hit.width / 2,
+        .row = external_hit.y + external_hit.height / 2, .button = BTN_LEFT, .pressed = 1 };
+    arrangement_pointer(&select_event);
+    assert(arrangement_drag == arrangement_selected);
+    int original_x = monitors[arrangement_selected].x, original_y = monitors[arrangement_selected].y;
+    select_event.button = 0; select_event.pressed = 0;
+    select_event.col += 1; select_event.row += 6;
+    arrangement_pointer(&select_event);
+    /* Down, beyond the snapping distance; still touching the other screen. */
+    assert(monitors[arrangement_selected].x == original_x &&
+           monitors[arrangement_selected].y > original_y + ARRANGEMENT_SNAP);
+    int saved_x = monitors[arrangement_selected].x, saved_y = monitors[arrangement_selected].y;
+    select_event.button = BTN_LEFT;
+    arrangement_pointer(&select_event);
+    assert(arrangement_drag < 0);
+    load_monitors();
+    b = monitor_index("HEADLESS-2");
+    assert(monitors[b].has_position && monitors[b].x == saved_x && monitors[b].y == saved_y);
+    arrangement_selected = b;
+    fail_open = 1;
+    arrangement_move(10, -10);
+    fail_open = 0;
+    assert(monitors[b].x == saved_x && monitors[b].y == saved_y);
+    file_text("monitors.conf", "HEADLESS-1=origin,1280x720,1.25,0,0\nHEADLESS-2=left,1280x720,1.5,-853,-120\n");
+    load_monitors();
+    b = monitor_index("HEADLESS-2");
+    assert(monitors[b].has_position && monitors[b].x == -853 && monitors[b].y == -120);
+    file_text("monitors.conf", "HEADLESS-1=origin,1280x720,1.25\nHEADLESS-2=left,1280x720,1.5\n");
+    load_monitors();
+    arrangement_selected = monitor_index("HEADLESS-2");
+    puts("PASS monitor drag saves independent XY, negative positions persist and failed moves roll back");
+    /* Snapping as kscreen's: two screens always touch (the nearer side, then
+     * edges or centres within 80 lined up); only a corner keeps the screen
+     * where it was; with more screens, edges near a neighbour meet or line up. */
+    {
+        struct monitor_rect two[2] = { { .name = "A", .width = 1024, .height = 576 },
+                                       { .name = "B", .width = 853, .height = 480, .x = -853 } };
+        int x = -900, y = 300;
+        arrangement_snap(two, 2, 1, -853, 0, &x, &y);
+        assert(x == -853 && y == 300);
+        x = -900; y = -30;
+        arrangement_snap(two, 2, 1, -853, 0, &x, &y);
+        assert(x == -853 && y == 0); /* tops */
+        x = -900; y = 30;
+        arrangement_snap(two, 2, 1, -853, 0, &x, &y);
+        assert(x == -853 && y == 96); /* bottoms, tried first */
+        struct monitor_rect tall[2] = { { .name = "A", .width = 1920, .height = 1080 },
+                                        { .name = "B", .width = 800, .height = 480, .x = -800 } };
+        x = -850; y = 330;
+        arrangement_snap(tall, 2, 1, -800, 0, &x, &y);
+        assert(x == -800 && y == 300); /* centres */
+        x = 100; y = 600;
+        arrangement_snap(two, 2, 1, -853, 0, &x, &y);
+        assert(x == 171 && y == 576); /* below, right edges lined up */
+        x = -2000; y = 2000;
+        arrangement_snap(two, 2, 1, -853, 0, &x, &y);
+        assert(x == -853 && y == 0);
+        struct monitor_rect three[3] = { { .name = "A", .width = 1024, .height = 576 },
+                                         { .name = "B", .width = 1920, .height = 1080, .x = 1024 },
+                                         { .name = "C", .width = 800, .height = 600, .x = 5000, .y = 5000 } };
+        x = 3000; y = 20;
+        arrangement_snap(three, 3, 2, 5000, 5000, &x, &y);
+        assert(x == 2944 && y == 0); /* right of B, tops lined up */
+        x = 4000; y = 2000;
+        arrangement_snap(three, 3, 2, 5000, 5000, &x, &y);
+        assert(x == 4000 && y == 2000); /* far from all: free */
+    }
+    puts("PASS dragging snaps as KDE's display settings: two screens touch, edges meet and line up within 80");
+    keys[0] = K_DOWN; keys[1] = 0; keys[2] = 27; nkeys = 3; keypos = 0;
+    arrange_screens();
+    assert(arrangement_selected == monitor_anchor());
+    puts("PASS origin selection survives the arrangement page refresh");
     /* The main page: a click selects a row, on its value it changes it, the
      * wheel moves; a double click is Enter only where Enter acts. */
     build_row_maps();
@@ -1011,7 +1213,7 @@ int main(int argc, char **argv)
     arrangement_apply();
     assert(monitors[arrangement_selected].place == MONITOR_ORIGIN);
     arrangement_selected = -1; arrangement_select(1); arrangement_draw();
-    assert(arrangement_selected == -1 && canvas_has("No external screens connected"));
+    assert(arrangement_selected == monitor_anchor() && canvas_has("Selected:"));
     keys[0] = '\n'; keys[1] = 27; nkeys = 2; keypos = 0;
     selected = num_hw_items();
     assert(screen_settings_key('\n'));
@@ -1131,6 +1333,20 @@ int main(int argc, char **argv)
                         "    <keybind key=\"C-S-Return\"" RUN "    <keybind key=\"A-space\"" RUN) == 0);
     free(text);
     puts("PASS labwc opens a window of foot for each of rc.conf's terminal keys, in its names");
+    written = open_memstream(&text, &size);
+    assert(written);
+    labwc_line(written, "<keybind key=\"HOME-KEY\"><action name=\"Execute\" command=\"/usr/local/lib/locachy/labwc-control --action home\" /></keybind>\n");
+    labwc_line(written, "<keybind key=\"LOCK-KEY\"><action name=\"Execute\" command=\"/usr/local/lib/locachy/labwc-control --action lock\" /></keybind>\n");
+    labwc_line(written, "<keybind key=\"IME-KEY\"><action name=\"Execute\" command=\"/usr/bin/true\" /></keybind>\n");
+    assert(fclose(written) == 0);
+    assert(strstr(text, "key=\"W-Escape\"") && strstr(text, "key=\"C-A-Escape\"") &&
+           strstr(text, "key=\"C-A-Super_L\"") && strstr(text, "key=\"W-l\""));
+    assert(strstr(text, "key=\"C-space\"><action name=\"Execute\" command=\"/usr/bin/true\"") &&
+           strstr(text, "key=\"Henkan_Mode\"") && strstr(text, "key=\"Muhenkan\"") &&
+           strstr(text, "key=\"Zenkaku_Hankaku\""));
+    assert(!strstr(text, "HOME-KEY") && !strstr(text, "LOCK-KEY") && !strstr(text, "IME-KEY"));
+    free(text);
+    puts("PASS compositor home, lock and every input method key are consuming bindings, not observer-only actions");
     rc_internal = "";
     assert(!monitor_internal("DP-3") && monitor_internal("eDP-1") && monitor_internal("LVDS-1"));
     assert(monitor_internal("DSI-1") && !monitor_internal("HDMI-A-1"));
@@ -1301,8 +1517,8 @@ int main(int argc, char **argv)
            bri_index() == tpm_index() + 1 && mach_index() == bri_index() + 1 &&
            upd_index() == mach_index() + 1 && boot_index() == upd_index() + 2 && opt_index() == boot_index() + 5 &&
            repo_index() == opt_index() + NOPT_MODULES && tnet_index() == repo_index() + NREPO_SECTIONS + 1 &&
-           circ_index() == tnet_index() + 1 && imek_index() == circ_index() + 1 &&
-           num_hw_items() == imek_index() + NIME_KEYS);
+           circ_index() == tnet_index() + 1 && imek_index() == circ_index() + 3 &&
+           kb_index() == imek_index() + NIME_KEYS && num_hw_items() == kb_index() + nkeyboards_seen);
     forks_before = forks;
     selected = ime_index();
     adjust(+1);
@@ -1372,6 +1588,7 @@ int main(int argc, char **argv)
     test_bluetooth();
     test_circular();
     test_ime_keys();
+    test_keyboards();
     /* Line editing in prompts: cursor movement, Delete and Ctrl+U. */
     char edited[64] = "abc";
     size_t epos = strlen(edited);

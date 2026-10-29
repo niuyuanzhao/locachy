@@ -80,9 +80,10 @@ void base_language_reload(void);
  * with rc.conf's values, written by settings. */
 #define LABWC_RC "/run/locachy/labwc-rc.xml"
 
-/* The screens' settings, written by settings: lines CONNECTOR=PLACE,MODE,SCALE
- * (PLACE origin, right, left, above or below; MODE WIDTHxHEIGHT or preferred;
- * SCALE fractional). The same scale applies to the shared display and to the
+/* The screens' settings: CONNECTOR=PLACE,MODE,SCALE[,X,Y], signed logical
+ * coordinates when present; PLACE origin/right/left/above/below for legacy
+ * placement, MODE WIDTHxHEIGHT or preferred, SCALE fractional.
+ * The same scale applies to the shared display and to the
  * framebuffer programs. monitor_conf: 1 and *out if connector name has a line;
  * otherwise 0 and the defaults (right, preferred, scale 0: not set). */
 #define MONITORS_CONF "/etc/locachy/monitors.conf"
@@ -90,6 +91,7 @@ struct monitor_conf {
     char place[16];
     int width, height; /* 0: preferred */
     double scale;      /* 0: not set */
+    int has_position, x, y; /* signed logical coordinates when set */
 };
 int monitor_conf(const char *name, struct monitor_conf *out);
 /* Whether connector name is the computer's own screen: an eDP, LVDS or DSI
@@ -108,6 +110,25 @@ int monitor_internal(const char *name);
  * logs why. BASE_FONT is Terminus 16 bold (the initramfs has only that). */
 #define BASE_FONT "/usr/local/share/locachy/font.psf"
 int screen_open(const char *font_path);
+/* Extended mode is opt-in; existing programs keep the mirrored canvas. Each
+ * selected output is drawn in its native pixels and its own text scale. */
+struct screen_output {
+    char name[32];
+    int x, y, width, height;       /* logical desktop rectangle */
+    int pixel_width, pixel_height;
+    int cols, rows;
+    double scale;
+};
+__attribute__((weak)) int screen_extended(int on);
+__attribute__((weak)) int screen_is_extended(void);
+__attribute__((weak)) int screen_output_current(void);
+__attribute__((weak)) int screen_output_count(void);
+__attribute__((weak)) int screen_output_get(int index, struct screen_output *out);
+__attribute__((weak)) int screen_output_select(int index); /* previous index, or -1 on failure */
+/* Desktop point to output/local native pixels; -1 in a gap or off-screen. */
+__attribute__((weak)) int screen_output_at(int x, int y, int *local_x, int *local_y);
+/* Move a desktop point onto the union of available output rectangles. */
+__attribute__((weak)) void screen_output_project(int *x, int *y);
 /* Read the scale again (settings changed it, or another output became the
  * first): 1 if the font and so the cells changed, and the picture is cleared
  * for a redraw. Taking the screen back (K_SHOWN) does this by itself. */
@@ -129,7 +150,7 @@ void screen_blit(int x, int y, int w, int h, const uint32_t *px, int stride);
 void screen_fill_px(int x, int y, int w, int h, uint32_t rgb);
 /* The cells in pixels: each is *w by *h, and row 0 starts *top pixels down. */
 void screen_cells(int *w, int *h, int *top);
-/* Make what was drawn since the last flush visible. */
+/* Make damage on every drawn output visible, regardless of the selected target. */
 void screen_flush(void);
 /* The status bar at the top, as on the shared display (panel.c), with title
  * (the program) and ime (its input method mode, or NULL). The cells start
@@ -253,7 +274,33 @@ void keys_name_any(int on);
 #define KEYS_CTRL  2
 #define KEYS_ALT   4
 #define KEYS_META  8
+#define KEYS_ALTGR 16
+#define KEYS_CAPS  32
 int keys_modifiers(void);
+/* The selected layout's modifier role for an evdev key, not its US position. */
+int keys_modifier(int code);
+/* Each keyboard types with its own keymap when keyboards.conf names one for
+ * it, else with the system's. A keyboard's name there, as sway names input
+ * devices: vendor:product:name (decimal; the name's spaces as _); 0, or -1
+ * when fd is not an input device. */
+#define KEYS_ID_SIZE 300
+int keys_device_id(int fd, char *out, size_t size);
+/* As keys_layout_name, keys_char and keys_match_action, for the keyboard fd
+ * (one of keys_fds; another: the system's layout). */
+const char *keys_device_layout(int fd, const char *field);
+int keys_device_char(int fd, int code, int shift);
+int keys_device_action(int fd, int ev_code, int ctrl, int alt, int shift, int meta);
+/* The keyboards there are (devices with letters, each once): its name, its
+ * keymap (its own, own, or the system's), whether its own keymap has no
+ * table (it types as the system's meanwhile). */
+struct keys_keyboard {
+    char id[KEYS_ID_SIZE], name[128], keymap[64];
+    int own, missing;
+};
+int keys_keyboards(struct keys_keyboard *out, int max);
+/* Keyboard id's own keymap into keyboards.conf, or none (keymap NULL); 0, or
+ * -1 with errno. The programs read it at keys_reload. */
+int keys_set_keyboard(const char *id, const char *keymap);
 /* Poll extra file descriptors while retaining keyboard and process-1 control
  * handling. Extra descriptors keep their events and receive revents. */
 struct pollfd;
@@ -278,6 +325,7 @@ struct pointer_event {
     int wheel;     /* scroll steps, positive up */
     int hwheel;    /* positive right */
     int buttons;   /* held: 1 left, 2 right, 4 middle */
+    int output;    /* extended output index; 0 for a mirrored canvas */
     int gesture;   /* GESTURE_PINCH: two fingers apart or together, by scale */
     double scale;  /* a pinch: the factor since its last event (above 1: apart, zoom in) */
 };

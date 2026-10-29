@@ -34,6 +34,7 @@ class Gestures:
         self.touchpad_tool = which("libinput-gestures")
         self.touchscreen_tool = which("lisgd")
         self.touchpad = None
+        self.touchpads = ()
         self.screens = {}
 
     def remove(self, path):
@@ -43,14 +44,23 @@ class Gestures:
             stop_child(item[2])
 
     def sync(self, context):
-        if self.touchpad_tool and (self.touchpad is None or self.touchpad.poll() is not None):
+        snapshot = list(context.list_devices(subsystem="input"))
+        touchpads = tuple(sorted((device.sys_path, device.device_node, device.get("USEC_INITIALIZED"))
+                                for device in snapshot if device.get("ID_INPUT_TOUCHPAD") == "1" and
+                                device.device_node and device.device_node.startswith("/dev/input/event")))
+        if touchpads != self.touchpads:
+            if self.touchpad is not None:
+                stop_child(self.touchpad)
+                self.touchpad = None
+            self.touchpads = touchpads
+        if self.touchpad_tool and touchpads and (self.touchpad is None or self.touchpad.poll() is not None):
             if self.touchpad is not None:
                 self.touchpad.wait()
-            self.touchpad = self.popen([self.touchpad_tool, "-c", CONFIG], stdin=subprocess.DEVNULL)
+            self.touchpad = self.popen([self.touchpad_tool, "--device", "all", "-c", CONFIG], stdin=subprocess.DEVNULL)
         if not self.touchscreen_tool:
             return
         devices = {}
-        for device in context.list_devices(subsystem="input"):
+        for device in snapshot:
             node = device.device_node
             if node and node.startswith("/dev/input/event") and node[len("/dev/input/event"):].isdigit() and \
                     device.get("ID_INPUT_TOUCHSCREEN") == "1":

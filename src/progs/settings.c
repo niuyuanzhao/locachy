@@ -25,6 +25,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <ftw.h>
 #include <glob.h>
 #include <limits.h>
 #include <poll.h>
@@ -77,8 +78,9 @@ static const struct { const char *code, *name; } language_names[] = {
 static char languages[MAX_LANGUAGES][16]; /* [0] "": English */
 static int nlanguages;
 
-#define MAX_MACHINES 32
+#define MAX_MACHINES 512
 static char machine_profiles[MAX_MACHINES][64]; /* [0] "": generic PC */
+static char machine_brands[MAX_MACHINES][64], machine_labels[MAX_MACHINES][128];
 static int nmachines;
 static char active_machine[64];
 
@@ -103,10 +105,28 @@ static int kernel_headers_declared, kernel_headers_installed;
 static char kernel_choices[64][64];
 static int nkernel_choices, kernel_choice;
 
+static void machine_metadata(int i)
+{
+    char path[512], line[512];
+    snprintf(machine_brands[i], sizeof machine_brands[i], "Other");
+    snprintf(machine_labels[i], sizeof machine_labels[i], "%s", machine_profiles[i]);
+    snprintf(path, sizeof path, MACHINES_DIR "/%s.conf", machine_profiles[i]);
+    FILE *f = fopen(path, "r");
+    while (f && fgets(line, sizeof line, f)) {
+        char value[128];
+        if (sscanf(line, "# Brand: %63[^\n]", machine_brands[i]) == 1) continue;
+        if (sscanf(line, "description=\"%127[^\"]\"", value) == 1)
+            snprintf(machine_labels[i], sizeof machine_labels[i], "%s", value);
+    }
+    if (f) fclose(f);
+}
+
 static void find_machines(void)
 {
     nmachines = 1;
     machine_profiles[0][0] = '\0';
+    snprintf(machine_brands[0], sizeof machine_brands[0], "Generic");
+    snprintf(machine_labels[0], sizeof machine_labels[0], "%s", _("generic PC"));
     DIR *d = opendir(MACHINES_DIR);
     struct dirent *e;
     while (d && (e = readdir(d)) != NULL && nmachines < MAX_MACHINES) {
@@ -115,17 +135,25 @@ static void find_machines(void)
             len - 5 >= sizeof machine_profiles[0]) {
             continue;
         }
-        snprintf(machine_profiles[nmachines++], sizeof machine_profiles[0], "%.*s", (int)(len - 5), e->d_name);
+        snprintf(machine_profiles[nmachines], sizeof machine_profiles[0], "%.*s", (int)(len - 5), e->d_name);
+        machine_metadata(nmachines++);
     }
     if (d) closedir(d);
     if (nmachines > 2) {
         for (int i = 1; i < nmachines; i++) {
             for (int j = i + 1; j < nmachines; j++) {
-                if (strcmp(machine_profiles[i], machine_profiles[j]) > 0) {
-                    char tmp[64];
-                    memcpy(tmp, machine_profiles[i], sizeof tmp);
-                    memcpy(machine_profiles[i], machine_profiles[j], sizeof tmp);
-                    memcpy(machine_profiles[j], tmp, sizeof tmp);
+                int by_brand = strcmp(machine_brands[i], machine_brands[j]);
+                if (by_brand > 0 || (!by_brand && strcmp(machine_labels[i], machine_labels[j]) > 0)) {
+                    char tmp[128];
+                    memcpy(tmp, machine_profiles[i], sizeof machine_profiles[0]);
+                    memcpy(machine_profiles[i], machine_profiles[j], sizeof machine_profiles[0]);
+                    memcpy(machine_profiles[j], tmp, sizeof machine_profiles[0]);
+                    memcpy(tmp, machine_brands[i], sizeof machine_brands[0]);
+                    memcpy(machine_brands[i], machine_brands[j], sizeof machine_brands[0]);
+                    memcpy(machine_brands[j], tmp, sizeof machine_brands[0]);
+                    memcpy(tmp, machine_labels[i], sizeof machine_labels[0]);
+                    memcpy(machine_labels[i], machine_labels[j], sizeof machine_labels[0]);
+                    memcpy(machine_labels[j], tmp, sizeof machine_labels[0]);
                 }
             }
         }
@@ -181,11 +209,21 @@ static char terminal_key[128] = "Ctrl+Alt+T";
 /* rc.conf's key_lock (process 1 locks the screen), login_skip (not at boot)
  * and lock_after (minutes without input; 0: never; 10 if not set). */
 static char lock_key[128] = "Super+L";
+static char home_key[256] = "Super+Esc Ctrl+Alt+Esc Ctrl+Alt+Super ThinkVantage";
 /* rc.conf's keys for the input method (keys.c): the mode cycle, Chinese,
  * direct input, Chinese mode's punctuation width; "" for none. */
 #define NIME_KEYS 4
 static const char *const ime_key_names[NIME_KEYS] = { "key_ime", "key_ime_cn", "key_ime_raw", "key_ime_width" };
 static char ime_keys[NIME_KEYS][128] = { "Ctrl+Space", "Henkan_Mode", "Muhenkan", "Zenkaku_Hankaku" };
+/* The keyboards there are, each with the keymap it types in (keys.c: its own
+ * in keyboards.conf, else the system's); a chosen keymap's key table is made
+ * with keytable, as make.sh makes them again at each build. */
+#define MAX_KEYBOARD_ROWS 8
+static struct keys_keyboard keyboards_seen[MAX_KEYBOARD_ROWS];
+static int nkeyboards_seen;
+#define KEYTABLE "/usr/local/lib/locachy/keytable"
+#define KEYMAP_TABLES "/usr/local/share/locachy/keymaps"
+#define KBD_KEYMAPS "/usr/share/kbd/keymaps"
 static int login_skip;
 static int lock_after = 10;
 static const int lock_afters[] = { 0, 1, 2, 5, 10, 15, 30, 60 };
@@ -200,6 +238,8 @@ static int tz_auto;           /* rc.conf has service_timezone */
 static int link_on;           /* rc.conf has service_link */
 static int term_net = 1;      /* rc.conf's term_network is not "0": term's shell on the network */
 static int circular = -1;     /* rc.conf's touchpad_circular: 1 on, 0 off, -1 (none) as libinput knows the touchpad */
+static int circular_width = 25, circular_delay = 300; /* coordinate-range parameter, milliseconds */
+static int circular_width_set, circular_delay_set;
 static char link_dev[32];     /* rc.conf's debug_link_interface: the port it reserves */
 static int clash_on;          /* rc.conf has service_clash */
 static int clash_proxy;       /* rc.conf's clash_mode is "proxy": its port only, no TUN */
@@ -267,6 +307,7 @@ struct monitor {
     int nmodes;
     int mode_sel;
     double scale;              /* one of scales[] */
+    int has_position, x, y;
 };
 
 /* The framebuffer programs' text is TEXT_H (18) pixels times the scale, the
@@ -449,6 +490,15 @@ static void load_monitors(void)
                     }
                 }
                 if (comma2) {
+                    char *position = strchr(comma2, ',');
+                    if (position) *position++ = '\0';
+                    int x, y, end = 0;
+                    if (position && sscanf(position, "%d,%d%n", &x, &y, &end) == 2 && !position[end] &&
+                        x >= -65536 && x <= 65536 && y >= -65536 && y <= 65536) {
+                        m->has_position = 1;
+                        m->x = x;
+                        m->y = y;
+                    }
                     double sc = strtod(comma2, NULL);
                     for (int si = 0; si < NSCALES; si++) {
                         if (sc > scales[si] - 0.01 && sc < scales[si] + 0.01) m->scale = scales[si];
@@ -472,8 +522,10 @@ static int save_monitors(void)
         const char *mstr = m->nmodes > 0 ? m->modes[m->mode_sel] : "preferred";
         int place = i == anchor ? MONITOR_ORIGIN : m->place;
         if (place < MONITOR_RIGHT || place > MONITOR_ORIGIN) place = MONITOR_RIGHT;
-        failed |= fprintf(out, "%s=%s,%s,%g\n", m->name, places[place], mstr,
+        failed |= fprintf(out, "%s=%s,%s,%g", m->name, places[place], mstr,
                           m->scale > 0 ? m->scale : 1.0) < 0;
+        if (m->has_position) failed |= fprintf(out, ",%d,%d", m->x, m->y) < 0;
+        failed |= fputc('\n', out) == EOF;
     }
     if (fclose(out) != 0) failed = 1;
     if (!failed && rename(MONITORS_CONF ".tmp", MONITORS_CONF) == 0) return 0;
@@ -525,8 +577,16 @@ static int labwc_key(const char *spec, char *out, size_t size)
             key = part;
         }
     }
-    if (key == NULL) return 0;
-    char name[16];
+    char name[32];
+    if (key == NULL) {
+        if (!mods[0]) return 0;
+        size_t n = strlen(mods);
+        const char *last = mods[n - 2] == 'C' ? "Control_L" : mods[n - 2] == 'A' ? "Alt_L" :
+                           mods[n - 2] == 'S' ? "Shift_L" : "Super_L";
+        mods[n - 2] = '\0';
+        snprintf(out, size, "%s%s", mods, last);
+        return 1;
+    }
     int fn = (key[0] == 'F' || key[0] == 'f') && isdigit((unsigned char)key[1]) ? atoi(key + 1) : 0;
     if (key[0] != '\0' && key[1] == '\0' && isalnum((unsigned char)key[0])) {
         snprintf(name, sizeof name, "%c", tolower((unsigned char)key[0]));
@@ -542,6 +602,11 @@ static int labwc_key(const char *spec, char *out, size_t size)
         snprintf(name, sizeof name, "Escape");
     } else if (strcasecmp(key, "BackSpace") == 0) {
         snprintf(name, sizeof name, "BackSpace");
+    } else if (strcasecmp(key, "ThinkVantage") == 0 || strcasecmp(key, "Vendor") == 0) {
+        snprintf(name, sizeof name, "XF86Launch1");
+    } else if (strcmp(key, "Henkan_Mode") == 0 || strcmp(key, "Muhenkan") == 0 ||
+               strcmp(key, "Zenkaku_Hankaku") == 0 || strcmp(key, "Hiragana_Katakana") == 0) {
+        snprintf(name, sizeof name, "%s", key);
     } else {
         return 0;
     }
@@ -557,17 +622,28 @@ static void labwc_line(FILE *out, const char *line)
     const char *start = strstr(line, "<pointerAcceleration>");
     const char *end = start ? strstr(start, "</pointerAcceleration>") : NULL;
     const char *map = strstr(line, "<mapToOutput></mapToOutput>");
-    const char *term = strstr(line, "key=\"TERMINAL-KEY\"");
+    static const char *const markers[] = { "key=\"TERMINAL-KEY\"", "key=\"HOME-KEY\"", "key=\"LOCK-KEY\"",
+                                           "key=\"IME-KEY\"" };
+    char ime_all[NIME_KEYS * (sizeof ime_keys[0] + 1)] = "";
+    for (int i = 0; i < NIME_KEYS; i++) {
+        strcat(ime_all, ime_keys[i]);
+        strcat(ime_all, " ");
+    }
+    const char *values[] = { terminal_key, home_key, lock_key, ime_all }, *term = NULL;
+    int marker = 0;
+    for (int i = 0; i < 4; i++) {
+        if ((term = strstr(line, markers[i])) != NULL) { marker = i; break; }
+    }
     if (term) {
-        char keys[sizeof terminal_key], name[32], *save = NULL;
-        snprintf(keys, sizeof keys, "%s", terminal_key);
+        char keys[sizeof ime_all], name[64], *save = NULL;
+        snprintf(keys, sizeof keys, "%s", values[marker]);
         for (char *p = keys; *p; p++) {
             if (*p == ',') *p = ' ';
         }
         for (char *k = strtok_r(keys, " \t", &save); k != NULL; k = strtok_r(NULL, " \t", &save)) {
             if (labwc_key(k, name, sizeof name)) {
                 fprintf(out, "%.*skey=\"%s\"%s", (int)(term - line), line, name,
-                        term + strlen("key=\"TERMINAL-KEY\""));
+                        term + strlen(markers[marker]));
             }
         }
     } else if (end) {
@@ -653,9 +729,12 @@ static int apply_circular(void)
         blank = line[strspn(line, " \t\r\n")] == '\0';
     }
     if (in) fclose(in);
-    if (new && circular >= 0) {
+    if (new && (circular >= 0 || circular_width_set || circular_delay_set)) {
         fprintf(new, "%s%s\n# settings: Touchpad Circular Scrolling (rc.conf touchpad_circular)\n"
-                "MatchUdevType=touchpad\nModelCircularTouchpad=%d\n", blank ? "" : "\n", CIRCULAR_SECTION, circular);
+                "MatchUdevType=touchpad\n", blank ? "" : "\n", CIRCULAR_SECTION);
+        if (circular >= 0) fprintf(new, "ModelCircularTouchpad=%d\n", circular);
+        if (circular_width_set) fprintf(new, "AttrCircularScrollRingWidth=%d\n", circular_width);
+        if (circular_delay_set) fprintf(new, "AttrCircularScrollDwell=%d\n", circular_delay);
     }
     int ok = old && new;
     if (old) fclose(old);
@@ -732,6 +811,12 @@ static void on_rc(const char *name, const char *value, void *arg)
         term_net = strcmp(value, "0") != 0;
     } else if (strcmp(name, "touchpad_circular") == 0) {
         circular = strcmp(value, "1") == 0 ? 1 : strcmp(value, "0") == 0 ? 0 : -1;
+    } else if (strcmp(name, "touchpad_circular_width") == 0) {
+        int width = atoi(value);
+        if (width >= 1 && width <= 50) { circular_width = width; circular_width_set = 1; }
+    } else if (strcmp(name, "touchpad_circular_dwell") == 0) {
+        int delay = atoi(value);
+        if (delay >= 0 && delay <= 2000) { circular_delay = delay; circular_delay_set = 1; }
     } else if (strcmp(name, "service_link") == 0) {
         link_on = 1;
     } else if (strcmp(name, "debug_link_interface") == 0) {
@@ -742,6 +827,8 @@ static void on_rc(const char *name, const char *value, void *arg)
         snprintf(terminal_key, sizeof terminal_key, "%s", value);
     } else if (strcmp(name, "key_lock") == 0) {
         snprintf(lock_key, sizeof lock_key, "%s", value);
+    } else if (strcmp(name, "key_home") == 0) {
+        snprintf(home_key, sizeof home_key, "%s", value);
     } else if (strncmp(name, "key_ime", 7) == 0) {
         for (int i = 0; i < NIME_KEYS; i++) {
             if (strcmp(name, ime_key_names[i]) == 0) snprintf(ime_keys[i], sizeof ime_keys[i], "%s", value);
@@ -1257,7 +1344,7 @@ struct opt_module {
 
 static const struct opt_module opt_modules[] = {
     { N_("Audio (PipeWire)"), "/usr/bin/wiremix",
-      "pipewire pipewire-alsa pipewire-pulse wireplumber wiremix",
+      "pipewire pipewire-alsa pipewire-pulse wireplumber wiremix sof-firmware",
       "service_audio", AUDIO_SERVICE, "program_mixer", MIXER_PROGRAM },
     { N_("Wayland display (labwc)"), "/usr/bin/labwc",
       "labwc-locachy swaybg libnotify libinput-tools libinput-gestures lisgd python-pyudev noto-fonts-emoji",
@@ -2453,12 +2540,18 @@ static int circ_index(void)
  * key_ime_width). */
 static int imek_index(void)
 {
-    return circ_index() + 1;
+    return circ_index() + 3;
+}
+
+/* A keyboard each: the keymap it types in. */
+static int kb_index(void)
+{
+    return imek_index() + NIME_KEYS;
 }
 
 static int num_hw_items(void)
 {
-    return imek_index() + NIME_KEYS;
+    return kb_index() + nkeyboards_seen;
 }
 
 static void rclone_remotes_summary(char *out, size_t size)
@@ -2625,10 +2718,12 @@ static void choose_key(const char *label, const char *rc_name, char *value, size
     keys_name_any(0);
 }
 
-/* Process 1 reads rc.conf's keys again (key_lock). */
+/* Process 1 reads rc.conf's keys again (key_lock); the shared display's
+ * compositor gets its consuming bindings of them. */
 static void reread_keys(void)
 {
     kill(1, SIGHUP);
+    apply_labwc();
 }
 
 /* The programs named comm get sig (labwc its configuration, locachy-bar
@@ -2894,6 +2989,177 @@ static void pick_zone(void)
     }
 }
 
+/* kbd's console keymaps, as the installer lists them (localectl
+ * list-keymaps): the names of KBD_KEYMAPS' *.map and *.map.gz files. */
+#define MAX_KEYMAPS 512
+static char keymap_names[MAX_KEYMAPS][48];
+static int nkeymap_names;
+
+static int add_keymap_name(const char *path, const struct stat *st, int kind, struct FTW *ftw)
+{
+    (void)st;
+    const char *base = path + ftw->base, *dot = strstr(base, ".map");
+    if (kind != FTW_F || !dot || (dot[4] && strcmp(dot + 4, ".gz") != 0) || nkeymap_names == MAX_KEYMAPS ||
+        dot - base >= (ptrdiff_t)sizeof keymap_names[0]) {
+        return 0;
+    }
+    snprintf(keymap_names[nkeymap_names], sizeof keymap_names[0], "%.*s", (int)(dot - base), base);
+    for (int i = 0; i < nkeymap_names; i++) {
+        if (strcmp(keymap_names[i], keymap_names[nkeymap_names]) == 0) return 0;
+    }
+    nkeymap_names++;
+    return 0;
+}
+
+static void load_keymap_names(void)
+{
+    nkeymap_names = 0;
+    nftw(KBD_KEYMAPS, add_keymap_name, 16, FTW_PHYS);
+    qsort(keymap_names, (size_t)nkeymap_names, sizeof keymap_names[0], by_name);
+}
+
+/* keytable KEYMAP KEYMAP_TABLES/KEYMAP.table, with the system's locale for
+ * the dead keys (as make.sh): 0 when it made the table. */
+static int make_keymap_table(const char *keymap)
+{
+    char out[256], lang[64] = "C", line[128];
+    FILE *conf = fopen("/etc/locale.conf", "r");
+    while (conf && fgets(line, sizeof line, conf)) {
+        if (sscanf(line, "LANG=%63[^\n\"]", lang) == 1) continue;
+        sscanf(line, "LANG=\"%63[^\n\"]", lang);
+    }
+    if (conf) fclose(conf);
+    mkdir(KEYMAP_TABLES, 0755);
+    snprintf(out, sizeof out, KEYMAP_TABLES "/%s.table", keymap);
+    pid_t pid = fork();
+    if (pid == 0) {
+        int null = open("/dev/null", O_RDWR);
+        if (null >= 0) {
+            dup2(null, STDIN_FILENO);
+            dup2(null, STDOUT_FILENO);
+            dup2(null, STDERR_FILENO);
+        }
+        setenv("LC_ALL", lang, 1);
+        execl(KEYTABLE, KEYTABLE, keymap, out, (char *)NULL);
+        _exit(127);
+    }
+    int status = -1;
+    return pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
+}
+
+/* Keyboard kb types in keymap from now on (NULL: the system's): its table,
+ * keyboards.conf, then the programs read it again (process 1 and the direct
+ * programs, the shared display's bar); the boot unlock's copy comes with the
+ * next boot image. */
+static void set_keyboard_keymap(const struct keys_keyboard *kb, const char *keymap)
+{
+    const char *system = keys_layout_name("console");
+    const char *name = kb->name[0] ? kb->name : kb->id;
+    if (keymap && system && strcmp(keymap, system) == 0) {
+        keymap = NULL;
+    }
+    if (keymap && make_keymap_table(keymap) < 0) {
+        /* TRANSLATORS: %s is a keyboard layout's name (a console keymap's). */
+        snprintf(notice, sizeof notice, _("No key table for layout %s; nothing changed."), keymap);
+        return;
+    }
+    if (keys_set_keyboard(kb->id, keymap) < 0) {
+        snprintf(notice, sizeof notice, _("Cannot write %s."), "/etc/locachy/keyboards.conf");
+        return;
+    }
+    keys_reload();
+    kill(1, SIGHUP);
+    signal_programs("locachy-bar", SIGHUP);
+    if (keymap) {
+        /* TRANSLATORS: the first %s is a keyboard's name, the second a keyboard layout's (us). */
+        snprintf(notice, sizeof notice, _("%.60s: layout %s from now on; the boot unlock takes it from the next boot image."), name,
+                 keymap);
+    } else {
+        /* TRANSLATORS: %s is a keyboard's name. */
+        snprintf(notice, sizeof notice, _("%.60s: the system's layout again."), name);
+    }
+}
+
+/* kbd's keymaps for keyboard kb, filtered by what is typed, the system's
+ * first: Enter chooses, Esc goes back. */
+static void pick_keymap(const struct keys_keyboard *kb)
+{
+    static int match[MAX_KEYMAPS + 1];
+    char filter[32] = "", line[256];
+    const char *system = keys_layout_name("console");
+    int sel = -1, top = 0;
+    load_keymap_names();
+    for (;;) {
+        int n = 0, list = 5, height = screen_rows() - list - 2;
+        for (int i = -1; i < nkeymap_names; i++) {
+            if (i < 0 ? filter[0] != '\0' : filter[0] && !strcasestr(keymap_names[i], filter)) continue;
+            if (sel < 0 && (i < 0 ? !kb->own : kb->own && strcmp(keymap_names[i], kb->keymap) == 0)) {
+                sel = n; /* first shown on the one there is */
+            }
+            match[n++] = i;
+        }
+        sel = sel < 0 ? 0 : sel >= n ? (n > 0 ? n - 1 : 0) : sel;
+        top = sel < top ? sel : sel >= top + height ? sel - height + 1 : top;
+        screen_fill(0, 0, screen_cols(), screen_rows(), BG);
+        screen_bar(_("settings"), NULL);
+        /* TRANSLATORS: %s is a keyboard's name; Up/Down/PgUp/PgDn, Enter and Esc are key names; keep them. */
+        snprintf(line, sizeof line, _("Layout of %.60s: type to filter   Up/Down/PgUp/PgDn   Enter: choose   Esc: back"),
+                 kb->name[0] ? kb->name : kb->id);
+        screen_text(2, 2, line, ACCENT, BG);
+        snprintf(line, sizeof line, _("Filter: %s_"), filter);
+        screen_text(2, 3, line, FG, BG);
+        if (n == 0) {
+            screen_text(4, list, _("No layout has that in its name."), DIM, BG);
+        }
+        for (int k = 0; k < height && top + k < n; k++) {
+            int i = match[top + k], on = top + k == sel;
+            int now = i < 0 ? !kb->own : kb->own && strcmp(keymap_names[i], kb->keymap) == 0;
+            char item[96];
+            if (i < 0) {
+                /* TRANSLATORS: %s is the system's keyboard layout (jp106). */
+                snprintf(item, sizeof item, _("The system's: %s"), system ? system : "us");
+            }
+            snprintf(line, sizeof line, "%s%s", i < 0 ? item : keymap_names[i], now ? _("   (now)") : "");
+            screen_fill(0, list + k, screen_cols(), 1, on ? ACCENT : BG);
+            screen_text(4, list + k, line, on ? BG : FG, on ? ACCENT : BG);
+        }
+        screen_flush();
+        int key = key_get();
+        size_t len = strlen(filter);
+        if (key == K_POINTER) {
+            const struct pointer_event *e = pointer_last();
+            if (e->wheel) {
+                sel = sel - 3 * e->wheel < 0 ? 0 : sel - 3 * e->wheel;
+            } else if (e->button == BTN_LEFT && e->pressed && e->row >= list && e->row - list < height &&
+                       top + e->row - list < n) {
+                sel = top + e->row - list;
+                key = e->clicks == 2 ? '\n' : 0;
+            }
+        }
+        if (key == 27) {
+            return;
+        } else if (key == '\n' && n > 0) {
+            set_keyboard_keymap(kb, match[sel] < 0 ? NULL : keymap_names[match[sel]]);
+            return;
+        } else if (key == K_UP && sel > 0) {
+            sel--;
+        } else if (key == K_DOWN && sel < n - 1) {
+            sel++;
+        } else if (key == K_PGUP) {
+            sel = sel > height ? sel - height : 0;
+        } else if (key == K_PGDN) {
+            sel = sel + height < n ? sel + height : n - 1;
+        } else if (key == '\b' && len > 0) {
+            while (len > 1 && ((unsigned char)filter[len - 1] & 0xC0) == 0x80) len--; /* a whole character */
+            filter[len - 1] = '\0';
+            sel = top = 0;
+        } else if (keys_typed(key) && len + strlen(keys_typed(key)) < sizeof filter) {
+            strcat(filter, keys_typed(key));
+            sel = top = 0;
+        }
+    }
+}
+
 __attribute__((weak)) int clipboard_get(int primary, int *fd, size_t *size);
 __attribute__((weak)) int keys_modifiers(void);
 __attribute__((weak)) const struct pointer_event *pointer_last(void);
@@ -3126,6 +3392,10 @@ struct arrangement_hit {
 static struct arrangement_hit arrangement_hits[MAX_MONITORS * 2 + 5];
 static int narrangement_hits, arrangement_selected = -1, arrangement_button;
 static int arrangement_pointer_col, arrangement_pointer_row, arrangement_pointer_seen;
+static int arrangement_drag = -1, arrangement_drag_col, arrangement_drag_row, arrangement_drag_x, arrangement_drag_y;
+static int arrangement_drag_moved, arrangement_min_x, arrangement_min_y;
+static double arrangement_factor = 1;
+static struct monitor arrangement_before_drag[MAX_MONITORS];
 
 static int arrangement_rects(struct monitor_rect *rects, int *indices)
 {
@@ -3139,7 +3409,8 @@ static int arrangement_rects(struct monitor_rect *rects, int *indices)
         double scale = m->scale > 0 ? m->scale : 1.0;
         rects[n] = (struct monitor_rect){ .name = m->name,
             .width = (int)(width / scale), .height = (int)(height / scale),
-            .place = i == anchor ? MONITOR_ORIGIN : m->place };
+            .place = i == anchor ? MONITOR_ORIGIN : m->place,
+            .has_position = m->has_position, .x = m->x, .y = m->y };
         indices[n++] = i;
     }
     monitor_layout(rects, (size_t)n);
@@ -3148,10 +3419,10 @@ static int arrangement_rects(struct monitor_rect *rects, int *indices)
 
 static void arrangement_select(int direction)
 {
-    int anchor = monitor_anchor(), best = -1;
+    int best = -1;
     const char *name = arrangement_selected >= 0 ? monitors[arrangement_selected].name : "";
     for (int i = 0; i < nmonitors; i++) {
-        if (i == anchor || !m_is_connected(&monitors[i])) continue;
+        if (!m_is_connected(&monitors[i])) continue;
         int cmp = strcmp(monitors[i].name, name);
         if ((direction > 0 && cmp > 0) || (direction < 0 && cmp < 0)) {
             if (best < 0 || (direction > 0 ? strcmp(monitors[i].name, monitors[best].name) < 0 :
@@ -3160,7 +3431,7 @@ static void arrangement_select(int direction)
     }
     if (best < 0) {
         for (int i = 0; i < nmonitors; i++) {
-            if (i == anchor || !m_is_connected(&monitors[i])) continue;
+            if (!m_is_connected(&monitors[i])) continue;
             if (best < 0 || (direction > 0 ? strcmp(monitors[i].name, monitors[best].name) < 0 :
                                              strcmp(monitors[i].name, monitors[best].name) > 0)) best = i;
         }
@@ -3172,9 +3443,118 @@ static void arrangement_apply(void)
 {
     int i = arrangement_selected;
     if (i < 0 || i >= nmonitors || i == monitor_anchor() || !m_is_connected(&monitors[i])) return;
-    int previous = monitors[i].place;
+    struct monitor previous = monitors[i];
     monitors[i].place = arrangement_button;
-    if (!monitor_saved()) monitors[i].place = previous;
+    monitors[i].has_position = 0;
+    if (!monitor_saved()) monitors[i] = previous;
+}
+
+static void arrangement_materialize(void)
+{
+    struct monitor_rect rects[MAX_MONITORS];
+    int indices[MAX_MONITORS], n = arrangement_rects(rects, indices);
+    for (int i = 0; i < n; i++) {
+        struct monitor *m = &monitors[indices[i]];
+        m->has_position = 1;
+        m->x = rects[i].x;
+        m->y = rects[i].y;
+    }
+}
+
+static int arrangement_coordinate(int value)
+{
+    return value < -65536 ? -65536 : value > 65536 ? 65536 : value;
+}
+
+static void arrangement_move(int dx, int dy)
+{
+    if (arrangement_selected < 0) return;
+    struct monitor previous[MAX_MONITORS];
+    memcpy(previous, monitors, sizeof previous);
+    arrangement_materialize();
+    struct monitor *m = &monitors[arrangement_selected];
+    m->x = arrangement_coordinate(m->x + dx);
+    m->y = arrangement_coordinate(m->y + dy);
+    if (!monitor_saved()) memcpy(monitors, previous, sizeof previous);
+}
+
+static void arrangement_position(void)
+{
+    if (arrangement_selected < 0) return;
+    struct monitor previous[MAX_MONITORS];
+    memcpy(previous, monitors, sizeof previous);
+    arrangement_materialize();
+    struct monitor *m = &monitors[arrangement_selected];
+    char value[64];
+    snprintf(value, sizeof value, "%d,%d", m->x, m->y);
+    int x, y, end = 0;
+    if (!prompt(_("Position X,Y (logical pixels): "), value, sizeof value)) {
+        memcpy(monitors, previous, sizeof previous);
+        return;
+    }
+    if (sscanf(value, "%d,%d%n", &x, &y, &end) != 2 || value[end] ||
+        x < -65536 || x > 65536 || y < -65536 || y > 65536) {
+        memcpy(monitors, previous, sizeof previous);
+        snprintf(notice, sizeof notice, "%s", _("Enter X,Y coordinates between -65536 and 65536."));
+        return;
+    }
+    m->x = x;
+    m->y = y;
+    if (!monitor_saved()) memcpy(monitors, previous, sizeof previous);
+}
+
+/* Snapping while a screen is dragged, as KDE's display settings have it
+ * (kscreen's output model): within 80 logical pixels an edge meets a
+ * neighbour's edge or lines up with it (and centres line up); two screens
+ * always touch, and a drag that would leave them meeting only at a corner
+ * keeps the screen where it was. Exact X,Y and the arrow keys do not snap. */
+#define ARRANGEMENT_SNAP 80
+
+static int snap_axis(int t_pos, int t_len, int len, int *pos)
+{
+    if (abs(t_pos + t_len - *pos) < ARRANGEMENT_SNAP) { *pos = t_pos + t_len; return 1; }       /* after it */
+    if (abs(t_pos + t_len - (*pos + len)) < ARRANGEMENT_SNAP) { *pos = t_pos + t_len - len; return 1; } /* ends */
+    if (abs(t_pos - *pos) < ARRANGEMENT_SNAP) { *pos = t_pos; return 1; }                        /* starts */
+    if (abs(t_pos - (*pos + len)) < ARRANGEMENT_SNAP) { *pos = t_pos - len; return 1; }          /* before it */
+    return 0;
+}
+
+static int snap_vertical(const struct monitor_rect *t, int height, int *y)
+{
+    if (snap_axis(t->y, t->height, height, y)) return 1;
+    int middle = t->y + t->height / 2;
+    if (abs(middle - (*y + height / 2)) < ARRANGEMENT_SNAP) { *y = middle - height / 2; return 1; }
+    return 0;
+}
+
+/* Screen self of rects (at was, its position before this move) going to x,y. */
+static void arrangement_snap(const struct monitor_rect *rects, int n, int self, int was_x, int was_y, int *x, int *y)
+{
+    int width = rects[self].width, height = rects[self].height;
+    if (n == 2) {
+        const struct monitor_rect *t = &rects[1 - self];
+        int x_overlap = *x <= t->x + t->width && t->x <= *x + width;
+        int y_overlap = *y <= t->y + t->height && t->y <= *y + height;
+        if (x_overlap) {
+            *y = abs(*y - t->y - t->height) < abs(*y + height - t->y) ? t->y + t->height : t->y - height;
+            snap_axis(t->x, t->width, width, x);
+        } else if (y_overlap) {
+            *x = abs(*x - t->x - t->width) < abs(*x + width - t->x) ? t->x + t->width : t->x - width;
+            snap_vertical(t, height, y);
+        } else {
+            *x = was_x;
+            *y = was_y;
+        }
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        const struct monitor_rect *t = &rects[i];
+        if (i == self || *y - (t->y + t->height) > ARRANGEMENT_SNAP || t->y - (*y + height) > ARRANGEMENT_SNAP) {
+            continue; /* not near it vertically */
+        }
+        snap_axis(t->x, t->width, width, x); /* beside it, or lined up with it */
+        snap_vertical(t, height, y);
+    }
 }
 
 static void arrangement_hit(int x, int y, int width, int height, int monitor, int button)
@@ -3197,8 +3577,9 @@ static void arrangement_draw(void)
     char line[160];
     if (arrangement_selected >= 0) {
         struct monitor *m = &monitors[arrangement_selected];
-        snprintf(line, sizeof line, _("Selected: %.31s  %s of %.31s"), m->name,
-                 _(place_labels[m->place]), anchor >= 0 ? monitors[anchor].name : _("origin"));
+        if (m->has_position) snprintf(line, sizeof line, _("Selected: %.31s  X %d  Y %d"), m->name, m->x, m->y);
+        else snprintf(line, sizeof line, _("Selected: %.31s  %s of %.31s"), m->name,
+                      _(place_labels[m->place]), anchor >= 0 ? monitors[anchor].name : _("origin"));
     } else {
         snprintf(line, sizeof line, "%s", n ? _("No external screens connected") : _("No screens connected"));
     }
@@ -3219,16 +3600,31 @@ static void arrangement_draw(void)
         screen_text(1, 4, line, FG, BG);
     }
     if (preview_height >= 3 && preview_width >= 8 && n) {
-        int width = 1, height = 1;
-        for (int i = 0; i < n; i++) {
-            if (rects[i].x + rects[i].width > width) width = rects[i].x + rects[i].width;
-            if (rects[i].y + rects[i].height > height) height = rects[i].y + rects[i].height;
+        int min_x = rects[0].x, min_y = rects[0].y;
+        int max_x = rects[0].x + rects[0].width, max_y = rects[0].y + rects[0].height;
+        for (int i = 1; i < n; i++) {
+            if (rects[i].x < min_x) min_x = rects[i].x;
+            if (rects[i].y < min_y) min_y = rects[i].y;
+            if (rects[i].x + rects[i].width > max_x) max_x = rects[i].x + rects[i].width;
+            if (rects[i].y + rects[i].height > max_y) max_y = rects[i].y + rects[i].height;
         }
+        int width = max_x - min_x, height = max_y - min_y;
+        if (width < 1) width = 1;
+        if (height < 1) height = 1;
         double factor = (double)preview_width / width;
         /* Character cells are about twice as tall as they are wide. */
         if ((double)preview_height * 2 / height < factor) factor = (double)preview_height * 2 / height;
+        if (arrangement_drag < 0) {
+            arrangement_factor = factor;
+            arrangement_min_x = min_x;
+            arrangement_min_y = min_y;
+        } else {
+            factor = arrangement_factor;
+            min_x = arrangement_min_x;
+            min_y = arrangement_min_y;
+        }
         for (int i = 0; i < n; i++) {
-            int x = 1 + (int)(rects[i].x * factor), y = 5 + (int)(rects[i].y * factor / 2);
+            int x = 1 + (int)((rects[i].x - min_x) * factor), y = 5 + (int)((rects[i].y - min_y) * factor / 2);
             int w = (int)(rects[i].width * factor), h = (int)(rects[i].height * factor / 2);
             if (w < 1) w = 1;
             if (h < 1) h = 1;
@@ -3270,8 +3666,8 @@ static void arrangement_draw(void)
         button_x += len + 1;
     }
     /* TRANSLATORS: Enter and Esc are key names; keep them. */
-    screen_text(1, rows - 3, cols < 44 ? _("Enter: apply  Esc: back") :
-                _("Arrows: select  Enter: apply  Esc: back"), FG, BG);
+    screen_text(1, rows - 3, cols < 44 ? _("Drag; p: X,Y; Esc: back") :
+                _("Drag: move  p: X,Y  Hold Shift and arrows: move  Enter: preset  Esc: back"), FG, BG);
     screen_text(1, rows - 2, _(notice), ACCENT, BG);
     screen_flush();
 }
@@ -3282,15 +3678,55 @@ static int arrangement_pointer(const struct pointer_event *event)
     arrangement_pointer_col = event->col;
     arrangement_pointer_row = event->row;
     arrangement_pointer_seen = 1;
+    if (arrangement_drag >= 0) {
+        struct monitor *m = &monitors[arrangement_drag];
+        int dx = arrangement_pointer_col - arrangement_drag_col;
+        int dy = arrangement_pointer_row - arrangement_drag_row;
+        if (dx || dy) {
+            arrangement_drag_moved = 1;
+            double move_x = dx / arrangement_factor, move_y = dy * 2.0 / arrangement_factor;
+            if (move_x < -131072) move_x = -131072;
+            if (move_x > 131072) move_x = 131072;
+            if (move_y < -131072) move_y = -131072;
+            if (move_y > 131072) move_y = 131072;
+            int x = arrangement_coordinate(arrangement_drag_x + (int)move_x);
+            int y = arrangement_coordinate(arrangement_drag_y + (int)move_y);
+            struct monitor_rect rects[MAX_MONITORS];
+            int indices[MAX_MONITORS], n = arrangement_rects(rects, indices), self = -1;
+            for (int i = 0; i < n; i++) {
+                if (indices[i] == arrangement_drag) self = i;
+            }
+            if (self >= 0) arrangement_snap(rects, n, self, m->x, m->y, &x, &y);
+            m->x = x;
+            m->y = y;
+        }
+        if (event->button == BTN_LEFT && !event->pressed) {
+            arrangement_drag = -1;
+            if (arrangement_drag_moved) {
+                if (!monitor_saved()) memcpy(monitors, arrangement_before_drag, sizeof monitors);
+            } else {
+                memcpy(monitors, arrangement_before_drag, sizeof monitors);
+            }
+        }
+        return 1;
+    }
     if (event->button != BTN_LEFT || !event->pressed) return 0;
-    for (int i = 0; i < narrangement_hits; i++) {
+    for (int i = narrangement_hits - 1; i >= 0; i--) {
         struct arrangement_hit *h = &arrangement_hits[i];
         if (arrangement_pointer_col < h->x || arrangement_pointer_col >= h->x + h->width ||
             arrangement_pointer_row < h->y || arrangement_pointer_row >= h->y + h->height) continue;
-        if (h->monitor >= 0 && h->monitor != monitor_anchor()) {
+        if (h->monitor >= 0) {
             arrangement_selected = h->monitor;
             arrangement_button = monitors[h->monitor].place;
             if (arrangement_button > MONITOR_BELOW) arrangement_button = MONITOR_RIGHT;
+            memcpy(arrangement_before_drag, monitors, sizeof monitors);
+            arrangement_materialize();
+            arrangement_drag = h->monitor;
+            arrangement_drag_col = event->col;
+            arrangement_drag_row = event->row;
+            arrangement_drag_x = monitors[h->monitor].x;
+            arrangement_drag_y = monitors[h->monitor].y;
+            arrangement_drag_moved = 0;
         } else if (h->button >= 0) {
             arrangement_button = h->button;
             arrangement_apply();
@@ -3302,8 +3738,20 @@ static int arrangement_pointer(const struct pointer_event *event)
 
 static int arrangement_key(int key)
 {
-    if (key == 27 || key == 'q') return 0;
-    if (key == K_UP || key == K_DOWN) {
+    if (key == 27 || key == 'q') {
+        if (arrangement_drag >= 0) {
+            memcpy(monitors, arrangement_before_drag, sizeof monitors);
+            arrangement_drag = -1;
+            return 1;
+        }
+        return 0;
+    }
+    if (key == 'p') arrangement_position();
+    else if ((keys_modifiers() & KEYS_SHIFT) && (key == K_UP || key == K_DOWN || key == K_LEFT || key == K_RIGHT)) {
+        int step = keys_modifiers() & KEYS_CTRL ? 1 : 10;
+        arrangement_move(key == K_LEFT ? -step : key == K_RIGHT ? step : 0,
+                         key == K_UP ? -step : key == K_DOWN ? step : 0);
+    } else if (key == K_UP || key == K_DOWN) {
         arrangement_select(key == K_DOWN ? 1 : -1);
         if (arrangement_selected >= 0) {
             arrangement_button = monitors[arrangement_selected].place;
@@ -3318,11 +3766,15 @@ static int arrangement_key(int key)
 static void arrange_screens(void)
 {
     arrangement_pointer_seen = 0;
+    arrangement_drag = -1;
     arrangement_selected = -1;
-    arrangement_select(1);
+    for (int i = 0; i < nmonitors; i++) {
+        if (i != monitor_anchor() && m_is_connected(&monitors[i])) { arrangement_selected = i; break; }
+    }
+    if (arrangement_selected < 0) arrangement_select(1);
     arrangement_button = arrangement_selected >= 0 ? monitors[arrangement_selected].place : MONITOR_RIGHT;
     if (arrangement_button > MONITOR_BELOW) arrangement_button = MONITOR_RIGHT;
-    snprintf(notice, sizeof notice, "%s", _("Text programs mirror; this layout is for the shared graphical display."));
+    snprintf(notice, sizeof notice, "%s", _("Drag a screen to position it; p edits its exact X,Y coordinates."));
     arrangement_draw();
     for (;;) {
         int key = key_poll_timeout(-1, 1000);
@@ -3331,13 +3783,13 @@ static void arrange_screens(void)
             continue;
         }
         if (!arrangement_key(key)) return;
-        if (key == 0 || key == K_SHOWN) {
+        if ((key == 0 || key == K_SHOWN) && arrangement_drag < 0) {
             char name[32] = "";
             if (arrangement_selected >= 0) snprintf(name, sizeof name, "%s", monitors[arrangement_selected].name);
             load_monitors();
             arrangement_selected = -1;
             for (int i = 0; i < nmonitors; i++) {
-                if (i != monitor_anchor() && m_is_connected(&monitors[i]) && strcmp(monitors[i].name, name) == 0)
+                if (m_is_connected(&monitors[i]) && strcmp(monitors[i].name, name) == 0)
                     arrangement_selected = i;
             }
             if (arrangement_selected < 0) arrangement_select(1);
@@ -3380,6 +3832,8 @@ static int nrow_maps;
 
 static void build_row_maps(void)
 {
+    /* The keyboards' rows come and go with them, as the screens' do. */
+    nkeyboards_seen = keys_keyboards(keyboards_seen, MAX_KEYBOARD_ROWS);
     nrow_maps = 0;
     for (int i = 0; i < nmonitors; i++) {
         struct monitor *m = &monitors[i];
@@ -3447,10 +3901,11 @@ static void category_entries(int cat)
     case CAT_INPUT:
         add_title(_("Mouse & Touchpad"));
         add_items(0, tp_present ? 4 : 1);
-        add_items(circ_index(), 1);
+        add_items(circ_index(), 3);
         add_title(_("Keyboard"));
         add_items(ime_index(), 2);
         add_items(imek_index(), NIME_KEYS);
+        add_items(kb_index(), nkeyboards_seen);
         add_title(_("Display & Monitor"));
         add_items(bri_index(), 1);
         add_items(hw, 1 + nrow_maps);
@@ -3514,10 +3969,8 @@ static void category_entries(int cat)
         add_items(upd_index(), 2);
         add_title(_("Software Sources"));
         add_items(repo_index(), NREPO_SECTIONS + 1);
-        if (repo_level[0]) {
+        if (repo_stack[0]) {
             char note[128];
-            snprintf(note, sizeof note, _("Packages for %s; own builds for %s. In order:"), repo_level, repo_cpu);
-            add_entry(E_NOTE, note);
             /* The stack, a line of names at a time. */
             for (const char *p = repo_stack; *p;) {
                 int n = 0;
@@ -3881,15 +4334,148 @@ static void change_boot_cmdline(void)
     make_boot_image();
 }
 
+struct machine_cell { int index, col, row, width; };
+static struct machine_cell machine_cells[MAX_MACHINES];
+static int nmachine_cells;
+
+static int machine_columns(void)
+{
+    int n = (screen_cols() - 4) / 26;
+    return n < 1 ? 1 : n > 5 ? 5 : n;
+}
+
+static int machine_grid(const int *match, int n)
+{
+    int columns = machine_columns(), width = (screen_cols() - 4) / columns;
+    int row = 0, column = 0;
+    const char *brand = NULL;
+    nmachine_cells = 0;
+    for (int k = 0; k < n; k++) {
+        int i = match[k];
+        if (!brand || strcmp(brand, machine_brands[i])) {
+            if (column) row++;
+            row++;
+            column = 0;
+            brand = machine_brands[i];
+        }
+        machine_cells[nmachine_cells++] = (struct machine_cell){ i, 2 + column * width, row, width };
+        if (++column == columns) { column = 0; row++; }
+    }
+    return row + (column != 0);
+}
+
+static int machine_next(int at, int key)
+{
+    if (key == K_LEFT) return at > 0 ? at - 1 : at;
+    if (key == K_RIGHT) return at + 1 < nmachine_cells ? at + 1 : at;
+    int direction = key == K_UP || key == K_PGUP ? -1 : 1, best = at, distance = INT_MAX;
+    for (int k = at + direction; k >= 0 && k < nmachine_cells; k += direction) {
+        if (machine_cells[k].row == machine_cells[at].row) continue;
+        int d = abs(machine_cells[k].row - machine_cells[at].row) * screen_cols() +
+                abs(machine_cells[k].col - machine_cells[at].col);
+        if (d < distance) { best = k; distance = d; }
+    }
+    return best;
+}
+
+static void choose_machine(int i)
+{
+    const char *value = machine_profiles[i][0] ? machine_profiles[i] : NULL;
+    if (rc_set("machine", value) < 0) {
+        snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+        return;
+    }
+    snprintf(active_machine, sizeof active_machine, "%s", value ? value : "");
+    rc_read(on_rc, NULL);
+    load_monitors();
+    apply_all();
+    kill(1, SIGHUP);
+    snprintf(notice, sizeof notice, _("Machine profile: %s."), machine_labels[i]);
+}
+
+static void pick_machine(void)
+{
+    int match[MAX_MACHINES], sel = 0, top = 0;
+    char filter[64] = "", line[256];
+    find_machines();
+    int chosen = current_machine_index();
+    for (;;) {
+        int n = 0, height = screen_rows() - 9;
+        if (height < 1) height = 1;
+        for (int i = 0; i < nmachines; i++) {
+            if (!filter[0] || strcasestr(machine_profiles[i], filter) || strcasestr(machine_labels[i], filter) ||
+                strcasestr(machine_brands[i], filter)) {
+                if (i == chosen) sel = n;
+                match[n++] = i;
+            }
+        }
+        if (sel >= n) sel = n ? n - 1 : 0;
+        machine_grid(match, n);
+        if (n && machine_cells[sel].row < top) top = machine_cells[sel].row;
+        if (n && machine_cells[sel].row >= top + height) top = machine_cells[sel].row - height + 1;
+        screen_fill(0, 0, screen_cols(), screen_rows(), BG);
+        screen_bar(_("settings"), NULL);
+        ui_hits_clear();
+        screen_text(2, 2, _("Machine profile: arrows to select; Enter: apply; Esc: back"), ACCENT, BG);
+        snprintf(line, sizeof line, _("Filter: %s_"), filter);
+        screen_text(2, 3, line, FG, BG);
+        const char *brand = NULL;
+        for (int k = 0; k < n; k++) {
+            struct machine_cell *c = &machine_cells[k];
+            int row = 5 + c->row - top, i = c->index;
+            if (!brand || strcmp(brand, machine_brands[i])) {
+                if (row - 1 >= 5 && row - 1 < 5 + height) screen_text(2, row - 1, machine_brands[i], ACCENT, BG);
+                brand = machine_brands[i];
+            }
+            if (row < 5 || row >= 5 + height) continue;
+            int current = strcmp(active_machine, machine_profiles[i]) == 0;
+            snprintf(line, sizeof line, "[%c] %.*s", current ? '*' : ' ', c->width > 6 ? c->width - 6 : 0,
+                     i ? machine_profiles[i] : _("generic PC"));
+            screen_fill(c->col, row, c->width - 1, 1, k == sel ? ACCENT : BG);
+            screen_text(c->col, row, line, k == sel ? BG : FG, k == sel ? ACCENT : BG);
+            ui_hit(c->col, row, c->width - 1, 1, k);
+        }
+        if (!n) screen_text(2, 5, _("No matching machine profile."), DIM, BG);
+        if (n) screen_text(2, screen_rows() - 3, machine_labels[match[sel]], FG, BG);
+        screen_flush();
+        int key = key_get();
+        if (key == K_POINTER) {
+            const struct pointer_event *e = pointer_last();
+            if (e->wheel && n) sel = machine_next(sel, e->wheel > 0 ? K_UP : K_DOWN);
+            else if (e->button == BTN_LEFT && e->pressed) {
+                int hit = ui_hit_at(e->col, e->row);
+                if (hit >= 0 && hit < n) { sel = hit; if (e->clicks == 2) key = '\n'; }
+            }
+        }
+        if (key == 27 || key == K_SHOWN) return;
+        if (key == '\n' && n) { choose_machine(match[sel]); return; }
+        if (n && (key == K_LEFT || key == K_RIGHT || key == K_UP || key == K_DOWN)) sel = machine_next(sel, key);
+        else if (n && (key == K_PGUP || key == K_PGDN)) {
+            for (int step = 0; step < height; step++) sel = machine_next(sel, key);
+        } else if (key == K_BOL) sel = 0;
+        else if (key == K_EOL && n) sel = n - 1;
+        else if ((key == '\b' || key == 127) && filter[0]) {
+            size_t len = strlen(filter);
+            while (len > 1 && ((unsigned char)filter[len - 1] & 0xC0) == 0x80) len--;
+            filter[len - 1] = '\0'; sel = top = 0;
+        }
+        else if (keys_typed(key) && strlen(filter) + strlen(keys_typed(key)) < sizeof filter) {
+            strcat(filter, keys_typed(key)); sel = top = 0;
+        }
+        chosen = -1;
+    }
+}
+
 static int enter_row(int idx)
 {
     return idx == num_hw_items() || idx == cl_index() + 2 || idx == tr_index() + 2 || idx == bt_index() + 2 ||
-           idx == wp_index() || idx == tk_index() || idx == host_index() || idx == upd_index() || idx == upd_index() + 1 ||
+           idx == wp_index() || idx == tk_index() || idx == host_index() || idx == mach_index() || idx == upd_index() || idx == upd_index() + 1 ||
            idx == boot_index() + 1 || idx == boot_index() + 2 || idx == boot_index() + 3 ||
            idx == repo_index() + NREPO_SECTIONS ||
            idx == sec_index() || idx == sec_index() + 2 || idx == fp_index() + 3 || idx == fc_index() + 4 || idx == fc_index() + 5 ||
            idx == fc_index() + 6 || idx == rclone_index() + 2 || idx == tpm_index() ||
-           idx == tz_index() || idx == tz_index() + 2 || (idx >= imek_index() && idx < imek_index() + NIME_KEYS);
+           idx == tz_index() || idx == tz_index() + 2 || (idx >= imek_index() && idx < imek_index() + NIME_KEYS) ||
+           (idx >= kb_index() && idx < kb_index() + nkeyboards_seen);
 }
 
 /* What a pointer event does, as a key: on the sidebar a click opens that
@@ -4105,6 +4691,22 @@ static void item_text(int idx, char *line, size_t size)
                  ime_keys[i][0] ? ime_keys[i] : _("none"));
         return;
     }
+    if ((i = idx - kb_index()) >= 0 && i < nkeyboards_seen) {
+        const struct keys_keyboard *kb = &keyboards_seen[i];
+        char what[160];
+        if (!kb->own) {
+            /* TRANSLATORS: %s is a keyboard layout's name (jp106, a console keymap's). */
+            snprintf(what, sizeof what, _("%s, the system's"), kb->keymap[0] ? kb->keymap : "us");
+        } else if (kb->missing) {
+            /* TRANSLATORS: %s is a keyboard layout's name (us, a console keymap's). */
+            snprintf(what, sizeof what, _("%s, its own: no key table, types as the system's"), kb->keymap);
+        } else {
+            /* TRANSLATORS: %s is a keyboard layout's name (us, a console keymap's). */
+            snprintf(what, sizeof what, _("%s, its own"), kb->keymap);
+        }
+        snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, kb->name[0] ? kb->name : kb->id, 32), what);
+        return;
+    }
     if (idx == tk_index()) {
         snprintf(line, size, "%.95s %s%s", ui_pad(label, sizeof label, _("Terminal key (shared display)"), 32),
                  terminal_key[0] ? terminal_key : _("none"), open_host("foot") ? "" : _("  (foot is not installed)"));
@@ -4312,7 +4914,8 @@ static void item_text(int idx, char *line, size_t size)
         if (!nmachines) find_machines();
         int mi = current_machine_index();
         const char *mval = mi > 0 ? machine_profiles[mi] : (active_machine[0] ? active_machine : _("generic PC"));
-        snprintf(line, size, "%.95s < %.60s >", ui_pad(label, sizeof label, _("Machine profile"), 32), mval);
+        snprintf(line, size, "%.95s %.60s  %s", ui_pad(label, sizeof label, _("Machine profile"), 32), mval,
+                 _("Enter: choose"));
         return;
     }
     if ((i = idx - upd_index()) >= 0 && i < 2) {
@@ -4366,6 +4969,14 @@ static void item_text(int idx, char *line, size_t size)
     if (idx == circ_index()) {
         snprintf(line, size, "%.95s < %s >", ui_pad(label, sizeof label, _("Touchpad Circular Scrolling"), 32),
                  circular > 0 ? _("on") : circular == 0 ? _("off") : _("round touchpads"));
+        return;
+    }
+    if (idx == circ_index() + 1 || idx == circ_index() + 2) {
+        int width = idx == circ_index() + 1;
+        snprintf(vbuf, sizeof vbuf, width ? "< %d >" : "< %d ms >",
+                 width ? circular_width : circular_delay);
+        snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label,
+                 width ? _("Edge activation range") : _("Edge activation dwell"), 30), vbuf);
         return;
     }
     if ((i = idx - repo_index()) >= 0 && i <= NREPO_SECTIONS) {
@@ -5001,19 +5612,7 @@ static void adjust(int dir)
         return;
     }
     if (selected == mach_index()) {
-        if (!nmachines) find_machines();
-        int next = (current_machine_index() + (dir < 0 ? nmachines - 1 : 1)) % nmachines;
-        const char *val = next ? machine_profiles[next] : NULL;
-        if (rc_set("machine", val) < 0) {
-            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
-            return;
-        }
-        snprintf(active_machine, sizeof active_machine, "%s", val ? val : "");
-        rc_read(on_rc, NULL);
-        load_monitors();
-        apply_all();
-        kill(1, SIGHUP);
-        snprintf(notice, sizeof notice, _("Machine profile: %s."), val ? val : _("generic PC"));
+        snprintf(notice, sizeof notice, "%s", _("Enter: choose a machine profile by brand."));
         return;
     }
     if (selected == upd_index() || selected == upd_index() + 1) {
@@ -5064,6 +5663,34 @@ static void adjust(int dir)
         term_net = !term_net;
         snprintf(notice, sizeof notice, "%s", term_net ? _("The terminal's shell is on the network from its next start.") :
                  _("The terminal's shell has no network from its next start."));
+        return;
+    }
+    if (selected == circ_index() + 1 || selected == circ_index() + 2) {
+        int width = selected == circ_index() + 1;
+        int previous = width ? circular_width : circular_delay;
+        int was_set = width ? circular_width_set : circular_delay_set;
+        int next = previous + (width ? 1 : 50) * dir;
+        int min = width ? 1 : 0, max = width ? 50 : 2000;
+        if (next < min) next = min;
+        if (next > max) next = max;
+        char value[24];
+        snprintf(value, sizeof value, "%d", next);
+        const char *key = width ? "touchpad_circular_width" : "touchpad_circular_dwell";
+        if (rc_set(key, value) < 0) {
+            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+            return;
+        }
+        if (width) { circular_width = next; circular_width_set = 1; }
+        else { circular_delay = next; circular_delay_set = 1; }
+        if (apply_circular() < 0) {
+            if (width) { circular_width = previous; circular_width_set = was_set; }
+            else { circular_delay = previous; circular_delay_set = was_set; }
+            snprintf(value, sizeof value, "%d", previous);
+            rc_set(key, was_set ? value : NULL);
+            snprintf(notice, sizeof notice, _("Cannot write %s."), LOCAL_QUIRKS);
+        } else {
+            snprintf(notice, sizeof notice, "%s", _("Saved in libinput; applies when the pointer context next opens."));
+        }
         return;
     }
     if (selected == circ_index()) {
@@ -5395,8 +6022,17 @@ int main(int argc, char **argv)
                 snprintf(notice, sizeof notice, _("%s: none, saved and applied."), _(ime_key_labels[k]));
             }
             draw();
+        } else if (key == '\n' && selected >= kb_index() && selected < kb_index() + nkeyboards_seen) {
+            pick_keymap(&keyboards_seen[selected - kb_index()]);
+            draw();
+        } else if (key == K_DEL && selected >= kb_index() && selected < kb_index() + nkeyboards_seen) {
+            set_keyboard_keymap(&keyboards_seen[selected - kb_index()], NULL);
+            draw();
         } else if (key == '\n' && selected == sec_index()) {
             change_password();
+            draw();
+        } else if (key == '\n' && selected == mach_index()) {
+            pick_machine();
             draw();
         } else if (key == '\n' && selected == host_index()) {
             change_hostname();

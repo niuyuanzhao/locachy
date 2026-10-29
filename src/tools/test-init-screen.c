@@ -50,7 +50,7 @@ static void frame(struct frame *f, const char *name, const char *dir, int *peer)
     *peer = pair[1];
     f->pid = 1000;
     snprintf(f->name, sizeof f->name, "%s", name);
-    snprintf(f->cgroup, sizeof f->cgroup, "%s/%s", dir, name);
+    assert(snprintf(f->cgroup, sizeof f->cgroup, "%s/%s", dir, name) < (int)sizeof f->cgroup);
     assert(mkdir(f->cgroup, 0700) == 0);
     snprintf(path, sizeof path, "%s/cgroup.events", f->cgroup);
     FILE *events = fopen(path, "w");

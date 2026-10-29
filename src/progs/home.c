@@ -64,6 +64,9 @@ static double refresh_at;
 static enum confirmation confirming;
 static char **stop_names;
 static int nstop, stop_program;
+#define HOME_OUTPUTS 32
+static int home_output, draw_first, draw_limit = -1, total_capacity;
+static int output_first[HOME_OUTPUTS], output_capacity[HOME_OUTPUTS];
 
 /* One program_NAME="PATH ARGS" setting of rc.conf. */
 static void program(const char *name, const char *value, void *arg)
@@ -382,13 +385,65 @@ static void wrapped(int row, int lines, const char *s, uint32_t color)
 
 static int footer_rows(void)
 {
-    return screen_rows() >= 14 ? 7 : 4;
+    return 4;
 }
 
 static int visible_rows(void)
 {
     int n = screen_rows() - footer_rows() - 3;
     return n > 0 ? n : 1;
+}
+
+static int grid_columns(void)
+{
+    int n = (screen_cols() - 2) / 26;
+    return n < 1 ? 1 : n > 5 ? 5 : n;
+}
+
+static int grid_width(void)
+{
+    int n = (screen_cols() - 2) / grid_columns();
+    return n > 0 ? n : 1;
+}
+
+static int grid_visible(void)
+{
+    int n = visible_rows() / 3;
+    return n > 0 ? n : 1;
+}
+
+static void grid_text(int col, int row, const char *s, uint32_t fg, uint32_t bg)
+{
+    char out[512];
+    size_t n = 0;
+    int cells = 0, width = grid_width() - 2;
+    const unsigned char *p = (const unsigned char *)s;
+    while (*p && n + 5 < sizeof out) {
+        const unsigned char *start = p;
+        unsigned char b = *p++;
+        int more = b < 0x80 ? 0 : (b & 0xE0) == 0xC0 ? 1 : (b & 0xF0) == 0xE0 ? 2 : 3;
+        uint32_t cp = b & (0x7Fu >> more);
+        for (; more && (*p & 0xC0) == 0x80; more--) cp = cp << 6 | (*p++ & 0x3F);
+        int w = screen_char_cells(cp);
+        if (cells + w > width) break;
+        memcpy(out + n, start, (size_t)(p - start));
+        n += (size_t)(p - start);
+        cells += w;
+    }
+    out[n] = '\0';
+    text(col, row, out, fg, bg);
+}
+
+static void move_selection(int key)
+{
+    int columns = grid_columns(), last_item = napps + nentries + 1;
+    int step = key == K_PGUP || key == K_PGDN ? grid_visible() * columns :
+               key == K_UP || key == K_DOWN ? columns : 1;
+    if (key == K_BOL) selected = 0;
+    else if (key == K_EOL) selected = last_item;
+    else selected += key == K_UP || key == K_LEFT || key == K_PGUP ? -step : step;
+    if (selected < 0) selected = 0;
+    if (selected > last_item) selected = last_item;
 }
 
 static const struct app *error_app(void)
@@ -405,31 +460,12 @@ static const struct app *error_app(void)
     return NULL;
 }
 
-/* Right-aligned in cells spaces (like %*s, but counting display cells). */
-static const char *pad_right(char *out, size_t size, const char *s, int cells)
-{
-    int pad = cells - ui_cells(s);
-    int n = 0;
-    while (pad-- > 0 && (size_t)n + 1 < size) {
-        out[n++] = ' ';
-    }
-    snprintf(out + n, size - (size_t)n, "%s", s);
-    return out;
-}
-
 /* ready also tells the log that home waits for keys (drive.py's prompt). */
-static void draw(int ready)
+static void draw_output(int ready)
 {
     char line[1024], state[200], failure[1024] = "";
-    char col_c[96], col_s[64], col_r[64], col_w[64];
     int cols = screen_cols(), rows = screen_rows();
     int footer = rows - footer_rows(), visible = visible_rows();
-    int name_width = cols - 33;
-    if (name_width < 1) {
-        name_width = 1;
-    } else if (name_width > 48) {
-        name_width = 48;
-    }
     if (cols > 0 && rows > 0) {
         screen_fill(0, 0, cols, rows, BG);
     }
@@ -469,59 +505,40 @@ static void draw(int ready)
             }
         }
     } else {
-        snprintf(line, sizeof line, "    %s %s %s %s",
-                 ui_pad(col_c, sizeof col_c, _("Container"), name_width),
-                 ui_pad(col_s, sizeof col_s, _("State"), 8),
-                 pad_right(col_r, sizeof col_r, _("RAM MiB"), 8),
-                 pad_right(col_w, sizeof col_w, _("Swap MiB"), 8));
-        text(1, 2, line, FG, BG);
-        int focus = selected + (selected >= napps);
-        int total = napps + nentries + 3;
-        if (scroll > focus) {
-            scroll = focus;
+        int columns = grid_columns(), width = grid_width(), shown = grid_visible();
+        int first = draw_first, end = draw_limit >= 0 ? draw_limit : napps + nentries + 2;
+        if (draw_limit < 0) {
+            int focus = selected / columns, total = (napps + nentries + 2 + columns - 1) / columns;
+            if (scroll > focus) scroll = focus;
+            if (focus >= scroll + shown) scroll = focus - shown + 1;
+            int max_scroll = total > shown ? total - shown : 0;
+            if (scroll > max_scroll) scroll = max_scroll;
+            first = scroll * columns;
         }
-        if (focus >= scroll + visible) {
-            scroll = focus - visible + 1;
-        }
-        int max_scroll = total > visible ? total - visible : 0;
-        if (scroll > max_scroll) {
-            scroll = max_scroll;
-        }
-        for (int row = 0, pos = scroll; row < visible && pos < total; row++, pos++) {
-            uint32_t fg = pos == focus ? BG : FG, bg = pos == focus ? ACCENT : BG;
+        for (int pos = first; pos < end && pos < napps + nentries + 2; pos++) {
+            int row = 3 + ((pos - first) / columns) * 3, col = 1 + ((pos - first) % columns) * width;
+            if (row + 1 >= footer) break;
+            uint32_t fg = pos == selected ? BG : FG, bg = pos == selected ? ACCENT : BG;
+            screen_fill(col, row, width - 1, 2, bg);
             if (pos < napps) {
-                char name[49];
-                snprintf(name, sizeof name, "%.*s", name_width, apps[pos].name);
-                if (strlen(apps[pos].name) > (size_t)name_width) {
-                    name[name_width - 1] = '~';
-                }
-                snprintf(line, sizeof line, "[%c] %-*s %s %8llu %8llu",
-                         apps[pos].marked ? 'x' : ' ', name_width, name,
-                         ui_pad(col_s, sizeof col_s, state_label(apps[pos].state), 8),
+                if (pos != selected && strcmp(apps[pos].state, "failed") == 0) fg = ERROR;
+                snprintf(line, sizeof line, "[%c] %s", apps[pos].marked ? 'x' : ' ', apps[pos].name);
+                grid_text(col + 1, row, line, fg, bg);
+                snprintf(line, sizeof line, "%s  %llu/%llu MiB", state_label(apps[pos].state),
                          apps[pos].ram / MIB, apps[pos].swap / MIB);
-                if (pos != focus && strcmp(apps[pos].state, "failed") == 0) {
-                    fg = ERROR;
-                }
-            } else if (pos == napps) {
-                snprintf(line, sizeof line, "%s",
-                         napps ? _("-- Host programs --") : _("-- Host programs (no containers) --"));
-                fg = ACCENT;
-            } else if (pos <= napps + nentries) {
-                int i = pos - napps - 1;
-                snprintf(line, sizeof line, "    %-12.15s %.200s", entries[i].name,
-                         entries[i].builtin ? _("home and the shared folders") :
+            } else if (pos < napps + nentries) {
+                int i = pos - napps;
+                grid_text(col + 1, row, entries[i].name, fg, bg);
+                snprintf(line, sizeof line, "%s", entries[i].builtin ? _("home and the shared folders") :
                          task_of(entries[i].key, state, sizeof state));
-            } else if (pos == napps + nentries + 1) {
-                snprintf(line, sizeof line, "    %s", _("reboot"));
             } else {
-                snprintf(line, sizeof line, "    %s", _("power off"));
+                grid_text(col + 1, row, pos == napps + nentries ? _("reboot") : _("power off"), fg, bg);
+                line[0] = '\0';
             }
-            if (cols > 0 && 3 + row < footer) {
-                screen_fill(0, 3 + row, cols, 1, bg);
-                text(1, 3 + row, line, fg, bg);
-                ui_hit(0, 3 + row, cols, 1, HIT_ROW + pos);
-            }
+            grid_text(col + 1, row + 1, line, fg, bg);
+            ui_hit(col, row, width - 1, 2, HIT_ROW + pos);
         }
+        text(1, 2, _("Containers: state, RAM / swap MiB"), FG, BG);
     }
 
     const struct app *a = error_app();
@@ -530,13 +547,7 @@ static void draw(int ready)
                  a->error[0] ? a->error : _("No failure reason reported."), a->name);
     }
     wrapped(footer, 1, last_customized ? last : _(last), ACCENT);
-    if (footer_rows() == 7) {
-        wrapped(footer + 1, 2, action_error[0] ? action_error : list_error, ERROR);
-        wrapped(footer + 3, 2, failure, ERROR);
-    } else {
-        wrapped(footer + 1, 1, action_error[0] ? action_error :
-                list_error[0] ? list_error : failure, ERROR);
-    }
+    wrapped(footer + 1, 1, action_error[0] ? action_error : list_error[0] ? list_error : failure, ERROR);
     if (confirming != CONF_NONE) {
         /* TRANSLATORS: Y and N are the confirmation keys; keep them. */
         int c = ui_button(1, rows - 2, _("Y: confirm"), HIT_KEY + 'y');
@@ -550,13 +561,53 @@ static void draw(int ready)
         c = ui_button(c, rows - 2, _("F: freeze"), HIT_KEY + 'f');
         ui_button(c, rows - 2, _("K: stop/close"), HIT_KEY + 'k');
         /* TRANSLATORS: Up/Down/PgUp/PgDn and Super+Esc are key names; keep them. */
-        text(1, rows - 1, _("Up/Down/PgUp/PgDn or the wheel: move   double click: open   "
+        text(1, rows - 1, _("Arrows/PgUp/PgDn or the wheel: move   double click: open   "
                             "right click: actions   Super+Esc: home"), FG, BG);
     }
     screen_flush();
     if (ready) {
         say("home> ");
     }
+}
+
+static void draw(int ready)
+{
+    int count = screen_is_extended && screen_is_extended() && screen_output_count ? screen_output_count() : 1;
+    if (count <= 1 || !screen_output_select) {
+        draw_first = 0;
+        draw_limit = -1;
+        draw_output(ready);
+        return;
+    }
+    if (count > HOME_OUTPUTS) count = HOME_OUTPUTS;
+    total_capacity = 0;
+    for (int i = 0; i < count; i++) {
+        screen_output_select(i);
+        output_capacity[i] = grid_visible() * grid_columns();
+        total_capacity += output_capacity[i];
+    }
+    int first = total_capacity > 0 ? selected / total_capacity * total_capacity : 0;
+    int selected_output = home_output < count ? home_output : 0;
+    for (int i = 0; i < count; i++) {
+        screen_output_select(i);
+        output_first[i] = first;
+        draw_first = first;
+        draw_limit = first + output_capacity[i];
+        if (selected >= draw_first && selected < draw_limit) selected_output = i;
+        draw_output(0);
+        first = draw_limit;
+    }
+    home_output = selected_output;
+    screen_output_select(home_output);
+    if (ready) say("home> ");
+}
+
+static void view_files(void)
+{
+    int was = screen_is_extended && screen_is_extended();
+    if (was) screen_extended(0);
+    files_view();
+    if (was) screen_extended(1);
 }
 
 /* Accepted is not completed: no local state changes, including for show. */
@@ -740,8 +791,14 @@ static int row_menu(int col, int row)
 static int pointer_key(void)
 {
     const struct pointer_event *e = pointer_last();
+    if (screen_is_extended && screen_is_extended() && screen_output_select) {
+        int previous = home_output;
+        if (screen_output_select(e->output) < 0) return 0;
+        home_output = e->output;
+        if (!e->button && !e->wheel && !e->hwheel && !e->gesture) return previous == home_output ? 0 : -1;
+    }
     if (e->wheel && confirming == CONF_NONE) {
-        selected -= e->wheel;
+        selected -= e->wheel * grid_columns();
         selected = selected < 0 ? 0 : selected > napps + nentries + 1 ? napps + nentries + 1 : selected;
         return -1;
     }
@@ -752,16 +809,17 @@ static int pointer_key(void)
     if (id >= HIT_KEY) {
         return e->button == BTN_LEFT ? id - HIT_KEY : 0;
     }
-    if (id < HIT_ROW || confirming != CONF_NONE || id - HIT_ROW == napps) {
-        return 0; /* elsewhere, the header, or while a question is asked */
+    if (id < HIT_ROW || id - HIT_ROW >= napps + nentries + 2 || confirming != CONF_NONE) {
+        return 0;
     }
     int pos = id - HIT_ROW;
-    selected = pos < napps ? pos : pos - 1;
+    selected = pos;
     if (e->button == BTN_RIGHT) {
         draw(0);
         return row_menu(e->col, e->row);
     }
-    if (pos < napps && e->col <= 3) {
+    int first = screen_is_extended && screen_is_extended() && home_output < HOME_OUTPUTS ? output_first[home_output] : 0;
+    if (pos < napps && e->col - (1 + (pos - first) % grid_columns() * grid_width()) <= 3) {
         return ' '; /* the box marks it */
     }
     return e->clicks == 2 ? '\n' : -1;
@@ -771,6 +829,7 @@ int main(void)
 {
     load();
     screen_open(BASE_FONT);
+    if (screen_extended) screen_extended(1);
     keys_open();
     refresh();
     selected = 0;
@@ -786,7 +845,7 @@ int main(void)
                 confirm_key(0); /* Never preserve a destructive prompt across a switch. */
             }
             if (files_request()) {
-                files_view();
+                view_files();
             }
             load();
             refresh();
@@ -797,7 +856,7 @@ int main(void)
         if (redraw) {
             refresh();
             if (confirming == CONF_NONE && files_request()) {
-                files_view();
+                view_files();
                 refresh();
                 draw(0);
                 continue;
@@ -818,21 +877,9 @@ int main(void)
         }
         if (confirming != CONF_NONE) {
             confirm_key(key);
-        } else if (key == K_UP || key == K_DOWN || key == K_PGUP || key == K_PGDN ||
-                   key == K_BOL || key == K_EOL) {
-            int step = key == K_PGUP || key == K_PGDN ? visible_rows() : 1;
-            if (key == K_BOL) {
-                selected = 0;
-            } else if (key == K_EOL) {
-                selected = napps + nentries + 1;
-            } else {
-                selected += key == K_UP || key == K_PGUP ? -step : step;
-                if (selected < 0) {
-                    selected = 0;
-                } else if (selected > napps + nentries + 1) {
-                    selected = napps + nentries + 1;
-                }
-            }
+        } else if (key == K_UP || key == K_DOWN || key == K_LEFT || key == K_RIGHT ||
+                   key == K_PGUP || key == K_PGDN || key == K_BOL || key == K_EOL) {
+            move_selection(key);
         } else if (key == ' ' && selected < napps) {
             apps[selected].marked = !apps[selected].marked;
         } else if (key == 'r' || key == 'R') {
@@ -859,7 +906,7 @@ int main(void)
         } else if (key == '\n' && selected == napps + nentries + 1) {
             confirming = CONF_POWEROFF;
         } else if (key == '\n' && entries[selected - napps].builtin) {
-            files_view();
+            view_files();
             refresh();
         } else if (key == '\n') {
             int host = selected - napps;
