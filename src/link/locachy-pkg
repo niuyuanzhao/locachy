@@ -296,6 +296,55 @@ def settle_tracked(tracked, first_install, refusal):
         return False
 
 
+def declared_missing(installed):
+    """Declared leaves that are not installed (sync's MISSING), in manifest order."""
+    if not os.path.isfile(MANIFEST):
+        return []
+    return [p for p in load_manifest(MANIFEST) if p not in installed]
+
+
+def install_missing(missing, tracked):
+    """Install declared leaves that are not installed, with their dependencies;
+    sync and apply share this. Nothing is removed here."""
+    repo_pkgs, aur_pkgs, local_pkgs = [], [], []
+    recipes = local_recipes()
+    local = local_names(recipes)
+    for p in missing:
+        if p in local:
+            if p not in recipes:
+                print(f"locachy-pkg: local recipe for {p} is missing; not replaced from the AUR", file=sys.stderr)
+                return False
+            local_pkgs.append(p)
+        elif subprocess.run(["pacman", "-Sp", p], stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL).returncode == 0:
+            repo_pkgs.append(p)
+        else:
+            aur_pkgs.append(p)
+    # Complete the repository ABI before compiling local/AUR packages.
+    # Kernel packages use LOCachy's initramfs, not a second generator.
+    if repo_pkgs and not run_pacman("pacman -S --needed --noconfirm --assume-installed initramfs " +
+                                    shlex.join(repo_pkgs)):
+        return False
+    missing_tracked = set(local_pkgs) & set(tracked)
+    if missing_tracked:
+        try:
+            if not install_tracked(missing_tracked):
+                return False
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+            print(f"locachy-pkg: initial tracked install failed: {e}", file=sys.stderr)
+            return False
+    for p in local_pkgs:
+        if p not in tracked and not run([BUILD_TOOL, "-i", "--local", p]):
+            return False
+    if aur_pkgs:
+        if not os.path.isfile(BUILD_TOOL):
+            sys.stderr.write(f"locachy-pkg: cannot build AUR packages: {' '.join(aur_pkgs)}\n")
+            return False
+        if not run([BUILD_TOOL, "-i"] + aur_pkgs, net=True):
+            return False
+    return True
+
+
 def cmd_sync(first_install=False):
     leaves = load_manifest()
     print(f"===> Reconciling system to /etc/locachy/packages ({len(leaves)} declared leaves)...")
@@ -312,42 +361,8 @@ def cmd_sync(first_install=False):
     # 1. Install missing declared leaves and their dependencies
     if missing:
         print(f"===> [1/4] Installing missing declared packages ({len(missing)}): {' '.join(missing)}")
-        repo_pkgs, aur_pkgs, local_pkgs = [], [], []
-        recipes = local_recipes()
-        local = local_names(recipes)
-        for p in missing:
-            if p in local:
-                if p not in recipes:
-                    print(f"locachy-pkg: local recipe for {p} is missing; not replaced from the AUR", file=sys.stderr)
-                    return 1
-                local_pkgs.append(p)
-            elif subprocess.run(["pacman", "-Sp", p], stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL).returncode == 0:
-                repo_pkgs.append(p)
-            else:
-                aur_pkgs.append(p)
-        # Complete the repository ABI before compiling local/AUR packages.
-        # Kernel packages use LOCachy's initramfs, not a second generator.
-        if repo_pkgs and not run_pacman("pacman -S --needed --noconfirm --assume-installed initramfs " +
-                                        shlex.join(repo_pkgs)):
+        if not install_missing(missing, tracked):
             return 1
-        missing_tracked = set(local_pkgs) & set(tracked)
-        if missing_tracked:
-            try:
-                if not install_tracked(missing_tracked):
-                    return 1
-            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
-                print(f"locachy-pkg: initial tracked install failed: {e}", file=sys.stderr)
-                return 1
-        for p in local_pkgs:
-            if p not in tracked and not run([BUILD_TOOL, "-i", "--local", p]):
-                return 1
-        if aur_pkgs:
-            if not os.path.isfile(BUILD_TOOL):
-                sys.stderr.write(f"locachy-pkg: cannot build AUR packages: {' '.join(aur_pkgs)}\n")
-                return 1
-            if not run([BUILD_TOOL, "-i"] + aur_pkgs, net=True):
-                return 1
         # Reload after installs
         packages, provides_map, explicit_set = load_installed_db()
 
@@ -1369,6 +1384,10 @@ def plan():
             reason = "host packages are updated before this build"
         if reason:
             rows.append(("host", "local", n, host[n], reason))
+    # Declared but not installed (a manifest completed by a source update):
+    # installed by apply after the host update, as sync would install them.
+    for n in declared_missing(host):
+        rows.append(("host", "missing", n, "", "declared, not installed"))
     host_changes = any(r[0] == "host" for r in rows)
     current = host_hash()
     if src_upd:
@@ -1468,6 +1487,8 @@ def print_plan(rows, checked):
                 print(f"  rebuild: {what}" + (f" ({old} -> {new})" if old or new else ""))
             elif kind == "local":
                 print(f"  local {what}: {new} (installed {old})")
+            elif kind == "missing":
+                print(f"  install {what}: {new}")
             else:
                 print(f"  {kind:<5} {what:<32} {old} -> {new}")
 
@@ -1528,6 +1549,17 @@ def apply_prepared_host(rows, recipes):
     return True
 
 
+def install_planned_missing(mine, tracked):
+    """The plan's declared-but-missing leaves that still are, once the host
+    update has succeeded. No sync: nothing is pruned or re-marked."""
+    planned = {r[2] for r in mine if r[1] == "missing"}
+    missing = [n for n in declared_missing(local_packages(LOCAL_DB)) if n in planned]
+    if not missing:
+        return True
+    print(f"===> Installing declared packages that are not installed: {' '.join(missing)}", flush=True)
+    return install_missing(missing, tracked)
+
+
 def apply_target(t, rows):
     mine = [r for r in rows if r[0] == t]
     if t == "host":
@@ -1536,10 +1568,14 @@ def apply_target(t, rows):
         tracked = tracked_recipes(baselines)
         if set(tracked) & set(installed):
             try:
-                return apply_prepared_host(rows, baselines)
+                if not apply_prepared_host(rows, baselines):
+                    return False
             except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
                 print(f"locachy-pkg: prepared host update failed: {e}", file=sys.stderr)
                 return False
+            # The prepared transaction published its sync databases: this
+            # resolves against the state just installed.
+            return install_planned_missing(mine, tracked)
         ok = run(["pacman", "-Syu", "--noconfirm"], net=True)
         aur = [r[2] for r in mine if r[1] == "aur"]
         if ok and aur:
@@ -1558,7 +1594,7 @@ def apply_target(t, rows):
                 print(f"locachy-pkg: local recipe for {name} disappeared; not replaced from the AUR", file=sys.stderr)
                 return False
             ok = run([BUILD_TOOL, "-i", "-r", "--local", name])
-        return ok
+        return ok and install_planned_missing(mine, tracked)
     if t == "locachy":
         commits = [r[4] for r in mine if r[1] == "rebuild" and re.fullmatch(r"[0-9a-f]{40}", r[4])]
         if commits:

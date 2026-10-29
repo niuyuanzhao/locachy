@@ -1,8 +1,9 @@
 #!/bin/bash
 # The library contract in a disposable target root (local-package-gate). No
-# input devices are created or read: /dev/input is private and empty. What the
-# patch does with a finger is tested in a VM (test-pointer-libinput.sh);
-# here, that this root has LOCachy's build of it.
+# input devices are created or read: /dev/input is private and empty. This is
+# an installed-library smoke contract, not proof of scrolling behaviour. The
+# v2 release additionally requires the patched upstream litest suite and
+# test-pointer-libinput.sh in a disposable VM (pkgbuilds/libinput/BEHAVIOR.md).
 set -euo pipefail
 out=${1:?usage: test-libinput.sh RESULT_DIRECTORY}
 mkdir -p "$out"
@@ -41,7 +42,9 @@ EOF
 "$out/load"
 python3 -I - "$out/gate.json" <<'PY'
 import json, sys
-json.dump({'name': 'libinput', 'id': 'libinput-circular-scroll-v1', 'passed': True,
+json.dump({'name': 'libinput', 'id': 'libinput-circular-scroll-v2', 'passed': True,
+           'scope': 'installed-library-smoke',
+           'release_tests_required': ['upstream-circular-litest', 'pointer-libinput-vm'],
            'tests': ['raised-epoch', 'provides', 'panasonic-round-quirks', 'links-and-loads']},
           open(sys.argv[1], 'w'), sort_keys=True)
 PY

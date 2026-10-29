@@ -14,6 +14,7 @@ int rc_read(void (*fn)(const char *, const char *, void *), void *arg)
     (void)fn; (void)arg;
     return 0;
 }
+void say(const char *fmt, ...) { (void)fmt; }
 
 static int pipe_fds[2];
 

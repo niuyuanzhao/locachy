@@ -208,7 +208,8 @@ rm -rf etc/containers && mkdir etc/containers
 printf "HEADLESS-1=origin,1280x720,1\nHEADLESS-2=right,preferred,1.5\n" >etc/monitors.conf
 python3 - "$src/link/labwc-rc.xml" etc/labwc/rc.xml <<'EOF'
 import sys
-s = open(sys.argv[1]).read().replace("TERMINAL-KEY", "C-A-t")
+s = open(sys.argv[1]).read().replace("TERMINAL-KEY", "C-A-t").replace("HOME-KEY", "W-Escape")
+s = "".join(line for line in s.replace("LOCK-KEY", "W-l").splitlines(True) if "IME-KEY" not in line)
 rules = """<windowRules>
   <windowRule title="First:*"><action name="MoveToOutput" output="HEADLESS-1"/></windowRule>
   <windowRule title="Second:*"><action name="MoveToOutput" output="HEADLESS-2"/></windowRule>

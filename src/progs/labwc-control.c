@@ -27,9 +27,10 @@
  * is frozen: it is applied once that runs again) and whenever a screen is
  * connected or disconnected; a configuration the compositor refuses (as
  * while it is getting the screens back) is tried again, up to 5 times. Its lines are
- * CONNECTOR=PLACE,MODE,SCALE: PLACE is origin (the screen the others are
- * placed around) or right, left, above, below; MODE is WIDTHxHEIGHT or
- * preferred; SCALE may be fractional. A screen it does not name keeps its
+ * CONNECTOR=PLACE,MODE,SCALE[,X,Y]: explicit signed logical coordinates
+ * override relative placement; PLACE is origin/right/left/above/below,
+ * MODE WIDTHxHEIGHT or preferred; SCALE may be fractional.
+ * A screen it does not name keeps its
  * mode and scale and goes to the right.
  *
  * Idleness: after rc.conf's lock_after minutes (default 10; 0: never) without
@@ -588,7 +589,8 @@ static int apply_monitors(void)
         else if (strcmp(pl[n].place, "below") == 0) place = MONITOR_BELOW;
         rect[n] = (struct monitor_rect){ .name = hd->name, .place = place,
             .width = mode[n] ? (int)(mode[n]->width / scale[n]) : 0,
-            .height = mode[n] ? (int)(mode[n]->height / scale[n]) : 0 };
+            .height = mode[n] ? (int)(mode[n]->height / scale[n]) : 0,
+            .has_position = pl[n].has_position, .x = pl[n].x, .y = pl[n].y };
         n++;
     }
     if (configured == 0) {
@@ -821,6 +823,12 @@ static void serve(int listener)
         wl_display_roundtrip(display);
         snprintf(reply, sizeof reply, apply_monitors() == 0 ? "ok monitors" :
                  "error the compositor offers no output management");
+    } else if (strcmp(request, "home") == 0 || strcmp(request, "lock") == 0) {
+        snprintf(reply, sizeof reply, "ok %s", request);
+        send(client, reply, strlen(reply), MSG_NOSIGNAL);
+        close(client);
+        kill(getppid(), strcmp(request, "home") == 0 ? SIGUSR1 : SIGUSR2);
+        return;
     } else {
         snprintf(reply, sizeof reply, "error unknown request");
     }
@@ -836,8 +844,32 @@ static void on_term(int sig)
     stop = 1;
 }
 
-int main(void)
+static int send_action(const char *action)
 {
+    if (strcmp(action, "home") != 0 && strcmp(action, "lock") != 0) return 2;
+    const char *runtime = getenv("XDG_RUNTIME_DIR");
+    if (!runtime || runtime[0] != '/') return 1;
+    struct sockaddr_un address = { .sun_family = AF_UNIX };
+    int n = snprintf(address.sun_path, sizeof address.sun_path, "%s/locachy-control.sock", runtime);
+    if (n < 0 || n >= (int)sizeof address.sun_path) return 1;
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (fd < 0) return 1;
+    if (connect(fd, (struct sockaddr *)&address, sizeof address) < 0 ||
+        send(fd, action, strlen(action), MSG_NOSIGNAL) != (ssize_t)strlen(action)) {
+        close(fd);
+        return 1;
+    }
+    struct pollfd wait = { .fd = fd, .events = POLLIN };
+    char reply[64] = "";
+    ssize_t got = poll(&wait, 1, 1000) > 0 ? recv(fd, reply, sizeof reply - 1, 0) : -1;
+    close(fd);
+    return got > 0 && strncmp(reply, "ok ", 3) == 0 ? 0 : 1;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc == 3 && strcmp(argv[1], "--action") == 0) return send_action(argv[2]);
+    if (argc != 1) return 2;
     const char *runtime = getenv("XDG_RUNTIME_DIR");
     if (!runtime || runtime[0] != '/') {
         say("labwc-control: XDG_RUNTIME_DIR is not set");

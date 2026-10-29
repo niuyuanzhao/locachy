@@ -80,8 +80,13 @@ unshare --mount --propagation private --pid --fork --kill-child --mount-proc bas
     WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_HEADLESS_OUTPUTS=1 \
         "$labwc" -C /etc/locachy/labwc -c /etc/locachy/labwc/rc.xml >"$out/labwc.log" 2>&1 &
     comp=$!
-    for _ in $(seq 1 80); do [ -S "$XDG_RUNTIME_DIR/locachy-clipboard-guard.sock" ] && break; sleep 0.1; done
+    # The guard socket may come before the display socket the helpers use.
+    for _ in $(seq 1 80); do
+        [ -S "$XDG_RUNTIME_DIR/locachy-clipboard-guard.sock" ] && [ -S "$XDG_RUNTIME_DIR/wayland-0" ] && break
+        sleep 0.1
+    done
     test -S "$XDG_RUNTIME_DIR/locachy-clipboard-guard.sock"
+    test -S "$XDG_RUNTIME_DIR/wayland-0"
     "$out/seat" >"$out/seat.log" 2>&1 &
     input=$!
     /usr/local/lib/locachy/labwc-control >"$out/control.log" 2>&1 &

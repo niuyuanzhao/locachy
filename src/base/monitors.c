@@ -24,6 +24,7 @@ int monitor_conf(const char *name, struct monitor_conf *out)
     snprintf(out->place, sizeof out->place, "right");
     out->width = out->height = 0;
     out->scale = 0;
+    out->has_position = out->x = out->y = 0;
     FILE *in = fopen(MONITORS_CONF, "r");
     char line[160];
     size_t klen = strlen(name);
@@ -50,9 +51,18 @@ int monitor_conf(const char *name, struct monitor_conf *out)
         if (mode && sscanf(mode, "%dx%d", &out->width, &out->height) != 2) {
             out->width = out->height = 0;
         }
+        char *position = scale ? strchr(scale, ',') : NULL;
+        if (position) *position++ = '\0';
         double s = scale ? strtod(scale, NULL) : 0;
         if (s >= 0.5 && s <= 4.0) {
             out->scale = s;
+        }
+        int x, y, end = 0;
+        if (position && sscanf(position, "%d,%d%n", &x, &y, &end) == 2 && !position[end] &&
+            x >= -65536 && x <= 65536 && y >= -65536 && y <= 65536) {
+            out->has_position = 1;
+            out->x = x;
+            out->y = y;
         }
     }
     if (in) {

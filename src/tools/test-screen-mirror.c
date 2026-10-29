@@ -42,7 +42,8 @@ static int single_output, external_only, disconnected, master_busy;
 static int cursor_calls, no_cursor_plane, cursor_last_x, cursor_last_y;
 /* A real 2x2 PSF2 file stands in for Terminus; Terminus itself is "missing". */
 static char test_font[] = "/tmp/test-screen-font-XXXXXX";
-static int font_fd = -1, scale_lines;
+static int font_fd = -1, scale_lines, extended_conf, positioned;
+static double internal_scale = 1.0, external_scale = 2.0;
 /* When set, Terminus is "there" (the test font) but for its bold at 12, as
  * the real one; the paths asked for are kept. */
 static int serve_terminus, nasked;
@@ -77,6 +78,17 @@ int monitor_internal(const char *name)
 int monitor_conf(const char *name, struct monitor_conf *out)
 {
     memset(out, 0, sizeof *out);
+    if (extended_conf) {
+        int internal = strcmp(name, "eDP-1") == 0;
+        out->scale = internal ? internal_scale : external_scale;
+        snprintf(out->place, sizeof out->place, "%s", internal ? "origin" : "right");
+        if (positioned) {
+            out->has_position = 1;
+            out->x = internal ? -8 : 3;
+            out->y = internal ? 0 : 2;
+        }
+        return 1;
+    }
     out->scale = scale_lines && strcmp(name, "eDP-1") == 0 ? 1.5 : 0;
     return out->scale > 0;
 }
@@ -88,6 +100,7 @@ void say(const char *fmt, ...)
 
 int control_fd(void) { return -1; }
 void control_wait_take(void) { abort(); }
+void base_language_reload(void) {}
 int panel_containers(const char *name, unsigned long long *ram)
 {
     (void)name;
@@ -502,7 +515,107 @@ static void test_lifecycle(void)
     assert(scaled_font(0.65) == NULL && glyph_mag == 1 && glyph_w == 2 && glyph_h == 2);
     assert(nasked == 2 && strstr(asked[0], "/ter-u12b.psf") && strstr(asked[1], "/ter-u12n.psf"));
     serve_terminus = 0;
+    scale_lines = 0;
+    assert(screen_extended(1) == 1 && screen_is_extended() && screen_output_count() == 2);
+    assert(screen_output_current() == 0);
+    extended_conf = 1;
+    assert(screen_rescale() == 1);
+    struct screen_output info[2];
+    assert(screen_output_get(0, &info[0]) == 0 && screen_output_get(1, &info[1]) == 0);
+    assert(!strcmp(info[0].name, "eDP-1") && info[0].pixel_width == 8 && info[0].pixel_height == 6);
+    assert(info[0].x == 0 && info[0].y == 0 && info[0].width == 8 && info[0].height == 6 && info[0].scale == 1);
+    assert(info[1].x == 8 && info[1].y == 0 && info[1].width == 6 && info[1].height == 5 && info[1].scale == 2);
+    assert(screen_output_select(0) == 0);
+    screen_fill_px(0, 0, 8, 6, 0x123456);
+    assert(screen_output_select(1) == 0 && screen_output_current() == 1 && screen_cols() == info[1].cols);
+    screen_fill_px(0, 0, 12, 10, 0x654321);
+    screen_flush();
+    assert(*(uint32_t *)outputs[0].map == 0x123456 && *(uint32_t *)outputs[1].map == 0x654321);
+    assert(outputs[0].surface != outputs[1].surface && outputs[0].surface->pixels != outputs[1].surface->pixels);
+    assert(screen_output_select(0) == 1);
+    dirties = 0;
+    screen_fill_px(2, 2, 1, 1, 0xAABBCC);
+    screen_flush();
+    assert(dirties == 1 && clips[0].x1 == 2 && clips[0].x2 == 3 && clips[0].y1 == 2 && clips[0].y2 == 3);
+    assert(*(uint32_t *)(outputs[0].map + outputs[0].pitch * 2 + 8) == 0xAABBCC);
+    assert(*(uint32_t *)outputs[1].map == 0x654321);
+    assert(screen_output_select(1) == 0);
+    int local_x, local_y;
+    assert(screen_output_at(9, 2, &local_x, &local_y) == 1 && local_x == 2 && local_y == 4);
+    assert(screen_output_at(13, 5, NULL, NULL) == -1);
+    int projected_x = 13, projected_y = 5;
+    screen_output_project(&projected_x, &projected_y);
+    assert(projected_x == 13 && projected_y == 4);
+    positioned = 1;
+    assert(screen_rescale() == 1 && screen_output_get(0, &info[0]) == 0 && screen_output_get(1, &info[1]) == 0);
+    assert(info[0].x == -8 && info[1].x == 3 && info[1].y == 2);
+    assert(screen_output_at(0, 3, NULL, NULL) == -1);
+    projected_x = 0; projected_y = 3;
+    screen_output_project(&projected_x, &projected_y);
+    assert(projected_x == -1 && projected_y == 3);
+    positioned = 0;
+    assert(screen_rescale() == 1);
+    puts("PASS extended outputs have distinct native canvases, per-output scale and gap-safe signed coordinates");
+    uint32_t *first_pixels = outputs[0].surface->pixels, *second_pixels = outputs[1].surface->pixels;
+    screen_cursor_move(1, 1);
+    screen_cursor_visible(1);
+    assert(outputs[0].soft_cursor && outputs[0].cursor_at.x1 != outputs[0].cursor_at.x2);
+    assert(outputs[1].cursor_at.x1 == outputs[1].cursor_at.x2);
+    screen_cursor_move(9, 1);
+    assert(outputs[0].cursor_at.x1 == outputs[0].cursor_at.x2);
+    assert(outputs[1].cursor_at.x1 != outputs[1].cursor_at.x2);
+    assert(*(uint32_t *)outputs[0].map == 0x123456);
+    screen_cursor_visible(0);
+    assert(outputs[1].cursor_at.x1 == outputs[1].cursor_at.x2);
     screen_release();
+    assert(screen_take(8) && noutputs == 2 && outputs[0].surface->pixels == first_pixels &&
+           outputs[1].surface->pixels == second_pixels);
+    assert(*(uint32_t *)outputs[0].map == 0x123456 && *(uint32_t *)outputs[1].map == 0x654321);
+    screen_release();
+    single_output = 1;
+    assert(screen_take(8) && screen_output_count() == 1 && outputs[0].surface->pixels == first_pixels);
+    screen_release();
+    single_output = 0;
+    assert(screen_take(8) && screen_output_count() == 2 && outputs[1].surface->pixels == second_pixels);
+    screen_release();
+    /* The second output's canvas cannot be made (a new scale, and no font
+     * for it): that output is dropped, never shown without a canvas. */
+    external_scale = 3.0;
+    snprintf(font_fallback, sizeof font_fallback, "%s", "/nonexistent/font.psf");
+    assert(screen_take(8) && screen_output_count() == 1 && !strcmp(outputs[0].name, "eDP-1"));
+    assert(outputs[0].surface && outputs[0].surface->pixels == first_pixels);
+    assert(screen_output_get(1, &info[1]) == -1 && screen_output_select(1) == -1);
+    assert(screen_output_select(0) == 0 && screen_output_current() == 0);
+    screen_fill_px(0, 0, 1, 1, 0x112233);
+    screen_flush();
+    assert(*(uint32_t *)outputs[0].map == 0x112233);
+    assert(screen_output_at(9, 1, NULL, NULL) == -1);
+    projected_x = 9; projected_y = 1;
+    screen_output_project(&projected_x, &projected_y);
+    assert(projected_x == 7 && projected_y == 1);
+    screen_release();
+    /* No output's canvas can be made: the take fails and leaves no output. */
+    internal_scale = 1.5;
+    assert(!screen_take(8) && screen_output_count() == 0 && !outputs && card == -1);
+    assert(screen_output_select(0) == -1 && screen_output_current() == -1);
+    screen_fill_px(0, 0, 1, 1, 0x445566);
+    screen_flush();
+    internal_scale = 1.0;
+    external_scale = 2.0;
+    snprintf(font_fallback, sizeof font_fallback, "%s", test_font);
+    assert(screen_take(8) && screen_output_count() == 2 && outputs[0].surface->pixels == first_pixels &&
+           outputs[1].surface->pixels == second_pixels);
+    screen_release();
+    puts("PASS extended outputs whose canvas cannot be made are dropped, never selected without one");
+    assert(screen_extended(0) == 1 && !screen_is_extended() && shadow == saved);
+    assert(screen_output_current() == -1);
+    extended_conf = 0;
+    while (surfaces) {
+        struct output_surface *next = surfaces->next;
+        free(surfaces->pixels); free(surfaces->font); free(surfaces);
+        surfaces = next;
+    }
+    puts("PASS extended cursor belongs to one output and canvases survive lease release and hotplug");
     free(shadow);
     shadow = NULL;
     unlink(test_font);

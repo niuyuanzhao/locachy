@@ -56,6 +56,11 @@ static int input_ioctl(int fd, unsigned long request, ...)
     va_start(ap, request);
     void *arg = va_arg(ap, void *);
     va_end(ap);
+    /* No names or ids: each keyboard types with the system's key table. */
+    if (request == EVIOCGID || (_IOC_TYPE(request) == 'E' && _IOC_NR(request) == _IOC_NR(EVIOCGNAME(0)))) {
+        errno = EINVAL;
+        return -1;
+    }
     assert(fd >= 0 && fd < (int)(sizeof owner / sizeof *owner) && owner[fd]);
     struct fixture *f = &input[owner[fd] - 1];
     if (request == EVIOCREVOKE) return 0;
@@ -88,6 +93,8 @@ void screen_cursor_visible(int on) { (void)on; }
 int screen_take(int fd) { close(fd); return 1; }
 void screen_release(void) {}
 int base_audio_key(int action, char *toast, size_t size)
+{ (void)action; (void)toast; (void)size; return 0; }
+int base_brightness_key(int action, char *toast, size_t size)
 { (void)action; (void)toast; (void)size; return 0; }
 
 static void add(int i, int mouse)

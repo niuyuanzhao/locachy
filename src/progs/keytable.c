@@ -10,6 +10,9 @@
  * The first lines name the layout (console, layout, model, variant, options;
  * "-" for none) and the locale of the compose sequences. Then:
  *   altgr CODE       a key that is AltGr (ISO_Level3_Shift) in this layout
+ *   modifier CODE BITS
+ *                    the XKB action's roles: Shift=1 Ctrl=2 Alt=4 Super=8,
+ *                    AltGr=16 Caps=32, independent of physical key position
  *   key CODE NAME S0 .. S7
  *                    the key's keysym name, and for each state (1 Shift,
  *                    2 Caps Lock locked, 4 AltGr) its keysym and character,
@@ -230,6 +233,19 @@ int main(int argc, char **argv)
             "options %s\nlocale %s\n", console, console, n.layout[0] ? n.layout : "-", n.model[0] ? n.model : "-",
             n.variant[0] ? n.variant : "-", n.options[0] ? n.options : "-", locale);
     for (int i = 0; i < naltgr; i++) fprintf(f, "altgr %d\n", altgr_code[i]);
+    for (int code = 1; code < 256; code++) {
+        struct xkb_state *press = xkb_state_new(km);
+        if (!press) { fclose(f); remove(tmp); return 1; }
+        xkb_state_update_key(press, (xkb_keycode_t)code + 8, XKB_KEY_DOWN);
+        int role = (xkb_state_mod_name_is_active(press, XKB_MOD_NAME_SHIFT, XKB_STATE_MODS_DEPRESSED) > 0 ? 1 : 0) |
+                   (xkb_state_mod_name_is_active(press, XKB_MOD_NAME_CTRL, XKB_STATE_MODS_DEPRESSED) > 0 ? 2 : 0) |
+                   (xkb_state_mod_name_is_active(press, XKB_MOD_NAME_ALT, XKB_STATE_MODS_DEPRESSED) > 0 ? 4 : 0) |
+                   (xkb_state_mod_name_is_active(press, XKB_MOD_NAME_LOGO, XKB_STATE_MODS_DEPRESSED) > 0 ? 8 : 0) |
+                   (xkb_state_mod_name_is_active(press, "Mod5", XKB_STATE_MODS_DEPRESSED) > 0 ? 16 : 0) |
+                   (xkb_state_mod_name_is_active(press, XKB_MOD_NAME_CAPS, XKB_STATE_MODS_LOCKED) > 0 ? 32 : 0);
+        xkb_state_unref(press);
+        if (role) fprintf(f, "modifier %d %d\n", code, role);
+    }
     for (int code = 1; code < 256; code++) {
         char name[64];
         if (syms[code][0] == XKB_KEY_NoSymbol || xkb_keysym_get_name(syms[code][0], name, sizeof name) <= 0) continue;

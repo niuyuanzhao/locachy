@@ -286,6 +286,23 @@ int main(int argc, char **argv)
     assert(on_screen("checked 2026-10-20 09:57"));
     assert(on_screen("mesa") && on_screen("1:26.2.4-1.1 -> 1:26.2.5-1.1")); /* host's details */
 
+    /* A plan whose only host work is a declared leaf that is not installed. */
+    char plan_text[1024];
+    FILE *saved_plan = fopen(D("plan.txt"), "r");
+    assert(saved_plan);
+    size_t plan_size = fread(plan_text, 1, sizeof plan_text - 1, saved_plan);
+    plan_text[plan_size] = '\0';
+    fclose(saved_plan);
+    put("plan.txt", "checked\t2026-10-20 09:57\nhost\tmissing\tsof-firmware\t\tdeclared, not installed\n");
+    run("a declared package not installed: host marked, its details", (const int[]){ END });
+    assert(on_screen("[x] host") && on_screen("1 declared to install"));
+    assert(on_screen("install sof-firmware") && on_screen("declared, not installed"));
+    unlink(D("calls"));
+    run("a declared package not installed: applied with the host",
+        (const int[]){ 'a', 'y', WAIT, WAIT, WAIT, END });
+    assert(has("calls", "pkg apply host\n"));
+    put("plan.txt", plan_text);
+
     unlink(D("calls"));
     run("unmark edge, apply, yes: host and locachy only",
         (const int[]){ K_DOWN, K_DOWN, ' ', 'a', 'y', WAIT, WAIT, WAIT, END });

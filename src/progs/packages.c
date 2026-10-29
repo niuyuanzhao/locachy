@@ -90,7 +90,7 @@ static char checked[40];
 
 struct target {
     char name[64], state[16], why[200], note[200]; /* note: what the check could not do */
-    int repo, aur, rebuild, marked;
+    int repo, aur, rebuild, missing, marked; /* missing: declared leaves to install */
 };
 static struct target targets[MAX_TARGETS];
 static int ntargets;
@@ -193,6 +193,8 @@ static void load_plan(void)
             t->repo++;
         } else if (strcmp(r->kind, "aur") == 0) {
             t->aur++;
+        } else if (strcmp(r->kind, "missing") == 0) {
+            t->missing++;
         } else if (strcmp(r->kind, "rebuild") == 0 || strcmp(r->kind, "local") == 0) {
             if (!t->rebuild++) {
                 snprintf(t->why, sizeof t->why, strcmp(r->kind, "local") == 0 ?
@@ -209,7 +211,8 @@ static void load_plan(void)
     }
     for (int i = 0; i < ntargets; i++) {
         struct target *t = &targets[i];
-        t->marked = (t->repo || t->aur || t->rebuild) && (!t->state[0] || strcmp(t->state, "closed") == 0);
+        t->marked = (t->repo || t->aur || t->rebuild || t->missing) &&
+                    (!t->state[0] || strcmp(t->state, "closed") == 0);
     }
 }
 
@@ -555,6 +558,15 @@ static void row_text(int i, char *line, size_t size, int *dim)
                      t->repo ? P_("%d update, some from the AUR", "%d updates, some from the AUR", total) :
                      P_("%d update, from the AUR", "%d updates, from the AUR", total), total);
         }
+        if (t->missing) {
+            size_t n = strlen(what);
+            if (n) {
+                snprintf(what + n, sizeof what - n, "; ");
+                n = strlen(what);
+            }
+            snprintf(what + n, sizeof what - n,
+                     P_("%d declared to install", "%d declared to install", t->missing), t->missing);
+        }
         if (t->rebuild) {
             size_t n = strlen(what);
             snprintf(what + n, sizeof what - n, n ? _("; rebuild: %s") : _("rebuild: %s"), t->why);
@@ -664,7 +676,9 @@ static void draw_lower(int top, int height)
                 screen_text(2, r++, w->what, WARN, PANE);
                 continue;
             }
-            if (strcmp(w->kind, "local") == 0) {
+            if (strcmp(w->kind, "missing") == 0) {
+                snprintf(line, sizeof line, _("install %-36.100s declared, not installed"), w->what);
+            } else if (strcmp(w->kind, "local") == 0) {
                 snprintf(line, sizeof line, _("local %-30.100s %.200s (installed %.80s)"), w->what, w->new_, w->old);
             } else if (strcmp(w->kind, "rebuild") == 0 && (w->old[0] || w->new_[0])) {
                 snprintf(line, sizeof line, _("rebuild: %s (%s -> %s)"), w->what, w->old, w->new_);

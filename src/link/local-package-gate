@@ -54,7 +54,7 @@ exec unshare --mount --propagation private --pid --fork --kill-child --mount-pro
         # A first root has no installed LOCachy runtime yet. Install only
         # the trusted test configuration, never run make.sh or its boot path.
         install -m 644 "$src/link/labwc-rc.xml" /etc/locachy/labwc/rc.xml
-        sed -i s/TERMINAL-KEY/C-A-t/ /etc/locachy/labwc/rc.xml
+        sed -i -e s/TERMINAL-KEY/C-A-t/ -e s/HOME-KEY/W-Escape/ -e s/LOCK-KEY/W-l/ -e /IME-KEY/d /etc/locachy/labwc/rc.xml
         install -m 644 "$src/rc.conf" /etc/locachy/rc.conf
         printf '\''lock_after="0"\n'\'' >>/etc/locachy/rc.conf
         : >/etc/locachy/monitors.conf

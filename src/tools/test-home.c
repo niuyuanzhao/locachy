@@ -50,13 +50,34 @@ void base_status(const char *tag, char *out, size_t size)
 { (void)tag; snprintf(out, size, "Network: test"); }
 int screen_open(const char *font) { (void)font; return 1; }
 int keys_open(void) { return 1; }
-int screen_cols(void) { return 80; }
+static int test_cols = 80, test_rows = 25;
+static int extended_fixture, output_fixture;
+int screen_extended(int on) { int old=extended_fixture;extended_fixture=on;return old!=on; }
+int screen_is_extended(void) { return extended_fixture; }
+int screen_output_current(void) { return output_fixture; }
+int screen_output_count(void) { return extended_fixture ? 2 : 1; }
+int screen_output_select(int index)
+{
+    if (index < 0 || index >= screen_output_count()) return -1;
+    int old=output_fixture;output_fixture=index;return old;
+}
+static char canvas[100][256];
+int screen_cols(void) { return test_cols; }
 int screen_char_cells(uint32_t cp) { return cp >= 0x2E80 && cp <= 0xA4CF ? 2 : 1; }
-int screen_rows(void) { return 25; }
+int screen_rows(void) { return test_rows; }
 void screen_text(int col, int row, const char *s, uint32_t fg, uint32_t bg)
-{ (void)col; (void)row; (void)s; (void)fg; (void)bg; }
+{
+    (void)fg; (void)bg;
+    if (row < 0 || row >= test_rows) return;
+    for (int i = 0; s[i] && col + i < test_cols; i++) if (col + i >= 0) canvas[row][col + i] = s[i];
+}
 void screen_fill(int col, int row, int width, int height, uint32_t color)
-{ (void)col; (void)row; (void)width; (void)height; (void)color; }
+{
+    (void)color;
+    for (int y = row; y < row + height && y < test_rows; y++)
+        for (int x = col; x < col + width && x < test_cols; x++)
+            if (x >= 0 && y >= 0) canvas[y][x] = ' ';
+}
 void screen_flush(void) {}
 void screen_bar(const char *title, const char *ime) { (void)title; (void)ime; }
 /* The keys a menu gets: a script; K_POINTER takes the next of events. */
@@ -79,8 +100,8 @@ void say(const char *format, ...) { (void)format; }
 /* The first cell of what was registered as id when last drawn. */
 static void hit_cell(int id, int *col, int *row)
 {
-    for (*row = 0; *row < 25; (*row)++)
-        for (*col = 0; *col < 80; (*col)++)
+    for (*row = 0; *row < test_rows; (*row)++)
+        for (*col = 0; *col < test_cols; (*col)++)
             if (ui_hit_at(*col, *row) == id) return;
     assert(0);
 }
@@ -145,8 +166,8 @@ int main(void)
     confirm_key('Y');
     assert(confirming == CONF_NONE && reboots == 1 && poweroffs == 1);
     draw(0);
-    assert(press(HIT_ROW + napps + nentries + 1, BTN_LEFT, 2, 6) == '\n' && selected == napps + nentries);
-    assert(press(HIT_ROW + napps + nentries + 2, BTN_LEFT, 2, 6) == '\n' && selected == napps + nentries + 1);
+    assert(press(HIT_ROW + napps + nentries, BTN_LEFT, 2, 6) == '\n' && selected == napps + nentries);
+    assert(press(HIT_ROW + napps + nentries + 1, BTN_LEFT, 2, 6) == '\n' && selected == napps + nentries + 1);
     selected = 0;
     draw(0);
     puts("Host UI: selection, batch actions, stop confirmation and in-place controls passed.");
@@ -156,8 +177,7 @@ int main(void)
     assert(press(HIT_ROW + 1, BTN_LEFT, 1, 10) == -1 && selected == 1);
     assert(press(HIT_ROW + 1, BTN_LEFT, 2, 10) == '\n');
     assert(press(HIT_ROW + 0, BTN_LEFT, 1, 2) == ' ' && selected == 0);
-    assert(press(HIT_ROW + napps, BTN_LEFT, 2, 10) == 0 && selected == 0);
-    assert(press(HIT_ROW + napps + 1, BTN_LEFT, 2, 10) == '\n' && selected == napps);
+    assert(press(HIT_ROW + napps, BTN_LEFT, 2, 10) == '\n' && selected == napps);
     /* The right button: the row's actions, by keys or by the pointer (the
      * opening release chooses nothing; a press outside closes it). */
     draw(0);
@@ -167,10 +187,10 @@ int main(void)
     int col, row;
     hit_cell(HIT_ROW + 1, &col, &row);
     struct pointer_event chosen[] = {
-        { .col = 10, .row = row, .button = BTN_RIGHT },
-        { .col = 13, .row = row + 3 },
-        { .col = 13, .row = row + 3, .button = BTN_LEFT, .pressed = 1 },
-        { .col = 13, .row = row + 3, .button = BTN_LEFT },
+        { .col = col + 10, .row = row, .button = BTN_RIGHT },
+        { .col = col + 13, .row = row + 3 },
+        { .col = col + 13, .row = row + 3, .button = BTN_LEFT, .pressed = 1 },
+        { .col = col + 13, .row = row + 3, .button = BTN_LEFT },
     };
     events = chosen;
     script = (const int[]){ K_POINTER, K_POINTER, K_POINTER, K_POINTER, 0 };
@@ -184,7 +204,7 @@ int main(void)
     /* The wheel moves the selection, kept on the list. */
     selected = 0;
     mouse = (struct pointer_event){ .wheel = -1 };
-    assert(pointer_key() == -1 && selected == 1);
+    assert(pointer_key() == -1 && selected == grid_columns());
     mouse.wheel = 50;
     assert(pointer_key() == -1 && selected == 0);
     /* The buttons are their keys (the left button only); while a question
@@ -202,6 +222,68 @@ int main(void)
     mouse = (struct pointer_event){ .col = 5, .row = 5 };
     assert(pointer_key() == 0 && stop_calls == 2);
     puts("Host UI pointer: rows, boxes, double clicks, row menus, the wheel and buttons passed.");
+    test_cols = 160; test_rows = 35; selected = scroll = 0;
+    draw(0);
+    assert(grid_columns() == 5);
+    int x0, y0, x1, y1;
+    hit_cell(HIT_ROW, &x0, &y0); hit_cell(HIT_ROW + 1, &x1, &y1);
+    assert(y0 == y1 && x1 > x0);
+    hit_cell(HIT_ROW + napps, &x1, &y1);
+    assert(y0 == y1 && x1 > x0);
+    assert(strstr(canvas[y0 + 1], "running") && strstr(canvas[y0 + 1], "MiB"));
+    move_selection(K_RIGHT); assert(selected == 1);
+    move_selection(K_DOWN); assert(selected == 6);
+    move_selection(K_UP); assert(selected == 1);
+    move_selection(K_LEFT); assert(selected == 0);
+    assert(press(HIT_ROW + 1, BTN_LEFT, 1, 2) == ' ' && selected == 1);
+    test_cols = 110; draw(0); assert(grid_columns() == 4);
+    test_cols = 24; test_rows = 12; selected = scroll = 0;
+    draw(0); assert(grid_columns() == 1);
+    move_selection(K_EOL); draw(0);
+    hit_cell(HIT_ROW + napps + nentries + 1, &x0, &y0);
+    assert(x0 >= 0 && x0 < test_cols && y0 < test_rows - footer_rows());
+    puts("PASS responsive home grid: five/four/one columns, state and memory retained, two-dimensional navigation");
+    test_cols = 54; test_rows = 11; selected = scroll = 0;
+    screen_extended(1);
+    draw(0);
+    assert(output_capacity[0] == 2 && output_capacity[1] == 2 && output_first[0] == 0 && output_first[1] == 2);
+    screen_output_select(0);
+    hit_cell(HIT_ROW, &x0, &y0);
+    assert(ui_hit_at(x0, y0) == HIT_ROW);
+    screen_output_select(1);
+    hit_cell(HIT_ROW + 2, &x1, &y1);
+    assert(ui_hit_at(x1, y1) == HIT_ROW + 2);
+    mouse = (struct pointer_event){ .output=1, .col=x1+5, .row=y1, .button=BTN_LEFT, .pressed=1, .clicks=2 };
+    assert(pointer_key() == '\n' && selected == 2 && home_output == 1);
+    draw(0);
+    assert(output_first[0] == 0 && output_first[1] == 2);
+    /* A menu opened on one output: a press at its cells on another closes it
+     * and chooses nothing; on its own output the same press chooses. */
+    hit_cell(HIT_ROW + 3, &x1, &y1);
+    struct pointer_event elsewhere[] = {
+        { .output = 1, .col = x1 + 5, .row = y1, .button = BTN_RIGHT },
+        { .output = 0, .col = x1 + 7, .row = y1 + 1 },
+        { .output = 0, .col = x1 + 7, .row = y1 + 1, .button = BTN_LEFT, .pressed = 1 },
+        { .output = 0, .col = x1 + 7, .row = y1 + 1, .button = BTN_LEFT },
+    };
+    events = elsewhere;
+    script = (const int[]){ K_POINTER, K_POINTER, K_POINTER, K_POINTER, 0 };
+    mouse = (struct pointer_event){ .output = 1, .col = x1 + 5, .row = y1, .button = BTN_RIGHT, .pressed = 1 };
+    assert(pointer_key() == -1 && selected == 3 && *script == K_POINTER); /* the release never read */
+    struct pointer_event here[] = {
+        { .output = 1, .col = x1 + 5, .row = y1, .button = BTN_RIGHT },
+        { .output = 1, .col = x1 + 7, .row = y1 + 1 },
+        { .output = 1, .col = x1 + 7, .row = y1 + 1, .button = BTN_LEFT, .pressed = 1 },
+        { .output = 1, .col = x1 + 7, .row = y1 + 1, .button = BTN_LEFT },
+    };
+    events = here;
+    script = (const int[]){ K_POINTER, K_POINTER, K_POINTER, K_POINTER, 0 };
+    mouse = (struct pointer_event){ .output = 1, .col = x1 + 5, .row = y1, .button = BTN_RIGHT, .pressed = 1 };
+    assert(pointer_key() == 'k' && selected == 3 && !*script);
+    script = NULL;
+    puts("PASS extended menu: a press on another output closes it and chooses nothing");
+    screen_extended(0);
+    puts("PASS extended home assigns different entries and pointer hit maps to each output");
     free(apps);
     free(app_data);
     return 0;

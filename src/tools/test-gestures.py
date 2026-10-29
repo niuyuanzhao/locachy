@@ -22,14 +22,17 @@ SCRATCH = sys.argv.pop(1) if len(sys.argv) > 1 else None
 
 
 class Device:
-    def __init__(self, path, node=None, touch=True, action="add", initialized="100"):
+    def __init__(self, path, node=None, touch=True, action="add", initialized="100", touchpad=False):
         self.sys_path = path
         self.device_node = node
         self.action = action
         self.touch = touch
         self.initialized = initialized
+        self.touchpad = touchpad
 
     def get(self, key):
+        if key == "ID_INPUT_TOUCHPAD":
+            return "1" if self.touchpad else None
         if key == "USEC_INITIALIZED":
             return self.initialized
         return "1" if key == "ID_INPUT_TOUCHSCREEN" and self.touch else None
@@ -78,6 +81,7 @@ class Gestures(unittest.TestCase):
     def setUp(self):
         self.context = Context()
         self.children = []
+        self.pad = Device("/sys/pad", "/dev/input/event2", touch=False, touchpad=True)
         self.glue = glue.Gestures(self.popen, lambda name: "/usr/bin/" + name)
         self.addCleanup(self.glue.close)
 
@@ -87,7 +91,7 @@ class Gestures(unittest.TestCase):
         return child
 
     def sync(self, *devices):
-        self.context.devices = devices
+        self.context.devices = [self.pad, *devices]
         self.glue.sync(self.context)
 
     def screens(self):
@@ -102,7 +106,7 @@ class Gestures(unittest.TestCase):
         self.sync(one, two)
         self.assertEqual(len(self.children), 3)
         touchpad = self.children[0]
-        self.assertEqual(touchpad.args, ["/usr/bin/libinput-gestures", "-c", glue.CONFIG])
+        self.assertEqual(touchpad.args, ["/usr/bin/libinput-gestures", "--device", "all", "-c", glue.CONFIG])
         for child in self.screens():
             self.assertNotIn("start_new_session", child.kwargs)
             self.assertNotIn("preexec_fn", child.kwargs)
@@ -152,6 +156,25 @@ class Gestures(unittest.TestCase):
         self.sync(new)
         self.assertEqual(self.screens()[-1].args[2], "/dev/input/event8")
         self.assertEqual(len(self.glue.screens), 1)
+
+    def test_touchpad_replug_restarts_standard_tool_with_current_devices(self):
+        self.sync()
+        first = self.children[0]
+        self.pad.initialized = "200"
+        self.sync()
+        self.assertEqual((first.terminated, first.waited), (1, 1))
+        second = self.children[-1]
+        self.pad.device_node = "/dev/input/event9"
+        self.sync()
+        self.assertEqual((second.terminated, second.waited), (1, 1))
+        self.context.devices = []
+        self.glue.sync(self.context)
+        self.assertIsNone(self.glue.touchpad)
+        before = len(self.children)
+        self.glue.sync(self.context)
+        self.assertEqual(len(self.children), before)
+        self.sync()
+        self.assertEqual(len(self.children), before + 1)
 
     def test_dead_children_are_reaped_and_restarted(self):
         one = Device("/sys/one", "/dev/input/event5")

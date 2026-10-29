@@ -2,15 +2,24 @@
  * keys.c types with them: US as before, JIS (jp106) with its own symbols and
  * the input method's keys by keysym name (and one bound to nothing for
  * settings to record), German letters where they are, an unknown keymap
- * refused, a missing table US. Key events through a pipe; no
- * device. Build with -ffunction-sections -fdata-sections -Wl,--gc-sections:
+ * refused, a missing table US; two keyboards, one with a keymap of its own
+ * (keyboards.conf). Key events through pipes, the keyboards' names and ids
+ * as the doubles of ioctl give them; no device. Build with
+ * -ffunction-sections -fdata-sections -Wl,--gc-sections:
  *   test-keytable KEYTABLE NEW_DIR */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include <stdarg.h>
+#include <sys/ioctl.h>
 #define KEYS_TABLE table_path
-static char table_path[512];
+#define KEYS_DEVICES devices_path
+#define KEYS_TABLES tables_dir
+static char table_path[512], devices_path[512], tables_dir[512];
+static int fixture_ioctl(int fd, unsigned long request, ...);
+#define ioctl fixture_ioctl
 #include "../base/keys.c"
+#undef ioctl
 #include <assert.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -22,7 +31,44 @@ int rc_read(void (*fn)(const char *, const char *, void *), void *arg)
     return 0;
 }
 
-static int pipe_fds[2];
+void say(const char *fmt, ...) { (void)fmt; }
+
+/* Two keyboards, as evdev names them: the built-in one, and a USB one with
+ * white space around its name. */
+static int fake_fd[2] = { -1, -1 };
+static const char *const fake_name[2] = { "AT Translated Set 2 keyboard", "  USB Keyboard " };
+static const struct input_id fake_id[2] = { { .bustype = BUS_I8042, .vendor = 1, .product = 1 },
+                                            { .bustype = BUS_USB, .vendor = 1133, .product = 49948 } };
+static int fixture_ioctl(int fd, unsigned long request, ...)
+{
+    va_list ap;
+    va_start(ap, request);
+    void *arg = va_arg(ap, void *);
+    va_end(ap);
+    for (int i = 0; i < 2; i++) {
+        if (fd != fake_fd[i]) continue;
+        if (request == EVIOCGID) {
+            memcpy(arg, &fake_id[i], sizeof fake_id[i]);
+            return 0;
+        }
+        if (_IOC_TYPE(request) == 'E' && _IOC_NR(request) == _IOC_NR(EVIOCGNAME(0))) {
+            snprintf(arg, _IOC_SIZE(request), "%s", fake_name[i]);
+            return (int)strlen(arg) + 1;
+        }
+        if (_IOC_TYPE(request) == 'E' && _IOC_NR(request) == _IOC_NR(EVIOCGBIT(EV_KEY, 0))) {
+            unsigned long *bits = arg;
+            memset(arg, 0, _IOC_SIZE(request));
+            bits[KEY_A / (8 * sizeof *bits)] |= 1ul << (KEY_A % (8 * sizeof *bits));
+            bits[KEY_ENTER / (8 * sizeof *bits)] |= 1ul << (KEY_ENTER % (8 * sizeof *bits));
+            return (int)_IOC_SIZE(request);
+        }
+        errno = EINVAL;
+        return -1;
+    }
+    return ioctl(fd, request, arg);
+}
+
+static int pipe_fds[2], board[2][2];
 static int key(int code, int value)
 {
     struct input_event ev = { .type = EV_KEY, .code = (unsigned short)code, .value = value };
@@ -52,18 +98,50 @@ static int types(int k, const char *text)
 
 static const char *keytable;
 static char dir[256];
-static int make(const char *keymap)
+static int run_keytable(const char *keymap, const char *out)
 {
-    snprintf(table_path, sizeof table_path, "%s/%s.table", dir, keymap);
     pid_t pid = fork();
     if (pid == 0) {
-        execl(keytable, keytable, keymap, table_path, (char *)NULL);
+        execl(keytable, keytable, keymap, out, (char *)NULL);
         _exit(127);
     }
     int status;
     assert(waitpid(pid, &status, 0) == pid);
-    keys_reload(); /* the table and rc.conf's keys again, as after settings */
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+static int make(const char *keymap)
+{
+    snprintf(table_path, sizeof table_path, "%s/%s.table", dir, keymap);
+    int status = run_keytable(keymap, table_path);
+    keys_reload(); /* the table and rc.conf's keys again, as after settings */
+    return status;
+}
+
+/* A key of keyboard i (of fake_fd). */
+static int on(int i, int code, int value)
+{
+    struct input_event ev = { .type = EV_KEY, .code = (unsigned short)code, .value = value };
+    assert(write(i == 0 ? board[0][1] : board[1][1], &ev, sizeof ev) == (ssize_t)sizeof ev);
+    return keys_event(fake_fd[i]);
+}
+
+static int on_tap(int i, int code)
+{
+    int k = on(i, code, 1);
+    assert(on(i, code, 0) == 0);
+    return k;
+}
+
+static int has_line(const char *path, const char *text)
+{
+    char buf[1024] = "";
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    buf[n] = '\0';
+    fclose(f);
+    return strstr(buf, text) != NULL;
 }
 
 int main(int argc, char **argv)
@@ -96,6 +174,11 @@ int main(int argc, char **argv)
     assert(key(KEY_LEFTSHIFT, 0) == 0);
     assert(tap(KEY_LEFTBRACE) == '@' && tap(KEY_APOSTROPHE) == ':' && tap(KEY_EQUAL) == '^' &&
            tap(KEY_YEN) == '\\' && tap(KEY_RO) == '\\' && tap(KEY_A) == 'a');
+    /* Its Caps Lock: Shift and the Eisu key, which alone types nothing. */
+    assert(tap(KEY_CAPSLOCK) == 0 && tap(KEY_A) == 'a');
+    assert(with(KEY_LEFTSHIFT, KEY_CAPSLOCK) == 0 && caps && tap(KEY_A) == 'A');
+    assert(key(KEY_LEFTSHIFT, 1) == 0 && key(KEY_CAPSLOCK, 1) == 0 && key(KEY_LEFTSHIFT, 0) == 0);
+    assert(key(KEY_CAPSLOCK, 0) == 0 && !caps && !caps_code && tap(KEY_A) == 'a'); /* Shift let go first */
     /* Henkan right of the space bar Chinese, Muhenkan left of it direct
      * input, Zenkaku_Hankaku (KEY_GRAVE on a JIS keyboard) the width: once
      * however long each is held. */
@@ -121,8 +204,8 @@ int main(int argc, char **argv)
     assert(tap(KEY_KATAKANAHIRAGANA) == K_ACT_IME_WIDTH && tap(KEY_GRAVE) == 0);
     assert(key(KEY_LEFTSHIFT, 1) == 0 && tap(KEY_SPACE) == K_ACT_IME_WIDTH && key(KEY_LEFTSHIFT, 0) == 0);
     rc_width = NULL;
-    puts("PASS jp106: JIS symbols (Shift+2 \", @, :, ^, \\ twice), Henkan_Mode/Muhenkan/Zenkaku_Hankaku "
-         "for the input method by keysym name, rc.conf's own keys instead");
+    puts("PASS jp106: JIS symbols (Shift+2 \", @, :, ^, \\ twice), Caps Lock on Shift+Eisu, "
+         "Henkan_Mode/Muhenkan/Zenkaku_Hankaku for the input method by keysym name, rc.conf's own keys instead");
 
     /* German: letters where its keys print them; bindings name letters. */
     assert(make("de") == 0);
@@ -179,6 +262,24 @@ int main(int argc, char **argv)
     assert(key(KEY_RIGHTALT, 1) == 0 && (keys_modifiers() & KEYS_ALT) && tap(KEY_Q) == 'q' && key(KEY_RIGHTALT, 0) == 0);
     puts("PASS uk: £ and € as typed; fr: é, AltGr's @, its dead ^; jp106: right Alt is Alt");
 
+    /* Modifier positions are the keymap's, including a Ctrl/Caps swap. */
+    char model_map[512];
+    snprintf(model_map, sizeof model_map, "%s/kbd-model-map", dir);
+    FILE *map = fopen(model_map, "w");
+    assert(map && fputs("jp-swap jp jp106 - ctrl:swapcaps\n", map) >= 0 && fclose(map) == 0);
+    assert(setenv("LOCACHY_KBD_MODEL_MAP", model_map, 1) == 0);
+    assert(make("jp-swap") == 0);
+    assert(keys_modifier(KEY_CAPSLOCK) == KEYS_CTRL && keys_modifier(KEY_LEFTCTRL) == KEYS_CAPS);
+    caps = 0;
+    assert(with(KEY_CAPSLOCK, KEY_C) == 3 && !caps && keys_modifiers() == 0);
+    assert(tap(KEY_LEFTCTRL) == 0 && caps && tap(KEY_A) == 'A');
+    assert(tap(KEY_LEFTCTRL) == 0 && !caps && tap(KEY_A) == 'a');
+    assert(key(KEY_CAPSLOCK, 1) == 0 && key(KEY_RIGHTCTRL, 1) == 0);
+    assert(key(KEY_CAPSLOCK, 0) == 0 && (keys_modifiers() & KEYS_CTRL) && tap(KEY_C) == 3);
+    assert(key(KEY_RIGHTCTRL, 0) == 0 && keys_modifiers() == 0);
+    assert(unsetenv("LOCACHY_KBD_MODEL_MAP") == 0);
+    puts("PASS layout modifiers: swapped Ctrl/Caps and independent simultaneous Control keys");
+
     /* No layout: refused, the table there (German) kept; no table at all: US. */
     assert(make("de") == 0);
     char kept[512];
@@ -193,5 +294,55 @@ int main(int argc, char **argv)
     assert(tap(KEY_Y) == 'y' && tap(KEY_HENKAN) == 0 && keys_layout_name("layout") == NULL);
     assert(keys_layout_load(kept) == 0 && tap(KEY_Y) == 'z'); /* the installer's own */
     puts("PASS an unknown keymap is refused (exit 1, nothing written); without a table, US");
+
+    /* JIS built in (the system's keymap), a US keyboard on USB with its own
+     * keymap in keyboards.conf: each types as its own keymap has it, the
+     * modifiers and Caps Lock of either count for both. */
+    assert(make("jp106") == 0);
+    snprintf(tables_dir, sizeof tables_dir, "%s/keymaps", dir);
+    snprintf(devices_path, sizeof devices_path, "%s/keyboards.conf", dir);
+    char us_table[600];
+    snprintf(us_table, sizeof us_table, "%s/us.table", tables_dir);
+    assert(mkdir(tables_dir, 0700) == 0 && run_keytable("us", us_table) == 0);
+    for (int i = 0; i < 2; i++) {
+        assert(pipe(board[i]) == 0);
+        fake_fd[i] = board[i][0];
+    }
+    keys_take(fake_fd, 2);
+    char id[KEYS_ID_SIZE];
+    assert(keys_device_id(fake_fd[1], id, sizeof id) == 0 && !strcmp(id, "1133:49948:USB_Keyboard"));
+    assert(keys_device_id(fake_fd[0], id, sizeof id) == 0 && !strcmp(id, "1:1:AT_Translated_Set_2_keyboard"));
+    assert(keys_set_keyboard("1133:49948:USB_Keyboard", "us") == 0);
+    assert(keys_set_keyboard("1133:49948:USB_Keyboard", "../us") < 0 && keys_set_keyboard("a b", "us") < 0);
+    assert(has_line(devices_path, "1133:49948:USB_Keyboard us\n"));
+    keys_reload();
+    assert(!strcmp(keys_device_layout(fake_fd[1], "layout"), "us") && !strcmp(keys_device_layout(fake_fd[0], "layout"), "jp"));
+    assert(on_tap(0, KEY_LEFTBRACE) == '@' && on_tap(1, KEY_LEFTBRACE) == '[');
+    assert(on(0, KEY_LEFTSHIFT, 1) == 0);
+    assert(on_tap(0, KEY_2) == '"' && on_tap(1, KEY_2) == '@'); /* Shift of one, 2 of either */
+    assert(on(0, KEY_LEFTSHIFT, 0) == 0);
+    assert(on(1, KEY_LEFTCTRL, 1) == 0 && on_tap(0, KEY_C) == 3 && on(1, KEY_LEFTCTRL, 0) == 0);
+    assert(on_tap(1, KEY_CAPSLOCK) == 0 && on_tap(0, KEY_A) == 'A' && on_tap(1, KEY_A) == 'A');
+    assert(on_tap(1, KEY_CAPSLOCK) == 0 && on_tap(0, KEY_A) == 'a');
+    assert(on_tap(0, KEY_HENKAN) == K_ACT_IME_CN && on_tap(1, KEY_GRAVE) == '`'); /* jp's width key is jp's */
+    assert(keys_device_char(fake_fd[1], KEY_APOSTROPHE, 0) == '\'' && keys_device_char(fake_fd[0], KEY_APOSTROPHE, 0) == ':');
+    assert(keys_device_action(fake_fd[0], KEY_GRAVE, 0, 0, 0, 0) == K_ACT_IME_WIDTH &&
+           keys_device_action(fake_fd[1], KEY_GRAVE, 0, 0, 0, 0) == 0);
+    struct keys_keyboard kb[4];
+    assert(keys_keyboards(kb, 4) == 2);
+    assert(!strcmp(kb[0].keymap, "jp106") && !kb[0].own && !strcmp(kb[0].name, "AT Translated Set 2 keyboard"));
+    assert(!strcmp(kb[1].keymap, "us") && kb[1].own && !kb[1].missing);
+    /* Its keymap's table missing: it types as the system's meanwhile, and says so. */
+    assert(keys_set_keyboard("1133:49948:USB_Keyboard", "de") == 0);
+    keys_reload();
+    assert(on_tap(1, KEY_LEFTBRACE) == '@' && keys_keyboards(kb, 4) == 2 && kb[1].own && kb[1].missing);
+    assert(keys_set_keyboard("1133:49948:USB_Keyboard", NULL) == 0 && !has_line(devices_path, "USB_Keyboard"));
+    keys_reload();
+    assert(keys_keyboards(kb, 4) == 2 && !kb[1].own && !strcmp(kb[1].keymap, "jp106"));
+    keys_release();
+    close(board[0][1]);
+    close(board[1][1]);
+    puts("PASS jp106 built in and a us keyboard of its own: [ and @, Shift+2 \" and @, Ctrl and Caps Lock of "
+         "either for both, its keymap saved by its sway name; a missing table falls back and is reported");
     return 0;
 }

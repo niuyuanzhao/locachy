@@ -108,6 +108,21 @@ int main(void)
     assert(output.size == 1 && output.data[0] == 3);
     free(output.data); memset(&output, 0, sizeof output);
     puts("PASS Ctrl+C remains an interrupt byte");
+    mods = KEYS_ALT;
+    send_key(-1, 'b'); output_is("\033b");
+    send_key(-1, K_LEFT); output_is("\033[1;3D");
+    mods = KEYS_CTRL;
+    send_key(-1, K_LEFT); output_is("\033[1;5D");
+    send_key(-1, K_DEL); output_is("\033[3;5~");
+    send_key(-1, K_F1); output_is("\033[1;5P");
+    send_key(-1, K_F1 + 4); output_is("\033[15;5~");
+    send_key(-1, '@');
+    assert(output.size == 1 && output.data[0] == 0);
+    free(output.data); memset(&output, 0, sizeof output);
+    mods = KEYS_SHIFT;
+    send_key(-1, '\t'); output_is("\033[Z");
+    mods = 0;
+    puts("PASS terminal modifiers: Alt text, Ctrl/Alt arrows, modified function keys and JIS Ctrl+@");
 
     static const char *const fkeys[] = { "\033OP", "\033OQ", "\033OR", "\033OS", "\033[15~", "\033[17~",
                                          "\033[18~", "\033[19~", "\033[20~", "\033[21~", "\033[23~", "\033[24~" };

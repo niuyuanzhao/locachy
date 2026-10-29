@@ -119,9 +119,41 @@ static double now(void)
     return (double)t.tv_sec + (double)t.tv_nsec / 1e9;
 }
 
+static int extended_screen(void)
+{
+    return screen_is_extended && screen_is_extended();
+}
+
+/* The cell at (x, y) and its output: when extended, the output's own cells
+ * at its native pixels, whatever output is drawn on; -1 off every output. */
+static int cell_at(int x, int y, int *col, int *row)
+{
+    if (!extended_screen()) {
+        screen_cell_at(x, y, col, row);
+        return 0;
+    }
+    int lx, ly, output = screen_output_at(x, y, &lx, &ly);
+    if (output < 0) return -1;
+    int previous = screen_output_select(output);
+    screen_cell_at(lx, ly, col, row);
+    if (previous >= 0) screen_output_select(previous);
+    return output;
+}
+
+/* Kept on the outputs when extended: moved only if its pixel is off them, so
+ * motions of less than a pixel add up. */
+static void keep_on_outputs(void)
+{
+    int x = (int)px, y = (int)py;
+    screen_output_project(&x, &y);
+    if (x != (int)px) px = x;
+    if (y != (int)py) py = y;
+}
+
 static void push(struct pointer_event e)
 {
-    screen_cell_at(e.x, e.y, &e.col, &e.row);
+    e.output = cell_at(e.x, e.y, &e.col, &e.row);
+    if (e.output < 0) return;
     e.buttons = held;
     if (qlen > 0) {
         struct pointer_event *tail = &queue[(qhead + qlen - 1) % QUEUE];
@@ -148,6 +180,24 @@ static void show_cursor(void)
     screen_cursor_visible(!touch_hid && (nmice > 0 || pen_near));
 }
 
+/* What absolute devices (touch screens, pens, absolute mice) point at, at
+ * (*x, *y) and *w by *h: the picture, or when extended the first output (the
+ * internal panel) in desktop coordinates, its native pixels over its scale,
+ * whatever output is drawn on. */
+EVENTS static void absolute_area(int *x, int *y, int *w, int *h)
+{
+    struct screen_output o;
+    if (extended_screen() && screen_output_get(0, &o) == 0) {
+        *x = o.x;
+        *y = o.y;
+        *w = o.width;
+        *h = o.height;
+        return;
+    }
+    *x = *y = 0;
+    screen_pixels(w, h);
+}
+
 /* The pointer at (px, py), kept on the picture. */
 EVENTS static void moved(void)
 {
@@ -156,9 +206,13 @@ EVENTS static void moved(void)
         touch_hid = 0;
         show_cursor();
     }
-    screen_pixels(&w, &h);
-    px = px < 0 ? 0 : px > w - 1 ? w - 1 : px;
-    py = py < 0 ? 0 : py > h - 1 ? h - 1 : py;
+    if (extended_screen()) {
+        keep_on_outputs();
+    } else {
+        screen_pixels(&w, &h);
+        px = px < 0 ? 0 : px > w - 1 ? w - 1 : px;
+        py = py < 0 ? 0 : py > h - 1 ? h - 1 : py;
+    }
     screen_cursor_move((int)px, (int)py);
     push((struct pointer_event){ .x = (int)px, .y = (int)py });
 }
@@ -235,7 +289,7 @@ static double fingers_apart(void)
 EVENTS static void drag(double x, double y)
 {
     int col, row;
-    screen_cell_at((int)x, (int)y, &col, &row);
+    if (cell_at((int)x, (int)y, &col, &row) < 0) return;
     if (row != touch_row || col != touch_col) {
         push((struct pointer_event){ .x = (int)touch_x0, .y = (int)touch_y0,
                                      .wheel = row - touch_row, .hwheel = touch_col - col });
@@ -259,14 +313,14 @@ EVENTS static void touch_down(int slot, double x, double y, double xmm, double y
         touch_y0 = y;
         touch_xmm0 = xmm;
         touch_ymm0 = ymm;
-        screen_cell_at((int)x, (int)y, &touch_col, &touch_row);
+        cell_at((int)x, (int)y, &touch_col, &touch_row);
         arm(HOLD_S);
     } else if ((touch_state == TOUCH_PENDING || touch_state == TOUCH_SCROLL) && slot != touch_first) {
         touch_state = TOUCH_TWO;
         touch_second = slot;
         pinch_last = fingers_apart();
-        screen_cell_at((int)((touches[touch_first].x + x) / 2), (int)((touches[touch_first].y + y) / 2),
-                       &touch_col, &touch_row);
+        cell_at((int)((touches[touch_first].x + x) / 2), (int)((touches[touch_first].y + y) / 2),
+                &touch_col, &touch_row);
         arm(0);
     }
 }
@@ -414,10 +468,10 @@ static double axis(struct libinput_event_pointer *p, enum libinput_pointer_axis 
 }
 
 /* A pen over the picture (a screen's pen) or a tablet (all the picture). */
-static void pen_moved(struct libinput_event_tablet_tool *pen, int w, int h)
+static void pen_moved(struct libinput_event_tablet_tool *pen, int x, int y, int w, int h)
 {
-    px = libinput_event_tablet_tool_get_x_transformed(pen, (uint32_t)w);
-    py = libinput_event_tablet_tool_get_y_transformed(pen, (uint32_t)h);
+    px = x + libinput_event_tablet_tool_get_x_transformed(pen, (uint32_t)w);
+    py = y + libinput_event_tablet_tool_get_y_transformed(pen, (uint32_t)h);
     moved();
 }
 
@@ -436,8 +490,8 @@ static void handle(struct libinput_event *ev)
     struct libinput_device *d = libinput_event_get_device(ev);
     enum libinput_pointer_axis v = LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL;
     enum libinput_pointer_axis h = LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL;
-    int w, hgt;
-    screen_pixels(&w, &hgt);
+    int ax, ay, w, hgt;
+    absolute_area(&ax, &ay, &w, &hgt);
     switch (type) {
     case LIBINPUT_EVENT_DEVICE_ADDED:
     case LIBINPUT_EVENT_DEVICE_REMOVED: {
@@ -455,13 +509,13 @@ static void handle(struct libinput_event *ev)
     }
     case LIBINPUT_EVENT_POINTER_MOTION:
         /* Deltas are for a picture at scale 1, as on the shared display. */
-        px += libinput_event_pointer_get_dx(p) * screen_scale();
-        py += libinput_event_pointer_get_dy(p) * screen_scale();
+        px += libinput_event_pointer_get_dx(p) * (extended_screen() ? 1.0 : screen_scale());
+        py += libinput_event_pointer_get_dy(p) * (extended_screen() ? 1.0 : screen_scale());
         moved();
         break;
     case LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE:
-        px = libinput_event_pointer_get_absolute_x_transformed(p, (uint32_t)w);
-        py = libinput_event_pointer_get_absolute_y_transformed(p, (uint32_t)hgt);
+        px = ax + libinput_event_pointer_get_absolute_x_transformed(p, (uint32_t)w);
+        py = ay + libinput_event_pointer_get_absolute_y_transformed(p, (uint32_t)hgt);
         moved();
         break;
     case LIBINPUT_EVENT_POINTER_BUTTON:
@@ -478,8 +532,8 @@ static void handle(struct libinput_event *ev)
     case LIBINPUT_EVENT_TOUCH_DOWN:
     case LIBINPUT_EVENT_TOUCH_MOTION:
         (type == LIBINPUT_EVENT_TOUCH_DOWN ? touch_down : touch_motion)(
-            libinput_event_touch_get_seat_slot(t), libinput_event_touch_get_x_transformed(t, (uint32_t)w),
-            libinput_event_touch_get_y_transformed(t, (uint32_t)hgt), libinput_event_touch_get_x(t),
+            libinput_event_touch_get_seat_slot(t), ax + libinput_event_touch_get_x_transformed(t, (uint32_t)w),
+            ay + libinput_event_touch_get_y_transformed(t, (uint32_t)hgt), libinput_event_touch_get_x(t),
             libinput_event_touch_get_y(t));
         break;
     case LIBINPUT_EVENT_TOUCH_UP:
@@ -511,11 +565,11 @@ static void handle(struct libinput_event *ev)
                    LIBINPUT_TABLET_TOOL_PROXIMITY_STATE_IN;
         touch_hid = 0;
         show_cursor();
-        pen_moved(pen, w, hgt);
+        pen_moved(pen, ax, ay, w, hgt);
         break;
     case LIBINPUT_EVENT_TABLET_TOOL_AXIS:
     case LIBINPUT_EVENT_TABLET_TOOL_TIP:
-        pen_moved(pen, w, hgt);
+        pen_moved(pen, ax, ay, w, hgt);
         if (type == LIBINPUT_EVENT_TABLET_TOOL_TIP) {
             button(BTN_LEFT, libinput_event_tablet_tool_get_tip_state(pen) == LIBINPUT_TABLET_TOOL_TIP_DOWN);
         }
@@ -634,6 +688,7 @@ void pointer_release(void)
 
 void pointer_resume(void)
 {
+    if (extended_screen()) keep_on_outputs();
     if (wanted && control_fd() >= 0) control_send(control_fd(), "pointer?", 8, NULL, 0);
 }
 

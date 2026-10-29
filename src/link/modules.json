@@ -26,7 +26,8 @@
       "pipewire-alsa",
       "pipewire-pulse",
       "wireplumber",
-      "wiremix"
+      "wiremix",
+      "sof-firmware"
     ],
     "rc": {
       "service_audio": "/usr/local/lib/locachy/audio-client",

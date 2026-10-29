@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""Complete an existing optional audio manifest without installing packages.
+Once only: the marker records that sof-firmware has been declared, so that a
+later removal by the user stays removed."""
+import os
+from pathlib import Path
+import stat
+import sys
+import tempfile
+
+LEGACY_AUDIO = {"pipewire", "pipewire-alsa", "pipewire-pulse", "wireplumber", "wiremix"}
+MARKER = "/var/lib/locachy/migrations/audio-sof-firmware"
+
+
+def record(marker):
+    marker.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    marker.write_text("sof-firmware declared for the optional audio module\n", encoding="utf-8")
+
+
+def migrate(path, marker=MARKER):
+    path, marker = Path(path), Path(marker)
+    if marker.exists() or not path.exists():
+        return False
+    if path.is_symlink() or not stat.S_ISREG(path.stat().st_mode):
+        raise ValueError("audio package manifest must be a regular file")
+    info = path.stat()
+    text = path.read_text(encoding="utf-8")
+    leaves = {line.split("#", 1)[0].strip() for line in text.splitlines()}
+    if "sof-firmware" in leaves:
+        record(marker)
+        return False
+    if not LEGACY_AUDIO <= leaves:
+        return False
+    if text and not text.endswith("\n"):
+        text += "\n"
+    text += "\n# Optional audio firmware\nsof-firmware\n"
+    fd, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    try:
+        os.fchmod(fd, stat.S_IMODE(info.st_mode))
+        if os.geteuid() == 0:
+            os.fchown(fd, info.st_uid, info.st_gid)
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            output.write(text)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    record(marker)
+    return True
+
+
+def main():
+    if len(sys.argv) > 3:
+        print("usage: migrate-audio-packages [MANIFEST [MARKER]]", file=sys.stderr)
+        return 2
+    try:
+        if migrate(*sys.argv[1:] or ["/etc/locachy/packages"]):
+            print("make: optional audio firmware declared; the next update (plan/apply) installs it")
+        return 0
+    except (OSError, ValueError) as error:
+        print(f"migrate-audio-packages: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

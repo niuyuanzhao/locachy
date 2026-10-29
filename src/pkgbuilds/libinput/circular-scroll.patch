@@ -1,19 +1,15 @@
-LOCachy: libinput's circular scrolling fixes and Panasonic round touchpads,
-not yet in a release, over libinput 1.32.0 (patch(1) skips this text):
-- 4cf1775d "quirks: system-panasonic: add CF-SV8 touchpad", merged into main
-  on 2026-10-17 (!1521);
-- !1514 "Implement support for Let's Note CF-FV, fixes for CF-SV1" at its head
-  3f0ccc4a (open): a ring touch held by tap to click keeps its zone (before,
-  circular scrolling never started with tapping on), a stop event when the
-  finger lifts, a single-finger gesture only, the ring measured from the
-  reachable edge, the CF-FV1 quirk and tests.
-Drop it when Arch's libinput has them.
+LOCachy: upstream libinput 1.32 circular scrolling fixes, Panasonic quirks,
+a configurable unitless ring width with 300ms dwell, and two-finger scrolling.
+
+The original fixes include upstream !1514 and the CF-SV8 quirk (!1521).
+AttrCircularScrollRingWidth and AttrCircularScrollDwell use libinput local
+quirks; they do not require a separate input daemon. The ring dwell uses
+libinput timers and yields to normal multi-finger scrolling and gestures.
 
 diff --git a/meson.build b/meson.build
-index f948c902..9b3c63c1 100644
 --- a/meson.build
 +++ b/meson.build
-@@ -915,6 +915,7 @@ if get_option('tests')
+@@ -915,6 +915,7 @@
  		'test/litest-device-nexus4-touch-screen.c',
  		'test/litest-device-magic-trackpad.c',
  		'test/litest-device-panasonic-cf-sv1.c',
@@ -22,10 +18,9 @@ index f948c902..9b3c63c1 100644
  		'test/litest-device-mouse-wheel-tilt.c',
  		'test/litest-device-mouse-wheel-hires-disabled.c',
 diff --git a/quirks/50-system-panasonic.quirks b/quirks/50-system-panasonic.quirks
-index b47ab938..68857ce1 100644
 --- a/quirks/50-system-panasonic.quirks
 +++ b/quirks/50-system-panasonic.quirks
-@@ -8,3 +8,17 @@ MatchVendor=0x06CB
+@@ -8,3 +8,17 @@
  MatchProduct=0xCDEA
  MatchDMIModalias=dmi:*svnPanasonicCorporation*:pnCFSV1*
  ModelCircularTouchpad=1
@@ -44,55 +39,106 @@ index b47ab938..68857ce1 100644
 +MatchDMIModalias=dmi:*svnPanasonicCorporation*:pnCFFV1*
 +ModelCircularTouchpad=1
 diff --git a/src/evdev-mt-touchpad-circular-scroll.c b/src/evdev-mt-touchpad-circular-scroll.c
-index aa265947..d312ab24 100644
 --- a/src/evdev-mt-touchpad-circular-scroll.c
 +++ b/src/evdev-mt-touchpad-circular-scroll.c
-@@ -32,6 +32,12 @@
-  * on small pads. */
- #define CIRCULAR_SCROLL_RING_WIDTH_MM 8.0
+@@ -27,10 +27,10 @@
  
-+/* The device reports the center of the finger contact. A finger on the
-+ * rim of the pad is reported approximately 5mm inside the axis range.
-+ * Measure the ring inward from this reachable edge, not from the axis
-+ * edge. */
-+#define CIRCULAR_SCROLL_EDGE_MARGIN_MM 5.0
-+
+ #include "evdev-mt-touchpad.h"
+ 
+-/* Physical width of the ring zone. A human finger is roughly 10mm wide;
+- * 8mm gives a comfortable target without eating the inner pointer area
+- * on small pads. */
+-#define CIRCULAR_SCROLL_RING_WIDTH_MM 8.0
++/* Relative ring width: the outer part of the reported radius. This is
++ * a unitless device setting, not a physical-distance calibration. */
++#define CIRCULAR_SCROLL_RING_WIDTH 25
++#define CIRCULAR_SCROLL_DWELL_MS 300
+ 
  /* Near dead-centre the polar angle is meaningless: atan2 swings by π
   * across a one-pixel crossing of the origin, and small noise on dx or
-  * dy produces wild angle deltas. Within this radius of the centre we
-@@ -92,6 +98,7 @@ tp_circular_scroll_reset_touch(struct tp_touch *t)
+@@ -46,6 +46,7 @@
+ 	switch (state) {
+ 	CASE_RETURN_STRING(CIRCULAR_SCROLL_TOUCH_STATE_NONE);
+ 	CASE_RETURN_STRING(CIRCULAR_SCROLL_TOUCH_STATE_INNER);
++	CASE_RETURN_STRING(CIRCULAR_SCROLL_TOUCH_STATE_PENDING);
+ 	CASE_RETURN_STRING(CIRCULAR_SCROLL_TOUCH_STATE_RING);
+ 	}
+ 	return NULL;
+@@ -88,15 +89,54 @@
+ static void
+ tp_circular_scroll_reset_touch(struct tp_touch *t)
+ {
++	libinput_timer_cancel(&t->scroll.circular.timer);
+ 	t->scroll.circular.state = CIRCULAR_SCROLL_TOUCH_STATE_NONE;
  	/* NAN signals "no valid baseline angle"; the next frame in
  	 * RING state will set a fresh baseline without emitting. */
  	t->scroll.circular.prev_angle = NAN;
 +	t->scroll.circular.scrolling = false;
++}
++
++static void
++tp_circular_scroll_dwell_timeout(usec_t time, void *data)
++{
++	(void)time;
++	struct tp_touch *t = data;
++	struct tp_dispatch *tp = t->tp;
++
++	if (tp->scroll.method != LIBINPUT_CONFIG_SCROLL_CIRCULAR ||
++	    t->scroll.circular.state != CIRCULAR_SCROLL_TOUCH_STATE_PENDING ||
++	    tp->nfingers_down != 1 || t->palm.state != PALM_NONE ||
++	    tp_thumb_ignored(tp, t))
++		return;
++
++	t->scroll.circular.state = CIRCULAR_SCROLL_TOUCH_STATE_RING;
++	t->scroll.circular.prev_angle = tp_circular_scroll_angle(tp, &t->point);
  }
  
  void
-@@ -106,9 +113,13 @@ tp_circular_scroll_init(struct tp_dispatch *tp, struct evdev_device *device)
+ tp_circular_scroll_init(struct tp_dispatch *tp, struct evdev_device *device)
+ {
++	struct tp_touch *t;
++	unsigned int dwell = CIRCULAR_SCROLL_DWELL_MS;
++	unsigned int width = CIRCULAR_SCROLL_RING_WIDTH;
++	_unref_(quirks) *q = libinput_device_get_quirks(&device->base);
++
++	if (q) {
++		quirks_get_uint32(q, QUIRK_ATTR_CIRCULAR_SCROLL_RING_WIDTH, &width);
++		quirks_get_uint32(q, QUIRK_ATTR_CIRCULAR_SCROLL_DWELL, &dwell);
++	}
++	tp->scroll.circular.dwell = usec_from_millis(dwell);
++	tp_for_each_touch(tp, t) {
++		char name[64];
++		snprintf(name, sizeof name, "%s (%d) circular-scroll",
++			 evdev_device_get_sysname(device), t->index);
++		libinput_timer_init(&t->scroll.circular.timer,
++				    tp_libinput_context(tp), name,
++				    tp_circular_scroll_dwell_timeout, t);
++		tp_circular_scroll_reset_touch(t);
++	}
++
+ 	if (!evdev_device_has_model_quirk(device, QUIRK_MODEL_CIRCULAR_TOUCHPAD))
+ 		return;
+ 
+@@ -106,53 +146,36 @@
  	tp->scroll.circular.center.y =
  		(device->abs.absinfo_y->maximum + device->abs.absinfo_y->minimum) / 2;
  
 -	/* Convert the 8mm ring width into device units by asking the
 -	 * evdev helper for a vector from (0,0) to (RING_WIDTH,RING_WIDTH) mm
 -	 * and taking the magnitude along one axis. */
-+	/* Convert the edge margin and the ring width to device units.
-+	 * Use the X component of a vector from (0,0) to (mm,mm). */
-+	struct phys_coords margin_mm = {
-+		.x = CIRCULAR_SCROLL_EDGE_MARGIN_MM,
-+		.y = CIRCULAR_SCROLL_EDGE_MARGIN_MM,
-+	};
-+	struct device_coords margin = evdev_device_mm_to_units(device, &margin_mm);
- 	struct phys_coords ring_mm = {
- 		.x = CIRCULAR_SCROLL_RING_WIDTH_MM,
- 		.y = CIRCULAR_SCROLL_RING_WIDTH_MM,
-@@ -120,18 +131,17 @@ tp_circular_scroll_init(struct tp_dispatch *tp, struct evdev_device *device)
+-	struct phys_coords ring_mm = {
+-		.x = CIRCULAR_SCROLL_RING_WIDTH_MM,
+-		.y = CIRCULAR_SCROLL_RING_WIDTH_MM,
+-	};
+-	struct device_coords ring_offset = evdev_device_mm_to_units(device, &ring_mm);
+-
+ 	int32_t radius_x =
+ 		(device->abs.absinfo_x->maximum - device->abs.absinfo_x->minimum) / 2;
  	int32_t radius_y =
  		(device->abs.absinfo_y->maximum - device->abs.absinfo_y->minimum) / 2;
  	int32_t radius = min(radius_x, radius_y);
 -	int32_t inner_radius = max(radius - ring_offset.x, radius / 2);
-+	/* The largest radius the device can report for a finger center. */
-+	int32_t reachable_radius = max(radius - margin.x, radius / 2);
-+	int32_t inner_radius = max(reachable_radius - ring_offset.x, radius / 2);
++	int32_t inner_radius = radius * (100 - width) / 100;
  
  	tp->scroll.circular.ring_threshold_sq = inner_radius * inner_radius;
  
@@ -103,54 +149,93 @@ index aa265947..d312ab24 100644
 -	 * angular rotation produces the same scroll regardless of where
 -	 * within the ring the finger currently sits, preserving the
 -	 * "rotate tighter near the centre to scroll faster" feel. */
--	int32_t ring_ref_radius = (radius + inner_radius) / 2;
-+	/* Reference radius of the virtual scroll wheel: the middle of the
-+	 * reachable ring. The scroll value is the arc length on a circle
-+	 * of this radius, not on the path of the finger. Thus the same
-+	 * rotation gives the same scroll at each position in the ring. */
-+	int32_t ring_ref_radius = (reachable_radius + inner_radius) / 2;
++	/* Arc length uses the middle of the configured ring as its radius. */
+ 	int32_t ring_ref_radius = (radius + inner_radius) / 2;
  	tp->scroll.circular.ring_reference_radius = ring_ref_radius;
  
- 	/* Convert the dead-zone radius to device units the same way as
-@@ -181,8 +191,35 @@ tp_circular_scroll_handle_state(struct tp_dispatch *tp, usec_t time)
- 			 * prevents accidental mode-flipping mid-gesture
- 			 * and lets the inner disc be used as a normal
- 			 * pointer area even when the finger strays
+-	/* Convert the dead-zone radius to device units the same way as
+-	 * the ring width. The X axis component is taken as the radius;
+-	 * for square pads the X and Y projections are identical. */
++	/* Only the centre singularity guard uses device resolution. */
+ 	struct phys_coords dead_mm = {
+ 		.x = CIRCULAR_SCROLL_DEAD_ZONE_RADIUS_MM,
+ 		.y = CIRCULAR_SCROLL_DEAD_ZONE_RADIUS_MM,
+ 	};
+ 	struct device_coords dead_zone = evdev_device_mm_to_units(device, &dead_mm);
+ 	tp->scroll.circular.dead_zone_radius_sq = dead_zone.x * dead_zone.x;
+-
+-	struct tp_touch *t;
+-	tp_for_each_touch(tp, t)
+-		tp_circular_scroll_reset_touch(t);
+ }
+ 
+ void
+ tp_remove_circular_scroll(struct tp_dispatch *tp)
+ {
+-	/* Nothing to tear down — no timers, no allocations. */
++	struct tp_touch *t;
++	tp_for_each_touch(tp, t) {
++		libinput_timer_cancel(&t->scroll.circular.timer);
++		libinput_timer_destroy(&t->scroll.circular.timer);
++	}
+ }
+ 
+ void
+@@ -162,6 +185,18 @@
+ 
+ 	if (tp->scroll.method != LIBINPUT_CONFIG_SCROLL_CIRCULAR)
+ 		return;
++
++	if (tp->nfingers_down > 1) {
++		const struct normalized_coords zero = { 0.0, 0.0 };
++		tp_for_each_touch(tp, t) {
++			libinput_timer_cancel(&t->scroll.circular.timer);
++			if (t->scroll.circular.scrolling)
++				evdev_notify_axis_finger(tp->device, time,
++					bit(LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL), &zero);
++			t->scroll.circular.scrolling = false;
++			t->scroll.circular.state = CIRCULAR_SCROLL_TOUCH_STATE_INNER;
++		}
++	}
+ 
+ 	tp_for_each_touch(tp, t) {
+ 		enum tp_circular_scroll_touch_state prev_state;
+@@ -176,27 +211,38 @@
+ 		case TOUCH_HOVERING:
+ 			break;
+ 		case TOUCH_BEGIN:
+-			/* Intent lock: whichever zone the touch starts in
+-			 * is where it stays for its entire lifetime. This
+-			 * prevents accidental mode-flipping mid-gesture
+-			 * and lets the inner disc be used as a normal
+-			 * pointer area even when the finger strays
 -			 * briefly into the ring. */
 -			if (tp_circular_scroll_point_on_ring(tp, &t->point)) {
-+			 * briefly into the ring.
-+			 *
-+			 * Circular scroll is a one-finger gesture. A touch
-+			 * that starts while other fingers are down is part
-+			 * of a multi-finger gesture. Send it to the gesture
-+			 * code, also when it is on the ring. On a round pad
-+			 * the outer fingers of a swipe are always on the
-+			 * ring. Also release a ring touch that has not
-+			 * scrolled yet. The fingers of one gesture usually
-+			 * start in different frames. */
-+			if (tp->nfingers_down > 1) {
-+				struct tp_touch *other;
-+
-+				tp_for_each_touch(tp, other) {
-+					if (other != t &&
-+					    other->scroll.circular.state ==
-+						    CIRCULAR_SCROLL_TOUCH_STATE_RING &&
-+					    !other->scroll.circular.scrolling) {
-+						evdev_log_debug(
-+							tp->device,
-+							"circular-scroll: touch %d released to multi-finger gesture\n",
-+							other->index);
-+						other->scroll.circular.state =
-+							CIRCULAR_SCROLL_TOUCH_STATE_INNER;
-+					}
-+				}
-+				t->scroll.circular.state =
-+					CIRCULAR_SCROLL_TOUCH_STATE_INNER;
-+			} else if (tp_circular_scroll_point_on_ring(tp, &t->point)) {
- 				t->scroll.circular.state =
- 					CIRCULAR_SCROLL_TOUCH_STATE_RING;
- 				t->scroll.circular.prev_angle =
-@@ -197,6 +234,17 @@ tp_circular_scroll_handle_state(struct tp_dispatch *tp, usec_t time)
+-				t->scroll.circular.state =
+-					CIRCULAR_SCROLL_TOUCH_STATE_RING;
+-				t->scroll.circular.prev_angle =
+-					tp_circular_scroll_angle(tp, &t->point);
++			if (tp->nfingers_down == 1 &&
++			    tp_circular_scroll_point_on_ring(tp, &t->point)) {
++				t->scroll.circular.state = CIRCULAR_SCROLL_TOUCH_STATE_PENDING;
++				if (usec_as_uint64_t(tp->scroll.circular.dwell) == 0)
++					tp_circular_scroll_dwell_timeout(time, t);
++				else
++					libinput_timer_set(&t->scroll.circular.timer,
++							   usec_add(time, tp->scroll.circular.dwell));
+ 			} else {
+-				t->scroll.circular.state =
+-					CIRCULAR_SCROLL_TOUCH_STATE_INNER;
++				t->scroll.circular.state = CIRCULAR_SCROLL_TOUCH_STATE_INNER;
+ 			}
+ 			break;
+ 		case TOUCH_UPDATE:
+-			/* State is locked from TOUCH_BEGIN. Do nothing. */
++			if (t->scroll.circular.state == CIRCULAR_SCROLL_TOUCH_STATE_PENDING &&
++			    !tp_circular_scroll_point_on_ring(tp, &t->point)) {
++				libinput_timer_cancel(&t->scroll.circular.timer);
++				t->scroll.circular.state = CIRCULAR_SCROLL_TOUCH_STATE_INNER;
++			}
  			break;
  		case TOUCH_MAYBE_END:
  		case TOUCH_END:
@@ -168,7 +253,7 @@ index aa265947..d312ab24 100644
  			tp_circular_scroll_reset_touch(t);
  			break;
  		}
-@@ -285,6 +333,7 @@ tp_circular_scroll_post_events(struct tp_dispatch *tp, usec_t time)
+@@ -285,6 +331,7 @@
  					 time,
  					 bit(LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL),
  					 &normalized);
@@ -176,7 +261,7 @@ index aa265947..d312ab24 100644
  	}
  
  	/* Return 0: we don't own the whole frame. Pointer motion for
-@@ -304,13 +353,19 @@ tp_circular_scroll_stop_events(struct tp_dispatch *tp, usec_t time)
+@@ -304,13 +351,19 @@
  		return;
  
  	tp_for_each_touch(tp, t) {
@@ -203,21 +288,174 @@ index aa265947..d312ab24 100644
  		tp_circular_scroll_reset_touch(t);
  	}
  }
+@@ -322,6 +375,7 @@
+ 
+ 	tp_for_each_touch(tp, t) {
+ 		switch (t->scroll.circular.state) {
++		case CIRCULAR_SCROLL_TOUCH_STATE_PENDING:
+ 		case CIRCULAR_SCROLL_TOUCH_STATE_RING:
+ 			return true;
+ 		case CIRCULAR_SCROLL_TOUCH_STATE_NONE:
+@@ -342,6 +396,7 @@
+ 	/* Touches on the ring are owned by scroll; inner touches are free
+ 	 * to drive pointer motion. */
+ 	switch (t->scroll.circular.state) {
++	case CIRCULAR_SCROLL_TOUCH_STATE_PENDING:
+ 	case CIRCULAR_SCROLL_TOUCH_STATE_RING:
+ 		return false;
+ 	case CIRCULAR_SCROLL_TOUCH_STATE_INNER:
 diff --git a/src/evdev-mt-touchpad.h b/src/evdev-mt-touchpad.h
-index 48375b7c..0583fc89 100644
 --- a/src/evdev-mt-touchpad.h
 +++ b/src/evdev-mt-touchpad.h
-@@ -275,6 +275,7 @@ struct tp_touch {
+@@ -157,6 +157,7 @@
+ enum tp_circular_scroll_touch_state {
+ 	CIRCULAR_SCROLL_TOUCH_STATE_NONE,
+ 	CIRCULAR_SCROLL_TOUCH_STATE_INNER, /* in the inner disc, pointer motion */
++	CIRCULAR_SCROLL_TOUCH_STATE_PENDING, /* edge dwell before scrolling */
+ 	CIRCULAR_SCROLL_TOUCH_STATE_RING,  /* on the outer ring, scrolling */
+ };
+ 
+@@ -275,6 +276,8 @@
  		struct {
  			enum tp_circular_scroll_touch_state state;
  			double prev_angle; /* radians, from center */
 +			bool scrolling;    /* true after the first scroll event */
++			struct libinput_timer timer;
  		} circular;
  	} scroll;
  
+@@ -451,6 +454,7 @@
+ 			struct device_coords center; /* device units */
+ 			int32_t ring_threshold_sq; /* squared distance, device units */
+ 			int32_t ring_reference_radius; /* device units */
++			usec_t dwell;
+ 			int32_t dead_zone_radius_sq;   /* squared distance, device units
+ 							*/
+ 		} circular;
+diff --git a/src/evdev-mt-touchpad.c b/src/evdev-mt-touchpad.c
+--- a/src/evdev-mt-touchpad.c
++++ b/src/evdev-mt-touchpad.c
+@@ -3135,10 +3135,10 @@
+ {
+ 	uint32_t methods = LIBINPUT_CONFIG_SCROLL_EDGE;
+ 
+-	/* Round touchpads use circular scroll exclusively — edge and
+-	 * two-finger scroll are both ill-suited to the geometry. */
++	/* Circular scrolling adds a one-finger ring without removing the
++	 * ordinary multi-finger scroll method. */
+ 	if (evdev_device_has_model_quirk(tp->device, QUIRK_MODEL_CIRCULAR_TOUCHPAD))
+-		return LIBINPUT_CONFIG_SCROLL_CIRCULAR;
++		methods |= LIBINPUT_CONFIG_SCROLL_CIRCULAR;
+ 
+ 	/* Any movement with more than one finger has random cursor
+ 	 * jumps. Don't allow for 2fg scrolling on this device, see
+diff --git a/src/evdev-mt-touchpad-gestures.c b/src/evdev-mt-touchpad-gestures.c
+--- a/src/evdev-mt-touchpad-gestures.c
++++ b/src/evdev-mt-touchpad-gestures.c
+@@ -1677,7 +1677,8 @@
+ 	struct device_float_coords raw;
+ 	struct normalized_coords delta;
+ 
+-	if (tp->scroll.method != LIBINPUT_CONFIG_SCROLL_2FG)
++	if (tp->scroll.method != LIBINPUT_CONFIG_SCROLL_2FG &&
++	    tp->scroll.method != LIBINPUT_CONFIG_SCROLL_CIRCULAR)
+ 		return;
+ 
+ 	/* We may confuse a pinch for a scroll initially,
+@@ -1709,7 +1710,8 @@
+ 	struct device_float_coords raw;
+ 	struct normalized_coords delta;
+ 
+-	if (tp->scroll.method != LIBINPUT_CONFIG_SCROLL_2FG)
++	if (tp->scroll.method != LIBINPUT_CONFIG_SCROLL_2FG &&
++	    tp->scroll.method != LIBINPUT_CONFIG_SCROLL_CIRCULAR)
+ 		return;
+ 
+ 	/* We may confuse a pinch for a scroll initially,
+@@ -2081,7 +2083,8 @@
+ void
+ tp_gesture_stop_twofinger_scroll(struct tp_dispatch *tp, usec_t time)
+ {
+-	if (tp->scroll.method != LIBINPUT_CONFIG_SCROLL_2FG)
++	if (tp->scroll.method != LIBINPUT_CONFIG_SCROLL_2FG &&
++	    tp->scroll.method != LIBINPUT_CONFIG_SCROLL_CIRCULAR)
+ 		return;
+ 
+ 	evdev_stop_scroll(tp->device, time, LIBINPUT_POINTER_AXIS_SOURCE_FINGER);
+diff --git a/src/quirks.h b/src/quirks.h
+--- a/src/quirks.h
++++ b/src/quirks.h
+@@ -99,6 +99,8 @@
+ 	_QUIRK_LAST_MODEL_QUIRK_, /* Guard: do not modify */
+ 
+ 	QUIRK_ATTR_SIZE_HINT = 300,
++	QUIRK_ATTR_CIRCULAR_SCROLL_RING_WIDTH,
++	QUIRK_ATTR_CIRCULAR_SCROLL_DWELL,
+ 	QUIRK_ATTR_EVENT_CODE,
+ 	QUIRK_ATTR_INPUT_PROP,
+ 	QUIRK_ATTR_IS_VIRTUAL,
+diff --git a/src/quirks.c b/src/quirks.c
+--- a/src/quirks.c
++++ b/src/quirks.c
+@@ -299,6 +299,10 @@
+ 	case QUIRK_MODEL_WACOM_TOUCHPAD:
+ 		return "ModelWacomTouchpad";
+ 
++	case QUIRK_ATTR_CIRCULAR_SCROLL_RING_WIDTH:
++		return "AttrCircularScrollRingWidth";
++	case QUIRK_ATTR_CIRCULAR_SCROLL_DWELL:
++		return "AttrCircularScrollDwell";
+ 	case QUIRK_ATTR_SIZE_HINT:
+ 		return "AttrSizeHint";
+ 	case QUIRK_ATTR_TOUCH_SIZE_RANGE:
+@@ -791,7 +795,21 @@
+ 	bool b;
+ 	double d;
+ 
+-	if (streq(key, quirk_get_name(QUIRK_ATTR_SIZE_HINT))) {
++	if (streq(key, quirk_get_name(QUIRK_ATTR_CIRCULAR_SCROLL_RING_WIDTH))) {
++		p->id = QUIRK_ATTR_CIRCULAR_SCROLL_RING_WIDTH;
++		if (!safe_atou(value, &v) || v < 1 || v > 50)
++			goto out;
++		p->type = PT_UINT;
++		p->value.u = v;
++		rc = true;
++	} else if (streq(key, quirk_get_name(QUIRK_ATTR_CIRCULAR_SCROLL_DWELL))) {
++		p->id = QUIRK_ATTR_CIRCULAR_SCROLL_DWELL;
++		if (!safe_atou(value, &v) || v > 2000)
++			goto out;
++		p->type = PT_UINT;
++		p->value.u = v;
++		rc = true;
++	} else if (streq(key, quirk_get_name(QUIRK_ATTR_SIZE_HINT))) {
+ 		p->id = QUIRK_ATTR_SIZE_HINT;
+ 		if (!parse_dimension_property(value, &dim.x, &dim.y))
+ 			goto out;
+diff --git a/doc/user/device-quirks.rst b/doc/user/device-quirks.rst
+--- a/doc/user/device-quirks.rst
++++ b/doc/user/device-quirks.rst
+@@ -244,3 +244,19 @@
+     One of ``touchpad``, ``mouse``, ``pointingstick``, ``keyboard``, ``joystick``,
+     ``tablet``, ``tablet-pad``. Matches the corresponding ``ID_INPUT_*`` udev
+     property.
++
++Circular scrolling parameters
++=============================
++
++``AttrCircularScrollRingWidth`` is an unsigned, unitless setting from 1
++to 50, default 25. It specifies the outer percentage of the reported
++radius used as the circular ring. It does not depend on device resolution
++and must not be presented as a physical-distance measurement.
++
++``AttrCircularScrollDwell`` is the time, in milliseconds, a single contact
++must remain in the ring before circular scrolling arms. The default is
++300; accepted values are 0 through 2000. Moving into the pointer area or
++adding a finger cancels a pending ring contact. These attributes are used
++with ``ModelCircularTouchpad=1`` in a local device-quirk section. Circular
++mode retains normal two-finger horizontal and vertical scrolling and
++multi-finger gestures.
 diff --git a/test/litest-device-panasonic-cf-fv1.c b/test/litest-device-panasonic-cf-fv1.c
 new file mode 100644
-index 00000000..dd9d3678
 --- /dev/null
 +++ b/test/litest-device-panasonic-cf-fv1.c
 @@ -0,0 +1,106 @@
@@ -328,10 +566,9 @@ index 00000000..dd9d3678
 +	    .absinfo = absinfo,
 +	    .quirk_file = quirk_file, )
 diff --git a/test/litest.h b/test/litest.h
-index 533a95af..88160888 100644
 --- a/test/litest.h
 +++ b/test/litest.h
-@@ -439,6 +439,7 @@ enum litest_device_type {
+@@ -439,6 +439,7 @@
  	LITEST_GENERIC_PRESSUREPAD,
  	LITEST_MAGIC_TRACKPAD,
  	LITEST_PANASONIC_CF_SV1,
@@ -340,27 +577,87 @@ index 533a95af..88160888 100644
  	LITEST_SYNAPTICS_HOVER_SEMI_MT,
  	LITEST_SYNAPTICS_I2C,
 diff --git a/test/test-touchpad.c b/test/test-touchpad.c
-index e086b39a..2ee234c3 100644
 --- a/test/test-touchpad.c
 +++ b/test/test-touchpad.c
-@@ -1460,6 +1460,189 @@ START_TEST(touchpad_circular_scroll_method_change)
+@@ -1244,14 +1244,15 @@
  }
  END_TEST
  
-+/* Distance from the center to the inner edge of the ring, in percent
-+ * of the axis. Same geometry as tp_circular_scroll_init(): the 8mm ring
-+ * starts 5mm inside the axis edge. The inner disc is at least half the
-+ * radius. */
+-START_TEST(touchpad_circular_scroll_method_exclusive)
++START_TEST(touchpad_circular_scroll_method_coexists)
+ {
+ 	struct litest_device *dev = litest_current_device();
+ 	struct libinput_device *device = dev->libinput_device;
+ 	uint32_t methods;
+ 
+ 	methods = libinput_device_config_scroll_get_methods(device);
+-	litest_assert_int_eq(methods, (uint32_t)LIBINPUT_CONFIG_SCROLL_CIRCULAR);
++	litest_assert(methods & LIBINPUT_CONFIG_SCROLL_CIRCULAR);
++	litest_assert(methods & LIBINPUT_CONFIG_SCROLL_2FG);
+ }
+ END_TEST
+ 
+@@ -1323,6 +1324,8 @@
+ 	 * ("scroll up"). Natural scroll flips the sign in either case. */
+ 	int end_y = (direction == CIRCULAR_SCROLL_CW) ? 90 : 10;
+ 	litest_touch_down(dev, 0, 90, 50);
++	litest_dispatch(li);
++	litest_timeout(li, 310);
+ 	litest_touch_move_to(dev, 0, 90, 50, 50, end_y, 10);
+ 	litest_touch_up(dev, 0);
+ 
+@@ -1383,6 +1386,10 @@
+ 	int start_x = (start == CIRCULAR_SCROLL_START_INNER) ? 40 : 90;
+ 	int end_x = (start == CIRCULAR_SCROLL_START_INNER) ? 90 : 60;
+ 	litest_touch_down(dev, 0, start_x, 50);
++	if (start == CIRCULAR_SCROLL_START_RING) {
++		litest_dispatch(li);
++		litest_timeout(li, 310);
++	}
+ 	litest_touch_move_to(dev, 0, start_x, 50, end_x, 50, 10);
+ 	litest_touch_up(dev, 0);
+ 
+@@ -1410,6 +1417,8 @@
+ 	 * scroll event mid-gesture, of magnitude ~π × ring_reference_radius
+ 	 * device units — easily detectable by a non-empty queue. */
+ 	litest_touch_down(dev, 0, 90, 50);
++	litest_dispatch(li);
++	litest_timeout(li, 310);
+ 	litest_touch_move_to(dev, 0, 90, 50, 10, 50, 10);
+ 	litest_touch_up(dev, 0);
+ 
+@@ -1437,6 +1446,8 @@
+ 	litest_assert_enum_eq(status, LIBINPUT_CONFIG_STATUS_SUCCESS);
+ 
+ 	litest_touch_down(dev, 0, 90, 50);
++	litest_dispatch(li);
++	litest_timeout(li, 310);
+ 	litest_touch_move_to(dev, 0, 90, 50, 50, 90, 10);
+ 	litest_touch_up(dev, 0);
+ 
+@@ -1452,11 +1463,296 @@
+ 	litest_assert_enum_eq(status, LIBINPUT_CONFIG_STATUS_SUCCESS);
+ 
+ 	litest_touch_down(dev, 0, 90, 50);
++	litest_dispatch(li);
++	litest_timeout(li, 310);
+ 	litest_touch_move_to(dev, 0, 90, 50, 50, 90, 10);
+ 	litest_touch_up(dev, 0);
+ 
+ 	litest_dispatch(li);
+ 	litest_assert_only_axis_events(li, LIBINPUT_EVENT_POINTER_SCROLL_FINGER);
++}
++END_TEST
++
++/* The default unitless ring width is the outer 25% of the reported
++ * radius. This boundary must not depend on advertised resolution. */
 +static double
 +touchpad_circular_scroll_ring_inner_pct(struct litest_device *dev)
 +{
 +	const struct input_absinfo *abs = libevdev_get_abs_info(dev->evdev, ABS_X);
 +	int range = abs->maximum - abs->minimum;
 +	int radius = range / 2;
-+	int margin = 5 * abs->resolution;
-+	int ring = 8 * abs->resolution;
-+	int reachable = max(radius - margin, radius / 2);
-+	int inner = max(reachable - ring, radius / 2);
++	int inner = radius * (100 - 25) / 100;
 +
 +	return 100.0 * inner / range;
 +}
@@ -415,6 +712,8 @@ index e086b39a..2ee234c3 100644
 +	/* A touch just outside the inner edge of the ring must scroll.
 +	 * This position is inside the area a finger can reach. */
 +	litest_touch_down(dev, 0, 50 + inner + 1, 50);
++	litest_dispatch(li);
++	litest_timeout(li, 310);
 +	litest_touch_move_to(dev, 0, 50 + inner + 1, 50, 50, 50 + inner + 1, 10);
 +	litest_touch_up(dev, 0);
 +
@@ -425,6 +724,8 @@ index e086b39a..2ee234c3 100644
 +
 +	/* A touch just inside the inner edge is a pointer touch. */
 +	litest_touch_down(dev, 0, 50 + inner - 2, 50);
++	litest_dispatch(li);
++	litest_timeout(li, 310);
 +	litest_touch_move_to(dev, 0, 50 + inner - 2, 50, 50, 50 + inner - 2, 10);
 +	litest_touch_up(dev, 0);
 +
@@ -445,6 +746,8 @@ index e086b39a..2ee234c3 100644
 +	litest_drain_events(li);
 +
 +	litest_touch_down(dev, 0, 90, 50);
++	litest_dispatch(li);
++	litest_timeout(li, 310);
 +	litest_touch_move_to(dev, 0, 90, 50, 50, 90, 10);
 +	litest_touch_up(dev, 0);
 +
@@ -459,6 +762,8 @@ index e086b39a..2ee234c3 100644
 +	/* A radial drag on the ring does not scroll. It must not send
 +	 * a stop event. */
 +	litest_touch_down(dev, 0, 90, 50);
++	litest_dispatch(li);
++	litest_timeout(li, 310);
 +	litest_touch_move_to(dev, 0, 90, 50, 75, 50, 10);
 +	litest_touch_up(dev, 0);
 +
@@ -467,41 +772,50 @@ index e086b39a..2ee234c3 100644
 +}
 +END_TEST
 +
++static double
++circular_scroll_sum_axis(struct libinput *li, enum libinput_pointer_axis axis)
++{
++	struct libinput_event *event;
++	double sum = 0;
++
++	litest_dispatch(li);
++	while ((event = libinput_get_event(li))) {
++		if (libinput_event_get_type(event) == LIBINPUT_EVENT_POINTER_SCROLL_FINGER) {
++			struct libinput_event_pointer *pointer = libinput_event_get_pointer_event(event);
++			if (libinput_event_pointer_has_axis(pointer, axis))
++				sum += libinput_event_pointer_get_scroll_value(pointer, axis);
++		}
++		libinput_event_destroy(event);
++	}
++	return sum;
++}
++
 +START_TEST(touchpad_circular_scroll_multifinger)
 +{
 +	struct litest_device *dev = litest_current_device();
 +	struct libinput *li = dev->libinput;
-+	int nscroll, nmotion, nstops;
-+	double last;
 +
 +	litest_enable_circular_scroll(dev);
-+	litest_drain_events(li);
-+
-+	/* Circular scroll is a one-finger gesture. Two fingers on the
-+	 * ring must go to the gesture code, also when they start in
-+	 * different frames. Neither finger must scroll. */
-+	litest_touch_down(dev, 0, 90, 50);
-+	litest_touch_down(dev, 1, 50, 90);
-+	litest_touch_move_two_touches(dev, 90, 50, 50, 90, -20, -20, 10);
-+	litest_touch_up(dev, 0);
-+	litest_touch_up(dev, 1);
-+
-+	touchpad_circular_scroll_count_events(li, &nscroll, &nmotion, &nstops, &last);
-+	litest_assert_int_eq(nscroll, 0);
-+	litest_drain_events(li);
-+
-+	/* A ring touch that scrolls continues to scroll when a second
-+	 * finger starts on the inner disc. */
-+	litest_touch_down(dev, 0, 90, 50);
-+	litest_touch_move_to(dev, 0, 90, 50, 70, 70, 5);
-+	litest_touch_down(dev, 1, 50, 50);
-+	litest_touch_move_to(dev, 0, 70, 70, 50, 90, 5);
-+	litest_touch_up(dev, 0);
-+	litest_touch_up(dev, 1);
-+
-+	touchpad_circular_scroll_count_events(li, &nscroll, &nmotion, &nstops, &last);
-+	litest_assert_int_gt(nscroll, 5);
-+	litest_assert_int_eq(nstops, 1);
++	for (int direction = 0; direction < 4; direction++) {
++		bool horizontal = direction < 2;
++		double distance = direction % 2 ? -20 : 20;
++		litest_drain_events(li);
++		/* The first contact is on the ring but the second arrives
++		 * before its dwell expires. Both belong to normal scrolling. */
++		double x1 = horizontal && distance > 0 ? 10 : 90;
++		double x2 = horizontal && distance > 0 ? 25 : 75;
++		litest_touch_down(dev, 0, x1, 50);
++		litest_touch_down(dev, 1, x2, 50);
++		litest_touch_move_two_touches(dev, x1, 50, x2, 50,
++				horizontal ? distance : 0,
++				horizontal ? 0 : distance, 20);
++		litest_touch_up(dev, 0);
++		litest_touch_up(dev, 1);
++		double sum = circular_scroll_sum_axis(li, horizontal ?
++			LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL :
++			LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL);
++		litest_assert_double_gt(sum * distance, 0);
++	}
 +}
 +END_TEST
 +
@@ -520,6 +834,8 @@ index e086b39a..2ee234c3 100644
 +	 * the scroll methods. This must not remove the zone of a ring
 +	 * touch that has not scrolled yet. */
 +	litest_touch_down(dev, 0, 90, 50);
++	litest_dispatch(li);
++	litest_timeout(li, 310);
 +	litest_touch_move_to(dev, 0, 90, 50, 50, 90, 10);
 +	litest_touch_up(dev, 0);
 +
@@ -530,10 +846,102 @@ index e086b39a..2ee234c3 100644
 +}
 +END_TEST
 +
- static bool
- touchpad_has_top_palm_detect_size(struct litest_device *dev)
- {
-@@ -7777,6 +7960,10 @@ TEST_COLLECTION(touchpad)
++START_TEST(touchpad_circular_scroll_dwell)
++{
++	struct litest_device *dev = litest_current_device();
++	struct libinput *li = dev->libinput;
++	int nscroll, nmotion, nstops;
++	double last;
++
++	litest_enable_circular_scroll(dev);
++	litest_drain_events(li);
++	litest_touch_down(dev, 0, 90, 50);
++	litest_dispatch(li);
++	litest_timeout(li, 100);
++	litest_touch_move_to(dev, 0, 90, 50, 88, 55, 3);
++	touchpad_circular_scroll_count_events(li, &nscroll, &nmotion, &nstops, &last);
++	litest_assert_int_eq(nscroll, 0);
++	litest_timeout(li, 250);
++	litest_touch_move_to(dev, 0, 88, 55, 70, 80, 10);
++	litest_touch_up(dev, 0);
++	touchpad_circular_scroll_count_events(li, &nscroll, &nmotion, &nstops, &last);
++	litest_assert_int_gt(nscroll, 0);
++	litest_assert_int_eq(nstops, 1);
++}
++END_TEST
++
++START_TEST(touchpad_circular_scroll_dwell_cancel)
++{
++	struct litest_device *dev = litest_current_device();
++	struct libinput *li = dev->libinput;
++	int nscroll, nmotion, nstops;
++	double last;
++
++	litest_enable_circular_scroll(dev);
++	litest_drain_events(li);
++	litest_touch_down(dev, 0, 90, 50);
++	litest_dispatch(li);
++	litest_timeout(li, 100);
++	litest_touch_move_to(dev, 0, 90, 50, 60, 50, 5);
++	litest_dispatch(li);
++	litest_timeout(li, 350);
++	litest_touch_move_to(dev, 0, 60, 50, 80, 80, 10);
++	litest_touch_up(dev, 0);
++	touchpad_circular_scroll_count_events(li, &nscroll, &nmotion, &nstops, &last);
++	litest_assert_int_eq(nscroll, 0);
++	litest_assert_int_gt(nmotion, 0);
++	/* Lifting a pending contact must also cancel its timer. */
++	litest_touch_down(dev, 0, 90, 50);
++	litest_touch_up(dev, 0);
++	litest_dispatch(li);
++	litest_timeout(li, 350);
++	litest_drain_events(li);
++	litest_touch_down(dev, 0, 50, 50);
++	litest_touch_move_to(dev, 0, 50, 50, 60, 55, 10);
++	litest_touch_up(dev, 0);
++	litest_assert_no_typed_events(li, LIBINPUT_EVENT_POINTER_SCROLL_FINGER);
++}
++END_TEST
++
++START_TEST(touchpad_circular_scroll_swipe)
++{
++	struct litest_device *dev = litest_current_device();
++	struct libinput *li = dev->libinput;
++	struct libinput_event *event;
++	int began = 0, ended = 0;
++
++	if (litest_slot_count(dev) < 3)
++		return LITEST_NOT_APPLICABLE;
++	litest_enable_circular_scroll(dev);
++	litest_drain_events(li);
++	litest_touch_down(dev, 0, 80, 45);
++	litest_touch_down(dev, 1, 70, 45);
++	litest_touch_down(dev, 2, 60, 45);
++	litest_touch_move_three_touches(dev, 80, 45, 70, 45, 60, 45, -30, 0, 20);
++	litest_touch_up(dev, 0);
++	litest_touch_up(dev, 1);
++	litest_touch_up(dev, 2);
++	litest_dispatch(li);
++	while ((event = libinput_get_event(li))) {
++		began += libinput_event_get_type(event) == LIBINPUT_EVENT_GESTURE_SWIPE_BEGIN;
++		ended += libinput_event_get_type(event) == LIBINPUT_EVENT_GESTURE_SWIPE_END;
++		libinput_event_destroy(event);
++	}
++	litest_assert_int_eq(began, 1);
++	litest_assert_int_eq(ended, 1);
+ }
+ END_TEST
+ 
+@@ -7760,7 +8056,7 @@
+ 	litest_add(touchpad_edge_scroll_into_area, LITEST_TOUCHPAD, LITEST_ANY | LITEST_CIRCULAR_TOUCHPAD);
+ 
+ 	litest_add(touchpad_circular_scroll_method_default, LITEST_CIRCULAR_TOUCHPAD, LITEST_ANY);
+-	litest_add(touchpad_circular_scroll_method_exclusive, LITEST_CIRCULAR_TOUCHPAD, LITEST_ANY);
++	litest_add(touchpad_circular_scroll_method_coexists, LITEST_CIRCULAR_TOUCHPAD, LITEST_ANY);
+ 	litest_with_parameters(params,
+ 			       "direction", 'I', 2,
+ 			       litest_named_i32(CIRCULAR_SCROLL_CW, "cw"),
+@@ -7777,6 +8073,13 @@
  	}
  	litest_add(touchpad_circular_scroll_dead_zone, LITEST_CIRCULAR_TOUCHPAD, LITEST_ANY);
  	litest_add(touchpad_circular_scroll_method_change, LITEST_CIRCULAR_TOUCHPAD, LITEST_ANY);
@@ -541,6 +949,55 @@ index e086b39a..2ee234c3 100644
 +	litest_add(touchpad_circular_scroll_stop_event, LITEST_CIRCULAR_TOUCHPAD, LITEST_ANY);
 +	litest_add(touchpad_circular_scroll_tap_enabled, LITEST_CIRCULAR_TOUCHPAD, LITEST_ANY);
 +	litest_add(touchpad_circular_scroll_multifinger, LITEST_CIRCULAR_TOUCHPAD, LITEST_ANY);
++	litest_add(touchpad_circular_scroll_dwell, LITEST_CIRCULAR_TOUCHPAD, LITEST_ANY);
++	litest_add(touchpad_circular_scroll_dwell_cancel, LITEST_CIRCULAR_TOUCHPAD, LITEST_ANY);
++	litest_add(touchpad_circular_scroll_swipe, LITEST_CIRCULAR_TOUCHPAD, LITEST_ANY);
  
  	litest_add(touchpad_left_handed, LITEST_TOUCHPAD|LITEST_BUTTON, LITEST_CLICKPAD);
  	litest_add_for_device(touchpad_left_handed_appletouch, LITEST_APPLETOUCH);
+diff --git a/test/test-quirks.c b/test/test-quirks.c
+--- a/test/test-quirks.c
++++ b/test/test-quirks.c
+@@ -1190,6 +1190,34 @@
+ 
+ 			litest_assert_double_eq(v, t->val);
+ 		}
++	}
++}
++END_TEST
++
++START_TEST(quirks_parse_circular_scroll)
++{
++	struct litest_device *dev = litest_current_device();
++	const struct qtest_uint widths[] = {
++		{ "25", true, 25 }, { "1", true, 1 }, { "50", true, 50 },
++		{ "0", false, 0 }, { "51", false, 0 }, { "7.5", false, 0 },
++	};
++	const struct qtest_uint dwells[] = {
++		{ "300", true, 300 }, { "0", true, 0 }, { "2000", true, 2000 },
++		{ "2001", false, 0 }, { "-1", false, 0 }, { "invalid", false, 0 },
++	};
++	ARRAY_FOR_EACH(widths, test) {
++		uint32_t value;
++		bool valid = test_attr_parse(dev, QUIRK_ATTR_CIRCULAR_SCROLL_RING_WIDTH,
++				test->str, (qparsefunc)quirks_get_uint32, &value);
++		litest_assert_int_eq(valid, test->success);
++		if (valid) litest_assert_int_eq(value, test->val);
++	}
++	ARRAY_FOR_EACH(dwells, test) {
++		uint32_t value;
++		bool valid = test_attr_parse(dev, QUIRK_ATTR_CIRCULAR_SCROLL_DWELL,
++				test->str, (qparsefunc)quirks_get_uint32, &value);
++		litest_assert_int_eq(valid, test->success);
++		if (valid) litest_assert_int_eq(value, test->val);
+ 	}
+ }
+ END_TEST
+@@ -1580,6 +1608,7 @@
+ 	litest_add_for_device(quirks_parse_range_attr, LITEST_MOUSE);
+ 	litest_add_for_device(quirks_parse_uint_attr, LITEST_MOUSE);
+ 	litest_add_for_device(quirks_parse_double_attr, LITEST_MOUSE);
++	litest_add_for_device(quirks_parse_circular_scroll, LITEST_MOUSE);
+ 	litest_add_for_device(quirks_parse_string_attr, LITEST_MOUSE);
+ 	litest_add_for_device(quirks_parse_bool_attr, LITEST_MOUSE);
+ 	litest_add_for_device(quirks_parse_integration_attr, LITEST_MOUSE);

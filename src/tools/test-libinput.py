@@ -165,7 +165,7 @@ pkgname = libinput-tools
         self.assertEqual(lock["upstream_pkgbase"], "libinput")
         self.assertEqual(lock["upstream_package"], "libinput")
         self.assertEqual(lock["package_version"], "1:1.32.0-1")
-        self.assertEqual(lock["gate"], "libinput-circular-scroll-v1")
+        self.assertEqual(lock["gate"], "libinput-circular-scroll-v2")
         self.assertEqual(sorted(lock["input_hashes"]), ["circular-scroll.patch", "library.patch"])
         wrapper = (lock_path.parent / "recipe/PKGBUILD").read_text()
         self.assertIn("pkgname='libinput'", wrapper)
@@ -216,6 +216,30 @@ package_libinput
         self.assertIn("+START_TEST(touchpad_circular_scroll_tap_enabled)", patch)
         for model in ("CF-SV8", "CF-FV1"):
             self.assertIn(f"+[Panasonic Let's Note {model} circular trackpad]", patch)
+
+    def test_ring_width_is_unitless_uint_and_dwell_keeps_milliseconds(self):
+        patch = (self.baseline / "circular-scroll.patch").read_text()
+        added = "\n".join(line[1:] for line in patch.splitlines()
+                          if line.startswith("+") and not line.startswith("+++"))
+        self.assertIn('return "AttrCircularScrollRingWidth"', added)
+        self.assertIn("#define CIRCULAR_SCROLL_RING_WIDTH 25", added)
+        self.assertIn("quirks_get_uint32(q, QUIRK_ATTR_CIRCULAR_SCROLL_RING_WIDTH, &width)", added)
+        self.assertIn("v < 1 || v > 50", added)
+        self.assertIn("radius * (100 - width) / 100", added)
+        self.assertIn("usec_from_millis(dwell)", added)
+        self.assertNotIn("AttrCircularScrollWidth", added)
+        self.assertNotIn("7.5mm", added)
+        self.assertNotIn("ring_mm", added)
+
+    def test_v2_contract_is_explicit_about_required_vm_behavior_proof(self):
+        contract = (SOURCE / "tools/test-libinput.sh").read_text()
+        self.assertIn("'id': 'libinput-circular-scroll-v2'", contract)
+        self.assertIn("'scope': 'installed-library-smoke'", contract)
+        self.assertIn("'release_tests_required': ['upstream-circular-litest', 'pointer-libinput-vm']", contract)
+        instructions = (SOURCE / "pkgbuilds/libinput/BEHAVIOR.md").read_text()
+        self.assertIn("--filter-test='touchpad_circular_scroll_*'", instructions)
+        self.assertIn("test-pointer-libinput.sh", instructions)
+        self.assertIn("smoke result alone is insufficient", instructions)
 
     def test_changed_patch_anchor_or_upstream_prepare_fail_closed(self):
         for recipe, expected in ((RECIPE.replace("-D documentation=false", "-D documentation=true"), "failed"),

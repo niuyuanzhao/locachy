@@ -4,6 +4,16 @@
 # session bus is service_session_bus's (bus-client); its state and
 # configuration are its own, in /var/lib/locachy/audio.
 set -eu
+: "${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required}"
+
+# Its messages and its servers' go to the kernel log (dmesg), as process 1's
+# do, not to the console process 1 has as stderr.
+log=/dev/kmsg
+[ -w "$log" ] || log=/dev/stderr
+say() { # LEVEL MESSAGE (kernel log level: 3 error, 4 warning)
+    printf '<%s>audio-client: %s\n' "$1" "$2" >>"$log"
+}
+exec 3>>"$log"
 
 mkdir -p -m 0755 /var/lib/locachy/audio
 
@@ -16,9 +26,11 @@ for _ in $(seq 1 100); do
     sleep 0.1
 done
 if [ -S /run/udev/control ]; then
-    timeout 30 udevadm trigger --action=add --subsystem-match=sound --settle || true
+    if ! timeout 30 udevadm trigger --action=add --subsystem-match=sound --settle 2>&3; then
+        say 4 "sound-device enumeration did not finish"
+    fi
 else
-    printf '<4>audio-client: no udevd (service_udev): no sound card will be found\n' >/dev/kmsg
+    say 4 "no udevd (service_udev): no sound card will be found"
 fi
 
 export XDG_STATE_HOME="/var/lib/locachy/audio"
@@ -32,7 +44,7 @@ for _ in $(seq 1 100); do
     sleep 0.1
 done
 [ -S "$XDG_RUNTIME_DIR/bus" ] || {
-    printf '<4>audio-client: no session bus (service_session_bus) yet\n' >/dev/kmsg
+    say 4 "no session bus (service_session_bus) yet"
     exit 1
 }
 
@@ -45,31 +57,46 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 0' TERM INT
+
+# A server's socket: one slow to start is waited for (30 s, in 0.05 s steps);
+# one that has ended has failed, and the group ends with it.
+socket_wait=600
+await_socket() { # PID SOCKET NAME
+    local status=0
+    for _ in $(seq 1 "$socket_wait"); do
+        [ -S "$2" ] && return 0
+        if ! kill -0 "$1" 2>/dev/null; then
+            wait "$1" || status=$?
+            say 3 "$3 ended before creating $2 (status $status)"
+            exit "$((status ? status : 1))"
+        fi
+        sleep 0.05
+    done
+    say 3 "$3 did not create $2 in time"
+    exit 1
+}
+
 dbus-monitor --address "unix:path=$XDG_RUNTIME_DIR/bus" \
-    'type=signal,interface=org.freedesktop.DBus.Local,member=Disconnected' >/dev/null 2>&1 &
+    'type=signal,interface=org.freedesktop.DBus.Local,member=Disconnected' >/dev/null 2>&3 3>&- &
 children+=("$!")
-rm -f /run/user/0/pipewire-0 /run/user/0/pipewire-0.lock /run/user/0/pulse/native /run/user/0/pulse/pid
+rm -f "$XDG_RUNTIME_DIR/pipewire-0" "$XDG_RUNTIME_DIR/pipewire-0.lock" \
+    "$XDG_RUNTIME_DIR/pulse/native" "$XDG_RUNTIME_DIR/pulse/pid"
 
-/usr/bin/pipewire >/dev/null 2>&1 &
+/usr/bin/pipewire >/dev/null 2>&3 3>&- &
 children+=("$!")
+await_socket "$!" "$XDG_RUNTIME_DIR/pipewire-0" pipewire
+chmod 0666 "$XDG_RUNTIME_DIR/pipewire-0"
 
-for _ in $(seq 1 40); do
-    [ -S /run/user/0/pipewire-0 ] && break
-    sleep 0.05
-done
-chmod 0666 /run/user/0/pipewire-0 2>/dev/null || true
-
-/usr/bin/wireplumber >/dev/null 2>&1 &
+/usr/bin/wireplumber >/dev/null 2>&3 3>&- &
 children+=("$!")
 
-/usr/bin/pipewire-pulse >/dev/null 2>&1 &
+/usr/bin/pipewire-pulse >/dev/null 2>&3 3>&- &
 children+=("$!")
+await_socket "$!" "$XDG_RUNTIME_DIR/pulse/native" pipewire-pulse
+chmod 0755 "$XDG_RUNTIME_DIR/pulse"
+chmod 0666 "$XDG_RUNTIME_DIR/pulse/native"
 
-for _ in $(seq 1 40); do
-    [ -S /run/user/0/pulse/native ] && break
-    sleep 0.05
-done
-chmod 0755 /run/user/0/pulse 2>/dev/null || true
-chmod 0666 /run/user/0/pulse/native 2>/dev/null || true
-
-wait -n "${children[@]}"
+status=0
+wait -n "${children[@]}" || status=$?
+say 3 "an audio server or the session bus watch ended (status $status)"
+exit "$status"
