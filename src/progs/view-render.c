@@ -6,19 +6,23 @@
  * The formats are those of Okular's generators. MuPDF reads most of them;
  * DjVu is djvulibre's and PostScript libspectre's (Ghostscript), as in
  * Okular. What MuPDF cannot read is first made into something it can:
- * plain text into UTF-8 (its encoding detected), WebP, HEIF/AVIF, JPEG XL
- * and the images ImageMagick reads (ICO, MNG, PCX, SGI, TGA, XBM, XCF, XPM,
- * DDS, OpenEXR, Radiance HDR: view-image.c) into PAM, a G3/G4 fax into PNG,
- * DVI into PDF (dvipdfmx), gzip and bzip2 into what they hold. Comic books
- * (zip, tar, RAR, 7z or a folder) are a document of their images in
- * Okular's natural order, read by MuPDF's archive and image readers, or by
- * libarchive and the libraries above.
+ * plain text into UTF-8 (its encoding detected), WebP, HEIF/AVIF, JPEG XL,
+ * camera RAW (LibRaw) and the images ImageMagick reads (ICO, MNG, PCX, SGI,
+ * TGA, XBM, XCF, XPM, DDS, OpenEXR, Radiance HDR: view-image.c) into PAM, a
+ * G3/G4 fax into PNG, DVI into PDF (dvipdfmx), gzip and bzip2 into what they
+ * hold. Comic books (zip, tar, RAR, 7z or a folder) are a document of their
+ * images in Okular's natural order, read by MuPDF's archive and image
+ * readers, or by libarchive and the libraries above. OpenDocument text
+ * (Okular's ooo generator) is made XHTML for MuPDF, CHM (its chm generator,
+ * by chmlib) an EPUB of its pages; OpenRaster and Krita images are the
+ * merged image they carry.
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
 #include <archive.h>
 #include <archive_entry.h>
+#include <chm_lib.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -28,6 +32,7 @@
 #include <libdjvu/ddjvuapi.h>
 #include <libdjvu/miniexp.h>
 #include <libheif/heif.h>
+#include <libraw.h>
 #include <libspectre/spectre.h>
 #include <limits.h>
 #include <math.h>
@@ -226,6 +231,18 @@ static const char *base_name(const char *name)
 {
     const char *slash = strrchr(name, '/');
     return slash ? slash + 1 : name;
+}
+
+static int ext_is(const char *e, const char *list)
+{
+    char want[16];
+    for (const char *s = list; *s;) {
+        size_t n = strcspn(s, " ");
+        snprintf(want, sizeof want, "%.*s", (int)n, s);
+        if (!strcasecmp(e, want)) return 1;
+        s += n + (s[n] == ' ');
+    }
+    return 0;
 }
 
 /* Okular's natural order (generators/comicbook/qnatsort.cpp), case-sensitive
@@ -501,6 +518,66 @@ static fz_buffer *jxl_pam(const unsigned char *data, size_t n)
     return b;
 }
 
+/* Camera RAW, which kimageformats' raw plugin reads with LibRaw: by the
+ * plugin's suffixes, or the signatures shared-mime-info knows them by (the
+ * TIFF-based ones have none; their names tell). */
+static int is_raw(const unsigned char *m, size_t n, const char *name)
+{
+    return ext_is(extension(name), "3fr arw crw cr2 cr3 dcr dng erf fff iiq k25 kdc mdc mef mos mrw nef nrw orf pef "
+                                   "raf raw rwl rw2 sr2 srf srw sti x3f") ||
+           (n >= 14 && !memcmp(m, "II\x1A\0\0\0HEAPCCDR", 14)) || (n >= 16 && !memcmp(m, "FUJIFILMCCD-RAW ", 16)) ||
+           (n >= 4 && !memcmp(m, "\0MRM", 4)) || (n >= 8 && !memcmp(m, "IIRO\x08\0\0\0", 8)) ||
+           (n >= 8 && !memcmp(m, "IIU\0\x08\0\0\0", 8)) || (n >= 8 && !memcmp(m, "IIU\0\x18\0\0\0", 8)) ||
+           (n >= 4 && !memcmp(m, "FOVb", 4));
+}
+
+/* The image as the plugin makes it by default: the camera's white balance
+ * (the image's average without one), AHD interpolation, sRGB, the camera's
+ * orientation applied; 8 bits a sample here, as view shows them. */
+static fz_buffer *raw_pam(const unsigned char *data, size_t n)
+{
+    static const char *const tuple[] = { NULL, "GRAYSCALE", NULL, "RGB", "RGB_ALPHA" };
+    libraw_data_t *lr = libraw_init(0);
+    if (!lr) fz_throw(ctx, FZ_ERROR_LIBRARY, "cannot start LibRaw");
+    lr->params.use_camera_wb = 1;
+    lr->params.use_auto_wb = 1;
+    lr->params.user_qual = 3;
+    lr->params.output_color = 1;
+    lr->params.output_bps = 8;
+    libraw_processed_image_t *img = NULL;
+    fz_buffer *b = NULL;
+    fz_var(img);
+    fz_var(b);
+    fz_try(ctx) {
+        int e = libraw_open_buffer(lr, data, n);
+        if (e == LIBRAW_SUCCESS && (uint64_t)lr->sizes.width * lr->sizes.height > VIEW_MAX_PIXELS) {
+            fz_throw(ctx, FZ_ERROR_LIMIT, "RAW image of %d x %d pixels", lr->sizes.width, lr->sizes.height);
+        }
+        if (e == LIBRAW_SUCCESS) e = libraw_unpack(lr);
+        if (e == LIBRAW_SUCCESS) e = libraw_dcraw_process(lr);
+        if (e == LIBRAW_SUCCESS) img = libraw_dcraw_make_mem_image(lr, &e);
+        if (!img) fz_throw(ctx, FZ_ERROR_FORMAT, "RAW image: %s", libraw_strerror(e));
+        int w = img->width, h = img->height, c = img->colors;
+        size_t size = (size_t)w * (size_t)h * (size_t)c;
+        if (img->type != LIBRAW_IMAGE_BITMAP || img->bits != 8 || c < 1 || c > 4 || !tuple[c] || img->data_size < size) {
+            fz_throw(ctx, FZ_ERROR_FORMAT, "RAW image: no 8-bit pixels");
+        }
+        if (!w || !h || (uint64_t)w * (uint64_t)h > VIEW_MAX_PIXELS) fz_throw(ctx, FZ_ERROR_LIMIT, "image of %d x %d pixels", w, h);
+        b = fz_new_buffer(ctx, size + 80);
+        fz_append_printf(ctx, b, "P7\nWIDTH %d\nHEIGHT %d\nDEPTH %d\nMAXVAL 255\nTUPLTYPE %s\nENDHDR\n", w, h, c, tuple[c]);
+        put(b, img->data, size);
+    }
+    fz_always(ctx) {
+        if (img) libraw_dcraw_clear_mem(img);
+        libraw_close(lr);
+    }
+    fz_catch(ctx) {
+        fz_drop_buffer(ctx, b);
+        fz_rethrow(ctx);
+    }
+    return b;
+}
+
 /* The rest of kimgio's types, read by ImageMagick (view-image.c): ICO, CUR,
  * MNG, PCX, SGI (image/x-rgb), TGA, XBM, XCF, XPM, DDS, OpenEXR and Radiance
  * HDR, each by the coder named for it. */
@@ -522,6 +599,7 @@ static fz_buffer *magick_pam(const unsigned char *data, size_t n, const char *co
  * ImageMagick's coders know only by name), as PAM. */
 static fz_buffer *convert_pam(const unsigned char *data, size_t n, const char *name)
 {
+    if (is_raw(data, n, name ? name : "")) return raw_pam(data, n);
     if (is_webp(data, n)) return webp_pam(data, n);
     if (is_heif(data, n)) return heif_pam(data, n);
     if (is_jxl(data, n)) return jxl_pam(data, n);
@@ -2664,16 +2742,1061 @@ static void open_fb2_zip(const char *path)
     set_format("FictionBook", 1);
 }
 
-static int ext_is(const char *e, const char *list)
+/* A zip whose first entry is "mimetype", stored, holding type: how
+ * OpenDocument, OpenRaster and Krita files say what they are. */
+static int zip_type_is(const unsigned char *m, size_t n, const char *type)
 {
-    char want[16];
-    for (const char *s = list; *s;) {
-        size_t n = strcspn(s, " ");
-        snprintf(want, sizeof want, "%.*s", (int)n, s);
-        if (!strcasecmp(e, want)) return 1;
-        s += n + (s[n] == ' ');
+    size_t len = strlen(type);
+    if (n < 40 + len) return 0;
+    uint32_t size = m[22] | m[23] << 8 | m[24] << 16 | (uint32_t)m[25] << 24;
+    return !memcmp(m, "PK\003\004", 4) && !m[8] && !m[9] && m[26] == 8 && !m[27] && !m[28] && !m[29] &&
+           (size == len || (m[6] & 8)) && !memcmp(m + 30, "mimetype", 8) && !memcmp(m + 38, type, len) &&
+           !memcmp(m + 38 + len, "PK", 2);
+}
+
+/* OpenRaster and Krita, as kimageformats' ora and kra plugins read them:
+ * the merged image they carry. */
+static void open_merged(const char *path)
+{
+    fz_archive *zip = fz_open_archive(ctx, path);
+    fz_buffer *b = NULL;
+    fz_try(ctx) {
+        b = fz_try_read_archive_entry(ctx, zip, "mergedimage.png");
+        if (!b) fz_throw(ctx, FZ_ERROR_FORMAT, "no merged image (mergedimage.png) in this file");
+    }
+    fz_always(ctx) fz_drop_archive(ctx, zip);
+    fz_catch(ctx) fz_rethrow(ctx);
+    open_buffer("png", b);
+    set_format("Image", 0);
+}
+
+/* OpenDocument text, which Okular's ooo generator read (to Okular 19.12),
+ * and its flat XML (.fodt): the text of content.xml made XHTML, reflowed
+ * by MuPDF as an EPUB is. The styles (styles.xml's and the automatic ones)
+ * are each element's inline CSS, their parents' first; font sizes are made
+ * relative to the default paragraph's, so the text grows with the layout's
+ * size; headings are h1 to h6 (the outline); lists, tables, links,
+ * bookmarks, the pictures the zip holds (or the flat file's base64 ones),
+ * and the footnotes at the end. Annotations and deleted changes are not
+ * shown, as in Okular. */
+#define ODT_TYPE "application/vnd.oasis.opendocument.text"
+
+struct odt_style {
+    const char *family, *name, *parent; /* in the XML, kept while converting */
+    char css[480];
+    float pt, pct;     /* fo:font-size in points, or a fraction of the parent's (0: not set) */
+    char num[10];      /* a list style's levels: their number format ('1', 'a', ...), 0 for bullets */
+};
+
+static struct {
+    struct odt_style *s;
+    int count, cap;
+    float base;        /* the default paragraph's font size, in points */
+} odt;
+
+/* The XHTML being made: where it goes, and the font size and list here. */
+struct odt_walk {
+    fz_buffer *out, *notes;
+    fz_archive *zip;
+    float size;        /* a factor of the default size */
+    const char *list;
+    int level, depth;
+};
+
+static fz_xml *odt_down(fz_xml *x, const char *tag)
+{
+    return x ? fz_xml_find_down(x, tag) : NULL;
+}
+
+static const char *odt_text(fz_xml *x)
+{
+    x = x ? fz_xml_down(x) : NULL;
+    return x ? fz_xml_text(x) : NULL;
+}
+
+static void put_escaped(fz_buffer *b, const char *s)
+{
+    for (; s && *s; s++) {
+        if (*s == '&') fz_append_string(ctx, b, "&amp;");
+        else if (*s == '<') fz_append_string(ctx, b, "&lt;");
+        else if (*s == '>') fz_append_string(ctx, b, "&gt;");
+        else if (*s == '"') fz_append_string(ctx, b, "&quot;");
+        else if ((unsigned char)*s >= 0x20 || *s == '\t' || *s == '\n' || *s == '\r') fz_append_byte(ctx, b, *s);
+    }
+}
+
+/* A length ("12pt", "0.5in", "1cm", ...) in points; 0 if it is not one. */
+static float odt_points(const char *v)
+{
+    char *end;
+    float f = v ? strtof(v, &end) : 0;
+    if (!(f > 0) || !isfinite(f)) return 0;
+    return !strcmp(end, "pt") ? f : !strcmp(end, "in") ? f * 72 : !strcmp(end, "cm") ? f * 72 / 2.54f :
+           !strcmp(end, "mm") ? f * 72 / 25.4f : !strcmp(end, "pc") ? f * 12 : !strcmp(end, "px") ? f * 0.75f : 0;
+}
+
+/* "prop:value;" appended to css, the value as CSS has it; values of other
+ * characters than lengths, colours and names have are left out. */
+static void odt_css(char *css, size_t size, const char *prop, const char *v)
+{
+    if (!v || !*v) return;
+    for (const char *s = v; *s; s++) if (!isalnum((unsigned char)*s) && !strchr(" .,%#+-()", *s)) return;
+    if (!strcmp(prop, "text-align")) v = !strcmp(v, "start") ? "left" : !strcmp(v, "end") ? "right" : v;
+    if (!strncmp(prop, "page-break-", 11)) {
+        if (strcmp(v, "page")) return;
+        v = "always";
+    }
+    size_t n = strlen(css);
+    if (n + strlen(prop) + strlen(v) + 3 <= size) snprintf(css + n, size - n, "%s:%s;", prop, v);
+}
+
+static const char *const odt_props[][2] = {
+    { "fo:font-weight", "font-weight" }, { "fo:font-style", "font-style" }, { "fo:font-variant", "font-variant" },
+    { "fo:text-transform", "text-transform" }, { "fo:color", "color" }, { "fo:background-color", "background-color" },
+    { "fo:text-align", "text-align" }, { "fo:text-indent", "text-indent" }, { "fo:line-height", "line-height" },
+    { "fo:margin", "margin" }, { "fo:margin-top", "margin-top" }, { "fo:margin-bottom", "margin-bottom" },
+    { "fo:margin-left", "margin-left" }, { "fo:margin-right", "margin-right" }, { "fo:padding", "padding" },
+    { "fo:padding-top", "padding-top" }, { "fo:padding-bottom", "padding-bottom" }, { "fo:padding-left", "padding-left" },
+    { "fo:padding-right", "padding-right" }, { "fo:border", "border" }, { "fo:border-top", "border-top" },
+    { "fo:border-bottom", "border-bottom" }, { "fo:border-left", "border-left" }, { "fo:border-right", "border-right" },
+    { "fo:break-before", "page-break-before" }, { "fo:break-after", "page-break-after" },
+};
+
+/* A style:style (or, family "list", a text:list-style) kept. */
+static void odt_add_style(fz_xml *x, const char *family)
+{
+    const char *name = fz_xml_att(x, "style:name");
+    if (!name) return;
+    if (odt.count == odt.cap) {
+        odt.cap = odt.cap ? odt.cap * 2 : 64;
+        odt.s = fz_realloc_array(ctx, odt.s, odt.cap, struct odt_style);
+    }
+    struct odt_style *st = &odt.s[odt.count++];
+    memset(st, 0, sizeof *st);
+    st->family = family ? family : "";
+    st->name = name;
+    st->parent = fz_xml_att(x, "style:parent-style-name");
+    for (fz_xml *p = fz_xml_down(x); p; p = fz_xml_next(p)) {
+        const char *tag = fz_xml_tag(p);
+        if (!tag) continue;
+        if (!strcmp(st->family, "list")) {
+            const char *l = fz_xml_att(p, "text:level"), *f = fz_xml_att(p, "style:num-format");
+            int level = l ? atoi(l) : 0;
+            if (level >= 1 && level <= 10 && !strcmp(tag, "list-level-style-number")) st->num[level - 1] = f && *f ? f[0] : '1';
+            continue;
+        }
+        if (!strstr(tag, "-properties")) continue;
+        for (size_t i = 0; i < sizeof odt_props / sizeof *odt_props; i++) {
+            odt_css(st->css, sizeof st->css, odt_props[i][1], fz_xml_att(p, odt_props[i][0]));
+        }
+        const char *u = fz_xml_att(p, "style:text-underline-style"), *l = fz_xml_att(p, "style:text-line-through-style");
+        int under = u && strcmp(u, "none"), through = l && strcmp(l, "none");
+        if (under || through) {
+            odt_css(st->css, sizeof st->css, "text-decoration", under && through ? "underline line-through" : under ? "underline" : "line-through");
+        }
+        const char *pos = fz_xml_att(p, "style:text-position");
+        if (pos) {
+            odt_css(st->css, sizeof st->css, "vertical-align", !strncmp(pos, "sub", 3) || pos[0] == '-' ? "sub" :
+                    !strncmp(pos, "0%", 2) || !strcmp(pos, "0") ? "baseline" : "super");
+        }
+        const char *size = fz_xml_att(p, "fo:font-size");
+        if (size && strchr(size, '%')) st->pct = strtof(size, NULL) / 100;
+        else if (size) st->pt = odt_points(size);
+    }
+}
+
+static void odt_styles(fz_xml *container)
+{
+    for (fz_xml *x = container ? fz_xml_down(container) : NULL; x; x = fz_xml_next(x)) {
+        if (fz_xml_is_tag(x, "style")) {
+            odt_add_style(x, fz_xml_att(x, "style:family"));
+        } else if (fz_xml_is_tag(x, "list-style")) {
+            odt_add_style(x, "list");
+        } else if (fz_xml_is_tag(x, "default-style") && fz_xml_att_eq(x, "style:family", "paragraph")) {
+            float pt = odt_points(fz_xml_att(odt_down(x, "text-properties"), "fo:font-size"));
+            if (pt > 0) odt.base = pt;
+        }
+    }
+}
+
+/* The last one of that name: content.xml's are after styles.xml's. */
+static const struct odt_style *odt_find(const char *family, const char *name)
+{
+    for (int i = odt.count - 1; name && i >= 0; i--) {
+        if (!strcmp(odt.s[i].name, name) && !strcmp(odt.s[i].family, family)) return &odt.s[i];
+    }
+    return NULL;
+}
+
+/* A style's font size as a factor of the default: *abs when a style of its
+ * chain gives it in points, else a factor of the size around it. */
+static float odt_size(const struct odt_style *st, int *abs, int depth)
+{
+    *abs = 0;
+    if (!st || depth > 16) return 1;
+    if (st->pt > 0) {
+        *abs = 1;
+        return st->pt / odt.base;
+    }
+    float parent = odt_size(odt_find(st->family, st->parent), abs, depth + 1);
+    return st->pct > 0 ? parent * st->pct : parent;
+}
+
+static void odt_chain_css(fz_buffer *b, const struct odt_style *st, int depth)
+{
+    if (!st || depth > 16) return;
+    odt_chain_css(b, odt_find(st->family, st->parent), depth + 1);
+    fz_append_string(ctx, b, st->css);
+}
+
+/* ' style="..."': extra, then the element's style (of family, named by its
+ * attribute att) with its font size in em; *size: the size inside it. */
+static void odt_style_att(struct odt_walk *w, fz_xml *x, const char *family, const char *att, const char *extra, float *size)
+{
+    const struct odt_style *st = att ? odt_find(family, fz_xml_att(x, att)) : NULL;
+    *size = w->size;
+    if (!st && !extra) return;
+    fz_append_printf(ctx, w->out, " style=\"%s", extra ? extra : "");
+    odt_chain_css(w->out, st, 0);
+    int abs;
+    float f = st ? odt_size(st, &abs, 0) : 1, em = 1;
+    if (st && abs) {
+        em = f / w->size;
+        *size = f;
+    } else if (st) {
+        em = f;
+        *size = w->size * f;
+    }
+    if (fabsf(em - 1) > 0.001f && em > 0.01f && em < 100) {
+        char v[32];
+        snprintf(v, sizeof v, "font-size:%.3fem;", em);
+        fz_append_string(ctx, w->out, v);
+    }
+    fz_append_byte(ctx, w->out, '"');
+}
+
+static void odt_walk(struct odt_walk *w, fz_xml *x);
+
+static void odt_children(const struct odt_walk *w, fz_xml *x, float size)
+{
+    struct odt_walk in = *w;
+    in.size = size;
+    if (++in.depth > 200) return;
+    for (fz_xml *c = fz_xml_down(x); c; c = fz_xml_next(c)) odt_walk(&in, c);
+}
+
+/* A frame's picture (the first MuPDF can read: a file of the zip, or base64
+ * data in a flat file) at the frame's size, or its text box. */
+static void odt_frame(struct odt_walk *w, fz_xml *frame)
+{
+    char css[160] = "";
+    odt_css(css, sizeof css, "width", fz_xml_att(frame, "svg:width"));
+    odt_css(css, sizeof css, "height", fz_xml_att(frame, "svg:height"));
+    for (fz_xml *c = fz_xml_down(frame); c; c = fz_xml_next(c)) {
+        if (fz_xml_is_tag(c, "text-box")) {
+            fz_append_string(ctx, w->out, "<div>");
+            odt_children(w, c, w->size);
+            fz_append_string(ctx, w->out, "</div>");
+            return;
+        }
+        if (!fz_xml_is_tag(c, "image")) continue;
+        const char *href = fz_xml_att(c, "xlink:href"), *data = odt_text(odt_down(c, "binary-data"));
+        if (href && w->zip && ext_is(extension(href), "png jpg jpeg jpe gif bmp tif tiff jp2 jpx jxr svg") &&
+            fz_has_archive_entry(ctx, w->zip, href)) {
+            fz_append_string(ctx, w->out, "<img alt=\"\" src=\"");
+            put_escaped(w->out, href);
+        } else if (data) {
+            /* Its first bytes tell what it is. */
+            char head[16];
+            int n = 0;
+            for (const char *s = data; *s && n < (int)sizeof head; s++) if (!isspace((unsigned char)*s)) head[n++] = *s;
+            fz_buffer *b = fz_new_buffer_from_base64(ctx, head, (size_t)n);
+            unsigned char *p;
+            size_t len = fz_buffer_storage(ctx, b, &p);
+            int svg = len >= 4 && (!memcmp(p, "<?xm", 4) || !memcmp(p, "<svg", 4));
+            int image = len >= 8 && fz_recognize_image_format(ctx, p) != FZ_IMAGE_UNKNOWN;
+            fz_drop_buffer(ctx, b);
+            if (!svg && !image) continue;
+            fz_append_printf(ctx, w->out, "<img alt=\"\" src=\"data:image/%s;base64,", svg ? "svg+xml" : "png");
+            for (const char *s = data; *s; s++) if (isalnum((unsigned char)*s) || *s == '+' || *s == '/' || *s == '=') fz_append_byte(ctx, w->out, *s);
+        } else {
+            continue;
+        }
+        fz_append_printf(ctx, w->out, "\" style=\"%s\"/>", css);
+        return;
+    }
+}
+
+static void odt_walk(struct odt_walk *w, fz_xml *x)
+{
+    const char *tag = fz_xml_tag(x), *v;
+    fz_buffer *out = w->out;
+    float size;
+    if (!tag) {
+        put_escaped(out, fz_xml_text(x));
+        return;
+    }
+    size_t len = strlen(tag);
+    if (!strcmp(tag, "p") || !strcmp(tag, "h")) {
+        char name[4] = "p";
+        if (tag[0] == 'h') {
+            int level = (v = fz_xml_att(x, "text:outline-level")) ? atoi(v) : 1;
+            snprintf(name, sizeof name, "h%d", level < 1 ? 1 : level > 6 ? 6 : level);
+        }
+        fz_append_printf(ctx, out, "<%s", name);
+        odt_style_att(w, x, "paragraph", "text:style-name", NULL, &size);
+        fz_append_byte(ctx, out, '>');
+        if (!fz_xml_down(x)) fz_append_string(ctx, out, "&#160;"); /* an empty paragraph keeps its line */
+        odt_children(w, x, size);
+        fz_append_printf(ctx, out, "</%s>", name);
+    } else if (!strcmp(tag, "span")) {
+        fz_append_string(ctx, out, "<span");
+        odt_style_att(w, x, "text", "text:style-name", NULL, &size);
+        fz_append_byte(ctx, out, '>');
+        odt_children(w, x, size);
+        fz_append_string(ctx, out, "</span>");
+    } else if (!strcmp(tag, "a") && (v = fz_xml_att(x, "xlink:href"))) {
+        fz_append_string(ctx, out, "<a href=\"");
+        put_escaped(out, v);
+        fz_append_string(ctx, out, "\">");
+        odt_children(w, x, w->size);
+        fz_append_string(ctx, out, "</a>");
+    } else if (!strcmp(tag, "s")) {
+        int n = (v = fz_xml_att(x, "text:c")) ? atoi(v) : 1;
+        for (int i = 0; i < (n < 1 ? 1 : n > 1000 ? 1000 : n); i++) fz_append_string(ctx, out, "&#160;");
+    } else if (!strcmp(tag, "tab")) {
+        fz_append_string(ctx, out, "&#160;&#160;&#160;&#160;"); /* as Okular */
+    } else if (!strcmp(tag, "line-break")) {
+        fz_append_string(ctx, out, "<br/>");
+    } else if ((!strcmp(tag, "bookmark") || !strcmp(tag, "bookmark-start")) && (v = fz_xml_att(x, "text:name"))) {
+        fz_append_string(ctx, out, "<a id=\"");
+        put_escaped(out, v);
+        fz_append_string(ctx, out, "\"></a>");
+    } else if (!strcmp(tag, "list")) {
+        struct odt_walk in = *w;
+        in.list = (v = fz_xml_att(x, "text:style-name")) ? v : w->list;
+        in.level = w->level + 1;
+        const struct odt_style *st = odt_find("list", in.list);
+        char f = st && in.level <= 10 ? st->num[in.level - 1] : 0;
+        if (f) {
+            fz_append_printf(ctx, out, "<ol style=\"list-style-type:%s\">", f == 'a' ? "lower-alpha" : f == 'A' ? "upper-alpha" :
+                             f == 'i' ? "lower-roman" : f == 'I' ? "upper-roman" : "decimal");
+        } else {
+            fz_append_string(ctx, out, "<ul>");
+        }
+        for (fz_xml *c = fz_xml_down(x); c; c = fz_xml_next(c)) {
+            int item = fz_xml_is_tag(c, "list-item"), header = fz_xml_is_tag(c, "list-header");
+            if (!item && !header) continue;
+            fz_append_string(ctx, out, header ? "<li style=\"list-style-type:none\">" : "<li>");
+            odt_children(&in, c, w->size);
+            fz_append_string(ctx, out, "</li>");
+        }
+        fz_append_string(ctx, out, f ? "</ol>" : "</ul>");
+    } else if (!strcmp(tag, "table")) {
+        fz_append_string(ctx, out, "<table");
+        odt_style_att(w, x, "table", "table:style-name", "border-collapse:collapse;", &size);
+        fz_append_byte(ctx, out, '>');
+        odt_children(w, x, size);
+        fz_append_string(ctx, out, "</table>");
+    } else if (!strcmp(tag, "table-row")) {
+        fz_append_string(ctx, out, "<tr>");
+        odt_children(w, x, w->size);
+        fz_append_string(ctx, out, "</tr>");
+    } else if (!strcmp(tag, "table-cell")) {
+        fz_append_string(ctx, out, "<td");
+        int cols = (v = fz_xml_att(x, "table:number-columns-spanned")) ? atoi(v) : 1;
+        int rows = (v = fz_xml_att(x, "table:number-rows-spanned")) ? atoi(v) : 1;
+        if (cols > 1 && cols < 1000) fz_append_printf(ctx, out, " colspan=\"%d\"", cols);
+        if (rows > 1 && rows < 1000) fz_append_printf(ctx, out, " rowspan=\"%d\"", rows);
+        odt_style_att(w, x, "table-cell", "table:style-name", NULL, &size);
+        fz_append_byte(ctx, out, '>');
+        odt_children(w, x, size);
+        fz_append_string(ctx, out, "</td>");
+    } else if (!strcmp(tag, "frame")) {
+        odt_frame(w, x);
+    } else if (!strcmp(tag, "note")) {
+        const char *cit = odt_text(odt_down(x, "note-citation"));
+        fz_append_string(ctx, out, "<sup>");
+        put_escaped(out, cit ? cit : "*");
+        fz_append_string(ctx, out, "</sup>");
+        if (w->notes) {
+            struct odt_walk in = *w;
+            in.out = w->notes;
+            in.notes = NULL;
+            fz_append_string(ctx, w->notes, "<div><sup>");
+            put_escaped(w->notes, cit ? cit : "*");
+            fz_append_string(ctx, w->notes, "</sup>");
+            fz_xml *body = odt_down(x, "note-body");
+            if (body) odt_children(&in, body, 1);
+            fz_append_string(ctx, w->notes, "</div>");
+        }
+    } else if (!strcmp(tag, "annotation") || !strcmp(tag, "tracked-changes") || !strcmp(tag, "forms") ||
+               !strcmp(tag, "table-columns") || !strcmp(tag, "table-column") || !strcmp(tag, "covered-table-cell") ||
+               (len > 6 && !strcmp(tag + len - 6, "-decls")) || (len > 7 && !strcmp(tag + len - 7, "-source"))) {
+        /* Not shown: annotations, deleted text, declarations, an index's template. */
+    } else {
+        odt_children(w, x, w->size); /* sections, fields, shapes, indexes: their text */
+    }
+}
+
+static fz_buffer *odt_html(fz_xml *content, fz_xml *styles, fz_xml *meta, fz_archive *zip)
+{
+    fz_buffer *out = fz_new_buffer(ctx, 65536), *notes = NULL;
+    fz_var(notes);
+    odt.base = 12;
+    odt.count = 0;
+    fz_try(ctx) {
+        notes = fz_new_buffer(ctx, 1024);
+        odt_styles(odt_down(styles, "styles"));
+        odt_styles(odt_down(content, "styles")); /* a flat file's */
+        odt_styles(odt_down(content, "automatic-styles"));
+        fz_xml *text = odt_down(odt_down(content, "body"), "text");
+        if (!text) fz_throw(ctx, FZ_ERROR_FORMAT, "no text in this OpenDocument file");
+        fz_append_string(ctx, out, "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>");
+        put_escaped(out, odt_text(odt_down(odt_down(meta, "meta"), "title")));
+        fz_append_string(ctx, out, "</title></head><body>");
+        struct odt_walk w = { out, notes, zip, 1, NULL, 0, 0 };
+        odt_children(&w, text, 1);
+        unsigned char *s;
+        size_t n = fz_buffer_storage(ctx, notes, &s);
+        if (n) {
+            fz_append_string(ctx, out, "<hr/>");
+            put(out, s, n);
+        }
+        fz_append_string(ctx, out, "</body></html>");
+    }
+    fz_always(ctx) {
+        fz_drop_buffer(ctx, notes);
+        fz_free(ctx, odt.s);
+        odt.s = NULL;
+        odt.count = odt.cap = 0;
+    }
+    fz_catch(ctx) {
+        fz_drop_buffer(ctx, out);
+        fz_rethrow(ctx);
+    }
+    return out;
+}
+
+static void open_odt(const char *path, int flat)
+{
+    fz_archive *zip = NULL;
+    fz_xml *content = NULL, *styles = NULL, *meta = NULL;
+    fz_buffer *raw = NULL, *html = NULL;
+    fz_stream *stm = NULL;
+    fz_var(zip);
+    fz_var(content);
+    fz_var(styles);
+    fz_var(meta);
+    fz_var(raw);
+    fz_var(html);
+    fz_var(stm);
+    fz_try(ctx) {
+        if (flat) {
+            raw = fz_read_file(ctx, path);
+            content = fz_parse_xml(ctx, raw, 1);
+        } else {
+            zip = fz_open_archive(ctx, path);
+            raw = fz_try_read_archive_entry(ctx, zip, "META-INF/manifest.xml");
+            unsigned char *s;
+            size_t n = raw ? fz_buffer_storage(ctx, raw, &s) : 0;
+            if (n && memmem(s, n, "encryption-data", 15)) fz_throw(ctx, FZ_ERROR_UNSUPPORTED, "Encrypted OpenDocument files cannot be read");
+            content = fz_parse_xml_archive_entry(ctx, zip, "content.xml", 1);
+            styles = fz_try_parse_xml_archive_entry(ctx, zip, "styles.xml", 1);
+            meta = fz_try_parse_xml_archive_entry(ctx, zip, "meta.xml", 1);
+        }
+        fz_xml *root = fz_xml_root(content);
+        html = odt_html(root, styles ? fz_xml_root(styles) : NULL, meta ? fz_xml_root(meta) : root, zip);
+        stm = fz_open_buffer(ctx, html);
+        /* Its pictures are read from the zip as the pages are laid out. */
+        doc = fz_open_document_with_stream_and_dir(ctx, "application/xhtml+xml", stm, zip);
+    }
+    fz_always(ctx) {
+        fz_drop_stream(ctx, stm);
+        fz_drop_buffer(ctx, html);
+        fz_drop_buffer(ctx, raw);
+        fz_drop_xml(ctx, meta);
+        fz_drop_xml(ctx, styles);
+        fz_drop_xml(ctx, content);
+        fz_drop_archive(ctx, zip);
+    }
+    fz_catch(ctx) fz_rethrow(ctx);
+    set_format("OpenDocument text", 1);
+}
+
+/* CHM, as Okular's chm generator shows it (generator_chm.cpp, ebook_chm.cpp):
+ * its HTML pages in the order of the table of contents (the binary one,
+ * #TOCIDX, where there is one, else the .hhc sitemap), then the archive's
+ * other pages, the home page first; the table of contents is the outline,
+ * the title #SYSTEM's. Here the pages are an EPUB's chapters, reflowed by
+ * MuPDF: chmlib's files are an archive of MuPDF's, with a package file and
+ * an NCX made for them. A page that is not UTF-8 and says no encoding is
+ * read in the code page of the file's language (its LCID), as Okular
+ * guesses it; the table of contents and the title too. */
+#define CHM_OPF "view-chm.opf"
+#define CHM_NCX "view-chm.ncx"
+
+typedef struct {
+    fz_archive super;
+    struct chmFile *chm;
+    const char *cp;
+} chm_archive;
+
+struct chm_entry {
+    int level;
+    char *name;            /* XML text */
+    char *path, *frag;     /* the page (NULL: none) and the place on it */
+};
+
+struct chm_book {
+    const char *cp;
+    struct chm_entry *toc;
+    int ntoc, tcap;
+    char **files;          /* the archive's, as chmlib lists them ("/dir/name") */
+    int nfiles, fcap;
+    int steps;             /* left for the binary table of contents */
+};
+
+/* Windows' code page for the language, as ebook_chm_encoding.cpp has them. */
+static const char *chm_codepage(unsigned lcid)
+{
+    switch (lcid) {
+    case 0x0804: case 0x1004: return "GB18030";
+    case 0x0404: case 0x1404: return "BIG5";
+    case 0x0C04: return "BIG5-HKSCS";
+    case 0x0C1A: case 0x082C: case 0x0843: return "CP1251";
+    case 0x042C: case 0x0443: return "CP1254";
+    }
+    switch (lcid & 0x3FF) {
+    case 0x01: case 0x20: case 0x29: return "CP1256";
+    case 0x25: case 0x26: case 0x27: return "CP1257";
+    case 0x05: case 0x0E: case 0x15: case 0x18: case 0x1A: case 0x1B: case 0x1C: case 0x24: return "CP1250";
+    case 0x02: case 0x19: case 0x22: case 0x23: case 0x2F: case 0x44: return "CP1251";
+    case 0x08: return "CP1253";
+    case 0x0D: return "CP1255";
+    case 0x11: return "CP932";
+    case 0x12: return "CP949";
+    case 0x1E: return "CP874";
+    case 0x1F: return "CP1254";
+    case 0x2A: return "CP1258";
+    case 0x49: return "TSCII";
+    default: return "CP1252";
+    }
+}
+
+static uint32_t le32(const unsigned char *p)
+{
+    return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+/* word in the n bytes at s, in any case: where, or NULL. */
+static char *find_case(const char *s, size_t n, const char *word)
+{
+    size_t k = strlen(word);
+    for (size_t i = 0; i + k <= n; i++) if (!strncasecmp(s + i, word, k)) return (char *)s + i;
+    return NULL;
+}
+
+/* name ("dir/file", or "/dir/file") in the CHM: its unit in *ui. */
+static int chm_find(struct chmFile *h, const char *name, struct chmUnitInfo *ui)
+{
+    char path[CHM_MAX_PATHLEN + 1];
+    return snprintf(path, sizeof path, "/%s", name + (name[0] == '/')) < (int)sizeof path &&
+           chm_resolve_object(h, path, ui) == CHM_RESOLVE_SUCCESS;
+}
+
+/* A file of the CHM, or NULL if it has none. */
+static fz_buffer *chm_read(struct chmFile *h, const char *name)
+{
+    struct chmUnitInfo ui;
+    if (!chm_find(h, name, &ui)) return NULL;
+    if (ui.length > MAX_UNPACKED) fz_throw(ctx, FZ_ERROR_LIMIT, "%s is too large", name);
+    fz_buffer *b = fz_new_buffer(ctx, (size_t)ui.length + 1);
+    if (ui.length && chm_retrieve_object(h, &ui, b->data, 0, (LONGINT64)ui.length) != (LONGINT64)ui.length) {
+        fz_drop_buffer(ctx, b);
+        fz_throw(ctx, FZ_ERROR_FORMAT, "cannot read %s of this CHM file", name);
+    }
+    b->len = (size_t)ui.length;
+    return b;
+}
+
+/* s appended to out in UTF-8: as it is if it is UTF-8, else from the code
+ * page (or Latin-1, where that fails). */
+static void chm_text(fz_buffer *out, const unsigned char *s, size_t n, const char *cp)
+{
+    unsigned char *o;
+    size_t at = fz_buffer_storage(ctx, out, &o);
+    if (valid_utf8(s, n)) {
+        put(out, s, n);
+    } else if (convert(out, cp, s, n) < 0) {
+        fz_resize_buffer(ctx, out, at);
+        for (size_t i = 0; i < n; i++) fz_append_rune(ctx, out, s[i]);
+    }
+}
+
+/* Where a page says its encoding: an XML declaration's "encoding=", else
+ * the first <meta> tag's "charset=" (http-equiv's, or HTML5's); NULL. */
+static char *chm_declaration(char *s)
+{
+    char *x = strstr(s, "<?xml"), *at = NULL;
+    if (x && x < s + strcspn(s, ">")) at = find_case(x, strcspn(x, ">"), "encoding=");
+    for (char *m = strcasestr(s, "<meta"); !at && m; m = strcasestr(m + 5, "<meta")) at = find_case(m, strcspn(m, ">"), "charset=");
+    return at;
+}
+
+/* A page for MuPDF, in UTF-8: by its BOM, else the encoding it says, else
+ * as it is if it is UTF-8, else from the code page; what it says of its
+ * encoding is then made nothing ("encoding=", "charset=" lose their "="),
+ * so MuPDF does not convert it again: its own conversion, of the encodings
+ * it knows, leaks the text when the page is then not XML (MuPDF 1.28). */
+static fz_buffer *chm_page(fz_buffer *b, const char *cp)
+{
+    char enc[64] = "", *at = chm_declaration((char *)fz_string_from_buffer(ctx, b));
+    unsigned char *s;
+    size_t n = fz_buffer_storage(ctx, b, &s), k = 0;
+    if (n >= 2 && (!memcmp(s, "\xFF\xFE", 2) || !memcmp(s, "\xFE\xFF", 2))) {
+        snprintf(enc, sizeof enc, "UTF-16");
+    } else if (n >= 3 && !memcmp(s, "\xEF\xBB\xBF", 3)) {
+        snprintf(enc, sizeof enc, "UTF-8");
+    } else if (at) {
+        const char *v = strchr(at, '=') + 1;
+        v += strspn(v, "\"' ");
+        while (k + 1 < sizeof enc && v[k] && (isalnum((unsigned char)v[k]) || strchr("-_.:", v[k]))) k++;
+        snprintf(enc, sizeof enc, "%.*s", (int)k, v);
+    }
+    if (!enc[0] && valid_utf8(s, n)) return b;
+    fz_buffer *u = NULL;
+    fz_var(u);
+    fz_try(ctx) {
+        u = fz_new_buffer(ctx, n * 2 + 16);
+        if (enc[0] && convert(u, enc, s, n) < 0) {
+            fz_drop_buffer(ctx, u);
+            u = NULL;
+            u = fz_new_buffer(ctx, n * 2 + 16);
+            enc[0] = '\0';
+        }
+        if (!enc[0]) chm_text(u, s, n, cp);
+        char *t = (char *)fz_string_from_buffer(ctx, u), *d;
+        while ((d = chm_declaration(t)) != NULL) *strchr(d, '=') = ' ';
+    }
+    fz_catch(ctx) {
+        fz_drop_buffer(ctx, u);
+        fz_drop_buffer(ctx, b);
+        fz_rethrow(ctx);
+    }
+    fz_drop_buffer(ctx, b);
+    return u;
+}
+
+static int chm_has_entry(fz_context *c, fz_archive *a, const char *name)
+{
+    (void)c;
+    struct chmUnitInfo ui;
+    return chm_find(((chm_archive *)a)->chm, name, &ui);
+}
+
+static fz_buffer *chm_read_entry(fz_context *c, fz_archive *a, const char *name)
+{
+    chm_archive *arch = (chm_archive *)a;
+    fz_buffer *b = chm_read(arch->chm, name);
+    if (!b) fz_throw(c, FZ_ERROR_FORMAT, "cannot find entry %s", name);
+    return ext_is(extension(name), "htm html") ? chm_page(b, arch->cp) : b;
+}
+
+static void chm_drop_archive(fz_context *c, fz_archive *a)
+{
+    (void)c;
+    if (((chm_archive *)a)->chm) chm_close(((chm_archive *)a)->chm);
+}
+
+/* An entry of the table of contents (name: with its entities if it is
+ * HTML's; one that is empty is none). Its URL is a page as Okular's
+ * pathToUrl takes it: the fragment apart, percent-decoded, from the root;
+ * a web address is none. */
+static void chm_add(struct chm_book *bk, int level, const char *name, int html, const char *url)
+{
+    while (isspace((unsigned char)*name)) name++;
+    size_t len = strlen(name);
+    while (len && isspace((unsigned char)name[len - 1])) len--;
+    if (!len) return;
+    if (bk->ntoc == bk->tcap) {
+        bk->tcap = bk->tcap ? bk->tcap * 2 : 64;
+        bk->toc = fz_realloc_array(ctx, bk->toc, bk->tcap, struct chm_entry);
+    }
+    struct chm_entry *e = &bk->toc[bk->ntoc++];
+    memset(e, 0, sizeof *e);
+    e->level = level;
+    char *x = e->name = fz_malloc(ctx, len * 5 + 1);
+    for (size_t i = 0; i < len; i++) {
+        const char *v = name[i] == '<' ? "&lt;" : name[i] == '>' ? "&gt;" : name[i] == '&' && !html ? "&amp;" : NULL;
+        if (v) x = stpcpy(x, v);
+        else if ((unsigned char)name[i] >= 0x20 || name[i] == '\t') *x++ = name[i];
+    }
+    *x = '\0';
+    while (url && *url == '/') url++;
+    if (url && *url && !strstr(url, "://") && strncasecmp(url, "mailto:", 7) && strncasecmp(url, "javascript:", 11)) {
+        const char *hash = strchr(url, '#');
+        size_t n = hash ? (size_t)(hash - url) : strlen(url);
+        if (n) {
+            e->path = fz_malloc(ctx, n + 1);
+            memcpy(e->path, url, n);
+            e->path[n] = '\0';
+            fz_cleanname(fz_urldecode(e->path));
+        }
+        if (hash && hash[1]) e->frag = fz_strdup(ctx, hash + 1);
+    }
+}
+
+/* An entry of the binary table of contents, in the code page. */
+static void chm_add_cp(struct chm_book *bk, int level, const char *name, const char *url)
+{
+    fz_buffer *n = fz_new_buffer(ctx, 256), *u = NULL;
+    fz_var(u);
+    fz_try(ctx) {
+        chm_text(n, (const unsigned char *)name, strlen(name), bk->cp);
+        u = fz_new_buffer(ctx, 256);
+        if (url) chm_text(u, (const unsigned char *)url, strlen(url), bk->cp);
+        chm_add(bk, level, fz_string_from_buffer(ctx, n), 0, url ? fz_string_from_buffer(ctx, u) : NULL);
+    }
+    fz_always(ctx) {
+        fz_drop_buffer(ctx, n);
+        fz_drop_buffer(ctx, u);
+    }
+    fz_catch(ctx) fz_rethrow(ctx);
+}
+
+static void chm_drop_toc(struct chm_book *bk)
+{
+    for (int i = 0; i < bk->ntoc; i++) {
+        fz_free(ctx, bk->toc[i].name);
+        fz_free(ctx, bk->toc[i].path);
+        fz_free(ctx, bk->toc[i].frag);
+    }
+    bk->ntoc = 0;
+}
+
+/* The NUL-terminated string at off in b, or NULL. */
+static const char *chm_string(fz_buffer *b, uint64_t off)
+{
+    unsigned char *s;
+    size_t n = fz_buffer_storage(ctx, b, &s);
+    return off < n && memchr(s + off, 0, n - off) ? (const char *)s + off : NULL;
+}
+
+enum { CHM_TOCIDX, CHM_TOPICS, CHM_URLTBL, CHM_URLSTR, CHM_STRINGS };
+
+/* The binary table of contents from off on, as Okular's RecurseLoadBTOC
+ * reads it (a book by its name, a topic by #TOPICS' name and URL): 0 if it
+ * is broken. */
+static int chm_btoc(struct chm_book *bk, fz_buffer **t, uint32_t off, int level)
+{
+    unsigned char *idx, *top, *tbl;
+    size_t ni = fz_buffer_storage(ctx, t[CHM_TOCIDX], &idx), nt = fz_buffer_storage(ctx, t[CHM_TOPICS], &top);
+    size_t nu = fz_buffer_storage(ctx, t[CHM_URLTBL], &tbl);
+    for (; off; off = le32(idx + off + 16)) {
+        if ((uint64_t)off + 20 > ni) return 1;
+        if (--bk->steps < 0 || level > 64) return 0;
+        uint32_t flags = le32(idx + off + 4), index = le32(idx + off + 8);
+        if (flags & 0x0C) {
+            const char *name, *url = NULL;
+            if (!(flags & 8)) {
+                name = chm_string(t[CHM_STRINGS], index);
+            } else {
+                if ((uint64_t)index * 16 + 12 > nt) return 0;
+                uint32_t title = le32(top + (size_t)index * 16 + 4), u = le32(top + (size_t)index * 16 + 8);
+                name = title == 0xFFFFFFFF ? "" : chm_string(t[CHM_STRINGS], title);
+                if ((uint64_t)u + 12 > nu || !(url = chm_string(t[CHM_URLSTR], (uint64_t)le32(tbl + u + 8) + 8))) return 0;
+            }
+            if (!name) return 0;
+            chm_add_cp(bk, level, name, url);
+        }
+        if (flags & 4) {
+            if ((uint64_t)off + 24 > ni) return 0;
+            uint32_t child = le32(idx + off + 20);
+            if (child && !chm_btoc(bk, t, child, level + 1)) return 0;
+        }
+    }
+    return 1;
+}
+
+/* The value of the attribute att in a tag's text (len bytes), in v: 0 if
+ * it has none. */
+static int chm_att(const char *tag, size_t len, const char *att, char *v, size_t size)
+{
+    size_t n = strlen(att);
+    for (size_t i = 1; i + n < len; i++) {
+        if (strncasecmp(tag + i, att, n) || tag[i + n] != '=' || isalnum((unsigned char)tag[i - 1])) continue;
+        const char *s = tag + i + n + 1, *end = tag + len;
+        char quote = s < end && (*s == '"' || *s == '\'') ? *s++ : 0;
+        size_t k = 0;
+        for (; s < end && (quote ? *s != quote : !isspace((unsigned char)*s)) && k + 1 < size; s++) v[k++] = *s;
+        v[k] = '\0';
+        return 1;
     }
     return 0;
+}
+
+/* A .hhc sitemap (in UTF-8), as Okular's parseFileAndFillArray reads it:
+ * each <object type="text/sitemap"> an entry of its "Name" (or "Keyword")
+ * and "Local" params, at the depth of the <ul> lists around it. */
+static void chm_hhc(struct chm_book *bk, const char *s)
+{
+    char name[1024] = "", url[1024] = "", v[1024], param[32];
+    int depth = 0, root = -1, in = 0;
+    for (const char *p = s; (p = strchr(p, '<')) != NULL;) {
+        /* The tag ends at a '>' out of quotes (or, a quote not closed, the next one). */
+        const char *tag = ++p, *end = p;
+        while (*end && *end != '>') {
+            if (*end == '"' || *end == '\'') {
+                const char *q = strchr(end + 1, *end);
+                if (!q) q = strchr(end + 1, '>');
+                if (!q) q = end + strlen(end);
+                end = q;
+                if (*end != '"' && *end != '\'') break;
+            }
+            end++;
+        }
+        size_t len = (size_t)(end - tag), w = 0;
+        while (w < len && (isalnum((unsigned char)tag[w]) || tag[w] == '/')) w++;
+        if (w == 6 && !strncasecmp(tag, "object", 6)) {
+            in = find_case(tag, len, "text/sitemap") != NULL;
+            name[0] = url[0] = '\0';
+        } else if (w == 7 && !strncasecmp(tag, "/object", 7) && in) {
+            if (name[0] || url[0]) {
+                if (root < 0) root = depth;
+                chm_add(bk, depth - root, name[0] ? name : url, 1, url);
+            }
+            in = 0;
+        } else if (w == 5 && !strncasecmp(tag, "param", 5) && in && chm_att(tag, len, "name", param, sizeof param) &&
+                   chm_att(tag, len, "value", v, sizeof v)) {
+            if ((!strcasecmp(param, "name") || !strcasecmp(param, "keyword")) && v[0]) memcpy(name, v, sizeof name);
+            else if (!strcasecmp(param, "local") && !url[0]) memcpy(url, v, sizeof url);
+        } else if (w == 2 && !strncasecmp(tag, "ul", 2)) {
+            if (depth < 256) depth++;
+        } else if (w == 3 && !strncasecmp(tag, "/ul", 3)) {
+            if (--depth < (root < 0 ? 0 : root)) depth = root < 0 ? 0 : root;
+        }
+        if (!*end) break;
+        p = end + 1;
+    }
+}
+
+static int chm_list(struct chmFile *h, struct chmUnitInfo *ui, void *opaque)
+{
+    (void)h;
+    struct chm_book *bk = opaque;
+    int ok = 1;
+    fz_try(ctx) {
+        if (bk->nfiles == bk->fcap) {
+            bk->fcap = bk->fcap ? bk->fcap * 2 : 256;
+            bk->files = fz_realloc_array(ctx, bk->files, bk->fcap, char *);
+        }
+        bk->files[bk->nfiles] = fz_strdup(ctx, ui->path);
+        bk->nfiles++;
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        ok = 0;
+    }
+    return ok ? CHM_ENUMERATOR_CONTINUE : CHM_ENUMERATOR_FAILURE;
+}
+
+/* Whether path is a page not seen before (CHM's names are case-insensitive). */
+static int chm_new_page(fz_tree **seen, const char *path)
+{
+    char key[CHM_MAX_PATHLEN + 1];
+    size_t i = 0;
+    for (; path[i] && i + 1 < sizeof key; i++) key[i] = (char)tolower((unsigned char)path[i]);
+    key[i] = '\0';
+    if (!key[0] || fz_tree_lookup(ctx, *seen, key)) return 0;
+    *seen = fz_tree_insert(ctx, *seen, key, (void *)key); /* any value but NULL */
+    return 1;
+}
+
+/* A path as an href: percent-encoded, but for its slashes and what URLs keep. */
+static void put_href(fz_buffer *b, const char *path)
+{
+    for (const unsigned char *s = (const unsigned char *)path; *s; s++) {
+        if (*s < 0x80 && (isalnum(*s) || strchr("-._~/", *s))) fz_append_byte(ctx, b, *s);
+        else fz_append_printf(ctx, b, "%%%02X", *s);
+    }
+}
+
+static void open_chm(const char *path)
+{
+    static const char container[] = "<?xml version=\"1.0\"?><container version=\"1.0\" "
+        "xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\"><rootfiles><rootfile full-path=\"" CHM_OPF "\" "
+        "media-type=\"application/oebps-package+xml\"/></rootfiles></container>";
+    static const char *const tables[] = { "#TOCIDX", "#TOPICS", "#URLTBL", "#URLSTR", "#STRINGS" };
+    struct chm_book bk;
+    memset(&bk, 0, sizeof bk);
+    fz_archive *chm = NULL, *made = NULL, *multi = NULL;
+    fz_buffer *b = NULL, *text = NULL, *opf = NULL, *ncx = NULL, *t[5] = { NULL };
+    fz_tree *seen = NULL;
+    const char **pages = NULL;
+    int npages = 0;
+    fz_var(bk);
+    fz_var(chm);
+    fz_var(made);
+    fz_var(multi);
+    fz_var(b);
+    fz_var(text);
+    fz_var(opf);
+    fz_var(ncx);
+    fz_var(t);
+    fz_var(seen);
+    fz_var(pages);
+    fz_var(npages);
+    fz_try(ctx) {
+        struct chmFile *h = chm_open(path);
+        if (!h) fz_throw(ctx, FZ_ERROR_FORMAT, "not a CHM file");
+        fz_try(ctx) chm = &fz_new_derived_archive(ctx, NULL, chm_archive)->super;
+        fz_catch(ctx) {
+            chm_close(h);
+            fz_rethrow(ctx);
+        }
+        chm->format = "chm";
+        chm->has_entry = chm_has_entry;
+        chm->read_entry = chm_read_entry;
+        chm->drop_archive = chm_drop_archive;
+        ((chm_archive *)chm)->chm = h;
+
+        /* #SYSTEM: the table of contents' file, the home page, the title,
+         * the language, the name of the files it was made of. */
+        char topics[CHM_MAX_PATHLEN + 1] = "", home[CHM_MAX_PATHLEN + 1] = "", title[512] = "", hhc[CHM_MAX_PATHLEN + 1] = "";
+        unsigned lcid = 0;
+        unsigned char *s;
+        size_t n = (b = chm_read(h, "#SYSTEM")) ? fz_buffer_storage(ctx, b, &s) : 0;
+        for (size_t i = 4; i + 4 <= n;) {
+            unsigned code = s[i] | s[i + 1] << 8, len = s[i + 2] | s[i + 3] << 8;
+            const char *v = (const char *)s + i + 4;
+            if (len > n - i - 4) break;
+            int vlen = (int)strnlen(v, len);
+            if (code == 0 && !topics[0]) snprintf(topics, sizeof topics, "%.*s", vlen, v);
+            else if (code == 2) snprintf(home, sizeof home, "%.*s", vlen, v);
+            else if (code == 3) snprintf(title, sizeof title, "%.*s", vlen, v);
+            else if (code == 4 && len >= 2) lcid = s[i + 4] | s[i + 5] << 8;
+            else if (code == 6) snprintf(hhc, sizeof hhc, "%.*s.hhc", vlen, v);
+            i += 4 + len;
+        }
+        bk.cp = ((chm_archive *)chm)->cp = chm_codepage(lcid);
+        if (!chm_enumerate(h, CHM_ENUMERATE_NORMAL | CHM_ENUMERATE_FILES, chm_list, &bk)) {
+            fz_throw(ctx, FZ_ERROR_FORMAT, "cannot list the files of this CHM file");
+        }
+        /* As Okular looks for the sitemap; then the first there is. */
+        struct chmUnitInfo ui;
+        if (!topics[0] && hhc[0] && chm_find(h, hhc, &ui)) memcpy(topics, hhc, sizeof topics);
+        if (!topics[0] && chm_find(h, "toc.hhc", &ui)) snprintf(topics, sizeof topics, "toc.hhc");
+        for (int i = 0; !topics[0] && i < bk.nfiles; i++) {
+            if (ext_is(extension(bk.files[i]), "hhc")) snprintf(topics, sizeof topics, "%s", bk.files[i]);
+        }
+
+        int all = 1;
+        for (int i = 0; i < 5; i++) all &= (t[i] = chm_read(h, tables[i])) != NULL;
+        if (all && (n = fz_buffer_storage(ctx, t[CHM_TOCIDX], &s)) >= 4) {
+            bk.steps = (int)(n / 20 + 1);
+            if (!chm_btoc(&bk, t, le32(s), 0)) chm_drop_toc(&bk);
+        }
+        fz_drop_buffer(ctx, b);
+        b = NULL;
+        if (!bk.ntoc && topics[0] && (b = chm_read(h, topics))) {
+            n = fz_buffer_storage(ctx, b, &s);
+            text = fz_new_buffer(ctx, n + 16);
+            chm_text(text, s, n, bk.cp);
+            chm_hhc(&bk, fz_string_from_buffer(ctx, text));
+        }
+
+        /* The pages: those of the table of contents, once each; the home
+         * page; the other HTML files. */
+        pages = fz_malloc_array(ctx, bk.ntoc + bk.nfiles + 1, const char *);
+        for (int i = 0; i < bk.ntoc; i++) {
+            const char *p = bk.toc[i].path;
+            if (p && chm_find(h, p, &ui) && chm_new_page(&seen, p)) pages[npages++] = p;
+        }
+        char *hp = home;
+        while (*hp == '/') hp++;
+        hp[strcspn(hp, "#")] = '\0';
+        if (ext_is(extension(hp), "htm html") && chm_find(h, hp, &ui) && chm_new_page(&seen, hp)) pages[npages++] = hp;
+        for (int i = 0; i < bk.nfiles; i++) {
+            const char *p = bk.files[i] + 1;
+            if (ext_is(extension(p), "htm html") && chm_new_page(&seen, p)) pages[npages++] = p;
+        }
+        if (!npages) fz_throw(ctx, FZ_ERROR_FORMAT, "no pages in this CHM file");
+
+        opf = fz_new_buffer(ctx, 1024 + (size_t)npages * 128);
+        fz_append_string(ctx, opf, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><package xmlns=\"http://www.idpf.org/2007/opf\" "
+                         "version=\"2.0\"><metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\">");
+        if (title[0]) {
+            fz_buffer *tb = fz_new_buffer(ctx, sizeof title * 2);
+            fz_try(ctx) {
+                chm_text(tb, (const unsigned char *)title, strlen(title), bk.cp);
+                fz_append_string(ctx, opf, "<dc:title>");
+                put_escaped(opf, fz_string_from_buffer(ctx, tb));
+                fz_append_string(ctx, opf, "</dc:title>");
+            }
+            fz_always(ctx) fz_drop_buffer(ctx, tb);
+            fz_catch(ctx) fz_rethrow(ctx);
+        }
+        fz_append_string(ctx, opf, "</metadata><manifest><item id=\"ncx\" href=\"" CHM_NCX "\" media-type=\"application/x-dtbncx+xml\"/>");
+        for (int i = 0; i < npages; i++) {
+            fz_append_printf(ctx, opf, "<item id=\"p%d\" href=\"", i);
+            put_href(opf, pages[i]);
+            fz_append_string(ctx, opf, "\" media-type=\"application/xhtml+xml\"/>");
+        }
+        fz_append_string(ctx, opf, "</manifest><spine toc=\"ncx\">");
+        for (int i = 0; i < npages; i++) fz_append_printf(ctx, opf, "<itemref idref=\"p%d\"/>", i);
+        fz_append_string(ctx, opf, "</spine></package>");
+
+        /* The outline: a navPoint an entry, inside the one before it when
+         * it is deeper; one without a page has an empty target. */
+        ncx = fz_new_buffer(ctx, 1024 + (size_t)bk.ntoc * 128);
+        fz_append_string(ctx, ncx, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ncx xmlns=\"http://www.daisy.org/z3986/2005/ncx/\" "
+                         "version=\"2005-1\"><navMap>");
+        int open = 0;
+        for (int i = 0; i < bk.ntoc; i++) {
+            int level = bk.toc[i].level < open ? bk.toc[i].level : open;
+            for (; open > level; open--) fz_append_string(ctx, ncx, "</navPoint>");
+            fz_append_string(ctx, ncx, "<navPoint><navLabel><text>");
+            fz_append_string(ctx, ncx, bk.toc[i].name);
+            fz_append_string(ctx, ncx, "</text></navLabel><content src=\"");
+            if (bk.toc[i].path) put_href(ncx, bk.toc[i].path);
+            if (bk.toc[i].path && bk.toc[i].frag) {
+                fz_append_byte(ctx, ncx, '#');
+                put_href(ncx, bk.toc[i].frag);
+            }
+            fz_append_string(ctx, ncx, "\"/>");
+            open++;
+        }
+        for (; open > 0; open--) fz_append_string(ctx, ncx, "</navPoint>");
+        fz_append_string(ctx, ncx, "</navMap></ncx>");
+
+        made = fz_new_tree_archive(ctx, NULL);
+        fz_tree_archive_add_data(ctx, made, "META-INF/container.xml", container, sizeof container - 1);
+        fz_tree_archive_add_buffer(ctx, made, CHM_OPF, opf);
+        fz_tree_archive_add_buffer(ctx, made, CHM_NCX, ncx);
+        multi = fz_new_multi_archive(ctx);
+        fz_mount_multi_archive(ctx, multi, chm, NULL);
+        fz_mount_multi_archive(ctx, multi, made, NULL); /* the last mounted is looked in first */
+        doc = epub_document_handler.open(ctx, &epub_document_handler, NULL, NULL, multi, NULL);
+    }
+    fz_always(ctx) {
+        fz_drop_archive(ctx, multi);
+        fz_drop_archive(ctx, made);
+        fz_drop_archive(ctx, chm);
+        fz_drop_buffer(ctx, b);
+        fz_drop_buffer(ctx, text);
+        fz_drop_buffer(ctx, opf);
+        fz_drop_buffer(ctx, ncx);
+        for (int i = 0; i < 5; i++) fz_drop_buffer(ctx, t[i]);
+        fz_drop_tree(ctx, seen, NULL);
+        fz_free(ctx, pages);
+        chm_drop_toc(&bk);
+        fz_free(ctx, bk.toc);
+        for (int i = 0; i < bk.nfiles; i++) fz_free(ctx, bk.files[i]);
+        fz_free(ctx, bk.files);
+    }
+    fz_catch(ctx) fz_rethrow(ctx);
+    set_format("CHM", 1);
 }
 
 /* Open path (name: what it is called, for its extension; m: its first n
@@ -2699,7 +3822,15 @@ static void open_by_type(const char *path, const char *name, int dir, const unsi
     } else if ((n >= 6 && !memcmp(m, "Rar!\x1A\x07", 6)) || (n >= 6 && !memcmp(m, "7z\xBC\xAF\x27\x1C", 6))) {
         doc = open_comic(path, COMIC_LIBARCHIVE);
         set_format("Comic book", 0);
-    } else if (is_kimgio(m, n) || magick_coder_content(m, n)) {
+    } else if (zip_type_is(m, n, "image/openraster") || zip_type_is(m, n, "application/x-krita") || ext_is(e, "ora kra krz")) {
+        open_merged(path);
+    } else if (zip_type_is(m, n, ODT_TYPE) || ext_is(e, "odt")) {
+        open_odt(path, 0);
+    } else if (ext_is(e, "fodt") || (n >= 5 && !memcmp(m, "<?xml", 5) && memmem(m, n, "office:mimetype=\"" ODT_TYPE "\"", sizeof "office:mimetype=\"" ODT_TYPE "\"" - 1))) {
+        open_odt(path, 1);
+    } else if ((n >= 4 && !memcmp(m, "ITSF", 4)) || ext_is(e, "chm")) {
+        open_chm(path);
+    } else if (is_raw(m, n, name) || is_kimgio(m, n) || magick_coder_content(m, n)) {
         open_converted(path, name, 0, 0);
     } else if ((n >= 64 && !memcmp(m, FAX_MAGIC, sizeof FAX_MAGIC - 1)) || ext_is(e, "g3 fax")) {
         open_converted(path, name, !ext_is(e, "g3"), 1);

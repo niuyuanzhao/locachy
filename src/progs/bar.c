@@ -24,15 +24,17 @@
  *   modes it grabs the keyboard (EVIOCGRAB), composes through base/ime.c,
  *   and types committed text and every other key into the focused window
  *   through zwp_virtual_keyboard_v1, so applications need no input method
- *   support; Ctrl+. or Shift+Space switches Chinese mode's punctuation
- *   between full width (where it starts: default.custom.yaml's table only)
- *   and half width (every key as typed). While
+ *   support; rc.conf's key_ime_width_cn (Ctrl+. and Shift+Space unless
+ *   set) switches Chinese mode's punctuation between full width (where it
+ *   starts: default.custom.yaml's table only) and half width (every key as
+ *   typed). While
  *   locachy-seat has released the seat (home is on the screen) it ignores the
  *   keyboard.
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -2217,6 +2219,75 @@ static int translate_code(int fd, int code)
     return c;
 }
 
+/* Chinese mode's width, besides key_ime_width (which labwc consumes in every
+ * application): rc.conf's key_ime_width_cn, keys that switch it only in
+ * Chinese mode while the keyboard is the bar's and otherwise type as usual,
+ * so labwc does not bind them. Written as the other key_* settings: keys
+ * separated by blanks or commas, each its modifiers and a key joined by +,
+ * the key a character or a keysym name; matched by the key's symbol (its
+ * first level) in the layout of the keyboard it is on. Read at start and
+ * when settings changes rc.conf. */
+#define MAX_WIDTH_KEYS 8
+static struct width_key {
+    xkb_keysym_t sym;
+    int ctrl, alt, shift, meta;
+} width_keys[MAX_WIDTH_KEYS];
+static int nwidth_keys;
+
+static void on_width_rc(const char *name, const char *value, void *arg)
+{
+    char (*spec)[128] = arg;
+    if (strcmp(name, "key_ime_width_cn") == 0) snprintf(*spec, sizeof *spec, "%s", value);
+}
+
+static void load_width_keys(void)
+{
+    char spec[128] = "Ctrl+. Shift+Space", *save = NULL;
+    rc_read(on_width_rc, &spec);
+    for (char *p = spec; *p; p++) {
+        if (*p == ',') *p = ' ';
+    }
+    nwidth_keys = 0;
+    for (char *tok = strtok_r(spec, " \t", &save); tok && nwidth_keys < MAX_WIDTH_KEYS;
+         tok = strtok_r(NULL, " \t", &save)) {
+        struct width_key k = { .sym = XKB_KEY_NoSymbol };
+        char *part_save = NULL;
+        for (char *part = strtok_r(tok, "+", &part_save); part; part = strtok_r(NULL, "+", &part_save)) {
+            if (strcasecmp(part, "Ctrl") == 0 || strcasecmp(part, "Control") == 0) {
+                k.ctrl = 1;
+            } else if (strcasecmp(part, "Alt") == 0) {
+                k.alt = 1;
+            } else if (strcasecmp(part, "Shift") == 0) {
+                k.shift = 1;
+            } else if (strcasecmp(part, "Super") == 0 || strcasecmp(part, "Meta") == 0 ||
+                       strcasecmp(part, "Win") == 0) {
+                k.meta = 1;
+            } else {
+                k.sym = part[1] ? xkb_keysym_from_name(part, XKB_KEYSYM_CASE_INSENSITIVE) :
+                                  xkb_utf32_to_keysym((uint32_t)tolower((unsigned char)part[0]));
+            }
+        }
+        if (k.sym != XKB_KEY_NoSymbol) width_keys[nwidth_keys++] = k;
+    }
+}
+
+/* Whether key code of a keyboard of layout l, with the modifiers held now,
+ * is one of key_ime_width_cn's. */
+static int width_key(int l, int code)
+{
+    struct layout *y = &layouts[l];
+    xkb_keycode_t key = (xkb_keycode_t)code + 8;
+    const xkb_keysym_t *syms = NULL;
+    int n = y->st ? xkb_keymap_key_get_syms_by_level(y->map, key, xkb_state_key_get_layout(y->st, key), 0, &syms) : 0;
+    for (int i = 0; n == 1 && i < nwidth_keys; i++) {
+        const struct width_key *k = &width_keys[i];
+        if (k->sym == syms[0] && k->ctrl == ctrl && k->alt == alt && k->shift == shift && k->meta == meta) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void notice(const char *msg)
 {
     snprintf(toast_msg, sizeof toast_msg, "%s", msg);
@@ -3181,9 +3252,9 @@ static void handle_kbd_event(int fd)
         if (is_mod || !grabbed) {
             continue;
         }
-        /* Chinese mode's width: Ctrl+. or Shift+Space, as in Chinese input methods. */
-        if (ime_mode() == IME_MODE_CN && !alt && !meta &&
-            ((ev.code == KEY_DOT && ctrl && !shift) || (ev.code == KEY_SPACE && shift && !ctrl))) {
+        /* Chinese mode's width: key_ime_width_cn (Ctrl+. and Shift+Space, as in
+         * Chinese input methods). */
+        if (ime_mode() == IME_MODE_CN && width_key(dl, ev.code)) {
             const char *msg = ev.value == 1 ? ime_toggle_width() : NULL;
             if (msg) {
                 notice(msg);
@@ -3340,6 +3411,7 @@ int main(void)
     cursor_surface = wl_compositor_create_surface(compositor);
     init_xkb();
     if (!nlayouts) return 1;
+    load_width_keys();
     ime_init(NULL, NULL);
     open_keyboards();
     signal(SIGUSR2, on_sigusr2);
@@ -3376,6 +3448,7 @@ int main(void)
             reset_keyboard_state();
             base_language_reload(); /* settings may have changed the language or keys */
             keys_reload();
+            load_width_keys();
             init_xkb(); /* the keyboards' layouts too (keyboards.conf) */
             restore_passthrough_keymap();
             bars_dirty = 1;

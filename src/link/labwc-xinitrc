@@ -1,0 +1,40 @@
+#!/bin/sh
+# /etc/locachy/labwc/xinitrc: labwc runs it each time it starts Xwayland
+# (labwc-config(5)), with DISPLAY set to the display labwc chose. rc.xml keeps
+# Xwayland running (xwaylandPersistence), so this runs at the start of the
+# shared display and again only if Xwayland had to be restarted.
+#
+# Root's Xwayland admits only root. The application user (uid 1000) is added
+# to its access control list (xhost(1), server-interpreted localuser), then the
+# display is published for locachy-app in the root-only runtime file
+# locachy-x11-display; empty: X11 is unavailable, Wayland is not affected.
+# No network clients, no access control disabled.
+umask 077
+state=${XDG_RUNTIME_DIR:-/run/user/0}/locachy-x11-display
+xdisplay=
+# A local display, :N (N of 1 to 5 digits, as locachy-app accepts), nothing else.
+n=${DISPLAY:-}
+n=${n#:}
+case ${DISPLAY:-} in
+:*) case $n in ''|*[!0-9]*|??????*) DISPLAY= ;; esac ;;
+*) DISPLAY= ;;
+esac
+# Containers and host programs have network namespaces of their own: they reach
+# Xwayland through the filesystem socket only, which wlroots makes with labwc's
+# umask (0755: root alone may connect). As an X server's own sockets are, it is
+# made connectable for everyone (0777); the access list decides who may use it.
+socket=/tmp/.X11-unix/X$n
+user=$(getent passwd 1000 | cut -d: -f1)
+if [ -z "$DISPLAY" ]; then
+    echo "labwc xinitrc: no Xwayland display; X11 unavailable" >&2
+elif [ -z "$user" ]; then
+    echo "labwc xinitrc: no user with uid 1000; X11 unavailable" >&2
+elif ! [ -S "$socket" ] || ! chmod 0777 "$socket"; then
+    echo "labwc xinitrc: $socket cannot be opened to the user; X11 unavailable" >&2
+elif timeout 10 xhost "+si:localuser:$user" >/dev/null; then
+    xdisplay=$DISPLAY
+else
+    echo "labwc xinitrc: cannot admit $user to Xwayland $DISPLAY; X11 unavailable" >&2
+fi
+tmp=$(mktemp "$state.XXXXXXXX") || exit 1
+printf '%s\n' "$xdisplay" >"$tmp" && mv -f "$tmp" "$state" || rm -f "$tmp"

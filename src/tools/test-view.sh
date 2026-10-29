@@ -29,7 +29,8 @@ echo "PASS view builds with -Werror"
 
 # view-render, as its own tests build it, where uid 1000 can run it.
 gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE progs/view-render.c progs/view-image.c -o "$b/view-render" \
-    $(pkg-config --cflags --libs libspectre libheif libjxl libwebp libwebpdemux libarchive ddjvuapi MagickWand) -lmupdf -lm
+    $(pkg-config --cflags --libs libspectre libheif libjxl libwebp libwebpdemux libarchive ddjvuapi MagickWand libraw) \
+    -lmupdf -lchm -lm
 sh tools/make-view-samples.sh "$b/samples" >/dev/null
 # The PDF fixtures of test-view-pdf (forms, an encrypted copy, a signature
 # placeholder) and, with OpenSSL, the generated CMS-signed copy.

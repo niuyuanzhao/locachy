@@ -33,7 +33,8 @@ enum view_op {
     VIEW_OPEN = 1,  /* text: the path; ax, ay, bx: the layout (w, h, em: points) for a reflowable
                      * document. Reply: pages, flags, text "FORMAT\tTITLE" (FORMAT as Okular
                      * names it: PDF, XPS, EPUB, Mobipocket, FictionBook, Markdown, Plain text,
-                     * Comic book, DjVu, PostScript, DVI, Fax, Image, TIFF); status EACCES and
+                     * Comic book, DjVu, PostScript, DVI, Fax, Image, TIFF, OpenDocument text,
+                     * CHM; camera RAW is an Image); status EACCES and
                      * flags VIEW_NEEDS_PASSWORD when a password is asked for. */
     VIEW_AUTH,      /* text: the password. Reply as OPEN's; EACCES: wrong. */
     VIEW_PAGE,      /* page. Reply: pw, ph (its size in points), flags VIEW_HAS_TEXT if it has. */

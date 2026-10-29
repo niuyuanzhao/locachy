@@ -86,6 +86,10 @@ static void command_output(char *const argv[], char *buf, size_t size)
         assert(argv[1] && !strcmp(argv[1], "list") && argv[2] == NULL);
         camera_commands++;
         snprintf(buf, size, "%s", camera_listing);
+    } else if (strcmp(argv[0], LOCACHY_REPOS) == 0 && argv[1] && !strcmp(argv[1], "status")) {
+        /* As locachy-repos says it: the repositories' names carry the level. */
+        snprintf(buf, size, "level\tx86-64-v3\ncpu\tznver4\ncore\ton\nextra\ton\nmultilib\toff\n"
+                 "stack\tcachyos-znver4 cachyos-core-znver4 core-x86-64-v3 extra-x86-64-v3 core extra\n");
     } else {
         pending_command = argv[0];
         pid_t pid = fixture_fork();
@@ -965,6 +969,65 @@ static void test_bluetooth(void)
          "without arguments; remove writes off and reloads before packages, failed writes abort");
 }
 
+/* The time zone row: automatic from where the network is, under Clash in
+ * either mode too (clash-client sends ipinfo.io direct); paused, the zone
+ * kept, while Tor carries the network (timezone-client's test), saying why
+ * and that one can be chosen. */
+static void test_time_zone(void)
+{
+    char line[512];
+    int page_before = settings_page, hups_before = hups;
+    tz_auto = 1;
+    tor_on = clash_proxy = 0;
+    for (clash_on = 0; clash_on < 2; clash_on++) { /* none, Clash's TUN */
+        item_text(tz_index(), line, sizeof line);
+        assert(strstr(line, "Automatic: ") && !strstr(line, "paused"));
+    }
+    clash_on = 1;
+    selected = tz_index();
+    adjust(+1);
+    assert(!strcmp(notice, "Enter: choose the time zone."));
+    rc_log[0] = '\0';
+    choose_zone("Automatic");
+    assert(!strcmp(rc_log, "service_timezone=" TIMEZONE_SERVICE ";") && hups == hups_before + 1);
+    assert(strstr(notice, "asked of ipinfo.io"));
+    settings_page = 1;
+    in_page = 1;
+    draw();
+    assert(category == CAT_TIME && canvas_has("Automatic: ") && !canvas_has("paused") &&
+           !canvas_has("ipinfo.io is not asked"));
+    /* The picker (its zones given here: the fixture has no zone1970.tab). */
+    nzones = 2;
+    snprintf(zones[0], sizeof zones[0], "Automatic");
+    snprintf(zones[1], sizeof zones[1], "UTC");
+    nkeys = keypos = 0;
+    keys[nkeys++] = 27;
+    pick_zone();
+    assert(canvas_has("Automatic: from where the network is   (now)") && canvas_has("UTC"));
+    tor_on = 1; /* through Clash or not */
+    item_text(tz_index(), line, sizeof line);
+    assert(strstr(line, "Automatic paused (Tor): "));
+    adjust(+1);
+    assert(!strcmp(notice, "Automatic paused: Tor carries the network, so ipinfo.io is not asked. "
+                           "Enter: choose a zone."));
+    notice[0] = '\0';
+    choose_zone("Automatic");
+    assert(strstr(notice, "Automatic paused: Tor carries the network") && hups == hups_before + 2);
+    draw();
+    assert(canvas_has("Automatic paused (Tor): ") &&
+           canvas_has("Tor carries the network: ipinfo.io is not asked. Enter: choose a zone."));
+    nkeys = keypos = 0;
+    keys[nkeys++] = 27;
+    pick_zone();
+    assert(canvas_has("Automatic: paused while Tor carries the network   (now)"));
+    nkeys = keypos = 0;
+    in_page = 0;
+    settings_page = page_before;
+    tz_auto = tor_on = clash_on = 0;
+    puts("PASS time zone: automatic under Clash in either mode as without it; paused, the zone kept, while Tor "
+         "carries the network, saying why and that one can be chosen");
+}
+
 int main(int argc, char **argv)
 {
     int generated = argc == 5 && strcmp(argv[1], "--fixture-dir") == 0 && strcmp(argv[3], "--place") == 0;
@@ -1189,10 +1252,16 @@ int main(int argc, char **argv)
     selected = fc_index() + 4;
     draw();
     assert(category == CAT_SYSTEM && item_row(fc_index() + 4) >= PAGE_TOP && canvas_has("Camera for faces"));
+    load_repos(); /* as settings starts: locachy-repos status, above */
     for (int c = 0; c < NCATS; c++) { /* each page as it is shown: ROOT/page-N.txt */
         snprintf(snapshot, sizeof snapshot, "page-%d", c);
         show_category(c, c % 2);
         draw();
+        /* No page names a CPU level or architecture: none is chosen in settings. */
+        for (int k = 0; k < nentries; k++) {
+            assert(!strstr(entries[k].text, "x86-64") && !strstr(entries[k].text, "znver"));
+        }
+        assert(!canvas_has("x86-64") && !canvas_has("znver"));
     }
     snapshot[0] = '\0';
     settings_page = 0;
@@ -1585,6 +1654,7 @@ int main(int argc, char **argv)
     assert(strstr(sudo_text, "pam_locachy_any.so locachy-lock-fingerprint locachy-lock-face\n"));
     fingerprint_on = face_on = 0;
     assert(sudo_ways() == 0);
+    test_time_zone();
     test_bluetooth();
     test_circular();
     test_ime_keys();

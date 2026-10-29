@@ -12,7 +12,11 @@
  *               is made of (its package and extras, as the repositories or
  *               the AUR have them; its command, from what its packages
  *               bring once built; its arguments, network and directories);
- *               b build, r roll back, d remove, l output
+ *               b build, r roll back, d remove, l output. Each row: what
+ *               its build installed over the host's (its upper's pacman
+ *               database), how many packages, how much; its details list
+ *               them, each one's version and size (PgUp/PgDn scroll them
+ *               when they do not fit)
  *   Host        its manifest (/etc/locachy/packages), each package's version
  *               and size as installed: i adds a package, x removes the
  *               selected one, s brings the system to it
@@ -66,6 +70,7 @@
 #define MAX_ROWS 1024
 #define MAX_TARGETS 64
 #define MAX_LEAVES 512
+#define MAX_CPKGS 2048 /* the packages of all the containers' builds */
 #define VALUE_MAX 480 /* a value of a configuration: its line stays under conf_read's 512 */
 #define HIT_ROW    0       /* + a list's or the form's line */
 #define HIT_TAB    100000  /* + the page */
@@ -99,9 +104,22 @@ struct container {
     char name[64], package[128], extras[VALUE_MAX + 1], command[256], arguments[256], network[8], camera[8];
     char directories[VALUE_MAX + 1], state[16], built[40];
     int prev, host;
+    int pkg_first, pkg_count, pkg_listed; /* its packages: cpkgs[pkg_first], pkg_listed of pkg_count */
+    long long pkg_bytes;
 };
 static struct container conts[MAX_TARGETS];
 static int nconts;
+
+/* What the containers' builds installed over the host's (each one's upper's
+ * pacman database), by name: their versions and sizes as installed. */
+struct cpkg {
+    char name[64], version[64];
+    long long bytes;
+};
+static struct cpkg cpkgs[MAX_CPKGS];
+static int ncpkgs;
+static int details_from, details_total, details_rows; /* a container's details: first line shown, of how many, how many fit */
+static char details_name[64];                         /* whose */
 
 /* The host's manifest: its leaves (their versions and sizes as installed),
  * and what differs from it; what is installed in all. */
@@ -265,9 +283,67 @@ static int by_name(const void *a, const void *b)
     return strcmp(((const struct container *)a)->name, ((const struct container *)b)->name);
 }
 
+static int by_cpkg(const void *a, const void *b)
+{
+    return strcmp(((const struct cpkg *)a)->name, ((const struct cpkg *)b)->name);
+}
+
+/* The packages its build installed (STATE/NAME/upper/var/lib/pacman/local,
+ * as locachy-pkg reads them: the rest it has from the host), into cpkgs.
+ * An entry without a desc (ALPM_DB_VERSION, the whiteout of a host package
+ * it replaced) is none. */
+static void load_packages(struct container *c)
+{
+    char path[512], desc[1024], *line = NULL;
+    size_t cap = 0;
+    snprintf(path, sizeof path, "%s/%s/upper/var/lib/pacman/local", STATE, c->name);
+    c->pkg_first = ncpkgs;
+    DIR *dir = opendir(path);
+    struct dirent *e;
+    while (dir && (e = readdir(dir)) != NULL) {
+        snprintf(desc, sizeof desc, "%s/%s/desc", path, e->d_name);
+        FILE *f = e->d_name[0] != '.' ? fopen(desc, "re") : NULL;
+        struct cpkg p = { 0 };
+        int tag = 0; /* the value under: 1 %NAME%, 2 %VERSION%, 3 %SIZE% */
+        while (f && getline(&line, &cap, f) > 0) {
+            line[strcspn(line, "\n")] = '\0';
+            if (line[0] == '%') {
+                tag = strcmp(line, "%NAME%") == 0 ? 1 : strcmp(line, "%VERSION%") == 0 ? 2 :
+                      strcmp(line, "%SIZE%") == 0 ? 3 : 0;
+                continue;
+            }
+            if (tag == 1) {
+                snprintf(p.name, sizeof p.name, "%.63s", line);
+            } else if (tag == 2) {
+                snprintf(p.version, sizeof p.version, "%.63s", line);
+            } else if (tag == 3) {
+                p.bytes = atoll(line);
+            }
+            tag = 0;
+        }
+        if (f) {
+            fclose(f);
+        }
+        if (!p.name[0]) {
+            continue;
+        }
+        c->pkg_count++;
+        c->pkg_bytes += p.bytes;
+        if (ncpkgs < MAX_CPKGS) {
+            cpkgs[ncpkgs++] = p;
+            c->pkg_listed++;
+        }
+    }
+    free(line);
+    if (dir) {
+        closedir(dir);
+    }
+    qsort(cpkgs + c->pkg_first, (size_t)c->pkg_listed, sizeof cpkgs[0], by_cpkg);
+}
+
 static void load_containers(void)
 {
-    nconts = 0;
+    nconts = ncpkgs = 0;
     DIR *dir = opendir(CONF_DIR);
     struct dirent *e;
     while (dir && (e = readdir(dir)) != NULL && nconts < MAX_TARGETS) {
@@ -291,6 +367,7 @@ static void load_containers(void)
         snprintf(path, sizeof path, "%s/%s/upper.prev", STATE, c->name);
         c->prev = stat(path, &st) == 0;
         read_state(c->name, c->state, sizeof c->state);
+        load_packages(c);
     }
     if (dir) {
         closedir(dir);
@@ -584,13 +661,18 @@ static void row_text(int i, char *line, size_t size, int *dim)
         snprintf(line, size, "[%c] %-12.12s %s %s", t->marked ? 'x' : ' ', t->name, sbuf, what);
     } else if (page == CONTAINERS) {
         struct container *c = &conts[i];
-        char bbuf[96], bpad[96], cbuf[32];
+        char bbuf[96], bpad[96], cbuf[32], pbuf[96], ppad[96], bytes[32];
         ui_pad(sbuf, sizeof sbuf, state_label(c->state), 8);
         ui_pad(nbuf, sizeof nbuf, strcmp(c->network, "1") == 0 ? C_("row", "network") : "", 8);
         ui_pad(cbuf, sizeof cbuf, strcmp(c->camera, "1") == 0 ? C_("row", "camera") : "", 7);
         snprintf(bbuf, sizeof bbuf, _("built %s"), ui_pad(bpad, sizeof bpad, c->built[0] ? c->built : _("never"), 19));
-        snprintf(line, size, "%-12.12s %s %s %s %s%s  %s %.200s", c->name, sbuf, nbuf, cbuf, bbuf,
-                 c->prev ? _(" (previous kept)") : "", c->package, c->extras);
+        pbuf[0] = '\0';
+        if (c->built[0] || c->pkg_count) { /* what its build installed over the host's */
+            human_size(c->pkg_bytes, bytes, sizeof bytes);
+            snprintf(pbuf, sizeof pbuf, P_("%d package, %s", "%d packages, %s", c->pkg_count), c->pkg_count, bytes);
+        }
+        snprintf(line, size, "%-12.12s %s %s %s %s %s%s  %s %.200s", c->name, sbuf, nbuf, cbuf,
+                 ui_pad(ppad, sizeof ppad, pbuf, 22), bbuf, c->prev ? _(" (previous kept)") : "", c->package, c->extras);
     } else {
         char vbuf[96], bytes[32];
         human_size(leaf_bytes[i], bytes, sizeof bytes);
@@ -619,9 +701,60 @@ static void pane_title(int row, const char *text)
     screen_text(1, row, text, BG, DIM);
 }
 
+#define CONT_ITEMS 10 /* the lines of a container's configuration and build in its details */
+
+/* How many lines a container's details have: its configuration and build,
+ * what its build installed in all, then those packages (under a header),
+ * one a line. */
+static int detail_lines(const struct container *c)
+{
+    return CONT_ITEMS + 1 + (c->pkg_listed ? 1 + c->pkg_listed : 0);
+}
+
+/* The i-th line of a container's details into line: its colour. */
+static uint32_t detail_line(const struct container *c, int i, char *line, size_t size)
+{
+    char kbuf[48], vbuf[96], bytes[32];
+    if (i < CONT_ITEMS) {
+        /* TRANSLATORS: r is the r key; keep it. */
+        const char *items[CONT_ITEMS][2] = {
+            { _("package"), c->package }, { _("extras"), c->extras },
+            { _("command"), c->command }, { _("arguments"), c->arguments },
+            { C_("detail", "network"), strcmp(c->network, "1") == 0 ? _("yes (locachy-net)") : _("no") },
+            { C_("detail", "camera"), strcmp(c->camera, "1") == 0 ? _("yes (the cameras, as they come and go)") : _("no") },
+            { _("directories"), c->directories },
+            { _("state"), state_label(c->state) }, { _("built"), c->built[0] ? c->built : _("never") },
+            { _("previous build"), c->prev ? _("kept (r rolls back to it)") : _("none") },
+        };
+        snprintf(line, size, "%s %s", ui_pad(kbuf, sizeof kbuf, items[i][0], 15), items[i][1]);
+        return FG;
+    }
+    human_size(c->pkg_bytes, bytes, sizeof bytes);
+    if (i == CONT_ITEMS && !c->built[0] && !c->pkg_count) {
+        snprintf(line, size, "%s", _("Not built yet: no build has installed anything"));
+        return DIM;
+    } else if (i == CONT_ITEMS && !c->pkg_count) {
+        snprintf(line, size, "%s", _("Its build installed nothing: all its packages are the host's"));
+        return DIM;
+    } else if (i == CONT_ITEMS) {
+        snprintf(line, size, P_("Its build installed %d package, %s; the rest is the host's",
+                                "Its build installed %d packages, %s; the rest is the host's", c->pkg_count),
+                 c->pkg_count, bytes);
+        return ACCENT;
+    } else if (i == CONT_ITEMS + 1) { /* a header over the columns, as the Host page's */
+        snprintf(line, size, "%-32.32s %s %10s", _("Package"), ui_pad(vbuf, sizeof vbuf, _("Version"), 28), _("Size"));
+        return DIM;
+    }
+    const struct cpkg *p = &cpkgs[c->pkg_first + i - CONT_ITEMS - 2];
+    human_size(p->bytes, bytes, sizeof bytes);
+    snprintf(line, size, "%-32.32s %s %10s", p->name, ui_pad(vbuf, sizeof vbuf, p->version, 28), bytes);
+    return FG;
+}
+
 /* The lower pane, on a background of its own under a title bar: the job's
  * output (while it runs, or l), else the selected row's details (on Host:
- * how the system stands to its manifest). */
+ * how the system stands to its manifest; of a container, its packages too,
+ * scrolled by details_from). */
 static void draw_lower(int top, int height)
 {
     char line[512];
@@ -691,23 +824,28 @@ static void draw_lower(int top, int height)
         }
     } else if (page == CONTAINERS && sel[page] < nconts) {
         struct container *c = &conts[sel[page]];
+        if (strcmp(details_name, c->name) != 0) { /* another one: from its first line */
+            snprintf(details_name, sizeof details_name, "%s", c->name);
+            details_from = 0;
+        }
+        details_total = detail_lines(c);
+        details_rows = height - 1 > 0 ? height - 1 : 0;
+        int most = details_total > details_rows ? details_total - details_rows : 0;
+        details_from = details_from < 0 ? 0 : details_from > most ? most : details_from;
         /* TRANSLATORS: l is the l key; keep it. */
         snprintf(line, sizeof line, _("Details: %s (%s/%s.conf)   l: output"), c->name, CONF_DIR, c->name);
+        if (most > 0) { /* more than the pane holds: which lines, and how to see the rest */
+            char where[64];
+            size_t len = strlen(line);
+            snprintf(where, sizeof where, _("lines %d-%d of %d"), details_from + 1, details_from + details_rows,
+                     details_total);
+            /* TRANSLATORS: PgUp/PgDn are key names; keep them. */
+            snprintf(line + len, sizeof line - len, "   %s   %s", where, _("PgUp/PgDn: scroll"));
+        }
         pane_title(top, line);
-        /* TRANSLATORS: r is the r key; keep it. */
-        const char *items[][2] = {
-            { _("package"), c->package }, { _("extras"), c->extras },
-            { _("command"), c->command }, { _("arguments"), c->arguments },
-            { C_("detail", "network"), strcmp(c->network, "1") == 0 ? _("yes (locachy-net)") : _("no") },
-            { C_("detail", "camera"), strcmp(c->camera, "1") == 0 ? _("yes (the cameras, as they come and go)") : _("no") },
-            { _("directories"), c->directories },
-            { _("state"), state_label(c->state) }, { _("built"), c->built[0] ? c->built : _("never") },
-            { _("previous build"), c->prev ? _("kept (r rolls back to it)") : _("none") },
-        };
-        for (size_t i = 0; i < sizeof items / sizeof items[0] && r < top + height; i++) {
-            char kbuf[48];
-            snprintf(line, sizeof line, "%s %s", ui_pad(kbuf, sizeof kbuf, items[i][0], 15), items[i][1]);
-            screen_text(2, r++, line, FG, PANE);
+        for (int i = details_from; i < details_total && r < top + height; i++) {
+            uint32_t color = detail_line(c, i, line, sizeof line);
+            screen_text(2, r++, line, color, PANE);
         }
     } else {
         pane_title(top, page == CONTAINERS ? _("Details") : _("Details: nothing selected"));
@@ -2009,7 +2147,9 @@ static int pointer_key(int n)
 {
     const struct pointer_event *e = pointer_last();
     if (e->wheel) {
-        if (ui_hit_at(e->col, e->row) == HIT_LOWER) {
+        if (ui_hit_at(e->col, e->row) == HIT_LOWER && page == CONTAINERS && !job && !show_log) {
+            details_from -= 3 * e->wheel; /* draw_lower keeps it in range */
+        } else if (ui_hit_at(e->col, e->row) == HIT_LOWER) {
             log_from += 3 * e->wheel;
             log_from = log_from < 0 ? 0 : log_from > log_total - 1 ? (log_total > 0 ? log_total - 1 : 0) : log_from;
         } else {
@@ -2064,6 +2204,10 @@ int main(void)
             step = step > 0 ? step : 1;
             log_from += key == K_PGUP ? step : -step;
             log_from = log_from < 0 ? 0 : log_from > log_total - 1 ? (log_total > 0 ? log_total - 1 : 0) : log_from;
+        } else if ((key == K_PGUP || key == K_PGDN) && page == CONTAINERS && n > 0 &&
+                   details_total > details_rows) { /* its details, more than they fit, scroll */
+            int step = details_rows > 1 ? details_rows - 1 : 1;
+            details_from += key == K_PGUP ? -step : step; /* draw_lower keeps it in range */
         } else if ((key == K_PGUP || key == K_PGDN) && n > 0) {
             int step = (screen_rows() - 6) / 2;
             step = step > 0 ? step : 1;

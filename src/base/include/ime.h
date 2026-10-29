@@ -34,10 +34,16 @@ const char *ime_mode_desc(void);
 /* Chinese mode's punctuation, full width each time the mode starts: full
  * (the punctuation of Rime's table in default.custom.yaml only; other keys
  * as typed) or half (every key as typed), switched by Ctrl+. or Shift+Space
- * as in Chinese input methods; letters, digits and space are not changed. The
+ * as in Chinese input methods (locachy-bar: rc.conf's key_ime_width_cn);
+ * letters, digits and space are not changed. The
  * label shows it (mode-labels.conf). Returns the notice for the new width; NULL outside
  * Chinese mode. */
 const char *ime_toggle_width(void);
+
+/* Whether key (as typed) with the modifiers held (keys_modifiers) is one of
+ * rc.conf's key_ime_width_cn (Ctrl+. and Shift+Space unless set): the keys
+ * that switch the width in Chinese mode only, and type as usual otherwise. */
+int ime_width_key(int key, int mods);
 
 /* rc.conf's keys for the input method, as keys.c gives them: key_ime cycles
  * the modes (K_CTRL_SPACE), key_ime_cn Chinese, key_ime_raw direct input,
@@ -79,6 +85,7 @@ static inline int ime_mode(void) { return 0; }
 static inline const char *ime_mode_label(void) { return "RAW"; }
 static inline const char *ime_mode_desc(void) { return " [RAW] Direct input "; }
 static inline const char *ime_toggle_width(void) { return NULL; }
+static inline int ime_width_key(int k, int m) { (void)k; (void)m; return 0; }
 static inline int ime_process_key(int k) { (void)k; return 0; }
 static inline void ime_caps_key(int p, int l) { (void)p; (void)l; }
 static inline void ime_set_caps(int l) { (void)l; }

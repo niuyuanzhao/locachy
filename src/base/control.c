@@ -129,6 +129,19 @@ int control_service(char *other, size_t size, int *len)
         pointer_take(fds[0], msg + 8); /* "pointer" NUL PATH */
         return 1;
     }
+    if (n == 0 && (strcmp(msg, "screens") == 0 || strcmp(msg, "pointer-enter") == 0 ||
+                   strcmp(msg, "pointer-left") == 0)) {
+        char *fields[1 + 5 * 8];
+        int count = control_fields(msg, got, fields, (int)(sizeof fields / sizeof fields[0]));
+        if (strcmp(msg, "screens") == 0 && screen_desk) {
+            screen_desk(fields + 1, count - 1); /* before a take: where its screens are */
+        } else if (strcmp(msg, "pointer-enter") == 0 && count == 3) {
+            pointer_came(atoi(fields[1]), atoi(fields[2]));
+        } else if (strcmp(msg, "pointer-left") == 0) {
+            pointer_went();
+        }
+        return 1;
+    }
     for (int i = 0; i < n; i++) {
         close(fds[i]);
     }
@@ -203,9 +216,18 @@ int base_call(char *const argv[])
 
 void base_open(char *const argv[], char *why, size_t size)
 {
-    static const char *const want[] = { "back", "ended", NULL };
-    char msg[CONTROL_MAX], *f[3];
-    int n = ask("open", argv, want, msg, sizeof msg, f, 3);
+    base_open_on(NULL, argv, why, size);
+}
+
+void base_open_on(const char *screen, char *const argv[], char *why, size_t size)
+{
+    static const char *const want[] = { "back", "ended", "shown", NULL };
+    char msg[CONTROL_MAX], *f[3], *on[16];
+    int k = 0;
+    if (screen) on[k++] = (char *)screen;
+    for (int i = 0; argv[i] && k < 15; i++) on[k++] = argv[i];
+    on[k] = NULL;
+    int n = ask(screen ? "open-on" : "open", on, want, msg, sizeof msg, f, 3);
 
     if (n == 0) {
         snprintf(why, size, "no process 1 to ask");

@@ -14,13 +14,31 @@ static int fake_signal(pid_t pid, int sig) { (void)pid; (void)sig; return 0; }
 #define kill fake_signal
 #define base_audio_key fake_audio
 #define base_brightness_key fake_brightness
+#ifdef CONFIG_IME
+#define ime_get_commit typed_commit /* the bar's commits, seen here */
+#endif
 #define main bar_main
 #include "../progs/bar.c"
 #undef main
+#ifdef CONFIG_IME
+#undef ime_get_commit
+#endif
 #undef base_audio_key
 #undef base_brightness_key
 #undef kill
 #include "i18n-stub.h"
+
+#ifdef CONFIG_IME
+/* The last text Rime committed, as the bar typed it. */
+static char committed[64];
+const char *ime_get_commit(void);
+const char *typed_commit(void)
+{
+    const char *c = ime_get_commit();
+    if (c && c[0]) snprintf(committed, sizeof committed, "%s", c);
+    return c;
+}
+#endif
 
 static int audio_action, brightness_action;
 static int fake_audio(int key, char *out, size_t size)
@@ -38,10 +56,10 @@ static int fake_brightness(int key, char *out, size_t size)
     return -1;
 }
 void say(const char *fmt, ...) { (void)fmt; }
+static const char *rc_width_cn = NULL; /* rc.conf's key_ime_width_cn, when it has one */
 int rc_read(void (*fn)(const char *, const char *, void *), void *arg)
 {
-    (void)fn;
-    (void)arg;
+    if (rc_width_cn) fn("key_ime_width_cn", rc_width_cn, arg);
     return 0;
 }
 double uptime(void) { return 1.0; }
@@ -301,6 +319,32 @@ int main(int argc, char **argv)
     kbd_layout[1] = 1;
     puts("PASS a keyboard of its own layout: its keys by it, modifiers of both keyboards in both, one Caps Lock, "
          "unplugged held keys released");
+    /* Chinese mode's width keys, rc.conf's key_ime_width_cn: Ctrl+. and
+     * Shift+Space unless set, each key by its symbol in its keyboard's
+     * layout (jp's @ is a key of its own, us's is Shift+2). */
+    load_width_keys();
+    key(KEY_CAPSLOCK, 1); /* jp's Ctrl here */
+    assert(width_key(0, KEY_DOT) && width_key(1, KEY_DOT) && !width_key(0, KEY_SPACE));
+    key(KEY_CAPSLOCK, 0);
+    okey(KEY_LEFTSHIFT, 1);
+    assert(width_key(1, KEY_SPACE) && width_key(0, KEY_SPACE) && !width_key(1, KEY_DOT));
+    okey(KEY_LEFTSHIFT, 0);
+    assert(!width_key(0, KEY_DOT) && !width_key(0, KEY_SPACE) && !width_key(1, KEY_SPACE));
+    rc_width_cn = "Ctrl+@,Hiragana_Katakana";
+    load_width_keys();
+    okey(KEY_LEFTCTRL, 1);
+    assert(!width_key(0, KEY_DOT) && width_key(0, KEY_LEFTBRACE) && !width_key(1, KEY_LEFTBRACE) &&
+           !width_key(1, KEY_2));
+    okey(KEY_LEFTCTRL, 0);
+    assert(width_key(0, KEY_KATAKANAHIRAGANA) && !width_key(0, KEY_LEFTBRACE));
+    rc_width_cn = "";
+    load_width_keys();
+    assert(nwidth_keys == 0);
+    rc_width_cn = NULL;
+    load_width_keys();
+    assert(nwidth_keys == 2 && keys_down == 0);
+    puts("PASS Chinese mode's width keys from rc.conf's key_ime_width_cn (Ctrl+. and Shift+Space unless set), "
+         "by each keyboard's layout");
     kbd_layout[1] = 0;
     if (integration) {
         init_xkb();
@@ -314,6 +358,23 @@ int main(int argc, char **argv)
         for (size_t i = 0; i < sizeof pinyin / sizeof pinyin[0]; i++) {
             key(pinyin[i], 1); key(pinyin[i], 0);
         }
+        assert(!strcmp(committed, "\xe4\xbd\xa0\xe5\xa5\xbd"));
+        /* The same on the second keyboard: every keyboard's keys reach Rime. */
+        committed[0] = '\0';
+        for (size_t i = 0; i < sizeof pinyin / sizeof pinyin[0]; i++) {
+            okey(pinyin[i], 1); okey(pinyin[i], 0);
+        }
+        assert(!strcmp(committed, "\xe4\xbd\xa0\xe5\xa5\xbd"));
+        /* Chinese mode's width by key_ime_width_cn's keys, on either
+         * keyboard; the keys are the bar's, not the application's. */
+        char full[40];
+        snprintf(full, sizeof full, "%s", ime_mode_label());
+        key(KEY_CAPSLOCK, 1); key(KEY_DOT, 1); /* jp's Ctrl here */
+        assert(strcmp(ime_mode_label(), full) != 0 && !layouts[0].down[KEY_DOT]);
+        key(KEY_DOT, 0); key(KEY_CAPSLOCK, 0);
+        okey(KEY_LEFTSHIFT, 1); okey(KEY_SPACE, 1);
+        assert(strcmp(ime_mode_label(), full) == 0 && !layouts[0].down[KEY_SPACE]);
+        okey(KEY_SPACE, 0); okey(KEY_LEFTSHIFT, 0);
         ime_set_mode(IME_MODE_EN);
         static const int english[] = { KEY_H, KEY_E, KEY_L, KEY_L, KEY_O, KEY_SPACE };
         for (size_t i = 0; i < sizeof english / sizeof english[0]; i++) {
@@ -321,6 +382,7 @@ int main(int argc, char **argv)
         }
         ime_set_mode(IME_MODE_RAW);
         puts("PASS real Rime CN/EN composition and commit executed from pipe keyboard input");
+        puts("PASS real Rime pinyin on a second keyboard commits Chinese text; its width keys switch the width");
 #endif
         key(KEY_A, 1);
         assert(layouts[0].down[KEY_A] == 1);
@@ -371,6 +433,17 @@ int main(int argc, char **argv)
         okey(KEY_A, 1); okey(KEY_A, 0); /* A on the us keyboard: one Caps Lock */
         okey(KEY_CAPSLOCK, 1); okey(KEY_CAPSLOCK, 0);
         okey(KEY_A, 1); okey(KEY_A, 0);
+#ifdef CONFIG_IME
+        /* Pinyin on that keyboard, by its own layout, commits too. */
+        ime_set_mode(IME_MODE_CN);
+        committed[0] = '\0';
+        for (size_t i = 0; i < sizeof pinyin / sizeof pinyin[0]; i++) {
+            okey(pinyin[i], 1); okey(pinyin[i], 0);
+        }
+        assert(!strcmp(committed, "\xe4\xbd\xa0\xe5\xa5\xbd"));
+        ime_set_mode(IME_MODE_RAW);
+        puts("PASS real Rime pinyin on a keyboard of its own layout commits Chinese text");
+#endif
         assert(wl_display_roundtrip(display) >= 0);
         for (int l = 0; l < nlayouts; l++) {
             for (int c = 0; c <= KEY_MAX; c++) assert(!layouts[l].down[c]);

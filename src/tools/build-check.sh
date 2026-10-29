@@ -55,10 +55,10 @@ gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE "$src/progs/archive-worker.c" \
 gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE "$src/progs/keytable.c" \
     $(pkg-config --cflags --libs xkbcommon) -o "$out/keytable"
 # The document viewer, where its libraries are installed (make.sh).
-view_pkgs="libspectre libheif libjxl libwebp libwebpdemux libarchive ddjvuapi MagickWand"
-if pkg-config --exists $view_pkgs && [ -f /usr/include/mupdf/fitz.h ]; then
+view_pkgs="libspectre libheif libjxl libwebp libwebpdemux libarchive ddjvuapi MagickWand libraw"
+if pkg-config --exists $view_pkgs && [ -f /usr/include/mupdf/fitz.h ] && [ -f /usr/include/chm_lib.h ]; then
     gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE "$src/progs/view-render.c" "$src/progs/view-image.c" \
-        $(pkg-config --cflags --libs $view_pkgs) -lmupdf -lm -o "$out/view-render"
+        $(pkg-config --cflags --libs $view_pkgs) -lmupdf -lchm -lm -o "$out/view-render"
     gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $ime_flags $flags \
         -I"$src/base/include" -I"$src/base" "$src/progs/view.c" "$src/progs/view-layout.c" \
         "$src/progs/view-client.c" "$src/progs/files.c" "$out"/obj/base-*.o "$out/obj/ime.o" \

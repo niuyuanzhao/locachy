@@ -29,7 +29,7 @@ for test in pointer input-hotplug; do
     "${cc[@]}" "$src/tools/test-$test.c" "${link[@]}" -lm -o "$out/$test"
     "$out/$test"
 done
-for test in rtc-alarm suspend-hibernate; do
+for test in rtc-alarm suspend-hibernate status-battery; do
     "${cc[@]}" "$src/tools/test-$test.c" "${link[@]}" -o "$out/$test"
     "$out/$test" "$out/$test-fixtures"
 done
@@ -48,7 +48,11 @@ done
     $(pkg-config --libs gio-2.0 xkbcommon wayland-client wayland-cursor) -lm \
     "${link[@]}" -o "$out/bar-keyboard"
 "$out/bar-keyboard"
-for test in gestures libinput audio-packages audio-client; do
+for test in gestures libinput audio-packages audio-client face-camera container-migration kernel-choice \
+            boot-kernel root-boot-unit; do
     python3 -B "$src/tools/test-$test.py" "$out"
 done
+python3 -B "$src/tools/test-xwayland.py" # takes no scratch directory
+bash "$src/tools/test-timezone-client.sh" "$out/timezone"
+bash "$src/tools/test-settings-tor.sh" "$out/settings-tor"
 printf '%s\n' 'PASS device-free interaction regressions; real KMS/libinput/IME hardware acceptance remains separate.'

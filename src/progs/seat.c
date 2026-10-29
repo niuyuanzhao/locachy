@@ -11,7 +11,8 @@
  * With labwc, the shared compositor, it also starts its host clients:
  * labwc-control (the containers' display locachy-0, window control, screens),
  * locachy-bar (status bar, input method) and swaybg (the wallpaper). Process 1 is told
- * "display-ready" once both wayland-0 and locachy-0 are there. Its gestures
+ * "display-ready" once both wayland-0 and locachy-0 are there, and the shared
+ * Xwayland's display (XWAYLAND.md) or its time is up. Its gestures
  * (/usr/local/lib/locachy/gestures) run while it is on the screen.
  */
 #include <drm/drm.h>
@@ -336,6 +337,14 @@ static void gestures(int on)
     gestures_pid = pid;
 }
 
+/* labwc's Xwayland: its xinitrc (link/labwc-xinitrc) writes the display the
+ * containers get, empty when X11 is unavailable. display-ready waits for it
+ * (when Xwayland is installed) up to X11_WAIT seconds, so that the first
+ * program started on it finds X11 there; Wayland comes without it. */
+#define X11_RECORD "/run/user/0/locachy-x11-display"
+#define XWAYLAND "/usr/bin/Xwayland"
+#define X11_WAIT 10
+
 /* The wallpaper, rc.conf's wallpaper (settings, or w in files): swaybg
  * with it, once wayland-0 is there, and started again when it has changed or
  * swaybg has exited. It is changed while the shared display is frozen, so it
@@ -387,8 +396,14 @@ static void wallpaper(void)
 
 /* From locachy-bar, which holds the keyboard in the input method's modes so
  * that process 1 does not see the keys: SIGUSR1 key_home, SIGUSR2 key_lock
- * (and labwc-control: idle). Passed on to process 1. */
-static volatile sig_atomic_t want_home, want_lock;
+ * (and labwc-control: idle); from labwc-control's touchpad swipes, SIGRTMIN
+ * the next task, SIGRTMIN + 1 the previous. Passed on to process 1. */
+static volatile sig_atomic_t want_home, want_lock, want_switch;
+
+static void on_sigswitch(int sig)
+{
+    want_switch = sig == SIGRTMIN ? 1 : -1;
+}
 
 static void on_sigusr1(int sig)
 {
@@ -417,6 +432,8 @@ int main(int argc, char **argv)
     }
     signal(SIGUSR1, on_sigusr1);
     signal(SIGUSR2, on_sigusr2);
+    signal(SIGRTMIN, on_sigswitch);
+    signal(SIGRTMIN + 1, on_sigswitch);
 
     int ctl = control_fd();
     if (ctl >= 0) {
@@ -458,6 +475,7 @@ int main(int argc, char **argv)
         unlink("/run/user/0/locachy-0");
         unlink("/run/user/0/locachy-control.sock");
         unlink("/run/user/0/locachy-bar.sock");
+        unlink(X11_RECORD);
     }
 
     pid_t comp_pid = fork();
@@ -482,6 +500,9 @@ int main(int argc, char **argv)
         setenv("LIBSEAT_BACKEND", "seatd", 1);
         setenv("SEATD_SOCK", sock_path, 1);
         if (is_labwc) {
+            /* Its Xwayland's display is labwc's to choose (DISPLAY), none other. */
+            unsetenv("DISPLAY");
+            unsetenv("XAUTHORITY");
             /* settings --apply (above) wrote the configuration with rc.conf's values. */
             const char *rc = access(LABWC_RC, R_OK) == 0 ? LABWC_RC : "/etc/locachy/labwc/rc.xml";
             execl(argv[1], argv[1], "-C", "/etc/locachy/labwc", "-c", rc, (char *)NULL);
@@ -506,7 +527,12 @@ int main(int argc, char **argv)
     for (;;) {
         if (is_labwc && !display_ready_sent && ctl >= 0 &&
             access("/run/user/0/wayland-0", F_OK) == 0 &&
-            access("/run/user/0/locachy-0", F_OK) == 0) {
+            access("/run/user/0/locachy-0", F_OK) == 0 &&
+            (access(X11_RECORD, F_OK) == 0 || access(XWAYLAND, X_OK) != 0 ||
+             uptime() - display_started > X11_WAIT)) {
+            if (access(X11_RECORD, F_OK) != 0 && access(XWAYLAND, X_OK) == 0) {
+                say("seat: Xwayland did not start within %d s: X11 programs cannot open windows", X11_WAIT);
+            }
             display_ready_sent = 1;
             control_send(ctl, "display-ready", 13, NULL, 0);
             wallpaper(); /* swaybg needs wayland-0: it does not wait for it */
@@ -527,6 +553,14 @@ int main(int argc, char **argv)
             want_lock = 0;
             if (ctl >= 0) {
                 control_send(ctl, "lock", 4, NULL, 0);
+            }
+        }
+        if (want_switch) {
+            static const char *const next[] = { "switch", "next", NULL }, *const prev[] = { "switch", "prev", NULL };
+            int forward = want_switch > 0;
+            want_switch = 0;
+            if (ctl >= 0) {
+                control_send_fields(ctl, forward ? next : prev);
             }
         }
         struct pollfd p[4];
@@ -651,6 +685,7 @@ int main(int argc, char **argv)
         unlink("/run/user/0/locachy-0");
         unlink("/run/user/0/locachy-control.sock");
         unlink("/run/user/0/locachy-bar.sock");
+        unlink(X11_RECORD);
     }
     drop_all_devices();
     if (cfd >= 0) close(cfd);

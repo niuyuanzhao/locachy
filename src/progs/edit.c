@@ -5755,7 +5755,7 @@ static void key_event(int key)
         if (ime_notice) say_toast(ime_notice);
         return;
     }
-    if (ime_mode() == IME_MODE_CN && ((key == '.' && mods == KEYS_CTRL) || (key == ' ' && mods == KEYS_SHIFT))) {
+    if (ime_mode() == IME_MODE_CN && ime_width_key(key, mods)) {
         const char *msg = ime_toggle_width();
         if (msg) {
             say_toast(msg);

@@ -9,9 +9,10 @@
 #include "../base/keys.c"
 #include <assert.h>
 
+static const char *rc[5]; /* rc.conf's NAME, VALUE pairs; none: the defaults */
 int rc_read(void (*fn)(const char *, const char *, void *), void *arg)
 {
-    (void)fn; (void)arg;
+    for (int i = 0; rc[i]; i += 2) fn(rc[i], rc[i + 1], arg);
     return 0;
 }
 void say(const char *fmt, ...) { (void)fmt; }
@@ -75,6 +76,18 @@ int main(void)
     assert(strcmp(caps_log, "press1 now0 release0 ") == 0);
     assert(key(KEY_A, 1) == 'a' && key(KEY_A, 0) == 0);
     puts("PASS Caps Lock: letters in capitals (Shift small), digits and Ctrl as ever; the input method told");
+    /* key_home: ThinkVantage (KEY_VENDOR, KEY_PROG1) goes home, whatever is
+     * held, unless rc.conf names other keys; then those do, it nothing. */
+    assert(key(KEY_VENDOR, 1) == K_ACT_HOME && key(KEY_VENDOR, 0) == 0 && keys_alone_action(KEY_PROG1) == K_ACT_HOME);
+    assert(keys_alone_action(KEY_MICMUTE) == K_MIC_MUTE && keys_alone_action(KEY_ESC) == 0);
+    rc[0] = "key_home", rc[1] = "Super+Esc MicMute", rc[2] = "key_mic_mute", rc[3] = "";
+    keys_reload();
+    assert(key(KEY_VENDOR, 1) == 0 && key(KEY_VENDOR, 0) == 0 && key(KEY_PROG1, 1) == 0 && key(KEY_PROG1, 0) == 0);
+    assert(keys_alone_action(KEY_VENDOR) == 0 && keys_alone_action(KEY_PROG1) == 0);
+    assert(key(KEY_LEFTCTRL, 1) == 0 && key(KEY_MICMUTE, 1) == K_ACT_HOME && key(KEY_MICMUTE, 0) == 0);
+    assert(key(KEY_LEFTCTRL, 0) == 0 && keys_alone_action(KEY_MICMUTE) == K_ACT_HOME);
+    assert(key(KEY_LEFTMETA, 1) == 0 && key(KEY_ESC, 1) == K_ACT_HOME && key(KEY_ESC, 0) == 0 && key(KEY_LEFTMETA, 0) == 0);
+    puts("PASS key_home=\"Super+Esc MicMute\": MicMute goes home (with Ctrl held too), Super+Esc still; ThinkVantage nothing");
     puts("ALL PASSED");
     return 0;
 }

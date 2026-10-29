@@ -72,11 +72,26 @@ int control_shown(void);
  * showing it. */
 int screen_take(int lease);
 void screen_release(void);
+/* The desktop's screens as process 1 gives them (fields NAME X Y W H, for
+ * each screen), before a take; their number. A point of the picture (the
+ * pointer's pixels) on the desktop and back: 0, or -1 without a place.
+ * Whether a desktop point is on a screen another program has. The output the
+ * pointer is on (-1: none), framed green when there are several screens. */
+__attribute__((weak)) void screen_desk(char *const *fields, int n);
+__attribute__((weak)) int screen_desk_count(void);
+__attribute__((weak)) int screen_to_desk(int x, int y, int *gx, int *gy);
+__attribute__((weak)) int screen_from_desk(int gx, int gy, int *x, int *y);
+__attribute__((weak)) int screen_desk_foreign(int gx, int gy);
+__attribute__((weak)) void screen_hover(int output);
 
-/* The screen, process 1 side: lend the output to a program as a DRM lease
- * (returns the lease fd, -1 on error), and take it back (revoke the lease,
- * show our own buffer again). */
+/* The screen, process 1 side: lend outputs to a program as a DRM lease
+ * (returns the lease fd, -1 on error): all those not lent (screen_lend), or
+ * those named; take one back (revoke the lease, show our own buffer again on
+ * its outputs). The outputs there are, by connector name, with their places
+ * on the desktop (monitors.conf, as the shared display lays them out). */
 int screen_lend(uint32_t *lessee);
+int screen_lend_outputs(const char *const *names, int n, uint32_t *lessee);
+int screen_places(struct screen_output *out, int max);
 int screen_drop_master(uint32_t lessee);
 int screen_take_back(uint32_t lessee);
 /* Rescan only while master and no active lease: 1 usable, 0 no output,
@@ -123,6 +138,10 @@ void pointer_remove(const char *path);
 void pointer_retry(void); /* retry leases not yet tagged by udev */
 void pointer_release(void);
 void pointer_resume(void);
+/* From process 1, with several screens: the pointer is this program's again
+ * at (gx, gy) on the desktop; it went to another program. */
+void pointer_came(int gx, int gy);
+void pointer_went(void);
 int pointer_fd(void);
 void pointer_dispatch(void);
 int pointer_next(void);

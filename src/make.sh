@@ -14,11 +14,12 @@
 #   /usr/local/bin/packages                    installs and updates (locachy-pkg)
 #   /usr/local/bin/locachy-seat, locachy-bar   the shared compositor's seat and bar
 #   /usr/local/bin/locachy-overview            its windows' overview (the top left corner, Super+W)
-#   /usr/local/lib/locachy/gestures            its gestures (libinput-gestures, lisgd: swipes for the overview)
+#   /usr/local/lib/locachy/gestures            its gestures (libinput-gestures, lisgd: swipes for home, the next and previous task, the overview)
 #   /etc/locachy/libinput-gestures.conf        the touchpad's
 #   /usr/local/lib/locachy/labwc-control       its trusted client (containers' display)
 #   /usr/local/lib/locachy/xdg-open            containers' xdg-open (to locachy-bar)
 #   /etc/locachy/labwc/rc.xml                  its configuration
+#   /etc/locachy/labwc/xinitrc                 its Xwayland's start (XWAYLAND.md)
 #   /usr/local/lib/locachy/link-client         the cable debug link (a service)
 #   /usr/local/lib/locachy/user-shell          term's shell, as the user (program_term)
 #   /usr/local/lib/locachy/link-connect        its connection, with keepalive
@@ -171,14 +172,14 @@ $GCC -o "$lib/drives" "$src/progs/drives.c" "$b"/glibc-base-*.o $FT_LIBS
 # The document viewer: view on the screen, view-render reading the documents
 # as the user in a sandbox of its own (progs/view-proto.h). Their libraries
 # are the manifest's (a system from before it: locachy-pkg install them).
-VIEW_PKGS="libspectre libheif libjxl libwebp libwebpdemux libarchive ddjvuapi MagickWand"
-if pkg-config --exists $VIEW_PKGS && [ -f /usr/include/mupdf/fitz.h ]; then
-    $GCC -o "$lib/view-render" "$src/progs/view-render.c" "$src/progs/view-image.c" $(pkg-config --cflags --libs $VIEW_PKGS) -lmupdf -lm
+VIEW_PKGS="libspectre libheif libjxl libwebp libwebpdemux libarchive ddjvuapi MagickWand libraw"
+if pkg-config --exists $VIEW_PKGS && [ -f /usr/include/mupdf/fitz.h ] && [ -f /usr/include/chm_lib.h ]; then
+    $GCC -o "$lib/view-render" "$src/progs/view-render.c" "$src/progs/view-image.c" $(pkg-config --cflags --libs $VIEW_PKGS) -lmupdf -lchm -lm
     $GCC $IME_CFLAGS -o /usr/local/bin/view "$src/progs/view.c" "$src/progs/view-layout.c" "$src/progs/view-client.c" \
         "$src/progs/files.c" "$b"/glibc-base-*.o "$b/glibc-ime.o" $IME_LIBS $FT_LIBS
 else
     rm -f /usr/local/bin/view "$lib/view-render"
-    echo "make: view not built: libmupdf, djvulibre, libspectre, libheif, libjxl, libwebp, imagemagick, libarchive are not all installed" >&2
+    echo "make: view not built: libmupdf, djvulibre, libspectre, libheif, libjxl, libwebp, imagemagick, libarchive, libraw, chmlib are not all installed" >&2
 fi
 # The text editor, with tree-sitter's grammars (dlopen'ed) and the queries
 # the grammar packages leave out (edit/queries, their upstream files).
@@ -484,6 +485,8 @@ gcc -O2 -o "$lib/gen_init_cpio" "$src/tools/gen_init_cpio.c" # the initramfs (lo
 install -m 755 "$src/link/gestures" "$lib/gestures"
 install -D -m 644 "$src/link/libinput-gestures.conf" /etc/locachy/libinput-gestures.conf
 install -D -m 644 "$src/link/labwc-rc.xml" /etc/locachy/labwc/rc.xml
+# Run by labwc whenever it starts Xwayland: the user admitted, the display published.
+install -D -m 644 "$src/link/labwc-xinitrc" /etc/locachy/labwc/xinitrc
 # Each container's own session bus (locachy-app), with locachy-bar its tray.
 install -D -m 644 "$src/link/container-bus.conf" /usr/local/share/locachy/container-bus.conf
 rm -f /etc/locachy/labwc/menu.xml

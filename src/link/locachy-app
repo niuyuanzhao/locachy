@@ -47,6 +47,10 @@
 #                 freezes and stops it like a container
 #   desktop       a host program's .desktop files in /usr/share/applications,
 #                 separated by spaces: its windows, and what it opens
+#   x11           "1": the shared X server too (Xwayland: DISPLAY and its
+#                 socket), for a program that has no Wayland; the X11 programs
+#                 on it can read each other's windows, input and selections
+#                 (XWAYLAND.md), so a program has it only when this says so
 # A container sees the host root through its overlay, minus the host's own
 # state (/var/lib/locachy, /var/log/locachy). Its programs run as the user
 # (uid 1000, made by locachy-setup) with a home of their own, in which the
@@ -706,6 +710,22 @@ shared_wayland=${LOCACHY_WAYLAND_DISPLAY:-locachy-0}
 [[ "$shared_wayland" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,107}$ ]] || die 'invalid LOCACHY_WAYLAND_DISPLAY socket name'
 [ "$shared_wayland" != bus ] || die 'Wayland socket name conflicts with the session bus'
 [ -S "$RUNTIME_DIR/$shared_wayland" ] || die "Wayland socket is not available: $RUNTIME_DIR/$shared_wayland"
+# The shared Xwayland display, for a program whose configuration asks for it
+# (x11="1"), as labwc's xinitrc published it once the user may connect; never
+# inherited from a caller or guessed as :0. None: Wayland only.
+x11_display=
+if [ "$(conf_value "$name" x11)" = 1 ]; then
+    [ ! -r "$RUNTIME_DIR/locachy-x11-display" ] || IFS= read -r x11_display <"$RUNTIME_DIR/locachy-x11-display" || true
+    if [ -z "$x11_display" ]; then
+        printf 'locachy-app: %s: there is no shared X11 display; it starts without X11\n' "$name" >&2
+    else
+        [[ "$x11_display" =~ ^:[0-9]{1,5}$ ]] || die 'invalid shared X11 display'
+        if [ ! -S "/tmp/.X11-unix/X${x11_display#:}" ]; then
+            printf 'locachy-app: %s: the shared X11 socket is not there; it starts without X11\n' "$name" >&2
+            x11_display=
+        fi
+    fi
+fi
 [ -x "$APP_INIT" ] || die "container reaper is not installed: $APP_INIT"
 for tool in unshare chroot mount mkfifo; do
     command -v "$tool" >/dev/null 2>&1 || die "$tool is required"
@@ -798,7 +818,7 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
 # passes back.
 "${net_prefix[@]}" unshare --mount --pid --fork --kill-child --propagation slave "${net_args[@]}" bash -euc '
     cbase=$1; want_net=$2; display=$3; init=$4; ready_fd=$5; host_runtime=$6; state_dir=$7
-    user=$8; uid=$9; gid=${10}; uhome=${11}; USER_DIRS=${12}; directories=${13}; host=${14}; camera=${15}; shift 15
+    user=$8; uid=$9; gid=${10}; uhome=${11}; USER_DIRS=${12}; directories=${13}; host=${14}; camera=${15}; x11_display=${16}; shift 16
     # Record host PID before mounting the namespace-local /proc. This bash
     # becomes the C reaper via exec, so its host PID stays unchanged.
     host_pid=; start_ticks=
@@ -874,6 +894,14 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
         mount -t proc proc "$cbase/merged/proc" -o nosuid,noexec,nodev
         mount -t sysfs sys "$cbase/merged/sys" -o nosuid,noexec,nodev,ro
         mount -t tmpfs tmp "$cbase/merged/tmp" -o mode=1777,nosuid,nodev
+        # X11 through the filesystem socket (the abstract one stays in the
+        # host network namespace), no TCP: this shared display only.
+        if [ -n "$x11_display" ]; then
+            install -d -m 1777 "$cbase/merged/tmp/.X11-unix"
+            xsocket="/tmp/.X11-unix/X${x11_display#:}"
+            touch "$cbase/merged$xsocket"
+            mount --bind -o ro "$xsocket" "$cbase/merged$xsocket"
+        fi
         mount -t tmpfs run "$cbase/merged/run" -o mode=0755,nosuid,nodev
         # The host runtime gives the container its display and sound only: no
         # session bus of root (it gets one of its own, below), no devices but the
@@ -1041,7 +1069,8 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
     export LOGNAME="$user"
     export XDG_RUNTIME_DIR="/run/user/$uid"
     export WAYLAND_DISPLAY="$display"
-    unset WAYLAND_SOCKET DISPLAY SEATD_SOCK
+    unset WAYLAND_SOCKET DISPLAY XAUTHORITY SEATD_SOCK
+    [ -z "$x11_display" ] || export DISPLAY="$x11_display"
     export HOME="$uhome"
     export XDG_CONFIG_HOME="$uhome/.config"
     export XDG_CACHE_HOME="$uhome/.cache"
@@ -1072,7 +1101,7 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
     exec "$app_init" "$@"
 ' bash "$cbase" "$want_net" "$shared_wayland" "$APP_INIT" "$READY_FD" "$RUNTIME_DIR" "$APP_RUNTIME/$name" \
     "$user" "$uid" "$gid" "$uhome" "$USER_DIRS" "$(conf_value "$name" directories)" "$host" \
-    "$(conf_value "$name" camera)" "$@" {APP_LOCK_FD}>&- &
+    "$(conf_value "$name" camera)" "$x11_display" "$@" {APP_LOCK_FD}>&- &
 launcher=$!
 
 # A bounded readiness handshake serializes start against controls. Once ready,

@@ -37,7 +37,21 @@ msgid_plural "%d items"
 msgstr[0] "%d 项"
 EOF
 msgfmt --check -o "$out/catalogs/zh_CN/LC_MESSAGES/locachy.mo" "$out/test.po"
+# Another library's catalog, as PAM's: its domain is not bound to UTF-8.
+cat >"$out/other.po" <<'OTHER'
+msgid ""
+msgstr ""
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+msgid "Password: "
+msgstr "密码："
+OTHER
+msgfmt --check -o "$out/catalogs/zh_CN/LC_MESSAGES/other-library.mo" "$out/other.po"
 localedef -i zh_CN -f UTF-8 "$out/locales/zh_CN.UTF-8"
+localedef -i C -f UTF-8 "$out/locales/C.UTF-8"
 gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -I"$src/base/include" -I"$src/base" \
     "$src/tools/test-i18n.c" "$src/base/i18n.c" "$src/base/rc.c" "$src/base/say.c" "$src/base/ui.c" \
     -o "$out/test-i18n"

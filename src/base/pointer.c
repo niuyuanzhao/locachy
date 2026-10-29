@@ -10,7 +10,10 @@
  * place on it is its place in the picture). Touchpad pinches are pinches;
  * swipes of three or more fingers go home (up) or to the next or previous
  * task (left, right). A pen points, its tip is the left button. No uinput,
- * daemon, or shared read of a device.
+ * daemon, or shared read of a device. With several screens, each program
+ * has its own: the pointer leaving this program's for another's is told to
+ * process 1, which gives the devices to that program (pointer_came there);
+ * the screen it is on has a green frame.
  * Process 1 (musl) is built without libinput: it only lends and revokes. */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -104,6 +107,7 @@ static int click_button, click_count, click_x, click_y;
 static struct pointer_event queue[QUEUE], last;
 static int qhead, qlen;
 static int nmice, touch_hid, pen_near, timer_fd = -1;
+static int away;                     /* on another program's screen: not ours to move */
 static double touch_ppmm = 4.0;      /* pixels of the picture per millimetre of the touch screen */
 static struct touch { int down; double x, y, xmm, ymm; } touches[TOUCHES];
 static enum { TOUCH_IDLE, TOUCH_PENDING, TOUCH_SCROLL, TOUCH_TWO, TOUCH_DONE } touch_state;
@@ -177,7 +181,34 @@ static void push(struct pointer_event e)
  * touch until a mouse moves again. */
 static void show_cursor(void)
 {
-    screen_cursor_visible(!touch_hid && (nmice > 0 || pen_near));
+    screen_cursor_visible(!away && !touch_hid && (nmice > 0 || pen_near));
+}
+
+static int several_screens(void)
+{
+    return screen_desk_count && screen_desk_count() > 1;
+}
+
+/* The pointer went onto another program's screen, at (gx, gy) on the
+ * desktop: process 1 gives it the devices; here it is gone until it comes
+ * back (pointer_came) or the screen is taken again. */
+static void leave(int gx, int gy)
+{
+    char x[16], y[16];
+    snprintf(x, sizeof x, "%d", gx);
+    snprintf(y, sizeof y, "%d", gy);
+    const char *const fields[] = { "pointer-leave", x, y, NULL };
+    if (control_fd() < 0 || control_send_fields(control_fd(), fields) < 0) return;
+    away = 1;
+    show_cursor();
+    if (screen_hover) screen_hover(-1);
+}
+
+/* The screen the pointer is on, framed when there are several. */
+static void hover(void)
+{
+    if (!screen_hover || !several_screens()) return;
+    screen_hover(away || nmice == 0 ? -1 : extended_screen() ? screen_output_at((int)px, (int)py, NULL, NULL) : 0);
 }
 
 /* What absolute devices (touch screens, pens, absolute mice) point at, at
@@ -198,14 +229,18 @@ EVENTS static void absolute_area(int *x, int *y, int *w, int *h)
     screen_pixels(w, h);
 }
 
-/* The pointer at (px, py), kept on the picture. */
+/* The pointer at (px, py), kept on the picture; onto another program's
+ * screen, unless a button is held (a drag stays). */
 EVENTS static void moved(void)
 {
-    int w, h;
+    int w, h, gx, gy;
+    if (away) return;
     if (touch_hid) {
         touch_hid = 0;
         show_cursor();
     }
+    int crossing = !held && several_screens() && screen_to_desk((int)px, (int)py, &gx, &gy) == 0 &&
+                   screen_desk_foreign(gx, gy);
     if (extended_screen()) {
         keep_on_outputs();
     } else {
@@ -213,7 +248,12 @@ EVENTS static void moved(void)
         px = px < 0 ? 0 : px > w - 1 ? w - 1 : px;
         py = py < 0 ? 0 : py > h - 1 ? h - 1 : py;
     }
+    if (crossing) {
+        leave(gx, gy);
+        return;
+    }
     screen_cursor_move((int)px, (int)py);
+    hover();
     push((struct pointer_event){ .x = (int)px, .y = (int)py });
 }
 
@@ -235,6 +275,8 @@ EVENTS static void press(int code, int pressed, int slack)
         click_x = e.x;
         click_y = e.y;
         e.clicks = click_count;
+        /* With several screens: the keyboard comes to the one pressed on. */
+        if (several_screens() && control_fd() >= 0) control_send(control_fd(), "pointer-press", 13, NULL, 0);
     }
     push(e);
 }
@@ -505,6 +547,7 @@ static void handle(struct libinput_event *ev)
         npointers += sign * is_pointer(d);
         nmice += sign * libinput_device_has_capability(d, LIBINPUT_DEVICE_CAP_POINTER);
         show_cursor();
+        hover(); /* the frame, once the pointer that came over has its devices */
         break;
     }
     case LIBINPUT_EVENT_POINTER_MOTION:
@@ -656,8 +699,31 @@ int pointer_take(int fd, const char *path)
     return -1; /* kept until release; libinput did not take it */
 }
 
+/* From process 1: the pointer is ours again, at (gx, gy) on the desktop. */
+void pointer_came(int gx, int gy)
+{
+    int x, y;
+    away = 0;
+    if (screen_from_desk && screen_from_desk(gx, gy, &x, &y) == 0) {
+        px = x;
+        py = y;
+    }
+    show_cursor();
+    moved();
+}
+
+/* From process 1: the pointer went to another program (it took the
+ * devices), not across an edge of ours. */
+void pointer_went(void)
+{
+    away = 1;
+    show_cursor();
+    if (screen_hover) screen_hover(-1);
+}
+
 void pointer_release(void)
 {
+    away = 0;
 #ifdef CONFIG_LIBINPUT
     if (li) {
         for (size_t i = 0; i < ndevices; i++) {

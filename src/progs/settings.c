@@ -1347,10 +1347,10 @@ static const struct opt_module opt_modules[] = {
       "pipewire pipewire-alsa pipewire-pulse wireplumber wiremix sof-firmware",
       "service_audio", AUDIO_SERVICE, "program_mixer", MIXER_PROGRAM },
     { N_("Wayland display (labwc)"), "/usr/bin/labwc",
-      "labwc-locachy swaybg libnotify libinput-tools libinput-gestures lisgd python-pyudev noto-fonts-emoji",
+      "labwc-locachy xorg-xwayland xorg-xhost swaybg libnotify libinput-tools libinput-gestures lisgd python-pyudev noto-fonts-emoji",
       "service_clipboard", "/usr/local/lib/locachy/clipboard --serve", NULL, NULL },
     { N_("Document viewer (view)"), "/usr/include/mupdf/fitz.h",
-      "libmupdf djvulibre libspectre libwebp libheif libjxl imagemagick openexr libarchive",
+      "libmupdf djvulibre libspectre libwebp libheif libjxl imagemagick openexr libarchive libraw chmlib",
       NULL, NULL, NULL, NULL },
     { N_("TeX DVI support (texlive)"), "/usr/bin/dvipdfmx",
       "texlive-bin texlive-basic", NULL, NULL, NULL, NULL },
@@ -1577,7 +1577,7 @@ static const char *const repo_labels[] = {
 };
 #define NREPO_SECTIONS ((int)(sizeof repo_sections / sizeof repo_sections[0]))
 static int repo_on[NREPO_SECTIONS];
-static char repo_level[16], repo_cpu[48], repo_ranked[64], repo_stack[512];
+static char repo_ranked[64];
 static pid_t repos_job;     /* locachy-repos apply|rank, while it runs */
 static char repos_what[24]; /* what it does: "rank", or a section set: "extra=off" */
 
@@ -1587,7 +1587,7 @@ static void load_repos(void)
     char out[1024];
     char *const cmd[] = { LOCACHY_REPOS, "status", NULL };
     command_output(cmd, out, sizeof out);
-    repo_level[0] = repo_cpu[0] = repo_ranked[0] = repo_stack[0] = '\0';
+    repo_ranked[0] = '\0';
     for (char *line = strtok(out, "\n"); line; line = strtok(NULL, "\n")) {
         char *v = strchr(line, '\t');
         if (!v) {
@@ -1599,13 +1599,7 @@ static void load_repos(void)
                 repo_on[i] = strcmp(v, "on") == 0;
             }
         }
-        if (strcmp(line, "level") == 0) {
-            snprintf(repo_level, sizeof repo_level, "%s", v);
-        } else if (strcmp(line, "cpu") == 0) {
-            snprintf(repo_cpu, sizeof repo_cpu, "%s", v);
-        } else if (strcmp(line, "stack") == 0) {
-            snprintf(repo_stack, sizeof repo_stack, "%s", v);
-        } else if (strcmp(line, "ranked") == 0 && *v) {
+        if (strcmp(line, "ranked") == 0 && *v) {
             char *country = strchr(v, '\t');
             if (country) {
                 *country++ = '\0';
@@ -2857,6 +2851,23 @@ static void current_zone(char *out, size_t size)
     snprintf(out, size, "%.100s", zone);
 }
 
+/* The automatic zone is paused, the zone kept, while full-system Tor carries
+ * the network (service_tor), as timezone-client has it: through Tor ipinfo.io
+ * would see its exit, and nothing goes around it. Under Clash it is asked in
+ * either mode: clash-client sends ipinfo.io direct. */
+static int zone_paused(void)
+{
+    return tor_on;
+}
+
+/* Why the automatic zone is paused, and that one can be chosen. */
+static void zone_paused_notice(void)
+{
+    /* TRANSLATORS: Enter is the Enter key; keep it. */
+    snprintf(notice, sizeof notice, "%s", _("Automatic paused: Tor carries the network, so ipinfo.io is not asked. "
+                                            "Enter: choose a zone."));
+}
+
 /* Automatic, UTC, and the zones of zone1970.tab (one for each region whose
  * clocks have agreed since 1970), sorted. */
 #define MAX_ZONES 512
@@ -2897,7 +2908,11 @@ static void choose_zone(const char *zone)
         }
         tz_auto = 1;
         kill(1, SIGHUP); /* process 1 starts timezone-client */
-        snprintf(notice, sizeof notice, "%s", _("Time zone: automatic, from where the network is (asked of ipinfo.io)."));
+        if (zone_paused()) {
+            zone_paused_notice();
+        } else {
+            snprintf(notice, sizeof notice, "%s", _("Time zone: automatic, from where the network is (asked of ipinfo.io)."));
+        }
         return;
     }
     snprintf(target, sizeof target, ZONEINFO "/%s", zone);
@@ -2923,6 +2938,8 @@ static void pick_zone(void)
     int sel = -1, top = 0;
     load_zones();
     current_zone(current, sizeof current);
+    const char *automatic = zone_paused() ? _("Automatic: paused while Tor carries the network") :
+                            _("Automatic: from where the network is");
     for (;;) {
         int n = 0, list = 5, height = screen_rows() - list - 2;
         for (int i = 0; i < nzones; i++) {
@@ -2947,8 +2964,7 @@ static void pick_zone(void)
         for (int k = 0; k < height && top + k < n; k++) {
             int i = match[top + k], on = top + k == sel;
             int now = tz_auto ? i == 0 : strcmp(zones[i], current) == 0;
-            snprintf(line, sizeof line, "%s%s", i == 0 ? _("Automatic: from where the network is") : zones[i],
-                     now ? _("   (now)") : "");
+            snprintf(line, sizeof line, "%s%s", i == 0 ? automatic : zones[i], now ? _("   (now)") : "");
             screen_fill(0, list + k, screen_cols(), 1, on ? ACCENT : BG);
             screen_text(4, list + k, line, on ? BG : FG, on ? ACCENT : BG);
         }
@@ -3915,7 +3931,7 @@ static void category_entries(int cat)
         add_items(bt_index(), 3);
         break;
     case CAT_NETWORK:
-        add_title(_("Wi-Fi & Internet"));
+        add_title(_("Network"));
         add_items(nw_index(), nnets + 1);
         if (nnets == 0) add_entry(E_NOTE, _("No saved network yet."));
         add_title(_("Tailscale"));
@@ -3952,6 +3968,10 @@ static void category_entries(int cat)
         add_items(lang_index(), 1);
         add_title(_("Date & Time"));
         add_items(tz_index(), 3);
+        if (tz_auto && zone_paused()) {
+            /* TRANSLATORS: Enter is the Enter key; keep it. */
+            add_entry(E_NOTE, _("Tor carries the network: ipinfo.io is not asked. Enter: choose a zone."));
+        }
         break;
     default:
         add_title(_("About This System"));
@@ -3968,25 +3988,10 @@ static void category_entries(int cat)
         add_title(_("Software Update"));
         add_items(upd_index(), 2);
         add_title(_("Software Sources"));
+        /* The switches and the mirrors only: the repositories' names carry
+         * the CPU level (core-x86-64-v3, cachyos-znver4), which is not
+         * chosen here (locachy-repos status lists them). */
         add_items(repo_index(), NREPO_SECTIONS + 1);
-        if (repo_stack[0]) {
-            char note[128];
-            /* The stack, a line of names at a time. */
-            for (const char *p = repo_stack; *p;) {
-                int n = 0;
-                for (const char *w = p; *w;) {
-                    size_t len = strcspn(w, " ");
-                    if (n > 0 && n + (int)len > 100) {
-                        break;
-                    }
-                    n = (int)(w - p + (ptrdiff_t)len);
-                    w += len + strspn(w + len, " ");
-                }
-                snprintf(note, sizeof note, "  %.*s", n, p);
-                add_entry(E_NOTE, note);
-                p += n + (int)strspn(p + n, " ");
-            }
-        }
         add_title(_("Optional Components"));
         add_items(opt_index(), NOPT_MODULES);
         add_title(_("Debug Cable"));
@@ -4718,7 +4723,12 @@ static void item_text(int idx, char *line, size_t size)
         struct tm tm;
         if (i == 0) {
             current_zone(zone, sizeof zone);
-            snprintf(vbuf, sizeof vbuf, tz_auto ? _("Automatic: %.60s") : "%.60s", zone);
+            if (tz_auto && zone_paused()) {
+                /* TRANSLATORS: %s is a time zone (Europe/Berlin). */
+                snprintf(vbuf, sizeof vbuf, _("Automatic paused (Tor): %.60s"), zone);
+            } else {
+                snprintf(vbuf, sizeof vbuf, tz_auto ? _("Automatic: %.60s") : "%.60s", zone);
+            }
             snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Time zone"), 32), vbuf);
         } else if (i == 1) {
             snprintf(line, size, "%.95s [%s]", ui_pad(label, sizeof label, _("Network time"), 32),
@@ -5842,6 +5852,10 @@ static void adjust(int dir)
         } else {
             snprintf(notice, sizeof notice, "%s", _("Never locked for want of input (the lock key and the lid still lock)."));
         }
+        return;
+    }
+    if (selected == tz_index() && tz_auto && zone_paused()) {
+        zone_paused_notice();
         return;
     }
     if (selected == tz_index() || selected == tz_index() + 2) {

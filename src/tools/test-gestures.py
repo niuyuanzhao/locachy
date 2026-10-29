@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""Gesture hotplug glue with udev/process fixtures, no input or display access.
+"""Gesture hotplug glue with udev/process fixtures, and the touchpad's
+bindings as libinput-gestures reads them; no input or display access.
   python3 -B tools/test-gestures.py SCRATCH_PARENT
 """
 import importlib.machinery
 import importlib.util
 from pathlib import Path
+import re
+import shlex
 import signal
 import subprocess
 import sys
 import tempfile
 import unittest
 from unittest import mock
+import xml.etree.ElementTree as ET
 
 sys.dont_write_bytecode = True
 SOURCE = Path(__file__).resolve().parents[1]
@@ -278,6 +282,65 @@ class Gestures(unittest.TestCase):
         module.Monitor.from_netlink.assert_called_once_with(context, source="udev")
         self.assertEqual(calls, [(context, monitor)])
         self.assertIn(signal.SIGINT, handlers)
+
+
+def touchpad_conf():
+    """libinput-gestures.conf as libinput-gestures reads it (get_conf,
+    conf_gesture): whole-line comments; gesture TYPE MOTION [FINGERS]
+    COMMAND, FINGERS one digit, none meaning every finger count."""
+    bindings, settings = {}, {}
+    for line in (SOURCE / "link/libinput-gestures.conf").read_text().splitlines():
+        line = line.strip()
+        if not line or line[0] == "#":
+            continue
+        key, rest = line.split(maxsplit=1)
+        if key != "gesture":
+            assert key in ("swipe_threshold", "timeout"), f"unexpected conf command: {line}"
+            settings[key] = rest
+            continue
+        kind, motion, command = rest.split(maxsplit=2)
+        fingers, *tail = command.split(maxsplit=1)
+        if fingers.isdigit() and len(fingers) == 1:
+            command = tail[0]
+        else:
+            fingers = ""
+        assert (kind, motion, fingers) not in bindings, f"bound twice: {line}"
+        bindings[(kind, motion, fingers)] = shlex.split(command)
+    return bindings, settings
+
+
+class TouchpadBindings(unittest.TestCase):
+    def setUp(self):
+        self.bindings, self.settings = touchpad_conf()
+        control = "/usr/local/lib/locachy/labwc-control"
+        self.wanted = {
+            # base/pointer.c swipe(): up "home", left "switch next", right
+            # "switch prev"; labwc-control carries them to process 1.
+            ("swipe", "up", "3"): [control, "--action", "home"],
+            ("swipe", "left", "3"): [control, "--action", "next"],
+            ("swipe", "right", "3"): [control, "--action", "prev"],
+            ("swipe", "up", "4"): [glue.OVERVIEW, "--show"],
+            ("swipe", "down", "4"): [glue.OVERVIEW, "--hide"],
+        }
+
+    def test_three_finger_swipes_as_direct_programs_and_overview_kept(self):
+        self.assertEqual(self.bindings, self.wanted)
+        # Home the way the shared compositor's home key asks for it.
+        rc = ET.parse(SOURCE / "link/labwc-rc.xml").getroot()
+        ns = {"o": "http://openbox.org/3.4/rc"}
+        key = rc.find("o:keyboard/o:keybind[@key='HOME-KEY']/o:action[@name='Execute']", ns)
+        self.assertEqual(shlex.split(key.get("command")), self.bindings[("swipe", "up", "3")])
+
+    def test_two_finger_movements_not_bound(self):
+        # No binding for two fingers or for every finger count: two-finger
+        # scrolling and pinching stay the application's.
+        self.assertEqual([k for k in self.bindings if not (k[2].isdigit() and int(k[2]) >= 3)], [])
+
+    def test_swipe_length_and_time_as_direct_programs(self):
+        units = re.search(r"^#define SWIPE_UNITS ([0-9.]+)", (SOURCE / "base/pointer.c").read_text(), re.M)
+        self.assertIsNotNone(units)
+        self.assertEqual(int(self.settings["swipe_threshold"]), int(float(units.group(1))))
+        self.assertEqual(float(self.settings["timeout"]), 0)
 
 
 class OverviewLifetime(unittest.TestCase):

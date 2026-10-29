@@ -17,23 +17,35 @@
  * (as busybox's init); both end everything first and leave / read-only.
  *
  * Home opens tasks. A task is a stack of programs: the one on top runs, the
- * ones below wait in base_call for it to return. One program runs at a time
- * and has the screen (a DRM lease) and the keyboard (evdev fds); every other
- * one, home included, is frozen with its memory pushed out to swap.
+ * ones below wait in base_call for it to return. A program on the screen
+ * runs and has it (a DRM lease); every other one, home included, is frozen
+ * with its memory pushed out to swap. With several screens each shows home
+ * or a task, opened there from home: home has every screen no task shows,
+ * each program a lease of its own screens, and they run side by side. The
+ * keyboard (evdev fds) is on the screen last pressed on (its program tells
+ * process 1 of a press); the pointer's devices are the program's whose
+ * screen the pointer is on (it tells process 1 when the pointer goes onto
+ * another program's screen), touch screens and pens the built-in panel's
+ * program's. The shared display, and the lock, have every screen.
  * The shared compositor of the containers' windows (labwc) runs under
  * /usr/local/bin/locachy-seat, which implements the seatd protocol on a
  * private socket and translates take/release to seat activation/deactivation.
- *   open ARG...   (from home) home is frozen; the task ARG... is thawed at
- *                 its top, or started.
+ *   open ARG...   (from home) the task ARG... is thawed at its top, or
+ *                 started, on every screen home shows; home, left without
+ *                 one, is frozen until it is told "back" or "ended".
+ *   open-on SCREEN ARG...  (from home) the same on that screen (a connector)
+ *                 only; home, if it keeps another, is told "shown TASK".
  *   kill ARG...   (from home) the task ARG... is killed and cleaned up.
  *   call ARG...   (from the top of a task) it is frozen; ARG... starts on top.
  *   a program exits: the one below is thawed and told "returned NAME
  *                 STATUS"; if there is none, the task ends and home is told
  *                 "ended TASK STATUS".
  *   ThinkVantage / Super+Esc, which process 1 always sees on its own fds: the
- *                 task is frozen as it is, and home is told "back TASK".
- *   switch next|prev  (from the program on the screen: a touchpad swipe) the
- *                 next or previous of home and the running tasks, in turn.
+ *                 task on the screen with the keyboard is frozen as it is,
+ *                 and home is told "back TASK".
+ *   switch next|prev  (from the program on a screen: a touchpad swipe) the
+ *                 next or previous of home and the running tasks not on
+ *                 another screen, in turn, there.
  *   lock          (from the program on the screen; key_lock, which process 1
  *                 also sees on its own fds; the lid closing; at boot unless
  *                 rc.conf has login_skip="1"; rc.conf's lock_after minutes
@@ -93,6 +105,8 @@ struct frame {
     int frozen;
     int shared_display;     /* release display without freezing shared infrastructure */
     uint32_t lessee;        /* its DRM lease while it has the screen */
+    uint32_t screens;       /* the screens it has (bits of places), while it has them */
+    int pointer_kinds;      /* the pointer devices it has: POINTER_MOVING, POINTER_DIRECT */
     int kbd[MAX_KBD], nkbd; /* the keyboard fds lent to it */
     int *pointer;
     size_t npointer;        /* input devices for its libinput (pointer?) */
@@ -128,8 +142,23 @@ static double active_at;           /* the last input (ms) */
 static int *afd;                   /* the input devices, read only to see input */
 static size_t nafd;
 static struct task tasks[MAX_TASKS];
-static struct task *front;  /* the task on screen; NULL: home */
-static struct frame *fg;    /* the program that has the screen */
+/* The screens (outputs, by connector name; one without a name, all of them,
+ * while process 1 cannot tell them apart) and the task each shows, or home
+ * (NULL). The keyboard is on focus_place's, the pointer on hover_place's.
+ * The lock, and the shared display while it is in front (display_front),
+ * have them all. */
+#define MAX_SCREENS 8
+struct place {
+    char name[32];
+    int x, y, w, h;         /* on the desktop, logical pixels */
+    int internal;           /* the built-in panel: touch screens and pens are its */
+    struct task *task;
+};
+static struct place places[MAX_SCREENS];
+static int nplaces, focus_place, hover_place;
+static struct task *display_front;
+#define POINTER_MOVING 1    /* mice, touchpads, TrackPoints (and keyboards, for typing detection) */
+#define POINTER_DIRECT 2    /* touch screens and pens on a screen (INPUT_PROP_DIRECT) */
 static int next_cgroup;
 static char *desktop_argv[] = {
     "/usr/local/bin/locachy-seat", "/usr/bin/labwc", NULL
@@ -801,16 +830,178 @@ static int start(struct frame *f, char *const argv[])
     return 0;
 }
 
-/* Give f the screen and the keyboard. */
+/* The screens: what each shows, and handing them, the keyboard and the
+ * pointer to the programs that should have them. */
 static int display_pending;
 static double display_refresh_at = -1;
 static double display_retry_until = -1;
 
-static int lend(struct frame *f)
+static void send3(struct frame *f, const char *a, const char *b, const char *c)
+{
+    const char *fields[] = { a, b, c, NULL };
+
+    control_send_fields(f->ctl, fields);
+}
+
+static int frames(struct frame **all)
+{
+    int n = 0;
+    all[n++] = &home;
+    all[n++] = &locker;
+    for (int i = 0; i < MAX_TASKS; i++) {
+        for (int d = 0; d < tasks[i].depth; d++) all[n++] = &tasks[i].f[d];
+    }
+    return n;
+}
+
+static struct frame *top(struct task *t)
+{
+    return t != NULL && t->depth > 0 ? &t->f[t->depth - 1] : NULL;
+}
+
+/* The program screen i should show: the lock's, the shared display's while
+ * in front, its task's, or home's; NULL for none (it is starting again). */
+static struct frame *showing(int i)
+{
+    struct frame *f;
+    if (locked) {
+        f = &locker;
+    } else if (display_front != NULL) {
+        f = top(display_front);
+    } else if (i >= 0 && i < nplaces && places[i].task != NULL) {
+        f = top(places[i].task);
+    } else {
+        f = &home;
+    }
+    return f != NULL && f->pid > 0 ? f : NULL;
+}
+
+/* The program the keyboard is for: the focused screen's. */
+static struct frame *focused(void)
+{
+    return showing(focus_place);
+}
+
+/* The screen a task is on; -1 if none. */
+static int place_of(const struct task *t)
+{
+    for (int i = 0; i < nplaces; i++) {
+        if (places[i].task == t) return i;
+    }
+    return -1;
+}
+
+/* The first screen frame f has; -1 if none. */
+static int place_of_frame(const struct frame *f)
+{
+    for (int i = 0; i < nplaces; i++) {
+        if (f->screens >> i & 1) return i;
+    }
+    return -1;
+}
+
+static int internal_place(void)
+{
+    for (int i = 0; i < nplaces; i++) {
+        if (places[i].internal) return i;
+    }
+    return 0;
+}
+
+/* The screen at (x, y) on the desktop; -1 if none. */
+static int place_at(int x, int y)
+{
+    for (int i = 0; i < nplaces; i++) {
+        const struct place *p = &places[i];
+        if (p->name[0] && x >= p->x && y >= p->y && (int64_t)x < (int64_t)p->x + p->w &&
+            (int64_t)y < (int64_t)p->y + p->h) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* The screens there are now (screen_places), each keeping the task it
+ * showed. A task whose screen has gone goes to one that shows home, else to
+ * the focused one (whose task waits, frozen, until home opens it again). */
+static void sync_places(void)
+{
+    struct screen_output out[MAX_SCREENS];
+    struct place old[MAX_SCREENS];
+    int n = screen_places(out, MAX_SCREENS), nold = nplaces;
+    char focus_name[32] = "", hover_name[32] = "";
+    memcpy(old, places, sizeof old);
+    if (focus_place < nold) snprintf(focus_name, sizeof focus_name, "%s", old[focus_place].name);
+    if (hover_place < nold) snprintf(hover_name, sizeof hover_name, "%s", old[hover_place].name);
+    memset(places, 0, sizeof places);
+    if (n <= 0) {
+        places[0].task = nold > 0 ? old[focus_place < nold ? focus_place : 0].task : NULL;
+        nplaces = 1;
+        focus_place = hover_place = 0;
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        snprintf(places[i].name, sizeof places[i].name, "%.31s", out[i].name);
+        places[i].x = out[i].x;
+        places[i].y = out[i].y;
+        places[i].w = out[i].width;
+        places[i].h = out[i].height;
+        places[i].internal = out[i].internal;
+        for (int k = 0; k < nold; k++) {
+            if (strcmp(old[k].name, out[i].name) == 0) places[i].task = old[k].task;
+        }
+    }
+    nplaces = n;
+    focus_place = hover_place = internal_place();
+    for (int i = 0; i < n; i++) {
+        if (strcmp(places[i].name, focus_name) == 0) focus_place = i;
+        if (strcmp(places[i].name, hover_name) == 0) hover_place = i;
+    }
+    for (int k = 0; k < nold; k++) {
+        struct task *t = old[k].task;
+        if (t == NULL || place_of(t) >= 0) continue;
+        int to = -1;
+        for (int i = 0; to < 0 && i < n; i++) {
+            if (places[i].task == NULL) to = i;
+        }
+        places[to >= 0 ? to : focus_place].task = t;
+        say("init: screen %s went; its task %s is on %s now", old[k].name[0] ? old[k].name : "?", t->key,
+            places[to >= 0 ? to : focus_place].name);
+    }
+}
+
+/* Tell f where the screens are on the desktop, before its take: NAME X Y W H
+ * for each; with several, the pointer goes from one program's to another's. */
+static void tell_screens(struct frame *f)
+{
+    char text[MAX_SCREENS][5][32];
+    const char *fields[2 + 5 * MAX_SCREENS] = { "screens" };
+    int n = 1;
+    for (int i = 0; i < nplaces; i++) {
+        if (!places[i].name[0]) continue;
+        snprintf(text[i][0], sizeof text[i][0], "%.31s", places[i].name);
+        snprintf(text[i][1], sizeof text[i][1], "%d", places[i].x);
+        snprintf(text[i][2], sizeof text[i][2], "%d", places[i].y);
+        snprintf(text[i][3], sizeof text[i][3], "%d", places[i].w);
+        snprintf(text[i][4], sizeof text[i][4], "%d", places[i].h);
+        for (int k = 0; k < 5; k++) fields[n++] = text[i][k];
+    }
+    fields[n] = NULL;
+    control_send_fields(f->ctl, fields);
+}
+
+/* Give f its screens (mask: bits of places), and the keyboard if it is the
+ * focused one. */
+static int lend(struct frame *f, uint32_t mask)
 {
     int fds[1 + MAX_KBD];
+    const char *names[MAX_SCREENS];
+    int n = 0;
 
-    fds[0] = screen_lend(&f->lessee);
+    for (int i = 0; i < nplaces; i++) {
+        if ((mask >> i & 1) && places[i].name[0]) names[n++] = places[i].name;
+    }
+    fds[0] = n ? screen_lend_outputs(names, n, &f->lessee) : screen_lend(&f->lessee);
     if (fds[0] < 0) {
         f->lessee = 0;
         display_pending = 1;
@@ -818,7 +1009,8 @@ static int lend(struct frame *f)
         display_retry_until = now_ms() + 2000;
         return -1;
     }
-    f->nkbd = keys_lend(f->kbd, MAX_KBD);
+    if (!f->shared_display) tell_screens(f);
+    f->nkbd = f == focused() ? keys_lend(f->kbd, MAX_KBD) : 0;
     memcpy(fds + 1, f->kbd, sizeof(int) * (size_t)f->nkbd);
     if (control_send(f->ctl, "take", 4, fds, 1 + f->nkbd) < 0) {
         say("init: cannot send the screen to %s", f->name);
@@ -830,7 +1022,7 @@ static int lend(struct frame *f)
         return -1;
     }
     close(fds[0]); /* the program holds the lease now */
-    fg = f;
+    f->screens = mask ? mask : 1;
     display_pending = 0;
     display_refresh_at = -1;
     display_retry_until = -1;
@@ -845,7 +1037,25 @@ static void display_changed(void)
     display_retry_until = now_ms() + 2000;
 }
 
-/* Take the screen and the keyboard back from f: ask, then revoke anyway. */
+/* What f has of the screens, the keyboard and the pointer comes back. */
+static void reclaim(struct frame *f)
+{
+    keys_take_back(f->kbd, f->nkbd);
+    f->nkbd = 0;
+    pointer_take_back(f->pointer, f->npointer);
+    f->pointer = NULL;
+    f->npointer = 0;
+    f->pointer_wanted = 0;
+    f->pointer_kinds = 0;
+    if (f->screens && screen_take_back(f->lessee) < 0) {
+        say("init: cannot reclaim DRM master from %s", f->name);
+    }
+    f->lessee = 0;
+    f->screens = 0;
+}
+
+/* Take its screens, the keyboard and the pointer back from f: ask, then
+ * revoke anyway. */
 static void take_back(struct frame *f)
 {
     char msg[CONTROL_MAX];
@@ -875,48 +1085,7 @@ static void take_back(struct frame *f)
             tell_tasks();
         }
     }
-    keys_take_back(f->kbd, f->nkbd);
-    f->nkbd = 0;
-    pointer_take_back(f->pointer, f->npointer);
-    f->pointer = NULL;
-    f->npointer = 0;
-    f->pointer_wanted = 0;
-    if (screen_take_back(f->lessee) < 0) {
-        say("init: cannot reclaim DRM master from %s", f->name);
-    }
-    f->lessee = 0;
-    fg = NULL;
-}
-
-/* Topology changes never freeze/restart a direct task. The shared display
- * owns the raw DRM master while active, so leave its hotplug to labwc and
- * rescan only once control returns to a direct frontend. */
-static int refresh_display(void)
-{
-    if (!display_pending || display_refresh_at < 0 || now_ms() < display_refresh_at) return 0;
-    if (fg && fg->shared_display) {
-        display_refresh_at = -1;
-        return 0;
-    }
-    struct frame *active = fg;
-    if (!active) {
-        if (locked) active = locker.pid > 0 ? &locker : NULL;
-        else if (front && front->depth > 0) active = &front->f[front->depth - 1];
-        else if (home.pid > 0) active = &home;
-    }
-    if (!active) { display_refresh_at = -1; return 0; }
-    if (fg) take_back(fg);
-    int available = screen_refresh();
-    if (available > 0 && lend(active) == 0) {
-        say("init: refreshed outputs for %s", active->name);
-    } else {
-        /* Keep the task and its shadow. A subsequent DRM event retries even
-         * when the same connector and mode return after a disconnect. */
-        display_pending = 1;
-        display_refresh_at = available < 0 && now_ms() < display_retry_until ? now_ms() + 200 : -1;
-        say("init: outputs unavailable for %s; waiting for a display change", active->name);
-    }
-    return 1;
+    reclaim(f);
 }
 
 static void freeze(struct frame *f)
@@ -951,31 +1120,247 @@ static void thaw(struct frame *f)
     say("init: thawed %s in %.1f ms", f->name, now_ms() - t0);
 }
 
-/* Hand the screen from the program that has it to `to`, freezing the first. */
-static void switch_to(struct frame *to)
+/* The kind of a pointer device: on a screen (touch screens, pens) or moving
+ * a cursor (the rest, keyboards included: libinput pairs them with touchpads). */
+static int pointer_kind(int fd)
 {
-    struct frame *from = fg;
+    unsigned long props[INPUT_PROP_CNT / (8 * sizeof(long)) + 1] = { 0 };
+    if (ioctl(fd, EVIOCGPROP(sizeof props), props) >= 0 &&
+        (props[INPUT_PROP_DIRECT / (8 * sizeof(long))] >> (INPUT_PROP_DIRECT % (8 * sizeof(long))) & 1)) {
+        return POINTER_DIRECT;
+    }
+    return POINTER_MOVING;
+}
 
-    if (from != NULL) {
-        take_back(from);
-        if (!from->shared_display) {
-            freeze(from);
+/* Lend f the pointer devices of the kinds wanted (and those only), without
+ * reopening devices it is already reading. A removed/reused event path first
+ * loses its old revoked lease. */
+static void pointer_refresh(struct frame *f, int kinds)
+{
+    char paths[64][POINTER_PATH];
+    size_t n;
+    int *fds = pointer_lend(&n, paths, 64);
+    for (size_t k = 0; k < n; k++) {
+        if (!(pointer_kind(fds[k]) & kinds)) {
+            close(fds[k]);
+            fds[k] = -1;
         }
     }
-    if (to->frozen) {
-        thaw(to);
+    for (size_t i = 0; i < f->npointer;) {
+        int found = 0;
+        for (size_t k = 0; k < n; k++) found |= fds[k] >= 0 && input_same(f->pointer[i], fds[k]);
+        if (found) { i++; continue; }
+        char msg[15 + POINTER_PATH];
+        int len = snprintf(msg, sizeof msg, "pointer-remove%c%s", 0, f->pointer_paths[i]);
+        control_send(f->ctl, msg, (size_t)len, NULL, 0);
+        ioctl(f->pointer[i], EVIOCREVOKE, NULL);
+        close(f->pointer[i]);
+        f->npointer--;
+        memmove(f->pointer + i, f->pointer + i + 1, (f->npointer - i) * sizeof *f->pointer);
+        memmove(f->pointer_paths + i, f->pointer_paths + i + 1,
+                (f->npointer - i) * sizeof *f->pointer_paths);
     }
-    lend(to);
+    for (size_t k = 0; k < n; k++) {
+        if (fds[k] < 0) continue;
+        int found = 0;
+        for (size_t i = 0; i < f->npointer; i++) found |= input_same(f->pointer[i], fds[k]);
+        if (found) { close(fds[k]); continue; }
+        int *p = realloc(f->pointer, (f->npointer + 1) * sizeof *p);
+        if (!p) { close(fds[k]); continue; }
+        f->pointer = p;
+        char msg[8 + POINTER_PATH];
+        int len = snprintf(msg, sizeof msg, "pointer%c%s", 0, paths[k]);
+        if (control_send(f->ctl, msg, (size_t)len, &fds[k], 1) < 0) { close(fds[k]); continue; }
+        memcpy(f->pointer_paths[f->npointer], paths[k], POINTER_PATH);
+        f->pointer[f->npointer++] = fds[k];
+    }
+    free(fds); /* surviving descriptors belong to f, not a temporary lease */
+    f->pointer_kinds = kinds;
+    if (kinds) control_send(f->ctl, "pointer-retry", 13, NULL, 0);
 }
 
-static void send3(struct frame *f, const char *a, const char *b, const char *c)
+/* Every program the pointer devices it should have: the hovered screen's the
+ * moving ones, the built-in panel's those on its screen; one that loses the
+ * moving ones is told (its cursor and frame go). */
+static void pointer_place(void)
 {
-    const char *fields[] = { a, b, c, NULL };
-
-    control_send_fields(f->ctl, fields);
+    struct frame *all[2 + MAX_TASKS * MAX_DEPTH];
+    struct frame *moving = showing(hover_place), *direct = showing(internal_place());
+    int n = frames(all);
+    for (int k = 0; k < n; k++) {
+        struct frame *f = all[k];
+        if (f->pid == 0) continue;
+        int kinds = !f->pointer_wanted || !f->screens || f->shared_display ? 0 :
+                    (f == moving ? POINTER_MOVING : 0) | (f == direct ? POINTER_DIRECT : 0);
+        if (kinds == f->pointer_kinds && (kinds == 0 || f->npointer > 0)) continue;
+        if ((f->pointer_kinds & POINTER_MOVING) && !(kinds & POINTER_MOVING)) {
+            control_send(f->ctl, "pointer-left", 12, NULL, 0);
+        }
+        pointer_refresh(f, kinds);
+    }
 }
 
-static void do_open(char *const argv[])
+/* The keyboard to the focused screen's program, from any other. */
+static void keys_place(void)
+{
+    struct frame *all[2 + MAX_TASKS * MAX_DEPTH];
+    struct frame *to = focused();
+    int n = frames(all);
+    for (int k = 0; k < n; k++) {
+        struct frame *f = all[k];
+        if (f == to || f->nkbd == 0) continue;
+        control_send(f->ctl, "keys", 4, NULL, 0);
+        keys_take_back(f->kbd, f->nkbd);
+        f->nkbd = 0;
+    }
+    if (to != NULL && to->screens && to->nkbd == 0) {
+        to->nkbd = keys_lend(to->kbd, MAX_KBD);
+        if (to->nkbd > 0) control_send(to->ctl, "keys", 4, to->kbd, to->nkbd);
+    }
+}
+
+/* The task home waits for in base_open, left without a screen; "" if none. */
+static char home_waits[128];
+
+/* Home is told verb ("back", "ended") about t if it waits for it. */
+static void answer_home(struct task *t, const char *verb, const char *code)
+{
+    if (!home_waits[0] || strcmp(home_waits, t->key) != 0) return;
+    home_waits[0] = '\0';
+    send3(&home, verb, t->key, code);
+}
+
+/* Every program gets the screens it should have now (shown). One with other
+ * screens than these gives them back first, and is frozen if left with none
+ * (the shared display is only released); when no screen is lent then, the
+ * outputs are scanned again. Then each that should have screens and has
+ * none gets them, thawed; the keyboard and the pointer follow. Home, waiting
+ * and given a screen again, is told the task it opened is "shown". */
+static void arrange(void)
+{
+    struct frame *all[2 + MAX_TASKS * MAX_DEPTH];
+    int n = frames(all);
+    for (int k = 0; k < n; k++) {
+        struct frame *f = all[k];
+        uint32_t want = 0;
+        for (int i = 0; i < nplaces; i++) want |= (uint32_t)(showing(i) == f) << i;
+        if (f->screens == 0 || f->screens == want) continue;
+        take_back(f);
+        if (want == 0 && !f->shared_display && f->pid > 0 && !f->frozen) freeze(f);
+    }
+    int lent = 0;
+    for (int k = 0; k < n; k++) lent |= all[k]->screens != 0;
+    if (!lent) {
+        screen_refresh();
+        sync_places();
+    }
+    for (int k = 0; k < n; k++) {
+        struct frame *f = all[k];
+        uint32_t want = 0;
+        for (int i = 0; i < nplaces; i++) want |= (uint32_t)(showing(i) == f) << i;
+        if (want == 0 || f->screens != 0 || f->pid == 0) continue;
+        if (f->frozen) thaw(f);
+        lend(f, want);
+    }
+    keys_place();
+    pointer_place();
+    if (home_waits[0] && home.screens) {
+        send3(&home, "shown", home_waits, NULL);
+        home_waits[0] = '\0';
+    }
+}
+
+/* Topology changes never freeze/restart a direct task. The shared display
+ * owns the raw DRM master while active, so leave its hotplug to labwc and
+ * rescan only once control returns to direct programs. */
+static int refresh_display(void)
+{
+    if (!display_pending || display_refresh_at < 0 || now_ms() < display_refresh_at) return 0;
+    if (display_front != NULL && top(display_front) && top(display_front)->screens) {
+        display_refresh_at = -1;
+        return 0;
+    }
+    struct frame *all[2 + MAX_TASKS * MAX_DEPTH], *had[2 + MAX_TASKS * MAX_DEPTH];
+    int n = frames(all), nhad = 0;
+    for (int k = 0; k < n; k++) {
+        if (all[k]->screens) {
+            had[nhad++] = all[k];
+            take_back(all[k]);
+        }
+    }
+    arrange();
+    int lent = 0;
+    for (int k = 0; k < n; k++) lent |= all[k]->screens != 0;
+    if (lent) {
+        /* One whose screen went to another program waits, frozen. */
+        for (int k = 0; k < nhad; k++) {
+            if (!had[k]->screens && !had[k]->shared_display && had[k]->pid > 0 && !had[k]->frozen) {
+                freeze(had[k]);
+            }
+        }
+        say("init: refreshed outputs: %d screen%s", nplaces, nplaces == 1 ? "" : "s");
+    } else {
+        /* Keep the tasks and their shadows. A subsequent DRM event retries
+         * even when the same connector and mode return after a disconnect. */
+        display_pending = 1;
+        display_refresh_at = now_ms() < display_retry_until ? now_ms() + 200 : -1;
+        say("init: outputs unavailable; waiting for a display change");
+    }
+    return 1;
+}
+
+/* The pointer went from f's screen onto another program's at (x, y) on the
+ * desktop: the devices go to that one, which has it from there. One that
+ * has not asked for the pointer (yet) leaves it where it was. */
+static void pointer_crossed(struct frame *f, int x, int y)
+{
+    char sx[16], sy[16];
+    snprintf(sx, sizeof sx, "%d", x);
+    snprintf(sy, sizeof sy, "%d", y);
+    const char *enter[] = { "pointer-enter", sx, sy, NULL };
+    int to = place_at(x, y);
+    struct frame *g = to >= 0 ? showing(to) : NULL;
+    if (g == NULL || g == f || !g->pointer_wanted || g->shared_display) {
+        control_send_fields(f->ctl, enter); /* nowhere else: it stays */
+        return;
+    }
+    hover_place = to;
+    pointer_place();
+    control_send_fields(g->ctl, enter);
+}
+
+/* A press of a button, a touch or a pen on f's screen: the keyboard goes to
+ * f (to the screen the pointer is on, if f has that one). */
+static void pressed(struct frame *f)
+{
+    if (locked || display_front != NULL || f->screens == 0 || focused() == f) return;
+    focus_place = f->screens >> hover_place & 1 ? hover_place : place_of_frame(f);
+    keys_place();
+}
+
+static struct task *shared_display_task(void)
+{
+    for (int i = 0; i < MAX_TASKS; i++) {
+        if (tasks[i].depth > 0 && tasks[i].f[0].shared_display) {
+            return &tasks[i];
+        }
+    }
+    return NULL;
+}
+
+/* The screen named (a connector); -1 if there is none. */
+static int place_named(const char *name)
+{
+    for (int i = 0; i < nplaces; i++) {
+        if (places[i].name[0] && strcmp(places[i].name, name) == 0) return i;
+    }
+    return -1;
+}
+
+/* The task argv on screen at (-1: on every screen home shows), thawed at its
+ * top or started; the shared display on all of them. The keyboard goes with
+ * it. Returns 0, or -1 after telling home "ended TASK -1". */
+static int do_open(int at, char *const argv[])
 {
     char key[128];
     struct task *t = NULL, *free_slot = NULL;
@@ -990,54 +1375,74 @@ static void do_open(char *const argv[])
     }
     if (t == NULL && strcmp(argv[0], desktop_argv[0]) == 0 && argv[1] != NULL &&
         strcmp(argv[1], desktop_argv[1]) == 0) {
-        for (int i = 0; i < MAX_TASKS; i++) {
-            if (tasks[i].depth && tasks[i].f[0].shared_display) {
-                t = &tasks[i];
-                break;
-            }
+        t = shared_display_task();
+    }
+    if (t == NULL) {
+        if (free_slot == NULL || start(&free_slot->f[0], argv) < 0) {
+            send3(&home, "ended", key, "-1");
+            return -1;
         }
+        snprintf(free_slot->key, sizeof free_slot->key, "%s", key);
+        free_slot->depth = 1;
+        t = free_slot;
     }
-    if (t != NULL) {
-        front = t;
-        switch_to(&t->f[t->depth - 1]);
-        return;
+    if (t->f[0].shared_display) {
+        display_front = t;
+    } else {
+        for (int i = 0; i < nplaces; i++) {
+            if (places[i].task == t) places[i].task = NULL;
+        }
+        if (at >= 0 && at < nplaces) {
+            places[at].task = t;
+        } else {
+            for (int i = 0; i < nplaces; i++) {
+                if (places[i].task == NULL) places[i].task = t;
+            }
+            if (place_of(t) < 0) places[focus_place].task = t;
+        }
+        if (places[focus_place].task != t) focus_place = place_of(t);
     }
-    if (free_slot == NULL) {
-        send3(&home, "ended", key, "-1");
-        return;
+    arrange();
+    return 0;
+}
+
+/* Home opened the task argv: it waits for it unless it kept a screen. */
+static void home_wait(char *const argv[])
+{
+    join(argv, home_waits, sizeof home_waits);
+    if (home.screens) {
+        send3(&home, "shown", home_waits, NULL);
+        home_waits[0] = '\0';
     }
-    take_back(&home);
-    freeze(&home);
-    if (start(&free_slot->f[0], argv) < 0) {
-        thaw(&home);
-        lend(&home);
-        send3(&home, "ended", key, "-1");
-        return;
+}
+
+static struct task *task_of(const struct frame *f)
+{
+    for (int i = 0; i < MAX_TASKS; i++) {
+        if (tasks[i].depth > 0 && f >= tasks[i].f && f < tasks[i].f + tasks[i].depth) return &tasks[i];
     }
-    snprintf(free_slot->key, sizeof free_slot->key, "%s", key);
-    free_slot->depth = 1;
-    front = free_slot;
-    lend(&free_slot->f[0]);
+    return NULL;
 }
 
 static void do_call(struct frame *caller, char *const argv[])
 {
-    struct task *t = front;
+    struct task *t = task_of(caller);
 
-    if (t == NULL || caller != &t->f[t->depth - 1] || t->depth == MAX_DEPTH) {
-        send3(caller, "returned", argv[0], "-1");
-        return;
-    }
-    take_back(caller);
-    freeze(caller);
-    if (start(&t->f[t->depth], argv) < 0) {
-        thaw(caller);
-        lend(caller);
+    if (t == NULL || caller != top(t) || t->depth == MAX_DEPTH || start(&t->f[t->depth], argv) < 0) {
         send3(caller, "returned", argv[0], "-1");
         return;
     }
     t->depth++;
-    lend(&t->f[t->depth - 1]);
+    arrange(); /* the caller is frozen, the new top has its screens */
+}
+
+/* t leaves every screen; it has ended or waits, frozen. */
+static void unplace(struct task *t)
+{
+    if (display_front == t) display_front = NULL;
+    for (int i = 0; i < nplaces; i++) {
+        if (places[i].task == t) places[i].task = NULL;
+    }
 }
 
 static void do_kill(char *const argv[])
@@ -1066,15 +1471,16 @@ static void do_kill(char *const argv[])
                     waitpid(f->pid, NULL, 0);
                 }
             }
-            pointer_take_back(f->pointer, f->npointer);
-            f->pointer = NULL;
-            f->npointer = 0;
+            reclaim(f); /* it may have been on another screen */
             close(f->ctl);
             rmdir(f->cgroup);
             f->pid = 0;
         }
+        unplace(t);
+        if (strcmp(home_waits, key) == 0) home_waits[0] = '\0';
         t->depth = 0;
         send3(&home, "ended", key, "137");
+        arrange();
         return;
     }
     send3(&home, "ended", key, "0");
@@ -1082,55 +1488,64 @@ static void do_kill(char *const argv[])
 
 static int stay_on_display;
 
-static void go_home(void)
+/* What screen at shows goes home, frozen as it is: the shared display from
+ * every screen (they show what they did before it), or the task there from
+ * every screen it is on. */
+static void go_home(int at)
 {
     stay_on_display = 0;
-    if (front == NULL) {
+    struct task *t = display_front != NULL ? display_front : at >= 0 && at < nplaces ? places[at].task : NULL;
+    if (t == NULL) {
         return;
     }
-    const char *key = front->key;
-    front = NULL;
-    if (!locked) { /* locked: home gets the screen when it unlocks */
-        switch_to(&home);
-    }
-    send3(&home, "back", key, NULL);
+    unplace(t);
+    answer_home(t, "back", NULL);
+    arrange(); /* locked: nothing changes until it unlocks */
 }
 
-/* The next (dir 1) or previous (-1) of home and the running tasks, in the
- * order of their slots, round; the one left is frozen as it is. */
-static void do_switch(int dir)
+/* The next (dir 1) or previous (-1) of home and the running tasks not on
+ * another screen, in the order of their slots, round, on screen at (where
+ * the shared display was, the task under it); the one left is frozen as it
+ * is. */
+static void do_switch(int at, int dir)
 {
-    struct task *ring[MAX_TASKS + 1];
-    int n = 0, at = 0;
+    if (at < 0 || at >= nplaces) return;
+    struct task *ring[MAX_TASKS + 1], *now = display_front != NULL ? display_front : places[at].task;
+    int n = 0, k = 0;
     ring[n++] = NULL; /* home */
     for (int i = 0; i < MAX_TASKS; i++) {
-        if (tasks[i].depth == 0) continue;
-        if (&tasks[i] == front) at = n;
-        ring[n++] = &tasks[i];
+        struct task *t = &tasks[i];
+        if (t->depth == 0 || (t != now && t != places[at].task && place_of(t) >= 0)) continue;
+        if (t == now) k = n;
+        ring[n++] = t;
     }
-    struct task *t = ring[(at + dir + n) % n];
-    if (n < 2 || dir == 0 || t == front) return;
-    if (t == NULL) {
-        go_home();
-        return;
+    struct task *to = ring[(k + dir + n) % n];
+    if (n < 2 || dir == 0 || to == now) return;
+    if (to != NULL && to->f[0].shared_display) {
+        display_front = to;
+        stay_on_display = 1; /* as when home opens its view */
+    } else if (now != NULL && now == display_front) {
+        display_front = NULL;
+        places[at].task = to;
+    } else {
+        for (int i = 0; i < nplaces; i++) {
+            if (now != NULL ? places[i].task == now : i == at) places[i].task = to;
+        }
     }
-    front = t;
-    if (t->f[0].shared_display) stay_on_display = 1; /* as when home opens its view */
-    switch_to(&t->f[t->depth - 1]);
+    arrange();
 }
 
-/* The lock screen on top of everything (lock_argv): what had the screen waits
- * as it would for home, frozen (the shared display only released). Without
- * the lock program there is no locking. */
+/* The lock screen on top of everything (lock_argv), on every screen: what
+ * they showed waits as it would for home, frozen (the shared display only
+ * released). Without the lock program there is no locking. */
 static void lock_start(void)
 {
     lock_start_at = -1;
     lock_shown = 0;
-    if (start(&locker, lock_argv) == 0) {
-        lend(&locker);
-    } else {
+    if (start(&locker, lock_argv) < 0) {
         lock_start_at = now_ms() + 1000;
     }
+    arrange();
 }
 
 static void lock(void)
@@ -1145,17 +1560,10 @@ static void lock(void)
     say("init: locking");
     locked = 1;
     stay_on_display = 0;
-    if (fg != NULL) {
-        struct frame *from = fg;
-        take_back(from);
-        if (!from->shared_display) {
-            freeze(from);
-        }
-    }
     lock_start();
 }
 
-/* The lock exited 0: back to the task that was on the screen, or home. */
+/* The lock exited 0: the screens show what they did before. */
 static void unlock(void)
 {
     if (!locked) {
@@ -1165,17 +1573,7 @@ static void unlock(void)
     lock_start_at = -1;
     active_at = now_ms();
     say("init: unlocked");
-    struct frame *to = front != NULL && front->depth > 0 ? &front->f[front->depth - 1] : &home;
-    if (to == &home) {
-        front = NULL;
-    }
-    if (to->pid == 0) {
-        return; /* home starting again: gone() lends it */
-    }
-    if (to->frozen) {
-        thaw(to);
-    }
-    lend(to);
+    arrange();
 }
 
 /* Every keyboard, mouse, touchpad, touch screen and pen (pointer_lend's
@@ -1191,83 +1589,41 @@ static void activity_open(void)
     afd = pointer_lend(&nafd, paths, MAX_ACTIVITY);
 }
 
-/* Reconcile pointer leases without reopening devices the frontend is already
- * reading. A removed/reused event path first loses its old revoked lease. */
-static void pointer_refresh(struct frame *f)
-{
-    char paths[64][POINTER_PATH];
-    size_t n;
-    int *fds = pointer_lend(&n, paths, 64);
-    for (size_t i = 0; i < f->npointer;) {
-        int found = 0;
-        for (size_t k = 0; k < n; k++) found |= input_same(f->pointer[i], fds[k]);
-        if (found) { i++; continue; }
-        char msg[15 + POINTER_PATH];
-        int len = snprintf(msg, sizeof msg, "pointer-remove%c%s", 0, f->pointer_paths[i]);
-        control_send(f->ctl, msg, (size_t)len, NULL, 0);
-        ioctl(f->pointer[i], EVIOCREVOKE, NULL);
-        close(f->pointer[i]);
-        f->npointer--;
-        memmove(f->pointer + i, f->pointer + i + 1, (f->npointer - i) * sizeof *f->pointer);
-        memmove(f->pointer_paths + i, f->pointer_paths + i + 1,
-                (f->npointer - i) * sizeof *f->pointer_paths);
-    }
-    for (size_t k = 0; k < n; k++) {
-        int found = 0;
-        for (size_t i = 0; i < f->npointer; i++) found |= input_same(f->pointer[i], fds[k]);
-        if (found) { close(fds[k]); continue; }
-        int *p = realloc(f->pointer, (f->npointer + 1) * sizeof *p);
-        if (!p) { close(fds[k]); continue; }
-        f->pointer = p;
-        char msg[8 + POINTER_PATH];
-        int len = snprintf(msg, sizeof msg, "pointer%c%s", 0, paths[k]);
-        if (control_send(f->ctl, msg, (size_t)len, &fds[k], 1) < 0) { close(fds[k]); continue; }
-        memcpy(f->pointer_paths[f->npointer], paths[k], POINTER_PATH);
-        f->pointer[f->npointer++] = fds[k];
-    }
-    free(fds); /* surviving descriptors belong to f, not a temporary lease */
-    control_send(f->ctl, "pointer-retry", 13, NULL, 0);
-}
-
 /* Called after existing module events and dead input descriptors. Only the
- * current framebuffer owner receives updates (including the lock); labwc
+ * programs on screens receive updates (the lock included): the keyboard's
+ * program its keyboards, each with pointer devices those of its kinds; labwc
  * discovers its own devices. No screen handover, input grab or synthetic key. */
 static void input_refresh(void)
 {
+    struct frame *all[2 + MAX_TASKS * MAX_DEPTH], *to = focused();
     keys_refresh();
     activity_open();
-    if (!fg || fg->shared_display) return;
-    if (keys_sync(fg->kbd, &fg->nkbd, MAX_KBD)) {
-        control_send(fg->ctl, "keys", 4, fg->kbd, fg->nkbd);
+    if (to != NULL && to->screens && !to->shared_display && keys_sync(to->kbd, &to->nkbd, MAX_KBD)) {
+        control_send(to->ctl, "keys", 4, to->kbd, to->nkbd);
     }
-    if (fg->pointer_wanted) pointer_refresh(fg);
+    int n = frames(all);
+    for (int k = 0; k < n; k++) {
+        if (all[k]->pointer_kinds) pointer_refresh(all[k], all[k]->pointer_kinds);
+    }
+    pointer_place();
 }
 
 /* When the screen locks for want of input (ms), or -1: never with lock_after
- * 0, nor while locked, nor while the shared display has the screen: labwc
+ * 0, nor while locked, nor while the shared display has the screens: labwc
  * knows its idleness, and what holds it off (a video playing), and
  * labwc-control asks for the lock. */
 static double idle_lock_at(void)
 {
-    if (lock_after <= 0 || locked || (fg != NULL && fg->shared_display)) {
+    if (lock_after <= 0 || locked || display_front != NULL) {
         return -1;
     }
     return active_at + lock_after * 1e3;
 }
 
-static struct task *shared_display_task(void)
-{
-    for (int i = 0; i < MAX_TASKS; i++) {
-        if (tasks[i].depth > 0 && tasks[i].f[0].shared_display) {
-            return &tasks[i];
-        }
-    }
-    return NULL;
-}
-
 /* Start, thaw, freeze or stop the shared display (labwc) following container
- * state. Returns 1 if it did any of it: the programs' sockets may then have
- * been read (take_back) or closed since the last poll. */
+ * state; it starts while every screen shows home. Returns 1 if it did any of
+ * it: the programs' sockets may then have been read (take_back) or closed
+ * since the last poll. */
 static int sync_display(void)
 {
     int state = apps_display_state();
@@ -1275,8 +1631,10 @@ static int sync_display(void)
 
     if (state == APPS_DISPLAY_ACTIVE) {
         if (t == NULL) {
-            if (access(desktop_argv[1], X_OK) == 0 && front == NULL && fg == &home) {
-                do_open(desktop_argv);
+            int all_home = display_front == NULL && !locked;
+            for (int i = 0; i < nplaces; i++) all_home &= places[i].task == NULL;
+            if (access(desktop_argv[1], X_OK) == 0 && all_home) {
+                do_open(-1, desktop_argv);
                 return 1;
             }
         } else if (t->f[0].frozen) {
@@ -1288,13 +1646,13 @@ static int sync_display(void)
     if (t == NULL) {
         return 0;
     }
-    int did = front == t;
+    int did = display_front == t;
     if (did) {
-        go_home();
+        go_home(-1);
     }
     struct frame *f = &t->f[0];
     if (state == APPS_DISPLAY_FROZEN) {
-        if (!f->frozen && fg != f) {
+        if (!f->frozen && !f->screens) {
             freeze(f);
             did = 1;
         }
@@ -1315,6 +1673,7 @@ static int sync_display(void)
     if (!f->reaped && f->pid > 0) {
         waitpid(f->pid, NULL, WNOHANG);
     }
+    reclaim(f);
     close(f->ctl);
     rmdir(f->cgroup);
     f->pid = 0;
@@ -1374,17 +1733,7 @@ static void gone(struct frame *f)
     while (read_value(ev_path, "populated") != 0 && now_ms() - t0 < 200) {
         usleep(1000);
     }
-    if (fg == f) {
-        keys_take_back(f->kbd, f->nkbd);
-        pointer_take_back(f->pointer, f->npointer);
-        f->pointer = NULL;
-        f->npointer = 0;
-        if (screen_take_back(f->lessee) < 0) {
-            say("init: exited %s while DRM master reclaim failed", f->name);
-        }
-        f->lessee = 0;
-        fg = NULL;
-    }
+    reclaim(f);
     close(f->ctl);
     rmdir(f->cgroup);
     char name[32];
@@ -1402,8 +1751,9 @@ static void gone(struct frame *f)
     }
     if (f == &home) {
         say("init: starting home again");
-        if (start(&home, home_argv) == 0 && front == NULL && !locked) {
-            lend(&home);
+        home_waits[0] = '\0';
+        if (start(&home, home_argv) == 0) {
+            arrange();
         }
         return;
     }
@@ -1420,21 +1770,12 @@ static void gone(struct frame *f)
         char code[12];
         snprintf(code, sizeof code, "%d", status);
         if (t->depth > 0) {
-            struct frame *caller = &t->f[t->depth - 1];
-            if (front == t && !locked) {
-                thaw(caller);
-                lend(caller);
-            }
-            send3(caller, "returned", name, code);
+            arrange(); /* the one below has its screens again, if the task is on any */
+            send3(top(t), "returned", name, code);
         } else {
-            if (front == t) {
-                front = NULL;
-                if (!locked) {
-                    thaw(&home);
-                    lend(&home);
-                }
-            }
-            send3(&home, "ended", t->key, code);
+            unplace(t);
+            answer_home(t, "ended", code);
+            arrange();
         }
         return;
     }
@@ -1677,14 +2018,15 @@ static void message(struct frame *f)
     }
     int n = control_fields(msg, len, fields, 15);
     fields[n] = NULL;
+    int open_on = strcmp(fields[0], "open-on") == 0 && n > 2;
     if (locked && f != &locker && (strcmp(fields[0], "call") == 0 || strcmp(fields[0], "open") == 0 ||
-                                   strcmp(fields[0], "app") == 0)) {
+                                   open_on || strcmp(fields[0], "app") == 0)) {
         /* Sent just before it was frozen: not now. */
         char key[128];
-        join(fields + 1, key, sizeof key);
+        join(fields + 1 + open_on, key, sizeof key);
         if (strcmp(fields[0], "call") == 0) {
             send3(f, "returned", n > 1 ? fields[1] : "", "-1");
-        } else if (strcmp(fields[0], "open") == 0) {
+        } else if (strcmp(fields[0], "app") != 0) {
             send3(&home, "ended", key, "-1");
         } else {
             const char *reply[] = { "app-result", "error", n > 2 ? fields[2] : "", "the screen is locked", NULL };
@@ -1692,8 +2034,10 @@ static void message(struct frame *f)
         }
     } else if (strcmp(fields[0], "call") == 0 && n > 1) {
         do_call(f, fields + 1);
-    } else if (strcmp(fields[0], "open") == 0 && n > 1 && f == &home) {
-        do_open(fields + 1);
+    } else if (((strcmp(fields[0], "open") == 0 && n > 1) || open_on) && f == &home) {
+        if (do_open(open_on ? place_named(fields[1]) : -1, fields + 1 + open_on) == 0) {
+            home_wait(fields + 1 + open_on);
+        }
     } else if (strcmp(fields[0], "kill") == 0 && n > 1 && f == &home) {
         do_kill(fields + 1);
     } else if (strcmp(fields[0], "tasks?") == 0 && f == &home) {
@@ -1718,32 +2062,37 @@ static void message(struct frame *f)
                             : apps_action(fields[1], fields[2], why, sizeof why);
         if (result == 0 && open_view) {
             stay_on_display = 1;
-            do_open(desktop_argv);
+            do_open(-1, desktop_argv);
         }
         const char *reply[] = { "app-result", result == 0 ? "ok" : "error", fields[2], why, NULL };
         control_send_fields(home.ctl, reply);
-    } else if (strcmp(fields[0], "pointer?") == 0 && f == fg && !f->shared_display) {
+    } else if (strcmp(fields[0], "pointer?") == 0 && f->screens && !f->shared_display) {
         f->pointer_wanted = 1;
-        pointer_refresh(f);
-    } else if (strcmp(fields[0], "master") == 0 && f == fg) {
+        pointer_place();
+    } else if (strcmp(fields[0], "pointer-leave") == 0 && n == 3 && (f->pointer_kinds & POINTER_MOVING)) {
+        pointer_crossed(f, atoi(fields[1]), atoi(fields[2]));
+    } else if (strcmp(fields[0], "pointer-press") == 0) {
+        pressed(f);
+    } else if (strcmp(fields[0], "master") == 0 && f->screens) {
         int result = screen_drop_master(f->lessee);
         f->lessee = 0;
         control_send(f->ctl, result == 0 ? "mastered" : "master-error", result == 0 ? 8 : 12, NULL, 0);
-    } else if (strcmp(fields[0], "display-ready") == 0 && f == fg && f->shared_display) {
+    } else if (strcmp(fields[0], "display-ready") == 0 && f->screens && f->shared_display) {
         if (stay_on_display) {
             stay_on_display = 0;
             apps_tick();
         } else {
-            go_home();
+            go_home(-1);
         }
-    } else if (strcmp(fields[0], "home") == 0 && f == fg && !locked) {
-        go_home();
-    } else if (strcmp(fields[0], "lock") == 0 && f == fg) {
+    } else if (strcmp(fields[0], "home") == 0 && f->screens && !locked) {
+        go_home(place_of_frame(f));
+    } else if (strcmp(fields[0], "lock") == 0 && f->screens) {
         lock();
     } else if (strcmp(fields[0], "locked") == 0 && f == &locker) {
         lock_shown = 1;
-    } else if (strcmp(fields[0], "switch") == 0 && n == 2 && f == fg && !locked) {
-        do_switch(strcmp(fields[1], "next") == 0 ? 1 : strcmp(fields[1], "prev") == 0 ? -1 : 0);
+    } else if (strcmp(fields[0], "switch") == 0 && n == 2 && f->screens && !locked) {
+        do_switch(display_front != NULL ? focus_place : place_of_frame(f),
+                  strcmp(fields[1], "next") == 0 ? 1 : strcmp(fields[1], "prev") == 0 ? -1 : 0);
     } else if (strcmp(fields[0], "reboot") == 0) {
         restart();
     } else if (strcmp(fields[0], "poweroff") == 0) {
@@ -1766,9 +2115,11 @@ static void lock_wait(void)
     }
 }
 
-/* The ACPI button driver's input devices, which process 1 always watches,
- * whatever is on the screen or stuck: the power button (KEY_POWER, no
- * letters) saves the log and powers off; the lid (SW_LID) puts the machine
+/* The ACPI button driver's input devices, and those with a key of key_home's
+ * that types nothing, alone (keys_alone_action: ThinkVantage unless rc.conf
+ * says otherwise), which process 1 always watches, whatever is on the screen
+ * or stuck: the power button (KEY_POWER, no letters) saves the log and powers
+ * off; such a key goes home; the lid (SW_LID) puts the machine
  * to sleep when it closes, on mains power as on battery, as logind does
  * (HandleLidSwitchExternalPower); docked, another screen connected, it stays
  * up, locked, and sleeps when that screen goes with the lid closed
@@ -1790,10 +2141,12 @@ static int system_inputs(int *fds, int max)
         ioctl(fd, EVIOCGBIT(EV_KEY, sizeof keys), keys);
         ioctl(fd, EVIOCGBIT(EV_SW, sizeof sw), sw);
         int power = ((keys[KEY_POWER / w] >> (KEY_POWER % w)) & 1) && !((keys[KEY_A / w] >> (KEY_A % w)) & 1);
-        int vantage = ((keys[KEY_VENDOR / w] >> (KEY_VENDOR % w)) & 1) ||
-                      ((keys[KEY_PROG1 / w] >> (KEY_PROG1 % w)) & 1);
+        int home_key = 0;
+        for (int code = 0; code <= KEY_MAX && !home_key; code++) {
+            home_key = ((keys[code / w] >> (code % w)) & 1) && keys_alone_action(code) == K_HOME;
+        }
         int lid = (sw[SW_LID / w] >> (SW_LID % w)) & 1;
-        if (power || vantage || lid) {
+        if (power || home_key || lid) {
             fds[n++] = fd;
             if (lid) {
                 lid_fd = fd;
@@ -2298,7 +2651,7 @@ int main(void)
             lock(); /* home waits under it (including when TPM auto-unlocked the disk) */
         }
         if (!locked) {
-            lend(&home);
+            arrange();
         }
     }
     if (rooted) {
@@ -2472,10 +2825,10 @@ int main(void)
                 if (ev.type == EV_KEY && ev.code == KEY_POWER && ev.value == 1) {
                     say("init: power button");
                     power_off();
-                } else if (ev.type == EV_KEY && (ev.code == KEY_VENDOR || ev.code == KEY_PROG1) && ev.value == 1) {
+                } else if (ev.type == EV_KEY && ev.value == 1 && keys_alone_action(ev.code) == K_HOME) {
                     if (!locked) {
-                        say("init: ThinkVantage button -> home");
-                        go_home();
+                        say("init: key_home key %d -> home", ev.code);
+                        go_home(focus_place);
                     }
                 } else if (ev.type == EV_SW && ev.code == SW_LID && ev.value == 1) {
                     lock_wait(); /* closed: locked, whether it sleeps or not */
@@ -2507,9 +2860,9 @@ int main(void)
                 int key = keys_event(p[j].fd);
                 /* The compositor consumes its own global keybinds before
                  * notifying us; acting on this observer would race delivery. */
-                int shared = fg && fg->shared_display;
+                int shared = display_front != NULL;
                 if (key == K_HOME && !locked && !shared) {
-                    go_home();
+                    go_home(focus_place);
                 } else if (key == K_ACT_LOCK && !shared) {
                     lock();
                 }

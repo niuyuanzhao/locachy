@@ -4,9 +4,13 @@
  */
 #ifdef CONFIG_IME
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 #include <rime_api.h>
 
@@ -236,6 +240,63 @@ const char *ime_toggle_width(void)
     rime->clear_composition(session);
     set_width(!full_width);
     return width_descriptions[full_width];
+}
+
+/* rc.conf's key_ime_width_cn, as locachy-bar reads it: keys separated by
+ * blanks or commas, each its modifiers and a key joined by +, the key a
+ * character or Space. Read again when rc.conf changes. */
+#define MAX_WIDTH_KEYS 8
+static struct { int ch, mods; } width_keys[MAX_WIDTH_KEYS];
+static int nwidth_keys = -1;
+static struct timespec width_keys_read;
+
+static void on_width_rc(const char *name, const char *value, void *arg)
+{
+    if (strcmp(name, "key_ime_width_cn") == 0) snprintf(arg, 128, "%s", value);
+}
+
+static void load_width_keys(void)
+{
+    struct stat st = { 0 }; /* no rc.conf: the defaults, read each time */
+    if (stat(RC_CONF, &st) == 0 && nwidth_keys >= 0 && st.st_mtim.tv_sec == width_keys_read.tv_sec &&
+        st.st_mtim.tv_nsec == width_keys_read.tv_nsec) {
+        return;
+    }
+    width_keys_read = st.st_mtim;
+    char spec[128] = "Ctrl+. Shift+Space", *save = NULL;
+    rc_read(on_width_rc, spec);
+    for (char *p = spec; *p; p++) {
+        if (*p == ',') *p = ' ';
+    }
+    nwidth_keys = 0;
+    for (char *tok = strtok_r(spec, " \t", &save); tok && nwidth_keys < MAX_WIDTH_KEYS;
+         tok = strtok_r(NULL, " \t", &save)) {
+        int ch = 0, mods = 0;
+        char *part_save = NULL;
+        for (char *part = strtok_r(tok, "+", &part_save); part; part = strtok_r(NULL, "+", &part_save)) {
+            if (strcasecmp(part, "Ctrl") == 0 || strcasecmp(part, "Control") == 0) mods |= KEYS_CTRL;
+            else if (strcasecmp(part, "Alt") == 0) mods |= KEYS_ALT;
+            else if (strcasecmp(part, "Shift") == 0) mods |= KEYS_SHIFT;
+            else if (strcasecmp(part, "Super") == 0 || strcasecmp(part, "Meta") == 0 ||
+                     strcasecmp(part, "Win") == 0) mods |= KEYS_META;
+            else if (strcasecmp(part, "Space") == 0) ch = ' ';
+            else if (!part[1]) ch = tolower((unsigned char)part[0]);
+        }
+        if (ch) {
+            width_keys[nwidth_keys].ch = ch;
+            width_keys[nwidth_keys++].mods = mods;
+        }
+    }
+}
+
+int ime_width_key(int key, int mods)
+{
+    load_width_keys();
+    mods &= KEYS_CTRL | KEYS_ALT | KEYS_SHIFT | KEYS_META;
+    for (int i = 0; i < nwidth_keys; i++) {
+        if (key >= 0 && key < 128 && tolower(key) == width_keys[i].ch && mods == width_keys[i].mods) return 1;
+    }
+    return 0;
 }
 
 const char *ime_mode_desc(void)

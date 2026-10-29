@@ -1,8 +1,10 @@
 {
   "desktop": {
-    "description": "Shared Wayland compositor & container display (labwc, gestures, notifications, screen sharing)",
+    "description": "Shared Wayland compositor & container display (labwc, Xwayland, gestures, notifications, screen sharing)",
     "packages": [
       "labwc-locachy",
+      "xorg-xwayland",
+      "xorg-xhost",
       "swaybg",
       "libnotify",
       "xdg-desktop-portal",
@@ -47,7 +49,9 @@
       "libjxl",
       "imagemagick",
       "openexr",
-      "libarchive"
+      "libarchive",
+      "libraw",
+      "chmlib"
     ],
     "rc": {},
     "default_standalone": true,

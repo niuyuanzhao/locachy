@@ -4,6 +4,12 @@
      writes a copy with the pointer acceleration, touch screen and terminal
      key of rc.conf, which labwc uses (locachy-seat passes it with -c). -->
 <openbox_config xmlns="http://openbox.org/3.4/rc">
+  <!-- The shared Xwayland stays running: its access list (the application
+       user, from xinitrc) would be gone with a lazily restarted one, whose
+       first client is checked before xinitrc runs. -->
+  <core>
+    <xwaylandPersistence>yes</xwaylandPersistence>
+  </core>
   <libinput>
     <device>
       <pointerAcceleration>0.4</pointerAcceleration>
