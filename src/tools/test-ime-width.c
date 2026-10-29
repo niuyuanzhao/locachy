@@ -2,12 +2,14 @@
  * test-ime-width USERDIR: Chinese mode's punctuation (base/ime.c) with the system's
  * Rime data, on a copy of its user directory (the bar has the real one open).
  * Built with -DCONFIG_IME and -lrime.
- *   1. Chinese mode starts at half width: punctuation, digits and space pass
- *      through to the application; the label is the half-width one
- *   2. a comma while composing commits the composition, then passes through
- *   3. full width (Ctrl+. or Shift+Space): Chinese punctuation; digits and
+ *   1. Chinese mode starts at full width: Chinese punctuation; digits and
  *      space still pass through; the label is the full-width one
- *   4. EN mode passes punctuation through; back in Chinese mode, half width
+ *   2. half width (Ctrl+. or Shift+Space): punctuation, digits and space pass
+ *      through to the application; the label is the half-width one
+ *   3. at half width a comma while composing commits the composition, then
+ *      passes through
+ *   4. EN mode passes punctuation through and has no width; back in Chinese
+ *      mode, full width again
  */
 #include <stdio.h>
 #include <string.h>

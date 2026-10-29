@@ -118,6 +118,7 @@ struct screen_output {
     int pixel_width, pixel_height;
     int cols, rows;
     double scale;
+    int internal;                  /* process 1's screen_places: the built-in panel */
 };
 __attribute__((weak)) int screen_extended(int on);
 __attribute__((weak)) int screen_is_extended(void);
@@ -239,6 +240,9 @@ int key_get(void);      /* wait for the next key */
 int key_poll(int fd);   /* like key_get, or 0 when fd is ready to read */
 int key_poll_timeout(int fd, int timeout_ms); /* with millisecond timeout */
 int keys_match_action(int ev_code, int ctrl, int alt, int shift, int meta);
+/* The action a key that types nothing (ThinkVantage, VolumeUp) is bound to
+ * alone, which it gives whatever modifiers are held; 0 for none. */
+int keys_alone_action(int code);
 void keys_reload(void); /* rc.conf's keys and the key table read again at the next key */
 /* The key table at path instead of the system's (the installer's, for the
  * layout chosen); -1 when it has none (US). */
@@ -369,8 +373,11 @@ int base_call(char *const argv[]);
 
 /* For home: show the task argv (start it if it is not running) and wait
  * until home has the screen again; why says what happened: "back NAME"
- * (Ctrl+Alt+Esc) or "ended NAME STATUS" (its last program exited). */
+ * (Ctrl+Alt+Esc) or "ended NAME STATUS" (its last program exited). With
+ * several screens, base_open_on shows it on the screen named (a connector)
+ * and, home keeping the others, returns at once: "shown NAME". */
 void base_open(char *const argv[], char *why, size_t size);
+void base_open_on(const char *screen, char *const argv[], char *why, size_t size);
 
 /* For home: the tasks there are, one line each: "NAME: prog > prog ...",
  * NAME being the argv that opened it, joined with spaces. */

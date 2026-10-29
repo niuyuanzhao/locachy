@@ -134,6 +134,7 @@ int screen_rescale(void) { abort(); }
 int open_candidates(const char *type, char names[][OPEN_NAME], int max) { (void)type; (void)names; (void)max; abort(); }
 int open_set_rule(const char *type, const char *value) { (void)type; (void)value; abort(); }
 int open_containers(char names[][OPEN_NAME], int max) { (void)names; (void)max; abort(); }
+int base_call(char *const argv[]) { (void)argv; abort(); }
 
 static void script(const char *name, const char *body)
 {

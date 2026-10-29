@@ -71,6 +71,14 @@ void screen_cell_at(int x, int y, int *col, int *row) { *col = x / 10; *row = y 
 void screen_cursor_move(int x, int y) { cursor_x = x; cursor_y = y; }
 void screen_cursor_visible(int on) { cursor_shown = on; }
 double screen_scale(void) { return 1.0; }
+/* The desktop of several screens (desk_fixture of them when 2): this
+ * program's picture at its origin, another program's screen right of it. */
+static int desk_fixture, hovered = -2;
+int screen_desk_count(void) { return desk_fixture; }
+int screen_to_desk(int x, int y, int *gx, int *gy) { *gx = x; *gy = y; return 0; }
+int screen_from_desk(int gx, int gy, int *x, int *y) { *x = gx; *y = gy; return 0; }
+int screen_desk_foreign(int gx, int gy) { return gx >= 1000 && gx < 2000 && gy >= 0 && gy < 800; }
+void screen_hover(int output) { hovered = output; }
 int rc_read(void (*fn)(const char *, const char *, void *), void *arg) { (void)fn; (void)arg; return -1; }
 
 int ioctl(int fd, unsigned long request, ...)
@@ -305,6 +313,34 @@ int main(void)
     extended_fixture = 0;
     selected_fixture = 0;
     puts("PASS extended touch, pen and absolute mice stay on the internal output with its own cells");
+
+    desk_fixture = 2;
+    nmice = 1;
+    touch_hid = 0;
+    px = 900; py = 100; moved(); next();
+    assert(hovered == 0 && cursor_shown == 1);
+    usleep(450000); /* no double click with the taps above */
+    button(BTN_LEFT, 1);
+    assert(recv(channel[1], request, sizeof request, MSG_DONTWAIT) == 13 && !strcmp(request, "pointer-press"));
+    button(BTN_LEFT, 0); next(); next();
+    px = 1200; moved(); /* onto the other program's screen */
+    assert(!pointer_next() && away && hovered == -1 && cursor_shown == 0);
+    assert(nsent == 4 && !strcmp(sent[3], "pointer-leave 1200"));
+    px += 10; moved();
+    assert(!pointer_next()); /* not ours until process 1 gives it back */
+    pointer_came(950, 100);
+    e = next();
+    assert(!away && e.x == 950 && e.y == 100 && cursor_x == 950 && hovered == 0 && cursor_shown == 1);
+    button(BTN_LEFT, 1); /* a drag stays on its screen */
+    assert(recv(channel[1], request, sizeof request, MSG_DONTWAIT) == 13);
+    px = 1300; moved();
+    next(); e = next();
+    assert(e.x == 999 && !away && nsent == 4);
+    button(BTN_LEFT, 0); next();
+    pointer_went();
+    assert(away && hovered == -1 && cursor_shown == 0);
+    desk_fixture = 0;
+    puts("PASS several screens: presses are told, leaving onto another's screen stops here, enter resumes");
 
     pointer_release();
     assert(ndevices == 0 && cursor_shown == 0);

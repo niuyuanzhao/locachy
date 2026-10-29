@@ -336,6 +336,28 @@ static void leases(int events)
     verify_outputs(2);
     say("PASS two-output lease: child modeset and cursor, revoke removes visibility, master reacquired");
 }
+/* Two programs side by side (MON-03): a lease of each output at once; one
+ * taken back leaves the other lent, and nothing rescans meanwhile. */
+static void side_by_side(void)
+{
+    struct screen_output at[4];
+    CHECK(screen_places(at, 4) == 2 && at[1].x == at[0].x + at[0].width && at[1].y == at[0].y);
+    const char *a[] = { outputs[0].name }, *b[] = { outputs[1].name };
+    uint32_t ia, ib, ic;
+    int la = screen_lend_outputs(a, 1, &ia), lb = screen_lend_outputs(b, 1, &ib);
+    CHECK(la >= 0 && lb >= 0 && ia && ib && ia != ib);
+    struct drm_mode_get_lease l = { 0 };
+    CHECK(ioctl(la, DRM_IOCTL_MODE_GET_LEASE, &l) == 0 && l.count_objects >= 3 && l.count_objects < 8);
+    say("one output's lease contains %u objects", l.count_objects);
+    CHECK(screen_lend_outputs(a, 1, &ic) < 0); /* lent already */
+    CHECK(screen_refresh() < 0 && errno == EBUSY);
+    CHECK(screen_take_back(ia) == 0 && lent && outputs[1].lessee == ib && !outputs[0].lessee);
+    CHECK(screen_take_back(ib) == 0 && !lent);
+    close(la);
+    close(lb);
+    verify_outputs(2);
+    say("PASS side-by-side leases: one output each at once, taken back one at a time");
+}
 static int events_open(void)
 {
     int fd = socket(AF_NETLINK, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, NETLINK_KOBJECT_UEVENT);
@@ -416,6 +438,7 @@ int main(void)
     alternate_mode();
     int events = events_open();
     leases(events);
+    side_by_side();
     replay_event(events);
     uint32_t *original = shadow;
     uint32_t w = width, h = height;

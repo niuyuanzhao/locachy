@@ -31,7 +31,8 @@ static int input_ioctl(int, unsigned long, ...);
 #undef ioctl
 
 #define NINPUT 4
-static struct fixture { int read, write, present, mouse; } input[NINPUT];
+/* button: a device with only that key (ThinkPad Extra Buttons' ThinkVantage) */
+static struct fixture { int read, write, present, mouse, button; } input[NINPUT];
 static int owner[1024]; /* fd -> fixture index + 1 */
 
 static int input_open(const char *path, int flags, ...)
@@ -70,7 +71,8 @@ static int input_ioctl(int fd, unsigned long request, ...)
         memset(arg, 0, _IOC_SIZE(request));
         int type = (int)_IOC_NR(request) - 0x20;
         if (type == EV_KEY) {
-            if (f->mouse) setbit(arg, BTN_LEFT);
+            if (f->button) setbit(arg, f->button);
+            else if (f->mouse) setbit(arg, BTN_LEFT);
             else { setbit(arg, KEY_A); setbit(arg, KEY_ENTER); }
         } else if (type == EV_REL && f->mouse) { setbit(arg, REL_X); setbit(arg, REL_Y); }
         return (int)_IOC_SIZE(request);
@@ -84,8 +86,9 @@ static int input_ioctl(int fd, unsigned long request, ...)
 }
 
 void say(const char *fmt, ...) { (void)fmt; }
+static const char *rc[3]; /* rc.conf's NAME, VALUE; none: the defaults */
 int rc_read(void (*fn)(const char *, const char *, void *), void *arg)
-{ (void)fn; (void)arg; return 0; }
+{ for (int i = 0; rc[i]; i += 2) fn(rc[i], rc[i + 1], arg); return 0; }
 void screen_pixels(int *w, int *h) { *w = 1000; *h = 800; }
 void screen_cell_at(int x, int y, int *col, int *row) { *col = x / 10; *row = y / 20; }
 void screen_cursor_move(int x, int y) { (void)x; (void)y; }
@@ -101,7 +104,7 @@ static void add(int i, int mouse)
 {
     int pair[2];
     assert(pipe2(pair, O_NONBLOCK | O_CLOEXEC) == 0);
-    input[i] = (struct fixture){ pair[0], pair[1], 1, mouse };
+    input[i] = (struct fixture){ pair[0], pair[1], 1, mouse, 0 };
 }
 
 static void emit(int i, int code, int value)
@@ -183,7 +186,7 @@ int main(void)
     if (!child) { close(pair[0]); close(sync[0]); frontend(pair[1], sync[1]); }
     close(pair[1]); close(sync[1]);
     home.ctl = pair[0]; home.pid = 123; home.lessee = 42;
-    fg = &home;
+    home.screens = 1; /* home on the screen, the keyboard and the pointer its */
     int take[1 + MAX_KBD];
     take[0] = open("/dev/null", O_RDONLY);
     home.nkbd = keys_lend(home.kbd, MAX_KBD);
@@ -191,7 +194,7 @@ int main(void)
     assert(control_send(home.ctl, "take", 4, take, home.nkbd + 1) == 0);
     close(take[0]);
     home.pointer_wanted = 1;
-    pointer_refresh(&home);
+    pointer_refresh(&home, POINTER_MOVING | POINTER_DIRECT);
     check(sync[0], 2, 2, 0, 0, 1);
 
     int original_key = fds[0], original_lease = home.kbd[0], original_pointer = home.pointer[0];
@@ -246,22 +249,29 @@ int main(void)
     /* Ownership only: no lock/auth code is replaced or exercised here. */
     locker = home;
     memset(&home, 0, sizeof home);
-    fg = &locker; locked = 1;
+    locked = 1;
     input[2].present = 0;
     input_refresh();
     check(sync[0], 2, 2, 0, 0, 0);
     emit(1, KEY_A, 1);
     check(sync[0], 2, 2, 'a', 0, 0);
-    assert(fg == &locker && locked && !home.pointer && home.nkbd == 0);
+    assert(focused() == &locker && locked && !home.pointer && home.nkbd == 0);
     puts("PASS an already-running lock receives input-only hotplug, not a background frame");
 
-    struct frame display = { .shared_display = 1 };
-    fg = &display;
+    /* The shared display in front: the lock, not on a screen, loses the
+     * pointer; the compositor gets no framebuffer input leases. */
+    struct frame *display = &tasks[0].f[0];
+    *display = (struct frame){ .shared_display = 1, .pid = 1, .ctl = -1, .screens = 1 };
+    tasks[0].depth = 1;
+    display_front = &tasks[0];
+    locked = 0;
     add(3, 0);
     input_refresh();
-    assert(count == 3 && !display.nkbd && !display.pointer);
-    check(sync[0], 2, 2, 0, 0, 0);
-    fg = &locker;
+    assert(count == 3 && !display->nkbd && !display->pointer && focused() == display);
+    check(sync[0], 2, 0, 0, 0, 0);
+    display_front = NULL;
+    tasks[0].depth = 0;
+    locked = 1;
     input_refresh();
     check(sync[0], 3, 3, 0, 0, 0);
     puts("PASS the shared compositor is not sent framebuffer input leases");
@@ -290,6 +300,31 @@ int main(void)
     free(locker.pointer);
     close(pair[0]); close(sync[0]);
     for (int i = 0; i < NINPUT; i++) { close(input[i].read); close(input[i].write); }
+
+    /* The keys that type nothing which process 1 watches on its own fds
+     * (system_inputs) and goes home on, whatever has the keyboard: key_home's
+     * alone, ThinkVantage unless rc.conf names others; then those, and
+     * ThinkVantage nothing. MicMute alone is key_mic_mute's, not home's. */
+    add(0, 0); input[0].button = KEY_PROG1;
+    add(1, 0); input[1].button = KEY_MICMUTE;
+    int sys[8], nsys = system_inputs(sys, 8);
+    assert(nsys == 1 && input_same(sys[0], input[0].read));
+    struct input_event ev;
+    emit(0, KEY_PROG1, 1);
+    assert(read(sys[0], &ev, sizeof ev) == sizeof ev && keys_alone_action(ev.code) == K_HOME);
+    assert(keys_alone_action(KEY_VENDOR) == K_HOME && keys_alone_action(KEY_MICMUTE) != K_HOME);
+    close(sys[0]);
+    rc[0] = "key_home", rc[1] = "Super+Esc MicMute";
+    keys_reload(); /* as at SIGHUP */
+    nsys = system_inputs(sys, 8);
+    assert(nsys == 1 && input_same(sys[0], input[1].read));
+    emit(1, KEY_MICMUTE, 1);
+    assert(read(sys[0], &ev, sizeof ev) == sizeof ev && keys_alone_action(ev.code) == K_HOME);
+    assert(keys_alone_action(KEY_PROG1) == 0 && keys_alone_action(KEY_VENDOR) == 0);
+    close(sys[0]);
+    for (int i = 0; i < 2; i++) { close(input[i].read); close(input[i].write); }
+    puts("PASS process 1 watches and goes home on key_home's keys: ThinkVantage by default, "
+         "MicMute when rc.conf names it, ThinkVantage then nothing");
     puts("ALL PASSED");
     return 0;
 }

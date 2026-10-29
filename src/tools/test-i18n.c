@@ -2,10 +2,12 @@
  * test-i18n LOCALEDIR: base/i18n.c over the catalog test-i18n.sh made in
  * LOCALEDIR: _, C_ and P_ translate; what the catalog has
  * not, and "", stay as they are; the language changes while running;
- * a language without its generated locale stays English; ui_cells and
- * ui_pad count a CJK character as two cells.
+ * a language without its generated locale stays English; another library's
+ * catalog (PAM's prompts) comes in UTF-8, not as question marks; ui_cells
+ * and ui_pad count a CJK character as two cells.
  */
 #include <assert.h>
+#include <libintl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,6 +57,10 @@ int main(int argc, char **argv)
     assert(strcmp(P_("%d item", "%d items", 5), "%d items") == 0);
     language("zh_CN.UTF-8");
     assert(strcmp(_("Save"), "\xe4\xbf\x9d\xe5\xad\x98") == 0);
+
+    printf("== another library's catalog, not bound to UTF-8 (PAM's prompts): UTF-8 all the same\n");
+    bindtextdomain("other-library", argv[1]);
+    assert(strcmp(dgettext("other-library", "Password: "), "\xe5\xaf\x86\xe7\xa0\x81\xef\xbc\x9a") == 0);
 
     printf("== a language whose locale is not generated stays English\n");
     language("fr_FR.UTF-8");

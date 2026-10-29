@@ -2,7 +2,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-28 21:35-0400\n"
+"POT-Creation-Date: 2026-10-29 08:05-0400\n"
 "PO-Revision-Date: 2026-10-24 22:38+0000\n"
 "Last-Translator: LOCachy <38998838+niuyuanzhao@users.noreply.github.com>\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -59,7 +59,7 @@ msgstr "音量: --"
 msgid "Bat --"
 msgstr "电池 --"
 
-#: base/status.c progs/installer.c progs/packages.c
+#: base/status.c progs/installer.c progs/packages.c progs/settings.c
 msgid "Network"
 msgstr "网络"
 
@@ -3689,8 +3689,9 @@ msgstr[0] "已选 %d 项（%s）"
 
 #: progs/files.c
 #, c-format
-msgid "%d items (%d hidden) | %s free"
-msgstr "%d 项（隐藏 %d 项）| 可用 %s"
+msgid "%d item (%d hidden) | %s free"
+msgid_plural "%d items (%d hidden) | %s free"
+msgstr[0] "%d 项（隐藏 %d 项）| 可用 %s"
 
 #: progs/files.c
 #, c-format
@@ -3811,6 +3812,12 @@ msgstr "d: 移入回收站"
 msgid "n: new folder"
 msgstr "n: 新建文件夹"
 
+#. TRANSLATORS: q is the key; keep it.
+#. TRANSLATORS: q is the q key; keep "q: ".
+#: progs/files.c progs/packages.c
+msgid "q: back"
+msgstr "q: 返回"
+
 #. TRANSLATORS: i is the key; keep it.
 #: progs/files.c
 msgid "i: props"
@@ -3830,12 +3837,6 @@ msgstr "w: 壁纸"
 #: progs/files.c
 msgid "e: eject"
 msgstr "e: 弹出"
-
-#. TRANSLATORS: q is the key; keep it.
-#. TRANSLATORS: q is the q key; keep "q: ".
-#: progs/files.c progs/packages.c
-msgid "q: back"
-msgstr "q: 返回"
 
 #: progs/files.c
 msgid "Space: mark  Tab: panes  Ctrl+1/2/3: view"
@@ -4950,6 +4951,11 @@ msgstr "打开 %s：错误"
 msgid "opening %s..."
 msgstr "正在打开 %s..."
 
+#: progs/home.c
+#, c-format
+msgid "%s is open on %s."
+msgstr "%s 已在 %s 上打开。"
+
 #: progs/installer.c
 msgid "(no model name)"
 msgstr "（无型号名）"
@@ -5941,12 +5947,90 @@ msgid "never"
 msgstr "从不"
 
 #: progs/packages.c
+#, c-format
+msgid "%d package, %s"
+msgid_plural "%d packages, %s"
+msgstr[0] "%d 个包，%s"
+
+#: progs/packages.c
 msgid " (previous kept)"
 msgstr "（保留上一版）"
 
 #: progs/packages.c progs/settings.c
 msgid "not installed"
 msgstr "未安装"
+
+#: progs/packages.c
+msgid "extras"
+msgstr "附加包"
+
+#: progs/packages.c
+msgid "package"
+msgstr "软件包"
+
+#: progs/packages.c
+msgid "arguments"
+msgstr "启动参数"
+
+#: progs/packages.c
+msgid "command"
+msgstr "启动命令"
+
+#: progs/packages.c
+msgctxt "detail"
+msgid "network"
+msgstr "网络"
+
+#: progs/packages.c
+msgid "yes (locachy-net)"
+msgstr "是 (locachy-net)"
+
+#: progs/packages.c
+msgctxt "detail"
+msgid "camera"
+msgstr "摄像头"
+
+#: progs/packages.c
+msgid "yes (the cameras, as they come and go)"
+msgstr "是（摄像头随插随拔）"
+
+#: progs/packages.c
+msgid "directories"
+msgstr "目录"
+
+#: progs/packages.c
+msgid "built"
+msgstr "构建时间"
+
+#: progs/packages.c
+msgid "state"
+msgstr "状态"
+
+#: progs/packages.c
+msgid "kept (r rolls back to it)"
+msgstr "已保留（按 r 回滚）"
+
+#: progs/packages.c
+msgid "previous build"
+msgstr "上一构建版本"
+
+#: progs/packages.c
+msgid "Not built yet: no build has installed anything"
+msgstr "尚未构建：还没有构建安装过任何东西"
+
+#: progs/packages.c
+msgid "Its build installed nothing: all its packages are the host's"
+msgstr "它的构建没有安装任何包：所有包都来自宿主"
+
+#: progs/packages.c
+#, c-format
+msgid "Its build installed %d package, %s; the rest is the host's"
+msgid_plural "Its build installed %d packages, %s; the rest is the host's"
+msgstr[0] "它的构建安装了 %d 个包，%s；其余来自宿主"
+
+#: progs/packages.c
+msgid "Package"
+msgstr "软件包"
 
 #: progs/packages.c
 msgid "done"
@@ -6016,59 +6100,10 @@ msgstr "重新构建：%s (%s -> %s)"
 msgid "Details: %s (%s/%s.conf)   l: output"
 msgstr "详细信息：%s（%s/%s.conf）   l: 输出"
 
+#. TRANSLATORS: PgUp/PgDn are key names; keep them.
 #: progs/packages.c
-msgid "extras"
-msgstr "附加包"
-
-#: progs/packages.c
-msgid "package"
-msgstr "软件包"
-
-#: progs/packages.c
-msgid "arguments"
-msgstr "启动参数"
-
-#: progs/packages.c
-msgid "command"
-msgstr "启动命令"
-
-#: progs/packages.c
-msgctxt "detail"
-msgid "network"
-msgstr "网络"
-
-#: progs/packages.c
-msgid "yes (locachy-net)"
-msgstr "是 (locachy-net)"
-
-#: progs/packages.c
-msgctxt "detail"
-msgid "camera"
-msgstr "摄像头"
-
-#: progs/packages.c
-msgid "yes (the cameras, as they come and go)"
-msgstr "是（摄像头随插随拔）"
-
-#: progs/packages.c
-msgid "directories"
-msgstr "目录"
-
-#: progs/packages.c
-msgid "built"
-msgstr "构建时间"
-
-#: progs/packages.c
-msgid "state"
-msgstr "状态"
-
-#: progs/packages.c
-msgid "kept (r rolls back to it)"
-msgstr "已保留（按 r 回滚）"
-
-#: progs/packages.c
-msgid "previous build"
-msgstr "上一构建版本"
+msgid "PgUp/PgDn: scroll"
+msgstr "PgUp/PgDn：滚动"
 
 #: progs/packages.c
 msgid "Details: nothing selected"
@@ -6178,10 +6213,6 @@ msgstr "启动命令"
 #: progs/packages.c
 msgid "Extras"
 msgstr "附加包"
-
-#: progs/packages.c
-msgid "Package"
-msgstr "软件包"
 
 #: progs/packages.c
 msgid "Preset"
@@ -7265,6 +7296,13 @@ msgstr "已保存至 %s。"
 msgid "(a file of its own)"
 msgstr "（独立文件）"
 
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid ""
+"Automatic paused: Tor carries the network, so ipinfo.io is not asked. Enter: "
+"choose a zone."
+msgstr "自动已暂停：网络经由 Tor，因此不向 ipinfo.io 查询。Enter：选择时区。"
+
 #: progs/settings.c
 msgid "Time zone: automatic, from where the network is (asked of ipinfo.io)."
 msgstr "时区：自动，根据网络位置确定（查询 ipinfo.io）。"
@@ -7278,6 +7316,14 @@ msgstr "无法设置时区 %s。"
 #, c-format
 msgid "Time zone %s: programs started from now on use it."
 msgstr "时区 %s：此后启动的程序将使用该时区。"
+
+#: progs/settings.c
+msgid "Automatic: paused while Tor carries the network"
+msgstr "自动：网络经由 Tor 时暂停"
+
+#: progs/settings.c
+msgid "Automatic: from where the network is"
+msgstr "自动：根据网络所在位置"
 
 #: progs/settings.c
 msgid "settings"
@@ -7297,10 +7343,6 @@ msgstr "筛选：%s_"
 #: progs/settings.c
 msgid "No time zone has that in its name."
 msgstr "没有名称包含该内容的时区。"
-
-#: progs/settings.c
-msgid "Automatic: from where the network is"
-msgstr "自动：根据网络所在位置"
 
 #: progs/settings.c
 msgid "   (now)"
@@ -7537,10 +7579,6 @@ msgid "Bluetooth"
 msgstr "蓝牙"
 
 #: progs/settings.c
-msgid "Wi-Fi & Internet"
-msgstr "Wi-Fi 和互联网"
-
-#: progs/settings.c
 msgid "No saved network yet."
 msgstr "尚无已保存的网络。"
 
@@ -7592,6 +7630,11 @@ msgstr "区域和语言"
 #: progs/settings.c
 msgid "Date & Time"
 msgstr "日期和时间"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Tor carries the network: ipinfo.io is not asked. Enter: choose a zone."
+msgstr "网络经由 Tor：不向 ipinfo.io 查询。Enter：选择时区。"
 
 #: progs/settings.c
 msgid "About This System"
@@ -7930,6 +7973,12 @@ msgstr "终端快捷键（共享桌面）"
 #: progs/settings.c
 msgid "  (foot is not installed)"
 msgstr "  （foot 未安装）"
+
+#. TRANSLATORS: %s is a time zone (Europe/Berlin).
+#: progs/settings.c
+#, c-format
+msgid "Automatic paused (Tor): %.60s"
+msgstr "自动已暂停（Tor）：%.60s"
 
 #: progs/settings.c
 #, c-format
@@ -10398,6 +10447,9 @@ msgstr "框选表格区域，再点击边缘附近划分行列；按 Esc 清除�
 #: progs/view.c
 msgid "Click to see the magnified view."
 msgstr "点击查看放大视图。"
+
+#~ msgid "Wi-Fi & Internet"
+#~ msgstr "Wi-Fi 和互联网"
 
 #~ msgid "Container"
 #~ msgstr "容器"

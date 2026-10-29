@@ -613,6 +613,11 @@ int keys_device_action(int fd, int ev_code, int c, int a, int s, int m)
     return match_action(table_of(fd), ev_code, c, a, s, m);
 }
 
+int keys_alone_action(int code)
+{
+    return code >= KEY_MUTE ? keys_match_action(code, 0, 0, 0, 0) : 0;
+}
+
 int keys_open(void)
 {
     load_keybindings(&tables[0]);

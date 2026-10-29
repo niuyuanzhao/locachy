@@ -1,7 +1,7 @@
 /*
  * Drive home's file manager (files.c) by its keys over a scratch home: the
- * screen, the keyboard and the opening of files are test doubles; the files
- * are real. As root it also checks that the operations are the user's (uid
+ * screen (which keeps what is drawn, as text), the keyboard and the opening
+ * of files are test doubles; the files are real. As root it also checks that the operations are the user's (uid
  * 1000) and that the file permissions return to root's after each.
  *   test-files DIR   (DIR: a new directory, made as the scratch home)
  * The folder request is the real FILES_REQUEST: run it in a private mount
@@ -67,20 +67,69 @@ static char opened_name[OPEN_NAME], opened_target[PATH_MAX], rule[OPEN_NAME];
 
 void say(const char *fmt, ...) { (void)fmt; }
 void base_status(const char *tag, char *out, size_t size) { (void)tag; snprintf(out, size, "status"); }
-int screen_cols(void) { return 100; }
+/* What is drawn: a character per cell (a wide one in its first, 0 in its
+ * second), as screen.c draws it on ncols columns (at most 100): a fill
+ * blanks, text is cut at the edge. And the bar's title. */
+static int ncols = 100;
+static uint32_t drawn[30][100];
+static char bar_title[64];
+int screen_cols(void) { return ncols; }
 int screen_rows(void) { return 30; }
 void screen_cells(int *w, int *h, int *t) { *w = 8; *h = 16; *t = 0; }
 int screen_char_cells(uint32_t cp) { return cp >= 0x4E00 && cp <= 0x9FFF ? 2 : 1; }
-void screen_fill(int c, int r, int w, int h, uint32_t rgb) { (void)c; (void)r; (void)w; (void)h; (void)rgb; }
+void screen_fill(int c, int r, int w, int h, uint32_t rgb)
+{
+    (void)rgb;
+    for (int y = r; y < r + h; y++)
+        for (int x = c; x < c + w; x++)
+            if (y >= 0 && y < 30 && x >= 0 && x < ncols) drawn[y][x] = ' ';
+}
 void screen_fill_px(int x, int y, int w, int h, uint32_t rgb)
 {
     (void)x; (void)y; (void)w; (void)h; (void)rgb;
     px_fills++;
 }
 void screen_text(int c, int r, const char *s, uint32_t fg, uint32_t bg)
-{ (void)c; (void)r; (void)s; (void)fg; (void)bg; }
+{
+    (void)fg;
+    (void)bg;
+    for (size_t i = 0; r >= 0 && r < 30 && s[i] && c < ncols; i = utf_next(s, i), c++) {
+        uint32_t cp = utf_at(s, i, utf_next(s, i));
+        if (c >= 0) drawn[r][c] = cp;
+        if (screen_char_cells(cp) == 2 && c + 1 < ncols) drawn[r][++c] = 0;
+    }
+}
 void screen_flush(void) {}
-void screen_bar(const char *title, const char *ime) { (void)title; (void)ime; }
+void screen_bar(const char *title, const char *ime)
+{
+    (void)ime;
+    snprintf(bar_title, sizeof bar_title, "%s", title);
+}
+
+/* Row r as drawn from column c, in UTF-8, without the blanks at its end. */
+static const char *drawn_row(int r, int c)
+{
+    static char line[100 * 3 + 1];
+    size_t n = 0;
+    for (; c < ncols; c++) {
+        uint32_t cp = drawn[r][c];
+        if (cp == 0) {
+            continue;
+        } else if (cp < 0x80) {
+            line[n++] = (char)cp;
+        } else if (cp < 0x800) {
+            line[n++] = (char)(0xC0 | cp >> 6);
+            line[n++] = (char)(0x80 | (cp & 63));
+        } else {
+            line[n++] = (char)(0xE0 | cp >> 12);
+            line[n++] = (char)(0x80 | (cp >> 6 & 63));
+            line[n++] = (char)(0x80 | (cp & 63));
+        }
+    }
+    while (n && line[n - 1] == ' ') n--;
+    line[n] = '\0';
+    return line;
+}
 int rc_set(const char *name, const char *value) { (void)name; (void)value; return 0; }
 
 int clipboard_set(int primary, const void *text, size_t size)
@@ -385,6 +434,30 @@ int main(int argc, char **argv)
     snprintf(kept, sizeof kept, "%s", P->cwd);
     run("the home key: back to home's list at once, the place kept", (const int[]){ K_ACT_HOME, END });
     assert(extra == 0 && strcmp(P->cwd, kept) == 0);
+
+    /* What it drew (Documents: sub/ a.txt b.txt, sub selected): the title, the
+     * toolbar, the column headers, the status and the buttons, nothing more. */
+    static const char status_start[] = " sub \xe2\x80\x94 1 item, inode/directory, ";
+    char toolbar[PATH_MAX + 64];
+    snprintf(toolbar, sizeof toolbar, " < > ^ %-65s Icons   Compact   Details", kept); /* the path: 64 columns */
+    assert(strcmp(bar_title, "files") == 0 && (strlen(kept) > 64 || strcmp(drawn_row(1, 0), toolbar) == 0));
+    assert(strcmp(drawn_row(2, SIDE), "  Name ^                          Size  Modified          Type") == 0);
+    assert(strncmp(drawn_row(27, 0), status_start, strlen(status_start)) == 0);
+    assert(strstr(drawn_row(27, 0), "  3 items (1 hidden) | "));
+    assert(strcmp(drawn_row(28, 0), " [Enter: open] [o: open with] [c: copy] [x: cut] [v: paste] [r: rename] "
+                                    "[d: trash] [n: new folder]") == 0);
+    assert(strcmp(drawn_row(29, 0), " [/: filter] [.: hidden] [s: sort] [i: props] [F3: split] [w: wallpaper] "
+                                    "[e: eject] [q: back]") == 0);
+
+    /* 68 columns (1366 pixels at scale 2): what does not fit is left out,
+     * never the way back. */
+    struct click back[] = { { .id = HIT_KEY + 'q', .button = BTN_LEFT, .clicks = 1 } };
+    clicks = back;
+    ncols = 68;
+    run("a narrow screen: q: back is still shown, and clicking it goes back", (const int[]){ CLICK(0), END });
+    assert(extra == 0 && strcmp(drawn_row(29, 0), " [/: filter] [.: hidden] [s: sort] [i: props] [F3: split] "
+                                                  "[q: back]") == 0);
+    ncols = 100;
 
     run("open: the rule, no chooser", (const int[]){ K_DOWN, K_DOWN, '\n', END });
     assert(opens == 3 && strcmp(opened_name, "one") == 0);

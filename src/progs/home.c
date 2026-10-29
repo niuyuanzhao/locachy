@@ -913,8 +913,15 @@ int main(void)
             last_customized = 1;
             snprintf(last, sizeof last, _("opening %s..."), entries[host].name);
             draw(0);
-            base_open(entries[host].argv, last, sizeof last);
-            say("home: %s", last); /* K_SHOWN comes next and redraws. */
+            /* On the screen it was chosen on, when home has several. */
+            struct screen_output on;
+            int several = screen_is_extended && screen_is_extended() && screen_output_count &&
+                          screen_output_count() > 1 && screen_output_get(home_output, &on) == 0;
+            base_open_on(several ? on.name : NULL, entries[host].argv, last, sizeof last);
+            say("home: %s", last); /* K_SHOWN comes next and redraws, */
+            if (several && strncmp(last, "shown ", 6) == 0) { /* unless home kept its other screens */
+                snprintf(last, sizeof last, _("%s is open on %s."), entries[host].name, on.name);
+            }
         }
         draw(0);
     }

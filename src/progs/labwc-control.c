@@ -18,6 +18,8 @@
  *   reload-monitors  apply MONITORS_CONF: "ok monitors" or "error ..."
  *   focused          the container of the focused window: "ok NAME", or "ok"
  *                    when no container's window has the focus
+ *   home, lock,      (labwc-control --action WHAT, from the touchpad's swipes)
+ *   next, prev       asked of process 1 through locachy-seat: "ok WHAT"
  * A window belongs to container NAME when its app_id names a .desktop file
  * that NAME installed (or that file's StartupWMClass), the way desktop shells
  * match windows to applications.
@@ -823,11 +825,15 @@ static void serve(int listener)
         wl_display_roundtrip(display);
         snprintf(reply, sizeof reply, apply_monitors() == 0 ? "ok monitors" :
                  "error the compositor offers no output management");
-    } else if (strcmp(request, "home") == 0 || strcmp(request, "lock") == 0) {
+    } else if (strcmp(request, "home") == 0 || strcmp(request, "lock") == 0 || strcmp(request, "next") == 0 ||
+               strcmp(request, "prev") == 0) {
         snprintf(reply, sizeof reply, "ok %s", request);
         send(client, reply, strlen(reply), MSG_NOSIGNAL);
         close(client);
-        kill(getppid(), strcmp(request, "home") == 0 ? SIGUSR1 : SIGUSR2);
+        /* To locachy-seat, which asks process 1: home, lock, the next or
+         * previous task (a touchpad swipe, as in the direct programs). */
+        kill(getppid(), request[0] == 'h' ? SIGUSR1 : request[0] == 'l' ? SIGUSR2 :
+                        request[0] == 'n' ? SIGRTMIN : SIGRTMIN + 1);
         return;
     } else {
         snprintf(reply, sizeof reply, "error unknown request");
@@ -846,7 +852,10 @@ static void on_term(int sig)
 
 static int send_action(const char *action)
 {
-    if (strcmp(action, "home") != 0 && strcmp(action, "lock") != 0) return 2;
+    if (strcmp(action, "home") != 0 && strcmp(action, "lock") != 0 && strcmp(action, "next") != 0 &&
+        strcmp(action, "prev") != 0) {
+        return 2;
+    }
     const char *runtime = getenv("XDG_RUNTIME_DIR");
     if (!runtime || runtime[0] != '/') return 1;
     struct sockaddr_un address = { .sun_family = AF_UNIX };

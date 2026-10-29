@@ -39,6 +39,31 @@ if [ -f "$runtime/usr/include/rime_api.h" ] && [ -f "$runtime/usr/lib/librime.so
         "$src/tools/test-bar-keyboard.c" "$src/base/keys.c" "$src/base/ime.c" "$out"/proto/*-protocol.c \
         -Wl,--gc-sections -Wl,-rpath-link,"$runtime/usr/lib" -L"$runtime/usr/lib" \
         $(pkg-config --libs gio-2.0) -lwayland-client -lwayland-cursor -lxkbcommon -lrime -o "$out/bin/rime-driver"
+    # The input method's modes and its key_ime_width_cn, with the runtime's Rime.
+    gcc "${flags[@]}" -DCONFIG_IME -I"$runtime/usr/include" "$src/tools/test-ime-modes.c" \
+        -Wl,--gc-sections -Wl,-rpath-link,"$runtime/usr/lib" -L"$runtime/usr/lib" -lrime -o "$out/bin/ime-modes"
+    for mode in enabled disabled; do
+        bwrap --unshare-all --die-with-parent --ro-bind "$runtime" / --proc /proc --dev /dev --tmpfs /tmp \
+            --bind "$out" /work /work/bin/ime-modes "$mode"
+    done
+    # Chinese mode's punctuation (test-ime-width) and Rime's Lua beside
+    # libinput (test-ime), linked as the programs are (build-check.sh's
+    # ime-libs), with the runtime's Rime data: each on a copy of its user
+    # directory deployed again with this tree's default.custom.yaml.
+    lua=$(readelf -d "$runtime/usr/lib/rime-plugins/librime-lua.so" | sed -n 's/.*(NEEDED).*\[\(liblua[^]]*\)\]$/\1/p' | head -n 1)
+    ime_libs=(-Wl,-rpath-link,"$runtime/usr/lib" -L"$runtime/usr/lib" -lrime
+              ${lua:+-Wl,--push-state,--no-as-needed -l:$lua -Wl,--pop-state})
+    gcc "${flags[@]}" -DCONFIG_IME -I"$runtime/usr/include" "$src/tools/test-ime-width.c" "$src/base/ime.c" \
+        "$src/base/rc.c" "$src/base/say.c" -Wl,--gc-sections "${ime_libs[@]}" -o "$out/bin/ime-width"
+    gcc "${flags[@]}" -DCONFIG_IME -I"$runtime/usr/include" "$src/tools/test-ime.c" "$src/base/ime.c" \
+        "$src/base/rc.c" "$src/base/say.c" -Wl,--gc-sections "${ime_libs[@]}" -linput -o "$out/bin/ime"
+    for test in ime-width ime; do
+        cp -a "$runtime/var/lib/locachy/rime" "$out/$test-user"
+        cp "$src/base/rime/default.custom.yaml" "$out/$test-user/"
+        rm -f "$out/$test-user/build/default.yaml"
+        bwrap --unshare-all --die-with-parent --ro-bind "$runtime" / --proc /proc --dev /dev --tmpfs /tmp \
+            --bind "$out" /work /work/bin/$test /work/$test-user
+    done
     rime=1
 else
     printf 'SKIP actual Rime: runtime headers/library or unprivileged bwrap unavailable\n'

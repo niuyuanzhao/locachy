@@ -8,9 +8,12 @@
  * its pictures while it does not have the screen.
  *
  * Process 1 opens the first card with a connected output itself (it is the
- * DRM master) and lends its connectors and CRTCs in one DRM lease (which
- * brings their primary planes along). A program started by process 1 gets
- * its lease through the existing control channel. Text is drawn pixel for
+ * DRM master) and lends connectors and CRTCs in DRM leases (which bring
+ * their primary planes along): all of them in one, or, with several
+ * screens, each program the screens it shows, the leases side by side. A
+ * program started by process 1 gets its lease through the existing control
+ * channel, and the desktop's layout (every screen's place, its own or not)
+ * with it; the screen the pointer is on, among several, has a green frame. Text is drawn pixel for
  * pixel in the logical picture with a PSF1 or PSF2 console font: Terminus,
  * TEXT_H pixels high times the first output's scale (MONITORS_CONF, as on the
  * shared display), so the cells, not the picture, grow with the scale.
@@ -58,11 +61,18 @@ struct output {
     uint32_t pitch, fb_id, handle;
     int soft_cursor;                 /* no cursor plane: drawn into the scanout */
     struct drm_clip_rect cursor_at;  /* where it was drawn there; empty if x1 == x2 */
+    uint32_t lessee;                 /* process 1: the lease it is lent in; 0 if none */
 };
 static struct output *outputs;
 static uint32_t noutputs;
 static int lent;                     /* suppress scanout while a frontend owns DRM */
 static uint32_t active_lessee;       /* a revocable lease, distinct from raw master handoff */
+/* Programs: the desktop's screens as process 1 gives them ("screens"), by
+ * connector name, in logical pixels; the one the pointer is on (hover_output,
+ * an index of outputs; -1: none), framed when there are two or more. */
+#define MAX_DESK 8
+static struct desk { char name[32]; int x, y, w, h; } desk[MAX_DESK];
+static int ndesk, hover_output = -1;
 static struct drm_clip_rect dirty;   /* drawn since the last flush; empty if x1 == x2 */
 
 static uint8_t *font;
@@ -102,6 +112,7 @@ static const char *const connector_types[] = {
 #define NCONNECTOR_TYPES (sizeof connector_types / sizeof connector_types[0])
 
 static void touch(uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1);
+static void hover_frame(struct output *o);
 static double screen_time(void);
 static void cursor_put(int fd);
 static void cursor_drop(int fd);
@@ -453,13 +464,12 @@ static const char *surface_for_output(struct output *o)
     return NULL;
 }
 
-static const char *extended_layout(void)
+/* The desktop rectangles of outputs[0..noutputs) (logical_width and
+ * logical_height set), placed as monitors.conf has them, as the shared
+ * display does (monitor_layout); NULL, or why not. */
+static const char *place_outputs(struct monitor_rect *rects)
 {
-    struct monitor_rect rects[32];
-    if (noutputs > 32) return "too many output rectangles";
     for (uint32_t i = 0; i < noutputs; i++) {
-        const char *why = surface_for_output(&outputs[i]);
-        if (why) return why;
         struct output *o = &outputs[i];
         struct monitor_conf conf;
         int configured = monitor_conf(o->name, &conf), place = i == 0 ? MONITOR_ORIGIN : MONITOR_RIGHT;
@@ -470,8 +480,6 @@ static const char *extended_layout(void)
             else if (!strcmp(conf.place, "below")) place = MONITOR_BELOW;
             else place = MONITOR_RIGHT;
         }
-        o->logical_width = (int)(o->surface->width / o->surface->scale);
-        o->logical_height = (int)(o->surface->height / o->surface->scale);
         if (o->logical_width < 1) o->logical_width = 1;
         if (o->logical_height < 1) o->logical_height = 1;
         if (configured && conf.has_position &&
@@ -483,7 +491,38 @@ static const char *extended_layout(void)
             .y = configured ? conf.y : 0 };
     }
     monitor_layout(rects, noutputs);
+    return NULL;
+}
+
+/* An output's place on the desktop as process 1 gave it; 0 when it gave none. */
+static int desk_place(const char *name, int *x, int *y)
+{
+    for (int i = 0; i < ndesk; i++) {
+        if (strcmp(desk[i].name, name) == 0) {
+            *x = desk[i].x;
+            *y = desk[i].y;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static const char *extended_layout(void)
+{
+    struct monitor_rect rects[32];
+    if (noutputs > 32) return "too many output rectangles";
     for (uint32_t i = 0; i < noutputs; i++) {
+        const char *why = surface_for_output(&outputs[i]);
+        if (why) return why;
+        struct output *o = &outputs[i];
+        o->logical_width = (int)(o->surface->width / o->surface->scale);
+        o->logical_height = (int)(o->surface->height / o->surface->scale);
+    }
+    const char *why = place_outputs(rects);
+    if (why) return why;
+    for (uint32_t i = 0; i < noutputs; i++) {
+        /* A program with some of the screens: where they are on the desktop. */
+        desk_place(outputs[i].name, &rects[i].x, &rects[i].y);
         if (outputs[i].x != rects[i].x || outputs[i].y != rects[i].y) outputs[i].surface->redraw = 1;
         outputs[i].x = rects[i].x; outputs[i].y = rects[i].y;
     }
@@ -1067,6 +1106,7 @@ int screen_take(int lease)
 
 void screen_release(void)
 {
+    hover_output = -1;
     clear_outputs(card);
     if (card >= 0) {
         close(card); /* ends the lease; shadow remains for the next take */
@@ -1076,27 +1116,50 @@ void screen_release(void)
     active_lessee = 0;
 }
 
-int screen_lend(uint32_t *lessee)
+static int any_lent(void)
+{
+    for (uint32_t i = 0; i < noutputs; i++) {
+        if (outputs[i].lessee) return 1;
+    }
+    return 0;
+}
+
+/* A lease of the outputs named (names NULL: all of them) not lent already. */
+int screen_lend_outputs(const char *const *names, int n, uint32_t *lessee)
 {
     *lessee = 0;
-    if (screen_refresh() <= 0 || noutputs == 0) {
+    if (card < 0 || noutputs == 0) {
+        errno = ENODEV;
         return -1;
     }
-    uint32_t *objects = array(noutputs, 2 * sizeof *objects);
-    if (objects == NULL) {
+    uint32_t *objects = array(noutputs, 2 * sizeof *objects), count = 0;
+    uint32_t *which = array(noutputs, sizeof *which);
+    if (objects == NULL || which == NULL) {
+        free(objects);
+        free(which);
         say("screen: no memory for lease objects");
         return -1;
     }
     for (uint32_t i = 0; i < noutputs; i++) {
-        objects[i * 2] = outputs[i].conn_id;
-        objects[i * 2 + 1] = outputs[i].crtc_id;
+        int wanted = names == NULL;
+        for (int k = 0; !wanted && k < n; k++) wanted = strcmp(names[k], outputs[i].name) == 0;
+        if (!wanted || outputs[i].lessee) continue;
+        which[count / 2] = i;
+        objects[count++] = outputs[i].conn_id;
+        objects[count++] = outputs[i].crtc_id;
+    }
+    if (count == 0) {
+        free(objects);
+        free(which);
+        errno = ENOENT;
+        return -1;
     }
     for (int retry = 0; retry < 15; retry++) {
         if (ioctl(card, DRM_IOCTL_SET_MASTER, 0) == 0) {
             struct drm_mode_create_lease l = { .object_ids = (uintptr_t)objects,
-                .object_count = noutputs * 2, .flags = O_CLOEXEC };
+                .object_count = count, .flags = O_CLOEXEC };
             int ok = ioctl(card, DRM_IOCTL_MODE_CREATE_LEASE, &l);
-            int fallback = ok < 0 && noutputs > 1;
+            int fallback = ok < 0 && count > 2;
             if (fallback) {
                 l = (struct drm_mode_create_lease){ .object_ids = (uintptr_t)objects,
                     .object_count = 2, .flags = O_CLOEXEC };
@@ -1106,11 +1169,12 @@ int screen_lend(uint32_t *lessee)
                 lent = 1;
                 active_lessee = l.lessee_id;
                 *lessee = l.lessee_id;
-                free(objects);
+                for (uint32_t k = 0; k < (fallback ? 1 : count / 2); k++) outputs[which[k]].lessee = l.lessee_id;
                 if (fallback) {
-                    say("screen: multi-output lease unavailable; lending connector %u only",
-                        outputs[0].conn_id);
+                    say("screen: multi-output lease unavailable; lending connector %u only", objects[0]);
                 }
+                free(objects);
+                free(which);
                 return (int)l.fd;
             }
         }
@@ -1118,9 +1182,47 @@ int screen_lend(uint32_t *lessee)
     }
     int error = errno;
     free(objects);
+    free(which);
     errno = error;
     say("screen: cannot create a lease: %m");
     return -1;
+}
+
+/* All of them, the outputs rescanned first. */
+int screen_lend(uint32_t *lessee)
+{
+    *lessee = 0;
+    if (!any_lent() && (screen_refresh() <= 0 || noutputs == 0)) {
+        return -1;
+    }
+    return screen_lend_outputs(NULL, 0, lessee);
+}
+
+int screen_places(struct screen_output *out, int max)
+{
+    struct monitor_rect rects[32];
+    if (card < 0 || noutputs == 0 || noutputs > 32) return 0;
+    for (uint32_t i = 0; i < noutputs; i++) {
+        struct output *o = &outputs[i];
+        struct monitor_conf conf;
+        double s = monitor_conf(o->name, &conf) && conf.scale > 0 ? conf.scale : 1.0;
+        o->logical_width = (int)(o->mode.hdisplay / s);
+        o->logical_height = (int)(o->mode.vdisplay / s);
+    }
+    if (place_outputs(rects) != NULL) return 0;
+    int n = 0;
+    for (uint32_t i = 0; i < noutputs && n < max; i++, n++) {
+        memset(&out[n], 0, sizeof out[n]);
+        snprintf(out[n].name, sizeof out[n].name, "%s", outputs[i].name);
+        out[n].x = rects[i].x;
+        out[n].y = rects[i].y;
+        out[n].width = rects[i].width;
+        out[n].height = rects[i].height;
+        out[n].pixel_width = outputs[i].mode.hdisplay;
+        out[n].pixel_height = outputs[i].mode.vdisplay;
+        out[n].internal = outputs[i].internal;
+    }
+    return n;
 }
 
 int screen_drop_master(uint32_t lessee)
@@ -1134,6 +1236,9 @@ int screen_drop_master(uint32_t lessee)
     if (lessee != 0 && ioctl(card, DRM_IOCTL_MODE_REVOKE_LEASE, &r) < 0 &&
         errno != ENOENT && errno != EINVAL) {
         return -1;
+    }
+    for (uint32_t i = 0; i < noutputs; i++) {
+        if (outputs[i].lessee == lessee) outputs[i].lessee = 0;
     }
     active_lessee = 0;
     for (int retry = 0; retry < 15; retry++) {
@@ -1157,10 +1262,16 @@ int screen_take_back(uint32_t lessee)
         errno != ENOENT && errno != EINVAL) {
         return -1;
     }
+    /* Its outputs come back (lessee 0: those of a raw master handoff, all). */
+    int back[32] = { 0 };
+    for (uint32_t i = 0; i < noutputs && i < 32; i++) {
+        back[i] = lessee == 0 ? !outputs[i].lessee : outputs[i].lessee == lessee;
+        if (back[i]) outputs[i].lessee = 0;
+    }
     active_lessee = 0;
     /* Revocation ended the lease even if raw master is returned later. A
      * timeout must not leave a stale lent bit preventing future retries. */
-    lent = 0;
+    lent = any_lent();
     int master = 0;
     for (int retry = 0; retry < 15; retry++) {
         if (ioctl(card, DRM_IOCTL_SET_MASTER, 0) == 0) {
@@ -1172,16 +1283,18 @@ int screen_take_back(uint32_t lessee)
     if (!master) {
         return -1;
     }
-    lent = 0;
     int result = 0;
     for (uint32_t i = 0; i < noutputs; i++) {
+        if (i < 32 && !back[i]) continue; /* still lent to another program */
         if (set_crtc(card, &outputs[i]) < 0) {
             say("screen: cannot restore connector %u: %m", outputs[i].conn_id);
             result = -1;
         }
     }
-    mark_all();
-    screen_flush();
+    if (!lent) {
+        mark_all();
+        screen_flush();
+    }
     return result;
 }
 
@@ -1189,7 +1302,7 @@ int screen_take_back(uint32_t lessee)
  * Keep the card open even with no connected outputs, for a later hotplug. */
 int screen_refresh(void)
 {
-    if (active_lessee != 0) {
+    if (active_lessee != 0 || any_lent()) {
         errno = EBUSY;
         return -1;
     }
@@ -1426,6 +1539,7 @@ void screen_flush(void)
                 .clips_ptr = (uintptr_t)&clip };
             ioctl(card, DRM_IOCTL_MODE_DIRTYFB, &cmd);
             s->dirty.x2 = s->dirty.x1;
+            hover_frame(o);
             soft_cursor_flush(o, 1);
         }
         if (drawing_surface) dirty = drawing_surface->dirty;
@@ -1445,9 +1559,132 @@ void screen_flush(void)
         struct drm_mode_fb_dirty_cmd cmd = { .fb_id = o->fb_id, .num_clips = 1,
                                              .clips_ptr = (uintptr_t)&clip };
         ioctl(card, DRM_IOCTL_MODE_DIRTYFB, &cmd);
+        hover_frame(o);
         soft_cursor_flush(o, 1);
     }
     dirty.x2 = dirty.x1;
+}
+
+/* The green frame around output o, when the pointer is on it and the desktop
+ * has more screens than one: drawn into its scanout over the picture, as the
+ * cursor is, after every copy of the picture there. */
+#define HOVER_GREEN 0x30C850u
+static void hover_frame(struct output *o)
+{
+    if (ndesk < 2 || hover_output < 0 || (uint32_t)hover_output >= noutputs || o != &outputs[hover_output] ||
+        o->map == NULL || lent) {
+        return;
+    }
+    double s = extended && o->surface ? o->surface->scale : scale > 0 ? scale : 1.0;
+    uint32_t w = o->mode.hdisplay, h = o->mode.vdisplay, t = (uint32_t)(3 * s + 0.5);
+    if (t < 2) t = 2;
+    if (2 * t >= w || 2 * t >= h) return;
+    for (uint32_t y = 0; y < h; y++) {
+        uint32_t *line = (uint32_t *)(o->map + (uint64_t)y * o->pitch);
+        if (y < t || y >= h - t) {
+            for (uint32_t x = 0; x < w; x++) line[x] = HOVER_GREEN;
+            continue;
+        }
+        for (uint32_t x = 0; x < t; x++) line[x] = line[w - 1 - x] = HOVER_GREEN;
+    }
+    struct drm_clip_rect clips[4] = {
+        { 0, 0, (unsigned short)w, (unsigned short)t },
+        { 0, (unsigned short)(h - t), (unsigned short)w, (unsigned short)h },
+        { 0, (unsigned short)t, (unsigned short)t, (unsigned short)(h - t) },
+        { (unsigned short)(w - t), (unsigned short)t, (unsigned short)w, (unsigned short)(h - t) },
+    };
+    struct drm_mode_fb_dirty_cmd cmd = { .fb_id = o->fb_id, .num_clips = 4, .clips_ptr = (uintptr_t)clips };
+    ioctl(card, DRM_IOCTL_MODE_DIRTYFB, &cmd);
+}
+
+/* Output i shown again from its picture (the frame taken off, or put on). */
+static void output_again(int i)
+{
+    if (i < 0 || (uint32_t)i >= noutputs) return;
+    struct output_surface *s = extended ? outputs[i].surface : NULL;
+    if (s) s->dirty = (struct drm_clip_rect){ 0, 0, (unsigned short)s->width, (unsigned short)s->height };
+    else dirty = (struct drm_clip_rect){ 0, 0, (unsigned short)width, (unsigned short)height };
+}
+
+void screen_hover(int output)
+{
+    if (output == hover_output) return;
+    int was = hover_output;
+    hover_output = output;
+    if (ndesk < 2) return;
+    output_again(was);
+    output_again(output);
+    screen_flush();
+}
+
+void screen_desk(char *const *fields, int n)
+{
+    ndesk = 0;
+    for (int i = 0; i + 4 < n && ndesk < MAX_DESK; i += 5) {
+        snprintf(desk[ndesk].name, sizeof desk[ndesk].name, "%s", fields[i]);
+        desk[ndesk].x = atoi(fields[i + 1]);
+        desk[ndesk].y = atoi(fields[i + 2]);
+        desk[ndesk].w = atoi(fields[i + 3]);
+        desk[ndesk].h = atoi(fields[i + 4]);
+        if (desk[ndesk].w > 0 && desk[ndesk].h > 0) ndesk++;
+    }
+}
+
+int screen_desk_count(void)
+{
+    return ndesk;
+}
+
+/* This program's picture, outside extended mode, is its first output's. */
+static const struct desk *first_desk(void)
+{
+    for (int i = 0; noutputs && i < ndesk; i++) {
+        if (strcmp(desk[i].name, outputs[0].name) == 0) return &desk[i];
+    }
+    return NULL;
+}
+
+int screen_to_desk(int x, int y, int *gx, int *gy)
+{
+    if (extended) {
+        *gx = x;
+        *gy = y;
+        return 0;
+    }
+    const struct desk *d = first_desk();
+    if (!d || !width || !height) return -1;
+    *gx = d->x + (int)((int64_t)x * d->w / (int64_t)width);
+    *gy = d->y + (int)((int64_t)y * d->h / (int64_t)height);
+    return 0;
+}
+
+int screen_from_desk(int gx, int gy, int *x, int *y)
+{
+    if (extended) {
+        *x = gx;
+        *y = gy;
+        return 0;
+    }
+    const struct desk *d = first_desk();
+    if (!d) return -1;
+    *x = (int)((int64_t)(gx - d->x) * (int64_t)width / d->w);
+    *y = (int)((int64_t)(gy - d->y) * (int64_t)height / d->h);
+    return 0;
+}
+
+int screen_desk_foreign(int gx, int gy)
+{
+    for (int i = 0; i < ndesk; i++) {
+        const struct desk *d = &desk[i];
+        if (gx < d->x || gy < d->y || (int64_t)gx >= (int64_t)d->x + d->w || (int64_t)gy >= (int64_t)d->y + d->h) {
+            continue;
+        }
+        for (uint32_t k = 0; k < noutputs; k++) {
+            if (strcmp(outputs[k].name, d->name) == 0) return 0;
+        }
+        return 1;
+    }
+    return 0;
 }
 
 void screen_fill(int col, int row, int ncols, int nrows, uint32_t rgb)

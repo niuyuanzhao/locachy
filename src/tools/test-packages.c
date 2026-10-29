@@ -189,7 +189,8 @@ static void run(const char *what, const int *keys)
     step = nsnaps = npicks = 0;
     page = UPDATES;
     memset(sel, 0, sizeof sel);
-    show_log = 0;
+    show_log = details_from = 0;
+    details_name[0] = '\0';
     for (int i = 0; i < ROWS; i++) {
         memset(grid[i], ' ', COLS);
         grid[i][COLS] = '\0';
@@ -204,6 +205,27 @@ static void put(const char *rel, const char *text)
     assert(f);
     fputs(text, f);
     fclose(f);
+}
+
+/* A package its build installed: an entry of its upper's pacman database,
+ * as pacman writes it. */
+static void installed_in(const char *container, const char *name, const char *version, long long bytes)
+{
+    char rel[256], text[512];
+    snprintf(rel, sizeof rel, "state/%s/upper/var/lib/pacman/local/%s-%s", container, name, version);
+    assert(mkdir(D(rel), 0755) == 0);
+    snprintf(text, sizeof text, "%%NAME%%\n%s\n\n%%VERSION%%\n%s\n\n%%BASE%%\n%s\n\n%%DESC%%\nA package\n\n"
+             "%%SIZE%%\n%lld\n\n%%REASON%%\n1\n\n", name, version, name, bytes);
+    strncat(rel, "/desc", sizeof rel - strlen(rel) - 1);
+    put(rel, text);
+}
+
+/* A package's line as the lists show it: name, version, size, in columns. */
+static const char *columns(const char *name, const char *version, const char *size)
+{
+    static char line[160];
+    snprintf(line, sizeof line, "%-32s %-28s %10s", name, version, size);
+    return line;
 }
 
 static int has(const char *rel, const char *text)
@@ -332,6 +354,49 @@ int main(int argc, char **argv)
     assert(has("calls", "pkg info microsoft-edge-stable-bin\n"));
     assert(on_screen("edge") && on_screen("network") && on_screen("built 2026-10-20 10:02:06 (previous kept)"));
 
+    /* What edge's build installed over the host's: its upper's pacman
+     * database, with its version file and the whiteout of a host package
+     * the build replaced (overlayfs makes a character device; a plain file
+     * here: neither has a desc, so neither is a package). plain is not
+     * built. */
+    const char *db[] = { "state/edge/upper", "state/edge/upper/var", "state/edge/upper/var/lib",
+                         "state/edge/upper/var/lib/pacman", "state/edge/upper/var/lib/pacman/local" };
+    for (size_t i = 0; i < sizeof db / sizeof db[0]; i++) {
+        mkdir(D(db[i]), 0755);
+    }
+    put("state/edge/upper/var/lib/pacman/local/ALPM_DB_VERSION", "9\n");
+    put("state/edge/upper/var/lib/pacman/local/glibc-2.40+r16-1", "");
+    installed_in("edge", "microsoft-edge-stable-bin", "155.0.4283.62-1", 629145600);
+    installed_in("edge", "zlib-ng", "2.2.2-1", 204800);
+    installed_in("edge", "gtk3", "1:3.24.43-4", 50331648);
+    installed_in("edge", "libxss", "1.2.4-1", 37500);
+    installed_in("edge", "nss", "3.105-1", 7340032);
+    installed_in("edge", "libcups", "2:2.4.11-1", 1048576);
+    installed_in("edge", "xdg-utils", "1.2.1-1", 300000);
+    installed_in("edge", "at-spi2-core", "2.54.0-2", 4194304);
+    put("conf/plain.conf", "package=\"sl\"\nextras=\"\"\ncommand=\"/usr/bin/sl\"\n");
+    run("containers: what each build installed, in all; edge's packages by name, their versions and sizes",
+        (const int[]){ '\t', END });
+    assert(on_screen("8 packages, 660.5 MiB  built 2026-10-20 10:02:06 (previous kept)"));
+    assert(on_screen("Its build installed 8 packages, 660.5 MiB; the rest is the host's"));
+    assert(on_screen(columns("Package", "Version", "Size")));
+    assert(on_screen(columns("at-spi2-core", "2.54.0-2", "4.0 MiB")) && on_screen(columns("libxss", "1.2.4-1", "36.6 KiB")));
+    assert(on_screen(columns("microsoft-edge-stable-bin", "155.0.4283.62-1", "600.0 MiB")));
+    assert(on_screen(columns("gtk3", "1:3.24.43-4", "48.0 MiB")) && on_screen(columns("libcups", "2:2.4.11-1", "1.0 MiB")));
+    assert(on_screen("lines 1-17 of 20   PgUp/PgDn: scroll") && !on_screen("zlib-ng") && !on_screen("glibc"));
+    struct click wheel[] = { { "Its build installed", 0, 0, 1 } };
+    clicks = wheel;
+    run("containers: PgDn scrolls the details to the last package, the wheel back; plain: not built, all fits, "
+        "PgUp moves the selection",
+        (const int[]){ '\t', K_PGDN, SNAP, CLICK(0), SNAP, K_DOWN, SNAP, K_PGUP, END });
+    assert(snapped("lines 4-20 of 20") && snapped(columns("zlib-ng", "2.2.2-1", "200.0 KiB")));
+    assert(snapped(columns("nss", "3.105-1", "7.0 MiB")) && snapped(columns("xdg-utils", "1.2.1-1", "293.0 KiB")));
+    assert(snapped("lines 1-17 of 20"));
+    assert(snapped("Details: plain") && snapped("Not built yet: no build has installed anything"));
+    snprintf(script_text, sizeof script_text, "%-12s %-8s %8s %7s %22s built never", "plain", "closed", "", "", "");
+    assert(snapped(script_text) && sel[CONTAINERS] == 0 && on_screen("Details: edge"));
+    unlink(D("conf/plain.conf"));
+
     run("new: from the edge preset, saved as it is: there is an edge already",
         (const int[]){ '\t', 'n', '\n', '\n', K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN,
                        K_DOWN, '\n', SNAP, END });
@@ -374,6 +439,9 @@ int main(int argc, char **argv)
     run("edge2: its directory removed", (const int[]){ '\t', K_DOWN, '\n', K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN,
                                                        K_DOWN, K_DOWN, K_DEL, K_DOWN, '\n', END });
     assert(has("conf/edge2.conf", "directories=\"\""));
+    /* Built, with nothing in its upper's pacman database. */
+    assert(on_screen("Details: edge2") && on_screen("Its build installed nothing: all its packages are the host's"));
+    assert(on_screen("0 packages, 0 B"));
 
     unlink(D("calls"));
     run("edge2 removed (its home kept)", (const int[]){ '\t', K_DOWN, 'd', 'y', 'n', WAIT, WAIT, END });

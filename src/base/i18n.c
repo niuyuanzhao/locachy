@@ -36,6 +36,12 @@ void base_language_reload(void)
         const char *dir = getenv("LOCACHY_LOCALE_DIR");
         bindtextdomain(I18N_DOMAIN, dir && dir[0] ? dir : LOCALE_DIR);
         bind_textdomain_codeset(I18N_DOMAIN, "UTF-8");
+        /* Other libraries' catalogs (PAM's prompts and messages) come in
+         * LC_CTYPE's character set: UTF-8, as everything is drawn here; in
+         * the C locale's ASCII every Chinese character is a question mark. */
+        if (!setlocale(LC_CTYPE, "C.UTF-8")) {
+            say("i18n: no C.UTF-8 locale; other libraries' translations may lose characters");
+        }
         ready = 1;
     }
     language[0] = '\0';

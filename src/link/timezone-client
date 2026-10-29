@@ -3,22 +3,42 @@
 # "Automatic"; choosing a zone there removes it): asked of ipinfo.io, which
 # tells it from the address the network has, each time the network's way out
 # changes, and made /etc/localtime. Programs started afterwards (containers
-# too) use it; the bars follow it at once.
+# too) use it; the bars follow it at once. While full-system Tor carries the
+# network, nothing is asked (through Tor ipinfo.io would see its exit, and
+# nothing goes around it) and the zone stays as it is; settings says why.
+# Under Clash it is asked in either mode: clash-client sends ipinfo.io direct.
 set -u
 
-NS=locachy-net
-ZONES=/usr/share/zoneinfo
+NS=${LOCACHY_TIMEZONE_NETNS:-locachy-net}
+RC=${LOCACHY_TIMEZONE_RC:-/etc/locachy/rc.conf}
+ZONES=${LOCACHY_TIMEZONE_ZONES:-/usr/share/zoneinfo}
+LOCALTIME=${LOCACHY_TIMEZONE_LOCALTIME:-/etc/localtime}
+
+# Full-system Tor is on (service_tor in rc.conf): tor-enforce sends everything
+# through it.
+tor_on() {
+    grep -qE '^[[:space:]]*service_tor=' "$RC" 2>/dev/null
+}
+
+# last: the route the zone was asked through, or "tor" while Tor kept it
+# (when Tor goes, it is asked again).
 last=
 while :; do
-    route=$(ip netns exec "$NS" ip route show default 2>/dev/null | head -n 1) || route=
-    if [ -n "$route" ] && [ "$route" != "$last" ]; then
-        zone=$(ip netns exec "$NS" curl -fsS --max-time 10 https://ipinfo.io/timezone 2>/dev/null) || zone=
-        if [[ "$zone" =~ ^[A-Za-z]+(/[A-Za-z0-9_+-]+)*$ ]] && [ -f "$ZONES/$zone" ]; then
-            if [ "$(readlink /etc/localtime 2>/dev/null)" != "$ZONES/$zone" ]; then
-                ln -sfn "$ZONES/$zone" /etc/localtime.new && mv -fT /etc/localtime.new /etc/localtime
-                echo "timezone-client: $zone"
+    if tor_on; then
+        [ "$last" = tor ] || echo "timezone-client: Tor carries the network: the zone is kept"
+        last=tor
+    else
+        route=$(ip netns exec "$NS" ip route show default 2>/dev/null | head -n 1) || route=
+        if [ -n "$route" ] && [ "$route" != "$last" ]; then
+            zone=$(ip netns exec "$NS" curl -fsS --max-time 10 https://ipinfo.io/timezone 2>/dev/null) || zone=
+            # Not when Tor came while it was asked: the answer may be its exit's.
+            if [[ "$zone" =~ ^[A-Za-z]+(/[A-Za-z0-9_+-]+)*$ ]] && [ -f "$ZONES/$zone" ] && ! tor_on; then
+                if [ "$(readlink "$LOCALTIME" 2>/dev/null)" != "$ZONES/$zone" ]; then
+                    ln -sfn "$ZONES/$zone" "$LOCALTIME.new" && mv -fT "$LOCALTIME.new" "$LOCALTIME"
+                    echo "timezone-client: $zone"
+                fi
+                last=$route
             fi
-            last=$route
         fi
     fi
     sleep 30

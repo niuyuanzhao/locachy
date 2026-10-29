@@ -1,12 +1,12 @@
 /*
  * view [PATH]: documents on the screen, as Okular shows them (PDF, XPS,
- * EPUB, MOBI, FictionBook, Markdown, text, HTML, comic books, DjVu,
- * PostScript, DVI, fax and images). The documents are read by view-render
- * (view-proto.h), as the user in a sandbox; this program is the screen, the
- * keys, the pointer and the clipboard. It never waits for a page: one
- * request is out at a time, the pages on the screen first, then those next
- * to them, then the sidebar's thumbnails, and what is no longer wanted is
- * cancelled (SIGUSR1). Without PATH, or on Ctrl+O, a file is chosen as in
+ * EPUB, MOBI, FictionBook, Markdown, text, HTML, OpenDocument text, comic
+ * books, DjVu, PostScript, DVI, fax and images). The documents are read
+ * by view-render (view-proto.h), as the user in a sandbox; this program is
+ * the screen, the keys, the pointer and the clipboard. It never waits for a
+ * page: one request is out at a time, the pages on the screen first, then
+ * those next to them, then the sidebar's thumbnails, and what is no longer
+ * wanted is cancelled (SIGUSR1). Without PATH, or on Ctrl+O, a file is chosen as in
  * home's file manager.
  *
  * Okular's keys (its part.cpp, pageview.cpp and KDE's standard shortcuts):
@@ -6042,8 +6042,7 @@ static void handle(int key)
     int mods = keys_modifiers();
     int typing = typing_line();
     ime_set_focus(typing);
-    if (typing && ime_mode() == IME_MODE_CN &&
-        ((key == '.' && mods == KEYS_CTRL) || (key == ' ' && mods == KEYS_SHIFT))) {
+    if (typing && ime_mode() == IME_MODE_CN && ime_width_key(key, mods)) {
         const char *notice = ime_toggle_width();
         if (notice) toast(0, "%s", notice);
         ui.dirty = 1; return;

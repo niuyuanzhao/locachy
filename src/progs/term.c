@@ -1297,8 +1297,7 @@ int main(int argc, char **argv)
                 show_toast(ime_notice);
             }
             say("term: ime mode %s", ime_mode_label());
-        } else if (ime_mode() == IME_MODE_CN && ((key == '.' && keys_modifiers() == KEYS_CTRL) ||
-                                                 (key == ' ' && keys_modifiers() == KEYS_SHIFT))) {
+        } else if (ime_mode() == IME_MODE_CN && ime_width_key(key, keys_modifiers())) {
             const char *msg = ime_toggle_width(); /* Chinese mode's width */
             if (msg) {
                 show_toast(msg);

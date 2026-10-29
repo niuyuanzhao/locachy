@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-28 21:45-0400\n"
+"POT-Creation-Date: 2026-10-29 08:05-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -66,7 +66,7 @@ msgstr ""
 msgid "Bat --"
 msgstr ""
 
-#: base/status.c progs/installer.c progs/packages.c
+#: base/status.c progs/installer.c progs/packages.c progs/settings.c
 msgid "Network"
 msgstr ""
 
@@ -3637,8 +3637,10 @@ msgstr[1] ""
 
 #: progs/files.c
 #, c-format
-msgid "%d items (%d hidden) | %s free"
-msgstr ""
+msgid "%d item (%d hidden) | %s free"
+msgid_plural "%d items (%d hidden) | %s free"
+msgstr[0] ""
+msgstr[1] ""
 
 #: progs/files.c
 #, c-format
@@ -3760,6 +3762,12 @@ msgstr ""
 msgid "n: new folder"
 msgstr ""
 
+#. TRANSLATORS: q is the key; keep it.
+#. TRANSLATORS: q is the q key; keep "q: ".
+#: progs/files.c progs/packages.c
+msgid "q: back"
+msgstr ""
+
 #. TRANSLATORS: i is the key; keep it.
 #: progs/files.c
 msgid "i: props"
@@ -3778,12 +3786,6 @@ msgstr ""
 #. TRANSLATORS: e is the key; keep it.
 #: progs/files.c
 msgid "e: eject"
-msgstr ""
-
-#. TRANSLATORS: q is the key; keep it.
-#. TRANSLATORS: q is the q key; keep "q: ".
-#: progs/files.c progs/packages.c
-msgid "q: back"
 msgstr ""
 
 #: progs/files.c
@@ -4903,6 +4905,11 @@ msgstr ""
 msgid "opening %s..."
 msgstr ""
 
+#: progs/home.c
+#, c-format
+msgid "%s is open on %s."
+msgstr ""
+
 #: progs/installer.c
 msgid "(no model name)"
 msgstr ""
@@ -5897,11 +5904,91 @@ msgid "never"
 msgstr ""
 
 #: progs/packages.c
+#, c-format
+msgid "%d package, %s"
+msgid_plural "%d packages, %s"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/packages.c
 msgid " (previous kept)"
 msgstr ""
 
 #: progs/packages.c progs/settings.c
 msgid "not installed"
+msgstr ""
+
+#: progs/packages.c
+msgid "extras"
+msgstr ""
+
+#: progs/packages.c
+msgid "package"
+msgstr ""
+
+#: progs/packages.c
+msgid "arguments"
+msgstr ""
+
+#: progs/packages.c
+msgid "command"
+msgstr ""
+
+#: progs/packages.c
+msgctxt "detail"
+msgid "network"
+msgstr ""
+
+#: progs/packages.c
+msgid "yes (locachy-net)"
+msgstr ""
+
+#: progs/packages.c
+msgctxt "detail"
+msgid "camera"
+msgstr ""
+
+#: progs/packages.c
+msgid "yes (the cameras, as they come and go)"
+msgstr ""
+
+#: progs/packages.c
+msgid "directories"
+msgstr ""
+
+#: progs/packages.c
+msgid "built"
+msgstr ""
+
+#: progs/packages.c
+msgid "state"
+msgstr ""
+
+#: progs/packages.c
+msgid "kept (r rolls back to it)"
+msgstr ""
+
+#: progs/packages.c
+msgid "previous build"
+msgstr ""
+
+#: progs/packages.c
+msgid "Not built yet: no build has installed anything"
+msgstr ""
+
+#: progs/packages.c
+msgid "Its build installed nothing: all its packages are the host's"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "Its build installed %d package, %s; the rest is the host's"
+msgid_plural "Its build installed %d packages, %s; the rest is the host's"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/packages.c
+msgid "Package"
 msgstr ""
 
 #: progs/packages.c
@@ -5973,58 +6060,9 @@ msgstr ""
 msgid "Details: %s (%s/%s.conf)   l: output"
 msgstr ""
 
+#. TRANSLATORS: PgUp/PgDn are key names; keep them.
 #: progs/packages.c
-msgid "extras"
-msgstr ""
-
-#: progs/packages.c
-msgid "package"
-msgstr ""
-
-#: progs/packages.c
-msgid "arguments"
-msgstr ""
-
-#: progs/packages.c
-msgid "command"
-msgstr ""
-
-#: progs/packages.c
-msgctxt "detail"
-msgid "network"
-msgstr ""
-
-#: progs/packages.c
-msgid "yes (locachy-net)"
-msgstr ""
-
-#: progs/packages.c
-msgctxt "detail"
-msgid "camera"
-msgstr ""
-
-#: progs/packages.c
-msgid "yes (the cameras, as they come and go)"
-msgstr ""
-
-#: progs/packages.c
-msgid "directories"
-msgstr ""
-
-#: progs/packages.c
-msgid "built"
-msgstr ""
-
-#: progs/packages.c
-msgid "state"
-msgstr ""
-
-#: progs/packages.c
-msgid "kept (r rolls back to it)"
-msgstr ""
-
-#: progs/packages.c
-msgid "previous build"
+msgid "PgUp/PgDn: scroll"
 msgstr ""
 
 #: progs/packages.c
@@ -6134,10 +6172,6 @@ msgstr ""
 
 #: progs/packages.c
 msgid "Extras"
-msgstr ""
-
-#: progs/packages.c
-msgid "Package"
 msgstr ""
 
 #: progs/packages.c
@@ -7218,6 +7252,13 @@ msgstr ""
 msgid "(a file of its own)"
 msgstr ""
 
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid ""
+"Automatic paused: Tor carries the network, so ipinfo.io is not asked. Enter: "
+"choose a zone."
+msgstr ""
+
 #: progs/settings.c
 msgid "Time zone: automatic, from where the network is (asked of ipinfo.io)."
 msgstr ""
@@ -7230,6 +7271,14 @@ msgstr ""
 #: progs/settings.c
 #, c-format
 msgid "Time zone %s: programs started from now on use it."
+msgstr ""
+
+#: progs/settings.c
+msgid "Automatic: paused while Tor carries the network"
+msgstr ""
+
+#: progs/settings.c
+msgid "Automatic: from where the network is"
 msgstr ""
 
 #: progs/settings.c
@@ -7249,10 +7298,6 @@ msgstr ""
 
 #: progs/settings.c
 msgid "No time zone has that in its name."
-msgstr ""
-
-#: progs/settings.c
-msgid "Automatic: from where the network is"
 msgstr ""
 
 #: progs/settings.c
@@ -7490,10 +7535,6 @@ msgid "Bluetooth"
 msgstr ""
 
 #: progs/settings.c
-msgid "Wi-Fi & Internet"
-msgstr ""
-
-#: progs/settings.c
 msgid "No saved network yet."
 msgstr ""
 
@@ -7544,6 +7585,11 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Date & Time"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Tor carries the network: ipinfo.io is not asked. Enter: choose a zone."
 msgstr ""
 
 #: progs/settings.c
@@ -7882,6 +7928,12 @@ msgstr ""
 
 #: progs/settings.c
 msgid "  (foot is not installed)"
+msgstr ""
+
+#. TRANSLATORS: %s is a time zone (Europe/Berlin).
+#: progs/settings.c
+#, c-format
+msgid "Automatic paused (Tor): %.60s"
 msgstr ""
 
 #: progs/settings.c

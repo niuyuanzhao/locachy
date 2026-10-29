@@ -19,6 +19,11 @@
 #      there minimizes the focused window, another brings it back; swaybg
 #      draws the wallpaper under the windows
 #      (screenshots: $out/shot-OUTPUT.ppm, clicks: a virtual pointer)
+#   5. locachy-seat, as process 1 starts it (a stand-in at its control
+#      socket), starts labwc and swaybg with rc.conf's wallpaper: on every
+#      screen, changed while released (as settings and files write it) at
+#      the next take, started again if it exited, ended with no wallpaper;
+#      the touchpad's swipes (labwc-control --action) reach process 1
 set -u
 src=$(cd "$(dirname "$0")/.." && pwd)
 out=/tmp/locachy-labwc-test
@@ -47,6 +52,7 @@ $cc -DCONFIG_FREETYPE -DCONFIG_NETWORKMANAGER -DCONFIG_IME -o locachy-bar "$src/
     xdg-shell-protocol.c wlr-foreign-toplevel-management-unstable-v1-protocol.c \
     fractional-scale-v1-protocol.c viewporter-protocol.c relative-pointer-unstable-v1-protocol.c $libs -lrime \
     -lxkbcommon -lwayland-cursor || exit 1
+$cc -DCONFIG_FREETYPE -DCONFIG_NETWORKMANAGER -o locachy-seat "$src/progs/seat.c" $base $libs || exit 1
 $cc -o test-window "$src/tools/test-window.c" xdg-shell-protocol.c -lwayland-client || exit 1
 $cc -o test-ime-client "$src/tools/test-ime-client.c" xdg-shell-protocol.c -lwayland-client -lxkbcommon || exit 1
 $cc -o wayland-check "$src/tools/wayland-check.c" -lwayland-client || exit 1
@@ -84,6 +90,51 @@ xs = [x for x in range(w) if at(x, H // 2) in (ON, OFF)]
 button = "BUTTON %d %s" % ((xs[0] + 20), "on" if at(xs[0], H // 2) == ON else "off") if xs else "no window button"
 print("bar %s, text %d/%d, %s" % ("yes" if bar and below else "no", top, bottom, button))
 sys.exit(0 if bar and below and top > 200 and bottom > 200 else 1)
+EOF
+# p1.py SEAT ARG...: process 1 for locachy-seat, its control socket at fd 3:
+# "take" (with a descriptor, as the screen comes) and "release" from standard
+# input go to it, "master" is answered "mastered", what it sends is printed
+# (fields separated by spaces).
+cat >p1.py <<'EOF'
+import os, selectors, socket, sys
+a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+os.environ["LOCACHY_CONTROL"] = "3"
+if os.fork() == 0:
+    os.dup2(b.fileno(), 3)
+    os.execv(sys.argv[1], sys.argv[1:])
+b.close()
+null = os.open("/dev/null", os.O_RDONLY)
+sel = selectors.DefaultSelector()
+sel.register(a, selectors.EVENT_READ)
+sel.register(sys.stdin, selectors.EVENT_READ)
+while True:
+    for key, _ in sel.select():
+        if key.fileobj is a:
+            msg = a.recv(4096)
+            if not msg:
+                sys.exit(0)
+            print(msg.decode().replace("\0", " "), flush=True)
+            if msg == b"master":
+                a.send(b"mastered")
+        else:
+            cmd = sys.stdin.readline().strip()
+            if not cmd:
+                sys.exit(0)
+            if cmd == "take":
+                socket.send_fds(a, [b"take"], [null])
+            else:
+                a.send(cmd.encode())
+EOF
+# Two wallpapers, PNG files of one colour each.
+python3 - <<'EOF'
+import struct, zlib
+def png(path, rgb):
+    raw = b"".join(b"\0" + bytes(rgb) * 64 for _ in range(48))
+    chunk = lambda t, d: struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d))
+    open(path, "wb").write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 64, 48, 8, 2, 0, 0, 0)) +
+                           chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+png("wall-a.png", (0x30, 0xa0, 0x50))
+png("wall-b.png", (0x20, 0x40, 0xc0))
 EOF
 modprobe uinput 2>/dev/null || true
 
@@ -247,6 +298,53 @@ kill $bar $client $control 2>/dev/null
 sleep 0.3
 check "labwc-control removed its sockets" "[ ! -e /run/user/0/locachy-0 ] && [ ! -e /run/user/0/locachy-control.sock ]"
 kill $labwc 2>/dev/null
+wait $labwc 2>/dev/null
+
+echo "== 5. the wallpaper (locachy-seat)"
+# locachy-seat starts labwc, labwc-control (this one) and swaybg itself;
+# udevadm, settings --apply, the bar and the gestures are left out: they
+# would act on the real devices.
+mount -t tmpfs tmpfs /run/udev && : >/run/udev/control
+mount --bind /usr/bin/true /usr/bin/udevadm
+[ ! -e /usr/local/bin/settings ] || mount --bind /usr/bin/true /usr/local/bin/settings
+mount --bind $out/labwc-control /usr/local/lib/locachy/labwc-control
+[ ! -e /usr/local/bin/locachy-bar ] || mount --bind /dev/null /usr/local/bin/locachy-bar
+[ ! -e /usr/local/lib/locachy/gestures ] || mount --bind /dev/null /usr/local/lib/locachy/gestures
+# As settings and files write it.
+wallpaper() { grep -v "^wallpaper=" /etc/locachy/rc.conf >/etc/locachy/rc.conf.tmp
+    [ -z "$1" ] || echo "wallpaper=\"$1\"" >>/etc/locachy/rc.conf.tmp
+    mv /etc/locachy/rc.conf.tmp /etc/locachy/rc.conf; }
+said() { for i in $(seq 100); do [ "$(grep -cx "$1" $out/p1.out)" -ge "$2" ] && return 0; sleep 0.2; done; return 1; }
+shows() { for i in $(seq 10); do $out/test-screenshot $out/wall 2>>$out/client.log
+    python3 $out/pixel.py $out/wall-HEADLESS-1.ppm 10 700 $1 2>>$out/pixel.log &&
+    python3 $out/pixel.py $out/wall-HEADLESS-2.ppm 10 700 $1 2>>$out/pixel.log && return 0; sleep 0.5; done
+    return 1; }
+wallpaper $out/wall-a.png
+mkfifo $out/p1.in
+WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_HEADLESS_OUTPUTS=2 \
+    python3 $out/p1.py $out/locachy-seat /usr/bin/labwc <$out/p1.in >$out/p1.out 2>$out/seat.log &
+exec 8>$out/p1.in
+echo take >&8
+said display-ready 1 && echo release >&8 # as process 1 does: home stays on the screen
+check "display-ready, then released" "said released 1"
+check "rc.conf wallpaper is drawn by its swaybg on both screens" "shows 30a050"
+wallpaper $out/wall-b.png
+echo take >&8
+check "one chosen while released is drawn at the next take, on both screens" "said master 2 && shows 2040c0"
+# As link/libinput-gestures.conf runs it for three-finger swipes.
+for a in home lock next prev; do $out/labwc-control --action $a >>$out/client.log 2>&1 || echo "action $a: $?" >>$out/client.log; done
+check "swipes: labwc-control --action home, lock, next, prev reach process 1" \
+    "said home 1 && said lock 1 && said \"switch next\" 1 && said \"switch prev\" 1"
+pkill -f "^swaybg -m fill"
+sleep 0.3
+echo release >&8; said released 2; echo take >&8
+check "a swaybg that exited is started again at the next take" "said master 3 && shows 2040c0"
+wallpaper ""
+echo release >&8; said released 3; echo take >&8
+said master 4; sleep 0.5
+check "no wallpaper: its swaybg is ended" "! pgrep -f \"^swaybg -m fill\" >/dev/null"
+exec 8>&-
+pkill -x labwc
 eval "exec ${KEYS[1]}>&-"
 wait 2>/dev/null
 [ $fail = 0 ] && echo "ALL PASSED" || echo "SOME FAILED"

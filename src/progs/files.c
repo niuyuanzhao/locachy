@@ -2670,7 +2670,8 @@ static void format_status_line(struct pane *p, char *out, size_t size)
         human((long long)vfs.f_bavail * (long long)vfs.f_frsize, free_str, sizeof free_str);
     }
     if (p->nhidden > 0 && free_str[0]) {
-        snprintf(right, sizeof right, _("%d items (%d hidden) | %s free"), p->nlist, p->nhidden, free_str);
+        snprintf(right, sizeof right, P_("%d item (%d hidden) | %s free", "%d items (%d hidden) | %s free", p->nlist),
+                 p->nlist, p->nhidden, free_str);
     } else if (free_str[0]) {
         snprintf(right, sizeof right, P_("%d item | %s free", "%d items | %s free", p->nlist), p->nlist, free_str);
     } else {
@@ -2690,6 +2691,12 @@ static void format_status_line(struct pane *p, char *out, size_t size)
     } else {
         fit(out, size, left[0] ? left : right, avail);
     }
+}
+
+/* A button that leaves keep columns free at its right, or none (col). */
+static int button_before(int col, int row, const char *label, int id, int keep)
+{
+    return col + ui_cells(label) + 2 + keep > screen_cols() ? col : ui_button(col, row, label, id);
 }
 
 static void draw(void)
@@ -2792,22 +2799,25 @@ static void draw(void)
         /* TRANSLATORS: u is the key; keep it. */
         c = ui_button(c, b2, _("u: undo"), HIT_KEY + 'u');
     }
-    /* TRANSLATORS: / is the key; keep it. */
-    c = ui_button(1, b1, _("/: filter"), HIT_KEY + '/');
-    /* TRANSLATORS: . is the key; keep it. */
-    c = ui_button(c, b1, _(".: hidden"), HIT_KEY + '.');
-    /* TRANSLATORS: s is the key; keep it. */
-    c = ui_button(c, b1, _("s: sort"), HIT_KEY + 's');
-    /* TRANSLATORS: i is the key; keep it. */
-    c = ui_button(c, b1, _("i: props"), HIT_KEY + 'i');
-    /* TRANSLATORS: F3 is the key; keep it. */
-    c = ui_button(c, b1, _("F3: split"), HIT_KEY + K_F1 + 2);
-    /* TRANSLATORS: w is the key; keep it. */
-    c = ui_button(c, b1, _("w: wallpaper"), HIT_KEY + 'w');
-    /* TRANSLATORS: e is the key; keep it. */
-    c = ui_button(c, b1, _("e: eject"), HIT_KEY + 'e');
+    /* The way back is never the button left out: the others leave it room. */
     /* TRANSLATORS: q is the key; keep it. */
-    c = ui_button(c, b1, _("q: back"), HIT_KEY + 'q');
+    const char *back = _("q: back");
+    int keep = ui_cells(back) + 3;
+    /* TRANSLATORS: / is the key; keep it. */
+    c = button_before(1, b1, _("/: filter"), HIT_KEY + '/', keep);
+    /* TRANSLATORS: . is the key; keep it. */
+    c = button_before(c, b1, _(".: hidden"), HIT_KEY + '.', keep);
+    /* TRANSLATORS: s is the key; keep it. */
+    c = button_before(c, b1, _("s: sort"), HIT_KEY + 's', keep);
+    /* TRANSLATORS: i is the key; keep it. */
+    c = button_before(c, b1, _("i: props"), HIT_KEY + 'i', keep);
+    /* TRANSLATORS: F3 is the key; keep it. */
+    c = button_before(c, b1, _("F3: split"), HIT_KEY + K_F1 + 2, keep);
+    /* TRANSLATORS: w is the key; keep it. */
+    c = button_before(c, b1, _("w: wallpaper"), HIT_KEY + 'w', keep);
+    /* TRANSLATORS: e is the key; keep it. */
+    c = button_before(c, b1, _("e: eject"), HIT_KEY + 'e', keep);
+    c = ui_button(c, b1, back, HIT_KEY + 'q');
     /* TRANSLATORS: Space, Tab and Ctrl+1/2/3 are keys; keep them. */
     if (c + 10 < cols) {
         screen_text(c, b1, _("Space: mark  Tab: panes  Ctrl+1/2/3: view"), FG, BG);
@@ -2833,7 +2843,7 @@ static void insert_text(char *text, size_t size, size_t *cur, int *all, const ch
         if (!bytes || i + bytes > len) break;
         int ok = b >= 32 && b != 127;
         for (size_t j = 1; j < bytes; j++) ok &= ((unsigned char)s[i + j] & 0xC0) == 0x80;
-        if (ok && n + k + bytes < size) {
+        if (ok && n + k + bytes < size && k + bytes <= sizeof clean) {
             memcpy(clean + k, s + i, bytes);
             k += bytes;
         }
