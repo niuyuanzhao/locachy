@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "libpaper",
+  "package": "libpaper",
+  "provider": "arch-gitlab",
+  "repository": "https://gitlab.archlinux.org/archlinux/packaging/packages/libpaper.git",
+  "api": "https://gitlab.archlinux.org/api/v4/projects/archlinux%2Fpackaging%2Fpackages%2Flibpaper",
+  "patch_revision": 1,
+  "adapter": "adapter.sh",
+  "inputs": ["lifecycle.patch"],
+  "source_directory": "libpaper",
+  "gate": "libpaper-lifecycle-v1"
+}

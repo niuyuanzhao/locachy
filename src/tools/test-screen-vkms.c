@@ -26,10 +26,18 @@ void say(const char *fmt, ...)
     fflush(stdout);
     va_end(ap);
 }
+static char resized_output[32];
+static int resized_width, resized_height;
+static double resized_scale;
 int monitor_conf(const char *name, struct monitor_conf *out)
 {
-    (void)name;
     memset(out, 0, sizeof *out);
+    if (resized_output[0] && strcmp(name, resized_output) == 0) {
+        out->width = resized_width;
+        out->height = resized_height;
+        out->scale = resized_scale;
+        return 1;
+    }
     return 0; /* no MONITORS_CONF in the VM: scale 1, the runner's /font.psf */
 }
 int monitor_internal(const char *name) { (void)name; return 0; }
@@ -61,7 +69,7 @@ static void put(const char *path, const char *value)
 static void configure(void)
 {
     directory("/config/vkms/mirror");
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 3; i++) {
         char p[256], target[256];
         snprintf(p, sizeof p, "/config/vkms/mirror/crtcs/c%d", i);
         directory(p);
@@ -336,6 +344,43 @@ static void leases(int events)
     verify_outputs(2);
     say("PASS two-output lease: child modeset and cursor, revoke removes visibility, master reacquired");
 }
+/* One long-lived program follows its new lease's native mode, rather than
+ * fitting its old screen-sized canvas into a different output. */
+static void resize_leases(void)
+{
+    uint32_t id;
+    int lease = screen_lend_outputs((const char *[]){ outputs[1].name }, 1, &id);
+    CHECK(lease >= 0 && id);
+    pid_t child = fork();
+    CHECK(child >= 0);
+    if (!child) {
+        CHECK(close(card) == 0);
+        card = -1;
+        clear_outputs(-1);
+        CHECK(screen_take(lease) && noutputs == 1);
+        uint32_t old_width = width, old_height = height;
+        CHECK(width == outputs[0].mode.hdisplay && height == outputs[0].mode.vdisplay);
+        snprintf(resized_output, sizeof resized_output, "%s", outputs[0].name);
+        resized_width = 1280;
+        resized_height = 720;
+        CHECK(old_width != 1280 || old_height != 720);
+        int again = dup(card);
+        CHECK(again >= 0 && screen_take(again));
+        CHECK(width == 1280 && height == 720);
+        CHECK(screen_cols() == 160 && screen_rows() == 44);
+        pattern(109);
+        verify_outputs(1);
+        CHECK(close(card) == 0);
+        card = -1;
+        _exit(0);
+    }
+    close(lease);
+    int status;
+    CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    CHECK(screen_take_back(id) == 0);
+    verify_outputs(2);
+    say("PASS leased canvas resize: native mode, new rows/columns and redrawn scanout");
+}
 /* Two programs side by side (MON-03): a lease of each output at once; one
  * taken back leaves the other lent, and nothing rescans meanwhile. */
 static void side_by_side(void)
@@ -357,6 +402,58 @@ static void side_by_side(void)
     close(lb);
     verify_outputs(2);
     say("PASS side-by-side leases: one output each at once, taken back one at a time");
+}
+static void three_programs(void)
+{
+    CHECK(noutputs == 3);
+    int leases[3], ready[3][2], done[3][2];
+    uint32_t ids[3];
+    pid_t children[3];
+    for (int i = 0; i < 3; i++) {
+        leases[i] = screen_lend_outputs((const char *[]){ outputs[i].name }, 1, &ids[i]);
+        CHECK(leases[i] >= 0 && ids[i]);
+        CHECK(pipe(ready[i]) == 0 && pipe(done[i]) == 0);
+    }
+    for (int i = 0; i < 3; i++) {
+        children[i] = fork();
+        CHECK(children[i] >= 0);
+        if (!children[i]) {
+            close(card);
+            card = -1;
+            clear_outputs(-1);
+            for (int j = 0; j < 3; j++) if (j != i) close(leases[j]);
+            CHECK(screen_take(leases[i]) && noutputs == 1);
+            CHECK(width == outputs[0].mode.hdisplay && height == outputs[0].mode.vdisplay);
+            pattern((uint32_t)(31 + i * 71));
+            verify_outputs(1);
+            CHECK(write(ready[i][1], "R", 1) == 1);
+            char c;
+            CHECK(read(done[i][0], &c, 1) == 1);
+            struct drm_mode_card_res res = { 0 };
+            CHECK(ioctl(card, DRM_IOCTL_MODE_GETRESOURCES, &res) == 0);
+            CHECK(res.count_connectors == 0);
+            screen_release();
+            _exit(0);
+        }
+    }
+    for (int i = 0; i < 3; i++) {
+        close(leases[i]); close(ready[i][1]); close(done[i][0]);
+        struct pollfd p = { .fd = ready[i][0], .events = POLLIN };
+        CHECK(poll(&p, 1, 4000) == 1);
+        char c;
+        CHECK(read(ready[i][0], &c, 1) == 1 && c == 'R');
+    }
+    for (int i = 0; i < 3; i++) {
+        CHECK(screen_take_back(ids[i]) == 0);
+        for (int j = i + 1; j < 3; j++) CHECK(outputs[j].lessee == ids[j]);
+        CHECK(write(done[i][1], "D", 1) == 1);
+        int status;
+        CHECK(waitpid(children[i], &status, 0) == children[i] && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        close(ready[i][0]); close(done[i][1]);
+    }
+    CHECK(!lent);
+    verify_outputs(3);
+    say("PASS three-output programs: three simultaneous real leases, native canvases and independent revocation");
 }
 static int events_open(void)
 {
@@ -398,6 +495,8 @@ static void status(int events, int connector, const char *state, unsigned expect
     verify_outputs(expected);
     say("PASS real hotplug o%d status=%s outputs=%u", connector, state, expected);
 }
+#include "test-packages-kms.h"
+
 int main(void)
 {
     if (getpid() != 1) {
@@ -438,6 +537,8 @@ int main(void)
     alternate_mode();
     int events = events_open();
     leases(events);
+    resize_leases();
+    packages_kms();
     side_by_side();
     replay_event(events);
     uint32_t *original = shadow;
@@ -477,6 +578,10 @@ int main(void)
     CHECK(screen_refresh() == 1 && screen_output_count() == 2);
     CHECK(*(uint32_t *)outputs[0].map == 0xCC2200 && *(uint32_t *)outputs[1].map == 0x0066CC);
     CHECK(screen_extended(0) == 1);
+    put("/config/vkms/mirror/connectors/o2/status", "1");
+    CHECK(screen_refresh() == 1 && noutputs == 3);
+    pattern(19);
+    three_programs();
     screen_release();
     say("PASS screen-vkms: real KMS, CRCs, cursor planes, lease, master, uevents, disconnect/reconnect, extended outputs");
     sync();

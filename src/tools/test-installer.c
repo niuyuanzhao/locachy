@@ -244,6 +244,16 @@ static const char describe[] =
     " {\"path\": \"/dev/sdc\", \"size\": 8589934592, \"model\": \"small\", \"tran\": \"usb\", \"removable\": true,"
     " \"in_use\": \"\", \"children\": []}]}\n";
 
+/* The description with the TPM, the firmware and fwupd's report as tpm_json
+ * has them (in place of its "tpm"). */
+static void describe_with(const char *tpm_json)
+{
+    static char text[sizeof describe + 1024];
+    const char *a = strstr(describe, "\"tpm\": "), *b = strstr(describe, "\"source\": ");
+    snprintf(text, sizeof text, "%.*s%s %s", (int)(a - describe), describe, tpm_json, b);
+    write_file(D("describe.json"), text, 0644);
+}
+
 /* locachy-install: the description; else how it was called, its secret
  * files (content and mode), and an installation's progress lines. */
 static const char fake_install[] =
@@ -495,6 +505,34 @@ int main(int argc, char **argv)
     const char *log = slurp(D("run/install.log"));
     assert(strstr(log, "Continue with: locachy-install --resume") && strstr(log, "Installation completed."));
     unlink(D("keys-wanted"));
+
+    /* The firmware in setup mode: Secure Boot with this computer's own keys,
+     * on unless turned off, Microsoft's too when asked; fwupd's HSI and the
+     * checks it found failing. */
+    describe_with("\"tpm\": {\"usable\": true, \"advice\": \"TPM 2.0, the firmware in setup mode\", \"version\": 2,"
+                  " \"setup_mode\": true}, \"host_security\": {\"id\": \"HSI:0 (v2.0.16)\", \"checks\":"
+                  " [\"\u2714 TPM v2.0: Found\", \"\u2718 Secure Boot: Disabled\"]},");
+    k('\n'); k(K_EOL); k('\n'); k(K_DOWN); k('\n'); k(K_EOL); k('\n');      /* to Encryption */
+    k(K_DOWN); k('\n'); type("correct horse"); k('\n'); type("correct horse"); k('\n');
+    k(SNAP);
+    k(K_DOWN); k(K_DOWN); k(K_RIGHT); k(SNAP);                               /* Microsoft's: yes */
+    k(K_EOL); k('\n');
+    k('\n'); k(21); type("boot-test"); k('\n');
+    k(K_DOWN); k(K_DOWN); k('\n'); type("Locachy123"); k('\n'); type("Locachy123"); k('\n');
+    for (int s = S_USER; s < S_SUMMARY; s++) { k(K_EOL); k('\n'); }
+    k(SNAP);
+    k(K_EOL); k('\n'); k('n');
+    run("secure boot in setup mode, fwupd's host security");
+    assert(snapped("Secure Boot with this computer's own keys") && snapped("Microsoft's keys too"));
+    assert(snapped("Host security (fwupd): HSI:0 (v2.0.16)") && snapped("\u2718 Secure Boot: Disabled"));
+    assert(!snapped("\u2714 TPM v2.0: Found"));
+    assert(snapped("this computer's own keys and Microsoft's"));
+    calls = slurp(D("calls"));
+    assert(strstr(calls, "--check ") && strstr(calls, " --secure-boot --secure-boot-microsoft"));
+    write_file(D("describe.json"), describe, 0644);
+    k('\n'); k(K_EOL); k('\n'); k(K_DOWN); k('\n'); k(K_EOL); k('\n'); k(SNAP);
+    run("no setup mode: no Secure Boot rows");
+    assert(snapped("Encrypt the disk") && !snapped("Secure Boot with this computer's own keys"));
 
     printf("PASS installer\n");
     return 0;

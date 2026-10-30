@@ -39,8 +39,16 @@ int rc_read(void (*fn)(const char *, const char *, void *), void *arg)
     return 0;
 }
 void base_tasks(char *out, size_t size) { if (size) out[0] = '\0'; }
+static char opened_output[32];
 void base_open(char *const argv[], char *out, size_t size)
 { (void)argv; opens++; snprintf(out, size, "returned"); }
+void base_open_on(const char *output, char *const argv[], char *out, size_t size)
+{
+    assert(argv && argv[0]);
+    snprintf(opened_output, sizeof opened_output, "%s", output ? output : "");
+    opens++;
+    snprintf(out, size, "shown %s", argv[0]);
+}
 void base_kill(char *const argv[]) { (void)argv; }
 void base_reboot(void) { reboots++; }
 void base_poweroff(void) { poweroffs++; }
@@ -51,11 +59,19 @@ void base_status(const char *tag, char *out, size_t size)
 int screen_open(const char *font) { (void)font; return 1; }
 int keys_open(void) { return 1; }
 static int test_cols = 80, test_rows = 25;
-static int extended_fixture, output_fixture;
+static int extended_fixture, output_fixture, output_count_fixture = 3;
+static const char *const output_names[] = { "eDP-1", "HDMI-A-1", "DP-1" };
 int screen_extended(int on) { int old=extended_fixture;extended_fixture=on;return old!=on; }
 int screen_is_extended(void) { return extended_fixture; }
 int screen_output_current(void) { return output_fixture; }
-int screen_output_count(void) { return extended_fixture ? 2 : 1; }
+int screen_output_count(void) { return extended_fixture ? output_count_fixture : 1; }
+int screen_output_get(int index, struct screen_output *out)
+{
+    if (index < 0 || index >= screen_output_count()) return -1;
+    memset(out, 0, sizeof *out);
+    snprintf(out->name, sizeof out->name, "%s", output_names[index]);
+    return 0;
+}
 int screen_output_select(int index)
 {
     if (index < 0 || index >= screen_output_count()) return -1;
@@ -246,17 +262,24 @@ int main(void)
     test_cols = 54; test_rows = 11; selected = scroll = 0;
     screen_extended(1);
     draw(0);
-    assert(output_capacity[0] == 2 && output_capacity[1] == 2 && output_first[0] == 0 && output_first[1] == 2);
-    screen_output_select(0);
-    hit_cell(HIT_ROW, &x0, &y0);
-    assert(ui_hit_at(x0, y0) == HIT_ROW);
+    assert(output_first[0] == 0 && output_first[1] == 0 && output_first[2] == 0);
+    for (int i = 0; i < 3; i++) {
+        screen_output_select(i);
+        hit_cell(HIT_ROW, &x0, &y0);
+        assert(ui_hit_at(x0, y0) == HIT_ROW);
+        mouse = (struct pointer_event){ .output=i, .col=x0+5, .row=y0, .button=BTN_LEFT, .pressed=1, .clicks=2 };
+        assert(pointer_key() == '\n' && selected == 0 && home_output == i);
+        draw(0);
+        assert(home_output == i && screen_output_current() == i);
+    }
+    selected = 3;
+    draw(0);
+    for (int i = 0; i < 3; i++) assert(output_first[i] == 2);
     screen_output_select(1);
     hit_cell(HIT_ROW + 2, &x1, &y1);
-    assert(ui_hit_at(x1, y1) == HIT_ROW + 2);
     mouse = (struct pointer_event){ .output=1, .col=x1+5, .row=y1, .button=BTN_LEFT, .pressed=1, .clicks=2 };
     assert(pointer_key() == '\n' && selected == 2 && home_output == 1);
     draw(0);
-    assert(output_first[0] == 0 && output_first[1] == 2);
     /* A menu opened on one output: a press at its cells on another closes it
      * and chooses nothing; on its own output the same press chooses. */
     hit_cell(HIT_ROW + 3, &x1, &y1);
@@ -282,8 +305,31 @@ int main(void)
     assert(pointer_key() == 'k' && selected == 3 && !*script);
     script = NULL;
     puts("PASS extended menu: a press on another output closes it and chooses nothing");
+    test_cols = 160; test_rows = 35; selected = napps + 1; scroll = 0;
+    memset(output_scroll, 0, sizeof output_scroll);
+    draw(0);
+    /* The first output can hold the entire list: the other two must still
+     * offer every program and keep their activation's connector. */
+    for (int i = 0; i < 3; i++) {
+        screen_output_select(i);
+        hit_cell(HIT_ROW + napps + 1, &x0, &y0);
+        mouse = (struct pointer_event){ .output=i, .col=x0+5, .row=y0, .button=BTN_LEFT, .pressed=1, .clicks=2 };
+        assert(pointer_key() == '\n' && selected == napps + 1);
+        draw(0);
+        open_entry(1);
+        assert(strcmp(opened_output, output_names[i]) == 0 && home_output == i);
+        /* Motion and the common Open button do not revert to output 0. */
+        mouse = (struct pointer_event){ .output=i, .col=5, .row=2 };
+        pointer_key();
+        draw(0);
+        hit_cell(HIT_KEY + '\n', &x0, &y0);
+        mouse = (struct pointer_event){ .output=i, .col=x0, .row=y0, .button=BTN_LEFT, .pressed=1, .clicks=1 };
+        assert(pointer_key() == '\n');
+        open_entry(1);
+        assert(strcmp(opened_output, output_names[i]) == 0);
+    }
     screen_extended(0);
-    puts("PASS extended home assigns different entries and pointer hit maps to each output");
+    puts("PASS three-output home: every screen offers every program; double click, redraw and Open keep its connector");
     free(apps);
     free(app_data);
     return 0;

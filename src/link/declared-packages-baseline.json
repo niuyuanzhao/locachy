@@ -1,0 +1,131 @@
+{
+ "commit": "08d2a66",
+ "base": [
+  "base",
+  "linux-cachyos-bore",
+  "linux-firmware",
+  "intel-ucode",
+  "amd-ucode",
+  "systemd-ukify",
+  "efibootmgr",
+  "e2fsprogs",
+  "terminus-font",
+  "noto-fonts",
+  "ttf-dejavu",
+  "ttf-liberation",
+  "libinput",
+  "adwaita-cursors",
+  "libxkbcommon",
+  "libx11",
+  "fastfetch",
+  "archlinux-keyring",
+  "cachyos-keyring",
+  "cachyos-mirrorlist",
+  "base-devel",
+  "git",
+  "musl",
+  "pikaur-static",
+  "pikaur",
+  "pacman-contrib",
+  "reflector",
+  "rate-mirrors",
+  "networkmanager",
+  "openresolv",
+  "wpa_supplicant",
+  "iw",
+  "wireless-regdb",
+  "nftables"
+ ],
+ "modules": {
+  "desktop": [
+   "labwc-locachy",
+   "swaybg",
+   "libnotify",
+   "xdg-desktop-portal",
+   "xdg-desktop-portal-wlr",
+   "libinput-tools",
+   "libinput-gestures",
+   "lisgd",
+   "python-pyudev",
+   "noto-fonts-emoji"
+  ],
+  "audio": [
+   "pipewire",
+   "pipewire-alsa",
+   "pipewire-pulse",
+   "wireplumber",
+   "wiremix",
+   "sof-firmware"
+  ],
+  "view": [
+   "libmupdf",
+   "djvulibre",
+   "libspectre",
+   "libwebp",
+   "libheif",
+   "libjxl",
+   "imagemagick",
+   "openexr",
+   "libarchive"
+  ],
+  "view-dvi": [
+   "texlive-bin",
+   "texlive-basic"
+  ],
+  "edit": [
+   "tree-sitter",
+   "tree-sitter-bash",
+   "tree-sitter-c",
+   "tree-sitter-cpp",
+   "tree-sitter-javascript",
+   "tree-sitter-lua",
+   "tree-sitter-markdown",
+   "tree-sitter-python",
+   "tree-sitter-query",
+   "tree-sitter-rust",
+   "tree-sitter-vim",
+   "tree-sitter-vimdoc",
+   "pcre2",
+   "json-glib"
+  ],
+  "7zip": [
+   "7zip"
+  ],
+  "cjk-fonts": [
+   "noto-fonts-cjk"
+  ],
+  "bluetooth": [
+   "bluez",
+   "bluez-utils",
+   "bluetui"
+  ],
+  "fwupd": [
+   "fwupd"
+  ],
+  "flashrom": [
+   "flashrom"
+  ],
+  "fprintd": [
+   "fprintd"
+  ],
+  "howdy": [
+   "python-dlib",
+   "howdy-git",
+   "linux-enable-ir-emitter-git"
+  ],
+  "tailscale": [
+   "tailscale"
+  ],
+  "clash": [
+   "mihomo"
+  ],
+  "tor": [
+   "tor",
+   "lyrebird-proxy"
+  ],
+  "rclone": [
+   "rclone",
+   "fuse3"
+  ]
+ }
+}

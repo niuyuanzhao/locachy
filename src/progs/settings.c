@@ -223,6 +223,8 @@ static struct keys_keyboard keyboards_seen[MAX_KEYBOARD_ROWS];
 static int nkeyboards_seen;
 #define KEYTABLE "/usr/local/lib/locachy/keytable"
 #define KEYMAP_TABLES "/usr/local/share/locachy/keymaps"
+#define SYSTEM_KEYMAP_TABLE "/usr/local/share/locachy/keymap.table"
+#define LABWC_ENV "/etc/locachy/labwc/environment"
 #define KBD_KEYMAPS "/usr/share/kbd/keymaps"
 static int login_skip;
 static int lock_after = 10;
@@ -661,12 +663,65 @@ static void labwc_line(FILE *out, const char *line)
 
 static void signal_programs(const char *comm_name, int sig);
 
+/* labwc reloads this standard environment file on SIGHUP. Keep unrelated
+ * entries and user XKB options; the key table supplies the selected layout. */
+static int keymap_environment(const char *table, const char *destination)
+{
+    static const char *const fields[] = { "layout", "model", "variant", "options" };
+    static const char *const variables[] = {
+        "XKB_DEFAULT_LAYOUT", "XKB_DEFAULT_MODEL", "XKB_DEFAULT_VARIANT", "XKB_DEFAULT_OPTIONS"
+    };
+    char values[4][128] = { "us", "pc105", "", "" }, line[512], key[32], value[128];
+    FILE *in = fopen(table, "r");
+    if (!in) return -1;
+    while (fgets(line, sizeof line, in)) {
+        if (sscanf(line, "%31s %127s", key, value) != 2) continue;
+        for (int i = 0; i < 4; i++) {
+            if (!strcmp(key, fields[i])) snprintf(values[i], sizeof values[i], "%s", !strcmp(value, "-") ? "" : value);
+        }
+    }
+    fclose(in);
+    FILE *out = fopen(destination, "we");
+    if (!out) return -1;
+    in = fopen(LABWC_ENV, "r");
+    int options = 0, ok = 1, newline = 1;
+    while (in && fgets(line, sizeof line, in)) {
+        const char *s = line + strspn(line, " \t");
+        int ours = 0;
+        for (int i = 0; i < 4; i++) {
+            if (!strncmp(s, variables[i], strlen(variables[i])) && s[strlen(variables[i])] == '=') {
+                if (i == 3) options = 1;
+                else ours = 1;
+            }
+        }
+        if (!ours) {
+            if (fputs(line, out) == EOF) ok = 0;
+            newline = line[strlen(line) - 1] == '\n';
+        }
+    }
+    if (in) fclose(in);
+    if (!newline && fputc('\n', out) == EOF) ok = 0;
+    for (int i = 0; i < 4; i++) {
+        if (i == 3 && options) continue;
+        if (fprintf(out, "%s=%s\n", variables[i], values[i]) < 0) ok = 0;
+    }
+    if (fclose(out) != 0) ok = 0;
+    return ok ? 0 : -1;
+}
+
 /* LABWC_RC: /etc/locachy/labwc/rc.xml with this pointer acceleration, touch
  * screen and terminal key; a running labwc rereads it on SIGHUP. */
 static void apply_labwc(void)
 {
+    if (access(SYSTEM_KEYMAP_TABLE, R_OK) == 0 &&
+        (keymap_environment(SYSTEM_KEYMAP_TABLE, LABWC_ENV ".tmp") < 0 || rename(LABWC_ENV ".tmp", LABWC_ENV) < 0)) {
+        unlink(LABWC_ENV ".tmp");
+        say("settings: cannot write %s: %m", LABWC_ENV);
+        return;
+    }
     FILE *in = fopen("/etc/locachy/labwc/rc.xml", "r");
     if (!in) {
+        if (access(SYSTEM_KEYMAP_TABLE, R_OK) == 0) signal_programs("labwc", SIGHUP);
         return;
     }
     mkdir("/run/locachy", 0755);
@@ -956,7 +1011,8 @@ static int ime_job(void)
 
 static void command_output(char *const argv[], char *buf, size_t size);
 
-static char tpm_summary[160] = "-";
+static char tpm_summary[160] = "-", sb_summary[160] = "-", hsi_summary[96] = "-";
+static int tpm_pending; /* a TPM binding waits for a start with this computer's Secure Boot keys */
 static int tpm_bound; /* a LUKS2 disk opens with the TPM at power-on */
 static int tpm_clear_asked;
 
@@ -966,7 +1022,7 @@ static void load_tpm_status(void)
         snprintf(tpm_summary, sizeof tpm_summary, "-");
         return;
     }
-    char buf[1024] = "";
+    char buf[4096] = "";
     char *const argv[] = { "/usr/local/bin/locachy-tpm", "status", "--json", NULL };
     command_output(argv, buf, sizeof buf);
     if (!buf[0]) {
@@ -977,8 +1033,24 @@ static void load_tpm_status(void)
     int has_luks = strstr(buf, "\"luks_devices\": [\"") != NULL;
     int active = strstr(buf, "\"tpm_active\": true") != NULL;
     int bound = strstr(buf, "\"systemd-tpm2\"") != NULL || strstr(buf, "\"locachy-tpm12\"") != NULL;
+    int bound_own = strstr(buf, "\"bound_own_keys\": true") != NULL;
     tpm_bound = has_luks && bound;
-    if (!has_luks) {
+    tpm_pending = strstr(buf, "\"pending\": true") != NULL;
+    /* Secure Boot: this computer's own keys (locachy-tpm secure-boot), the
+     * firmware's, setup mode (keys can be enrolled), or off. */
+    if (strstr(buf, "\"secure_boot_own\": true")) {
+        snprintf(sb_summary, sizeof sb_summary, "%s", _("on, with this computer's own keys"));
+    } else if (strstr(buf, "\"setup_mode\": true")) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(sb_summary, sizeof sb_summary, "%s", _("setup mode (Enter: enroll this computer's keys)"));
+    } else if (strstr(buf, "\"secure_boot\": true")) {
+        snprintf(sb_summary, sizeof sb_summary, "%s", _("on, with the firmware's keys"));
+    } else {
+        snprintf(sb_summary, sizeof sb_summary, "%s", _("off"));
+    }
+    if (tpm_pending) {
+        snprintf(tpm_summary, sizeof tpm_summary, "%s", _("bound at the next start with Secure Boot on this computer's keys"));
+    } else if (!has_luks) {
         snprintf(tpm_summary, sizeof tpm_summary, "%s", _("no LUKS2 disk"));
     } else if (ver == 0) {
         snprintf(tpm_summary, sizeof tpm_summary, "%s", _("no TPM chip"));
@@ -986,12 +1058,39 @@ static void load_tpm_status(void)
         snprintf(tpm_summary, sizeof tpm_summary, "%s", _("TPM 1.2 disabled in BIOS"));
     } else if (bound) {
         /* TRANSLATORS: Delete is the Delete key; keep it. */
-        snprintf(tpm_summary, sizeof tpm_summary, ver == 2 ?
-                 _("TPM 2.0 bound (Delete: unbind)") : _("TPM 1.2 bound (Delete: unbind)"));
+        snprintf(tpm_summary, sizeof tpm_summary, ver == 1 ? _("TPM 1.2 bound (Delete: unbind)") :
+                 bound_own ? _("TPM 2.0 bound to this computer's Secure Boot keys (Delete: unbind)") :
+                 _("TPM 2.0 bound (Delete: unbind)"));
     } else {
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(tpm_summary, sizeof tpm_summary, ver == 2 ?
                  _("TPM 2.0 (Enter: bind auto-unlock)") : _("TPM 1.2 (Enter: bind auto-unlock)"));
+    }
+}
+
+/* fwupd's Host Security ID, as fwupdmgr security says it (HSI:1 (v2.0.16)),
+ * asked once the Security page is first shown; when fwupd does not answer
+ * at once (its daemon starting), Enter shows its whole report. */
+#define FWUPDMGR "/usr/bin/fwupdmgr"
+static int hsi_loaded;
+
+static void load_hsi(void)
+{
+    char buf[8192];
+    hsi_loaded = 1;
+    if (access(FWUPDMGR, X_OK) != 0) {
+        snprintf(hsi_summary, sizeof hsi_summary, "%s", _("fwupd is not installed"));
+        return;
+    }
+    char *const argv[] = { FWUPDMGR, "security", "--no-unreported-check", "--no-security-fix", "--no-reboot-check",
+                           NULL };
+    command_output(argv, buf, sizeof buf);
+    const char *id = strstr(buf, "HSI:");
+    if (id) {
+        snprintf(hsi_summary, sizeof hsi_summary, "%.*s", (int)strcspn(id, "\033\r\n"), id);
+    } else {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(hsi_summary, sizeof hsi_summary, "%s", _("Enter: fwupd's report"));
     }
 }
 
@@ -1383,9 +1482,10 @@ static void load_kernel_state(void)
     FILE *f = fopen(KERNEL_MANIFEST, "r");
     while (f && fgets(line, sizeof line, f)) {
         line[strcspn(line, "#\r\n")] = '\0';
-        char *s = line + strspn(line, " \t");
-        s[strcspn(s, " \t")] = '\0';
-        if (strcmp(s, header) == 0) kernel_headers_declared = 1;
+        char *save;
+        for (char *s = strtok_r(line, " \t\v\f", &save); s; s = strtok_r(NULL, " \t\v\f", &save)) {
+            if (strcmp(s, header) == 0) kernel_headers_declared = 1;
+        }
     }
     if (f) fclose(f);
     DIR *d = opendir(PACMAN_LOCAL);
@@ -2485,9 +2585,19 @@ static int tpm_index(void)
     return ime_index() + 2;
 }
 
-static int bri_index(void)
+static int sb_index(void)
 {
     return tpm_index() + 1;
+}
+
+static int hsi_index(void)
+{
+    return tpm_index() + 2;
+}
+
+static int bri_index(void)
+{
+    return tpm_index() + 3;
 }
 
 static int mach_index(void)
@@ -2537,10 +2647,15 @@ static int imek_index(void)
     return circ_index() + 3;
 }
 
-/* A keyboard each: the keymap it types in. */
-static int kb_index(void)
+static int system_keymap_index(void)
 {
     return imek_index() + NIME_KEYS;
+}
+
+/* A keyboard each: an explicit layout, or the system default above it. */
+static int kb_index(void)
+{
+    return system_keymap_index() + 1;
 }
 
 static int num_hw_items(void)
@@ -3036,17 +3151,16 @@ static void load_keymap_names(void)
 
 /* keytable KEYMAP KEYMAP_TABLES/KEYMAP.table, with the system's locale for
  * the dead keys (as make.sh): 0 when it made the table. */
-static int make_keymap_table(const char *keymap)
+#ifndef SETTINGS_KEYMAP_GENERATOR
+static int make_keymap_table_at(const char *keymap, const char *out)
 {
-    char out[256], lang[64] = "C", line[128];
+    char lang[64] = "C", line[128];
     FILE *conf = fopen("/etc/locale.conf", "r");
     while (conf && fgets(line, sizeof line, conf)) {
         if (sscanf(line, "LANG=%63[^\n\"]", lang) == 1) continue;
         sscanf(line, "LANG=\"%63[^\n\"]", lang);
     }
     if (conf) fclose(conf);
-    mkdir(KEYMAP_TABLES, 0755);
-    snprintf(out, sizeof out, KEYMAP_TABLES "/%s.table", keymap);
     pid_t pid = fork();
     if (pid == 0) {
         int null = open("/dev/null", O_RDWR);
@@ -3062,6 +3176,93 @@ static int make_keymap_table(const char *keymap)
     int status = -1;
     return pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
 }
+#endif
+
+static int make_keymap_table(const char *keymap)
+{
+    char out[256];
+    mkdir(KEYMAP_TABLES, 0755);
+    snprintf(out, sizeof out, KEYMAP_TABLES "/%s.table", keymap);
+    return make_keymap_table_at(keymap, out);
+}
+
+static int keymap_vconsole(const char *keymap)
+{
+    FILE *in = fopen("/etc/vconsole.conf", "r"), *out = fopen("/etc/vconsole.conf.new", "we");
+    if (!out) { if (in) fclose(in); return -1; }
+    char line[512];
+    int ok = 1, newline = 1;
+    while (in && fgets(line, sizeof line, in)) {
+        const char *s = line + strspn(line, " \t");
+        if (!strncmp(s, "KEYMAP=", 7)) continue;
+        if (fputs(line, out) == EOF) ok = 0;
+        newline = line[strlen(line) - 1] == '\n';
+    }
+    if (in) fclose(in);
+    if (!newline && fputc('\n', out) == EOF) ok = 0;
+    if (fprintf(out, "KEYMAP=%s\n", keymap) < 0) ok = 0;
+    if (fclose(out) != 0) ok = 0;
+    return ok ? 0 : -1;
+}
+
+/* Prepare everything without disturbing live input. File/config failures
+ * restore the previous files; readers are notified only after all succeed. */
+static void set_system_keymap(const char *keymap)
+{
+    static const char *const paths[] = { SYSTEM_KEYMAP_TABLE, LABWC_ENV, "/etc/vconsole.conf" };
+    int existed[3] = { 0 }, backed = 0, committed = 0;
+    char stage[256], backup[256];
+    if (make_keymap_table_at(keymap, SYSTEM_KEYMAP_TABLE ".new") < 0) {
+        unlink(SYSTEM_KEYMAP_TABLE ".new");
+        unlink(SYSTEM_KEYMAP_TABLE ".new.tmp");
+        snprintf(notice, sizeof notice, _("No key table for layout %s; nothing changed."), keymap);
+        return;
+    }
+    if (keymap_environment(SYSTEM_KEYMAP_TABLE ".new", LABWC_ENV ".new") < 0 || keymap_vconsole(keymap) < 0) goto failed;
+    for (int i = 0; i < 3; i++) {
+        snprintf(backup, sizeof backup, "%s.old", paths[i]);
+        if (access(backup, F_OK) == 0) goto failed;
+    }
+    for (int i = 0; i < 3; i++) {
+        snprintf(backup, sizeof backup, "%s.old", paths[i]);
+        existed[i] = access(paths[i], F_OK) == 0;
+        if (existed[i] && link(paths[i], backup) < 0) goto rollback;
+        backed++;
+    }
+    for (int i = 0; i < 3; i++) {
+        snprintf(stage, sizeof stage, "%s.new", paths[i]);
+        if (rename(stage, paths[i]) < 0) goto rollback;
+        committed++;
+    }
+    if (rc_set("keymap", keymap) < 0) goto rollback;
+    for (int i = 0; i < 3; i++) {
+        snprintf(backup, sizeof backup, "%s.old", paths[i]);
+        if (existed[i]) unlink(backup);
+    }
+    keys_reload();
+    kill(1, SIGHUP);
+    signal_programs("locachy-bar", SIGHUP);
+    apply_labwc();
+    /* TRANSLATORS: %s is a console keyboard layout, such as us. */
+    snprintf(notice, sizeof notice, _("System keyboard layout: %s. Explicit keyboard layouts stay unchanged; "
+                                     "the boot unlock takes it from the next boot image."), keymap);
+    return;
+rollback:
+    for (int i = 0; i < backed; i++) {
+        snprintf(backup, sizeof backup, "%s.old", paths[i]);
+        if (!existed[i] && i < committed) unlink(paths[i]);
+        if (existed[i]) {
+            if (rename(backup, paths[i]) < 0) say("settings: cannot restore %s: %m", paths[i]);
+            else unlink(backup); /* rename of two hardlinks to one inode is a no-op */
+        }
+    }
+failed:
+    for (int i = 0; i < 3; i++) {
+        snprintf(stage, sizeof stage, "%s.new", paths[i]);
+        unlink(stage);
+    }
+    snprintf(notice, sizeof notice, "%s", _("Cannot save the system keyboard layout; nothing applied."));
+}
 
 /* Keyboard kb types in keymap from now on (NULL: the system's): its table,
  * keyboards.conf, then the programs read it again (process 1 and the direct
@@ -3069,11 +3270,7 @@ static int make_keymap_table(const char *keymap)
  * next boot image. */
 static void set_keyboard_keymap(const struct keys_keyboard *kb, const char *keymap)
 {
-    const char *system = keys_layout_name("console");
     const char *name = kb->name[0] ? kb->name : kb->id;
-    if (keymap && system && strcmp(keymap, system) == 0) {
-        keymap = NULL;
-    }
     if (keymap && make_keymap_table(keymap) < 0) {
         /* TRANSLATORS: %s is a keyboard layout's name (a console keymap's). */
         snprintf(notice, sizeof notice, _("No key table for layout %s; nothing changed."), keymap);
@@ -3107,9 +3304,11 @@ static void pick_keymap(const struct keys_keyboard *kb)
     load_keymap_names();
     for (;;) {
         int n = 0, list = 5, height = screen_rows() - list - 2;
-        for (int i = -1; i < nkeymap_names; i++) {
+        for (int i = kb ? -1 : 0; i < nkeymap_names; i++) {
             if (i < 0 ? filter[0] != '\0' : filter[0] && !strcasestr(keymap_names[i], filter)) continue;
-            if (sel < 0 && (i < 0 ? !kb->own : kb->own && strcmp(keymap_names[i], kb->keymap) == 0)) {
+            int now = kb ? i < 0 ? !kb->own : kb->own && !strcmp(keymap_names[i], kb->keymap) :
+                      !strcmp(keymap_names[i], system ? system : "us");
+            if (sel < 0 && now) {
                 sel = n; /* first shown on the one there is */
             }
             match[n++] = i;
@@ -3120,7 +3319,7 @@ static void pick_keymap(const struct keys_keyboard *kb)
         screen_bar(_("settings"), NULL);
         /* TRANSLATORS: %s is a keyboard's name; Up/Down/PgUp/PgDn, Enter and Esc are key names; keep them. */
         snprintf(line, sizeof line, _("Layout of %.60s: type to filter   Up/Down/PgUp/PgDn   Enter: choose   Esc: back"),
-                 kb->name[0] ? kb->name : kb->id);
+                 kb ? (kb->name[0] ? kb->name : kb->id) : _("System keyboard layout"));
         screen_text(2, 2, line, ACCENT, BG);
         snprintf(line, sizeof line, _("Filter: %s_"), filter);
         screen_text(2, 3, line, FG, BG);
@@ -3129,7 +3328,8 @@ static void pick_keymap(const struct keys_keyboard *kb)
         }
         for (int k = 0; k < height && top + k < n; k++) {
             int i = match[top + k], on = top + k == sel;
-            int now = i < 0 ? !kb->own : kb->own && strcmp(keymap_names[i], kb->keymap) == 0;
+            int now = kb ? i < 0 ? !kb->own : kb->own && !strcmp(keymap_names[i], kb->keymap) :
+                      !strcmp(keymap_names[i], system ? system : "us");
             char item[96];
             if (i < 0) {
                 /* TRANSLATORS: %s is the system's keyboard layout (jp106). */
@@ -3155,7 +3355,8 @@ static void pick_keymap(const struct keys_keyboard *kb)
         if (key == 27) {
             return;
         } else if (key == '\n' && n > 0) {
-            set_keyboard_keymap(kb, match[sel] < 0 ? NULL : keymap_names[match[sel]]);
+            if (kb) set_keyboard_keymap(kb, match[sel] < 0 ? NULL : keymap_names[match[sel]]);
+            else set_system_keymap(keymap_names[match[sel]]);
             return;
         } else if (key == K_UP && sel > 0) {
             sel--;
@@ -3921,7 +4122,7 @@ static void category_entries(int cat)
         add_title(_("Keyboard"));
         add_items(ime_index(), 2);
         add_items(imek_index(), NIME_KEYS);
-        add_items(kb_index(), nkeyboards_seen);
+        add_items(system_keymap_index(), 1 + nkeyboards_seen);
         add_title(_("Display & Monitor"));
         add_items(bri_index(), 1);
         add_items(hw, 1 + nrow_maps);
@@ -3961,7 +4162,9 @@ static void category_entries(int cat)
         add_title(_("Screen Locking"));
         add_items(sec_index() + 1, 3);
         add_title(_("Disk Encryption"));
-        add_items(tpm_index(), 1);
+        add_items(tpm_index(), 2);
+        add_title(_("Host Security"));
+        add_items(hsi_index(), 1);
         break;
     case CAT_TIME:
         add_title(_("Region & Language"));
@@ -4085,6 +4288,9 @@ static void page_move(int step)
 static void show_category(int c, int focus_page)
 {
     c = c < 0 ? 0 : c >= NCATS ? NCATS - 1 : c;
+    if (c == CAT_SECURITY && !hsi_loaded) {
+        load_hsi();
+    }
     if (c != category || search[0]) {
         category = c;
         search[0] = '\0';
@@ -4478,9 +4684,9 @@ static int enter_row(int idx)
            idx == boot_index() + 1 || idx == boot_index() + 2 || idx == boot_index() + 3 ||
            idx == repo_index() + NREPO_SECTIONS ||
            idx == sec_index() || idx == sec_index() + 2 || idx == fp_index() + 3 || idx == fc_index() + 4 || idx == fc_index() + 5 ||
-           idx == fc_index() + 6 || idx == rclone_index() + 2 || idx == tpm_index() ||
+           idx == fc_index() + 6 || idx == rclone_index() + 2 || idx == tpm_index() || idx == sb_index() || idx == hsi_index() ||
            idx == tz_index() || idx == tz_index() + 2 || (idx >= imek_index() && idx < imek_index() + NIME_KEYS) ||
-           (idx >= kb_index() && idx < kb_index() + nkeyboards_seen);
+           (idx >= system_keymap_index() && idx < kb_index() + nkeyboards_seen);
 }
 
 /* What a pointer event does, as a key: on the sidebar a click opens that
@@ -4696,6 +4902,12 @@ static void item_text(int idx, char *line, size_t size)
                  ime_keys[i][0] ? ime_keys[i] : _("none"));
         return;
     }
+    if (idx == system_keymap_index()) {
+        const char *keymap = keys_layout_name("console");
+        snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("System keyboard layout"), 32),
+                 keymap ? keymap : "us");
+        return;
+    }
     if ((i = idx - kb_index()) >= 0 && i < nkeyboards_seen) {
         const struct keys_keyboard *kb = &keyboards_seen[i];
         char what[160];
@@ -4907,6 +5119,14 @@ static void item_text(int idx, char *line, size_t size)
     }
     if (idx == tpm_index()) {
         snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("TPM disk auto-unlock"), 32), tpm_summary);
+        return;
+    }
+    if (idx == sb_index()) {
+        snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Secure Boot"), 32), sb_summary);
+        return;
+    }
+    if (idx == hsi_index()) {
+        snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Host security (fwupd)"), 32), hsi_summary);
         return;
     }
     if (idx == bri_index()) {
@@ -5603,6 +5823,17 @@ static void adjust(int dir)
         snprintf(notice, sizeof notice, "%s", _("Enter: bind LUKS2 auto-unlock to TPM (1.2 or 2.0)   Delete: unbind"));
         return;
     }
+    if (selected == sb_index()) {
+        /* TRANSLATORS: Enter and M are key names; keep them. */
+        snprintf(notice, sizeof notice, "%s", _("Enter: this computer's own Secure Boot keys into the firmware (setup "
+                                                "mode)   M: Microsoft's too (Windows, Microsoft-signed boot media)"));
+        return;
+    }
+    if (selected == hsi_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, "%s", _("Enter: fwupd's report (fwupdmgr security), with the fixes it offers"));
+        return;
+    }
     if (selected == bri_index()) {
         int bcur = 0, bmax = 0;
         if (!base_brightness_get || !base_brightness_set || base_brightness_get(&bcur, &bmax) < 0 || bmax <= 0) {
@@ -6036,6 +6267,9 @@ int main(int argc, char **argv)
                 snprintf(notice, sizeof notice, _("%s: none, saved and applied."), _(ime_key_labels[k]));
             }
             draw();
+        } else if (key == '\n' && selected == system_keymap_index()) {
+            pick_keymap(NULL);
+            draw();
         } else if (key == '\n' && selected >= kb_index() && selected < kb_index() + nkeyboards_seen) {
             pick_keymap(&keyboards_seen[selected - kb_index()]);
             draw();
@@ -6094,6 +6328,41 @@ int main(int argc, char **argv)
                 int st = in_term(cmd);
                 load_tpm_status();
                 snprintf(notice, sizeof notice, st == 0 ? _("%s done.") : _("%s did not finish."), "locachy-tpm enroll");
+            }
+            draw();
+        } else if ((key == '\n' || key == 'm' || key == 'M') && selected == sb_index()) {
+            if (access("/usr/local/bin/locachy-tpm", X_OK) != 0) {
+                snprintf(notice, sizeof notice, _("%s is not installed."), "locachy-tpm");
+            } else {
+                /* What it says stays until Enter: the reason when the keys do
+                 * not go in, and what follows when they do. */
+                char *const enroll[] = { "/bin/sh", "-c",
+                                         "/usr/local/bin/locachy-tpm secure-boot --enroll \"$@\"; s=$?; "
+                                         "printf '\\nEnter: back to settings. '; read -r _; exit $s",
+                                         "sh", key == '\n' ? NULL : "--microsoft", NULL };
+                int st = in_term(enroll);
+                load_tpm_status();
+                if (st != 0) {
+                    snprintf(notice, sizeof notice, _("%s did not finish."), "locachy-tpm secure-boot");
+                } else if (tpm_pending) {
+                    snprintf(notice, sizeof notice, "%s", _("Secure Boot keys enrolled. At the next start the "
+                                                            "passphrase is asked once; the TPM is bound to the new "
+                                                            "keys then."));
+                } else {
+                    snprintf(notice, sizeof notice, "%s", _("Secure Boot keys enrolled; turn Secure Boot on in the "
+                                                            "firmware if it does not come on by itself."));
+                }
+            }
+            draw();
+        } else if (key == '\n' && selected == hsi_index()) {
+            if (access(FWUPDMGR, X_OK) != 0) {
+                snprintf(notice, sizeof notice, _("%s is not installed."), "fwupd");
+            } else {
+                char *const report[] = { "/bin/sh", "-c",
+                                         FWUPDMGR " security --no-unreported-check --no-reboot-check; "
+                                         "printf '\\nEnter: back to settings. '; read -r _", NULL };
+                in_term(report);
+                load_hsi();
             }
             draw();
         } else if (key == K_DEL && selected == tpm_index() && access("/usr/local/bin/locachy-tpm", X_OK) == 0) {

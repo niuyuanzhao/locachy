@@ -1,16 +1,50 @@
 #!/usr/bin/env python3
-"""locachy-tpm: hardware-bound LUKS2 auto-unlock for TPM 2.0 and TPM 1.2.
+"""locachy-tpm: hardware-bound LUKS2 unlocking for TPM 2.0 and TPM 1.2.
 
-Supports both modern PCs (TPM 2.0 via systemd-cryptenroll + systemd-tpm2 LUKS2
-token) and older machines such as ThinkPad X230 (TPM 1.2 via TCG TakeOwnership +
-PCR composite + TPM_Seal + locachy-tpm12 LUKS2 token).
+TPM 2.0, with systemd's tools, and no PIN: the long passphrase stays as the
+way in whenever the TPM does not open the disk.
+  Without this machine's own Secure Boot keys in the firmware, as it always
+  was: systemd-cryptenroll seals each disk key to PCRs 0+7 (the firmware, and
+  Secure Boot's state and keys). Any system started on this machine reads the
+  same values, so it keeps a disk taken out of the machine closed, and no
+  more.
+  With them (secure-boot: sbctl's keys, enrolled in setup mode): every boot
+  image is signed for Secure Boot and carries the PCR 11 value it measures
+  to, signed with this machine's PCR key (locachy-boot, ukify). The disk key
+  is sealed to PCR 7 (Secure Boot on, these keys, the key that let the image
+  start) and to that PCR public key: it opens under this image and any later
+  one so signed (updates keep working), and only in its initramfs (process 1
+  measures enter-initrd before unlocking and leave-initrd before leaving it
+  or resuming a hibernated system). Enrolling the keys changes PCR 7: disks
+  bound before are bound again at the next start with Secure Boot on these
+  keys (enroll --pending), the passphrase typed once at that start.
+TPM 1.2 (ThinkPad X230 and its time): TCG TakeOwnership + PCR composite +
+TPM_Seal + the locachy-tpm12 LUKS2 token; PCR 0 by default: it keeps a disk
+taken out of the machine closed, and no more.
 
 Usage:
   locachy-tpm status [--json]
   locachy-tpm enroll [--pcrs LIST] [--passphrase-stdin] [DEVICE...]
+                       TPM 2.0: PCR 7 and the signed PCR 11 policy while
+                       Secure Boot runs this machine's keys, else (or with
+                       --pcrs) PCRs 0+7 or those given; TPM 1.2: PCR 0 or
+                       those given
+  locachy-tpm enroll --pending
+                       process 1, at each start while a binding waits: done
+                       once Secure Boot runs this machine's keys
+  locachy-tpm secure-boot [--enroll [--microsoft]] [--passphrase-stdin]
+                       this machine's Secure Boot and PCR keys (made when
+                       missing) and the boot image signed with them;
+                       --enroll puts them in the firmware (setup mode; with
+                       Microsoft's: --microsoft), the disks bound to the TPM
+                       bound again at the next start
+  locachy-tpm prepare --passphrase-stdin
+                       the installer's, after secure-boot --enroll: the disks
+                       bound at the first start with Secure Boot on
   locachy-tpm clear [DEVICE...]
 """
 import argparse
+import base64
 import getpass
 import hashlib
 import hmac
@@ -77,6 +111,72 @@ def secure_boot():
     except OSError:
         return None
     return len(data) >= 5 and data[4] == 1
+
+
+EFI_GLOBAL = "8be4df61-93ca-11d2-aa0d-00e098032b8c"
+EFI_IMAGE_SECURITY = "d719b2cb-3d3a-4596-a3bc-dad00e67656f"  # db, dbx
+EFI_CERT_X509 = bytes.fromhex("a159c0a5e494a74a87b5ab155c2bf072")
+SB_DB_KEY = Path("/var/lib/sbctl/keys/db/db.key")
+SB_DB_CERT = Path("/var/lib/sbctl/keys/db/db.pem")
+PCR_PRIVATE = Path("/etc/systemd/tpm2-pcr-private-key.pem")
+PCR_PUBLIC = Path("/etc/systemd/tpm2-pcr-public-key.pem")
+PENDING = Path("/var/lib/locachy/tpm-pending")
+LOCACHY_BOOT = Path("/usr/local/bin/locachy-boot")
+BOOT_IMAGE = Path("/usr/local/lib/locachy/boot/locachy.efi")
+ESP_IMAGES = (Path("/efi/EFI/locachy/locachy.efi"), Path("/efi/EFI/BOOT/BOOTX64.EFI"))
+SECURITYFS = Path("/sys/kernel/security")
+
+
+def efi_variable(name, guid):
+    """An EFI variable's data (after its 4 bytes of attributes); None without it."""
+    try:
+        data = Path(f"/sys/firmware/efi/efivars/{name}-{guid}").read_bytes()
+    except OSError:
+        return None
+    return data[4:]
+
+
+def setup_mode():
+    data = efi_variable("SetupMode", EFI_GLOBAL)
+    return bool(data) and data[0] == 1
+
+
+def db_certificates():
+    """The X.509 certificates in Secure Boot's db (EFI_SIGNATURE_LISTs)."""
+    data, certs, i = efi_variable("db", EFI_IMAGE_SECURITY) or b"", [], 0
+    while i + 28 <= len(data):
+        kind = data[i:i + 16]
+        list_size, header_size, sig_size = struct.unpack("<III", data[i + 16:i + 28])
+        if list_size < 28 or sig_size < 16 or i + list_size > len(data):
+            break
+        j = i + 28 + header_size
+        while kind == EFI_CERT_X509 and j + sig_size <= i + list_size:
+            certs.append(data[j + 16:j + sig_size])
+            j += sig_size
+        i += list_size
+    return certs
+
+
+def own_certificate():
+    """sbctl's db certificate, DER; None without one."""
+    try:
+        text = SB_DB_CERT.read_text()
+    except OSError:
+        return None
+    body = text.split("-----BEGIN CERTIFICATE-----", 1)[-1].split("-----END CERTIFICATE-----", 1)[0]
+    try:
+        return base64.b64decode("".join(body.split()))
+    except ValueError:
+        return None
+
+
+def secure_boot_own():
+    """Secure Boot on, out of setup mode, with this machine's db key in db:
+    only what this machine signed (and what another db key the firmware
+    keeps signed: Microsoft's, when enrolled with them) starts, and PCR 7
+    tells which key let the boot image start."""
+    cert = own_certificate()
+    return bool(secure_boot()) and not setup_mode() and cert is not None and cert in db_certificates()
 
 
 def luks_meta(dev):
@@ -247,14 +347,176 @@ def clear_device_tpm(dev):
             subprocess.run(["cryptsetup", "luksKillSlot", "--batch-mode", dev, str(slot)], check=False)
 
 
-def enroll_tpm2(dev, passphrase, pcrs):
-    clear_device_tpm(dev)
-    pcr_arg = "+".join(str(x) for x in pcrs) if pcrs else "0+7"
-    env = dict(os.environ, PASSWORD=passphrase)
-    p = subprocess.run(["systemd-cryptenroll", "--tpm2-device=auto", f"--tpm2-pcrs={pcr_arg}", dev],
-                       env=env, text=True)
-    if p.returncode != 0:
+def run_cryptenroll(dev, options, unlock, env_extra=None):
+    """systemd-cryptenroll OPTIONS DEV, a key slot already there opened with
+    unlock: ("passphrase", text), ("key-file", path), or ("tpm2",): the
+    disk's TPM 2.0 token, while the TPM still opens it. Its exit status."""
+    command = ["systemd-cryptenroll"] + options
+    env = {k: v for k, v in os.environ.items() if k not in ("PASSWORD", "NEWPASSWORD", "PIN", "NEWPIN")}
+    if unlock[0] == "key-file":
+        command.append(f"--unlock-key-file={unlock[1]}")
+    elif unlock[0] == "tpm2":
+        command.append("--unlock-tpm2-device=auto")
+    else:
+        env["PASSWORD"] = unlock[1]
+    env.update(env_extra or {})
+    return subprocess.run(command + [dev], env=env, text=True).returncode
+
+
+def enroll_tpm2(dev, unlock, pcrs=None):
+    """A systemd-tpm2 token on dev in place of the TPM 2.0 ones it had (they
+    stay when this fails). pcrs None: PCR 7 and the signed PCR 11 policy
+    (this machine's PCR public key); else those PCRs alone, the PCR key left
+    out (systemd-cryptenroll would take /etc/systemd's by itself)."""
+    if pcrs is None:
+        if not PCR_PUBLIC.is_file():
+            raise RuntimeError(f"no PCR key ({PCR_PUBLIC}): locachy-tpm secure-boot makes it")
+        policy = ["--tpm2-pcrs=7", f"--tpm2-public-key={PCR_PUBLIC}", "--tpm2-public-key-pcrs=11"]
+    else:
+        policy = [f"--tpm2-pcrs={'+'.join(str(x) for x in pcrs) if pcrs else '0+7'}", "--tpm2-public-key="]
+    if run_cryptenroll(dev, ["--tpm2-device=auto"] + policy + ["--wipe-slot=tpm2"], unlock):
         raise RuntimeError(f"systemd-cryptenroll failed on {dev}")
+
+
+def pending_request():
+    try:
+        request = json.loads((PENDING / "request.json").read_text())
+    except FileNotFoundError:
+        return None
+    except ValueError as e:
+        raise RuntimeError(f"invalid {PENDING / 'request.json'}: left untouched") from e
+    if not isinstance(request, dict) or not isinstance(request.get("devices"), dict):
+        raise RuntimeError(f"invalid {PENDING / 'request.json'}: left untouched")
+    return request
+
+
+def sync_directory(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def save_pending(path, text):
+    """A complete, durable file or the old one, never a partly written key
+    or request. Both files are on the encrypted root, with root-only modes."""
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", dir=PENDING, prefix=path.name + ".", delete=False) as f:
+            temporary = Path(f.name)
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, path)
+        sync_directory(PENDING)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def save_pending_request(request):
+    save_pending(PENDING / "request.json", json.dumps(request) + "\n")
+
+
+def pending_key_present(dev, key):
+    """Whether this key opens a slot. Only cryptsetup's wrong-passphrase
+    status on a readable LUKS header means no; I/O and other failures must
+    not be mistaken for an absent slot (and lose its key)."""
+    if not key.is_file():
+        raise RuntimeError(f"{key}: pending key missing; request kept")
+    p = subprocess.run(["cryptsetup", "open", "--test-passphrase", "--key-file", str(key), dev],
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if p.returncode == 0:
+        return True
+    if p.returncode == 2 and luks_meta(dev).get("keyslots"):
+        return False
+    raise RuntimeError(f"{dev}: could not check pending key slot; key and request kept")
+
+
+def luks_uuid(dev):
+    p = subprocess.run(["cryptsetup", "luksUUID", dev], capture_output=True, text=True)
+    return p.stdout.strip() if p.returncode == 0 else ""
+
+
+def device_of(uuid):
+    p = subprocess.run(["blkid", "-U", uuid], capture_output=True, text=True)
+    return p.stdout.strip() if p.returncode == 0 else ""
+
+
+def prepare_pending(devs, unlocks):
+    """A key slot of its own on each disk (opened with unlocks[dev]), its key
+    in PENDING on the encrypted root, until enroll --pending binds the disk
+    with it at a start with Secure Boot on this machine's keys and removes
+    both: the PCR 7 of that start is not the one of this."""
+    PENDING.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(PENDING, 0o700)
+    sync_directory(PENDING.parent)
+    request = pending_request() or {"devices": {}}
+    for d in devs:
+        uuid = luks_uuid(d)
+        if not uuid:
+            raise RuntimeError(f"{d}: not a LUKS2 disk")
+        key = PENDING / request["devices"].get(uuid, f"{uuid}.key")
+        # A previous attempt may have saved the key or added the slot before
+        # it stopped. Never overwrite that key; save the association before
+        # changing the LUKS header, and check the slot when retrying.
+        if uuid in request["devices"] and not key.is_file():
+            raise RuntimeError(f"{key}: pending key missing; request kept")
+        if not key.is_file():
+            save_pending(key, secrets.token_hex(32))
+        request["devices"][uuid] = key.name
+        save_pending_request(request)
+        if pending_key_present(d, key):
+            continue
+        if run_cryptenroll(d, ["--password"], unlocks[d], {"NEWPASSWORD": key.read_text()}):
+            raise RuntimeError(f"{d}: no key slot added for its TPM binding (wrong passphrase?); key and request kept")
+
+
+def retire_pending(request, uuid, dev):
+    """Remove this slot only, then its association and key. If the removal
+    succeeded before an interruption, checking the key makes a retry safe."""
+    key = PENDING / request["devices"][uuid]
+    if pending_key_present(dev, key):
+        p = subprocess.run(["cryptsetup", "luksRemoveKey", "--batch-mode", "--key-file", str(key), dev], check=False)
+        if p.returncode != 0:
+            raise RuntimeError(f"{dev}: could not remove pending key slot; key and request kept")
+    remaining = {"devices": {u: n for u, n in request["devices"].items() if u != uuid},
+                 "enrolled": [u for u in request.get("enrolled", []) if u != uuid]}
+    save_pending_request(remaining)
+    request.update(remaining)
+    key.unlink()
+    sync_directory(PENDING)
+
+
+def finish_pending(request):
+    if not request["devices"]:
+        (PENDING / "request.json").unlink()
+        sync_directory(PENDING)
+        if not any(PENDING.iterdir()):
+            PENDING.rmdir()
+            sync_directory(PENDING.parent)
+
+
+def drop_pending():
+    """A waiting binding given up or done. A missing disk or failed removal
+    keeps that disk's key and request so that cleanup can be retried."""
+    request = pending_request()
+    if request is None:
+        return
+    failed = False
+    for uuid in list(request["devices"]):
+        dev = device_of(uuid)
+        try:
+            if not dev:
+                raise RuntimeError(f"no disk {uuid} here: pending key and request kept")
+            retire_pending(request, uuid, dev)
+        except (OSError, RuntimeError) as e:
+            print(f"locachy-tpm: {e}", file=sys.stderr)
+            failed = True
+    finish_pending(request)
+    if failed:
+        raise RuntimeError("pending cleanup incomplete; retry locachy-tpm clear when the disks are available")
 
 
 def enroll_tpm12(dev, tpm_dev, passphrase, pcrs):
@@ -290,10 +552,18 @@ def enroll_tpm12(dev, tpm_dev, passphrase, pcrs):
         raise RuntimeError(f"cryptsetup token import failed on {dev}")
 
 
+def token_summary(tok):
+    """What status shows of a token: its PCRs, and those of a signed policy."""
+    if tok.get("type") == "systemd-tpm2":
+        return {"type": "systemd-tpm2", "pcrs": tok.get("tpm2-pcrs", []),
+                "signed_pcrs": tok.get("tpm2_pubkey_pcrs", []) if tok.get("tpm2_pubkey") else []}
+    return {"type": tok.get("type"), "pcrs": tok.get("pcrs", []), "signed_pcrs": []}
+
+
 def cmd_status(args):
     ver, tdev = tpm_info()
     targets = find_luks_targets()
-    enrolled = {d: [tok.get("type") for _, tok in device_tpm_tokens(d)] for d in targets}
+    enrolled = {d: [token_summary(tok) for _, tok in device_tpm_tokens(d)] for d in targets}
     active = True
     if ver == 1:
         en, act, _ = tpm12_sysfs_flags()
@@ -303,6 +573,12 @@ def cmd_status(args):
         "tpm_device": tdev,
         "tpm_active": active if ver else False,
         "secure_boot": secure_boot(),
+        "setup_mode": setup_mode(),
+        "own_keys": SB_DB_KEY.is_file() and PCR_PRIVATE.is_file(),
+        "secure_boot_own": secure_boot_own(),
+        "own_keys_in_db": not setup_mode() and own_certificate() is not None and own_certificate() in db_certificates(),
+        "bound_own_keys": any(t["signed_pcrs"] for toks in enrolled.values() for t in toks),
+        "pending": pending_request() is not None,
         "luks_devices": targets,
         "enrolled": enrolled,
     }
@@ -315,11 +591,19 @@ def cmd_status(args):
         print(f"TPM: 1.2 ({tdev}, {'active' if active else 'disabled/deactivated in BIOS'})")
     else:
         print(f"TPM: 2.0 ({tdev})")
+    print("Secure Boot: " + ("on, with this machine's keys" if data["secure_boot_own"] else
+                             "setup mode (keys can be enrolled)" if data["setup_mode"] else
+                             "on, not with this machine's keys" if data["secure_boot"] else "off"))
+    if data["pending"]:
+        print("TPM unlocking: bound at the next start with Secure Boot on this machine's keys")
     if not targets:
         print("LUKS2: no locachy-crypt partition on this system")
     for d in targets:
-        kinds = enrolled[d]
-        print(f"  {d}: {'enrolled (' + ', '.join(kinds) + ')' if kinds else 'passphrase only'}")
+        toks = enrolled[d]
+        print(f"  {d}: " + (", ".join(f"{t['type']} (PCRs {'+'.join(map(str, t['pcrs'])) or '-'}"
+                                      + (f", signed PCRs {'+'.join(map(str, t['signed_pcrs']))}"
+                                         if t["signed_pcrs"] else "") + ")" for t in toks)
+                            if toks else "passphrase only"))
     return 0
 
 
@@ -331,16 +615,139 @@ def parse_pcrs(raw, ver):
     return [int(x) for x in raw.replace("+", ",").split(",") if x.strip()]
 
 
+def read_passphrase(stdin):
+    pw = sys.stdin.read().rstrip("\r\n") if stdin else getpass.getpass("Current LUKS2 recovery passphrase: ")
+    if not pw:
+        raise RuntimeError("empty passphrase")
+    return pw
+
+
+def rebuild_boot(*args):
+    if not LOCACHY_BOOT.is_file():
+        return 0
+    return subprocess.run([str(LOCACHY_BOOT)] + list(args), check=False).returncode
+
+
+def image_on_esp():
+    """The image just made is the one the firmware starts (the ESP mounted at
+    /efi, both of its places)."""
+    try:
+        made = BOOT_IMAGE.read_bytes()
+        return all(p.read_bytes() == made for p in ESP_IMAGES)
+    except OSError:
+        return False
+
+
+def cmd_secure_boot(args):
+    """This machine's keys, made when missing, and the boot image signed with
+    them; with --enroll put in the firmware, and the disks bound to the TPM
+    bound again at the next start (their binding includes PCR 7, which the
+    keys change)."""
+    if not SB_DB_KEY.is_file():
+        subprocess.run(["sbctl", "create-keys"], check=True)
+    if not PCR_PRIVATE.is_file():
+        subprocess.run(["ukify", "genkey", f"--pcr-private-key={PCR_PRIVATE}", f"--pcr-public-key={PCR_PUBLIC}"],
+                       check=True)
+    if not args.enroll:
+        return 1 if rebuild_boot() else 0
+    if not setup_mode():
+        print("locachy-tpm: the firmware is not in setup mode: in its settings, clear the Secure Boot keys "
+              "(setup mode), then run this again", file=sys.stderr)
+        return 1
+    # With the keys in, the firmware starts only what they signed: the image
+    # on the ESP must be that first.
+    if rebuild_boot() or not image_on_esp():
+        print("locachy-tpm: the signed boot image is not on the ESP (/efi): keys not enrolled", file=sys.stderr)
+        return 1
+    bound = [d for d in find_luks_targets() if any(t.get("type") == "systemd-tpm2" for _, t in device_tpm_tokens(d))]
+    pw = read_passphrase(True) if bound and args.passphrase_stdin else None
+    try:
+        for d in bound:
+            # The disk's own TPM binding opens it here while it binds PCRs
+            # 0+7 only; one with the signed PCR 11 policy does not (process
+            # 1 measured leave-initrd): the passphrase then.
+            try:
+                prepare_pending([d], {d: ("tpm2",) if pw is None else ("passphrase", pw)})
+            except RuntimeError:
+                if pw is not None:
+                    raise
+                print(f"locachy-tpm: the TPM does not open {d} here: the passphrase", file=sys.stderr)
+                pw = read_passphrase(False)
+                prepare_pending([d], {d: ("passphrase", pw)})
+    except BaseException:
+        drop_pending()
+        raise
+    # sbctl reads the firmware's event log (option ROMs) from securityfs;
+    # mounted here only for it (a chroot's /sys stays as it was).
+    mounted = SECURITYFS.is_dir() and not any(SECURITYFS.iterdir()) and subprocess.run(
+        ["mount", "-t", "securityfs", "securityfs", str(SECURITYFS)], check=False).returncode == 0
+    p = subprocess.run(["sbctl", "enroll-keys"] + (["--microsoft"] if args.microsoft else []),
+                       capture_output=True, text=True)
+    if mounted:
+        subprocess.run(["umount", str(SECURITYFS)], check=False)
+    sys.stdout.write(p.stdout)
+    sys.stderr.write(p.stderr)
+    if p.returncode != 0:
+        if bound:
+            drop_pending()
+        print("locachy-tpm: keys not enrolled (sbctl's reason above). If this machine's firmware runs drivers "
+              "signed by Microsoft, or it should start Windows or Microsoft-signed boot media too, enroll with "
+              "--microsoft", file=sys.stderr)
+        return 1
+    print("Enrolled this machine's Secure Boot keys" + (" and Microsoft's" if args.microsoft else "") +
+          "; turn Secure Boot on in the firmware if it does not come on by itself")
+    if bound:
+        print("TPM unlocking: the disks are bound again at the next start with Secure Boot on (the passphrase "
+              "is asked once, at that start)")
+    return 0
+
+
+def cmd_pending():
+    """The binding prepare_pending left, once Secure Boot runs this machine's
+    keys: each disk bound with its key slot, then the slots and keys removed."""
+    request = pending_request()
+    if request is None:
+        return 0
+    if not secure_boot_own():
+        print("locachy-tpm: TPM unlocking waits for a start with Secure Boot on this machine's keys")
+        return 0
+    failed = False
+    for uuid, name in list(request["devices"].items()):
+        dev = device_of(uuid)
+        try:
+            if not dev:
+                raise RuntimeError(f"no disk {uuid} here: binding still waits; key and request kept")
+            if uuid not in request.get("enrolled", []):
+                enroll_tpm2(dev, ("key-file", str(PENDING / name)))
+                print(f"Enrolled TPM 2.0 auto-unlock on {dev} (PCR 7 and the signed PCR 11 policy)")
+                request.setdefault("enrolled", []).append(uuid)
+                save_pending_request(request)
+            retire_pending(request, uuid, dev)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+            print(f"locachy-tpm: {e}", file=sys.stderr)
+            failed = True
+    finish_pending(request)
+    rebuild_boot("--luks")
+    return 1 if failed else 0
+
+
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_st = sub.add_parser("status")
     p_st.add_argument("--json", action="store_true")
     p_en = sub.add_parser("enroll")
-    p_en.add_argument("--pcrs", default="", help="PCRs to bind (default: 0+7 on TPM 2.0, 0 on TPM 1.2: the firmware only, "
-                           "not what it starts)")
+    p_en.add_argument("--pcrs", default="", help="PCRs to bind (default: TPM 2.0 7 and the signed PCR 11 policy "
+                      "while Secure Boot runs this machine's keys, else 0+7; TPM 1.2 0: the firmware only)")
     p_en.add_argument("--passphrase-stdin", action="store_true")
+    p_en.add_argument("--pending", action="store_true")
     p_en.add_argument("devices", nargs="*")
+    p_sb = sub.add_parser("secure-boot")
+    p_sb.add_argument("--enroll", action="store_true")
+    p_sb.add_argument("--microsoft", action="store_true")
+    p_sb.add_argument("--passphrase-stdin", action="store_true")
+    p_pr = sub.add_parser("prepare")
+    p_pr.add_argument("--passphrase-stdin", action="store_true")
     p_cl = sub.add_parser("clear")
     p_cl.add_argument("devices", nargs="*")
     args = parser.parse_args()
@@ -350,42 +757,47 @@ def main():
     if os.geteuid() != 0:
         print("locachy-tpm: must run as root", file=sys.stderr)
         return 1
-    devs = args.devices or find_luks_targets()
-    if not devs:
-        print("locachy-tpm: no LUKS2 locachy-crypt partitions found", file=sys.stderr)
-        return 1
-
-    if args.cmd == "clear":
-        for d in devs:
-            clear_device_tpm(d)
-            print(f"Cleared TPM auto-unlock token from {d}")
-        if Path("/usr/local/bin/locachy-boot").is_file():
-            subprocess.run(["/usr/local/bin/locachy-boot", "--luks"], check=False)
-        return 0
-
-    ver, tdev = tpm_info()
-    if ver == 0:
-        print("locachy-tpm: no TPM 2.0 or TPM 1.2 chip found", file=sys.stderr)
-        return 1
-    pcrs = parse_pcrs(args.pcrs, ver)
-    if args.passphrase_stdin:
-        pw = sys.stdin.read().rstrip("\r\n")
-    else:
-        pw = getpass.getpass("Current LUKS2 recovery passphrase: ")
-    if not pw:
-        print("locachy-tpm: empty passphrase", file=sys.stderr)
-        return 1
-
     try:
-        for d in devs:
-            if ver == 2:
-                enroll_tpm2(d, pw, pcrs)
-            else:
+        if args.cmd == "secure-boot":
+            return cmd_secure_boot(args)
+        if args.cmd == "enroll" and args.pending:
+            return cmd_pending()
+        devs = getattr(args, "devices", None) or find_luks_targets()
+        if not devs:
+            print("locachy-tpm: no LUKS2 locachy-crypt partitions found", file=sys.stderr)
+            return 1
+        if args.cmd == "clear":
+            for d in devs:
+                clear_device_tpm(d)
+                print(f"Cleared TPM auto-unlock token from {d}")
+            drop_pending()
+            rebuild_boot("--luks")
+            return 0
+        if args.cmd == "prepare":
+            pw = read_passphrase(args.passphrase_stdin)
+            prepare_pending(devs, {d: ("passphrase", pw) for d in devs})
+            print("TPM 2.0 unlocking is bound at the first start with Secure Boot on this machine's keys")
+            return 0
+
+        ver, tdev = tpm_info()
+        if ver == 0:
+            print("locachy-tpm: no TPM 2.0 or TPM 1.2 chip found", file=sys.stderr)
+            return 1
+        pw = read_passphrase(args.passphrase_stdin)
+        if ver == 2:
+            own = secure_boot_own() and not args.pcrs
+            pcrs = None if own else parse_pcrs(args.pcrs, ver)
+            for d in devs:
+                enroll_tpm2(d, ("passphrase", pw), pcrs)
+                print(f"Enrolled TPM 2.0 auto-unlock on {d} (" + ("PCR 7 and the signed PCR 11 policy" if own else
+                      f"PCRs: {'+'.join(map(str, pcrs)) or '0+7'}") + ")")
+            drop_pending()
+        else:
+            pcrs = parse_pcrs(args.pcrs, ver)
+            for d in devs:
                 enroll_tpm12(d, tdev, pw, pcrs)
-            vstr = "2.0" if ver == 2 else "1.2"
-            print(f"Enrolled TPM {vstr} auto-unlock on {d} (PCRs: {'+'.join(map(str, pcrs)) or 'SRK'})")
-        if Path("/usr/local/bin/locachy-boot").is_file():
-            subprocess.run(["/usr/local/bin/locachy-boot", "--luks"], check=False)
+                print(f"Enrolled TPM 1.2 auto-unlock on {d} (PCRs: {'+'.join(map(str, pcrs)) or 'SRK'})")
+        rebuild_boot("--luks")
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
         print(f"locachy-tpm: {e}", file=sys.stderr)
         return 1

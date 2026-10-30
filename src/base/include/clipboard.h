@@ -12,8 +12,11 @@
 #define CLIPBOARD_TIMEOUT_MS 2500
 
 enum { CLIPBOARD_REGULAR, CLIPBOARD_PRIMARY, CLIPBOARD_SELECTIONS };
+/* RESTORE GENERATION: each selection changed since the sync that returned
+ * GENERATION (or whose transfer is pending or failed) gets the copy the
+ * service kept at that sync back, offered again as its own. */
 enum { CLIPBOARD_GET, CLIPBOARD_SET, CLIPBOARD_CLEAR, CLIPBOARD_SYNC, CLIPBOARD_CHECK, CLIPBOARD_STATUS,
-       CLIPBOARD_GET_PNG, CLIPBOARD_SET_PNG };
+       CLIPBOARD_GET_PNG, CLIPBOARD_SET_PNG, CLIPBOARD_RESTORE };
 enum { CLIPBOARD_OK, CLIPBOARD_EMPTY, CLIPBOARD_NO_TEXT, CLIPBOARD_BUSY, CLIPBOARD_FAILED };
 
 struct clipboard_message {
@@ -36,7 +39,9 @@ int clipboard_clear(int primary);
 int clipboard_sync(uint64_t *generation);
 int clipboard_check(uint64_t generation);
 /* Compositor-gated freeze: begin -> capture -> freeze -> commit, bounded.
- * On failure this cancels the transaction and leaves the cgroup unfrozen. */
+ * On failure this cancels the transaction and leaves the cgroup unfrozen.
+ * After the commit, the host's copy from the capture is put back if a copy
+ * came in between or the freeze cut a transfer short (RESTORE). */
 int clipboard_freeze(const char *cgroup);
 int clipboard_request(struct clipboard_message *message, int *fd, int timeout_ms);
 const char *clipboard_error(int status);

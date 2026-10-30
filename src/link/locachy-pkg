@@ -24,7 +24,9 @@ Commands:
 
 Updates of the host, LOCachy and the containers (see the part below):
   locachy-pkg plan [--cached] [--machine]   check, and show what an update would do
-  locachy-pkg apply [TARGET...]             do the last plan (all of it, or TARGET...)
+  locachy-pkg apply [TARGET...]             do the last plan (all of it, or TARGET...); with
+                                            LOCachy's update: its source and updater first,
+                                            then the rest checked again by it and done
   locachy-pkg update [--yes]                plan, show it, ask once, apply all
   locachy-pkg rebuild [--force]             LOCachy's programs built again (make.sh --boot)
                                             unless built against the host as it is; pacman's
@@ -56,15 +58,23 @@ MANIFEST = "/etc/locachy/packages"
 LOCAL_DB = "/var/lib/pacman/local"
 
 
+# A package name as pacman takes it: letters, digits and @ . _ + -, not
+# starting with - or . (a manifest line may hold several, whitespace apart).
+PACKAGE_NAME = re.compile(r"[A-Za-z0-9@_+][A-Za-z0-9@._+-]*")
+
+
+def line_names(line):
+    """The package names a manifest line declares."""
+    return line.split("#", 1)[0].split()
+
+
 def load_manifest(path=MANIFEST):
     if not os.path.isfile(path):
         sys.exit(f"locachy-pkg: manifest {path} does not exist")
     leaves = []
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
-            line = line.split("#", 1)[0].strip()
-            if line:
-                leaves.append(line)
+            leaves.extend(line_names(line))
     return sorted(set(leaves))
 
 
@@ -459,12 +469,55 @@ def manifest_lines():
     return lines
 
 
+def without_names(lines, names):
+    """Manifest lines with names taken out; other names a line held stay,
+    one per line (and its comment, on a line of its own)."""
+    kept = []
+    for line in lines:
+        here = line_names(line)
+        if not set(here) & set(names):
+            kept.append(line)
+            continue
+        for n in here:
+            if n in names:
+                print(f"===> Unregistering leaf: {n}")
+        comment = line.split("#", 1)[1].strip() if "#" in line else ""
+        if comment:
+            kept.append(f"# {comment}\n")
+        kept += [n + "\n" for n in here if n not in names]
+    return kept
+
+
+def unknown_packages(names):
+    """Of names, those that no local recipe, repository (pacman -Sp, as
+    install_missing asks) or the AUR has: never declared, for a declared
+    leaf nothing provides stops every sync and update after it."""
+    local = local_names()
+    left = [n for n in names if n not in local and subprocess.run(
+        ["pacman", "-Sp", n], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0]
+    found = aur_info(left) if left else {}
+    return [n for n in left if n not in found]
+
+
 def cmd_install(pkgs):
-    if not pkgs:
+    names = list(dict.fromkeys(n for p in pkgs for n in p.split()))
+    if not names:
         sys.exit("usage: locachy-pkg install PKG...")
+    bad = [n for n in names if not PACKAGE_NAME.fullmatch(n)]
+    if bad:
+        print(f"locachy-pkg: not a package name: {' '.join(bad)}; nothing registered", file=sys.stderr)
+        return 1
     leaves = load_manifest()
+    try:
+        unknown = unknown_packages([n for n in names if n not in leaves])
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+        print(f"locachy-pkg: could not look the packages up ({e}); nothing registered", file=sys.stderr)
+        return 1
+    if unknown:
+        print(f"locachy-pkg: no repository or the AUR has {' '.join(unknown)}; nothing registered", file=sys.stderr)
+        return 1
     lines = manifest_lines()
-    for p in pkgs:
+    for p in names:
         if p not in leaves:
             lines.append(f"{p}\n")
             print(f"===> Registering leaf: {p}")
@@ -526,8 +579,7 @@ def cmd_kernel(args):
         elif name + "-headers" in leaves:
             # Revisiting a previously selected kernel must retain OFF rather
             # than resurrect its old headers declaration.
-            write_manifest([line for line in manifest_lines()
-                            if line.split("#", 1)[0].strip() != name + "-headers"])
+            write_manifest(without_names(manifest_lines(), {name + "-headers"}))
         if cmd_install(packages) != 0:
             return 1
         # Keep the existing kernel as a fallback. Select only after the new
@@ -550,15 +602,10 @@ def cmd_kernel(args):
 
 
 def cmd_remove(pkgs):
-    if not pkgs:
+    names = {n for p in pkgs for n in p.split()}
+    if not names:
         sys.exit("usage: locachy-pkg remove PKG...")
-    lines = []
-    for line in manifest_lines():
-        if line.split("#", 1)[0].strip() in pkgs:
-            print(f"===> Unregistering leaf: {line.strip()}")
-        else:
-            lines.append(line)
-    write_manifest(lines)
+    write_manifest(without_names(manifest_lines(), names))
     return cmd_sync()
 
 
@@ -576,6 +623,13 @@ def cmd_remove(pkgs):
 #              (91-locachy-rebuild) does it after every transaction, however
 #              it was started; here it is done unless that hook already has.
 #              (The boot files for a new kernel or microcode: its own hook.)
+#              A new LOCachy source is applied first: the source, then from
+#              it the updater, its helpers, builder and contract gate, and
+#              the packages its definitions add (declare-packages); the
+#              updated updater then checks again and applies the rest, its
+#              programs built last. The host is always planned and its
+#              patched packages built and tested by one source, the one
+#              installed: their recipes and their contracts agree.
 #   NAME       a container (/etc/locachy/containers/NAME.conf): built anew
 #              (locachy-app build) when its own packages have updates, when
 #              its configuration names other packages, or when the host has
@@ -598,6 +652,8 @@ DEFAULT_UPDATE_REPO = "https://github.com/niuyuanzhao/locachy.git"
 LEVEL_FILE = "/usr/local/lib/locachy/level"
 CPU_FILE = "/usr/local/lib/locachy/cpu"  # what -march it is built for (make.sh)
 BUILT_HOST_FILE = "/usr/local/lib/locachy/built-host" # host_hash() of make.sh --boot's last build
+SOURCE_UNBUILT_FILE = "/usr/local/lib/locachy/source-unbuilt" # COMMIT, setup-pending until helpers ready; make.sh removes it
+SELF = "/usr/local/bin/locachy-pkg"
 INIT = "/usr/local/lib/locachy/init"
 PLAN_FILE = "/var/lib/locachy/plan"
 CHECK_DB = "/var/tmp/locachy-checkupdates"
@@ -969,29 +1025,6 @@ def check_source_update():
     return old_short, commit, label, branch
 
 
-def staged_test_source(update):
-    """Validate a pending source update against target libraries before install.
-    Keeping the old sources for contracts would prevent their own compiler
-    fixes from ever reaching a host whose package update runs first.
-    """
-    if update is None:
-        return SRC
-    commit = update[1]
-    if not re.fullmatch(r"[0-9a-f]{40}", commit):
-        raise RuntimeError("invalid source commit for target validation")
-    verify_source_commit(commit)
-    parent = os.path.join(LOCAL_RECORDS, "source-tests")
-    os.makedirs(parent, exist_ok=True)
-    directory = tempfile.mkdtemp(prefix=commit[:12] + "-", dir=parent)
-    try:
-        extract_commit_src(commit, directory)
-        helper_module("locachy_transaction").test_source_hash(directory)
-    except Exception:
-        shutil.rmtree(directory)
-        raise
-    return directory
-
-
 def apply_source_update(commit):
     """Verify and atomically install commit's src/ tree into SRC."""
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
@@ -1321,14 +1354,35 @@ def local_packages(db):
     return packages
 
 
-def plan():
-    """The plan: (target, kind, what, old, new) rows."""
+def source_setup_pending():
+    """A source installed, its updater helpers or declarations not yet ready."""
+    try:
+        with open(SOURCE_UNBUILT_FILE, encoding="utf-8") as f:
+            return "setup-pending" in f.read().splitlines()
+    except FileNotFoundError:
+        return False
+
+
+def plan(check_source=True):
+    """The plan: (target, kind, what, old, new) rows. Phase two checks only
+    the installed source: another remote commit is for the next Apply."""
     global _pending_plan_lock
     _pending_plan_lock = None
     rows = []
+    if source_setup_pending():
+        # The installed source may need newer helpers than this process.
+        # Check must stay read-only and resumable, without the stale plan:
+        # the real work is checked after setup, by the installed updater.
+        rows = [("host", "rebuild", "checked after LOCachy source setup", "", ""),
+                ("locachy", "rebuild", "finish the installed source setup, then check and apply", "", ""),
+                ("locachy", "note", "source setup did not finish; Apply retries it before checking the rest", "", "")]
+        for name in containers():
+            rows += [(name, "state", container_state(name), "", ""),
+                     (name, "rebuild", "checked after LOCachy source setup", "", "")]
+        return rows
     updates, newest = repo_updates()
     try:
-        src_upd = check_source_update()
+        src_upd = check_source_update() if check_source else None
     except SourceNotChecked as e:
         print(f"locachy-pkg: LOCachy source not checked: {e}", file=sys.stderr)
         rows.append(("locachy", "note", f"source not checked: {e}", "", ""))
@@ -1353,9 +1407,14 @@ def plan():
             if name not in recipes:
                 raise RuntimeError(f"{name}: local recipe is missing; update cannot be prepared")
             prepared_recipes.setdefault(name, {"baseline_dir": baselines[name], "recipe_dir": recipes[name]})
-        test_source = staged_test_source(src_upd)
+        # Tested by the installed source, whose recipes these are: with a
+        # LOCachy update applied, the updated updater checks again. Declared
+        # leaves the host lacks and the repositories have go into the same
+        # transaction, so into its build and contract roots too.
+        declared = [n for n in declared_missing(host) if n in newest and n not in local_owned]
         _pending_plan_lock = transaction.snapshot(LOCAL_RECORDS, os.path.join(CHECK_DB, "sync"), PACMAN_CONFIG,
-                                                   transaction_host_hash(), prepared_recipes, candidate_locks, test_source=test_source)
+                                                   transaction_host_hash(), prepared_recipes, candidate_locks,
+                                                   test_source=SRC, missing=declared)
     foreign = {n: v for n, v in host.items() if n not in newest and n not in local_owned}
     owned = {}
     for name in containers():
@@ -1385,7 +1444,8 @@ def plan():
         if reason:
             rows.append(("host", "local", n, host[n], reason))
     # Declared but not installed (a manifest completed by a source update):
-    # installed by apply after the host update, as sync would install them.
+    # installed by apply with the host update (prepared: in its transaction,
+    # the repositories' ones), as sync would install them.
     for n in declared_missing(host):
         rows.append(("host", "missing", n, "", "declared, not installed"))
     host_changes = any(r[0] == "host" for r in rows)
@@ -1395,6 +1455,11 @@ def plan():
         rows.append(("locachy", "repo", "locachy-src", old_short, new_label))
         rows.append(("locachy", "rebuild", f"new source and recipes from branch {branch} (make.sh --boot)",
                      old_short, new_commit))
+        rows.append(("locachy", "note", "applied before the host: the rest is checked again by the updated updater",
+                     "", ""))
+    elif os.path.exists(SOURCE_UNBUILT_FILE):
+        rows.append(("locachy", "rebuild", "its programs: not yet built from the installed LOCachy source (make.sh --boot)",
+                     "", ""))
     elif host_changes:
         rows.append(("locachy", "rebuild", "its programs, against the updated host (make.sh --boot)", "", ""))
     elif locachy_built_host() != current:
@@ -1645,7 +1710,7 @@ def rebuild_locachy(force=False):
     if not on_host_root():
         print("locachy-pkg: not the host's root; LOCachy's programs left as they are", flush=True)
         return True
-    if not force and locachy_built_host() == host_hash():
+    if not force and locachy_built_host() == host_hash() and not os.path.exists(SOURCE_UNBUILT_FILE):
         print("locachy-pkg: LOCachy's programs are built against the host as it is", flush=True)
         return True
     try:
@@ -1678,11 +1743,87 @@ def cmd_plan(args):
     return 0
 
 
-def cmd_apply(targets):
-    rows, _ = load_plan()
+def write_source_unbuilt(commit, pending=False):
+    """The existing unbuilt marker also records whether source setup is done.
+    Atomic, so an interrupted completion still retries the idempotent setup."""
+    os.makedirs(os.path.dirname(SOURCE_UNBUILT_FILE), exist_ok=True)
+    temporary = SOURCE_UNBUILT_FILE + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as f:
+        f.write(commit + "\n" + ("setup-pending\n" if pending else ""))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(temporary, SOURCE_UNBUILT_FILE)
+
+
+def finish_source_setup():
+    """Retry both idempotent helpers before planning the host. The source is
+    already installed, so no old plan or network source lookup is needed."""
+    try:
+        with open(SOURCE_UNBUILT_FILE, encoding="utf-8") as f:
+            commit = f.readline().strip()
+        if not (run(["sh", os.path.join(SRC, "link/install-pkg-tools"), SRC]) and
+                run(["python3", "-I", os.path.join(SRC, "link/declare-packages"), SRC, MANIFEST])):
+            return False
+        write_source_unbuilt(commit)
+        return True
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+        print(f"locachy-pkg: source setup failed: {e}", file=sys.stderr)
+        return False
+
+
+def install_source_first(commit):
+    """The plan's LOCachy source, and from it the updater, its helpers, the
+    builder and the contract gate (install-pkg-tools) and the packages its
+    definitions add (declare-packages), before anything else: the host and
+    the containers are then planned and tested by the source they will run
+    with. Its programs are built later, against the updated host: until
+    make.sh --boot has, SOURCE_UNBUILT_FILE says so. Its setup-pending line
+    stays until both helpers succeed, so a fresh Check and Apply can retry."""
+    try:
+        apply_source_update(commit)
+        write_source_unbuilt(commit, pending=True)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+        print(f"locachy-pkg: source update failed: {e}", file=sys.stderr)
+        return False
+    return finish_source_setup()
+
+
+def cmd_apply(targets, after_source=False):
+    """The last plan, target by target. With a LOCachy update among the
+    targets its source and updater come first; the updated updater then
+    checks again and applies the rest (after_source: that second part)."""
+    if source_setup_pending():
+        print("===> locachy: finish the installed source setup first", flush=True)
+        if not finish_source_setup():
+            print("===> locachy: not done", flush=True)
+            print("===> not done: locachy", flush=True)
+            return 1
+        print("===> locachy: source setup finished; the rest is checked again by the updated updater", flush=True)
+        sys.stderr.flush()
+        os.execv(SELF, [SELF, "apply", "--after-source"] + list(targets))
+    if after_source:
+        try:
+            rows = plan(check_source=False)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+            print(f"locachy-pkg: check after the LOCachy update failed: {e}", file=sys.stderr)
+            print("===> not done: " + (" ".join(targets) or "all"), flush=True)
+            return 1
+        save_plan(rows)
+    else:
+        rows, _ = load_plan()
     if not rows:
         sys.exit("locachy-pkg: no plan: run locachy-pkg plan first")
     order = [t for t in targets_of(rows) if not targets or t in targets]
+    commits = [r[4] for r in rows if r[:2] == ("locachy", "rebuild") and re.fullmatch(r"[0-9a-f]{40}", r[4])]
+    if commits and "locachy" in order and not after_source:
+        print("===> locachy: its source and updater first", flush=True)
+        if not install_source_first(commits[-1]):
+            print("===> locachy: not done", flush=True)
+            print("===> not done: locachy", flush=True)
+            return 1
+        print("===> locachy: source installed; the rest is checked again by the updated updater", flush=True)
+        sys.stderr.flush()
+        os.execv(SELF, [SELF, "apply", "--after-source"] + list(targets))
     failed = []
     for t in order:
         print(f"===> {t}", flush=True)
@@ -1738,7 +1879,8 @@ def main():
     elif action == "plan":
         sys.exit(cmd_plan(sys.argv[2:]))
     elif action == "apply":
-        sys.exit(cmd_apply(sys.argv[2:]))
+        args = sys.argv[2:]
+        sys.exit(cmd_apply([a for a in args if a != "--after-source"], "--after-source" in args))
     elif action == "update":
         sys.exit(cmd_update(sys.argv[2:]))
     elif action == "rebuild":

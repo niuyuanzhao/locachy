@@ -45,19 +45,21 @@ static char *dir_path(const char *rel)
 #define COLS 140
 #define ROWS 40
 static char grid[ROWS][COLS + 1], shown[ROWS][COLS + 1];
+static int current_cols = COLS, current_rows = ROWS;
 
 void say(const char *fmt, ...) { (void)fmt; }
 int screen_open(const char *font) { (void)font; return 1; }
 int keys_open(void) { return 1; }
-int screen_cols(void) { return COLS; }
-int screen_rows(void) { return ROWS; }
+int screen_cols(void) { return current_cols; }
+int screen_rows(void) { return current_rows; }
 int screen_char_cells(uint32_t cp) { (void)cp; return 1; }
 void screen_bar(const char *title, const char *ime) { (void)title; (void)ime; }
 void screen_fill(int col, int row, int cols, int rows, uint32_t rgb)
 {
     (void)rgb;
-    for (int r = row; r < row + rows && r < ROWS; r++) {
-        for (int c = col; c < col + cols && c < COLS; c++) {
+    assert(col >= 0 && row >= 0);
+    for (int r = row; r < row + rows && r < current_rows; r++) {
+        for (int c = col; c < col + cols && c < current_cols; c++) {
             grid[r][c] = ' ';
         }
     }
@@ -66,7 +68,8 @@ void screen_text(int col, int row, const char *s, uint32_t fg, uint32_t bg)
 {
     (void)fg;
     (void)bg;
-    for (int c = col; *s && c < COLS && row < ROWS; c++, s++) {
+    assert(col >= 0 && row >= 0);
+    for (int c = col; *s && c < current_cols && row < current_rows; c++, s++) {
         grid[row][c] = *s;
     }
 }
@@ -91,6 +94,7 @@ static int on_screen(const char *text)
 #define END 0
 #define WAIT (-1)
 #define SNAP (-2)
+#define RESIZE (-3)
 #define CLICK(i) (-100 - (i))
 static const int *script;
 static int step;
@@ -132,6 +136,16 @@ int key_poll_timeout(int fd, int ms)
     if (key <= CLICK(0)) {
         point(&clicks[CLICK(0) - key]);
         return K_POINTER;
+    }
+    if (key == RESIZE) {
+        current_cols = 110;
+        current_rows = 28;
+        for (int r = 0; r < ROWS; r++) {
+            memset(grid[r], ' ', COLS);
+            grid[r][COLS] = '\0';
+        }
+        memcpy(shown, grid, sizeof shown);
+        return K_SHOWN;
     }
     if (key == WAIT) {
         usleep(300000);
@@ -187,6 +201,8 @@ static void run(const char *what, const int *keys)
     printf("== %s\n", what);
     script = keys;
     step = nsnaps = npicks = 0;
+    current_cols = COLS;
+    current_rows = ROWS;
     page = UPDATES;
     memset(sel, 0, sizeof sel);
     show_log = details_from = 0;
@@ -273,6 +289,7 @@ int main(int argc, char **argv)
     char script_text[4096];
     snprintf(script_text, sizeof script_text,
              "#!/bin/sh\necho \"pkg $*\" >>%s/calls\n"
+             "[ \"$1\" != install ] || echo \"pkg install: $# arguments\" >>%s/calls\n"
              "case \"$*\" in \"plan --cached --machine\") cat %s/plan.txt ;;\n"
              "\"status --machine\") cat %s/status.txt ;; info\\ *) cat %s/info.txt ;;\n"
              "search\\ *) cat %s/search.txt ;; plan) seq 1 60; sleep 0.2 ;;\n"
@@ -282,7 +299,7 @@ int main(int argc, char **argv)
              "  echo 'Trust them: locachy-build --trust-key 40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C'; exit 3\n"
              "  fi; echo working; sleep 0.2 ;;\n"
              "*) echo working; sleep 0.2 ;; esac\n",
-             dir, dir, dir, dir, dir, dir, dir);
+             dir, dir, dir, dir, dir, dir, dir, dir);
     put("pkg", script_text);
     snprintf(script_text, sizeof script_text, "#!/bin/sh\necho \"app $*\" >>%s/calls\necho done\n", dir);
     put("app", script_text);
@@ -383,6 +400,7 @@ int main(int argc, char **argv)
     assert(on_screen(columns("at-spi2-core", "2.54.0-2", "4.0 MiB")) && on_screen(columns("libxss", "1.2.4-1", "36.6 KiB")));
     assert(on_screen(columns("microsoft-edge-stable-bin", "155.0.4283.62-1", "600.0 MiB")));
     assert(on_screen(columns("gtk3", "1:3.24.43-4", "48.0 MiB")) && on_screen(columns("libcups", "2:2.4.11-1", "1.0 MiB")));
+    assert(on_screen("Details: edge   l: output") && !on_screen("Details: edge ("));
     assert(on_screen("lines 1-17 of 20   PgUp/PgDn: scroll") && !on_screen("zlib-ng") && !on_screen("glibc"));
     struct click wheel[] = { { "Its build installed", 0, 0, 1 } };
     clicks = wheel;
@@ -453,6 +471,17 @@ int main(int argc, char **argv)
     assert(has("calls", "pkg install foo\n") && has("calls", "pkg remove labwc\n"));
     assert(on_screen("labwc"));
 
+    /* Several names at once: each its own argument, as locachy-pkg install takes them. */
+    unlink(D("calls"));
+    run("host: add two packages at once",
+        (const int[]){ '\t', '\t', 'i', 'l', 'i', 'b', 'r', 'a', 'w', ' ', ' ', 'c', 'h', 'm', 'l', 'i', 'b', ' ', '\n',
+                       WAIT, WAIT, END });
+    assert(has("calls", "pkg install libraw chmlib\n") && has("calls", "pkg install: 3 arguments\n"));
+    unlink(D("calls"));
+    run("host: a name pacman does not take is refused",
+        (const int[]){ '\t', '\t', 'i', 'a', ';', 'b', '\n', WAIT, END });
+    assert(!has("calls", "pkg install") && on_screen("Package names: letters, digits and @ . _ + -, at most 32."));
+
     run("host: what differs from the manifest; versions, sizes, and what is installed in all",
         (const int[]){ '\t', '\t', END });
     assert(on_screen("drift    cowsay") && on_screen("3 declared, 366 installed"));
@@ -508,6 +537,33 @@ int main(int argc, char **argv)
         (const int[]){ '\t', '/', 'f', 'i', 'r', 'e', '\n', '\n', '\n', WAIT, WAIT, END });
     assert(has("calls", "pkg search fire\n") && has("calls", "app build firefox\n"));
     assert(has("conf/firefox.conf", "package=\"firefox\"") && has("conf/firefox.conf", "extras=\"libnotify\""));
+
+    run("resize: the main page lays out the new rows and hit map",
+        (const int[]){ RESIZE, SNAP, END });
+    assert(strstr(shown[26], "[c: check]") && ui_hit_at(2, 26) == HIT_KEY + 'c');
+    assert(on_screen("Installed: 1234 packages"));
+
+    unlink(D("calls"));
+    run("resize: a package prompt keeps its text and redraws the page",
+        (const int[]){ '\t', '\t', 'i', 'f', RESIZE, 'o', 'o', SNAP, '\n', WAIT, WAIT, END });
+    assert(has("calls", "pkg install foo\n") && snapped("Declared package"));
+
+    unlink(D("calls"));
+    clicks = applying;
+    run("resize: confirmation waits for an answer and stays clickable",
+        (const int[]){ 'a', RESIZE, SNAP, CLICK(4), WAIT, WAIT, END });
+    assert(has("calls", "pkg apply host locachy edge\n") && snapped("Y: yes"));
+
+    clicks = editing;
+    run("resize: a container field redraws and keeps its draft",
+        (const int[]){ CLICK(0), CLICK(1), CLICK(2), K_EOL, 'x', RESIZE, 'y', SNAP, '\n', CLICK(3), END });
+    assert(has("conf/edge.conf", "arguments=\"-zxy\"") && snapped("Container edge"));
+
+    char refusal[400], shared[512];
+    snprintf(shared, sizeof shared, "%s/Downloads", D("home"));
+    assert(directory_refused(shared, refusal, sizeof refusal));
+    assert(strstr(refusal, "Downloads is in Downloads, which every container has already."));
+    assert(!strstr(refusal, dir)); /* long home paths must not push the reason off screen */
 
     puts("ALL PASSED");
     return 0;

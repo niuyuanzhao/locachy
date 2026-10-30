@@ -1,0 +1,221 @@
+diff -ruN a/docs/labwc-config.5.scd b/docs/labwc-config.5.scd
+--- a/docs/labwc-config.5.scd	2026-08-22 01:24:33.000000000 +0800
++++ b/docs/labwc-config.5.scd	2026-10-30 09:49:09.038002122 +0800
+@@ -549,6 +549,14 @@
+ 	If *inner* and *outer* is 0, snapping is disabled. Default is 10 for
+ 	*<range><inner>* and *<range><outer>*, and 50 for *<cornerRange>*.
+ 
++*<snapping><innerEdgeHold>*
++	While interactively moving a floating window, hold its cursor at a shared
++	output edge for this many milliseconds. Releasing there snaps the window
++	to its original output. Continued motion after this time crosses to the
++	adjacent output; moving back cancels the hold immediately. Ordinary pointer
++	motion and interactive resizing are unaffected. Default is 750 ms.
++	Set to 0 to disable. Requires a nonzero inner snapping range.
++
+ *<snapping><overlay><enabled>* [yes|no]
+ 	Show an overlay when snapping a window to an output edge.
+ 	Default is yes.
+diff -ruN a/docs/rc.xml.all b/docs/rc.xml.all
+--- a/docs/rc.xml.all	2026-08-22 01:24:33.000000000 +0800
++++ b/docs/rc.xml.all	2026-10-30 09:49:09.038212373 +0800
+@@ -168,6 +168,7 @@
+   <snapping>
+     <!-- Set inner and outer range to 0 to disable window snapping completely -->
+     <range inner="10" outer="10" />
++    <innerEdgeHold>750</innerEdgeHold>
+     <cornerRange>50</cornerRange>
+     <overlay enabled="yes">
+       <delay inner="500" outer="500" />
+diff -ruN a/include/config/rcxml.h b/include/config/rcxml.h
+--- a/include/config/rcxml.h	2026-08-22 01:24:33.000000000 +0800
++++ b/include/config/rcxml.h	2026-10-30 09:49:09.034859398 +0800
+@@ -168,6 +168,7 @@
+ 	int unmaximize_threshold;
+ 
+ 	/* window snapping */
++	int snap_inner_edge_hold;
+ 	int snap_edge_range_inner;
+ 	int snap_edge_range_outer;
+ 	int snap_edge_corner_range;
+diff -ruN a/include/labwc.h b/include/labwc.h
+--- a/include/labwc.h	2026-08-22 01:24:33.000000000 +0800
++++ b/include/labwc.h	2026-10-30 09:49:09.036061318 +0800
+@@ -93,6 +93,14 @@
+ 		struct wlr_scene_tree *icons;
+ 	} drag;
+ 
++	/* A temporary cursor barrier while moving a window across an inner edge. */
++	struct {
++		bool active, horizontal;
++		int direction;
++		double position, lo, hi;
++		int64_t until_msec;
++	} inner_edge_hold;
++
+ 	struct overlay overlay;
+ 	/* Used to prevent region snapping when starting a move with A-Left */
+ 	bool region_prevent_snap;
+diff -ruN a/src/config/rcxml.c b/src/config/rcxml.c
+--- a/src/config/rcxml.c	2026-08-22 01:24:33.000000000 +0800
++++ b/src/config/rcxml.c	2026-10-30 09:49:09.035805533 +0800
+@@ -1252,6 +1252,8 @@
+ 		rc.snap_edge_range_outer = atoi(content);
+ 		wlr_log(WLR_ERROR, "<snapping><range> is deprecated. "
+ 			"Use <snapping><range inner=\"\" outer=\"\"> instead.");
++	} else if (!strcasecmp(nodename, "innerEdgeHold.snapping")) {
++		rc.snap_inner_edge_hold = MAX(0, atoi(content));
+ 	} else if (!strcasecmp(nodename, "inner.range.snapping")) {
+ 		rc.snap_edge_range_inner = atoi(content);
+ 	} else if (!strcasecmp(nodename, "outer.range.snapping")) {
+@@ -1572,6 +1574,7 @@
+ 	rc.unsnap_threshold = 20;
+ 	rc.unmaximize_threshold = 150;
+ 
++	rc.snap_inner_edge_hold = 750;
+ 	rc.snap_edge_range_inner = 10;
+ 	rc.snap_edge_range_outer = 10;
+ 	rc.snap_edge_corner_range = 50;
+diff -ruN a/src/input/cursor.c b/src/input/cursor.c
+--- a/src/input/cursor.c	2026-08-22 01:24:33.000000000 +0800
++++ b/src/input/cursor.c	2026-10-30 10:50:09.722085974 +0800
+@@ -875,6 +875,112 @@
+ 			== seat->wlr_seat->pointer_state.focused_surface;
+ }
+ 
++/* Window-edge resistance does not hold the pointer at the snap trigger.
++ * While moving a window, pause at a shared output edge long enough to use
++ * its snap preview. Continued motion after the hold crosses normally; a
++ * retreat cancels immediately. Ordinary pointer motion is never held. */
++static void
++inner_edge_hold(struct seat *seat, double *dx, double *dy)
++{
++	if (server.input_mode != LAB_INPUT_STATE_MOVE || !server.grabbed_view
++			|| !view_is_floating(server.grabbed_view)
++			|| rc.snap_inner_edge_hold <= 0 || rc.snap_edge_range_inner <= 0) {
++		seat->inner_edge_hold.active = false;
++		return;
++	}
++
++	struct timespec now;
++	clock_gettime(CLOCK_MONOTONIC, &now);
++	int64_t msec = (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
++	double x = seat->cursor->x, y = seat->cursor->y;
++	if (seat->inner_edge_hold.active) {
++		double delta = seat->inner_edge_hold.horizontal ? *dx : *dy;
++		double along = seat->inner_edge_hold.horizontal ? y + *dy : x + *dx;
++		if (delta * seat->inner_edge_hold.direction < 0
++				|| along < seat->inner_edge_hold.lo
++				|| along >= seat->inner_edge_hold.hi) {
++			seat->inner_edge_hold.active = false;
++		} else {
++			if (msec >= seat->inner_edge_hold.until_msec) {
++				double position = seat->inner_edge_hold.horizontal ? x : y;
++				/* Do not start another hold if this event is only vertical,
++				 * or a sub-pixel step has not crossed the boundary yet. */
++				if ((position - seat->inner_edge_hold.position)
++						* seat->inner_edge_hold.direction > 0) {
++					seat->inner_edge_hold.active = false;
++				}
++				return;
++			}
++			if (seat->inner_edge_hold.horizontal) {
++				*dx = seat->inner_edge_hold.position - x;
++			} else {
++				*dy = seat->inner_edge_hold.position - y;
++			}
++			return;
++		}
++	}
++
++	struct output *output = output_nearest_to(x, y);
++	if (!output_is_usable(output)) {
++		return;
++	}
++	struct wlr_box box;
++	wlr_output_layout_get_box(server.output_layout, output->wlr_output, &box);
++	double target_x = x + *dx, target_y = y + *dy;
++	enum wlr_direction directions[] = {
++		WLR_DIRECTION_LEFT, WLR_DIRECTION_RIGHT,
++		WLR_DIRECTION_UP, WLR_DIRECTION_DOWN,
++	};
++	for (size_t i = 0; i < ARRAY_SIZE(directions); ++i) {
++		bool horizontal = i < 2;
++		int direction = (i == 0 || i == 2) ? -1 : 1;
++		double edge = horizontal ? box.x + (direction > 0 ? box.width : 0)
++			: box.y + (direction > 0 ? box.height : 0);
++		double current = horizontal ? x : y;
++		double target = horizontal ? target_x : target_y;
++		if ((target - edge) * direction < 0 || (current - edge) * direction > 0
++				|| (horizontal ? *dx : *dy) * direction <= 0) {
++			continue;
++		}
++		/* Test the motion segment where it crosses this edge, not its
++		 * endpoint, which may already be past an offset neighbor. */
++		double fraction = (edge - current) / (target - current);
++		double along = horizontal ? y + *dy * fraction : x + *dx * fraction;
++		struct wlr_output *next = wlr_output_layout_adjacent_output(
++			server.output_layout, directions[i], output->wlr_output, x, y);
++		if (!next) {
++			continue; /* The layout already constrains exterior edges. */
++		}
++		struct wlr_box neighbor;
++		wlr_output_layout_get_box(server.output_layout, next, &neighbor);
++		double near = horizontal ? neighbor.x + (direction < 0 ? neighbor.width : 0)
++			: neighbor.y + (direction < 0 ? neighbor.height : 0);
++		double lo = MAX(horizontal ? box.y : box.x,
++			horizontal ? neighbor.y : neighbor.x);
++		double hi = MIN(horizontal ? box.y + box.height : box.x + box.width,
++			horizontal ? neighbor.y + neighbor.height : neighbor.x + neighbor.width);
++		if (near != edge || along < lo || along >= hi) {
++			continue; /* Not a shared edge at this point (offset outputs or a gap). */
++		}
++
++		seat->inner_edge_hold.active = true;
++		seat->inner_edge_hold.horizontal = horizontal;
++		seat->inner_edge_hold.direction = direction;
++		seat->inner_edge_hold.position = edge - (direction > 0 ? 1 : 0);
++		seat->inner_edge_hold.lo = lo;
++		seat->inner_edge_hold.hi = hi;
++		seat->inner_edge_hold.until_msec = msec + rc.snap_inner_edge_hold;
++		if (horizontal) {
++			*dx = seat->inner_edge_hold.position - x;
++			*dy *= fraction;
++		} else {
++			*dy = seat->inner_edge_hold.position - y;
++			*dx *= fraction;
++		}
++		return;
++	}
++}
++
+ static void
+ preprocess_cursor_motion(struct seat *seat, struct wlr_pointer *pointer,
+ 		uint32_t time_msec, double dx, double dy)
+@@ -883,6 +989,7 @@
+ 		return;
+ 	}
+ 	apply_constraint(seat, pointer, &dx, &dy);
++	inner_edge_hold(seat, &dx, &dy);
+ 
+ 	/*
+ 	 * The cursor doesn't move unless we tell it to. The cursor
+@@ -1513,6 +1620,7 @@
+ 		seat->wlr_seat, (uint64_t)time_msec * 1000,
+ 		dx, dy, dx, dy);
+ 
++	inner_edge_hold(seat, &dx, &dy);
+ 	wlr_cursor_move(seat->cursor, device, dx, dy);
+ 	double sx, sy;
+ 	bool notify = cursor_process_motion(time_msec, &sx, &sy);
+diff -ruN a/src/interactive.c b/src/interactive.c
+--- a/src/interactive.c	2026-08-22 01:24:33.000000000 +0800
++++ b/src/interactive.c	2026-10-30 09:49:09.036263113 +0800
+@@ -349,6 +349,7 @@
+ 	}
+ 
+ 	server.grabbed_view = NULL;
++	server.seat.inner_edge_hold.active = false;
+ 
+ 	/*
+ 	 * It's possible that grabbed_view was set but interactive_begin()

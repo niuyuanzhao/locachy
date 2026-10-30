@@ -160,6 +160,10 @@ int main(int argc, char **argv)
         assert(keys_char(code, 1) == (unsigned char)shifted[code]);
     }
     assert(!strcmp(keys_layout_name("layout"), "us") && !strcmp(keys_layout_name("console"), "us"));
+    assert(tap(KEY_KP1) == K_EOL && tap(KEY_KP2) == K_DOWN);
+    assert(tap(KEY_NUMLOCK) == 0 && tap(KEY_KP1) == '1' && tap(KEY_KP2) == '2');
+    assert(tap(KEY_NUMLOCK) == 0 && tap(KEY_KP1) == K_EOL);
+    puts("PASS generated US Num Lock: keypad digits when locked and navigation when unlocked");
     assert(keys_layout_name("options") == NULL); /* terminate:ctrl_alt_bksp dropped */
     /* A JIS keyboard with the US layout: Henkan keeps its name, the key
      * left of 1 types ` (Zenkaku_Hankaku is jp's). */
@@ -339,6 +343,12 @@ int main(int argc, char **argv)
     assert(keys_set_keyboard("1133:49948:USB_Keyboard", NULL) == 0 && !has_line(devices_path, "USB_Keyboard"));
     keys_reload();
     assert(keys_keyboards(kb, 4) == 2 && !kb[1].own && !strcmp(kb[1].keymap, "jp106"));
+    assert(on_tap(0, KEY_Y) == 'y' && on_tap(1, KEY_Y) == 'y');
+    assert(keys_set_keyboard("1133:49948:USB_Keyboard", "us") == 0);
+    keys_reload();
+    assert(count == 2 && on_tap(0, KEY_Y) == 'y' && on_tap(1, KEY_Y) == 'y');
+    assert(on_tap(0, KEY_LEFTBRACE) == '@' && on_tap(1, KEY_LEFTBRACE) == '[');
+    puts("PASS direct-input setup, clearing and re-enabling layouts keep both keyboard queues live, including y");
     keys_release();
     close(board[0][1]);
     close(board[1][1]);

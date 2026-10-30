@@ -12,6 +12,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -65,7 +66,8 @@ class LocalPackages(unittest.TestCase):
                             ("CPU_FILE", str(self.cpu)),
                             ("RC_CONF", str(self.rc)), ("SOURCE_REPO_DIR", str(self.source_repo)),
                             ("SOURCE_COMMIT_FILE", str(self.source_commit)),
-                            ("TRUSTED_SIGNERS", str(self.signers))):
+                            ("TRUSTED_SIGNERS", str(self.signers)),
+                            ("SOURCE_UNBUILT_FILE", str(self.root / "source-unbuilt"))):
             p = mock.patch.object(pkg, name, value)
             p.start()
             self.addCleanup(p.stop)
@@ -133,7 +135,7 @@ class LocalPackages(unittest.TestCase):
         self.assertIn(("host", "local", "labwc-locachy", "0.20.2-1.1",
                        "1:0.21.0-1: stable 0.21.0-1 (0.21.0-1)"), rows)
 
-    def test_host_contract_uses_pending_source_update_not_old_compiler_input(self):
+    def test_check_plans_the_host_with_the_installed_source_and_pins_declared_packages(self):
         self.record()
         (self.recipe / "upstream.json").write_text('{"schema":1}\n')
         commit = "a" * 40
@@ -142,39 +144,252 @@ class LocalPackages(unittest.TestCase):
                                    "source_version": "0.20.2-1", "upstream_tag": "0.20.2-1"}}
         self.patch("check_source_update", lambda: ("old", commit, "new sources", "main"))
         self.patch("checked_local_candidates", lambda *args: ({"labwc-locachy": candidate}, {}))
+        self.patch("repo_updates", lambda: ([], {"base": "1", "libraw": "0.22-1"}))
+        self.manifest.write_text("labwc-locachy\nlibraw\nfrom-the-aur\n")
         snapshots = []
         transaction = types.SimpleNamespace(snapshot=lambda *args, **kwargs:
                                             snapshots.append(kwargs) or {"directory": "plan"})
         self.patch("helper_module", lambda _: transaction)
-        self.patch("staged_test_source", lambda update: str(self.root / update[1]))
         self.patch("transaction_host_hash", lambda: "current")
-        pkg.plan()
-        self.assertEqual(snapshots[0]["test_source"], str(self.root / commit))
+        rows = pkg.plan()
+        # Never the pending source's tests with the installed source's recipes.
+        self.assertEqual(snapshots[0]["test_source"], str(self.src))
+        # Repository packages the manifest declares: in the prepared transaction.
+        self.assertEqual(snapshots[0]["missing"], ["libraw"])
+        self.assertIn(("host", "missing", "from-the-aur", "", "declared, not installed"), rows)
+        self.assertIn(("locachy", "note", "applied before the host: the rest is checked again by the updated updater",
+                       "", ""), rows)
+        self.assertFalse(hasattr(pkg, "staged_test_source"))
 
-    def test_staged_sources_are_verified_and_do_not_replace_live_tree(self):
-        commit = "a" * 40
+    def source_update_fixture(self, gate):
+        """A source tree whose libinput recipe and contract name gate; its
+        view module has libraw, which the published one did not."""
+        tree = self.root / ("source-" + gate)
+        recipe = tree / "pkgbuilds/libinput"
+        recipe.mkdir(parents=True)
+        (recipe / "upstream.json").write_text(json.dumps({"schema": 1, "gate": gate}))
+        (tree / "tools").mkdir()
+        (tree / "tools/contract-id").write_text(gate + "\n")
+        (tree / "link").mkdir()
+        (tree / "link/declare-packages").write_text((SOURCE.parent / "declare-packages").read_text())
+        (tree / "link/modules.json").write_text(json.dumps({"view": {"packages": ["libmupdf", "libraw"]}}))
+        (tree / "link/declared-packages-baseline.json").write_text(
+            json.dumps({"base": ["base"], "modules": {"view": ["libmupdf"]}}))
+        (tree / "packages").write_text("base\n")
+        return tree
+
+    def test_combined_update_installs_the_source_first_then_plans_the_host_with_it(self):
+        """The FV1 failure: recipes from the installed source (gate v1), the
+        contract from the update's (v2), and a library the update's view
+        needs declared nowhere. Now one source plans, builds and tests."""
+        shutil.rmtree(self.src)
+        shutil.copytree(self.source_update_fixture("libinput-circular-scroll-v1"), self.src)
+        new = self.source_update_fixture("libinput-circular-scroll-v2")
+        self.manifest.write_text("base\nlibmupdf\nlibinput\n")
+        self.host = {"base": "1", "libmupdf": "1", "libinput": "1:1.32.0-1"}
+        commit = "b" * 40
+        update = [("old", commit, "new sources", "main")]
+        self.patch("check_source_update", lambda: update[0] if update else None)
+        self.patch("repo_updates", lambda: ([], {"base": "1", "libmupdf": "1", "libraw": "0.22-1"}))
+
+        def candidates(recipes, installed):
+            gate = json.loads(Path(recipes["libinput"], "upstream.json").read_text())["gate"]
+            return {"libinput": {"baseline_dir": recipes["libinput"], "recipe_dir": recipes["libinput"],
+                                 "candidate": {"candidate_id": "c", "package_version": "1:1.32.0-1",
+                                               "source_version": "1.32.0-1", "upstream_tag": "1.32.0-1",
+                                               "gate": gate}}}, {}
+        self.patch("checked_local_candidates", candidates)
+        contracts = []
+
+        def snapshot(*args, test_source=None, missing=None, **kwargs):
+            # What locachy-build --validate-prepared compares: the candidate's
+            # gate (its recipe) and the id its contract writes (the tests).
+            contracts.append((args[4]["libinput"]["candidate"]["gate"],
+                              Path(test_source, "tools/contract-id").read_text().strip(), missing))
+            return {"directory": "plan"}
+        transaction = types.SimpleNamespace(snapshot=snapshot, file_hash=lambda path: "hash",
+                                            write_json=lambda path, data: None)
+        self.patch("helper_module", lambda name: transaction)
+        self.patch("transaction_host_hash", lambda: "current")
+        self.patch("local_record", lambda name: {})
+        unbuilt = self.root / "source-unbuilt"
+        self.patch("PLAN_FILE", str(self.root / "plan"))
+        pkg.save_plan(pkg.plan())  # Check
+        self.assertEqual(contracts[0][:2], ("libinput-circular-scroll-v1",) * 2)
+        record = self.root / "declared-packages.json"
+        commands = []
+
+        def run(cmd, net=False):
+            commands.append(cmd)
+            if cmd[0] == "python3":  # declare-packages itself, its record in the scratch tree
+                return subprocess.run([sys.executable] + cmd[1:] + [str(record)], capture_output=True).returncode == 0
+            return True
+        self.patch("run", run)
+
+        def install_source(c):
+            shutil.rmtree(self.src)
+            shutil.copytree(new, self.src)
+        self.patch("apply_source_update", install_source)
+
+        class Exec(Exception):
+            pass
+
+        def execv(path, argv):
+            raise Exec(path, argv)
+        p = mock.patch.object(pkg.os, "execv", execv)
+        p.start()
+        self.addCleanup(p.stop)
+        with contextlib.redirect_stdout(io.StringIO()) as out, self.assertRaises(Exec) as phase_two:
+            pkg.cmd_apply(["host", "locachy"])
+        self.assertEqual(phase_two.exception.args, (pkg.SELF, [pkg.SELF, "apply", "--after-source", "host", "locachy"]))
+        self.assertEqual(commands, [["sh", os.path.join(str(self.src), "link/install-pkg-tools"), str(self.src)],
+                                    ["python3", "-I", os.path.join(str(self.src), "link/declare-packages"),
+                                     str(self.src), str(self.manifest)]])
+        self.assertEqual(unbuilt.read_text(), commit + "\n")
+        self.assertIn("libraw", pkg.load_manifest(str(self.manifest)))
+        self.assertIn("===> locachy: source installed; the rest is checked again by the updated updater",
+                      out.getvalue())
+        # The updated updater: one source for recipes and contracts, the
+        # declared library in the prepared transaction, the programs built.
+        del update[:]
+        applied = []
+        self.patch("apply_target", lambda target, rows: applied.append(target) or True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(pkg.cmd_apply(["host", "locachy"], after_source=True), 0)
+        self.assertEqual(contracts[1], ("libinput-circular-scroll-v2", "libinput-circular-scroll-v2", ["libraw"]))
+        self.assertEqual(applied, ["host", "locachy"])
+        self.assertEqual(len(contracts), 3)  # Check, phase two, the plan after it
+        rows, _ = pkg.load_plan()
+        self.assertIn(("locachy", "rebuild",
+                       "its programs: not yet built from the installed LOCachy source (make.sh --boot)", "", ""), rows)
+
+    def source_setup_failure_case(self, helper):
+        """A helper fails after the source is recorded; a fresh Check and
+        Apply, not the preserved old plan, must finish setup before the host."""
+        self.record()
+        self.patch("PLAN_FILE", str(self.root / "plan"))
+        self.patch("repo_updates", lambda: ([], {"base": "1", "libraw": "0.22-1"}))
+        commit = "b" * 40
+        commands = []
+        failed = [False]
+
+        def run(command, net=False):
+            commands.append(command)
+            if command[0] == helper and not failed[0]:
+                failed[0] = True
+                return False
+            if command[0] == "python3":
+                self.manifest.write_text("labwc-locachy\nlibraw\n")
+            return True
+        self.patch("run", run)
+        self.patch("apply_source_update", lambda c: self.source_commit.write_text(c + "\n"))
+        rows = [("host", "repo", "base", "1", "2"), ("locachy", "rebuild", "new source", "old", commit)]
+        pkg.save_plan(rows)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(pkg.cmd_apply([]), 1)
+        self.assertEqual(self.source_commit.read_text(), commit + "\n")
+        self.assertTrue(pkg.source_setup_pending())
+        self.assertEqual(len(commands), 1 if helper == "sh" else 2)
+        # The original failure plan is gone. A new Check must work even
+        # while this process still has the old updater's helper modules.
+        Path(pkg.PLAN_FILE).unlink()
+        self.patch("check_source_update", lambda: self.fail("Check fetched a source during pending setup"))
+        self.patch("checked_local_candidates", lambda *args: self.fail("Check used helpers before setup finished"))
+        self.patch("repo_updates", lambda: self.fail("Check did repository work before setup finished"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(pkg.cmd_plan([]), 0)
+        pending, _ = pkg.load_plan()
+        self.assertEqual(pkg.targets_of(pending), ["host", "locachy"])
+        self.assertTrue(any("source setup did not finish" in r[2] for r in pending))
+        commands.clear()
+
+        class Exec(Exception):
+            pass
+
+        def execv(path, argv):
+            raise Exec(path, argv)
+        with mock.patch.object(pkg.os, "execv", execv), contextlib.redirect_stdout(io.StringIO()), \
+                self.assertRaises(Exec) as phase_two:
+            pkg.cmd_apply([])
+        self.assertEqual(phase_two.exception.args, (pkg.SELF, [pkg.SELF, "apply", "--after-source"]))
+        self.assertEqual([c[0] for c in commands], ["sh", "python3"])
+        self.assertFalse(pkg.source_setup_pending())
+        self.assertIn("libraw", pkg.load_manifest(str(self.manifest)))
+        self.assertEqual(Path(pkg.SOURCE_UNBUILT_FILE).read_text(), commit + "\n")
+        # Only after the retry succeeded may the refreshed host plan run.
+        self.patch("repo_updates", lambda: ([], {"base": "1", "libraw": "0.22-1"}))
+        self.patch("checked_local_candidates", lambda *args: ({}, {}))
+        self.patch("check_source_update", lambda: None)
+        applied = []
+        self.patch("apply_target", lambda target, rows: applied.append(target) or True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(pkg.cmd_apply([], after_source=True), 0)
+        self.assertEqual(applied, ["host", "locachy"])
+
+    def test_failed_helper_install_resumes_after_a_fresh_check(self):
+        self.source_setup_failure_case("sh")
+
+    def test_failed_declarations_resume_after_a_fresh_check(self):
+        self.source_setup_failure_case("python3")
+
+    def test_phase_two_does_not_apply_a_newer_source_discovered_at_refresh(self):
+        self.record()
+        self.patch("PLAN_FILE", str(self.root / "plan"))
+        installed, newer = "b" * 40, "c" * 40
+        self.source_commit.write_text(installed + "\n")
+        Path(pkg.SOURCE_UNBUILT_FILE).write_text(installed + "\n")
+        fetched = []
+        applied = []
+        self.patch("check_source_update", lambda: fetched.append(newer) or (installed[:7], newer, "newer", "main"))
+        self.patch("apply_source_update", lambda c: self.fail("phase two applied an unselected newer source"))
+
+        def apply(target, rows):
+            # The initial phase-two refresh must not fetch another source.
+            self.assertEqual(fetched, [])
+            applied.append((target, rows))
+            return True
+        self.patch("apply_target", apply)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(pkg.cmd_apply(["locachy"], after_source=True), 0)
+        self.assertEqual([t for t, _ in applied], ["locachy"])
+        self.assertFalse(any(r[4] == newer for _, rows in applied for r in rows))
+        self.assertEqual(fetched, [newer])  # the final Check offers it for a later Apply
+        remaining, _ = pkg.load_plan()
+        self.assertTrue(any(r[:2] == ("locachy", "rebuild") and r[4] == newer for r in remaining))
+        self.assertEqual(self.source_commit.read_text(), installed + "\n")
+
+    def test_unbuilt_source_is_built_even_against_the_same_host(self):
+        self.record()
+        unbuilt = self.root / "source-unbuilt"
+        self.assertEqual(pkg.plan(), [])
+        unbuilt.write_text("b" * 40 + "\n")
+        self.assertEqual([r[:2] for r in pkg.plan()], [("locachy", "rebuild")])
         calls = []
-        self.patch("verify_source_commit", lambda c: calls.append(("verify", c)))
-        def extract(c, target):
-            calls.append(("extract", c))
-            (Path(target) / "make.sh").write_text("candidate\n")
-        self.patch("extract_commit_src", extract)
-        self.patch("helper_module", lambda _: types.SimpleNamespace(test_source_hash=lambda path: "digest"))
-        path = pkg.staged_test_source(("old", commit, "new", "main"))
-        self.assertEqual(calls, [("verify", commit), ("extract", commit)])
-        self.assertEqual((Path(path) / "make.sh").read_text(), "candidate\n")
-        self.assertFalse((self.src / "make.sh").exists())
-        self.assertEqual(pkg.staged_test_source(None), str(self.src))
+        self.patch("run", lambda cmd, net=False: calls.append(cmd) or True)
+        self.patch("on_host_root", lambda: True)
+        self.assertTrue(pkg.rebuild_locachy())
+        self.assertEqual(calls, [["sh", os.path.join(str(self.src), "make.sh"), "--boot", "x86-64-v2", "x86-64-v2"]])
+        make = (SOURCE.parents[1] / "make.sh").read_text()
+        self.assertLess(make.index('>"$lib/built-host"'), make.index('rm -f "$lib/source-unbuilt"'))
+        self.assertIn('python3 -I "$src/link/declare-packages" "$src" /etc/locachy/packages', make)
 
-    def test_invalid_or_unverified_pending_sources_are_never_staged(self):
-        with self.assertRaisesRegex(RuntimeError, "invalid source commit"):
-            pkg.staged_test_source(("old", "--bad", "new", "main"))
-        def rejected(_):
-            raise RuntimeError("signature verification failed")
-        self.patch("verify_source_commit", rejected)
-        self.patch("extract_commit_src", lambda *args: self.fail("unverified source extracted"))
-        with self.assertRaisesRegex(RuntimeError, "signature verification"):
-            pkg.staged_test_source(("old", "a" * 40, "new", "main"))
+    def test_host_only_apply_keeps_the_installed_source_and_failed_source_stops(self):
+        rows = [("host", "repo", "base", "1", "2"), ("locachy", "repo", "locachy-src", "old", "new"),
+                ("locachy", "rebuild", "new source", "old", "c" * 40)]
+        applied = []
+        self.patch("load_plan", lambda: (rows, "checked"))
+        self.patch("apply_target", lambda target, r: applied.append(target) or True)
+        self.patch("plan", lambda: [])
+        self.patch("save_plan", lambda r: None)
+        self.patch("install_source_first", lambda c: self.fail("the source was installed for a host-only apply"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(pkg.cmd_apply(["host"]), 0)
+        self.assertEqual(applied, ["host"])
+        self.patch("install_source_first", lambda c: False)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(pkg.cmd_apply([]), 1)
+        self.assertEqual(applied, ["host"])  # nothing after a failed source
+        self.assertIn("===> not done: locachy", out.getvalue())
 
     def test_check_uses_official_stable_recipe_not_optimized_build_release(self):
         (self.recipe / "upstream.json").write_text('{"package":"labwc"}\n')

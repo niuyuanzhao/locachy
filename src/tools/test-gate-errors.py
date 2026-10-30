@@ -32,6 +32,20 @@ class GateErrors(unittest.TestCase):
         self.assertIn(str(self.root / "host-clients-build.log"), result.stderr)
         self.assertEqual((self.root / "host-clients-build.log").read_text(), "settings.c: error: format-truncation\n")
 
+    def test_contract_mismatch_names_both_ids_and_the_source(self):
+        text = (SOURCE / "link/locachy-build").read_text()
+        start = text.index("    expected = data['recipes'][name].get('candidate', {}).get('gate')")
+        end = text.index("    for filename in", start)
+        code = "for name in builds:\n" + text[start:end]
+        with self.assertRaises(RuntimeError) as failed:
+            exec(code, {"builds": {"libinput": {}},
+                        "data": {"recipes": {"libinput": {"candidate": {"gate": "libinput-v2"}}},
+                                 "test_source": {"sha256": "a" * 64}},
+                        "gate": {"name": "libinput", "id": "libinput-v1", "passed": True}})
+        self.assertIn("expected id='libinput-v2'", str(failed.exception))
+        self.assertIn("id='libinput-v1'", str(failed.exception))
+        self.assertIn("trusted source " + "a" * 64, str(failed.exception))
+
     def test_success_keeps_output_in_its_own_log(self):
         result = subprocess.run(["bash", str(self.script), str(self.root), "sh", "-c", 'printf "build passed\\n"'],
                                 capture_output=True, text=True, timeout=5)

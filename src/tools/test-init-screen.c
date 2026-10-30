@@ -207,6 +207,7 @@ static void reset(int screens, int keyboards, int devices)
     nouts = 0;
     if (screens > 0) output("eDP-1", 0, 0, 1366, 768, 1);
     if (screens > 1) output("HDMI-A-1", 1366, 0, 1920, 1080, 0);
+    if (screens > 2) output("DP-1", 3286, 0, 2560, 1440, 0);
     kbd_count = keyboards;
     ndev = devices;
     available = 1;
@@ -388,6 +389,51 @@ static void waiting(void)
     puts("PASS home, left without a screen, waits for the task it opened: back, ended");
 }
 
+static void three(void)
+{
+    reset(3, 1, 2);
+    assert(nplaces == 3 && home.screens == 7);
+    const char *names[] = { "eDP-1", "HDMI-A-1", "DP-1" };
+    const char *programs[] = { "packages", "settings", "term" };
+    struct frame *opened[3];
+    for (int i = 0; i < 3; i++) {
+        opened[i] = task(i, programs[i]);
+        char *argv[] = { (char *)programs[i], NULL };
+        assert(do_open(place_named(names[i]), argv) == 0);
+        home_wait(argv);
+        assert(opened[i]->screens == (1u << i) && !opened[i]->frozen);
+        assert(places[i].task == &tasks[i] && focus_place == i && opened[i]->nkbd == 1);
+        for (int k = 0; k < i; k++) {
+            assert(opened[k]->screens == (1u << k) && !opened[k]->frozen && opened[k]->nkbd == 0);
+            assert(lessee_of[k] && lessee_of[k] != lessee_of[i]);
+        }
+    }
+    assert(home.screens == 0 && home.frozen);
+    for (int i = 0; i < 3; i++) {
+        go_home(i);
+        assert(home.screens == (1u << (i + 1)) - 1 && opened[i]->frozen);
+    }
+    assert(home.screens == 7 && !home.frozen);
+    puts("PASS three connectors independently launch tasks with leases 1/2/4 and return each screen to home");
+
+    /* A direct program is one task: opening it on another output moves its
+     * existing top, whether it was frozen or still shown somewhere else. */
+    char *packages[] = { "packages", NULL };
+    assert(do_open(place_named("HDMI-A-1"), packages) == 0);
+    assert(places[1].task == &tasks[0] && opened[0]->screens == 2 && !opened[0]->frozen);
+    assert(tasks[0].depth == 1 && strcmp(tasks[0].key, "packages") == 0);
+    assert(do_open(place_named("DP-1"), packages) == 0);
+    assert(places[1].task == NULL && places[2].task == &tasks[0] && opened[0]->screens == 4);
+    assert(home.screens == 3 && focus_place == 2 && opened[0]->nkbd == 1);
+    go_home(2);
+    assert(opened[0]->frozen && home.screens == 7);
+    assert(do_open(place_named("eDP-1"), packages) == 0);
+    assert(places[0].task == &tasks[0] && opened[0]->screens == 1 && !opened[0]->frozen);
+    assert(home.screens == 6 && focus_place == 0 && tasks[0].depth == 1);
+    go_home(0);
+    puts("PASS one existing packages task moves across all three outputs, frozen or already shown, without a new instance");
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2 && mkdir(argv[1], 0700) == 0);
@@ -395,6 +441,7 @@ int main(int argc, char **argv)
     hotplug();
     switching();
     several();
+    three();
     waiting();
     puts("ALL PASSED");
     return 0;

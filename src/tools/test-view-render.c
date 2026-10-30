@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <strings.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
@@ -62,10 +63,26 @@ static const char *sample(const char *name)
     return path[i];
 }
 
-static void start(void)
+/* Every renderer is reaped and checked, including intermediate ones: an
+ * LSan failure on shutdown must fail the test, not just appear in its log.
+ * Cancellation does not stop the renderer; a garbled request exits 0. The
+ * sandbox-refusal children have their own explicit expected exit below. */
+static void stop(void)
 {
     if (sock >= 0) close(sock);
-    if (pid > 0) waitpid(pid, NULL, 0);
+    sock = -1;
+    if (pid <= 0) return;
+    int status = -1;
+    pid_t got;
+    do got = waitpid(pid, &status, 0); while (got < 0 && errno == EINTR);
+    check(got == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "view-render %ld exits cleanly (wait %ld, status %#x)", (long)pid, (long)got, status);
+    pid = -1;
+}
+
+static void start(void)
+{
+    stop();
     pid = view_spawn(&sock);
     if (pid < 0) {
         check(0, "view_spawn");
@@ -1174,6 +1191,7 @@ static void test_dvi(void)
     check(r.status == 0 && !strncmp(r.text, "DVI\t", 4), "sample.dvi: dvipdfmx is installed, OPEN converts it (%s)", r.text);
     /* TeX's DVI (make-view-samples.sh), its text in Computer Modern: what
      * dvipdfmx says goes to view-render's stderr, here a file. */
+    stop(); /* the preceding renderer's shutdown diagnostics are not DVI's */
     char log[] = "/tmp/view-test-dvi-XXXXXX", said[4096] = "";
     int fd = mkstemp(log), saved = dup(2);
     fflush(stderr);
@@ -1306,12 +1324,14 @@ static void refuses(const char *what, int uid, int nnp, int netns, const char *e
     size_t got = 0;
     for (ssize_t n; got + 1 < sizeof msg && (n = read(err[0], msg + got, sizeof msg - 1 - got)) > 0;) got += (size_t)n;
     msg[got] = '\0';
-    int status;
-    waitpid(p, &status, 0);
+    int status = -1;
+    pid_t reaped;
+    do reaped = waitpid(p, &status, 0); while (reaped < 0 && errno == EINTR);
     close(err[0]);
     close(sv[0]);
     msg[strcspn(msg, "\n")] = '\0';
-    check(WIFEXITED(status) && WEXITSTATUS(status) == 1 && strstr(msg, expect), "sandbox: %s: refuses (\"%s\")", what, msg);
+    check(reaped == p && WIFEXITED(status) && WEXITSTATUS(status) == 1 && strstr(msg, expect),
+          "sandbox: %s: refuses (status %#x, \"%s\")", what, status, msg);
 }
 
 static void test_refusals(void)
@@ -1561,8 +1581,140 @@ static void test_pdf_edit(void)
     check(call(&q, NULL).status == ENOTSUP, "PDF edit: UNDO of an EPUB: ENOTSUP");
 }
 
+/* OPEN of path with mode: its status, pages, and the names its memfd lists,
+ * joined by spaces. */
+static struct view_reply open_names(const char *path, int mode, char *names, size_t size)
+{
+    struct view_request q = req(VIEW_OPEN, 0);
+    snprintf(q.text, sizeof q.text, "%s", path);
+    q.mode = mode;
+    char *data;
+    struct view_reply r = call(&q, (void **)&data);
+    names[0] = '\0';
+    for (size_t at = 0; data && at < r.size; at += strlen(data + at) + 1) {
+        size_t n = strlen(names);
+        snprintf(names + n, size - n, "%s%s", n ? " " : "", data + at);
+    }
+    free(data);
+    return r;
+}
+
+/* The RAW samples' page: red on the left, blue on the right. */
+static int raw_colors(int page)
+{
+    struct view_reply rr;
+    uint32_t *px = render(page, 1, 0, &rr);
+    int ok = px && rr.w > rr.h && is_color(pixel(px, rr.w, rr.w / 4, rr.h / 2), 0xFF, 0, 0) &&
+             is_color(pixel(px, rr.w, rr.w * 3 / 4, rr.h / 2), 0, 0, 0xFF);
+    free(px);
+    return ok;
+}
+
+/* Gwenview's Browse mode's folder (make-view-samples.c gallery): a
+ * gallery's own images in KIO's name order, Okular's comic book of it, the
+ * orders by date taken (EXIF, else the file's time) and by size, both
+ * ways; META of each kind; RAW pages in the folder and in an archive. */
+static void test_gallery(void)
+{
+    char names[1024], want[1024];
+    struct view_reply r = open_names(sample("gallery"), VIEW_GALLERY, names, sizeof names);
+    check(r.status == 0 && r.pages == 5 && !strcmp(names, "a.jpg B.jpg c.png d.dng e.png"),
+          "gallery: its own images, by name as KIO sorts (%d pages: %s; %s)", r.pages, names, r.text);
+    r = open_names(sample("gallery"), VIEW_SORT_NAME, names, sizeof names);
+    check(r.status == 0 && !strcmp(names, "B.jpg a.jpg c.png d.dng e.png sub/s.png"),
+          "gallery as a comic book: Okular's order, a folder down too (%s)", names);
+    r = open_names(sample("gallery"), VIEW_GALLERY | VIEW_SORT_DATE, names, sizeof names);
+    check(r.status == 0 && !strcmp(names, "B.jpg c.png a.jpg d.dng e.png"),
+          "gallery by date: JPEG EXIF 2019, a file of 2020, 2021, DNG 2022, PNG eXIf 2023 (%s)", names);
+    r = open_names(sample("gallery"), VIEW_GALLERY | VIEW_SORT_DATE | VIEW_SORT_DESCENDING, names, sizeof names);
+    check(r.status == 0 && !strcmp(names, "e.png d.dng a.jpg c.png B.jpg"), "gallery by date, descending (%s)", names);
+    /* By size: what the files' sizes say, then their names. */
+    const char *files[5] = { "a.jpg", "B.jpg", "c.png", "d.dng", "e.png" };
+    long long sizes[5];
+    for (int i = 0; i < 5; i++) {
+        struct stat st;
+        char path[PATH_MAX];
+        snprintf(path, sizeof path, "%s/gallery/%s", samples, files[i]);
+        sizes[i] = stat(path, &st) == 0 ? (long long)st.st_size : -1;
+    }
+    for (int i = 0; i < 5; i++) {
+        for (int k = i + 1; k < 5; k++) {
+            if (sizes[k] < sizes[i] || (sizes[k] == sizes[i] && strcasecmp(files[k], files[i]) < 0)) {
+                long long t = sizes[i];
+                const char *f = files[i];
+                sizes[i] = sizes[k], files[i] = files[k];
+                sizes[k] = t, files[k] = f;
+            }
+        }
+    }
+    snprintf(want, sizeof want, "%s %s %s %s %s", files[0], files[1], files[2], files[3], files[4]);
+    r = open_names(sample("gallery"), VIEW_GALLERY | VIEW_SORT_SIZE, names, sizeof names);
+    check(r.status == 0 && !strcmp(names, want), "gallery by size: %s (want %s)", names, want);
+
+    r = open_names(sample("gallery"), VIEW_GALLERY, names, sizeof names);
+    static const struct { int page; const char *has[10]; const char *not; } metas[] = {
+        { 0, { "Name\ta.jpg\n", "Image Size\t64x48\n", "Exif.Photo.DateTimeOriginal\t2021-05-01 10:00:00\n", "Exif.Image.Make\tCam\n",
+               "Exif.Image.Model\tOne\n", "Exif.Photo.ExposureTime\t1/250 s\n", "Exif.Photo.FNumber\tF2.8\n",
+               "Exif.Photo.ISOSpeedRatings\t200\n", "Exif.Photo.FocalLength\t35.0 mm\n", "Exif.Photo.Flash\t25\n" }, NULL },
+        { 1, { "Name\tB.jpg\n", "Image Size\t48x64\n", "Exif.Photo.DateTimeOriginal\t2019-01-01 00:00:00\n", "File Size\t" }, "Make" },
+        { 2, { "Name\tc.png\n", "Date Modified\t2020-06-01 12:00:00\n" }, "Exif." },
+        { 3, { "Name\td.dng\n", "Image Size\t64x48\n", "Exif.Image.Make\tView\n", "Exif.Image.Model\tTester\n",
+               "Exif.Photo.DateTimeOriginal\t2022-02-02 02:02:02\n" }, NULL },
+        { 4, { "Name\te.png\n", "Exif.Photo.DateTimeOriginal\t2023-03-03 03:03:03\n" }, NULL },
+    };
+    for (size_t m = 0; m < sizeof metas / sizeof *metas; m++) {
+        struct view_request q = req(VIEW_META, metas[m].page);
+        char *data;
+        struct view_reply rm = call(&q, (void **)&data);
+        int ok = rm.status == 0 && data;
+        for (int k = 0; ok && k < 10 && metas[m].has[k]; k++) ok = strstr(data, metas[m].has[k]) != NULL;
+        if (ok && metas[m].not) ok = !strstr(data, metas[m].not);
+        check(ok, "gallery: META of page %d (%s) has what it should: \"%s\"", metas[m].page, metas[m].has[0], data ? data : rm.text);
+        free(data);
+    }
+    check(raw_colors(3), "gallery: the DNG, a page of the folder, is LibRaw's picture");
+    r = open_names(sample("gallery/pack.cbz"), 0, names, sizeof names);
+    check(r.status == 0 && !strncmp(r.text, "Comic book\t", 11) && r.pages == 2 && !strcmp(names, "p1.png p2.dng") && raw_colors(1),
+          "gallery/pack.cbz: a comic book whose second page is a DNG, LibRaw's picture (%s, %s)", r.text, names);
+    /* An image by itself: a JPEG MuPDF reads, a WebP view-render converts. */
+    static const char *const singles[] = { "sample.jpg", "sample.webp" };
+    for (size_t k = 0; k < sizeof singles / sizeof *singles; k++) {
+        char name[64], *data;
+        open_doc(sample(singles[k]), 0, 0, 0);
+        struct view_request q = req(VIEW_META, 0);
+        struct view_reply rm = call(&q, (void **)&data);
+        snprintf(name, sizeof name, "Name\t%s\n", singles[k]);
+        check(rm.status == 0 && data && strstr(data, name) && strstr(data, "Image Size\t200x100\n") && strstr(data, "File Size\t"),
+              "%s: META, its name and 200x100 pixels (\"%s\")", singles[k], data ? data : rm.text);
+        free(data);
+    }
+    open_doc(sample("sample.pdf"), 0, 0, 0);
+    struct view_request q = req(VIEW_META, 0);
+    struct view_reply rm = call(&q, NULL);
+    check(rm.status == ENOTSUP, "sample.pdf: META is ENOTSUP (%d %s)", rm.status, rm.text);
+}
+
+/* Negative regression for stop()/start(): use the real restart path with
+ * a previous child that exits nonzero or by a signal. The runner requires
+ * this process to fail with one FAIL line; the new renderer must still be
+ * reaped. _exit avoids running inherited sanitizer/stdio cleanup. */
+static int test_reap_failure(const char *how)
+{
+    if (strcmp(how, "exit") && strcmp(how, "signal")) return 2;
+    pid = fork();
+    if (pid == 0) {
+        if (!strcmp(how, "signal")) kill(getpid(), SIGKILL);
+        _exit(23);
+    }
+    if (pid < 0) return 2;
+    start();
+    stop();
+    return failures ? 1 : 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 3 && !strcmp(argv[1], "--reap-failure")) return test_reap_failure(argv[2]);
     if (argc != 3) {
         fprintf(stderr, "usage: test-view-render SAMPLES RENDERER\n");
         return 2;
@@ -1582,6 +1734,7 @@ int main(int argc, char **argv)
     test_djvu();
     test_ps();
     test_images();
+    test_gallery();
     test_magick();
     test_dvi();
     test_pdf_edit();
@@ -1589,8 +1742,7 @@ int main(int argc, char **argv)
     test_sandbox();
     test_refusals();
     test_garbled();
-    close(sock);
-    waitpid(pid, NULL, 0);
+    stop();
     printf("%s: %d failed\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }

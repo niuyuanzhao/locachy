@@ -100,6 +100,7 @@ _locachy_call_upstream() (
 prepare() {
     _locachy_call_upstream prepare || return
     patch --batch --forward --fuzz=0 -d "$srcdir/labwc" -Np1 -i "$srcdir/clipboard-guard.patch" || return
+    patch --batch --forward --fuzz=0 -d "$srcdir/labwc" -Np1 -i "$srcdir/inner-edge-hold.patch" || return
     cp -- "$srcdir/locachy-clipboard.c" "$srcdir/labwc/src/locachy-clipboard.c" || return
     cp -- "$srcdir/locachy-clipboard.h" "$srcdir/labwc/include/locachy-clipboard.h"
 }

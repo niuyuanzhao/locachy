@@ -25,7 +25,9 @@ static pid_t fixture_waitpid(pid_t, int *, int);
 static DIR *fixture_opendir(const char *);
 static int fixture_rename(const char *, const char *);
 static int fixture_unlink(const char *);
+static int fixture_link(const char *, const char *);
 static int fixture_fclose(FILE *);
+static int make_keymap_table_at(const char *, const char *);
 static int fixture_kill(pid_t, int);
 static int fixture_sethostname(const char *, size_t);
 static struct passwd *fixture_getpwuid(uid_t);
@@ -34,6 +36,7 @@ static struct passwd *fixture_getpwuid(uid_t);
 #define opendir fixture_opendir
 #define rename fixture_rename
 #define unlink fixture_unlink
+#define link fixture_link
 #define fclose fixture_fclose
 #define kill fixture_kill
 #define sethostname fixture_sethostname
@@ -42,6 +45,7 @@ static struct passwd *fixture_getpwuid(uid_t);
 #define waitpid fixture_waitpid
 #define main settings_main
 #define SETTINGS_COMMAND_OUTPUT
+#define SETTINGS_KEYMAP_GENERATOR
 #define PACMAN_LOCAL "/fixture/pacman-local"
 #include "../progs/settings.c"
 #include "../base/ui.c"
@@ -54,6 +58,7 @@ static struct passwd *fixture_getpwuid(uid_t);
 #undef kill
 #undef fclose
 #undef unlink
+#undef link
 #undef rename
 #undef opendir
 #undef fopen
@@ -67,6 +72,9 @@ static struct passwd *fixture_getpwuid(uid_t uid)
 
 static char root[1024];
 static int fail_open, fail_close, fail_rename;
+static const char *fail_rename_target;
+static int labwc_hups;
+void say(const char *fmt, ...) { (void)fmt; }
 static FILE *writing;
 static int test_cols = 100, test_rows = 35, frames, settings_page;
 int screen_is_extended(void) { return 0; }
@@ -78,6 +86,8 @@ static struct pointer_event mouse;
 static char snapshot[32];
 static const char *camera_listing = "", *pending_command;
 static int camera_commands;
+static int fake_fwupd, fwupd_asked;
+static const char *fake_tpm_status; /* locachy-tpm status --json, as it says it (NULL: not installed) */
 
 static void command_output(char *const argv[], char *buf, size_t size)
 {
@@ -86,6 +96,13 @@ static void command_output(char *const argv[], char *buf, size_t size)
         assert(argv[1] && !strcmp(argv[1], "list") && argv[2] == NULL);
         camera_commands++;
         snprintf(buf, size, "%s", camera_listing);
+    } else if (strcmp(argv[0], "/usr/local/bin/locachy-tpm") == 0 && argv[1] && !strcmp(argv[1], "status")) {
+        snprintf(buf, size, "%s\n", fake_tpm_status ? fake_tpm_status : "");
+    } else if (strcmp(argv[0], FWUPDMGR) == 0 && argv[1] && !strcmp(argv[1], "security")) {
+        /* As fwupdmgr says it: the ID in bold, then the checks. */
+        fwupd_asked++;
+        snprintf(buf, size, "Host Security ID: \033[1mHSI:1 (v2.0.16)\033[0m\n\n\033[1mHSI-1\033[0m\n"
+                 "\u2714 BIOS firmware updates:     Enabled\n");
     } else if (strcmp(argv[0], LOCACHY_REPOS) == 0 && argv[1] && !strcmp(argv[1], "status")) {
         /* As locachy-repos says it: the repositories' names carry the level. */
         snprintf(buf, size, "level\tx86-64-v3\ncpu\tznver4\ncore\ton\nextra\ton\nmultilib\toff\n"
@@ -123,6 +140,16 @@ static const char *map_path(const char *path, char *out, size_t size)
         snprintf(out, size, "%s/howdy.ini", root);
     else if (strcmp(path, "/etc/locachy/labwc/rc.xml") == 0)
         snprintf(out, size, "%s/absent-labwc.xml", root);
+    else if (strncmp(path, LABWC_ENV, strlen(LABWC_ENV)) == 0)
+        snprintf(out, size, "%s/labwc-environment%s", root, path + strlen(LABWC_ENV));
+    else if (strcmp(path, LABWC_RC) == 0 || strcmp(path, LABWC_RC ".tmp") == 0)
+        snprintf(out, size, "%s/labwc-rc%s", root, path + strlen(LABWC_RC));
+    else if (strncmp(path, SYSTEM_KEYMAP_TABLE, strlen(SYSTEM_KEYMAP_TABLE)) == 0)
+        snprintf(out, size, "%s/keymap.table%s", root, path + strlen(SYSTEM_KEYMAP_TABLE));
+    else if (strncmp(path, KEYMAP_TABLES "/", strlen(KEYMAP_TABLES) + 1) == 0)
+        snprintf(out, size, "%s/%s", root, path + strlen(KEYMAP_TABLES) + 1);
+    else if (strncmp(path, "/etc/vconsole.conf", 18) == 0)
+        snprintf(out, size, "%s/vconsole.conf%s", root, path + 18);
     else if (strcmp(path, CLASH_STATE "/subscription") == 0)
         snprintf(out, size, "%s/subscription", root);
     else if (strcmp(path, LOCALE_DIR) == 0) /* the Language row: no catalog here, English only */
@@ -168,8 +195,20 @@ static int fixture_rename(const char *from, const char *to)
     char a[1400], b[1400];
     map_path(from, a, sizeof a);
     map_path(to, b, sizeof b);
-    if (fail_rename) { errno = EACCES; return -1; }
+    if (fail_rename || (fail_rename_target && !strcmp(to, fail_rename_target))) {
+        fail_rename_target = NULL;
+        errno = EACCES;
+        return -1;
+    }
     return rename(a, b);
+}
+
+static int fixture_link(const char *from, const char *to)
+{
+    char a[1400], b[1400];
+    map_path(from, a, sizeof a);
+    map_path(to, b, sizeof b);
+    return link(a, b);
 }
 
 static int fixture_unlink(const char *path)
@@ -217,6 +256,10 @@ static int fixture_kill(pid_t pid, int signal)
         bar_hups++;
         return 0;
     }
+    if (allow_rc && pid == 4243 && signal == SIGHUP) {
+        labwc_hups++;
+        return 0;
+    }
     if (!allow_rc || pid != 1 || signal != SIGHUP) abort();
     event('H');
     hups++;
@@ -234,9 +277,15 @@ static int fixture_access(const char *path, int mode)
     if (!strcmp(path, "/usr/lib/librime.so") || !strcmp(path, "/usr/bin/rime_deployer")) return fake_rime ? 0 : -1;
     if (!strcmp(path, "/usr/share/rime-data/rime_frost.schema.yaml")) return fake_rime_zh ? 0 : -1;
     if (!strcmp(path, HOWDY) || !strcmp(path, FACE_CAMERA_TOOL)) return fake_howdy ? 0 : -1;
-    if (!strcmp(path, "/usr/local/bin/locachy-tpm")) return -1;
+    if (!strcmp(path, "/usr/local/bin/locachy-tpm")) return fake_tpm_status ? 0 : -1;
+    if (!strcmp(path, FWUPDMGR)) return fake_fwupd ? 0 : -1;
     if (!strcmp(path, NVIDIA_DRIVER)) return fake_nvidia ? 0 : -1;
     if (!strcmp(path, "/etc/libinput")) return 0; /* its file is the fixture's */
+    if (!strncmp(path, SYSTEM_KEYMAP_TABLE, strlen(SYSTEM_KEYMAP_TABLE)) ||
+        !strncmp(path, LABWC_ENV, strlen(LABWC_ENV)) || !strncmp(path, "/etc/vconsole.conf", 18)) {
+        char mapped[1400];
+        return access(map_path(path, mapped, sizeof mapped), mode);
+    }
     for (int i = 0; i < NOPT_MODULES; i++) {
         if (!strcmp(path, opt_modules[i].probe)) return (fake_opt & (1 << i)) ? 0 : -1;
     }
@@ -486,7 +535,7 @@ static void test_circular(void)
     char text[1024], path[1400];
     snprintf(path, sizeof path, "%s/local-overrides.quirks", root);
     assert(circ_index() == tnet_index() + 1 && imek_index() == circ_index() + 3 &&
-           kb_index() == imek_index() + NIME_KEYS && num_hw_items() == kb_index() + nkeyboards_seen);
+           system_keymap_index() == imek_index() + NIME_KEYS && kb_index() == system_keymap_index() + 1 && num_hw_items() == kb_index() + nkeyboards_seen);
     on_rc("touchpad_circular", "0", NULL);
     assert(circular == 0);
     on_rc("touchpad_circular", "yes", NULL);
@@ -640,7 +689,19 @@ static struct keys_keyboard fake_keyboards[2] = {
     { .id = "1133:49948:USB_Keyboard", .name = "USB Keyboard", .keymap = "us", .own = 1 },
 };
 static char keyboard_log[256];
-static int keys_reloads;
+static int keys_reloads, fail_keymap;
+static char system_keymap[48] = "jp106";
+static int make_keymap_table_at(const char *keymap, const char *out)
+{
+    if (fail_keymap) return -1;
+    char mapped[1400];
+    FILE *f = fopen(map_path(out, mapped, sizeof mapped), "w");
+    assert(f);
+    fprintf(f, "console %s\nlayout %s\nmodel %s\nvariant -\noptions -\n", keymap,
+            !strcmp(keymap, "jp106") ? "jp" : keymap, !strcmp(keymap, "jp106") ? "jp106" : "pc105");
+    assert(fclose(f) == 0);
+    return 0;
+}
 int keys_keyboards(struct keys_keyboard *out, int max)
 {
     int n = max < 2 ? max : 2;
@@ -654,12 +715,25 @@ int keys_set_keyboard(const char *id, const char *keymap)
     for (int i = 0; i < 2; i++) {
         if (strcmp(fake_keyboards[i].id, id) != 0) continue;
         fake_keyboards[i].own = keymap != NULL;
-        snprintf(fake_keyboards[i].keymap, sizeof fake_keyboards[i].keymap, "%s", keymap ? keymap : "jp106");
+        snprintf(fake_keyboards[i].keymap, sizeof fake_keyboards[i].keymap, "%s", keymap ? keymap : system_keymap);
     }
     return 0;
 }
-void keys_reload(void) { keys_reloads++; }
-const char *keys_layout_name(const char *field) { return strcmp(field, "console") == 0 ? "jp106" : NULL; }
+void keys_reload(void)
+{
+    keys_reloads++;
+    char path[1400], name[32], value[48];
+    snprintf(path, sizeof path, "%s/keymap.table", root);
+    FILE *f = fopen(path, "r");
+    while (f && fscanf(f, "%31s %47s", name, value) == 2) {
+        if (!strcmp(name, "console")) snprintf(system_keymap, sizeof system_keymap, "%s", value);
+    }
+    if (f) fclose(f);
+    for (int i = 0; i < 2; i++) {
+        if (!fake_keyboards[i].own) snprintf(fake_keyboards[i].keymap, sizeof fake_keyboards[i].keymap, "%s", system_keymap);
+    }
+}
+const char *keys_layout_name(const char *field) { return !strcmp(field, "console") ? system_keymap : NULL; }
 
 /* A row for each keyboard with the keymap it types in; one of its own, or
  * the system's again (Delete, or the system's chosen); process 1 and the
@@ -683,8 +757,9 @@ static void test_keyboards(void)
     set_keyboard_keymap(&keyboards_seen[1], "us"); /* its table made (keytable), then keyboards.conf */
     assert(strstr(keyboard_log, "1133:49948:USB_Keyboard=us;") && keys_reloads == 2);
     assert(!strcmp(notice, "USB Keyboard: layout us from now on; the boot unlock takes it from the next boot image."));
-    set_keyboard_keymap(&keyboards_seen[0], "jp106"); /* the system's: none of its own */
-    assert(strstr(keyboard_log, "1:1:AT_Translated_Set_2_keyboard=;"));
+    set_keyboard_keymap(&keyboards_seen[0], "jp106"); /* equal to the default remains explicit */
+    assert(strstr(keyboard_log, "1:1:AT_Translated_Set_2_keyboard=jp106;"));
+    assert(fake_keyboards[0].own);
     fake_keyboards[1].missing = 1;
     test_cols = 160;
     draw();
@@ -695,6 +770,95 @@ static void test_keyboards(void)
     settings_page = page_before;
     puts("PASS keyboards: a row each with the keymap it types in (the system's, its own, its own without a "
          "table); chosen or the system's again; process 1 and the bar told");
+}
+
+static void read_fixture(const char *relative, char *out, size_t size)
+{
+    char path[1400];
+    snprintf(path, sizeof path, "%s/%s", root, relative);
+    FILE *f = fopen(path, "r");
+    assert(f);
+    size_t n = fread(out, 1, size - 1, f);
+    out[n] = '\0';
+    assert(fclose(f) == 0);
+}
+
+static void test_system_keymap(void)
+{
+    int page_before = settings_page;
+    settings_page = 1;
+    char table[1024], environment[1024], console[1024];
+    const char *original_table = "console jp106\nlayout jp\nmodel jp106\nvariant -\noptions -\n";
+    const char *original_env = "XCURSOR_SIZE=24\nXKB_DEFAULT_LAYOUT=jp\nXKB_DEFAULT_OPTIONS=ctrl:nocaps\nCUSTOM=kept\n";
+    const char *original_console = "KEYMAP=jp106\nFONT=ter-u16b\n";
+    file_text("keymap.table", original_table);
+    file_text("labwc-environment", original_env);
+    file_text("vconsole.conf", original_console);
+    set_keyboard_keymap(&fake_keyboards[1], NULL);
+    int before = keys_reloads, hup_before = hups, bar_before = bar_hups, labwc_before = labwc_hups;
+    selected = system_keymap_index();
+    in_page = 1;
+    draw();
+    assert(canvas_has("System keyboard layout") && enter_row(system_keymap_index()));
+    assert(fake_keyboards[0].own && !fake_keyboards[1].own);
+
+    fail_keymap = 1;
+    set_system_keymap("us");
+    fail_keymap = 0;
+    assert(strstr(notice, "nothing changed") && keys_reloads == before);
+    fail_rc = 1;
+    set_system_keymap("us");
+    fail_rc = 0;
+    assert(strstr(notice, "nothing applied") && keys_reloads == before && hups == hup_before);
+    for (int i = 0; i < 3; i++) {
+        static const char *const paths[] = { SYSTEM_KEYMAP_TABLE, LABWC_ENV, "/etc/vconsole.conf" };
+        fail_rename_target = paths[i];
+        set_system_keymap("us");
+        assert(keys_reloads == before && hups == hup_before && !strcmp(system_keymap, "jp106"));
+        read_fixture("keymap.table", table, sizeof table);
+        read_fixture("labwc-environment", environment, sizeof environment);
+        read_fixture("vconsole.conf", console, sizeof console);
+        assert(!strcmp(table, original_table) && !strcmp(environment, original_env) && !strcmp(console, original_console));
+    }
+    set_system_keymap("us");
+    assert(!strcmp(system_keymap, "us") && keys_reloads == before + 1);
+    assert(hups == hup_before + 1 && bar_hups == bar_before + 1 && labwc_hups == labwc_before + 1);
+    assert(strstr(rc_log, "keymap=us;") && strstr(notice, "Explicit keyboard layouts stay unchanged"));
+    assert(fake_keyboards[0].own && !strcmp(fake_keyboards[0].keymap, "jp106"));
+    assert(!fake_keyboards[1].own && !strcmp(fake_keyboards[1].keymap, "us"));
+    read_fixture("labwc-environment", environment, sizeof environment);
+    read_fixture("vconsole.conf", console, sizeof console);
+    assert(strstr(environment, "XKB_DEFAULT_LAYOUT=us\n") && strstr(environment, "XKB_DEFAULT_MODEL=pc105\n"));
+    assert(strstr(environment, "XKB_DEFAULT_OPTIONS=ctrl:nocaps\n") && strstr(environment, "XCURSOR_SIZE=24\n") &&
+           strstr(environment, "CUSTOM=kept\n") && !strstr(environment, "XKB_DEFAULT_LAYOUT=jp"));
+    assert(!strcmp(console, "FONT=ter-u16b\nKEYMAP=us\n"));
+    file_text("labwc-environment", "XCURSOR_SIZE=24\n");
+    file_text("keymap.table.new", "layout de\nmodel pc105\nvariant nodeadkeys\noptions compose:ralt\n");
+    assert(keymap_environment(SYSTEM_KEYMAP_TABLE ".new", LABWC_ENV ".new") == 0);
+    read_fixture("labwc-environment.new", environment, sizeof environment);
+    assert(strstr(environment, "XKB_DEFAULT_LAYOUT=de\n") && strstr(environment, "XKB_DEFAULT_VARIANT=nodeadkeys\n") &&
+           strstr(environment, "XKB_DEFAULT_OPTIONS=compose:ralt\n") && strstr(environment, "XCURSOR_SIZE=24\n"));
+
+    /* The same picker handles the system default, including Enter and cancel. */
+    nkeys = keypos = 0;
+    press('\n', 0, NULL);
+    pick_keymap(NULL);
+    assert(keypos == nkeys && keys_reloads == before + 2 && !strcmp(system_keymap, "us"));
+    nkeys = keypos = 0;
+    press(27, 0, NULL);
+    pick_keymap(NULL);
+    assert(keypos == nkeys && keys_reloads == before + 2 && !strcmp(system_keymap, "us"));
+    char path[1400];
+    for (int i = 0; i < 3; i++) {
+        const char *files[] = { "keymap.table", "labwc-environment", "vconsole.conf" };
+        snprintf(path, sizeof path, "%s/%s", root, files[i]);
+        unlink(path);
+    }
+    snprintf(system_keymap, sizeof system_keymap, "jp106");
+    in_page = 0;
+    settings_page = page_before;
+    puts("PASS system keyboard layout: US default with explicit JIS, inherited USB, staged file/config failures "
+         "leave input unchanged; labwc environment preserves user options and reloads");
 }
 
 static void test_bluetooth(void)
@@ -904,6 +1068,13 @@ static void test_bluetooth(void)
     file_text("packages", "base\nlinux-cachyos-bore\n");
     load_kernel_state();
     assert(!kernel_headers_declared && !kernel_headers_installed);
+    file_text("packages", "base linux-cachyos-bore\tlinux-cachyos-bore-headers # chosen headers\n");
+    load_kernel_state();
+    assert(kernel_headers_declared && !kernel_headers_installed);
+    file_text("packages", "base linux-cachyos-bore # linux-cachyos-bore-headers\n");
+    load_kernel_state();
+    assert(!kernel_headers_declared && !kernel_headers_installed);
+    puts("PASS kernel headers reads each whitespace-separated manifest name, not comments");
     nkernel_choices = 2;
     kernel_choice = 0;
     snprintf(kernel_choices[0], sizeof kernel_choices[0], "linux-cachyos-bore");
@@ -1264,6 +1435,76 @@ int main(int argc, char **argv)
         assert(!canvas_has("x86-64") && !canvas_has("znver"));
     }
     snapshot[0] = '\0';
+    /* The Security page: the TPM, Secure Boot and fwupd's Host Security ID,
+     * asked of fwupdmgr once, when the page is first shown. */
+    assert(!strcmp(hsi_summary, "fwupd is not installed"));
+    fake_fwupd = 1;
+    hsi_loaded = fwupd_asked = 0;
+    show_category(CAT_TIME, 1);
+    show_category(CAT_SECURITY, 1);
+    show_category(CAT_TIME, 1);
+    show_category(CAT_SECURITY, 1);
+    draw();
+    assert(fwupd_asked == 1 && !strcmp(hsi_summary, "HSI:1 (v2.0.16)"));
+    assert(canvas_has("TPM disk auto-unlock") && canvas_has("Secure Boot") && canvas_has("Host security (fwupd)") &&
+           canvas_has("HSI:1 (v2.0.16)"));
+    fake_fwupd = 0;
+    /* The TPM and Secure Boot rows from locachy-tpm status: TPM 1.2 as the
+     * VM's swtpm 1.2 gave it (bound by locachy-tpm, then cleared), TPM 2.0
+     * bound to this computer's Secure Boot keys, and a binding waiting. */
+    static const char tpm12_bound[] =
+        "{\"tpm_version\": 1, \"tpm_device\": \"/dev/tpm0\", \"tpm_active\": true, \"secure_boot\": false, "
+        "\"setup_mode\": true, \"own_keys\": false, \"secure_boot_own\": false, \"own_keys_in_db\": false, "
+        "\"bound_own_keys\": false, \"pending\": false, \"luks_devices\": [\"/dev/sda3\", \"/dev/sda2\"], "
+        "\"enrolled\": {\"/dev/sda3\": [{\"type\": \"locachy-tpm12\", \"pcrs\": [0], \"signed_pcrs\": []}], "
+        "\"/dev/sda2\": [{\"type\": \"locachy-tpm12\", \"pcrs\": [0], \"signed_pcrs\": []}]}}";
+    static const char tpm12_cleared[] =
+        "{\"tpm_version\": 1, \"tpm_device\": \"/dev/tpm0\", \"tpm_active\": true, \"secure_boot\": false, "
+        "\"setup_mode\": true, \"own_keys\": false, \"secure_boot_own\": false, \"own_keys_in_db\": false, "
+        "\"bound_own_keys\": false, \"pending\": false, \"luks_devices\": [\"/dev/sda3\", \"/dev/sda2\"], "
+        "\"enrolled\": {\"/dev/sda3\": [], \"/dev/sda2\": []}}";
+    static const char tpm12_off[] =
+        "{\"tpm_version\": 1, \"tpm_device\": \"/dev/tpm0\", \"tpm_active\": false, \"secure_boot\": null, "
+        "\"setup_mode\": false, \"own_keys\": false, \"secure_boot_own\": false, \"own_keys_in_db\": false, "
+        "\"bound_own_keys\": false, \"pending\": false, \"luks_devices\": [\"/dev/sda3\"], "
+        "\"enrolled\": {\"/dev/sda3\": []}}";
+    static const char tpm2_own[] =
+        "{\"tpm_version\": 2, \"tpm_device\": \"/dev/tpm0\", \"tpm_active\": true, \"secure_boot\": true, "
+        "\"setup_mode\": false, \"own_keys\": true, \"secure_boot_own\": true, \"own_keys_in_db\": true, "
+        "\"bound_own_keys\": true, \"pending\": false, \"luks_devices\": [\"/dev/sda3\", \"/dev/sda2\"], "
+        "\"enrolled\": {\"/dev/sda3\": [{\"type\": \"systemd-tpm2\", \"pcrs\": [7], \"signed_pcrs\": [11]}], "
+        "\"/dev/sda2\": [{\"type\": \"systemd-tpm2\", \"pcrs\": [7], \"signed_pcrs\": [11]}]}}";
+    static const char tpm2_pending[] =
+        "{\"tpm_version\": 2, \"tpm_device\": \"/dev/tpm0\", \"tpm_active\": true, \"secure_boot\": false, "
+        "\"setup_mode\": false, \"own_keys\": true, \"secure_boot_own\": false, \"own_keys_in_db\": true, "
+        "\"bound_own_keys\": false, \"pending\": true, \"luks_devices\": [\"/dev/sda3\"], "
+        "\"enrolled\": {\"/dev/sda3\": [{\"type\": \"systemd-tpm2\", \"pcrs\": [0, 7], \"signed_pcrs\": []}]}}";
+    const struct { const char *status, *tpm, *sb; int bound; } tpm_rows[] = {
+        { tpm12_bound, "TPM 1.2 bound (Delete: unbind)", "setup mode (Enter: enroll this computer's keys)", 1 },
+        { tpm12_cleared, "TPM 1.2 (Enter: bind auto-unlock)", "setup mode (Enter: enroll this computer's keys)", 0 },
+        { tpm12_off, "TPM 1.2 disabled in BIOS", "off", 0 },
+        { tpm2_own, "TPM 2.0 bound to this computer's Secure Boot keys (Delete: unbind)",
+          "on, with this computer's own keys", 1 },
+        { tpm2_pending, "bound at the next start with Secure Boot on this computer's keys", "off", 1 },
+    };
+    for (size_t i = 0; i < sizeof tpm_rows / sizeof tpm_rows[0]; i++) {
+        fake_tpm_status = tpm_rows[i].status;
+        load_tpm_status();
+        if (strcmp(tpm_summary, tpm_rows[i].tpm) || strcmp(sb_summary, tpm_rows[i].sb) || tpm_bound != tpm_rows[i].bound) {
+            fprintf(stderr, "tpm row %zu: [%s] [%s] %d\n", i, tpm_summary, sb_summary, tpm_bound);
+        }
+        assert(!strcmp(tpm_summary, tpm_rows[i].tpm) && !strcmp(sb_summary, tpm_rows[i].sb));
+        assert(tpm_bound == tpm_rows[i].bound);
+    }
+    fake_tpm_status = tpm12_bound;
+    load_tpm_status();
+    show_category(CAT_TIME, 1);
+    show_category(CAT_SECURITY, 1);
+    draw();
+    assert(canvas_has("TPM 1.2 bound (Delete: unbind)"));
+    fake_tpm_status = NULL;
+    load_tpm_status();
+    tpm_bound = 0;
     settings_page = 0;
     puts("PASS sidebar categories hold every setting once; a click opens a page; Up/Down go through the "
          "categories, Enter into the page; the page moves within its settings; / finds across categories");
@@ -1583,11 +1824,12 @@ int main(int argc, char **argv)
     assert(fc_index() == fp_index() + 4 && rclone_index() == fc_index() + 7 &&
            lang_index() == rclone_index() + 3 && host_index() == lang_index() + 1 &&
            ime_index() == host_index() + 1 && tpm_index() == ime_index() + 2 &&
-           bri_index() == tpm_index() + 1 && mach_index() == bri_index() + 1 &&
+           sb_index() == tpm_index() + 1 && hsi_index() == sb_index() + 1 &&
+           bri_index() == hsi_index() + 1 && mach_index() == bri_index() + 1 &&
            upd_index() == mach_index() + 1 && boot_index() == upd_index() + 2 && opt_index() == boot_index() + 5 &&
            repo_index() == opt_index() + NOPT_MODULES && tnet_index() == repo_index() + NREPO_SECTIONS + 1 &&
            circ_index() == tnet_index() + 1 && imek_index() == circ_index() + 3 &&
-           kb_index() == imek_index() + NIME_KEYS && num_hw_items() == kb_index() + nkeyboards_seen);
+           system_keymap_index() == imek_index() + NIME_KEYS && kb_index() == system_keymap_index() + 1 && num_hw_items() == kb_index() + nkeyboards_seen);
     forks_before = forks;
     selected = ime_index();
     adjust(+1);
@@ -1659,6 +1901,7 @@ int main(int argc, char **argv)
     test_circular();
     test_ime_keys();
     test_keyboards();
+    test_system_keymap();
     /* Line editing in prompts: cursor movement, Delete and Ctrl+U. */
     char edited[64] = "abc";
     size_t epos = strlen(edited);

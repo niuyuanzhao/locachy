@@ -25,7 +25,7 @@ def migrate(path, marker=MARKER):
         raise ValueError("audio package manifest must be a regular file")
     info = path.stat()
     text = path.read_text(encoding="utf-8")
-    leaves = {line.split("#", 1)[0].strip() for line in text.splitlines()}
+    leaves = {name for line in text.splitlines() for name in line.split("#", 1)[0].split()}
     if "sof-firmware" in leaves:
         record(marker)
         return False

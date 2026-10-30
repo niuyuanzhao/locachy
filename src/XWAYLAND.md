@@ -84,27 +84,28 @@ clipboard's offer. Measured:
 - a `locachy-app freeze` started while the host clipboard is still reading a
   slow X11 copy waits for the transfer (its sync), then freezes.
 
-**Gap.** The freeze barrier of labwc-locachy (the cgroup gate between
-`clipboard freeze`'s capture and its freezer write) covers Wayland clients
-only. xwm forwards an X11 copy from its own X connection (the clipboard with
-`wlr_seat_request_set_selection` and no Wayland client, the primary selection
-with `wlr_seat_set_primary_selection` directly), so the gate cannot attribute
-it to the container's cgroup. Measured, with the window widened by the test:
+**The freeze window.** The freeze barrier of labwc-locachy (the cgroup gate
+between `clipboard freeze`'s capture and its freezer write) refuses Wayland
+copies of the cgroup being frozen (`tools/test-clipboard-guard.sh`). It does
+not see X11 copies: xwm forwards them from its own X connection (the clipboard
+with `wlr_seat_request_set_selection` and no Wayland client, the primary
+selection with `wlr_seat_set_primary_selection` directly). The host clipboard
+covers that window itself, with the copy it keeps anyway: every sync leaves
+it holding the selections as they were then (references to the stored bytes,
+dropped after 10 s), and right after the freezer write `clipboard freeze`
+asks it to restore the capture's sync. Each selection that changed since, or
+whose transfer the freeze cut short, gets the kept copy back and is offered
+again. Measured, with the window held open by the test:
 
-- an X11 copy made by the container between the freeze's sync and its commit
-  is accepted. The guard test (`tools/test-clipboard-guard.sh`) measures that
-  a Wayland copy by a gated cgroup is refused while its gate is open;
-- if the commit freezes the container while the host clipboard is still
-  reading that copy, the read cannot complete: right after the freeze the host
-  clipboard reports "transfer is not complete", and after the resume (2.5 s
-  later) "transfer failed". X11 pastes get nothing while frozen, and the
-  copy again after the resume. The host clipboard takes the next X11 copy
-  normally.
+- an X11 copy made by the container inside the window (the clipboard showed
+  it) gives way to the host copy from the capture, for X11 pastes too;
+- a freeze that cuts the transfer of such a copy short leaves the host copy
+  from the capture as the clipboard, for X11 pastes too; resumed, the
+  container's next X11 copy is taken normally.
 
-In use the window is only the time between one freeze's sync and its freezer
-write (its length was not measured), and the container has to copy within it.
-Closing it needs a change to the labwc-locachy guard
-(`pkgbuilds/labwc-locachy`), which this change does not make.
+Any copy in that window gives way, also one by another program. The window
+lasts from the capture to the freezer write of one freeze (its length was not
+measured).
 
 ## Verification
 
@@ -123,6 +124,5 @@ bash tools/test-xwayland.sh
 It builds `locachy-seat` and `clipboard` from this tree, uses this tree's labwc
 configuration, and runs them with a stand-in process 1, a headless labwc and
 plain XCB clients, in private mount and PID namespaces, without real input
-devices or the physical display. Its lines: PASS, FAIL, and GAP for the
-measured limits above. A failed or unrun integration test is not a successful
+devices or the physical display. Its result lines are PASS and FAIL. A failed or unrun integration test is not a successful
 deployment.

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Boot a disposable, diskless VM; never load vkms on the host.
+# Boot a disposable, diskless VM; never load vkms on the host. The host's
+# packaged Terminus 16/28 fonts exercise actual text and fractional scaling.
 set -euo pipefail
 if (( $# != 3 )); then
     printf 'Usage: %s KERNEL VKMS_MODULE OUTPUT_DIRECTORY\n' "$0" >&2
@@ -20,7 +21,8 @@ mkdir -p "$OUT"
 CC=${CC:-musl-gcc}
 "$CC" -static -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
     -Wl,--gc-sections -I "$SOURCE/base/include" -idirafter /usr/include \
-    "$SOURCE/tools/test-screen-vkms.c" -o "$OUT/init"
+    "$SOURCE/tools/test-screen-vkms.c" "$SOURCE/base/ui.c" "$SOURCE/base/panel.c" \
+    "$SOURCE/base/status.c" "$SOURCE/base/rc.c" -o "$OUT/init"
 case "$MODULE" in
     *.zst) zstd -d -q -c "$MODULE" > "$OUT/vkms.ko" ;;
     *.ko) cp "$MODULE" "$OUT/vkms.ko" ;;
@@ -33,14 +35,20 @@ import stat
 import sys
 
 out = Path(sys.argv[1])
+font = gzip.decompress(Path('/usr/share/kbd/consolefonts/ter-u16b.psf.gz').read_bytes())
 entries = [
     ('init', (out / 'init').read_bytes(), stat.S_IFREG | 0o755, 0, 0),
     ('vkms.ko', (out / 'vkms.ko').read_bytes(), stat.S_IFREG | 0o644, 0, 0),
-    ('font.psf', bytes([0x36, 0x04, 0, 16]) + bytes(4096), stat.S_IFREG | 0o644, 0, 0),
+    ('font.psf', font, stat.S_IFREG | 0o644, 0, 0),
     ('dev', b'', stat.S_IFDIR | 0o755, 0, 0),
     ('dev/console', b'', stat.S_IFCHR | 0o600, 5, 1),
-    ('TRAILER!!!', b'', 0, 0, 0),
 ]
+prefix = Path('usr/local/share/locachy/terminus')
+for folder in ('usr', 'usr/local', 'usr/local/share', 'usr/local/share/locachy', str(prefix)):
+    entries.append((folder, b'', stat.S_IFDIR | 0o755, 0, 0))
+font28 = gzip.decompress(Path('/usr/share/kbd/consolefonts/ter-u28b.psf.gz').read_bytes())
+entries.append((str(prefix / 'ter-u28b.psf'), font28, stat.S_IFREG | 0o644, 0, 0))
+entries.append(('TRAILER!!!', b'', 0, 0, 0))
 archive = bytearray()
 for ino, (name, data, mode, major, minor) in enumerate(entries, 1):
     name = name.encode() + b'\0'

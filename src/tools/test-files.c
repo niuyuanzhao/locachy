@@ -273,7 +273,7 @@ int open_candidates(const char *type, char names[][OPEN_NAME], int max)
     static const char *const archivers[] = { "program:archive", NULL };
     return fill(names, max, strcmp(type, "text/plain") == 0 ? editors :
                             strcmp(type, "application/zip") == 0 ? archivers :
-                            strcmp(type, "application/pdf") == 0 ? viewers :
+                            strcmp(type, "application/pdf") == 0 || strcmp(type, "inode/directory") == 0 ? viewers :
                             strcmp(type, "x-scheme-handler/https") == 0 ? browsers : none);
 }
 
@@ -429,6 +429,15 @@ int main(int argc, char **argv)
 
     run("open with: A makes it the rule", (const int[]){ K_DOWN, 'o', 'a', END });
     assert(opens == 2 && strcmp(opened_name, "one") == 0 && strcmp(rule, "one") == 0);
+
+    /* A folder: o offers what lists inode/directory (view's .desktop does),
+     * with no A (folders open here whatever a rule says: open_set_rule's
+     * double would refuse it); Enter still goes in. */
+    run("open with on a folder: the viewer offered, no rule; Enter goes in, Left back",
+        (const int[]){ K_BOL, 'o', 'a', '\n', '\n', K_LEFT, END });
+    assert(tasks == 1 && strcmp(task[1], at_home("Documents/sub")) == 0 && strcmp(rule, "one") == 0 && opens == 2);
+    assert(here("Documents") && strcmp(P->list[P->sel].name, "sub") == 0);
+    tasks = 0;
 
     char kept[PATH_MAX];
     snprintf(kept, sizeof kept, "%s", P->cwd);

@@ -12,10 +12,10 @@
  *   altgr CODE       a key that is AltGr (ISO_Level3_Shift) in this layout
  *   modifier CODE BITS
  *                    the XKB action's roles: Shift=1 Ctrl=2 Alt=4 Super=8,
- *                    AltGr=16 Caps=32, independent of physical key position
- *   key CODE NAME S0 .. S7
+ *                    AltGr=16 Caps=32 Num=64, independent of physical key position
+ *   key CODE NAME S0 .. S15
  *                    the key's keysym name, and for each state (1 Shift,
- *                    2 Caps Lock locked, 4 AltGr) its keysym and character,
+ *                    2 Caps Lock locked, 4 AltGr, 8 Num Lock) its keysym and character,
  *                    "KEYSYM:CHAR" in hex, as xkb gives them; 0 for none
  *   compose KEYSYM.. : CHAR..
  *                    a dead key's (or Multi_key's) sequence and what it
@@ -32,7 +32,7 @@
 #include <xkbcommon/xkbcommon-compose.h>
 
 #define KBD_MODEL_MAP "/usr/share/systemd/kbd-model-map"
-#define NSTATES 8
+#define NSTATES 16
 #define MAX_SEQUENCE 6
 #define MAX_RESULT 4
 
@@ -198,6 +198,8 @@ int main(int argc, char **argv)
      * key sets it (Mod5 in xkeyboard-config, whatever a layout makes it). */
     xkb_mod_mask_t shift = 1u << xkb_keymap_mod_get_index(km, XKB_MOD_NAME_SHIFT);
     xkb_mod_mask_t lock = 1u << xkb_keymap_mod_get_index(km, XKB_MOD_NAME_CAPS), altgr = 0;
+    xkb_mod_index_t num_index = xkb_keymap_mod_get_index(km, XKB_MOD_NAME_NUM);
+    xkb_mod_mask_t num = num_index == XKB_MOD_INVALID ? 0 : 1u << num_index;
     int altgr_code[256], naltgr = 0;
     for (int code = 1; code < 256; code++) {
         if (xkb_state_key_get_one_sym(st, (xkb_keycode_t)code + 8) != XKB_KEY_ISO_Level3_Shift) continue;
@@ -213,7 +215,8 @@ int main(int argc, char **argv)
     static uint32_t chars[256][NSTATES];
     for (int code = 1; code < 256; code++) {
         for (int s = 0; s < NSTATES; s++) {
-            xkb_state_update_mask(st, (s & 1 ? shift : 0) | (s & 4 ? altgr : 0), 0, s & 2 ? lock : 0, 0, 0, 0);
+            xkb_state_update_mask(st, (s & 1 ? shift : 0) | (s & 4 ? altgr : 0), 0,
+                                  (s & 2 ? lock : 0) | (s & 8 ? num : 0), 0, 0, 0);
             xkb_keycode_t kc = (xkb_keycode_t)code + 8;
             syms[code][s] = xkb_state_key_get_one_sym(st, kc);
             chars[code][s] = text(syms[code][s], xkb_state_key_get_utf32(st, kc));
@@ -242,7 +245,8 @@ int main(int argc, char **argv)
                    (xkb_state_mod_name_is_active(press, XKB_MOD_NAME_ALT, XKB_STATE_MODS_DEPRESSED) > 0 ? 4 : 0) |
                    (xkb_state_mod_name_is_active(press, XKB_MOD_NAME_LOGO, XKB_STATE_MODS_DEPRESSED) > 0 ? 8 : 0) |
                    (xkb_state_mod_name_is_active(press, "Mod5", XKB_STATE_MODS_DEPRESSED) > 0 ? 16 : 0) |
-                   (xkb_state_mod_name_is_active(press, XKB_MOD_NAME_CAPS, XKB_STATE_MODS_LOCKED) > 0 ? 32 : 0);
+                   (xkb_state_mod_name_is_active(press, XKB_MOD_NAME_CAPS, XKB_STATE_MODS_LOCKED) > 0 ? 32 : 0) |
+                   (xkb_state_mod_name_is_active(press, XKB_MOD_NAME_NUM, XKB_STATE_MODS_LOCKED) > 0 ? 64 : 0);
         xkb_state_unref(press);
         if (role) fprintf(f, "modifier %d %d\n", code, role);
     }

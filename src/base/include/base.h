@@ -100,8 +100,9 @@ int monitor_conf(const char *name, struct monitor_conf *out);
 int monitor_internal(const char *name);
 
 /* The screen (screen.c): one logical picture mirrored to connected outputs
- * of the selected DRM card, each in its preferred mode. Other output sizes
- * fit the fixed logical picture with black borders. Text is Terminus from
+ * of the selected DRM card, each in its preferred mode. The picture follows
+ * the first selected output's size on each take (K_SHOWN asks for a redraw);
+ * other output sizes fit that picture with black borders. Text is Terminus from
  * BASE_FONT_DIR, TEXT_H pixels high at the first output's scale of 1 (its
  * MONITORS_CONF scale, else 1; 14 to 56 pixels, above 32 a Terminus of half
  * the size drawn twice as large), and the top bar one and a half rows;

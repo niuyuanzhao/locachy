@@ -65,8 +65,8 @@ static enum confirmation confirming;
 static char **stop_names;
 static int nstop, stop_program;
 #define HOME_OUTPUTS 32
-static int home_output, draw_first, draw_limit = -1, total_capacity;
-static int output_first[HOME_OUTPUTS], output_capacity[HOME_OUTPUTS];
+static int home_output;
+static int output_first[HOME_OUTPUTS], output_scroll[HOME_OUTPUTS];
 
 /* One program_NAME="PATH ARGS" setting of rc.conf. */
 static void program(const char *name, const char *value, void *arg)
@@ -506,16 +506,13 @@ static void draw_output(int ready)
         }
     } else {
         int columns = grid_columns(), width = grid_width(), shown = grid_visible();
-        int first = draw_first, end = draw_limit >= 0 ? draw_limit : napps + nentries + 2;
-        if (draw_limit < 0) {
-            int focus = selected / columns, total = (napps + nentries + 2 + columns - 1) / columns;
-            if (scroll > focus) scroll = focus;
-            if (focus >= scroll + shown) scroll = focus - shown + 1;
-            int max_scroll = total > shown ? total - shown : 0;
-            if (scroll > max_scroll) scroll = max_scroll;
-            first = scroll * columns;
-        }
-        for (int pos = first; pos < end && pos < napps + nentries + 2; pos++) {
+        int focus = selected / columns, total = (napps + nentries + 2 + columns - 1) / columns;
+        if (scroll > focus) scroll = focus;
+        if (focus >= scroll + shown) scroll = focus - shown + 1;
+        int max_scroll = total > shown ? total - shown : 0;
+        if (scroll > max_scroll) scroll = max_scroll;
+        int first = scroll * columns;
+        for (int pos = first; pos < napps + nentries + 2; pos++) {
             int row = 3 + ((pos - first) / columns) * 3, col = 1 + ((pos - first) % columns) * width;
             if (row + 1 >= footer) break;
             uint32_t fg = pos == selected ? BG : FG, bg = pos == selected ? ACCENT : BG;
@@ -574,31 +571,24 @@ static void draw(int ready)
 {
     int count = screen_is_extended && screen_is_extended() && screen_output_count ? screen_output_count() : 1;
     if (count <= 1 || !screen_output_select) {
-        draw_first = 0;
-        draw_limit = -1;
+        home_output = 0;
         draw_output(ready);
         return;
     }
     if (count > HOME_OUTPUTS) count = HOME_OUTPUTS;
-    total_capacity = 0;
+    if (home_output < 0 || home_output >= count) home_output = 0;
+    output_scroll[home_output] = scroll;
+    /* Every output is a launcher, not a slice of one shared list. Drawing
+     * another output must not change where an activation came from. */
     for (int i = 0; i < count; i++) {
         screen_output_select(i);
-        output_capacity[i] = grid_visible() * grid_columns();
-        total_capacity += output_capacity[i];
-    }
-    int first = total_capacity > 0 ? selected / total_capacity * total_capacity : 0;
-    int selected_output = home_output < count ? home_output : 0;
-    for (int i = 0; i < count; i++) {
-        screen_output_select(i);
-        output_first[i] = first;
-        draw_first = first;
-        draw_limit = first + output_capacity[i];
-        if (selected >= draw_first && selected < draw_limit) selected_output = i;
+        scroll = output_scroll[i];
         draw_output(0);
-        first = draw_limit;
+        output_scroll[i] = scroll;
+        output_first[i] = scroll * grid_columns();
     }
-    home_output = selected_output;
     screen_output_select(home_output);
+    scroll = output_scroll[home_output];
     if (ready) say("home> ");
 }
 
@@ -793,8 +783,10 @@ static int pointer_key(void)
     const struct pointer_event *e = pointer_last();
     if (screen_is_extended && screen_is_extended() && screen_output_select) {
         int previous = home_output;
-        if (screen_output_select(e->output) < 0) return 0;
+        if (e->output < 0 || e->output >= HOME_OUTPUTS || screen_output_select(e->output) < 0) return 0;
+        output_scroll[previous] = scroll;
         home_output = e->output;
+        scroll = output_scroll[home_output];
         if (!e->button && !e->wheel && !e->hwheel && !e->gesture) return previous == home_output ? 0 : -1;
     }
     if (e->wheel && confirming == CONF_NONE) {
@@ -823,6 +815,21 @@ static int pointer_key(void)
         return ' '; /* the box marks it */
     }
     return e->clicks == 2 ? '\n' : -1;
+}
+
+static void open_entry(int host)
+{
+    last_customized = 1;
+    snprintf(last, sizeof last, _("opening %s..."), entries[host].name);
+    draw(0);
+    struct screen_output on;
+    int several = screen_is_extended && screen_is_extended() && screen_output_count &&
+                  screen_output_count() > 1 && screen_output_get(home_output, &on) == 0;
+    base_open_on(several ? on.name : NULL, entries[host].argv, last, sizeof last);
+    say("home: %s", last);
+    if (several && strncmp(last, "shown ", 6) == 0) {
+        snprintf(last, sizeof last, _("%s is open on %s."), entries[host].name, on.name);
+    }
 }
 
 int main(void)
@@ -909,19 +916,7 @@ int main(void)
             view_files();
             refresh();
         } else if (key == '\n') {
-            int host = selected - napps;
-            last_customized = 1;
-            snprintf(last, sizeof last, _("opening %s..."), entries[host].name);
-            draw(0);
-            /* On the screen it was chosen on, when home has several. */
-            struct screen_output on;
-            int several = screen_is_extended && screen_is_extended() && screen_output_count &&
-                          screen_output_count() > 1 && screen_output_get(home_output, &on) == 0;
-            base_open_on(several ? on.name : NULL, entries[host].argv, last, sizeof last);
-            say("home: %s", last); /* K_SHOWN comes next and redraws, */
-            if (several && strncmp(last, "shown ", 6) == 0) { /* unless home kept its other screens */
-                snprintf(last, sizeof last, _("%s is open on %s."), entries[host].name, on.name);
-            }
+            open_entry(selected - napps);
         }
         draw(0);
     }

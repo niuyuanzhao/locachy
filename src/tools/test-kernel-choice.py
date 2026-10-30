@@ -33,6 +33,9 @@ class KernelChoice(unittest.TestCase):
         for name, value in (("MANIFEST", str(self.manifest)), ("RC_CONF", str(self.rc)),
                             ("cmd_sync", lambda: self.calls.append("sync") or 0),
                             ("kernel_packages", lambda: ["linux", "linux-lts", "linux-cachyos-bore"]),
+                            ("unknown_packages", lambda names: [n for n in names if n not in {
+                                "linux", "linux-headers", "linux-lts", "linux-lts-headers",
+                                "linux-cachyos-bore", "linux-cachyos-bore-headers"}]),
                             ("run", lambda cmd: self.calls.append(cmd) or True)):
             patch = mock.patch.object(pkg, name, value)
             patch.start()

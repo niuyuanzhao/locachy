@@ -373,11 +373,7 @@ static int caps_locked;
 
 void ime_caps_key(int pressed, int locked)
 {
-    if (!rime || !session || !focused || current_mode == IME_MODE_RAW) {
-        return;
-    }
-    rime->process_key(session, RIME_CAPS_LOCK, (locked ? RIME_LOCK_MASK : 0) | (pressed ? 0 : RIME_RELEASE_MASK));
-    collect_commit(); /* ascii_composer's commit_code style commits the input */
+    ime_key_event(RIME_CAPS_LOCK, (locked ? RIME_LOCK_MASK : 0) | (pressed ? 0 : RIME_RELEASE_MASK));
 }
 
 void ime_set_caps(int locked)
@@ -466,8 +462,22 @@ int ime_process_key(int key)
         }
     }
 
-    int sym = to_keysym(key);
-    Bool handled = rime->process_key(session, sym, caps_locked ? RIME_LOCK_MASK : 0);
+    return ime_key_event((unsigned int)to_keysym(key), caps_locked ? RIME_LOCK_MASK : 0);
+}
+
+int ime_key_event(unsigned int sym, unsigned int mask)
+{
+    if (!rime || !session || !focused || current_mode == IME_MODE_RAW || !sym) return 0;
+    /* EN keeps punctuation and navigation direct when no composition is
+     * active; lock/modifier events still reach ascii_composer. */
+    if (current_mode == IME_MODE_EN && menu_count() < 0 && !(mask & RIME_RELEASE_MASK) &&
+        !((sym >= 'a' && sym <= 'z') || (sym >= 'A' && sym <= 'Z')) &&
+        !(sym >= 0xffe1 && sym <= 0xffee) && sym != 0xff7f && sym != 0xff30) return 0;
+    /* fcitx5-rime/IBus use these X11 modifiers and the release flag. The
+     * resolved keysym already contains Num Lock and the keyboard layout. */
+    mask &= (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 6) | (1u << 26) | (1u << 30);
+    if (mask & (1u << 6)) mask |= 1u << 26; /* IBus virtual Super */
+    Bool handled = rime->process_key(session, (int)sym, (int)mask);
     collect_commit();
     return handled != 0;
 }
