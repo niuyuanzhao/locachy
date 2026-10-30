@@ -14,6 +14,7 @@
  *   Alt+Left, Alt+Right: back, forward; Alt+Up, Backspace (and Left in the
  *   Details view): up, as far as /; Ctrl+L: the location (trash:// too)
  *   Enter: open (a folder: go in)   Tab: places, the panes   o: open with...
+ *   (a folder too, with what lists inode/directory; it is never the default)
  *   Ctrl+C c, Ctrl+X x, Ctrl+V v: copy, cut, paste   Ctrl+A: select all
  *   Space: mark   F2 r: rename   F10 Ctrl+Shift+N n: new folder
  *   Delete d: move to the Trash   Shift+Delete D: delete permanently
@@ -3261,6 +3262,8 @@ static int choose(const char *path, const char *type, char *name, size_t size)
         return 0;
     }
     int is_rule = open_rule(type, rule, sizeof rule) == OPEN_RULE_CONTAINER;
+    /* Folders open in files, whatever a rule says (locachy-bar too): no rule for them. */
+    int rules = strcmp(type, "inode/directory") != 0;
     for (int i = 0; is_rule && i < n; i++) {
         if (strcmp(names[i], rule) == 0) {
             at = i;
@@ -3291,7 +3294,7 @@ static int choose(const char *path, const char *type, char *name, size_t size)
         /* TRANSLATORS: Enter is the key; keep it. */
         int c = ui_button(SIDE + 1, r0 + 4 + last, _("Enter: open"), HIT_KEY + '\n');
         /* TRANSLATORS: A is the key; keep it. */
-        c = ui_button(c, r0 + 4 + last, _("A: always use it"), HIT_KEY + 'a');
+        if (rules) c = ui_button(c, r0 + 4 + last, _("A: always use it"), HIT_KEY + 'a');
         /* TRANSLATORS: Esc is the key; keep it. */
         ui_button(c, r0 + 4 + last, _("Esc: cancel"), HIT_KEY + 27);
         screen_flush();
@@ -3317,7 +3320,7 @@ static int choose(const char *path, const char *type, char *name, size_t size)
             at++;
         } else if (key >= '1' && key <= '9' && key - '1' <= last) {
             at = key - '1';
-        } else if (key == '\n' || key == 'a' || key == 'A') {
+        } else if (key == '\n' || (rules && (key == 'a' || key == 'A'))) {
             if (at == n) {
                 all = 1;
                 n = open_containers(names, 24);
@@ -3343,6 +3346,11 @@ static void open_file(const char *path, int pick, const char *with)
     as_user(0);
     if (!type_ok) {
         report(1, _("Cannot tell what %s is."), path);
+        return;
+    }
+    /* A folder is gone into here; what else opens folders only by Open with... */
+    if (!pick && !with && strcmp(type, "inode/directory") == 0) {
+        go(path, NULL);
         return;
     }
     int kind = open_rule(type, name, sizeof name);
@@ -3714,7 +3722,7 @@ static int file_menu(int col, int row, int on_file)
         ITEM(_("Properties"), 'i');
     } else if (on_file) {
         ITEM(_("Open"), '\n');
-        if (!P->list[P->sel].dir) ITEM(_("Open with..."), 'o');
+        ITEM(_("Open with..."), 'o');
         ITEM(_("Copy"), 'c');
         ITEM(_("Cut"), 'x');
         if (nclip && !search) ITEM(_("Paste"), 'v');
@@ -4322,8 +4330,8 @@ static int browse(char *out, size_t size)
                     snprintf(out, size, "%s", path);
                     return 1;
                 }
-            } else if (!P->list[P->sel].dir) {
-                open_file(path, key == 'o', NULL);
+            } else {
+                open_file(path, key == 'o', NULL); /* a folder: only by o, Open with... */
             }
         } else if (key == ' ' && P->nlist > 0) {
             P->list[P->sel].marked = !P->list[P->sel].marked;

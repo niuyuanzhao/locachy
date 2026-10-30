@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Declare in the package manifest what LOCachy's definitions add.
+
+  declare-packages SOURCE [MANIFEST [RECORD]]
+
+The base list (SOURCE/packages) and each module of SOURCE/link/modules.json
+grow with LOCachy's source. RECORD keeps what has been declared from them so
+far. Each run appends to MANIFEST, under a comment naming the base or the
+module, what the definitions have that RECORD does not and MANIFEST lacks,
+then records the definitions. A module counts only where it is declared:
+its first package (its anchor) is in MANIFEST. A package the user removes
+later stays removed (RECORD has it). Without RECORD, the definitions of
+published commit 08d2a66 (link/declared-packages-baseline.json) stand for
+it, so a kernel the user swapped out is not declared again. Nothing is
+installed here: an update's host step installs what is declared."""
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+import tempfile
+
+MANIFEST = "/etc/locachy/packages"
+RECORD = "/var/lib/locachy/declared-packages.json"
+BASELINE = "link/declared-packages-baseline.json"
+
+
+def leaves(text):
+    """The names text declares (a line may hold several, whitespace apart)."""
+    return [name for line in text.splitlines() for name in line.split("#", 1)[0].split()]
+
+
+def definitions(source):
+    source = Path(source)
+    modules = json.loads((source / "link/modules.json").read_text(encoding="utf-8"))
+    return {"base": leaves((source / "packages").read_text(encoding="utf-8")),
+            "modules": {name: list(entry.get("packages", [])) for name, entry in modules.items()}}
+
+
+def write(path, text, mode, owner=None):
+    """path replaced whole by text (a crash leaves the old or the new file)."""
+    fd, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    try:
+        os.fchmod(fd, mode)
+        if owner is not None and os.geteuid() == 0:
+            os.fchown(fd, *owner)
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            output.write(text)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def declare(source, manifest=MANIFEST, record=RECORD):
+    """The (where, packages) groups appended to manifest."""
+    manifest, record = Path(manifest), Path(record)
+    if not manifest.exists():
+        return []
+    if manifest.is_symlink() or not stat.S_ISREG(manifest.stat().st_mode):
+        raise ValueError("package manifest must be a regular file")
+    current = definitions(source)
+    known = json.loads((record if record.exists() else Path(source) / BASELINE).read_text(encoding="utf-8"))
+    text = manifest.read_text(encoding="utf-8")
+    declared = set(leaves(text))
+    groups = []
+
+    def add(where, wanted, before):
+        new = [p for p in wanted if p not in before and p not in declared]
+        if new:
+            groups.append((where, new))
+            declared.update(new)
+
+    add("base", current["base"], set(known.get("base", [])))
+    for name, packages in current["modules"].items():
+        if packages and packages[0] in declared:
+            add("module " + name, packages, set(known.get("modules", {}).get(name, [])))
+    if groups:
+        if text and not text.endswith("\n"):
+            text += "\n"
+        for where, packages in groups:
+            text += f"\n# Added by a LOCachy update: {where}\n" + "".join(p + "\n" for p in packages)
+        info = manifest.stat()
+        write(manifest, text, stat.S_IMODE(info.st_mode), (info.st_uid, info.st_gid))
+    if not record.exists() or json.loads(record.read_text(encoding="utf-8")) != current:
+        record.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+        write(record, json.dumps(current, indent=1, sort_keys=True) + "\n", 0o644)
+    return groups
+
+
+def main():
+    if not 2 <= len(sys.argv) <= 4:
+        print("usage: declare-packages SOURCE [MANIFEST [RECORD]]", file=sys.stderr)
+        return 2
+    try:
+        groups = declare(*sys.argv[1:])
+    except (OSError, ValueError) as e:
+        print(f"declare-packages: {e}", file=sys.stderr)
+        return 1
+    for where, packages in groups:
+        print(f"declare-packages: {where}: {' '.join(packages)} declared; an update's host step installs them")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -56,6 +56,10 @@ int ime_action(int key, const char **notice);
  * Either way the key may have committed text (ime_get_commit): type it before
  * passing the key on (a comma at half width ends the composition). */
 int ime_process_key(int key);
+/* Native XKB/X11 keysym and modifier mask, as Rime front ends supply them:
+ * Shift, Lock, Control, Mod1, Mod4/Super; release is bit 30. Num Lock is
+ * expressed by the resolved keypad keysym, not passed as a modifier. */
+int ime_key_event(unsigned int sym, unsigned int mask);
 
 /* Caps Lock, as Rime's front ends give it (ascii_composer with
  * good_old_caps_lock): its key ends the composition and turns ASCII mode on
@@ -87,6 +91,7 @@ static inline const char *ime_mode_desc(void) { return " [RAW] Direct input "; }
 static inline const char *ime_toggle_width(void) { return NULL; }
 static inline int ime_width_key(int k, int m) { (void)k; (void)m; return 0; }
 static inline int ime_process_key(int k) { (void)k; return 0; }
+static inline int ime_key_event(unsigned int s, unsigned int m) { (void)s; (void)m; return 0; }
 static inline void ime_caps_key(int p, int l) { (void)p; (void)l; }
 static inline void ime_set_caps(int l) { (void)l; }
 static inline const char *ime_get_commit(void) { return NULL; }

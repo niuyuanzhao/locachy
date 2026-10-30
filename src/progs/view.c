@@ -1,7 +1,8 @@
 /*
  * view [PATH]: documents on the screen, as Okular shows them (PDF, XPS,
- * EPUB, MOBI, FictionBook, Markdown, text, HTML, OpenDocument text, comic
- * books, DjVu, PostScript, DVI, fax and images). The documents are read
+ * EPUB, MOBI, FictionBook, Markdown, text, HTML, OpenDocument text, CHM,
+ * comic books, DjVu, PostScript, DVI, fax and images), and folders of
+ * images as Gwenview browses them. The documents are read
  * by view-render (view-proto.h), as the user in a sandbox; this program is
  * the screen, the keys, the pointer and the clipboard. It never waits for a
  * page: one request is out at a time, the pages on the screen first, then
@@ -33,6 +34,14 @@
  *   < and > (MuPDF's viewer's keys): a reflowed document's text smaller, larger
  *   A PDF's (view-pdf-ui.inc): F6 the annotation tools, Ctrl+Z, Ctrl+Shift+Z
  *   undo, redo, Ctrl+S, Ctrl+Shift+S save, save as; its forms, signatures
+ * Gwenview's Browse and View modes (gal) for a folder (it opens in Browse),
+ * a comic book and an image by itself: in Browse the arrows, Page Up, Page
+ * Down, Home and End move in the grid, Enter or a double click opens a
+ * folder or an archive or views an image, Alt+Up goes to the parent folder,
+ * Ctrl+wheel and the status bar's - and + size the thumbnails, View > Sort
+ * By orders by name, date (taken) or size; in View mode Esc and Alt+Up go
+ * back to Browse, F toggles Zoom to Fit, Home and End are the first and the
+ * last image, Ctrl+R and Ctrl+Shift+R rotate, F4 the Information panel.
  * The pointer: with Browse, dragging moves the pages and a click follows a
  * link (the right button dragged is Area Selection); with Text Selection,
  * dragging selects text for the primary selection (a double click a word, a
@@ -53,6 +62,8 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -110,11 +121,11 @@
  * pageview.cpp setupViewerActions and setupActions). */
 enum { TOOL_BROWSE, TOOL_TEXT, TOOL_ZOOM, TOOL_AREA, TOOL_TABLE, TOOL_MAGNIFIER };
 enum { FOCUS_DOC, FOCUS_SIDEBAR, FOCUS_FIND, FOCUS_PROMPT, FOCUS_LIST };
-enum { TAB_CONTENTS, TAB_THUMBNAILS, TAB_BOOKMARKS, TAB_ANNOTATIONS, TAB_SIGNATURES };
+enum { TAB_CONTENTS, TAB_THUMBNAILS, TAB_BOOKMARKS, TAB_ANNOTATIONS, TAB_SIGNATURES, TAB_INFO };
 enum { J_NONE, J_OPEN, J_AUTH, J_PAGE, J_RENDER, J_THUMB, J_LINKS, J_HITS, J_SELECT, J_OUTLINE,
        J_INFO, J_EXPORT, J_EMBEDDED, J_SAVE, J_LAYOUT, J_RESOLVE, J_TOPTEXT, J_REFIND, J_BBOX,
        J_PDF_STATUS, J_PDF_ANNOTS, J_PDF_FIELDS, J_PDF_SIGS, J_PDF_EDIT, J_PDF_WRITE, J_WORDS, J_MAGNIFY,
-       J_MARK, J_FIND_MARK, J_SLIDE };
+       J_MARK, J_FIND_MARK, J_SLIDE, J_GRID, J_META };
 enum { P_NONE, P_GOTO, P_PASSWORD, P_EXPORT, P_SAVE, P_OVERWRITE, P_BOOKMARK,
        P_PDF_TEXT, P_PDF_SAVE_AS, P_PDF_UNSAVED, P_PDF_CONSENT, P_COLOR, P_IMAGE };
 enum { L_NONE, L_INFO, L_EMBEDDED };
@@ -135,7 +146,8 @@ enum { A_NONE, A_OPEN, A_PROPERTIES, A_EMBEDDED, A_EXPORT, A_QUIT, A_COPY, A_FIN
        A_ANNOT_PROPERTIES, A_TAB_SWITCH, A_PRESENTATION, A_COLOR_MENU, A_CHANGE_COLORS, A_COLOR_NORMAL,
        A_COLOR_MODE, A_COLOR_MODE_LAST = A_COLOR_MODE + CM_COUNT - 1, A_COLOR_CONFIG, A_COLUMNS_MENU, A_RTL,
        A_ZOOM_TOOL, A_AREA_TOOL, A_TABLE_TOOL, A_MAGNIFIER, A_RECENT, A_CONTAINING, A_AREA_COPY, A_AREA_COPY_FLAT,
-       A_AREA_SEARCH, A_AREA_IMAGE_COPY, A_AREA_IMAGE_SAVE, A_TABLE_COPY, A_BOOKMARK_REMOVE };
+       A_AREA_SEARCH, A_AREA_IMAGE_COPY, A_AREA_IMAGE_SAVE, A_TABLE_COPY, A_BOOKMARK_REMOVE,
+       A_GAL_BROWSE, A_GAL_VIEW, A_SORT_MENU, A_INFO_PANEL };
 
 /* Places the pointer clicks, as registered with ui_hit. */
 #define HIT_MENU   1000    /* + the menu */
@@ -150,6 +162,11 @@ enum { A_NONE, A_OPEN, A_PROPERTIES, A_EMBEDDED, A_EXPORT, A_QUIT, A_COPY, A_FIN
 #define HIT_TOC    1000000 /* + an entry of the contents */
 #define HIT_THUMB  2000000 /* + a page */
 #define HIT_BOOKMARK 3000000 /* + a bookmarked page */
+#define HIT_GAL_SMALLER 1600    /* Browse's thumbnail size slider's - and + */
+#define HIT_GAL_LARGER  1601
+#define HIT_MODE        1602    /* + 0 Browse, 1 View: Gwenview's toolbar buttons */
+#define HIT_INFO_MORE   1604    /* the Information panel's "Show more details" */
+#define HIT_GAL         8000000 /* + an item of Browse's grid */
 #define HIT_DOCUMENT_TAB 5000
 #define HIT_CLOSE_TAB 6000
 #define TABS_MAX 32
@@ -228,6 +245,24 @@ static int pdf_editing(void);
 static void pdf_insert(const char *s, size_t len);
 static void pdf_menu_items(int m, struct item *it, int *n);
 
+/* Gwenview's Browse mode (below). */
+struct job;
+static int gal_background(struct job *j);
+static int gal_wanted(const struct job *j);
+static void gal_opened(const void *data, size_t size);
+static void gal_failed(const char *why);
+static void draw_gallery(void);
+static int key_gallery(int key, int mods);
+static void gal_activate(int k);
+static void gal_pointer(const struct pointer_event *e);
+static void gal_click(int id, const struct pointer_event *e);
+static int gal_able(void);
+static int gal_info_able(void);
+static void gal_browse(void);
+static void gal_forget(void);
+static void draw_info(void);
+static void gal_sort_menu(void);
+
 static struct {
     int open;                 /* there are pages to show */
     int opening;              /* OPEN or AUTH is out */
@@ -261,12 +296,48 @@ static struct {
     int render_mode, bw_threshold, bw_contrast;
     uint32_t paper, recolor_fg, recolor_bg;
     int columns, rtl;         /* okular.kcfg ViewColumns (1 to 8), rtlReadingDirection */
+    int thumbnail_size, sort, sort_desc; /* Browse mode's: gwenviewconfig.kcfg ThumbnailSize, Sorting, SortDescending */
 } settings;
+
+/* Gwenview's Browse mode (its handbook's "Browse Mode"; browsemainpage.cpp,
+ * thumbnailview.cpp): a folder's images, or a comic book's pages, as a grid
+ * of thumbnails, the folder's folders and archives first; View mode is the
+ * page view. A folder opens in Browse, its own images the pages
+ * (VIEW_GALLERY); Enter or a double click on an image goes to View, on a
+ * folder or an archive opens it; Esc and Alt+Up go back to Browse, and in
+ * Browse Alt+Up goes to the parent folder. An image opened by itself is
+ * shown alone (Okular's), and Esc browses its folder with it selected. */
+#define GAL_SIZE     128      /* gwenviewconfig.kcfg ThumbnailSize */
+#define GAL_SIZE_MIN 48       /* thumbnailview.h MinThumbnailSize, MaxThumbnailSize */
+#define GAL_SIZE_MAX 1024
+#define GAL_WHEEL    4        /* thumbnailview.cpp WHEEL_ZOOM_MULTIPLIER: pixels a Ctrl+wheel step */
+#define GAL_STEP     10       /* the slider's -/+ buttons: QSlider's page step */
+struct gal_item {
+    char *name;
+    int archive;              /* else a folder */
+    time_t mtime;
+    long long size;           /* a folder's: its items (Gwenview sorts folders by their count) */
+};
+static struct {
+    int on;                   /* Browse mode is shown */
+    int folder;               /* the document is a folder (VIEW_GALLERY) */
+    int empty;                /* that folder has no images: no document, its folders only */
+    char dir[PATH_MAX];       /* that folder */
+    int sel, top;             /* the selected item; the grid scrolled by top pixels */
+    char **name;              /* each page's name (OPEN's list) */
+    int nname;
+    struct gal_item *item;    /* the folder's folders and archives, shown first */
+    int nitem;
+    char want[NAME_MAX + 1];  /* the item to select once listed */
+    char *info;               /* the Information panel: VIEW_META of info_page */
+    int info_page, info_asked, info_more;
+} gal = { .info_page = -1 };
 
 static void settings_default(void)
 {
     settings = (typeof(settings)){ .sidebar = 1, .tool = TOOL_BROWSE, .render_mode = CM_INVERTED, .bw_threshold = 127,
-        .bw_contrast = 2, .paper = 0xFFFFFF, .recolor_fg = 0x600000, .recolor_bg = 0xF0F0F0, .columns = 3 };
+        .bw_contrast = 2, .paper = 0xFFFFFF, .recolor_fg = 0x600000, .recolor_bg = 0xF0F0F0, .columns = 3,
+        .thumbnail_size = GAL_SIZE, .sort = VIEW_SORT_NAME };
 }
 
 static struct {
@@ -522,14 +593,15 @@ static void geometry(void)
     if (splitter_px < 1) splitter_px = 1;
     int logical_w = (int)(W / scale);
     if (!settings.side_width) settings.side_width = clampi(logical_w / 11, 90, 600);
-    side_px = settings.sidebar ? (int)lround(clampi(settings.side_width, 90, 600) * scale) : 0;
+    /* Browse mode is the grid alone, with its status bar on the bottom row. */
+    side_px = settings.sidebar && !gal.on ? (int)lround(clampi(settings.side_width, 90, 600) * scale) : 0;
     /* Preserve the stored width on a temporarily narrow screen. */
     if (side_px > W - splitter_px - cw) side_px = W - splitter_px - cw;
     if (side_px < 0) side_px = 0;
     side_cols = side_px / cw;
     ax = side_px ? side_px + splitter_px : 0;
     ay = top + (2 + tab_rows() + pdf_rows()) * ch;
-    int bottom = bottom_used() ? top + (nrows - 1) * ch : H;
+    int bottom = bottom_used() || gal.on ? top + (nrows - 1) * ch : H;
     aw = W - ax > 1 ? W - ax : 1;
     ah = bottom - ay > 1 ? bottom - ay : 1;
     size_t need = (size_t)(W > 0 ? W : 1) * (size_t)(H > 0 ? H : 1);
@@ -873,8 +945,8 @@ static void push_job(const struct job *j, int first)
     }
     nqueue++;
     /* What is asked for now goes before a picture being drawn. */
-    if (fly.busy && !fly.cancelled && (fly.job.kind == J_RENDER || fly.job.kind == J_THUMB || fly.job.kind == J_SLIDE) &&
-        render_pid > 0) {
+    if (fly.busy && !fly.cancelled && (fly.job.kind == J_RENDER || fly.job.kind == J_THUMB || fly.job.kind == J_SLIDE ||
+                                       fly.job.kind == J_GRID) && render_pid > 0) {
         kill(render_pid, SIGUSR1);
         fly.cancelled = 1;
     }
@@ -1059,7 +1131,9 @@ static int still_wanted(const struct job *j)
 {
     if (j->gen != doc.gen) return 0;
     if (j->kind == J_SLIDE) return pres_wanted(j);
+    if (j->kind == J_GRID) return gal_wanted(j);
     if (j->kind == J_HITS) return j->tx == find.gen;
+    if (gal.on && (j->kind == J_RENDER || j->kind == J_THUMB)) return 0; /* Browse shows neither */
     if (j->kind == J_THUMB) {
         int y, w, h;
         double z;
@@ -1084,8 +1158,8 @@ static int still_wanted(const struct job *j)
 static void check_stale(void)
 {
     if (fly.busy && !fly.cancelled && render_pid > 0 &&
-        (fly.job.kind == J_RENDER || fly.job.kind == J_THUMB || fly.job.kind == J_HITS || fly.job.kind == J_SLIDE) &&
-        !still_wanted(&fly.job)) {
+        (fly.job.kind == J_RENDER || fly.job.kind == J_THUMB || fly.job.kind == J_HITS || fly.job.kind == J_SLIDE ||
+         fly.job.kind == J_GRID) && !still_wanted(&fly.job)) {
         kill(render_pid, SIGUSR1);
         fly.cancelled = 1;
     }
@@ -1113,6 +1187,7 @@ static struct job hits_job(int i)
 static int background(struct job *j)
 {
     if (pres.on) return pres_background(j);
+    if (gal.on) return gal_background(j);
     compute_prio();
     for (int k = 0; k < nprio; k++) {
         if (!doc.page[prio[k]].known && !doc.page[prio[k]].asked) {
@@ -1172,6 +1247,13 @@ static int background(struct job *j)
             continue;
         }
         render_job(j, J_THUMB, i, (float)z, -1, -1);
+        return 1;
+    }
+    /* The Information panel's page. */
+    if (side_cols && ui.tab == TAB_INFO && gal_info_able() && !gal.info_asked && gal.info_page != current_page()) {
+        *j = new_job(J_META, VIEW_META);
+        j->page = j->req.page = current_page();
+        gal.info_asked = 1;
         return 1;
     }
     for (; doc.size_next < doc.pages; doc.size_next++) {
@@ -1304,6 +1386,9 @@ static void state_fields(const char *line, struct saved *s, int settings_line)
             else if (!strcmp(t, "side_width")) settings.side_width = clampi((int)x, 90, 600);
             else if (!strcmp(t, "trim_margins")) settings.trim_margins = x != 0;
             else if (!strcmp(t, "paged")) settings.paged = x != 0;
+            else if (!strcmp(t, "thumbnail_size")) settings.thumbnail_size = clampi((int)x, GAL_SIZE_MIN, GAL_SIZE_MAX);
+            else if (!strcmp(t, "sort")) settings.sort = clampi((int)x, VIEW_SORT_NAME, VIEW_SORT_SIZE);
+            else if (!strcmp(t, "sort_desc")) settings.sort_desc = x != 0;
             continue;
         }
         if (!strcmp(t, "page")) s->page = (int)x;
@@ -1357,11 +1442,12 @@ static void state_save(void)
     FILE *f = fd >= 0 ? fdopen(fd, "w") : NULL;
     if (!f && fd >= 0) close(fd);
     if (f) {
-        fprintf(f, "sidebar=%d invert=%d tool=%d facing=%d side_width=%d paged=%d trim_margins=%d render_mode=%d "
-                "paper=%06x recolor_fg=%06x recolor_bg=%06x bw_threshold=%d bw_contrast=%d columns=%d rtl=%d\t\n",
-                settings.sidebar, settings.invert, settings.tool, settings.facing,
-                settings.side_width, settings.paged, settings.trim_margins, settings.render_mode, settings.paper,
-                settings.recolor_fg, settings.recolor_bg, settings.bw_threshold, settings.bw_contrast,
+        fprintf(f, "sidebar=%d invert=%d tool=%d facing=%d side_width=%d paged=%d thumbnail_size=%d sort=%d sort_desc=%d "
+                "trim_margins=%d render_mode=%d paper=%06x recolor_fg=%06x recolor_bg=%06x bw_threshold=%d bw_contrast=%d "
+                "columns=%d rtl=%d\t\n",
+                settings.sidebar, settings.invert, settings.tool, settings.facing, settings.side_width, settings.paged,
+                settings.thumbnail_size, settings.sort, settings.sort_desc, settings.trim_margins, settings.render_mode,
+                settings.paper, settings.recolor_fg, settings.recolor_bg, settings.bw_threshold, settings.bw_contrast,
                 settings.columns, settings.rtl);
         int lines = 1;
         for (int k = 0; k < recent.n; k++, lines++) fprintf(f, "recent\t%s\n", recent.path[k]);
@@ -1673,6 +1759,7 @@ static void list_close(void)
 static void close_document(void)
 {
     pdf_forget();
+    gal_forget();
     free_pages();
     bpend_free();
     free(doc.outline);
@@ -1701,8 +1788,13 @@ static struct job open_job(int again)
     j.req.ax = doc.lw;
     j.req.ay = doc.lh;
     j.req.bx = doc.em;
+    /* A comic book's order, and a folder as Gwenview shows it. */
+    j.req.mode = settings.sort | (settings.sort_desc ? VIEW_SORT_DESCENDING : 0) | (gal.folder ? VIEW_GALLERY : 0);
     return j;
 }
+
+static int gal_keep_browse;     /* the next document opens in Browse mode too (a new order) */
+static void gal_list(const char *dir);
 
 static void open_document(const char *path)
 {
@@ -1711,11 +1803,18 @@ static void open_document(const char *path)
     close_document();
     nqueue = 0;
     if (!tabs.n) { tabs.path[0] = strdup(path); tabs.n = tabs.path[0] ? 1 : 0; tabs.current = 0; }
-    geometry();
     memset(&trim, 0, sizeof trim);
+    struct stat st;
     as_user(1);
     int ok = realpath(path, real) != NULL;
+    int folder = ok && stat(real, &st) == 0 && S_ISDIR(st.st_mode);
     as_user(0);
+    gal.folder = folder;
+    gal.on = gal_keep_browse < 0 ? 0 : folder || gal_keep_browse;
+    gal_keep_browse = 0;
+    gal.want[0] = '\0';
+    gal.sel = gal.top = gal.empty = 0;
+    geometry();
     if (!ok) {
         if (path[0] == '/') {
             snprintf(real, sizeof real, "%s", path);
@@ -1725,6 +1824,7 @@ static void open_document(const char *path)
         }
     }
     snprintf(doc.path, sizeof doc.path, "%s", real);
+    if (folder) gal_list(real);
     doc.format[0] = doc.title[0] = '\0';
     doc.with_password = 0;
     memset(doc.password, 0, sizeof doc.password);
@@ -1751,7 +1851,7 @@ static void reopen(void)
 
 static void prompt_open(int kind, const char *question, const char *initial, int masked);
 
-static void opened(const struct job *j, const struct view_reply *rep)
+static void opened(const struct job *j, const struct view_reply *rep, const void *data, size_t size)
 {
     doc.opening = 0;
     if (rep->status == EACCES && (rep->flags & VIEW_NEEDS_PASSWORD)) {
@@ -1773,10 +1873,14 @@ static void opened(const struct job *j, const struct view_reply *rep)
         return;
     }
     if (rep->status != 0 || rep->pages < 1) {
+        doc.open = 0;
+        if (gal.folder) {
+            gal_failed(rep->text); /* its folders are still browsed */
+            return;
+        }
         /* TRANSLATORS: the first %.200s is the file name; the second is the reason from the renderer. */
         toast(1, _("Could not open %.200s. Reason: %.200s"), base_name(doc.path),
               rep->status ? rep->text : _("it has no pages"));
-        doc.open = 0;
         recent_remove(doc.path);
         return;
     }
@@ -1843,6 +1947,7 @@ static void opened(const struct job *j, const struct view_reply *rep)
     ui.follow_thumbs = 1;
     ui.changed = 0;
     ui.dirty = 1;
+    if (!again) gal_opened(data, size);
     pdf_opened(again);
 }
 
@@ -2166,7 +2271,7 @@ static void page_size(const struct job *j, const struct view_reply *rep)
     for (int k = 0; k < nprio; k++) {
         if (prio[k] == j->page) ui.dirty = 1;
     }
-    if (first || thumbs_shown()) ui.dirty = 1;
+    if (first || thumbs_shown() || gal.on) ui.dirty = 1;
 }
 
 static void got_select(const struct job *j, const struct view_reply *rep, const void *data, size_t size)
@@ -2308,7 +2413,7 @@ static int reply(const struct job *j, const struct view_reply *rep, void *data, 
     switch (j->kind) {
     case J_OPEN:
     case J_AUTH:
-        opened(j, rep);
+        opened(j, rep, data, data ? size : 0);
         break;
     case J_PAGE:
         if (mine && j->page >= 0) page_size(j, rep);
@@ -2316,6 +2421,7 @@ static int reply(const struct job *j, const struct view_reply *rep, void *data, 
     case J_RENDER:
     case J_THUMB:
     case J_SLIDE:
+    case J_GRID:
         if (!mine || rep->status == ECANCELED) break;
         if (rep->status != 0 || !data || rep->w < 1 || rep->h < 1 || pix_bytes(rep->w, rep->h) > size) {
             /* TRANSLATORS: %d is the page number; %.200s is the reason from the renderer. */
@@ -2328,7 +2434,7 @@ static int reply(const struct job *j, const struct view_reply *rep, void *data, 
         ui.dirty = 1;
         /* Kept, or unmapped by pix_add when there is no room. */
         if (j->kind == J_SLIDE && !still_wanted(j)) break;
-        pix_add(j->kind == J_THUMB ? 1 : j->kind == J_SLIDE ? 2 : 0, j->page, j->rotate, j->zoom, j->tx, j->ty, rep->w, rep->h,
+        pix_add(j->kind == J_THUMB || j->kind == J_GRID ? 1 : j->kind == J_SLIDE ? 2 : 0, j->page, j->rotate, j->zoom, j->tx, j->ty, rep->w, rep->h,
                 data, size, (j->kind == J_RENDER && still_wanted(j)) || (j->kind == J_SLIDE && j->page == pres.page));
         return 1;
     case J_BBOX:
@@ -2408,6 +2514,14 @@ static int reply(const struct job *j, const struct view_reply *rep, void *data, 
             if (!doc.noutline && ui.tab == TAB_CONTENTS) ui.tab = TAB_THUMBNAILS;
             ui.dirty = 1;
         }
+        break;
+    case J_META:
+        if (!mine) break;
+        gal.info_asked = 0;
+        gal.info_page = j->page;
+        free(gal.info);
+        gal.info = rep->status == 0 && data && size ? strndup(data, size) : NULL;
+        ui.dirty = 1;
         break;
     case J_INFO:
         if (rep->status != 0) toast(1, _("No properties: %.200s"), rep->text);
@@ -2834,8 +2948,20 @@ static void draw_sidebar(void)
         ui_hit(col, 2, w, 1, HIT_TAB + t);
         col += w + 1;
     }
+    if (gal_info_able()) {
+        /* Gwenview's sidebar's Information tab. */
+        snprintf(label, sizeof label, " %s ", side_cols >= 50 ? _("Information") : "I");
+        int w = ui_cells(label), on = ui.tab == TAB_INFO;
+        screen_text(col, 2, label, on ? BG : FG, on ? ACCENT : BG);
+        ui_hit(col, 2, w, 1, HIT_TAB + TAB_INFO);
+        col += w + 1;
+    }
     pdf_sidebar_tabs(col);
     if (pdf_draw_sidebar()) return;
+    if (ui.tab == TAB_INFO) {
+        if (gal_info_able()) draw_info();
+        return;
+    }
     int last = side_last();
     if (ui.tab == TAB_BOOKMARKS) {
         int n = 0, rows = last - 3 + 1;
@@ -2956,7 +3082,21 @@ static void draw_menubar(void)
         ui_hit(col - 1, 1, len + 2, 1, HIT_MENU + m);
         col += len + 2;
     }
-    if (!doc.open) return;
+    if (gal_able()) {
+        /* Gwenview's toolbar: Browse and View. */
+        for (int k = 0; k < 2; k++) {
+            char label[64];
+            snprintf(label, sizeof label, " %s ", k ? C_("mode", "View") : _("Browse"));
+            int on = k ? !gal.on : gal.on, w = ui_cells(label);
+            screen_text(col, 1, label, on ? BG : FG, on ? ACCENT : BG);
+            ui_hit(col, 1, w, 1, HIT_MODE + k);
+            col += w + 1;
+        }
+    }
+    if (!doc.open) {
+        if (gal.on) screen_text(col + 1, 1, gal.dir, DIM, BG);
+        return;
+    }
     char title[300];
     /* KDE's caption of a modified document. */
     if (pdf_modified()) {
@@ -3105,7 +3245,9 @@ static void draw(void)
         return;
     }
     screen_fill_px(ax, ay, aw, ah, DESK);
-    if (doc.open) {
+    if (gal.on && (doc.open || gal.folder)) {
+        draw_gallery();
+    } else if (doc.open) {
         compute_prio();
         for (int k = 0; k < nvis; k++) draw_page(prio[k]);
     } else {
@@ -3116,7 +3258,7 @@ static void draw(void)
         else snprintf(text, sizeof text, _("No document.   Ctrl+O: open a file   Ctrl+Q: quit"));
         screen_text(side_cols + 2, 3, text, FG, DESK);
     }
-    if (doc.open) draw_tools();
+    if (doc.open && !gal.on) draw_tools();
     if (side_cols) draw_sidebar();
     if (side_px) screen_fill_px(side_px, ay, splitter_px, ah, ptr.splitter ? ACCENT : DIM);
     draw_menubar();
@@ -3558,6 +3700,13 @@ static int menu_items(int m, struct item *it)
         ITEM(_("Show Sidebar"), "F7", A_SIDEBAR, settings.sidebar);
     }
     pdf_menu_items(m, it, &n);
+    if (m == 2 && gal_able()) {
+        /* Gwenview's modes and View > Sort By. */
+        ITEM(_("Browse"), "Esc", A_GAL_BROWSE, gal.on);
+        ITEM(C_("mode", "View"), "", A_GAL_VIEW, !gal.on);
+        ITEM(_("Sort By..."), "", A_SORT_MENU, 0);
+    }
+    if (m == 5 && gal_info_able()) ITEM(_("Information Panel"), "F4", A_INFO_PANEL, settings.sidebar && ui.tab == TAB_INFO);
     if (m == 2) {
         ITEM(_("Presentation"), "Ctrl+Shift+P", A_PRESENTATION, 0);
         ITEM(_("Color Mode..."), "", A_COLOR_MENU, settings.invert);
@@ -4260,8 +4409,14 @@ static void do_action(int a)
                     a != A_RTL && a != A_COLUMNS_MENU && a != A_RECENT && a != A_ZOOM_TOOL && a != A_AREA_TOOL &&
                     a != A_TABLE_TOOL && a != A_MAGNIFIER &&
                     a != A_BROWSE && a != A_TEXT_SELECT && a != A_FIND && a != A_REOPEN_TAB &&
-                    a != A_CLOSE_TAB && a != A_NEXT_TAB && a != A_PREV_TAB;
+                    a != A_CLOSE_TAB && a != A_NEXT_TAB && a != A_PREV_TAB && a != A_GAL_BROWSE && a != A_GAL_VIEW &&
+                    a != A_SORT_MENU && a != A_RELOAD;
     if (needs_doc && !doc.open) return;
+    /* Browse mode has none of the page view's actions. */
+    if (gal.on && a != A_OPEN && a != A_RECENT && a != A_CONTAINING && a != A_CLOSE_TAB && a != A_NEXT_TAB &&
+        a != A_PREV_TAB && a != A_REOPEN_TAB && a != A_RELOAD && a != A_QUIT && a != A_PROPERTIES &&
+        a != A_GAL_BROWSE && a != A_GAL_VIEW && a != A_SORT_MENU && a != A_INVERT && a != A_COLOR_MENU &&
+        a != A_CHANGE_COLORS && a != A_COLOR_NORMAL && a != A_COLOR_CONFIG && a != A_SIDEBAR) return;
     /* What closes the document asks first about its unsaved changes (Okular's queryClose). */
     if ((a == A_QUIT || a == A_RELOAD || a == A_OPEN || a == A_CLOSE_TAB || a == A_REOPEN_TAB) && pdf_guard(a, -1)) return;
     switch (a) {
@@ -4432,6 +4587,18 @@ static void do_action(int a)
         break;
     }
     case A_SIDEBAR: sidebar(!settings.sidebar); break;
+    case A_GAL_BROWSE: gal_browse(); break;
+    case A_GAL_VIEW: if (gal.on && gal.sel >= gal.nitem) gal_activate(gal.sel); break;
+    case A_SORT_MENU: gal_sort_menu(); break;
+    case A_INFO_PANEL:
+        if (settings.sidebar && ui.tab == TAB_INFO) {
+            sidebar(0);
+        } else {
+            ui.tab = TAB_INFO;
+            if (!settings.sidebar) sidebar(1);
+            ui.dirty = 1;
+        }
+        break;
     case A_FOLLOW_LINK: follow_link(ctx.page, ctx.link); break;
     case A_COPY_LINK:
         if (ctx.page >= 0 && ctx.link >= 0 && ctx.link < doc.page[ctx.page].nlink) {
@@ -4464,6 +4631,10 @@ static int key_global(int key, int mods)
     else if (key == 3 && mods == KEYS_CTRL) a = A_COPY;
     else if (key == K_F1 + 2) a = mods & KEYS_SHIFT ? A_FIND_PREV : A_FIND_NEXT;
     else if (key == K_F1 + 6) a = A_SIDEBAR;
+    else if (key == K_F1 + 3 && gal_info_able()) a = A_INFO_PANEL; /* Gwenview's sidebar, F4 */
+    else if (key == 18 && (mods == KEYS_CTRL || mods == (KEYS_CTRL | KEYS_SHIFT)) && gal_info_able()) {
+        a = mods & KEYS_SHIFT ? A_ROTATE_LEFT : A_ROTATE_RIGHT; /* Gwenview's Ctrl+R, Ctrl+Shift+R */
+    }
     else if (key == '\n' && mods == KEYS_ALT) a = A_PROPERTIES;
     else if ((key == '+' || key == '=') && ctrl) a = A_ZOOM_IN;
     else if (key == '-' && ctrl) a = A_ZOOM_OUT;
@@ -4497,7 +4668,23 @@ static void key_doc(int key, int mods)
 {
     int shift = mods & KEYS_SHIFT;
     if (pdf_key_doc(key, mods)) return;
+    if (key == K_UP && mods == KEYS_ALT && gal_able()) { /* Gwenview's Up in View mode: Browse */
+        gal_browse();
+        return;
+    }
     if (mods & (KEYS_CTRL | KEYS_ALT)) return;
+    if (gal_info_able()) {
+        /* Gwenview's View mode: F toggles Zoom to Fit (else 100%), Home and End
+         * the first and the last image. */
+        if (key == 'f') {
+            zoom_to(v.mode == VL_FIT_PAGE ? VL_FIXED : VL_FIT_PAGE, 1, ax + aw / 2, ay + ah / 2);
+            return;
+        }
+        if (key == K_BOL || key == K_EOL) {
+            do_action(key == K_BOL ? A_FIRST : A_LAST);
+            return;
+        }
+    }
     switch (key) {
     case ' ': screen_step(shift ? -1 : 1); break;
     case K_PGDN: screen_step(1); break;
@@ -4526,6 +4713,7 @@ static void key_doc(int key, int mods)
             ui.dirty = 1;
         } else if (table.on) table_clear();
         else if (sel.active || sel.dragging) sel_clear();
+        else if (gal_able()) gal_browse(); /* Gwenview's Browse, Esc */
         break;
     }
 }
@@ -4607,6 +4795,13 @@ static void key_sidebar(int key, int mods)
 {
     if (mods & (KEYS_CTRL | KEYS_ALT)) return;
     if (pdf_key_sidebar(key, mods)) return;
+    if (ui.tab == TAB_INFO) {
+        if (key == '\n') gal.info_more = !gal.info_more;
+        else if (key == K_LEFT) ui.tab = TAB_BOOKMARKS;
+        else if (key == '\t' || key == 27) ui.focus = FOCUS_DOC;
+        ui.dirty = 1;
+        return;
+    }
     if (ui.tab == TAB_BOOKMARKS) {
         key_bookmarks(key);
         return;
@@ -5723,6 +5918,11 @@ static void tool_set(int tool)
 /* A click on what was drawn to be clicked. */
 static void click(int id, const struct pointer_event *e)
 {
+    if (id >= HIT_GAL || (id >= HIT_GAL_SMALLER && id <= HIT_INFO_MORE)) {
+        gal_click(id, e);
+        ui.dirty = 1;
+        return;
+    }
     if (pdf_click(id, e)) {
         ui.dirty = 1;
         return;
@@ -5786,6 +5986,10 @@ static void pointer(const struct pointer_event *e)
 {
     if (pres.on && doc.open && !prompt.kind) {
         pres_pointer(e);
+        return;
+    }
+    if (gal.on && !prompt.kind && !list.kind && !ptr.find_drag) {
+        gal_pointer(e);
         return;
     }
     int mods = keys_modifiers(), page;
@@ -6069,10 +6273,692 @@ static void handle(int key)
     } else if (ui.focus == FOCUS_LIST) {
         if (key == 17 && (mods & KEYS_CTRL)) do_action(A_QUIT);
         else key_list(key, mods);
+    } else if (gal.on && ui.focus != FOCUS_FIND && key_gallery(key, mods)) {
+        /* Browse mode's */
     } else if (!key_global(key, mods)) {
         if (ui.focus == FOCUS_FIND) key_find(key, mods);
         else if (ui.focus == FOCUS_SIDEBAR) key_sidebar(key, mods);
         else key_doc(key, mods);
+    }
+}
+
+/* Gwenview's Browse mode (see gal): the grid, its keys and pointer, the
+ * folder's items, and the switches between the modes. */
+#define FOLDER_RGB      0x3DAEE9 /* Breeze's folder icon */
+#define ARCHIVE_RGB     0xC8A050
+
+/* KIO's order of names (KDirSortFilterProxyModel, Gwenview's): natural,
+ * case-insensitive, then exact. */
+static int kio_compare(const char *a, const char *b)
+{
+    const char *x = a, *y = b;
+    while (*x && *y) {
+        if (isdigit((unsigned char)*x) && isdigit((unsigned char)*y)) {
+            while (*x == '0' && isdigit((unsigned char)x[1])) x++;
+            while (*y == '0' && isdigit((unsigned char)y[1])) y++;
+            size_t nx = strspn(x, "0123456789"), ny = strspn(y, "0123456789");
+            if (nx != ny) return nx < ny ? -1 : 1;
+            int r = strncmp(x, y, nx);
+            if (r) return r;
+            x += nx;
+            y += ny;
+            continue;
+        }
+        int cx = tolower((unsigned char)*x), cy = tolower((unsigned char)*y);
+        if (cx != cy) return cx < cy ? -1 : 1;
+        x++;
+        y++;
+    }
+    if (*x || *y) return *x ? 1 : -1;
+    return strcmp(a, b);
+}
+
+/* Folders and archives first, in the order chosen (Gwenview's
+ * SortedDirModel): a folder's size is its number of items. */
+static int gal_item_order(const void *pa, const void *pb)
+{
+    const struct gal_item *a = pa, *b = pb;
+    int r = settings.sort == VIEW_SORT_DATE ? (a->mtime > b->mtime) - (a->mtime < b->mtime) :
+            settings.sort == VIEW_SORT_SIZE ? (a->size > b->size) - (a->size < b->size) : 0;
+    if (!r) r = kio_compare(a->name, b->name);
+    return settings.sort_desc ? -r : r;
+}
+
+static int is_archive_name(const char *name)
+{
+    static const char *const exts[] = { "cbz", "cbr", "cb7", "cbt", "zip", "rar", "7z", "tar", NULL };
+    const char *dot = strrchr(name, '.');
+    for (int i = 0; dot && exts[i]; i++) if (!strcasecmp(dot + 1, exts[i])) return 1;
+    return 0;
+}
+
+/* A folder's folders and the archives view opens, not the hidden ones
+ * (Gwenview's ShowHiddenFiles is off), read as the user. */
+static void gal_list(const char *dir)
+{
+    for (int i = 0; i < gal.nitem; i++) free(gal.item[i].name);
+    free(gal.item);
+    gal.item = NULL;
+    gal.nitem = 0;
+    snprintf(gal.dir, sizeof gal.dir, "%s", dir);
+    int cap = 0;
+    as_user(1);
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    while (d && (e = readdir(d)) != NULL) {
+        char path[PATH_MAX];
+        struct stat st;
+        if (e->d_name[0] == '.' || snprintf(path, sizeof path, "%s/%s", dir, e->d_name) >= (int)sizeof path ||
+            stat(path, &st) < 0) continue;
+        int archive = S_ISREG(st.st_mode) && is_archive_name(e->d_name);
+        if (!S_ISDIR(st.st_mode) && !archive) continue;
+        if (gal.nitem == cap) {
+            struct gal_item *more = realloc(gal.item, sizeof *more * (size_t)(cap ? cap * 2 : 16));
+            if (!more) break;
+            gal.item = more;
+            cap = cap ? cap * 2 : 16;
+        }
+        struct gal_item *it = &gal.item[gal.nitem];
+        it->name = strdup(e->d_name);
+        if (!it->name) break;
+        it->archive = archive;
+        it->mtime = st.st_mtime;
+        it->size = archive ? (long long)st.st_size : 0;
+        DIR *sub = archive ? NULL : opendir(path);
+        struct dirent *f;
+        while (sub && (f = readdir(sub)) != NULL) it->size += f->d_name[0] != '.';
+        if (sub) closedir(sub);
+        gal.nitem++;
+    }
+    if (d) closedir(d);
+    as_user(0);
+    if (gal.nitem) qsort(gal.item, (size_t)gal.nitem, sizeof *gal.item, gal_item_order);
+}
+
+static int gal_count(void)
+{
+    return gal.nitem + (doc.open && gal.name ? (doc.pages < gal.nname ? doc.pages : gal.nname) : 0);
+}
+
+static int image_doc(void)
+{
+    return doc.open && (!strcmp(doc.format, "Image") || !strcmp(doc.format, "TIFF"));
+}
+
+/* There is a Browse mode: a folder, a comic book, an image (its folder's). */
+static int gal_able(void)
+{
+    return gal.folder || (doc.open && gal.name) || image_doc();
+}
+
+/* The Information panel: a picture's (a comic book's page, an image). */
+static int gal_info_able(void)
+{
+    return doc.open && (gal.name || image_doc());
+}
+
+/* A cell of the grid: the thumbnail's box (ThumbnailSize wide, at
+ * Gwenview's ThumbnailAspectRatio of 3:2), the name under it (its
+ * ThumbnailDetails: the file name), margins; whole cells of text, so the
+ * names are on its rows. */
+static void gal_cell(int *cell_w, int *cell_h, int *box_w, int *box_h)
+{
+    *box_w = (int)lround(settings.thumbnail_size * scale);
+    *box_h = *box_w * 2 / 3;
+    *cell_w = (*box_w + 2 * col_margin + cw - 1) / cw * cw;
+    *cell_h = (*box_h + 2 * col_margin + ch - 1) / ch * ch + ch;
+}
+
+static int gal_columns(void)
+{
+    int cell_w, cell_h, bw, bh;
+    gal_cell(&cell_w, &cell_h, &bw, &bh);
+    return aw / cell_w > 0 ? aw / cell_w : 1;
+}
+
+/* Item k's top left on the screen. */
+static void gal_at(int k, int *X, int *Y)
+{
+    int cell_w, cell_h, bw, bh, cols = gal_columns();
+    gal_cell(&cell_w, &cell_h, &bw, &bh);
+    *X = ax + k % cols * cell_w;
+    *Y = ay + k / cols * cell_h - gal.top;
+}
+
+/* The grid scrolled by whole rows of cells, the selection on an item. */
+static void gal_clamp(void)
+{
+    int cell_w, cell_h, bw, bh, cols = gal_columns(), n = gal_count();
+    gal_cell(&cell_w, &cell_h, &bw, &bh);
+    int rows = (n + cols - 1) / cols, max = rows * cell_h - ah;
+    gal.top = clampi(gal.top / cell_h * cell_h, 0, max > 0 ? (max + cell_h - 1) / cell_h * cell_h : 0);
+    gal.sel = clampi(gal.sel, 0, n > 0 ? n - 1 : 0);
+}
+
+static void gal_into_sight(void)
+{
+    int cell_w, cell_h, bw, bh, cols = gal_columns();
+    gal_cell(&cell_w, &cell_h, &bw, &bh);
+    gal.sel = clampi(gal.sel, 0, gal_count() > 0 ? gal_count() - 1 : 0);
+    int y = gal.sel / cols * cell_h;
+    if (y < gal.top) gal.top = y;
+    else if (y + cell_h > gal.top + ah) gal.top = y + cell_h - ah;
+    gal_clamp();
+}
+
+/* The items of the rows in sight, and of the row after them. */
+static void gal_seen(int *first, int *last)
+{
+    int cell_w, cell_h, bw, bh, cols = gal_columns();
+    gal_cell(&cell_w, &cell_h, &bw, &bh);
+    *first = gal.top / cell_h * cols;
+    *last = ((gal.top + ah + cell_h - 1) / cell_h + 1) * cols;
+    if (*last > gal_count()) *last = gal_count();
+}
+
+/* Page i's thumbnail: in the box, never larger than the picture (Gwenview
+ * does not enlarge a small image). */
+static double gal_zoom(int i, int *w, int *h)
+{
+    int cell_w, cell_h, bw, bh;
+    float rw, rh;
+    gal_cell(&cell_w, &cell_h, &bw, &bh);
+    vl_rotated(v.rotate, doc.pw[i] > 0 ? doc.pw[i] : 1, doc.ph[i] > 0 ? doc.ph[i] : 1, &rw, &rh);
+    double z = fmin(bw / (double)rw, bh / (double)rh);
+    if (z > z100) z = z100;
+    *w = (int)(rw * z + 0.5) > 0 ? (int)(rw * z + 0.5) : 1;
+    *h = (int)(rh * z + 0.5) > 0 ? (int)(rh * z + 0.5) : 1;
+    return z;
+}
+
+/* Browse's work: the sizes of the pages in sight, then their thumbnails. */
+static int gal_background(struct job *j)
+{
+    int first, last;
+    if (!doc.open || !gal.name) return 0;
+    gal_seen(&first, &last);
+    for (int k = first > gal.nitem ? first : gal.nitem; k < last; k++) {
+        struct page *pg = &doc.page[k - gal.nitem];
+        if (!pg->known && !pg->asked) {
+            *j = page_job(k - gal.nitem);
+            return 1;
+        }
+    }
+    for (int k = first > gal.nitem ? first : gal.nitem; k < last; k++) {
+        int i = k - gal.nitem, w, h;
+        if (!doc.page[i].known || doc.page[i].failed) continue;
+        double z = gal_zoom(i, &w, &h);
+        if (pix_find(1, i, v.rotate, (float)z, -1, -1) >= 0 || pix_room(pix_bytes(w, h), frame_start, 0) < 0) continue;
+        render_job(j, J_GRID, i, (float)z, -1, -1);
+        return 1;
+    }
+    return 0;
+}
+
+static int gal_wanted(const struct job *j)
+{
+    int first, last, w, h;
+    if (!gal.on || !gal.name || j->rotate != v.rotate) return 0;
+    gal_seen(&first, &last);
+    int k = gal.nitem + j->page;
+    return k >= first && k < last && (float)gal_zoom(j->page, &w, &h) == j->zoom;
+}
+
+/* OPEN's answer: a comic book's (a folder's) names, and what to select:
+ * the item asked for (an image, or the folder gone up from), else the
+ * first image, else the first item (mainwindow.cpp). */
+static void gal_opened(const void *data, size_t size)
+{
+    if (strcmp(doc.format, "Comic book")) return;
+    for (int i = 0; i < gal.nname; i++) free(gal.name[i]);
+    free(gal.name);
+    gal.name = calloc((size_t)doc.pages, sizeof *gal.name);
+    gal.nname = gal.name ? doc.pages : 0;
+    const char *s = data;
+    for (size_t at = 0, i = 0; gal.name && s && i < (size_t)doc.pages && at < size; i++) {
+        size_t len = strnlen(s + at, size - at);
+        gal.name[i] = strndup(s + at, len);
+        at += len + 1;
+    }
+    if (gal.folder && !saved.found) {
+        v.mode = VL_FIT_PAGE; /* Gwenview's ZoomMode, Autofit */
+        layout();
+        v.sx = v.sy = 0;
+    }
+    gal.sel = doc.pages ? gal.nitem : 0;
+    for (int k = 0; gal.want[0] && k < gal_count(); k++) {
+        const char *name = k < gal.nitem ? gal.item[k].name : gal.name ? gal.name[k - gal.nitem] : NULL;
+        if (name && !strcmp(name, gal.want)) {
+            gal.sel = k;
+            if (k >= gal.nitem) go(pos_page(k - gal.nitem));
+            break;
+        }
+    }
+    gal.want[0] = '\0';
+    geometry();
+    layout();
+    gal_into_sight();
+    ui.dirty = 1;
+}
+
+/* A folder with no images: its folders are browsed all the same. */
+static void gal_failed(const char *why)
+{
+    gal.empty = gal.on = 1;
+    gal.sel = 0;
+    for (int k = 0; gal.want[0] && k < gal.nitem; k++) if (!strcmp(gal.item[k].name, gal.want)) gal.sel = k;
+    gal.want[0] = '\0';
+    geometry();
+    gal_into_sight();
+    if (!strstr(why, "no images")) {
+        /* TRANSLATORS: the first %.200s is the file name; the second is the reason from the renderer. */
+        toast(1, _("Could not open %.200s. Reason: %.200s"), base_name(doc.path), why);
+    }
+    ui.dirty = 1;
+}
+
+static void gal_forget(void)
+{
+    for (int i = 0; i < gal.nname; i++) free(gal.name[i]);
+    free(gal.name);
+    gal.name = NULL;
+    gal.nname = 0;
+    for (int i = 0; i < gal.nitem; i++) free(gal.item[i].name);
+    free(gal.item);
+    gal.item = NULL;
+    gal.nitem = 0;
+    free(gal.info);
+    gal.info = NULL;
+    gal.info_page = -1;
+    gal.info_asked = gal.info_more = 0;
+    gal.on = gal.folder = gal.empty = 0;
+}
+
+/* Open path in this tab (browse: in Browse mode; -1: in View mode), want
+ * selected once it is listed. */
+static void gal_go(const char *path, const char *want, int browse)
+{
+    char copy[PATH_MAX], keep[NAME_MAX + 1];
+    snprintf(copy, sizeof copy, "%s", path);
+    snprintf(keep, sizeof keep, "%s", want ? want : "");
+    if (tabs.n) {
+        char *name = strdup(copy);
+        if (name) {
+            free(tabs.path[tabs.current]);
+            tabs.path[tabs.current] = name;
+        }
+    }
+    gal_keep_browse = browse;
+    stop_renderer();
+    open_document(copy);
+    snprintf(gal.want, sizeof gal.want, "%s", keep);
+}
+
+/* Alt+Up: the parent folder, the one left selected (mainwindow.cpp goUp);
+ * of an archive, its folder. */
+static void gal_up(void)
+{
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof dir, "%s", gal.folder ? gal.dir : doc.path);
+    char *slash = strrchr(dir, '/');
+    if (!slash || !slash[1] || (slash == dir && gal.folder && !dir[1])) return;
+    char want[NAME_MAX + 1];
+    snprintf(want, sizeof want, "%.*s", NAME_MAX, slash + 1);
+    if (slash == dir) dir[1] = '\0';
+    else *slash = '\0';
+    gal_go(dir, want, 1);
+}
+
+/* View mode: the page view, at page i. */
+static void gal_view(int i)
+{
+    if (!doc.open || i < 0 || i >= doc.pages) return;
+    gal.on = 0;
+    geometry();
+    layout();
+    go(pos_page(i));
+    ui.focus = FOCUS_DOC;
+    ui.follow_thumbs = 1;
+    changed();
+}
+
+/* An item activated (Return, a double click): a folder or an archive
+ * opened and browsed, an image viewed. */
+static void gal_activate(int k)
+{
+    if (k < 0 || k >= gal_count()) return;
+    if (k < gal.nitem) {
+        char path[PATH_MAX];
+        if (snprintf(path, sizeof path, "%s%s%s", gal.dir, strcmp(gal.dir, "/") ? "/" : "", gal.item[k].name) < (int)sizeof path) {
+            gal_go(path, NULL, 1);
+        }
+        return;
+    }
+    gal_view(k - gal.nitem);
+}
+
+/* Esc, Alt+Up or the Browse button in View mode: the grid, the page
+ * selected; an image by itself, its folder's grid, it selected. */
+static void gal_browse(void)
+{
+    if (gal.on) return;
+    if (doc.open && gal.name) {
+        gal.on = 1;
+        gal.sel = gal.nitem + current_page();
+        geometry();
+        gal_into_sight();
+        ui.focus = FOCUS_DOC;
+        check_stale();
+        ui.dirty = 1;
+    } else if (image_doc()) {
+        char dir[PATH_MAX];
+        snprintf(dir, sizeof dir, "%s", doc.path);
+        char *slash = strrchr(dir, '/');
+        if (!slash) return;
+        char want[NAME_MAX + 1];
+        snprintf(want, sizeof want, "%.*s", NAME_MAX, slash + 1);
+        if (slash == dir) dir[1] = '\0';
+        else *slash = '\0';
+        gal_go(dir, want, 1);
+    }
+}
+
+static void gal_size(int size)
+{
+    settings.thumbnail_size = clampi(size, GAL_SIZE_MIN, GAL_SIZE_MAX);
+    gal_into_sight();
+    changed();
+}
+
+/* View > Sort By: the folder's items and the pages again in that order,
+ * the selection kept. */
+static void gal_sort(int key, int desc)
+{
+    settings.sort = key;
+    settings.sort_desc = desc;
+    changed();
+    char want[NAME_MAX + 1] = "";
+    int k = gal.on ? gal.sel : gal.nitem + current_page();
+    if (k < gal.nitem && k < gal_count()) snprintf(want, sizeof want, "%s", gal.item[k].name);
+    else if (gal.name && k - gal.nitem < gal.nname && gal.name[k - gal.nitem]) snprintf(want, sizeof want, "%s", gal.name[k - gal.nitem]);
+    if (gal.folder && !doc.open) {
+        gal_list(gal.dir);
+        for (int i = 0; i < gal.nitem; i++) if (!strcmp(gal.item[i].name, want)) gal.sel = i;
+        ui.dirty = 1;
+    } else if (doc.open && (gal.folder || gal.name)) {
+        char path[PATH_MAX];
+        snprintf(path, sizeof path, "%s", doc.path);
+        gal_go(path, want, gal.on ? 1 : -1);
+    }
+}
+
+static void gal_sort_menu(void)
+{
+    struct item it[4] = {
+        { _("Name"), "", 1, settings.sort == VIEW_SORT_NAME },
+        { _("Date"), "", 2, settings.sort == VIEW_SORT_DATE },
+        { _("Size"), "", 3, settings.sort == VIEW_SORT_SIZE },
+        { _("Descending"), "", 4, settings.sort_desc },
+    };
+    int k = submenu(it, 4);
+    if (k >= 1 && k <= 3) gal_sort(k == 1 ? VIEW_SORT_NAME : k == 2 ? VIEW_SORT_DATE : VIEW_SORT_SIZE, settings.sort_desc);
+    else if (k == 4) gal_sort(settings.sort, !settings.sort_desc);
+}
+
+/* A folder's or an archive's picture, in the thumbnail's box. */
+static void gal_icon(int bx, int by, int bw, int bh, int archive)
+{
+    int s = (bw < bh ? bw : bh) * 3 / 4, x = bx + (bw - s) / 2, y = by + (bh - s) / 2;
+    int cx0 = x, cy0 = y, cx1 = x + s, cy1 = y + s;
+    if (!clip_area(&cx0, &cy0, &cx1, &cy1)) return;
+    uint32_t rgb = archive ? ARCHIVE_RGB : FOLDER_RGB;
+    for (int r = cy0; r < cy1; r++) {
+        int yy = r - y;
+        int tab = !archive && yy < s / 6;
+        int x0 = tab ? x : cx0, x1 = tab ? x + s * 2 / 5 : cx1;
+        x0 = x0 > cx0 ? x0 : cx0;
+        x1 = x1 < cx1 ? x1 : cx1;
+        if (x1 > x0) screen_fill_px(x0, r, x1 - x0, 1, rgb);
+        if (archive && x + s / 2 - 1 >= cx0 && x + s / 2 + 1 <= cx1 && (yy / 3) % 2) {
+            screen_fill_px(x + s / 2 - 1, r, 3, 1, DESK); /* its zip */
+        }
+    }
+}
+
+static void draw_gallery(void)
+{
+    int cell_w, cell_h, bw, bh, first, last;
+    gal_clamp();
+    gal_cell(&cell_w, &cell_h, &bw, &bh);
+    gal_seen(&first, &last);
+    novl = 0;
+    int row0 = (ay - top) / ch, row1 = (ay + ah - top) / ch; /* the area's rows of text */
+    for (int k = first; k < last; k++) {
+        int X, Y;
+        gal_at(k, &X, &Y);
+        int on = k == gal.sel;
+        int cy0 = Y > ay ? Y : ay, cy1 = Y + cell_h < ay + ah ? Y + cell_h : ay + ah;
+        if (on && cy1 > cy0) screen_fill_px(X, cy0, cell_w, cy1 - cy0, SELECTED); /* Breeze's selection */
+        int bx = X + (cell_w - bw) / 2, by = Y + col_margin;
+        const char *name = NULL;
+        if (k < gal.nitem) {
+            gal_icon(bx, by, bw, bh, gal.item[k].archive);
+            name = gal.item[k].name;
+        } else {
+            int i = k - gal.nitem, w, h;
+            name = gal.name ? gal.name[i] : NULL;
+            if (doc.page[i].known) {
+                double z = gal_zoom(i, &w, &h);
+                int tx = bx + (bw - w) / 2, ty = by + bh - h; /* on the box's bottom, as Gwenview's */
+                int cx0 = tx, cy0 = ty, cx1 = tx + w, cy1 = ty + h;
+                if (clip_area(&cx0, &cy0, &cx1, &cy1)) {
+                    int c = pix_find(1, i, v.rotate, (float)z, -1, -1);
+                    if (doc.page[i].failed) {
+                        screen_fill_px(cx0, cy0, cx1 - cx0, cy1 - cy0, ERROR);
+                    } else if (c >= 0) {
+                        cache[c].used = ++ticks;
+                        put_pixels(cache[c].px, cache[c].w, cache[c].h, tx, ty, cx0, cy0, cx1, cy1);
+                    } else if (!put_scaled(i, tx, ty, w, h, cx0, cy0, cx1, cy1)) {
+                        put_paper(cx0, cy0, cx1, cy1);
+                    }
+                }
+            }
+        }
+        /* Its name, on the cell's last row of text. */
+        int row = (Y + cell_h - ch - top) / ch;
+        if (name && row >= row0 && row < row1) {
+            char text[PATH_MAX];
+            int cells = cell_w / cw - 1;
+            fit(text, sizeof text, name, cells > 1 ? cells : 1);
+            int col = X / cw + (cell_w / cw - ui_cells(text)) / 2;
+            screen_text(col, row, text, on ? BG : FG, on ? SELECTED : DESK);
+        }
+        int r0 = (cy0 - top) / ch, r1 = (cy1 - 1 - top) / ch;
+        r0 = r0 > row0 ? r0 : row0;
+        r1 = r1 < row1 - 1 ? r1 : row1 - 1;
+        if (r1 >= r0) ui_hit(X / cw, r0, cell_w / cw, r1 - r0 + 1, HIT_GAL + k);
+    }
+    if (bottom_used()) return;
+    /* The status bar: the number of images, the thumbnail size slider. */
+    int row = nrows - 1;
+    char text[128];
+    screen_fill_px(0, top + row * ch, W, H - (top + row * ch), BG);
+    screen_fill(0, row, ncols, 1, BG);
+    int images = doc.open && gal.name ? doc.pages : 0;
+    /* TRANSLATORS: Gwenview's status bar; %d is the number of images. */
+    snprintf(text, sizeof text, P_("%d image", "%d images", (unsigned long)images), images);
+    screen_text(1, row, text, FG, BG);
+    snprintf(text, sizeof text, "%d x %d", settings.thumbnail_size, settings.thumbnail_size);
+    int col = ncols - 1 - (3 + 1 + (int)strlen(text) + 1 + 3);
+    col = ui_button(col, row, "-", HIT_GAL_SMALLER);
+    screen_text(col, row, text, FG, BG);
+    ui_button(col + (int)strlen(text) + 1, row, "+", HIT_GAL_LARGER);
+}
+
+/* Browse mode's keys (Qt's list view, thumbnailview.cpp): 1 if key was one. */
+static int key_gallery(int key, int mods)
+{
+    int cell_w, cell_h, bw, bh, cols = gal_columns(), n = gal_count();
+    gal_cell(&cell_w, &cell_h, &bw, &bh);
+    int rows = ah / cell_h > 0 ? ah / cell_h : 1, to = gal.sel;
+    if (key == K_UP && mods == KEYS_ALT) {
+        gal_up();
+        return 1;
+    }
+    if (mods & (KEYS_CTRL | KEYS_ALT)) return 0;
+    switch (key) {
+    case K_LEFT: to--; break;
+    case K_RIGHT: to++; break;
+    case K_UP: to -= cols; break;
+    case K_DOWN: to += cols; break;
+    case K_PGUP: to -= rows * cols; break;
+    case K_PGDN: to += rows * cols; break;
+    case K_BOL: to = 0; break;
+    case K_EOL: to = n - 1; break;
+    case '\n': gal_activate(gal.sel); return 1;
+    case 27: return 1; /* Browse is what Esc goes back to */
+    default: return 0;
+    }
+    if (n) {
+        gal.sel = clampi(to, 0, n - 1);
+        gal_into_sight();
+        check_stale();
+    }
+    ui.dirty = 1;
+    return 1;
+}
+
+static void gal_pointer(const struct pointer_event *e)
+{
+    int cell_w, cell_h, bw, bh;
+    gal_cell(&cell_w, &cell_h, &bw, &bh);
+    if (e->gesture == GESTURE_PINCH) {
+        if (e->scale > 0) gal_size((int)lround(settings.thumbnail_size * e->scale));
+        return;
+    }
+    if (e->wheel) {
+        /* Ctrl: the thumbnails' size, 4 pixels a step (thumbnailview.cpp). */
+        if (keys_modifiers() & KEYS_CTRL) {
+            gal_size(settings.thumbnail_size + GAL_WHEEL * e->wheel);
+        } else {
+            gal.top -= cell_h * e->wheel;
+            gal_clamp();
+            check_stale();
+        }
+        ui.dirty = 1;
+        return;
+    }
+    if (!e->pressed || e->button != BTN_LEFT) return;
+    int id = ui_hit_at(e->col, e->row);
+    if (id >= 0) click(id, e);
+}
+
+/* A click on an item selects it; a double click activates it. */
+static void gal_click(int id, const struct pointer_event *e)
+{
+    if (id >= HIT_GAL) {
+        gal.sel = id - HIT_GAL;
+        ui.focus = FOCUS_DOC;
+        if (e->clicks == 2) gal_activate(gal.sel);
+    } else if (id == HIT_GAL_SMALLER || id == HIT_GAL_LARGER) {
+        gal_size(settings.thumbnail_size + (id == HIT_GAL_LARGER ? GAL_STEP : -GAL_STEP));
+    } else if (id == HIT_MODE) {
+        gal_browse();
+    } else if (id == HIT_MODE + 1) {
+        if (gal.on && gal.sel >= gal.nitem) gal_activate(gal.sel);
+    } else if (id == HIT_INFO_MORE) {
+        gal.info_more = !gal.info_more;
+    }
+}
+
+/* The Information panel (Gwenview's InfoContextManagerItem): its preferred
+ * keys (gwenviewconfig.kcfg PreferredMetaInfoKeyList: General.Name,
+ * General.ImageSize, Exif.Photo.ExposureTime, Exif.Photo.Flash), and with
+ * "Show more details" every key there is; labels as Gwenview and Exiv2 give
+ * them. */
+static const char *const info_preferred[] = { "Name", "Image Size", "Exif.Photo.ExposureTime", "Exif.Photo.Flash" };
+
+static const char *gal_label(const char *key)
+{
+    static const struct { const char *key, *label; } labels[] = {
+        { "Name", N_("Name") }, { "File Size", N_("File Size") }, { "Date Modified", N_("Date Modified") },
+        { "Image Size", N_("Image Size") }, { "Exif.Photo.DateTimeOriginal", N_("Date and Time (original)") },
+        { "Exif.Image.DateTime", N_("Date and Time") }, { "Exif.Image.Make", N_("Manufacturer") },
+        { "Exif.Image.Model", N_("Model") }, { "Exif.Photo.ExposureTime", N_("Exposure Time") },
+        { "Exif.Photo.FNumber", N_("FNumber") }, { "Exif.Photo.ISOSpeedRatings", N_("ISO Speed Ratings") },
+        { "Exif.Photo.FocalLength", N_("Focal Length") }, { "Exif.Photo.Flash", N_("Flash") },
+    };
+    for (size_t i = 0; i < sizeof labels / sizeof *labels; i++) if (!strcmp(key, labels[i].key)) return _(labels[i].label);
+    return key;
+}
+
+/* A value as shown: a file size in KDE's units (KIO::convertSize), an image
+ * size with its megapixels above 0.1 (imagemetainfomodel.cpp), the flash as
+ * Exiv2 reads its bits. */
+static void gal_value(const char *key, const char *raw, char *out, size_t size)
+{
+    int w, h;
+    if (!strcmp(key, "File Size")) {
+        double b = atof(raw);
+        if (b < 1024) snprintf(out, size, P_("%.0f byte", "%.0f bytes", (unsigned long)b), b);
+        /* TRANSLATORS: file sizes, KDE's binary units. */
+        else if (b < 1024.0 * 1024) snprintf(out, size, _("%.1f KiB"), b / 1024);
+        else if (b < 1024.0 * 1024 * 1024) snprintf(out, size, _("%.1f MiB"), b / 1024 / 1024);
+        else snprintf(out, size, _("%.1f GiB"), b / 1024 / 1024 / 1024);
+    } else if (!strcmp(key, "Image Size") && sscanf(raw, "%dx%d", &w, &h) == 2) {
+        double mp = w * (double)h / 1e6;
+        /* TRANSLATORS: an image's size in pixels and its megapixels. */
+        if (mp > 0.1) snprintf(out, size, _("%dx%d (%.1fMP)"), w, h, mp);
+        else snprintf(out, size, "%dx%d", w, h);
+    } else if (!strcmp(key, "Exif.Photo.Flash")) {
+        int f = atoi(raw);
+        if (f & 0x20) {
+            snprintf(out, size, "%s", _("No flash function"));
+        } else {
+            snprintf(out, size, "%s", f & 1 ? _("Fired") : _("No flash"));
+            size_t n;
+            const char *parts[3] = { (f & 0x18) == 0x18 ? _("auto") : (f & 0x18) == 0x08 ? _("compulsory") : NULL,
+                                     f & 0x40 ? _("red-eye reduction") : NULL,
+                                     (f & 6) == 6 ? _("return light detected") : (f & 6) == 4 ? _("return light not detected") : NULL };
+            for (int k = 0; k < 3; k++) {
+                if (parts[k] && (n = strlen(out)) < size) snprintf(out + n, size - n, ", %s", parts[k]);
+            }
+        }
+    } else {
+        snprintf(out, size, "%s", raw);
+    }
+}
+
+static void draw_info(void)
+{
+    int row = 3, last = side_last();
+    char line[600], text[600], value[300];
+    if (!gal.info || gal.info_page != current_page()) return;
+    for (int pass = 0; pass < 2 && row <= last; pass++) {
+        if (pass && !gal.info_more) break;
+        for (const char *s = gal.info; *s && row <= last;) {
+            const char *end = strchr(s, '\n'), *tab = strchr(s, '\t');
+            size_t len = end ? (size_t)(end - s) : strlen(s);
+            if (tab && tab < s + len) {
+                char key[64], raw[256];
+                snprintf(key, sizeof key, "%.*s", (int)(tab - s), s);
+                snprintf(raw, sizeof raw, "%.*s", (int)(s + len - tab - 1), tab + 1);
+                int preferred = 0;
+                for (size_t k = 0; k < sizeof info_preferred / sizeof *info_preferred; k++) preferred |= !strcmp(key, info_preferred[k]);
+                if (preferred == !pass) {
+                    gal_value(key, raw, value, sizeof value);
+                    snprintf(line, sizeof line, "%s: %s", gal_label(key), value);
+                    fit(text, sizeof text, line, side_cols - 1);
+                    screen_text(0, row++, text, FG, BG);
+                }
+            }
+            s += len + (end != NULL);
+        }
+    }
+    if (row <= last) {
+        fit(text, sizeof text, gal.info_more ? _("Show fewer details") : _("Show more details..."), side_cols - 1);
+        screen_text(0, row, text, ACCENT, BG);
+        ui_hit(0, row, ui_cells(text), 1, HIT_INFO_MORE);
     }
 }
 
@@ -6155,6 +7041,7 @@ static void forget(void)
     memset(&tabs, 0, sizeof tabs);
     restarts = 0;
     last_death = 0;
+    gal_keep_browse = 0;
     pdf_reset();
 }
 

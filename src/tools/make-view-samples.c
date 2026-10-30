@@ -12,6 +12,7 @@
 #include <archive.h>
 #include <archive_entry.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <gif_lib.h>
 #include <iconv.h>
 #include <jxl/encode.h>
@@ -25,6 +26,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <tiffio.h>
+#include <time.h>
 #include <webp/encode.h>
 
 static fz_context *ctx;
@@ -736,6 +738,176 @@ static void comics(void)
     free(p10);
 }
 
+/* A TIFF IFD (big-endian) at off of t: its entries, the values that do
+ * not fit in them after it; next: the next IFD's offset. The offset after
+ * it all. */
+struct tag {
+    unsigned tag, type, count;
+    const void *data;
+    size_t size;
+};
+
+static size_t ifd(unsigned char *t, size_t off, const struct tag *e, int n, size_t next)
+{
+    size_t data = off + 2 + 12 * (size_t)n + 4;
+    put16(t + off, (unsigned)n);
+    for (int i = 0; i < n; i++) {
+        unsigned char *p = t + off + 2 + 12 * (size_t)i;
+        put16(p, e[i].tag);
+        put16(p + 2, e[i].type);
+        put32(p + 4, e[i].count);
+        memset(p + 8, 0, 4);
+        if (e[i].size <= 4) {
+            memcpy(p + 8, e[i].data, e[i].size);
+        } else {
+            put32(p + 8, (unsigned)data);
+            memcpy(t + data, e[i].data, e[i].size);
+            data += (e[i].size + 1) & ~(size_t)1;
+        }
+    }
+    put32(t + off + 2 + 12 * (size_t)n, (unsigned)next);
+    return data;
+}
+
+/* EXIF (TIFF) of the tags Gwenview dates and shows images by: IFD0's Make
+ * and Model (if make), the Exif IFD's DateTimeOriginal and (with a make)
+ * ExposureTime 1/250, FNumber 2.8, ISOSpeedRatings 200, FocalLength 35 and
+ * Flash 0x19 (fired, auto). Its size. */
+static size_t exif(unsigned char *t, const char *make, const char *model, const char *date)
+{
+    unsigned char exposure[8], fnumber[8], iso[2], focal[8], flash[2], exif_at[4] = { 0 };
+    put32(exposure, 1), put32(exposure + 4, 250);
+    put32(fnumber, 28), put32(fnumber + 4, 10);
+    put16(iso, 200);
+    put32(focal, 35), put32(focal + 4, 1);
+    put16(flash, 0x19);
+    memcpy(t, "MM\0*\0\0\0\x08", 8);
+    struct tag ifd0[3];
+    int n0 = 0;
+    if (make) {
+        ifd0[n0++] = (struct tag){ 0x010F, 2, (unsigned)strlen(make) + 1, make, strlen(make) + 1 };
+        ifd0[n0++] = (struct tag){ 0x0110, 2, (unsigned)strlen(model) + 1, model, strlen(model) + 1 };
+    }
+    ifd0[n0++] = (struct tag){ 0x8769, 4, 1, exif_at, 4 };
+    size_t end = ifd(t, 8, ifd0, n0, 0);
+    put32(t + 8 + 2 + 12 * (size_t)(n0 - 1) + 8, (unsigned)end); /* the Exif IFD's offset */
+    struct tag sub[] = {
+        { 0x829A, 5, 1, exposure, 8 }, { 0x829D, 5, 1, fnumber, 8 }, { 0x8827, 3, 1, iso, 2 },
+        { 0x9003, 2, 20, date, 20 }, { 0x9209, 3, 1, flash, 2 }, { 0x920A, 5, 1, focal, 8 },
+    };
+    return make ? ifd(t, end, sub, 6, 0) : ifd(t, end, &sub[3], 1, 0);
+}
+
+static unsigned crc_png(const unsigned char *p, size_t n)
+{
+    unsigned c = 0xFFFFFFFF;
+    for (size_t i = 0; i < n; i++) {
+        c ^= p[i];
+        for (int k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >> 1) : c >> 1;
+    }
+    return ~c;
+}
+
+/* A JPEG with its EXIF in an APP1 segment after the SOI. */
+static void jpeg_exif(const char *name, int w, int h, unsigned color, const char *make, const char *model, const char *date)
+{
+    unsigned char t[512];
+    size_t n = exif(t, make, model, date), size;
+    jpeg(name, w, h, color);
+    unsigned char *j = read_file(at(name), &size), *out_ = malloc(size + n + 10);
+    memcpy(out_, j, 2);
+    out_[2] = 0xFF, out_[3] = 0xE1;
+    put16(out_ + 4, (unsigned)(n + 8));
+    memcpy(out_ + 6, "Exif\0\0", 6);
+    memcpy(out_ + 12, t, n);
+    memcpy(out_ + 12 + n, j + 2, size - 2);
+    write_file(name, out_, size + n + 10);
+    free(j);
+    free(out_);
+}
+
+/* A PNG with its EXIF in an eXIf chunk after the IHDR. */
+static void png_exif(const char *name, int w, int h, unsigned color, const char *date)
+{
+    unsigned char chunk[600];
+    size_t n = exif(chunk + 8, NULL, NULL, date), size;
+    png(name, w, h, color);
+    unsigned char *p = read_file(at(name), &size), *out_ = malloc(size + n + 12);
+    put32(chunk, (unsigned)n);
+    memcpy(chunk + 4, "eXIf", 4);
+    put32(chunk + 8 + n, crc_png(chunk + 4, n + 4));
+    memcpy(out_, p, 33); /* the signature and IHDR */
+    memcpy(out_ + 33, chunk, n + 12);
+    memcpy(out_ + 45 + n, p + 33, size - 33);
+    write_file(name, out_, size + n + 12);
+    free(p);
+    free(out_);
+}
+
+/* A linear DNG (16-bit RGB, no colour matrix: LibRaw keeps the camera's
+ * RGB) of 64 x 48, the left half red and the right blue; its date in IFD0's
+ * DateTime, which LibRaw reads. */
+static void dng(const char *name, const char *date)
+{
+    enum { W = 64, H = 48 };
+    static unsigned char t[512 + W * H * 6];
+    unsigned char bps[6], sf[4] = { 0 }, w[4], h[4], one[2], photo[2], three[2], strip[4] = { 0 }, count[4], ver[4] = { 1, 4, 0, 0 },
+                  neutral[24], orient[2];
+    put32(w, W), put32(h, H), put16(one, 1), put16(photo, 34892), put16(three, 3), put32(count, W * H * 6), put16(orient, 1);
+    for (int i = 0; i < 3; i++) put16(bps + 2 * i, 16), put32(neutral + 8 * i, 1), put32(neutral + 8 * i + 4, 1);
+    memcpy(t, "MM\0*\0\0\0\x08", 8);
+    struct tag e[] = {
+        { 254, 4, 1, sf, 4 }, { 256, 4, 1, w, 4 }, { 257, 4, 1, h, 4 }, { 258, 3, 3, bps, 6 }, { 259, 3, 1, one, 2 },
+        { 262, 3, 1, photo, 2 }, { 271, 2, 5, "View", 5 }, { 272, 2, 7, "Tester", 7 }, { 273, 4, 1, strip, 4 },
+        { 274, 3, 1, orient, 2 }, { 277, 3, 1, three, 2 }, { 278, 4, 1, h, 4 }, { 279, 4, 1, count, 4 },
+        { 284, 3, 1, one, 2 }, { 306, 2, 20, date, 20 }, { 50706, 1, 4, ver, 4 }, { 50708, 2, 12, "View Tester", 12 },
+        { 50728, 5, 3, neutral, 24 },
+    };
+    size_t at_ = ifd(t, 8, e, (int)(sizeof e / sizeof *e), 0);
+    put32(t + 8 + 2 + 12 * 8 + 8, (unsigned)at_); /* StripOffsets */
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            unsigned char *p = t + at_ + ((size_t)y * W + x) * 6;
+            put16(p, x < W / 2 ? 65535 : 0), put16(p + 2, 0), put16(p + 4, x < W / 2 ? 0 : 65535);
+        }
+    }
+    write_file(name, t, at_ + W * H * 6);
+}
+
+/* Gwenview's Browse mode's folder: images in another order by date than by
+ * name (EXIF in a JPEG, a PNG's eXIf, a DNG; a PNG with none, dated by its
+ * file), a folder, and an archive of a PNG and a DNG; and a folder with no
+ * image but in its folder. */
+static void gallery(void)
+{
+    char dir[4096];
+    snprintf(dir, sizeof dir, "%s/gallery", out);
+    mkdir(dir, 0755);
+    snprintf(dir, sizeof dir, "%s/gallery/sub", out);
+    mkdir(dir, 0755);
+    jpeg_exif("gallery/a.jpg", 64, 48, 0xC00000, "Cam", "One", "2021:05:01 10:00:00");
+    jpeg_exif("gallery/B.jpg", 48, 64, 0x00C000, NULL, NULL, "2019:01:01 00:00:00");
+    png("gallery/c.png", 64, 48, 0x0000C0);
+    struct tm tm = { .tm_year = 120, .tm_mon = 5, .tm_mday = 1, .tm_hour = 12, .tm_isdst = -1 };
+    struct timespec ts[2] = { { mktime(&tm), 0 }, { mktime(&tm), 0 } };
+    if (utimensat(AT_FDCWD, at("gallery/c.png"), ts, 0) != 0) die("cannot date gallery/c.png");
+    dng("gallery/d.dng", "2022:02:02 02:02:02");
+    png_exif("gallery/e.png", 64, 48, 0xC0C000, "2023:03:03 03:03:03");
+    png("gallery/sub/s.png", 64, 48, 0x00C0C0);
+    size_t s1, s2;
+    unsigned char *p1 = read_file(at("gallery/c.png"), &s1), *p2 = read_file(at("gallery/d.dng"), &s2);
+    struct entry e[] = { { "p1.png", p1, s1 }, { "p2.dng", p2, s2 } };
+    archive("gallery/pack.cbz", ARCHIVE_FORMAT_ZIP, e, 2);
+    free(p1);
+    free(p2);
+    /* A folder of folders only, as a Pictures folder of years is. */
+    snprintf(dir, sizeof dir, "%s/years", out);
+    mkdir(dir, 0755);
+    snprintf(dir, sizeof dir, "%s/years/2024", out);
+    mkdir(dir, 0755);
+    png("years/2024/x.png", 64, 48, 0xC000C0);
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 3) die("usage: make-view-samples OUTDIR FONT.ttf");
@@ -820,6 +992,7 @@ int main(int argc, char **argv)
     png("gm-src2.png", 200, 100, 0xE04040);
     png("gm-dark.png", 200, 100, 0x202020);
     comics();
+    gallery();
 
     /* Faxes: raw G3 (.g3), raw G4 (.fax), and G3 with a PC Research header
      * saying normal resolution. */

@@ -64,6 +64,9 @@ if [ -f "$runtime/usr/include/rime_api.h" ] && [ -f "$runtime/usr/lib/librime.so
         bwrap --unshare-all --die-with-parent --ro-bind "$runtime" / --proc /proc --dev /dev --tmpfs /tmp \
             --bind "$out" /work /work/bin/$test /work/$test-user
     done
+    gcc "${flags[@]}" -DCONFIG_IME -I"$runtime/usr/include" "$src/tools/test-caps-ime.c" "$src/base/ime.c" \
+        -Wl,--gc-sections "${ime_libs[@]}" -o "$out/bin/caps-ime"
+    gcc "${flags[@]}" "$src/progs/keytable.c" $(pkg-config --cflags --libs xkbcommon) -o "$out/bin/keytable"
     rime=1
 else
     printf 'SKIP actual Rime: runtime headers/library or unprivileged bwrap unavailable\n'
@@ -123,6 +126,10 @@ if [ "$rime" = 1 ]; then
         --bind "$out" /work --setenv HOME /work --setenv XDG_RUNTIME_DIR /work/runtime \
         --setenv WAYLAND_DISPLAY wayland-0 --setenv XKB_DEFAULT_LAYOUT us \
         /usr/bin/timeout 35 /work/bin/rime-driver --headless /work/rime-schema /work/rime-user >"$out/rime.log" 2>&1
+    bwrap --unshare-all --die-with-parent --ro-bind "$runtime" / --proc /proc --dev /dev --tmpfs /tmp \
+        --bind "$out" /work --setenv HOME /work --setenv LC_ALL C.UTF-8 \
+        /usr/bin/timeout 35 /work/bin/caps-ime /work/bin/keytable /work/caps-tables \
+        /work/rime-schema /work/rime-user >"$out/caps-direct.log" 2>&1
 fi
 sleep 0.3
 kill -0 "$comp"
@@ -171,6 +178,10 @@ for line in text.splitlines():
     elif fields[:3] == ['KEY', '46', '1'] and depressed & 4:
         ctrl_c = True
 assert ctrl_c, 'Ctrl of one keyboard missing on the other'
+for code in (63, 64, 65, 66): # F5..F8, two keyboards after first setup and re-enable
+    assert any(row[1:3] == [str(code), '1'] for row in keys), ('layout transition lost a keyboard', code)
+assert 'PASS first per-keyboard setup' in (root / 'bar.log').read_text()
+print('PASS focused client receives both keyboards after first layout setup and clear/re-enable')
 print('PASS focused client: Super+Escape consumed, action once, no Escape press or unmatched release')
 print('PASS two keyboard layouts at once: " and @ on the same key, Ctrl and Caps Lock across keyboards')
 print('PASS direct-input mode: the configured input method key is consumed by the compositor binding')
@@ -178,6 +189,29 @@ print('PASS ordinary Right and left click reach the focused client with balanced
 print('PASS actual virtual UTF-8 commit, duplicate physical keycodes, unplug and output reset delivery')
 if actual_rime:
     print('PASS actual librime CN and EN commit reaches a standard client')
+    assert 'PASS real Rime Caps in RAW/CN/EN' in (root / 'rime.log').read_text()
+    assert (root / 'caps-direct.log').read_text().count('PASS direct real Rime Caps mode') == 3
+    for start in (67, 68, 87): # F9, F10, F11: the Caps scenario's mode markers
+        section = text.split(f'KEY {start} 1', 1)[1].split('KEY 88 1', 1)[0]
+        chars = ''.join(line.split(' ', 3)[3] for line in section.splitlines()
+                        if line.startswith('KEY ') and len(line.split(' ', 3)) == 4 and line.split(' ', 3)[2] == '1')
+        assert 'AB' in chars and 'CD' in chars, ('Caps text did not reach the focused client', start, chars)
+        assert '12' in chars, ('Num Lock keypad digits did not reach the focused client', start, chars)
+        assert 'KEY 79 1 \n' in section and 'KEY 80 1 \n' in section, ('keypad navigation missing', start)
+        if start == 68: assert '你好' in chars, ('pinyin did not resume after Caps off', chars)
+        if start == 87: assert 'hello' in chars, ('English IME did not resume after Caps off', chars)
+    punctuation = text.split('KEY 62 1', 1)[1].split('KEY 88 1', 1)[0]
+    chars = ''.join(line.split(' ', 3)[3] for line in punctuation.splitlines()
+                    if line.startswith('KEY ') and len(line.split(' ', 3)) == 4 and line.split(' ', 3)[2] == '1')
+    assert chars == ',./', ('idle English punctuation changed in the native bar event path', chars)
+    release_section = text.split('KEY 61 1', 1)[1]
+    release_chars = ''.join(line.split(' ', 3)[3] for line in release_section.splitlines()
+                            if line.startswith('KEY ') and len(line.split(' ', 3)) == 4 and line.split(' ', 3)[2] == '1')
+    assert release_chars == '你好', ('modifier/release commit was not delivered before any subsequent key', release_chars)
+    assert 'PASS native Rime modifier/release commits are delivered immediately' in (root / 'rime.log').read_text()
+    print('PASS native Rime modifier/release commits reach the focused client without a following key')
+    print('PASS idle English punctuation passes through the native bar Rime path unchanged')
+    print('PASS Caps produces actual shared uppercase text on JIS and US in RAW/CN/EN; composition resumes')
 (root / 'result.json').write_text(json.dumps({'passed': True, 'global_shortcut': True,
     'balanced_keyboard': True, 'plain_click': True, 'actual_rime': actual_rime, 'two_layouts': True},
     sort_keys=True) + '\n')

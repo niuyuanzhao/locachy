@@ -132,9 +132,12 @@ def test_source_hash(source):
     return h.hexdigest()
 
 
-def snapshot(state_dir, sync_dir, pacman_config, host_sha256, recipes, candidate_locks=None, test_source=None):
+def snapshot(state_dir, sync_dir, pacman_config, host_sha256, recipes, candidate_locks=None, test_source=None,
+             missing=None):
     """recipes maps names to {baseline_dir, recipe_dir, candidate}. No recipe
-    is evaluated here; every input hash is rechecked before preparation."""
+    is evaluated here; every input hash is rechecked before preparation.
+    missing: declared repository packages the host lacks, installed in the
+    same transaction (and so in its build and contract roots)."""
     parent = Path(state_dir) / "transactions"
     parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     directory = Path(tempfile.mkdtemp(prefix="plan-", dir=parent))
@@ -144,6 +147,9 @@ def snapshot(state_dir, sync_dir, pacman_config, host_sha256, recipes, candidate
         shutil.copytree(sync_dir, directory / "sync")
         text = flatten_config(pacman_config)
         (directory / "pacman.conf").write_text(text, encoding="utf-8")
+        missing = sorted(set(missing or []))
+        if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9@._+\-]*", name) for name in missing):
+            raise TransactionError("invalid declared package name")
         pins = {}
         for name, entry in recipes.items():
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9@._+\-]*", name):
@@ -155,7 +161,7 @@ def snapshot(state_dir, sync_dir, pacman_config, host_sha256, recipes, candidate
         data = {"version": 1, "created": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "host_sha256": host_sha256, "sync_sha256": tree_hash(directory / "sync"),
                 "config_sha256": file_hash(directory / "pacman.conf"), "recipes": pins,
-                "candidate_locks": candidate_locks or {}}
+                "candidate_locks": candidate_locks or {}, "missing": missing}
         if test_source is not None:
             source = Path(test_source).resolve()
             digest = test_source_hash(source)
@@ -454,6 +460,9 @@ def install(reference, directory, data, results, host_hash, db_path="/var/lib/pa
         config = workspace / "pacman.conf"
         config.write_text(transaction_config((state / "pacman.conf").read_text(), repo), encoding="utf-8")
         targets = ["locachy-validated/" + name + "=" + results[name]["version"] for name in sorted(results)]
+        # Declared packages the host lacks: tested in the candidates' roots.
+        targets += [name for name in data.get("missing", [])
+                    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9@._+\-]*", name)]
         with real_database_lock(db_path):
             load_snapshot(reference, host_hash())
             checked = {name: prepared_result(directory, name, data) for name in results}

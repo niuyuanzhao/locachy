@@ -27,6 +27,9 @@ btrfs-progs
 cryptsetup
 nvme-cli
 flashrom
+# fwupd's Host Security ID report (fwupdmgr security), shown at the
+# installer's encryption step
+fwupd
 kbd
 nano
 # The full-screen installer and its terminal (installer/make-live.sh): their

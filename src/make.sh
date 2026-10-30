@@ -302,6 +302,7 @@ if [ -x /usr/bin/bluetui ] && ! grep -q '^[[:space:]]*program_bluetooth=' /etc/l
 fi
 [ -e /etc/locachy/packages ] || install -D -m 644 "$src/packages" /etc/locachy/packages
 python3 -I "$src/link/migrate-audio-packages" /etc/locachy/packages
+python3 -I "$src/link/declare-packages" "$src" /etc/locachy/packages
 # Containers: their configurations (/etc/locachy/containers/NAME.conf, the
 # user's) and the presets to choose from (ours, replaced each time).
 mkdir -p /etc/locachy/containers
@@ -473,6 +474,7 @@ ln -sfn ../xdg-open "$lib/host-bin/xdg-open"
 install -m 755 "$src/link/locachy-net" /usr/local/bin/locachy-net
 install -m 755 "$src/link/locachy-setup" /usr/local/bin/locachy-setup
 install -m 755 "$src/link/locachy-boot" /usr/local/bin/locachy-boot
+install -m 755 "$src/link/locachy-efi" /usr/local/bin/locachy-efi
 install -D -m 644 "$src/link/90-locachy-boot.hook" /etc/pacman.d/hooks/90-locachy-boot.hook
 install -D -m 644 "$src/link/pam.d/locachy-lock" /etc/pam.d/locachy-lock
 install -D -m 644 "$src/link/pam.d/locachy-lock-fingerprint" /etc/pam.d/locachy-lock-fingerprint
@@ -535,6 +537,7 @@ if [ "$boot_mode" -eq 1 ]; then
     # What all of it is built against: the packages as locachy-pkg hashes
     # them (host_hash), so that it builds again only when they change.
     pacman -Q | sha256sum | cut -c1-16 >"$lib/built-host"
+    rm -f "$lib/source-unbuilt" # built from the installed source (locachy-pkg apply)
     echo "make: $level: init, home, term, settings, note; boot files made"
 else
     echo "make: $level: home, term, settings, note and services (process 1 and boot files unchanged)"

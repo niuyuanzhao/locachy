@@ -192,6 +192,20 @@ for name, entry in sorted(recipes.items()):
 PY
         )
         pacman -Su --noscriptlet --noconfirm --ignore "$ignored" "${assume[@]}"
+        # Declared packages the host lacks: the host's transaction installs
+        # them with the candidates, so every build and contract root has them.
+        declared=()
+        while read -r package; do
+            [ -z "$package" ] || declared+=("$package")
+        done < <(python3 -I - "$prepare/plan.json" <<'PY'
+import json, re, sys
+with open(sys.argv[1]) as f: names = json.load(f).get('missing', [])
+if any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9@._+\-]*', n) for n in names):
+    raise RuntimeError('invalid declared package names')
+for name in names: print(name)
+PY
+        )
+        [ "${#declared[@]}" -eq 0 ] || pacman -S --needed --noscriptlet --noconfirm "${assume[@]}" "${declared[@]}"
         pacman -Q >"$handover/target-base-packages.txt"
         [ "${1:-}" != --validate-prepared ] || exit 0
     fi
@@ -815,7 +829,9 @@ for name, item in builds.items():
     gate = json.loads((run / 'gate' / name / 'gate.json').read_text())
     expected = data['recipes'][name].get('candidate', {}).get('gate')
     if not expected or gate.get('name') != name or gate.get('id') != expected or gate.get('passed') is not True:
-        raise RuntimeError(name + ': package contract did not pass')
+        raise RuntimeError(f"{name}: package contract did not pass: expected id={expected!r}, "
+                           f"got name={gate.get('name')!r}, id={gate.get('id')!r}, "
+                           f"passed={gate.get('passed')!r}; trusted source {data['test_source']['sha256']}")
     for filename in ('target-packages.txt', 'target-base-packages.txt'):
         shutil.copyfile(run / 'out' / filename, directory / filename)
     old = directory / 'gate'

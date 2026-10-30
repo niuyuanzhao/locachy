@@ -173,12 +173,11 @@ def in_net(cmd):
 
 
 def declared():
+    """The manifest's leaves (a line may hold several, whitespace apart)."""
     leaves = []
     with open(MANIFEST, encoding="utf-8") as f:
         for line in f:
-            line = line.split("#", 1)[0].strip()
-            if line:
-                leaves.append(line)
+            leaves.extend(line.split("#", 1)[0].split())
     return leaves
 
 

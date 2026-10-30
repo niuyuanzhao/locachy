@@ -10,6 +10,10 @@
 #include <poll.h>
 static int fake_audio(int, char *, size_t);
 static int fake_brightness(int, char *, size_t);
+static int keyboard_ioctl(int fd, unsigned long request, ...);
+#define ioctl keyboard_ioctl
+#define keys_device_layout test_device_layout
+#define keys_reload test_keys_reload
 static int fake_signal(pid_t pid, int sig) { (void)pid; (void)sig; return 0; }
 #define kill fake_signal
 #define base_audio_key fake_audio
@@ -26,7 +30,36 @@ static int fake_signal(pid_t pid, int sig) { (void)pid; (void)sig; return 0; }
 #undef base_audio_key
 #undef base_brightness_key
 #undef kill
+#undef keys_device_layout
+#undef keys_reload
+#undef ioctl
 #include "i18n-stub.h"
+
+static int own_us, own_jis, reload_count, grabs[2], release_during_grab;
+static int keyboard_index(int fd);
+static char system_table[PATH_MAX];
+void keys_reload(void);
+void test_keys_reload(void)
+{
+    reload_count++;
+    keys_reload();
+    if (system_table[0]) assert(keys_layout_load(system_table) == 0);
+}
+static int keyboard_ioctl(int fd, unsigned long request, ...)
+{
+    assert(request == EVIOCGRAB);
+    va_list ap;
+    va_start(ap, request);
+    void *arg = va_arg(ap, void *);
+    va_end(ap);
+    int i = keyboard_index(fd);
+    if (i >= 0) grabs[i] = arg != NULL;
+    if (arg && release_during_grab) {
+        release_during_grab = 0;
+        assert(raise(SIGUSR2) == 0);
+    }
+    return 0;
+}
 
 #ifdef CONFIG_IME
 /* The last text Rime committed, as the bar typed it. */
@@ -101,7 +134,7 @@ static void write_schema(const char *directory)
     snprintf(path, sizeof path, "%s/default.yaml", directory);
     FILE *f = fopen(path, "w");
     assert(f && fputs("config_version: '1'\nschema_list:\n  - schema: easy_en\n  - schema: rime_frost\n"
-                      "ascii_composer:\n  good_old_caps_lock: true\n  switch_key:\n    Caps_Lock: clear\n", f) >= 0 && fclose(f) == 0);
+                      "ascii_composer:\n  good_old_caps_lock: true\n  switch_key:\n    Caps_Lock: clear\n    Shift_R: commit_text\n", f) >= 0 && fclose(f) == 0);
     static const char *const schemas[] = { "easy_en", "rime_frost" };
     for (int i = 0; i < 2; i++) {
         snprintf(path, sizeof path, "%s/%s.schema.yaml", directory, schemas[i]);
@@ -109,9 +142,10 @@ static void write_schema(const char *directory)
         assert(f);
         fprintf(f, "schema:\n  schema_id: %s\n  name: Test\n  version: '1'\n"
                 "switches:\n  - name: ascii_mode\n    reset: 0\n"
-                "engine:\n  processors: [ascii_composer, recognizer, speller, selector, express_editor]\n"
-                "  segmentors: [ascii_segmentor, matcher, abc_segmentor, fallback_segmentor]\n"
-                "  translators: [table_translator]\n"
+                "engine:\n  processors: [ascii_composer, recognizer, speller, punctuator, selector, express_editor]\n"
+                "  segmentors: [ascii_segmentor, matcher, abc_segmentor, punct_segmentor, fallback_segmentor]\n"
+                "  translators: [punct_translator, table_translator]\n"
+                "punctuator:\n  half_shape:\n    ',': {commit: '\xeF\xbc\x8c'}\n"
                 "speller:\n  alphabet: abcdefghijklmnopqrstuvwxyz\n  delimiter: \" '\"\n"
                 "translator:\n  dictionary: test\n  enable_user_dict: false\n", schemas[i]);
         assert(fclose(f) == 0);
@@ -151,6 +185,24 @@ static void key(int code, int value)
 
 /* A key of the second keyboard (other: its pipe). */
 static int other[2];
+static int keyboard_index(int fd)
+{
+    return fd == events[0] ? 0 : fd == other[0] ? 1 : -1;
+}
+const char *test_device_layout(int fd, const char *field)
+{
+    if (own_jis && fd == events[0]) {
+        if (!strcmp(field, "layout")) return "jp";
+        if (!strcmp(field, "model")) return "jp106";
+        return NULL;
+    }
+    if (own_us && fd == other[0]) {
+        if (!strcmp(field, "layout")) return "us";
+        if (!strcmp(field, "model")) return "pc105";
+        return NULL;
+    }
+    return keys_layout_name(field);
+}
 static void okey(int code, int value)
 {
     struct input_event e = { .type = EV_KEY, .code = (unsigned short)code, .value = value };
@@ -166,6 +218,66 @@ static int sym(int l, int code)
 static int mod(int l, const char *name, enum xkb_state_component kind)
 {
     return xkb_state_mod_name_is_active(layouts[l].st, name, kind) > 0;
+}
+
+static void layout_transition(void)
+{
+    assert(ime_mode() == IME_MODE_RAW);
+    register_keyboard_signals(); /* the same registrations production main uses */
+    set_grab(0);
+    assert(raise(SIGUSR2) == 0);
+    keyboard_signals();
+    assert(!active && !grabbed && !grabs[0] && !grabs[1]);
+    own_us = 1;
+    int before = reload_count;
+    assert(raise(SIGHUP) == 0); /* settings owns the screen while changing keyboards.conf */
+    keyboard_signals();
+    assert(reload_count == before + 1 && nlayouts == 2 && kbd_layout[1] == 1 && want_grab);
+    assert(!active && !grabbed && !grabs[0] && !grabs[1]);
+    /* Neither queue is monopolised: the direct program can still read y. */
+    struct input_event e = { .type = EV_KEY, .code = KEY_Y, .value = 1 }, got;
+    assert(write(events[1], &e, sizeof e) == sizeof e && read(events[0], &got, sizeof got) == sizeof got);
+    assert(got.code == KEY_Y);
+    assert(write(other[1], &e, sizeof e) == sizeof e && read(other[0], &got, sizeof got) == sizeof got);
+    assert(got.code == KEY_Y);
+    set_grab(1); /* a delayed UI callback must not reacquire a released seat */
+    assert(!grabbed && !grabs[0] && !grabs[1]);
+    on_sigusr1(SIGUSR1);
+    keyboard_signals();
+    assert(active && grabbed && grabs[0] && grabs[1] && nlayouts == 2);
+    key(KEY_F5, 1); key(KEY_F5, 0);
+    okey(KEY_F6, 1); okey(KEY_F6, 0);
+    on_sigusr2(SIGUSR2);
+    own_us = 0;
+    on_sighup(SIGHUP);
+    keyboard_signals();
+    assert(!active && !grabbed && !grabs[0] && !grabs[1] && nlayouts == 1);
+    own_us = 1;
+    on_sighup(SIGHUP);
+    keyboard_signals();
+    assert(!active && !grabbed && !grabs[0] && !grabs[1] && nlayouts == 2);
+    on_sigusr1(SIGUSR1);
+    keyboard_signals();
+    assert(active && grabbed && grabs[0] && grabs[1]);
+    key(KEY_F7, 1); key(KEY_F7, 0);
+    okey(KEY_F8, 1); okey(KEY_F8, 0);
+    set_grab(0);
+    void (*previous)(int) = signal(SIGUSR2, on_sigusr2);
+    assert(previous != SIG_ERR);
+    release_during_grab = 1;
+    set_grab(1);
+    assert(!release_during_grab && !active && !grabbed && !grabs[0] && !grabs[1]);
+    assert(signal(SIGUSR2, previous) != SIG_ERR);
+    keyboard_signals();
+    on_sigusr1(SIGUSR1);
+    keyboard_signals();
+    assert(active && grabbed && grabs[0] && grabs[1]);
+    own_us = 0;
+    on_sighup(SIGHUP);
+    keyboard_signals();
+    assert(active && !grabbed && !grabs[0] && !grabs[1] && nlayouts == 1);
+    puts("PASS first per-keyboard setup, clear and re-enable never grab the direct program's keyboards; "
+         "only the seat take enables forwarding");
 }
 
 static int nothing_fed(void)
@@ -230,7 +342,8 @@ int main(int argc, char **argv)
         }
     }
     assert(fclose(tf) == 0);
-    assert(keys_layout_load(table) == 0 && unlink(table) == 0);
+    snprintf(system_table, sizeof system_table, "%s", table);
+    assert(keys_layout_load(table) == 0);
     assert(keys_char(KEY_N, 0) == 'n' && keys_char(KEY_SPACE, 0) == ' ');
     const char *const jp_swap[4] = { "jp", "jp106", NULL, "ctrl:swapcaps" };
     assert(layout_init(&layouts[0], jp_swap) == 0);
@@ -346,7 +459,9 @@ int main(int argc, char **argv)
     puts("PASS Chinese mode's width keys from rc.conf's key_ime_width_cn (Ctrl+. and Shift+Space unless set), "
          "by each keyboard's layout");
     kbd_layout[1] = 0;
+    layout_transition();
     if (integration) {
+        assert(wl_display_roundtrip(display) >= 0);
         init_xkb();
         assert(nlayouts == 1 && layouts[0].keymap_fd >= 0 && !strcmp(layouts[0].names[3], "ctrl:swapcaps"));
         restore_passthrough_keymap();
@@ -453,6 +568,90 @@ int main(int argc, char **argv)
         reconcile_keyboards(reconnect, 2);
         assert(wl_display_roundtrip(display) >= 0);
         puts("PASS real delivery through a second layout's virtual keyboard: its keymap, both keyboards' modifiers");
+#ifdef CONFIG_IME
+        /* Real XKB JIS Shift+Eisu, not a hand-assigned Caps role, while Rime
+         * is composing: both layouts must leave composition and type capitals. */
+        const char *const plain_us[4] = { "us", "pc105", NULL, NULL };
+        const char *const plain_jp[4] = { "jp", "jp106", NULL, NULL };
+        reset_keyboard_state();
+        layout_free(&layouts[0]);
+        layout_free(&layouts[1]);
+        assert(layout_init(&layouts[0], plain_us) == 0 && layout_init(&layouts[1], plain_jp) == 0);
+        nlayouts = 2;
+        kbd_layout[0] = 1;
+        kbd_layout[1] = 0;
+        own_us = 0;
+        own_jis = 1;
+        grabbed = want_grab = 1;
+        for (int mode = IME_MODE_RAW; mode <= IME_MODE_EN; mode++) {
+            ime_set_mode(mode);
+            /* Distinct marker per mode, read back from the real client. */
+            int marker = mode == IME_MODE_RAW ? KEY_F9 : mode == IME_MODE_CN ? KEY_F10 : KEY_F11;
+            okey(marker, 1); okey(marker, 0);
+            if (mode != IME_MODE_RAW) { key(KEY_N, 1); key(KEY_N, 0); }
+            char preedit[256], candidates[256];
+            if (mode != IME_MODE_RAW) assert(ime_get_overlay(preedit, candidates, sizeof preedit));
+            key(KEY_LEFTSHIFT, 1);
+            key(KEY_CAPSLOCK, 1); key(KEY_CAPSLOCK, 0);
+            key(KEY_LEFTSHIFT, 0);
+            assert(caps_locked());
+            assert(!ime_get_overlay(preedit, candidates, sizeof preedit));
+            key(KEY_A, 1); key(KEY_A, 0);
+            okey(KEY_B, 1); okey(KEY_B, 0);
+            key(KEY_LEFTSHIFT, 1);
+            key(KEY_CAPSLOCK, 1); key(KEY_CAPSLOCK, 0);
+            key(KEY_LEFTSHIFT, 0);
+            assert(!caps_locked());
+            if (mode != IME_MODE_RAW) {
+                committed[0] = '\0';
+                const int *word = mode == IME_MODE_CN ? pinyin : english;
+                size_t nword = mode == IME_MODE_CN ? sizeof pinyin / sizeof pinyin[0] : sizeof english / sizeof english[0];
+                for (size_t i = 0; i < nword; i++) { key(word[i], 1); key(word[i], 0); }
+                assert(mode != IME_MODE_CN || !strcmp(committed, "\xe4\xbd\xa0\xe5\xa5\xbd"));
+            }
+            /* The other keyboard's plain Caps is the same lock for both. */
+            okey(KEY_CAPSLOCK, 1); okey(KEY_CAPSLOCK, 0);
+            assert(caps_locked());
+            key(KEY_C, 1); key(KEY_C, 0);
+            okey(KEY_D, 1); okey(KEY_D, 0);
+            okey(KEY_CAPSLOCK, 1); okey(KEY_CAPSLOCK, 0);
+            assert(!caps_locked());
+            okey(KEY_NUMLOCK, 1); okey(KEY_NUMLOCK, 0);
+            key(KEY_KP1, 1); key(KEY_KP1, 0);
+            okey(KEY_KP2, 1); okey(KEY_KP2, 0);
+            key(KEY_NUMLOCK, 1); key(KEY_NUMLOCK, 0);
+            key(KEY_KP1, 1); key(KEY_KP1, 0);
+            okey(KEY_KP2, 1); okey(KEY_KP2, 0);
+            okey(KEY_F12, 1); okey(KEY_F12, 0);
+        }
+        puts("PASS real Rime Caps in RAW/CN/EN: JIS Shift+Eisu and US Caps, composition cleared, shared capitals, input resumed");
+        puts("PASS real Rime Num Lock in RAW/CN/EN: shared keypad digits and unlocked navigation");
+        ime_set_mode(IME_MODE_CN);
+        committed[0] = '\0';
+        okey(KEY_COMMA, 1); okey(KEY_COMMA, 0);
+        assert(!strcmp(committed, "\xef\xbc\x8c")); /* this schema would transform it if EN fed it */
+        ime_set_mode(IME_MODE_EN);
+        committed[0] = '\0';
+        okey(KEY_F4, 1); okey(KEY_F4, 0);
+        okey(KEY_COMMA, 1); okey(KEY_COMMA, 0);
+        okey(KEY_DOT, 1); okey(KEY_DOT, 0);
+        okey(KEY_SLASH, 1); okey(KEY_SLASH, 0);
+        okey(KEY_F12, 1); okey(KEY_F12, 0);
+        assert(!committed[0]);
+        ime_set_mode(IME_MODE_CN);
+        committed[0] = '\0';
+        okey(KEY_F3, 1); okey(KEY_F3, 0);
+        key(KEY_N, 1); key(KEY_N, 0);
+        key(KEY_I, 1); key(KEY_I, 0);
+        assert(!committed[0]);
+        okey(KEY_RIGHTSHIFT, 1);
+        okey(KEY_RIGHTSHIFT, 0);
+        assert(!strcmp(committed, "\xe4\xbd\xa0\xe5\xa5\xbd"));
+        assert(ime_get_commit() == NULL); /* delivered immediately, not retained for the next key */
+        puts("PASS native Rime modifier/release commits are delivered immediately");
+        own_jis = 0;
+        ime_set_mode(IME_MODE_RAW);
+#endif
         grabbed = want_grab = 0;
         text_vkbd = NULL;
         for (int l = 0; l < MAX_LAYOUTS; l++) layouts[l].vkbd = NULL;
@@ -489,5 +688,6 @@ int main(int argc, char **argv)
     for (int l = 0; l < nlayouts; l++) layout_free(&layouts[l]);
     xkb_context_unref(xkb_ctx);
     close(events[0]); close(events[1]);
+    assert(unlink(system_table) == 0);
     return 0;
 }

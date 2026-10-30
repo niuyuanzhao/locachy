@@ -236,5 +236,94 @@ class Sync(unittest.TestCase):
         self.assertLess(make, archive)
 
 
+class Manifest(unittest.TestCase):
+    """install and remove on a real manifest file; sync itself is doubled."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="pkg-manifest-", dir=SCRATCH)
+        self.addCleanup(self.tmp.cleanup)
+        self.manifest = Path(self.tmp.name) / "packages"
+        self.manifest.write_text("# leaves\nbase\n")
+        self.synced = []
+        load = pkg.load_manifest  # its default path is bound at definition time
+        self.unknown = []
+        for name, value in (("MANIFEST", str(self.manifest)), ("load_manifest", lambda path=None: load(str(self.manifest))),
+                            ("cmd_sync", lambda: self.synced.append(load(str(self.manifest))) or 0),
+                            ("unknown_packages", lambda names: [n for n in names if n in self.unknown])):
+            p = mock.patch.object(pkg, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.load = load
+
+    def call(self, function, names):
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+            return function(names), err.getvalue()
+
+    def test_names_typed_together_are_separate_leaves(self):
+        self.assertEqual(self.call(pkg.cmd_install, ["libraw chmlib"])[0], 0)
+        self.assertEqual(self.manifest.read_text(), "# leaves\nbase\nlibraw\nchmlib\n")
+        self.assertEqual(self.synced, [["base", "chmlib", "libraw"]])
+
+    def test_an_invalid_name_writes_nothing(self):
+        for names in (["libraw -rf"], ["good", "bad/name"], [".hidden"], ["a;b"]):
+            status, err = self.call(pkg.cmd_install, names)
+            self.assertEqual(status, 1, names)
+            self.assertIn("not a package name", err)
+        self.assertEqual(self.manifest.read_text(), "# leaves\nbase\n")
+        self.assertEqual(self.synced, [])
+
+    def test_a_name_nothing_has_writes_nothing(self):
+        self.unknown = ["xorg-host"]
+        status, err = self.call(pkg.cmd_install, ["libraw xorg-host"])
+        self.assertEqual(status, 1)
+        self.assertIn("no repository or the AUR has xorg-host; nothing registered", err)
+        self.assertEqual(self.manifest.read_text(), "# leaves\nbase\n")
+        self.assertEqual(self.synced, [])
+
+    def test_a_failed_lookup_does_not_register_or_sync(self):
+        with mock.patch.object(pkg, "unknown_packages", side_effect=RuntimeError("the AUR did not answer")):
+            status, err = self.call(pkg.cmd_install, ["libraw chmlib"])
+        self.assertEqual(status, 1)
+        self.assertIn("nothing registered", err)
+        self.assertEqual(self.manifest.read_text(), "# leaves\nbase\n")
+        self.assertEqual(self.synced, [])
+
+    def test_a_line_with_several_names_reads_as_each_and_loses_only_the_removed(self):
+        self.manifest.write_text("# leaves\nbase\nlibraw chmlib  # typed together\n")
+        self.assertEqual(self.load(str(self.manifest)), ["base", "chmlib", "libraw"])
+        self.assertEqual(pkg.declared_missing({"base": "1", "libraw": "1"}), ["chmlib"])
+        self.assertEqual(self.call(pkg.cmd_remove, ["libraw"])[0], 0)
+        self.assertEqual(self.load(str(self.manifest)), ["base", "chmlib"])
+        self.assertIn("# typed together\nchmlib\n", self.manifest.read_text())
+        self.assertEqual(self.call(pkg.cmd_remove, ["chmlib"])[0], 0)
+        self.assertEqual(self.load(str(self.manifest)), ["base"])
+        repos = (SOURCE / "link/locachy-repos").read_text()
+        self.assertIn('leaves.extend(line.split("#", 1)[0].split())', repos)
+
+
+class Lookup(unittest.TestCase):
+    """Where a name to declare is looked up: local recipes, then the
+    repositories (pacman -Sp), then the AUR for what is left."""
+    def test_local_then_repositories_then_the_aur(self):
+        asked = []
+        def run(cmd, **kwargs):
+            asked.append(cmd[-1])
+            return subprocess.CompletedProcess(cmd, 0 if cmd[-1] == "libraw" else 1)
+        with mock.patch.object(pkg, "local_names", lambda: {"labwc-locachy"}), \
+                mock.patch.object(pkg.subprocess, "run", run), \
+                mock.patch.object(pkg, "aur_info", return_value={"bluetui": ("1", "")}) as lookup:
+            self.assertEqual(pkg.unknown_packages(["labwc-locachy", "libraw", "bluetui", "xorg-host"]), ["xorg-host"])
+        self.assertEqual(asked, ["libraw", "bluetui", "xorg-host"])
+        lookup.assert_called_once_with(["bluetui", "xorg-host"])
+
+    def test_the_aur_not_answering_is_an_error_not_a_yes(self):
+        def down(names):
+            raise RuntimeError("the AUR did not answer")
+        with mock.patch.object(pkg, "local_names", lambda: set()), \
+                mock.patch.object(pkg.subprocess, "run", lambda cmd, **k: subprocess.CompletedProcess(cmd, 1)), \
+                mock.patch.object(pkg, "aur_info", down):
+            with self.assertRaises(RuntimeError):
+                pkg.unknown_packages(["xorg-host"])
+
+
 if __name__ == "__main__":
     unittest.main()

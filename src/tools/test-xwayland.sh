@@ -5,8 +5,8 @@
 # (built and copied into $out); labwc-control and app-init are the installed
 # ones. Private mount and PID namespaces; a headless labwc started by
 # locachy-seat for a stand-in process 1 (as test-labwc.sh 5), no real input,
-# not the screen. Results on standard output (PASS, FAIL, GAP: a measured
-# limit XWAYLAND.md describes), the programs' output in $out.
+# not the screen. Results on standard output (PASS, FAIL), the programs'
+# output in $out.
 #   1. display-ready comes with the display labwc's xinitrc published;
 #      Xwayland runs before any X11 client, in the display's cgroup, admits
 #      uid 1000 and not other users
@@ -17,8 +17,9 @@
 #      freeze, resume, stop; host-program mode; one without x11="1" has none
 #   4. X11 clipboard: a container X11 copy reaches the host clipboard and
 #      another X11 client; frozen and stopped, its copy stays pasteable; an
-#      X11 copy inside a freeze transaction, and a freeze during a slow X11
-#      transfer, are measured
+#      X11 copy between a freeze capture and its freezer write (the window
+#      held open by window.py), or one the freeze cuts short, gives way to the
+#      host copy of the capture
 set -u
 src=$(cd "$(dirname "$0")/.." && pwd)
 for tool in Xwayland xhost labwc gcc pkg-config wayland-scanner setpriv nsenter python3; do
@@ -82,39 +83,43 @@ while True:
             else:
                 a.send(cmd.encode())
 EOF
-# guard.py CGROUP STATE: the compositor's freeze transaction (as clipboard
-# freeze makes it): "begin", then STATE.ready; on STATE.commit or STATE.abort
-# that message, its reply into STATE.reply.
-cat >"$out/guard.py" <<'EOF'
+# window.py STATE: a relay at STATE.sock for clipboard freeze
+# (LOCACHY_CLIPBOARD_GUARD_SOCKET) to the compositor freeze gate: it passes
+# every message on as it is, but holds "commit" (STATE.window) until STATE.go,
+# so that the window between the capture and the freezer write stays open.
+cat >"$out/window.py" <<'EOF'
 import array, os, socket, sys, time
-s = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-s.settimeout(5)
-s.connect(os.environ["XDG_RUNTIME_DIR"] + "/locachy-clipboard-guard.sock")
-fd = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY)
-s.sendmsg([b"begin"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [fd]))])
-os.close(fd)
-if s.recv(128) != b"ready":
-    sys.exit("no gate")
-open(sys.argv[2] + ".ready", "w").close()
+state = sys.argv[1]
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+listener.bind(state + ".sock")
+listener.listen(1)
+open(state + ".listening", "w").close()
+client, _ = listener.accept()
+gate = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+gate.connect(os.environ["XDG_RUNTIME_DIR"] + "/locachy-clipboard-guard.sock")
 while True:
-    for m in ("commit", "abort"):
-        if os.path.exists(sys.argv[2] + "." + m):
-            s.send(m.encode())
-            try:
-                reply = s.recv(128).decode()
-            except OSError as e:
-                reply = str(e)
-            open(sys.argv[2] + ".reply", "w").write(reply)
-            sys.exit(0)
-    time.sleep(0.01)
+    msg, ancillary, _, _ = client.recvmsg(128, socket.CMSG_SPACE(4))
+    if not msg:
+        break
+    fds = array.array("i")
+    for level, kind, data in ancillary:
+        if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+            fds.frombytes(data[:len(data) - len(data) % fds.itemsize])
+    if msg == b"commit":
+        open(state + ".window", "w").close()
+        while not os.path.exists(state + ".go"):
+            time.sleep(0.01)
+    gate.sendmsg([msg], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, fds)] if fds else [])
+    for fd in fds:
+        os.close(fd)
+    client.send(gate.recv(128))
 EOF
 
 export out src
 exec timeout 300 unshare --mount --propagation private --pid --fork --kill-child --mount-proc bash -c '
 set -u
-fail=0 gaps=0
+fail=0
 check() { if eval "$2"; then echo "PASS $1"; else echo "FAIL $1"; fail=1; fi; }
-gap() { echo "GAP $1"; gaps=$((gaps+1)); }
 mount -t tmpfs -o mode=0755 tmpfs /run/user
 mkdir -m 0700 /run/user/0
 export XDG_RUNTIME_DIR=/run/user/0
@@ -234,25 +239,27 @@ app resume x11clip >>$out/clip.log 2>&1
 pkill -USR1 -f "^$out/client copy x11"
 wait_for "[ \"\$(get)\" = x11-2 ]" 50
 check "resumed, it copies again (x11-2)" "[ \"\$(get)\" = x11-2 ]"
-# The window of a freeze between its capture (sync) and the freezer write
-# (commit), widened: the container copies inside it.
-python3 $out/guard.py /sys/fs/cgroup/app_x11clip $out/gate >$out/guard.log 2>&1 &
-wait_for "[ -e $out/gate.ready ]"
+# freeze_window NAME STATE: locachy-app freeze NAME, its window between the
+# capture and the freezer write held open by window.py until STATE.go.
+freeze_window() {
+    python3 $out/window.py $out/$2 >$out/$2.log 2>&1 &
+    wait_for "[ -e $out/$2.listening ]"
+    ( export LOCACHY_CLIPBOARD_GUARD_SOCKET=$out/$2.sock; app freeze $1 ) >>$out/$2.log 2>&1 &
+    freezer=$!
+    wait_for "[ -e $out/$2.window ]" 60
+}
 printf retained-by-host | $out/clipboard set
-$out/clipboard sync >/dev/null
+freeze_window x11clip w1
 pkill -USR1 -f "^$out/client copy x11"
-sleep 1.5
-got=$(get)
-if ! grep -q "^copied x11-3" $out/clip.log; then
-    echo "FAIL the container X11 client did not copy inside the freeze transaction"
-    fail=1
-elif [ "$got" = retained-by-host ]; then
-    echo "PASS an X11 copy inside a freeze transaction is refused"
-else
-    gap "an X11 copy between the freeze sync and its commit is not refused: the clipboard became \"$got\""
-fi
-touch $out/gate.abort
-wait_for "[ -e $out/gate.reply ]"
+wait_for "grep -q \"^copied x11-3\" $out/clip.log" 20
+sleep 1
+inside=$(get)
+touch $out/w1.go
+wait $freezer; frozen=$?
+got=$(get); x11=$(paste)
+check "an X11 copy between the freeze capture and its freezer write (clipboard then \"$inside\") gives way to the host copy: \"$got\", X11 paste \"$x11\"" \
+    "grep -q \"^copied x11-3\" $out/clip.log && [ $frozen = 0 ] && grep -q \"frozen 1\" /sys/fs/cgroup/app_x11clip/cgroup.events && [ \"$got\" = retained-by-host ] && [ \"$x11\" = retained-by-host ]"
+app resume x11clip >>$out/clip.log 2>&1
 app stop x11clip >>$out/clip.log 2>&1
 wait $clip_launcher 2>/dev/null
 last=$(get)
@@ -274,32 +281,23 @@ else
     check "freeze refused during a slow X11 transfer: not frozen, the clipboard intact ($got)" \
         "grep -q \"frozen 0\" /sys/fs/cgroup/app_x11slow/cgroup.events && [ \"${got%-*}\" = slow ]"
 fi
-# The consequence of the GAP above: the slow source copies inside the window
-# (after the capture) and the freeze is committed while that copy is read.
+# The same window: the slow source copies inside it, and the freezer write
+# comes while the host clipboard is still reading that copy.
 app resume x11slow >>$out/slow.log 2>&1
-python3 $out/guard.py /sys/fs/cgroup/app_x11slow $out/slowgate >$out/slowguard.log 2>&1 &
-wait_for "[ -e $out/slowgate.ready ]"
-$out/clipboard sync >/dev/null
+before=$(get)
+freeze_window x11slow w2
 pkill -USR1 -f "^$out/client copy slow"
 wait_for "grep -q \"^copied slow-3\" $out/slow.log" 20
 sleep 0.2
-touch $out/slowgate.commit
-wait_for "[ -e $out/slowgate.reply ]" 80
+touch $out/w2.go
+wait $freezer; frozen=$?
 got=$(get); x11=$(paste)
-if [ "$got" = slow-3 ] && [ "$x11" = slow-3 ]; then
-    echo "PASS frozen while its X11 copy (inside the transaction) was read: clipboard and X11 paste slow-3"
-else
-    gap "frozen ($(cat $out/slowgate.reply 2>/dev/null)) while the X11 copy of that window was read: host clipboard \"$got\", X11 paste \"$x11\""
-fi
+check "the freeze cut the transfer of an X11 copy short: the host copy from the capture stays (\"$before\": \"$got\", X11 paste \"$x11\")" \
+    "[ $frozen = 0 ] && grep -q \"frozen 1\" /sys/fs/cgroup/app_x11slow/cgroup.events && [ -n \"$before\" ] && [ \"$got\" = \"$before\" ] && [ \"$x11\" = \"$before\" ]"
 app resume x11slow >>$out/slow.log 2>&1
-sleep 2.5
-echo "     resumed: host clipboard \"$(get)\", X11 paste \"$(paste)\""
 pkill -USR1 -f "^$out/client copy slow"
-if wait_for "[ \"\$(get)\" = slow-4 ]" 50; then
-    echo "PASS the host clipboard takes the next X11 copy after the failed one (slow-4)"
-else
-    gap "the host clipboard does not take the next X11 copy: \"$(get)\""
-fi
+wait_for "[ \"\$(get)\" = slow-4 ]" 50
+check "resumed, the host clipboard takes its next X11 copy (slow-4)" "[ \"\$(get)\" = slow-4 ]"
 app stop x11slow >>$out/slow.log 2>&1
 wait $slow_launcher 2>/dev/null
 
@@ -310,8 +308,6 @@ exec 8>&-
 for i in $(seq 100); do [ ! -e /run/user/0/locachy-x11-display ] && break; sleep 0.1; done
 check "the seat removed the display record at its end" "[ ! -e /run/user/0/locachy-x11-display ]"
 wait 2>/dev/null
-if [ $fail != 0 ]; then echo "SOME FAILED (logs: $out)"
-elif [ $gaps != 0 ]; then echo "PASSED WITH $gaps GAP(S): measured limits, see XWAYLAND.md (logs: $out)"
-else echo "ALL PASSED (logs: $out)"; fi
+[ $fail = 0 ] && echo "ALL PASSED (logs: $out)" || echo "SOME FAILED (logs: $out)"
 exit $fail
 '

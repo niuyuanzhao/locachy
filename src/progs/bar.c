@@ -1654,8 +1654,9 @@ static void render_bot_bar(void)
 static int kbds[MAX_KBDS];
 static int nkbds;
 static int kbd_layout[MAX_KBDS];
-static volatile sig_atomic_t sig_regrab, sig_release, active = 1;
+static volatile sig_atomic_t sig_regrab, sig_release, sig_reload, active = 1;
 static void set_grab(int on);
+static void load_width_keys(void);
 
 /* Virtual keyboard + XKB keymap handling. A virtual keyboard for each
  * keyboard layout in use, the system's first: a keyboard with a keymap of its
@@ -2022,6 +2023,7 @@ static void vkbd_type_utf8(const char *s)
 /* Evdev keyboard monitoring & EVIOCGRAB */
 static uint8_t kbd_down[MAX_KBDS][KEY_MAX + 1];
 static uint8_t kbd_forwarded[MAX_KBDS][KEY_MAX + 1]; /* the layout it went through, + 1; 0: not passed on */
+static uint8_t kbd_caps[MAX_KBDS][KEY_MAX + 1]; /* this press is Caps (JIS: Shift+Eisu), through its release */
 static int grabbed, want_grab;
 static int keys_down;
 static int shift, ctrl, alt, meta, altgr; /* altgr: right Alt where the layout makes it AltGr */
@@ -2060,6 +2062,7 @@ static void reset_keyboard_state(void)
         xkb_state_update_mask(y->st, 0, 0, xkb_state_serialize_mods(y->st, XKB_STATE_MODS_LOCKED), 0, 0, 0);
     }
     memset(kbd_down, 0, sizeof kbd_down);
+    memset(kbd_caps, 0, sizeof kbd_caps);
     keys_down = 0;
     if (compose_st) xkb_compose_state_reset(compose_st);
     update_xkb_modifiers();
@@ -2069,13 +2072,14 @@ static void reconcile_keyboards(const int *next, int nnext)
 {
     int old[MAX_KBDS], old_layout[MAX_KBDS], nold = nkbds;
     struct stat identity[MAX_KBDS];
-    uint8_t held[MAX_KBDS][KEY_MAX + 1], forwarded[MAX_KBDS][KEY_MAX + 1];
+    uint8_t held[MAX_KBDS][KEY_MAX + 1], forwarded[MAX_KBDS][KEY_MAX + 1], capkeys[MAX_KBDS][KEY_MAX + 1];
     memset(identity, 0, sizeof identity);
     for (int i = 0; i < nold; i++) fstat(kbds[i], &identity[i]);
     memcpy(old, kbds, sizeof old);
     memcpy(old_layout, kbd_layout, sizeof old_layout);
     memcpy(held, kbd_down, sizeof held);
     memcpy(forwarded, kbd_forwarded, sizeof forwarded);
+    memcpy(capkeys, kbd_caps, sizeof capkeys);
     if (next) {
         nkbds = nnext > MAX_KBDS ? MAX_KBDS : nnext;
         memcpy(kbds, next, (size_t)nkbds * sizeof *kbds);
@@ -2085,6 +2089,7 @@ static void reconcile_keyboards(const int *next, int nnext)
     }
     memset(kbd_down, 0, sizeof kbd_down);
     memset(kbd_forwarded, 0, sizeof kbd_forwarded);
+    memset(kbd_caps, 0, sizeof kbd_caps);
     int changed = nold != nkbds, removed[MAX_KBDS] = { 0 }, kept[MAX_KBDS] = { 0 };
     for (int i = 0; i < nold; i++) {
         int found = 0;
@@ -2095,6 +2100,7 @@ static void reconcile_keyboards(const int *next, int nnext)
                 identity[i].st_rdev == current.st_rdev) {
                 memcpy(kbd_down[j], held[i], sizeof held[i]);
                 memcpy(kbd_forwarded[j], forwarded[i], sizeof forwarded[i]);
+                memcpy(kbd_caps[j], capkeys[i], sizeof capkeys[i]);
                 kbd_layout[j] = old_layout[i];
                 kept[j] = found = 1;
                 break;
@@ -2163,12 +2169,21 @@ static void clear_virtual_keys(void)
 
 static void set_grab(int on)
 {
+    /* A release arriving during acquisition must run after the whole set,
+     * not ungrab its first device and leave a later one grabbed again. */
+    sigset_t release, previous;
+    sigemptyset(&release);
+    sigaddset(&release, SIGUSR2);
+    sigprocmask(SIG_BLOCK, &release, &previous);
+    on = on && active; /* a configuration reload never acquires a released seat */
     if (!on) clear_virtual_keys();
-    if (grabbed == on) return;
-    for (int i = 0; i < nkbds; i++) {
-        ioctl(kbds[i], EVIOCGRAB, on ? (void *)1 : NULL);
+    if (grabbed != on) {
+        for (int i = 0; i < nkbds; i++) {
+            ioctl(kbds[i], EVIOCGRAB, on ? (void *)1 : NULL);
+        }
+        grabbed = on;
     }
-    grabbed = on;
+    sigprocmask(SIG_SETMASK, &previous, NULL);
 }
 
 
@@ -2190,6 +2205,41 @@ static void on_sigusr1(int sig)
     (void)sig;
     sig_regrab = 1;
     active = 1;
+}
+
+/* Settings may change the layouts while a direct program owns the seat.
+ * Reloading configuration does not grant the bar ownership of its input. */
+static void on_sighup(int sig)
+{
+    (void)sig;
+    sig_reload = 1;
+}
+
+static void register_keyboard_signals(void)
+{
+    signal(SIGUSR2, on_sigusr2);
+    signal(SIGUSR1, on_sigusr1);
+    signal(SIGHUP, on_sighup); /* settings changes configuration, not seat ownership */
+}
+
+static void keyboard_signals(void)
+{
+    if (sig_release) {
+        sig_release = 0;
+        reset_keyboard_state();
+    }
+    if (sig_regrab || sig_reload) {
+        sig_regrab = sig_reload = 0;
+        reset_keyboard_state();
+        base_language_reload();
+        keys_reload();
+        load_width_keys();
+        init_xkb();
+        if (active) restore_passthrough_keymap();
+        bars_dirty = 1;
+        want_grab = grab_wanted();
+        set_grab(want_grab);
+    }
 }
 
 static int translate_code(int fd, int code)
@@ -3146,6 +3196,31 @@ static void open_request(void)
     }
 }
 
+/* X11 modifier bits as librime's standard front ends use them. Num Lock
+ * stays in XKB's resolved keysym (KP_1 versus KP_End), not in Rime's mask. */
+static unsigned int rime_modifiers(struct xkb_state *st)
+{
+    static const struct { const char *name; unsigned int mask; } mods[] = {
+        { XKB_MOD_NAME_SHIFT, 1u << 0 }, { XKB_MOD_NAME_CAPS, 1u << 1 },
+        { XKB_MOD_NAME_CTRL, 1u << 2 }, { XKB_MOD_NAME_ALT, 1u << 3 },
+        { XKB_MOD_NAME_LOGO, 1u << 6 },
+    };
+    unsigned int mask = 0;
+    for (size_t i = 0; i < sizeof mods / sizeof mods[0]; i++) {
+        if (xkb_state_mod_name_is_active(st, mods[i].name, XKB_STATE_MODS_EFFECTIVE) > 0) mask |= mods[i].mask;
+    }
+    return mask;
+}
+
+/* Every Rime event can commit, including a modifier or its release. Deliver
+ * it now, before forwarding the event, and abandon stale work after handover. */
+static int drain_ime_commit(int epoch)
+{
+    const char *commit = ime_get_commit();
+    if (commit && commit[0]) vkbd_type_utf8(commit);
+    return epoch == input_epoch;
+}
+
 static void handle_kbd_event(int fd)
 {
     struct input_event ev;
@@ -3157,6 +3232,8 @@ static void handle_kbd_event(int fd)
         int dl = kbd_layout[device];
         cur_layout = dl;
         int caps_before = caps_locked(), was_down = kbd_down[device][ev.code];
+        xkb_keysym_t sym_before = xkb_state_key_get_one_sym(layouts[dl].st, (xkb_keycode_t)ev.code + 8);
+        unsigned int mask_before = rime_modifiers(layouts[dl].st);
         if (ev.value != 2) {
             int down = ev.value != 0;
             keys_down += down - was_down;
@@ -3166,16 +3243,20 @@ static void handle_kbd_event(int fd)
                 share_locks(dl);
             }
         }
+        /* A shifted lock such as JIS Shift+Eisu has no unshifted Caps role.
+         * Follow the actual XKB lock transition, and its matching release. */
+        int caps_after = caps_locked();
+        if (ev.value == 1 && (caps_after != caps_before || sym_before == XKB_KEY_Caps_Lock))
+            kbd_caps[device][ev.code] = 1;
+        int caps_key = kbd_caps[device][ev.code];
+        if (ev.value == 0) kbd_caps[device][ev.code] = 0;
         /* Num Lock passes on as a key, as before; its lock is in every layout's state. */
-        int role = ev.code < 256 ? layouts[dl].role[ev.code] : 0, is_mod = (role & ~ROLE_NUM) != 0;
+        int role = ev.code < 256 ? layouts[dl].role[ev.code] : 0, is_mod = (role & ~ROLE_NUM) != 0 || caps_key;
         update_xkb_modifiers();
-        if ((role & KEYS_CAPS) && ev.value != 2) {
+        if ((caps_key || (role & KEYS_CAPS)) && ev.value != 2) {
             /* Rime as its front ends tell it: the key with the lock before
              * it, then the lock after; it ends what is being composed. */
-            if (grabbed) {
-                ime_caps_key(ev.value == 1, caps_before);
-            }
-            ime_set_caps(caps_locked());
+            ime_set_caps(caps_after);
             if (grabbed) {
                 render_bot_bar();
             }
@@ -3189,6 +3270,11 @@ static void handle_kbd_event(int fd)
         }
 
         if (ev.value == 0) {
+            if (grabbed) {
+                int epoch = input_epoch;
+                ime_key_event(caps_key ? XKB_KEY_Caps_Lock : sym_before, mask_before | (1u << 30));
+                if (!drain_ime_commit(epoch)) continue;
+            }
             int fl = kbd_forwarded[device][ev.code] - 1;
             if (fl >= 0) {
                 kbd_forwarded[device][ev.code] = 0;
@@ -3249,7 +3335,13 @@ static void handle_kbd_event(int fd)
             }
             continue;
         }
-        if (is_mod || !grabbed) {
+        if (!grabbed) continue;
+        if (is_mod || (role & ROLE_NUM)) {
+            int epoch = input_epoch;
+            ime_key_event(caps_key ? XKB_KEY_Caps_Lock : sym_before, mask_before);
+            if (!drain_ime_commit(epoch)) continue;
+            render_bot_bar();
+            wl_display_flush(display);
             continue;
         }
         /* Chinese mode's width: key_ime_width_cn (Ctrl+. and Shift+Space, as in
@@ -3285,13 +3377,10 @@ static void handle_kbd_event(int fd)
 
         int epoch = input_epoch;
         int k = translate_code(fd, ev.code);
-        int taken = k > 0 && !alt && !meta && !altgr &&
-                    (!ctrl || (k >= K_CTRL_0 && k <= K_CTRL_0 + 9)) && ime_process_key(k);
-        const char *commit = ime_get_commit(); /* before the key, if it passes on */
-        if (commit != NULL && commit[0] != '\0') {
-            vkbd_type_utf8(commit);
-        }
-        if (epoch != input_epoch) continue;
+        int candidate = !alt && !meta && !altgr &&
+                        ((!ctrl && k >= '0' && k <= '9') || (k >= K_CTRL_0 && k <= K_CTRL_0 + 9));
+        int taken = candidate ? ime_process_key(k) : ime_key_event(sym_before, mask_before);
+        if (!drain_ime_commit(epoch)) continue;
         if (taken) {
             render_bot_bar();
             wl_display_flush(display);
@@ -3414,9 +3503,7 @@ int main(void)
     load_width_keys();
     ime_init(NULL, NULL);
     open_keyboards();
-    signal(SIGUSR2, on_sigusr2);
-    signal(SIGUSR1, on_sigusr1);
-    signal(SIGHUP, on_sigusr1); /* settings changed rc.conf (language, keys) */
+    register_keyboard_signals();
 
     if (vkbd_mgr && wl_seat_obj) {
         text_vkbd = zwp_virtual_keyboard_manager_v1_create_virtual_keyboard(vkbd_mgr, wl_seat_obj);
@@ -3435,25 +3522,10 @@ int main(void)
     g_main_context_acquire(gctx);
 
     for (;;) {
-        if (sig_release) {
-            sig_release = 0;
-            reset_keyboard_state();
-        }
+        keyboard_signals();
         if (active && uptime() - last_keyboards >= 1.0) {
             open_keyboards();
             last_keyboards = uptime();
-        }
-        if (sig_regrab) {
-            sig_regrab = 0;
-            reset_keyboard_state();
-            base_language_reload(); /* settings may have changed the language or keys */
-            keys_reload();
-            load_width_keys();
-            init_xkb(); /* the keyboards' layouts too (keyboards.conf) */
-            restore_passthrough_keymap();
-            bars_dirty = 1;
-            want_grab = grab_wanted();
-            set_grab(want_grab);
         }
         wl_display_flush(display);
         GPollFD gfds[32];

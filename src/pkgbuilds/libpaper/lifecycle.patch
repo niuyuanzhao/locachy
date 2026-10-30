@@ -1,0 +1,45 @@
+--- a/lib/libpaper.c.in.in
++++ b/lib/libpaper.c.in.in
+@@ -235,6 +235,8 @@
+             char *name = gettok(l, &saveptr);
+             char *wstr = gettok(NULL, &saveptr), *hstr = gettok(NULL, &saveptr);
+             char *ustr = gettok(NULL, &saveptr);
++            free(l);
++            l = NULL;
+             if (name != NULL && wstr != NULL && hstr != NULL && ustr != NULL) {
+                 errno = 0;
+                 double w = strtod(wstr, NULL);
+@@ -348,8 +350,8 @@
+             strncpy(papername, s, MAX_PAPERNAME_LEN);
+         papername[MAX_PAPERNAME_LEN] = '\0';
+         free(s);
+-        free(l);
+-    }
++    }
++    free(l);
+     fclose(fp);
+     return papername;
+ }
+@@ -482,11 +484,22 @@
+ int paperdone(void)
+ {
+     if (initialized) {
++        while (papers != NULL) {
++            struct paper *next = papers->next;
++            free((char *)papers->name);
++            free(papers);
++            papers = next;
++        }
++        default_paper = NULL;
++        free(paper_specsfile);
++        paper_specsfile = NULL;
++        paper_lineno = 0;
+         free(sysconfdir_alloc);
+         sysconfdir = sysconfdir_alloc = NULL;
+         if (free_xdg_config_home)
+             free(xdg_config_home);
+         xdg_config_home = NULL;
++        free_xdg_config_home = false;
+         initialized = false;
+     }
+     return PAPER_OK;

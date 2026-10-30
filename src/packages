@@ -15,6 +15,9 @@ linux-firmware
 intel-ucode
 amd-ucode
 systemd-ukify
+# Secure Boot with this machine's own keys (locachy-tpm secure-boot): the
+# image signed, and TPM 2.0 disk keys bound to what it measures
+sbctl
 efibootmgr
 e2fsprogs
 

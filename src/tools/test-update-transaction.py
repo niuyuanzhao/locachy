@@ -293,6 +293,43 @@ class UpdateTransaction(unittest.TestCase):
         with self.assertRaisesRegex(tx.TransactionError, "trusted test sources changed"):
             tx.load_snapshot(ref, self.host)
 
+    def test_declared_packages_are_pinned_tested_and_in_the_same_transaction(self):
+        with self.assertRaisesRegex(tx.TransactionError, "invalid declared package name"):
+            tx.snapshot(self.records, self.sync, self.config, self.host,
+                        {"example": {"baseline_dir": str(self.recipe)}}, missing=["-rf"])
+        self.reference = tx.snapshot(self.records, self.sync, self.config, self.host,
+                                     {"example": {"baseline_dir": str(self.recipe), "recipe_dir": str(self.recipe)}},
+                                     missing=["libraw", "chmlib", "libraw"])
+        self.directory, self.data = tx.load_snapshot(self.reference, self.host)
+        self.assertEqual(self.data["missing"], ["chmlib", "libraw"])
+        result = self.result()
+        # A library the contracts' root did not have is refused at install.
+        with self.assertRaisesRegex(tx.TransactionError, "libraw=0.22-1 was not tested"):
+            tx.verify_install_versions("libraw 0.22-1\nexample 2-1\n", self.directory, {"example": result})
+        target = self.directory / "prepared/example/target-packages.txt"
+        target.write_text("runtime 2-1\nchmlib 0.40-1\nlibraw 0.22-1\nexample 2-1\n")
+        result["target_packages_sha256"] = tx.file_hash(target)
+        tx.write_json(self.directory / "prepared/example/result.json", result)
+        commands = []
+        def run(command, **kwargs):
+            if command[0] == "repo-add":
+                Path(command[1]).write_bytes(b"candidate repository")
+                return subprocess.CompletedProcess(command, 0)
+            command = command[10:]
+            commands.append(command)
+            if "-Sup" in command:
+                return subprocess.CompletedProcess(command, 0, stdout="LOCACHY-PACKAGE chmlib 0.40-1\n"
+                                                   "LOCACHY-PACKAGE libraw 0.22-1\nLOCACHY-PACKAGE example 2-1\n")
+            for name in ("chmlib-0.40-1", "libraw-0.22-1", "example-2-1"):
+                (self.db / "local" / name).mkdir()
+                (self.db / "local" / name / "desc").write_text("entry")
+                (self.db / "local" / name / "files").write_text("entry")
+            return subprocess.CompletedProcess(command, 0)
+        self.assertTrue(tx.install(self.reference, self.directory, self.data, {"example": result},
+                                   lambda: self.host, str(self.db), run))
+        for command in commands:
+            self.assertEqual(command[-3:], ["locachy-validated/example=2-1", "chmlib", "libraw"])
+
     def test_host_failure_stops_dependent_targets_and_preserves_plan(self):
         rows = [("host", "local", "example", "1", "2"), ("locachy", "rebuild", "programs", "", ""),
                 ("demo", "rebuild", "host changes", "", "")]

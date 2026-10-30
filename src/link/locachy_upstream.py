@@ -211,14 +211,15 @@ def _config(name, baseline_dir):
         raise UpstreamError("upstream tracking configuration is unavailable") from e
     overlays = {
         "labwc-locachy": ("labwc", "labwc", ["labwc"],
-                         ["clipboard-guard.patch", "locachy-clipboard.c", "locachy-clipboard.h"],
-                         "labwc-clipboard-freeze-v1"),
+                         ["clipboard-guard.patch", "inner-edge-hold.patch", "locachy-clipboard.c", "locachy-clipboard.h"],
+                         "labwc-clipboard-inner-edge-v2"),
         "libinput": ("libinput", "libinput", ["libinput", "libinput-tools"],
                      ["library.patch", "circular-scroll.patch"], "libinput-circular-scroll-v2"),
         "libinput-tools": ("libinput-tools", "libinput", ["libinput", "libinput-tools"],
                           ["cli.patch"], "libinput-tools-cli-v1"),
         "libmupdf": ("libmupdf", "mupdf", ["libmupdf", "mupdf", "mupdf-gl", "mupdf-tools", "python-mupdf"],
                      ["bundled-cmark-gfm.patch"], "libmupdf-markdown-v1"),
+        "libpaper": ("libpaper", "libpaper", ["libpaper"], ["lifecycle.patch"], "libpaper-lifecycle-v1"),
     }
     if cfg.get("schema") != SCHEMA or cfg.get("name") != name or name not in overlays:
         raise UpstreamError("unsupported upstream overlay")

@@ -2,7 +2,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-29 08:05-0400\n"
+"POT-Creation-Date: 2026-10-29 21:44-0400\n"
 "PO-Revision-Date: 2026-10-24 22:38+0000\n"
 "Last-Translator: LOCachy <38998838+niuyuanzhao@users.noreply.github.com>\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -476,11 +476,11 @@ msgstr "没有归档：Ctrl+O 打开，Ctrl+N 新建。"
 msgid "Find: %s"
 msgstr "查找：%s"
 
-#: progs/archive.c progs/files.c progs/packages.c
+#: progs/archive.c progs/files.c progs/packages.c progs/view.c
 msgid "Name"
 msgstr "名称"
 
-#: progs/archive.c progs/files.c progs/packages.c
+#: progs/archive.c progs/files.c progs/packages.c progs/view.c
 msgid "Size"
 msgstr "大小"
 
@@ -4938,16 +4938,6 @@ msgstr "关机..."
 
 #: progs/home.c
 #, c-format
-msgid "open %s: accepted"
-msgstr "打开 %s：已接受"
-
-#: progs/home.c
-#, c-format
-msgid "open %s: error"
-msgstr "打开 %s：错误"
-
-#: progs/home.c
-#, c-format
 msgid "opening %s..."
 msgstr "正在打开 %s..."
 
@@ -4955,6 +4945,16 @@ msgstr "正在打开 %s..."
 #, c-format
 msgid "%s is open on %s."
 msgstr "%s 已在 %s 上打开。"
+
+#: progs/home.c
+#, c-format
+msgid "open %s: accepted"
+msgstr "打开 %s：已接受"
+
+#: progs/home.c
+#, c-format
+msgid "open %s: error"
+msgstr "打开 %s：错误"
 
 #: progs/installer.c
 msgid "(no model name)"
@@ -5209,6 +5209,31 @@ msgid ""
 msgstr "每次开机都要输入，键盘布局与这里相同（美式）。建议十个字符以上。"
 
 #: progs/installer.c
+msgid "Secure Boot with this computer's own keys"
+msgstr "用本机自己的密钥启用安全启动"
+
+#: progs/installer.c
+msgid "Microsoft's keys too"
+msgstr "同时加入微软的密钥"
+
+#: progs/installer.c
+msgid ""
+"The firmware is in setup mode: its Secure Boot keys can be this computer's "
+"own. Then, with Secure Boot on, only boot images signed here start, and the "
+"TPM opens the disk for them alone. Microsoft's keys too: Windows, Microsoft-"
+"signed boot media, and the firmware drivers some computers need."
+msgstr ""
+"固件处于设置模式：可以把安全启动密钥换成本机自己的。之后开启安全启动时，只有"
+"在本机签名的启动镜像能启动，TPM 也只为它们打开磁盘。同时加入微软的密钥：用于 "
+"Windows、微软签名的启动介质，以及部分电脑需要的固件驱动。"
+
+#. TRANSLATORS: %s is fwupd's Host Security ID, such as HSI:1 (v2.0.16).
+#: progs/installer.c
+#, c-format
+msgid "Host security (fwupd): %s"
+msgstr "主机安全（fwupd）：%s"
+
+#: progs/installer.c
 msgid "User name"
 msgstr "用户名"
 
@@ -5340,6 +5365,22 @@ msgstr "EFI %s，根 %s，交换 %s"
 #: progs/installer.c
 msgid "the filesystems mounted at /mnt and /mnt/efi"
 msgstr "挂载在 /mnt 和 /mnt/efi 的文件系统"
+
+#: progs/installer.c progs/settings.c
+msgid "Secure Boot"
+msgstr "安全启动"
+
+#: progs/installer.c
+msgid "as the firmware has it"
+msgstr "保持固件现状"
+
+#: progs/installer.c
+msgid "this computer's own keys and Microsoft's"
+msgstr "本机自己的密钥和微软的密钥"
+
+#: progs/installer.c
+msgid "this computer's own keys"
+msgstr "本机自己的密钥"
 
 #: progs/installer.c
 #, c-format
@@ -6094,12 +6135,6 @@ msgstr "本地 %-30.100s %.200s（已安装 %.80s）"
 msgid "rebuild: %s (%s -> %s)"
 msgstr "重新构建：%s (%s -> %s)"
 
-#. TRANSLATORS: l is the l key; keep it.
-#: progs/packages.c
-#, c-format
-msgid "Details: %s (%s/%s.conf)   l: output"
-msgstr "详细信息：%s（%s/%s.conf）   l: 输出"
-
 #. TRANSLATORS: PgUp/PgDn are key names; keep them.
 #: progs/packages.c
 msgid "PgUp/PgDn: scroll"
@@ -6590,8 +6625,12 @@ msgid "add %s to the host"
 msgstr "向宿主安装 %s"
 
 #: progs/packages.c
-msgid "Package to add (repositories or the AUR):"
-msgstr "要安装的软件包（来自软件源或 AUR）："
+msgid "Packages to add, separated by spaces (repositories or the AUR):"
+msgstr "要安装的软件包，用空格分隔（来自软件源或 AUR）："
+
+#: progs/packages.c
+msgid "Package names: letters, digits and @ . _ + -, at most 32."
+msgstr "软件包名只能用字母、数字与 @ . _ + -，最多 32 个。"
 
 #: progs/packages.c
 #, c-format
@@ -6689,6 +6728,23 @@ msgid "Saved; the shared display applies the layout when it is shown."
 msgstr "已保存；共享桌面显示时将应用该布局。"
 
 #: progs/settings.c
+msgid "on, with this computer's own keys"
+msgstr "已开启，使用本机自己的密钥"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "setup mode (Enter: enroll this computer's keys)"
+msgstr "设置模式（Enter: 写入本机的密钥）"
+
+#: progs/settings.c
+msgid "on, with the firmware's keys"
+msgstr "已开启，使用固件自带的密钥"
+
+#: progs/settings.c
+msgid "bound at the next start with Secure Boot on this computer's keys"
+msgstr "将在下次以本机密钥安全启动时绑定"
+
+#: progs/settings.c
 msgid "no LUKS2 disk"
 msgstr "无 LUKS2 加密盘"
 
@@ -6700,10 +6756,16 @@ msgstr "未检测到 TPM 芯片"
 msgid "TPM 1.2 disabled in BIOS"
 msgstr "BIOS 中未启用 TPM 1.2"
 
+#. TRANSLATORS: Delete is the Delete key; keep it.
 #: progs/settings.c
 #, c-format
 msgid "TPM 1.2 bound (Delete: unbind)"
 msgstr "已绑定 TPM 1.2（Delete: 解除绑定）"
+
+#: progs/settings.c
+#, c-format
+msgid "TPM 2.0 bound to this computer's Secure Boot keys (Delete: unbind)"
+msgstr "TPM 2.0 已绑定本机的安全启动密钥（Delete: 解除绑定）"
 
 #: progs/settings.c
 #, c-format
@@ -6719,6 +6781,15 @@ msgstr "TPM 1.2（Enter: 绑定自动解密）"
 #, c-format
 msgid "TPM 2.0 (Enter: bind auto-unlock)"
 msgstr "TPM 2.0（Enter: 绑定自动解密）"
+
+#: progs/settings.c
+msgid "fwupd is not installed"
+msgstr "未安装 fwupd"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: fwupd's report"
+msgstr "Enter: 查看 fwupd 的报告"
 
 #: progs/settings.c
 msgid "left index finger"
@@ -7354,6 +7425,20 @@ msgstr "   （当前）"
 msgid "No key table for layout %s; nothing changed."
 msgstr "布局 %s 没有键位表；未作改动。"
 
+#. TRANSLATORS: %s is a console keyboard layout, such as us.
+#: progs/settings.c
+#, c-format
+msgid ""
+"System keyboard layout: %s. Explicit keyboard layouts stay unchanged; the "
+"boot unlock takes it from the next boot image."
+msgstr ""
+"系统默认键盘布局：%s。各键盘显式指定的布局不变；开机解锁在下次生成引导镜像后"
+"使用。"
+
+#: progs/settings.c
+msgid "Cannot save the system keyboard layout; nothing applied."
+msgstr "无法保存系统默认键盘布局；未应用更改。"
+
 #. TRANSLATORS: the first %s is a keyboard's name, the second a keyboard layout's (us).
 #: progs/settings.c
 #, c-format
@@ -7375,6 +7460,10 @@ msgid ""
 "Layout of %.60s: type to filter   Up/Down/PgUp/PgDn   Enter: choose   Esc: "
 "back"
 msgstr "%.60s 的布局：输入以筛选   Up/Down/PgUp/PgDn   Enter: 选择   Esc: 返回"
+
+#: progs/settings.c
+msgid "System keyboard layout"
+msgstr "系统默认键盘布局"
 
 #: progs/settings.c
 msgid "No layout has that in its name."
@@ -7622,6 +7711,10 @@ msgstr "锁屏"
 #: progs/settings.c
 msgid "Disk Encryption"
 msgstr "磁盘加密"
+
+#: progs/settings.c
+msgid "Host Security"
+msgstr "主机安全"
 
 #: progs/settings.c
 msgid "Region & Language"
@@ -8131,6 +8224,10 @@ msgstr "  （将一并安装 Rime）"
 #: progs/settings.c
 msgid "TPM disk auto-unlock"
 msgstr "TPM 磁盘自动解密"
+
+#: progs/settings.c
+msgid "Host security (fwupd)"
+msgstr "主机安全（fwupd）"
 
 #: progs/settings.c
 msgid "not supported"
@@ -8679,6 +8776,20 @@ msgstr "中文拼音：无法运行 locachy-pkg。"
 msgid "Enter: bind LUKS2 auto-unlock to TPM (1.2 or 2.0)   Delete: unbind"
 msgstr "Enter: 将 LUKS2 自动解密绑定到 TPM（1.2 或 2.0）   Delete: 解除绑定"
 
+#. TRANSLATORS: Enter and M are key names; keep them.
+#: progs/settings.c
+msgid ""
+"Enter: this computer's own Secure Boot keys into the firmware (setup mode)   "
+"M: Microsoft's too (Windows, Microsoft-signed boot media)"
+msgstr ""
+"Enter: 把本机自己的安全启动密钥写入固件（设置模式）   M: 同时加入微软的密钥"
+"（Windows、微软签名的启动介质）"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: fwupd's report (fwupdmgr security), with the fixes it offers"
+msgstr "Enter: 查看 fwupd 的报告（fwupdmgr security）及其提供的修复"
+
 #: progs/settings.c
 msgid "No controllable backlight on this display."
 msgstr "当前显示器没有可调节的背光。"
@@ -8898,6 +9009,18 @@ msgstr "%s 未正常结束。"
 #, c-format
 msgid "%s done."
 msgstr "%s 已完成。"
+
+#: progs/settings.c
+msgid ""
+"Secure Boot keys enrolled. At the next start the passphrase is asked once; "
+"the TPM is bound to the new keys then."
+msgstr "安全启动密钥已写入。下次启动时会询问一次口令，届时 TPM 绑定到新密钥。"
+
+#: progs/settings.c
+msgid ""
+"Secure Boot keys enrolled; turn Secure Boot on in the firmware if it does "
+"not come on by itself."
+msgstr "安全启动密钥已写入；如果安全启动没有自动开启，请在固件设置中打开。"
 
 #. TRANSLATORS: Delete is the Delete key; keep it.
 #: progs/settings.c
@@ -9896,6 +10019,10 @@ msgid "Thumbs"
 msgstr "缩略图"
 
 #: progs/view.c
+msgid "Information"
+msgstr "信息"
+
+#: progs/view.c
 msgid "No bookmarks"
 msgstr "无书签"
 
@@ -9910,6 +10037,15 @@ msgstr "隐藏侧边栏"
 #: progs/view.c
 msgid "Show Sidebar"
 msgstr "显示侧边栏"
+
+#: progs/view.c
+msgid "Browse"
+msgstr "浏览"
+
+#: progs/view.c
+msgctxt "mode"
+msgid "View"
+msgstr "查看"
 
 #. TRANSLATORS: %.255s is the document title or file name.
 #: progs/view.c
@@ -10134,10 +10270,6 @@ msgid "Rename Bookmark..."
 msgstr "重命名书签..."
 
 #: progs/view.c
-msgid "Browse"
-msgstr "浏览"
-
-#: progs/view.c
 msgid "Zoom"
 msgstr "缩放"
 
@@ -10156,6 +10288,14 @@ msgstr "表格选择"
 #: progs/view.c
 msgid "Magnifier"
 msgstr "放大镜"
+
+#: progs/view.c
+msgid "Sort By..."
+msgstr "排序方式..."
+
+#: progs/view.c
+msgid "Information Panel"
+msgstr "信息面板"
 
 #: progs/view.c
 msgid "Presentation"
@@ -10447,6 +10587,141 @@ msgstr "框选表格区域，再点击边缘附近划分行列；按 Esc 清除�
 #: progs/view.c
 msgid "Click to see the magnified view."
 msgstr "点击查看放大视图。"
+
+#: progs/view.c
+msgid "Date"
+msgstr "日期"
+
+#: progs/view.c
+msgid "Descending"
+msgstr "降序"
+
+#. TRANSLATORS: Gwenview's status bar; %d is the number of images.
+#: progs/view.c
+#, c-format
+msgid "%d image"
+msgid_plural "%d images"
+msgstr[0] "%d 张图像"
+
+#: progs/view.c
+msgid "Date Modified"
+msgstr "修改日期"
+
+#: progs/view.c
+msgid "File Size"
+msgstr "文件大小"
+
+#: progs/view.c
+msgid "Date and Time (original)"
+msgstr "原始日期和时间"
+
+#: progs/view.c
+msgid "Image Size"
+msgstr "图像大小"
+
+#: progs/view.c
+msgid "Date and Time"
+msgstr "日期和时间"
+
+#: progs/view.c
+msgid "Manufacturer"
+msgstr "制造商"
+
+#: progs/view.c
+msgid "Exposure Time"
+msgstr "曝光时间"
+
+#: progs/view.c
+msgid "Model"
+msgstr "型号"
+
+#: progs/view.c
+msgid "FNumber"
+msgstr "光圈值"
+
+#: progs/view.c
+msgid "ISO Speed Ratings"
+msgstr "ISO 感光度"
+
+#: progs/view.c
+msgid "Flash"
+msgstr "闪光灯"
+
+#: progs/view.c
+msgid "Focal Length"
+msgstr "焦距"
+
+#: progs/view.c
+#, c-format
+msgid "%.0f byte"
+msgid_plural "%.0f bytes"
+msgstr[0] "%.0f 字节"
+
+#. TRANSLATORS: file sizes, KDE's binary units.
+#: progs/view.c
+#, c-format
+msgid "%.1f KiB"
+msgstr "%.1f KiB"
+
+#: progs/view.c
+#, c-format
+msgid "%.1f MiB"
+msgstr "%.1f MiB"
+
+#: progs/view.c
+#, c-format
+msgid "%.1f GiB"
+msgstr "%.1f GiB"
+
+#. TRANSLATORS: an image's size in pixels and its megapixels.
+#: progs/view.c
+#, c-format
+msgid "%dx%d (%.1fMP)"
+msgstr "%dx%d（%.1f 百万像素）"
+
+#: progs/view.c
+msgid "No flash function"
+msgstr "无闪光灯功能"
+
+#: progs/view.c
+msgid "Fired"
+msgstr "已闪光"
+
+#: progs/view.c
+msgid "No flash"
+msgstr "未闪光"
+
+#: progs/view.c
+msgid "auto"
+msgstr "自动"
+
+#: progs/view.c
+msgid "compulsory"
+msgstr "强制"
+
+#: progs/view.c
+msgid "red-eye reduction"
+msgstr "防红眼"
+
+#: progs/view.c
+msgid "return light detected"
+msgstr "检测到回闪"
+
+#: progs/view.c
+msgid "return light not detected"
+msgstr "未检测到回闪"
+
+#: progs/view.c
+msgid "Show fewer details"
+msgstr "显示较少详情"
+
+#: progs/view.c
+msgid "Show more details..."
+msgstr "显示更多详情..."
+
+#, c-format
+#~ msgid "Details: %s (%s/%s.conf)   l: output"
+#~ msgstr "详细信息：%s（%s/%s.conf）   l: 输出"
 
 #~ msgid "Wi-Fi & Internet"
 #~ msgstr "Wi-Fi 和互联网"

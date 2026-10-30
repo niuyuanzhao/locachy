@@ -96,8 +96,13 @@ static char keymaps[MAX_LIST][48], zones[MAX_LIST][48];
 static int nkeymaps, nzones;
 static char levels[8][16], level_auto[16], cpu_model[48], repo_names[4][16];
 static int nlevels, nrepos;
-static int tpm_usable, net_profiles;
+static int tpm_usable, tpm_setup_mode, net_profiles;
 static char tpm_advice[512];
+/* fwupd's Host Security ID, and the checks it found failing (as it words
+ * them), when the live system has fwupd. */
+#define MAX_HSI_CHECKS 32
+static char hsi_id[64], hsi_failing[MAX_HSI_CHECKS][160];
+static int nhsi_failing;
 static char source_text[512]; /* the LOCachy source locachy-install is, as it said */
 static int source_not_newest;
 static long long memory_bytes, esp_bytes, min_root_bytes;
@@ -114,6 +119,7 @@ enum { ENC_OFF, ENC_PASS, ENC_TPM };
 static struct {
     int lang; /* 0 English, 1 Chinese: the system's */
     int disk_mode, swap_gib, encrypt, boot_lock, ntp, ime, machine, level, rank, copy_network, hibernate;
+    int secure_boot, secure_boot_microsoft; /* own Secure Boot keys (firmware in setup mode) */
     char disk[64], esp[64], root[64], swap[64];
     char passphrase[256], password[256];
     char user[32], full_name[128], hostname[64], keymap[48], timezone[64], cpu[48];
@@ -382,7 +388,17 @@ static int load_description(void)
     }
     o = jget(d, "tpm");
     tpm_usable = json_object_get_boolean(jget(o, "usable"));
+    tpm_setup_mode = json_object_get_boolean(jget(o, "setup_mode"));
     copy(tpm_advice, sizeof tpm_advice, jstr(o, "advice"));
+    o = jget(d, "host_security");
+    copy(hsi_id, sizeof hsi_id, jstr(o, "id"));
+    a = jget(o, "checks");
+    nhsi_failing = 0;
+    for (int i = 0; i < jlen(a) && nhsi_failing < MAX_HSI_CHECKS; i++) {
+        if (strncmp(jtext(a, i), "\u2718", strlen("\u2718")) == 0) {
+            copy(hsi_failing[nhsi_failing++], sizeof hsi_failing[0], jtext(a, i));
+        }
+    }
     o = jget(d, "source");
     copy(source_text, sizeof source_text, jstr(o, "text"));
     source_not_newest = json_object_get_boolean(jget(o, "not_newest"));
@@ -435,6 +451,7 @@ static void set_defaults(void)
     c.disk_mode = WHOLE;
     c.swap_gib = dflt.swap_gib;
     c.encrypt = ENC_PASS;
+    c.secure_boot = tpm_setup_mode;
     c.boot_lock = c.ntp = c.rank = 1;
     c.copy_network = dflt.copy_network;
     c.hibernate = -1;
@@ -583,7 +600,7 @@ enum {
     R_START_LANG = 1, R_START_KEYMAP, R_START_INSTALL, R_START_TERM, R_START_REBOOT, R_START_OFF,
     R_NET_SETUP, R_NET_COPY, R_NEXT,
     R_DISK_MODE, R_SWAP, R_ESP, R_ROOT, R_SWAP_PART, R_TERMINAL, R_RESCAN,
-    R_ENC, R_PASS,
+    R_ENC, R_PASS, R_SB, R_SB_MICROSOFT,
     R_USER, R_FULL_NAME, R_PASSWORD, R_HOST, R_LOCK,
     R_LANG, R_TZ, R_NTP, R_IME,
     R_MACHINE, R_LEVEL, R_CPU, R_RANK, R_UPD_REPO, R_UPD_BRANCH, R_HIBERNATE,
@@ -775,6 +792,25 @@ static void build_encryption(int width)
                     width);
     }
     add_wrapped(E_NOTE, tpm_advice, width);
+    if (tpm_setup_mode) {
+        add_item(R_SB, _("Secure Boot with this computer's own keys"), choice(yes_no(c.secure_boot)));
+        if (c.secure_boot) {
+            add_item(R_SB_MICROSOFT, _("Microsoft's keys too"), choice(yes_no(c.secure_boot_microsoft)));
+        }
+        add_wrapped(E_NOTE, _("The firmware is in setup mode: its Secure Boot keys can be this computer's own. "
+                              "Then, with Secure Boot on, only boot images signed here start, and the TPM opens "
+                              "the disk for them alone. Microsoft's keys too: Windows, Microsoft-signed boot "
+                              "media, and the firmware drivers some computers need."), width);
+    }
+    if (hsi_id[0]) {
+        char line[160];
+        /* TRANSLATORS: %s is fwupd's Host Security ID, such as HSI:1 (v2.0.16). */
+        snprintf(line, sizeof line, _("Host security (fwupd): %s"), hsi_id);
+        add_wrapped(E_NOTE, line, width);
+        for (int i = 0; i < nhsi_failing; i++) {
+            add_wrapped(E_NOTE, hsi_failing[i], width);
+        }
+    }
     add_next(S_ENCRYPTION);
 }
 
@@ -899,6 +935,11 @@ static void build_summary(int width)
     add_item(E_NOTE, _("Disk"), line);
     add_erased();
     add_item(E_NOTE, _("Encryption"), enc_label(c.encrypt));
+    if (tpm_setup_mode) {
+        add_item(E_NOTE, _("Secure Boot"), !c.secure_boot ? _("as the firmware has it") :
+                 c.secure_boot_microsoft ? _("this computer's own keys and Microsoft's") :
+                 _("this computer's own keys"));
+    }
     snprintf(line, sizeof line, _("%s%s%s%s on %s; lock at power-on: %s"), c.user, c.full_name[0] ? " (" : "",
              c.full_name, c.full_name[0] ? ")" : "", c.hostname, yes_no(c.boot_lock || c.encrypt == ENC_TPM));
     add_item(E_NOTE, _("User"), line);
@@ -1299,6 +1340,10 @@ static int install_args(struct args *a, int check)
     if (c.full_name[0]) arg(a, "--full-name=%s", c.full_name);
     arg(a, "--hostname=%s", c.hostname);
     if (!c.boot_lock && c.encrypt != ENC_TPM) arg(a, "--login-skip");
+    if (tpm_setup_mode && c.secure_boot) {
+        arg(a, "--secure-boot");
+        if (c.secure_boot_microsoft) arg(a, "--secure-boot-microsoft");
+    }
     arg(a, "--language=%s", languages[c.lang]);
     arg(a, "--keymap=%s", c.keymap);
     arg(a, "--timezone=%s", c.timezone);
@@ -2127,7 +2172,7 @@ static int is_choice(int id)
 {
     return id == R_START_LANG || id == R_NET_COPY || id == R_DISK_MODE || id == R_SWAP || id == R_ENC ||
            id == R_LOCK || id == R_LANG || id == R_NTP || id == R_IME || id == R_MACHINE || id == R_LEVEL ||
-           id == R_RANK || (id >= R_REPO && id < R_REPO + 4);
+           id == R_RANK || id == R_SB || id == R_SB_MICROSOFT || (id >= R_REPO && id < R_REPO + 4);
 }
 
 static void act(int id, int key)
@@ -2207,6 +2252,12 @@ static void act(int id, int key)
     }
     case R_PASS:
         prompt_secret(_("Disk passphrase:"), _("The same again:"), c.passphrase, sizeof c.passphrase);
+        break;
+    case R_SB:
+        c.secure_boot = !c.secure_boot;
+        break;
+    case R_SB_MICROSOFT:
+        c.secure_boot_microsoft = !c.secure_boot_microsoft;
         break;
     case R_USER:
         prompt(_("User name:"), c.user, sizeof c.user, 0);

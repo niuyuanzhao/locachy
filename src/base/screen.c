@@ -2,7 +2,8 @@
  * The screen. Everything is drawn into a shadow buffer in ordinary memory;
  * screen_flush mirrors what changed into a dumb buffer for each connected
  * output on one DRM card and tells the driver (DIRTYFB). The first selected
- * output fixes the logical size; other sizes fit that picture with black
+ * output sets the logical size on each take; changing output or mode resizes
+ * the picture for the program to redraw. Other sizes fit it with black
  * borders. Programs may opt into extended mode: each connector then keeps an
  * independent native canvas, text scale and desktop rectangle. A program keeps
  * its pictures while it does not have the screen.
@@ -935,7 +936,8 @@ static const char *create_output(int fd, struct output *o)
     return NULL;
 }
 
-/* Show the fixed logical picture on every selected output on this fd. */
+/* Show the current picture on the outputs of this fd (native per-output
+ * canvases in extended mode, one fitted canvas otherwise). */
 static const char *show(int fd)
 {
     const char *why = "no usable output buffers";
@@ -976,7 +978,8 @@ static const char *show(int fd)
     return NULL;
 }
 
-/* Refresh physical outputs, but never resize an existing logical picture. */
+/* Refresh the outputs and match the drawing size to the first selected one.
+ * A take is followed by K_SHOWN, so programs lay out and draw it again. */
 static const char *prepare(int fd)
 {
     const char *why = find_outputs(fd);
@@ -1002,19 +1005,24 @@ static const char *prepare(int fd)
         if (why != NULL) clear_outputs(fd);
         return why;
     }
-    if (shadow == NULL) {
-        double s = output_scale();
-        if ((why = scaled_font(s)) != NULL) {
-            clear_outputs(fd);
-            return why;
-        }
-        width = outputs[0].mode.hdisplay;
-        height = outputs[0].mode.vdisplay;
-        shadow = calloc((size_t)width * height, sizeof *shadow);
-        if (shadow == NULL) {
+    uint32_t w = outputs[0].mode.hdisplay, h = outputs[0].mode.vdisplay;
+    if (shadow == NULL || width != w || height != h) {
+        uint32_t *picture = (uint64_t)w * h > SIZE_MAX / sizeof *picture ? NULL :
+                            calloc((size_t)w * h, sizeof *picture);
+        if (picture == NULL) {
             clear_outputs(fd);
             return "no memory for the shadow buffer";
         }
+        double s = output_scale();
+        if ((why = scaled_font(s)) != NULL) {
+            free(picture);
+            clear_outputs(fd);
+            return why;
+        }
+        free(shadow);
+        shadow = picture;
+        width = w;
+        height = h;
         scale = s;
         layout();
     }

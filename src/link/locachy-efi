@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""Maintain LOCachy's UEFI entry with efibootmgr, never raw variable writes.
+
+locachy-efi [--esp /efi] [--first]
+--first is the installer's: put this entry first, preserving other entries.
+Normal boot-image updates keep the existing order (append if missing).
+"""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+import uuid
+
+EFI = Path("/sys/firmware/efi")
+EFIVARS = EFI / "efivars"
+LABEL = "LOCachy"
+LOADER = r"\EFI\locachy\locachy.efi"
+ESP_TYPE = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+
+
+def command(args):
+    result = subprocess.run(args, capture_output=True, text=True, timeout=30,
+                            stdin=subprocess.DEVNULL, env=dict(os.environ, LC_ALL="C"))
+    if result.returncode:
+        raise RuntimeError(" ".join(args) + ": " + (result.stderr.strip() or f"status {result.returncode}"))
+    return result.stdout
+
+
+def mounted(path):
+    data = json.loads(command(["findmnt", "--json", "--mountpoint", str(path),
+                               "--output", "TARGET,SOURCE,FSTYPE,OPTIONS,MAJ:MIN"]))
+    mounts = data.get("filesystems", [])
+    if len(mounts) != 1 or Path(mounts[0]["target"]) != path:
+        raise RuntimeError(f"{path}: an explicit filesystem mount is required")
+    return mounts[0]
+
+
+def block(path):
+    data = json.loads(command(["lsblk", "--json", "--nodeps", "--paths", "--properties-by", "blkid", "--output",
+                               "PATH,TYPE,PKNAME,PARTN,PARTUUID,PARTTYPE,PTTYPE,MAJ:MIN", path]))
+    devices = data.get("blockdevices", [])
+    if len(devices) != 1:
+        raise RuntimeError(f"{path}: one block device is required")
+    return devices[0]
+
+
+def esp_target(path):
+    path = Path(os.path.abspath(path))
+    if path.resolve() != path:
+        raise RuntimeError(f"{path}: linked mount paths are not accepted")
+    fs = mounted(path)
+    if fs.get("fstype") != "vfat":
+        raise RuntimeError(f"{path}: not a FAT ESP")
+    loader = path / "EFI/locachy/locachy.efi"
+    if not loader.is_file() or loader.resolve() != loader:
+        raise RuntimeError(f"{loader}: installed, non-linked boot image required")
+    source = os.path.realpath(fs["source"])
+    info = os.stat(source)
+    if not stat.S_ISBLK(info.st_mode) or f"{os.major(info.st_rdev)}:{os.minor(info.st_rdev)}" != fs.get("maj:min"):
+        raise RuntimeError(f"{source}: mount/block identity mismatch")
+    part = block(source)
+    if part.get("type") != "part" or part.get("maj:min") != fs.get("maj:min") or \
+            str(part.get("parttype", "")).lower() != ESP_TYPE or part.get("pttype") != "gpt":
+        raise RuntimeError(f"{source}: a GPT EFI System Partition is required")
+    try:
+        number = int(part["partn"])
+        guid = str(uuid.UUID(part["partuuid"]))
+    except (KeyError, ValueError, TypeError) as e:
+        raise RuntimeError(f"{source}: missing partition number or GPT UUID") from e
+    parent = part.get("pkname") or ""
+    if number < 1 or not parent.startswith("/dev/") or block(parent).get("type") != "disk":
+        raise RuntimeError(f"{source}: unsupported parent disk")
+    return parent, number, guid
+
+
+def entries(text):
+    order = []
+    found = []
+    for line in text.splitlines():
+        if line.startswith("BootOrder:"):
+            value = line.partition(":")[2].strip()
+            if value and not re.fullmatch(r"[0-9a-fA-F]{4}(?:,[0-9a-fA-F]{4})*", value):
+                raise RuntimeError("efibootmgr returned an invalid BootOrder")
+            order = [n.upper() for n in value.split(",")] if value else []
+        match = re.match(r"^Boot([0-9A-Fa-f]{4})(\*)?\s+LOCachy\s+(.+)$", line)
+        if not match or not re.match(r"(?:HD|PciRoot|Pci|VenHw|Acpi|AcpiEx)\(", match[3], re.I):
+            continue
+        device = re.search(r"HD\((\d+),GPT,([0-9A-Fa-f-]+),[^)]*\)", match[3], re.I)
+        file = re.search(r"File\(([^)]*)\)", match[3], re.I)
+        # efibootmgr/libefivar versions print either File(PATH) or /\\PATH.
+        path = file[1] if file else match[3][device.end() + 1:].strip() if device else ""
+        if device and path.startswith(("\\", "/")):
+            found.append({"number": match[1].upper(), "active": bool(match[2]),
+                          "part": int(device[1]), "guid": device[2].lower(),
+                          "loader": path.replace("/", "\\").lower()})
+    return order, found
+
+
+def register(esp, first=False):
+    disk, partition, guid = esp_target(esp)
+    if not EFI.is_dir():
+        raise RuntimeError("not booted in UEFI mode")
+    variables = mounted(EFIVARS)
+    if variables.get("fstype") != "efivarfs" or "rw" not in variables.get("options", "").split(",") or \
+            not os.access(EFIVARS, os.W_OK):
+        raise RuntimeError("EFI variables are unavailable or read-only")
+
+    def matches(item):
+        return item["part"] == partition and item["guid"] == guid and item["loader"] == LOADER.lower()
+
+    order, all_entries = entries(command(["efibootmgr", "--verbose"]))
+    exact = [item for item in all_entries if matches(item)]
+    if not exact:
+        if all_entries:
+            print("locachy-efi: other LOCachy entries point elsewhere; left untouched")
+        command(["efibootmgr", "--create-only", "--disk", disk, "--part", str(partition),
+                 "--label", LABEL, "--loader", LOADER])
+        _, after = entries(command(["efibootmgr", "--verbose"]))
+        exact = [item for item in after if matches(item)]
+        if not exact:
+            raise RuntimeError("firmware did not retain the new LOCachy entry")
+    item = next((item for item in exact if item["number"] in order), exact[0])
+    number = item["number"]
+    if not item["active"]:
+        command(["efibootmgr", "--bootnum", number, "--active"])
+    wanted = [number] + [n for n in order if n != number] if first else order if number in order else order + [number]
+    if wanted != order:
+        command(["efibootmgr", "--bootorder", ",".join(wanted)])
+    actual_order, actual = entries(command(["efibootmgr", "--verbose"]))
+    if actual_order != wanted or not any(matches(i) and i["number"] == number and i["active"] for i in actual):
+        raise RuntimeError("firmware did not retain the requested LOCachy entry/order")
+    print(f"locachy-efi: Boot{number} {LABEL}, {disk} partition {partition} {LOADER}; "
+          + ("first in BootOrder" if first else "BootOrder preserved" if number in order else "added to BootOrder"))
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--esp", default="/efi")
+    parser.add_argument("--first", action="store_true")
+    args = parser.parse_args()
+    try:
+        if os.geteuid() != 0:
+            raise RuntimeError("must run as root")
+        return register(args.esp, args.first)
+    except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as e:
+        print(f"locachy-efi: boot entry not ready: {e}; fallback EFI/BOOT/BOOTX64.EFI is retained", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -206,7 +206,7 @@ source ./PKGBUILD
         original = json.loads(config.read_text())
         for key, value in (("repository", "https://example.invalid/libinput.git"),
                            ("pkgbase", "other"), ("package", "libinput"),
-                           ("gate", "labwc-clipboard-freeze-v1")):
+                           ("gate", "labwc-clipboard-inner-edge-v2")):
             config.write_text(json.dumps(dict(original, **{key: value})))
             with self.assertRaises(u.UpstreamError):
                 self.candidate()

@@ -549,8 +549,10 @@ int main(int argc, char **argv)
     check(r.status != 0 && strstr(r.text, "CHM"), "broken.chm: OPEN fails: %s", r.text);
     close(sock);
     int status = -1;
-    waitpid(pid, &status, 0);
-    check(WIFEXITED(status) && WEXITSTATUS(status) == 0, "view-render exits cleanly (status %#x)", status);
+    pid_t got;
+    do got = waitpid(pid, &status, 0); while (got < 0 && errno == EINTR);
+    check(got == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "view-render exits cleanly (wait %ld, status %#x)", (long)got, status);
     printf("%s: %d failed\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }
@@ -567,6 +569,19 @@ for build in normal sanitize; do
         "$src/progs/view-client.c" "$src/tools/test-view-render.c" "$src/progs/view-image.c" -o "$dir/test-$build" \
         $(pkg-config --cflags --libs MagickWand) -lm
     echo "== $build build"
+    for how in exit signal; do
+        rc=0
+        "$dir/test-$build" --reap-failure "$how" >"$dir/reap-$build-$how.log" 2>&1 || rc=$?
+        # The intentional failure stays in its own log: the process, not
+        # just the log, must fail, with exactly the renderer-exit FAIL.
+        if [ "$rc" -eq 1 ] && [ "$(grep -c '^FAIL view-render .* exits cleanly' "$dir/reap-$build-$how.log")" -eq 1 ] &&
+           [ "$(grep -c '^FAIL' "$dir/reap-$build-$how.log")" -eq 1 ]; then
+            echo "PASS renderer restart propagates a previous child's $how failure ($build)"
+        else
+            echo "FAIL renderer restart did not propagate exactly one $how failure ($build, status $rc)"
+            status=1
+        fi
+    done
     "$dir/test-$build" "$dir/samples" "$dir/view-render-$build" || status=1
     # Trim Margins' content box, as Okular's imageBoundingBox finds it.
     gcc $flags -DVIEW_RENDER_TEST_PATH="\"$dir/view-render-$build\"" \

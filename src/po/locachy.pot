@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-29 08:05-0400\n"
+"POT-Creation-Date: 2026-10-29 21:44-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -484,11 +484,11 @@ msgstr ""
 msgid "Find: %s"
 msgstr ""
 
-#: progs/archive.c progs/files.c progs/packages.c
+#: progs/archive.c progs/files.c progs/packages.c progs/view.c
 msgid "Name"
 msgstr ""
 
-#: progs/archive.c progs/files.c progs/packages.c
+#: progs/archive.c progs/files.c progs/packages.c progs/view.c
 msgid "Size"
 msgstr ""
 
@@ -4892,22 +4892,22 @@ msgstr ""
 
 #: progs/home.c
 #, c-format
-msgid "open %s: accepted"
-msgstr ""
-
-#: progs/home.c
-#, c-format
-msgid "open %s: error"
-msgstr ""
-
-#: progs/home.c
-#, c-format
 msgid "opening %s..."
 msgstr ""
 
 #: progs/home.c
 #, c-format
 msgid "%s is open on %s."
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "open %s: accepted"
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "open %s: error"
 msgstr ""
 
 #: progs/installer.c
@@ -5164,6 +5164,28 @@ msgid ""
 msgstr ""
 
 #: progs/installer.c
+msgid "Secure Boot with this computer's own keys"
+msgstr ""
+
+#: progs/installer.c
+msgid "Microsoft's keys too"
+msgstr ""
+
+#: progs/installer.c
+msgid ""
+"The firmware is in setup mode: its Secure Boot keys can be this computer's "
+"own. Then, with Secure Boot on, only boot images signed here start, and the "
+"TPM opens the disk for them alone. Microsoft's keys too: Windows, Microsoft-"
+"signed boot media, and the firmware drivers some computers need."
+msgstr ""
+
+#. TRANSLATORS: %s is fwupd's Host Security ID, such as HSI:1 (v2.0.16).
+#: progs/installer.c
+#, c-format
+msgid "Host security (fwupd): %s"
+msgstr ""
+
+#: progs/installer.c
 msgid "User name"
 msgstr ""
 
@@ -5296,6 +5318,22 @@ msgstr ""
 
 #: progs/installer.c
 msgid "the filesystems mounted at /mnt and /mnt/efi"
+msgstr ""
+
+#: progs/installer.c progs/settings.c
+msgid "Secure Boot"
+msgstr ""
+
+#: progs/installer.c
+msgid "as the firmware has it"
+msgstr ""
+
+#: progs/installer.c
+msgid "this computer's own keys and Microsoft's"
+msgstr ""
+
+#: progs/installer.c
+msgid "this computer's own keys"
 msgstr ""
 
 #: progs/installer.c
@@ -6054,12 +6092,6 @@ msgstr ""
 msgid "rebuild: %s (%s -> %s)"
 msgstr ""
 
-#. TRANSLATORS: l is the l key; keep it.
-#: progs/packages.c
-#, c-format
-msgid "Details: %s (%s/%s.conf)   l: output"
-msgstr ""
-
 #. TRANSLATORS: PgUp/PgDn are key names; keep them.
 #: progs/packages.c
 msgid "PgUp/PgDn: scroll"
@@ -6549,7 +6581,11 @@ msgid "add %s to the host"
 msgstr ""
 
 #: progs/packages.c
-msgid "Package to add (repositories or the AUR):"
+msgid "Packages to add, separated by spaces (repositories or the AUR):"
+msgstr ""
+
+#: progs/packages.c
+msgid "Package names: letters, digits and @ . _ + -, at most 32."
 msgstr ""
 
 #: progs/packages.c
@@ -6646,6 +6682,23 @@ msgid "Saved; the shared display applies the layout when it is shown."
 msgstr ""
 
 #: progs/settings.c
+msgid "on, with this computer's own keys"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "setup mode (Enter: enroll this computer's keys)"
+msgstr ""
+
+#: progs/settings.c
+msgid "on, with the firmware's keys"
+msgstr ""
+
+#: progs/settings.c
+msgid "bound at the next start with Secure Boot on this computer's keys"
+msgstr ""
+
+#: progs/settings.c
 msgid "no LUKS2 disk"
 msgstr ""
 
@@ -6657,9 +6710,15 @@ msgstr ""
 msgid "TPM 1.2 disabled in BIOS"
 msgstr ""
 
+#. TRANSLATORS: Delete is the Delete key; keep it.
 #: progs/settings.c
 #, c-format
 msgid "TPM 1.2 bound (Delete: unbind)"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "TPM 2.0 bound to this computer's Secure Boot keys (Delete: unbind)"
 msgstr ""
 
 #: progs/settings.c
@@ -6675,6 +6734,15 @@ msgstr ""
 #: progs/settings.c
 #, c-format
 msgid "TPM 2.0 (Enter: bind auto-unlock)"
+msgstr ""
+
+#: progs/settings.c
+msgid "fwupd is not installed"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: fwupd's report"
 msgstr ""
 
 #: progs/settings.c
@@ -7310,6 +7378,18 @@ msgstr ""
 msgid "No key table for layout %s; nothing changed."
 msgstr ""
 
+#. TRANSLATORS: %s is a console keyboard layout, such as us.
+#: progs/settings.c
+#, c-format
+msgid ""
+"System keyboard layout: %s. Explicit keyboard layouts stay unchanged; the "
+"boot unlock takes it from the next boot image."
+msgstr ""
+
+#: progs/settings.c
+msgid "Cannot save the system keyboard layout; nothing applied."
+msgstr ""
+
 #. TRANSLATORS: the first %s is a keyboard's name, the second a keyboard layout's (us).
 #: progs/settings.c
 #, c-format
@@ -7330,6 +7410,10 @@ msgstr ""
 msgid ""
 "Layout of %.60s: type to filter   Up/Down/PgUp/PgDn   Enter: choose   Esc: "
 "back"
+msgstr ""
+
+#: progs/settings.c
+msgid "System keyboard layout"
 msgstr ""
 
 #: progs/settings.c
@@ -7577,6 +7661,10 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Disk Encryption"
+msgstr ""
+
+#: progs/settings.c
+msgid "Host Security"
 msgstr ""
 
 #: progs/settings.c
@@ -8087,6 +8175,10 @@ msgstr ""
 
 #: progs/settings.c
 msgid "TPM disk auto-unlock"
+msgstr ""
+
+#: progs/settings.c
+msgid "Host security (fwupd)"
 msgstr ""
 
 #: progs/settings.c
@@ -8621,6 +8713,18 @@ msgstr ""
 msgid "Enter: bind LUKS2 auto-unlock to TPM (1.2 or 2.0)   Delete: unbind"
 msgstr ""
 
+#. TRANSLATORS: Enter and M are key names; keep them.
+#: progs/settings.c
+msgid ""
+"Enter: this computer's own Secure Boot keys into the firmware (setup mode)   "
+"M: Microsoft's too (Windows, Microsoft-signed boot media)"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: fwupd's report (fwupdmgr security), with the fixes it offers"
+msgstr ""
+
 #: progs/settings.c
 msgid "No controllable backlight on this display."
 msgstr ""
@@ -8839,6 +8943,18 @@ msgstr ""
 #: progs/settings.c
 #, c-format
 msgid "%s done."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Secure Boot keys enrolled. At the next start the passphrase is asked once; "
+"the TPM is bound to the new keys then."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Secure Boot keys enrolled; turn Secure Boot on in the firmware if it does "
+"not come on by itself."
 msgstr ""
 
 #. TRANSLATORS: Delete is the Delete key; keep it.
@@ -9841,6 +9957,10 @@ msgid "Thumbs"
 msgstr ""
 
 #: progs/view.c
+msgid "Information"
+msgstr ""
+
+#: progs/view.c
 msgid "No bookmarks"
 msgstr ""
 
@@ -9854,6 +9974,15 @@ msgstr ""
 
 #: progs/view.c
 msgid "Show Sidebar"
+msgstr ""
+
+#: progs/view.c
+msgid "Browse"
+msgstr ""
+
+#: progs/view.c
+msgctxt "mode"
+msgid "View"
 msgstr ""
 
 #. TRANSLATORS: %.255s is the document title or file name.
@@ -10079,10 +10208,6 @@ msgid "Rename Bookmark..."
 msgstr ""
 
 #: progs/view.c
-msgid "Browse"
-msgstr ""
-
-#: progs/view.c
 msgid "Zoom"
 msgstr ""
 
@@ -10100,6 +10225,14 @@ msgstr ""
 
 #: progs/view.c
 msgid "Magnifier"
+msgstr ""
+
+#: progs/view.c
+msgid "Sort By..."
+msgstr ""
+
+#: progs/view.c
+msgid "Information Panel"
 msgstr ""
 
 #: progs/view.c
@@ -10392,4 +10525,137 @@ msgstr ""
 
 #: progs/view.c
 msgid "Click to see the magnified view."
+msgstr ""
+
+#: progs/view.c
+msgid "Date"
+msgstr ""
+
+#: progs/view.c
+msgid "Descending"
+msgstr ""
+
+#. TRANSLATORS: Gwenview's status bar; %d is the number of images.
+#: progs/view.c
+#, c-format
+msgid "%d image"
+msgid_plural "%d images"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/view.c
+msgid "Date Modified"
+msgstr ""
+
+#: progs/view.c
+msgid "File Size"
+msgstr ""
+
+#: progs/view.c
+msgid "Date and Time (original)"
+msgstr ""
+
+#: progs/view.c
+msgid "Image Size"
+msgstr ""
+
+#: progs/view.c
+msgid "Date and Time"
+msgstr ""
+
+#: progs/view.c
+msgid "Manufacturer"
+msgstr ""
+
+#: progs/view.c
+msgid "Exposure Time"
+msgstr ""
+
+#: progs/view.c
+msgid "Model"
+msgstr ""
+
+#: progs/view.c
+msgid "FNumber"
+msgstr ""
+
+#: progs/view.c
+msgid "ISO Speed Ratings"
+msgstr ""
+
+#: progs/view.c
+msgid "Flash"
+msgstr ""
+
+#: progs/view.c
+msgid "Focal Length"
+msgstr ""
+
+#: progs/view.c
+#, c-format
+msgid "%.0f byte"
+msgid_plural "%.0f bytes"
+msgstr[0] ""
+msgstr[1] ""
+
+#. TRANSLATORS: file sizes, KDE's binary units.
+#: progs/view.c
+#, c-format
+msgid "%.1f KiB"
+msgstr ""
+
+#: progs/view.c
+#, c-format
+msgid "%.1f MiB"
+msgstr ""
+
+#: progs/view.c
+#, c-format
+msgid "%.1f GiB"
+msgstr ""
+
+#. TRANSLATORS: an image's size in pixels and its megapixels.
+#: progs/view.c
+#, c-format
+msgid "%dx%d (%.1fMP)"
+msgstr ""
+
+#: progs/view.c
+msgid "No flash function"
+msgstr ""
+
+#: progs/view.c
+msgid "Fired"
+msgstr ""
+
+#: progs/view.c
+msgid "No flash"
+msgstr ""
+
+#: progs/view.c
+msgid "auto"
+msgstr ""
+
+#: progs/view.c
+msgid "compulsory"
+msgstr ""
+
+#: progs/view.c
+msgid "red-eye reduction"
+msgstr ""
+
+#: progs/view.c
+msgid "return light detected"
+msgstr ""
+
+#: progs/view.c
+msgid "return light not detected"
+msgstr ""
+
+#: progs/view.c
+msgid "Show fewer details"
+msgstr ""
+
+#: progs/view.c
+msgid "Show more details..."
 msgstr ""

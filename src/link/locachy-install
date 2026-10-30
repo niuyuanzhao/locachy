@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Build a local LOCachy target from the generic live installer.
 The caller prepares and mounts empty ext4/FAT32 filesystems. No partitioning,
-formatting, NVRAM changes or reboot is performed here.
+formatting or reboot is performed here. After copying the boot image, the
+installer registers its LOCachy UEFI entry; fallback stays if that fails.
 An installation that stops (a failure, or source signing keys for a person to
 trust) can be continued where it stopped, on its target as it is:
 --resume, in the same live session (RESUME_RECORD).
@@ -107,14 +108,20 @@ def valid_cpu(name):
 
 # What this machine's TPM can do for the disk (locachy-tpm status), and so
 # what to choose with encryption on: (usable, recommended, why). TPM
-# auto-unlock opens the disk at power-on with nothing typed; as it is bound
-# (TPM 1.2: PCR 0, TPM 2.0: PCRs 0+7, and LOCachy's boot image unsigned) it
-# guards a disk taken out of the machine only.
-def tpm_advice():
+# auto-unlock opens the disk at power-on with nothing typed; bound as
+# without own Secure Boot keys (TPM 1.2: PCR 0, TPM 2.0: PCRs 0+7, the boot
+# image unsigned) it guards a disk taken out of the machine only. With the
+# firmware in setup mode, this machine's own Secure Boot keys can be enrolled
+# (--secure-boot): TPM 2.0 is then bound to them and to the signed images.
+def tpm_status():
     try:
-        st = json.loads(output([sys.executable, "-I", str(SOURCE / "link/locachy-tpm"), "status", "--json"]))
+        return json.loads(output([sys.executable, "-I", str(SOURCE / "link/locachy-tpm"), "status", "--json"]))
     except (OSError, ValueError, subprocess.SubprocessError):
-        st = {}
+        return {}
+
+
+def tpm_advice(st=None):
+    st = tpm_status() if st is None else st
     ver, active, sb = st.get("tpm_version", 0), st.get("tpm_active", False), st.get("secure_boot")
     if not ver:
         return False, "passphrase", "no TPM: a passphrase"
@@ -123,9 +130,33 @@ def tpm_advice():
     if ver == 1:
         return True, "passphrase", ("TPM 1.2: a passphrase recommended (TPM auto-unlock binds the firmware only, "
                                     "with no PIN: it guards a removed disk only)")
+    if st.get("setup_mode"):
+        return True, "tpm", ("TPM 2.0, the firmware in setup mode: with this computer's own Secure Boot keys "
+                             "enrolled, TPM auto-unlock opens the disk only for LOCachy's signed boot images "
+                             "with Secure Boot on (from the first such start, the passphrase typed once then), "
+                             "coming back from hibernation too")
     return True, "passphrase", ("TPM 2.0: a passphrase recommended (TPM auto-unlock binds PCRs 0+7"
                                 + (", Secure Boot off" if not sb else "") + ", the boot image unsigned: "
                                 "it guards a removed disk only)")
+
+
+# fwupd's Host Security ID report (fwupdmgr security): the HSI level and each
+# check, as fwupd words them; None without fwupd.
+def host_security():
+    if not shutil.which("fwupdmgr"):
+        return None
+    try:
+        p = subprocess.run(["fwupdmgr", "security", "--no-unreported-check", "--no-security-fix",
+                            "--no-reboot-check"], capture_output=True, text=True, timeout=90,
+                           stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = re.sub(r"\x1b\[[0-9;]*m", "", p.stdout)
+    found = re.search(r"HSI:\S+(?: \([^)]*\))?", text)
+    if p.returncode != 0 or not found:
+        return None
+    checks = [line.strip() for line in text.splitlines() if line.strip()[:1] in ("\u2714", "\u2718")]
+    return {"id": found.group(0), "checks": checks}
 
 
 REPO_SECTIONS = ("core", "extra", "multilib")
@@ -563,6 +594,8 @@ def check_choices(args):
         raise ValueError("--hibernate-after: not a number of seconds")
     if args.tpm and not args.encrypt:
         raise ValueError("--tpm needs --encrypt: the TPM unlocks an encrypted disk")
+    if args.secure_boot_microsoft and not args.secure_boot:
+        raise ValueError("--secure-boot-microsoft goes with --secure-boot")
     for option, path in (("--luks-passphrase-file", args.luks_passphrase_file), ("--password-file", args.password_file)):
         if path:
             secret = read_secret(path)
@@ -584,7 +617,8 @@ def describe(parser):
         memory = int(re.search(r"^MemTotal:\s+(\d+) kB", Path("/proc/meminfo").read_text(), re.M).group(1)) * 1024
     except (OSError, AttributeError):
         memory = 0
-    usable, _, advice = tpm_advice()
+    tpm = tpm_status()
+    usable, _, advice = tpm_advice(tpm)
     return {
         "defaults": {"user": default("user"), "hostname": default("hostname"), "keymap": default("keymap"),
                      "timezone": default("timezone"), "swap_gib": default("swap_gib"), "level": default("level"),
@@ -600,7 +634,9 @@ def describe(parser):
         "machines": [{"name": n, "description": d} for n, d in machine_profiles()],
         "repo_sections": list(REPO_SECTIONS),
         "keymaps": keymaps(), "timezones": timezones(),
-        "tpm": {"usable": usable, "advice": advice},
+        "tpm": {"usable": usable, "advice": advice, "version": tpm.get("tpm_version", 0),
+                "setup_mode": bool(tpm.get("setup_mode"))},
+        "host_security": host_security(),
         "network_profiles": len(live_nm_connections()),
         "memory_bytes": memory, "esp_bytes": ESP_BYTES, "min_root_bytes": MIN_ROOT_BYTES,
         "disks": disks(),
@@ -639,11 +675,8 @@ def apply_customizations(args, root):
     manifest_changed = False
     manifest = root / "etc/locachy/packages"
     if manifest.is_file():
-        existing = set(
-            line.split("#", 1)[0].strip()
-            for line in manifest.read_text().splitlines()
-            if line.split("#", 1)[0].strip()
-        )
+        existing = {name for line in manifest.read_text().splitlines()
+                    for name in line.split("#", 1)[0].split()}
         added = []
         if getattr(args, "encrypt", False) and "cryptsetup" not in existing:
             added.append("cryptsetup")
@@ -884,14 +917,12 @@ def install(args, root, esp, root_fs, esp_fs, level):
         if apply_customizations(args, root):
             run(["arch-chroot", str(root), "/usr/local/bin/locachy-pkg", "sync", "--first-install"])
         run(["arch-chroot", str(root), "sh", "/usr/local/src/locachy/make.sh", level, cpu])
-        if getattr(args, "encrypt", False) and getattr(args, "tpm", False):
-            if getattr(args, "luks_passphrase_file", None):
-                pw = read_secret(args.luks_passphrase_file) + "\n"
-                run(["arch-chroot", str(root), "/usr/local/bin/locachy-tpm", "enroll", "--passphrase-stdin"],
-                    input=pw, text=True)
-            else:
-                print("Bind LUKS2 disk auto-unlock to this computer's TPM chip:", flush=True)
-                run(["arch-chroot", str(root), "/usr/local/bin/locachy-tpm", "enroll"])
+        secure_boot = getattr(args, "secure_boot", False)
+        if getattr(args, "encrypt", False) and getattr(args, "tpm", False) and not secure_boot:
+            tpm_install(args, root)
+        if secure_boot:
+            # This machine's keys made, so that the image below is signed.
+            run(["arch-chroot", str(root), "/usr/local/bin/locachy-tpm", "secure-boot"])
         boot_cmd = ["arch-chroot", str(root), "/usr/local/bin/locachy-boot"]
         if getattr(args, "encrypt", False):
             boot_cmd.append("--luks")
@@ -899,14 +930,14 @@ def install(args, root, esp, root_fs, esp_fs, level):
         run(["arch-chroot", str(root), "/usr/local/bin/locachy-pkg", "status"])
         (root / "etc/resolv.conf").unlink(missing_ok=True)
         (root / "etc/resolv.conf").touch()
-        # Recheck block identities before the first boot-file write. No NVRAM
-        # entry is needed: use the standard removable-media fallback path.
+        # Recheck block identities before the first boot-file write or UEFI
+        # entry registration; the removable-media path remains a recovery path.
         if filesystem(saved)["maj:min"] != esp_fs["maj:min"] or filesystem(root)["maj:min"] != root_fs["maj:min"]:
             raise RuntimeError("Target mount identities changed during installation")
         if any(saved.iterdir()) and not (getattr(args, "resume", False) and esp_ours_only(saved)):
             raise RuntimeError("The target ESP changed during the build; left untouched")
-        # The unified kernel image (locachy-boot): the firmware starts it from
-        # the fallback path; EFI/locachy keeps it for locachy-boot's updates.
+        # The unified kernel image (locachy-boot): the formal UEFI entry uses
+        # EFI/locachy; EFI/BOOT remains the standard fallback.
         image = root / "usr/local/lib/locachy/boot/locachy.efi"
         if not image.is_file():
             raise RuntimeError("The completed target has no boot image (locachy.efi)")
@@ -917,6 +948,15 @@ def install(args, root, esp, root_fs, esp_fs, level):
         fallback.mkdir(exist_ok=True)
         shutil.copyfile(image, fallback / "BOOTX64.EFI")
         os.sync()
+        if secure_boot:
+            secure_boot_install(args, root, saved)
+        # Run the installed source's helper in the live system: saved is the
+        # verified ESP mount, hidden from target builds and package scripts.
+        registered = run([sys.executable, "-I", str(root / "usr/local/bin/locachy-efi"),
+                          "--esp", str(saved), "--first"], check=False)
+        if registered.returncode:
+            print("UEFI entry was not registered (the reason above). The installed image and fallback remain; "
+                  "locachy-boot --register-only repairs the entry on the installed system.", flush=True)
         state = root / "var/lib/locachy/install.json"
         repo, branch, _ = update_source(args)
         state.write_text(json.dumps({"cpu_level": level, "cpu": cpu,
@@ -938,6 +978,55 @@ def install(args, root, esp, root_fs, esp_fs, level):
     finally:
         run(["umount", str(saved)])
         saved.rmdir()
+
+
+def tpm_install(args, root):
+    """The disks bound to the TPM now, as locachy-tpm enroll binds them
+    without this machine's own Secure Boot keys (TPM 2.0: PCRs 0+7, which
+    read here as at the first start while Secure Boot stays off)."""
+    tool = ["arch-chroot", str(root), "/usr/local/bin/locachy-tpm", "enroll"]
+    if getattr(args, "luks_passphrase_file", None):
+        run(tool + ["--passphrase-stdin"], input=read_secret(args.luks_passphrase_file) + "\n", text=True)
+    else:
+        print("Bind LUKS2 disk auto-unlock to this computer's TPM chip:", flush=True)
+        run(tool)
+
+
+def luks_passphrase(args):
+    if getattr(args, "luks_passphrase_file", None):
+        return read_secret(args.luks_passphrase_file)
+    return getpass.getpass("The LUKS2 passphrase, to give the TPM a key slot: ")
+
+
+def secure_boot_install(args, root, esp):
+    """This machine's Secure Boot keys into the firmware (setup mode), once
+    the image they signed is on the ESP (mounted at the root's /efi for it,
+    as on the installed system); with TPM auto-unlock, the disks bound at the
+    first start with Secure Boot on (PCR 7 is not that of this live system):
+    the passphrase is typed once then. When the keys do not go in, the disks
+    are bound as without them."""
+    tool = ["arch-chroot", str(root), "/usr/local/bin/locachy-tpm"]
+    target = root / "efi"
+    target.mkdir(exist_ok=True)
+    run(["mount", "--bind", str(esp), str(target)])
+    try:
+        enroll = run(tool + ["secure-boot", "--enroll"] + (["--microsoft"] if args.secure_boot_microsoft else []),
+                     check=False)
+        try:
+            st = json.loads(output(tool + ["status", "--json"]))
+        except (OSError, ValueError, subprocess.SubprocessError):
+            st = {}
+        enrolled = enroll.returncode == 0 or bool(st.get("own_keys_in_db"))
+        if not enrolled:
+            print("Secure Boot: this computer's keys were not enrolled (the reason above); the boot image is "
+                  "signed with them, and settings' Secure Boot row enrolls them later", flush=True)
+        if getattr(args, "encrypt", False) and getattr(args, "tpm", False):
+            if enrolled and st.get("tpm_version") == 2:
+                run(tool + ["prepare", "--passphrase-stdin"], input=luks_passphrase(args) + "\n", text=True)
+            else:
+                tpm_install(args, root)
+    finally:
+        run(["umount", str(target)])
 
 
 def interactive_wizard(args):
@@ -1161,6 +1250,12 @@ def make_parser():
     parser.add_argument("--encrypt", action="store_true", help="encrypt root (and swap) with LUKS2")
     parser.add_argument("--tpm", action="store_true", help="bind LUKS2 auto-unlock to TPM 2.0 or TPM 1.2 (unlocks into boot lock screen)")
     parser.add_argument("--luks-passphrase-file", help="file holding the LUKS2 passphrase")
+    parser.add_argument("--secure-boot", action="store_true",
+                        help="this computer's own Secure Boot keys (sbctl) into the firmware, which must be in "
+                             "setup mode; the boot image signed with them, and TPM 2.0 auto-unlock bound to them")
+    parser.add_argument("--secure-boot-microsoft", action="store_true",
+                        help="with --secure-boot: Microsoft's keys too (Windows, Microsoft-signed boot media, "
+                             "firmware drivers some machines need)")
     parser.add_argument("--password-file", help="file holding the installed user's password (else passwd asks)")
     parser.add_argument("--level", default="auto", choices=("auto", "x86-64", "x86-64-v1", "x86-64-v2", "x86-64-v3", "x86-64-v4"),
                         help="the packages' CPU level (the repositories stacked for it)")
@@ -1333,6 +1428,10 @@ def main():
                 fwd.append("--encrypt")
             if args.tpm:
                 fwd.append("--tpm")
+            if args.secure_boot:
+                fwd.append("--secure-boot")
+            if args.secure_boot_microsoft:
+                fwd.append("--secure-boot-microsoft")
             if args.hibernate_after is not None:
                 fwd += ["--hibernate-after", str(args.hibernate_after)]
             if args.work_dir:

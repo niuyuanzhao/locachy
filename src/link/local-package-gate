@@ -9,7 +9,7 @@ root=${2:?}
 source=${3:?}
 out=${4:?}
 case "$name" in
-labwc-locachy|libinput|libinput-tools|libmupdf) ;;
+labwc-locachy|libinput|libinput-tools|libmupdf|libpaper) ;;
 *) echo "local-package-gate: no test contract for $name" >&2; exit 1 ;;
 esac
 for path in "$root" "$source" "$out"; do
@@ -83,6 +83,7 @@ exec unshare --mount --propagation private --pid --fork --kill-child --mount-pro
         run_logged restricted.log timeout 60 bash "$src/tools/test-clipboard-restricted.sh"
         run_logged guard.log timeout 180 bash "$src/tools/test-clipboard-guard.sh" /usr/bin/labwc
         run_logged cgroup.log timeout 130 bash "$src/tools/test-clipboard-cgroup.sh" /usr/bin/labwc
-        python3 -B -c "import json; json.dump({\"name\":\"labwc-locachy\",\"id\":\"labwc-clipboard-freeze-v1\",\"passed\":True,\"tests\":[\"clipboard\",\"restricted\",\"guard\",\"cgroup\"]},open(\"$result/gate.json\",\"w\"))"
+        run_logged inner-edge.log timeout 180 bash "$src/tools/test-snapping.sh" "$out/inner-edge" --inner-edge
+        python3 -B -c "import json; json.dump({\"name\":\"labwc-locachy\",\"id\":\"labwc-clipboard-inner-edge-v2\",\"passed\":True,\"tests\":[\"clipboard\",\"restricted\",\"guard\",\"cgroup\",\"inner-edge\"]},open(\"$result/gate.json\",\"w\"))"
         '\''
 '

@@ -34,8 +34,10 @@ enum view_op {
                      * document. Reply: pages, flags, text "FORMAT\tTITLE" (FORMAT as Okular
                      * names it: PDF, XPS, EPUB, Mobipocket, FictionBook, Markdown, Plain text,
                      * Comic book, DjVu, PostScript, DVI, Fax, Image, TIFF, OpenDocument text,
-                     * CHM; camera RAW is an Image); status EACCES and
-                     * flags VIEW_NEEDS_PASSWORD when a password is asked for. */
+                     * CHM; camera RAW is an Image); a comic book's memfd: its pages' names
+                     * (paths in it), in order, each ending in a NUL; mode: VIEW_SORT_*,
+                     * VIEW_GALLERY. Status EACCES and flags VIEW_NEEDS_PASSWORD when a
+                     * password is asked for. */
     VIEW_AUTH,      /* text: the password. Reply as OPEN's; EACCES: wrong. */
     VIEW_PAGE,      /* page. Reply: pw, ph (its size in points), flags VIEW_HAS_TEXT if it has. */
     VIEW_RENDER,    /* page at zoom pixels a point, rotate (0, 90, 180, 270 clockwise); x, y, w,
@@ -99,6 +101,14 @@ enum view_op {
                         * of the page's start as a decimal number: it survives a new
                         * layout and a reopening. */
     VIEW_FIND_MARK,    /* text: a VIEW_MARK. Reply: page, where it is in this layout. */
+    VIEW_META,         /* page of a comic book, or of an image (format Image or TIFF): its
+                        * picture's information, as Gwenview's Information panel has it.
+                        * Reply: memfd: "KEY\tVALUE\n" lines, what is known: General's
+                        * Name, File Size (bytes), Date Modified, Image Size (WxH), then
+                        * Exiv2's keys Exif.Photo.DateTimeOriginal, Exif.Image.DateTime
+                        * (dates "YYYY-MM-DD HH:MM:SS"), Exif.Image.Make, Exif.Image.Model,
+                        * Exif.Photo.ExposureTime, FNumber, ISOSpeedRatings, FocalLength,
+                        * Flash (its number). */
 };
 
 /* VIEW_PDF_*'s reply flags */
@@ -147,6 +157,16 @@ enum view_sig_status {
 };
 
 enum { VIEW_SELECT_CHARS, VIEW_SELECT_WORDS, VIEW_SELECT_LINES };
+
+/* OPEN's mode, for a comic book (a folder or an archive of images): the
+ * pages' order, Gwenview's View > Sort By, and a folder as Gwenview shows
+ * it (its own images, not its folders'). */
+#define VIEW_SORT_NAME       0   /* the names' natural order (Okular's; a gallery's KIO's) */
+#define VIEW_SORT_DATE       1   /* when taken (EXIF, Gwenview's tags), else the file's time */
+#define VIEW_SORT_SIZE       2   /* the file's size */
+#define VIEW_SORT_MASK     0xF
+#define VIEW_SORT_DESCENDING 0x10
+#define VIEW_GALLERY       0x20
 
 /* OPEN's and PAGE's flags */
 #define VIEW_REFLOWABLE      1u /* laid out to the screen: LAYOUT applies */

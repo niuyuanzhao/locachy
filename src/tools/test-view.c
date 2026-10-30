@@ -2550,6 +2550,189 @@ static void pick_out_dir(void)
     pick_ok = 1;
 }
 
+
+/* Gwenview's Browse mode (make-view-samples.c gallery: a.jpg B.jpg c.png
+ * d.dng e.png, the folder sub and the archive pack.cbz). */
+static int red_px(uint32_t c)
+{
+    return (c >> 16 & 0xFF) > 0x90 && (c >> 8 & 0xFF) < 0x50 && (c & 0xFF) < 0x50;
+}
+
+static int blue_px(uint32_t c)
+{
+    return (c >> 16 & 0xFF) < 0x50 && (c >> 8 & 0xFF) < 0x50 && (c & 0xFF) > 0x90;
+}
+
+/* The screen's pixel at (fx, fy) of item k's thumbnail. */
+static uint32_t gal_pixel(int k, double fx, double fy)
+{
+    int X, Y, cell_w, cell_h, bw, bh, w, h;
+    gal_at(k, &X, &Y);
+    gal_cell(&cell_w, &cell_h, &bw, &bh);
+    gal_zoom(k - gal.nitem, &w, &h);
+    int tx = X + (cell_w - bw) / 2 + (bw - w) / 2, ty = Y + col_margin + bh - h;
+    return pic[ty + (int)(fy * h)][tx + (int)(fx * w)];
+}
+
+static const char *gal_selected(void)
+{
+    return gal.sel < gal.nitem ? gal.item[gal.sel].name : gal.name[gal.sel - gal.nitem];
+}
+
+static void browse_opened(void)
+{
+    assert(gal.on && gal.folder && doc.open && doc.pages == 5 && gal.nitem == 2 && side_px == 0);
+    assert(!strcmp(gal.item[0].name, "pack.cbz") && gal.item[0].archive && !strcmp(gal.item[1].name, "sub") && !gal.item[1].archive);
+    assert(!strcmp(gal.name[0], "a.jpg") && !strcmp(gal.name[1], "B.jpg") && !strcmp(gal.name[3], "d.dng"));
+    assert(gal.sel == 2 && settings.thumbnail_size == 128);
+    assert(on_screen("a.jpg") && on_screen("pack.cbz") && on_screen("sub") && on_screen("5 images") && on_screen("128 x 128"));
+    assert(on_screen(" Browse ") && on_screen(" View "));
+    assert(red_px(gal_pixel(2, 0.8, 0.8)) && blue_px(gal_pixel(5, 0.75, 0.5)) && red_px(gal_pixel(5, 0.25, 0.5)));
+    printf("PASS Browse mode (a folder): the grid of its images by name, the folder and the archive first, the first "
+           "image selected, names, \"5 images\", \"128 x 128\", the JPEG's and the DNG's thumbnails\n");
+}
+
+static void browse_right(void)
+{
+    assert(gal.on && gal.sel == 3);
+    printf("PASS Browse: Right selects the next image\n");
+}
+
+static void viewed_b(void)
+{
+    assert(!gal.on && current_page() == 1 && side_px > 0 && v.mode == VL_FIT_PAGE);
+    printf("PASS Enter: View mode at B.jpg, the page view (fit, Gwenview's Autofit), the sidebar back\n");
+}
+
+static void browsed_back(void)
+{
+    assert(gal.on && gal.sel == 3 && side_px == 0);
+    printf("PASS Esc: back to Browse, B.jpg selected\n");
+}
+
+static void double_clicked(void)
+{
+    assert(!gal.on && current_page() == 2);
+    printf("PASS a double click on c.png: View mode at it\n");
+}
+
+static void size_wheel(void)
+{
+    assert(gal.on && settings.thumbnail_size == 132 && on_screen("132 x 132"));
+    printf("PASS Ctrl+wheel: thumbnails 4 pixels larger (132)\n");
+}
+
+static void size_larger(void)
+{
+    assert(settings.thumbnail_size == 142);
+    printf("PASS the slider's +: 10 larger (142)\n");
+}
+
+static void size_smaller(void)
+{
+    assert(settings.thumbnail_size == 132);
+    printf("PASS the slider's -: 10 smaller (132)\n");
+}
+
+static void sorted_by_date(void)
+{
+    assert(gal.on && settings.sort == VIEW_SORT_DATE && doc.pages == 5);
+    assert(!strcmp(gal.name[0], "B.jpg") && !strcmp(gal.name[1], "c.png") && !strcmp(gal.name[2], "a.jpg") &&
+           !strcmp(gal.name[3], "d.dng") && !strcmp(gal.name[4], "e.png"));
+    assert(!strcmp(gal_selected(), "c.png"));
+    printf("PASS View > Sort By > Date: B.jpg (EXIF 2019), c.png (its file, 2020), a.jpg, d.dng, e.png; c.png still selected\n");
+}
+
+static void raw_viewed(void)
+{
+    int X, Y;
+    assert(!gal.on && current_page() == 3);
+    spot(3, doc.pw[3] / 4, doc.ph[3] / 2, &X, &Y);
+    assert(red_px(pic[Y][X]));
+    spot(3, doc.pw[3] * 3 / 4, doc.ph[3] / 2, &X, &Y);
+    assert(blue_px(pic[Y][X]));
+    printf("PASS the DNG in View mode: LibRaw's picture, red and blue\n");
+}
+
+static void info_shown(void)
+{
+    assert(settings.sidebar && ui.tab == TAB_INFO && gal.info && gal.info_page == 3);
+    assert(strstr(gal.info, "Name\td.dng\n") && strstr(gal.info, "Exif.Image.Make\tView\n") && on_screen("Image Size"));
+    assert(!on_screen("Manufactur"));
+    printf("PASS F4: the Information panel, Gwenview's preferred keys (Name, Image Size)\n");
+}
+
+static void info_more(void)
+{
+    assert(gal.info_more && on_screen("Manufactur"));
+    printf("PASS Show more details: every key (Manufacturer ...)\n");
+}
+
+static void up_to_browse(void)
+{
+    assert(gal.on && !strcmp(gal_selected(), "d.dng"));
+    printf("PASS Alt+Up in View mode: Browse, d.dng selected\n");
+}
+
+static void up_to_parent(void)
+{
+    char real[PATH_MAX];
+    assert(realpath(samples, real) && gal.on && gal.folder && !strcmp(gal.dir, real));
+    assert(gal.sel < gal.nitem && !strcmp(gal_selected(), "gallery"));
+    printf("PASS Alt+Up in Browse: the parent folder, gallery selected\n");
+}
+
+static void back_in(void)
+{
+    assert(gal.on && gal.folder && strstr(gal.dir, "/gallery") && doc.pages == 5 && gal.sel == 2);
+    printf("PASS Enter on a folder: it is browsed, its first image selected\n");
+}
+
+static void archive_browsed(void)
+{
+    assert(gal.on && !gal.folder && !strcmp(doc.format, "Comic book") && doc.pages == 2 && !strcmp(gal.name[1], "p2.dng"));
+    printf("PASS Enter on an archive: its pages browsed (a PNG and a DNG)\n");
+}
+
+static void archive_up(void)
+{
+    assert(gal.on && gal.folder && !strcmp(gal_selected(), "pack.cbz"));
+    printf("PASS Alt+Up from the archive: its folder, the archive selected\n");
+}
+
+static void sort_name_back(void)
+{
+    assert(settings.sort == VIEW_SORT_NAME && !strcmp(gal.name[0], "a.jpg"));
+    printf("PASS Sort By > Name again\n");
+}
+
+static void years_browsed(void)
+{
+    assert(gal.on && gal.folder && gal.empty && !doc.open && gal.nitem == 1 && !strcmp(gal.item[0].name, "2024"));
+    assert(on_screen("0 images") && on_screen("2024"));
+    printf("PASS a folder of folders only: Browse lists them, \"0 images\"\n");
+}
+
+static void year_in(void)
+{
+    assert(gal.on && gal.folder && doc.open && doc.pages == 1 && !strcmp(gal.name[0], "x.png") && gal.sel == 0);
+    printf("PASS Enter on its folder: browsed, its image selected\n");
+}
+
+static void year_up(void)
+{
+    assert(gal.on && gal.empty && gal.sel == 0 && !strcmp(gal_selected(), "2024"));
+    printf("PASS Alt+Up: back to the folder of folders, 2024 selected\n");
+}
+
+static void image_escaped(void)
+{
+    char real[PATH_MAX];
+    assert(realpath(samples, real) && gal.on && gal.folder && !strcmp(gal.dir, real) && doc.open);
+    assert(gal.sel >= gal.nitem && !strcmp(gal_selected(), "sample.png"));
+    printf("PASS an image by itself: Esc browses its folder, it selected\n");
+}
+
 int main(int argc, char **argv)
 {
     assert((argc == 3 || argc == 4) && geteuid() == 0);
@@ -3136,6 +3319,36 @@ int main(int argc, char **argv)
     idle(); check(panel_start); key(K_DOWN, 0); key('\n', 0); check(panel_down); key(K_UP, 0); key('\n', 0); check(panel_up);
     key(K_DEL, 0); check(panel_deleted); downs(1); key('\n', 0); check(panel_removed);
     run("sample.pdf: the bookmarks panel", sample("sample.pdf"));
+
+    /* Gwenview's Browse and View modes. The grid at 128: cells of 144 by
+     * 128 pixels from (0, 40), seven a row; the status bar's - and + at
+     * columns 111 and 125 of its row 46 for "132 x 132". */
+    idle(); check(browse_opened);
+    key(K_RIGHT, 0); check(browse_right);
+    key('\n', 0); idle(); check(viewed_b);
+    key(27, 0); check(browsed_back);
+    pointer_at(4 * 144 + 72, 104, BTN_LEFT, 1, 2, 0, 0); pointer_at(4 * 144 + 72, 104, BTN_LEFT, 0, 0, 0, 0); idle();
+    check(double_clicked);
+    key(27, 0);
+    pointer_at(500, 200, 0, 0, 0, 1, KEYS_CTRL); idle(); check(size_wheel);
+    pointer_at(125 * 8 + 4, TOP + 46 * 16 + 8, BTN_LEFT, 1, 1, 0, 0); check(size_larger);
+    pointer_at(111 * 8 + 4, TOP + 46 * 16 + 8, BTN_LEFT, 1, 1, 0, 0); check(size_smaller);
+    key('v', KEYS_ALT); downs(19); key('\n', 0); downs(1); key('\n', 0); idle(); check(sorted_by_date);
+    key(K_RIGHT, 0); key(K_RIGHT, 0); key('\n', 0); idle(); check(raw_viewed);
+    key(K_F1 + 3, 0); idle(); check(info_shown);
+    key('\t', 0); key('\n', 0); check(info_more); key(27, 0);
+    key(K_UP, KEYS_ALT); check(up_to_browse);
+    key(K_UP, KEYS_ALT); idle(); check(up_to_parent);
+    key('\n', 0); idle(); check(back_in);
+    key(K_BOL, 0); key('\n', 0); idle(); check(archive_browsed);
+    key(K_UP, KEYS_ALT); idle(); check(archive_up);
+    key('v', KEYS_ALT); downs(19); key('\n', 0); key('\n', 0); idle(); check(sort_name_back);
+    run("gallery: Browse and View modes, Sort By Date, a RAW page, the Information panel, folders and an archive",
+        sample("gallery"));
+    idle(); key(27, 0); idle(); check(image_escaped);
+    run("sample.png: Esc browses its folder", sample("sample.png"));
+    idle(); check(years_browsed); key('\n', 0); idle(); check(year_in); key(K_UP, KEYS_ALT); idle(); check(year_up);
+    run("years: a folder of folders only", sample("years"));
 
 #ifdef CONFIG_IME
     char ime_doc[PATH_MAX];

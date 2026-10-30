@@ -833,7 +833,7 @@ static void draw_lower(int top, int height)
         int most = details_total > details_rows ? details_total - details_rows : 0;
         details_from = details_from < 0 ? 0 : details_from > most ? most : details_from;
         /* TRANSLATORS: l is the l key; keep it. */
-        snprintf(line, sizeof line, _("Details: %s (%s/%s.conf)   l: output"), c->name, CONF_DIR, c->name);
+        snprintf(line, sizeof line, _("Details: %s   l: output"), c->name);
         if (most > 0) { /* more than the pane holds: which lines, and how to see the rest */
             char where[64];
             size_t len = strlen(line);
@@ -1035,6 +1035,8 @@ static int prompt(const char *label, char *text, size_t size)
             return 0;
         } else if (key == '\n') {
             return 1;
+        } else if (key == K_SHOWN) {
+            draw();
         } else {
             edit_line_key(key, text, size, &pos);
         }
@@ -1045,16 +1047,26 @@ static int yes(const char *question)
 {
     char line[512];
     snprintf(line, sizeof line, "%s [y/N] ", question);
-    int row = screen_rows() - 1;
-    screen_fill(0, row, screen_cols(), 1, BG);
-    screen_text(1, row, line, ACCENT, BG);
-    /* TRANSLATORS: Y is the Y key; keep "Y: ". */
-    int c = ui_button(2 + ui_cells(line), row, _("Y: yes"), HIT_KEY + 'y');
-    /* TRANSLATORS: N is the N key; keep "N: ". */
-    ui_button(c, row, _("N: no"), HIT_KEY + 'n');
-    screen_flush();
+    int redraw = 1;
     for (;;) {
+        if (redraw) {
+            int row = screen_rows() - 1;
+            screen_fill(0, row, screen_cols(), 1, BG);
+            screen_text(1, row, line, ACCENT, BG);
+            /* TRANSLATORS: Y is the Y key; keep "Y: ". */
+            int c = ui_button(2 + ui_cells(line), row, _("Y: yes"), HIT_KEY + 'y');
+            /* TRANSLATORS: N is the N key; keep "N: ". */
+            ui_button(c, row, _("N: no"), HIT_KEY + 'n');
+            screen_flush();
+            redraw = 0;
+        }
         int key = key_get();
+        if (key == K_SHOWN) {
+            draw();
+            redraw = 1;
+            continue;
+        }
+        if (key == 0) continue;
         if (key == K_POINTER) {
             const struct pointer_event *e = pointer_last();
             if (!e->pressed) continue; /* a motion is no answer */
@@ -1517,13 +1529,13 @@ static void form_show(struct form *f)
 
 /* The selected line's value, edited where it is shown: 1 with Enter (text
  * holds it then), 0 with Esc (text as it was). Printable ASCII but ". */
-static int form_edit(const struct form *f, char *text, size_t size)
+static int form_edit(struct form *f, char *text, size_t size)
 {
     char copy[VALUE_MAX + 1], line[VALUE_MAX + 8];
-    int row = FORM_TOP + f->sel - f->first, width = screen_cols() - FORM_VALUE - 2;
     snprintf(copy, sizeof copy, "%s", text);
     size_t pos = strlen(copy), limit = size < sizeof copy ? size : sizeof copy;
     for (;;) {
+        int row = FORM_TOP + f->sel - f->first, width = screen_cols() - FORM_VALUE - 2;
         size_t len = strlen(copy);
         if (pos > len) pos = len;
         int start = width > 1 && (int)pos >= width ? (int)pos - width + 1 : 0;
@@ -1542,6 +1554,8 @@ static int form_edit(const struct form *f, char *text, size_t size)
         } else if (key == '\n') {
             snprintf(text, size, "%s", copy);
             return 1;
+        } else if (key == K_SHOWN) {
+            form_show(f);
         } else {
             edit_line_key(key, copy, limit, &pos);
         }
@@ -1701,7 +1715,7 @@ static int directory_refused(const char *path, char *why, size_t size)
         if (strlen(word) == len && strncmp(rel, word, len) == 0) {
             snprintf(why, size, strcmp(word, "Drives") == 0 ?
                      _("%.200s is in %s, which every container has already (as a whole: a drive in it could not be ejected).") :
-                     _("%.200s is in %s, which every container has already."), path, word);
+                     _("%.200s is in %s, which every container has already."), rel, word);
             return 1;
         }
     }
@@ -2082,7 +2096,7 @@ static void container_key(int key)
 
 static void host_key(int key)
 {
-    char text[128] = "", label[160];
+    char text[512] = "", label[160];
     if (key == '/') {
         static struct search_hit hits[64];
         static char items[64][320];
@@ -2093,10 +2107,25 @@ static void host_key(int key)
             start_job(label, argv);
         }
     } else if (key == 'i') {
-        if (prompt(_("Package to add (repositories or the AUR):"), text, sizeof text) && text[0]) {
-            char *argv[] = { PKG, "install", text, NULL };
+        /* One or more names, separated by spaces: each its own argument. */
+        if (prompt(_("Packages to add, separated by spaces (repositories or the AUR):"), text, sizeof text) &&
+            text[0]) {
+            char *argv[32 + 3], *save = NULL;
+            int n = 0;
+            if (!valid_packages(text, 32)) {
+                say_notice(1, "%s", _("Package names: letters, digits and @ . _ + -, at most 32."));
+                return;
+            }
             snprintf(label, sizeof label, _("add %s to the host"), text);
-            start_job(label, argv);
+            argv[n++] = PKG;
+            argv[n++] = "install";
+            for (char *w = strtok_r(text, " ", &save); w; w = strtok_r(NULL, " ", &save)) {
+                argv[n++] = w;
+            }
+            argv[n] = NULL;
+            if (n > 2) {
+                start_job(label, argv);
+            }
         }
     } else if (key == 'x' && sel[HOST] < nleaves) {
         char *name = leaves[sel[HOST]];

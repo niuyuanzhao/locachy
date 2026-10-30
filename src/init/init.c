@@ -449,70 +449,261 @@ static void ensure_char_node_from_sysfs(const char *dev_path, const char *sys_de
     }
 }
 
-static int run_cryptsetup_token(const char *cryptsetup, const char *dev, const char *mapper)
+/* cryptsetup open of dev as mapper, with its tokens (--token-only: a TPM
+ * that opens it, standard input /dev/null) or the passphrase pass (--key-file
+ * -, every byte of it). The swap lets discards through (swapon below drops
+ * what it held from the disk). */
+static int run_cryptsetup(const char *cryptsetup, const char *dev, const char *mapper, const char *pass)
 {
-    int status = -1;
+    int p[2] = { -1, -1 }, status = -1;
+    if (pass && pipe(p) < 0) return -1;
+    const char *argv[12];
+    int n = 0;
+    argv[n++] = "cryptsetup";
+    argv[n++] = "open";
+    argv[n++] = "--type";
+    argv[n++] = "luks";
+    if (!pass) {
+        argv[n++] = "--token-only";
+    } else {
+        argv[n++] = "--key-file";
+        argv[n++] = "-";
+    }
+    if (strcmp(mapper, "locachy-swap-crypt") == 0) argv[n++] = "--allow-discards";
+    argv[n++] = dev;
+    argv[n++] = mapper;
+    argv[n] = NULL;
     pid_t pid = fork();
     if (pid == 0) {
+        if (pass) {
+            close(p[1]);
+            dup2(p[0], STDIN_FILENO);
+            close(p[0]);
+        } else {
+            int null_fd = open("/dev/null", O_RDWR);
+            if (null_fd >= 0) {
+                dup2(null_fd, STDIN_FILENO);
+                if (null_fd > 2) close(null_fd);
+            }
+        }
+        execv(cryptsetup, (char *const *)argv);
+        _exit(127);
+    }
+    if (pass) {
+        close(p[0]);
+        if (pid > 0) {
+            ssize_t w = write(p[1], pass, strlen(pass));
+            (void)w;
+        }
+        close(p[1]);
+    }
+    if (pid > 0) {
+        waitpid(pid, &status, 0);
+    }
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        ensure_mapper_nodes(mapper);
+        return 0;
+    }
+    return -1;
+}
+
+/* Whether dev's LUKS2 header has a TPM token (systemd-tpm2, locachy-tpm12),
+ * as cryptsetup prints it: only to say why the passphrase is asked. */
+static int has_tpm_token(const char *cryptsetup, const char *dev)
+{
+    static char json[65536];
+    int p[2];
+    if (pipe(p) < 0) return 0;
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(p[0]);
+        dup2(p[1], STDOUT_FILENO);
+        close(p[1]);
         int null_fd = open("/dev/null", O_RDWR);
         if (null_fd >= 0) {
             dup2(null_fd, STDIN_FILENO);
+            dup2(null_fd, STDERR_FILENO);
             if (null_fd > 2) close(null_fd);
         }
-        execl(cryptsetup, "cryptsetup", "open", "--type", "luks", "--token-only", dev, mapper, (char *)NULL);
+        execl(cryptsetup, "cryptsetup", "luksDump", "--dump-json-metadata", dev, (char *)NULL);
         _exit(127);
     }
-    if (pid > 0) {
-        waitpid(pid, &status, 0);
-    }
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-        ensure_mapper_nodes(mapper);
-        return 0;
-    }
-    return -1;
-}
-
-static int run_cryptsetup_open(const char *cryptsetup, const char *dev, const char *mapper, const char *pass)
-{
-    int p[2], status = -1;
-    if (pipe(p) < 0) return -1;
-    pid_t pid = fork();
-    if (pid == 0) {
-        close(p[1]);
-        dup2(p[0], STDIN_FILENO);
-        close(p[0]);
-        execl(cryptsetup, "cryptsetup", "open", "--type", "luks", "--key-file", "-", dev, mapper, (char *)NULL);
-        _exit(127);
+    close(p[1]);
+    size_t len = 0;
+    ssize_t n;
+    while (pid > 0 && len < sizeof json - 1 && (n = read(p[0], json + len, sizeof json - 1 - len)) > 0) {
+        len += (size_t)n;
     }
     close(p[0]);
     if (pid > 0) {
-        size_t len = strlen(pass);
-        ssize_t w = write(p[1], pass, len);
-        (void)w;
-        close(p[1]);
-        waitpid(pid, &status, 0);
-    } else {
-        close(p[1]);
+        waitpid(pid, NULL, 0);
     }
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-        ensure_mapper_nodes(mapper);
-        return 0;
-    }
-    return -1;
+    json[len] = '\0';
+    return strstr(json, "\"systemd-tpm2\"") != NULL || strstr(json, "\"locachy-tpm12\"") != NULL;
 }
 
-/* Unlock LUKS2 partitions labelled locachy-crypt (and locachy-swap-crypt)
- * before hibernation resume and root mounting. Tries hardware-bound TPM 2.0 /
- * TPM 1.2 LUKS2 tokens first (leaving the boot lock screen enabled so the user
- * unlocks with fingerprint/face/password), falling back to the passphrase UI. */
+/* The boot phases a TPM 2.0 key may be sealed to, measured into PCR 11 by
+ * systemd-pcrextend as systemd's systemd-pcrphase-initrd.service does. A key
+ * bound to the boot image's signed enter-initrd value (locachy-boot,
+ * locachy-tpm) opens between the two only: here, before the root is the root
+ * or a hibernated system is back, never in the running system. Without a
+ * TPM 2.0 or the tool nothing is measured. */
+#define PCREXTEND "/usr/lib/systemd/systemd-pcrextend"
+#define EFIVARS "/sys/firmware/efi/efivars"
+static int phase_entered, phase_left, efivars_here;
+
+static void measure_phase(const char *word)
+{
+    int leaving = strcmp(word, "leave-initrd") == 0;
+    if ((leaving ? phase_left || !phase_entered : phase_entered) || access(PCREXTEND, X_OK) != 0 ||
+        access("/dev/tpmrm0", F_OK) != 0) {
+        return;
+    }
+    *(leaving ? &phase_left : &phase_entered) = 1;
+    /* It measures only when the stub measured the image (its EFI variable
+     * says so): the variables, here until the initramfs is left. */
+    if (!leaving && access("/sys/firmware/efi", F_OK) == 0 &&
+        mount("efivarfs", EFIVARS, "efivarfs", MS_NOSUID | MS_NODEV | MS_NOEXEC | MS_RDONLY, NULL) == 0) {
+        efivars_here = 1;
+    }
+    int status = -1;
+    pid_t pid = fork();
+    if (pid == 0) {
+        execl(PCREXTEND, "systemd-pcrextend", "--graceful", word, (char *)NULL);
+        _exit(127);
+    }
+    if (pid > 0) {
+        waitpid(pid, &status, 0);
+    }
+    say("init: boot phase %s: %s", word, WIFEXITED(status) && WEXITSTATUS(status) == 0 ? "measured" : "not measured");
+    if (leaving && efivars_here && umount(EFIVARS) == 0) {
+        efivars_here = 0;
+    }
+}
+
+/* A line typed at the boot prompt, shown as stars: title, the partitions,
+ * wrong in red when there is something to say (the last one did not open
+ * them, or why it is asked), then label and the stars. The keyboard types
+ * as the system does (the key table rc.conf's keymap made, base keys.c). */
+static void ask_secret(const char *title, const char *label, const char *wrong, char *out, size_t size)
+{
+    char stars[68], line[160];
+    size_t len = 0;
+    memset(out, 0, size);
+    for (;;) {
+        screen_fill(0, 0, screen_cols(), screen_rows(), BG);
+        screen_text(2, 2, title, FG, BG);
+        snprintf(line, sizeof line, "Partition: %s%s%s", luks_root_dev[0] ? luks_root_dev : "",
+                 luks_root_dev[0] && luks_swap_dev[0] ? ", " : "", luks_swap_dev[0] ? luks_swap_dev : "");
+        screen_text(2, 4, line, FG, BG);
+        if (wrong) {
+            screen_text(2, 6, wrong, 0xCC4444, BG);
+        }
+        size_t nstars = 0; /* a star for each character */
+        for (size_t i = 0; i < len && nstars < sizeof stars - 2; i++) {
+            nstars += ((unsigned char)out[i] & 0xC0) != 0x80;
+        }
+        memset(stars, '*', nstars);
+        stars[nstars] = '_';
+        stars[nstars + 1] = '\0';
+        snprintf(line, sizeof line, "%s: %s", label, stars);
+        screen_text(2, 8, line, FG, BG);
+        screen_flush();
+        int k = key_get();
+        if (k == '\n') return;
+        if (k == 21) { /* Ctrl+U */
+            memset(out, 0, size);
+            len = 0;
+        } else if ((k == '\b' || k == K_DEL) && len > 0) {
+            while (len > 1 && ((unsigned char)out[len - 1] & 0xC0) == 0x80) out[--len] = '\0';
+            out[--len] = '\0'; /* a whole character */
+        } else if (keys_typed(k) && len + strlen(keys_typed(k)) < size) {
+            memcpy(out + len, keys_typed(k), strlen(keys_typed(k)));
+            len += strlen(keys_typed(k));
+            out[len] = '\0';
+        }
+    }
+}
+
+/* Unlock the LUKS2 partitions labelled locachy-crypt (the root) and
+ * locachy-swap-crypt (the swap, where hibernation writes) before resume and
+ * root mounting. Their TPM tokens first, as they always were tried (no PIN:
+ * cryptsetup --token-only, whatever the header says): the swap first, then
+ * the root. A hibernation image holds the root's key, so resuming it needs
+ * a successful root unlock too, never just a token's unauthenticated JSON.
+ * Nothing is typed when both tokens work; otherwise the passphrase when there is no
+ * token or the TPM does not open it (the firmware, Secure Boot or its keys
+ * changed; a TPM 2.0 binding with this machine's Secure Boot keys is bound
+ * again by locachy-tpm enroll --pending at such a start). A TPM unlock
+ * leaves the boot lock screen on (fingerprint, face, password); the
+ * passphrase is the boot's unlock. */
+static const char *cryptsetup_path;
+static int root_open, swap_open, resume_image;
+
+static int swap_holds_image(void)
+{
+    return luks_swap_dev[0] && swap_open && has_signature("/dev/mapper/locachy-swap-crypt", 4096 - 10, "S1SUSPEND");
+}
+
+/* The passphrase prompt, until both partitions are open. */
+static void unlock_with_passphrase(const char *why)
+{
+    char pass[256];
+    const char *wrong = why;
+    screen_open("/font.psf");
+    keys_open();
+    for (int attempt = 0; attempt < 5 && !(root_open && swap_open); attempt++) {
+        say("init: waiting for LUKS2 passphrase on %s (attempt %d)",
+            luks_root_dev[0] ? luks_root_dev : luks_swap_dev, attempt + 1);
+        ask_secret("LOCachy — Full Disk Encryption (LUKS2)", "Passphrase", wrong, pass, sizeof pass);
+        if (!swap_open && run_cryptsetup(cryptsetup_path, luks_swap_dev, "locachy-swap-crypt", pass) == 0) {
+            swap_open = 1;
+        }
+        if (!root_open && run_cryptsetup(cryptsetup_path, luks_root_dev, "locachy-crypt", pass) == 0) {
+            root_open = 1;
+        }
+        memset(pass, 0, sizeof pass);
+        wrong = "Wrong passphrase; try again.";
+        if (root_open && swap_open) {
+            luks_passphrase_entered = 1;
+            say("init: unlocked LUKS2 %s", luks_root_dev[0] ? luks_root_dev : luks_swap_dev);
+        }
+    }
+    if (!(root_open && swap_open)) {
+        say("init: failed to unlock LUKS2 after 5 attempts");
+    }
+    keys_release();
+    screen_release();
+}
+
+/* The TPM's tokens of the partitions not open yet; then, when one stays
+ * closed, why the passphrase is asked (NULL: no TPM token, nothing to say). */
+static const char *unlock_with_tpm(void)
+{
+    const char *cs = cryptsetup_path;
+    if (!root_open && run_cryptsetup(cs, luks_root_dev, "locachy-crypt", NULL) == 0) {
+        root_open = 1;
+    }
+    if (root_open && swap_open) {
+        say("init: auto-unlocked LUKS2 via TPM (%s); boot lock stays active",
+            luks_root_dev[0] ? luks_root_dev : luks_swap_dev);
+        return NULL;
+    }
+    if ((!root_open && has_tpm_token(cs, luks_root_dev)) || (!swap_open && has_tpm_token(cs, luks_swap_dev))) {
+        say("init: the TPM did not open LUKS2 %s", luks_root_dev[0] ? luks_root_dev : luks_swap_dev);
+        return "The TPM did not open the disk (firmware or Secure Boot changed): the passphrase.";
+    }
+    return NULL;
+}
+
 static void unlock_luks(void)
 {
     luks_root_dev[0] = luks_swap_dev[0] = '\0';
     each_block_dev(check_luks_dev);
     if (!luks_root_dev[0] && !luks_swap_dev[0]) return;
-    const char *cs = access("/sbin/cryptsetup", X_OK) == 0 ? "/sbin/cryptsetup" :
-                     access("/usr/bin/cryptsetup", X_OK) == 0 ? "/usr/bin/cryptsetup" : NULL;
-    if (!cs) {
+    cryptsetup_path = access("/sbin/cryptsetup", X_OK) == 0 ? "/sbin/cryptsetup" :
+                      access("/usr/bin/cryptsetup", X_OK) == 0 ? "/usr/bin/cryptsetup" : NULL;
+    if (!cryptsetup_path) {
         say("init: LUKS2 partition %s found, but cryptsetup is not in the initramfs",
             luks_root_dev[0] ? luks_root_dev : luks_swap_dev);
         return;
@@ -527,72 +718,35 @@ static void unlock_luks(void)
     ensure_char_node_from_sysfs("/dev/mapper/control", "/sys/class/misc/device-mapper/dev");
     ensure_char_node_from_sysfs("/dev/tpm0", "/sys/class/tpm/tpm0/dev");
     ensure_char_node_from_sysfs("/dev/tpmrm0", "/sys/class/tpmrm/tpmrm0/dev");
+    measure_phase("enter-initrd");
 
-    int swap_open = !luks_swap_dev[0] || run_cryptsetup_token(cs, luks_swap_dev, "locachy-swap-crypt") == 0;
-    int root_open = !luks_root_dev[0] || run_cryptsetup_token(cs, luks_root_dev, "locachy-crypt") == 0;
-    if (swap_open && root_open) {
-        say("init: auto-unlocked LUKS2 via TPM (%s); boot lock stays active",
-            luks_root_dev[0] ? luks_root_dev : luks_swap_dev);
+    root_open = !luks_root_dev[0];
+    swap_open = !luks_swap_dev[0] ||
+                run_cryptsetup(cryptsetup_path, luks_swap_dev, "locachy-swap-crypt", NULL) == 0;
+    const char *why = unlock_with_tpm();
+    if (swap_holds_image() && luks_root_dev[0] && root_open) {
+        resume_image = 1;
+        say("init: the TPM opened root and swap; the swap holds a hibernation image");
         return;
     }
-
-    screen_open("/font.psf");
-    keys_open();
-    char pass[256], stars[68], prompt_line[160];
-    for (int attempt = 0; attempt < 5; attempt++) {
-        size_t len = 0;
-        memset(pass, 0, sizeof pass);
-        say("init: waiting for LUKS2 passphrase on %s (attempt %d)",
-            luks_root_dev[0] ? luks_root_dev : luks_swap_dev, attempt + 1);
-        for (;;) {
-            screen_fill(0, 0, screen_cols(), screen_rows(), BG);
-            screen_text(2, 2, "LOCachy — Full Disk Encryption (LUKS2)", FG, BG);
-            snprintf(prompt_line, sizeof prompt_line, "Partition: %s%s%s",
-                     luks_root_dev[0] ? luks_root_dev : "",
-                     luks_root_dev[0] && luks_swap_dev[0] ? ", " : "",
-                     luks_swap_dev[0] ? luks_swap_dev : "");
-            screen_text(2, 4, prompt_line, FG, BG);
-            if (attempt > 0) {
-                screen_text(2, 6, "Wrong passphrase; try again.", 0xCC4444, BG);
-            }
-            size_t nstars = 0; /* a star for each character */
-            for (size_t i = 0; i < len && nstars < sizeof stars - 2; i++) {
-                nstars += ((unsigned char)pass[i] & 0xC0) != 0x80;
-            }
-            memset(stars, '*', nstars);
-            stars[nstars] = '_';
-            stars[nstars + 1] = '\0';
-            snprintf(prompt_line, sizeof prompt_line, "Passphrase: %s", stars);
-            screen_text(2, 8, prompt_line, FG, BG);
-            screen_flush();
-            int k = key_get();
-            if (k == '\n') break;
-            if (k == 21) { /* Ctrl+U */
-                memset(pass, 0, sizeof pass);
-                len = 0;
-            } else if ((k == '\b' || k == K_DEL) && len > 0) {
-                while (len > 1 && ((unsigned char)pass[len - 1] & 0xC0) == 0x80) pass[--len] = '\0';
-                pass[--len] = '\0'; /* a whole character */
-            } else if (keys_typed(k) && len + strlen(keys_typed(k)) < sizeof pass) {
-                memcpy(pass + len, keys_typed(k), strlen(keys_typed(k)));
-                len += strlen(keys_typed(k));
-                pass[len] = '\0';
-            }
-        }
-        if (!swap_open && run_cryptsetup_open(cs, luks_swap_dev, "locachy-swap-crypt", pass) == 0) swap_open = 1;
-        if (!root_open && run_cryptsetup_open(cs, luks_root_dev, "locachy-crypt", pass) == 0) root_open = 1;
-        memset(pass, 0, sizeof pass);
-        if (swap_open && root_open) {
-            luks_passphrase_entered = 1;
-            say("init: unlocked LUKS2 %s", luks_root_dev[0] ? luks_root_dev : luks_swap_dev);
-            keys_release();
-            screen_release();
-            return;
-        }
+    if (!(root_open && swap_open)) {
+        unlock_with_passphrase(why);
     }
-    say("init: failed to unlock LUKS2 after 5 attempts");
-    keys_release();
-    screen_release();
+}
+
+/* The hibernation image did not come back (the write below returned): the
+ * root is opened now, with its TPM token while that still opens it (one
+ * bound to PCRs 0+7; one with the signed PCR 11 policy no longer does: the
+ * boot phase has left the initramfs), else the passphrase. */
+static void unlock_after_failed_resume(void)
+{
+    if (!luks_root_dev[0] || root_open || !cryptsetup_path) return;
+    say("init: the hibernation image did not come back; opening the root");
+    const char *why = unlock_with_tpm();
+    if (!root_open) {
+        unlock_with_passphrase(why ? "The hibernated system could not come back, and the TPM does not open the "
+                                     "disk now: the passphrase." : NULL);
+    }
 }
 
 /*
@@ -609,6 +763,12 @@ static void unlock_luks(void)
 static int check_resume_dev(const char *dev)
 {
     struct stat st;
+    /* Neither forged token metadata nor exhausted passphrase attempts may
+     * release a root key held inside the image. An encrypted swap without
+     * an identified, unlocked encrypted root is not authorization either. */
+    if ((luks_root_dev[0] || luks_swap_dev[0]) && (!luks_root_dev[0] || !root_open)) {
+        return 0;
+    }
     if (luks_only && !is_mapper(dev, "locachy-swap-crypt")) {
         return 0;
     }
@@ -617,6 +777,9 @@ static int check_resume_dev(const char *dev)
         stat(dev, &st) == 0) {
         snprintf(resume_dev, sizeof resume_dev, "%u:%u", major(st.st_rdev), minor(st.st_rdev));
         say("init: %s: %s", dev, image ? "resuming from the hibernation image there" : "no hibernation image");
+        if (image) {
+            measure_phase("leave-initrd"); /* the system coming back is past the initramfs */
+        }
         if (write_file("/sys/power/resume", resume_dev) < 0) {
             say("init: /sys/power/resume %s: %s", resume_dev, strerror(errno));
         }
@@ -647,7 +810,10 @@ static int check_disk_dev(const char *dev)
     }
     if (!swap_dev[0] && has_signature(dev, 4096 - 10, "SWAPSPACE2") &&
         has_label(dev, 1052, "locachy-swap") && (!luks_only || is_mapper(dev, "locachy-swap-crypt"))) {
-        if (swapon(dev, 0) == 0) {
+        /* With discards (a disk that has them): what the swap held before
+         * this start is dropped from the disk now, and pages freed later
+         * as they are freed. */
+        if (swapon(dev, SWAP_FLAG_DISCARD) == 0 || swapon(dev, 0) == 0) {
             snprintf(swap_dev, sizeof swap_dev, "%s", dev);
         } else {
             say("init: swapon %s: %s", dev, strerror(errno));
@@ -1799,6 +1965,29 @@ static void reap_all(int ms)
  * else is asked to end (SIGTERM), and killed 2 s later (SIGKILL reaches
  * frozen programs too); the ESP is unmounted, the log saved and the root made
  * read-only, so neither needs repairing at the next boot. */
+#ifndef SWAP_FLAG_DISCARD_ONCE
+#define SWAP_FLAG_DISCARD_ONCE 0x20000 /* as util-linux has it: the whole area, at swapon */
+#endif
+/* What the swap held dropped from the disk, a hibernation image the machine
+ * came back from included (the kernel only puts the swap's signature back):
+ * swapon's discard of everything but the header, as at boot. The swap opens
+ * with the TPM and nothing typed, so nothing of a past session stays in it.
+ * Nothing on a disk without discards. */
+static void wipe_swap(void)
+{
+    if (!swap_dev[0]) return;
+    if (swapoff(swap_dev) < 0) {
+        say("init: swapoff %s: %s", swap_dev, strerror(errno));
+        return;
+    }
+    if (swapon(swap_dev, SWAP_FLAG_DISCARD | SWAP_FLAG_DISCARD_ONCE) < 0) {
+        say("init: swapon %s to discard it: %s", swap_dev, strerror(errno));
+        return;
+    }
+    swapoff(swap_dev);
+    say("init: %s: its content discarded", swap_dev);
+}
+
 static void shut_down(int how)
 {
     say(how == RB_POWER_OFF ? "init: power off" : "init: reboot");
@@ -1806,6 +1995,7 @@ static void shut_down(int how)
     reap_all(2000);
     kill(-1, SIGKILL);
     reap_all(2000);
+    wipe_swap();
     if (esp_dev[0] && umount("/efi") < 0) {
         say("init: umount /efi: %s", strerror(errno));
     }
@@ -2596,6 +2786,10 @@ int main(void)
     unlock_luks();
     luks_only = luks_root_dev[0] != '\0';
     resume(); /* does not return when there is a hibernated system to go back to */
+    if (resume_image) {
+        unlock_after_failed_resume();
+    }
+    measure_phase("leave-initrd");
     /* The disks first (their drivers and ext4 are built into the kernel):
      * the other drivers are modules in the root. */
     const char *data = disks();
@@ -2626,6 +2820,27 @@ int main(void)
         double t0 = uptime();
         esp_mount();
         say("init: ESP checked at %.3f s (%.0f ms)", uptime(), (uptime() - t0) * 1000);
+        /* A TPM 2.0 binding left for a start with Secure Boot on this
+         * machine's keys (the installer's, or one Secure Boot's new keys
+         * made necessary): locachy-tpm enroll --pending, beside the rest of
+         * the start, what it says in the kernel's log; it waits again when
+         * those keys are not on. */
+        if (access("/var/lib/locachy/tpm-pending", F_OK) == 0 && access("/usr/local/bin/locachy-tpm", X_OK) == 0) {
+            pid_t tpid = fork();
+            if (tpid == 0) {
+                setsid();
+                sigprocmask(SIG_UNBLOCK, &handled, NULL);
+                int log = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+                if (log >= 0) {
+                    dup2(log, STDOUT_FILENO);
+                    dup2(log, STDERR_FILENO);
+                }
+                setenv("PYTHONUNBUFFERED", "1", 1);
+                execl("/usr/local/bin/locachy-tpm", "locachy-tpm", "enroll", "--pending", (char *)NULL);
+                _exit(127);
+            }
+            say("init: a TPM binding waits: locachy-tpm enroll --pending (pid %d)", (int)tpid);
+        }
         t0 = uptime();
         apps_init();
         say("init: applications discovered at %.3f s (%.0f ms)", uptime(), (uptime() - t0) * 1000);

@@ -50,6 +50,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #include <webp/decode.h>
 #include <webp/demux.h>
@@ -439,14 +440,19 @@ static fz_buffer *webp_pam(const unsigned char *data, size_t n)
     return b;
 }
 
-static fz_buffer *heif_pam(const unsigned char *data, size_t n)
+static struct heif_context *heif_new(void)
 {
     static int initialized;
     if (!initialized) {
         heif_init(NULL);
         initialized = 1;
     }
-    struct heif_context *hc = heif_context_alloc();
+    return heif_context_alloc();
+}
+
+static fz_buffer *heif_pam(const unsigned char *data, size_t n)
+{
+    struct heif_context *hc = heif_new();
     struct heif_image_handle *handle = NULL;
     struct heif_image *img = NULL;
     fz_buffer *b = NULL;
@@ -521,10 +527,12 @@ static fz_buffer *jxl_pam(const unsigned char *data, size_t n)
 /* Camera RAW, which kimageformats' raw plugin reads with LibRaw: by the
  * plugin's suffixes, or the signatures shared-mime-info knows them by (the
  * TIFF-based ones have none; their names tell). */
+#define RAW_SUFFIXES "3fr arw crw cr2 cr3 dcr dng erf fff iiq k25 kdc mdc mef mos mrw nef nrw orf pef raf raw rwl rw2 " \
+                     "sr2 srf srw sti x3f"
+
 static int is_raw(const unsigned char *m, size_t n, const char *name)
 {
-    return ext_is(extension(name), "3fr arw crw cr2 cr3 dcr dng erf fff iiq k25 kdc mdc mef mos mrw nef nrw orf pef "
-                                   "raf raw rwl rw2 sr2 srf srw sti x3f") ||
+    return ext_is(extension(name), RAW_SUFFIXES) ||
            (n >= 14 && !memcmp(m, "II\x1A\0\0\0HEAPCCDR", 14)) || (n >= 16 && !memcmp(m, "FUJIFILMCCD-RAW ", 16)) ||
            (n >= 4 && !memcmp(m, "\0MRM", 4)) || (n >= 8 && !memcmp(m, "IIRO\x08\0\0\0", 8)) ||
            (n >= 8 && !memcmp(m, "IIU\0\x08\0\0\0", 8)) || (n >= 8 && !memcmp(m, "IIU\0\x18\0\0\0", 8)) ||
@@ -744,18 +752,170 @@ static fz_document *open_dvi(const char *path, struct view_reply *r)
     return d;
 }
 
+/* EXIF, an image's TIFF-structured metadata, where each format keeps it:
+ * JPEG's APP1 segment, TIFF itself, PNG's eXIf chunk, WebP's EXIF chunk
+ * (libwebp's demuxer), HEIF's Exif item (libheif) and JPEG XL's Exif box;
+ * the tags Gwenview shows and dates images by (Exiv2's names below). Camera
+ * RAW's are LibRaw's. */
+struct exif {
+    char date[20];             /* Exif.Photo.DateTimeOriginal, "YYYY:MM:DD HH:MM:SS" */
+    char date_image[20];       /* Exif.Image.DateTimeOriginal */
+    char digitized[20];        /* Exif.Photo.DateTimeDigitized */
+    char date_file[20];        /* Exif.Image.DateTime */
+    char make[64], model[64];  /* Exif.Image.Make, Exif.Image.Model */
+    double exposure, fnumber, focal; /* Exif.Photo.ExposureTime, FNumber, FocalLength; 0: none */
+    int iso, flash;            /* Exif.Photo.ISOSpeedRatings; Exif.Photo.Flash, -1: none */
+};
+
+static unsigned exif16(const unsigned char *p, int le)
+{
+    return le ? p[0] | p[1] << 8 : p[0] << 8 | p[1];
+}
+
+static uint32_t exif32(const unsigned char *p, int le)
+{
+    return le ? p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24 : (uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3];
+}
+
+static void exif_ascii(char *out, size_t size, const unsigned char *s, uint32_t n)
+{
+    size_t k = 0;
+    for (uint32_t i = 0; i < n && s[i] && k + 1 < size; i++) out[k++] = s[i] < ' ' || s[i] == 0x7F ? ' ' : (char)s[i];
+    while (k && out[k - 1] == ' ') k--;
+    out[k] = '\0';
+}
+
+/* The IFD at off of TIFF data t (n bytes), and the Exif IFD it points to. */
+static void exif_ifd(const unsigned char *t, size_t n, int le, uint32_t off, struct exif *x, int depth)
+{
+    static const unsigned char sizes[] = { 0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8 };
+    if (depth > 1 || off < 8 || (uint64_t)off + 2 > n) return;
+    unsigned count = exif16(t + off, le);
+    for (unsigned i = 0; i < count && (uint64_t)off + 2 + 12 * (i + 1) <= n; i++) {
+        const unsigned char *e = t + off + 2 + 12 * i;
+        unsigned tag = exif16(e, le), type = exif16(e + 2, le);
+        uint32_t cnt = exif32(e + 4, le), at = exif32(e + 8, le);
+        uint64_t size = type < sizeof sizes ? (uint64_t)sizes[type] * cnt : 0;
+        const unsigned char *d = size <= 4 ? e + 8 : at + size <= n ? t + at : NULL;
+        if (!size || !d) continue;
+        double ratio = type == 5 && exif32(d + 4, le) ? (double)exif32(d, le) / exif32(d + 4, le) : 0;
+        unsigned short_value = type == 3 ? exif16(d, le) : type == 4 ? exif32(d, le) : 0;
+        if (tag == 0x010F && type == 2) exif_ascii(x->make, sizeof x->make, d, cnt);
+        else if (tag == 0x0110 && type == 2) exif_ascii(x->model, sizeof x->model, d, cnt);
+        else if (tag == 0x0132 && type == 2) exif_ascii(x->date_file, sizeof x->date_file, d, cnt);
+        else if (tag == 0x9003 && type == 2 && depth) exif_ascii(x->date, sizeof x->date, d, cnt);
+        else if (tag == 0x9003 && type == 2) exif_ascii(x->date_image, sizeof x->date_image, d, cnt);
+        else if (tag == 0x9004 && type == 2 && depth) exif_ascii(x->digitized, sizeof x->digitized, d, cnt);
+        else if (tag == 0x829A) x->exposure = ratio;
+        else if (tag == 0x829D) x->fnumber = ratio;
+        else if (tag == 0x920A) x->focal = ratio;
+        else if (tag == 0x8827 && short_value) x->iso = (int)short_value;
+        else if (tag == 0x9209 && (type == 3 || type == 4)) x->flash = (int)short_value;
+        else if (tag == 0x8769 && type == 4) exif_ifd(t, n, le, at, x, depth + 1);
+    }
+}
+
+static int exif_tiff(const unsigned char *t, size_t n, struct exif *x)
+{
+    if (n >= 6 && !memcmp(t, "Exif\0\0", 6)) {
+        t += 6;
+        n -= 6;
+    }
+    int le = n >= 8 && !memcmp(t, "II", 2);
+    if (n < 8 || (!le && memcmp(t, "MM", 2)) || exif16(t + 2, le) != 42) return 0;
+    exif_ifd(t, n, le, exif32(t + 4, le), x, 0);
+    return 1;
+}
+
+static uint32_t be32(const unsigned char *p)
+{
+    return (uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3];
+}
+
+/* The EXIF of image data s (n bytes, maybe only its start): 1 if found. */
+static int exif_read(const unsigned char *s, size_t n, struct exif *x)
+{
+    memset(x, 0, sizeof *x);
+    x->flash = -1;
+    if (n >= 4 && (!memcmp(s, "II*\0", 4) || !memcmp(s, "MM\0*", 4))) return exif_tiff(s, n, x);
+    if (n >= 4 && s[0] == 0xFF && s[1] == 0xD8) {
+        for (size_t i = 2; i + 4 <= n && s[i] == 0xFF && s[i + 1] != 0xDA;) {
+            size_t len = (size_t)s[i + 2] << 8 | s[i + 3];
+            if (s[i + 1] == 0xE1 && len >= 8 && i + 2 + len <= n && !memcmp(s + i + 4, "Exif\0\0", 6)) {
+                return exif_tiff(s + i + 4, len - 2, x);
+            }
+            i += 2 + len;
+        }
+        return 0;
+    }
+    if (n >= 8 && !memcmp(s, "\x89PNG\r\n\x1A\n", 8)) {
+        for (size_t i = 8; i + 12 <= n;) {
+            uint32_t len = be32(s + i);
+            if ((uint64_t)i + 12 + len > n) break;
+            if (!memcmp(s + i + 4, "eXIf", 4)) return exif_tiff(s + i + 8, len, x);
+            if (!memcmp(s + i + 4, "IDAT", 4) || !memcmp(s + i + 4, "IEND", 4)) break;
+            i += 12 + len;
+        }
+        return 0;
+    }
+    if (is_webp(s, n)) {
+        WebPData wd = { s, n };
+        WebPDemuxer *dmux = WebPDemux(&wd);
+        WebPChunkIterator it;
+        int found = dmux && WebPDemuxGetChunk(dmux, "EXIF", 1, &it) && exif_tiff(it.chunk.bytes, it.chunk.size, x);
+        if (dmux && found) WebPDemuxReleaseChunkIterator(&it);
+        WebPDemuxDelete(dmux);
+        return found;
+    }
+    if (is_heif(s, n)) {
+        struct heif_context *hc = heif_new();
+        struct heif_image_handle *handle = NULL;
+        heif_item_id id;
+        int found = 0;
+        if (hc && !heif_context_read_from_memory_without_copy(hc, s, n, NULL).code &&
+            !heif_context_get_primary_image_handle(hc, &handle).code &&
+            heif_image_handle_get_list_of_metadata_block_IDs(handle, "Exif", &id, 1) == 1) {
+            size_t size = heif_image_handle_get_metadata_size(handle, id);
+            unsigned char *d = size >= 4 ? malloc(size) : NULL;
+            /* After a 4-byte offset to the TIFF header (ISO/IEC 23008-12). */
+            if (d && !heif_image_handle_get_metadata(handle, id, d).code && 4 + (uint64_t)be32(d) < size) {
+                found = exif_tiff(d + 4 + be32(d), size - 4 - be32(d), x);
+            }
+            free(d);
+        }
+        heif_image_handle_release(handle);
+        heif_context_free(hc);
+        return found;
+    }
+    if (n >= 12 && !memcmp(s, "\0\0\0\x0CJXL \r\n\x87\n", 12)) {
+        for (size_t i = 0; i + 8 <= n;) {
+            uint64_t len = be32(s + i);
+            if (len < 8 || i + len > n) break;
+            if (!memcmp(s + i + 4, "Exif", 4) && len >= 12 && 12 + (uint64_t)be32(s + i + 8) < len) {
+                return exif_tiff(s + i + 12 + be32(s + i + 8), len - 12 - be32(s + i + 8), x);
+            }
+            i += len;
+        }
+    }
+    return 0;
+}
+
 /* Comic books, as Okular's comicbook generator reads them: the images of a
  * zip, tar, RAR or 7z archive or of a folder (and its folders one level
- * down), in natural order of their paths, one a page. Zip and tar are read
+ * down; for Gwenview's gallery, VIEW_GALLERY, only its own), in natural
+ * order of their paths (or OPEN's: by date taken or size), one a page. Zip and tar are read
  * by MuPDF's archive code, folders from the disk, the rest by libarchive
  * into memory. A page is decoded when it is shown, by MuPDF's image code or
- * the decoders above (WebP, HEIF, JPEG XL, ImageMagick). */
+ * the decoders above (WebP, HEIF, JPEG XL, camera RAW, ImageMagick). */
 typedef struct {
     fz_document super;
     fz_archive *arch;
+    char *dir;                 /* a folder's path (its files' sizes and times) */
     char **names;
     int count, cap;
 } comic_doc;
+
+static comic_doc *comic;       /* the document, if it is one */
 
 typedef struct {
     fz_page super;
@@ -773,7 +933,7 @@ static int is_image_name(const char *name)
     /* Hidden files, and the resource forks macOS adds, are not pages. */
     if (base[0] == '.' || !strncmp(name, "__MACOSX/", 9)) return 0;
     for (int i = 0; exts[i]; i++) if (!strcasecmp(e, exts[i])) return 1;
-    return 0;
+    return ext_is(e, RAW_SUFFIXES); /* camera RAW, LibRaw's (raw_pam) */
 }
 
 static void comic_add(comic_doc *d, const char *name)
@@ -791,6 +951,7 @@ static void comic_drop(fz_context *c, fz_document *doc_)
     comic_doc *d = (comic_doc *)doc_;
     for (int i = 0; i < d->count; i++) fz_free(c, d->names[i]);
     fz_free(c, d->names);
+    fz_free(c, d->dir);
     fz_drop_archive(c, d->arch);
 }
 
@@ -846,7 +1007,8 @@ static fz_page *comic_load(fz_context *c, fz_document *doc_, int chapter, int nu
         buf = fz_read_archive_entry(c, d->arch, d->names[number]);
         unsigned char *s;
         size_t n = fz_buffer_storage(c, buf, &s);
-        if (n >= 8 && fz_recognize_image_format(c, s) != FZ_IMAGE_UNKNOWN) {
+        /* A camera RAW is LibRaw's, TIFF-based or not. */
+        if (n >= 8 && !ext_is(extension(d->names[number]), RAW_SUFFIXES) && fz_recognize_image_format(c, s) != FZ_IMAGE_UNKNOWN) {
             p->image = fz_new_image_from_buffer(c, buf);
         } else {
             /* No resolution in them: MuPDF's 96 dpi for such images. */
@@ -867,8 +1029,8 @@ static fz_page *comic_load(fz_context *c, fz_document *doc_, int chapter, int nu
 }
 
 /* A folder's images, and those of its folders, as Okular lists them (not
- * hidden ones; one level down). */
-static void comic_list_dir(comic_doc *d, const char *dir, const char *prefix, int depth)
+ * hidden ones; down to max levels: one, or none for a gallery). */
+static void comic_list_dir(comic_doc *d, const char *dir, const char *prefix, int depth, int max)
 {
     char path[PATH_MAX], name[PATH_MAX];
     snprintf(path, sizeof path, "%s%s%s", dir, *prefix ? "/" : "", prefix);
@@ -885,7 +1047,7 @@ static void comic_list_dir(comic_doc *d, const char *dir, const char *prefix, in
             char full[PATH_MAX];
             struct stat st;
             if (snprintf(full, sizeof full, "%s/%s", dir, name) >= (int)sizeof full || stat(full, &st) < 0) continue;
-            if (S_ISDIR(st.st_mode) && depth < 1) comic_list_dir(d, dir, name, depth + 1);
+            if (S_ISDIR(st.st_mode) && depth < max) comic_list_dir(d, dir, name, depth + 1, max);
             else if (S_ISREG(st.st_mode) && is_image_name(name)) comic_add(d, name);
         }
     }
@@ -935,9 +1097,194 @@ static void comic_read_archive(comic_doc *d, const char *path)
     fz_catch(ctx) fz_rethrow(ctx);
 }
 
+/* What is known of page i of a comic book without decoding it: its EXIF
+ * (a RAW's, LibRaw's), and a folder's file's size and time. */
+struct page_info {
+    int64_t size;              /* -1: unknown */
+    time_t mtime;              /* 0: unknown */
+    struct exif x;
+};
+
+#define INFO_HEAD (256 << 10)  /* where JPEG, PNG and TIFF keep their EXIF */
+#define INFO_MAX (64 << 20)    /* WebP, HEIF and JPEG XL read whole, up to this */
+
+static void exif_time(char *out, size_t size, time_t t)
+{
+    struct tm tm;
+    if (!t || !localtime_r(&t, &tm) || !strftime(out, size, "%Y:%m:%d %H:%M:%S", &tm)) out[0] = '\0';
+}
+
+/* An EXIF date as shown: "YYYY-MM-DD HH:MM:SS". */
+static char *exif_shown(char *d)
+{
+    if (strlen(d) >= 10 && d[4] == ':' && d[7] == ':') d[4] = d[7] = '-';
+    return d;
+}
+
+/* A RAW's metadata, as LibRaw has it, from its path or its bytes. */
+static void raw_info(const char *path, const unsigned char *s, size_t n, struct exif *x)
+{
+    libraw_data_t *lr = libraw_init(0);
+    if (!lr) return;
+    if ((path ? libraw_open_file(lr, path) : libraw_open_buffer(lr, s, n)) == LIBRAW_SUCCESS) {
+        exif_time(x->date, sizeof x->date, lr->other.timestamp);
+        snprintf(x->make, sizeof x->make, "%s", lr->idata.make);
+        snprintf(x->model, sizeof x->model, "%s", lr->idata.model);
+        x->exposure = lr->other.shutter > 0 ? lr->other.shutter : 0;
+        x->fnumber = lr->other.aperture > 0 ? lr->other.aperture : 0;
+        x->focal = lr->other.focal_len > 0 ? lr->other.focal_len : 0;
+        x->iso = lr->other.iso_speed > 0 ? (int)lroundf(lr->other.iso_speed) : 0;
+    }
+    libraw_close(lr);
+}
+
+static void comic_info(comic_doc *d, int i, struct page_info *info)
+{
+    const char *name = d->names[i];
+    char full[PATH_MAX];
+    struct stat st;
+    memset(info, 0, sizeof *info);
+    info->size = -1;
+    info->x.flash = -1;
+    int file = d->dir && snprintf(full, sizeof full, "%s/%s", d->dir, name) < (int)sizeof full;
+    if (file && stat(full, &st) == 0) {
+        info->size = st.st_size;
+        info->mtime = st.st_mtime;
+    }
+    int raw = ext_is(extension(name), RAW_SUFFIXES);
+    if (raw && file) {
+        raw_info(full, NULL, 0, &info->x);
+        return;
+    }
+    unsigned char *head = NULL, *whole = NULL;
+    size_t n = 0;
+    fz_buffer *b = NULL;
+    fz_var(head);
+    fz_var(whole);
+    fz_var(b);
+    fz_try(ctx) {
+        if (file) {
+            int fd = open(full, O_RDONLY | O_CLOEXEC | O_NOCTTY | O_NONBLOCK);
+            head = fd >= 0 ? malloc(INFO_HEAD) : NULL;
+            ssize_t got = head ? pread(fd, head, INFO_HEAD, 0) : -1;
+            n = got > 0 ? (size_t)got : 0;
+            if (n == INFO_HEAD && info->size > INFO_HEAD && info->size <= INFO_MAX &&
+                (is_webp(head, n) || is_heif(head, n) || is_jxl(head, n)) && (whole = malloc((size_t)info->size))) {
+                got = pread(fd, whole, (size_t)info->size, 0);
+                n = got > 0 ? (size_t)got : 0;
+            }
+            if (fd >= 0) close(fd);
+            exif_read(whole ? whole : head, n, &info->x);
+        } else {
+            b = fz_read_archive_entry(ctx, d->arch, name);
+            unsigned char *s;
+            n = fz_buffer_storage(ctx, b, &s);
+            info->size = (int64_t)n;
+            if (raw) raw_info(NULL, s, n, &info->x);
+            else exif_read(s, n, &info->x);
+        }
+    }
+    fz_always(ctx) {
+        free(head);
+        free(whole);
+        fz_drop_buffer(ctx, b);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        say("comic book page %s: cannot read its information", name);
+    }
+}
+
+/* The date Gwenview dates an image by (timeutils.cpp dateTimeForFileItem):
+ * the first of Exif.Photo.DateTimeOriginal, Exif.Image.DateTimeOriginal,
+ * Exif.Photo.DateTimeDigitized and Exif.Image.DateTime that is a date (in
+ * local time), else the file's time. */
+static void page_date(const struct page_info *info, char *out, size_t size)
+{
+    const char *const tags[] = { info->x.date, info->x.date_image, info->x.digitized, info->x.date_file };
+    for (size_t i = 0; i < sizeof tags / sizeof *tags; i++) {
+        struct tm tm;
+        memset(&tm, 0, sizeof tm);
+        const char *end = strptime(tags[i], "%Y:%m:%d %H:%M:%S", &tm);
+        if (end && !*end) {
+            snprintf(out, size, "%s", tags[i]);
+            return;
+        }
+    }
+    exif_time(out, size, info->mtime);
+}
+
+/* KIO's order of names (Gwenview's, KDirSortFilterProxyModel): natural,
+ * case-insensitive, then case-sensitive. */
+static int kio_compare(const void *pa, const void *pb)
+{
+    const char *a = *(char *const *)pa, *b = *(char *const *)pb;
+    char fa[PATH_MAX], fb[PATH_MAX];
+    size_t i;
+    for (i = 0; a[i] && i + 1 < sizeof fa; i++) fa[i] = (char)tolower((unsigned char)a[i]);
+    fa[i] = '\0';
+    for (i = 0; b[i] && i + 1 < sizeof fb; i++) fb[i] = (char)tolower((unsigned char)b[i]);
+    fb[i] = '\0';
+    const char *pfa = fa, *pfb = fb;
+    int r = natural_compare(&pfa, &pfb);
+    return r ? r : strcmp(a, b);
+}
+
+struct comic_key {
+    char *name;
+    char date[20];
+    int64_t size;
+    time_t mtime;
+};
+static int sort_descending, sort_kio;
+
+/* Gwenview's: by date, then the file's time; by size; then the name. */
+static int by_key(const void *pa, const void *pb, int date)
+{
+    const struct comic_key *a = pa, *b = pb;
+    int r = date ? strcmp(a->date, b->date) : (a->size > b->size) - (a->size < b->size);
+    if (!r && date) r = (a->mtime > b->mtime) - (a->mtime < b->mtime);
+    if (!r) r = sort_kio ? kio_compare(&a->name, &b->name) : natural_compare(&a->name, &b->name);
+    return sort_descending ? -r : r;
+}
+
+static int by_date(const void *a, const void *b) { return by_key(a, b, 1); }
+static int by_size(const void *a, const void *b) { return by_key(a, b, 0); }
+
+static int by_name(const void *a, const void *b)
+{
+    int r = sort_kio ? kio_compare(a, b) : natural_compare(a, b);
+    return sort_descending ? -r : r;
+}
+
+/* The pages in OPEN's order (mode: VIEW_SORT_*): a gallery's names in
+ * KIO's order, a comic book's in Okular's. */
+static void comic_sort(comic_doc *d, int mode)
+{
+    int key = mode & VIEW_SORT_MASK;
+    sort_descending = (mode & VIEW_SORT_DESCENDING) != 0;
+    sort_kio = (mode & VIEW_GALLERY) != 0;
+    if (key != VIEW_SORT_DATE && key != VIEW_SORT_SIZE) {
+        qsort(d->names, (size_t)d->count, sizeof *d->names, by_name);
+        return;
+    }
+    struct comic_key *k = fz_malloc_array(ctx, d->count, struct comic_key);
+    for (int i = 0; i < d->count; i++) {
+        struct page_info info;
+        comic_info(d, i, &info);
+        k[i].name = d->names[i];
+        k[i].size = info.size;
+        k[i].mtime = info.mtime;
+        page_date(&info, k[i].date, sizeof k[i].date);
+    }
+    qsort(k, (size_t)d->count, sizeof *k, key == VIEW_SORT_DATE ? by_date : by_size);
+    for (int i = 0; i < d->count; i++) d->names[i] = k[i].name;
+    fz_free(ctx, k);
+}
+
 enum { COMIC_MUPDF, COMIC_DIR, COMIC_LIBARCHIVE };
 
-static fz_document *open_comic(const char *path, int how)
+static fz_document *open_comic(const char *path, int how, int mode)
 {
     comic_doc *d = fz_new_derived_document(ctx, comic_doc);
     d->super.drop_document = comic_drop;
@@ -946,7 +1293,8 @@ static fz_document *open_comic(const char *path, int how)
     fz_try(ctx) {
         if (how == COMIC_DIR) {
             d->arch = fz_open_directory(ctx, path);
-            comic_list_dir(d, path, "", 0);
+            d->dir = fz_strdup(ctx, path);
+            comic_list_dir(d, path, "", 0, mode & VIEW_GALLERY ? 0 : 1);
         } else if (how == COMIC_MUPDF) {
             d->arch = fz_open_archive(ctx, path);
             int n = fz_count_archive_entries(ctx, d->arch);
@@ -958,12 +1306,13 @@ static fz_document *open_comic(const char *path, int how)
             comic_read_archive(d, path);
         }
         if (d->count == 0) fz_throw(ctx, FZ_ERROR_FORMAT, "no images in this comic book");
-        qsort(d->names, (size_t)d->count, sizeof *d->names, natural_compare);
+        comic_sort(d, mode);
     }
     fz_catch(ctx) {
         fz_drop_document(ctx, &d->super);
         fz_rethrow(ctx);
     }
+    comic = d;
     return &d->super;
 }
 
@@ -2628,6 +2977,8 @@ static void vp_request(const struct view_request *q, struct view_reply *r, struc
 
 /* Opening. */
 static float open_w, open_h, open_em; /* OPEN's layout, for after AUTH */
+static int open_mode;                 /* OPEN's mode: a comic book's order (VIEW_SORT_*), VIEW_GALLERY */
+static char open_path[PATH_MAX];      /* the document's file */
 
 static void close_document(void)
 {
@@ -2635,6 +2986,7 @@ static void close_document(void)
     drop_page();
     fz_drop_document(ctx, doc);
     doc = NULL;
+    comic = NULL;
     djvu_close();
     ps_close();
     if (data_fd >= 0) close(data_fd);
@@ -3806,7 +4158,7 @@ static void open_by_type(const char *path, const char *name, int dir, const unsi
     const char *e = extension(name);
     kind = MUPDF;
     if (dir) {
-        doc = open_comic(path, COMIC_DIR);
+        doc = open_comic(path, COMIC_DIR, open_mode);
         set_format("Comic book", 0);
     } else if (n >= 8 && !memcmp(m, "AT&TFORM", 8)) {
         kind = DJVU;
@@ -3820,7 +4172,7 @@ static void open_by_type(const char *path, const char *name, int dir, const unsi
         set_format("DVI", 1);
         doc = open_dvi(path, r);
     } else if ((n >= 6 && !memcmp(m, "Rar!\x1A\x07", 6)) || (n >= 6 && !memcmp(m, "7z\xBC\xAF\x27\x1C", 6))) {
-        doc = open_comic(path, COMIC_LIBARCHIVE);
+        doc = open_comic(path, COMIC_LIBARCHIVE, open_mode);
         set_format("Comic book", 0);
     } else if (zip_type_is(m, n, "image/openraster") || zip_type_is(m, n, "application/x-krita") || ext_is(e, "ora kra krz")) {
         open_merged(path);
@@ -3872,7 +4224,7 @@ static void open_by_type(const char *path, const char *name, int dir, const unsi
         if (doc) {
             /* MuPDF's own. */
         } else if (h == &cbz_document_handler) {
-            doc = open_comic(path, COMIC_MUPDF);
+            doc = open_comic(path, COMIC_MUPDF, open_mode);
             set_format("Comic book", 0);
         } else if (h == &txt_document_handler) {
             open_text(path);
@@ -3888,7 +4240,7 @@ static void open_by_type(const char *path, const char *name, int dir, const unsi
             set_format("DVI", 1);
             doc = open_dvi(path, r);
         } else if (ext_is(e, "cbz cbr cb7 cbt zip rar 7z tar")) {
-            doc = open_comic(path, COMIC_LIBARCHIVE);
+            doc = open_comic(path, COMIC_LIBARCHIVE, open_mode);
             set_format("Comic book", 0);
         } else if (magick_coder_name(name)) {
             open_converted(path, name, 0, 0);
@@ -3942,7 +4294,7 @@ static void finish_open(struct view_reply *r)
     snprintf(r->text, sizeof r->text, "%s\t%s", format, title);
 }
 
-static void op_open(const struct view_request *q, struct view_reply *r)
+static void op_open(const struct view_request *q, struct view_reply *r, struct out *o)
 {
     char name[PATH_MAX], fdpath[64];
     unsigned char m[4096];
@@ -3952,7 +4304,9 @@ static void op_open(const struct view_request *q, struct view_reply *r)
     open_w = q->ax;
     open_h = q->ay;
     open_em = q->bx;
+    open_mode = q->mode;
     snprintf(name, sizeof name, "%s", path);
+    snprintf(open_path, sizeof open_path, "%s", path);
     copy_text(title, sizeof title, base_name(path));
     /* Not blocking on a FIFO someone named. */
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
@@ -3984,6 +4338,11 @@ static void op_open(const struct view_request *q, struct view_reply *r)
     }
     open_by_type(path, name, S_ISDIR(st.st_mode), m, (size_t)n, r);
     if (!r->status) finish_open(r);
+    /* A comic book's pages' names, in their order. */
+    if (!r->status && comic) {
+        o->buf = fz_new_buffer(ctx, 4096);
+        for (int i = 0; i < comic->count; i++) put(o->buf, comic->names[i], strlen(comic->names[i]) + 1);
+    }
 }
 
 static void op_auth(const struct view_request *q, struct view_reply *r)
@@ -4030,6 +4389,94 @@ static void op_info(struct view_reply *r, struct out *o)
     fz_append_printf(ctx, o->buf, "Page size\t%.0f x %.0f points (%.0f x %.0f mm)\n", pw, ph, pw * 25.4f / 72, ph * 25.4f / 72);
     if (kind == MUPDF && pdf_specifics(ctx, doc)) pdf_fonts(o->buf, pdf_specifics(ctx, doc));
     r->count = 0;
+}
+
+/* The image the document is: its EXIF, and (page 0 of one MuPDF reads) its
+ * pixels' size from its header. */
+static void image_info(int page_, struct exif *x, int *w, int *h)
+{
+    fz_buffer *b = fz_read_file(ctx, open_path);
+    fz_image *image = NULL;
+    fz_var(image);
+    fz_try(ctx) {
+        unsigned char *s;
+        size_t n = fz_buffer_storage(ctx, b, &s);
+        exif_read(s, n, x);
+        if (page_ == 0 && n >= 8 && fz_recognize_image_format(ctx, s) != FZ_IMAGE_UNKNOWN) {
+            image = fz_new_image_from_buffer(ctx, b);
+            uint8_t turn = fz_image_orientation(ctx, image);
+            *w = turn > 4 ? image->h : image->w;
+            *h = turn > 4 ? image->w : image->h;
+        }
+    }
+    fz_always(ctx) {
+        fz_drop_image(ctx, image);
+        fz_drop_buffer(ctx, b);
+    }
+    fz_catch(ctx) fz_rethrow(ctx);
+}
+
+/* VIEW_META: an image page's information, as Gwenview's Information panel
+ * has it: a comic book's page (its file), or the image the document is. */
+static void op_meta(const struct view_request *q, struct out *o)
+{
+    struct page_info info;
+    const char *name = comic ? comic->names[q->page] : open_path;
+    char v[256];
+    int w = 0, h = 0;
+    if (comic) {
+        comic_info(comic, q->page, &info);
+    } else {
+        memset(&info, 0, sizeof info);
+        info.size = -1;
+        info.x.flash = -1;
+        struct stat st;
+        if (data_fd < 0 && stat(open_path, &st) == 0) {
+            info.size = st.st_size;
+            info.mtime = st.st_mtime;
+        }
+        if (ext_is(extension(open_path), RAW_SUFFIXES)) {
+            raw_info(open_path, NULL, 0, &info.x);
+        } else {
+            image_info(q->page, &info.x, &w, &h);
+        }
+    }
+    o->buf = fz_new_buffer(ctx, 512);
+    put_info(o->buf, "Name", base_name(name));
+    if (info.size >= 0) fz_append_printf(ctx, o->buf, "File Size\t%lld\n", (long long)info.size);
+    exif_time(v, sizeof v, info.mtime);
+    put_info(o->buf, "Date Modified", exif_shown(v));
+    /* The picture's pixels, upright: else a comic book page's image, else
+     * the page at the 96 dots an inch MuPDF gives an image without them (the
+     * ones view-render converted). */
+    if (!w) {
+        load_page(q->page);
+        w = (int)lroundf((page_box.x1 - page_box.x0) * 96 / 72);
+        h = (int)lroundf((page_box.y1 - page_box.y0) * 96 / 72);
+    }
+    if (comic && ((comic_page *)page)->image) {
+        fz_image *image = ((comic_page *)page)->image;
+        uint8_t turn = fz_image_orientation(ctx, image);
+        w = turn > 4 ? image->h : image->w;
+        h = turn > 4 ? image->w : image->h;
+    }
+    if (w > 0 && h > 0) fz_append_printf(ctx, o->buf, "Image Size\t%dx%d\n", w, h);
+    put_info(o->buf, "Exif.Photo.DateTimeOriginal", exif_shown(info.x.date));
+    put_info(o->buf, "Exif.Image.DateTime", exif_shown(info.x.date_file));
+    put_info(o->buf, "Exif.Image.Make", info.x.make);
+    put_info(o->buf, "Exif.Image.Model", info.x.model);
+    if (info.x.exposure > 0) {
+        if (info.x.exposure < 1) snprintf(v, sizeof v, "1/%.0f s", 1 / info.x.exposure);
+        else snprintf(v, sizeof v, "%.1f s", info.x.exposure);
+        put_info(o->buf, "Exif.Photo.ExposureTime", v);
+    }
+    if (info.x.fnumber > 0) {
+        snprintf(v, sizeof v, "F%.1f", info.x.fnumber);
+        put_info(o->buf, "Exif.Photo.FNumber", v);
+    }
+    if (info.x.iso > 0) fz_append_printf(ctx, o->buf, "Exif.Photo.ISOSpeedRatings\t%d\n", info.x.iso);
+    if (info.x.focal > 0) fz_append_printf(ctx, o->buf, "Exif.Photo.FocalLength\t%.1f mm\n", info.x.focal);
+    if (info.x.flash >= 0) fz_append_printf(ctx, o->buf, "Exif.Photo.Flash\t%d\n", info.x.flash);
 }
 
 static void op_export(struct out *o)
@@ -4150,7 +4597,7 @@ static void content_bounds(const struct view_request *q, struct view_reply *r, s
 static void dispatch(const struct view_request *q, struct view_reply *r, struct out *o)
 {
     if (q->op == VIEW_OPEN) {
-        op_open(q, r);
+        op_open(q, r, o);
         return;
     }
     if (q->op == VIEW_AUTH) {
@@ -4239,6 +4686,11 @@ static void dispatch(const struct view_request *q, struct view_reply *r, struct 
         break;
     case VIEW_INFO:
         op_info(r, o);
+        break;
+    case VIEW_META:
+        if (!has_page) fail(r, EINVAL, "No page %d", q->page);
+        else if (kind != MUPDF || (!comic && strcmp(format, "Image") && strcmp(format, "TIFF"))) fail(r, ENOTSUP, "%s is not an image", format);
+        else op_meta(q, o);
         break;
     case VIEW_EXPORT:
         if (!has_text) fail(r, ENOTSUP, "%s has no text", format);

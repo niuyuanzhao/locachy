@@ -18,6 +18,11 @@ link=(-Wl,--gc-sections)
 "$out/settings" "$out/settings-fixtures"
 "${cc[@]}" "$src/tools/test-monitor-layout.c" "${link[@]}" -o "$out/monitor-layout"
 "$out/monitor-layout"
+"${cc[@]}" "$src/tools/test-packages.c" "$src/base/ui.c" "$src/base/rc.c" "${link[@]}" -o "$out/packages"
+timeout 180 "$out/packages" "$out/packages-fixtures"
+"${cc[@]}" $(pkg-config --cflags json-c) "$src/tools/test-installer.c" "$src/base/ui.c" "${link[@]}" \
+    $(pkg-config --libs json-c) -o "$out/installer"
+timeout 60 "$out/installer" "$out/installer-fixtures"
 "${cc[@]}" "$src/progs/keytable.c" $(pkg-config --cflags --libs xkbcommon) -o "$out/keytable"
 "${cc[@]}" "$src/tools/test-keytable.c" "${link[@]}" -o "$out/keytable-test"
 LC_ALL=C.UTF-8 "$out/keytable-test" "$out/keytable" "$out/keytable-fixtures"
@@ -49,10 +54,12 @@ done
     "${link[@]}" -o "$out/bar-keyboard"
 "$out/bar-keyboard"
 for test in gestures libinput audio-packages audio-client face-camera container-migration kernel-choice \
-            boot-kernel root-boot-unit; do
+            boot-kernel root-boot-unit install declare-packages efi init-unlock libpaper; do
     python3 -B "$src/tools/test-$test.py" "$out"
 done
-python3 -B "$src/tools/test-xwayland.py" # takes no scratch directory
+for test in xwayland tpm; do # no scratch directory
+    python3 -B "$src/tools/test-$test.py"
+done
 bash "$src/tools/test-timezone-client.sh" "$out/timezone"
 bash "$src/tools/test-settings-tor.sh" "$out/settings-tor"
 printf '%s\n' 'PASS device-free interaction regressions; real KMS/libinput/IME hardware acceptance remains separate.'

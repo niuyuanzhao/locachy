@@ -31,7 +31,7 @@ static const char normal[] = "\0\0331234567890-=\b\tqwertyuiop[]\n\0asdfghjkl;'`
 static const char shifted[] = "\0\033!@#$%^&*()_+\b\tQWERTYUIOP{}\n\0ASDFGHJKL:\"~\0|ZXCVBNM<>?\0*\0 ";
 
 /* The layout's key table, written by keytable from rc.conf's keymap: for
- * each key and state (1 Shift, 2 Caps Lock, 4 AltGr) its keysym and the
+ * each key and state (1 Shift, 2 Caps Lock, 4 AltGr, 8 Num Lock) its keysym and the
  * character it types (Unicode, 0 for none), its keysym name (Henkan_Mode),
  * the keys that are AltGr, the dead keys' sequences, and the layout's X
  * names (the shared display's: locachy-seat). Read at the first key, again
@@ -49,7 +49,8 @@ static const char shifted[] = "\0\033!@#$%^&*()_+\b\tQWERTYUIOP{}\n\0ASDFGHJKL:\
 #ifndef KEYS_TABLES
 #define KEYS_TABLES "/usr/local/share/locachy/keymaps"
 #endif
-#define NSTATES 8
+#define NSTATES 16
+#define ROLE_NUM 64
 #define MAX_SEQUENCE 6
 #define MAX_RESULT 4
 struct sequence {
@@ -93,6 +94,7 @@ static int count;
 static unsigned char modifiers[MAX_KEYBOARDS][256], unowned_modifiers[256];
 static int shift, ctrl, alt, meta, altgr;
 static int caps; /* Caps Lock locked: letters in capitals (with Shift, small) */
+static int num;  /* Num Lock: the key table's resolved keypad symbols */
 static int caps_code; /* a key that was Caps Lock only with Shift when pressed (jp's Eisu) */
 static int last_code; /* the last key pressed, not a modifier */
 static struct table *last_table = &tables[0]; /* that key's keyboard's */
@@ -133,6 +135,7 @@ static void us_states(struct table *tb)
     tb->modifier_role[KEY_LEFTALT] = tb->modifier_role[KEY_RIGHTALT] = KEYS_ALT;
     tb->modifier_role[KEY_LEFTMETA] = tb->modifier_role[KEY_RIGHTMETA] = KEYS_META;
     tb->modifier_role[KEY_CAPSLOCK] = KEYS_CAPS;
+    tb->modifier_role[KEY_NUMLOCK] = ROLE_NUM;
     for (size_t i = 0; i < sizeof normal - 1; i++) {
         uint32_t n = (unsigned char)normal[i], u = (unsigned char)shifted[i];
         int letter = isalpha((int)n);
@@ -178,7 +181,16 @@ static int load_table(struct table *tb, const char *path)
             for (int st = 0; st < NSTATES; st++) {
                 unsigned sym, ch;
                 int used;
-                if (sscanf(line + at, " %x:%x%n", &sym, &ch, &used) != 2) break;
+                if (sscanf(line + at, " %x:%x%n", &sym, &ch, &used) != 2) {
+                    /* Tables made before Num Lock had eight states. */
+                    if (st == 8) {
+                        for (int t = 8; t < NSTATES; t++) {
+                            got_syms[t][code] = got_syms[t - 8][code];
+                            got_chars[t][code] = got_chars[t - 8][code];
+                        }
+                    }
+                    break;
+                }
                 got_syms[st][code] = sym;
                 got_chars[st][code] = ch < 0x110000 ? ch : 0;
                 at += used;
@@ -186,7 +198,7 @@ static int load_table(struct table *tb, const char *path)
             memcpy(names[code], name, sizeof name);
             keys++;
         } else if (sscanf(line, "modifier %d %d", &code, &at) == 2) {
-            if (code > 0 && code < 256 && at >= 0 && at < 64) {
+            if (code > 0 && code < 256 && at >= 0 && at < 128) {
                 roles[code] = (unsigned char)at;
                 explicit_roles = 1;
             }
@@ -926,7 +938,8 @@ static int translate(struct table *tb, int code, int repeat)
         }
         return act;
     }
-    int bare = !ctrl && !alt && !meta && !name_any, st = (shift ? 1 : 0) | (caps ? 2 : 0) | (altgr ? 4 : 0);
+    int bare = !ctrl && !alt && !meta && !name_any;
+    int st = (shift ? 1 : 0) | (caps ? 2 : 0) | (altgr ? 4 : 0) | (num ? 8 : 0);
     if (bare && npending > 0 && code > 0 && code < 256) {
         return compose_feed(tb, tb->syms[st][code]); /* any key goes on with the sequence, or ends it */
     }
@@ -966,6 +979,20 @@ static int translate(struct table *tb, int code, int repeat)
     }
     if (ctrl && !alt && !shift && code >= KEY_1 && code <= KEY_0) {
         return K_CTRL_0 + (code == KEY_0 ? 0 : code - KEY_1 + 1);
+    }
+    /* The keysym already includes Num Lock, Shift and the layout. Keypad
+     * navigation is the ordinary navigation API to direct programs. */
+    switch (tb->syms[st][code]) {
+    case 0xff95: return K_BOL;  /* KP_Home */
+    case 0xff96: return K_LEFT;
+    case 0xff97: return K_UP;
+    case 0xff98: return K_RIGHT;
+    case 0xff99: return K_DOWN;
+    case 0xff9a: return K_PGUP;
+    case 0xff9b: return K_PGDN;
+    case 0xff9c: return K_EOL;
+    case 0xff9e: return K_INS;
+    case 0xff9f: return K_DEL;
     }
     uint32_t c = tb->chars[st & ~2][code];
     if (ctrl && (((c | 0x20) >= 'a' && (c | 0x20) <= 'z') || (c >= '[' && c <= '_'))) {
@@ -1037,6 +1064,10 @@ int keys_event(int fd)
     if (!role && ev.code == caps_code && caps_code) {
         role = KEYS_CAPS;
         if (ev.value == 0) caps_code = 0;
+    }
+    if (role == ROLE_NUM) {
+        if (ev.value == 1) num = !num;
+        return 0;
     }
     if (role && role != KEYS_CAPS) {
         unsigned char *held = device >= 0 ? modifiers[device] : unowned_modifiers;

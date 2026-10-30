@@ -127,15 +127,21 @@ class Install(unittest.TestCase):
     def test_tpm_advice_from_locachy_tpm_status(self):
         def status(st):
             return lambda command: json.dumps(st)
-        cases = [({"tpm_version": 0}, False, "no TPM"),
-                 ({"tpm_version": 1, "tpm_active": False}, False, "TPM 1.2 off in the firmware"),
-                 ({"tpm_version": 1, "tpm_active": True}, True, "TPM 1.2: a passphrase recommended"),
-                 ({"tpm_version": 2, "tpm_active": True, "secure_boot": False}, True, "Secure Boot off")]
-        for st, usable, said in cases:
+        cases = [({"tpm_version": 0}, False, "passphrase", "no TPM"),
+                 ({"tpm_version": 1, "tpm_active": False}, False, "passphrase", "TPM 1.2 off in the firmware"),
+                 ({"tpm_version": 1, "tpm_active": True}, True, "passphrase", "TPM 1.2: a passphrase recommended"),
+                 ({"tpm_version": 2, "tpm_active": True, "setup_mode": True}, True, "tpm",
+                  "only for LOCachy's signed boot images"),
+                 ({"tpm_version": 2, "tpm_active": True, "secure_boot": False}, True, "passphrase",
+                  "binds PCRs 0+7, Secure Boot off, the boot image unsigned"),
+                 ({"tpm_version": 2, "tpm_active": True, "secure_boot": True}, True, "passphrase",
+                  "binds PCRs 0+7, the boot image unsigned")]
+        for st, usable, recommended, said in cases:
             with mock.patch.object(i, "output", status(st)):
                 advice = i.tpm_advice()
-            self.assertEqual((advice[0], advice[1]), (usable, "passphrase"), st)
+            self.assertEqual((advice[0], advice[1]), (usable, recommended), st)
             self.assertIn(said, advice[2])
+            self.assertNotIn("PIN at", advice[2])
         def broken(command):
             raise subprocess.CalledProcessError(1, command)
         with mock.patch.object(i, "output", broken):
@@ -189,8 +195,11 @@ class Install(unittest.TestCase):
     def test_describe_lists_choices_defaults_and_disks_but_not_the_live_medium(self):
         with mock.patch.object(i, "output", self.block_output), \
              mock.patch.object(i, "cpu_model", lambda level: "ivybridge"), \
-             mock.patch.object(i, "tpm_advice", lambda: (True, "passphrase", "TPM 1.2: a passphrase recommended")):
+             mock.patch.object(i, "tpm_status", lambda: {"tpm_version": 1}), \
+             mock.patch.object(i, "host_security", lambda: {"id": "HSI:1 (v2.0.16)", "checks": []}), \
+             mock.patch.object(i, "tpm_advice", lambda st=None: (True, "passphrase", "TPM 1.2: a passphrase recommended")):
             d = json.loads(json.dumps(i.describe(i.make_parser())))
+        self.assertEqual(d["host_security"]["id"], "HSI:1 (v2.0.16)")
         self.assertEqual([x["path"] for x in d["disks"]], ["/dev/sda", "/dev/sdc"])
         sda = d["disks"][0]
         self.assertEqual((sda["model"], sda["tran"], sda["in_use"]), ("Samsung SSD", "sata", ""))
@@ -252,7 +261,8 @@ class Install(unittest.TestCase):
                                (["--timezone", "Mars/Olympus"], "timezone"), (["--features", "desktop,nope"], "module"),
                                (["--containers", "a b"], "container"), (["--machine", "x999"], "machine"),
                                (["--full-name", "A:B"], "colon"), (["--hibernate-after", "-1"], "seconds"),
-                               (["--tpm"], "needs --encrypt")):
+                               (["--tpm"], "needs --encrypt"),
+                               (["--secure-boot-microsoft"], "goes with --secure-boot")):
                 with self.assertRaisesRegex(ValueError, said, msg=argv):
                     i.check_choices(self.args(*argv))
             for text in ("", "\n", "two\nlines\n"):
@@ -414,7 +424,9 @@ class Install(unittest.TestCase):
             with mock.patch.dict(os.environ, {"LOCACHY_SOURCE": "bundled: could not fetch x (main): fatal: no"}), \
                  mock.patch.object(i, "output", self.block_output), \
                  mock.patch.object(i, "cpu_model", lambda level: "ivybridge"), \
-                 mock.patch.object(i, "tpm_advice", lambda: (False, "off", "no TPM")):
+                 mock.patch.object(i, "tpm_status", lambda: {"tpm_version": 1}), \
+                 mock.patch.object(i, "host_security", lambda: None), \
+                 mock.patch.object(i, "tpm_advice", lambda st=None: (False, "off", "no TPM")):
                 self.assertEqual(i.describe(i.make_parser())["source"],
                                  {"text": "this medium's own, 0123456789ab; could not fetch x (main): fatal: no",
                                   "not_newest": True})
@@ -488,6 +500,56 @@ class Install(unittest.TestCase):
             i.main()
         self.assertIn("Nothing to continue", err.getvalue())
 
+    def test_host_security_is_fwupds_own_report(self):
+        report = ("Host Security ID: \x1b[1mHSI:1 (v2.0.16)\x1b[0m\n\n\x1b[1mHSI-1\x1b[0m\n"
+                  "\u2714 BIOS firmware updates:     \x1b[32mEnabled\x1b[0m\n"
+                  "\u2718 Secure Boot:                \x1b[31mDisabled\x1b[0m\n"
+                  "\nThis system has a low HSI security level.\n")
+        seen = []
+        def fwupdmgr(command, **kw):
+            seen.append(command)
+            return subprocess.CompletedProcess(command, 0, report, "")
+        with mock.patch.object(i.shutil, "which", lambda name: "/usr/bin/" + name), \
+                mock.patch.object(i.subprocess, "run", fwupdmgr):
+            self.assertEqual(i.host_security(), {"id": "HSI:1 (v2.0.16)", "checks": [
+                "\u2714 BIOS firmware updates:     Enabled", "\u2718 Secure Boot:                Disabled"]})
+        self.assertEqual(seen, [["fwupdmgr", "security", "--no-unreported-check", "--no-security-fix",
+                                 "--no-reboot-check"]])
+        with mock.patch.object(i.shutil, "which", lambda name: None):
+            self.assertIsNone(i.host_security())
+
+    def test_secure_boot_keys_go_in_after_the_signed_image_is_on_the_esp(self):
+        """Keys made before the image (signed), enrolled once it is on the ESP;
+        TPM 2.0 then prepared for the first start with Secure Boot on, or bound
+        as without the keys when they did not go in."""
+        script = (SOURCE / "link/locachy-install").read_text()
+        self.assertLess(script.index('"/usr/local/bin/locachy-tpm", "secure-boot"])'), script.index("boot_cmd = "))
+        self.assertLess(script.index('shutil.copyfile(image, fallback / "BOOTX64.EFI")'),
+                        script.index("secure_boot_install(args, root, saved)"))
+        esp = self.root.parent / "esp"
+        esp.mkdir()
+        secret = Path(self.tmp.name) / "pw"
+        secret.write_text("correct horse")
+        for enrolled, status, want in ((0, {"tpm_version": 2}, "prepare"),
+                                       (1, {"tpm_version": 2, "own_keys_in_db": False}, "enroll"),
+                                       (1, {"tpm_version": 2, "own_keys_in_db": True}, "prepare")):
+            calls = []
+            def run(command, **kw):
+                calls.append((command, kw))
+                return subprocess.CompletedProcess(command, enrolled if "--enroll" in command else 0)
+            args = self.args("--encrypt", "--tpm", "--secure-boot", "--secure-boot-microsoft",
+                             "--luks-passphrase-file", str(secret))
+            with mock.patch.object(i, "run", run), mock.patch.object(i, "output", lambda c: json.dumps(status)), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                i.secure_boot_install(args, self.root, esp)
+            commands = [c for c, _ in calls]
+            self.assertEqual(commands[0], ["mount", "--bind", str(esp), str(self.root / "efi")])
+            self.assertEqual(commands[1], ["arch-chroot", str(self.root), "/usr/local/bin/locachy-tpm", "secure-boot",
+                                           "--enroll", "--microsoft"])
+            self.assertEqual(commands[2][3:5], [want, "--passphrase-stdin"])
+            self.assertEqual(calls[2][1]["input"], "correct horse\n")
+            self.assertEqual(commands[-1], ["umount", str(self.root / "efi")])
+
     def test_running_root_rejected_before_any_build(self):
         with self.assertRaisesRegex(ValueError, "running installation"):
             i.validate("/", "/efi")
@@ -499,6 +561,19 @@ class Install(unittest.TestCase):
         self.assertIn('"passwd", args.user', script)
         self.assertLess(script.index('"passwd", args.user'), script.index('destination.mkdir'))
         self.assertLess(script.index('if any(saved.iterdir())'), script.index('destination.mkdir'))
+
+    def test_customization_recognizes_multiple_manifest_names_without_duplicates(self):
+        conf = self.root / "etc/locachy"
+        conf.mkdir(parents=True, exist_ok=True)
+        original = "base cryptsetup\npipewire pipewire-alsa\tpipewire-pulse # audio\nwireplumber wiremix sof-firmware\n"
+        (conf / "packages").write_text(original)
+        (conf / "rc.conf").write_text('hibernate_after="30"\n')
+        args = type("Args", (), {"encrypt": True, "features": "audio", "containers": ""})()
+        with mock.patch.object(i, "update_source", return_value=("off", "main", "")):
+            self.assertFalse(i.apply_customizations(args, self.root))
+            self.assertFalse(i.apply_customizations(args, self.root))
+        self.assertEqual((conf / "packages").read_text(), original)
+        self.assertTrue((conf / "luks").is_file())
 
     def test_partitioning_luks2_and_customizations(self):
         calls = []

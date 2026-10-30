@@ -86,6 +86,18 @@ class AudioPackages(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(self.manifest.stat().st_mode), 0o640)
         self.assertEqual((self.manifest.stat().st_uid, self.manifest.stat().st_gid), (before.st_uid, before.st_gid))
 
+    def test_multiple_names_per_line_complete_audio_and_find_existing_firmware(self):
+        legacy = "base\npipewire pipewire-alsa\tpipewire-pulse # wireplumber in the next line\nwireplumber wiremix\n"
+        self.manifest.write_text(legacy)
+        self.assertTrue(self.migrate())
+        self.assertEqual(self.manifest.read_text().splitlines().count("sof-firmware"), 1)
+        self.marker.unlink()
+        declared = legacy + "other\tsof-firmware # already declared\n"
+        self.manifest.write_text(declared)
+        self.assertFalse(self.migrate())
+        self.assertEqual(self.manifest.read_text(), declared)
+        self.assertTrue(self.marker.is_file())
+
     def test_user_removal_after_migration_is_not_added_again(self):
         legacy = "base\n" + "\n".join(sorted(migration.LEGACY_AUDIO)) + "\n"
         self.manifest.write_text(legacy)

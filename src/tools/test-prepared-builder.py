@@ -4,6 +4,7 @@ remote recipe metadata/builds stay under the build user. No mounts/pacman."""
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import sys
 import unittest
 
@@ -43,6 +44,36 @@ class PreparedBuilder(m.LocalBuild):
         self.assertIn('pacman -Rdd --noscriptlet --noconfirm example', calls)
         self.assertIn('--assume-installed example=1-1', calls)
         self.assertTrue((self.handover / 'target-base-packages.txt').exists())
+
+    def test_declared_packages_are_in_every_build_and_contract_root(self):
+        """A library the update's tests need (libraw for view-render) and the
+        host lacks: installed after the target upgrade, before the root's
+        package list is taken, in builds and in the contracts' root alike."""
+        plan = self.root / 'plan'
+        plan.mkdir()
+        recipes = {'example': {'candidate': {'package_version': '1-1'}}}
+        (plan / 'plan.json').write_text(json.dumps({'recipes': recipes, 'missing': ['chmlib', 'libraw']}))
+        self.env['LOCACHY_BUILD_PREPARE'] = str(plan)
+        self.command('pacman', 'echo "pacman $*" >>"$TEST_LOG"; '
+                     'case "$1:${2:-}" in -T:installed) exit 0 ;; -T:*) exit 1 ;; '
+                     '-Sp:aur-tool) exit 1 ;; -Qq:) echo example ;; -Q:) echo "base 1" ;; *) exit 0 ;; esac')
+        self.command('bsdtar', 'case "$*" in *.PKGINFO*) printf "pkgname = example\\npkgver = 1-1\\n" ;; '
+                     '*.BUILDINFO*) printf "pkgname = example\\n" ;; *) exit 1 ;; esac')
+        for stage in (['--local', 'example'], ['--validate-prepared', str(plan)]):
+            self.log.write_text('')
+            result = subprocess.run(['bash', str(self.script)] + stage, env=self.env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            calls = self.log.read_text().splitlines()
+            install = [c for c in calls if c.startswith('pacman -S --needed --noscriptlet')]
+            self.assertEqual(install, ['pacman -S --needed --noscriptlet --noconfirm --assume-installed initramfs '
+                                       '--assume-installed example=1-1 chmlib libraw'], stage)
+            self.assertLess(calls.index(next(c for c in calls if c.startswith('pacman -Su '))), calls.index(install[0]))
+            self.assertLess(calls.index(install[0]), calls.index('pacman -Q'))
+        (plan / 'plan.json').write_text(json.dumps({'recipes': recipes}))
+        self.log.write_text('')
+        result = self.run_stage()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('pacman -S --needed --noscriptlet', self.log.read_text())
 
     def test_tracked_overlay_does_not_need_a_baseline_pkgbuild(self):
         text = m.SOURCE.read_text()

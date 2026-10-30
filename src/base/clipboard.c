@@ -275,7 +275,19 @@ int clipboard_freeze(const char *cgroup)
     if (milliseconds() >= until) goto done;
     /* The compositor writes freeze only while the gate transaction exists;
      * an expired/disconnected transaction cannot perform the side effect. */
-    if (guard_message(socket_fd, "commit", -1, "committed", until) == 0) result = CLIPBOARD_OK;
+    if (guard_message(socket_fd, "commit", -1, "committed", until) == 0) {
+        result = CLIPBOARD_OK;
+        /* Frozen. A copy that came between the capture and the freezer write
+         * (one the gate does not see, as an X11 copy through Xwayland), or a
+         * transfer the freeze cut short, gives way to the host's copy of the
+         * capture. The freeze stands whatever the answer (an older service
+         * does not know RESTORE). */
+        struct clipboard_message r = { .version = CLIPBOARD_VERSION, .operation = CLIPBOARD_RESTORE,
+            .generation = m.generation };
+        int none = -1;
+        clipboard_request(&r, &none, CLIPBOARD_TIMEOUT_MS);
+        if (none >= 0) close(none);
+    }
 done:
     if (socket_fd >= 0) close(socket_fd);
     close(dir);

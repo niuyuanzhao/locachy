@@ -517,6 +517,67 @@ static void client_reply(struct client *c, int status, int data)
     c->fd = -1;
 }
 
+/* The selections as a sync left them, kept (blob references, no second copy
+ * of the bytes) for a RESTORE of that sync's generation: a freeze asks for
+ * it after its freezer write, when a copy that came in between, or one the
+ * freeze cut short, would otherwise stand. Dropped after HOLD_MS. */
+#define HOLD_MS 10000
+static struct held {
+    struct contents saved;
+    int present;
+    uint64_t revision;
+} held[CLIPBOARD_SELECTIONS];
+static uint64_t held_generation;
+static int64_t held_until;
+static int holding;
+
+static void hold_release(void)
+{
+    for (int i = 0; i < CLIPBOARD_SELECTIONS; i++) contents_drop(&held[i].saved);
+    holding = 0;
+}
+
+static void hold(void)
+{
+    hold_release();
+    for (int i = 0; i < CLIPBOARD_SELECTIONS; i++) {
+        struct selection *sel = &selections[i];
+        for (size_t f = 0; f < sel->saved.count; f++) {
+            if (add_format(&held[i].saved, sel->saved.formats[f].mime, sel->saved.formats[f].blob) < 0) {
+                hold_release();
+                return;
+            }
+        }
+        held[i].present = sel->present;
+        held[i].revision = sel->revision;
+    }
+    held_generation = generation;
+    held_until = now() + HOLD_MS;
+    holding = 1;
+}
+
+static int restore(uint64_t at)
+{
+    if (!holding || held_generation != at) return CLIPBOARD_FAILED;
+    for (int i = 0; i < CLIPBOARD_SELECTIONS; i++) {
+        struct selection *sel = &selections[i];
+        if (sel->revision == held[i].revision && !sel->offer && !sel->failed) continue;
+        offer_drop(sel->offer);
+        sel->offer = NULL;
+        contents_drop(&sel->saved);
+        sel->saved = held[i].saved;
+        memset(&held[i].saved, 0, sizeof held[i].saved);
+        sel->present = held[i].present;
+        sel->failed = 0;
+        sel->revision++;
+        generation++;
+        sel->needs_publish = 1;
+        publish(i);
+    }
+    hold_release();
+    return CLIPBOARD_OK;
+}
+
 static void serve_client(struct client *c)
 {
     char space[CMSG_SPACE(sizeof(int) * 8)] = { 0 };
@@ -613,6 +674,9 @@ static void serve_client(struct client *c)
             c->syncing = 1;
         } else c->synced = 1;
         goto done;
+    case CLIPBOARD_RESTORE:
+        status = restore(c->message.generation);
+        break;
     case CLIPBOARD_STATUS:
         c->message.generation = generation;
         c->message.length = display && device ? 1 : 0;
@@ -659,6 +723,7 @@ static void service_barriers(void)
             continue;
         }
         c->message.generation = generation;
+        hold();
         client_reply(c, CLIPBOARD_OK, -1);
     }
 }
@@ -681,6 +746,7 @@ static void accept_client(int listener)
 static void sweep(void)
 {
     int64_t t = now();
+    if (holding && t >= held_until) hold_release();
     for (int i = 0; i < CLIPBOARD_SELECTIONS; i++) {
         struct selection *sel = &selections[i];
         if (sel->offer && t >= sel->offer->until) {

@@ -21,8 +21,14 @@
 # Then, when the ESP is mounted (/efi; not in make-root.sh's chroot, which
 # takes the image from there): EFI/locachy/locachy.efi and the firmware's
 # fallback EFI/BOOT/BOOTX64.EFI become the new image, the one in use kept as
-# EFI/locachy/locachy-prev.efi.
+# EFI/locachy/locachy-prev.efi. locachy-efi maintains the formal NVRAM entry
+# without changing an existing BootOrder; --register-only repairs just that.
 set -eu
+
+# Repair only the formal UEFI entry, without rebuilding or changing the image.
+if [ "${1:-}" = --register-only ]; then
+    exec /usr/local/bin/locachy-efi --esp /efi
+fi
 
 lib=/usr/local/lib/locachy
 boot=$lib/boot
@@ -134,6 +140,14 @@ EOF
             printf 'file /usr/lib/%s %s 0755 0 0\n' "$(basename "$tss")" "$(realpath "$tss")" >>"$work/initramfs.list"
             bins="$bins $tss"
         done
+        # Process 1 measures the boot phases into PCR 11 with it, as
+        # systemd-pcrphase-initrd.service does: TPM keys sealed to the signed
+        # enter-initrd value open only until it measures leave-initrd.
+        if [ -x /usr/lib/systemd/systemd-pcrextend ]; then
+            printf 'file /usr/lib/systemd/systemd-pcrextend /usr/lib/systemd/systemd-pcrextend 0755 0 0\n' \
+                >>"$work/initramfs.list"
+            bins="$bins /usr/lib/systemd/systemd-pcrextend"
+        fi
     fi
     ldd $bins 2>/dev/null | sed -n 's/.*=> \([^ ]*\) (.*/\1/p; s/^[[:space:]]*\(\/[^ ]*\) (.*/\1/p' | sort -u |
     while read -r so; do
@@ -190,14 +204,34 @@ if [ -f /etc/locachy/keyboards.conf ]; then
         [ -f "$t" ] && printf 'file %s %s 0644 0 0\n' "$t" "$t" >>"$work/initramfs.list"
     done
 fi
+# The file systemd's tools take as "this is an initrd": the TPM token then
+# also looks for the boot image's PCR signature in /.extra, where the stub
+# puts it.
+printf 'NAME="LOCachy initramfs"\n' >"$work/initrd-release"
+printf 'dir /etc 0755 0 0\nfile /etc/initrd-release %s 0644 0 0\n' "$work/initrd-release" >>"$work/initramfs.list"
 "$lib/gen_init_cpio" "$work/initramfs.list" | gzip -9 >"$boot/initramfs.img.new"
 
 # The unified image, as the Arch Wiki's ukify section makes it: the microcode
-# initrds before the initramfs; unsigned (no Secure Boot keys here).
+# initrds before the initramfs. With this machine's own keys (locachy-tpm
+# secure-boot) it is signed for Secure Boot (sbctl's db key), and carries the
+# PCR 11 value it measures to up to process 1's enter-initrd, signed with the
+# PCR key: TPM keys bound to that public key open under this image and any
+# later one so signed, in the initramfs only.
+sbkey=/var/lib/sbctl/keys/db/db.key sbcert=/var/lib/sbctl/keys/db/db.pem
+pcrkey=/etc/systemd/tpm2-pcr-private-key.pem pcrpub=/etc/systemd/tpm2-pcr-public-key.pem
 set --
 for u in $microcode; do
     set -- "$@" --initrd="$u"
 done
+if [ -f "$sbkey" ] && [ -f "$sbcert" ]; then
+    # The kernel inside is covered by the image's signature (the stub starts
+    # it from the verified image); systemd-sbsign signs the image only.
+    set -- "$@" --signtool=systemd-sbsign --secureboot-private-key="$sbkey" --secureboot-certificate="$sbcert" \
+        --no-sign-kernel
+fi
+if [ -f "$pcrkey" ] && [ -f "$pcrpub" ]; then
+    set -- "$@" --pcr-private-key="$pcrkey" --pcr-public-key="$pcrpub" --phases=enter-initrd
+fi
 ukify build --linux="$kernel" "$@" --initrd="$boot/initramfs.img.new" --cmdline="$cmdline" \
     --uname="$version" --output="$boot/locachy.efi.new" >"$work/ukify.log" 2>&1 ||
     { cat "$work/ukify.log" >&2; echo "locachy-boot: ukify failed; the boot files are left as they are" >&2; exit 1; }
@@ -207,9 +241,19 @@ done
 # What the boot loader era left (GRUB's files): not made any more.
 rm -f "$boot/vmlinuz.efi" "$boot/grub.cfg" "$boot/grubx64.efi" "$boot/intel-ucode.img" "$boot/amd-ucode.img"
 echo "locachy-boot: kernel $version, microcode:${microcode:- none}, command line: $cmdline"
+signed="unsigned"
+[ ! -f "$sbkey" ] || signed="signed for Secure Boot"
+[ ! -f "$pcrkey" ] || signed="$signed, PCR 11 policy signed"
+echo "locachy-boot: the image is $signed"
 
+# An old directory under /efi is not a mounted ESP. Do not replace files on
+# the root filesystem if the real ESP could not be mounted.
+if [ "$(findmnt --noheadings --raw --mountpoint /efi --types vfat --output TARGET 2>/dev/null)" != /efi ]; then
+    echo "locachy-boot: no FAT ESP mounted at /efi: the image is in $boot; ESP files and NVRAM left untouched"
+    exit 0
+fi
 if [ ! -d "$esp/locachy" ]; then
-    echo "locachy-boot: no $esp/locachy mounted: the image is in $boot"
+    echo "locachy-boot: no $esp/locachy installed: the image is in $boot"
     exit 0
 fi
 [ -d "/usr/lib/modules/$version" ] || { echo "locachy-boot: no modules for $version; the ESP is left as it is" >&2; exit 1; }
@@ -225,3 +269,6 @@ for f in vmlinuz initramfs grub grubx64 intel-ucode amd-ucode; do
 done
 sync
 echo "locachy-boot: $esp: $(cd "$esp" && ls locachy BOOT | tr '\n' ' ')"
+if ! /usr/local/bin/locachy-efi --esp /efi; then
+    echo "locachy-boot: image updated, UEFI entry not ready; fallback retained (locachy-boot --register-only retries)" >&2
+fi

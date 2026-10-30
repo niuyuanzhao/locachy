@@ -424,7 +424,7 @@ static void test_lifecycle(void)
     fail_map = 0;
     assert(screen_take(8));
     screen_release();
-    /* One visible output, and later a different size, retain the logical canvas. */
+    /* A different output resizes the canvas; an unchanged one keeps it. */
     single_output = 1;
     assert(screen_take(8) && noutputs == 1 && outputs[0].conn_id == 102);
     lease_calls = 0;
@@ -434,11 +434,29 @@ static void test_lifecycle(void)
     single_output = 0;
     external_only = disconnected = 1;
     assert(screen_take(8) && noutputs == 1 && outputs[0].conn_id == 101);
-    assert(outputs[0].mode.hdisplay == 12 && width == 8 && height == 6 && shadow == saved);
+    assert(outputs[0].mode.hdisplay == 12 && width == 12 && height == 10);
+    assert(cols == 6 && rows == 4 && bar_h == 3 && shadow[0] == 0);
+    saved = shadow;
+    shadow[0] = 0x654321;
+    screen_release();
+    assert(screen_take(8) && shadow == saved && shadow[0] == 0x654321);
     screen_release();
     external_only = disconnected = 0;
     assert(screen_refresh() == 1 && card == 7 && noutputs == 2);
-    assert(shadow == saved && width == 8 && height == 6);
+    assert(width == 8 && height == 6 && cols == 4 && rows == 2 && shadow[0] == 0);
+    saved = shadow;
+    puts("PASS canvas follows the leased output size and preserves unchanged geometry");
+    screen_release();
+    external_only = disconnected = 1;
+    snprintf(font_fallback, sizeof font_fallback, "%s", "/nonexistent/font.psf");
+    assert(!screen_take(8) && width == 8 && height == 6 && shadow == saved && card == -1);
+    snprintf(font_fallback, sizeof font_fallback, "%s", test_font);
+    assert(screen_take(8) && width == 12 && height == 10);
+    screen_release();
+    external_only = disconnected = 0;
+    assert(screen_take(8) && width == 8 && height == 6);
+    saved = shadow;
+    puts("PASS failed resize keeps the old canvas; a later take can retry safely");
     lease_calls = 0; reject_multi = 0;
     assert(screen_lend(&lessee) == 9 && active_lessee == 42);
     master_busy = 1;
@@ -516,6 +534,7 @@ static void test_lifecycle(void)
     assert(nasked == 2 && strstr(asked[0], "/ter-u12b.psf") && strstr(asked[1], "/ter-u12n.psf"));
     serve_terminus = 0;
     scale_lines = 0;
+    saved = shadow;
     assert(screen_extended(1) == 1 && screen_is_extended() && screen_output_count() == 2);
     assert(screen_output_current() == 0);
     extended_conf = 1;
