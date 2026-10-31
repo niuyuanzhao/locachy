@@ -157,7 +157,7 @@ struct pane {
     char search_root[PATH_MAX];
     char search_query[128];
     struct file *list;
-    int nlist, nhidden, cap, sel, top, view, sort, desc;
+    int nlist, nhidden, cap, sel, top, follow_sel, view, sort, desc;
     int zoom[VIEWS];
     char filter[128];
     struct place_visit back[MAX_HISTORY], fwd[MAX_HISTORY];
@@ -1217,6 +1217,8 @@ static void load_pane(struct pane *p, const char *keep)
 static void load_dir(const char *keep)
 {
     load_pane(P, keep);
+    if (!keep || !keep[0]) P->top = 0;
+    P->follow_sel = keep && keep[0];
 }
 
 static const char *selected_name(const struct pane *p)
@@ -1459,6 +1461,7 @@ static int go_pane(struct pane *p, const char *dir, const char *keep, int record
     msg_sticky = 0;
     load_pane(p, keep);
     p->top = 0;
+    p->follow_sel = keep && keep[0];
     return 0;
 }
 
@@ -1532,6 +1535,8 @@ static void pane_like(struct pane *to, const struct pane *p)
         snprintf(to->cwd, sizeof to->cwd, "%s", p->cwd);
     }
     to->sel = p->sel < to->nlist ? p->sel : 0;
+    to->top = p->top;
+    to->follow_sel = 1;
 }
 
 static void set_active(void)
@@ -2443,11 +2448,11 @@ static void pane_grid(const struct pane *p, int cols, int nrows, int *grid_cols,
 {
     int z = clampi(p->zoom[p->view], 0, zoom_max[p->view]);
     if (p->view == VIEW_ICONS) {
-        static const int tw[] = { 10, 12, 14, 16, 20, 24, 28 }, th[] = { 3, 3, 4, 4, 5, 6, 7 };
+        static const int tw[] = { 10, 12, 14, 16, 20, 24, 28 }, th[] = { 4, 4, 5, 5, 6, 7, 8 };
         *tile_cols = tw[z] < cols ? tw[z] : cols;
         *tile_rows = th[z];
     } else if (p->view == VIEW_COMPACT) {
-        static const int tw[] = { 20, 26, 34 };
+        static const int tw[] = { 22, 30, 38 };
         *tile_cols = tw[z] < cols ? tw[z] : cols;
         *tile_rows = z == 2 ? 2 : 1;
     } else {
@@ -2461,21 +2466,48 @@ static void pane_grid(const struct pane *p, int cols, int nrows, int *grid_cols,
     if (*view_rows < 1) *view_rows = 1;
 }
 
+/* Scroll unit (items per row in Icons/Details, items per column in Compact)
+ * and visible span (rows in Icons/Details, columns in Compact). */
+static void pane_units(const struct pane *p, int gc, int vr, int *unit, int *span)
+{
+    if (p->view == VIEW_COMPACT) {
+        *unit = vr;
+        *span = gc;
+    } else {
+        *unit = gc;
+        *span = vr;
+    }
+}
+
+static void pane_scroll_px(const struct pane *p, int gc, int tc, int tr, int vr, int *sx, int *sy)
+{
+    if (p->view == VIEW_COMPACT) {
+        *sx = (p->top / vr) * tc * cell_w;
+        *sy = 0;
+    } else {
+        *sx = 0;
+        *sy = (p->top / gc) * tr * cell_h;
+    }
+}
+
 static void clamp_scroll(struct pane *p, int which)
 {
-    int col, row, cols, nrows, gc, tc, tr, vr;
+    int col, row, cols, nrows, gc, tc, tr, vr, unit, span;
     pane_area(p, which, &col, &row, &cols, &nrows);
     pane_grid(p, cols, nrows, &gc, &tc, &tr, &vr);
+    pane_units(p, gc, vr, &unit, &span);
     p->sel = clampi(p->sel, 0, p->nlist > 0 ? p->nlist - 1 : 0);
-    int sr = p->sel / gc, tr0 = p->top / gc;
-    if (drag.mode != DRAG_BAND || drag.pane != which) {
-        if (sr < tr0) tr0 = sr;
-        if (sr >= tr0 + vr) tr0 = sr - vr + 1;
+    int u0 = p->top / unit;
+    if (p->follow_sel && (drag.mode != DRAG_BAND || drag.pane != which)) {
+        int su = p->sel / unit;
+        if (su < u0) u0 = su;
+        if (su >= u0 + span) u0 = su - span + 1;
+        p->follow_sel = 0;
     }
-    int max_row = p->nlist > 0 ? (p->nlist - 1) / gc : 0;
-    if (tr0 > max_row) tr0 = max_row;
-    if (tr0 < 0) tr0 = 0;
-    p->top = tr0 * gc;
+    int total = p->nlist > 0 ? (p->nlist - 1) / unit + 1 : 0;
+    int max_u = total > span ? total - span : 0;
+    u0 = clampi(u0, 0, max_u);
+    p->top = u0 * unit;
 }
 
 /* What kind of icon an item gets, from its name (and dir/exec). */
@@ -2527,7 +2559,7 @@ static void frame_px(int x, int y, int w, int h, uint32_t rgb)
 
 /* An icon drawn in the cell box (col, row, cols, rows): a folder with its
  * tab, or a page with its folded corner and a badge of its kind. */
-static void draw_icon(int col, int row, int cols, int rows_box, const struct file *f, uint32_t bg)
+static void draw_icon(int col, int row, int cols, int rows_box, const struct file *f, uint32_t bg, int on)
 {
     static const uint32_t ink[] = {
         [KIND_FOLDER] = 0x58A8F0, [KIND_FILE] = 0x90A0B0,  [KIND_TEXT] = 0x78B890,
@@ -2567,10 +2599,12 @@ static void draw_icon(int col, int row, int cols, int rows_box, const struct fil
             screen_fill_px(x + 3, y + 3, pw - fold - 3, h - band - 5, 0xB8E0C8);
         }
     }
-    if (f->marked) {
-        screen_text(col, row, "*", ACCENT, bg);
-    } else if (f->link) {
-        screen_text(col + cols - 1, row + rows_box - 1, "@", ACCENT, bg);
+    if (cols >= 6) {
+        if (f->marked) {
+            screen_text(col, row, "*", on ? BG : ACCENT, bg);
+        } else if (f->link) {
+            screen_text(col + cols - 1, row + rows_box - 1, "@", on ? BG : ACCENT, bg);
+        }
     }
 }
 
@@ -2673,13 +2707,76 @@ static void relative_search_dir(const struct pane *p, const struct file *f, char
     }
 }
 
+static void compact_sub(struct pane *p, int i, char *out, size_t size)
+{
+    struct file *f = &p->list[i];
+    if (f->dir) {
+        int cnt = dir_items(p, f, i);
+        if (cnt >= 0) snprintf(out, size, P_("%d item", "%d items", cnt), cnt);
+        else snprintf(out, size, "%s", _("Folder"));
+    } else {
+        human(f->size, out, size);
+    }
+}
+
+/* Item i's tile origin (tx, ty) and active content box (cx, cy, cw, ch) in
+ * pane p's document cell coordinates, leaving surrounding cells as HIT_AREA. */
+static void item_box(struct pane *p, int cols, int gc, int tc, int tr, int vr, const struct details_cols *dc,
+                     int i, int *tx, int *ty, int *cx, int *cy, int *cw, int *ch)
+{
+    struct file *f = &p->list[i];
+    char label[300], cut[300];
+    snprintf(label, sizeof label, "%s%s", shown_name(f), f->dir ? "/" : "");
+    if (p->view == VIEW_ICONS) {
+        int r = i / gc, c = i % gc, pad_x = tc >= 6 ? 1 : 0;
+        *tx = c * tc;
+        *ty = r * tr;
+        *cx = *tx + pad_x;
+        *cy = *ty;
+        *cw = tc - 2 * pad_x;
+        int icon_rows = tr > 3 ? tr - 3 : 1;
+        size_t split = utf_fit(label, *cw);
+        int label_rows = label[split] && icon_rows + 2 <= tr - 1 ? 2 : 1;
+        *ch = icon_rows + label_rows;
+    } else if (p->view == VIEW_COMPACT) {
+        int c = i / vr, r = i % vr;
+        *tx = c * tc;
+        *ty = r * tr;
+        *cx = *tx;
+        *cy = *ty;
+        *ch = tr;
+        int max_lbl = tc > 6 ? tc - 5 : (tc > 3 ? tc - 3 : 1);
+        fit(cut, sizeof cut, label, max_lbl);
+        int w = utf_cells(cut, 0, strlen(cut));
+        if (tr > 1) {
+            char sub[32], scut[32];
+            compact_sub(p, i, sub, sizeof sub);
+            fit(scut, sizeof scut, sub, max_lbl);
+            int sw = utf_cells(scut, 0, strlen(scut));
+            if (sw > w) w = sw;
+        }
+        int max_w = tc > 2 ? tc - 2 : tc;
+        *cw = clampi(3 + w + 1, 4 < max_w ? 4 : max_w, max_w);
+    } else {
+        *tx = 0;
+        *ty = i * tr;
+        *cx = 0;
+        *cy = *ty;
+        *ch = tr;
+        fit(cut, sizeof cut, label, dc->name_w);
+        int w = utf_cells(cut, 0, strlen(cut));
+        *cw = clampi(3 + w + 1, 4 < cols ? 4 : cols, cols);
+    }
+}
+
 static void draw_pane(struct pane *p, int which)
 {
     int active = !side && tabs[cur_tab].active == which;
     uint32_t pane_bg = tabs[cur_tab].split && tabs[cur_tab].active != which ? PANE_BG : BG;
-    int col, row, cols, nrows, gc, tc, tr, vr;
+    int col, row, cols, nrows, gc, tc, tr, vr, unit, span;
     pane_area(p, which, &col, &row, &cols, &nrows);
     pane_grid(p, cols, nrows, &gc, &tc, &tr, &vr);
+    pane_units(p, gc, vr, &unit, &span);
     clamp_scroll(p, which);
     screen_fill(col, body_top(), cols, rows(), pane_bg);
     ui_hit(col, row, cols, nrows, HIT_AREA + which);
@@ -2697,38 +2794,62 @@ static void draw_pane(struct pane *p, int which)
     }
 
     int hit_base = HIT_FILE + which * HIT_PANE;
-    for (int i = p->top; i < p->nlist; i++) {
-        int k = i - p->top, r = k / gc, c = k % gc;
-        if (r >= vr) break;
+    int sx_cells = p->view == VIEW_COMPACT ? (p->top / vr) * tc : 0;
+    int sy_cells = p->view == VIEW_COMPACT ? 0 : (p->top / gc) * tr;
+    int limit = p->top + span * unit;
+    if (limit > p->nlist) limit = p->nlist;
+    for (int i = p->top; i < limit; i++) {
         struct file *f = &p->list[i];
-        int ix = col + c * tc, iy = row + r * tr, tw = p->view == VIEW_DETAILS ? cols : tc;
+        int tx, ty, cx, cy, cw, ch;
+        item_box(p, cols, gc, tc, tr, vr, &dc, i, &tx, &ty, &cx, &cy, &cw, &ch);
+        int ix = col + tx - sx_cells, iy = row + ty - sy_cells;
+        int scx = col + cx - sx_cells, scy = row + cy - sy_cells;
         int on = active && i == p->sel;
         uint32_t bg = on ? ACCENT : f->marked ? MARK : pane_bg;
         uint32_t fg = on ? BG : f->dir ? ACCENT : f->exec ? 0x90E890 : FG;
         char label[300], cut[300], line[1024];
         snprintf(label, sizeof label, "%s%s", shown_name(f), f->dir ? "/" : "");
-        screen_fill(ix, iy, tw, tr, bg);
 
         if (p->view == VIEW_ICONS) {
-            draw_icon(ix + 1, iy, tw - 2, tr - 2, f, bg);
-            size_t split = utf_fit(label, tw - 2);
-            if (!label[split]) {
-                int w = utf_cells(label, 0, split);
-                screen_text(ix + (tw - w) / 2, iy + tr - 2, label, fg, bg);
+            int icon_rows = tr > 3 ? tr - 3 : 1;
+            screen_fill(scx, scy, cw, ch, bg);
+            draw_icon(scx, scy, cw, icon_rows, f, bg, on);
+            size_t split = utf_fit(label, cw);
+            if (ch - icon_rows <= 1) {
+                fit(cut, sizeof cut, label, cw);
+                int w = utf_cells(cut, 0, strlen(cut));
+                screen_text(scx + (cw - w) / 2, scy + icon_rows, cut, fg, bg);
             } else {
                 char first[300];
                 snprintf(first, sizeof first, "%.*s", (int)split, label);
-                screen_text(ix + 1, iy + tr - 2, first, fg, bg);
-                fit(cut, sizeof cut, label + split, tw - 2);
-                int w = utf_cells(cut, 0, strlen(cut));
-                screen_text(ix + (tw - w) / 2, iy + tr - 1, cut, fg, bg);
+                int w1 = utf_cells(first, 0, strlen(first));
+                screen_text(scx + (cw - w1) / 2, scy + icon_rows, first, fg, bg);
+                fit(cut, sizeof cut, label + split, cw);
+                int w2 = utf_cells(cut, 0, strlen(cut));
+                screen_text(scx + (cw - w2) / 2, scy + icon_rows + 1, cut, fg, bg);
+            }
+            if (!active && i == p->sel) {
+                frame_px(scx * cell_w, top_px + scy * cell_h, cw * cell_w, ch * cell_h, ACCENT);
             }
         } else if (p->view == VIEW_COMPACT) {
-            char mark = f->marked ? '*' : f->dir ? '/' : f->exec ? '*' : ' ';
-            fit(cut, sizeof cut, label, tw - 4);
-            snprintf(line, sizeof line, " %c %s", mark, cut);
-            screen_text(ix, iy, line, fg, bg);
+            int max_lbl = tc > 6 ? tc - 5 : (tc > 3 ? tc - 3 : 1);
+            screen_fill(scx, scy, cw, ch, bg);
+            draw_icon(scx, scy, 2 < cw ? 2 : cw, tr, f, bg, on);
+            char mark = f->marked ? '*' : f->link ? '@' : ' ';
+            fit(cut, sizeof cut, label, max_lbl);
+            snprintf(line, sizeof line, "%c %s", mark, cut);
+            screen_text(scx + 2, scy, line, fg, bg);
+            if (tr > 1) {
+                char sub[32], scut[32];
+                compact_sub(p, i, sub, sizeof sub);
+                fit(scut, sizeof scut, sub, max_lbl);
+                screen_text(scx + 3, scy + 1, scut, on ? BG : DIM, bg);
+            }
+            if (!active && i == p->sel) {
+                frame_px(scx * cell_w, top_px + scy * cell_h, cw * cell_w, ch * cell_h, ACCENT);
+            }
         } else {
+            screen_fill(ix, iy, cols, tr, bg);
             pad(cut, sizeof cut, label, dc.name_w);
             size_t len = (size_t)snprintf(line, sizeof line, "%c %s", f->marked ? '*' : ' ', cut);
             if (dc.size_w) {
@@ -2792,11 +2913,11 @@ static void draw_pane(struct pane *p, int which)
                 fit(cut, sizeof cut, sub, cols - 4);
                 screen_text(ix + 3, iy + 1, cut, on ? BG : DIM, bg);
             }
+            if (!active && i == p->sel) {
+                frame_px(ix * cell_w, top_px + iy * cell_h, cols * cell_w, tr * cell_h, ACCENT);
+            }
         }
-        if (!active && i == p->sel) {
-            frame_px(ix * cell_w, top_px + iy * cell_h, tw * cell_w, tr * cell_h, ACCENT);
-        }
-        ui_hit(ix, iy, tw, tr, hit_base + i);
+        ui_hit(scx, scy, cw, ch, hit_base + i);
     }
 }
 
@@ -2890,11 +3011,12 @@ static void draw_tabs(void)
 static void draw_rubberband(void)
 {
     struct pane *p = &tabs[cur_tab].pane[drag.pane];
-    int col, row, cols, nrows, gc, tc, tr, vr;
+    int col, row, cols, nrows, gc, tc, tr, vr, sx, sy;
     pane_area(p, drag.pane, &col, &row, &cols, &nrows);
     pane_grid(p, cols, nrows, &gc, &tc, &tr, &vr);
-    int ox = col * cell_w, oy = top_px + row * cell_h, scroll = (p->top / gc) * tr * cell_h;
-    int x0 = ox + drag.ax, y0 = oy + drag.ay - scroll, x1 = drag.x, y1 = drag.y;
+    pane_scroll_px(p, gc, tc, tr, vr, &sx, &sy);
+    int ox = col * cell_w, oy = top_px + row * cell_h;
+    int x0 = ox + drag.ax - sx, y0 = oy + drag.ay - sy, x1 = drag.x, y1 = drag.y;
     int rx = (x0 < x1 ? x0 : x1), ry = (y0 < y1 ? y0 : y1);
     int rw = abs(x1 - x0) + 1, rh = abs(y1 - y0) + 1;
     int min_x = ox, max_x = ox + cols * cell_w, min_y = oy, max_y = oy + nrows * cell_h;
@@ -3733,6 +3855,7 @@ static int take_folder_request(void)
                 P->sel = i;
             }
         }
+        P->follow_sel = 1;
     } else {
         parent_of(real, dir, sizeof dir);
         if (go(dir, base_name(real)) < 0) return 0;
@@ -3787,6 +3910,7 @@ static void apply_sort_choice(int col_sort)
         P->desc = 0;
     }
     sort_pane(P, keep);
+    P->follow_sel = 1;
     save_prefs();
 }
 
@@ -3836,6 +3960,7 @@ static void sort_menu(int col, int row)
         sort_case = !sort_case;
     }
     sort_pane(P, keep);
+    P->follow_sel = 1;
     save_prefs();
 }
 
@@ -3978,7 +4103,10 @@ static void archive_action(int code)
     }
     reload_all();
     for (int i = 0; name[0] && i < P->nlist; i++) {
-        if (strcmp(P->list[i].name, name) == 0) P->sel = i;
+        if (strcmp(P->list[i].name, name) == 0) {
+            P->sel = i;
+            P->follow_sel = 1;
+        }
     }
     if (status == 0) {
         report(0, "%s", code <= KEY_EXTRACT_TO ? _("Extracted.") : name[0] ? name : _("Compressed."));
@@ -4068,6 +4196,7 @@ static void zoom_pane(struct pane *p, int step)
 {
     int v = p->view;
     p->zoom[v] = step == 0 ? zoom_default[v] : clampi(p->zoom[v] + step, 0, zoom_max[v]);
+    p->follow_sel = 1;
     static const int px[] = { 16, 22, 32, 48, 64, 96, 128 };
     if (v == VIEW_ICONS) {
         report(0, _("Icons: %d px."), px[p->zoom[v]]);
@@ -4090,41 +4219,51 @@ static void drag_stop(void)
 static void band_mark(void)
 {
     struct pane *p = &tabs[cur_tab].pane[drag.pane];
-    int col, row, cols, nrows, gc, tc, tr, vr;
+    int col, row, cols, nrows, gc, tc, tr, vr, sx, sy;
     pane_area(p, drag.pane, &col, &row, &cols, &nrows);
     pane_grid(p, cols, nrows, &gc, &tc, &tr, &vr);
-    int ox = col * cell_w, oy = top_px + row * cell_h, scroll = (p->top / gc) * tr * cell_h;
-    int bx = drag.x - ox, by = drag.y - oy + scroll;
+    pane_scroll_px(p, gc, tc, tr, vr, &sx, &sy);
+    struct details_cols dc;
+    compute_details_cols(cols, &dc);
+    int ox = col * cell_w, oy = top_px + row * cell_h;
+    int bx = drag.x - ox + sx, by = drag.y - oy + sy;
     int x0 = drag.ax < bx ? drag.ax : bx, x1 = drag.ax > bx ? drag.ax : bx;
     int y0 = drag.ay < by ? drag.ay : by, y1 = drag.ay > by ? drag.ay : by;
-    int tw = (p->view == VIEW_DETAILS ? cols : tc) * cell_w, th = tr * cell_h;
     int first = -1, last = -1;
     for (int i = 0; i < p->nlist; i++) {
-        int ix0 = (i % gc) * tc * cell_w, iy0 = (i / gc) * th;
-        int hit = ix0 < x1 + 1 && ix0 + tw > x0 && iy0 < y1 + 1 && iy0 + th > y0;
+        int tx, ty, cx, cy, cw, ch;
+        item_box(p, cols, gc, tc, tr, vr, &dc, i, &tx, &ty, &cx, &cy, &cw, &ch);
+        int ix0 = cx * cell_w, iy0 = cy * cell_h, iw = cw * cell_w, ih = ch * cell_h;
+        int hit = ix0 <= x1 && ix0 + iw > x0 && iy0 <= y1 && iy0 + ih > y0;
         int was = i < drag.nbase ? drag.base[i] : 0;
         p->list[i].marked = (drag.mods & KEYS_CTRL) ? (hit ? !was : was) :
                             (drag.mods & KEYS_SHIFT) ? (was || hit) : hit;
         if (hit && first < 0) first = i;
         if (hit) last = i;
     }
-    if (last >= 0) p->sel = by >= drag.ay ? last : first;
+    if (last >= 0) {
+        int fwd = p->view == VIEW_COMPACT ? (bx > drag.ax || (bx == drag.ax && by >= drag.ay)) : (by >= drag.ay);
+        p->sel = fwd ? last : first;
+    }
 }
 
-/* One auto-scroll step while the rubberband is held at or past the top or
- * bottom of the pane's viewport. 1 if it scrolled. */
+/* One auto-scroll step while the rubberband is held at or past the viewport's
+ * scroll edge (left/right in Compact, top/bottom in Icons and Details). */
 static int band_autoscroll(void)
 {
     struct pane *p = &tabs[cur_tab].pane[drag.pane];
-    int col, row, cols, nrows, gc, tc, tr, vr;
+    int col, row, cols, nrows, gc, tc, tr, vr, unit, span;
     pane_area(p, drag.pane, &col, &row, &cols, &nrows);
     pane_grid(p, cols, nrows, &gc, &tc, &tr, &vr);
-    int tr0 = p->top / gc, max_row = p->nlist > 0 ? (p->nlist - 1) / gc + 1 - vr : 0;
-    if (max_row < 0) max_row = 0;
-    int next = drag.row <= row + 1 ? tr0 - 1 : drag.row >= row + nrows - 2 ? tr0 + 1 : tr0;
-    next = clampi(next, 0, max_row);
-    if (next == tr0) return 0;
-    p->top = next * gc;
+    pane_units(p, gc, vr, &unit, &span);
+    int u0 = p->top / unit, total = p->nlist > 0 ? (p->nlist - 1) / unit + 1 : 0;
+    int max_u = total > span ? total - span : 0;
+    int delta = p->view == VIEW_COMPACT
+        ? (drag.col <= col + 1 ? -1 : drag.col >= col + cols - 2 ? 1 : 0)
+        : (drag.row <= row + 1 ? -1 : drag.row >= row + nrows - 2 ? 1 : 0);
+    int next = clampi(u0 + delta, 0, max_u);
+    if (next == u0) return 0;
+    p->top = next * unit;
     band_mark();
     return 1;
 }
@@ -4215,12 +4354,16 @@ static int pointer_key(int *out_mods)
             zoom_pane(P, e->wheel > 0 ? 1 : -1);
             return -1;
         }
-        int col, row, cols, nrows, gc, tc, tr, vr;
+        int col, row, cols, nrows, gc, tc, tr, vr, unit, span;
         pane_area(P, which, &col, &row, &cols, &nrows);
         pane_grid(P, cols, nrows, &gc, &tc, &tr, &vr);
-        int step = 3 * e->wheel * gc;
-        P->sel = clampi(P->sel - step, 0, P->nlist > 0 ? P->nlist - 1 : 0);
-        P->top = clampi(P->top - step, 0, P->nlist > 0 ? P->nlist - 1 : 0);
+        pane_units(P, gc, vr, &unit, &span);
+        int step = (P->view == VIEW_DETAILS ? 3 : 1) * e->wheel;
+        int total = P->nlist > 0 ? (P->nlist - 1) / unit + 1 : 0;
+        int max_u = total > span ? total - span : 0;
+        int u0 = clampi(P->top / unit - step, 0, max_u);
+        P->top = u0 * unit;
+        P->follow_sel = 0;
         return -1;
     }
 
@@ -4295,6 +4438,7 @@ static int pointer_key(int *out_mods)
     if (id >= HIT_VIEW && id - HIT_VIEW < VIEWS) {
         if (e->button == BTN_LEFT) {
             P->view = id - HIT_VIEW;
+            P->follow_sel = 1;
             save_prefs();
         }
         return -1;
@@ -4348,6 +4492,9 @@ static int pointer_key(int *out_mods)
         set_active();
         if (i >= P->nlist) return 0;
         if (e->button == BTN_RIGHT) {
+            if (!P->list[i].marked && marked(P)) {
+                for (int k = 0; k < P->nlist; k++) P->list[k].marked = 0;
+            }
             P->sel = i;
             draw();
             int raw = file_menu(e->col, e->row, 1);
@@ -4366,29 +4513,23 @@ static int pointer_key(int *out_mods)
             clear = 1; /* cleared on release if it was not a drag */
         }
         P->sel = i;
+        P->follow_sel = 1;
         msg_sticky = 0;
         if (e->clicks == 2 && !(mods & (KEYS_SHIFT | KEYS_CTRL))) {
             drag_stop();
             return '\n';
         }
-        int pcol, prow, pcols, pnrows;
-        pane_area(P, which, &pcol, &prow, &pcols, &pnrows);
-        int name_end = pcol + 4 + utf_cells(shown_name(&P->list[i]), 0, strlen(shown_name(&P->list[i])));
-        if (P->view == VIEW_DETAILS && e->col > name_end) {
-            id = HIT_AREA + which; /* blank space to the right of the name: rubberband */
-        } else {
-            drag_stop();
-            drag.mode = DRAG_PENDING;
-            drag.pane = which;
-            drag.item = i;
-            drag.ax = e->col;
-            drag.ay = e->row;
-            drag.col = e->col;
-            drag.row = e->row;
-            drag.mods = mods;
-            drag.clear = clear;
-            return -1;
-        }
+        drag_stop();
+        drag.mode = DRAG_PENDING;
+        drag.pane = which;
+        drag.item = i;
+        drag.ax = e->col;
+        drag.ay = e->row;
+        drag.col = e->col;
+        drag.row = e->row;
+        drag.mods = mods;
+        drag.clear = clear;
+        return -1;
     }
     if (id >= HIT_AREA && id < HIT_AREA + 2) {
         int which = id - HIT_AREA;
@@ -4402,9 +4543,10 @@ static int pointer_key(int *out_mods)
             *out_mods = raw == 'D' ? KEYS_SHIFT : ((raw >> 16) & 0xF);
             return raw & 0xFFFF;
         }
-        int col, row, cols, nrows, gc, tc, tr, vr;
+        int col, row, cols, nrows, gc, tc, tr, vr, sx, sy;
         pane_area(P, which, &col, &row, &cols, &nrows);
         pane_grid(P, cols, nrows, &gc, &tc, &tr, &vr);
+        pane_scroll_px(P, gc, tc, tr, vr, &sx, &sy);
         drag_stop();
         if (!(mods & (KEYS_SHIFT | KEYS_CTRL))) {
             for (int k = 0; k < P->nlist; k++) P->list[k].marked = 0;
@@ -4412,8 +4554,8 @@ static int pointer_key(int *out_mods)
         drag.mode = DRAG_BAND;
         drag.pane = which;
         drag.mods = mods;
-        drag.ax = px - col * cell_w;
-        drag.ay = py - (top_px + row * cell_h) + (P->top / gc) * tr * cell_h;
+        drag.ax = px - col * cell_w + sx;
+        drag.ay = py - (top_px + row * cell_h) + sy;
         drag.x = px;
         drag.y = py;
         drag.col = e->col;
@@ -4457,10 +4599,52 @@ static int browse(char *out, size_t size)
             }
             continue;
         }
+        if (key == 27) {
+            if (drag.mode != DRAG_NONE) {
+                if (drag.mode == DRAG_BAND) {
+                    struct pane *dp = &tabs[cur_tab].pane[drag.pane];
+                    for (int k = 0; k < dp->nlist; k++) {
+                        dp->list[k].marked = k < drag.nbase ? drag.base[k] : 0;
+                    }
+                }
+                drag_stop();
+                continue;
+            }
+            if (pull.on) {
+                pull.on = 0;
+                report(0, "%s", _("Refresh cancelled."));
+                continue;
+            }
+            if (cloud_job.pid) {
+                cloud_cancel();
+                report(0, "%s", _("Cancelled."));
+                continue;
+            }
+            if (P->filter[0]) {
+                P->filter[0] = '\0';
+                load_dir(NULL);
+                continue;
+            }
+            if (marked(P) > 0) {
+                for (int i = 0; i < P->nlist; i++) P->list[i].marked = 0;
+                msg_sticky = 0;
+                continue;
+            }
+            if (side && !side_hidden) {
+                side = 0;
+                continue;
+            }
+            if (pick_type) {
+                return 0;
+            }
+            msg_sticky = 0;
+            continue;
+        }
         drag_stop();
         /* View modes, zoom, split, tabs, navigation, sorting: available while picking too. */
         if (key == K_CTRL_0 + 1 || key == K_CTRL_0 + 2 || key == K_CTRL_0 + 3) {
             P->view = key - (K_CTRL_0 + 1);
+            P->follow_sel = 1;
             save_prefs();
             continue;
         }
@@ -4536,7 +4720,7 @@ static int browse(char *out, size_t size)
             history(key == K_RIGHT);
             continue;
         }
-        if (((mods & KEYS_ALT) && key == K_UP) || key == '\b') {
+        if (((mods & KEYS_ALT) && key == K_UP) || key == '\b' || key == 127) {
             go_up();
             continue;
         }
@@ -4575,12 +4759,7 @@ static int browse(char *out, size_t size)
             report(0, P_("Marked %d item.", "Marked all %d items.", P->nlist), P->nlist);
             continue;
         }
-        if (key == 'q' || key == 27) {
-            if (P->filter[0] && key == 27) {
-                P->filter[0] = '\0';
-                load_dir(NULL);
-                continue;
-            }
+        if (key == 'q') {
             return 0;
         }
         /* The home key (rc.conf key_home), as from any program: home's list,
@@ -4620,16 +4799,37 @@ static int browse(char *out, size_t size)
             int col, row, cols, nrows, gc, tc, tr, vr;
             pane_area(P, tabs[cur_tab].active, &col, &row, &cols, &nrows);
             pane_grid(P, cols, nrows, &gc, &tc, &tr, &vr);
-            int step = key == K_LEFT ? -1 : key == K_RIGHT ? 1 : key == K_UP ? -gc : key == K_DOWN ? gc :
-                       key == K_PGUP ? -vr * gc : vr * gc;
-            int next = key == K_BOL ? 0 : key == K_EOL ? P->nlist - 1 : P->sel + step;
-            next = clampi(next, 0, P->nlist > 0 ? P->nlist - 1 : 0);
+            int last_idx = P->nlist > 0 ? P->nlist - 1 : 0, next = P->sel;
+            if (key == K_BOL) {
+                next = 0;
+            } else if (key == K_EOL) {
+                next = last_idx;
+            } else if (P->view == VIEW_COMPACT) {
+                if (key == K_UP) next = P->sel - 1;
+                else if (key == K_DOWN) next = P->sel + 1;
+                else if (key == K_LEFT) next = P->sel >= vr ? P->sel - vr : P->sel;
+                else if (key == K_RIGHT) next = P->sel / vr < last_idx / vr ? P->sel + vr : P->sel;
+                else if (key == K_PGUP) next = P->sel - gc * vr;
+                else if (key == K_PGDN) next = P->sel + gc * vr;
+            } else if (P->view == VIEW_ICONS) {
+                if (key == K_LEFT) next = P->sel - 1;
+                else if (key == K_RIGHT) next = P->sel + 1;
+                else if (key == K_UP) next = P->sel >= gc ? P->sel - gc : P->sel;
+                else if (key == K_DOWN) next = P->sel / gc < last_idx / gc ? P->sel + gc : P->sel;
+                else if (key == K_PGUP) next = P->sel - vr * gc;
+                else if (key == K_PGDN) next = P->sel + vr * gc;
+            } else {
+                int step = key == K_UP ? -1 : key == K_DOWN ? 1 : key == K_PGUP ? -vr : vr;
+                next = P->sel + step;
+            }
+            next = clampi(next, 0, last_idx);
             if (mods & KEYS_SHIFT) {
                 for (int k = P->sel < next ? P->sel : next; k <= (P->sel < next ? next : P->sel); k++) {
                     P->list[k].marked = 1;
                 }
             }
             P->sel = next;
+            P->follow_sel = 1;
             msg_sticky = 0;
         } else if (key == K_LEFT && P->view == VIEW_DETAILS) {
             go_up();
@@ -4660,6 +4860,7 @@ static int browse(char *out, size_t size)
         } else if (key == ' ' && P->nlist > 0) {
             P->list[P->sel].marked = !P->list[P->sel].marked;
             P->sel = P->sel < P->nlist - 1 ? P->sel + 1 : P->sel;
+            P->follow_sel = 1;
         } else if ((key == 'c' || key == 'x' ||
                     ((mods & KEYS_CTRL) && (key == ('c' & 0x1F) || key == ('x' & 0x1F)))) && P->nlist > 0) {
             to_clip(key == 'x' || key == ('x' & 0x1F));

@@ -84,18 +84,17 @@ void base_status(const char *tag, char *out, size_t size) { (void)tag; snprintf(
  * second), as screen.c draws it on ncols columns (at most 100): a fill
  * blanks, text is cut at the edge. And the bar's title. */
 static int ncols = 100;
-static uint32_t drawn[30][100];
+static uint32_t drawn[30][100], drawn_bg[30][100];
 static char bar_title[64];
 int screen_cols(void) { return ncols; }
-int screen_rows(void) { return 30; }
+int screen_rows(void) { return ncols ? 30 : 30; }
 void screen_cells(int *w, int *h, int *t) { *w = 8; *h = 16; *t = 0; }
 int screen_char_cells(uint32_t cp) { return cp >= 0x4E00 && cp <= 0x9FFF ? 2 : 1; }
 void screen_fill(int c, int r, int w, int h, uint32_t rgb)
 {
-    (void)rgb;
     for (int y = r; y < r + h; y++)
         for (int x = c; x < c + w; x++)
-            if (y >= 0 && y < 30 && x >= 0 && x < ncols) drawn[y][x] = ' ';
+            if (y >= 0 && y < 30 && x >= 0 && x < ncols) { drawn[y][x] = ' '; drawn_bg[y][x] = rgb; }
 }
 void screen_fill_px(int x, int y, int w, int h, uint32_t rgb)
 {
@@ -105,11 +104,10 @@ void screen_fill_px(int x, int y, int w, int h, uint32_t rgb)
 void screen_text(int c, int r, const char *s, uint32_t fg, uint32_t bg)
 {
     (void)fg;
-    (void)bg;
     for (size_t i = 0; r >= 0 && r < 30 && s[i] && c < ncols; i = utf_next(s, i), c++) {
         uint32_t cp = utf_at(s, i, utf_next(s, i));
-        if (c >= 0) drawn[r][c] = cp;
-        if (screen_char_cells(cp) == 2 && c + 1 < ncols) drawn[r][++c] = 0;
+        if (c >= 0) { drawn[r][c] = cp; drawn_bg[r][c] = bg; }
+        if (screen_char_cells(cp) == 2 && c + 1 < ncols) { drawn[r][++c] = 0; drawn_bg[r][c] = bg; }
     }
 }
 void screen_flush(void) {}
@@ -173,8 +171,8 @@ int key_poll_timeout(int fd, int timeout)
     mods = 0;
     int key = script[step];
     if (key == END) {
-        assert(++extra < 50); /* Esc does not get out: stuck */
-        return 27;
+        assert(++extra < 50); /* q does not get out: stuck */
+        return 'q';
     }
     step++;
     if (key <= -1000000) {
@@ -590,7 +588,7 @@ int main(int argc, char **argv)
     chosen[0] = '\0';
     assert(pick("choose: Esc, nothing chosen", "text/", at_home("Downloads"), NULL, (const int[]){ 27, END },
                 chosen, sizeof chosen) == 0 && !chosen[0]);
-    assert(pick("choose: the home key leaves the choice open (only Esc ends it)", "text/", at_home("Downloads"),
+    assert(pick("choose: the home key leaves the choice open (q or Esc ends it)", "text/", at_home("Downloads"),
                 NULL, (const int[]){ K_ACT_HOME, END }, chosen, sizeof chosen) == 0 && extra == 1);
 
     /* Choosing a folder (packages: a container's directories): o on it. */
@@ -635,11 +633,11 @@ int main(int argc, char **argv)
         { .id = HIT_FILE + 0, .wheel = -5 },
     };
     clicks = marking;
-    run("pointer: Shift marks a range, Ctrl one; delete answered by buttons (a motion is no answer); the wheel",
+    run("pointer: Shift marks a range, Ctrl one; delete answered by buttons (a motion is no answer); the wheel keeps selection",
         (const int[]){ CLICK(0), CLICK(1), CLICK(2), CLICK(3), 'D', CLICK(4), CLICK(5), 'D', CLICK(6),
                        CLICK(7), 'q', END });
     assert(!exists("Documents/p") && !exists("Documents/c (2).md"));
-    assert(exists("Documents/new") && exists("Documents/c.md") && P->sel == P->nlist - 1);
+    assert(exists("Documents/new") && exists("Documents/c.md") && P->sel == 0 && P->top == 0);
 
     int ic = index_of("c.md");
     struct click opening[] = {
@@ -1032,6 +1030,181 @@ int main(int argc, char **argv)
     snprintf(want, sizeof want, "--unmount %s\n", at_home("Drives/remote"));
     assert(strcmp(last, want) == 0);
 #undef CLOUD_CALLS
+
+    /*
+     * Esc never exits files_view (only q / [q: back] / Ctrl+W / K_ACT_HOME do);
+     * Icons (Ctrl+1), Compact (Ctrl+2) and Details (Ctrl+3) view hitboxes,
+     * margins, column-major Compact layout, background menus, rubberband
+     * selection, and wheel scrolling decoupled from selection.
+     */
+    mk("Views");
+    mk("Views/dir-a");
+    for (int i = 0; i < 85; i++) {
+        char rel[64];
+        snprintf(rel, sizeof rel, "Views/v-%02d.txt", i + 1);
+        put(rel, 1700000000 + i);
+    }
+    assert(chmod(at_home("Views/v-01.txt"), 0755) == 0);
+    go(at_home("Views"), NULL);
+    P->view = VIEW_DETAILS;
+    P->zoom[VIEW_ICONS] = zoom_default[VIEW_ICONS];
+    P->zoom[VIEW_COMPACT] = zoom_default[VIEW_COMPACT];
+    P->zoom[VIEW_DETAILS] = zoom_default[VIEW_DETAILS];
+
+    /* 1. Esc in files_view: clears filter, marks, sidebar focus, rubberband
+     *    and item drag, and never exits even when pressed repeatedly idle. */
+    struct click esc_band[] = {
+        { .id = AT, .col = SIDE + 60, .row = 3, .button = BTN_LEFT, .clicks = 1 },
+        { .id = AT, .col = SIDE + 5, .row = 8 },
+        { .id = HIT_FILE + 1, .button = BTN_LEFT, .clicks = 1 },
+        { .id = HIT_FILE + 0 },
+    };
+    clicks = esc_band;
+    run("Esc clears filter, marks, sidebar focus, rubberband (restoring marks) and item drag, never exiting files",
+        (const int[]){ '/', 'v', '-', '0', '\n', 27,
+                       KEY('a' & 0x1F, KEYS_CTRL), 27,
+                       '\t', 27,
+                       ' ', CLICK(0), CLICK(1), 27,
+                       27, /* clears the restored mark on item 0 */
+                       CLICK(2), CLICK(3), 27,
+                       27, 27, 27, END });
+    assert(extra == 1 && here("Views") && !P->filter[0] && marked(P) == 0 && side == 0 && drag.mode == DRAG_NONE);
+    assert(exists("Views/v-01.txt") && !exists("Views/dir-a/v-01.txt"));
+
+    /* 2. Details view: clicking empty space to the right of a name clears marks
+     *    without marking that row; right-clicking there opens folder menu;
+     *    wheel scrolls P->top without changing P->sel, preserving Shift-click. */
+    struct click det_clicks[] = {
+        { .id = AT, .col = SIDE + 60, .row = 4, .button = BTN_LEFT, .clicks = 1 },
+        { .id = AT, .col = SIDE + 60, .row = 4, .button = BTN_LEFT, .release = 1 },
+        { .id = AT, .col = SIDE + 60, .row = 4, .button = BTN_RIGHT, .clicks = 1 },
+        { .id = AT, .col = SIDE + 60, .row = 4, .button = BTN_RIGHT, .release = 1 },
+        { .id = MENU(0), .button = BTN_LEFT, .clicks = 1 },
+        { .id = MENU(0), .button = BTN_LEFT, .release = 1 },
+        { .id = AT, .col = SIDE + 20, .row = 6, .wheel = -4 },
+        { .id = HIT_FILE + 15, .button = BTN_LEFT, .clicks = 1, .mods = KEYS_SHIFT },
+        { .id = HIT_FILE + 15, .button = BTN_LEFT, .release = 1, .mods = KEYS_SHIFT },
+    };
+    clicks = det_clicks;
+    run("Details: blank row tail clears marks and opens folder menu; wheel scrolls without moving selection",
+        (const int[]){ KEY('a' & 0x1F, KEYS_CTRL), CLICK(0), CLICK(1),
+                       CLICK(2), CLICK(3), CLICK(4), CLICK(5), 'd', 'e', 't', '\n',
+                       K_BOL, K_DOWN, K_DOWN, CLICK(6), END });
+    assert(exists("Views/det") && marked(P) == 0 && P->sel == 2 && P->top == 12);
+    assert(rmdir(at_home("Views/det")) == 0);
+    run("Details: Shift-click after wheel scroll marks from the preserved anchor",
+        (const int[]){ K_BOL, K_DOWN, K_DOWN, CLICK(6), CLICK(7), CLICK(8), K_DOWN, END });
+    assert(marked(P) == 14 && P->list[2].marked && P->list[15].marked && !P->list[1].marked && P->sel == 16);
+
+    /* 3. Icons view (Ctrl+1): card margins leave HIT_AREA between icons on all
+     *    sides; marked cards stay visually separated; gap click deselects, gap
+     *    rubberband selects a 2x2 block, gap right-click opens folder menu,
+     *    right-clicking an unmarked icon clears stale marks, Up on row 0 stays
+     *    in column, Backspace goes up, wheel scrolls 1 icon row keeping P->sel. */
+    run("Icons: switch to Ctrl+1 and mark first two items",
+        (const int[]){ KEY(K_CTRL_0 + 1, 0), K_BOL, ' ', ' ', K_LEFT, END });
+    assert(P->view == VIEW_ICONS && P->list[0].marked && P->list[1].marked && P->sel == 1);
+    /* Tile width at default zoom 2 is 14 (gc = 5 across 82 cols), height 5:
+     * col SIDE is left gap, SIDE+13 and SIDE+14 are the 2-cell gap between
+     * card 0 and card 1, and row 2+4=6 is the bottom gap row. */
+    assert(ui_hit_at(SIDE, 2) == HIT_AREA && ui_hit_at(SIDE + 13, 2) == HIT_AREA && ui_hit_at(SIDE + 14, 2) == HIT_AREA);
+    assert(ui_hit_at(SIDE + 2, 6) == HIT_AREA);
+    assert(drawn_bg[2][SIDE + 2] == MARK && drawn_bg[2][SIDE + 13] == BG && drawn_bg[2][SIDE + 14] == BG);
+    assert(drawn_bg[2][SIDE + 16] == ACCENT && drawn_bg[6][SIDE + 2] == BG);
+
+    struct click icon_clicks[] = {
+        /* Click in horizontal gap between icon 0 and icon 1 -> clears marks. */
+        { .id = AT, .col = SIDE + 13, .row = 3, .button = BTN_LEFT, .clicks = 1 },
+        { .id = AT, .col = SIDE + 13, .row = 3, .button = BTN_LEFT, .release = 1 },
+        /* Rubberband from gap (SIDE+13, row 2) to card (col 2, row 1) = (SIDE+30, row 8):
+         * touches col 1..2 on rows 0..1 -> items 1, 2, 6, 7 (4 items). */
+        { .id = AT, .col = SIDE + 13, .row = 2, .button = BTN_LEFT, .clicks = 1 },
+        { .id = AT, .col = SIDE + 30, .row = 8 },
+        { .id = AT, .col = SIDE + 30, .row = 8, .button = BTN_LEFT, .release = 1 },
+        /* Right-click in vertical gap row 6 -> folder menu item 0 ("New folder..."). */
+        { .id = AT, .col = SIDE + 4, .row = 6, .button = BTN_RIGHT, .clicks = 1 },
+        { .id = AT, .col = SIDE + 4, .row = 6, .button = BTN_RIGHT, .release = 1 },
+        { .id = MENU(0), .button = BTN_LEFT, .clicks = 1 },
+        { .id = MENU(0), .button = BTN_LEFT, .release = 1 },
+        /* Wheel -2 scrolls 2 icon rows (10 items) without changing P->sel. */
+        { .id = AT, .col = SIDE + 4, .row = 4, .wheel = -2 },
+        /* Right-click unmarked icon 4 while icons 0..1 are marked -> clears old marks. */
+        { .id = HIT_FILE + 4, .button = BTN_RIGHT, .clicks = 1 },
+    };
+    clicks = icon_clicks;
+    run("Icons: gap click clears marks, then 2x2 rubberband marks only 4 cards",
+        (const int[]){ KEY('a' & 0x1F, KEYS_CTRL), CLICK(0), CLICK(1),
+                       CLICK(2), CLICK(3), CLICK(4), END });
+    assert(marked(P) == 4 && P->list[1].marked && P->list[2].marked && P->list[6].marked && P->list[7].marked);
+    assert(!P->list[0].marked && !P->list[5].marked);
+
+    run("Icons: right-clicking an unmarked icon clears previous multi-selection",
+        (const int[]){ K_BOL, ' ', ' ', CLICK(10), 27, END });
+    assert(marked(P) == 0 && P->sel == 4);
+
+    run("Icons: gap right-click opens folder menu, Up on row 0 stays in column, wheel keeps selection",
+        (const int[]){ CLICK(5), CLICK(6), CLICK(7), CLICK(8), 'i', 'c', 'o', '\n',
+                       K_BOL, K_RIGHT, K_RIGHT, K_UP, CLICK(9), END });
+    assert(exists("Views/ico") && P->sel == 2 && P->top == 10);
+    assert(rmdir(at_home("Views/ico")) == 0);
+    run("Icons: Backspace goes up to parent folder", (const int[]){ '\b', END });
+    assert(here("") && strcmp(P->list[P->sel].name, "Views") == 0);
+    go(at_home("Views"), NULL);
+
+    /* 4. Compact view (Ctrl+2): column-major layout (top-to-bottom per column,
+     *    then left-to-right), pixel icons, executable files do not collide with
+     *    '*' mark, zoom 3 draws second-line size, horizontal scroll & rubberband. */
+    px_fills = 0;
+    run("Compact: switch to Ctrl+2, check column-major navigation and marks",
+        (const int[]){ KEY(K_CTRL_0 + 2, 0), K_BOL, END });
+    /* nrows = 25, tc = 22 (gc = 3 columns of 25 rows):
+     * item 0 ("dir-a") at (SIDE, 2), item 1 ("v-01.txt", exec) at (SIDE, 3),
+     * item 25 ("v-25.txt") at (SIDE + 22, 2). */
+    assert(P->view == VIEW_COMPACT && px_fills > 40);
+    assert(ui_hit_at(SIDE, 2) == HIT_FILE + 0 && ui_hit_at(SIDE, 3) == HIT_FILE + 1);
+    assert(ui_hit_at(SIDE + 22, 2) == HIT_FILE + 25);
+    assert(drawn[3][SIDE + 2] == ' '); /* executable v-01.txt is NOT '*' unless marked */
+    assert(ui_hit_at(SIDE + 18, 3) == HIT_AREA && ui_hit_at(SIDE + 21, 2) == HIT_AREA);
+
+    run("Compact: Down moves within column (+1), Right moves across columns (+25), Left moves back (-25)",
+        (const int[]){ K_DOWN, K_RIGHT, K_DOWN, K_LEFT, ' ', END });
+    /* 0 -> 1 -> 26 -> 27 -> 2 (marked, then Space advances to 3). */
+    assert(P->list[2].marked && P->sel == 3 && drawn[4][SIDE + 2] == '*');
+
+    struct click cmp_clicks[] = {
+        /* Click blank space to the right of short filename -> clears marks. */
+        { .id = AT, .col = SIDE + 18, .row = 4, .button = BTN_LEFT, .clicks = 1 },
+        { .id = AT, .col = SIDE + 18, .row = 4, .button = BTN_LEFT, .release = 1 },
+        /* Right-click in column gap -> folder background menu ("New folder..."). */
+        { .id = AT, .col = SIDE + 21, .row = 4, .button = BTN_RIGHT, .clicks = 1 },
+        { .id = AT, .col = SIDE + 21, .row = 4, .button = BTN_RIGHT, .release = 1 },
+        { .id = MENU(0), .button = BTN_LEFT, .clicks = 1 },
+        { .id = MENU(0), .button = BTN_LEFT, .release = 1 },
+        /* Wheel -1 scrolls 1 column (25 items) horizontally without moving P->sel. */
+        { .id = AT, .col = SIDE + 10, .row = 4, .wheel = -1 },
+        /* Rubberband auto-scroll right to the last column across 61 items. */
+        { .id = AT, .col = SIDE + 18, .row = 2, .button = BTN_LEFT, .clicks = 1 },
+        { .id = AT, .col = 99, .row = 6 },
+        { .id = AT, .col = 99, .row = 6, .button = BTN_LEFT, .release = 1 },
+    };
+    clicks = cmp_clicks;
+    run("Compact: blank tail clears marks, gap right-click creates folder, wheel scrolls 1 column keeping P->sel",
+        (const int[]){ KEY('a' & 0x1F, KEYS_CTRL), CLICK(0), CLICK(1),
+                       CLICK(2), CLICK(3), CLICK(4), CLICK(5), 'c', 'm', 'p', '\n',
+                       K_BOL, K_DOWN, CLICK(6), END });
+    assert(exists("Views/cmp") && marked(P) == 0 && P->sel == 1 && P->top == 25);
+    assert(rmdir(at_home("Views/cmp")) == 0);
+
+    run("Compact: horizontal rubberband auto-scrolls across columns",
+        (const int[]){ K_BOL, CLICK(7), CLICK(8), TIMEOUT, TIMEOUT, TIMEOUT, CLICK(9), END });
+    assert(P->top >= 25 && marked(P) >= 8);
+    run("Compact: Esc clears marks and zoom 3 draws subtitle row",
+        (const int[]){ KEY('a' & 0x1F, KEYS_CTRL), 27, KEY('+', KEYS_CTRL), KEY('+', KEYS_CTRL), END });
+    assert(marked(P) == 0 && P->zoom[VIEW_COMPACT] == 2 && strlen(drawn_row(3, SIDE + 3)) > 0);
+    P->zoom[VIEW_COMPACT] = zoom_default[VIEW_COMPACT];
+    P->view = VIEW_DETAILS;
+    go(scratch, NULL);
+    assert(remove_tree(at_home("Views")) == 0);
 
     puts("ALL PASSED");
     return 0;
