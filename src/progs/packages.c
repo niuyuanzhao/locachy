@@ -3,12 +3,15 @@
  * they are done. The work is locachy-pkg's, locachy-app's and
  * locachy-build's; this shows what they would do and starts them. Three
  * pages, Tab between them:
- *   Updates     the last plan (locachy-pkg plan): a row for the host, for
- *               LOCachy and for each container, with what an update would
- *               do there; c checks again (on the network), Space marks, a
- *               applies the marked ones, Enter shows a row's packages
+ *   Updates     where updates come from (LOCachy's source, the app
+ *               presets), then the last plan (locachy-pkg plan): a row for
+ *               the host, for LOCachy, for the app presets and for each
+ *               container, with what an update would do there; c checks
+ *               again (on the network), Space marks, a applies the marked
+ *               ones, Enter shows a row's packages
  *   Containers  their configurations (/etc/locachy/containers) and builds:
- *               n new, Enter edits one: its form, a line for each thing it
+ *               n new (from a preset: the system's host programs, the app
+ *               presets' catalog), Enter edits one: its form, a line for each thing it
  *               is made of (its package and extras, as the repositories or
  *               the AUR have them; its command, from what its packages
  *               bring once built; its arguments, network and directories);
@@ -59,13 +62,21 @@
 #ifndef JOB_LOG /* the places: another for each in tools/test-packages.c */
 #define JOB_LOG "/run/locachy/packages.log"
 #define JOB_PID "/run/locachy/packages.pid"
-#define PRESETS "/usr/local/share/locachy/containers"
+/* The presets: the system's (its host programs), the app presets' catalog
+ * (from their own repository; CATALOG in it says which). */
+#define SYSTEM_PRESETS "/usr/local/share/locachy/containers"
+#define APPS_CATALOG   "/var/lib/locachy/apps/catalog"
+#define SOURCE_COMMIT  "/usr/local/lib/locachy/source-commit" /* the LOCachy source installed */
+#define RC_FILE RC_CONF /* where updates come from: update_repo, update_branch, apps_repo, apps_branch */
 #define STATE   "/var/lib/locachy/containers"
 #define CONF_DIR CONTAINERS_CONF
 #define PKG "/usr/local/bin/locachy-pkg"
 #define APP "/usr/local/bin/locachy-app"
 #endif
 #define MANIFEST "/etc/locachy/packages"
+/* As locachy-pkg takes them when rc.conf does not say. */
+#define DEFAULT_UPDATE_REPO "https://github.com/niuyuanzhao/locachy.git"
+#define DEFAULT_APPS_REPO   "https://github.com/niuyuanzhao/locachy-apps.git"
 
 #define MAX_ROWS 1024
 #define MAX_TARGETS 64
@@ -85,7 +96,8 @@ static int show_log; /* the job's output in the lower half, not the selected row
 static char notice[512];
 static int notice_error;
 
-/* The plan: target, kind (repo, aur, rebuild, state), what, old, new. */
+/* The plan: target, kind (repo, aur, rebuild, state; the app presets'
+ * catalog, merge), what, old, new. */
 struct row {
     char target[64], kind[16], what[200], old[80], new_[80];
 };
@@ -94,11 +106,18 @@ static int nrows;
 static char checked[40];
 
 struct target {
-    char name[64], state[16], why[200], note[200]; /* note: what the check could not do */
-    int repo, aur, rebuild, missing, marked; /* missing: declared leaves to install */
+    char name[64], state[16], why[200], note[300]; /* note: what the check could not do */
+    int repo, aur, rebuild, missing, merge, marked; /* missing: declared leaves to install; merge: configurations
+                                                        that follow their new presets */
 };
 static struct target targets[MAX_TARGETS];
 static int ntargets;
+
+/* Where updates come from, a line each above the list: LOCachy's source
+ * (its commit installed) and the app presets (their catalog's commit and
+ * origin); apps_on: rc.conf does not turn the app presets' updates off. */
+static char source_line[600], apps_line[600];
+static int apps_on, apps_missing;
 
 struct container {
     char name[64], package[128], extras[VALUE_MAX + 1], command[256], arguments[256], network[8], camera[8];
@@ -178,6 +197,83 @@ static struct target *target(const char *name)
     return t;
 }
 
+/* rc.conf's update_repo, update_branch, apps_repo, apps_branch into arg's
+ * four values (none there: what they already are). */
+static void source_value(const char *name, const char *value, void *arg)
+{
+    static const char *const keys[4] = { "update_repo", "update_branch", "apps_repo", "apps_branch" };
+    char (*values)[256] = arg;
+    for (int i = 0; i < 4; i++) {
+        if (strcmp(name, keys[i]) == 0) {
+            snprintf(values[i], 256, "%s", value);
+        }
+    }
+}
+
+/* The app presets' CATALOG: its origin and commit into arg's two values. */
+static void catalog_value(const char *name, const char *value, void *arg)
+{
+    char (*values)[64] = arg;
+    if (strcmp(name, "origin") == 0) {
+        snprintf(values[0], 64, "%s", value);
+    } else if (strcmp(name, "commit") == 0) {
+        snprintf(values[1], 64, "%s", value);
+    }
+}
+
+/* rc.conf's "", "0" or "off": no updates from there. */
+static int repo_off(const char *repo)
+{
+    return !repo[0] || strcmp(repo, "0") == 0 || strcmp(repo, "off") == 0;
+}
+
+/* A repository and its branch as an update follows them, or off. */
+static void follows(char *out, size_t size, const char *repo, const char *branch)
+{
+    if (repo_off(repo)) {
+        snprintf(out, size, "%s", _("off"));
+    } else {
+        snprintf(out, size, "%.250s (%.120s)", repo, branch[0] ? branch : "main");
+    }
+}
+
+/* The two lines of where updates come from: what is installed first, the
+ * repository last (a long one cuts only itself). */
+static void load_sources(void)
+{
+    char rc[4][256] = { DEFAULT_UPDATE_REPO, "", DEFAULT_APPS_REPO, "" }, catalog[2][64] = { "", "" };
+    char from[400], commit[64] = "", installed[160], path[512];
+    conf_read(RC_FILE, source_value, rc);
+    FILE *f = fopen(SOURCE_COMMIT, "re");
+    if (f) {
+        if (!fgets(commit, sizeof commit, f)) {
+            commit[0] = '\0';
+        }
+        fclose(f);
+    }
+    commit[strcspn(commit, " \t\r\n")] = '\0';
+    follows(from, sizeof from, rc[0], rc[1]);
+    if (commit[0]) {
+        snprintf(source_line, sizeof source_line, _("LOCachy source: %.7s installed; updates: %s"), commit, from);
+    } else {
+        snprintf(source_line, sizeof source_line, _("LOCachy source: its commit is not recorded; updates: %s"), from);
+    }
+    snprintf(path, sizeof path, "%s/CATALOG", APPS_CATALOG);
+    apps_missing = conf_read(path, catalog_value, catalog) < 0;
+    if (apps_missing) {
+        snprintf(installed, sizeof installed, "%s", _("none installed"));
+    } else if (strcmp(catalog[0], "bootstrap") == 0) {
+        snprintf(installed, sizeof installed, "%s", _("from the system, not yet from the apps repository"));
+    } else if (strcmp(catalog[0], "medium") == 0) {
+        snprintf(installed, sizeof installed, _("%.7s from the installation medium"), catalog[1][0] ? catalog[1] : "?");
+    } else {
+        snprintf(installed, sizeof installed, _("%.7s from the apps repository"), catalog[1][0] ? catalog[1] : "?");
+    }
+    follows(from, sizeof from, rc[2], rc[3]);
+    apps_on = !repo_off(rc[2]);
+    snprintf(apps_line, sizeof apps_line, _("App presets: %s; updates: %s"), installed, from);
+}
+
 static void load_plan(void)
 {
     char line[600], *f[5];
@@ -185,6 +281,9 @@ static void load_plan(void)
     checked[0] = '\0';
     target("host");
     target("locachy");
+    if (apps_on) {
+        target("apps");
+    }
     char cmd[600];
     snprintf(cmd, sizeof cmd, "%s plan --cached --machine 2>/dev/null", PKG);
     FILE *in = popen(cmd, "r");
@@ -218,10 +317,13 @@ static void load_plan(void)
                 snprintf(t->why, sizeof t->why, strcmp(r->kind, "local") == 0 ?
                          _("local package %.180s") : "%.180s", r->what);
             }
+        } else if (strcmp(r->kind, "merge") == 0) {
+            t->merge++;
         } else if (strcmp(r->kind, "state") == 0) {
             snprintf(t->state, sizeof t->state, "%s", r->what);
-        } else if (strcmp(r->kind, "note") == 0) {
-            snprintf(t->note, sizeof t->note, "%s", r->what);
+        } else if (strcmp(r->kind, "note") == 0) { /* each one: the app presets can have two */
+            size_t len = strlen(t->note);
+            snprintf(t->note + len, sizeof t->note - len, "%s%s", len ? "; " : "", r->what);
         }
     }
     if (in) {
@@ -444,6 +546,7 @@ static void installed_summary(char *line, size_t size)
 
 static void load_all(void)
 {
+    load_sources();
     load_plan();
     load_containers();
     load_host();
@@ -648,6 +751,13 @@ static void row_text(int i, char *line, size_t size, int *dim)
             size_t n = strlen(what);
             snprintf(what + n, sizeof what - n, n ? _("; rebuild: %s") : _("rebuild: %s"), t->why);
         }
+        if (t->merge) { /* the app presets: configurations that follow them */
+            char merged[160];
+            size_t n = strlen(what);
+            snprintf(merged, sizeof merged, P_("%d configuration follows its new preset",
+                                               "%d configurations follow their new presets", t->merge), t->merge);
+            snprintf(what + n, sizeof what - n, "%s%s", n ? "; " : "", merged);
+        }
         if (t->note[0]) { /* first: the rest of the row may not fit */
             char rest[300];
             memcpy(rest, what, sizeof rest);
@@ -817,6 +927,10 @@ static void draw_lower(int top, int height)
                 snprintf(line, sizeof line, _("rebuild: %s (%s -> %s)"), w->what, w->old, w->new_);
             } else if (strcmp(w->kind, "rebuild") == 0) {
                 snprintf(line, sizeof line, _("rebuild: %s"), w->what);
+            } else if (strcmp(w->kind, "catalog") == 0) { /* the app presets: which commit */
+                snprintf(line, sizeof line, "%.120s: %.40s -> %.7s", w->what, w->old, w->new_);
+            } else if (strcmp(w->kind, "merge") == 0) {
+                snprintf(line, sizeof line, _("%s follows its new preset: %s"), w->what, w->old);
             } else {
                 snprintf(line, sizeof line, "%-5s %-36s %s -> %s", w->kind, w->what, w->old, w->new_);
             }
@@ -896,6 +1010,10 @@ static void draw(void)
                  ui_pad(vbuf, sizeof vbuf, _("Version"), 28), _("Size"));
         screen_text(2, top++, hbuf, DIM, BG);
         height--;
+    } else if (page == UPDATES) { /* where updates come from, over the list; the pane stays where it is */
+        screen_text(2, top++, source_line, DIM, BG);
+        screen_text(2, top++, apps_line, apps_missing ? WARN : DIM, BG);
+        height -= 2;
     }
     int first = sel[page] >= height ? sel[page] - height + 1 : 0;
     if (n == 0) {
@@ -1139,31 +1257,58 @@ static int choose(const char *title, char items[][320], int n)
     }
 }
 
-static int by_string(const void *a, const void *b)
+/* A preset: its name and its file (DIR/NAME.conf). */
+struct preset {
+    char name[64], path[400];
+};
+
+static int by_preset(const void *a, const void *b)
 {
-    return strcmp(a, b);
+    return strcmp(((const struct preset *)a)->name, ((const struct preset *)b)->name);
 }
 
-/* The presets' names (PRESETS/NAME.conf), sorted: how many. */
-static int preset_names(char names[][64], int max)
+/* The presets of dir after the n in p, sorted, a name once (those before
+ * it are kept): how many in all. apps: the app presets' catalog, where a
+ * host program is none of them. */
+static int presets_of(const char *dir, int apps, struct preset *p, int n, int max)
 {
-    int n = 0;
-    DIR *dir = opendir(PRESETS);
+    int first = n;
+    DIR *d = opendir(dir);
     struct dirent *e;
-    while (dir && (e = readdir(dir)) != NULL && n < max) {
+    while (d && (e = readdir(d)) != NULL && n < max) {
         size_t len = strlen(e->d_name);
-        if (len > 5 && len - 5 < 64 && strcmp(e->d_name + len - 5, ".conf") == 0) {
-            snprintf(names[n++], 64, "%.*s", (int)(len - 5), e->d_name);
+        int known = 0;
+        if (len <= 5 || len - 5 >= sizeof p[0].name || strcmp(e->d_name + len - 5, ".conf") != 0) {
+            continue;
+        }
+        snprintf(p[n].name, sizeof p[n].name, "%.*s", (int)(len - 5), e->d_name);
+        snprintf(p[n].path, sizeof p[n].path, "%s/%s", dir, e->d_name);
+        for (int i = 0; i < first && !known; i++) {
+            known = strcmp(p[i].name, p[n].name) == 0;
+        }
+        struct container c = { 0 };
+        if (apps && !known) {
+            conf_read(p[n].path, container_value, &c);
+        }
+        if (!known && !c.host) {
+            n++;
         }
     }
-    if (dir) {
-        closedir(dir);
+    if (d) {
+        closedir(d);
     }
-    qsort(names, (size_t)n, 64, by_string);
+    qsort(p + first, (size_t)(n - first), sizeof p[0], by_preset);
     return n;
 }
 
-/* The name of the preset at path (PRESETS/NAME.conf). */
+/* The presets: the system's (its host programs) first, then the app
+ * presets' catalog's: how many. */
+static int preset_list(struct preset *p, int max)
+{
+    return presets_of(APPS_CATALOG, 1, p, presets_of(SYSTEM_PRESETS, 0, p, 0, max), max);
+}
+
+/* The name of the preset at path (DIR/NAME.conf). */
 static const char *preset_name(const char *path)
 {
     static char name[64];
@@ -1608,14 +1753,13 @@ static void form_lookup(struct form *f)
 static void form_preset(struct form *f)
 {
     static char items[64][320];
-    char names[63][64], old[64], typed[64];
-    int n = preset_names(names, 63);
+    static struct preset presets[63];
+    char old[64], typed[64];
+    int n = preset_list(presets, 63);
     for (int i = 0; i < n; i++) {
-        char path[400];
         struct container c = { 0 };
-        snprintf(path, sizeof path, "%s/%.63s.conf", PRESETS, names[i]);
-        conf_read(path, container_value, &c);
-        snprintf(items[i], sizeof items[i], "%-16.63s %.100s %.150s", names[i], c.package, c.extras);
+        conf_read(presets[i].path, container_value, &c);
+        snprintf(items[i], sizeof items[i], "%-16.63s %.100s %.150s", presets[i].name, c.package, c.extras);
     }
     snprintf(items[n], sizeof items[n], "%s", _("(blank)"));
     int at = choose(_("A new container: from a preset (its lines filled in; then it is yours), or blank"), items, n + 1);
@@ -1627,10 +1771,10 @@ static void form_preset(struct form *f)
     f->preset[0] = f->package[0] = f->extras[0] = f->command[0] = f->arguments[0] = '\0';
     f->network = f->camera = f->ndirs = f->ninfo = 0;
     if (at < n) {
-        snprintf(f->preset, sizeof f->preset, "%s/%.63s.conf", PRESETS, names[at]);
+        snprintf(f->preset, sizeof f->preset, "%s", presets[at].path);
         conf_read(f->preset, form_value, f);
     }
-    snprintf(f->name, sizeof f->name, "%.63s", typed[0] ? typed : at < n ? names[at] : "");
+    snprintf(f->name, sizeof f->name, "%.63s", typed[0] ? typed : at < n ? presets[at].name : "");
     f->changed = 1;
     form_lookup(f);
 }
@@ -1995,7 +2139,7 @@ static int run_search(const char *prompt_label, struct search_hit *hits, char it
     say_notice(0, _("Searching recipes, repositories and the AUR for %s..."), query);
     draw();
     char cmd[1024], line[1024], *w[8];
-    snprintf(cmd, sizeof cmd, "LOCACHY_PRESETS=%s %s search %s 2>/dev/null", PRESETS, PKG, query);
+    snprintf(cmd, sizeof cmd, "LOCACHY_APPS_CATALOG=%s %s search %s 2>/dev/null", APPS_CATALOG, PKG, query);
     FILE *in = popen(cmd, "r");
     int n = 0;
     while (in && n < max && fgets(line, sizeof line, in)) {
@@ -2040,8 +2184,8 @@ static void search_container(void)
     for (char *c = seed.name; *c; c++) {
         if (!isalnum((unsigned char)*c) && *c != '_' && *c != '-' && *c != '.') *c = '-';
     }
-    if (strcmp(hits[at].kind, "recipe") == 0) {
-        snprintf(seed.preset, sizeof seed.preset, "%s/%.63s.conf", PRESETS, hits[at].name);
+    if (strcmp(hits[at].kind, "recipe") == 0) { /* an app preset: search reads their catalog */
+        snprintf(seed.preset, sizeof seed.preset, "%s/%.63s.conf", APPS_CATALOG, hits[at].name);
     }
     snprintf(seed.package, sizeof seed.package, "%s", hits[at].package);
     snprintf(seed.extras, sizeof seed.extras, "%s", hits[at].extras);

@@ -88,6 +88,12 @@ static char active_machine[64];
  * none) and update_branch (none: main). */
 #define DEFAULT_UPDATE_REPO "https://github.com/niuyuanzhao/locachy.git"
 static char update_repo[256], update_branch[128];
+/* And the app presets' own repository: apps_repo ("off": none) and
+ * apps_branch (none: main); the catalog installed says what it is in its
+ * CATALOG (origin, commit). */
+#define DEFAULT_APPS_REPO "https://github.com/niuyuanzhao/locachy-apps.git"
+#define APPS_CATALOG_INFO "/var/lib/locachy/apps/catalog/CATALOG"
+static char apps_repo[256], apps_branch[128];
 
 /* The boot image's command line (locachy-boot reads them each time it makes
  * it): the kernel's messages shown (boot_verbose) or quiet, and options added
@@ -844,6 +850,10 @@ static void on_rc(const char *name, const char *value, void *arg)
         snprintf(update_repo, sizeof update_repo, "%s", value);
     } else if (strcmp(name, "update_branch") == 0) {
         snprintf(update_branch, sizeof update_branch, "%s", value);
+    } else if (strcmp(name, "apps_repo") == 0) {
+        snprintf(apps_repo, sizeof apps_repo, "%s", value);
+    } else if (strcmp(name, "apps_branch") == 0) {
+        snprintf(apps_branch, sizeof apps_branch, "%s", value);
     } else if (strcmp(name, "boot_verbose") == 0) {
         boot_verbose = strcmp(value, "1") == 0;
     } else if (strcmp(name, "boot_cmdline") == 0) {
@@ -2605,7 +2615,8 @@ static int mach_index(void)
     return bri_index() + 1;
 }
 
-/* Source updates: the repository, its branch. */
+/* Source updates: the repository, its branch; the app presets': theirs,
+ * and the catalog installed. */
 static int upd_index(void)
 {
     return mach_index() + 1;
@@ -2614,7 +2625,7 @@ static int upd_index(void)
 /* Boot: the kernel's messages, options added, the image (made again). */
 static int boot_index(void)
 {
-    return upd_index() + 2;
+    return upd_index() + 5;
 }
 
 static int opt_index(void)
@@ -2663,11 +2674,52 @@ static int num_hw_items(void)
     return kb_index() + nkeyboards_seen;
 }
 
+/* The cloud service's status (rclone-client): name, path, state, last
+ * success, reason. The first remote whose sign-in was rejected goes into
+ * relogin; the line lists what the service reports, not a guess. */
+#define CLOUD_STATUS "/run/locachy/cloud/status"
+static int rclone_status_summary(char *out, size_t size, char *relogin, size_t rsize)
+{
+    FILE *f = rclone_on ? fopen(CLOUD_STATUS, "re") : NULL;
+    char line[1024], names[160] = "";
+    int n = 0;
+    if (relogin) relogin[0] = '\0';
+    while (f && fgets(line, sizeof line, f)) {
+        char *field[5] = { 0 }, *save = NULL;
+        int k = 0;
+        line[strcspn(line, "\r\n")] = '\0';
+        for (char *s = strtok_r(line, "\t", &save); s && k < 5; s = strtok_r(NULL, "\t", &save)) field[k++] = s;
+        if (k < 4) continue;
+        int auth = strcmp(field[2], "failed") == 0 && k > 4 && strcmp(field[4], "authentication") == 0;
+        const char *state = auth ? _("sign in again") : strcmp(field[2], "ready") == 0 ? _("online") :
+                            strcmp(field[2], "mounting") == 0 ? _("connecting") :
+                            strcmp(field[2], "unmounted") == 0 ? _("unmounted") :
+                            strcmp(field[2], "refreshing") == 0 ? _("refreshing") : _("needs attention");
+        if (auth && relogin && !relogin[0]) snprintf(relogin, rsize, "%s", field[0]);
+        if (n < 3) {
+            size_t cur = strlen(names);
+            snprintf(names + cur, sizeof names - cur, "%s%.20s: %s", n ? ", " : "", field[0], state);
+        }
+        n++;
+    }
+    if (f) fclose(f);
+    if (n == 0) return 0;
+    if (relogin && relogin[0]) {
+        /* TRANSLATORS: %s lists cloud drives and their states; Enter is the key; keep it. */
+        snprintf(out, size, _("%s   Enter: sign in again"), names);
+    } else {
+        /* TRANSLATORS: %s lists cloud drives and their states; Enter is the key; keep it. */
+        snprintf(out, size, _("%s%s   Enter: configure (rclone config)"), names, n > 3 ? ", ..." : "");
+    }
+    return n;
+}
+
 static void rclone_remotes_summary(char *out, size_t size)
 {
     const char *user = user_name();
     char path[256], line[256], names[128] = "";
     int n = 0;
+    if (rclone_status_summary(out, size, NULL, 0) > 0) return;
     if (!user) {
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(out, size, "%s", _("none   Enter: configure (rclone config)"));
@@ -4189,7 +4241,7 @@ static void category_entries(int cat)
         add_title(_("Boot"));
         add_items(boot_index(), 5);
         add_title(_("Software Update"));
-        add_items(upd_index(), 2);
+        add_items(upd_index(), 5);
         add_title(_("Software Sources"));
         /* The switches and the mirrors only: the repositories' names carry
          * the CPU level (core-x86-64-v3, cachyos-znver4), which is not
@@ -4486,6 +4538,75 @@ static void change_update_branch(void)
     snprintf(notice, sizeof notice, _("Following branch %.100s: c in packages checks it."), text);
 }
 
+/* The app presets' repository and branch: as the source's, rc.conf's
+ * apps_repo and apps_branch. */
+static void change_apps_repo(void)
+{
+    char text[256];
+    snprintf(text, sizeof text, "%s", apps_repo[0] ? apps_repo : DEFAULT_APPS_REPO);
+    if (!prompt(_("App presets repository (git URL, or off): "), text, sizeof text) || !text[0]) {
+        snprintf(notice, sizeof notice, "%s", _("App presets repository unchanged."));
+        return;
+    }
+    if (strcmp(text, "off") != 0 && !valid_update_repo(text)) {
+        snprintf(notice, sizeof notice, "%s", _("Not an https://, ssh:// or git@ URL (or off)."));
+        return;
+    }
+    if (rc_set("apps_repo", text) < 0) {
+        snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+        return;
+    }
+    snprintf(apps_repo, sizeof apps_repo, "%s", text);
+    /* TRANSLATORS: packages is the program's name, c the c key; keep them. */
+    snprintf(notice, sizeof notice, strcmp(text, "off") == 0 ? _("App preset updates off.") :
+             _("App presets from %.120s: c in packages checks it."), text);
+}
+
+static void change_apps_branch(void)
+{
+    char text[128];
+    snprintf(text, sizeof text, "%s", apps_branch[0] ? apps_branch : "main");
+    if (!prompt(_("App presets branch to follow: "), text, sizeof text) || !text[0]) {
+        snprintf(notice, sizeof notice, "%s", _("App presets branch unchanged."));
+        return;
+    }
+    if (!valid_update_branch(text)) {
+        snprintf(notice, sizeof notice, "%s", _("Not a branch name: letters, digits, . _ / - (from a letter or digit)."));
+        return;
+    }
+    if (rc_set("apps_branch", strcmp(text, "main") == 0 ? NULL : text) < 0) {
+        snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+        return;
+    }
+    snprintf(apps_branch, sizeof apps_branch, "%s", strcmp(text, "main") == 0 ? "" : text);
+    /* TRANSLATORS: packages is the program's name, c the c key; keep them. */
+    snprintf(notice, sizeof notice, _("App presets follow branch %.100s: c in packages checks it."), text);
+}
+
+/* The app presets installed, as their catalog's CATALOG says: its commit
+ * and where it came from (the bootstrap one: the system's presets, before
+ * the first from the apps repository); none without a catalog. */
+static void apps_catalog_summary(char *out, size_t size)
+{
+    char line[256], origin[32] = "", commit[48] = "";
+    FILE *f = fopen(APPS_CATALOG_INFO, "re");
+    if (!f) {
+        snprintf(out, size, "%s", _("none"));
+        return;
+    }
+    while (fgets(line, sizeof line, f)) {
+        if (sscanf(line, "origin=\"%31[^\"]\"", origin) != 1) sscanf(line, "commit=\"%47[^\"]\"", commit);
+    }
+    fclose(f);
+    if (strcmp(origin, "bootstrap") == 0) {
+        snprintf(out, size, "%s", _("from the system, not yet from the apps repository"));
+    } else if (strcmp(origin, "medium") == 0) {
+        snprintf(out, size, _("%.7s from the installation medium"), commit[0] ? commit : "?");
+    } else {
+        snprintf(out, size, _("%.7s from the apps repository"), commit[0] ? commit : "?");
+    }
+}
+
 /* locachy-boot now: the boot image with the options as they are, for the next
  * start (its output in BOOT_LOG), as pacman's hooks make it after updates. */
 static void make_boot_image(void)
@@ -4680,7 +4801,8 @@ static void pick_machine(void)
 static int enter_row(int idx)
 {
     return idx == num_hw_items() || idx == cl_index() + 2 || idx == tr_index() + 2 || idx == bt_index() + 2 ||
-           idx == wp_index() || idx == tk_index() || idx == host_index() || idx == mach_index() || idx == upd_index() || idx == upd_index() + 1 ||
+           idx == wp_index() || idx == tk_index() || idx == host_index() || idx == mach_index() ||
+           (idx >= upd_index() && idx < upd_index() + 4) ||
            idx == boot_index() + 1 || idx == boot_index() + 2 || idx == boot_index() + 3 ||
            idx == repo_index() + NREPO_SECTIONS ||
            idx == sec_index() || idx == sec_index() + 2 || idx == fp_index() + 3 || idx == fc_index() + 4 || idx == fc_index() + 5 ||
@@ -5148,15 +5270,24 @@ static void item_text(int idx, char *line, size_t size)
                  _("Enter: choose"));
         return;
     }
-    if ((i = idx - upd_index()) >= 0 && i < 2) {
-        int off = strcmp(update_repo, "off") == 0;
+    if ((i = idx - upd_index()) >= 0 && i < 5) {
+        int off = strcmp(update_repo, "off") == 0, apps_off = strcmp(apps_repo, "off") == 0;
         if (i == 0) {
             /* TRANSLATORS: Enter is the Enter key; keep it. */
             snprintf(line, size, "%.95s %.120s   %s", ui_pad(label, sizeof label, _("Update repository"), 32),
                      off ? _("off") : update_repo[0] ? update_repo : DEFAULT_UPDATE_REPO, _("(Enter: change)"));
-        } else {
+        } else if (i == 1) {
             snprintf(line, size, "  %.95s %.100s   %s", ui_pad(label, sizeof label, _("Update branch"), 30),
                      update_branch[0] ? update_branch : "main", off ? _("(updates off)") : _("(Enter: change)"));
+        } else if (i == 2) {
+            snprintf(line, size, "%.95s %.120s   %s", ui_pad(label, sizeof label, _("App presets from"), 32),
+                     apps_off ? _("off") : apps_repo[0] ? apps_repo : DEFAULT_APPS_REPO, _("(Enter: change)"));
+        } else if (i == 3) {
+            snprintf(line, size, "  %.95s %.100s   %s", ui_pad(label, sizeof label, _("App presets branch"), 30),
+                     apps_branch[0] ? apps_branch : "main", apps_off ? _("(updates off)") : _("(Enter: change)"));
+        } else {
+            apps_catalog_summary(vbuf, sizeof vbuf);
+            snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _("App presets installed"), 30), vbuf);
         }
         return;
     }
@@ -5756,8 +5887,10 @@ static void adjust(int dir)
         }
         rclone_on = !rclone_on;
         kill(1, SIGHUP);
+        /* Mounting takes the network: its result is the remotes line's. */
         snprintf(notice, sizeof notice, "%s", rclone_on ?
-                 _("Cloud drives mounted under ~/Drives/<remote>.") : _("Cloud drives unmounted."));
+                 _("Cloud drives are being mounted under ~/Drives/<remote>; their state is shown below.") :
+                 _("Cloud drives stop; files with uploads pending keep their drive until they are done."));
         return;
     }
     if (selected == rclone_index() + 2) {
@@ -5861,6 +5994,18 @@ static void adjust(int dir)
         snprintf(notice, sizeof notice, "%s", selected == upd_index() ?
                  _("Enter: the git repository LOCachy's source updates come from (or off).") :
                  _("Enter: the branch of that repository to follow (main by default)."));
+        return;
+    }
+    if (selected == upd_index() + 2 || selected == upd_index() + 3) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, "%s", selected == upd_index() + 2 ?
+                 _("Enter: the git repository the app presets come from (or off).") :
+                 _("Enter: the branch of the app presets' repository to follow (main by default)."));
+        return;
+    }
+    if (selected == upd_index() + 4) {
+        /* TRANSLATORS: packages is the program's name, c the c key; keep them. */
+        snprintf(notice, sizeof notice, "%s", _("The app presets installed: c in packages checks for newer ones."));
         return;
     }
     if (selected == boot_index() + 3 || selected == boot_index() + 4) {
@@ -6291,6 +6436,12 @@ int main(int argc, char **argv)
         } else if (key == '\n' && selected == upd_index() + 1) {
             change_update_branch();
             draw();
+        } else if (key == '\n' && selected == upd_index() + 2) {
+            change_apps_repo();
+            draw();
+        } else if (key == '\n' && selected == upd_index() + 3) {
+            change_apps_branch();
+            draw();
         } else if (key == '\n' && selected == boot_index() + 3) {
             if (pkg_job || repos_job) {
                 snprintf(notice, sizeof notice, "%s", _("Wait: a package job is still running."));
@@ -6457,8 +6608,13 @@ int main(int argc, char **argv)
             if (!rclone_installed()) {
                 snprintf(notice, sizeof notice, "%s", _("rclone is not installed: the Cloud drives installed line installs it."));
             } else {
-                char *const argv[] = { RCLONE_SERVICE, "--config", NULL };
-                int status = in_term(argv);
+                /* A remote whose sign-in was rejected: rclone's own reconnect
+                 * for it; otherwise its whole configuration. */
+                char summary[256], relogin[256];
+                rclone_status_summary(summary, sizeof summary, relogin, sizeof relogin);
+                char *const config[] = { RCLONE_SERVICE, "--config", NULL };
+                char *const reconnect[] = { RCLONE_SERVICE, "--reconnect", relogin, NULL };
+                int status = in_term(relogin[0] ? reconnect : config);
                 snprintf(notice, sizeof notice, "%s", status == 0 ?
                          _("rclone config done.") : _("rclone config did not finish."));
             }

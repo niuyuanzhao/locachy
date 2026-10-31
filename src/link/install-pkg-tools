@@ -8,7 +8,7 @@ install -d /usr/local/bin "$lib" /etc/locachy
 for tool in locachy-build locachy-pkg locachy-repos; do
     install -m 755 "$src/link/$tool" "/usr/local/bin/$tool"
 done
-for module in locachy_upstream.py locachy_transaction.py; do
+for module in locachy_upstream.py locachy_transaction.py locachy_apps.py; do
     install -m 644 "$src/link/$module" "$lib/$module"
 done
 install -m 755 "$src/link/local-package-gate" "$lib/local-package-gate"

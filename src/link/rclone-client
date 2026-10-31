@@ -1,127 +1,637 @@
-#!/bin/bash
-# rclone-client: mounts each remote in ~/.config/rclone/rclone.conf under
-# ~/Drives/<remote> inside locachy-net as the user (uid 1000), so both the
-# framebuffer file manager and every container (which receives ~/Drives as a
-# shared rslave mount) can read and write iCloud Drive, Google Drive, OneDrive,
-# WebDAV, S3 and other rclone remotes.
-#
-#   rclone-client            run as a service (process 1 supervises it)
-#   rclone-client --config   run "rclone config" as the user (in locachy-net
-#                            when active, so OAuth/iCloud login reaches the net)
-set -euo pipefail
+#!/usr/bin/env python3
+"""Supervise rclone mounts; expose only status, refresh and unmount to files.
 
-user_line=$(getent passwd 1000 || true)
-if [ -z "$user_line" ]; then
-    echo "rclone-client: no user with uid 1000" >&2
-    exit 1
-fi
-user=${user_line%%:*}
-rest=${user_line#*:}; rest=${rest#*:}; rest=${rest#*:}
-gid=${rest%%:*}
-rest=${rest#*:}; rest=${rest#*:}
-uhome=${rest%%:*}
-conf="$uhome/.config/rclone/rclone.conf"
-drives="$uhome/Drives"
+The private RC sockets belong to rclone, not to applications. All backend and
+credential handling remains rclone's. The host control socket accepts root only.
+"""
+import errno
+import fcntl
+import hashlib
+import http.client
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import selectors
+import signal
+import socket
+import stat
+import struct
+import subprocess
+import sys
+import time
 
-as_user() {
-    HOME="$uhome" USER="$user" LOGNAME="$user" XDG_CONFIG_HOME="$uhome/.config" \
-        XDG_CACHE_HOME="$uhome/.cache" \
-        setpriv --reuid=1000 --regid="$gid" --clear-groups -- "$@"
+sys.dont_write_bytecode = True
+RCLONE = "/usr/bin/rclone"
+FUSERMOUNT = "/usr/bin/fusermount3"
+RUNTIME = Path("/run/locachy/cloud")
+CONTROL = RUNTIME / "control.sock"
+STATUS = RUNTIME / "status"
+NETNS = "/run/netns/locachy-net"
+RESOLVER = "/etc/netns/locachy-net/resolv.conf"
+FUSE_CONF = Path("/etc/fuse.conf")
+LIMIT = 16384
+REFRESH_TIMEOUT = 30
+SHUTDOWN_WAIT = 60  # for open files and pending uploads before stopping anyway
+
+
+class CloudError(Exception):
+    pass
+
+
+class CloudBusy(CloudError):
+    """Refused without changing state: open files or uploads keep the mount."""
+
+
+def run(args, **kwargs):
+    return subprocess.run(args, check=True, timeout=30, **kwargs)
+
+
+def identity():
+    user = pwd.getpwuid(1000)
+    return user, Path(user.pw_dir) / "Drives"
+
+
+def user_command(user, args):
+    return ["env", "-i", "PATH=/usr/local/sbin:/usr/local/bin:/usr/bin", "LANG=C.UTF-8",
+            f"HOME={user.pw_dir}", f"USER={user.pw_name}", f"LOGNAME={user.pw_name}",
+            f"XDG_CONFIG_HOME={user.pw_dir}/.config", f"XDG_CACHE_HOME={user.pw_dir}/.cache",
+            "setpriv", "--reuid=1000", f"--regid={user.pw_gid}", "--clear-groups", "--", *args]
+
+
+def safe_name(name):
+    return isinstance(name, str) and 0 < len(name.encode()) <= 200 and name not in (".", "..") \
+        and not any(ord(c) < 32 or ord(c) == 127 or c in "/\\:" for c in name)
+
+
+def unescape_mount(value):
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), value)
+
+
+def mounts():
+    rows = {}
+    with open("/proc/self/mountinfo", encoding="utf-8") as f:
+        for line in f:
+            before, sep, after = line.partition(" - ")
+            a, b = before.split(), after.split()
+            if sep and len(a) >= 6 and len(b) >= 2:
+                rows[unescape_mount(a[4])] = (b[0], unescape_mount(b[1]))
+    return rows
+
+
+def make_directory(path, uid, gid, mode):
+    path.mkdir(mode=mode, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        os.fchown(fd, uid, gid)
+        os.fchmod(fd, mode)
+    finally:
+        os.close(fd)
+
+
+def network_command(args):
+    if not Path(NETNS).exists() or not Path(RESOLVER).is_file() or Path(RESOLVER).is_symlink():
+        raise CloudError("network namespace or resolver is not ready")
+    # Only / becomes a slave: the separately shared Drives mount stays shared.
+    # Resolver binds stay private, while new mounts under Drives reach the host.
+    return ["unshare", "--mount", "--propagation", "unchanged", "--", "sh", "-eu", "-c",
+            'mount --make-slave /; mount --bind "$1" /etc/resolv.conf; shift; '
+            'net=$1; shift; exec nsenter --net="$net" -- "$@"', "rclone-network", RESOLVER, NETNS, *args]
+
+
+def mount_command(user, remote, point, rc_socket, config):
+    args = [RCLONE, "--config", str(config), "mount", remote + ":", str(point),
+            "--vfs-cache-mode", "writes", "--dir-cache-time", "60s", "--allow-other",
+            # mountinfo shows the backend's own root (an alias's target) unless named.
+            "--devname", remote + ":",
+            "--rc", "--rc-addr", str(rc_socket), "--rc-no-auth", "--use-json-log"]
+    return network_command(user_command(user, args))
+
+
+class UnixHTTP(http.client.HTTPConnection):
+    def __init__(self, path, timeout=2):
+        super().__init__("localhost", timeout=timeout)
+        self.path = str(path)
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(self.path)
+
+
+def rc(path, operation, params=None):
+    conn = UnixHTTP(path)
+    try:
+        conn.request("POST", "/" + operation, json.dumps(params or {}), {"Content-Type": "application/json"})
+        response = conn.getresponse()
+        body = response.read(LIMIT + 1)
+        if len(body) > LIMIT:
+            raise CloudError("rclone control response is too large")
+        result = json.loads(body)
+        if not isinstance(result, dict):
+            raise CloudError("invalid rclone control response")
+        if response.status != 200 or result.get("error"):
+            raise CloudError(str(result.get("error") or "rclone control failed"))
+        return result
+    finally:
+        conn.close()
+
+
+def error_kind(message):
+    # Standard OAuth errors, not provider names, token timestamps or all 403s.
+    text = message.lower()
+    # rclone's own OAuth diagnosis ("... try refreshing with rclone config
+    # reconnect"), or an OAuth error field; a bare 401 may still be refreshed.
+    if "config reconnect" in text \
+            or re.search(r"[\"']?error[\"']?\s*[:=]\s*[\"']?(invalid_grant|invalid_token)\b", text) \
+            or re.search(r"\boauth2\b.*\b(invalid_grant|invalid_token)\b", text, re.S) \
+            or re.search(r"\btoken\b.*\binvalid_grant\b", text, re.S):
+        return "authentication"
+    if re.search(r"\b(429|too many requests)\b", text):
+        return "rate-limit"
+    if re.search(r"\b(403|permission denied|access denied)\b", text):
+        return "permission"
+    if any(s in text for s in ("no such host", "network is unreachable", "connection refused",
+                               "i/o timeout", "context deadline exceeded", "temporary failure in name resolution")):
+        return "network"
+    return "attention"
+
+
+REASONS = {
+    "authentication": "Authentication was rejected. Open Settings > Cloud drives to reconnect this remote.",
+    "rate-limit": "The remote is rate limited. Try again later.",
+    "permission": "The remote denied this operation. Check its permissions in Settings > Cloud drives.",
+    "network": "The cloud drive cannot reach the network. Check the network, then refresh.",
+    "attention": "The cloud drive needs attention. Open Settings > Cloud drives; diagnostic logs are private.",
+    "busy": "Files on the cloud drive are open or still uploading. Close them, then try again.",
 }
 
-if [ "${1:-}" = "--config" ]; then
-    install -d -o 1000 -g "$gid" -m 0700 "$uhome/.config" "$uhome/.config/rclone" "$uhome/.cache"
-    if [ -e /run/netns/locachy-net ]; then
-        exec ip netns exec locachy-net env HOME="$uhome" USER="$user" LOGNAME="$user" \
-            XDG_CONFIG_HOME="$uhome/.config" XDG_CACHE_HOME="$uhome/.cache" \
-            setpriv --reuid=1000 --regid="$gid" --clear-groups -- /usr/bin/rclone config
-    else
-        exec env HOME="$uhome" USER="$user" LOGNAME="$user" \
-            XDG_CONFIG_HOME="$uhome/.config" XDG_CACHE_HOME="$uhome/.cache" \
-            setpriv --reuid=1000 --regid="$gid" --clear-groups -- /usr/bin/rclone config
-    fi
-fi
 
-if [ ! -x /usr/bin/rclone ] || [ ! -x /usr/bin/fusermount3 ]; then
-    echo "rclone-client: rclone or fusermount3 is not installed" >&2
-    sleep 5
-    exit 1
-fi
+def refresh_params(directory):
+    # The mount's root has no "dir": rclone 1.75 answers dir="" with
+    # "file does not exist". One directory, never recursive, in the background.
+    params = {"recursive": "false", "_async": True}
+    if directory:
+        params["dir"] = directory
+    return params
 
-for _ in $(seq 1 50); do
-    [ -e /run/netns/locachy-net ] && [ -e /dev/fuse ] && break
-    sleep 0.2
-done
-if [ ! -e /run/netns/locachy-net ] || [ ! -e /dev/fuse ]; then
-    echo "rclone-client: waiting for locachy-net and /dev/fuse" >&2
-    sleep 5
-    exit 1
-fi
 
-install -d -o 1000 -g "$gid" -m 0755 "$drives"
-if ! mountpoint -q "$drives"; then
-    mount --bind "$drives" "$drives"
-fi
-mount --make-shared "$drives"
+def refresh_output(output, directory):
+    result = output.get("result")
+    if not isinstance(result, dict) or directory not in result:
+        raise CloudError("rclone did not report the requested directory")
+    if result[directory] != "OK":
+        raise CloudError(str(result[directory]))
 
-grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo "user_allow_other" >>/etc/fuse.conf
 
-declare -A pids=()
-declare -A mpoints=()
+def pending_writes(stats):
+    disk = stats.get("diskCache", {})
+    # vfs.inUse is the VFS reference count (normally 1), not open file handles.
+    # The kernel's ordinary unmount still refuses open filesystem references.
+    return any(int(disk.get(key, 0)) > 0 for key in ("uploadsInProgress", "uploadsQueued", "erroredFiles"))
 
-list_remotes() {
-    [ -r "$conf" ] || return 0
-    sed -n 's/^\[\([A-Za-z0-9._-][A-Za-z0-9._-]*\)\][[:space:]]*$/\1/p' "$conf"
-}
 
-unmount_one() {
-    local r=$1
-    local mp=${mpoints[$r]:-"$drives/$r"}
-    if [ -n "${pids[$r]:-}" ]; then
-        kill "${pids[$r]}" 2>/dev/null || true
-        wait "${pids[$r]}" 2>/dev/null || true
-        unset "pids[$r]"
-    fi
-    if mountpoint -q "$mp" 2>/dev/null; then
-        fusermount3 -u -z "$mp" 2>/dev/null || umount -l "$mp" 2>/dev/null || true
-    fi
-    rmdir "$mp" 2>/dev/null || true
-    unset "mpoints[$r]"
-}
+def public_row(remote):
+    return {"name": remote.name, "path": str(remote.point), "state": remote.state,
+            "reason": remote.reason, "last_success": remote.last_success}
 
-cleanup() {
-    for r in "${!mpoints[@]}"; do
-        unmount_one "$r"
-    done
-}
-trap cleanup EXIT
-trap "exit 0" TERM INT
 
-while :; do
-    declare -A wanted=()
-    while IFS= read -r r; do
-        [ -n "$r" ] || continue
-        wanted[$r]=1
-        if [ -n "${pids[$r]:-}" ] && kill -0 "${pids[$r]}" 2>/dev/null; then
-            continue
-        fi
-        mp="$drives/$r"
-        install -d -o 1000 -g "$gid" -m 0755 "$mp"
-        install -d -o 1000 -g "$gid" -m 0700 "$uhome/.cache/rclone"
-        ip netns exec locachy-net env HOME="$uhome" USER="$user" LOGNAME="$user" \
-            XDG_CONFIG_HOME="$uhome/.config" XDG_CACHE_HOME="$uhome/.cache" \
-            setpriv --reuid=1000 --regid="$gid" --clear-groups -- \
-            /usr/bin/rclone mount "$r:" "$mp" \
-            --vfs-cache-mode writes --dir-cache-time 60s --allow-other >/dev/null 2>&1 &
-        pids[$r]=$!
-        mpoints[$r]=$mp
-    done < <(list_remotes)
+class Remote:
+    def __init__(self, name, point, directory):
+        self.name, self.point, self.directory = name, point, directory
+        self.rc_socket = directory / "rc" / "rc.sock"
+        self.process = None
+        self.state, self.reason = "mounting", ""
+        self.last_success, self.retry_at, self.started_at = 0, 0, 0
+        self.log = None
+        self.log_offset = 0
+        self.log_tail = b""
+        self.notified = ""
+        self.notification_id = 0
+        self.job = None
+        self.paused = False
+        self.created_point = False
+        self.mounted_once = False
 
-    for r in "${!mpoints[@]}"; do
-        if [ -z "${wanted[$r]:-}" ]; then
-            unmount_one "$r"
-        fi
-    done
-    unset wanted
-    sleep 3
-done
+
+class Service:
+    def __init__(self):
+        self.user, self.drives = identity()
+        self.config = Path(self.user.pw_dir) / ".config/rclone/rclone.conf"
+        self.remotes = {}
+        self.selector = selectors.DefaultSelector()
+        self.stopping = False
+        self.next_discovery = 0
+        self.next_jobs = 0
+        self.config_changed = None
+
+    def write_status(self):
+        rows = [public_row(r) for r in sorted(self.remotes.values(), key=lambda r: r.name)]
+        temporary = STATUS.with_suffix(".new")
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            os.fchmod(f.fileno(), 0o644)
+            for row in rows:
+                f.write("\t".join(str(row[k]) for k in ("name", "path", "state", "last_success", "reason")) + "\n")
+        os.replace(temporary, STATUS)
+
+    def notify(self, remote):
+        if remote.state == "ready":
+            if remote.notification_id:
+                try:
+                    subprocess.run(["gdbus", "call", "--address", "unix:path=/run/user/0/bus",
+                                    "--dest", "org.freedesktop.Notifications", "--object-path",
+                                    "/org/freedesktop/Notifications", "--method",
+                                    "org.freedesktop.Notifications.CloseNotification", str(remote.notification_id)],
+                                   capture_output=True, timeout=2)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+            remote.notified, remote.notification_id = "", 0
+            return
+        if remote.reason not in REASONS or remote.notified == remote.reason:
+            return
+        try:
+            result = subprocess.run([
+                "gdbus", "call", "--address", "unix:path=/run/user/0/bus", "--dest", "org.freedesktop.Notifications",
+                "--object-path", "/org/freedesktop/Notifications", "--method", "org.freedesktop.Notifications.Notify",
+                "Cloud drives", str(remote.notification_id), "", f"Cloud drive: {remote.name}",
+                REASONS[remote.reason], "[]", "{}", "10000"], capture_output=True, text=True, timeout=2)
+            if result.returncode == 0:
+                match = re.fullmatch(r"\(uint32 (\d+),\)\s*", result.stdout)
+                remote.notification_id = int(match[1]) if match else 0
+                remote.notified = remote.reason
+        except (OSError, subprocess.SubprocessError):
+            pass  # Keep the state visible; retry after the display's bus appears.
+
+    def failed(self, remote, error):
+        remote.state, remote.reason = "failed", error_kind(str(error))
+        self.notify(remote)
+        self.write_status()
+
+    def setup(self):
+        make_directory(RUNTIME, 0, 0, 0o755)
+        lockfd = os.open(RUNTIME / "service.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        self.lock = os.fdopen(lockfd, "w")
+        fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        make_directory(self.drives, self.user.pw_uid, self.user.pw_gid, 0o755)
+        if str(self.drives) not in mounts():
+            run(["mount", "--bind", str(self.drives), str(self.drives)])
+        run(["mount", "--make-shared", str(self.drives)])
+        fuse = FUSE_CONF
+        text = fuse.read_text() if fuse.exists() else ""
+        if not re.search(r"^\s*user_allow_other\s*(?:#.*)?$", text, re.M):
+            with fuse.open("a") as f:
+                f.write("\nuser_allow_other\n")
+        CONTROL.unlink(missing_ok=True)
+        self.server = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        self.server.bind(str(CONTROL))
+        os.chown(CONTROL, 0, self.user.pw_gid)
+        os.chmod(CONTROL, 0o660)
+        self.server.listen(8)
+        self.server.setblocking(False)
+        self.selector.register(self.server, selectors.EVENT_READ, None)
+        self.write_status()
+
+    def discover(self):
+        if not self.config.exists():
+            return []
+        result = run(user_command(self.user, [RCLONE, "--config", str(self.config), "listremotes", "--json"]),
+                     capture_output=True, text=True)
+        rows = json.loads(result.stdout)
+        if not isinstance(rows, list):
+            raise CloudError("rclone listed no remotes")
+        names = []
+        for row in rows:
+            name = row.get("name") if isinstance(row, dict) else None
+            if safe_name(name):
+                names.append(name)
+            else:
+                # One unusable name must not take the other remotes down with it.
+                print("rclone-client: a remote name cannot be a mount directory; it is not mounted",
+                      file=sys.stderr, flush=True)
+        return list(dict.fromkeys(names))
+
+    def start(self, remote):
+        if remote.paused or time.monotonic() < remote.retry_at:
+            return
+        try:
+            mounted = mounts().get(str(remote.point))
+            if mounted:
+                raise CloudError("the mount directory is already in use")
+            if remote.point.is_symlink() or (remote.point.exists() and any(remote.point.iterdir())):
+                raise CloudError("the mount directory is not empty or is a symbolic link")
+            if len(os.fsencode(remote.rc_socket)) >= 108:
+                raise CloudError("the private control socket path is too long")
+            remote.created_point = not remote.point.exists()
+            make_directory(remote.point, self.user.pw_uid, self.user.pw_gid, 0o755)
+            make_directory(remote.directory, 0, 0, 0o711)
+            make_directory(remote.rc_socket.parent, self.user.pw_uid, self.user.pw_gid, 0o700)
+            remote.rc_socket.unlink(missing_ok=True)
+            # Root owns the log parent: the application user cannot redirect it.
+            # Only root reads raw backend messages, which can contain private paths.
+            logpath = remote.directory / "rclone.log"
+            fd = os.open(logpath, os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+            os.fchown(fd, 0, 0)
+            os.fchmod(fd, 0o600)
+            remote.log = os.fdopen(fd, "a+b", buffering=0)
+            remote.log_offset, remote.log_tail = os.fstat(fd).st_size, b""
+            remote.process = subprocess.Popen(mount_command(self.user, remote.name, remote.point,
+                                                             remote.rc_socket, self.config),
+                                              stdin=subprocess.DEVNULL, stdout=remote.log, stderr=remote.log,
+                                              start_new_session=True)
+            remote.started_at = time.monotonic()
+            remote.state, remote.reason = "mounting", ""
+            self.write_status()
+        except (OSError, ValueError, CloudError, subprocess.SubprocessError) as e:
+            remote.retry_at = time.monotonic() + 30
+            self.failed(remote, e)
+
+    def read_log(self, remote):
+        if not remote.log:
+            return
+        data = os.pread(remote.log.fileno(), 65536, remote.log_offset)
+        remote.log_offset += len(data)
+        lines = (remote.log_tail + data).split(b"\n")
+        remote.log_tail = lines.pop()[-LIMIT:]
+        for line in lines:
+            try:
+                entry = json.loads(line)
+            except (UnicodeDecodeError, ValueError):
+                continue
+            if isinstance(entry, dict) and str(entry.get("level", "")).lower() in ("error", "critical", "fatal") \
+                    and error_kind(str(entry.get("msg", ""))) == "authentication":
+                # Other backend errors may be retried transfers; they stay in the private log.
+                # Only the category leaves this process, never the message.
+                self.failed(remote, str(entry.get("msg", "")))
+
+    def clear_dead_mount(self, remote):
+        row = mounts().get(str(remote.point))
+        if not row:
+            return
+        if not remote.mounted_once or row != ("fuse.rclone", remote.name + ":"):
+            raise CloudError("the mount directory belongs to another filesystem")
+        # Ordinary unmount only: the kernel refuses while files are open.
+        if subprocess.run([FUSERMOUNT, "-u", str(remote.point)], capture_output=True, timeout=30).returncode:
+            raise CloudBusy("cloud drive files are open")
+
+    def stop(self, remote):
+        process = remote.process
+        try:
+            if process and process.poll() is None and pending_writes(rc(remote.rc_socket, "vfs/stats")):
+                raise CloudBusy("pending uploads; the mount remains active")
+            self.clear_dead_mount(remote)
+            if process:
+                if process.poll() is None:
+                    process.terminate()
+                process.wait(timeout=10)
+        except CloudBusy:
+            raise
+        except (OSError, CloudError, ValueError, http.client.HTTPException, subprocess.SubprocessError) as e:
+            self.failed(remote, e)
+            raise CloudError("cloud drive is unavailable; pending cache is kept") from e
+        remote.process = None
+        if remote.log:
+            remote.log.close()
+            remote.log = None
+        if remote.created_point:
+            try:
+                remote.point.rmdir()
+            except OSError:
+                pass  # A new local entry after unmount is never removed recursively.
+        remote.state, remote.reason = "unmounted", ""
+        self.write_status()
+
+    def find(self, path):
+        if not isinstance(path, str) or not os.path.isabs(path) or os.path.normpath(path) != path \
+                or any(ord(c) < 32 or ord(c) == 127 for c in path):
+            raise CloudError("an absolute normalized mount path is required")
+        for remote in self.remotes.values():
+            root = str(remote.point)
+            if path == root or path.startswith(root + "/"):
+                rel = os.path.relpath(path, root)
+                return remote, "" if rel == "." else rel
+        raise CloudError("this directory is not a managed cloud drive")
+
+    def reply(self, client, data):
+        try:
+            client.send(json.dumps(data).encode())
+        except OSError:
+            pass
+        client.close()
+
+    def request(self):
+        client, _ = self.server.accept()
+        client.settimeout(1)
+        try:
+            _, uid, _ = struct.unpack("3i", client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+            if uid not in (0, self.user.pw_uid):
+                raise CloudError("host cloud control requires root or the drives' user")
+            raw = client.recv(LIMIT + 1)
+            if len(raw) > LIMIT:
+                raise CloudError("request too large")
+            request = json.loads(raw)
+            if not isinstance(request, dict):
+                raise CloudError("cloud request must be an object")
+            operation = request.get("op")
+            remote, directory = self.find(request.get("path"))
+            if operation == "refresh":
+                if remote.job:
+                    raise CloudError("this cloud drive is already refreshing")
+                if not remote.process or remote.process.poll() is not None \
+                        or mounts().get(str(remote.point)) != ("fuse.rclone", remote.name + ":"):
+                    raise CloudError("cloud drive is not mounted")
+                remote.mounted_once = True
+                data = rc(remote.rc_socket, "vfs/refresh", refresh_params(directory))
+                jobid = data.get("jobid")
+                if not isinstance(jobid, int):
+                    raise CloudError("rclone did not start a refresh job")
+                remote.job = (jobid, directory, client, time.monotonic() + REFRESH_TIMEOUT)
+                remote.state, remote.reason = "refreshing", ""
+                self.write_status()
+                return
+            if operation == "unmount" and not directory:
+                self.stop(remote)
+                remote.paused = True
+                self.reply(client, {"ok": True, "state": "unmounted"})
+                return
+            raise CloudError("unsupported cloud drive operation")
+        except CloudBusy:
+            self.reply(client, {"ok": False, "state": "busy", "reason": REASONS["busy"]})
+        except (OSError, ValueError, CloudError, http.client.HTTPException, subprocess.SubprocessError) as e:
+            self.reply(client, {"ok": False, "state": error_kind(str(e)),
+                                "reason": REASONS[error_kind(str(e))]})
+
+    def jobs(self):
+        for remote in self.remotes.values():
+            if not remote.job:
+                continue
+            jobid, directory, client, deadline = remote.job
+            try:
+                job = rc(remote.rc_socket, "job/status", {"jobid": jobid})
+                if not job.get("finished"):
+                    if time.monotonic() < deadline:
+                        continue
+                    try:
+                        rc(remote.rc_socket, "job/stop", {"jobid": jobid})
+                    except (OSError, ValueError, CloudError, http.client.HTTPException):
+                        pass
+                    raise CloudError("context deadline exceeded")
+                if not job.get("success") or job.get("error"):
+                    raise CloudError(str(job.get("error") or "refresh failed"))
+                refresh_output(job.get("output", {}), directory)
+                remote.state, remote.reason, remote.last_success = "ready", "", int(time.time())
+                self.notify(remote)
+                self.reply(client, {"ok": True, "state": "ready"})
+            except (OSError, ValueError, CloudError, http.client.HTTPException) as e:
+                self.failed(remote, e)
+                self.reply(client, {"ok": False, "state": remote.reason, "reason": REASONS[remote.reason]})
+            remote.job = None
+            self.write_status()
+
+    def tick(self):
+        now = time.monotonic()
+        if now >= self.next_discovery:
+            self.next_discovery = now + 3
+            try:
+                wanted = set(self.discover())
+                for name in wanted:
+                    if name not in self.remotes:
+                        tag = hashlib.sha256(name.encode()).hexdigest()[:24]
+                        self.remotes[name] = Remote(name, self.drives / name, RUNTIME / tag)
+                for name, remote in list(self.remotes.items()):
+                    if name not in wanted:
+                        try:
+                            self.stop(remote)
+                            del self.remotes[name]
+                        except CloudError:
+                            pass
+            except (OSError, ValueError, CloudError, subprocess.SubprocessError):
+                print("rclone-client: cannot list remotes; keeping existing mounts", file=sys.stderr, flush=True)
+            try:
+                changed = self.config.stat().st_mtime_ns
+            except OSError:
+                changed = 0
+            if changed != self.config_changed:
+                # After "rclone config reconnect", restart only mounts it can help,
+                # and only when idle: stop() refuses open files and pending uploads.
+                self.config_changed = changed
+                for remote in self.remotes.values():
+                    if remote.reason == "authentication" and remote.process:
+                        try:
+                            self.stop(remote)
+                            remote.retry_at = 0
+                        except CloudError:
+                            pass
+        for remote in self.remotes.values():
+            self.read_log(remote)
+            if remote.process and remote.process.poll() is not None:
+                remote.process = None
+                remote.retry_at = now + 30
+                if remote.log:
+                    remote.log.close()
+                    remote.log = None
+                try:
+                    self.clear_dead_mount(remote)
+                except (OSError, CloudError, subprocess.SubprocessError):
+                    pass  # A busy or foreign mount is never forcibly detached.
+                if remote.state != "failed":
+                    self.failed(remote, "rclone mount stopped")
+            if not remote.process:
+                self.start(remote)
+            elif remote.state == "mounting":
+                row = mounts().get(str(remote.point))
+                if row == ("fuse.rclone", remote.name + ":"):
+                    remote.mounted_once = True
+                    remote.state = "ready"
+                    self.notify(remote)
+                    self.write_status()
+                elif now - remote.started_at > 30:
+                    self.failed(remote, "mount did not become ready")
+            if remote.state == "failed":
+                self.notify(remote)
+        if now >= self.next_jobs:
+            self.next_jobs = now + 0.2
+            self.jobs()
+
+    def serve(self):
+        self.setup()
+        try:
+            while not self.stopping:
+                for _, _ in self.selector.select(0.2):
+                    self.request()
+                self.tick()
+        finally:
+            for remote in self.remotes.values():
+                if remote.job:
+                    self.reply(remote.job[2], {"ok": False, "state": "attention", "reason": "Cloud drives are stopping."})
+                deadline = time.monotonic() + SHUTDOWN_WAIT
+                while True:
+                    try:
+                        self.stop(remote)
+                        break
+                    except CloudError:
+                        if not remote.process or remote.process.poll() is not None \
+                                or time.monotonic() >= deadline:
+                            break
+                        time.sleep(1)
+                if remote.process and remote.process.poll() is None:
+                    # rclone keeps unuploaded writes in its cache and uploads them
+                    # at the next start with the same flags; nothing is deleted here.
+                    print("rclone-client: busy cloud drive stopped; its write cache is kept", file=sys.stderr, flush=True)
+                    remote.process.terminate()
+                    try:
+                        remote.process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        remote.process.kill()
+            self.write_status()
+            CONTROL.unlink(missing_ok=True)
+
+
+def client(operation, path):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as conn:
+        conn.settimeout(REFRESH_TIMEOUT + 5)
+        conn.connect(str(CONTROL))
+        conn.send(json.dumps({"op": operation, "path": path}).encode())
+        raw = conn.recv(LIMIT + 1)
+        if len(raw) > LIMIT:
+            raise CloudError("cloud response too large")
+        result = json.loads(raw)
+    if result.get("ok"):
+        print("Cloud drive refreshed." if operation == "refresh" else "Cloud drive unmounted.")
+        return 0
+    print(result.get("reason", "Cloud drive operation failed."))
+    return 1
+
+
+def main():
+    args = sys.argv[1:]
+    if args[:1] in (["--refresh"], ["--unmount"]) and len(args) == 2:
+        return client(args[0][2:], args[1])
+    if args in (["--config"], ["--reconnect"]) or (args[:1] == ["--reconnect"] and len(args) == 2):
+        user, _ = identity()
+        for path in (Path(user.pw_dir) / ".config/rclone", Path(user.pw_dir) / ".cache/rclone"):
+            make_directory(path, user.pw_uid, user.pw_gid, 0o700)
+        command = [RCLONE, "config"]
+        if args[0] == "--reconnect":
+            if len(args) != 2 or not safe_name(args[1]):
+                raise CloudError("choose a remote to reconnect")
+            command += ["reconnect", args[1] + ":"]
+        os.execvp("ip", ["ip", "netns", "exec", "locachy-net", *user_command(user, command)])
+    if args:
+        raise CloudError("usage: rclone-client [--config | --reconnect REMOTE | --refresh PATH | --unmount PATH]")
+    service = Service()
+    signal.signal(signal.SIGTERM, lambda *_: setattr(service, "stopping", True))
+    signal.signal(signal.SIGINT, lambda *_: setattr(service, "stopping", True))
+    service.serve()
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (OSError, ValueError, CloudError, subprocess.SubprocessError) as e:
+        # Backend output stays private; never echo tokens into a caller's UI.
+        print("rclone-client: " + (str(e) if isinstance(e, CloudError) else "cloud drive operation failed"),
+              file=sys.stderr)
+        sys.exit(1)

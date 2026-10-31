@@ -105,9 +105,12 @@ static char hsi_id[64], hsi_failing[MAX_HSI_CHECKS][160];
 static int nhsi_failing;
 static char source_text[512]; /* the LOCachy source locachy-install is, as it said */
 static int source_not_newest;
+static char apps_text[512]; /* and the app presets' catalog it installs */
+static int apps_not_newest;
 static long long memory_bytes, esp_bytes, min_root_bytes;
 static struct {
     char user[32], hostname[64], keymap[48], timezone[64], update_repo[256], update_branch[128];
+    char apps_repo[256], apps_branch[128];
     int swap_gib, copy_network;
     unsigned char repos[4];
 } dflt;
@@ -123,7 +126,7 @@ static struct {
     char disk[64], esp[64], root[64], swap[64];
     char passphrase[256], password[256];
     char user[32], full_name[128], hostname[64], keymap[48], timezone[64], cpu[48];
-    char update_repo[256], update_branch[128];
+    char update_repo[256], update_branch[128], apps_repo[256], apps_branch[128];
     unsigned char module_on[MAX_ITEMS], container_on[MAX_ITEMS], repo_on[4];
     int lang_touched, modules_touched, containers_touched, ime_touched;
 } c;
@@ -337,6 +340,8 @@ static int load_description(void)
     copy(dflt.timezone, sizeof dflt.timezone, jstr(def, "timezone"));
     copy(dflt.update_repo, sizeof dflt.update_repo, jstr(def, "update_repo"));
     copy(dflt.update_branch, sizeof dflt.update_branch, jstr(def, "update_branch"));
+    copy(dflt.apps_repo, sizeof dflt.apps_repo, jstr(def, "apps_repo"));
+    copy(dflt.apps_branch, sizeof dflt.apps_branch, jstr(def, "apps_branch"));
     dflt.swap_gib = (int)jint(def, "swap_gib");
     dflt.copy_network = json_object_get_boolean(jget(def, "copy_network"));
     a = jget(d, "repo_sections");
@@ -402,6 +407,9 @@ static int load_description(void)
     o = jget(d, "source");
     copy(source_text, sizeof source_text, jstr(o, "text"));
     source_not_newest = json_object_get_boolean(jget(o, "not_newest"));
+    o = jget(d, "apps");
+    copy(apps_text, sizeof apps_text, jstr(o, "text"));
+    apps_not_newest = json_object_get_boolean(jget(o, "not_newest"));
     net_profiles = (int)jint(d, "network_profiles");
     memory_bytes = jint(d, "memory_bytes");
     esp_bytes = jint(d, "esp_bytes");
@@ -462,6 +470,8 @@ static void set_defaults(void)
     copy(c.cpu, sizeof c.cpu, "auto");
     copy(c.update_repo, sizeof c.update_repo, dflt.update_repo);
     copy(c.update_branch, sizeof c.update_branch, dflt.update_branch);
+    copy(c.apps_repo, sizeof c.apps_repo, dflt.apps_repo);
+    copy(c.apps_branch, sizeof c.apps_branch, dflt.apps_branch);
     memcpy(c.repo_on, dflt.repos, sizeof c.repo_on);
     follow_language();
 }
@@ -603,7 +613,7 @@ enum {
     R_ENC, R_PASS, R_SB, R_SB_MICROSOFT,
     R_USER, R_FULL_NAME, R_PASSWORD, R_HOST, R_LOCK,
     R_LANG, R_TZ, R_NTP, R_IME,
-    R_MACHINE, R_LEVEL, R_CPU, R_RANK, R_UPD_REPO, R_UPD_BRANCH, R_HIBERNATE,
+    R_MACHINE, R_LEVEL, R_CPU, R_RANK, R_UPD_REPO, R_UPD_BRANCH, R_APPS_REPO, R_APPS_BRANCH, R_HIBERNATE,
     R_INSTALL,
     R_DISK = 1000, R_MODULE = 2000, R_CONTAINER = 3000, R_REPO = 4000, R_PROBLEM = 5000,
 };
@@ -868,6 +878,8 @@ static void build_system(void)
     add_item(R_RANK, _("Rank the mirrors first"), choice(yes_no(c.rank)));
     add_item(R_UPD_REPO, _("Updates from"), c.update_repo);
     add_item(R_UPD_BRANCH, _("Branch"), c.update_branch);
+    add_item(R_APPS_REPO, _("App presets from"), c.apps_repo);
+    add_item(R_APPS_BRANCH, _("App presets branch"), c.apps_branch);
     snprintf(line, sizeof line, P_("%d second", "%d seconds", (unsigned long)c.hibernate), c.hibernate);
     add_item(R_HIBERNATE, _("Hibernate after"), c.hibernate < 0 ? _("as the system has it") : line);
     add_next(S_SYSTEM);
@@ -974,6 +986,20 @@ static void build_summary(int width)
     if (source_text[0]) {
         snprintf(line, sizeof line, _("Now: %s"), source_text);
         add_wrapped(source_not_newest ? E_WARN : E_NOTE, line, width);
+    }
+    /* The app presets as the source: their repository's newest, fetched
+     * when it installs, else the medium's own. */
+    snprintf(line, sizeof line, "%s (%s)", c.apps_repo, c.apps_branch);
+    add_item(E_NOTE, _("App presets from"), line);
+    if (strcmp(c.apps_repo, "off") == 0) {
+        snprintf(line, sizeof line, "%s", _("this medium's own (updates are off)"));
+    } else {
+        snprintf(line, sizeof line, "%s", _("the newest from the repository above, fetched when it installs"));
+    }
+    add_item(E_NOTE, _("App presets"), line);
+    if (apps_text[0]) {
+        snprintf(line, sizeof line, _("Now: %s"), apps_text);
+        add_wrapped(apps_not_newest ? E_WARN : E_NOTE, line, width);
     }
     add(E_GAP, " ");
     add(R_INSTALL, "%s", _("Install"));
@@ -1364,6 +1390,8 @@ static int install_args(struct args *a, int check)
     if (!c.rank) arg(a, "--no-rank-mirrors");
     arg(a, "--update-repo=%s", c.update_repo);
     arg(a, "--update-branch=%s", c.update_branch);
+    arg(a, "--apps-repo=%s", c.apps_repo);
+    arg(a, "--apps-branch=%s", c.apps_branch);
     if (c.hibernate >= 0) arg(a, "--hibernate-after=%d", c.hibernate);
     return 0;
 }
@@ -2155,6 +2183,8 @@ static void continue_install(void)
     arg(&a, "--password-file=%s", path);
     arg(&a, "--update-repo=%s", c.update_repo);
     arg(&a, "--update-branch=%s", c.update_branch);
+    arg(&a, "--apps-repo=%s", c.apps_repo);
+    arg(&a, "--apps-branch=%s", c.apps_branch);
     say("installer: continuing");
     start_install(a.v, 1);
     if (job) {
@@ -2317,6 +2347,12 @@ static void act(int id, int key)
         break;
     case R_UPD_BRANCH:
         prompt(_("Branch:"), c.update_branch, sizeof c.update_branch, 0);
+        break;
+    case R_APPS_REPO:
+        prompt(_("App presets from (a git URL, or off):"), c.apps_repo, sizeof c.apps_repo, 0);
+        break;
+    case R_APPS_BRANCH:
+        prompt(_("App presets branch:"), c.apps_branch, sizeof c.apps_branch, 0);
         break;
     case R_HIBERNATE:
         if (c.hibernate >= 0) {

@@ -17,6 +17,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # The medium's app presets (make-installer.sh: LOCACHY_APPS_SRC), from
+      # their own repository.
+      - name: Checkout the app presets repository
+        uses: actions/checkout@v4
+        with:
+          repository: niuyuanzhao/locachy-apps
+          ref: main
+          path: locachy-apps
+
       - name: Run installer unit tests
         run: |
           python3 -I src/tools/test-installer-profile.py /tmp
@@ -27,10 +36,15 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
           mkdir -p /tmp/locachy-iso-out
+          apps_commit=$(git -C "$GITHUB_WORKSPACE/locachy-apps" rev-parse HEAD)
           docker run --rm --privileged \
             -e LOCACHY_REPO="https://github.com/${{ github.repository }}.git" \
             -e LOCACHY_BRANCH="${{ github.ref_type == 'branch' && github.ref_name || 'main' }}" \
             -e LOCACHY_COMMIT="${{ github.sha }}" \
+            -e LOCACHY_APPS_SRC=/repo/locachy-apps \
+            -e LOCACHY_APPS_REPO="https://github.com/niuyuanzhao/locachy-apps.git" \
+            -e LOCACHY_APPS_BRANCH=main \
+            -e LOCACHY_APPS_COMMIT="$apps_commit" \
             -v "$GITHUB_WORKSPACE:/repo:ro" \
             -v /tmp/locachy-iso-out:/out \
             archlinux:latest bash -euc '

@@ -2,6 +2,10 @@
 # make-installer.sh [--profile-only] WORK_DIRECTORY OUTPUT_DIRECTORY
 # One generic x86-64 installation medium, composed from packaged archiso.
 # Target CPU/repository choices belong to locachy-install, never this image.
+# Its app presets: a catalog made from a checkout of their repository,
+# LOCACHY_APPS_SRC (locachy-apps; LOCACHY_APPS_REPO, LOCACHY_APPS_BRANCH and
+# LOCACHY_APPS_COMMIT say where it is from, else its git does), validated by
+# link/locachy_apps.py: without a valid one there is no medium.
 set -euo pipefail
 export LC_ALL=C.UTF-8
 
@@ -44,6 +48,17 @@ case "$out/" in "$work/"*) die "output must not be inside work" ;; esac
 case "$work/" in "$out/"*) die "work must not be inside output" ;; esac
 [ -f "$baseline/profiledef.sh" ] && [ -f "$baseline/packages.x86_64" ] || die "packaged archiso baseline is missing: $baseline"
 [ -f "$src/link/locachy-install" ] || die "source installer entry is missing: $src/link/locachy-install"
+apps_src=${LOCACHY_APPS_SRC:-}
+[ -n "$apps_src" ] && [ -d "$apps_src" ] ||
+    die "the app presets are missing: LOCACHY_APPS_SRC must be a checkout of their repository (locachy-apps)"
+why=$(python3 -I "$src/link/locachy_apps.py" validate "$apps_src" 2>&1) || die "the app presets in $apps_src: $why"
+apps_repo=${LOCACHY_APPS_REPO:-} apps_branch=${LOCACHY_APPS_BRANCH:-} apps_commit=${LOCACHY_APPS_COMMIT:-}
+if [ -e "$apps_src/.git" ]; then
+    apps_repo=${apps_repo:-$(git -C "$apps_src" remote get-url origin 2>/dev/null || true)}
+    apps_branch=${apps_branch:-$(git -C "$apps_src" symbolic-ref --short HEAD 2>/dev/null || true)}
+    apps_commit=${apps_commit:-$(git -C "$apps_src" rev-parse HEAD 2>/dev/null || true)}
+fi
+apps_branch=${apps_branch:-main}
 if [ "$profile_only" = 0 ]; then
     command -v "$mkarchiso" >/dev/null || die "mkarchiso is not available"
 fi
@@ -76,9 +91,9 @@ done
 for file in make-root.sh make.sh make-installer.sh packages rc.conf; do
     cp -a "$src/$file" "$payload/$file"
 done
-python3 -I - "$src" "$root/etc/locachy/source-origin.json" <<'PY'
+python3 -I - "$src" "$root/etc/locachy/source-origin.json" "$apps_repo" "$apps_branch" "$apps_commit" <<'PY'
 import json, os, subprocess, sys
-src, dest = sys.argv[1], sys.argv[2]
+src, dest, apps_repo, apps_branch, apps_commit = sys.argv[1:6]
 def git_out(*args):
     try:
         return subprocess.check_output(["git", "-C", src, *args], stderr=subprocess.DEVNULL, text=True, timeout=5).strip()
@@ -88,9 +103,14 @@ repo = os.environ.get("LOCACHY_REPO") or git_out("remote", "get-url", "origin")
 branch = os.environ.get("LOCACHY_BRANCH") or git_out("symbolic-ref", "--short", "HEAD")
 commit = os.environ.get("LOCACHY_COMMIT") or git_out("rev-parse", "HEAD")
 with open(dest, "w", encoding="utf-8") as f:
-    json.dump({"repo": repo, "branch": branch or "main", "commit": commit}, f)
+    json.dump({"repo": repo, "branch": branch or "main", "commit": commit,
+               "apps_repo": apps_repo, "apps_branch": apps_branch, "apps_commit": apps_commit}, f)
     f.write("\n")
 PY
+# The app presets the medium installs when newer ones cannot be fetched.
+mkdir -p "$root/usr/local/share/locachy"
+why=$(python3 -I "$src/link/locachy_apps.py" catalog "$apps_src" "$root/usr/local/share/locachy/apps-catalog" \
+      medium "$apps_repo" "$apps_branch" "$apps_commit" 2>&1) || die "the app presets in $apps_src: $why"
 install -m 755 "$src/installer/locachy-install" "$root/usr/local/bin/locachy-install"
 install -m 644 "$src/installer/issue" "$root/etc/issue"
 install -m 644 "$src/installer/NetworkManager.conf" "$root/etc/NetworkManager/conf.d/20-locachy-installer.conf"

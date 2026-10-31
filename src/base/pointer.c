@@ -102,6 +102,9 @@ static int wanted, npointers;
 static double px, py;                /* where the pointer is, in pixels */
 static int held;                     /* buttons held: 1 left, 2 right, 4 middle */
 static double scroll_v, scroll_h;    /* scrolling not yet a whole step */
+static int scroll_events, scroll_source, scroll_fingers, scroll_axes;
+static int scroll_x, scroll_y;
+static void *scroll_device;
 static double click_at;
 static int click_button, click_count, click_x, click_y;
 static struct pointer_event queue[QUEUE], last;
@@ -177,6 +180,50 @@ static void push(struct pointer_event e)
 /* What libinput's events become (unused where it is not built in: process 1). */
 #define EVENTS __attribute__((unused))
 
+static void scroll_boundary(int phase)
+{
+    if (scroll_events && scroll_source != SCROLL_NONE && scroll_source != SCROLL_WHEEL) {
+        push((struct pointer_event){ .x = scroll_x, .y = scroll_y, .gesture = GESTURE_SCROLL,
+                                     .scroll_source = scroll_source, .scroll_phase = phase,
+                                     .scroll_fingers = scroll_fingers });
+    }
+}
+
+static void scroll_finish(int phase)
+{
+    scroll_boundary(phase);
+    scroll_source = scroll_fingers = scroll_axes = 0;
+    scroll_device = NULL;
+    scroll_v = scroll_h = 0;
+}
+
+static void scroll_begin(int source, int fingers, int x, int y, void *device)
+{
+    if (source == scroll_source && fingers == scroll_fingers && device == scroll_device) return;
+    scroll_finish(SCROLL_CANCEL);
+    scroll_source = source;
+    scroll_fingers = fingers;
+    scroll_x = x;
+    scroll_y = y;
+    scroll_device = device;
+    scroll_boundary(SCROLL_BEGIN);
+}
+
+int pointer_scroll_events(int on)
+{
+    int old = scroll_events;
+    scroll_events = !!on;
+    if (!scroll_events) {
+        int kept = 0;
+        for (int i = 0; i < qlen; i++) {
+            struct pointer_event e = queue[(qhead + i) % QUEUE];
+            if (e.gesture != GESTURE_SCROLL) queue[(qhead + kept++) % QUEUE] = e;
+        }
+        qlen = kept;
+    }
+    return old;
+}
+
 /* The cursor is shown while a mouse is there or a pen near, but not after a
  * touch until a mouse moves again. */
 static void show_cursor(void)
@@ -199,6 +246,7 @@ static void leave(int gx, int gy)
     snprintf(y, sizeof y, "%d", gy);
     const char *const fields[] = { "pointer-leave", x, y, NULL };
     if (control_fd() < 0 || control_send_fields(control_fd(), fields) < 0) return;
+    scroll_finish(SCROLL_CANCEL);
     away = 1;
     show_cursor();
     if (screen_hover) screen_hover(-1);
@@ -295,8 +343,24 @@ EVENTS static void scroll(double v, double h)
     scroll_v -= sv;
     scroll_h -= sh;
     if (sv || sh) {
-        push((struct pointer_event){ .x = (int)px, .y = (int)py, .wheel = -sv, .hwheel = sh });
+        push((struct pointer_event){ .x = (int)px, .y = (int)py, .wheel = -sv, .hwheel = sh,
+                                     .scroll_source = scroll_source, .scroll_phase = SCROLL_UPDATE,
+                                     .scroll_fingers = scroll_fingers });
     }
+}
+
+/* Each zero-valued axis ends only that axis, not the other one's scroll. */
+EVENTS static void scroll_input(int source, double v, double h, int axes, void *device)
+{
+    if (v != 0 || h != 0) {
+        scroll_begin(source, 0, (int)px, (int)py, device);
+    } else if (source != scroll_source || device != scroll_device) {
+        return;
+    }
+    if (axes & 1) scroll_axes = v != 0 ? scroll_axes | 1 : scroll_axes & ~1;
+    if (axes & 2) scroll_axes = h != 0 ? scroll_axes | 2 : scroll_axes & ~2;
+    scroll(v, h);
+    if (source != SCROLL_WHEEL && !scroll_axes) scroll_finish(SCROLL_END);
 }
 
 /* The touch screen's hold timer (none without libinput: tests call
@@ -333,8 +397,11 @@ EVENTS static void drag(double x, double y)
     int col, row;
     if (cell_at((int)x, (int)y, &col, &row) < 0) return;
     if (row != touch_row || col != touch_col) {
+        scroll_begin(SCROLL_TOUCH, touch_state == TOUCH_TWO ? 2 : 1, (int)touch_x0, (int)touch_y0, NULL);
         push((struct pointer_event){ .x = (int)touch_x0, .y = (int)touch_y0,
-                                     .wheel = row - touch_row, .hwheel = touch_col - col });
+                                     .wheel = row - touch_row, .hwheel = touch_col - col,
+                                     .scroll_source = SCROLL_TOUCH, .scroll_phase = SCROLL_UPDATE,
+                                     .scroll_fingers = scroll_fingers });
         touch_row = row;
         touch_col = col;
     }
@@ -358,12 +425,16 @@ EVENTS static void touch_down(int slot, double x, double y, double xmm, double y
         cell_at((int)x, (int)y, &touch_col, &touch_row);
         arm(HOLD_S);
     } else if ((touch_state == TOUCH_PENDING || touch_state == TOUCH_SCROLL) && slot != touch_first) {
+        if (scroll_source == SCROLL_TOUCH) scroll_finish(SCROLL_CANCEL);
         touch_state = TOUCH_TWO;
         touch_second = slot;
         pinch_last = fingers_apart();
         cell_at((int)((touches[touch_first].x + x) / 2), (int)((touches[touch_first].y + y) / 2),
                 &touch_col, &touch_row);
         arm(0);
+    } else if (touch_state == TOUCH_TWO && slot != touch_first && slot != touch_second) {
+        if (scroll_source == SCROLL_TOUCH) scroll_finish(SCROLL_CANCEL);
+        touch_state = TOUCH_DONE;
     }
 }
 
@@ -397,7 +468,10 @@ EVENTS static void touch_up(int slot)
     if (touch_state == TOUCH_PENDING && slot == touch_first) {
         arm(0);
         tap(BTN_LEFT);
+    } else if (touch_state == TOUCH_SCROLL && slot == touch_first) {
+        if (scroll_source == SCROLL_TOUCH) scroll_finish(SCROLL_END);
     } else if (touch_state == TOUCH_TWO) {
+        if (scroll_source == SCROLL_TOUCH) scroll_finish(SCROLL_END);
         touch_state = TOUCH_DONE; /* the other finger lifting is no tap */
     }
     int left = 0;
@@ -415,6 +489,7 @@ EVENTS static void touch_timer(void)
 
 static void touch_reset(void)
 {
+    if (scroll_source == SCROLL_TOUCH) scroll_finish(SCROLL_CANCEL);
     memset(touches, 0, sizeof touches);
     touch_state = TOUCH_IDLE;
     arm(0);
@@ -423,6 +498,7 @@ static void touch_reset(void)
 /* A touchpad pinch: libinput's scale since it began, reported in steps. */
 EVENTS static void pinch(double scale_now)
 {
+    scroll_finish(SCROLL_CANCEL);
     if (pinch_last > 0 && fabs(scale_now / pinch_last - 1) >= PINCH_STEP) {
         push((struct pointer_event){ .x = (int)px, .y = (int)py, .gesture = GESTURE_PINCH,
                                      .scale = scale_now / pinch_last });
@@ -540,6 +616,8 @@ static void handle(struct libinput_event *ev)
         int sign = type == LIBINPUT_EVENT_DEVICE_ADDED ? 1 : -1;
         double w_mm, h_mm;
         if (sign > 0) configure(d);
+        if (sign < 0 && d == scroll_device) scroll_finish(SCROLL_CANCEL);
+        if (sign < 0 && libinput_device_has_capability(d, LIBINPUT_DEVICE_CAP_TOUCH)) touch_reset();
         if (sign > 0 && libinput_device_has_capability(d, LIBINPUT_DEVICE_CAP_TOUCH) &&
             libinput_device_get_size(d, &w_mm, &h_mm) == 0 && w_mm > 0) {
             touch_ppmm = w / w_mm;
@@ -566,12 +644,17 @@ static void handle(struct libinput_event *ev)
                libinput_event_pointer_get_button_state(p) == LIBINPUT_BUTTON_STATE_PRESSED);
         break;
     case LIBINPUT_EVENT_POINTER_SCROLL_WHEEL:
-        scroll(axis(p, v, 1, 1), axis(p, h, 1, 1));
-        break;
     case LIBINPUT_EVENT_POINTER_SCROLL_FINGER:
-    case LIBINPUT_EVENT_POINTER_SCROLL_CONTINUOUS:
-        scroll(axis(p, v, 0, SCROLL_PIXELS), axis(p, h, 0, SCROLL_PIXELS));
+    case LIBINPUT_EVENT_POINTER_SCROLL_CONTINUOUS: {
+        int wheel = type == LIBINPUT_EVENT_POINTER_SCROLL_WHEEL;
+        int source = wheel ? SCROLL_WHEEL : type == LIBINPUT_EVENT_POINTER_SCROLL_FINGER ?
+                     SCROLL_FINGER : SCROLL_CONTINUOUS;
+        int axes = (libinput_event_pointer_has_axis(p, v) ? 1 : 0) |
+                   (libinput_event_pointer_has_axis(p, h) ? 2 : 0);
+        scroll_input(source, axis(p, v, wheel, wheel ? 1 : SCROLL_PIXELS),
+                     axis(p, h, wheel, wheel ? 1 : SCROLL_PIXELS), axes, d);
         break;
+    }
     case LIBINPUT_EVENT_TOUCH_DOWN:
     case LIBINPUT_EVENT_TOUCH_MOTION:
         (type == LIBINPUT_EVENT_TOUCH_DOWN ? touch_down : touch_motion)(
@@ -586,12 +669,14 @@ static void handle(struct libinput_event *ev)
         touch_reset();
         break;
     case LIBINPUT_EVENT_GESTURE_PINCH_BEGIN:
+        scroll_finish(SCROLL_CANCEL);
         pinch_last = 1;
         break;
     case LIBINPUT_EVENT_GESTURE_PINCH_UPDATE:
         pinch(libinput_event_gesture_get_scale(g));
         break;
     case LIBINPUT_EVENT_GESTURE_SWIPE_BEGIN:
+        scroll_finish(SCROLL_CANCEL);
         swipe_dx = swipe_dy = 0;
         break;
     case LIBINPUT_EVENT_GESTURE_SWIPE_UPDATE:
@@ -637,6 +722,8 @@ void pointer_remove(const char *path)
         if (strcmp(devices[i].path, path) != 0) continue;
 #ifdef CONFIG_LIBINPUT
         if (devices[i].input) {
+            if (devices[i].input == scroll_device) scroll_finish(SCROLL_CANCEL);
+            if (libinput_device_has_capability(devices[i].input, LIBINPUT_DEVICE_CAP_TOUCH)) touch_reset();
             libinput_path_remove_device(devices[i].input);
             libinput_device_unref(devices[i].input);
         }
@@ -716,6 +803,8 @@ void pointer_came(int gx, int gy)
  * devices), not across an edge of ours. */
 void pointer_went(void)
 {
+    scroll_finish(SCROLL_CANCEL);
+    touch_reset();
     away = 1;
     show_cursor();
     if (screen_hover) screen_hover(-1);
@@ -723,6 +812,8 @@ void pointer_went(void)
 
 void pointer_release(void)
 {
+    qlen = 0;
+    scroll_finish(SCROLL_CANCEL);
     away = 0;
 #ifdef CONFIG_LIBINPUT
     if (li) {
@@ -747,7 +838,6 @@ void pointer_release(void)
     npointers = nmice = 0;
     touch_hid = pen_near = 0;
     held = 0;
-    qlen = 0;
     scroll_v = scroll_h = 0;
     screen_cursor_visible(0);
 }

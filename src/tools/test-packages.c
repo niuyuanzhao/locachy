@@ -3,7 +3,9 @@
  * screen and keyboard as test doubles and locachy-pkg and locachy-app as
  * scripts that answer from fixed text and write down how they were called;
  * files (choosing a folder) and the user's home as doubles too; the pointer
- * as synthetic events on what is shown.
+ * as synthetic events on what is shown. The presets: the system's (DIR/presets)
+ * and the app presets' catalog (DIR/catalog); rc.conf and the source's
+ * commit as DIR's files.
  *   test-packages DIR   (DIR: a new directory for the doubles' files)
  * Build with base/ui.c and base/rc.c.
  */
@@ -22,7 +24,10 @@ static char *dir_path(const char *rel);
 
 #define JOB_LOG D("job.log")
 #define JOB_PID D("job.pid")
-#define PRESETS D("presets")
+#define SYSTEM_PRESETS D("presets")
+#define APPS_CATALOG D("catalog")
+#define SOURCE_COMMIT D("source-commit")
+#define RC_FILE D("rc.conf")
 #define STATE D("state")
 #define CONF_DIR D("conf")
 #define PKG D("pkg")
@@ -265,6 +270,7 @@ int main(int argc, char **argv)
     free(real);
     mkdir(D("conf"), 0755);
     mkdir(D("presets"), 0755);
+    mkdir(D("catalog"), 0755);
     mkdir(D("state"), 0755);
     mkdir(D("home"), 0755);
     mkdir(D("home/Projects"), 0755);
@@ -292,14 +298,15 @@ int main(int argc, char **argv)
              "[ \"$1\" != install ] || echo \"pkg install: $# arguments\" >>%s/calls\n"
              "case \"$*\" in \"plan --cached --machine\") cat %s/plan.txt ;;\n"
              "\"status --machine\") cat %s/status.txt ;; info\\ *) cat %s/info.txt ;;\n"
-             "search\\ *) cat %s/search.txt ;; plan) seq 1 60; sleep 0.2 ;;\n"
+             "search\\ *) echo \"catalog $LOCACHY_APPS_CATALOG\" >>%s/calls; cat %s/search.txt ;;\n"
+             "plan) seq 1 60; sleep 0.2 ;;\n"
              "commands\\ *) cat %s/commands.txt ;;\n"
              "apply\\ *) if [ -e %s/keys-wanted ]; then\n"
              "  echo 'Source key to trust: lyrebird-proxy 40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C'\n"
              "  echo 'Trust them: locachy-build --trust-key 40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C'; exit 3\n"
              "  fi; echo working; sleep 0.2 ;;\n"
              "*) echo working; sleep 0.2 ;; esac\n",
-             dir, dir, dir, dir, dir, dir, dir, dir);
+             dir, dir, dir, dir, dir, dir, dir, dir, dir);
     put("pkg", script_text);
     snprintf(script_text, sizeof script_text, "#!/bin/sh\necho \"app $*\" >>%s/calls\necho done\n", dir);
     put("app", script_text);
@@ -309,8 +316,8 @@ int main(int argc, char **argv)
                        "arguments=\"\"\nnetwork=\"1\"\ndirectories=\"\"\n";
     const char *firefox = "# Mozilla Firefox\npackage=\"firefox\"\nextras=\"libnotify\"\n"
                           "command=\"/usr/bin/firefox\"\narguments=\"\"\nnetwork=\"1\"\ndirectories=\"\"\n";
-    put("presets/edge.conf", edge);
-    put("presets/firefox.conf", firefox);
+    put("catalog/edge.conf", edge); /* app presets; the system's (host programs) come later */
+    put("catalog/firefox.conf", firefox);
     put("conf/edge.conf", edge);
     mkdir(D("state/edge"), 0755);
     mkdir(D("state/edge/upper.prev"), 0755);
@@ -324,6 +331,12 @@ int main(int argc, char **argv)
     assert(on_screen("[ ] hello") && on_screen("running"));
     assert(on_screen("checked 2026-10-20 09:57"));
     assert(on_screen("mesa") && on_screen("1:26.2.4-1.1 -> 1:26.2.5-1.1")); /* host's details */
+    /* Where updates come from, over the list: rc.conf says nothing (the
+     * defaults), no commit recorded, no catalog; the app presets a row of
+     * their own, nothing in the plan for them. */
+    assert(on_screen("LOCachy source: its commit is not recorded; updates: https://github.com/niuyuanzhao/locachy.git (main)"));
+    assert(on_screen("App presets: none installed; updates: https://github.com/niuyuanzhao/locachy-apps.git (main)"));
+    assert(on_screen("[ ] apps") && on_screen("up to date"));
 
     /* A plan whose only host work is a declared leaf that is not installed. */
     char plan_text[1024];
@@ -344,7 +357,7 @@ int main(int argc, char **argv)
 
     unlink(D("calls"));
     run("unmark edge, apply, yes: host and locachy only",
-        (const int[]){ K_DOWN, K_DOWN, ' ', 'a', 'y', WAIT, WAIT, WAIT, END });
+        (const int[]){ K_DOWN, K_DOWN, K_DOWN, ' ', 'a', 'y', WAIT, WAIT, WAIT, END });
     assert(has("calls", "pkg apply host locachy\n"));
     assert(on_screen("done"));
 
@@ -526,7 +539,7 @@ int main(int argc, char **argv)
      * editing supports Left/Right/Home/Delete. */
     run("updates: Enter unmarks the selected one; End goes to the last, Home to the first",
         (const int[]){ K_BOL, '\n', SNAP, K_EOL, END });
-    assert(snapped("[ ] host") && !targets[0].marked && sel[UPDATES] == 3);
+    assert(snapped("[ ] host") && !targets[0].marked && sel[UPDATES] == 4);
     unlink(D("calls"));
     run("host: the prompt edits where the cursor is (Left, Home, Delete)",
         (const int[]){ '\t', '\t', 'i', 'a', 'c', K_LEFT, 'b', K_BOL, K_DEL, '\n', WAIT, WAIT, END });
@@ -536,7 +549,10 @@ int main(int argc, char **argv)
     run("containers: / searches recipes/repos/AUR, Enter picks firefox, Enter saves and builds it",
         (const int[]){ '\t', '/', 'f', 'i', 'r', 'e', '\n', '\n', '\n', WAIT, WAIT, END });
     assert(has("calls", "pkg search fire\n") && has("calls", "app build firefox\n"));
-    assert(has("conf/firefox.conf", "package=\"firefox\"") && has("conf/firefox.conf", "extras=\"libnotify\""));
+    snprintf(script_text, sizeof script_text, "catalog %s\n", D("catalog")); /* search reads the app presets' catalog */
+    assert(has("calls", script_text));
+    assert(has("conf/firefox.conf", "# Mozilla Firefox\n") && has("conf/firefox.conf", "package=\"firefox\""));
+    assert(has("conf/firefox.conf", "extras=\"libnotify\""));
 
     run("resize: the main page lays out the new rows and hit map",
         (const int[]){ RESIZE, SNAP, END });
@@ -564,6 +580,91 @@ int main(int argc, char **argv)
     assert(directory_refused(shared, refusal, sizeof refusal));
     assert(strstr(refusal, "Downloads is in Downloads, which every container has already."));
     assert(!strstr(refusal, dir)); /* long home paths must not push the reason off screen */
+
+    /* The app presets' part of the plan, a row of its own: its notes first,
+     * then what it would do; its details: the commit, each configuration
+     * that follows its new preset; a container rebuilt for it. Over the
+     * list, a line each: the source installed and where it comes from, the
+     * catalog's origin and where it comes from; the lower pane where it is
+     * on the other pages. */
+    put("source-commit", "89abcdef0123456789abcdef0123456789abcdef\n");
+    put("catalog/CATALOG", "format=\"1\"\norigin=\"bootstrap\"\nrepo=\"\"\nbranch=\"\"\ncommit=\"\"\n"
+                           "installed=\"2026-10-30 10:00\"\nsystem_commit=\"89abcdef0123456789abcdef0123456789abcdef\"\n");
+    put("rc.conf", "update_branch=\"next\"\napps_repo=\"https://example.org/me/apps.git\"\napps_branch=\"stable\"\n");
+    put("plan.txt", "checked\t2026-10-30 11:00\n"
+                    "apps\trepo\tlocachy-apps\tbootstrap\t0123456 (Add zathura)\n"
+                    "apps\tcatalog\tapp presets from branch stable\tbootstrap\t0123456789abcdef0123456789abcdef01234567\n"
+                    "apps\tmerge\tedge\tpackage extras\t\n"
+                    "apps\tnote\tbootstrap catalog from the system source, not from the apps repository\t\t\n"
+                    "edge\tstate\tclosed\t\t\n"
+                    "edge\trebuild\tits preset names other packages\tmicrosoft-edge-stable-bin\t"
+                    "microsoft-edge-stable-bin libva\n");
+    unlink(D("calls"));
+    run("app presets: their row and details, the two sources' lines, applied with the rest",
+        (const int[]){ SNAP, K_DOWN, K_DOWN, SNAP, '\t', '\t', SNAP, '\t', 'a', 'y', WAIT, WAIT, WAIT, END });
+    assert(snapped("LOCachy source: 89abcde installed; updates: https://github.com/niuyuanzhao/locachy.git (next)"));
+    assert(snapped("App presets: from the system, not yet from the apps repository; "
+                   "updates: https://example.org/me/apps.git (stable)"));
+    assert(snapped("[x] apps") && snapped("bootstrap catalog from the system source, not from the apps repository; "
+                                          "1 update"));
+    int dim_row;
+    char apps_row[512];
+    row_text(2, apps_row, sizeof apps_row, &dim_row); /* the rest of it, past the screen's edge */
+    assert(!strcmp(targets[2].name, "apps") && strstr(apps_row, "; 1 update; 1 configuration follows its new preset") &&
+           !dim_row);
+    assert(snapped("[x] edge") && snapped("rebuild: its preset names other packages"));
+    assert(strstr(snaps[0][3], "LOCachy source: ") && strstr(snaps[0][4], "App presets: ") &&
+           strstr(snaps[0][5], "[ ] host")); /* the list under them */
+    assert(snapped("Details: apps   l: output") && snapped("locachy-apps") && snapped("bootstrap -> 0123456 (Add zathura)"));
+    assert(snapped("app presets from branch stable: bootstrap -> 0123456") && !snapped("01234567"));
+    assert(snapped("edge follows its new preset: package extras"));
+    /* The pane: under half of what is left, on Updates as on Host. */
+    assert(strstr(snaps[0][20], "Details: host") && strstr(snaps[1][20], "Details: apps") &&
+           strstr(snaps[2][20], " declared, ") && strstr(snaps[2][3], "Declared package"));
+    assert(has("calls", "pkg apply apps edge\n"));
+
+    /* Updates off for both: no row for the app presets; the catalog from
+     * their repository, its commit. */
+    put("plan.txt", plan_text);
+    put("rc.conf", "update_repo=\"off\"\napps_repo=\"off\"\n");
+    put("catalog/CATALOG", "format=\"1\"\norigin=\"repository\"\nrepo=\"https://example.org/me/apps.git\"\n"
+                           "branch=\"main\"\ncommit=\"fedcba9876543210fedcba9876543210fedcba98\"\n"
+                           "installed=\"2026-10-30 10:00\"\n");
+    run("updates off: both lines say so, no app presets' row", (const int[]){ END });
+    assert(on_screen("LOCachy source: 89abcde installed; updates: off"));
+    assert(on_screen("App presets: fedcba9 from the apps repository; updates: off") && !on_screen("fedcba98"));
+    assert(!on_screen("] apps") && on_screen("[x] host") && on_screen("[x] edge"));
+
+    /* A long repository: what is installed stays first, the buttons below. */
+    snprintf(script_text, sizeof script_text, "apps_repo=\"https://example.org/%0200d.git\"\n", 0);
+    put("rc.conf", script_text);
+    put("catalog/CATALOG", "format=\"1\"\norigin=\"medium\"\nrepo=\"https://example.org/me/apps.git\"\nbranch=\"main\"\n"
+                           "commit=\"fedcba9876543210fedcba9876543210fedcba98\"\ninstalled=\"2026-10-30 10:00\"\n");
+    run("a long app presets repository: installed first, nothing pushed off", (const int[]){ END });
+    assert(on_screen("App presets: fedcba9 from the installation medium; updates: https://example.org/0000"));
+    assert(on_screen("[ ] apps") && on_screen("[c: check]") && on_screen("[q: back]") && !on_screen("(null)"));
+    unlink(D("rc.conf"));
+    unlink(D("catalog/CATALOG"));
+    unlink(D("source-commit"));
+
+    /* The presets of a new container: the system's (host programs) first,
+     * then the app presets' catalog's; a name once (the system's); a host
+     * program in the catalog is none. */
+    put("presets/foot.conf", "# foot: a host program\npackage=\"foot\"\ncommand=\"/usr/bin/foot\"\nhost=\"1\"\n");
+    put("catalog/foot.conf", "package=\"foot-app\"\ncommand=\"/usr/bin/foot\"\n");
+    put("catalog/hosty.conf", "package=\"hosty\"\ncommand=\"/usr/bin/hosty\"\nhost=\"1\"\n");
+    run("new: the system's presets first, then the app presets'; a name once, no host program from the catalog",
+        (const int[]){ '\t', 'n', '\n', SNAP, '\n', K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN,
+                       K_DOWN, '\n', END });
+    snprintf(script_text, sizeof script_text, "%-16s %s", "foot", "foot");
+    assert(strstr(snaps[0][3], script_text) && strstr(snaps[0][4], "edge") && strstr(snaps[0][5], "firefox"));
+    assert(strstr(snaps[0][6], "(blank)") && !snapped("foot-app") && !snapped("hosty"));
+    assert(has("conf/foot.conf", "# foot: a host program\n") && has("conf/foot.conf", "host=\"1\""));
+    assert(has("conf/foot.conf", "package=\"foot\"") && !has("conf/foot.conf", "foot-app"));
+    unlink(D("conf/foot.conf"));
+    unlink(D("presets/foot.conf"));
+    unlink(D("catalog/foot.conf"));
+    unlink(D("catalog/hosty.conf"));
 
     puts("ALL PASSED");
     return 0;

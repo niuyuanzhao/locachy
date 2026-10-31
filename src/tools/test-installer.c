@@ -221,7 +221,8 @@ static void write_file(const char *path, const char *text, mode_t mode)
 static const char describe[] =
     "{\"defaults\": {\"user\": \"user\", \"hostname\": \"locachy\", \"keymap\": \"us\", \"timezone\": \"auto\","
     " \"swap_gib\": 8, \"level\": \"auto\", \"cpu\": \"auto\", \"repos\": [\"core\", \"extra\", \"multilib\"],"
-    " \"update_repo\": \"https://github.com/niuyuanzhao/locachy.git\", \"update_branch\": \"main\", \"copy_network\": false},"
+    " \"update_repo\": \"https://github.com/niuyuanzhao/locachy.git\", \"update_branch\": \"main\","
+    " \"apps_repo\": \"https://github.com/niuyuanzhao/locachy-apps.git\", \"apps_branch\": \"main\", \"copy_network\": false},"
     " \"languages\": [\"en_US.UTF-8\", \"zh_CN.UTF-8\"],"
     " \"levels\": {\"supported\": [\"x86-64\", \"x86-64-v2\"], \"auto\": \"x86-64-v2\", \"cpu_model\": \"ivybridge\"},"
     " \"ime\": [{\"name\": \"off\", \"label\": \"OFF (no Rime packages)\"}, {\"name\": \"en\", \"label\": \"English\"},"
@@ -235,6 +236,7 @@ static const char describe[] =
     " \"repo_sections\": [\"core\", \"extra\", \"multilib\"], \"keymaps\": [\"de\", \"us\"], \"timezones\": [\"UTC\", \"Asia/Shanghai\"],"
     " \"tpm\": {\"usable\": false, \"advice\": \"TPM 1.2 off in the firmware: a passphrase\"},"
     " \"source\": {\"text\": \"this medium's own, 0123456789ab; could not fetch\", \"not_newest\": true},"
+    " \"apps\": {\"text\": \"the medium's own app presets, fedcba987654; could not fetch\", \"not_newest\": true},"
     " \"network_profiles\": 0, \"memory_bytes\": 17179869184, \"esp_bytes\": 536870912, \"min_root_bytes\": 17179869184,"
     " \"disks\": [{\"path\": \"/dev/sda\", \"size\": 256060514304, \"model\": \"Samsung SSD\", \"tran\": \"sata\","
     " \"removable\": false, \"in_use\": \"\", \"children\": [{\"path\": \"/dev/sda1\", \"type\": \"part\", \"size\": 536870912,"
@@ -404,8 +406,29 @@ int main(int argc, char **argv)
     assert(strstr(calls, "--yes --disk=/dev/sda --swap-gib=8 --encrypt --luks-passphrase-file="));
     assert(strstr(calls, "--user=boot-test --hostname=locachy --language=en_US.UTF-8 --keymap=us --timezone=auto"));
     assert(strstr(calls, "--ime=off --no-copy-network --features=desktop --containers=foot --level=auto --cpu=auto"));
-    assert(strstr(calls, "--repos=core,extra,multilib --update-repo=https://github.com/niuyuanzhao/locachy.git --update-branch=main"));
+    assert(strstr(calls, "--repos=core,extra,multilib --update-repo=https://github.com/niuyuanzhao/locachy.git --update-branch=main"
+                         " --apps-repo=https://github.com/niuyuanzhao/locachy-apps.git --apps-branch=main"));
     assert(!strstr(calls, "correct horse") && !strstr(calls, "Locachy123"));
+    /* The app presets in the summary as the source: where from, then what
+     * locachy-install has now, warned as the source's when not the newest. */
+    assert(snapped("App presets from") && snapped("https://github.com/niuyuanzhao/locachy-apps.git (main)"));
+    assert(snapped("Now: the medium's own app presets, fedcba987654; could not fetch"));
+    build_step(S_SUMMARY, 100);
+    int apps_now = 0, source_now = 0, apps_where = 0;
+    for (int i = 0; i < nentries; i++) {
+        if (strstr(entries[i].text, "Now: the medium's own app presets")) apps_now = entries[i].id;
+        if (strstr(entries[i].text, "Now: this medium's own, 0123456789ab")) source_now = entries[i].id;
+        if (strstr(entries[i].text, "App presets ") && strstr(entries[i].text, "the newest from the repository above")) {
+            apps_where = i;
+        }
+    }
+    assert(apps_now == E_WARN && source_now == E_WARN && apps_where > 0);
+    apps_not_newest = 0;
+    build_step(S_SUMMARY, 100);
+    for (int i = 0; i < nentries; i++) {
+        if (strstr(entries[i].text, "Now: the medium's own app presets")) apps_now = entries[i].id;
+    }
+    assert(apps_now == E_NOTE);
     const char *secrets = slurp(D("secrets"));
     printf("%s", secrets);
     assert(strstr(secrets, "--luks-passphrase-file 600 correct horse\n"));
@@ -499,7 +522,8 @@ int main(int argc, char **argv)
     calls = slurp(D("calls"));
     printf("%s", calls);
     assert(strstr(calls, "--resume --yes --luks-passphrase-file="));
-    assert(strstr(calls, "--update-repo=https://github.com/niuyuanzhao/locachy.git --update-branch=main"));
+    assert(strstr(calls, "--update-repo=https://github.com/niuyuanzhao/locachy.git --update-branch=main"
+                         " --apps-repo=https://github.com/niuyuanzhao/locachy-apps.git --apps-branch=main"));
     secrets = slurp(D("secrets"));
     assert(strstr(strstr(secrets, "--password-file 600 Locachy123\n") + 1, "--password-file 600 Locachy123\n"));
     const char *log = slurp(D("run/install.log"));
@@ -533,6 +557,41 @@ int main(int argc, char **argv)
     k('\n'); k(K_EOL); k('\n'); k(K_DOWN); k('\n'); k(K_EOL); k('\n'); k(SNAP);
     run("no setup mode: no Secure Boot rows");
     assert(snapped("Encrypt the disk") && !snapped("Secure Boot with this computer's own keys"));
+
+    /* The app presets' rows on the System page, under the source's: off and
+     * another branch go to locachy-install; the summary says so. */
+    k('\n');                    /* Install LOCachy */
+    k(K_EOL); k('\n');          /* Network: Next */
+    k(K_DOWN); k('\n');         /* Disk: the first disk */
+    k(K_EOL); k('\n');
+    k(K_DOWN); k('\n'); type("correct horse"); k('\n'); type("correct horse"); k('\n');
+    k(K_EOL); k('\n');          /* Encryption: Next */
+    k('\n'); k(21); type("boot-test"); k('\n');
+    k(K_DOWN); k(K_DOWN); k('\n'); type("Locachy123"); k('\n'); type("Locachy123"); k('\n');
+    for (int s = S_USER; s < S_SYSTEM; s++) { k(K_EOL); k('\n'); }
+    k(K_EOL); k(K_UP); k(K_UP); k(K_UP);                     /* above Next and Hibernate after */
+    k('\n'); k(21); type("off"); k('\n');
+    k(K_DOWN); k('\n'); k(21); type("next"); k('\n');
+    k(SNAP);
+    k(K_EOL); k('\n');          /* System: Next */
+    k(SNAP);
+    k(K_EOL); k('\n'); k('n');  /* Install: --check, then no */
+    run("app presets off, another branch");
+    char row[160];
+    snprintf(row, sizeof row, "%-30s %s", "Branch", "main");
+    assert(snapped(row));
+    snprintf(row, sizeof row, "%-30s %s", "App presets from", "off");
+    assert(snapped(row));
+    snprintf(row, sizeof row, "%-30s %s", "App presets branch", "next");
+    assert(snapped(row));
+    snprintf(row, sizeof row, "%-30s %s", "App presets from", "off (next)");
+    assert(snapped(row));
+    snprintf(row, sizeof row, "%-30s %s", "App presets", "this medium's own (updates are off)");
+    assert(snapped(row));
+    snprintf(row, sizeof row, "%-30s %s", "LOCachy source", "the newest from the repository above");
+    assert(snapped(row));
+    calls = slurp(D("calls"));
+    assert(strstr(calls, "--check ") && strstr(calls, " --update-branch=main --apps-repo=off --apps-branch=next"));
 
     printf("PASS installer\n");
     return 0;

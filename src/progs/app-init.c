@@ -216,10 +216,19 @@ int main(int argc, char **argv)
                 forward(SIGKILL);
             continue;
         }
-        /* TERM reaches the main app and all descendants, including orphans
-         * and processes in other sessions. Host cgroup.kill is the bounded
-         * fallback if the main app itself refuses to exit. */
-        forward(sig);
+        /* A stop (TERM) reaches the main app alone: it shuts down with its
+         * helpers and its session bus still there, as on a desktop (a
+         * browser's storage service commits what the browser flushes as it
+         * exits). The rest get TERM once it has exited, above. Host
+         * cgroup.kill is the bounded fallback if it refuses to exit. Other
+         * signals reach the main app and all descendants, including orphans
+         * and processes in other sessions. */
+        if (sig == SIGTERM && !main_exited) {
+            if (kill(child, SIGTERM) < 0 && errno != ESRCH)
+                perror("locachy-app-init: signal the application");
+        } else {
+            forward(sig);
+        }
     }
     alarm(0);
     return main_exited ? result : 125;

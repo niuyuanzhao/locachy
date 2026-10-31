@@ -1,51 +1,64 @@
 #!/bin/bash
-# The live entry: locachy-install of the newest LOCachy source, as the packages
-# come from their mirrors. The source is fetched (git, shallow) from the update
-# repository and branch given (--update-repo, --update-branch), else those the
-# medium's own source came from (--resume, --trust-key: those of the
-# installation they continue). A call that may install fetches it again; --describe-json,
-# --check, --trust-key and --help use what was fetched, or fetch it the
-# first time. When it cannot be fetched, what was fetched before from there
-# runs, else the medium's own source (also with updates off). LOCACHY_SOURCE
-# tells locachy-install which, and why: fetched, fetched earlier (not fetched
-# again), fetched before: WHY, bundled: WHY.
+# The live entry: locachy-install of the newest LOCachy source and app
+# presets, as the packages come from their mirrors. The source is fetched
+# (git, shallow) from the update repository and branch given (--update-repo,
+# --update-branch), else those the medium's own source came from (--resume,
+# --trust-key: those of the installation they continue). A call that may
+# install fetches it again; --describe-json, --check, --trust-key and --help
+# use what was fetched, or fetch it the first time. When it cannot be
+# fetched, what was fetched before from there runs, else the medium's own
+# source (also with updates off). LOCACHY_SOURCE tells locachy-install which,
+# and why: fetched, fetched earlier (not fetched again), fetched before: WHY,
+# bundled: WHY. The app presets (--apps-repo, --apps-branch, else the
+# medium's apps_repo, apps_branch) are fetched the same way, made a catalog by
+# that source's own helper (link/locachy_apps.py: validated, never run), else
+# the medium's catalog is used; LOCACHY_APPS_CATALOG is the catalog and
+# LOCACHY_APPS says which, as LOCACHY_SOURCE does.
 set -uo pipefail
 bundled=${LOCACHY_SOURCE_BUNDLED:-/usr/local/src/locachy}
 fetched=${LOCACHY_SOURCE_FETCHED:-/run/locachy-source}
+apps_bundled=${LOCACHY_APPS_BUNDLED:-/usr/local/share/locachy/apps-catalog}
+apps_fetched=${LOCACHY_APPS_FETCHED:-/run/locachy-apps}
 origin=${LOCACHY_SOURCE_ORIGIN:-/etc/locachy/source-origin.json}
 record=${LOCACHY_RESUME_RECORD:-/run/locachy-install/resume.json}
 export GIT_ALLOW_PROTOCOL=${GIT_ALLOW_PROTOCOL:-https:ssh} GIT_TERMINAL_PROMPT=0
 
-repo= branch= again=1 prev= continued=0
+repo= branch= apps_repo= apps_branch= again=1 prev= continued=0
 for a in "$@"; do
     case $prev in
     --update-repo) repo=$a ;;
     --update-branch) branch=$a ;;
+    --apps-repo) apps_repo=$a ;;
+    --apps-branch) apps_branch=$a ;;
     esac
     case $a in
     --update-repo=*) repo=${a#*=} ;;
     --update-branch=*) branch=${a#*=} ;;
+    --apps-repo=*) apps_repo=${a#*=} ;;
+    --apps-branch=*) apps_branch=${a#*=} ;;
     --describe-json | --check | --help | -h) again=0 ;;
     --trust-key) again=0 continued=1 ;;
     --resume) continued=1 ;;
     esac
     prev=$a
 done
-if [ -z "$repo" ] || [ -z "$branch" ]; then
-    [ "$continued" = 1 ] || record=
-    read -r o_repo o_branch < <(python3 -I -c 'import json, sys
-def read(path, repo, branch):
+[ "$continued" = 1 ] || record=
+read -r o_repo o_branch o_apps_repo o_apps_branch < <(python3 -I -c 'import json, sys
+def read(path):
     try:
         o = json.load(open(path, encoding="utf-8"))
-        return o.get(repo) or "", o.get(branch) or ""
-    except (OSError, ValueError, AttributeError):
-        return "", ""
-r_repo, r_branch = read(sys.argv[2], "update_repo", "update_branch") if sys.argv[2] else ("", "")
-o_repo, o_branch = read(sys.argv[1], "repo", "branch")
-print(r_repo or o_repo or "-", r_branch or o_branch or "main")' "$origin" "$record")
-    [ -n "$repo" ] || repo=$o_repo
-    [ -n "$branch" ] || branch=$o_branch
-fi
+        return o if isinstance(o, dict) else {}
+    except (OSError, ValueError):
+        return {}
+r = read(sys.argv[2]) if sys.argv[2] else {}
+o = read(sys.argv[1])
+print(r.get("update_repo") or o.get("repo") or "-", r.get("update_branch") or o.get("branch") or "main",
+      r.get("apps_repo") or o.get("apps_repo") or "-", r.get("apps_branch") or o.get("apps_branch") or "main")' \
+    "$origin" "$record")
+[ -n "$repo" ] || repo=$o_repo
+[ -n "$branch" ] || branch=$o_branch
+[ -n "$apps_repo" ] || apps_repo=$o_apps_repo
+[ -n "$apps_branch" ] || apps_branch=$o_apps_branch
 
 why= now=0
 if [ "$repo" = off ]; then
@@ -76,12 +89,61 @@ elif [ "$again" = 1 ] || [ "$(cat "$fetched.from" 2>/dev/null)" != "$repo $branc
 fi
 
 if [ -z "$why" ]; then
-    if [ "$now" = 1 ]; then export LOCACHY_SOURCE=fetched; else export LOCACHY_SOURCE="fetched earlier"; fi
-    exec python3 -I "$fetched/src/link/locachy-install" "$@"
+    if [ "$now" = 1 ]; then LOCACHY_SOURCE=fetched; else LOCACHY_SOURCE="fetched earlier"; fi
+    entry=$fetched/src
+elif [ "$(cat "$fetched.from" 2>/dev/null)" = "$repo $branch" ] && [ -f "$fetched/src/link/locachy-install" ]; then
+    LOCACHY_SOURCE="fetched before: $why"
+    entry=$fetched/src
+else
+    LOCACHY_SOURCE="bundled: $why"
+    entry=$bundled
 fi
-if [ "$(cat "$fetched.from" 2>/dev/null)" = "$repo $branch" ] && [ -f "$fetched/src/link/locachy-install" ]; then
-    export LOCACHY_SOURCE="fetched before: $why"
-    exec python3 -I "$fetched/src/link/locachy-install" "$@"
+export LOCACHY_SOURCE
+
+why= now=0
+helper=$entry/link/locachy_apps.py
+if [ "$apps_repo" = off ]; then
+    why="updates are off"
+elif ! [[ $apps_repo =~ ^(https://|ssh://|git@)[^[:space:]]+$ ]] ||
+     ! [[ $apps_branch =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
+    why="no repository to fetch from ($apps_repo, $apps_branch)"
+elif [ ! -f "$helper" ]; then
+    why="this source has no app presets helper"
+elif [ "$again" = 1 ] || [ "$(cat "$apps_fetched.from" 2>/dev/null)" != "$apps_repo $apps_branch" ] ||
+     [ ! -f "$apps_fetched/CATALOG" ]; then
+    echo "Fetching the newest app presets: $apps_repo ($apps_branch)" >&2
+    rm -rf "$apps_fetched.git" "$apps_fetched.new"
+    err=$(timeout 300 git clone -q --depth=1 --single-branch --branch="$apps_branch" -- "$apps_repo" \
+          "$apps_fetched.git" 2>&1)
+    rc=$?
+    if [ "$rc" = 0 ]; then
+        commit=$(git -C "$apps_fetched.git" rev-parse HEAD)
+        if err=$(python3 -I "$helper" catalog "$apps_fetched.git" "$apps_fetched.new" repository \
+                 "$apps_repo" "$apps_branch" "$commit" 2>&1); then
+            rm -rf "$apps_fetched"
+            mv "$apps_fetched.new" "$apps_fetched"
+            printf '%s\n' "$apps_repo $apps_branch" >"$apps_fetched.from"
+            now=1
+        else
+            why="$apps_repo ($apps_branch): ${err##*$'\n'}"
+        fi
+    else
+        [ "$rc" != 124 ] || err="no answer in 300 s"
+        err=${err:-git failed ($rc)}
+        why="could not fetch $apps_repo ($apps_branch): ${err##*$'\n'}"
+    fi
+    rm -rf "$apps_fetched.git" "$apps_fetched.new"
 fi
-export LOCACHY_SOURCE="bundled: $why"
-exec python3 -I "$bundled/link/locachy-install" "$@"
+
+if [ -z "$why" ]; then
+    if [ "$now" = 1 ]; then LOCACHY_APPS=fetched; else LOCACHY_APPS="fetched earlier"; fi
+    LOCACHY_APPS_CATALOG=$apps_fetched
+elif [ "$(cat "$apps_fetched.from" 2>/dev/null)" = "$apps_repo $apps_branch" ] && [ -f "$apps_fetched/CATALOG" ]; then
+    LOCACHY_APPS="fetched before: $why"
+    LOCACHY_APPS_CATALOG=$apps_fetched
+else
+    LOCACHY_APPS="bundled: $why"
+    LOCACHY_APPS_CATALOG=$apps_bundled
+fi
+export LOCACHY_APPS LOCACHY_APPS_CATALOG
+exec python3 -I "$entry/link/locachy-install" "$@"

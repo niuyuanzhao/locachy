@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-29 21:44-0400\n"
+"POT-Creation-Date: 2026-10-30 16:22-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -1602,7 +1602,7 @@ msgstr ""
 msgid "Current Project"
 msgstr ""
 
-#: progs/edit-filesearch-ui.inc
+#: progs/edit-filesearch-ui.inc progs/files.c
 msgid "Folder"
 msgstr ""
 
@@ -3158,9 +3158,71 @@ msgstr ""
 msgid "Bookmark"
 msgstr ""
 
+#: progs/files.c progs/settings.c
+msgid "sign in again"
+msgstr ""
+
+#: progs/files.c progs/settings.c
+msgid "needs attention"
+msgstr ""
+
+#: progs/files.c
+msgid "offline"
+msgstr ""
+
+#: progs/files.c progs/settings.c
+msgid "connecting"
+msgstr ""
+
+#: progs/files.c progs/settings.c
+msgid "online"
+msgstr ""
+
+#: progs/files.c progs/settings.c
+msgid "refreshing"
+msgstr ""
+
+#: progs/files.c progs/settings.c
+msgid "unmounted"
+msgstr ""
+
 #: progs/files.c progs/firmware.c
 #, c-format
 msgid "Cannot read %s."
+msgstr ""
+
+#: progs/files.c
+msgid "Cannot start the cloud drive operation."
+msgstr ""
+
+#: progs/files.c
+msgid "Refreshing cloud drive..."
+msgstr ""
+
+#: progs/files.c
+msgid "Reading cloud drive..."
+msgstr ""
+
+#: progs/files.c
+msgid "Unmounting cloud drive..."
+msgstr ""
+
+#: progs/files.c
+msgid "Cloud drive timed out; the previous list is kept."
+msgstr ""
+
+#: progs/files.c
+msgid "Cloud drive list updated."
+msgstr ""
+
+#: progs/files.c
+msgid "Cloud drive unmounted."
+msgstr ""
+
+#: progs/files.c
+msgid ""
+"Cloud drive operation failed; the previous list is kept. See Settings > "
+"Cloud drives."
 msgstr ""
 
 #. TRANSLATORS: first %s is a folder path, second %s is the system error.
@@ -3596,6 +3658,10 @@ msgstr ""
 
 #: progs/files.c
 msgid "Icons"
+msgstr ""
+
+#: progs/files.c
+msgid "Refresh"
 msgstr ""
 
 #: progs/files.c
@@ -4139,6 +4205,10 @@ msgid "Eject"
 msgstr ""
 
 #: progs/files.c
+msgid "Unmount"
+msgstr ""
+
+#: progs/files.c
 msgid "Duplicate (Ctrl+U)"
 msgstr ""
 
@@ -4175,6 +4245,10 @@ msgid "Folder properties (I)"
 msgstr ""
 
 #: progs/files.c
+msgid "Refresh (F5)"
+msgstr ""
+
+#: progs/files.c
 msgid "Sort files... (s)"
 msgstr ""
 
@@ -4203,6 +4277,18 @@ msgstr ""
 #: progs/files.c
 #, c-format
 msgid "Details zoom: %d."
+msgstr ""
+
+#: progs/files.c
+msgid "Refresh cancelled."
+msgstr ""
+
+#: progs/files.c
+msgid "Pull to refresh"
+msgstr ""
+
+#: progs/files.c
+msgid "Release to refresh"
 msgstr ""
 
 #: progs/files.c
@@ -4980,7 +5066,7 @@ msgstr ""
 msgid "The computer's name: letters, digits and -, up to 63."
 msgstr ""
 
-#: progs/installer.c progs/settings.c
+#: progs/installer.c progs/packages.c progs/settings.c
 msgid "off"
 msgstr ""
 
@@ -5271,6 +5357,14 @@ msgstr ""
 msgid "Branch"
 msgstr ""
 
+#: progs/installer.c progs/settings.c
+msgid "App presets from"
+msgstr ""
+
+#: progs/installer.c progs/settings.c
+msgid "App presets branch"
+msgstr ""
+
 #: progs/installer.c
 #, c-format
 msgid "%d second"
@@ -5383,6 +5477,10 @@ msgstr ""
 #: progs/installer.c
 #, c-format
 msgid "Now: %s"
+msgstr ""
+
+#: progs/installer.c
+msgid "App presets"
 msgstr ""
 
 #: progs/installer.c
@@ -5703,6 +5801,14 @@ msgid "Branch:"
 msgstr ""
 
 #: progs/installer.c
+msgid "App presets from (a git URL, or off):"
+msgstr ""
+
+#: progs/installer.c
+msgid "App presets branch:"
+msgstr ""
+
+#: progs/installer.c
 msgid "Hibernate after (seconds asleep; empty: as the system has it):"
 msgstr ""
 
@@ -5814,6 +5920,39 @@ msgstr ""
 
 #: progs/packages.c
 #, c-format
+msgid "LOCachy source: %.7s installed; updates: %s"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "LOCachy source: its commit is not recorded; updates: %s"
+msgstr ""
+
+#: progs/packages.c
+msgid "none installed"
+msgstr ""
+
+#: progs/packages.c progs/settings.c
+msgid "from the system, not yet from the apps repository"
+msgstr ""
+
+#: progs/packages.c progs/settings.c
+#, c-format
+msgid "%.7s from the installation medium"
+msgstr ""
+
+#: progs/packages.c progs/settings.c
+#, c-format
+msgid "%.7s from the apps repository"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "App presets: %s; updates: %s"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
 msgid "local package %.180s"
 msgstr ""
 
@@ -5913,6 +6052,13 @@ msgstr ""
 #, c-format
 msgid "rebuild: %s"
 msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "%d configuration follows its new preset"
+msgid_plural "%d configurations follow their new presets"
+msgstr[0] ""
+msgstr[1] ""
 
 #: progs/packages.c
 msgid "not checked yet"
@@ -6090,6 +6236,11 @@ msgstr ""
 #: progs/packages.c
 #, c-format
 msgid "rebuild: %s (%s -> %s)"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "%s follows its new preset: %s"
 msgstr ""
 
 #. TRANSLATORS: PgUp/PgDn are key names; keep them.
@@ -7196,6 +7347,18 @@ msgstr ""
 msgid "fprintd-enroll was killed"
 msgstr ""
 
+#. TRANSLATORS: %s lists cloud drives and their states; Enter is the key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "%s   Enter: sign in again"
+msgstr ""
+
+#. TRANSLATORS: %s lists cloud drives and their states; Enter is the key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "%s%s   Enter: configure (rclone config)"
+msgstr ""
+
 #. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
 msgid "none   Enter: configure (rclone config)"
@@ -7771,6 +7934,39 @@ msgid "Following branch %.100s: c in packages checks it."
 msgstr ""
 
 #: progs/settings.c
+msgid "App presets repository (git URL, or off): "
+msgstr ""
+
+#: progs/settings.c
+msgid "App presets repository unchanged."
+msgstr ""
+
+#. TRANSLATORS: packages is the program's name, c the c key; keep them.
+#: progs/settings.c
+#, c-format
+msgid "App preset updates off."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "App presets from %.120s: c in packages checks it."
+msgstr ""
+
+#: progs/settings.c
+msgid "App presets branch to follow: "
+msgstr ""
+
+#: progs/settings.c
+msgid "App presets branch unchanged."
+msgstr ""
+
+#. TRANSLATORS: packages is the program's name, c the c key; keep them.
+#: progs/settings.c
+#, c-format
+msgid "App presets follow branch %.100s: c in packages checks it."
+msgstr ""
+
+#: progs/settings.c
 msgid "Making the boot image (locachy-boot)..."
 msgstr ""
 
@@ -8200,6 +8396,10 @@ msgstr ""
 
 #: progs/settings.c
 msgid "(updates off)"
+msgstr ""
+
+#: progs/settings.c
+msgid "App presets installed"
 msgstr ""
 
 #: progs/settings.c
@@ -8659,11 +8859,15 @@ msgid "rclone is not installed: the line above installs it."
 msgstr ""
 
 #: progs/settings.c
-msgid "Cloud drives mounted under ~/Drives/<remote>."
+msgid ""
+"Cloud drives are being mounted under ~/Drives/<remote>; their state is shown "
+"below."
 msgstr ""
 
 #: progs/settings.c
-msgid "Cloud drives unmounted."
+msgid ""
+"Cloud drives stop; files with uploads pending keep their drive until they "
+"are done."
 msgstr ""
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
@@ -8748,6 +8952,20 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Enter: the branch of that repository to follow (main by default)."
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter: the git repository the app presets come from (or off)."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Enter: the branch of the app presets' repository to follow (main by default)."
+msgstr ""
+
+#. TRANSLATORS: packages is the program's name, c the c key; keep them.
+#: progs/settings.c
+msgid "The app presets installed: c in packages checks for newer ones."
 msgstr ""
 
 #: progs/settings.c

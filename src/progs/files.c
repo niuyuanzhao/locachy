@@ -61,6 +61,11 @@
 #include <strings.h>
 #include <sys/fsuid.h>
 #include <sys/mount.h>
+#include <sys/mman.h>
+#include <sys/prctl.h>
+#include <sys/wait.h>
+#include <sched.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <time.h>
@@ -70,6 +75,17 @@
 #include "archive-proto.h"
 #include "clipboard.h"
 #include "files.h"
+#include "files-cloud.h"
+
+#ifndef CLOUD_STATUS
+#define CLOUD_STATUS "/run/locachy/cloud/status"
+#endif
+#ifndef CLOUD_CLIENT
+#define CLOUD_CLIENT "/usr/local/lib/locachy/rclone-client"
+#endif
+#ifndef CLOUD_LIST
+#define CLOUD_LIST "/usr/local/lib/locachy/files-cloud-list"
+#endif
 
 #define FG     0xD0D0D0
 #define BG     0x101820
@@ -166,6 +182,25 @@ static char *clip[MAX_CLIP];
 static int nclip, clip_cut;
 static const char *pick_type; /* files_pick: the type a file must have to be chosen */
 
+struct cloud_mount {
+    char name[256], path[PATH_MAX], state[32], reason[32];
+};
+static struct cloud_mount clouds[32];
+static int nclouds;
+static struct {
+    pid_t pid;
+    int fd, stage, top, hidden;
+    double deadline;
+    char path[PATH_MAX], keep[256];
+} cloud_job;
+enum { CLOUD_REFRESH = 1, CLOUD_READ, CLOUD_UNMOUNT };
+/* Pull to refresh: a finger scroll that began at the top of a pane. */
+#define PULL_STEPS 3
+static struct { int on, pane, steps; } pull;
+static void cloud_cancel(void);
+static int cloud_begin(struct pane *p, int stage);
+static void cloud_tick(void);
+
 /* The pointer's press, held: on an item (it may become a drag of the marked
  * items), or a rubberband from empty space. */
 enum { DRAG_NONE, DRAG_PENDING, DRAG_ITEMS, DRAG_BAND };
@@ -256,6 +291,56 @@ static void parent_of(const char *path, char *out, size_t size)
 {
     const char *slash = strrchr(path, '/');
     snprintf(out, size, "%.*s", slash && slash != path ? (int)(slash - path) : 1, slash ? path : "/");
+}
+
+/* Root-owned metadata only: neither discovery nor drawing opens the remote. */
+static void cloud_discover(void)
+{
+    nclouds = 0;
+    int fd = open(CLOUD_STATUS, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat st;
+    if (fd < 0) return;
+    /* Written by the root service; home runs as root (tests: as their user). */
+    if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) || st.st_uid != geteuid() || (st.st_mode & 022)) {
+        close(fd);
+        return;
+    }
+    FILE *in = fdopen(fd, "r");
+    if (!in) { close(fd); return; }
+    char line[PATH_MAX + 512], drives[PATH_MAX];
+    if (join(drives, sizeof drives, home, "Drives") < 0) { fclose(in); return; }
+    while (fgets(line, sizeof line, in) && nclouds < 32) {
+        /* name, path, state, last success, and a reason category */
+        char *fields[5], *save = NULL;
+        int n = 0;
+        line[strcspn(line, "\r\n")] = '\0';
+        for (char *s = strtok_r(line, "\t", &save); s && n < 5; s = strtok_r(NULL, "\t", &save)) fields[n++] = s;
+        if (n < 4 || !fields[0][0] || strpbrk(fields[0], "/\\") || !strcmp(fields[0], ".") || !strcmp(fields[0], "..")) continue;
+        char expected[PATH_MAX];
+        if (join(expected, sizeof expected, drives, fields[0]) < 0 || strcmp(expected, fields[1])) continue;
+        struct cloud_mount *c = &clouds[nclouds++];
+        snprintf(c->name, sizeof c->name, "%.255s", fields[0]);
+        snprintf(c->path, sizeof c->path, "%s", expected);
+        snprintf(c->state, sizeof c->state, "%.31s", fields[2]);
+        snprintf(c->reason, sizeof c->reason, "%.31s", n > 4 ? fields[4] : "");
+    }
+    fclose(in);
+}
+
+static const struct cloud_mount *cloud_at(const char *path)
+{
+    for (int i = 0; i < nclouds; i++) if (inside(path, clouds[i].path)) return &clouds[i];
+    return NULL;
+}
+
+static const char *cloud_state(const struct cloud_mount *c)
+{
+    if (!strcmp(c->state, "failed")) {
+        return !strcmp(c->reason, "authentication") ? _("sign in again") :
+               !strcmp(c->reason, "network") ? _("offline") : _("needs attention");
+    }
+    return !strcmp(c->state, "ready") ? _("online") : !strcmp(c->state, "mounting") ? _("connecting") :
+           !strcmp(c->state, "refreshing") ? _("refreshing") : !strcmp(c->state, "unmounted") ? _("unmounted") : _("needs attention");
 }
 
 static size_t utf_prev(const char *s, size_t p)
@@ -832,6 +917,7 @@ static int item_path(const struct pane *p, int i, char *out, size_t size)
 static int dir_items(const struct pane *p, struct file *f, int idx)
 {
     if (!f->dir) return 0;
+    if (cloud_at(p->cwd)) return -1; /* A painted row must not list its remote children. */
     if (f->items >= 0) return f->items;
     char path[PATH_MAX];
     int count = 0;
@@ -1110,6 +1196,10 @@ static void load_pane(struct pane *p, const char *keep)
 {
     char name[256];
     snprintf(name, sizeof name, "%s", keep ? keep : "");
+    if (!is_trash(p) && !is_search(p) && cloud_at(p->cwd)) {
+        cloud_begin(p, CLOUD_READ);
+        return;
+    }
     for (int i = 0; i < p->nlist; i++) {
         free_entry(&p->list[i]);
     }
@@ -1135,8 +1225,156 @@ static const char *selected_name(const struct pane *p)
 }
 
 /* Every pane of every tab read again, each keeping its selected item. */
+static double cloud_now(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+static void cloud_cancel(void)
+{
+    if (!cloud_job.pid) return;
+    kill(-cloud_job.pid, SIGTERM);
+    kill(cloud_job.pid, SIGTERM);
+    int status;
+    for (int i = 0; i < 20; i++) {
+        if (waitpid(cloud_job.pid, &status, WNOHANG) == cloud_job.pid) break;
+        if (i == 19) {
+            kill(-cloud_job.pid, SIGKILL);
+            kill(cloud_job.pid, SIGKILL);
+            while (waitpid(cloud_job.pid, &status, 0) < 0 && errno == EINTR) {}
+        } else {
+            usleep(1000);
+        }
+    }
+    close(cloud_job.fd);
+    memset(&cloud_job, 0, sizeof cloud_job);
+}
+
+static int cloud_begin(struct pane *p, int stage)
+{
+    if (cloud_job.pid) {
+        if (!strcmp(cloud_job.path, p->cwd) && stage == CLOUD_READ) return 0;
+        cloud_cancel();
+    }
+    struct passwd *pw = getpwuid(USER);
+    int root = geteuid() == 0;
+    if (!pw) return -1;
+    uid_t uid = root ? pw->pw_uid : getuid();
+    gid_t gid = root ? pw->pw_gid : getgid();
+    int fd = memfd_create("files-cloud", MFD_CLOEXEC);
+    if (fd < 0) { report(1, _("Cannot start the cloud drive operation.")); return -1; }
+    char env_home[PATH_MAX + 8], env_user[128];
+    snprintf(env_home, sizeof env_home, "HOME=%s", pw->pw_dir);
+    snprintf(env_user, sizeof env_user, "USER=%.120s", pw->pw_name);
+    char *const env[] = { env_home, env_user, "PATH=/usr/bin", "LANG=C.UTF-8", NULL };
+    char *const read_args[] = { CLOUD_LIST, p->cwd, NULL };
+    char *const control_args[] = { CLOUD_CLIENT, stage == CLOUD_REFRESH ? "--refresh" : "--unmount", p->cwd, NULL };
+    pid_t pid = fork();
+    if (pid == 0) {
+        sigset_t none;
+        sigemptyset(&none);
+        int null = open("/dev/null", O_RDWR);
+        if (setsid() < 0 || null < 0 || dup2(null, 0) < 0 || dup2(fd, 1) < 0 || dup2(null, 2) < 0 ||
+            close_range(3, ~0u, 0) < 0 || sigprocmask(SIG_SETMASK, &none, NULL) < 0) _exit(127);
+        if (root && (unshare(CLONE_NEWNET) < 0 || setgroups(0, NULL) < 0 || setgid(gid) < 0 || setuid(uid) < 0)) _exit(127);
+        if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) _exit(127);
+        execve(stage == CLOUD_READ ? CLOUD_LIST : CLOUD_CLIENT,
+               stage == CLOUD_READ ? read_args : control_args, env);
+        _exit(127);
+    }
+    if (pid < 0) { close(fd); report(1, _("Cannot start the cloud drive operation.")); return -1; }
+    cloud_job.pid = pid;
+    cloud_job.fd = fd;
+    cloud_job.stage = stage;
+    cloud_job.top = p->top;
+    cloud_job.hidden = hidden;
+    cloud_job.deadline = cloud_now() + 40;
+    snprintf(cloud_job.path, sizeof cloud_job.path, "%s", p->cwd);
+    snprintf(cloud_job.keep, sizeof cloud_job.keep, "%s", selected_name(p));
+    report(0, "%s", stage == CLOUD_REFRESH ? _("Refreshing cloud drive...") :
+           stage == CLOUD_READ ? _("Reading cloud drive...") : _("Unmounting cloud drive..."));
+    return 0;
+}
+
+static struct pane *cloud_pane(void)
+{
+    for (int t = 0; t < ntabs; t++) for (int k = 0; k <= tabs[t].split; k++) {
+        struct pane *p = &tabs[t].pane[k];
+        if (!strcmp(p->cwd, cloud_job.path)) return p;
+    }
+    return NULL;
+}
+
+static void cloud_tick(void)
+{
+    if (!cloud_job.pid) return;
+    int status;
+    pid_t done = waitpid(cloud_job.pid, &status, WNOHANG);
+    if (done == 0) {
+        if (cloud_now() < cloud_job.deadline) return;
+        cloud_cancel();
+        report(1, _("Cloud drive timed out; the previous list is kept."));
+        return;
+    }
+    struct pane *p = cloud_pane();
+    if (done < 0 || (!p && cloud_job.stage != CLOUD_UNMOUNT)) { cloud_cancel(); return; }
+    int stage = cloud_job.stage, fd = cloud_job.fd;
+    char keep[256];
+    snprintf(keep, sizeof keep, "%s", cloud_job.keep);
+    int top = cloud_job.top, was_hidden = cloud_job.hidden;
+    cloud_job.pid = 0;
+    int ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    if (stage == CLOUD_READ && ok && hidden == was_hidden) {
+        struct stat st;
+        ok = fstat(fd, &st) == 0 && st.st_size >= 0 && st.st_size % sizeof(struct cloud_entry) == 0 &&
+             (uint64_t)st.st_size / sizeof(struct cloud_entry) <= CLOUD_LIST_MAX;
+        struct pane next = { 0 };
+        if (ok && lseek(fd, 0, SEEK_SET) < 0) ok = 0;
+        struct cloud_entry row;
+        while (ok && read(fd, &row, sizeof row) == sizeof row) {
+            if (row.magic != CLOUD_LIST_MAGIC || !memchr(row.name, 0, sizeof row.name) ||
+                !memchr(row.type, 0, sizeof row.type) || !row.name[0] ||
+                strchr(row.name, '/') || !strcmp(row.name, ".") || !strcmp(row.name, "..")) { ok = 0; break; }
+            if (!hidden && row.name[0] == '.') { next.nhidden++; continue; }
+            if (!shown(row.name, p->filter)) continue;
+            struct file *f = new_entry(&next);
+            if (!f) { ok = 0; break; }
+            snprintf(f->name, sizeof f->name, "%s", row.name);
+            snprintf(f->type, sizeof f->type, "%s", row.type);
+            f->mode = row.mode; f->dir = row.dir; f->link = row.link;
+            f->uid = row.uid; f->gid = row.gid; f->size = row.size; f->blocks = row.blocks;
+            f->mtime = (time_t)row.mtime; f->items = -1;
+            f->exec = S_ISREG(f->mode) && (f->mode & 0111);
+        }
+        if (ok) {
+            for (int i = 0; i < p->nlist; i++) free_entry(&p->list[i]);
+            free(p->list);
+            p->list = next.list; p->cap = next.cap; p->nlist = next.nlist; p->nhidden = next.nhidden;
+            sort_pane(p, keep);
+            p->top = top;
+            report(0, _("Cloud drive list updated."));
+        } else {
+            for (int i = 0; i < next.nlist; i++) free_entry(&next.list[i]);
+            free(next.list);
+        }
+    } else if (stage == CLOUD_REFRESH && ok) {
+        close(fd);
+        cloud_begin(p, CLOUD_READ);
+        return;
+    } else if (stage == CLOUD_UNMOUNT && ok) {
+        cloud_discover();
+        report(0, _("Cloud drive unmounted."));
+    }
+    close(fd);
+    memset(&cloud_job, 0, sizeof cloud_job);
+    if (!ok) report(1, _("Cloud drive operation failed; the previous list is kept. See Settings > Cloud drives."));
+}
+
 static void reload_all(void)
 {
+    cloud_discover();
     for (int t = 0; t < ntabs; t++) {
         for (int k = 0; k <= tabs[t].split; k++) {
             struct pane *p = &tabs[t].pane[k];
@@ -1145,6 +1383,15 @@ static void reload_all(void)
             load_pane(p, keep);
         }
     }
+}
+
+static void refresh_pane(void)
+{
+    cloud_discover();
+    /* A cloud folder asks its service to refresh the remote; any other folder
+     * reads again as F5 always has, every pane of every tab. */
+    if (cloud_at(P->cwd)) cloud_begin(P, CLOUD_REFRESH);
+    else reload_all();
 }
 
 static void visit_free(struct place_visit *v)
@@ -1177,6 +1424,11 @@ static int go_pane(struct pane *p, const char *dir, const char *keep, int record
     char real[PATH_MAX];
     if (strcmp(dir, TRASH_URL) == 0 || strcmp(dir, SEARCH_URL) == 0) {
         snprintf(real, sizeof real, "%s", dir);
+    } else if (cloud_at(dir)) {
+        /* The user worker validates/reads the FUSE directory, never the UI. */
+        if (strlen(dir) >= sizeof real || strstr(dir, "/../") || strstr(dir, "/./") ||
+            !strcmp(base_name(dir), "..") || !strcmp(base_name(dir), ".")) return -1;
+        snprintf(real, sizeof real, "%s", dir);
     } else {
         as_user(1);
         DIR *d = realpath(dir, real) ? opendir(real) : NULL;
@@ -1196,6 +1448,11 @@ static int go_pane(struct pane *p, const char *dir, const char *keep, int record
         while (p->nfwd > 0) {
             visit_free(&p->fwd[--p->nfwd]);
         }
+    }
+    if (cloud_job.pid && strcmp(cloud_job.path, real)) cloud_cancel();
+    if (strcmp(p->cwd, real) && cloud_at(real)) {
+        for (int i = 0; i < p->nlist; i++) free_entry(&p->list[i]);
+        p->nlist = p->sel = p->nhidden = 0;
     }
     snprintf(p->cwd, sizeof p->cwd, "%s", real);
     p->filter[0] = '\0';
@@ -2026,11 +2283,15 @@ static void rebuild_places(void)
 {
     nplaces = 0;
     if (!home[0]) return;
+    cloud_discover();
     snprintf(places[nplaces++], PATH_MAX, "%s", home);
     char copy[256];
     snprintf(copy, sizeof copy, "%s", dirs);
     for (char *d = strtok(copy, " "); d && nplaces < MAX_PLACES - 1; d = strtok(NULL, " ")) {
         snprintf(places[nplaces++], PATH_MAX, "%s/%s", home, d);
+    }
+    for (int i = 0; i < nclouds && nplaces < MAX_PLACES - 1; i++) {
+        snprintf(places[nplaces++], PATH_MAX, "%s", clouds[i].path);
     }
     char bpath[PATH_MAX], line[PATH_MAX + 128];
     bookmarks_path(bpath, sizeof bpath);
@@ -2474,7 +2735,8 @@ static void draw_pane(struct pane *p, int which)
                 char size[32] = "", sfit[32];
                 if (f->dir) {
                     int cnt = dir_items(p, f, i);
-                    snprintf(size, sizeof size, P_("%d item", "%d items", cnt), cnt);
+                    if (cnt >= 0) snprintf(size, sizeof size, P_("%d item", "%d items", cnt), cnt);
+                    else snprintf(size, sizeof size, "%s", _("Folder"));
                 } else {
                     human(f->size, size, sizeof size);
                 }
@@ -2563,13 +2825,22 @@ static void draw_toolbar(void)
         screen_text(right + 1, 1, label, on ? BG : FG, on ? ACCENT : BAR_BG);
         ui_hit(right, 1, len, 1, HIT_VIEW + v);
     }
+    /* F5's button, where the path keeps its room: the views come first. */
+    const char *refresh = _("Refresh");
+    int refresh_len = ui_cells(refresh) + 3;
+    if (right - refresh_len > c + 24) {
+        right -= refresh_len;
+        ui_button(right, 1, refresh, HIT_KEY + K_F1 + 4);
+    }
 
     int path_col = c, max_path = right - path_col - 1;
     char raw[PATH_MAX + 512], shown_cwd[PATH_MAX + 256], line[1024];
     if (is_search(P)) {
         snprintf(shown_cwd, sizeof shown_cwd, _("Search '%s' in %s"), P->search_query, P->search_root);
     } else {
-        snprintf(shown_cwd, sizeof shown_cwd, "%.800s", P->cwd);
+        const struct cloud_mount *cloud = cloud_at(P->cwd);
+        if (cloud) snprintf(shown_cwd, sizeof shown_cwd, "[%s] %.700s", cloud_state(cloud), P->cwd);
+        else snprintf(shown_cwd, sizeof shown_cwd, "%.800s", P->cwd);
     }
     /* TRANSLATORS: v is the key; keep it. */
     snprintf(raw, sizeof raw, "%s%s%s%s", shown_cwd, P->filter[0] ? _("   filter: ") : "", P->filter,
@@ -2654,7 +2925,8 @@ static void format_status_line(struct pane *p, char *out, size_t size)
         char sz[32], dt[24], perm[16];
         if (f->dir) {
             int cnt = dir_items(p, f, p->sel);
-            snprintf(sz, sizeof sz, P_("%d item", "%d items", cnt), cnt);
+            if (cnt >= 0) snprintf(sz, sizeof sz, P_("%d item", "%d items", cnt), cnt);
+            else snprintf(sz, sizeof sz, "%s", _("Folder"));
         } else {
             human(f->size, sz, sizeof sz);
         }
@@ -2667,7 +2939,7 @@ static void format_status_line(struct pane *p, char *out, size_t size)
 
     const char *fs_dir = is_search(p) ? p->search_root : is_trash(p) ? home : p->cwd;
     struct statvfs vfs;
-    if (fs_dir[0] && statvfs(fs_dir, &vfs) == 0 && vfs.f_blocks > 0) {
+    if (fs_dir[0] && !cloud_at(fs_dir) && statvfs(fs_dir, &vfs) == 0 && vfs.f_blocks > 0) {
         human((long long)vfs.f_bavail * (long long)vfs.f_frsize, free_str, sizeof free_str);
     }
     if (p->nhidden > 0 && free_str[0]) {
@@ -2719,7 +2991,12 @@ static void draw(void)
             const char *name = strcmp(places[i], home) == 0 ? _("Home") :
                                strcmp(places[i], TRASH_URL) == 0 ? _("Trash") : base_name(places[i]);
             int on = side && i == side_sel, here = strcmp(places[i], P->cwd) == 0;
-            char cut[64];
+            char cut[64], cloud_label[320];
+            const struct cloud_mount *cloud = cloud_at(places[i]);
+            if (cloud) {
+                snprintf(cloud_label, sizeof cloud_label, "%s [%s]", cloud->name, cloud_state(cloud));
+                name = cloud_label;
+            }
             screen_fill(0, top_row + i, SIDE, 1, on ? ACCENT : BG);
             snprintf(cut, sizeof cut, "%.*s", (int)utf_fit(name, SIDE - 5), name);
             snprintf(line, sizeof line, " %c %s", here ? '>' : ' ', cut);
@@ -3194,6 +3471,13 @@ static void unescape(char *s)
  * in a container (then the device is still claimed). */
 static void eject(const char *path, const char *name)
 {
+    const struct cloud_mount *cloud = cloud_at(path);
+    if (cloud && !strcmp(path, cloud->path)) {
+        struct pane mount = { 0 };
+        snprintf(mount.cwd, sizeof mount.cwd, "%s", path);
+        cloud_begin(&mount, CLOUD_UNMOUNT);
+        return;
+    }
     char line[2048], dev[128] = "";
     FILE *in = fopen("/proc/self/mountinfo", "re");
     while (in && fgets(line, sizeof line, in)) {
@@ -3735,7 +4019,7 @@ static int file_menu(int col, int row, int on_file)
         }
         if (P->list[P->sel].dir && join(other, sizeof other, home, "Drives") == 0 && strcmp(P->cwd, other) == 0 &&
             join(path, sizeof path, P->cwd, P->list[P->sel].name) == 0) {
-            ITEM(_("Eject"), 'e');
+            ITEM(cloud_at(path) ? _("Unmount") : _("Eject"), 'e');
         }
         if (!search) {
             ITEM(_("Duplicate (Ctrl+U)"), MODS(KEYS_CTRL) + ('u' & 0x1F));
@@ -3765,6 +4049,7 @@ static int file_menu(int col, int row, int on_file)
     if (!pick_type && nundo) {
         ITEM(_("Undo"), 'u');
     }
+    if (!on_file && !trash && !search) ITEM(_("Refresh (F5)"), K_F1 + 4); /* the folder's, as Dolphin's Reload */
     ITEM(_("Sort files... (s)"), 's');
     if (P->view == VIEW_DETAILS) {
         ITEM(_("Columns... (C)"), 'C');
@@ -3853,7 +4138,7 @@ static void pointer_xy(const struct pointer_event *e, int *x, int *y)
 
 static void place_go(int i)
 {
-    if (strcmp(places[i], TRASH_URL) != 0) {
+    if (strcmp(places[i], TRASH_URL) != 0 && !cloud_at(places[i])) {
         as_user(1);
         mkdir(places[i], 0755);
         as_user(0);
@@ -3868,7 +4153,45 @@ static int pointer_key(int *out_mods)
     const struct pointer_event *e = pointer_last();
     int mods = keys_modifiers(), px, py;
     pointer_xy(e, &px, &py);
+    /* Only a finger (a touch screen's one, or a touchpad's scroll) pulls;
+     * wheels, the TrackPoint and file drags scroll as before. */
+    if (e->gesture == GESTURE_SCROLL) {
+        int finger = (e->scroll_source == SCROLL_TOUCH && e->scroll_fingers == 1) ||
+                     e->scroll_source == SCROLL_FINGER;
+        if (e->scroll_phase == SCROLL_BEGIN) {
+            int id = ui_hit_at(e->col, e->row), which = -1;
+            if (id >= HIT_FILE && id < HIT_AREA) which = (id - HIT_FILE) / HIT_PANE;
+            else if (id >= HIT_AREA && id < HIT_AREA + 2) which = id - HIT_AREA;
+            struct pane *p = which >= 0 ? &tabs[cur_tab].pane[which] : NULL;
+            pull.on = finger && drag.mode == DRAG_NONE && !pick_type && p && p->top == 0 &&
+                      !is_trash(p) && !is_search(p);
+            pull.pane = which;
+            pull.steps = 0;
+            return 0;
+        }
+        int was = pull.on && pull.steps >= PULL_STEPS;
+        pull.on = 0;
+        if (e->scroll_phase == SCROLL_END && was) {
+            tabs[cur_tab].active = pull.pane;
+            set_active();
+            refresh_pane();
+        } else if (was) {
+            report(0, "%s", _("Refresh cancelled."));
+        }
+        return -1;
+    }
+    if (pull.on && e->wheel) {
+        struct pane *p = &tabs[cur_tab].pane[pull.pane];
+        pull.steps += e->wheel;
+        if (pull.steps < 0 || p->top != 0) {
+            pull.on = 0; /* scrolled into the list: an ordinary scroll */
+        } else {
+            report(0, "%s", pull.steps >= PULL_STEPS ? _("Release to refresh") : _("Pull to refresh"));
+            return -1;
+        }
+    }
     if (e->gesture == GESTURE_PINCH) {
+        pull.on = 0;
         if (e->scale >= 1.15 || e->scale <= 0.87) {
             zoom_pane(P, e->scale > 1.0 ? 1 : -1);
             return -1;
@@ -4111,9 +4434,10 @@ static int browse(char *out, size_t size)
     int show = 1;
     for (;;) {
         set_active();
+        cloud_tick();
         if (show) draw();
         show = 1;
-        int key = key_poll_timeout(-1, drag.mode == DRAG_BAND ? 40 : 2000);
+        int key = key_poll_timeout(-1, drag.mode == DRAG_BAND ? 40 : cloud_job.pid ? 100 : 2000);
         int mods = keys_modifiers();
         if (key == K_POINTER) {
             mods = 0;
@@ -4168,7 +4492,7 @@ static int browse(char *out, size_t size)
             continue;
         }
         if (key == K_F1 + 4) { /* F5 */
-            reload_all();
+            refresh_pane();
             continue;
         }
         if (key == K_F1 + 2) { /* F3 */
@@ -4405,7 +4729,11 @@ void files_view(void)
         go_pane(P, home, NULL, 0);
     }
     take_request();
+    int scroll_events = pointer_scroll_events(1);
     browse(NULL, 0);
+    pointer_scroll_events(scroll_events);
+    pull.on = 0;
+    cloud_cancel();
     drag_stop();
 }
 
@@ -4419,7 +4747,11 @@ int files_pick(const char *dir, const char *keep, const char *type, const char *
     }
     pick_type = type;
     report(0, "%s", what);
+    int scroll_events = pointer_scroll_events(1);
     int chosen = browse(out, size);
+    pointer_scroll_events(scroll_events);
+    pull.on = 0;
+    cloud_cancel();
     pick_type = NULL;
     drag_stop();
     return chosen;

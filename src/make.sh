@@ -36,7 +36,9 @@
 #   /etc/locachy/rc.conf                       the startup file (when missing)
 #   /etc/os-release                            the system's name: LOCachy
 #   /etc/sudoers.d/10-locachy-user             sudo for the user (uid 1000), with its password
-#   /usr/local/share/locachy/containers/       presets of containers (NAME.conf)
+#   /usr/local/share/locachy/containers/       presets of the host programs (NAME.conf); the
+#                                              app presets are a catalog of their own
+#                                              (/var/lib/locachy/apps, link/locachy_apps.py)
 #   /usr/local/bin/locachy-boot                the boot files, put on the ESP; run
 #   /etc/pacman.d/hooks/90-locachy-boot.hook   by pacman for a new kernel or microcode
 #   /etc/pacman.d/hooks/91-locachy-rebuild.hook  all of this again (locachy-pkg rebuild),
@@ -169,6 +171,8 @@ $GCC -o /usr/local/bin/firmware "$src/progs/firmware.c" "$src/progs/files.c" "$b
 $GCC -o "$lib/archive-worker" "$src/progs/archive-worker.c" $(pkg-config --cflags --libs libarchive libcrypto)
 $GCC -o /usr/local/bin/archive "$src/progs/archive.c" "$src/progs/files.c" "$b"/glibc-base-*.o $FT_LIBS
 $GCC -o "$lib/drives" "$src/progs/drives.c" "$b"/glibc-base-*.o $FT_LIBS
+# Cloud folders' metadata, read as the user so files never waits on the network.
+$GCC $(pkg-config --cflags gio-2.0) -o "$lib/files-cloud-list" "$src/progs/files-cloud-list.c" $(pkg-config --libs gio-2.0)
 # The document viewer: view on the screen, view-render reading the documents
 # as the user in a sandbox of its own (progs/view-proto.h). Their libraries
 # are the manifest's (a system from before it: locachy-pkg install them).
@@ -304,11 +308,21 @@ fi
 python3 -I "$src/link/migrate-audio-packages" /etc/locachy/packages
 python3 -I "$src/link/declare-packages" "$src" /etc/locachy/packages
 # Containers: their configurations (/etc/locachy/containers/NAME.conf, the
-# user's) and the presets to choose from (ours, replaced each time).
+# user's) and the presets to choose from: the host programs' (ours, replaced
+# each time) and the app presets' catalog (from their own repository, which
+# a system update never replaces). A system from before that catalog keeps
+# the app presets it had in it until the first from there.
 mkdir -p /etc/locachy/containers
-rm -rf /usr/local/share/locachy/containers
+if python3 -I "$src/link/locachy_apps.py" bootstrap /usr/local/share/locachy/containers; then
+    rm -rf /usr/local/share/locachy/containers
+else
+    # Kept, not lost: the next run tries again.
+    echo "make: app presets: no catalog made from the presets before; they stay in /usr/local/share/locachy/containers until one is" >&2
+fi
 install -d /usr/local/share/locachy/containers
-install -m 644 "$src"/containers/*.conf /usr/local/share/locachy/containers/
+for preset in "$src"/containers/*.conf; do
+    ! grep -q '^host="1"' "$preset" || install -m 644 "$preset" /usr/local/share/locachy/containers/
+done
 if [ -d "$src/machines" ]; then
     rm -rf /usr/local/share/locachy/machines
     install -d /usr/local/share/locachy/machines

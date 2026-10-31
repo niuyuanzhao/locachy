@@ -35,6 +35,14 @@ final transaction. A newly required library must not be supplied manually just
 to make the new tests compile. AUR and local builds retain their separate,
 explicit failure paths.
 
+## App presets
+
+The app presets come from their own repository (`apps_repo`, `apps_branch`),
+not from the source. Check pins their catalog's commit as the `apps` target;
+Apply installs it after the source and before the host, merges the
+configurations that follow a preset, and never builds or installs packages
+for it. A failure there stops nothing else. See [APPS.md](APPS.md).
+
 ## Package contracts
 
 Locally patched packages are built unprivileged in disposable roots against the

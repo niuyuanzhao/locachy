@@ -29,6 +29,8 @@
 #include <unistd.h>
 
 #include <gio/gio.h>
+#include <mntent.h>
+#include <limits.h>
 
 #include "base.h"
 
@@ -147,8 +149,26 @@ static int file_type(const char *path, const struct stat *st, char *type, size_t
         snprintf(type, size, "%s", kind);
         return 0;
     }
+    /* As KIO's slow mounts: drawing a type must not download every cloud
+     * file. Match the actual enclosing mount, not a folder named Drives. */
+    int slow = 0;
+    size_t longest = 0;
+    char resolved[PATH_MAX], buffer[8192];
+    const char *target = realpath(path, resolved) ? resolved : path;
+    FILE *mounts = setmntent("/proc/self/mounts", "re");
+    struct mntent entry, *mount;
+    while (mounts && (mount = getmntent_r(mounts, &entry, buffer, sizeof buffer)) != NULL) {
+        size_t len = strlen(mount->mnt_dir);
+        if (len < longest || strncmp(target, mount->mnt_dir, len) != 0 ||
+            (len != 1 && target[len] && target[len] != '/')) continue;
+        longest = len;
+        slow = strncmp(mount->mnt_type, "fuse.", 5) == 0 && strncmp(mount->mnt_fsname, "/dev/", 5) != 0;
+        static const char *const network[] = { "nfs", "nfs4", "cifs", "smb3", "smbfs", "ceph", "9p", "autofs" };
+        for (size_t i = 0; i < sizeof network / sizeof network[0]; i++) slow |= strcmp(mount->mnt_type, network[i]) == 0;
+    }
+    if (mounts) endmntent(mounts);
     guchar data[4096]; /* GIO's sniffing length for local files */
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOCTTY | O_NONBLOCK);
+    int fd = slow ? -1 : open(path, O_RDONLY | O_CLOEXEC | O_NOCTTY | O_NONBLOCK);
     ssize_t n = fd >= 0 ? read(fd, data, sizeof data) : -1;
     if (fd >= 0) {
         close(fd);
