@@ -570,8 +570,8 @@ class LocalPackages(unittest.TestCase):
 
         # Another branch is ignored until rc.conf follows it; a bad name is refused.
         git("checkout", "-q", "-b", "next")
-        (origin / "src/containers").mkdir(exist_ok=True)
-        (origin / "src/containers/next-only.conf").write_text('package="next-only"\n')
+        (origin / "src/machines").mkdir(exist_ok=True)
+        (origin / "src/machines/next-only.conf").write_text('description="Next only"\n')
         git("add", "-A")
         git("commit", "-m", "Next branch only")
         c_next = git("rev-parse", "HEAD")
@@ -587,31 +587,32 @@ class LocalPackages(unittest.TestCase):
                 pkg.plan()
         self.rc.write_text(f'update_repo="file://{origin}"\n')
 
-        # Upstream adds a new container recipe and updates make.sh.
-        (origin / "src/containers").mkdir(exist_ok=True)
-        (origin / "src/containers/signal.conf").write_text('package="signal-desktop"\n')
+        # Upstream adds a machine profile and updates make.sh (app presets
+        # are not the source's: test-apps-catalog.py).
+        (origin / "src/machines").mkdir(exist_ok=True)
+        (origin / "src/machines/x13.conf").write_text('description="ThinkPad X13"\n')
         (origin / "src/make.sh").write_text("#!/bin/sh\n# v2\nexit 0\n")
         (origin / "src/make.sh").chmod(0o755)
         git("add", "-A")
-        git("commit", "-m", "Add Signal container recipe")
+        git("commit", "-m", "Add the X13 machine profile")
         c2 = git("rev-parse", "HEAD")
 
         rows = pkg.plan()
-        self.assertIn(("locachy", "repo", "locachy-src", c1[:7], f"{c2[:7]} (Add Signal container recipe)"), rows)
+        self.assertIn(("locachy", "repo", "locachy-src", c1[:7], f"{c2[:7]} (Add the X13 machine profile)"), rows)
         self.assertIn(("locachy", "rebuild", "new source and recipes from branch main (make.sh --boot)", c1[:7], c2), rows)
 
         rebuilt = []
         self.patch("rebuild_locachy", lambda force=False: rebuilt.append(force) or True)
         self.assertTrue(pkg.apply_target("locachy", rows))
         self.assertEqual(rebuilt, [True])
-        self.assertTrue((self.src / "containers/signal.conf").is_file())
+        self.assertTrue((self.src / "machines/x13.conf").is_file())
         self.assertEqual(self.source_commit.read_text().strip(), c2)
         self.record()
         self.assertEqual(pkg.plan(), [])
 
         # When trusted-signers is populated, an unsigned commit is rejected.
         self.signers.write_text("user@example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n")
-        (origin / "src/containers/untrusted.conf").write_text('package="bad"\n')
+        (origin / "src/machines/untrusted.conf").write_text('description="bad"\n')
         git("add", "-A")
         git("commit", "-m", "Unsigned change")
         with self.assertRaisesRegex(RuntimeError, "signature verification"):

@@ -22,7 +22,7 @@ Commands:
   locachy-pkg kernel list|select PACKAGE   available kernels, or install/select one
   locachy-pkg kernel headers on|off        declare/remove the selected kernel's headers
 
-Updates of the host, LOCachy and the containers (see the part below):
+Updates of the host, LOCachy, its app presets and the containers (see the part below):
   locachy-pkg plan [--cached] [--machine]   check, and show what an update would do
   locachy-pkg apply [TARGET...]             do the last plan (all of it, or TARGET...); with
                                             LOCachy's update: its source and updater first,
@@ -37,6 +37,8 @@ What a container's form (packages) shows:
                                  TAB VERSION TAB DESCRIPTION TAB HOST_VERSION
   locachy-pkg commands NAME      what NAME's build can run: lines PROGRAM TAB
                                  ARGUMENTS TAB TITLE
+  locachy-pkg search TERM...     the app presets (the catalog, LOCACHY_APPS_CATALOG),
+                                 the repositories' and the AUR's packages
 """
 import glob
 import importlib.util
@@ -630,16 +632,23 @@ def cmd_remove(pkgs):
 #              programs built last. The host is always planned and its
 #              patched packages built and tested by one source, the one
 #              installed: their recipes and their contracts agree.
+#   apps       the app presets' catalog (locachy_apps.py), from a repository
+#              of its own (apps_repo, apps_branch): the commit Check fetched,
+#              then the configurations that follow its presets (merge). Done
+#              after the source, before the rest; its failure stops nothing
+#              else. Never a build, a package or a boot image.
 #   NAME       a container (/etc/locachy/containers/NAME.conf): built anew
 #              (locachy-app build) when its own packages have updates, when
-#              its configuration names other packages, or when the host has
-#              changed since it was built; never while it runs
+#              its configuration names other packages (or will, once apps
+#              merged its preset), or when the host has changed since it was
+#              built; never while it runs
 #
 # Plan lines for programs (packages, the TUI): TARGET TAB KIND TAB WHAT TAB
 # OLD TAB NEW, KIND one of repo, aur, local (WHAT: package, NEW: why),
 # rebuild (WHAT says why), state (WHAT:
-# closed, running, frozen; containers only). The last plan is kept in
-# PLAN_FILE, with the time of its check.
+# closed, running, frozen; containers only), catalog and merge (apps only:
+# its commit; a configuration's keys that follow its preset). The last plan
+# is kept in PLAN_FILE, with the time of its check.
 
 CONF_DIR = "/etc/locachy/containers"
 RC_CONF = "/etc/locachy/rc.conf"
@@ -649,6 +658,10 @@ SOURCE_REPO_DIR = "/var/lib/locachy/repo"
 SOURCE_COMMIT_FILE = "/usr/local/lib/locachy/source-commit"
 TRUSTED_SIGNERS = "/etc/locachy/trusted-signers"
 DEFAULT_UPDATE_REPO = "https://github.com/niuyuanzhao/locachy.git"
+APPS_DIR = "/var/lib/locachy/apps" # the app presets: catalog, repo.git, baseline (locachy_apps.py)
+DEFAULT_APPS_REPO = "https://github.com/niuyuanzhao/locachy-apps.git"
+APPS_CATALOG_ROW = "app presets from branch "
+PRESET_REBUILD = "its preset names other packages"
 LEVEL_FILE = "/usr/local/lib/locachy/level"
 CPU_FILE = "/usr/local/lib/locachy/cpu"  # what -march it is built for (make.sh)
 BUILT_HOST_FILE = "/usr/local/lib/locachy/built-host" # host_hash() of make.sh --boot's last build
@@ -901,11 +914,32 @@ def source_repo_url():
 def source_branch():
     """The branch of update_repo to follow (rc.conf update_branch, default
     main); refused unless it is one plain branch name, never an option."""
-    branch = os.environ.get("LOCACHY_UPDATE_BRANCH") or read_conf(RC_CONF).get("update_branch", "") or "main"
+    return checked_branch("update_branch", os.environ.get("LOCACHY_UPDATE_BRANCH"))
+
+
+def checked_branch(key, env):
+    """rc.conf key's branch (env first, default main), one plain branch name."""
+    branch = env or read_conf(RC_CONF).get(key, "") or "main"
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,127}", branch) or ".." in branch or "//" in branch \
             or branch.endswith(("/", ".", ".lock")):
-        raise RuntimeError(f"update_branch {branch!r} in {RC_CONF} is not a branch name")
+        raise RuntimeError(f"{key} {branch!r} in {RC_CONF} is not a branch name")
     return branch
+
+
+def apps_repo_url():
+    """Git repository URL of the app presets (as source_repo_url: rc.conf
+    apps_repo, else the default on the host); '' when off."""
+    env = os.environ.get("LOCACHY_APPS_REPO")
+    if env is not None:
+        return "" if env in ("", "0", "off") else env
+    rc = read_conf(RC_CONF)
+    if "apps_repo" in rc:
+        return "" if rc["apps_repo"] in ("", "0", "off") else rc["apps_repo"]
+    return DEFAULT_APPS_REPO if on_host_root() else ""
+
+
+def apps_branch():
+    return checked_branch("apps_branch", os.environ.get("LOCACHY_APPS_BRANCH"))
 
 
 def source_tree_digest(path):
@@ -936,6 +970,46 @@ def source_tree_digest(path):
                         h.update(chunk)
                 h.update(b"\0")
     return h.hexdigest()
+
+
+def apps_rows(fetch=True, pinned=None):
+    """The app presets' part of a plan: the catalog Check fetched (fetch),
+    else the one an earlier plan pinned, while repo.git has it (a re-plan
+    that does not check: after the source), else none until the next Check;
+    with the configurations that will follow it and the containers that
+    their merge rebuilds. A failure is a note: it stops nothing else."""
+    url = apps_repo_url()
+    if not url or not shutil.which("git"):
+        return []
+    rows, found, meta = [], None, {}
+    try:
+        apps = helper_module("locachy_apps")
+        catalog = os.path.join(APPS_DIR, "catalog")
+        meta = apps.read_meta(catalog) if os.path.isdir(catalog) else {}
+        branch = apps_branch()
+        if fetch:
+            print(f"locachy-pkg: app presets from {url} ({branch})", file=sys.stderr)
+            found = apps.check(APPS_DIR, url, branch, CONF_DIR, TRUSTED_SIGNERS, net=in_net)
+        elif pinned and apps.fetched(APPS_DIR, pinned):
+            found = apps.compare(APPS_DIR, pinned, CONF_DIR, TRUSTED_SIGNERS)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+        print(f"locachy-pkg: app presets not checked: {e}", file=sys.stderr)
+        rows.append(("apps", "note", f"not checked: {e}".replace("\t", " "), "", ""))
+    if found:
+        rows += [("apps", "repo", "locachy-apps", found["old"], found["label"]),
+                 ("apps", "catalog", APPS_CATALOG_ROW + branch, found["old"], found["commit"])]
+        for name, keys, old, new in found["merges"]:
+            rows.append(("apps", "merge", name, " ".join(keys), ""))
+            if sorted(old.split()) != sorted(new.split()):
+                rows.append((name, "rebuild", PRESET_REBUILD, old, new))
+    if meta.get("origin") == "bootstrap":
+        rows.append(("apps", "note", "bootstrap catalog from the system source, not from the apps repository", "", ""))
+    return rows
+
+
+def planned_apps_commit(rows):
+    """The app presets' commit a plan pinned, if any."""
+    return next((r[4] for r in rows if r[:2] == ("apps", "catalog") and re.fullmatch(r"[0-9a-f]{40}", r[4])), None)
 
 
 def verify_source_commit(commit):
@@ -1183,14 +1257,15 @@ def cmd_info(names):
 
 
 def cmd_search(terms):
-    """Search LOCachy container recipes (/usr/local/share/locachy/containers),
-    official sync repositories (pacman -Ss) and the AUR RPC for terms.
-    Output rows: NAME<TAB>KIND<TAB>PACKAGE<TAB>EXTRAS<TAB>COMMAND<TAB>ARGUMENTS<TAB>NETWORK<TAB>DESCRIPTION."""
+    """Search LOCachy's app presets (the catalog: LOCACHY_APPS_CATALOG, else
+    APPS_DIR/catalog), official sync repositories (pacman -Ss) and the AUR
+    RPC for terms. Output rows: NAME<TAB>KIND<TAB>PACKAGE<TAB>EXTRAS<TAB>
+    COMMAND<TAB>ARGUMENTS<TAB>NETWORK<TAB>DESCRIPTION."""
     q = " ".join(terms).strip()
     if not q:
         return 0
     ql = q.lower()
-    presets_dir = os.environ.get("LOCACHY_PRESETS", "/usr/local/share/locachy/containers")
+    presets_dir = os.environ.get("LOCACHY_APPS_CATALOG") or os.path.join(APPS_DIR, "catalog")
     for path in sorted(glob.glob(os.path.join(presets_dir, "*.conf"))):
         conf = read_conf(path)
         if conf.get("host") == "1":
@@ -1363,9 +1438,10 @@ def source_setup_pending():
         return False
 
 
-def plan(check_source=True):
+def plan(check_source=True, apps_commit=None):
     """The plan: (target, kind, what, old, new) rows. Phase two checks only
-    the installed source: another remote commit is for the next Apply."""
+    the installed source: another remote commit is for the next Apply; its
+    app presets are those of apps_commit (the plan before it), not fetched."""
     global _pending_plan_lock
     _pending_plan_lock = None
     rows = []
@@ -1488,7 +1564,7 @@ def plan(check_source=True):
                 rows.append((name, "rebuild", f"the host has changed since it was built ({built.get('date', '?')})", "", ""))
             elif host_changes:
                 rows.append((name, "rebuild", "the host is updated", "", ""))
-    return rows
+    return rows + apps_rows(check_source, apps_commit)
 
 
 def save_plan(rows):
@@ -1528,7 +1604,7 @@ def load_plan():
 def targets_of(rows):
     """The targets with something to do, in the order they are applied."""
     order = []
-    for t in ["host", "locachy"] + containers():
+    for t in ["apps", "host", "locachy"] + containers():
         if any(r[0] == t and r[1] not in ("state", "note") for r in rows):
             order.append(t)
     return order
@@ -1554,6 +1630,10 @@ def print_plan(rows, checked):
                 print(f"  local {what}: {new} (installed {old})")
             elif kind == "missing":
                 print(f"  install {what}: {new}")
+            elif kind == "catalog":
+                print(f"  {what} ({old} -> {new[:7]})")
+            elif kind == "merge":
+                print(f"  merge {what}: {old} as its new preset has them")
             else:
                 print(f"  {kind:<5} {what:<32} {old} -> {new}")
 
@@ -1625,8 +1705,31 @@ def install_planned_missing(mine, tracked):
     return install_missing(missing, tracked)
 
 
+def apply_apps(mine):
+    """The catalog the plan checked (never fetched again: the commit it
+    pinned), then the configurations that follow its presets. Nothing else:
+    no make.sh, no package, no boot image."""
+    rows = [r for r in mine if r[1] == "catalog" and re.fullmatch(r"[0-9a-f]{40}", r[4])]
+    if not rows:
+        return True
+    what, commit = rows[-1][2], rows[-1][4]
+    branch = what[len(APPS_CATALOG_ROW):] if what.startswith(APPS_CATALOG_ROW) else apps_branch()
+    try:
+        changed = helper_module("locachy_apps").apply(APPS_DIR, commit, CONF_DIR, TRUSTED_SIGNERS,
+                                                      apps_repo_url(), branch)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+        print(f"locachy-pkg: app presets not updated, the installed catalog stays: {e}", file=sys.stderr)
+        return False
+    print(f"===> apps: catalog {commit[:7]} installed", flush=True)
+    for name, keys in changed:
+        print(f"===> apps: {name}: {' '.join(keys)} as its new preset has them", flush=True)
+    return True
+
+
 def apply_target(t, rows):
     mine = [r for r in rows if r[0] == t]
+    if t == "apps":
+        return apply_apps(mine)
     if t == "host":
         installed = local_packages(LOCAL_DB)
         baselines = baseline_recipes()
@@ -1803,7 +1906,7 @@ def cmd_apply(targets, after_source=False):
         os.execv(SELF, [SELF, "apply", "--after-source"] + list(targets))
     if after_source:
         try:
-            rows = plan(check_source=False)
+            rows = plan(check_source=False, apps_commit=planned_apps_commit(load_plan()[0]))
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
             print(f"locachy-pkg: check after the LOCachy update failed: {e}", file=sys.stderr)
             print("===> not done: " + (" ".join(targets) or "all"), flush=True)
@@ -1826,6 +1929,8 @@ def cmd_apply(targets, after_source=False):
         os.execv(SELF, [SELF, "apply", "--after-source"] + list(targets))
     failed = []
     for t in order:
+        if t not in targets_of(rows):
+            continue  # its rebuild was for a preset merge that was not done
         print(f"===> {t}", flush=True)
         if not apply_target(t, rows):
             failed.append(t)
@@ -1833,6 +1938,9 @@ def cmd_apply(targets, after_source=False):
             if t == "host":
                 print("===> stopping: LOCachy and container updates depend on the host", flush=True)
                 break
+            if t == "apps":
+                # The configurations were not merged: nothing to build for that.
+                rows = [r for r in rows if r[1:3] != ("rebuild", PRESET_REBUILD)]
         else:
             print(f"===> {t}: done", flush=True)
     if failed:

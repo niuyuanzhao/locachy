@@ -168,6 +168,8 @@ static const char *map_path(const char *path, char *out, size_t size)
         snprintf(out, size, "%s/locale.conf%s", root, path + 16);
     else if (strcmp(path, LOCAL_QUIRKS) == 0 || strcmp(path, LOCAL_QUIRKS ".tmp") == 0)
         snprintf(out, size, "%s/local-overrides.quirks%s", root, path + strlen(LOCAL_QUIRKS));
+    else if (strcmp(path, APPS_CATALOG_INFO) == 0) /* the app presets installed: absent unless a test writes it */
+        snprintf(out, size, "%s/apps-CATALOG", root);
     else if (strcmp(path, "/proc") == 0 || strncmp(path, "/proc/", 6) == 0) /* the programs told */
         snprintf(out, size, "%s/proc%s", root, path + 5);
     else { fprintf(stderr, "Unexpected file access: %s\n", path); abort(); }
@@ -861,6 +863,102 @@ static void test_system_keymap(void)
          "leave input unchanged; labwc environment preserves user options and reloads");
 }
 
+/* A prompt's answer: what it shows taken away (Ctrl+U), text typed, Enter. */
+static void type_answer(const char *text)
+{
+    nkeys = keypos = 0;
+    press(21, 0, NULL);
+    for (const char *s = text; *s; s++) press(*s, 0, NULL);
+    press('\n', 0, NULL);
+}
+
+/* The app presets' rows under Software Update: their repository and branch,
+ * edited as the source's (rc.conf apps_repo, apps_branch), and the catalog
+ * installed, as its CATALOG says (none without one). */
+static void test_apps_rows(void)
+{
+    char line[512], path[1400];
+    snprintf(path, sizeof path, "%s/apps-CATALOG", root);
+    unlink(path);
+    apps_repo[0] = apps_branch[0] = update_repo[0] = update_branch[0] = '\0';
+    assert(enter_row(upd_index() + 2) && enter_row(upd_index() + 3) && !enter_row(upd_index() + 4));
+    item_text(upd_index() + 2, line, sizeof line);
+    assert(strstr(line, "App presets from") && strstr(line, " https://github.com/niuyuanzhao/locachy-apps.git   (Enter: change)"));
+    item_text(upd_index() + 3, line, sizeof line);
+    assert(!strncmp(line, "  App presets branch", 20) && strstr(line, " main   (Enter: change)"));
+    item_text(upd_index() + 4, line, sizeof line);
+    assert(!strncmp(line, "  App presets installed", 23) && !strcmp(line + strlen(line) - 5, " none"));
+    file_text("apps-CATALOG", "format=\"1\"\norigin=\"bootstrap\"\nrepo=\"\"\nbranch=\"\"\ncommit=\"\"\n"
+                              "installed=\"2026-10-30 10:00\"\nsystem_commit=\"0123456789abcdef0123456789abcdef01234567\"\n");
+    item_text(upd_index() + 4, line, sizeof line);
+    assert(strstr(line, " from the system, not yet from the apps repository") && !strstr(line, "0123456"));
+    file_text("apps-CATALOG", "format=\"1\"\norigin=\"medium\"\nrepo=\"https://example.org/apps.git\"\nbranch=\"main\"\n"
+                              "commit=\"fedcba9876543210fedcba9876543210fedcba98\"\ninstalled=\"2026-10-30 10:00\"\n");
+    item_text(upd_index() + 4, line, sizeof line);
+    assert(strstr(line, " fedcba9 from the installation medium") && !strstr(line, "fedcba98"));
+    file_text("apps-CATALOG", "format=\"1\"\norigin=\"repository\"\nrepo=\"https://example.org/apps.git\"\nbranch=\"main\"\n"
+                              "commit=\"89abcdef0123456789abcdef0123456789abcdef\"\ninstalled=\"2026-10-30 10:00\"\n");
+    selected = upd_index() + 4; /* scrolled down to it: the source's rows above */
+    draw();
+    assert(category == CAT_SYSTEM && canvas_has("Update repository") && canvas_has("App presets from") &&
+           canvas_has("App presets branch") && canvas_has("App presets installed") &&
+           canvas_has("89abcde from the apps repository"));
+    assert(item_row(upd_index() + 2) == item_row(upd_index() + 1) + 1 && item_row(upd_index() + 4) > 0);
+    /* Off: its branch says so; the source's rows are not the app presets'. */
+    on_rc("apps_repo", "off", NULL);
+    on_rc("apps_branch", "next", NULL);
+    item_text(upd_index() + 2, line, sizeof line);
+    assert(strstr(line, " off   (Enter: change)"));
+    item_text(upd_index() + 3, line, sizeof line);
+    assert(strstr(line, " next   (updates off)"));
+    item_text(upd_index() + 1, line, sizeof line);
+    assert(strstr(line, " main   (Enter: change)"));
+    events[0] = rc_log[0] = '\0';
+    selected = upd_index() + 2;
+    adjust(+1);
+    assert(!rc_log[0] && strstr(notice, "Enter: the git repository the app presets come from (or off)."));
+    selected = upd_index() + 4;
+    adjust(-1);
+    assert(!rc_log[0] && strstr(notice, "The app presets installed: c in packages checks for newer ones."));
+    /* Typed: a git URL, off, or nothing written; a branch name as the source's. */
+    apps_repo[0] = apps_branch[0] = '\0';
+    type_answer("https://example.org/me/apps.git");
+    change_apps_repo();
+    assert(!strcmp(rc_log, "apps_repo=https://example.org/me/apps.git;") && !strcmp(apps_repo, "https://example.org/me/apps.git"));
+    assert(!strcmp(notice, "App presets from https://example.org/me/apps.git: c in packages checks it."));
+    events[0] = rc_log[0] = '\0';
+    type_answer("file:///x");
+    change_apps_repo();
+    assert(!rc_log[0] && !strcmp(apps_repo, "https://example.org/me/apps.git") && strstr(notice, "Not an https://"));
+    nkeys = keypos = 0;
+    press(27, 0, NULL);
+    change_apps_repo();
+    assert(!rc_log[0] && !strcmp(notice, "App presets repository unchanged."));
+    type_answer("off");
+    change_apps_repo();
+    assert(!strcmp(rc_log, "apps_repo=off;") && !strcmp(apps_repo, "off") && !strcmp(notice, "App preset updates off."));
+    events[0] = rc_log[0] = '\0';
+    type_answer("next");
+    change_apps_branch();
+    assert(!strcmp(rc_log, "apps_branch=next;") && !strcmp(apps_branch, "next") &&
+           !strcmp(notice, "App presets follow branch next: c in packages checks it."));
+    events[0] = rc_log[0] = '\0';
+    type_answer("main");
+    change_apps_branch();
+    assert(!strcmp(rc_log, "apps_branch=(none);") && !apps_branch[0]);
+    events[0] = rc_log[0] = '\0';
+    type_answer("a..b");
+    change_apps_branch();
+    assert(!rc_log[0] && !apps_branch[0] && strstr(notice, "Not a branch name"));
+    assert(!update_repo[0] && !update_branch[0]); /* the source's are their own */
+    nkeys = keypos = 0;
+    events[0] = rc_log[0] = notice[0] = '\0';
+    apps_repo[0] = apps_branch[0] = '\0';
+    unlink(path);
+    puts("PASS app presets rows: repository and branch edited as the source's (apps_repo, apps_branch), off shown "
+         "on the branch; the catalog installed: none, from the system (bootstrap), the medium's or the repository's commit");
+}
+
 static void test_bluetooth(void)
 {
     /* All three packages' required executables, not merely bluetui. */
@@ -1030,10 +1128,11 @@ static void test_bluetooth(void)
     adjust(+1);
     assert(!rc_log[0] && strstr(notice, "Enter: the branch"));
     update_repo[0] = update_branch[0] = '\0';
+    test_apps_rows();
 
     /* Boot: the kernel's messages and options in rc.conf, and the image made
      * at once (locachy-boot), as pacman's hooks make it after updates. */
-    assert(boot_index() == upd_index() + 2 && opt_index() == boot_index() + 5);
+    assert(boot_index() == upd_index() + 5 && opt_index() == boot_index() + 5);
     assert(valid_boot_cmdline("i915.enable_psr=0 mitigations=off") && valid_boot_cmdline(""));
     assert(!valid_boot_cmdline("a\"b") && !valid_boot_cmdline("$(id)") && !valid_boot_cmdline("a;b") &&
            !valid_boot_cmdline("a\nb") && !valid_boot_cmdline("a\\b"));
@@ -1826,7 +1925,7 @@ int main(int argc, char **argv)
            ime_index() == host_index() + 1 && tpm_index() == ime_index() + 2 &&
            sb_index() == tpm_index() + 1 && hsi_index() == sb_index() + 1 &&
            bri_index() == hsi_index() + 1 && mach_index() == bri_index() + 1 &&
-           upd_index() == mach_index() + 1 && boot_index() == upd_index() + 2 && opt_index() == boot_index() + 5 &&
+           upd_index() == mach_index() + 1 && boot_index() == upd_index() + 5 && opt_index() == boot_index() + 5 &&
            repo_index() == opt_index() + NOPT_MODULES && tnet_index() == repo_index() + NREPO_SECTIONS + 1 &&
            circ_index() == tnet_index() + 1 && imek_index() == circ_index() + 3 &&
            system_keymap_index() == imek_index() + NIME_KEYS && kb_index() == system_keymap_index() + 1 && num_hw_items() == kb_index() + nkeyboards_seen);

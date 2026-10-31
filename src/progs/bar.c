@@ -352,6 +352,7 @@ struct tray {
     struct tray *next;
 };
 static struct tray *trays;
+static struct tray host_notes; /* root's session bus, never a container's tray */
 static double tray_scanned;
 
 static const char watcher_xml[] =
@@ -385,6 +386,8 @@ static struct tray *tray_find(const char *name)
 
 static struct tray *tray_of(GDBusConnection *conn)
 {
+    if (!conn) return NULL;
+    if (host_notes.conn == conn) return &host_notes;
     for (struct tray *t = trays; t; t = t->next) {
         if (t->conn == conn) {
             return t;
@@ -2776,7 +2779,7 @@ static const char notes_xml[] =
 
 static void note_emit(const char *container, const char *signal, GVariant *params)
 {
-    struct tray *t = tray_find(container);
+    struct tray *t = container[0] ? tray_find(container) : &host_notes;
     if (t && t->conn) {
         g_dbus_connection_emit_signal(t->conn, NULL, NOTES_PATH, NOTES_NAME, signal, params, NULL);
     } else {
@@ -2896,8 +2899,8 @@ static void notes_call(GDBusConnection *conn, const gchar *sender, const gchar *
     }
 }
 
-/* On a container's bus as soon as the bar is connected to it, before the
- * tray watcher: locachy-app starts the program once the watcher is there. */
+/* On each bus, including the host's. A container gets this before its tray
+ * watcher: locachy-app starts the program once the watcher is there. */
 static void notes_serve(struct tray *t)
 {
     static GDBusNodeInfo *info;
@@ -2932,6 +2935,42 @@ static void notes_drop(struct tray *t)
     render_notes();
 }
 
+static void host_notes_closed(GDBusConnection *conn, gboolean remote, GError *error, gpointer data)
+{
+    (void)remote;
+    (void)error;
+    (void)data;
+    if (host_notes.conn != conn) return;
+    notes_drop(&host_notes);
+    g_object_unref(host_notes.conn);
+    host_notes.conn = NULL;
+    host_notes.retry_at = uptime() + 1.0;
+}
+
+static void host_notes_connected(GObject *source, GAsyncResult *result, gpointer data)
+{
+    (void)source;
+    (void)data;
+    host_notes.connecting = 0;
+    host_notes.conn = g_bus_get_finish(result, NULL);
+    if (!host_notes.conn) {
+        host_notes.retry_at = uptime() + 5.0;
+        return;
+    }
+    g_dbus_connection_set_exit_on_close(host_notes.conn, FALSE);
+    g_signal_connect(host_notes.conn, "closed", G_CALLBACK(host_notes_closed), NULL);
+    notes_serve(&host_notes);
+}
+
+/* Services use the standard host session bus. Never bind it into an app. */
+static void host_notes_tick(void)
+{
+    if (!host_notes.conn && !host_notes.connecting && uptime() >= host_notes.retry_at) {
+        host_notes.connecting = 1;
+        g_bus_get(G_BUS_TYPE_SESSION, NULL, host_notes_connected, NULL);
+    }
+}
+
 static void render_notes(void)
 {
     struct overlay *o = &notes_ovl;
@@ -2957,7 +2996,7 @@ static void render_notes(void)
         if (i > 0) {
             panel_fill(o->px, o->bw, o->bh, o->bw, 0, r * o->ch, o->bw, 1, NOTE_LINE);
         }
-        snprintf(line, sizeof line, "%s \xc2\xb7 %s", n->container, n->app);
+        snprintf(line, sizeof line, "%s%s%s", n->container, n->container[0] ? " \xc2\xb7 " : "", n->app);
         panel_text_fit(cut, sizeof cut, line, room, o->font);
         ovl_text(o, 1, r, cut, OVL_FG2, OVL_BG);
         panel_text_fit(cut, sizeof cut, n->summary, room, o->font);
@@ -3040,7 +3079,7 @@ static void notes_click(double y, uint32_t button)
         if (n.has_default) {
             note_emit(n.container, "ActionInvoked", g_variant_new("(us)", n.id, "default"));
         }
-        show_container(n.container);
+        if (n.container[0]) show_container(n.container);
     }
     note_remove(i, 2);
 }
@@ -3581,6 +3620,7 @@ int main(void)
             render_bot_bar();
         }
         tray_scan();
+        host_notes_tick();
         again_tick();
         notes_tick();
         check_bars();

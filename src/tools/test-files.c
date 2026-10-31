@@ -6,9 +6,13 @@
  *   test-files DIR   (DIR: a new directory, made as the scratch home)
  * The folder request is the real FILES_REQUEST: run it in a private mount
  * namespace with a tmpfs on /run/locachy. The pointer: synthetic events on
- * what the drawing registered. Build with base/ui.c.
+ * what the drawing registered. Build with base/ui.c, and with CLOUD_LIST
+ * set to a built files-cloud-list; the cloud service is a stand-in script.
  */
 #define ARCHIVE_PROGRAM "/bin/true" /* there and runnable: its menus are shown */
+#define CLOUD_STATUS cloud_status_path
+#define CLOUD_CLIENT cloud_client_path
+static char cloud_status_path[256], cloud_client_path[256];
 #include "../progs/files.c"
 #include "i18n-stub.h"
 #include <assert.h>
@@ -17,6 +21,8 @@
 #define TIMEOUT (-1) /* key_poll_timeout times out */
 #define REQUEST (-2) /* a container asks for the folder in request; a timeout */
 #define OPEN    (-3) /* open_in_home's request: request is the file's text; a timeout */
+#define WAIT    (-4) /* a timeout after 50 ms: a cloud worker has time to end */
+#define SCROLL(i) (-200 - (i)) /* scrolls[i], as K_POINTER */
 #define KEY(k, m) (-1000000 - ((m) << 16) - (k)) /* key k with modifiers m */
 #define CLICK(i) (-100 - (i)) /* clicks[i], as K_POINTER */
 
@@ -29,10 +35,17 @@ struct click {
 #define AT (-1)
 #define MENU(k) (-10 - (k))
 static const struct click *clicks;
+static const struct pointer_event *scrolls;
 static struct pointer_event mouse;
-static int mods, menu_col, menu_row, px_fills;
+static int mods, menu_col, menu_row, px_fills, scroll_opted;
 static char clip_paste[256];
 const struct pointer_event *pointer_last(void) { return &mouse; }
+int pointer_scroll_events(int on)
+{
+    int was = scroll_opted;
+    scroll_opted = on;
+    return was;
+}
 int keys_modifiers(void) { return mods; }
 
 /* The first cell of what was registered as id when last drawn. */
@@ -169,9 +182,19 @@ int key_poll_timeout(int fd, int timeout)
         mods = (raw >> 16) & 0xF;
         return raw & 0xFFFF;
     }
+    if (key <= SCROLL(0) && key > -1000000) {
+        mouse = scrolls[SCROLL(0) - key]; /* over the pane's empty space */
+        hit_cell(HIT_AREA, &mouse.col, &mouse.row);
+        mods = 0;
+        return K_POINTER;
+    }
     if (key <= CLICK(0)) {
         point(&clicks[CLICK(0) - key]);
         return K_POINTER;
+    }
+    if (key == WAIT) {
+        usleep(50000);
+        return 0;
     }
     if (key == REQUEST || key == OPEN) {
         FILE *f = fopen(key == OPEN ? OPEN_REQUEST : FILES_REQUEST, "w");
@@ -448,8 +471,8 @@ int main(int argc, char **argv)
      * toolbar, the column headers, the status and the buttons, nothing more. */
     static const char status_start[] = " sub \xe2\x80\x94 1 item, inode/directory, ";
     char toolbar[PATH_MAX + 64];
-    snprintf(toolbar, sizeof toolbar, " < > ^ %-65s Icons   Compact   Details", kept); /* the path: 64 columns */
-    assert(strcmp(bar_title, "files") == 0 && (strlen(kept) > 64 || strcmp(drawn_row(1, 0), toolbar) == 0));
+    snprintf(toolbar, sizeof toolbar, " < > ^ %-55s[Refresh]  Icons   Compact   Details", kept); /* the path: 54 columns */
+    assert(strcmp(bar_title, "files") == 0 && (strlen(kept) > 54 || strcmp(drawn_row(1, 0), toolbar) == 0));
     assert(strcmp(drawn_row(2, SIDE), "  Name ^                          Size  Modified          Type") == 0);
     assert(strncmp(drawn_row(27, 0), status_start, strlen(status_start)) == 0);
     assert(strstr(drawn_row(27, 0), "  3 items (1 hidden) | "));
@@ -912,6 +935,103 @@ int main(int argc, char **argv)
     assert(ncalled == 4 && strcmp(called[1], "--add") == 0 && strstr(msg, "Cancelled"));
     call_status = 0;
 #undef ARK_ITEM
+
+    /* A cloud drive, as the cloud service's status lists it: read by the
+     * real metadata worker, refreshed by the service (here a script that
+     * records its calls and adds a file as the remote would). */
+    mk("Drives");
+    mk("Drives/remote");
+    put("Drives/remote/old.txt", 0);
+    snprintf(cloud_status_path, sizeof cloud_status_path, "%s", at_home(".cloud-status"));
+    snprintf(cloud_client_path, sizeof cloud_client_path, "%s", at_home(".cloud-client"));
+    FILE *status = fopen(cloud_status_path, "w");
+    assert(status);
+    fprintf(status, "remote\t%s\tready\t0\t\nbad/name\t%s\tready\t0\t\nother\t/etc\tready\t0\t\n"
+                    "lapsed\t%s\tfailed\t0\tauthentication\n",
+            at_home("Drives/remote"), at_home("Drives/bad"), at_home("Drives/lapsed"));
+    fclose(status);
+    chmod(cloud_status_path, 0644);
+    FILE *client = fopen(cloud_client_path, "w");
+    assert(client);
+    fprintf(client, "#!/bin/sh\nd=$(dirname \"$0\")\nprintf '%%s %%s\\n' \"$1\" \"$2\" >>\"$d/.cloud-calls\"\n"
+                    "[ ! -e \"$d/.cloud-fail\" ] || exit 1\n"
+                    "[ \"$1\" != --refresh ] || : >\"$2/new.txt\"\n");
+    fclose(client);
+    chmod(cloud_client_path, 0755);
+    FILE *created = fopen(at_home(".cloud-calls"), "w");
+    assert(created);
+    fclose(created);
+    own(".cloud-calls");
+    int calls = 0;
+#define CLOUD_CALLS() ({ FILE *c = fopen(at_home(".cloud-calls"), "r"); int n = 0, ch; \
+                         while (c && (ch = fgetc(c)) != EOF) n += ch == '\n'; if (c) fclose(c); n; })
+    go(at_home("Documents"), NULL);
+    run("cloud drives are places from the root-owned status; unsafe entries are not",
+        (const int[]){ K_BOL, END });
+    assert(nclouds == 2 && strcmp(clouds[0].path, at_home("Drives/remote")) == 0);
+    assert(strcmp(cloud_state(&clouds[1]), "sign in again") == 0); /* the service's category, not a guess */
+    int cloud_place = -1;
+    for (int i = 0; i < nplaces; i++) if (strcmp(places[i], at_home("Drives/remote")) == 0) cloud_place = i;
+    assert(cloud_place > 0);
+
+    go(at_home("Drives/remote"), NULL);
+    run("a cloud folder is read by the worker, not the interface",
+        (const int[]){ WAIT, WAIT, WAIT, WAIT, END });
+    assert(here("Drives/remote") && P->nlist == 1 && strcmp(P->list[0].name, "old.txt") == 0);
+    assert(strcmp(P->list[0].type, "text/plain") == 0); /* by its name: nothing downloaded */
+    assert(strstr(drawn_row(1, 0), "[online]"));
+
+    run("F5 on a cloud drive asks the service to refresh, then reads the folder again",
+        (const int[]){ KEY(K_F1 + 4, 0), WAIT, WAIT, WAIT, WAIT, WAIT, WAIT, END });
+    assert(CLOUD_CALLS() == ++calls && P->nlist == 2 && strcmp(P->list[0].name, "new.txt") == 0);
+    unlink(at_home("Drives/remote/new.txt"));
+
+    /* A touch pulled down three rows at the top of the list, then lifted:
+     * one refresh. Released short of it, or by a TrackPoint: none. */
+    struct pointer_event pull_full[] = {
+        { .gesture = GESTURE_SCROLL, .scroll_source = SCROLL_TOUCH, .scroll_phase = SCROLL_BEGIN, .scroll_fingers = 1 },
+        { .wheel = 1, .scroll_source = SCROLL_TOUCH, .scroll_phase = SCROLL_UPDATE, .scroll_fingers = 1 },
+        { .wheel = 2, .scroll_source = SCROLL_TOUCH, .scroll_phase = SCROLL_UPDATE, .scroll_fingers = 1 },
+        { .gesture = GESTURE_SCROLL, .scroll_source = SCROLL_TOUCH, .scroll_phase = SCROLL_END, .scroll_fingers = 1 },
+        { .gesture = GESTURE_SCROLL, .scroll_source = SCROLL_TOUCH, .scroll_phase = SCROLL_CANCEL, .scroll_fingers = 1 },
+        { .gesture = GESTURE_SCROLL, .scroll_source = SCROLL_CONTINUOUS, .scroll_phase = SCROLL_BEGIN },
+        { .wheel = 3, .scroll_source = SCROLL_CONTINUOUS, .scroll_phase = SCROLL_UPDATE },
+        { .gesture = GESTURE_SCROLL, .scroll_source = SCROLL_CONTINUOUS, .scroll_phase = SCROLL_END },
+    };
+    scrolls = pull_full;
+    run("pulling down past the threshold at the top refreshes once, on release",
+        (const int[]){ SCROLL(0), SCROLL(1), SCROLL(2), SCROLL(3), WAIT, WAIT, WAIT, WAIT, WAIT, WAIT, END });
+    assert(scroll_opted == 0 && CLOUD_CALLS() == ++calls && strstr(msg, "updated"));
+    unlink(at_home("Drives/remote/new.txt"));
+    run("a pull released short of the threshold does not refresh",
+        (const int[]){ SCROLL(0), SCROLL(1), SCROLL(3), WAIT, WAIT, END });
+    assert(CLOUD_CALLS() == calls);
+    run("a cancelled pull (a second finger, a lost screen) does not refresh",
+        (const int[]){ WAIT, WAIT, WAIT, SCROLL(0), SCROLL(1), SCROLL(2), SCROLL(4), END });
+    assert(CLOUD_CALLS() == calls && strstr(msg, "cancelled"));
+    run("a TrackPoint's middle-button scroll never pulls",
+        (const int[]){ SCROLL(5), SCROLL(6), SCROLL(7), WAIT, WAIT, END });
+    assert(CLOUD_CALLS() == calls);
+
+    put(".cloud-fail", 0);
+    int listed = P->nlist;
+    run("a failed refresh keeps the previous list and says so",
+        (const int[]){ KEY(K_F1 + 4, 0), WAIT, WAIT, WAIT, WAIT, END });
+    assert(CLOUD_CALLS() == ++calls && P->nlist == listed && strstr(msg, "previous list"));
+    unlink(at_home(".cloud-fail"));
+
+    go(at_home("Drives"), "remote");
+    run("e unmounts a cloud drive through the service, not as a USB drive",
+        (const int[]){ 'e', WAIT, WAIT, WAIT, END });
+    assert(CLOUD_CALLS() == ++calls && strstr(msg, "unmounted"));
+    FILE *log = fopen(at_home(".cloud-calls"), "r");
+    char line[PATH_MAX + 32] = "", last[PATH_MAX + 32] = "";
+    while (log && fgets(line, sizeof line, log)) snprintf(last, sizeof last, "%s", line);
+    if (log) fclose(log);
+    char want[PATH_MAX + 32];
+    snprintf(want, sizeof want, "--unmount %s\n", at_home("Drives/remote"));
+    assert(strcmp(last, want) == 0);
+#undef CLOUD_CALLS
 
     puts("ALL PASSED");
     return 0;

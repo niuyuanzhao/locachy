@@ -264,6 +264,138 @@ int main(void)
     assert(nsent == 3 && !strcmp(sent[0], "home") && !strcmp(sent[1], "switch next") &&
            !strcmp(sent[2], "switch prev"));
     puts("PASS touchpad: pinches in steps; three or more fingers swipe home, to the next and previous task");
+
+    scroll_input(SCROLL_FINGER, 2, 0, 1, &pipes[0]);
+    e = next();
+    assert(e.wheel == -2 && e.scroll_source == SCROLL_FINGER && e.scroll_phase == SCROLL_UPDATE &&
+           e.scroll_fingers == 0 && e.gesture == GESTURE_NONE && !pointer_next());
+    scroll_input(SCROLL_FINGER, 0, 0, 1, &pipes[0]);
+    assert(!pointer_next());
+    scroll_input(SCROLL_CONTINUOUS, -1, 2, 3, &pipes[0]);
+    e = next();
+    assert(e.wheel == 1 && e.hwheel == 2 && e.scroll_source == SCROLL_CONTINUOUS);
+    scroll_input(SCROLL_CONTINUOUS, 0, 0, 3, &pipes[0]);
+    assert(!pointer_next());
+    puts("PASS scrolling sources tag existing updates without adding unrequested boundary events");
+
+    assert(pointer_scroll_events(1) == 0);
+    px = 400; py = 300;
+    scroll_input(SCROLL_FINGER, -0.2, 0, 1, &pipes[0]);
+    e = next();
+    assert(e.gesture == GESTURE_SCROLL && e.scroll_phase == SCROLL_BEGIN && e.scroll_source == SCROLL_FINGER &&
+           e.scroll_fingers == 0 && e.x == 400 && e.y == 300 && !e.wheel && !e.hwheel && !pointer_next());
+    scroll_input(SCROLL_FINGER, -0.9, 0.1, 3, &pipes[0]);
+    px = 410; moved();
+    e = next();
+    assert(e.wheel == 1 && e.scroll_phase == SCROLL_UPDATE && e.scroll_source == SCROLL_FINGER);
+    e = next();
+    assert(e.x == 410 && !e.gesture && !e.scroll_phase);
+    scroll_input(SCROLL_FINGER, 0, 0, 1, &pipes[0]);
+    assert(!pointer_next()); /* the horizontal axis is still active */
+    scroll_input(SCROLL_FINGER, 0, 0, 2, &pipes[0]);
+    e = next();
+    assert(e.gesture == GESTURE_SCROLL && e.scroll_phase == SCROLL_END && e.x == 400 && e.y == 300 &&
+           !e.wheel && !e.hwheel && !pointer_next());
+    scroll_input(SCROLL_FINGER, 0, 0, 3, &pipes[0]);
+    assert(!pointer_next()); /* a second stop does not end the gesture again */
+    puts("PASS opted-in finger scrolling starts before a full step and ends once after both axes stop");
+
+    scroll_input(SCROLL_CONTINUOUS, 1, 0, 1, &pipes[0]);
+    e = next(); assert(e.scroll_phase == SCROLL_BEGIN && e.scroll_source == SCROLL_CONTINUOUS);
+    e = next(); assert(e.wheel == -1 && e.scroll_source == SCROLL_CONTINUOUS);
+    scroll_input(SCROLL_WHEEL, 1, 0, 1, &pipes[0]);
+    e = next(); assert(e.scroll_phase == SCROLL_CANCEL && e.scroll_source == SCROLL_CONTINUOUS);
+    e = next();
+    assert(e.wheel == -1 && e.scroll_source == SCROLL_WHEEL && e.scroll_phase == SCROLL_UPDATE && !pointer_next());
+    scroll_input(SCROLL_FINGER, 1, 0, 1, &pipes[0]);
+    next(); next();
+    scroll_input(SCROLL_FINGER, 1, 0, 1, &pipes[1]);
+    e = next(); assert(e.scroll_phase == SCROLL_CANCEL);
+    e = next(); assert(e.scroll_phase == SCROLL_BEGIN);
+    e = next(); assert(e.scroll_phase == SCROLL_UPDATE);
+    pointer_went();
+    e = next(); assert(e.scroll_phase == SCROLL_CANCEL && !pointer_next());
+    scroll_input(SCROLL_FINGER, 0, 0, 1, &pipes[1]);
+    assert(!pointer_next());
+    away = 0;
+    puts("PASS wheel and TrackPoint sources stay distinct; source, device and ownership changes cancel scrolling");
+
+    scroll_input(SCROLL_FINGER, -1, 0, 1, &pipes[0]);
+    next(); next();
+    pinch_last = 1;
+    pinch(1.2);
+    e = next(); assert(e.scroll_phase == SCROLL_CANCEL && e.scroll_source == SCROLL_FINGER);
+    e = next(); assert(e.gesture == GESTURE_PINCH && !e.scroll_phase && !pointer_next());
+    scroll_input(SCROLL_FINGER, 0, 0, 1, &pipes[0]);
+    assert(!pointer_next());
+    puts("PASS pinching cancels a pending finger scroll before its zoom event");
+
+    touch_down(0, 200, 200, 20, 20);
+    touch_motion(0, 200, 260, 20, 26);
+    e = next();
+    assert(e.gesture == GESTURE_SCROLL && e.scroll_source == SCROLL_TOUCH && e.scroll_phase == SCROLL_BEGIN &&
+           e.scroll_fingers == 1 && e.x == 200 && e.y == 200);
+    e = next();
+    assert(e.wheel == 3 && e.scroll_source == SCROLL_TOUCH && e.scroll_phase == SCROLL_UPDATE && e.scroll_fingers == 1);
+    touch_motion(0, 200, 220, 20, 22);
+    e = next(); assert(e.wheel == -2 && e.scroll_fingers == 1);
+    touch_up(0);
+    e = next(); assert(e.scroll_phase == SCROLL_END && e.scroll_fingers == 1 && !pointer_next());
+    touch_up(0);
+    assert(!pointer_next());
+    puts("PASS single-finger touch scrolling reports direction reversal and exactly one release at its origin");
+
+    touch_down(0, 300, 300, 30, 30);
+    touch_motion(0, 300, 360, 30, 36);
+    next(); next();
+    touch_down(1, 400, 360, 40, 36);
+    e = next(); assert(e.scroll_phase == SCROLL_CANCEL && e.scroll_fingers == 1);
+    touch_motion(0, 300, 400, 30, 40);
+    e = next(); assert(e.gesture == GESTURE_PINCH && !e.scroll_phase);
+    e = next(); assert(e.scroll_phase == SCROLL_BEGIN && e.scroll_fingers == 2);
+    e = next(); assert(e.scroll_phase == SCROLL_UPDATE && e.scroll_fingers == 2);
+    touch_up(1);
+    e = next(); assert(e.scroll_phase == SCROLL_END && e.scroll_fingers == 2);
+    touch_up(0);
+    assert(!pointer_next());
+    touch_down(0, 300, 300, 30, 30);
+    touch_motion(0, 300, 360, 30, 36);
+    next(); next();
+    touch_reset();
+    e = next(); assert(e.scroll_phase == SCROLL_CANCEL && e.scroll_source == SCROLL_TOUCH && !pointer_next());
+    touch_up(0);
+    assert(!pointer_next());
+    puts("PASS adding a second touch cancels the single-finger gesture; cancellation is not a release");
+
+    touch_down(0, 300, 300, 30, 30);
+    touch_down(1, 400, 300, 40, 30);
+    touch_motion(0, 300, 340, 30, 30.1);
+    next(); next();
+    touch_down(2, 500, 300, 50, 30);
+    e = next(); assert(e.scroll_phase == SCROLL_CANCEL && e.scroll_fingers == 2);
+    touch_motion(0, 300, 400, 30, 30.2);
+    touch_up(0); touch_up(1); touch_up(2);
+    assert(!pointer_next());
+    touch_down(0, 200, 200, 20, 20);
+    touch_up(0);
+    e = next(); assert(e.button == BTN_LEFT && e.pressed && !e.scroll_phase);
+    e = next(); assert(e.button == BTN_LEFT && !e.pressed && !e.scroll_phase && !pointer_next());
+    touch_down(0, 200, 200, 20, 20);
+    touch_timer();
+    e = next(); assert(e.button == BTN_RIGHT && e.pressed && !e.scroll_phase);
+    next(); touch_up(0);
+    assert(!pointer_next());
+    puts("PASS third-finger arrival cancels scrolling; opted-in taps and holds retain their button events");
+
+    touch_down(0, 300, 300, 30, 30);
+    touch_motion(0, 300, 360, 30, 36);
+    assert(pointer_scroll_events(0) == 1); /* already queued boundaries disappear too */
+    e = next(); assert(e.wheel == 3 && e.scroll_phase == SCROLL_UPDATE && !pointer_next());
+    touch_up(0);
+    assert(!pointer_next());
+    assert(pointer_scroll_events(0) == 0);
+    puts("PASS disabling lifecycle delivery preserves updates and removes queued boundaries");
+
     extended_fixture = 1;
     px = 1100; py = 200; moved();
     e = next();
@@ -342,7 +474,15 @@ int main(void)
     desk_fixture = 0;
     puts("PASS several screens: presses are told, leaving onto another's screen stops here, enter resumes");
 
+    assert(pointer_scroll_events(1) == 0);
+    away = 0;
+    scroll_input(SCROLL_FINGER, -1, 0, 1, &pipes[0]);
+    next(); next();
     pointer_release();
+    e = next(); assert(e.scroll_phase == SCROLL_CANCEL && e.scroll_source == SCROLL_FINGER && !pointer_next());
+    scroll_input(SCROLL_FINGER, 0, 0, 1, &pipes[0]);
+    assert(!pointer_next());
+    assert(pointer_scroll_events(0) == 1);
     assert(ndevices == 0 && cursor_shown == 0);
     for (int i = 0; i < DEVICES; i++) {
         assert(fcntl(pipes[i][0], F_GETFD) < 0 && errno == EBADF);

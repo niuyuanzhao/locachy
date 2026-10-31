@@ -5,6 +5,9 @@
  * user, uid 1000, owns the files of FAT, exFAT and NTFS ones), and a drive
  * that has been pulled out is unmounted. ~/Drives is a shared mount point:
  * containers have it with slave propagation, so drives come and go there too.
+ * Startup adopts a live mount of the same removable device; it never tears
+ * down another mount below Drives, and it removes only folders this service
+ * created itself.
  *
  * Ejecting is the file manager's (files.c, e): it unmounts the drive and
  * powers it off; a drive unmounted that way is not mounted again until it is
@@ -22,6 +25,7 @@
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 
 #include "base.h"
@@ -32,7 +36,8 @@
 struct drive {
     char dev[32];       /* sdb1, mmcblk0p1 */
     char dir[512];      /* where it is mounted; "" if it is not */
-    int seen, ejected;  /* ejected: unmounted by someone else; left alone */
+    int seen, ejected, owned; /* adopted mounts stay when this service stops */
+    dev_t device;            /* block identity, retained after unplug */
 };
 
 static struct drive drives[MAX_DRIVES];
@@ -84,10 +89,95 @@ static int probe(const char *dev, char *type, size_t tsize, char *label, size_t 
     return type[0] ? 0 : -1;
 }
 
+static void mount_unescape(char *s)
+{
+    char *to = s;
+    while (*s) {
+        if (*s == '\\' && s[1] >= '0' && s[1] <= '7' && s[2] >= '0' && s[2] <= '7' &&
+            s[3] >= '0' && s[3] <= '7') {
+            *to++ = (char)((s[1] - '0') * 64 + (s[2] - '0') * 8 + s[3] - '0');
+            s += 4;
+        } else {
+            *to++ = *s++;
+        }
+    }
+    *to = '\0';
+}
+
+/* Match the exact mount, including same-filesystem bind mounts. Never stat
+ * a network mount to find out whether it is mounted: that can block. */
 static int mounted(const char *dir)
 {
-    struct stat a, b;
-    return stat(dir, &a) == 0 && stat(top, &b) == 0 && a.st_dev != b.st_dev;
+    char *line = NULL;
+    size_t size = 0;
+    int found = 0;
+    FILE *in = fopen("/proc/self/mountinfo", "re");
+    while (in && getline(&line, &size, in) >= 0) {
+        char path[4096];
+        if (sscanf(line, "%*s %*s %*s %*s %4095s", path) != 1) continue;
+        mount_unescape(path);
+        if (strcmp(path, dir) == 0) found = 1;
+    }
+    free(line);
+    if (in) fclose(in);
+    return found;
+}
+
+static int mounted_device(const struct drive *d)
+{
+    char source[64], *line = NULL;
+    size_t size = 0;
+    int match = 0;
+    snprintf(source, sizeof source, "/dev/%s", d->dev);
+    if (!d->device) return 0;
+    FILE *in = fopen("/proc/self/mountinfo", "re");
+    while (in && getline(&line, &size, in) >= 0) {
+        char path[4096], from[4096];
+        unsigned int maj, min;
+        const char *dash = strstr(line, " - ");
+        if (!dash || sscanf(line, "%*s %*s %u:%u %*s %4095s", &maj, &min, path) != 3 ||
+            sscanf(dash + 3, "%*s %4095s", from) != 1) continue;
+        mount_unescape(path);
+        mount_unescape(from);
+        if (strcmp(path, d->dir) == 0) {
+            match = strcmp(from, source) == 0 && maj == major(d->device) && min == minor(d->device);
+        }
+    }
+    free(line);
+    if (in) fclose(in);
+    return match;
+}
+
+/* Reuse an existing mount of this actual removable block device. No mount
+ * below Drives is torn down at startup, and an unrelated mount is not ours. */
+static int adopt_mount(struct drive *d)
+{
+    char source[64], *line = NULL;
+    struct stat st;
+    size_t size = 0, n = strlen(top);
+    snprintf(source, sizeof source, "/dev/%s", d->dev);
+    if (stat(source, &st) < 0 || !S_ISBLK(st.st_mode)) return 0;
+    FILE *in = fopen("/proc/self/mountinfo", "re");
+    while (in && getline(&line, &size, in) >= 0) {
+        char path[4096], from[4096], root[4096], fs[64];
+        unsigned int maj, min;
+        const char *dash = strstr(line, " - ");
+        if (!dash || sscanf(line, "%*s %*s %u:%u %4095s %4095s", &maj, &min, root, path) != 4 ||
+            sscanf(dash + 3, "%63s %4095s", fs, from) != 2 ||
+            maj != major(st.st_rdev) || min != minor(st.st_rdev)) continue;
+        mount_unescape(path);
+        mount_unescape(from);
+        if (strcmp(from, source) != 0 || strcmp(root, "/") != 0 || strncmp(path, top, n) != 0 ||
+            path[n] != '/' || !path[n + 1] || strchr(path + n + 1, '/') || strlen(path) >= sizeof d->dir) continue;
+        memcpy(d->dir, path, strlen(path) + 1);
+        d->device = st.st_rdev;
+        d->owned = 0;
+    }
+    free(line);
+    if (in) fclose(in);
+    if (d->dir[0] && !mounted_device(d)) d->dir[0] = '\0';
+    if (d->dir[0]) say("drives: keeping %s at %s", source, d->dir);
+    return d->dir[0] != '\0';
 }
 
 static void mount_drive(struct drive *d)
@@ -123,8 +213,7 @@ static void mount_drive(struct drive *d)
         }
     }
     snprintf(d->dir, sizeof d->dir, "%s/%s", top, name);
-    for (int i = 2; (mkdir(d->dir, 0755) < 0 && (errno != EEXIST || mounted(d->dir) ||
-                                                  rmdir(d->dir) < 0 || mkdir(d->dir, 0755) < 0)); i++) {
+    for (int i = 2; mkdir(d->dir, 0755) < 0; i++) {
         if (i > 9) {
             say("drives: %s: no place for it in %s", d->dev, top);
             d->dir[0] = '\0';
@@ -143,6 +232,9 @@ static void mount_drive(struct drive *d)
         d->ejected = 1;
         return;
     }
+    struct stat st;
+    d->device = stat(src, &st) == 0 && S_ISBLK(st.st_mode) ? st.st_rdev : 0;
+    d->owned = 1;
     say("drives: %s (%s) at %s", src, type, d->dir);
 }
 
@@ -169,13 +261,14 @@ static void consider(const char *dev)
         return;
     }
     d->seen = 1;
-    if (d->dir[0] && !mounted(d->dir)) {
+    if (d->dir[0] && !mounted_device(d)) {
         say("drives: %s was unmounted (ejected); not mounted again until it is plugged in again", d->dev);
-        rmdir(d->dir);
+        if (d->owned && !mounted(d->dir)) rmdir(d->dir);
         d->dir[0] = '\0';
+        d->owned = 0;
         d->ejected = 1;
     }
-    if (!d->dir[0] && !d->ejected) {
+    if (!d->dir[0] && !d->ejected && !adopt_mount(d)) {
         mount_drive(d);
     }
 }
@@ -223,10 +316,9 @@ static void scan(void)
             i++;
             continue;
         }
-        if (d->dir[0]) {
+        if (d->dir[0] && mounted_device(d)) {
             say("drives: %s was pulled out; unmounting %s", d->dev, d->dir);
-            umount2(d->dir, MNT_DETACH);
-            rmdir(d->dir);
+            if (umount2(d->dir, MNT_DETACH) == 0 && d->owned) rmdir(d->dir);
         }
         *d = drives[--ndrives];
     }
@@ -253,25 +345,12 @@ int main(void)
             say("drives: cannot give %s to the user: %m", top);
         }
     }
-    /* Left from before: folders of drives (the system stopped with them in),
-     * drives mounted by a drives that did not end cleanly. */
-    DIR *old = opendir(top);
-    struct dirent *e;
-    while (old && (e = readdir(old)) != NULL) {
-        char path[600];
-        if (e->d_name[0] == '.') continue;
-        snprintf(path, sizeof path, "%s/%s", top, e->d_name);
-        if (mounted(path)) {
-            umount2(path, MNT_DETACH);
-        }
-        rmdir(path);
-    }
-    if (old) closedir(old);
-    /* A mount point of its own, shared: what is mounted under it appears in
-     * the containers that have it (slave). It stays when this ends, so that
-     * running containers keep seeing it after a restart of the service. */
-    if (mount(NULL, top, NULL, MS_SHARED, NULL) < 0 &&
-        (mount(top, top, NULL, MS_BIND, NULL) < 0 || mount(NULL, top, NULL, MS_SHARED, NULL) < 0)) {
+    /* Keep existing mounts and folders. The scan adopts only actual removable
+     * block devices; cloud drives and user-owned paths are not ours to clean. */
+    /* A mount point of its own, shared: retain existing children when binding
+     * it, including a cloud service that started before this one. */
+    if ((!mounted(top) && mount(top, top, NULL, MS_BIND | MS_REC, NULL) < 0) ||
+        mount(NULL, top, NULL, MS_SHARED, NULL) < 0) {
         say("drives: cannot make %s a shared mount point: %m", top);
         return 1;
     }
@@ -283,10 +362,8 @@ int main(void)
         sleep(2);
     }
     for (int i = 0; i < ndrives; i++) {
-        if (drives[i].dir[0]) {
-            umount2(drives[i].dir, MNT_DETACH);
-            rmdir(drives[i].dir);
-        }
+        if (drives[i].owned && drives[i].dir[0] && mounted_device(&drives[i]) &&
+            umount2(drives[i].dir, 0) == 0) rmdir(drives[i].dir);
     }
     return 0;
 }

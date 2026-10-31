@@ -331,10 +331,18 @@ struct pointer_event {
     int hwheel;    /* positive right */
     int buttons;   /* held: 1 left, 2 right, 4 middle */
     int output;    /* extended output index; 0 for a mirrored canvas */
-    int gesture;   /* GESTURE_PINCH: two fingers apart or together, by scale */
+    int gesture;   /* GESTURE_PINCH, or an opted-in GESTURE_SCROLL boundary */
     double scale;  /* a pinch: the factor since its last event (above 1: apart, zoom in) */
+    int scroll_source, scroll_phase, scroll_fingers;
 };
-enum { GESTURE_NONE, GESTURE_PINCH };
+enum { GESTURE_NONE, GESTURE_PINCH, GESTURE_SCROLL };
+enum { SCROLL_NONE, SCROLL_WHEEL, SCROLL_FINGER, SCROLL_CONTINUOUS, SCROLL_TOUCH };
+enum { SCROLL_PHASE_NONE, SCROLL_BEGIN, SCROLL_UPDATE, SCROLL_END, SCROLL_CANCEL };
+/* Updates keep wheel/hwheel; touch scroll_fingers is exact, a touchpad's 0
+ * (libinput does not report its count). Boundaries have GESTURE_SCROLL and
+ * no wheel delta, only while opted in; returns the previous setting. Enable
+ * before the gesture: an already running scroll has no replayed BEGIN. */
+int pointer_scroll_events(int on);
 const struct pointer_event *pointer_last(void);
 int pointer_present(void); /* a pointer device is there */
 /* The cursor's shape: an arrow, a text beam (where text is selected), none. */

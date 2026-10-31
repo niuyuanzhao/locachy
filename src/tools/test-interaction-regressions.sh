@@ -53,13 +53,22 @@ done
     $(pkg-config --libs gio-2.0 xkbcommon wayland-client wayland-cursor) -lm \
     "${link[@]}" -o "$out/bar-keyboard"
 "$out/bar-keyboard"
+# Host notifications on a private session bus, through the real bar server.
+"${cc[@]}" $(pkg-config --cflags gio-2.0) -I"$out/protocols" "$src/tools/test-host-notify.c" \
+    "$out/protocols"/*-protocol.c $(pkg-config --libs gio-2.0 wayland-client wayland-cursor xkbcommon) -lm \
+    "${link[@]}" -o "$out/host-notify"
+timeout 30 dbus-run-session -- "$out/host-notify"
+"${cc[@]}" "$src/tools/test-drives-state.c" "${link[@]}" -o "$out/drives-state"
+"$out/drives-state" "$out/drives-fixtures"
 for test in gestures libinput audio-packages audio-client face-camera container-migration kernel-choice \
-            boot-kernel root-boot-unit install declare-packages efi init-unlock libpaper; do
+            boot-kernel root-boot-unit install apps-catalog declare-packages efi init-unlock libpaper rclone; do
     python3 -B "$src/tools/test-$test.py" "$out"
 done
 for test in xwayland tpm; do # no scratch directory
     python3 -B "$src/tools/test-$test.py"
 done
 bash "$src/tools/test-timezone-client.sh" "$out/timezone"
+sh "$src/tools/test-files.sh" "$out/files"
+sh "$src/tools/test-app-init.sh" "$out/app-init"
 bash "$src/tools/test-settings-tor.sh" "$out/settings-tor"
 printf '%s\n' 'PASS device-free interaction regressions; real KMS/libinput/IME hardware acceptance remains separate.'

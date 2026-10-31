@@ -9,6 +9,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -54,6 +55,24 @@ class Install(unittest.TestCase):
         patch = mock.patch.object(i, "RESUME_RECORD", self.record)
         patch.start()
         self.addCleanup(patch.stop)
+        patch = mock.patch.object(i, "RESUME_APPS", self.record.with_name("apps-catalog"))
+        patch.start()
+        self.addCleanup(patch.stop)
+        # This run's app presets (the live entry's LOCACHY_APPS_CATALOG): none
+        # until a test makes one.
+        self.apps = Path(self.tmp.name) / "run/locachy-apps"
+        patch = mock.patch.dict(os.environ, {"LOCACHY_APPS_CATALOG": str(self.apps), "LOCACHY_APPS": ""})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    APPS_URL = "https://example.org/locachy-apps.git"
+
+    def make_catalog(self, presets, commit="c" * 40, dest=None, origin="repository"):
+        dest = dest or self.apps
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        i.APPS.write_catalog({name: text.encode() for name, text in presets.items()}, str(dest),
+                             i.APPS.new_meta("1", origin, self.APPS_URL, "next", commit))
+        return dest
 
     def output(self, command):
         if command[0] == "findmnt":
@@ -193,6 +212,7 @@ class Install(unittest.TestCase):
         return i.make_parser().parse_args(list(argv))
 
     def test_describe_lists_choices_defaults_and_disks_but_not_the_live_medium(self):
+        self.make_catalog({"firefox": 'package="firefox"\ncommand="/usr/bin/firefox"\n'})
         with mock.patch.object(i, "output", self.block_output), \
              mock.patch.object(i, "cpu_model", lambda level: "ivybridge"), \
              mock.patch.object(i, "tpm_status", lambda: {"tpm_version": 1}), \
@@ -214,7 +234,11 @@ class Install(unittest.TestCase):
         self.assertTrue(d["tpm"]["usable"])
         self.assertIn("cjk-fonts", d["module_defaults"]["zh_CN.UTF-8"])
         self.assertNotIn("cjk-fonts", d["module_defaults"]["en_US.UTF-8"])
-        self.assertIn({"name": "foot", "host": True}, d["containers"])
+        # The system's host programs first, then the app presets' catalog.
+        self.assertEqual(d["containers"], [{"name": "code", "host": True}, {"name": "foot", "host": True},
+                                           {"name": "firefox", "host": False}])
+        self.assertEqual((d["defaults"]["apps_repo"], d["defaults"]["apps_branch"]), (self.APPS_URL, "next"))
+        self.assertEqual(d["apps"], {"text": f"{'c' * 12} of {self.APPS_URL} (next)", "not_newest": False})
         self.assertEqual(d["machines"][0], {"name": "generic", "description": "Generic PC"})
         self.assertIn("x230-agan", [m["name"] for m in d["machines"]])
         self.assertEqual([x["name"] for x in d["ime"]], ["off", "en", "zh"])
@@ -257,6 +281,18 @@ class Install(unittest.TestCase):
             secret.write_text("correct horse\n")
             i.check_choices(self.args("--password-file", str(secret), "--encrypt", "--tpm",
                                       "--luks-passphrase-file", str(secret)))
+            # An app is a host program or in the catalog; an unknown one stops
+            # the installation before a disk is touched, never a guess.
+            with self.assertRaisesRegex(ValueError, "^Unknown app: firefox$"):
+                i.check_choices(self.args("--containers", "foot,firefox"))
+            self.make_catalog({"firefox": 'package="firefox"\ncommand="/usr/bin/firefox"\n'})
+            i.check_choices(self.args("--containers", "foot,firefox"))
+            with self.assertRaisesRegex(ValueError, "^Unknown app: qq$"):
+                i.check_choices(self.args("--containers", "foot,qq"))
+            for argv, said in ((["--apps-repo", "ftp://x"], "App presets repository must be"),
+                               (["--apps-branch", "a..b"], "Invalid app presets branch")):
+                with self.assertRaisesRegex(ValueError, said):
+                    i.apps_source(self.args(*argv))
             for argv, said in ((["--hostname=-bad-"], "hostname"), (["--keymap", "dvorak-x"], "keymap"),
                                (["--timezone", "Mars/Olympus"], "timezone"), (["--features", "desktop,nope"], "module"),
                                (["--containers", "a b"], "container"), (["--machine", "x999"], "machine"),
@@ -398,14 +434,20 @@ class Install(unittest.TestCase):
         rc.parent.mkdir(parents=True)
         rc.write_text('update_repo="https://github.com/niuyuanzhao/locachy.git"\nupdate_branch="old"\n')
         base = {"encrypt": False, "language": "en_US.UTF-8", "features": "", "containers": ""}
-        i.apply_customizations(type("A", (), dict(base, update_repo="off", update_branch="dev"))(), self.root)
+        i.apply_customizations(type("A", (), dict(base, update_repo="off", update_branch="dev", apps_repo="off",
+                                                  apps_branch="dev"))(), self.root)
         text = rc.read_text()
         self.assertIn('update_repo="off"', text)
         self.assertIn('update_branch="dev"', text)
         self.assertEqual(text.count("update_branch="), 1)
+        self.assertIn('apps_repo="off"\napps_branch="dev"\n', text)
         with mock.patch.object(i, "detect_source_git", return_value=(i.DEFAULT_UPDATE_REPO, "main", "")):
             i.apply_customizations(type("A", (), base)(), self.root)
-        self.assertNotIn("update_branch=", rc.read_text())
+        text = rc.read_text()
+        self.assertNotIn("update_branch=", text)
+        self.assertNotIn("apps_branch=", text)  # main: not written
+        self.assertEqual(text.count("apps_repo="), 1)
+        self.assertIn(f'apps_repo="{i.DEFAULT_APPS_REPO}"', text)  # no catalog, no recorded origin
 
     def test_source_line_says_which_source_and_why(self):
         url, commit = "https://example.org/locachy.git", "0123456789ab" + "c" * 28
@@ -431,6 +473,32 @@ class Install(unittest.TestCase):
                                  {"text": "this medium's own, 0123456789ab; could not fetch x (main): fatal: no",
                                   "not_newest": True})
 
+    def test_apps_line_says_which_catalog_and_why(self):
+        short = "c" * 12
+        with mock.patch.dict(os.environ, {"LOCACHY_APPS": "bundled: could not fetch x (main): fatal: no"}):
+            self.assertEqual(i.apps_line(), ("none; could not fetch x (main): fatal: no", True))
+        self.make_catalog({"firefox": 'package="firefox"\ncommand="/usr/bin/firefox"\n'})
+        for how, said in (("fetched", (f"{short} of {self.APPS_URL} (next), the newest, fetched now", False)),
+                          ("fetched earlier", (f"{short} of {self.APPS_URL} (next), fetched earlier", False)),
+                          ("fetched before: could not fetch x (next): fatal: no",
+                           (f"{short} of {self.APPS_URL} (next), fetched before; could not fetch x (next): fatal: no",
+                            True)),
+                          ("bundled: updates are off", (f"this medium's own, {short} (updates are off)", False)),
+                          ("bundled: x (next): not compatible: format 2",
+                           (f"this medium's own, {short}; x (next): not compatible: format 2", True))):
+            with mock.patch.dict(os.environ, {"LOCACHY_APPS": how}):
+                self.assertEqual(i.apps_line(), said, how)
+        with mock.patch.dict(os.environ, {"LOCACHY_APPS": "fetched"}), contextlib.redirect_stdout(io.StringIO()) as out, \
+                mock.patch.object(i, "detect_source_git", return_value=("https://example.org/l.git", "main", "")):
+            i.print_source()
+        self.assertIn(f"App presets: {short} of {self.APPS_URL} (next), the newest, fetched now\n", out.getvalue())
+        # No catalog repository recorded: what the medium recorded, else the default.
+        origin = Path(self.tmp.name) / "source-origin.json"
+        origin.write_text(json.dumps({"apps_repo": "https://example.org/fork-apps.git", "apps_branch": "dev"}))
+        with mock.patch.dict(os.environ, {"LOCACHY_APPS_CATALOG": str(Path(self.tmp.name) / "none")}):
+            self.assertEqual(i.detect_apps_git(origin)[:2], ("https://example.org/fork-apps.git", "dev"))
+            self.assertEqual(i.detect_apps_git(origin.parent / "missing.json")[:2], (i.DEFAULT_APPS_REPO, "main"))
+
     def test_a_stopped_installation_is_continued_where_it_stopped(self):
         first, again = Path(self.tmp.name) / "password", Path(self.tmp.name) / "password-again"
         first.write_text("Locachy123\n")
@@ -448,8 +516,11 @@ class Install(unittest.TestCase):
             keys.write_text(f"lyrebird-proxy {key}\n")
             return subprocess.CompletedProcess(cmd, 1)
         out = io.StringIO()
+        firefox = {"firefox": 'package="firefox"\ncommand="/usr/bin/firefox"\n'}
+        self.make_catalog(firefox, commit="d" * 40)
         argv = ["locachy-install", "--root", str(self.root), "--esp", str(self.esp), "--yes", "--user", "boot-test",
-                "--features", "tor", "--password-file", str(first), "--update-repo", "https://example.org/l.git"]
+                "--features", "tor", "--password-file", str(first), "--update-repo", "https://example.org/l.git",
+                "--apps-repo", "https://example.org/a.git", "--containers", "firefox"]
         with mock.patch.object(sys, "argv", argv), mock.patch.object(i.os, "geteuid", lambda: 0), \
              mock.patch.object(i, "validate", validate), mock.patch.object(i, "run", stopped), \
              contextlib.redirect_stdout(out):
@@ -463,6 +534,7 @@ class Install(unittest.TestCase):
         self.assertRegex(install_id, "^[0-9a-f]{32}$")
         self.assertEqual(oct(self.record.stat().st_mode & 0o777), "0o600")
         self.assertEqual(record["update_repo"], "https://example.org/l.git")
+        self.assertEqual((record["apps_repo"], record["apps_commit"]), ("https://example.org/a.git", "d" * 40))
         self.assertIn("--features", record["argv"])
         self.assertNotIn("--password-file", record["argv"])  # never a secret, nor where it was
         self.assertEqual(calls[-1][calls[-1].index("--install-id") + 1], install_id)
@@ -476,8 +548,29 @@ class Install(unittest.TestCase):
              mock.patch.object(i.subprocess, "run", lambda cmd, **kw: chroot.append(cmd) or subprocess.CompletedProcess(cmd, 0)):
             self.assertEqual(i.main(), 0)
         self.assertEqual(chroot, [["arch-chroot", str(self.root), "/usr/local/bin/locachy-build", "--trust-key", key]])
-        # --resume: its options as recorded, the password again; the same ID.
+        # The app presets it started with, kept beside its record.
+        kept = self.record.with_name("apps-catalog")
+        self.assertEqual(i.APPS.read_meta(kept)["commit"], "d" * 40)
+        # --resume before its target has a catalog: those kept, not this run's
+        # (a newer one, without firefox); stopped again, both stay.
+        shutil.rmtree(self.apps)
+        self.make_catalog({"gimp": 'package="gimp"\ncommand="/usr/bin/gimp"\n'}, commit="e" * 40)
+        with mock.patch.object(sys, "argv", ["locachy-install", "--resume", "--yes", "--password-file", str(again)]), \
+             mock.patch.object(i.os, "geteuid", lambda: 0), \
+             mock.patch.object(i, "resumed_target", lambda record: Path(record["root"])), \
+             mock.patch.object(i, "validate", validate), mock.patch.object(i, "run", stopped), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(i.main(), 1)
+        self.assertEqual(os.environ["LOCACHY_APPS_CATALOG"], str(kept))
+        self.assertEqual(json.loads(self.record.read_text())["apps_commit"], "d" * 40)
+        self.assertEqual(i.APPS.read_meta(kept)["commit"], "d" * 40)
+        # --resume: its options as recorded, the password again; the same ID;
+        # the app presets the target has already (pinned), not this run's.
         calls.clear()
+        os.environ["LOCACHY_APPS_CATALOG"] = str(self.apps)
+        shutil.rmtree(self.apps)
+        self.make_catalog({}, commit="e" * 40)  # this run's: no firefox
+        pinned = self.make_catalog(firefox, commit="d" * 40, dest=self.root / i.APPS_CATALOG)
         with mock.patch.object(sys, "argv", ["locachy-install", "--resume", "--yes", "--password-file", str(again)]), \
              mock.patch.object(i.os, "geteuid", lambda: 0), \
              mock.patch.object(i, "resumed_target", lambda record: Path(record["root"])), \
@@ -491,8 +584,11 @@ class Install(unittest.TestCase):
         self.assertEqual(inner[inner.index("--password-file") + 1], str(again))
         self.assertEqual(inner[inner.index("--features") + 1], "tor")
         self.assertEqual(inner[inner.index("--update-repo") + 1], "https://example.org/l.git")
+        self.assertEqual(inner[inner.index("--apps-repo") + 1], "https://example.org/a.git")
+        self.assertEqual(os.environ["LOCACHY_APPS_CATALOG"], str(pinned))  # the inner run's too
         self.assertEqual(checked[-1], install_id)
         self.assertFalse(self.record.exists())
+        self.assertFalse(kept.exists())
         # Nothing to continue now.
         with mock.patch.object(sys, "argv", ["locachy-install", "--resume"]), \
              mock.patch.object(i.os, "geteuid", lambda: 0), contextlib.redirect_stderr(io.StringIO()) as err, \
@@ -607,8 +703,16 @@ class Install(unittest.TestCase):
         (self.root / "usr/share/zoneinfo/Asia/Shanghai").write_bytes(b"TZif2")
         presets = self.root / "usr/local/src/locachy/containers"
         presets.mkdir(parents=True, exist_ok=True)
-        (presets / "firefox.conf").write_text('package="firefox"\n')
+        (presets / "firefox.conf").write_text('package="firefox-of-the-source"\n')  # not a host program: not offered
         (presets / "foot.conf").write_text('host="1"\npackage="foot"\ncommand="/usr/bin/foot"\n')
+        firefox = 'package="firefox"\ncommand="/usr/bin/firefox"\n'
+        # An app the catalog does not have stops it before anything is written.
+        rc_before = (self.root / "etc/locachy/rc.conf").read_text()
+        with self.assertRaisesRegex(ValueError, "^Unknown app: firefox$"):
+            i.apply_customizations(type("Args", (), {"containers": "foot,firefox"})(), self.root)
+        self.assertFalse((self.root / "etc/hostname").exists())
+        self.assertEqual((self.root / "etc/locachy/rc.conf").read_text(), rc_before)
+        self.make_catalog({"firefox": firefox, "qq": 'package="linuxqq"\ncommand="/usr/bin/linuxqq"\n'})
         cargs = type("Args", (), {
             "encrypt": True, "language": "zh_CN.UTF-8", "login_skip": True,
             "hostname": "x230-box", "keymap": "dvorak", "timezone": "Asia/Shanghai", "no_ntp": True,
@@ -629,6 +733,7 @@ class Install(unittest.TestCase):
                          "fwupd", "flashrom", "tailscale", "rclone", "fuse3", "foot"} <= set(pkgs))
         self.assertNotIn("texlive-bin", pkgs)
         self.assertNotIn("code", pkgs)
+        self.assertNotIn("linuxqq", pkgs)  # an app's packages are its container's, never the host's
         self.assertTrue((self.root / "etc/locachy/luks").is_file())
         rc = (self.root / "etc/locachy/rc.conf").read_text()
         self.assertIn('language="zh_CN.UTF-8"', rc)
@@ -644,9 +749,14 @@ class Install(unittest.TestCase):
         self.assertIn('service_rclone="/usr/local/lib/locachy/rclone-client"', rc)
         self.assertRegex(rc, r'update_repo="https://github\.com/niuyuanzhao/locachy(?:\.git)?"')
         self.assertEqual(i.SOURCE, SOURCE)
-        self.assertTrue((self.root / "etc/locachy/containers/firefox.conf").is_file())
+        self.assertEqual((self.root / "etc/locachy/containers/firefox.conf").read_text(), firefox)
         self.assertTrue((self.root / "etc/locachy/containers/foot.conf").is_file())
-        self.assertTrue((self.root / "etc/locachy/containers/qq.conf").is_file())
+        self.assertIn('package="linuxqq"', (self.root / "etc/locachy/containers/qq.conf").read_text())
+        # The whole catalog, with where it came from, is the installed system's.
+        catalog = self.root / i.APPS_CATALOG
+        self.assertEqual(sorted(i.APPS.read_catalog(str(catalog))), ["firefox", "qq"])
+        self.assertEqual(i.APPS.read_meta(str(catalog))["commit"], "c" * 40)
+        self.assertIn(f'apps_repo="{self.APPS_URL}"\napps_branch="next"\n', rc)
 
         # Minimal install: zero optional features or containers adds nothing beyond core base.
         min_root = self.root.parent / "min-target"

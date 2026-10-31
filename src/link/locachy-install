@@ -9,6 +9,7 @@ trust) can be continued where it stopped, on its target as it is:
 """
 import argparse
 import getpass
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -24,10 +25,17 @@ _HERE_SRC = Path(__file__).resolve().parents[1]
 SOURCE = _HERE_SRC if (_HERE_SRC / "make-root.sh").is_file() else Path("/usr/local/src/locachy")
 DEFAULT_UPDATE_REPO = "https://github.com/niuyuanzhao/locachy.git"
 DEFAULT_UPDATE_BRANCH = "main"
+DEFAULT_APPS_REPO = "https://github.com/niuyuanzhao/locachy-apps.git"
 SOURCE_ORIGIN = "/etc/locachy/source-origin.json" # written into the live image by make-installer.sh
+# The app presets: the catalog this run installs from (LOCACHY_APPS_CATALOG,
+# the live entry's: fetched, else the medium's own) and the installed
+# system's, where the whole catalog goes (locachy_apps.py).
+MEDIUM_APPS_CATALOG = "/usr/local/share/locachy/apps-catalog" # make-installer.sh's
+APPS_CATALOG = "var/lib/locachy/apps/catalog" # in the target
 # An installation started in this live session: its ID (also in its target's
 # work directory), its target's mounts, its options (never its secrets).
 RESUME_RECORD = Path("/run/locachy-install/resume.json")
+RESUME_APPS = RESUME_RECORD.with_name("apps-catalog")
 # The source signing keys a build of the target stopped for (locachy-build).
 UNTRUSTED_KEYS = "var/lib/locachy/builder/untrusted-keys"
 # What the installation writes to the ESP, and nothing else.
@@ -38,6 +46,9 @@ MODULES = json.loads((SOURCE / "link/modules.json").read_text(encoding="utf-8"))
 FEATURE_PACKAGES = {k: list(v.get("packages") or []) for k, v in MODULES.items()}
 FEATURE_RC_MAP = {k: dict(v.get("rc") or {}) for k, v in MODULES.items()}
 FEATURE_RC = {k: next(iter(rc.items())) for k, rc in FEATURE_RC_MAP.items() if rc}
+_spec = importlib.util.spec_from_file_location("locachy_apps", SOURCE / "link/locachy_apps.py")
+APPS = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(APPS)
 
 
 def host_preset_packages(containers, presets_dir=None):
@@ -219,10 +230,16 @@ def write_resume_record(install_id, root, argv, args):
     RESUME_RECORD.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     new = RESUME_RECORD.with_name(RESUME_RECORD.name + ".new")
     new.write_text(json.dumps({"install_id": install_id, "root": str(root), "argv": argv,
-                               "update_repo": args.update_repo or "", "update_branch": args.update_branch or ""},
+                               "update_repo": args.update_repo or "", "update_branch": args.update_branch or "",
+                               "apps_repo": args.apps_repo or "", "apps_branch": args.apps_branch or "",
+                               "apps_commit": apps_meta().get("commit", "")},
                               indent=1) + "\n", encoding="utf-8")
     os.chmod(new, 0o600)
     os.replace(new, RESUME_RECORD)
+    # Its app presets beside it, as long as it can be continued: before the
+    # target has its own copy, a continued run installs from these (pinned).
+    if apps_catalog() != RESUME_APPS:
+        APPS.copy_catalog(str(apps_catalog()), str(RESUME_APPS))
 
 
 def resumed_target(record):
@@ -382,9 +399,78 @@ def source_line():
     return line, False
 
 
+def apps_catalog():
+    """The app presets' catalog this run installs from: LOCACHY_APPS_CATALOG
+    (the live entry's; continued, the target's own), else the medium's."""
+    return Path(os.environ.get("LOCACHY_APPS_CATALOG") or MEDIUM_APPS_CATALOG)
+
+
+def apps_meta():
+    """Where that catalog came from (its CATALOG); {} without one."""
+    try:
+        return APPS.read_meta(apps_catalog())
+    except (OSError, ValueError):
+        return {}
+
+
+def detect_apps_git(origin_file=SOURCE_ORIGIN):
+    """(repo, branch, commit) of the app presets: the catalog's, else what
+    the installer image recorded (source-origin.json apps_*)."""
+    meta = apps_meta()
+    repo, branch, commit = (meta.get(k, "") for k in ("repo", "branch", "commit"))
+    if not repo:
+        try:
+            origin = json.loads(Path(origin_file).read_text(encoding="utf-8"))
+            repo, branch, commit = (str(origin.get(k) or "") for k in ("apps_repo", "apps_branch", "apps_commit"))
+        except (OSError, ValueError, AttributeError):
+            pass
+    return (repo if valid_repo_url(repo) else DEFAULT_APPS_REPO,
+            branch if valid_branch(branch) else DEFAULT_UPDATE_BRANCH, commit)
+
+
+def apps_line():
+    """(text, not_newest): which app presets this run installs, as
+    source_line says it of the source (LOCACHY_APPS: fetched now, fetched
+    before, or the medium's own, and why)."""
+    repo, branch, commit = detect_apps_git()
+    how = os.environ.get("LOCACHY_APPS", "")
+    why = how.split(": ", 1)[1] if ": " in how else ""
+    if not apps_meta():
+        return "none" + (f"; {why}" if why else ""), True
+    short = commit[:12] if commit else "unknown commit"
+    if how == "bundled: updates are off":
+        return f"this medium's own, {short} (updates are off)", False
+    if how.startswith("bundled: "):
+        return f"this medium's own, {short}; {why}", True
+    line = f"{short} of {repo} ({branch})"
+    if how == "fetched":
+        return line + ", the newest, fetched now", False
+    if how == "fetched earlier":
+        return line + ", fetched earlier", False
+    if how.startswith("fetched before: "):
+        return line + ", fetched before; " + why, True
+    return line, False
+
+
 def print_source():
     text, not_newest = source_line()
     print(("Source (not the newest): " if not_newest else "Source: ") + text, flush=True)
+    text, not_newest = apps_line()
+    print(("App presets (not the newest): " if not_newest else "App presets: ") + text, flush=True)
+
+
+def apps_source(args):
+    """(repo, branch) the installed system takes app presets from: what was
+    given (--apps-repo, --apps-branch; repo "off" disables), else where the
+    catalog came from."""
+    repo, branch, _ = detect_apps_git()
+    want_repo = (getattr(args, "apps_repo", "") or "").strip()
+    want_branch = (getattr(args, "apps_branch", "") or "").strip()
+    if want_repo and want_repo != "off" and not valid_repo_url(want_repo):
+        raise ValueError("App presets repository must be an https://, ssh:// or git@ URL, or off: " + want_repo)
+    if want_branch and not valid_branch(want_branch):
+        raise ValueError("Invalid app presets branch name: " + want_branch)
+    return want_repo or repo, want_branch or branch
 
 
 def update_source(args):
@@ -439,11 +525,23 @@ def default_containers(features):
     return {"foot"} if "desktop" in features else set()
 
 
+def presets(source_dir=None, catalog=None):
+    """name -> (path, host program) of each preset: the system's host
+    programs (containers/, host="1" only), then the app presets' catalog's
+    (validated as it is read; never a host program), a name once."""
+    found = {}
+    sdir = Path(source_dir) if source_dir else SOURCE / "containers"
+    for p in sorted(sdir.glob("*.conf")) if sdir.is_dir() else []:
+        if re.search(r'^host="1"\s*$', p.read_text(encoding="utf-8"), re.M):
+            found[p.stem] = (p, True)
+    for name, path in APPS.read_catalog(catalog or apps_catalog()).items():
+        found.setdefault(name, (Path(path), False))
+    return found
+
+
 def container_presets():
-    """(name, host program) of each preset in containers/."""
-    cdir = SOURCE / "containers"
-    return [(p.stem, bool(re.search(r'^host="1"\s*$', p.read_text(encoding="utf-8"), re.M)))
-            for p in sorted(cdir.glob("*.conf"))] if cdir.is_dir() else []
+    """(name, host program) of each preset."""
+    return [(name, host) for name, (_, host) in presets().items()]
 
 
 def machine_profiles():
@@ -583,9 +681,12 @@ def check_choices(args):
     for feat in parse_csv_items(args.features):
         if feat not in MODULES:
             raise ValueError("Unknown module: " + feat)
+    known = presets()
     for cname in parse_csv_items(args.containers):
         if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}", cname):
             raise ValueError("Invalid container name: " + cname)
+        if cname not in known:
+            raise ValueError("Unknown app: " + cname)
     if args.machine and args.machine not in {name for name, _ in machine_profiles()}:
         raise ValueError("Unknown machine profile: " + args.machine)
     if re.search(r"[:\n]", args.full_name or ""):
@@ -607,6 +708,7 @@ def describe(parser):
     """What the full-screen installer offers: choices, defaults, disks."""
     default = parser.get_default
     repo, branch, _ = detect_source_git()
+    apps_repo, apps_branch, _ = detect_apps_git()
     try:
         levels = sorted(supported_levels())
         auto = cpu_level("auto")
@@ -623,7 +725,8 @@ def describe(parser):
         "defaults": {"user": default("user"), "hostname": default("hostname"), "keymap": default("keymap"),
                      "timezone": default("timezone"), "swap_gib": default("swap_gib"), "level": default("level"),
                      "cpu": default("cpu"), "repos": repo_sections(default("repos")),
-                     "update_repo": repo, "update_branch": branch, "copy_network": bool(live_nm_connections())},
+                     "update_repo": repo, "update_branch": branch, "apps_repo": apps_repo,
+                     "apps_branch": apps_branch, "copy_network": bool(live_nm_connections())},
         "languages": ["en_US.UTF-8", "zh_CN.UTF-8"],
         "levels": {"supported": levels, "auto": auto, "cpu_model": model},
         "ime": [{"name": k, "label": v} for k, v in IME_LABELS.items()],
@@ -641,6 +744,7 @@ def describe(parser):
         "memory_bytes": memory, "esp_bytes": ESP_BYTES, "min_root_bytes": MIN_ROOT_BYTES,
         "disks": disks(),
         "source": dict(zip(("text", "not_newest"), source_line())),
+        "apps": dict(zip(("text", "not_newest"), apps_line())),
     }
 
 
@@ -671,7 +775,16 @@ def apply_customizations(args, root):
             raise ValueError("Unknown timezone in zoneinfo: " + tzone)
 
     presets_dir = root / "usr/local/src/locachy/containers"
-    host_pkgs = host_preset_packages(containers, presets_dir if presets_dir.is_dir() else None)
+    host_dir = presets_dir if presets_dir.is_dir() else None
+    # The app presets' catalog: this run's, the target's own once it has one
+    # (a continued installation keeps the one it started with).
+    catalog = root / APPS_CATALOG
+    pinned = (catalog / "CATALOG").is_file()
+    known = presets(host_dir, catalog if pinned else None)
+    for cname in containers:
+        if cname not in known:
+            raise ValueError("Unknown app: " + cname)
+    host_pkgs = host_preset_packages(containers, host_dir)
     manifest_changed = False
     manifest = root / "etc/locachy/packages"
     if manifest.is_file():
@@ -728,8 +841,9 @@ def apply_customizations(args, root):
 
     rc = root / "etc/locachy/rc.conf"
     lines = [s for s in rc.read_text().splitlines()
-             if not s.startswith(("service_link=", "debug_link_interface=", "login_skip=",
-                                  "language=", "update_repo=", "update_branch=", "machine=", "keymap="))]
+             if not s.startswith(("service_link=", "debug_link_interface=", "login_skip=", "language=",
+                                  "update_repo=", "update_branch=", "apps_repo=", "apps_branch=",
+                                  "machine=", "keymap="))]
     if tzone != "auto":
         lines = [s for s in lines if not s.startswith("service_timezone=")]
     if getattr(args, "no_ntp", False):
@@ -749,6 +863,10 @@ def apply_customizations(args, root):
         lib_dir = root / "usr/local/lib/locachy"
         lib_dir.mkdir(parents=True, exist_ok=True)
         (lib_dir / "source-commit").write_text(detected_commit + "\n", encoding="utf-8")
+    apps_url, apps_br = apps_source(args)
+    lines.append(f'apps_repo="{apps_url}"')
+    if apps_br != DEFAULT_UPDATE_BRANCH:
+        lines.append(f'apps_branch="{apps_br}"')
     lang = getattr(args, "language", "")
     if lang and lang not in ("en_US.UTF-8", "C.UTF-8"):
         lines.append(f'language="{lang}"')
@@ -763,17 +881,14 @@ def apply_customizations(args, root):
             lines.append(f'{k}="{v}"')
     rc.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
+    # All of the catalog the installed system's (its updates start from it),
+    # the chosen presets its configurations.
+    if not pinned and apps_catalog().is_dir():
+        APPS.copy_catalog(str(apps_catalog()), str(catalog))
     conf_dir = root / "etc/locachy/containers"
     conf_dir.mkdir(parents=True, exist_ok=True)
     for cname in containers:
-        preset = presets_dir / f"{cname}.conf"
-        if preset.is_file():
-            shutil.copyfile(preset, conf_dir / f"{cname}.conf")
-        else:
-            (conf_dir / f"{cname}.conf").write_text(
-                f'package="{cname}"\nextras=""\ncommand="/usr/bin/{cname}"\narguments=""\nnetwork="1"\ndirectories=""\n',
-                encoding="utf-8"
-            )
+        shutil.copyfile(known[cname][0], conf_dir / f"{cname}.conf")
     return manifest_changed
 
 
@@ -1076,7 +1191,9 @@ def interactive_wizard(args):
         print(f" 10. Timezone, NTP & Wi-Fi: tz={args.timezone}, ntp={'OFF' if args.no_ntp else 'ON'}, "
               f"copy live Wi-Fi={'ON' if args.copy_network else 'OFF'} ({len(live_nm_connections())} profile(s))")
         repo, branch, _ = update_source(args)
-        print(f" 11. Updates from         : " + ("off (no source updates)" if repo == "off" else f"{repo}, branch {branch}"))
+        apps_repo, apps_branch = apps_source(args)
+        print(f" 11. Updates from         : " + ("off (no source updates)" if repo == "off" else f"{repo}, branch {branch}")
+              + "; app presets " + ("off" if apps_repo == "off" else f"{apps_repo}, branch {apps_branch}"))
         print(f" 12. Repositories         : {', '.join(repo_sections(args.repos)) or 'none'}; mirrors "
               + ("kept as they are" if args.no_rank_mirrors else "ranked from here first"))
         print("  i. Start installation")
@@ -1220,6 +1337,16 @@ def interactive_wizard(args):
                 print("Invalid branch name.")
             elif br:
                 args.update_branch = br
+            rp = input(f"Git repository for the app presets ('off' disables) [{apps_repo}]: ").strip()
+            if rp and rp != "off" and not valid_repo_url(rp):
+                print("Not an https://, ssh:// or git@ URL.")
+            elif rp:
+                args.apps_repo = rp
+            br = input(f"Its branch to follow [{apps_branch}]: ").strip()
+            if br and not valid_branch(br):
+                print("Invalid branch name.")
+            elif br:
+                args.apps_branch = br
         elif choice == "12":
             on = repo_sections(args.repos)
             t = input(f"Toggle sections (comma-separated: {', '.join(REPO_SECTIONS)}; Enter keeps) [{','.join(on)}]: ").strip().lower()
@@ -1282,6 +1409,11 @@ def make_parser():
                              "else github.com/niuyuanzhao/locachy)")
     parser.add_argument("--update-branch", default="",
                         help="branch of the update repository to follow (default: this source's branch, else main)")
+    parser.add_argument("--apps-repo", default="",
+                        help="Git URL for the app presets, or off (default: where this run's catalog came from, "
+                             "else github.com/niuyuanzhao/locachy-apps)")
+    parser.add_argument("--apps-branch", default="",
+                        help="branch of the app presets repository to follow (default: the catalog's, else main)")
     parser.add_argument("--hostname", default="locachy", help="system hostname (/etc/hostname and /etc/hosts)")
     parser.add_argument("--keymap", default="us", help="keyboard layout (e.g. us, dvorak, colemak, gb, de, fr, jp)")
     parser.add_argument("--timezone", default="auto",
@@ -1331,6 +1463,17 @@ def main():
         args = parser.parse_args(record["argv"] + [a for a in sys.argv[1:] if a != "--resume"])
         args.resume, args.install_id = True, record["install_id"]
         print("Continuing the installation on " + str(root) + ", where it stopped.", flush=True)
+        # The app presets it started with (pinned): its target's, else those
+        # kept beside its record; only without either, this run's.
+        if (root / APPS_CATALOG / "CATALOG").is_file():
+            os.environ["LOCACHY_APPS_CATALOG"] = str(root / APPS_CATALOG)
+            os.environ["LOCACHY_APPS"] = ""
+        elif (RESUME_APPS / "CATALOG").is_file():
+            os.environ["LOCACHY_APPS_CATALOG"] = str(RESUME_APPS)
+            os.environ["LOCACHY_APPS"] = ""
+        elif record.get("apps_commit") and record["apps_commit"] != apps_meta().get("commit"):
+            print(f"App presets: this run's, not {str(record['apps_commit'])[:12]} the installation started with "
+                  "(its target has none yet)", flush=True)
     if args.copy_network is None:
         args.copy_network = bool(live_nm_connections())
     if os.geteuid() != 0:
@@ -1355,6 +1498,7 @@ def main():
         parser.error("--tpm: " + tpm_advice()[2])
     try:
         update_source(args)
+        apps_source(args)
         repo_sections(args.repos)
         if not args.private:
             check_choices(args)
@@ -1412,7 +1556,8 @@ def main():
                          ("--timezone", args.timezone),
                          ("--features", args.features), ("--containers", args.containers),
                          ("--machine", args.machine), ("--update-repo", args.update_repo),
-                         ("--update-branch", args.update_branch)):
+                         ("--update-branch", args.update_branch), ("--apps-repo", args.apps_repo),
+                         ("--apps-branch", args.apps_branch)):
                 if v:
                     fwd += [k, v]
             fwd.append("--copy-network" if args.copy_network else "--no-copy-network")
@@ -1461,6 +1606,7 @@ def main():
                 print("Continue with: locachy-install --resume", flush=True)
                 return 1
             RESUME_RECORD.unlink(missing_ok=True)
+            shutil.rmtree(RESUME_APPS, ignore_errors=True)
 
         else:
             install(args, root, esp, root_fs, esp_fs, level)

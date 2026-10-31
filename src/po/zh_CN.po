@@ -2,7 +2,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-29 21:44-0400\n"
+"POT-Creation-Date: 2026-10-30 16:22-0400\n"
 "PO-Revision-Date: 2026-10-24 22:38+0000\n"
 "Last-Translator: LOCachy <38998838+niuyuanzhao@users.noreply.github.com>\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -1595,7 +1595,7 @@ msgstr "查找：%.*s"
 msgid "Current Project"
 msgstr "当前项目"
 
-#: progs/edit-filesearch-ui.inc
+#: progs/edit-filesearch-ui.inc progs/files.c
 msgid "Folder"
 msgstr "文件夹"
 
@@ -3230,10 +3230,72 @@ msgstr "无法加载正文内容字体。"
 msgid "Bookmark"
 msgstr "书签"
 
+#: progs/files.c progs/settings.c
+msgid "sign in again"
+msgstr "需重新登录"
+
+#: progs/files.c progs/settings.c
+msgid "needs attention"
+msgstr "需要处理"
+
+#: progs/files.c
+msgid "offline"
+msgstr "离线"
+
+#: progs/files.c progs/settings.c
+msgid "connecting"
+msgstr "正在连接"
+
+#: progs/files.c progs/settings.c
+msgid "online"
+msgstr "在线"
+
+#: progs/files.c progs/settings.c
+msgid "refreshing"
+msgstr "正在刷新"
+
+#: progs/files.c progs/settings.c
+msgid "unmounted"
+msgstr "已卸载"
+
 #: progs/files.c progs/firmware.c
 #, c-format
 msgid "Cannot read %s."
 msgstr "无法读取 %s。"
+
+#: progs/files.c
+msgid "Cannot start the cloud drive operation."
+msgstr "无法启动云盘操作。"
+
+#: progs/files.c
+msgid "Refreshing cloud drive..."
+msgstr "正在刷新云盘…"
+
+#: progs/files.c
+msgid "Reading cloud drive..."
+msgstr "正在读取云盘…"
+
+#: progs/files.c
+msgid "Unmounting cloud drive..."
+msgstr "正在卸载云盘…"
+
+#: progs/files.c
+msgid "Cloud drive timed out; the previous list is kept."
+msgstr "云盘超时；保留原来的列表。"
+
+#: progs/files.c
+msgid "Cloud drive list updated."
+msgstr "云盘列表已更新。"
+
+#: progs/files.c
+msgid "Cloud drive unmounted."
+msgstr "云盘已卸载。"
+
+#: progs/files.c
+msgid ""
+"Cloud drive operation failed; the previous list is kept. See Settings > "
+"Cloud drives."
+msgstr "云盘操作失败；保留原来的列表。请查看“设置 > 云盘”。"
 
 #. TRANSLATORS: first %s is a folder path, second %s is the system error.
 #: progs/files.c
@@ -3650,6 +3712,10 @@ msgstr "详细信息"
 #: progs/files.c
 msgid "Icons"
 msgstr "图标"
+
+#: progs/files.c
+msgid "Refresh"
+msgstr "刷新"
 
 #: progs/files.c
 #, c-format
@@ -4187,6 +4253,10 @@ msgid "Eject"
 msgstr "弹出"
 
 #: progs/files.c
+msgid "Unmount"
+msgstr "卸载"
+
+#: progs/files.c
 msgid "Duplicate (Ctrl+U)"
 msgstr "创建副本 (Ctrl+U)"
 
@@ -4223,6 +4293,10 @@ msgid "Folder properties (I)"
 msgstr "文件夹属性 (I)"
 
 #: progs/files.c
+msgid "Refresh (F5)"
+msgstr "刷新 (F5)"
+
+#: progs/files.c
 msgid "Sort files... (s)"
 msgstr "排序方式... (s)"
 
@@ -4252,6 +4326,18 @@ msgstr "紧凑视图缩放：%d。"
 #, c-format
 msgid "Details zoom: %d."
 msgstr "详细信息视图缩放：%d。"
+
+#: progs/files.c
+msgid "Refresh cancelled."
+msgstr "已取消刷新。"
+
+#: progs/files.c
+msgid "Pull to refresh"
+msgstr "下拉刷新"
+
+#: progs/files.c
+msgid "Release to refresh"
+msgstr "松开即刷新"
 
 #: progs/files.c
 msgid "Filter (part of the name):"
@@ -5026,7 +5112,7 @@ msgstr "设置用户密码。"
 msgid "The computer's name: letters, digits and -, up to 63."
 msgstr "计算机名：字母、数字和 -，最多 63 个。"
 
-#: progs/installer.c progs/settings.c
+#: progs/installer.c progs/packages.c progs/settings.c
 msgid "off"
 msgstr "关"
 
@@ -5319,6 +5405,14 @@ msgstr "更新来源"
 msgid "Branch"
 msgstr "分支"
 
+#: progs/installer.c progs/settings.c
+msgid "App presets from"
+msgstr "应用预设模板来源"
+
+#: progs/installer.c progs/settings.c
+msgid "App presets branch"
+msgstr "应用预设模板分支"
+
 #: progs/installer.c
 #, c-format
 msgid "%d second"
@@ -5430,6 +5524,10 @@ msgstr "LOCachy 源码"
 #, c-format
 msgid "Now: %s"
 msgstr "目前：%s"
+
+#: progs/installer.c
+msgid "App presets"
+msgstr "应用预设模板"
 
 #: progs/installer.c
 msgid "Install"
@@ -5751,6 +5849,14 @@ msgid "Branch:"
 msgstr "分支："
 
 #: progs/installer.c
+msgid "App presets from (a git URL, or off):"
+msgstr "应用预设模板来源（git 地址，或 off）："
+
+#: progs/installer.c
+msgid "App presets branch:"
+msgstr "应用预设模板分支："
+
+#: progs/installer.c
 msgid "Hibernate after (seconds asleep; empty: as the system has it):"
 msgstr "多久后休眠（睡眠的秒数；留空：按系统默认）："
 
@@ -5862,6 +5968,39 @@ msgstr "更新"
 
 #: progs/packages.c
 #, c-format
+msgid "LOCachy source: %.7s installed; updates: %s"
+msgstr "LOCachy 源码：已安装 %.7s；更新来源：%s"
+
+#: progs/packages.c
+#, c-format
+msgid "LOCachy source: its commit is not recorded; updates: %s"
+msgstr "LOCachy 源码：未记录其提交；更新来源：%s"
+
+#: progs/packages.c
+msgid "none installed"
+msgstr "尚未安装"
+
+#: progs/packages.c progs/settings.c
+msgid "from the system, not yet from the apps repository"
+msgstr "来自系统，尚未来自应用仓库"
+
+#: progs/packages.c progs/settings.c
+#, c-format
+msgid "%.7s from the installation medium"
+msgstr "%.7s，来自安装介质"
+
+#: progs/packages.c progs/settings.c
+#, c-format
+msgid "%.7s from the apps repository"
+msgstr "%.7s，来自应用仓库"
+
+#: progs/packages.c
+#, c-format
+msgid "App presets: %s; updates: %s"
+msgstr "应用预设模板：%s；更新来源：%s"
+
+#: progs/packages.c
+#, c-format
 msgid "local package %.180s"
 msgstr "本地软件包 %.180s"
 
@@ -5959,6 +6098,12 @@ msgstr "；重新构建：%s"
 #, c-format
 msgid "rebuild: %s"
 msgstr "重新构建：%s"
+
+#: progs/packages.c
+#, c-format
+msgid "%d configuration follows its new preset"
+msgid_plural "%d configurations follow their new presets"
+msgstr[0] "%d 个配置跟随新的预设模板"
 
 #: progs/packages.c
 msgid "not checked yet"
@@ -6134,6 +6279,11 @@ msgstr "本地 %-30.100s %.200s（已安装 %.80s）"
 #, c-format
 msgid "rebuild: %s (%s -> %s)"
 msgstr "重新构建：%s (%s -> %s)"
+
+#: progs/packages.c
+#, c-format
+msgid "%s follows its new preset: %s"
+msgstr "%s 跟随新的预设模板：%s"
 
 #. TRANSLATORS: PgUp/PgDn are key names; keep them.
 #: progs/packages.c
@@ -7240,6 +7390,18 @@ msgstr "fprintd-enroll 失败"
 msgid "fprintd-enroll was killed"
 msgstr "fprintd-enroll 已终止"
 
+#. TRANSLATORS: %s lists cloud drives and their states; Enter is the key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "%s   Enter: sign in again"
+msgstr "%s   Enter: 重新登录"
+
+#. TRANSLATORS: %s lists cloud drives and their states; Enter is the key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "%s%s   Enter: configure (rclone config)"
+msgstr "%s%s   Enter: 配置 (rclone config)"
+
 #. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
 msgid "none   Enter: configure (rclone config)"
@@ -7820,6 +7982,39 @@ msgid "Following branch %.100s: c in packages checks it."
 msgstr "改为跟随分支 %.100s：在 packages 中按 c 检查。"
 
 #: progs/settings.c
+msgid "App presets repository (git URL, or off): "
+msgstr "应用预设模板仓库（git 地址，或 off）："
+
+#: progs/settings.c
+msgid "App presets repository unchanged."
+msgstr "应用预设模板仓库未更改。"
+
+#. TRANSLATORS: packages is the program's name, c the c key; keep them.
+#: progs/settings.c
+#, c-format
+msgid "App preset updates off."
+msgstr "应用预设模板更新已关闭。"
+
+#: progs/settings.c
+#, c-format
+msgid "App presets from %.120s: c in packages checks it."
+msgstr "应用预设模板来自 %.120s：在 packages 中按 c 检查。"
+
+#: progs/settings.c
+msgid "App presets branch to follow: "
+msgstr "应用预设模板跟随的分支："
+
+#: progs/settings.c
+msgid "App presets branch unchanged."
+msgstr "应用预设模板分支未更改。"
+
+#. TRANSLATORS: packages is the program's name, c the c key; keep them.
+#: progs/settings.c
+#, c-format
+msgid "App presets follow branch %.100s: c in packages checks it."
+msgstr "应用预设模板改为跟随分支 %.100s：在 packages 中按 c 检查。"
+
+#: progs/settings.c
 msgid "Making the boot image (locachy-boot)..."
 msgstr "正在生成启动镜像（locachy-boot）……"
 
@@ -8249,6 +8444,10 @@ msgstr "更新分支"
 #: progs/settings.c
 msgid "(updates off)"
 msgstr "（更新已关闭）"
+
+#: progs/settings.c
+msgid "App presets installed"
+msgstr "已安装的应用预设模板"
 
 #: progs/settings.c
 msgid "Boot messages"
@@ -8721,12 +8920,16 @@ msgid "rclone is not installed: the line above installs it."
 msgstr "rclone 未安装：可在上方行安装。"
 
 #: progs/settings.c
-msgid "Cloud drives mounted under ~/Drives/<remote>."
-msgstr "云盘已挂载至 ~/Drives/<remote>。"
+msgid ""
+"Cloud drives are being mounted under ~/Drives/<remote>; their state is shown "
+"below."
+msgstr "正在把云盘挂载到 ~/Drives/<remote>；下方显示其状态。"
 
 #: progs/settings.c
-msgid "Cloud drives unmounted."
-msgstr "云盘已取消挂载。"
+msgid ""
+"Cloud drives stop; files with uploads pending keep their drive until they "
+"are done."
+msgstr "云盘停止；尚有文件待上传的云盘会保留到上传完成。"
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
@@ -8814,6 +9017,20 @@ msgstr "Enter: 设置 LOCachy 源码更新所用的 git 仓库（或 off）。"
 #: progs/settings.c
 msgid "Enter: the branch of that repository to follow (main by default)."
 msgstr "Enter: 设置要跟随的该仓库分支（默认 main）。"
+
+#: progs/settings.c
+msgid "Enter: the git repository the app presets come from (or off)."
+msgstr "Enter: 设置应用预设模板所用的 git 仓库（或 off）。"
+
+#: progs/settings.c
+msgid ""
+"Enter: the branch of the app presets' repository to follow (main by default)."
+msgstr "Enter: 设置要跟随的应用预设模板仓库分支（默认 main）。"
+
+#. TRANSLATORS: packages is the program's name, c the c key; keep them.
+#: progs/settings.c
+msgid "The app presets installed: c in packages checks for newer ones."
+msgstr "已安装的应用预设模板：在 packages 中按 c 检查是否有更新。"
 
 #: progs/settings.c
 msgid "Wait: a package job is still running."
