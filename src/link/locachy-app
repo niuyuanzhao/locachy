@@ -299,11 +299,19 @@ do_stop() {
             "$CLIPBOARD" sync >/dev/null ||
                 printf 'locachy-app: %s: clipboard was not saved before stopping\n' "$name" >&2
         fi
-        request_term "$name"
-        # Allow up to three seconds for the reaper and launcher to exit.
-        wait_event "$cg" populated 0 || true
-        printf '1\n' >"$cg/cgroup.kill"
-        wait_event "$cg" populated 0 || die "timed out stopping $name after cgroup.kill"
+        # Ask open Wayland windows to close cleanly first so browsers flush
+        # cookies and storage to disk before falling back to SIGTERM.
+        if [ -x /usr/local/lib/locachy/labwc-control ] && [ -S "$RUNTIME_DIR/locachy-control.sock" ] &&
+           /usr/local/lib/locachy/labwc-control --close "$name" 2>/dev/null; then
+            wait_event "$cg" populated 0 || true
+        fi
+        if is_running "$name"; then
+            request_term "$name"
+            # Allow up to three seconds for the reaper and launcher to exit.
+            wait_event "$cg" populated 0 || true
+            printf '1\n' >"$cg/cgroup.kill"
+            wait_event "$cg" populated 0 || die "timed out stopping $name after cgroup.kill"
+        fi
     fi
     rm -f "$APP_RUNTIME/$name/reaper.pid" "$APP_RUNTIME/$name.ready"
     # No host mounts to unmount: the private mount namespace dies with the
@@ -560,7 +568,7 @@ do_list() {
 # frozen and stopped with it. Asking which screen: slurp, as it does.
 start_screencast() {
     local name=$1 bus="$APP_RUNTIME/$1/bus/bus" backend=/usr/lib/xdg-desktop-portal-wlr
-    [ -x "$backend" ] && [ -S "$bus" ] && [ -S "$RUNTIME_DIR/wayland-0" ] || return 0
+    [ -x "$backend" ] && [ -S "$bus" ] && [ -S "$RUNTIME_DIR/wayland-0" ] && [ -S "$RUNTIME_DIR/pipewire-0" ] || return 0
     (
         exec {APP_LOCK_FD}>&-
         export DBUS_SESSION_BUS_ADDRESS="unix:path=$bus" WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR="$RUNTIME_DIR"
@@ -1044,6 +1052,10 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
         # Pin the host-built init even if a previous overlay has a stale copy.
         touch "$cbase/merged/run/locachy-app-init"
         mount --bind -o ro "$init" "$cbase/merged/run/locachy-app-init"
+        if [ -x /usr/local/lib/locachy/container-documents ]; then
+            touch "$cbase/merged/run/locachy-container-documents"
+            mount --bind -o ro /usr/local/lib/locachy/container-documents "$cbase/merged/run/locachy-container-documents"
+        fi
         # xdg-open hands paths and URLs to the host (locachy-bar), which opens
         # them in the container chosen for their type. The directory, not the
         # socket, so that a new bar socket reaches running containers too.
@@ -1088,6 +1100,18 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
         setpriv --reuid="$uid" --regid="$gid" --clear-groups ${nnp:-} -- dbus-daemon \
             --config-file=/usr/local/share/locachy/container-bus.conf --fork --nopidfile >/dev/null 2>&1; then
         export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/locachy-bus/bus"
+        # Own org.freedesktop.portal.Documents inside containers so
+        # xdg-desktop-portal stays resident instead of crashing on /dev/fuse.
+        if [ "$host" != 1 ] && [ -x /run/locachy-container-documents ]; then
+            setpriv --reuid="$uid" --regid="$gid" --clear-groups ${nnp:-} -- \
+                /run/locachy-container-documents </dev/null >/dev/null 2>&1 &
+            for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+                dbus-send --session --print-reply=literal --dest=org.freedesktop.DBus /org/freedesktop/DBus \
+                    org.freedesktop.DBus.NameHasOwner string:org.freedesktop.portal.Documents 2>/dev/null |
+                    grep -q true && break
+                sleep 0.05
+            done
+        fi
         # The tray watcher first (locachy-bar, up to 2 s), so that a program
         # that lives on in a tray finds one when it starts.
         for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do

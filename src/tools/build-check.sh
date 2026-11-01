@@ -53,6 +53,8 @@ gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE "$src/progs/archive-worker.c" \
     $(pkg-config --cflags --libs libarchive libcrypto) -o "$out/archive-worker"
 gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE "$src/progs/files-cloud-list.c" \
     $(pkg-config --cflags --libs gio-2.0) -o "$out/files-cloud-list"
+gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE "$src/progs/container-documents.c" \
+    $(pkg-config --cflags --libs gio-2.0) -o "$out/container-documents"
 # The key table of a keymap: libxkbcommon (make.sh, installer/make-live.sh).
 gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE "$src/progs/keytable.c" \
     $(pkg-config --cflags --libs xkbcommon) -o "$out/keytable"

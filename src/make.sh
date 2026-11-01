@@ -173,6 +173,8 @@ $GCC -o /usr/local/bin/archive "$src/progs/archive.c" "$src/progs/files.c" "$b"/
 $GCC -o "$lib/drives" "$src/progs/drives.c" "$b"/glibc-base-*.o $FT_LIBS
 # Cloud folders' metadata, read as the user so files never waits on the network.
 $GCC $(pkg-config --cflags gio-2.0) -o "$lib/files-cloud-list" "$src/progs/files-cloud-list.c" $(pkg-config --libs gio-2.0)
+# Container session-bus document-portal owner so xdg-desktop-portal stays up without FUSE.
+$GCC $(pkg-config --cflags gio-2.0) -o "$lib/container-documents" "$src/progs/container-documents.c" $(pkg-config --libs gio-2.0)
 # The document viewer: view on the screen, view-render reading the documents
 # as the user in a sandbox of its own (progs/view-proto.h). Their libraries
 # are the manifest's (a system from before it: locachy-pkg install them).

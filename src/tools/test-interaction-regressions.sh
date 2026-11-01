@@ -70,5 +70,6 @@ done
 bash "$src/tools/test-timezone-client.sh" "$out/timezone"
 sh "$src/tools/test-files.sh" "$out/files"
 sh "$src/tools/test-app-init.sh" "$out/app-init"
+sh "$src/tools/test-container-documents.sh" "$out/container-documents"
 bash "$src/tools/test-settings-tor.sh" "$out/settings-tor"
 printf '%s\n' 'PASS device-free interaction regressions; real KMS/libinput/IME hardware acceptance remains separate.'

@@ -15,6 +15,8 @@
  *                    its program again ("ok shown 0, ..."), or "error ..."
  *   raise NAME       the same, without locachy-bar: for a window that is
  *                    still coming (a file just handed to the program)
+ *   close NAME       ask the windows of container NAME to close cleanly:
+ *                    "ok closed N" (0 when none is open)
  *   reload-monitors  apply MONITORS_CONF: "ok monitors" or "error ..."
  *   focused          the container of the focused window: "ok NAME", or "ok"
  *                    when no container's window has the focus
@@ -276,6 +278,31 @@ static void show(const char *name, char *reply, size_t size, int bar)
         snprintf(reply, size, nids ? "error no window of %.63s is open" :
                  "error %.63s has no .desktop file to match its windows", name);
     }
+}
+
+static void close_windows(const char *name, char *reply, size_t size)
+{
+    char ids[MAX_IDS][OPEN_WINDOW_ID];
+    if (!valid_name(name)) {
+        snprintf(reply, size, "error invalid container name");
+        return;
+    }
+    if (!toplevels) {
+        snprintf(reply, size, "ok closed 0");
+        return;
+    }
+    int nids = open_window_ids(name, ids, MAX_IDS), closed = 0;
+    for (struct window *w = windows; w; w = w->next) {
+        for (int i = 0; i < nids; i++) {
+            if (strcasecmp(w->app_id, ids[i]) == 0) {
+                zwlr_foreign_toplevel_handle_v1_close(w->handle);
+                closed++;
+                break;
+            }
+        }
+    }
+    wl_display_flush(display);
+    snprintf(reply, size, "ok closed %d", closed);
 }
 
 static void focused(char *reply, size_t size)
@@ -818,6 +845,9 @@ static void serve(int listener)
         int bar = request[0] == 's';
         wl_display_roundtrip(display); /* the windows as they are now */
         show(request + (bar ? 5 : 6), reply, sizeof reply, bar);
+    } else if (strncmp(request, "close ", 6) == 0) {
+        wl_display_roundtrip(display);
+        close_windows(request + 6, reply, sizeof reply);
     } else if (strcmp(request, "focused") == 0) {
         wl_display_roundtrip(display);
         focused(reply, sizeof reply);
@@ -850,12 +880,8 @@ static void on_term(int sig)
     stop = 1;
 }
 
-static int send_action(const char *action)
+static int send_request(const char *msg, char *reply, size_t rsize)
 {
-    if (strcmp(action, "home") != 0 && strcmp(action, "lock") != 0 && strcmp(action, "next") != 0 &&
-        strcmp(action, "prev") != 0) {
-        return 2;
-    }
     const char *runtime = getenv("XDG_RUNTIME_DIR");
     if (!runtime || runtime[0] != '/') return 1;
     struct sockaddr_un address = { .sun_family = AF_UNIX };
@@ -864,20 +890,42 @@ static int send_action(const char *action)
     int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     if (fd < 0) return 1;
     if (connect(fd, (struct sockaddr *)&address, sizeof address) < 0 ||
-        send(fd, action, strlen(action), MSG_NOSIGNAL) != (ssize_t)strlen(action)) {
+        send(fd, msg, strlen(msg), MSG_NOSIGNAL) != (ssize_t)strlen(msg)) {
         close(fd);
         return 1;
     }
     struct pollfd wait = { .fd = fd, .events = POLLIN };
-    char reply[64] = "";
-    ssize_t got = poll(&wait, 1, 1000) > 0 ? recv(fd, reply, sizeof reply - 1, 0) : -1;
+    ssize_t got = poll(&wait, 1, 1000) > 0 ? recv(fd, reply, rsize - 1, 0) : -1;
     close(fd);
-    return got > 0 && strncmp(reply, "ok ", 3) == 0 ? 0 : 1;
+    if (got <= 0) return 1;
+    reply[got] = '\0';
+    return strncmp(reply, "ok ", 3) == 0 ? 0 : 1;
+}
+
+static int send_action(const char *action)
+{
+    char reply[64] = "";
+    if (strcmp(action, "home") != 0 && strcmp(action, "lock") != 0 && strcmp(action, "next") != 0 &&
+        strcmp(action, "prev") != 0) {
+        return 2;
+    }
+    return send_request(action, reply, sizeof reply);
+}
+
+static int send_close(const char *name)
+{
+    char msg[96], reply[64] = "";
+    if (!valid_name(name)) return 2;
+    snprintf(msg, sizeof msg, "close %.63s", name);
+    if (send_request(msg, reply, sizeof reply) != 0) return 1;
+    int count = 0;
+    return sscanf(reply, "ok closed %d", &count) == 1 && count > 0 ? 0 : 1;
 }
 
 int main(int argc, char **argv)
 {
     if (argc == 3 && strcmp(argv[1], "--action") == 0) return send_action(argv[2]);
+    if (argc == 3 && strcmp(argv[1], "--close") == 0) return send_close(argv[2]);
     if (argc != 1) return 2;
     const char *runtime = getenv("XDG_RUNTIME_DIR");
     if (!runtime || runtime[0] != '/') {
