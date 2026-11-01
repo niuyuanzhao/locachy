@@ -41,11 +41,13 @@ separate input tests; this UI test does not prove that handover is safe.
 ## Lock keys and the input method
 
 The shared display sends Rime the layout's native XKB keysym, standard
-Shift/Lock/Control/Alt/Super modifiers and release events, as mature Rime
-frontends do. Num Lock affects the resolved keypad symbol (`KP_1` versus
-`KP_End`); its modifier bit is not passed as an unrelated Rime mode switch.
-JIS Shift+Eisu is recognized from the actual XKB Caps Lock transition, not an
-assumed unshifted physical key role. Lock state is shared across the keyboards.
+Shift/Control/Alt/Super modifiers and release events. Mode selection
+(`RAW` / `CN` / `EN`) and Caps Lock passthrough stay in the host front end,
+and Rime's internal `ascii_mode` is kept off. Num Lock affects the resolved
+keypad symbol (`KP_1` versus `KP_End`); its modifier bit is not passed as an
+unrelated Rime mode switch. JIS Shift+Eisu is recognized from the actual XKB
+Caps Lock transition, not an assumed unshifted physical key role. Lock state is
+shared across the keyboards.
 
 Direct-input key tables now contain sixteen Shift/Caps/AltGr/Num combinations.
 Old eight-state tables remain readable, but cannot supply the Num-dependent

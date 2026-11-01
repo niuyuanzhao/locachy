@@ -648,6 +648,12 @@ int main(int argc, char **argv)
         okey(KEY_RIGHTSHIFT, 0);
         assert(!strcmp(committed, "\xe4\xbd\xa0\xe5\xa5\xbd"));
         assert(ime_get_commit() == NULL); /* delivered immediately, not retained for the next key */
+        /* Even when a third-party schema configures Shift_R: commit_text in
+         * ascii_composer, Rime's internal ascii_mode stays clamped off so the
+         * very next key in CN still composes and maps Chinese punctuation. */
+        committed[0] = '\0';
+        okey(KEY_COMMA, 1); okey(KEY_COMMA, 0);
+        assert(!strcmp(committed, "\xef\xbc\x8c"));
         puts("PASS native Rime modifier/release commits are delivered immediately");
         own_jis = 0;
         ime_set_mode(IME_MODE_RAW);

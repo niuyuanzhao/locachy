@@ -5,7 +5,6 @@ schema:
 
 engine:
   processors:
-    - ascii_composer
     - key_binder
     - speller
     - selector
@@ -18,17 +17,6 @@ engine:
     - table_translator
   filters:
     - uniquifier
-
-# Caps Lock as in the Chinese schema (default.custom.yaml): it ends the
-# composition, and while it is locked the keys go on as typed, in capitals.
-ascii_composer:
-  good_old_caps_lock: true
-  switch_key:
-    Caps_Lock: clear
-    Shift_L: noop
-    Shift_R: noop
-    Control_L: noop
-    Control_R: noop
 
 speller:
   alphabet: "zyxwvutsrqponmlkjihgfedcbaABCDEFGHIJKLMNOPQRSTUVWXYZ"

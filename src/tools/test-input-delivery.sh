@@ -59,7 +59,8 @@ if [ -f "$runtime/usr/include/rime_api.h" ] && [ -f "$runtime/usr/lib/librime.so
         "$src/base/rc.c" "$src/base/say.c" -Wl,--gc-sections "${ime_libs[@]}" -linput -o "$out/bin/ime"
     for test in ime-width ime; do
         cp -a "$runtime/var/lib/locachy/rime" "$out/$test-user"
-        cp "$src/base/rime/default.custom.yaml" "$out/$test-user/"
+        cp "$src/base/rime/default.custom.yaml" "$src/base/rime/easy_en.schema.yaml" \
+           "$src/base/rime/rime_frost.custom.yaml" "$out/$test-user/"
         rm -f "$out/$test-user/build/default.yaml"
         bwrap --unshare-all --die-with-parent --ro-bind "$runtime" / --proc /proc --dev /dev --tmpfs /tmp \
             --bind "$out" /work /work/bin/$test /work/$test-user
@@ -207,7 +208,7 @@ if actual_rime:
     release_section = text.split('KEY 61 1', 1)[1]
     release_chars = ''.join(line.split(' ', 3)[3] for line in release_section.splitlines()
                             if line.startswith('KEY ') and len(line.split(' ', 3)) == 4 and line.split(' ', 3)[2] == '1')
-    assert release_chars == '你好', ('modifier/release commit was not delivered before any subsequent key', release_chars)
+    assert release_chars == '你好，', ('modifier/release commit or clamped ascii_mode failed', release_chars)
     assert 'PASS native Rime modifier/release commits are delivered immediately' in (root / 'rime.log').read_text()
     print('PASS native Rime modifier/release commits reach the focused client without a following key')
     print('PASS idle English punctuation passes through the native bar Rime path unchanged')

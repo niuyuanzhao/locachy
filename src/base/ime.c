@@ -95,6 +95,18 @@ static void set_width(int full)
     rime->set_option(session, "full_shape", False);
 }
 
+/* LOCachy never uses Rime's ascii_mode: no schema here declares it or its
+ * processor, and this keeps it off around every key. */
+static void force_composition_mode(void)
+{
+    /* Only written when it is on: an unconditional set notifies librime on
+     * every key and recomposes a pending digit separator ("5." then "."). */
+    if (rime && session && rime->get_option && rime->set_option &&
+        rime->get_option(session, "ascii_mode")) {
+        rime->set_option(session, "ascii_mode", False);
+    }
+}
+
 static void disable_emoji(void)
 {
     if (rime && session && rime->set_option) {
@@ -149,6 +161,7 @@ int ime_init(const char *shared_dir, const char *user_dir)
         return -1;
     }
     rime->select_schema(session, chinese_enabled ? cn_schema : "easy_en");
+    force_composition_mode();
     if (chinese_enabled) {
         disable_emoji();
     }
@@ -196,10 +209,12 @@ void ime_set_mode(int mode)
     current_mode = mode;
     if (current_mode == IME_MODE_CN) {
         rime->select_schema(session, cn_schema);
+        force_composition_mode();
         disable_emoji();
         set_width(1);
     } else if (current_mode == IME_MODE_EN) {
         rime->select_schema(session, "easy_en");
+        force_composition_mode();
     }
 }
 
@@ -364,21 +379,26 @@ static void collect_commit(void)
     }
 }
 
-/* Rime's key masks (librime's key_table.h, X11's): Caps Lock locked, a
- * release; Caps Lock's keysym. */
-#define RIME_LOCK_MASK    (1 << 1)
+/* Caps Lock is handled directly by the host front end rather than Rime's
+ * internal ascii_mode: locking clears any active composition, and while locked
+ * every key passes straight through as typed. */
 #define RIME_RELEASE_MASK (1 << 30)
-#define RIME_CAPS_LOCK    0xffe5 // XK_Caps_Lock
 static int caps_locked;
 
 void ime_caps_key(int pressed, int locked)
 {
-    ime_key_event(RIME_CAPS_LOCK, (locked ? RIME_LOCK_MASK : 0) | (pressed ? 0 : RIME_RELEASE_MASK));
+    (void)locked;
+    if (pressed && rime && session) {
+        rime->clear_composition(session);
+    }
 }
 
 void ime_set_caps(int locked)
 {
     caps_locked = locked != 0;
+    if (caps_locked && rime && session) {
+        rime->clear_composition(session);
+    }
 }
 
 static int to_keysym(int key)
@@ -403,7 +423,7 @@ static int to_keysym(int key)
 
 int ime_process_key(int key)
 {
-    if (!rime || !session || !focused || current_mode == IME_MODE_RAW) {
+    if (!rime || !session || !focused || current_mode == IME_MODE_RAW || caps_locked) {
         return 0; // 100% Passthrough
     }
 
@@ -462,22 +482,24 @@ int ime_process_key(int key)
         }
     }
 
-    return ime_key_event((unsigned int)to_keysym(key), caps_locked ? RIME_LOCK_MASK : 0);
+    return ime_key_event((unsigned int)to_keysym(key), 0);
 }
 
 int ime_key_event(unsigned int sym, unsigned int mask)
 {
-    if (!rime || !session || !focused || current_mode == IME_MODE_RAW || !sym) return 0;
+    if (!rime || !session || !focused || current_mode == IME_MODE_RAW || caps_locked || !sym) return 0;
     /* EN keeps punctuation and navigation direct when no composition is
-     * active; lock/modifier events still reach ascii_composer. */
+     * active. */
     if (current_mode == IME_MODE_EN && menu_count() < 0 && !(mask & RIME_RELEASE_MASK) &&
-        !((sym >= 'a' && sym <= 'z') || (sym >= 'A' && sym <= 'Z')) &&
-        !(sym >= 0xffe1 && sym <= 0xffee) && sym != 0xff7f && sym != 0xff30) return 0;
+        !((sym >= 'a' && sym <= 'z') || (sym >= 'A' && sym <= 'Z'))) return 0;
     /* fcitx5-rime/IBus use these X11 modifiers and the release flag. The
-     * resolved keysym already contains Num Lock and the keyboard layout. */
-    mask &= (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 6) | (1u << 26) | (1u << 30);
+     * resolved keysym already contains Num Lock and the keyboard layout; Caps
+     * Lock passthrough is handled above without Rime's ascii_mode. */
+    mask &= (1u << 0) | (1u << 2) | (1u << 3) | (1u << 6) | (1u << 26) | (1u << 30);
     if (mask & (1u << 6)) mask |= 1u << 26; /* IBus virtual Super */
+    force_composition_mode();
     Bool handled = rime->process_key(session, (int)sym, (int)mask);
+    force_composition_mode();
     collect_commit();
     return handled != 0;
 }

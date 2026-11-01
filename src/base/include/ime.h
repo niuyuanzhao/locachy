@@ -61,12 +61,10 @@ int ime_process_key(int key);
  * expressed by the resolved keypad keysym, not passed as a modifier. */
 int ime_key_event(unsigned int sym, unsigned int mask);
 
-/* Caps Lock, as Rime's front ends give it (ascii_composer with
- * good_old_caps_lock): its key ends the composition and turns ASCII mode on
- * when it locks, off when it unlocks; while it is locked, the keys pass by
- * Rime and the program types them (letters in capitals). ime_caps_key: the
- * key pressed (1) or released (0), locked as the keyboard had it before this
- * event (Linux's order); ime_set_caps: locked or not after it. */
+/* Caps Lock is handled by the host front end, not by Rime's ascii_mode:
+ * locking ends the composition and, while locked, keys bypass Rime and the
+ * program types them (letters in capitals). ime_caps_key: the key pressed (1)
+ * or released (0); ime_set_caps: locked or not after it. */
 void ime_caps_key(int pressed, int locked);
 void ime_set_caps(int locked);
 

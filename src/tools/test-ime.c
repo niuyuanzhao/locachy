@@ -147,6 +147,38 @@ int main(int argc, char **argv)
     ime_process_key(27);
     ime_get_commit();
     puts("PASS Caps Lock: locking ends the composition, locked keys pass by Rime, unlocked pinyin again");
+    /* Shift_L, Shift_R, Eisu_toggle and F4 must not flip Rime's ascii_mode:
+     * the production schemas have no such switch keys, and ime_key_event keeps
+     * ascii_mode off around every key. */
+    static const struct { unsigned int sym, mask; } internal_toggles[] = {
+        { 0xffe1, 0 }, { 0xffe1, (1u << 0) | (1u << 30) }, /* Shift_L tap */
+        { 0xffe2, 0 }, { 0xffe2, (1u << 0) | (1u << 30) }, /* Shift_R tap */
+        { 0xff30, 0 }, { 0xff30, 1u << 30 },               /* JIS Eisu_toggle */
+        { 0xffc1, 0 }, { 0xffc1, 1u << 30 },               /* F4 switcher */
+        { '2', (1u << 2) | (1u << 0) }, { '2', (1u << 2) | (1u << 0) | (1u << 30) },
+        { '@', (1u << 2) | (1u << 0) }, { '@', (1u << 2) | (1u << 0) | (1u << 30) },
+    };
+    for (size_t i = 0; i < sizeof internal_toggles / sizeof internal_toggles[0]; i++) {
+        ime_key_event(internal_toggles[i].sym, internal_toggles[i].mask);
+        ime_get_commit();
+    }
+    if (ime_get_overlay(row1, row2, sizeof row1)) {
+        fprintf(stderr, "FAIL unexpected switcher/preedit overlay: [%s]\n", row1);
+        fail();
+    }
+    ime_process_key('n');
+    ime_process_key('i');
+    if (!ime_get_overlay(row1, row2, sizeof row1) || strstr(row1, "1") == NULL) {
+        fprintf(stderr, "FAIL Shift/Eisu/F4 flipped ascii_mode: no candidates for ni: [%s]\n", row1);
+        fail();
+    }
+    ime_process_key(27);
+    ime_get_commit();
+    if (!ime_process_key(',') || ! (chosen = ime_get_commit()) || strcmp(chosen, "，") != 0) {
+        fputs("FAIL Shift/Eisu/F4 left Chinese punctuation in ASCII mode\n", stderr);
+        fail();
+    }
+    puts("PASS Shift_L, Shift_R, Eisu_toggle and F4 never flip Rime into internal ascii_mode");
     ime_toggle_width();
     for (size_t i = 0; i < sizeof table / sizeof table[0]; i++) {
         if (ime_process_key(table[i].key) || ime_get_commit()) {

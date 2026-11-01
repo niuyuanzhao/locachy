@@ -3,11 +3,9 @@ patch:
     - schema: rime_frost
     - schema: easy_en
   menu/page_size: 20
-  # Caps Lock as Rime's own default.yaml has it: the key ends the composition
-  # (clear) and, while locked, every key goes on as typed (letters in
-  # capitals); the front end gives Rime the lock (base/ime.c).
-  ascii_composer/good_old_caps_lock: true
-  ascii_composer/switch_key/Caps_Lock: clear
+  # Rime's switcher (F4, Control+grave) is off: LOCachy's own keys choose the
+  # mode (base/ime.c), and ascii_mode is kept off around every key.
+  switcher/hotkeys: []
   # Chinese mode's punctuation at full width (where it starts; ascii_punct
   # off): rime-frost / rime-ice's Chinese punctuation from half_shape, each
   # committed at once with no menu; ASCII symbols (/ | ` ~ @ # % & * - + =)

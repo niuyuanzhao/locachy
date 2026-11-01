@@ -3,3 +3,39 @@ patch:
   grammar/collocation_max_length: 5
   grammar/collocation_min_length: 2
   translator/contextual_suggestions: true
+  # Mirrors rime_frost.schema.yaml without ascii_composer and without the
+  # ascii_mode switch: RAW / CN / EN and Caps Lock belong to the host front end.
+  engine/processors:
+    - lua_processor@*select_character
+    - recognizer
+    - key_binder
+    - speller
+    - punctuator
+    - selector
+    - navigator
+    - express_editor
+  engine/segmentors:
+    - ascii_segmentor
+    - matcher
+    - abc_segmentor
+    - affix_segmentor@radical_lookup
+    - punct_segmentor
+    - fallback_segmentor
+  switches:
+    - name: traditionalization
+      states: [ 简体, 繁体 ]
+    - name: full_shape
+      states: [ 半角, 全角 ]
+    - name: ascii_punct
+      states: [ 。，, ．， ]
+    - name: emoji
+      states: [ 💀, 😄 ]
+    - name: chinese_english
+      states: [ 翻译关, 翻译开 ]
+    - name: mars
+      reset: 0
+      states: [ 地, 煋 ]
+    - name: chaifen
+      states: [ 拆分不提示, 拆分提示 ]
+    - name: pin_cand
+      states: [ 固顶关, 固顶开 ]

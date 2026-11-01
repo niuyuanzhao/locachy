@@ -32,10 +32,11 @@ initramfs 中是键位表和设备覆盖的副本。开机磁盘口令只有在�
 
 ## 锁定键与输入法
 
-共享显示按成熟 Rime 前端的方式，向 Rime 传送布局解析的原生 XKB keysym、标准
-Shift/Lock/Control/Alt/Super 修饰状态及释放事件。Num Lock 改变的是解析后的小键盘
-符号（`KP_1` 或 `KP_End`），不把它的修饰位误当作 Rime 模式切换。JIS 的 Shift+英数
-通过实际 XKB Caps Lock 状态变化识别，不再假定其未按 Shift 时就是锁定键。
+共享显示向 Rime 传送布局解析的原生 XKB keysym、标准 Shift/Control/Alt/Super 修饰状态
+及释放事件；模式切换（`RAW` / `CN` / `EN`）与 Caps Lock 直通完全由宿主前端管理，不保留
+Rime 内部的 `ascii_mode`。Num Lock 改变的是解析后的小键盘符号（`KP_1` 或
+`KP_End`），不把它的修饰位误当作 Rime 模式切换。JIS 的 Shift+英数通过实际 XKB
+Caps Lock 状态变化识别，不再假定其未按 Shift 时就是锁定键。
 各键盘共享锁定状态。
 
 直连键位表现在包含 Shift/Caps/AltGr/Num 的十六种组合。旧八态表仍可读取，但不能
