@@ -92,6 +92,9 @@ static signed char device_table[MAX_KEYBOARDS]; /* each one's table; -1: not loo
 static int count;
 /* Track physical keys independently even when two share a modifier role. */
 static unsigned char modifiers[MAX_KEYBOARDS][256], unowned_modifiers[256];
+/* Each one's queue overflowed: its events dropped up to the next SYN_REPORT.
+ * Cleared when the set changes (a stale mark would drop a live key). */
+static unsigned char dropping[MAX_KEYBOARDS];
 static int shift, ctrl, alt, meta, altgr;
 static int caps; /* Caps Lock locked: letters in capitals (with Shift, small) */
 static int num;  /* Num Lock: the key table's resolved keypad symbols */
@@ -109,6 +112,57 @@ __attribute__((weak)) void ime_set_caps(int locked);
 static int has(const unsigned long *bits, int n)
 {
     return (bits[n / (8 * sizeof(long))] >> (n % (8 * sizeof(long)))) & 1;
+}
+
+static int leds_shown; /* keys_leds */
+static int open_mode = O_RDONLY; /* O_RDWR once keys_leds is called */
+
+/* The locks onto the keyboards' LEDs while this process shows them, as
+ * libinput's evdev_device_led_update writes them: EV_LED events, then a
+ * SYN_REPORT. The input core passes on only an LED that changes; a keyboard
+ * without that LED ignores it. */
+static void show_locks(void)
+{
+    struct input_event ev[3] = {
+        { .type = EV_LED, .code = LED_CAPSL, .value = caps },
+        { .type = EV_LED, .code = LED_NUML, .value = num },
+        { .type = EV_SYN, .code = SYN_REPORT },
+    };
+    for (int i = 0; leds_shown && i < count; i++) {
+        while (write(keyboards[i], ev, sizeof ev) < 0 && errno == EINTR) {
+        }
+    }
+}
+
+/* The locks as the LEDs show them (whoever set them last), from the first
+ * keyboard with a Caps Lock LED, as libevdev takes a device's LED state when
+ * it starts on it (libevdev_set_fd: EVIOCGLED). */
+static void locks_from_leds(void)
+{
+    for (int i = 0; i < count; i++) {
+        unsigned long leds[LED_MAX / (8 * sizeof(long)) + 1] = { 0 }, lit[LED_MAX / (8 * sizeof(long)) + 1] = { 0 };
+        if (ioctl(keyboards[i], EVIOCGBIT(EV_LED, sizeof leds), leds) < 0 || !has(leds, LED_CAPSL) ||
+            ioctl(keyboards[i], EVIOCGLED(sizeof lit), lit) < 0) {
+            continue;
+        }
+        int was = caps;
+        caps = has(lit, LED_CAPSL);
+        num = has(lit, LED_NUML);
+        if (caps != was && ime_set_caps) {
+            ime_set_caps(caps);
+        }
+        return;
+    }
+}
+
+void keys_leds(int on)
+{
+    open_mode = O_RDWR;
+    if (on && !leds_shown) {
+        locks_from_leds();
+    }
+    leds_shown = on;
+    show_locks();
 }
 
 static void add_binding(struct table *tb, int code, int c, int a, int s, int m, int action)
@@ -669,6 +723,7 @@ void keys_refresh(void)
         int version;
         if (ioctl(keyboards[i], EVIOCGVERSION, &version) >= 0) { i++; continue; }
         close(keyboards[i]);
+        memset(dropping, 0, sizeof dropping);
         count--;
         memmove(keyboards + i, keyboards + i + 1, (size_t)(count - i) * sizeof *keyboards);
         memmove(paths + i, paths + i + 1, (size_t)(count - i) * sizeof *paths);
@@ -676,11 +731,12 @@ void keys_refresh(void)
         memmove(device_table + i, device_table + i + 1, (size_t)(count - i) * sizeof *device_table);
     }
     update_modifiers();
+    int found = 0;
     for (int i = 0; i < 64 && count < MAX_KEYBOARDS; i++) {
         unsigned long bits[KEY_MAX / (8 * sizeof(long)) + 1] = { 0 };
         char path[sizeof paths[0]];
         snprintf(path, sizeof path, "/dev/input/event%d", i);
-        int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+        int fd = open(path, open_mode | O_NONBLOCK | O_CLOEXEC);
         if (fd < 0) {
             continue;
         }
@@ -703,9 +759,13 @@ void keys_refresh(void)
             memset(modifiers[count], 0, sizeof modifiers[count]);
             device_table[count] = -1;
             keyboards[count++] = fd;
+            found = 1;
         } else {
             close(fd);
         }
+    }
+    if (found) {
+        show_locks(); /* a new keyboard starts with the console's LEDs (kbd_start) */
     }
 }
 
@@ -720,10 +780,12 @@ void keys_take(const int *fds, int n)
             close(fds[i]);
         }
     }
+    locks_from_leds(); /* Caps and Num Lock as process 1 shows them */
 }
 
 /* An input-only update is not a new screen activation. Keep live queues and
- * modifier state; discard only descriptors for devices no longer lent. */
+ * modifier state; discard only descriptors for devices no longer lent. A
+ * program given the keyboard again takes the locks as keys_take does. */
 void keys_update(const int *fds, int n)
 {
     int old[MAX_KEYBOARDS], used[MAX_KEYBOARDS] = { 0 }, old_count = count;
@@ -752,7 +814,11 @@ void keys_update(const int *fds, int n)
         }
     }
     for (int i = 0; i < old_count; i++) if (!used[i]) close(old[i]);
+    memset(dropping, 0, sizeof dropping);
     update_modifiers();
+    if (old_count == 0) {
+        locks_from_leds();
+    }
 }
 
 void keys_release(void)
@@ -763,6 +829,7 @@ void keys_release(void)
     count = 0;
     memset(modifiers, 0, sizeof modifiers);
     memset(unowned_modifiers, 0, sizeof unowned_modifiers);
+    memset(dropping, 0, sizeof dropping);
     shift = ctrl = alt = meta = altgr = 0;
     npending = 0;
 }
@@ -1044,16 +1111,53 @@ int keys_modifiers(void)
     return (shift ? KEYS_SHIFT : 0) | (ctrl ? KEYS_CTRL : 0) | (alt ? KEYS_ALT : 0) | (meta ? KEYS_META : 0);
 }
 
+/* After a SYN_DROPPED: the device's keys as the kernel has them now
+ * (EVIOCGKEY, which also drops the queued key events it covers), as
+ * libevdev's sync_key_state takes them. A modifier held here but up there
+ * is released (its release was lost: a later Esc is no Super+Esc), one down
+ * there is held; nothing is typed. */
+static void resync(int device)
+{
+    unsigned long down[KEY_MAX / (8 * sizeof(long)) + 1] = { 0 };
+    if (ioctl(keyboards[device], EVIOCGKEY(sizeof down), down) < 0) {
+        return;
+    }
+    struct table *tb = device_table_of(device);
+    for (int code = 1; code < 256; code++) {
+        int role = tb->modifier_role[code];
+        if (role && role != KEYS_CAPS && role != ROLE_NUM) modifiers[device][code] = (unsigned char)has(down, code);
+    }
+    if (caps_code && !has(down, caps_code)) caps_code = 0;
+    update_modifiers();
+}
+
 int keys_event(int fd)
 {
     struct input_event ev;
 
-    if (read(fd, &ev, sizeof ev) != sizeof ev || ev.type != EV_KEY || ev.value < 0 || ev.value > 2) {
+    if (read(fd, &ev, sizeof ev) != sizeof ev) {
         return 0;
     }
     int device = -1;
     for (int i = 0; i < count; i++) {
         if (keyboards[i] == fd) { device = i; break; }
+    }
+    /* The queue overflowed (SYN_DROPPED): what follows up to the next
+     * SYN_REPORT is dropped, then the keys are read again (event-codes.rst,
+     * "SYN_DROPPED"). */
+    if (ev.type == EV_SYN && ev.code == SYN_DROPPED) {
+        if (device >= 0) dropping[device] = 1;
+        return 0;
+    }
+    if (device >= 0 && dropping[device]) {
+        if (ev.type == EV_SYN && ev.code == SYN_REPORT) {
+            dropping[device] = 0;
+            resync(device);
+        }
+        return 0;
+    }
+    if (ev.type != EV_KEY || ev.value < 0 || ev.value > 2) {
+        return 0;
     }
     read_table();
     struct table *tb = device >= 0 ? device_table_of(device) : &tables[0];
@@ -1066,7 +1170,10 @@ int keys_event(int fd)
         if (ev.value == 0) caps_code = 0;
     }
     if (role == ROLE_NUM) {
-        if (ev.value == 1) num = !num;
+        if (ev.value == 1) {
+            num = !num;
+            show_locks();
+        }
         return 0;
     }
     if (role && role != KEYS_CAPS) {
@@ -1084,6 +1191,7 @@ int keys_event(int fd)
             if (ime_set_caps) {
                 ime_set_caps(caps);
             }
+            show_locks();
         }
         return 0;
     }

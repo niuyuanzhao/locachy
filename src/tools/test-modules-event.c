@@ -117,6 +117,19 @@ int main(void)
           "DEVPATH=/devices/pci0000:00/0000:00:02.0/drm/card1\0SUBSYSTEM=drm\0LEASE=1\0"
           "DEVNAME=dri/card1\0DEVTYPE=drm_minor\0", 0, 0);
 
+    /* A battery or charger changed, came or went: process 1 looks at the
+     * batteries (MODULES_POWER); a display change and it, both. */
+    CHECK("change@/power_supply/BAT0\0ACTION=change\0SUBSYSTEM=power_supply\0POWER_SUPPLY_CAPACITY=4\0",
+          MODULES_POWER, 0);
+    CHECK("add@/power_supply/BAT1\0ACTION=add\0SUBSYSTEM=power_supply\0", MODULES_POWER, 0);
+    CHECK("remove@/power_supply/AC\0SUBSYSTEM=power_supply\0ACTION=remove\0", MODULES_POWER, 0);
+    CHECK("change@/power_supply/BAT0\0SUBSYSTEM=power_supply\0", 0, 0);
+    CHECK("change@/power_supply/BAT0\0ACTION=change\0SUBSYSTEM=power_supply_x\0", 0, 0);
+    static const char battery[] = "change@/power_supply/BAT0\0ACTION=change\0SUBSYSTEM=power_supply\0";
+    static const char screen[] = "change@/drm\0ACTION=change\0SUBSYSTEM=drm\0HOTPLUG=1\0";
+    const struct packet mixed[] = { { battery, sizeof battery - 1 }, { screen, sizeof screen - 1 } };
+    check_packets(mixed, 2, MODULES_DISPLAY | MODULES_POWER, 0);
+
     /* Processed udev events only wake init's input refresh. Their properties
      * must not replay driver loads or produce another DRM handover. */
     CHECK("libudev\0binary\0ACTION=add\0SUBSYSTEM=drm\0HOTPLUG=1\0MODALIAS=test:udev\0", 0, 0);
@@ -164,6 +177,7 @@ int main(void)
     check_packets(NULL, 0, 0, 0);
     receive_error = EBADF;
     check_packets(NULL, 0, 0, 0);
-    puts("modules_event: DRM topology (leases and replays are not), alias loading, queue drain and bounds passed.");
+    puts("PASS modules_event: DRM topology (leases and replays are not), power_supply changes, alias loading, "
+         "queue drain and bounds");
     return 0;
 }

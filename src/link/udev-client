@@ -14,10 +14,11 @@
 # that appears on the host only passes through it, to locachy-net (the preset
 # 90-locachy-network.rules). Interfaces are numbered per namespace, and the
 # kernel tells a namespace only of its own: the two databases must not mix.
-# Once it runs, every device but the network's is announced to it
-# (coldplug), as at a systemd boot; a program that needs some devices
-# described asks for them itself (udevadm trigger --settle), so nothing
-# waits on this script.
+# Once it runs, every device is announced to it (coldplug), as at a systemd
+# boot (systemd-udev-trigger.service): the interfaces still on the host too,
+# those that appeared while it was not there to pass them on; a program that
+# needs some devices described asks for them itself (udevadm trigger
+# --settle), so nothing waits on this script.
 set -eu
 
 mkdir -p /run/udev
@@ -28,7 +29,7 @@ until [ -S /run/udev/control ]; do
     sleep 0.05
 done
 udevadm trigger --type=subsystems --action=add --subsystem-nomatch=net
-udevadm trigger --type=devices --action=add --subsystem-nomatch=net
+udevadm trigger --type=devices --action=add
 udevadm settle --timeout=30 || true
 printf '<6>udev-client: devices described\n' >/dev/kmsg
 wait "$udevd"

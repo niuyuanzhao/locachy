@@ -18,7 +18,8 @@
  * - Notifications: org.freedesktop.Notifications on the same buses; popups at
  *   the top right of the focused window's screen, the container marked in the
  *   window list (no icons, action buttons, sound or history).
- * - Keyboard: reads /dev/input/event* for rc.conf's keys (key_ime, the
+ * - Keyboard: reads the keyboards process 1 lends with the seat (seat passes
+ *   them on; it opens none itself) for rc.conf's keys (key_ime, the
  *   volume keys; key_home and key_lock while it holds the keyboard, read
  *   again each time the seat comes back). In the CN/EN input
  *   modes it grabs the keyboard (EVIOCGRAB), composes through base/ime.c,
@@ -28,8 +29,8 @@
  *   set) switches Chinese mode's punctuation between full width (where it
  *   starts: default.custom.yaml's table only) and half width (every key as
  *   typed). While
- *   locachy-seat has released the seat (home is on the screen) it ignores the
- *   keyboard.
+ *   locachy-seat has released the seat (home is on the screen) it has no
+ *   keyboard: process 1 has revoked what it lent.
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -46,6 +47,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
@@ -342,7 +344,7 @@ struct tray_item {
 struct tray {
     char name[OPEN_NAME];
     char ids[MAX_TRAY_IDS][OPEN_WINDOW_ID]; /* its windows' app ids */
-    int nids, seen, connecting;
+    int nids, seen, connecting, frozen;
     double retry_at;
     GDBusConnection *conn;
     guint own, object;
@@ -691,15 +693,47 @@ static int container_frozen(const char *name)
     return strstr(text, "frozen 1") != NULL;
 }
 
-/* The buses there are, every quarter of a second: a container waits for the
- * watcher before its program starts, so that the program finds it. A frozen
- * container is left alone; asynchronous throughout, so a frozen bus cannot
- * hold the bar. */
+/* The buses there are, looked at again when something there changes
+ * (inotify(7) on TRAY_DIR, each container's directory and bus directory,
+ * and its cgroup.events, which changes when it is frozen or thawed:
+ * cgroup-v2.rst) and when a connection's retry is due; every quarter of a
+ * second without inotify. A container waits for the watcher before its
+ * program starts, so that the program finds it. A frozen container is left
+ * alone; asynchronous throughout, so a frozen bus cannot hold the bar. */
+static int tray_watch = -2; /* the inotify descriptor; -2: not made yet, -1: none */
+static int tray_watching;   /* TRAY_DIR watched (process 1 makes it at boot) */
+static int tray_changed = 1;
+
+static void tray_watch_add(const char *path, uint32_t mask)
+{
+    if (tray_watch >= 0) inotify_add_watch(tray_watch, path, mask);
+}
+
+/* When tray_scan should look again (uptime), or -1: only at a change. */
+static double tray_due(void)
+{
+    if (!tray_watching || tray_changed) return tray_scanned + 0.25;
+    double due = -1;
+    for (struct tray *t = trays; t; t = t->next) {
+        if (!t->conn && !t->connecting && !t->frozen && (due < 0 || t->retry_at < due)) due = t->retry_at;
+    }
+    return due;
+}
+
 static void tray_scan(void)
 {
-    if (uptime() - tray_scanned < 0.25) {
+    if (tray_watch == -2) {
+        tray_watch = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    }
+    if (tray_watch >= 0 && !tray_watching) { /* without it, scanned as before */
+        tray_watching = inotify_add_watch(tray_watch, TRAY_DIR, IN_CREATE | IN_DELETE | IN_MOVED_TO |
+                                          IN_MOVED_FROM | IN_ONLYDIR) >= 0;
+    }
+    double due = tray_due();
+    if (due < 0 || uptime() < due) {
         return;
     }
+    tray_changed = 0;
     tray_scanned = uptime();
     for (struct tray *t = trays; t; t = t->next) {
         t->seen = 0;
@@ -712,6 +746,13 @@ static void tray_scan(void)
         if (e->d_name[0] == '.' || strlen(e->d_name) >= OPEN_NAME) {
             continue;
         }
+        /* Watched until they go (a removed directory's watch ends with it). */
+        snprintf(path, sizeof path, TRAY_DIR "/%s", e->d_name);
+        tray_watch_add(path, IN_CREATE | IN_MOVED_TO | IN_ONLYDIR);
+        snprintf(path, sizeof path, TRAY_DIR "/%s/bus", e->d_name);
+        tray_watch_add(path, IN_CREATE | IN_DELETE | IN_MOVED_TO | IN_MOVED_FROM | IN_ONLYDIR);
+        snprintf(path, sizeof path, "/sys/fs/cgroup/app_%.63s/cgroup.events", e->d_name);
+        tray_watch_add(path, IN_MODIFY);
         snprintf(path, sizeof path, TRAY_DIR "/%s/bus/bus", e->d_name);
         if (stat(path, &st) != 0 || !S_ISSOCK(st.st_mode)) {
             continue;
@@ -727,7 +768,8 @@ static void tray_scan(void)
             continue;
         }
         t->seen = 1;
-        if (!t->conn && !t->connecting && uptime() >= t->retry_at && !container_frozen(t->name)) {
+        t->frozen = container_frozen(t->name);
+        if (!t->conn && !t->connecting && uptime() >= t->retry_at && !t->frozen) {
             char address[400];
             snprintf(address, sizeof address, "unix:path=%s", path);
             t->connecting = 1;
@@ -2027,6 +2069,7 @@ static void vkbd_type_utf8(const char *s)
 static uint8_t kbd_down[MAX_KBDS][KEY_MAX + 1];
 static uint8_t kbd_forwarded[MAX_KBDS][KEY_MAX + 1]; /* the layout it went through, + 1; 0: not passed on */
 static uint8_t kbd_caps[MAX_KBDS][KEY_MAX + 1]; /* this press is Caps (JIS: Shift+Eisu), through its release */
+static uint8_t kbd_dropping[MAX_KBDS]; /* its queue overflowed: dropping up to the next SYN_REPORT */
 static int grabbed, want_grab;
 static int keys_down;
 static int shift, ctrl, alt, meta, altgr; /* altgr: right Alt where the layout makes it AltGr */
@@ -2083,16 +2126,14 @@ static void reconcile_keyboards(const int *next, int nnext)
     memcpy(held, kbd_down, sizeof held);
     memcpy(forwarded, kbd_forwarded, sizeof forwarded);
     memcpy(capkeys, kbd_caps, sizeof capkeys);
-    if (next) {
-        nkbds = nnext > MAX_KBDS ? MAX_KBDS : nnext;
-        memcpy(kbds, next, (size_t)nkbds * sizeof *kbds);
-    } else {
-        keys_refresh(); /* Includes separate brightness, audio and vendor devices. */
-        nkbds = keys_fds(kbds, MAX_KBDS);
-    }
+    /* As process 1 lends them: its keyboards include the separate brightness,
+     * audio and vendor key devices. */
+    nkbds = nnext > MAX_KBDS ? MAX_KBDS : nnext;
+    memcpy(kbds, next, (size_t)nkbds * sizeof *kbds);
     memset(kbd_down, 0, sizeof kbd_down);
     memset(kbd_forwarded, 0, sizeof kbd_forwarded);
     memset(kbd_caps, 0, sizeof kbd_caps);
+    memset(kbd_dropping, 0, sizeof kbd_dropping);
     int changed = nold != nkbds, removed[MAX_KBDS] = { 0 }, kept[MAX_KBDS] = { 0 };
     for (int i = 0; i < nold; i++) {
         int found = 0;
@@ -2140,9 +2181,75 @@ static void reconcile_keyboards(const int *next, int nnext)
     }
 }
 
-static void open_keyboards(void)
+/* The keyboards process 1 lends with the seat, passed on by seat
+ * (LOCACHY_BAR_KEYS): the bar opens no input device itself, so what process
+ * 1 revokes when it takes the seat back (EVIOCREVOKE, which also ends a
+ * grab) the bar can no longer read. */
+static int keys_link = -1;
+
+static int keyboard_alive(int fd)
 {
-    reconcile_keyboards(NULL, 0);
+    int version;
+    return ioctl(fd, EVIOCGVERSION, &version) >= 0;
+}
+
+/* fds: the keyboards lent now. One of the same device already held, and not
+ * revoked, keeps its queue and state, as keys_update does in the programs; a
+ * new one starts empty, as libinput drains a device it adds
+ * (evdev_drain_fd). The others are closed. */
+static void take_keyboards(const int *fds, int n)
+{
+    int next[MAX_KBDS], nnext = 0, old[MAX_KBDS], nold = nkbds, used[MAX_KBDS] = { 0 };
+    memcpy(old, kbds, sizeof old);
+    for (int i = 0; i < n; i++) {
+        int k;
+        for (k = 0; k < nold; k++) {
+            if (!used[k] && input_same(old[k], fds[i]) && keyboard_alive(old[k])) break;
+        }
+        if (k < nold) {
+            used[k] = 1;
+            next[nnext++] = old[k];
+            if (fds[i] != old[k]) close(fds[i]);
+        } else if (nnext < MAX_KBDS) {
+            struct input_event ev;
+            while (read(fds[i], &ev, sizeof ev) == sizeof ev) {
+            }
+            next[nnext++] = fds[i];
+        } else {
+            close(fds[i]);
+        }
+    }
+    reconcile_keyboards(next, nnext);
+    for (int k = 0; k < nold; k++) {
+        if (!used[k]) close(old[k]);
+    }
+}
+
+/* seat's message: "keys" and the keyboards; its end closed, none. */
+static void keyboards_message(void)
+{
+    char msg[CONTROL_MAX];
+    int fds[CONTROL_MAX_FDS], n = 0;
+    int len = control_recv(keys_link, msg, sizeof msg, fds, &n);
+    if (len <= 0) {
+        close(keys_link);
+        keys_link = -1;
+        take_keyboards(NULL, 0);
+    } else if (strcmp(msg, "keys") == 0) {
+        take_keyboards(fds, n);
+    } else {
+        for (int i = 0; i < n; i++) close(fds[i]);
+    }
+}
+
+/* A keyboard revoked or unplugged (POLLHUP, POLLERR): the others kept. */
+static void drop_dead_keyboards(void)
+{
+    int alive[MAX_KBDS], n = 0;
+    for (int i = 0; i < nkbds; i++) {
+        if (keyboard_alive(kbds[i])) alive[n++] = kbds[i];
+    }
+    take_keyboards(alive, n);
 }
 
 /* Each layout's keys passed on, released; its modifiers none; the seat's
@@ -2190,6 +2297,19 @@ static void set_grab(int on)
 }
 
 
+/* The signals wake the main loop through a pipe: it may wait without a
+ * timeout, and a signal between keyboard_signals and poll would otherwise
+ * wait for the next event. */
+static int wake_pipe[2] = { -1, -1 };
+
+static void wake(void)
+{
+    int saved = errno;
+    if (wake_pipe[1] >= 0 && write(wake_pipe[1], "", 1) < 0) {
+    }
+    errno = saved;
+}
+
 /* locachy-seat: the seat has been released (home is on the screen). */
 static void on_sigusr2(int sig)
 {
@@ -2200,6 +2320,7 @@ static void on_sigusr2(int sig)
     grabbed = 0;
     sig_release = 1;
     active = 0;
+    wake();
 }
 
 /* locachy-seat: the seat is back. */
@@ -2208,6 +2329,7 @@ static void on_sigusr1(int sig)
     (void)sig;
     sig_regrab = 1;
     active = 1;
+    wake();
 }
 
 /* Settings may change the layouts while a direct program owns the seat.
@@ -2216,10 +2338,14 @@ static void on_sighup(int sig)
 {
     (void)sig;
     sig_reload = 1;
+    wake();
 }
 
 static void register_keyboard_signals(void)
 {
+    if (wake_pipe[0] < 0 && pipe2(wake_pipe, O_NONBLOCK | O_CLOEXEC) < 0) {
+        say("locachy-bar: no wake pipe: %s", strerror(errno));
+    }
     signal(SIGUSR2, on_sigusr2);
     signal(SIGUSR1, on_sigusr1);
     signal(SIGHUP, on_sighup); /* settings changes configuration, not seat ownership */
@@ -3260,10 +3386,46 @@ static int drain_ime_commit(int epoch)
     return epoch == input_epoch;
 }
 
+/* The next event of keyboard fd (device: its index). After a queue
+ * overflow (SYN_DROPPED) the events up to the next SYN_REPORT are dropped
+ * (event-codes.rst), and a key down here but up in the kernel now
+ * (EVIOCGKEY) comes as a release, as libevdev's sync_key_state makes one:
+ * no key is left down in the focused window. */
+static int next_kbd_event(int fd, int device, struct input_event *ev)
+{
+    static struct input_event released[KEY_MAX + 1];
+    static int nreleased;
+    for (;;) {
+        if (nreleased > 0) {
+            *ev = released[--nreleased];
+            return 1;
+        }
+        if (read(fd, ev, sizeof *ev) != sizeof *ev) return 0;
+        if (device < 0) return 1;
+        if (ev->type == EV_SYN && ev->code == SYN_DROPPED) {
+            kbd_dropping[device] = 1;
+            continue;
+        }
+        if (!kbd_dropping[device]) return 1;
+        if (ev->type != EV_SYN || ev->code != SYN_REPORT) continue;
+        kbd_dropping[device] = 0;
+        unsigned long down[KEY_MAX / (8 * sizeof(long)) + 1] = { 0 };
+        if (ioctl(fd, EVIOCGKEY(sizeof down), down) < 0) continue;
+        for (int code = 1; code <= KEY_MAX; code++) {
+            int kernel = (down[code / (8 * sizeof(long))] >> (code % (8 * sizeof(long)))) & 1;
+            if (kbd_down[device][code] && !kernel) {
+                released[nreleased++] = (struct input_event){ .type = EV_KEY, .code = (unsigned short)code };
+            }
+        }
+    }
+}
+
 static void handle_kbd_event(int fd)
 {
     struct input_event ev;
-    while (read(fd, &ev, sizeof ev) == sizeof ev) {
+    int index = -1;
+    for (int i = 0; i < nkbds; i++) if (kbds[i] == fd) index = i;
+    while (next_kbd_event(fd, index, &ev)) {
         if (ev.type != EV_KEY || !active || ev.code > KEY_MAX || !nlayouts || ev.value < 0 || ev.value > 2) continue;
         int device = -1;
         for (int i = 0; i < nkbds; i++) if (kbds[i] == fd) device = i;
@@ -3521,6 +3683,39 @@ static const struct wl_registry_listener reg_listener = {
     .global_remove = reg_remove,
 };
 
+/* How long the loop may wait (ms; -1: for an event): until the earliest of
+ * the deadlines the ticks keep (a notice's end, a tray or bus retry, a
+ * question's, a notification's, a bar surface asked again), and while the
+ * shared display is on the screen the clock's next second. Released, the
+ * bar draws nothing and wakes only for events. */
+static int wait_ms(void)
+{
+    double now = uptime(), next = -1;
+#define DUE(t) do { double t_ = (t); if (next < 0 || t_ < next) next = t_; } while (0)
+    if (toast_active) DUE(toast_expire);
+    double tray = tray_due();
+    if (tray >= 0) DUE(tray);
+    if (!host_notes.conn && !host_notes.connecting) DUE(host_notes.retry_at);
+    if (again.watch[0]) DUE(again.watch_until);
+    if (again.pending && !again.shown) DUE(active && choose.client < 0 ? now : again.until);
+    for (int i = 0; active && i < nnotes; i++) {
+        if (notes[i].time > 0 && notes[i].shown_at > 0) DUE(notes[i].shown_at + notes[i].time / 1000.0);
+    }
+    for (struct bar *b = bars; b; b = b->next) {
+        if (!b->surf) DUE(b->since + 1.0);
+        else if (b->configured && !b->shown && b->retries < 3) DUE(b->since + 3.0);
+    }
+#undef DUE
+    int ms = next < 0 ? -1 : next <= now ? 0 : (int)((next - now) * 1000) + 1;
+    if (active) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        int second = 1000 - (int)(ts.tv_nsec / 1000000);
+        if (ms < 0 || second < ms) ms = second;
+    }
+    return ms;
+}
+
 int main(void)
 {
     for (int tries = 0; tries < 50; tries++) {
@@ -3541,7 +3736,15 @@ int main(void)
     if (!nlayouts) return 1;
     load_width_keys();
     ime_init(NULL, NULL);
-    open_keyboards();
+    const char *link = getenv("LOCACHY_BAR_KEYS");
+    keys_link = link && *link ? atoi(link) : -1;
+    unsetenv("LOCACHY_BAR_KEYS");
+    if (keys_link < 3) {
+        keys_link = -1;
+        say("locachy-bar: no keyboards from seat (LOCACHY_BAR_KEYS): key_ime and the volume keys do nothing");
+    } else {
+        fcntl(keys_link, F_SETFD, FD_CLOEXEC);
+    }
     register_keyboard_signals();
 
     if (vkbd_mgr && wl_seat_obj) {
@@ -3555,39 +3758,46 @@ int main(void)
     bar_listen();
 
     int wl_fd = wl_display_get_fd(display);
-    double last_top = 0, last_keyboards = 0;
+    time_t last_second = 0;
     /* GLib's sources (the tray's D-Bus connections) are polled here too. */
     GMainContext *gctx = g_main_context_default();
     g_main_context_acquire(gctx);
 
     for (;;) {
         keyboard_signals();
-        if (active && uptime() - last_keyboards >= 1.0) {
-            open_keyboards();
-            last_keyboards = uptime();
-        }
         wl_display_flush(display);
         GPollFD gfds[32];
         gint gmax, gtimeout;
         g_main_context_prepare(gctx, &gmax);
         int ngfds = g_main_context_query(gctx, gmax, &gtimeout, gfds, 32);
         ngfds = ngfds > 32 ? 32 : ngfds;
-        struct pollfd p[3 + MAX_KBDS + 32];
-        int nbase = 3 + nkbds;
+        struct pollfd p[4 + MAX_KBDS + 32 + 2];
+        int nbase = 4 + nkbds;
         p[0] = (struct pollfd){ .fd = wl_fd, .events = POLLIN };
         p[1] = (struct pollfd){ .fd = open_fd, .events = POLLIN }; /* -1: ignored */
         p[2] = (struct pollfd){ .fd = bar_fd, .events = POLLIN };
+        p[3] = (struct pollfd){ .fd = keys_link, .events = POLLIN };
         for (int i = 0; i < nkbds; i++) {
-            p[3 + i] = (struct pollfd){ .fd = kbds[i], .events = POLLIN };
+            p[4 + i] = (struct pollfd){ .fd = kbds[i], .events = POLLIN };
         }
         for (int i = 0; i < ngfds; i++) {
             p[nbase + i] = (struct pollfd){ .fd = gfds[i].fd, .events = (short)gfds[i].events };
         }
-        int timeout = toast_active ? 50 : 250; /* 250: the tray looks for new buses */
-        if (gtimeout >= 0 && gtimeout < timeout) {
+        p[nbase + ngfds] = (struct pollfd){ .fd = tray_watch, .events = POLLIN }; /* -1, -2: ignored */
+        p[nbase + ngfds + 1] = (struct pollfd){ .fd = wake_pipe[0], .events = POLLIN };
+        int timeout = wait_ms();
+        if (gtimeout >= 0 && (timeout < 0 || gtimeout < timeout)) {
             timeout = gtimeout;
         }
-        int polled = poll(p, (nfds_t)(nbase + ngfds), timeout);
+        int polled = poll(p, (nfds_t)(nbase + ngfds + 2), timeout);
+        char drain[4096];
+        if (polled > 0 && (p[nbase + ngfds].revents & POLLIN)) {
+            while (read(tray_watch, drain, sizeof drain) > 0) {
+            }
+            tray_changed = 1;
+        }
+        while (polled > 0 && (p[nbase + ngfds + 1].revents & POLLIN) && read(wake_pipe[0], drain, sizeof drain) > 0) {
+        }
         for (int i = 0; i < ngfds; i++) {
             gfds[i].revents = polled > 0 ? (gushort)p[nbase + i].revents : 0;
         }
@@ -3607,10 +3817,18 @@ int main(void)
         if (p[2].revents & POLLIN) {
             bar_request();
         }
-        for (int i = 0; i < nkbds; i++) {
-            if (p[3 + i].revents & POLLIN) {
+        int dead = 0, held = nkbds;
+        for (int i = 0; i < held; i++) {
+            if (p[4 + i].revents & POLLIN) {
                 handle_kbd_event(kbds[i]);
             }
+            dead |= (p[4 + i].revents & (POLLHUP | POLLERR | POLLNVAL)) != 0;
+        }
+        if (dead) {
+            drop_dead_keyboards();
+        }
+        if (p[3].revents & (POLLIN | POLLHUP | POLLERR)) {
+            keyboards_message(); /* after the keys already queued */
         }
         if (choose.client >= 0 && !active) { /* home came to the front meanwhile */
             answer(choose.client, "error the shared display left the screen%s", "");
@@ -3624,9 +3842,12 @@ int main(void)
         again_tick();
         notes_tick();
         check_bars();
-        if (bars_dirty || uptime() - last_top >= 1.0) {
+        /* The clock's second changed (only while on the screen), or a change
+         * to show. */
+        time_t second = time(NULL);
+        if (bars_dirty || (active && second != last_second)) {
             bars_dirty = 0;
-            last_top = uptime();
+            last_second = second;
             render_bars();
             overlays_follow();
         }

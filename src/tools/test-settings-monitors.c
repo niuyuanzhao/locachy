@@ -46,6 +46,7 @@ static struct passwd *fixture_getpwuid(uid_t);
 #define main settings_main
 #define SETTINGS_COMMAND_OUTPUT
 #define SETTINGS_KEYMAP_GENERATOR
+#define HW_DISABLE_DEV_IOCTL 1
 #define PACMAN_LOCAL "/fixture/pacman-local"
 #include "../progs/settings.c"
 #include "../base/ui.c"
@@ -170,6 +171,16 @@ static const char *map_path(const char *path, char *out, size_t size)
         snprintf(out, size, "%s/local-overrides.quirks%s", root, path + strlen(LOCAL_QUIRKS));
     else if (strcmp(path, APPS_CATALOG_INFO) == 0) /* the app presets installed: absent unless a test writes it */
         snprintf(out, size, "%s/apps-CATALOG", root);
+    else if (strcmp(path, "/etc/os-release") == 0)
+        snprintf(out, size, "%s/os-release", root);
+    else if (strcmp(path, "/var/lib/locachy/source-commit") == 0)
+        snprintf(out, size, "%s/source-commit", root);
+    else if (strcmp(path, "/var/lib/locachy/battery") == 0 || strncmp(path, "/var/lib/locachy/battery/", 25) == 0)
+        snprintf(out, size, "%s/battery%s", root, path + 24);
+    else if (strcmp(path, "/usr/share/hwdata") == 0 || strncmp(path, "/usr/share/hwdata/", 18) == 0)
+        snprintf(out, size, "%s/hwdata%s", root, path + 17);
+    else if (strcmp(path, "/sys") == 0 || strncmp(path, "/sys/", 5) == 0)
+        snprintf(out, size, "%s/sys%s", root, path + 4);
     else if (strcmp(path, "/proc") == 0 || strncmp(path, "/proc/", 6) == 0) /* the programs told */
         snprintf(out, size, "%s/proc%s", root, path + 5);
     else { fprintf(stderr, "Unexpected file access: %s\n", path); abort(); }
@@ -537,7 +548,10 @@ static void test_circular(void)
     char text[1024], path[1400];
     snprintf(path, sizeof path, "%s/local-overrides.quirks", root);
     assert(circ_index() == tnet_index() + 1 && imek_index() == circ_index() + 3 &&
-           system_keymap_index() == imek_index() + NIME_KEYS && kb_index() == system_keymap_index() + 1 && num_hw_items() == kb_index() + nkeyboards_seen);
+           system_keymap_index() == imek_index() + NIME_KEYS && kb_index() == system_keymap_index() + 1 &&
+           bat_page_index() == kb_index() + nkeyboards_seen && bat_thresh_index() == bat_page_index() + 1 &&
+           hwinfo_index() == bat_thresh_index() + power_thresh_count() && hwcopy_index() == hwinfo_index() + 1 &&
+           num_hw_items() == hwcopy_index() + 1);
     on_rc("touchpad_circular", "0", NULL);
     assert(circular == 0);
     on_rc("touchpad_circular", "yes", NULL);
@@ -783,6 +797,388 @@ static void read_fixture(const char *relative, char *out, size_t size)
     size_t n = fread(out, 1, size - 1, f);
     out[n] = '\0';
     assert(fclose(f) == 0);
+}
+
+static char clip_buf[8192];
+int clipboard_set(int primary, const void *text, size_t size)
+{
+    (void)primary;
+    size_t n = size < sizeof clip_buf - 1 ? size : sizeof clip_buf - 1;
+    memcpy(clip_buf, text, n);
+    clip_buf[n] = '\0';
+    return 0;
+}
+
+static void mkp(const char *rel)
+{
+    char full[1400], cur[1400];
+    snprintf(full, sizeof full, "%s/%s", root, rel);
+    size_t len = strlen(full);
+    for (size_t i = 1; i <= len; i++) {
+        if (full[i] == '/' || full[i] == '\0') {
+            memcpy(cur, full, i);
+            cur[i] = '\0';
+            (void)mkdir(cur, 0700);
+        }
+    }
+}
+
+static void file_bytes(const char *rel, const void *data, size_t n)
+{
+    char path[1400];
+    snprintf(path, sizeof path, "%s/%s", root, rel);
+    FILE *f = fopen(path, "wb");
+    assert(f && fwrite(data, 1, n, f) == n && fclose(f) == 0);
+}
+
+static void test_power_and_hwinfo(void)
+{
+    int page_before = settings_page;
+    settings_page = 1;
+    test_cols = 120;
+    test_rows = 36;
+
+    /* 1. Populate sysfs power_supply (AC + inserted BAT0 with thresholds + peripheral mouse)
+     *    and saved history/meta with a swapped-out spare pack and SWAP handoff event. */
+    mkp("sys/class/power_supply/AC");
+    file_text("sys/class/power_supply/AC/type", "Mains\n");
+    file_text("sys/class/power_supply/AC/online", "1\n");
+    file_text("sys/class/power_supply/AC/voltage_now", "20000000\n");
+
+    mkp("sys/class/power_supply/BAT0");
+    file_text("sys/class/power_supply/BAT0/type", "Battery\n");
+    file_text("sys/class/power_supply/BAT0/present", "1\n");
+    file_text("sys/class/power_supply/BAT0/status", "Charging\n");
+    file_text("sys/class/power_supply/BAT0/manufacturer", "LGC\n");
+    file_text("sys/class/power_supply/BAT0/model_name", "45N1111\n");
+    file_text("sys/class/power_supply/BAT0/serial_number", "4102\n");
+    file_text("sys/class/power_supply/BAT0/technology", "Li-ion\n");
+    file_text("sys/class/power_supply/BAT0/energy_now", "44100000\n");
+    file_text("sys/class/power_supply/BAT0/energy_full", "52400000\n");
+    file_text("sys/class/power_supply/BAT0/energy_full_design", "56700000\n");
+    file_text("sys/class/power_supply/BAT0/power_now", "18500000\n");
+    file_text("sys/class/power_supply/BAT0/voltage_now", "12150000\n");
+    file_text("sys/class/power_supply/BAT0/voltage_min_design", "11100000\n");
+    file_text("sys/class/power_supply/BAT0/cycle_count", "142\n");
+    file_text("sys/class/power_supply/BAT0/temp", "315\n");
+    file_text("sys/class/power_supply/BAT0/charge_control_start_threshold", "75\n");
+    file_text("sys/class/power_supply/BAT0/charge_control_end_threshold", "80\n");
+
+    mkp("sys/class/power_supply/hidpp_battery_0");
+    file_text("sys/class/power_supply/hidpp_battery_0/type", "Battery\n");
+    file_text("sys/class/power_supply/hidpp_battery_0/scope", "Device\n");
+    file_text("sys/class/power_supply/hidpp_battery_0/present", "1\n");
+    file_text("sys/class/power_supply/hidpp_battery_0/model_name", "TrackPoint BT\n");
+    file_text("sys/class/power_supply/hidpp_battery_0/capacity", "90\n");
+    file_text("sys/class/power_supply/hidpp_battery_0/status", "Discharging\n");
+
+    mkp("battery");
+    int64_t t_now = (int64_t)time(NULL);
+    power_now_override = t_now;
+    {
+        char meta[512], hist[1024], ev[256];
+        snprintf(meta, sizeof meta,
+                 "pack_id=SANYO_45N1029_8899\nslot=BAT0\ninserted=0\nlast_seen=%lld\n"
+                 "vendor=SANYO\nmodel=45N1029\nserial=8899\ntechnology=Li-ion\n"
+                 "capacity_decipct=182\nenergy_now_mwh=9100\nenergy_full_mwh=50000\n"
+                 "energy_design_mwh=56700\nvoltage_design_mv=11100\ncycles=310\n",
+                 (long long)(t_now - 1800));
+        file_text("battery/SANYO_45N1029_8899.meta", meta);
+        snprintf(hist, sizeof hist,
+                 "%lld\t420\t12400\t21000\t11400\tD\t0\n"
+                 "%lld\t182\t11800\t9100\t10900\tD\t0\n"
+                 "%lld\t182\t0\t9100\t0\tR\t1\n",
+                 (long long)(t_now - 3600), (long long)(t_now - 1801), (long long)(t_now - 1800));
+        file_text("battery/SANYO_45N1029_8899.tsv", hist);
+
+        /* Active pack history with a 2-hour sleep gap */
+        snprintf(hist, sizeof hist,
+                 "%lld\t650\t9200\t34000\t11600\tD\t0\n"
+                 "%lld\t620\t0\t32500\t11500\tC\t1\n"
+                 "%lld\t800\t16000\t42000\t12050\tC\t1\n",
+                 (long long)(t_now - 10800), (long long)(t_now - 1800), (long long)(t_now - 600));
+        file_text("battery/LGC_45N1111_4102.tsv", hist);
+
+        snprintf(ev, sizeof ev, "SWAP\t%lld\tBAT0\tSANYO_45N1029_8899\t182\tLGC_45N1111_4102\t620\n",
+                 (long long)(t_now - 1800));
+        file_text("battery/events.tsv", ev);
+    }
+
+    power_refresh_devices();
+    assert(npower_devs == 3 && power_thresh_count() == 2);
+    assert(!strcmp(power_devs[0].pack_id, "LGC_45N1111_4102") && !power_devs[0].is_offline_pack);
+    assert(!strcmp(power_devs[1].pack_id, "SANYO_45N1029_8899") && power_devs[1].is_offline_pack);
+    assert(power_devs[2].is_peripheral);
+
+    show_category(CAT_POWER, 1);
+    draw();
+    assert(category == CAT_POWER && canvas_has("Power & Battery") && canvas_has("Battery curves & health"));
+    assert(canvas_has("Charge start threshold") && canvas_has("Charge stop threshold"));
+    assert(canvas_has("Lid Close Holdoff") && canvas_has("Critical Battery Level"));
+    assert(canvas_has("+1 spare") && canvas_has("Spare (removed)") && canvas_has("Last handoff:"));
+
+    /* Power management: lid holdoff, critical battery */
+    rc_log[0] = '\0';
+    selected = tp_present ? 5 : 2; /* lid holdoff: 30 s -> 35 s */
+    adjust(+1);
+    assert(rc_lid_holdoff == 35 && strstr(rc_log, "lid_holdoff=35;"));
+    selected = tp_present ? 6 : 3; /* critical battery: 5% -> 6% */
+    adjust(+1);
+    assert(rc_battery_critical == 6 && strstr(rc_log, "battery_critical=6;"));
+
+    /* Search '/' finds both battery curves and SMART */
+    snprintf(search, sizeof search, "%s", "SMART");
+    build_entries();
+    assert(first_setting() == hwinfo_index());
+    search[0] = '\0';
+
+    /* Threshold adjustment & EC-safe persistence */
+    rc_log[0] = '\0';
+    selected = bat_thresh_index() + 1; /* stop threshold: 80% -> 85% */
+    adjust(+1);
+    char th_val[32];
+    read_fixture("sys/class/power_supply/BAT0/charge_control_end_threshold", th_val, sizeof th_val);
+    assert(atoi(th_val) == 85 && strstr(rc_log, "battery_charge_end=85;"));
+    selected = bat_thresh_index(); /* start threshold: 75% -> 80% */
+    adjust(+1);
+    read_fixture("sys/class/power_supply/BAT0/charge_control_start_threshold", th_val, sizeof th_val);
+    assert(atoi(th_val) == 80 && strstr(rc_log, "battery_charge_start=80;"));
+
+    /* Interactive battery curves subpage: modes, spans, cursor, spare pack tab, copy */
+    clip_buf[0] = '\0';
+    nkeys = keypos = 0;
+    keys[nkeys++] = 'm';     /* switch to Power (W) */
+    keys[nkeys++] = '1';     /* 1h span */
+    keys[nkeys++] = K_LEFT;  /* cursor active */
+    keys[nkeys++] = '\t';    /* switch to offline Spare pack SANYO_45N1029_8899 */
+    keys[nkeys++] = 'c';     /* copy battery report */
+    keys[nkeys++] = 27;      /* back */
+    power_curves_page();
+    assert(keypos == nkeys);
+    assert(strstr(clip_buf, "LGC_45N1111_4102") && strstr(clip_buf, "[Spare — SANYO_45N1029_8899] (removed)"));
+    assert(strstr(clip_buf, "Recent handoffs:") && strstr(clip_buf, "BAT0 swapped"));
+    puts("PASS Power & Battery: pack identity, spare pack retention, SWAP handoff markers, curves, cursor and EC thresholds");
+
+    /* 2. Populate hardware fixtures (CPU, Mem, SMBIOS Type 16/17, NVMe & ATA SMART,
+     *    EDID monitor, hwmon/RAPL sensors, PCI/USB hwdata, DMI) and exercise hwinfo_page. */
+    file_text("os-release", "PRETTY_NAME=\"LOCachy\"\n");
+    file_text("source-commit", "fbe2cb1f6a8283a1c198e4bfa3c3deabf406628e\n");
+    file_text("proc/cpuinfo",
+              "processor\t: 0\nvendor_id\t: GenuineIntel\ncpu family\t: 6\nmodel\t\t: 140\n"
+              "model name\t: 11th Gen Intel(R) Core(TM) i7-1185G7 @ 3.00GHz\nstepping\t: 1\n"
+              "microcode\t: 0xb4\ncpu cores\t: 4\n"
+              "flags\t\t: fpu cx16 lahf_lm popcnt sse4_1 sse4_2 ssse3 avx avx2 bmi1 bmi2 f16c fma abm movbe xsave aes vaes avx512f avx512bw avx512cd avx512dq avx512vl vmx\n\n");
+    file_text("proc/meminfo",
+              "MemTotal:       16384000 kB\nMemFree:         8000000 kB\n"
+              "MemAvailable:   12000000 kB\nBuffers:          256000 kB\n"
+              "Cached:          3500000 kB\nSReclaimable:     244000 kB\n"
+              "Shmem:            128000 kB\nSwapTotal:      16777216 kB\n"
+              "SwapFree:       16000000 kB\n");
+    mkp("sys/devices/system/cpu/cpu0/cache/index0");
+    file_text("sys/devices/system/cpu/cpu0/cache/index0/level", "1\n");
+    file_text("sys/devices/system/cpu/cpu0/cache/index0/type", "Data\n");
+    file_text("sys/devices/system/cpu/cpu0/cache/index0/size", "48K\n");
+    mkp("sys/devices/system/cpu/cpu0/cpufreq");
+    file_text("sys/devices/system/cpu/cpu0/cpufreq/scaling_driver", "intel_pstate\n");
+    file_text("sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", "powersave\n");
+    file_text("sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", "2400000\n");
+    file_text("sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq", "400000\n");
+    file_text("sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq", "4800000\n");
+    mkp("sys/devices/system/cpu/vulnerabilities");
+    file_text("sys/devices/system/cpu/vulnerabilities/meltdown", "Not affected\n");
+
+    /* Binary SMBIOS Type 16 (2 slots, 32 GiB max) + Type 17 (16 GiB LPDDR4-4267 + Empty) + Type 127 */
+    {
+        uint8_t dmi[256];
+        memset(dmi, 0, sizeof dmi);
+        size_t o = 0;
+        /* Type 16 */
+        dmi[o + 0] = 16; dmi[o + 1] = 0x17; dmi[o + 6] = 0x03;
+        uint32_t max_kb = 32u * 1024u * 1024u;
+        memcpy(dmi + o + 7, &max_kb, 4);
+        dmi[o + 13] = 2;
+        o += 0x17 + 2; /* double-NUL empty string set */
+        /* Type 17 #1: 16384 MiB LPDDR4-4267 SODIMM Samsung */
+        uint8_t *t17 = dmi + o;
+        t17[0] = 17; t17[1] = 0x28; t17[2] = 1;
+        uint16_t sz_mb = 16384;
+        memcpy(t17 + 0x0C, &sz_mb, 2);
+        t17[0x0E] = 0x0B; /* Row of chips */
+        t17[0x10] = 1;    /* "ChannelA-DIMM0" */
+        t17[0x12] = 0x1E; /* LPDDR4 */
+        uint16_t spd = 4267, mv = 1100;
+        memcpy(t17 + 0x15, &spd, 2);
+        t17[0x17] = 2;    /* "Samsung" */
+        t17[0x1A] = 3;    /* "K4U6E3S4AA-MGCL" */
+        t17[0x1B] = 2;    /* 2R */
+        memcpy(t17 + 0x20, &spd, 2);
+        memcpy(t17 + 0x26, &mv, 2);
+        o += 0x28;
+        const char s1[] = "ChannelA-DIMM0\0Samsung\0K4U6E3S4AA-MGCL\0";
+        memcpy(dmi + o, s1, sizeof s1);
+        o += sizeof s1;
+        /* Type 17 #2: Empty slot */
+        dmi[o + 0] = 17; dmi[o + 1] = 0x15; dmi[o + 0x10] = 1;
+        o += 0x15;
+        const char s2[] = "ChannelB-DIMM0\0";
+        memcpy(dmi + o, s2, sizeof s2);
+        o += sizeof s2;
+        /* Type 127 end */
+        dmi[o + 0] = 127; dmi[o + 1] = 4;
+        o += 6;
+        mkp("sys/firmware/dmi/tables");
+        file_bytes("sys/firmware/dmi/tables/DMI", dmi, o);
+    }
+
+    /* Block device nvme0n1 with 512-byte binary NVMe SMART health log */
+    mkp("sys/block/nvme0n1/device");
+    mkp("sys/block/nvme0n1/queue");
+    file_text("sys/block/nvme0n1/size", "1000215216\n");
+    file_text("sys/block/nvme0n1/device/model", "SAMSUNG MZVL2512HCJQ\n");
+    file_text("sys/block/nvme0n1/device/firmware_rev", "GXA7601Q\n");
+    file_text("sys/block/nvme0n1/queue/rotational", "0\n");
+    {
+        uint8_t nlog[512];
+        memset(nlog, 0, sizeof nlog);
+        uint16_t kelv = 311; /* 38 C */
+        memcpy(nlog + 1, &kelv, 2);
+        nlog[3] = 100; /* 100% spare */
+        nlog[4] = 10;
+        nlog[5] = 3;   /* 3% used -> 97% health */
+        uint64_t u_rd = 25000000ULL, u_wr = 18000000ULL, pcyc = 412ULL, poh = 1850ULL;
+        memcpy(nlog + 32, &u_rd, 8);
+        memcpy(nlog + 48, &u_wr, 8);
+        memcpy(nlog + 112, &pcyc, 8);
+        memcpy(nlog + 128, &poh, 8);
+        file_bytes("sys/block/nvme0n1/smart_nvme.bin", nlog, sizeof nlog);
+    }
+
+    /* Connected DRM EDID (128-byte Panasonic MEI 2160x1440 @ 60Hz 14.0" 3:2 panel) */
+    mkp("hwdata");
+    file_text("hwdata/pnp.ids", "MEI\tPanasonic Industry Company\n");
+    file_text("hwdata/pci.ids",
+              "8086  Intel Corporation\n\t9a49  TigerLake-LP GT2 [Iris Xe Graphics]\n"
+              "C 03  Display controller\n\t00  VGA compatible controller\n");
+    file_text("hwdata/usb.ids",
+              "04f2  Chicony Electronics Co., Ltd\n\tb6d9  Integrated IR Camera\n");
+    {
+        uint8_t edid[128];
+        memset(edid, 0, sizeof edid);
+        const uint8_t hdr[8] = { 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00 };
+        memcpy(edid, hdr, 8);
+        /* 'M'=13, 'E'=5, 'I'=9 -> (13<<10)|(5<<5)|9 = 0x34A9 BE */
+        edid[8] = 0x34; edid[9] = 0xA9;
+        edid[10] = 0x96; edid[11] = 0xA0;
+        edid[16] = 12; edid[17] = 31; /* week 12, 2021 */
+        edid[18] = 1; edid[19] = 4; edid[20] = 0xA5; /* digital, 8-bit, DP */
+        edid[21] = 30; edid[22] = 20; /* 30x20 cm = 14.2" */
+        /* DTD: 2160x1440 @ 60.00 Hz -> 203.93 MHz = 20393 * 10kHz, htotal=2320 (hblank=160), vtotal=1465 (vblank=25) */
+        uint16_t pclk = 20393;
+        memcpy(edid + 54, &pclk, 2);
+        edid[54 + 2] = 2160 & 0xFF;
+        edid[54 + 3] = 160 & 0xFF;
+        edid[54 + 4] = (((2160 >> 8) & 0x0F) << 4) | ((160 >> 8) & 0x0F);
+        edid[54 + 5] = 1440 & 0xFF;
+        edid[54 + 6] = 25 & 0xFF;
+        edid[54 + 7] = (((1440 >> 8) & 0x0F) << 4) | ((25 >> 8) & 0x0F);
+        /* Descriptor 2: 0xFE panel string */
+        edid[72 + 3] = 0xFE;
+        memcpy(edid + 72 + 5, "VVX14P048M00\n", 13);
+        file_bytes("drm/card9-HEADLESS-1/edid", edid, sizeof edid);
+    }
+
+    /* PCI, USB, hwmon, DMI fixtures */
+    mkp("sys/bus/pci/devices/0000:00:02.0");
+    file_text("sys/bus/pci/devices/0000:00:02.0/vendor", "0x8086\n");
+    file_text("sys/bus/pci/devices/0000:00:02.0/device", "0x9a49\n");
+    file_text("sys/bus/pci/devices/0000:00:02.0/class", "0x030000\n");
+    file_text("sys/bus/pci/devices/0000:00:02.0/current_link_speed", "16.0 GT/s PCIe\n");
+    file_text("sys/bus/pci/devices/0000:00:02.0/current_link_width", "4\n");
+
+    mkp("sys/bus/usb/devices/1-4");
+    file_text("sys/bus/usb/devices/1-4/idVendor", "04f2\n");
+    file_text("sys/bus/usb/devices/1-4/idProduct", "b6d9\n");
+    file_text("sys/bus/usb/devices/1-4/speed", "480\n");
+    file_text("sys/bus/usb/devices/1-4/bMaxPower", "500mA\n");
+
+    mkp("sys/class/hwmon/hwmon0");
+    file_text("sys/class/hwmon/hwmon0/name", "coretemp\n");
+    file_text("sys/class/hwmon/hwmon0/temp1_label", "Package id 0\n");
+    file_text("sys/class/hwmon/hwmon0/temp1_input", "47500\n");
+    file_text("sys/class/hwmon/hwmon0/temp1_crit", "100000\n");
+    file_text("sys/class/hwmon/hwmon0/fan1_label", "CPU Fan\n");
+    file_text("sys/class/hwmon/hwmon0/fan1_input", "2650\n");
+
+    mkp("sys/class/dmi/id");
+    file_text("sys/class/dmi/id/sys_vendor", "Panasonic Corporation\n");
+    file_text("sys/class/dmi/id/product_name", "CF-FV1RDAVS\n");
+    file_text("sys/class/dmi/id/bios_version", "V1.02L13\n");
+    file_text("sys/class/dmi/id/ec_firmware_release", "1.02\n");
+
+    about_summary_loaded = 0;
+    show_category(CAT_SYSTEM, 1);
+    draw();
+    assert(canvas_has("Panasonic Corporation CF-FV1RDAVS") && canvas_has("Hardware & system information"));
+    clip_buf[0] = '\0';
+    copy_system_summary_action();
+    assert(strstr(clip_buf, "CF-FV1RDAVS") && strstr(clip_buf, "i7-1185G7"));
+
+    /* Step through all 10 categories in hwinfo_page and verify parsed values */
+    hw_populate_category(HWCAT_CPU);
+    hw_cat = HWCAT_CPU;
+    hwinfo_draw();
+    assert(canvas_has("x86-64-v4") && canvas_has("48K") && canvas_has("intel_pstate"));
+
+    hw_populate_category(HWCAT_MEMORY);
+    hw_cat = HWCAT_MEMORY;
+    hwinfo_draw();
+    assert(canvas_has("16 GiB LPDDR4-4267") && canvas_has("Samsung K4U6E3S4AA-MGCL") && canvas_has("Empty"));
+
+    hw_populate_category(HWCAT_STORAGE);
+    hw_cat = HWCAT_STORAGE;
+    hwinfo_draw();
+    assert(canvas_has("SAMSUNG MZVL2512HCJQ") && canvas_has("97% remaining (3% endurance used") &&
+           canvas_has("1850 hours"));
+
+    hw_populate_category(HWCAT_GRAPHICS);
+    hw_cat = HWCAT_GRAPHICS;
+    hwinfo_draw();
+    assert(canvas_has("Iris Xe Graphics") && canvas_has("Panasonic Industry Company") &&
+           canvas_has("VVX14P048M00") && canvas_has("2160x1440 @ 60.00 Hz"));
+
+    hw_populate_category(HWCAT_SENSORS);
+    hw_cat = HWCAT_SENSORS;
+    hw_update_sensor_spark();
+    hwinfo_draw();
+    assert(canvas_has("Package id 0") && canvas_has("47.5") && canvas_has("2650 RPM"));
+
+    hw_populate_category(HWCAT_PCI);
+    hw_cat = HWCAT_PCI;
+    hwinfo_draw();
+    assert(canvas_has("00:02.0") && canvas_has("16.0 GT/s x4"));
+
+    hw_populate_category(HWCAT_USB);
+    hw_cat = HWCAT_USB;
+    hwinfo_draw();
+    assert(canvas_has("04f2:b6d9") && canvas_has("Chicony") && canvas_has("Integrated IR Camera"));
+
+    /* Full interactive loop navigation & copy */
+    clip_buf[0] = '\0';
+    nkeys = keypos = 0;
+    keys[nkeys++] = K_DOWN; /* Processor */
+    keys[nkeys++] = K_DOWN; /* Memory & Slots */
+    keys[nkeys++] = 'c';    /* copy Memory & Slots page */
+    keys[nkeys++] = 'q';    /* exit */
+    hwinfo_page();
+    assert(keypos == nkeys && strstr(clip_buf, "Samsung K4U6E3S4AA-MGCL"));
+
+    power_now_override = 0;
+    test_cols = 100;
+    test_rows = 35;
+    in_page = 0;
+    settings_page = page_before;
+    puts("PASS Hardware Information browser: CPU ISA/caches, SMBIOS Type 16/17 DIMMs, NVMe SMART, EDID panel, "
+         "hwmon live sensors, PCIe link speed and USB hwdata");
 }
 
 static void test_system_keymap(void)
@@ -1928,7 +2324,10 @@ int main(int argc, char **argv)
            upd_index() == mach_index() + 1 && boot_index() == upd_index() + 5 && opt_index() == boot_index() + 5 &&
            repo_index() == opt_index() + NOPT_MODULES && tnet_index() == repo_index() + NREPO_SECTIONS + 1 &&
            circ_index() == tnet_index() + 1 && imek_index() == circ_index() + 3 &&
-           system_keymap_index() == imek_index() + NIME_KEYS && kb_index() == system_keymap_index() + 1 && num_hw_items() == kb_index() + nkeyboards_seen);
+           system_keymap_index() == imek_index() + NIME_KEYS && kb_index() == system_keymap_index() + 1 &&
+           bat_page_index() == kb_index() + nkeyboards_seen && bat_thresh_index() == bat_page_index() + 1 &&
+           hwinfo_index() == bat_thresh_index() + power_thresh_count() && hwcopy_index() == hwinfo_index() + 1 &&
+           num_hw_items() == hwcopy_index() + 1);
     forks_before = forks;
     selected = ime_index();
     adjust(+1);
@@ -2001,6 +2400,7 @@ int main(int argc, char **argv)
     test_ime_keys();
     test_keyboards();
     test_system_keymap();
+    test_power_and_hwinfo();
     /* Line editing in prompts: cursor movement, Delete and Ctrl+U. */
     char edited[64] = "abc";
     size_t epos = strlen(edited);

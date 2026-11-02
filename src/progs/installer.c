@@ -2542,6 +2542,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "installer: no screen to use; locachy-install --help is the installer on the console\n");
         return 1;
     }
+    keys_leds(1); /* the console's keyboard, which showed Caps Lock, is off */
     keys_open();
     take_pointer();
     say("installer: started");

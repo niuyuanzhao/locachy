@@ -5,6 +5,7 @@
 #endif
 #include <assert.h>
 #include <dirent.h>
+#include <poll.h>
 #include <pwd.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -20,9 +21,13 @@ static int fixture_stat(const char *, struct stat *);
 static int fixture_mount(const char *, const char *, const char *, unsigned long, const void *);
 static int fixture_umount(const char *, int);
 static int fixture_mkdir(const char *, mode_t);
-static int fixture_rmdir(const char *);
 static int fixture_chown(const char *, uid_t, gid_t);
-static unsigned int fixture_sleep(unsigned int);
+static int fixture_fchown(int, uid_t, gid_t);
+static int fixture_unlinkat(int, const char *, int);
+static int fixture_poll(struct pollfd *, nfds_t, int);
+static char control_path[256];
+#define DRIVES_CONTROL control_path
+#define HOST_BUS "/nonexistent/bus"
 #define fopen fixture_fopen
 #define opendir fixture_opendir
 #define getpwuid fixture_user
@@ -30,9 +35,10 @@ static unsigned int fixture_sleep(unsigned int);
 #define mount fixture_mount
 #define umount2 fixture_umount
 #define mkdir fixture_mkdir
-#define rmdir fixture_rmdir
 #define chown fixture_chown
-#define sleep fixture_sleep
+#define fchown fixture_fchown
+#define unlinkat fixture_unlinkat
+#define poll fixture_poll
 #define main drives_main
 #include "../progs/drives.c"
 #undef main
@@ -43,9 +49,11 @@ static unsigned int fixture_sleep(unsigned int);
 #undef mount
 #undef umount2
 #undef mkdir
-#undef rmdir
 #undef chown
-#undef sleep
+#undef fchown
+#undef unlinkat
+#undef poll
+#include "i18n-stub.h"
 
 static char scratch[200], mount_table[16384];
 static int unmounts, removals, mounts;
@@ -98,10 +106,11 @@ static int fixture_umount(const char *path, int flags)
     return 0;
 }
 static int fixture_mkdir(const char *path, mode_t mode) { (void)path; (void)mode; return 0; }
-static int fixture_rmdir(const char *path) { (void)path; removals++; return 0; }
 static int fixture_chown(const char *path, uid_t uid, gid_t gid)
 { (void)path; (void)uid; (void)gid; return 0; }
-static unsigned int fixture_sleep(unsigned int seconds) { (void)seconds; stop = 1; return 0; }
+static int fixture_fchown(int fd, uid_t uid, gid_t gid) { (void)fd; (void)uid; (void)gid; return 0; }
+static int fixture_unlinkat(int fd, const char *path, int flags) { (void)fd; (void)path; (void)flags; removals++; return 0; }
+static int fixture_poll(struct pollfd *p, nfds_t n, int ms) { (void)p; (void)n; (void)ms; stop = 1; return 0; }
 static void table(const char *text) { snprintf(mount_table, sizeof mount_table, "%s", text); }
 static void reset(void)
 {
@@ -118,11 +127,16 @@ int main(int argc, char **argv)
     snprintf(path, sizeof path, "%s/Drives", scratch); assert(mkdir(path, 0700) == 0);
     snprintf(path, sizeof path, "%s/Drives/Cloud", scratch); assert(mkdir(path, 0700) == 0);
     snprintf(path, sizeof path, "%s/Drives/Empty", scratch); assert(mkdir(path, 0700) == 0);
+    snprintf(path, sizeof path, "%s/control", scratch); assert(mkdir(path, 0700) == 0);
+    snprintf(control_path, sizeof control_path, "%s/control/socket", scratch);
     snprintf(mount_table, sizeof mount_table,
              "1 0 0:1 / / rw - tmpfs root rw\n2 1 0:77 / %s/Drives/Cloud rw - fuse.rclone cloud: rw\n", scratch);
     assert(drives_main() == 0 && unmounts == 0 && removals == 0);
     assert(mounts == 2 && bind_flags == (MS_BIND | MS_REC));
     puts("PASS startup preserves cloud mounts and empty user folders; recursive bind retains child mounts");
+    struct stat cs;
+    assert(lstat(control_path, &cs) == 0 && S_ISSOCK(cs.st_mode) && (cs.st_mode & 0777) == 0600);
+    puts("PASS the eject control socket is root-only (0600 in a 0700 folder)");
 
     snprintf(path, sizeof path, "%s/Drives/Cloud", scratch);
     assert(mounted(path));

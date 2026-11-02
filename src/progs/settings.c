@@ -51,6 +51,13 @@
 __attribute__((weak)) int base_brightness_get(int *cur, int *max_val);
 __attribute__((weak)) int base_brightness_set(int target, int max_ref);
 __attribute__((weak)) int base_brightness_restore(void);
+__attribute__((weak)) void screen_cells(int *w, int *h, int *top);
+__attribute__((weak)) void screen_fill_px(int x, int y, int w, int h, uint32_t rgb);
+__attribute__((weak)) int clipboard_set(int primary, const void *text, size_t size);
+
+static int power_thresh_count(void);
+static void apply_saved_battery_thresholds(void);
+extern int rc_bat_start, rc_bat_end;
 
 #define FG     0xD0D0D0
 #define BG     0x101820
@@ -66,6 +73,8 @@ static int tp_speed = 180;      /* 10..255 */
 static int tp_pts = 0;          /* 0 or 1 */
 static int ptr_accel = 4;       /* -10..+10 => -1.0..+1.0 */
 static int hib_after = 30;      /* 10..600 s */
+static int rc_lid_holdoff = 30; /* 0..120 s */
+static int rc_battery_critical = 5; /* 0..50 % */
 static int tailscale_enabled; /* rc.conf has service_tailscale */
 static int bluetooth_on;      /* rc.conf has service_bluetooth */
 static int rclone_on;         /* rc.conf has service_rclone */
@@ -822,6 +831,7 @@ static void apply_all(void)
         write_glob("/sys/devices/platform/i8042/serio*/press_to_select", tp_pts);
         write_glob("/sys/devices/platform/i8042/serio*/serio*/press_to_select", tp_pts);
     }
+    apply_saved_battery_thresholds();
     apply_labwc();
 }
 
@@ -908,6 +918,18 @@ static void on_rc(const char *name, const char *value, void *arg)
         face_on = strcmp(value, "1") == 0;
     } else if (strcmp(name, "face_dlib") == 0) {
         snprintf(face_dlib, sizeof face_dlib, "%s", value);
+    } else if (strcmp(name, "battery_charge_start") == 0 && value[0]) {
+        int v = atoi(value);
+        if (v >= 0 && v <= 99) rc_bat_start = v;
+    } else if (strcmp(name, "battery_charge_end") == 0 && value[0]) {
+        int v = atoi(value);
+        if (v >= 20 && v <= 100) rc_bat_end = v;
+    } else if (strcmp(name, "lid_holdoff") == 0 && value[0]) {
+        int v = atoi(value);
+        if (v >= 0 && v <= 120) rc_lid_holdoff = v;
+    } else if (strcmp(name, "battery_critical") == 0 && value[0]) {
+        int v = atoi(value);
+        if (v >= 0 && v <= 50) rc_battery_critical = v;
     }
 }
 
@@ -916,15 +938,19 @@ static void on_rc(const char *name, const char *value, void *arg)
 static void save_rc(void)
 {
     char sens[16], speed[16], pts[16], accel[16], hib[16];
+    char holdoff[16], crit[16];
     snprintf(sens, sizeof sens, "%d", tp_sens);
     snprintf(speed, sizeof speed, "%d", tp_speed);
     snprintf(pts, sizeof pts, "%d", tp_pts);
     snprintf(accel, sizeof accel, "%.1f", ptr_accel / 10.0);
     snprintf(hib, sizeof hib, "%d", hib_after);
+    snprintf(holdoff, sizeof holdoff, "%d", rc_lid_holdoff);
+    snprintf(crit, sizeof crit, "%d", rc_battery_critical);
     /* Change these keys only: a growing list of services must not be cut off
      * by a fixed array of lines in the settings editor. */
     const char *values[][2] = {
         { "pointer_accel", accel }, { "hibernate_after", hib },
+        { "lid_holdoff", holdoff }, { "battery_critical", crit },
         { "tailscale_enabled", NULL }, /* superseded by the service line */
         { "service_tailscale", tailscale_enabled ? TAILSCALE_SERVICE : NULL },
         { "trackpoint_sensitivity", sens }, { "trackpoint_speed", speed },
@@ -1286,10 +1312,13 @@ static char face_camera[160], face_choice[160];
 static int face_choice_loaded;
 struct face_cam {
     char path[64], name[96];
+    char stable[160]; /* its /dev/v4l link (the tool's stable_path), else path */
     int ir;
 };
 
-/* Capability enumeration only: painting settings never starts streaming. */
+/* Capability enumeration only: painting settings never starts streaming.
+ * Lines "NODE<TAB>CANDIDATE<TAB>NAME<TAB>STABLE"; a tool from before
+ * STABLE gives three fields, and then the node stands for itself. */
 static int face_cameras(struct face_cam *out, int max)
 {
     char buf[8192], *save;
@@ -1303,10 +1332,15 @@ static int face_cameras(struct face_cam *out, int max)
         char *name = strchr(candidate, '\t');
         if (!name) continue;
         *name++ = '\0';
+        char *stable = strchr(name, '\t');
+        if (stable) *stable++ = '\0';
         if (strncmp(line, "/dev/video", 10) || !line[10] ||
             strspn(line + 10, "0123456789") != strlen(line + 10) || strlen(line) >= sizeof out[n].path) continue;
+        if (!stable || strncmp(stable, "/dev/v4l/", 9) != 0 || strlen(stable) >= sizeof out[n].stable)
+            stable = line;
         snprintf(out[n].path, sizeof out[n].path, "%s", line);
         snprintf(out[n].name, sizeof out[n].name, "%.95s", name);
+        snprintf(out[n].stable, sizeof out[n].stable, "%s", stable);
         out[n++].ir = strcmp(candidate, "1") == 0;
     }
     return n;
@@ -1373,7 +1407,9 @@ static void face_camera_label(char *out, size_t size)
     }
 }
 
-/* Selection is a preview; Enter tests it before howdy saves the choice. */
+/* Selection is a preview; Enter tests it before howdy saves the choice. It
+ * is held by the camera's stable path, so that a camera renumbered before
+ * Enter is still the one tested and saved. */
 static int next_face_camera(int dir)
 {
     struct face_cam cams[16];
@@ -1381,7 +1417,7 @@ static int next_face_camera(int dir)
     if (ncams == 0) return -1;
     int at = face_camera_index(cams, ncams) + 1;
     int to = (at + dir + ncams + 1) % (ncams + 1);
-    snprintf(face_choice, sizeof face_choice, "%s", to ? cams[to - 1].path : "");
+    snprintf(face_choice, sizeof face_choice, "%s", to ? cams[to - 1].stable : "");
     return 0;
 }
 
@@ -2505,7 +2541,7 @@ static void format_bar(char *out, size_t size, int val, int min, int max)
  * and date, and the debug cable link. */
 static int ts_index(void)
 {
-    return tp_present ? 5 : 2;
+    return tp_present ? 7 : 4;
 }
 
 static int cl_index(void)
@@ -2669,9 +2705,29 @@ static int kb_index(void)
     return system_keymap_index() + 1;
 }
 
-static int num_hw_items(void)
+static int bat_page_index(void)
 {
     return kb_index() + nkeyboards_seen;
+}
+
+static int bat_thresh_index(void)
+{
+    return bat_page_index() + 1;
+}
+
+static int hwinfo_index(void)
+{
+    return bat_thresh_index() + power_thresh_count();
+}
+
+static int hwcopy_index(void)
+{
+    return hwinfo_index() + 1;
+}
+
+static int num_hw_items(void)
+{
+    return hwcopy_index() + 1;
 }
 
 /* The cloud service's status (rclone-client): name, path, state, last
@@ -4120,16 +4176,17 @@ static void build_row_maps(void)
  * pages of that category). Keys go to the sidebar or to the page (in_page);
  * / finds settings in every category. A setting is still its index
  * (selected), as the functions above count them. */
-enum { CAT_INPUT, CAT_DEVICES, CAT_NETWORK, CAT_APPEARANCE, CAT_APPS, CAT_SECURITY, CAT_TIME, CAT_SYSTEM, NCATS };
+enum { CAT_INPUT, CAT_DEVICES, CAT_POWER, CAT_NETWORK, CAT_APPEARANCE, CAT_APPS, CAT_SECURITY, CAT_TIME, CAT_SYSTEM, NCATS };
 static const char *const cat_names[NCATS] = {
-    N_("Input & Output"), N_("Connected Devices"), N_("Networking"), N_("Appearance"),
+    N_("Input & Output"), N_("Connected Devices"), N_("Power & Battery"), N_("Networking"), N_("Appearance"),
     N_("Apps & Windows"), N_("Security & Privacy"), N_("Language & Time"), N_("System"),
 };
 static int category, in_page, page_scroll;
 static char search[64]; /* what / found: the page has every category's settings with it */
 
 #define PAGE_TOP 2
-#define MAX_ENTRIES 256
+#define MAX_ENTRIES 384
+#define SIDE_BG 0x304860 /* the category or setting where the keys are not */
 #define E_TITLE (-1) /* a group's title */
 #define E_NOTE (-2)  /* a line to read, not a setting */
 #define E_GAP (-3)   /* the blank line before a title */
@@ -4162,6 +4219,9 @@ static void add_items(int first, int count)
     for (int i = 0; i < count; i++) add_entry(first + i, NULL);
 }
 
+#include "settings-power.inc"
+#include "settings-hwinfo.inc"
+
 /* Category cat's groups and their settings, after the entries there are. */
 static void category_entries(int cat)
 {
@@ -4182,6 +4242,14 @@ static void category_entries(int cat)
     case CAT_DEVICES:
         add_title(_("Bluetooth"));
         add_items(bt_index(), 3);
+        break;
+    case CAT_POWER:
+        add_title(_("Power Management"));
+        add_items(tp_present ? 4 : 1, 3);
+        add_items(bat_thresh_index(), power_thresh_count());
+        add_title(_("Battery & Energy"));
+        add_items(bat_page_index(), 1);
+        add_power_category_notes();
         break;
     case CAT_NETWORK:
         add_title(_("Network"));
@@ -4232,12 +4300,12 @@ static void category_entries(int cat)
         add_title(_("About This System"));
         add_items(host_index(), 1);
         add_items(mach_index(), 1);
+        add_items(hwinfo_index(), 2);
+        add_about_system_notes();
         add_title(_("Users"));
         add_items(sec_index(), 1);
         add_items(fp_index(), 4);
         add_items(fc_index(), 7);
-        add_title(_("Power Management"));
-        add_items(tp_present ? 4 : 1, 1);
         add_title(_("Boot"));
         add_items(boot_index(), 5);
         add_title(_("Software Update"));
@@ -4342,6 +4410,9 @@ static void show_category(int c, int focus_page)
     c = c < 0 ? 0 : c >= NCATS ? NCATS - 1 : c;
     if (c == CAT_SECURITY && !hsi_loaded) {
         load_hsi();
+    }
+    if (c == CAT_POWER) {
+        power_refresh_devices();
     }
     if (c != category || search[0]) {
         category = c;
@@ -4808,7 +4879,8 @@ static int enter_row(int idx)
            idx == sec_index() || idx == sec_index() + 2 || idx == fp_index() + 3 || idx == fc_index() + 4 || idx == fc_index() + 5 ||
            idx == fc_index() + 6 || idx == rclone_index() + 2 || idx == tpm_index() || idx == sb_index() || idx == hsi_index() ||
            idx == tz_index() || idx == tz_index() + 2 || (idx >= imek_index() && idx < imek_index() + NIME_KEYS) ||
-           (idx >= system_keymap_index() && idx < kb_index() + nkeyboards_seen);
+           (idx >= system_keymap_index() && idx < kb_index() + nkeyboards_seen) ||
+           idx == bat_page_index() || idx == hwinfo_index() || idx == hwcopy_index();
 }
 
 /* What a pointer event does, as a key: on the sidebar a click opens that
@@ -4891,8 +4963,8 @@ static void item_text(int idx, char *line, size_t size)
     int hw = num_hw_items(), i;
     line[0] = '\0';
     /* The pointer's rows (first TrackPoint's three, when there is one), then
-     * the battery's. */
-    if (idx >= 0 && idx < (tp_present ? 5 : 2)) {
+     * the power management rows. */
+    if (idx >= 0 && idx < (tp_present ? 7 : 4)) {
         int k = tp_present ? idx : idx + 3;
         if (k == 0) {
             format_bar(bar, sizeof bar, tp_sens, 10, 255);
@@ -4906,9 +4978,21 @@ static void item_text(int idx, char *line, size_t size)
         } else if (k == 3) {
             format_bar(bar, sizeof bar, ptr_accel, -10, 10);
             snprintf(line, size, "%.95s %s  %+4.1f", ui_pad(label, sizeof label, _("Pointer Acceleration"), 32), bar, ptr_accel / 10.0);
-        } else {
+        } else if (k == 4) {
             format_bar(bar, sizeof bar, hib_after, 10, 300);
             snprintf(line, size, "%.95s %s  %3d s", ui_pad(label, sizeof label, _("Hibernate Timeout"), 32), bar, hib_after);
+        } else if (k == 5) {
+            if (rc_lid_holdoff == 0) {
+                snprintf(line, size, "%.95s < %s >", ui_pad(label, sizeof label, _("Lid Close Holdoff"), 32), _("0 s (off)"));
+            } else {
+                snprintf(line, size, "%.95s < %d s >", ui_pad(label, sizeof label, _("Lid Close Holdoff"), 32), rc_lid_holdoff);
+            }
+        } else {
+            if (rc_battery_critical == 0) {
+                snprintf(line, size, "%.95s < %s >", ui_pad(label, sizeof label, _("Critical Battery Level"), 32), _("off"));
+            } else {
+                snprintf(line, size, "%.95s < %d%% >", ui_pad(label, sizeof label, _("Critical Battery Level"), 32), rc_battery_critical);
+            }
         }
         return;
     }
@@ -5379,6 +5463,36 @@ static void item_text(int idx, char *line, size_t size)
         }
         return;
     }
+    if (idx == bat_page_index()) {
+        power_summary_text(vbuf, sizeof vbuf);
+        snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Battery curves & health"), 32), vbuf);
+        return;
+    }
+    if ((i = idx - bat_thresh_index()) >= 0 && i < power_thresh_count()) {
+        int bi = power_thresh_bat_index();
+        const struct bat_device *b = bi >= 0 ? &power_devs[bi] : NULL;
+        int is_end = (i == 1) || (b && !b->has_start_thresh && b->has_end_thresh);
+        if (!is_end) {
+            snprintf(line, size, "%.95s < %d%% >",
+                     ui_pad(label, sizeof label, _("Charge start threshold"), 32), b ? b->start_thresh : 0);
+        } else {
+            snprintf(line, size, "%.95s < %d%% >",
+                     ui_pad(label, sizeof label, _("Charge stop threshold"), 32), b ? b->end_thresh : 100);
+        }
+        return;
+    }
+    if (idx == hwinfo_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Hardware & system information"), 32),
+                 _("CPU, memory, storage SMART, sensors, PCI, USB   (Enter: open)"));
+        return;
+    }
+    if (idx == hwcopy_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Copy system summary"), 32),
+                 _("(Enter: copy to clipboard)"));
+        return;
+    }
     if (idx == hw) {
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(line, size, "%s", _("Arrange screens...  [Enter]"));
@@ -5409,8 +5523,6 @@ static void item_text(int idx, char *line, size_t size)
         snprintf(line, size, "%-32.32s < %.60s >", rule_types[i], rlabel);
     }
 }
-
-#define SIDE_BG 0x304860 /* the category or setting where the keys are not */
 
 static void draw_sidebar(int width)
 {
@@ -5476,35 +5588,34 @@ static void draw(void)
 static void adjust(int dir)
 {
     int hw = num_hw_items();
-    if (tp_present) {
-        if (selected == 0) {
+    if (selected < (tp_present ? 7 : 4)) {
+        int k = tp_present ? selected : selected + 3;
+        if (k == 0) {
             tp_sens += dir * 10;
             if (tp_sens < 10) tp_sens = 10;
             if (tp_sens > 255) tp_sens = 255;
-        } else if (selected == 1) {
+        } else if (k == 1) {
             tp_speed += dir * 10;
             if (tp_speed < 10) tp_speed = 10;
             if (tp_speed > 255) tp_speed = 255;
-        } else if (selected == 2) {
+        } else if (k == 2) {
             tp_pts = !tp_pts;
-        } else if (selected == 3) {
+        } else if (k == 3) {
             ptr_accel += dir;
             if (ptr_accel < -10) ptr_accel = -10;
             if (ptr_accel > 10) ptr_accel = 10;
-        } else if (selected == 4) {
+        } else if (k == 4) {
             hib_after += dir * 10;
             if (hib_after < 10) hib_after = 10;
             if (hib_after > 600) hib_after = 600;
-        }
-    } else {
-        if (selected == 0) {
-            ptr_accel += dir;
-            if (ptr_accel < -10) ptr_accel = -10;
-            if (ptr_accel > 10) ptr_accel = 10;
-        } else if (selected == 1) {
-            hib_after += dir * 10;
-            if (hib_after < 10) hib_after = 10;
-            if (hib_after > 600) hib_after = 600;
+        } else if (k == 5) {
+            rc_lid_holdoff += dir * 5;
+            if (rc_lid_holdoff < 0) rc_lid_holdoff = 0;
+            if (rc_lid_holdoff > 120) rc_lid_holdoff = 120;
+        } else if (k == 6) {
+            rc_battery_critical += dir;
+            if (rc_battery_critical < 0) rc_battery_critical = 0;
+            if (rc_battery_critical > 50) rc_battery_critical = 50;
         }
     }
 
@@ -6240,6 +6351,25 @@ static void adjust(int dir)
                  _("Enter: set the date and time."));
         return;
     }
+    if (selected == bat_page_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, "%s", _("Enter: open battery curves, health and handoff history."));
+        return;
+    }
+    if (selected >= bat_thresh_index() && selected < bat_thresh_index() + power_thresh_count()) {
+        adjust_power_threshold(selected - bat_thresh_index(), dir);
+        return;
+    }
+    if (selected == hwinfo_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, "%s", _("Enter: open hardware, storage SMART and live sensor browser."));
+        return;
+    }
+    if (selected == hwcopy_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, "%s", _("Enter: copy system and hardware summary to clipboard."));
+        return;
+    }
     if (selected == hw) {
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(notice, sizeof notice, "%s", _("Enter: arrange the screens with the direction buttons."));
@@ -6429,6 +6559,15 @@ int main(int argc, char **argv)
             draw();
         } else if (key == '\n' && selected == host_index()) {
             change_hostname();
+            draw();
+        } else if (key == '\n' && selected == bat_page_index()) {
+            power_curves_page();
+            draw();
+        } else if (key == '\n' && selected == hwinfo_index()) {
+            hwinfo_page();
+            draw();
+        } else if (key == '\n' && selected == hwcopy_index()) {
+            copy_system_summary_action();
             draw();
         } else if (key == '\n' && selected == upd_index()) {
             change_update_repo();

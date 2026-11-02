@@ -841,7 +841,7 @@ def apply_customizations(args, root):
 
     rc = root / "etc/locachy/rc.conf"
     lines = [s for s in rc.read_text().splitlines()
-             if not s.startswith(("service_link=", "debug_link_interface=", "login_skip=", "language=",
+             if not s.startswith(("service_link=", "debug_link_interface=", "debug_link_mac=", "login_skip=", "language=",
                                   "update_repo=", "update_branch=", "apps_repo=", "apps_branch=",
                                   "machine=", "keymap="))]
     if tzone != "auto":

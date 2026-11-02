@@ -282,6 +282,14 @@ void keys_name_any(int on);
 #define KEYS_ALTGR 16
 #define KEYS_CAPS  32
 int keys_modifiers(void);
+/* Caps Lock and Num Lock on the keyboards' LEDs, written as libinput writes
+ * them, by a process whose own keyboards they are: process 1 (the programs
+ * it lends keyboards to cannot write; they take the locks as the LEDs show
+ * them at each take) and the installer, both with the console's keyboard
+ * off. From the first call its keyboards are opened for writing. On: the
+ * locks as the LEDs show them now (another owner's), then shown at each
+ * change and on each keyboard found; off: another owner shows its own. */
+void keys_leds(int on);
 /* The selected layout's modifier role for an evdev key, not its US position. */
 int keys_modifier(int code);
 /* Each keyboard types with its own keymap when keyboards.conf names one for

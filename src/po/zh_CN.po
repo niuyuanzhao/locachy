@@ -2,7 +2,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-30 16:22-0400\n"
+"POT-Creation-Date: 2026-11-02 04:07-0500\n"
 "PO-Revision-Date: 2026-10-24 22:38+0000\n"
 "Last-Translator: LOCachy <38998838+niuyuanzhao@users.noreply.github.com>\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -270,7 +270,7 @@ msgstr "蓝牙 %d%%"
 msgid "BT (%d)"
 msgstr "蓝牙 (%d)"
 
-#: base/status.c
+#: base/status.c progs/settings-hwinfo.inc
 msgid "connected"
 msgstr "已连接"
 
@@ -1008,6 +1008,47 @@ msgstr "其他容器..."
 #: progs/bar.c
 msgid "Enter: open   A: always use it   Esc: cancel"
 msgstr "Enter: 打开   A: 始终使用此项   Esc: 取消"
+
+#: progs/drives.c
+#, c-format
+msgid "%s was not ejected"
+msgstr "未能弹出 %s"
+
+#: progs/drives.c
+#, c-format
+msgid "%s is in use"
+msgstr "%s 正在使用中"
+
+#: progs/drives.c
+#, c-format
+msgid "Files on it are open in %s."
+msgstr "其中的文件在 %s 中打开着。"
+
+#: progs/drives.c
+#, c-format
+msgid "Writing data to %s"
+msgstr "正在写入 %s"
+
+#: progs/drives.c
+msgid "Don't unplug it yet."
+msgstr "现在还不要拔出。"
+
+#: progs/drives.c
+msgid "One or more applications are keeping it busy."
+msgstr "还有程序在使用它。"
+
+#: progs/drives.c
+msgid "A program still has it open."
+msgstr "有程序仍打开着它。"
+
+#: progs/drives.c
+#, c-format
+msgid "%s can be safely unplugged"
+msgstr "现在可以安全拔出 %s 了"
+
+#: progs/drives.c
+msgid "The device can be removed now."
+msgstr "现在可以移除该设备了。"
 
 #: progs/edit-actions.inc progs/view.c
 msgid "File"
@@ -3238,7 +3279,7 @@ msgstr "需重新登录"
 msgid "needs attention"
 msgstr "需要处理"
 
-#: progs/files.c
+#: progs/files.c progs/settings-power.inc
 msgid "offline"
 msgstr "离线"
 
@@ -3681,7 +3722,7 @@ msgstr "位置"
 msgid "Original Location"
 msgstr "原始位置"
 
-#: progs/files.c
+#: progs/files.c progs/settings-hwinfo.inc
 msgid "Type"
 msgstr "类型"
 
@@ -4028,6 +4069,41 @@ msgstr "Enter / Esc: 关闭"
 msgid "Octal permissions (e.g. 644 or 755):"
 msgstr "八进制权限（如 644 或 755）："
 
+#: progs/files.c
+#, c-format
+msgid "%s is still being ejected."
+msgstr "%s 还在弹出中。"
+
+#: progs/files.c
+#, c-format
+msgid "%s cannot be ejected: the drives service is not running."
+msgstr "无法弹出 %s：磁盘服务未运行。"
+
+#: progs/files.c
+#, c-format
+msgid "Ejecting %s..."
+msgstr "正在弹出 %s……"
+
+#: progs/files.c
+#, c-format
+msgid "Writing data to %s. Don't unplug it yet."
+msgstr "正在写入 %s。现在还不要拔出。"
+
+#: progs/files.c
+#, c-format
+msgid "%s can be safely unplugged now."
+msgstr "现在可以安全拔出 %s 了。"
+
+#: progs/files.c
+#, c-format
+msgid "%s is in use: files on it are open in %s."
+msgstr "%s 正在使用中：其中的文件在 %s 中打开着。"
+
+#: progs/files.c
+#, c-format
+msgid "%s is in use: close the files open on it first."
+msgstr "%s 正在使用中：请先关闭其上打开的文件。"
+
 #. TRANSLATORS: Drives is the folder name ~/Drives; keep it.
 #: progs/files.c
 #, c-format
@@ -4036,19 +4112,23 @@ msgstr "%s 不是驱动器（只能弹出 Drives 中的设备）。"
 
 #: progs/files.c
 #, c-format
-msgid "%s is in use: close the files open on it first."
-msgstr "%s 正在使用中：请先关闭其上打开的文件。"
+msgid "Another drive is being ejected; try %s again when it is done."
+msgstr "正在弹出另一个磁盘；完成后再试 %s。"
 
 #: progs/files.c
 #, c-format
-msgid ""
-"%s is still in use in a container: stop it before pulling the drive out."
-msgstr "%s 仍在容器中使用：拔出驱动器前请先停止该容器。"
+msgid "%s is still in use (a program has the device open); it was not ejected."
+msgstr "%s 仍在使用中（有程序打开着设备）；未弹出。"
 
 #: progs/files.c
 #, c-format
-msgid "%s can be pulled out now."
-msgstr "现在可以拔出 %s。"
+msgid "%s was not ejected: %s"
+msgstr "未能弹出 %s：%s"
+
+#: progs/files.c
+#, c-format
+msgid "Ejecting %s failed: the drives service stopped. Do not unplug it yet."
+msgstr "弹出 %s 失败：磁盘服务已停止。现在还不要拔出。"
 
 #: progs/files.c
 msgid "There is no container to open it with."
@@ -4371,7 +4451,8 @@ msgstr "此处不能选择 %s：不是 %s*。"
 msgid "w makes an image the wallpaper; %s is not one."
 msgstr "按 w 可将图片设为壁纸；%s 不是图片。"
 
-#: progs/files.c progs/installer.c progs/packages.c progs/settings.c
+#: progs/files.c progs/installer.c progs/packages.c progs/settings-power.inc
+#: progs/settings.c
 #, c-format
 msgid "Cannot write %s."
 msgstr "无法写入 %s。"
@@ -4467,11 +4548,11 @@ msgstr "设备更新 (fwupd)"
 msgid "SPI Flash (flashrom)"
 msgstr "SPI 编程器 (flashrom)"
 
-#: progs/firmware.c
+#: progs/firmware.c progs/settings-power.inc
 msgid "Device"
 msgstr "设备"
 
-#: progs/firmware.c
+#: progs/firmware.c progs/settings-hwinfo.inc
 msgid "Vendor"
 msgstr "厂商"
 
@@ -5075,7 +5156,7 @@ msgstr "系统"
 msgid "User"
 msgstr "用户"
 
-#: progs/installer.c
+#: progs/installer.c progs/settings-hwinfo.inc
 msgid "Summary"
 msgstr "摘要"
 
@@ -5156,7 +5237,7 @@ msgstr "安装要下载软件包：需要联网。"
 msgid "not connected"
 msgstr "未连接"
 
-#: progs/installer.c
+#: progs/installer.c progs/settings-power.inc
 msgid "Now"
 msgstr "现在"
 
@@ -5227,7 +5308,7 @@ msgid "%d GiB"
 msgid_plural "%d GiB"
 msgstr[0] "%d GiB"
 
-#: progs/installer.c
+#: progs/installer.c progs/settings-hwinfo.inc
 msgid "Swap"
 msgstr "交换分区"
 
@@ -6822,6 +6903,1075 @@ msgstr "尚未检查更新：按 c 检查更新。"
 msgid "The last check is shown; c checks again."
 msgstr "当前显示上次检查结果；按 c 重新检查更新。"
 
+#: progs/settings-hwinfo.inc
+msgid "Processor"
+msgstr "处理器"
+
+#: progs/settings-hwinfo.inc
+msgid "Memory & Slots"
+msgstr "内存与插槽"
+
+#: progs/settings-hwinfo.inc
+msgid "Storage & SMART"
+msgstr "存储与 SMART 健康度"
+
+#: progs/settings-hwinfo.inc
+msgid "Graphics & Displays"
+msgstr "显卡与显示器"
+
+#: progs/settings-hwinfo.inc
+msgid "Sensors (Live)"
+msgstr "传感器（实时）"
+
+#: progs/settings-hwinfo.inc
+msgid "PCI & PCIe Bus"
+msgstr "PCI 与 PCIe 总线"
+
+#: progs/settings-hwinfo.inc
+msgid "USB Devices"
+msgstr "USB 设备"
+
+#: progs/settings-hwinfo.inc
+msgid "Network Adapters"
+msgstr "网络适配器"
+
+#: progs/settings-hwinfo.inc
+msgid "Firmware & DMI"
+msgstr "固件与 DMI"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "System: %.52s, Linux %.44s"
+msgstr "系统：%.52s，Linux %.44s"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "System: %.96s"
+msgstr "系统：%.96s"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "Model: %.104s"
+msgstr "机型：%.104s"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "Hardware: %.76s, %.24s RAM"
+msgstr "硬件：%.76s，%.24s 内存"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "Hardware: %.96s"
+msgstr "硬件：%.96s"
+
+#: progs/settings-hwinfo.inc
+msgid "Processor Identification"
+msgstr "处理器标识"
+
+#: progs/settings-hwinfo.inc progs/view.c
+msgid "Model"
+msgstr "型号"
+
+#: progs/settings-hwinfo.inc progs/settings-power.inc progs/view-pdf-ui.inc
+msgid "Unknown"
+msgstr "未知"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "Family %s, Model %s, Stepping %s"
+msgstr "家族 %s，型号 %s，步进 %s"
+
+#: progs/settings-hwinfo.inc
+msgid "Signature"
+msgstr "步进签名"
+
+#: progs/settings-hwinfo.inc
+msgid "Microcode"
+msgstr "微码版本"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%d physical cores, %d hardware threads"
+msgstr "%d 个物理核心，%d 个硬件线程"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%d hardware threads"
+msgstr "%d 个硬件线程"
+
+#: progs/settings-hwinfo.inc
+msgid "Topology"
+msgstr "核心拓扑"
+
+#: progs/settings-hwinfo.inc
+msgid "x86-64 ISA level"
+msgstr "x86-64 指令集档位"
+
+#: progs/settings-hwinfo.inc
+msgid "Key extensions"
+msgstr "主要指令集扩展"
+
+#: progs/settings-hwinfo.inc
+msgid "Cache Hierarchy"
+msgstr "缓存层级"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%s (%s-way, CPUs %s)"
+msgstr "%s（%s 路组相联，CPU %s）"
+
+#: progs/settings-hwinfo.inc
+msgid "Frequency & Power Scaling"
+msgstr "频率与功耗调节"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%s (governor: %s, EPP: %s)"
+msgstr "%s（调速器：%s，能效倾向：%s）"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%s (governor: %s)"
+msgstr "%s（调速器：%s）"
+
+#: progs/settings-hwinfo.inc
+msgid "Scaling driver"
+msgstr "调频驱动"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%.0f MHz  (range %.0f – %.0f MHz)"
+msgstr "%.0f MHz  （范围 %.0f – %.0f MHz）"
+
+#: progs/settings-hwinfo.inc
+msgid "CPU Security Mitigations"
+msgstr "CPU 安全漏洞缓解"
+
+#: progs/settings-hwinfo.inc
+msgid "Physical Memory Array (SMBIOS)"
+msgstr "物理内存阵列（SMBIOS）"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%u slots, max supported %.0f GiB (%s)"
+msgstr "%u 个插槽，最大支持 %.0f GiB（%s）"
+
+#: progs/settings-hwinfo.inc
+msgid "ECC"
+msgstr "ECC 纠错"
+
+#: progs/settings-hwinfo.inc
+msgid "Non-ECC"
+msgstr "非 ECC"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%u memory slots"
+msgstr "%u 个内存插槽"
+
+#: progs/settings-hwinfo.inc
+msgid "Controller array"
+msgstr "内存控制器阵列"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "Slot %d"
+msgstr "插槽 %d"
+
+#: progs/settings-hwinfo.inc
+msgid "Empty"
+msgstr "空槽"
+
+#: progs/settings-hwinfo.inc
+msgid "System Memory Usage"
+msgstr "系统内存占用"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%.2f / %.2f GiB (%d%%)"
+msgstr "%.2f / %.2f GiB（%d%%）"
+
+#: progs/settings-hwinfo.inc
+msgid "Physical RAM"
+msgstr "物理内存"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%.2f GiB available, %.2f GiB page cache, %.1f MiB shared"
+msgstr "%.2f GiB 可用，%.2f GiB 页缓存，%.1f MiB 共享"
+
+#: progs/settings-hwinfo.inc
+msgid "Breakdown"
+msgstr "内存构成"
+
+#: progs/settings-hwinfo.inc
+msgid "Dirty pages"
+msgstr "待写回脏页"
+
+#: progs/settings-hwinfo.inc
+msgid "Zswap compressed"
+msgstr "Zswap 压缩池"
+
+#: progs/settings-hwinfo.inc
+msgid "Not configured"
+msgstr "未配置"
+
+#: progs/settings-hwinfo.inc
+msgid "Physical Memory Modules"
+msgstr "物理内存条明细"
+
+#: progs/settings-hwinfo.inc
+msgid ""
+"SMBIOS Type 17 table is not exposed on this machine (e.g. virtual machine)."
+msgstr "当前机器未暴露 SMBIOS Type 17 内存条表（如虚拟机环境）。"
+
+#: progs/settings-hwinfo.inc
+msgid "Block Devices"
+msgstr "块存储设备"
+
+#: progs/settings-hwinfo.inc
+msgid "No block devices found in /sys/block."
+msgstr "/sys/block 中未发现块设备。"
+
+#: progs/settings-hwinfo.inc
+msgid "Capacity"
+msgstr "容量"
+
+#: progs/settings-hwinfo.inc
+msgid "Firmware"
+msgstr "固件版本"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%d%% remaining (%u%% endurance used, spare %u%%)"
+msgstr "剩余寿命 %d%%（已用耐久度 %u%%，备用块 %u%%）"
+
+#: progs/settings-hwinfo.inc
+msgid "SMART health"
+msgstr "SMART 健康度"
+
+#: progs/settings-hwinfo.inc progs/settings-power.inc
+msgid "Temperature"
+msgstr "温度"
+
+#: progs/settings-hwinfo.inc
+msgid "Total data written"
+msgstr "累计写入量"
+
+#: progs/settings-hwinfo.inc
+msgid "Total data read"
+msgstr "累计读取量"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%llu hours, %llu power cycles, %llu unsafe shutdowns"
+msgstr "通电 %llu 小时，%llu 次通电循环，%llu 次异常掉电"
+
+#: progs/settings-hwinfo.inc
+msgid "Lifetime counters"
+msgstr "寿命计数"
+
+#: progs/settings-hwinfo.inc
+msgid "Media / integrity errors"
+msgstr "介质与数据完整性错误"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%d%% life remaining"
+msgstr "剩余寿命 %d%%"
+
+#: progs/settings-hwinfo.inc
+msgid "SMART SSD life"
+msgstr "SMART 固态寿命"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%lld hours, %lld power cycles"
+msgstr "通电 %lld 小时，%lld 次通电循环"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "reallocated %lld, pending %lld"
+msgstr "重映射扇区 %lld，待处理扇区 %lld"
+
+#: progs/settings-hwinfo.inc
+msgid "Sector health"
+msgstr "扇区健康状态"
+
+#: progs/settings-hwinfo.inc
+msgid "No physical disks detected."
+msgstr "未检测到物理磁盘。"
+
+#: progs/settings-hwinfo.inc
+msgid "Graphics Adapters"
+msgstr "显示适配器"
+
+#: progs/settings-hwinfo.inc
+msgid "No PCI display controller listed."
+msgstr "未列出 PCI 显示控制器。"
+
+#: progs/settings-hwinfo.inc
+msgid "Display controller"
+msgstr "显示控制器"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "Display — %.64s"
+msgstr "显示器 — %.64s"
+
+#: progs/settings-hwinfo.inc
+msgid "Panel / Monitor"
+msgstr "面板 / 显示器"
+
+#: progs/settings-hwinfo.inc
+msgid "Native timing"
+msgstr "原生时序"
+
+#: progs/settings-hwinfo.inc
+msgid "Preferred mode"
+msgstr "首选分辨率"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%.1f\" diagonal (%d × %d cm)"
+msgstr "%.1f 英寸对角线（%d × %d 厘米）"
+
+#: progs/settings-hwinfo.inc
+msgid "Physical size"
+msgstr "物理尺寸"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%d-bit per channel"
+msgstr "每通道 %d 位色深"
+
+#: progs/settings-hwinfo.inc
+msgid "Color depth"
+msgstr "色深"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "Week %d, %d"
+msgstr "%2$d 年第 %1$d 周"
+
+#: progs/settings-hwinfo.inc
+msgid "Manufactured"
+msgstr "生产日期"
+
+#: progs/settings-hwinfo.inc
+msgid "Serial"
+msgstr "序列号"
+
+#: progs/settings-hwinfo.inc
+msgid "Connected Displays"
+msgstr "已连接显示器"
+
+#: progs/settings-hwinfo.inc
+msgid "No connected DRM output reported."
+msgstr "未报告已连接的 DRM 显示输出。"
+
+#: progs/settings-hwinfo.inc
+msgid "CPU Package Power"
+msgstr "CPU 封装功耗"
+
+#: progs/settings-hwinfo.inc
+msgid "Hardware Sensors"
+msgstr "硬件传感器"
+
+#: progs/settings-hwinfo.inc
+msgid "No hwmon or thermal sensors reported on this system."
+msgstr "当前系统未报告 hwmon 或温控传感器。"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%.1f °C   (crit %.0f °C)"
+msgstr "%.1f °C   （临界 %.0f °C）"
+
+#: progs/settings-hwinfo.inc
+msgid "PCI Devices"
+msgstr "PCI 设备"
+
+#: progs/settings-hwinfo.inc
+msgid "No PCI devices reported in /sys/bus/pci/devices."
+msgstr "/sys/bus/pci/devices 中未报告 PCI 设备。"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "PCI & PCIe Devices (%d total)"
+msgstr "PCI 与 PCIe 设备（共 %d 个）"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "USB Bus & Devices (%d total)"
+msgstr "USB 总线与设备（共 %d 个）"
+
+#: progs/settings-hwinfo.inc
+msgid "No USB devices reported in /sys/bus/usb/devices."
+msgstr "/sys/bus/usb/devices 中未报告 USB 设备。"
+
+#: progs/settings-hwinfo.inc
+msgid "Link & driver"
+msgstr "链路与驱动"
+
+#: progs/settings-hwinfo.inc
+msgid "MAC address"
+msgstr "MAC 地址"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "RX %s  /  TX %s"
+msgstr "接收 %s  /  发送 %s"
+
+#: progs/settings-hwinfo.inc
+msgid "Traffic"
+msgstr "累计流量"
+
+#: progs/settings-hwinfo.inc
+msgid "Network Interfaces"
+msgstr "网络接口"
+
+#: progs/settings-hwinfo.inc
+msgid "No active network adapters found."
+msgstr "未发现网络适配器。"
+
+#: progs/settings-hwinfo.inc
+msgid "System vendor"
+msgstr "系统厂商"
+
+#: progs/settings-hwinfo.inc
+msgid "Product name"
+msgstr "产品名称"
+
+#: progs/settings-hwinfo.inc
+msgid "Product version"
+msgstr "产品版本"
+
+#: progs/settings-hwinfo.inc
+msgid "Product SKU"
+msgstr "产品 SKU"
+
+#: progs/settings-hwinfo.inc
+msgid "Product family"
+msgstr "产品系列"
+
+#: progs/settings-hwinfo.inc
+msgid "Board vendor"
+msgstr "主板厂商"
+
+#: progs/settings-hwinfo.inc
+msgid "Board model"
+msgstr "主板型号"
+
+#: progs/settings-hwinfo.inc
+msgid "Board version"
+msgstr "主板版本"
+
+#: progs/settings-hwinfo.inc
+msgid "BIOS vendor"
+msgstr "BIOS 厂商"
+
+#: progs/settings-hwinfo.inc
+msgid "BIOS version"
+msgstr "BIOS 版本"
+
+#: progs/settings-hwinfo.inc
+msgid "BIOS release date"
+msgstr "BIOS 发布日期"
+
+#: progs/settings-hwinfo.inc
+msgid "EC firmware release"
+msgstr "EC 固件版本"
+
+#: progs/settings-hwinfo.inc
+msgid "System & Firmware DMI"
+msgstr "系统与固件 DMI"
+
+#: progs/settings-hwinfo.inc
+msgid "No DMI firmware strings reported."
+msgstr "未报告 DMI 固件信息。"
+
+#: progs/settings-hwinfo.inc
+msgid "Boot & Platform Security"
+msgstr "引导与平台安全"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "UEFI (%.16s-bit)"
+msgstr "UEFI（%.16s 位）"
+
+#: progs/settings-hwinfo.inc
+msgid "Boot mode"
+msgstr "引导模式"
+
+#: progs/settings-hwinfo.inc
+msgid "Legacy BIOS / non-EFI"
+msgstr "传统 BIOS / 非 EFI"
+
+#: progs/settings-hwinfo.inc
+msgid "TPM hardware"
+msgstr "TPM 硬件"
+
+#: progs/settings-hwinfo.inc
+msgid "Kernel cmdline"
+msgstr "内核启动参数"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%d loaded modules"
+msgstr "已加载 %d 个模块"
+
+#: progs/settings-hwinfo.inc
+msgid "Kernel modules"
+msgstr "内核模块"
+
+#: progs/settings-hwinfo.inc
+msgid "System Overview"
+msgstr "系统概览"
+
+#: progs/settings-hwinfo.inc
+msgid "Operating system"
+msgstr "操作系统"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings-hwinfo.inc progs/settings.c
+msgid "Hostname"
+msgstr "主机名"
+
+#: progs/settings-hwinfo.inc
+msgid "Linux kernel"
+msgstr "Linux 内核"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%ldd %02ldh %02ldm"
+msgstr "%ld 天 %02ld 小时 %02ld 分"
+
+#: progs/settings-hwinfo.inc
+msgid "Uptime"
+msgstr "运行时长"
+
+#: progs/settings-hwinfo.inc
+msgid "Load average"
+msgstr "平均负载"
+
+#: progs/settings-hwinfo.inc
+msgid "Hardware Summary"
+msgstr "硬件概览"
+
+#: progs/settings-hwinfo.inc
+msgid "Computer"
+msgstr "计算机型号"
+
+#: progs/settings-hwinfo.inc
+msgid "Generic x86_64 system"
+msgstr "通用 x86_64 系统"
+
+#: progs/settings-hwinfo.inc
+msgid "Memory"
+msgstr "内存"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "Spare pack (%.36s)"
+msgstr "备用电池包（%.36s）"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "Battery %.36s"
+msgstr "电池 %.36s"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%d.%d%% (%s), health %.1f%% (%.1f / %.1f Wh)"
+msgstr "%d.%d%%（%s），健康度 %.1f%%（%.1f / %.1f Wh）"
+
+#: progs/settings-hwinfo.inc
+msgid "Copied system summary to clipboard."
+msgstr "已将系统摘要复制到剪贴板。"
+
+#: progs/settings-hwinfo.inc progs/settings-power.inc
+msgid "Clipboard service is not running."
+msgstr "剪贴板服务未运行。"
+
+#: progs/settings-hwinfo.inc
+msgid "settings — Hardware Information"
+msgstr "设置 — 硬件信息"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "Live curve: %.28s / %.36s = %.1f %s  (min %.1f, max %.1f %s)"
+msgstr "实时曲线：%.28s / %.36s = %.1f %s  （最低 %.1f，最高 %.1f %s）"
+
+#. TRANSLATORS: Tab, r, c and Esc are key names; keep them.
+#: progs/settings-hwinfo.inc
+msgid "Up/Down: move  Tab: pane  r: refresh  c: copy  Esc: back"
+msgstr "上下键: 选择  Tab: 切换栏  r: 刷新  c: 复制  Esc: 返回"
+
+#: progs/settings-hwinfo.inc
+msgid ""
+"Up/Down: select   Tab / Left / Right: switch pane   r: refresh   c: copy "
+"page   Esc: back"
+msgstr ""
+"上下键: 选择   Tab / 左右键: 切换栏   r: 刷新   c: 复制本页   Esc: 返回"
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "Copied %s to clipboard."
+msgstr "已将“%s”复制到剪贴板。"
+
+#: progs/settings-hwinfo.inc
+msgid "Hardware readings refreshed."
+msgstr "硬件读数已刷新。"
+
+#: progs/settings-power.inc
+msgid "Charging"
+msgstr "充电中"
+
+#: progs/settings-power.inc
+msgid "Discharging"
+msgstr "放电中"
+
+#: progs/settings-power.inc
+msgid "Full"
+msgstr "已充满"
+
+#: progs/settings-power.inc
+msgid "Not charging"
+msgstr "未充电"
+
+#: progs/settings-power.inc
+msgid "Idle"
+msgstr "空闲"
+
+#: progs/settings-power.inc
+msgid "Removed (spare)"
+msgstr "已拔出（备用）"
+
+#: progs/settings-power.inc
+msgid "Removed from slot"
+msgstr "已从槽位拔出"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s %s swapped: %.24s (%d%%) -> %.24s (%d%%)"
+msgstr "%s %s 换电：%.24s（%d%%）-> %.24s（%d%%）"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s discharge handoff %s (%d%% -> %d%%)"
+msgstr "%s 放电接力 %s（%d%% -> %d%%）"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s %s removed: %.28s (%d%%)"
+msgstr "%s %s 已拔出：%.28s（%d%%）"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s %s inserted: %.28s (%d%%)"
+msgstr "%s %s 已插入：%.28s（%d%%）"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "AC power (%d removed pack on record)   (Enter: curves & health)"
+msgstr "交流电源（记录中有 %d 块拔出的备用电池）   (Enter: 曲线与健康度)"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s   (Enter: power & battery details)"
+msgstr "%s   (Enter: 电源与电池详情)"
+
+#: progs/settings-power.inc
+msgid "AC power, no battery detected"
+msgstr "交流电源，未检测到电池"
+
+#: progs/settings-power.inc
+msgid "No battery detected"
+msgstr "未检测到电池"
+
+#: progs/settings-power.inc
+#, c-format
+msgid ", health %.1f%%"
+msgstr "，健康度 %.1f%%"
+
+#: progs/settings-power.inc
+#, c-format
+msgid " +%d spare"
+msgstr " +%d 块备用"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%d batteries%s (%s %d%%, %s%s%s)   (Enter: curves & health)"
+msgstr "%d 块电池%s（%s %d%%，%s%s%s）   (Enter: 曲线与健康度)"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s%s %d%%, %s%s%s   (Enter: curves & health)"
+msgstr "%s%s %d%%，%s%s%s   (Enter: 曲线与健康度)"
+
+#: progs/settings-power.inc
+msgid "Battery"
+msgstr "电池"
+
+#: progs/settings-power.inc
+msgid "Spare (removed)"
+msgstr "备用电池（已拔出）"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s [%s]: health %.1f%% (%.1f / %.1f Wh), %d cycles"
+msgstr "%s [%s]：健康度 %.1f%%（%.1f / %.1f Wh），%d 次循环"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s [%s]: health %.1f%% (%.1f / %.1f Wh)"
+msgstr "%s [%s]：健康度 %.1f%%（%.1f / %.1f Wh）"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s [%s]: %d%%, %s"
+msgstr "%s [%s]：%d%%，%s"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Last handoff: %.104s"
+msgstr "最近切换：%.104s"
+
+#: progs/settings-power.inc
+msgid ""
+"Running on AC adapter; no system battery is reported in /sys/class/"
+"power_supply."
+msgstr "当前使用交流电源运行；/sys/class/power_supply 中未报告系统电池。"
+
+#: progs/settings-power.inc
+msgid "No system battery is reported in /sys/class/power_supply."
+msgstr "/sys/class/power_supply 中未报告系统电池。"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Cannot write charge start threshold for %s."
+msgstr "无法写入 %s 的充电起始阈值。"
+
+#: progs/settings-power.inc
+#, c-format
+msgid ""
+"Charge start threshold: %d%% (re-applied automatically on battery swap)."
+msgstr "充电起始阈值：%d%%（更换电池时自动重新应用）。"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Cannot write charge stop threshold for %s."
+msgstr "无法写入 %s 的充电停止阈值。"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Charge stop threshold: %d%% (re-applied automatically on battery swap)."
+msgstr "充电停止阈值：%d%%（更换电池时自动重新应用）。"
+
+#: progs/settings-power.inc
+msgid "12h"
+msgstr "12小时"
+
+#: progs/settings-power.inc
+msgid "1h"
+msgstr "1小时"
+
+#: progs/settings-power.inc
+msgid "24h"
+msgstr "24小时"
+
+#: progs/settings-power.inc
+msgid "2h"
+msgstr "2小时"
+
+#: progs/settings-power.inc
+msgid "48h"
+msgstr "48小时"
+
+#: progs/settings-power.inc
+msgid "7d"
+msgstr "7天"
+
+#: progs/settings-power.inc
+msgid "Last 12 hours"
+msgstr "最近 12 小时"
+
+#: progs/settings-power.inc
+msgid "Last 2 hours"
+msgstr "最近 2 小时"
+
+#: progs/settings-power.inc
+msgid "Last hour"
+msgstr "最近 1 小时"
+
+#: progs/settings-power.inc
+msgid "Last 24 hours"
+msgstr "最近 24 小时"
+
+#: progs/settings-power.inc
+msgid "Last 48 hours"
+msgstr "最近 48 小时"
+
+#: progs/settings-power.inc
+msgid "Last 7 days"
+msgstr "最近 7 天"
+
+#: progs/settings-power.inc
+#, c-format
+msgid " (%dh %02dm remaining)"
+msgstr "（预计剩余 %d 小时 %02d 分）"
+
+#: progs/settings-power.inc
+msgid "settings — Power & Battery"
+msgstr "设置 — 电源与电池"
+
+#: progs/settings-power.inc
+msgid "Window too small for battery curves."
+msgstr "窗口过小，无法显示电池曲线。"
+
+#: progs/settings-power.inc
+msgid "Spare"
+msgstr "备用"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "AC: On (%.1f V)"
+msgstr "电源：已接通（%.1f V）"
+
+#: progs/settings-power.inc
+msgid "AC: Offline"
+msgstr "电源：未连接"
+
+#: progs/settings-power.inc
+msgid "AC: Online"
+msgstr "电源：已接通"
+
+#: progs/settings-power.inc
+msgid " Charge (%) "
+msgstr " 电量 (%) "
+
+#: progs/settings-power.inc
+msgid " Power (W) "
+msgstr " 功率 (W) "
+
+#: progs/settings-power.inc
+msgid "Span:"
+msgstr "范围："
+
+#: progs/settings-power.inc
+msgid " Refresh "
+msgstr " 刷新 "
+
+#: progs/settings-power.inc
+msgid " Copy "
+msgstr " 复制 "
+
+#: progs/settings-power.inc
+msgid "No battery available"
+msgstr "无可用电池"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s — Peripheral device (live battery level: %d%%, history not recorded)"
+msgstr "%s — 外设电池（当前电量：%d%%，不记录历史曲线）"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Handoff %.160s"
+msgstr "切换事件：%.160s"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Cursor %s: [%s — last %d.%d%%]"
+msgstr "游标 %s：[%s — 拔出前 %d.%d%%]"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Cursor %s: %d.%d%%  %.2f W  %.2f V  [%s%s]"
+msgstr "游标 %s：%d.%d%%  %.2f W  %.2f V  [%s%s]"
+
+#: progs/settings-power.inc
+msgid " — sleep/off gap"
+msgstr " — 睡眠/关机断档"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Cursor %s: no data recorded at this time"
+msgstr "游标 %s：该时刻暂无记录数据"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s — %s [%s] (%d pts, avg %.1f W, peak %.1f W)"
+msgstr "%s — %s [%s]（%d 个采样点，平均 %.1f W，峰值 %.1f W）"
+
+#: progs/settings-power.inc
+msgid "Charge Percentage"
+msgstr "电量百分比"
+
+#: progs/settings-power.inc
+msgid "Energy Consumption"
+msgstr "功率消耗"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s — %s [%s]"
+msgstr "%s — %s [%s]"
+
+#: progs/settings-power.inc
+msgid "State"
+msgstr "状态"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Removed (last in %.24s at %.20s)"
+msgstr "已拔出（上次位于 %.24s，%.20s）"
+
+#: progs/settings-power.inc
+msgid "Current charge"
+msgstr "当前电量"
+
+#: progs/settings-power.inc
+msgid "Last charge"
+msgstr "上次电量"
+
+#: progs/settings-power.inc
+msgid "Health"
+msgstr "电池健康度"
+
+#: progs/settings-power.inc
+msgid "not reported"
+msgstr "未上报"
+
+#: progs/settings-power.inc
+msgid "Charge cycles"
+msgstr "充电循环次数"
+
+#: progs/settings-power.inc
+msgid "Vendor / Model"
+msgstr "厂商 / 型号"
+
+#: progs/settings-power.inc
+msgid "Serial / Type"
+msgstr "序列号 / 类型"
+
+#: progs/settings-power.inc
+msgid "Li-ion"
+msgstr "锂离子"
+
+#: progs/settings-power.inc
+msgid "Power rate"
+msgstr "实时功率"
+
+#: progs/settings-power.inc
+msgid "Voltage"
+msgstr "电压"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%.2f V (design %.2f V)"
+msgstr "%.2f V（设计 %.2f V）"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "design %.2f V"
+msgstr "设计 %.2f V"
+
+#: progs/settings-power.inc
+msgid "Remaining energy"
+msgstr "剩余能量"
+
+#: progs/settings-power.inc
+msgid "Last full charge"
+msgstr "上次满充容量"
+
+#: progs/settings-power.inc
+msgid "Design capacity"
+msgstr "出厂设计容量"
+
+#: progs/settings-power.inc
+msgid "AC adapter"
+msgstr "交流适配器"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Online (%.1f V, %.2f A)"
+msgstr "已接通（%.1f V，%.2f A）"
+
+#: progs/settings-power.inc
+msgid "Offline"
+msgstr "未连接"
+
+#: progs/settings-power.inc
+msgid "Online"
+msgstr "已接通"
+
+#: progs/settings-power.inc
+msgid "Charge limits"
+msgstr "充电阈值"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "start %d%%, stop %d%%"
+msgstr "起始 %d%%，停止 %d%%"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "saved %d%%–%d%% (applied on insert)"
+msgstr "已保存 %d%%–%d%%（插入电池时应用）"
+
+#: progs/settings-power.inc
+msgid "not exposed by firmware"
+msgstr "固件未开放调节"
+
+#: progs/settings-power.inc
+msgid "Last handoff"
+msgstr "最近换电/接力"
+
+#: progs/settings-power.inc
+msgid "none in window"
+msgstr "时间窗内无切换"
+
+#: progs/settings-power.inc
+msgid "Pack ID"
+msgstr "电池包标识"
+
+#: progs/settings-power.inc
+msgid "Battery & Health"
+msgstr "电池与健康度"
+
+#: progs/settings-power.inc
+msgid "Energy"
+msgstr "能量与电参数"
+
+#: progs/settings-power.inc
+msgid "Thresholds & Handoff"
+msgstr "阈值与换电记录"
+
+#: progs/settings-power.inc
+msgid "Energy & Handoff"
+msgstr "能量与换电记录"
+
+#. TRANSLATORS: m, Tab, Left/Right, r, c and Esc are key names; keep them.
+#: progs/settings-power.inc
+msgid "m: %/W  1-6: span  Arrows: cursor  r: refresh  Esc: back"
+msgstr "m: 电量/功率  1-6: 范围  方向键: 游标  r: 刷新  Esc: 返回"
+
+#: progs/settings-power.inc
+msgid ""
+"m: %/W   1-6: span   Left/Right: cursor   Tab: pack   r: refresh   c: copy   "
+"Esc: back"
+msgstr ""
+"m: 电量/功率   1-6: 时间范围   左右键: 游标   Tab: 切换电池包   r: 刷新   c: "
+"复制   Esc: 返回"
+
+#: progs/settings-power.inc
+msgid "Battery readings refreshed."
+msgstr "电池读数已刷新。"
+
+#: progs/settings-power.inc
+msgid "Copied battery report to clipboard."
+msgstr "已将电池报告复制到剪贴板。"
+
 #: progs/settings.c
 msgid "generic PC"
 msgstr "通用 PC"
@@ -7802,6 +8952,10 @@ msgid "Networking"
 msgstr "网络"
 
 #: progs/settings.c
+msgid "Power & Battery"
+msgstr "电源与电池"
+
+#: progs/settings.c
 msgid "Apps & Windows"
 msgstr "应用和窗口"
 
@@ -7828,6 +8982,14 @@ msgstr "显示和监视器"
 #: progs/settings.c
 msgid "Bluetooth"
 msgstr "蓝牙"
+
+#: progs/settings.c
+msgid "Power Management"
+msgstr "电源管理"
+
+#: progs/settings.c
+msgid "Battery & Energy"
+msgstr "电池与能耗"
 
 #: progs/settings.c
 msgid "No saved network yet."
@@ -7898,10 +9060,6 @@ msgstr "关于此系统"
 #: progs/settings.c
 msgid "Users"
 msgstr "用户"
-
-#: progs/settings.c
-msgid "Power Management"
-msgstr "电源管理"
 
 #: progs/settings.c
 msgid "Boot"
@@ -8094,6 +9252,18 @@ msgstr "指针加速度"
 #: progs/settings.c
 msgid "Hibernate Timeout"
 msgstr "合盖休眠等待"
+
+#: progs/settings.c
+msgid "0 s (off)"
+msgstr "0 秒（关闭）"
+
+#: progs/settings.c
+msgid "Lid Close Holdoff"
+msgstr "合盖缓冲时间"
+
+#: progs/settings.c
+msgid "Critical Battery Level"
+msgstr "极低电量阈值"
 
 #: progs/settings.c
 msgid "Tailscale installed"
@@ -8395,11 +9565,6 @@ msgstr "云盘（挂载于 ~/Drives）"
 msgid "Cloud remotes (iCloud, Drive)"
 msgstr "云盘远端 (iCloud, Drive)"
 
-#. TRANSLATORS: Enter is the Enter key; keep it.
-#: progs/settings.c
-msgid "Hostname"
-msgstr "主机名"
-
 #: progs/settings.c
 msgid "(Enter: change)"
 msgstr "（Enter：修改）"
@@ -8555,6 +9720,36 @@ msgstr "尚未在本机排序"
 #: progs/settings.c
 msgid "(Enter: rank them again)"
 msgstr "（Enter：重新排序）"
+
+#: progs/settings.c
+msgid "Battery curves & health"
+msgstr "电池曲线与健康度"
+
+#: progs/settings.c
+msgid "Charge start threshold"
+msgstr "充电起始阈值"
+
+#: progs/settings.c
+msgid "Charge stop threshold"
+msgstr "充电停止阈值"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Hardware & system information"
+msgstr "硬件与系统信息"
+
+#: progs/settings.c
+msgid "CPU, memory, storage SMART, sensors, PCI, USB   (Enter: open)"
+msgstr "CPU、内存、磁盘 SMART、传感器、PCI、USB   (Enter: 打开)"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Copy system summary"
+msgstr "复制系统摘要"
+
+#: progs/settings.c
+msgid "(Enter: copy to clipboard)"
+msgstr "(Enter: 复制到剪贴板)"
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
@@ -9176,6 +10371,21 @@ msgstr "Enter: 设置日期与时间。"
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
+msgid "Enter: open battery curves, health and handoff history."
+msgstr "Enter: 打开电池历史曲线、健康度与换电记录。"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: open hardware, storage SMART and live sensor browser."
+msgstr "Enter: 打开硬件明细、磁盘 SMART 健康度与实时传感器浏览器。"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: copy system and hardware summary to clipboard."
+msgstr "Enter: 将系统与硬件摘要复制到剪贴板。"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
 msgid "Enter: arrange the screens with the direction buttons."
 msgstr "Enter: 使用方向按钮排列显示器。"
 
@@ -9784,10 +10994,6 @@ msgstr "无法修改此批注的文本。"
 #: progs/view-pdf-ui.inc
 msgid "This annotation's text is too long to edit here."
 msgstr "此批注的文本过长，无法在此编辑。"
-
-#: progs/view-pdf-ui.inc
-msgid "Unknown"
-msgstr "未知"
 
 #: progs/view-pdf-ui.inc
 msgid "Author:"
@@ -10849,10 +12055,6 @@ msgid "Exposure Time"
 msgstr "曝光时间"
 
 #: progs/view.c
-msgid "Model"
-msgstr "型号"
-
-#: progs/view.c
 msgid "FNumber"
 msgstr "光圈值"
 
@@ -10936,6 +12138,20 @@ msgstr "显示较少详情"
 msgid "Show more details..."
 msgstr "显示更多详情..."
 
+#~ msgid "default (kernel)"
+#~ msgstr "默认（内核）"
+
+#~ msgid "deep (S3)"
+#~ msgstr "深度休眠（S3）"
+
+#~ msgid "Sleep Mode"
+#~ msgstr "睡眠模式"
+
+#, c-format
+#~ msgid ""
+#~ "%s is still in use in a container: stop it before pulling the drive out."
+#~ msgstr "%s 仍在容器中使用：拔出驱动器前请先停止该容器。"
+
 #, c-format
 #~ msgid "Details: %s (%s/%s.conf)   l: output"
 #~ msgstr "详细信息：%s（%s/%s.conf）   l: 输出"
@@ -10945,9 +12161,6 @@ msgstr "显示更多详情..."
 
 #~ msgid "Container"
 #~ msgstr "容器"
-
-#~ msgid "State"
-#~ msgstr "状态"
 
 #~ msgid "RAM MiB"
 #~ msgstr "内存 MiB"

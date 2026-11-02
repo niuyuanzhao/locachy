@@ -28,6 +28,7 @@ int screen_lend(uint32_t *lessee) { *lessee = 42; return open("/dev/null", O_RDO
 int screen_take_back(uint32_t lessee) { assert(lessee == 42); return 0; }
 int screen_drop_master(uint32_t lessee) { (void)lessee; return 0; }
 int keys_lend(int *fds, int max) { (void)fds; (void)max; return 0; }
+void keys_leds(int on) { (void)on; }
 void keys_take_back(const int *fds, int n) { (void)fds; assert(n == 0); }
 int *pointer_lend(size_t *n, char (*paths)[POINTER_PATH], size_t max) { (void)paths; (void)max; *n = 0; return NULL; }
 void pointer_take_back(int *fds, size_t n) { assert(!fds && n == 0); }

@@ -65,6 +65,7 @@ void say(const char *fmt, ...)
 int screen_open(const char *font) { (void)font; return 1; }
 void screen_release(void) {}
 int keys_open(void) { return 1; }
+void keys_leds(int on) { (void)on; }
 void keys_release(void) {}
 int pointer_open(void) { return -1; }
 int *pointer_lend(size_t *count, char paths[][POINTER_PATH], size_t max) { (void)paths; (void)max; *count = 0; return NULL; }

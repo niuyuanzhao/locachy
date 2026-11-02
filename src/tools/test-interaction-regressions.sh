@@ -26,7 +26,7 @@ timeout 60 "$out/installer" "$out/installer-fixtures"
 "${cc[@]}" "$src/progs/keytable.c" $(pkg-config --cflags --libs xkbcommon) -o "$out/keytable"
 "${cc[@]}" "$src/tools/test-keytable.c" "${link[@]}" -o "$out/keytable-test"
 LC_ALL=C.UTF-8 "$out/keytable-test" "$out/keytable" "$out/keytable-fixtures"
-for test in keys-name keyboard-devices term-clipboard screen-mirror; do
+for test in keys-name keyboard-devices term-clipboard screen-mirror modules-event; do
     "${cc[@]}" "$src/tools/test-$test.c" "${link[@]}" -o "$out/$test"
     "$out/$test"
 done
@@ -34,10 +34,12 @@ for test in pointer input-hotplug; do
     "${cc[@]}" "$src/tools/test-$test.c" "${link[@]}" -lm -o "$out/$test"
     "$out/$test"
 done
-for test in rtc-alarm suspend-hibernate status-battery; do
+for test in rtc-alarm suspend-hibernate init-lid status-battery battery-handoff; do
     "${cc[@]}" "$src/tools/test-$test.c" "${link[@]}" -o "$out/$test"
     "$out/$test" "$out/$test-fixtures"
 done
+"${cc[@]}" -fsanitize=address,undefined "$src/tools/test-battery-handoff.c" -o "$out/battery-handoff-san"
+"$out/battery-handoff-san" "$out/battery-handoff-san-fixtures"
 "${cc[@]}" "$src/tools/test-init-screen.c" "${link[@]}" -o "$out/init-screen"
 # frame.cgroup models the short production cgroup path, not a long result path.
 (cd "$out" && ./init-screen init-fixtures)
@@ -60,7 +62,9 @@ done
 timeout 30 dbus-run-session -- "$out/host-notify"
 "${cc[@]}" "$src/tools/test-drives-state.c" "${link[@]}" -o "$out/drives-state"
 "$out/drives-state" "$out/drives-fixtures"
-for test in gestures libinput audio-packages audio-client face-camera container-migration kernel-choice \
+"${cc[@]}" -fsanitize=address,undefined "$src/tools/test-drives-eject.c" -o "$out/drives-eject"
+"$out/drives-eject" "$out/drives-eject-fixtures"
+for test in gestures libinput audio-packages audio-client audio-isolation face-camera container-migration kernel-choice \
             boot-kernel root-boot-unit install apps-catalog declare-packages efi init-unlock libpaper rclone; do
     python3 -B "$src/tools/test-$test.py" "$out"
 done
@@ -71,5 +75,7 @@ bash "$src/tools/test-timezone-client.sh" "$out/timezone"
 sh "$src/tools/test-files.sh" "$out/files"
 sh "$src/tools/test-app-init.sh" "$out/app-init"
 sh "$src/tools/test-container-documents.sh" "$out/container-documents"
+bash "$src/tools/test-camera-nodes.sh" "$out/camera-nodes"
+bash "$src/tools/test-network-handoff.sh" "$out/network-handoff" # unprivileged user and network namespaces
 bash "$src/tools/test-settings-tor.sh" "$out/settings-tor"
 printf '%s\n' 'PASS device-free interaction regressions; real KMS/libinput/IME hardware acceptance remains separate.'

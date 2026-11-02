@@ -35,9 +35,11 @@
 #   arguments     the program's arguments, separated by spaces (no quoting); a
 #                 file or URL it opens goes after them
 #   network       "1": on locachy-net
-#   camera        "1": the cameras (/dev/video*, /dev/media*: V4L2, as video calls
-#                 use them), the user's in it, as they come and go; its sound
-#                 (and so the microphone) it has whatever this says
+#   camera        "1": the ordinary cameras (V4L2 capture nodes, /dev/videoN, and
+#                 their media controller nodes, as video calls use them), the
+#                 user's in it, as they come and go; never the face unlock or an
+#                 infrared one (locachy-face-camera ordinary); its sound (and so
+#                 the microphone) it has whatever this says
 #   directories   more directories of the user's home, separated by colons, at
 #                 the same paths in it (not the home itself, not in Drives,
 #                 not in the shared user directories, which it has already)
@@ -55,9 +57,10 @@
 # state (/var/lib/locachy, /var/log/locachy). Its programs run as the user
 # (uid 1000, made by locachy-setup) with a home of their own, in which the
 # shared user directories of the host home (USER_DIRS) are mounted at the
-# same paths. Of the host runtime they get the display (locachy-0) and sound
-# (PipeWire, Pulse) sockets only; of the devices, the GPU render nodes, and
-# with camera="1" the cameras (nodes of its own /dev, the user's). A
+# same paths. Of the host runtime they get the display (locachy-0) and the
+# restricted sound sockets (PipeWire, Pulse: audio-client) only; of the
+# devices, the GPU render nodes, and with camera="1" the ordinary cameras
+# (nodes of its own /dev, the user's). A
 # container has a session bus of its own, none of the host; locachy-bar is
 # the tray watcher on it.
 set -euo pipefail
@@ -77,6 +80,11 @@ APP_RUNTIME="${LOCACHY_APP_RUNTIME:-/run/locachy/apps}"
 RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/0}"
 APP_INIT="${LOCACHY_APP_INIT:-/usr/local/lib/locachy/app-init}"
 CLIPBOARD="${LOCACHY_CLIPBOARD_TOOL:-/usr/local/lib/locachy/clipboard}"
+# The containers' sound: the restricted sockets of the host's servers
+# (audio-client; 50-locachy-sockets.conf, 50-locachy-pulse.conf).
+PIPEWIRE_SOCKET=/run/pipewire/pipewire-0-restricted
+PULSE_SOCKET=/run/pulse/native
+FACE_CAMERA=/usr/local/bin/locachy-face-camera
 
 # These overrides are intentionally a root-only integration-test seam. They
 # cannot be used to redirect a normal unprivileged invocation, and all paths
@@ -576,18 +584,32 @@ start_screencast() {
     ) </dev/null >>"$APP_RUNTIME/$name.log" 2>&1 &
 }
 
+# The cameras a container with camera="1" has: the ordinary capture cameras
+# and their media controller nodes, as locachy-face-camera tells them, never
+# the face unlock camera nor an infrared one; none when it cannot tell. Lines
+# "NAME MAJOR MINOR" of the host /dev as it is now.
+camera_nodes() {
+    local node major minor
+    [ -x "$FACE_CAMERA" ] || return 0
+    while read -r node; do
+        [[ "$node" =~ ^/dev/(video|media)[0-9]+$ ]] && [ -c "$node" ] && [ ! -L "$node" ] || continue
+        read -r major minor < <(stat -c "%t %T" "$node" 2>/dev/null) || continue
+        printf '%s %d %d\n' "${node#/dev/}" "$((16#$major))" "$((16#$minor))"
+    done < <(timeout 10 "$FACE_CAMERA" ordinary 2>/dev/null || true)
+}
+
 # The cameras of the host now, in each running container with camera="1":
-# its /dev made to have the same (a node of its own for each, the user's),
-# no more. udev runs it as cameras come and go (91-locachy-cameras.rules).
+# its /dev made to have the ordinary ones (camera_nodes; a node of its own
+# for each, the user's), no more. udev runs it as cameras come and go
+# (91-locachy-cameras.rules), locachy-face-camera when face unlock gets a
+# camera.
 do_cameras() {
     local conf name pid ticks node major minor nodes=() uid gid
     IFS=: read -r _ _ uid gid _ <<<"$(getent passwd "$APP_UID" || true)"
     [ -n "${uid:-}" ] || return 0
-    for node in /dev/video* /dev/media*; do
-        [ -c "$node" ] || continue
-        read -r major minor < <(stat -c "%t %T" "$node")
-        nodes+=("${node##*/}" "$((16#$major))" "$((16#$minor))")
-    done
+    while read -r node major minor; do
+        nodes+=("$node" "$major" "$minor")
+    done < <(camera_nodes)
     for conf in "$CONT_CONF"/*.conf; do
         [ -f "$conf" ] || continue
         name=$(basename "$conf" .conf)
@@ -815,6 +837,11 @@ trap - EXIT
       "$cbase/data"/.config/*/SingletonSocket \
       "$cbase/data"/.config/*/SingletonCookie 2>/dev/null || true
 rm -f "$APP_RUNTIME/$name/reaper.pid" "$APP_RUNTIME/$name.ready"
+# Its cameras (camera="1", a container: a host program has the host's /dev).
+cameras=
+if [ "$host" != 1 ] && [ "$(conf_value "$name" camera)" = 1 ]; then
+    cameras=$(camera_nodes)
+fi
 
 # Move the launcher itself before ANY namespace child is forked. From here
 # every helper, unshare parent, PID 1 and descendant inherits app_NAME.
@@ -826,7 +853,8 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
 # passes back.
 "${net_prefix[@]}" unshare --mount --pid --fork --kill-child --propagation slave "${net_args[@]}" bash -euc '
     cbase=$1; want_net=$2; display=$3; init=$4; ready_fd=$5; host_runtime=$6; state_dir=$7
-    user=$8; uid=$9; gid=${10}; uhome=${11}; USER_DIRS=${12}; directories=${13}; host=${14}; camera=${15}; x11_display=${16}; shift 16
+    user=$8; uid=$9; gid=${10}; uhome=${11}; USER_DIRS=${12}; directories=${13}; host=${14}; cameras=${15}; x11_display=${16}
+    pw_socket=${17}; pulse_socket=${18}; shift 18
     # Record host PID before mounting the namespace-local /proc. This bash
     # becomes the C reaper via exec, so its host PID stays unchanged.
     host_pid=; start_ticks=
@@ -853,14 +881,15 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
         touch "$run/$display"
         mount --bind "$host_runtime/$display" "$run/$display"
         unset DBUS_SESSION_BUS_ADDRESS
-        if [ -S "$host_runtime/pipewire-0" ]; then
+        # Its sound: the restricted sockets, as a container has them.
+        if [ -S "$pw_socket" ]; then
             touch "$run/pipewire-0"
-            mount --bind "$host_runtime/pipewire-0" "$run/pipewire-0"
+            mount --bind "$pw_socket" "$run/pipewire-0"
         fi
-        if [ -S "$host_runtime/pulse/native" ]; then
+        if [ -S "$pulse_socket" ]; then
             install -d -o "$uid" -g "$gid" -m 0700 "$run/pulse"
             touch "$run/pulse/native"
-            mount --bind "$host_runtime/pulse/native" "$run/pulse/native"
+            mount --bind "$pulse_socket" "$run/pulse/native"
             export PULSE_SERVER="unix:$run/pulse/native"
         fi
         bus_dir="$state_dir/bus"
@@ -911,22 +940,23 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
             mount --bind -o ro "$xsocket" "$cbase/merged$xsocket"
         fi
         mount -t tmpfs run "$cbase/merged/run" -o mode=0755,nosuid,nodev
-        # The host runtime gives the container its display and sound only: no
-        # session bus of root (it gets one of its own, below), no devices but the
-        # render nodes.
+        # The host runtime gives the container its display only: no session bus
+        # of root (it gets one of its own, below), no devices but the render
+        # nodes. Its sound is the restricted sockets of the servers, at the
+        # paths of a session of its own (pipewire-0, pulse/native).
         run="$cbase/merged/run/user/$uid"
         mkdir -p -m 0700 "$run"
         touch "$run/$display"
         mount --bind "$host_runtime/$display" "$run/$display"
         unset DBUS_SESSION_BUS_ADDRESS
-        if [ -S "$host_runtime/pipewire-0" ]; then
+        if [ -S "$pw_socket" ]; then
             touch "$run/pipewire-0"
-            mount --bind "$host_runtime/pipewire-0" "$run/pipewire-0"
+            mount --bind "$pw_socket" "$run/pipewire-0"
         fi
-        if [ -S "$host_runtime/pulse/native" ]; then
+        if [ -S "$pulse_socket" ]; then
             mkdir -p -m 0700 "$run/pulse"
             touch "$run/pulse/native"
-            mount --bind "$host_runtime/pulse/native" "$run/pulse/native"
+            mount --bind "$pulse_socket" "$run/pulse/native"
             export PULSE_SERVER="unix:/run/user/$uid/pulse/native"
         fi
         chown -R "$uid:$gid" "$run"
@@ -1034,16 +1064,14 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
             touch "$cbase/merged/dev/dri/${node##*/}"
             mount --bind "$node" "$cbase/merged/dev/dri/${node##*/}"
         done
-        # The cameras (camera="1"): nodes of its own, the user its owner, the
+        # The cameras (camera="1"): nodes of its own for the ordinary ones
+        # (camera_nodes: lines NAME MAJOR MINOR), the user their owner, the
         # host nodes as they were (root, video); more as they come (cameras).
-        if [ "$camera" = 1 ]; then
-            for node in /dev/video* /dev/media*; do
-                [ -c "$node" ] || continue
-                read -r major minor < <(stat -c "%t %T" "$node")
-                mknod -m 0600 "$cbase/merged/dev/${node##*/}" c $((16#$major)) $((16#$minor))
-                chown "$uid:$gid" "$cbase/merged/dev/${node##*/}"
-            done
-        fi
+        while read -r node major minor; do
+            [ -n "$node" ] || continue
+            mknod -m 0600 "$cbase/merged/dev/$node" c "$major" "$minor"
+            chown "$uid:$gid" "$cbase/merged/dev/$node"
+        done <<<"$cameras"
         ln -sf /proc/self/fd "$cbase/merged/dev/fd"
         ln -sf /proc/self/fd/0 "$cbase/merged/dev/stdin"
         ln -sf /proc/self/fd/1 "$cbase/merged/dev/stdout"
@@ -1125,7 +1153,7 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
     exec "$app_init" "$@"
 ' bash "$cbase" "$want_net" "$shared_wayland" "$APP_INIT" "$READY_FD" "$RUNTIME_DIR" "$APP_RUNTIME/$name" \
     "$user" "$uid" "$gid" "$uhome" "$USER_DIRS" "$(conf_value "$name" directories)" "$host" \
-    "$(conf_value "$name" camera)" "$x11_display" "$@" {APP_LOCK_FD}>&- &
+    "$cameras" "$x11_display" "$PIPEWIRE_SOCKET" "$PULSE_SOCKET" "$@" {APP_LOCK_FD}>&- &
 launcher=$!
 
 # A bounded readiness handshake serializes start against controls. Once ready,

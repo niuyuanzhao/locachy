@@ -274,7 +274,9 @@ class Service:
         lockfd = os.open(RUNTIME / "service.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         self.lock = os.fdopen(lockfd, "w")
         fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        make_directory(self.drives, self.user.pw_uid, self.user.pw_gid, 0o755)
+        # root's, as the drives service keeps it: a folder the user owned could
+        # be swapped for a link under a mount (udisks2 mounts only below one of root's).
+        make_directory(self.drives, 0, 0, 0o755)
         if str(self.drives) not in mounts():
             run(["mount", "--bind", str(self.drives), str(self.drives)])
         run(["mount", "--make-shared", str(self.drives)])

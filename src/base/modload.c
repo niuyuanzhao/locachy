@@ -257,7 +257,7 @@ int modules_event(void)
             continue;
         }
         int add = next - buf >= 4 && memcmp(buf, "add@", 4) == 0;
-        int drm = 0, action = 0, hotplug = 0, lease = 0, synthetic = 0;
+        int drm = 0, power = 0, action = 0, hotplug = 0, lease = 0, synthetic = 0;
         for (char *k = next + 1; k < end; k = next + 1) {
             next = memchr(k, '\0', (size_t)(end - k));
             if (next == NULL) {
@@ -265,6 +265,8 @@ int modules_event(void)
             }
             if (strcmp(k, "SUBSYSTEM=drm") == 0) {
                 drm = 1;
+            } else if (strcmp(k, "SUBSYSTEM=power_supply") == 0) {
+                power = 1;
             } else if (strcmp(k, "ACTION=add") == 0 || strcmp(k, "ACTION=change") == 0 ||
                        strcmp(k, "ACTION=remove") == 0) {
                 action = 1;
@@ -282,7 +284,12 @@ int modules_event(void)
          * of displays: counting it would refresh, lend again, and loop. Nor
          * is a replay (udevadm trigger at boot): it takes the screen back
          * from home while home is starting. Its modules are still loaded. */
-        changed |= drm && (action || hotplug) && !lease && !synthetic;
+        changed |= drm && (action || hotplug) && !lease && !synthetic ? MODULES_DISPLAY : 0;
+        /* A battery or charger changed (power_supply_changed_work's
+         * KOBJ_CHANGE, a supply added or removed): process 1 looks at the
+         * batteries for the critical-battery action. A replay too: it may
+         * be the first word of a battery there was already. */
+        changed |= power && action ? MODULES_POWER : 0;
     }
     return changed;
 }

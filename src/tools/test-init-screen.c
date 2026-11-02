@@ -95,6 +95,7 @@ void keys_take_back(const int *fds, int n)
     for (int i = 0; i < n; i++) close(fds[i]);
     step('K');
 }
+void keys_leds(int on) { (void)on; }
 /* ndev pointer devices: files of their own in the scratch directory, as
  * distinct inodes as event nodes are. */
 int *pointer_lend(size_t *count, char paths[][POINTER_PATH], size_t max)

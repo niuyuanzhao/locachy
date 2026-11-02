@@ -97,7 +97,7 @@ read -r dev <&${KEYS[0]}
 mount -t tmpfs -o mode=0755 tmpfs /dev/input
 mknod /dev/input/event0 c ${dev%%:*} ${dev##*:}
 key() { for k in "$@"; do echo "$k" >&${KEYS[1]}; done; sleep 0.4; }
-$out/locachy-bar >$out/bar.log 2>&1 &
+python3 $src/tools/test-bar-keys.py /dev/input/event0 -- $out/locachy-bar >$out/bar.log 2>&1 &
 for i in $(seq 50); do [ -S /run/user/0/locachy-bar.sock ] && break; sleep 0.1; done
 request() { python3 -c "
 import socket, sys

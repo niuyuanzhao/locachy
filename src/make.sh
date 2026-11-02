@@ -171,6 +171,7 @@ $GCC -o /usr/local/bin/firmware "$src/progs/firmware.c" "$src/progs/files.c" "$b
 $GCC -o "$lib/archive-worker" "$src/progs/archive-worker.c" $(pkg-config --cflags --libs libarchive libcrypto)
 $GCC -o /usr/local/bin/archive "$src/progs/archive.c" "$src/progs/files.c" "$b"/glibc-base-*.o $FT_LIBS
 $GCC -o "$lib/drives" "$src/progs/drives.c" "$b"/glibc-base-*.o $FT_LIBS
+$GCC -o "$lib/battery-history" "$src/progs/battery-history.c"
 # Cloud folders' metadata, read as the user so files never waits on the network.
 $GCC $(pkg-config --cflags gio-2.0) -o "$lib/files-cloud-list" "$src/progs/files-cloud-list.c" $(pkg-config --libs gio-2.0)
 # Container session-bus document-portal owner so xdg-desktop-portal stays up without FUSE.
@@ -286,6 +287,22 @@ fi
 if ! grep -q '^[[:space:]]*program_firmware=' /etc/locachy/rc.conf; then
     printf 'program_firmware="/usr/local/bin/firmware"\n' >>/etc/locachy/rc.conf
     echo "make: rc.conf: program_firmware added"
+fi
+if ! grep -q '^[[:space:]]*service_battery=' /etc/locachy/rc.conf; then
+    printf 'service_battery="/usr/local/lib/locachy/battery-history"\n' >>/etc/locachy/rc.conf
+    echo "make: rc.conf: service_battery added"
+fi
+# The debug cable link's port by its card's permanent address (network-client),
+# for a link turned on before debug_link_mac: the card of its name, on the host
+# (process 1's network namespace: this may run in locachy-net, from pacman).
+if grep -qE '^[[:space:]]*service_link=' /etc/locachy/rc.conf &&
+    ! grep -q '^debug_link_mac=' /etc/locachy/rc.conf; then
+    dev=$(sed -n 's/^debug_link_interface="\([^"]*\)".*/\1/p' /etc/locachy/rc.conf | tail -n 1)
+    mac=$([ -z "$dev" ] || nsenter -t 1 -n "$src/link/network-client" --address "$dev" 2>/dev/null) || mac=
+    if [ -n "$mac" ]; then
+        printf 'debug_link_mac="%s"\n' "$mac" >>/etc/locachy/rc.conf
+        echo "make: rc.conf: debug_link_mac added ($dev)"
+    fi
 fi
 # The framebuffer programs that open files (open.c's program:NAME): their
 # .desktop files, and home's entries in an rc.conf from before them.
@@ -431,6 +448,11 @@ install -m 755 "$src/link/network-client" "$lib/network-client"
 install -m 755 "$src/link/audio-client" "$lib/audio-client"
 install -m 755 "$src/link/bluetooth-client" "$lib/bluetooth-client"
 install -D -m 644 "$src/link/50-locachy-bluetooth.conf" /etc/wireplumber/wireplumber.conf.d/50-locachy-bluetooth.conf
+install -D -m 644 "$src/link/50-locachy-access.conf" /etc/wireplumber/wireplumber.conf.d/50-locachy-access.conf
+install -D -m 644 "$src/link/50-locachy-cameras.conf" /etc/wireplumber/wireplumber.conf.d/50-locachy-cameras.conf
+install -D -m 644 "$src/link/50-locachy-sockets.conf" /etc/pipewire/pipewire.conf.d/50-locachy-sockets.conf
+install -D -m 644 "$src/link/50-locachy-pulse.conf" /etc/pipewire/pipewire-pulse.conf.d/50-locachy-pulse.conf
+install -D -m 644 "$src/link/locachy-audio.sysusers" /usr/local/lib/sysusers.d/locachy-audio.conf
 install -m 755 "$src/link/tailscale-client" "$lib/tailscale-client"
 install -m 755 "$src/link/clash-client" "$lib/clash-client"
 install -m 755 "$src/link/tor-client" "$lib/tor-client"

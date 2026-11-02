@@ -67,6 +67,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/input.h>
+#include <linux/kd.h>
 #include <net/if.h>
 #include <poll.h>
 #include <sys/ioctl.h>
@@ -82,7 +83,9 @@
 #include <sys/stat.h>
 #include <sys/swap.h>
 #include <sys/sysmacros.h>
+#include <sys/timerfd.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -166,9 +169,18 @@ static char *desktop_argv[] = {
 static char swap_dev[64], esp_dev[64];
 static char resume_dev[16];       /* the swap as MAJOR:MINOR, where hibernation goes */
 static int luks_passphrase_entered; /* 1 when passphrase was entered at boot (0 if TPM auto-unlocked) */
-static int lid_fd = -1;
+static int lid_fds[4], nlid;     /* the system inputs with a lid switch (SW_LID) */
 static int lid_wakes_from_disk = 1; /* until the closed lid wakes it from hibernation */
 static int hibernate_after = 30; /* seconds asleep with the lid closed (config) */
+static int lid_holdoff = 30;     /* seconds after boot and each sleep the lid only locks (config) */
+static double lid_holdoff_until; /* ms (now_ms): until then the lid only locks */
+static double lid_check_at = -1; /* ms: the lid's level is looked at once then (a holdoff's end) */
+static double hibernate_at = -1; /* s (CLOCK_BOOTTIME): the lid-closed sleep hibernates then; -1: none */
+static int suspend_failures;     /* sleeps in a row the kernel refused (write "mem" failed) */
+static char mem_sleep[8];        /* rc.conf (a machine profile) mem_sleep; "": the kernel's mode */
+static int battery_critical = 5; /* percent: on battery at or below it, hibernate or power off (config) */
+static double battery_act_at = -1;   /* ms: the critical battery's action, unless power comes back */
+static double battery_check_at = -1; /* ms: look at batteries without a trip point again (fallback) */
 static struct service *services;
 static size_t nservices;
 static sigset_t handled;    /* blocked here, read from a signalfd */
@@ -244,6 +256,45 @@ static void mount_kernel_fs(void)
     if (write_file(CGROUP "/cgroup.subtree_control", "+memory") < 0) {
         say("init: cannot enable the memory controller: %s", strerror(errno));
     }
+}
+
+/* The console (the foreground virtual terminal) as logind's
+ * session_prepare_vt and seatd's terminal.c leave it for a graphical
+ * session. Its keyboard off (K_OFF): the kernel's keyboard handler queues no
+ * characters for it and acts on no special key, Ctrl+Alt+Del and console
+ * switching included; process 1 reads the keyboards from evdev and lends
+ * them, and what was typed before is flushed. Then, once the screen is ours,
+ * KD_GRAPHICS: the console draws nothing on it. Nothing to restore: no
+ * getty ever runs on it. */
+static int console_vt = -1;
+
+static void console_keyboard_off(void)
+{
+    console_vt = open("/dev/tty0", O_RDWR | O_NOCTTY | O_CLOEXEC);
+    if (console_vt < 0) {
+        say("init: /dev/tty0: %s", strerror(errno));
+        return;
+    }
+    if (ioctl(console_vt, KDSKBMODE, K_OFF) < 0) {
+        say("init: console keyboard off (K_OFF): %s", strerror(errno));
+    }
+    tcflush(console_vt, TCIFLUSH);
+}
+
+static void console_graphics(void)
+{
+    if (console_vt >= 0 && ioctl(console_vt, KDSETMODE, KD_GRAPHICS) < 0) {
+        say("init: console KD_GRAPHICS: %s", strerror(errno));
+    }
+}
+
+/* Ctrl+Alt+Del, the Boot key of the kernel's keymap (on Delete and the
+ * keypad's Delete), which the console no longer acts on: a reboot, as the
+ * kernel's SIGINT always made it, wherever it is pressed. */
+static int ctrl_alt_del(int key)
+{
+    return key == K_DEL &&
+           (keys_modifiers() & (KEYS_CTRL | KEYS_ALT | KEYS_SHIFT | KEYS_META)) == (KEYS_CTRL | KEYS_ALT);
 }
 
 static int has_signature(const char *dev, off_t offset, const char *sig)
@@ -611,6 +662,11 @@ static void ask_secret(const char *title, const char *label, const char *wrong, 
         screen_flush();
         int k = key_get();
         if (k == '\n') return;
+        if (ctrl_alt_del(k)) { /* before the root: nothing to stop or write back */
+            say("init: Ctrl+Alt+Del at the passphrase: rebooting");
+            sync();
+            reboot(RB_AUTOBOOT);
+        }
         if (k == 21) { /* Ctrl+U */
             memset(out, 0, size);
             len = 0;
@@ -650,7 +706,10 @@ static void unlock_with_passphrase(const char *why)
 {
     char pass[256];
     const char *wrong = why;
-    screen_open("/font.psf");
+    if (screen_open("/font.psf")) {
+        console_graphics();
+    }
+    keys_leds(1);
     keys_open();
     for (int attempt = 0; attempt < 5 && !(root_open && swap_open); attempt++) {
         say("init: waiting for LUKS2 passphrase on %s (attempt %d)",
@@ -948,6 +1007,17 @@ static void join(char *const argv[], char *out, size_t size)
     }
 }
 
+/* A child's standard input: /dev/null, as apps.c gives containers, never
+ * process 1's console. */
+static void stdin_null(void)
+{
+    int null_fd = open("/dev/null", O_RDONLY);
+    if (null_fd >= 0) {
+        dup2(null_fd, STDIN_FILENO);
+        if (null_fd > 2) close(null_fd);
+    }
+}
+
 /* Start argv (argv[0] a full path) in frame f, in a cgroup of its own, with
  * a control socket at fd 3. */
 static int start(struct frame *f, char *const argv[])
@@ -973,6 +1043,7 @@ static int start(struct frame *f, char *const argv[])
         write_file(procs, "0");
         setsid();
         sigprocmask(SIG_UNBLOCK, &handled, NULL);
+        stdin_null();
         if (sv[1] == 3) {
             fcntl(3, F_SETFD, 0); /* keep it across exec */
         } else {
@@ -1215,6 +1286,18 @@ static void reclaim(struct frame *f)
     f->pointer_kinds = 0;
     if (f->screens && screen_take_back(f->lessee) < 0) {
         say("init: cannot reclaim DRM master from %s", f->name);
+        /* The shared display's compositor is master on a file of its own,
+         * which no other file can make drop it (drm_auth.c: SET_MASTER is
+         * EBUSY while another master exists): it has not let go, so it
+         * ends; its files closed, master is free. Never left holding the
+         * screens and the input under the lock. */
+        if (f->shared_display && f->pid > 0) {
+            char kill_path[96];
+            say("init: ending %s to take the screens back", f->name);
+            snprintf(kill_path, sizeof kill_path, "%s/cgroup.kill", f->cgroup);
+            write_file(kill_path, "1");
+            if (screen_take_back(0) < 0) say("init: DRM master still not free after ending %s", f->name);
+        }
     }
     f->lessee = 0;
     f->screens = 0;
@@ -1367,11 +1450,23 @@ static void pointer_place(void)
 }
 
 /* The keyboard to the focused screen's program, from any other. */
+/* The keyboards' Caps and Num Lock LEDs show the locks of the program the
+ * keyboard is for: process 1's, which the direct programs take as the LEDs
+ * show them (their lent keyboards are read-only), or the shared display's,
+ * which labwc sets through libinput. Before a "take": the program taking
+ * the keyboard reads them then. */
+static void leds_place(void)
+{
+    struct frame *to = focused();
+    keys_leds(to == NULL || !to->shared_display);
+}
+
 static void keys_place(void)
 {
     struct frame *all[2 + MAX_TASKS * MAX_DEPTH];
     struct frame *to = focused();
     int n = frames(all);
+    leds_place();
     for (int k = 0; k < n; k++) {
         struct frame *f = all[k];
         if (f == to || f->nkbd == 0) continue;
@@ -1420,6 +1515,7 @@ static void arrange(void)
         screen_refresh();
         sync_places();
     }
+    leds_place();
     for (int k = 0; k < n; k++) {
         struct frame *f = all[k];
         uint32_t want = 0;
@@ -1764,7 +1860,9 @@ static void input_refresh(void)
     struct frame *all[2 + MAX_TASKS * MAX_DEPTH], *to = focused();
     keys_refresh();
     activity_open();
-    if (to != NULL && to->screens && !to->shared_display && keys_sync(to->kbd, &to->nkbd, MAX_KBD)) {
+    /* The shared display's go to its bar (locachy-bar reads the keyboards
+     * seat passes on, no others). */
+    if (to != NULL && to->screens && keys_sync(to->kbd, &to->nkbd, MAX_KBD)) {
         control_send(to->ctl, "keys", 4, to->kbd, to->nkbd);
     }
     int n = frames(all);
@@ -2021,12 +2119,25 @@ struct settings_read {
     struct service *services;
     size_t count;
     int hibernate_after, login_skip, lock_after, failed;
+    int lid_holdoff, battery_critical;
+    char mem_sleep[8];
 };
 
 /* One setting of rc.conf (base.h) for process 1; the other settings belong
  * to the programs that read them (as in BSD's rc.conf):
  *   hibernate_after="SECONDS"   asleep with the lid closed, then hibernate
  *                               (default 30), on mains power as on battery
+ *   lid_holdoff="SECONDS"       for that long after boot and after each
+ *                               sleep the lid only locks; then whether it is
+ *                               closed counts, once (default 30, logind's
+ *                               HoldoffTimeoutSec: screens and docks that
+ *                               appear late are seen; 0: at once)
+ *   battery_critical="PERCENT"  on battery at or below it: hibernate, or
+ *                               power off without a resume device, 20 s
+ *                               after the warning (default 5; 0: never)
+ *   mem_sleep="deep"            how the machine suspends: "deep" (S3),
+ *                               "s2idle" or "shallow"; unset, the kernel's
+ *                               choice (a machine profile sets it)
  *   login_skip="1"              not locked at boot (key_lock and the lid lock)
  *   lock_after="MINUTES"        locked after that long without input
  *                               (default 10; 0: never)
@@ -2034,8 +2145,20 @@ struct settings_read {
 static void setting(const char *name, const char *value, void *arg)
 {
     struct settings_read *next = arg;
+    int number = value[0] && strspn(value, "0123456789") == strlen(value) && strlen(value) < 6;
     if (strcmp(name, "hibernate_after") == 0 && atoi(value) > 0) {
         next->hibernate_after = atoi(value);
+    } else if (strcmp(name, "lid_holdoff") == 0 && number) {
+        next->lid_holdoff = atoi(value);
+    } else if (strcmp(name, "battery_critical") == 0 && number && atoi(value) <= 50) {
+        next->battery_critical = atoi(value);
+    } else if (strcmp(name, "mem_sleep") == 0) {
+        if (!value[0] || strcmp(value, "deep") == 0 || strcmp(value, "s2idle") == 0 ||
+            strcmp(value, "shallow") == 0) { /* "": rc.conf takes a profile's back */
+            snprintf(next->mem_sleep, sizeof next->mem_sleep, "%s", value);
+        } else {
+            say("init: rc.conf: mem_sleep \"%s\" is none of deep, s2idle, shallow; left out", value);
+        }
     } else if (strcmp(name, "login_skip") == 0) {
         next->login_skip = strcmp(value, "1") == 0;
     } else if (strcmp(name, "lock_after") == 0) {
@@ -2099,7 +2222,8 @@ static void apply_hostname(void)
 static void read_settings(void)
 {
     apply_hostname();
-    struct settings_read next = { .hibernate_after = hibernate_after, .lock_after = 600 };
+    struct settings_read next = { .hibernate_after = hibernate_after, .lock_after = 600, .lid_holdoff = 30,
+                                  .battery_critical = 5 };
     int read = rc_read(setting, &next);
     if (read < 0 || next.failed) {
         say("init: cannot %s %s; services unchanged", read < 0 ? "read" : "allocate services for", RC_CONF);
@@ -2128,11 +2252,15 @@ static void read_settings(void)
     services = next.services;
     nservices = next.count;
     hibernate_after = next.hibernate_after;
+    lid_holdoff = next.lid_holdoff;
+    battery_critical = next.battery_critical;
+    snprintf(mem_sleep, sizeof mem_sleep, "%s", next.mem_sleep);
     login_skip = next.login_skip;
     lock_after = next.lock_after;
     keys_reload(); /* key_home, key_lock */
-    say("init: settings: hibernate_after %d s, login_skip %d, lock_after %d s, %zu services", hibernate_after,
-        login_skip, lock_after, nservices);
+    say("init: settings: hibernate_after %d s, lid_holdoff %d s, battery_critical %d %%, mem_sleep %s, "
+        "login_skip %d, lock_after %d s, %zu services", hibernate_after, lid_holdoff, battery_critical,
+        mem_sleep[0] ? mem_sleep : "(the kernel's)", login_skip, lock_after, nservices);
 }
 
 static void service_start(struct service *s)
@@ -2142,6 +2270,7 @@ static void service_start(struct service *s)
     if (pid == 0) {
         setsid();
         sigprocmask(SIG_UNBLOCK, &handled, NULL);
+        stdin_null();
         execl("/bin/sh", "sh", "-c", s->command, (char *)NULL);
         _exit(127);
     }
@@ -2263,7 +2392,7 @@ static void message(struct frame *f)
         pointer_crossed(f, atoi(fields[1]), atoi(fields[2]));
     } else if (strcmp(fields[0], "pointer-press") == 0) {
         pressed(f);
-    } else if (strcmp(fields[0], "master") == 0 && f->screens) {
+    } else if (strcmp(fields[0], "master") == 0 && f->screens && f->shared_display) {
         int result = screen_drop_master(f->lessee);
         f->lessee = 0;
         control_send(f->ctl, result == 0 ? "mastered" : "master-error", result == 0 ? 8 : 12, NULL, 0);
@@ -2290,18 +2419,44 @@ static void message(struct frame *f)
     } /* "released" after the deadline: nothing to do */
 }
 
-/* Lock, and wait (up to 1 s) for the lock to be on the screen: before the
- * machine sleeps, so that it wakes up locked. */
-static void lock_wait(void)
+/* Lock, and wait for the lock to be on the screen: before the machine
+ * sleeps, so that it wakes up locked. At most 5 s, as logind holds a sleep
+ * for a delay inhibitor (InhibitDelayMaxSec, logind-core.c) and then goes
+ * ahead, saying so (manager_dispatch_delayed, logind-dbus.c). Locked, the
+ * screens and keyboards are the lock's alone (showing) whether it has drawn
+ * yet or not. Without the lock program the lid fails closed: process 1 is
+ * locked all the same, and nothing gets the screens or the keyboards again;
+ * an unlocked sleep would give the session to whoever opens the lid. The
+ * power button (or SIGUSR2) powers off cleanly from there. */
+#define LOCK_WAIT_MS 5000
+static void lid_lock(void)
 {
     lock();
+    if (!locked) {
+        say("init: SECURITY: %s is missing; locked without it: nothing gets the screens until a restart",
+            lock_argv[0]);
+        locked = 1;
+        lock_shown = 0;
+        lock_start_at = -1;
+        stay_on_display = 0;
+        arrange();
+    }
+}
+
+static void lock_wait(void)
+{
+    lid_lock();
     double t0 = now_ms();
-    while (locked && !lock_shown && locker.pid > 0 && now_ms() - t0 < 1000) {
+    while (locked && !lock_shown && locker.pid > 0 && now_ms() - t0 < LOCK_WAIT_MS) {
         struct pollfd w = { .fd = locker.ctl, .events = POLLIN };
-        if (poll(&w, 1, 1000 - (int)(now_ms() - t0)) <= 0) {
+        if (poll(&w, 1, LOCK_WAIT_MS - (int)(now_ms() - t0)) <= 0) {
             break;
         }
         message(&locker);
+    }
+    if (locked && !lock_shown && locker.pid > 0) {
+        say("init: the lock is not on the screen after %.1f s; going on (the screens are only the lock's)",
+            (now_ms() - t0) / 1e3);
     }
 }
 
@@ -2313,11 +2468,13 @@ static void lock_wait(void)
  * to sleep when it closes, on mains power as on battery, as logind does
  * (HandleLidSwitchExternalPower); docked, another screen connected, it stays
  * up, locked, and sleeps when that screen goes with the lid closed
- * (HandleLidSwitchDocked). */
+ * (HandleLidSwitchDocked); within lid_holdoff of the boot or a sleep it only
+ * locks (lid_changed). */
 static int system_inputs(int *fds, int max)
 {
     int n = 0;
 
+    nlid = 0;
     for (int i = 0; i < 32 && n < max; i++) {
         unsigned long keys[KEY_MAX / (8 * sizeof(long)) + 1] = { 0 };
         unsigned long sw[SW_MAX / (8 * sizeof(long)) + 1] = { 0 };
@@ -2338,8 +2495,8 @@ static int system_inputs(int *fds, int max)
         int lid = (sw[SW_LID / w] >> (SW_LID % w)) & 1;
         if (power || home_key || lid) {
             fds[n++] = fd;
-            if (lid) {
-                lid_fd = fd;
+            if (lid && nlid < (int)(sizeof lid_fds / sizeof *lid_fds)) {
+                lid_fds[nlid++] = fd;
             }
         } else {
             close(fd);
@@ -2348,34 +2505,34 @@ static int system_inputs(int *fds, int max)
     return n;
 }
 
-/* Whether the lid is closed. The ACPI button driver's state file asks the
- * firmware (_LID) at every read; the input device only knows the last event,
- * which after a resume from disk is the closing before it. */
+/* A system input gone: no longer a lid either. */
+static void lid_forget(int fd)
+{
+    for (int i = 0; i < nlid; i++) {
+        if (lid_fds[i] == fd) {
+            lid_fds[i--] = lid_fds[--nlid];
+        }
+    }
+}
+
+/* Whether the lid is closed: the switch's level as the input core keeps it
+ * (EVIOCGSW), closed if any lid device says so, as logind has it
+ * (button_check_switches in logind-button.c, manager_is_lid_closed in
+ * logind-core.c). Never _LID itself (/proc/acpi/button/lid): the ACPI button
+ * driver reports the lid again on every resume and restore from hibernation
+ * (acpi_button_resume, its SIMPLE_DEV_PM_OPS in drivers/acpi/button.c), and
+ * on machines whose _LID is wrong after a resume its lid_init_state quirk
+ * reports the lid open instead, which reading _LID would bypass. */
 static int lid_closed(void)
 {
-    DIR *d = opendir("/proc/acpi/button/lid");
-    struct dirent *e;
-    char path[300], state[64];
-
-    while (d != NULL && (e = readdir(d)) != NULL) {
-        snprintf(path, sizeof path, "/proc/acpi/button/lid/%s/state", e->d_name);
-        int fd = open(path, O_RDONLY | O_CLOEXEC);
-        ssize_t n = fd < 0 ? -1 : read(fd, state, sizeof state - 1);
-        if (fd >= 0) {
-            close(fd);
-        }
-        if (n > 0) {
-            state[n] = '\0';
-            closedir(d);
-            return strstr(state, "closed") != NULL;
+    for (int i = 0; i < nlid; i++) {
+        unsigned long sw[SW_MAX / (8 * sizeof(long)) + 1] = { 0 };
+        size_t w = 8 * sizeof(long);
+        if (ioctl(lid_fds[i], EVIOCGSW(sizeof sw), sw) >= 0 && ((sw[SW_LID / w] >> (SW_LID % w)) & 1)) {
+            return 1;
         }
     }
-    if (d != NULL) {
-        closedir(d);
-    }
-    unsigned long sw[SW_MAX / (8 * sizeof(long)) + 1] = { 0 };
-    size_t w = 8 * sizeof(long);
-    return lid_fd >= 0 && ioctl(lid_fd, EVIOCGSW(sizeof sw), sw) >= 0 && ((sw[SW_LID / w] >> (SW_LID % w)) & 1);
+    return 0;
 }
 
 /* Let the lid wake the machine, or not: the ACPI lid devices (PNP0C0D) as
@@ -2427,139 +2584,358 @@ static int docked(void)
     return found;
 }
 
+/* A one-line sysfs file into buf (without its newline); -1 if unreadable. */
+static int read_line(const char *path, char *buf, size_t size)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    ssize_t n = fd < 0 ? -1 : read(fd, buf, size - 1);
+
+    if (fd >= 0) {
+        close(fd);
+    }
+    buf[n > 0 ? n : 0] = '\0';
+    buf[strcspn(buf, "\n")] = '\0';
+    return n < 0 ? -1 : (int)strlen(buf);
+}
+
+/*
+ * The batteries, summed as upower sums them for its display device
+ * (up_daemon_update_display_battery in src/up-daemon.c): only supplies of
+ * the system (scope Device is a mouse's or a pen's: up_device_supply_coldplug,
+ * and the kernel's own power_supply_is_system_supplied), a battery without
+ * "present" counting as present (the ABI, sysfs-class-power); the percentage
+ * weighted by energy, else the mean of capacity; discharging when one is
+ * and none is charging or full (state_all_discharging: an idle second pack
+ * shows "Not charging"). On mains with every battery discharging (a charger
+ * too weak) the level counts as on battery, as upower's
+ * up_daemon_get_warning_level_local has it.
+ */
+#ifndef POWER_SUPPLY_CLASS
+#define POWER_SUPPLY_CLASS "/sys/class/power_supply"
+#endif
+#define BATTERY_ACTION_MS 20000 /* upower's UP_DAEMON_ACTION_DELAY (up-daemon.c): power can come back */
+#define BATTERY_RECHECK_MIN_S 30 /* upower's UP_DAEMON_SHORT_TIMEOUT (up-constants.h) */
+
+struct batteries {
+    int count;      /* system batteries present */
+    int discharging;
+    int ac;         /* another supply (mains, USB) online */
+    int no_trip;    /* one without a trip point (_BTP): nothing tells when it gets low */
+    double percent;
+    double seconds; /* until battery_critical at the present draw; -1 unknown */
+};
+
+/* Room for the class directory, a supply's name (NAME_MAX) and an attribute. */
+#define SUPPLY_PATH (sizeof POWER_SUPPLY_CLASS + 288)
+
+static long long supply_value(const char *name, const char *attr)
+{
+    char path[SUPPLY_PATH];
+
+    snprintf(path, sizeof path, "%s/%s/%s", POWER_SUPPLY_CLASS, name, attr);
+    return read_value(path, NULL);
+}
+
+/* The batteries now; set_trip: each ACPI battery's trip point (its writable
+ * alarm, in the battery's own units: drivers/acpi/battery.c,
+ * acpi_battery_alarm_store, which calls _BTP) at battery_critical of its
+ * full charge, where it differs. The firmware then notifies the kernel when
+ * the charge falls to it, which sends the uevent this looks again at
+ * (acpi_battery_notify, power_supply_changed), and the kernel wakes the
+ * machine from a sleep for it (acpi_battery_update: capacity_now at or
+ * below the alarm, acpi_pm_wakeup_event). A battery whose alarm reads 0 has
+ * no _BTP (acpi_battery_init_alarm); systemd's battery_trip_point_alarm_exists
+ * (src/sleep/battery-capacity.c) reads it so too. */
+static void batteries_read(struct batteries *b, int set_trip)
+{
+    DIR *d = opendir(POWER_SUPPLY_CLASS);
+    struct dirent *e;
+    double now = 0, full = 0, rate = 0, percents = 0;
+    int energy = 1, unit = 0, any_discharging = 0, none_charging = 1;
+
+    memset(b, 0, sizeof *b);
+    b->seconds = -1;
+    while (d != NULL && (e = readdir(d)) != NULL) {
+        char path[SUPPLY_PATH], text[32];
+        if (e->d_name[0] == '.') {
+            continue;
+        }
+        snprintf(path, sizeof path, "%s/%s/scope", POWER_SUPPLY_CLASS, e->d_name);
+        if (read_line(path, text, sizeof text) > 0 && strcmp(text, "Device") == 0) {
+            continue;
+        }
+        snprintf(path, sizeof path, "%s/%s/type", POWER_SUPPLY_CLASS, e->d_name);
+        if (read_line(path, text, sizeof text) <= 0) {
+            continue;
+        }
+        if (strcmp(text, "Battery") != 0) {
+            b->ac |= supply_value(e->d_name, "online") > 0;
+            continue;
+        }
+        if (supply_value(e->d_name, "present") == 0) {
+            continue;
+        }
+        b->count++;
+        snprintf(path, sizeof path, "%s/%s/status", POWER_SUPPLY_CLASS, e->d_name);
+        read_line(path, text, sizeof text);
+        if (strcmp(text, "Charging") == 0 || strcmp(text, "Full") == 0) {
+            none_charging = 0;
+        } else if (strcmp(text, "Discharging") == 0) {
+            any_discharging = 1;
+        }
+        int u = 1; /* energy (uWh, uW), else charge (uAh, uA), as upower reads them */
+        long long n = supply_value(e->d_name, "energy_now"), f = supply_value(e->d_name, "energy_full");
+        long long r = supply_value(e->d_name, "power_now");
+        if (n < 0 || f <= 0) {
+            u = 2;
+            n = supply_value(e->d_name, "charge_now");
+            f = supply_value(e->d_name, "charge_full");
+            r = supply_value(e->d_name, "current_now");
+        }
+        if (n >= 0 && f > 0 && (unit == 0 || unit == u)) {
+            unit = u;
+            now += (double)n;
+            full += (double)f;
+            rate += r < 0 ? -(double)r : (double)r; /* the ABI's sign is the direction */
+        } else {
+            energy = 0;
+        }
+        long long c = supply_value(e->d_name, "capacity");
+        percents += c < 0 ? 0 : c > 100 ? 100 : (double)c;
+        long long alarm = supply_value(e->d_name, "alarm");
+        if (alarm <= 0) {
+            b->no_trip = 1;
+        } else if (set_trip && battery_critical > 0 && f > 0) {
+            long long want = f / 100 * battery_critical / 1000 * 1000; /* the kernel keeps it /1000 */
+            if (want > 0 && (alarm - want > 1000 || want - alarm > 1000)) {
+                char value[24];
+                snprintf(value, sizeof value, "%lld", want);
+                snprintf(path, sizeof path, "%s/%s/alarm", POWER_SUPPLY_CLASS, e->d_name);
+                if (write_file(path, value) == 0) {
+                    say("init: %s: trip point %lld -> %lld (battery_critical %d %%)", e->d_name, alarm, want,
+                        battery_critical);
+                } else {
+                    say("init: %s: cannot set the trip point: %s", e->d_name, strerror(errno));
+                    b->no_trip = 1;
+                }
+            }
+        }
+    }
+    if (d != NULL) {
+        closedir(d);
+    }
+    b->discharging = any_discharging && none_charging;
+    if (b->count > 0) {
+        b->percent = energy && full > 0 ? 100 * now / full : percents / b->count;
+    }
+    if (energy && full > 0 && rate > 0) {
+        b->seconds = 3600 * (now - full * battery_critical / 100) / rate;
+    }
+}
+
+/* On battery at or below battery_critical (systemd's
+ * battery_is_discharging_and_low, src/shared/battery-util.c, at its 5 %). */
+static int battery_low(void)
+{
+    struct batteries b;
+
+    if (battery_critical <= 0) {
+        return 0;
+    }
+    batteries_read(&b, 0);
+    return b.count > 0 && b.discharging && b.percent <= battery_critical;
+}
+
+/* The warning, where something can show it at no cost: the shared
+ * display's bar serves notifications on root's session bus (bar.c), as
+ * rclone-client sends them; gdbus gives up after 2 s. Otherwise only the
+ * log. */
+static void battery_warn(const char *text)
+{
+    if (access("/usr/bin/gdbus", X_OK) != 0 || access("/run/user/0/bus", F_OK) != 0) {
+        return;
+    }
+    pid_t pid = fork();
+    if (pid == 0) {
+        setsid();
+        sigprocmask(SIG_UNBLOCK, &handled, NULL);
+        stdin_null();
+        execl("/usr/bin/gdbus", "gdbus", "call", "--address", "unix:path=/run/user/0/bus", "--timeout", "2",
+              "--dest", "org.freedesktop.Notifications", "--object-path", "/org/freedesktop/Notifications",
+              "--method", "org.freedesktop.Notifications.Notify", "Battery", "0", "", "Battery critically low",
+              text, "[]", "{'urgency': <byte 2>}", "0", (char *)NULL);
+        _exit(127);
+    }
+}
+
+/* Look at the batteries: at boot, on a power_supply uevent, when the
+ * fallback below is due. On battery at or below battery_critical, the action
+ * is due BATTERY_ACTION_MS later, after the warning, as upower takes its
+ * CriticalPowerAction (up_daemon_set_warning_level, take_action_timeout_cb);
+ * power coming back, or the charge rising above it again, calls it off.
+ * Batteries without a trip point send no uevent as they empty (the ACPI
+ * battery driver calls power_supply_changed only when the firmware notifies,
+ * acpi_battery_notify; test_power only when its parameters are set), so for
+ * them, and only while discharging, one look is due at half the time the
+ * present draw leaves until battery_critical (never sooner than
+ * BATTERY_RECHECK_MIN_S; without a draw, as if 2 % went per minute): a few
+ * wakeups per discharge, none on mains. */
+static void battery_check(void)
+{
+    struct batteries b;
+
+    battery_check_at = -1;
+    if (battery_critical <= 0) {
+        battery_act_at = -1;
+        return;
+    }
+    batteries_read(&b, 1);
+    if (b.count == 0 || !b.discharging || b.percent > battery_critical) {
+        if (battery_act_at >= 0) {
+            say("init: battery: %.0f %%, %s: no critical-battery action", b.percent,
+                b.discharging ? "above battery_critical again" : "power is back");
+        }
+        battery_act_at = -1;
+        if (b.count > 0 && b.discharging && b.no_trip) {
+            double s = b.seconds > 0 ? b.seconds / 2 : (b.percent - battery_critical) * 30;
+            battery_check_at = now_ms() + (s > BATTERY_RECHECK_MIN_S ? s : BATTERY_RECHECK_MIN_S) * 1e3;
+        }
+        return;
+    }
+    if (battery_act_at < 0) {
+        char text[160];
+        battery_act_at = now_ms() + BATTERY_ACTION_MS;
+        snprintf(text, sizeof text, "%.0f %% left. Connect the charger, or the computer %s in %d s.", b.percent,
+                 resume_dev[0] ? "hibernates" : "powers off", BATTERY_ACTION_MS / 1000);
+        say("init: battery critical: %s", text);
+        battery_warn(text);
+    }
+}
+
 /* Hibernate: the kernel writes everything in memory to the swap (resume_dev)
  * and powers the machine off. At the next start resume() brings it all back
- * and this returns, as if the machine had only slept. */
-static void hibernate(void)
+ * and this returns 0, as if the machine had only slept; -1 if the image
+ * could not be written. */
+static int hibernate(void)
 {
     say("init: hibernating to %s", swap_dev);
     save_log();
     sync();
     if (write_file("/sys/power/state", "disk") < 0) {
         say("init: cannot hibernate: %s", strerror(errno));
-        return;
-    }
-    say("init: back from hibernation");
-}
-
-#ifndef RTC_CLASS
-#define RTC_CLASS "/sys/class/rtc"
-#endif
-
-static int rtc_alarm_clear(const char *path)
-{
-    if (path[0] && write_file(path, "0") < 0) {
-        say("init: cannot clear wake alarm %s: %s", path, strerror(errno));
         return -1;
     }
+    say("init: back from hibernation");
     return 0;
 }
 
-static int rtc_alarm_set(char *path, size_t size, const char *when)
+/* Hibernate with the lid as it is: closed, it may wake the machine from
+ * disk only until the firmware has once woken it for being closed (the
+ * X230's does, some 10 s after powering off); then again without the lid as
+ * a wakeup source, and so from then on: the power button brings it back. */
+static int hibernate_now(void)
 {
-    if (path[0]) {
-        if (rtc_alarm_clear(path) == 0 && write_file(path, when) == 0) return 0;
-        say("init: cannot arm wake alarm %s: %s", path, strerror(errno));
-        path[0] = '\0';
+    int closed = lid_closed();
+
+    if (closed) {
+        lid_wake(lid_wakes_from_disk);
     }
-    DIR *d = opendir(RTC_CLASS);
-    struct dirent *e;
-    while (d && (e = readdir(d)) != NULL) {
-        if (strncmp(e->d_name, "rtc", 3) || !e->d_name[3] ||
-            strspn(e->d_name + 3, "0123456789") != strlen(e->d_name + 3)) continue;
-        char alarm[320];
-        int n = snprintf(alarm, sizeof alarm, "%s/%s/wakealarm", RTC_CLASS, e->d_name);
-        if (n < 0 || n >= (int)sizeof alarm || access(alarm, W_OK) != 0) continue;
-        if (write_file(alarm, "0") == 0 && write_file(alarm, when) == 0) {
-            snprintf(path, size, "%s", alarm);
-            closedir(d);
-            say("init: suspend-to-hibernate wake alarm %s at %s", path, when);
-            return 0;
-        }
-        say("init: cannot arm wake alarm %s: %s", alarm, strerror(errno));
+    int result = hibernate();
+    if (result == 0 && closed && lid_wakes_from_disk && lid_closed()) {
+        say("init: the closed lid woke the machine from disk; again without lid wakeup");
+        lid_wakes_from_disk = 0;
+        lid_wake(0);
+        result = hibernate();
     }
-    if (d) closedir(d);
-    say("init: no usable RTC wake alarm; timed hibernation could not be armed");
-    return -1;
+    if (closed) {
+        lid_wake(1); /* opening the lid wakes it from S3 */
+    }
+    return result;
 }
 
-/* Suspend to RAM (ACPI S3) until something wakes the machine: opening the
- * lid, the power button, or the RTC alarm. Everything stays in memory as it
- * was, frozen programs and the screen included; the kernel suspends and
- * resumes the devices. When the lid closed it (lid), the machine hibernates
- * if the lid is still closed hibernate_after seconds later (the RTC alarm
- * wakes it for that; hibernate_after in rc.conf), on mains power as on
- * battery: only memory written to the encrypted swap is as safe as the disk.
- * Docked meanwhile (another screen connected), it stays up. Returns how long
- * the machine slept, in seconds. */
-static double suspend(int lid)
+/* The boot-time clock, which counts the time asleep (tk_update_sleep_time
+ * in kernel/time/timekeeping.c), as systemd-sleep keeps its deadline on it;
+ * in seconds. */
+static double boottime(void)
 {
-    struct timespec a, b;
-    char when[24], alarm[320] = "";
+    struct timespec t;
 
-    save_log();
-    sync();
-    if (write_file("/sys/power/mem_sleep", "deep") < 0)
-        say("init: deep sleep unavailable; using the kernel-selected sleep mode");
-    clock_gettime(CLOCK_REALTIME, &a); /* the boot-time clock stops in S3 */
-    time_t hibernate_at = a.tv_sec + hibernate_after;
-    int try_hibernate = lid && resume_dev[0];
-    if (lid && !resume_dev[0]) say("init: timed hibernation unavailable: no resume device");
-    for (;;) {
-        if (try_hibernate) {
-            clock_gettime(CLOCK_REALTIME, &b);
-            snprintf(when, sizeof when, "+%lld", (long long)(hibernate_at > b.tv_sec ? hibernate_at - b.tv_sec : 1));
-            if (rtc_alarm_set(alarm, sizeof alarm, when) < 0) {
-                say("init: timed hibernation unavailable; sleeping until woken");
-                try_hibernate = 0;
-            }
-        }
-        say("init: going to sleep");
-        if (write_file("/sys/power/state", "mem") < 0) {
-            say("init: cannot sleep: %s", strerror(errno));
-            rtc_alarm_clear(alarm);
-            return 0;
-        }
-        clock_gettime(CLOCK_REALTIME, &b);
-        if (!lid || !lid_closed()) {
-            break;
-        }
-        if (docked()) {
-            say("init: woke up with the lid closed, another screen connected: staying up");
-            break;
-        }
-        if (try_hibernate && b.tv_sec >= hibernate_at) {
-            /* Once: it returns back from disk, or having failed (the
-             * machine must not stay up with the lid closed either way).
-             * The alarm that just woke the machine goes first: still
-             * pending, it would wake it again at once from hibernation. */
-            rtc_alarm_clear(alarm);
-            lid_wake(lid_wakes_from_disk);
-            hibernate();
-            if (lid_wakes_from_disk && lid_closed()) {
-                /* Back with the lid still closed: the firmware woke the
-                 * machine because of the closed lid (the X230's does, some
-                 * 10 s after powering off). Again without the lid as a wakeup
-                 * source, and so from now on: the power button brings it
-                 * back. */
-                say("init: the closed lid woke the machine from disk; again without lid wakeup");
-                lid_wakes_from_disk = 0;
-                lid_wake(0);
-                hibernate();
-            }
-            lid_wake(1); /* opening the lid wakes it from S3 */
-            try_hibernate = 0;
-            if (!lid_closed()) {
-                break;
-            }
-        }
-        say("init: woke up with the lid still closed; back to sleep");
+    clock_gettime(CLOCK_BOOTTIME, &t);
+    return (double)t.tv_sec + (double)t.tv_nsec / 1e9;
+}
+
+/* The kernel refuses to suspend when an alarm timer is due sooner than this
+ * (alarmtimer_suspend in kernel/time/alarmtimer.c: -EBUSY, and a 2 s wakeup
+ * event): the deadline is then as good as reached. */
+#define ALARM_MIN_S 2
+
+/* A wake alarm seconds from now: a timerfd on the kernel's alarm timer
+ * (CLOCK_BOOTTIME_ALARM; process 1 has CAP_WAKE_ALARM), as systemd-sleep
+ * arms one before each suspend (custom_timer_suspend and execute_s2h in
+ * src/sleep/sleep.c). The kernel sets the RTC itself, in its suspend
+ * callback, from the alarm timer due first, on an RTC whose parent may wake
+ * the machine (alarmtimer_suspend, alarmtimer_rtc_add_device); without one
+ * that clock has no resolution (alarm_clock_getres: -EINVAL) and nothing
+ * would wake it. The timer goes when its fd is closed (timerfd_release). -1
+ * if there is none. */
+static int wake_alarm(double seconds)
+{
+    struct timespec res;
+    struct itimerspec at = { .it_value = { .tv_sec = (time_t)seconds,
+                                           .tv_nsec = (long)((seconds - (double)(time_t)seconds) * 1e9) } };
+
+    if (clock_getres(CLOCK_BOOTTIME_ALARM, &res) < 0) {
+        say("init: no RTC can wake the machine (CLOCK_BOOTTIME_ALARM: %s)", strerror(errno));
+        return -1;
     }
-    if (lid) rtc_alarm_clear(alarm);
-    clock_gettime(CLOCK_REALTIME, &b);
-    double slept = (double)(b.tv_sec - a.tv_sec) + (double)(b.tv_nsec - a.tv_nsec) / 1e9;
+    int fd = timerfd_create(CLOCK_BOOTTIME_ALARM, TFD_NONBLOCK | TFD_CLOEXEC);
+    if (fd < 0 || timerfd_settime(fd, 0, &at, NULL) < 0) {
+        int err = errno;
+        if (fd >= 0) {
+            close(fd);
+        }
+        say("init: no wake alarm: %s", strerror(err));
+        return -1;
+    }
+    return fd;
+}
+
+/* Whether that alarm went off: its timerfd is readable, as systemd-sleep
+ * tells a wake by its timer from any other (fd_wait_for_event after
+ * execute). */
+static int wake_alarm_fired(int fd)
+{
+    uint64_t ticks;
+
+    return fd >= 0 && read(fd, &ticks, sizeof ticks) == (ssize_t)sizeof ticks;
+}
+
+/* The start of a sleep: the lid's holdoff runs from here, as logind arms it
+ * when it starts one (execute_shutdown_or_sleep in logind-dbus.c), on the
+ * monotonic clock, which stops while the machine sleeps: the rest of it runs
+ * after the wake. */
+static void sleep_began(void)
+{
+    lid_holdoff_until = now_ms() + lid_holdoff * 1e3;
+}
+
+/* The kernel refused to sleep (write "mem" failed): why, and what it last
+ * recorded (/sys/power/suspend_stats, Documentation/ABI/testing/sysfs-power;
+ * earlier failures may be what it shows). */
+static void suspend_failed(int err)
+{
+    char dev[64], step[32];
+
+    read_line("/sys/power/suspend_stats/last_failed_dev", dev, sizeof dev);
+    read_line("/sys/power/suspend_stats/last_failed_step", step, sizeof step);
+    say("init: cannot sleep: %s; the kernel's last failure: device \"%s\", errno %lld, step \"%s\"",
+        strerror(err), dev, read_value("/sys/power/suspend_stats/last_failed_errno", NULL), step);
+}
+
+/* Awake again: TrackPoint speed (psmouse resets on resume) and networking. */
+static void woke_up(double slept)
+{
     say("init: woke up after %.1f s asleep", slept);
-    /* Restore TrackPoint speed (psmouse resets on resume) and restart networking. */
     if (fork() == 0) {
         execl("/usr/local/bin/settings", "settings", "--apply", (char *)NULL);
         _exit(0);
@@ -2571,7 +2947,225 @@ static double suspend(int lid)
         }
     }
     screen_flush();
-    return slept;
+}
+
+/* Suspend to RAM until something wakes the machine: opening the lid, the
+ * power button, the wake alarm. Everything stays in memory as it was, frozen
+ * programs and the screen included; the kernel suspends and resumes the
+ * devices, in the mode rc.conf's mem_sleep (a machine profile) names, else
+ * in the kernel's own (systemd-sleep writes /sys/power/mem_sleep only when
+ * MemorySleepMode= is set: execute in src/sleep/sleep.c; the kernel picks
+ * s2idle itself where the firmware asks for it, drivers/acpi/x86/s2idle.c).
+ * When the lid closed it (lid), each sleep reads the lid's level again just
+ * before it (open by then: none; neither logind nor systemd-sleep looks
+ * again between the decision and the write), and the machine hibernates
+ * hibernate_after seconds into it if the lid is still closed (hibernate_at,
+ * on the boot-time clock, kept over the wakes and a refused sleep until the
+ * lid opens), on
+ * mains power as on battery: only memory written to the encrypted swap is as
+ * safe as the disk. It hibernates at once on battery at or below
+ * battery_critical (systemd-sleep's custom_timer_suspend does not suspend
+ * then), or powers off without a resume device. Woken with the lid closed
+ * by something else, it stays up, locked, and lid_changed looks at the lid
+ * again when the holdoff is over (logind's HoldoffTimeoutSec: a dock's
+ * screens re-link meanwhile); with lid_holdoff 0, at once: docked it stays
+ * up, otherwise back to sleep. A hibernation that fails is a sleep until
+ * woken, as systemd-sleep's execute_s2h has it. Returns how long the
+ * machine slept, in seconds; -1 if the kernel refused to sleep. */
+static double suspend(int lid)
+{
+    double a = boottime();
+    int slept = 0, refused = 0;
+
+    save_log();
+    sync();
+    if (mem_sleep[0] && write_file("/sys/power/mem_sleep", mem_sleep) < 0) {
+        say("init: mem_sleep %s: %s; the kernel's mode instead", mem_sleep, strerror(errno));
+    }
+    if (lid && resume_dev[0] && hibernate_at < 0) {
+        hibernate_at = a + hibernate_after;
+    }
+    if (lid && !resume_dev[0]) {
+        say("init: timed hibernation unavailable: no resume device");
+    }
+    for (;;) {
+        sleep_began();
+        if (lid && !lid_closed()) {
+            /* Opened again while it locked and synced (a bounce shorter
+             * than that): its level last, as it was read at the closing. */
+            say("init: the lid is open again: not sleeping");
+            hibernate_at = -1;
+            break;
+        }
+        int low = lid && battery_low(), fired = 0;
+        int due = low || (lid && hibernate_at >= 0 && hibernate_at - boottime() < ALARM_MIN_S);
+        if (!due) {
+            int alarm = lid && hibernate_at >= 0 ? wake_alarm(hibernate_at - boottime()) : -1;
+            if (lid && hibernate_at >= 0 && alarm < 0) {
+                say("init: timed hibernation unavailable; sleeping until woken");
+                hibernate_at = -1;
+            }
+            say("init: going to sleep");
+            int failed = write_file("/sys/power/state", "mem") < 0, err = errno;
+            fired = wake_alarm_fired(alarm);
+            if (alarm >= 0) {
+                close(alarm);
+            }
+            double left = hibernate_at >= 0 ? hibernate_at - boottime() : -1;
+            if (failed && err == EBUSY && hibernate_at >= 0 && left < ALARM_MIN_S) {
+                say("init: the kernel will not suspend %.1f s before the wake alarm: hibernating now", left);
+                due = 1;
+            } else if (failed) {
+                suspend_failed(err);
+                refused = 1;
+                break;
+            } else {
+                slept = 1;
+                if (!lid || !lid_closed()) {
+                    hibernate_at = -1;
+                    break;
+                }
+                low = battery_low();
+                due = fired || low || (hibernate_at >= 0 && left < ALARM_MIN_S);
+                if (!due && lid_holdoff > 0) {
+                    say("init: woke up with the lid still closed; looking again in %d s", lid_holdoff);
+                    break;
+                }
+                if (!due && docked()) {
+                    say("init: woke up with the lid closed, another screen connected: staying up");
+                    hibernate_at = -1;
+                    break;
+                }
+                if (!due) {
+                    say("init: woke up with the lid still closed; back to sleep");
+                    continue;
+                }
+            }
+        }
+        hibernate_at = -1;
+        if (low && !resume_dev[0]) {
+            say("init: battery critical with the lid closed, no resume device: powering off");
+            power_off();
+            break; /* only where reboot() failed */
+        }
+        say("init: %s with the lid closed: hibernating", low ? "battery critical" : fired ? "the wake alarm" :
+            "the hibernation deadline");
+        if (hibernate_now() == 0) {
+            slept = 1;
+            break;
+        }
+        if (low) {
+            say("init: battery critical and the image could not be written: powering off");
+            power_off();
+            break;
+        }
+        if (!lid_closed()) {
+            break;
+        }
+    }
+    double b = boottime();
+    if (slept) {
+        woke_up(b - a);
+    }
+    return refused ? -1 : b - a;
+}
+
+/* The lid, from its level: after a lid event (edge: it closed in it), when
+ * a holdoff ends, after a display change, and for a lid device that
+ * appeared. logind's lid handling (button_dispatch, button_recheck and
+ * button_lid_switch_handle_action in logind-button.c; manager_handle_action
+ * in logind-action.c, which ignores the lid while its holdoff lasts), with
+ * the level read back before anything is done, so that a bounce, or an old
+ * closing still queued, does nothing. Open: nothing is due. Closed: it locks
+ * when it closes; within a holdoff that is all, and the level is looked at
+ * once more when it ends; after it, docked (another screen connected) the
+ * machine stays up, locked, otherwise it sleeps. A sleep the kernel refused
+ * is looked at once more, at the holdoff's end and at least ALARM_MIN_S
+ * later (a wakeup event's hold), longer each time; refused twice in a row
+ * with the lid closed, it hibernates: the machine must not stay up with the
+ * lid closed (systemd-sleep would suspend instead; init's policy is the
+ * disk). */
+static void lid_changed(int edge)
+{
+    if (!lid_closed()) {
+        if (lid_check_at >= 0 || hibernate_at >= 0 || suspend_failures) {
+            say("init: the lid is open");
+        }
+        lid_check_at = -1;
+        hibernate_at = -1;
+        suspend_failures = 0;
+        return;
+    }
+    if (edge) {
+        say("init: lid closed");
+        lid_lock(); /* closed: locked, whether it sleeps or not */
+    }
+    if (now_ms() < lid_holdoff_until) {
+        lid_check_at = lid_holdoff_until;
+        say("init: the lid is closed within the holdoff; looking again in %.0f s",
+            (lid_holdoff_until - now_ms()) / 1e3);
+        return;
+    }
+    lid_check_at = -1;
+    if (docked()) {
+        if (edge) {
+            say("init: lid closed, another screen connected: not sleeping");
+        }
+        hibernate_at = -1; /* in use: an old deadline must not hibernate it once undocked */
+        return;
+    }
+    if (!edge) {
+        say("init: the lid is closed, no other screen");
+    }
+    lock_wait();
+    double slept = suspend(1);
+    if (slept >= 0) {
+        suspend_failures = 0;
+    } else if (++suspend_failures >= 2 && resume_dev[0] && lid_closed()) {
+        say("init: the kernel refused to suspend %d times with the lid closed: hibernating", suspend_failures);
+        double a = boottime();
+        sleep_began();
+        hibernate_at = -1;
+        if (hibernate_now() == 0) {
+            suspend_failures = 0;
+            woke_up(boottime() - a);
+        } else {
+            say("init: POWER: cannot suspend or hibernate; the machine is up with the lid closed");
+        }
+    }
+    if (lid_closed()) {
+        /* Refused again and again (no resume device): 2, 4, 8, 16, then 32 s apart at least. */
+        int n = suspend_failures < 5 ? suspend_failures : 5;
+        double retry = n > 0 ? now_ms() + ALARM_MIN_S * 1e3 * (double)(1 << (n - 1)) : 0;
+        lid_check_at = retry > lid_holdoff_until ? retry : lid_holdoff_until;
+    }
+}
+
+/* The critical-battery action, due BATTERY_ACTION_MS after the warning:
+ * still on battery at or below battery_critical, hibernate (locked first: it
+ * comes back as it went), else, or if the image cannot be written, power off
+ * cleanly (shut_down), upower's CriticalPowerAction order without hybrid
+ * sleep (up_backend_take_action: Hibernate, then PowerOff). */
+static void battery_act(void)
+{
+    battery_act_at = -1;
+    if (!battery_low()) {
+        battery_check();
+        return;
+    }
+    if (resume_dev[0]) {
+        say("init: battery critical: hibernating");
+        lock_wait();
+        double a = boottime();
+        sleep_began();
+        if (hibernate_now() == 0) {
+            woke_up(boottime() - a);
+            battery_check();
+            return;
+        }
+    }
+    say("init: battery critical: powering off");
+    power_off();
 }
 
 /*
@@ -2697,7 +3291,7 @@ static void report(const struct sample *a, const struct sample *b)
  *   locachy.reboot=SECONDS     after that long since boot, save the log and
  *                           reboot (the idle power is measured until then)
  *   locachy.sleeptest=SECONDS  20 s after boot, sleep (S3) that long, woken by
- *                           the RTC alarm, and measure the battery meanwhile;
+ *                           the wake alarm, and measure the battery meanwhile;
  *                           the time asleep counts towards locachy.reboot
  * The kernel leaves parameters with a dot to modules, so they reach us only
  * through /proc/cmdline. */
@@ -2723,24 +3317,23 @@ static int cmdline_int(const char *name)
     return 0;
 }
 
-/* locachy.sleeptest: sleep for seconds, woken by the RTC alarm; then measure the
- * idle power from now on (in *after). */
+/* locachy.sleeptest: sleep for seconds, woken by the wake alarm (the kernel's
+ * alarm timer); then measure the idle power from now on (in *after). */
 static void sleep_test(int seconds, struct sample *after)
 {
     struct sample before;
-    char when[16];
 
     sample(&before);
     say("init: sleep test: before: AC online %lld, battery %s", read_value("/sys/class/power_supply/AC/online", NULL),
         battery_status());
-    snprintf(when, sizeof when, "+%d", seconds);
-    if (write_file("/sys/class/rtc/rtc0/wakealarm", "0") < 0 ||
-        write_file("/sys/class/rtc/rtc0/wakealarm", when) < 0) {
-        say("init: sleep test: cannot set the RTC alarm: %s", strerror(errno));
+    int alarm = wake_alarm(seconds);
+    if (alarm < 0) {
+        say("init: sleep test: no wake alarm");
         sample(after);
         return;
     }
     double slept = suspend(0);
+    close(alarm);
     sample(after);
     say("init: sleep test: after: AC online %lld, battery %s", read_value("/sys/class/power_supply/AC/online", NULL),
         battery_status());
@@ -2759,8 +3352,10 @@ int main(void)
     struct sample measured = { 0 }; /* the start of the idle measurement */
 
     /* Signals, read from sfd: children ending, rc.conf changed (SIGHUP), and
-     * the requests to reboot (SIGTERM; SIGINT is Ctrl+Alt+Del, which the
-     * kernel would otherwise act on at once, without syncing) and power off
+     * the requests to reboot (SIGTERM; SIGINT is the kernel's Ctrl+Alt+Del,
+     * which it would otherwise act on at once, without syncing: only while
+     * the console's keyboard is on, before console_keyboard_off or where it
+     * failed; after it, process 1 sees the keys itself) and power off
      * (SIGUSR2). */
     sigemptyset(&handled);
     sigaddset(&handled, SIGCHLD);
@@ -2781,6 +3376,7 @@ int main(void)
     setenv("LANG", "C.UTF-8", 1);
 
     mount_kernel_fs();
+    console_keyboard_off();
     say("init: started at %.3f s", started);
     prepare_boot_storage();
     unlock_luks();
@@ -2847,12 +3443,23 @@ int main(void)
     }
     say("init: opening screen at %.3f s", uptime());
     if (screen_open(rooted ? BASE_FONT : "/font.psf")) {
+        console_graphics();
         screen_describe();
         screen_text(1, 0, rooted ? "LOCachy: starting home" : "LOCachy: no root (locachy-root)", FG, BG);
         screen_flush();
     }
-    int nk = keys_open(), npfd = system_inputs(pfd, 8);
+    keys_leds(1);
+    int nk = keys_open(), npfd = system_inputs(pfd, 8), npfd_boot = npfd, system_lost = 0;
     activity_open();
+    /* The lid's holdoff from the start, lid_holdoff seconds on the monotonic
+     * clock from boot, as logind sets it at its start (manager_startup in
+     * logind.c: 0 + HoldoffTimeoutSec); closed meanwhile, it is looked at
+     * when that is over. */
+    lid_holdoff_until = lid_holdoff * 1e3;
+    if (lid_closed()) {
+        lid_check_at = lid_holdoff_until;
+    }
+    battery_check();
     active_at = now_ms();
     say("init: keyboards: %d, power button and lid: %d, swap: %s, root: %s, esp: %s", nk, npfd,
         swap_dev[0] ? swap_dev : "none", rooted ? data : "none", esp_dev[0] ? esp_dev : "none");
@@ -2919,7 +3526,8 @@ int main(void)
             p[n++] = (struct pollfd){ .fd = modules_fd(), .events = POLLIN };
         }
         /* Wake up for the next timed thing: a service to start again, the
-         * idle measurement, the debug reboot. */
+         * idle measurement, the debug reboot, the lid's second look, the
+         * critical battery's action and its fallback look. */
         double next = -1;
         for (size_t i = 0; i < nservices; i++) {
             if (services[i].pid == 0 && (next < 0 || services[i].restart_at < next)) {
@@ -2931,6 +3539,12 @@ int main(void)
         }
         if (lock_start_at >= 0 && (next < 0 || lock_start_at < next)) {
             next = lock_start_at;
+        }
+        double timers[3] = { lid_check_at, battery_act_at, battery_check_at };
+        for (int i = 0; i < 3; i++) {
+            if (timers[i] >= 0 && (next < 0 || timers[i] < next)) {
+                next = timers[i];
+            }
         }
         double idle_at = idle_lock_at();
         if (idle_at >= 0 && (next < 0 || idle_at < next)) {
@@ -2969,6 +3583,19 @@ int main(void)
             lock_start();
             continue;
         }
+        if (lid_check_at >= 0 && lid_check_at <= now_ms()) {
+            lid_check_at = -1;
+            lid_changed(0);
+            continue;
+        }
+        if (battery_act_at >= 0 && battery_act_at <= now_ms()) {
+            battery_act();
+            continue;
+        }
+        if (battery_check_at >= 0 && battery_check_at <= now_ms()) {
+            battery_check();
+            continue;
+        }
         if (idle_lock_at() >= 0 && idle_lock_at() <= now_ms()) {
             say("init: no input for %d s: locking", lock_after);
             active_at = now_ms(); /* without the lock program: not again at once */
@@ -3004,6 +3631,7 @@ int main(void)
                     } else if (si.ssi_signo == SIGHUP) {
                         if (rooted) {
                             read_settings();
+                            battery_check(); /* battery_critical: its trip points */
                         }
                     } else if (si.ssi_signo == SIGTERM || si.ssi_signo == SIGINT) {
                         restart();
@@ -3016,13 +3644,23 @@ int main(void)
             }
             if (j == uevent_j) {
                 if (p[j].revents & POLLIN) {
-                    if (modules_event()) display_changed();
+                    int events = modules_event();
+                    if (events & MODULES_DISPLAY) display_changed();
                     input_refresh(); /* an input device may have come or gone */
-                    /* Up with the lid closed (docked), and the other screen gone. */
-                    if (lid_closed() && !docked()) {
-                        say("init: the lid closed, no other screen");
-                        lock_wait();
-                        suspend(1);
+                    int lid_again = 0;
+                    if (system_lost) {
+                        for (int i = 0; i < npfd; i++) close(pfd[i]);
+                        npfd = system_inputs(pfd, 8);
+                        system_lost = npfd < npfd_boot;
+                        lid_again = nlid > 0; /* logind checks a new one's switches */
+                    }
+                    /* With the lid closed, a screen gone (or come) decides
+                     * again whether the machine is docked. */
+                    if ((lid_again || (events & MODULES_DISPLAY)) && lid_closed()) {
+                        lid_changed(0);
+                    }
+                    if (events & MODULES_POWER) {
+                        battery_check();
                     }
                     break;
                 }
@@ -3032,27 +3670,42 @@ int main(void)
                 message(who[j]);
                 break;
             }
+            if (who[j] == NULL && j >= 1 && j <= npfd && (p[j].revents & (POLLERR | POLLHUP | POLLNVAL))) {
+                /* A system input gone (unplugged, its driver unbound): a
+                 * dead evdev file polls POLLHUP|POLLERR for ever
+                 * (evdev_poll), so it is closed; uevents look for such
+                 * devices again until as many are back. */
+                int k = j - 1;
+                say("init: a power button, home key or lid device has gone");
+                lid_forget(pfd[k]);
+                close(pfd[k]);
+                memmove(pfd + k, pfd + k + 1, (size_t)(npfd - k - 1) * sizeof *pfd);
+                npfd--;
+                system_lost = 1;
+                break;
+            }
             if (who[j] == NULL && j <= npfd && (p[j].revents & POLLIN)) { /* 1..npfd: system inputs */
-                struct input_event ev;
-                if (read(p[j].fd, &ev, sizeof ev) != sizeof ev) {
-                    break;
+                /* All that is queued (evdev_read gives as much as fits):
+                 * the lid by its level after them, never by an old edge. */
+                struct input_event ev[64];
+                ssize_t got = read(p[j].fd, ev, sizeof ev);
+                int lid = 0, closing = 0;
+                for (ssize_t k = 0; got > 0 && k < got / (ssize_t)sizeof *ev; k++) {
+                    if (ev[k].type == EV_KEY && ev[k].code == KEY_POWER && ev[k].value == 1) {
+                        say("init: power button");
+                        power_off();
+                    } else if (ev[k].type == EV_KEY && ev[k].value == 1 && keys_alone_action(ev[k].code) == K_HOME) {
+                        if (!locked) {
+                            say("init: key_home key %d -> home", ev[k].code);
+                            go_home(focus_place);
+                        }
+                    } else if (ev[k].type == EV_SW && ev[k].code == SW_LID) {
+                        lid = 1;
+                        closing |= ev[k].value == 1;
+                    }
                 }
-                if (ev.type == EV_KEY && ev.code == KEY_POWER && ev.value == 1) {
-                    say("init: power button");
-                    power_off();
-                } else if (ev.type == EV_KEY && ev.value == 1 && keys_alone_action(ev.code) == K_HOME) {
-                    if (!locked) {
-                        say("init: key_home key %d -> home", ev.code);
-                        go_home(focus_place);
-                    }
-                } else if (ev.type == EV_SW && ev.code == SW_LID && ev.value == 1) {
-                    lock_wait(); /* closed: locked, whether it sleeps or not */
-                    if (docked()) {
-                        say("init: lid closed, another screen connected: not sleeping");
-                    } else {
-                        say("init: lid closed");
-                        suspend(1);
-                    }
+                if (lid) {
+                    lid_changed(closing);
                 }
                 break;
             }
@@ -3080,6 +3733,9 @@ int main(void)
                     go_home(focus_place);
                 } else if (key == K_ACT_LOCK && !shared) {
                     lock();
+                } else if (ctrl_alt_del(key)) {
+                    say("init: Ctrl+Alt+Del");
+                    restart();
                 }
                 break;
             }

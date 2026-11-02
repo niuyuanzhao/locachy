@@ -10,7 +10,8 @@
 # 1, as settings does after its Debug cable link switch).
 set -euo pipefail
 
-RC="/etc/locachy/rc.conf"
+RC=${LOCACHY_SETUP_RC:-/etc/locachy/rc.conf}
+NETWORK=${LOCACHY_NETWORK_CLIENT:-/usr/local/lib/locachy/network-client}
 
 show_status() {
     local link_state="off"
@@ -24,7 +25,9 @@ show_status() {
     echo "  Debug cable link   : $link_state"
     local debug_dev
     debug_dev=$(sed -n 's/^debug_link_interface="\([^"]*\)".*/\1/p' "$RC" | tail -n 1)
-    echo "  Debug interface    : ${debug_dev:--}"
+    local debug_mac
+    debug_mac=$(sed -n 's/^debug_link_mac="\([^"]*\)".*/\1/p' "$RC" | tail -n 1)
+    echo "  Debug interface    : ${debug_dev:--}${debug_mac:+ ($debug_mac)}"
     echo "  Containers dir     : /var/lib/locachy/containers"
 }
 
@@ -48,9 +51,15 @@ set_debug_link() {
     saved=$(sed -n 's/^[[:space:]]*#*[[:space:]]*service_link="[^ "]* \([^ "]*\) \([0-9]*\)".*/\1 \2/p' "$RC" | tail -n 1)
     local addr="${2:-${saved% *}}"
     local port="${3:-${saved#* }}"
-    local dev="${4:-}"
+    local dev="${4:-}" mac key value
     addr="${addr:-fe80::14f0:c576:56c1:631f}"
     port="${port:-2300}"
+    # The card reserved before (debug_link_mac), under the name it has now,
+    # here or in locachy-net; else the port named, or the first wired one.
+    if [ -z "$dev" ] && [ "$mode" = on ]; then
+        dev=$("$NETWORK" --debug-port 2>/dev/null ||
+            { [ ! -e /run/netns/locachy-net ] || ip netns exec locachy-net "$NETWORK" --debug-port 2>/dev/null; }) || dev=
+    fi
     [ -n "$dev" ] || dev=$(sed -n 's/^debug_link_interface="\([^"]*\)".*/\1/p' "$RC" | tail -n 1)
     if [ "$mode" = on ]; then
         [ -n "$dev" ] || dev=$(wired_interface)
@@ -58,11 +67,22 @@ set_debug_link() {
             echo "locachy-setup: no wired port found; name it: on ADDR PORT IFACE" >&2
             return 2
         }
-        if grep -q '^debug_link_interface=' "$RC"; then
-            sed -i "s/^debug_link_interface=.*/debug_link_interface=\"$dev\"/" "$RC"
-        else
-            printf '\ndebug_link_interface="%s"\n' "$dev" >>"$RC"
-        fi
+        # The port is its card, by permanent address (network-client keeps
+        # that one on the host, whatever its name then).
+        mac=$("$NETWORK" --address "$dev" ||
+            { [ ! -e /run/netns/locachy-net ] || ip netns exec locachy-net "$NETWORK" --address "$dev"; }) || mac=
+        [ -n "$mac" ] || {
+            echo "locachy-setup: no permanent address of $dev here or in locachy-net" >&2
+            return 2
+        }
+        for key in debug_link_interface debug_link_mac; do
+            if [ "$key" = debug_link_mac ]; then value=$mac; else value=$dev; fi
+            if grep -q "^$key=" "$RC"; then
+                sed -i "s/^$key=.*/$key=\"$value\"/" "$RC"
+            else
+                printf '\n%s="%s"\n' "$key" "$value" >>"$RC"
+            fi
+        done
         if grep -qE '^[[:space:]]*#?[[:space:]]*service_link=' "$RC"; then
             sed -i "s|^[[:space:]]*#*[[:space:]]*service_link=.*|service_link=\"/usr/local/lib/locachy/link-client $addr $port\"|" "$RC"
         else
@@ -80,7 +100,10 @@ set_debug_link() {
     elif [ "$mode" = off ]; then
         sed -i 's/^[[:space:]]*service_link=/#service_link=/' "$RC"
         echo "locachy-setup: returning the debug interface to NetworkManager (debug connection will close)"
-        /usr/local/lib/locachy/network-client --interfaces
+        # One that cannot go stays here, down (said in the kernel's log): the
+        # link is off all the same.
+        "$NETWORK" --interfaces ||
+            echo "locachy-setup: an interface stays on the host, down (see the kernel log)" >&2
     else
         echo "usage: locachy-setup debug-link [on [ADDR [PORT [IFACE]]] | off]" >&2
         return 2

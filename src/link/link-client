@@ -1,5 +1,6 @@
 #!/bin/bash
-# link-client ADDRESS PORT: debug shell on the explicitly reserved wired port.
+# link-client ADDRESS PORT: debug shell on the explicitly reserved wired port:
+# the card of rc.conf's debug_link_mac, whatever the kernel named it.
 # No listening service; disabled ports belong to NetworkManager in locachy-net.
 set -eu
 
@@ -8,12 +9,16 @@ if ! grep -qE '^[[:space:]]*service_link=' "$RC"; then
     exec sleep infinity
 fi
 
-dev=$(sed -n 's/^[[:space:]]*debug_link_interface="\([^"]*\)".*/\1/p' "$RC" | tail -n 1)
-[ -n "$dev" ] && [ -e "/sys/class/net/$dev" ] || {
-    echo "link-client: configure debug_link_interface in $RC" >&2
+dev=$(/usr/local/lib/locachy/network-client --debug-port) || {
+    echo "link-client: the debug link's port (debug_link_mac in $RC) is not here: locachy-setup debug-link on" >&2
     exit 1
 }
-[ ! -d "/sys/class/net/$dev/phy80211" ] && [ "$(cat "/sys/class/net/$dev/type")" = 1 ] || exit 1
+[ "$(cat "/sys/class/net/$dev/type")" = 1 ] || exit 1
+# Its link-local address only: no address or route from router
+# advertisements, which the defaults of the host's namespace would take,
+# when the host has no network.
+printf '0\n' >"/proc/sys/net/ipv6/conf/$dev/accept_ra"
+printf '0\n' >"/proc/sys/net/ipv6/conf/$dev/autoconf"
 ip link set "$dev" up
 ip -6 addr replace fe80::230/64 dev "$dev" nodad
 exec /usr/local/lib/locachy/link-connect "$1%$dev" "$2" bash

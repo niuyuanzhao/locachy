@@ -18,6 +18,7 @@
 #include <drm/drm.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <linux/input.h>
 #include <poll.h>
 #include <signal.h>
@@ -25,9 +26,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/sysmacros.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -136,17 +139,30 @@ static void send_err(int sock, int err)
     send_msg(sock, SERVER_ERROR, &e, sizeof e);
 }
 
+static void message_fds(const char *msg, int *fds, int n);
+
+/* DRM master from process 1, within 400 ms; a message that comes first (a
+ * "keys" for the bar) is taken as it comes, not as a refusal. */
 static int request_master(int ctl)
 {
     if (ctl < 0) return 0;
     if (control_send(ctl, "master", 6, NULL, 0) < 0) return -1;
-    struct pollfd p = { .fd = ctl, .events = POLLIN };
-    if (poll(&p, 1, 400) > 0 && (p.revents & POLLIN)) {
+    double deadline = uptime() + 0.4;
+    for (int left; (left = (int)((deadline - uptime()) * 1000)) > 0;) {
+        struct pollfd p = { .fd = ctl, .events = POLLIN };
+        if (poll(&p, 1, left) <= 0 || !(p.revents & POLLIN)) break;
         char msg[CONTROL_MAX];
         int fds[CONTROL_MAX_FDS], nfds = 0;
         int len = control_recv(ctl, msg, sizeof msg, fds, &nfds);
-        for (int i = 0; i < nfds; i++) close(fds[i]);
-        if (len == 8 && strcmp(msg, "mastered") == 0) return 0;
+        if (len == 8 && strcmp(msg, "mastered") == 0) {
+            for (int i = 0; i < nfds; i++) close(fds[i]);
+            return 0;
+        }
+        if (len <= 0) {
+            for (int i = 0; i < nfds; i++) close(fds[i]);
+            break;
+        }
+        message_fds(msg, fds, nfds);
     }
     say("seat: process 1 did not hand over DRM master");
     return -1;
@@ -167,6 +183,21 @@ static int drop_all_devices(void)
         }
     }
     return 0;
+}
+
+/* Before the compositor is told to disable its seat, as seatd's
+ * seat_disable_client deactivates the devices first: every input device is
+ * revoked (EVIOCREVOKE, which also cuts the compositor's copies), so that a
+ * compositor that hangs or ignores the request reads no key typed elsewhere.
+ * A revoked device stays listed until the compositor closes it; it opens
+ * the device again when it is enabled (an evdev device is never reactivated). */
+static void revoke_input_devices(void)
+{
+    for (int i = 0; i < ndevs; i++) {
+        if (!devs[i].is_drm && ioctl(devs[i].fd, EVIOCREVOKE, NULL) < 0 && errno != ENODEV) {
+            say("seat: cannot revoke %s: %m", devs[i].path);
+        }
+    }
 }
 
 static int acquire_drm_masters(void)
@@ -225,13 +256,30 @@ static void handle_client_msg(int cfd)
             send_err(cfd, EINVAL);
             break;
         }
-        char path[128];
-        snprintf(path, sizeof path, "%.*s", (int)plen, (char *)payload + 2);
-        if (strncmp(path, "/dev/dri/", 9) != 0 && strncmp(path, "/dev/input/event", 16) != 0) {
-            send_err(cfd, EACCES);
+        /* As seatd's seat_open_device: none while the seat is disabled
+         * (EPERM), and only an input or display device, its path resolved
+         * (realpath) and opened without following a link. */
+        if (!active_seat) {
+            send_err(cfd, EPERM);
             break;
         }
-        int dev_fd = open(path, O_RDWR | O_NONBLOCK | O_NOCTTY | O_CLOEXEC);
+        char asked[128], path[PATH_MAX];
+        snprintf(asked, sizeof asked, "%.*s", (int)plen, (char *)payload + 2);
+        if (realpath(asked, path) == NULL) {
+            send_err(cfd, errno);
+            break;
+        }
+        if (strncmp(path, "/dev/dri/", 9) != 0 && strncmp(path, "/dev/input/event", 16) != 0) {
+            send_err(cfd, ENOENT);
+            break;
+        }
+        int dev_fd = open(path, O_RDWR | O_NONBLOCK | O_NOCTTY | O_NOFOLLOW | O_CLOEXEC);
+        struct stat st;
+        if (dev_fd >= 0 && (fstat(dev_fd, &st) < 0 || !S_ISCHR(st.st_mode))) {
+            close(dev_fd);
+            dev_fd = -1;
+            errno = ENOENT;
+        }
         if (dev_fd < 0) {
             send_err(cfd, errno);
         } else {
@@ -246,7 +294,7 @@ static void handle_client_msg(int cfd)
             if (ndevs < 64) {
                 devs[ndevs].id = id;
                 devs[ndevs].fd = dev_fd;
-                snprintf(devs[ndevs].path, sizeof devs[ndevs].path, "%s", path);
+                snprintf(devs[ndevs].path, sizeof devs[ndevs].path, "%.127s", path);
                 devs[ndevs].is_drm = is_drm;
                 ndevs++;
             }
@@ -294,8 +342,9 @@ static void handle_client_msg(int cfd)
     }
 }
 
-/* A host client of the compositor; it waits for wayland-0 itself. */
-static pid_t start_client(const char *path)
+/* A host client of the compositor; it waits for wayland-0 itself. keys: a
+ * socket it keeps (LOCACHY_BAR_KEYS), or -1. */
+static pid_t start_client(const char *path, int keys)
 {
     if (access(path, X_OK) != 0) {
         say("seat: %s is not installed", path);
@@ -304,10 +353,56 @@ static pid_t start_client(const char *path)
     pid_t pid = fork();
     if (pid == 0) {
         setenv("WAYLAND_DISPLAY", "wayland-0", 1);
+        if (keys >= 0) {
+            char number[16];
+            fcntl(keys, F_SETFD, 0); /* kept across exec */
+            snprintf(number, sizeof number, "%d", keys);
+            setenv("LOCACHY_BAR_KEYS", number, 1);
+        }
         execl(path, path, (char *)NULL);
         _exit(127);
     }
     return pid;
+}
+
+/* The keyboards process 1 lends with the seat ("take", "keys"), passed on to
+ * locachy-bar, which reads no input device of its own: what process 1
+ * revokes when it takes the seat back (EVIOCREVOKE) it revokes in the bar
+ * too, as it does for every program it lends them to. seat keeps a copy of
+ * each, to give a bar started later. */
+#define MAX_KEYBOARDS 8
+static int keyboards[MAX_KEYBOARDS], nkeyboards, bar_keys = -1;
+
+static void send_keyboards(void)
+{
+    if (bar_keys >= 0 && control_send(bar_keys, "keys", 4, keyboards, nkeyboards) < 0) {
+        say("seat: cannot pass the keyboards to locachy-bar: %s", strerror(errno));
+    }
+}
+
+static void keyboards_lent(const int *fds, int n)
+{
+    for (int i = 0; i < nkeyboards; i++) close(keyboards[i]);
+    nkeyboards = 0;
+    for (int i = 0; i < n; i++) {
+        if (nkeyboards < MAX_KEYBOARDS) keyboards[nkeyboards++] = fds[i];
+        else close(fds[i]);
+    }
+    send_keyboards();
+}
+
+/* A message's descriptors: a "take"'s keyboards (after its screen lease,
+ * which seat does not use: it asks for DRM master) and a "keys"'s are the
+ * bar's; any other's are closed. */
+static void message_fds(const char *msg, int *fds, int n)
+{
+    int take = strcmp(msg, "take") == 0;
+    if ((take && n >= 1) || strcmp(msg, "keys") == 0) {
+        if (take) close(fds[0]);
+        keyboards_lent(fds + take, n - take);
+        return;
+    }
+    for (int i = 0; i < n; i++) close(fds[i]);
 }
 
 /* The gestures (libinput-gestures, lisgd: link/gestures), in a process
@@ -399,22 +494,37 @@ static void wallpaper(void)
  * (and labwc-control: idle); from labwc-control's touchpad swipes, SIGRTMIN
  * the next task, SIGRTMIN + 1 the previous. Passed on to process 1. */
 static volatile sig_atomic_t want_home, want_lock, want_switch;
+/* The signals wake the loop through a pipe (poll waits without a timeout:
+ * a signal between its flag's check and poll would otherwise wait until
+ * the next event). */
+static int wake_pipe[2] = { -1, -1 };
+
+static void wake(void)
+{
+    int saved = errno;
+    if (wake_pipe[1] >= 0 && write(wake_pipe[1], "", 1) < 0) {
+    }
+    errno = saved;
+}
 
 static void on_sigswitch(int sig)
 {
     want_switch = sig == SIGRTMIN ? 1 : -1;
+    wake();
 }
 
 static void on_sigusr1(int sig)
 {
     (void)sig;
     want_home = 1;
+    wake();
 }
 
 static void on_sigusr2(int sig)
 {
     (void)sig;
     want_lock = 1;
+    wake();
 }
 
 static void on_rc_keymap(const char *name, const char *value, void *arg)
@@ -430,6 +540,9 @@ int main(int argc, char **argv)
         fprintf(stderr, "usage: seat COMMAND [ARG...]\n");
         return 2;
     }
+    if (pipe2(wake_pipe, O_NONBLOCK | O_CLOEXEC) < 0) {
+        say("seat: no wake pipe: %s", strerror(errno));
+    }
     signal(SIGUSR1, on_sigusr1);
     signal(SIGUSR2, on_sigusr2);
     signal(SIGRTMIN, on_sigswitch);
@@ -441,12 +554,11 @@ int main(int argc, char **argv)
             char msg[CONTROL_MAX];
             int fds[CONTROL_MAX_FDS], nfds = 0;
             int len = control_recv(ctl, msg, sizeof msg, fds, &nfds);
-            for (int i = 0; i < nfds; i++) {
-                close(fds[i]);
-            }
             if (len <= 0) {
+                for (int i = 0; i < nfds; i++) close(fds[i]);
                 return 1;
             }
+            message_fds(msg, fds, nfds);
             if (strcmp(msg, "take") == 0) {
                 if (request_master(ctl) < 0) return 1;
                 break;
@@ -517,12 +629,31 @@ int main(int argc, char **argv)
     double display_started = uptime();
     pid_t bar_pid = -1, control_pid = -1;
     if (is_labwc) {
-        control_pid = start_client("/usr/local/lib/locachy/labwc-control");
-        bar_pid = start_client("/usr/local/bin/locachy-bar");
+        int pair[2] = { -1, -1 };
+        if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, pair) < 0) {
+            say("seat: no keyboard socket for locachy-bar: %s", strerror(errno));
+        }
+        control_pid = start_client("/usr/local/lib/locachy/labwc-control", -1);
+        bar_pid = start_client("/usr/local/bin/locachy-bar", pair[1]);
+        if (pair[1] >= 0) close(pair[1]);
+        bar_keys = pair[0];
+        send_keyboards(); /* those of the first take */
     }
 
     int cfd = -1;
     say("seat: started %s (pid %d), seatd socket %s", argv[1], (int)comp_pid, sock_path);
+    /* The compositor's end wakes the loop (pidfd_open(2): readable once it
+     * has exited); so do the files display-ready waits for, appearing in
+     * the runtime directory (inotify(7)), until it is sent. */
+    int comp_fd = comp_pid > 0 ? (int)syscall(SYS_pidfd_open, comp_pid, 0) : -1;
+    int ready_fd = -1;
+    if (is_labwc) {
+        ready_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+        if (ready_fd >= 0 && inotify_add_watch(ready_fd, "/run/user/0", IN_CREATE | IN_MOVED_TO) < 0) {
+            close(ready_fd);
+            ready_fd = -1;
+        }
+    }
 
     for (;;) {
         if (is_labwc && !display_ready_sent && ctl >= 0 &&
@@ -537,6 +668,10 @@ int main(int argc, char **argv)
             control_send(ctl, "display-ready", 13, NULL, 0);
             wallpaper(); /* swaybg needs wayland-0: it does not wait for it */
             gestures(1);
+            if (ready_fd >= 0) {
+                close(ready_fd);
+                ready_fd = -1;
+            }
         }
         if (is_labwc && !display_ready_sent && uptime() - display_started > 15) {
             say("seat: labwc startup timed out");
@@ -563,7 +698,7 @@ int main(int argc, char **argv)
                 control_send_fields(ctl, forward ? next : prev);
             }
         }
-        struct pollfd p[4];
+        struct pollfd p[7];
         int n = 0;
         int lfd_i = n; p[n++] = (struct pollfd){ .fd = lfd, .events = POLLIN };
         int cfd_i = -1;
@@ -576,23 +711,41 @@ int main(int argc, char **argv)
             ctl_i = n;
             p[n++] = (struct pollfd){ .fd = ctl, .events = POLLIN };
         }
+        p[n++] = (struct pollfd){ .fd = wake_pipe[0], .events = POLLIN }; /* -1: ignored */
+        p[n++] = (struct pollfd){ .fd = comp_fd, .events = POLLIN };
+        p[n++] = (struct pollfd){ .fd = ready_fd, .events = POLLIN };
+        /* Waiting for display-ready: until X11_WAIT (the files can come
+         * before it) or the startup's end; else no timeout. Without a
+         * pidfd or an inotify watch, once a second as a fallback. */
+        int timeout = -1;
+        if (is_labwc && !display_ready_sent) {
+            double elapsed = uptime() - display_started;
+            int x11_pending = elapsed < X11_WAIT && access(X11_RECORD, F_OK) != 0 && access(XWAYLAND, X_OK) == 0;
+            double left = (x11_pending ? X11_WAIT : 15) - elapsed;
+            timeout = ready_fd < 0 ? 1000 : left > 0 ? (int)(left * 1000) + 10 : 10;
+        }
+        if (comp_fd < 0 && (timeout < 0 || timeout > 1000)) timeout = 1000;
 
-        int r = poll(p, (nfds_t)n, 200);
+        int r = poll(p, (nfds_t)n, timeout);
         if (r < 0) {
             if (errno == EINTR) continue;
             break;
+        }
+        char drain[256];
+        while (wake_pipe[0] >= 0 && read(wake_pipe[0], drain, sizeof drain) > 0) {
+        }
+        while (ready_fd >= 0 && read(ready_fd, drain, sizeof drain) > 0) {
         }
 
         if (ctl_i >= 0 && (p[ctl_i].revents & (POLLIN | POLLHUP))) {
             char msg[CONTROL_MAX];
             int fds[CONTROL_MAX_FDS], nfds = 0;
             int len = control_recv(ctl, msg, sizeof msg, fds, &nfds);
-            for (int i = 0; i < nfds; i++) {
-                close(fds[i]);
-            }
             if (len <= 0) {
+                for (int i = 0; i < nfds; i++) close(fds[i]);
                 break;
             }
+            message_fds(msg, fds, nfds);
             if (strcmp(msg, "take") == 0) {
                 if (request_master(ctl) < 0 || acquire_drm_masters() < 0) {
                     say("seat: refusing to enable a compositor without DRM master");
@@ -616,8 +769,10 @@ int main(int argc, char **argv)
                     kill(bar_pid, SIGUSR2);
                     usleep(10000);
                 }
+                keyboards_lent(NULL, 0); /* process 1 revokes them after "released" */
                 active_seat = 0;
                 disable_ack_received = 0;
+                revoke_input_devices();
                 if (cfd >= 0) {
                     send_msg(cfd, SERVER_DISABLE_SEAT, NULL, 0);
                     double deadline = uptime() + 0.25;
@@ -643,9 +798,13 @@ int main(int argc, char **argv)
         }
 
         if (p[lfd_i].revents & POLLIN) {
+            /* The compositor's connection; another while it lasts is not
+             * given the seat (seatd keeps one client active, never two). */
             int new_cfd = accept4(lfd, NULL, NULL, SOCK_CLOEXEC);
-            if (new_cfd >= 0) {
-                if (cfd >= 0) close(cfd);
+            if (new_cfd >= 0 && cfd >= 0) {
+                say("seat: a second seat client refused");
+                close(new_cfd);
+            } else if (new_cfd >= 0) {
                 cfd = new_cfd;
             }
         }

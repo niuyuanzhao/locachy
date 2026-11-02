@@ -116,7 +116,9 @@ void keys_take_back(const int *fds, int n);
  * readable. Processed udev events also wake this fd for input rescans. */
 int modules_start(const char *root);
 int modules_fd(void);
-int modules_event(void); /* Nonzero if a DRM topology event was received. */
+int modules_event(void); /* MODULES_DISPLAY | MODULES_POWER: what the events drained were */
+#define MODULES_DISPLAY 1  /* a DRM topology change (not a lease, not a replay) */
+#define MODULES_POWER 2    /* a power_supply add, change or remove */
 
 /* Process 1: the keyboards' own fds, to poll them with other things, and the
  * key for one evdev event (0 if none). Ctrl+Alt+Esc gives K_HOME. */

@@ -35,9 +35,16 @@ class Camera(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.config = self.root / "config.ini"
         self.config.write_text("[video]\ndevice_path = /missing\nrecording_plugin = opencv\n")
-        patch = mock.patch.object(cam, "HOWDY_CONF", str(self.config))
-        patch.start()
-        self.addCleanup(patch.stop)
+        self.by_path, self.by_id = self.root / "by-path", self.root / "by-id"
+        self.by_path.mkdir()
+        self.by_id.mkdir()
+        self.app = self.root / "locachy-app"
+        for name, value in (("HOWDY_CONF", str(self.config)), ("V4L_LINKS", (str(self.by_path), str(self.by_id))),
+                            ("EMITTER_CONF", str(self.root / "emitter.toml")), ("SYS_CLASS", str(self.root / "class")),
+                            ("LOCACHY_APP", str(self.app))):
+            patch = mock.patch.object(cam, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
 
     def enumeration(self, kind):
         def ioctl(fd, request, buffer, mutate):
@@ -68,6 +75,88 @@ class Camera(unittest.TestCase):
         self.assertEqual(ir["name"], "IR Camera")
         self.assertFalse(self.enumeration("colour")["candidate"])
         self.assertTrue(self.enumeration("multiplane")["candidate"])
+
+    def link(self, directory, name, node):
+        (directory / name).symlink_to(node)
+        return str(directory / name)
+
+    def sysfs(self, node, parent):
+        cls = "video4linux" if node.startswith("video") else "media"
+        (self.root / "devices" / parent).mkdir(parents=True, exist_ok=True)
+        (self.root / "class" / cls / node).mkdir(parents=True)
+        (self.root / "class" / cls / node / "device").symlink_to(self.root / "devices" / parent)
+
+    def test_stable_path_prefers_by_path_then_by_id_then_the_node(self):
+        self.link(self.by_id, "usb-Chicony_IR-video-index0", "/dev/video2")
+        self.assertEqual(cam.stable_path("/dev/video2"), str(self.by_id / "usb-Chicony_IR-video-index0"))
+        self.link(self.by_path, "pci-0000:00:14.0-usbv2-0:6:1.2-video-index0", "/dev/video2")
+        short = self.link(self.by_path, "pci-0000:00:14.0-usb-0:6:1.2-video-index0", "/dev/video2")
+        self.link(self.by_path, "pci-0000:00:14.0-usb-0:6:1.0-video-index0", "/dev/video0")
+        self.assertEqual(cam.stable_path("/dev/video2"), short)
+        self.assertEqual(cam.stable_path(short), short)
+        self.assertEqual(cam.stable_path("/dev/video9"), "/dev/video9")
+        print("PASS face camera stable path: by-path (howdy config.ini), else by-id (ir-emitter), else node", flush=True)
+
+    def test_apply_saves_stable_path_and_migrates_old_node_values(self):
+        link = self.link(self.by_path, "pci-0000:00:14.0-usb-0:6:1.2-video-index0", "/dev/video2")
+        self.config.write_text("[video]\ndevice_path = /dev/video2\n")
+        # An old value is still read (and matched) as before.
+        self.assertEqual(cam.resolve_device(cam.configured_device(), [device("/dev/video2")])["path"], "/dev/video2")
+        self.app.write_text("#!/bin/sh\n")
+        self.app.chmod(0o755)
+        calls = []
+        def run(command, **kwargs):
+            calls.append(command)
+            if command[1] == "-U":
+                self.config.write_text("[video]\ndevice_path = %s\n" % command[-1])
+        with mock.patch.object(cam.subprocess, "run", side_effect=run), contextlib.redirect_stdout(io.StringIO()):
+            cam.apply_device(device("/dev/video2"), "test")
+        self.assertEqual(calls, [[cam.HOWDY, "-U", "test", "set", "device_path", link], [str(self.app), "cameras"]])
+        self.assertEqual(cam.configured_device(), link)
+        self.assertEqual(cam.resolve_device(cam.configured_device(), [device("/dev/video2")])["path"], "/dev/video2")
+        print("PASS face camera saved by stable path; an old /dev/videoN value is read and replaced on save; "
+              "running containers re-synced", flush=True)
+
+    def test_ordinary_nodes_withhold_infrared_and_face_unlock_cameras(self):
+        face = self.link(self.by_path, "pci-face-video-index0", "/dev/video3")
+        emitter = self.link(self.by_id, "usb-emitter-video-index0", "/dev/video6")
+        (self.root / "emitter.toml").write_text('["%s"]\nsavelist = []\n' % emitter)
+        kinds = {"/dev/video0": ("A", device("/dev/video0", False)),   # ordinary
+                 "/dev/video1": ("A", None),                            # its metadata node
+                 "/dev/video2": ("B", device("/dev/video2", True)),     # infrared candidate
+                 "/dev/video3": ("C", device("/dev/video3", False)),    # howdy's device_path
+                 "/dev/video4": ("D", device("/dev/video4", False)),    # ordinary
+                 "/dev/video5": ("D", OSError("busy")),                 # cannot be asked
+                 "/dev/video6": ("E", device("/dev/video6", False))}    # the emitter's
+        for node, (parent, _) in kinds.items():
+            self.sysfs(node[5:], parent)
+        medias = {"/dev/media0": "A", "/dev/media1": "B", "/dev/media2": "C", "/dev/media3": "D",
+                  "/dev/media4": "E", "/dev/media5": "F"}
+        for node, parent in medias.items():
+            self.sysfs(node[5:], parent)
+        def capture(path):
+            value = kinds[path][1]
+            if isinstance(value, Exception):
+                raise value
+            return value
+        for configured in (face, "/dev/video3"):
+            with self.subTest(device_path=configured):
+                self.config.write_text("[video]\ndevice_path = %s\n" % configured)
+                with mock.patch.object(cam, "video_nodes", return_value=list(kinds)), \
+                        mock.patch.object(cam, "capture_device", side_effect=capture), \
+                        mock.patch.object(cam.glob, "glob", return_value=list(medias)):
+                    self.assertEqual(cam.ordinary_nodes(), ["/dev/video0", "/dev/video4", "/dev/media0"])
+        print("PASS camera=\"1\" nodes: ordinary capture nodes and their media nodes only; never the infrared "
+              "candidate, howdy's or the emitter's camera, nor media nodes they (or unknown nodes) share", flush=True)
+
+    def test_list_gives_node_candidate_name_and_stable_path(self):
+        link = self.link(self.by_path, "pci-ir-video-index0", "/dev/video2")
+        args = types.SimpleNamespace(command="list")
+        with mock.patch.object(cam, "devices", return_value=[device("/dev/video2"), device("/dev/video4", False)]), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(cam.run(args), 0)
+        self.assertEqual(out.getvalue().splitlines(),
+                         ["/dev/video2\t1\tTest camera\t" + link, "/dev/video4\t0\tTest camera\t/dev/video4"])
 
     def test_sparse_high_numbered_nodes_and_numeric_order(self):
         paths = ["/dev/video128", "/dev/video2", "/dev/video3", "/dev/video0", "/dev/videotext"]

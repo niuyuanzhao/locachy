@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-30 16:22-0400\n"
+"POT-Creation-Date: 2026-11-02 04:07-0500\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -277,7 +277,7 @@ msgstr ""
 msgid "BT (%d)"
 msgstr ""
 
-#: base/status.c
+#: base/status.c progs/settings-hwinfo.inc
 msgid "connected"
 msgstr ""
 
@@ -1013,6 +1013,47 @@ msgstr ""
 #. TRANSLATORS: Enter, A and Esc are keys; keep them.
 #: progs/bar.c
 msgid "Enter: open   A: always use it   Esc: cancel"
+msgstr ""
+
+#: progs/drives.c
+#, c-format
+msgid "%s was not ejected"
+msgstr ""
+
+#: progs/drives.c
+#, c-format
+msgid "%s is in use"
+msgstr ""
+
+#: progs/drives.c
+#, c-format
+msgid "Files on it are open in %s."
+msgstr ""
+
+#: progs/drives.c
+#, c-format
+msgid "Writing data to %s"
+msgstr ""
+
+#: progs/drives.c
+msgid "Don't unplug it yet."
+msgstr ""
+
+#: progs/drives.c
+msgid "One or more applications are keeping it busy."
+msgstr ""
+
+#: progs/drives.c
+msgid "A program still has it open."
+msgstr ""
+
+#: progs/drives.c
+#, c-format
+msgid "%s can be safely unplugged"
+msgstr ""
+
+#: progs/drives.c
+msgid "The device can be removed now."
 msgstr ""
 
 #: progs/edit-actions.inc progs/view.c
@@ -3166,7 +3207,7 @@ msgstr ""
 msgid "needs attention"
 msgstr ""
 
-#: progs/files.c
+#: progs/files.c progs/settings-power.inc
 msgid "offline"
 msgstr ""
 
@@ -3628,7 +3669,7 @@ msgstr ""
 msgid "Original Location"
 msgstr ""
 
-#: progs/files.c
+#: progs/files.c progs/settings-hwinfo.inc
 msgid "Type"
 msgstr ""
 
@@ -3980,6 +4021,41 @@ msgstr ""
 msgid "Octal permissions (e.g. 644 or 755):"
 msgstr ""
 
+#: progs/files.c
+#, c-format
+msgid "%s is still being ejected."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "%s cannot be ejected: the drives service is not running."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Ejecting %s..."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Writing data to %s. Don't unplug it yet."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "%s can be safely unplugged now."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "%s is in use: files on it are open in %s."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "%s is in use: close the files open on it first."
+msgstr ""
+
 #. TRANSLATORS: Drives is the folder name ~/Drives; keep it.
 #: progs/files.c
 #, c-format
@@ -3988,18 +4064,22 @@ msgstr ""
 
 #: progs/files.c
 #, c-format
-msgid "%s is in use: close the files open on it first."
+msgid "Another drive is being ejected; try %s again when it is done."
 msgstr ""
 
 #: progs/files.c
 #, c-format
-msgid ""
-"%s is still in use in a container: stop it before pulling the drive out."
+msgid "%s is still in use (a program has the device open); it was not ejected."
 msgstr ""
 
 #: progs/files.c
 #, c-format
-msgid "%s can be pulled out now."
+msgid "%s was not ejected: %s"
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Ejecting %s failed: the drives service stopped. Do not unplug it yet."
 msgstr ""
 
 #: progs/files.c
@@ -4324,7 +4404,8 @@ msgstr ""
 msgid "w makes an image the wallpaper; %s is not one."
 msgstr ""
 
-#: progs/files.c progs/installer.c progs/packages.c progs/settings.c
+#: progs/files.c progs/installer.c progs/packages.c progs/settings-power.inc
+#: progs/settings.c
 #, c-format
 msgid "Cannot write %s."
 msgstr ""
@@ -4420,11 +4501,11 @@ msgstr ""
 msgid "SPI Flash (flashrom)"
 msgstr ""
 
-#: progs/firmware.c
+#: progs/firmware.c progs/settings-power.inc
 msgid "Device"
 msgstr ""
 
-#: progs/firmware.c
+#: progs/firmware.c progs/settings-hwinfo.inc
 msgid "Vendor"
 msgstr ""
 
@@ -5029,7 +5110,7 @@ msgstr ""
 msgid "User"
 msgstr ""
 
-#: progs/installer.c
+#: progs/installer.c progs/settings-hwinfo.inc
 msgid "Summary"
 msgstr ""
 
@@ -5111,7 +5192,7 @@ msgstr ""
 msgid "not connected"
 msgstr ""
 
-#: progs/installer.c
+#: progs/installer.c progs/settings-power.inc
 msgid "Now"
 msgstr ""
 
@@ -5184,7 +5265,7 @@ msgid_plural "%d GiB"
 msgstr[0] ""
 msgstr[1] ""
 
-#: progs/installer.c
+#: progs/installer.c progs/settings-hwinfo.inc
 msgid "Swap"
 msgstr ""
 
@@ -6779,6 +6860,1072 @@ msgstr ""
 msgid "The last check is shown; c checks again."
 msgstr ""
 
+#: progs/settings-hwinfo.inc
+msgid "Processor"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Memory & Slots"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Storage & SMART"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Graphics & Displays"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Sensors (Live)"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "PCI & PCIe Bus"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "USB Devices"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Network Adapters"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Firmware & DMI"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "System: %.52s, Linux %.44s"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "System: %.96s"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "Model: %.104s"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "Hardware: %.76s, %.24s RAM"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "Hardware: %.96s"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Processor Identification"
+msgstr ""
+
+#: progs/settings-hwinfo.inc progs/view.c
+msgid "Model"
+msgstr ""
+
+#: progs/settings-hwinfo.inc progs/settings-power.inc progs/view-pdf-ui.inc
+msgid "Unknown"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "Family %s, Model %s, Stepping %s"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Signature"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Microcode"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%d physical cores, %d hardware threads"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%d hardware threads"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Topology"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "x86-64 ISA level"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Key extensions"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Cache Hierarchy"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%s (%s-way, CPUs %s)"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Frequency & Power Scaling"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%s (governor: %s, EPP: %s)"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%s (governor: %s)"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Scaling driver"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%.0f MHz  (range %.0f – %.0f MHz)"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "CPU Security Mitigations"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Physical Memory Array (SMBIOS)"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%u slots, max supported %.0f GiB (%s)"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "ECC"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Non-ECC"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%u memory slots"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Controller array"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "Slot %d"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Empty"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "System Memory Usage"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%.2f / %.2f GiB (%d%%)"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Physical RAM"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%.2f GiB available, %.2f GiB page cache, %.1f MiB shared"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Breakdown"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Dirty pages"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Zswap compressed"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Not configured"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Physical Memory Modules"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid ""
+"SMBIOS Type 17 table is not exposed on this machine (e.g. virtual machine)."
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Block Devices"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "No block devices found in /sys/block."
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Capacity"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Firmware"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%d%% remaining (%u%% endurance used, spare %u%%)"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "SMART health"
+msgstr ""
+
+#: progs/settings-hwinfo.inc progs/settings-power.inc
+msgid "Temperature"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Total data written"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Total data read"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%llu hours, %llu power cycles, %llu unsafe shutdowns"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Lifetime counters"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Media / integrity errors"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%d%% life remaining"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "SMART SSD life"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%lld hours, %lld power cycles"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "reallocated %lld, pending %lld"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Sector health"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "No physical disks detected."
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Graphics Adapters"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "No PCI display controller listed."
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Display controller"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "Display — %.64s"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Panel / Monitor"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Native timing"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Preferred mode"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%.1f\" diagonal (%d × %d cm)"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Physical size"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%d-bit per channel"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Color depth"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "Week %d, %d"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Manufactured"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Serial"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Connected Displays"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "No connected DRM output reported."
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "CPU Package Power"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Hardware Sensors"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "No hwmon or thermal sensors reported on this system."
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%.1f °C   (crit %.0f °C)"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "PCI Devices"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "No PCI devices reported in /sys/bus/pci/devices."
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "PCI & PCIe Devices (%d total)"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "USB Bus & Devices (%d total)"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "No USB devices reported in /sys/bus/usb/devices."
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Link & driver"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "MAC address"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "RX %s  /  TX %s"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Traffic"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Network Interfaces"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "No active network adapters found."
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "System vendor"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Product name"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Product version"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Product SKU"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Product family"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Board vendor"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Board model"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Board version"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "BIOS vendor"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "BIOS version"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "BIOS release date"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "EC firmware release"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "System & Firmware DMI"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "No DMI firmware strings reported."
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Boot & Platform Security"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "UEFI (%.16s-bit)"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Boot mode"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Legacy BIOS / non-EFI"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "TPM hardware"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Kernel cmdline"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%d loaded modules"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Kernel modules"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "System Overview"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Operating system"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings-hwinfo.inc progs/settings.c
+msgid "Hostname"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Linux kernel"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%ldd %02ldh %02ldm"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Uptime"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Load average"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Hardware Summary"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Computer"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Generic x86_64 system"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Memory"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "Spare pack (%.36s)"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "Battery %.36s"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "%d.%d%% (%s), health %.1f%% (%.1f / %.1f Wh)"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Copied system summary to clipboard."
+msgstr ""
+
+#: progs/settings-hwinfo.inc progs/settings-power.inc
+msgid "Clipboard service is not running."
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "settings — Hardware Information"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "Live curve: %.28s / %.36s = %.1f %s  (min %.1f, max %.1f %s)"
+msgstr ""
+
+#. TRANSLATORS: Tab, r, c and Esc are key names; keep them.
+#: progs/settings-hwinfo.inc
+msgid "Up/Down: move  Tab: pane  r: refresh  c: copy  Esc: back"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid ""
+"Up/Down: select   Tab / Left / Right: switch pane   r: refresh   c: copy "
+"page   Esc: back"
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+#, c-format
+msgid "Copied %s to clipboard."
+msgstr ""
+
+#: progs/settings-hwinfo.inc
+msgid "Hardware readings refreshed."
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Charging"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Discharging"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Full"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Not charging"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Idle"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Removed (spare)"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Removed from slot"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s %s swapped: %.24s (%d%%) -> %.24s (%d%%)"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s discharge handoff %s (%d%% -> %d%%)"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s %s removed: %.28s (%d%%)"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s %s inserted: %.28s (%d%%)"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "AC power (%d removed pack on record)   (Enter: curves & health)"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s   (Enter: power & battery details)"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "AC power, no battery detected"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "No battery detected"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid ", health %.1f%%"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid " +%d spare"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%d batteries%s (%s %d%%, %s%s%s)   (Enter: curves & health)"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s%s %d%%, %s%s%s   (Enter: curves & health)"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Battery"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Spare (removed)"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s [%s]: health %.1f%% (%.1f / %.1f Wh), %d cycles"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s [%s]: health %.1f%% (%.1f / %.1f Wh)"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s [%s]: %d%%, %s"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Last handoff: %.104s"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid ""
+"Running on AC adapter; no system battery is reported in /sys/class/"
+"power_supply."
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "No system battery is reported in /sys/class/power_supply."
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Cannot write charge start threshold for %s."
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid ""
+"Charge start threshold: %d%% (re-applied automatically on battery swap)."
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Cannot write charge stop threshold for %s."
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Charge stop threshold: %d%% (re-applied automatically on battery swap)."
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "12h"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "1h"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "24h"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "2h"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "48h"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "7d"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Last 12 hours"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Last 2 hours"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Last hour"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Last 24 hours"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Last 48 hours"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Last 7 days"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid " (%dh %02dm remaining)"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "settings — Power & Battery"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Window too small for battery curves."
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Spare"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "AC: On (%.1f V)"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "AC: Offline"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "AC: Online"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid " Charge (%) "
+msgstr ""
+
+#: progs/settings-power.inc
+msgid " Power (W) "
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Span:"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid " Refresh "
+msgstr ""
+
+#: progs/settings-power.inc
+msgid " Copy "
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "No battery available"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s — Peripheral device (live battery level: %d%%, history not recorded)"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Handoff %.160s"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Cursor %s: [%s — last %d.%d%%]"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Cursor %s: %d.%d%%  %.2f W  %.2f V  [%s%s]"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid " — sleep/off gap"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Cursor %s: no data recorded at this time"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s — %s [%s] (%d pts, avg %.1f W, peak %.1f W)"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Charge Percentage"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Energy Consumption"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s — %s [%s]"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "State"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Removed (last in %.24s at %.20s)"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Current charge"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Last charge"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Health"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "not reported"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Charge cycles"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Vendor / Model"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Serial / Type"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Li-ion"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Power rate"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Voltage"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%.2f V (design %.2f V)"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "design %.2f V"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Remaining energy"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Last full charge"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Design capacity"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "AC adapter"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Online (%.1f V, %.2f A)"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Offline"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Online"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Charge limits"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "start %d%%, stop %d%%"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "saved %d%%–%d%% (applied on insert)"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "not exposed by firmware"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Last handoff"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "none in window"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Pack ID"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Battery & Health"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Energy"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Thresholds & Handoff"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Energy & Handoff"
+msgstr ""
+
+#. TRANSLATORS: m, Tab, Left/Right, r, c and Esc are key names; keep them.
+#: progs/settings-power.inc
+msgid "m: %/W  1-6: span  Arrows: cursor  r: refresh  Esc: back"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid ""
+"m: %/W   1-6: span   Left/Right: cursor   Tab: pack   r: refresh   c: copy   "
+"Esc: back"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Battery readings refreshed."
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Copied battery report to clipboard."
+msgstr ""
+
 #: progs/settings.c
 msgid "generic PC"
 msgstr ""
@@ -7754,6 +8901,10 @@ msgid "Networking"
 msgstr ""
 
 #: progs/settings.c
+msgid "Power & Battery"
+msgstr ""
+
+#: progs/settings.c
 msgid "Apps & Windows"
 msgstr ""
 
@@ -7779,6 +8930,14 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Bluetooth"
+msgstr ""
+
+#: progs/settings.c
+msgid "Power Management"
+msgstr ""
+
+#: progs/settings.c
+msgid "Battery & Energy"
 msgstr ""
 
 #: progs/settings.c
@@ -7849,10 +9008,6 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Users"
-msgstr ""
-
-#: progs/settings.c
-msgid "Power Management"
 msgstr ""
 
 #: progs/settings.c
@@ -8045,6 +9200,18 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Hibernate Timeout"
+msgstr ""
+
+#: progs/settings.c
+msgid "0 s (off)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Lid Close Holdoff"
+msgstr ""
+
+#: progs/settings.c
+msgid "Critical Battery Level"
 msgstr ""
 
 #: progs/settings.c
@@ -8348,11 +9515,6 @@ msgstr ""
 msgid "Cloud remotes (iCloud, Drive)"
 msgstr ""
 
-#. TRANSLATORS: Enter is the Enter key; keep it.
-#: progs/settings.c
-msgid "Hostname"
-msgstr ""
-
 #: progs/settings.c
 msgid "(Enter: change)"
 msgstr ""
@@ -8507,6 +9669,36 @@ msgstr ""
 
 #: progs/settings.c
 msgid "(Enter: rank them again)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Battery curves & health"
+msgstr ""
+
+#: progs/settings.c
+msgid "Charge start threshold"
+msgstr ""
+
+#: progs/settings.c
+msgid "Charge stop threshold"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Hardware & system information"
+msgstr ""
+
+#: progs/settings.c
+msgid "CPU, memory, storage SMART, sensors, PCI, USB   (Enter: open)"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Copy system summary"
+msgstr ""
+
+#: progs/settings.c
+msgid "(Enter: copy to clipboard)"
 msgstr ""
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
@@ -9108,6 +10300,21 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Enter: set the date and time."
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: open battery curves, health and handoff history."
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: open hardware, storage SMART and live sensor browser."
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: copy system and hardware summary to clipboard."
 msgstr ""
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
@@ -9720,10 +10927,6 @@ msgstr ""
 
 #: progs/view-pdf-ui.inc
 msgid "This annotation's text is too long to edit here."
-msgstr ""
-
-#: progs/view-pdf-ui.inc
-msgid "Unknown"
 msgstr ""
 
 #: progs/view-pdf-ui.inc
@@ -10787,10 +11990,6 @@ msgstr ""
 
 #: progs/view.c
 msgid "Exposure Time"
-msgstr ""
-
-#: progs/view.c
-msgid "Model"
 msgstr ""
 
 #: progs/view.c

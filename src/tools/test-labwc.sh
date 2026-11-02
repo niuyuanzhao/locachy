@@ -235,7 +235,7 @@ mount -t tmpfs -o mode=0755 tmpfs /dev/input
 mknod /dev/input/event0 c ${dev%%:*} ${dev##*:}
 key() { for k in "$@"; do echo "$k" >&${KEYS[1]}; done; sleep 0.4; }
 # The bar first: a headless labwc has no keyboard but the virtual one of the bar.
-( trap "echo home >>$out/home" USR1; $out/locachy-bar & bar=$!; echo $bar >$out/bar.pid
+( trap "echo home >>$out/home" USR1; python3 $src/tools/test-bar-keys.py /dev/input/event0 -- $out/locachy-bar & bar=$!; echo $bar >$out/bar.pid
   while kill -0 $bar 2>/dev/null; do wait $bar; done ) >$out/bar.log 2>&1 &
 sleep 2
 bar=$(cat $out/bar.pid)

@@ -1,8 +1,12 @@
 #!/bin/bash
-# Host PipeWire + WirePlumber + PulseAudio service for LOCachy (no systemd).
-# Its runtime directory and home are process 1's (XDG_RUNTIME_DIR, HOME), the
-# session bus is service_session_bus's (bus-client); its state and
-# configuration are its own, in /var/lib/locachy/audio.
+# Host PipeWire + WirePlumber + PulseAudio service for LOCachy (no systemd),
+# run as PipeWire's and WirePlumber's system-wide units run them
+# (pipewire.service.in, pipewire-pulse.service.in, wireplumber.service.in):
+# as the system user pipewire, with no new privileges and CAP_SYS_NICE only,
+# WirePlumber with the main-systemwide profile, the sockets in /run/pipewire
+# (PIPEWIRE_RUNTIME_DIR) and /run/pulse (PULSE_RUNTIME_PATH). Which socket
+# gives what: 50-locachy-sockets.conf, 50-locachy-pulse.conf. WirePlumber's
+# state is in /var/lib/locachy/audio; its configuration is the system's only.
 set -eu
 : "${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required}"
 
@@ -15,12 +19,23 @@ say() { # LEVEL MESSAGE (kernel log level: 3 error, 4 warning)
 }
 exec 3>>"$log"
 
-mkdir -p -m 0755 /var/lib/locachy/audio
+user=pipewire
+sysusers=/usr/local/lib/sysusers.d/locachy-audio.conf
+pw_runtime=/run/pipewire
+pulse_runtime=/run/pulse
+state=/var/lib/locachy/audio
+
+# The user, as systemd-sysusers.service makes those of sysusers.d at boot
+# (process 1 here runs no such service): made when missing, else unchanged.
+if ! systemd-sysusers "$sysusers" >/dev/null 2>&3 || ! getent passwd "$user" >/dev/null; then
+    say 3 "no system user $user ($sysusers)"
+    exit 1
+fi
 
 # The sound cards described by udevd (udev-client) before WirePlumber looks
 # for them; their device files are root's and the audio group's (udev's
-# rules): PipeWire runs as root, and containers get its sockets (pipewire-0,
-# pulse/native), not the devices.
+# rules), the group the servers get. Containers get the servers' restricted
+# sockets, not the devices.
 for _ in $(seq 1 100); do
     [ -S /run/udev/control ] && break
     sleep 0.1
@@ -33,20 +48,19 @@ else
     say 4 "no udevd (service_udev): no sound card will be found"
 fi
 
-export XDG_STATE_HOME="/var/lib/locachy/audio"
-export XDG_CONFIG_HOME="/var/lib/locachy/audio"
-
-# WirePlumber cannot keep its devices after losing its session bus. Wait for
-# it, and watch the connection below: process 1 restarts this group if the
-# bus disconnects. Nothing here starts or stops the bus itself.
-for _ in $(seq 1 100); do
-    [ -S "$XDG_RUNTIME_DIR/bus" ] && break
-    sleep 0.1
-done
-[ -S "$XDG_RUNTIME_DIR/bus" ] || {
-    say 4 "no session bus (service_session_bus) yet"
-    exit 1
-}
+# The runtime directories, the servers' (RuntimeDirectory=pipewire in
+# pipewire.service.in), 0700 as a session's runtime directory is: only they
+# and root reach a socket in them. A container reaches its sockets through
+# its own bind mounts of them (locachy-app), not through these directories.
+install -d -o "$user" -g "$user" -m 0700 "$pw_runtime" "$pulse_runtime"
+# WirePlumber's state (XDG_STATE_HOME/wireplumber), its user's. One left by a
+# WirePlumber that ran as root becomes its user's once: root never works again
+# in a tree the server writes, whose links it would follow.
+install -d -m 0755 "$state"
+if [ -d "$state/wireplumber" ] && [ "$(stat -c %u "$state/wireplumber")" = 0 ]; then
+    chown -R -h "$user:$user" "$state/wireplumber"
+fi
+install -d -o "$user" -g "$user" -m 0700 "$state/wireplumber"
 
 children=()
 cleanup() {
@@ -54,6 +68,7 @@ cleanup() {
         kill "${children[@]}" 2>/dev/null || true
         wait "${children[@]}" 2>/dev/null || true
     fi
+    [ ! -L "$XDG_RUNTIME_DIR/pipewire-0" ] || rm -f "$XDG_RUNTIME_DIR/pipewire-0"
 }
 trap cleanup EXIT
 trap 'exit 0' TERM INT
@@ -76,27 +91,40 @@ await_socket() { # PID SOCKET NAME
     exit 1
 }
 
-dbus-monitor --address "unix:path=$XDG_RUNTIME_DIR/bus" \
-    'type=signal,interface=org.freedesktop.DBus.Local,member=Disconnected' >/dev/null 2>&3 3>&- &
-children+=("$!")
+# A server as the units start it: User=pipewire, its group and audio only,
+# NoNewPrivileges=yes, AmbientCapabilities=CAP_SYS_NICE (realtime, module-rt),
+# the units' environment and nothing of root's. Run in the background, which
+# it becomes: $! is the server itself, for the waits and kills below.
+as_server() { # [NAME=VALUE...] COMMAND ARG...
+    exec setpriv --reuid="$user" --regid="$user" --groups=audio \
+        --inh-caps=+sys_nice --ambient-caps=+sys_nice --no-new-privs --reset-env -- \
+        env PIPEWIRE_RUNTIME_DIR="$pw_runtime" "$@"
+}
+
+# What servers that ran as root left in root's runtime directory.
 rm -f "$XDG_RUNTIME_DIR/pipewire-0" "$XDG_RUNTIME_DIR/pipewire-0.lock" \
+    "$XDG_RUNTIME_DIR/pipewire-0-manager" "$XDG_RUNTIME_DIR/pipewire-0-manager.lock" \
     "$XDG_RUNTIME_DIR/pulse/native" "$XDG_RUNTIME_DIR/pulse/pid"
+rmdir "$XDG_RUNTIME_DIR/pulse" 2>/dev/null || true
 
-/usr/bin/pipewire >/dev/null 2>&3 3>&- &
+as_server /usr/bin/pipewire >/dev/null 2>&3 3>&- &
 children+=("$!")
-await_socket "$!" "$XDG_RUNTIME_DIR/pipewire-0" pipewire
-chmod 0666 "$XDG_RUNTIME_DIR/pipewire-0"
+for socket in pipewire-0 pipewire-0-manager pipewire-0-restricted; do
+    await_socket "${children[0]}" "$pw_runtime/$socket" pipewire
+done
+# locachy-bar takes the sound to be there when root's runtime directory has
+# pipewire-0 (base/status.c); root's programs connect through it.
+ln -sfn "$pw_runtime/pipewire-0" "$XDG_RUNTIME_DIR/pipewire-0"
 
-/usr/bin/wireplumber >/dev/null 2>&3 3>&- &
+as_server GIO_USE_VFS=local XDG_STATE_HOME="$state" \
+    /usr/bin/wireplumber -p main-systemwide >/dev/null 2>&3 3>&- &
 children+=("$!")
 
-/usr/bin/pipewire-pulse >/dev/null 2>&3 3>&- &
+as_server PULSE_RUNTIME_PATH="$pulse_runtime" /usr/bin/pipewire-pulse >/dev/null 2>&3 3>&- &
 children+=("$!")
-await_socket "$!" "$XDG_RUNTIME_DIR/pulse/native" pipewire-pulse
-chmod 0755 "$XDG_RUNTIME_DIR/pulse"
-chmod 0666 "$XDG_RUNTIME_DIR/pulse/native"
+await_socket "$!" "$pulse_runtime/native" pipewire-pulse
 
 status=0
 wait -n "${children[@]}" || status=$?
-say 3 "an audio server or the session bus watch ended (status $status)"
+say 3 "an audio server ended (status $status)"
 exit "$status"

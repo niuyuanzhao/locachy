@@ -34,7 +34,7 @@ if [ -f /usr/include/rime_api.h ] && [ -f /usr/lib/librime.so ]; then
 fi
 gcc -O2 -Wall -Wextra -Werror $ime_flags -I"$src/base/include" \
     -c "$src/base/ime.c" -o "$out/obj/ime.o"
-for name in note seat; do
+for name in note seat drives; do
     gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags \
         -I"$src/base/include" -I"$src/base" "$src/progs/$name.c" \
         "$out"/obj/base-*.o $libs -o "$out/$name"
@@ -55,6 +55,8 @@ gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE "$src/progs/files-cloud-list.c" \
     $(pkg-config --cflags --libs gio-2.0) -o "$out/files-cloud-list"
 gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE "$src/progs/container-documents.c" \
     $(pkg-config --cflags --libs gio-2.0) -o "$out/container-documents"
+gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE "$src/progs/battery-history.c" \
+    -o "$out/battery-history"
 # The key table of a keymap: libxkbcommon (make.sh, installer/make-live.sh).
 gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE "$src/progs/keytable.c" \
     $(pkg-config --cflags --libs xkbcommon) -o "$out/keytable"

@@ -57,8 +57,11 @@ static int input_ioctl(int fd, unsigned long request, ...)
     va_start(ap, request);
     void *arg = va_arg(ap, void *);
     va_end(ap);
-    /* No names or ids: each keyboard types with the system's key table. */
-    if (request == EVIOCGID || (_IOC_TYPE(request) == 'E' && _IOC_NR(request) == _IOC_NR(EVIOCGNAME(0)))) {
+    /* No names or ids: each keyboard types with the system's key table. No
+     * LEDs: the locks stay as each side has them (test-keyboard-devices). */
+    if (request == EVIOCGID || (_IOC_TYPE(request) == 'E' && (_IOC_NR(request) == _IOC_NR(EVIOCGNAME(0)) ||
+                                                             _IOC_NR(request) == 0x20 + EV_LED ||
+                                                             _IOC_NR(request) == _IOC_NR(EVIOCGLED(0))))) {
         errno = EINVAL;
         return -1;
     }
@@ -259,7 +262,8 @@ int main(void)
     puts("PASS an already-running lock receives input-only hotplug, not a background frame");
 
     /* The shared display in front: the lock, not on a screen, loses the
-     * pointer; the compositor gets no framebuffer input leases. */
+     * pointer; the compositor gets no framebuffer pointer leases, but the
+     * keyboards, its bar's, follow hotplug like a direct program's. */
     struct frame *display = &tasks[0].f[0];
     *display = (struct frame){ .shared_display = 1, .pid = 1, .ctl = -1, .screens = 1 };
     tasks[0].depth = 1;
@@ -267,14 +271,16 @@ int main(void)
     locked = 0;
     add(3, 0);
     input_refresh();
-    assert(count == 3 && !display->nkbd && !display->pointer && focused() == display);
+    assert(count == 3 && display->nkbd == 3 && !display->pointer && focused() == display);
     check(sync[0], 2, 0, 0, 0, 0);
+    keys_take_back(display->kbd, display->nkbd); /* as reclaim does */
+    display->nkbd = 0;
     display_front = NULL;
     tasks[0].depth = 0;
     locked = 1;
     input_refresh();
     check(sync[0], 3, 3, 0, 0, 0);
-    puts("PASS the shared compositor is not sent framebuffer input leases");
+    puts("PASS the shared compositor gets keyboard leases for its bar, never framebuffer pointer leases");
 
     for (int i = 0; i < NINPUT; i++) input[i].present = 0;
     input_refresh();

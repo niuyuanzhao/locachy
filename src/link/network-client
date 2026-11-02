@@ -2,59 +2,209 @@
 # network-client: NetworkManager in locachy-net for wired and wireless links,
 # with a udevd of its own there: network interfaces are numbered per
 # namespace, so the database of locachy-net (a /run/udev of its own) is not
-# the host's (udev-client). The interfaces of devices go to locachy-net, all
-# but debug_link_interface when service_link is on: those there are when it
-# starts, and each one that appears later (the preset rule
-# 90-locachy-network.rules runs network-client --interface NAME on the host).
+# the host's (udev-client). The interfaces of devices go to locachy-net,
+# whatever their type, all but the debug link's port when service_link is
+# on: those there are when it starts, and each one that appears later (the
+# preset rule 90-locachy-network.rules runs network-client --ifindex N on
+# the host). One that cannot go stays on the host, down, and is said.
 set -eu
 
 NS=locachy-net
-RC=/etc/locachy/rc.conf
+RC=${LOCACHY_NETWORK_RC:-/etc/locachy/rc.conf}
 
 rc_value() {
     sed -n "s/^[[:space:]]*$1=\"\([^\"]*\)\".*/\1/p" "$RC" | tail -n 1
 }
 
-# Interface dev of the host to locachy-net (a wireless one with its phy),
-# unless it is the debug link's.
+# The debug link's port, while service_link is on: the card whose permanent
+# address is debug_link_mac (locachy-setup debug-link on records it), as
+# systemd.link's PermanentMACAddress= and NetworkManager's mac-address name
+# a card; never a kernel name, which the kernel gives to whichever card it
+# finds first.
+link_on=
+! grep -qE '^[[:space:]]*service_link=' "$RC" || link_on=1
+debug_mac=$(rc_value debug_link_mac)
+debug_mac=${debug_mac,,}
+
+# The index of interface $1 here; nothing when it is not here.
+ifindex() {
+    ip -o link show dev "$1" 2>/dev/null | sed -n 's/^\([0-9]*\): .*/\1/p'
+}
+
+# The permanent address of interface $1, the one NetworkManager matches a
+# mac-address with (nm-device-ethernet.c): the kernel's IFLA_PERM_ADDRESS,
+# which ip shows (permaddr) only while the address differs from it
+# (ip/ipaddress.c); else the address itself, as NetworkManager takes it
+# when the card has none (nm-device.c).
+perm_address() {
+    ip -o link show dev "$1" 2>/dev/null |
+        sed -n 's/.* permaddr \([0-9a-f:]*\).*/\1/p;t;s/.* link\/ether \([0-9a-f:]*\) .*/\1/p'
+}
+
+debug_port() {
+    [ -n "$debug_mac" ] && [ ! -d "/sys/class/net/$1/phy80211" ] &&
+        [ "$(perm_address "$1")" = "$debug_mac" ]
+}
+
+# Interface dev of the host to locachy-net: a wireless one with its phy
+# (cfg80211 renames it wlan%d there when its name is taken there:
+# net/wireless/core.c, cfg80211_switch_netns), any other of a device
+# whatever its type (Ethernet, a modem's raw IP, InfiniBand), but the debug
+# link's port. Virtual ones stay in the namespace software made them in, as
+# the rule leaves them. Fails, saying so, when the interface stays here.
 move_interface() {
-    local dev=$1 path=/sys/class/net/$1 debug_dev= phy
+    local dev=$1 path=/sys/class/net/$1 index phy pattern err=
     [ -e "$path" ] && [ "$dev" != lo ] || return 0
-    if grep -qE '^[[:space:]]*service_link=' "$RC"; then
-        debug_dev=$(rc_value debug_link_interface)
-    fi
-    [ "$dev" != "$debug_dev" ] || return 0
+    index=$(ifindex "$dev")
+    [ -n "$index" ] || return 0
     if [ -d "$path/phy80211" ]; then
         phy=$(readlink -f "$path/phy80211")
-        iw phy "${phy##*/}" set netns name "$NS"
-    elif [ "$(<"$path/type")" = 1 ]; then
-        ip link set "$dev" netns "$NS"
+        err=$(iw phy "${phy##*/}" set netns name "$NS" 2>&1) || :
+    else
+        case $(readlink -f "$path") in /sys/devices/virtual/*) return 0 ;; esac
+        if [ -n "$link_on" ]; then
+            if [ -z "$debug_mac" ]; then
+                printf '<4>network-client: the debug link has no port (no debug_link_mac: turn it off and on again); %s goes to %s\n' \
+                    "$dev" "$NS" >/dev/kmsg
+            elif debug_port "$dev"; then
+                return 0
+            fi
+        fi
+        # The kernel keeps its name, and refuses when locachy-net has one of
+        # that name (EEXIST: net/core/dev.c, __dev_change_net_namespace);
+        # then with the pattern of its name (eth%d), as cfg80211 does: ip
+        # link ... name sends it as IFLA_IFNAME, and the kernel gives it a
+        # free name of the pattern there, under the rtnl lock that it holds
+        # (rtnetlink.c, do_setlink). Only then: a pattern always renames.
+        pattern=${dev%"${dev##*[!0-9]}"}
+        pattern="${pattern:0:13}%d"
+        err=$(ip link set dev "$dev" netns "$NS" 2>&1) ||
+            err=$(ip link set dev "$dev" netns "$NS" name "$pattern" 2>&1) || :
     fi
+    # Moved, or gone (a move of it by another of these, or unplugged).
+    [ "$(ifindex "$dev")" = "$index" ] || return 0
+    ip link set dev "$dev" down 2>/dev/null || :
+    printf '<3>network-client: %s stays on the host, down: it cannot go to %s (%s)\n' \
+        "$dev" "$NS" "${err//$'\n'/ }" >/dev/kmsg
+    return 1
 }
 
+# Every interface of the host to locachy-net; one that stays does not keep
+# the others here, it fails the whole.
 move_interfaces() {
+    local path status=0
     for path in /sys/class/net/*; do
-        move_interface "${path##*/}"
+        move_interface "${path##*/}" || status=1
     done
+    return "$status"
 }
 
-# On the host, with locachy-net there (the udevd of locachy-net runs the same
-# rules; before locachy-net is made, its start moves them all).
+# On the host, with locachy-net there (before locachy-net is made, its start
+# moves them all).
 on_host() {
     [ -e /run/netns/"$NS" ] &&
         [ "$(stat -L -c %i /proc/self/ns/net)" != "$(stat -L -c %i /run/netns/"$NS")" ]
 }
 
+# The rules of the udevd of locachy-net: those of network interfaces, which
+# NetworkManager reads (NM_UNMANAGED, ID_NET_MANAGED_BY, ID_BUS,
+# ID_NET_AUTO_LINK_LOCAL_ONLY: nm-platform.c, nm-device.c), systemd's
+# description and setup of an interface (.link files, sysctl.d per
+# interface: 99-systemd.rules, which only tags other devices). The kernel
+# tells locachy-net of every device of the machine, as
+# it tells each namespace of the first user namespace (lib/kobject_uevent.c,
+# uevent_net_broadcast_untagged); with the rest of the rules this udevd
+# would load modules, run the host's programs (the cameras' for instance)
+# and describe the host's disks and devices a second time, to any program in
+# locachy-net. That is the host udevd's (udev-client).
+NET_RULES="75-net-description 80-net-setup-link 81-net-bridge 81-net-dhcp 82-net-auto-link-local
+    84-nm-drivers 85-nm-unmanaged 99-systemd"
+RULE_DIRS="/etc/udev/rules.d /usr/local/lib/udev/rules.d /usr/lib/udev/rules.d"
+
 case "${1:-}" in
---interface) # an interface that appeared (90-locachy-network.rules)
+--ifindex) # an interface that appeared (90-locachy-network.rules), by index
+    [[ "${2:-}" =~ ^[0-9]+$ ]] || exit 2
+    dev=$(ip -o link show 2>/dev/null | sed -n "s/^$2: \([^:@]*\)[:@].*/\1/p")
+    if [ -n "$dev" ] && on_host; then
+        move_interface "$dev" || :
+    fi
+    exit 0
+    ;;
+--interface) # one, by name
     if on_host; then
-        move_interface "$2" || printf '<4>network-client: cannot move %s to %s\n' "$2" "$NS" >/dev/kmsg
+        move_interface "$2" || :
     fi
     exit 0
     ;;
 --interfaces) # after a change of the debug link's port (locachy-setup)
-    move_interfaces
+    [ -e /run/netns/"$NS" ] || exit 0
+    on_host || {
+        echo "network-client: --interfaces moves the host's interfaces: run it on the host" >&2
+        exit 2
+    }
+    move_interfaces || exit 1
     exit 0
+    ;;
+--address) # the permanent address of interface $2, here (locachy-setup)
+    # Not one the driver made up (NET_ADDR_RANDOM, addr_assign_type 1),
+    # which is another at each start: systemd's net_id does not name a card
+    # by it either (udev-builtin-net_id.c, names_mac).
+    if [ "$(cat "/sys/class/net/$2/addr_assign_type" 2>/dev/null)" = 1 ]; then
+        echo "network-client: $2 has a random address: no address names it" >&2
+        exit 1
+    fi
+    address=$(perm_address "$2")
+    [ -n "$address" ] || exit 1
+    printf '%s\n' "$address"
+    exit 0
+    ;;
+--debug-port) # the debug link's port, if it is here (link-client, locachy-setup)
+    for path in /sys/class/net/*; do
+        if debug_port "${path##*/}"; then
+            printf '%s\n' "${path##*/}"
+            exit 0
+        fi
+    done
+    exit 1
+    ;;
+--udevd) # the udevd of locachy-net, in a mount namespace of its own (below)
+    # Only there, over the /run/udev of locachy-net: never the host's.
+    [ "$(stat -L -c %i /proc/self/ns/net)" = "$(stat -L -c %i /run/netns/"$NS")" ] &&
+        mountpoint -q /run/udev || exit 2
+    # Each of its rules files as udev takes it (src/udev/udev-rules.c,
+    # conf_files_list_strv_full): the first of /etc, /run (this one, empty),
+    # /usr/local/lib and /usr/lib; empty or a link to /dev/null, none. Read
+    # into its /run/udev/rules.d, the other directories hidden from it.
+    mkdir -p /run/udev/rules.d
+    for name in $NET_RULES; do
+        for dir in $RULE_DIRS; do
+            [ -e "$dir/$name.rules" ] || continue
+            cat "$dir/$name.rules" >"/run/udev/rules.d/$name.rules"
+            break
+        done
+    done
+    # The one rule of 50-udev-default.rules for interfaces (its others are
+    # the host's devices'): ID_NET_DRIVER, which 84-nm-drivers.rules and
+    # 85-nm-unmanaged.rules read.
+    printf '%s\n' 'ACTION!="remove", SUBSYSTEM=="net", IMPORT{builtin}="net_driver"' \
+        >/run/udev/rules.d/50-net-driver.rules
+    for dir in $RULE_DIRS; do
+        [ ! -d "$dir" ] || mount -t tmpfs -o ro,mode=0755 tmpfs "$dir"
+    done
+    # A /dev of its own, as a container's: udevd sets the modes of device
+    # nodes and links /dev/char and /dev/block for every device it is told
+    # of (src/udev/udev-node.c), and the host's are the host udevd's. The
+    # programs its rules run get the nodes they may open; udevd logs to kmsg.
+    mkdir /run/udev/dev
+    mount -t tmpfs -o mode=0755,nosuid tmpfs /run/udev/dev
+    for d in null zero full random urandom kmsg; do
+        [ -e "/dev/$d" ] || continue
+        touch "/run/udev/dev/$d"
+        mount --bind "/dev/$d" "/run/udev/dev/$d"
+    done
+    mount --move /run/udev/dev /dev
+    rmdir /run/udev/dev
+    exec /usr/lib/systemd/systemd-udevd
     ;;
 esac
 
@@ -82,7 +232,8 @@ for r in /sys/class/rfkill/rfkill*; do
     [ "$(cat "$r/type" 2>/dev/null)" != wlan ] || printf '0\n' >"$r/soft"
 done
 
-move_interfaces
+# One that stays (said) does not keep NetworkManager from the others.
+move_interfaces || :
 
 # The system bus, service_system_bus's (bus-client): NetworkManager and
 # wpa_supplicant cannot do without it; until it is there, process 1 starts
@@ -100,12 +251,12 @@ printf '<6>network-client: starting udevd, wpa_supplicant and NetworkManager in 
 # udevd of locachy-net and NetworkManager, sharing a /run/udev of their own,
 # and wpa_supplicant, which NetworkManager drives on the system bus (started
 # here, in locachy-net with the wireless cards: the bus would start it on the
-# host). Its interfaces are announced to udevd (net only: the other devices
-# are the host's udevd's). If any one ends, end the others: process 1 starts
-# the group again.
+# host). udevd runs the rules of network interfaces only (--udevd, above),
+# and its interfaces are announced to it. If any one ends, end the others:
+# process 1 starts the group again.
 exec ip netns exec "$NS" unshare --mount --propagation slave bash -euc '
     mount -t tmpfs -o mode=0755 tmpfs /run/udev
-    /usr/lib/systemd/systemd-udevd &
+    unshare --mount --propagation private "$0" --udevd &
     udevd=$!
     wpa_supplicant -u -s &
     wpa=$!
@@ -138,4 +289,4 @@ exec ip netns exec "$NS" unshare --mount --propagation slave bash -euc '
     NetworkManager --no-daemon &
     nm=$!
     wait -n "$udevd" "$wpa" "$nm"
-'
+' "$0"

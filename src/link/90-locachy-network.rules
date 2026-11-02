@@ -2,6 +2,8 @@
 # device (not a virtual one) that appears on the host goes to locachy-net,
 # where NetworkManager has the network; the debug link's port stays, if the
 # link is on (network-client decides). Turned off by a link to /dev/null of
-# the same name in /etc/udev/rules.d.
+# the same name in /etc/udev/rules.d. By its index, which a rename keeps:
+# RUN+= is expanded when the rule is read, before udevd renames the
+# interface (a NAME= rule, a .link file), so $kernel would be the old name.
 ACTION=="add", SUBSYSTEM=="net", KERNEL!="lo", DEVPATH!="/devices/virtual/*", \
-    RUN+="/usr/local/lib/locachy/network-client --interface $kernel"
+    RUN+="/usr/local/lib/locachy/network-client --ifindex $env{IFINDEX}"

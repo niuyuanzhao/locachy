@@ -63,6 +63,8 @@
 #include <sys/mount.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <sched.h>
 #include <signal.h>
@@ -85,6 +87,9 @@
 #endif
 #ifndef CLOUD_LIST
 #define CLOUD_LIST "/usr/local/lib/locachy/files-cloud-list"
+#endif
+#ifndef DRIVES_CONTROL
+#define DRIVES_CONTROL "/run/locachy/drives/control" /* drives.c's */
 #endif
 
 #define FG     0xD0D0D0
@@ -194,6 +199,11 @@ static struct {
     char path[PATH_MAX], keep[256];
 } cloud_job;
 enum { CLOUD_REFRESH = 1, CLOUD_READ, CLOUD_UNMOUNT };
+/* A drive being ejected by the drives service: its answers, and its name. */
+static struct {
+    int fd;
+    char name[256];
+} drive_job = { .fd = -1 };
 /* Pull to refresh: a finger scroll that began at the top of a pane. */
 #define PULL_STEPS 3
 static struct { int on, pane, steps; } pull;
@@ -3572,25 +3582,12 @@ static void properties(int folder_self)
     }
 }
 
-/* mountinfo writes a space as \040 (and \011 tab, \012 newline, \134 \). */
-static void unescape(char *s)
-{
-    char *out = s;
-    for (; *s; s++) {
-        if (s[0] == '\\' && s[1] >= '0' && s[1] <= '3' && s[2] >= '0' && s[2] <= '7' &&
-            s[3] >= '0' && s[3] <= '7') {
-            *out++ = (char)((s[1] - '0') * 64 + (s[2] - '0') * 8 + (s[3] - '0'));
-            s += 3;
-        } else {
-            *out++ = *s;
-        }
-    }
-    *out = '\0';
-}
-
-/* A drive in ~/Drives: unmounted, then its USB device powered off, so that
- * it can be pulled out. Not while something has files open on it, here or
- * in a container (then the device is still claimed). */
+/* A drive in ~/Drives: the drives service (drives.c, as root) ejects it
+ * when asked at DRIVES_CONTROL, as udisks2 powers a drive off, and says how
+ * that goes: "writing" (do not unplug it yet), "busy" (the programs that
+ * have files open on it), "safe" (it can be unplugged), or "error". Its job
+ * runs on while this program is frozen, and the shared display shows the
+ * same as a notification. */
 static void eject(const char *path, const char *name)
 {
     const struct cloud_mount *cloud = cloud_at(path);
@@ -3600,58 +3597,77 @@ static void eject(const char *path, const char *name)
         cloud_begin(&mount, CLOUD_UNMOUNT);
         return;
     }
-    char line[2048], dev[128] = "";
-    FILE *in = fopen("/proc/self/mountinfo", "re");
-    while (in && fgets(line, sizeof line, in)) {
-        char mp[PATH_MAX], src[128];
-        const char *dash = strstr(line, " - ");
-        if (sscanf(line, "%*s %*s %*s %*s %4095s", mp) != 1 || !dash) {
+    if (drive_job.fd >= 0) {
+        report(1, _("%s is still being ejected."), drive_job.name);
+        return;
+    }
+    struct sockaddr_un a = { .sun_family = AF_UNIX };
+    char request[PATH_MAX + 8];
+    int n = snprintf(request, sizeof request, "eject\t%s", path);
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    snprintf(a.sun_path, sizeof a.sun_path, "%s", DRIVES_CONTROL);
+    if (fd < 0 || n >= (int)sizeof request || connect(fd, (struct sockaddr *)&a, sizeof a) < 0 ||
+        send(fd, request, (size_t)n, MSG_NOSIGNAL) != n) {
+        if (fd >= 0) close(fd);
+        report(1, _("%s cannot be ejected: the drives service is not running."), name);
+        return;
+    }
+    drive_job.fd = fd;
+    snprintf(drive_job.name, sizeof drive_job.name, "%s", name);
+    report(0, _("Ejecting %s..."), name);
+}
+
+/* What the drives service said about the drive being ejected. */
+static void drive_tick(void)
+{
+    char m[PATH_MAX + 128];
+    ssize_t n;
+    while (drive_job.fd >= 0 && (n = recv(drive_job.fd, m, sizeof m - 1, MSG_DONTWAIT)) != 0) {
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EINTR) return;
+            break;
+        }
+        m[n] = '\0';
+        /* kind, the folder's name, then the detail */
+        char *kind = m, *name = strchr(m, '\t'), *detail = name ? strchr(name + 1, '\t') : NULL;
+        if (!name || !detail) break;
+        *name++ = '\0';
+        *detail++ = '\0';
+        if (!strcmp(kind, "writing")) {
+            /* GVfs: "Writing data to %s\nDevice should not be unplugged." */
+            report(0, _("Writing data to %s. Don't unplug it yet."), name);
             continue;
         }
-        unescape(mp);
-        if (strcmp(mp, path) == 0 && sscanf(dash + 3, "%*s %127s", src) == 1) {
-            snprintf(dev, sizeof dev, "%s", src);
+        if (!strcmp(kind, "safe")) {
+            /* GVfs: "%s can be safely unplugged"; KDE: "This device can now be safely removed." */
+            report(0, _("%s can be safely unplugged now."), name);
+        } else if (!strcmp(kind, "busy") && detail[0]) {
+            /* KDE: "One or more files on this device are opened in application X." */
+            report(1, _("%s is in use: files on it are open in %s."), name, detail);
+        } else if (!strcmp(kind, "busy")) {
+            report(1, _("%s is in use: close the files open on it first."), name);
+        } else if (!strcmp(detail, "not-drive")) {
+            /* TRANSLATORS: Drives is the folder name ~/Drives; keep it. */
+            report(1, _("%s is not a drive (only those in Drives are ejected)."), name);
+        } else if (!strcmp(detail, "another")) {
+            report(1, _("Another drive is being ejected; try %s again when it is done."), name);
+        } else if (!strcmp(detail, "held")) {
+            report(1, _("%s is still in use (a program has the device open); it was not ejected."), name);
+        } else {
+            report(1, _("%s was not ejected: %s"), name, detail);
         }
-    }
-    if (in) {
-        fclose(in);
-    }
-    if (strncmp(dev, "/dev/", 5) != 0) {
-        /* TRANSLATORS: Drives is the folder name ~/Drives; keep it. */
-        report(1, _("%s is not a drive (only those in Drives are ejected)."), name);
+        close(drive_job.fd);
+        drive_job.fd = -1;
+        reload_all();
         return;
     }
-    sync();
-    if (umount2(path, 0) < 0) {
-        report(1, _("%s is in use: close the files open on it first."), name);
-        return;
+    if (drive_job.fd >= 0) {
+        /* Ended without saying how: the service stopped. */
+        report(1, _("Ejecting %s failed: the drives service stopped. Do not unplug it yet."), drive_job.name);
+        close(drive_job.fd);
+        drive_job.fd = -1;
+        reload_all();
     }
-    int fd = open(dev, O_RDONLY | O_EXCL | O_CLOEXEC);
-    if (fd < 0) {
-        report(1, _("%s is still in use in a container: stop it before pulling the drive out."), name);
-        return;
-    }
-    close(fd);
-    /* The disk of the partition: /sys/class/block/sdb1 is .../sdb/sdb1. */
-    char sys[PATH_MAX], disk[PATH_MAX], file[PATH_MAX + 32];
-    struct stat st;
-    snprintf(sys, sizeof sys, "/sys/class/block/%s", dev + 5);
-    snprintf(file, sizeof file, "%s/partition", sys);
-    if (realpath(sys, disk) == NULL) {
-        disk[0] = '\0';
-    } else if (stat(file, &st) == 0) {
-        *strrchr(disk, '/') = '\0';
-    }
-    snprintf(file, sizeof file, "%s/device/delete", disk);
-    FILE *off = disk[0] ? fopen(file, "we") : NULL;
-    int powered_off = off && fputs("1", off) >= 0;
-    if (off && fclose(off) != 0) {
-        powered_off = 0;
-    }
-    say("files: ejected %s (%s)%s", path, dev, powered_off ? ", powered off" : "");
-    rmdir(path);
-    report(0, _("%s can be pulled out now."), name);
-    reload_all();
 }
 
 /* The chooser: the containers that can open type (or all of them). */
@@ -4577,9 +4593,11 @@ static int browse(char *out, size_t size)
     for (;;) {
         set_active();
         cloud_tick();
+        drive_tick();
         if (show) draw();
         show = 1;
-        int key = key_poll_timeout(-1, drag.mode == DRAG_BAND ? 40 : cloud_job.pid ? 100 : 2000);
+        /* The drives service's answer wakes it as a key does. */
+        int key = key_poll_timeout(drive_job.fd, drag.mode == DRAG_BAND ? 40 : cloud_job.pid ? 100 : 2000);
         int mods = keys_modifiers();
         if (key == K_POINTER) {
             mods = 0;

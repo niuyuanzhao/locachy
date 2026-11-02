@@ -63,3 +63,37 @@ or replace hardware acceptance.
 
 Reference: [fcitx5-rime](https://github.com/fcitx/fcitx5-rime), its Rime
 key-event/modifier adapter.
+
+## Who reads the keyboard
+
+Process 1 turns off the text console's own keyboard handler (`K_OFF`) as it
+starts and, once the screen is its own, puts the console in graphics mode
+(`KD_GRAPHICS`), as logind and seatd do for a graphical session. A key then
+reaches only the program the keyboard is lent to and process 1, which
+watches for its own keys; nothing is queued on the console, and the
+programs and services process 1 starts have `/dev/null` as their standard
+input.
+
+- **Ctrl+Alt+Del** is process 1's: a clean reboot wherever it sees the keys
+  (direct programs, home, the lock, the boot passphrase, the shared display in
+  direct input). While the input method holds the keyboard (CN/EN), the keys
+  go to the bar only, as they did before.
+- **Caps Lock and Num Lock LEDs.** With the console's handler off, process 1
+  sets the LEDs for the direct programs (`EV_LED`, as libinput writes them);
+  their lent keyboards are read-only, and a program takes the lock state from
+  the LEDs each time it is given the keyboard. The shared display's labwc
+  sets its own. The full-screen installer sets them too.
+- **The bar** reads only the keyboards process 1 lends with the seat; seat
+  passes them on. When home or another direct program comes to the front,
+  process 1 revokes them (`EVIOCREVOKE`, which also ends a grab), and seat
+  revokes labwc's input devices before it disables labwc's seat, as seatd
+  does.
+- **A full input queue** (`SYN_DROPPED`): the rest of that frame is dropped and
+  the keys are read again from the kernel (`EVIOCGKEY`), so a lost release
+  leaves no modifier or key held and nothing is typed.
+
+`test-keyboard-devices.c` covers the LEDs, the read-only lent keyboards and
+`SYN_DROPPED`; `test-bar-keyboard.c` the bar's lent keyboards, draining and
+revocation; `test-input-hotplug.c` hotplug with the shared display in front.
+The real console, revocation in a VM and the X230's Caps Lock LED still need
+their acceptance runs.

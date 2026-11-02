@@ -3,10 +3,11 @@
 # an ext4 filesystem labelled LOCTEST), as root on a built system where the
 # service runs. A mount namespace with slave propagation made before the disk
 # appears stands for a running container.
-#   1. the disk is mounted at ~/Drives/LOCTEST, and ~/Drives is shared
+#   1. the disk is mounted at ~/Drives/LOCTEST, ~/Drives is shared and root's
 #   2. the earlier namespace sees it there too
-#   3. ejected as the file manager does (unmount, power off): the folder goes,
-#      in the namespace as well
+#   3. ejected as the file manager asks (the service's control socket): a
+#      file held open in the namespace makes it "busy", naming the program;
+#      then "writing" and "safe", and the folder goes, in the namespace too
 #   4. plugged in again and pulled out without ejecting: unmounted
 set -u
 fail=0
@@ -31,11 +32,29 @@ mkfs.ext4 -q -F -L LOCTEST "/dev/$dev"
 echo "== 1. mounted"
 check "it is mounted at $d/LOCTEST" "wait_for \"mountpoint -q $d/LOCTEST\""
 check "$d is a shared mount point" "findmnt -no PROPAGATION $d | grep -q shared"
+check "$d is root's, 0755" "[ \"\$(stat -c %u:%a $d)\" = 0:755 ]"
 echo "== 2. in a namespace made before"
 check "the earlier namespace sees it" "nsenter --target $ns --mount mountpoint -q $d/LOCTEST"
 echo "== 3. ejected"
-sync
-umount "$d/LOCTEST" && echo 1 >"/sys/block/$dev/device/delete"
+eject() { python3 -c '
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+s.connect("/run/locachy/drives/control")
+s.send(b"eject\t" + sys.argv[1].encode())
+s.settimeout(60)
+while True:
+    m = s.recv(4096)
+    if not m:
+        break
+    print(m.decode().replace("\t", " "))
+' "$1"; }
+nsenter --target $ns --mount sh -c "exec 3<$d/LOCTEST; exec -a holder sleep 30" &
+holder=$!
+sleep 0.5
+check "busy while a file is open in the namespace" "eject $d/LOCTEST | grep -q '^busy LOCTEST .*sleep'"
+check "and still mounted" "mountpoint -q $d/LOCTEST"
+kill $holder; wait $holder 2>/dev/null
+check "then writing, and safe to unplug" "eject $d/LOCTEST | tr '\\n' '|' | grep -q '^writing LOCTEST |safe LOCTEST '"
 check "its folder has gone" "wait_for \"[ ! -e $d/LOCTEST ]\""
 check "from the namespace too" "! nsenter --target $ns --mount mountpoint -q $d/LOCTEST"
 echo "== 4. pulled out"

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Discover V4L2 capture devices and test them with howdy, without saving images."""
+"""Discover V4L2 capture devices and test them with howdy, without saving images.
+
+  list      capture devices: node, infrared candidate, name, stable path
+  ordinary  the nodes a container with camera="1" may have (locachy-app)
+  auto, test DEVICE, add  as settings runs them (--user, --apply)
+"""
 import argparse
 import configparser
 import fcntl
@@ -12,16 +17,31 @@ import stat
 import struct
 import subprocess
 import sys
+import tomllib
 
 HOWDY = "/usr/bin/howdy"
 HOWDY_LIB = "/usr/lib/howdy"
 HOWDY_CONF = "/etc/howdy/config.ini"
 EMITTER = "/usr/bin/linux-enable-ir-emitter"
+# The emitter's configuration, as the lock screen's PAM file passes it
+# (pam.d/locachy-lock-face: run --config).
+EMITTER_CONF = "/root/.config/linux-enable-ir-emitter.toml"
+LOCACHY_APP = "/usr/local/bin/locachy-app"
+# udev's persistent names (60-persistent-v4l.rules), by-path first: howdy's
+# config.ini says "Video devices are usually found in /dev/v4l/by-path/", and
+# a port is not taken by another camera of the same model, as an ID_SERIAL
+# without a serial number (by-id) can be. by-id is what linux-enable-ir-emitter
+# keeps (configuration.rs V4LPath::find_v4l_path).
+V4L_LINKS = ("/dev/v4l/by-path", "/dev/v4l/by-id")
+SYS_CLASS = "/sys/class"
 PROBE_TIMEOUT = 12
 
 
 def capture_device(path):
-    """Linux videodev2.h: QUERYCAP and ENUM_FMT, never start streaming here."""
+    """Linux videodev2.h: QUERYCAP and ENUM_FMT, never start streaming here.
+    Capture is the device_caps test of udev's v4l_id (ID_V4L_CAPABILITIES
+    ":capture:"); grey-only formats make an infrared candidate, as
+    linux-enable-ir-emitter's grey_devices (video/stream.rs) looks for GREY."""
     if not stat.S_ISCHR(os.stat(path).st_mode):
         return None
     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
@@ -49,10 +69,14 @@ def capture_device(path):
         os.close(fd)
 
 
+def video_nodes():
+    paths = [p for p in glob.glob("/dev/video*") if re.fullmatch(r"/dev/video[0-9]+", p)]
+    return sorted(paths, key=lambda p: int(p[10:]))
+
+
 def devices():
     found = []
-    paths = [p for p in glob.glob("/dev/video*") if re.fullmatch(r"/dev/video[0-9]+", p)]
-    for path in sorted(paths, key=lambda p: int(p[10:])):
+    for path in video_nodes():
         try:
             device = capture_device(path)
             if device:
@@ -71,6 +95,71 @@ def configured_device():
 def resolve_device(path, found):
     real = os.path.realpath(path)
     return next((d for d in found if d["path"] == real), None)
+
+
+def stable_path(path):
+    """The persistent udev link of a node (V4L_LINKS), else the node itself:
+    what is saved, so that renumbering never moves face unlock to another
+    camera. Of several links in a directory, the shortest (by-path has one
+    with and one without the USB revision)."""
+    real = os.path.realpath(path)
+    for directory in V4L_LINKS:
+        try:
+            names = sorted(os.listdir(directory), key=lambda name: (len(name), name))
+        except OSError:
+            continue
+        for name in names:
+            link = os.path.join(directory, name)
+            if os.path.realpath(link) == real:
+                return link
+    return real
+
+
+def emitter_devices():
+    """The devices linux-enable-ir-emitter has a configuration for: the keys
+    of its file (configuration.rs Configurations, a map by V4LPath)."""
+    try:
+        with open(EMITTER_CONF, "rb") as config:
+            return set(tomllib.load(config))
+    except (OSError, ValueError):
+        return set()
+
+
+def sysfs_device(node):
+    """The device a /dev/videoN or /dev/mediaN belongs to (its class link),
+    which a camera's capture and media controller nodes share (uvcvideo:
+    the USB interface)."""
+    name = os.path.basename(node)
+    link = os.path.join(SYS_CLASS, "video4linux" if name.startswith("video") else "media", name, "device")
+    return os.path.realpath(link) if os.path.exists(link) else None
+
+
+def ordinary_nodes():
+    """What a container with camera="1" may have: the capture nodes that are
+    not infrared candidates and not the face unlock camera (howdy's
+    device_path, the emitter's devices), and the media controller nodes of
+    their devices only, none of a device such a camera, or a node that could
+    not be asked what it is, is also on."""
+    withheld = {os.path.realpath(path) for path in emitter_devices() | {configured_device()} if path and path != "none"}
+    passed, closed = [], set()
+    for path in video_nodes():
+        try:
+            device = capture_device(path)
+        except OSError:
+            closed.add(sysfs_device(path))
+            continue
+        if device is None:
+            continue
+        if device["candidate"] or path in withheld:
+            closed.add(sysfs_device(path))
+        else:
+            passed.append(path)
+    opened = {sysfs_device(path) for path in passed} - closed - {None}
+    medias = [p for p in glob.glob("/dev/media*") if re.fullmatch(r"/dev/media[0-9]+", p)]
+    for path in sorted(medias, key=lambda p: int(p[10:])):
+        if sysfs_device(path) in opened:
+            passed.append(path)
+    return passed
 
 
 def probe_frame(path):
@@ -162,19 +251,32 @@ def automatic(found):
 
 
 def apply_device(device, user):
+    """Saved by its stable path (an old /dev/videoN value is read as before
+    and replaced here); then the running containers with cameras are made
+    again (locachy-app cameras), so that none keeps the face camera."""
     if not user:
         raise ValueError("--user is required to apply the camera choice")
-    subprocess.run([HOWDY, "-U", user, "set", "device_path", device["path"]], check=True, timeout=10)
-    if os.path.realpath(configured_device()) != device["path"]:
+    path = stable_path(device["path"])
+    subprocess.run([HOWDY, "-U", user, "set", "device_path", path], check=True, timeout=10)
+    if configured_device() != path or os.path.realpath(path) != device["path"]:
         raise RuntimeError("howdy did not retain the camera choice")
-    print(f'howdy camera: {device["path"]}', flush=True)
+    print(f'howdy camera: {path}', flush=True)
+    if os.access(LOCACHY_APP, os.X_OK):
+        try:
+            subprocess.run([LOCACHY_APP, "cameras"], check=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            print("Running containers with cameras were not updated; restart them.", flush=True)
 
 
 def run(args):
+    if args.command == "ordinary":
+        for path in ordinary_nodes():
+            print(path)
+        return 0
     found = devices()
     if args.command == "list":
         for device in found:
-            print(f'{device["path"]}\t{int(device["candidate"])}\t{device["name"]}')
+            print(f'{device["path"]}\t{int(device["candidate"])}\t{device["name"]}\t{stable_path(device["path"])}')
         return 0
     if args.command == "test":
         device = resolve_device(args.device, found)
@@ -210,7 +312,7 @@ def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("list", "auto", "test", "add"))
+    parser.add_argument("command", choices=("list", "ordinary", "auto", "test", "add"))
     parser.add_argument("device", nargs="?")
     parser.add_argument("--user")
     parser.add_argument("--apply", action="store_true", help="save a successfully tested device through howdy")

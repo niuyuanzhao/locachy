@@ -1,0 +1,8 @@
+# The system user of PipeWire, WirePlumber and pipewire-pulse
+# (/usr/local/lib/sysusers.d/locachy-audio.conf, make.sh; sysusers.d(5)), as
+# their system-wide units run them (User=pipewire: pipewire.service.in,
+# pipewire-pulse.service.in, wireplumber.service.in). audio-client has
+# systemd-sysusers make it, as systemd-sysusers.service would at boot, and
+# gives the daemons the audio group (the sound cards, 50-udev-default.rules)
+# and no other: not video, so the cameras stay closed to them.
+u pipewire - "PipeWire system services"

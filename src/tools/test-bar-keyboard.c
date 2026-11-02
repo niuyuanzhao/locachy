@@ -45,13 +45,23 @@ void test_keys_reload(void)
     keys_reload();
     if (system_table[0]) assert(keys_layout_load(system_table) == 0);
 }
+static int revoked_fd = -1; /* EVIOCGVERSION: ENODEV, as after EVIOCREVOKE */
 static int keyboard_ioctl(int fd, unsigned long request, ...)
 {
-    assert(request == EVIOCGRAB);
     va_list ap;
     va_start(ap, request);
     void *arg = va_arg(ap, void *);
     va_end(ap);
+    if (request == EVIOCGVERSION) {
+        if (fd == revoked_fd) { errno = ENODEV; return -1; }
+        *(int *)arg = EV_VERSION;
+        return 0;
+    }
+    if (request == EVIOCGKEY(sizeof(unsigned long) * (KEY_MAX / (8 * sizeof(long)) + 1))) {
+        memset(arg, 0, _IOC_SIZE(request)); /* every key up in the kernel */
+        return 0;
+    }
+    assert(request == EVIOCGRAB);
     int i = keyboard_index(fd);
     if (i >= 0) grabs[i] = arg != NULL;
     if (arg && release_during_grab) {
@@ -690,10 +700,44 @@ int main(int argc, char **argv)
     clear_virtual_keys();
     assert(!layouts[0].down[KEY_LEFTMETA]);
     puts("PASS seat release schedules balanced virtual-key cleanup even after the physical grab ended");
+
+    /* The keyboards seat passes on: the same device again keeps its queue
+     * and held keys, a new one starts drained, a revoked one goes. */
+    active = 1;
+    key(KEY_LEFTSHIFT, 1);
+    assert(shift && keys_down == 1);
+    int again = dup(events[0]), fresh[2];
+    assert(again >= 0 && pipe2(fresh, O_NONBLOCK | O_CLOEXEC) == 0);
+    take_keyboards(&again, 1);
+    assert(nkbds == 1 && kbds[0] == events[0] && shift && fcntl(again, F_GETFD) < 0);
+    struct input_event stale = { .type = EV_KEY, .code = KEY_A, .value = 1 };
+    assert(write(fresh[1], &stale, sizeof stale) == sizeof stale);
+    int lent[] = { dup(events[0]), fresh[0] };
+    take_keyboards(lent, 2);
+    assert(nkbds == 2 && kbds[0] == events[0] && kbds[1] == fresh[0] && shift);
+    assert(read(fresh[0], &stale, sizeof stale) < 0 && errno == EAGAIN);
+    puts("PASS keyboards from seat: a device lent again keeps its state, a new one starts drained");
+    struct input_event lost[] = {
+        { .type = EV_SYN, .code = SYN_DROPPED }, { .type = EV_KEY, .code = KEY_LEFTSHIFT, .value = 0 },
+        { .type = EV_SYN, .code = SYN_REPORT },
+    };
+    assert(write(events[1], lost, sizeof lost) == sizeof lost);
+    handle_kbd_event(events[0]);
+    assert(!shift && keys_down == 0 && !kbd_down[0][KEY_LEFTSHIFT]);
+    puts("PASS after SYN_DROPPED a key the kernel has up is released, none left down");
+    revoked_fd = fresh[0];
+    drop_dead_keyboards();
+    revoked_fd = -1;
+    assert(nkbds == 1 && kbds[0] == events[0] && fcntl(fresh[0], F_GETFD) < 0);
+    close(fresh[1]);
+    take_keyboards(NULL, 0);
+    assert(nkbds == 0 && fcntl(events[0], F_GETFD) < 0);
+    events[0] = -1;
+    puts("PASS a revoked keyboard is closed; none lent, none held");
     ime_done();
     for (int l = 0; l < nlayouts; l++) layout_free(&layouts[l]);
     xkb_context_unref(xkb_ctx);
-    close(events[0]); close(events[1]);
+    close(events[1]); /* events[0]: closed by take_keyboards */
     assert(unlink(system_table) == 0);
     return 0;
 }

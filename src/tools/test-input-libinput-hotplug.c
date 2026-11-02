@@ -37,6 +37,9 @@ struct libinput_device *libinput_device_ref(struct libinput_device *d)
 { assert(d == device); refs++; return d; }
 struct libinput_device *libinput_device_unref(struct libinput_device *d)
 { assert(d == device && refs > 0); refs--; return refs ? d : NULL; }
+/* A pointer device, no touch screen: its removal resets no touch state. */
+int libinput_device_has_capability(struct libinput_device *d, enum libinput_device_capability c)
+{ assert(d == device && refs > 0); (void)c; return 0; }
 void libinput_path_remove_device(struct libinput_device *d)
 {
     assert(d == device && input_fd >= 0);
