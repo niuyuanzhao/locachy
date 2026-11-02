@@ -26,6 +26,8 @@ r groups "$(id -G)"
 r var_lib_locachy "$(ls -A /var/lib/locachy 2>&1 | tr '\n' ' ')"
 r other_container "$(ls /var/lib/locachy/containers/edge/data 2>&1 | head -1)"
 r runtime "$(cd /run/user/$(id -u) && find . -mindepth 1 -not -path "./dbus-1*" | sort | tr '\n' ' ')"
+r sound_links "$(readlink /run/user/$(id -u)/pipewire-0) $(readlink /run/user/$(id -u)/pulse/native)"
+r sound_write "$(touch /run/user/$(id -u)/locachy-sound/pipewire/x 2>&1 | grep -c 'Read-only')"
 r bus "${DBUS_SESSION_BUS_ADDRESS:-none}"
 r bus_socket "$([ -S /run/locachy-bus/bus ] && echo yes || echo no)"
 r host_buses "$(ls /run/dbus /run/user/0/bus 2>&1 | tr '\n' ' ')"
@@ -73,7 +75,17 @@ check "no supplementary groups" "[ \"$(v groups)\" = \"$(id -g $uid)\" ]"
 check "home is the user home path ($(v home))" "[ \"$(v home)\" = $uhome ]"
 check "/var/lib/locachy is empty inside" "[ \"$(v var_lib_locachy | wc -w)\" = 0 ]"
 check "another container data is out of reach" "v other_container | grep -q \"No such file\""
-check "runtime: display and sound only ($(v runtime))" "[ \"$(v runtime)\" = \"./locachy-0 ./pipewire-0 ./pulse ./pulse/native \" ] || [ \"$(v runtime)\" = \"./locachy-0 \" ]"
+sound="./locachy-sound ./locachy-sound/pipewire ./locachy-sound/pipewire/pipewire-0 ./locachy-sound/pipewire/pipewire-0.lock"
+sound="$sound ./locachy-sound/pulse ./locachy-sound/pulse/native ./pipewire-0 ./pulse ./pulse/native"
+# doc: the mount point container-documents names (its GetMountPoint), when it runs.
+runtime=$(v runtime | sed "s|^\./doc ||")
+check "runtime: display and sound only ($(v runtime))" "[ \"$runtime\" = \"./locachy-0 $sound \" ] || [ \"$runtime\" = \"./locachy-0 \" ]"
+# Its sound: the directories of the restricted sockets of the servers,
+# read-only, its session paths linked into them (a restarted server is
+# reached).
+check "sound: pipewire-0 and pulse/native link into locachy-sound ($(v sound_links))" \
+    "[ \"$(v sound_links)\" = \"locachy-sound/pipewire/pipewire-0 ../locachy-sound/pulse/native\" ] || [ \"$runtime\" = \"./locachy-0 \" ]"
+check "sound: the socket directories are read-only in it" "[ \"$(v sound_write)\" = 1 ] || [ \"$runtime\" = \"./locachy-0 \" ]"
 check "its own session bus ($(v bus))" "[ \"$(v bus)\" = unix:path=/run/locachy-bus/bus ] && [ \"$(v bus_socket)\" = yes ]"
 check "no bus of the host" "v host_buses | grep -q \"No such file\" && ! v host_buses | grep -q system_bus_socket"
 check "no sound devices" "v snd | grep -q \"No such file\""

@@ -1355,6 +1355,95 @@ static void test_apps_rows(void)
          "on the branch; the catalog installed: none, from the system (bootstrap), the medium's or the repository's commit");
 }
 
+/* The page's keys (page_key): nothing changes before Enter. A component's
+ * line installs on Enter and is removed only by Delete pressed twice;
+ * Left/Right never do either. A setting opens on Enter, Left/Right change
+ * it then, Enter or Esc close it; Left goes back to the categories. */
+static void test_page_keys(void)
+{
+    int forks_before, hups_before;
+    fake_bluetooth = 0;
+    bluetooth_on = 0;
+    in_page = 1;
+    editing = 0;
+    selected = bt_index();
+    draw();
+    assert(category == CAT_DEVICES);
+    forks_before = forks;
+    events[0] = rc_log[0] = '\0';
+    assert(page_key(K_RIGHT) && forks == forks_before && !events[0] && strstr(notice, "Enter: install it"));
+    assert(page_key('+') && page_key('-') && page_key('=') && page_key(' ') && forks == forks_before && !rc_log[0]);
+    assert(!editing && page_key(K_LEFT) && !in_page && forks == forks_before);
+    in_page = 1;
+    assert(page_key(K_DEL) && forks == forks_before && strstr(notice, "Not installed"));
+    assert(page_key('\n') && forks == forks_before + 1 && !strcmp(pkg_action, "install") && !editing);
+    pkg_check();
+    /* Installed: Enter only says so; Delete asks once, then removes. */
+    fake_bluetooth = 7;
+    forks_before = forks;
+    assert(page_key('\n') && forks == forks_before && strstr(notice, "Installed"));
+    assert(page_key(K_RIGHT) && forks == forks_before && page_key(K_LEFT) && !in_page && forks == forks_before);
+    in_page = 1;
+    assert(page_key(K_DEL) && forks == forks_before && strstr(notice, "Delete again"));
+    remove_asked = -1; /* another key between them (main) asks again */
+    assert(page_key(K_DEL) && forks == forks_before && strstr(notice, "Delete again"));
+    assert(page_key(K_DEL) && forks == forks_before + 1 && !strcmp(pkg_action, "remove"));
+    pkg_check();
+
+    /* A setting: closed, Right only says; Enter opens it (amber), Left/Right
+     * change it, Enter closes it; Esc closes it, Esc again goes back. */
+    bluetooth_on = 0;
+    selected = bt_index() + 1;
+    rc_log[0] = '\0';
+    hups_before = hups;
+    assert(page_key(K_RIGHT) && !bluetooth_on && !rc_log[0] && hups == hups_before && strstr(notice, "Enter, then"));
+    assert(page_key('\n') && editing && strstr(notice, "Left/Right: change"));
+    draw();
+    assert(colors[item_row(selected)][text_x()] == EDIT_BG);
+    assert(page_key(K_RIGHT) && bluetooth_on && editing && strstr(rc_log, "service_bluetooth=" BLUETOOTH_SERVICE));
+    assert(page_key('\n') && !editing && in_page);
+    draw();
+    assert(colors[item_row(selected)][text_x()] == ACCENT);
+    assert(page_key(K_RIGHT) && page_key('+') && bluetooth_on); /* closed again */
+    assert(page_key('\n') && page_key(K_LEFT) && !bluetooth_on && editing && in_page);
+    assert(page_key(27) && !editing && in_page);
+    assert(page_key(27) && !in_page);
+    in_page = 1;
+    /* Up/Down close it and move; a line of its own Enter leaves Enter to main. */
+    assert(page_key('\n') && editing && page_key(K_DOWN) && !editing && selected == bt_index() + 2);
+    assert(!page_key('\n') && !editing && page_key(K_RIGHT) && strstr(notice, "Enter: open Bluetooth"));
+    fake_bluetooth = 0;
+    bluetooth_on = 0;
+
+    /* A chooser: Enter opens it, Left/Right choose, Enter does it (main). */
+    selected = fp_index() + 3;
+    int finger = fp_next;
+    assert(page_key(K_RIGHT) && fp_next == finger && strstr(notice, "Enter, then Left/Right: choose"));
+    assert(page_key('\n') && editing && fp_next == finger && strstr(notice, "Enter: do it"));
+    assert(page_key(K_RIGHT) && fp_next == (finger + 1) % NFINGERS);
+    assert(!page_key('\n') && !editing);
+    fp_next = finger;
+
+    /* What row_hint asks of adjust on the lines of their own Enter and on
+     * those that only show something changes nothing. */
+    for (int c = 0; c < NCATS; c++) {
+        show_category(c, 1);
+        for (int k = 0; k < nentries; k++) {
+            int idx = entries[k].idx;
+            if (idx < 0 || picker_row(idx) || !(enter_row(idx) || info_row(idx))) continue;
+            selected = idx;
+            int f = forks, h = hups, t = term_calls;
+            events[0] = rc_log[0] = notice[0] = '\0';
+            row_hint();
+            assert(forks == f && hups == h && term_calls == t && !events[0] && !rc_log[0] && notice[0]);
+        }
+    }
+    in_page = 1;
+    editing = 0;
+    puts("PASS page keys: nothing changes before Enter; components install on Enter, go only on Delete twice; "
+         "Left/Right change an open setting only; Left goes back to the categories");
+}
+
 static void test_bluetooth(void)
 {
     /* All three packages' required executables, not merely bluetui. */
@@ -1383,14 +1472,17 @@ static void test_bluetooth(void)
         assert(canvas_has("Bluetooth devices") && canvas_has("not installed") && !canvas_has("Tailscale"));
         assert(item_row(bt_index()) > PAGE_TOP && colors[item_row(bt_index())][text_x()] == ACCENT);
         assert(colors[item_row(bt_index())][0] != ACCENT); /* the sidebar is not selected: the page is */
+        /* A click on a value opens it and changes it; the component's line
+         * (installed) never changes by a click, a double click is its Enter. */
         for (int i = 0; i < 3; i++) {
             mouse = (struct pointer_event){ .col = text_x() + 38, .row = item_row(bt_index() + i),
                                             .button = BTN_LEFT, .pressed = 1, .clicks = 1 };
             assert(item_at(mouse.row) == bt_index() + i);
-            assert(settings_pointer() == (i == 2 ? -1 : K_RIGHT));
+            assert(settings_pointer() == (i == 1 ? K_RIGHT : -1) && editing == (i == 1));
             mouse.clicks = 2;
-            assert(settings_pointer() == (i == 2 ? '\n' : K_RIGHT));
+            assert(settings_pointer() == (i == 1 ? K_RIGHT : '\n') && editing == (i == 1));
         }
+        editing = 0;
     }
     tp_present = 0;
     int forks_before = forks, hups_before = hups;
@@ -1490,6 +1582,7 @@ static void test_bluetooth(void)
     assert(!strcmp(pkg_action, "remove") && strstr(rc_log, "service_audio=(none)") && strstr(rc_log, "program_mixer=(none)"));
     pkg_check();
     fake_opt = 0;
+    test_page_keys();
 
     tailscale_login();
     assert(tailscale_term_calls == 1 && strstr(notice, "logged in"));

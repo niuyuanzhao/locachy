@@ -216,7 +216,7 @@ def cmd_status(machine=False):
     except Exception:
         pass
 
-    recipes = local_recipes()
+    recipes = local_recipes(build=False)
     local_dirty = local_rebuilds(recipes, local_packages(LOCAL_DB)) if local_names(recipes) else []
     if machine:
         details = local_details(LOCAL_DB)
@@ -285,20 +285,24 @@ def echo_indent(msg):
     print(f"  {msg}")
 
 
-def settle_tracked(tracked, first_install, refusal):
-    """Tracked packages whose recorded inputs no longer match. On an installed
-    system that is an update, for plan/apply. During the first installation
-    the packages installed after them (AUR dependencies) change what they were
-    built against; they are built again through the validated path of their
-    first install, and the installation goes on."""
+def dirty_tracked(tracked):
+    """Tracked packages whose recorded inputs no longer match the host's."""
     if not tracked:
-        return True
-    dirty = [n for n, _ in local_rebuilds(local_recipes(), local_packages(LOCAL_DB)) if n in tracked]
+        return []
+    return [n for n, _ in local_rebuilds(local_recipes(build=False), local_packages(LOCAL_DB)) if n in tracked]
+
+
+def settle_tracked(tracked):
+    """During the first installation the packages installed after tracked
+    ones (AUR dependencies) change what they were built against: they are
+    built again through the validated path of their first install, and the
+    installation goes on. (On an installed system that is the update's:
+    plan, then apply, builds and tests them again before replacing them;
+    sync leaves them as they are, so that installing or removing other
+    packages never waits for it.)"""
+    dirty = dirty_tracked(tracked)
     if not dirty:
         return True
-    if not first_install:
-        print(refusal, file=sys.stderr)
-        return False
     print(f"===> Building tracked packages again, their inputs changed during the installation: {' '.join(dirty)}",
           flush=True)
     try:
@@ -319,11 +323,12 @@ def install_missing(missing, tracked):
     """Install declared leaves that are not installed, with their dependencies;
     sync and apply share this. Nothing is removed here."""
     repo_pkgs, aur_pkgs, local_pkgs = [], [], []
-    recipes = local_recipes()
+    recipes = local_recipes(build=False)
     local = local_names(recipes)
     for p in missing:
         if p in local:
-            if p not in recipes:
+            # A tracked one is install_tracked's, the validated way.
+            if p not in recipes and p not in tracked:
                 print(f"locachy-pkg: local recipe for {p} is missing; not replaced from the AUR", file=sys.stderr)
                 return False
             local_pkgs.append(p)
@@ -366,8 +371,7 @@ def cmd_sync(first_install=False):
     missing = sorted(set(leaves) - installed_all)
     baseline = baseline_recipes()
     tracked = tracked_recipes(baseline)
-    if not settle_tracked(tracked, first_install, "locachy-pkg: tracked patched packages need a validated update: "
-                          "use plan/apply, not an unchecked sync rebuild"):
+    if first_install and not settle_tracked(tracked):
         return 1
 
     # 1. Install missing declared leaves and their dependencies
@@ -381,10 +385,9 @@ def cmd_sync(first_install=False):
     if set(leaves) - set(packages):
         print("locachy-pkg: install left declared packages missing; nothing is pruned", file=sys.stderr)
         return 1
-    if not settle_tracked(tracked, first_install,
-                          "locachy-pkg: installed tracked inputs changed; use plan/apply before pruning"):
+    if first_install and not settle_tracked(tracked):
         return 1
-    recipes = local_recipes()
+    recipes = local_recipes(build=False)
     dirty = local_rebuilds(recipes, local_packages(LOCAL_DB)) if local_names(recipes) else []
     dirty = [(name, reason) for name, reason in dirty if name not in tracked]
     for name, reason in dirty:
@@ -437,8 +440,14 @@ def cmd_sync(first_install=False):
         if not run_pacman(f"pacman -Rns --noconfirm {' '.join(orphans)} >/dev/null 2>&1"):
             return 1
     # What was pruned may have been part of what tracked packages were built against.
-    if first_install and not settle_tracked(tracked, True, ""):
+    if first_install and not settle_tracked(tracked):
         return 1
+    # Installed: tracked packages built against other host packages than now
+    # are the update's (plan, then apply), never sync's own unchecked build.
+    waiting = [] if first_install else dirty_tracked(tracked)
+    if waiting:
+        print(f"===> Left for the update (locachy-pkg plan, then apply builds and tests them again): "
+              f"{' '.join(waiting)}")
 
     # Final verification
     packages, provides_map, explicit_set = load_installed_db()
@@ -770,22 +779,40 @@ def baseline_recipes():
     return recipes
 
 
-def local_recipes():
+# Tracked packages whose promoted build no longer matches the installed
+# source (name -> why), as local_recipes(build=False) found them.
+STALE_TRACKED = {}
+
+
+def local_recipes(build=True):
     """Use the same promoted effective recipe for info/status/sync as builds.
-    Baseline files remain authoritative overlay inputs, not a forever pin."""
-    recipes = baseline_recipes()
-    tracked = tracked_recipes(recipes)
+    Baseline files remain authoritative overlay inputs, not a forever pin.
+    A tracked package whose promoted build no longer matches the installed
+    source (a source update changed its patch) is the update's to build and
+    test again (plan, then apply): for a build that stops here, as
+    effective_recipe has it; what builds none of them (status, info, sync's
+    own installs and removals) leaves it out instead, STALE_TRACKED saying
+    why, so that installing or removing other packages never waits for it."""
+    recipes = dict(baseline_recipes())
+    tracked = dict(tracked_recipes(recipes))
     if tracked:
         upstream = helper_module("locachy_upstream")
-        for name, baseline in tracked.items():
-            recipes[name] = str(upstream.effective_recipe(name, baseline, LOCAL_RECORDS))
+        for name, baseline in list(tracked.items()):
+            try:
+                recipes[name] = str(upstream.effective_recipe(name, baseline, LOCAL_RECORDS))
+                STALE_TRACKED.pop(name, None)
+            except upstream.UpstreamError as e:
+                if build:
+                    raise
+                del recipes[name]
+                STALE_TRACKED[name] = str(e)
     return recipes
 
 
 def local_names(recipes=None):
     """Records keep a package local even if its source recipe disappears. It
     must fail explicitly, not silently fall back to an unrelated AUR name."""
-    names = set(local_recipes() if recipes is None else recipes)
+    names = set(local_recipes(build=False) if recipes is None else recipes)
     for path in glob.glob(os.path.join(LOCAL_RECORDS, "*.json")):
         name = os.path.basename(path)[:-5]
         if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9@._+\-]*", name) and not name.endswith(".build"):
@@ -871,7 +898,8 @@ def local_rebuild_reason(name, path, installed_version, recipes=None):
 def local_rebuilds(recipes, installed):
     result = []
     for name in sorted(local_names(recipes) & set(installed)):
-        reason = local_rebuild_reason(name, recipes[name], installed[name], recipes) if name in recipes else "local recipe is missing"
+        reason = local_rebuild_reason(name, recipes[name], installed[name], recipes) if name in recipes else \
+            STALE_TRACKED.get(name, "local recipe is missing")
         if reason:
             result.append((name, reason))
     return result
@@ -1222,7 +1250,7 @@ def cmd_info(names):
     """KIND: local (LOCachy's recipe), repo, aur, none (neither has it),
     unknown (not in the repositories, and the AUR did not answer)."""
     host = local_packages(LOCAL_DB)
-    recipes = local_recipes()
+    recipes = local_recipes(build=False)
     local_owned = local_names(recipes)
     repo, rest = {}, []
     for n in names:

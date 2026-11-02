@@ -54,11 +54,23 @@ dbus-run-session -- sh -euc '
         exit 1
     fi
     if [ -x /usr/lib/xdg-desktop-portal ]; then
+        # A display for the GTK backend (it leaves without one, and the
+        # portal then has no file chooser): the headless one of GTK here,
+        # as a container has locachy-0.
+        chooser=
+        if [ -f /usr/share/xdg-desktop-portal/portals/gtk.portal ] && command -v broadwayd >/dev/null; then
+            broadwayd :17 >"$XDG_RUNTIME_DIR/broadway.log" 2>&1 &
+            bw=$!
+            sleep 0.5
+            export GDK_BACKEND=broadway BROADWAY_DISPLAY=:17
+            dbus-update-activation-environment GDK_BACKEND BROADWAY_DISPLAY
+            chooser=1
+        fi
         mkdir -p "$XDG_RUNTIME_DIR/xdg/xdg-desktop-portal"
         cp "$2" "$XDG_RUNTIME_DIR/xdg/xdg-desktop-portal/portals.conf"
         XDG_CONFIG_DIRS="$XDG_RUNTIME_DIR/xdg" /usr/lib/xdg-desktop-portal >"$XDG_RUNTIME_DIR/xdp.log" 2>&1 &
         xdp=$!
-        trap "kill $srv $xdp 2>/dev/null || true" EXIT
+        trap "kill $srv $xdp ${bw:-} 2>/dev/null || true" EXIT
         for _ in $(seq 60); do
             dbus-send --session --print-reply=literal --dest=org.freedesktop.DBus /org/freedesktop/DBus \
                 org.freedesktop.DBus.NameHasOwner string:org.freedesktop.portal.Desktop 2>/dev/null |
@@ -71,6 +83,22 @@ dbus-run-session -- sh -euc '
             /org/freedesktop/portal/desktop org.freedesktop.DBus.Properties.Get \
             string:org.freedesktop.host.portal.Registry string:version)
         echo "$reg" | grep -q "uint32"
+        # The file chooser, as Chromium and Firefox look for it before they
+        # use it (FileChooser version 3 or later), and a dialog asked for.
+        if [ -n "$chooser" ]; then
+            fc=$(dbus-send --session --print-reply=literal --dest=org.freedesktop.portal.Desktop \
+                /org/freedesktop/portal/desktop org.freedesktop.DBus.Properties.Get \
+                string:org.freedesktop.portal.FileChooser string:version)
+            [ "$(echo "$fc" | awk "{print \$NF}")" -ge 3 ]
+            req=$(gdbus call --session --dest org.freedesktop.portal.Desktop \
+                --object-path /org/freedesktop/portal/desktop \
+                --method org.freedesktop.portal.FileChooser.OpenFile "" "Attach" "{}")
+            echo "$req" | grep -q "/org/freedesktop/portal/desktop/request/"
+            echo "version $(echo "$fc" | awk "{print \$NF}"), OpenFile asked a dialog" >"$XDG_RUNTIME_DIR/file-chooser"
+        fi
     fi
 ' sh "$out/container-documents" "$src/link/portals.conf"
 echo "PASS container-documents serves org.freedesktop.portal.Documents cleanly"
+if [ -f "$out/rt/file-chooser" ]; then
+    echo "PASS portals.conf gives the containers a file chooser (xdg-desktop-portal-gtk): $(cat "$out/rt/file-chooser")"
+fi

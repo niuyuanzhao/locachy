@@ -5,7 +5,7 @@ pipewire-pulse, run as this user with the shipped configuration fragments
 
 No sound or video device is opened: ALSA and BlueZ monitors are off, the
 graph has two null nodes (support.null-audio-sink). A client of the
-containers' sockets (pipewire-0-restricted, pulse/native) must play and
+containers' sockets (restricted/pipewire-0, restricted/native) must play and
 record, and must not change devices, other streams, metadata or modules; the
 host's manager socket keeps full control (wpctl, as locachy-bar uses it).
 CONTROL runs show what the fragments change: without them restricted clients
@@ -76,6 +76,8 @@ class AudioIsolation(unittest.TestCase):
         self.user0 = self.run_dir / "user0"
         for d in (self.pw, self.pulse, self.user0):
             d.mkdir(mode=0o700)
+        for d in (self.pw, self.pulse):  # as audio-client makes them
+            (d / "restricted").mkdir(mode=0o755)
         self.children = []
         self.addCleanup(self.stop_all)
         tone = self.tmp / "tone.wav"
@@ -143,18 +145,18 @@ class AudioIsolation(unittest.TestCase):
         return subprocess.run(list(args), env=self.env(conf, **extra), capture_output=True, text=True, timeout=timeout)
 
     def restricted(self, conf, *args, timeout=10):
-        return self.run_tool(conf, *args, timeout=timeout, PIPEWIRE_REMOTE=str(self.pw / "pipewire-0-restricted"))
+        return self.run_tool(conf, *args, timeout=timeout, PIPEWIRE_REMOTE=str(self.pw / "restricted/pipewire-0"))
 
     def pulse_tool(self, conf, *args, timeout=10):
-        return self.run_tool(conf, *args, timeout=timeout, PULSE_SERVER="unix:" + str(self.pulse / "native"))
+        return self.run_tool(conf, *args, timeout=timeout, PULSE_SERVER="unix:" + str(self.pulse / "restricted/native"))
 
     def start_stack(self, conf):
         self.spawn("pipewire", conf)
         self.wait(lambda: all((self.pw / s).is_socket() for s in
-                              ("pipewire-0", "pipewire-0-manager", "pipewire-0-restricted")), "PipeWire sockets")
+                              ("pipewire-0", "pipewire-0-manager", "restricted/pipewire-0")), "PipeWire sockets")
         wp = self.spawn("wireplumber", conf, "-p", "main-systemwide", GIO_USE_VFS="local", WIREPLUMBER_DEBUG="3")
         self.spawn("pipewire-pulse", conf, PULSE_RUNTIME_PATH=str(self.pulse))
-        self.wait(lambda: (self.pulse / "native").is_socket(), "pipewire-pulse socket")
+        self.wait(lambda: (self.pulse / "restricted/native").is_socket(), "pipewire-pulse socket")
         self.wait(lambda: "test-sink" in self.run_tool(conf, "wpctl", "status").stdout, "WirePlumber policy")
         return wp
 
@@ -170,9 +172,13 @@ class AudioIsolation(unittest.TestCase):
     def test_containers_sockets(self):
         conf = self.config("conf")
         wp = self.start_stack(conf)
-        modes = {s: (self.pw / s).stat().st_mode & 0o777 for s in ("pipewire-0", "pipewire-0-manager", "pipewire-0-restricted")}
-        self.assertEqual(modes, {"pipewire-0": 0o660, "pipewire-0-manager": 0o600, "pipewire-0-restricted": 0o666})
-        print("PASS sockets: pipewire-0 0660, pipewire-0-manager 0600 (upstream units), pipewire-0-restricted 0666", flush=True)
+        modes = {s: (self.pw / s).stat().st_mode & 0o777 for s in ("pipewire-0", "pipewire-0-manager", "restricted/pipewire-0")}
+        self.assertEqual(modes, {"pipewire-0": 0o660, "pipewire-0-manager": 0o600, "restricted/pipewire-0": 0o666})
+        # Only the containers' sockets are in the directories they get.
+        self.assertEqual(sorted(p.name for p in (self.pw / "restricted").iterdir() if p.is_socket()), ["pipewire-0"])
+        self.assertEqual(sorted(p.name for p in (self.pulse / "restricted").iterdir()), ["native"])
+        print("PASS sockets: pipewire-0 0660, pipewire-0-manager 0600 (upstream units), restricted/pipewire-0 0666; "
+              "the restricted directories hold the containers' sockets only", flush=True)
 
         # Restricted native client: read and execute only, on every node.
         perms = self.node_permissions(conf)
@@ -191,12 +197,12 @@ class AudioIsolation(unittest.TestCase):
         # It plays and records.
         play = subprocess.Popen(["pw-play", "--target", "test-sink", str(self.tone)], stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL,
-                                env=self.env(conf, PIPEWIRE_REMOTE=str(self.pw / "pipewire-0-restricted")))
+                                env=self.env(conf, PIPEWIRE_REMOTE=str(self.pw / "restricted/pipewire-0")))
         self.wait(lambda: "pw-play:output_FL" in self.run_tool(conf, "pw-link", "-l").stdout and
                   "test-sink:playback_FL" in self.run_tool(conf, "pw-link", "-l").stdout, "playback link")
         recorded = self.tmp / "rec.wav"
         subprocess.run(["timeout", "5", "pw-record", "--target", "test-source", str(recorded)],
-                       env=self.env(conf, PIPEWIRE_REMOTE=str(self.pw / "pipewire-0-restricted")))
+                       env=self.env(conf, PIPEWIRE_REMOTE=str(self.pw / "restricted/pipewire-0")))
         self.assertEqual(play.wait(timeout=15), 0)
         self.assertGreater(peak(recorded)[0], 0)
         print("PASS restricted native client plays (linked to the sink) and records (%d frames)" % peak(recorded)[0], flush=True)
@@ -217,7 +223,7 @@ class AudioIsolation(unittest.TestCase):
         # Long enough to connect while other suites load the machine: the
         # check is that frames arrive at all.
         subprocess.run(["timeout", "5", "parec", "-d", "test-source", "--file-format=wav", str(precorded)],
-                       env=self.env(conf, PULSE_SERVER="unix:" + str(self.pulse / "native")))
+                       env=self.env(conf, PULSE_SERVER="unix:" + str(self.pulse / "restricted/native")))
         self.assertGreater(peak(precorded)[0], 0)
         print("PASS pulse client: load-module/unload-module/set-sink-volume Access denied; paplay plays, parec records", flush=True)
 
@@ -236,10 +242,10 @@ class AudioIsolation(unittest.TestCase):
         # still link another client's stream to its own input.
         play = subprocess.Popen(["pw-play", "--target", "test-sink", str(self.tone)], stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL,
-                                env=self.env(conf, PIPEWIRE_REMOTE=str(self.pw / "pipewire-0-restricted")))
+                                env=self.env(conf, PIPEWIRE_REMOTE=str(self.pw / "restricted/pipewire-0")))
         cross = self.tmp / "cross.wav"
         rec = subprocess.Popen(["timeout", "3", "pw-record", "-P", "{ node.autoconnect = false }", str(cross)],
-                               env=self.env(conf, PIPEWIRE_REMOTE=str(self.pw / "pipewire-0-restricted")))
+                               env=self.env(conf, PIPEWIRE_REMOTE=str(self.pw / "restricted/pipewire-0")))
         time.sleep(1)
         linked = [self.restricted(conf, "pw-link", "pw-play:output_" + c, "pw-record:input_" + c).returncode
                   for c in ("FL", "FR")]

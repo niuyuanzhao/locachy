@@ -23,6 +23,8 @@ pkg = importlib.util.module_from_spec(spec)
 loader.exec_module(pkg)
 SCRATCH = sys.argv.pop(1) if len(sys.argv) > 1 else None
 INSTALL_TRACKED = pkg.install_tracked
+LOCAL_RECIPES = pkg.local_recipes
+LOCAL_REBUILDS = pkg.local_rebuilds
 LOAD_INSTALLED = pkg.load_installed_db
 
 
@@ -37,7 +39,7 @@ class Sync(unittest.TestCase):
         self.baseline = {"libinput-tools": str(self.root / "recipe")}
         self.patch("load_manifest", lambda: self.leaves)
         self.patch("baseline_recipes", lambda: self.baseline)
-        self.patch("local_recipes", lambda: self.baseline)
+        self.patch("local_recipes", lambda build=True: self.baseline)
         self.patch("tracked_recipes", lambda recipes: recipes)
         self.patch("local_names", lambda recipes=None: set(self.baseline))
         self.patch("local_packages", lambda db: {n: "1" for n in self.installed})
@@ -138,18 +140,63 @@ class Sync(unittest.TestCase):
         self.assertEqual(self.sync(), 1)
         self.assertIn("bootstrap-only", self.installed)
 
-    def test_dirty_installed_tracked_still_needs_plan_apply(self):
+    def test_dirty_installed_tracked_waits_for_the_update(self):
+        """Installing or removing others never waits for a validated
+        rebuild; sync never builds a tracked package itself and says the
+        update has it."""
         self.installed["libinput-tools"] = []
-        self.patch("local_rebuilds", lambda *args: [("libinput-tools", "patch changed")])
-        self.assertEqual(self.sync(), 1)
-        self.assertEqual(self.calls, [])
+        self.patch("local_rebuilds", lambda *args: [("libinput-tools", "host libraries or build tools changed")])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.object(pkg.os.path, "isfile", return_value=True):
+            self.assertEqual(pkg.cmd_sync(), 0)
+        self.assertFalse(any(isinstance(c, tuple) and c[0] == "tracked" for c in self.calls))
+        self.assertFalse(any(isinstance(c, tuple) and "libinput-tools" in c[0] for c in self.calls))
+        self.assertIn("repo-program", self.installed)
+        self.assertIn("arbitrary-aur-name", self.installed)
+        self.assertNotIn("bootstrap-only", self.installed)
+        self.assertIn("plan, then apply", out.getvalue())
+        self.assertIn("libinput-tools", out.getvalue())
 
-    def test_installed_system_never_prunes_after_tracked_inputs_changed(self):
+    def test_stale_promoted_tracked_recipe_waits_for_the_update(self):
+        """A source update changed a tracked package's patch: its promoted
+        build no longer matches. A build refuses it (fail closed); sync,
+        which builds none of them, installs and prunes the others and says
+        the update has it."""
+        self.installed["libinput-tools"] = []
+        pkg.STALE_TRACKED.clear()
+        self.addCleanup(pkg.STALE_TRACKED.clear)
+
+        class UpstreamError(RuntimeError):
+            pass
+
+        def effective(name, baseline, records):
+            raise UpstreamError("local recipe or patch changed since Check")
+        upstream = types.SimpleNamespace(UpstreamError=UpstreamError, effective_recipe=effective)
+        self.patch("helper_module", lambda name: upstream)
+        self.patch("local_recipes", LOCAL_RECIPES)
+        self.patch("local_rebuilds", LOCAL_REBUILDS)
+        with self.assertRaises(UpstreamError):
+            pkg.local_recipes()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.object(pkg.os.path, "isfile", return_value=True):
+            self.assertEqual(pkg.cmd_sync(), 0)
+        self.assertFalse(any(isinstance(c, tuple) and c[0] == "tracked" for c in self.calls))
+        self.assertFalse(any(isinstance(c, tuple) and "libinput-tools" in c[0] for c in self.calls))
+        self.assertIn("repo-program", self.installed)
+        self.assertIn("arbitrary-aur-name", self.installed)
+        self.assertNotIn("bootstrap-only", self.installed)
+        self.assertIn("libinput-tools", out.getvalue())
+        self.assertEqual(pkg.STALE_TRACKED, {"libinput-tools": "local recipe or patch changed since Check"})
+
+    def test_installed_system_leaves_changed_tracked_inputs_to_the_update(self):
         self.aur_changes_tracked_inputs()
-        self.assertEqual(self.sync(), 1)
+        self.assertEqual(self.sync(), 0)
+        # Its first install, the validated way; never built again by sync.
         self.assertEqual([c for c in self.calls if isinstance(c, tuple) and c[0] == "tracked"],
                          [("tracked", {"libinput-tools"})])
-        self.assertIn("bootstrap-only", self.installed)
+        self.assertNotIn("bootstrap-only", self.installed)
 
     def test_first_install_builds_tracked_again_after_aur_then_prunes(self):
         rebuilt = self.aur_changes_tracked_inputs()

@@ -1,6 +1,6 @@
 {
   "desktop": {
-    "description": "Shared Wayland compositor & container display (labwc, Xwayland, gestures, notifications, screen sharing)",
+    "description": "Shared Wayland compositor & container display (labwc, Xwayland, gestures, notifications, screen sharing, file chooser)",
     "packages": [
       "labwc-locachy",
       "xorg-xwayland",
@@ -9,6 +9,7 @@
       "libnotify",
       "xdg-desktop-portal",
       "xdg-desktop-portal-wlr",
+      "xdg-desktop-portal-gtk",
       "libinput-tools",
       "libinput-gestures",
       "lisgd",

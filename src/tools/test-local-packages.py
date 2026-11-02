@@ -127,7 +127,7 @@ class LocalPackages(unittest.TestCase):
                                    "repository_version": "0.21.0-1.7", "source_version": "0.21.0-1",
                                    "upstream_tag": "0.21.0-1"}}
         self.patch("checked_local_candidates", lambda recipes, installed: ({"labwc-locachy": candidate}, {}))
-        self.patch("local_recipes", lambda: self.fail("Check read the stale promotion before pinning its replacement"))
+        self.patch("local_recipes", lambda build=True: self.fail("Check read the stale promotion before pinning its replacement"))
         transaction = types.SimpleNamespace(snapshot=lambda *args, **kwargs: {"directory": "plan"})
         self.patch("helper_module", lambda name: transaction)
         self.patch("transaction_host_hash", lambda: "current")
@@ -417,7 +417,7 @@ class LocalPackages(unittest.TestCase):
 
     def test_apply_uses_pinned_replacement_not_the_stale_promotion(self):
         (self.recipe / "upstream.json").write_text('{"schema":1}\n')
-        self.patch("local_recipes", lambda: self.fail("Apply used a stale active recipe"))
+        self.patch("local_recipes", lambda build=True: self.fail("Apply used a stale active recipe"))
         calls = []
         self.patch("apply_prepared_host", lambda rows, recipes: calls.append(recipes) or True)
         self.patch("repo_info", lambda name: self.fail("Apply re-resolved stable or target versions"))
@@ -734,7 +734,7 @@ class LocalPackages(unittest.TestCase):
     def test_prepared_host_installs_missing_leaf_only_after_its_transaction(self):
         (self.recipe / "upstream.json").write_text('{"schema":1}\n')
         self.manifest.write_text("labwc-locachy\nsof-firmware\n")
-        self.patch("local_recipes", lambda: {"labwc-locachy": str(self.recipe)})
+        self.patch("local_recipes", lambda build=True: {"labwc-locachy": str(self.recipe)})
         rows = [("host", "missing", "sof-firmware", "", "declared, not installed")]
         done = []
         self.patch("apply_prepared_host", lambda rows, recipes: done.append("prepared") or True)

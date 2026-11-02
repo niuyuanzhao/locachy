@@ -2,7 +2,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-02 04:07-0500\n"
+"POT-Creation-Date: 2026-11-03 02:10+0800\n"
 "PO-Revision-Date: 2026-10-24 22:38+0000\n"
 "Last-Translator: LOCachy <38998838+niuyuanzhao@users.noreply.github.com>\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -5345,7 +5345,8 @@ msgstr ""
 "在终端里准备好：/mnt 挂一个卷标为 locachy-root 的空 ext4，/mnt/efi 挂一个空 "
 "FAT32。"
 
-#: progs/installer.c
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/installer.c progs/settings.c
 msgid "Enter: open it"
 msgstr "Enter：打开"
 
@@ -8008,14 +8009,12 @@ msgstr "主屏"
 msgid "Right"
 msgstr "右侧"
 
-#. TRANSLATORS: Up/Down, Enter, Left/Right, Tab, / and q are key names; keep them.
+#. TRANSLATORS: Up/Down, Enter, Left, Tab, / and q are key names; keep them.
 #: progs/settings.c
 msgid ""
-"Up/Down: choose   Enter: open   Left/Right: change   Tab: categories or "
-"settings   /: find   q: back to home"
-msgstr ""
-"Up/Down: 选择   Enter: 打开   Left/Right: 修改   Tab: 在分类与设置间切"
-"换   /: 查找   q: 返回主页"
+"Up/Down: choose   Enter: change or open   Left/Tab: categories   /: find   "
+"q: back to home"
+msgstr "Up/Down: 选择   Enter: 修改或打开   Left/Tab: 回到分类   /: 查找   q: 返回主页"
 
 #: progs/settings.c
 #, c-format
@@ -8330,15 +8329,15 @@ msgstr "已连接，%s"
 msgid "no address yet"
 msgstr "尚无地址"
 
-#. TRANSLATORS: Right is the Right arrow key; keep it.
+#. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
-msgid "logged out  (Right: log in with a QR code)"
-msgstr "未登录  (Right: 扫码登录)"
+msgid "logged out  (Enter: log in with a QR code)"
+msgstr "未登录  (Enter: 扫码登录)"
 
-#. TRANSLATORS: Right is the Right arrow key; keep it.
+#. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
-msgid "stopped  (Right: connect)"
-msgstr "已停止  (Right: 连接)"
+msgid "stopped  (Enter: connect)"
+msgstr "已停止  (Enter: 连接)"
 
 #: progs/settings.c
 msgid "starting (tailscaled is not answering yet)"
@@ -8787,10 +8786,10 @@ msgstr "没有名称含此内容的布局。"
 msgid "The system's: %s"
 msgstr "系统的：%s"
 
-#. TRANSLATORS: Left/Right are the Left and Right arrow keys; keep them.
+#. TRANSLATORS: Network time is the name of the line above; keep it as its translation.
 #: progs/settings.c
-msgid "Network time sets the clock: turn it off (Left/Right) to set it here."
-msgstr "已启用网络对时：请先关闭（按 Left/Right）再在此设置时间。"
+msgid "Network time sets the clock: turn Network time off to set it here."
+msgstr "已启用网络对时：先关闭“网络对时”，再在此设置时间。"
 
 #. TRANSLATORS: Enter and Esc are key names; keep them and YYYY-MM-DD HH:MM.
 #: progs/settings.c
@@ -10393,6 +10392,48 @@ msgstr "Enter: 使用方向按钮排列显示器。"
 #, c-format
 msgid "Saved to %s and applied."
 msgstr "已保存至 %s 并生效。"
+
+#. TRANSLATORS: Enter and Delete are key names; keep them.
+#: progs/settings.c
+msgid "Installed   Delete, twice: remove it"
+msgstr "已安装   连按两次 Delete: 卸载"
+
+#: progs/settings.c
+msgid "Enter: install it"
+msgstr "Enter: 安装"
+
+#: progs/settings.c
+msgid "Enter: install the rest   Delete, twice: remove it"
+msgstr "Enter: 安装缺少的部分   连按两次 Delete: 卸载"
+
+#. TRANSLATORS: Enter and Left/Right are key names; keep them.
+#: progs/settings.c
+msgid "Enter, then Left/Right: choose   Enter again: do it"
+msgstr "Enter 后用 Left/Right 选择   再按 Enter: 执行"
+
+#. TRANSLATORS: Enter and Left/Right are key names; keep them.
+#: progs/settings.c
+msgid "Enter, then Left/Right: change it   Enter again: done"
+msgstr "Enter 后用 Left/Right 修改   再按 Enter: 完成"
+
+#. TRANSLATORS: Left/Right, Enter and Esc are key names; keep them.
+#: progs/settings.c
+msgid "Left/Right: choose   Enter: do it   Esc: leave it"
+msgstr "Left/Right: 选择   Enter: 执行   Esc: 不做"
+
+#: progs/settings.c
+msgid "Left/Right: change   Enter or Esc: done"
+msgstr "Left/Right: 修改   Enter 或 Esc: 完成"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Not installed: Enter installs it."
+msgstr "未安装：按 Enter 安装。"
+
+#. TRANSLATORS: Delete is the Delete key; keep it.
+#: progs/settings.c
+msgid "Delete again: remove it, with what only it needs."
+msgstr "再按一次 Delete：卸载它，以及只为它装的依赖。"
 
 #: progs/settings.c
 msgid "No wallpaper; the shared display shows that when it is next shown."

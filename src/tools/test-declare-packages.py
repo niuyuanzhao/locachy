@@ -113,7 +113,7 @@ class DeclarePackages(unittest.TestCase):
                                          base["modules"]["view"]))
         with contextlib.redirect_stdout(io.StringIO()):
             groups = dict(declare.declare(SOURCE, self.manifest, self.record))
-        self.assertEqual(groups.get("module desktop"), ["xorg-xwayland", "xorg-xhost"])
+        self.assertEqual(groups.get("module desktop"), ["xorg-xwayland", "xorg-xhost", "xdg-desktop-portal-gtk"])
         self.assertEqual(groups.get("module view"), ["libraw", "chmlib"])
         self.assertNotIn("module audio", groups)
         self.assertFalse(any(p.startswith("linux-cachyos") for p in self.leaves()))

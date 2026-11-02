@@ -80,10 +80,13 @@ APP_RUNTIME="${LOCACHY_APP_RUNTIME:-/run/locachy/apps}"
 RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/0}"
 APP_INIT="${LOCACHY_APP_INIT:-/usr/local/lib/locachy/app-init}"
 CLIPBOARD="${LOCACHY_CLIPBOARD_TOOL:-/usr/local/lib/locachy/clipboard}"
-# The containers' sound: the restricted sockets of the host's servers
-# (audio-client; 50-locachy-sockets.conf, 50-locachy-pulse.conf).
-PIPEWIRE_SOCKET=/run/pipewire/pipewire-0-restricted
-PULSE_SOCKET=/run/pulse/native
+# The containers' sound: the directories of the restricted sockets of the
+# host's servers (audio-client; 50-locachy-sockets.conf, 50-locachy-pulse.conf).
+# A container gets the directories, not the sockets: servers started again
+# (one ended, an update) make new sockets, which a bound socket file never
+# reaches; a bound directory has them.
+PIPEWIRE_SOCKETS=/run/pipewire/restricted
+PULSE_SOCKETS=/run/pulse/restricted
 FACE_CAMERA=/usr/local/bin/locachy-face-camera
 
 # These overrides are intentionally a root-only integration-test seam. They
@@ -573,7 +576,9 @@ do_list() {
 # backend, xdg-desktop-portal-wlr, started here from the host on the
 # container's bus and on the shared display itself (wayland-0: capturing the
 # screen is of the interfaces locachy-0 hides). In the container's cgroup:
-# frozen and stopped with it. Asking which screen: slurp, as it does.
+# frozen and stopped with it. Asking which screen: slurp, as it does. (The
+# file chooser's backend, xdg-desktop-portal-gtk, needs nothing of the host:
+# the container's bus starts it in the container, on locachy-0.)
 start_screencast() {
     local name=$1 bus="$APP_RUNTIME/$1/bus/bus" backend=/usr/lib/xdg-desktop-portal-wlr
     [ -x "$backend" ] && [ -S "$bus" ] && [ -S "$RUNTIME_DIR/wayland-0" ] && [ -S "$RUNTIME_DIR/pipewire-0" ] || return 0
@@ -854,7 +859,7 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
 "${net_prefix[@]}" unshare --mount --pid --fork --kill-child --propagation slave "${net_args[@]}" bash -euc '
     cbase=$1; want_net=$2; display=$3; init=$4; ready_fd=$5; host_runtime=$6; state_dir=$7
     user=$8; uid=$9; gid=${10}; uhome=${11}; USER_DIRS=${12}; directories=${13}; host=${14}; cameras=${15}; x11_display=${16}
-    pw_socket=${17}; pulse_socket=${18}; shift 18
+    pw_sockets=${17}; pulse_sockets=${18}; shift 18
     # Record host PID before mounting the namespace-local /proc. This bash
     # becomes the C reaper via exec, so its host PID stays unchanged.
     host_pid=; start_ticks=
@@ -868,6 +873,28 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
     [ -n "$host_pid" ] && [ -n "$start_ticks" ] || { printf "locachy-app: cannot read reaper identity\n" >&2; exit 125; }
     printf "%s %s\n" "$host_pid" "$start_ticks" >"$state_dir/reaper.pid"
     ip link set lo up 2>/dev/null || true
+    # Its sound (sound RUN): the directories of the restricted sockets of the
+    # servers, read-only in RUN/locachy-sound, and the paths of a session
+    # (RUN/pipewire-0, RUN/pulse/native) linked to the sockets in them. A
+    # server started again makes its socket anew in the same directory, so
+    # the programs running here reach it again. Nothing without the servers.
+    sound() {
+        [ -d "$pw_sockets" ] || [ -d "$pulse_sockets" ] || return 0
+        install -d -o "$uid" -g "$gid" -m 0700 "$1/locachy-sound"
+        if [ -d "$pw_sockets" ]; then
+            install -d -m 0755 "$1/locachy-sound/pipewire"
+            mount --bind -o ro "$pw_sockets" "$1/locachy-sound/pipewire"
+            ln -s locachy-sound/pipewire/pipewire-0 "$1/pipewire-0"
+            chown -h "$uid:$gid" "$1/pipewire-0"
+        fi
+        if [ -d "$pulse_sockets" ]; then
+            install -d -m 0755 "$1/locachy-sound/pulse"
+            mount --bind -o ro "$pulse_sockets" "$1/locachy-sound/pulse"
+            install -d -o "$uid" -g "$gid" -m 0700 "$1/pulse"
+            ln -s ../locachy-sound/pulse/native "$1/pulse/native"
+            chown -h "$uid:$gid" "$1/pulse/native"
+        fi
+    }
     if [ "$host" = 1 ]; then
         # A host program (host="1"): the real root and home, hidden by nothing
         # but file permissions. Of its own it has /proc (its PID namespace), a
@@ -882,16 +909,8 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
         mount --bind "$host_runtime/$display" "$run/$display"
         unset DBUS_SESSION_BUS_ADDRESS
         # Its sound: the restricted sockets, as a container has them.
-        if [ -S "$pw_socket" ]; then
-            touch "$run/pipewire-0"
-            mount --bind "$pw_socket" "$run/pipewire-0"
-        fi
-        if [ -S "$pulse_socket" ]; then
-            install -d -o "$uid" -g "$gid" -m 0700 "$run/pulse"
-            touch "$run/pulse/native"
-            mount --bind "$pulse_socket" "$run/pulse/native"
-            export PULSE_SERVER="unix:$run/pulse/native"
-        fi
+        sound "$run"
+        [ ! -d "$pulse_sockets" ] || export PULSE_SERVER="unix:$run/pulse/native"
         bus_dir="$state_dir/bus"
         rm -rf "$bus_dir"
         install -d -o "$uid" -g "$gid" -m 0700 "$bus_dir"
@@ -949,17 +968,9 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
         touch "$run/$display"
         mount --bind "$host_runtime/$display" "$run/$display"
         unset DBUS_SESSION_BUS_ADDRESS
-        if [ -S "$pw_socket" ]; then
-            touch "$run/pipewire-0"
-            mount --bind "$pw_socket" "$run/pipewire-0"
-        fi
-        if [ -S "$pulse_socket" ]; then
-            mkdir -p -m 0700 "$run/pulse"
-            touch "$run/pulse/native"
-            mount --bind "$pulse_socket" "$run/pulse/native"
-            export PULSE_SERVER="unix:/run/user/$uid/pulse/native"
-        fi
         chown -R "$uid:$gid" "$run"
+        sound "$run"
+        [ ! -d "$pulse_sockets" ] || export PULSE_SERVER="unix:/run/user/$uid/pulse/native"
         # The session bus of this container: its socket in a directory of the
         # host runtime of the container, where locachy-bar finds it to be the
         # tray watcher. Waited for below only when the bar is there.
@@ -1153,7 +1164,7 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
     exec "$app_init" "$@"
 ' bash "$cbase" "$want_net" "$shared_wayland" "$APP_INIT" "$READY_FD" "$RUNTIME_DIR" "$APP_RUNTIME/$name" \
     "$user" "$uid" "$gid" "$uhome" "$USER_DIRS" "$(conf_value "$name" directories)" "$host" \
-    "$cameras" "$x11_display" "$PIPEWIRE_SOCKET" "$PULSE_SOCKET" "$@" {APP_LOCK_FD}>&- &
+    "$cameras" "$x11_display" "$PIPEWIRE_SOCKETS" "$PULSE_SOCKETS" "$@" {APP_LOCK_FD}>&- &
 launcher=$!
 
 # A bounded readiness handshake serializes start against controls. Once ready,

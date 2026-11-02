@@ -467,8 +467,9 @@ install -m 755 "$src/link/udev-client" "$lib/udev-client"
 install -m 755 "$src/link/bus-client" "$lib/bus-client"
 install -D -m 644 "$src/link/90-locachy-network.rules" /usr/local/lib/udev/rules.d/90-locachy-network.rules
 install -D -m 644 "$src/link/91-locachy-cameras.rules" /usr/local/lib/udev/rules.d/91-locachy-cameras.rules
-# Screen sharing in the containers (locachy-app starts the backend): which
-# portal backend answers, with the desktop module's xdg-desktop-portal-wlr.
+# Screen sharing (locachy-app starts its backend) and choosing files in the
+# containers: which portal backend answers, with the desktop module's
+# xdg-desktop-portal-wlr and xdg-desktop-portal-gtk.
 if [ -x /usr/lib/xdg-desktop-portal-wlr ]; then
     install -D -m 644 "$src/link/portals.conf" /etc/xdg/xdg-desktop-portal/portals.conf
 else

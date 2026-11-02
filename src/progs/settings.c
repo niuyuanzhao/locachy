@@ -337,11 +337,11 @@ static struct monitor monitors[MAX_MONITORS];
 static int nmonitors;
 
 static int selected;
-/* TRANSLATORS: Up/Down, Enter, Left/Right, Tab, / and q are key names; keep them. */
-static const char default_notice[] = N_("Up/Down: choose   Enter: open   Left/Right: change   "
-                                        "Tab: categories or settings   /: find   q: back to home");
-static char notice[512] = N_("Up/Down: choose   Enter: open   Left/Right: change   "
-                             "Tab: categories or settings   /: find   q: back to home");
+/* TRANSLATORS: Up/Down, Enter, Left, Tab, / and q are key names; keep them. */
+static const char default_notice[] = N_("Up/Down: choose   Enter: change or open   Left/Tab: categories   "
+                                        "/: find   q: back to home");
+static char notice[512] = N_("Up/Down: choose   Enter: change or open   Left/Tab: categories   "
+                             "/: find   q: back to home");
 
 static int is_internal_output(const char *name)
 {
@@ -1894,11 +1894,11 @@ static const char *tailscale_status(void)
     if (strcmp(state, "Running") == 0) {
         snprintf(line, sizeof line, _("connected, %s"), ip[0] ? ip : _("no address yet"));
     } else if (strcmp(state, "NeedsLogin") == 0) {
-        /* TRANSLATORS: Right is the Right arrow key; keep it. */
-        snprintf(line, sizeof line, "%s", _("logged out  (Right: log in with a QR code)"));
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(line, sizeof line, "%s", _("logged out  (Enter: log in with a QR code)"));
     } else if (strcmp(state, "Stopped") == 0) {
-        /* TRANSLATORS: Right is the Right arrow key; keep it. */
-        snprintf(line, sizeof line, "%s", _("stopped  (Right: connect)"));
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(line, sizeof line, "%s", _("stopped  (Enter: connect)"));
     } else if (state[0]) {
         snprintf(line, sizeof line, "%s", state);
     } else {
@@ -3638,8 +3638,8 @@ static void set_clock(void)
     time_t t = time(NULL);
     struct tm tm, want = { 0 };
     if (ntp_on) {
-        /* TRANSLATORS: Left/Right are the Left and Right arrow keys; keep them. */
-        snprintf(notice, sizeof notice, "%s", _("Network time sets the clock: turn it off (Left/Right) to set it here."));
+        /* TRANSLATORS: Network time is the name of the line above; keep it as its translation. */
+        snprintf(notice, sizeof notice, "%s", _("Network time sets the clock: turn Network time off to set it here."));
         return;
     }
     localtime_r(&t, &tm);
@@ -4182,11 +4182,14 @@ static const char *const cat_names[NCATS] = {
     N_("Apps & Windows"), N_("Security & Privacy"), N_("Language & Time"), N_("System"),
 };
 static int category, in_page, page_scroll;
+static int editing;            /* the selected setting is open: Left/Right change it (page_key) */
+static int remove_asked = -1;  /* the component's line Delete was pressed on once (page_key) */
 static char search[64]; /* what / found: the page has every category's settings with it */
 
 #define PAGE_TOP 2
 #define MAX_ENTRIES 384
 #define SIDE_BG 0x304860 /* the category or setting where the keys are not */
+#define EDIT_BG 0xE8B860 /* the setting open for Left/Right (page_key) */
 #define E_TITLE (-1) /* a group's title */
 #define E_NOTE (-2)  /* a line to read, not a setting */
 #define E_GAP (-3)   /* the blank line before a title */
@@ -4422,6 +4425,7 @@ static void show_category(int c, int focus_page)
         selected = first_setting();
     }
     in_page = focus_page;
+    editing = 0;
 }
 
 /* The sidebar's width: the longest category and room; 0 when the screen is
@@ -4880,14 +4884,57 @@ static int enter_row(int idx)
            idx == fc_index() + 6 || idx == rclone_index() + 2 || idx == tpm_index() || idx == sb_index() || idx == hsi_index() ||
            idx == tz_index() || idx == tz_index() + 2 || (idx >= imek_index() && idx < imek_index() + NIME_KEYS) ||
            (idx >= system_keymap_index() && idx < kb_index() + nkeyboards_seen) ||
-           idx == bat_page_index() || idx == hwinfo_index() || idx == hwcopy_index();
+           idx == bat_page_index() || idx == hwinfo_index() || idx == hwcopy_index() || idx == ts_index() + 2;
 }
+
+/* An optional component's line, its packages installed or not: Enter
+ * installs it (what of it is missing), Delete pressed twice removes it, and
+ * nothing else does either (page_key). *present: something of it is
+ * installed, what Delete removes; *complete: nothing of it is left to
+ * install. */
+static int component_row(int idx, int *present, int *complete)
+{
+    int p = -1, c = -1;
+    if (idx == ts_index()) p = c = tailscale_installed();
+    else if (idx == cl_index()) p = c = clash_installed();
+    else if (idx == tr_index()) { p = tor_installed(); c = p && lyrebird_installed(); }
+    else if (idx == bt_index()) p = c = bluetooth_installed();
+    else if (idx == fc_index()) p = c = howdy_installed();
+    else if (idx == rclone_index()) p = c = rclone_installed();
+    else if (idx == ime_index()) p = c = rime_installed();
+    else if (idx == ime_index() + 1) p = c = rime_zh_installed();
+    else if (idx == fp_index()) p = c = fprintd_installed();
+    else if (idx == boot_index() + 4) p = c = kernel_headers_declared;
+    else if (idx >= opt_index() && idx < opt_index() + NOPT_MODULES) p = c = opt_module_installed(idx - opt_index());
+    if (p < 0) return 0;
+    if (present) *present = p;
+    if (complete) *complete = c;
+    return 1;
+}
+
+/* Lines whose Left/Right only choose what their Enter then does (a kernel,
+ * a camera, a finger): Enter opens them, Enter again does it. */
+static int picker_row(int idx)
+{
+    return idx == boot_index() + 3 || idx == fc_index() + 4 || idx == fp_index() + 3;
+}
+
+/* Lines that only show something; Enter says what it is. */
+static int info_row(int idx)
+{
+    return idx == cl_index() + 3 || idx == tr_index() + 3 || idx == fc_index() + 3 || idx == fp_index() + 2 ||
+           idx == upd_index() + 4;
+}
+
+static void row_hint(void);
 
 /* What a pointer event does, as a key: on the sidebar a click opens that
  * category's page (the wheel goes through them); on the page a click
- * selects a setting, on its value (from column 33 of its line) changes it:
- * by "<" down, else up; a double click is Enter where Enter does
- * something; the wheel moves. -1: redraw only; 0: nothing. */
+ * selects a setting, on the value of a setting that has one (from column 33
+ * of its line) opens it and changes it, as a spin box's arrows do: by "<"
+ * down, else up; a component's line never changes by a click, a double
+ * click is Enter there (it installs) as where Enter does something; the
+ * wheel moves. -1: redraw only; 0: nothing. */
 static int settings_pointer(void)
 {
     const struct pointer_event *e = pointer_last();
@@ -4910,10 +4957,19 @@ static int settings_pointer(void)
     }
     int idx = item_at(e->row), col = e->col - text_x() + 2;
     if (idx < 0) return 0;
+    int moved = idx != selected || !in_page, component = component_row(idx, NULL, NULL);
+    if (moved) editing = 0;
     selected = idx;
     in_page = 1;
-    if (e->clicks == 2 && enter_row(idx)) return '\n';
-    if (col >= 33 && !enter_row(idx)) return col < 37 ? K_LEFT : K_RIGHT;
+    if (e->clicks == 2 && (enter_row(idx) || component)) {
+        editing = 0;
+        return '\n';
+    }
+    if (col >= 33 && !enter_row(idx) && !component && !info_row(idx)) {
+        editing = 1;
+        return col < 37 ? K_LEFT : K_RIGHT;
+    }
+    if (moved) row_hint();
     return -1;
 }
 
@@ -4951,6 +5007,7 @@ static void find_setting(void)
     }
     selected = first_setting();
     in_page = 1;
+    editing = 0;
     /* TRANSLATORS: Esc is the Esc key; keep it. */
     snprintf(notice, sizeof notice, _("Settings with \"%.40s\"   Esc: back to the categories"), search);
 }
@@ -5549,7 +5606,7 @@ static void draw_page(int px)
             screen_text(x + 2, row, e->text, DIM, BG);
         } else if (e->idx >= 0) {
             int on = e->idx == selected;
-            uint32_t bg = on ? (in_page ? ACCENT : SIDE_BG) : BG;
+            uint32_t bg = on ? (in_page ? (editing ? EDIT_BG : ACCENT) : SIDE_BG) : BG;
             item_text(e->idx, line, sizeof line);
             screen_fill(px, row, screen_cols() - px, 1, bg);
             screen_text(x, row, line, on && in_page ? BG : FG, bg);
@@ -5655,8 +5712,8 @@ static void adjust(int dir)
     }
     if (selected == ts_idx + 2) {
         const char *state = tailscale_status();
-        if (dir > 0 && (strcmp(state, _("logged out  (Right: log in with a QR code)")) == 0 ||
-                        strcmp(state, _("stopped  (Right: connect)")) == 0)) {
+        if (dir > 0 && (strcmp(state, _("logged out  (Enter: log in with a QR code)")) == 0 ||
+                        strcmp(state, _("stopped  (Enter: connect)")) == 0)) {
             tailscale_login();
         } else {
             snprintf(notice, sizeof notice, _("Tailscale: %.140s."), state);
@@ -6398,9 +6455,144 @@ static void adjust(int dir)
         cycle_rule(selected - hw - 1 - nrow_maps, dir);
         return;
     }
+    /* A line of its own Enter has nothing for Left/Right to change: its
+     * note above, if it has one (row_hint shows those). */
+    if (enter_row(selected)) return;
     apply_all();
     save_rc();
     snprintf(notice, sizeof notice, _("Saved to %s and applied."), RC_CONF);
+}
+
+/* What the selected line takes, in the notice line: shown when it is
+ * selected, and for Right before it is open. The notes of the lines of
+ * their own Enter and of those that only show something are adjust's, which
+ * changes nothing on them (test_page_keys holds it to that). */
+static void row_hint(void)
+{
+    int present = 0, complete = 0;
+    if (component_row(selected, &present, &complete)) {
+        /* TRANSLATORS: Enter and Delete are key names; keep them. */
+        snprintf(notice, sizeof notice, "%s", complete ? _("Installed   Delete, twice: remove it") :
+                 present ? _("Enter: install the rest   Delete, twice: remove it") : _("Enter: install it"));
+    } else if (picker_row(selected)) {
+        /* TRANSLATORS: Enter and Left/Right are key names; keep them. */
+        snprintf(notice, sizeof notice, "%s", _("Enter, then Left/Right: choose   Enter again: do it"));
+    } else if (enter_row(selected) || info_row(selected)) {
+        notice[0] = '\0';
+        adjust(-1); /* -1: never Tailscale's login, which is Enter's */
+        if (!notice[0]) {
+            /* TRANSLATORS: Enter is the Enter key; keep it. */
+            snprintf(notice, sizeof notice, "%s", _("Enter: open it"));
+        }
+    } else {
+        /* TRANSLATORS: Enter and Left/Right are key names; keep them. */
+        snprintf(notice, sizeof notice, "%s", _("Enter, then Left/Right: change it   Enter again: done"));
+    }
+}
+
+static void editing_notice(void)
+{
+    /* TRANSLATORS: Left/Right, Enter and Esc are key names; keep them. */
+    snprintf(notice, sizeof notice, "%s", picker_row(selected) ? _("Left/Right: choose   Enter: do it   Esc: leave it") :
+             _("Left/Right: change   Enter or Esc: done"));
+}
+
+/* A chooser left with Esc shows what is in use again. */
+static void picker_cancel(void)
+{
+    if (selected == fc_index() + 4) {
+        face_choice_loaded = 0;
+        load_face_camera();
+    } else if (selected == boot_index() + 3) {
+        kernel_choice = 0; /* the kernel booted (load_kernel_choices) */
+    }
+}
+
+/* A key on the page. Nothing changes before Enter: Enter opens a setting
+ * (its line turns amber), Left/Right then change it, Enter or Esc close it;
+ * a line of its own Enter does that (the rest of main's keys), a chooser
+ * opens on Enter and does what was chosen on Enter again. A component's
+ * line installs it on Enter and removes it on Delete pressed twice;
+ * Left/Right never do either. Left, Tab and Esc go back to the categories,
+ * as Right came from them. 1: the key is taken; 0: main's lines of their
+ * own Enter and Delete have it. */
+static int page_key(int key)
+{
+    int present = 0, complete = 0, component = component_row(selected, &present, &complete);
+    if (editing) {
+        if (key == K_LEFT || key == '-') {
+            adjust(-1);
+            return 1;
+        }
+        if (key == K_RIGHT || key == '+' || key == '=') {
+            adjust(+1);
+            return 1;
+        }
+        editing = 0;
+        if (key == '\n' && picker_row(selected)) return 0; /* its Enter does it */
+        if (key == 27 || key == '\n' || key == ' ') {
+            if (key == 27 && picker_row(selected)) picker_cancel();
+            snprintf(notice, sizeof notice, "%s", _(default_notice));
+            return 1;
+        }
+        /* any other key closes it and is taken as below */
+    }
+    if (key == K_LEFT || key == '\t' || key == 27) {
+        in_page = 0;
+        return 1;
+    }
+    if (key == K_UP || key == K_DOWN || key == K_PGUP || key == K_PGDN || key == K_BOL || key == K_EOL) {
+        page_move(key == K_UP ? -1 : key == K_DOWN ? 1 : key == K_PGUP ? -page_rows() :
+                  key == K_PGDN ? page_rows() : key == K_BOL ? -MAX_ENTRIES : MAX_ENTRIES);
+        row_hint();
+        return 1;
+    }
+    if (key == K_RIGHT || key == '-' || key == '+' || key == '=') {
+        row_hint();
+        return 1;
+    }
+    if (component && (key == '\n' || key == K_DEL)) {
+        if (pkg_job) {
+            adjust(+1); /* what is still being done: nothing starts */
+        } else if (key == '\n') {
+            if (complete) row_hint();
+            else adjust(+1); /* installs it, or what of it is missing */
+        } else if (!present) {
+            /* TRANSLATORS: Enter is the Enter key; keep it. */
+            snprintf(notice, sizeof notice, "%s", _("Not installed: Enter installs it."));
+        } else if (remove_asked != selected) {
+            remove_asked = selected;
+            /* TRANSLATORS: Delete is the Delete key; keep it. */
+            snprintf(notice, sizeof notice, "%s", _("Delete again: remove it, with what only it needs."));
+        } else {
+            remove_asked = -1;
+            adjust(-1); /* switches it off first, then removes it */
+        }
+        return 1;
+    }
+    if (key == '\n' || key == ' ') {
+        if (selected == ts_index() + 2) {
+            if (key == '\n') adjust(+1); /* logs in or connects, when it is out */
+            return 1;
+        }
+        if (picker_row(selected)) {
+            editing = 1;
+            editing_notice();
+            return 1;
+        }
+        if (enter_row(selected)) {
+            if (key == ' ') row_hint();
+            return key == ' '; /* main's: Enter does what the line is for */
+        }
+        if (info_row(selected) || component) {
+            row_hint();
+            return 1;
+        }
+        editing = 1;
+        editing_notice();
+        return 1;
+    }
+    return 0;
 }
 
 int main(int argc, char **argv)
@@ -6442,6 +6634,7 @@ int main(int argc, char **argv)
         int key = key_poll_timeout(-1, pkg_job || repos_job ? 500 : 2000);
         if (key != 0 && key != K_DEL) {
             fp_delete_asked = face_delete_asked = tor_bridges_delete_asked = tpm_clear_asked = 0; /* Delete twice in a row deletes them */
+            remove_asked = -1;
         }
         build_row_maps();
         pkg_check();
@@ -6471,31 +6664,16 @@ int main(int argc, char **argv)
         } else if (key == '/') {
             find_setting();
             draw();
-        } else if (key == 27 && search[0]) { /* back to the categories, at the setting found */
+        } else if (key == 27 && search[0] && !editing) { /* back to the categories, at the setting found */
             search[0] = '\0';
             in_page = 0;
             snprintf(notice, sizeof notice, "%s", _(default_notice));
             draw();
         } else if (!in_page) {
             sidebar_key(key);
+            if (in_page) row_hint();
             draw();
-        } else if (key == 27 || key == '\t') {
-            in_page = 0;
-            draw();
-        } else if (key == K_UP || key == K_DOWN) {
-            page_move(key == K_UP ? -1 : 1);
-            draw();
-        } else if (key == K_PGUP || key == K_PGDN) {
-            page_move(key == K_PGUP ? -page_rows() : page_rows());
-            draw();
-        } else if (key == K_BOL || key == K_EOL) {
-            page_move(key == K_BOL ? -MAX_ENTRIES : MAX_ENTRIES);
-            draw();
-        } else if (key == K_LEFT || key == '-') {
-            adjust(-1);
-            draw();
-        } else if (key == K_RIGHT || key == '+' || key == '=') {
-            adjust(+1);
+        } else if (page_key(key)) {
             draw();
         } else if (bluetooth_settings_key(key)) {
             draw();
@@ -6757,9 +6935,6 @@ int main(int argc, char **argv)
                 snprintf(notice, sizeof notice, "%s", status == 0 ?
                          _("rclone config done.") : _("rclone config did not finish."));
             }
-            draw();
-        } else if (key == '\n' || key == ' ') {
-            adjust(+1);
             draw();
         }
     }

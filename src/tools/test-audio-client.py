@@ -110,9 +110,9 @@ if name == "pipewire":
     time.sleep(float(os.environ.get("TEST_PIPEWIRE_DELAY", "0")))
 endpoints = []
 if name == "pipewire" and not os.environ.get("TEST_PIPEWIRE_NO_SOCKET"):
-    endpoints = [Path(os.environ["PIPEWIRE_RUNTIME_DIR"]) / s for s in ("pipewire-0", "pipewire-0-manager", "pipewire-0-restricted")]
+    endpoints = [Path(os.environ["PIPEWIRE_RUNTIME_DIR"]) / s for s in ("pipewire-0", "pipewire-0-manager", "restricted/pipewire-0")]
 if name == "pipewire-pulse":
-    endpoints = [Path(os.environ["PULSE_RUNTIME_PATH"]) / "native"]
+    endpoints = [Path(os.environ["PULSE_RUNTIME_PATH"]) / "restricted/native"]
 for path in endpoints:
     endpoint = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     endpoint.bind(str(path))
@@ -175,7 +175,7 @@ while True:
     def wait_ready(self, seconds=5):
         until = time.monotonic() + seconds
         while time.monotonic() < until:
-            if (self.pulse_runtime / "native").is_socket() and "wireplumber" in self.servers() and \
+            if (self.pulse_runtime / "restricted/native").is_socket() and "wireplumber" in self.servers() and \
                     (self.root_runtime / "pipewire-0").is_symlink():
                 return
             if self.process.poll() is not None:
@@ -219,12 +219,18 @@ while True:
         self.assertEqual(servers["pipewire-pulse"]["env"]["PULSE_RUNTIME_PATH"], str(self.pulse_runtime))
         self.assertEqual(servers["wireplumber"]["env"]["XDG_STATE_HOME"], str(self.state))
         self.assertEqual(servers["wireplumber"]["env"]["GIO_USE_VFS"], "local")
-        # The runtime directories are the servers' alone; the sockets keep
-        # the modes PipeWire gave them (no chmod here).
+        # The runtime directories are the servers' alone; in each, the
+        # directory of the containers' socket (restricted, 0755: a container
+        # gets the directory, not the socket); the sockets keep the modes
+        # PipeWire gave them (no chmod here).
         for directory in (self.pw_runtime, self.pulse_runtime, self.state / "wireplumber"):
             self.assertEqual(directory.stat().st_mode & 0o777, 0o700, directory)
-        self.assertEqual([c[2][:6] for c in self.calls("install") if str(self.pw_runtime) in c[2]],
-                         [["-d", "-o", "pipewire", "-g", "pipewire", "-m"]])
+        for directory in (self.pw_runtime / "restricted", self.pulse_runtime / "restricted"):
+            self.assertEqual(directory.stat().st_mode & 0o777, 0o755, directory)
+        owner = ["-d", "-o", "pipewire", "-g", "pipewire", "-m"]
+        self.assertEqual([c[2] for c in self.calls("install") if str(self.pw_runtime) in " ".join(c[2])],
+                         [owner + ["0700", str(self.pw_runtime), str(self.pulse_runtime)],
+                          owner + ["0755", str(self.pw_runtime / "restricted"), str(self.pulse_runtime / "restricted")]])
         self.assertNotIn("chmod", self.text)
         self.assertEqual(os.readlink(self.root_runtime / "pipewire-0"), str(self.pw_runtime / "pipewire-0"))
         self.process.terminate()
@@ -233,7 +239,7 @@ while True:
         self.assertFalse(os.path.lexists(self.root_runtime / "pipewire-0"))
         self.assertEqual(self.kmsg.read_text(), "")
         print("PASS audio servers run as pipewire (audio group only, CAP_SYS_NICE, no_new_privs), "
-              "WirePlumber main-systemwide, runtime directories 0700", flush=True)
+              "WirePlumber main-systemwide, runtime directories 0700, the containers' socket directories 0755", flush=True)
 
     def test_without_its_user_nothing_runs(self):
         for env in ({"TEST_NO_USER": "1"}, {"TEST_SYSUSERS_FAIL": "1"}):

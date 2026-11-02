@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-02 04:07-0500\n"
+"POT-Creation-Date: 2026-11-03 02:10+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -5300,7 +5300,8 @@ msgid ""
 "empty FAT32 at /mnt/efi."
 msgstr ""
 
-#: progs/installer.c
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/installer.c progs/settings.c
 msgid "Enter: open it"
 msgstr ""
 
@@ -7962,11 +7963,11 @@ msgstr ""
 msgid "Right"
 msgstr ""
 
-#. TRANSLATORS: Up/Down, Enter, Left/Right, Tab, / and q are key names; keep them.
+#. TRANSLATORS: Up/Down, Enter, Left, Tab, / and q are key names; keep them.
 #: progs/settings.c
 msgid ""
-"Up/Down: choose   Enter: open   Left/Right: change   Tab: categories or "
-"settings   /: find   q: back to home"
+"Up/Down: choose   Enter: change or open   Left/Tab: categories   /: find   "
+"q: back to home"
 msgstr ""
 
 #: progs/settings.c
@@ -8283,14 +8284,14 @@ msgstr ""
 msgid "no address yet"
 msgstr ""
 
-#. TRANSLATORS: Right is the Right arrow key; keep it.
+#. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
-msgid "logged out  (Right: log in with a QR code)"
+msgid "logged out  (Enter: log in with a QR code)"
 msgstr ""
 
-#. TRANSLATORS: Right is the Right arrow key; keep it.
+#. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
-msgid "stopped  (Right: connect)"
+msgid "stopped  (Enter: connect)"
 msgstr ""
 
 #: progs/settings.c
@@ -8736,9 +8737,9 @@ msgstr ""
 msgid "The system's: %s"
 msgstr ""
 
-#. TRANSLATORS: Left/Right are the Left and Right arrow keys; keep them.
+#. TRANSLATORS: Network time is the name of the line above; keep it as its translation.
 #: progs/settings.c
-msgid "Network time sets the clock: turn it off (Left/Right) to set it here."
+msgid "Network time sets the clock: turn Network time off to set it here."
 msgstr ""
 
 #. TRANSLATORS: Enter and Esc are key names; keep them and YYYY-MM-DD HH:MM.
@@ -10325,6 +10326,48 @@ msgstr ""
 #: progs/settings.c
 #, c-format
 msgid "Saved to %s and applied."
+msgstr ""
+
+#. TRANSLATORS: Enter and Delete are key names; keep them.
+#: progs/settings.c
+msgid "Installed   Delete, twice: remove it"
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter: install it"
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter: install the rest   Delete, twice: remove it"
+msgstr ""
+
+#. TRANSLATORS: Enter and Left/Right are key names; keep them.
+#: progs/settings.c
+msgid "Enter, then Left/Right: choose   Enter again: do it"
+msgstr ""
+
+#. TRANSLATORS: Enter and Left/Right are key names; keep them.
+#: progs/settings.c
+msgid "Enter, then Left/Right: change it   Enter again: done"
+msgstr ""
+
+#. TRANSLATORS: Left/Right, Enter and Esc are key names; keep them.
+#: progs/settings.c
+msgid "Left/Right: choose   Enter: do it   Esc: leave it"
+msgstr ""
+
+#: progs/settings.c
+msgid "Left/Right: change   Enter or Esc: done"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Not installed: Enter installs it."
+msgstr ""
+
+#. TRANSLATORS: Delete is the Delete key; keep it.
+#: progs/settings.c
+msgid "Delete again: remove it, with what only it needs."
 msgstr ""
 
 #: progs/settings.c
