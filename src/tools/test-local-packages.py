@@ -711,7 +711,8 @@ class LocalPackages(unittest.TestCase):
         # The host update first, then the leaf through sync's own repository path.
         self.assertEqual(calls, [["pacman", "-Syu", "--noconfirm"],
                                  "pacman -S --needed --noconfirm --assume-installed initramfs sof-firmware"])
-        self.assertEqual(queries, [["pacman", "-Sp", "sof-firmware"]])
+        # A Vulkan driver is installed (pacman -T): none is added.
+        self.assertEqual(queries, [["pacman", "-Sp", "sof-firmware"], ["pacman", "-T", "vulkan-driver"]])
         self.assertNotIn(missing, pkg.plan())
 
     def test_apply_installs_nothing_when_no_declared_leaf_is_missing(self):

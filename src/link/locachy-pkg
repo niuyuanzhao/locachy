@@ -319,6 +319,50 @@ def declared_missing(installed):
     return [p for p in load_manifest(MANIFEST) if p not in installed]
 
 
+# Each GPU's Vulkan driver by its kernel driver (Arch Wiki, Vulkan:
+# Installation). With none of these, Mesa's software one.
+VULKAN_DRIVERS = {"i915": "vulkan-intel", "xe": "vulkan-intel", "amdgpu": "vulkan-radeon",
+                  "nouveau": "vulkan-nouveau", "nvidia": "nvidia-utils", "virtio_gpu": "vulkan-virtio"}
+
+
+def gpu_vulkan_drivers(drm="/sys/class/drm"):
+    drivers = []
+    for card in sorted(glob.glob(os.path.join(drm, "card[0-9]*"))):
+        if "-" in os.path.basename(card):  # a connector
+            continue
+        try:
+            driver = os.path.basename(os.readlink(os.path.join(card, "device/driver")))
+        except OSError:
+            continue
+        if driver in VULKAN_DRIVERS and VULKAN_DRIVERS[driver] not in drivers:
+            drivers.append(VULKAN_DRIVERS[driver])
+    return drivers or ["vulkan-swrast"]
+
+
+def needed_vulkan_drivers(repo_pkgs, aur_pkgs):
+    """This machine's Vulkan drivers when a package to install depends on
+    vulkan-driver and nothing installed provides it, else none: pacman would
+    take the first provider in the repositories' order ([cachyos-v3]'s
+    mesa-git, which conflicts with mesa), not this machine's."""
+    if not (repo_pkgs or aur_pkgs) or subprocess.run(["pacman", "-T", "vulkan-driver"],
+                                                     stdout=subprocess.DEVNULL).returncode == 0:
+        return []
+    depends = []
+    for p in repo_pkgs:
+        out = subprocess.run(["pacman", "-Si", "--", p], capture_output=True, text=True,
+                             env=dict(os.environ, LC_ALL="C")).stdout or ""
+        for line in out.splitlines():
+            if line.startswith("Depends On") and " : " in line:
+                depends += line.split(" : ", 1)[1].split()
+    if aur_pkgs:
+        try:
+            for r in aur_results(aur_pkgs):
+                depends += r.get("Depends") or []
+        except (RuntimeError, ValueError):
+            pass  # the build says what is missing
+    return gpu_vulkan_drivers() if any(re.split(r"[<>=]", d, 1)[0] == "vulkan-driver" for d in depends) else []
+
+
 def install_missing(missing, tracked):
     """Install declared leaves that are not installed, with their dependencies;
     sync and apply share this. Nothing is removed here."""
@@ -337,6 +381,9 @@ def install_missing(missing, tracked):
             repo_pkgs.append(p)
         else:
             aur_pkgs.append(p)
+    drivers = needed_vulkan_drivers(repo_pkgs, aur_pkgs)
+    if drivers and not run_pacman("pacman -S --needed --noconfirm --asdeps " + shlex.join(drivers)):
+        return False
     # Complete the repository ABI before compiling local/AUR packages.
     # Kernel packages use LOCachy's initramfs, not a second generator.
     if repo_pkgs and not run_pacman("pacman -S --needed --noconfirm --assume-installed initramfs " +
@@ -1209,9 +1256,9 @@ def repo_updates():
     return updates, newest
 
 
-def aur_info(names):
-    """name -> (version, description) of the AUR's packages among names."""
-    info = {}
+def aur_results(names):
+    """The AUR's RPC info of its packages among names."""
+    results = []
     names = sorted(set(names))
     for i in range(0, len(names), 100):
         query = "&".join("arg[]=" + urllib.parse.quote(n) for n in names[i:i + 100])
@@ -1219,9 +1266,13 @@ def aur_info(names):
                            capture_output=True, text=True)
         if p.returncode != 0:
             raise RuntimeError(f"the AUR did not answer: {p.stderr.strip()}")
-        for r in json.loads(p.stdout).get("results", []):
-            info[r["Name"]] = (r["Version"], r.get("Description") or "")
-    return info
+        results += json.loads(p.stdout).get("results", [])
+    return results
+
+
+def aur_info(names):
+    """name -> (version, description) of the AUR's packages among names."""
+    return {r["Name"]: (r["Version"], r.get("Description") or "") for r in aur_results(names)}
 
 
 def aur_versions(names):

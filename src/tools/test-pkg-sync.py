@@ -47,6 +47,7 @@ class Sync(unittest.TestCase):
         self.patch("load_installed_db", lambda: (dict(self.installed), {n: [n] for n in self.installed},
                                                 set(self.installed)))
         self.patch("install_tracked", self.tracked)
+        self.patch("needed_vulkan_drivers", lambda repo, aur: [])
         self.patch("run_pacman", self.pacman)
         self.patch("run", self.run_command)
         p = mock.patch.object(pkg.subprocess, "run", self.query)
@@ -254,6 +255,22 @@ class Sync(unittest.TestCase):
         self.assertEqual(snapshot[0][1], {"test_source": pkg.SRC})
         self.assertEqual(installed, [("reference", self.baseline)])
 
+    def test_the_machines_vulkan_driver_comes_before_what_needs_one(self):
+        self.patch("needed_vulkan_drivers", lambda repo, aur: ["vulkan-intel"] if "arbitrary-aur-name" in aur else [])
+        self.assertEqual(self.sync(), 0)
+        driver = self.calls.index("pacman -S --needed --noconfirm --asdeps vulkan-intel")
+        repo = next(i for i, c in enumerate(self.calls) if isinstance(c, str) and "--assume-installed initramfs" in c)
+        aur = self.calls.index(([pkg.BUILD_TOOL, "-i", "arbitrary-aur-name"], True))
+        self.assertLess(driver, repo)
+        self.assertLess(driver, aur)
+
+    def test_a_failed_vulkan_driver_stops_before_the_build(self):
+        self.patch("needed_vulkan_drivers", lambda repo, aur: ["vulkan-intel"])
+        self.patch("run_pacman", lambda cmd: self.calls.append(cmd) or "vulkan-intel" not in cmd)
+        self.assertEqual(self.sync(), 1)
+        self.assertFalse(any(isinstance(c, tuple) for c in self.calls))
+        self.assertIn("bootstrap-only", self.installed)
+
     def test_pacman_omitted_reason_is_explicit(self):
         db = self.root / "db"
         for name, reason in (("leaf", ""), ("dependency", "%REASON%\n1\n\n")):
@@ -281,6 +298,59 @@ class Sync(unittest.TestCase):
         self.assertLess(sync, check)
         self.assertLess(check, make)
         self.assertLess(make, archive)
+
+
+class VulkanDriver(unittest.TestCase):
+    """vulkan-driver for what needs it: this machine's GPUs' drivers, not the
+    first provider in the repositories' order."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="pkg-vulkan-", dir=SCRATCH)
+        self.addCleanup(self.tmp.cleanup)
+        self.drm = Path(self.tmp.name) / "drm"
+
+    def card(self, name, driver):
+        device = self.drm.parent / (self.drm.name + "-devices") / name
+        (device / "drivers" / driver).mkdir(parents=True)
+        (self.drm / name).mkdir(parents=True)
+        (self.drm / name / "device").symlink_to(device)
+        (device / "driver").symlink_to(device / "drivers" / driver)
+
+    def test_each_gpus_driver_once_else_the_software_one(self):
+        self.card("card0", "i915")
+        self.card("card0-eDP-1", "i915")  # a connector
+        self.card("card1", "nouveau")
+        self.card("card2", "xe")
+        self.card("card3", "evdi")
+        self.assertEqual(pkg.gpu_vulkan_drivers(str(self.drm)), ["vulkan-intel", "vulkan-nouveau"])
+        other = Path(self.tmp.name) / "other"
+        other.mkdir()
+        self.drm = other
+        self.card("card0", "bochs-drm")
+        self.assertEqual(pkg.gpu_vulkan_drivers(str(other)), ["vulkan-swrast"])
+
+    def needed(self, satisfied, repo_depends, aur_depends, repo=("repo-program",), aur=("aur-program",)):
+        def run(cmd, **kwargs):
+            if cmd[:2] == ["pacman", "-T"]:
+                return subprocess.CompletedProcess(cmd, 0 if satisfied else 127)
+            return subprocess.CompletedProcess(cmd, 0, stdout="Name            : x\nDepends On      : " + repo_depends + "\n")
+        with mock.patch.object(pkg.subprocess, "run", run), \
+                mock.patch.object(pkg, "aur_results", lambda names: [{"Name": n, "Depends": aur_depends} for n in names]), \
+                mock.patch.object(pkg, "gpu_vulkan_drivers", lambda: ["vulkan-intel"]):
+            return pkg.needed_vulkan_drivers(list(repo), list(aur))
+
+    def test_only_when_needed_and_none_is_installed(self):
+        self.assertEqual(self.needed(False, "None", ["gtk3", "vulkan-driver"]), ["vulkan-intel"])
+        self.assertEqual(self.needed(False, "glibc  vulkan-driver>=1", [], aur=()), ["vulkan-intel"])
+        self.assertEqual(self.needed(True, "None", ["vulkan-driver"]), [])
+        self.assertEqual(self.needed(False, "glibc", ["gtk3", "vulkan-icd-loader"]), [])
+        self.assertEqual(self.needed(False, "None", [], repo=(), aur=()), [])
+
+    def test_the_aur_not_answering_leaves_it_to_the_build(self):
+        def down(names):
+            raise RuntimeError("the AUR did not answer")
+        with mock.patch.object(pkg.subprocess, "run", lambda cmd, **k: subprocess.CompletedProcess(cmd, 127)), \
+                mock.patch.object(pkg, "aur_results", down):
+            self.assertEqual(pkg.needed_vulkan_drivers([], ["aur-program"]), [])
 
 
 class Manifest(unittest.TestCase):
