@@ -90,6 +90,13 @@ static int keyboards[MAX_KEYBOARDS];
 static char paths[MAX_KEYBOARDS][32]; /* process 1: to open them again */
 static signed char device_table[MAX_KEYBOARDS]; /* each one's table; -1: not looked up yet */
 static int count;
+/* The tables of keyboards this process reads that are not among those
+ * (the shared display's bar reads the ones process 1 lends it), by id. */
+static struct {
+    char id[KEYS_ID_SIZE];
+    signed char table;
+} others[MAX_KEYBOARDS];
+static int nothers;
 /* Track physical keys independently even when two share a modifier role. */
 static unsigned char modifiers[MAX_KEYBOARDS][256], unowned_modifiers[256];
 /* Each one's queue overflowed: its events dropped up to the next SYN_REPORT.
@@ -315,6 +322,7 @@ static void drop_device_tables(void)
     }
     ntables = 1;
     memset(device_table, -1, sizeof device_table);
+    nothers = 0;
     last_table = &tables[0];
 }
 
@@ -407,14 +415,26 @@ static struct table *device_table_of(int i)
     return &tables[device_table[i]];
 }
 
-/* The table fd types with (one not among the keyboards: the system's). */
+/* The table fd types with: a keyboard's of those, or another's by its id
+ * (looked up once until keys_reload); not a keyboard, the system's. */
 static struct table *table_of(int fd)
 {
     for (int i = 0; i < count; i++) {
         if (keyboards[i] == fd) return device_table_of(i);
     }
     read_table();
-    return &tables[0];
+    char id[KEYS_ID_SIZE];
+    if (keys_device_id(fd, id, sizeof id) < 0) return &tables[0];
+    for (int i = 0; i < nothers; i++) {
+        if (strcmp(others[i].id, id) == 0) return &tables[others[i].table];
+    }
+    int t = resolve(fd);
+    if (nothers == MAX_KEYBOARDS) {
+        memmove(others, others + 1, (size_t)--nothers * sizeof *others);
+    }
+    snprintf(others[nothers].id, sizeof others[0].id, "%s", id);
+    others[nothers++].table = (signed char)t;
+    return &tables[t];
 }
 
 int keys_modifier(int code)

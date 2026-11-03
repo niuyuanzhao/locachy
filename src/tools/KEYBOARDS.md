@@ -87,13 +87,15 @@ input.
   passes them on. When home or another direct program comes to the front,
   process 1 revokes them (`EVIOCREVOKE`, which also ends a grab), and seat
   revokes labwc's input devices before it disables labwc's seat, as seatd
-  does.
+  does. A lent keyboard still types in its own layout: the bar looks it up in
+  `keyboards.conf` by its id.
 - **A full input queue** (`SYN_DROPPED`): the rest of that frame is dropped and
   the keys are read again from the kernel (`EVIOCGKEY`), so a lost release
   leaves no modifier or key held and nothing is typed.
 
 `test-keyboard-devices.c` covers the LEDs, the read-only lent keyboards and
 `SYN_DROPPED`; `test-bar-keyboard.c` the bar's lent keyboards, draining and
-revocation; `test-input-hotplug.c` hotplug with the shared display in front.
+revocation; `test-keytable.c` the layout of a keyboard the bar reads;
+`test-input-hotplug.c` hotplug with the shared display in front.
 The real console, revocation in a VM and the X230's Caps Lock LED still need
 their acceptance runs.

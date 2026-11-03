@@ -3,7 +3,8 @@
  * the input method's keys by keysym name (and one bound to nothing for
  * settings to record), German letters where they are, an unknown keymap
  * refused, a missing table US; two keyboards, one with a keymap of its own
- * (keyboards.conf). Key events through pipes, the keyboards' names and ids
+ * (keyboards.conf), also as a program reads them that does not give them to
+ * keys.c (the shared display's bar). Key events through pipes, the keyboards' names and ids
  * as the doubles of ioctl give them; no device. Build with
  * -ffunction-sections -fdata-sections -Wl,--gc-sections:
  *   test-keytable KEYTABLE NEW_DIR */
@@ -354,5 +355,33 @@ int main(int argc, char **argv)
     close(board[1][1]);
     puts("PASS jp106 built in and a us keyboard of its own: [ and @, Shift+2 \" and @, Ctrl and Caps Lock of "
          "either for both, its keymap saved by its sway name; a missing table falls back and is reported");
+
+    /* The system's us, the built-in one jp106 of its own, both read by a
+     * program that does not give them to keys.c (the shared display's bar,
+     * with the keyboards process 1 lends it): each still has its own table. */
+    char jp_table[600];
+    snprintf(jp_table, sizeof jp_table, "%s/jp106.table", tables_dir);
+    assert(run_keytable("jp106", jp_table) == 0);
+    assert(keys_set_keyboard("1133:49948:USB_Keyboard", NULL) == 0);
+    assert(keys_set_keyboard("1:1:AT_Translated_Set_2_keyboard", "jp106") == 0);
+    for (int i = 0; i < 2; i++) {
+        assert(pipe(board[i]) == 0);
+        fake_fd[i] = board[i][0];
+    }
+    assert(make("us") == 0 && count == 0);
+    assert(!strcmp(keys_device_layout(fake_fd[0], "layout"), "jp") && !strcmp(keys_device_layout(fake_fd[1], "layout"), "us"));
+    assert(keys_device_char(fake_fd[0], KEY_APOSTROPHE, 0) == ':' && keys_device_char(fake_fd[1], KEY_APOSTROPHE, 0) == '\'');
+    assert(keys_device_char(fake_fd[0], KEY_2, 1) == '"' && keys_device_char(fake_fd[1], KEY_2, 1) == '@');
+    assert(keys_device_action(fake_fd[0], KEY_GRAVE, 0, 0, 0, 0) == K_ACT_IME_WIDTH &&
+           keys_device_action(fake_fd[1], KEY_GRAVE, 0, 0, 0, 0) == 0);
+    assert(keys_set_keyboard("1:1:AT_Translated_Set_2_keyboard", NULL) == 0);
+    keys_reload(); /* as settings, then SIGHUP to the bar */
+    assert(!strcmp(keys_device_layout(fake_fd[0], "layout"), "us") && keys_device_char(fake_fd[0], KEY_APOSTROPHE, 0) == '\'');
+    for (int i = 0; i < 2; i++) {
+        close(board[i][0]);
+        close(board[i][1]);
+    }
+    puts("PASS us for the system, jp106 for the built-in one, read by the bar: its layout, characters and "
+         "keys by its id; the system's again after it is cleared");
     return 0;
 }

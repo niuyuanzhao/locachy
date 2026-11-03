@@ -65,11 +65,13 @@ Caps Lock 状态变化识别，不再假定其未按 Shift 时就是锁定键。
   取得锁定状态。共享显示的 labwc 自己设置指示灯。全屏安装器同样设置。
 - **状态栏**只读取进程 1 随座位借出的键盘，由 seat 转交。home 或其他直连程序到前台时，
   进程 1 撤销这些键盘（`EVIOCREVOKE`，同时解除抓取）；seat 在停用 labwc 的座位之前
-  先撤销 labwc 的输入设备，与 seatd 相同。
+  先撤销 labwc 的输入设备，与 seatd 相同。借来的键盘仍按它自己的布局输入：状态栏按
+  键盘的 id 在 `keyboards.conf` 中查找。
 - **输入队列溢出**（`SYN_DROPPED`）：丢弃该帧余下的事件，再从内核重新读取按键状态
   （`EVIOCGKEY`），丢失的松开不会让修饰键或按键一直按住，也不会打出字符。
 
 `test-keyboard-devices.c` 覆盖指示灯、只读的借出键盘和 `SYN_DROPPED`；
-`test-bar-keyboard.c` 覆盖状态栏借到的键盘、清空旧事件和撤销；`test-input-hotplug.c`
+`test-bar-keyboard.c` 覆盖状态栏借到的键盘、清空旧事件和撤销；`test-keytable.c` 覆盖
+状态栏所读键盘的布局；`test-input-hotplug.c`
 覆盖共享显示在前台时的热插拔。真实控制台、虚拟机中的撤销和 X230 的 Caps Lock 指示灯
 仍需各自的验收。
