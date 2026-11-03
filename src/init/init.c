@@ -2396,8 +2396,11 @@ static void message(struct frame *f)
         int result = screen_drop_master(f->lessee);
         f->lessee = 0;
         control_send(f->ctl, result == 0 ? "mastered" : "master-error", result == 0 ? 8 : 12, NULL, 0);
-    } else if (strcmp(fields[0], "display-ready") == 0 && f->screens && f->shared_display) {
-        if (stay_on_display) {
+    } else if (strcmp(fields[0], "display-ready") == 0 && f->shared_display) {
+        apps_display_ready(); /* with or without the screens (the lock may have them) */
+        if (!f->screens) {
+            apps_tick();
+        } else if (stay_on_display) {
             stay_on_display = 0;
             apps_tick();
         } else {

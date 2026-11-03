@@ -26,6 +26,7 @@ timeout 60 "$out/installer" "$out/installer-fixtures"
 "${cc[@]}" "$src/progs/keytable.c" $(pkg-config --cflags --libs xkbcommon) -o "$out/keytable"
 "${cc[@]}" "$src/tools/test-keytable.c" "${link[@]}" -o "$out/keytable-test"
 LC_ALL=C.UTF-8 "$out/keytable-test" "$out/keytable" "$out/keytable-fixtures"
+"$src/tools/test-app-registry.sh" "$out/app-registry"
 for test in keys-name keyboard-devices term-clipboard screen-mirror modules-event; do
     "${cc[@]}" "$src/tools/test-$test.c" "${link[@]}" -o "$out/$test"
     "$out/$test"

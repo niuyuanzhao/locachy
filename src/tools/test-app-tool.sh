@@ -1,5 +1,5 @@
 #!/bin/sh
-# Test double used only by test-app-registry.c.
+# Test double used only by test-app-registry.c (test-app-registry.sh).
 set -eu
 root=/run/locachy-registry-test
 name=$2

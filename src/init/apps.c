@@ -155,9 +155,24 @@ static int ready(const struct app *app)
     return access(path, F_OK) == 0;
 }
 
+/* The shared display said display-ready (seat: its sockets, and X11 once
+ * labwc's xinitrc has published it, when Xwayland is installed) for the
+ * display socket it has now, by its inode: a new session's socket waits for
+ * its own message. Its sockets alone come first: a program started then
+ * finds no X11. */
+static ino_t announced;
+
+void apps_display_ready(void)
+{
+    struct stat st;
+    announced = stat(APP_DISPLAY_READY, &st) == 0 ? st.st_ino : 0;
+}
+
 static int display_ready(void)
 {
-    return access(APP_DISPLAY, F_OK) == 0 && access(APP_DISPLAY_READY, F_OK) == 0;
+    struct stat st;
+    return announced && access(APP_DISPLAY, F_OK) == 0 && stat(APP_DISPLAY_READY, &st) == 0 &&
+           st.st_ino == announced;
 }
 
 static void failure(struct app *app, const char *message)

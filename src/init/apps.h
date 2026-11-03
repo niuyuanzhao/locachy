@@ -13,6 +13,9 @@ enum {
 
 void apps_init(void);
 void apps_tick(void);
+/* The shared display has said display-ready: programs start on it from now
+ * on, and on a later session's display once that one says it too. */
+void apps_display_ready(void);
 int apps_reap(pid_t pid, int status);
 int apps_busy(void);
 int apps_display_state(void);

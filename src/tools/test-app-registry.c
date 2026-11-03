@@ -1,5 +1,6 @@
 /* Exercise host asynchronous lifecycle bookkeeping without booting a PID 1. */
 #include <assert.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
@@ -55,6 +56,11 @@ int main(void)
     assert(apps_action("start", "../invalid", why, sizeof why) == -1);
     assert(apps_action("start", "alpha", why, sizeof why) == 0);
     assert(apps_action("start", "alpha", why, sizeof why) == -1);
+    /* The display's sockets are there, but it has not said display-ready
+     * (X11 not yet published): the program waits for it. */
+    tick_for(200);
+    contains("alpha\tstarting\t");
+    apps_display_ready();
     tick_for(200);
     contains("alpha\trunning\t");
     assert(apps_action("freeze", "alpha", why, sizeof why) == 0);
@@ -89,6 +95,20 @@ int main(void)
     tick_for(200);
     contains("alpha\trunning\t");
     opened("/home/u/Documents/a.txt\nhttps://example.org/\n");
+    assert(apps_action("stop", "alpha", why, sizeof why) == 0);
+    tick_for(300);
+    contains("alpha\tclosed\t");
+    /* A later session's display (its socket made again) waits for its own
+     * display-ready. */
+    assert(unlink(APP_DISPLAY_READY) == 0);
+    int fd = open(APP_DISPLAY_READY, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    assert(fd >= 0 && close(fd) == 0);
+    assert(apps_action("start", "alpha", why, sizeof why) == 0);
+    tick_for(200);
+    contains("alpha\tstarting\t");
+    apps_display_ready();
+    tick_for(200);
+    contains("alpha\trunning\t");
     assert(apps_action("stop", "alpha", why, sizeof why) == 0);
     tick_for(300);
     contains("alpha\tclosed\t");

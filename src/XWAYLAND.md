@@ -45,7 +45,9 @@ Measured alternatives (Xwayland 24.1.14, labwc 0.20.2):
 record at the start of each session and at its end, and tells process 1
 `display-ready` once the record is there (when Xwayland is installed; after
 10 s it goes on without X11 and says so: this fallback is not measured).
-Xwayland is labwc's child, in the shared display's cgroup, not in an
+Process 1 starts no program on the shared display before that message, so
+the first one, started with the display, finds X11 there (`x11="1"`): its
+sockets alone come first. Xwayland is labwc's child, in the shared display's cgroup, not in an
 application's.
 
 ## Containers

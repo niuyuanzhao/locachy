@@ -22,6 +22,7 @@ int apps_open(const char *name, const char *target, char *why, size_t size)
 int apps_action(const char *action, const char *name, char *why, size_t size)
 { (void)action; (void)name; (void)why; (void)size; abort(); }
 void apps_tick(void) {}
+void apps_display_ready(void) {}
 int apps_reap(pid_t pid, int status) { (void)pid; (void)status; return 0; }
 int screen_refresh(void) { return 1; }
 int screen_lend(uint32_t *lessee) { *lessee = 42; return open("/dev/null", O_RDONLY); }
