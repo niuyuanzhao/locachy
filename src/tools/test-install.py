@@ -235,8 +235,8 @@ class Install(unittest.TestCase):
         self.assertIn("cjk-fonts", d["module_defaults"]["zh_CN.UTF-8"])
         self.assertNotIn("cjk-fonts", d["module_defaults"]["en_US.UTF-8"])
         # The system's host programs first, then the app presets' catalog.
-        self.assertEqual(d["containers"], [{"name": "code", "host": True}, {"name": "foot", "host": True},
-                                           {"name": "firefox", "host": False}])
+        self.assertEqual(d["containers"], [{"name": "chatgpt", "host": True}, {"name": "code", "host": True},
+                                           {"name": "foot", "host": True}, {"name": "firefox", "host": False}])
         self.assertEqual((d["defaults"]["apps_repo"], d["defaults"]["apps_branch"]), (self.APPS_URL, "next"))
         self.assertEqual(d["apps"], {"text": f"{'c' * 12} of {self.APPS_URL} (next)", "not_newest": False})
         self.assertEqual(d["machines"][0], {"name": "generic", "description": "Generic PC"})

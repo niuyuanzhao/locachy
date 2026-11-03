@@ -5,7 +5,7 @@
 The presets offered for containers (Edge, Firefox, WeChat and the others) live
 in a repository of their own, `locachy-apps`, not in this source. This
 repository keeps only the host programs' presets (`src/containers/`:
-`foot.conf`, `code.conf`, `host="1"`): their packages are the host's manifest
+`foot.conf`, `code.conf`, `chatgpt.conf`, `host="1"`): their packages are the host's manifest
 and `code.conf` runs a system wrapper. An app preset may never be a host
 program; `host=` in the apps repository rejects its catalog.
 

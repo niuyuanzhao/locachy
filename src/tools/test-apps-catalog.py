@@ -356,7 +356,7 @@ class Catalog(Base):
                         make.index("rm -rf /usr/local/share/locachy/containers"))
         self.assertIn("grep -q '^host=\"1\"' \"$preset\" || install -m 644 \"$preset\" "
                       "/usr/local/share/locachy/containers/", make)
-        self.assertEqual(sorted(p.name for p in (SOURCE / "containers").glob("*.conf")), ["code.conf", "foot.conf"])
+        self.assertEqual(sorted(p.name for p in (SOURCE / "containers").glob("*.conf")), ["chatgpt.conf", "code.conf", "foot.conf"])
         tools = (SOURCE / "link/install-pkg-tools").read_text()
         self.assertIn("locachy_apps.py", tools)
 

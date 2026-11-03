@@ -3,7 +3,7 @@
 [English](APPS.md)
 
 容器可选的预设（Edge、Firefox、微信等）放在单独的仓库 `locachy-apps` 中，不在本源码里。
-本仓库只保留宿主程序的预设（`src/containers/`：`foot.conf`、`code.conf`，`host="1"`）：
+本仓库只保留宿主程序的预设（`src/containers/`：`foot.conf`、`code.conf`、`chatgpt.conf`，`host="1"`）：
 它们的软件包属于宿主清单，`code.conf` 运行的是系统自带的包装脚本。应用预设绝不能是宿主程序；
 应用仓库里出现 `host=` 会使整个目录被拒绝。
 
