@@ -417,6 +417,18 @@ for conf in /etc/locachy/containers/*.conf; do
         migrate_conf "$conf"
     fi
 done
+# fre:ac started without X11 (process 1 once started a program before
+# Xwayland was there, and locachy-app started it anyway) saved its window
+# size from a screen of none, negative, with which it never starts again:
+# those values go, and it takes its defaults.
+for conf in /etc/locachy/containers/*.conf; do
+    [ -f "$conf" ] && grep -qx 'package="freac"' "$conf" || continue
+    xml=/var/lib/locachy/containers/$(basename "$conf" .conf)/data/.config/freac/freac.xml
+    if [ -f "$xml" ] && grep -Eq '<value name="Window(Size|Pos)[XY]">-' "$xml"; then
+        sed -i -E '/<value name="Window(Size|Pos)[XY]">-/d' "$xml"
+        echo "make: $xml: the window size a start without X11 saved is dropped"
+    fi
+done
 install -m 644 "$src/base/rime/mode-labels.conf" /usr/local/share/locachy/ime-mode-labels.conf
 # The interface's translations: each catalog of po/LINGUAS,
 # checked and compiled, and its locale generated as the Arch Wiki's Locale

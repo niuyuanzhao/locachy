@@ -53,8 +53,10 @@ application's.
 ## Containers
 
 `locachy-app` reads the record and validates it (`:N`) without evaluating it as
-shell code; if the display's socket is not there (Xwayland restarting), the
-program starts without X11 and says so. Only a program whose configuration
+shell code. A program that asks for X11 is not started without it (no record,
+an empty one, or the display's socket not there while Xwayland starts
+again): it says so and exits, and nothing of the program runs, so it saves
+nothing from a start without its display. Only a program whose configuration
 says `x11="1"` gets X11 (see the security boundary below); any other stays
 Wayland only, with no `DISPLAY` and no X11 socket. Such a container gets
 `DISPLAY` and a read-only bind mount of that display's socket in its private

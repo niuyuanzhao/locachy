@@ -747,19 +747,17 @@ shared_wayland=${LOCACHY_WAYLAND_DISPLAY:-locachy-0}
 [ -S "$RUNTIME_DIR/$shared_wayland" ] || die "Wayland socket is not available: $RUNTIME_DIR/$shared_wayland"
 # The shared Xwayland display, for a program whose configuration asks for it
 # (x11="1"), as labwc's xinitrc published it once the user may connect; never
-# inherited from a caller or guessed as :0. None: Wayland only.
+# inherited from a caller or guessed as :0. None: Wayland only. A program
+# that asks for it does not start without it: nothing of it runs, so nothing
+# it would save from a start without its display (fre:ac its window size,
+# from a screen of none) is left behind.
 x11_display=
 if [ "$(conf_value "$name" x11)" = 1 ]; then
     [ ! -r "$RUNTIME_DIR/locachy-x11-display" ] || IFS= read -r x11_display <"$RUNTIME_DIR/locachy-x11-display" || true
-    if [ -z "$x11_display" ]; then
-        printf 'locachy-app: %s: there is no shared X11 display; it starts without X11\n' "$name" >&2
-    else
-        [[ "$x11_display" =~ ^:[0-9]{1,5}$ ]] || die 'invalid shared X11 display'
-        if [ ! -S "/tmp/.X11-unix/X${x11_display#:}" ]; then
-            printf 'locachy-app: %s: the shared X11 socket is not there; it starts without X11\n' "$name" >&2
-            x11_display=
-        fi
-    fi
+    [ -n "$x11_display" ] || die "$name: it asks for X11 (x11=\"1\") and there is no shared X11 display: not started"
+    [[ "$x11_display" =~ ^:[0-9]{1,5}$ ]] || die 'invalid shared X11 display'
+    [ -S "/tmp/.X11-unix/X${x11_display#:}" ] ||
+        die "$name: it asks for X11 (x11=\"1\") and the shared X11 socket is not there (Xwayland starting again): not started"
 fi
 [ -x "$APP_INIT" ] || die "container reaper is not installed: $APP_INIT"
 for tool in unshare chroot mount mkfifo; do

@@ -14,7 +14,8 @@
 #      again) uid 1000 is still admitted
 #   3. a container with x11="1": DISPLAY, that one socket, an XCB window from its own
 #      network namespace (where the abstract socket is not reachable),
-#      freeze, resume, stop; host-program mode; one without x11="1" has none
+#      freeze, resume, stop; host-program mode; one without x11="1" has none;
+#      one with x11="1" and no X11 display is not started
 #   4. X11 clipboard: a container X11 copy reaches the host clipboard and
 #      another X11 client; frozen and stopped, its copy stays pasteable; an
 #      X11 copy between a freeze capture and its freezer write (the window
@@ -216,9 +217,11 @@ app start x11host $out/client >$out/host.log 2>&1
 check "a host program gets the same display" "grep -q \"connected $display uid=1000\" $out/host.log"
 printf ":99\n" >/run/user/0/locachy-x11-display # its socket is not there
 app start x11none $out/client >$out/none.log 2>&1
+: >/run/user/0/locachy-x11-display # X11 unavailable
+app start x11none $out/client >$out/empty.log 2>&1
 printf "%s\n" "$display" >/run/user/0/locachy-x11-display
-check "a record without its socket: the container still starts, without DISPLAY" \
-    "grep -q \"starts without X11\" $out/none.log && grep -q \"DISPLAY=unset\" $out/none.log"
+check "x11=\"1\" with a record without its socket, or an empty one: not started, said why; nothing of it ran" \
+    "grep -q \"socket is not there.*not started\" $out/none.log && grep -q \"no shared X11 display: not started\" $out/empty.log && ! grep -q \"DISPLAY=\" $out/none.log $out/empty.log"
 app start x11off $out/client >$out/off.log 2>&1 # its configuration does not ask for X11
 check "a container without x11=\"1\": no DISPLAY, Wayland only" \
     "grep -q \"DISPLAY=unset\" $out/off.log && ! grep -q \"without X11\" $out/off.log"
