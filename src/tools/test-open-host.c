@@ -56,8 +56,9 @@ int main(void)
         folders(dir);
         assert(mount("tmpfs", dirs[i], "tmpfs", 0, "mode=0755") == 0);
     }
-    put(CONTAINERS_CONF "/editor.conf", "host=\"1\"\ndesktop=\"ed.desktop ../evil.desktop a/b.desktop ed-url.desktop\"\n");
-    put(CONTAINERS_CONF "/box.conf", "package=\"box\"\n");
+    put(CONTAINERS_CONF "/editor.conf", "host=\"1\"\ndesktop=\"ed.desktop ../evil.desktop a/b.desktop ed-url.desktop\"\n"
+                                        "command=\"/usr/bin/ed\"\n");
+    put(CONTAINERS_CONF "/box.conf", "package=\"box\"\ncommand=\"/usr/bin/boxer\"\n");
     put("/usr/share/applications/ed.desktop",
         "[Desktop Entry]\nName=Editor\nMimeType=text/plain;\nStartupWMClass=ed-wm\n");
     put("/usr/share/applications/ed-url.desktop", "[Desktop Entry]\nName=Editor URL\nMimeType=x-scheme-handler/ed;\n");
@@ -69,8 +70,9 @@ int main(void)
     int n = open_window_ids("editor", ids, 8);
     assert(n == 3 && !strcmp(ids[0], "ed") && !strcmp(ids[1], "ed-wm") && !strcmp(ids[2], "ed-url"));
     n = open_window_ids("box", ids, 8);
-    assert(n == 1 && !strcmp(ids[0], "box"));
+    assert(n == 2 && !strcmp(ids[0], "box") && !strcmp(ids[1], "boxer"));
     puts("PASS a host program's windows: the .desktop files it names, not every program's");
+    puts("PASS a container's windows: its command's name too (a toolkit's app id), once");
 
     char names[8][OPEN_NAME], label[128];
     n = open_candidates("text/plain", names, 8);

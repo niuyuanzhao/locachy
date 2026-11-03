@@ -435,7 +435,10 @@ void open_user_dirs(char *home, size_t hsize, char *dirs, size_t dsize);
 int open_candidates(const char *type, char names[][OPEN_NAME], int max);
 int open_containers(char names[][OPEN_NAME], int max);
 /* The app ids of container name's windows: its .desktop files' names and
- * StartupWMClass values, as desktop shells match windows to programs. */
+ * StartupWMClass values, as desktop shells match windows to programs, and
+ * its command's base name (a toolkit's app id when the program sets none).
+ * A window none of these names (a dialog of another program, as a portal's
+ * file chooser) is its parent window's (wlr-foreign-toplevel's parent). */
 #define OPEN_WINDOW_ID 128
 int open_window_ids(const char *name, char ids[][OPEN_WINDOW_ID], int max);
 void open_label(const char *name, const char *type, char *label, size_t size);

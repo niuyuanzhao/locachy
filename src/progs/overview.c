@@ -123,6 +123,7 @@ struct listed {               /* a window as ext-foreign-toplevel-list has it */
 
 struct window {
     struct zwlr_foreign_toplevel_handle_v1 *handle;
+    struct zwlr_foreign_toplevel_handle_v1 *parent; /* the window it is a dialog of */
     char title[128], app_id[64], container[OPEN_NAME];
     int minimized, activated;
     struct wl_output *outputs[4];
@@ -638,6 +639,11 @@ static void win_closed(void *data, struct zwlr_foreign_toplevel_handle_v1 *h)
             break;
         }
     }
+    for (struct window *o = windows; o; o = o->next) {
+        if (o->parent == h) {
+            o->parent = NULL; /* its handle is gone with it */
+        }
+    }
     cap_free(&w->cap);
     free(w->thumb.px);
     free(w->scaled.px);
@@ -651,7 +657,29 @@ static void win_closed(void *data, struct zwlr_foreign_toplevel_handle_v1 *h)
 
 static void win_parent(void *data, struct zwlr_foreign_toplevel_handle_v1 *h,
                        struct zwlr_foreign_toplevel_handle_v1 *p)
-{ (void)data; (void)h; (void)p; }
+{
+    struct window *w = data;
+    (void)h;
+    w->parent = p;
+}
+
+/* The container of w: the one its app id names, else its parent window's
+ * (a dialog another program draws for it, as a portal's file chooser);
+ * "" if none. */
+static const char *win_container(const struct window *w)
+{
+    for (int depth = 0; w && depth < 8; depth++) {
+        if (w->container[0]) {
+            return w->container;
+        }
+        const struct window *parent = NULL;
+        for (const struct window *o = windows; o && w->parent && !parent; o = o->next) {
+            parent = o->handle == w->parent ? o : NULL;
+        }
+        w = parent;
+    }
+    return "";
+}
 
 static const struct zwlr_foreign_toplevel_handle_v1_listener win_listener = {
     win_title, win_app_id, win_output_enter, win_output_leave, win_state, win_done, win_closed, win_parent,
@@ -748,7 +776,7 @@ static int window_on(const struct window *w, const struct output *o)
 static int matches(const struct window *w)
 {
     return !search[0] || strcasestr(w->title, search) || strcasestr(w->app_id, search) ||
-           strcasestr(w->container, search);
+           strcasestr(win_container(w), search);
 }
 
 /* The windows of this screen that the search leaves, in order. */
@@ -1047,7 +1075,7 @@ static void draw(struct output *o)
                     }
                 }
             }
-            const char *name = w->container[0] ? w->container : w->app_id[0] ? w->app_id : "?";
+            const char *name = win_container(w)[0] ? win_container(w) : w->app_id[0] ? w->app_id : "?";
             int ly = w->y + w->h - ch / 2;
             label(px, W, H, w->x + w->w / 2, ly, w->w + gap, name, bold, ch, 0xFF000000u, HIGHLIGHT);
             label(px, W, H, w->x + w->w / 2, ly + ch + ch / 2, w->w + gap, w->title[0] ? w->title : name, font, ch,

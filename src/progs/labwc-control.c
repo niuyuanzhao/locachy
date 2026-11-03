@@ -24,7 +24,10 @@
  *   next, prev       asked of process 1 through locachy-seat: "ok WHAT"
  * A window belongs to container NAME when its app_id names a .desktop file
  * that NAME installed (or that file's StartupWMClass), the way desktop shells
- * match windows to applications.
+ * match windows to applications, or its command (a toolkit's app id when a
+ * program sets none); a window whose app_id no container has is its parent
+ * window's (wlr-foreign-toplevel's parent: a dialog another program draws
+ * for it, as a portal's file chooser).
  *
  * Screens: MONITORS_CONF, written by settings, is applied at start, on
  * request, whenever it changes (settings writes it while the shared display
@@ -89,6 +92,7 @@ static char container_path[108], control_path[108], bar_path[108];
 
 struct window {
     struct zwlr_foreign_toplevel_handle_v1 *handle;
+    struct zwlr_foreign_toplevel_handle_v1 *parent; /* the window it is a dialog of */
     char app_id[128];
     int minimized, activated, announced;
     struct window *next;
@@ -153,6 +157,11 @@ static void window_closed(void *data, struct zwlr_foreign_toplevel_handle_v1 *h)
             break;
         }
     }
+    for (struct window *o = windows; o; o = o->next) {
+        if (o->parent == h) {
+            o->parent = NULL; /* its handle is gone with it */
+        }
+    }
     zwlr_foreign_toplevel_handle_v1_destroy(h);
     free(w);
 }
@@ -160,9 +169,62 @@ static void window_closed(void *data, struct zwlr_foreign_toplevel_handle_v1 *h)
 static void window_parent(void *data, struct zwlr_foreign_toplevel_handle_v1 *h,
                           struct zwlr_foreign_toplevel_handle_v1 *parent)
 {
-    (void)data;
+    struct window *w = data;
     (void)h;
-    (void)parent;
+    w->parent = parent;
+}
+
+static const struct window *parent_of(const struct window *w)
+{
+    for (const struct window *o = windows; o && w->parent; o = o->next) {
+        if (o->handle == w->parent) {
+            return o;
+        }
+    }
+    return NULL;
+}
+
+/* Does an app id of container name (open_window_ids) name window w's? */
+static int named_by(const struct window *w, const char *name)
+{
+    char ids[MAX_IDS][OPEN_WINDOW_ID];
+    int nids = open_window_ids(name, ids, MAX_IDS);
+    for (int i = 0; i < nids; i++) {
+        if (strcasecmp(w->app_id, ids[i]) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* The container of window w: the first whose app ids name its own, else its
+ * parent window's (a dialog another program draws for it, as a portal's
+ * file chooser); "" when none. */
+static void window_container(const struct window *w, char *name, size_t size)
+{
+    char names[64][OPEN_NAME];
+    int n = open_containers(names, 64);
+    name[0] = '\0';
+    for (int depth = 0; w && depth < 8; depth++, w = parent_of(w)) {
+        for (int k = 0; k < n; k++) {
+            if (named_by(w, names[k])) {
+                snprintf(name, size, "%.63s", names[k]);
+                return;
+            }
+        }
+    }
+}
+
+/* Is window w container name's: its app id one of name's, or (an app id no
+ * container has) its parent window name's? */
+static int window_of(const struct window *w, const char *name)
+{
+    char owner[OPEN_NAME];
+    if (named_by(w, name)) {
+        return 1;
+    }
+    window_container(w, owner, sizeof owner);
+    return strcmp(owner, name) == 0;
 }
 
 static const struct zwlr_foreign_toplevel_handle_v1_listener window_listener = {
@@ -260,15 +322,12 @@ static void show(const char *name, char *reply, size_t size, int bar)
     int nids = open_window_ids(name, ids, MAX_IDS);
     int shown = 0;
     for (struct window *w = windows; w; w = w->next) {
-        for (int i = 0; i < nids; i++) {
-            if (strcasecmp(w->app_id, ids[i]) == 0) {
-                if (w->minimized) {
-                    zwlr_foreign_toplevel_handle_v1_unset_minimized(w->handle);
-                }
-                zwlr_foreign_toplevel_handle_v1_activate(w->handle, seat);
-                shown++;
-                break;
+        if (window_of(w, name)) {
+            if (w->minimized) {
+                zwlr_foreign_toplevel_handle_v1_unset_minimized(w->handle);
             }
+            zwlr_foreign_toplevel_handle_v1_activate(w->handle, seat);
+            shown++;
         }
     }
     wl_display_flush(display);
@@ -282,7 +341,6 @@ static void show(const char *name, char *reply, size_t size, int bar)
 
 static void close_windows(const char *name, char *reply, size_t size)
 {
-    char ids[MAX_IDS][OPEN_WINDOW_ID];
     if (!valid_name(name)) {
         snprintf(reply, size, "error invalid container name");
         return;
@@ -291,14 +349,11 @@ static void close_windows(const char *name, char *reply, size_t size)
         snprintf(reply, size, "ok closed 0");
         return;
     }
-    int nids = open_window_ids(name, ids, MAX_IDS), closed = 0;
+    int closed = 0;
     for (struct window *w = windows; w; w = w->next) {
-        for (int i = 0; i < nids; i++) {
-            if (strcasecmp(w->app_id, ids[i]) == 0) {
-                zwlr_foreign_toplevel_handle_v1_close(w->handle);
-                closed++;
-                break;
-            }
+        if (window_of(w, name)) {
+            zwlr_foreign_toplevel_handle_v1_close(w->handle);
+            closed++;
         }
     }
     wl_display_flush(display);
@@ -311,19 +366,11 @@ static void focused(char *reply, size_t size)
     while (w && !w->activated) {
         w = w->next;
     }
-    snprintf(reply, size, "ok");
-    char names[64][OPEN_NAME];
-    int n = w ? open_containers(names, 64) : 0;
-    for (int k = 0; k < n; k++) {
-        char ids[MAX_IDS][OPEN_WINDOW_ID];
-        int nids = open_window_ids(names[k], ids, MAX_IDS);
-        for (int i = 0; i < nids; i++) {
-            if (strcasecmp(w->app_id, ids[i]) == 0) {
-                snprintf(reply, size, "ok %.63s", names[k]);
-                return;
-            }
-        }
+    char name[OPEN_NAME] = "";
+    if (w) {
+        window_container(w, name, sizeof name);
     }
+    snprintf(reply, size, name[0] ? "ok %.63s" : "ok", name);
 }
 
 /* Screens */

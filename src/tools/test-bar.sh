@@ -13,6 +13,9 @@
 #      list; one goes by itself, a click on the other runs its default action,
 #      brings the container's window and clears the mark. It writes files
 #      named .locachy-bar-test-notify* in the shared Documents and removes them.
+#   4. whose a window is (labwc-control): a dialog of an app id no container
+#      has is its parent window's; an app id that is a container's command
+#      name is that container's; any other is no container's
 set -u
 src=$(cd "$(dirname "$0")/.." && pwd)
 out=/var/tmp/locachy-bar-test
@@ -253,6 +256,36 @@ shot 1.2
 check "the container s window has the focus ($focused), the mark is gone ($(buttons))" \
     "[ \"$focused\" = \"ok demo\" ] && ! buttons | grep -q attn && [ \"\$(python3 $out/box.py $out/shot-HEADLESS-1.ppm 182848)\" = none ]"
 
+pkill -f "$out/test-window"
+
+echo "== 4. a window no container names: its parent window s; one named after a command: that container s"
+ask() { python3 -c "
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+s.connect(\"/run/user/0/locachy-control.sock\")
+s.send(sys.argv[1].encode())
+print(s.recv(256).decode())" "$1"; }
+sleep 0.5
+$out/test-window --title "First: with a dialog" locachy-test-window xdg-desktop-portal-gtk >/dev/null 2>&1 &
+sleep 1.5
+shown=$(ask "show demo")
+focused=$(ask focused)
+check "a dialog of another app id (a portal s file chooser) is its parent s: show demo finds both ($shown), the focus is demo s ($focused)" \
+    "[ \"$shown\" = \"ok shown 2\" ] && [ \"$focused\" = \"ok demo\" ]"
+pkill -f "$out/test-window"
+echo "command=\"/usr/bin/true\"" >/etc/locachy/containers/demo.conf # 3. saved its own
+sleep 0.5
+$out/test-window --title "First: a toolkit app id" true >/dev/null 2>&1 &
+sleep 1.5
+focused=$(ask focused)
+check "a window whose app id is its container s command name (a GTK dialog with no app id of its own) is that container s ($focused)" \
+    "[ \"$focused\" = \"ok demo\" ]"
+pkill -f "$out/test-window"
+sleep 0.5
+$out/test-window --title "First: nobody" nobody-at-all >/dev/null 2>&1 &
+sleep 1.5
+focused=$(ask focused)
+check "a window no container names and with no parent is no container s ($focused)" "[ \"$focused\" = ok ]"
 pkill -f "$out/test-window"
 LOCACHY_WAYLAND_DISPLAY=locachy-0 locachy-app stop demo >/dev/null 2>&1
 rmdir /sys/fs/cgroup/app_demo 2>/dev/null

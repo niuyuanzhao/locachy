@@ -211,7 +211,7 @@ static int lists(const char *mimetypes, const char *type)
 
 struct program_conf {
     int host;
-    char desktop[256];
+    char desktop[256], command[256];
 };
 
 static void on_program(const char *key, const char *value, void *arg)
@@ -221,6 +221,8 @@ static void on_program(const char *key, const char *value, void *arg)
         c->host = strcmp(value, "1") == 0;
     } else if (strcmp(key, "desktop") == 0) {
         snprintf(c->desktop, sizeof c->desktop, "%s", value);
+    } else if (strcmp(key, "command") == 0) {
+        snprintf(c->command, sizeof c->command, "%s", value);
     }
 }
 
@@ -452,6 +454,24 @@ int open_window_ids(const char *name, char ids[][OPEN_WINDOW_ID], int max)
             }
         }
         fclose(in);
+    }
+    /* Its command's name: the app id GTK and Qt give a window when the
+     * program sets none (g_get_prgname, QCoreApplication::applicationName:
+     * argv[0]'s base name), as its dialogs have. */
+    struct program_conf c;
+    const char *slash;
+    if (!program_name(name) && n < max) {
+        program_conf(name, &c);
+        slash = strrchr(c.command, '/');
+        if (slash && slash[1]) {
+            int seen = 0;
+            for (int i = 0; i < n && !seen; i++) {
+                seen = strcmp(ids[i], slash + 1) == 0;
+            }
+            if (!seen) {
+                snprintf(ids[n++], OPEN_WINDOW_ID, "%.127s", slash + 1);
+            }
+        }
     }
     return n;
 }

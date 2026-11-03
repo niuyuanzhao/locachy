@@ -164,6 +164,7 @@ struct window {
     struct zwlr_foreign_toplevel_handle_v1 *handle;
     char title[128], app_id[64];
     char container[OPEN_NAME];  /* whose .desktop names its app id; "" if none */
+    struct zwlr_foreign_toplevel_handle_v1 *parent; /* the window it is a dialog of */
     int activated, minimized;
     double focused_at;          /* when it last had the focus */
     struct wl_output *outputs[WINDOW_OUTPUTS], *last;
@@ -172,6 +173,24 @@ struct window {
 };
 static struct zwlr_foreign_toplevel_manager_v1 *toplevel_mgr;
 static struct window *windows;
+
+/* The container of w: the one its app id names, else its parent window's
+ * (a dialog another program draws for it, as a portal's file chooser);
+ * "" if none. */
+static const char *win_container(const struct window *w)
+{
+    for (int depth = 0; w && depth < 8; depth++) {
+        if (w->container[0]) {
+            return w->container;
+        }
+        const struct window *parent = NULL;
+        for (const struct window *o = windows; o && w->parent && !parent; o = o->next) {
+            parent = o->handle == w->parent ? o : NULL;
+        }
+        w = parent;
+    }
+    return "";
+}
 
 static void win_title(void *data, struct zwlr_foreign_toplevel_handle_v1 *h, const char *title)
 {
@@ -265,6 +284,11 @@ static void win_closed(void *data, struct zwlr_foreign_toplevel_handle_v1 *h)
             b->focus_seen = NULL;
         }
     }
+    for (struct window *o = windows; o; o = o->next) {
+        if (o->parent == h) {
+            o->parent = NULL; /* its handle is gone with it */
+        }
+    }
     zwlr_foreign_toplevel_handle_v1_destroy(h);
     free(w);
     bars_dirty = 1;
@@ -273,9 +297,9 @@ static void win_closed(void *data, struct zwlr_foreign_toplevel_handle_v1 *h)
 static void win_parent(void *data, struct zwlr_foreign_toplevel_handle_v1 *h,
                        struct zwlr_foreign_toplevel_handle_v1 *parent)
 {
-    (void)data;
+    struct window *w = data;
     (void)h;
-    (void)parent;
+    w->parent = parent;
 }
 
 static const struct zwlr_foreign_toplevel_handle_v1_listener win_listener = {
@@ -920,11 +944,11 @@ static int list_entries(const struct bar *b, struct entry *e, int max)
         memset(x, 0, sizeof *x);
         x->win = w;
         x->top = w->title[0] ? w->title : _("(untitled)");
-        const char *owner = w->container[0] ? w->container : w->app_id;
+        const char *container = win_container(w), *owner = container[0] ? container : w->app_id;
         /* TRANSLATORS: %s is the container name or app id; keep short: bar button. */
         snprintf(x->second, sizeof x->second, w->minimized ? _("%s, minimized") : "%s", owner);
         x->bottom = x->second;
-        struct tray *t = w->container[0] ? tray_find(w->container) : NULL;
+        struct tray *t = container[0] ? tray_find(container) : NULL;
         x->bg = w->activated && !w->minimized ? WIN_ON : t && t->notified ? WIN_ATTN : WIN_BG;
     }
     for (struct tray *t = trays; t && n < max; t = t->next) {
@@ -1059,8 +1083,8 @@ static void render_bars(void)
     const char *focus = "";
     unsigned long long ram;
     for (struct window *w = windows; w; w = w->next) {
-        if (w->activated && !w->minimized && w->container[0]) {
-            focus = w->container;
+        if (w->activated && !w->minimized && win_container(w)[0]) {
+            focus = win_container(w);
         }
     }
     struct tray *seen = focus[0] ? tray_find(focus) : NULL;
@@ -3170,7 +3194,7 @@ static void show_container(const char *name)
 {
     struct window *best = NULL;
     for (struct window *w = windows; w; w = w->next) {
-        if (strcmp(w->container, name) == 0 && (!best || w->focused_at > best->focused_at)) {
+        if (strcmp(win_container(w), name) == 0 && (!best || w->focused_at > best->focused_at)) {
             best = w;
         }
     }

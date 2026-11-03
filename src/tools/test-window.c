@@ -1,5 +1,7 @@
 /* A C Wayland test client that can minimize its only window: test-window
- * [--minimize | --title TITLE [APP_ID]]. */
+ * [--minimize | --title TITLE [APP_ID [DIALOG_APP_ID]]]. With DIALOG_APP_ID,
+ * a second window opens after the first, its child (xdg_toplevel.set_parent),
+ * as a dialog another program draws for it (a portal's file chooser). */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -36,6 +38,44 @@ static void configure(void *data, struct xdg_surface *xdg, uint32_t serial)
         configured = 1;
     }
 }
+
+/* The dialog: its surface, buffer and whether it was drawn, in data. */
+struct dialog {
+    struct wl_surface *surface;
+    struct wl_buffer *buffer;
+    int configured;
+};
+
+static void dialog_configure(void *data, struct xdg_surface *xdg, uint32_t serial)
+{
+    struct dialog *d = data;
+    xdg_surface_ack_configure(xdg, serial);
+    if (!d->configured) {
+        wl_surface_attach(d->surface, d->buffer, 0, 0);
+        wl_surface_damage(d->surface, 0, 0, 160, 100);
+        wl_surface_commit(d->surface);
+        d->configured = 1;
+    }
+}
+
+static void dialog_top_configure(void *data, struct xdg_toplevel *top, int32_t width,
+                                 int32_t height, struct wl_array *states)
+{
+    (void)data;
+    (void)top;
+    (void)width;
+    (void)height;
+    (void)states;
+}
+
+static void dialog_close(void *data, struct xdg_toplevel *top)
+{
+    (void)data;
+    (void)top;
+}
+
+static const struct xdg_surface_listener dialog_listener = { dialog_configure };
+static const struct xdg_toplevel_listener dialog_top = { .configure = dialog_top_configure, .close = dialog_close };
 
 static void global(void *data, struct wl_registry *registry, uint32_t name,
                    const char *interface, uint32_t version)
@@ -116,6 +156,8 @@ int main(int argc, char **argv)
     }
     struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, 160 * 100 * 4);
     buffer = wl_shm_pool_create_buffer(pool, 0, 160, 100, 160 * 4, WL_SHM_FORMAT_ARGB8888);
+    struct dialog dialog = { 0 };
+    dialog.buffer = wl_shm_pool_create_buffer(pool, 0, 160, 100, 160 * 4, WL_SHM_FORMAT_ARGB8888);
     wl_shm_pool_destroy(pool);
     close(fd);
     surface = wl_compositor_create_surface(compositor);
@@ -138,6 +180,22 @@ int main(int argc, char **argv)
     if (argc > 1 && strcmp(argv[1], "--minimize") == 0) {
         xdg_toplevel_set_minimized(toplevel);
         wl_display_roundtrip(display);
+    }
+    if (argc > 4 && strcmp(argv[1], "--title") == 0) {
+        dialog.surface = wl_compositor_create_surface(compositor);
+        struct xdg_surface *xdg = xdg_wm_base_get_xdg_surface(wm, dialog.surface);
+        xdg_surface_add_listener(xdg, &dialog_listener, &dialog);
+        struct xdg_toplevel *top = xdg_surface_get_toplevel(xdg);
+        xdg_toplevel_add_listener(top, &dialog_top, &dialog);
+        xdg_toplevel_set_parent(top, toplevel);
+        xdg_toplevel_set_title(top, "Dialog");
+        xdg_toplevel_set_app_id(top, argv[4]);
+        wl_surface_commit(dialog.surface);
+        for (int i = 0; i < 4; i++) {
+            if (wl_display_roundtrip(display) < 0) {
+                return 4;
+            }
+        }
     }
     while (wl_display_dispatch(display) >= 0) {
     }
