@@ -1119,7 +1119,12 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
     export XDG_RUNTIME_DIR="/run/user/$uid"
     export WAYLAND_DISPLAY="$display"
     unset WAYLAND_SOCKET DISPLAY XAUTHORITY SEATD_SOCK
-    [ -z "$x11_display" ] || export DISPLAY="$x11_display"
+    # A program given X11 keeps its GTK on X11 too (GDK_BACKEND, gtk3 and
+    # gtk4): labwc scales X11 windows by the screen scale itself, while GTK
+    # on Wayland reports that scale (rounded up) to a program that then draws
+    # its X11 windows that much larger again. fre:ac (smooth asks
+    # gdk_screen_get_monitor_scale_factor) was three times too large at 1.5.
+    [ -z "$x11_display" ] || export DISPLAY="$x11_display" GDK_BACKEND=x11
     export HOME="$uhome"
     export XDG_CONFIG_HOME="$uhome/.config"
     export XDG_CACHE_HOME="$uhome/.cache"

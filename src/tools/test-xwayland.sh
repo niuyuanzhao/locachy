@@ -199,6 +199,7 @@ check "a container XCB window as uid 1000 on $display" "grep -q \"connected $dis
 pid=$(cut -d" " -f1 /run/locachy/apps/x11test/reaper.pid 2>/dev/null)
 tr "\0" "\n" </proc/$(pgrep -f "^$out/client --hold" | head -n 1)/environ >$out/environ 2>/dev/null
 check "its DISPLAY is the shared one, no XAUTHORITY" "grep -qx DISPLAY=$display $out/environ && ! grep -q ^XAUTHORITY= $out/environ"
+check "its GTK on X11 too (GDK_BACKEND=x11)" "grep -qx GDK_BACKEND=x11 $out/environ"
 check "its /tmp/.X11-unix has only that socket" \
     "[ \"\$(timeout 5 nsenter --target $pid --mount --root -- find /tmp/.X11-unix -mindepth 1 -maxdepth 1 -printf \"%f\\n\")\" = X\${display#:} ]"
 check "the abstract socket: reachable in the host network namespace, not in the container one" \

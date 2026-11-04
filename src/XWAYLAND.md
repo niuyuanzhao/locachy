@@ -62,7 +62,14 @@ Wayland only, with no `DISPLAY` and no X11 socket. Such a container gets
 `DISPLAY` and a read-only bind mount of that display's socket in its private
 `/tmp/.X11-unix`; nothing else of the host `/tmp`, no other display, no TCP
 access, no `XAUTHORITY`. A host program (`host="1"`) with `x11="1"` gets the
-same `DISPLAY`. Applications keep their own managed process trees and their
+same `DISPLAY`. Such a program also gets `GDK_BACKEND=x11`, so that its GTK
+dialogs and any scale it asks GTK for belong to X11 as its windows do: labwc
+scales X11 windows by the screen scale itself, and GTK on Wayland reports
+that scale (rounded up). Measured at scale 1.5: fre:ac (smooth asks
+`gdk_screen_get_monitor_scale_factor`) drew its X11 windows twice as large
+before labwc scaled them, three times too large in all, its widgets over one
+another; with `GDK_BACKEND=x11` it has its normal size, and its GTK file
+dialog opens as an X11 window. Applications keep their own managed process trees and their
 freeze and stop controls.
 
 ## Security boundary

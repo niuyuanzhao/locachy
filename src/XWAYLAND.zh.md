@@ -50,7 +50,12 @@ X11：显示的 socket 比 X11 先出现。Xwayland 是 labwc
 `DISPLAY`，也没有 X11 套接字。这样的容器收到 `DISPLAY`，并在自己私有的
 `/tmp/.X11-unix` 中只读绑定这个显示的套接字；不接收宿主 `/tmp` 的其他内容、其他显示、
 TCP 访问或 `XAUTHORITY`。写了 `x11="1"` 的宿主程序（`host="1"`）收到相同的
-`DISPLAY`。应用仍各自拥有受管理的进程树以及冻结、关闭控制。
+`DISPLAY`。这样的程序还会得到 `GDK_BACKEND=x11`，让它的 GTK 对话框以及它向 GTK
+询问的缩放与它的窗口一样属于 X11：labwc 自己按屏幕缩放比例放大 X11 窗口，而 Wayland
+上的 GTK 报告的正是这个比例（向上取整）。在 1.5 倍缩放下实测：fre:ac（smooth 调用
+`gdk_screen_get_monitor_scale_factor`）先把自己的 X11 窗口画大两倍，再被 labwc
+放大，总共大了三倍，控件互相重叠；设置 `GDK_BACKEND=x11` 后大小正常，它的 GTK
+文件对话框作为 X11 窗口打开。应用仍各自拥有受管理的进程树以及冻结、关闭控制。
 
 ## 安全边界
 
