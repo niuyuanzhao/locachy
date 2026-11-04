@@ -76,8 +76,19 @@ int main(void)
     assert(apps_action("start", "broken", why, sizeof why) == 0);
     tick_for(300);
     contains("broken\tfailed\t");
+    /* The last line is the program's own: the status, and where to look. */
+    contains("\tapplication exited with status 23; inspect broken.log\n");
     assert(apps_action("stop", "broken", why, sizeof why) == 0);
     contains("broken\tclosed\t");
+    /* locachy-app refused the start (die): its reason is the failure, for
+     * home to show. */
+    assert(apps_action("start", "refused", why, sizeof why) == 0);
+    tick_for(300);
+    contains("refused\tfailed\t");
+    contains("\trefused: it asks for X11 (x11=\"1\") and there is no shared X11 display: not started\n");
+    puts("PASS a refused start: the reason locachy-app gave is the failure home shows");
+    assert(apps_action("stop", "refused", why, sizeof why) == 0);
+    contains("refused\tclosed\t");
     /* A container whose configuration has gone is forgotten (APP_CONF/gamma.conf). */
     contains("gamma\tclosed\t");
     assert(unlink(APP_CONF "/gamma.conf") == 0);

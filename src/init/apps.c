@@ -560,6 +560,45 @@ int apps_open(const char *name, const char *target, char *why, size_t size)
     return 0;
 }
 
+/* Why locachy-app ended: the last line of its log, when it is one of its own
+ * ("locachy-app: REASON", as die writes it before exiting), into out; a line
+ * the program wrote after it says nothing about the start. Only the end of
+ * the log is read. Returns 1 if there was such a line. */
+static int launcher_reason(const struct app *app, char *out, size_t size)
+{
+    static const char prefix[] = "locachy-app: ";
+    char path[192], text[2048];
+    snprintf(path, sizeof path, APP_RUN "/%s.log", app->name);
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        return 0;
+    }
+    struct stat st;
+    off_t from = fstat(fd, &st) == 0 && st.st_size > (off_t)sizeof text - 1 ?
+                 st.st_size - (off_t)(sizeof text - 1) : 0;
+    ssize_t n = pread(fd, text, sizeof text - 1, from);
+    close(fd);
+    if (n <= 0) {
+        return 0;
+    }
+    text[n] = '\0';
+    while (n > 0 && (text[n - 1] == '\n' || text[n - 1] == '\r')) {
+        text[--n] = '\0';
+    }
+    char *line = strrchr(text, '\n');
+    line = line ? line + 1 : (from == 0 ? text : NULL); /* a cut first line is no line */
+    if (!line || strncmp(line, prefix, sizeof prefix - 1) != 0 || !line[sizeof prefix - 1]) {
+        return 0;
+    }
+    snprintf(out, size, "%s", line + sizeof prefix - 1);
+    for (char *p = out; *p; p++) { /* apps_list rows are tab separated lines */
+        if ((unsigned char)*p < 32 || (unsigned char)*p == 127) {
+            *p = ' ';
+        }
+    }
+    return 1;
+}
+
 int apps_reap(pid_t pid, int status)
 {
     for (int i = 0; i < count; i++) {
@@ -579,9 +618,11 @@ int apps_reap(pid_t pid, int status)
             return 1;
         }
         if (code != 0) {
-            char error[160];
-            snprintf(error, sizeof error, "%s exited with status %d; inspect %.63s.log",
-                     launcher ? "application" : "container operation", code, app->name);
+            char error[sizeof app->error];
+            if (!launcher_reason(app, error, sizeof error)) {
+                snprintf(error, sizeof error, "%s exited with status %d; inspect %.63s.log",
+                         launcher ? "application" : "container operation", code, app->name);
+            }
             failure(app, error);
         } else if (!launcher) {
             if (strcmp(app->pending, "stopping") != 0) {

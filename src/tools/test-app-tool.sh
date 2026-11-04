@@ -5,7 +5,13 @@ root=/run/locachy-registry-test
 name=$2
 cg="$root/cgroup/app_$name"
 run() {
-    [ "$name" != broken ] || exit 23
+    # broken: the program fails, after a line of its own; refused: refused as
+    # locachy-app refuses a start (die), its reason the last line.
+    [ "$name" != broken ] || { echo "broken: some output of the program" >&2; exit 23; }
+    if [ "$name" = refused ]; then
+        printf 'locachy-app: %s\n' "$name: it asks for X11 (x11=\"1\") and there is no shared X11 display: not started" >&2
+        exit 1
+    fi
     printf 'populated 1\nfrozen 0\n' >"$cg/cgroup.events"
     printf '1048576\n' >"$cg/memory.current"
     printf '0\n' >"$cg/memory.swap.current"

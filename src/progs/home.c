@@ -59,6 +59,7 @@ static int napps;
 static char tasks[2048];
 static char last[512] = N_("Container actions stay here; state refreshes every 500 ms.");
 static int last_customized;
+static char opening[64]; /* the container home last asked to open, until it is not starting */
 static char action_error[512], list_error[160];
 static double refresh_at;
 static enum confirmation confirming;
@@ -283,6 +284,20 @@ static void load_apps(void)
     apps = next;
     app_data = data;
     napps = count;
+    /* An open home asked for that failed says so in its own line too, not
+     * "accepted"; the line below it gives the reason. */
+    for (int i = 0; opening[0] && i < napps; i++) {
+        if (strcmp(apps[i].name, opening) != 0) {
+            continue;
+        }
+        if (strcmp(apps[i].state, "failed") == 0) {
+            snprintf(last, sizeof last, _("open %s: error"), opening);
+            last_customized = 1;
+        }
+        if (strcmp(apps[i].state, "starting") != 0 && strcmp(apps[i].state, "opening") != 0) {
+            opening[0] = '\0';
+        }
+    }
     list_error[0] = '\0';
     if (invalid) {
         snprintf(list_error, sizeof list_error,
@@ -904,6 +919,7 @@ int main(void)
             last_customized = 1;
             snprintf(last, sizeof last,
                      accepted ? _("open %s: accepted") : _("open %s: error"), apps[selected].name);
+            snprintf(opening, sizeof opening, "%s", accepted ? apps[selected].name : "");
             if (accepted) {
                 continue;
             }

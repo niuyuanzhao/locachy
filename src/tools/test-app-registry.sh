@@ -13,7 +13,7 @@ src=$1 out=$2
 mount -t tmpfs tmpfs /run
 root=/run/locachy-registry-test
 mkdir -p "$root/conf" "$root/runtime" "$root/cgroup"
-for n in alpha broken gamma; do
+for n in alpha broken gamma refused; do
     printf "package=\"x\"\ncommand=\"/bin/true\"\n" >"$root/conf/$n.conf"
     cg=$root/cgroup/app_$n
     mkdir -p "$cg"

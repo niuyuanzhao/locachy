@@ -2281,7 +2281,13 @@ static void service_start(struct service *s)
 
 /* Wait for every child that has ended: a program's status is kept for gone()
  * (which runs when its control socket closes); a service is started again 5 s
- * later; anything else (orphans, which become ours) is just let go. */
+ * later; anything else (orphans, which become ours) is just let go. An
+ * application's launcher or job that ended sets apps_reaped: the display
+ * follows the containers at once (sync_display), not at the next event, of
+ * which there may be none (a refused start left the empty shared display in
+ * front until something else woke process 1). */
+static int apps_reaped;
+
 static void reap(void)
 {
     int status;
@@ -2289,6 +2295,7 @@ static void reap(void)
 
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
         if (apps_reap(pid, status)) {
+            apps_reaped = 1;
             continue;
         }
         if (home.pid == pid) {
@@ -3567,6 +3574,9 @@ int main(void)
         if (apps_busy() && (timeout < 0 || timeout > 100)) {
             timeout = 100;
         }
+        if (apps_reaped) {
+            timeout = 0;
+        }
         int ready = poll(p, (nfds_t)n, timeout);
         if (refresh_display()) {
             continue; /* take_back consumed control messages: rebuild poll */
@@ -3574,8 +3584,11 @@ int main(void)
         apps_tick();
         /* What poll found ready may be stale after it (home's message read by
          * take_back, then waited for again while home is frozen): poll again. */
-        if ((ready == 0 || !apps_busy()) && sync_display()) {
-            continue;
+        if (ready == 0 || !apps_busy()) {
+            apps_reaped = 0;
+            if (sync_display()) {
+                continue;
+            }
         }
         for (size_t i = 0; i < nservices; i++) {
             if (services[i].pid == 0 && services[i].restart_at <= now_ms()) {
