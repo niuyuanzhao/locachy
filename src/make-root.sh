@@ -430,15 +430,10 @@ if [ "${WITH_IME:-1}" = 0 ]; then
     sed '/^librime$/d; /^words$/d; /^rime-/d' "$s/packages" >"$s/packages.no-ime"
     mv "$s/packages.no-ime" "$s/packages"
 fi
-case "${WITH_IME:-0}" in
-en)
-    printf '\n# Input method (English completion)\nlibrime\nwords\n' >>"$s/packages"
-    ;;
-1|zh)
-    printf '\n# Input method (Rime & Chinese dictionaries)\nlibrime\nwords\nrime-frost-git\nrime-pinyin-simp\nrime-wanxiang-gram-zh-hans\n' >>"$s/packages"
-    ;;
-esac
-python3 -I - "$s" "${LOCACHY_INSTALLER:-0}" "${WITH_FEATURES-__DEFAULT__}" "${WITH_EXTRA_PACKAGES:-}" <<'PY'
+# The input method (WITH_IME: en, zh) is a module of its own choice (modules.json's
+# "choice": "ime"); the Python below adds it, and what each chosen module requires.
+python3 -I - "$s" "${LOCACHY_INSTALLER:-0}" "${WITH_FEATURES-__DEFAULT__}" "${WITH_EXTRA_PACKAGES:-}" \
+    "${WITH_IME:-0}" <<'PY'
 import json, sys
 from pathlib import Path
 
@@ -446,16 +441,25 @@ src = Path(sys.argv[1])
 from_installer = sys.argv[2] == "1"
 raw_features = sys.argv[3]
 raw_extra = sys.argv[4]
+raw_ime = sys.argv[5]
 
 mods = json.loads((src / "link/modules.json").read_text(encoding="utf-8"))
+listed = {k: v for k, v in mods.items() if not v.get("choice")}
 if raw_features == "__DEFAULT__":
-    chosen = [] if from_installer else [k for k, v in mods.items() if v.get("default_standalone")]
+    chosen = [] if from_installer else [k for k, v in listed.items() if v.get("default_standalone")]
 else:
     chosen = [x.strip() for x in raw_features.replace(" ", ",").split(",") if x.strip()]
 
 for m in chosen:
-    if m not in mods:
+    if m not in listed:
         raise SystemExit(f"make-root: unknown module in WITH_FEATURES: {m}")
+ime = {"en": "ime", "zh": "ime-zh", "1": "ime-zh"}.get(raw_ime)
+if ime and ime not in chosen:
+    chosen.append(ime)
+# What they require (Chinese Pinyin: Rime and the CJK fonts), as declare-packages
+# and settings take it.
+for m in chosen:
+    chosen += [r for r in mods[m].get("requires", []) if r not in chosen]
 
 pkg_file = src / "packages"
 existing = {

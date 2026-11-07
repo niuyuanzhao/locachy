@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <sched.h>
+#include <signal.h>
 #include <stdint.h>
 #include <poll.h>
 #include <linux/input-event-codes.h>
@@ -1284,6 +1285,19 @@ int main(int argc, char **argv)
             key != K_ACT_IME_WIDTH && key != K_POINTER && toast_active) {
             hide_toast();
         }
+        if (key == K_CLOSE) {
+            /* The window's close: as a terminal closing, the child's process
+             * group is hung up (SIGHUP) and the terminal goes; whatever is
+             * left of it ends with the window's cgroup. */
+            say("term: closed: hanging up %s (pid %d)", cmd[0], (int)pid);
+            kill(-pid, SIGHUP);
+            close(pty);
+            for (int i = 0; i < 50 && waitpid(pid, NULL, WNOHANG) == 0; i++) {
+                usleep(10000);
+            }
+            ime_done();
+            return 0;
+        }
         if (key == K_POINTER) {
             pointer_input(pointer_last());
         } else if (key == K_SHOWN) {
@@ -1293,6 +1307,10 @@ int main(int argc, char **argv)
                 dirty[r] = 1;
             }
         } else if (ime_action(key, &ime_notice)) {
+            const char *commit = ime_get_commit(); /* English mode's word, as typed */
+            if (commit != NULL && commit[0] != '\0') {
+                queue_output(commit, strlen(commit));
+            }
             if (ime_notice) {
                 show_toast(ime_notice);
             }

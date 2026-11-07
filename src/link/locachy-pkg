@@ -18,7 +18,10 @@ Commands:
                            when missing), missing|drift|orphan|local-rebuild TAB NAME, then
                            closure|installed|foreign|bytes TAB COUNT
   locachy-pkg install PKG  install package(s) and register as leaf in manifest
-  locachy-pkg remove PKG   remove package(s), unregister from manifest, and prune closure
+  locachy-pkg remove PKG   remove package(s), unregister from manifest, and prune closure;
+                           installs nothing (other declared leaves missing stay so); a
+                           module's requirements declared only for it and not
+                           installed are unregistered with it
   locachy-pkg kernel list|select PACKAGE   available kernels, or install/select one
   locachy-pkg kernel headers on|off        declare/remove the selected kernel's headers
 
@@ -360,7 +363,7 @@ def needed_vulkan_drivers(repo_pkgs, aur_pkgs):
                 depends += r.get("Depends") or []
         except (RuntimeError, ValueError):
             pass  # the build says what is missing
-    return gpu_vulkan_drivers() if any(re.split(r"[<>=]", d, 1)[0] == "vulkan-driver" for d in depends) else []
+    return gpu_vulkan_drivers() if any(re.split(r"[<>=]", d, maxsplit=1)[0] == "vulkan-driver" for d in depends) else []
 
 
 def install_missing(missing, tracked):
@@ -409,7 +412,11 @@ def install_missing(missing, tracked):
     return True
 
 
-def cmd_sync(first_install=False):
+def cmd_sync(first_install=False, install=True):
+    """install=False is a removal's (cmd_remove): nothing is installed or
+    built, only what no installed leaf needs any more is removed. Declared
+    leaves that are not installed stay declared, and are said: a sync or an
+    update's host step installs them, never the removal of something else."""
     leaves = load_manifest()
     print(f"===> Reconciling system to /etc/locachy/packages ({len(leaves)} declared leaves)...")
 
@@ -422,20 +429,23 @@ def cmd_sync(first_install=False):
         return 1
 
     # 1. Install missing declared leaves and their dependencies
-    if missing:
+    if missing and not install:
+        print(f"===> Declared, not installed; a removal installs nothing, a sync or an update does "
+              f"({len(missing)}): {' '.join(missing)}")
+    elif missing:
         print(f"===> [1/4] Installing missing declared packages ({len(missing)}): {' '.join(missing)}")
         if not install_missing(missing, tracked):
             return 1
         # Reload after installs
         packages, provides_map, explicit_set = load_installed_db()
 
-    if set(leaves) - set(packages):
+    if install and set(leaves) - set(packages):
         print("locachy-pkg: install left declared packages missing; nothing is pruned", file=sys.stderr)
         return 1
     if first_install and not settle_tracked(tracked):
         return 1
-    recipes = local_recipes(build=False)
-    dirty = local_rebuilds(recipes, local_packages(LOCAL_DB)) if local_names(recipes) else []
+    recipes = local_recipes(build=False) if install else {}
+    dirty = local_rebuilds(recipes, local_packages(LOCAL_DB)) if install and local_names(recipes) else []
     dirty = [(name, reason) for name, reason in dirty if name not in tracked]
     for name, reason in dirty:
         print(f"===> Rebuilding local package {name}: {reason}")
@@ -502,6 +512,10 @@ def cmd_sync(first_install=False):
     final_unmanaged = set(packages.keys()) - keep
     final_missing = set(leaves) - set(packages.keys())
 
+    if not final_unmanaged and not install and final_missing <= set(missing):
+        print(f"===> Removed; nothing installed (closure: {len(keep)}, drift: 0, declared but not installed: "
+              f"{len(final_missing)})")
+        return 0
     if not final_unmanaged and not final_missing:
         print(f"===> Fully converged! (leaves: {len(leaves)}, closure: {len(keep)}, drift: 0)")
         return 0
@@ -575,10 +589,13 @@ def cmd_install(pkgs):
         print(f"locachy-pkg: no repository or the AUR has {' '.join(unknown)}; nothing registered", file=sys.stderr)
         return 1
     lines = manifest_lines()
-    for p in names:
-        if p not in leaves:
-            lines.append(f"{p}\n")
-            print(f"===> Registering leaf: {p}")
+    # Asked for by name, a leaf declared only as a requirement is chosen now.
+    added = [p for p in names if p not in leaves or p in required_only(lines)]
+    if added and lines and REQUIRED_BY in (line_headers(lines)[-1] or ""):
+        lines.append("\n")  # not in declare-packages' group of a requirement
+    for p in added:
+        lines.append(f"{p}\n")
+        print(f"===> Registering leaf: {p}")
     write_manifest(lines)
     return cmd_sync()
 
@@ -659,12 +676,87 @@ def cmd_kernel(args):
         return 1
 
 
+REQUIRED_BY = "(required by "
+
+
+def line_headers(lines):
+    """Each manifest line's block comment: the comment line above it, up to a
+    blank line (declare-packages writes each group so: a blank line, the
+    comment, its names)."""
+    header, headers = None, []
+    for line in lines:
+        text = line.strip()
+        if not text:
+            header = None
+        elif text.startswith("#"):
+            header = text
+        headers.append(header)
+    return headers
+
+
+def required_only(lines):
+    """Names declared only in declare-packages' groups of a requirement
+    ("module M (required by X)"), never on their own (the installer's list, a
+    settings row, locachy-pkg install)."""
+    only, chosen = set(), set()
+    for line, header in zip(lines, line_headers(lines)):
+        (only if header and REQUIRED_BY in header else chosen).update(line_names(line))
+    return only - chosen
+
+
+def module_definitions():
+    """modules.json of the installed source (name -> entry); none without it."""
+    try:
+        with open(os.path.join(SRC, "link/modules.json"), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def dropped_requirements(lines, before):
+    """What a removal leaves declared for nothing: the modules a removed
+    module required (modules.json "requires": Chinese Pinyin the CJK fonts)
+    that no module still declared requires, none of whose packages is
+    installed, and that were declared only as a requirement, never chosen on
+    their own. Installed, or chosen, a module stays: its own row removes it.
+    declare-packages declares a requirement only with its requirer, so the
+    next update does not bring it back."""
+    modules = {n: e for n, e in module_definitions().items() if e.get("packages")}
+    if not modules:
+        return lines
+    installed = set(load_installed_db()[0])
+    while True:
+        after = {n for line in lines for n in line_names(line)}
+        declared = {m for m, e in modules.items() if e["packages"][0] in after}
+        required = {r for m in declared for r in modules[m].get("requires", [])}
+        only = required_only(lines)
+        drop = {}
+        for m, e in modules.items():
+            if e["packages"][0] not in before or m in declared:
+                continue  # not removed by this
+            for r in e.get("requires", []):
+                packages = [p for p in modules.get(r, {}).get("packages", []) if p in after]
+                if (r in modules and r not in required and r in declared and packages and
+                        not any(p in installed for p in modules[r]["packages"]) and set(packages) <= only):
+                    drop[r] = (m, packages)
+        if not drop:
+            return lines
+        dropped = set()
+        for r, (m, packages) in sorted(drop.items()):
+            print(f"===> Unregistering module {r}: declared only as {m}'s requirement, not installed: "
+                  f"{' '.join(packages)}")
+            dropped.update(packages)
+        lines = without_names(lines, dropped)
+
+
 def cmd_remove(pkgs):
     names = {n for p in pkgs for n in p.split()}
     if not names:
         sys.exit("usage: locachy-pkg remove PKG...")
-    write_manifest(without_names(manifest_lines(), names))
-    return cmd_sync()
+    lines = manifest_lines()
+    before = {n for line in lines for n in line_names(line)}
+    write_manifest(dropped_requirements(without_names(lines, names), before))
+    return cmd_sync(install=False)  # removing never installs what else is declared
 
 
 # ---------------------------------------------------------------------------
@@ -687,7 +779,11 @@ def cmd_remove(pkgs):
 #              updated updater then checks again and applies the rest, its
 #              programs built last. The host is always planned and its
 #              patched packages built and tested by one source, the one
-#              installed: their recipes and their contracts agree.
+#              installed: their recipes and their contracts agree. Until a
+#              plan has nothing of it left (its local packages built, its
+#              declared ones installed, its programs built), its commit is
+#              pending (SOURCE_PENDING_FILE) and SOURCE_COMMIT_FILE keeps the
+#              one applied before.
 #   apps       the app presets' catalog (locachy_apps.py), from a repository
 #              of its own (apps_repo, apps_branch): the commit Check fetched,
 #              then the configurations that follow its presets (merge). Done
@@ -722,6 +818,10 @@ LEVEL_FILE = "/usr/local/lib/locachy/level"
 CPU_FILE = "/usr/local/lib/locachy/cpu"  # what -march it is built for (make.sh)
 BUILT_HOST_FILE = "/usr/local/lib/locachy/built-host" # host_hash() of make.sh --boot's last build
 SOURCE_UNBUILT_FILE = "/usr/local/lib/locachy/source-unbuilt" # COMMIT, setup-pending until helpers ready; make.sh removes it
+# SOURCE_COMMIT_FILE is the LOCachy installed: the commit whose update has all
+# been applied (finish_source_update). SOURCE_PENDING_FILE is the commit Apply
+# installed in SRC whose update has not finished yet.
+SOURCE_PENDING_FILE = "/usr/local/lib/locachy/source-pending"
 SELF = "/usr/local/bin/locachy-pkg"
 INIT = "/usr/local/lib/locachy/init"
 PLAN_FILE = "/var/lib/locachy/plan"
@@ -1077,6 +1177,10 @@ def apps_rows(fetch=True, pinned=None):
             rows.append(("apps", "merge", name, " ".join(keys), ""))
             if sorted(old.split()) != sorted(new.split()):
                 rows.append((name, "rebuild", PRESET_REBUILD, old, new))
+        for name, current, requested in found.get("reviews", []):
+            access = "real-system access" if requested else "isolated access"
+            rows.append(("apps", "note", f"{name}: preset requests {access}; "
+                         "review Access in packages; current access is kept", "", ""))
     if meta.get("origin") == "bootstrap":
         rows.append(("apps", "note", "bootstrap catalog from the system source, not from the apps repository", "", ""))
     return rows
@@ -1113,13 +1217,31 @@ def extract_commit_src(commit, dest_dir):
         raise RuntimeError(f"failed to extract LOCachy source from {commit[:12]}")
 
 
-def recorded_source_commit():
+def read_commit(path):
+    """The commit a one-line file holds, '' when none."""
     try:
-        with open(SOURCE_COMMIT_FILE, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             c = f.read().strip()
             return c if re.fullmatch(r"[0-9a-f]{40}", c) else ""
     except OSError:
         return ""
+
+
+def write_commit(path, commit):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        f.write(commit + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(path + ".tmp", path)
+
+
+def recorded_source_commit():
+    return read_commit(SOURCE_COMMIT_FILE)
+
+
+def pending_source_commit():
+    return read_commit(SOURCE_PENDING_FILE)
 
 
 class SourceNotChecked(Exception):
@@ -1128,7 +1250,8 @@ class SourceNotChecked(Exception):
 
 def check_source_update():
     """Fetch update_branch of update_repo into SOURCE_REPO_DIR and return
-    (old_short, new_commit, new_label) when the remote src/ tree differs from SRC.
+    (old_short, new_commit, new_label) when the remote src/ tree differs from SRC;
+    None when it is the commit applied (SOURCE_COMMIT_FILE) with nothing pending.
     SourceNotChecked when it cannot be fetched (RuntimeError with
     LOCACHY_UPDATE_STRICT=1)."""
     url = source_repo_url()
@@ -1155,16 +1278,22 @@ def check_source_update():
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         return None
     verify_source_commit(commit)
+    if commit == recorded_source_commit() and not update_unfinished():
+        # The commit applied, all of it. Its tree is not compared: the
+        # installation (make-root.sh) put only what the system builds from
+        # into SRC, and added its chosen modules to SRC's packages and rc.conf.
+        return None
     subject = subprocess.run(["git", "-C", SOURCE_REPO_DIR, "log", "-1", "--format=%s", commit],
                              check=True, capture_output=True, text=True).stdout.strip()
     with tempfile.TemporaryDirectory(prefix="locachy-src-check-") as tmp:
         extract_commit_src(commit, tmp)
         if source_tree_digest(SRC) == source_tree_digest(tmp):
-            if recorded_source_commit() != commit:
+            # The installed tree is this commit's. It is recorded as installed
+            # only when no update of it is still to finish (an Apply that
+            # installed it and stopped records it once it has all been done).
+            if recorded_source_commit() != commit and not update_unfinished():
                 try:
-                    os.makedirs(os.path.dirname(SOURCE_COMMIT_FILE), exist_ok=True)
-                    with open(SOURCE_COMMIT_FILE, "w", encoding="utf-8") as f:
-                        f.write(commit + "\n")
+                    write_commit(SOURCE_COMMIT_FILE, commit)
                 except OSError:
                     pass
             return None
@@ -1193,9 +1322,48 @@ def apply_source_update(commit):
             os.rename(backup, SRC)
         raise
     shutil.rmtree(backup, ignore_errors=True)
-    os.makedirs(os.path.dirname(SOURCE_COMMIT_FILE), exist_ok=True)
-    with open(SOURCE_COMMIT_FILE, "w", encoding="utf-8") as f:
-        f.write(commit + "\n")
+    # Installed in SRC, not yet applied: SOURCE_COMMIT_FILE keeps the commit
+    # applied before until finish_source_update.
+    write_commit(SOURCE_PENDING_FILE, commit)
+
+
+def update_unfinished():
+    """A source update Apply started and has not finished: its commit pending,
+    its setup pending, or its programs not built from it."""
+    return bool(pending_source_commit()) or source_setup_pending() or os.path.exists(SOURCE_UNBUILT_FILE)
+
+
+def finish_source_update():
+    """The pending source update has all been applied (setup, host, programs):
+    its commit becomes the installed one. Nothing while any part is left."""
+    commit = pending_source_commit()
+    if not commit or source_setup_pending() or os.path.exists(SOURCE_UNBUILT_FILE):
+        return False
+    write_commit(SOURCE_COMMIT_FILE, commit)
+    os.unlink(SOURCE_PENDING_FILE)
+    print(f"===> locachy: source {commit[:7]} applied", flush=True)
+    return True
+
+
+def source_update_left(rows):
+    """What a plan still has to do for the installed source: its local
+    packages built, its declared packages installed, its programs built (not
+    a newer source, not the repositories' or the AUR's updates)."""
+    return [r for r in rows if r[:2] in (("host", "local"), ("host", "missing")) or
+            (r[:2] == ("locachy", "rebuild") and not re.fullmatch(r"[0-9a-f]{40}", r[4]))]
+
+
+def settle_source_update(rows):
+    """A fresh plan (rows) with nothing left of the pending source update:
+    finished. Else the plan says what is installed and what is pending."""
+    pending = pending_source_commit()
+    if not pending:
+        return rows
+    if not source_update_left(rows) and finish_source_update():
+        return rows
+    applied = recorded_source_commit()
+    return rows + [("locachy", "note", f"source {pending[:7]} installed, its update not finished "
+                    f"(last applied: {applied[:7] if applied else 'not recorded'})", "", "")]
 
 
 def conf_packages(conf):
@@ -1347,8 +1515,6 @@ def cmd_search(terms):
     presets_dir = os.environ.get("LOCACHY_APPS_CATALOG") or os.path.join(APPS_DIR, "catalog")
     for path in sorted(glob.glob(os.path.join(presets_dir, "*.conf"))):
         conf = read_conf(path)
-        if conf.get("host") == "1":
-            continue
         name = os.path.basename(path)[:-5]
         desc = ""
         try:
@@ -1683,7 +1849,11 @@ def load_plan():
 def targets_of(rows):
     """The targets with something to do, in the order they are applied."""
     order = []
-    for t in ["apps", "host", "locachy"] + containers():
+    # Package changes in a followed store recipe can also rebuild an app
+    # with real-system access. Its ordinary package updates belong to host,
+    # but its recipe still has its own build target.
+    configured = sorted(os.path.basename(p)[:-5] for p in glob.glob(os.path.join(CONF_DIR, "*.conf")))
+    for t in dict.fromkeys(["apps", "host", "locachy"] + containers() + configured):
         if any(r[0] == t and r[1] not in ("state", "note") for r in rows):
             order.append(t)
     return order
@@ -1913,7 +2083,7 @@ def cmd_plan(args):
     if "--cached" in args:
         rows, checked = load_plan()
     else:
-        rows = plan()
+        rows = settle_source_update(plan())
         save_plan(rows)
         rows, checked = load_plan()
     if "--machine" in args:
@@ -1985,7 +2155,7 @@ def cmd_apply(targets, after_source=False):
         os.execv(SELF, [SELF, "apply", "--after-source"] + list(targets))
     if after_source:
         try:
-            rows = plan(check_source=False, apps_commit=planned_apps_commit(load_plan()[0]))
+            rows = settle_source_update(plan(check_source=False, apps_commit=planned_apps_commit(load_plan()[0])))
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
             print(f"locachy-pkg: check after the LOCachy update failed: {e}", file=sys.stderr)
             print("===> not done: " + (" ".join(targets) or "all"), flush=True)
@@ -2027,14 +2197,15 @@ def cmd_apply(targets, after_source=False):
         # network check must not hide the failure or overwrite its lock.
         print("===> not done: " + " ".join(failed), flush=True)
         return 1
-    rows = plan()
+    # The source's update is finished only by a plan that has nothing of it left.
+    rows = settle_source_update(plan())
     save_plan(rows)
     print("===> all done", flush=True)
     return 0
 
 
 def cmd_update(args):
-    rows = plan()
+    rows = settle_source_update(plan())
     save_plan(rows)
     rows, checked = load_plan()
     print_plan(rows, checked)
@@ -2049,6 +2220,10 @@ def cmd_update(args):
 
 
 def main():
+    # Its files (the manifest, the source in SRC, the plan) and those of what
+    # it runs (make.sh, pacman, declare-packages) are made as packages' are,
+    # whatever the caller's umask: others read them too.
+    os.umask(0o022)
     if len(sys.argv) < 2:
         sys.exit(cmd_sync())
 

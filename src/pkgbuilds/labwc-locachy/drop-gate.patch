@@ -1,0 +1,111 @@
+--- a/src/input/cursor.c
++++ b/src/input/cursor.c
+@@ -31,6 +31,7 @@
+ #include "input/touch.h"
+ #include "labwc.h"
+ #include "locachy-clipboard.h"
++#include "locachy-drop.h"
+ #include "layers.h"
+ #include "menu/menu.h"
+ #include "output.h"
+@@ -1546,7 +1547,7 @@
+ 		notify = cursor_process_button_press(seat, event->button,
+ 			event->time_msec);
+ 		if (notify) {
+-			wlr_seat_pointer_notify_button(seat->wlr_seat, event->time_msec,
++			locachy_drop_pointer_button(seat->wlr_seat, event->time_msec,
+ 				event->button, event->state);
+ 		}
+ 		break;
+@@ -1554,7 +1555,7 @@
+ 		notify = cursor_process_button_release(seat, event->button,
+ 			event->time_msec);
+ 		if (notify) {
+-			wlr_seat_pointer_notify_button(seat->wlr_seat, event->time_msec,
++			locachy_drop_pointer_button(seat->wlr_seat, event->time_msec,
+ 				event->button, event->state);
+ 		}
+ 		cursor_finish_button_release(seat, event->button);
+@@ -1793,13 +1794,13 @@
+ 	case WL_POINTER_BUTTON_STATE_PRESSED:
+ 		notify = cursor_process_button_press(seat, button, time_msec);
+ 		if (notify) {
+-			wlr_seat_pointer_notify_button(seat->wlr_seat, time_msec, button, state);
++			locachy_drop_pointer_button(seat->wlr_seat, time_msec, button, state);
+ 		}
+ 		break;
+ 	case WL_POINTER_BUTTON_STATE_RELEASED:
+ 		notify = cursor_process_button_release(seat, button, time_msec);
+ 		if (notify) {
+-			wlr_seat_pointer_notify_button(seat->wlr_seat, time_msec, button, state);
++			locachy_drop_pointer_button(seat->wlr_seat, time_msec, button, state);
+ 		}
+ 		cursor_finish_button_release(seat, button);
+ 		break;
+--- a/src/input/keyboard.c
++++ b/src/input/keyboard.c
+@@ -16,6 +16,7 @@
+ #include "input/ime.h"
+ #include "input/key-state.h"
+ #include "labwc.h"
++#include "locachy-drop.h"
+ #include "menu/menu.h"
+ #include "session-lock.h"
+ #include "view.h"
+@@ -542,6 +543,10 @@
+ 				key_state_store_pressed_key_as_bound(event->keycode);
+ 				return LAB_KEY_HANDLED_TRUE;
+ 			}
++		} else if (locachy_drop_escape(keyboard->base.seat->wlr_seat,
++				keyinfo.translated.syms, keyinfo.translated.nr_syms)) {
++			key_state_store_pressed_key_as_bound(event->keycode);
++			return LAB_KEY_HANDLED_TRUE;
+ 		}
+ 	}
+ 
+--- a/src/input/touch.c
++++ b/src/input/touch.c
+@@ -15,6 +15,7 @@
+ #include "config/touch.h"
+ #include "idle.h"
+ #include "labwc.h"
++#include "locachy-drop.h"
+ #include "ssd.h"
+ #include "view.h"
+ 
+@@ -202,7 +203,7 @@
+ 	wl_list_for_each_safe(touch_point, tmp, &seat->touch_points, link) {
+ 		if (touch_point->touch_id == event->touch_id) {
+ 			if (touch_point->surface) {
+-				wlr_seat_touch_notify_up(seat->wlr_seat, event->time_msec,
++				locachy_drop_touch_up(seat->wlr_seat, event->time_msec,
+ 					event->touch_id);
+ 			} else {
+ 				cursor_emulate_button(seat, BTN_LEFT,
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -1,5 +1,6 @@
+ labwc_sources = files(
+   'locachy-clipboard.c',
++  'locachy-drop.c',
+   'action.c',
+   'buffer.c',
+   'debug.c',
+--- a/src/server.c
++++ b/src/server.c
+@@ -64,6 +64,7 @@
+ #include "input/keyboard.h"
+ #include "labwc.h"
+ #include "locachy-clipboard.h"
++#include "locachy-drop.h"
+ #include "layers.h"
+ #include "magnifier.h"
+ #include "menu/menu.h"
+@@ -889,6 +890,7 @@
+ 	wl_event_source_remove(server.sigterm_source);
+ 	wl_event_source_remove(server.sigchld_source);
+ 
++	locachy_drop_finish();
+ 	locachy_clipboard_finish();
+ 	wl_display_destroy_clients(server.wl_display);
+ 

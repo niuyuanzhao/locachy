@@ -120,6 +120,8 @@ int screen_lend_outputs(const char *const *names, int n, uint32_t *lessee) { (vo
 int screen_take_back(uint32_t lessee) { (void)lessee; return 0; }
 int screen_drop_master(uint32_t lessee) { (void)lessee; return 0; }
 void keys_leds(int on) { (void)on; }
+int keys_locks(void) { return 0; }
+void keys_set_locks(int locks) { (void)locks; }
 int keys_sync(int *fds, int *n, int max) { (void)fds; (void)max; *n = 0; return 0; }
 int keys_lend(int *fds, int max) { (void)fds; (void)max; return 0; }
 void keys_take_back(const int *fds, int n) { (void)fds; (void)n; }

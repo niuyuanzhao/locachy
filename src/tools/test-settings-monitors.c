@@ -49,8 +49,10 @@ static struct passwd *fixture_getpwuid(uid_t);
 #define HW_DISABLE_DEV_IOCTL 1
 #define PACMAN_LOCAL "/fixture/pacman-local"
 #include "../progs/settings.c"
+#include "../base/fontmatch.c" /* without FreeType: fontconfig is not asked */
 #include "../base/ui.c"
 #include "i18n-stub.h"
+#include "jobs-double.h"
 #undef main
 #undef waitpid
 #undef fork
@@ -76,6 +78,7 @@ static int fail_open, fail_close, fail_rename;
 static const char *fail_rename_target;
 static int labwc_hups;
 void say(const char *fmt, ...) { (void)fmt; }
+void key_close_kept(void) {} /* no window here: K_CLOSE never comes */
 static FILE *writing;
 static int test_cols = 100, test_rows = 35, frames, settings_page;
 int screen_is_extended(void) { return 0; }
@@ -125,6 +128,10 @@ static const char *map_path(const char *path, char *out, size_t size)
         snprintf(out, size, "%s/drm", root);
     else if (strncmp(path, "/sys/class/drm/", 15) == 0)
         snprintf(out, size, "%s/drm/%s", root, path + 15);
+    else if (strcmp(path, MONITOR_PROFILES_CONF) == 0)
+        snprintf(out, size, "%s/monitor-profiles.conf", root);
+    else if (strcmp(path, MONITOR_PROFILES_CONF ".tmp") == 0)
+        snprintf(out, size, "%s/monitor-profiles.conf.tmp", root);
     else if (strcmp(path, MONITORS_CONF) == 0)
         snprintf(out, size, "%s/monitors.conf", root);
     else if (strcmp(path, MONITORS_CONF ".tmp") == 0)
@@ -173,7 +180,7 @@ static const char *map_path(const char *path, char *out, size_t size)
         snprintf(out, size, "%s/apps-CATALOG", root);
     else if (strcmp(path, "/etc/os-release") == 0)
         snprintf(out, size, "%s/os-release", root);
-    else if (strcmp(path, "/var/lib/locachy/source-commit") == 0)
+    else if (strcmp(path, "/usr/local/lib/locachy/source-commit") == 0)
         snprintf(out, size, "%s/source-commit", root);
     else if (strcmp(path, "/var/lib/locachy/battery") == 0 || strncmp(path, "/var/lib/locachy/battery/", 25) == 0)
         snprintf(out, size, "%s/battery%s", root, path + 24);
@@ -300,9 +307,18 @@ static int fixture_access(const char *path, int mode)
         return access(map_path(path, mapped, sizeof mapped), mode);
     }
     for (int i = 0; i < NOPT_MODULES; i++) {
-        if (!strcmp(path, opt_modules[i].probe)) return (fake_opt & (1 << i)) ? 0 : -1;
+        if (opt_modules[i].probe && !strcmp(path, opt_modules[i].probe)) return (fake_opt & (1 << i)) ? 0 : -1;
     }
     return access(path, mode);
+}
+
+/* A system job asked for (jobs-double.h): counted as a fork was. */
+static int submit_hook(void)
+{
+    event('F');
+    if (!allow_rc) return -1;
+    forks++;
+    return 0;
 }
 
 /* Elsewhere (load_nets' nmcli in the UI loop): no process, no networks. */
@@ -329,7 +345,22 @@ int rc_read(void (*fn)(const char *, const char *, void *), void *arg)
     if (rc_internal[0]) fn("internal_screen", rc_internal, arg);
     return 0;
 }
+#define fopen fixture_fopen
+#define opendir fixture_opendir
+#define rename fixture_rename
+#define unlink fixture_unlink
+#define fclose fixture_fclose
 #include "../base/monitors.c"
+#undef fclose
+#undef unlink
+#undef rename
+#undef opendir
+#undef fopen
+int monitor_modes(const char *name, struct monitor_mode *out, int max)
+{
+    (void)name; (void)out; (void)max;
+    return -1; /* sysfs fixture only; advertised-mode selection has its own tests */
+}
 /* adjust() reaches these for other rows only; the screen rows must not. */
 int rc_set(const char *name, const char *value)
 {
@@ -439,6 +470,11 @@ int key_poll_timeout(int fd, int timeout)
 
 static void file_text(const char *relative, const char *text)
 {
+    if (!strcmp(relative, "monitors.conf")) {
+        char profile[1400];
+        snprintf(profile, sizeof profile, "%s/monitor-profiles.conf", root);
+        unlink(profile); /* a fixture import starts with legacy settings */
+    }
     char path[1400];
     snprintf(path, sizeof path, "%s/%s", root, relative);
     FILE *f = fopen(path, "w");
@@ -547,7 +583,8 @@ static void test_circular(void)
     static const char on[] = CIRCULAR_TEXT("1"), off[] = CIRCULAR_TEXT("0");
     char text[1024], path[1400];
     snprintf(path, sizeof path, "%s/local-overrides.quirks", root);
-    assert(circ_index() == tnet_index() + 1 && imek_index() == circ_index() + 3 &&
+    assert(circ_index() == tnet_index() + 1 && clicks_index() == circ_index() + 3 &&
+           imek_index() == clicks_index() + 1 &&
            system_keymap_index() == imek_index() + NIME_KEYS && kb_index() == system_keymap_index() + 1 &&
            bat_page_index() == kb_index() + nkeyboards_seen && bat_thresh_index() == bat_page_index() + 1 &&
            hwinfo_index() == bat_thresh_index() + power_thresh_count() && hwcopy_index() == hwinfo_index() + 1 &&
@@ -601,6 +638,167 @@ static void test_circular(void)
     assert(apply_circular() == 0);
     puts("PASS touchpad circular scrolling: round touchpads (none written), on, off; a section of libinput's "
          "local quirks, the rest kept; width and dwell independently adjustable");
+}
+
+static void mkp(const char *rel);
+
+/* A fixture input device: /sys/class/input/EVENT/device as sysfs has it
+ * (properties: INPUT_PROP_* bits, in hex). */
+static void input_device(const char *event, const char *name, const char *props, const char *bus,
+                         const char *vendor, const char *product)
+{
+    char rel[256], text[256];
+    snprintf(rel, sizeof rel, "sys/class/input/%s/device/id", event);
+    mkp(rel);
+    const char *files[5][2] = { { "name", name }, { "properties", props }, { "id/bustype", bus },
+                                { "id/vendor", vendor }, { "id/product", product } };
+    for (int i = 0; i < 5; i++) {
+        snprintf(rel, sizeof rel, "sys/class/input/%s/device/%s", event, files[i][0]);
+        snprintf(text, sizeof text, "%s\n", files[i][1]);
+        file_text(rel, text);
+    }
+}
+
+/* What labwc_line writes for line. */
+static void labwc_written(const char *line, char *out, size_t size)
+{
+    char *text = NULL;
+    size_t len = 0;
+    FILE *f = open_memstream(&text, &len);
+    assert(f);
+    labwc_line(f, line);
+    assert(fclose(f) == 0);
+    snprintf(out, size, "%s", text);
+    free(text);
+}
+
+static void clicks_step(int dir, const char *rc, const char *note, const char *when, const char *file,
+                        const char *tap, const char *method)
+{
+    char text[2048], line[128];
+    rc_log[0] = '\0';
+    adjust(dir);
+    quirks_text(text, sizeof text);
+    assert(!strcmp(rc_log, rc) && strstr(notice, note) && strstr(notice, when) && !strcmp(text, file));
+    labwc_written("      <tap>yes</tap>\n", line, sizeof line);
+    assert(!strcmp(line, tap));
+    labwc_written("      <clickMethod></clickMethod>\n", line, sizeof line);
+    assert(!strcmp(line, method));
+}
+
+/* Touchpad Clicks: rc.conf's touchpad_clicks; labwc's tap to click and click
+ * method; for "pointing" a section of libinput's local quirks for each
+ * clickpad (INPUT_PROP_BUTTONPAD) only, kept while "pointing" stays (a
+ * touchpad not probed yet at boot), removed with it; the rest of the file
+ * kept. test-touchpad-clicks runs the same section through libinput. */
+static void test_touchpad_clicks(void)
+{
+    static const char theirs[] = "[A tablet of theirs]\nMatchName=*Tablet*\nAttrPressureRange=10:8\n";
+#define CLICKPAD_TEXT "[LOCachy touchpad clicks: SynPS/2 Synaptics TouchPad]\n" \
+    "# settings: Touchpad Clicks, pointing only (rc.conf touchpad_clicks): this clickpad's own press is no click\n" \
+    "MatchUdevType=touchpad\nMatchBus=ps2\nMatchVendor=0x0002\nMatchProduct=0x0007\n" \
+    "MatchName=SynPS/2 Synaptics TouchPad\nAttrEventCode=-BTN_LEFT\n"
+#define ODD_TEXT "[LOCachy touchpad clicks: Odd *1 * *pad*]\n" \
+    "# settings: Touchpad Clicks, pointing only (rc.conf touchpad_clicks): this clickpad's own press is no click\n" \
+    "MatchUdevType=touchpad\nMatchBus=bluetooth\nMatchVendor=0x05AC\nMatchProduct=0x0265\n" \
+    "MatchName=Odd *1 * *pad*\nAttrEventCode=-BTN_LEFT\n"
+#define CIRCULAR_ON "[LOCachy touchpad circular scrolling]\n" \
+    "# settings: Touchpad Circular Scrolling (rc.conf touchpad_circular)\n" \
+    "MatchUdevType=touchpad\nModelCircularTouchpad=1\n"
+    static const char at_once[] = "programs after home, the shared display at once.";
+    static const char restart[] = "programs after home, the shared display from its next start.";
+    static const char tap_yes[] = "      <tap>yes</tap>\n", tap_no[] = "      <tap>no</tap>\n";
+    static const char none[] = "      <clickMethod>none</clickMethod>\n";
+    char text[2048], expected[2048], from[1400], to[1400];
+    int pads = -1;
+    on_rc("touchpad_clicks", "press", NULL);
+    assert(clicks == CLICKS_PRESS);
+    on_rc("touchpad_clicks", "pointing", NULL);
+    assert(clicks == CLICKS_POINTING);
+    on_rc("touchpad_clicks", "yes", NULL);
+    assert(clicks == CLICKS_TAP);
+    /* A clickpad, a TrackPoint and a touchpad with two buttons of its own
+     * (Panasonic's round one): only the clickpad gets a section. */
+    input_device("event5", "SynPS/2 Synaptics TouchPad", "5", "0011", "0002", "0007");
+    input_device("event6", "TPPS/2 IBM TrackPoint", "21", "0011", "0002", "000a");
+    input_device("event7", "SYNA0103:00 06CB:CE53 Touchpad", "1", "0018", "06cb", "ce53");
+    mkp("sys/class/input/input5");
+    assert(apply_clicks(&pads) == 0 && pads == 0); /* as at boot: tap and press, nothing written */
+    quirks_text(text, sizeof text);
+    assert(!text[0]);
+    file_text("local-overrides.quirks", theirs);
+    selected = clicks_index();
+    clicks_step(+1, "touchpad_clicks=press;", "Touchpads click when pressed, not when tapped", at_once, theirs,
+                tap_no, "");
+    snprintf(expected, sizeof expected, "%s\n%s", theirs, CLICKPAD_TEXT);
+    clicks_step(+1, "touchpad_clicks=pointing;", "Touchpads only point; separate buttons still click", restart,
+                expected, tap_no, none);
+    assert(apply_clicks(&pads) == 0 && pads == 1); /* at boot: the same file */
+    quirks_text(text, sizeof text);
+    assert(!strcmp(text, expected));
+    /* At boot before the touchpad's driver: its section stays. */
+    snprintf(from, sizeof from, "%s/sys/class/input/event5", root);
+    snprintf(to, sizeof to, "%s/sys/class/input-event5-later", root);
+    assert(rename(from, to) == 0);
+    assert(apply_clicks(&pads) == 0 && pads == 1);
+    quirks_text(text, sizeof text);
+    assert(!strcmp(text, expected));
+    /* Another clickpad (Bluetooth, a name libinput's parser could not take
+     * as it is): a section of its own after the first. */
+    input_device("event8", "Odd #1 = [pad]  ", "4", "0005", "05ac", "0265");
+    assert(apply_clicks(&pads) == 0 && pads == 2);
+    snprintf(expected, sizeof expected, "%s\n%s\n%s", theirs, CLICKPAD_TEXT, ODD_TEXT);
+    quirks_text(text, sizeof text);
+    assert(!strcmp(text, expected));
+    /* The circular row's section beside them; leaving "pointing" removes
+     * only these. */
+    circular = 1;
+    assert(apply_circular() == 0);
+    snprintf(expected, sizeof expected, "%s\n%s\n%s\n%s", theirs, CLICKPAD_TEXT, ODD_TEXT, CIRCULAR_ON);
+    quirks_text(text, sizeof text);
+    assert(!strcmp(text, expected));
+    snprintf(expected, sizeof expected, "%s\n%s", theirs, CIRCULAR_ON);
+    clicks_step(+1, "touchpad_clicks=(none);", "Touchpads click when tapped or pressed", restart, expected,
+                tap_yes, "");
+    /* Backwards: pointing only again (the first clickpad only now); a file
+     * that cannot be written leaves rc.conf and the row as they were. */
+    assert(rename(to, from) == 0);
+    char from8[1400], to8[1400];
+    snprintf(from8, sizeof from8, "%s/sys/class/input/event8", root);
+    snprintf(to8, sizeof to8, "%s/sys/class/input-event8-later", root);
+    assert(rename(from8, to8) == 0);
+    assert(apply_clicks(NULL) == 0); /* not pointing only: nothing kept of the second */
+    fail_open = 1;
+    rc_log[0] = '\0';
+    adjust(-1);
+    fail_open = 0;
+    assert(clicks == CLICKS_TAP && !strcmp(rc_log, "touchpad_clicks=pointing;touchpad_clicks=(none);") &&
+           strstr(notice, "Cannot write") && strstr(notice, "local-overrides.quirks"));
+    snprintf(expected, sizeof expected, "%s\n%s\n%s", theirs, CIRCULAR_ON, CLICKPAD_TEXT);
+    clicks_step(-1, "touchpad_clicks=pointing;", "Touchpads only point", restart, expected, tap_no, none);
+    snprintf(expected, sizeof expected, "%s\n%s\n", theirs, CIRCULAR_ON);
+    clicks_step(-1, "touchpad_clicks=press;", "Touchpads click when pressed", restart, expected, tap_no, "");
+    /* No clickpad here: pointing only says so, and nothing waits for a
+     * restart. */
+    assert(rename(from, to) == 0);
+    clicks_step(+1, "touchpad_clicks=pointing;", "Touchpads do not tap; none here clicks by pressing", at_once,
+                expected, tap_no, none);
+    int page_before = settings_page;
+    settings_page = 1;
+    in_page = 1;
+    draw();
+    assert(category == CAT_INPUT && canvas_has("Touchpad Clicks") && canvas_has("< pointing only >"));
+    in_page = 0;
+    settings_page = page_before;
+    clicks = CLICKS_TAP;
+    circular = -1;
+    assert(apply_clicks(NULL) == 0 && apply_circular() == 0);
+    quirks_text(text, sizeof text);
+    assert(!strstr(text, "[LOCachy"));
+    snprintf(from, sizeof from, "%s/local-overrides.quirks", root);
+    assert(unlink(from) == 0);
+    puts("PASS touchpad clicks: tap and press, press only, pointing only; labwc's tap and click method; a "
+         "libinput section per clickpad only, kept while pointing only stays, removed with it, the rest kept");
 }
 
 /* key_get for choose_key: keys[] with the modifiers held at each and the
@@ -1119,6 +1317,7 @@ static void test_power_and_hwinfo(void)
     show_category(CAT_SYSTEM, 1);
     draw();
     assert(canvas_has("Panasonic Corporation CF-FV1RDAVS") && canvas_has("Hardware & system information"));
+    assert(canvas_has("LOCachy (fbe2cb1)")); /* the source applied, as locachy-pkg records it */
     clip_buf[0] = '\0';
     copy_system_summary_action();
     assert(strstr(clip_buf, "CF-FV1RDAVS") && strstr(clip_buf, "i7-1185G7"));
@@ -1236,6 +1435,19 @@ static void test_system_keymap(void)
     read_fixture("labwc-environment.new", environment, sizeof environment);
     assert(strstr(environment, "XKB_DEFAULT_LAYOUT=de\n") && strstr(environment, "XKB_DEFAULT_VARIANT=nodeadkeys\n") &&
            strstr(environment, "XKB_DEFAULT_OPTIONS=compose:ralt\n") && strstr(environment, "XCURSOR_SIZE=24\n"));
+    /* An empty options line, or one with only keytable's caps:capslock, is the
+     * table's: a jp table's caps:capslock replaces it, a us table's none that. */
+    file_text("labwc-environment", "XKB_DEFAULT_OPTIONS=\nXCURSOR_SIZE=24\n");
+    file_text("keymap.table.new", "layout jp\nmodel jp106\nvariant -\noptions caps:capslock\n");
+    assert(keymap_environment(SYSTEM_KEYMAP_TABLE ".new", LABWC_ENV ".new") == 0);
+    read_fixture("labwc-environment.new", environment, sizeof environment);
+    assert(strstr(environment, "XKB_DEFAULT_OPTIONS=caps:capslock\n") && strstr(environment, "XKB_DEFAULT_LAYOUT=jp\n") &&
+           strstr(environment, "XCURSOR_SIZE=24\n") && !strstr(environment, "XKB_DEFAULT_OPTIONS=\n"));
+    file_text("labwc-environment", environment);
+    file_text("keymap.table.new", "layout us\nmodel pc105\nvariant -\noptions -\n");
+    assert(keymap_environment(SYSTEM_KEYMAP_TABLE ".new", LABWC_ENV ".new") == 0);
+    read_fixture("labwc-environment.new", environment, sizeof environment);
+    assert(strstr(environment, "XKB_DEFAULT_OPTIONS=\n") && !strstr(environment, "caps:capslock"));
 
     /* The same picker handles the system default, including Enter and cancel. */
     nkeys = keypos = 0;
@@ -1643,9 +1855,12 @@ static void test_bluetooth(void)
     selected = boot_index();
     adjust(+1);
     assert(boot_verbose && strstr(rc_log, "boot_verbose=1;") && forks == forks_boot + 1);
-    assert(strstr(notice, "Boot image made"));
+    assert(boot_job && strstr(notice, "Making the boot image") && !strcmp(jobs_double_last, "boot"));
+    boot_check(); /* the queue's job has ended (jobs-double.h) */
+    assert(!boot_job && strstr(notice, "Boot image made"));
     adjust(-1);
     assert(!boot_verbose && strstr(rc_log, "boot_verbose=(none);") && forks == forks_boot + 2);
+    boot_check();
     on_rc("boot_cmdline", "i915.enable_psr=0", NULL);
     selected = boot_index() + 1;
     draw();
@@ -1787,6 +2002,37 @@ static void test_time_zone(void)
          "carries the network, saying why and that one can be chosen");
 }
 
+/* The top bar's pages: --page names and the window manager's request pipe. */
+static void test_pages(void)
+{
+    assert(open_page("network") && category == CAT_NETWORK && in_page && entry_of(selected) >= 0);
+    assert(open_page("power") && category == CAT_POWER && entry_of(selected) >= 0);
+    assert(open_page("devices") && category == CAT_DEVICES && selected == bt_index());
+    assert(open_page("date-time") && category == CAT_TIME && selected == tz_index());
+    assert(open_page("hardware") && category == CAT_SYSTEM && selected == hwinfo_index());
+    assert(!open_page("../etc") && !open_page("") && !open_page("Network") && category == CAT_SYSTEM);
+    int fds[2];
+    char number[16];
+    assert(pipe(fds) == 0 && fds[0] >= 3);
+    snprintf(number, sizeof number, "%d", fds[0]);
+    assert(setenv("LOCACHY_REQUEST_FD", number, 1) == 0);
+    request_open();
+    assert(request_fd == fds[0] && !getenv("LOCACHY_REQUEST_FD"));
+    assert(write(fds[1], "page network\npage pow", 21) == 21);
+    requests();
+    assert(category == CAT_NETWORK);
+    assert(write(fds[1], "er\npage nowhere\n", 16) == 16);
+    requests();
+    assert(category == CAT_POWER);
+    requests(); /* nothing waiting: returns at once */
+    assert(request_fd == fds[0] && category == CAT_POWER);
+    close(fds[1]);
+    requests();
+    assert(request_fd == -1); /* its end closed it: not waited on again */
+    puts("PASS top bar pages: each name opens its settings, others change nothing; a window takes page "
+         "requests split across reads and drops a closed request pipe");
+}
+
 int main(int argc, char **argv)
 {
     int generated = argc == 5 && strcmp(argv[1], "--fixture-dir") == 0 && strcmp(argv[3], "--place") == 0;
@@ -1794,6 +2040,7 @@ int main(int argc, char **argv)
     snprintf(root, sizeof root, "%s", argv[generated ? 2 : 1]);
     assert(root[0] == '/');
     prepare();
+    jobs_double_hook = submit_hook;
     if (generated) {
         int place = place_index(argv[4]);
         assert(place <= MONITOR_BELOW && !strcmp(places[place], argv[4]));
@@ -2158,6 +2405,22 @@ int main(int argc, char **argv)
     for (int i = 0; i < n; i++) if (!strcmp(rects[i].name, "HEADLESS-3"))
         assert(rects[i].width == 1920 && rects[i].height == 1080 && rects[i].y == 0);
     puts("PASS mixed native resolutions in shared logical geometry");
+    file_text("monitors.conf", "HEADLESS-1=origin,1280x720,1.25\nHEADLESS-2=left,1280x720,1.5\nHEADLESS-3=above,1920x1080,1\n");
+    load_monitors();
+    assert(save_monitors() == 0);
+    connector("HEADLESS-1", "disconnected\n", "1280x720\n");
+    load_monitors();
+    monitors[monitor_index("HEADLESS-2")].scale = 1.75;
+    assert(save_monitors() == 0);
+    connector("HEADLESS-1", "connected\n", "1280x720\n");
+    load_monitors();
+    assert(monitors[monitor_index("HEADLESS-2")].place == MONITOR_LEFT &&
+           monitors[monitor_index("HEADLESS-2")].scale == 1.5);
+    connector("HEADLESS-1", "disconnected\n", "1280x720\n");
+    assert(save_monitors() < 0); /* stale form cannot save another topology */
+    connector("HEADLESS-1", "connected\n", "1280x720\n");
+    load_monitors();
+    puts("PASS settings saves each connected set independently; cable races do not save an incomplete topology");
     build_row_maps();
     int scale_row = -1, h1 = monitor_index("HEADLESS-1");
     for (int i = 0; i < nrow_maps; i++)
@@ -2416,7 +2679,8 @@ int main(int argc, char **argv)
            bri_index() == hsi_index() + 1 && mach_index() == bri_index() + 1 &&
            upd_index() == mach_index() + 1 && boot_index() == upd_index() + 5 && opt_index() == boot_index() + 5 &&
            repo_index() == opt_index() + NOPT_MODULES && tnet_index() == repo_index() + NREPO_SECTIONS + 1 &&
-           circ_index() == tnet_index() + 1 && imek_index() == circ_index() + 3 &&
+           circ_index() == tnet_index() + 1 && clicks_index() == circ_index() + 3 &&
+           imek_index() == clicks_index() + 1 &&
            system_keymap_index() == imek_index() + NIME_KEYS && kb_index() == system_keymap_index() + 1 &&
            bat_page_index() == kb_index() + nkeyboards_seen && bat_thresh_index() == bat_page_index() + 1 &&
            hwinfo_index() == bat_thresh_index() + power_thresh_count() && hwcopy_index() == hwinfo_index() + 1 &&
@@ -2429,6 +2693,7 @@ int main(int argc, char **argv)
     selected = ime_index() + 1;
     adjust(+1);
     assert(forks == forks_before + 2 && !strcmp(pkg_action, "install") && !strcmp(pkg_name, IME_ALL_PACKAGES));
+    assert(strstr(notice, "CJK fonts")); /* fontconfig has no font for Chinese here: Pinyin brings them */
     pkg_job = 0;
     fake_rime = 1;
     fake_rime_zh = 1;
@@ -2490,10 +2755,12 @@ int main(int argc, char **argv)
     test_time_zone();
     test_bluetooth();
     test_circular();
+    test_touchpad_clicks();
     test_ime_keys();
     test_keyboards();
     test_system_keymap();
     test_power_and_hwinfo();
+    test_pages();
     /* Line editing in prompts: cursor movement, Delete and Ctrl+U. */
     char edited[64] = "abc";
     size_t epos = strlen(edited);

@@ -5,14 +5,19 @@
   "provider": "arch-gitlab",
   "repository": "https://gitlab.archlinux.org/archlinux/packaging/packages/labwc.git",
   "api": "https://gitlab.archlinux.org/api/v4/projects/archlinux%2Fpackaging%2Fpackages%2Flabwc",
-  "patch_revision": 4,
+  "patch_revision": 8,
   "adapter": "adapter.sh",
   "inputs": [
     "clipboard-guard.patch",
     "inner-edge-hold.patch",
+    "corner-edge-hold.patch",
+    "drop-gate.patch",
+    "keyboard-locks.patch",
     "locachy-clipboard.c",
-    "locachy-clipboard.h"
+    "locachy-clipboard.h",
+    "locachy-drop.c",
+    "locachy-drop.h"
   ],
   "source_directory": "labwc",
-  "gate": "labwc-clipboard-inner-edge-v2"
+  "gate": "labwc-clipboard-corner-drop-v4"
 }

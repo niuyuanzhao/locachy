@@ -12,6 +12,7 @@ int monitor_conf(const char *name, struct monitor_conf *out)
     return 0;
 }
 int monitor_internal(const char *name) { (void)name; return 0; }
+int monitor_profiles_select_sysfs(void) { return 0; }
 
 int main(int argc, char **argv)
 {

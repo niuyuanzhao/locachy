@@ -231,58 +231,60 @@ int content_font_text_cells(const char *utf8)
 #ifdef CONFIG_FREETYPE
 #include <ft2build.h>
 #include FT_FREETYPE_H
+#include FT_ADVANCES_H
 #include <stdlib.h>
 #include <string.h>
 
+#include "fontmatch.h"
+
+/* The regular face: fontconfig's match for monospace, or an explicit path's
+ * face. Bold, oblique and bold oblique: the same family's real ones, as
+ * fontconfig matches them. A character a face lacks comes from fontconfig's
+ * fallbacks for that family and style (fontmatch.c, tools/FONTS.md). */
 struct content_font {
     FT_Library library;
     FT_Face faces[4];                 /* regular, bold, oblique, bold oblique */
-    FT_Face cjk[2];                   /* regular and real bold, no fake oblique */
+    FT_Face own;                      /* an explicit path's regular face; the others are the sets' */
+    struct font_set *sets[4];         /* fontconfig's fonts for each style */
+    FT_Face cjk[2];                   /* where CJK ideographs fall back, regular and real bold (no
+                                         fake oblique): measured into the line, so wide text fits */
     int size_px, cell_w, cell_h, baseline;
     uint32_t *pixels;
     size_t capacity;
 };
 
-static const char *const regular_paths[] = {
-    "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
-};
-static const char *const cjk_paths[2][2] = {
-    { "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-      "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc" },
-    { "/usr/share/fonts/noto-cjk/NotoSansCJK-Bold.ttc",
-      "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc" }
-};
+#define IDEOGRAPH 0x4E00 /* the first CJK unified ideograph, whose fallback the line fits */
 
-static FT_Face open_face(FT_Library library, const char *path, FT_Long index, int mono)
+static FT_Face open_face(FT_Library library, const char *path)
 {
     FT_Face face = NULL;
-    if (FT_New_Face(library, path, index, &face)) return NULL;
-    if ((mono && !FT_IS_FIXED_WIDTH(face)) || FT_Select_Charmap(face, FT_ENCODING_UNICODE)) {
+    if (FT_New_Face(library, path, 0, &face)) return NULL;
+    if (!FT_IS_FIXED_WIDTH(face) || FT_Select_Charmap(face, FT_ENCODING_UNICODE)) {
         FT_Done_Face(face);
         return NULL;
     }
     return face;
 }
 
-static FT_Face open_cjk(FT_Library library, const char *path)
-{
-    FT_Face first = open_face(library, path, 0, 0);
-    if (!first) return NULL;
-    if (first->family_name && strstr(first->family_name, " SC")) return first;
-    for (FT_Long i = 1; i < first->num_faces; i++) {
-        FT_Face face = open_face(library, path, i, 0);
-        if (!face) continue;
-        if (face->family_name && strstr(face->family_name, " SC")) {
-            FT_Done_Face(first);
-            return face;
-        }
-        FT_Done_Face(face);
-    }
-    return first;
-}
-
 static int pixels_up(FT_Pos value) { return (int)((value + 63) / 64); }
+
+/* A cell: a fixed-width face's advance; else (a monospace family whose own
+ * flag says otherwise, as Noto Sans Mono's does) its widest printable ASCII
+ * character. */
+static int cell_width(FT_Face face)
+{
+    if (FT_IS_FIXED_WIDTH(face)) return pixels_up(face->size->metrics.max_advance);
+    int width = 0;
+    for (FT_ULong c = 0x21; c < 0x7F; c++) {
+        FT_Fixed advance;
+        FT_UInt glyph = FT_Get_Char_Index(face, c);
+        if (glyph && !FT_Get_Advance(face, glyph, FT_LOAD_DEFAULT, &advance)) {
+            int w = (int)((advance + 0xFFFF) >> 16);
+            if (w > width) width = w;
+        }
+    }
+    return width;
+}
 
 static void measure(struct content_font *font)
 {
@@ -292,11 +294,11 @@ static void measure(struct content_font *font)
         if (!face) continue;
         FT_Size_Metrics *m = &face->size->metrics;
         int a = pixels_up(m->ascender), d = pixels_up(-m->descender);
-        int h = pixels_up(m->height), w = pixels_up(m->max_advance);
+        int h = pixels_up(m->height), w = i < 4 ? cell_width(face) : 0;
         if (a > ascent) ascent = a;
         if (d > descent) descent = d;
         if (h > height) height = h;
-        if (i < 4 && w > width) width = w;
+        if (w > width) width = w;
     }
     if (height < ascent + descent) height = ascent + descent;
     font->cell_w = width > 0 ? width : 1;
@@ -310,17 +312,21 @@ int content_font_set_size_px(struct content_font *font, int size_px)
     if (size_px < CONTENT_FONT_MIN_PX) size_px = CONTENT_FONT_MIN_PX;
     if (size_px > CONTENT_FONT_MAX_PX) size_px = CONTENT_FONT_MAX_PX;
     if (font->size_px == size_px) return 0;
-    for (int i = 0; i < 6; i++) {
-        FT_Face face = i < 4 ? font->faces[i] : font->cjk[i - 4];
+    for (int i = 0; i < 4; i++) {
+        FT_Face face = font->faces[i];
         if (!face || !FT_Set_Pixel_Sizes(face, 0, (FT_UInt)size_px)) continue;
         /* Every face remains at the old size if the change cannot be made. */
-        for (int j = 0; j < 6; j++) {
-            FT_Face old = j < 4 ? font->faces[j] : font->cjk[j - 4];
+        for (int j = 0; j < 4; j++) {
+            FT_Face old = font->faces[j];
             if (old && font->size_px) FT_Set_Pixel_Sizes(old, 0, (FT_UInt)font->size_px);
         }
         return -1;
     }
     font->size_px = size_px;
+    for (int i = 0; i < 2; i++) {
+        FT_UInt glyph;
+        font->cjk[i] = font_set_face(font->sets[i], IDEOGRAPH, size_px, &glyph);
+    }
     measure(font);
     return 0;
 }
@@ -333,37 +339,29 @@ struct content_font *content_font_new(const char *path, int size_px)
         free(font);
         return NULL;
     }
-    if (path && *path) font->faces[0] = open_face(font->library, path, 0, 1);
-    else {
-        for (size_t i = 0; i < sizeof regular_paths / sizeof *regular_paths; i++) {
-            font->faces[0] = open_face(font->library, regular_paths[i], 0, 1);
-            if (font->faces[0]) { path = regular_paths[i]; break; }
+    if (path && *path) {
+        font->own = font->faces[0] = open_face(font->library, path);
+        if (font->own) {
+            font->sets[0] = font_set_new(font->library, font->own->family_name ?
+                                         font->own->family_name : "monospace", 0, 0);
         }
+    } else {
+        font->sets[0] = font_set_new(font->library, "monospace", 0, 0);
+        font->faces[0] = font_set_primary(font->sets[0]);
     }
-    if (!font->faces[0]) { content_font_free(font); return NULL; }
-    /* Sibling style files are part of the same packaged DejaVu family. Do
-     * not silently mix an explicitly selected other family with DejaVu. */
-    const char *base = strrchr(path, '/');
-    base = base ? base + 1 : path;
-    if (!strcmp(base, "DejaVuSansMono.ttf")) {
-        static const char *const names[] = {
-            "DejaVuSansMono-Bold.ttf", "DejaVuSansMono-Oblique.ttf", "DejaVuSansMono-BoldOblique.ttf"
-        };
-        size_t prefix = (size_t)(base - path);
-        char *sibling = malloc(prefix + sizeof "DejaVuSansMono-BoldOblique.ttf");
-        if (sibling) {
-            memcpy(sibling, path, prefix);
-            for (int i = 0; i < 3; i++) {
-                strcpy(sibling + prefix, names[i]);
-                font->faces[i + 1] = open_face(font->library, sibling, 0, 1);
-            }
-            free(sibling);
-        }
-    }
-    for (int i = 0; i < 2; i++) {
-        for (size_t j = 0; j < sizeof cjk_paths[i] / sizeof *cjk_paths[i]; j++) {
-            font->cjk[i] = open_cjk(font->library, cjk_paths[i][j]);
-            if (font->cjk[i]) break;
+    if (!font->faces[0] || !font->sets[0]) { content_font_free(font); return NULL; }
+    const char *family = font->faces[0]->family_name;
+    for (int i = 1; i < 4; i++) {
+        font->sets[i] = font_set_new(font->library, family ? family : "monospace",
+                                     i & CONTENT_FONT_BOLD, i & CONTENT_FONT_ITALIC);
+        if (!font->sets[i]) { content_font_free(font); return NULL; }
+        /* The family's own style only: never another family's, nor the
+         * regular face standing in for it. */
+        FT_Face face = font_set_primary(font->sets[i]);
+        if (face && family && face->family_name && !strcmp(face->family_name, family) &&
+            !(i & CONTENT_FONT_BOLD) == !(face->style_flags & FT_STYLE_FLAG_BOLD) &&
+            !(i & CONTENT_FONT_ITALIC) == !(face->style_flags & FT_STYLE_FLAG_ITALIC)) {
+            font->faces[i] = face;
         }
     }
     if (content_font_set_size_px(font, size_px)) { content_font_free(font); return NULL; }
@@ -373,8 +371,8 @@ struct content_font *content_font_new(const char *path, int size_px)
 void content_font_free(struct content_font *font)
 {
     if (!font) return;
-    for (int i = 0; i < 4; i++) if (font->faces[i]) FT_Done_Face(font->faces[i]);
-    for (int i = 0; i < 2; i++) if (font->cjk[i]) FT_Done_Face(font->cjk[i]);
+    for (int i = 0; i < 4; i++) font_set_free(font->sets[i]);
+    if (font->own) FT_Done_Face(font->own);
     FT_Done_FreeType(font->library);
     free(font->pixels);
     free(font);
@@ -409,12 +407,13 @@ static FT_Face glyph_face(const struct content_font *font, FT_Face selected,
         *glyph = FT_Get_Char_Index(font->faces[0], cp);
         if (*glyph) return font->faces[0];
     }
-    int bold = (style & CONTENT_FONT_BOLD) != 0;
-    FT_Face cjk = font->cjk[bold] ? font->cjk[bold] : font->cjk[0];
-    if (cjk) {
-        *glyph = FT_Get_Char_Index(cjk, cp);
-        if (*glyph) return cjk;
-    }
+    /* fontconfig's fallbacks, bold ones for bold text (CJK families have
+     * real bold faces); no fake oblique. */
+    FT_Face face = NULL;
+    if (style & CONTENT_FONT_BOLD) face = font_set_face(font->sets[CONTENT_FONT_BOLD], cp, font->size_px, glyph);
+    if (!face) face = font_set_face(font->sets[0], cp, font->size_px, glyph);
+    if (face) return face;
+    *glyph = 0;
     return selected;                   /* glyph 0 is its real .notdef */
 }
 

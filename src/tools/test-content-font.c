@@ -1,4 +1,7 @@
-/* Real packaged fonts and an in-memory screen, without DRM, input or a UI. */
+/* Real installed fonts, chosen through fontconfig in the fixture configuration
+ * FONTCONFIG_FILE names (font-fixtures.sh), and an in-memory screen, without
+ * DRM, input or a UI. test-content-font [cjk MONO | latin]: MONO is DejaVu
+ * Sans Mono's file, the explicit path. */
 #include "../base/font.c"
 #include <assert.h>
 #include <stdio.h>
@@ -38,6 +41,7 @@ static void test_widths(void)
 #define FG 0xEAD9C2u
 #define BG 0x203145u
 static uint32_t picture[WIDTH * HEIGHT];
+static const char *explicit_path;
 static int allow_x, allow_y, allow_w = WIDTH, allow_h = HEIGHT;
 static int fills, blits;
 
@@ -127,9 +131,11 @@ static void test_sizes_and_ownership(void)
     assert(content_font_set_size_px(font, INT_MAX) == 0 && content_font_size_px(font) == 96);
     assert(content_font_set_size_px(NULL, 18) == -1);
     assert(!content_font_new("/nonexistent/DejaVuSansMono.ttf", 18));
-    struct content_font *explicit_font = content_font_new(regular_paths[0], 24);
-    if (!explicit_font) explicit_font = content_font_new(regular_paths[1], 24);
-    assert(explicit_font);
+    /* An explicit file, and its family's real styles as fontconfig has them. */
+    struct content_font *explicit_font = content_font_new(explicit_path, 24);
+    assert(explicit_font && explicit_font->own == explicit_font->faces[0]);
+    for (int i = 1; i < 4; i++) assert(explicit_font->faces[i] && explicit_font->faces[i] != explicit_font->faces[0]);
+    assert(explicit_font->cjk[0] && strstr(explicit_font->cjk[0]->family_name, " SC"));
     content_font_free(explicit_font);
     content_font_free(font);
     content_font_free(other);
@@ -275,12 +281,37 @@ static void test_styles_and_raster(struct content_font *font)
     assert(coverage(&bitmap, 0, 1) == 255 && coverage(&bitmap, 1, 1) == 0);
     puts("PASS actual regular/bold/italic/bold-italic faces, underline, exact alpha blend, gray/mono and negative pitch");
 }
+
+static void test_without_cjk(void)
+{
+    struct content_font *font = content_font_new(NULL, 24);
+    assert(font && !font->cjk[0] && !font->cjk[1]);
+    FT_UInt glyph;
+    assert(glyph_face(font, font->faces[0], 0x4E2D, 0, &glyph) == font->faces[0] && glyph == 0);
+    assert(glyph_face(font, font->faces[1], 0x4E2D, CONTENT_FONT_BOLD, &glyph) == font->faces[1] && glyph == 0);
+    reset_screen(0, 0, WIDTH, HEIGHT);
+    draw(font, 20, 20, "\xE4\xB8\xAD" "B", 0);
+    assert(blits == 1 && ink_count() > 0);
+    assert(content_font_text_cells("\xE4\xB8\xAD" "B") == 3);
+    content_font_free(font);
+    puts("PASS without a CJK font: CJK is the real .notdef in two cells, and nothing fails");
+}
 #endif
 
-int main(void)
+int main(int argc, char **argv)
 {
     test_widths();
 #ifdef CONFIG_FREETYPE
+    if (argc == 2 && strcmp(argv[1], "latin") == 0) {
+        test_without_cjk();
+        puts("ALL PASSED");
+        return 0;
+    }
+    if (argc != 3 || strcmp(argv[1], "cjk") != 0) {
+        fprintf(stderr, "usage: test-content-font cjk MONO | latin\n");
+        return 2;
+    }
+    explicit_path = argv[2];
     test_sizes_and_ownership();
     struct content_font *font = content_font_new(NULL, 24);
     assert(font);
@@ -289,6 +320,8 @@ int main(void)
     test_styles_and_raster(font);
     content_font_free(font);
 #else
+    (void)argc;
+    (void)argv;
     assert(!content_font_new(NULL, 24));
     assert(content_font_set_size_px(NULL, 24) == -1);
     assert(content_font_size_px(NULL) == 0);

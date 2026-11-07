@@ -6,6 +6,10 @@
 /* Show the file manager until the user leaves it. */
 void files_view(void);
 
+/* The same at folder (or at a file, selected in its folder), checked as a
+ * container's request is: only inside the user's home. */
+void files_view_at(const char *folder);
+
 /* Has a container asked home to show a folder (FILES_REQUEST)? */
 int files_request(void);
 
@@ -14,5 +18,9 @@ int files_request(void);
  * 1 with its path in out, or 0 (the user went back). Nothing is changed.
  * The type inode/directory chooses a folder (o, on the selected one). */
 int files_pick(const char *dir, const char *keep, const char *type, const char *what, char *out, size_t size);
+
+/* 1 when the last files_view or files_pick ended because the window's
+ * close was asked for (K_CLOSE): the caller closes too, as its quit does. */
+int files_close_asked(void);
 
 #endif

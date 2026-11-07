@@ -33,8 +33,10 @@ fwupd
 kbd
 nano
 # The full-screen installer and its terminal (installer/make-live.sh): their
-# libraries, and the fonts of their text beside Terminus (symbols, Chinese).
+# libraries, and the fonts of their text beside Terminus (symbols, Chinese),
+# as fontconfig chooses them.
 freetype2
+fontconfig
 libinput
 json-c
 libxkbcommon

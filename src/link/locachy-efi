@@ -39,6 +39,29 @@ def mounted(path):
     return mounts[0]
 
 
+def private_namespace():
+    """Whether this process's mount namespace is not process 1's."""
+    try:
+        return os.readlink("/proc/self/ns/mnt") != os.readlink("/proc/1/ns/mnt")
+    except OSError:
+        return False
+
+
+def variables_mount():
+    """The EFI variables' mount. Under `ip netns exec` (pacman's downloads in
+    locachy-net, so every hook pacman runs: make.sh --boot, locachy-boot, this)
+    /sys is a sysfs of that network namespace's own, without efivarfs. There,
+    in that private mount namespace and never in the system's, it is mounted
+    again as process 1 mounts it at boot (init.c, switch_root)."""
+    try:
+        return mounted(EFIVARS)
+    except RuntimeError:
+        if not private_namespace():
+            raise RuntimeError(f"{EFIVARS}: efivarfs is not mounted") from None
+    command(["mount", "-t", "efivarfs", "-o", "nosuid,nodev,noexec", "efivarfs", str(EFIVARS)])
+    return mounted(EFIVARS)
+
+
 def block(path):
     data = json.loads(command(["lsblk", "--json", "--nodeps", "--paths", "--properties-by", "blkid", "--output",
                                "PATH,TYPE,PKNAME,PARTN,PARTUUID,PARTTYPE,PTTYPE,MAJ:MIN", path]))
@@ -104,7 +127,7 @@ def register(esp, first=False):
     disk, partition, guid = esp_target(esp)
     if not EFI.is_dir():
         raise RuntimeError("not booted in UEFI mode")
-    variables = mounted(EFIVARS)
+    variables = variables_mount()
     if variables.get("fstype") != "efivarfs" or "rw" not in variables.get("options", "").split(",") or \
             not os.access(EFIVARS, os.W_OK):
         raise RuntimeError("EFI variables are unavailable or read-only")

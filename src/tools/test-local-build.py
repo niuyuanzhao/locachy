@@ -6,6 +6,7 @@ no mount, user switch, package manager or PKGBUILD execution takes place.
 """
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -173,6 +174,34 @@ class LocalBuild(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("not a full fingerprint: B467F0BF", result.stderr)
 
+    def test_build_user_keyring_is_opened_and_closed_by_every_build(self):
+        """Locks a build root's keyboxd left (killed with its PID namespace,
+        under another host name) are removed before any key is looked up;
+        the build user's daemons are ended when the build ends, stopped for
+        keys too, so that it leaves none."""
+        (self.bin / "find").unlink()  # the real one: it removes the locks
+        self.command("gpgconf", 'echo "gpgconf $*" >>"$TEST_LOG"')
+        keys = self.home / ".gnupg/public-keys.d"
+        keys.mkdir(parents=True)
+        (keys / "pubring.db").write_text("the keys\n")
+        stale = keys / ".#lk0x00007fc4940022c0.archiso.5"
+        stale.write_text("         5\narchiso\n")
+        os.link(stale, keys / "pubring.db.lock")
+        (self.home / ".gnupg/trustdb.gpg.lock").write_text("         9\narchiso\n")
+        own = "3C2C43D9447D5938EF4551EBE23B7E70B467F0BF"
+        self.info.write_text(self.info.read_text() + "\tvalidpgpkeys = " + own + "\n")
+        result = self.run_stage()
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertEqual(sorted(p.name for p in keys.iterdir()), ["pubring.db"])
+        self.assertEqual((keys / "pubring.db").read_text(), "the keys\n")
+        self.assertFalse((self.home / ".gnupg/trustdb.gpg.lock").exists())
+        calls = self.log.read_text().splitlines()
+        opened = calls.index(next(c for c in calls if c.endswith("command=gpgconf --kill all")))
+        looked = calls.index(next(c for c in calls if c.startswith("gpg --batch --list-keys")))
+        self.assertLess(opened, looked)
+        self.assertEqual(calls[-2:], ["builder HOME=" + str(self.home) + " command=gpgconf --kill all",
+                                      "gpgconf --kill all"])
+
     def test_makepkg_failure_is_propagated(self):
         self.env["TEST_FAIL_BUILD"] = "1"
         result = self.run_stage()
@@ -240,6 +269,56 @@ class LocalBuild(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertTrue("--local takes one package name" in result.stderr or "usage: locachy-build" in result.stderr)
         self.assertFalse(self.log.exists())
+
+
+class BuildUserKeyring(unittest.TestCase):
+    """locachy-build's keyring_open and keyring_close with the real GnuPG, a
+    keyboxd keyring as GnuPG 2.4 makes one, and build roots of their own (a
+    user, PID and host name namespace each): the installer's (host name
+    archiso), then the installed system's (locachy)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="keyring-", dir=SCRATCH)
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name) / "home"
+        (self.home / ".gnupg").mkdir(mode=0o700, parents=True)
+        (self.home / ".gnupg/common.conf").write_text("use-keyboxd\n")
+        text = SOURCE.read_text()
+        self.functions = "".join(text[text.index(f"\n{name}() {{"):].split("\n}\n", 1)[0] + "\n}\n"
+                                 for name in ("keyring_open", "keyring_close"))
+        probe = subprocess.run(["unshare", "--user", "--map-root-user", "--uts", "--pid", "--fork", "true"],
+                               capture_output=True)
+        if probe.returncode or not shutil.which("gpg"):
+            self.skipTest("needs gpg and unprivileged user namespaces")
+
+    def root(self, host, script):
+        """script in a build root named host; its processes are killed with it."""
+        prelude = (f'home={self.home}\nas_builder() {{ env -i HOME="$home" PATH=/usr/bin:/bin "$@"; }}\n'
+                   + self.functions + f"hostname {host}\n")
+        return subprocess.run(["timeout", "120", "unshare", "--user", "--map-root-user", "--uts", "--pid", "--fork",
+                               "--kill-child", "bash", "-c", prelude + script], capture_output=True, text=True)
+
+    def test_a_keyring_left_locked_under_another_host_name_is_read_again(self):
+        made = self.root("archiso", 'as_builder gpg --batch --passphrase "" --quick-gen-key '
+                                    '"Upstream <upstream@example.org>" ed25519 sign never && '
+                                    'as_builder gpg --batch --with-colons --list-keys | awk -F: \'$1 == "fpr" {print $10; exit}\'')
+        self.assertEqual(made.returncode, 0, made.stderr)
+        key = made.stdout.strip()
+        lock = self.home / ".gnupg/public-keys.d/pubring.db.lock"
+        self.assertTrue(lock.exists())  # its keyboxd killed with the root: the lock stays
+        before = self.root("locachy", f"as_builder timeout 20 gpg --batch --list-keys {key}")
+        self.assertNotEqual(before.returncode, 0)  # another host's lock: no key can be read
+        opened = self.root("locachy", f"keyring_open; as_builder gpg --batch --list-keys {key} >/dev/null; s=$?; "
+                                      "keyring_close; exit $s")
+        self.assertEqual(opened.returncode, 0, opened.stderr)
+        self.assertFalse(lock.exists())
+        # Closed in the installer's root, read on the installed system as it is.
+        closed = self.root("archiso", f"keyring_open; as_builder gpg --batch --list-keys {key} >/dev/null; keyring_close")
+        self.assertEqual(closed.returncode, 0, closed.stderr)
+        self.assertFalse(lock.exists())
+        after = self.root("locachy", f"as_builder timeout 20 gpg --batch --list-keys {key}")
+        self.assertEqual(after.returncode, 0, after.stderr)
+
 
 
 if __name__ == "__main__":

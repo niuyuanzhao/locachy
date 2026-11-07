@@ -101,8 +101,13 @@ prepare() {
     _locachy_call_upstream prepare || return
     patch --batch --forward --fuzz=0 -d "$srcdir/labwc" -Np1 -i "$srcdir/clipboard-guard.patch" || return
     patch --batch --forward --fuzz=0 -d "$srcdir/labwc" -Np1 -i "$srcdir/inner-edge-hold.patch" || return
+    patch --batch --forward --fuzz=0 -d "$srcdir/labwc" -Np1 -i "$srcdir/corner-edge-hold.patch" || return
+    patch --batch --forward --fuzz=0 -d "$srcdir/labwc" -Np1 -i "$srcdir/drop-gate.patch" || return
+    patch --batch --forward --fuzz=0 -d "$srcdir/labwc" -Np1 -i "$srcdir/keyboard-locks.patch" || return
     cp -- "$srcdir/locachy-clipboard.c" "$srcdir/labwc/src/locachy-clipboard.c" || return
-    cp -- "$srcdir/locachy-clipboard.h" "$srcdir/labwc/include/locachy-clipboard.h"
+    cp -- "$srcdir/locachy-clipboard.h" "$srcdir/labwc/include/locachy-clipboard.h" || return
+    cp -- "$srcdir/locachy-drop.c" "$srcdir/labwc/src/locachy-drop.c" || return
+    cp -- "$srcdir/locachy-drop.h" "$srcdir/labwc/include/locachy-drop.h"
 }
 build() { _locachy_call_upstream build; }
 check() { _locachy_call_upstream check; }

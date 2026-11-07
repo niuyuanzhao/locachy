@@ -17,7 +17,8 @@
       "noto-fonts-emoji"
     ],
     "rc": {
-      "service_clipboard": "/usr/local/lib/locachy/clipboard --serve"
+      "service_clipboard": "/usr/local/lib/locachy/clipboard --serve",
+      "service_documents": "/usr/local/lib/locachy/locachy-docs"
     },
     "default_standalone": true,
     "default_wizard": true
@@ -104,6 +105,7 @@
     "packages": [
       "noto-fonts-cjk"
     ],
+    "fontconfig_lang": "zh",
     "rc": {},
     "default_standalone": true,
     "default_wizard": false
@@ -205,6 +207,33 @@
     "rc": {
       "service_rclone": "/usr/local/lib/locachy/rclone-client"
     },
+    "default_standalone": false,
+    "default_wizard": false
+  },
+  "ime": {
+    "description": "Input method: English completion (librime, words)",
+    "packages": [
+      "librime",
+      "words"
+    ],
+    "rc": {},
+    "choice": "ime",
+    "default_standalone": false,
+    "default_wizard": false
+  },
+  "ime-zh": {
+    "description": "Chinese Pinyin input (rime-frost), with CJK fonts",
+    "packages": [
+      "rime-frost-git",
+      "rime-pinyin-simp",
+      "rime-wanxiang-gram-zh-hans"
+    ],
+    "requires": [
+      "ime",
+      "cjk-fonts"
+    ],
+    "rc": {},
+    "choice": "ime",
     "default_standalone": false,
     "default_wizard": false
   }

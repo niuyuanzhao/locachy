@@ -6,7 +6,9 @@ set -euo pipefail
 src=$(cd "$(dirname "$0")/.." && pwd)
 out=${LOCACHY_CLIPBOARD_TEST_OUT:-$(mktemp -d /var/tmp/locachy-clipboard-test.XXXXXX)}
 labwc=${LOCACHY_TEST_LABWC:-/usr/bin/labwc}
-mkdir -p "$out/proto"
+mkdir -p "$out/proto" "$out/labwc"
+sed 's|<xwaylandPersistence>yes</xwaylandPersistence>|<xwaylandPersistence>no</xwaylandPersistence>|' \
+    /etc/locachy/labwc/rc.xml >"$out/labwc/rc.xml"
 wayland-scanner client-header "$src/base/protocols/ext-data-control-v1.xml" "$out/proto/ext-data-control-v1-client-protocol.h"
 wayland-scanner private-code "$src/base/protocols/ext-data-control-v1.xml" "$out/proto/ext-data-control-v1-protocol.c"
 cc=(gcc -O2 -g -Wall -Wextra -Werror -I"$src/base/include" -I"$out/proto")
@@ -21,7 +23,7 @@ exec unshare --mount --propagation private --pid --fork --kill-child --mount-pro
     export LOCACHY_CLIPBOARD_SOCKET=/run/locachy/clipboard.sock
     start_display() {
         WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_HEADLESS_OUTPUTS=1 \
-            "$labwc" -C /etc/locachy/labwc -c /etc/locachy/labwc/rc.xml >"$out/labwc.log" 2>&1 &
+            "$labwc" -C "$out/labwc" -c "$out/labwc/rc.xml" >"$out/labwc.log" 2>&1 &
         comp=$!
         for _ in $(seq 1 60); do [ -S "$XDG_RUNTIME_DIR/wayland-0" ] && break; sleep 0.1; done
     }

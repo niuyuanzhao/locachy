@@ -1,8 +1,9 @@
 <?xml version="1.0"?>
 <!-- /etc/locachy/labwc/rc.xml: the shared compositor. Programs and containers
      are opened, frozen and stopped from home, never from here. settings
-     writes a copy with the pointer acceleration, touch screen and terminal
-     key of rc.conf, which labwc uses (locachy-seat passes it with -c). -->
+     writes a copy with the pointer acceleration, touch screen, terminal
+     key and touchpad clicks of rc.conf, which labwc uses (locachy-seat
+     passes it with -c). -->
 <openbox_config xmlns="http://openbox.org/3.4/rc">
   <!-- The shared Xwayland stays running: its access list (the application
        user, from xinitrc) would be gone with a lazily restarted one, whose
@@ -11,9 +12,17 @@
     <xwaylandPersistence>yes</xwaylandPersistence>
   </core>
   <libinput>
+    <!-- One device profile for all: labwc gives a device only the profile
+         that matches it best, so a touchpad one would leave this one out.
+         Tap to click (rc.conf touchpad_clicks: "no" for "press" and
+         "pointing") is set on touchpads only, the click method on
+         clickpads only; settings writes "none" for "pointing" (no soft
+         button areas) and leaves the line out otherwise. -->
     <device>
-      <pointerAcceleration>0.4</pointerAcceleration>
+      <pointerSpeed>0.4</pointerSpeed>
       <naturalScroll>no</naturalScroll>
+      <tap>yes</tap>
+      <clickMethod></clickMethod>
     </device>
   </libinput>
   <keyboard>

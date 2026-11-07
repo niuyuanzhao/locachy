@@ -38,8 +38,8 @@ cd "$out"
 gcc -O2 -Wall -Wextra -Werror "$src/tools/test-xwayland-client.c" -lxcb -o client || exit 1
 base=$(ls "$src"/base/*.c | grep -v "/ime.c$")
 gcc -O2 -Wall -Wextra -D_GNU_SOURCE -DCONFIG_FREETYPE -DCONFIG_NETWORKMANAGER -I"$src/base/include" -I"$src/base" \
-    $(pkg-config --cflags freetype2 libnm) -o locachy-seat "$src/progs/seat.c" $base \
-    $(pkg-config --libs freetype2 libnm) -lwayland-client -lm || exit 1
+    $(pkg-config --cflags freetype2 fontconfig libnm) -o locachy-seat "$src/progs/seat.c" $base \
+    $(pkg-config --libs freetype2 fontconfig libnm) -lwayland-client -lm || exit 1
 wayland-scanner client-header "$src/base/protocols/ext-data-control-v1.xml" proto/ext-data-control-v1-client-protocol.h
 wayland-scanner private-code "$src/base/protocols/ext-data-control-v1.xml" proto/ext-data-control-v1-protocol.c
 gcc -O2 -Wall -Wextra -Werror -I"$src/base/include" -Iproto "$src/progs/clipboard.c" "$src/base/clipboard.c" \

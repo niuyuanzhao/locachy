@@ -42,7 +42,11 @@ UNTRUSTED_KEYS = "var/lib/locachy/builder/untrusted-keys"
 ESP_FILES = {"EFI", "EFI/locachy", "EFI/locachy/locachy.efi", "EFI/BOOT", "EFI/BOOT/BOOTX64.EFI"}
 sys.dont_write_bytecode = True
 
-MODULES = json.loads((SOURCE / "link/modules.json").read_text(encoding="utf-8"))
+# The optional modules chosen as such; the input method's ("choice": "ime")
+# follow the input method choice instead (WITH_IME: make-root.sh adds them,
+# with what they require).
+MODULES = {k: v for k, v in json.loads((SOURCE / "link/modules.json").read_text(encoding="utf-8")).items()
+           if not v.get("choice")}
 FEATURE_PACKAGES = {k: list(v.get("packages") or []) for k, v in MODULES.items()}
 FEATURE_RC_MAP = {k: dict(v.get("rc") or {}) for k, v in MODULES.items()}
 FEATURE_RC = {k: next(iter(rc.items())) for k, rc in FEATURE_RC_MAP.items() if rc}
@@ -51,18 +55,17 @@ APPS = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(APPS)
 
 
-def host_preset_packages(containers, presets_dir=None):
-    base = Path(presets_dir) if presets_dir else (SOURCE / "containers")
+def host_preset_packages(containers, presets_dir=None, known=None):
+    known = known if known is not None else presets(presets_dir)
     pkgs = []
     for cname in containers:
-        p = base / f"{cname}.conf"
-        if not p.is_file():
+        entry = known.get(cname)
+        if not entry or not entry[1]:
             continue
-        text = p.read_text(encoding="utf-8")
-        if re.search(r'^host="1"\s*$', text, re.M):
-            m = re.search(r'^package="([^"]+)"\s*$', text, re.M)
-            if m and m.group(1) not in pkgs:
-                pkgs.append(m.group(1))
+        values = APPS.conf_values(entry[0].read_text(encoding="utf-8"))
+        for name in APPS.packages(values).split():
+            if name not in pkgs:
+                pkgs.append(name)
     return pkgs
 
 
@@ -238,8 +241,26 @@ def write_resume_record(install_id, root, argv, args):
     os.replace(new, RESUME_RECORD)
     # Its app presets beside it, as long as it can be continued: before the
     # target has its own copy, a continued run installs from these (pinned).
+    # A run without app presets (a medium from before them, none fetched)
+    # keeps none, and leaves none of an earlier run.
     if apps_catalog() != RESUME_APPS:
-        APPS.copy_catalog(str(apps_catalog()), str(RESUME_APPS))
+        if apps_meta():
+            APPS.copy_catalog(str(apps_catalog()), str(RESUME_APPS))
+        else:
+            shutil.rmtree(RESUME_APPS, ignore_errors=True)
+
+
+def resume_catalog(root):
+    """The app presets a continued installation installs from: its target's,
+    else those kept beside its record; None without either (or with one that
+    cannot be read, such as an empty one an older installer kept)."""
+    for catalog in (root / APPS_CATALOG, RESUME_APPS):
+        try:
+            if APPS.read_meta(str(catalog)):
+                return catalog
+        except (OSError, ValueError):
+            pass
+    return None
 
 
 def resumed_target(record):
@@ -491,11 +512,76 @@ def valid_hostname(name):
     return bool(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", name or ""))
 
 
+LIVE_NM_CONNECTIONS = Path("/etc/NetworkManager/system-connections")
+
+
 def live_nm_connections():
-    nm_dir = Path("/etc/NetworkManager/system-connections")
-    if not nm_dir.is_dir():
+    if not LIVE_NM_CONNECTIONS.is_dir():
         return []
-    return sorted(p for p in nm_dir.glob("*.nmconnection") if p.is_file() and not p.is_symlink())
+    return sorted(p for p in LIVE_NM_CONNECTIONS.glob("*.nmconnection") if p.is_file() and not p.is_symlink())
+
+
+# Profiles of these types name the live system's interface (NetworkManager
+# writes interface-name when it completes a profile for a device). The
+# installed system names its own (net.ifnames=0, and locachy-net may rename
+# one: network-client), and NetworkManager takes a profile of another name
+# for incompatible with the device: dropped, the profile is for any device
+# of its type. A secret whose flags say an agent keeps it, or nobody (1, 2),
+# is not in the file: the installation says so.
+NM_DEVICE_TYPES = {"wifi", "802-11-wireless", "ethernet", "802-3-ethernet"}
+
+
+def carried_nm_profile(text):
+    """(text for the installed system, notes) of a live keyfile."""
+    section, kind, flags, secrets = "", "", {}, set()
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            section = s[1:-1]
+        elif "=" in s and not s.startswith(("#", ";")):
+            k, v = (x.strip() for x in s.split("=", 1))
+            if section == "connection" and k == "type":
+                kind = v
+            elif k.endswith("-flags") and section in ("wifi-security", "802-1x"):
+                flags[k[:-6]] = v
+            elif section in ("wifi-security", "802-1x"):
+                secrets.add(k)
+    out, section, notes = [], "", []
+    for line in text.splitlines(keepends=True):
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            section = s[1:-1]
+        elif kind in NM_DEVICE_TYPES and section == "connection" and s.split("=", 1)[0].strip() == "interface-name":
+            notes.append(f"not bound to the live system's {s.split('=', 1)[1].strip()}")
+            continue
+        out.append(line)
+    for name, value in sorted(flags.items()):
+        if value.isdigit() and int(value) & 3 and name not in secrets:
+            notes.append(f"its {name} is not saved in it (an agent kept it): connect with nmtui to enter it")
+    return "".join(out), notes
+
+
+def copy_network_profiles(target):
+    """The live system's NetworkManager profiles into the target's, as
+    NetworkManager reads them: root's, 0600 from the start (they hold the
+    secrets), in a directory of root's alone."""
+    sources = live_nm_connections()
+    if not sources:
+        return
+    directory = target / "etc/NetworkManager/system-connections"
+    directory.mkdir(parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    for source in sources:
+        text, notes = carried_nm_profile(source.read_text(encoding="utf-8"))
+        destination = directory / source.name
+        destination.unlink(missing_ok=True)
+        fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            if os.geteuid() == 0:
+                os.fchown(f.fileno(), 0, 0)
+            os.fchmod(f.fileno(), 0o600)
+            f.write(text)
+        print(f"Saved network {source.stem}: copied" + "".join("; " + n for n in notes), flush=True)
 
 
 # The choices and their defaults, one place for the wizard, the full-screen
@@ -528,14 +614,16 @@ def default_containers(features):
 def presets(source_dir=None, catalog=None):
     """name -> (path, host program) of each preset: the system's host
     programs (containers/, host="1" only), then the app presets' catalog's
-    (validated as it is read; never a host program), a name once."""
+    (validated as it is read, with its requested access), a name once."""
     found = {}
     sdir = Path(source_dir) if source_dir else SOURCE / "containers"
     for p in sorted(sdir.glob("*.conf")) if sdir.is_dir() else []:
         if re.search(r'^host="1"\s*$', p.read_text(encoding="utf-8"), re.M):
             found[p.stem] = (p, True)
     for name, path in APPS.read_catalog(catalog or apps_catalog()).items():
-        found.setdefault(name, (Path(path), False))
+        p = Path(path)
+        host = APPS.conf_values(p.read_text(encoding="utf-8")).get("host") == "1"
+        found.setdefault(name, (p, host))
     return found
 
 
@@ -784,7 +872,7 @@ def apply_customizations(args, root):
     for cname in containers:
         if cname not in known:
             raise ValueError("Unknown app: " + cname)
-    host_pkgs = host_preset_packages(containers, host_dir)
+    host_pkgs = host_preset_packages(containers, known=known)
     manifest_changed = False
     manifest = root / "etc/locachy/packages"
     if manifest.is_file():
@@ -830,14 +918,7 @@ def apply_customizations(args, root):
     lt.symlink_to("/usr/share/zoneinfo/" + ("UTC" if tzone == "auto" else tzone))
 
     if getattr(args, "copy_network", False):
-        src_conns = live_nm_connections()
-        if src_conns:
-            dst_nm = etc / "NetworkManager/system-connections"
-            dst_nm.mkdir(parents=True, exist_ok=True)
-            for cf in src_conns:
-                dest_cf = dst_nm / cf.name
-                shutil.copyfile(cf, dest_cf)
-                os.chmod(dest_cf, 0o600)
+        copy_network_profiles(root)
 
     rc = root / "etc/locachy/rc.conf"
     lines = [s for s in rc.read_text().splitlines()
@@ -883,7 +964,7 @@ def apply_customizations(args, root):
 
     # All of the catalog the installed system's (its updates start from it),
     # the chosen presets its configurations.
-    if not pinned and apps_catalog().is_dir():
+    if not pinned and apps_meta():
         APPS.copy_catalog(str(apps_catalog()), str(catalog))
     conf_dir = root / "etc/locachy/containers"
     conf_dir.mkdir(parents=True, exist_ok=True)
@@ -1465,11 +1546,9 @@ def main():
         print("Continuing the installation on " + str(root) + ", where it stopped.", flush=True)
         # The app presets it started with (pinned): its target's, else those
         # kept beside its record; only without either, this run's.
-        if (root / APPS_CATALOG / "CATALOG").is_file():
-            os.environ["LOCACHY_APPS_CATALOG"] = str(root / APPS_CATALOG)
-            os.environ["LOCACHY_APPS"] = ""
-        elif (RESUME_APPS / "CATALOG").is_file():
-            os.environ["LOCACHY_APPS_CATALOG"] = str(RESUME_APPS)
+        pinned = resume_catalog(root)
+        if pinned:
+            os.environ["LOCACHY_APPS_CATALOG"] = str(pinned)
             os.environ["LOCACHY_APPS"] = ""
         elif record.get("apps_commit") and record["apps_commit"] != apps_meta().get("commit"):
             print(f"App presets: this run's, not {str(record['apps_commit'])[:12]} the installation started with "

@@ -36,7 +36,9 @@ static int fixture_kill(pid_t, int);
 #define kill fixture_kill
 #define main settings_main
 #include "../progs/settings.c"
+#include "../base/fontmatch.c" /* without FreeType: fontconfig is not asked */
 #include "i18n-stub.h"
+#include "jobs-double.h"
 #undef main
 #undef kill
 #undef waitpid
@@ -113,6 +115,10 @@ int rc_set(const char *name, const char *value)
 }
 int rc_read(void (*fn)(const char *, const char *, void *), void *arg) { (void)fn; (void)arg; return 0; }
 int monitor_internal(const char *name) { (void)name; return 0; } /* no screens here */
+int monitor_profiles_connected(struct monitor_identity *out, int max)
+{ (void)out; (void)max; abort(); } /* adjust() retains the screen branches, never exercised here */
+int monitor_profiles_save(const struct monitor_profile_entry *entries, int n)
+{ (void)entries; (void)n; abort(); }
 double uptime(void) { static double t; return t += 10; }
 int screen_cols(void) { return 100; }
 int screen_rows(void) { return 30; }
@@ -127,6 +133,7 @@ int key_get(void)
     return (unsigned char)*keys_in++;
 }
 void say(const char *fmt, ...) { (void)fmt; }
+void key_close_kept(void) {} /* no window here: K_CLOSE never comes */
 /* adjust() reaches these for other rows only. */
 void screen_bar(const char *title, const char *ime) { (void)title; (void)ime; abort(); }
 int key_poll_timeout(int fd, int timeout) { (void)fd; (void)timeout; abort(); }

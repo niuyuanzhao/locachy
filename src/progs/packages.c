@@ -25,11 +25,22 @@
  *               selected one, s brings the system to it
  * Above the lists, what the host has installed in all (how many packages,
  * how much, declared, with what they need, foreign; drift and missing).
- * What takes time runs as a job, one at a time, out of this program's task
- * (in the root cgroup: it goes on while home is on the screen, or after this
- * program has ended, and is never frozen); its output is shown in the lower
- * pane (a background of its own, under a title bar: what runs, how it ended,
- * which lines; PgUp/PgDn scroll it) and kept in JOB_LOG.
+ * What takes time is a system job (locachy-jobs, tools/JOBS.md): queued with
+ * the others, one at a time, in a cgroup of its own; it goes on while home
+ * is on the screen, or after this program has ended, is never frozen, and
+ * home lists it. This program follows one of its own at a time; reopened,
+ * it shows the last one it asked for. Its output is shown in the lower pane
+ * (a background of its own, under a title bar: what runs, how it ended,
+ * which lines; PgUp/PgDn scroll it).
+ * The lower pane and the notice can be selected with the pointer, as in term
+ * (textsel.h), and copied: y or Ctrl+C what is selected (else the command
+ * below, else the notice), Y all the pane holds.
+ * A build that stops for source signing keys (locachy-build's "Source key to
+ * trust" lines, exit status 3) is not a failure but a person's decision: the
+ * pane lists the keys (each one's package, fingerprint, and the recipe whose
+ * validpgpkeys name it) and the command that trusts them, which y copies; a
+ * person checks them and runs it as root, and g then continues the job: a
+ * new job, queued, with what is left of it.
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -39,17 +50,17 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <linux/input-event-codes.h>
-#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 #include "base.h"
 #include "files.h"
+#include "jobs.h"
+#include "textsel.h"
 
 #define FG     0xD0D0D0
 #define BG     0x101820
@@ -59,20 +70,22 @@
 #define WARN   0xE0C060
 #define PANE   0x05080C /* the output pane: a terminal's black, apart from the lists */
 
-#ifndef JOB_LOG /* the places: another for each in tools/test-packages.c */
-#define JOB_LOG "/run/locachy/packages.log"
-#define JOB_PID "/run/locachy/packages.pid"
+#ifndef PKG /* the places: another for each in tools/test-packages.c */
 /* The presets: the system's (its host programs), the app presets' catalog
  * (from their own repository; CATALOG in it says which). */
 #define SYSTEM_PRESETS "/usr/local/share/locachy/containers"
 #define APPS_CATALOG   "/var/lib/locachy/apps/catalog"
 #define SOURCE_COMMIT  "/usr/local/lib/locachy/source-commit" /* the LOCachy source installed */
+#define SOURCE_PENDING "/usr/local/lib/locachy/source-pending" /* in place, its update not finished */
 #define RC_FILE RC_CONF /* where updates come from: update_repo, update_branch, apps_repo, apps_branch */
 #define STATE   "/var/lib/locachy/containers"
 #define CONF_DIR CONTAINERS_CONF
 #define PKG "/usr/local/bin/locachy-pkg"
 #define APP "/usr/local/bin/locachy-app"
+#define UNTRUSTED_KEYS "/var/lib/locachy/builder/untrusted-keys" /* locachy-build's: the keys not trusted yet */
+#define RECIPES "/usr/local/src/locachy/pkgbuilds" /* LOCachy's own recipes */
 #endif
+#define TRUST_TOOL "locachy-build --trust-key"
 #define MANIFEST "/etc/locachy/packages"
 /* As locachy-pkg takes them when rc.conf does not say. */
 #define DEFAULT_UPDATE_REPO "https://github.com/niuyuanzhao/locachy.git"
@@ -148,11 +161,30 @@ static int nleaves, nothers, nmissing, ndrift;
 static char closure[16];
 static long long installed = -1, foreign, installed_bytes;
 
-/* The job: ours (a child), or one a previous run left going; how the last
- * one ended (-1 none yet, 0 done, 1 failed, 2 ended: not ours to know). */
-static pid_t job;
-static int job_ours, job_result = -1;
-static char job_label[160];
+/* The job: the queue's id of the one this program follows, until it has
+ * ended (0: none); its output (the last one asked for, ended or not); how
+ * the last one ended (-1 none yet, 0 done, 1 failed, 2 stopped from home);
+ * while it has not ended, its state as the queue said it last (queued,
+ * running, stopping). */
+static int job;
+static int job_result = -1;
+static char job_label[160], job_log[512], job_state[16];
+/* Its kind and arguments (each followed by a NUL in job_args), to continue
+ * it; job_kind "": it cannot be. */
+#define JOB_ARGV (MAX_TARGETS + 8)
+static char job_kind[24], job_args[4096], *job_argv[JOB_ARGV + 1];
+
+/* The source signing keys the last job stopped for, in its output's order;
+ * trusted: no longer in UNTRUSTED_KEYS. */
+#define MAX_KEYS 32
+struct wanted_key {
+    char name[64], fpr[72];
+    int trusted;
+};
+static struct wanted_key wanted[MAX_KEYS];
+static int nwanted;
+
+static char said[512]; /* the notice to copy: the last one said, not what a copy says of itself */
 
 static void say_notice(int error, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void say_notice(int error, const char *fmt, ...)
@@ -162,7 +194,10 @@ static void say_notice(int error, const char *fmt, ...)
     vsnprintf(notice, sizeof notice, fmt, ap);
     va_end(ap);
     notice_error = error;
+    snprintf(said, sizeof said, "%s", notice);
 }
+
+static int valid_packages(const char *s, int max);
 
 /* Fields of a line, split at tabs (empty ones kept). */
 static int fields(char *line, char **f, int max)
@@ -239,21 +274,35 @@ static void follows(char *out, size_t size, const char *repo, const char *branch
 
 /* The two lines of where updates come from: what is installed first, the
  * repository last (a long one cuts only itself). */
-static void load_sources(void)
+/* The first word of file path's first line, or "". */
+static void read_word(const char *path, char *out, size_t size)
 {
-    char rc[4][256] = { DEFAULT_UPDATE_REPO, "", DEFAULT_APPS_REPO, "" }, catalog[2][64] = { "", "" };
-    char from[400], commit[64] = "", installed[160], path[512];
-    conf_read(RC_FILE, source_value, rc);
-    FILE *f = fopen(SOURCE_COMMIT, "re");
+    out[0] = '\0';
+    FILE *f = fopen(path, "re");
     if (f) {
-        if (!fgets(commit, sizeof commit, f)) {
-            commit[0] = '\0';
+        if (!fgets(out, (int)size, f)) {
+            out[0] = '\0';
         }
         fclose(f);
     }
-    commit[strcspn(commit, " \t\r\n")] = '\0';
+    out[strcspn(out, " \t\r\n")] = '\0';
+}
+
+static void load_sources(void)
+{
+    char rc[4][256] = { DEFAULT_UPDATE_REPO, "", DEFAULT_APPS_REPO, "" }, catalog[2][64] = { "", "" };
+    char from[400], commit[64], pending[64], installed[160], path[512];
+    conf_read(RC_FILE, source_value, rc);
+    read_word(SOURCE_COMMIT, commit, sizeof commit);
+    read_word(SOURCE_PENDING, pending, sizeof pending);
     follows(from, sizeof from, rc[0], rc[1]);
-    if (commit[0]) {
+    if (commit[0] && pending[0]) { /* an update that stopped: in place, not all applied */
+        snprintf(source_line, sizeof source_line, _("LOCachy source: %.7s installed, %.7s not finished; updates: %s"),
+                 commit, pending, from);
+    } else if (pending[0]) {
+        snprintf(source_line, sizeof source_line,
+                 _("LOCachy source: its commit is not recorded, %.7s not finished; updates: %s"), pending, from);
+    } else if (commit[0]) {
         snprintf(source_line, sizeof source_line, _("LOCachy source: %.7s installed; updates: %s"), commit, from);
     } else {
         snprintf(source_line, sizeof source_line, _("LOCachy source: its commit is not recorded; updates: %s"), from);
@@ -460,16 +509,12 @@ static void load_containers(void)
         snprintf(c->name, sizeof c->name, "%.*s", (int)(len - 5), e->d_name);
         snprintf(path, sizeof path, "%s/%s", CONF_DIR, e->d_name);
         conf_read(path, container_value, c);
-        if (c->host) { /* a host program: its package is the host's (the Host page) */
-            nconts--;
-            continue;
-        }
         snprintf(path, sizeof path, "%s/%s/built", STATE, c->name);
         conf_read(path, built_value, c);
         snprintf(path, sizeof path, "%s/%s/upper.prev", STATE, c->name);
         c->prev = stat(path, &st) == 0;
         read_state(c->name, c->state, sizeof c->state);
-        load_packages(c);
+        if (!c->host) load_packages(c);
     }
     if (dir) {
         closedir(dir);
@@ -559,117 +604,365 @@ static const char *state_label(const char *state)
            strcmp(state, "running") == 0 ? _("running") : state;
 }
 
-/* The job: argv, its output in JOB_LOG, out of this program's task. */
-static void start_job(const char *label, char *const argv[])
+/* The job's kind and arguments, kept to continue it. Too many to keep:
+ * none, it cannot be continued. */
+static void keep_args(const char *kind, char *const args[])
 {
+    size_t len = 0;
+    int n = 0;
+    snprintf(job_kind, sizeof job_kind, "%s", kind);
+    for (; args[n]; n++) {
+        size_t size = strlen(args[n]) + 1;
+        if (n == JOB_ARGV || len + size > sizeof job_args) {
+            job_kind[0] = '\0';
+            n = 0;
+            break;
+        }
+        memcpy(job_args + len, args[n], size);
+        job_argv[n] = job_args + len;
+        len += size;
+    }
+    job_argv[n] = NULL;
+}
+
+/* The queue's kind of argv (PKG's or APP's command, its own arguments from
+ * argv[2]); NULL if it is none. */
+static const char *job_kind_of(char *const argv[])
+{
+    static const char *const pkg[][2] = { { "install", "pkg-install" }, { "remove", "pkg-remove" },
+                                          { "sync", "pkg-sync" }, { "plan", "pkg-plan" }, { "apply", "pkg-apply" } };
+    static const char *const app[][2] = { { "build", "app-build" }, { "rollback", "app-rollback" },
+                                          { "remove", "app-remove" } };
+    int of_pkg = strcmp(argv[0], PKG) == 0;
+    if (!argv[1] || (!of_pkg && strcmp(argv[0], APP) != 0)) {
+        return NULL;
+    }
+    for (size_t i = 0; of_pkg && i < sizeof pkg / sizeof pkg[0]; i++) {
+        if (strcmp(argv[1], pkg[i][0]) == 0) return pkg[i][1];
+    }
+    for (size_t i = 0; !of_pkg && i < sizeof app / sizeof app[0]; i++) {
+        if (strcmp(argv[1], app[i][0]) == 0) return app[i][1];
+    }
+    return NULL;
+}
+
+/* A system job of kind with args (continued: what was left of one that
+ * stopped for keys), the one this program follows now. */
+static void submit_job(const char *label, const char *kind, char *const args[], int continued)
+{
+    char why[256] = "";
+    int id = 0, position = 0;
     if (job) {
         say_notice(1, _("Wait: %s is still running."), job_label);
         return;
     }
-    mkdir("/run/locachy", 0755);
-    pid_t pid = fork();
-    if (pid == 0) {
-        setsid();
-        int cg = open("/sys/fs/cgroup/cgroup.procs", O_WRONLY | O_CLOEXEC);
-        if (cg >= 0) {
-            if (write(cg, "0", 1) < 0) {
-            }
-            close(cg);
-        }
-        int out = open(JOB_LOG, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-        int null = open("/dev/null", O_RDONLY | O_CLOEXEC);
-        if (out >= 0) {
-            dup2(out, STDOUT_FILENO);
-            dup2(out, STDERR_FILENO);
-        }
-        if (null >= 0) {
-            dup2(null, STDIN_FILENO);
-        }
-        execv(argv[0], argv);
-        _exit(127);
+    if (jobs_submit(kind, (const char *const *)args, &id, &position, why, sizeof why) < 0) {
+        say_notice(1, _("Cannot start %s: %s"), label, why);
+        return;
     }
-    if (pid < 0) {
+    job = id;
+    job_result = -1;
+    snprintf(job_state, sizeof job_state, "%s", position ? "queued" : "running");
+    log_from = 0;
+    show_log = 1;
+    nwanted = 0;
+    snprintf(job_label, sizeof job_label, "%s", label);
+    jobs_log_path(id, job_log, sizeof job_log);
+    keep_args(kind, args);
+    if (continued) {
+        say_notice(0, _("%s: continuing; it goes on if you leave."), label);
+    } else if (position) {
+        say_notice(0, _("%s: queued (%d before it); it goes on if you leave."), label, position);
+    } else {
+        say_notice(0, _("%s: running; it goes on if you leave."), label);
+    }
+}
+
+/* The job argv (PKG's or APP's command). */
+static void start_job(const char *label, char *const argv[])
+{
+    const char *kind = job_kind_of(argv);
+    if (!kind) {
         say_notice(1, _("Cannot start %s."), label);
         return;
     }
-    job = pid;
-    job_ours = 1;
-    job_result = -1;
-    log_from = 0;
-    show_log = 1;
-    snprintf(job_label, sizeof job_label, "%s", label);
-    FILE *f = fopen(JOB_PID, "we");
-    if (f) {
-        fprintf(f, "%d %s\n", (int)pid, label);
-        fclose(f);
-    }
-    say_notice(0, _("%s: running; it goes on if you leave."), label);
+    submit_job(label, kind, argv + 2, 0);
 }
 
-/* A job left going by a previous run of this program. */
-static void find_job(void)
+/* A fingerprint, as locachy-build writes them: 40 or 64 hexadecimal digits,
+ * upper case (nothing else goes into a command to copy). */
+static int valid_fpr(const char *s)
 {
-    FILE *f = fopen(JOB_PID, "re");
-    int pid;
-    char label[160] = "";
-    if (f && fscanf(f, "%d %159[^\n]", &pid, label) >= 1 && pid > 1 && kill(pid, 0) == 0) {
-        job = pid;
-        job_ours = 0;
-        snprintf(job_label, sizeof job_label, "%s", label);
-        say_notice(0, _("%s: still running."), label);
+    size_t n = strspn(s, "0123456789ABCDEF");
+    return (n == 40 || n == 64) && s[n] == '\0';
+}
+
+/* The source signing keys the last job stopped for: locachy-build's "Source
+ * key to trust: NAME FINGERPRINT" lines in its output; how many. */
+static int parse_keys(void)
+{
+    char *line = NULL, name[64], fpr[72], more;
+    size_t cap = 0;
+    FILE *f = job_log[0] ? fopen(job_log, "re") : NULL;
+    nwanted = 0;
+    while (f && getline(&line, &cap, f) > 0) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (strncmp(line, "Source key to trust: ", 21) != 0 || sscanf(line + 21, "%63s %71s %c", name, fpr, &more) != 2 ||
+            !valid_fpr(fpr) || !valid_packages(name, 1)) {
+            continue;
+        }
+        int known = 0;
+        for (int i = 0; i < nwanted && !known; i++) {
+            known = strcmp(wanted[i].name, name) == 0 && strcmp(wanted[i].fpr, fpr) == 0;
+        }
+        if (!known && nwanted < MAX_KEYS) {
+            memcpy(wanted[nwanted].name, name, sizeof name);
+            memcpy(wanted[nwanted].fpr, fpr, sizeof fpr);
+            wanted[nwanted++].trusted = 0;
+        }
+    }
+    free(line);
+    if (f) {
+        fclose(f);
+    }
+    return nwanted;
+}
+
+/* Which of them a person has trusted since: locachy-build --trust-key takes
+ * each one it trusts out of UNTRUSTED_KEYS. Without that file none is taken
+ * as trusted. */
+static void keys_refresh(void)
+{
+    char text[8192];
+    FILE *f = fopen(UNTRUSTED_KEYS, "re");
+    size_t n = f ? fread(text, 1, sizeof text - 2, f) : 0;
+    if (n && text[n - 1] != '\n') {
+        text[n++] = '\n';
+    }
+    text[n] = '\0';
+    for (int i = 0; i < nwanted; i++) {
+        char line[80];
+        snprintf(line, sizeof line, " %s\n", wanted[i].fpr);
+        wanted[i].trusted = f && !strstr(text, line);
     }
     if (f) {
         fclose(f);
     }
 }
 
-/* The command that trusts the source signing keys a build stopped for
- * (locachy-build's "Trust them: ..." in the job's output), or "". */
+static int by_text(const void *a, const void *b)
+{
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+/* The command that trusts those not trusted yet, as locachy-build prints it
+ * ("Trust them: ..."): their fingerprints sorted, each once; "" if none is
+ * left. */
+#define COMMAND_MAX (sizeof TRUST_TOOL + MAX_KEYS * 65)
 static void trust_command(char *out, size_t size)
 {
-    char buf[65536];
-    out[0] = '\0';
-    int fd = open(JOB_LOG, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return;
-    off_t end = lseek(fd, 0, SEEK_END);
-    ssize_t got = pread(fd, buf, sizeof buf - 1, end > (off_t)sizeof buf - 1 ? end - (off_t)sizeof buf + 1 : 0);
-    close(fd);
-    if (got <= 0) return;
-    buf[got] = '\0';
-    for (char *s = strstr(buf, "Trust them: "); s; s = strstr(s + 1, "Trust them: ")) {
-        if (s != buf && s[-1] != '\n') continue;
-        size_t n = strcspn(s + 12, "\r\n");
-        snprintf(out, size, "%.*s", (int)n, s + 12);
+    const char *fprs[MAX_KEYS];
+    int n = 0;
+    for (int i = 0; i < nwanted; i++) {
+        int known = wanted[i].trusted;
+        for (int k = 0; k < n && !known; k++) {
+            known = strcmp(fprs[k], wanted[i].fpr) == 0;
+        }
+        if (!known) {
+            fprs[n++] = wanted[i].fpr;
+        }
+    }
+    qsort(fprs, (size_t)n, sizeof fprs[0], by_text);
+    size_t len = (size_t)snprintf(out, size, "%s", n ? TRUST_TOOL : "");
+    for (int i = 0; i < n && len < size; i++) {
+        len += (size_t)snprintf(out + len, size - len, " %s", fprs[i]);
+    }
+}
+
+/* A fingerprint as gpg shows it: groups of four, two spaces at the middle. */
+static void group_fpr(const char *fpr, char *out, size_t size)
+{
+    size_t n = strlen(fpr), len = 0;
+    for (size_t i = 0; i < n && len + 3 < size; i++) {
+        if (i && i % 4 == 0) {
+            out[len++] = ' ';
+            if (i == n / 2) {
+                out[len++] = ' ';
+            }
+        }
+        out[len++] = fpr[i];
+    }
+    out[len] = '\0';
+}
+
+/* Where a key comes from: the validpgpkeys of the recipe it was named in,
+ * LOCachy's own of that name, else the AUR's (of that package base). */
+static void key_source(const char *name, char *out, size_t size)
+{
+    char path[400];
+    struct stat st;
+    snprintf(path, sizeof path, "%s/%.63s", RECIPES, name);
+    if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+        /* TRANSLATORS: validpgpkeys is a recipe's (PKGBUILD's) field; keep it. */
+        snprintf(out, size, _("validpgpkeys of LOCachy's recipe: %s"), path);
+    } else {
+        snprintf(path, sizeof path, "https://aur.archlinux.org/cgit/aur.git/tree/PKGBUILD?h=%.63s", name);
+        /* TRANSLATORS: validpgpkeys is a recipe's (PKGBUILD's) field; keep it. */
+        snprintf(out, size, _("validpgpkeys of the AUR's recipe: %s"), path);
+    }
+}
+
+/* The targets of locachy-pkg apply targets[0..n) its output says it has
+ * applied ("===> NAME: done"): done[i] for targets[i]. */
+static void targets_done(char *const targets[], int n, int *done)
+{
+    char *line = NULL;
+    size_t cap = 0;
+    FILE *f = job_log[0] ? fopen(job_log, "re") : NULL;
+    while (f && getline(&line, &cap, f) > 0) {
+        line[strcspn(line, "\r\n")] = '\0';
+        size_t len = strlen(line);
+        if (strncmp(line, "===> ", 5) != 0 || len < 11 || strcmp(line + len - 6, ": done") != 0) {
+            continue;
+        }
+        for (int i = 0; i < n; i++) {
+            if (strlen(targets[i]) == len - 11 && strncmp(line + 5, targets[i], len - 11) == 0) {
+                done[i] = 1;
+            }
+        }
+    }
+    free(line);
+    if (f) {
+        fclose(f);
+    }
+}
+
+/* g: the job that stopped for source signing keys, once a person has
+ * trusted them, on from where it stopped (locachy-build checks them again,
+ * and stops again for any not trusted), as a new job. locachy-pkg apply
+ * keeps the plan it stopped with: the targets it applied are not applied
+ * again, the others are, from that plan. Another job (a container's build,
+ * an install) is asked for again as it was: its builds check their keys
+ * before anything is built. */
+static void continue_job(void)
+{
+    char args[sizeof job_args], *argv[JOB_ARGV + 1], label[160], kind[sizeof job_kind];
+    int n = 0, done[JOB_ARGV] = { 0 };
+    if (!job_kind[0]) {
+        say_notice(1, _("%s cannot be continued: its arguments were not kept."), job_label);
+        return;
+    }
+    memcpy(args, job_args, sizeof args); /* submit_job keeps the new ones in job_args */
+    for (; job_argv[n]; n++) {
+        argv[n] = args + (job_argv[n] - job_args);
+    }
+    argv[n] = NULL;
+    if (n > 0 && strcmp(job_kind, "pkg-apply") == 0) {
+        int kept = 0;
+        targets_done(argv, n, done);
+        for (int i = 0; i < n; i++) {
+            if (!done[i]) {
+                argv[kept++] = argv[i];
+            }
+        }
+        if (kept > 0) { /* none left: all of them again, never apply without targets (all of the plan) */
+            argv[kept] = NULL;
+        }
+    }
+    snprintf(label, sizeof label, "%s", job_label);
+    snprintf(kind, sizeof kind, "%s", job_kind);
+    submit_job(label, kind, argv, 1);
+}
+
+/* A job's label as start_job's callers give it, from its kind and
+ * arguments (a new run of this program knows the job from the queue). */
+static void label_of(const struct jobs_row *r, char *out, size_t size)
+{
+    char name[sizeof r->args];
+    const char *a = r->args;
+    size_t len = strlen(a);
+    int host = 0, data = len > 7 && strcmp(a + len - 7, " --data") == 0;
+    snprintf(name, sizeof name, "%.*s", (int)(data ? len - 7 : len), a); /* a container's name alone */
+    for (int i = 0; i < nconts; i++) {
+        host |= strcmp(conts[i].name, a) == 0 && conts[i].host;
+    }
+    if (strcmp(r->kind, "pkg-apply") == 0) {
+        snprintf(out, size, "%s %s", _("Apply:"), a);
+    } else if (strcmp(r->kind, "pkg-plan") == 0) {
+        snprintf(out, size, "%s", _("check for updates"));
+    } else if (strcmp(r->kind, "pkg-sync") == 0) {
+        snprintf(out, size, "%s", _("bring the host to its manifest"));
+    } else if (strcmp(r->kind, "pkg-install") == 0) {
+        snprintf(out, size, _("add %s to the host"), a);
+    } else if (strcmp(r->kind, "pkg-remove") == 0) {
+        snprintf(out, size, _("remove %s from the host"), a);
+    } else if (strcmp(r->kind, "app-build") == 0) {
+        snprintf(out, size, host ? _("install %s on the host") : _("build %s"), a);
+    } else if (strcmp(r->kind, "app-rollback") == 0) {
+        snprintf(out, size, _("roll back %s"), a);
+    } else if (strcmp(r->kind, "app-remove") == 0) {
+        snprintf(out, size, data ? _("remove %s and its home") : _("remove %s"), name);
+    } else {
+        snprintf(out, size, "%s %s", r->kind, a);
+    }
+}
+
+/* The last job this program asked for, as the queue has it: followed again
+ * while it has not ended; stopped for source signing keys, to be continued;
+ * else its output for l. */
+static void find_job(void)
+{
+    static struct jobs_row rows[JOBS_ROWS_MAX];
+    char text[sizeof rows[0].args], *args[JOB_ARGV + 1], *save = NULL;
+    int n = jobs_mine(rows, JOBS_ROWS_MAX), k = 0;
+    if (n <= 0) {
+        return;
+    }
+    const struct jobs_row *r = &rows[n - 1];
+    label_of(r, job_label, sizeof job_label);
+    jobs_log_path(r->id, job_log, sizeof job_log);
+    snprintf(text, sizeof text, "%s", r->args);
+    for (char *w = strtok_r(text, " ", &save); w && k < JOB_ARGV; w = strtok_r(NULL, " ", &save)) {
+        args[k++] = w;
+    }
+    args[k] = NULL;
+    keep_args(r->kind, args);
+    if (!jobs_ended(r)) {
+        job = r->id;
+        snprintf(job_state, sizeof job_state, "%s", r->state);
+        say_notice(0, _("%s: %s; it goes on if you leave."), job_label, jobs_state_label(r->state));
+    } else if (strcmp(r->state, "keys") == 0 && parse_keys()) {
+        job_result = 1;
+        show_log = 1;
+        say_notice(1, _("%s: stopped for source signing keys to trust (below); none is trusted by itself."), job_label);
     }
 }
 
 static void check_job(void)
 {
-    int status = 0;
-    if (!job) {
+    struct jobs_row r;
+    char why[256];
+    if (!job || jobs_status(job, &r, why, sizeof why) < 0) {
         return;
     }
-    if (job_ours ? waitpid(job, &status, WNOHANG) != job : kill(job, 0) == 0) {
+    if (!jobs_ended(&r)) {
+        snprintf(job_state, sizeof job_state, "%s", r.state); /* queued until the one before it ends */
         return;
     }
-    int ok = job_ours && WIFEXITED(status) && WEXITSTATUS(status) == 0;
-    job_result = !job_ours ? 2 : ok ? 0 : 1;
-    if (!job_ours) {
-        say_notice(0, _("%s: ended; its output is below."), job_label);
+    int ok = strcmp(r.state, "done") == 0;
+    job_result = ok ? 0 : strcmp(r.state, "cancelled") == 0 ? 2 : 1;
+    job = 0;
+    if (!ok && parse_keys()) {
+        /* Not a failure: a person's decision, which nothing makes by itself. */
+        say_notice(1, _("%s: stopped for source signing keys to trust (below); none is trusted by itself."), job_label);
+    } else if (job_result == 2) {
+        /* TRANSLATORS: home is the program's name; keep it. */
+        say_notice(1, _("%s: stopped from home; its output is below."), job_label);
     } else if (ok) {
         say_notice(0, _("%s: done."), job_label);
     } else {
-        char trust[512];
-        trust_command(trust, sizeof trust);
-        if (trust[0]) {
-            /* Not trusted by anything but a person: the keys are in the output. */
-            say_notice(1, _("Trust the keys below as root, after checking them: %s; then apply again."), trust);
-        } else {
-            say_notice(1, _("%s: failed; its output is below (and in %s)."), job_label, JOB_LOG);
-        }
+        say_notice(1, _("%s: failed; its output is below (and in %s)."), job_label, job_log);
     }
-    job = 0;
-    unlink(JOB_PID);
     load_all();
     char build_prefix[32];
     snprintf(build_prefix, sizeof build_prefix, _("build %s"), "");
@@ -683,35 +976,45 @@ static void check_job(void)
     }
 }
 
-/* The last lines of the job's output (a line rewritten with \r: its last
- * form), from the end, skipping from of them; n of them at most. How many
- * lines there are (of its last 32 KiB) into total. */
-static int log_lines(char lines[][256], int n, int from, int *total)
+/* The job's output as the pane has it: its last 32 KiB, read into log_buf,
+ * a line each in log_all (a line rewritten with \r: its last form); how
+ * many. */
+#define LOG_LINES 2048
+static char log_buf[32768], *log_all[LOG_LINES];
+
+static int log_split(void)
 {
-    static char buf[32768];
-    *total = 0;
-    int fd = open(JOB_LOG, O_RDONLY | O_CLOEXEC);
+    int fd = job_log[0] ? open(job_log, O_RDONLY | O_CLOEXEC) : -1;
     if (fd < 0) {
         return 0;
     }
     off_t end = lseek(fd, 0, SEEK_END);
-    off_t start = end > (off_t)sizeof buf - 1 ? end - (off_t)sizeof buf + 1 : 0;
-    ssize_t got = pread(fd, buf, sizeof buf - 1, start);
+    off_t start = end > (off_t)sizeof log_buf - 1 ? end - (off_t)sizeof log_buf + 1 : 0;
+    ssize_t got = pread(fd, log_buf, sizeof log_buf - 1, start);
     close(fd);
     if (got <= 0) {
         return 0;
     }
-    buf[got] = '\0';
-    char *all[2048];
+    log_buf[got] = '\0';
     int count = 0;
-    for (char *s = strtok(buf, "\n"); s && count < 2048; s = strtok(NULL, "\n")) {
+    char *save = NULL;
+    for (char *s = strtok_r(log_buf, "\n", &save); s && count < LOG_LINES; s = strtok_r(NULL, "\n", &save)) {
         char *cr = strrchr(s, '\r');
         while (cr && cr[1] == '\0' && cr > s) { /* a line ending in \r */
             *cr = '\0';
             cr = strrchr(s, '\r');
         }
-        all[count++] = cr ? cr + 1 : s;
+        log_all[count++] = cr ? cr + 1 : s;
     }
+    return count;
+}
+
+/* The last lines of the job's output, from the end, skipping from of them;
+ * n of them at most. How many lines there are into total. */
+static int log_lines(char lines[][256], int n, int from, int *total)
+{
+    int count = log_split();
+    char **all = log_all;
     *total = count;
     int last = count - from, first = last - n < 0 ? 0 : last - n, k = 0;
     for (int i = first; i < last && i >= 0; i++) {
@@ -774,10 +1077,12 @@ static void row_text(int i, char *line, size_t size, int *dim)
         char bbuf[96], bpad[96], cbuf[32], pbuf[96], ppad[96], bytes[32];
         ui_pad(sbuf, sizeof sbuf, state_label(c->state), 8);
         ui_pad(nbuf, sizeof nbuf, strcmp(c->network, "1") == 0 ? C_("row", "network") : "", 8);
-        ui_pad(cbuf, sizeof cbuf, strcmp(c->camera, "1") == 0 ? C_("row", "camera") : "", 7);
+        ui_pad(cbuf, sizeof cbuf, c->host ? _("host") : strcmp(c->camera, "1") == 0 ? C_("row", "camera") : "", 7);
         snprintf(bbuf, sizeof bbuf, _("built %s"), ui_pad(bpad, sizeof bpad, c->built[0] ? c->built : _("never"), 19));
         pbuf[0] = '\0';
-        if (c->built[0] || c->pkg_count) { /* what its build installed over the host's */
+        if (c->host) {
+            snprintf(pbuf, sizeof pbuf, "%s", _("packages on the host"));
+        } else if (c->built[0] || c->pkg_count) { /* what its build installed over the host's */
             human_size(c->pkg_bytes, bytes, sizeof bytes);
             snprintf(pbuf, sizeof pbuf, P_("%d package, %s", "%d packages, %s", c->pkg_count), c->pkg_count, bytes);
         }
@@ -804,11 +1109,175 @@ static uint32_t log_color(const char *s)
     return strcasestr(s, "warning") ? WARN : FG;
 }
 
-/* The pane's title: a bar across, apart from the lists above. */
-static void pane_title(int row, const char *text)
+/* The pane's title: a bar across, apart from the lists above; with Y when
+ * the pane has something to copy. */
+static void pane_title(int row, const char *text, int copy)
 {
+    char line[700];
+    /* TRANSLATORS: Y is the Y key (Shift+y); keep "Y: ". */
+    snprintf(line, sizeof line, "%s%s%s", text, copy ? "   " : "", copy ? _("Y: copy all") : "");
     screen_fill(0, row, screen_cols(), 1, DIM);
-    screen_text(1, row, text, BG, DIM);
+    textsel_put(1, row, line, BG, DIM);
+}
+
+/* A line of the pane at row *r (and the row after it next), above bottom. */
+static void pane_put(int *r, int bottom, int col, const char *text, uint32_t color)
+{
+    if (*r < bottom) {
+        textsel_put(col, (*r)++, text, color, PANE);
+    }
+}
+
+/* text from row *r at col, cut into lines as wide as the pane has room for
+ * from col (by cells: a fingerprint's origin, an address with no space to
+ * break at). */
+static void pane_wrap(int *r, int bottom, int col, const char *text, uint32_t color)
+{
+    char line[600], ch[5];
+    int width = screen_cols() - col - 1 > 8 ? screen_cols() - col - 1 : 8;
+    while (*text && *r < bottom) {
+        size_t n = 0;
+        int cells = 0;
+        while (text[n]) {
+            size_t len = 1;
+            while (len < 4 && ((unsigned char)text[n + len] & 0xC0) == 0x80) len++;
+            memcpy(ch, text + n, len);
+            ch[len] = '\0';
+            int w = ui_cells(ch);
+            if (n > 0 && (cells + w > width || n + len >= sizeof line)) break;
+            cells += w;
+            n += len;
+        }
+        snprintf(line, sizeof line, "%.*s", (int)n, text);
+        pane_put(r, bottom, col, line, color);
+        text += n;
+    }
+}
+
+/* Where the command's line starting at command is cut, width cells wide: at
+ * a space, never inside a fingerprint. */
+static size_t command_cut(const char *command, int width)
+{
+    size_t len = strlen(command), cut = len;
+    if ((int)len > width && width > 2) {
+        for (cut = (size_t)width - 2; cut > 0 && command[cut] != ' '; cut--) {
+        }
+        cut = cut ? cut : strcspn(command, " ");
+    }
+    return cut;
+}
+
+/* How many rows draw_command takes for command. */
+static int command_rows(const char *command)
+{
+    int n = 0;
+    while (*command) {
+        size_t cut = command_cut(command, screen_cols() - 8);
+        command += cut + (command[cut] == ' ');
+        n++;
+    }
+    return n;
+}
+
+/* The command that trusts the keys, from row r: a line, or more when it is
+ * wider than the pane, each but the last ending in " \" (a shell takes them
+ * as one, selected and pasted together): the row after it. */
+static int draw_command(int r, int bottom, const char *command)
+{
+    char line[COMMAND_MAX + 8];
+    int width = screen_cols() - 8, col = 4;
+    while (*command && r < bottom) {
+        size_t cut = command_cut(command, width);
+        snprintf(line, sizeof line, "%.*s%s", (int)cut, command, command[cut] ? " \\" : "");
+        pane_put(&r, bottom, col, line, ACCENT);
+        command += cut + (command[cut] == ' ');
+        col = 6;
+    }
+    return r;
+}
+
+/* The source signing keys the job stopped for, from row r of the pane: each
+ * one's package, fingerprint and where it comes from; the command that
+ * trusts those not trusted yet, or, all trusted, how to go on. The row after
+ * them. */
+/* Key i's line (package, fingerprint as gpg groups it, whether trusted now)
+ * into line, its origin's into origin; the origin's column after the line's
+ * start. */
+static int key_lines(int i, char *line, size_t lsize, char *origin, size_t osize)
+{
+    char fpr[96], pad[160];
+    group_fpr(wanted[i].fpr, fpr, sizeof fpr);
+    ui_pad(pad, sizeof pad, wanted[i].name, 24);
+    snprintf(line, lsize, "%s %s%s%s", pad, fpr, wanted[i].trusted ? "   " : "",
+             wanted[i].trusted ? _("trusted now") : "");
+    key_source(wanted[i].name, origin, osize);
+    return ui_cells(pad) + 1;
+}
+
+static const char *keys_waiting(void)
+{
+    return _("Waiting for you: source signing keys to trust. None is trusted by itself.");
+}
+
+static const char *keys_all_trusted(void)
+{
+    /* TRANSLATORS: g is the g key; keep it. */
+    return _("All of them are trusted now: g continues where it stopped.");
+}
+
+static const char *keys_check(void)
+{
+    return _("Check each with its upstream project; then run this as root (admin, from home):");
+}
+
+static const char *keys_then(void)
+{
+    /* TRANSLATORS: y and g are the y and g keys; keep them. */
+    return _("y copies the command; once they are trusted, g continues where it stopped.");
+}
+
+/* The keys and their origins whole (each origin wrapped to the pane, not
+ * cut at its edge), the rows of what follows them kept for it: the command
+ * and how to go on are never pushed out of a short pane by long origins. */
+static int draw_keys(int r, int bottom)
+{
+    char line[600], origin[600], command[COMMAND_MAX];
+    keys_refresh();
+    trust_command(command, sizeof command);
+    pane_put(&r, bottom, 2, keys_waiting(), WARN);
+    int tail = command[0] ? command_rows(command) + 2 : 1;
+    int keys_bottom = bottom - tail > r ? bottom - tail : bottom;
+    for (int i = 0; i < nwanted; i++) {
+        int at = key_lines(i, line, sizeof line, origin, sizeof origin);
+        pane_put(&r, keys_bottom, 4, line, wanted[i].trusted ? DIM : FG);
+        pane_wrap(&r, keys_bottom, 4 + at, origin, DIM);
+    }
+    if (!command[0]) {
+        pane_put(&r, bottom, 2, keys_all_trusted(), ACCENT);
+        return r;
+    }
+    pane_put(&r, bottom, 2, keys_check(), FG);
+    r = draw_command(r, bottom, command);
+    pane_put(&r, bottom, 2, keys_then(), DIM);
+    return r;
+}
+
+/* What draw_keys shows, a line each, as text (the command on one line). */
+static void key_list_text(FILE *out)
+{
+    char line[600], origin[600], command[COMMAND_MAX];
+    keys_refresh();
+    trust_command(command, sizeof command);
+    fprintf(out, "%s\n", keys_waiting());
+    for (int i = 0; i < nwanted; i++) {
+        int at = key_lines(i, line, sizeof line, origin, sizeof origin);
+        fprintf(out, "  %s\n  %*s%s\n", line, at, "", origin);
+    }
+    if (command[0]) {
+        fprintf(out, "%s\n  %s\n%s\n", keys_check(), command, keys_then());
+    } else {
+        fprintf(out, "%s\n", keys_all_trusted());
+    }
 }
 
 #define CONT_ITEMS 10 /* the lines of a container's configuration and build in its details */
@@ -831,8 +1300,9 @@ static uint32_t detail_line(const struct container *c, int i, char *line, size_t
             { _("package"), c->package }, { _("extras"), c->extras },
             { _("command"), c->command }, { _("arguments"), c->arguments },
             { C_("detail", "network"), strcmp(c->network, "1") == 0 ? _("yes (locachy-net)") : _("no") },
-            { C_("detail", "camera"), strcmp(c->camera, "1") == 0 ? _("yes (the cameras, as they come and go)") : _("no") },
-            { _("directories"), c->directories },
+            { c->host ? _("Access") : C_("detail", "camera"), c->host ? _("real system and full home") :
+                strcmp(c->camera, "1") == 0 ? _("yes (the cameras, as they come and go)") : _("no") },
+            { c->host ? _("devices") : _("directories"), c->host ? _("by your permissions") : c->directories },
             { _("state"), state_label(c->state) }, { _("built"), c->built[0] ? c->built : _("never") },
             { _("previous build"), c->prev ? _("kept (r rolls back to it)") : _("none") },
         };
@@ -840,7 +1310,10 @@ static uint32_t detail_line(const struct container *c, int i, char *line, size_t
         return FG;
     }
     human_size(c->pkg_bytes, bytes, sizeof bytes);
-    if (i == CONT_ITEMS && !c->built[0] && !c->pkg_count) {
+    if (i == CONT_ITEMS && c->host) {
+        snprintf(line, size, "%s", _("Its packages are on the host; their versions and sizes are on the Host page."));
+        return DIM;
+    } else if (i == CONT_ITEMS && !c->built[0] && !c->pkg_count) {
         snprintf(line, size, "%s", _("Not built yet: no build has installed anything"));
         return DIM;
     } else if (i == CONT_ITEMS && !c->pkg_count) {
@@ -861,21 +1334,76 @@ static uint32_t detail_line(const struct container *c, int i, char *line, size_t
     return FG;
 }
 
+/* A row of the plan as the details show it into line: its colour. */
+static uint32_t update_line(const struct row *w, char *line, size_t size)
+{
+    if (strcmp(w->kind, "note") == 0) {
+        snprintf(line, size, "%s", w->what);
+        return WARN;
+    } else if (strcmp(w->kind, "missing") == 0) {
+        snprintf(line, size, _("install %-36.100s declared, not installed"), w->what);
+    } else if (strcmp(w->kind, "local") == 0) {
+        snprintf(line, size, _("local %-30.100s %.200s (installed %.80s)"), w->what, w->new_, w->old);
+    } else if (strcmp(w->kind, "rebuild") == 0 && (w->old[0] || w->new_[0])) {
+        snprintf(line, size, _("rebuild: %s (%s -> %s)"), w->what, w->old, w->new_);
+    } else if (strcmp(w->kind, "rebuild") == 0) {
+        snprintf(line, size, _("rebuild: %s"), w->what);
+    } else if (strcmp(w->kind, "catalog") == 0) { /* the app presets: which commit */
+        snprintf(line, size, "%.120s: %.40s -> %.7s", w->what, w->old, w->new_);
+    } else if (strcmp(w->kind, "merge") == 0) {
+        snprintf(line, size, _("%s follows its new preset: %s"), w->what, w->old);
+    } else {
+        snprintf(line, size, "%-5s %-36s %s -> %s", w->kind, w->what, w->old, w->new_);
+    }
+    return FG;
+}
+
+/* Line i of the lower pane when it does not show the job's output: on Host,
+ * how the system stands to its manifest; else the selected row's details.
+ * Into line: its colour, 0 past the last line. */
+static uint32_t pane_line(int i, char *line, size_t size)
+{
+    if (page == HOST && i < nothers) {
+        snprintf(line, size, "%s", others[i]);
+        return strncmp(others[i], "missing", 7) == 0 ? ERROR : FG;
+    } else if (page == HOST && i == 0) {
+        snprintf(line, size, "%s", _("The system is as the manifest says."));
+        return DIM;
+    } else if (page == UPDATES && sel[page] < ntargets) {
+        const struct target *t = &targets[sel[page]];
+        for (int k = 0; k < nrows; k++) {
+            const struct row *w = &rows[k];
+            if (strcmp(w->target, t->name) == 0 && strcmp(w->kind, "state") != 0 && i-- == 0) {
+                return update_line(w, line, size);
+            }
+        }
+    } else if (page == CONTAINERS && sel[page] < nconts && i < detail_lines(&conts[sel[page]])) {
+        return detail_line(&conts[sel[page]], i, line, size);
+    }
+    return 0;
+}
+
 /* The lower pane, on a background of its own under a title bar: the job's
- * output (while it runs, or l), else the selected row's details (on Host:
- * how the system stands to its manifest; of a container, its packages too,
- * scrolled by details_from). */
+ * output (while it runs, or l; stopped for source signing keys, those
+ * first), else the selected row's details (on Host: how the system stands
+ * to its manifest; of a container, its packages too, scrolled by
+ * details_from). */
 static void draw_lower(int top, int height)
 {
     char line[512];
-    int r = top + 1;
+    int r = top + 1, bottom = top + height;
     screen_fill(0, top, screen_cols(), height, PANE);
     if (job || show_log) {
         char lines[64][256];
-        int total, n = log_lines(lines, height - 1 < 64 ? height - 1 : 64, log_from, &total);
+        int stopped = !job && nwanted;
+        if (stopped) {
+            r = draw_keys(r, bottom);
+        }
+        int total, n = log_lines(lines, bottom - r < 0 ? 0 : bottom - r < 64 ? bottom - r : 64, log_from, &total);
         log_total = total;
-        const char *how = job ? _("running") : job_result == 0 ? _("done") : job_result == 1 ? _("failed") :
-                          job_result == 2 ? _("ended") : "";
+        const char *how = job ? jobs_state_label(job_state[0] ? job_state : "running") :
+                          stopped ? _("stopped") : job_result == 0 ? _("done") :
+                          job_result == 1 ? _("failed") : job_result == 2 ? _("ended") : "";
         char where[64] = "";
         if (n) {
             int last = total - log_from;
@@ -885,9 +1413,9 @@ static void draw_lower(int top, int height)
         snprintf(line, sizeof line, _("Output: %s%s%s%s   %s   PgUp/PgDn: scroll   l: %s"),
                  job || job_result >= 0 ? job_label : n ? _("the last job") : _("no job yet"),
                  how[0] ? " (" : "", how, how[0] ? ")" : "", where, page == HOST ? _("the manifest") : _("details"));
-        pane_title(top, line);
-        for (int i = 0; i < n && r < top + height; i++) {
-            screen_text(2, r++, lines[i], log_color(lines[i]), PANE);
+        pane_title(top, line, total > 0);
+        for (int i = 0; i < n; i++) {
+            pane_put(&r, bottom, 2, lines[i], log_color(lines[i]));
         }
         return;
     }
@@ -896,45 +1424,22 @@ static void draw_lower(int top, int height)
         snprintf(line, sizeof line, P_("%s: %d declared, %s installed with what they need   l: output",
                                        "%s: %d declared, %s installed with what they need   l: output", nleaves),
                  MANIFEST, nleaves, closure[0] ? closure : "?");
-        pane_title(top, line);
-        for (int i = 0; i < nothers && r < top + height; i++) {
-            screen_text(2, r++, others[i], strncmp(others[i], "missing", 7) == 0 ? ERROR : FG, PANE);
-        }
-        if (nothers == 0) {
-            screen_text(2, r++, _("The system is as the manifest says."), DIM, PANE);
+        pane_title(top, line, 1);
+        uint32_t color;
+        for (int i = 0; r < bottom && (color = pane_line(i, line, sizeof line)) != 0; i++) {
+            pane_put(&r, bottom, 2, line, color);
         }
         return;
     }
     if (page == UPDATES && sel[page] < ntargets) {
         struct target *t = &targets[sel[page]];
         /* TRANSLATORS: l is the l key; keep it. */
+        char first[512];
         snprintf(line, sizeof line, _("Details: %s   l: output"), t->name);
-        pane_title(top, line);
-        for (int i = 0; i < nrows && r < top + height; i++) {
-            struct row *w = &rows[i];
-            if (strcmp(w->target, t->name) != 0 || strcmp(w->kind, "state") == 0) {
-                continue;
-            }
-            if (strcmp(w->kind, "note") == 0) {
-                screen_text(2, r++, w->what, WARN, PANE);
-                continue;
-            }
-            if (strcmp(w->kind, "missing") == 0) {
-                snprintf(line, sizeof line, _("install %-36.100s declared, not installed"), w->what);
-            } else if (strcmp(w->kind, "local") == 0) {
-                snprintf(line, sizeof line, _("local %-30.100s %.200s (installed %.80s)"), w->what, w->new_, w->old);
-            } else if (strcmp(w->kind, "rebuild") == 0 && (w->old[0] || w->new_[0])) {
-                snprintf(line, sizeof line, _("rebuild: %s (%s -> %s)"), w->what, w->old, w->new_);
-            } else if (strcmp(w->kind, "rebuild") == 0) {
-                snprintf(line, sizeof line, _("rebuild: %s"), w->what);
-            } else if (strcmp(w->kind, "catalog") == 0) { /* the app presets: which commit */
-                snprintf(line, sizeof line, "%.120s: %.40s -> %.7s", w->what, w->old, w->new_);
-            } else if (strcmp(w->kind, "merge") == 0) {
-                snprintf(line, sizeof line, _("%s follows its new preset: %s"), w->what, w->old);
-            } else {
-                snprintf(line, sizeof line, "%-5s %-36s %s -> %s", w->kind, w->what, w->old, w->new_);
-            }
-            screen_text(2, r++, line, FG, PANE);
+        pane_title(top, line, pane_line(0, first, sizeof first) != 0);
+        uint32_t color;
+        for (int i = 0; r < bottom && (color = pane_line(i, line, sizeof line)) != 0; i++) {
+            pane_put(&r, bottom, 2, line, color);
         }
     } else if (page == CONTAINERS && sel[page] < nconts) {
         struct container *c = &conts[sel[page]];
@@ -956,14 +1461,86 @@ static void draw_lower(int top, int height)
             /* TRANSLATORS: PgUp/PgDn are key names; keep them. */
             snprintf(line + len, sizeof line - len, "   %s   %s", where, _("PgUp/PgDn: scroll"));
         }
-        pane_title(top, line);
-        for (int i = details_from; i < details_total && r < top + height; i++) {
+        pane_title(top, line, 1);
+        for (int i = details_from; i < details_total && r < bottom; i++) {
             uint32_t color = detail_line(c, i, line, sizeof line);
-            screen_text(2, r++, line, color, PANE);
+            pane_put(&r, bottom, 2, line, color);
         }
     } else {
-        pane_title(top, page == CONTAINERS ? _("Details") : _("Details: nothing selected"));
+        pane_title(top, page == CONTAINERS ? _("Details") : _("Details: nothing selected"), 0);
     }
+}
+
+static void show_notice(int error, const char *text)
+{
+    snprintf(notice, sizeof notice, "%s", text);
+    notice_error = error;
+}
+
+/* text to the clipboard, or (primary) to the primary selection; the notice
+ * says what was copied, or why not, without becoming the notice to copy. */
+static void copy_text(int primary, const char *text)
+{
+    char msg[512];
+    int failed = textsel_copy(primary, text, msg, sizeof msg);
+    if (msg[0]) {
+        show_notice(failed, msg);
+    }
+}
+
+/* y, Ctrl+C: what is selected; else, stopped for source signing keys, the
+ * command that trusts those not trusted yet; else the notice. */
+static void copy_key(void)
+{
+    char command[COMMAND_MAX];
+    char *text = textsel_get();
+    command[0] = '\0';
+    if (!job && nwanted) {
+        keys_refresh();
+        trust_command(command, sizeof command);
+    }
+    if (text && text[0]) {
+        copy_text(0, text);
+    } else if (command[0]) {
+        copy_text(0, command);
+    } else if (said[0]) {
+        copy_text(0, said);
+    } else {
+        show_notice(0, _("Nothing selected: drag over text, or double-click a word, or triple-click a line."));
+    }
+    free(text);
+}
+
+/* Y: all the lower pane holds, a line each: the job's output (its lines the
+ * pane counts), after the source signing keys it stopped for, with where
+ * they come from; or the details. */
+static void copy_pane(void)
+{
+    char *text = NULL, line[512];
+    size_t size = 0;
+    FILE *out = open_memstream(&text, &size);
+    if (!out) {
+        return;
+    }
+    if (job || show_log) {
+        if (!job && nwanted) {
+            key_list_text(out);
+        }
+        int n = log_split();
+        for (int i = 0; i < n; i++) {
+            fprintf(out, "%s%s", i ? "\n" : "", log_all[i]);
+        }
+    } else {
+        for (int i = 0; pane_line(i, line, sizeof line); i++) {
+            fprintf(out, "%s%s", i ? "\n" : "", line);
+        }
+    }
+    if (fclose(out) == 0 && text[0]) {
+        copy_text(0, text);
+    } else {
+        show_notice(0, _("Nothing to copy here."));
+    }
+    free(text);
 }
 
 /* Each page's actions: label, then key; the buttons at the bottom. */
@@ -983,6 +1560,7 @@ static void draw(void)
     int cols = screen_cols(), rows_n = screen_rows();
     screen_fill(0, 0, cols, rows_n, BG);
     ui_hits_clear();
+    textsel_frame();
     screen_bar(_("packages"), NULL);
     int x = 1, pending = 0;
     for (int i = 0; i < ntargets; i++) {
@@ -1033,11 +1611,18 @@ static void draw(void)
     for (int b = 0; b < 8 && help[page][b][0]; b++) {
         x = ui_button(x, rows_n - 2, _(help[page][b][0]), HIT_KEY + help[page][b][1][0]);
     }
+    if (!job && nwanted) {
+        /* TRANSLATORS: g is the g key; keep "g: ". */
+        x = ui_button(x, rows_n - 2, _("g: continue"), HIT_KEY + 'g');
+    }
+    /* TRANSLATORS: y is the y key; keep "y: ". */
+    x = ui_button(x, rows_n - 2, _("y: copy"), HIT_KEY + 'y');
     /* TRANSLATORS: Tab is the Tab key; keep "Tab: ". */
     x = ui_button(x, rows_n - 2, _("Tab: page"), HIT_KEY + '\t');
     /* TRANSLATORS: q is the q key; keep "q: ". */
     ui_button(x, rows_n - 2, _("q: back"), HIT_KEY + 'q');
-    screen_text(1, rows_n - 1, notice, notice_error ? ERROR : ACCENT, BG);
+    textsel_put(1, rows_n - 1, notice, notice_error ? ERROR : ACCENT, BG);
+    textsel_draw(BG, ACCENT);
     screen_flush();
 }
 
@@ -1268,9 +1853,9 @@ static int by_preset(const void *a, const void *b)
 }
 
 /* The presets of dir after the n in p, sorted, a name once (those before
- * it are kept): how many in all. apps: the app presets' catalog, where a
- * host program is none of them. */
-static int presets_of(const char *dir, int apps, struct preset *p, int n, int max)
+ * it are kept): how many in all. The catalog was validated when installed;
+ * a recipe may ask for real system access, granted only when saved. */
+static int presets_of(const char *dir, struct preset *p, int n, int max)
 {
     int first = n;
     DIR *d = opendir(dir);
@@ -1286,11 +1871,7 @@ static int presets_of(const char *dir, int apps, struct preset *p, int n, int ma
         for (int i = 0; i < first && !known; i++) {
             known = strcmp(p[i].name, p[n].name) == 0;
         }
-        struct container c = { 0 };
-        if (apps && !known) {
-            conf_read(p[n].path, container_value, &c);
-        }
-        if (!known && !c.host) {
+        if (!known) {
             n++;
         }
     }
@@ -1305,7 +1886,7 @@ static int presets_of(const char *dir, int apps, struct preset *p, int n, int ma
  * presets' catalog's: how many. */
 static int preset_list(struct preset *p, int max)
 {
-    return presets_of(APPS_CATALOG, 1, p, presets_of(SYSTEM_PRESETS, 0, p, 0, max), max);
+    return presets_of(APPS_CATALOG, p, presets_of(SYSTEM_PRESETS, p, 0, max), max);
 }
 
 /* The name of the preset at path (DIR/NAME.conf). */
@@ -1351,7 +1932,7 @@ struct pkg_info { /* a line of locachy-pkg info */
 };
 
 struct form {
-    int is_new, built, network, camera, changed;
+    int is_new, built, network, camera, changed, host;
     char preset[400]; /* the preset it was filled from ("": none) */
     char name[64], package[128], extras[VALUE_MAX + 1], command[256], arguments[256];
     char dirs[MAX_DIRS][256];
@@ -1361,10 +1942,11 @@ struct form {
     int sel, first, button; /* the selected line, the first shown, the button */
 };
 
-enum field { F_PRESET, F_NAME, F_PACKAGE, F_EXTRAS, F_COMMAND, F_ARGUMENTS, F_NETWORK, F_CAMERA, F_DIRS, F_ALWAYS, F_BUTTONS };
+enum field { F_PRESET, F_NAME, F_PACKAGE, F_EXTRAS, F_COMMAND, F_ARGUMENTS, F_NETWORK, F_CAMERA, F_DIRS, F_ACCESS,
+             F_ALWAYS, F_BUTTONS };
 static const char *const field_names[] = {
     N_("Preset"), N_("Name"), N_("Package"), N_("Extras"), N_("Command"), N_("Arguments"), N_("Network"), N_("Camera"),
-    N_("Directories"), N_("Always"), "",
+    N_("Directories"), N_("Access"), N_("Always"), "",
 };
 enum { B_SAVE, B_BUILD, B_CANCEL, BUTTONS };
 static const char *const button_names[BUTTONS] = { N_("Save"), N_("Save and build"), N_("Cancel") };
@@ -1425,6 +2007,8 @@ static void form_value(const char *name, const char *value, void *arg)
         f->network = strcmp(value, "1") == 0;
     } else if (strcmp(name, "camera") == 0) {
         f->camera = strcmp(value, "1") == 0;
+    } else if (strcmp(name, "host") == 0) {
+        f->host = strcmp(value, "1") == 0;
     } else if (strcmp(name, "directories") == 0) {
         f->ndirs = 0;
         for (const char *s = value; *s && f->ndirs < MAX_DIRS;) {
@@ -1464,10 +2048,13 @@ static int form_lines(const struct form *f, struct form_line *l)
     add_line(l, &n, F_COMMAND, 0);
     add_line(l, &n, F_ARGUMENTS, 0);
     add_line(l, &n, F_NETWORK, 0);
-    add_line(l, &n, F_CAMERA, 0);
-    for (int i = 0; i <= f->ndirs; i++) { /* the last: to add one */
-        add_line(l, &n, F_DIRS, i);
+    if (!f->host) {
+        add_line(l, &n, F_CAMERA, 0);
+        for (int i = 0; i <= f->ndirs; i++) { /* the last: to add one */
+            add_line(l, &n, F_DIRS, i);
+        }
     }
+    add_line(l, &n, F_ACCESS, 0);
     add_line(l, &n, F_ALWAYS, 0);
     add_line(l, &n, F_BUTTONS, 0);
     return n;
@@ -1516,7 +2103,7 @@ static uint32_t command_text(const struct form *f, char *out, size_t size)
         return f->built ? ERROR : DIM;
     }
     snprintf(path, sizeof path, "%s/%s/upper%s", STATE, f->name, f->command);
-    if (f->built && lstat(path, &st) == 0) {
+    if (!f->host && f->built && lstat(path, &st) == 0) {
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(out, size, "%s", _("in its build   Enter: what its packages run"));
         return FG;
@@ -1526,7 +2113,8 @@ static uint32_t command_text(const struct form *f, char *out, size_t size)
         snprintf(out, size, "%s", f->built ? _("the host's   Enter: what its packages run") : _("the host's"));
         return FG;
     }
-    snprintf(out, size, "%s", f->built ? _("neither in its build nor on the host") : _("not on the host: from its build?"));
+    snprintf(out, size, "%s", f->host ? _("not installed on the host") :
+             f->built ? _("neither in its build nor on the host") : _("not on the host: from its build?"));
     return f->built ? ERROR : DIM;
 }
 
@@ -1611,10 +2199,20 @@ static uint32_t form_row(const struct form *f, const struct form_line *l, char *
         /* TRANSLATORS: Delete is the Delete key; keep it. */
         snprintf(info, isize, "%s", _("at the same path in it   Delete: remove"));
         return DIM;
+    case F_ACCESS:
+        snprintf(value, vsize, "%s", f->host ? _("real system and full home") : _("isolated filesystem"));
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(info, isize, "%s", f->host ? _("Enter: switch; packages on the host, commands as you") :
+                 _("Enter: switch; private app data and shared folders"));
+        return f->host ? WARN : DIM;
     case F_ALWAYS:
-        open_user_dirs(home_, sizeof home_, dirs_, sizeof dirs_);
         snprintf(value, vsize, "%s", _("display, sound, GPU, fonts, its own bus"));
-        snprintf(info, isize, _("and of your home: %s"), dirs_);
+        if (f->host) {
+            snprintf(info, isize, "%s", _("devices by your permissions; home starts, freezes and stops it"));
+        } else {
+            open_user_dirs(home_, sizeof home_, dirs_, sizeof dirs_);
+            snprintf(info, isize, _("and of your home: %s"), dirs_);
+        }
         return DIM;
     default:
         return FG;
@@ -1642,7 +2240,7 @@ static void form_draw(struct form *f, const struct form_line *l, int n)
             int x = FORM_VALUE;
             for (int b = 0; b < BUTTONS; b++) {
                 int lit = on && b == f->button;
-                snprintf(line, sizeof line, "[ %s ]", _(button_names[b]));
+                snprintf(line, sizeof line, "[ %s ]", f->host && b == B_BUILD ? _("Save and install") : _(button_names[b]));
                 int w = ui_cells(line);
                 screen_text(x, r, line, lit ? BG : FG, lit ? ACCENT : BG);
                 ui_hit(x, r, w, 1, HIT_BUTTON + b);
@@ -1769,7 +2367,7 @@ static void form_preset(struct form *f)
     snprintf(old, sizeof old, "%s", f->preset[0] ? preset_name(f->preset) : "");
     snprintf(typed, sizeof typed, "%s", f->name[0] && strcmp(f->name, old) != 0 ? f->name : "");
     f->preset[0] = f->package[0] = f->extras[0] = f->command[0] = f->arguments[0] = '\0';
-    f->network = f->camera = f->ndirs = f->ninfo = 0;
+    f->network = f->camera = f->host = f->ndirs = f->ninfo = 0;
     if (at < n) {
         snprintf(f->preset, sizeof f->preset, "%s", presets[at].path);
         conf_read(f->preset, form_value, f);
@@ -1899,6 +2497,75 @@ static void add_directory(struct form *f)
     say_notice(0, _("%.200s: at the same path in it, from its next start."), path);
 }
 
+/* Wrap a disclosure by display cells, including translations without spaces. */
+static int access_text(int row, const char *text)
+{
+    int width = screen_cols() - 4;
+    while (*text && row < screen_rows() - 4) {
+        char line[512];
+        size_t n = 0, last_space = 0;
+        int cells = 0;
+        while (text[n] && n + 5 < sizeof line) {
+            size_t next = n + 1;
+            while (((unsigned char)text[next] & 0xC0) == 0x80) next++;
+            char cp[8] = "";
+            memcpy(cp, text + n, next - n);
+            int cw = ui_cells(cp);
+            if (cells + cw > width) break;
+            if (text[n] == ' ') last_space = n;
+            cells += cw;
+            n = next;
+        }
+        if (text[n] && last_space) n = last_space;
+        if (!n) break;
+        memcpy(line, text, n);
+        line[n] = '\0';
+        screen_text(2, row++, line, FG, BG);
+        text += n;
+        text += strspn(text, " ");
+    }
+    return row + 1;
+}
+
+/* A new grant of real system access is a person's choice, never a side
+ * effect of selecting a recipe. Keep the disclosure on its own screen. */
+static int grant_host_access(const struct form *f)
+{
+    static const char *const details[] = {
+        N_("Packages will be installed on the real system."),
+        N_("It can read and change your full home and system files as you."),
+        N_("It can run terminal commands; sudo still requires authentication."),
+        N_("Home still starts, freezes, resumes and stops its whole process tree."),
+    };
+    for (;;) {
+        char title[200];
+        screen_fill(0, 0, screen_cols(), screen_rows(), BG);
+        ui_hits_clear();
+        screen_bar(_("packages"), NULL);
+        snprintf(title, sizeof title, _("Allow %s to access your real system?"), f->name);
+        screen_text(1, 1, title, WARN, BG);
+        int row = 4;
+        for (size_t i = 0; i < sizeof details / sizeof details[0]; i++) {
+            row = access_text(row, _(details[i]));
+        }
+        /* TRANSLATORS: Y and N are the Y and N keys; keep them. */
+        screen_text(1, screen_rows() - 3, _("Y: allow and save   N or Esc: cancel without saving"), WARN, BG);
+        /* TRANSLATORS: Y is the Y key; keep "Y: ". */
+        int x = ui_button(1, screen_rows() - 2, _("Y: yes"), HIT_KEY + 'y');
+        /* TRANSLATORS: N is the N key; keep "N: ". */
+        ui_button(x, screen_rows() - 2, _("N: no"), HIT_KEY + 'n');
+        screen_flush();
+        int key = key_get();
+        if (key == 0 || key == K_SHOWN) continue;
+        if (key == K_POINTER) {
+            const struct pointer_event *e = pointer_last();
+            if (!e->pressed) continue;
+            key = ui_hit_at(e->col, e->row) == HIT_KEY + 'y' ? 'y' : 'n';
+        }
+        return key == 'y' || key == 'Y';
+    }
+}
+
 /* Its configuration written (CONF_DIR/NAME.conf; a new one from its preset,
  * whose comment it keeps): 0, or -1 with the notice saying why not. */
 static int form_save(struct form *f)
@@ -1928,6 +2595,12 @@ static int form_save(struct form *f)
         }
         len += (size_t)snprintf(dirs_ + len, sizeof dirs_ - len, "%s%s", i ? ":" : "", f->dirs[i]);
     }
+    struct form current = { 0 };
+    if (!f->is_new) conf_read(path, form_value, &current);
+    if (f->host && !current.host && !grant_host_access(f)) {
+        say_notice(0, _("%s: access not granted; nothing saved or installed."), f->name);
+        return -1;
+    }
     if (f->is_new && f->preset[0] && copy_file(f->preset, path) < 0) {
         say_notice(1, _("Cannot write %s."), path);
         return -1;
@@ -1935,7 +2608,7 @@ static int form_save(struct form *f)
     const char *values[][2] = {
         { "package", f->package }, { "extras", f->extras }, { "command", f->command },
         { "arguments", f->arguments }, { "network", f->network ? "1" : "0" }, { "camera", f->camera ? "1" : "0" },
-        { "directories", dirs_ },
+        { "directories", dirs_ }, { "host", f->host ? "1" : "0" },
     };
     for (size_t i = 0; i < sizeof values / sizeof values[0]; i++) {
         if (conf_set(path, values[i][0], values[i][1]) < 0) {
@@ -1998,6 +2671,13 @@ static int form_enter(struct form *f, const struct form_line *l)
             snprintf(f->arguments, sizeof f->arguments, "%.255s", text);
             f->changed = 1;
         }
+    } else if (l->field == F_ACCESS) {
+        f->host = !f->host;
+        f->changed = 1;
+        /* The number of rows changes when camera/directories are hidden. */
+        struct form_line lines[FORM_LINES];
+        int n = form_lines(f, lines);
+        for (int i = 0; i < n; i++) if (lines[i].field == F_ACCESS) f->sel = i;
     } else if (l->field == F_NETWORK) {
         f->network = !f->network;
         f->changed = 1;
@@ -2023,7 +2703,7 @@ static int form_enter(struct form *f, const struct form_line *l)
                 /* TRANSLATORS: b is the b key; keep it. */
                 say_notice(1, _("%s saved; it is %s: stop it (home), then b builds it."), f->name, state_label(state));
             } else {
-                snprintf(label, sizeof label, _("build %s"), f->name);
+                snprintf(label, sizeof label, f->host ? _("install %s on the host") : _("build %s"), f->name);
                 start_job(label, argv);
             }
         }
@@ -2184,14 +2864,19 @@ static void search_container(void)
     for (char *c = seed.name; *c; c++) {
         if (!isalnum((unsigned char)*c) && *c != '_' && *c != '-' && *c != '.') *c = '-';
     }
-    if (strcmp(hits[at].kind, "recipe") == 0) { /* an app preset: search reads their catalog */
+    if (strcmp(hits[at].kind, "recipe") == 0) { /* its whole configuration, including access and shared directories */
         snprintf(seed.preset, sizeof seed.preset, "%s/%.63s.conf", APPS_CATALOG, hits[at].name);
+        if (conf_read(seed.preset, form_value, &seed) < 0) {
+            say_notice(1, _("Cannot read %s; nothing saved or installed."), seed.preset);
+            return;
+        }
+    } else {
+        snprintf(seed.package, sizeof seed.package, "%s", hits[at].package);
+        snprintf(seed.extras, sizeof seed.extras, "%s", hits[at].extras);
+        snprintf(seed.command, sizeof seed.command, "%s", hits[at].command);
+        snprintf(seed.arguments, sizeof seed.arguments, "%s", hits[at].arguments);
+        seed.network = hits[at].network;
     }
-    snprintf(seed.package, sizeof seed.package, "%s", hits[at].package);
-    snprintf(seed.extras, sizeof seed.extras, "%s", hits[at].extras);
-    snprintf(seed.command, sizeof seed.command, "%s", hits[at].command);
-    snprintf(seed.arguments, sizeof seed.arguments, "%s", hits[at].arguments);
-    seed.network = hits[at].network;
     edit_container_with(NULL, &seed);
 }
 
@@ -2218,19 +2903,26 @@ static void container_key(int key)
         edit_container(name);
     } else if (key == 'b' || key == 'r') {
         char *argv[] = { APP, key == 'b' ? "build" : "rollback", c->name, NULL };
-        snprintf(label, sizeof label, key == 'b' ? _("build %s") : _("roll back %s"), c->name);
-        if (strcmp(c->state, "closed") != 0) {
+        snprintf(label, sizeof label, key == 'b' ? c->host ? _("install %s on the host") : _("build %s") :
+                 _("roll back %s"), c->name);
+        if (key == 'r' && c->host) {
+            say_notice(1, "%s", _("Its packages are on the host; there is no private build to roll back."));
+        } else if (strcmp(c->state, "closed") != 0) {
             say_notice(1, _("%s is %s: stop it (home) first."), c->name, state_label(c->state));
         } else if (key == 'b' || yes(_("Roll back to its previous build?"))) {
             start_job(label, argv);
         }
     } else if (key == 'd') {
-        snprintf(text, sizeof text, _("Remove %s (its configuration and builds)?"), c->name);
+        snprintf(text, sizeof text, c->host ? _("Remove %s from home? Host packages and your files will be kept.") :
+                 _("Remove %s (its configuration and builds)?"), c->name);
         if (strcmp(c->state, "closed") != 0) {
             say_notice(1, _("%s is %s: stop it (home) first."), c->name, state_label(c->state));
         } else if (yes(text)) {
-            snprintf(text, sizeof text, _("Its home too (%s/%s/data: its settings, its files)?"), STATE, c->name);
-            int data = yes(text);
+            int data = 0;
+            if (!c->host) {
+                snprintf(text, sizeof text, _("Its home too (%s/%s/data: its settings, its files)?"), STATE, c->name);
+                data = yes(text);
+            }
             char *argv[] = { APP, "remove", c->name, data ? "--data" : NULL, NULL };
             snprintf(label, sizeof label, data ? _("remove %s and its home") : _("remove %s"), c->name);
             start_job(label, argv);
@@ -2319,10 +3011,11 @@ static void updates_key(int key)
 static int pointer_key(int n)
 {
     const struct pointer_event *e = pointer_last();
+    int id = ui_hit_at(e->col, e->row);
     if (e->wheel) {
-        if (ui_hit_at(e->col, e->row) == HIT_LOWER && page == CONTAINERS && !job && !show_log) {
+        if (id == HIT_LOWER && page == CONTAINERS && !job && !show_log) {
             details_from -= 3 * e->wheel; /* draw_lower keeps it in range */
-        } else if (ui_hit_at(e->col, e->row) == HIT_LOWER) {
+        } else if (id == HIT_LOWER) {
             log_from += 3 * e->wheel;
             log_from = log_from < 0 ? 0 : log_from > log_total - 1 ? (log_total > 0 ? log_total - 1 : 0) : log_from;
         } else {
@@ -2331,9 +3024,20 @@ static int pointer_key(int n)
         }
         return -1;
     }
+    /* The lower pane's text and the notice: selected as in term, offered as
+     * the primary selection once made. */
+    int got = textsel_pointer(e, id == HIT_LOWER || e->row == screen_rows() - 1);
+    if (got == TEXTSEL_MADE) {
+        char *text = textsel_get();
+        if (text && text[0]) {
+            copy_text(1, text);
+        }
+        free(text);
+    }
+    if (got != TEXTSEL_NONE) return -1;
     if (e->button != BTN_LEFT || !e->pressed) return 0;
-    int id = ui_hit_at(e->col, e->row);
     if (id >= HIT_KEY) return id - HIT_KEY;
+    textsel_clear(); /* a row or a page: the pane shows another's */
     if (id >= HIT_TAB && id < HIT_LOWER) {
         page = id - HIT_TAB;
         return -1;
@@ -2349,8 +3053,8 @@ int main(void)
 {
     screen_open(BASE_FONT);
     keys_open();
-    find_job();
     load_all();
+    find_job(); /* after the containers: a build's label says whether it installs on the host */
     if (!notice[0]) {
         /* TRANSLATORS: c is the c key; keep it. */
         say_notice(0, "%s", checked[0] ? _("The last check is shown; c checks again.") : _("Not checked yet: c checks."));
@@ -2364,8 +3068,17 @@ int main(void)
             key = pointer_key(n);
             if (key == 0) continue;
         }
+        if (key > 0 && key != 'y' && key != 'Y' && key != 3) {
+            textsel_clear(); /* what the pane shows may change */
+        }
         if (key == 'q' || key == 27) {
             return 0;
+        } else if (key == 'y' || key == 3) { /* 3: Ctrl+C */
+            copy_key();
+        } else if (key == 'Y') {
+            copy_pane();
+        } else if (key == 'g' && !job && nwanted) {
+            continue_job();
         } else if (key == '\t') {
             page = (page + 1) % PAGES;
         } else if (key == K_UP && sel[page] > 0) {

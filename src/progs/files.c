@@ -53,6 +53,7 @@
 #include <grp.h>
 #include <limits.h>
 #include <linux/input-event-codes.h>
+#include <poll.h>
 #include <pwd.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -76,8 +77,24 @@
 #include "base.h"
 #include "archive-proto.h"
 #include "clipboard.h"
+#include "wayland-data.h"
+#include "wayland-backend.h"
 #include "files.h"
 #include "files-cloud.h"
+#include "docs-proto.h"
+
+/* In a window (LOCACHY_BACKEND=wayland) there is no process 1 to ask: the
+ * document viewer opens through the seat's window requests, containers
+ * through the top bar's open socket (xdg-open's protocol). */
+#ifndef SEAT_CLIENT
+#define SEAT_CLIENT "/usr/local/bin/locachy-seat"
+#endif
+#ifndef BAR_OPEN_SOCKET
+#define BAR_OPEN_SOCKET "/run/locachy/open/socket"
+#endif
+#ifndef VIEW_PROGRAM
+#define VIEW_PROGRAM "/usr/local/bin/view"
+#endif
 
 #ifndef CLOUD_STATUS
 #define CLOUD_STATUS "/run/locachy/cloud/status"
@@ -186,6 +203,27 @@ static int nplaces;
 static char *clip[MAX_CLIP];
 static int nclip, clip_cut;
 static const char *pick_type; /* files_pick: the type a file must have to be chosen */
+/* The window's close was asked for (K_CLOSE): files leaves as q does, once
+ * nothing unfinished (a copy) holds it; files_close_asked tells the caller. */
+static int close_asked;
+
+/* A managed window on the shared display, not a screen of home's. */
+static int in_window(void)
+{
+    return wl_backend_requested() > 0;
+}
+
+/* Did process 1 run the program it was asked to open (base_open's why:
+ * "back TASK", "shown TASK", "ended TASK STATUS")? Not with no process 1 to
+ * ask, nor when it could not be started (-1) or run (127). */
+static int program_ran(const char *why)
+{
+    if (strncmp(why, "no process 1", 12) == 0) {
+        return 0;
+    }
+    const char *status = strrchr(why, ' ');
+    return strncmp(why, "ended ", 6) != 0 || !status || (strcmp(status, " -1") != 0 && strcmp(status, " 127") != 0);
+}
 
 struct cloud_mount {
     char name[256], path[PATH_MAX], state[32], reason[32];
@@ -220,7 +258,11 @@ static struct {
     int x, y, col, row;  /* the pointer now */
     char *base;          /* the marks at the press */
     int nbase;
+    int out;             /* tried to leave the window as a drag to other programs */
 } drag;
+/* A drag to other programs with private files (tools/DOCUMENTS.md): the
+ * document service's connection until the drag ends, and its session. */
+static struct { int fd; char session[32]; } docs_drag = { .fd = -1 };
 
 /* The undo stack (Dolphin's Ctrl+Z: KIO's FileUndoManager). */
 enum { UNDO_TRASH, UNDO_RENAME, UNDO_MKDIR, UNDO_COPY, UNDO_MOVE, UNDO_CREATE };
@@ -528,9 +570,242 @@ static int remove_tree(const char *path)
     return nftw(path, remove_one, 16, FTW_DEPTH | FTW_PHYS);
 }
 
+/*
+ * A copy, or a move across filesystems, in progress (copy_begin to
+ * copy_end). Each item is written under a hidden name in the destination
+ * folder (temp) and renamed to its own name only once it is whole; what is
+ * unfinished is removed when it fails, when it is stopped (Esc, the window's
+ * close) and when the program is asked to end (SIGTERM, home's Stop: the
+ * copy stops at the next chunk, its temp goes, then the program ends as the
+ * signal would have ended it). Between chunks the window keeps answering:
+ * its progress is drawn, new sizes are taken, Esc and the close are asked
+ * about.
+ */
+enum { COPY_GOING, COPY_STOPPED, COPY_TERMINATED };
+#define COPY_TEMP ".locachy-copy-" /* + the process id and a number */
+static struct {
+    int active, moving, stop;
+    long long done, total;     /* of the item being copied */
+    double shown, drawn;       /* when the keys were last looked at, the progress drawn */
+    char name[256];            /* its name, for the progress */
+    char temp[PATH_MAX];       /* what it is written under; "" when none */
+} copying;
+static double copy_tick_interval = 0.05; /* seconds between looks at the keys */
+static volatile sig_atomic_t copy_terminated;
+static int copy_wake[2] = { -1, -1 };     /* SIGTERM wakes a question waiting for a key */
+static struct sigaction copy_saved_term;
+static void draw(void);
+static void output_ready(void);
+static void drag_stop(void);
+
+static double copy_clock(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+static void copy_on_term(int sig)
+{
+    (void)sig;
+    int saved = errno;
+    copy_terminated = 1;
+    if (copy_wake[1] >= 0) {
+        ssize_t r = write(copy_wake[1], "", 1);
+        (void)r;
+    }
+    errno = saved;
+}
+
+/* Copies (moving: moves) begin: SIGTERM stops them instead of ending the
+ * program at once (no SA_RESTART: a long read or write ends early). */
+static void copy_begin(int moving)
+{
+    memset(&copying, 0, sizeof copying);
+    copying.active = 1;
+    copying.moving = moving;
+    copying.shown = copying.drawn = copy_clock();
+    copy_terminated = 0;
+    if (copy_wake[0] < 0 && pipe2(copy_wake, O_CLOEXEC | O_NONBLOCK) < 0) {
+        copy_wake[0] = copy_wake[1] = -1;
+    }
+    struct sigaction sa = { .sa_handler = copy_on_term };
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGTERM, &sa, &copy_saved_term);
+}
+
+/* They are over: SIGTERM as it was. One that came meanwhile, its copy now
+ * cleaned up, ends the program as it would have. 1 if they were stopped. */
+static int copy_end(void)
+{
+    int stopped = copying.stop != COPY_GOING;
+    char byte;
+    copying.active = 0;
+    copying.stop = COPY_GOING;
+    sigaction(SIGTERM, &copy_saved_term, NULL);
+    while (copy_wake[0] >= 0 && read(copy_wake[0], &byte, 1) == 1) {
+    }
+    if (copy_terminated) {
+        copy_terminated = 0;
+        say("files: asked to end during a copy: the unfinished copy was removed");
+        raise(SIGTERM);
+    }
+    return stopped;
+}
+
+static void copy_show(void)
+{
+    char done[32], total[32];
+    human(copying.done, done, sizeof done);
+    human(copying.total, total, sizeof total);
+    /* TRANSLATORS: %s are a file name, the bytes copied and the bytes in all; Esc is the key. */
+    report(0, copying.moving ? _("Moving %s: %s of %s. Esc: stop.") : _("Copying %s: %s of %s. Esc: stop."),
+           copying.name, done, total);
+    draw();
+}
+
+/* Esc while copying (closing 0), or the window's close (1): stop the copy?
+ * Asked on the line above the buttons, as yes() asks; the copy waits. For a
+ * close: y stops it and closes, n closes when it is done, Esc keeps the
+ * window. Another close meanwhile stops it and closes. */
+static void copy_ask(int closing)
+{
+    for (;;) {
+        char line[400];
+        int row = screen_rows() - 3;
+        snprintf(line, sizeof line, "%s ", closing ?
+                 /* TRANSLATORS: y, n and Esc are keys; keep them. */
+                 _("The copy is not finished. y: stop it now and close, n: close when it is done, Esc: stay.") :
+                 /* TRANSLATORS: y and N are keys; keep them. */
+                 _("Stop copying? What is not copied yet is not kept. y/N"));
+        screen_fill(0, row, screen_cols(), 1, BG);
+        screen_text(1, row, line, ERROR, BG);
+        /* TRANSLATORS: Y is the key; keep it. */
+        int c = ui_button(2 + ui_cells(line), row, _("Y: yes"), HIT_KEY + 'y');
+        /* TRANSLATORS: N is the key; keep it. */
+        c = ui_button(c, row, _("N: no"), HIT_KEY + 'n');
+        if (closing) {
+            /* TRANSLATORS: Esc is the key; keep it. */
+            ui_button(c, row, _("Esc: stay"), HIT_KEY + 27);
+        }
+        screen_flush();
+        int key = key_poll_timeout(copy_wake[0], -1);
+        if (copy_terminated) {
+            copying.stop = COPY_TERMINATED;
+            return;
+        }
+        if (key == 0) {
+            continue;
+        }
+        if (key == K_SHOWN) {
+            output_ready();
+            draw();
+            continue;
+        }
+        if (key == K_POINTER) {
+            const struct pointer_event *e = pointer_last();
+            if (!e->pressed || e->button != BTN_LEFT) continue; /* a motion is no answer */
+            int id = ui_hit_at(e->col, e->row);
+            key = id >= HIT_KEY ? id - HIT_KEY : 0;
+            if (!key) continue;
+        }
+        if (key == K_CLOSE) {
+            key_close_kept(); /* it closes once the copy is cleaned up */
+            close_asked = 1;
+            copying.stop = COPY_STOPPED;
+        } else if (key == 'y' || key == 'Y') {
+            copying.stop = COPY_STOPPED;
+        } else if (closing && key == 27) {
+            close_asked = 0;
+        } else if (closing && key != 'n' && key != 'N') {
+            continue;
+        }
+        return;
+    }
+}
+
+/* Between chunks: SIGTERM or a stop seen; at most every
+ * copy_tick_interval, the progress drawn and the keys looked at. -1: stop. */
+static int copy_tick(void)
+{
+    if (copy_terminated) {
+        copying.stop = COPY_TERMINATED;
+    }
+    if (copying.stop != COPY_GOING || !copying.active) {
+        return copying.stop != COPY_GOING ? -1 : 0;
+    }
+    double now = copy_clock();
+    if (now - copying.shown < copy_tick_interval) {
+        return 0;
+    }
+    /* The progress is drawn at a fifth of that rate: keys stay quick, and
+     * the canvas is not drawn again for each look. */
+    if (now - copying.drawn >= 5 * copy_tick_interval) {
+        copying.drawn = now;
+        copy_show();
+    }
+    copying.shown = now;
+    for (int i = 0; i < 16 && copying.stop == COPY_GOING; i++) {
+        int key = key_poll_timeout(copy_wake[0], 0);
+        if (copy_terminated) {
+            copying.stop = COPY_TERMINATED;
+        } else if (key == 0) {
+            break;
+        } else if (key == K_SHOWN) {
+            drag_stop();
+            pull.on = 0;
+            output_ready();
+            copy_show();
+        } else if (key == K_CLOSE) {
+            key_close_kept(); /* it stays open on purpose: the copy is asked about */
+            close_asked = 1;
+            copy_ask(1);
+            copy_show();
+        } else if (key == 27) {
+            copy_ask(0);
+            copy_show();
+        }
+    }
+    as_user(1); /* every copy runs as the user */
+    return copying.stop != COPY_GOING ? -1 : 0;
+}
+
+/* All of buf to fd, through interruptions (not SIGTERM's). */
+static int write_all(int fd, const char *buf, size_t len)
+{
+    while (len > 0) {
+        ssize_t n = write(fd, buf, len);
+        if (n < 0 && errno == EINTR && !copy_terminated) {
+            continue;
+        }
+        if (n <= 0) {
+            return -1;
+        }
+        buf += n;
+        len -= (size_t)n;
+    }
+    return 0;
+}
+
+static long long tree_size_bytes;
+
+static int add_size(const char *path, const struct stat *st, int flag, struct FTW *ftw)
+{
+    (void)path;
+    (void)ftw;
+    if (flag == FTW_F && S_ISREG(st->st_mode)) {
+        tree_size_bytes += st->st_size;
+    }
+    return 0;
+}
+
 static int copy_tree(const char *from, const char *to)
 {
     struct stat st;
+    if (copy_tick() < 0) {
+        errno = ECANCELED;
+        return -1;
+    }
     if (lstat(from, &st) < 0) {
         return -1;
     }
@@ -552,7 +827,7 @@ static int copy_tree(const char *from, const char *to)
         DIR *d = opendir(from);
         struct dirent *e;
         int failed = d == NULL;
-        while (d && (e = readdir(d)) != NULL) {
+        while (d && copying.stop == COPY_GOING && (e = readdir(d)) != NULL) {
             char a[PATH_MAX], b[PATH_MAX];
             if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) {
                 continue;
@@ -562,6 +837,10 @@ static int copy_tree(const char *from, const char *to)
         }
         if (d) {
             closedir(d);
+        }
+        if (copying.stop != COPY_GOING) {
+            errno = ECANCELED;
+            return -1;
         }
         return failed ? -1 : 0;
     }
@@ -574,20 +853,95 @@ static int copy_tree(const char *from, const char *to)
     }
     char buf[65536];
     ssize_t n = 0;
-    while (in >= 0 && out >= 0 && (n = read(in, buf, sizeof buf)) > 0) {
-        if (write(out, buf, (size_t)n) != n) {
+    while (in >= 0 && out >= 0 && (n = read(in, buf, sizeof buf)) != 0) {
+        if (n < 0 && errno == EINTR && !copy_terminated) {
+            continue;
+        }
+        if (n < 0 || write_all(out, buf, (size_t)n) < 0) {
+            n = -1;
+            break;
+        }
+        copying.done += n;
+        if (copy_tick() < 0) {
             n = -1;
             break;
         }
     }
-    int failed = in < 0 || out < 0 || n < 0;
+    int saved = errno, failed = in < 0 || out < 0 || n < 0;
     if (in >= 0) {
         close(in);
     }
     if (out >= 0 && close(out) < 0) {
         failed = 1;
+        saved = errno;
     }
+    errno = copying.stop != COPY_GOING ? ECANCELED : saved;
     return failed ? -1 : 0;
+}
+
+/* to, which is not there, renamed from from: never over something that
+ * came meanwhile (on a filesystem without RENAME_NOREPLACE, looked at
+ * first). */
+static int rename_new(const char *from, const char *to)
+{
+    struct stat st;
+    if (renameat2(AT_FDCWD, from, AT_FDCWD, to, RENAME_NOREPLACE) == 0) {
+        return 0;
+    }
+    if (errno != EINVAL && errno != ENOSYS) {
+        return -1;
+    }
+    if (lstat(to, &st) == 0) {
+        errno = EEXIST;
+        return -1;
+    }
+    return rename(from, to);
+}
+
+/* from copied whole to to (not there): written under a hidden name in to's
+ * folder, then renamed. 0, or -1 (errno; ECANCELED: stopped) with nothing
+ * of it left. A device or a socket is not copied (-1, ENOTSUP). */
+static int copy_item(const char *from, const char *to)
+{
+    static unsigned serial;
+    char dir[PATH_MAX];
+    struct stat st;
+    if (lstat(from, &st) < 0) {
+        return -1;
+    }
+    if (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) {
+        errno = ENOTSUP;
+        return -1;
+    }
+    parent_of(to, dir, sizeof dir);
+    do {
+        if (snprintf(copying.temp, sizeof copying.temp, "%s/" COPY_TEMP "%d-%u", strcmp(dir, "/") == 0 ? "" : dir,
+                     (int)getpid(), serial++) >= (int)sizeof copying.temp) {
+            copying.temp[0] = '\0';
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+    } while (lstat(copying.temp, &st) == 0);
+    snprintf(copying.name, sizeof copying.name, "%s", base_name(to));
+    copying.done = 0;
+    tree_size_bytes = 0;
+    nftw(from, add_size, 16, FTW_PHYS);
+    copying.total = tree_size_bytes;
+    int r = copy_tree(from, copying.temp);
+    if (r == 0 && copying.stop != COPY_GOING) {
+        errno = ECANCELED; /* stopped after its last chunk */
+        r = -1;
+    }
+    if (r == 0) {
+        r = rename_new(copying.temp, to);
+    }
+    if (r < 0) {
+        int saved = errno;
+        remove_tree(copying.temp);
+        errno = saved;
+    }
+    copying.temp[0] = '\0';
+    return r;
 }
 
 /* from moved to to, copied and removed across filesystems; never over
@@ -599,14 +953,13 @@ static int move_path(const char *from, const char *to)
         errno = EEXIST;
         return -1;
     }
-    if (rename(from, to) == 0) {
+    if (rename_new(from, to) == 0) {
         return 0;
     }
     if (errno != EXDEV) {
         return -1;
     }
-    if (copy_tree(from, to) < 0) {
-        remove_tree(to);
+    if (copy_item(from, to) < 0) {
         return -1;
     }
     return remove_tree(from);
@@ -1724,8 +2077,9 @@ static void undo_last(void)
         return;
     }
     int done = 0, failed = 0;
+    copy_begin(1); /* moved back across filesystems: copied whole or not at all */
     as_user(1);
-    for (int i = u->n - 1; i >= 0; i--) {
+    for (int i = u->n - 1; i >= 0 && copying.stop == COPY_GOING; i--) {
         char up[PATH_MAX];
         int ok;
         if (u->kind == UNDO_MKDIR) {
@@ -1746,6 +2100,7 @@ static void undo_last(void)
         failed += !ok;
     }
     as_user(0);
+    copy_end();
     if (failed) {
         /* TRANSLATORS: %s is the undone action, %d is the count of items undone. */
         report(1, P_("Undone: %s (%d item); some could not be (is something there now?).",
@@ -1766,8 +2121,9 @@ static void transfer(char *const *paths, int n, const char *dir, int cut)
 {
     int done = 0, failed = 0;
     struct undo *u = undo_begin(cut ? UNDO_MOVE : UNDO_COPY);
+    copy_begin(cut);
     as_user(1);
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < n && copying.stop == COPY_GOING; i++) {
         const char *base = base_name(paths[i]);
         char to[PATH_MAX], from_dir[PATH_MAX];
         int ok;
@@ -1782,15 +2138,21 @@ static void transfer(char *const *paths, int n, const char *dir, int cut)
             ok = move_path(paths[i], to) == 0;
             if (ok) undo_add(u, paths[i], to, NULL);
         } else {
-            ok = copy_tree(paths[i], to) == 0;
+            ok = copy_item(paths[i], to) == 0;
             if (ok) undo_add(u, paths[i], to, NULL);
         }
         done += ok;
-        failed += !ok;
+        failed += !ok && copying.stop == COPY_GOING; /* the one stopped is not a failure */
     }
     as_user(0);
     undo_end(u);
-    if (cut && failed) {
+    if (copy_end()) {
+        /* TRANSLATORS: %d is the count of items finished before the stop. */
+        report(1, cut ? P_("Move stopped after %d item; the unfinished one is where it was.",
+                           "Move stopped after %d items; the unfinished one is where it was.", done) :
+                        P_("Copy stopped after %d item; the unfinished copy was removed.",
+                           "Copy stopped after %d items; the unfinished copy was removed.", done), done);
+    } else if (cut && failed) {
         report(1, P_("Moved %d item; some could not be.", "Moved %d items; some could not be.", done), done);
     } else if (cut) {
         /* TRANSLATORS: Ctrl+Z is the key; keep it. */
@@ -1872,8 +2234,9 @@ static void trash_items(struct pane *p, const int *idx, int n)
     }
     describe(p, idx, n, what, sizeof what);
     struct undo *u = undo_begin(UNDO_TRASH);
+    copy_begin(1); /* into the home's Trash from another filesystem: whole or not at all */
     as_user(1);
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < n && copying.stop == COPY_GOING; i++) {
         char path[PATH_MAX], to[PATH_MAX], info[PATH_MAX];
         if (item_path(p, idx[i], path, sizeof path) == 0 && trash_one(path, to, info, sizeof to) == 0) {
             undo_add(u, path, to, info);
@@ -1884,6 +2247,7 @@ static void trash_items(struct pane *p, const int *idx, int n)
     }
     as_user(0);
     undo_end(u);
+    copy_end();
     if (done == n) {
         /* TRANSLATORS: %s is a file name or "the N items"; Ctrl+Z is the key; keep it. */
         report(0, _("Moved %s to Trash (Ctrl+Z to undo)."), what);
@@ -1943,8 +2307,9 @@ static void restore_targets(void)
 {
     int idx[MAX_CLIP], n = targets(P, idx, MAX_CLIP), done = 0;
     char why[PATH_MAX + 64] = "";
+    copy_begin(1); /* back to another filesystem: whole or not at all */
     as_user(1);
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < n && copying.stop == COPY_GOING; i++) {
         const struct file *f = &P->list[idx[i]];
         char file[PATH_MAX], info[PATH_MAX], up[PATH_MAX];
         struct stat st;
@@ -1963,6 +2328,7 @@ static void restore_targets(void)
         }
     }
     as_user(0);
+    copy_end();
     if (why[0]) {
         /* TRANSLATORS: %d is the count restored, %s is why another item could not be restored. */
         report(1, P_("Restored %d item; %s.", "Restored %d items; %s.", done), done, why);
@@ -2217,8 +2583,16 @@ static void open_terminal_here(void)
         "/usr/local/bin/term", "/bin/sh", "-c",
         "cd -- \"$1\" 2>/dev/null || true; exec /bin/bash -l", "sh", (char *)dir, NULL
     };
+    if (in_window()) {
+        /* TRANSLATORS: %s is a program's name (term, edit, archive). */
+        report(1, _("%s opens from home only, not from a window."), "term");
+        return;
+    }
     base_open(argv, why, sizeof why);
-    report(0, _("Terminal closed (%s)."), base_name(dir));
+    /* "shown": on one of several screens, home keeping the others. */
+    if (!program_ran(why)) report(1, _("%s could not be started (%s)."), "term", why);
+    else if (strncmp(why, "shown ", 6) == 0) report(0, _("Opened with %s."), "term");
+    else report(0, _("Terminal closed (%s)."), base_name(dir));
 }
 
 static void find_files(void)
@@ -2403,6 +2777,51 @@ static void toggle_bookmark(void)
  *   rows-2, rows-1: the buttons
  */
 static int cell_w, cell_h, top_px;
+static int files_output;
+static char files_output_name[32];
+static void drag_stop(void);
+
+static int native_outputs(void)
+{
+    return screen_is_extended && screen_is_extended() && screen_output_count && screen_output_select &&
+           screen_output_get;
+}
+
+static int output_current(void)
+{
+    return native_outputs() && screen_output_current ? screen_output_current() : 0;
+}
+
+static void select_output(int output)
+{
+    struct screen_output info;
+    if (!native_outputs()) {
+        files_output = 0;
+        files_output_name[0] = '\0';
+    } else if (screen_output_select(output) >= 0 && screen_output_get(output, &info) == 0) {
+        files_output = output;
+        snprintf(files_output_name, sizeof files_output_name, "%s", info.name);
+    }
+}
+
+/* An output index may name another connector after hotplug. Keep the input
+ * target by connector name, falling back to the first surviving output. */
+static void output_ready(void)
+{
+    if (!native_outputs()) {
+        select_output(0);
+        return;
+    }
+    int count = screen_output_count(), found = 0;
+    struct screen_output info;
+    for (int i = 0; i < count; i++) {
+        if (screen_output_get(i, &info) == 0 && !strcmp(info.name, files_output_name)) {
+            found = i;
+            break;
+        }
+    }
+    if (count > 0) select_output(found);
+}
 
 static void cell_metrics(void)
 {
@@ -3104,13 +3523,15 @@ static int button_before(int col, int row, const char *label, int id, int keep)
     return col + ui_cells(label) + 2 + keep > screen_cols() ? col : ui_button(col, row, label, id);
 }
 
-static void draw(void)
+static void draw_output(void)
 {
     char line[256];
     int cols = screen_cols(), r = rows(), top_row = body_top();
     set_active();
     cell_metrics();
-    screen_fill(0, 0, cols, screen_rows(), BG);
+    int width, height;
+    screen_pixels(&width, &height);
+    screen_fill_px(0, 0, width, height, BG);
     ui_hits_clear();
     screen_bar("files", NULL);
     draw_toolbar();
@@ -3144,9 +3565,9 @@ static void draw(void)
         screen_fill_px((col + w) * cell_w + cell_w / 2, top_px + top_row * cell_h, 1, r * cell_h, DIM);
         draw_pane(&tabs[cur_tab].pane[1], 1);
     }
-    if (drag.mode == DRAG_BAND) {
+    if (output_current() == files_output && drag.mode == DRAG_BAND) {
         draw_rubberband();
-    } else if (drag.mode == DRAG_ITEMS) {
+    } else if (output_current() == files_output && drag.mode == DRAG_ITEMS) {
         char tag[64];
         snprintf(tag, sizeof tag, " %s ", drag.mods & KEYS_CTRL ? _("+ copy") : _("-> move"));
         screen_text(drag.col + 1, drag.row, tag, BG, ACCENT);
@@ -3235,6 +3656,39 @@ static void draw(void)
     screen_flush();
 }
 
+static void draw(void)
+{
+    output_ready();
+    int count = native_outputs() ? screen_output_count() : 1;
+    if (count <= 1) {
+        draw_output();
+        return;
+    }
+    /* A browser has one folder/selection, not independent copies per screen.
+     * Auxiliary reflow must not consume follow_sel or round the active
+     * output's scroll position to another grid's columns. Paint the input
+     * output last: the shared hit map then describes exactly that output. */
+    struct pane *a = &tabs[cur_tab].pane[0], *b = &tabs[cur_tab].pane[1];
+    int top[2] = { a->top, b->top }, follow[2] = { a->follow_sel, b->follow_sel };
+    for (int i = 0; i < count; i++) {
+        if (i == files_output || screen_output_select(i) < 0) continue;
+        a->top = top[0]; b->top = top[1];
+        a->follow_sel = follow[0]; b->follow_sel = follow[1];
+        draw_output();
+    }
+    a->top = top[0]; b->top = top[1];
+    a->follow_sel = follow[0]; b->follow_sel = follow[1];
+    screen_output_select(files_output);
+    draw_output();
+}
+
+/* Modals stay on the screen that opened them. A click on another screen
+ * cannot accidentally accept a dialog at the same character coordinates. */
+static int pointer_here(const struct pointer_event *e)
+{
+    return !native_outputs() || e->output == output_current();
+}
+
 /* Whole UTF-8 characters (no control characters) inserted at cur, replacing
  * the initial selection when all is set. */
 static void insert_text(char *text, size_t size, size_t *cur, int *all, const char *s, size_t len)
@@ -3299,7 +3753,8 @@ static const char *prompt(const char *question, const char *initial, int select_
         screen_flush();
         int key = key_poll_timeout(-1, -1), mods = keys_modifiers();
         size_t n = strlen(text);
-        if (key == 27) {
+        if (key == 27 || key == K_CLOSE) {
+            close_asked |= key == K_CLOSE; /* nothing typed is kept: the window closes */
             return NULL;
         } else if (key == '\n') {
             return text;
@@ -3361,6 +3816,8 @@ static const char *prompt(const char *question, const char *initial, int select_
             const char *typed = keys_typed(key);
             insert_text(text, sizeof text, &cur, &all, typed, strlen(typed));
         } else if (key == K_SHOWN) {
+            drag_stop();
+            pull.on = 0;
             draw();
         }
     }
@@ -3383,8 +3840,9 @@ static int yes(const char *question)
         if (key == K_POINTER) {
             const struct pointer_event *e = pointer_last();
             if (!e->pressed) continue; /* a motion is no answer */
-            key = ui_hit_at(e->col, e->row) == HIT_KEY + 'y' ? 'y' : 'n';
+            key = pointer_here(e) && ui_hit_at(e->col, e->row) == HIT_KEY + 'y' ? 'y' : 'n';
         }
+        close_asked |= key == K_CLOSE; /* no: nothing is done, and the window closes */
         return key == 'y' || key == 'Y';
     }
 }
@@ -3545,9 +4003,15 @@ static void properties(int folder_self)
         screen_flush();
 
         int key = key_poll_timeout(-1, -1);
+        if (key == K_SHOWN) {
+            drag_stop();
+            pull.on = 0;
+            draw();
+            return;
+        }
         if (key == K_POINTER) {
             const struct pointer_event *e = pointer_last();
-            int id = e->pressed && e->button == BTN_LEFT ? ui_hit_at(e->col, e->row) : -1;
+            int id = pointer_here(e) && e->pressed && e->button == BTN_LEFT ? ui_hit_at(e->col, e->row) : -1;
             key = id >= HIT_KEY ? (id - HIT_KEY) & 0xFFFF : 0;
         }
         if (key == 'x' && !pick_type && !is_trash(P) && S_ISREG(st.st_mode)) {
@@ -3576,7 +4040,8 @@ static void properties(int folder_self)
                     }
                 }
             }
-        } else if (key == 27 || key == 'q' || key == '\n' || key == 'i' || key == 'I') {
+        } else if (key == 27 || key == 'q' || key == '\n' || key == 'i' || key == 'I' || key == K_CLOSE) {
+            close_asked |= key == K_CLOSE;
             return;
         }
     }
@@ -3721,19 +4186,26 @@ static int choose(const char *path, const char *type, char *name, size_t size)
         ui_button(c, r0 + 4 + last, _("Esc: cancel"), HIT_KEY + 27);
         screen_flush();
         int key = key_poll_timeout(-1, -1);
+        if (key == K_SHOWN) {
+            drag_stop();
+            pull.on = 0;
+            draw();
+            return 0;
+        }
         if (key == K_POINTER) {
             const struct pointer_event *e = pointer_last();
-            int id = e->pressed && e->button == BTN_LEFT ? ui_hit_at(e->col, e->row) : -1;
+            int id = pointer_here(e) && e->pressed && e->button == BTN_LEFT ? ui_hit_at(e->col, e->row) : -1;
             if (id >= HIT_KEY) {
                 key = id - HIT_KEY;
             } else if (id >= HIT_FILE && id - HIT_FILE <= last) {
                 at = id - HIT_FILE;
                 key = e->clicks == 2 ? '\n' : 0;
-            } else if (e->wheel) {
+            } else if (pointer_here(e) && e->wheel) {
                 at = at - e->wheel < 0 ? 0 : at - e->wheel > last ? last : at - e->wheel;
             }
         }
-        if (key == 27 || key == 'q') {
+        if (key == 27 || key == 'q' || key == K_CLOSE) {
+            close_asked |= key == K_CLOSE;
             report(0, _("Not opened."));
             return 0;
         } else if (key == K_UP && at > 0) {
@@ -3755,6 +4227,118 @@ static int choose(const char *path, const char *type, char *name, size_t size)
             snprintf(name, size, "%s", names[at]);
             return 1;
         }
+    }
+}
+
+/* locachy-seat --window PROGRAM TARGET, run by itself (no shell), as the
+ * top bar runs it: 0 when process 1 was asked for the window, else -1 and
+ * what the seat said into why. It answers within a second or so. */
+static int seat_window(const char *program, const char *target, char *why, size_t size)
+{
+    int err[2];
+    if (pipe2(err, O_CLOEXEC) < 0) {
+        snprintf(why, size, "%s", strerror(errno));
+        return -1;
+    }
+    pid_t pid = fork();
+    if (pid == 0) {
+        int null = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        if (null >= 0) dup2(null, STDIN_FILENO);
+        dup2(err[1], STDERR_FILENO);
+        char *argv[] = { "locachy-seat", "--window", (char *)program, (char *)target, NULL };
+        execv(SEAT_CLIENT, argv);
+        dprintf(STDERR_FILENO, "cannot run %s: %s", SEAT_CLIENT, strerror(errno));
+        _exit(127);
+    }
+    close(err[1]);
+    if (pid < 0) {
+        snprintf(why, size, "%s", strerror(errno));
+        close(err[0]);
+        return -1;
+    }
+    char text[512];
+    size_t len = 0;
+    double until = copy_clock() + 5;
+    for (;;) {
+        struct pollfd p = { .fd = err[0], .events = POLLIN };
+        double left = until - copy_clock();
+        if (left <= 0 || poll(&p, 1, (int)(left * 1000) + 1) <= 0) {
+            kill(pid, SIGKILL); /* no answer in time */
+            snprintf(text, sizeof text, "%s", _("no answer from locachy-seat"));
+            len = strlen(text);
+            break;
+        }
+        ssize_t n = read(err[0], text + len, sizeof text - 1 - len);
+        if (n <= 0 || (len += (size_t)n) == sizeof text - 1) break;
+    }
+    close(err[0]);
+    text[len] = '\0';
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+    }
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        return 0;
+    }
+    text[strcspn(text, "\n")] = '\0';
+    const char *said = strncmp(text, "locachy-seat: ", 14) == 0 ? text + 14 : text;
+    snprintf(why, size, "%s", said[0] ? said : _("locachy-seat failed"));
+    return -1;
+}
+
+/* A container opens target as asked from the shared display: the top bar's
+ * open socket, "with NAME TARGET" as xdg-open asks (progs/bar.c, which keeps
+ * a container to its shared folders). 0 on its "ok NAME", else -1 and why. */
+static int bar_open(const char *name, const char *target, char *why, size_t size)
+{
+    char request[PATH_MAX + OPEN_NAME + 16], reply[512];
+    struct sockaddr_un a = { .sun_family = AF_UNIX };
+    int n = snprintf(request, sizeof request, "with %s %s", name, target);
+    if (n < 0 || n >= (int)sizeof request) {
+        snprintf(why, size, "%s", _("the path is too long"));
+        return -1;
+    }
+    snprintf(a.sun_path, sizeof a.sun_path, "%s", BAR_OPEN_SOCKET);
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    if (fd < 0 || connect(fd, (struct sockaddr *)&a, sizeof a) < 0 || send(fd, request, (size_t)n, MSG_NOSIGNAL) != n) {
+        if (fd >= 0) close(fd);
+        snprintf(why, size, "%s", _("the top bar is not running"));
+        return -1;
+    }
+    struct pollfd wait = { .fd = fd, .events = POLLIN };
+    ssize_t got = poll(&wait, 1, 10000) > 0 ? recv(fd, reply, sizeof reply - 1, 0) : -1;
+    close(fd);
+    if (got <= 0) {
+        snprintf(why, size, "%s", _("no answer from the top bar"));
+        return -1;
+    }
+    reply[got] = '\0';
+    if (strncmp(reply, "ok", 2) == 0) {
+        return 0;
+    }
+    snprintf(why, size, "%s", strncmp(reply, "error ", 6) == 0 ? reply + 6 : reply);
+    return -1;
+}
+
+/* A framebuffer program asked for in a window, which has no process 1 to
+ * ask: the document viewer as it is installed opens in a view window of its
+ * own (as the top bar's xdg-open opens it); a folder is browsed here; any
+ * other program (edit, archive, term) opens from home only. */
+static void open_program_window(const char *program, const char *path, const char *type, int words, char *const *argv)
+{
+    char why[512];
+    if (strcmp(type, "inode/directory") == 0 && path[0] == '/') {
+        if (go(path, NULL) == 0) report(0, _("Folders are browsed here in a window."));
+    } else if (words == 2 && strcmp(argv[0], VIEW_PROGRAM) == 0 && path[0] == '/') {
+        say("files: open %s with %s in a window", path, program);
+        if (seat_window("view", path, why, sizeof why) == 0) {
+            report(0, _("Opened with %s in a window."), program);
+        } else {
+            say("files: no view window: %s", why);
+            /* TRANSLATORS: first %s is a program's name, second %s why it did not open. */
+            report(1, _("Cannot open a %s window: %.400s"), program, why);
+        }
+    } else {
+        report(1, _("%s opens from home only, not from a window."), program);
     }
 }
 
@@ -3787,11 +4371,22 @@ static void open_file(const char *path, int pick, const char *with)
     }
     /* A framebuffer program: a task of its own, on this screen; it sees the
      * user's files as the user. */
-    if (open_program(name, path, spec, sizeof spec, argv, 16)) {
+    int words = open_program(name, path, spec, sizeof spec, argv, 16);
+    if (words) {
+        const char *program = name + strlen(OPEN_PROGRAM);
+        if (in_window()) {
+            open_program_window(program, path, type, words, argv);
+            return;
+        }
         say("home: open %s (%s) with %s", path, type, name);
         base_open(argv, why, sizeof why);
         say("home: %s", why);
-        report(0, _("Opened with %s."), name + strlen(OPEN_PROGRAM));
+        if (program_ran(why)) {
+            report(0, _("Opened with %s."), program);
+        } else {
+            /* TRANSLATORS: %s is a program's name, then process 1's answer. */
+            report(1, _("%s could not be started (%s)."), program, why);
+        }
         return;
     }
     if (with) {
@@ -3801,6 +4396,15 @@ static void open_file(const char *path, int pick, const char *with)
     /* A container sees the shared folders only; a host program, the home. */
     if (path[0] == '/' && !open_host(name) && !open_shared(path, why, sizeof why)) {
         report(1, _("%.400s: containers cannot see it."), why);
+        return;
+    }
+    if (in_window()) {
+        say("files: open %s (%s) in %s through the top bar", path, type, name);
+        if (bar_open(name, path, why, sizeof why) == 0) {
+            report(0, _("Opened in %s."), name);
+        } else {
+            report(1, "%s: %.400s", name, why);
+        }
         return;
     }
     say("home: open %s (%s) in %s", path, type, name);
@@ -3840,21 +4444,14 @@ static int take_open_request(void)
     return 1;
 }
 
-/* A folder (or a file in it) a container asked to show (FILES_REQUEST): inside
- * the user's home, a folder's newest file selected, or the file itself. */
-static int take_folder_request(void)
+/* A folder (or a file in it) a container asked to show (FILES_REQUEST, or
+ * the window's own folder): inside the user's home, a folder's newest file
+ * selected, or the file itself. */
+static int show_requested(const char *raw)
 {
-    char raw[PATH_MAX + 16], path[PATH_MAX], real[PATH_MAX], dir[PATH_MAX];
+    char path[PATH_MAX], real[PATH_MAX], dir[PATH_MAX];
     struct stat st;
-    FILE *in = fopen(FILES_REQUEST, "re");
-    if (!in) {
-        return 0;
-    }
-    int got = fgets(raw, sizeof raw, in) != NULL;
-    fclose(in);
-    unlink(FILES_REQUEST);
-    raw[got ? strcspn(raw, "\n") : 0] = '\0';
-    if (!got || open_normalize(raw, path, sizeof path) < 0) {
+    if (open_normalize(raw, path, sizeof path) < 0) {
         return 0;
     }
     as_user(1);
@@ -3881,8 +4478,25 @@ static int take_folder_request(void)
     return 1;
 }
 
+static int take_folder_request(void)
+{
+    char raw[PATH_MAX + 16];
+    FILE *in = fopen(FILES_REQUEST, "re");
+    if (!in) {
+        return 0;
+    }
+    int got = fgets(raw, sizeof raw, in) != NULL;
+    fclose(in);
+    unlink(FILES_REQUEST);
+    raw[got ? strcspn(raw, "\n") : 0] = '\0';
+    return got && show_requested(raw);
+}
+
 static int take_request(void)
 {
+    if (in_window()) {
+        return 0; /* home's requests, never a window's */
+    }
     int folder = take_folder_request();
     return take_open_request() || folder;
 }
@@ -4087,6 +4701,10 @@ static void archive_action(int code)
     int idx[MAX_CLIP], n = targets(P, idx, MAX_CLIP), k = 0, status;
     char *argv[MAX_CLIP + 8], name[NAME_MAX + 16] = "", made[PATH_MAX];
     if (n == 0 || is_trash(P) || is_search(P)) return;
+    if (in_window()) {
+        report(1, _("%s opens from home only, not from a window."), "archive");
+        return;
+    }
     argv[k++] = ARCHIVE_PROGRAM;
     if (code == KEY_EXTRACT_HERE || code == KEY_EXTRACT_TRASH) {
         argv[k++] = "--batch";
@@ -4284,9 +4902,261 @@ static int band_autoscroll(void)
     return 1;
 }
 
+/* A file:// URI of a path, percent-encoded (RFC 8089), CRLF-terminated as
+ * text/uri-list lines are. -1 when it does not fit. */
+static int uri_line(char *out, size_t size, size_t *len, const char *path)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    if (*len + 7 >= size) return -1;
+    memcpy(out + *len, "file://", 7);
+    *len += 7;
+    for (const unsigned char *p = (const unsigned char *)path; *p; p++) {
+        int plain = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') ||
+                    *p == '/' || *p == '-' || *p == '.' || *p == '_' || *p == '~';
+        if (*len + (plain ? 1 : 3) + 3 > size) return -1;
+        if (plain) {
+            out[(*len)++] = (char)*p;
+        } else {
+            out[(*len)++] = '%';
+            out[(*len)++] = hex[*p >> 4];
+            out[(*len)++] = hex[*p & 15];
+        }
+    }
+    out[(*len)++] = '\r';
+    out[(*len)++] = '\n';
+    out[*len] = '\0';
+    return 0;
+}
+
+/* The drag with private files ended: the document service keeps their
+ * documents only for a finished drop (end ... done), and nothing once the
+ * connection closes without one. */
+static void docs_drag_ended(int finished, void *data)
+{
+    (void)data;
+    if (docs_drag.fd < 0) return;
+    char msg[64];
+    int n = snprintf(msg, sizeof msg, "end %s %s", docs_drag.session, finished ? "done" : "cancelled");
+    if (send(docs_drag.fd, msg, (size_t)n, MSG_NOSIGNAL) != n) {
+        fprintf(stderr, "files: document service: end not sent: %s\n", strerror(errno));
+    }
+    close(docs_drag.fd);
+    docs_drag.fd = -1;
+    docs_drag.session[0] = '\0';
+}
+
+/* One request to the document service with fds, and its answer (NUL
+ * terminated) in reply, waited for at most 5 s. -1 if none came. */
+static int docs_request(const char *text, size_t len, const int *fds, int nfds, char *reply, size_t size)
+{
+    char control[CMSG_SPACE(sizeof(int) * DOCS_FDS_MAX)] = { 0 };
+    struct iovec iov = { .iov_base = (void *)text, .iov_len = len };
+    struct msghdr m = { .msg_iov = &iov, .msg_iovlen = 1 };
+    if (nfds > 0) {
+        m.msg_control = control;
+        m.msg_controllen = CMSG_SPACE(sizeof(int) * (size_t)nfds);
+        struct cmsghdr *c = CMSG_FIRSTHDR(&m);
+        c->cmsg_level = SOL_SOCKET;
+        c->cmsg_type = SCM_RIGHTS;
+        c->cmsg_len = CMSG_LEN(sizeof(int) * (size_t)nfds);
+        memcpy(CMSG_DATA(c), fds, sizeof(int) * (size_t)nfds);
+    }
+    if (sendmsg(docs_drag.fd, &m, MSG_NOSIGNAL) != (ssize_t)len) return -1;
+    struct pollfd p = { .fd = docs_drag.fd, .events = POLLIN };
+    int r;
+    while ((r = poll(&p, 1, 5000)) < 0 && errno == EINTR) {}
+    ssize_t got = r == 1 ? recv(docs_drag.fd, reply, size - 1, 0) : -1;
+    if (got <= 0) return -1;
+    reply[got] = '\0';
+    return 0;
+}
+
+/* The private items of a drag (path[i] of each i with private[i]) made
+ * documents of the host's document service, which nobody may read yet: each
+ * opened as the user (O_PATH, without O_NOFOLLOW: what the user's path
+ * names), sent DOCS_FDS_MAX at a time; their paths as containers see them
+ * come back into doc[i]. All or nothing: -1 with the service told nothing is
+ * kept (the connection closes), and why set (a message of the interface). */
+static int docs_begin(char (*path)[PATH_MAX], const int *private, int n, char **doc, char *why, size_t size)
+{
+    struct sockaddr_un a = { .sun_family = AF_UNIX };
+    char home_dir[PATH_MAX], shared[256];
+    open_user_dirs(home_dir, sizeof home_dir, shared, sizeof shared);
+    snprintf(a.sun_path, sizeof a.sun_path, "%s", DOCS_CONTROL);
+    docs_drag.fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    if (docs_drag.fd < 0 || connect(docs_drag.fd, (struct sockaddr *)&a, sizeof a) < 0) {
+        fprintf(stderr, "files: document service %s: %s\n", DOCS_CONTROL, strerror(errno));
+        if (docs_drag.fd >= 0) close(docs_drag.fd);
+        docs_drag.fd = -1;
+        /* TRANSLATORS: %s lists the shared folder names, e.g. "Documents Downloads Drives". */
+        snprintf(why, size, _("Files outside the shared folders (%s) need the document service, which is not running: the drag did not start."), shared);
+        return -1;
+    }
+    char *msg = malloc(DOCS_MSG_MAX), *reply = malloc(DOCS_MSG_MAX);
+    int ok = msg && reply, first = 1;
+    for (int i = 0; ok && i < n;) {
+        int fds[DOCS_FDS_MAX], item[DOCS_FDS_MAX], nfds = 0;
+        size_t len = (size_t)snprintf(msg, DOCS_MSG_MAX, first ? "begin" : "begin-more %s", docs_drag.session);
+        for (; i < n && nfds < DOCS_FDS_MAX && ok; i++) {
+            if (!private[i]) continue;
+            const char *name = base_name(path[i]);
+            as_user(1);
+            int fd = open(path[i], O_PATH | O_CLOEXEC);
+            as_user(0);
+            char at[64], now[PATH_MAX];
+            snprintf(at, sizeof at, "/proc/self/fd/%d", fd);
+            ssize_t r = fd >= 0 ? readlink(at, now, sizeof now - 1) : -1;
+            if (r > 0) now[r] = '\0';
+            /* The file as it is now still in the home (a renamed folder on
+             * the way may have taken it elsewhere). */
+            ok = r > 0 && inside(now, home_dir) && strcmp(now, home_dir) != 0 &&
+                 len + 1 + strlen(name) < DOCS_MSG_MAX;
+            if (!ok) {
+                fprintf(stderr, "files: %s: %s\n", path[i], fd < 0 ? strerror(errno) : "no longer in the home");
+                if (fd >= 0) close(fd);
+                break;
+            }
+            len += (size_t)snprintf(msg + len, DOCS_MSG_MAX - len, "\n%s", name);
+            item[nfds] = i;
+            fds[nfds++] = fd;
+        }
+        if (ok && nfds > 0) {
+            ok = docs_request(msg, len, fds, nfds, reply, DOCS_MSG_MAX) == 0;
+            if (ok && strncmp(reply, "ok ", 3) != 0) {
+                fprintf(stderr, "files: document service: %s\n", reply);
+                ok = 0;
+            }
+            /* "ok SESSION", then one path a line, in the order sent. */
+            char *line = ok ? reply + 3 : NULL, *next = line ? strchr(line, '\n') : NULL;
+            if (ok && next) *next++ = '\0';
+            if (ok && first) snprintf(docs_drag.session, sizeof docs_drag.session, "%s", line);
+            ok = ok && line[0] && strcmp(line, docs_drag.session) == 0;
+            for (int k = 0; ok && k < nfds; k++) {
+                line = next;
+                next = line ? strchr(line, '\n') : NULL;
+                if (next) *next++ = '\0';
+                ok = line && line[0] == '/';
+                if (ok) ok = (doc[item[k]] = strdup(line)) != NULL;
+            }
+            first = 0;
+        }
+        for (int k = 0; k < nfds; k++) close(fds[k]);
+    }
+    free(msg);
+    free(reply);
+    if (!ok) {
+        close(docs_drag.fd); /* the service deletes what it made of these */
+        docs_drag.fd = -1;
+        docs_drag.session[0] = '\0';
+        /* TRANSLATORS: %s lists the shared folder names, e.g. "Documents Downloads Drives". */
+        snprintf(why, size, _("The document service could not offer the files outside the shared folders (%s): the drag did not start."), shared);
+        return -1;
+    }
+    return 0;
+}
+
+/* An item drag leaving a Wayland window goes on as a standard drag to other
+ * programs, copy only. Files in the shared folders, which an isolated
+ * program sees at the same paths, go as their file:// URIs. Any other file
+ * of the home goes as a document of the host's document service
+ * (tools/DOCUMENTS.md): its path in the document portal's mount, which only
+ * the program it is dropped on may read (the compositor asks the service
+ * before it lets the drop through), and a FileTransfer key of the same
+ * paths. A real path of such a file is never offered. Nothing outside the
+ * home; all or nothing. 1: the drag left. */
+static int drag_out(int px, int py)
+{
+    int w, h;
+    if (drag.out || pick_type || !wl_data_active || !wl_data_drag_start || !wl_data_press_serial ||
+        !wl_data_active()) return 0;
+    screen_pixels(&w, &h);
+    if (px >= 0 && py >= 0 && px < w && py < h) return 0;
+    drag.out = 1;
+    if (wl_data_drag_active && wl_data_drag_active()) return 0;
+    if (docs_drag.fd >= 0) docs_drag_ended(0, NULL); /* a drag that never told its end */
+    struct pane *fp = &tabs[cur_tab].pane[drag.pane];
+    int idx[MAX_CLIP], n = 0;
+    if (drag.item >= 0 && drag.item < fp->nlist && !fp->list[drag.item].marked) {
+        idx[n++] = drag.item;
+    } else {
+        n = targets(fp, idx, MAX_CLIP);
+    }
+    char home_dir[PATH_MAX], shared[256];
+    open_user_dirs(home_dir, sizeof home_dir, shared, sizeof shared);
+    char (*real)[PATH_MAX] = n > 0 ? calloc((size_t)n, PATH_MAX) : NULL;
+    int *private = n > 0 ? calloc((size_t)n, sizeof *private) : NULL;
+    char **doc = n > 0 ? calloc((size_t)n, sizeof *doc) : NULL;
+    int nprivate = 0, refused = !real || !private || !doc || is_trash(fp) || !home_dir[0];
+    for (int i = 0; i < n && !refused; i++) {
+        char path[PATH_MAX], why[512];
+        as_user(1);
+        int ok = item_path(fp, idx[i], path, sizeof path) == 0 && realpath(path, real[i]) != NULL;
+        as_user(0);
+        if (ok && !open_shared(real[i], why, sizeof why)) {
+            private[i] = inside(real[i], home_dir) && strcmp(real[i], home_dir) != 0;
+            ok = private[i];
+            nprivate += private[i];
+        }
+        refused = !ok;
+    }
+    char why[512] = "";
+    if (refused) {
+        snprintf(why, sizeof why, "%s", _("Only files in the home folder can be dragged to other programs."));
+    } else if (nprivate > 0 && !wl_data_drag_start_key) {
+        snprintf(why, sizeof why, "%s", _("The drag to other programs could not start."));
+        refused = 1;
+    } else if (nprivate > 0) {
+        refused = docs_begin(real, private, n, doc, why, sizeof why) < 0;
+    }
+    /* The same paths, the documents' for private files: the URI list once
+     * (receivers ask for it on every enter), and the key. */
+    size_t size = (size_t)n * (3 * PATH_MAX + 16) + 1, len = 0, joined = 0;
+    char *uris = refused ? NULL : malloc(size), *paths = refused ? NULL : malloc((size_t)n * PATH_MAX + 1);
+    for (int i = 0; i < n && uris && paths; i++) {
+        const char *p = private[i] ? doc[i] : real[i];
+        if (uri_line(uris, size, &len, p) < 0) {
+            free(uris);
+            uris = NULL;
+            break;
+        }
+        size_t plen = strlen(p);
+        memcpy(paths + joined, p, plen + 1);
+        joined += plen + 1;
+    }
+    if (!refused && (!uris || !paths)) {
+        snprintf(why, sizeof why, "%s", _("The drag to other programs could not start."));
+        refused = 1;
+    }
+    if (!refused && nprivate > 0) {
+        size_t ksize = joined / 3 * 4 + sizeof DOCS_KEY_PREFIX + 8;
+        char *key = malloc(ksize);
+        refused = !key || docs_key_encode(paths, joined - 1, key, ksize) < 0 ||
+                  wl_data_drag_start_key(uris, len, key, wl_data_press_serial(), docs_drag_ended, NULL) < 0;
+        free(key);
+    } else if (!refused) {
+        refused = wl_data_drag_start(uris, len, wl_data_press_serial()) < 0;
+    }
+    if (refused) {
+        if (!why[0]) snprintf(why, sizeof why, "%s", _("The drag to other programs could not start."));
+        if (docs_drag.fd >= 0) docs_drag_ended(0, NULL);
+        report(1, "%s", why);
+    }
+    for (int i = 0; doc && i < n; i++) free(doc[i]);
+    free(doc);
+    free(private);
+    free(real);
+    free(uris);
+    free(paths);
+    return !refused;
+}
+
 static void pointer_xy(const struct pointer_event *e, int *x, int *y)
 {
     cell_metrics();
+    /* Extended pointer pixels are desktop logical coordinates; drawing and
+     * rubberband anchors use the selected output's native pixels. */
+    if (native_outputs() && screen_output_at && (e->x || e->y) &&
+        screen_output_at(e->x, e->y, x, y) == e->output) return;
     *x = e->x || e->y ? e->x : e->col * cell_w + cell_w / 2;
     *y = e->x || e->y ? e->y : top_px + e->row * cell_h + cell_h / 2;
 }
@@ -4307,6 +5177,17 @@ static int pointer_key(int *out_mods)
 {
     const struct pointer_event *e = pointer_last();
     int mods = keys_modifiers(), px, py;
+    if (native_outputs()) {
+        if (e->output < 0 || e->output >= screen_output_count()) return 0;
+        if (e->output != files_output) {
+            /* An item drag can target another output's folder. A rubberband
+             * belongs to the grid where its anchor was pressed. */
+            if (drag.mode == DRAG_BAND || drag.mode == DRAG_PENDING) drag_stop();
+            pull.on = 0;
+            select_output(e->output);
+            draw(); /* rebuild this output's cells and hit regions first */
+        }
+    }
     pointer_xy(e, &px, &py);
     /* Only a finger (a touch screen's one, or a touchpad's scroll) pulls;
      * wheels, the TrackPoint and file drags scroll as before. */
@@ -4391,6 +5272,10 @@ static int pointer_key(int *out_mods)
         drag.col = e->col;
         drag.row = e->row;
         drag.mods = mods;
+        if ((drag.mode == DRAG_PENDING || drag.mode == DRAG_ITEMS) && !pick_type && drag_out(px, py)) {
+            drag_stop(); /* the compositor has the pointer until the drop */
+            return -1;
+        }
         if (drag.mode == DRAG_PENDING && (e->col != drag.ax || e->row != drag.ay)) {
             drag.mode = DRAG_ITEMS;
             return -1;
@@ -4591,6 +5476,10 @@ static int browse(char *out, size_t size)
 {
     int show = 1;
     for (;;) {
+        /* The window's close, here or in a question, a menu or a copy: as q. */
+        if (close_asked) {
+            return 0;
+        }
         set_active();
         cloud_tick();
         drive_tick();
@@ -4599,6 +5488,10 @@ static int browse(char *out, size_t size)
         /* The drives service's answer wakes it as a key does. */
         int key = key_poll_timeout(drive_job.fd, drag.mode == DRAG_BAND ? 40 : cloud_job.pid ? 100 : 2000);
         int mods = keys_modifiers();
+        if (key == K_CLOSE) {
+            close_asked = 1;
+            continue;
+        }
         if (key == K_POINTER) {
             mods = 0;
             key = pointer_key(&mods);
@@ -4612,6 +5505,13 @@ static int browse(char *out, size_t size)
             continue;
         }
         if (key == K_SHOWN || key == 0) {
+            if (key == K_SHOWN) {
+                /* No pixel anchor survives a changed mode, scale or output.
+                 * The folder, selection and keyboard target do survive. */
+                drag_stop();
+                pull.on = 0;
+                output_ready();
+            }
             if ((pick_type || !take_request()) && key == K_SHOWN) {
                 reload_all();
             }
@@ -4939,21 +5839,62 @@ static int browse(char *out, size_t size)
     }
 }
 
-void files_view(void)
+/* The caller may be a single-output task, or home with every output.
+ * Native reflow is local to files; restore the caller's mode and drawing
+ * target, including callers that deliberately retain a mirrored canvas. */
+static int files_screens_begin(int *previous)
+{
+    int was = screen_is_extended && screen_is_extended();
+    *previous = was && screen_output_current ? screen_output_current() : 0;
+    if (screen_extended) screen_extended(1);
+    files_output_name[0] = '\0';
+    select_output(*previous >= 0 ? *previous : 0);
+    output_ready();
+    return was;
+}
+
+static void files_screens_end(int was, int previous)
+{
+    if (!was && screen_extended) screen_extended(0);
+    else if (native_outputs() && screen_output_count() > 0) {
+        screen_output_select(previous >= 0 && previous < screen_output_count() ? previous : 0);
+    }
+}
+
+/* folder: a window's own (files-main), shown as a container's request is;
+ * NULL: home's file manager, which takes the requests waiting for it. */
+static void view_at(const char *folder)
 {
     if (setup() < 0) {
         return;
     }
+    int previous, was = files_screens_begin(&previous);
+    close_asked = 0;
     if (!P->cwd[0] || (!is_trash(P) && !is_search(P) && !inside(P->cwd, home)) || go_pane(P, P->cwd, NULL, 0) < 0) {
         go_pane(P, home, NULL, 0);
     }
-    take_request();
+    if (folder) {
+        show_requested(folder);
+    } else {
+        take_request();
+    }
     int scroll_events = pointer_scroll_events(1);
     browse(NULL, 0);
     pointer_scroll_events(scroll_events);
     pull.on = 0;
     cloud_cancel();
     drag_stop();
+    files_screens_end(was, previous);
+}
+
+void files_view(void)
+{
+    view_at(NULL);
+}
+
+void files_view_at(const char *folder)
+{
+    view_at(folder);
 }
 
 int files_pick(const char *dir, const char *keep, const char *type, const char *what, char *out, size_t size)
@@ -4961,6 +5902,8 @@ int files_pick(const char *dir, const char *keep, const char *type, const char *
     if (setup() < 0) {
         return 0;
     }
+    int previous, was = files_screens_begin(&previous);
+    close_asked = 0;
     if (go(dir, keep) < 0) {
         go(home, NULL);
     }
@@ -4973,5 +5916,11 @@ int files_pick(const char *dir, const char *keep, const char *type, const char *
     cloud_cancel();
     pick_type = NULL;
     drag_stop();
+    files_screens_end(was, previous);
     return chosen;
+}
+
+int files_close_asked(void)
+{
+    return close_asked;
 }

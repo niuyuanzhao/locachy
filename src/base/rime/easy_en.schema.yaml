@@ -1,11 +1,15 @@
 schema:
   schema_id: easy_en
   name: "English"
-  version: "0.1"
+  version: "0.2"
 
+# English mode's front end (base/ime.c, en_key) gives Rime the letters and
+# BackSpace only, as fcitx5's keyboard engine keeps its word: every other key
+# commits the letters as typed and is typed itself, and Tab moves to a
+# completion. So no key here selects or pages: none of the keys typed in
+# English (Space, digits, - = [ ]) is taken from the text.
 engine:
   processors:
-    - key_binder
     - speller
     - selector
     - navigator
@@ -22,6 +26,7 @@ speller:
   alphabet: "zyxwvutsrqponmlkjihgfedcbaABCDEFGHIJKLMNOPQRSTUVWXYZ"
   auto_select: false
 
+# Completions are offered; one is committed only when Tab moved to it.
 translator:
   dictionary: easy_en
   enable_sentence: false
@@ -30,14 +35,3 @@ translator:
 
 menu:
   page_size: 20
-
-key_binder:
-  bindings:
-    - { when: has_menu, accept: bracketleft, send: Page_Up }
-    - { when: has_menu, accept: bracketright, send: Page_Down }
-    - { when: has_menu, accept: minus, send: Page_Up }
-    - { when: has_menu, accept: equal, send: Page_Down }
-    - { when: has_menu, accept: Left, send: Up }
-    - { when: has_menu, accept: Right, send: Down }
-    - { when: has_menu, accept: Tab, send: Down }
-    - { when: has_menu, accept: ISO_Left_Tab, send: Up }

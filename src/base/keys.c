@@ -10,6 +10,7 @@
  * each by its own table's roles, and Caps Lock is one.
  */
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/input.h>
@@ -19,9 +20,17 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/ioctl.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "internal.h"
+#include "include/wayland-backend.h"
+
+/* The input devices as sysfs has them (eventN/device), for the keyboards'
+ * list of a program that holds none (keys_keyboards). */
+#ifndef KEYS_SYSFS_INPUT
+#define KEYS_SYSFS_INPUT "/sys/class/input"
+#endif
 
 #define MAX_KEYBOARDS 8
 #define MAX_BINDINGS  32
@@ -127,7 +136,9 @@ static int open_mode = O_RDONLY; /* O_RDWR once keys_leds is called */
 /* The locks onto the keyboards' LEDs while this process shows them, as
  * libinput's evdev_device_led_update writes them: EV_LED events, then a
  * SYN_REPORT. The input core passes on only an LED that changes; a keyboard
- * without that LED ignores it. */
+ * without that LED ignores it. The LEDs are only written, never read back
+ * for the locks: a keyboard whose LED its firmware drives (an embedded
+ * controller's Caps Lock LED) may not report what was written (EVIOCGLED). */
 static void show_locks(void)
 {
     struct input_event ev[3] = {
@@ -141,33 +152,25 @@ static void show_locks(void)
     }
 }
 
-/* The locks as the LEDs show them (whoever set them last), from the first
- * keyboard with a Caps Lock LED, as libevdev takes a device's LED state when
- * it starts on it (libevdev_set_fd: EVIOCGLED). */
-static void locks_from_leds(void)
+int keys_locks(void)
 {
-    for (int i = 0; i < count; i++) {
-        unsigned long leds[LED_MAX / (8 * sizeof(long)) + 1] = { 0 }, lit[LED_MAX / (8 * sizeof(long)) + 1] = { 0 };
-        if (ioctl(keyboards[i], EVIOCGBIT(EV_LED, sizeof leds), leds) < 0 || !has(leds, LED_CAPSL) ||
-            ioctl(keyboards[i], EVIOCGLED(sizeof lit), lit) < 0) {
-            continue;
-        }
-        int was = caps;
-        caps = has(lit, LED_CAPSL);
-        num = has(lit, LED_NUML);
-        if (caps != was && ime_set_caps) {
-            ime_set_caps(caps);
-        }
-        return;
+    return (caps ? KEYS_LOCK_CAPS : 0) | (num ? KEYS_LOCK_NUM : 0);
+}
+
+void keys_set_locks(int locks)
+{
+    int was = caps;
+    caps = !!(locks & KEYS_LOCK_CAPS);
+    num = !!(locks & KEYS_LOCK_NUM);
+    if (caps != was && ime_set_caps) {
+        ime_set_caps(caps);
     }
+    show_locks();
 }
 
 void keys_leds(int on)
 {
     open_mode = O_RDWR;
-    if (on && !leds_shown) {
-        locks_from_leds();
-    }
     leds_shown = on;
     show_locks();
 }
@@ -339,6 +342,21 @@ static void read_table(void)
     if (!table_read) keys_layout_load(KEYS_TABLE);
 }
 
+/* As sway names input devices: vendor:product:name, the name without white
+ * space around it, its spaces and unprintable bytes as _. */
+static void format_device_id(unsigned vendor, unsigned product, const char *device_name, char *out, size_t size)
+{
+    char name[256];
+    snprintf(name, sizeof name, "%s", device_name);
+    char *s = name, *e = name + strlen(name);
+    while (isspace((unsigned char)*s)) s++;
+    while (e > s && isspace((unsigned char)e[-1])) *--e = '\0';
+    for (char *p = s; *p; p++) {
+        if (*p == ' ' || !isprint((unsigned char)*p)) *p = '_';
+    }
+    snprintf(out, size, "%u:%u:%s", vendor, product, s);
+}
+
 int keys_device_id(int fd, char *out, size_t size)
 {
     struct input_id id;
@@ -346,15 +364,7 @@ int keys_device_id(int fd, char *out, size_t size)
     if (ioctl(fd, EVIOCGID, &id) < 0 || ioctl(fd, EVIOCGNAME(sizeof name - 1), name) < 0) {
         return -1;
     }
-    /* As sway names input devices: the name without white space around it,
-     * its spaces and unprintable bytes as _. */
-    char *s = name, *e = name + strlen(name);
-    while (isspace((unsigned char)*s)) s++;
-    while (e > s && isspace((unsigned char)e[-1])) *--e = '\0';
-    for (char *p = s; *p; p++) {
-        if (*p == ' ' || !isprint((unsigned char)*p)) *p = '_';
-    }
-    snprintf(out, size, "%u:%u:%s", id.vendor, id.product, s);
+    format_device_id(id.vendor, id.product, name, out, size);
     return 0;
 }
 
@@ -481,6 +491,11 @@ int keys_device_char(int fd, int code, int with_shift)
 
 const char *keys_text(void)
 {
+    if (wl_backend_active()) {
+#ifdef CONFIG_WAYLAND
+        return wl_backend_text();
+#endif
+    }
     return typed_text;
 }
 
@@ -707,6 +722,13 @@ int keys_alone_action(int code)
 int keys_open(void)
 {
     load_keybindings(&tables[0]);
+    /* A window's keys and pointer are its seat's (wayland-backend.c): no
+     * keyboard or pointer device of its own, no lease from process 1. */
+    if (wl_backend_active()) return 1;
+    if (wl_backend_requested() != 0) {
+        say("keys: a window was asked for (LOCACHY_BACKEND), but there is none; no input devices are opened");
+        exit(WL_EXIT_UNAVAILABLE);
+    }
     if (control_fd() >= 0) {
         control_wait_take(); /* keys_take does the rest */
         pointer_open();      /* and the pointer comes after each take */
@@ -785,7 +807,7 @@ void keys_refresh(void)
         }
     }
     if (found) {
-        show_locks(); /* a new keyboard starts with the console's LEDs (kbd_start) */
+        show_locks(); /* a new keyboard starts with the console's LEDs (kbd_start): ours on all */
     }
 }
 
@@ -800,12 +822,14 @@ void keys_take(const int *fds, int n)
             close(fds[i]);
         }
     }
-    locks_from_leds(); /* Caps and Num Lock as process 1 shows them */
+    /* The locks come with the keyboards (control.c: keys_set_locks), as
+     * process 1 holds them: never from the LEDs of one keyboard. */
 }
 
 /* An input-only update is not a new screen activation. Keep live queues and
  * modifier state; discard only descriptors for devices no longer lent. A
- * program given the keyboard again takes the locks as keys_take does. */
+ * program given the keyboard again takes the locks as keys_take does
+ * (control.c, when it held none before). */
 void keys_update(const int *fds, int n)
 {
     int old[MAX_KEYBOARDS], used[MAX_KEYBOARDS] = { 0 }, old_count = count;
@@ -836,9 +860,6 @@ void keys_update(const int *fds, int n)
     for (int i = 0; i < old_count; i++) if (!used[i]) close(old[i]);
     memset(dropping, 0, sizeof dropping);
     update_modifiers();
-    if (old_count == 0) {
-        locks_from_leds();
-    }
 }
 
 void keys_release(void)
@@ -902,10 +923,76 @@ int keys_fds(int *fds, int max)
     return n;
 }
 
+/* sysfs's file of input device event (its device/...), one line without its
+ * newline; -1 when there is none. */
+static int sysfs_line(const char *event, const char *file, char *out, size_t size)
+{
+    char path[512];
+    snprintf(path, sizeof path, "%s/%s/device/%s", KEYS_SYSFS_INPUT, event, file);
+    FILE *f = fopen(path, "re");
+    if (!f) return -1;
+    int ok = fgets(out, (int)size, f) != NULL;
+    fclose(f);
+    if (!ok) return -1;
+    out[strcspn(out, "\n")] = '\0';
+    return 0;
+}
+
+/* The keyboards (letters and Enter, as keys_refresh takes them) of sysfs's
+ * input devices, by event number, each id once: for a program that holds
+ * none, a window on the shared display (whose keys are its seat's), which
+ * lists and sets them as the direct program does. Nothing is opened in
+ * /dev/input. */
+static int sysfs_keyboards(struct keys_keyboard *out, int max)
+{
+    DIR *d = opendir(KEYS_SYSFS_INPUT);
+    struct dirent *e;
+    int seen[64] = { 0 }, n = 0;
+    while (d && (e = readdir(d)) != NULL) {
+        int number, end = 0;
+        if (sscanf(e->d_name, "event%d%n", &number, &end) == 1 && !e->d_name[end] && number >= 0 && number < 64) {
+            seen[number] = 1;
+        }
+    }
+    if (d) closedir(d);
+    for (int i = 0; i < 64 && n < max; i++) {
+        char event[16], name[256], vendor[16], product[16], bits[1024];
+        snprintf(event, sizeof event, "event%d", i);
+        if (!seen[i] || sysfs_line(event, "name", name, sizeof name) < 0 ||
+            sysfs_line(event, "id/vendor", vendor, sizeof vendor) < 0 ||
+            sysfs_line(event, "id/product", product, sizeof product) < 0 ||
+            sysfs_line(event, "capabilities/key", bits, sizeof bits) < 0) {
+            continue;
+        }
+        /* The key bitmap in hex words, the highest first (the kernel's
+         * input_print_bitmap): KEY_A and KEY_ENTER are in the last one. */
+        const char *last = strrchr(bits, ' ');
+        unsigned long long word = strtoull(last ? last + 1 : bits, NULL, 16);
+        if (!((word >> KEY_A) & 1) || !((word >> KEY_ENTER) & 1)) continue;
+        struct keys_keyboard *k = &out[n];
+        memset(k, 0, sizeof *k);
+        format_device_id((unsigned)strtoul(vendor, NULL, 16), (unsigned)strtoul(product, NULL, 16), name, k->id,
+                         sizeof k->id);
+        snprintf(k->name, sizeof k->name, "%.*s", (int)sizeof k->name - 1, name);
+        k->own = device_keymap(k->id, k->keymap, sizeof k->keymap) == 0;
+        if (!k->own) snprintf(k->keymap, sizeof k->keymap, "%s", tables[0].layout_names[0]);
+        char table[sizeof KEYS_TABLES + 72];
+        snprintf(table, sizeof table, "%s/%s.table", KEYS_TABLES, k->keymap);
+        k->missing = k->own && strcmp(k->keymap, tables[0].layout_names[0]) != 0 && access(table, R_OK) != 0;
+        int dup = 0;
+        for (int j = 0; j < n; j++) dup |= strcmp(out[j].id, k->id) == 0;
+        if (!dup) n++;
+    }
+    return n;
+}
+
 int keys_keyboards(struct keys_keyboard *out, int max)
 {
     int n = 0;
     read_table();
+    if (count == 0) {
+        return sysfs_keyboards(out, max);
+    }
     for (int i = 0; i < count && n < max; i++) {
         unsigned long bits[KEY_MAX / (8 * sizeof(long)) + 1] = { 0 };
         struct keys_keyboard *k = &out[n];
@@ -1103,11 +1190,24 @@ static int translate(struct table *tb, int code, int repeat)
 void keys_name_any(int on)
 {
     name_any = on;
+#ifdef CONFIG_WAYLAND
+    wl_backend_name_keys(on);
+#endif
 }
 
 int keys_last_name(char *out, size_t size)
 {
     char key[32];
+#ifdef CONFIG_WAYLAND
+    if (wl_backend_active()) {
+        int held = wl_backend_modifiers();
+        const char *name = wl_backend_key_name();
+        if (!name[0]) return -1;
+        snprintf(out, size, "%s%s%s%s%s", held & KEYS_CTRL ? "Ctrl+" : "", held & KEYS_ALT ? "Alt+" : "",
+                 held & KEYS_SHIFT ? "Shift+" : "", held & KEYS_META ? "Super+" : "", name);
+        return 0;
+    }
+#endif
     const struct table *tb = last_table;
     read_table();
     if (last_code == KEY_SPACE || last_code == KEY_ENTER || last_code == KEY_TAB) {
@@ -1128,6 +1228,11 @@ int keys_last_name(char *out, size_t size)
 
 int keys_modifiers(void)
 {
+    if (wl_backend_active()) {
+#ifdef CONFIG_WAYLAND
+        return wl_backend_modifiers();
+#endif
+    }
     return (shift ? KEYS_SHIFT : 0) | (ctrl ? KEYS_CTRL : 0) | (alt ? KEYS_ALT : 0) | (meta ? KEYS_META : 0);
 }
 
@@ -1223,8 +1328,55 @@ int keys_event(int fd)
     return 0;
 }
 
+void key_close_kept(void)
+{
+#ifdef CONFIG_WAYLAND
+    wl_backend_close_kept();
+#endif
+}
+
+#ifdef CONFIG_WAYLAND
+/* A window's input, with the same answers as the devices': K_SHOWN for a
+ * new size, K_POINTER, keys (K_CLOSE when closing it is asked for), 0 when
+ * an extra fd is ready or the time has passed. The program ends here only
+ * when closing is asked again within 3 s of an unanswered K_CLOSE, or when
+ * the compositor has gone: nothing can show it any more. */
+static int window_poll(struct pollfd *extra, size_t nextra, int timeout_ms)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    long long deadline = (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000 + (timeout_ms > 0 ? timeout_ms : 0);
+    for (size_t i = 0; i < nextra; i++) extra[i].revents = 0;
+    for (;;) {
+        if (screen_window_shown()) return K_SHOWN;
+        if (pointer_next()) return K_POINTER;
+        int key = wl_backend_next_key();
+        if (key) return key;
+        int left = -1;
+        if (timeout_ms >= 0) {
+            clock_gettime(CLOCK_MONOTONIC, &t);
+            long long now = (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+            left = now >= deadline ? 0 : (int)(deadline - now);
+        }
+        int r = wl_backend_wait(extra, nextra, left);
+        if (r < 0) {
+            if (wl_backend_close_forced()) {
+                say("keys: closed again within 3 s of an unanswered close: the program ends");
+                exit(0);
+            }
+            say("keys: the compositor has gone: the window cannot be shown any more");
+            exit(WL_EXIT_UNAVAILABLE);
+        }
+        if (r == 0 || r == 2) return 0; /* r == 0: nothing came in the time */
+    }
+}
+#endif
+
 int key_poll_many(struct pollfd *extra, size_t nextra, int timeout_ms)
 {
+#ifdef CONFIG_WAYLAND
+    if (wl_backend_active()) return window_poll(extra, nextra, timeout_ms);
+#endif
     size_t size = MAX_KEYBOARDS + 2 + nextra;
     struct pollfd *p = calloc(size, sizeof *p);
     if (!p) return 0;

@@ -189,12 +189,35 @@ def cmd_fwupd_releases(args):
     return 0
 
 
+NETNS = "/run/netns/locachy-net"
+# What downloads: fwupdmgr fetches LVFS's metadata and the firmware archives
+# itself (and install-release an archive by its address), then hands them to
+# the daemon over D-Bus.
+NET_ACTIONS = ("refresh", "update", "install-release")
+
+
+def outside_net():
+    """locachy-net is there and this process is not in it."""
+    try:
+        return os.stat(NETNS).st_ino != os.stat("/proc/self/ns/net").st_ino
+    except OSError:
+        return False
+
+
 def cmd_fwupd_action(args):
     exe = fwupdmgr_bin()
     if not exe:
         print("fwupdmgr is not installed; install the fwupd package first.", file=sys.stderr)
         return 10
     act = args.action
+    if act in NET_ACTIONS and outside_net():
+        # The network is in locachy-net, through the network layers that are
+        # on; a system job runs in the root namespace, which has lo alone.
+        # Only this client goes there: the daemon (on the system bus, its
+        # socket a path) keeps its own namespace and the devices.
+        sys.stdout.flush()
+        os.execvp("ip", ["ip", "netns", "exec", "locachy-net", sys.executable, "-I", os.path.abspath(__file__)]
+                  + sys.argv[1:])
     if act == "refresh":
         try:
             rem = run_json([exe, "get-remotes", "--json"])

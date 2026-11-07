@@ -2,7 +2,8 @@
 # test-container-documents.sh OUT: verify container-documents refuses root,
 # owns org.freedesktop.portal.Documents on a private session bus as an
 # unprivileged user, answers version/GetMountPoint/Lookup/List/GetHostPaths,
-# and rejects Add with org.freedesktop.portal.Error.NotAllowed.
+# and rejects Add with org.freedesktop.portal.Error.NotAllowed; its
+# FileTransfer decodes a LOCachy key in RetrieveFiles and allows no transfer.
 set -eu
 src=$(cd "$(dirname "$0")/.." && pwd)
 out=${1:?usage: test-container-documents.sh OUT}
@@ -53,6 +54,24 @@ dbus-run-session -- sh -euc '
         echo "FAIL Delete should fail with NotAllowed"
         exit 1
     fi
+    # FileTransfer: RetrieveFiles answers the paths of a LOCachy key (made
+    # here by coreutils, not by the code under test); a bad key is an
+    # invalid argument; starting a transfer or adding files is not allowed.
+    ft() { gdbus call --session --dest org.freedesktop.portal.Documents \
+        --object-path /org/freedesktop/portal/documents --method "org.freedesktop.portal.FileTransfer.$@"; }
+    ftv=$(dbus-send --session --print-reply=literal --dest=org.freedesktop.portal.Documents \
+        /org/freedesktop/portal/documents org.freedesktop.DBus.Properties.Get \
+        string:org.freedesktop.portal.FileTransfer string:version)
+    echo "$ftv" | grep -q "uint32 1"
+    key=LOCACHYDOC$(printf "/run/user/1000/doc/a1/r e.pdf\000/home/u/Documents/x.txt" | base64 -w0 | tr "+/" "-_" | tr -d "=")
+    q=$(printf "\047")
+    [ "$(ft RetrieveFiles "$key" "{}")" = "([$q/run/user/1000/doc/a1/r e.pdf$q, $q/home/u/Documents/x.txt$q],)" ]
+    ft RetrieveFiles "${key}=" "{}" 2>&1 | grep -q InvalidArgument
+    ft RetrieveFiles "$(printf "%s" "$key" | tr A B)x" "{}" 2>&1 | grep -q InvalidArgument
+    ft StartTransfer "{}" 2>&1 | grep -q NotAllowed
+    ft AddFiles "$key" "@ah []" "{}" 2>&1 | grep -q NotAllowed
+    [ "$(ft StopTransfer "$key")" = "()" ]
+    echo "version 1, RetrieveFiles decodes the key" >"$XDG_RUNTIME_DIR/file-transfer"
     if [ -x /usr/lib/xdg-desktop-portal ]; then
         # A display for the GTK backend (it leaves without one, and the
         # portal then has no file chooser): the headless one of GTK here,
@@ -99,6 +118,12 @@ dbus-run-session -- sh -euc '
     fi
 ' sh "$out/container-documents" "$src/link/portals.conf"
 echo "PASS container-documents serves org.freedesktop.portal.Documents cleanly"
+if [ -f "$out/rt/file-transfer" ]; then
+    echo "PASS container-documents serves org.freedesktop.portal.FileTransfer: $(cat "$out/rt/file-transfer"), a bad key is an invalid argument, StartTransfer and AddFiles not allowed, StopTransfer succeeds"
+else
+    echo "FAIL container-documents FileTransfer"
+    exit 1
+fi
 if [ -f "$out/rt/file-chooser" ]; then
     echo "PASS portals.conf gives the containers a file chooser (xdg-desktop-portal-gtk): $(cat "$out/rt/file-chooser")"
 fi

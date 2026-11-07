@@ -21,8 +21,10 @@ sbctl
 efibootmgr
 e2fsprogs
 
-# Base fonts & pointer input for framebuffer programs
+# Base fonts & pointer input for framebuffer programs; fontconfig chooses
+# their fonts beside Terminus (base/fontmatch.c, tools/FONTS.md)
 terminus-font
+fontconfig
 noto-fonts
 ttf-dejavu
 ttf-liberation

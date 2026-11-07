@@ -42,11 +42,15 @@
 #include <unistd.h>
 #include <linux/rtc.h>
 #include <linux/input-event-codes.h>
+#include <linux/input.h> /* BUS_* */
 
 #include "base.h"
 #include "auth.h"
 #include "files.h"
+#include "fontmatch.h"
+#include "jobs.h"
 #include "monitor-layout.h"
+#include "monitor-profile.h"
 
 __attribute__((weak)) int base_brightness_get(int *cur, int *max_val);
 __attribute__((weak)) int base_brightness_set(int target, int max_ref);
@@ -64,7 +68,7 @@ extern int rc_bat_start, rc_bat_end;
 #define ACCENT 0x80C0FF
 #define DIM    0x808890
 
-#define MAX_MONITORS  8
+#define MAX_MONITORS  32
 #define MAX_MODES     8
 
 static int tp_present;
@@ -107,9 +111,7 @@ static char apps_repo[256], apps_branch[128];
 /* The boot image's command line (locachy-boot reads them each time it makes
  * it): the kernel's messages shown (boot_verbose) or quiet, and options added
  * (boot_cmdline). */
-#define LOCACHY_BOOT "/usr/local/bin/locachy-boot"
 #define BOOT_IMAGE "/usr/local/lib/locachy/boot/locachy.efi"
-#define BOOT_LOG "/run/locachy/boot.log"
 static int boot_verbose;
 static char boot_cmdline[256];
 static char boot_kernel[64] = "linux-cachyos-bore";
@@ -257,12 +259,20 @@ static int term_net = 1;      /* rc.conf's term_network is not "0": term's shell
 static int circular = -1;     /* rc.conf's touchpad_circular: 1 on, 0 off, -1 (none) as libinput knows the touchpad */
 static int circular_width = 25, circular_delay = 300; /* coordinate-range parameter, milliseconds */
 static int circular_width_set, circular_delay_set;
+/* rc.conf's touchpad_clicks (Touchpad Clicks): unset, a touchpad clicks when
+ * tapped and when pressed; "press", only when pressed; "pointing", neither:
+ * tap to click off and a clickpad's own press taken away (apply_clicks).
+ * Separate buttons, the TrackPoint's or a touchpad's own, still click. */
+enum { CLICKS_TAP, CLICKS_PRESS, CLICKS_POINTING, NCLICKS };
+static const char *const clicks_values[NCLICKS] = { NULL, "press", "pointing" };
+static const char *const clicks_labels[NCLICKS] = { N_("tap and press"), N_("press only"), N_("pointing only") };
+static int clicks;
 static char link_dev[32];     /* rc.conf's debug_link_interface: the port it reserves */
 static int clash_on;          /* rc.conf has service_clash */
 static int clash_proxy;       /* rc.conf's clash_mode is "proxy": its port only, no TUN */
 static int tor_on;            /* rc.conf has service_tor */
 static char tor_front[16];    /* rc.conf's tor_front: "mihomo" or "bridges", Tor's way out */
-static pid_t pkg_job;         /* locachy-pkg install|remove PACKAGE..., while it runs */
+static int pkg_job;           /* locachy-pkg ACTION PACKAGE...: its system job, until it has ended */
 static char pkg_action[16], pkg_name[128]; /* pkg_name: packages, space-separated */
 /* NetworkManager's saved Wi-Fi and wired networks and the MAC address each
  * shows: its own random one, the same each time ("stable", the default of
@@ -295,6 +305,10 @@ static int nnets;
 #define IME_BASE_PACKAGES "librime words"
 #define IME_ZH_PACKAGES "rime-frost-git rime-pinyin-simp rime-wanxiang-gram-zh-hans"
 #define IME_ALL_PACKAGES IME_BASE_PACKAGES " " IME_ZH_PACKAGES
+/* The CJK fonts module's packages, which Chinese Pinyin requires
+ * (modules.json: ime-zh requires cjk-fonts): its job brings them when
+ * fontconfig has no font for Chinese (tools/FONTS.md). */
+#define CJK_FONT_PACKAGES "noto-fonts-cjk"
 #define CLASH_STATE "/var/lib/locachy/clash" /* clash-client's: containers do not see it */
 #ifndef TOR_SERVICE
 #define TOR_SERVICE "/usr/local/lib/locachy/tor-client"
@@ -306,7 +320,6 @@ static int nnets;
 #define TOR_STATE "/var/lib/locachy/tor" /* tor-client's: containers do not see it */
 #endif
 #define TOR_PACKAGES "tor lyrebird-proxy" /* lyrebird (the AUR's lyrebird-proxy): obfs4, WebTunnel */
-#define PKG_LOG "/run/locachy/settings-package.log"
 #define NTP_SERVICE "/usr/local/lib/locachy/ntp-client"
 #define TIMEZONE_SERVICE "/usr/local/lib/locachy/timezone-client"
 #define ZONEINFO "/usr/share/zoneinfo"
@@ -318,6 +331,7 @@ static const char *const place_labels[] = { N_("Right"), N_("Left"), N_("Above")
 struct monitor {
     char name[32];
     char status[32];
+    struct monitor_identity identity;
     int is_internal;
     int place;                 /* enum monitor_place */
     char modes[MAX_MODES][32];
@@ -424,6 +438,17 @@ static void read_one_line(const char *path, char *out, size_t size)
 
 static void load_modes_for_connector(const char *card_dir, struct monitor *m)
 {
+    struct monitor_mode advertised[MAX_MODES];
+    int count = monitor_modes(m->name, advertised, MAX_MODES);
+    m->nmodes = 0;
+    if (count > 0) {
+        for (int i = 0; i < count; i++) {
+            snprintf(m->modes[m->nmodes++], sizeof m->modes[0], "%dx%d@%d", advertised[i].width,
+                     advertised[i].height, advertised[i].refresh_mhz);
+            if (advertised[i].current) m->mode_sel = i;
+        }
+        return;
+    }
     char mpath[320];
     snprintf(mpath, sizeof mpath, "/sys/class/drm/%.255s/modes", card_dir);
     FILE *f = fopen(mpath, "r");
@@ -479,8 +504,19 @@ static void load_monitors(void)
         closedir(dir);
     }
 
-    /* 2. Overlay remembered configuration from MONITORS_CONF */
-    FILE *in = fopen(MONITORS_CONF, "r");
+    /* Select only after the full connected set has been discovered. A
+     * fallback is a view of legacy settings, never a saved profile. */
+    struct monitor_identity connected[MAX_MONITORS];
+    int nconnected = 0;
+    for (int i = 0; i < nmonitors; i++) {
+        monitor_identity_sysfs(monitors[i].name, &monitors[i].identity);
+        if (!strcmp(monitors[i].status, "connected")) connected[nconnected++] = monitors[i].identity;
+    }
+    int matched = monitor_profiles_select(connected, nconnected);
+    if (nconnected > 0) snprintf(notice, sizeof notice, "%s", matched ?
+        _("Saved display-set layout selected.") : _("No saved layout for this display set; legacy layout is used without changing saved profiles."));
+    /* 2. Preserve legacy disconnected rows for the old-file fallback. */
+    FILE *in = matched ? NULL : fopen(MONITORS_CONF, "r");
     char line[128];
     while (in && fgets(line, sizeof line, in)) {
         line[strcspn(line, "\r\n")] = '\0';
@@ -527,33 +563,63 @@ static void load_monitors(void)
     if (in) {
         fclose(in);
     }
+    for (int i = 0; i < nmonitors; i++) {
+        struct monitor *m = &monitors[i];
+        if (strcmp(m->status, "connected")) continue;
+        struct monitor_conf saved;
+        if (!monitor_conf(m->name, &saved)) continue;
+        m->place = place_index(saved.place);
+        m->scale = saved.scale > 0 ? saved.scale : m->scale;
+        m->has_position = saved.has_position; m->x = saved.x; m->y = saved.y;
+        int matched_mode = saved.width == 0;
+        for (int step = 0; step < m->nmodes; step++) {
+            int j = (m->mode_sel + step) % m->nmodes, w = 0, h = 0, rate = 0;
+            sscanf(m->modes[j], "%dx%d@%d", &w, &h, &rate);
+            if (w == saved.width && h == saved.height && (!saved.refresh_mhz || saved.refresh_mhz == rate)) {
+                m->mode_sel = j; matched_mode = 1;
+                break;
+            }
+        }
+        if (!matched_mode && m->nmodes < MAX_MODES) {
+            m->mode_sel = m->nmodes++;
+            snprintf(m->modes[m->mode_sel], sizeof m->modes[0], "%dx%d@%d", saved.width, saved.height, saved.refresh_mhz);
+            snprintf(notice, sizeof notice, _("%.31s: saved mode unavailable; current mode is kept until you choose another."), m->name);
+        }
+    }
 }
 
 static int save_monitors(void)
 {
-    FILE *out = fopen(MONITORS_CONF ".tmp", "w");
-    if (!out) return -1;
-    int anchor = monitor_anchor(), failed = 0;
+    struct monitor_profile_entry entries[MAX_MONITORS];
+    int anchor = monitor_anchor(), count = 0;
     for (int i = 0; i < nmonitors; i++) {
         struct monitor *m = &monitors[i];
-        const char *mstr = m->nmodes > 0 ? m->modes[m->mode_sel] : "preferred";
-        int place = i == anchor ? MONITOR_ORIGIN : m->place;
-        if (place < MONITOR_RIGHT || place > MONITOR_ORIGIN) place = MONITOR_RIGHT;
-        failed |= fprintf(out, "%s=%s,%s,%g", m->name, places[place], mstr,
-                          m->scale > 0 ? m->scale : 1.0) < 0;
-        if (m->has_position) failed |= fprintf(out, ",%d,%d", m->x, m->y) < 0;
-        failed |= fputc('\n', out) == EOF;
+        if (strcmp(m->status, "connected")) continue;
+        struct monitor_profile_entry *e = &entries[count++];
+        e->identity = m->identity;
+        memset(&e->conf, 0, sizeof e->conf);
+        snprintf(e->conf.place, sizeof e->conf.place, "%s", places[i == anchor ? MONITOR_ORIGIN : m->place]);
+        e->conf.scale = m->scale;
+        e->conf.has_position = m->has_position; e->conf.x = m->x; e->conf.y = m->y;
+        if (m->nmodes) sscanf(m->modes[m->mode_sel], "%dx%d@%d", &e->conf.width, &e->conf.height, &e->conf.refresh_mhz);
     }
-    if (fclose(out) != 0) failed = 1;
-    if (!failed && rename(MONITORS_CONF ".tmp", MONITORS_CONF) == 0) return 0;
-    unlink(MONITORS_CONF ".tmp");
-    return -1;
+    struct monitor_identity now[MAX_MONITORS];
+    int nnow = monitor_profiles_connected(now, MAX_MONITORS);
+    if (nnow != count) return -1;
+    for (int i = 0; i < count; i++) {
+        int present = 0;
+        for (int j = 0; j < nnow; j++) present |= !strcmp(entries[i].identity.connector, now[j].connector) &&
+            !strcmp(entries[i].identity.fingerprint, now[j].fingerprint);
+        if (!present) return -1; /* a cable changed while the form was open */
+    }
+    if (monitor_profiles_save(entries, count) < 0) return -1;
+    return 0;
 }
 
 static int monitor_saved(void)
 {
     if (save_monitors() < 0) {
-        snprintf(notice, sizeof notice, _("Cannot save %s."), MONITORS_CONF);
+        snprintf(notice, sizeof notice, _("Cannot save %s."), MONITOR_PROFILES_CONF);
         return 0;
     }
     snprintf(notice, sizeof notice, _("Saved; the shared display applies the layout when it is shown."));
@@ -632,13 +698,19 @@ static int labwc_key(const char *spec, char *out, size_t size)
 }
 
 /* A line of the labwc configuration as written: rc.conf's acceleration, the
- * touch screen's output (the line left out when it is not known), and the
- * terminal keys (a line for each; none, none). */
+ * touch screen's output (the line left out when it is not known), the
+ * terminal keys (a line for each; none, none), and touchpad clicks: tap to
+ * click, and for "pointing" no soft button areas (click method none; the
+ * line left out otherwise, libinput's default). labwc sets either only where
+ * libinput has it: tapping on touchpads, click methods on clickpads. */
 static void labwc_line(FILE *out, const char *line)
 {
-    const char *start = strstr(line, "<pointerAcceleration>");
-    const char *end = start ? strstr(start, "</pointerAcceleration>") : NULL;
+    const char *start = strstr(line, "<pointerSpeed>");
+    const char *end = start ? strstr(start, "</pointerSpeed>") : NULL;
     const char *map = strstr(line, "<mapToOutput></mapToOutput>");
+    const char *tap = strstr(line, "<tap>");
+    const char *tap_end = tap ? strstr(tap, "</tap>") : NULL;
+    const char *method = strstr(line, "<clickMethod></clickMethod>");
     static const char *const markers[] = { "key=\"TERMINAL-KEY\"", "key=\"HOME-KEY\"", "key=\"LOCK-KEY\"",
                                            "key=\"IME-KEY\"" };
     char ime_all[NIME_KEYS * (sizeof ime_keys[0] + 1)] = "";
@@ -664,7 +736,14 @@ static void labwc_line(FILE *out, const char *line)
             }
         }
     } else if (end) {
-        fprintf(out, "%.*s<pointerAcceleration>%.1f%s", (int)(start - line), line, ptr_accel / 10.0, end);
+        fprintf(out, "%.*s<pointerSpeed>%.1f%s", (int)(start - line), line, ptr_accel / 10.0, end);
+    } else if (tap_end) {
+        fprintf(out, "%.*s<tap>%s%s", (int)(tap - line), line, clicks == CLICKS_TAP ? "yes" : "no", tap_end);
+    } else if (method) {
+        if (clicks == CLICKS_POINTING) {
+            fprintf(out, "%.*s<clickMethod>none</clickMethod>%s", (int)(method - line), line,
+                    method + strlen("<clickMethod></clickMethod>"));
+        }
     } else if (map) {
         const char *screen = touch_output();
         if (screen[0]) {
@@ -678,8 +757,19 @@ static void labwc_line(FILE *out, const char *line)
 
 static void signal_programs(const char *comm_name, int sig);
 
+/* XKB_DEFAULT_OPTIONS's value at s (after the '='): one the key table gave,
+ * not configured: none, or only the option keytable adds to a layout whose
+ * Caps Lock key is Eisu (caps:capslock). */
+static int table_options(const char *s)
+{
+    size_t n = strcspn(s, "\r\n");
+    while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t')) n--;
+    return n == 0 || (n == strlen("caps:capslock") && !strncmp(s, "caps:capslock", n));
+}
+
 /* labwc reloads this standard environment file on SIGHUP. Keep unrelated
- * entries and user XKB options; the key table supplies the selected layout. */
+ * entries and configured XKB options; the key table supplies the selected
+ * layout, and its options where none are configured. */
 static int keymap_environment(const char *table, const char *destination)
 {
     static const char *const fields[] = { "layout", "model", "variant", "options" };
@@ -705,7 +795,7 @@ static int keymap_environment(const char *table, const char *destination)
         int ours = 0;
         for (int i = 0; i < 4; i++) {
             if (!strncmp(s, variables[i], strlen(variables[i])) && s[strlen(variables[i])] == '=') {
-                if (i == 3) options = 1;
+                if (i == 3 && !table_options(s + strlen(variables[i]) + 1)) options = 1;
                 else ours = 1;
             }
         }
@@ -725,7 +815,8 @@ static int keymap_environment(const char *table, const char *destination)
 }
 
 /* LABWC_RC: /etc/locachy/labwc/rc.xml with this pointer acceleration, touch
- * screen and terminal key; a running labwc rereads it on SIGHUP. */
+ * screen, terminal key and touchpad clicks; a running labwc rereads it on
+ * SIGHUP and sets its devices up again. */
 static void apply_labwc(void)
 {
     if (access(SYSTEM_KEYMAP_TABLE, R_OK) == 0 &&
@@ -770,21 +861,18 @@ static void write_glob(const char *pattern, int val)
 static int write_atomic_file(const char *path, const char *tmp, const char *content);
 
 /* libinput's file for local device quirks ("Installing temporary local device
- * quirks" in its documentation); settings writes one section of it. */
+ * quirks" in its documentation); settings writes sections of it. libinput
+ * reads it when its context is made: a direct program's as it takes the
+ * pointer (when it next has the screen), the shared display's as it starts.
+ * A line libinput cannot parse disables every quirk, its own too. */
 #define LOCAL_QUIRKS "/etc/libinput/local-overrides.quirks"
 #define CIRCULAR_SECTION "[LOCachy touchpad circular scrolling]"
+#define CLICKS_SECTION "[LOCachy touchpad clicks"
 
-/* rc.conf's touchpad_circular: whether touchpads scroll as a finger goes round
- * their edge, clockwise down (libinput's circular scrolling, since 1.32),
- * instead of with two fingers. libinput does it on the touchpads it has the
- * ModelCircularTouchpad quirk for, the round ones of Panasonic's CF-SV1, CF-SV8
- * and CF-FV1 (pkgbuilds/libinput), and nothing else on them. Unset, nothing is
- * written: libinput's list decides. "1" or "0" sets the quirk for every
- * touchpad here, in a section of its own; the rest of the file is kept.
- * libinput reads the file when its context is made: a direct program's as it
- * takes the pointer (when it next has the screen), the shared display's as it
- * starts. -1 when the file cannot be written. */
-static int apply_circular(void)
+/* LOCAL_QUIRKS with the sections whose title starts with title replaced by
+ * text ("": removed), the rest of the file kept; the file goes when nothing
+ * is left in it. -1 when it cannot be written. */
+static int replace_quirks(const char *title, const char *text)
 {
     char *was = NULL, *now = NULL, line[512];
     size_t was_len = 0, now_len = 0;
@@ -793,19 +881,13 @@ static int apply_circular(void)
     int ours = 0, blank = 1;
     while (in && old && new && fgets(line, sizeof line, in)) {
         fputs(line, old);
-        if (line[0] == '[') ours = strncmp(line, CIRCULAR_SECTION, strlen(CIRCULAR_SECTION)) == 0;
+        if (line[0] == '[') ours = strncmp(line, title, strlen(title)) == 0;
         if (ours) continue;
         fputs(line, new);
         blank = line[strspn(line, " \t\r\n")] == '\0';
     }
     if (in) fclose(in);
-    if (new && (circular >= 0 || circular_width_set || circular_delay_set)) {
-        fprintf(new, "%s%s\n# settings: Touchpad Circular Scrolling (rc.conf touchpad_circular)\n"
-                "MatchUdevType=touchpad\n", blank ? "" : "\n", CIRCULAR_SECTION);
-        if (circular >= 0) fprintf(new, "ModelCircularTouchpad=%d\n", circular);
-        if (circular_width_set) fprintf(new, "AttrCircularScrollRingWidth=%d\n", circular_width);
-        if (circular_delay_set) fprintf(new, "AttrCircularScrollDwell=%d\n", circular_delay);
-    }
+    if (new && text[0]) fprintf(new, "%s%s", blank ? "" : "\n", text);
     int ok = old && new;
     if (old) fclose(old);
     if (new) fclose(new);
@@ -820,9 +902,147 @@ static int apply_circular(void)
     return result;
 }
 
+/* rc.conf's touchpad_circular: whether touchpads scroll as a finger goes round
+ * their edge, clockwise down (libinput's circular scrolling, since 1.32),
+ * instead of with two fingers. libinput does it on the touchpads it has the
+ * ModelCircularTouchpad quirk for, the round ones of Panasonic's CF-SV1, CF-SV8
+ * and CF-FV1 (pkgbuilds/libinput), and nothing else on them. Unset, nothing is
+ * written: libinput's list decides. "1" or "0" sets the quirk for every
+ * touchpad here, in a section of its own. -1 when the file cannot be
+ * written. */
+static int apply_circular(void)
+{
+    char text[512] = "";
+    if (circular >= 0 || circular_width_set || circular_delay_set) {
+        size_t n = (size_t)snprintf(text, sizeof text, "%s\n# settings: Touchpad Circular Scrolling "
+                                    "(rc.conf touchpad_circular)\nMatchUdevType=touchpad\n", CIRCULAR_SECTION);
+        if (circular >= 0) n += (size_t)snprintf(text + n, sizeof text - n, "ModelCircularTouchpad=%d\n", circular);
+        if (circular_width_set) {
+            n += (size_t)snprintf(text + n, sizeof text - n, "AttrCircularScrollRingWidth=%d\n", circular_width);
+        }
+        if (circular_delay_set) snprintf(text + n, sizeof text - n, "AttrCircularScrollDwell=%d\n", circular_delay);
+    }
+    return replace_quirks(CIRCULAR_SECTION, text);
+}
+
+/* The sections of LOCAL_QUIRKS whose title starts with title, as they are,
+ * a blank line before each but the first; NULL when out of memory. */
+static char *quirks_sections(const char *title)
+{
+    char *text = NULL, line[512];
+    size_t len = 0;
+    FILE *in = fopen(LOCAL_QUIRKS, "r"), *out = open_memstream(&text, &len);
+    int ours = 0, sections = 0;
+    while (in && out && fgets(line, sizeof line, in)) {
+        if (line[0] == '[') {
+            ours = strncmp(line, title, strlen(title)) == 0;
+            if (ours && sections++) fputc('\n', out);
+        }
+        if (ours && line[strspn(line, " \t\r\n")] != '\0') fputs(line, out);
+    }
+    if (in) fclose(in);
+    if (out) fclose(out);
+    return text;
+}
+
+/* name as a MatchName that matches it (fnmatch(3)) and that libinput's
+ * parser takes as it is: a run of anything else than printable ASCII
+ * without # = * ? [ ] \ and quotes (a trailing blank too) is one '*'. */
+static void quirk_name(const char *name, char *out, size_t size)
+{
+    size_t n = 0, i = 0;
+    int star = 0;
+    for (; name[i] && n + 2 < size; i++) {
+        unsigned char c = (unsigned char)name[i];
+        if (c > ' ' && c < 0x7f && !strchr("#=*?[]\\\"'", c)) {
+            out[n++] = (char)c;
+            star = 0;
+        } else if (c == ' ' && name[i + strspn(name + i, " ")] != '\0') {
+            out[n++] = ' ';
+            star = 0;
+        } else if (!star) {
+            out[n++] = '*';
+            star = 1;
+        }
+    }
+    if (name[i] && !star) out[n++] = '*'; /* too long: the rest */
+    out[n] = '\0';
+}
+
+/* For "pointing", a section for each clickpad here (INPUT_PROP_BUTTONPAD: its
+ * surface presses its one button, BTN_LEFT) that takes that button away:
+ * libinput's AttrEventCode, applied as it opens the device. It stays a
+ * touchpad and points, scrolls and swipes as before; a touchpad with buttons
+ * of its own is no clickpad, and a TrackPoint's buttons are its own device.
+ * have: the sections there already; *count: the clickpads in all. */
+static void clickpad_sections(FILE *out, const char *have, int *count)
+{
+    DIR *d = opendir("/sys/class/input");
+    for (struct dirent *e; d && (e = readdir(d)) != NULL;) {
+        if (strncmp(e->d_name, "event", 5) != 0) continue;
+        char path[320], value[256], name[200], glob[160], *section = NULL;
+        size_t len = 0;
+        snprintf(path, sizeof path, "/sys/class/input/%.64s/device/properties", e->d_name);
+        read_one_line(path, value, sizeof value);
+        const char *word = strrchr(value, ' ');
+        if (!((strtoul(word ? word + 1 : value, NULL, 16) >> INPUT_PROP_BUTTONPAD) & 1)) continue;
+        snprintf(path, sizeof path, "/sys/class/input/%.64s/device/name", e->d_name);
+        read_one_line(path, name, sizeof name);
+        quirk_name(name, glob, sizeof glob);
+        unsigned long id[3];
+        static const char *const ids[3] = { "bustype", "vendor", "product" };
+        for (int i = 0; i < 3; i++) {
+            snprintf(path, sizeof path, "/sys/class/input/%.64s/device/id/%s", e->d_name, ids[i]);
+            read_one_line(path, value, sizeof value);
+            id[i] = strtoul(value, NULL, 16);
+        }
+        const char *bus = id[0] == BUS_USB ? "usb" : id[0] == BUS_BLUETOOTH ? "bluetooth" :
+                          id[0] == BUS_I8042 ? "ps2" : id[0] == BUS_RMI ? "rmi" : id[0] == BUS_I2C ? "i2c" :
+                          id[0] == BUS_SPI ? "spi" : NULL;
+        FILE *s = open_memstream(&section, &len);
+        if (!s) continue;
+        fprintf(s, "%s: %s]\n# settings: Touchpad Clicks, pointing only (rc.conf touchpad_clicks): "
+                "this clickpad's own press is no click\nMatchUdevType=touchpad\n", CLICKS_SECTION, glob);
+        if (bus) fprintf(s, "MatchBus=%s\n", bus);
+        fprintf(s, "MatchVendor=0x%04lX\nMatchProduct=0x%04lX\n", id[1] & 0xffff, id[2] & 0xffff);
+        if (glob[0]) fprintf(s, "MatchName=%s\n", glob);
+        fputs("AttrEventCode=-BTN_LEFT\n", s);
+        if (fclose(s) == 0 && !strstr(have, section)) {
+            fprintf(out, "%s%s", *count ? "\n" : "", section);
+            ++*count;
+        }
+        free(section);
+    }
+    if (d) closedir(d);
+}
+
+/* rc.conf's touchpad_clicks in LOCAL_QUIRKS: for "pointing", clickpad_sections,
+ * with those written before (settings --apply may run at boot before a
+ * touchpad's driver has probed it); otherwise none. Tap to click and the
+ * click method are labwc_line's and pointer.c's. -1 when the file cannot be
+ * written; *pads (if not NULL): the clickpads with a section. */
+static int apply_clicks(int *pads)
+{
+    char *have = quirks_sections(CLICKS_SECTION), *text = NULL;
+    size_t len = 0;
+    FILE *out = have ? open_memstream(&text, &len) : NULL;
+    int count = 0;
+    if (out && clicks == CLICKS_POINTING) {
+        fputs(have, out);
+        for (const char *s = have; (s = strstr(s, CLICKS_SECTION)) != NULL; s++) count++;
+        clickpad_sections(out, have, &count);
+    }
+    int result = out && fclose(out) == 0 ? replace_quirks(CLICKS_SECTION, text) : -1;
+    if (pads) *pads = count;
+    free(have);
+    free(text);
+    return result;
+}
+
 static void apply_all(void)
 {
     apply_circular();
+    apply_clicks(NULL);
     if (tp_present) {
         write_glob("/sys/devices/platform/i8042/serio*/sensitivity", tp_sens);
         write_glob("/sys/devices/platform/i8042/serio*/serio*/sensitivity", tp_sens);
@@ -892,6 +1112,11 @@ static void on_rc(const char *name, const char *value, void *arg)
     } else if (strcmp(name, "touchpad_circular_dwell") == 0) {
         int delay = atoi(value);
         if (delay >= 0 && delay <= 2000) { circular_delay = delay; circular_delay_set = 1; }
+    } else if (strcmp(name, "touchpad_clicks") == 0) {
+        clicks = CLICKS_TAP;
+        for (int i = 1; i < NCLICKS; i++) {
+            if (strcmp(value, clicks_values[i]) == 0) clicks = i;
+        }
     } else if (strcmp(name, "service_link") == 0) {
         link_on = 1;
     } else if (strcmp(name, "debug_link_interface") == 0) {
@@ -1505,8 +1730,8 @@ static const struct opt_module opt_modules[] = {
       "tree-sitter-rust tree-sitter-vim tree-sitter-vimdoc pcre2 json-glib",
       NULL, NULL, NULL, NULL },
     { N_("7-Zip (encrypted 7z, RAR)"), "/usr/bin/7z", "7zip", NULL, NULL, NULL, NULL },
-    { N_("CJK fonts (noto-cjk)"), "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-      "noto-fonts-cjk", NULL, NULL, NULL, NULL },
+    { N_("CJK fonts (noto-cjk)"), NULL, /* there when fontconfig has a font for Chinese */
+      CJK_FONT_PACKAGES, NULL, NULL, NULL, NULL },
     { N_("Firmware updates (fwupd)"), "/usr/bin/fwupdmgr",
       "fwupd", NULL, NULL, NULL, NULL },
     { N_("SPI programmer (flashrom)"), "/usr/bin/flashrom",
@@ -1514,9 +1739,19 @@ static const struct opt_module opt_modules[] = {
 };
 #define NOPT_MODULES ((int)(sizeof opt_modules / sizeof opt_modules[0]))
 
+/* Whether fontconfig has a font for Chinese (any CJK family): asked once,
+ * and again after a package job (pkg_check). */
+static int cjk_fonts = -1;
+
+static int cjk_fonts_present(void)
+{
+    if (cjk_fonts < 0) cjk_fonts = font_lang_present("zh") == 1;
+    return cjk_fonts;
+}
+
 static int opt_module_installed(int i)
 {
-    return access(opt_modules[i].probe, R_OK) == 0;
+    return opt_modules[i].probe ? access(opt_modules[i].probe, R_OK) == 0 : cjk_fonts_present();
 }
 
 /* The manifest is the headers switch; installed state may lag a failed job. */
@@ -1589,105 +1824,111 @@ static const char *pkg_title(void)
            face_job() ? _("Face recognition (howdy)") : "Tailscale";
 }
 
-/* locachy-pkg ACTION PACKAGE..., in the background, its output in PKG_LOG.
- * ACTION "swap", package "OLD NEW": locachy-pkg remove OLD, then install NEW
- * (one package in place of another it conflicts with). */
+/* locachy-pkg ACTION PACKAGE... as a system job (locachy-jobs, tools/JOBS.md:
+ * queued with the others; it goes on when settings closes, and home lists
+ * it). ACTION "swap", package "OLD NEW": remove OLD, then install NEW (one
+ * package in place of another it conflicts with); "kernel", package "select
+ * KERNEL" or "headers on|off". */
 static void start_pkg_job(const char *action, const char *package)
 {
-    mkdir("/run/locachy", 0755);
-    pid_t pid = fork();
-    if (pid == 0) {
-        setsid();
-        int log = open(PKG_LOG, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        int null = open("/dev/null", O_RDONLY);
-        if (log >= 0) {
-            dup2(log, STDOUT_FILENO);
-            dup2(log, STDERR_FILENO);
-        }
-        if (null >= 0) {
-            dup2(null, STDIN_FILENO);
-        }
-        char list[512], *args[32] = { "locachy-pkg", (char *)action };
-        int n = 2;
-        snprintf(list, sizeof list, "%s", package);
-        for (char *w = strtok(list, " "); w && n < 31; w = strtok(NULL, " ")) {
-            args[n++] = w;
-        }
-        args[n] = NULL;
-        if (strcmp(action, "swap") == 0 && n == 4) {
-            char *remove[] = { "locachy-pkg", "remove", args[2], NULL };
-            int status;
-            pid_t r = fork();
-            if (r == 0) {
-                execv("/usr/local/bin/locachy-pkg", remove);
-                _exit(127);
-            }
-            if (r < 0 || waitpid(r, &status, 0) != r || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-                _exit(1);
-            }
-            args[1] = "install";
-            args[2] = args[3];
-            args[3] = NULL;
-        }
-        execv("/usr/local/bin/locachy-pkg", args);
-        _exit(127);
+    static const char *const kinds[][2] = { { "install", "pkg-install" }, { "remove", "pkg-remove" },
+                                            { "swap", "pkg-swap" } };
+    char list[512], why[256] = "", *args[33];
+    const char *kind = NULL;
+    int n = 0, id = 0, position = 0;
+    snprintf(list, sizeof list, "%s", package);
+    for (char *w = strtok(list, " "); w && n < 32; w = strtok(NULL, " ")) {
+        args[n++] = w;
     }
-    pkg_job = pid > 0 ? pid : 0;
+    args[n] = NULL;
+    for (size_t i = 0; i < sizeof kinds / sizeof kinds[0]; i++) {
+        if (strcmp(action, kinds[i][0]) == 0) kind = kinds[i][1];
+    }
+    if (strcmp(action, "kernel") == 0 && n == 2) {
+        kind = strcmp(args[0], "select") == 0 ? "kernel-select" : strcmp(args[0], "headers") == 0 ? "kernel-headers" : NULL;
+        args[0] = args[1];
+        args[1] = NULL;
+    }
+    pkg_job = kind && jobs_submit(kind, (const char *const *)args, &id, &position, why, sizeof why) == 0 ? id : 0;
+    if (!pkg_job) {
+        say("settings: locachy-pkg %s %s: %s", action, package, kind ? why : "not a job");
+    }
     snprintf(pkg_action, sizeof pkg_action, "%s", action);
     snprintf(pkg_name, sizeof pkg_name, "%s", package);
 }
 
-/* The last line written to a job's log. */
-static void log_last_line(const char *path, char *out, size_t size)
+/* What job id does now: the last line of its output, or where it waits in
+ * the queue. */
+static void job_progress(int id, char *out, size_t size)
 {
-    char buf[1024];
+    struct jobs_row r;
+    char why[160];
     out[0] = '\0';
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) {
+    if (id <= 0 || jobs_status(id, &r, why, sizeof why) < 0) {
         return;
     }
-    off_t end = lseek(fd, 0, SEEK_END);
-    off_t from = end > (off_t)sizeof buf - 1 ? end - (off_t)sizeof buf + 1 : 0;
-    ssize_t n = pread(fd, buf, sizeof buf - 1, from);
-    close(fd);
-    if (n <= 0) {
-        return;
-    }
-    buf[n] = '\0';
-    char *line = NULL;
-    for (char *s = strtok(buf, "\r\n"); s; s = strtok(NULL, "\r\n")) {
-        if (*s) {
-            line = s;
-        }
-    }
-    if (line) {
-        snprintf(out, size, "%s", line);
+    if (strcmp(r.state, "queued") == 0) {
+        snprintf(out, size, _("queued (%d before it)"), r.position);
+    } else {
+        snprintf(out, size, "%.100s", r.last);
     }
 }
 
-/* The last line locachy-pkg wrote. */
+/* What the package job does now. */
 static void pkg_progress(char *out, size_t size)
 {
-    char line[1024];
-    log_last_line(PKG_LOG, line, sizeof line);
-    snprintf(out, size, "%.100s", line);
+    job_progress(pkg_job, out, size);
 }
+
+/* Job id has ended: 1, with how (r) and its output (log). */
+static int job_ended(int id, struct jobs_row *r, char *log, size_t size)
+{
+    char why[160];
+    if (id <= 0 || jobs_status(id, r, why, sizeof why) < 0 || !jobs_ended(r)) {
+        return 0;
+    }
+    jobs_log_path(id, log, size);
+    return 1;
+}
+
+/* Chinese Pinyin, with what it requires (modules.json's ime-zh): Rime when
+ * it is not there, and the CJK fonts module when fontconfig has no font for
+ * Chinese. 1: the fonts come too. The job is known by the Pinyin packages,
+ * as ime_job and the rows look for it. */
+static int ime_zh_job(void)
+{
+    const char *ime = rime_installed() ? IME_ZH_PACKAGES : IME_ALL_PACKAGES;
+    int fonts = !cjk_fonts_present();
+    char packages[256];
+    snprintf(packages, sizeof packages, "%s%s", ime, fonts ? " " CJK_FONT_PACKAGES : "");
+    start_pkg_job("install", packages);
+    snprintf(pkg_name, sizeof pkg_name, "%s", ime);
+    return fonts;
+}
+
+static void signal_programs(const char *comm_name, int sig);
 
 /* Has the package job ended? Then say how. */
 static void pkg_check(void)
 {
-    int status;
-    if (pkg_job == 0 || waitpid(pkg_job, &status, WNOHANG) != pkg_job) {
+    struct jobs_row r;
+    char log[96];
+    if (!job_ended(pkg_job, &r, log, sizeof log)) {
         return;
     }
     pkg_job = 0;
+    int ok = strcmp(r.state, "done") == 0;
+    cjk_fonts = -1; /* fonts may have come or gone */
+    if (ime_job()) {
+        signal_programs("locachy-bar", SIGHUP); /* it starts Rime again for Chinese Pinyin */
+    }
     if (strcmp(pkg_action, "kernel") == 0) {
         snprintf(boot_kernel, sizeof boot_kernel, "linux-cachyos-bore");
         rc_read(on_rc, NULL);
         load_kernel_state();
         load_kernel_choices();
-        snprintf(notice, sizeof notice, WIFEXITED(status) && WEXITSTATUS(status) == 0 ?
-                 _("Kernel package choice applied.") : _("Kernel package choice did not finish; see %s."), PKG_LOG);
+        snprintf(notice, sizeof notice, ok ?
+                 _("Kernel package choice applied.") : _("Kernel package choice did not finish; see %s."), log);
         return;
     }
     if (strcmp(pkg_name, "fprintd") == 0) {
@@ -1695,10 +1936,10 @@ static void pkg_check(void)
     } else if (face_job()) {
         load_faces();
     }
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 0 && strcmp(pkg_action, "swap") == 0) {
+    if (ok && strcmp(pkg_action, "swap") == 0) {
         snprintf(notice, sizeof notice, "%s", dlib_installed() == 2 ?
                  _("Faces are computed on the NVIDIA GPU now.") : _("Faces are computed on the CPU now."));
-    } else if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+    } else if (ok) {
         snprintf(notice, sizeof notice,
                  strcmp(pkg_action, "install") == 0 ? _("%s installed; switch it on below.") : _("%s removed."),
                  pkg_title());
@@ -1706,17 +1947,16 @@ static void pkg_check(void)
         snprintf(notice, sizeof notice,
                  strcmp(pkg_action, "install") == 0 ? _("Could not install %s; see %s.") :
                  strcmp(pkg_action, "swap") == 0 ? _("Could not switch %s; see %s.") :
-                 _("Could not remove %s; see %s."), pkg_title(), PKG_LOG);
+                 _("Could not remove %s; see %s."), pkg_title(), log);
     }
 }
 
 /* Software sources (locachy-repos): the repositories' sections and the
- * mirror lists. Switching a section, or ranking the mirrors, runs in the
- * background, its output in REPOS_LOG. A section goes off only when every
+ * mirror lists. Switching a section, or ranking the mirrors, is a system
+ * job (locachy-jobs), as the package jobs are. A section goes off only when every
  * declared package keeps a repository; else locachy-repos says which ones
  * need it, and rc.conf and pacman.conf stay as they were. */
 #define LOCACHY_REPOS "/usr/local/bin/locachy-repos"
-#define REPOS_LOG "/run/locachy/settings-repos.log"
 static const char *const repo_sections[] = { "core", "extra", "multilib" };
 static const char *const repo_labels[] = {
     N_("Core repositories"), N_("Extra repositories"), N_("Multilib (32-bit) repositories"),
@@ -1724,7 +1964,7 @@ static const char *const repo_labels[] = {
 #define NREPO_SECTIONS ((int)(sizeof repo_sections / sizeof repo_sections[0]))
 static int repo_on[NREPO_SECTIONS];
 static char repo_ranked[64];
-static pid_t repos_job;     /* locachy-repos apply|rank, while it runs */
+static int repos_job;       /* locachy-repos apply|rank: its system job, until it has ended */
 static char repos_what[24]; /* what it does: "rank", or a section set: "extra=off" */
 
 /* What locachy-repos status says. */
@@ -1756,54 +1996,65 @@ static void load_repos(void)
     }
 }
 
-/* locachy-repos rank, or apply --set WHAT, in the background. */
+/* locachy-repos rank, or apply --set WHAT, as a system job. */
 static void start_repos_job(const char *what)
 {
-    mkdir("/run/locachy", 0755);
-    pid_t pid = fork();
-    if (pid == 0) {
-        setsid();
-        int log = open(REPOS_LOG, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        int null = open("/dev/null", O_RDONLY);
-        if (log >= 0) {
-            dup2(log, STDOUT_FILENO);
-            dup2(log, STDERR_FILENO);
-        }
-        if (null >= 0) {
-            dup2(null, STDIN_FILENO);
-        }
-        if (strcmp(what, "rank") == 0) {
-            execl(LOCACHY_REPOS, "locachy-repos", "rank", (char *)NULL);
-        } else {
-            execl(LOCACHY_REPOS, "locachy-repos", "apply", "--set", what, (char *)NULL);
-        }
-        _exit(127);
+    const char *const set[] = { what, NULL };
+    char why[256] = "";
+    int id = 0, position = 0;
+    int rank = strcmp(what, "rank") == 0;
+    repos_job = jobs_submit(rank ? "repos-rank" : "repos-set", rank ? NULL : set, &id, &position, why,
+                            sizeof why) == 0 ? id : 0;
+    if (!repos_job) {
+        say("settings: locachy-repos %s: %s", what, why);
     }
-    repos_job = pid > 0 ? pid : 0;
     snprintf(repos_what, sizeof repos_what, "%s", what);
 }
 
 /* Has the repositories' job ended? Then say how: a refusal in its words. */
 static void repos_check(void)
 {
-    int status;
-    char line[1024];
-    if (repos_job == 0 || waitpid(repos_job, &status, WNOHANG) != repos_job) {
+    struct jobs_row r;
+    char log[96];
+    if (!job_ended(repos_job, &r, log, sizeof log)) {
         return;
     }
     repos_job = 0;
     load_repos();
-    int ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    int ok = strcmp(r.state, "done") == 0;
     if (strcmp(repos_what, "rank") == 0) {
         snprintf(notice, sizeof notice, ok ? _("Mirrors ranked.") : _("Some mirror lists were not ranked; see %s."),
-                 REPOS_LOG);
+                 log);
     } else if (ok) {
         snprintf(notice, sizeof notice, "%s", _("Repositories changed: the next update moves the packages."));
     } else {
-        log_last_line(REPOS_LOG, line, sizeof line);
-        snprintf(notice, sizeof notice, line[0] ? "%s" : _("Could not change the repositories; see %s."),
-                 line[0] ? line : REPOS_LOG);
+        snprintf(notice, sizeof notice, r.last[0] ? "%s" : _("Could not change the repositories; see %s."),
+                 r.last[0] ? r.last : log);
     }
+}
+
+/*
+ * The window's close (K_CLOSE, only a window gets it): settings leaves as q
+ * does. Its package, repositories and boot image jobs are system jobs
+ * (locachy-jobs), which go on without it (tools/JOBS.md).
+ */
+static int closing; /* a close was asked for */
+
+/* key, read in the main loop or in a question or list: 1 if it was the
+ * window's close (the caller cancels what it was asking, as Esc does). */
+static int close_read(int key)
+{
+    if (key != K_CLOSE) {
+        return 0;
+    }
+    closing = 1;
+    return 1;
+}
+
+/* A close was asked for. */
+static int close_due(void)
+{
+    return closing;
 }
 
 /* What a command (argv[0] a full path) writes on its output within 1.5 s,
@@ -2494,6 +2745,9 @@ static void enroll_finger(const char *finger)
             break;
         }
         int key = key_poll_timeout(p[0], 500);
+        if (close_read(key)) {
+            key = 27;
+        }
         if (key == 'q' || key == 27) {
             kill(-pid, SIGTERM);
             waitpid(pid, &status, 0);
@@ -2687,11 +2941,17 @@ static int circ_index(void)
     return tnet_index() + 1;
 }
 
+/* Touchpads: what clicks (rc.conf touchpad_clicks). */
+static int clicks_index(void)
+{
+    return circ_index() + 3;
+}
+
 /* The input method's keys (rc.conf key_ime, key_ime_cn, key_ime_raw,
  * key_ime_width). */
 static int imek_index(void)
 {
-    return circ_index() + 3;
+    return clicks_index() + 1;
 }
 
 static int system_keymap_index(void)
@@ -2826,6 +3086,9 @@ static void choose_wallpaper(void)
     /* TRANSLATORS: Enter is the Enter key; keep it. */
     if (!files_pick(dir, keep, "image/", _("The wallpaper: Enter on a picture."), path, sizeof path)) {
         snprintf(notice, sizeof notice, "%s", _("Wallpaper left as it is."));
+        if (files_close_asked()) {
+            close_read(K_CLOSE); /* the window's close, read by the file manager */
+        }
         return;
     }
     if (rc_set("wallpaper", path) < 0) {
@@ -2896,6 +3159,10 @@ static void choose_key(const char *label, const char *rc_name, char *value, size
     for (;;) {
         int key = key_get(), mods = keys_modifiers();
         char name[128];
+        if (close_read(key)) {
+            key = 27;
+            mods = 0;
+        }
         if (key == K_SHOWN) {
             draw();
             continue;
@@ -3194,6 +3461,9 @@ static void pick_zone(void)
         screen_flush();
         int key = key_get();
         size_t len = strlen(filter);
+        if (close_read(key)) {
+            key = 27;
+        }
         if (key == K_POINTER) {
             const struct pointer_event *e = pointer_last();
             if (e->wheel) {
@@ -3450,6 +3720,9 @@ static void pick_keymap(const struct keys_keyboard *kb)
         screen_flush();
         int key = key_get();
         size_t len = strlen(filter);
+        if (close_read(key)) {
+            key = 27;
+        }
         if (key == K_POINTER) {
             const struct pointer_event *e = pointer_last();
             if (e->wheel) {
@@ -3615,7 +3888,7 @@ static int prompt_as(const char *label, char *text, size_t size, int hidden)
         screen_text(2, screen_rows() - 2, line, ACCENT, BG);
         screen_flush();
         int key = key_get();
-        if (key == 27) {
+        if (key == 27 || close_read(key)) {
             return 0;
         } else if (key == '\n') {
             return 1;
@@ -4103,6 +4376,10 @@ static void arrange_screens(void)
     arrangement_draw();
     for (;;) {
         int key = key_poll_timeout(-1, 1000);
+        if (close_read(key)) {
+            if (arrangement_drag >= 0) arrangement_key(27); /* the drag undone, as Esc does */
+            return;
+        }
         if (key == K_POINTER) {
             if (arrangement_pointer(pointer_last())) arrangement_draw();
             continue;
@@ -4233,6 +4510,7 @@ static void category_entries(int cat)
     case CAT_INPUT:
         add_title(_("Mouse & Touchpad"));
         add_items(0, tp_present ? 4 : 1);
+        add_items(clicks_index(), 1);
         add_items(circ_index(), 3);
         add_title(_("Keyboard"));
         add_items(ime_index(), 2);
@@ -4682,34 +4960,67 @@ static void apps_catalog_summary(char *out, size_t size)
     }
 }
 
-/* locachy-boot now: the boot image with the options as they are, for the next
- * start (its output in BOOT_LOG), as pacman's hooks make it after updates. */
+/* locachy-boot now, as a system job: the boot image with the options as they
+ * are, for the next start, as pacman's hooks make it after updates. */
+static int boot_job;
 static void make_boot_image(void)
 {
-    int status = -1;
-    snprintf(notice, sizeof notice, "%s", _("Making the boot image (locachy-boot)..."));
-    screen_fill(0, screen_rows() - 2, screen_cols(), 1, BG); /* the notice line, while it waits */
-    screen_text(2, screen_rows() - 2, notice, ACCENT, BG);
-    screen_flush();
-    pid_t pid = fork();
-    if (pid == 0) {
-        mkdir("/run/locachy", 0755);
-        int out = open(BOOT_LOG, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-        int null = open("/dev/null", O_RDONLY | O_CLOEXEC);
-        if (out >= 0) {
-            dup2(out, STDOUT_FILENO);
-            dup2(out, STDERR_FILENO);
-        }
-        if (null >= 0) {
-            dup2(null, STDIN_FILENO);
-        }
-        execl(LOCACHY_BOOT, LOCACHY_BOOT, (char *)NULL);
-        _exit(127);
+    char why[256] = "";
+    int id = 0, position = 0;
+    if (boot_job) {
+        snprintf(notice, sizeof notice, "%s", _("The boot image is still being made."));
+        return;
     }
-    if (pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+    if (jobs_submit("boot", NULL, &id, &position, why, sizeof why) < 0) {
+        snprintf(notice, sizeof notice, _("Could not make the boot image: %s"), why);
+        return;
+    }
+    boot_job = id;
+    snprintf(notice, sizeof notice, "%s", _("Making the boot image (locachy-boot)..."));
+}
+
+/* Has the boot image's job ended? Then say how. */
+static void boot_check(void)
+{
+    struct jobs_row r;
+    char log[96];
+    if (!job_ended(boot_job, &r, log, sizeof log)) {
+        return;
+    }
+    boot_job = 0;
+    if (strcmp(r.state, "done") == 0) {
         snprintf(notice, sizeof notice, "%s", _("Boot image made: the next start uses it."));
     } else {
-        snprintf(notice, sizeof notice, _("Could not make the boot image; see %s."), BOOT_LOG);
+        snprintf(notice, sizeof notice, _("Could not make the boot image; see %s."), log);
+    }
+}
+
+/* Reopened: the jobs settings asked for that have not ended (locachy-jobs
+ * keeps them), followed again. */
+static void adopt_jobs(void)
+{
+    static struct jobs_row rows[JOBS_ROWS_MAX];
+    int n = jobs_mine(rows, JOBS_ROWS_MAX);
+    for (int i = 0; i < n; i++) {
+        const struct jobs_row *r = &rows[i];
+        if (jobs_ended(r)) {
+            continue;
+        }
+        if (strcmp(r->kind, "repos-rank") == 0 || strcmp(r->kind, "repos-set") == 0) {
+            repos_job = r->id;
+            snprintf(repos_what, sizeof repos_what, "%s", strcmp(r->kind, "repos-rank") == 0 ? "rank" : r->args);
+        } else if (strcmp(r->kind, "boot") == 0) {
+            boot_job = r->id;
+        } else if (strncmp(r->kind, "kernel-", 7) == 0) {
+            pkg_job = r->id;
+            snprintf(pkg_action, sizeof pkg_action, "kernel");
+            snprintf(pkg_name, sizeof pkg_name, "%s %.100s", strcmp(r->kind, "kernel-select") == 0 ? "select" : "headers",
+                     r->args);
+        } else if (strncmp(r->kind, "pkg-", 4) == 0) {
+            pkg_job = r->id;
+            snprintf(pkg_action, sizeof pkg_action, "%s", r->kind + 4);
+            snprintf(pkg_name, sizeof pkg_name, "%.127s", r->args);
+        }
     }
 }
 
@@ -4846,6 +5157,9 @@ static void pick_machine(void)
         if (n) screen_text(2, screen_rows() - 3, machine_labels[match[sel]], FG, BG);
         screen_flush();
         int key = key_get();
+        if (close_read(key)) {
+            key = 27;
+        }
         if (key == K_POINTER) {
             const struct pointer_event *e = pointer_last();
             if (e->wheel && n) sel = machine_next(sel, e->wheel > 0 ? K_UP : K_DOWN);
@@ -5468,6 +5782,11 @@ static void item_text(int idx, char *line, size_t size)
                  term_net ? _("on") : _("off"));
         return;
     }
+    if (idx == clicks_index()) {
+        snprintf(line, size, "%.95s < %s >", ui_pad(label, sizeof label, _("Touchpad Clicks"), 32),
+                 _(clicks_labels[clicks]));
+        return;
+    }
     if (idx == circ_index()) {
         snprintf(line, size, "%.95s < %s >", ui_pad(label, sizeof label, _("Touchpad Circular Scrolling"), 32),
                  circular > 0 ? _("on") : circular == 0 ? _("off") : _("round touchpads"));
@@ -5484,7 +5803,7 @@ static void item_text(int idx, char *line, size_t size)
     if ((i = idx - repo_index()) >= 0 && i <= NREPO_SECTIONS) {
         char progress[112] = "";
         if (repos_job) {
-            log_last_line(REPOS_LOG, vbuf, sizeof vbuf);
+            job_progress(repos_job, vbuf, sizeof vbuf);
             snprintf(progress, sizeof progress, "%.100s", vbuf[0] ? vbuf : "...");
         }
         if (i < NREPO_SECTIONS) {
@@ -5560,12 +5879,18 @@ static void item_text(int idx, char *line, size_t size)
         if (!m_is_connected(m)) {
             snprintf(line, size, _("Screen %-12.12s (disconnected)"), m->name);
         } else if (row_maps[i].field == 1) {
+            char mode_label[80];
             const char *mname = m->nmodes > 0 ? m->modes[m->mode_sel] : _("preferred");
-            char mpadded[64];
+            int mw, mh, mr;
+            if (sscanf(mname, "%dx%d@%d", &mw, &mh, &mr) == 3 && mr > 0) {
+                snprintf(mode_label, sizeof mode_label, "%dx%d %.3f Hz", mw, mh, mr / 1000.0);
+                mname = mode_label;
+            }
+            char mpadded[96];
             snprintf(vbuf, sizeof vbuf, m->is_internal ? _("Laptop %-10.10s Resolution:") :
                      _("Screen %-10.10s Resolution:"), m->name);
             snprintf(line, size, "  %.95s < %s >", ui_pad(label, sizeof label, vbuf, 30),
-                     ui_pad(mpadded, sizeof mpadded, mname, 17));
+                     ui_pad(mpadded, sizeof mpadded, mname, 27));
         } else if (row_maps[i].field == 2) {
             snprintf(vbuf, sizeof vbuf, m->is_internal ? _("Laptop %-10.10s Scale:") :
                      _("Screen %-10.10s Scale:"), m->name);
@@ -5639,6 +5964,11 @@ static void draw(void)
         draw_sidebar(cols);
     }
     screen_text(2, rows - 2, _(notice), ACCENT, BG);
+    if (pkg_job || repos_job || boot_job) {
+        /* TRANSLATORS: settings and home are programs' names; keep them. */
+        screen_text(2, rows - 1, _("A system job of settings' runs or waits: it goes on if settings closes; "
+                                   "home lists it."), FG, BG);
+    }
     screen_flush();
 }
 
@@ -6108,13 +6438,15 @@ static void adjust(int dir)
         return;
     }
     if (selected == ime_index() + 1) {
+        int fonts = 0;
         if (rime_zh_installed()) {
             start_pkg_job("remove", IME_ZH_PACKAGES);
         } else {
-            start_pkg_job("install", rime_installed() ? IME_ZH_PACKAGES : IME_ALL_PACKAGES);
+            fonts = ime_zh_job();
         }
-        snprintf(notice, sizeof notice, "%s", pkg_job ? (strcmp(pkg_action, "install") == 0 ?
-                 _("Chinese Pinyin: installing rime-frost and grammar model, then rebuilding.") :
+        snprintf(notice, sizeof notice, "%s", pkg_job ? (strcmp(pkg_action, "install") == 0 ? (fonts ?
+                 _("Chinese Pinyin: installing rime-frost, its grammar model and CJK fonts, then rebuilding.") :
+                 _("Chinese Pinyin: installing rime-frost and grammar model, then rebuilding.")) :
                  _("Chinese Pinyin: removing rime-frost (English completion kept).")) :
                  _("Chinese Pinyin: cannot run locachy-pkg."));
         return;
@@ -6217,6 +6549,38 @@ static void adjust(int dir)
         term_net = !term_net;
         snprintf(notice, sizeof notice, "%s", term_net ? _("The terminal's shell is on the network from its next start.") :
                  _("The terminal's shell has no network from its next start."));
+        return;
+    }
+    if (selected == clicks_index()) {
+        /* Tap and press, press only, pointing only, round again. Tap to
+         * click reaches the shared display at once (apply_labwc), a
+         * clickpad's press only as libinput reads its quirks: see
+         * apply_clicks. */
+        int previous = clicks, next = (clicks + (dir < 0 ? NCLICKS - 1 : 1)) % NCLICKS, pads = 0;
+        if (rc_set("touchpad_clicks", clicks_values[next]) < 0) {
+            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+            return;
+        }
+        clicks = next;
+        char *before = quirks_sections(CLICKS_SECTION);
+        if (apply_clicks(&pads) < 0) {
+            free(before);
+            clicks = previous;
+            rc_set("touchpad_clicks", clicks_values[previous]);
+            snprintf(notice, sizeof notice, _("Cannot write %s."), LOCAL_QUIRKS);
+            return;
+        }
+        char *after = quirks_sections(CLICKS_SECTION);
+        int restart = !before || !after || strcmp(before, after) != 0;
+        free(before);
+        free(after);
+        apply_labwc();
+        const char *what = clicks == CLICKS_TAP ? _("Touchpads click when tapped or pressed") :
+                           clicks == CLICKS_PRESS ? _("Touchpads click when pressed, not when tapped") :
+                           pads ? _("Touchpads only point; separate buttons still click") :
+                           _("Touchpads do not tap; none here clicks by pressing its surface");
+        snprintf(notice, sizeof notice, restart ? _("%s: programs after home, the shared display from its next start.") :
+                 _("%s: programs after home, the shared display at once."), what);
         return;
     }
     if (selected == circ_index() + 1 || selected == circ_index() + 2) {
@@ -6595,6 +6959,81 @@ static int page_key(int key)
     return 0;
 }
 
+/* A page by a stable English name (--page=NAME, or "page NAME" from the
+ * window manager), so that a block of the top bar opens its own settings:
+ * that category, keys on its page, at the setting the block shows. */
+static int open_page(const char *name)
+{
+    static const struct { const char *name; int category; } pages[] = {
+        { "network", CAT_NETWORK }, { "power", CAT_POWER }, { "devices", CAT_DEVICES },
+        { "date-time", CAT_TIME }, { "hardware", CAT_SYSTEM },
+    };
+    for (size_t i = 0; i < sizeof pages / sizeof *pages; i++) {
+        if (strcmp(name, pages[i].name) != 0) {
+            continue;
+        }
+        show_category(pages[i].category, 1);
+        selected = pages[i].category == CAT_TIME ? tz_index() :
+                   pages[i].category == CAT_SYSTEM ? hwinfo_index() : first_setting();
+        editing = 0;
+        return 1;
+    }
+    return 0;
+}
+
+/* The window manager's request pipe (LOCACHY_REQUEST_FD): a settings window
+ * already open is asked for another page rather than started twice. Read
+ * without waiting; its end closes it, so that the wait does not spin. */
+static int request_fd = -1;
+
+static void request_open(void)
+{
+    const char *s = getenv("LOCACHY_REQUEST_FD");
+    char *end = NULL;
+    long fd = s ? strtol(s, &end, 10) : -1;
+    unsetenv("LOCACHY_REQUEST_FD");
+    if (!s || !end || *end || fd < 3 || fd > 1023 || fcntl((int)fd, F_GETFD) < 0) {
+        return;
+    }
+    fcntl((int)fd, F_SETFD, FD_CLOEXEC);
+    fcntl((int)fd, F_SETFL, fcntl((int)fd, F_GETFL) | O_NONBLOCK);
+    request_fd = (int)fd;
+}
+
+static void requests(void)
+{
+    static char line[128];
+    static size_t have;
+    while (request_fd >= 0) {
+        ssize_t n = read(request_fd, line + have, sizeof line - 1 - have);
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+            close(request_fd);
+            request_fd = -1;
+            break;
+        }
+        if (n < 0) {
+            break;
+        }
+        have += (size_t)n;
+        char *nl;
+        while ((nl = memchr(line, '\n', have)) != NULL) {
+            *nl = '\0';
+            if (strncmp(line, "page ", 5) == 0) {
+                open_page(line + 5);
+            }
+            size_t used = (size_t)(nl - line) + 1;
+            memmove(line, nl + 1, have - used);
+            have -= used;
+        }
+        if (have == sizeof line - 1) {
+            have = 0; /* a line longer than any request: dropped */
+        }
+    }
+}
+
 int main(int argc, char **argv)
 {
     signal(SIGPIPE, SIG_IGN); /* an answer to a PAM child that has ended (auth.c) */
@@ -6628,17 +7067,35 @@ int main(int argc, char **argv)
     load_repos();
     load_kernel_state();
     load_kernel_choices();
+    adopt_jobs();
+    request_open();
+    build_row_maps();
+    build_entries();
+    for (int i = 1; i < argc; i++) {
+        if (strncmp(argv[i], "--page=", 7) == 0 && !open_page(argv[i] + 7)) {
+            snprintf(notice, sizeof notice, _("No settings page is named %.40s."), argv[i] + 7);
+        }
+    }
     draw();
 
     for (;;) {
-        int key = key_poll_timeout(-1, pkg_job || repos_job ? 500 : 2000);
+        if (close_due()) {
+            return 0; /* the window's close, read in a question or list */
+        }
+        int key = key_poll_timeout(request_fd, pkg_job || repos_job || boot_job ? 500 : 2000);
+        requests();
         if (key != 0 && key != K_DEL) {
             fp_delete_asked = face_delete_asked = tor_bridges_delete_asked = tpm_clear_asked = 0; /* Delete twice in a row deletes them */
             remove_asked = -1;
         }
+        close_read(key);
         build_row_maps();
         pkg_check();
         repos_check();
+        boot_check();
+        if (close_due()) {
+            return 0; /* closed as q does: its jobs go on (locachy-jobs) */
+        }
         if (key == K_POINTER) {
             key = settings_pointer();
             if (key == 0) continue;

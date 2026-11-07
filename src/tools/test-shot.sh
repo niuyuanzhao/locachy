@@ -32,8 +32,8 @@ for p in wlr-foreign-toplevel-management-unstable-v1 wlr-layer-shell-unstable-v1
     wayland-scanner client-header "$src/base/protocols/$p.xml" "$p-client-protocol.h"
     wayland-scanner private-code "$src/base/protocols/$p.xml" "$p-protocol.c"
 done
-cc="gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -I$src/base/include -I$src/base -I$out $(pkg-config --cflags freetype2 libnm)"
-libs="$(pkg-config --libs freetype2 libnm) -lwayland-client -lm"
+cc="gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -I$src/base/include -I$src/base -I$out $(pkg-config --cflags freetype2 fontconfig libnm)"
+libs="$(pkg-config --libs freetype2 fontconfig libnm) -lwayland-client -lm"
 base=$(ls "$src"/base/*.c | grep -v '/ime.c$')
 $cc -DCONFIG_FREETYPE -DCONFIG_NETWORKMANAGER -o labwc-control "$src/progs/labwc-control.c" $base \
     security-context-v1-protocol.c wlr-foreign-toplevel-management-unstable-v1-protocol.c \

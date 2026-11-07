@@ -115,7 +115,7 @@ class Validation(Base):
         p = subprocess.run([sys.executable, "-I", str(HELPER), "validate", str(self.tree({"edge.conf": EDGE}))],
                            capture_output=True, text=True)
         self.assertEqual((p.returncode, p.stdout), (0, "OK 1 app presets, format 1\n"))
-        self.refused("not compatible: format 2", fmt="2\n")
+        self.refused("not compatible: format 3", fmt="3\n")
         self.refused("not compatible: format 1", fmt=" 1\n")
         self.refused("no FORMAT", fmt=None)
         tree = self.tree({})
@@ -138,7 +138,7 @@ class Validation(Base):
                  'network="1"\r': 'not KEY="VALUE"', 'Network="1"': 'not KEY="VALUE"',
                  'foo="1"': "unknown key foo", 'packages="a b"': "unknown key packages",
                  'network="0"': "network a second time",
-                 'host="1"': "host programs are the system's, never an app preset",
+                 'host="1"': "host requires format 2",
                  'arguments="$(touch x)"': "arguments has a quote, backslash, $, backquote or control character",
                  'arguments="a\\b"': "backslash", 'arguments="`id`"': "backquote",
                  'arguments="a"b"': "quote", 'arguments="a\x01"': "control character"}
@@ -166,6 +166,24 @@ class Validation(Base):
         # The first invalid file rejects them all.
         self.refused("a.conf: line 1: unknown key foo", {"a.conf": 'foo="1"\n', "edge.conf": EDGE, "z.conf": "x\n"})
 
+    def test_format_two_accepts_host_modes_but_format_one_still_refuses_them(self):
+        for mode in ("0", "1"):
+            text = FOOT.replace('host="1"', f'host="{mode}"')
+            tree = self.tree({"foot.conf": text}, fmt="2\n")
+            self.assertEqual(apps.validate_tree(str(tree)), ("2", {"foot": text.encode()}))
+            self.refused("host requires format 2", {"foot.conf": text})
+        self.refused("host is not 0 or 1", {"foot.conf": FOOT.replace('host="1"', 'host="yes"')}, fmt="2\n")
+        dest = self.root / "format-two-catalog"
+        apps.write_catalog({"foot": FOOT.encode()}, str(dest), apps.new_meta("2", "medium"))
+        self.assertEqual(sorted(apps.read_catalog(str(dest))), ["foot"])
+        apps.copy_catalog(str(dest), str(self.root / "format-two-copy"))
+        self.assertEqual(apps.read_meta(str(self.root / "format-two-copy"))["format"], "2")
+        # Metadata is authoritative even for an installed catalog: do not let
+        # an old-format file smuggle in the new access key.
+        (dest / "CATALOG").write_text('format="1"\norigin="medium"\n')
+        with self.assertRaisesRegex(apps.CatalogError, "host requires format 2"):
+            apps.read_catalog(str(dest))
+
     def test_the_catalog_command_writes_a_new_catalog_only_from_a_valid_tree(self):
         dest = self.root / "catalog"
         tree = self.tree({"edge.conf": EDGE})
@@ -178,10 +196,10 @@ class Validation(Base):
         self.assertEqual(sorted(apps.read_catalog(str(dest))), ["edge"])
         p = subprocess.run(command, capture_output=True, text=True)
         self.assertEqual(p.returncode, 1)  # never over an existing one
-        bad = self.tree({"edge.conf": EDGE}, fmt="2\n")
+        bad = self.tree({"edge.conf": EDGE}, fmt="3\n")
         p = subprocess.run(command[:4] + [str(bad), str(self.root / "other")] + command[6:], capture_output=True,
                            text=True)
-        self.assertEqual((p.returncode, p.stderr), (1, "not compatible: format 2\n"))
+        self.assertEqual((p.returncode, p.stderr), (1, "not compatible: format 3\n"))
         self.assertFalse((self.root / "other").exists())
         p = subprocess.run(command[:6] + ["somewhere"] + command[7:], capture_output=True, text=True)
         self.assertEqual(p.returncode, 1)
@@ -204,10 +222,10 @@ class Catalog(Base):
     def test_incompatible_format_keeps_the_old_catalog(self):
         self.install()
         before = {p.name: p.read_bytes() for p in self.catalog().iterdir()}
-        c2 = self.commit({"FORMAT": "2\n", "apps/edge.conf": EDGE.replace("wayland", "x11")}, "Format two")
-        with self.assertRaisesRegex(apps.CatalogError, "not compatible: format 2"):
+        c2 = self.commit({"FORMAT": "3\n", "apps/edge.conf": EDGE.replace("wayland", "x11")}, "Format three")
+        with self.assertRaisesRegex(apps.CatalogError, "not compatible: format 3"):
             apps.check(str(self.apps_dir), self.url, "main", str(self.conf), str(self.signers))
-        with self.assertRaisesRegex(apps.CatalogError, "not compatible: format 2"):
+        with self.assertRaisesRegex(apps.CatalogError, "not compatible: format 3"):
             apps.apply(str(self.apps_dir), c2, str(self.conf), str(self.signers), self.url, "main")
         self.assertEqual({p.name: p.read_bytes() for p in self.catalog().iterdir()}, before)
 
@@ -317,6 +335,45 @@ class Catalog(Base):
         values = apps.conf_values((self.conf / "edge.conf").read_text())
         self.assertEqual((values["camera"], values["x11"]), ("0", "0"))
 
+    def test_catalog_updates_keep_host_permission_in_both_directions(self):
+        self.install()
+        (self.conf / "edge.conf").write_text(EDGE)
+        granted = EDGE.replace('arguments="--ozone-platform=wayland"', 'arguments="--ozone-platform=wayland --new"') + 'host="1"\n'
+        c2 = self.commit({"FORMAT": "2\n", "apps/edge.conf": granted}, "Request real-system access")
+        found = apps.check(str(self.apps_dir), self.url, "main", str(self.conf), str(self.signers))
+        self.assertEqual(found["reviews"], [("edge", False, True)])
+        self.assertEqual(found["merges"], [("edge", ["arguments"], "microsoft-edge-stable-bin",
+                                           "microsoft-edge-stable-bin")])
+        apps.apply(str(self.apps_dir), c2, str(self.conf), str(self.signers), self.url, "main")
+        current = (self.conf / "edge.conf").read_text()
+        self.assertNotIn("host=", current)
+        self.assertIn("--new", current)
+        self.assertEqual((self.apps_dir / "baseline/edge.conf").read_text(), granted)
+        # Even after the new baseline has host=1, another update cannot grant it.
+        self.commit({"apps/edge.conf": granted.replace("--new", "--next")}, "Later update")
+        found = apps.check(str(self.apps_dir), self.url, "main", str(self.conf), str(self.signers))
+        self.assertEqual(found["reviews"], [("edge", False, True)])
+        self.install()
+        self.assertNotIn("host=", (self.conf / "edge.conf").read_text())
+        # A grant confirmed by the user then follows ordinary recipe updates.
+        (self.conf / "edge.conf").write_text((self.conf / "edge.conf").read_text() + 'host="1"\n')
+        self.commit({"apps/edge.conf": granted.replace("--new", "--last")}, "Authorized app update")
+        found = apps.check(str(self.apps_dir), self.url, "main", str(self.conf), str(self.signers))
+        self.assertEqual(found["reviews"], [])
+        self.install()
+        self.assertEqual(apps.conf_values((self.conf / "edge.conf").read_text())["host"], "1")
+        self.assertIn("--last", (self.conf / "edge.conf").read_text())
+        # Removing host from a later recipe must not revoke the existing grant.
+        self.commit({"apps/edge.conf": EDGE}, "Request isolated access")
+        found = apps.check(str(self.apps_dir), self.url, "main", str(self.conf), str(self.signers))
+        self.assertEqual(found["reviews"], [("edge", True, False)])
+        self.install()
+        self.assertIn('host="1"', (self.conf / "edge.conf").read_text())
+        for current_host in ('host="0"\n', 'host="1"\n', ""):
+            text, keys = apps.merged(EDGE + current_host, {"host": "1"}, {})
+            self.assertEqual(text, EDGE + current_host)
+            self.assertEqual(keys, [])
+
     def test_copy_into_a_new_system(self):
         self.install()
         target = self.root / "target/var/lib/locachy/apps/catalog"
@@ -356,9 +413,41 @@ class Catalog(Base):
                         make.index("rm -rf /usr/local/share/locachy/containers"))
         self.assertIn("grep -q '^host=\"1\"' \"$preset\" || install -m 644 \"$preset\" "
                       "/usr/local/share/locachy/containers/", make)
-        self.assertEqual(sorted(p.name for p in (SOURCE / "containers").glob("*.conf")), ["chatgpt.conf", "code.conf", "foot.conf"])
+        self.assertEqual(sorted(p.name for p in (SOURCE / "containers").glob("*.conf")), ["code.conf", "foot.conf"])
         tools = (SOURCE / "link/install-pkg-tools").read_text()
         self.assertIn("locachy_apps.py", tools)
+
+    def test_chatgpt_store_migration_keeps_user_state_and_old_merge_base(self):
+        make = (SOURCE / "make.sh").read_text()
+        start = make.index("legacy_chatgpt=")
+        end = make.index('\nif python3 -I "$src/link/locachy_apps.py" bootstrap', start)
+        shared = self.root / "share-containers"
+        shared.mkdir()
+        original = FOOT.replace("foot", "chatgpt")
+        (shared / "chatgpt.conf").write_text(original)
+        config = original.replace('command="/usr/bin/chatgpt"', 'command="/usr/bin/custom-chatgpt"')
+        (self.conf / "chatgpt.conf").write_text(config)
+        data = self.root / "state/chatgpt/data"
+        data.mkdir(parents=True)
+        (data / "keep").write_text("user data")
+        step = make[start:end].replace("/usr/local/share/locachy/containers", str(shared))
+        step = step.replace("/etc/locachy/containers", str(self.conf))
+        step = step.replace("/var/lib/locachy/apps", str(self.apps_dir))
+        for _ in range(2):
+            p = subprocess.run(["sh", "-euc", step], capture_output=True, text=True, timeout=10)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertFalse((shared / "chatgpt.conf").exists())
+            self.assertEqual((self.conf / "chatgpt.conf").read_text(), config)
+            self.assertEqual((self.apps_dir / "baseline/chatgpt.conf").read_text(), original)
+            self.assertEqual((data / "keep").read_text(), "user data")
+        self.commit({"FORMAT": "2\n", "apps/chatgpt.conf": original + 'arguments="--ozone-platform=wayland"\n'},
+                    "ChatGPT in store")
+        _, changed = self.install()
+        self.assertEqual(changed, [("chatgpt", ["arguments"])])
+        values = apps.conf_values((self.conf / "chatgpt.conf").read_text())
+        self.assertEqual(values["command"], "/usr/bin/custom-chatgpt")
+        self.assertEqual(values["host"], "1")
+        self.assertEqual(values["arguments"], "--ozone-platform=wayland")
 
     def test_make_keeps_the_old_presets_when_no_catalog_is_made(self):
         """make.sh's preset step, run on private files: a failed bootstrap
@@ -404,6 +493,7 @@ class Updater(Base):
                             ("BUILT_HOST_FILE", self.root / "built-host"),
                             ("SOURCE_UNBUILT_FILE", self.root / "source-unbuilt"),
                             ("SOURCE_COMMIT_FILE", self.root / "source-commit"),
+                            ("SOURCE_PENDING_FILE", self.root / "source-pending"),
                             ("SOURCE_REPO_DIR", self.root / "repo")):
             self.patch(name, str(value))
         self.patch("in_net", lambda command: command)
@@ -463,8 +553,8 @@ class Updater(Base):
         self.rc.write_text(f'apps_repo="{self.url}"\n')
         self.commit({"apps/edge.conf": EDGE + 'host="1"\n'}, "Edge a host program")
         with self.quiet()[0]:
-            self.assertEqual(pkg.apps_rows(), [("apps", "note", "not checked: edge.conf: line 9: host programs are "
-                                                "the system's, never an app preset", "", "")])
+            self.assertEqual(pkg.apps_rows(), [("apps", "note", "not checked: edge.conf: line 9: host requires format 2",
+                                                "", "")])
         self.assertEqual({p.name: p.read_bytes() for p in self.catalog().iterdir()}, before)
 
     def test_bootstrap_catalog_is_noted_until_one_from_the_repository(self):
@@ -512,6 +602,38 @@ class Updater(Base):
             rows = pkg.apps_rows()
         self.assertIn(("apps", "merge", "gimp", "network", ""), rows)
         self.assertFalse(any(r[1:3] == ("rebuild", pkg.PRESET_REBUILD) for r in rows))
+
+    def test_authorized_host_recipe_packages_rebuild_through_apply(self):
+        self.commit({"FORMAT": "2\n", "apps/hosty.conf": FOOT.replace("foot", "hosty")}, "Host-access recipe")
+        self.install()
+        (self.conf / "hosty.conf").write_text(FOOT.replace("foot", "hosty"))
+        self.commit({"apps/hosty.conf": FOOT.replace("foot", "hosty") + 'extras="git"\n'}, "Host app needs git")
+        with self.quiet()[0]:
+            rows = pkg.plan()
+        self.assertIn(("apps", "merge", "hosty", "extras", ""), rows)
+        self.assertIn(("hosty", "rebuild", pkg.PRESET_REBUILD, "hosty", "hosty git"), rows)
+        self.assertEqual(pkg.targets_of(rows), ["apps", "hosty"])
+        built = []
+        self.patch("run", lambda command, net=False: built.append(command) or True)
+        pkg.save_plan(rows)
+        with self.quiet()[0]:
+            self.assertEqual(pkg.cmd_apply([]), 0)
+        self.assertEqual(built, [["/usr/local/bin/locachy-app", "build", "hosty"]])
+        values = apps.conf_values((self.conf / "hosty.conf").read_text())
+        self.assertEqual((values["host"], values["extras"]), ("1", "git"))
+
+    def test_requested_access_change_is_visible_in_the_update_plan(self):
+        self.install()
+        (self.conf / "edge.conf").write_text(EDGE)
+        self.commit({"FORMAT": "2\n", "apps/edge.conf": EDGE + 'host="1"\n'}, "Request host access")
+        with self.quiet()[0]:
+            rows = pkg.apps_rows()
+        note = ("apps", "note", "edge: preset requests real-system access; review Access in packages; current access is kept",
+                "", "")
+        self.assertIn(note, rows)
+        self.assertFalse(any(row[1] == "merge" for row in rows))
+        self.install()
+        self.assertNotIn("host=", (self.conf / "edge.conf").read_text())
 
     def test_apps_only_apply_builds_nothing_and_applies_the_checked_commit(self):
         self.install()
@@ -591,12 +713,12 @@ class Updater(Base):
             pkg.cmd_apply([], after_source=True)  # that plan is empty: nothing to apply
         self.assertEqual(seen, [(False, c2)])
 
-    def test_search_reads_the_catalog_and_skips_host_programs(self):
+    def test_search_offers_real_system_recipes_from_the_catalog(self):
         catalog = self.root / "search-catalog"
         catalog.mkdir()
         (catalog / "edge.conf").write_text(EDGE)
         (catalog / "foot.conf").write_text(FOOT)
-        (catalog / "CATALOG").write_text('format="1"\norigin="medium"\n')
+        (catalog / "CATALOG").write_text('format="2"\norigin="medium"\n')
         nothing = lambda *a, **kw: subprocess.CompletedProcess(a, 1, "", "")
         stack, out, _ = self.quiet()
         with stack, mock.patch.dict(os.environ, {"LOCACHY_APPS_CATALOG": str(catalog)}), \
@@ -605,7 +727,8 @@ class Updater(Base):
             self.assertEqual(pkg.cmd_search(["foot"]), 0)
         self.assertEqual(out.getvalue().splitlines(), [
             "edge\trecipe\tmicrosoft-edge-stable-bin\t\t/usr/bin/microsoft-edge-stable\t--ozone-platform=wayland\t1\t"
-            "LOCachy preset: Microsoft Edge, on the network."])
+            "LOCachy preset: Microsoft Edge, on the network.",
+            "foot\trecipe\tfoot\t\t/usr/bin/foot\t\t1\t"])
         self.assertNotIn("LOCACHY_PRESETS", (SOURCE / "link/locachy-pkg").read_text())
 
 

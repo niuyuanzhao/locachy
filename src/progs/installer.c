@@ -46,6 +46,7 @@
 #include "base.h"
 #include "clipboard.h"
 #include "internal.h"
+#include "textsel.h"
 
 #define FG     0xD0D0D0
 #define BG     0x101820
@@ -1410,7 +1411,11 @@ static char last_line[256], error_line[512], run_source[512];
 static int run_source_not_newest;
 /* What a stopped installation waits for: source signing keys for a person
  * to check and trust (each package, its key), the command that does it; and
- * whether it can be continued where it stopped (locachy-install --resume). */
+ * whether it can be continued where it stopped (locachy-install --resume).
+ * The command is this medium's own locachy-install, by its path, with the
+ * keys' full fingerprints (nothing else from the output): it is there in
+ * the terminal (t) whatever the output said (locachy-build's "Trust them:"
+ * names a program of the target only) and whatever that shell's PATH. */
 #define MAX_WANTED 16
 static struct { char name[64], key[72]; } wanted[MAX_WANTED];
 static int nwanted, resumable, resumed_run;
@@ -1438,6 +1443,23 @@ static void stage_go(int s)
     }
 }
 
+/* A full fingerprint (40 or 64 hex digits), as locachy-build --trust-key takes it. */
+static int fingerprint(const char *key)
+{
+    size_t n = strlen(key);
+    return (n == 40 || n == 64) && strspn(key, "0123456789ABCDEFabcdef") == n;
+}
+
+static void make_trust_command(void)
+{
+    size_t n = (size_t)snprintf(trust_command, sizeof trust_command, "%s --trust-key", INSTALL_CMD);
+    for (int i = 0; i < nwanted && n < sizeof trust_command; i++) {
+        int seen = 0;
+        for (int j = 0; j < i; j++) seen |= strcmp(wanted[j].key, wanted[i].key) == 0;
+        if (!seen) n += (size_t)snprintf(trust_command + n, sizeof trust_command - n, " %s", wanted[i].key);
+    }
+}
+
 static void progress_line(const char *s)
 {
     int n, m;
@@ -1462,15 +1484,14 @@ static void progress_line(const char *s)
     } else if (strncmp(s, "Source key to trust: ", 21) == 0 && nwanted < MAX_WANTED) {
         char name[64], key[72];
         int known = 0;
-        if (sscanf(s + 21, "%63s %71s", name, key) == 2) {
+        if (sscanf(s + 21, "%63s %71s", name, key) == 2 && fingerprint(key)) {
             for (int i = 0; i < nwanted; i++) known |= strcmp(wanted[i].key, key) == 0 && strcmp(wanted[i].name, name) == 0;
             if (!known) {
                 copy(wanted[nwanted].name, sizeof wanted[0].name, name);
                 copy(wanted[nwanted++].key, sizeof wanted[0].key, key);
+                make_trust_command();
             }
         }
-    } else if (strncmp(s, "Trust them: ", 12) == 0) {
-        copy(trust_command, sizeof trust_command, s + 12); /* the last one: locachy-install's */
     } else if (strncmp(s, "Continue with: ", 15) == 0) {
         resumable = 1;
     } else if (sscanf(s, "(%d/%d) ", &n, &m) == 2 && strstr(s, ") installing ")) {
@@ -1788,97 +1809,22 @@ static int log_lines(char lines[][256], int n, int from, int *total)
     return k;
 }
 
-/* What the installation's pages show, cell by cell, to select with the
- * pointer as in term (a drag; a double click: a word; a triple one: a line)
- * and copy: to the primary selection as a selection is made, to the
- * clipboard with y or Ctrl+C. A cell: its character's UTF-8, "" for none,
- * "\1" for the right half of a wide one. */
-#define SHOWN_ROWS 160
-#define SHOWN_COLS 320
-static char shown[SHOWN_ROWS][SHOWN_COLS][5];
-static struct { int active, dragging, anchor, end; } sel; /* row * SHOWN_COLS + col */
-
-static void page_text(int col, int row, const char *s, uint32_t fg, uint32_t bg)
-{
-    screen_text(col, row, s, fg, bg);
-    if (row < 0 || row >= SHOWN_ROWS) return;
-    const unsigned char *p = (const unsigned char *)s;
-    while (*p && col < SHOWN_COLS) {
-        const unsigned char *from = p;
-        unsigned char b = *p++;
-        int more = b < 0x80 ? 0 : (b & 0xE0) == 0xC0 ? 1 : (b & 0xF0) == 0xE0 ? 2 : (b & 0xF8) == 0xF0 ? 3 : 0;
-        uint32_t cp = b < 0x80 ? b : b & (0x3Fu >> more);
-        for (; more > 0 && (*p & 0xC0) == 0x80; more--) cp = cp << 6 | (*p++ & 0x3F);
-        int w = screen_char_cells(cp);
-        if (col >= 0 && p - from < 5) {
-            memcpy(shown[row][col], from, (size_t)(p - from));
-            shown[row][col][p - from] = '\0';
-        }
-        for (int k = 1; k < w && col + k < SHOWN_COLS; k++) strcpy(shown[row][col + k], "\1");
-        col += w > 0 ? w : 1;
-    }
-}
-
-static int selection_bounds(int *a, int *b)
-{
-    if (!sel.active) return 0;
-    *a = sel.anchor < sel.end ? sel.anchor : sel.end;
-    *b = sel.anchor < sel.end ? sel.end : sel.anchor;
-    return 1;
-}
-
-static void draw_selection(void)
-{
-    int a, b;
-    if (!selection_bounds(&a, &b)) return;
-    for (int i = a; i <= b && i / SHOWN_COLS < screen_rows(); i++) {
-        const char *ch = shown[i / SHOWN_COLS][i % SHOWN_COLS];
-        if (ch[0] && ch[0] != '\1') screen_text(i % SHOWN_COLS, i / SHOWN_COLS, ch, BG, ACCENT);
-    }
-}
-
-/* The text selected, rows without their trailing blanks (malloc'd), or NULL. */
-static char *selection_text(void)
-{
-    int a, b;
-    if (!selection_bounds(&a, &b)) return NULL;
-    char *text = malloc((size_t)(b - a + 2) * 5 + 1);
-    if (!text) return NULL;
-    size_t n = 0, line = 0;
-    int row = a / SHOWN_COLS;
-    for (int i = a; i <= b; i++) {
-        if (i / SHOWN_COLS != row) {
-            while (n > line && text[n - 1] == ' ') n--;
-            text[n++] = '\n';
-            line = n;
-            row = i / SHOWN_COLS;
-        }
-        const char *ch = shown[row][i % SHOWN_COLS];
-        if (ch[0] == '\1') continue;
-        size_t len = ch[0] ? strlen(ch) : 1;
-        memcpy(text + n, ch[0] ? ch : " ", len);
-        n += len;
-    }
-    while (n > line && text[n - 1] == ' ') n--;
-    text[n] = '\0';
-    return text;
-}
-
+/* What the installation's pages show is drawn with textsel_put, to select
+ * with the pointer as in term (a drag; a double click: a word; a triple one:
+ * a line) and copy: to the primary selection as a selection is made, to the
+ * clipboard with y or Ctrl+C (textsel.h). */
 static void copy_text(int primary, const char *text)
 {
-    int status = clipboard_set(primary, text, strlen(text));
-    if (status != CLIPBOARD_OK) {
-        tell(1, _("Not copied: %s"), _(clipboard_error(status)));
-    } else if (!primary) {
-        tell(0, _("Copied: %.200s"), text);
-    }
+    char msg[512];
+    int failed = textsel_copy(primary, text, msg, sizeof msg);
+    if (msg[0]) tell(failed, "%s", msg);
 }
 
 /* y, Ctrl+C: what is selected; else the command that trusts the keys the
  * installation waits for, else its error. */
 static void copy_key(void)
 {
-    char *text = selection_text();
+    char *text = textsel_get();
     if (text && text[0]) {
         copy_text(0, text);
     } else if (nwanted && trust_command[0]) {
@@ -1891,54 +1837,16 @@ static void copy_key(void)
     free(text);
 }
 
-static int word_cell(int row, int col)
-{
-    const char *ch = shown[row][col];
-    return ch[0] && strcmp(ch, " ") != 0;
-}
-
 /* The pointer on an installation's page: 1 if it is about a selection. */
 static int select_pointer(const struct pointer_event *e, int on_button)
 {
-    if (e->row < 0 || e->row >= SHOWN_ROWS || e->col < 0 || e->col >= SHOWN_COLS) return 0;
-    int at = e->row * SHOWN_COLS + e->col;
-    if (e->button == BTN_LEFT && e->pressed) {
-        if (on_button) return 0;
-        sel.active = sel.dragging = 1;
-        sel.anchor = sel.end = at;
-        if (e->clicks >= 2) {
-            int a = e->col, b = e->col;
-            if (e->clicks == 2) {
-                while (a > 0 && word_cell(e->row, a - 1)) a--;
-                while (b + 1 < SHOWN_COLS && word_cell(e->row, b + 1)) b++;
-            } else {
-                for (a = 0; a < SHOWN_COLS - 1 && !word_cell(e->row, a); a++) {
-                }
-                for (b = SHOWN_COLS - 1; b > a && !word_cell(e->row, b); b--) {
-                }
-            }
-            sel.anchor = e->row * SHOWN_COLS + a;
-            sel.end = e->row * SHOWN_COLS + b;
-            sel.dragging = 0;
-            char *text = selection_text();
-            if (text && text[0]) copy_text(1, text);
-            free(text);
-        }
-        return 1;
+    int got = textsel_pointer(e, !on_button);
+    if (got == TEXTSEL_MADE) {
+        char *text = textsel_get();
+        if (text && text[0]) copy_text(1, text);
+        free(text);
     }
-    if (!sel.dragging) return 0;
-    sel.end = at;
-    if (e->button == BTN_LEFT && !e->pressed) {
-        sel.dragging = 0;
-        if (sel.anchor == sel.end) {
-            sel.active = 0; /* a click: no selection */
-        } else {
-            char *text = selection_text();
-            if (text && text[0]) copy_text(1, text);
-            free(text);
-        }
-    }
-    return 1;
+    return got != TEXTSEL_NONE;
 }
 
 static uint32_t log_color(const char *s)
@@ -1958,32 +1866,32 @@ static void draw_progress(void)
     elapsed(until - started, t, sizeof t);
     if (mode == M_RUN) {
         snprintf(line, sizeof line, resumed_run ? _("Continuing the installation   %s") : _("Installing LOCachy   %s"), t);
-        page_text(2, r, line, ACCENT, BG);
+        textsel_put(2, r, line, ACCENT, BG);
     } else if (mode == M_DONE) {
         snprintf(line, sizeof line, _("LOCachy is installed (%s). Take the installation medium out, then reboot."), t);
-        page_text(2, r, line, ACCENT, BG);
+        textsel_put(2, r, line, ACCENT, BG);
     } else if (nwanted) {
         /* Not a failure: a person's decision, which nothing makes by itself. */
-        page_text(2, r, _("Waiting for you: source signing keys to trust. None is trusted by itself."), WARN, BG);
+        textsel_put(2, r, _("Waiting for you: source signing keys to trust. None is trusted by itself."), WARN, BG);
         for (int i = 0; i < nwanted; i++) {
             char pad[96];
             snprintf(line, sizeof line, "%s %s", ui_pad(pad, sizeof pad, wanted[i].name, 28), wanted[i].key);
-            page_text(4, ++r, line, FG, BG);
+            textsel_put(4, ++r, line, FG, BG);
         }
-        page_text(2, ++r, _("Check each with its upstream project; then trust them in the terminal (t):"), FG, BG);
-        page_text(4, ++r, trust_command[0] ? trust_command : "locachy-install --trust-key", ACCENT, BG);
-        page_text(2, ++r, _("y copies the command; c then continues where the installation stopped."), DIM, BG);
+        textsel_put(2, ++r, _("Check each with its upstream project; then trust them in the terminal (t):"), FG, BG);
+        textsel_put(4, ++r, trust_command, ACCENT, BG);
+        textsel_put(2, ++r, _("y copies the command; c then continues where the installation stopped."), DIM, BG);
     } else {
-        page_text(2, r, _("The installation failed. Nothing more is written; the output below says why."), ERROR, BG);
-        if (error_line[0]) page_text(4, ++r, error_line, ERROR, BG);
+        textsel_put(2, r, _("The installation failed. Nothing more is written; the output below says why."), ERROR, BG);
+        if (error_line[0]) textsel_put(4, ++r, error_line, ERROR, BG);
         if (resumable) {
-            page_text(2, ++r, _("Deal with the cause (t: a terminal); then c continues where the installation stopped."),
+            textsel_put(2, ++r, _("Deal with the cause (t: a terminal); then c continues where the installation stopped."),
                       DIM, BG);
         }
     }
     if (run_source[0]) {
         snprintf(line, sizeof line, _("LOCachy source: %s"), run_source);
-        page_text(4, ++r, line, run_source_not_newest ? WARN : DIM, BG);
+        textsel_put(4, ++r, line, run_source_not_newest ? WARN : DIM, BG);
     }
     r += 2;
     for (int s = 0; s < NSTAGES; s++, r++) {
@@ -2002,7 +1910,7 @@ static void draw_progress(void)
         } else {
             snprintf(line, sizeof line, "%s %8s", pad, t);
         }
-        page_text(4, r, line, skipped ? DIM : now_on ? ACCENT : stage == s && mode == M_FAILED ? ERROR : FG, BG);
+        textsel_put(4, r, line, skipped ? DIM : now_on ? ACCENT : stage == s && mode == M_FAILED ? ERROR : FG, BG);
     }
     r++;
     int top = r, height = rows - 2 - top;
@@ -2017,9 +1925,9 @@ static void draw_progress(void)
     log_path(logp, sizeof logp);
     /* TRANSLATORS: PgUp/PgDn are key names; keep them. */
     snprintf(line, sizeof line, _("Output: %s   %s   PgUp/PgDn: scroll"), logp, where);
-    page_text(1, top, line, BG, DIM);
+    textsel_put(1, top, line, BG, DIM);
     ui_hit(0, top, cols, height, HIT_PANE);
-    for (int i = 0; i < n; i++) page_text(2, top + 1 + i, lines[i], log_color(lines[i]), PANE);
+    for (int i = 0; i < n; i++) textsel_put(2, top + 1 + i, lines[i], log_color(lines[i]), PANE);
     if (log_from > total) log_from = total;
 }
 
@@ -2061,9 +1969,9 @@ static void draw(void)
         if (sw) draw_sidebar(sw);
         draw_entries(page_x());
     } else {
-        memset(shown, 0, sizeof shown);
+        textsel_frame();
         draw_progress();
-        draw_selection();
+        textsel_draw(BG, ACCENT);
     }
     draw_buttons();
     screen_text(1, screen_rows() - 1, notice, notice_error ? ERROR : ACCENT, BG);
@@ -2451,12 +2359,12 @@ static void after_key(int key)
         go_step(S_SUMMARY);
         reread(); /* the disk was partitioned: what is on it now */
     } else if (mode == M_FAILED && key == 'c' && resumable) {
-        sel.active = 0;
+        textsel_clear();
         continue_install();
     } else if (key == 'y' || key == 3) {
         copy_key();
     } else if (key == 27) {
-        sel.active = 0;
+        textsel_clear();
     }
 }
 

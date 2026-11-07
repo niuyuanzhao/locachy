@@ -8,7 +8,9 @@ static int settings_kill(pid_t pid, int sig);
 #define rc_set settings_rc_set
 #define main settings_main
 #include "../progs/settings.c"
+#include "../base/fontmatch.c" /* without FreeType: fontconfig is not asked */
 #include "i18n-stub.h"
+#include "jobs-double.h"
 #undef main
 #undef rc_set
 #undef kill
@@ -18,6 +20,7 @@ static const char *path;
 static int reloads, writes_left = -1;
 
 void say(const char *fmt, ...) { (void)fmt; }
+void key_close_kept(void) {} /* no window here: K_CLOSE never comes */
 
 int settings_rc_set(const char *name, const char *value)
 {

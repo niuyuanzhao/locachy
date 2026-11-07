@@ -9,7 +9,7 @@
  * a stop for a source signing key to trust (then --resume goes on);
  * keytable writes a table of two keys, or fails when told to.
  *   test-installer DIR   (DIR: a new directory for the doubles' files)
- * Build with base/ui.c and json-c.
+ * Build with base/ui.c, base/textsel.c and json-c.
  */
 #include <assert.h>
 #include <setjmp.h>
@@ -275,9 +275,8 @@ static const char fake_install[] =
     "  echo '== x86-64-v2: build mounted target'\n"
     "  echo 'Source key to trust: lyrebird-proxy 40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C'\n"
     "  echo 'Trust them: locachy-build --trust-key 40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C'\n"
+    "  echo 'Source key to trust: odd ;reboot'\n"
     "  echo 'locachy-install: Target build failed; see the log' >&2\n"
-    "  echo 'Source key to trust: lyrebird-proxy 40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C'\n"
-    "  echo 'Trust them: locachy-install --trust-key 40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C'\n"
     "  echo 'Continue with: locachy-install --resume'; exit 1\n"
     "fi\n"
     "if [ -e \"$d/install-fail\" ]; then\n"
@@ -325,7 +324,7 @@ static void run(const char *what)
     nkeys = 0;
     keys[0] = END;
     nptrs = at_ptr = 0;
-    sel.active = sel.dragging = 0;
+    textsel_clear();
 }
 
 /* From the start to the summary: the whole disk sda, a passphrase, the
@@ -493,8 +492,11 @@ int main(int argc, char **argv)
     unlink(D("install-fail"));
 
     /* A source signing key to trust: the installation waits, says which and
-     * the command (y copies it); text is selected with the pointer and
-     * copied; c goes on where it stopped (--resume), the secrets again. */
+     * the command (y copies it): this medium's locachy-install by its path
+     * with the full fingerprints, whatever "Trust them:" the output had
+     * (here only locachy-build's, a program of the target) and never a
+     * "key" that is not one; text is selected with the pointer and copied;
+     * c goes on where it stopped (--resume), the secrets again. */
     write_file(D("keys-wanted"), "", 0644);
     to_summary("correct horse");
     k(K_EOL); k('\n'); k('y');
@@ -509,9 +511,14 @@ int main(int argc, char **argv)
     run("keys to trust, copying, continuing");
     assert(snapped("Waiting for you: source signing keys to trust. None is trusted by itself."));
     assert(snapped("lyrebird-proxy") && snapped("40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C"));
-    assert(snapped("locachy-install --trust-key 40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C"));
+    char trust[640];
+    /* The command row: that and nothing after it (the rows are blank-padded). */
+    snprintf(trust, sizeof trust, "    %s --trust-key 40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C   ", D("locachy-install"));
+    assert(snapped(trust));
+    assert(snapped("Source key to trust: odd ;reboot") && !snapped("    odd    ")); /* in the output only */
     assert(snapped("c: continue") && !snapped("b: back to the summary"));
-    assert(snapped("Copied: locachy-install --trust-key 40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C"));
+    snprintf(trust, sizeof trust, "Copied: %s --trust-key 40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C", D("locachy-install"));
+    assert(snapped(trust));
     printf("copied: [%s] [%s]\n", copied[0], copied[1]);
     fflush(stdout);
     assert(strncmp(copied[0], "Waiting for you: source signing keys", 36) == 0);

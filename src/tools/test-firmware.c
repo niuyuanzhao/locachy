@@ -11,13 +11,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static char dir[256];
 static char *dpath(const char *rel);
 
-#define FW_JOB_LOG    dpath("fw.log")
-#define FW_JOB_PID    dpath("fw.pid")
 #define FW_HELPER     dpath("helper")
 #define PKG_HELPER    dpath("pkg")
 #define FWUPD_PATH    dpath("fwupdmgr")
@@ -45,6 +44,74 @@ static struct pointer_event mouse;
 static char picked_file[PATH_MAX];
 
 void say(const char *fmt, ...) { (void)fmt; }
+
+/* The system jobs' queue (jobs.h) as a double: a job runs at once, the
+ * helper doubles as the service would run them (its kinds' commands), its
+ * output in DIR/job-ID.log; the queue's own behaviour is test-jobs.sh's. */
+#define MAX_JOBS 16
+static pid_t job_pids[MAX_JOBS + 1];
+static int job_status[MAX_JOBS + 1], njobs_run;
+
+int jobs_submit(const char *kind, const char *const args[], int *id, int *position, char *why, size_t size)
+{
+    static const char *const fixed[][4] = {
+        { "fw-refresh", "fwupd-action", "refresh" }, { "fw-update", "fwupd-action", "update" },
+        { "fw-verify", "fwupd-action", "verify" }, { "fw-unlock", "fwupd-action", "unlock" },
+        { "fw-local-install", "fwupd-action", "local-install" },
+        { "fw-install-release", "fwupd-action", "install-release" }, { "spi-probe", "spi-probe" },
+        { "spi-backup", "spi-backup" }, { "spi-verify", "spi-verify" }, { "spi-write", "spi-write" },
+        { "pkg-install", "install" },
+    };
+    const char *argv[32];
+    int n = 0;
+    assert(njobs_run < MAX_JOBS);
+    argv[n++] = strcmp(kind, "pkg-install") == 0 ? PKG_HELPER : FW_HELPER;
+    for (size_t i = 0; i < sizeof fixed / sizeof fixed[0]; i++) {
+        if (strcmp(kind, fixed[i][0]) != 0) continue;
+        for (int k = 1; k < 4 && fixed[i][k]; k++) argv[n++] = fixed[i][k];
+    }
+    assert(n > 1);
+    for (int i = 0; args[i]; i++) argv[n++] = args[i];
+    argv[n] = NULL;
+    int job = ++njobs_run;
+    char log[512];
+    jobs_log_path(job, log, sizeof log);
+    pid_t pid = fork();
+    if (pid == 0) {
+        FILE *out = freopen(log, "w", stdout);
+        if (!out || dup2(STDOUT_FILENO, STDERR_FILENO) < 0) _exit(126);
+        execv(argv[0], (char *const *)argv);
+        _exit(127);
+    }
+    assert(pid > 0);
+    job_pids[job] = pid;
+    job_status[job] = -1;
+    *id = job;
+    *position = 0;
+    snprintf(why, size, "ok");
+    return 0;
+}
+
+int jobs_status(int id, struct jobs_row *row, char *why, size_t size)
+{
+    (void)why;
+    (void)size;
+    assert(id > 0 && id <= njobs_run);
+    int st;
+    if (job_status[id] < 0 && waitpid(job_pids[id], &st, WNOHANG) == job_pids[id]) {
+        job_status[id] = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
+    }
+    memset(row, 0, sizeof *row);
+    row->id = id;
+    row->status = job_status[id];
+    snprintf(row->state, sizeof row->state, "%s", job_status[id] < 0 ? "running" : job_status[id] ? "failed" : "done");
+    return 0;
+}
+
+int jobs_ended(const struct jobs_row *row) { return strcmp(row->state, "running") != 0; }
+void jobs_log_path(int id, char *out, size_t size) { snprintf(out, size, "%s/job-%d.log", dir, id); }
+int jobs_mine(struct jobs_row *rows, int max) { (void)rows; (void)max; return 0; }
+const char *jobs_state_label(const char *state) { return state; }
 int screen_open(const char *font) { (void)font; return 1; }
 int keys_open(void) { return 1; }
 int screen_cols(void) { return COLS; }

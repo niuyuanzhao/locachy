@@ -4,7 +4,7 @@ apart from the system's source. Its files are data, parsed and validated,
 never sourced or run; a catalog is taken whole or not at all, and switched in
 one step, so that a failure keeps the one there was.
 
-A repository has FORMAT (its format: one line, 1) and its presets in
+A repository has FORMAT (its format: one line, 1 or 2) and its presets in
 apps/NAME.conf. Installed, the catalog is APPS_DIR/catalog: NAME.conf, and
 CATALOG, where it came from (KEY="VALUE" lines, as rc.conf). The updater
 (locachy-pkg) fetches into APPS_DIR/repo.git. A configuration made from a
@@ -33,7 +33,7 @@ import time
 
 APPS_DIR = "/var/lib/locachy/apps"
 SOURCE_COMMIT_FILE = "/usr/local/lib/locachy/source-commit"
-FORMATS = ("1",) # the repository formats this system reads
+FORMATS = ("1", "2") # format 2 may request real-system access (host)
 MAX_BYTES = 16 * 1024
 NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
@@ -56,9 +56,10 @@ def _path(value):
     return value.startswith("/") and len(value) > 1 and ".." not in value.split("/")
 
 
-# A preset's keys, those of locachy-app's configuration but host (a host
-# program is the system's, never an app preset), and what each may hold.
+# A preset requests access; saving it in packages grants that access only
+# after the user confirms it. Catalog updates never change a granted mode.
 CHECKS = {
+    "host": (lambda v: v in ("0", "1"), "0 or 1"),
     "package": (lambda v: bool(PACKAGE.fullmatch(v)), "one package name"),
     "extras": (lambda v: all(PACKAGE.fullmatch(w) for w in v.split()), "package names separated by spaces"),
     "command": (lambda v: _path(v) and " " not in v, "an absolute path"),
@@ -73,7 +74,7 @@ CHECKS = {
 REQUIRED = ("package", "command")
 
 
-def preset_values(name, data):
+def preset_values(name, data, fmt="2"):
     """KEY -> VALUE of preset NAME (its bytes), validated: UTF-8, each line
     empty, a comment or KEY="VALUE", each key known and once, each value of
     its kind; package and command there."""
@@ -92,8 +93,8 @@ def preset_values(name, data):
         if not match:
             raise CatalogError(f'{where}: not KEY="VALUE"')
         key, value = match.groups()
-        if key == "host":
-            raise CatalogError(f"{where}: host programs are the system's, never an app preset")
+        if key == "host" and fmt == "1":
+            raise CatalogError(f"{where}: host requires format 2")
         if key not in CHECKS:
             raise CatalogError(f"{where}: unknown key {key}")
         if key in values:
@@ -125,7 +126,7 @@ def _read(path):
         return f.read(MAX_BYTES + 1)
 
 
-def _presets(directory, extra=()):
+def _presets(directory, extra=(), fmt="2"):
     """NAME -> bytes of the presets in directory, where every entry but extra
     is a valid NAME.conf: the first that is not rejects them all."""
     found = {}
@@ -136,7 +137,7 @@ def _presets(directory, extra=()):
         if not NAME.fullmatch(name):
             raise CatalogError(f"{entry}: not a preset's name (NAME.conf; NAME of a-z, 0-9, . _ -)")
         data = _read(os.path.join(directory, entry))
-        preset_values(name, data)
+        preset_values(name, data, fmt)
         found[name] = data
     return found
 
@@ -152,7 +153,7 @@ def validate_tree(tree):
     apps = os.path.join(tree, "apps")
     if os.path.islink(apps) or not os.path.isdir(apps):
         raise CatalogError("no apps directory")
-    presets = _presets(apps)
+    presets = _presets(apps, fmt=fmt)
     if not presets:
         raise CatalogError("no presets in apps")
     return fmt, presets
@@ -182,9 +183,10 @@ def read_catalog(directory):
         return {}
     if os.path.islink(directory) or not os.path.isdir(directory):
         raise CatalogError(f"{directory}: not a directory")
-    presets = _presets(directory, ("CATALOG",))
-    if not read_meta(directory):
+    meta = read_meta(directory)
+    if not meta:
         raise CatalogError(f"{directory}: no CATALOG")
+    presets = _presets(directory, ("CATALOG",), meta["format"])
     return {name: os.path.join(directory, name + ".conf") for name in presets}
 
 
@@ -264,9 +266,12 @@ def switch(catalog, presets, meta, before=None):
 
 def copy_catalog(src, dest):
     """An installed catalog (the live installer's) as a new system's (dest),
-    validated and written whole."""
+    validated and written whole. Never one made of nothing: a src that is not
+    a catalog (missing, or without its CATALOG) is a CatalogError."""
     presets = {name: _read(path) for name, path in read_catalog(src).items()}
     meta = read_meta(src)
+    if not meta:
+        raise CatalogError(f"{src}: no catalog")
     switch(dest, presets, dict(meta, installed=time.strftime("%Y-%m-%d %H:%M")))
 
 
@@ -349,8 +354,10 @@ def merged(text, base, new):
     base preset had it following the new preset (taken out where that has
     none); its comments, other keys and the user's values as they were."""
     current = conf_values(text)
+    # host is a grant, not a setting a repository may silently change. Keep
+    # its exact spelling (including an absent key) through every new base.
     changes = {key: new.get(key) for key in sorted(set(base) | set(new))
-               if current.get(key) == base.get(key) and new.get(key) != base.get(key)}
+               if key != "host" and current.get(key) == base.get(key) and new.get(key) != base.get(key)}
     if not changes:
         return text, []
     lines, done = [], set()
@@ -373,8 +380,8 @@ def merges(conf_dir, apps_dir, old, new):
     """(name, path, text, merged text, keys) of each configuration that
     follows a preset of the new catalog: its base the preset it last followed
     (baseline), else the old catalog's (old: NAME -> bytes). A configuration
-    the user made (no base), a host program's, and one whose preset is gone
-    are left as they are. new: NAME -> values."""
+    the user made (no base) and one whose preset is gone are left as they
+    are. A granted host mode stays unchanged. new: NAME -> values."""
     found = []
     for path in sorted(glob.glob(os.path.join(glob.escape(conf_dir), "*.conf"))):
         name = os.path.basename(path)[:-5]
@@ -384,8 +391,6 @@ def merges(conf_dir, apps_dir, old, new):
             with open(path, encoding="utf-8") as f:
                 text = f.read()
         except (OSError, UnicodeDecodeError):
-            continue
-        if conf_values(text).get("host") == "1":
             continue
         try:
             base = _read(os.path.join(apps_dir, "baseline", name + ".conf"))
@@ -419,12 +424,16 @@ def compare(apps_dir, commit, conf_dir, signers):
     if meta.get("commit") == commit:
         return None
     with tempfile.TemporaryDirectory(prefix="locachy-apps-check-") as tmp:
-        _, presets = extract(apps_dir, commit, tmp)
-    new = {name: preset_values(name, data) for name, data in presets.items()}
+        fmt, presets = extract(apps_dir, commit, tmp)
+    new = {name: preset_values(name, data, fmt) for name, data in presets.items()}
+    old = _installed(catalog)
+    reviews = [(name, conf_values(text).get("host") == "1", new[name].get("host") == "1")
+               for name, _, text, _, _ in merges(conf_dir, apps_dir, old, new)
+               if (conf_values(text).get("host") == "1") != (new[name].get("host") == "1")]
     subject = _git(os.path.join(apps_dir, "repo.git"), "log", "-1", "--format=%s", commit).stdout.strip()
     return {"old": meta.get("commit", "")[:7] or meta.get("origin") or "none", "commit": commit,
             "label": f"{commit[:7]} ({subject[:48]})" if subject else commit[:7],
-            "merges": merge_preview(conf_dir, apps_dir, _installed(catalog), new)}
+            "merges": merge_preview(conf_dir, apps_dir, old, new), "reviews": reviews}
 
 
 def check(apps_dir, url, branch, conf_dir, signers, net=lambda command: command):
@@ -445,7 +454,7 @@ def apply(apps_dir, commit, conf_dir, signers, repo, branch):
         fmt, presets = extract(apps_dir, commit, tmp)
     catalog = os.path.join(apps_dir, "catalog")
     old = _installed(catalog)
-    new = {name: preset_values(name, data) for name, data in presets.items()}
+    new = {name: preset_values(name, data, fmt) for name, data in presets.items()}
     todo = merges(conf_dir, apps_dir, old, new)
     baseline = os.path.join(apps_dir, "baseline")
 

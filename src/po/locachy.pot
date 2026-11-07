@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-03 02:10+0800\n"
+"POT-Creation-Date: 2026-11-07 02:11-0500\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -37,6 +37,60 @@ msgstr ""
 
 #: base/clipboard.c
 msgid "clipboard service unavailable or transfer failed"
+msgstr ""
+
+#: base/jobs.c
+msgid "The request is too long."
+msgstr ""
+
+#: base/jobs.c
+#, c-format
+msgid "The job service (locachy-jobs) does not run: %s."
+msgstr ""
+
+#: base/jobs.c
+#, c-format
+msgid "The job service (locachy-jobs) did not answer: %s."
+msgstr ""
+
+#: base/jobs.c progs/settings.c
+msgid "refused"
+msgstr ""
+
+#: base/jobs.c
+msgid "The job service gave no job."
+msgstr ""
+
+#: base/jobs.c
+msgid "The job service's answer is not a job."
+msgstr ""
+
+#: base/jobs.c
+msgid "queued"
+msgstr ""
+
+#: base/jobs.c progs/home.c progs/packages.c
+msgid "running"
+msgstr ""
+
+#: base/jobs.c progs/home.c
+msgid "stopping"
+msgstr ""
+
+#: base/jobs.c progs/packages.c
+msgid "done"
+msgstr ""
+
+#: base/jobs.c progs/home.c progs/packages.c
+msgid "failed"
+msgstr ""
+
+#: base/jobs.c
+msgid "cancelled"
+msgstr ""
+
+#: base/jobs.c
+msgid "waiting for keys"
 msgstr ""
 
 #. TRANSLATORS: status bar: keep short.
@@ -293,6 +347,23 @@ msgstr ""
 #: base/status.c
 msgid "IME"
 msgstr ""
+
+#: base/textsel.c
+#, c-format
+msgid "Not copied: %s"
+msgstr ""
+
+#: base/textsel.c
+#, c-format
+msgid "Copied: %.200s"
+msgstr ""
+
+#: base/textsel.c
+#, c-format
+msgid "Copied %d line: %.*s ..."
+msgid_plural "Copied %d lines: %.*s ..."
+msgstr[0] ""
+msgstr[1] ""
 
 #: progs/archive-proto.h
 msgid "Tar archive (gzip-compressed)"
@@ -1812,7 +1883,7 @@ msgstr ""
 msgid "No language server configured for %s. Use Configure Server Command."
 msgstr ""
 
-#: progs/edit-language.inc
+#: progs/edit-language.inc progs/firmware.c progs/packages.c
 #, c-format
 msgid "Cannot start %s: %s"
 msgstr ""
@@ -3227,6 +3298,47 @@ msgstr ""
 msgid "unmounted"
 msgstr ""
 
+#: progs/files.c
+#, c-format
+msgid "Copying %s: %s of %s. Esc: stop."
+msgstr ""
+
+#. TRANSLATORS: %s are a file name, the bytes copied and the bytes in all; Esc is the key.
+#: progs/files.c
+#, c-format
+msgid "Moving %s: %s of %s. Esc: stop."
+msgstr ""
+
+#. TRANSLATORS: y, n and Esc are keys; keep them.
+#: progs/files.c
+msgid ""
+"The copy is not finished. y: stop it now and close, n: close when it is "
+"done, Esc: stay."
+msgstr ""
+
+#. TRANSLATORS: y and N are keys; keep them.
+#: progs/files.c
+msgid "Stop copying? What is not copied yet is not kept. y/N"
+msgstr ""
+
+#. TRANSLATORS: Y is the key; keep it.
+#. TRANSLATORS: Y and N are the keys; keep "Y: " and "N: ".
+#. TRANSLATORS: Y is the Y key; keep "Y: ".
+#: progs/files.c progs/installer.c progs/packages.c
+msgid "Y: yes"
+msgstr ""
+
+#. TRANSLATORS: N is the key; keep it.
+#. TRANSLATORS: N is the N key; keep "N: ".
+#: progs/files.c progs/installer.c progs/packages.c
+msgid "N: no"
+msgstr ""
+
+#. TRANSLATORS: Esc is the key; keep it.
+#: progs/files.c
+msgid "Esc: stay"
+msgstr ""
+
 #: progs/files.c progs/firmware.c
 #, c-format
 msgid "Cannot read %s."
@@ -3370,6 +3482,21 @@ msgstr[1] ""
 #, c-format
 msgid "Undone: %s (%d item)."
 msgid_plural "Undone: %s (%d items)."
+msgstr[0] ""
+msgstr[1] ""
+
+#. TRANSLATORS: %d is the count of items finished before the stop.
+#: progs/files.c
+#, c-format
+msgid "Move stopped after %d item; the unfinished one is where it was."
+msgid_plural "Move stopped after %d items; the unfinished one is where it was."
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/files.c
+#, c-format
+msgid "Copy stopped after %d item; the unfinished copy was removed."
+msgid_plural "Copy stopped after %d items; the unfinished copy was removed."
 msgstr[0] ""
 msgstr[1] ""
 
@@ -3617,6 +3744,23 @@ msgid "Inverted selection: %d item marked."
 msgid_plural "Inverted selection: %d items marked."
 msgstr[0] ""
 msgstr[1] ""
+
+#. TRANSLATORS: %s is a program's name (term, edit, archive).
+#: progs/files.c
+#, c-format
+msgid "%s opens from home only, not from a window."
+msgstr ""
+
+#. TRANSLATORS: %s is a program's name, then process 1's answer.
+#: progs/files.c
+#, c-format
+msgid "%s could not be started (%s)."
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Opened with %s."
+msgstr ""
 
 #: progs/files.c
 #, c-format
@@ -3899,19 +4043,6 @@ msgstr ""
 msgid "Space: mark  Tab: panes  Ctrl+1/2/3: view"
 msgstr ""
 
-#. TRANSLATORS: Y is the key; keep it.
-#. TRANSLATORS: Y and N are the keys; keep "Y: " and "N: ".
-#. TRANSLATORS: Y is the Y key; keep "Y: ".
-#: progs/files.c progs/installer.c progs/packages.c
-msgid "Y: yes"
-msgstr ""
-
-#. TRANSLATORS: N is the key; keep it.
-#. TRANSLATORS: N is the N key; keep "N: ".
-#: progs/files.c progs/installer.c progs/packages.c
-msgid "N: no"
-msgstr ""
-
 #: progs/files.c
 #, c-format
 msgid "%d file"
@@ -4102,13 +4233,43 @@ msgid "Not opened."
 msgstr ""
 
 #: progs/files.c
-#, c-format
-msgid "Cannot tell what %s is."
+msgid "no answer from locachy-seat"
+msgstr ""
+
+#: progs/files.c
+msgid "locachy-seat failed"
+msgstr ""
+
+#: progs/files.c
+msgid "the path is too long"
+msgstr ""
+
+#: progs/files.c
+msgid "the top bar is not running"
+msgstr ""
+
+#: progs/files.c
+msgid "no answer from the top bar"
+msgstr ""
+
+#: progs/files.c
+msgid "Folders are browsed here in a window."
 msgstr ""
 
 #: progs/files.c
 #, c-format
-msgid "Opened with %s."
+msgid "Opened with %s in a window."
+msgstr ""
+
+#. TRANSLATORS: first %s is a program's name, second %s why it did not open.
+#: progs/files.c
+#, c-format
+msgid "Cannot open a %s window: %.400s"
+msgstr ""
+
+#: progs/files.c
+#, c-format
+msgid "Cannot tell what %s is."
 msgstr ""
 
 #: progs/files.c
@@ -4359,6 +4520,30 @@ msgstr ""
 msgid "Details zoom: %d."
 msgstr ""
 
+#. TRANSLATORS: %s lists the shared folder names, e.g. "Documents Downloads Drives".
+#: progs/files.c
+#, c-format
+msgid ""
+"Files outside the shared folders (%s) need the document service, which is "
+"not running: the drag did not start."
+msgstr ""
+
+#. TRANSLATORS: %s lists the shared folder names, e.g. "Documents Downloads Drives".
+#: progs/files.c
+#, c-format
+msgid ""
+"The document service could not offer the files outside the shared folders "
+"(%s): the drag did not start."
+msgstr ""
+
+#: progs/files.c
+msgid "Only files in the home folder can be dragged to other programs."
+msgstr ""
+
+#: progs/files.c
+msgid "The drag to other programs could not start."
+msgstr ""
+
 #: progs/files.c
 msgid "Refresh cancelled."
 msgstr ""
@@ -4445,14 +4630,21 @@ msgstr ""
 msgid "Wait: %s is still running."
 msgstr ""
 
-#: progs/firmware.c progs/packages.c
+#. TRANSLATORS: home is the program's name; keep it.
+#: progs/firmware.c
 #, c-format
-msgid "Cannot start %s."
+msgid ""
+"%s: queued (%d before it); it goes on if firmware closes; home lists it."
 msgstr ""
 
 #: progs/firmware.c
 #, c-format
-msgid "Running: %s..."
+msgid "%s: running; it goes on if firmware closes; home lists it."
+msgstr ""
+
+#: progs/firmware.c
+#, c-format
+msgid "%s: %s; its output is below."
 msgstr ""
 
 #: progs/firmware.c
@@ -4463,6 +4655,11 @@ msgstr ""
 #: progs/firmware.c
 #, c-format
 msgid "%s completed."
+msgstr ""
+
+#: progs/firmware.c
+#, c-format
+msgid "%s was stopped from home; check the output pane below."
 msgstr ""
 
 #: progs/firmware.c
@@ -4482,7 +4679,11 @@ msgstr ""
 
 #: progs/firmware.c
 #, c-format
-msgid " Output (%s) "
+msgid " Output (%.200s) "
+msgstr ""
+
+#: progs/firmware.c progs/packages.c
+msgid "no job yet"
 msgstr ""
 
 #: progs/firmware.c
@@ -4838,24 +5039,12 @@ msgstr ""
 msgid "opening"
 msgstr ""
 
-#: progs/home.c progs/packages.c
-msgid "running"
-msgstr ""
-
 #: progs/home.c
 msgid "freezing"
 msgstr ""
 
 #: progs/home.c progs/packages.c
 msgid "frozen"
-msgstr ""
-
-#: progs/home.c
-msgid "stopping"
-msgstr ""
-
-#: progs/home.c progs/packages.c
-msgid "failed"
 msgstr ""
 
 #: progs/home.c
@@ -4875,13 +5064,87 @@ msgstr ""
 
 #: progs/home.c
 #, c-format
+msgid "open %s: error"
+msgstr ""
+
+#: progs/home.c
+#, c-format
 msgid "Ignored %d invalid container record."
 msgid_plural "Ignored %d invalid container records."
 msgstr[0] ""
 msgstr[1] ""
 
+#. TRANSLATORS: J is the key name; keep it.
+#: progs/home.c
+#, c-format
+msgid "   system jobs: %d running, %d waiting (J)"
+msgstr ""
+
+#. TRANSLATORS: K and Esc are key names; keep them.
+#: progs/home.c
+msgid ""
+"System jobs, one at a time in order: id, kind, state, its arguments, who "
+"asked   K: remove or stop   Esc: back"
+msgstr ""
+
+#: progs/home.c
+msgid "No system job yet."
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "(%d before it)"
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "(status %d)"
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "Output of job %d, its last lines:"
+msgstr ""
+
 #: progs/home.c
 msgid "not running"
+msgstr ""
+
+#: progs/home.c progs/installer.c progs/packages.c
+#, c-format
+msgid "lines %d-%d of %d"
+msgstr ""
+
+#: progs/home.c
+msgid "system log"
+msgstr ""
+
+#. TRANSLATORS: Tab, PgUp/PgDn, y, Y and Esc are key names; keep them.
+#: progs/home.c
+#, c-format
+msgid "Log: %s  %s%sTab: %s  PgUp/PgDn: scroll  y/Y: copy  Esc: back"
+msgstr ""
+
+#: progs/home.c
+msgid "container log"
+msgstr ""
+
+#: progs/home.c
+msgid "No LOCachy system log lines found."
+msgstr ""
+
+#: progs/home.c
+msgid "No log yet for this container (press Tab for the system log)."
+msgstr ""
+
+#: progs/home.c progs/packages.c
+msgid "Nothing to copy here."
+msgstr ""
+
+#: progs/home.c progs/installer.c progs/packages.c
+msgid ""
+"Nothing selected: drag over text, or double-click a word, or triple-click a "
+"line."
 msgstr ""
 
 #: progs/home.c
@@ -4890,7 +5153,7 @@ msgstr ""
 
 #: progs/home.c
 #, c-format
-msgid "%d containers   %d marked (operation targets only)"
+msgid "%d containers   %d marked (operation targets only)%s"
 msgstr ""
 
 #: progs/home.c
@@ -4910,6 +5173,20 @@ msgstr ""
 #: progs/home.c
 #, c-format
 msgid "Y/N: Reboot the host?"
+msgstr ""
+
+#. TRANSLATORS: Y and N are the confirmation keys; keep them.
+#: progs/home.c
+#, c-format
+msgid ""
+"Y/N: Stop system job %d while it runs? A package transaction stopped midway "
+"can leave the system half-changed."
+msgstr ""
+
+#. TRANSLATORS: Y and N are the confirmation keys; keep them.
+#: progs/home.c
+#, c-format
+msgid "Y/N: Remove system job %d from the queue? It has not started."
 msgstr ""
 
 #. TRANSLATORS: Y and N are the confirmation keys; keep them.
@@ -4949,6 +5226,40 @@ msgstr ""
 msgid "Any other key cancels without acting."
 msgstr ""
 
+#. TRANSLATORS: Tab, y, Y, Esc and J are key names; keep them.
+#: progs/home.c
+msgid "Tab: container log"
+msgstr ""
+
+#: progs/home.c
+msgid "Tab: system log"
+msgstr ""
+
+#. TRANSLATORS: y is the y key; keep "y: ".
+#: progs/home.c progs/installer.c progs/packages.c
+msgid "y: copy"
+msgstr ""
+
+#. TRANSLATORS: Y is the Y key (Shift+y); keep "Y: ".
+#: progs/home.c progs/packages.c
+msgid "Y: copy all"
+msgstr ""
+
+#: progs/home.c
+msgid "J: system jobs"
+msgstr ""
+
+#: progs/home.c
+msgid "Esc: back"
+msgstr ""
+
+#. TRANSLATORS: Up/Down/PgUp/PgDn and Super+Esc are key names; keep them.
+#: progs/home.c
+msgid ""
+"Arrows/PgUp/PgDn or the wheel: scroll   drag/double-click: select   "
+"Super+Esc: home"
+msgstr ""
+
 #: progs/home.c progs/packages.c
 msgid "Space: mark"
 msgstr ""
@@ -4963,6 +5274,20 @@ msgstr ""
 
 #: progs/home.c
 msgid "K: stop/close"
+msgstr ""
+
+#. TRANSLATORS: J is the key name; keep it.
+#: progs/home.c
+msgid "J: containers"
+msgstr ""
+
+#. TRANSLATORS: L is the key name; keep it.
+#: progs/home.c
+msgid "L: containers"
+msgstr ""
+
+#: progs/home.c
+msgid "L: logs"
 msgstr ""
 
 #. TRANSLATORS: Up/Down/PgUp/PgDn and Super+Esc are key names; keep them.
@@ -5008,6 +5333,27 @@ msgid "Cannot prepare stop confirmation: out of memory."
 msgstr ""
 
 #: progs/home.c
+msgid "No system job is selected."
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "System job %d has ended: nothing to stop."
+msgstr ""
+
+#. TRANSLATORS: %s is "Reboot" or "Power off"; J is the key name, keep it.
+#: progs/home.c
+#, c-format
+msgid ""
+"%s refused: %d system job runs or waits (job %d, %s). Wait for it, or stop "
+"it in the system jobs (J)."
+msgid_plural ""
+"%s refused: %d system jobs run or wait (job %d, %s). Wait for them, or stop "
+"them in the system jobs (J)."
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/home.c
 msgid "Reboot cancelled."
 msgstr ""
 
@@ -5020,6 +5366,36 @@ msgid "Stop cancelled."
 msgstr ""
 
 #: progs/home.c
+msgid "The system job was left as it is."
+msgstr ""
+
+#. TRANSLATORS: K is the key name; keep it.
+#: progs/home.c
+#, c-format
+msgid "System job %d has started meanwhile: K again to stop it."
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "System job %d: stopping."
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "System job %d: removed from the queue."
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "System job %d had ended."
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "System job %d: %s"
+msgstr ""
+
+#: progs/home.c
 #, c-format
 msgid "Stop: %d accepted, %d error(s); state is refreshed from base."
 msgstr ""
@@ -5029,8 +5405,20 @@ msgstr ""
 msgid "Close requested for host program %s."
 msgstr ""
 
+#: progs/home.c progs/installer.c
+msgid "Reboot"
+msgstr ""
+
+#: progs/home.c progs/installer.c
+msgid "Power off"
+msgstr ""
+
 #: progs/home.c
 msgid "Freeze"
+msgstr ""
+
+#: progs/home.c
+msgid "Log"
 msgstr ""
 
 #: progs/home.c
@@ -5070,11 +5458,6 @@ msgstr ""
 #: progs/home.c
 #, c-format
 msgid "open %s: accepted"
-msgstr ""
-
-#: progs/home.c
-#, c-format
-msgid "open %s: error"
 msgstr ""
 
 #: progs/installer.c
@@ -5586,14 +5969,6 @@ msgid "Terminal (a root shell, for repairs)"
 msgstr ""
 
 #: progs/installer.c
-msgid "Reboot"
-msgstr ""
-
-#: progs/installer.c
-msgid "Power off"
-msgstr ""
-
-#: progs/installer.c
 msgid ""
 "The terminal is a root shell on this live system: nmtui, cryptsetup, arch-"
 "chroot, locachy-install --help. exit comes back here."
@@ -5677,22 +6052,6 @@ msgstr ""
 
 #: progs/installer.c
 #, c-format
-msgid "Not copied: %s"
-msgstr ""
-
-#: progs/installer.c
-#, c-format
-msgid "Copied: %.200s"
-msgstr ""
-
-#: progs/installer.c
-msgid ""
-"Nothing selected: drag over text, or double-click a word, or triple-click a "
-"line."
-msgstr ""
-
-#: progs/installer.c
-#, c-format
 msgid "Continuing the installation   %s"
 msgstr ""
 
@@ -5707,7 +6066,7 @@ msgid ""
 "LOCachy is installed (%s). Take the installation medium out, then reboot."
 msgstr ""
 
-#: progs/installer.c
+#: progs/installer.c progs/packages.c
 msgid ""
 "Waiting for you: source signing keys to trust. None is trusted by itself."
 msgstr ""
@@ -5742,11 +6101,6 @@ msgstr ""
 msgid "%s %8s   fetched %d, installed %d of %d"
 msgstr ""
 
-#: progs/installer.c progs/packages.c
-#, c-format
-msgid "lines %d-%d of %d"
-msgstr ""
-
 #. TRANSLATORS: PgUp/PgDn are key names; keep them.
 #: progs/installer.c
 #, c-format
@@ -5771,10 +6125,6 @@ msgstr ""
 
 #: progs/installer.c
 msgid "t: terminal"
-msgstr ""
-
-#: progs/installer.c
-msgid "y: copy"
 msgstr ""
 
 #: progs/installer.c
@@ -6002,6 +6352,17 @@ msgstr ""
 
 #: progs/packages.c
 #, c-format
+msgid "LOCachy source: %.7s installed, %.7s not finished; updates: %s"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid ""
+"LOCachy source: its commit is not recorded, %.7s not finished; updates: %s"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
 msgid "LOCachy source: %.7s installed; updates: %s"
 msgstr ""
 
@@ -6055,17 +6416,104 @@ msgstr[1] ""
 
 #: progs/packages.c
 #, c-format
+msgid "%s: continuing; it goes on if you leave."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "%s: queued (%d before it); it goes on if you leave."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
 msgid "%s: running; it goes on if you leave."
 msgstr ""
 
 #: progs/packages.c
 #, c-format
-msgid "%s: still running."
+msgid "Cannot start %s."
+msgstr ""
+
+#. TRANSLATORS: validpgpkeys is a recipe's (PKGBUILD's) field; keep it.
+#: progs/packages.c
+#, c-format
+msgid "validpgpkeys of LOCachy's recipe: %s"
+msgstr ""
+
+#. TRANSLATORS: validpgpkeys is a recipe's (PKGBUILD's) field; keep it.
+#: progs/packages.c
+#, c-format
+msgid "validpgpkeys of the AUR's recipe: %s"
 msgstr ""
 
 #: progs/packages.c
 #, c-format
-msgid "%s: ended; its output is below."
+msgid "%s cannot be continued: its arguments were not kept."
+msgstr ""
+
+#: progs/packages.c
+msgid "Apply:"
+msgstr ""
+
+#: progs/packages.c
+msgid "check for updates"
+msgstr ""
+
+#: progs/packages.c
+msgid "bring the host to its manifest"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "add %s to the host"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "remove %s from the host"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "build %s"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "install %s on the host"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "roll back %s"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "remove %s"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "remove %s and its home"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "%s: %s; it goes on if you leave."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid ""
+"%s: stopped for source signing keys to trust (below); none is trusted by "
+"itself."
+msgstr ""
+
+#. TRANSLATORS: home is the program's name; keep it.
+#: progs/packages.c
+#, c-format
+msgid "%s: stopped from home; its output is below."
 msgstr ""
 
 #: progs/packages.c
@@ -6075,18 +6523,7 @@ msgstr ""
 
 #: progs/packages.c
 #, c-format
-msgid ""
-"Trust the keys below as root, after checking them: %s; then apply again."
-msgstr ""
-
-#: progs/packages.c
-#, c-format
 msgid "%s: failed; its output is below (and in %s)."
-msgstr ""
-
-#: progs/packages.c
-#, c-format
-msgid "build %s"
 msgstr ""
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
@@ -6161,12 +6598,20 @@ msgid "camera"
 msgstr ""
 
 #: progs/packages.c
+msgid "host"
+msgstr ""
+
+#: progs/packages.c
 #, c-format
 msgid "built %s"
 msgstr ""
 
 #: progs/packages.c progs/settings.c
 msgid "never"
+msgstr ""
+
+#: progs/packages.c
+msgid "packages on the host"
 msgstr ""
 
 #: progs/packages.c
@@ -6182,6 +6627,27 @@ msgstr ""
 
 #: progs/packages.c progs/settings.c
 msgid "not installed"
+msgstr ""
+
+#: progs/packages.c
+msgid "trusted now"
+msgstr ""
+
+#. TRANSLATORS: g is the g key; keep it.
+#: progs/packages.c
+msgid "All of them are trusted now: g continues where it stopped."
+msgstr ""
+
+#: progs/packages.c
+msgid ""
+"Check each with its upstream project; then run this as root (admin, from "
+"home):"
+msgstr ""
+
+#. TRANSLATORS: y and g are the y and g keys; keep them.
+#: progs/packages.c
+msgid ""
+"y copies the command; once they are trusted, g continues where it stopped."
 msgstr ""
 
 #: progs/packages.c
@@ -6210,12 +6676,28 @@ msgid "yes (locachy-net)"
 msgstr ""
 
 #: progs/packages.c
+msgid "Access"
+msgstr ""
+
+#: progs/packages.c
 msgctxt "detail"
 msgid "camera"
 msgstr ""
 
 #: progs/packages.c
+msgid "real system and full home"
+msgstr ""
+
+#: progs/packages.c
 msgid "yes (the cameras, as they come and go)"
+msgstr ""
+
+#: progs/packages.c
+msgid "by your permissions"
+msgstr ""
+
+#: progs/packages.c
+msgid "devices"
 msgstr ""
 
 #: progs/packages.c
@@ -6239,6 +6721,11 @@ msgid "previous build"
 msgstr ""
 
 #: progs/packages.c
+msgid ""
+"Its packages are on the host; their versions and sizes are on the Host page."
+msgstr ""
+
+#: progs/packages.c
 msgid "Not built yet: no build has installed anything"
 msgstr ""
 
@@ -6258,7 +6745,31 @@ msgid "Package"
 msgstr ""
 
 #: progs/packages.c
-msgid "done"
+#, c-format
+msgid "install %-36.100s declared, not installed"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "local %-30.100s %.200s (installed %.80s)"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "rebuild: %s (%s -> %s)"
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "%s follows its new preset: %s"
+msgstr ""
+
+#: progs/packages.c
+msgid "The system is as the manifest says."
+msgstr ""
+
+#: progs/packages.c
+msgid "stopped"
 msgstr ""
 
 #: progs/packages.c
@@ -6269,10 +6780,6 @@ msgstr ""
 #: progs/packages.c
 #, c-format
 msgid "Output: %s%s%s%s   %s   PgUp/PgDn: scroll   l: %s"
-msgstr ""
-
-#: progs/packages.c
-msgid "no job yet"
 msgstr ""
 
 #: progs/packages.c
@@ -6295,34 +6802,10 @@ msgid_plural "%s: %d declared, %s installed with what they need   l: output"
 msgstr[0] ""
 msgstr[1] ""
 
-#: progs/packages.c
-msgid "The system is as the manifest says."
-msgstr ""
-
 #. TRANSLATORS: l is the l key; keep it.
 #: progs/packages.c
 #, c-format
 msgid "Details: %s   l: output"
-msgstr ""
-
-#: progs/packages.c
-#, c-format
-msgid "install %-36.100s declared, not installed"
-msgstr ""
-
-#: progs/packages.c
-#, c-format
-msgid "local %-30.100s %.200s (installed %.80s)"
-msgstr ""
-
-#: progs/packages.c
-#, c-format
-msgid "rebuild: %s (%s -> %s)"
-msgstr ""
-
-#: progs/packages.c
-#, c-format
-msgid "%s follows its new preset: %s"
 msgstr ""
 
 #. TRANSLATORS: PgUp/PgDn are key names; keep them.
@@ -6413,6 +6896,11 @@ msgstr ""
 msgid "No container yet: n makes one."
 msgstr ""
 
+#. TRANSLATORS: g is the g key; keep "g: ".
+#: progs/packages.c
+msgid "g: continue"
+msgstr ""
+
 #. TRANSLATORS: Tab is the Tab key; keep "Tab: ".
 #: progs/packages.c
 msgid "Tab: page"
@@ -6496,6 +6984,10 @@ msgid "the host's   Enter: what its packages run"
 msgstr ""
 
 #: progs/packages.c
+msgid "not installed on the host"
+msgstr ""
+
+#: progs/packages.c
 msgid "neither in its build nor on the host"
 msgstr ""
 
@@ -6555,7 +7047,24 @@ msgid "at the same path in it   Delete: remove"
 msgstr ""
 
 #: progs/packages.c
+msgid "isolated filesystem"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/packages.c
+msgid "Enter: switch; packages on the host, commands as you"
+msgstr ""
+
+#: progs/packages.c
+msgid "Enter: switch; private app data and shared folders"
+msgstr ""
+
+#: progs/packages.c
 msgid "display, sound, GPU, fonts, its own bus"
+msgstr ""
+
+#: progs/packages.c
+msgid "devices by your permissions; home starts, freezes and stops it"
 msgstr ""
 
 #: progs/packages.c
@@ -6575,6 +7084,10 @@ msgstr ""
 
 #: progs/packages.c
 msgid "(no name yet)"
+msgstr ""
+
+#: progs/packages.c
+msgid "Save and install"
 msgstr ""
 
 #. TRANSLATORS: Up/Down, Enter, Delete, Left/Right and Esc are key names; keep them.
@@ -6686,6 +7199,32 @@ msgid "%.200s: at the same path in it, from its next start."
 msgstr ""
 
 #: progs/packages.c
+msgid "Packages will be installed on the real system."
+msgstr ""
+
+#: progs/packages.c
+msgid "It can read and change your full home and system files as you."
+msgstr ""
+
+#: progs/packages.c
+msgid "It can run terminal commands; sudo still requires authentication."
+msgstr ""
+
+#: progs/packages.c
+msgid "Home still starts, freezes, resumes and stops its whole process tree."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "Allow %s to access your real system?"
+msgstr ""
+
+#. TRANSLATORS: Y and N are the Y and N keys; keep them.
+#: progs/packages.c
+msgid "Y: allow and save   N or Esc: cancel without saving"
+msgstr ""
+
+#: progs/packages.c
 msgid "A name is letters, digits, . _ - (from a letter or digit)."
 msgstr ""
 
@@ -6706,6 +7245,11 @@ msgid_plural ""
 "Its directories are more than a configuration line holds (%d characters)."
 msgstr[0] ""
 msgstr[1] ""
+
+#: progs/packages.c
+#, c-format
+msgid "%s: access not granted; nothing saved or installed."
+msgstr ""
 
 #: progs/packages.c
 #, c-format
@@ -6772,7 +7316,11 @@ msgstr ""
 
 #: progs/packages.c
 #, c-format
-msgid "roll back %s"
+msgid "Cannot read %s; nothing saved or installed."
+msgstr ""
+
+#: progs/packages.c
+msgid "Its packages are on the host; there is no private build to roll back."
 msgstr ""
 
 #: progs/packages.c
@@ -6786,6 +7334,11 @@ msgstr ""
 
 #: progs/packages.c
 #, c-format
+msgid "Remove %s from home? Host packages and your files will be kept."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
 msgid "Remove %s (its configuration and builds)?"
 msgstr ""
 
@@ -6795,22 +7348,7 @@ msgid "Its home too (%s/%s/data: its settings, its files)?"
 msgstr ""
 
 #: progs/packages.c
-#, c-format
-msgid "remove %s"
-msgstr ""
-
-#: progs/packages.c
-#, c-format
-msgid "remove %s and its home"
-msgstr ""
-
-#: progs/packages.c
 msgid "Search repositories and the AUR:"
-msgstr ""
-
-#: progs/packages.c
-#, c-format
-msgid "add %s to the host"
 msgstr ""
 
 #: progs/packages.c
@@ -6827,24 +7365,7 @@ msgid "Remove %s from the host (and what only it needs)?"
 msgstr ""
 
 #: progs/packages.c
-#, c-format
-msgid "remove %s from the host"
-msgstr ""
-
-#: progs/packages.c
 msgid "Install what the manifest names and remove what it does not?"
-msgstr ""
-
-#: progs/packages.c
-msgid "bring the host to its manifest"
-msgstr ""
-
-#: progs/packages.c
-msgid "check for updates"
-msgstr ""
-
-#: progs/packages.c
-msgid "Apply:"
 msgstr ""
 
 #. TRANSLATORS: Space is the Space key; keep it.
@@ -7932,6 +8453,18 @@ msgid "generic PC"
 msgstr ""
 
 #: progs/settings.c
+msgid "pointing only"
+msgstr ""
+
+#: progs/settings.c
+msgid "press only"
+msgstr ""
+
+#: progs/settings.c
+msgid "tap and press"
+msgstr ""
+
+#: progs/settings.c
 msgid "a new one each time"
 msgstr ""
 
@@ -7968,6 +8501,22 @@ msgstr ""
 msgid ""
 "Up/Down: choose   Enter: change or open   Left/Tab: categories   /: find   "
 "q: back to home"
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"No saved layout for this display set; legacy layout is used without changing "
+"saved profiles."
+msgstr ""
+
+#: progs/settings.c
+msgid "Saved display-set layout selected."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid ""
+"%.31s: saved mode unavailable; current mode is kept until you choose another."
 msgstr ""
 
 #: progs/settings.c
@@ -8189,6 +8738,11 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Face recognition (howdy)"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "queued (%d before it)"
 msgstr ""
 
 #: progs/settings.c
@@ -8608,10 +9162,6 @@ msgstr ""
 #: progs/settings.c
 #, c-format
 msgid "Password left as it was: %.100s"
-msgstr ""
-
-#: progs/settings.c
-msgid "refused"
 msgstr ""
 
 #: progs/settings.c
@@ -9123,6 +9673,15 @@ msgid "App presets follow branch %.100s: c in packages checks it."
 msgstr ""
 
 #: progs/settings.c
+msgid "The boot image is still being made."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Could not make the boot image: %s"
+msgstr ""
+
+#: progs/settings.c
 msgid "Making the boot image (locachy-boot)..."
 msgstr ""
 
@@ -9629,6 +10188,10 @@ msgid "on"
 msgstr ""
 
 #: progs/settings.c
+msgid "Touchpad Clicks"
+msgstr ""
+
+#: progs/settings.c
 msgid "Touchpad Circular Scrolling"
 msgstr ""
 
@@ -9739,6 +10302,13 @@ msgstr ""
 #: progs/settings.c
 #, c-format
 msgid "  %.95s < %3d%% >  (text and windows)"
+msgstr ""
+
+#. TRANSLATORS: settings and home are programs' names; keep them.
+#: progs/settings.c
+msgid ""
+"A system job of settings' runs or waits: it goes on if settings closes; home "
+"lists it."
 msgstr ""
 
 #: progs/settings.c
@@ -10094,6 +10664,12 @@ msgstr ""
 
 #: progs/settings.c
 msgid ""
+"Chinese Pinyin: installing rime-frost, its grammar model and CJK fonts, then "
+"rebuilding."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
 "Chinese Pinyin: installing rime-frost and grammar model, then rebuilding."
 msgstr ""
 
@@ -10191,6 +10767,32 @@ msgstr ""
 
 #: progs/settings.c
 msgid "The terminal's shell has no network from its next start."
+msgstr ""
+
+#: progs/settings.c
+msgid "Touchpads click when tapped or pressed"
+msgstr ""
+
+#: progs/settings.c
+msgid "Touchpads click when pressed, not when tapped"
+msgstr ""
+
+#: progs/settings.c
+msgid "Touchpads only point; separate buttons still click"
+msgstr ""
+
+#: progs/settings.c
+msgid "Touchpads do not tap; none here clicks by pressing its surface"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%s: programs after home, the shared display from its next start."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%s: programs after home, the shared display at once."
 msgstr ""
 
 #: progs/settings.c
@@ -10368,6 +10970,11 @@ msgstr ""
 #. TRANSLATORS: Delete is the Delete key; keep it.
 #: progs/settings.c
 msgid "Delete again: remove it, with what only it needs."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "No settings page is named %.40s."
 msgstr ""
 
 #: progs/settings.c

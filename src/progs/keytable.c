@@ -8,7 +8,8 @@
  * the same in all of them and on the shared display.
  *
  * The first lines name the layout (console, layout, model, variant, options;
- * "-" for none) and the locale of the compose sequences. Then:
+ * "-" for none; caps:capslock added where the Caps Lock key would be Eisu,
+ * see main) and the locale of the compose sequences. Then:
  *   altgr CODE       a key that is AltGr (ISO_Level3_Shift) in this layout
  *   modifier CODE BITS
  *                    the XKB action's roles: Shift=1 Ctrl=2 Alt=4 Super=8,
@@ -32,6 +33,8 @@
 #include <xkbcommon/xkbcommon-compose.h>
 
 #define KBD_MODEL_MAP "/usr/share/systemd/kbd-model-map"
+#define CAPS_KEY 58                     /* evdev's KEY_CAPSLOCK */
+#define CAPS_OPTION "caps:capslock"     /* xkeyboard-config: that key Caps Lock alone */
 #define NSTATES 16
 #define MAX_SEQUENCE 6
 #define MAX_RESULT 4
@@ -189,6 +192,26 @@ int main(int argc, char **argv)
         fprintf(stderr, "keytable: no X keyboard layout for keymap %s (layout %s)\n", console, n.layout);
         return 1;
     }
+    /* A layout whose Caps Lock key types Eisu_toggle alone (jp: Shift+Eisu
+     * is Caps Lock) gets xkeyboard-config's caps:capslock, so that key is
+     * Caps Lock alone too: no Japanese input method acts on Eisu here. The
+     * option is in the table's options, so labwc and the bar compile the
+     * same keymap as the direct programs. */
+    struct xkb_state *probe = xkb_state_new(km);
+    size_t had = strlen(n.options);
+    if (probe && xkb_state_key_get_one_sym(probe, CAPS_KEY + 8) == XKB_KEY_Eisu_toggle &&
+        had + sizeof "," CAPS_OPTION <= sizeof n.options) {
+        strcat(n.options, had ? "," CAPS_OPTION : CAPS_OPTION);
+        struct xkb_keymap *caps_lock = xkb_keymap_new_from_names(ctx, &rmlvo, XKB_KEYMAP_COMPILE_NO_FLAGS);
+        if (caps_lock) {
+            xkb_keymap_unref(km);
+            km = caps_lock;
+        } else {
+            fprintf(stderr, "keytable: no %s for layout %s: its Caps Lock key stays Eisu\n", CAPS_OPTION, n.layout);
+            n.options[had] = '\0';
+        }
+    }
+    if (probe) xkb_state_unref(probe);
     struct xkb_state *st = xkb_state_new(km);
     if (!st) {
         perror("keytable");

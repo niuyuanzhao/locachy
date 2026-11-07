@@ -29,16 +29,13 @@
  * window's (wlr-foreign-toplevel's parent: a dialog another program draws
  * for it, as a portal's file chooser).
  *
- * Screens: MONITORS_CONF, written by settings, is applied at start, on
- * request, whenever it changes (settings writes it while the shared display
- * is frozen: it is applied once that runs again) and whenever a screen is
- * connected or disconnected; a configuration the compositor refuses (as
- * while it is getting the screens back) is tried again, up to 5 times. Its lines are
- * CONNECTOR=PLACE,MODE,SCALE[,X,Y]: explicit signed logical coordinates
- * override relative placement; PLACE is origin/right/left/above/below,
- * MODE WIDTHxHEIGHT or preferred; SCALE may be fractional.
- * A screen it does not name keeps its
- * mode and scale and goes to the right.
+ * Screens: the exact connected display set selects a saved profile;
+ * MONITORS_CONF remains the unchanged legacy fallback. Selection runs at
+ * start, on file changes, and when a head or its enabled/mode capabilities
+ * change. A proposed configuration is tested before apply; refusal keeps
+ * the active layout instead of repeating the same failing request. Modes
+ * may include exact millihertz (WIDTHxHEIGHT@MILLIHZ); scale and signed
+ * logical coordinates are restored together.
  *
  * Idleness: after rc.conf's lock_after minutes (default 10; 0: never) without
  * input on the shared display, as labwc tells (ext-idle-notify-v1, which
@@ -73,6 +70,7 @@
 #include "wlr-output-management-unstable-v1-client-protocol.h"
 #include "base.h"
 #include "monitor-layout.h"
+#include "monitor-profile.h"
 
 #define MAX_IDS 16
 #define BAR_SOCKET "locachy-bar.sock"
@@ -319,10 +317,13 @@ static void show(const char *name, char *reply, size_t size, int bar)
         snprintf(reply, size, "error the compositor offers no window control");
         return;
     }
-    int nids = open_window_ids(name, ids, MAX_IDS);
+    /* A managed host window (process 1's window-PROGRAM-N) has its own name
+     * as app id and no .desktop file of a container. */
+    int native = strncmp(name, "window-", 7) == 0;
+    int nids = native ? 1 : open_window_ids(name, ids, MAX_IDS);
     int shown = 0;
     for (struct window *w = windows; w; w = w->next) {
-        if (window_of(w, name)) {
+        if (native ? strcmp(w->app_id, name) == 0 : window_of(w, name)) {
             if (w->minimized) {
                 zwlr_foreign_toplevel_handle_v1_unset_minimized(w->handle);
             }
@@ -393,13 +394,14 @@ struct head {
 
 static struct head *heads;
 static uint32_t output_serial;
-static int heads_changed, reload_wanted, refused;
+static int heads_changed, reload_wanted;
 static double apply_at; /* apply MONITORS_CONF then (uptime), if not 0 */
 
 static void mode_size(void *data, struct zwlr_output_mode_v1 *m, int32_t width, int32_t height)
 {
     struct mode *mode = data;
     (void)m;
+    if (mode->width != width || mode->height != height) heads_changed = 1;
     mode->width = width;
     mode->height = height;
 }
@@ -408,6 +410,7 @@ static void mode_refresh(void *data, struct zwlr_output_mode_v1 *m, int32_t refr
 {
     struct mode *mode = data;
     (void)m;
+    if (mode->refresh != refresh) heads_changed = 1;
     mode->refresh = refresh;
 }
 
@@ -422,6 +425,7 @@ static void mode_finished(void *data, struct zwlr_output_mode_v1 *m)
 {
     struct mode *mode = data;
     struct head *h = mode->head;
+    heads_changed = 1;
     for (struct mode **p = h ? &h->modes : NULL; p && *p; p = &(*p)->next) {
         if (*p == mode) {
             *p = mode->next;
@@ -450,6 +454,7 @@ static void head_name(void *data, struct zwlr_output_head_v1 *hd, const char *na
 {
     struct head *h = data;
     (void)hd;
+    if (strcmp(h->name, name)) heads_changed = 1;
     snprintf(h->name, sizeof h->name, "%s", name);
 }
 
@@ -487,6 +492,7 @@ static void head_enabled(void *data, struct zwlr_output_head_v1 *hd, int32_t ena
 {
     struct head *h = data;
     (void)hd;
+    if (h->enabled != enabled) heads_changed = 1;
     h->enabled = enabled;
 }
 
@@ -497,6 +503,7 @@ static void head_current_mode(void *data, struct zwlr_output_head_v1 *hd,
     (void)hd;
     for (struct mode *mode = h->modes; mode; mode = mode->next) {
         if (mode->mode == m) {
+            if (h->current != mode) heads_changed = 1;
             h->current = mode;
         }
     }
@@ -506,6 +513,7 @@ static void head_position(void *data, struct zwlr_output_head_v1 *hd, int32_t x,
 {
     struct head *h = data;
     (void)hd;
+    if (h->x != x || h->y != y) heads_changed = 1;
     h->x = x;
     h->y = y;
 }
@@ -521,7 +529,9 @@ static void head_scale(void *data, struct zwlr_output_head_v1 *hd, wl_fixed_t sc
 {
     struct head *h = data;
     (void)hd;
-    h->scale = wl_fixed_to_double(scale);
+    double value = wl_fixed_to_double(scale);
+    if (h->scale != value) heads_changed = 1;
+    h->scale = value;
 }
 
 static void head_finished(void *data, struct zwlr_output_head_v1 *hd)
@@ -589,46 +599,62 @@ static struct mode *pick_mode(struct head *h, const struct monitor_conf *pl)
 {
     struct mode *best = NULL;
     for (struct mode *m = h->modes; m; m = m->next) {
-        if (pl->width > 0) {
-            if (m->width != pl->width || m->height != pl->height) {
-                continue;
-            }
-            if (!best || (m->preferred && !best->preferred) ||
-                (m->preferred == best->preferred && m->refresh > best->refresh)) {
-                best = m;
-            }
-        } else if (m->preferred) {
-            best = m;
-            break;
-        }
+        if (pl->width > 0 && (m->width != pl->width || m->height != pl->height)) continue;
+        if (pl->refresh_mhz > 0 && m->refresh != pl->refresh_mhz) continue;
+        if (m == h->current) return m;
+        if (!best || (m->preferred && !best->preferred)) best = m;
     }
+    if (!best && pl->width > 0)
+        say("labwc-control: %s: saved mode %dx%d@%d unavailable; current mode kept", h->name,
+            pl->width, pl->height, pl->refresh_mhz);
     return best ? best : h->current;
 }
 
+struct monitor_transaction {
+    uint32_t serial;
+    int applying, n;
+    struct head *heads[16];
+    struct mode *modes[16];
+    struct monitor_rect rects[16];
+    double scales[16];
+};
+static struct monitor_transaction *pending_monitors;
+static void send_monitor_transaction(struct monitor_transaction *t);
+
 static void config_succeeded(void *data, struct zwlr_output_configuration_v1 *c)
 {
-    (void)data;
-    refused = 0;
-    say("labwc-control: screens configured");
+    struct monitor_transaction *t = data;
     zwlr_output_configuration_v1_destroy(c);
+    if (!t->applying && t->serial == output_serial && !heads_changed) {
+        t->applying = 1;
+        send_monitor_transaction(t);
+        return;
+    }
+    if (t->applying) say("labwc-control: screens configured");
+    else { reload_wanted = 1; apply_at = uptime() + 0.1; }
+    pending_monitors = NULL;
+    if (reload_wanted) apply_at = uptime() + 0.1;
+    free(t);
 }
 
 static void config_failed(void *data, struct zwlr_output_configuration_v1 *c)
 {
-    (void)data;
-    say("labwc-control: the compositor refused the screen configuration%s",
-        refused < 5 ? "; trying again in a second" : "");
-    if (refused++ < 5) {
-        apply_at = uptime() + 1.0;
-    }
+    struct monitor_transaction *t = data;
+    say("labwc-control: the compositor refused the screen configuration; active layout kept");
     zwlr_output_configuration_v1_destroy(c);
+    pending_monitors = NULL;
+    if (reload_wanted) apply_at = uptime() + 0.1;
+    free(t);
 }
 
 static void config_cancelled(void *data, struct zwlr_output_configuration_v1 *c)
 {
-    (void)data;
-    reload_wanted = 1; /* the screens changed meanwhile: again, after their done */
+    struct monitor_transaction *t = data;
+    reload_wanted = 1;
+    apply_at = uptime() + 0.1;
     zwlr_output_configuration_v1_destroy(c);
+    pending_monitors = NULL;
+    free(t);
 }
 
 static const struct zwlr_output_configuration_v1_listener config_listener = {
@@ -637,7 +663,26 @@ static const struct zwlr_output_configuration_v1_listener config_listener = {
     .cancelled = config_cancelled,
 };
 
-/* Apply MONITORS_CONF to the enabled screens; 0 if sent or nothing to do. */
+static void send_monitor_transaction(struct monitor_transaction *t)
+{
+    struct zwlr_output_configuration_v1 *c = zwlr_output_manager_v1_create_configuration(outputs, t->serial);
+    zwlr_output_configuration_v1_add_listener(c, &config_listener, t);
+    for (struct head *hd = heads; hd; hd = hd->next) {
+        int i = 0;
+        while (i < t->n && t->heads[i] != hd) i++;
+        if (i == t->n) { zwlr_output_configuration_v1_disable_head(c, hd->head); continue; }
+        struct zwlr_output_configuration_head_v1 *ch = zwlr_output_configuration_v1_enable_head(c, hd->head);
+        if (t->modes[i]) zwlr_output_configuration_head_v1_set_mode(ch, t->modes[i]->mode);
+        zwlr_output_configuration_head_v1_set_position(ch, t->rects[i].x, t->rects[i].y);
+        zwlr_output_configuration_head_v1_set_scale(ch, wl_fixed_from_double(t->scales[i]));
+    }
+    if (t->applying) zwlr_output_configuration_v1_apply(c);
+    else zwlr_output_configuration_v1_test(c);
+    wl_display_flush(display);
+}
+
+/* Test the connected topology before applying it. A refused transaction
+ * leaves the compositor layout active; the saved desire is not rewritten. */
 static int apply_monitors(void)
 {
     struct head *list[16];
@@ -650,6 +695,16 @@ static int apply_monitors(void)
     if (!outputs) {
         return -1;
     }
+    if (pending_monitors) { reload_wanted = 1; return 0; }
+    struct monitor_identity connected[MONITOR_PROFILE_MAX];
+    int nconnected = monitor_profiles_connected(connected, MONITOR_PROFILE_MAX);
+    if (!nconnected) {
+        /* Headless tests and a host without DRM sysfs still have the
+         * complete output-manager set, including a not-yet-enabled head. */
+        for (struct head *hd = heads; hd && nconnected < MONITOR_PROFILE_MAX; hd = hd->next)
+            if (hd->name[0]) monitor_identity_sysfs(hd->name, &connected[nconnected++]);
+    }
+    monitor_profiles_select(connected, nconnected);
     for (struct head *hd = heads; hd && n < 16; hd = hd->next) {
         if (!hd->enabled || !hd->name[0]) {
             continue;
@@ -681,30 +736,16 @@ static int apply_monitors(void)
     if (!changed) {
         return 0;
     }
-    struct zwlr_output_configuration_v1 *config =
-        zwlr_output_manager_v1_create_configuration(outputs, output_serial);
-    zwlr_output_configuration_v1_add_listener(config, &config_listener, NULL);
-    for (struct head *hd = heads; hd; hd = hd->next) {
-        int i = 0;
-        while (i < n && list[i] != hd) {
-            i++;
-        }
-        if (i == n) {
-            zwlr_output_configuration_v1_disable_head(config, hd->head);
-            continue;
-        }
-        struct zwlr_output_configuration_head_v1 *ch =
-            zwlr_output_configuration_v1_enable_head(config, hd->head);
-        if (mode[i]) {
-            zwlr_output_configuration_head_v1_set_mode(ch, mode[i]->mode);
-        }
-        zwlr_output_configuration_head_v1_set_position(ch, rect[i].x, rect[i].y);
-        zwlr_output_configuration_head_v1_set_scale(ch, wl_fixed_from_double(scale[i]));
-        say("labwc-control: %s %dx%d scale %.2f at %d,%d", hd->name,
+    struct monitor_transaction *t = calloc(1, sizeof *t);
+    if (!t) return -1;
+    t->serial = output_serial; t->n = n;
+    for (int i = 0; i < n; i++) {
+        t->heads[i] = list[i]; t->modes[i] = mode[i]; t->rects[i] = rect[i]; t->scales[i] = scale[i];
+        say("labwc-control: %s %dx%d scale %.2f at %d,%d", list[i]->name,
             mode[i] ? mode[i]->width : 0, mode[i] ? mode[i]->height : 0, scale[i], rect[i].x, rect[i].y);
     }
-    zwlr_output_configuration_v1_apply(config);
-    wl_display_flush(display);
+    pending_monitors = t;
+    send_monitor_transaction(t);
     return 0;
 }
 
@@ -874,13 +915,44 @@ static int open_container_display(void)
     return keep[1];
 }
 
+/* To locachy-seat, which passes it on to process 1 (LOCACHY_SEAT_REQUESTS). */
+static int seat_requests = -1;
+
+/* window PROGRAM [TARGET] (locachy-seat --window): a host program as a
+ * managed window. Its fields, bounded, as process 1 takes them; the seat and
+ * process 1 check program and target. */
+static void window_request(const char *args, char *reply, size_t size)
+{
+    char msg[16 + 64 + 1024];
+    const char *space = strchr(args, ' ');
+    size_t plen = space ? (size_t)(space - args) : strlen(args);
+    const char *target = space ? space + 1 : "";
+    if (seat_requests < 0) {
+        snprintf(reply, size, "error no seat to pass window requests to");
+        return;
+    }
+    if (plen == 0 || plen >= 64 || strlen(target) >= 1024) {
+        snprintf(reply, size, "error malformed window request");
+        return;
+    }
+    int n = snprintf(msg, sizeof msg, "window%c%.*s", '\0', (int)plen, args);
+    if (target[0]) {
+        n += snprintf(msg + n + 1, sizeof msg - (size_t)n - 1, "%s", target) + 1;
+    }
+    if (send(seat_requests, msg, (size_t)n, MSG_NOSIGNAL | MSG_DONTWAIT) != n) {
+        snprintf(reply, size, "error the seat does not take window requests now");
+        return;
+    }
+    snprintf(reply, size, "ok window requested");
+}
+
 static void serve(int listener)
 {
     int client = accept4(listener, NULL, NULL, SOCK_CLOEXEC);
     if (client < 0) {
         return;
     }
-    char request[128], reply[160];
+    char request[16 + 64 + 1024], reply[160];
     struct pollfd wait = { .fd = client, .events = POLLIN };
     ssize_t n = poll(&wait, 1, 200) > 0 ? recv(client, request, sizeof request - 1, 0) : -1;
     if (n <= 0) {
@@ -895,6 +967,8 @@ static void serve(int listener)
     } else if (strncmp(request, "close ", 6) == 0) {
         wl_display_roundtrip(display);
         close_windows(request + 6, reply, sizeof reply);
+    } else if (strncmp(request, "window ", 7) == 0) {
+        window_request(request + 7, reply, sizeof reply);
     } else if (strcmp(request, "focused") == 0) {
         wl_display_roundtrip(display);
         focused(reply, sizeof reply);
@@ -904,7 +978,7 @@ static void serve(int listener)
                  "error the compositor offers no output management");
     } else if (strcmp(request, "home") == 0 || strcmp(request, "lock") == 0 || strcmp(request, "next") == 0 ||
                strcmp(request, "prev") == 0) {
-        snprintf(reply, sizeof reply, "ok %s", request);
+        snprintf(reply, sizeof reply, "ok %.15s", request); /* home, lock, next or prev */
         send(client, reply, strlen(reply), MSG_NOSIGNAL);
         close(client);
         /* To locachy-seat, which asks process 1: home, lock, the next or
@@ -982,6 +1056,14 @@ int main(int argc, char **argv)
     snprintf(container_path, sizeof container_path, "%s/locachy-0", runtime);
     snprintf(control_path, sizeof control_path, "%s/locachy-control.sock", runtime);
     snprintf(bar_path, sizeof bar_path, "%s/" BAR_SOCKET, runtime);
+    const char *requests = getenv("LOCACHY_SEAT_REQUESTS");
+    if (requests && *requests) {
+        seat_requests = atoi(requests);
+        if (seat_requests < 3 || fcntl(seat_requests, F_SETFD, FD_CLOEXEC) < 0) {
+            seat_requests = -1;
+        }
+    }
+    unsetenv("LOCACHY_SEAT_REQUESTS");
     for (int tries = 0; !display && tries < 100; tries++) {
         display = wl_display_connect(NULL);
         if (!display) {
@@ -1049,8 +1131,8 @@ int main(int argc, char **argv)
             ssize_t n = read(watch, events, sizeof events);
             for (char *e = events; n > 0 && e < events + n;) {
                 struct inotify_event *ev = (struct inotify_event *)e;
-                if (ev->len && strcmp(ev->name, strrchr(MONITORS_CONF, '/') + 1) == 0) {
-                    refused = 0;
+                if (ev->len && (!strcmp(ev->name, strrchr(MONITORS_CONF, '/') + 1) ||
+                                !strcmp(ev->name, strrchr(MONITOR_PROFILES_CONF, '/') + 1))) {
                     apply_at = uptime() + 0.3; /* settled: written, and renamed */
                 } else if (ev->len && strcmp(ev->name, strrchr(RC_CONF, '/') + 1) == 0) {
                     watch_idle();

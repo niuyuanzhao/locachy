@@ -76,7 +76,9 @@ int main(int argc, char **argv)
         lock_key(0); /* generated JIS Shift+Eisu */
         clear_result();
         stroke(0, KEY_A); stroke(1, KEY_B);
-        assert(!strcmp(result, "AB"));
+        /* Locking ends the composition: Chinese drops the pinyin, English
+         * commits its word as typed (taken with the next key, before it). */
+        assert(!strcmp(result, mode == IME_MODE_EN ? "nAB" : "AB"));
         lock_key(1); /* the US keyboard unlocks the same lock */
         clear_result();
         if (mode == IME_MODE_RAW) {

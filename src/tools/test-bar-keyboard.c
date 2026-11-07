@@ -22,6 +22,9 @@ static int fake_signal(pid_t pid, int sig) { (void)pid; (void)sig; return 0; }
 #define ime_get_commit typed_commit /* the bar's commits, seen here */
 #endif
 #define main bar_main
+/* The bar's sockets, relative: in the exec test's own directory. */
+#define OPEN_DIR "bar-exec-open"
+#define BAR_SOCKET "bar-exec.sock"
 #include "../progs/bar.c"
 #undef main
 #ifdef CONFIG_IME
@@ -34,6 +37,10 @@ static int fake_signal(pid_t pid, int sig) { (void)pid; (void)sig; return 0; }
 #undef keys_reload
 #undef ioctl
 #include "i18n-stub.h"
+#ifndef KEYS_LOCK_CAPS /* internal.h's, for a bar from before the locks */
+#define KEYS_LOCK_CAPS 1
+#define KEYS_LOCK_NUM 2
+#endif
 
 static int own_us, own_jis, reload_count, grabs[2], release_during_grab;
 static int keyboard_index(int fd);
@@ -108,6 +115,8 @@ int rc_read(void (*fn)(const char *, const char *, void *), void *arg)
 double uptime(void) { return 1.0; }
 int text_px(double scale) { (void)scale; return 18; }
 const struct panel_font *panel_font(int height, int bold) { (void)height; (void)bold; return NULL; }
+static int font_reloads;
+int panel_fonts_reload(void) { font_reloads++; return 0; }
 void panel_font_size(const struct panel_font *font, int *w, int *h) { (void)font; *w = 9; *h = 18; }
 void panel_fill(uint32_t *px, int w, int h, int stride, int x, int y, int bw, int bh, uint32_t color)
 { (void)px;(void)w;(void)h;(void)stride;(void)x;(void)y;(void)bw;(void)bh;(void)color; }
@@ -122,6 +131,7 @@ void panel_text_fit(char *out, size_t size, const char *text, int width, const s
 void panel_draw(uint32_t *px, int w, int h, int stride, const char *title, const char *sub,
                 const char *ime, int reserve, int *x0, int *x1)
 { (void)px;(void)w;(void)h;(void)stride;(void)title;(void)sub;(void)ime;(void)reserve;*x0=0;*x1=0; }
+int panel_hits(struct panel_hit *out, int max) { (void)out;(void)max;return 0; }
 int panel_containers(const char *name, unsigned long long *ram) { (void)name;*ram=0;return 0; }
 int open_containers(char names[][OPEN_NAME], int max) { (void)names;(void)max;return 0; }
 int open_candidates(const char *type, char names[][OPEN_NAME], int max) { (void)type;(void)names;(void)max;return 0; }
@@ -133,7 +143,7 @@ int open_program(const char *name, const char *target, char *spec, size_t size, 
 { (void)name;(void)target;(void)spec;(void)size;(void)argv;(void)max;return 0; }
 int open_shared(const char *path, char *why, size_t size) { (void)path;(void)why;(void)size;return 0; }
 int open_host(const char *name) { (void)name;return 0; }
-int open_in_home(const char *with, const char *target) { (void)with;(void)target;return 0; }
+/* open_in_home: control.c's (linked for the seat's link, control_send/control_recv). */
 
 static int events[2];
 #ifdef CONFIG_IME
@@ -239,10 +249,11 @@ static void layout_transition(void)
     keyboard_signals();
     assert(!active && !grabbed && !grabs[0] && !grabs[1]);
     own_us = 1;
-    int before = reload_count;
+    int before = reload_count, fonts_before = font_reloads;
     assert(raise(SIGHUP) == 0); /* settings owns the screen while changing keyboards.conf */
     keyboard_signals();
     assert(reload_count == before + 1 && nlayouts == 2 && kbd_layout[1] == 1 && want_grab);
+    assert(font_reloads == fonts_before + 1); /* fonts installed meanwhile (Chinese Pinyin's) are seen */
     assert(!active && !grabbed && !grabs[0] && !grabs[1]);
     /* Neither queue is monopolised: the direct program can still read y. */
     struct input_event e = { .type = EV_KEY, .code = KEY_Y, .value = 1 }, got;
@@ -298,8 +309,200 @@ static int nothing_fed(void)
     return 1;
 }
 
+/*
+ * Updating in place (bar_exec), in a process of its own: test-bar-keyboard
+ * exec-child, started from a copy of this program that the parent then
+ * replaces with a new file, as a rebuild does. The child runs the bar's own
+ * steps: exe_record, bar_inherit, the listening sockets, the seat's
+ * signals, keyboard_signals on SIGHUP, exec_ready and bar_exec in its loop.
+ * It reports on TEST_REPORT and takes commands on TEST_COMMANDS (fds):
+ * "lend" (a keyboard: a pipe), "busy N" (N notifications on the screen),
+ * "quit".
+ */
+static int report_fd = -1;
+int kill(pid_t pid, int sig); /* the real one: the bar's was fake_signal, declared under that name */
+
+static void report(const char *fmt, ...)
+{
+    char line[256];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(line, sizeof line - 1, fmt, ap);
+    va_end(ap);
+    if (n < 0 || n > (int)sizeof line - 2) n = (int)sizeof line - 2;
+    line[n] = '\n';
+    assert(write(report_fd, line, (size_t)n + 1) == n + 1);
+}
+
+static int exec_child(char **argv)
+{
+    report_fd = atoi(getenv("TEST_REPORT"));
+    int commands = atoi(getenv("TEST_COMMANDS"));
+    sigset_t mask;
+    sigprocmask(SIG_SETMASK, NULL, &mask);
+    int held = sigismember(&mask, SIGHUP) && sigismember(&mask, SIGUSR1) && sigismember(&mask, SIGUSR2);
+    exe_record(argv);
+    xkb_ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+    assert(xkb_ctx);
+    init_xkb();
+    bar_inherit();
+    open_listen();
+    bar_listen();
+    register_keyboard_signals();
+    sigprocmask(SIG_SETMASK, NULL, &mask);
+    assert(!sigismember(&mask, SIGHUP) && !sigismember(&mask, SIGUSR2));
+    /* A request made while the previous image ran waits in the backlog. */
+    int waiting = accept4(bar_fd, NULL, NULL, SOCK_CLOEXEC);
+    report("start pid=%d inherited=%d keys=%d kbds=%d active=%d held=%d waiting=%d", (int)getpid(),
+           bar_inherited, keys_link >= 0, nkbds, (int)active, held, waiting >= 0);
+    if (waiting >= 0) close(waiting);
+    for (;;) {
+        struct pollfd p[2] = { { .fd = wake_pipe[0], .events = POLLIN }, { .fd = commands, .events = POLLIN } };
+        poll(p, 2, exec_wanted ? 100 : -1);
+        char drain[64];
+        while (read(wake_pipe[0], drain, sizeof drain) > 0) {
+        }
+        int hup = sig_reload;
+        keyboard_signals();
+        if (hup) report("hup wanted=%d", exec_wanted);
+        if (p[1].revents & POLLIN) {
+            char line[64];
+            ssize_t n = read(commands, line, sizeof line - 1);
+            assert(n > 0);
+            line[n] = '\0';
+            if (!strncmp(line, "lend", 4)) {
+                int kbd[2];
+                assert(pipe2(kbd, O_NONBLOCK | O_CLOEXEC) == 0);
+                take_keyboards(&kbd[0], 1);
+                report("lent kbds=%d", nkbds);
+            } else if (!strncmp(line, "busy ", 5)) {
+                nnotes = atoi(line + 5);
+                report("busy %d", nnotes);
+            } else {
+                return 0;
+            }
+        }
+        if (exec_wanted && exec_ready()) bar_exec();
+    }
+}
+
+static int read_line(int fd, char *line, size_t size, int timeout_ms)
+{
+    size_t n = 0;
+    while (n + 1 < size) {
+        struct pollfd p = { .fd = fd, .events = POLLIN };
+        if (poll(&p, 1, timeout_ms) <= 0 || read(fd, &line[n], 1) != 1) return 0;
+        if (line[n] == '\n') break;
+        n++;
+    }
+    line[n] = '\0';
+    return 1;
+}
+
+/* from written as a new file at to (a new inode, as the linker writes it),
+ * its time age seconds ago (settled). */
+static void install_copy(const char *from, const char *to, int age)
+{
+    char temporary[PATH_MAX], buffer[65536];
+    snprintf(temporary, sizeof temporary, "%s.new", to);
+    int in = open(from, O_RDONLY | O_CLOEXEC), out = open(temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0755);
+    assert(in >= 0 && out >= 0);
+    ssize_t n;
+    while ((n = read(in, buffer, sizeof buffer)) > 0) assert(write(out, buffer, (size_t)n) == n);
+    assert(n == 0 && close(in) == 0 && close(out) == 0);
+    struct timespec times[2] = { { .tv_sec = time(NULL) - age }, { .tv_sec = time(NULL) - age } };
+    assert(utimensat(AT_FDCWD, temporary, times, 0) == 0 && rename(temporary, to) == 0);
+}
+
+static void expect(int fd, const char *prefix, char *line, size_t size)
+{
+    if (!read_line(fd, line, size, 10000) || strncmp(line, prefix, strlen(prefix)) != 0) {
+        fprintf(stderr, "FAIL bar exec: wanted \"%s...\", got \"%s\"\n", prefix, line);
+        abort();
+    }
+}
+
+static void test_exec_in_place(void)
+{
+    char dir[] = "/tmp/bar-exec-XXXXXX", cwd[PATH_MAX], copy[PATH_MAX], line[256];
+    assert(mkdtemp(dir) && getcwd(cwd, sizeof cwd) && chdir(dir) == 0);
+    snprintf(copy, sizeof copy, "%s/locachy-bar", dir);
+    char self[PATH_MAX];
+    ssize_t len = readlink("/proc/self/exe", self, sizeof self - 1);
+    assert(len > 0);
+    self[len] = '\0';
+    install_copy(self, copy, 60);
+    int reports[2], commands[2], keys[2];
+    assert(pipe2(reports, O_CLOEXEC) == 0 && pipe2(commands, O_CLOEXEC) == 0 &&
+           socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, keys) == 0);
+    pid_t pid = fork();
+    assert(pid >= 0);
+    if (pid == 0) {
+        char number[16];
+        fcntl(reports[1], F_SETFD, 0);
+        fcntl(commands[0], F_SETFD, 0);
+        fcntl(keys[1], F_SETFD, 0); /* as locachy-seat starts the bar */
+        snprintf(number, sizeof number, "%d", reports[1]);
+        setenv("TEST_REPORT", number, 1);
+        snprintf(number, sizeof number, "%d", commands[0]);
+        setenv("TEST_COMMANDS", number, 1);
+        snprintf(number, sizeof number, "%d", keys[1]);
+        setenv("LOCACHY_BAR_KEYS", number, 1);
+        execl(copy, copy, "exec-child", (char *)NULL);
+        _exit(127);
+    }
+    close(reports[1]);
+    close(commands[0]);
+    close(keys[1]);
+    int in = reports[0], out = commands[1];
+    char want[128];
+    snprintf(want, sizeof want, "start pid=%d inherited=0 keys=1 kbds=0 active=1 held=0 waiting=0", (int)pid);
+    expect(in, want, line, sizeof line);
+    assert(write(out, "lend", 4) == 4);
+    expect(in, "lent kbds=1", line, sizeof line);
+    /* The executable unchanged: a SIGHUP only reloads. */
+    assert(kill(pid, SIGHUP) == 0);
+    expect(in, "hup wanted=0", line, sizeof line);
+    assert(!read_line(in, line, sizeof line, 300));
+    puts("PASS bar exec: an unchanged executable is not run again; SIGHUP only reloads");
+    /* A new build while a notification is on the screen: it waits. */
+    assert(write(out, "busy 1", 6) == 6);
+    expect(in, "busy 1", line, sizeof line);
+    install_copy(self, copy, 60);
+    int waiting = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    struct sockaddr_un address = { .sun_family = AF_UNIX, .sun_path = "bar-exec.sock" };
+    assert(waiting >= 0 && connect(waiting, (struct sockaddr *)&address, sizeof address) == 0);
+    assert(kill(pid, SIGUSR2) == 0); /* the seat released (home on the screen) */
+    assert(kill(pid, SIGHUP) == 0);
+    expect(in, "hup wanted=1", line, sizeof line);
+    assert(!read_line(in, line, sizeof line, 500));
+    puts("PASS bar exec: a new build waits while something is on the screen to answer or read");
+    assert(write(out, "busy 0", 6) == 6);
+    expect(in, "busy 0", line, sizeof line);
+    snprintf(want, sizeof want, "start pid=%d inherited=2 keys=1 kbds=1 active=0 held=1 waiting=1", (int)pid);
+    expect(in, want, line, sizeof line);
+    close(waiting);
+    puts("PASS bar exec: the new build runs in place: same PID, seat link, keyboard, sockets (a waiting request taken), released state, the seat's signals held until handled");
+    /* The new image knows its own file: no second exec. */
+    assert(kill(pid, SIGHUP) == 0);
+    expect(in, "hup wanted=0", line, sizeof line);
+    assert(write(out, "quit", 4) == 4);
+    int status;
+    assert(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    close(in);
+    close(out);
+    close(keys[0]);
+    unlink(copy);
+    unlink("bar-exec.sock");
+    unlink("bar-exec-open/socket");
+    rmdir("bar-exec-open");
+    assert(chdir(cwd) == 0 && rmdir(dir) == 0);
+    puts("PASS bar exec: after the exec the new image reloads on SIGHUP and is not run again");
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 2 && !strcmp(argv[1], "exec-child")) return exec_child(argv);
     int integration = argc >= 2 && !strcmp(argv[1], "--headless");
     assert(argc == 1 || integration);
 #ifdef CONFIG_IME
@@ -665,6 +868,29 @@ int main(int argc, char **argv)
         okey(KEY_COMMA, 1); okey(KEY_COMMA, 0);
         assert(!strcmp(committed, "\xef\xbc\x8c"));
         puts("PASS native Rime modifier/release commits are delivered immediately");
+        /* English mode through the bar's own event path (#291): the test
+         * dictionary's "hello" is a completion of "hel" and "hell". Space,
+         * a main-row digit, -, Return and a keypad digit (Num Lock on) end the
+         * word as typed and are typed; Tab moves to the completion, Space
+         * commits it and is typed. Between F1 and F12 (test-input-delivery.sh). */
+        ime_set_mode(IME_MODE_EN);
+        okey(KEY_F1, 1); okey(KEY_F1, 0);
+        static const int en_probe[] = { KEY_H, KEY_E, KEY_L, KEY_SPACE, KEY_H, KEY_E, KEY_L, KEY_3,
+                                        KEY_H, KEY_E, KEY_L, KEY_MINUS, KEY_H, KEY_E, KEY_L, KEY_ENTER };
+        for (size_t i = 0; i < sizeof en_probe / sizeof en_probe[0]; i++) {
+            okey(en_probe[i], 1); okey(en_probe[i], 0);
+        }
+        okey(KEY_NUMLOCK, 1); okey(KEY_NUMLOCK, 0);
+        static const int en_keypad[] = { KEY_H, KEY_E, KEY_L, KEY_KP1, KEY_H, KEY_E, KEY_L, KEY_L, KEY_TAB, KEY_SPACE };
+        for (size_t i = 0; i < sizeof en_keypad / sizeof en_keypad[0]; i++) {
+            okey(en_keypad[i], 1); okey(en_keypad[i], 0);
+        }
+        okey(KEY_NUMLOCK, 1); okey(KEY_NUMLOCK, 0);
+        okey(KEY_F12, 1); okey(KEY_F12, 0);
+        char row1_en[256], row2_en[256];
+        assert(!ime_get_overlay(row1_en, row2_en, sizeof row1_en));
+        puts("PASS real Rime English through the bar: Space, digits, -, Return and keypad digits typed as typed; "
+             "Tab chooses the completion");
         own_jis = 0;
         ime_set_mode(IME_MODE_RAW);
 #endif
@@ -734,10 +960,67 @@ int main(int argc, char **argv)
     assert(nkbds == 0 && fcntl(events[0], F_GETFD) < 0);
     events[0] = -1;
     puts("PASS a revoked keyboard is closed; none lent, none held");
+
+    /* The locks process 1 gives with the keyboards ("keys LOCKS", through
+     * the seat): the bar starts from them after holding none, keeps them
+     * across its layouts made again, reports its own changes on the link,
+     * and keeps its state when a keyboard is added. */
+    int link[2], board[2], extra[2];
+    assert(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, link) == 0);
+    assert(pipe2(board, O_NONBLOCK | O_CLOEXEC) == 0 && pipe2(extra, O_NONBLOCK | O_CLOEXEC) == 0);
+    keys_link = link[0];
+    char msg[64];
+    int len = snprintf(msg, sizeof msg, "keys%c%d", 0, KEYS_LOCK_CAPS);
+    assert(control_send(link[1], msg, (size_t)len, &board[0], 1) == 0);
+    keyboards_message();
+    assert(nkbds == 1 && active);
+    assert(caps_locked() && !mod(0, XKB_MOD_NAME_NUM, XKB_STATE_MODS_LOCKED));
+    puts("PASS the bar given the keyboards after none starts from process 1's locks (Caps Lock on)");
+    struct input_event tap = { .type = EV_KEY, .code = KEY_LEFTCTRL, .value = 1 }; /* jp, ctrl:swapcaps: Caps Lock */
+    assert(write(board[1], &tap, sizeof tap) == sizeof tap);
+    handle_kbd_event(kbds[0]);
+    tap.value = 0;
+    assert(write(board[1], &tap, sizeof tap) == sizeof tap);
+    handle_kbd_event(kbds[0]);
+    int rfds[CONTROL_MAX_FDS], nfds = 0, got = control_recv(link[1], msg, sizeof msg, rfds, &nfds);
+    assert(!caps_locked() && got == 7 && !strcmp(msg, "locks") && !strcmp(msg + 6, "0") && nfds == 0);
+    tap.value = 1;
+    assert(write(board[1], &tap, sizeof tap) == sizeof tap);
+    handle_kbd_event(kbds[0]);
+    tap.value = 0;
+    assert(write(board[1], &tap, sizeof tap) == sizeof tap);
+    handle_kbd_event(kbds[0]);
+    got = control_recv(link[1], msg, sizeof msg, rfds, &nfds);
+    assert(caps_locked() && got == 7 && !strcmp(msg + 6, "1"));
+    assert(control_recv(link[1], msg, sizeof msg, rfds, &nfds) < 0 && errno == EAGAIN); /* once per change */
+    puts("PASS each Caps Lock the bar sees is reported on the seat's link (locks 0, locks 1)");
+    on_sighup(SIGHUP);
+    keyboard_signals();
+    assert(caps_locked());
+    puts("PASS the layouts made again (settings' reload) keep the locks");
+    int two[2] = { dup(kbds[0]), extra[0] };
+    len = snprintf(msg, sizeof msg, "keys%c%d", 0, 0);
+    assert(control_send(link[1], msg, (size_t)len, two, 2) == 0);
+    close(two[0]);
+    keyboards_message();
+    assert(nkbds == 2 && caps_locked());
+    puts("PASS a keyboard added while the bar holds the keyboards: its own Caps Lock stands");
+    assert(control_send(link[1], "keys", 4, NULL, 0) == 0);
+    keyboards_message();
+    len = snprintf(msg, sizeof msg, "keys%c%d", 0, KEYS_LOCK_NUM);
+    assert(control_send(link[1], msg, (size_t)len, &board[0], 1) == 0);
+    keyboards_message();
+    assert(nkbds == 1 && !caps_locked() && mod(0, XKB_MOD_NAME_NUM, XKB_STATE_MODS_LOCKED));
+    puts("PASS the seat taken back: the bar starts again from the locks given (Num Lock only)");
+    take_keyboards(NULL, 0);
+    keys_link = -1;
+    close(link[0]); close(link[1]);
+    close(board[0]); close(board[1]); close(extra[0]); close(extra[1]);
     ime_done();
     for (int l = 0; l < nlayouts; l++) layout_free(&layouts[l]);
     xkb_context_unref(xkb_ctx);
     close(events[1]); /* events[0]: closed by take_keyboards */
     assert(unlink(system_table) == 0);
+    if (!integration) test_exec_in_place();
     return 0;
 }

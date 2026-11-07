@@ -5,6 +5,8 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <ftw.h>
+#include <sys/stat.h>
 #include <linux/input.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -17,6 +19,12 @@ static ssize_t fixture_write(int, const void *, size_t);
 #define ioctl fixture_ioctl
 #define write fixture_write
 #define KEYS_TABLE "/nonexistent/keymap.table"
+/* sysfs's input devices, keyboards.conf and the keymaps' tables: a fixture
+ * directory (empty until the keyboards' list is tested). */
+static char sysfs_input[256], keyboards_conf[256], keymap_tables[256];
+#define KEYS_SYSFS_INPUT sysfs_input
+#define KEYS_DEVICES keyboards_conf
+#define KEYS_TABLES keymap_tables
 #include "../base/keys.c"
 #undef open
 #undef ioctl
@@ -119,6 +127,85 @@ static int key(int i, int code, int value)
     return event(i, EV_KEY, code, value);
 }
 
+/* A fixture file (its directories made). */
+static void put(const char *root, const char *relative, const char *text)
+{
+    char path[512];
+    snprintf(path, sizeof path, "%s/%s", root, relative);
+    for (char *p = path + 1; (p = strchr(p, '/')) != NULL; p++) {
+        *p = '\0';
+        assert(mkdir(path, 0755) == 0 || errno == EEXIST);
+        *p = '/';
+    }
+    FILE *f = fopen(path, "w");
+    assert(f && fputs(text, f) >= 0 && fclose(f) == 0);
+}
+
+static int remove_entry(const char *path, const struct stat *st, int flag, struct FTW *ftw)
+{
+    (void)st; (void)flag; (void)ftw;
+    return remove(path);
+}
+
+/* An input device as sysfs has it: eventN/device's name, ids (hex) and key
+ * bitmap (hex words, the highest first). */
+static void sysfs_device(const char *root, int n, const char *name, const char *vendor, const char *product,
+                         const char *keys)
+{
+    char file[64], text[300];
+    static const char *const files[] = { "name", "id/vendor", "id/product", "capabilities/key" };
+    const char *values[] = { name, vendor, product, keys };
+    for (int i = 0; i < 4; i++) {
+        snprintf(file, sizeof file, "event%d/device/%s", n, files[i]);
+        snprintf(text, sizeof text, "%s\n", values[i]);
+        put(root, file, text);
+    }
+}
+
+/* The keyboards' rows of a program that holds no keyboard (settings in a
+ * window on the shared display): sysfs's keyboards, each id once, with the
+ * keymap each types in; nothing opened in /dev/input. */
+static void test_keyboards_without_lend(void)
+{
+    char root[] = "/tmp/keyboard-devices-XXXXXX";
+    assert(mkdtemp(root));
+    snprintf(sysfs_input, sizeof sysfs_input, "%s/class/input", root);
+    snprintf(keyboards_conf, sizeof keyboards_conf, "%s/keyboards.conf", root);
+    snprintf(keymap_tables, sizeof keymap_tables, "%s/keymaps", root);
+    /* letters and Enter (KEY_A 30, KEY_ENTER 28) in the last word */
+    sysfs_device(sysfs_input, 0, "AT Translated Set 2 keyboard", "0001", "0001",
+                 "402000000 3803078f800d001 feffffdfffefffff fffffffffffffffe");
+    sysfs_device(sysfs_input, 1, "Power Button", "0000", "0001", "10000000000000 0");
+    sysfs_device(sysfs_input, 2, "USB Keyboard", "046d", "c31c", "ffffffffffffffff fffffffffffffffe");
+    sysfs_device(sysfs_input, 3, "USB Keyboard", "046d", "c31c", "1f 0 ffffffffffffffff 50000000"); /* its other interface */
+    sysfs_device(sysfs_input, 5, "Mini Keyboard", "1234", "0005", "fffffffe");
+    put(sysfs_input, "input7/name", "not an event device\n");
+    put(root, "keyboards.conf", "# fixture\n1133:49948:USB_Keyboard us\n4660:5:Mini_Keyboard de\n");
+    put(root, "keymaps/us.table", "console us\n");
+    keys_release();
+    for (int i = 0; i < 3; i++) present[i] = 0; /* no lent keyboard, no device opened */
+    struct keys_keyboard kb[MAX_KEYBOARDS];
+    int n = keys_keyboards(kb, MAX_KEYBOARDS);
+    assert(count == 0);
+    assert(n == 3);
+    assert(!strcmp(kb[0].id, "1:1:AT_Translated_Set_2_keyboard") && !strcmp(kb[0].name, "AT Translated Set 2 keyboard"));
+    assert(!kb[0].own && !kb[0].missing);
+    assert(!strcmp(kb[1].id, "1133:49948:USB_Keyboard") && kb[1].own && !strcmp(kb[1].keymap, "us") && !kb[1].missing);
+    assert(!strcmp(kb[2].id, "4660:5:Mini_Keyboard") && kb[2].own && !strcmp(kb[2].keymap, "de") && kb[2].missing);
+    assert(keys_keyboards(kb, 1) == 1);
+    /* Set from there as the direct program sets them: keyboards.conf. */
+    assert(keys_set_keyboard(kb[0].id, "jp106") == 0);
+    n = keys_keyboards(kb, MAX_KEYBOARDS);
+    assert(n == 3 && kb[0].own && !strcmp(kb[0].keymap, "jp106") && kb[0].missing);
+    assert(keys_set_keyboard(kb[0].id, NULL) == 0);
+    n = keys_keyboards(kb, MAX_KEYBOARDS);
+    assert(n == 3 && !kb[0].own);
+    assert(nftw(root, remove_entry, 16, FTW_DEPTH | FTW_PHYS) == 0);
+    sysfs_input[0] = keyboards_conf[0] = keymap_tables[0] = '\0';
+    puts("PASS keyboards without a lent one (a window's settings): sysfs's keyboards, each once, with the keymap "
+         "each types in; keyboards.conf set from there");
+}
+
 int main(void)
 {
     for (int i = 0; i < 3; i++) {
@@ -184,23 +271,26 @@ int main(void)
     keys_release();
     puts("PASS a program that does not show the locks never writes a keyboard");
 
-    led[LED_NUML] = 1; /* as another owner left them */
+    led[LED_NUML] = 1; /* as another owner left them: never taken from there */
+    caps = 0;
     keys_leds(0);
     keys_refresh();
     assert(count == 3 && mode[keyboards[0]] == O_RDWR && led_writes == 0);
     keys_leds(1);
-    assert(!caps && num && ime_caps == 0 && !led[LED_CAPSL] && led[LED_NUML] && led_writes == 3);
+    assert(!caps && !num && !led[LED_CAPSL] && !led[LED_NUML] && led_writes == 3);
     assert(key(0, KEY_CAPSLOCK, 1) == 0 && caps && led[LED_CAPSL] && ime_caps == 1);
     assert(key(0, KEY_CAPSLOCK, 0) == 0 && key(0, KEY_A, 1) == 'A');
-    assert(key(0, KEY_NUMLOCK, 1) == 0 && !num && !led[LED_NUML] && led[LED_CAPSL]);
-    puts("PASS process 1 takes the locks from the LEDs, then shows each change on them");
+    assert(key(0, KEY_NUMLOCK, 1) == 0 && num && led[LED_NUML] && led[LED_CAPSL]);
+    puts("PASS process 1 shows its own locks, never the LEDs' (output only), then each change on them");
 
-    keys_leds(0);
-    int writes = led_writes;
-    assert(key(0, KEY_CAPSLOCK, 1) == 0 && !caps && led[LED_CAPSL] && led_writes == writes);
+    /* The shared display's locks (its seat's "locks" report): on every
+     * keyboard; shown again over another writer's. */
+    keys_set_locks(KEYS_LOCK_CAPS | KEYS_LOCK_NUM);
+    assert(caps && num && led[LED_CAPSL] && led[LED_NUML] && ime_caps == 1);
+    led[LED_CAPSL] = 0; /* another writer cleared it */
     keys_leds(1);
     assert(caps && led[LED_CAPSL]);
-    puts("PASS while the shared display shows its locks, process 1 leaves the LEDs and takes them back");
+    puts("PASS process 1 shows the shared display's reported locks, its own state again over another writer's");
 
     present[0] = 0;
     keys_refresh();
@@ -216,12 +306,14 @@ int main(void)
     led[LED_CAPSL] = 0;
     led[LED_NUML] = 1;
     keys_take(lent, nlent); /* as a program takes them: the same code, its own state */
-    assert(!caps && num);
-    writes = led_writes;
+    assert(caps && num);    /* never from one keyboard's LEDs */
+    keys_set_locks(KEYS_LOCK_NUM); /* the locks that came with them (control.c) */
+    assert(!caps && num && ime_caps == 0);
+    int writes = led_writes;
     assert(key(0, KEY_CAPSLOCK, 1) == 0 && caps && !led[LED_CAPSL] && led_writes == writes);
     keys_release();
     for (int i = 0; i < 3; i++) { close(queues[i][0]); close(queues[i][1]); }
-    puts("PASS lent keyboards are read-only; a program takes the locks as the LEDs show them");
+    puts("PASS lent keyboards are read-only; a program takes the locks process 1 gives with them");
 
     /* A queue overflowed while Ctrl was held: its release lost. */
     for (int i = 0; i < 3; i++) assert(pipe2(queues[i], O_CLOEXEC | O_NONBLOCK) == 0);
@@ -239,5 +331,6 @@ int main(void)
     keys_release();
     for (int i = 0; i < 3; i++) { close(queues[i][0]); close(queues[i][1]); }
     puts("PASS after SYN_DROPPED the keys are read again: a lost release clears, a lost press holds, nothing typed");
+    test_keyboards_without_lend();
     return 0;
 }

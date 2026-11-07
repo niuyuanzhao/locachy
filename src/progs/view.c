@@ -3447,6 +3447,17 @@ static void prompt_close(void)
  * document's own selected in its parent. */
 static char chosen_dir[PATH_MAX];
 
+static void do_action(int a);
+
+/* The window's close, read by the file manager while it was choosing:
+ * handled as one read here (handle's K_CLOSE). */
+static void picker_closed(void)
+{
+    if (!files_close_asked()) return;
+    do_action(A_QUIT);
+    if (!ui.quit) key_close_kept();
+}
+
 static int choose_folder(const char *what)
 {
     char parent[PATH_MAX], keep[NAME_MAX + 1];
@@ -3459,6 +3470,7 @@ static int choose_folder(const char *what)
     else if (slash) parent[1] = '\0';
     int ok = files_pick(parent, keep, "inode/directory", what, chosen_dir, sizeof chosen_dir);
     refresh();
+    if (!ok) picker_closed();
     return ok;
 }
 
@@ -3923,6 +3935,7 @@ static void pick_document(void)
     int ok = files_pick(dir, keep, "", _("Choose a document to open."), path, sizeof path);
     refresh();
     if (ok) open_in_tab(path);
+    else picker_closed();
 }
 
 /* File > Open Recent (KRecentFilesAction, MaxRecentItems 10): the newest
@@ -6237,6 +6250,13 @@ static void handle(int key)
     }
     if (key == K_POINTER) {
         pointer(pointer_last());
+        return;
+    }
+    if (key == K_CLOSE) {
+        /* The window's close: Ctrl+Q's quit, which asks first about unsaved
+         * changes (Okular's queryClose); asked, the window stays open. */
+        do_action(A_QUIT);
+        if (!ui.quit) key_close_kept();
         return;
     }
     if (pres.on && doc.open && ui.focus != FOCUS_PROMPT) {

@@ -57,7 +57,11 @@ Partial failure is retryable: an entry created before an order-write failure
 is reused by the next call. Legacy boot, absent/read-only efivarfs, unsupported
 targets, command errors and firmware refusing to retain state are all explicit
 failures. On a normal image update these do not discard the successfully
-updated UKI or fallback. A normal image update also checks that `/efi` is an
+updated UKI or fallback. Package jobs run pacman in `locachy-net` through
+`ip netns exec`, which mounts a sysfs of its own over `/sys` without
+efivarfs; the rebuild hooks then run there. In such a private mount namespace
+(never process 1's) the helper mounts efivarfs again, as process 1 does at
+boot. A normal image update also checks that `/efi` is an
 actual FAT mount before touching ESP files: a stale directory on the root
 filesystem is not treated as a mounted ESP.
 

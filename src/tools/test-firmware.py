@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Unit and contract tests for locachy-firmware (fwupd, BIOS settings, flashrom)."""
+"""Unit and contract tests for locachy-firmware (fwupd, BIOS settings, flashrom).
+  python3 -B tools/test-firmware.py [SCRATCH_PARENT]
+"""
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -20,11 +22,12 @@ loader = importlib.machinery.SourceFileLoader("locachy_firmware", str(SOURCE / "
 spec = importlib.util.spec_from_loader(loader.name, loader)
 fw = importlib.util.module_from_spec(spec)
 loader.exec_module(fw)
+SCRATCH = sys.argv.pop(1) if len(sys.argv) > 1 else None
 
 
 class FirmwareHelperTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="test-fw-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="test-fw-", dir=SCRATCH)
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
 
@@ -81,6 +84,53 @@ elif "get-releases" in args:
             rlines = rbuf.getvalue().strip().splitlines()
             self.assertEqual([l.split("\t")[1] for l in rlines], ["upgrade", "reinstall", "downgrade"])
             self.assertIn("Fix S3 resume", rlines[0])
+
+    def test_network_actions_run_in_locachy_net(self):
+        """A system job runs in the root namespace (lo alone): fwupd's
+        downloads go into locachy-net, with the rest of its action; what
+        needs no network (and the daemon, the devices) stays as it is."""
+        calls = self.root / "calls"
+        stand_in = self.make_script("fwupdmgr", f"""
+import sys
+open({str(calls)!r}, "a").write(" ".join(sys.argv[1:]) + "\\n")
+print("{{}}")
+""")
+        netns = self.root / "netns"  # stands in for /run/netns/locachy-net: another namespace
+        netns.write_text("")
+
+        class Exec(Exception):
+            pass
+
+        def execvp(file, argv):
+            raise Exec(file, argv)
+
+        def action(name):
+            args = type("A", (), {"action": name, "target": "dev-sys-01", "extra": "https://example.org/029.cab"})()
+            with mock.patch("sys.stdout", io.StringIO()):
+                return fw.cmd_fwupd_action(args)
+
+        argv = ["/usr/local/bin/locachy-firmware", "fwupd-action", "refresh"]
+        with mock.patch.dict(os.environ, {"LOCACHY_FWUPD_BIN": str(stand_in)}), \
+                mock.patch.object(fw.os, "execvp", execvp), mock.patch.object(fw.sys, "argv", argv):
+            with mock.patch.object(fw, "NETNS", str(netns)):
+                for name in ("refresh", "update", "install-release"):
+                    with self.assertRaises(Exec) as e:
+                        action(name)
+                    self.assertEqual(e.exception.args, ("ip", ["ip", "netns", "exec", "locachy-net", sys.executable,
+                                                               "-I", os.path.abspath(fw.__file__)] + argv[1:]), name)
+                self.assertFalse(calls.exists(), "fwupdmgr ran outside locachy-net")
+                for name in ("verify", "unlock"):
+                    self.assertEqual(action(name), 0)
+                self.assertEqual(calls.read_text(), "verify dev-sys-01\nunlock dev-sys-01 --assume-yes\n")
+            calls.unlink()
+            # In locachy-net already (the re-executed one): fwupdmgr itself.
+            with mock.patch.object(fw, "NETNS", "/proc/self/ns/net"):
+                self.assertEqual(action("refresh"), 0)
+            # No locachy-net (no network service yet): as before, nothing else.
+            with mock.patch.object(fw, "NETNS", str(self.root / "missing")):
+                self.assertEqual(action("update"), 0)
+            self.assertEqual(calls.read_text(), "get-remotes --json\nrefresh --force\n"
+                                                "update --assume-yes --no-reboot-check\n")
 
     def test_bios_attributes_read_and_write(self):
         attrs = self.root / "attributes"

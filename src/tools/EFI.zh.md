@@ -44,7 +44,10 @@ EFI 变量。目标必须是 GPT EFI System Partition 上显式挂载的 FAT 文
 新建时隐式改变 BootOrder，随后明确写入所需顺序并回读验证。部分失败可重试：
 若已建项但写顺序失败，下次复用已有项，不再重复创建。Legacy 启动、efivarfs
 缺失或只读、不支持的目标、命令错误及固件未保存状态都明确失败。普通映像更新
-中，这些错误不会丢弃已经成功更新的 UKI 和 fallback。普通更新在写 ESP 文件前还
+中，这些错误不会丢弃已经成功更新的 UKI 和 fallback。软件包任务通过 `ip netns exec`
+在 `locachy-net` 中运行 pacman，它会在 `/sys` 上挂载自己的 sysfs，其中没有
+efivarfs；重建钩子随后在那里运行。在这种私有挂载命名空间（绝不是进程 1 的）中，
+该助手像进程 1 启动时那样重新挂载 efivarfs。普通更新在写 ESP 文件前还
 确认 `/efi` 是实际 FAT 挂载点；根文件系统上的遗留目录不算挂载成功。
 
 ## 测试

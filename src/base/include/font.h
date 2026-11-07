@@ -15,9 +15,11 @@ enum {
 #define CONTENT_FONT_MIN_PX 12
 #define CONTENT_FONT_MAX_PX 96
 
-/* NULL or empty path selects the packaged DejaVu Sans Mono. An explicit path
- * selects a Unicode, fixed-width regular face; matching packaged DejaVu style
- * faces in its directory are used when available. Noto Sans CJK is a fallback.
+/* NULL or empty path selects fontconfig's match for monospace (the system's
+ * and the user's fonts.conf). An explicit path selects a Unicode, fixed-width
+ * regular face. Either way bold and oblique are the family's real faces as
+ * fontconfig matches them, when it has them, and characters a face lacks come
+ * from fontconfig's fallbacks (any installed CJK font; tools/FONTS.md).
  * NULL means unavailable (including builds without CONFIG_FREETYPE). */
 struct content_font *content_font_new(const char *path, int size_px);
 void content_font_free(struct content_font *font);

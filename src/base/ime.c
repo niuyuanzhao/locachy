@@ -1,6 +1,7 @@
 /*
  * base/ime.c: Rime input method with rime-frost + wanxiang grammar & English completion.
- * Supports 20 candidates per page: 1..9,0 for 1..10 and Ctrl+1..9,0 for 11..20.
+ * Chinese mode: 20 candidates per page, 1..9,0 for 1..10 and Ctrl+1..9,0 for 11..20.
+ * English mode: completions chosen with Tab only (en_key); digits never select.
  */
 #ifdef CONFIG_IME
 
@@ -16,12 +17,21 @@
 
 #include "ime.h"
 #include "base.h"
+#include "wayland-backend.h"
 
 static RimeApi *rime;
 static RimeSessionId session;
 static int focused = 1;
 static int current_mode = IME_MODE_RAW; /* Default: RAW passthrough */
 static char commit_buf[512];
+/* A window on the shared display (LOCACHY_BACKEND=wayland): the display's
+ * bar is the input method of every window there, typing through its virtual
+ * keyboard, and holds Rime's user data; the program starts no Rime of its
+ * own and stays in direct input. */
+static int in_window;
+/* English mode: the completion Tab moved to on Rime's page; -1 none, the
+ * letters as typed (en_key). */
+static int en_pick = -1;
 static const char *cn_schema = "rime_frost";
 static int chinese_enabled = 1;
 static char mode_labels[3][16] = { "RAW", "CN", "EN" };
@@ -115,25 +125,60 @@ static void disable_emoji(void)
     }
 }
 
+/* The Chinese schema installed, the first of these; NULL: only librime and
+ * words (English completion), no Chinese mode. */
+static const char *installed_cn_schema(void)
+{
+    if (access("/var/lib/locachy/rime/build/context_pinyin.schema.yaml", R_OK) == 0 ||
+        access("/var/lib/locachy/rime/context_pinyin.schema.yaml", R_OK) == 0) {
+        return "context_pinyin";
+    } else if (access("/var/lib/locachy/rime/build/rime_frost.schema.yaml", R_OK) == 0 ||
+               access("/usr/share/rime-data/rime_frost.schema.yaml", R_OK) == 0) {
+        return "rime_frost";
+    } else if (access("/usr/share/rime-data/pinyin_simp.schema.yaml", R_OK) == 0) {
+        return "pinyin_simp";
+    } else if (access("/usr/share/rime-data/luna_pinyin_simp.schema.yaml", R_OK) == 0) {
+        return "luna_pinyin_simp";
+    }
+    return NULL;
+}
+
+/* What ime_init started from: the Chinese schema and the time of Rime's last
+ * deployment (make.sh deploys again when the dictionaries change). */
+static const char *started_schema;
+static struct timespec started_deploy;
+static const char *started_shared, *started_user; /* its directories (NULL: the system's) */
+static int set_up; /* RimeSetup: once per process (its logging initialises once) */
+
+static struct timespec deploy_time(const char *user_dir)
+{
+    char path[256];
+    struct stat st;
+    snprintf(path, sizeof path, "%s/build/default.yaml", user_dir ? user_dir : "/var/lib/locachy/rime");
+    return stat(path, &st) == 0 ? st.st_mtim : (struct timespec){ 0 };
+}
+
 int ime_init(const char *shared_dir, const char *user_dir)
 {
+    chinese_enabled = 1;
     load_mode_labels();
+    current_mode = IME_MODE_RAW;
+    en_pick = -1;
+    in_window = wl_backend_requested() > 0;
+    if (in_window) {
+        return 0; /* the bar's input method types into the window */
+    }
     rime = rime_get_api();
     if (!rime) {
         return -1;
     }
-    if (access("/var/lib/locachy/rime/build/context_pinyin.schema.yaml", R_OK) == 0 ||
-        access("/var/lib/locachy/rime/context_pinyin.schema.yaml", R_OK) == 0) {
-        cn_schema = "context_pinyin";
-    } else if (access("/var/lib/locachy/rime/build/rime_frost.schema.yaml", R_OK) == 0 ||
-               access("/usr/share/rime-data/rime_frost.schema.yaml", R_OK) == 0) {
-        cn_schema = "rime_frost";
-    } else if (access("/usr/share/rime-data/pinyin_simp.schema.yaml", R_OK) == 0) {
-        cn_schema = "pinyin_simp";
-    } else if (access("/usr/share/rime-data/luna_pinyin_simp.schema.yaml", R_OK) == 0) {
-        cn_schema = "luna_pinyin_simp";
+    started_shared = shared_dir;
+    started_user = user_dir;
+    started_schema = installed_cn_schema();
+    started_deploy = deploy_time(user_dir);
+    if (started_schema) {
+        cn_schema = started_schema;
     } else {
-        /* Only librime + words (English completion) is installed: no CN mode. */
         chinese_enabled = 0;
         cn_schema = "easy_en";
     }
@@ -146,7 +191,10 @@ int ime_init(const char *shared_dir, const char *user_dir)
     traits.app_name = "rime.locachy";
     traits.min_log_level = 2; // 2 = ERROR
 
-    rime->setup(&traits);
+    if (!set_up) {
+        rime->setup(&traits);
+        set_up = 1;
+    }
     rime->initialize(&traits);
     char build_default[256];
     snprintf(build_default, sizeof build_default, "%s/build/default.yaml",
@@ -179,11 +227,31 @@ void ime_done(void)
     }
 }
 
+int ime_reload(void)
+{
+    /* Its own directories again (the system's, unless ime_init was given others). */
+    struct timespec deployed = deploy_time(started_user);
+    if (rime && session && installed_cn_schema() == started_schema &&
+        deployed.tv_sec == started_deploy.tv_sec && deployed.tv_nsec == started_deploy.tv_nsec) {
+        return 0;
+    }
+    /* As ibus-rime and fcitx5-rime redeploy: finalize, initialize again. */
+    if (rime && !session) {
+        rime->finalize();
+        rime = NULL;
+    }
+    ime_done();
+    return ime_init(started_shared, started_user) == 0 ? 1 : -1;
+}
+
+static void end_composition(void);
+
 void ime_set_focus(int f)
 {
     focused = f != 0;
     if (!focused && rime && session) {
         rime->clear_composition(session);
+        en_pick = -1;
     }
 }
 
@@ -194,7 +262,7 @@ int ime_has_focus(void)
 
 void ime_set_mode(int mode)
 {
-    if (mode < IME_MODE_RAW || mode > IME_MODE_EN ||
+    if (in_window || mode < IME_MODE_RAW || mode > IME_MODE_EN ||
         (mode == IME_MODE_CN && !chinese_enabled)) {
         return;
     }
@@ -205,7 +273,7 @@ void ime_set_mode(int mode)
     if (mode == current_mode) {
         return;
     }
-    rime->clear_composition(session);
+    end_composition(); /* English mode's word is committed, as fcitx5 does on a switch */
     current_mode = mode;
     if (current_mode == IME_MODE_CN) {
         rime->select_schema(session, cn_schema);
@@ -368,38 +436,145 @@ static int input_has_letter(void)
     return 0;
 }
 
+/* Text for the program to type, after what is waiting there already (the
+ * caller takes it with ime_get_commit after each key). */
+static void append_commit(const char *text)
+{
+    size_t used = strlen(commit_buf);
+    snprintf(commit_buf + used, sizeof commit_buf - used, "%s", text);
+}
+
 static void collect_commit(void)
 {
     RIME_STRUCT(RimeCommit, commit);
     if (rime->get_commit(session, &commit)) {
         if (commit.text && commit.text[0]) {
-            snprintf(commit_buf, sizeof commit_buf, "%s", commit.text);
+            append_commit(commit.text);
         }
         rime->free_commit(&commit);
     }
 }
 
+/* English mode's word ends (en_key): the completion Tab moved to, else the
+ * letters exactly as typed, is committed. */
+static void en_commit(void)
+{
+    int pick = en_pick;
+    en_pick = -1;
+    if (pick >= 0 && pick < menu_count() && rime->select_candidate_on_current_page &&
+        rime->select_candidate_on_current_page(session, (size_t)pick)) {
+        collect_commit();
+    }
+    const char *in = rime->get_input(session); /* what no completion took */
+    if (in && in[0]) {
+        append_commit(in);
+        rime->clear_composition(session);
+    }
+}
+
+/* What is being composed ends without a key: committed in English mode (as
+ * fcitx5's keyboard engine commits its word when the input method is
+ * switched), dropped in Chinese mode (Rime's Caps_Lock: clear). */
+static void end_composition(void)
+{
+    if (!rime || !session) {
+        return;
+    }
+    if (current_mode == IME_MODE_EN) {
+        en_commit();
+    } else {
+        rime->clear_composition(session);
+    }
+}
+
 /* Caps Lock is handled directly by the host front end rather than Rime's
- * internal ascii_mode: locking clears any active composition, and while locked
- * every key passes straight through as typed. */
+ * internal ascii_mode: locking ends any active composition (end_composition),
+ * and while locked every key passes straight through as typed. */
 #define RIME_RELEASE_MASK (1 << 30)
 static int caps_locked;
 
 void ime_caps_key(int pressed, int locked)
 {
     (void)locked;
-    if (pressed && rime && session) {
-        rime->clear_composition(session);
+    if (pressed) {
+        end_composition();
     }
 }
 
 void ime_set_caps(int locked)
 {
     caps_locked = locked != 0;
-    if (caps_locked && rime && session) {
-        rime->clear_composition(session);
+    if (caps_locked) {
+        end_composition();
     }
 }
+
+/* A key, as librime's front ends give it: the keysym and the X11 modifiers
+ * fcitx5-rime and IBus use (Shift, Control, Mod1, Mod4/Super) with the
+ * release flag. The resolved keysym already contains Num Lock and the
+ * keyboard layout; Caps Lock passthrough is handled without Rime's
+ * ascii_mode. Any commit is collected. */
+static int rime_key(unsigned int sym, unsigned int mask)
+{
+    mask &= (1u << 0) | (1u << 2) | (1u << 3) | (1u << 6) | (1u << 26) | (1u << 30);
+    if (mask & (1u << 6)) mask |= 1u << 26; /* IBus virtual Super */
+    force_composition_mode();
+    Bool handled = rime->process_key(session, (int)sym, (int)mask);
+    force_composition_mode();
+    collect_commit();
+    return handled != 0;
+}
+
+/* Modifiers alone: Shift_L..Hyper_R (Caps_Lock among them), the ISO
+ * level shifts and latches, Mode_switch, Num_Lock. */
+static int modifier_sym(unsigned int sym)
+{
+    return (sym >= 0xffe1 && sym <= 0xffee) || (sym >= 0xfe01 && sym <= 0xfe0f) || sym == 0xff7e || sym == 0xff7f;
+}
+
+/* English mode, as fcitx5's keyboard engine with word hints
+ * (src/im/keyboard/keyboard.cpp, KeyboardEngine::keyEvent): the letters
+ * typed make the word, shown with Rime's completions and none of them chosen;
+ * Tab and Shift+Tab move through those of the page (from none to the first or
+ * the last, past either end to none again; with no completion, Tab is typed
+ * as below, never swallowed); BackSpace takes a letter back.
+ * Any other key ends the word: the letters exactly as typed (or the
+ * completion Tab moved to) are committed, then the key itself goes on as
+ * typed (Space, Return, Escape, digits of the main row or the keypad,
+ * punctuation, arrows, Ctrl, Alt or Super with a key). Modifiers alone and
+ * releases change nothing. Only letters and BackSpace reach Rime, so its
+ * selector never takes a key: nothing typed is lost or changed without Tab. */
+static int en_key(unsigned int sym, unsigned int mask)
+{
+    if ((mask & RIME_RELEASE_MASK) || modifier_sym(sym)) {
+        return 0;
+    }
+    int plain = !(mask & ((1u << 2) | (1u << 3) | (1u << 6) | (1u << 26))); /* no Ctrl, Alt, Super */
+    const char *in = rime->get_input(session);
+    int composing = in && in[0];
+    if (plain && ((sym >= 'a' && sym <= 'z') || (sym >= 'A' && sym <= 'Z') || (composing && sym == 0xff08))) {
+        en_pick = -1; /* a letter more or less: the word as typed again */
+        return rime_key(sym, mask);
+    }
+    if (!composing) {
+        return 0;
+    }
+    int n = plain && (sym == 0xff09 || sym == 0xfe20) ? menu_count() : 0;
+    if (n > 0) { /* Tab; Shift+Tab: ISO_Left_Tab, or Tab with Shift */
+        if (sym == 0xfe20 || (mask & 1u)) {
+            en_pick = en_pick < 0 ? n - 1 : en_pick - 1;
+        } else {
+            en_pick = en_pick + 1 >= n ? -1 : en_pick + 1;
+        }
+        return 1;
+    }
+    /* Without a completion to move to, Tab is typed like any other key. */
+    en_commit();
+    return 0;
+}
+
+/* Shift held with a direct program's key (keys.c's, linked in the programs). */
+__attribute__((weak)) int keys_modifiers(void);
 
 static int to_keysym(int key)
 {
@@ -426,11 +601,18 @@ int ime_process_key(int key)
     if (!rime || !session || !focused || current_mode == IME_MODE_RAW || caps_locked) {
         return 0; // 100% Passthrough
     }
+    if (current_mode == IME_MODE_EN) {
+        /* A direct program's key as a keysym: K_TEXT (ä), the control
+         * characters of Ctrl+letter and Ctrl+digit are none of en_key's own
+         * keys, so they end the word and go on. */
+        int shift = key == '\t' && keys_modifiers && (keys_modifiers() & KEYS_SHIFT);
+        return en_key(key == K_TEXT ? 0xffffffu : (unsigned int)to_keysym(key), shift ? 1u : 0u);
+    }
 
     int ncands = menu_count();
     int composing = (ncands >= 0);
 
-    // Candidate selection when composing:
+    // Chinese mode's candidate selection when composing:
     //   1..9, 0       -> candidates 1..10 (index 0..9)
     //   Ctrl+1..9, 0  -> candidates 11..20 (index 10..19)
     if (composing && ncands > 0 && input_has_letter()) {
@@ -473,35 +655,17 @@ int ime_process_key(int key)
     // default.custom.yaml's table, but not "." or ":" right after a digit:
     // 3.14, 12:30, and the key again gives the full-width stop or colon)
     // and gives back the others (digits, space, Enter, the rest), which go on
-    // as typed. It has to see them to know what came before. In English mode,
-    // when not composing, only letters go to it.
-    if (!composing && current_mode != IME_MODE_CN) {
-        int is_letter = ((key >= 'a' && key <= 'z') || (key >= 'A' && key <= 'Z'));
-        if (!is_letter) {
-            return 0; // Passthrough to shell/app directly!
-        }
-    }
-
+    // as typed. It has to see them to know what came before.
     return ime_key_event((unsigned int)to_keysym(key), 0);
 }
 
 int ime_key_event(unsigned int sym, unsigned int mask)
 {
     if (!rime || !session || !focused || current_mode == IME_MODE_RAW || caps_locked || !sym) return 0;
-    /* EN keeps punctuation and navigation direct when no composition is
-     * active. */
-    if (current_mode == IME_MODE_EN && menu_count() < 0 && !(mask & RIME_RELEASE_MASK) &&
-        !((sym >= 'a' && sym <= 'z') || (sym >= 'A' && sym <= 'Z'))) return 0;
-    /* fcitx5-rime/IBus use these X11 modifiers and the release flag. The
-     * resolved keysym already contains Num Lock and the keyboard layout; Caps
-     * Lock passthrough is handled above without Rime's ascii_mode. */
-    mask &= (1u << 0) | (1u << 2) | (1u << 3) | (1u << 6) | (1u << 26) | (1u << 30);
-    if (mask & (1u << 6)) mask |= 1u << 26; /* IBus virtual Super */
-    force_composition_mode();
-    Bool handled = rime->process_key(session, (int)sym, (int)mask);
-    force_composition_mode();
-    collect_commit();
-    return handled != 0;
+    if (current_mode == IME_MODE_EN) {
+        return en_key(sym, mask);
+    }
+    return rime_key(sym, mask);
 }
 
 const char *ime_get_commit(void)
@@ -579,9 +743,14 @@ int ime_get_overlay(char *row1, char *row2, size_t size)
         int has_row2 = (ncands > 10);
         const char *tag = ime_mode_label();
 
+        /* English mode: no digit labels (digits are typed, en_key), the
+         * completion Tab moved to in brackets, none at first. */
+        int en = current_mode == IME_MODE_EN;
+        int highlighted = en ? en_pick : ctx.menu.highlighted_candidate_index;
+
         char hdr1[128], hdr2[128];
         snprintf(hdr1, sizeof hdr1, "[%s p.%d] %s", tag, ctx.menu.page_no + 1, ctx.composition.preedit);
-        snprintf(hdr2, sizeof hdr2, "Ctrl+1..0");
+        snprintf(hdr2, sizeof hdr2, "%s", en ? "" : "Ctrl+1..0");
 
         int w_hdr1 = str_cells(hdr1);
         int w_hdr2 = has_row2 ? str_cells(hdr2) : 0;
@@ -599,18 +768,26 @@ int ime_get_overlay(char *row1, char *row2, size_t size)
         int limit1 = ncands < 10 ? ncands : 10;
         for (int i = 0; i < limit1 && l1 < size; i++) {
             int label = (i + 1) % 10;
-            int hl1 = (i == ctx.menu.highlighted_candidate_index);
+            int hl1 = (i == highlighted);
             char item1[128], item2[128];
-            snprintf(item1, sizeof item1, hl1 ? "[%d.%s]" : " %d.%s ",
-                     label, ctx.menu.candidates[i].text);
+            if (en) {
+                snprintf(item1, sizeof item1, hl1 ? "[%s]" : " %s ", ctx.menu.candidates[i].text);
+            } else {
+                snprintf(item1, sizeof item1, hl1 ? "[%d.%s]" : " %d.%s ",
+                         label, ctx.menu.candidates[i].text);
+            }
 
             int w1 = str_cells(item1);
             int w2 = 0;
             item2[0] = '\0';
             if (has_row2 && (10 + i) < ncands) {
-                int hl2 = ((10 + i) == ctx.menu.highlighted_candidate_index);
-                snprintf(item2, sizeof item2, hl2 ? "[^%d.%s]" : "^%d.%s ",
-                         label, ctx.menu.candidates[10 + i].text);
+                int hl2 = ((10 + i) == highlighted);
+                if (en) {
+                    snprintf(item2, sizeof item2, hl2 ? "[%s]" : " %s ", ctx.menu.candidates[10 + i].text);
+                } else {
+                    snprintf(item2, sizeof item2, hl2 ? "[^%d.%s]" : "^%d.%s ",
+                             label, ctx.menu.candidates[10 + i].text);
+                }
                 w2 = str_cells(item2);
             }
             int col_w = (w1 > w2 ? w1 : w2) + 1;

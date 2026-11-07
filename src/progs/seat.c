@@ -139,7 +139,7 @@ static void send_err(int sock, int err)
     send_msg(sock, SERVER_ERROR, &e, sizeof e);
 }
 
-static void message_fds(const char *msg, int *fds, int n);
+static void message_fds(const char *msg, int len, int *fds, int n);
 
 /* DRM master from process 1, within 400 ms; a message that comes first (a
  * "keys" for the bar) is taken as it comes, not as a refusal. */
@@ -162,7 +162,7 @@ static int request_master(int ctl)
             for (int i = 0; i < nfds; i++) close(fds[i]);
             break;
         }
-        message_fds(msg, fds, nfds);
+        message_fds(msg, len, fds, nfds);
     }
     say("seat: process 1 did not hand over DRM master");
     return -1;
@@ -344,7 +344,10 @@ static void handle_client_msg(int cfd)
 
 /* A host client of the compositor; it waits for wayland-0 itself. keys: a
  * socket it keeps (LOCACHY_BAR_KEYS), or -1. */
-static pid_t start_client(const char *path, int keys)
+/* A host client, given fd (kept across exec) named in environment variable
+ * env: the bar its keyboards (LOCACHY_BAR_KEYS), labwc-control the way to
+ * pass on window requests (LOCACHY_SEAT_REQUESTS). */
+static pid_t start_client(const char *path, int fd, const char *env)
 {
     if (access(path, X_OK) != 0) {
         say("seat: %s is not installed", path);
@@ -353,11 +356,11 @@ static pid_t start_client(const char *path, int keys)
     pid_t pid = fork();
     if (pid == 0) {
         setenv("WAYLAND_DISPLAY", "wayland-0", 1);
-        if (keys >= 0) {
+        if (fd >= 0) {
             char number[16];
-            fcntl(keys, F_SETFD, 0); /* kept across exec */
-            snprintf(number, sizeof number, "%d", keys);
-            setenv("LOCACHY_BAR_KEYS", number, 1);
+            fcntl(fd, F_SETFD, 0); /* kept across exec */
+            snprintf(number, sizeof number, "%d", fd);
+            setenv(env, number, 1);
         }
         execl(path, path, (char *)NULL);
         _exit(127);
@@ -369,14 +372,43 @@ static pid_t start_client(const char *path, int keys)
  * locachy-bar, which reads no input device of its own: what process 1
  * revokes when it takes the seat back (EVIOCREVOKE) it revokes in the bar
  * too, as it does for every program it lends them to. seat keeps a copy of
- * each, to give a bar started later. */
+ * each, to give a bar started later, and the locks (Caps and Num Lock)
+ * process 1 gave with them (-1: none given), passed on as it gave them. */
 #define MAX_KEYBOARDS 8
-static int keyboards[MAX_KEYBOARDS], nkeyboards, bar_keys = -1;
+static int keyboards[MAX_KEYBOARDS], nkeyboards, bar_keys = -1, lent_locks = -1;
 
 static void send_keyboards(void)
 {
-    if (bar_keys >= 0 && control_send(bar_keys, "keys", 4, keyboards, nkeyboards) < 0) {
+    char msg[16] = "keys";
+    int len = lent_locks >= 0 ? snprintf(msg, sizeof msg, "keys%c%d", 0, lent_locks) : 4;
+    if (bar_keys >= 0 && control_send(bar_keys, msg, (size_t)len, keyboards, nkeyboards) < 0) {
         say("seat: cannot pass the keyboards to locachy-bar: %s", strerror(errno));
+    }
+}
+
+/* The bar's reports on its link: "locks LOCKS", the locks as its keyboards
+ * have them after a lock key (it may hold the keyboards out of process 1's
+ * sight), passed on to process 1. Every report waiting is passed on; the
+ * bar gone, its link is closed. */
+static void bar_reports(int ctl)
+{
+    char msg[64];
+    int fds[CONTROL_MAX_FDS], nfds = 0, len = -1;
+    while (bar_keys >= 0 && (len = control_recv(bar_keys, msg, sizeof msg, fds, &nfds)) > 0) {
+        for (int i = 0; i < nfds; i++) close(fds[i]);
+        char *end = msg, *fields[3];
+        int n = control_fields(msg, len, fields, 3);
+        long locks = n == 2 && strcmp(fields[0], "locks") == 0 ? strtol(fields[1], &end, 10) : -1;
+        if (locks < 0 || locks > (KEYS_LOCK_CAPS | KEYS_LOCK_NUM) || *end) continue;
+        if (ctl >= 0) {
+            const char *const report[] = { "locks", fields[1], NULL };
+            control_send_fields(ctl, report);
+        }
+    }
+    if (bar_keys >= 0 && (len == 0 || (len < 0 && errno != EAGAIN && errno != EINTR))) {
+        say("seat: locachy-bar's link has closed");
+        close(bar_keys);
+        bar_keys = -1;
     }
 }
 
@@ -393,11 +425,12 @@ static void keyboards_lent(const int *fds, int n)
 
 /* A message's descriptors: a "take"'s keyboards (after its screen lease,
  * which seat does not use: it asks for DRM master) and a "keys"'s are the
- * bar's; any other's are closed. */
-static void message_fds(const char *msg, int *fds, int n)
+ * bar's, with the locks they come with; any other's are closed. */
+static void message_fds(const char *msg, int len, int *fds, int n)
 {
     int take = strcmp(msg, "take") == 0;
     if ((take && n >= 1) || strcmp(msg, "keys") == 0) {
+        if (len > 5) lent_locks = atoi(msg + 5);
         if (take) close(fds[0]);
         keyboards_lent(fds + take, n - take);
         return;
@@ -410,16 +443,52 @@ static void message_fds(const char *msg, int *fds, int n)
  * screen, ended when it goes, so that no swipe meant for a direct program
  * reaches them. */
 #define GESTURES "/usr/local/lib/locachy/gestures"
-static pid_t gestures_pid = -1;
+static pid_t gestures_pid = -1, gestures_stopping = -1;
+
+/* A helper's graceful shutdown must not consume process 1's 500 ms seat
+ * handover deadline. In particular pyudev can still be in a one-second poll
+ * after SIGTERM, with gesture children to reap after it. End the entire
+ * group within a small budget, before another program receives input. */
+static int stop_group(pid_t pid)
+{
+    if (pid <= 0) return 1;
+    /* Do not signal a parent group if the child has not completed setsid
+     * yet. Signalling this child alone is safe in that startup window. */
+    if (getpgid(pid) != pid) {
+        kill(pid, SIGKILL);
+        return waitpid(pid, NULL, WNOHANG) == pid;
+    }
+    kill(-pid, SIGTERM);
+    double deadline = uptime() + 0.05;
+    int reaped = 0;
+    for (;;) {
+        if (!reaped && waitpid(pid, NULL, WNOHANG) == pid) reaped = 1;
+        if (kill(-pid, 0) < 0 && errno == ESRCH) break;
+        if (uptime() >= deadline) break;
+        usleep(1000);
+    }
+    /* A leader may have exited before its children. Do not let those input
+     * readers outlive the seat release merely because waitpid found it. */
+    kill(-pid, SIGKILL);
+    if (!reaped) reaped = waitpid(pid, NULL, WNOHANG) == pid;
+    return reaped;
+}
 
 static void gestures(int on)
 {
+    if (gestures_stopping > 0) {
+        if (waitpid(gestures_stopping, NULL, WNOHANG) == 0) {
+            /* No new reader while the previous group is still ending. */
+            if (on) say("seat: the previous gestures helper is still ending");
+            return;
+        }
+        gestures_stopping = -1;
+    }
     if (gestures_pid > 0) {
-        kill(-gestures_pid, SIGTERM);
-        waitpid(gestures_pid, NULL, 0);
+        if (!stop_group(gestures_pid)) gestures_stopping = gestures_pid;
         gestures_pid = -1;
     }
-    if (!on || access(GESTURES, X_OK) != 0) {
+    if (!on || gestures_stopping > 0 || access(GESTURES, X_OK) != 0) {
         return;
     }
     pid_t pid = fork();
@@ -534,11 +603,108 @@ static void on_rc_keymap(const char *name, const char *value, void *arg)
     }
 }
 
+/* Window requests: a host program as a managed window on the shared display
+ * (process 1's apps_window_open checks them again, with the files). Only
+ * these programs; a page for settings, a file for view, a folder for files
+ * (none: the home) and nothing for the mixer. */
+#define WINDOW_TARGET_MAX 1024
+static int window_request_valid(const char *program, const char *target)
+{
+    static const char *const pages[] = { "network", "power", "devices", "date-time", "hardware" };
+    size_t len = strlen(target);
+    if (len >= WINDOW_TARGET_MAX) {
+        return 0;
+    }
+    for (const char *c = target; *c; c++) {
+        if ((unsigned char)*c < 32 || *c == 127) {
+            return 0;
+        }
+    }
+    if (strcmp(program, "settings") == 0) {
+        for (size_t i = 0; len && i < sizeof pages / sizeof *pages; i++) {
+            if (strcmp(target, pages[i]) == 0) return 1;
+        }
+        return !len;
+    }
+    if (strcmp(program, "view") == 0 || strcmp(program, "files") == 0) {
+        return !len || target[0] == '/';
+    }
+    return strcmp(program, "mixer") == 0 && !len;
+}
+
+/* locachy-seat --window PROGRAM [TARGET], as the top bar runs it: through
+ * labwc-control's socket to the running seat, which passes it on to process
+ * 1. The window's start shows in home and in the log; this only says whether
+ * the request was taken. */
+static int window_client(int argc, char **argv)
+{
+    const char *program = argc > 0 ? argv[0] : "", *target = argc > 1 ? argv[1] : "";
+    if (argc < 1 || argc > 2 || !window_request_valid(program, target)) {
+        fprintf(stderr, "usage: locachy-seat --window view [FILE] | files [FOLDER] | "
+                        "settings [network|power|devices|date-time|hardware] | mixer\n");
+        return 2;
+    }
+    const char *runtime = getenv("XDG_RUNTIME_DIR");
+    struct sockaddr_un address = { .sun_family = AF_UNIX };
+    char request[16 + 64 + WINDOW_TARGET_MAX], reply[160];
+    snprintf(address.sun_path, sizeof address.sun_path, "%s/locachy-control.sock",
+             runtime && runtime[0] == '/' ? runtime : "/run/user/0");
+    int n = snprintf(request, sizeof request, target[0] ? "window %s %s" : "window %s", program, target);
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    if (fd < 0 || connect(fd, (struct sockaddr *)&address, sizeof address) < 0 ||
+        send(fd, request, (size_t)n, MSG_NOSIGNAL) != n) {
+        fprintf(stderr, "locachy-seat: the shared display's window control is not running\n");
+        if (fd >= 0) close(fd);
+        return 1;
+    }
+    struct pollfd wait = { .fd = fd, .events = POLLIN };
+    ssize_t got = poll(&wait, 1, 1000) > 0 ? recv(fd, reply, sizeof reply - 1, 0) : -1;
+    close(fd);
+    if (got <= 0) {
+        fprintf(stderr, "locachy-seat: no answer from the window control\n");
+        return 1;
+    }
+    reply[got] = '\0';
+    if (got < 2 || reply[0] != 'o' || reply[1] != 'k') {
+        fprintf(stderr, "locachy-seat: %s\n", reply);
+        return 1;
+    }
+    return 0;
+}
+
+/* A window request labwc-control passed on ("window", PROGRAM[, TARGET]),
+ * to process 1 when valid. */
+static void window_forward(int requests, int ctl)
+{
+    char msg[16 + 64 + WINDOW_TARGET_MAX + 1], *fields[4];
+    ssize_t len = recv(requests, msg, sizeof msg - 1, MSG_DONTWAIT);
+    if (len <= 0) {
+        return;
+    }
+    msg[len] = '\0';
+    int n = 0;
+    for (ssize_t i = 0; i < len && n < 4; i += (ssize_t)strlen(msg + i) + 1) {
+        fields[n++] = msg + i;
+    }
+    if (n < 2 || n > 3 || strcmp(fields[0], "window") != 0 ||
+        !window_request_valid(fields[1], n == 3 ? fields[2] : "")) {
+        say("seat: a malformed window request refused");
+        return;
+    }
+    fields[n] = NULL;
+    if (ctl >= 0) {
+        control_send_fields(ctl, (const char *const *)fields);
+    }
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
         fprintf(stderr, "usage: seat COMMAND [ARG...]\n");
         return 2;
+    }
+    if (strcmp(argv[1], "--window") == 0) {
+        return window_client(argc - 2, argv + 2);
     }
     if (pipe2(wake_pipe, O_NONBLOCK | O_CLOEXEC) < 0) {
         say("seat: no wake pipe: %s", strerror(errno));
@@ -558,7 +724,7 @@ int main(int argc, char **argv)
                 for (int i = 0; i < nfds; i++) close(fds[i]);
                 return 1;
             }
-            message_fds(msg, fds, nfds);
+            message_fds(msg, len, fds, nfds);
             if (strcmp(msg, "take") == 0) {
                 if (request_master(ctl) < 0) return 1;
                 break;
@@ -628,13 +794,19 @@ int main(int argc, char **argv)
     int display_ready_sent = 0;
     double display_started = uptime();
     pid_t bar_pid = -1, control_pid = -1;
+    int window_requests = -1; /* from labwc-control: window PROGRAM [TARGET] */
     if (is_labwc) {
-        int pair[2] = { -1, -1 };
+        int pair[2] = { -1, -1 }, requests[2] = { -1, -1 };
         if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, pair) < 0) {
             say("seat: no keyboard socket for locachy-bar: %s", strerror(errno));
         }
-        control_pid = start_client("/usr/local/lib/locachy/labwc-control", -1);
-        bar_pid = start_client("/usr/local/bin/locachy-bar", pair[1]);
+        if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, requests) < 0) {
+            say("seat: no window request socket for labwc-control: %s", strerror(errno));
+        }
+        control_pid = start_client("/usr/local/lib/locachy/labwc-control", requests[1], "LOCACHY_SEAT_REQUESTS");
+        if (requests[1] >= 0) close(requests[1]);
+        window_requests = requests[0];
+        bar_pid = start_client("/usr/local/bin/locachy-bar", pair[1], "LOCACHY_BAR_KEYS");
         if (pair[1] >= 0) close(pair[1]);
         bar_keys = pair[0];
         send_keyboards(); /* those of the first take */
@@ -678,6 +850,9 @@ int main(int argc, char **argv)
             kill(comp_pid, SIGTERM);
             break;
         }
+        if (want_home || want_lock) {
+            bar_reports(ctl); /* the locks the bar sent before it asked */
+        }
         if (want_home) {
             want_home = 0;
             if (ctl >= 0) {
@@ -698,7 +873,7 @@ int main(int argc, char **argv)
                 control_send_fields(ctl, forward ? next : prev);
             }
         }
-        struct pollfd p[7];
+        struct pollfd p[9];
         int n = 0;
         int lfd_i = n; p[n++] = (struct pollfd){ .fd = lfd, .events = POLLIN };
         int cfd_i = -1;
@@ -714,6 +889,10 @@ int main(int argc, char **argv)
         p[n++] = (struct pollfd){ .fd = wake_pipe[0], .events = POLLIN }; /* -1: ignored */
         p[n++] = (struct pollfd){ .fd = comp_fd, .events = POLLIN };
         p[n++] = (struct pollfd){ .fd = ready_fd, .events = POLLIN };
+        int requests_i = n;
+        p[n++] = (struct pollfd){ .fd = window_requests, .events = POLLIN }; /* -1: ignored */
+        int reports_i = n;
+        p[n++] = (struct pollfd){ .fd = bar_keys, .events = POLLIN }; /* -1: ignored */
         /* Waiting for display-ready: until X11_WAIT (the files can come
          * before it) or the startup's end; else no timeout. Without a
          * pidfd or an inotify watch, once a second as a fallback. */
@@ -736,6 +915,17 @@ int main(int argc, char **argv)
         }
         while (ready_fd >= 0 && read(ready_fd, drain, sizeof drain) > 0) {
         }
+        /* The bar's locks before anything process 1 is told after them
+         * (a "home" it asked for). */
+        if (p[reports_i].revents & (POLLIN | POLLHUP | POLLERR)) {
+            bar_reports(ctl);
+        }
+        if (p[requests_i].revents & POLLIN) {
+            window_forward(window_requests, ctl);
+        } else if (p[requests_i].revents & (POLLHUP | POLLERR)) {
+            close(window_requests); /* labwc-control has ended */
+            window_requests = -1;
+        }
 
         if (ctl_i >= 0 && (p[ctl_i].revents & (POLLIN | POLLHUP))) {
             char msg[CONTROL_MAX];
@@ -745,7 +935,7 @@ int main(int argc, char **argv)
                 for (int i = 0; i < nfds; i++) close(fds[i]);
                 break;
             }
-            message_fds(msg, fds, nfds);
+            message_fds(msg, len, fds, nfds);
             if (strcmp(msg, "take") == 0) {
                 if (request_master(ctl) < 0 || acquire_drm_masters() < 0) {
                     say("seat: refusing to enable a compositor without DRM master");
@@ -764,11 +954,14 @@ int main(int argc, char **argv)
                     gestures(display_ready_sent);
                 }
             } else if (strcmp(msg, "release") == 0) {
+                double release_started = uptime();
                 gestures(0);
+                double gestures_stopped = uptime();
                 if (bar_pid > 0) {
                     kill(bar_pid, SIGUSR2);
                     usleep(10000);
                 }
+                bar_reports(ctl); /* its last locks, before "released" */
                 keyboards_lent(NULL, 0); /* process 1 revokes them after "released" */
                 active_seat = 0;
                 disable_ack_received = 0;
@@ -794,6 +987,10 @@ int main(int argc, char **argv)
                     break;
                 }
                 control_send(ctl, "released", 8, NULL, 0);
+                if (uptime() - release_started > 0.10) {
+                    say("seat: released in %.0f ms (gestures %.0f ms)",
+                        (uptime() - release_started) * 1000, (gestures_stopped - release_started) * 1000);
+                }
             }
         }
 
@@ -848,6 +1045,7 @@ int main(int argc, char **argv)
     }
     drop_all_devices();
     if (cfd >= 0) close(cfd);
+    if (window_requests >= 0) close(window_requests);
     close(lfd);
     unlink(sock_path);
     for (int i = 0; i < ndevs; i++) {

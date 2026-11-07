@@ -30,12 +30,12 @@ for p in wlr-layer-shell-unstable-v1 virtual-keyboard-unstable-v1 xdg-shell \
     wayland-scanner client-header "$src/base/protocols/$p.xml" "$p-client-protocol.h"
     wayland-scanner private-code "$src/base/protocols/$p.xml" "$p-protocol.c"
 done
-cc="gcc -O2 -Wall -Wextra -D_GNU_SOURCE -I$src/base/include -I$src/base -I$out $(pkg-config --cflags freetype2 libnm)"
+cc="gcc -O2 -Wall -Wextra -D_GNU_SOURCE -I$src/base/include -I$src/base -I$out $(pkg-config --cflags freetype2 fontconfig libnm)"
 base=$(ls "$src"/base/*.c | grep -v '/ime.c$')
 $cc -DCONFIG_FREETYPE -DCONFIG_NETWORKMANAGER -DCONFIG_IME -o locachy-bar "$src/progs/bar.c" $base \
     "$src/base/ime.c" wlr-layer-shell-unstable-v1-protocol.c virtual-keyboard-unstable-v1-protocol.c \
     xdg-shell-protocol.c wlr-foreign-toplevel-management-unstable-v1-protocol.c \
-    fractional-scale-v1-protocol.c viewporter-protocol.c $(pkg-config --libs freetype2 libnm) \
+    fractional-scale-v1-protocol.c viewporter-protocol.c $(pkg-config --libs freetype2 fontconfig libnm) \
     -lwayland-client -lwayland-cursor -lrime -lxkbcommon || exit 1
 $cc $(pkg-config --cflags gio-2.0) -o test-tray-item "$src/tools/test-tray-item.c" $(pkg-config --libs gio-2.0) || exit 1
 $cc -o test-uinput "$src/tools/test-uinput.c" || exit 1

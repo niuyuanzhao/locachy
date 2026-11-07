@@ -84,6 +84,9 @@ exec unshare --mount --propagation private --pid --fork --kill-child --mount-pro
         run_logged guard.log timeout 180 bash "$src/tools/test-clipboard-guard.sh" /usr/bin/labwc
         run_logged cgroup.log timeout 130 bash "$src/tools/test-clipboard-cgroup.sh" /usr/bin/labwc
         run_logged inner-edge.log timeout 180 bash "$src/tools/test-snapping.sh" "$out/inner-edge" --inner-edge
-        python3 -B -c "import json; json.dump({\"name\":\"labwc-locachy\",\"id\":\"labwc-clipboard-inner-edge-v2\",\"passed\":True,\"tests\":[\"clipboard\",\"restricted\",\"guard\",\"cgroup\",\"inner-edge\"]},open(\"$result/gate.json\",\"w\"))"
+        run_logged corner-unit.log timeout 60 bash "$src/tools/test-bar-corner.sh" "$out/corner-unit"
+        run_logged corner-edge.log timeout 180 bash "$src/tools/test-snapping.sh" "$out/corner-edge" --corner
+        run_logged drop-gate.log timeout 180 bash "$src/tools/test-drop-gate.sh" "$out/drop-gate" /usr/bin/labwc
+        python3 -B -c "import json; json.dump({\"name\":\"labwc-locachy\",\"id\":\"labwc-clipboard-corner-drop-v4\",\"passed\":True,\"tests\":[\"clipboard\",\"restricted\",\"guard\",\"cgroup\",\"inner-edge\",\"corner-unit\",\"corner-edge\",\"drop-gate\"]},open(\"$result/gate.json\",\"w\"))"
         '\''
 '

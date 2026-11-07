@@ -2,7 +2,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-03 02:10+0800\n"
+"POT-Creation-Date: 2026-11-07 02:11-0500\n"
 "PO-Revision-Date: 2026-10-24 22:38+0000\n"
 "Last-Translator: LOCachy <38998838+niuyuanzhao@users.noreply.github.com>\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -32,6 +32,60 @@ msgstr "剪贴板传输尚未完成"
 #: base/clipboard.c
 msgid "clipboard service unavailable or transfer failed"
 msgstr "剪贴板服务不可用或传输失败"
+
+#: base/jobs.c
+msgid "The request is too long."
+msgstr "请求太长。"
+
+#: base/jobs.c
+#, c-format
+msgid "The job service (locachy-jobs) does not run: %s."
+msgstr "任务服务（locachy-jobs）未运行：%s。"
+
+#: base/jobs.c
+#, c-format
+msgid "The job service (locachy-jobs) did not answer: %s."
+msgstr "任务服务（locachy-jobs）没有回应：%s。"
+
+#: base/jobs.c progs/settings.c
+msgid "refused"
+msgstr "已拒绝"
+
+#: base/jobs.c
+msgid "The job service gave no job."
+msgstr "任务服务没有给出任务。"
+
+#: base/jobs.c
+msgid "The job service's answer is not a job."
+msgstr "任务服务的回复不是一个任务。"
+
+#: base/jobs.c
+msgid "queued"
+msgstr "排队中"
+
+#: base/jobs.c progs/home.c progs/packages.c
+msgid "running"
+msgstr "运行中"
+
+#: base/jobs.c progs/home.c
+msgid "stopping"
+msgstr "正在停止"
+
+#: base/jobs.c progs/packages.c
+msgid "done"
+msgstr "已完成"
+
+#: base/jobs.c progs/home.c progs/packages.c
+msgid "failed"
+msgstr "失败"
+
+#: base/jobs.c
+msgid "cancelled"
+msgstr "已取消"
+
+#: base/jobs.c
+msgid "waiting for keys"
+msgstr "等待信任密钥"
 
 #. TRANSLATORS: status bar: keep short.
 #. TRANSLATORS: %d is the number of frozen containers; keep short: bar field.
@@ -286,6 +340,22 @@ msgstr "已启用"
 #: base/status.c
 msgid "IME"
 msgstr "输入法"
+
+#: base/textsel.c
+#, c-format
+msgid "Not copied: %s"
+msgstr "未复制：%s"
+
+#: base/textsel.c
+#, c-format
+msgid "Copied: %.200s"
+msgstr "已复制：%.200s"
+
+#: base/textsel.c
+#, c-format
+msgid "Copied %d line: %.*s ..."
+msgid_plural "Copied %d lines: %.*s ..."
+msgstr[0] "已复制 %d 行：%.*s ..."
 
 #: progs/archive-proto.h
 msgid "Tar archive (gzip-compressed)"
@@ -1805,7 +1875,7 @@ msgstr "在启动语言服务器前，请先保存此文档。"
 msgid "No language server configured for %s. Use Configure Server Command."
 msgstr "未为 %s 配置语言服务器。请使用“配置服务器命令”。"
 
-#: progs/edit-language.inc
+#: progs/edit-language.inc progs/firmware.c progs/packages.c
 #, c-format
 msgid "Cannot start %s: %s"
 msgstr "无法启动 %s：%s"
@@ -3299,6 +3369,47 @@ msgstr "正在刷新"
 msgid "unmounted"
 msgstr "已卸载"
 
+#: progs/files.c
+#, c-format
+msgid "Copying %s: %s of %s. Esc: stop."
+msgstr "正在复制 %s：%s / %s。Esc：停止。"
+
+#. TRANSLATORS: %s are a file name, the bytes copied and the bytes in all; Esc is the key.
+#: progs/files.c
+#, c-format
+msgid "Moving %s: %s of %s. Esc: stop."
+msgstr "正在移动 %s：%s / %s。Esc：停止。"
+
+#. TRANSLATORS: y, n and Esc are keys; keep them.
+#: progs/files.c
+msgid ""
+"The copy is not finished. y: stop it now and close, n: close when it is "
+"done, Esc: stay."
+msgstr "复制尚未完成。y：立即停止并关闭，n：复制完成后关闭，Esc：保留窗口。"
+
+#. TRANSLATORS: y and N are keys; keep them.
+#: progs/files.c
+msgid "Stop copying? What is not copied yet is not kept. y/N"
+msgstr "停止复制？尚未复制的部分不会保留。y/N"
+
+#. TRANSLATORS: Y is the key; keep it.
+#. TRANSLATORS: Y and N are the keys; keep "Y: " and "N: ".
+#. TRANSLATORS: Y is the Y key; keep "Y: ".
+#: progs/files.c progs/installer.c progs/packages.c
+msgid "Y: yes"
+msgstr "Y: 是"
+
+#. TRANSLATORS: N is the key; keep it.
+#. TRANSLATORS: N is the N key; keep "N: ".
+#: progs/files.c progs/installer.c progs/packages.c
+msgid "N: no"
+msgstr "N: 否"
+
+#. TRANSLATORS: Esc is the key; keep it.
+#: progs/files.c
+msgid "Esc: stay"
+msgstr "Esc: 保留"
+
 #: progs/files.c progs/firmware.c
 #, c-format
 msgid "Cannot read %s."
@@ -3440,6 +3551,19 @@ msgstr[0] "已撤销：%s（%d 项）；部分未能撤销（原位置是否已�
 msgid "Undone: %s (%d item)."
 msgid_plural "Undone: %s (%d items)."
 msgstr[0] "已撤销：%s（%d 项）。"
+
+#. TRANSLATORS: %d is the count of items finished before the stop.
+#: progs/files.c
+#, c-format
+msgid "Move stopped after %d item; the unfinished one is where it was."
+msgid_plural "Move stopped after %d items; the unfinished one is where it was."
+msgstr[0] "移动在完成 %d 项后停止；未完成的那一项仍在原处。"
+
+#: progs/files.c
+#, c-format
+msgid "Copy stopped after %d item; the unfinished copy was removed."
+msgid_plural "Copy stopped after %d items; the unfinished copy was removed."
+msgstr[0] "复制在完成 %d 项后停止；未完成的副本已删除。"
 
 #: progs/files.c
 #, c-format
@@ -3671,6 +3795,23 @@ msgstr "无法复制路径到剪贴板。"
 msgid "Inverted selection: %d item marked."
 msgid_plural "Inverted selection: %d items marked."
 msgstr[0] "已反向选择：标记 %d 项。"
+
+#. TRANSLATORS: %s is a program's name (term, edit, archive).
+#: progs/files.c
+#, c-format
+msgid "%s opens from home only, not from a window."
+msgstr "%s 只能从 home 打开，不能从窗口打开。"
+
+#. TRANSLATORS: %s is a program's name, then process 1's answer.
+#: progs/files.c
+#, c-format
+msgid "%s could not be started (%s)."
+msgstr "无法启动 %s（%s）。"
+
+#: progs/files.c
+#, c-format
+msgid "Opened with %s."
+msgstr "已用 %s 打开。"
 
 #: progs/files.c
 #, c-format
@@ -3949,19 +4090,6 @@ msgstr "e: 弹出"
 msgid "Space: mark  Tab: panes  Ctrl+1/2/3: view"
 msgstr "Space: 标记  Tab: 窗格  Ctrl+1/2/3: 视图"
 
-#. TRANSLATORS: Y is the key; keep it.
-#. TRANSLATORS: Y and N are the keys; keep "Y: " and "N: ".
-#. TRANSLATORS: Y is the Y key; keep "Y: ".
-#: progs/files.c progs/installer.c progs/packages.c
-msgid "Y: yes"
-msgstr "Y: 是"
-
-#. TRANSLATORS: N is the key; keep it.
-#. TRANSLATORS: N is the N key; keep "N: ".
-#: progs/files.c progs/installer.c progs/packages.c
-msgid "N: no"
-msgstr "N: 否"
-
 #: progs/files.c
 #, c-format
 msgid "%d file"
@@ -4150,14 +4278,44 @@ msgid "Not opened."
 msgstr "未打开。"
 
 #: progs/files.c
-#, c-format
-msgid "Cannot tell what %s is."
-msgstr "无法识别 %s 的类型。"
+msgid "no answer from locachy-seat"
+msgstr "locachy-seat 没有应答"
+
+#: progs/files.c
+msgid "locachy-seat failed"
+msgstr "locachy-seat 执行失败"
+
+#: progs/files.c
+msgid "the path is too long"
+msgstr "路径太长"
+
+#: progs/files.c
+msgid "the top bar is not running"
+msgstr "顶栏没有运行"
+
+#: progs/files.c
+msgid "no answer from the top bar"
+msgstr "顶栏没有应答"
+
+#: progs/files.c
+msgid "Folders are browsed here in a window."
+msgstr "在窗口中，文件夹就在这里浏览。"
 
 #: progs/files.c
 #, c-format
-msgid "Opened with %s."
-msgstr "已用 %s 打开。"
+msgid "Opened with %s in a window."
+msgstr "已用 %s 在单独的窗口中打开。"
+
+#. TRANSLATORS: first %s is a program's name, second %s why it did not open.
+#: progs/files.c
+#, c-format
+msgid "Cannot open a %s window: %.400s"
+msgstr "无法打开 %s 窗口：%.400s"
+
+#: progs/files.c
+#, c-format
+msgid "Cannot tell what %s is."
+msgstr "无法识别 %s 的类型。"
 
 #: progs/files.c
 #, c-format
@@ -4407,6 +4565,30 @@ msgstr "紧凑视图缩放：%d。"
 msgid "Details zoom: %d."
 msgstr "详细信息视图缩放：%d。"
 
+#. TRANSLATORS: %s lists the shared folder names, e.g. "Documents Downloads Drives".
+#: progs/files.c
+#, c-format
+msgid ""
+"Files outside the shared folders (%s) need the document service, which is "
+"not running: the drag did not start."
+msgstr "共享文件夹（%s）以外的文件需要文档服务，但它没有运行：拖动没有开始。"
+
+#. TRANSLATORS: %s lists the shared folder names, e.g. "Documents Downloads Drives".
+#: progs/files.c
+#, c-format
+msgid ""
+"The document service could not offer the files outside the shared folders "
+"(%s): the drag did not start."
+msgstr "文档服务无法提供共享文件夹（%s）以外的文件：拖动没有开始。"
+
+#: progs/files.c
+msgid "Only files in the home folder can be dragged to other programs."
+msgstr "只有主文件夹中的文件可以拖到其他程序。"
+
+#: progs/files.c
+msgid "The drag to other programs could not start."
+msgstr "无法开始向其他程序拖动。"
+
 #: progs/files.c
 msgid "Refresh cancelled."
 msgstr "已取消刷新。"
@@ -4492,15 +4674,23 @@ msgstr "IFD 分区：仅网卡 NVM (gbe)"
 msgid "Wait: %s is still running."
 msgstr "请稍候：%s 仍在运行中。"
 
-#: progs/firmware.c progs/packages.c
+#. TRANSLATORS: home is the program's name; keep it.
+#: progs/firmware.c
 #, c-format
-msgid "Cannot start %s."
-msgstr "无法启动 %s。"
+msgid ""
+"%s: queued (%d before it); it goes on if firmware closes; home lists it."
+msgstr ""
+"%s：已排队（前面还有 %d 个）；firmware 关闭后它会继续；home 中可以看到它。"
 
 #: progs/firmware.c
 #, c-format
-msgid "Running: %s..."
-msgstr "正在运行：%s..."
+msgid "%s: running; it goes on if firmware closes; home lists it."
+msgstr "%s：运行中；firmware 关闭后它会继续；home 中可以看到它。"
+
+#: progs/firmware.c
+#, c-format
+msgid "%s: %s; its output is below."
+msgstr "%s：%s；输出见下方。"
 
 #: progs/firmware.c
 #, c-format
@@ -4511,6 +4701,11 @@ msgstr "%s（另有 %d 个匹配型号，请指定 -c）"
 #, c-format
 msgid "%s completed."
 msgstr "%s 已完成。"
+
+#: progs/firmware.c
+#, c-format
+msgid "%s was stopped from home; check the output pane below."
+msgstr "%s 已在 home 中被停止；请查看下方的输出区。"
 
 #: progs/firmware.c
 #, c-format
@@ -4529,8 +4724,12 @@ msgstr " 版本 %s 更新说明 "
 
 #: progs/firmware.c
 #, c-format
-msgid " Output (%s) "
-msgstr " 输出 (%s) "
+msgid " Output (%.200s) "
+msgstr " 输出（%.200s） "
+
+#: progs/firmware.c progs/packages.c
+msgid "no job yet"
+msgstr "尚无任务"
 
 #: progs/firmware.c
 msgid "firmware"
@@ -4886,10 +5085,6 @@ msgstr "已关闭"
 msgid "opening"
 msgstr "正在打开"
 
-#: progs/home.c progs/packages.c
-msgid "running"
-msgstr "运行中"
-
 #: progs/home.c
 msgid "freezing"
 msgstr "正在冻结"
@@ -4897,14 +5092,6 @@ msgstr "正在冻结"
 #: progs/home.c progs/packages.c
 msgid "frozen"
 msgstr "已冻结"
-
-#: progs/home.c
-msgid "stopping"
-msgstr "正在停止"
-
-#: progs/home.c progs/packages.c
-msgid "failed"
-msgstr "失败"
 
 #: progs/home.c
 #, c-format
@@ -4923,13 +5110,89 @@ msgstr "无法刷新容器：行数过多。"
 
 #: progs/home.c
 #, c-format
+msgid "open %s: error"
+msgstr "打开 %s：错误"
+
+#: progs/home.c
+#, c-format
 msgid "Ignored %d invalid container record."
 msgid_plural "Ignored %d invalid container records."
 msgstr[0] "已忽略 %d 条无效容器记录。"
 
+#. TRANSLATORS: J is the key name; keep it.
+#: progs/home.c
+#, c-format
+msgid "   system jobs: %d running, %d waiting (J)"
+msgstr "   系统任务：%d 个运行中，%d 个排队（J）"
+
+#. TRANSLATORS: K and Esc are key names; keep them.
+#: progs/home.c
+msgid ""
+"System jobs, one at a time in order: id, kind, state, its arguments, who "
+"asked   K: remove or stop   Esc: back"
+msgstr ""
+"系统任务，按顺序一次一个：编号、种类、状态、参数、请求者   K：移除或停止   "
+"Esc：返回"
+
+#: progs/home.c
+msgid "No system job yet."
+msgstr "还没有系统任务。"
+
+#: progs/home.c
+#, c-format
+msgid "(%d before it)"
+msgstr "（前面还有 %d 个）"
+
+#: progs/home.c
+#, c-format
+msgid "(status %d)"
+msgstr "（状态码 %d）"
+
+#: progs/home.c
+#, c-format
+msgid "Output of job %d, its last lines:"
+msgstr "任务 %d 的输出，最后几行："
+
 #: progs/home.c
 msgid "not running"
 msgstr "未运行"
+
+#: progs/home.c progs/installer.c progs/packages.c
+#, c-format
+msgid "lines %d-%d of %d"
+msgstr "第 %d-%d 行，共 %d 行"
+
+#: progs/home.c
+msgid "system log"
+msgstr "系统日志"
+
+#. TRANSLATORS: Tab, PgUp/PgDn, y, Y and Esc are key names; keep them.
+#: progs/home.c
+#, c-format
+msgid "Log: %s  %s%sTab: %s  PgUp/PgDn: scroll  y/Y: copy  Esc: back"
+msgstr "日志：%s  %s%sTab：%s  PgUp/PgDn：滚动  y/Y：复制  Esc：返回"
+
+#: progs/home.c
+msgid "container log"
+msgstr "容器日志"
+
+#: progs/home.c
+msgid "No LOCachy system log lines found."
+msgstr "未找到 LOCachy 系统日志。"
+
+#: progs/home.c
+msgid "No log yet for this container (press Tab for the system log)."
+msgstr "此容器还没有日志（按 Tab 查看系统日志）。"
+
+#: progs/home.c progs/packages.c
+msgid "Nothing to copy here."
+msgstr "这里没有可复制的内容。"
+
+#: progs/home.c progs/installer.c progs/packages.c
+msgid ""
+"Nothing selected: drag over text, or double-click a word, or triple-click a "
+"line."
+msgstr "没有选中内容：用鼠标拖过文字，或双击选一个词、三击选一行。"
 
 #: progs/home.c
 msgid "home"
@@ -4937,8 +5200,8 @@ msgstr "主页"
 
 #: progs/home.c
 #, c-format
-msgid "%d containers   %d marked (operation targets only)"
-msgstr "%d 个容器   %d 个已勾选（仅作操作目标）"
+msgid "%d containers   %d marked (operation targets only)%s"
+msgstr "%d 个容器   %d 个已标记（仅作为操作目标）%s"
 
 #: progs/home.c
 #, c-format
@@ -4957,6 +5220,22 @@ msgstr "Y/N: 关闭宿主程序 %s？"
 #, c-format
 msgid "Y/N: Reboot the host?"
 msgstr "Y/N: 重启主机？"
+
+#. TRANSLATORS: Y and N are the confirmation keys; keep them.
+#: progs/home.c
+#, c-format
+msgid ""
+"Y/N: Stop system job %d while it runs? A package transaction stopped midway "
+"can leave the system half-changed."
+msgstr ""
+"Y/N：停止正在运行的系统任务 %d？中途停止的软件包事务可能让系统处于半更改状"
+"态。"
+
+#. TRANSLATORS: Y and N are the confirmation keys; keep them.
+#: progs/home.c
+#, c-format
+msgid "Y/N: Remove system job %d from the queue? It has not started."
+msgstr "Y/N：把系统任务 %d 移出队列？它还没有开始。"
 
 #. TRANSLATORS: Y and N are the confirmation keys; keep them.
 #: progs/home.c
@@ -4994,6 +5273,40 @@ msgstr "未报告失败原因。"
 msgid "Any other key cancels without acting."
 msgstr "按其他任意键取消。"
 
+#. TRANSLATORS: Tab, y, Y, Esc and J are key names; keep them.
+#: progs/home.c
+msgid "Tab: container log"
+msgstr "Tab：容器日志"
+
+#: progs/home.c
+msgid "Tab: system log"
+msgstr "Tab：系统日志"
+
+#. TRANSLATORS: y is the y key; keep "y: ".
+#: progs/home.c progs/installer.c progs/packages.c
+msgid "y: copy"
+msgstr "y: 复制"
+
+#. TRANSLATORS: Y is the Y key (Shift+y); keep "Y: ".
+#: progs/home.c progs/packages.c
+msgid "Y: copy all"
+msgstr "Y: 全部复制"
+
+#: progs/home.c
+msgid "J: system jobs"
+msgstr "J：系统任务"
+
+#: progs/home.c
+msgid "Esc: back"
+msgstr "Esc：返回"
+
+#. TRANSLATORS: Up/Down/PgUp/PgDn and Super+Esc are key names; keep them.
+#: progs/home.c
+msgid ""
+"Arrows/PgUp/PgDn or the wheel: scroll   drag/double-click: select   "
+"Super+Esc: home"
+msgstr "Arrows/PgUp/PgDn 或滚轮: 滚动   拖动/双击: 选择   Super+Esc: 主页"
+
 #: progs/home.c progs/packages.c
 msgid "Space: mark"
 msgstr "Space: 勾选"
@@ -5009,6 +5322,20 @@ msgstr "F: 冻结"
 #: progs/home.c
 msgid "K: stop/close"
 msgstr "K: 停止/关闭"
+
+#. TRANSLATORS: J is the key name; keep it.
+#: progs/home.c
+msgid "J: containers"
+msgstr "J：容器"
+
+#. TRANSLATORS: L is the key name; keep it.
+#: progs/home.c
+msgid "L: containers"
+msgstr "L：容器"
+
+#: progs/home.c
+msgid "L: logs"
+msgstr "L：日志"
 
 #. TRANSLATORS: Up/Down/PgUp/PgDn and Super+Esc are key names; keep them.
 #: progs/home.c
@@ -5054,6 +5381,28 @@ msgid "Cannot prepare stop confirmation: out of memory."
 msgstr "无法准备停止确认：内存不足。"
 
 #: progs/home.c
+msgid "No system job is selected."
+msgstr "没有选中系统任务。"
+
+#: progs/home.c
+#, c-format
+msgid "System job %d has ended: nothing to stop."
+msgstr "系统任务 %d 已结束：无需停止。"
+
+#. TRANSLATORS: %s is "Reboot" or "Power off"; J is the key name, keep it.
+#: progs/home.c
+#, c-format
+msgid ""
+"%s refused: %d system job runs or waits (job %d, %s). Wait for it, or stop "
+"it in the system jobs (J)."
+msgid_plural ""
+"%s refused: %d system jobs run or wait (job %d, %s). Wait for them, or stop "
+"them in the system jobs (J)."
+msgstr[0] ""
+"已拒绝%s：有 %d 个系统任务正在运行或排队（任务 %d，%s）。请等待它们结束，或在"
+"系统任务（J）中停止它们。"
+
+#: progs/home.c
 msgid "Reboot cancelled."
 msgstr "已取消重启。"
 
@@ -5066,6 +5415,36 @@ msgid "Stop cancelled."
 msgstr "已取消停止。"
 
 #: progs/home.c
+msgid "The system job was left as it is."
+msgstr "系统任务保持原样。"
+
+#. TRANSLATORS: K is the key name; keep it.
+#: progs/home.c
+#, c-format
+msgid "System job %d has started meanwhile: K again to stop it."
+msgstr "系统任务 %d 在此期间已开始：再按 K 可停止它。"
+
+#: progs/home.c
+#, c-format
+msgid "System job %d: stopping."
+msgstr "系统任务 %d：正在停止。"
+
+#: progs/home.c
+#, c-format
+msgid "System job %d: removed from the queue."
+msgstr "系统任务 %d：已移出队列。"
+
+#: progs/home.c
+#, c-format
+msgid "System job %d had ended."
+msgstr "系统任务 %d 已经结束。"
+
+#: progs/home.c
+#, c-format
+msgid "System job %d: %s"
+msgstr "系统任务 %d：%s"
+
+#: progs/home.c
 #, c-format
 msgid "Stop: %d accepted, %d error(s); state is refreshed from base."
 msgstr "停止：已接受 %d 个，错误 %d 个；状态正从底层刷新。"
@@ -5075,9 +5454,21 @@ msgstr "停止：已接受 %d 个，错误 %d 个；状态正从底层刷新。"
 msgid "Close requested for host program %s."
 msgstr "已请求关闭宿主程序 %s。"
 
+#: progs/home.c progs/installer.c
+msgid "Reboot"
+msgstr "重启"
+
+#: progs/home.c progs/installer.c
+msgid "Power off"
+msgstr "关机"
+
 #: progs/home.c
 msgid "Freeze"
 msgstr "冻结"
+
+#: progs/home.c
+msgid "Log"
+msgstr "日志"
 
 #: progs/home.c
 msgid "Mark / unmark"
@@ -5117,11 +5508,6 @@ msgstr "%s 已在 %s 上打开。"
 #, c-format
 msgid "open %s: accepted"
 msgstr "打开 %s：已接受"
-
-#: progs/home.c
-#, c-format
-msgid "open %s: error"
-msgstr "打开 %s：错误"
 
 #: progs/installer.c
 msgid "(no model name)"
@@ -5632,14 +6018,6 @@ msgid "Terminal (a root shell, for repairs)"
 msgstr "终端（root shell，用于救援）"
 
 #: progs/installer.c
-msgid "Reboot"
-msgstr "重启"
-
-#: progs/installer.c
-msgid "Power off"
-msgstr "关机"
-
-#: progs/installer.c
 msgid ""
 "The terminal is a root shell on this live system: nmtui, cryptsetup, arch-"
 "chroot, locachy-install --help. exit comes back here."
@@ -5725,22 +6103,6 @@ msgstr "抹掉并安装？"
 
 #: progs/installer.c
 #, c-format
-msgid "Not copied: %s"
-msgstr "未复制：%s"
-
-#: progs/installer.c
-#, c-format
-msgid "Copied: %.200s"
-msgstr "已复制：%.200s"
-
-#: progs/installer.c
-msgid ""
-"Nothing selected: drag over text, or double-click a word, or triple-click a "
-"line."
-msgstr "没有选中内容：用鼠标拖过文字，或双击选一个词、三击选一行。"
-
-#: progs/installer.c
-#, c-format
 msgid "Continuing the installation   %s"
 msgstr "正在继续安装   %s"
 
@@ -5755,7 +6117,7 @@ msgid ""
 "LOCachy is installed (%s). Take the installation medium out, then reboot."
 msgstr "LOCachy 已安装（%s）。拔出安装介质，然后重启。"
 
-#: progs/installer.c
+#: progs/installer.c progs/packages.c
 msgid ""
 "Waiting for you: source signing keys to trust. None is trusted by itself."
 msgstr "等你决定：有源码签名密钥待信任。没有哪一把会被自动信任。"
@@ -5790,11 +6152,6 @@ msgstr "LOCachy 源码：%s"
 msgid "%s %8s   fetched %d, installed %d of %d"
 msgstr "%s %8s   已下载 %d，已安装 %d / %d"
 
-#: progs/installer.c progs/packages.c
-#, c-format
-msgid "lines %d-%d of %d"
-msgstr "第 %d-%d 行，共 %d 行"
-
 #. TRANSLATORS: PgUp/PgDn are key names; keep them.
 #: progs/installer.c
 #, c-format
@@ -5820,10 +6177,6 @@ msgstr "PgDn：下一步"
 #: progs/installer.c
 msgid "t: terminal"
 msgstr "t：终端"
-
-#: progs/installer.c
-msgid "y: copy"
-msgstr "y: 复制"
 
 #: progs/installer.c
 msgid "p: power off"
@@ -6050,6 +6403,17 @@ msgstr "更新"
 
 #: progs/packages.c
 #, c-format
+msgid "LOCachy source: %.7s installed, %.7s not finished; updates: %s"
+msgstr "LOCachy 源码：已安装 %.7s，%.7s 未完成；更新来源：%s"
+
+#: progs/packages.c
+#, c-format
+msgid ""
+"LOCachy source: its commit is not recorded, %.7s not finished; updates: %s"
+msgstr "LOCachy 源码：未记录其提交，%.7s 未完成；更新来源：%s"
+
+#: progs/packages.c
+#, c-format
 msgid "LOCachy source: %.7s installed; updates: %s"
 msgstr "LOCachy 源码：已安装 %.7s；更新来源：%s"
 
@@ -6104,18 +6468,105 @@ msgstr[0] ""
 
 #: progs/packages.c
 #, c-format
+msgid "%s: continuing; it goes on if you leave."
+msgstr "%s：正在继续；退出本界面后仍会继续。"
+
+#: progs/packages.c
+#, c-format
+msgid "%s: queued (%d before it); it goes on if you leave."
+msgstr "%s：已排队（前面还有 %d 个）；离开后它会继续。"
+
+#: progs/packages.c
+#, c-format
 msgid "%s: running; it goes on if you leave."
 msgstr "%s：正在运行；退出本界面后仍会继续。"
 
 #: progs/packages.c
 #, c-format
-msgid "%s: still running."
-msgstr "%s：仍在运行中。"
+msgid "Cannot start %s."
+msgstr "无法启动 %s。"
+
+#. TRANSLATORS: validpgpkeys is a recipe's (PKGBUILD's) field; keep it.
+#: progs/packages.c
+#, c-format
+msgid "validpgpkeys of LOCachy's recipe: %s"
+msgstr "来自 LOCachy 配方的 validpgpkeys：%s"
+
+#. TRANSLATORS: validpgpkeys is a recipe's (PKGBUILD's) field; keep it.
+#: progs/packages.c
+#, c-format
+msgid "validpgpkeys of the AUR's recipe: %s"
+msgstr "来自 AUR 配方的 validpgpkeys：%s"
 
 #: progs/packages.c
 #, c-format
-msgid "%s: ended; its output is below."
-msgstr "%s：已结束；下方为其输出。"
+msgid "%s cannot be continued: its arguments were not kept."
+msgstr "%s 无法继续：没有保存它的参数。"
+
+#: progs/packages.c
+msgid "Apply:"
+msgstr "应用更新："
+
+#: progs/packages.c
+msgid "check for updates"
+msgstr "检查更新"
+
+#: progs/packages.c
+msgid "bring the host to its manifest"
+msgstr "同步宿主至软件清单"
+
+#: progs/packages.c
+#, c-format
+msgid "add %s to the host"
+msgstr "向宿主安装 %s"
+
+#: progs/packages.c
+#, c-format
+msgid "remove %s from the host"
+msgstr "从宿主卸载 %s"
+
+#: progs/packages.c
+#, c-format
+msgid "build %s"
+msgstr "构建 %s"
+
+#: progs/packages.c
+#, c-format
+msgid "install %s on the host"
+msgstr "在宿主上安装 %s"
+
+#: progs/packages.c
+#, c-format
+msgid "roll back %s"
+msgstr "回滚 %s"
+
+#: progs/packages.c
+#, c-format
+msgid "remove %s"
+msgstr "卸载 %s"
+
+#: progs/packages.c
+#, c-format
+msgid "remove %s and its home"
+msgstr "卸载 %s 及其私有目录"
+
+#: progs/packages.c
+#, c-format
+msgid "%s: %s; it goes on if you leave."
+msgstr "%s：%s；离开后它会继续。"
+
+#: progs/packages.c
+#, c-format
+msgid ""
+"%s: stopped for source signing keys to trust (below); none is trusted by "
+"itself."
+msgstr "%s：因有源码签名密钥待信任而暂停（见下方）；不会自动信任任何密钥。"
+
+#. TRANSLATORS: home is the program's name; keep it.
+#: progs/packages.c
+#, c-format
+msgid "%s: stopped from home; its output is below."
+msgstr "%s：已在 home 中被停止；输出见下方。"
 
 #: progs/packages.c
 #, c-format
@@ -6124,19 +6575,8 @@ msgstr "%s：已完成。"
 
 #: progs/packages.c
 #, c-format
-msgid ""
-"Trust the keys below as root, after checking them: %s; then apply again."
-msgstr "核对下面的密钥后，以 root 信任它们：%s；然后再应用一次。"
-
-#: progs/packages.c
-#, c-format
 msgid "%s: failed; its output is below (and in %s)."
 msgstr "%s：失败；下方为其输出（亦保存于 %s）。"
-
-#: progs/packages.c
-#, c-format
-msgid "build %s"
-msgstr "构建 %s"
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/packages.c
@@ -6206,6 +6646,10 @@ msgid "camera"
 msgstr "摄像头"
 
 #: progs/packages.c
+msgid "host"
+msgstr "宿主"
+
+#: progs/packages.c
 #, c-format
 msgid "built %s"
 msgstr "构建于 %s"
@@ -6213,6 +6657,10 @@ msgstr "构建于 %s"
 #: progs/packages.c progs/settings.c
 msgid "never"
 msgstr "从不"
+
+#: progs/packages.c
+msgid "packages on the host"
+msgstr "软件包在宿主上"
 
 #: progs/packages.c
 #, c-format
@@ -6227,6 +6675,27 @@ msgstr "（保留上一版）"
 #: progs/packages.c progs/settings.c
 msgid "not installed"
 msgstr "未安装"
+
+#: progs/packages.c
+msgid "trusted now"
+msgstr "现已信任"
+
+#. TRANSLATORS: g is the g key; keep it.
+#: progs/packages.c
+msgid "All of them are trusted now: g continues where it stopped."
+msgstr "现已全部信任：按 g 从暂停处继续。"
+
+#: progs/packages.c
+msgid ""
+"Check each with its upstream project; then run this as root (admin, from "
+"home):"
+msgstr "逐一与其上游项目核对；然后以 root 运行（home 中的 admin）："
+
+#. TRANSLATORS: y and g are the y and g keys; keep them.
+#: progs/packages.c
+msgid ""
+"y copies the command; once they are trusted, g continues where it stopped."
+msgstr "按 y 复制该命令；信任之后，按 g 从暂停处继续。"
 
 #: progs/packages.c
 msgid "extras"
@@ -6254,13 +6723,29 @@ msgid "yes (locachy-net)"
 msgstr "是 (locachy-net)"
 
 #: progs/packages.c
+msgid "Access"
+msgstr "访问权限"
+
+#: progs/packages.c
 msgctxt "detail"
 msgid "camera"
 msgstr "摄像头"
 
 #: progs/packages.c
+msgid "real system and full home"
+msgstr "真实系统和完整主目录"
+
+#: progs/packages.c
 msgid "yes (the cameras, as they come and go)"
 msgstr "是（摄像头随插随拔）"
+
+#: progs/packages.c
+msgid "by your permissions"
+msgstr "按你的用户权限访问"
+
+#: progs/packages.c
+msgid "devices"
+msgstr "设备"
 
 #: progs/packages.c
 msgid "directories"
@@ -6283,6 +6768,11 @@ msgid "previous build"
 msgstr "上一构建版本"
 
 #: progs/packages.c
+msgid ""
+"Its packages are on the host; their versions and sizes are on the Host page."
+msgstr "软件包安装在宿主上；版本和大小见“宿主”页。"
+
+#: progs/packages.c
 msgid "Not built yet: no build has installed anything"
 msgstr "尚未构建：还没有构建安装过任何东西"
 
@@ -6299,53 +6789,6 @@ msgstr[0] "它的构建安装了 %d 个包，%s；其余来自宿主"
 #: progs/packages.c
 msgid "Package"
 msgstr "软件包"
-
-#: progs/packages.c
-msgid "done"
-msgstr "已完成"
-
-#: progs/packages.c
-msgid "ended"
-msgstr "已结束"
-
-#. TRANSLATORS: PgUp/PgDn and l are key names; keep them.
-#: progs/packages.c
-#, c-format
-msgid "Output: %s%s%s%s   %s   PgUp/PgDn: scroll   l: %s"
-msgstr "输出：%s%s%s%s   %s   PgUp/PgDn: 滚动   l: %s"
-
-#: progs/packages.c
-msgid "no job yet"
-msgstr "尚无任务"
-
-#: progs/packages.c
-msgid "the last job"
-msgstr "上次任务"
-
-#: progs/packages.c
-msgid "details"
-msgstr "详情"
-
-#: progs/packages.c
-msgid "the manifest"
-msgstr "软件清单"
-
-#. TRANSLATORS: l is the l key; keep it.
-#: progs/packages.c
-#, c-format
-msgid "%s: %d declared, %s installed with what they need   l: output"
-msgid_plural "%s: %d declared, %s installed with what they need   l: output"
-msgstr[0] "%s：已声明 %d 个，连同依赖共已安装 %s 个   l: 输出"
-
-#: progs/packages.c
-msgid "The system is as the manifest says."
-msgstr "当前系统与软件清单一致。"
-
-#. TRANSLATORS: l is the l key; keep it.
-#: progs/packages.c
-#, c-format
-msgid "Details: %s   l: output"
-msgstr "详细信息：%s   l: 输出"
 
 #: progs/packages.c
 #, c-format
@@ -6366,6 +6809,49 @@ msgstr "重新构建：%s (%s -> %s)"
 #, c-format
 msgid "%s follows its new preset: %s"
 msgstr "%s 跟随新的预设模板：%s"
+
+#: progs/packages.c
+msgid "The system is as the manifest says."
+msgstr "当前系统与软件清单一致。"
+
+#: progs/packages.c
+msgid "stopped"
+msgstr "已暂停"
+
+#: progs/packages.c
+msgid "ended"
+msgstr "已结束"
+
+#. TRANSLATORS: PgUp/PgDn and l are key names; keep them.
+#: progs/packages.c
+#, c-format
+msgid "Output: %s%s%s%s   %s   PgUp/PgDn: scroll   l: %s"
+msgstr "输出：%s%s%s%s   %s   PgUp/PgDn: 滚动   l: %s"
+
+#: progs/packages.c
+msgid "the last job"
+msgstr "上次任务"
+
+#: progs/packages.c
+msgid "details"
+msgstr "详情"
+
+#: progs/packages.c
+msgid "the manifest"
+msgstr "软件清单"
+
+#. TRANSLATORS: l is the l key; keep it.
+#: progs/packages.c
+#, c-format
+msgid "%s: %d declared, %s installed with what they need   l: output"
+msgid_plural "%s: %d declared, %s installed with what they need   l: output"
+msgstr[0] "%s：已声明 %d 个，连同依赖共已安装 %s 个   l: 输出"
+
+#. TRANSLATORS: l is the l key; keep it.
+#: progs/packages.c
+#, c-format
+msgid "Details: %s   l: output"
+msgstr "详细信息：%s   l: 输出"
 
 #. TRANSLATORS: PgUp/PgDn are key names; keep them.
 #: progs/packages.c
@@ -6455,6 +6941,11 @@ msgstr "（无）"
 msgid "No container yet: n makes one."
 msgstr "尚无容器：按 n 新建。"
 
+#. TRANSLATORS: g is the g key; keep "g: ".
+#: progs/packages.c
+msgid "g: continue"
+msgstr "g: 继续"
+
 #. TRANSLATORS: Tab is the Tab key; keep "Tab: ".
 #: progs/packages.c
 msgid "Tab: page"
@@ -6538,6 +7029,10 @@ msgid "the host's   Enter: what its packages run"
 msgstr "位于宿主系统中   Enter: 列出其软件包提供的程序"
 
 #: progs/packages.c
+msgid "not installed on the host"
+msgstr "宿主上尚未安装"
+
+#: progs/packages.c
 msgid "neither in its build nor on the host"
 msgstr "容器构建与宿主系统中均不存在"
 
@@ -6597,8 +7092,25 @@ msgid "at the same path in it   Delete: remove"
 msgstr "在容器内挂载于相同路径   Delete: 移除"
 
 #: progs/packages.c
+msgid "isolated filesystem"
+msgstr "隔离的文件系统"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/packages.c
+msgid "Enter: switch; packages on the host, commands as you"
+msgstr "Enter：切换；软件包在宿主上，命令以你的身份执行"
+
+#: progs/packages.c
+msgid "Enter: switch; private app data and shared folders"
+msgstr "Enter：切换；私有应用数据与共享文件夹"
+
+#: progs/packages.c
 msgid "display, sound, GPU, fonts, its own bus"
 msgstr "显示、音频、GPU、字体及独立总线"
+
+#: progs/packages.c
+msgid "devices by your permissions; home starts, freezes and stops it"
+msgstr "设备按你的权限访问；由 home 启动、冻结和停止"
 
 #: progs/packages.c
 #, c-format
@@ -6618,6 +7130,10 @@ msgstr "容器 %s   %s/%s.conf"
 #: progs/packages.c
 msgid "(no name yet)"
 msgstr "（尚未命名）"
+
+#: progs/packages.c
+msgid "Save and install"
+msgstr "保存并安装"
 
 #. TRANSLATORS: Up/Down, Enter, Delete, Left/Right and Esc are key names; keep them.
 #: progs/packages.c
@@ -6731,6 +7247,32 @@ msgid "%.200s: at the same path in it, from its next start."
 msgstr "%.200s：下次启动时将在容器内相同路径挂载。"
 
 #: progs/packages.c
+msgid "Packages will be installed on the real system."
+msgstr "软件包将安装到真实系统中。"
+
+#: progs/packages.c
+msgid "It can read and change your full home and system files as you."
+msgstr "它能以你的身份读写完整主目录和系统文件，仍受你的用户权限约束。"
+
+#: progs/packages.c
+msgid "It can run terminal commands; sudo still requires authentication."
+msgstr "它能执行终端命令；sudo 仍需身份认证。"
+
+#: progs/packages.c
+msgid "Home still starts, freezes, resumes and stops its whole process tree."
+msgstr "home 仍负责启动、冻结、恢复和停止它的整棵进程树。"
+
+#: progs/packages.c
+#, c-format
+msgid "Allow %s to access your real system?"
+msgstr "允许 %s 访问你的真实系统吗？"
+
+#. TRANSLATORS: Y and N are the Y and N keys; keep them.
+#: progs/packages.c
+msgid "Y: allow and save   N or Esc: cancel without saving"
+msgstr "Y：允许并保存   N 或 Esc：取消且不保存"
+
+#: progs/packages.c
 msgid "A name is letters, digits, . _ - (from a letter or digit)."
 msgstr "名称仅限字母、数字与 . _ -（须以字母或数字开头）。"
 
@@ -6750,6 +7292,11 @@ msgid ""
 msgid_plural ""
 "Its directories are more than a configuration line holds (%d characters)."
 msgstr[0] "共享目录超出单行配置长度上限（%d 个字符）。"
+
+#: progs/packages.c
+#, c-format
+msgid "%s: access not granted; nothing saved or installed."
+msgstr "%s：未授予访问权限；未保存或安装任何内容。"
 
 #: progs/packages.c
 #, c-format
@@ -6815,8 +7362,12 @@ msgstr "搜索容器预设模板、软件源与 AUR："
 
 #: progs/packages.c
 #, c-format
-msgid "roll back %s"
-msgstr "回滚 %s"
+msgid "Cannot read %s; nothing saved or installed."
+msgstr "无法读取 %s；未保存或安装任何内容。"
+
+#: progs/packages.c
+msgid "Its packages are on the host; there is no private build to roll back."
+msgstr "软件包安装在宿主上，没有可回退的私有构建。"
 
 #: progs/packages.c
 #, c-format
@@ -6829,6 +7380,11 @@ msgstr "回滚到上一个构建版本？"
 
 #: progs/packages.c
 #, c-format
+msgid "Remove %s from home? Host packages and your files will be kept."
+msgstr "从 home 移除 %s 吗？宿主软件包和你的文件将保留。"
+
+#: progs/packages.c
+#, c-format
 msgid "Remove %s (its configuration and builds)?"
 msgstr "卸载 %s（包括其配置与构建镜像）？"
 
@@ -6838,23 +7394,8 @@ msgid "Its home too (%s/%s/data: its settings, its files)?"
 msgstr "同时删除其私有目录（%s/%s/data：应用设置与文件）？"
 
 #: progs/packages.c
-#, c-format
-msgid "remove %s"
-msgstr "卸载 %s"
-
-#: progs/packages.c
-#, c-format
-msgid "remove %s and its home"
-msgstr "卸载 %s 及其私有目录"
-
-#: progs/packages.c
 msgid "Search repositories and the AUR:"
 msgstr "搜索软件源与 AUR："
-
-#: progs/packages.c
-#, c-format
-msgid "add %s to the host"
-msgstr "向宿主安装 %s"
 
 #: progs/packages.c
 msgid "Packages to add, separated by spaces (repositories or the AUR):"
@@ -6870,25 +7411,8 @@ msgid "Remove %s from the host (and what only it needs)?"
 msgstr "从宿主卸载 %s（及其独占依赖）？"
 
 #: progs/packages.c
-#, c-format
-msgid "remove %s from the host"
-msgstr "从宿主卸载 %s"
-
-#: progs/packages.c
 msgid "Install what the manifest names and remove what it does not?"
 msgstr "安装软件清单中列出的软件包，并卸载未列出的软件包？"
-
-#: progs/packages.c
-msgid "bring the host to its manifest"
-msgstr "同步宿主至软件清单"
-
-#: progs/packages.c
-msgid "check for updates"
-msgstr "检查更新"
-
-#: progs/packages.c
-msgid "Apply:"
-msgstr "应用更新："
 
 #. TRANSLATORS: Space is the Space key; keep it.
 #: progs/packages.c
@@ -7978,6 +8502,18 @@ msgid "generic PC"
 msgstr "通用 PC"
 
 #: progs/settings.c
+msgid "pointing only"
+msgstr "仅指点"
+
+#: progs/settings.c
+msgid "press only"
+msgstr "仅按压"
+
+#: progs/settings.c
+msgid "tap and press"
+msgstr "轻触和按压"
+
+#: progs/settings.c
 msgid "a new one each time"
 msgstr "每次连接生成新地址"
 
@@ -8014,7 +8550,25 @@ msgstr "右侧"
 msgid ""
 "Up/Down: choose   Enter: change or open   Left/Tab: categories   /: find   "
 "q: back to home"
-msgstr "Up/Down: 选择   Enter: 修改或打开   Left/Tab: 回到分类   /: 查找   q: 返回主页"
+msgstr ""
+"Up/Down: 选择   Enter: 修改或打开   Left/Tab: 回到分类   /: 查找   q: 返回主"
+"页"
+
+#: progs/settings.c
+msgid ""
+"No saved layout for this display set; legacy layout is used without changing "
+"saved profiles."
+msgstr "这组显示器尚无已保存布局；使用旧配置，不改动已保存的各组布局。"
+
+#: progs/settings.c
+msgid "Saved display-set layout selected."
+msgstr "已选用这组显示器保存的布局。"
+
+#: progs/settings.c
+#, c-format
+msgid ""
+"%.31s: saved mode unavailable; current mode is kept until you choose another."
+msgstr "%.31s：已保存的显示模式不可用；选择其他模式前保留当前模式。"
 
 #: progs/settings.c
 #, c-format
@@ -8235,6 +8789,11 @@ msgstr "指纹识别 (fprintd)"
 #: progs/settings.c
 msgid "Face recognition (howdy)"
 msgstr "人脸识别 (howdy)"
+
+#: progs/settings.c
+#, c-format
+msgid "queued (%d before it)"
+msgstr "已排队（前面还有 %d 个）"
 
 #: progs/settings.c
 #, c-format
@@ -8656,10 +9215,6 @@ msgstr "%.40s 的密码已修改。"
 #, c-format
 msgid "Password left as it was: %.100s"
 msgstr "密码保持原状：%.100s"
-
-#: progs/settings.c
-msgid "refused"
-msgstr "已拒绝"
 
 #: progs/settings.c
 msgid "ask every time"
@@ -9172,6 +9727,15 @@ msgid "App presets follow branch %.100s: c in packages checks it."
 msgstr "应用预设模板改为跟随分支 %.100s：在 packages 中按 c 检查。"
 
 #: progs/settings.c
+msgid "The boot image is still being made."
+msgstr "启动镜像仍在生成中。"
+
+#: progs/settings.c
+#, c-format
+msgid "Could not make the boot image: %s"
+msgstr "无法生成启动镜像：%s"
+
+#: progs/settings.c
 msgid "Making the boot image (locachy-boot)..."
 msgstr "正在生成启动镜像（locachy-boot）……"
 
@@ -9677,6 +10241,10 @@ msgid "on"
 msgstr "开"
 
 #: progs/settings.c
+msgid "Touchpad Clicks"
+msgstr "触摸板点击"
+
+#: progs/settings.c
 msgid "Touchpad Circular Scrolling"
 msgstr "触摸板绕边滚动"
 
@@ -9788,6 +10356,15 @@ msgstr "显示器 %-10.10s 缩放比例："
 #, c-format
 msgid "  %.95s < %3d%% >  (text and windows)"
 msgstr "  %.95s < %3d%% >  （文字与窗口）"
+
+#. TRANSLATORS: settings and home are programs' names; keep them.
+#: progs/settings.c
+msgid ""
+"A system job of settings' runs or waits: it goes on if settings closes; home "
+"lists it."
+msgstr ""
+"settings 的系统任务正在运行或排队：settings 关闭后它会继续；home 中可以看到"
+"它。"
 
 #: progs/settings.c
 #, c-format
@@ -10157,6 +10734,12 @@ msgstr "输入法：无法运行 locachy-pkg。"
 
 #: progs/settings.c
 msgid ""
+"Chinese Pinyin: installing rime-frost, its grammar model and CJK fonts, then "
+"rebuilding."
+msgstr "中文拼音：正在安装雾凇拼音、语法模型与中日韩字体并重新构建。"
+
+#: progs/settings.c
+msgid ""
 "Chinese Pinyin: installing rime-frost and grammar model, then rebuilding."
 msgstr "中文拼音：正在安装雾凇拼音与语法模型并重新构建。"
 
@@ -10258,6 +10841,32 @@ msgstr "终端的 shell 下次启动时联网。"
 #: progs/settings.c
 msgid "The terminal's shell has no network from its next start."
 msgstr "终端的 shell 下次启动时不联网。"
+
+#: progs/settings.c
+msgid "Touchpads click when tapped or pressed"
+msgstr "触摸板轻触或按压时点击"
+
+#: progs/settings.c
+msgid "Touchpads click when pressed, not when tapped"
+msgstr "触摸板按压时点击，轻触不点击"
+
+#: progs/settings.c
+msgid "Touchpads only point; separate buttons still click"
+msgstr "触摸板只用于指点；独立按键仍可点击"
+
+#: progs/settings.c
+msgid "Touchpads do not tap; none here clicks by pressing its surface"
+msgstr "触摸板不再轻触点击；本机没有按压表面即点击的触摸板"
+
+#: progs/settings.c
+#, c-format
+msgid "%s: programs after home, the shared display from its next start."
+msgstr "%s：直连程序回 home 后、共享显示下次启动时生效。"
+
+#: progs/settings.c
+#, c-format
+msgid "%s: programs after home, the shared display at once."
+msgstr "%s：直连程序回 home 后生效，共享显示立即生效。"
 
 #: progs/settings.c
 msgid "Saved in libinput; applies when the pointer context next opens."
@@ -10434,6 +11043,11 @@ msgstr "未安装：按 Enter 安装。"
 #: progs/settings.c
 msgid "Delete again: remove it, with what only it needs."
 msgstr "再按一次 Delete：卸载它，以及只为它装的依赖。"
+
+#: progs/settings.c
+#, c-format
+msgid "No settings page is named %.40s."
+msgstr "没有名为 %.40s 的设置页面。"
 
 #: progs/settings.c
 msgid "No wallpaper; the shared display shows that when it is next shown."
@@ -12178,92 +12792,3 @@ msgstr "显示较少详情"
 #: progs/view.c
 msgid "Show more details..."
 msgstr "显示更多详情..."
-
-#~ msgid "default (kernel)"
-#~ msgstr "默认（内核）"
-
-#~ msgid "deep (S3)"
-#~ msgstr "深度休眠（S3）"
-
-#~ msgid "Sleep Mode"
-#~ msgstr "睡眠模式"
-
-#, c-format
-#~ msgid ""
-#~ "%s is still in use in a container: stop it before pulling the drive out."
-#~ msgstr "%s 仍在容器中使用：拔出驱动器前请先停止该容器。"
-
-#, c-format
-#~ msgid "Details: %s (%s/%s.conf)   l: output"
-#~ msgstr "详细信息：%s（%s/%s.conf）   l: 输出"
-
-#~ msgid "Wi-Fi & Internet"
-#~ msgstr "Wi-Fi 和互联网"
-
-#~ msgid "Container"
-#~ msgstr "容器"
-
-#~ msgid "RAM MiB"
-#~ msgstr "内存 MiB"
-
-#~ msgid "Swap MiB"
-#~ msgstr "交换 MiB"
-
-#~ msgid "-- Host programs (no containers) --"
-#~ msgstr "-- 宿主程序（无容器） --"
-
-#~ msgid "-- Host programs --"
-#~ msgstr "-- 宿主程序 --"
-
-#~ msgid ""
-#~ "Text programs mirror; this layout is for the shared graphical display."
-#~ msgstr "文本程序为镜像显示；此布局用于共享图形桌面。"
-
-#, c-format
-#~ msgid "Packages for %s; own builds for %s. In order:"
-#~ msgstr "软件包面向 %s；本机编译面向 %s。顺序："
-
-#~ msgid "Tailscale login"
-#~ msgstr "Tailscale 登录"
-
-#~ msgid "Scan the code with a phone, or open the address on another device:"
-#~ msgstr "使用手机扫码，或在另一台设备上打开以下地址："
-
-#~ msgid "(the screen is too small for the code: use the address)"
-#~ msgstr "（显示器过小无法显示二维码：请使用上方地址）"
-
-#~ msgid "Tailscale login cancelled."
-#~ msgstr "Tailscale 登录已取消。"
-
-#~ msgid "none set"
-#~ msgstr "未设置"
-
-#~ msgid "No camera (/dev/video*), or howdy could not set it."
-#~ msgstr "没有摄像头（/dev/video*），或 howdy 无法设置它。"
-
-#, c-format
-#~ msgid "howdy uses %.100s. Face recognition wants the infrared one."
-#~ msgstr "howdy 现在用 %.100s。人脸识别要用红外的那个。"
-
-#~ msgid "Keyboard layout (the system's console; this installer types US)"
-#~ msgstr "键盘布局（新系统的控制台；本安装器按美式输入）"
-
-#~ msgid "The lock key left as it is."
-#~ msgstr "锁屏快捷键保持原状。"
-
-#~ msgid "The terminal key left as it is."
-#~ msgstr "终端快捷键保持原状。"
-
-#, c-format
-#~ msgid "The terminal key: %s, saved and applied."
-#~ msgstr "终端快捷键：%s，已保存并生效。"
-
-#~ msgid ""
-#~ "-- Screens: arrangement, resolution, scale (click < or > to change) --"
-#~ msgstr "-- 显示器：排列、分辨率、缩放比例（点击 < 或 > 修改） --"
-
-#~ msgid "-- Default applications: the container that opens a type --"
-#~ msgstr "-- 默认应用程序：打开各类型文件的容器 --"
-
-#~ msgid " (running)"
-#~ msgstr "（运行中）"

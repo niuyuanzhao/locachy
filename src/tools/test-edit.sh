@@ -12,8 +12,8 @@ out=${1:-/tmp/test-edit}
 rm -rf "$out"
 mkdir -p "$out/obj"
 
-flags="$(pkg-config --cflags freetype2 libnm libinput) -DCONFIG_FREETYPE -DCONFIG_NETWORKMANAGER -DCONFIG_LIBINPUT"
-libs="$(pkg-config --libs freetype2 libnm libinput) -lm"
+flags="$(pkg-config --cflags freetype2 fontconfig libnm libinput) -DCONFIG_FREETYPE -DCONFIG_NETWORKMANAGER -DCONFIG_LIBINPUT"
+libs="$(pkg-config --libs freetype2 fontconfig libnm libinput) -lm"
 ime_flags= ime_libs=
 if [ -f /usr/include/rime_api.h ] && [ -f /usr/lib/librime.so ]; then
     ime_flags=-DCONFIG_IME
@@ -50,8 +50,8 @@ for kind in plain asan; do
             $src/progs/edit-layout.c $src/progs/edit-lsp.c $src/progs/edit-session.c $src/progs/edit-filesearch.c
             $src/base/ui.c"
         # shellcheck disable=SC2086
-        $cc -DCONFIG_IME -DCONFIG_FREETYPE $(pkg-config --cflags freetype2 json-glib-1.0) $queries $extra -o "$out/test-edit-$t-$kind" $files \
-            -ltree-sitter -lpcre2-8 $(pkg-config --libs freetype2 json-glib-1.0) -lm
+        $cc -DCONFIG_IME -DCONFIG_FREETYPE $(pkg-config --cflags freetype2 fontconfig json-glib-1.0) $queries $extra -o "$out/test-edit-$t-$kind" $files \
+            -ltree-sitter -lpcre2-8 $(pkg-config --libs freetype2 fontconfig json-glib-1.0) -lm
     done
     for t in core syntax ui layout; do
         dir="$out/run-$t-$kind"

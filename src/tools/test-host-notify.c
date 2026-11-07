@@ -18,6 +18,7 @@ int open_rule(const char *type, char *name, size_t size)
 void open_label(const char *name, const char *type, char *out, size_t size)
 { (void)type; snprintf(out, size, "%s", name); }
 const struct panel_font *panel_font(int height, int bold) { (void)height; (void)bold; return NULL; }
+int panel_fonts_reload(void) { return 0; }
 void panel_font_size(const struct panel_font *font, int *w, int *h) { (void)font; *w = 9; *h = 18; }
 void panel_fill(uint32_t *px, int w, int h, int stride, int x, int y, int bw, int bh, uint32_t color)
 { (void)px;(void)w;(void)h;(void)stride;(void)x;(void)y;(void)bw;(void)bh;(void)color; }

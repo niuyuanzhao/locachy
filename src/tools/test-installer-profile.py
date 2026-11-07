@@ -182,6 +182,14 @@ class InstallerProfile(unittest.TestCase):
                      f'commit="{"c" * 40}"'):
             self.assertIn(line + "\n", meta)
 
+    def test_the_medium_preserves_format_two_host_access_recipes(self):
+        (self.apps / "FORMAT").write_text("2\n")
+        recipe = 'host="1"\npackage="chatgpt-desktop"\ncommand="/usr/bin/chatgpt"\n'
+        (self.apps / "apps/chatgpt.conf").write_text(recipe)
+        catalog = self.profile() / "airootfs/usr/local/share/locachy/apps-catalog"
+        self.assertIn('format="2"\n', (catalog / "CATALOG").read_text())
+        self.assertEqual((catalog / "chatgpt.conf").read_text(), recipe)
+
     def test_missing_or_invalid_app_presets_stop_the_build_before_anything_is_made(self):
         def refused(said):
             result = self.run_builder("--profile-only", self.work, self.out)
@@ -189,11 +197,11 @@ class InstallerProfile(unittest.TestCase):
             self.assertIn(said, result.stderr)
             self.assertFalse(self.work.exists())  # never an empty catalog
             self.assertFalse(self.out.exists())
-        (self.apps / "FORMAT").write_text("2\n")
-        refused("not compatible: format 2")
+        (self.apps / "FORMAT").write_text("3\n")
+        refused("not compatible: format 3")
         (self.apps / "FORMAT").write_text("1\n")
         (self.apps / "apps/edge.conf").write_text('host="1"\n')
-        refused("host programs are the system's")
+        refused("host requires format 2")
         shutil.rmtree(self.apps / "apps")
         refused("no apps directory")
         self.env["LOCACHY_APPS_SRC"] = str(self.root / "nowhere")
@@ -410,10 +418,10 @@ class LiveEntry(unittest.TestCase):
         out, err = self.entry("--check")
         self.assertEqual((err, self.apps_seen()), ("", ("fetched earlier", str(self.apps_fetched))))
         # Content this system does not take: the one fetched before, and why.
-        (self.apps / "FORMAT").write_text("2\n")
-        self.apps_commit("Format two")
+        (self.apps / "FORMAT").write_text("3\n")
+        self.apps_commit("Format three")
         self.entry("--yes")
-        self.assertEqual(self.apps_seen(), (f"fetched before: {self.APPS_URL} (main): not compatible: format 2",
+        self.assertEqual(self.apps_seen(), (f"fetched before: {self.APPS_URL} (main): not compatible: format 3",
                                             str(self.apps_fetched)))
         self.assertIn(f'commit="{first}"', (self.apps_fetched / "CATALOG").read_text())
         # Another branch, never fetched from: the medium's own.

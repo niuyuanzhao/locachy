@@ -31,7 +31,7 @@ class KernelChoice(unittest.TestCase):
         self.rc.write_text('boot_verbose="1"\n')
         self.calls = []
         for name, value in (("MANIFEST", str(self.manifest)), ("RC_CONF", str(self.rc)),
-                            ("cmd_sync", lambda: self.calls.append("sync") or 0),
+                            ("cmd_sync", lambda **how: self.calls.append("sync") or 0),
                             ("kernel_packages", lambda: ["linux", "linux-lts", "linux-cachyos-bore"]),
                             ("unknown_packages", lambda names: [n for n in names if n not in {
                                 "linux", "linux-headers", "linux-lts", "linux-lts-headers",

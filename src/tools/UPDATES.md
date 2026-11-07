@@ -22,6 +22,20 @@ package declaration failed, Apply retries that source setup before planning the
 host. The second phase stays on the selected source; a newer commit discovered
 at the end is offered in the next plan, not silently installed mid-update.
 
+`/usr/local/lib/locachy/source-commit` is the source applied: the commit whose
+update has all been done. Fetching a commit, or Apply putting its tree in
+place, does not change it. Until a plan has nothing of that update left (its
+local packages built, its declared packages installed, its programs built),
+the commit is pending in `/usr/local/lib/locachy/source-pending`, and the
+plan carries a note naming both. An update that stopped (a build waiting for
+source signing keys, say) therefore leaves the earlier commit as the applied
+one; the Apply that finishes it records the new one. `packages` and the
+About page of `settings` show the applied commit, `packages` the pending one
+too. When the commit fetched is the applied one and nothing of it is pending,
+Check offers no source update: an installation puts only part of that commit
+in `/usr/local/src/locachy` and adds its chosen modules to the packages and
+rc.conf there, so the tree is not compared with it.
+
 `declare-packages` records the base and optional-module package definitions.
 Source additions for an enabled module enter `/etc/locachy/packages`
 automatically. Explicit removals stay removed. A missing record starts from the
@@ -66,6 +80,7 @@ names are read as separate packages; removing one keeps the others.
 
 Adding or removing leaves still runs reconciliation, not only a one-package
 pacman command. A failed operation retains its output in
-`/run/locachy/packages.log`; a failed prepared update retains its plan and gate
+its system job's log, `/run/locachy/jobs/ID.log` (home lists the jobs,
+[JOBS.md](JOBS.md)); a failed prepared update retains its plan and gate
 logs under `/var/lib/locachy/local-packages/transactions/`. Do not delete those
 logs or skip their contracts to get past a failure.

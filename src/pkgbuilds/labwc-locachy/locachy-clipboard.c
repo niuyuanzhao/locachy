@@ -335,6 +335,32 @@ static int accept_transaction(int fd, uint32_t mask, void *data)
     return 0;
 }
 
+/* The connection credentials identify its creator. Pin that PID with pidfd
+ * before consulting /proc again; inherited connections retain the original
+ * cgroup if the creator has gone. */
+static int current_cgroup(struct tracked_client *c)
+{
+    struct pollfd p = { .fd = c->pidfd, .events = POLLIN };
+    if (c->pidfd >= 0 && poll(&p, 1, 0) == 0) {
+        int current = process_cgroup(c->pid);
+        p.revents = 0;
+        if (current >= 0 && poll(&p, 1, 0) == 0) {
+            if (c->cgroup >= 0) close(c->cgroup);
+            c->cgroup = current;
+        } else if (current >= 0) close(current);
+    }
+    return c->cgroup;
+}
+
+int locachy_client_cgroup(struct wl_client *client)
+{
+    struct tracked_client *c;
+    wl_list_for_each(c, &tracked, link) {
+        if (c->client == client) return current_cgroup(c);
+    }
+    return -1;
+}
+
 bool locachy_clipboard_allowed(bool primary)
 {
     if (!sender || !request_interface || !request_name) return true;
@@ -343,19 +369,7 @@ bool locachy_clipboard_allowed(bool primary)
     struct tracked_client *c;
     wl_list_for_each(c, &tracked, link) {
         if (c->client != sender) continue;
-        /* The connection credentials identify its creator. Pin that PID
-         * with pidfd before consulting /proc again; inherited connections
-         * retain the original cgroup if the creator has gone. */
-        struct pollfd p = { .fd = c->pidfd, .events = POLLIN };
-        if (c->pidfd >= 0 && poll(&p, 1, 0) == 0) {
-            int current = process_cgroup(c->pid);
-            p.revents = 0;
-            if (current >= 0 && poll(&p, 1, 0) == 0) {
-                if (c->cgroup >= 0) close(c->cgroup);
-                c->cgroup = current;
-            } else if (current >= 0) close(current);
-        }
-        if (c->cgroup < 0) return false;
+        if (current_cgroup(c) < 0) return false;
         struct guard *g;
         wl_list_for_each(g, &guards, link) {
             if (g->directory >= 0 && beneath(c->cgroup, g->directory)) {

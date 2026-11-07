@@ -111,9 +111,12 @@ struct bar {
         char tray[OPEN_NAME];   /* or (both empty) a scroll arrow: step -1 or 1 */
         int step, x0, x1;
     } buttons[MAX_BUTTONS];     /* the window list as drawn (buffer pixels) */
+    struct panel_hit status[8]; /* the status blocks as drawn (buffer pixels) */
+    int nstatus;
     int first;                  /* the window list scrolled: its first entry shown */
     struct window *focus_seen;  /* the focused window when it was last drawn */
     double wheel;               /* scrolling not yet a whole entry */
+    long long corner_attempt, corner_triggered; /* this output's approach/cooldown, ms */
     int nbuttons;
     struct bar *next;
 };
@@ -1066,6 +1069,7 @@ static void render_bar(struct bar *b, const char *title, const char *sub)
     struct wl_buffer *buf = create_shm_buffer(w, h, &px);
     if (!buf) return;
     panel_draw(px, w, h, w, title, sub, ime_mode_label(), n ? n * 10 * cw + 2 * cw : 0, &x0, &x1);
+    b->nstatus = panel_hits(b->status, (int)(sizeof b->status / sizeof *b->status));
     draw_windows(b, px, w, h, x0, x1);
     munmap(px, (size_t)w * (size_t)h * 4);
     wl_surface_attach(b->surf, buf, 0, 0);
@@ -1130,6 +1134,12 @@ static void pointer_enter(void *data, struct wl_pointer *p, uint32_t serial, str
     pointer_notes = s && s == notes_surface();
     pointer_x = wl_fixed_to_double(x);
     pointer_y = wl_fixed_to_double(y);
+#ifdef CORNER_TEST_MOTION
+    if (pointer_bar) {
+        printf("corner-pointer %u %.3f %.3f\n", pointer_bar->name, pointer_x, pointer_y);
+        fflush(stdout);
+    }
+#endif
     struct wl_cursor *cursor = cursor_theme ? wl_cursor_theme_get_cursor(cursor_theme, "left_ptr") : NULL;
     if (!cursor && cursor_theme) {
         cursor = wl_cursor_theme_get_cursor(cursor_theme, "default");
@@ -1149,6 +1159,9 @@ static void pointer_leave(void *data, struct wl_pointer *p, uint32_t serial, str
     (void)p;
     (void)serial;
     (void)s;
+    if (pointer_bar) {
+        pointer_bar->corner_attempt = 0;
+    }
     pointer_bar = NULL;
     pointer_notes = 0;
 }
@@ -1160,6 +1173,54 @@ static void pointer_motion(void *data, struct wl_pointer *p, uint32_t time, wl_f
     (void)time;
     pointer_x = wl_fixed_to_double(x);
     pointer_y = wl_fixed_to_double(y);
+#ifdef CORNER_TEST_MOTION
+    if (pointer_bar) {
+        printf("corner-pointer %u %.3f %.3f\n", pointer_bar->name, pointer_x, pointer_y);
+        fflush(stdout);
+    }
+#endif
+}
+
+#ifndef SEAT_CLIENT
+#define SEAT_CLIENT "/usr/local/bin/locachy-seat"
+#endif
+/* A managed window of a host program on this display (locachy-seat --window
+ * PROGRAM [TARGET]): the seat passes the request on to process 1, which
+ * starts only programs and targets it knows. The client is run by itself,
+ * no shell, in the background (a child of its own waits for it); the
+ * window's start or failure shows in home and in the log. */
+static void window_open(const char *program, const char *target)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (fork() == 0) {
+            setsid();
+            char *argv[] = { "locachy-seat", "--window", (char *)program, (char *)target, NULL };
+            execv(SEAT_CLIENT, argv);
+            _exit(127);
+        }
+        _exit(0);
+    }
+    if (pid > 0) {
+        waitpid(pid, NULL, 0);
+    }
+}
+
+/* A status block clicked: its settings page, or the mixer for the volume. */
+static void status_open(enum panel_block id)
+{
+    const char *program = "settings", *page = NULL;
+    switch (id) {
+    case PANEL_BLOCK_VOLUME: program = "mixer"; break; /* no target */
+    case PANEL_BLOCK_BLUETOOTH: page = "devices"; break;
+    case PANEL_BLOCK_NETWORK: page = "network"; break;
+    case PANEL_BLOCK_BATTERY: page = "power"; break;
+    case PANEL_BLOCK_TIME: page = "date-time"; break;
+    case PANEL_BLOCK_MEMORY:
+    case PANEL_BLOCK_CPU: page = "hardware"; break;
+    default: return;
+    }
+    window_open(program, page);
 }
 
 static void pointer_button(void *data, struct wl_pointer *p, uint32_t serial, uint32_t time,
@@ -1177,6 +1238,14 @@ static void pointer_button(void *data, struct wl_pointer *p, uint32_t serial, ui
         return;
     }
     double x = pointer_x * (pointer_bar->viewport ? pointer_bar->scale120 : 120) / 120.0;
+    for (int i = 0; i < pointer_bar->nstatus; i++) {
+        if (x >= pointer_bar->status[i].x0 && x < pointer_bar->status[i].x1) {
+            if (button == BTN_LEFT) {
+                status_open(pointer_bar->status[i].id);
+            }
+            return;
+        }
+    }
     for (int i = 0; i < pointer_bar->nbuttons; i++) {
         if (x >= pointer_bar->buttons[i].x0 && x < pointer_bar->buttons[i].x1) {
             if (pointer_bar->buttons[i].win) {
@@ -1224,13 +1293,16 @@ static const struct wl_pointer_listener pointer_listener = {
 
 /* The overview, by itself (its parent gone at once, the bar has no child to
  * wait for); run while it is up, it closes it. */
+#ifndef OVERVIEW
+#define OVERVIEW "/usr/local/bin/locachy-overview"
+#endif
 static void run_overview(void)
 {
     pid_t pid = fork();
     if (pid == 0) {
         if (fork() == 0) {
             setsid();
-            execl("/usr/local/bin/locachy-overview", "locachy-overview", (char *)NULL);
+            execl(OVERVIEW, "locachy-overview", (char *)NULL);
             _exit(127);
         }
         _exit(0);
@@ -1240,44 +1312,34 @@ static void run_overview(void)
     }
 }
 
-/* The top left corner of a screen, as KWin's screen edges have it
- * (screenedge.cpp: Edge::check, canActivate; kwinrc's defaults): pushed into
- * for ElectricBorderDelay, 75 ms, it triggers, every push of an attempt
- * within the reactivation threshold (ElectricBorderCooldown, 350 ms) of its
- * first; the pointer more than 30 pixels away, the attempt is over; after a
- * trigger, pushes go unheeded until the corner has been left alone for
- * 275 ms (that threshold less the delay), so one long push shows or closes
- * the overview once. KWin pushes the pointer back a pixel so that each push
- * meets the corner again; a client cannot move the pointer, so here a push
- * is relative motion (zwp-relative-pointer, which the compositor sends
- * though the pointer goes no further) up or left while the pointer is in the
- * corner's pixel of a bar (the overview leaves that pixel to the bar). A
- * screen beside or above, the pointer goes there instead: no corner, as in
- * KWin. (x, y): the pointer on the bar, (dx, dy): its motion, ms: when.
- * 1: the corner triggers. */
-static long long corner_attempt, corner_triggered; /* ms; 0: none */
-
-static int corner_push(double x, double y, double dx, double dy, long long ms)
+/* Every output has its own top-left approach and cooldown. The thresholds
+ * follow KWin's Edge::check/canActivate defaults: 75 ms, a 350 ms attempt,
+ * 30 logical pixels to reset, and 275 ms quiet before reactivation. The
+ * compositor's bounded corner-edge hold makes an internal seam reachable;
+ * raw relative motion still reaches this one logical pixel while held.
+ * (x, y) are surface-local logical coordinates, independent of output
+ * origin, transform and fractional scale. No timer runs while idle. */
+static int corner_push(struct bar *b, double x, double y, double dx, double dy, long long ms)
 {
-    if (x >= 1 || y >= 1 || (dx >= 0 && dy >= 0)) {
-        if (x + y > 30) {
-            corner_attempt = 0;
+    if (x < 0 || y < 0 || x >= 1 || y >= 1 || (dx >= 0 && dy >= 0)) {
+        if (x < 0 || y < 0 || x + y > 30 || dx > 0 || dy > 0) {
+            b->corner_attempt = 0;
         }
         return 0;
     }
-    if (corner_triggered && ms - corner_triggered < 350 - 75) {
-        corner_triggered = ms; /* still cooling down: from now on */
+    if (b->corner_triggered && ms - b->corner_triggered < 350 - 75) {
+        b->corner_triggered = ms; /* continued pushing postpones reactivation */
         return 0;
     }
-    if (!corner_attempt || ms - corner_attempt > 350) {
-        corner_attempt = ms;
+    if (!b->corner_attempt || ms - b->corner_attempt > 350) {
+        b->corner_attempt = ms;
         return 0;
     }
-    if (ms - corner_attempt < 75) {
+    if (ms - b->corner_attempt < 75) {
         return 0;
     }
-    corner_triggered = ms;
-    corner_attempt = 0;
+    b->corner_triggered = ms;
+    b->corner_attempt = 0;
     return 1;
 }
 
@@ -1289,7 +1351,8 @@ static void relative_motion(void *data, struct zwp_relative_pointer_v1 *r, uint3
     (void)udx;
     (void)udy;
     long long ms = (long long)(((uint64_t)hi << 32 | lo) / 1000);
-    if (pointer_bar && corner_push(pointer_x, pointer_y, wl_fixed_to_double(dx), wl_fixed_to_double(dy), ms)) {
+    if (pointer_bar && corner_push(pointer_bar, pointer_x, pointer_y,
+                                   wl_fixed_to_double(dx), wl_fixed_to_double(dy), ms)) {
         say("locachy-bar: the top left corner: the overview");
         run_overview();
     }
@@ -1367,6 +1430,7 @@ static void destroy_bar_surface(struct bar *b)
         pointer_bar = NULL;
     }
     b->configured = b->shown = 0;
+    b->corner_attempt = b->corner_triggered = 0;
     b->nbuttons = 0;
 }
 
@@ -2005,6 +2069,76 @@ static void share_locks(int l)
     }
 }
 
+/*
+ * The locks (Caps and Num Lock, KEYS_LOCK_*) are process 1's, one state for
+ * every program (keys.c). The bar starts from them when it is given the
+ * keyboards after holding none ("keys LOCKS": the seat taken back, the
+ * first keyboard plugged in again), keeps them across its layouts made
+ * again, and reports each change on the seat's link ("locks LOCKS"): while
+ * it holds the keyboards (EVIOCGRAB) process 1 does not see the keys. labwc
+ * takes them from its virtual keyboard's modifiers (labwc-locachy's
+ * keyboard-locks.patch), the keyboards' LEDs with them. -1: not known (no
+ * keyboards).
+ */
+static int bar_locks = -1;
+static int keys_link; /* the seat's link (defined with the keyboards below) */
+
+static int layout_locks(int l)
+{
+    struct xkb_state *st = layouts[l].st;
+    if (!st) return 0;
+    return (xkb_state_mod_name_is_active(st, XKB_MOD_NAME_CAPS, XKB_STATE_MODS_LOCKED) > 0 ? KEYS_LOCK_CAPS : 0) |
+           (xkb_state_mod_name_is_active(st, XKB_MOD_NAME_NUM, XKB_STATE_MODS_LOCKED) > 0 ? KEYS_LOCK_NUM : 0);
+}
+
+/* locks in every layout's state, and Caps Lock to the input method. */
+static void layouts_take_locks(int locks)
+{
+    int caps_before = nlayouts ? !!(layout_locks(0) & KEYS_LOCK_CAPS) : -1;
+    for (int m = 0; m < nlayouts; m++) {
+        struct xkb_state *st = layouts[m].st;
+        if (!st) continue;
+        xkb_mod_mask_t locked = xkb_state_serialize_mods(st, XKB_STATE_MODS_LOCKED), was = locked;
+        static const struct { const char *name; int lock; } mods[] = {
+            { XKB_MOD_NAME_CAPS, KEYS_LOCK_CAPS }, { XKB_MOD_NAME_NUM, KEYS_LOCK_NUM },
+        };
+        for (size_t i = 0; i < sizeof mods / sizeof mods[0]; i++) {
+            xkb_mod_index_t k = xkb_keymap_mod_get_index(layouts[m].map, mods[i].name);
+            if (k == XKB_MOD_INVALID) continue;
+            if (locks & mods[i].lock) locked |= 1u << k;
+            else locked &= ~(1u << k);
+        }
+        if (locked != was) {
+            xkb_state_update_mask(st, xkb_state_serialize_mods(st, XKB_STATE_MODS_DEPRESSED),
+                                  xkb_state_serialize_mods(st, XKB_STATE_MODS_LATCHED), locked,
+                                  xkb_state_serialize_layout(st, XKB_STATE_LAYOUT_DEPRESSED),
+                                  xkb_state_serialize_layout(st, XKB_STATE_LAYOUT_LATCHED),
+                                  xkb_state_serialize_layout(st, XKB_STATE_LAYOUT_LOCKED));
+        }
+    }
+    if (caps_before != !!(locks & KEYS_LOCK_CAPS)) ime_set_caps(!!(locks & KEYS_LOCK_CAPS));
+}
+
+/* The bar's locks reported on the seat's link (keys_link), for process 1. */
+static void report_locks(void)
+{
+    char msg[16];
+    int len = snprintf(msg, sizeof msg, "locks%c%d", 0, bar_locks);
+    if (keys_link >= 0 && bar_locks >= 0) control_send(keys_link, msg, (size_t)len, NULL, 0);
+}
+
+/* The locks process 1 gave with the keyboards: the layouts' and, while the
+ * seat is the bar's, labwc's (the seat's layout's virtual keyboard). */
+static void take_given_locks(int locks)
+{
+    bar_locks = locks;
+    layouts_take_locks(locks);
+    if (active && nlayouts && layout_vkbd(&layouts[active_layout])) {
+        use_layout(active_layout);
+        wl_display_flush(display);
+    }
+}
+
 /* The keys text is typed on: letters and digits only. Applications go by the
  * key as well as by the character the keymap gives it, and Esc, Enter, Tab,
  * Backspace... have meanings of their own (Chromium drops a character typed
@@ -2249,7 +2383,9 @@ static void take_keyboards(const int *fds, int n)
     }
 }
 
-/* seat's message: "keys" and the keyboards; its end closed, none. */
+/* seat's message: "keys [LOCKS]" and the keyboards; its end closed, none.
+ * Given keyboards after none, the bar starts from the locks they come with;
+ * left with none, it knows no locks until then. */
 static void keyboards_message(void)
 {
     char msg[CONTROL_MAX];
@@ -2259,8 +2395,12 @@ static void keyboards_message(void)
         close(keys_link);
         keys_link = -1;
         take_keyboards(NULL, 0);
+        bar_locks = -1;
     } else if (strcmp(msg, "keys") == 0) {
+        int had = nkbds, locks = len > 5 ? atoi(msg + 5) : -1;
         take_keyboards(fds, n);
+        if (nkbds == 0) bar_locks = -1;
+        else if (had == 0 && locks >= 0) take_given_locks(locks);
     } else {
         for (int i = 0; i < n; i++) close(fds[i]);
     }
@@ -2276,8 +2416,9 @@ static void drop_dead_keyboards(void)
     take_keyboards(alive, n);
 }
 
-/* Each layout's keys passed on, released; its modifiers none; the seat's
- * layout last, so that the seat keeps it. */
+/* Each layout's keys passed on, released; its modifiers none but the locks
+ * (labwc takes a virtual keyboard's locks as the seat's); the seat's layout
+ * last, so that the seat keeps it. */
 static void clear_virtual_keys(void)
 {
     memset(kbd_forwarded, 0, sizeof kbd_forwarded);
@@ -2295,7 +2436,8 @@ static void clear_virtual_keys(void)
                 zwp_virtual_keyboard_v1_key(y->vkbd, t, (uint32_t)c, WL_KEYBOARD_KEY_STATE_RELEASED);
             }
         }
-        zwp_virtual_keyboard_v1_modifiers(y->vkbd, 0, 0, 0, 0);
+        zwp_virtual_keyboard_v1_modifiers(y->vkbd, 0, 0, y->st ? xkb_state_serialize_mods(y->st,
+                                          XKB_STATE_MODS_LOCKED) : 0, 0);
         y->sent_valid = 0;
         wl_display_flush(display);
     }
@@ -2356,8 +2498,9 @@ static void on_sigusr1(int sig)
     wake();
 }
 
-/* Settings may change the layouts while a direct program owns the seat.
- * Reloading configuration does not grant the bar ownership of its input. */
+/* Settings may change the layouts, or the input method's packages, while a
+ * direct program owns the seat. Reloading configuration does not grant the
+ * bar ownership of its input. */
 static void on_sighup(int sig)
 {
     (void)sig;
@@ -2373,6 +2516,119 @@ static void register_keyboard_signals(void)
     signal(SIGUSR2, on_sigusr2);
     signal(SIGUSR1, on_sigusr1);
     signal(SIGHUP, on_sighup); /* settings changes configuration, not seat ownership */
+    /* The seat's signals, held while the previous image ran this one
+     * (bar_exec), come now, to these handlers. */
+    sigset_t seat_signals;
+    sigemptyset(&seat_signals);
+    sigaddset(&seat_signals, SIGHUP);
+    sigaddset(&seat_signals, SIGUSR1);
+    sigaddset(&seat_signals, SIGUSR2);
+    sigprocmask(SIG_UNBLOCK, &seat_signals, NULL);
+}
+
+/*
+ * Updating in place. A system update builds locachy-bar again (pacman's
+ * hook: locachy-pkg rebuild) while this one runs, as when Chinese Pinyin is
+ * installed into a system whose bar was built without the input method. On
+ * settings' SIGHUP, when the file it was started from is another file
+ * (linking writes a new one) or changed since, the bar runs it in its own
+ * place (bar_exec: execv, so the same PID, which locachy-seat supervises,
+ * the same argv and environment), once no chooser, question, notification
+ * or composition is on the screen, and the file is EXE_SETTLE seconds old
+ * (not one being linked). /proc/self/exe is read once, at the start: later
+ * it names the running image, even after its file was replaced. Unchanged,
+ * a SIGHUP only reloads, as before.
+ *
+ * What goes across: the seat's link (LOCACHY_BAR_KEYS, as the seat gave it)
+ * and the keyboards it lent with their locks, the listening sockets (OPEN_SOCKET,
+ * BAR_SOCKET: no request is refused meanwhile, a waiting one is taken
+ * after), whether the seat is released; the seat's signals are held until
+ * the new image has its handlers. What is closed first: no keyboard stays
+ * grabbed, no key held through the virtual keyboard, Rime's user data
+ * saved, D-Bus and Wayland requests flushed. What the new image makes again:
+ * its Wayland objects (the bars, overlays and virtual keyboard: labwc
+ * destroys the old ones as the connection closes), the tray's watcher and
+ * the notification server on each bus (StatusNotifierItems register again
+ * when the watcher reappears, as the specification has them do). The bar
+ * holds no clipboard. The input method starts in direct input.
+ */
+#define EXE_SETTLE 2
+static char exe_path[4096]; /* the file it was started from */
+static struct stat exe_stat;
+static int exe_known, exec_wanted, bar_inherited;
+static char **bar_argv;
+
+static void exe_record(char **argv)
+{
+    bar_argv = argv;
+    ssize_t n = readlink("/proc/self/exe", exe_path, sizeof exe_path - 1);
+    exe_known = n > 0 && (exe_path[n] = '\0', stat(exe_path, &exe_stat) == 0);
+}
+
+/* The file at exe_path, an executable, is not the one started. */
+static int exe_changed(void)
+{
+    struct stat now;
+    if (!exe_known || stat(exe_path, &now) != 0 || !S_ISREG(now.st_mode) || access(exe_path, X_OK) != 0) {
+        return 0;
+    }
+    return now.st_dev != exe_stat.st_dev || now.st_ino != exe_stat.st_ino ||
+           now.st_mtim.tv_sec != exe_stat.st_mtim.tv_sec || now.st_mtim.tv_nsec != exe_stat.st_mtim.tv_nsec;
+}
+
+/* A listening socket the previous image left (NAME: its number), still
+ * bound to path; -1: none, and the bar makes it anew. */
+static int inherited_socket(const char *name, const char *path)
+{
+    const char *value = getenv(name);
+    int fd = value && *value ? atoi(value) : -1, listening = 0;
+    unsetenv(name);
+    struct sockaddr_un address;
+    socklen_t length = sizeof address, size = sizeof listening;
+    if (fd < 3 || fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) return -1;
+    if (getsockopt(fd, SOL_SOCKET, SO_ACCEPTCONN, &listening, &size) != 0 || !listening ||
+        getsockname(fd, (struct sockaddr *)&address, &length) != 0 || address.sun_family != AF_UNIX ||
+        strncmp(address.sun_path, path, sizeof address.sun_path) != 0 || access(path, F_OK) != 0) {
+        close(fd);
+        return -1;
+    }
+    bar_inherited++;
+    return fd;
+}
+
+/* What locachy-seat gave the bar (LOCACHY_BAR_KEYS: its link for the
+ * keyboards), and what its previous image left it (bar_exec): the keyboards
+ * it held, whether the seat was released. After init_xkb. */
+static void bar_inherit(void)
+{
+    const char *link = getenv("LOCACHY_BAR_KEYS");
+    keys_link = link && *link ? atoi(link) : -1;
+    unsetenv("LOCACHY_BAR_KEYS");
+    if (keys_link < 3) {
+        keys_link = -1;
+        say("locachy-bar: no keyboards from seat (LOCACHY_BAR_KEYS): key_ime and the volume keys do nothing");
+    } else {
+        fcntl(keys_link, F_SETFD, FD_CLOEXEC);
+    }
+    if (getenv("LOCACHY_BAR_RELEASED")) active = 0;
+    unsetenv("LOCACHY_BAR_RELEASED");
+    const char *list = getenv("LOCACHY_BAR_KEYBOARDS");
+    int fds[MAX_KBDS], n = 0;
+    for (const char *p = list; p && *p && n < MAX_KBDS;) {
+        char *end;
+        long fd = strtol(p, &end, 10);
+        if (end == p) break;
+        if (fd >= 3 && fd <= INT32_MAX && fcntl((int)fd, F_SETFD, FD_CLOEXEC) == 0) fds[n++] = (int)fd;
+        p = *end == ',' ? end + 1 : end;
+    }
+    unsetenv("LOCACHY_BAR_KEYBOARDS");
+    if (n) take_keyboards(fds, n);
+    const char *locks = getenv("LOCACHY_BAR_LOCKS");
+    if (n && locks && *locks) { /* the previous image's: restore_passthrough_keymap gives them to labwc */
+        bar_locks = atoi(locks) & (KEYS_LOCK_CAPS | KEYS_LOCK_NUM);
+        layouts_take_locks(bar_locks);
+    }
+    unsetenv("LOCACHY_BAR_LOCKS");
 }
 
 static void keyboard_signals(void)
@@ -2382,12 +2638,17 @@ static void keyboard_signals(void)
         reset_keyboard_state();
     }
     if (sig_regrab || sig_reload) {
+        int hup = sig_reload;
         sig_regrab = sig_reload = 0;
+        if (hup && exe_changed()) exec_wanted = 1; /* bar_exec, once nothing is shown */
         reset_keyboard_state();
         base_language_reload();
+        ime_reload(); /* Chinese Pinyin installed or removed (settings) */
+        panel_fonts_reload(); /* and the CJK fonts it requires */
         keys_reload();
         load_width_keys();
         init_xkb();
+        if (bar_locks >= 0) layouts_take_locks(bar_locks); /* the new layouts keep the locks */
         if (active) restore_passthrough_keymap();
         bars_dirty = 1;
         want_grab = grab_wanted();
@@ -2509,7 +2770,9 @@ static void notice(const char *msg)
  * the chooser (no rule and several candidates, or the rule "ask"). Folders
  * go to home's file manager. One request is served at a time.
  */
+#ifndef OPEN_DIR
 #define OPEN_DIR "/run/locachy/open"
+#endif
 #define OPEN_SOCKET OPEN_DIR "/socket"
 #define CHOICES 24
 
@@ -2526,6 +2789,9 @@ static struct overlay question = { .ns = "locachy-open", .render = render_choose
 static void open_listen(void)
 {
     struct sockaddr_un address = { .sun_family = AF_UNIX, .sun_path = OPEN_SOCKET };
+    if ((open_fd = inherited_socket("LOCACHY_BAR_OPEN_FD", OPEN_SOCKET)) >= 0) {
+        return;
+    }
     mkdir("/run/locachy", 0755);
     mkdir(OPEN_DIR, 0755);
     unlink(OPEN_SOCKET);
@@ -2617,8 +2883,11 @@ static void deliver(int client, const char *name)
     /* A framebuffer program: home opens it, on its own screen, as root. Only
      * one whose .desktop file opens the type: a request (any container can
      * send one) never has its file run by the terminal or the like. A
-     * container's path is the host's only in the shared folders. */
-    if (open_program(name, choose.target, spec, sizeof spec, argv, 16)) {
+     * container's path is the host's only in the shared folders. The
+     * document viewer as it is installed opens in a window of its own on
+     * this display instead (process 1's, as root as in home). */
+    int words = open_program(name, choose.target, spec, sizeof spec, argv, 16);
+    if (words) {
         char why[512];
         if (!opens_type(name, choose.type)) {
             say("locachy-bar: refused %s (%s) from %s with %s: it does not open that", choose.target,
@@ -2626,6 +2895,12 @@ static void deliver(int client, const char *name)
             answer(client, "error %s does not open files of this type", name);
         } else if (choose.target[0] == '/' && !open_shared(choose.target, why, sizeof why)) {
             answer(client, "error %s", why);
+        } else if (words == 2 && strcmp(argv[0], "/usr/local/bin/view") == 0 && choose.target[0] == '/' &&
+                   strlen(choose.target) < 1024) {
+            say("locachy-bar: open %s (%s) from %s with %s in a window", choose.target, choose.type, choose.from,
+                name);
+            window_open("view", choose.target);
+            answer(client, "ok %s", name);
         } else if (open_in_home(name, choose.target) < 0) {
             answer(client, "error cannot ask home to open it%s", "");
         } else {
@@ -2766,12 +3041,17 @@ static void again_tick(void)
  * was asked for one, or the user is asked about starting it again) or
  * "error WHY".
  */
+#ifndef BAR_SOCKET
 #define BAR_SOCKET "/run/user/0/locachy-bar.sock"
+#endif
 static int bar_fd = -1;
 
 static void bar_listen(void)
 {
     struct sockaddr_un address = { .sun_family = AF_UNIX, .sun_path = BAR_SOCKET };
+    if ((bar_fd = inherited_socket("LOCACHY_BAR_FD", BAR_SOCKET)) >= 0) {
+        return;
+    }
     unlink(BAR_SOCKET);
     bar_fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     if (bar_fd < 0 || bind(bar_fd, (struct sockaddr *)&address, sizeof address) < 0 ||
@@ -3363,15 +3643,15 @@ static void open_request(void)
     if (with[0]) {
         deliver(client, with);
     } else if (strcmp(choose.type, "inode/directory") == 0) {
-        /* Folders open in home's file manager: home reads the request when it is shown. */
-        FILE *out = fopen(FILES_REQUEST, "we");
-        if (out) {
-            fprintf(out, "%s\n", choose.target);
-            fclose(out);
+        /* Folders open in a file manager window of their own on this display
+         * (files shows only the user's home, checked as the user). */
+        if (choose.target[0] != '/' || strlen(choose.target) >= 1024) {
+            answer(client, "error cannot show %s", choose.target);
+            return;
         }
-        say("locachy-bar: open folder %s from %s in home's file manager", choose.target, choose.from);
-        kill(getppid(), SIGUSR1); /* locachy-seat asks for home */
-        answer(client, "ok home%s", "");
+        say("locachy-bar: open folder %s from %s in a file manager window", choose.target, choose.from);
+        window_open("files", choose.target);
+        answer(client, "ok files%s", "");
     } else {
         int kind = open_rule(choose.type, rule, sizeof rule);
         char names[2][OPEN_NAME];
@@ -3466,6 +3746,16 @@ static void handle_kbd_event(int fd)
             if (down != was_down) {
                 feed_key(dl, ev.code, down);
                 share_locks(dl);
+                if (layout_locks(dl) != bar_locks) {
+                    /* A lock key: process 1 is told (it may not see it);
+                     * held here, labwc too, through the seat's layout. */
+                    bar_locks = layout_locks(dl);
+                    report_locks();
+                    if (grabbed && layouts[active_layout].vkbd) {
+                        use_layout(active_layout);
+                        wl_display_flush(display);
+                    }
+                }
             }
         }
         /* A shifted lock such as JIS Shift+Eisu has no unshifted Caps role.
@@ -3533,7 +3823,11 @@ static void handle_kbd_event(int fd)
         }
         if (act == K_CTRL_SPACE || act == K_ACT_IME_CN || act == K_ACT_IME_RAW || act == K_ACT_IME_WIDTH) {
             const char *msg;
+            int epoch = input_epoch;
             if (ev.value == 1 && ime_action(act, &msg)) {
+                /* English mode's word is committed when the mode changes:
+                 * typed now, while the keyboard is still the bar's. */
+                if (!drain_ime_commit(epoch)) continue;
                 want_grab = grab_wanted();
                 if (keys_down == 0) {
                     set_grab(want_grab);
@@ -3707,6 +4001,85 @@ static const struct wl_registry_listener reg_listener = {
     .global_remove = reg_remove,
 };
 
+/* What the user may still answer or read: bar_exec waits for it to go. */
+static int exec_busy(void)
+{
+    return choose.client >= 0 || again.pending || again.shown || nnotes > 0 || ime_bar.surf != NULL;
+}
+
+/* The changed executable, settled, and nothing on the screen to answer. A
+ * file changed back (or gone) is no longer wanted. */
+static int exec_ready(void)
+{
+    struct stat st;
+    if (!exe_changed()) {
+        exec_wanted = 0;
+        return 0;
+    }
+    return stat(exe_path, &st) == 0 && time(NULL) >= st.st_mtime + EXE_SETTLE && !exec_busy();
+}
+
+static void keep_open(int fd, int keep)
+{
+    if (fd >= 0) fcntl(fd, F_SETFD, keep ? 0 : FD_CLOEXEC);
+}
+
+/* The new executable in this one's place (see exe_record). Returns only if
+ * it cannot be run; this image then goes on as it was. */
+static void bar_exec(void)
+{
+    exec_wanted = 0;
+    sigset_t seat_signals, previous;
+    sigemptyset(&seat_signals);
+    sigaddset(&seat_signals, SIGHUP);
+    sigaddset(&seat_signals, SIGUSR1);
+    sigaddset(&seat_signals, SIGUSR2);
+    sigprocmask(SIG_BLOCK, &seat_signals, &previous); /* their default would end the new image */
+    say("locachy-bar: %s is a new build: running it in place (pid %d)", exe_path, (int)getpid());
+    set_grab(0); /* no keyboard grabbed, no key held through the virtual keyboard */
+    ime_done();  /* Rime's user data saved */
+    for (struct tray *t = trays; t; t = t->next) {
+        if (t->conn) g_dbus_connection_flush_sync(t->conn, NULL, NULL);
+    }
+    if (host_notes.conn) g_dbus_connection_flush_sync(host_notes.conn, NULL, NULL);
+    if (display) wl_display_flush(display);
+    char number[16], list[MAX_KBDS * 12] = "";
+    size_t used = 0;
+    for (int i = 0; i < nkbds; i++) {
+        keep_open(kbds[i], 1);
+        used += (size_t)snprintf(list + used, sizeof list - used, "%s%d", i ? "," : "", kbds[i]);
+    }
+    if (nkbds) setenv("LOCACHY_BAR_KEYBOARDS", list, 1);
+    if (bar_locks >= 0) {
+        snprintf(number, sizeof number, "%d", bar_locks);
+        setenv("LOCACHY_BAR_LOCKS", number, 1);
+    }
+    struct { int fd; const char *name; } passed[] = {
+        { keys_link, "LOCACHY_BAR_KEYS" }, { open_fd, "LOCACHY_BAR_OPEN_FD" }, { bar_fd, "LOCACHY_BAR_FD" },
+    };
+    for (size_t i = 0; i < sizeof passed / sizeof passed[0]; i++) {
+        if (passed[i].fd < 0) continue;
+        keep_open(passed[i].fd, 1);
+        snprintf(number, sizeof number, "%d", passed[i].fd);
+        setenv(passed[i].name, number, 1);
+    }
+    if (!active) setenv("LOCACHY_BAR_RELEASED", "1", 1);
+    execv(exe_path, bar_argv);
+    int error = errno;
+    for (int i = 0; i < nkbds; i++) keep_open(kbds[i], 0);
+    for (size_t i = 0; i < sizeof passed / sizeof passed[0]; i++) {
+        keep_open(passed[i].fd, 0);
+        unsetenv(passed[i].name);
+    }
+    unsetenv("LOCACHY_BAR_KEYBOARDS");
+    unsetenv("LOCACHY_BAR_LOCKS");
+    unsetenv("LOCACHY_BAR_RELEASED");
+    ime_init(NULL, NULL);
+    set_grab(want_grab);
+    sigprocmask(SIG_SETMASK, &previous, NULL);
+    say("locachy-bar: cannot run %s (%s); this one goes on", exe_path, strerror(error));
+}
+
 /* How long the loop may wait (ms; -1: for an event): until the earliest of
  * the deadlines the ticks keep (a notice's end, a tray or bus retry, a
  * question's, a notification's, a bar surface asked again), and while the
@@ -3722,6 +4095,7 @@ static int wait_ms(void)
     if (!host_notes.conn && !host_notes.connecting) DUE(host_notes.retry_at);
     if (again.watch[0]) DUE(again.watch_until);
     if (again.pending && !again.shown) DUE(active && choose.client < 0 ? now : again.until);
+    if (exec_wanted && !exec_busy()) DUE(now + 1.0); /* the new executable settling */
     for (int i = 0; active && i < nnotes; i++) {
         if (notes[i].time > 0 && notes[i].shown_at > 0) DUE(notes[i].shown_at + notes[i].time / 1000.0);
     }
@@ -3740,8 +4114,10 @@ static int wait_ms(void)
     return ms;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    (void)argc;
+    exe_record(argv);
     for (int tries = 0; tries < 50; tries++) {
         display = wl_display_connect(NULL);
         if (display) break;
@@ -3760,15 +4136,7 @@ int main(void)
     if (!nlayouts) return 1;
     load_width_keys();
     ime_init(NULL, NULL);
-    const char *link = getenv("LOCACHY_BAR_KEYS");
-    keys_link = link && *link ? atoi(link) : -1;
-    unsetenv("LOCACHY_BAR_KEYS");
-    if (keys_link < 3) {
-        keys_link = -1;
-        say("locachy-bar: no keyboards from seat (LOCACHY_BAR_KEYS): key_ime and the volume keys do nothing");
-    } else {
-        fcntl(keys_link, F_SETFD, FD_CLOEXEC);
-    }
+    bar_inherit();
     register_keyboard_signals();
 
     if (vkbd_mgr && wl_seat_obj) {
@@ -3789,6 +4157,9 @@ int main(void)
 
     for (;;) {
         keyboard_signals();
+        if (exec_wanted && exec_ready()) {
+            bar_exec(); /* returns only if the new executable cannot be run */
+        }
         wl_display_flush(display);
         GPollFD gfds[32];
         gint gmax, gtimeout;

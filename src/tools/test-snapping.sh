@@ -20,8 +20,8 @@ wayland-scanner client-header "$dec" "$out/gen/xdg-decoration-unstable-v1-client
 wayland-scanner private-code "$dec" "$out/gen/xdg-decoration-unstable-v1-protocol.c"
 cc=(gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -I"$src/base/include" -I"$src/base" -I"$out/gen")
 mapfile -t base < <(find "$src/base" -maxdepth 1 -name '*.c' ! -name ime.c | sort)
-read -r -a flags <<<"$(pkg-config --cflags freetype2 libnm)"
-read -r -a libs <<<"$(pkg-config --libs freetype2 libnm)"
+read -r -a flags <<<"$(pkg-config --cflags freetype2 fontconfig libnm)"
+read -r -a libs <<<"$(pkg-config --libs freetype2 fontconfig libnm)"
 "${cc[@]}" "${flags[@]}" -DCONFIG_FREETYPE -DCONFIG_NETWORKMANAGER \
     "$src/progs/labwc-control.c" "${base[@]}" "$out/gen/security-context-v1-protocol.c" \
     "$out/gen/wlr-foreign-toplevel-management-unstable-v1-protocol.c" \
@@ -33,13 +33,18 @@ read -r -a libs <<<"$(pkg-config --libs freetype2 libnm)"
     "$out/gen/wlr-output-management-unstable-v1-protocol.c" "$out/gen/ext-idle-notify-v1-protocol.c" \
     "${libs[@]}" -lwayland-client -lm -o "$out/outputs"
 # Rime is optional on the target host; snapping does not need an input method.
-ime_flags=() ime_libs=()
+ime_flags=() ime_libs=() bar_flags=()
+if [ "${2:-}" = --corner ]; then
+    bar_flags=("-DOVERVIEW=\"$out/overview-marker\"" -DCORNER_TEST_MOTION)
+    printf '#!/bin/sh\nprintf "trigger\\n" >>"%s/triggers"\n' "$out" >"$out/overview-marker"
+    chmod 755 "$out/overview-marker"
+fi
 if [ -f /usr/include/rime_api.h ] && [ -f /usr/lib/librime.so ]; then
     ime_flags=(-DCONFIG_IME)
     rime_lua=$({ ldd /usr/lib/rime-plugins/librime-lua.so 2>/dev/null || true; } | sed -n 's/^[[:space:]]*\(liblua[^ ]*\) => .*/\1/p' | head -n 1)
     ime_libs=(-lrime ${rime_lua:+-Wl,--push-state,--no-as-needed -l:$rime_lua -Wl,--pop-state})
 fi
-"${cc[@]}" "${flags[@]}" -DCONFIG_FREETYPE -DCONFIG_NETWORKMANAGER "${ime_flags[@]}" \
+"${cc[@]}" "${flags[@]}" -DCONFIG_FREETYPE -DCONFIG_NETWORKMANAGER "${ime_flags[@]}" "${bar_flags[@]}" \
     "$src/progs/bar.c" "${base[@]}" "$src/base/ime.c" \
     "$out/gen/wlr-layer-shell-unstable-v1-protocol.c" "$out/gen/virtual-keyboard-unstable-v1-protocol.c" \
     "$out/gen/xdg-shell-protocol.c" "$out/gen/wlr-foreign-toplevel-management-unstable-v1-protocol.c" \
@@ -70,6 +75,7 @@ Path(sys.argv[2]).write_text(text)
 PY
 test_script=test-snapping.py
 [ "${2:-}" != --inner-edge ] || test_script=test-inner-edge.py
+[ "${2:-}" != --corner ] || test_script=test-corner-edge.py
 export src out test_script LOCACHY_TEST_LABWC="${LOCACHY_TEST_LABWC:-labwc}"
 exec unshare --mount --propagation private --pid --fork --kill-child --mount-proc bash -euc '
     mkdir -p /dev/input /run/user /run/locachy /etc/locachy

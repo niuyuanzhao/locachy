@@ -12,6 +12,9 @@ for module in locachy_upstream.py locachy_transaction.py locachy_apps.py; do
     install -m 644 "$src/link/$module" "$lib/$module"
 done
 install -m 755 "$src/link/local-package-gate" "$lib/local-package-gate"
+# pacman.conf and the mirror lists readable by the build user again, where an
+# earlier locachy-repos left them root's alone.
+python3 -I /usr/local/bin/locachy-repos fix-modes || echo "install-pkg-tools: locachy-repos fix-modes failed" >&2
 [ -e /etc/locachy/packages ] || install -m 644 "$src/packages" /etc/locachy/packages
 if ! getent passwd locachy-builder >/dev/null; then
     useradd --system --user-group --home-dir /var/lib/locachy/builder/home --no-create-home \

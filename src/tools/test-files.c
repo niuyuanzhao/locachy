@@ -12,7 +12,8 @@
 #define ARCHIVE_PROGRAM "/bin/true" /* there and runnable: its menus are shown */
 #define CLOUD_STATUS cloud_status_path
 #define CLOUD_CLIENT cloud_client_path
-static char cloud_status_path[256], cloud_client_path[256];
+#define SEAT_CLIENT seat_client_path /* a script of the test's: what it was asked */
+static char cloud_status_path[256], cloud_client_path[256], seat_client_path[256];
 #include "../progs/files.c"
 #include "i18n-stub.h"
 #include <assert.h>
@@ -22,6 +23,10 @@ static char cloud_status_path[256], cloud_client_path[256];
 #define REQUEST (-2) /* a container asks for the folder in request; a timeout */
 #define OPEN    (-3) /* open_in_home's request: request is the file's text; a timeout */
 #define WAIT    (-4) /* a timeout after 50 ms: a cloud worker has time to end */
+#define HOTPLUG (-5) /* one output removed while a drag/pull is in progress */
+#define AFTER_HOTPLUG (-6) /* verify the real browse K_SHOWN path */
+#define IDLE    (-7) /* nothing typed, for as long as a copy runs (then a timeout) */
+#define TERM    (-8) /* SIGTERM to this process (home's Stop); a timeout */
 #define SCROLL(i) (-200 - (i)) /* scrolls[i], as K_POINTER */
 #define KEY(k, m) (-1000000 - ((m) << 16) - (k)) /* key k with modifiers m */
 #define CLICK(i) (-100 - (i)) /* clicks[i], as K_POINTER */
@@ -83,34 +88,107 @@ void base_status(const char *tag, char *out, size_t size) { (void)tag; snprintf(
 /* What is drawn: a character per cell (a wide one in its first, 0 in its
  * second), as screen.c draws it on ncols columns (at most 100): a fill
  * blanks, text is cut at the edge. And the bar's title. */
-static int ncols = 100;
+static int ncols = 100, native_fixture, native_on, native_output, native_count = 2;
 static uint32_t drawn[30][100], drawn_bg[30][100];
+static uint32_t output_drawn[2][30][100], output_bg[2][30][100];
+static int native_cols[] = { 76, 100 }, native_rows[] = { 27, 30 };
+static int native_cell_w[] = { 8, 12 }, native_cell_h[] = { 16, 24 };
+static const char *native_names[] = { "eDP-1", "HDMI-A-1" };
 static char bar_title[64];
-int screen_cols(void) { return ncols; }
-int screen_rows(void) { return ncols ? 30 : 30; }
-void screen_cells(int *w, int *h, int *t) { *w = 8; *h = 16; *t = 0; }
+int screen_cols(void) { return native_on ? native_cols[native_output] : ncols; }
+int screen_rows(void) { return native_on ? native_rows[native_output] : 30; }
+void screen_cells(int *w, int *h, int *t)
+{
+    *w = native_on ? native_cell_w[native_output] : 8;
+    *h = native_on ? native_cell_h[native_output] : 16;
+    *t = 0;
+}
+void screen_pixels(int *w, int *h)
+{
+    int cw, ch, top;
+    screen_cells(&cw, &ch, &top);
+    *w = screen_cols() * cw;
+    *h = screen_rows() * ch + top;
+}
+int screen_extended(int on)
+{
+    if (!native_fixture) return -1;
+    int changed = native_on != !!on;
+    native_on = !!on;
+    if (native_output >= native_count) native_output = 0;
+    return changed;
+}
+int screen_is_extended(void) { return native_on; }
+int screen_output_current(void) { return native_on ? native_output : 0; }
+int screen_output_count(void) { return native_on ? native_count : 1; }
+int screen_output_get(int i, struct screen_output *out)
+{
+    if (i < 0 || i >= screen_output_count()) return -1;
+    memset(out, 0, sizeof *out);
+    snprintf(out->name, sizeof out->name, "%s", native_names[i]);
+    out->x = i ? 608 : 0;
+    out->pixel_width = native_cols[i] * native_cell_w[i];
+    out->pixel_height = native_rows[i] * native_cell_h[i];
+    out->scale = i ? 1.5 : 1;
+    out->width = out->pixel_width / out->scale;
+    out->height = out->pixel_height / out->scale;
+    return 0;
+}
+int screen_output_select(int i)
+{
+    if (i < 0 || i >= screen_output_count()) return -1;
+    int old = native_output;
+    if (native_on) {
+        memcpy(output_drawn[old], drawn, sizeof drawn);
+        memcpy(output_bg[old], drawn_bg, sizeof drawn_bg);
+        native_output = i;
+        memcpy(drawn, output_drawn[i], sizeof drawn);
+        memcpy(drawn_bg, output_bg[i], sizeof drawn_bg);
+    }
+    return old;
+}
+int screen_output_at(int x, int y, int *lx, int *ly)
+{
+    for (int i = 0; i < native_count; i++) {
+        struct screen_output o;
+        screen_output_get(i, &o);
+        if (x < o.x || y < 0 || x >= o.x + o.width || y >= o.height) continue;
+        if (lx) *lx = (x - o.x) * o.scale;
+        if (ly) *ly = y * o.scale;
+        return i;
+    }
+    return -1;
+}
 int screen_char_cells(uint32_t cp) { return cp >= 0x4E00 && cp <= 0x9FFF ? 2 : 1; }
 void screen_fill(int c, int r, int w, int h, uint32_t rgb)
 {
     for (int y = r; y < r + h; y++)
         for (int x = c; x < c + w; x++)
-            if (y >= 0 && y < 30 && x >= 0 && x < ncols) { drawn[y][x] = ' '; drawn_bg[y][x] = rgb; }
+            if (y >= 0 && y < screen_rows() && x >= 0 && x < screen_cols()) { drawn[y][x] = ' '; drawn_bg[y][x] = rgb; }
 }
 void screen_fill_px(int x, int y, int w, int h, uint32_t rgb)
 {
-    (void)x; (void)y; (void)w; (void)h; (void)rgb;
+    int width, height;
+    screen_pixels(&width, &height);
+    if (x == 0 && y == 0 && w == width && h == height) screen_fill(0, 0, screen_cols(), screen_rows(), rgb);
     px_fills++;
 }
 void screen_text(int c, int r, const char *s, uint32_t fg, uint32_t bg)
 {
     (void)fg;
-    for (size_t i = 0; r >= 0 && r < 30 && s[i] && c < ncols; i = utf_next(s, i), c++) {
+    for (size_t i = 0; r >= 0 && r < screen_rows() && s[i] && c < screen_cols(); i = utf_next(s, i), c++) {
         uint32_t cp = utf_at(s, i, utf_next(s, i));
         if (c >= 0) { drawn[r][c] = cp; drawn_bg[r][c] = bg; }
-        if (screen_char_cells(cp) == 2 && c + 1 < ncols) { drawn[r][++c] = 0; drawn_bg[r][c] = bg; }
+        if (screen_char_cells(cp) == 2 && c + 1 < screen_cols()) { drawn[r][++c] = 0; drawn_bg[r][c] = bg; }
     }
 }
-void screen_flush(void) {}
+void screen_flush(void)
+{
+    if (native_on) {
+        memcpy(output_drawn[native_output], drawn, sizeof drawn);
+        memcpy(output_bg[native_output], drawn_bg, sizeof drawn_bg);
+    }
+}
 void screen_bar(const char *title, const char *ime)
 {
     (void)ime;
@@ -164,6 +242,12 @@ int clipboard_get(int primary, int *fd, size_t *size)
     return CLIPBOARD_OK;
 }
 
+/* While a copy runs: how often it looked at the keys, whether its hidden
+ * temporary was there, and whether anything was ever under watch_final. */
+static int copy_polls, saw_temp, saw_final, kept_closes;
+static char watch_final[PATH_MAX];
+void key_close_kept(void) { kept_closes++; }
+
 int key_poll_timeout(int fd, int timeout)
 {
     (void)fd;
@@ -174,7 +258,21 @@ int key_poll_timeout(int fd, int timeout)
         assert(++extra < 50); /* q does not get out: stuck */
         return 'q';
     }
+    if (key == IDLE && copying.temp[0]) {
+        struct stat st;
+        copy_polls++;
+        saw_temp |= lstat(copying.temp, &st) == 0;
+        saw_final |= watch_final[0] && lstat(watch_final, &st) == 0;
+        return 0;
+    }
     step++;
+    if (key == IDLE) {
+        return 0;
+    }
+    if (key == TERM) {
+        kill(getpid(), SIGTERM);
+        return 0;
+    }
     if (key <= -1000000) {
         int raw = -1000000 - key;
         mods = (raw >> 16) & 0xF;
@@ -189,6 +287,17 @@ int key_poll_timeout(int fd, int timeout)
     if (key <= CLICK(0)) {
         point(&clicks[CLICK(0) - key]);
         return K_POINTER;
+    }
+    if (key == HOTPLUG) {
+        native_count = 1;
+        drag.mode = DRAG_BAND;
+        drag.base = calloc(1, 1);
+        pull.on = 1;
+        return K_SHOWN;
+    }
+    if (key == AFTER_HOTPLUG) {
+        assert(drag.mode == DRAG_NONE && !pull.on && files_output == 0 && native_output == 0);
+        return 'q';
     }
     if (key == WAIT) {
         usleep(50000);
@@ -228,27 +337,35 @@ int open_normalize(const char *target, char *out, size_t size)
     return snprintf(out, size, "%s", path) < (int)size ? 0 : -1;
 }
 
-/* "program:viewer" is a framebuffer program: a task of its own (base_open). */
+/* "program:viewer" is a framebuffer program: a task of its own (base_open);
+ * so are "program:view", the document viewer as installed (a window of its
+ * own from a window), and "program:edit" (from home only). */
 static char task[2][PATH_MAX];
 static int tasks;
 int open_program(const char *name, const char *target, char *spec, size_t size, char *argv[], int max)
 {
-    if (strcmp(name, "program:viewer") != 0 || max < 3) {
+    const char *binary = !strcmp(name, "program:viewer") ? "/usr/local/bin/viewer" :
+                         !strcmp(name, "program:view") ? "/usr/local/bin/view" :
+                         !strcmp(name, "program:edit") ? "/usr/local/bin/edit" : NULL;
+    if (!binary || max < 3) {
         return 0;
     }
-    snprintf(spec, size, "/usr/local/bin/viewer");
+    snprintf(spec, size, "%s", binary);
     argv[0] = spec;
     argv[1] = (char *)target;
     argv[2] = NULL;
     return 2;
 }
 
+/* Process 1's answer: home had one screen, and has it again; or "shown"
+ * (several: home kept the others). */
+static const char *open_answer = "back viewer";
 void base_open(char *const argv[], char *why, size_t size)
 {
     tasks++;
     snprintf(task[0], sizeof task[0], "%s", argv[0]);
     snprintf(task[1], sizeof task[1], "%s", argv[1] ? argv[1] : "");
-    snprintf(why, size, "back viewer");
+    snprintf(why, size, "%s", open_answer);
 }
 
 /* archive, called by the Extract and Compress menus: its argv, and the
@@ -276,6 +393,199 @@ int open_shared(const char *path, char *why, size_t size)
     }
     snprintf(why, size, "%.400s: not in a shared folder", path);
     return 0;
+}
+
+/* The Wayland window's data device (wayland-data.c): off unless a scenario
+ * turns it on; a drag records its text/uri-list and press serial, one with
+ * a document-portal key also the key and how it is told its end. */
+static int wl_on, wl_starts, wl_key_starts;
+static char wl_uris[8192], wl_key[8192];
+static uint32_t wl_serial;
+static void (*wl_ended)(int finished, void *data);
+static void *wl_ended_data;
+int wl_data_active(void) { return wl_on; }
+uint32_t wl_data_press_serial(void) { return 4242; }
+int wl_data_drag_start(const char *uris, size_t size, uint32_t serial)
+{
+    wl_starts++;
+    wl_serial = serial;
+    snprintf(wl_uris, sizeof wl_uris, "%.*s", (int)size, uris);
+    return 0;
+}
+int wl_data_drag_start_key(const char *uris, size_t size, const char *key, uint32_t serial,
+                           void (*ended)(int finished, void *data), void *data)
+{
+    wl_key_starts++;
+    wl_serial = serial;
+    snprintf(wl_uris, sizeof wl_uris, "%.*s", (int)size, uris);
+    snprintf(wl_key, sizeof wl_key, "%s", key);
+    wl_ended = ended;
+    wl_ended_data = data;
+    return 0;
+}
+
+/* A stand-in document service on DOCS_CONTROL (docs-proto.h) for one
+ * connection: each begin's names, and the paths its descriptors have, go to
+ * DOCS_DIR/log with the end; a begin is answered with answer, or with the
+ * documents' paths as the service gives them (session 7, document dN). */
+static pid_t fake_docs(const char *answer)
+{
+    struct sockaddr_un a = { .sun_family = AF_UNIX, .sun_path = DOCS_CONTROL };
+    mkdir("/run/locachy", 01777);
+    mkdir(DOCS_DIR, 0755);
+    unlink(DOCS_CONTROL);
+    unlink(DOCS_DIR "/log");
+    int s = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    assert(s >= 0 && bind(s, (struct sockaddr *)&a, sizeof a) == 0 && listen(s, 1) == 0);
+    pid_t pid = fork();
+    assert(pid >= 0);
+    if (pid > 0) {
+        close(s);
+        return pid;
+    }
+    int c = accept(s, NULL, NULL), docs = 0;
+    FILE *log = fopen(DOCS_DIR "/log", "w");
+    for (;;) {
+        char text[DOCS_MSG_MAX + 1], control[CMSG_SPACE(sizeof(int) * DOCS_FDS_MAX)];
+        struct iovec iov = { .iov_base = text, .iov_len = DOCS_MSG_MAX };
+        struct msghdr m = { .msg_iov = &iov, .msg_iovlen = 1, .msg_control = control, .msg_controllen = sizeof control };
+        ssize_t n = recvmsg(c, &m, 0);
+        if (n <= 0) break;
+        text[n] = '\0';
+        int fds[DOCS_FDS_MAX], nfds = 0;
+        struct cmsghdr *h = CMSG_FIRSTHDR(&m);
+        if (h && h->cmsg_type == SCM_RIGHTS) {
+            nfds = (int)((h->cmsg_len - CMSG_LEN(0)) / sizeof(int));
+            memcpy(fds, CMSG_DATA(h), sizeof(int) * (size_t)nfds);
+        }
+        char reply[DOCS_MSG_MAX] = "ok 7", *save = NULL;
+        size_t len = strlen(reply);
+        fprintf(log, "%s\n", strtok_r(text, "\n", &save));
+        int k = 0;
+        for (char *name = strtok_r(NULL, "\n", &save); name; name = strtok_r(NULL, "\n", &save), k++) {
+            char at[64], path[PATH_MAX] = "?";
+            snprintf(at, sizeof at, "/proc/self/fd/%d", k < nfds ? fds[k] : -1);
+            ssize_t r = readlink(at, path, sizeof path - 1);
+            if (r > 0) path[r] = '\0';
+            int flags = k < nfds ? fcntl(fds[k], F_GETFL) : -1;
+            fprintf(log, "name %s %s%s\n", name, path, flags >= 0 && (flags & O_PATH) ? " O_PATH" : "");
+            len += (size_t)snprintf(reply + len, sizeof reply - len, "\n/run/user/1000/doc/d%d/%s", ++docs, name);
+        }
+        for (int i = 0; i < nfds; i++) close(fds[i]);
+        fflush(log);
+        if (strncmp(text, "begin", 5) == 0) {
+            const char *out = answer ? answer : reply;
+            send(c, out, strlen(out), MSG_NOSIGNAL);
+        }
+    }
+    fclose(log);
+    _exit(0);
+}
+
+/* The stand-in's log, once its connection ended. */
+static const char *fake_docs_log(pid_t pid)
+{
+    static char text[8192];
+    assert(waitpid(pid, NULL, 0) == pid);
+    FILE *f = fopen(DOCS_DIR "/log", "r");
+    size_t n = f ? fread(text, 1, sizeof text - 1, f) : 0;
+    text[n] = '\0';
+    if (f) fclose(f);
+    return text;
+}
+
+/* A stand-in top bar on its open socket (BAR_OPEN_SOCKET) for one request:
+ * what it was asked goes to BAR_LOG, answer is its reply. */
+#define BAR_LOG "/run/locachy/open/log"
+static pid_t fake_bar(const char *answer)
+{
+    struct sockaddr_un a = { .sun_family = AF_UNIX, .sun_path = BAR_OPEN_SOCKET };
+    mkdir("/run/locachy", 01777);
+    mkdir("/run/locachy/open", 0755);
+    unlink(BAR_OPEN_SOCKET);
+    unlink(BAR_LOG);
+    int s = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    assert(s >= 0 && bind(s, (struct sockaddr *)&a, sizeof a) == 0 && listen(s, 1) == 0);
+    pid_t pid = fork();
+    assert(pid >= 0);
+    if (pid > 0) {
+        close(s);
+        return pid;
+    }
+    char request[PATH_MAX + 128];
+    int c = accept(s, NULL, NULL);
+    ssize_t n = c >= 0 ? recv(c, request, sizeof request - 1, 0) : -1;
+    FILE *log = fopen(BAR_LOG, "w");
+    if (log) {
+        fprintf(log, "%.*s", n > 0 ? (int)n : 0, request);
+        fclose(log);
+    }
+    if (c >= 0) send(c, answer, strlen(answer), MSG_NOSIGNAL);
+    _exit(0);
+}
+
+/* A file's text (the stand-ins' logs), "" when there is none. */
+static const char *text_of(const char *path)
+{
+    static char text[4096];
+    FILE *f = fopen(path, "r");
+    size_t n = f ? fread(text, 1, sizeof text - 1, f) : 0;
+    text[n] = '\0';
+    if (f) fclose(f);
+    return text;
+}
+
+static const char *fake_bar_log(pid_t pid)
+{
+    assert(waitpid(pid, NULL, 0) == pid);
+    return text_of(BAR_LOG);
+}
+
+/* The copies' hidden temporaries in a folder. */
+static int temps_in(const char *dir)
+{
+    int n = 0;
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    while (d && (e = readdir(d)) != NULL) n += strncmp(e->d_name, COPY_TEMP, strlen(COPY_TEMP)) == 0;
+    if (d) closedir(d);
+    return n;
+}
+
+/* A file of size bytes at path. */
+static void put_bytes(const char *path, size_t size)
+{
+    static char block[65536];
+    memset(block, 'x', sizeof block);
+    FILE *f = fopen(path, "w");
+    assert(f);
+    for (size_t done = 0; done < size; done += sizeof block) {
+        assert(fwrite(block, 1, size - done < sizeof block ? size - done : sizeof block, f) > 0);
+    }
+    assert(fclose(f) == 0);
+}
+
+static long long size_of(const char *path)
+{
+    struct stat st;
+    return lstat(path, &st) == 0 ? (long long)st.st_size : -1;
+}
+
+/* transfer (paste, a drop) of from into dir with these keys: they must all
+ * be used. */
+static void copy_with(const char *what, const char *from, const char *dir, int cut, const int *keys)
+{
+    char path[PATH_MAX];
+    char *list[] = { path };
+    printf("== %s\n", what);
+    snprintf(path, sizeof path, "%s", from);
+    script = keys;
+    step = extra = 0;
+    error = 0;
+    copy_polls = saw_temp = saw_final = 0;
+    transfer(list, 1, dir, cut);
+    if (script[step] == IDLE) step++; /* the copy ended while nothing was typed */
+    assert(script[step] == END && extra == 0);
 }
 
 static int fill(char names[][OPEN_NAME], int max, const char *const *from)
@@ -426,6 +736,7 @@ int main(int argc, char **argv)
 {
     assert(argc == 2);
     is_root = geteuid() == 0;
+    copy_tick_interval = 1e9; /* copies look at the keys only where a scenario says */
     assert(mkdir(argv[1], 0755) == 0);
     char *real = realpath(argv[1], NULL);
     assert(real && strlen(real) < 200);
@@ -817,6 +1128,83 @@ int main(int argc, char **argv)
     assert(exists("Documents/new/item-01.txt") && !exists("Documents/item-01.txt"));
     assert(!exists("Documents/item-02.txt") && exists(".local/share/Trash/files/item-02.txt"));
 
+    /* Dragging out of the window: shared files as a copy-only text/uri-list
+     * with the real press serial; a private file of the home only as a
+     * document of the document service (all or nothing); nothing else. */
+    put("Documents/a b 中.txt", 0);
+    put("secret.txt", 0);
+    assert(symlink("../secret.txt", at_home("Documents/to-secret")) == 0);
+    assert(symlink("/etc/passwd", at_home("Documents/to-etc")) == 0);
+    run("reload Documents", (const int[]){ KEY(K_F1 + 4, 0), END });
+    char expect[PATH_MAX + 64];
+    snprintf(expect, sizeof expect, "file://%s/Documents/a%%20b%%20%%E4%%B8%%AD.txt\r\n", scratch);
+    struct click out[] = {
+        { .id = HIT_FILE + index_of("a b 中.txt"), .button = BTN_LEFT, .clicks = 1 },
+        { .id = AT, .col = -1, .row = 6 }, /* the pointer leaves the window, the button held */
+        { .id = AT, .col = -1, .row = 6, .button = BTN_LEFT, .release = 1 },
+        { .id = HIT_FILE + index_of("to-secret"), .button = BTN_LEFT, .clicks = 1 },
+        { .id = HIT_FILE + index_of("to-etc"), .button = BTN_LEFT, .clicks = 1 },
+    };
+    clicks = out;
+    wl_starts = 0;
+    run("direct screen: an item dragged past the edge stays an internal drag",
+        (const int[]){ CLICK(0), CLICK(1), CLICK(2), END });
+    assert(wl_starts == 0 && drag.mode == DRAG_NONE);
+    wl_on = 1;
+    run("Wayland window: a shared file dragged out is a copy-only text/uri-list drag",
+        (const int[]){ CLICK(0), CLICK(1), CLICK(2), END });
+    assert(wl_starts == 1 && wl_key_starts == 0 && wl_serial == 4242 && strcmp(wl_uris, expect) == 0 &&
+           drag.mode == DRAG_NONE);
+    assert(exists("Documents/a b 中.txt"));
+    puts("PASS a shared file dragged out of a window: one percent-encoded file URI, the press serial, a copy");
+    error = 0;
+    run("Wayland window: a link out of the home is refused, nothing starts",
+        (const int[]){ CLICK(4), CLICK(1), CLICK(2), END });
+    assert(wl_starts == 1 && wl_key_starts == 0 && error && strstr(msg, "home folder"));
+    puts("PASS a file outside the home (here through a symbolic link) never leaves as a drag");
+    error = 0;
+    run("Wayland window: a private file without the document service is refused, nothing starts",
+        (const int[]){ CLICK(3), CLICK(1), CLICK(2), END });
+    assert(wl_starts == 1 && wl_key_starts == 0 && error && strstr(msg, "not running") &&
+           strstr(msg, "shared folders") && exists("secret.txt"));
+    puts("PASS a private file without the document service never leaves as a drag, and the message says why");
+    error = 0;
+    pid_t svc = fake_docs("error the portal refused it");
+    run("Wayland window: a private file the document service refuses is refused, nothing starts",
+        (const int[]){ CLICK(3), CLICK(1), CLICK(2), END });
+    const char *svc_log = fake_docs_log(svc);
+    assert(wl_starts == 1 && wl_key_starts == 0 && error && strstr(msg, "document service") &&
+           docs_drag.fd < 0 && strstr(svc_log, "begin\nname secret.txt ") && !strstr(svc_log, "end "));
+    puts("PASS a private file the document service refuses: nothing starts, the connection closes (all or nothing)");
+    error = 0;
+    svc = fake_docs(NULL);
+    run("Wayland window: a private file dragged out is a document of the document service",
+        (const int[]){ CLICK(3), CLICK(1), CLICK(2), END });
+    char doc_uri[] = "file:///run/user/1000/doc/d1/secret.txt\r\n", decoded[512];
+    long n = docs_key_decode(wl_key, decoded, sizeof decoded);
+    assert(wl_key_starts == 1 && wl_starts == 1 && !error && wl_serial == 4242 && strcmp(wl_uris, doc_uri) == 0);
+    assert(!strstr(wl_uris, scratch) && n == 32 && memcmp(decoded, "/run/user/1000/doc/d1/secret.txt", 32) == 0);
+    assert(wl_ended && docs_drag.fd >= 0);
+    wl_ended(1, wl_ended_data); /* the drop was read */
+    svc_log = fake_docs_log(svc);
+    char seen[PATH_MAX + 64];
+    snprintf(seen, sizeof seen, "begin\nname secret.txt %s/secret.txt O_PATH\nend 7 done\n", scratch);
+    assert(strcmp(svc_log, seen) == 0 && docs_drag.fd < 0);
+    puts("PASS a private file dragged out: an O_PATH descriptor of it to the document service, its document's "
+         "path in the URI list and the key (never its own), the end told when the drop was read");
+    svc = fake_docs(NULL);
+    run("Wayland window: a private drag that is cancelled tells the document service",
+        (const int[]){ CLICK(3), CLICK(1), CLICK(2), END });
+    assert(wl_key_starts == 2 && wl_ended);
+    wl_ended(0, wl_ended_data);
+    svc_log = fake_docs_log(svc);
+    assert(strstr(svc_log, "end 7 cancelled\n") && docs_drag.fd < 0);
+    puts("PASS a cancelled private drag ends with end SESSION cancelled");
+    wl_on = 0;
+    assert(unlink(at_home("Documents/to-secret")) == 0 && unlink(at_home("secret.txt")) == 0 &&
+           unlink(at_home("Documents/a b 中.txt")) == 0 && unlink(at_home("Documents/to-etc")) == 0);
+    run("reload Documents", (const int[]){ KEY(K_F1 + 4, 0), END });
+
     /*
      * Navigation up to / and Back/Forward history (Alt+Left, Alt+Right, Alt+Up),
      * Ctrl+L location bar with Ctrl+V clipboard paste, Split view (F3), Tabs
@@ -892,6 +1280,11 @@ int main(int argc, char **argv)
         (const int[]){ KEY('d' & 0x1F, KEYS_CTRL), KEY(K_F1 + 8, 0), KEY(K_F1 + 3, 0), END });
     assert(nplaces == places_before + 1 && strcmp(places[nplaces - 1], TRASH_URL) == 0);
     assert(exists(".config/gtk-3.0/bookmarks") && side_hidden == 1 && strcmp(task[0], "/usr/local/bin/term") == 0);
+    assert(strstr(msg, "Terminal closed"));
+    open_answer = "shown /usr/local/bin/term";
+    run("F4 terminal on one of several screens: open there, not closed", (const int[]){ KEY(K_F1 + 3, 0), END });
+    assert(strstr(msg, "Opened with term") && !strstr(msg, "closed"));
+    open_answer = "back viewer";
     run("remove bookmark and show side pane again",
         (const int[]){ KEY('d' & 0x1F, KEYS_CTRL), KEY(K_F1 + 8, 0), K_LEFT, END });
     assert(nplaces == places_before && side_hidden == 0 && here("Documents"));
@@ -1205,6 +1598,264 @@ int main(int argc, char **argv)
     P->view = VIEW_DETAILS;
     go(scratch, NULL);
     assert(remove_tree(at_home("Views")) == 0);
+
+    /* Native screens reflow one browser state, not a scaled first canvas. */
+    native_fixture = native_on = 1;
+    native_output = 1;
+    native_count = 2;
+    files_output_name[0] = '\0';
+    select_output(1);
+    P->view = VIEW_DETAILS;
+    P->follow_sel = 1;
+    draw();
+    assert(native_output == 1 && files_output == 1 && cell_w == 12 && cell_h == 24);
+    assert(output_drawn[0][24][1] != 0 && output_drawn[1][27][1] != 0);
+    assert(!memcmp(drawn, output_drawn[1], sizeof drawn));
+    int old_top = P->top;
+    int which_col, which_row;
+    hit_cell(HIT_FILE, &which_col, &which_row);
+    mouse = (struct pointer_event){ .output = 0, .col = which_col, .row = which_row,
+        .x = which_col * 8 + 4, .y = which_row * 16 + 8, .button = BTN_LEFT, .pressed = 1 };
+    pointer_key(&mods);
+    assert(native_output == 0 && files_output == 0 && cell_w == 8 && cell_h == 16);
+    assert(P->top == old_top && P->sel == 0);
+    int local_x, local_y;
+    mouse = (struct pointer_event){ .output = 1, .col = 20, .row = 5, .x = 808, .y = 80 };
+    select_output(1);
+    pointer_xy(&mouse, &local_x, &local_y);
+    assert(local_x == 300 && local_y == 120);
+    assert(!pointer_here(&(struct pointer_event){ .output = 0 }));
+    assert(pointer_here(&(struct pointer_event){ .output = 1 }));
+    puts("== native mixed-resolution files: per-output reflow, target hit map and scaled pointer pixels");
+
+    drag.mode = DRAG_BAND;
+    drag.base = calloc(1, 1);
+    mouse = (struct pointer_event){ .output = 0, .col = 30, .row = 10, .x = 244, .y = 168 };
+    pointer_key(&mods);
+    assert(drag.mode == DRAG_NONE && files_output == 0);
+    select_output(1);
+    run("files: hotplug K_SHOWN cancels pixel anchors without changing the folder",
+        (const int[]){ HOTPLUG, AFTER_HOTPLUG, END });
+    assert(files_output == 0 && native_output == 0 && !strcmp(files_output_name, "eDP-1"));
+    native_count = 2;
+    native_on = 0;
+    int previous, was = files_screens_begin(&previous);
+    assert(!was && native_on);
+    files_screens_end(was, previous);
+    assert(!native_on);
+    native_fixture = 0;
+    was = files_screens_begin(&previous);
+    assert(!was && !native_on);
+    draw(); /* an unavailable native canvas stays safely mirrored */
+    files_screens_end(was, previous);
+    puts("== files: rubberband output transition cancels its anchor; hotplug and mirror fallback stay usable");
+
+    /*
+     * Copies, and moves across filesystems: written under a hidden name in
+     * the destination folder and renamed when whole. Stopped (Esc, the
+     * window's close), failed, or ended by SIGTERM (home's Stop), nothing of
+     * them is left under either name. Between chunks the window answers.
+     */
+    char big[PATH_MAX], downloads[PATH_MAX], final_big[PATH_MAX];
+    snprintf(big, sizeof big, "%s", at_home("Documents/big.bin"));
+    snprintf(downloads, sizeof downloads, "%s", at_home("Downloads"));
+    snprintf(final_big, sizeof final_big, "%s", at_home("Downloads/big.bin"));
+    put_bytes(big, 1 << 20); /* 16 chunks */
+    own("Documents/big.bin");
+    go(at_home("Documents"), NULL);
+    copy_tick_interval = 0; /* every chunk looks at the keys */
+    snprintf(watch_final, sizeof watch_final, "%s", final_big);
+    copy_with("a copy: under a hidden name until whole, the keys looked at between chunks", big, downloads, 0,
+              (const int[]){ IDLE, END });
+    assert(!error && size_of(final_big) == 1 << 20 && temps_in(downloads) == 0);
+    assert(saw_temp && !saw_final && copy_polls >= 15);
+    assert(unlink(final_big) == 0);
+    puts("PASS a copy is written under a hidden name, renamed when whole; the keys are looked at between chunks");
+
+    copy_with("Esc while copying: y stops it", big, downloads, 0, (const int[]){ 27, 'y', END });
+    assert(error && strstr(msg, "Copy stopped") && size_of(final_big) < 0 && temps_in(downloads) == 0);
+    assert(size_of(big) == 1 << 20);
+    copy_with("Esc while copying: n goes on", big, downloads, 0, (const int[]){ 27, 'n', IDLE, END });
+    assert(!error && size_of(final_big) == 1 << 20 && temps_in(downloads) == 0);
+    assert(unlink(final_big) == 0);
+    puts("PASS Esc while copying asks; y stops it with nothing left, n goes on");
+
+    kept_closes = 0;
+    close_asked = 0;
+    copy_with("the window's close while copying: y stops it now", big, downloads, 0, (const int[]){ K_CLOSE, 'y', END });
+    assert(close_asked && kept_closes == 1 && error && strstr(msg, "Copy stopped"));
+    assert(size_of(final_big) < 0 && temps_in(downloads) == 0);
+    close_asked = 0;
+    copy_with("the close: n closes when the copy is done", big, downloads, 0, (const int[]){ K_CLOSE, 'n', IDLE, END });
+    assert(close_asked && kept_closes == 2 && !error && size_of(final_big) == 1 << 20);
+    assert(unlink(final_big) == 0);
+    close_asked = 0;
+    copy_with("the close: Esc keeps the window", big, downloads, 0, (const int[]){ K_CLOSE, 27, IDLE, END });
+    assert(!close_asked && kept_closes == 3 && size_of(final_big) == 1 << 20);
+    assert(unlink(final_big) == 0);
+    copy_with("the close asked again while asked: stopped, closing", big, downloads, 0,
+              (const int[]){ K_CLOSE, K_CLOSE, END });
+    assert(close_asked && kept_closes == 5 && size_of(final_big) < 0 && temps_in(downloads) == 0);
+    close_asked = 0;
+    copy_tick_interval = 1e9;
+    puts("PASS the window's close while copying is kept (never forced) and asked: stop now, close when done, or stay");
+
+    run("the window's close leaves files as q does", (const int[]){ K_CLOSE, END });
+    assert(extra == 0 && files_close_asked());
+    int listed_before = P->nlist;
+    run("a close during a question: nothing done, files closes", (const int[]){ K_BOL, 'D', K_CLOSE, END });
+    assert(extra == 0 && files_close_asked() && P->nlist == listed_before && !error);
+    assert(pick("choosing: the close ends it, nothing chosen", "text/", at_home("Documents"), NULL,
+                (const int[]){ K_CLOSE, END }, chosen, sizeof chosen) == 0 && files_close_asked());
+    run("no close: back with q", (const int[]){ END });
+    assert(extra == 1 && !files_close_asked());
+    puts("PASS the window's close quits files as q does, also from a question and from a choice (files_close_asked)");
+
+    if (!is_root) {
+        mk("Documents/tree");
+        put("Documents/tree/a.txt", 0);
+        put("Documents/tree/b.txt", 0);
+        assert(chmod(at_home("Documents/tree/b.txt"), 0) == 0);
+        copy_with("a copy that fails midway", at_home("Documents/tree"), downloads, 0, (const int[]){ END });
+        assert(error && strstr(msg, "could not be") && !exists("Downloads/tree") && temps_in(downloads) == 0);
+        assert(chmod(at_home("Documents/tree/b.txt"), 0644) == 0 && remove_tree(at_home("Documents/tree")) == 0);
+        puts("PASS a copy that fails midway leaves nothing under its name and no temporary");
+    }
+
+    copy_tick_interval = 0;
+    for (int in_question = 0; in_question < 2; in_question++) {
+        fflush(NULL);
+        pid_t child = fork();
+        assert(child >= 0);
+        if (child == 0) {
+            copy_with("SIGTERM while copying", big, downloads, 0,
+                      in_question ? (const int[]){ 27, TERM, END } : (const int[]){ TERM, IDLE, END });
+            _exit(0); /* not reached: the signal ends it */
+        }
+        int status;
+        assert(waitpid(child, &status, 0) == child);
+        assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGTERM);
+        assert(size_of(final_big) < 0 && temps_in(downloads) == 0 && size_of(big) == 1 << 20);
+    }
+    copy_tick_interval = 1e9;
+    puts("PASS SIGTERM (home's Stop) during a copy or its question: the temporary goes, then the signal ends it");
+
+    /* A second filesystem (test-files.sh mounts one): moves are copies there. */
+#define OTHER_FS "/run/other"
+    struct stat other_st, home_st;
+    assert(stat(OTHER_FS, &other_st) == 0 && stat(scratch, &home_st) == 0 && other_st.st_dev != home_st.st_dev);
+    assert(mkdir(OTHER_FS "/xfs", 0755) == 0);
+    put_bytes(OTHER_FS "/xfs/one.bin", 200000);
+    put_bytes(OTHER_FS "/xfs/two.bin", 10);
+    copy_with("a move across filesystems", OTHER_FS "/xfs", downloads, 1, (const int[]){ END });
+    assert(!error && size_of(at_home("Downloads/xfs/one.bin")) == 200000 && size_of(at_home("Downloads/xfs/two.bin")) == 10);
+    assert(access(OTHER_FS "/xfs", F_OK) != 0 && temps_in(downloads) == 0);
+    assert(remove_tree(at_home("Downloads/xfs")) == 0);
+    if (!is_root) {
+        assert(mkdir(OTHER_FS "/xbad", 0755) == 0);
+        put_bytes(OTHER_FS "/xbad/a.bin", 10);
+        put_bytes(OTHER_FS "/xbad/b.bin", 10);
+        assert(chmod(OTHER_FS "/xbad/b.bin", 0) == 0);
+        copy_with("a move across filesystems that fails", OTHER_FS "/xbad", downloads, 1, (const int[]){ END });
+        assert(error && size_of(at_home("Downloads/xbad")) < 0 && temps_in(downloads) == 0);
+        assert(size_of(OTHER_FS "/xbad/a.bin") == 10 && size_of(OTHER_FS "/xbad/b.bin") == 10);
+        assert(chmod(OTHER_FS "/xbad/b.bin", 0644) == 0 && remove_tree(OTHER_FS "/xbad") == 0);
+    }
+    put_bytes(OTHER_FS "/xbig.bin", 1 << 20);
+    copy_tick_interval = 0;
+    copy_with("Esc during a move across filesystems: y", OTHER_FS "/xbig.bin", downloads, 1, (const int[]){ 27, 'y', END });
+    assert(error && strstr(msg, "Move stopped") && size_of(OTHER_FS "/xbig.bin") == 1 << 20);
+    assert(size_of(at_home("Downloads/xbig.bin")) < 0 && temps_in(downloads) == 0);
+    assert(unlink(OTHER_FS "/xbig.bin") == 0);
+    copy_tick_interval = 1e9;
+    puts("PASS moves across filesystems are whole or not at all; the source goes only once its copy is whole");
+
+    /*
+     * Opening in a window (LOCACHY_BACKEND=wayland, no process 1 to ask): the
+     * document viewer through locachy-seat --window view PATH, a container
+     * through the top bar's open socket, a folder browsed here, any other
+     * framebuffer program refused clearly; never a success that did not
+     * happen. Directly, what process 1 says is told as it is.
+     */
+    snprintf(seat_client_path, sizeof seat_client_path, "%s", at_home(".seat-client"));
+    char seat_calls[PATH_MAX], seat_fail[PATH_MAX], doc[PATH_MAX], wtxt[PATH_MAX];
+    snprintf(seat_calls, sizeof seat_calls, "%s", at_home(".seat-calls"));
+    snprintf(seat_fail, sizeof seat_fail, "%s", at_home(".seat-fail"));
+    FILE *seat = fopen(seat_client_path, "w");
+    assert(seat);
+    fprintf(seat, "#!/bin/sh\nd=$(dirname \"$0\")\nprintf '%%s\\n' \"$*\" >>\"$d/.seat-calls\"\n"
+                  "if [ -e \"$d/.seat-fail\" ]; then\n"
+                  "    echo \"locachy-seat: the shared display's window control is not running\" >&2\n"
+                  "    exit 1\nfi\n");
+    assert(fclose(seat) == 0 && chmod(seat_client_path, 0755) == 0);
+    put("Documents/doc.pdf", 0);
+    put("Documents/w.txt", 0);
+    mk("Documents/folder");
+    snprintf(doc, sizeof doc, "%s", at_home("Documents/doc.pdf"));
+    snprintf(wtxt, sizeof wtxt, "%s", at_home("Documents/w.txt"));
+    go(at_home("Documents"), NULL);
+    setenv("LOCACHY_BACKEND", "wayland", 1);
+    int tasks_before = tasks, opens_before = opens;
+    error = 0;
+    open_file(doc, 0, "program:view");
+    snprintf(want, sizeof want, "--window view %s\n", doc);
+    assert(!error && strstr(msg, "Opened with view in a window") && !strcmp(text_of(seat_calls), want));
+    assert(tasks == tasks_before);
+    put(".seat-fail", 0);
+    open_file(doc, 0, "program:view");
+    assert(error && strstr(msg, "Cannot open a view window") && strstr(msg, "window control is not running"));
+    assert(unlink(seat_fail) == 0 && unlink(seat_calls) == 0);
+    puts("PASS window: the viewer opens a view window (locachy-seat --window view PATH); a refusal says why");
+    open_file(doc, 0, "program:edit");
+    assert(error && strstr(msg, "edit opens from home only") && size_of(seat_calls) < 0 && tasks == tasks_before);
+    open_file(at_home("Documents/folder"), 0, "program:view");
+    assert(!error && here("Documents/folder") && size_of(seat_calls) < 0);
+    go(at_home("Documents"), NULL);
+    puts("PASS window: another framebuffer program is refused clearly; a folder is browsed here");
+
+    snprintf(rule, sizeof rule, "one");
+    pid_t bar = fake_bar("ok one");
+    open_file(wtxt, 0, NULL);
+    snprintf(want, sizeof want, "with one %s", wtxt);
+    assert(!strcmp(fake_bar_log(bar), want) && !error && strstr(msg, "Opened in one") && opens == opens_before);
+    bar = fake_bar("error one is not installed");
+    open_file(wtxt, 0, NULL);
+    fake_bar_log(bar);
+    assert(error && strstr(msg, "one is not installed"));
+    assert(unlink(BAR_OPEN_SOCKET) == 0);
+    open_file(wtxt, 0, NULL);
+    assert(error && strstr(msg, "top bar is not running"));
+    open_file(at_home("notes.txt"), 0, NULL);
+    assert(error && strstr(msg, "containers cannot see it")); /* checked before the bar is asked */
+    rule[0] = '\0';
+    puts("PASS window: a container opens through the top bar's open socket (with NAME TARGET); "
+         "its refusal or absence is reported; the shared folders' rule stays");
+
+    FILE *home_request = fopen(FILES_REQUEST, "w");
+    assert(home_request && fprintf(home_request, "%s\n", downloads) > 0 && fclose(home_request) == 0);
+    assert(!take_request() && access(FILES_REQUEST, F_OK) == 0 && unlink(FILES_REQUEST) == 0);
+    error = 0;
+    open_terminal_here();
+    assert(error && strstr(msg, "term opens from home only") && tasks == tasks_before);
+    ncalled = 0;
+    P->sel = index_of("w.txt");
+    archive_action(KEY_EXTRACT_HERE);
+    assert(error && strstr(msg, "archive opens from home only") && ncalled == 0);
+    unsetenv("LOCACHY_BACKEND");
+    puts("PASS window: home's requests stay home's; term and archive say they open from home only");
+
+    open_answer = "no process 1 to ask";
+    open_file(doc, 0, "program:viewer");
+    assert(error && strstr(msg, "viewer could not be started"));
+    open_answer = "ended /usr/local/bin/viewer x -1";
+    open_file(doc, 0, "program:viewer");
+    assert(error && strstr(msg, "could not be started"));
+    open_answer = "back viewer";
+    open_file(doc, 0, "program:viewer");
+    assert(!error && strstr(msg, "Opened with viewer"));
+    puts("PASS direct: an open process 1 did not run is reported so, never as opened");
+    assert(unlink(doc) == 0 && unlink(wtxt) == 0 && rmdir(at_home("Documents/folder")) == 0 && unlink(big) == 0);
+    assert(unlink(seat_client_path) == 0);
 
     puts("ALL PASSED");
     return 0;

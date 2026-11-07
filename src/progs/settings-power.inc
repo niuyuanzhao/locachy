@@ -1080,8 +1080,8 @@ static void power_curves_page(void)
             if (power_curves_pointer(pointer_last())) power_curves_draw();
             continue;
         }
-        if (key == 27 || key == 'q') {
-            notice[0] = '\0';
+        if (key == 27 || key == 'q' || close_read(key)) {
+            if (!closing) notice[0] = '\0';
             return;
         }
         int cols = screen_cols();

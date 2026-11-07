@@ -13,10 +13,10 @@ chmod 755 "$b"
 trap 'rm -rf "$b"' EXIT
 cd "$src"
 
-FT_CFLAGS="-DCONFIG_FREETYPE $(pkg-config --cflags freetype2)"
+FT_CFLAGS="-DCONFIG_FREETYPE $(pkg-config --cflags freetype2 fontconfig)"
 NM_CFLAGS="-DCONFIG_NETWORKMANAGER $(pkg-config --cflags libnm)"
 INPUT_CFLAGS="-DCONFIG_LIBINPUT $(pkg-config --cflags libinput)"
-LIBS="$(pkg-config --libs freetype2) $(pkg-config --libs libnm) $(pkg-config --libs libinput) -lm"
+LIBS="$(pkg-config --libs freetype2 fontconfig) $(pkg-config --libs libnm) $(pkg-config --libs libinput) -lm"
 GCC="gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -I$src/base/include -I$src/base $FT_CFLAGS $NM_CFLAGS $INPUT_CFLAGS"
 
 # The program itself, linked as make.sh links the others (a build check).

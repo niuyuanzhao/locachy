@@ -15,9 +15,17 @@
 
 #ifdef CONFIG_IME
 
-/* Initialize Rime with shared_dir and user_dir. Returns 0 on success. */
+/* Initialize Rime with shared_dir and user_dir. Returns 0 on success. In a
+ * window on the shared display (LOCACHY_BACKEND=wayland) no Rime is started:
+ * the display's bar is the input method there, and the program stays in
+ * direct input (0). */
 int ime_init(const char *shared_dir, const char *user_dir);
 void ime_done(void);
+/* After the input method's packages may have changed (locachy-bar on SIGHUP):
+ * Rime starts again, in the default directories, only when the Chinese schema
+ * it would choose or its deployment is not the one it started with (Chinese
+ * Pinyin installed or removed); 0 unchanged, 1 started again, -1 failed. */
+int ime_reload(void);
 
 /* Focus control: 1 = text focus (IME active), 0 = complete passthrough. */
 void ime_set_focus(int focused);
@@ -52,7 +60,13 @@ int ime_width_key(int key, int mods);
 int ime_action(int key, const char **notice);
 
 /* Process a key. Returns 1 if consumed by IME, 0 if passed through.
- * Control combos (Ctrl+C, Alt+x, etc.) always cancel preedit and pass through.
+ * Chinese mode: digits choose from the candidates; control combos (Ctrl+C,
+ * Alt+x, etc.) cancel the preedit and pass through. English mode, as fcitx5's
+ * keyboard engine: letters make the word, Tab and Shift+Tab move through its
+ * completions (none at first), BackSpace edits it; any other key (Space,
+ * Return, digits, punctuation, Escape, arrows, combos) commits the letters as
+ * typed, or the completion moved to, and passes through. Switching the mode
+ * or locking Caps commits English mode's word too.
  * Either way the key may have committed text (ime_get_commit): type it before
  * passing the key on (a comma at half width ends the composition). */
 int ime_process_key(int key);
@@ -79,6 +93,7 @@ int ime_get_overlay(char *row1, char *row2, size_t size);
 
 static inline int ime_init(const char *s, const char *u) { (void)s; (void)u; return 0; }
 static inline void ime_done(void) {}
+static inline int ime_reload(void) { return 0; }
 static inline void ime_set_focus(int f) { (void)f; }
 static inline int ime_has_focus(void) { return 0; }
 static inline int ime_cycle_mode(void) { return 0; }

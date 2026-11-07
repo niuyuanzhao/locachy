@@ -12,15 +12,36 @@
  *                       char *why, size_t size);
  * Lists contain name, state, RAM bytes, swap bytes and error, tab-separated.
  * Actions start/resume/freeze/stop/show return 0 for accepted, -1 for error.
+ *
+ * J shows the system jobs (locachy-jobs, tools/JOBS.md): the queue of long
+ * root operations the programs asked for, one at a time, each with its state
+ * and the last lines of its output. K removes the selected one from the
+ * queue, or stops it while it runs, after Y: a package transaction stopped
+ * midway can leave the system half-changed. Reboot and power off are refused
+ * while a job runs or waits.
+ *
+ * L shows the selected or failed container's log (/run/locachy/apps/NAME.log)
+ * or the system log (LOCachy's lines in the kernel ring buffer, toggled with
+ * Tab), scrolled with Up/Down/PgUp/PgDn or the wheel and copyable with y/Y or
+ * pointer selection.
  */
+#include <fcntl.h>
 #include <limits.h>
 #include <linux/input-event-codes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/klog.h>
+#include <unistd.h>
 
 #include "base.h"
 #include "files.h"
+#include "jobs.h"
+#include "textsel.h"
+
+#ifndef HOME_APP_RUN
+#define HOME_APP_RUN "/run/locachy/apps"
+#endif
 
 void base_apps(char *buf, size_t size);
 int base_app_action(const char *action, const char *name, char *why, size_t size);
@@ -34,6 +55,8 @@ int base_app_action(const char *action, const char *name, char *why, size_t size
 #define MIB 1048576ULL
 #define HIT_ROW 0        /* + the list position */
 #define HIT_KEY 100000   /* + the key a button stands for */
+#define HIT_JOB 200000   /* + a system job's line */
+#define HIT_LOG 300000   /* the log view's lines */
 
 struct entry {
     char name[16];
@@ -49,7 +72,7 @@ struct app {
     int marked;               /* operation target, not running state */
 };
 
-enum confirmation { CONF_NONE, CONF_STOP, CONF_PROGRAM, CONF_REBOOT, CONF_POWEROFF };
+enum confirmation { CONF_NONE, CONF_STOP, CONF_PROGRAM, CONF_REBOOT, CONF_POWEROFF, CONF_JOB };
 
 static struct entry entries[MAX_ENTRIES];
 static int nentries, selected, scroll;
@@ -65,6 +88,16 @@ static double refresh_at;
 static enum confirmation confirming;
 static char **stop_names;
 static int nstop, stop_program;
+/* The system jobs (jobs_list): shown instead of the grid (J); the one
+ * selected; the one asked about (CONF_JOB), and whether it was running. */
+static struct jobs_row jobs[JOBS_ROWS_MAX];
+static int njobs, jobs_shown, job_selected, job_asked, job_asked_running;
+/* A container's log (HOME_APP_RUN/NAME.log) or the system's (log_system:
+ * LOCachy's lines in the kernel ring buffer), shown instead of the grid (L);
+ * log_from: lines back from its end, log_total: how many lines it holds. */
+#define HOME_LOG_LINES 2048
+static int log_shown, log_system, log_from, log_total;
+static char log_name[64], log_buf[32768], *log_all[HOME_LOG_LINES];
 #define HOME_OUTPUTS 32
 static int home_output;
 static int output_first[HOME_OUTPUTS], output_scroll[HOME_OUTPUTS];
@@ -308,9 +341,85 @@ static void load_apps(void)
 
 static void refresh(void)
 {
+    char why[256];
     load_apps();
     base_tasks(tasks, sizeof tasks);
+    njobs = jobs_list(jobs, JOBS_ROWS_MAX, why, sizeof why);
+    if (njobs < 0) {
+        njobs = 0; /* no service: no jobs to show */
+    }
+    if (job_selected >= njobs) {
+        job_selected = njobs > 0 ? njobs - 1 : 0;
+    }
     refresh_at = uptime() + REFRESH_MS / 1000.0;
+}
+
+static void text(int col, int row, const char *s, uint32_t fg, uint32_t bg);
+
+/* How many jobs run and wait, for the line over the grid. */
+static void jobs_summary(char *out, size_t size)
+{
+    int running = 0, waiting = 0;
+    for (int i = 0; i < njobs; i++) {
+        running += strcmp(jobs[i].state, "running") == 0 || strcmp(jobs[i].state, "stopping") == 0;
+        waiting += strcmp(jobs[i].state, "queued") == 0;
+    }
+    out[0] = '\0';
+    if (running || waiting) {
+        /* TRANSLATORS: J is the key name; keep it. */
+        snprintf(out, size, _("   system jobs: %d running, %d waiting (J)"), running, waiting);
+    }
+}
+
+/* The system jobs, a line each from row 3, the selected one's output under
+ * them, down to the footer. */
+static void draw_jobs(int footer)
+{
+    char line[1024];
+    int cols = screen_cols(), shown = footer - 3 - 6;
+    if (shown < 1) shown = 1;
+    /* TRANSLATORS: K and Esc are key names; keep them. */
+    text(1, 2, _("System jobs, one at a time in order: id, kind, state, its arguments, who asked   "
+                 "K: remove or stop   Esc: back"), FG, BG);
+    if (!njobs) {
+        text(1, 3, _("No system job yet."), FG, BG);
+        return;
+    }
+    int first = job_selected >= shown ? job_selected - shown + 1 : 0;
+    for (int i = first; i < njobs && i - first < shown; i++) {
+        const struct jobs_row *j = &jobs[i];
+        char how[48] = "";
+        if (strcmp(j->state, "queued") == 0) {
+            snprintf(how, sizeof how, _("(%d before it)"), j->position);
+        } else if (jobs_ended(j)) {
+            snprintf(how, sizeof how, _("(status %d)"), j->status);
+        }
+        snprintf(line, sizeof line, "%5d  %-18s %-16s %-14s %.80s  [%s]", j->id, j->kind, jobs_state_label(j->state),
+                 how, j->args, j->from);
+        int row = 3 + i - first, on = i == job_selected;
+        uint32_t fg = on ? BG : strcmp(j->state, "failed") == 0 ? ERROR : FG;
+        screen_fill(1, row, cols - 2, 1, on ? ACCENT : BG);
+        text(1, row, line, fg, on ? ACCENT : BG);
+        ui_hit(1, row, cols - 2, 1, HIT_JOB + i);
+    }
+    static char tail[JOBS_LOG_TAIL + 64];
+    const struct jobs_row *j = &jobs[job_selected];
+    int top = 3 + (njobs - first < shown ? njobs - first : shown) + 1, rows = footer - top - 1;
+    snprintf(line, sizeof line, _("Output of job %d, its last lines:"), j->id);
+    text(1, top, line, ACCENT, BG);
+    if (rows < 1 || jobs_log(j->id, tail, sizeof tail) < 0) return;
+    char *lines[256];
+    int n = 0;
+    for (char *p = tail; *p && n < 256;) {
+        char *end = strchr(p, '\n');
+        if (end) *end = '\0';
+        char *cr = strrchr(p, '\r'); /* a line rewritten with \r: its last form */
+        lines[n++] = cr ? cr + 1 : p;
+        p = end ? end + 1 : p + strlen(p);
+    }
+    for (int i = n > rows ? n - rows : 0, row = top + 1; i < n; i++, row++) {
+        text(2, row, lines[i], FG, BG);
+    }
 }
 
 /* What runs in the task called key, from base_tasks, or "not running". */
@@ -394,7 +503,9 @@ static void wrapped(int row, int lines, const char *s, uint32_t color)
             memcpy(part, start, n);
             part[n] = '\0';
         }
-        text(1, row + i, part, color, BG);
+        if (1 < screen_cols() && row + i >= 0 && row + i < screen_rows()) {
+            textsel_put(1, row + i, part, color, BG);
+        }
     }
 }
 
@@ -475,6 +586,210 @@ static const struct app *error_app(void)
     return NULL;
 }
 
+__attribute__((weak)) int home_klog_read(char *buf, int size);
+
+/* One line of the kernel ring buffer: past its "<LEVEL>[SECONDS] " prefix,
+ * kept when it comes from one of LOCachy's own components (say.c). */
+static char *locachy_klog_line(char *s)
+{
+    static const char *const prefixes[] = {
+        "init: ", "seat: ", "screen: ", "apps: ", "keys: ", "modules: ",
+        "labwc-control: ", "locachy-", "home: ", "lock: ", "window: "
+    };
+    if (*s == '<') {
+        while (*s && *s != '>') s++;
+        if (*s == '>') s++;
+    }
+    const char *body = s;
+    if (*body == '[') {
+        const char *end = strchr(body, ']');
+        if (end && end[1] == ' ') body = end + 2;
+    }
+    for (size_t i = 0; i < sizeof prefixes / sizeof prefixes[0]; i++) {
+        if (strncmp(body, prefixes[i], strlen(prefixes[i])) == 0) return s;
+    }
+    return NULL;
+}
+
+static int log_split(void)
+{
+    log_buf[0] = '\0';
+    if (log_system) {
+        int cap = home_klog_read ? (int)sizeof log_buf - 1 : klogctl(10, NULL, 0);
+        if (cap > 0) {
+            char *raw = home_klog_read ? NULL : malloc((size_t)cap + 1);
+            int got = home_klog_read ? home_klog_read(log_buf, cap) : raw ? klogctl(3, raw, cap) : -1;
+            if (raw && got > 0) {
+                int start = got > (int)sizeof log_buf - 1 ? got - ((int)sizeof log_buf - 1) : 0;
+                if (start > 0) {
+                    const char *nl = memchr(raw + start, '\n', (size_t)(got - start));
+                    if (nl) start = (int)(nl + 1 - raw);
+                }
+                memcpy(log_buf, raw + start, (size_t)(got - start));
+                log_buf[got - start] = '\0';
+            } else if (got > 0) {
+                log_buf[got < (int)sizeof log_buf ? got : (int)sizeof log_buf - 1] = '\0';
+            }
+            free(raw);
+        }
+    } else if (log_name[0] && valid_name(log_name)) {
+        char path[384];
+        snprintf(path, sizeof path, "%s/%s.log", HOME_APP_RUN, log_name);
+        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (fd >= 0) {
+            off_t end = lseek(fd, 0, SEEK_END);
+            off_t start = end > (off_t)sizeof log_buf - 1 ? end - (off_t)sizeof log_buf + 1 : 0;
+            ssize_t got = pread(fd, log_buf, sizeof log_buf - 1, start);
+            close(fd);
+            if (got > 0) log_buf[got] = '\0';
+        }
+    }
+    int count = 0;
+    for (char *p = log_buf; *p && count < HOME_LOG_LINES;) {
+        char *end = strchr(p, '\n');
+        if (end) *end = '\0';
+        char *cr = strrchr(p, '\r');
+        while (cr && cr[1] == '\0' && cr > p) {
+            *cr = '\0';
+            cr = strrchr(p, '\r');
+        }
+        char *line = cr ? cr + 1 : p;
+        for (char *c = line; *c; c++) {
+            if ((unsigned char)*c < 32 || (unsigned char)*c == 127) *c = ' ';
+        }
+        if (log_system) line = locachy_klog_line(line);
+        if (line && line[0]) log_all[count++] = line;
+        p = end ? end + 1 : p + strlen(p);
+    }
+    return count;
+}
+
+static void open_logs(void)
+{
+    if (log_shown) {
+        log_shown = 0;
+        textsel_clear();
+        return;
+    }
+    jobs_shown = 0;
+    log_shown = 1;
+    log_from = 0;
+    textsel_clear();
+    const struct app *err = error_app();
+    const char *want = selected < napps ? apps[selected].name : err ? err->name : NULL;
+    if (want && valid_name(want)) {
+        snprintf(log_name, sizeof log_name, "%s", want);
+        log_system = 0;
+    } else {
+        log_name[0] = '\0';
+        log_system = 1;
+    }
+}
+
+static void scroll_log(int delta, int page_rows)
+{
+    if (page_rows < 1) page_rows = 1;
+    int most = log_total > page_rows ? log_total - page_rows : 0;
+    log_from += delta;
+    if (log_from < 0) log_from = 0;
+    if (log_from > most) log_from = most;
+}
+
+static void draw_logs(int footer)
+{
+    char line[1024], where[96] = "", target[384];
+    int cols = screen_cols(), body_rows = footer - 3;
+    if (body_rows < 1) body_rows = 1;
+    log_total = log_split();
+    int most = log_total > body_rows ? log_total - body_rows : 0;
+    if (log_from < 0) log_from = 0;
+    if (log_from > most) log_from = most;
+    int last_line = log_total - log_from;
+    int first_line = last_line - body_rows < 0 ? 0 : last_line - body_rows;
+    if (last_line > first_line) {
+        snprintf(where, sizeof where, _("lines %d-%d of %d"), first_line + 1, last_line, log_total);
+    }
+    if (log_system) {
+        snprintf(target, sizeof target, "%s", _("system log"));
+    } else {
+        snprintf(target, sizeof target, "%s/%s.log", HOME_APP_RUN, log_name);
+    }
+    /* TRANSLATORS: Tab, PgUp/PgDn, y, Y and Esc are key names; keep them. */
+    snprintf(line, sizeof line, _("Log: %s  %s%sTab: %s  PgUp/PgDn: scroll  y/Y: copy  Esc: back"),
+             target, where, where[0] ? "  " : "",
+             log_system && log_name[0] ? _("container log") : _("system log"));
+    text(1, 2, line, ACCENT, BG);
+    ui_hit(1, 3, cols - 2, body_rows, HIT_LOG);
+    if (log_total == 0) {
+        textsel_put(2, 3, log_system ? _("No LOCachy system log lines found.") :
+                    _("No log yet for this container (press Tab for the system log)."), FG, BG);
+        return;
+    }
+    char clipped[512];
+    for (int i = first_line, row = 3; i < last_line && row < footer; i++, row++) {
+        int width = cols - 3 > 0 ? cols - 3 : 1;
+        size_t n = 0;
+        int cells = 0;
+        for (const unsigned char *p = (const unsigned char *)log_all[i]; *p && n + 5 < sizeof clipped;) {
+            const unsigned char *c0 = p;
+            unsigned char b = *p++;
+            int more = b < 0x80 ? 0 : (b & 0xE0) == 0xC0 ? 1 : (b & 0xF0) == 0xE0 ? 2 : (b & 0xF8) == 0xF0 ? 3 : 0;
+            uint32_t cp = b & (0x3Fu >> more);
+            for (; more > 0 && (*p & 0xC0) == 0x80; more--) cp = cp << 6 | (*p++ & 0x3F);
+            int w = screen_char_cells(cp);
+            if (cells + w > width) break;
+            memcpy(clipped + n, c0, (size_t)(p - c0));
+            n += (size_t)(p - c0);
+            cells += w;
+        }
+        clipped[n] = '\0';
+        textsel_put(2, row, clipped, FG, BG);
+    }
+}
+
+static void copy_log(int all)
+{
+    char msg[512], *text = NULL;
+    if (all) {
+        size_t size = 0;
+        FILE *out = open_memstream(&text, &size);
+        if (!out) return;
+        int n = log_split();
+        for (int i = 0; i < n; i++) fprintf(out, "%s\n", log_all[i]);
+        fclose(out);
+        if (!text || !text[0]) {
+            free(text);
+            last_customized = 1;
+            snprintf(last, sizeof last, "%s", _("Nothing to copy here."));
+            return;
+        }
+    } else {
+        text = textsel_get();
+        if (!text || !text[0]) {
+            free(text);
+            const struct app *a = error_app();
+            if (a && a->error[0]) {
+                textsel_copy(0, a->error, msg, sizeof msg);
+                if (msg[0]) {
+                    last_customized = 1;
+                    snprintf(last, sizeof last, "%s", msg);
+                }
+            } else {
+                last_customized = 1;
+                snprintf(last, sizeof last, "%s",
+                         _("Nothing selected: drag over text, or double-click a word, or triple-click a line."));
+            }
+            return;
+        }
+    }
+    textsel_copy(0, text, msg, sizeof msg);
+    if (msg[0]) {
+        last_customized = 1;
+        snprintf(last, sizeof last, "%s", msg);
+    }
+    free(text);
+}
+
 /* ready also tells the log that home waits for keys (drive.py's prompt). */
 static void draw_output(int ready)
 {
@@ -485,9 +800,14 @@ static void draw_output(int ready)
         screen_fill(0, 0, cols, rows, BG);
     }
     ui_hits_clear();
+    if (!screen_is_extended || !screen_is_extended() || home_output == screen_output_current()) {
+        textsel_frame();
+    }
     screen_bar(_("home"), NULL);
-    snprintf(line, sizeof line, _("%d containers   %d marked (operation targets only)"),
-             napps, marked_count());
+    char summary[160];
+    jobs_summary(summary, sizeof summary);
+    snprintf(line, sizeof line, _("%d containers   %d marked (operation targets only)%s"),
+             napps, marked_count(), summary);
     text(1, 1, line, ACCENT, BG);
 
     if (confirming != CONF_NONE) {
@@ -502,6 +822,13 @@ static void draw_output(int ready)
         } else if (confirming == CONF_REBOOT) {
             /* TRANSLATORS: Y and N are the confirmation keys; keep them. */
             snprintf(line, sizeof line, _("Y/N: Reboot the host?"));
+        } else if (confirming == CONF_JOB && job_asked_running) {
+            /* TRANSLATORS: Y and N are the confirmation keys; keep them. */
+            snprintf(line, sizeof line, _("Y/N: Stop system job %d while it runs? A package transaction stopped "
+                                          "midway can leave the system half-changed."), job_asked);
+        } else if (confirming == CONF_JOB) {
+            /* TRANSLATORS: Y and N are the confirmation keys; keep them. */
+            snprintf(line, sizeof line, _("Y/N: Remove system job %d from the queue? It has not started."), job_asked);
         } else {
             /* TRANSLATORS: Y and N are the confirmation keys; keep them. */
             snprintf(line, sizeof line, _("Y/N: Power off the host?"));
@@ -519,6 +846,10 @@ static void draw_output(int ready)
                 }
             }
         }
+    } else if (jobs_shown) {
+        draw_jobs(footer);
+    } else if (log_shown) {
+        draw_logs(footer);
     } else {
         int columns = grid_columns(), width = grid_width(), shown = grid_visible();
         int focus = selected / columns, total = (napps + nentries + 2 + columns - 1) / columns;
@@ -565,16 +896,34 @@ static void draw_output(int ready)
         int c = ui_button(1, rows - 2, _("Y: confirm"), HIT_KEY + 'y');
         ui_button(c, rows - 2, _("N: cancel"), HIT_KEY + 'n');
         text(1, rows - 1, _("Any other key cancels without acting."), FG, BG);
+    } else if (log_shown) {
+        /* TRANSLATORS: Tab, y, Y, Esc and J are key names; keep them. */
+        int c = ui_button(1, rows - 2, log_system && log_name[0] ? _("Tab: container log") : _("Tab: system log"),
+                          HIT_KEY + '\t');
+        c = ui_button(c, rows - 2, _("y: copy"), HIT_KEY + 'y');
+        c = ui_button(c, rows - 2, _("Y: copy all"), HIT_KEY + 'Y');
+        c = ui_button(c, rows - 2, _("J: system jobs"), HIT_KEY + 'j');
+        ui_button(c, rows - 2, _("Esc: back"), HIT_KEY + 27);
+        /* TRANSLATORS: Up/Down/PgUp/PgDn and Super+Esc are key names; keep them. */
+        text(1, rows - 1, _("Arrows/PgUp/PgDn or the wheel: scroll   drag/double-click: select   "
+                            "Super+Esc: home"), FG, BG);
     } else {
         /* TRANSLATORS: Enter, Space, R, F, K are key names; keep them. */
         int c = ui_button(1, rows - 2, _("Enter: open"), HIT_KEY + '\n');
         c = ui_button(c, rows - 2, _("Space: mark"), HIT_KEY + ' ');
         c = ui_button(c, rows - 2, _("R: start/resume"), HIT_KEY + 'r');
         c = ui_button(c, rows - 2, _("F: freeze"), HIT_KEY + 'f');
-        ui_button(c, rows - 2, _("K: stop/close"), HIT_KEY + 'k');
+        c = ui_button(c, rows - 2, _("K: stop/close"), HIT_KEY + 'k');
+        /* TRANSLATORS: J is the key name; keep it. */
+        c = ui_button(c, rows - 2, jobs_shown ? _("J: containers") : _("J: system jobs"), HIT_KEY + 'j');
+        /* TRANSLATORS: L is the key name; keep it. */
+        ui_button(c, rows - 2, log_shown ? _("L: containers") : _("L: logs"), HIT_KEY + 'l');
         /* TRANSLATORS: Up/Down/PgUp/PgDn and Super+Esc are key names; keep them. */
         text(1, rows - 1, _("Arrows/PgUp/PgDn or the wheel: move   double click: open   "
                             "right click: actions   Super+Esc: home"), FG, BG);
+    }
+    if (!screen_is_extended || !screen_is_extended() || home_output == screen_output_current()) {
+        textsel_draw(BG, ACCENT);
     }
     screen_flush();
     if (ready) {
@@ -609,10 +958,7 @@ static void draw(int ready)
 
 static void view_files(void)
 {
-    int was = screen_is_extended && screen_is_extended();
-    if (was) screen_extended(0);
-    files_view();
-    if (was) screen_extended(1);
+    files_view(); /* files keeps native per-output layouts and restores our target */
 }
 
 /* Accepted is not completed: no local state changes, including for show. */
@@ -722,6 +1068,44 @@ static void confirm_stop(void)
     confirming = CONF_STOP;
 }
 
+/* K on the selected system job: asked about first, whatever its state. */
+static void confirm_job(void)
+{
+    refresh();
+    last_customized = 1;
+    if (job_selected >= njobs) {
+        snprintf(last, sizeof last, "%s", _("No system job is selected."));
+        return;
+    }
+    const struct jobs_row *j = &jobs[job_selected];
+    if (jobs_ended(j)) {
+        snprintf(last, sizeof last, _("System job %d has ended: nothing to stop."), j->id);
+        return;
+    }
+    job_asked = j->id;
+    job_asked_running = strcmp(j->state, "queued") != 0;
+    confirming = CONF_JOB;
+}
+
+/* Not while a system job runs or waits: rebooting would cut it (a package
+ * transaction half done). 1 if refused, with why in last. */
+static int jobs_hold_power(const char *what)
+{
+    struct jobs_row running = { 0 };
+    int pending = jobs_pending(&running);
+    if (pending <= 0) {
+        return 0;
+    }
+    last_customized = 1;
+    /* TRANSLATORS: %s is "Reboot" or "Power off"; J is the key name, keep it. */
+    snprintf(last, sizeof last, P_("%s refused: %d system job runs or waits (job %d, %s). Wait for it, or stop it "
+                                   "in the system jobs (J).",
+                                   "%s refused: %d system jobs run or wait (job %d, %s). Wait for them, or stop "
+                                   "them in the system jobs (J).", pending),
+             what, pending, running.id, running.kind[0] ? running.kind : "?");
+    return 1;
+}
+
 /* Consume every confirmation key, so Enter cannot fall through to power off. */
 static void confirm_key(int key)
 {
@@ -729,11 +1113,30 @@ static void confirm_key(int key)
         last_customized = 1;
         snprintf(last, sizeof last, "%s",
                  confirming == CONF_REBOOT ? _("Reboot cancelled.") :
-                 confirming == CONF_POWEROFF ? _("Power off cancelled.") : _("Stop cancelled."));
+                 confirming == CONF_POWEROFF ? _("Power off cancelled.") :
+                 confirming == CONF_JOB ? _("The system job was left as it is.") : _("Stop cancelled."));
         clear_confirmation();
         return;
     }
     action_error[0] = '\0';
+    if (confirming == CONF_JOB) {
+        char why[256] = "";
+        int r = jobs_cancel(job_asked, job_asked_running, why, sizeof why);
+        last_customized = 1;
+        if (r == 1) {
+            /* TRANSLATORS: K is the key name; keep it. */
+            snprintf(last, sizeof last, _("System job %d has started meanwhile: K again to stop it."), job_asked);
+        } else if (r == 0) {
+            snprintf(last, sizeof last, strcmp(why, "stopping") == 0 ? _("System job %d: stopping.") :
+                     strcmp(why, "removed") == 0 ? _("System job %d: removed from the queue.") :
+                     _("System job %d had ended."), job_asked);
+        } else {
+            snprintf(action_error, sizeof action_error, _("System job %d: %s"), job_asked, why);
+        }
+        clear_confirmation();
+        refresh();
+        return;
+    }
     if (confirming == CONF_STOP) {
         int accepted = 0;
         for (int i = 0; i < nstop; i++) {
@@ -749,11 +1152,17 @@ static void confirm_key(int key)
         snprintf(last, sizeof last, _("Close requested for host program %s."), entries[stop_program].name);
     } else if (confirming == CONF_REBOOT) {
         clear_confirmation();
+        if (jobs_hold_power(_("Reboot"))) {
+            return;
+        }
         say("home: reboot");
         base_reboot();
         return;
     } else if (confirming == CONF_POWEROFF) {
         clear_confirmation();
+        if (jobs_hold_power(_("Power off"))) {
+            return;
+        }
         say("home: power off");
         base_poweroff();
         return;
@@ -765,9 +1174,9 @@ static void confirm_key(int key)
 /* The actions for the selected row, as their keys. */
 static int row_menu(int col, int row)
 {
-    static const int container_keys[] = { '\n', 'r', 'f', 'k', ' ' }, program_keys[] = { '\n', 'k' };
+    static const int container_keys[] = { '\n', 'r', 'f', 'k', ' ', 'l' }, program_keys[] = { '\n', 'k' };
     const char *container[] = {
-        _("Open"), _("Start / resume"), _("Freeze"), _("Stop..."), _("Mark / unmark"), NULL
+        _("Open"), _("Start / resume"), _("Freeze"), _("Stop..."), _("Mark / unmark"), _("Log"), NULL
     };
     const char *program[] = { _("Open"), _("Close..."), NULL };
     const char *builtin[] = { _("Open"), NULL };
@@ -802,21 +1211,44 @@ static int pointer_key(void)
         output_scroll[previous] = scroll;
         home_output = e->output;
         scroll = output_scroll[home_output];
-        if (!e->button && !e->wheel && !e->hwheel && !e->gesture) return previous == home_output ? 0 : -1;
+        if (!e->button && !e->wheel && !e->hwheel && !e->gesture &&
+            !(textsel_active() && e->buttons == 1)) return previous == home_output ? 0 : -1;
     }
     if (e->wheel && confirming == CONF_NONE) {
+        if (log_shown) {
+            scroll_log(3 * e->wheel, screen_rows() - footer_rows() - 3);
+            return -1;
+        }
         selected -= e->wheel * grid_columns();
         selected = selected < 0 ? 0 : selected > napps + nentries + 1 ? napps + nentries + 1 : selected;
+        return -1;
+    }
+    int id = ui_hit_at(e->col, e->row);
+    int footer = screen_rows() - footer_rows();
+    int got = confirming == CONF_NONE ?
+              textsel_pointer(e, id == HIT_LOG || e->row == footer || e->row == footer + 1) : TEXTSEL_NONE;
+    if (got == TEXTSEL_MADE) {
+        char *sel_text = textsel_get();
+        if (sel_text && sel_text[0]) {
+            char msg[512];
+            textsel_copy(1, sel_text, msg, sizeof msg);
+        }
+        free(sel_text);
+    }
+    if (got != TEXTSEL_NONE) {
         return -1;
     }
     if (!e->pressed || (e->button != BTN_LEFT && e->button != BTN_RIGHT)) {
         return 0;
     }
-    int id = ui_hit_at(e->col, e->row);
-    if (id >= HIT_KEY) {
+    if (id >= HIT_JOB && id < HIT_LOG) {
+        if (confirming == CONF_NONE && id - HIT_JOB < njobs) job_selected = id - HIT_JOB;
+        return -1;
+    }
+    if (id >= HIT_KEY && id < HIT_JOB) {
         return e->button == BTN_LEFT ? id - HIT_KEY : 0;
     }
-    if (id < HIT_ROW || id - HIT_ROW >= napps + nentries + 2 || confirming != CONF_NONE) {
+    if (log_shown || id < HIT_ROW || id - HIT_ROW >= napps + nentries + 2 || confirming != CONF_NONE) {
         return 0;
     }
     int pos = id - HIT_ROW;
@@ -897,8 +1329,51 @@ int main(void)
             }
             continue;
         }
+        if (key > 0 && key != 'y' && key != 'Y' && key != 3) {
+            textsel_clear();
+        }
         if (confirming != CONF_NONE) {
             confirm_key(key);
+        } else if (key == 'y' || key == 3) { /* 3: Ctrl+C */
+            copy_log(0);
+        } else if (key == 'Y' && log_shown) {
+            copy_log(1);
+        } else if (key == 'j' || key == 'J') {
+            log_shown = 0;
+            jobs_shown = !jobs_shown;
+            refresh();
+        } else if (key == 'l' || key == 'L') {
+            open_logs();
+            refresh();
+        } else if (log_shown && key == '\t') {
+            if (log_system && log_name[0]) {
+                log_system = 0;
+            } else {
+                log_system = 1;
+            }
+            log_from = 0;
+        } else if (log_shown && (key == K_UP || key == K_DOWN || key == K_PGUP || key == K_PGDN ||
+                                 key == K_BOL || key == K_EOL)) {
+            int page_rows = screen_rows() - footer_rows() - 3;
+            if (page_rows < 1) page_rows = 1;
+            if (key == K_BOL) log_from = log_total;
+            else if (key == K_EOL) log_from = 0;
+            else if (key == K_UP) scroll_log(1, page_rows);
+            else if (key == K_DOWN) scroll_log(-1, page_rows);
+            else scroll_log(key == K_PGUP ? page_rows : -page_rows, page_rows);
+        } else if (log_shown && key == 27) {
+            log_shown = 0;
+        } else if (log_shown) {
+            /* the containers' keys act on the grid only */
+        } else if (jobs_shown && (key == K_UP || key == K_DOWN)) {
+            job_selected += key == K_UP ? -1 : 1;
+            job_selected = job_selected < 0 ? 0 : job_selected >= njobs ? (njobs > 0 ? njobs - 1 : 0) : job_selected;
+        } else if (jobs_shown && (key == 'k' || key == 'K' || key == K_DEL)) {
+            confirm_job();
+        } else if (jobs_shown && key == 27) {
+            jobs_shown = 0;
+        } else if (jobs_shown) {
+            /* the containers' keys act on the grid only */
         } else if (key == K_UP || key == K_DOWN || key == K_LEFT || key == K_RIGHT ||
                    key == K_PGUP || key == K_PGDN || key == K_BOL || key == K_EOL) {
             move_selection(key);

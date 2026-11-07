@@ -9,6 +9,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -119,6 +120,85 @@ class DeclarePackages(unittest.TestCase):
         self.assertFalse(any(p.startswith("linux-cachyos") for p in self.leaves()))
         current = declare.definitions(SOURCE)
         self.assertEqual(groups.get("base", []), [p for p in current["base"] if p not in base["base"]])
+
+    def test_a_required_module_comes_once_with_the_one_requiring_it(self):
+        """Chinese Pinyin requires the CJK fonts: a system that has Pinyin but
+        not the fonts gets them declared once; one the user removed stays out."""
+        def modules(requires):
+            entries = {"desktop": {"packages": ["labwc-locachy"]},
+                       "cjk-fonts": {"packages": ["noto-fonts-cjk"], "fontconfig_lang": "zh"},
+                       "ime": {"packages": ["librime", "words"], "choice": "ime"},
+                       "ime-zh": {"packages": ["rime-frost-git"], "choice": "ime"}}
+            if requires:
+                entries["ime-zh"]["requires"] = ["ime", "cjk-fonts"]
+            (self.src / "link/modules.json").write_text(json.dumps(entries))
+        asked = []
+        has_font = False
+        def fontconfig_has(lang):
+            asked.append(lang)
+            return has_font
+        original = declare.fontconfig_has
+        declare.fontconfig_has = fontconfig_has
+        self.addCleanup(setattr, declare, "fontconfig_has", original)
+        (self.src / "packages").write_text("base\n")
+        modules(False)
+        self.manifest.write_text("base\nlibrime\nwords\nrime-frost-git\n")
+        self.assertEqual(self.run_declare(), [])
+        modules(True)
+        self.assertEqual(self.run_declare(), [("module cjk-fonts (required by ime-zh)", ["noto-fonts-cjk"])])
+        self.assertEqual(asked, ["zh"])
+        self.assertIn("noto-fonts-cjk", self.leaves())
+        self.assertEqual(json.loads(self.record.read_text())["requires"], {"ime-zh": ["ime", "cjk-fonts"]})
+        self.manifest.write_text(self.manifest.read_text().replace("noto-fonts-cjk\n", ""))
+        self.assertEqual(self.run_declare(), [])
+        self.assertNotIn("noto-fonts-cjk", self.leaves())
+        # Without Pinyin declared the requirement brings nothing.
+        self.record.unlink()
+        self.manifest.write_text("base\nlibrime\nwords\n")
+        self.assertEqual(self.run_declare(), [])
+        self.assertNotIn("noto-fonts-cjk", self.leaves())
+        # Another CJK family fontconfig has (WenQuanYi, Source Han) is enough.
+        self.record.unlink()
+        self.manifest.write_text("base\nlibrime\nwords\nrime-frost-git\nwqy-zenhei\n")
+        has_font = True
+        self.assertEqual(self.run_declare(), [])
+        self.assertNotIn("noto-fonts-cjk", self.leaves())
+
+    def test_chinese_pinyin_requires_the_cjk_fonts_everywhere(self):
+        """modules.json says it; make-root.sh (the installers' WITH_IME) and
+        settings' Chinese Pinyin install what it says."""
+        modules = json.loads((SOURCE / "link/modules.json").read_text())
+        self.assertEqual(modules["ime-zh"]["requires"], ["ime", "cjk-fonts"])
+        self.assertEqual(modules["cjk-fonts"]["fontconfig_lang"], "zh")
+        self.assertTrue(all(modules[m].get("choice") == "ime" for m in ("ime", "ime-zh")))
+        # make-root.sh's module step, as the installers run it.
+        script = (SOURCE / "make-root.sh").read_text()
+        step = script[script.index("python3 -I - "):]
+        step = step[step.index("<<'PY'\n") + 7:step.index("\nPY\n")]
+        for ime, wanted, unwanted in (("zh", {"librime", "words", "rime-frost-git", "noto-fonts-cjk"}, set()),
+                                      ("en", {"librime", "words"}, {"rime-frost-git", "noto-fonts-cjk"}),
+                                      ("0", set(), {"librime", "noto-fonts-cjk"})):
+            root = self.root / ("make-root-" + ime)
+            (root / "link").mkdir(parents=True)
+            (root / "link/modules.json").write_text(json.dumps(modules))
+            (root / "packages").write_text("base\n")
+            (root / "rc.conf").write_text("")
+            result = subprocess.run([sys.executable, "-I", "-c", step, str(root), "1", "", "", ime],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            leaves = set(declare.leaves((root / "packages").read_text()))
+            self.assertTrue(wanted <= leaves, (ime, leaves))
+            self.assertFalse(unwanted & leaves, (ime, leaves))
+        # settings' copies of the lists, and its Pinyin job bringing the fonts.
+        settings = (SOURCE / "progs/settings.c").read_text()
+        def define(name):
+            line = next(ln for ln in settings.splitlines() if ln.startswith(f"#define {name} "))
+            return line.split('"')[1].split()
+        self.assertEqual(define("IME_BASE_PACKAGES"), modules["ime"]["packages"])
+        self.assertEqual(define("IME_ZH_PACKAGES"), modules["ime-zh"]["packages"])
+        self.assertEqual(define("CJK_FONT_PACKAGES"), modules["cjk-fonts"]["packages"])
+        self.assertIn("CJK_FONT_PACKAGES", settings[settings.index("static int ime_zh_job(void)"):])
+        self.assertIn('font_lang_present("zh")', settings)  # the module's fontconfig_lang
 
 
 if __name__ == "__main__":

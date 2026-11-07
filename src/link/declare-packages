@@ -8,15 +8,20 @@ grow with LOCachy's source. RECORD keeps what has been declared from them so
 far. Each run appends to MANIFEST, under a comment naming the base or the
 module, what the definitions have that RECORD does not and MANIFEST lacks,
 then records the definitions. A module counts only where it is declared:
-its first package (its anchor) is in MANIFEST. A package the user removes
-later stays removed (RECORD has it). Without RECORD, the definitions of
-published commit 08d2a66 (link/declared-packages-baseline.json) stand for
-it, so a kernel the user swapped out is not declared again. Nothing is
+its first package (its anchor) is in MANIFEST. A module a declared one
+requires ("requires": Chinese Pinyin the CJK fonts) is declared with it once,
+when that requirement is new, unless its anchor is there already or, for a
+module of fonts ("fontconfig_lang"), fontconfig has a font for that language
+already (any family: fc-list :lang=LANG, as settings asks). A package
+the user removes later stays removed (RECORD has it). Without RECORD, the
+definitions of published commit 08d2a66 (link/declared-packages-baseline.json)
+stand for it, so a kernel the user swapped out is not declared again. Nothing is
 installed here: an update's host step installs what is declared."""
 import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
 import tempfile
 
@@ -34,7 +39,23 @@ def definitions(source):
     source = Path(source)
     modules = json.loads((source / "link/modules.json").read_text(encoding="utf-8"))
     return {"base": leaves((source / "packages").read_text(encoding="utf-8")),
-            "modules": {name: list(entry.get("packages", [])) for name, entry in modules.items()}}
+            "modules": {name: list(entry.get("packages", [])) for name, entry in modules.items()},
+            "requires": {name: list(entry["requires"]) for name, entry in modules.items() if entry.get("requires")}}
+
+
+def fontconfig_langs(source):
+    """module -> the language its fonts are for ("fontconfig_lang")."""
+    modules = json.loads((Path(source) / "link/modules.json").read_text(encoding="utf-8"))
+    return {name: entry["fontconfig_lang"] for name, entry in modules.items() if entry.get("fontconfig_lang")}
+
+
+def fontconfig_has(lang):
+    """Whether fontconfig has a font for lang (fc-list :lang=LANG lists one)."""
+    try:
+        return subprocess.run(["fc-list", "-q", ":lang=" + lang], stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def write(path, text, mode, owner=None):
@@ -77,6 +98,19 @@ def declare(source, manifest=MANIFEST, record=RECORD):
     for name, packages in current["modules"].items():
         if packages and packages[0] in declared:
             add("module " + name, packages, set(known.get("modules", {}).get(name, [])))
+    langs = fontconfig_langs(source)
+    for name, required in current["requires"].items():
+        packages = current["modules"].get(name, [])
+        if not packages or packages[0] not in declared:
+            continue
+        before = set(known.get("requires", {}).get(name, []))
+        for other in required:
+            wanted = current["modules"].get(other, [])
+            if other in before or not wanted or wanted[0] in declared:
+                continue
+            if other in langs and fontconfig_has(langs[other]):
+                continue
+            add(f"module {other} (required by {name})", wanted, set())
     if groups:
         if text and not text.endswith("\n"):
             text += "\n"

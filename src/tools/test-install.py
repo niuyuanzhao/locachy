@@ -67,11 +67,11 @@ class Install(unittest.TestCase):
 
     APPS_URL = "https://example.org/locachy-apps.git"
 
-    def make_catalog(self, presets, commit="c" * 40, dest=None, origin="repository"):
+    def make_catalog(self, presets, commit="c" * 40, dest=None, origin="repository", fmt="1"):
         dest = dest or self.apps
         dest.parent.mkdir(parents=True, exist_ok=True)
         i.APPS.write_catalog({name: text.encode() for name, text in presets.items()}, str(dest),
-                             i.APPS.new_meta("1", origin, self.APPS_URL, "next", commit))
+                             i.APPS.new_meta(fmt, origin, self.APPS_URL, "next", commit))
         return dest
 
     def output(self, command):
@@ -212,7 +212,8 @@ class Install(unittest.TestCase):
         return i.make_parser().parse_args(list(argv))
 
     def test_describe_lists_choices_defaults_and_disks_but_not_the_live_medium(self):
-        self.make_catalog({"firefox": 'package="firefox"\ncommand="/usr/bin/firefox"\n'})
+        self.make_catalog({"chatgpt": 'host="1"\npackage="chatgpt-desktop"\ncommand="/usr/bin/chatgpt"\n',
+                           "firefox": 'package="firefox"\ncommand="/usr/bin/firefox"\n'}, fmt="2")
         with mock.patch.object(i, "output", self.block_output), \
              mock.patch.object(i, "cpu_model", lambda level: "ivybridge"), \
              mock.patch.object(i, "tpm_status", lambda: {"tpm_version": 1}), \
@@ -235,14 +236,35 @@ class Install(unittest.TestCase):
         self.assertIn("cjk-fonts", d["module_defaults"]["zh_CN.UTF-8"])
         self.assertNotIn("cjk-fonts", d["module_defaults"]["en_US.UTF-8"])
         # The system's host programs first, then the app presets' catalog.
-        self.assertEqual(d["containers"], [{"name": "chatgpt", "host": True}, {"name": "code", "host": True},
-                                           {"name": "foot", "host": True}, {"name": "firefox", "host": False}])
+        self.assertEqual(d["containers"], [{"name": "code", "host": True}, {"name": "foot", "host": True},
+                                           {"name": "chatgpt", "host": True}, {"name": "firefox", "host": False}])
         self.assertEqual((d["defaults"]["apps_repo"], d["defaults"]["apps_branch"]), (self.APPS_URL, "next"))
         self.assertEqual(d["apps"], {"text": f"{'c' * 12} of {self.APPS_URL} (next)", "not_newest": False})
         self.assertEqual(d["machines"][0], {"name": "generic", "description": "Generic PC"})
         self.assertIn("x230-agan", [m["name"] for m in d["machines"]])
         self.assertEqual([x["name"] for x in d["ime"]], ["off", "en", "zh"])
         self.assertEqual(d["timezones"][0], "UTC")
+
+    def test_host_packages_come_from_the_selected_catalog_and_its_extras(self):
+        chatgpt = 'host="1"\npackage="chatgpt-desktop"\nextras="git ripgrep"\ncommand="/usr/bin/chatgpt"\n'
+        self.make_catalog({"chatgpt": chatgpt, "isolated": 'package="hello"\ncommand="/usr/bin/hello"\n'}, fmt="2")
+        self.assertEqual(i.host_preset_packages(["chatgpt", "isolated", "foot"]),
+                         ["chatgpt-desktop", "git", "ripgrep", "foot"])
+        root = self.root / "target-custom"
+        (root / "etc/locachy").mkdir(parents=True)
+        (root / "etc/locachy/packages").write_text("base\n")
+        (root / "etc/locachy/rc.conf").write_text("")
+        # Continued installations use their own pinned catalog, not a newer
+        # live catalog whose package or access mode may have changed.
+        pinned = self.make_catalog({"chatgpt": chatgpt.replace("chatgpt-desktop", "chatgpt-pinned")},
+                                   dest=root / i.APPS_CATALOG, fmt="2")
+        args = type("Args", (), {"containers": "chatgpt", "features": ""})()
+        self.assertTrue(i.apply_customizations(args, root))
+        manifest = (root / "etc/locachy/packages").read_text().splitlines()
+        self.assertTrue({"chatgpt-pinned", "git", "ripgrep"} <= set(manifest))
+        self.assertNotIn("chatgpt-desktop", manifest)
+        self.assertIn('host="1"', (root / "etc/locachy/containers/chatgpt.conf").read_text())
+        self.assertEqual(i.APPS.read_meta(str(pinned))["format"], "2")
 
     def test_targets_checked_before_anything_is_written(self):
         with mock.patch.object(i, "output", self.block_output):
@@ -596,6 +618,67 @@ class Install(unittest.TestCase):
             i.main()
         self.assertIn("Nothing to continue", err.getvalue())
 
+    def test_an_older_medium_s_installer_calls_this_one(self):
+        """The live entry fetches the newest locachy-install; the full-screen
+        installer calling it is the medium's, maybe older. Its calls exactly
+        as installer.c of 146a90a makes them (the medium of 2026-10-27), on
+        such a medium: no app presets' catalog (it predates them) and no
+        LOCACHY_APPS_CATALOG (its live entry fetches none). The installation
+        stops for a key; its trust command is this installer's; c (--resume)
+        goes on where it stopped, also past an empty catalog an older
+        installer kept beside the record."""
+        os.environ.pop("LOCACHY_APPS_CATALOG")
+        os.environ.pop("LOCACHY_APPS")
+        medium = Path(self.tmp.name) / "medium-without-app-presets"
+        key = "40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C"
+        secret = Path(self.tmp.name) / "password"
+        secret.write_text("Locachy123\n")
+        calls, checked = [], []
+        def validate(r, e, install_id=None):
+            checked.append(install_id)
+            return self.root, self.esp, self.root_fs, self.esp_fs
+        def stopped(cmd, **kw):
+            calls.append(cmd)
+            keys = self.root / i.UNTRUSTED_KEYS
+            keys.parent.mkdir(parents=True, exist_ok=True)
+            keys.write_text(f"lyrebird-proxy {key}\n")
+            return subprocess.CompletedProcess(cmd, 1)
+        def call(argv, run, out=None):
+            with mock.patch.object(sys, "argv", ["/usr/local/bin/locachy-install"] + argv), \
+                 mock.patch.object(i, "MEDIUM_APPS_CATALOG", str(medium)), \
+                 mock.patch.object(i.os, "geteuid", lambda: 0), mock.patch.object(i, "validate", validate), \
+                 mock.patch.object(i, "resumed_target", lambda record: Path(record["root"])), \
+                 mock.patch.object(i, "run", run), contextlib.redirect_stdout(out or io.StringIO()):
+                return i.main()
+        repo = "--update-repo=https://github.com/niuyuanzhao/locachy.git"
+        first = ["--yes", "--root=" + str(self.root), "--esp=" + str(self.esp), "--password-file=" + str(secret),
+                 "--user=boot-test", "--hostname=locachy", "--language=en_US.UTF-8", "--keymap=us",
+                 "--timezone=auto", "--ime=off", "--copy-network", "--features=desktop,tor", "--containers=foot",
+                 "--level=auto", "--cpu=auto", "--repos=core,extra,multilib", repo, "--update-branch=main"]
+        out = io.StringIO()
+        self.assertEqual(call(first, stopped, out), 1)
+        trust = [line for line in out.getvalue().splitlines() if line.startswith("Trust them: ")]
+        self.assertEqual(trust[-1], f"Trust them: locachy-install --trust-key {key}")  # what that installer shows
+        self.assertFalse(self.record.with_name("apps-catalog").exists())  # none was there to keep
+        chroot = []
+        with mock.patch.object(i.subprocess, "run", lambda cmd, **kw: chroot.append(cmd) or subprocess.CompletedProcess(cmd, 0)):
+            self.assertEqual(call(["--trust-key", key], stopped), 0)
+        self.assertEqual(chroot, [["arch-chroot", str(self.root), "/usr/local/bin/locachy-build", "--trust-key", key]])
+        # c: as that installer continues. An older installer (930434b) kept an
+        # empty catalog beside the record; it is not taken for one.
+        kept = self.record.with_name("apps-catalog")
+        kept.mkdir()
+        (kept / "CATALOG").write_text('installed="2026-11-05 10:00"\n')
+        again = ["--resume", "--yes", "--password-file=" + str(secret), repo, "--update-branch=main"]
+        calls.clear()
+        self.assertEqual(call(again, lambda cmd, **kw: calls.append(cmd) or subprocess.CompletedProcess(cmd, 0)), 0)
+        inner = calls[-1]
+        self.assertIn("--resume", inner)
+        self.assertEqual(inner[inner.index("--features") + 1], "desktop,tor")
+        self.assertEqual(inner[inner.index("--containers") + 1], "foot")
+        self.assertEqual(checked[-1], inner[inner.index("--install-id") + 1])  # the same installation
+        self.assertFalse(self.record.exists())
+
     def test_host_security_is_fwupds_own_report(self):
         report = ("Host Security ID: \x1b[1mHSI:1 (v2.0.16)\x1b[0m\n\n\x1b[1mHSI-1\x1b[0m\n"
                   "\u2714 BIOS firmware updates:     \x1b[32mEnabled\x1b[0m\n"
@@ -670,6 +753,55 @@ class Install(unittest.TestCase):
             self.assertFalse(i.apply_customizations(args, self.root))
         self.assertEqual((conf / "packages").read_text(), original)
         self.assertTrue((conf / "luks").is_file())
+
+    def test_live_network_profiles_are_carried_as_networkmanager_reads_them(self):
+        """Keyfiles as the live system's NetworkManager writes them (nmcli,
+        nmtui: interface-name of the live device): root's, 0600, their
+        secrets kept, bound to no live interface; one whose secret an agent
+        kept is said to need it again."""
+        live = Path(self.tmp.name) / "live-nm"
+        live.mkdir()
+        wifi = ("[connection]\nid=Home\nuuid=78b2c58b-d6f5-4885-97bf-7155edd67f06\ntype=wifi\ninterface-name=wlp3s0\n\n"
+                "[wifi]\nmode=infrastructure\nssid=Home\n\n[wifi-security]\nkey-mgmt=wpa-psk\npsk=Secret-12345\n\n"
+                "[ipv4]\nmethod=auto\n\n[ipv6]\naddr-gen-mode=default\nmethod=auto\n\n[proxy]\n")
+        wired = ("[connection]\nid=Wired connection 1\nuuid=0d1c4c2a-5f0e-3f43-9a43-3b1f2f2b9a10\ntype=ethernet\n"
+                 "autoconnect-priority=-999\ninterface-name=enp0s25\n\n[ethernet]\n\n[ipv4]\nmethod=auto\n")
+        agent = ("[connection]\nid=Cafe\nuuid=5b0f3e0c-1d2a-4c55-8e7a-2f6d9e1b3c44\ntype=wifi\n\n"
+                 "[wifi]\nssid=Cafe\n\n[wifi-security]\nkey-mgmt=wpa-psk\npsk-flags=1\n")
+        tunnel = ("[connection]\nid=wg0\nuuid=1e2d3c4b-5a69-4788-9a0b-1c2d3e4f5a6b\ntype=wireguard\ninterface-name=wg0\n\n"
+                  "[wireguard]\nprivate-key=cGFzc3dvcmQ=\n")
+        for name, text in (("Home", wifi), ("Wired connection 1", wired), ("Cafe", agent), ("wg0", tunnel)):
+            path = live / (name + ".nmconnection")
+            path.write_text(text)
+            path.chmod(0o600)
+        (live / "notes.txt").write_text("not a profile\n")
+        with mock.patch.object(i, "LIVE_NM_CONNECTIONS", live), contextlib.redirect_stdout(io.StringIO()) as out:
+            i.copy_network_profiles(self.root)
+        target = self.root / "etc/NetworkManager/system-connections"
+        self.assertEqual(oct(target.stat().st_mode & 0o777), "0o700")
+        self.assertEqual(sorted(p.name for p in target.iterdir()),
+                         ["Cafe.nmconnection", "Home.nmconnection", "Wired connection 1.nmconnection", "wg0.nmconnection"])
+        for path in target.iterdir():
+            self.assertEqual(oct(path.stat().st_mode & 0o777), "0o600", path)  # NetworkManager ignores any other
+            self.assertEqual(path.stat().st_uid, os.geteuid())  # root, installing
+        self.assertEqual((target / "Home.nmconnection").read_text(), wifi.replace("interface-name=wlp3s0\n", ""))
+        self.assertIn("psk=Secret-12345\n", (target / "Home.nmconnection").read_text())
+        self.assertEqual((target / "Wired connection 1.nmconnection").read_text(),
+                         wired.replace("interface-name=enp0s25\n", ""))
+        self.assertEqual((target / "wg0.nmconnection").read_text(), tunnel)  # its own interface, by its name
+        self.assertEqual((target / "Cafe.nmconnection").read_text(), agent)
+        said = out.getvalue()
+        self.assertIn("Saved network Home: copied; not bound to the live system's wlp3s0\n", said)
+        self.assertIn("Saved network Wired connection 1: copied; not bound to the live system's enp0s25\n", said)
+        self.assertIn("Saved network Cafe: copied; its psk is not saved in it (an agent kept it): "
+                      "connect with nmtui to enter it\n", said)
+        self.assertIn("Saved network wg0: copied\n", said)
+        # Copied again (a continued installation): replaced, still 0600.
+        with mock.patch.object(i, "LIVE_NM_CONNECTIONS", live), contextlib.redirect_stdout(io.StringIO()):
+            i.copy_network_profiles(self.root)
+        self.assertEqual(oct((target / "Home.nmconnection").stat().st_mode & 0o777), "0o600")
+        script = (SOURCE / "link/locachy-install").read_text()
+        self.assertIn('if getattr(args, "copy_network", False):\n        copy_network_profiles(root)', script)
 
     def test_partitioning_luks2_and_customizations(self):
         calls = []

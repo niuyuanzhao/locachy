@@ -1,7 +1,14 @@
 #!/bin/sh
-# Ask process 1 (init) for a clean system reboot (SIGTERM -> shut_down(RB_AUTOBOOT)).
+# Ask process 1 (init) for a clean system reboot (SIGTERM -> shutdown_request).
+# A system job that runs (tools/JOBS.md) is waited for first; -f/--force
+# reboots without waiting: systemd's immediate reboot signal, SIGRTMIN+15,
+# by number (49: glibc's SIGRTMIN is 34), still ending everything cleanly.
 set -eu
 if [ "$(id -u)" -ne 0 ]; then
     exec sudo /usr/local/bin/reboot "$@"
 fi
-exec kill -TERM 1
+case "$*" in
+    '') exec kill -TERM 1 ;;
+    -f | --force) exec kill -s 49 1 ;;
+    *) echo 'usage: reboot [--force]' >&2; exit 2 ;;
+esac

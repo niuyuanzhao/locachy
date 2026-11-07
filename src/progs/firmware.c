@@ -11,8 +11,10 @@
  *                     (CH341A, FT2232, Dediprog, spidev, serprog): probe chip &
  *                     IFD regions, mandatory 3-read SHA-256 verified backup,
  *                     verify, and confirmed write.
- * Long operations run in the root cgroup (never frozen across screen switches)
- * with live output in the lower pane (FW_JOB_LOG).
+ * Long operations are system jobs (locachy-jobs, tools/JOBS.md): queued with
+ * the others, one at a time, in a cgroup of their own; they go on when this
+ * program closes or is frozen, and home lists them. Their output is shown in
+ * the lower pane; reopened, this program shows its job that has not ended.
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -33,6 +35,7 @@
 
 #include "base.h"
 #include "files.h"
+#include "jobs.h"
 
 #define FG     0xD0D0D0
 #define BG     0x101820
@@ -41,9 +44,7 @@
 #define ERROR  0xFF9090
 #define BAR_BG 0x1C2836
 
-#ifndef FW_JOB_LOG
-#define FW_JOB_LOG    "/run/locachy/firmware.log"
-#define FW_JOB_PID    "/run/locachy/firmware.pid"
+#ifndef FW_HELPER
 #define FW_HELPER     "/usr/local/bin/locachy-firmware"
 #define PKG_HELPER    "/usr/local/bin/locachy-pkg"
 #define FWUPD_PATH    "/usr/bin/fwupdmgr"
@@ -118,8 +119,9 @@ static int flashrom_missing;
 static int page;
 static int sel[NPAGES], top_row[NPAGES];
 static int show_log = 1, log_scroll;
-static pid_t job_pid;
-static char job_label[128];
+static int job_id;              /* the job asked for (the queue's id), until it has ended; 0: none */
+static char job_label[128], job_kind[24];
+static char job_log[512];       /* its output: the job shown last */
 static int confirming;
 static char pending_path[PATH_MAX];
 static char notice[320];
@@ -322,52 +324,76 @@ static void load_all(void)
     load_spi();
 }
 
+/* The queue's kind of argv (FW_HELPER's or PKG_HELPER's command), and where
+ * its own arguments begin; NULL if it is none. */
+static const char *job_kind_of(char *const argv[], int *first)
+{
+    static const char *const actions[][2] = {
+        { "refresh", "fw-refresh" }, { "update", "fw-update" }, { "verify", "fw-verify" },
+        { "unlock", "fw-unlock" }, { "local-install", "fw-local-install" }, { "install-release", "fw-install-release" },
+    };
+    if (strcmp(argv[0], PKG_HELPER) == 0 && argv[1] && strcmp(argv[1], "install") == 0) {
+        *first = 2;
+        return "pkg-install";
+    }
+    if (strcmp(argv[0], FW_HELPER) != 0 || !argv[1]) return NULL;
+    if (strcmp(argv[1], "fwupd-action") == 0 && argv[2]) {
+        for (size_t i = 0; i < sizeof actions / sizeof actions[0]; i++) {
+            if (strcmp(argv[2], actions[i][0]) == 0) {
+                *first = 3;
+                return actions[i][1];
+            }
+        }
+        return NULL;
+    }
+    *first = 2;
+    return strncmp(argv[1], "spi-", 4) == 0 ? argv[1] : NULL;
+}
+
+/* argv as a system job (locachy-jobs): this program shows one of its own. */
 static void start_job(const char *label, char *const argv[])
 {
-    if (job_pid > 0) {
+    int first = 0, id = 0, position = 0;
+    const char *kind = job_kind_of(argv, &first);
+    char why[256] = "";
+    if (job_id > 0) {
         say_notice(1, _("Wait: %s is still running."), job_label);
         return;
     }
-    mkdir("/run/locachy", 0755);
-    pid_t pid = fork();
-    if (pid == 0) {
-        setsid();
-        int cg = open("/sys/fs/cgroup/cgroup.procs", O_WRONLY | O_CLOEXEC);
-        if (cg >= 0) {
-            if (write(cg, "0", 1) < 0) {}
-            close(cg);
-        }
-        int out = open(FW_JOB_LOG, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-        int null = open("/dev/null", O_RDONLY | O_CLOEXEC);
-        if (out >= 0) {
-            dup2(out, STDOUT_FILENO);
-            dup2(out, STDERR_FILENO);
-        }
-        if (null >= 0) {
-            dup2(null, STDIN_FILENO);
-        }
-        execv(argv[0], argv);
-        _exit(127);
-    }
-    if (pid < 0) {
-        say_notice(1, _("Cannot start %s."), label);
+    if (!kind || jobs_submit(kind, (const char *const *)argv + first, &id, &position, why, sizeof why) < 0) {
+        say_notice(1, _("Cannot start %s: %s"), label, why);
         return;
     }
-    job_pid = pid;
+    job_id = id;
+    snprintf(job_kind, sizeof job_kind, "%s", kind);
     snprintf(job_label, sizeof job_label, "%s", label);
+    jobs_log_path(id, job_log, sizeof job_log);
     show_log = 1;
     log_scroll = 0;
-    FILE *pf = fopen(FW_JOB_PID, "we");
-    if (pf) {
-        fprintf(pf, "%d %s\n", (int)pid, label);
-        fclose(pf);
+    /* TRANSLATORS: home is the program's name; keep it. */
+    say_notice(0, position ? _("%s: queued (%d before it); it goes on if firmware closes; home lists it.") :
+               _("%s: running; it goes on if firmware closes; home lists it."), label, position);
+}
+
+/* Reopened: this program's job that has not ended, shown again. */
+static void find_job(void)
+{
+    static struct jobs_row rows[JOBS_ROWS_MAX];
+    int n = jobs_mine(rows, JOBS_ROWS_MAX);
+    for (int i = n - 1; i >= 0; i--) {
+        if (jobs_ended(&rows[i])) continue;
+        job_id = rows[i].id;
+        snprintf(job_kind, sizeof job_kind, "%s", rows[i].kind);
+        snprintf(job_label, sizeof job_label, "%.23s %.100s", rows[i].kind, rows[i].args);
+        jobs_log_path(job_id, job_log, sizeof job_log);
+        say_notice(0, _("%s: %s; its output is below."), job_label, jobs_state_label(rows[i].state));
+        return;
     }
-    say_notice(0, _("Running: %s..."), label);
 }
 
 static void parse_probe_log(void)
 {
-    FILE *f = fopen(FW_JOB_LOG, "re");
+    FILE *f = fopen(job_log, "re");
     if (!f) return;
     char line[512];
     detected_chip[0] = detected_ifd[0] = '\0';
@@ -399,22 +425,21 @@ static void parse_probe_log(void)
 
 static void check_job(void)
 {
-    if (job_pid <= 0) return;
-    int st = 0;
-    if (waitpid(job_pid, &st, WNOHANG) != job_pid) return;
-    job_pid = 0;
-    unlink(FW_JOB_PID);
-    int ok = WIFEXITED(st) && WEXITSTATUS(st) == 0;
-    if (strstr(job_label, "SPI probe") != NULL) {
+    struct jobs_row r;
+    char why[256];
+    if (job_id <= 0 || jobs_status(job_id, &r, why, sizeof why) < 0 || !jobs_ended(&r)) return;
+    job_id = 0;
+    if (strcmp(job_kind, "spi-probe") == 0) {
         parse_probe_log();
     }
     load_all();
     if (in_releases) load_releases(rel_dev_idx);
-    if (ok) {
+    if (strcmp(r.state, "done") == 0) {
         say_notice(0, _("%s completed."), job_label);
+    } else if (strcmp(r.state, "cancelled") == 0) {
+        say_notice(1, _("%s was stopped from home; check the output pane below."), job_label);
     } else {
-        say_notice(1, _("%s failed (status %d); check the output pane below."),
-                   job_label, WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+        say_notice(1, _("%s failed (status %d); check the output pane below."), job_label, r.status);
     }
 }
 
@@ -449,17 +474,17 @@ static void draw_log_pane(int top_r, int h)
     int cols = screen_cols();
     screen_fill(0, top_r, cols, 1, BAR_BG);
     char hdr[256];
-    if (job_pid > 0) {
+    if (job_id > 0) {
         snprintf(hdr, sizeof hdr, _(" Output: %.120s (running...) "), job_label);
     } else if (in_releases && nrels > 0 && sel_rel < nrels && rels[sel_rel].notes[0]) {
         snprintf(hdr, sizeof hdr, _(" Release %s notes "), rels[sel_rel].version);
     } else {
-        snprintf(hdr, sizeof hdr, _(" Output (%s) "), FW_JOB_LOG);
+        snprintf(hdr, sizeof hdr, _(" Output (%.200s) "), job_log[0] ? job_log : _("no job yet"));
     }
     screen_text(1, top_r, hdr, ACCENT, BAR_BG);
     if (h <= 1) return;
 
-    if (!job_pid && in_releases && nrels > 0 && sel_rel < nrels && rels[sel_rel].notes[0]) {
+    if (!job_id && in_releases && nrels > 0 && sel_rel < nrels && rels[sel_rel].notes[0]) {
         char cut[512];
         fit_cells(cut, sizeof cut, rels[sel_rel].notes, cols - 2);
         screen_text(1, top_r + 1, cut, FG, BG);
@@ -468,7 +493,7 @@ static void draw_log_pane(int top_r, int h)
 
     static char lines[256][256];
     int nlines = 0;
-    FILE *f = fopen(FW_JOB_LOG, "re");
+    FILE *f = job_log[0] ? fopen(job_log, "re") : NULL;
     while (f && fgets(lines[nlines % 256], sizeof lines[0], f)) {
         lines[nlines % 256][strcspn(lines[nlines % 256], "\r\n")] = '\0';
         nlines++;
@@ -837,10 +862,11 @@ int main(void)
     screen_open(BASE_FONT);
     keys_open();
     say_notice(0, "%s", _("Tab switches between fwupd Devices, BIOS Settings and SPI Flash (flashrom)."));
+    find_job();
     draw();
 
     for (;;) {
-        int timeout = job_pid > 0 ? 300 : -1;
+        int timeout = job_id > 0 ? 300 : -1;
         int key = key_poll_timeout(-1, timeout);
         int mods = keys_modifiers();
         check_job();
@@ -854,12 +880,12 @@ int main(void)
         if (key == K_POINTER) {
             key = pointer_to_key();
             if (key <= 0) {
-                if (key < 0 || job_pid > 0) draw();
+                if (key < 0 || job_id > 0) draw();
                 continue;
             }
         }
         if (key == 0) {
-            if (job_pid > 0) draw();
+            if (job_id > 0) draw();
             continue;
         }
 

@@ -2,7 +2,7 @@
  * test-screen-blit: screen.c's pictures without a screen: screen_blit and
  * screen_fill_px clipped to its shadow buffer at every edge, the alpha byte
  * dropped, and screen_char_cells as screen_text draws (2 for CJK, else 1).
- * Build with -DCONFIG_FREETYPE as make.sh does.
+ * Build with -DCONFIG_FREETYPE and base/fontmatch.c (fontconfig) as make.sh does.
  */
 #include "../base/screen.c"
 #include <assert.h>
@@ -14,6 +14,7 @@ int monitor_conf(const char *name, struct monitor_conf *out)
     return 0;
 }
 int monitor_internal(const char *name) { (void)name; return 0; }
+int monitor_profiles_select_sysfs(void) { return 0; }
 
 static uint32_t at(int x, int y) { return shadow[(size_t)y * width + (size_t)x]; }
 

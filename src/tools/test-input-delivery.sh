@@ -30,13 +30,13 @@ gcc "${flags[@]}" -U_GNU_SOURCE "$src/tools/test-seat.c" "$out/proto/virtual-key
     "$out/proto/wlr-virtual-pointer-unstable-v1-protocol.c" -Wl,--gc-sections \
     -lwayland-client -lxkbcommon -o "$out/bin/seat"
 gcc "${flags[@]}" $(pkg-config --cflags gio-2.0) "$src/tools/test-bar-keyboard.c" "$src/base/keys.c" \
-    "$out"/proto/*-protocol.c -Wl,--gc-sections $(pkg-config --libs gio-2.0) \
+    "$src/base/control.c" "$out"/proto/*-protocol.c -Wl,--gc-sections $(pkg-config --libs gio-2.0) \
     -lwayland-client -lwayland-cursor -lxkbcommon -o "$out/bin/bar-driver"
 
 rime=0
 if [ -f "$runtime/usr/include/rime_api.h" ] && [ -f "$runtime/usr/lib/librime.so" ] && command -v bwrap >/dev/null; then
     gcc "${flags[@]}" -DCONFIG_IME -I"$runtime/usr/include" $(pkg-config --cflags gio-2.0) \
-        "$src/tools/test-bar-keyboard.c" "$src/base/keys.c" "$src/base/ime.c" "$out"/proto/*-protocol.c \
+        "$src/tools/test-bar-keyboard.c" "$src/base/keys.c" "$src/base/control.c" "$src/base/ime.c" "$out"/proto/*-protocol.c \
         -Wl,--gc-sections -Wl,-rpath-link,"$runtime/usr/lib" -L"$runtime/usr/lib" \
         $(pkg-config --libs gio-2.0) -lwayland-client -lwayland-cursor -lxkbcommon -lrime -o "$out/bin/rime-driver"
     # The input method's modes and its key_ime_width_cn, with the runtime's Rime.
@@ -205,10 +205,19 @@ if actual_rime:
     chars = ''.join(line.split(' ', 3)[3] for line in punctuation.splitlines()
                     if line.startswith('KEY ') and len(line.split(' ', 3)) == 4 and line.split(' ', 3)[2] == '1')
     assert chars == ',./', ('idle English punctuation changed in the native bar event path', chars)
-    release_section = text.split('KEY 61 1', 1)[1]
+    release_section = text.split('KEY 61 1', 1)[1].split('KEY 59 1', 1)[0]
     release_chars = ''.join(line.split(' ', 3)[3] for line in release_section.splitlines()
                             if line.startswith('KEY ') and len(line.split(' ', 3)) == 4 and line.split(' ', 3)[2] == '1')
     assert release_chars == '你好，', ('modifier/release commit or clamped ascii_mode failed', release_chars)
+    # English mode (#291), F1..F12: every key as typed (Return's text is a
+    # carriage return, kept out of the log's lines), Tab's completion.
+    english = text.split('KEY 59 1', 1)[1].split('KEY 88 1', 1)[0]
+    english_chars = ''.join(line.split(' ', 3)[3] for line in english.splitlines()
+                            if line.startswith('KEY ') and len(line.split(' ', 3)) == 4 and line.split(' ', 3)[2] == '1')
+    assert english_chars == 'hel hel3hel-helhel1hello ', ('English mode lost or changed typing', english_chars)
+    assert 'KEY 28 1' in english, 'Return after an English word did not reach the client'
+    assert 'PASS real Rime English through the bar' in (root / 'rime.log').read_text()
+    print('PASS English mode through the bar reaches the client exactly as typed; Tab chooses the completion')
     assert 'PASS native Rime modifier/release commits are delivered immediately' in (root / 'rime.log').read_text()
     print('PASS native Rime modifier/release commits reach the focused client without a following key')
     print('PASS idle English punctuation passes through the native bar Rime path unchanged')

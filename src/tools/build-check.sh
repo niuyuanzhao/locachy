@@ -10,6 +10,7 @@ done
 for file in "$src"/base/*.c; do
     name=$(basename "$file" .c)
     [ "$name" != open ] || continue # GIO's, the programs' only (make.sh)
+    [ "$name" != jobs ] || continue # locachy-jobs' clients: the programs' only
     musl-gcc -static -O2 -Wall -Wextra -I"$src/base/include" -I"$src/base" \
         -isystem "$out/uapi" -c "$file" -o "$out/obj/musl-$name.o"
 done
@@ -17,8 +18,8 @@ musl-gcc -static -O2 -Wall -Wextra -I"$src/base/include" -I"$src/base" \
     -isystem "$out/uapi" "$src/init/init.c" "$src/init/apps.c" \
     "$out"/obj/musl-*.o -o "$out/init"
 
-flags="$(pkg-config --cflags freetype2 libnm libinput) -DCONFIG_FREETYPE -DCONFIG_NETWORKMANAGER -DCONFIG_LIBINPUT"
-libs="$(pkg-config --libs freetype2 libnm libinput) -lm"
+flags="$(pkg-config --cflags freetype2 fontconfig libnm libinput) -DCONFIG_FREETYPE -DCONFIG_NETWORKMANAGER -DCONFIG_LIBINPUT"
+libs="$(pkg-config --libs freetype2 fontconfig libnm libinput) -lm"
 for file in "$src"/base/*.c; do
     name=$(basename "$file" .c)
     [ "$name" != ime ] || continue
@@ -55,8 +56,12 @@ gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE "$src/progs/files-cloud-list.c" \
     $(pkg-config --cflags --libs gio-2.0) -o "$out/files-cloud-list"
 gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE "$src/progs/container-documents.c" \
     $(pkg-config --cflags --libs gio-2.0) -o "$out/container-documents"
+gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE "$src/progs/locachy-docs.c" \
+    $(pkg-config --cflags --libs gio-unix-2.0) -o "$out/locachy-docs"
 gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE "$src/progs/battery-history.c" \
     -o "$out/battery-history"
+gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -I"$src/base/include" "$src/progs/locachy-jobs.c" \
+    -o "$out/locachy-jobs"
 # The key table of a keymap: libxkbcommon (make.sh, installer/make-live.sh).
 gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE "$src/progs/keytable.c" \
     $(pkg-config --cflags --libs xkbcommon) -o "$out/keytable"
@@ -126,6 +131,32 @@ if command -v wayland-scanner >/dev/null 2>&1 && pkg-config --exists wayland-cli
             ext-foreign-toplevel-list-v1 ext-image-capture-source-v1 ext-image-copy-capture-v1 \
             fractional-scale-v1 viewporter xdg-shell) \
         "$out"/obj/base-*.o $libs -lwayland-client -lwayland-cursor -lxkbcommon -lpng -lm -o "$out/locachy-shot"
+    # The programs that also open as windows (make.sh's WIN objects): the base
+    # with the window transport; the direct-only builds above stay as they are.
+    for p in primary-selection-unstable-v1 xdg-decoration-unstable-v1; do
+        wayland-scanner client-header "$src/base/protocols/$p.xml" "$out/$p-client-protocol.h"
+        wayland-scanner private-code "$src/base/protocols/$p.xml" "$out/$p-protocol.c"
+    done
+    for file in "$src"/base/*.c; do
+        name=$(basename "$file" .c)
+        [ "$name" != ime ] || continue
+        gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -DCONFIG_WAYLAND $flags \
+            -I"$src/base/include" -I"$src/base" -I"$out" -c "$file" -o "$out/obj/win-$name.o"
+    done
+    win="$(proto xdg-shell fractional-scale-v1 viewporter primary-selection-unstable-v1 xdg-decoration-unstable-v1)
+        -lwayland-client -lwayland-cursor -lxkbcommon"
+    gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $ime_flags $flags -I"$src/base/include" -I"$out" \
+        "$src/progs/term.c" "$out"/obj/win-*.o "$out/obj/ime.o" $win $ime_libs $libs -o "$out/term-window"
+    gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags -I"$src/base/include" -I"$src/base" -I"$out" \
+        "$src/progs/settings.c" "$src/progs/files.c" "$src/progs/auth.c" "$out"/obj/win-*.o $win $libs -lpam \
+        -o "$out/settings-window"
+    gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags -I"$src/base/include" -I"$src/base" -I"$out" \
+        "$src/progs/files-main.c" "$src/progs/files.c" "$out"/obj/win-*.o $win $libs -o "$out/files"
+    if [ -e "$out/view" ]; then
+        gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $ime_flags $flags -I"$src/base/include" -I"$src/base" -I"$out" \
+            "$src/progs/view.c" "$src/progs/view-layout.c" "$src/progs/view-client.c" "$src/progs/files.c" \
+            "$out"/obj/win-*.o "$out/obj/ime.o" $win $ime_libs $libs -o "$out/view-window"
+    fi
 fi
 if pkg-config --exists libcryptsetup json-c openssl; then
     gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -shared -fPIC \

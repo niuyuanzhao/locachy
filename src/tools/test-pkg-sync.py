@@ -6,6 +6,7 @@ import contextlib
 import importlib.machinery
 import importlib.util
 import io
+import json
 from pathlib import Path
 import shlex
 import subprocess
@@ -281,6 +282,47 @@ class Sync(unittest.TestCase):
         self.assertEqual(set(packages), {"leaf", "dependency"})
         self.assertEqual(explicit, {"leaf"})
 
+    def test_removal_installs_nothing(self):
+        """Removing a module (settings' Chinese Pinyin) never installs a leaf
+        that is declared but not installed (the CJK fonts' noto-fonts-cjk,
+        declared by an update and not installed yet): it unregisters, removes
+        what no installed leaf needs, builds nothing, and says what stays
+        missing. A sync or an update's host step installs that."""
+        self.installed.update({"rime-frost-git": [], "librime": []})
+        self.leaves = ["base", "librime", "rime-frost-git", "noto-fonts-cjk"]
+        self.patch("manifest_lines", lambda: [name + "\n" for name in self.leaves])
+        self.patch("write_manifest", lambda lines: setattr(self, "leaves", sorted(
+            name for line in lines for name in pkg.line_names(line))))
+        self.patch("run", lambda cmd, net=False: self.calls.append((cmd, net)) or True)
+
+        def pacman(command):
+            self.calls.append(command)
+            args = shlex.split(command)
+            if "-Rns" in args:
+                for name in args[args.index("--noconfirm") + 1:]:
+                    self.installed.pop(name, None)
+            return True
+        self.patch("run_pacman", pacman)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.object(pkg.os.path, "isfile", return_value=True):
+            status = pkg.cmd_remove(["rime-frost-git"])
+        self.assertEqual(status, 0)
+        self.assertEqual(self.leaves, ["base", "librime", "noto-fonts-cjk"])
+        self.assertFalse(any(isinstance(c, str) and "pacman -S " in c for c in self.calls), self.calls)
+        self.assertFalse(any(isinstance(c, list) and "-Sp" in c for c in self.calls), self.calls)  # not even looked up
+        self.assertFalse(any(isinstance(c, tuple) for c in self.calls), self.calls)  # no build, tracked or AUR
+        self.assertNotIn("rime-frost-git", self.installed)
+        self.assertNotIn("bootstrap-only", self.installed)
+        self.assertNotIn("noto-fonts-cjk", self.installed)
+        self.assertIn("librime", self.installed)
+        self.assertIn("Declared, not installed", out.getvalue())
+        self.assertIn("noto-fonts-cjk", out.getvalue())
+        # A sync (or an install) still installs what is declared.
+        self.calls.clear()
+        self.assertEqual(self.sync(), 1)  # the double installs only repo-program: noto-fonts-cjk stays missing
+        self.assertTrue(any(isinstance(c, tuple) and "noto-fonts-cjk" in c[0] for c in self.calls), self.calls)
+
     def test_root_bootstrap_uses_the_normal_reconciler_before_make(self):
         script = (SOURCE / "make-root.sh").read_text()
         self.assertNotIn("*-git|", script)
@@ -364,7 +406,7 @@ class Manifest(unittest.TestCase):
         load = pkg.load_manifest  # its default path is bound at definition time
         self.unknown = []
         for name, value in (("MANIFEST", str(self.manifest)), ("load_manifest", lambda path=None: load(str(self.manifest))),
-                            ("cmd_sync", lambda: self.synced.append(load(str(self.manifest))) or 0),
+                            ("cmd_sync", lambda **how: self.synced.append(load(str(self.manifest))) or 0),
                             ("unknown_packages", lambda names: [n for n in names if n in self.unknown])):
             p = mock.patch.object(pkg, name, value)
             p.start()
@@ -415,6 +457,92 @@ class Manifest(unittest.TestCase):
         self.assertEqual(self.load(str(self.manifest)), ["base"])
         repos = (SOURCE / "link/locachy-repos").read_text()
         self.assertIn('leaves.extend(line.split("#", 1)[0].split())', repos)
+
+
+class RequirementRemoval(unittest.TestCase):
+    """Removing Chinese Pinyin leaves no pending download of what it alone
+    required: the CJK fonts' module, declared by an update as ime-zh's
+    requirement (declare-packages) and not installed, is unregistered with it;
+    installed, or chosen on its own, it stays. The next update declares it
+    again only with Pinyin. modules.json and declare-packages are the tree's."""
+    PINYIN = ["rime-frost-git", "rime-pinyin-simp", "rime-wanxiang-gram-zh-hans"]
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="pkg-requirement-", dir=SCRATCH)
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.manifest = self.root / "packages"
+        self.record = self.root / "declared-packages.json"
+        self.manifest.write_text("# leaves\nbase\nlibrime\nwords\n" + "".join(p + "\n" for p in self.PINYIN))
+        self.installed = {"base", "librime", "words", *self.PINYIN}
+        self.synced = []
+        load = pkg.load_manifest  # its default path is bound at definition time
+        self.load = lambda: load(str(self.manifest))
+        loader = importlib.machinery.SourceFileLoader("declare_for_sync", str(SOURCE / "link/declare-packages"))
+        self.declare = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(self.declare)
+        for module, name, value in (
+                (pkg, "SRC", str(SOURCE)), (pkg, "MANIFEST", str(self.manifest)), (pkg, "load_manifest", lambda path=None: self.load()),
+                (pkg, "cmd_sync", lambda **how: self.synced.append(how) or 0),
+                (pkg, "unknown_packages", lambda names: []),
+                (pkg, "load_installed_db", lambda db=None: ({n: [] for n in self.installed}, {}, set(self.installed))),
+                (self.declare, "fontconfig_has", lambda lang: False)):
+            p = mock.patch.object(module, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def update(self, record_requires=True):
+        """An update's declare-packages run; without record_requires, the one
+        that first saw ime-zh's requirements (its record from before them)."""
+        current = self.declare.definitions(SOURCE)
+        if not record_requires:
+            current = {k: v for k, v in current.items() if k != "requires"}
+        if not self.record.exists() or not record_requires:
+            self.record.write_text(json.dumps(current))
+        with contextlib.redirect_stdout(io.StringIO()):
+            return self.declare.declare(str(SOURCE), str(self.manifest), str(self.record))
+
+    def call(self, function, names):
+        with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+            return function(names), out.getvalue()
+
+    def test_declared_not_installed_fonts_go_with_pinyin(self):
+        groups = self.update(record_requires=False)
+        self.assertEqual(groups, [("module cjk-fonts (required by ime-zh)", ["noto-fonts-cjk"])])
+        self.assertIn("noto-fonts-cjk", self.load())
+        status, out = self.call(pkg.cmd_remove, [" ".join(self.PINYIN)])
+        self.assertEqual(status, 0)
+        self.assertEqual(self.load(), ["base", "librime", "words"])  # Rime (installed) stays
+        self.assertEqual(self.synced, [{"install": False}])  # nothing installed
+        self.assertIn("Unregistering module cjk-fonts", out)
+        # The next update, and its sync: no CJK fonts while Pinyin is absent.
+        self.assertEqual(self.update(), [])
+        self.assertNotIn("noto-fonts-cjk", self.load())
+
+    def test_installed_fonts_stay(self):
+        self.update(record_requires=False)
+        self.installed.add("noto-fonts-cjk")
+        self.assertEqual(self.call(pkg.cmd_remove, [" ".join(self.PINYIN)])[0], 0)
+        self.assertIn("noto-fonts-cjk", self.load())
+
+    def test_fonts_chosen_on_their_own_stay(self):
+        # A settings row's install after the update declared it as a requirement.
+        self.update(record_requires=False)
+        self.assertEqual(self.call(pkg.cmd_install, ["noto-fonts-cjk"])[0], 0)
+        self.assertNotIn("(required by ime-zh)\nnoto-fonts-cjk\nnoto-fonts-cjk", self.manifest.read_text())
+        self.assertEqual(self.call(pkg.cmd_remove, [" ".join(self.PINYIN)])[0], 0)
+        self.assertIn("noto-fonts-cjk", self.load())
+        # Declared on its own from the start (the installer's list, a plain line).
+        self.manifest.write_text("# leaves\nbase\nnoto-fonts-cjk\nlibrime\nwords\n" +
+                                 "".join(p + "\n" for p in self.PINYIN))
+        self.assertEqual(self.call(pkg.cmd_remove, [" ".join(self.PINYIN)])[0], 0)
+        self.assertIn("noto-fonts-cjk", self.load())
+
+    def test_a_user_install_after_a_requirement_group_is_its_own(self):
+        self.update(record_requires=False)
+        self.assertEqual(self.call(pkg.cmd_install, ["tor"])[0], 0)
+        self.assertTrue(self.manifest.read_text().endswith("noto-fonts-cjk\n\ntor\n"))
+        self.assertEqual(pkg.required_only(pkg.manifest_lines()), {"noto-fonts-cjk"})
 
 
 class Lookup(unittest.TestCase):

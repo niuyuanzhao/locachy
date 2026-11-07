@@ -23,8 +23,28 @@
 变量和用户明确配置的 XKB options 保留。`/etc/vconsole.conf` 同步系统默认，并保留
 其他设置。
 
+## 日文布局上的 Caps Lock
+
+XKB 的 `jp` 在 Caps Lock 键上放 `Eisu_toggle`，Shift+该键才是 `Caps_Lock`。LOCachy
+没有日文输入法，所以 `keytable` 给凡是 Caps Lock 键单按为 `Eisu_toggle` 的布局加上
+xkeyboard-config 的标准选项 `caps:capslock`：该键单按和 Shift 同按都是 Caps Lock，与其他
+布局及控制台键表一致（kbd 的 `jp106` 那里也是 `Caps_Lock`）。该选项写进键位表的
+`options` 行，所以直连程序、锁屏、开机口令、顶栏和 labwc 编译的是同一个键表。labwc
+的 `environment` 中，空的 `XKB_DEFAULT_OPTIONS` 或只有这个选项时视为来自键位表、随之
+更新；其他值视为用户配置，保留不动。
+
+该规则只在单按为 `Eisu_toggle` 时生效；选项里已重映射该键的布局（如
+`ctrl:swapcaps`）保持自己的映射。以后若加入日文输入法、需要英数键，删除
+`progs/keytable.c` 中的这条规则（`CAPS_OPTION`）即可：Shift+Caps Lock 仍是锁定，单按
+恢复为 `Eisu_toggle`。
+
 initramfs 中是键位表和设备覆盖的副本。开机磁盘口令只有在下次生成引导镜像后才使用
 新选择；运行时修改布局不会自行生成或替换引导镜像。
+
+共享显示上以窗口打开的设置不持有键盘（按键来自座席），因此从 sysfs
+（`/sys/class/input/eventN/device`：有字母和 Enter 的设备，同一 id 只列一次）列出各键盘，
+并通过与直连设置相同的 `keyboards.conf` 和重读流程设置它们；不打开 `/dev/input`
+中的任何设备（`test-keyboard-devices.c`）。
 
 `test-settings-monitors.c` 覆盖系统默认与设备覆盖的区分、US 默认加明确 JIS 和跟随
 默认的 USB、选择确认与取消、生成/配置/替换失败的回滚，以及 labwc 用户选项保留。
@@ -50,6 +70,15 @@ Caps Lock 状态变化识别，不再假定其未按 Shift 时就是锁定键。
 
 参考：[fcitx5-rime](https://github.com/fcitx/fcitx5-rime) 的 Rime 按键事件/修饰适配。
 
+英文模式（`EN`，Rime 的 `easy_en`）按 fcitx5 键盘引擎的单词提示方式工作：字母组成
+单词，显示其补全，初始不选中任何一项；Tab 与 Shift+Tab 在补全间移动（越过两端后
+回到不选中）；BackSpace 编辑单词。其他任何键（空格、回车、Esc、主键盘或小键盘数字、
+标点、方向键、Ctrl/Alt/Super 组合键）先按原样提交所输入的字母（或 Tab 移到的补全），
+再输入该键本身。英文模式下数字从不选词；中文模式保留数字选词。切换模式或锁定
+Caps 也会提交该单词。共享显示上的窗口（term、view）不再启动自己的 Rime：该显示上
+所有窗口的输入法都是状态栏。`tools/test-ime-keys.c` 用 Rime 会话替身覆盖各模式；
+`test-ime.c` 与状态栏的 `test-bar-keyboard.c`（在 `test-input-delivery.sh` 中）使用真实 Rime。
+
 ## 谁读取键盘
 
 进程 1 启动时关闭文本控制台自身的键盘处理（`K_OFF`），拿到屏幕后把控制台设为图形
@@ -59,10 +88,19 @@ Caps Lock 状态变化识别，不再假定其未按 Shift 时就是锁定键。
 
 - **Ctrl+Alt+Del** 由进程 1 处理：只要它看到这组键（直连程序、home、锁屏、开机磁盘
   口令、直接输入模式下的共享显示），就干净地重启。输入法占用键盘时（CN/EN），按键
-  只到状态栏，与以前一样。
-- **Caps Lock、Num Lock 指示灯**：控制台的处理关闭后，直连程序的指示灯由进程 1 写入
-  （`EV_LED`，写法同 libinput）；借给程序的键盘是只读的，程序每次拿到键盘时按指示灯
-  取得锁定状态。共享显示的 labwc 自己设置指示灯。全屏安装器同样设置。
+  只到状态栏，与以前一样。有系统任务运行时，重启会先等它结束；再按一次 Ctrl+Alt+Del
+  （新的一次按下，而不是按住 Delete）则立即重启（`JOBS.zh.md`，“关机”一节）。
+- **Caps Lock、Num Lock：一个状态**：控制台的处理关闭后，进程 1 为所有程序保存锁定
+  状态，并把它显示在每个键盘的指示灯上（`EV_LED`，写法同 libinput），之后插入的键盘
+  也一样；开机时所有锁定都是关闭的。指示灯只写不读：任何地方都不从指示灯读回锁定
+  状态，因为指示灯由固件驱动的键盘（X230 的嵌入式控制器）未必如实报告写入的值
+  （`EVIOCGLED`）。直连程序看到的锁定键它都看得到（借出的键盘是只读副本），并随键盘一起给出状态
+  （`take LOCKS`、`keys LOCKS`）；程序从这个状态开始，而不是从某一个键盘的指示灯读取。
+  共享显示上，状态栏在 CN/EN 模式下抓取键盘、进程 1 看不到按键，所以每次变化都经
+  seat 的链路上报（`locks LOCKS`，转给进程 1）；它从随座位给出的状态开始，并通过虚拟
+  键盘的修饰状态交给 labwc。labwc-locachy 的 `keyboard-locks.patch` 让新键盘带着座位
+  的锁定状态加入，把宿主虚拟键盘的锁定状态当作座位的状态，会话停用时清空。进程 1 每次
+  分配键盘时都重新显示自己的状态。全屏安装器同样设置指示灯。
 - **状态栏**只读取进程 1 随座位借出的键盘，由 seat 转交。home 或其他直连程序到前台时，
   进程 1 撤销这些键盘（`EVIOCREVOKE`，同时解除抓取）；seat 在停用 labwc 的座位之前
   先撤销 labwc 的输入设备，与 seatd 相同。借来的键盘仍按它自己的布局输入：状态栏按
@@ -71,7 +109,9 @@ Caps Lock 状态变化识别，不再假定其未按 Shift 时就是锁定键。
   （`EVIOCGKEY`），丢失的松开不会让修饰键或按键一直按住，也不会打出字符。
 
 `test-keyboard-devices.c` 覆盖指示灯、只读的借出键盘和 `SYN_DROPPED`；
-`test-bar-keyboard.c` 覆盖状态栏借到的键盘、清空旧事件和撤销；`test-keytable.c` 覆盖
+`test-keyboard-locks.c` 覆盖进程 1、直连程序和共享显示之间的同一锁定状态（开机时两个
+键盘不一致、抓取键盘的桌面上报、热插拔）；`test-bar-keyboard.c` 覆盖状态栏借到的键盘、
+清空旧事件、撤销和它的锁定状态；`test-keytable.c` 覆盖
 状态栏所读键盘的布局；`test-input-hotplug.c`
 覆盖共享显示在前台时的热插拔。真实控制台、虚拟机中的撤销和 X230 的 Caps Lock 指示灯
 仍需各自的验收。

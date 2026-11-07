@@ -11,9 +11,10 @@
  * Fonts are Terminus (BASE_FONT_DIR/ter-uNN[nb].psf, 12 to 32 pixels high,
  * and above that one of half the size drawn twice as large), the largest
  * that fits, so that the bar is as sharp at 1.5 or 3 as at 1: PANEL_H (27)
- * pixels at scale 1 has rows of 12. Wide characters (CJK) come
- * from NotoSansCJK through FreeType at the same height; without FreeType
- * (process 1) they show as '?'.
+ * pixels at scale 1 has rows of 12. Wide characters (CJK) come from
+ * fontconfig's monospace and its fallbacks (fontmatch.c) through FreeType at
+ * the same height; without FreeType (process 1), or without a font that has
+ * them, they show as '?'.
  */
 #include <dirent.h>
 #include <fcntl.h>
@@ -25,10 +26,10 @@
 #ifdef CONFIG_FREETYPE
 #include <ft2build.h>
 #include FT_FREETYPE_H
-#include FT_SIZES_H
 #endif
 
 #include "base.h"
+#include "fontmatch.h"
 
 #define PSF2_MAGIC 0x864AB572u
 #define FG    0xFFD0D0D0u
@@ -43,8 +44,7 @@ struct panel_font {
     struct { uint32_t cp, g; } utab[2048];
     int nutab;
 #ifdef CONFIG_FREETYPE
-    FT_Size ft_size;
-    int ft_ready;
+    int ft_px; /* wide characters' size; 0: none */
 #endif
 };
 
@@ -54,7 +54,7 @@ static struct panel_font fonts[2 * NSIZES]; /* normal and bold of each size */
 
 #ifdef CONFIG_FREETYPE
 static FT_Library ft_lib;
-static FT_Face ft_face;
+static struct font_set *ft_fonts;
 static int ft_tried;
 #endif
 
@@ -142,15 +142,12 @@ const struct panel_font *panel_font(int height, int bold)
 #ifdef CONFIG_FREETYPE
             if (!ft_tried) {
                 ft_tried = 1;
-                if (FT_Init_FreeType(&ft_lib) != 0 ||
-                    FT_New_Face(ft_lib, "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 0, &ft_face) != 0) {
-                    ft_face = NULL;
+                if (FT_Init_FreeType(&ft_lib) == 0) {
+                    ft_fonts = font_set_new(ft_lib, "monospace", 0, 0);
                 }
             }
-            if (f->glyphs && ft_face && FT_New_Size(ft_face, &f->ft_size) == 0 &&
-                FT_Activate_Size(f->ft_size) == 0 &&
-                FT_Set_Pixel_Sizes(ft_face, 0, f->h > 16 ? f->h - 2 : f->h - 1) == 0) {
-                f->ft_ready = 1;
+            if (f->glyphs && ft_fonts) {
+                f->ft_px = (int)(f->h > 16 ? f->h - 2 : f->h - 1);
             }
 #endif
         }
@@ -249,11 +246,12 @@ void panel_text(uint32_t *px, int w, int h, int stride, int x, int y, const char
         }
         panel_fill(px, w, h, stride, x, y, cell_w, (int)f->h, bg);
 #ifdef CONFIG_FREETYPE
-        if (wide && f->ft_ready && FT_Activate_Size(f->ft_size) == 0 &&
-            FT_Load_Char(ft_face, cp, FT_LOAD_RENDER) == 0) {
-            FT_Bitmap *bm = &ft_face->glyph->bitmap;
+        FT_UInt index = 0;
+        FT_Face face = wide && f->ft_px > 0 ? font_set_face(ft_fonts, cp, f->ft_px, &index) : NULL;
+        if (face && FT_Load_Glyph(face, index, FT_LOAD_RENDER) == 0) {
+            FT_Bitmap *bm = &face->glyph->bitmap;
             int x_off = x + (cell_w - (int)bm->width) / 2;
-            int y_off = y + (int)f->h - (int)f->h / 6 - ft_face->glyph->bitmap_top;
+            int y_off = y + (int)f->h - (int)f->h / 6 - face->glyph->bitmap_top;
             uint32_t fg_r = (fg >> 16) & 0xFF, fg_g = (fg >> 8) & 0xFF, fg_b = fg & 0xFF;
             uint32_t bg_r = (bg >> 16) & 0xFF, bg_g = (bg >> 8) & 0xFF, bg_b = bg & 0xFF;
             for (int gy = 0; gy < (int)bm->rows; gy++) {
@@ -285,6 +283,21 @@ void panel_text(uint32_t *px, int w, int h, int stride, int x, int y, const char
         }
         x += (int)f->w; /* a wide character without FreeType: one '?' */
     }
+}
+
+int panel_fonts_reload(void)
+{
+#ifdef CONFIG_FREETYPE
+    if (ft_fonts && font_config_reload() > 0) {
+        struct font_set *fresh = font_set_new(ft_lib, "monospace", 0, 0);
+        if (fresh) {
+            font_set_free(ft_fonts);
+            ft_fonts = fresh;
+            return 1;
+        }
+    }
+#endif
+    return 0;
 }
 
 int panel_containers(const char *name, unsigned long long *ram)
@@ -320,7 +333,26 @@ int panel_containers(const char *name, unsigned long long *ram)
 struct block {
     char top[96], bottom[96];
     int min; /* cells, so that it stays put as numbers change */
+    enum panel_block id;
 };
+
+/* The blocks the last panel_draw drew, for a caller that takes clicks. */
+static struct panel_hit hits[9];
+static int nhits;
+
+static void hit(int x0, int x1, enum panel_block id)
+{
+    if (id != PANEL_BLOCK_NONE && nhits < (int)(sizeof hits / sizeof *hits)) {
+        hits[nhits++] = (struct panel_hit){ .x0 = x0, .x1 = x1, .id = id };
+    }
+}
+
+int panel_hits(struct panel_hit *out, int max)
+{
+    int n = nhits < max ? nhits : max;
+    for (int i = 0; i < n; i++) out[i] = hits[i];
+    return n;
+}
 
 static int block_width(const struct block *b, const struct panel_font *f)
 {
@@ -329,11 +361,12 @@ static int block_width(const struct block *b, const struct panel_font *f)
     return w > b->min * (int)f->w ? w : b->min * (int)f->w;
 }
 
-static void set(struct block *b, const char *top, const char *bottom, int min)
+static void set(struct block *b, const char *top, const char *bottom, int min, enum panel_block id)
 {
     snprintf(b->top, sizeof b->top, "%s", top);
     snprintf(b->bottom, sizeof b->bottom, "%s", bottom);
     b->min = min;
+    b->id = id;
 }
 
 void panel_draw(uint32_t *px, int w, int h, int stride, const char *title, const char *sub,
@@ -343,6 +376,7 @@ void panel_draw(uint32_t *px, int w, int h, int stride, const char *title, const
     int gap = h * 5 / 9, inset = h / 9;
     panel_fill(px, w, h, stride, 0, 0, w, h, PANEL_BG);
     *mid_x0 = *mid_x1 = 0;
+    nhits = 0;
     if (!big) {
         return;
     }
@@ -368,28 +402,30 @@ void panel_draw(uint32_t *px, int w, int h, int stride, const char *title, const
     base_status_fields(&s);
     struct block left[3], right[6];
     int nright = 0;
-    set(&left[0], title, sub, 12);
-    set(&left[1], s.memory, s.swap, 14);
-    set(&left[2], s.cpu, s.temp, 7); /* "CPU 99%" */
+    set(&left[0], title, sub, 12, PANEL_BLOCK_NONE);
+    set(&left[1], s.memory, s.swap, 14, PANEL_BLOCK_MEMORY);
+    set(&left[2], s.cpu, s.temp, 7, PANEL_BLOCK_CPU); /* "CPU 99%" */
     if (ime && ime[0]) {
-        set(&right[nright++], "IME", ime, 3);
+        set(&right[nright++], "IME", ime, 3, PANEL_BLOCK_NONE); /* the input method's own clicks */
     }
-    set(&right[nright++], s.volume, s.mic, 9);
+    set(&right[nright++], s.volume, s.mic, 9, PANEL_BLOCK_VOLUME);
     if (s.bluetooth[0]) {
-        set(&right[nright++], s.bluetooth, s.bt_device, 7);
+        set(&right[nright++], s.bluetooth, s.bt_device, 7, PANEL_BLOCK_BLUETOOTH);
     }
-    set(&right[nright++], s.network, s.address, 14);
-    set(&right[nright++], s.battery, s.power, 12);
-    set(&right[nright++], s.time, s.date, 14);
+    set(&right[nright++], s.network, s.address, 14, PANEL_BLOCK_NETWORK);
+    set(&right[nright++], s.battery, s.power, 12, PANEL_BLOCK_BATTERY);
+    set(&right[nright++], s.time, s.date, 14, PANEL_BLOCK_TIME);
 
     /* The right ones from the right edge; the left ones after LOCachy, as
      * many as fit before them. */
     int x = w - rw;
     for (int i = nright - 1; i >= 0; i--) {
-        x -= block_width(&right[i], row);
+        int width = block_width(&right[i], row);
+        x -= width;
         if (x < lx) {
             break;
         }
+        hit(x, x + width, right[i].id);
         panel_text(px, w, h, stride, x, y0, right[i].top, FG, PANEL_BG, row);
         panel_text(px, w, h, stride, x, y0 + rh, right[i].bottom, DIM, PANEL_BG, row);
         *mid_x1 = x;
@@ -404,6 +440,7 @@ void panel_draw(uint32_t *px, int w, int h, int stride, const char *title, const
         if (i > 0) {
             panel_fill(px, w, h, stride, lx - gap / 2, inset, 1, h - 2 * inset, LINE);
         }
+        hit(lx, lx + width, left[i].id);
         panel_text(px, w, h, stride, lx, y0, left[i].top, FG, PANEL_BG, row);
         panel_text(px, w, h, stride, lx, y0 + rh, left[i].bottom, DIM, PANEL_BG, row);
         lx += width + gap;

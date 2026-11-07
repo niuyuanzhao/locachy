@@ -1,0 +1,143 @@
+--- a/include/labwc.h
++++ b/include/labwc.h
+@@ -101,6 +101,13 @@
+ 		int64_t until_msec;
+ 	} inner_edge_hold;
+ 
++	/* A bounded approach to a layer-shell hot corner, also at output seams. */
++	struct {
++		bool active, bypass;
++		double x, y;
++		int64_t until_msec;
++	} corner_edge_hold;
++
+ 	struct overlay overlay;
+ 	/* Used to prevent region snapping when starting a move with A-Left */
+ 	bool region_prevent_snap;
+--- a/src/input/cursor.c
++++ b/src/input/cursor.c
+@@ -18,6 +18,7 @@
+ #include <wlr/util/region.h>
+ #include "action.h"
+ #include "common/macros.h"
++#include "common/scene-helpers.h"
+ #include "common/mem.h"
+ #include "config/mousebind.h"
+ #include "config/rcxml.h"
+@@ -989,9 +990,100 @@
+ 		} else {
+ 			*dy = seat->inner_edge_hold.position - y;
+ 			*dx *= fraction;
++		}
++		return;
++	}
++}
++
++/* A bar corner must be reachable at an internal output seam too. Capture
++ * only a diagonal approach whose motion segment meets the top or left edge
++ * close to that output's top-left corner. Ordinary seam crossings and every
++ * drag pass through. The other motion component can still reach the corner.
++ * A held corner expires and stays bypassed until left, so it cannot trap the
++ * pointer. Do not reserve a corner hidden by a fullscreen/lock surface. */
++static bool
++corner_has_bar(double x, double y)
++{
++	double sx, sy;
++	struct wlr_scene_node *node = wlr_scene_node_at(&server.scene->tree.node,
++		x + 0.5, y + 0.5, &sx, &sy);
++	struct wlr_surface *surface = node ? lab_wlr_surface_from_node(node) : NULL;
++	struct wlr_layer_surface_v1 *layer = surface
++		? wlr_layer_surface_v1_try_from_wlr_surface(surface) : NULL;
++	return layer && layer->namespace && !strcmp(layer->namespace, "locachy-bar");
++}
++
++static void
++corner_edge_hold(struct seat *seat, double *dx, double *dy)
++{
++	double x = seat->cursor->x, y = seat->cursor->y;
++	if (server.input_mode != LAB_INPUT_STATE_PASSTHROUGH || seat->drag.active
++			|| seat->wlr_seat->pointer_state.button_count) {
++		seat->corner_edge_hold.active = seat->corner_edge_hold.bypass = false;
++		return;
++	}
++	struct timespec now;
++	clock_gettime(CLOCK_MONOTONIC, &now);
++	int64_t msec = (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
++	if (seat->corner_edge_hold.active || seat->corner_edge_hold.bypass) {
++		double cx = seat->corner_edge_hold.x, cy = seat->corner_edge_hold.y;
++		if (x < cx || y < cy || x - cx + y - cy > 30
++				|| *dx > 0 || *dy > 0 || !corner_has_bar(cx, cy)) {
++			seat->corner_edge_hold.active = seat->corner_edge_hold.bypass = false;
++		} else if (seat->corner_edge_hold.bypass) {
++			return;
++		} else if (msec >= seat->corner_edge_hold.until_msec) {
++			seat->corner_edge_hold.active = false;
++			seat->corner_edge_hold.bypass = true;
++			return;
++		} else {
++			*dx = MAX(*dx, cx - x);
++			*dy = MAX(*dy, cy - y);
++			return;
++		}
++	}
++	/* Pure-axis transit is an approach only on the other edge's trigger
++	 * pixel, not throughout the 30 pixel reset neighborhood. */
++	if (*dx > 0 || *dy > 0 || (*dx == 0 && *dy == 0)) {
++		return;
++	}
++	struct output *output = output_nearest_to(x, y);
++	if (!output_is_usable(output)) {
++		return;
++	}
++	struct wlr_box box;
++	wlr_output_layout_get_box(server.output_layout, output->wlr_output, &box);
++	if (x < box.x || y < box.y || x >= box.x + box.width
++			|| y >= box.y + box.height || !corner_has_bar(box.x, box.y)) {
++		return;
++	}
++	double tx = x + *dx, ty = y + *dy;
++	double fraction = 2.0;
++	if (tx < box.x) {
++		double at = (box.x - x) / *dx;
++		double along = y + *dy * at - box.y;
++		if (along >= 0 && along <= 30) {
++			fraction = at;
+ 		}
++	}
++	if (ty < box.y) {
++		double at = (box.y - y) / *dy;
++		double along = x + *dx * at - box.x;
++		if (along >= 0 && along <= 30 && at < fraction) {
++			fraction = at;
++		}
++	}
++	if (fraction > 1.0 || (*dy == 0 && y - box.y >= 1)
++			|| (*dx == 0 && x - box.x >= 1)) {
+ 		return;
+ 	}
++	seat->corner_edge_hold.active = true;
++	seat->corner_edge_hold.bypass = false;
++	seat->corner_edge_hold.x = box.x;
++	seat->corner_edge_hold.y = box.y;
++	seat->corner_edge_hold.until_msec = msec + 350;
++	*dx = MAX(*dx, box.x - x);
++	*dy = MAX(*dy, box.y - y);
+ }
+ 
+ static void
+@@ -1003,6 +1095,7 @@
+ 	}
+ 	apply_constraint(seat, pointer, &dx, &dy);
+ 	inner_edge_hold(seat, &dx, &dy);
++	corner_edge_hold(seat, &dx, &dy);
+ 
+ 	/*
+ 	 * The cursor doesn't move unless we tell it to. The cursor
+@@ -1634,6 +1727,7 @@
+ 		dx, dy, dx, dy);
+ 
+ 	inner_edge_hold(seat, &dx, &dy);
++	corner_edge_hold(seat, &dx, &dy);
+ 	wlr_cursor_move(seat->cursor, device, dx, dy);
+ 	double sx, sy;
+ 	bool notify = cursor_process_motion(time_msec, &sx, &sy);

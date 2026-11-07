@@ -176,6 +176,35 @@ class Registration(unittest.TestCase):
                 self.register()
         self.assertEqual(self.mutations(), [])
 
+    def test_variables_mounted_again_only_in_a_private_namespace(self):
+        """pacman runs in locachy-net through `ip netns exec`, which mounts a
+        sysfs of its own over /sys: its hooks (make.sh --boot, locachy-boot)
+        see no efivarfs ("UEFI entry not ready" in every package job). There,
+        in that private mount namespace, it is mounted again and the entry
+        kept; in process 1's namespace it is never mounted, and said so."""
+        mounted = []
+        original = self.command
+
+        def command(args):
+            if args[0] == "findmnt" and str(self.variables) in args and not mounted:
+                self.calls.append(args)
+                raise RuntimeError(" ".join(args) + ": status 1")
+            if args[0] == "mount":
+                self.calls.append(args)
+                mounted.append(args)
+                return ""
+            return original(args)
+        with mock.patch.object(efi, "command", command), mock.patch.object(efi, "private_namespace", lambda: False):
+            with self.assertRaisesRegex(RuntimeError, "efivarfs is not mounted"):
+                self.register()
+        self.assertEqual((mounted, self.mutations()), ([], []))
+        with mock.patch.object(efi, "command", command), mock.patch.object(efi, "private_namespace", lambda: True):
+            self.assertEqual(self.register(), 0)
+        self.assertEqual(mounted, [["mount", "-t", "efivarfs", "-o", "nosuid,nodev,noexec", "efivarfs",
+                                    str(self.variables)]])
+        self.assertEqual(self.order, ["0001", "0002", "0003"])
+        self.assertIn('cmd = f"ip netns exec locachy-net {cmd}"', (SOURCE / "link/locachy-pkg").read_text())
+
     def test_command_failure_keeps_boot_image_and_order(self):
         self.fail = "No space left on device"
         with self.assertRaisesRegex(RuntimeError, "No space"):

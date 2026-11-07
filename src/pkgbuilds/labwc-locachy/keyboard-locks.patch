@@ -1,0 +1,169 @@
+--- a/include/input/keyboard.h
++++ b/include/input/keyboard.h
+@@ -33,6 +33,7 @@ void keyboard_group_finish(struct seat *seat);
+ 
+ void keyboard_setup_handlers(struct keyboard *keyboard);
+ void keyboard_set_numlock(struct wlr_keyboard *keyboard);
++void keyboard_take_seat_locks(struct seat *seat, struct wlr_keyboard *keyboard);
+ void keyboard_update_layout(struct seat *seat, xkb_layout_index_t layout);
+ void keyboard_cancel_keybind_repeat(struct keyboard *keyboard);
+ void keyboard_cancel_all_keybind_repeats(struct seat *seat);
+--- a/src/input/keyboard.c
++++ b/src/input/keyboard.c
+@@ -47,6 +47,99 @@ struct keyinfo {
+ 
+ static bool should_cancel_cycling_on_next_key_release;
+ 
++/*
++ * LOCachy: one Caps Lock and one Num Lock for the seat. Its physical keyboards
++ * share them (wlr_keyboard_group), and a new one joins with them. A host
++ * client's virtual keyboard gives the seat its locks with its modifiers:
++ * LOCachy's bar gives so the locks process 1 keeps for every program, when
++ * the seat comes back and while it holds the keyboards (security-context
++ * clients cannot bind the virtual keyboard manager). A disabled session keeps
++ * none: the next owner of the seat gives them again.
++ */
++static const char *const lock_names[] = { XKB_MOD_NAME_CAPS, XKB_MOD_NAME_NUM };
++#if WLR_HAS_SESSION
++static struct wl_listener session_active;
++#endif
++
++static unsigned int
++locks_of(struct wlr_keyboard *kb)
++{
++	unsigned int locks = 0;
++	for (size_t i = 0; kb->xkb_state && i < ARRAY_SIZE(lock_names); i++) {
++		if (xkb_state_mod_name_is_active(kb->xkb_state, lock_names[i],
++				XKB_STATE_MODS_LOCKED) > 0) {
++			locks |= 1u << i;
++		}
++	}
++	return locks;
++}
++
++/* The keyboard's locked Caps and Num Lock (its LEDs follow), the rest kept. */
++static void
++set_locks(struct wlr_keyboard *kb, unsigned int locks)
++{
++	if (!kb->keymap) {
++		return;
++	}
++	xkb_mod_mask_t locked = kb->modifiers.locked;
++	for (size_t i = 0; i < ARRAY_SIZE(lock_names); i++) {
++		xkb_mod_index_t index = xkb_keymap_mod_get_index(kb->keymap, lock_names[i]);
++		if (index == XKB_MOD_INVALID) {
++			continue;
++		}
++		if (locks & (1u << i)) {
++			locked |= (xkb_mod_mask_t)1 << index;
++		} else {
++			locked &= ~((xkb_mod_mask_t)1 << index);
++		}
++	}
++	if (locked != kb->modifiers.locked) {
++		wlr_keyboard_notify_modifiers(kb, kb->modifiers.depressed,
++			kb->modifiers.latched, locked, kb->modifiers.group);
++	}
++}
++
++/*
++ * The seat's locks: through one physical keyboard of the group (wlroots
++ * gives its modifiers to the others and to the group), else the group's own.
++ */
++static void
++seat_set_locks(struct seat *seat, unsigned int locks)
++{
++	struct wlr_keyboard *group = &seat->keyboard_group->keyboard;
++	if (locks == locks_of(group)) {
++		return;
++	}
++	struct input *input;
++	wl_list_for_each(input, &seat->inputs, link) {
++		if (input->wlr_input_device->type != WLR_INPUT_DEVICE_KEYBOARD) {
++			continue;
++		}
++		struct keyboard *keyboard = (struct keyboard *)input;
++		if (!keyboard->is_virtual && keyboard->wlr_keyboard->group) {
++			set_locks(keyboard->wlr_keyboard, locks);
++			return;
++		}
++	}
++	set_locks(group, locks);
++}
++
++void
++keyboard_take_seat_locks(struct seat *seat, struct wlr_keyboard *keyboard)
++{
++	set_locks(keyboard, locks_of(&seat->keyboard_group->keyboard));
++}
++
++#if WLR_HAS_SESSION
++static void
++handle_session_active(struct wl_listener *listener, void *data)
++{
++	if (!server.session->active) {
++		seat_set_locks(&server.seat, 0);
++	}
++}
++#endif
++
+ static struct keybind *cur_keybind;
+ 
+ /* Called on --reconfigure to prevent segfault when handling release keybinds */
+@@ -140,6 +233,12 @@ handle_modifiers(struct wl_listener *listener, void *data)
+ 	struct seat *seat = keyboard->base.seat;
+ 	struct wlr_keyboard *wlr_keyboard = keyboard->wlr_keyboard;
+ 
++	/* LOCachy: before this keyboard's modifiers go to the client, so that
++	 * they are the last it gets. */
++	if (keyboard->is_virtual) {
++		seat_set_locks(seat, locks_of(wlr_keyboard));
++	}
++
+ 	key_state_indicator_update(seat);
+ 
+ 	if (server.input_mode == LAB_INPUT_STATE_MOVE) {
+@@ -832,6 +931,12 @@ keyboard_group_init(struct seat *seat)
+ 	seat->keyboard_group = wlr_keyboard_group_create();
+ 	keyboard_configure(seat, &seat->keyboard_group->keyboard,
+ 		/* is_virtual */ false);
++#if WLR_HAS_SESSION
++	if (server.session) {
++		session_active.notify = handle_session_active;
++		wl_signal_add(&server.session->events.active, &session_active);
++	}
++#endif
+ }
+ 
+ void
+@@ -849,6 +954,12 @@ keyboard_group_finish(struct seat *seat)
+ 	 * free
+ 	 */
+ 	if (seat->keyboard_group) {
++#if WLR_HAS_SESSION
++		if (session_active.notify) {
++			wl_list_remove(&session_active.link);
++			session_active.notify = NULL;
++		}
++#endif
+ 		wlr_keyboard_group_destroy(seat->keyboard_group);
+ 		seat->keyboard_group = NULL;
+ 	}
+--- a/src/seat.c
++++ b/src/seat.c
+@@ -444,6 +444,15 @@ new_keyboard(struct seat *seat, struct wlr_input_device *device, bool is_virtual
+ 	 */
+ 	keyboard_set_numlock(kb);
+ 
++	/*
++	 * LOCachy: a physical keyboard joins with the seat's Caps and Num Lock,
++	 * its LEDs lit as they are. wlroots starts it with none and its LEDs off,
++	 * and the group would take the locks from it at its first key.
++	 */
++	if (!is_virtual) {
++		keyboard_take_seat_locks(seat, kb);
++	}
++
+ 	if (is_virtual) {
+ 		/* key repeat information is usually synchronized via the keyboard group */
+ 		wlr_keyboard_set_repeat_info(kb, rc.repeat_rate, rc.repeat_delay);

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """locachy-repos without the network: the stack for each level and CPU, the
 sections, a refused or allowed switch (the resolver stubbed), rc.conf as
-base/rc.c writes it, and ranked lists replacing the old ones only with mirrors.
+base/rc.c writes it, and ranked lists replacing the old ones only with mirrors;
+what it writes 0644 under any umask, and an earlier version's private files
+made so again.
   python3 -B tools/test-repos.py [SCRATCH_PARENT]
 """
 import importlib.machinery
@@ -139,6 +141,34 @@ class Files(unittest.TestCase):
         self.assertNotIn("multilib", self.conf.read_text().split("[options]", 1)[1])
         self.assertIn('repo_multilib="0"', self.rc.read_text())
 
+    def test_written_files_are_0644_under_a_private_umask(self):
+        # As a system job's step ran it before: the service's umask 077.
+        old = os.umask(0o077)
+        try:
+            self.assertEqual(self.apply("multilib=on"), 0)
+        finally:
+            os.umask(old)
+        for f in (self.conf, self.rc, self.d / "pacman.conf.locachy-old"):
+            self.assertEqual(f.stat().st_mode & 0o777, 0o644, f)
+
+    def test_fix_modes_repairs_what_an_earlier_version_left_private(self):
+        lists = self.d / "pacman.d"
+        lists.mkdir()
+        private = [self.conf, self.rc, lists / "mirrorlist", lists / "cachyos-v3-mirrorlist",
+                   lists / "alhp-mirrorlist.locachy-old"]
+        for f in private[2:]:
+            f.write_text("Server = https://old.example/$repo/os/$arch\n")
+        other = lists / "custom-mirrorlist"  # not its file
+        other.write_text("x\n")
+        for f in private + [other]:
+            f.chmod(0o600)
+        with mock.patch("sys.stderr"):
+            self.assertEqual(r.fix_modes(str(lists)), len(private))
+            self.assertEqual(r.fix_modes(str(lists)), 0)
+        for f in private:
+            self.assertEqual(f.stat().st_mode & 0o777, 0o644, f)
+        self.assertEqual(other.stat().st_mode & 0o777, 0o600)
+
     def test_bad_set_is_an_error(self):
         with self.assertRaises(ValueError):
             self.apply("testing=on")
@@ -206,6 +236,18 @@ class Rank(unittest.TestCase):
         self.calls.clear()
         self.rank(geoip, country=None)
         self.assertEqual(self.calls[0][0][0], "curl")
+
+    def test_ranked_lists_are_0644_under_a_private_umask(self):
+        old = os.umask(0o077)
+        try:
+            self.rank({"reflector": "Server = https://a.example/$repo/os/$arch\n",
+                       "cachyos": "Server = https://c.example/repo/$arch/$repo\n",
+                       "stdin": "Server = https://h.example/alhp/$repo/os/$arch/\n"})
+        finally:
+            os.umask(old)
+        for name in ("mirrorlist", "cachyos-mirrorlist", "cachyos-v3-mirrorlist", "alhp-mirrorlist",
+                     "mirrorlist.locachy-old", ".locachy-ranked"):
+            self.assertEqual((self.d / name).stat().st_mode & 0o777, 0o644, name)
 
     def test_nothing_ranked_leaves_the_lists(self):
         self.assertEqual(self.rank({}), 1)

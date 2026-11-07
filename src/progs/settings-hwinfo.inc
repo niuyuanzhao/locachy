@@ -37,7 +37,7 @@ static double hw_sqrt(double x)
 #define HW_OS_RELEASE "/etc/os-release"
 #endif
 #ifndef HW_SOURCE_COMMIT
-#define HW_SOURCE_COMMIT "/var/lib/locachy/source-commit"
+#define HW_SOURCE_COMMIT "/usr/local/lib/locachy/source-commit" /* locachy-pkg's: the source applied */
 #endif
 #ifndef HW_NETNS_LOCACHY
 #define HW_NETNS_LOCACHY "/run/netns/locachy-net"
@@ -2385,8 +2385,8 @@ static void hwinfo_page(void)
             }
             continue;
         }
-        if (key == 'q' || (key == 27 && !hw_in_pane)) {
-            notice[0] = '\0';
+        if (key == 'q' || (key == 27 && !hw_in_pane) || close_read(key)) {
+            if (!closing) notice[0] = '\0';
             return;
         }
         if (key == 27 && hw_in_pane) {

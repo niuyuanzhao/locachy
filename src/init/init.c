@@ -14,7 +14,10 @@
  * 5 s after they exit. SIGHUP reads rc.conf again (settings sends it after
  * saving): a service whose line has gone is ended, a new one is started, the
  * others keep running. SIGTERM and Ctrl+Alt+Del reboot, SIGUSR2 powers off
- * (as busybox's init); both end everything first and leave / read-only.
+ * (as busybox's init); both end everything first and leave / read-only. A
+ * system job that runs (tools/JOBS.md) is waited for first, its screen and
+ * the log saying so; asked again (Ctrl+Alt+Del, poweroff --force or reboot
+ * --force: systemd's SIGRTMIN+14, +15) it goes ahead at once (shutdown_request).
  *
  * Home opens tasks. A task is a stack of programs: the one on top runs, the
  * ones below wait in base_call for it to return. A program on the screen
@@ -23,7 +26,8 @@
  * or a task, opened there from home: home has every screen no task shows,
  * each program a lease of its own screens, and they run side by side. The
  * keyboard (evdev fds) is on the screen last pressed on (its program tells
- * process 1 of a press); the pointer's devices are the program's whose
+ * process 1 of a press, and on which of its screens when it has several:
+ * "pointer-press SCREEN"); the pointer's devices are the program's whose
  * screen the pointer is on (it tells process 1 when the pointer goes onto
  * another program's screen), touch screens and pens the built-in panel's
  * program's. The shared display, and the lock, have every screen.
@@ -31,10 +35,12 @@
  * /usr/local/bin/locachy-seat, which implements the seatd protocol on a
  * private socket and translates take/release to seat activation/deactivation.
  *   open ARG...   (from home) the task ARG... is thawed at its top, or
- *                 started, on every screen home shows; home, left without
- *                 one, is frozen until it is told "back" or "ended".
- *   open-on SCREEN ARG...  (from home) the same on that screen (a connector)
- *                 only; home, if it keeps another, is told "shown TASK".
+ *                 started, on one screen home shows: the focused one (the
+ *                 request came from there), else the built-in panel, else
+ *                 the first; home, if it keeps another, is told "shown
+ *                 TASK", else, left without one, is frozen until it is told
+ *                 "back" or "ended".
+ *   open-on SCREEN ARG...  (from home) the same on that screen (a connector).
  *   kill ARG...   (from home) the task ARG... is killed and cleaned up.
  *   call ARG...   (from the top of a task) it is frozen; ARG... starts on top.
  *   a program exits: the one below is thawed and told "returned NAME
@@ -70,6 +76,7 @@
 #include <linux/kd.h>
 #include <net/if.h>
 #include <poll.h>
+#include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -91,6 +98,7 @@
 
 #include "internal.h"
 #include "apps.h"
+#include "jobs.h" /* JOBS_CGROUP, JOBS_DIR: where system jobs run; process 1 speaks none of their protocol */
 
 #define FG    0xD0D0D0
 #define BG    0x000000
@@ -181,6 +189,8 @@ static char mem_sleep[8];        /* rc.conf (a machine profile) mem_sleep; "": t
 static int battery_critical = 5; /* percent: on battery at or below it, hibernate or power off (config) */
 static double battery_act_at = -1;   /* ms: the critical battery's action, unless power comes back */
 static double battery_check_at = -1; /* ms: look at batteries without a trip point again (fallback) */
+static int shutdown_how = -1;        /* RB_POWER_OFF, RB_AUTOBOOT: asked for, waiting for a system job */
+static double shutdown_at = -1;      /* ms: shutdown_look is due then */
 static struct service *services;
 static size_t nservices;
 static sigset_t handled;    /* blocked here, read from a signalfd */
@@ -1097,10 +1107,14 @@ static struct frame *top(struct task *t)
 }
 
 /* The program screen i should show: the lock's, the shared display's while
- * in front, its task's, or home's; NULL for none (it is starting again). */
+ * in front, its task's, or home's; NULL for none (it is starting again, or
+ * the machine goes down once a system job ends: process 1 says so there). */
 static struct frame *showing(int i)
 {
     struct frame *f;
+    if (shutdown_how >= 0) {
+        return NULL;
+    }
     if (locked) {
         f = &locker;
     } else if (display_front != NULL) {
@@ -1227,6 +1241,15 @@ static void tell_screens(struct frame *f)
     control_send_fields(f->ctl, fields);
 }
 
+/* "take" or "keys" with fds, and the locks (keys_locks) the keyboards come
+ * with: the one state the program starts from. */
+static int send_with_locks(struct frame *f, const char *verb, const int *fds, int nfds)
+{
+    char msg[16];
+    int len = snprintf(msg, sizeof msg, "%s%c%d", verb, 0, keys_locks());
+    return control_send(f->ctl, msg, (size_t)len, fds, nfds);
+}
+
 /* Give f its screens (mask: bits of places), and the keyboard if it is the
  * focused one. */
 static int lend(struct frame *f, uint32_t mask)
@@ -1249,7 +1272,7 @@ static int lend(struct frame *f, uint32_t mask)
     if (!f->shared_display) tell_screens(f);
     f->nkbd = f == focused() ? keys_lend(f->kbd, MAX_KBD) : 0;
     memcpy(fds + 1, f->kbd, sizeof(int) * (size_t)f->nkbd);
-    if (control_send(f->ctl, "take", 4, fds, 1 + f->nkbd) < 0) {
+    if (send_with_locks(f, "take", fds, 1 + f->nkbd) < 0) {
         say("init: cannot send the screen to %s", f->name);
         close(fds[0]);
         keys_take_back(f->kbd, f->nkbd);
@@ -1284,7 +1307,14 @@ static void reclaim(struct frame *f)
     f->npointer = 0;
     f->pointer_wanted = 0;
     f->pointer_kinds = 0;
-    if (f->screens && screen_take_back(f->lessee) < 0) {
+    int restored = f->screens ? screen_take_back(f->lessee) : 0;
+    if (restored > 0) {
+        /* Master is ours; only the old scanout no longer fits the outputs
+         * labwc changed while it owned DRM. Rescan instead of killing its
+         * clients for a disconnected connector or an obsolete mode. */
+        say("init: %s returned DRM master; output topology needs a rescan", f->name);
+        display_changed();
+    } else if (restored < 0) {
         say("init: cannot reclaim DRM master from %s", f->name);
         /* The shared display's compositor is master on a file of its own,
          * which no other file can make drop it (drm_auth.c: SET_MASTER is
@@ -1308,14 +1338,14 @@ static void reclaim(struct frame *f)
 static void take_back(struct frame *f)
 {
     char msg[CONTROL_MAX];
-    int fds[CONTROL_MAX_FDS], n = 0;
+    int fds[CONTROL_MAX_FDS], n = 0, len = 0;
     double t0 = now_ms();
 
     control_send(f->ctl, "release", 7, NULL, 0);
     for (;;) {
         struct pollfd w = { .fd = f->ctl, .events = POLLIN };
         int left = 500 - (int)(now_ms() - t0);
-        if (left <= 0 || poll(&w, 1, left) <= 0 || control_recv(f->ctl, msg, sizeof msg, fds, &n) <= 0) {
+        if (left <= 0 || poll(&w, 1, left) <= 0 || (len = control_recv(f->ctl, msg, sizeof msg, fds, &n)) <= 0) {
             say("init: %s did not release the screen in time; revoking", f->name);
             break;
         }
@@ -1325,7 +1355,9 @@ static void take_back(struct frame *f)
         if (strcmp(msg, "released") == 0) {
             break;
         }
-        if (f == &home && strcmp(msg, "apps?") == 0) {
+        if (f->shared_display && f->nkbd > 0 && strcmp(msg, "locks") == 0 && n == 0 && len > 6) {
+            keys_set_locks(atoi(msg + 6)); /* the bar's last, sent on before "released" */
+        } else if (f == &home && strcmp(msg, "apps?") == 0) {
             char rows[CONTROL_MAX - 8];
             apps_list(rows, sizeof rows);
             const char *reply[] = { "apps", rows, NULL };
@@ -1449,24 +1481,18 @@ static void pointer_place(void)
     }
 }
 
-/* The keyboard to the focused screen's program, from any other. */
-/* The keyboards' Caps and Num Lock LEDs show the locks of the program the
- * keyboard is for: process 1's, which the direct programs take as the LEDs
- * show them (their lent keyboards are read-only), or the shared display's,
- * which labwc sets through libinput. Before a "take": the program taking
- * the keyboard reads them then. */
-static void leds_place(void)
-{
-    struct frame *to = focused();
-    keys_leds(to == NULL || !to->shared_display);
-}
-
+/* The keyboard to the focused screen's program, from any other. The locks
+ * (Caps and Num Lock) are process 1's wherever the keyboard goes: it sees
+ * every lock key the programs see (their lent keyboards are copies), shows
+ * the locks on every keyboard's LEDs, and gives them with each lend. Only
+ * the shared display's bar can hold the keyboards out of its sight; its
+ * seat reports the locks then ("locks"), and labwc takes them from the bar. */
 static void keys_place(void)
 {
     struct frame *all[2 + MAX_TASKS * MAX_DEPTH];
     struct frame *to = focused();
     int n = frames(all);
-    leds_place();
+    keys_leds(1); /* shown again: labwc writes the LEDs too while it has the keyboards */
     for (int k = 0; k < n; k++) {
         struct frame *f = all[k];
         if (f == to || f->nkbd == 0) continue;
@@ -1476,7 +1502,7 @@ static void keys_place(void)
     }
     if (to != NULL && to->screens && to->nkbd == 0) {
         to->nkbd = keys_lend(to->kbd, MAX_KBD);
-        if (to->nkbd > 0) control_send(to->ctl, "keys", 4, to->kbd, to->nkbd);
+        if (to->nkbd > 0) send_with_locks(to, "keys", to->kbd, to->nkbd);
     }
 }
 
@@ -1515,7 +1541,6 @@ static void arrange(void)
         screen_refresh();
         sync_places();
     }
-    leds_place();
     for (int k = 0; k < n; k++) {
         struct frame *f = all[k];
         uint32_t want = 0;
@@ -1591,12 +1616,18 @@ static void pointer_crossed(struct frame *f, int x, int y)
     control_send_fields(g->ctl, enter);
 }
 
-/* A press of a button, a touch or a pen on f's screen: the keyboard goes to
- * f (to the screen the pointer is on, if f has that one). */
-static void pressed(struct frame *f)
+/* A press of a button, a touch or a pen on f's screen at (-1: f did not say
+ * which; home, with several of its own, does): the keyboard goes to f, and
+ * that screen is the focused one, else the screen the pointer is on if f has
+ * that one. What home then opens goes there (home_place). */
+static void pressed(struct frame *f, int at)
 {
-    if (locked || display_front != NULL || f->screens == 0 || focused() == f) return;
-    focus_place = f->screens >> hover_place & 1 ? hover_place : place_of_frame(f);
+    if (locked || display_front != NULL || f->screens == 0) return;
+    if (at < 0 || !(f->screens >> at & 1)) {
+        if (focused() == f) return;
+        at = f->screens >> hover_place & 1 ? hover_place : place_of_frame(f);
+    }
+    focus_place = at;
     keys_place();
 }
 
@@ -1619,9 +1650,25 @@ static int place_named(const char *name)
     return -1;
 }
 
-/* The task argv on screen at (-1: on every screen home shows), thawed at its
- * top or started; the shared display on all of them. The keyboard goes with
- * it. Returns 0, or -1 after telling home "ended TASK -1". */
+/* The screen a task home opens naming none goes on: one, as a desktop opens
+ * a window on one monitor. The focused one if home shows it (the request
+ * came from there: home pressed on, or the program that asked home), else
+ * the built-in panel, else the first, of those home shows; the focused one
+ * if home shows none. */
+static int home_place(void)
+{
+    int internal = internal_place();
+    if (focus_place < nplaces && places[focus_place].task == NULL) return focus_place;
+    if (internal < nplaces && places[internal].task == NULL) return internal;
+    for (int i = 0; i < nplaces; i++) {
+        if (places[i].task == NULL) return i;
+    }
+    return focus_place;
+}
+
+/* The task argv on screen at (-1: home_place's), thawed at its top or
+ * started; the shared display on every screen. The keyboard goes with it.
+ * Returns 0, or -1 after telling home "ended TASK -1". */
 static int do_open(int at, char *const argv[])
 {
     char key[128];
@@ -1654,14 +1701,7 @@ static int do_open(int at, char *const argv[])
         for (int i = 0; i < nplaces; i++) {
             if (places[i].task == t) places[i].task = NULL;
         }
-        if (at >= 0 && at < nplaces) {
-            places[at].task = t;
-        } else {
-            for (int i = 0; i < nplaces; i++) {
-                if (places[i].task == NULL) places[i].task = t;
-            }
-            if (place_of(t) < 0) places[focus_place].task = t;
-        }
+        places[at >= 0 && at < nplaces ? at : home_place()].task = t;
         if (places[focus_place].task != t) focus_place = place_of(t);
     }
     arrange();
@@ -1863,7 +1903,7 @@ static void input_refresh(void)
     /* The shared display's go to its bar (locachy-bar reads the keyboards
      * seat passes on, no others). */
     if (to != NULL && to->screens && keys_sync(to->kbd, &to->nkbd, MAX_KBD)) {
-        control_send(to->ctl, "keys", 4, to->kbd, to->nkbd);
+        send_with_locks(to, "keys", to->kbd, to->nkbd);
     }
     int n = frames(all);
     for (int k = 0; k < n; k++) {
@@ -2105,14 +2145,255 @@ static void shut_down(int how)
     reboot(how);
 }
 
+/*
+ * A system job (locachy-jobs, tools/JOBS.md) runs in a cgroup of its own,
+ * JOBS_CGROUP/job-ID, one at a time; the service starts the next queued one
+ * as soon as one ends. Ended midway, pacman or a firmware write leaves the
+ * system half changed, so a power off or reboot asked for while one runs
+ * waits for it: nothing gets the screens (showing), process 1's own and the
+ * log say which job and how to go ahead, and each job's cgroup.events is
+ * watched (inotify: the kernel marks it modified when "populated" changes),
+ * the folder too, for the next one. Once none has run for JOBS_QUIET_MS (the
+ * next queued one would have started), the shutdown goes on. Process 1 looks
+ * at nothing else of the jobs: the queue is the service's, which runs on
+ * meanwhile, as everything else does; the state file only names the kind.
+ *
+ * It goes ahead at once (force) on poweroff --force and reboot --force
+ * (link/poweroff, link/reboot: systemd's signals for an immediate power off
+ * and reboot, SIGRTMIN+14 and +15, by number: glibc's SIGRTMIN, which kill(1)
+ * counts from, is 34, process 1's musl's 35), and when a person asks again
+ * while it waits (person_asked). What programs ask for (home, poweroff and
+ * reboot without --force, the critical battery) waits; asked again, the last
+ * request says which of the two it is. Only the critical battery's waits for
+ * a time (battery_power_off).
+ */
+#define SIG_POWEROFF_NOW 48
+#define SIG_REBOOT_NOW 49
+#define JOBS_QUIET_MS 1000
+#define AGAIN_MS 1000            /* asking again: a new press, not the last one held or seen twice */
+#define BATTERY_JOB_WAIT_MS 60000
+static double shutdown_by = -1;  /* ms: it goes ahead then, a job or not; -1: never */
+static double jobs_quiet_at = -1; /* ms: no job has run since before then; -1: one runs */
+static int jobs_watch = -1;      /* inotify, while it waits; -1: none (then looked at once a second) */
+static int shutdown_shown;       /* the screens are process 1's */
+static int shown_job = -1;       /* the job its screen names (0: none runs) */
+static double asked_at = -1;     /* ms: the last Ctrl+Alt+Del or power button */
+
+/* The system jobs that run: the job-ID cgroups with processes ("populated
+ * 1"); how many, the lowest ID into *id. While a shutdown waits, each one's
+ * cgroup.events is watched first. */
+static int jobs_running(int *id)
+{
+    DIR *d = opendir(JOBS_CGROUP);
+    struct dirent *e;
+    int n = 0, k, len;
+
+    *id = 0;
+    while (d != NULL && (e = readdir(d)) != NULL) {
+        char path[sizeof JOBS_CGROUP + 288]; /* a name (NAME_MAX), /cgroup.events */
+        if (sscanf(e->d_name, "job-%d%n", &k, &len) != 1 || k <= 0 || e->d_name[len] != '\0') {
+            continue;
+        }
+        snprintf(path, sizeof path, "%s/%s/cgroup.events", JOBS_CGROUP, e->d_name);
+        if (jobs_watch >= 0) {
+            inotify_add_watch(jobs_watch, path, IN_MODIFY);
+        }
+        if (read_value(path, "populated") > 0) {
+            n++;
+            if (*id == 0 || k < *id) *id = k;
+        }
+    }
+    if (d != NULL) {
+        closedir(d);
+    }
+    return n;
+}
+
+/* The kind of job id, for people: the first line of its state file
+ * (kind=, as locachy-jobs writes it); "" if unreadable. */
+static void job_kind(int id, char *out, size_t size)
+{
+    char path[sizeof JOBS_DIR + 24], line[64];
+
+    out[0] = '\0';
+    snprintf(path, sizeof path, "%s/%d.state", JOBS_DIR, id);
+    FILE *f = fopen(path, "re");
+    if (f != NULL && fgets(line, sizeof line, f) != NULL && strncmp(line, "kind=", 5) == 0) {
+        snprintf(out, size, "%.*s", (int)strspn(line + 5, "abcdefghijklmnopqrstuvwxyz0123456789-"), line + 5);
+    }
+    if (f != NULL) {
+        fclose(f);
+    }
+}
+
+/* What it waits for (id; 0: none runs now), on process 1's own screen and in
+ * the log. In English: process 1 draws with Terminus alone, which has no CJK
+ * (its boot passphrase prompt too). */
+static void shutdown_show(int id)
+{
+    char kind[32] = "", head[160], job[96];
+    const char *going = shutdown_how == RB_POWER_OFF ? "powering off" : "rebooting";
+
+    shown_job = id;
+    if (id > 0) {
+        job_kind(id, kind, sizeof kind);
+    }
+    if (shutdown_by >= 0) {
+        snprintf(head, sizeof head, "LOCachy: battery critical: %s once the system job ends, in %.0f s at most.",
+                 going, (shutdown_by - now_ms()) / 1e3);
+    } else {
+        snprintf(head, sizeof head, "LOCachy: %s once the system job ends.", going);
+    }
+    if (id > 0) {
+        char bound[48] = "";
+        if (shutdown_by >= 0) {
+            snprintf(bound, sizeof bound, " (critical battery: %.0f s at most)", (shutdown_by - now_ms()) / 1e3);
+        }
+        snprintf(job, sizeof job, "System job %d runs%s%s.", id, kind[0] ? ": " : "", kind);
+        say("init: %s: waiting for system job %d (%s) to end%s; to go ahead now, cutting it: Ctrl+Alt+Del "
+            "(reboot), poweroff --force, reboot --force", going, id, kind[0] ? kind : "kind unknown", bound);
+    } else {
+        snprintf(job, sizeof job, "No system job runs now: %s.", going);
+        say("init: %s: no system job runs; going on in %d ms unless the next one starts", going, JOBS_QUIET_MS);
+    }
+    screen_fill(0, 0, screen_cols(), screen_rows(), BG);
+    screen_text(2, 2, head, FG, BG);
+    screen_text(2, 4, job, FG, BG);
+    screen_text(2, 6, "Ending it midway can leave packages, the boot image or firmware half written.", FG, BG);
+    screen_text(2, 8, "To go ahead now anyway: Ctrl+Alt+Del reboots; as root, poweroff --force or reboot --force.",
+                FG, BG);
+    screen_flush();
+}
+
+static void shutdown_go(int how)
+{
+    if (jobs_watch >= 0) {
+        close(jobs_watch);
+        jobs_watch = -1;
+    }
+    shutdown_how = -1;
+    shutdown_at = shutdown_by = jobs_quiet_at = -1;
+    shutdown_shown = 0;
+    shut_down(how);
+}
+
+/* Power off or reboot (how) once no system job runs; force: at once.
+ * bound_ms >= 0: a job gets that long at most (the critical battery). */
+static void shutdown_request(int how, int force, int bound_ms)
+{
+    const char *what = how == RB_POWER_OFF ? "power off" : "reboot";
+    char kind[32];
+    int id, n = jobs_running(&id);
+
+    if (force || (shutdown_how < 0 && n == 0)) {
+        if (n > 0) {
+            job_kind(id, kind, sizeof kind);
+            say("init: %s now, without waiting: system job %d (%s) is cut", what, id, kind[0] ? kind : "kind unknown");
+        }
+        shutdown_go(how);
+        return;
+    }
+    if (shutdown_how < 0) {
+        jobs_watch = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+        if (jobs_watch < 0 || inotify_add_watch(jobs_watch, JOBS_CGROUP, IN_CREATE | IN_DELETE | IN_ONLYDIR) < 0) {
+            say("init: cannot watch %s: %s; looking at it once a second", JOBS_CGROUP, strerror(errno));
+            if (jobs_watch >= 0) {
+                close(jobs_watch);
+                jobs_watch = -1;
+            }
+        }
+        shutdown_shown = 0;
+        jobs_quiet_at = -1;
+        shutdown_by = -1;
+    } else {
+        say("init: %s asked for, once no system job runs", what);
+    }
+    if (how != shutdown_how || (bound_ms >= 0 && (shutdown_by < 0 || now_ms() + bound_ms < shutdown_by))) {
+        shown_job = -1; /* said again */
+    }
+    shutdown_how = how;
+    if (bound_ms >= 0 && (shutdown_by < 0 || now_ms() + bound_ms < shutdown_by)) {
+        shutdown_by = now_ms() + bound_ms;
+    }
+    shutdown_at = now_ms(); /* shutdown_look at once */
+}
+
+/* While a shutdown waits: at once (the screens become process 1's), when a
+ * job's cgroup or their folder changed (jobs_watch), at shutdown_at (the
+ * quiet time's end, the bound; without the watch, once a second). */
+static void shutdown_look(void)
+{
+    char events[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
+    int id;
+
+    while (jobs_watch >= 0 && read(jobs_watch, events, sizeof events) > 0) {
+    }
+    if (!shutdown_shown) {
+        shutdown_shown = 1;
+        arrange(); /* nothing gets the screens: they show process 1's */
+    }
+    int n = jobs_running(&id);
+    double now = now_ms();
+    if (n > 0) {
+        jobs_quiet_at = -1;
+    } else if (jobs_quiet_at < 0) {
+        jobs_quiet_at = now + JOBS_QUIET_MS;
+    }
+    if (n > 0 && shutdown_by >= 0 && now >= shutdown_by) {
+        char kind[32];
+        job_kind(id, kind, sizeof kind);
+        say("init: POWER: the critical battery's power off waited %d s; system job %d (%s) still runs and is cut: "
+            "it can be left half done", BATTERY_JOB_WAIT_MS / 1000, id, kind[0] ? kind : "kind unknown");
+        shutdown_go(shutdown_how);
+        return;
+    }
+    if (n == 0 && (now >= jobs_quiet_at || (shutdown_by >= 0 && now >= shutdown_by))) {
+        shutdown_go(shutdown_how);
+        return;
+    }
+    if ((n > 0 ? id : 0) != shown_job) {
+        shutdown_show(n > 0 ? id : 0);
+    }
+    shutdown_at = n == 0 ? jobs_quiet_at : jobs_watch < 0 ? now + 1000 : -1;
+    if (shutdown_by >= 0 && (shutdown_at < 0 || shutdown_by < shutdown_at)) {
+        shutdown_at = shutdown_by;
+    }
+}
+
+/* Ctrl+Alt+Del (how: RB_AUTOBOOT) or the power button (RB_POWER_OFF): a
+ * person asks. While a shutdown waits that is asking again: it goes ahead at
+ * once. Within AGAIN_MS of the last one it is that press still (Delete
+ * repeats while held) or seen on another device: nothing. */
+static void person_asked(int how)
+{
+    double last = asked_at;
+
+    asked_at = now_ms();
+    if (last >= 0 && asked_at - last < AGAIN_MS) {
+        return;
+    }
+    say(how == RB_AUTOBOOT ? "init: Ctrl+Alt+Del" : "init: power button");
+    shutdown_request(how, shutdown_how >= 0, -1);
+}
+
 static void power_off(void)
 {
-    shut_down(RB_POWER_OFF);
+    shutdown_request(RB_POWER_OFF, 0, -1);
 }
 
 static void restart(void)
 {
-    shut_down(RB_AUTOBOOT);
+    shutdown_request(RB_AUTOBOOT, 0, -1);
+}
+
+/* The critical battery's power off where it cannot hibernate: a system job
+ * that runs gets BATTERY_JOB_WAIT_MS to end, then the machine powers off all
+ * the same, saying so. Cut at once, pacman or a firmware write is left half
+ * done for certain; waited for without end, the battery would end it too,
+ * with the root still writable. */
+static void battery_power_off(void)
+{
+    shutdown_request(RB_POWER_OFF, 0, BATTERY_JOB_WAIT_MS);
 }
 
 struct settings_read {
@@ -2134,7 +2415,8 @@ struct settings_read {
  *                               appear late are seen; 0: at once)
  *   battery_critical="PERCENT"  on battery at or below it: hibernate, or
  *                               power off without a resume device, 20 s
- *                               after the warning (default 5; 0: never)
+ *                               after the warning (default 5; 0: never); a
+ *                               system job that runs gets 60 s more to end
  *   mem_sleep="deep"            how the machine suspends: "deep" (S3),
  *                               "s2idle" or "shallow"; unset, the kernel's
  *                               choice (a machine profile sets it)
@@ -2346,12 +2628,15 @@ static void message(struct frame *f)
     fields[n] = NULL;
     int open_on = strcmp(fields[0], "open-on") == 0 && n > 2;
     if (locked && f != &locker && (strcmp(fields[0], "call") == 0 || strcmp(fields[0], "open") == 0 ||
-                                   open_on || strcmp(fields[0], "app") == 0)) {
+                                   open_on || strcmp(fields[0], "app") == 0 || strcmp(fields[0], "window") == 0)) {
         /* Sent just before it was frozen: not now. */
         char key[128];
         join(fields + 1 + open_on, key, sizeof key);
         if (strcmp(fields[0], "call") == 0) {
             send3(f, "returned", n > 1 ? fields[1] : "", "-1");
+        } else if (strcmp(fields[0], "window") == 0) {
+            const char *reply[] = { "window-result", "error", n > 1 ? fields[1] : "", "the screen is locked", NULL };
+            control_send_fields(f->ctl, reply);
         } else if (strcmp(fields[0], "app") != 0) {
             send3(&home, "ended", key, "-1");
         } else {
@@ -2392,13 +2677,31 @@ static void message(struct frame *f)
         }
         const char *reply[] = { "app-result", result == 0 ? "ok" : "error", fields[2], why, NULL };
         control_send_fields(home.ctl, reply);
+    } else if (strcmp(fields[0], "window") == 0 && (n == 2 || n == 3) && (f->shared_display || f == &home)) {
+        /* window PROGRAM [TARGET]: a host program as a managed window of its
+         * own on the shared display (the top bar's status areas, a file
+         * opened there), from the display's seat; the display stays on the
+         * screen. From home, the display comes to the front for it. */
+        struct task *dt = shared_display_task();
+        if (dt != NULL && dt->f[0].frozen) {
+            thaw(&dt->f[0]);
+        }
+        char why[192];
+        int result = apps_window_open(fields[1], n == 3 ? fields[2] : "", why, sizeof why);
+        say("init: window %s: %s", fields[1], why);
+        if (result == 0 && f == &home) {
+            stay_on_display = 1;
+            do_open(-1, desktop_argv);
+        }
+        const char *reply[] = { "window-result", result == 0 ? "ok" : "error", fields[1], why, NULL };
+        control_send_fields(f->ctl, reply);
     } else if (strcmp(fields[0], "pointer?") == 0 && f->screens && !f->shared_display) {
         f->pointer_wanted = 1;
         pointer_place();
     } else if (strcmp(fields[0], "pointer-leave") == 0 && n == 3 && (f->pointer_kinds & POINTER_MOVING)) {
         pointer_crossed(f, atoi(fields[1]), atoi(fields[2]));
     } else if (strcmp(fields[0], "pointer-press") == 0) {
-        pressed(f);
+        pressed(f, n > 1 ? place_named(fields[1]) : -1);
     } else if (strcmp(fields[0], "master") == 0 && f->screens && f->shared_display) {
         int result = screen_drop_master(f->lessee);
         f->lessee = 0;
@@ -2413,6 +2716,10 @@ static void message(struct frame *f)
         } else {
             go_home(-1);
         }
+    } else if (strcmp(fields[0], "locks") == 0 && n == 2 && f->shared_display && f->nkbd > 0) {
+        /* The shared display's locks while it has the keyboards: its bar may
+         * hold them (EVIOCGRAB), so process 1 does not see those keys. */
+        keys_set_locks(atoi(fields[1]));
     } else if (strcmp(fields[0], "home") == 0 && f->screens && !locked) {
         go_home(place_of_frame(f));
     } else if (strcmp(fields[0], "lock") == 0 && f->screens) {
@@ -3055,8 +3362,8 @@ static double suspend(int lid)
         hibernate_at = -1;
         if (low && !resume_dev[0]) {
             say("init: battery critical with the lid closed, no resume device: powering off");
-            power_off();
-            break; /* only where reboot() failed */
+            battery_power_off();
+            break; /* a system job runs (it waits for it, awake), or reboot() failed */
         }
         say("init: %s with the lid closed: hibernating", low ? "battery critical" : fired ? "the wake alarm" :
             "the hibernation deadline");
@@ -3066,7 +3373,7 @@ static double suspend(int lid)
         }
         if (low) {
             say("init: battery critical and the image could not be written: powering off");
-            power_off();
+            battery_power_off();
             break;
         }
         if (!lid_closed()) {
@@ -3094,9 +3401,14 @@ static double suspend(int lid)
  * later (a wakeup event's hold), longer each time; refused twice in a row
  * with the lid closed, it hibernates: the machine must not stay up with the
  * lid closed (systemd-sleep would suspend instead; init's policy is the
- * disk). */
+ * disk). While a power off or reboot waits for a system job, the lid does
+ * nothing (logind's manager_handle_action: an action under way, another is
+ * ignored; a job's sleep inhibitor, as PackageKit takes one, holds the lid). */
 static void lid_changed(int edge)
 {
+    if (shutdown_how >= 0) {
+        return;
+    }
     if (!lid_closed()) {
         if (lid_check_at >= 0 || hibernate_at >= 0 || suspend_failures) {
             say("init: the lid is open");
@@ -3153,9 +3465,11 @@ static void lid_changed(int edge)
 
 /* The critical-battery action, due BATTERY_ACTION_MS after the warning:
  * still on battery at or below battery_critical, hibernate (locked first: it
- * comes back as it went), else, or if the image cannot be written, power off
- * cleanly (shut_down), upower's CriticalPowerAction order without hybrid
- * sleep (up_backend_take_action: Hibernate, then PowerOff). */
+ * comes back as it went; a system job that runs goes on after the resume),
+ * else, or if the image cannot be written, power off cleanly (shut_down;
+ * battery_power_off: a system job gets a short time first), upower's
+ * CriticalPowerAction order without hybrid sleep (up_backend_take_action:
+ * Hibernate, then PowerOff). */
 static void battery_act(void)
 {
     battery_act_at = -1;
@@ -3175,7 +3489,7 @@ static void battery_act(void)
         }
     }
     say("init: battery critical: powering off");
-    power_off();
+    battery_power_off();
 }
 
 /*
@@ -3366,13 +3680,16 @@ int main(void)
      * which it would otherwise act on at once, without syncing: only while
      * the console's keyboard is on, before console_keyboard_off or where it
      * failed; after it, process 1 sees the keys itself) and power off
-     * (SIGUSR2). */
+     * (SIGUSR2); both without waiting for a system job (SIG_POWEROFF_NOW,
+     * SIG_REBOOT_NOW). */
     sigemptyset(&handled);
     sigaddset(&handled, SIGCHLD);
     sigaddset(&handled, SIGHUP);
     sigaddset(&handled, SIGTERM);
     sigaddset(&handled, SIGINT);
     sigaddset(&handled, SIGUSR2);
+    sigaddset(&handled, SIG_POWEROFF_NOW);
+    sigaddset(&handled, SIG_REBOOT_NOW);
     sigprocmask(SIG_BLOCK, &handled, NULL);
     int sfd = signalfd(-1, &handled, SFD_CLOEXEC);
     reboot(RB_DISABLE_CAD);
@@ -3493,11 +3810,11 @@ int main(void)
     }
 
     for (;;) {
-        /* signals, system inputs, keyboards, home, the tasks, uevents */
-        struct pollfd p[1 + 8 + MAX_KBD + MAX_ACTIVITY + 2 + MAX_TASKS * MAX_DEPTH + 1];
-        struct frame *who[1 + 8 + MAX_KBD + MAX_ACTIVITY + 2 + MAX_TASKS * MAX_DEPTH + 1];
+        /* signals, system inputs, keyboards, home, the tasks, uevents, system jobs */
+        struct pollfd p[1 + 8 + MAX_KBD + MAX_ACTIVITY + 2 + MAX_TASKS * MAX_DEPTH + 2];
+        struct frame *who[1 + 8 + MAX_KBD + MAX_ACTIVITY + 2 + MAX_TASKS * MAX_DEPTH + 2];
         int n = 0;
-        int signal_j = n; /* SIGCHLD, SIGHUP, SIGTERM, SIGINT, SIGUSR2 */
+        int signal_j = n; /* SIGCHLD, SIGHUP, SIGTERM, SIGINT, SIGUSR2, SIG_POWEROFF_NOW, SIG_REBOOT_NOW */
         who[n] = NULL;
         p[n++] = (struct pollfd){ .fd = sfd, .events = POLLIN };
         for (int i = 0; i < npfd; i++) {
@@ -3535,9 +3852,16 @@ int main(void)
             who[n] = NULL;
             p[n++] = (struct pollfd){ .fd = modules_fd(), .events = POLLIN };
         }
+        int jobs_j = -1; /* while a shutdown waits: the system jobs' cgroups changed */
+        if (jobs_watch >= 0) {
+            jobs_j = n;
+            who[n] = NULL;
+            p[n++] = (struct pollfd){ .fd = jobs_watch, .events = POLLIN };
+        }
         /* Wake up for the next timed thing: a service to start again, the
          * idle measurement, the debug reboot, the lid's second look, the
-         * critical battery's action and its fallback look. */
+         * critical battery's action and its fallback look, a waiting
+         * shutdown's look. */
         double next = -1;
         for (size_t i = 0; i < nservices; i++) {
             if (services[i].pid == 0 && (next < 0 || services[i].restart_at < next)) {
@@ -3550,8 +3874,8 @@ int main(void)
         if (lock_start_at >= 0 && (next < 0 || lock_start_at < next)) {
             next = lock_start_at;
         }
-        double timers[3] = { lid_check_at, battery_act_at, battery_check_at };
-        for (int i = 0; i < 3; i++) {
+        double timers[4] = { lid_check_at, battery_act_at, battery_check_at, shutdown_at };
+        for (int i = 0; i < 4; i++) {
             if (timers[i] >= 0 && (next < 0 || timers[i] < next)) {
                 next = timers[i];
             }
@@ -3612,6 +3936,10 @@ int main(void)
             battery_check();
             continue;
         }
+        if (shutdown_at >= 0 && shutdown_at <= now_ms()) {
+            shutdown_look();
+            continue;
+        }
         if (idle_lock_at() >= 0 && idle_lock_at() <= now_ms()) {
             say("init: no input for %d s: locking", lock_after);
             active_at = now_ms(); /* without the lock program: not again at once */
@@ -3631,6 +3959,7 @@ int main(void)
             sample(&end);
             report(&measured, &end);
             say("init: locachy.reboot: rebooting now");
+            reboot_s = 0; /* asked once: a system job that runs is waited for */
             restart();
         }
         if (ready <= 0) {
@@ -3649,11 +3978,22 @@ int main(void)
                             read_settings();
                             battery_check(); /* battery_critical: its trip points */
                         }
-                    } else if (si.ssi_signo == SIGTERM || si.ssi_signo == SIGINT) {
+                    } else if (si.ssi_signo == SIGTERM) {
                         restart();
+                    } else if (si.ssi_signo == SIGINT) {
+                        person_asked(RB_AUTOBOOT); /* the kernel's Ctrl+Alt+Del */
                     } else if (si.ssi_signo == SIGUSR2) {
                         power_off();
+                    } else if (si.ssi_signo == SIG_POWEROFF_NOW || si.ssi_signo == SIG_REBOOT_NOW) {
+                        shutdown_request(si.ssi_signo == SIG_POWEROFF_NOW ? RB_POWER_OFF : RB_AUTOBOOT, 1, -1);
                     }
+                    break;
+                }
+                continue;
+            }
+            if (j == jobs_j) {
+                if (p[j].revents & POLLIN) {
+                    shutdown_look();
                     break;
                 }
                 continue;
@@ -3708,8 +4048,7 @@ int main(void)
                 int lid = 0, closing = 0;
                 for (ssize_t k = 0; got > 0 && k < got / (ssize_t)sizeof *ev; k++) {
                     if (ev[k].type == EV_KEY && ev[k].code == KEY_POWER && ev[k].value == 1) {
-                        say("init: power button");
-                        power_off();
+                        person_asked(RB_POWER_OFF); /* "init: power button" */
                     } else if (ev[k].type == EV_KEY && ev[k].value == 1 && keys_alone_action(ev[k].code) == K_HOME) {
                         if (!locked) {
                             say("init: key_home key %d -> home", ev[k].code);
@@ -3750,8 +4089,7 @@ int main(void)
                 } else if (key == K_ACT_LOCK && !shared) {
                     lock();
                 } else if (ctrl_alt_del(key)) {
-                    say("init: Ctrl+Alt+Del");
-                    restart();
+                    person_asked(RB_AUTOBOOT); /* "init: Ctrl+Alt+Del" */
                 }
                 break;
             }

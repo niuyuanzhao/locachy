@@ -8,6 +8,7 @@
 #   /usr/local/lib/locachy/keytable      the key table of the layout chosen (libxkbcommon)
 #   /usr/local/lib/locachy/clipboard     the clipboard they copy and paste with (its socket)
 #   /usr/local/share/locachy/font.psf, terminus/   their text (Terminus)
+#   /etc/fonts/conf.d/64-locachy-cjk-prefer.conf    Han text's CJK variant (tools/FONTS.md)
 #   /usr/local/share/locale/LL_CC/       their translations (po/LINGUAS)
 #   /usr/lib/locale/LL_CC.utf8/          the locales those need (localedef)
 set -eu
@@ -18,8 +19,8 @@ trap 'rm -rf "$b"' EXIT
 
 # As make.sh's $GCC, for the CPU level every x86-64 runs.
 gcc="gcc -O2 -march=x86-64 -mtune=generic -Wall -Wextra -D_GNU_SOURCE -I$src/base/include -I$src/base
-     -DCONFIG_FREETYPE -DCONFIG_NETWORKMANAGER -DCONFIG_LIBINPUT $(pkg-config --cflags freetype2 libnm libinput)"
-libs="$(pkg-config --libs freetype2 libnm libinput) -lm"
+     -DCONFIG_FREETYPE -DCONFIG_NETWORKMANAGER -DCONFIG_LIBINPUT $(pkg-config --cflags freetype2 fontconfig libnm libinput)"
+libs="$(pkg-config --libs freetype2 fontconfig libnm libinput) -lm"
 for f in "$src"/base/*.c; do
     $gcc -c -o "$b/base-$(basename "$f" .c).o" "$f" # ime.c without CONFIG_IME: no input method here
 done
@@ -36,6 +37,8 @@ $gcc -I"$b" -o "$root/usr/local/lib/locachy/clipboard" "$src/progs/clipboard.c" 
     "$b/base-clipboard.o" -lwayland-client
 
 gzip -dc /usr/share/kbd/consolefonts/ter-u16b.psf.gz >"$root/usr/local/share/locachy/font.psf"
+# Han text's Noto CJK variant, as on an installed system (make.sh, tools/FONTS.md).
+install -D -m 644 "$src/link/64-locachy-cjk-prefer.conf" "$root/etc/fonts/conf.d/64-locachy-cjk-prefer.conf"
 for size in 12 14 16 18 20 22 24 28 32; do
     for style in n b; do
         f=/usr/share/kbd/consolefonts/ter-u$size$style.psf.gz

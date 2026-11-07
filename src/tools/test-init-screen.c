@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 
 static int refreshed, lends, returns, releases, available = 1, send_fail, kbd_count, ndev;
+static int restore_result; /* screen_take_back: master failure, restored, or stale scanout */
 static char order[128], log_[8192], dir[200];
 static int peer[256];
 static struct screen_output outs[4];
@@ -81,7 +82,7 @@ int screen_take_back(uint32_t lessee)
     for (int i = 0; i < 4; i++) {
         if (lessee_of[i] == lessee) lessee_of[i] = 0;
     }
-    return 0;
+    return restore_result;
 }
 int screen_drop_master(uint32_t lessee) { (void)lessee; return 0; }
 int keys_lend(int *fds, int max)
@@ -96,6 +97,8 @@ void keys_take_back(const int *fds, int n)
     step('K');
 }
 void keys_leds(int on) { (void)on; }
+int keys_locks(void) { return 0; }
+void keys_set_locks(int locks) { (void)locks; }
 /* ndev pointer devices: files of their own in the scratch directory, as
  * distinct inodes as event nodes are. */
 int *pointer_lend(size_t *count, char paths[][POINTER_PATH], size_t max)
@@ -148,6 +151,22 @@ int control_send(int fd, const char *msg, size_t size, const int *fds, int n)
 }
 int control_recv(int fd, char *msg, size_t size, int *fds, int *nfds)
 { (void)fds; *nfds = 0; ssize_t n = recv(fd, msg, size - 1, 0); if (n >= 0) msg[n] = 0; return (int)n; }
+/* As base/control.c splits a message into its NUL-separated fields. */
+int control_fields(char *msg, int len, char **fields, int max)
+{
+    int n = 0;
+    for (int i = 0; i < len && n < max; i += (int)strlen(msg + i) + 1) fields[n++] = msg + i;
+    return n;
+}
+/* Containers: none here (message's app requests are not sent). */
+int apps_open(const char *name, const char *target, char *why, size_t size)
+{ (void)name; (void)target; snprintf(why, size, "none"); return -1; }
+int apps_action(const char *action, const char *name, char *why, size_t size)
+{ (void)action; (void)name; snprintf(why, size, "none"); return -1; }
+int apps_window_open(const char *program, const char *target, char *why, size_t size)
+{ (void)program; (void)target; snprintf(why, size, "none"); return -1; }
+void apps_display_ready(void) {}
+void apps_tick(void) {}
 
 /* A frame with its own control socket and a scratch cgroup whose freezing
  * is done at once. */
@@ -164,6 +183,9 @@ static void frame(struct frame *f, const char *name)
     snprintf(f->name, sizeof f->name, "%s", name);
     assert(snprintf(f->cgroup, sizeof f->cgroup, "%s/c%d", dir, made++) < (int)sizeof f->cgroup);
     assert(mkdir(f->cgroup, 0700) == 0);
+    snprintf(path, sizeof path, "%s/cgroup.kill", f->cgroup);
+    FILE *kill_file = fopen(path, "w");
+    assert(kill_file && fputc('0', kill_file) == '0' && fclose(kill_file) == 0);
     snprintf(path, sizeof path, "%s/cgroup.events", f->cgroup);
     FILE *events = fopen(path, "w");
     assert(events && fputs("populated 1\nfrozen 1\n", events) >= 0 && fclose(events) == 0);
@@ -212,7 +234,7 @@ static void reset(int screens, int keyboards, int devices)
     kbd_count = keyboards;
     ndev = devices;
     available = 1;
-    send_fail = 0;
+    send_fail = restore_result = 0;
     frame(&home, "home");
     arrange();
     order[0] = log_[0] = 0;
@@ -266,6 +288,101 @@ static void hotplug(void)
     assert(returns == before + 1 && lessee_of[0] == 0);
     send_fail = 0;
     puts("PASS failed take packet revokes the lease and input copies");
+}
+
+/* A compositor's returned master is not a successful restore of init's
+ * stale scanout: hotplug happened while labwc owned the real DRM file. */
+static void shared_hotplug(void)
+{
+    char path[256];
+    reset(2, 1, 0);
+    struct frame *display = task(2, "display");
+    display->shared_display = 1;
+    display_front = &tasks[2];
+    arrange();
+    assert(display->screens == 3 && home.screens == 0 && !display->frozen);
+    int before = refreshed;
+    display_changed();
+    display_refresh_at = 0;
+    assert(refresh_display() == 0 && refreshed == before);
+    /* The external output disappears. Master comes back, but restoring the
+     * old two-output scanout reports stale geometry rather than EBUSY. */
+    nouts = 1;
+    restore_result = 1;
+    display_pending = 0;
+    display_refresh_at = -1;
+    take_back(display);
+    assert(display_pending && display_refresh_at >= 0);
+    go_home(-1);
+    assert(display->pid == 1000 && tasks[2].depth == 1 && !display->frozen);
+    snprintf(path, sizeof path, "%s/cgroup.kill", display->cgroup);
+    FILE *f = fopen(path, "r");
+    assert(f && fgetc(f) == '0');
+    fclose(f);
+    assert(home.screens == 1 && nplaces == 1 && home.nkbd == 1);
+    assert(display_front == NULL && display->screens == 0);
+    restore_result = 0;
+    puts("PASS stale hotplug scanout after returned master rescans and keeps the compositor and its clients alive");
+
+    reset(2, 1, 0);
+    display = task(2, "display");
+    display->shared_display = 1;
+    display_front = &tasks[2];
+    arrange();
+    frame(&locker, "lock");
+    locked = 1;
+    nouts = 1;
+    restore_result = 1;
+    arrange();
+    assert(locked && locker.screens == 1 && locker.nkbd == 1 && nplaces == 1);
+    assert(display->screens == 0 && display->nkbd == 0 && display->pid == 1000);
+    snprintf(path, sizeof path, "%s/cgroup.kill", display->cgroup);
+    f = fopen(path, "r");
+    assert(f && fgetc(f) == '0');
+    fclose(f);
+    restore_result = 0;
+    puts("PASS a lock after hotplug gets the rescanned screen and keyboard without terminating the released compositor");
+
+    reset(1, 1, 0);
+    display = task(2, "display");
+    display->shared_display = 1;
+    display_front = &tasks[2];
+    arrange();
+    nouts = 0;
+    available = 0;
+    restore_result = 1;
+    go_home(-1);
+    assert(display->pid == 1000 && tasks[2].depth == 1 && display->screens == 0);
+    assert(home.pid == 1000 && home.screens == 0 && display_pending);
+    snprintf(path, sizeof path, "%s/cgroup.kill", display->cgroup);
+    f = fopen(path, "r");
+    assert(f && fgetc(f) == '0');
+    fclose(f);
+    available = 1;
+    restore_result = 0;
+    output("HDMI-A-1", 0, 0, 1920, 1080, 0);
+    display_changed();
+    display_refresh_at = 0;
+    assert(refresh_display() == 1 && home.screens == 1 && home.nkbd == 1);
+    assert(display->pid == 1000 && tasks[2].depth == 1);
+    puts("PASS losing every output preserves the shared display until reconnection restores home input and scanout");
+
+    /* Ownership failure is different: background DRM must never remain
+     * accessible when home or the lock is being given the screen. */
+    reset(1, 0, 0);
+    display = task(2, "display");
+    display->shared_display = 1;
+    display_front = &tasks[2];
+    arrange();
+    restore_result = -1;
+    go_home(-1);
+    snprintf(path, sizeof path, "%s/cgroup.kill", display->cgroup);
+    assert(access(path, F_OK) == 0);
+    f = fopen(path, "r");
+    assert(f && fgetc(f) == '1');
+    fclose(f);
+    restore_result = 0;
+    puts("PASS failure to reclaim DRM ownership still ends the compositor before another program receives the screen");
 }
 
 /* Swipes on one screen: home, a task in slot 0, a shared display in slot 2. */
@@ -330,11 +447,11 @@ static void several(void)
     puts("PASS the pointer's devices go to the program whose screen it moves onto, which is told where");
 
     log_[0] = 0;
-    pressed(term); /* no pointer devices of its own now: still its screen's press */
+    pressed(term, -1); /* no pointer devices of its own now: still its screen's press */
     assert(focus_place == 1 && term->nkbd == 1);
-    pressed(&home);
+    pressed(&home, -1);
     assert(focus_place == 0 && home.nkbd == 1 && term->nkbd == 0 && strstr(log_, "term:keys 0\n"));
-    pressed(&home);
+    pressed(&home, -1);
     assert(focus_place == 0 && home.nkbd == 1);
     puts("PASS the keyboard follows the screen last pressed on");
 
@@ -435,14 +552,88 @@ static void three(void)
     puts("PASS one existing packages task moves across all three outputs, frozen or already shown, without a new instance");
 }
 
+/* f tells process 1 the fields (NULL ended), which it reads at once
+ * (message): home's open (base_open, as its file manager opens a document
+ * in view), a press (pointer.c), a program's request for home. */
+static void tell(struct frame *f, const char *const *fields)
+{
+    char msg[512];
+    size_t len = 0;
+    for (; *fields; fields++) {
+        size_t n = strlen(*fields) + 1;
+        assert(len + n <= sizeof msg);
+        memcpy(msg + len, *fields, n);
+        len += n;
+    }
+    assert(len > 0 && send(peer[f->ctl], msg, len - 1, 0) == (ssize_t)(len - 1));
+    message(f);
+}
+
+/* Three screens, home on all of them. What home opens naming no screen
+ * ("open": what its file manager opens in view, also for a program that
+ * asked home to open something) goes on one screen, as a desktop opens a
+ * window on one monitor: the one pressed on or asked from, not every screen
+ * home shows. */
+static void one_screen(void)
+{
+    reset(3, 1, 2);
+    struct frame *a = task(0, "/usr/local/bin/view /home/u/a.pdf");
+    struct frame *b = task(1, "/usr/local/bin/view /home/u/b.pdf");
+    tell(&home,(const char *const[]){ "pointer-press", "DP-1", NULL }); /* on home's third screen */
+    assert(focus_place == 2 && home.nkbd == 1);
+    tell(&home, (const char *const[]){ "open", "/usr/local/bin/view", "/home/u/a.pdf", NULL });
+    assert(places[2].task == &tasks[0] && places[0].task == NULL && places[1].task == NULL);
+    assert(a->screens == 4 && !a->frozen && home.screens == 3 && !home.frozen);
+    assert(strstr(log_, "home:shown /usr/local/bin/view /home/u/a.pdf\n") && !home_waits[0]);
+    assert(focus_place == 2 && a->nkbd == 1 && home.nkbd == 0);
+    puts("PASS home's open naming no screen: view on the one of home's three screens pressed on; home keeps two");
+
+    /* view follows a link to another document (open_in_home): its screen
+     * goes home, and home opens the document there. */
+    tell(a, (const char *const[]){ "home", NULL });
+    assert(places[2].task == NULL && a->frozen && home.screens == 7 && focus_place == 2);
+    tell(&home, (const char *const[]){ "open", "/usr/local/bin/view", "/home/u/b.pdf", NULL });
+    assert(places[2].task == &tasks[1] && b->screens == 4 && home.screens == 3 && a->frozen);
+    puts("PASS what a program asks home to open goes on that program's screen, not on every screen");
+
+    /* The pointer goes from view onto home's HDMI-A-1 and presses there. */
+    home.pointer_wanted = b->pointer_wanted = 1; /* both asked since their take: pointer? */
+    pointer_crossed(b, 1500, 100);
+    assert(hover_place == 1);
+    tell(&home, (const char *const[]){ "pointer-press", "HDMI-A-1", NULL });
+    assert(focus_place == 1 && home.nkbd == 1 && b->nkbd == 0);
+    tell(&home, (const char *const[]){ "open", "/usr/local/bin/view", "/home/u/a.pdf", NULL });
+    assert(places[1].task == &tasks[0] && places[2].task == &tasks[1] && a->screens == 2 && !a->frozen);
+    assert(home.screens == 1 && !home.frozen && focus_place == 1 && a->nkbd == 1);
+    puts("PASS presses on home's screens move where its next open goes; each view keeps its own screen");
+
+    /* The focused screen shows a program (home asked after the shared
+     * display, which every screen showed): the built-in panel if home
+     * shows it, else the first screen home shows. */
+    reset(3, 1, 2);
+    task(0, "term");
+    task(1, "settings");
+    task(2, "packages");
+    assert(do_open(place_named("DP-1"), (char *[]){ "term", NULL }) == 0 && focus_place == 2);
+    tell(&home, (const char *const[]){ "open", "settings", NULL });
+    assert(places[0].task == &tasks[1] && places[1].task == NULL && places[2].task == &tasks[0]);
+    assert(home.screens == 2 && focus_place == 0);
+    tell(&home, (const char *const[]){ "open", "packages", NULL });
+    assert(places[1].task == &tasks[2] && places[0].task == &tasks[1] && places[2].task == &tasks[0]);
+    assert(home.screens == 0 && home.frozen && strcmp(home_waits, "packages") == 0);
+    puts("PASS a focused screen home does not show: the built-in panel, else the first home shows; never all");
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2 && mkdir(argv[1], 0700) == 0);
     snprintf(dir, sizeof dir, "%s", argv[1]); /* short and relative, as the cgroup paths are */
     hotplug();
+    shared_hotplug();
     switching();
     several();
     three();
+    one_screen();
     waiting();
     puts("ALL PASSED");
     return 0;

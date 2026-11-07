@@ -1,8 +1,9 @@
 /* The pointer for direct-screen frontends. Process 1 owns the original input
  * devices and revokes every copy on release; only the program on the screen
  * reads its copies. It reads them through libinput, the library the shared
- * display uses, set up the same way: acceleration from rc.conf, tap to click,
- * two-finger and TrackPoint scrolling, the touchpad ignored while typing.
+ * display uses, set up the same way: acceleration and touchpad clicks (tap to
+ * click unless turned off) from rc.conf, two-finger and TrackPoint
+ * scrolling, the touchpad ignored while typing.
  * Motions move the screen's cursor at once and become K_POINTER events
  * (merged while unread). Touch screens: a tap is a click, holding still a
  * right click, dragging scrolls, two fingers pinch and scroll (libinput
@@ -36,6 +37,7 @@
 #endif
 
 #include "internal.h"
+#include "include/wayland-backend.h"
 
 #define QUEUE 64
 #define CLICK_S 0.4        /* a second press within this is a double click */
@@ -323,8 +325,16 @@ EVENTS static void press(int code, int pressed, int slack)
         click_x = e.x;
         click_y = e.y;
         e.clicks = click_count;
-        /* With several screens: the keyboard comes to the one pressed on. */
-        if (several_screens() && control_fd() >= 0) control_send(control_fd(), "pointer-press", 13, NULL, 0);
+        /* With several screens: the keyboard comes to the one pressed on,
+         * named when this program has several of its own (extended): what
+         * home opens then goes on that one. */
+        if (several_screens() && control_fd() >= 0) {
+            struct screen_output o;
+            const char *const fields[] = { "pointer-press", o.name, NULL };
+            int on = extended_screen() ? screen_output_at(e.x, e.y, NULL, NULL) : -1;
+            if (on >= 0 && screen_output_get(on, &o) == 0) control_send_fields(control_fd(), fields);
+            else control_send(control_fd(), "pointer-press", 13, NULL, 0);
+        }
     }
     push(e);
 }
@@ -548,10 +558,22 @@ static void close_restricted(int fd, void *data)
 
 static const struct libinput_interface interface = { open_restricted, close_restricted };
 
+/* rc.conf's pointer_accel, and touchpad_clicks: unset, tap to click; "press",
+ * presses only; "pointing", neither (settings' libinput quirk takes a
+ * clickpad's press away). */
+struct pointer_settings {
+    double accel;
+    int tap, pointing;
+};
+
 static void on_setting(const char *name, const char *value, void *arg)
 {
+    struct pointer_settings *s = arg;
     if (strcmp(name, "pointer_accel") == 0) {
-        *(double *)arg = strtod(value, NULL);
+        s->accel = strtod(value, NULL);
+    } else if (strcmp(name, "touchpad_clicks") == 0) {
+        s->pointing = strcmp(value, "pointing") == 0;
+        s->tap = !s->pointing && strcmp(value, "press") != 0;
     }
 }
 
@@ -562,16 +584,23 @@ static int is_pointer(struct libinput_device *d)
            libinput_device_has_capability(d, LIBINPUT_DEVICE_CAP_TABLET_TOOL);
 }
 
-/* As labwc sets it up: its defaults, and rc.conf's acceleration. */
+/* As labwc sets it up: its defaults, and rc.conf's acceleration and touchpad
+ * clicks (settings writes the same into labwc's rc.xml): tap to click, and
+ * for "pointing" no soft button areas either, so that all of a clickpad
+ * points (libinput's click method none; its press is a left click still
+ * until the quirk takes it away). */
 static void configure(struct libinput_device *d)
 {
-    double accel = 0;
-    rc_read(on_setting, &accel);
+    struct pointer_settings s = { .accel = 0, .tap = 1, .pointing = 0 };
+    rc_read(on_setting, &s);
     if (libinput_device_config_accel_is_available(d)) {
-        libinput_device_config_accel_set_speed(d, accel < -1 ? -1 : accel > 1 ? 1 : accel);
+        libinput_device_config_accel_set_speed(d, s.accel < -1 ? -1 : s.accel > 1 ? 1 : s.accel);
     }
     if (libinput_device_config_tap_get_finger_count(d) > 0) {
-        libinput_device_config_tap_set_enabled(d, LIBINPUT_CONFIG_TAP_ENABLED);
+        libinput_device_config_tap_set_enabled(d, s.tap ? LIBINPUT_CONFIG_TAP_ENABLED : LIBINPUT_CONFIG_TAP_DISABLED);
+    }
+    if (s.pointing && libinput_device_config_click_get_methods(d) != LIBINPUT_CONFIG_CLICK_METHOD_NONE) {
+        libinput_device_config_click_set_method(d, LIBINPUT_CONFIG_CLICK_METHOD_NONE);
     }
     if (libinput_device_config_scroll_has_natural_scroll(d)) {
         libinput_device_config_scroll_set_natural_scroll_enabled(d, 0);
@@ -907,3 +936,39 @@ int pointer_present(void)
 {
     return npointers > 0;
 }
+
+#ifdef CONFIG_WAYLAND
+/* A window's pointer (wayland-backend.c): the seat's events, already in
+ * pixels of the picture, become this program's as a device's would; the
+ * compositor draws the cursor. */
+void pointer_window_motion(int x, int y)
+{
+    /* The canvas keeps the hidden top bar's rows above the window. A point
+     * above the window (during a held button) stays negative: off the canvas. */
+    if (y >= 0) y += screen_window_top();
+    px = x;
+    py = y;
+    push((struct pointer_event){ .x = x, .y = y });
+}
+
+void pointer_window_button(int code, int pressed)
+{
+    press(code, pressed, 4 * (int)(screen_scale() + 0.5));
+}
+
+void pointer_window_scroll(int source, double v, double h, int axes)
+{
+    static int window_device; /* one scrolling device: the seat's pointer */
+    scroll_input(source, v, h, axes, &window_device);
+}
+
+void pointer_window_present(int on)
+{
+    npointers = on ? 1 : 0;
+}
+
+void pointer_window_leave(void)
+{
+    scroll_finish(SCROLL_CANCEL);
+}
+#endif

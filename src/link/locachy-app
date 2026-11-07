@@ -6,7 +6,7 @@
 #                                            configuration
 #   locachy-app resume|freeze|stop NAME      kill is an alias for stop
 #   locachy-app install NAME PKG...          PKG... added to NAME's extras, then build
-#   locachy-app build NAME                   NAME's upper made anew from its packages
+#   locachy-app build NAME                   build its upper, or install host-access packages
 #                                            (the old one kept as upper.prev)
 #   locachy-app rollback NAME                upper.prev back in its place
 #   locachy-app remove NAME [--data]         its configuration and state gone; its
@@ -43,10 +43,10 @@
 #   directories   more directories of the user's home, separated by colons, at
 #                 the same paths in it (not the home itself, not in Drives,
 #                 not in the shared user directories, which it has already)
-#   host          "1": a host program, no container: the host's own package (the
-#                 manifest), the real root and home; still its own namespaces,
-#                 cgroup, display socket (locachy-0) and bus, so that home starts,
-#                 freezes and stops it like a container
+#   host          "1": real-system access: packages on the host (the manifest),
+#                 the real root and home with the user's permissions; still its
+#                 own namespaces, cgroup, display socket (locachy-0) and bus,
+#                 so home starts, freezes and stops it like every other app
 #   desktop       a host program's .desktop files in /usr/share/applications,
 #                 separated by spaces: its windows, and what it opens
 #   x11           "1": the shared X server too (Xwayland: DISPLAY and its
@@ -62,7 +62,9 @@
 # devices, the GPU render nodes, and with camera="1" the ordinary cameras
 # (nodes of its own /dev, the user's). A
 # container has a session bus of its own, none of the host; locachy-bar is
-# the tray watcher on it.
+# the tray watcher on it. At /run/user/UID/doc it has its own view of the
+# host's document portal (locachy-docs, tools/DOCUMENTS.md): the private
+# files dropped on it, nothing else; a host program (host="1") too.
 set -euo pipefail
 
 die() {
@@ -88,6 +90,12 @@ CLIPBOARD="${LOCACHY_CLIPBOARD_TOOL:-/usr/local/lib/locachy/clipboard}"
 PIPEWIRE_SOCKETS=/run/pipewire/restricted
 PULSE_SOCKETS=/run/pulse/restricted
 FACE_CAMERA=/usr/local/bin/locachy-face-camera
+# The document service (locachy-docs): a container's view of its documents
+# is attached on DOCS_VIEWS/NAME, which the container has at
+# /run/user/UID/doc. DOCS_DIR, the service's, is never in a container.
+DOCS_TOOL=/usr/local/lib/locachy/locachy-docs
+DOCS_DIR=/run/locachy/docs
+DOCS_VIEWS=$DOCS_DIR/views
 
 # These overrides are intentionally a root-only integration-test seam. They
 # cannot be used to redirect a normal unprivileged invocation, and all paths
@@ -110,7 +118,7 @@ export XDG_RUNTIME_DIR="$RUNTIME_DIR"
 umask 077
 
 # The value of KEY in NAME's configuration, "" if it has none.
-is_host() { # NAME: a host program (host="1"), not a container
+is_host() { # NAME: managed real-system access (host="1"), no private filesystem
     [ "$(conf_value "$1" host)" = 1 ]
 }
 
@@ -167,6 +175,9 @@ valid_name() {
 
 check_name() {
     valid_name "$1" || die "invalid app name (use 1-64 letters, digits, dots, underscores or hyphens; start with a letter or digit)"
+    # window-PROGRAM-N: process 1's native windows (root host programs);
+    # labwc and the document service tell them by that name.
+    [[ "$1" != window-* ]] || die "invalid app name: names beginning with window- are the native windows'"
 }
 
 cg_path() {
@@ -372,16 +383,22 @@ do_open_running() { # NAME TARGET COMMAND...
 # Only then does it take the place of the old upper, which is kept as
 # upper.prev (locachy-app rollback). Its home (data) is not touched.
 do_build() {
-    local name="$1" attempt cbase="$CONT_BASE/$name" pkg_cache=/var/cache/locachy-pkgs
+    local name="$1" attempt cbase="$CONT_BASE/$1" pkg_cache=/var/cache/locachy-pkgs
     local packages repo_pkgs=() aur_pkgs=() p missing command
     if is_host "$name"; then
-        # A host program: its package is the host's (locachy-pkg install), so
-        # nothing is built; its command is only looked for.
-        command=$(conf_value "$name" command)
-        [ -x "$command" ] || die "$name: $command is not installed (locachy-pkg install $(conf_value "$name" package))"
+        # The same store build action installs a recipe with real-system
+        # access on the host. The configuration grants that access; packages
+        # must be registered leaves so later reconciliation keeps them.
         mkdir -p "$cbase"
-        printf 'date="%s"\npackages="%s"\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$(conf_value "$name" package)" >"$cbase/built"
-        printf 'locachy-app: %s is a host program: nothing to build\n' "$name"
+        rm -f "$cbase/built" "$cbase/built.new"
+        saved_packages "$name"
+        [ "${#packages[@]}" -gt 0 ] || die "$name has no package (package= in $CONT_CONF/$name.conf)"
+        locachy-pkg install "${packages[@]}" || die "$name: package installation failed; not built"
+        command=$(conf_value "$name" command)
+        [ -n "$command" ] && [ -x "$command" ] || die "$name: $command is not installed after its packages; not built"
+        printf 'date="%s"\npackages="%s"\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${packages[*]}" >"$cbase/built.new"
+        mv -f "$cbase/built.new" "$cbase/built"
+        printf 'locachy-app: %s built: real-system packages installed\n' "$name"
         return 0
     fi
     saved_packages "$name"
@@ -589,6 +606,38 @@ start_screencast() {
     ) </dev/null >>"$APP_RUNTIME/$name.log" 2>&1 &
 }
 
+# The launcher's line "ready" on FD, while PID lives, for at most six seconds.
+# A read that times out keeps what it had of the line (bash saves partial
+# input), so the line is put together across reads. A line written just
+# before the launcher ended is still in the FIFO. ready_why: timeout, ended
+# (PID gone first) or line (something else written).
+wait_ready() { # FD PID
+    local fd=$1 pid=$2 line= part= attempt
+    ready_why=timeout
+    for ((attempt = 0; attempt < 120; ++attempt)); do
+        part=
+        if IFS= read -r -t 0.05 -u "$fd" part; then
+            line+=$part
+            [ "$line" = ready ] && return 0
+            ready_why=line
+            return 1
+        fi
+        line+=$part
+        if ! kill -0 "$pid" 2>/dev/null; then
+            part=
+            if IFS= read -r -t 0.05 -u "$fd" part; then
+                line+=$part
+                [ "$line" = ready ] && return 0
+                ready_why=line
+                return 1
+            fi
+            ready_why=ended
+            return 1
+        fi
+    done
+    return 1
+}
+
 # The cameras a container with camera="1" has: the ordinary capture cameras
 # and their media controller nodes, as locachy-face-camera tells them, never
 # the face unlock camera nor an infrared one; none when it cannot tell. Lines
@@ -640,6 +689,76 @@ do_cameras() {
             done
         ' bash "$uid" "$gid" "${nodes[@]}" || printf 'locachy-app: cameras: %s not updated\n' "$name" >&2
     done
+}
+
+# --- A container's document view (locachy-docs, tools/DOCUMENTS.md) ---
+
+# The views mount (DOCS_VIEWS) is there: locachy-docs --attach made it. The
+# mount table says so; nothing is looked up in it: an attached view is the
+# user's FUSE mount (no allow_other), and root's stat of it fails.
+docs_views_mounted() {
+    awk -v p="$DOCS_VIEWS" '$5 == p { found = 1 } END { exit !found }' /proc/self/mountinfo
+}
+
+# docs_bind NAME RUN UID GID, as root in the container's mount namespace
+# (its mounts slaves of the host's): RUN/doc is the directory DOCS_VIEWS/NAME
+# of the views mount, bound as a slave of it, not the view attached on it
+# now. What the service attaches on that directory later (docs_reattach,
+# its start again) and each detach reach RUN/doc; a copy of the view attached
+# now would stay, dead, once the service started again. The directory is
+# found in a bind of the views mount alone, without the views on it, under
+# the service's lock (no attach in between). Status 1: no view.
+docs_bind() {
+    local bare="$2/.docs-views" lock status=1
+    mkdir -m 0700 "$bare" || return 1
+    exec {lock}>>"$DOCS_DIR/lock" || { rmdir "$bare"; return 1; }
+    flock -x "$lock"
+    if mount --bind "$DOCS_VIEWS" "$bare"; then
+        if [ -d "$bare/$1" ] && [ ! -L "$bare/$1" ] && install -d -o "$3" -g "$4" -m 0700 "$2/doc" &&
+            mount --bind "$bare/$1" "$2/doc"; then
+            if mount --make-slave "$2/doc"; then
+                status=0
+            else
+                umount "$2/doc"
+            fi
+        fi
+        umount "$bare"
+    fi
+    exec {lock}>&-
+    rmdir "$bare"
+    return "$status"
+}
+
+# docs_reattach NAME: NAME's view attached again once its start is over (its
+# control lock is free again): the container bound the bare directory, which
+# only an attach after that fills. In the background, forked before the
+# launcher enters app_NAME: the service answers no container's process.
+docs_reattach() {
+    (
+        [ -z "${APP_LOCK_FD:-}" ] || exec {APP_LOCK_FD}>&-
+        [ -z "${READY_FD:-}" ] || exec {READY_FD}>&-
+        exec {lock}>"$APP_RUNTIME/$1/control.lock"
+        flock -x "$lock"
+        if is_running "$1"; then
+            "$DOCS_TOOL" --attach "$1" || true
+        fi
+    ) </dev/null &
+}
+
+# docs_select NAME: the document view NAME gets when it starts. --attach makes
+# the views mount and NAME's directory on it, and attaches the portal's view
+# for NAME when the service runs. docs_name is NAME when the views mount is
+# there (docs_bind decides what the container gets); the view is attached
+# again once the start is over (docs_reattach). Asked of the mount table, not
+# of the view: root cannot stat an attached view (the user's FUSE mount).
+docs_select() {
+    docs_name=
+    [ -x "$DOCS_TOOL" ] || return 0
+    "$DOCS_TOOL" --attach "$1" || true
+    if docs_views_mounted; then
+        docs_name=$1
+        docs_reattach "$1"
+    fi
 }
 
 operation=start
@@ -767,11 +886,12 @@ cbase="$CONT_BASE/$name"
 cg=$(cg_path "$name")
 host=0
 is_host "$name" && host=1
-if [ "$host" = 1 ]; then
-    mkdir -p "$cg"
-else
-    mkdir -p "$cbase/upper" "$cbase/work" "$cbase/merged" "$cbase/data" "$cg"
-fi
+[ "$host" = 1 ] || mkdir -p "$cbase/upper" "$cbase/work" "$cbase/merged" "$cbase/data"
+# Its cgroup open to read, as process 1 makes the windows' (init/apps.c), not
+# 0700 by this script's umask: the document server, the user's, watches its
+# cgroup.events. Only root writes a cgroup's files.
+mkdir -p "$cg"
+chmod 0755 "$cg"
 [ -w "$cg/cgroup.freeze" ] && [ -w "$cg/cgroup.kill" ] || die 'a writable cgroup v2 freezer and cgroup.kill are required'
 modprobe overlay 2>/dev/null || true
 
@@ -845,19 +965,27 @@ cameras=
 if [ "$host" != 1 ] && [ "$(conf_value "$name" camera)" = 1 ]; then
     cameras=$(camera_nodes)
 fi
+# Its document view: DOCS_VIEWS/NAME on the shared views mount (made by
+# --attach, which attaches the portal's view for it if the document service
+# runs; the service attaches it itself when it starts later). The container
+# binds the directory (docs_bind); its view is attached again after the start
+# (docs_reattach). Asked before this script enters the cgroup: the service
+# answers no container's process. Without it, the container gets no view,
+# and nothing dropped on it is readable.
+docs_select "$name"
 
 # Move the launcher itself before ANY namespace child is forked. From here
 # every helper, unshare parent, PID 1 and descendant inherits app_NAME.
 # An empty cgroup can retain a previous freeze request after forced teardown.
 printf '0\n' >"$cg/cgroup.freeze"
 printf '%s\n' "$$" >"$cg/cgroup.procs"
-# Slave: the one shared mount of the host, ~/Drives (the drives service),
-# passes its USB drives on to the container as they come and go; nothing
-# passes back.
+# Slave: the shared mounts of the host, ~/Drives (the drives service) and
+# the document views (locachy-docs), pass their mounts on to the container
+# as they come and go; nothing passes back.
 "${net_prefix[@]}" unshare --mount --pid --fork --kill-child --propagation slave "${net_args[@]}" bash -euc '
     cbase=$1; want_net=$2; display=$3; init=$4; ready_fd=$5; host_runtime=$6; state_dir=$7
     user=$8; uid=$9; gid=${10}; uhome=${11}; USER_DIRS=${12}; directories=${13}; host=${14}; cameras=${15}; x11_display=${16}
-    pw_sockets=${17}; pulse_sockets=${18}; shift 18
+    pw_sockets=${17}; pulse_sockets=${18}; docs_name=${19}; docs_dir=${20}; docs_bind_fn=${21}; shift 21
     # Record host PID before mounting the namespace-local /proc. This bash
     # becomes the C reaper via exec, so its host PID stays unchanged.
     host_pid=; start_ticks=
@@ -893,6 +1021,19 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
             chown -h "$uid:$gid" "$1/pulse/native"
         fi
     }
+    # Its document view (doc_view RUN, locachy-docs) at RUN/doc: the view
+    # directory of the host bound as a slave (docs_bind), so that the view
+    # attached there after this, and again after the document service started
+    # again, is the one it sees. It shows only the documents dropped on this
+    # container.
+    doc_view() {
+        [ -n "$docs_name" ] || return 0
+        DOCS_DIR=$docs_dir
+        DOCS_VIEWS=$docs_dir/views
+        eval "$docs_bind_fn"
+        docs_bind "$docs_name" "$1" "$uid" "$gid" ||
+            printf "locachy-app: %s: no document view\n" "$docs_name" >&2
+    }
     if [ "$host" = 1 ]; then
         # A host program (host="1"): the real root and home, hidden by nothing
         # but file permissions. Of its own it has /proc (its PID namespace), a
@@ -909,6 +1050,10 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
         # Its sound: the restricted sockets, as a container has them.
         sound "$run"
         [ ! -d "$pulse_sockets" ] || export PULSE_SERVER="unix:$run/pulse/native"
+        # Its document view, as a container has it; the document service
+        # itself out of sight (any peer of its bus may grant any document).
+        doc_view "$run"
+        [ ! -d "$docs_dir" ] || mount -t tmpfs -o mode=0755,size=4k,nosuid,nodev,noexec hidden "$docs_dir"
         bus_dir="$state_dir/bus"
         rm -rf "$bus_dir"
         install -d -o "$uid" -g "$gid" -m 0700 "$bus_dir"
@@ -969,6 +1114,7 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
         chown -R "$uid:$gid" "$run"
         sound "$run"
         [ ! -d "$pulse_sockets" ] || export PULSE_SERVER="unix:/run/user/$uid/pulse/native"
+        doc_view "$run"
         # The session bus of this container: its socket in a directory of the
         # host runtime of the container, where locachy-bar finds it to be the
         # tray watcher. Waited for below only when the bar is there.
@@ -1144,9 +1290,13 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
         export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/locachy-bus/bus"
         # Own org.freedesktop.portal.Documents inside containers so
         # xdg-desktop-portal stays resident instead of crashing on /dev/fuse.
-        if [ "$host" != 1 ] && [ -x /run/locachy-container-documents ]; then
+        # A host program too: a document portal of its own would mount over
+        # its document view.
+        documents=/run/locachy-container-documents
+        [ "$host" != 1 ] || documents=/usr/local/lib/locachy/container-documents
+        if [ -x "$documents" ]; then
             setpriv --reuid="$uid" --regid="$gid" --clear-groups ${nnp:-} -- \
-                /run/locachy-container-documents </dev/null >/dev/null 2>&1 &
+                "$documents" </dev/null >/dev/null 2>&1 &
             for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
                 dbus-send --session --print-reply=literal --dest=org.freedesktop.DBus /org/freedesktop/DBus \
                     org.freedesktop.DBus.NameHasOwner string:org.freedesktop.portal.Documents 2>/dev/null |
@@ -1167,24 +1317,27 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
     exec "$app_init" "$@"
 ' bash "$cbase" "$want_net" "$shared_wayland" "$APP_INIT" "$READY_FD" "$RUNTIME_DIR" "$APP_RUNTIME/$name" \
     "$user" "$uid" "$gid" "$uhome" "$USER_DIRS" "$(conf_value "$name" directories)" "$host" \
-    "$cameras" "$x11_display" "$PIPEWIRE_SOCKETS" "$PULSE_SOCKETS" "$@" {APP_LOCK_FD}>&- &
+    "$cameras" "$x11_display" "$PIPEWIRE_SOCKETS" "$PULSE_SOCKETS" "$docs_name" "$DOCS_DIR" "$(declare -f docs_bind)" \
+    "$@" {APP_LOCK_FD}>&- &
 launcher=$!
 
 # A bounded readiness handshake serializes start against controls. Once ready,
 # the host caller waits for the real application status without holding a lock.
-ready=
-for ((attempt = 0; attempt < 120; ++attempt)); do
-    if IFS= read -r -t 0.05 -u "$READY_FD" ready; then
-        break
-    fi
-    kill -0 "$launcher" 2>/dev/null || break
-done
-exec {READY_FD}>&-
-if [ "$ready" != ready ]; then
-    printf 'locachy-app: %s failed to initialize within six seconds\n' "$name" >&2
+ready_why=
+if ! wait_ready "$READY_FD" "$launcher"; then
+    exec {READY_FD}>&-
+    case $ready_why in
+    ended)
+        status=0
+        wait "$launcher" || status=$?
+        printf 'locachy-app: %s ended before it was ready (status %s)\n' "$name" "$status" >&2 ;;
+    line) printf 'locachy-app: %s wrote a malformed readiness line\n' "$name" >&2 ;;
+    *) printf 'locachy-app: %s failed to initialize within six seconds\n' "$name" >&2 ;;
+    esac
     printf '1\n' >"$cg/cgroup.kill"
     exit 125
 fi
+exec {READY_FD}>&-
 touch "$APP_RUNTIME/$name.ready"
 start_screencast "$name"
 unlock_app

@@ -21,10 +21,12 @@ static inline int input_same(int a, int b)
  * SOCK_SEQPACKET socket, at the fd number in $LOCACHY_CONTROL in the program.
  * A message is fields separated by NUL bytes, the first naming it.
  *   process 1 -> program
- *     take                 with fds: a DRM lease, then keyboards; the
- *                          program owns them until "release"
- *     keys                 with fds: current keyboard leases, including zero;
- *                          keep unchanged queues, no new screen activation
+ *     take [LOCKS]         with fds: a DRM lease, then keyboards; the
+ *                          program owns them until "release"; LOCKS
+ *                          (KEYS_LOCK_* in decimal) the locks it starts with
+ *     keys [LOCKS]         with fds: current keyboard leases, including zero;
+ *                          keep unchanged queues, no new screen activation;
+ *                          LOCKS taken only by a program that held none
  *     pointer-remove PATH  remove a disconnected libinput device
  *     pointer-retry        retry leases not yet tagged by udev
  *     pointer PATH         with an fd: an input device for libinput (a
@@ -37,6 +39,9 @@ static inline int input_same(int a, int b)
  *     tasks LINE...        (home) the answer to "tasks?"
  *   program -> process 1
  *     released             done: the fds are closed
+ *     locks LOCKS          (the shared display, through its seat) the locks
+ *                          as its keyboards have them now: its bar can hold
+ *                          the keyboards (EVIOCGRAB), out of process 1's sight
  *     pointer?             (the program on the screen) its input devices
  *     call ARG...          run ARG... and come back here when it exits
  *     open ARG...          (home) show the task ARG..., starting it if need be
@@ -93,6 +98,8 @@ int screen_lend(uint32_t *lessee);
 int screen_lend_outputs(const char *const *names, int n, uint32_t *lessee);
 int screen_places(struct screen_output *out, int max);
 int screen_drop_master(uint32_t lessee);
+/* -1: lease/master not reclaimed; 0: reclaimed and scanout restored;
+ * 1: master reclaimed but stale scanout needs screen_refresh, not a kill. */
 int screen_take_back(uint32_t lessee);
 /* Rescan only while master and no active lease: 1 usable, 0 no output,
  * -1 error. The logical canvas dimensions remain unchanged. */
@@ -104,6 +111,15 @@ int screen_refresh(void);
  * file). */
 void keys_take(const int *fds, int n);
 void keys_update(const int *fds, int n);
+/* The locks: Caps Lock and Num Lock, one state for every keyboard. Process 1
+ * holds it (keys_leds), toggles it at each lock key it sees, takes the shared
+ * display's ("locks"), and gives it with the keyboards ("take", "keys"); a
+ * program starts from it. keys_set_locks shows it where this process owns
+ * the LEDs and tells the input method of Caps Lock. */
+#define KEYS_LOCK_CAPS 1
+#define KEYS_LOCK_NUM  2
+int keys_locks(void);
+void keys_set_locks(int locks);
 void keys_release(void);
 void keys_refresh(void); /* process 1: rescan, preserving live queues */
 int keys_sync(int *fds, int *n, int max); /* reconcile leases; nonzero if changed */

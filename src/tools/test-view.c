@@ -152,6 +152,12 @@ int files_pick(const char *dir, const char *keep, const char *type, const char *
     return pick_ok;
 }
 
+/* The window's close (K_CLOSE): never read by the stand-in file manager;
+ * how often view stayed open on purpose. */
+static int closes_kept;
+int files_close_asked(void) { return 0; }
+void key_close_kept(void) { closes_kept++; }
+
 /* The script. */
 enum { S_KEY, S_POINTER, S_PAGE_POINTER, S_IDLE, S_CHECK, S_KILL, S_RENDERING, S_TIMED_KEY, S_UNTIL };
 struct step {

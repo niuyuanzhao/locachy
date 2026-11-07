@@ -211,8 +211,10 @@ def _config(name, baseline_dir):
         raise UpstreamError("upstream tracking configuration is unavailable") from e
     overlays = {
         "labwc-locachy": ("labwc", "labwc", ["labwc"],
-                         ["clipboard-guard.patch", "inner-edge-hold.patch", "locachy-clipboard.c", "locachy-clipboard.h"],
-                         "labwc-clipboard-inner-edge-v2"),
+                         ["clipboard-guard.patch", "inner-edge-hold.patch", "corner-edge-hold.patch",
+                          "drop-gate.patch", "keyboard-locks.patch", "locachy-clipboard.c", "locachy-clipboard.h",
+                          "locachy-drop.c", "locachy-drop.h"],
+                         "labwc-clipboard-corner-drop-v4"),
         "libinput": ("libinput", "libinput", ["libinput", "libinput-tools"],
                      ["library.patch", "circular-scroll.patch"], "libinput-circular-scroll-v2"),
         "libinput-tools": ("libinput-tools", "libinput", ["libinput", "libinput-tools"],

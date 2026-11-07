@@ -139,22 +139,40 @@ static void centered(int row, const char *text, uint32_t fg)
     screen_text(col > 0 ? col : 0, row, text, fg, BG);
 }
 
-static void draw(void)
+/* Every output lays out the same authentication state in its own cells. */
+static void draw_output(void)
 {
     char line[512], when[64];
-    int rows = screen_rows(), r = rows / 3;
+    int rows = screen_rows(), width, height, devices = 0;
+    for (int i = 1; i < NWAYS; i++) devices += ways[i].on != 0;
+    /* Keep the password, device messages and error above the footer even on
+     * a short screen at a large text scale. Gaps are decoration, not content. */
+    int spacious = rows >= 18 + devices;
+    int show_user = rows >= 6 + devices;
+    int show_clock = rows >= 7 + devices;
+    int show_date = rows >= 8 + devices;
+    int body = 2 + devices + show_user + show_clock + show_date + (spacious ? 3 : 0);
+    int footer = rows > 1 ? rows - 2 : 0;
+    int r = rows / 3;
+    if (r + body > footer) r = footer - body;
+    if (r < 1) r = 1;
     time_t t = time(NULL);
     struct tm tm;
     localtime_r(&t, &tm);
-    screen_fill(0, 0, screen_cols(), rows, BG);
+    screen_pixels(&width, &height);
+    screen_fill_px(0, 0, width, height, BG);
     screen_bar(_("locked"), NULL);
-    strftime(when, sizeof when, "%H:%M", &tm);
-    centered(r++, when, FG);
-    strftime(when, sizeof when, "%A %Y-%m-%d", &tm);
-    centered(r++, when, FG);
-    r++;
-    centered(r++, user, ACCENT);
-    r++;
+    if (show_clock) {
+        strftime(when, sizeof when, "%H:%M", &tm);
+        centered(r++, when, FG);
+    }
+    if (show_date) {
+        strftime(when, sizeof when, "%A %Y-%m-%d", &tm);
+        centered(r++, when, FG);
+    }
+    if (spacious) r++;
+    if (show_user) centered(r++, user, ACCENT);
+    if (spacious) r++;
     struct auth *p = &ways[0].a;
     const char *ask = p->asking ? p->prompt : setting ? _("New password:") : _("Password:");
     char stars[33];
@@ -173,11 +191,23 @@ static void draw(void)
             centered(r++, line, FG);
         }
     }
-    r++;
-    centered(r, status_line, ERROR);
+    if (spacious) r++;
+    centered(r < footer ? r : footer - 1, status_line, ERROR);
     /* TRANSLATORS: Enter and Esc are key names; keep them. */
-    centered(rows - 2, setting ? _("There is no password yet: type one, then again.   Esc: clear") :
+    centered(footer, setting ? _("There is no password yet: type one, then again.   Esc: clear") :
              _("Enter: unlock   Esc: clear"), FG);
+}
+
+static void draw(void)
+{
+    int extended = screen_is_extended && screen_is_extended() && screen_output_count && screen_output_select;
+    int count = extended ? screen_output_count() : 1;
+    int previous = extended && screen_output_current ? screen_output_current() : 0;
+    for (int i = 0; i < count; i++) {
+        if (extended && screen_output_select(i) < 0) continue;
+        draw_output();
+    }
+    if (extended && previous >= 0 && previous < count) screen_output_select(previous);
     screen_flush();
 }
 
@@ -247,6 +277,7 @@ int main(void)
     if (!screen_open(BASE_FONT)) {
         return 1;
     }
+    if (screen_extended) screen_extended(1); /* a failure keeps the safe mirrored canvas */
     keys_open();
     if (!user[0]) {
         snprintf(status_line, sizeof status_line, "%s", _("There is no user (uid 1000) to unlock for."));

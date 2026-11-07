@@ -105,16 +105,21 @@ int control_service(char *other, size_t size, int *len)
     if (got <= 0) {
         return 0;
     }
+    /* "take" and "keys" may carry the locks, process 1's, as a second field. */
+    int locks = got > 5 && (strcmp(msg, "take") == 0 || strcmp(msg, "keys") == 0) ? atoi(msg + 5) : -1;
     if (strcmp(msg, "take") == 0 && n >= 1) {
         screen_take(fds[0]);
         keys_reload(); /* rc.conf's keys and the key table, as settings may have left them */
         keys_take(fds + 1, n - 1);
+        if (locks >= 0) keys_set_locks(locks);
         pointer_resume();
         shown = 1;
         return 1;
     }
     if (strcmp(msg, "keys") == 0) {
+        int held[CONTROL_MAX_FDS], had = keys_fds(held, CONTROL_MAX_FDS);
         keys_update(fds, n);
+        if (locks >= 0 && had == 0 && n > 0) keys_set_locks(locks); /* a program's own presses stand */
         return 1;
     }
     if (strcmp(msg, "pointer-retry") == 0 && n == 0) {

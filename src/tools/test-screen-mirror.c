@@ -39,6 +39,7 @@ static int buffers, frames, mappings, closes, sets, dirties, lease_calls, reject
 static uint32_t lease_counts[2];
 static struct drm_clip_rect clips[2];
 static int single_output, external_only, disconnected, master_busy;
+static int bandwidth_limit, mode_attempts, attempted_refresh[16], request_refresh, lower_resolution, active_refresh;
 static int cursor_calls, no_cursor_plane, cursor_last_x, cursor_last_y;
 /* A real 2x2 PSF2 file stands in for Terminus; Terminus itself is "missing". */
 static char test_font[] = "/tmp/test-screen-font-XXXXXX";
@@ -71,6 +72,7 @@ static void write_test_font(void)
     snprintf(font_fallback, sizeof font_fallback, "%s", test_font);
 }
 static const char *named_internal; /* rc.conf's internal_screen */
+int monitor_profiles_select_sysfs(void) { return 0; }
 int monitor_internal(const char *name)
 {
     return named_internal ? strcmp(name, named_internal) == 0 : strncmp(name, "eDP", 3) == 0;
@@ -87,6 +89,10 @@ int monitor_conf(const char *name, struct monitor_conf *out)
             out->x = internal ? -8 : 3;
             out->y = internal ? 0 : 2;
         }
+        return 1;
+    }
+    if (request_refresh && strcmp(name, "eDP-1") == 0) {
+        out->width = 8; out->height = 6; out->refresh_mhz = request_refresh;
         return 1;
     }
     out->scale = scale_lines && strcmp(name, "eDP-1") == 0 ? 1.5 : 0;
@@ -154,10 +160,13 @@ static int mock_ioctl(int fd, unsigned long request, ...)
         c->encoder_id = id + 200;
         if (c->count_modes >= 2) {
             struct drm_mode_modeinfo modes[] = {
-                { .hdisplay = 10, .vdisplay = 8 },
+                { .hdisplay = id == 102 ? 8 : 12, .vdisplay = id == 102 ? 6 : 10, .vrefresh = 30 },
                 { .hdisplay = id == 102 ? 8 : 12, .vdisplay = id == 102 ? 6 : 10,
-                  .type = DRM_MODE_TYPE_PREFERRED }
+                  .vrefresh = 60, .type = DRM_MODE_TYPE_PREFERRED }
             };
+            if (lower_resolution) {
+                modes[0].hdisplay = 4; modes[0].vdisplay = 3;
+            }
             memcpy((void *)(uintptr_t)c->modes_ptr, modes, sizeof modes);
         }
         if (c->count_encoders >= 2) {
@@ -172,7 +181,12 @@ static int mock_ioctl(int fd, unsigned long request, ...)
                             e->encoder_id == 401 ? 2 : 0;
         if (single_output && e->encoder_id != 302) e->possible_crtcs = 0;
         if (external_only && e->encoder_id == 302) e->possible_crtcs = 0;
-        e->crtc_id = e->encoder_id == 301 ? 201 : 0;
+        e->crtc_id = e->encoder_id == 301 || (active_refresh && e->encoder_id == 302) ? 201 : 0;
+    } else if (request == DRM_IOCTL_MODE_GETCRTC) {
+        struct drm_mode_crtc *c = arg;
+        c->mode_valid = active_refresh != 0;
+        if (active_refresh) c->mode = (struct drm_mode_modeinfo){ .hdisplay = 8, .vdisplay = 6,
+                                                                 .vrefresh = (uint32_t)(active_refresh / 1000) };
     } else if (request == DRM_IOCTL_MODE_CREATE_DUMB) {
         struct drm_mode_create_dumb *d = arg;
         d->pitch = d->width == 64 ? 256 : d->width * 4 + 8; /* a cursor buffer: no padding */
@@ -193,6 +207,10 @@ static int mock_ioctl(int fd, unsigned long request, ...)
     } else if (request == DRM_IOCTL_MODE_SETCRTC) {
         struct drm_mode_crtc *s = arg;
         assert(s->count_connectors == 1 && s->mode_valid && s->fb_id);
+        if (bandwidth_limit) {
+            if (mode_attempts < 16) attempted_refresh[mode_attempts++] = monitor_mode_millihz(&s->mode);
+            if (monitor_mode_millihz(&s->mode) > bandwidth_limit) { errno = EINVAL; return -1; }
+        }
         sets++;
     } else if (request == DRM_IOCTL_MODE_DIRTYFB) {
         struct drm_mode_fb_dirty_cmd *d = arg;
@@ -407,7 +425,8 @@ static void test_lifecycle(void)
         for (int nth = 1; nth <= 2; nth++) {
             fail_request = requests[i]; fail_at = nth; request_calls = 0;
             assert(screen_take(8));
-            assert(noutputs == 1 && buffers == 1 && frames == 1 && mappings == 1);
+            int expected = requests[i] == DRM_IOCTL_MODE_SETCRTC ? 2 : 1;
+            assert(noutputs == (uint32_t)expected && buffers == expected && frames == expected && mappings == expected);
             assert(shadow == saved && shadow[0] == 0x123456);
             screen_release();
             assert(!outputs && !noutputs && card == -1 && !buffers && !frames && !mappings);
@@ -645,6 +664,59 @@ int main(void)
     test_copy();
     test_matching();
     test_lifecycle();
+    /* A reduced-bandwidth link refuses 60 Hz but advertised 30 Hz works. */
+    snprintf(test_font, sizeof test_font, "%s", "/tmp/test-screen-font-XXXXXX");
+    write_test_font();
+    single_output = 1; request_refresh = 60000; bandwidth_limit = 30000;
+    mode_attempts = 0;
+    assert(screen_take(8) && noutputs == 1);
+    assert(mode_attempts == 2 && attempted_refresh[0] == 60000 && attempted_refresh[1] == 30000);
+    assert(monitor_mode_millihz(&outputs[0].mode) == 30000 && request_refresh == 60000);
+    assert(outputs[0].mode.hdisplay == 8 && outputs[0].mode.vdisplay == 6);
+    screen_release();
+    bandwidth_limit = 0; mode_attempts = 0;
+    assert(screen_take(8) && monitor_mode_millihz(&outputs[0].mode) == 60000);
+    screen_release();
+    active_refresh = 30000; bandwidth_limit = 30000; mode_attempts = 0;
+    assert(screen_take(8) && noutputs == 1 && mode_attempts == 2);
+    assert(attempted_refresh[0] == 60000 && attempted_refresh[1] == 30000);
+    assert(monitor_mode_millihz(&outputs[0].mode) == 30000);
+    screen_release(); active_refresh = 0;
+    puts("PASS a refused requested mode restores the previously active advertised timing first");
+    bandwidth_limit = 1; mode_attempts = 0;
+    assert(!screen_take(8) && !outputs && !noutputs && !buffers && !frames && !mappings);
+    assert(mode_attempts == 2);
+    puts("PASS all advertised modes refused: bounded attempts and no leaked framebuffer or stale output");
+    bandwidth_limit = 30000; lower_resolution = 1;
+    assert(screen_take(8) && width == 4 && height == 3 && noutputs == 1);
+    assert(outputs[0].mode.hdisplay == 4 && outputs[0].mode.vdisplay == 3);
+    screen_release();
+    puts("PASS lower-resolution fallback resizes the direct canvas and preserves output usability");
+    assert(screen_extended(1) && screen_take(8));
+    assert(screen_output_count() == 1 && outputs[0].surface->width == 4 && outputs[0].surface->height == 3);
+    assert(screen_output_select(0) >= 0 && width == 4 && height == 3);
+    screen_fill_px(0, 0, 4, 3, 0); screen_flush();
+    screen_release();
+    assert(screen_extended(0));
+    while (surfaces) {
+        struct output_surface *next = surfaces->next;
+        free(surfaces->pixels); free(surfaces->font); free(surfaces); surfaces = next;
+    }
+    puts("PASS extended fallback rebuilds the native per-output canvas before scanout");
+    request_refresh = single_output = bandwidth_limit = lower_resolution = 0;
+    unlink(test_font);
+    free(shadow); shadow = NULL;
+    puts("PASS refused 60 Hz falls back to advertised 30 Hz; desired 60 Hz stays and a later take retries it");
+    snprintf(test_font, sizeof test_font, "%s", "/tmp/test-screen-font-XXXXXX");
+    write_test_font();
+    assert(screen_take(8));
+    fail_request = DRM_IOCTL_MODE_SETCRTC; fail_at = 1; request_calls = 0;
+    assert(screen_take_back(0) == 1 && !active_lessee && !lent);
+    fail_request = 0;
+    assert(screen_refresh() == 1);
+    screen_release();
+    unlink(test_font); free(shadow); shadow = NULL;
+    puts("PASS master reclaimed with stale scanout returns rescan, distinct from master acquisition failure");
     puts("screen mirror: copy/fit, maximum CRTC matching, lease fallback and cleanup passed");
     return 0;
 }

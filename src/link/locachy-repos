@@ -33,12 +33,19 @@ are to be dealt with first.
       the CachyOS mirror lists the stack uses: v3, v4
   locachy-repos alhp-mirrors                       (for make-root.sh)
       ALHP's known mirrors as a list, before any ranking
+  locachy-repos fix-modes                          (for make.sh)
+      its files (pacman.conf, the mirror lists, rc.conf) 0644 again where an
+      earlier version left them root's alone; apply, rank and status do it too
+
+What it writes is 0644 whatever its caller's umask: pacman as the build user
+(makepkg) reads pacman.conf and the mirror lists it includes.
 """
 import argparse
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -95,9 +102,52 @@ def conf_set(path, name, value):
         pass
     if value is not None and not done:
         lines.append(f'{name}="{value}"\n')
-    with open(path + ".tmp", "w", encoding="utf-8") as f:
-        f.writelines(lines)
-    os.replace(path + ".tmp", path)
+    write_public(path, "".join(lines))
+
+
+def write_public(path, text):
+    """text replaces path whole, 0644 whatever the umask: pacman.conf, the
+    mirror lists and rc.conf are read by others (makepkg's pacman as the
+    build user, the programs)."""
+    tmp = path + ".locachy-new"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        os.fchmod(f.fileno(), 0o644)
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def keep_old(path):
+    """path's copy as PATH.locachy-old, 0644 as path is."""
+    shutil.copyfile(path, path + ".locachy-old")
+    os.chmod(path + ".locachy-old", 0o644)
+
+
+def owned_files(mirrors="/etc/pacman.d"):
+    """The files this program writes, each one's copy, and rc.conf."""
+    lists = ["mirrorlist", "cachyos-mirrorlist", "cachyos-v3-mirrorlist", "cachyos-v4-mirrorlist",
+             "alhp-mirrorlist"]
+    files = [PACMAN_CONF] + [os.path.join(mirrors, name) for name in lists]
+    return files + [f + ".locachy-old" for f in files] + [os.path.join(mirrors, ".locachy-ranked"), RC_CONF]
+
+
+def fix_modes(mirrors="/etc/pacman.d"):
+    """Those of its files that are not 0644 made so: written by an earlier
+    version with a private umask, they were root's alone, and every AUR build
+    failed reading them. Regular files of its own user (root) only; the
+    number fixed."""
+    fixed = 0
+    for path in owned_files(mirrors):
+        try:
+            st = os.lstat(path)
+        except OSError:
+            continue
+        mode = stat.S_IMODE(st.st_mode)
+        if stat.S_ISREG(st.st_mode) and st.st_uid == os.geteuid() and mode != 0o644:
+            os.chmod(path, 0o644)
+            print(f"locachy-repos: {path} was {mode:04o}, now 0644", file=sys.stderr)
+            fixed += 1
+    return fixed
 
 
 def sections(rc):
@@ -244,10 +294,8 @@ def cmd_apply(args):
     if args.check_only:
         print("locachy-repos: the change keeps every declared package")
         return 0
-    shutil.copyfile(PACMAN_CONF, PACMAN_CONF + ".locachy-old")
-    with open(PACMAN_CONF + ".locachy-new", "w", encoding="utf-8") as f:
-        f.write(new)
-    os.replace(PACMAN_CONF + ".locachy-new", PACMAN_CONF)
+    keep_old(PACMAN_CONF)
+    write_public(PACMAN_CONF, new)
     for name, value in changes.items():
         conf_set(RC_CONF, name, value)
     print(f"locachy-repos: {PACMAN_CONF} written; the next update moves the packages")
@@ -291,10 +339,8 @@ def install_list(path, text, what):
         print(f"locachy-repos: {what}: no mirror ranked; {path} left as it is", file=sys.stderr)
         return False
     if os.path.exists(path):
-        shutil.copyfile(path, path + ".locachy-old")
-    with open(path + ".locachy-new", "w", encoding="utf-8") as f:
-        f.write(f"# {what}, ranked by locachy-repos {time.strftime('%Y-%m-%d %H:%M')}\n" + text)
-    os.replace(path + ".locachy-new", path)
+        keep_old(path)
+    write_public(path, f"# {what}, ranked by locachy-repos {time.strftime('%Y-%m-%d %H:%M')}\n" + text)
     print(f"locachy-repos: {what}: {len(servers(text))} mirrors in {path}")
     return True
 
@@ -375,10 +421,9 @@ def cmd_rank(args):
     if args.cachyos_levels is None:
         levels = [lv for lv in ("v3", "v4") if os.path.exists(os.path.join(args.dir, f"cachyos-{lv}-mirrorlist"))]
     done = [rank_arch(args.dir, country), rank_cachyos(args.dir, country, levels), rank_alhp(args.dir, country)]
-    with open(os.path.join(args.dir, ".locachy-ranked"), "w", encoding="utf-8") as f:
-        json.dump({"at": time.strftime("%Y-%m-%d %H:%M"), "country": country,
-                   "arch": done[0], "cachyos": done[1], "alhp": done[2]}, f)
-        f.write("\n")
+    write_public(os.path.join(args.dir, ".locachy-ranked"),
+                 json.dumps({"at": time.strftime("%Y-%m-%d %H:%M"), "country": country,
+                             "arch": done[0], "cachyos": done[1], "alhp": done[2]}) + "\n")
     return 0 if all(done) else 1
 
 
@@ -420,8 +465,13 @@ def main():
     cl.add_argument("--level", required=True)
     cl.add_argument("--cpu", required=True)
     sub.add_parser("alhp-mirrors")
+    sub.add_parser("fix-modes")
     args = parser.parse_args()
     try:
+        if args.command in ("apply", "rank", "status", "fix-modes"):
+            fix_modes(getattr(args, "dir", "/etc/pacman.d"))
+        if args.command == "fix-modes":
+            return 0
         if args.command == "config":
             level = args.level or recorded("level")
             sys.stdout.write(config(level, args.cpu or recorded("cpu", level) or level, args.mirrors, read_conf(args.rc)))

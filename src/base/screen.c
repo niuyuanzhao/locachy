@@ -37,8 +37,12 @@
 #include FT_FREETYPE_H
 #endif
 
+#include "fontmatch.h"
 #include "internal.h"
 #include "monitor-layout.h"
+#include "include/monitor-mode.h"
+#include "include/monitor-profile.h"
+#include "include/wayland-backend.h"
 
 #define PSF1_MAGIC 0x0436u     /* bytes 36 04 */
 #define PSF2_MAGIC 0x864AB572u /* bytes 72 b5 4a 86 */
@@ -57,6 +61,9 @@ struct output {
     int x, y, logical_width, logical_height;
     struct output_surface *surface;
     struct drm_mode_modeinfo mode;
+    struct drm_mode_modeinfo current_mode; /* advertised active timing before this take */
+    struct drm_mode_modeinfo *modes;
+    uint32_t nmodes;
     uint8_t *map;
     uint64_t map_size;
     uint32_t pitch, fb_id, handle;
@@ -120,22 +127,16 @@ static void cursor_drop(int fd);
 static void soft_cursor_flush(struct output *o, int draw);
 
 #ifdef CONFIG_FREETYPE
+/* What Terminus lacks (box drawing, symbols, CJK): fontconfig's monospace
+ * and its fallbacks (fontmatch.c), as fontconfig's configuration has them. */
 static FT_Library ft_lib;
-static FT_Face ft_face, ft_cjk; /* symbols (DejaVu Sans Mono), and CJK (Noto Sans CJK SC) */
+static struct font_set *ft_fonts;
 static int ft_ready;
+static int ft_px; /* their size: the text's height, less a pixel above and below */
 
 static void ft_size(void)
 {
-    FT_UInt px = glyph_h > 2 ? glyph_h - 2 : glyph_h;
-    if (px == 0) {
-        return;
-    }
-    if (ft_face) {
-        FT_Set_Pixel_Sizes(ft_face, 0, px);
-    }
-    if (ft_cjk) {
-        FT_Set_Pixel_Sizes(ft_cjk, 0, px);
-    }
+    ft_px = glyph_h > 2 ? (int)glyph_h - 2 : (int)glyph_h;
 }
 
 static void ft_init(void)
@@ -143,28 +144,8 @@ static void ft_init(void)
     if (ft_ready || FT_Init_FreeType(&ft_lib) != 0) {
         return;
     }
-    if (FT_New_Face(ft_lib, "/usr/share/fonts/TTF/DejaVuSansMono.ttf", 0, &ft_face) != 0) {
-        ft_face = NULL;
-    }
-    /* The collection's simplified Chinese face; its first face is Japanese. */
-    const char *cjk = "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc";
-    FT_Face f;
-    if (FT_New_Face(ft_lib, cjk, 0, &f) == 0) {
-        FT_Long n = f->num_faces;
-        ft_cjk = f;
-        for (FT_Long i = 1; i < n; i++) {
-            if (FT_New_Face(ft_lib, cjk, i, &f) != 0) {
-                continue;
-            }
-            if (f->family_name && strstr(f->family_name, " SC")) {
-                FT_Done_Face(ft_cjk);
-                ft_cjk = f;
-                break;
-            }
-            FT_Done_Face(f);
-        }
-    }
-    ft_ready = ft_face != NULL || ft_cjk != NULL;
+    ft_fonts = font_set_new(ft_lib, "monospace", 0, 0);
+    ft_ready = ft_fonts != NULL;
     ft_size();
 }
 
@@ -183,10 +164,10 @@ static int is_wide_cjk(uint32_t cp)
 
 static void draw_ft_glyph(int col, int row, uint32_t cp, int wide, uint32_t fg, uint32_t bg)
 {
-    FT_Face f = !ft_ready ? NULL : ft_face && FT_Get_Char_Index(ft_face, cp) ? ft_face :
-                ft_cjk && FT_Get_Char_Index(ft_cjk, cp) ? ft_cjk : NULL;
+    FT_UInt index = 0;
+    FT_Face f = ft_ready && ft_px > 0 ? font_set_face(ft_fonts, cp, ft_px, &index) : NULL;
     screen_fill(col, row, wide ? 2 : 1, 1, bg);
-    if (f == NULL || FT_Load_Char(f, cp, FT_LOAD_RENDER) != 0) {
+    if (f == NULL || FT_Load_Glyph(f, index, FT_LOAD_RENDER) != 0) {
         return;
     }
     FT_Bitmap *bm = &f->glyph->bitmap;
@@ -372,9 +353,15 @@ static double output_scale(void)
     return noutputs > 0 && monitor_conf(outputs[0].name, &c) && c.scale > 0 ? c.scale : 1.0;
 }
 
+/* The top bar: one and a half text rows of the current font. */
+static uint32_t bar_height(void)
+{
+    return glyph_h * 3 / 2;
+}
+
 static void layout(void)
 {
-    bar_h = glyph_h * 3 / 2;
+    bar_h = bar_height();
     top = bar_h > glyph_h ? bar_h - glyph_h : 0;
     cols = (int)(width / glyph_w);
     rows = height > top ? (int)((height - top) / glyph_h) : 0;
@@ -573,6 +560,7 @@ static void clear_outputs(int fd)
     cursor_drop(fd);
     for (uint32_t i = 0; i < noutputs; i++) {
         destroy_output(fd, &outputs[i]);
+        free(outputs[i].modes);
     }
     free(outputs);
     outputs = NULL;
@@ -659,25 +647,6 @@ static int read_output(int fd, uint32_t id, struct output *o)
         o->internal = monitor_internal(o->name);
         struct monitor_conf conf;
         int configured = monitor_conf(o->name, &conf);
-        for (uint32_t m = 0; m < c.count_modes; m++) {
-            if (modes[m].hdisplay == 0 || modes[m].vdisplay == 0) {
-                continue;
-            }
-            if (o->mode.hdisplay == 0 || (modes[m].type & DRM_MODE_TYPE_PREFERRED)) {
-                o->mode = modes[m];
-                if (modes[m].type & DRM_MODE_TYPE_PREFERRED) {
-                    break;
-                }
-            }
-        }
-        if (configured && conf.width > 0 && conf.height > 0) {
-            for (uint32_t m = 0; m < c.count_modes; m++) {
-                if (modes[m].hdisplay == conf.width && modes[m].vdisplay == conf.height) {
-                    o->mode = modes[m];
-                    break;
-                }
-            }
-        }
         /* Consider every encoder, not just the currently attached one. */
         for (uint32_t e = 0; e <= c.count_encoders; e++) {
             uint32_t eid = e == c.count_encoders ? c.encoder_id : encs[e];
@@ -689,12 +658,30 @@ static int read_output(int fd, uint32_t id, struct output *o)
                 o->possible_crtcs |= enc.possible_crtcs;
                 if (eid == c.encoder_id) {
                     o->preferred_crtc = enc.crtc_id;
+                    struct drm_mode_crtc current = { .crtc_id = enc.crtc_id };
+                    if (enc.crtc_id && ioctl(fd, DRM_IOCTL_MODE_GETCRTC, &current) == 0 && current.mode_valid) {
+                        o->current_mode = current.mode;
+                    }
                 }
             }
         }
-        free(modes);
+        int chosen = monitor_mode_choose(modes, c.count_modes, &o->current_mode,
+                                         configured ? conf.width : 0, configured ? conf.height : 0,
+                                         configured ? conf.refresh_mhz : 0);
+        if (chosen < 0) {
+            if (configured) say("screen: %s: saved mode %dx%d@%d mHz is not advertised; keeping an available mode",
+                                o->name, conf.width, conf.height, conf.refresh_mhz);
+            chosen = monitor_mode_choose(modes, c.count_modes, &o->current_mode, 0, 0, 0);
+        }
+        if (chosen >= 0) o->mode = modes[chosen];
         free(encs);
-        return o->mode.hdisplay != 0 && o->possible_crtcs != 0;
+        if (!o->mode.hdisplay || !o->possible_crtcs) {
+            free(modes);
+            return 0;
+        }
+        o->modes = modes;
+        o->nmodes = c.count_modes;
+        return 1;
     }
     return 0;
 }
@@ -769,6 +756,8 @@ static const char *find_outputs(int fd)
             list[used++] = list[i];
         } else {
             say("screen: connector %u has no available CRTC", list[i].conn_id);
+            free(list[i].modes);
+            list[i].modes = NULL;
         }
     }
     if (used == 0) {
@@ -790,6 +779,9 @@ static const char *find_outputs(int fd)
     list = NULL;
 
 done:
+    if (list) {
+        for (uint32_t i = 0; i < count; i++) free(list[i].modes);
+    }
     free(list);
     free(connectors);
     free(crtcs);
@@ -936,31 +928,92 @@ static const char *create_output(int fd, struct output *o)
     return NULL;
 }
 
+/* Retry only advertised timings: first the previous active mode, then modes
+ * with strictly lower pixel-clock demand. Desired configuration stays saved. */
+static uint64_t mode_cost(const struct drm_mode_modeinfo *m)
+{
+    if (m->clock) return (uint64_t)m->clock * 1000000;
+    return (uint64_t)m->hdisplay * m->vdisplay * (unsigned)monitor_mode_millihz(m);
+}
+
+static int fallback_mode(const struct output *o, const struct drm_mode_modeinfo *failed,
+                         uint64_t below, int active)
+{
+    if (active && o->current_mode.hdisplay && !monitor_mode_same(&o->current_mode, failed)) {
+        int current = monitor_mode_choose(o->modes, o->nmodes, NULL, o->current_mode.hdisplay,
+                                          o->current_mode.vdisplay, monitor_mode_millihz(&o->current_mode));
+        if (current >= 0) return current;
+    }
+    int best = -1;
+    uint64_t cost = 0;
+    for (uint32_t i = 0; i < o->nmodes; i++) {
+        const struct drm_mode_modeinfo *m = &o->modes[i];
+        uint64_t demand = mode_cost(m);
+        if (!m->hdisplay || !m->vdisplay || monitor_mode_same(m, failed) || demand >= below) continue;
+        if (best < 0 || demand > cost) { best = (int)i; cost = demand; }
+    }
+    return best;
+}
+
+static const char *enable_output(int fd, struct output *o)
+{
+    struct drm_mode_modeinfo requested = o->mode;
+    uint64_t below = mode_cost(&requested);
+    const char *error = NULL;
+    int active = 1;
+    for (uint32_t attempt = 0; attempt <= o->nmodes + 1; attempt++) {
+        error = extended ? surface_for_output(o) : NULL;
+        if (!error) error = create_output(fd, o);
+        if (error) { destroy_output(fd, o); return error; }
+        if (!error) {
+            /* Never enable an unpopulated framebuffer, including fallback. */
+            struct output_surface *s = extended ? o->surface : NULL;
+            struct drm_clip_rect clip = s ? (struct drm_clip_rect){ 0, 0,
+                (unsigned short)s->width, (unsigned short)s->height } :
+                (struct drm_clip_rect){ 0, 0, (unsigned short)width, (unsigned short)height };
+            copy_picture(o->map, o->pitch, o->mode.hdisplay, o->mode.vdisplay,
+                         s ? s->pixels : shadow, s ? s->width : width, s ? s->height : height, clip);
+            if (set_crtc(fd, o) == 0) {
+                if (!monitor_mode_same(&o->mode, &requested)) {
+                    say("screen: %s: requested %ux%u@%d mHz unavailable; using %ux%u@%d mHz (saved setting kept)",
+                        o->name, requested.hdisplay, requested.vdisplay, monitor_mode_millihz(&requested),
+                        o->mode.hdisplay, o->mode.vdisplay, monitor_mode_millihz(&o->mode));
+                }
+                return NULL;
+            }
+            error = "DRM_IOCTL_MODE_SETCRTC failed";
+        }
+        destroy_output(fd, o);
+        int next = fallback_mode(o, &o->mode, below, active);
+        active = 0;
+        if (next < 0) break;
+        o->mode = o->modes[next];
+        uint64_t demand = mode_cost(&o->mode);
+        if (demand < below) below = demand;
+    }
+    return error;
+}
+
 /* Show the current picture on the outputs of this fd (native per-output
  * canvases in extended mode, one fitted canvas otherwise). */
 static const char *show(int fd)
 {
     const char *why = "no usable output buffers";
     uint32_t used = 0;
-    struct drm_clip_rect full = { 0, 0, (unsigned short)width, (unsigned short)height };
+    int resized_fallback = 0;
     for (uint32_t i = 0; i < noutputs; i++) {
         struct output *o = &outputs[i];
-        const char *error = create_output(fd, o);
-        if (error == NULL) {
-            /* Populate scanout and black borders before enabling its CRTC. */
-            struct output_surface *s = extended ? o->surface : NULL;
-            struct drm_clip_rect clip = s ? (struct drm_clip_rect){ 0, 0,
-                (unsigned short)s->width, (unsigned short)s->height } : full;
-            copy_picture(o->map, o->pitch, o->mode.hdisplay, o->mode.vdisplay,
-                         s ? s->pixels : shadow, s ? s->width : width, s ? s->height : height, clip);
-            if (set_crtc(fd, o) < 0) error = "DRM_IOCTL_MODE_SETCRTC failed";
-        }
+        int old_w = o->mode.hdisplay, old_h = o->mode.vdisplay;
+        const char *error = enable_output(fd, o);
         if (error != NULL) {
             why = error;
             say("screen: connector %u unavailable: %s", o->conn_id, error);
             destroy_output(fd, o);
+            free(o->modes);
+            o->modes = NULL;
             continue;
         }
+        if (used == 0 && (old_w != o->mode.hdisplay || old_h != o->mode.vdisplay)) resized_fallback = 1;
         outputs[used++] = *o;
     }
     noutputs = used;
@@ -971,7 +1024,25 @@ static const char *show(int fd)
     }
     card = fd;
     lent = 0;
-    if (extended) select_available_surface();
+    if (!extended && resized_fallback && (width != outputs[0].mode.hdisplay || height != outputs[0].mode.vdisplay)) {
+        uint32_t w = outputs[0].mode.hdisplay, h = outputs[0].mode.vdisplay;
+        uint32_t *picture = (uint64_t)w * h > SIZE_MAX / sizeof *picture ? NULL :
+                            calloc((size_t)w * h, sizeof *picture);
+        if (picture) {
+            copy_picture((uint8_t *)picture, w * 4u, w, h, shadow, width, height,
+                         (struct drm_clip_rect){ 0, 0, (unsigned short)width, (unsigned short)height });
+            free(shadow);
+            shadow = picture; width = w; height = h;
+            layout();
+        } else {
+            say("screen: fallback canvas allocation failed; fitting the previous canvas");
+        }
+    }
+    if (extended) {
+        const char *layout_error = extended_layout();
+        if (layout_error) say("screen: fallback layout: %s", layout_error);
+        select_available_surface();
+    }
     mark_all();
     screen_flush();
     cursor_put(fd);
@@ -982,6 +1053,7 @@ static const char *show(int fd)
  * A take is followed by K_SHOWN, so programs lay out and draw it again. */
 static const char *prepare(int fd)
 {
+    monitor_profiles_select_sysfs();
     const char *why = find_outputs(fd);
     if (why != NULL) {
         return why;
@@ -996,6 +1068,8 @@ static const char *prepare(int fd)
             if (error != NULL) {
                 why = error;
                 say("screen: %s unavailable: %s", outputs[i].name, error);
+                free(outputs[i].modes);
+                outputs[i].modes = NULL;
                 continue;
             }
             outputs[used++] = outputs[i];
@@ -1036,6 +1110,62 @@ static double screen_time(void)
     return (double)t.tv_sec + (double)t.tv_nsec / 1e9;
 }
 
+/* A window on the shared display (LOCACHY_BACKEND=wayland, wayland-backend.c)
+ * instead of screens: one canvas, the window's size in pixels at its scale.
+ * No DRM, lease or process-1 control is used; a new size is K_SHOWN. The
+ * desktop has its own bar, so a window has none: the canvas keeps the top
+ * bar's rows above the window (programs lay out as on a screen, their first
+ * row of content at the window's top), screen_bar draws nothing, and those
+ * rows are never shown. */
+static int window_mode;
+#ifdef CONFIG_WAYLAND
+static uint32_t window_hidden; /* the top bar's pixel rows, above the window */
+static int window_new_size;
+
+static int window_resize(int w, int h, double s)
+{
+    if (w < 1 || h < 1 || w > 16384 || h > 16384) return -1;
+    if (s < 0.5 || s > 8) s = 1.0;
+    /* The text at this scale first: the hidden bar's height follows it. */
+    if ((font == NULL || s < scale - 0.001 || s > scale + 0.001) && scaled_font(s) != NULL && font == NULL) {
+        return -1; /* no font at all; one that cannot be scaled stays */
+    }
+    uint32_t hidden = bar_height();
+    uint32_t *picture = calloc((size_t)w * ((size_t)h + hidden), sizeof *picture);
+    if (picture == NULL) {
+        layout(); /* the old canvas, with the text as it is now */
+        return -1;
+    }
+    free(shadow);
+    shadow = picture;
+    width = (uint32_t)w;
+    height = (uint32_t)h + hidden;
+    window_hidden = hidden;
+    scale = s;
+    layout();
+    mark_all();
+    window_new_size = 1;
+    return 0;
+}
+
+int screen_window_top(void)
+{
+    return window_mode ? (int)window_hidden : 0;
+}
+
+static void window_frame(void)
+{
+    screen_flush();
+}
+
+int screen_window_shown(void)
+{
+    int shown = window_new_size;
+    window_new_size = 0;
+    return shown;
+}
+#endif
+
 int screen_open(const char *font_path)
 {
     const char *why = NULL;
@@ -1044,13 +1174,35 @@ int screen_open(const char *font_path)
     ft_init();
 #endif
 
+    /* An explicit window request is met or ends the program: it never falls
+     * back to opening DRM or the input devices itself. */
+    int backend = wl_backend_requested();
+    if (backend != 0) {
+#ifdef CONFIG_WAYLAND
+        if (backend > 0) {
+            if (wl_backend_open(window_resize, window_frame) == 0) {
+                window_mode = 1;
+                say("screen: a window of %ux%u pixels, scale %.2f, font %ux%u, %dx%d cells", width, height,
+                    scale, glyph_w, glyph_h, cols, rows);
+                return 1;
+            }
+            say("screen: LOCACHY_BACKEND=wayland, but no window from the compositor (WAYLAND_DISPLAY=%s)",
+                getenv("WAYLAND_DISPLAY") ? getenv("WAYLAND_DISPLAY") : "unset");
+            exit(WL_EXIT_UNAVAILABLE);
+        }
+#endif
+        if (backend > 0) say("screen: LOCACHY_BACKEND=wayland, but this program is built without the window backend");
+        else say("screen: LOCACHY_BACKEND=%s is not a backend (direct or wayland)", getenv("LOCACHY_BACKEND"));
+        exit(WL_EXIT_CONFIG);
+    }
+
     if (why == NULL && control_fd() >= 0) {
         control_wait_take(); /* screen_take does the rest */
         return shadow != NULL;
     }
     for (int attempt = 0; why == NULL && attempt <= 50; attempt++) {
         for (int n = 0; why == NULL && n < 8; n++) {
-            char path[24];
+            char path[32];
             snprintf(path, sizeof path, "/dev/dri/card%d", n);
             double opened_at = screen_time();
             int fd = open(path, O_RDWR | O_CLOEXEC);
@@ -1295,8 +1447,8 @@ int screen_take_back(uint32_t lessee)
     for (uint32_t i = 0; i < noutputs; i++) {
         if (i < 32 && !back[i]) continue; /* still lent to another program */
         if (set_crtc(card, &outputs[i]) < 0) {
-            say("screen: cannot restore connector %u: %m", outputs[i].conn_id);
-            result = -1;
+            say("screen: master restored; connector %u needs rescan: %m", outputs[i].conn_id);
+            result = 1;
         }
     }
     if (!lent) {
@@ -1318,7 +1470,7 @@ int screen_refresh(void)
         /* Booting without a connected monitor is recoverable: no earlier
          * scanout fd exists, so probe cards again on the hotplug event. */
         for (int n = 0; n < 8; n++) {
-            char path[24];
+            char path[32];
             snprintf(path, sizeof path, "/dev/dri/card%d", n);
             int fd = open(path, O_RDWR | O_CLOEXEC);
             if (fd < 0) continue;
@@ -1359,6 +1511,7 @@ int screen_refresh(void)
 int screen_extended(int on)
 {
     on = !!on;
+    if (window_mode) return on ? -1 : 0; /* a window is one canvas */
     if (on == extended) return 0;
     for (uint32_t i = 0; i < noutputs; i++) soft_cursor_flush(&outputs[i], 0);
     if (on) {
@@ -1389,17 +1542,29 @@ int screen_is_extended(void)
 
 int screen_output_current(void)
 {
+    if (window_mode) return 0;
     return noutputs ? extended ? selected_output : 0 : -1;
 }
 
 int screen_output_count(void)
 {
+    if (window_mode) return 1;
     return extended ? (int)noutputs : noutputs ? 1 : 0;
 }
 
 int screen_output_get(int index, struct screen_output *out)
 {
     if (!out || index < 0 || index >= screen_output_count()) return -1;
+    if (window_mode) {
+        memset(out, 0, sizeof *out);
+        snprintf(out->name, sizeof out->name, "window");
+        out->width = out->pixel_width = (int)width;
+        out->height = out->pixel_height = (int)height;
+        out->scale = scale;
+        out->cols = cols;
+        out->rows = rows;
+        return 0;
+    }
     const struct output *o = &outputs[index];
     const struct output_surface *s = extended ? o->surface : NULL;
     memset(out, 0, sizeof *out);
@@ -1433,7 +1598,7 @@ int screen_output_at(int x, int y, int *local_x, int *local_y)
         if (x < 0 || y < 0 || x >= (int)width || y >= (int)height) return -1;
         if (local_x) *local_x = x;
         if (local_y) *local_y = y;
-        return noutputs ? 0 : -1;
+        return noutputs || window_mode ? 0 : -1;
     }
     for (uint32_t i = 0; i < noutputs; i++) {
         struct output *o = &outputs[i];
@@ -1533,6 +1698,21 @@ static void touch(uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1)
  * scanout drivers ignore DIRTYFB. Keep logical damage while lent/released. */
 void screen_flush(void)
 {
+#ifdef CONFIG_WAYLAND
+    if (window_mode) {
+        /* Held back while the compositor shows the last one: drawn again
+         * from the canvas when it is done (window_frame), changes kept.
+         * The window shows the canvas below the hidden bar's rows. */
+        if (shadow == NULL || dirty.x1 == dirty.x2 || height <= window_hidden) return;
+        int y0 = dirty.y1 > window_hidden ? (int)(dirty.y1 - window_hidden) : 0;
+        int y1 = dirty.y2 > window_hidden ? (int)(dirty.y2 - window_hidden) : 0;
+        if (y1 <= y0 || wl_backend_flush(shadow + (size_t)window_hidden * width, (int)width,
+                                         (int)(height - window_hidden), dirty.x1, y0, dirty.x2, y1) == 0) {
+            dirty.x2 = dirty.x1; /* shown, or only the hidden rows changed */
+        }
+        return;
+    }
+#endif
     if (extended) {
         save_drawing_surface();
         if (card < 0 || !noutputs || lent) return;
@@ -1870,8 +2050,8 @@ void screen_bar(const char *title, const char *ime)
     unsigned long long ram;
     char sub[32] = "";
     int x0, x1;
-    if (shadow == NULL || height < bar_h) {
-        return;
+    if (shadow == NULL || height < bar_h || window_mode) {
+        return; /* a window: the desktop's bar shows all this */
     }
     int frozen = panel_containers(NULL, &ram);
     if (frozen) {
@@ -2190,5 +2370,8 @@ void screen_cursor(int shape)
 {
     if (shape == cursor_shape) return;
     cursor_shape = shape;
+#ifdef CONFIG_WAYLAND
+    if (window_mode) wl_backend_cursor(shape); /* the compositor draws a window's cursor */
+#endif
     cursor_put(card);
 }

@@ -188,7 +188,7 @@ class StableUpstream(unittest.TestCase):
     def promote(self, lock):
         artifact = "b" * 64
         return u.promote_candidate(lock, "labwc-locachy", self.baseline, self.state,
-            artifact_sha256=artifact, gate={"id": "labwc-clipboard-inner-edge-v2", "passed": True,
+            artifact_sha256=artifact, gate={"id": "labwc-clipboard-corner-drop-v4", "passed": True,
                                            "artifact_sha256": artifact, "test_hash": "c" * 64})
 
     def test_promotion_requires_passed_matching_artifact_gate(self):
@@ -228,7 +228,9 @@ package() { printf 'package:%s\\n' \"$pkgname\" >>\"$TEST_LOG\"; }
         recipe = lock.parent / "recipe"
         (recipe / "src/labwc/src").mkdir(parents=True)
         (recipe / "src/labwc/include").mkdir()
-        for name in ("clipboard-guard.patch", "inner-edge-hold.patch", "locachy-clipboard.c", "locachy-clipboard.h"):
+        for name in ("clipboard-guard.patch", "inner-edge-hold.patch", "corner-edge-hold.patch",
+                     "drop-gate.patch", "keyboard-locks.patch", "locachy-clipboard.c", "locachy-clipboard.h",
+                     "locachy-drop.c", "locachy-drop.h"):
             shutil.copyfile(recipe / name, recipe / "src" / name)
         binary = self.root / "bin"
         binary.mkdir()
@@ -241,7 +243,7 @@ srcdir=$PWD/src
 source ./PKGBUILD
 [[ $pkgname == labwc-locachy && $epoch == 1 && $pkgver == 0.21.0 && $pkgrel == 2 ]]
 [[ ${depends[*]} == 'new-wlroots cairo' && ${options[*]} == '!lto debug' ]]
-[[ ${#source[@]} == 5 && ${#sha256sums[@]} == 5 && ${sha256sums[0]} == upstream-sum ]]
+[[ ${#source[@]} == 10 && ${#sha256sums[@]} == 10 && ${sha256sums[0]} == upstream-sum ]]
 prepare
 build
 check
@@ -259,9 +261,16 @@ package
         self.assertIn("package:labwc", lines)
         self.assertIn("--batch --forward --fuzz=0", lines)
         self.assertIn("inner-edge-hold.patch", lines)
-        self.assertEqual(sum(line.startswith("patch:") for line in lines.splitlines()), 2)
+        self.assertIn("corner-edge-hold.patch", lines)
+        self.assertIn("drop-gate.patch", lines)
+        self.assertIn("keyboard-locks.patch", lines)
+        self.assertEqual(sum(line.startswith("patch:") for line in lines.splitlines()), 5)
         self.assertEqual((recipe / "src/labwc/src/locachy-clipboard.c").read_bytes(),
                          (self.baseline / "locachy-clipboard.c").read_bytes())
+        self.assertEqual((recipe / "src/labwc/src/locachy-drop.c").read_bytes(),
+                         (self.baseline / "locachy-drop.c").read_bytes())
+        self.assertEqual((recipe / "src/labwc/include/locachy-drop.h").read_bytes(),
+                         (self.baseline / "locachy-drop.h").read_bytes())
 
 
 class BuildFingerprint(unittest.TestCase):

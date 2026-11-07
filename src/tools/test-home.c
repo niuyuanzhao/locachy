@@ -1,23 +1,42 @@
 /* Drive the actual home handlers with host-control and screen test doubles,
  * and the pointer with synthetic events.
- * Build with base/ui.c (the click places and the menu). */
+ * Build with base/ui.c and base/textsel.c. */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+static char fixture_dir[256] = "/tmp";
+#define HOME_APP_RUN fixture_dir
 #define main home_program_main
 #include "../progs/home.c"
 #include "i18n-stub.h"
+#include "clipboard.h"
 #undef main
 #include <assert.h>
 #include <stdarg.h>
+#include <sys/stat.h>
 
 static int start_calls, freeze_calls, stop_calls, show_calls, opens, reboots, poweroffs, files_views;
-static int running;
+static int running, beta_failed;
+static char copied[2][4096];
+static const char *klog_fixture = "";
+
+int clipboard_set(int primary, const void *text, size_t size)
+{
+    snprintf(copied[primary ? 1 : 0], sizeof copied[0], "%.*s", (int)size, (const char *)text);
+    return CLIPBOARD_OK;
+}
+const char *clipboard_error(int status) { return status == CLIPBOARD_OK ? "ok" : "failed"; }
+
+int home_klog_read(char *buf, int size)
+{
+    return snprintf(buf, (size_t)size, "%s", klog_fixture);
+}
 
 void base_apps(char *out, size_t size)
 {
-    snprintf(out, size, "alpha\t%s\t1048576\t0\t\nbeta\tfrozen\t0\t1048576\t\n",
-             running ? "running" : "closed");
+    snprintf(out, size, "alpha\t%s\t1048576\t0\t\nbeta\t%s\t0\t1048576\t%s\n",
+             running ? "running" : "closed", beta_failed ? "failed" : "frozen",
+             beta_failed ? "application exited with status 1; inspect /run/locachy/apps/beta.log" : "");
 }
 
 int base_app_action(const char *action, const char *name, char *why, size_t size)
@@ -51,6 +70,50 @@ void base_open_on(const char *output, char *const argv[], char *out, size_t size
 }
 void base_kill(char *const argv[]) { (void)argv; }
 void base_reboot(void) { reboots++; }
+
+/* The system jobs' queue (jobs.h) as a double: the rows it lists, what was
+ * asked to be cancelled; queue_started: a queued job starts before Y. */
+static struct jobs_row queue_rows[4];
+static int queue_n, cancels, cancel_id, cancel_confirmed, queue_started;
+int jobs_list(struct jobs_row *rows, int max, char *why, size_t size)
+{
+    (void)why; (void)size;
+    int n = queue_n < max ? queue_n : max;
+    memcpy(rows, queue_rows, (size_t)n * sizeof *rows);
+    return n;
+}
+int jobs_log(int id, char *buf, size_t size)
+{
+    snprintf(buf, size, "line one of %d\nlast line of %d\n", id, id);
+    return 0;
+}
+int jobs_ended(const struct jobs_row *row)
+{
+    return strcmp(row->state, "running") != 0 && strcmp(row->state, "queued") != 0;
+}
+int jobs_cancel(int id, int confirm, char *why, size_t size)
+{
+    cancels++;
+    cancel_id = id;
+    cancel_confirmed = confirm;
+    if (!confirm && queue_started) {
+        snprintf(why, size, "job %d runs: stopping it can leave the system half-changed", id);
+        return 1;
+    }
+    snprintf(why, size, "%s", confirm ? "stopping" : "removed");
+    return 0;
+}
+int jobs_pending(struct jobs_row *running)
+{
+    int n = 0;
+    for (int i = queue_n - 1; i >= 0; i--) {
+        if (jobs_ended(&queue_rows[i])) continue;
+        n++;
+        *running = queue_rows[i];
+    }
+    return n;
+}
+const char *jobs_state_label(const char *state) { return state; }
 void base_poweroff(void) { poweroffs++; }
 void files_view(void) { files_views++; }
 int files_request(void) { return 0; }
@@ -113,6 +176,15 @@ int key_poll_timeout(int fd, int timeout)
 double uptime(void) { return 1.0; }
 void say(const char *format, ...) { (void)format; }
 
+/* Some row of the screen shows text. */
+static int canvas_has(const char *text)
+{
+    for (int r = 0; r < test_rows; r++) {
+        if (strstr(canvas[r], text)) return 1;
+    }
+    return 0;
+}
+
 /* The first cell of what was registered as id when last drawn. */
 static void hit_cell(int id, int *col, int *row)
 {
@@ -132,8 +204,12 @@ static int press(int id, int button, int clicks, int offset)
     return pointer_key();
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    if (argc > 1) {
+        snprintf(fixture_dir, sizeof fixture_dir, "%s", argv[1]);
+        mkdir(fixture_dir, 0700);
+    }
     load();
     refresh();
     assert(napps == 2 && nentries == 3 && entries[0].builtin && strcmp(entries[0].name, "files") == 0);
@@ -330,6 +406,112 @@ int main(void)
     }
     screen_extended(0);
     puts("PASS three-output home: every screen offers every program; double click, redraw and Open keep its connector");
+
+    /* The system jobs: J lists them with their state and the selected one's
+     * output; reboot and power off are refused while one runs or waits; K
+     * asks first: Y stops a running one (confirmed to the queue), removes a
+     * queued one; N leaves it; one that has ended is not asked about. */
+    queue_rows[0] = (struct jobs_row){ .id = 4, .kind = "pkg-install", .state = "running", .status = -1,
+                                       .from = "settings", .args = "tailscale" };
+    queue_rows[1] = (struct jobs_row){ .id = 5, .kind = "repos-rank", .state = "queued", .status = -1,
+                                       .position = 1, .from = "settings" };
+    queue_rows[2] = (struct jobs_row){ .id = 3, .kind = "boot", .state = "failed", .status = 1, .position = -1,
+                                       .from = "settings" };
+    queue_n = 3;
+    refresh();
+    selected = 0;
+    confirming = CONF_NONE;
+    draw(0);
+    assert(canvas_has("system jobs: 1 running, 1 waiting (J)"));
+    int reboots_before = reboots, poweroffs_before = poweroffs;
+    confirming = CONF_REBOOT;
+    confirm_key('y');
+    assert(reboots == reboots_before && strstr(last, "Reboot refused: 2 system jobs run or wait (job 4, pkg-install)"));
+    confirming = CONF_POWEROFF;
+    confirm_key('y');
+    assert(poweroffs == poweroffs_before && strstr(last, "Power off refused"));
+    jobs_shown = 1;
+    job_selected = 0;
+    draw(0);
+    assert(canvas_has("pkg-install") && canvas_has("tailscale  [settings]") && canvas_has("(1 before it)") &&
+           canvas_has("(status 1)") && canvas_has("Output of job 4") && canvas_has("last line of 4"));
+    confirm_job();
+    assert(confirming == CONF_JOB && job_asked == 4 && job_asked_running);
+    draw(0);
+    assert(canvas_has("Y/N: Stop system job 4 while it runs?") && canvas_has("half-changed"));
+    confirm_key('n');
+    assert(confirming == CONF_NONE && cancels == 0 && strstr(last, "left as it is"));
+    confirm_job();
+    confirm_key('y');
+    assert(cancels == 1 && cancel_id == 4 && cancel_confirmed == 1 && strstr(last, "System job 4: stopping."));
+    job_selected = 1;
+    confirm_job();
+    assert(confirming == CONF_JOB && job_asked == 5 && !job_asked_running);
+    confirm_key('y');
+    assert(cancels == 2 && cancel_id == 5 && !cancel_confirmed && strstr(last, "removed from the queue"));
+    queue_started = 1;
+    confirm_job();
+    confirm_key('y');
+    assert(cancels == 3 && !cancel_confirmed && strstr(last, "started meanwhile: K again to stop it"));
+    job_selected = 2;
+    confirm_job();
+    assert(confirming == CONF_NONE && cancels == 3 && strstr(last, "has ended"));
+    draw(0);
+    assert(press(HIT_JOB + 0, BTN_LEFT, 1, 2) == -1 && job_selected == 0);
+    queue_n = 0;
+    refresh();
+    jobs_shown = 0;
+    confirming = CONF_REBOOT;
+    confirm_key('y');
+    assert(reboots == reboots_before + 1);
+    puts("PASS system jobs: listed with state and output; reboot and power off refused while one runs or waits; "
+         "stopped or removed only after Y");
+
+    /* Logs (L): on a host row with a failed container, L opens that failed
+     * container's log; Tab toggles the filtered LOCachy system log; wheel/keys
+     * scroll; Y copies the whole log and y on the grid copies the failure. */
+    test_cols = 140; test_rows = 25;
+    beta_failed = 1;
+    refresh();
+    selected = napps; /* host row ("files"), while beta has failed */
+    char beta_log[320];
+    snprintf(beta_log, sizeof beta_log, "%s/beta.log", fixture_dir);
+    FILE *lf = fopen(beta_log, "we");
+    assert(lf);
+    for (int i = 1; i <= 25; i++) fprintf(lf, "beta log line %02d: Wayland display disconnected\n", i);
+    fclose(lf);
+    klog_fixture = "<6>[   12.340000] usb 1-1: noise from kernel driver\n"
+                   "<6>[   45.100000] seat: released in 52 ms (gestures 50 ms)\n"
+                   "<6>[   45.110000] init: ending locachy-seat to take the screens back\n";
+    draw(0);
+    assert(canvas_has("inspect /run/locachy/apps/beta.log") && canvas_has("L: logs"));
+    copied[0][0] = '\0';
+    copy_log(0);
+    assert(strstr(copied[0], "inspect /run/locachy/apps/beta.log"));
+    open_logs();
+    assert(log_shown && !log_system && strcmp(log_name, "beta") == 0);
+    draw(0);
+    assert(canvas_has("beta.log") && canvas_has("beta log line 25") && !canvas_has("beta log line 01"));
+    assert(canvas_has("Tab: system log") && canvas_has("Esc: back"));
+    mouse = (struct pointer_event){ .wheel = 2 };
+    assert(pointer_key() == -1 && log_from == 6);
+    draw(0);
+    assert(canvas_has("beta log line 19") && !canvas_has("beta log line 25"));
+    copied[0][0] = '\0';
+    copy_log(1);
+    assert(strstr(copied[0], "beta log line 01") && strstr(copied[0], "beta log line 25"));
+    /* Tab switches to the system log (LOCachy lines kept, unrelated driver noise skipped). */
+    log_system = 1; log_from = 0;
+    draw(0);
+    assert(canvas_has("Log: system log") && canvas_has("Tab: container log") &&
+           canvas_has("init: ending locachy-seat") && !canvas_has("usb 1-1: noise"));
+    copied[0][0] = '\0';
+    copy_log(1);
+    assert(strstr(copied[0], "seat: released in 52 ms") && !strstr(copied[0], "usb 1-1: noise"));
+    open_logs();
+    assert(!log_shown);
+    unlink(beta_log);
+    puts("PASS home logs (L): failed container log and filtered system log, scroll and copy");
     free(apps);
     free(app_data);
     return 0;

@@ -34,7 +34,9 @@
 
 #include "base.h"
 
-#define CONTAINERS "/var/lib/locachy/containers"
+#ifndef OPEN_CONTAINERS
+#define OPEN_CONTAINERS "/var/lib/locachy/containers" /* their state: locachy-app's CONT_BASE */
+#endif
 
 static int valid_name(const char *name)
 {
@@ -313,7 +315,7 @@ static int desktop_files(const char *name, char paths[][512], int max)
         return n;
     }
     char dir_path[256];
-    snprintf(dir_path, sizeof dir_path, CONTAINERS "/%s/upper/usr/share/applications", name);
+    snprintf(dir_path, sizeof dir_path, OPEN_CONTAINERS "/%s/upper/usr/share/applications", name);
     DIR *dir = opendir(dir_path);
     struct dirent *e;
     while (dir && (e = readdir(dir)) != NULL && n < max) {

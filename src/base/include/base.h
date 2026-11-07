@@ -82,18 +82,26 @@ void base_language_reload(void);
 
 /* The screens' settings: CONNECTOR=PLACE,MODE,SCALE[,X,Y], signed logical
  * coordinates when present; PLACE origin/right/left/above/below for legacy
- * placement, MODE WIDTHxHEIGHT or preferred, SCALE fractional.
+ * placement, MODE WIDTHxHEIGHT[@MILLIHZ] or preferred, SCALE fractional.
  * The same scale applies to the shared display and to the
  * framebuffer programs. monitor_conf: 1 and *out if connector name has a line;
  * otherwise 0 and the defaults (right, preferred, scale 0: not set). */
 #define MONITORS_CONF "/etc/locachy/monitors.conf"
 struct monitor_conf {
     char place[16];
-    int width, height; /* 0: preferred */
+    int width, height; /* 0: active advertised mode, else preferred */
+    int refresh_mhz;    /* 0: current/preferred; otherwise exact millihertz */
     double scale;      /* 0: not set */
     int has_position, x, y; /* signed logical coordinates when set */
 };
 int monitor_conf(const char *name, struct monitor_conf *out);
+/* Advertised DRM modes, one per resolution and exact millihertz value.
+ * current/preferred are flags; -1 if the connector could not be queried.
+ * It never changes a mode or opens DRM master. */
+struct monitor_mode {
+    int width, height, refresh_mhz, current, preferred;
+};
+int monitor_modes(const char *connector, struct monitor_mode *out, int max);
 /* Whether connector name is the computer's own screen: an eDP, LVDS or DSI
  * one, or, when rc.conf says internal_screen="NAME", that one only (a panel
  * on another kind of connector, as the X230's on DP-3). */
@@ -199,8 +207,24 @@ void panel_text_fit(char *out, size_t size, const char *s, int width, const stru
 /* The bytes of the longest start of s that fits in width pixels. */
 size_t panel_text_cut(const char *s, int width, const struct panel_font *f);
 void panel_fill(uint32_t *px, int w, int h, int stride, int x, int y, int bw, int bh, uint32_t argb);
+/* Wide characters' fonts again when fontconfig's configuration or fonts have
+ * changed since they were read (fonts installed): locachy-bar on SIGHUP. 1
+ * when they were read again. */
+int panel_fonts_reload(void);
 /* How many containers are frozen; *ram: the memory of container name. */
 int panel_containers(const char *name, unsigned long long *ram);
+/* The status blocks the last panel_draw showed, pixels [x0, x1) of its px,
+ * for a caller that opens their settings on a click. The input method's
+ * own block is not one of them. */
+enum panel_block {
+    PANEL_BLOCK_NONE, PANEL_BLOCK_MEMORY, PANEL_BLOCK_CPU, PANEL_BLOCK_VOLUME,
+    PANEL_BLOCK_BLUETOOTH, PANEL_BLOCK_NETWORK, PANEL_BLOCK_BATTERY, PANEL_BLOCK_TIME,
+};
+struct panel_hit {
+    int x0, x1;
+    enum panel_block id;
+};
+int panel_hits(struct panel_hit *out, int max);
 
 /* The keyboard (keys.c): every evdev device with letter keys, typing as the
  * layout's key table has it (keytable, from rc.conf's keymap; US without
@@ -232,6 +256,14 @@ int panel_containers(const char *name, unsigned long long *ram);
 #define K_TEXT       0x1FA /* a key typed text that is not one ASCII character (ä, €, a dead key's é): keys_text */
 #define K_ACT_LOCK   0x1FB /* key_lock: process 1 locks the screen */
 #define K_ACT_HOME   0x1FE
+/* Not a key: closing the window was asked for (its close button, or the
+ * compositor's close binding). Only a window (LOCACHY_BACKEND=wayland) gets
+ * it, and nothing else ends the program: leave as the program's own quit
+ * does. A program that stays open on purpose (work in progress, unsaved
+ * changes) calls key_close_kept() after reading it; otherwise another close
+ * within 3 s of reading K_CLOSE ends the program at once (a program that
+ * does not know K_CLOSE can still be closed). */
+#define K_CLOSE      0x1FC
 /* Not a key: the screen and the keyboard have just been given to this
  * program (first, and again each time process 1 gives them back after a
  * switch). The picture is shown again as it was; check what needs it. */
@@ -240,6 +272,7 @@ int keys_open(void);    /* the number of keyboards found */
 int key_get(void);      /* wait for the next key */
 int key_poll(int fd);   /* like key_get, or 0 when fd is ready to read */
 int key_poll_timeout(int fd, int timeout_ms); /* with millisecond timeout */
+void key_close_kept(void); /* after K_CLOSE: the program stays open on purpose */
 int keys_match_action(int ev_code, int ctrl, int alt, int shift, int meta);
 /* The action a key that types nothing (ThinkVantage, VolumeUp) is bound to
  * alone, which it gives whatever modifiers are held; 0 for none. */
@@ -283,12 +316,14 @@ void keys_name_any(int on);
 #define KEYS_CAPS  32
 int keys_modifiers(void);
 /* Caps Lock and Num Lock on the keyboards' LEDs, written as libinput writes
- * them, by a process whose own keyboards they are: process 1 (the programs
- * it lends keyboards to cannot write; they take the locks as the LEDs show
- * them at each take) and the installer, both with the console's keyboard
- * off. From the first call its keyboards are opened for writing. On: the
- * locks as the LEDs show them now (another owner's), then shown at each
- * change and on each keyboard found; off: another owner shows its own. */
+ * them, by a process whose own keyboards they are: process 1, which holds
+ * the one lock state for every program (the programs it lends keyboards to
+ * cannot write; they take the locks with their keyboards, keys_set_locks)
+ * and the installer, both with the console's keyboard off. From the first
+ * call its keyboards are opened for writing. On: its locks (all off at the
+ * start) shown on every keyboard at each change and on each keyboard found.
+ * The LEDs are output only, never read back for the locks: an embedded
+ * controller may drive a keyboard's LED itself and not report writes. */
 void keys_leds(int on);
 /* The selected layout's modifier role for an evdev key, not its US position. */
 int keys_modifier(int code);
@@ -388,11 +423,13 @@ int base_audio_key(int action_key, char *toast, size_t size);
  */
 int base_call(char *const argv[]);
 
-/* For home: show the task argv (start it if it is not running) and wait
- * until home has the screen again; why says what happened: "back NAME"
- * (Ctrl+Alt+Esc) or "ended NAME STATUS" (its last program exited). With
- * several screens, base_open_on shows it on the screen named (a connector)
- * and, home keeping the others, returns at once: "shown NAME". */
+/* For home: show the task argv (start it if it is not running) on one
+ * screen and wait until home has the screen again; why says what happened:
+ * "back NAME" (Ctrl+Alt+Esc) or "ended NAME STATUS" (its last program
+ * exited). base_open's screen is the one the request came from (the one
+ * home was last pressed on, or the program that asked home was on);
+ * base_open_on's, the screen named (a connector). With several screens,
+ * home keeping the others, both return at once: "shown NAME". */
 void base_open(char *const argv[], char *why, size_t size);
 void base_open_on(const char *screen, char *const argv[], char *why, size_t size);
 

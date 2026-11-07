@@ -41,6 +41,7 @@ int monitor_conf(const char *name, struct monitor_conf *out)
     return 0; /* no MONITORS_CONF in the VM: scale 1, the runner's /font.psf */
 }
 int monitor_internal(const char *name) { (void)name; return 0; }
+int monitor_profiles_select_sysfs(void) { return 0; }
 int control_fd(void) { return -1; }
 void control_wait_take(void) { abort(); }
 

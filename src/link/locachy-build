@@ -68,6 +68,30 @@ die() {
     exit 1
 }
 
+as_builder() {
+    setpriv --reuid="$user" --regid="$user" --init-groups --reset-env "$@"
+}
+
+# The build user's keyring, opened by every run that reads or changes it
+# (under bdir/lock: no other program uses it then) and closed before the run
+# ends. GnuPG's keyboxd holds a lock on its database while it runs
+# (public-keys.d/pubring.db.lock), named by host name and process ID. One
+# killed with a build root's PID namespace leaves that lock; under another
+# host name (the installed system's, after the installer's build roots)
+# GnuPG cannot tell it is stale, no key can be read and every key looks
+# untrusted. gpgconf --unlock refuses a lock of another host, so
+# keyring_open ends the build user's daemons and removes the locks they left
+# (each a link to a "PID\nHOST\n" file of GnuPG's dotlock); keyring_close
+# ends them, so that no lock is left.
+keyring_open() {
+    as_builder install -d -m 0700 "$home/.gnupg"
+    as_builder gpgconf --kill all >/dev/null 2>&1 || true
+    find "$home/.gnupg" -maxdepth 2 -type f \( -name '*.lock' -o -name '.#lk*' \) -delete
+}
+keyring_close() {
+    as_builder gpgconf --kill all >/dev/null 2>&1 || true
+}
+
 if [ "${LOCACHY_BUILD_STAGE:-}" = chroot ]; then
     if [ "${1:-}" = --run ]; then
         shift
@@ -76,14 +100,12 @@ if [ "${LOCACHY_BUILD_STAGE:-}" = chroot ]; then
     fi
     uid=$(id -u "$user")
     gid=$(id -g "$user")
-    as_builder() {
-        setpriv --reuid="$user" --regid="$user" --init-groups --reset-env "$@"
-    }
     tool=$(command -v pikaur || command -v pikaur-static || true)
     # One keyring checks every source signature: the build user's, which
     # --trust-key keeps. pikaur run as root would take pacman's
     # (/etc/pacman.d/gnupg, the packages' signers) unless told this one.
-    as_builder install -d -m 0700 "$home/.gnupg"
+    keyring_open
+    trap keyring_close EXIT
     keyring=(--build-gpgdir "$home/.gnupg")
     # "NAME FINGERPRINT" lines: the keys not in the build user's keyring are
     # written down for the caller; keys_stop ends the run if there was one.
@@ -604,14 +626,19 @@ if [ "${1:-}" = --trust-key ]; then
         [[ "$key" =~ ^[[:xdigit:]]{40}$ || "$key" =~ ^[[:xdigit:]]{64}$ ]] || die "not a full fingerprint: $key"
     done
     as_user() {
-        setpriv --reuid="$user" --regid="$user" --init-groups --reset-env "$@"
+        as_builder "$@"
     }
     net=()
     [ ! -e /run/netns/locachy-net ] || net=(ip netns exec locachy-net)
+    # The build user's keyring is this run's alone, as a build's.
+    exec {lock}>"$bdir/lock"
+    flock -n "$lock" || { echo "locachy-build: waiting for the build that runs now"; flock -x "$lock"; }
+    keyring_open
     keyring=$(mktemp -d -t locachy-trust-key.XXXXXX)
     # No daemon of either keyring outlives this (keyboxd, dirmngr): one would
-    # hold the mounts of the root it runs in (arch-chroot's, at installation).
-    trap 'gpgconf --homedir "$keyring" --kill all 2>/dev/null || true; as_user gpgconf --kill all 2>/dev/null || true
+    # hold the mounts of the root it runs in (arch-chroot's, at installation),
+    # and the build user's lock of its keyring.
+    trap 'gpgconf --homedir "$keyring" --kill all 2>/dev/null || true; keyring_close
           rm -rf "$keyring"' EXIT
     status=0
     for key in "$@"; do

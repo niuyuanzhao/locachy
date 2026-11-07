@@ -471,8 +471,26 @@ int main(void)
     button(BTN_LEFT, 0); next();
     pointer_went();
     assert(away && hovered == -1 && cursor_shown == 0);
-    desk_fixture = 0;
     puts("PASS several screens: presses are told, leaving onto another's screen stops here, enter resumes");
+
+    /* Extended, with several screens of its own (home): a press names the
+     * one it is on, where what home opens then goes. */
+    extended_fixture = 1;
+    snprintf(outs[0].name, sizeof outs[0].name, "eDP-1");
+    snprintf(outs[1].name, sizeof outs[1].name, "HDMI-A-1");
+    usleep(450000); /* no double click with the presses above */
+    px = 1200; py = 100;
+    button(BTN_LEFT, 1);
+    assert(nsent == 5 && !strcmp(sent[4], "pointer-press HDMI-A-1"));
+    button(BTN_LEFT, 0);
+    px = 300;
+    button(BTN_LEFT, 1);
+    assert(nsent == 6 && !strcmp(sent[5], "pointer-press eDP-1"));
+    button(BTN_LEFT, 0);
+    while (pointer_next()) {
+    }
+    extended_fixture = selected_fixture = desk_fixture = 0;
+    puts("PASS extended presses name the screen pressed on");
 
     assert(pointer_scroll_events(1) == 0);
     away = 0;

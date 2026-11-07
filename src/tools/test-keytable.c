@@ -179,11 +179,21 @@ int main(int argc, char **argv)
     assert(key(KEY_LEFTSHIFT, 0) == 0);
     assert(tap(KEY_LEFTBRACE) == '@' && tap(KEY_APOSTROPHE) == ':' && tap(KEY_EQUAL) == '^' &&
            tap(KEY_YEN) == '\\' && tap(KEY_RO) == '\\' && tap(KEY_A) == 'a');
-    /* Its Caps Lock: Shift and the Eisu key, which alone types nothing. */
-    assert(tap(KEY_CAPSLOCK) == 0 && tap(KEY_A) == 'a');
+    /* Its Caps Lock key is Caps Lock alone (caps:capslock, not jp's Eisu), and
+     * with Shift as jp has it. */
+    const char *jp_options = keys_layout_name("options");
+    assert(jp_options && !strcmp(jp_options, "caps:capslock") && keys_modifier(KEY_CAPSLOCK) == KEYS_CAPS);
+    caps = 0;
+    assert(tap(KEY_CAPSLOCK) == 0 && caps && tap(KEY_A) == 'A' && tap(KEY_CAPSLOCK) == 0 && !caps && tap(KEY_A) == 'a');
     assert(with(KEY_LEFTSHIFT, KEY_CAPSLOCK) == 0 && caps && tap(KEY_A) == 'A');
     assert(key(KEY_LEFTSHIFT, 1) == 0 && key(KEY_CAPSLOCK, 1) == 0 && key(KEY_LEFTSHIFT, 0) == 0);
     assert(key(KEY_CAPSLOCK, 0) == 0 && !caps && !caps_code && tap(KEY_A) == 'a'); /* Shift let go first */
+    /* Num Lock as in US: keypad navigation, digits while it is locked. */
+    num = 0;
+    assert(keys_modifier(KEY_NUMLOCK) == ROLE_NUM && tap(KEY_KP1) == K_EOL && tap(KEY_KP2) == K_DOWN);
+    assert(tap(KEY_NUMLOCK) == 0 && num && tap(KEY_KP1) == '1' && tap(KEY_KP2) == '2');
+    assert(tap(KEY_NUMLOCK) == 0 && !num && tap(KEY_KP1) == K_EOL);
+    puts("PASS jp106: its Caps Lock key locks alone and with Shift (caps:capslock in the table); Num Lock as US");
     /* Henkan right of the space bar Chinese, Muhenkan left of it direct
      * input, Zenkaku_Hankaku (KEY_GRAVE on a JIS keyboard) the width: once
      * however long each is held. */
@@ -209,7 +219,7 @@ int main(int argc, char **argv)
     assert(tap(KEY_KATAKANAHIRAGANA) == K_ACT_IME_WIDTH && tap(KEY_GRAVE) == 0);
     assert(key(KEY_LEFTSHIFT, 1) == 0 && tap(KEY_SPACE) == K_ACT_IME_WIDTH && key(KEY_LEFTSHIFT, 0) == 0);
     rc_width = NULL;
-    puts("PASS jp106: JIS symbols (Shift+2 \", @, :, ^, \\ twice), Caps Lock on Shift+Eisu, "
+    puts("PASS jp106: JIS symbols (Shift+2 \", @, :, ^, \\ twice), "
          "Henkan_Mode/Muhenkan/Zenkaku_Hankaku for the input method by keysym name, rc.conf's own keys instead");
 
     /* German: letters where its keys print them; bindings name letters. */
@@ -383,5 +393,42 @@ int main(int argc, char **argv)
     }
     puts("PASS us for the system, jp106 for the built-in one, read by the bar: its layout, characters and "
          "keys by its id; the system's again after it is cleared");
+
+    /* The system's us, the built-in one jp106 of its own, and a US keyboard
+     * on USB plugged in later, with no entry: in a direct program given it
+     * while it runs (keys_update, as process 1 lends a new keyboard), the USB
+     * one types the system's us and its Caps Lock locks; the built-in one
+     * types JIS, its Caps Lock key locking alone and with Shift. The entry
+     * names the built-in one only. */
+    assert(keys_set_keyboard("1:1:AT_Translated_Set_2_keyboard", "jp106") == 0);
+    keys_reload();
+    for (int i = 0; i < 2; i++) {
+        assert(pipe(board[i]) == 0);
+        fake_fd[i] = board[i][0];
+    }
+    keys_take(&fake_fd[0], 1); /* the built-in one alone */
+    caps = 0;
+    assert(on_tap(0, KEY_LEFTBRACE) == '@' && on_tap(0, KEY_CAPSLOCK) == 0 && caps && on_tap(0, KEY_CAPSLOCK) == 0 && !caps);
+    int plugged[2] = { dup(fake_fd[0]), fake_fd[1] };
+    keys_update(plugged, 2); /* the USB one plugged in */
+    assert(count == 2 && !strcmp(keys_device_layout(fake_fd[1], "layout"), "us"));
+    assert(on_tap(1, KEY_LEFTBRACE) == '[' && on_tap(1, KEY_APOSTROPHE) == '\'' && on_tap(0, KEY_APOSTROPHE) == ':');
+    assert(on_tap(1, KEY_CAPSLOCK) == 0 && caps && on_tap(1, KEY_A) == 'A' && on_tap(0, KEY_A) == 'A');
+    assert(on_tap(1, KEY_CAPSLOCK) == 0 && !caps && on_tap(1, KEY_A) == 'a');
+    assert(on_tap(0, KEY_CAPSLOCK) == 0 && caps && on_tap(1, KEY_A) == 'A' && on_tap(0, KEY_CAPSLOCK) == 0 && !caps);
+    assert(on(0, KEY_LEFTSHIFT, 1) == 0 && on_tap(0, KEY_CAPSLOCK) == 0 && on(0, KEY_LEFTSHIFT, 0) == 0 && caps);
+    assert(on_tap(1, KEY_B) == 'B' && on_tap(1, KEY_CAPSLOCK) == 0 && !caps);
+    /* Num Lock of either keyboard for both. */
+    num = 0;
+    assert(on_tap(0, KEY_NUMLOCK) == 0 && num && on_tap(1, KEY_KP1) == '1' && on_tap(0, KEY_KP2) == '2');
+    assert(on_tap(1, KEY_NUMLOCK) == 0 && !num && on_tap(0, KEY_KP1) == K_EOL);
+    assert(keys_keyboards(kb, 4) == 2 && kb[0].own && !strcmp(kb[0].keymap, "jp106") && !kb[1].own &&
+           !strcmp(kb[1].keymap, "us"));
+    keys_release();
+    close(board[0][1]);
+    close(board[1][1]);
+    puts("PASS us for the system, jp106 for the built-in one, a USB keyboard plugged in with no entry: the USB one "
+         "types us and its Caps Lock locks; the built-in one JIS, its Caps Lock key locking alone and with Shift; "
+         "Num Lock of either for both");
     return 0;
 }

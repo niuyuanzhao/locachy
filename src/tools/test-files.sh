@@ -2,7 +2,8 @@
 # test-files.sh NEW_OUTPUT: build test-files and the cloud folder worker, and
 # run them as an unprivileged user (uid 1000) in a disposable user and mount
 # namespace with a private /run: FILES_REQUEST is real there. The scratch home
-# is two levels below /, as the history test going up to / expects.
+# is two levels below /, as the history test going up to / expects. A second
+# tmpfs (/run/other) is another filesystem for moves across filesystems.
 set -eu
 [ "$#" = 1 ] || { echo "usage: test-files.sh NEW_OUTPUT" >&2; exit 2; }
 out=$(realpath -m "$1")
@@ -20,7 +21,8 @@ for mode in plain sanitize; do
     # The test user cannot enter the builder's home: the binaries are copied in.
     unshare --map-auto --map-root-user --mount sh -c '
         mount -t tmpfs -o mode=1777 tmpfs /run || exit 9
-        mkdir -m 1777 /run/locachy /run/bin /run/scratch
+        mkdir -m 1777 /run/locachy /run/bin /run/scratch /run/other
+        mount -t tmpfs -o mode=1777 tmpfs /run/other || exit 9
         install -m 755 "$1" /run/scratch/test-files
         install -m 755 "$2" /run/bin/files-cloud-list
         exec setpriv --reuid=1000 --regid=1000 --clear-groups -- timeout 150 /run/scratch/test-files /run/fhome

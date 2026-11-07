@@ -57,6 +57,12 @@ int control_send(int sock, const char *msg, size_t len, const int *fds, int nfds
 { (void)sock; (void)msg; (void)len; (void)fds; (void)nfds; abort(); }
 int screen_cols(void) { return COLS; }
 int screen_rows(void) { return ROWS; }
+void screen_pixels(int *w, int *h) { *w = COLS * 8; *h = ROWS * 16; }
+void screen_fill_px(int x, int y, int w, int h, uint32_t rgb)
+{
+    (void)x; (void)y; (void)w; (void)h; (void)rgb;
+    memset(grid, ' ', sizeof grid);
+}
 int ui_cells(const char *s) { return (int)strlen(s); }
 void screen_bar(const char *title, const char *ime) { (void)title; (void)ime; }
 void screen_flush(void) {}

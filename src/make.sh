@@ -25,6 +25,9 @@
 #   /usr/local/lib/locachy/link-connect        its connection, with keepalive
 #   /usr/local/lib/locachy/network-client      isolated NetworkManager service
 #   /usr/local/lib/locachy/drives              USB drives in ~/Drives (a service)
+#   /usr/local/lib/locachy/locachy-docs        private files dragged into a container (a service)
+#   /usr/local/lib/locachy/locachy-jobs        the system jobs' queue: package transactions, the
+#                                              boot image, firmware, one at a time (a service)
 #   /usr/local/lib/locachy/udev-client         the devices: systemd-udevd as packaged (a service)
 #   /usr/local/lib/udev/rules.d/               LOCachy's preset udev rules
 #   /usr/local/lib/locachy/ntp-client          network time (a service)
@@ -33,6 +36,7 @@
 #   /usr/local/lib/locachy/keytable            the key table of a keymap (libxkbcommon)
 #   /usr/local/share/locachy/keymap.table      rc.conf keymap's: what each key types
 #   /usr/local/share/locachy/terminus/         Terminus 12..32: the text at each scale, and the bar's
+#   /etc/fonts/conf.d/64-locachy-cjk-prefer.conf  Han text's Noto CJK variant (tools/FONTS.md)
 #   /etc/locachy/rc.conf                       the startup file (when missing)
 #   /etc/os-release                            the system's name: LOCachy
 #   /etc/sudoers.d/10-locachy-user             sudo for the user (uid 1000), with its password
@@ -49,6 +53,10 @@
 # the next boot):
 #   /usr/local/lib/locachy/init                process 1
 set -eu
+# What it installs is read and run by others too (the user, the containers:
+# xdg-open, app-init), whatever its caller's umask; a private file gets its
+# mode explicitly.
+umask 022
 
 level= cpu=
 boot_mode=0
@@ -85,19 +93,23 @@ cc="musl-gcc -static -O2 -march=$cpu -Wall -Wextra -I$src/base/include -isystem 
 # mounted: linked statically (musl). It is only used through the initramfs.
 if [ "$boot_mode" -eq 1 ]; then
     for f in "$src"/base/*.c; do
-        # Opening files is the programs' (GIO's content types), not process 1's.
+        # Opening files is the programs' (GIO's content types), and asking for
+        # system jobs (locachy-jobs) too, not process 1's.
         [ "$(basename "$f")" = "open.c" ] && continue
+        [ "$(basename "$f")" = "jobs.c" ] && continue
         $cc -I"$src/base" -c -o "$b/musl-base-$(basename "$f" .c).o" "$f"
     done
     $cc -I"$src/base" -o "$lib/init" "$src/init/init.c" "$src/init/apps.c" "$b"/musl-base-*.o
 fi
 
-# FreeType CJK support for programs running in glibc root.
+# FreeType for the programs running in the glibc root: what Terminus lacks
+# (symbols, CJK) in the fonts fontconfig chooses (base/fontmatch.c,
+# tools/FONTS.md). Process 1 (musl, above) has neither.
 FT_CFLAGS=""
 FT_LIBS=""
-if pkg-config --exists freetype2; then
-    FT_CFLAGS="-DCONFIG_FREETYPE $(pkg-config --cflags freetype2)"
-    FT_LIBS="$(pkg-config --libs freetype2)"
+if pkg-config --exists freetype2 fontconfig; then
+    FT_CFLAGS="-DCONFIG_FREETYPE $(pkg-config --cflags freetype2 fontconfig)"
+    FT_LIBS="$(pkg-config --libs freetype2 fontconfig)"
 fi
 
 NM_CFLAGS="-DCONFIG_NETWORKMANAGER $(pkg-config --cflags libnm)"
@@ -154,11 +166,37 @@ for f in "$src"/base/*.c; do
     $GCC -c -o "$b/glibc-base-$(basename "$f" .c).o" "$f"
 done
 $GCC $IME_CFLAGS -c -o "$b/glibc-ime.o" "$src/base/ime.c"
+# The programs that also open as windows on the shared display (term, settings,
+# view, files; LOCACHY_BACKEND=wayland, set only by the trusted window
+# launcher) are linked with the base built with the window transport
+# (wayland-backend.c, wayland-data.c). Without the desktop module's Wayland
+# libraries they stay direct-only and refuse a window request.
+WIN=glibc-base
+WIN_LIBS=""
+if command -v wayland-scanner >/dev/null 2>&1 && pkg-config --exists wayland-client wayland-cursor xkbcommon; then
+    for p in xdg-shell fractional-scale-v1 viewporter primary-selection-unstable-v1 xdg-decoration-unstable-v1; do
+        wayland-scanner client-header "$src/base/protocols/$p.xml" "$b/$p-client-protocol.h"
+        wayland-scanner private-code "$src/base/protocols/$p.xml" "$b/$p-protocol.c"
+        gcc -O2 -march=$cpu -c -o "$b/proto-$p.o" "$b/$p-protocol.c"
+    done
+    for f in "$src"/base/*.c; do
+        [ "$(basename "$f")" = "ime.c" ] && continue
+        $GCC -DCONFIG_WAYLAND -I"$b" $(pkg-config --cflags wayland-client wayland-cursor xkbcommon) \
+            -c -o "$b/glibc-win-$(basename "$f" .c).o" "$f"
+    done
+    WIN=glibc-win
+    WIN_LIBS="$b/proto-xdg-shell.o $b/proto-fractional-scale-v1.o $b/proto-viewporter.o
+        $b/proto-primary-selection-unstable-v1.o $b/proto-xdg-decoration-unstable-v1.o
+        $(pkg-config --libs wayland-client wayland-cursor xkbcommon) -lm"
+fi
 
 $GCC -o /usr/local/bin/home "$src/progs/home.c" "$src/progs/files.c" "$b"/glibc-base-*.o $FT_LIBS
-$GCC $IME_CFLAGS -o /usr/local/bin/term "$src/progs/term.c" "$b"/glibc-base-*.o "$b/glibc-ime.o" $IME_LIBS $FT_LIBS
+$GCC $IME_CFLAGS -o /usr/local/bin/term "$src/progs/term.c" "$b"/$WIN-*.o "$b/glibc-ime.o" $IME_LIBS $FT_LIBS \
+    $WIN_LIBS
 $GCC -o /usr/local/bin/settings "$src/progs/settings.c" "$src/progs/files.c" "$src/progs/auth.c" \
-    "$b"/glibc-base-*.o $FT_LIBS -lpam
+    "$b"/$WIN-*.o $FT_LIBS -lpam $WIN_LIBS
+# The file manager on its own (home calls files_view itself), for a window.
+$GCC -o /usr/local/bin/files "$src/progs/files-main.c" "$src/progs/files.c" "$b"/$WIN-*.o $FT_LIBS $WIN_LIBS
 $GCC -o /usr/local/bin/lock "$src/progs/lock.c" "$src/progs/auth.c" "$b"/glibc-base-*.o $FT_LIBS -lpam
 $GCC -shared -fPIC -o /usr/lib/security/pam_locachy_any.so "$src/progs/pam_locachy_any.c" "$src/progs/auth.c" -lpam
 $GCC -o /usr/local/bin/locachy-seat "$src/progs/seat.c" "$b"/glibc-base-*.o $FT_LIBS
@@ -172,10 +210,15 @@ $GCC -o "$lib/archive-worker" "$src/progs/archive-worker.c" $(pkg-config --cflag
 $GCC -o /usr/local/bin/archive "$src/progs/archive.c" "$src/progs/files.c" "$b"/glibc-base-*.o $FT_LIBS
 $GCC -o "$lib/drives" "$src/progs/drives.c" "$b"/glibc-base-*.o $FT_LIBS
 $GCC -o "$lib/battery-history" "$src/progs/battery-history.c"
+# The system jobs' queue (tools/JOBS.md): long root operations, one at a time.
+$GCC -o "$lib/locachy-jobs" "$src/progs/locachy-jobs.c"
 # Cloud folders' metadata, read as the user so files never waits on the network.
 $GCC $(pkg-config --cflags gio-2.0) -o "$lib/files-cloud-list" "$src/progs/files-cloud-list.c" $(pkg-config --libs gio-2.0)
 # Container session-bus document-portal owner so xdg-desktop-portal stays up without FUSE.
 $GCC $(pkg-config --cflags gio-2.0) -o "$lib/container-documents" "$src/progs/container-documents.c" $(pkg-config --libs gio-2.0)
+# The host's document service: private files of the home dragged into one
+# container (tools/DOCUMENTS.md), with the desktop module's document portal.
+$GCC $(pkg-config --cflags gio-unix-2.0) -o "$lib/locachy-docs" "$src/progs/locachy-docs.c" $(pkg-config --libs gio-unix-2.0)
 # The document viewer: view on the screen, view-render reading the documents
 # as the user in a sandbox of its own (progs/view-proto.h). Their libraries
 # are the manifest's (a system from before it: locachy-pkg install them).
@@ -183,7 +226,7 @@ VIEW_PKGS="libspectre libheif libjxl libwebp libwebpdemux libarchive ddjvuapi Ma
 if pkg-config --exists $VIEW_PKGS && [ -f /usr/include/mupdf/fitz.h ] && [ -f /usr/include/chm_lib.h ]; then
     $GCC -o "$lib/view-render" "$src/progs/view-render.c" "$src/progs/view-image.c" $(pkg-config --cflags --libs $VIEW_PKGS) -lmupdf -lchm -lm
     $GCC $IME_CFLAGS -o /usr/local/bin/view "$src/progs/view.c" "$src/progs/view-layout.c" "$src/progs/view-client.c" \
-        "$src/progs/files.c" "$b"/glibc-base-*.o "$b/glibc-ime.o" $IME_LIBS $FT_LIBS
+        "$src/progs/files.c" "$b"/$WIN-*.o "$b/glibc-ime.o" $IME_LIBS $FT_LIBS $WIN_LIBS
 else
     rm -f /usr/local/bin/view "$lib/view-render"
     echo "make: view not built: libmupdf, djvulibre, libspectre, libheif, libjxl, libwebp, imagemagick, libarchive, libraw, chmlib are not all installed" >&2
@@ -284,6 +327,16 @@ if [ -x "$lib/clipboard" ]; then
 elif grep -q '^[[:space:]]*service_clipboard=' /etc/locachy/rc.conf; then
     sed -i '/^[[:space:]]*service_clipboard=/d' /etc/locachy/rc.conf
 fi
+# The document service where the document portal is (the desktop module's
+# xdg-desktop-portal), as the desktop module's rc has it for new systems.
+if [ -x /usr/lib/xdg-document-portal ]; then
+    if ! grep -q '^[[:space:]]*service_documents=' /etc/locachy/rc.conf; then
+        printf 'service_documents="/usr/local/lib/locachy/locachy-docs"\n' >>/etc/locachy/rc.conf
+        echo "make: rc.conf: service_documents added"
+    fi
+elif grep -q '^[[:space:]]*service_documents=' /etc/locachy/rc.conf; then
+    sed -i '/^[[:space:]]*service_documents=/d' /etc/locachy/rc.conf
+fi
 if ! grep -q '^[[:space:]]*program_firmware=' /etc/locachy/rc.conf; then
     printf 'program_firmware="/usr/local/bin/firmware"\n' >>/etc/locachy/rc.conf
     echo "make: rc.conf: program_firmware added"
@@ -291,6 +344,10 @@ fi
 if ! grep -q '^[[:space:]]*service_battery=' /etc/locachy/rc.conf; then
     printf 'service_battery="/usr/local/lib/locachy/battery-history"\n' >>/etc/locachy/rc.conf
     echo "make: rc.conf: service_battery added"
+fi
+if ! grep -q '^[[:space:]]*service_jobs=' /etc/locachy/rc.conf; then
+    printf 'service_jobs="/usr/local/lib/locachy/locachy-jobs"\n' >>/etc/locachy/rc.conf
+    echo "make: rc.conf: service_jobs added"
 fi
 # The debug cable link's port by its card's permanent address (network-client),
 # for a link turned on before debug_link_mac: the card of its name, on the host
@@ -332,6 +389,15 @@ python3 -I "$src/link/declare-packages" "$src" /etc/locachy/packages
 # a system update never replaces). A system from before that catalog keeps
 # the app presets it had in it until the first from there.
 mkdir -p /etc/locachy/containers
+# ChatGPT is a store recipe now. Keep the old preset as its merge base for
+# an existing configuration; neither that configuration nor its data moves.
+legacy_chatgpt=/usr/local/share/locachy/containers/chatgpt.conf
+chatgpt_base=/var/lib/locachy/apps/baseline/chatgpt.conf
+if [ -f "$legacy_chatgpt" ] && [ -f /etc/locachy/containers/chatgpt.conf ] && [ ! -e "$chatgpt_base" ]; then
+    install -d /var/lib/locachy/apps/baseline
+    install -m 644 "$legacy_chatgpt" "$chatgpt_base"
+fi
+rm -f "$legacy_chatgpt"
 if python3 -I "$src/link/locachy_apps.py" bootstrap /usr/local/share/locachy/containers; then
     rm -rf /usr/local/share/locachy/containers
 else
@@ -490,6 +556,9 @@ fi
 install -m 755 "$src/link/ntp-client" "$lib/ntp-client"
 install -m 755 "$src/link/timezone-client" "$lib/timezone-client"
 install -D -m 644 "$src/link/NetworkManager.conf" /etc/NetworkManager/conf.d/30-locachy-network.conf
+# Which variant of the Noto CJK families Han text without a language gets:
+# Simplified Chinese first (tools/FONTS.md); the user's fonts.conf comes first.
+install -D -m 644 "$src/link/64-locachy-cjk-prefer.conf" /etc/fonts/conf.d/64-locachy-cjk-prefer.conf
 sh "$src/link/install-pkg-tools" "$src"
 # sudo for the user (uid 1000), with its own password. By name: its programs
 # run without supplementary groups (app-init), so %wheel would not match there.
@@ -542,6 +611,8 @@ install -D -m 644 "$src/link/labwc-rc.xml" /etc/locachy/labwc/rc.xml
 install -D -m 644 "$src/link/labwc-xinitrc" /etc/locachy/labwc/xinitrc
 # Each container's own session bus (locachy-app), with locachy-bar its tray.
 install -D -m 644 "$src/link/container-bus.conf" /usr/local/share/locachy/container-bus.conf
+# The host's documents bus (locachy-docs), the user's, in no container.
+install -D -m 644 "$src/link/docs-bus.conf" /usr/local/share/locachy/docs-bus.conf
 rm -f /etc/locachy/labwc/menu.xml
 gcc -O2 -Wall -Wextra -o "$lib/link-connect" "$src/link/link-connect.c"
 # The framebuffer programs' text is Terminus of the screen's scale (screen.c);

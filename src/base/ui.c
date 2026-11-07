@@ -128,8 +128,8 @@ int ui_menu(int col, int row, const char *const *items)
             sel = (sel + 1) % n;
         } else if (key == '\n') {
             return sel;
-        } else if (key == 27 || key == K_SHOWN) {
-            return -1;
+        } else if (key == 27 || key == K_SHOWN || key == K_CLOSE) {
+            return -1; /* the window's close: the menu goes; closing again closes the window */
         } else if (key == K_POINTER) {
             const struct pointer_event *e = pointer_last();
             int inside = e->output == output && e->col >= col && e->col < col + w &&

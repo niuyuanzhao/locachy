@@ -67,6 +67,7 @@ class LocalPackages(unittest.TestCase):
                             ("RC_CONF", str(self.rc)), ("SOURCE_REPO_DIR", str(self.source_repo)),
                             ("SOURCE_COMMIT_FILE", str(self.source_commit)),
                             ("TRUSTED_SIGNERS", str(self.signers)),
+                            ("SOURCE_PENDING_FILE", str(self.root / "source-pending")),
                             ("SOURCE_UNBUILT_FILE", str(self.root / "source-unbuilt"))):
             p = mock.patch.object(pkg, name, value)
             p.start()
@@ -89,6 +90,44 @@ class LocalPackages(unittest.TestCase):
                 "host": "build-current", "version": self.host["labwc-locachy"]}
         data.update(changes)
         (self.records / "labwc-locachy.json").write_text(json.dumps(data))
+
+    def test_check_offers_no_update_for_the_commit_installed(self):
+        """Just installed: SRC is make-root.sh's copy of the commit (no
+        installer/, its chosen modules added to packages and rc.conf), the
+        commit recorded as applied. Check fetches that commit: no update."""
+        upstream = self.root / "upstream"
+        (upstream / "src/installer").mkdir(parents=True)
+        for rel, text in (("make.sh", "#!/bin/sh\n"), ("packages", "base\n"), ("rc.conf", 'hostname="x"\n'),
+                          ("installer/packages.x86_64", "archiso\n")):
+            (upstream / "src" / rel).write_text(text)
+
+        def git(*args):
+            return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@invalid", *args], cwd=upstream,
+                                  check=True, capture_output=True, text=True).stdout.strip()
+        git("init", "-q", "-b", "main")
+        git("add", "-A")
+        git("commit", "-q", "-m", "LOCachy")
+        commit = git("rev-parse", "HEAD")
+        shutil.rmtree(self.src)
+        shutil.copytree(upstream / "src", self.src, ignore=shutil.ignore_patterns("installer"))
+        with open(self.src / "packages", "a") as f:
+            f.write("\n# Selected optional modules\nfwupd\n")
+        with open(self.src / "rc.conf", "a") as f:
+            f.write('repo_multilib="0"\n')
+        self.assertNotEqual(pkg.source_tree_digest(str(self.src)), pkg.source_tree_digest(str(upstream / "src")))
+        self.patch("in_net", lambda cmd: cmd)
+        with mock.patch.dict(os.environ, {"LOCACHY_UPDATE_REPO": "file://" + str(upstream),
+                                          "LOCACHY_UPDATE_BRANCH": "main"}), contextlib.redirect_stderr(io.StringIO()):
+            self.source_commit.write_text(commit + "\n")
+            self.assertIsNone(pkg.check_source_update())
+            # An update of it still to finish: compared as before, not taken as done.
+            (self.root / "source-pending").write_text(commit + "\n")
+            self.assertEqual(pkg.check_source_update()[1], commit)
+            (self.root / "source-pending").unlink()
+            # Another commit applied: this one is the update.
+            self.source_commit.write_text("0" * 40 + "\n")
+            self.assertEqual(pkg.check_source_update()[:2], ("0000000", commit))
+        self.assertEqual(self.source_commit.read_text(), "0" * 40 + "\n")
 
     def test_info_is_local_without_executing_recipe(self):
         self.patch("repo_info", lambda name: None)
@@ -282,12 +321,13 @@ class LocalPackages(unittest.TestCase):
                 self.manifest.write_text("labwc-locachy\nlibraw\n")
             return True
         self.patch("run", run)
-        self.patch("apply_source_update", lambda c: self.source_commit.write_text(c + "\n"))
+        self.patch("apply_source_update", lambda c: pkg.write_commit(pkg.SOURCE_PENDING_FILE, c))
         rows = [("host", "repo", "base", "1", "2"), ("locachy", "rebuild", "new source", "old", commit)]
         pkg.save_plan(rows)
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(pkg.cmd_apply([]), 1)
-        self.assertEqual(self.source_commit.read_text(), commit + "\n")
+        self.assertEqual(Path(pkg.SOURCE_PENDING_FILE).read_text(), commit + "\n")
+        self.assertFalse(self.source_commit.exists())
         self.assertTrue(pkg.source_setup_pending())
         self.assertEqual(len(commands), 1 if helper == "sh" else 2)
         # The original failure plan is gone. A new Check must work even
@@ -539,8 +579,9 @@ class LocalPackages(unittest.TestCase):
         self.assertEqual(self.manifest.read_text(), "# keep this\nlabwc-locachy\n")
         self.assertFalse(self.marker.exists())
 
-    def test_github_source_and_recipe_update_and_trusted_signers(self):
-        self.record()
+    def source_origin(self):
+        """update_repo: a git repository whose src/ is the installed source
+        (one commit, returned), and git in it."""
         self.patch("in_net", lambda cmd: cmd)
         (self.src / "make.sh").write_text("#!/bin/sh\nexit 0\n")
         (self.src / "make.sh").chmod(0o755)
@@ -561,8 +602,84 @@ class LocalPackages(unittest.TestCase):
         git("config", "user.email", "test@example.com")
         git("add", "-A")
         git("commit", "-m", "Initial release")
-        c1 = git("rev-parse", "HEAD")
         self.rc.write_text(f'update_repo="file://{origin}"\n')
+        return origin, git, git("rev-parse", "HEAD")
+
+    def test_source_commit_is_recorded_only_once_its_update_has_all_been_applied(self):
+        """The installed commit is the one whose update finished: not the one
+        fetched, nor the one put in place by an Apply that then stopped (its
+        builds waiting for source signing keys), nor the one a Check finds
+        already in place; once a later Apply has done the rest, that one."""
+        self.record()
+        self.patch("PLAN_FILE", str(self.root / "plan"))
+        origin, git, c1 = self.source_origin()
+        self.assertEqual(pkg.plan(), [])
+        self.assertEqual(self.source_commit.read_text(), c1 + "\n")
+        # c2 changes the compositor's patch: its package is built again.
+        (origin / "src/pkgbuilds/labwc-locachy/guard.patch").write_text("patch version two\n")
+        git("commit", "-qam", "Change the compositor patch")
+        c2 = git("rev-parse", "HEAD")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(pkg.cmd_plan([]), 0)  # Check: fetched, nothing installed
+        self.assertEqual(self.source_commit.read_text(), c1 + "\n")
+        self.assertFalse(Path(pkg.SOURCE_PENDING_FILE).exists())
+        self.patch("run", lambda cmd, net=False: True)  # install-pkg-tools, declare-packages
+
+        class Exec(Exception):
+            pass
+
+        def execv(path, argv):
+            raise Exec(path, argv)
+        p = mock.patch.object(pkg.os, "execv", execv)
+        p.start()
+        self.addCleanup(p.stop)
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(Exec):
+            pkg.cmd_apply([])  # its source and updater first
+        self.assertEqual((self.src / "pkgbuilds/labwc-locachy/guard.patch").read_text(), "patch version two\n")
+        self.assertEqual(self.source_commit.read_text(), c1 + "\n")
+        self.assertEqual(Path(pkg.SOURCE_PENDING_FILE).read_text(), c2 + "\n")
+        # Phase two: the host's build stops for a source signing key.
+        applied = []
+
+        def stopped(target, rows):
+            applied.append(target)
+            print("Source key to trust: example 3C2C43D9447D5938EF4551EBE23B7E70B467F0BF")
+            return False
+        self.patch("apply_target", stopped)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(pkg.cmd_apply([], after_source=True), 1)
+        self.assertEqual(applied, ["host"])
+        self.assertEqual(self.source_commit.read_text(), c1 + "\n")
+        # A Check finds c2's tree in place: still not installed, and it says so.
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(pkg.cmd_plan([]), 0)
+        self.assertEqual(self.source_commit.read_text(), c1 + "\n")
+        rows, _ = pkg.load_plan()
+        self.assertEqual(pkg.targets_of(rows), ["host", "locachy"])
+        self.assertIn(("locachy", "note", f"source {c2[:7]} installed, its update not finished "
+                       f"(last applied: {c1[:7]})", "", ""), rows)
+        # The key trusted; Apply builds the package and the programs: c2 is installed.
+        unbuilt = Path(pkg.SOURCE_UNBUILT_FILE)
+
+        def apply(target, rows):
+            applied.append(target)
+            if target == "host":
+                self.record()
+            elif target == "locachy":
+                unbuilt.unlink()  # make.sh --boot
+            return True
+        self.patch("apply_target", apply)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(pkg.cmd_apply([]), 0)
+        self.assertEqual(applied, ["host", "host", "locachy"])
+        self.assertIn(f"===> locachy: source {c2[:7]} applied\n", out.getvalue())
+        self.assertEqual(self.source_commit.read_text(), c2 + "\n")
+        self.assertFalse(Path(pkg.SOURCE_PENDING_FILE).exists())
+        self.assertEqual(pkg.load_plan()[0], [])
+
+    def test_github_source_and_recipe_update_and_trusted_signers(self):
+        self.record()
+        origin, git, c1 = self.source_origin()
 
         # Identical tree: no update planned, and source-commit is recorded.
         self.assertEqual(pkg.plan(), [])
@@ -606,9 +723,12 @@ class LocalPackages(unittest.TestCase):
         self.assertTrue(pkg.apply_target("locachy", rows))
         self.assertEqual(rebuilt, [True])
         self.assertTrue((self.src / "machines/x13.conf").is_file())
-        self.assertEqual(self.source_commit.read_text().strip(), c2)
+        self.assertEqual(self.source_commit.read_text().strip(), c1)  # in place, not yet all applied
+        self.assertEqual(Path(pkg.SOURCE_PENDING_FILE).read_text().strip(), c2)
         self.record()
-        self.assertEqual(pkg.plan(), [])
+        self.assertEqual(pkg.settle_source_update(pkg.plan()), [])
+        self.assertEqual(self.source_commit.read_text().strip(), c2)
+        self.assertFalse(Path(pkg.SOURCE_PENDING_FILE).exists())
 
         # When trusted-signers is populated, an unsigned commit is rejected.
         self.signers.write_text("user@example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n")

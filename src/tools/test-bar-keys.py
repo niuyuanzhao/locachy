@@ -3,7 +3,9 @@
 the keyboards DEVICE... as locachy-seat gives them: a socket at
 LOCACHY_BAR_KEYS, a "keys" message with the open devices. PROGRAM keeps this
 process's id (the tests signal it); a child holds the other end until
-PROGRAM ends, as seat does while it runs."""
+PROGRAM ends, as seat does while it runs, reading what PROGRAM sends on it
+(the bar's "locks" after a key: seat takes them for process 1) until its end
+is closed."""
 import os
 import socket
 import sys
@@ -19,7 +21,11 @@ if os.fork() == 0:
     socket.send_fds(ours, [b"keys"], fds)
     for fd in fds:
         os.close(fd)
-    ours.recv(1)  # until PROGRAM has closed its end
+    # A message is not the end: the bar reports its locks on this link at
+    # the first key. Taking one as the end closed the link, and the bar
+    # dropped the keyboards ("watching 0").
+    while ours.recv(4096):
+        pass
     os._exit(0)
 ours.close()
 for fd in fds:

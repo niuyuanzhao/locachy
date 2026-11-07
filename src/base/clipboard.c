@@ -18,6 +18,15 @@
 #include <unistd.h>
 
 #include "clipboard.h"
+#include "include/wayland-data.h"
+
+/* A program drawn in a Wayland window uses that window's standard data
+ * device; everything else (and binaries without it) the host service. */
+static int wayland_selection(void)
+{
+    return wl_data_active && wl_data_active() && wl_data_clipboard_get && wl_data_clipboard_set &&
+           wl_data_clipboard_clear;
+}
 
 static int64_t milliseconds(void)
 {
@@ -145,11 +154,17 @@ static int get_as(uint32_t operation, int primary, int *fd, size_t *size)
 
 int clipboard_get(int primary, int *fd, size_t *size)
 {
+    if (wayland_selection()) {
+        return wl_data_clipboard_get(primary, "text/plain;charset=utf-8", fd, size);
+    }
     return get_as(CLIPBOARD_GET, primary, fd, size);
 }
 
 int clipboard_get_png(int *fd, size_t *size)
 {
+    if (wayland_selection()) {
+        return wl_data_clipboard_get(0, "image/png", fd, size);
+    }
     return get_as(CLIPBOARD_GET_PNG, 0, fd, size);
 }
 
@@ -179,16 +194,25 @@ static int set_as(uint32_t operation, int primary, const void *text, size_t size
 
 int clipboard_set(int primary, const void *text, size_t size)
 {
+    if (wayland_selection()) {
+        return wl_data_clipboard_set(primary, "text/plain;charset=utf-8", text, size);
+    }
     return set_as(CLIPBOARD_SET, primary, text, size);
 }
 
 int clipboard_set_png(const void *png, size_t size)
 {
+    if (wayland_selection()) {
+        return wl_data_clipboard_set(0, "image/png", png, size);
+    }
     return set_as(CLIPBOARD_SET_PNG, 0, png, size);
 }
 
 int clipboard_clear(int primary)
 {
+    if (wayland_selection()) {
+        return wl_data_clipboard_clear(primary);
+    }
     struct clipboard_message m = { .version = CLIPBOARD_VERSION, .operation = CLIPBOARD_CLEAR,
         .selection = primary ? CLIPBOARD_PRIMARY : CLIPBOARD_REGULAR };
     int fd = -1;
