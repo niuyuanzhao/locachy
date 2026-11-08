@@ -166,4 +166,12 @@ if pkg-config --exists libcryptsetup json-c openssl; then
         $(pkg-config --libs libcryptsetup json-c openssl) \
         -o "$out/libcryptsetup-token-locachy-tpm12.so"
 fi
+# The shell scripts parse (an apostrophe in a comment of a single-quoted
+# inner script ends the quote: the script then fails as a whole).
+for f in "$src"/link/* "$src"/*.sh "$src"/tools/*.sh; do
+    case "$(head -n 1 "$f" 2>/dev/null)" in
+    '#!/bin/bash'* | '#!/usr/bin/env bash'*) bash -n "$f" || { echo "build-check: $f does not parse" >&2; exit 1; } ;;
+    '#!/bin/sh'*) sh -n "$f" || { echo "build-check: $f does not parse" >&2; exit 1; } ;;
+    esac
+done
 printf 'Candidate binaries built in %s; installed system unchanged.\n' "$out"
