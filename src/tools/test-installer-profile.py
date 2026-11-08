@@ -197,8 +197,11 @@ class InstallerProfile(unittest.TestCase):
             self.assertIn(said, result.stderr)
             self.assertFalse(self.work.exists())  # never an empty catalog
             self.assertFalse(self.out.exists())
-        (self.apps / "FORMAT").write_text("3\n")
-        refused("not compatible: format 3")
+        (self.apps / "FORMAT").write_text("4\n")
+        refused("not compatible: format 4")
+        (self.apps / "FORMAT").write_text("2\n")
+        (self.apps / "apps/edge.conf").write_text('tor="1"\n')
+        refused("tor requires format 3")
         (self.apps / "FORMAT").write_text("1\n")
         (self.apps / "apps/edge.conf").write_text('host="1"\n')
         refused("host requires format 2")
@@ -418,10 +421,10 @@ class LiveEntry(unittest.TestCase):
         out, err = self.entry("--check")
         self.assertEqual((err, self.apps_seen()), ("", ("fetched earlier", str(self.apps_fetched))))
         # Content this system does not take: the one fetched before, and why.
-        (self.apps / "FORMAT").write_text("3\n")
-        self.apps_commit("Format three")
+        (self.apps / "FORMAT").write_text("4\n")
+        self.apps_commit("Format four")
         self.entry("--yes")
-        self.assertEqual(self.apps_seen(), (f"fetched before: {self.APPS_URL} (main): not compatible: format 3",
+        self.assertEqual(self.apps_seen(), (f"fetched before: {self.APPS_URL} (main): not compatible: format 4",
                                             str(self.apps_fetched)))
         self.assertIn(f'commit="{first}"', (self.apps_fetched / "CATALOG").read_text())
         # Another branch, never fetched from: the medium's own.

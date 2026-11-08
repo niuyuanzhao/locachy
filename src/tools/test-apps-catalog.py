@@ -115,7 +115,7 @@ class Validation(Base):
         p = subprocess.run([sys.executable, "-I", str(HELPER), "validate", str(self.tree({"edge.conf": EDGE}))],
                            capture_output=True, text=True)
         self.assertEqual((p.returncode, p.stdout), (0, "OK 1 app presets, format 1\n"))
-        self.refused("not compatible: format 3", fmt="3\n")
+        self.refused("not compatible: format 4", fmt="4\n")
         self.refused("not compatible: format 1", fmt=" 1\n")
         self.refused("no FORMAT", fmt=None)
         tree = self.tree({})
@@ -139,6 +139,7 @@ class Validation(Base):
                  'foo="1"': "unknown key foo", 'packages="a b"': "unknown key packages",
                  'network="0"': "network a second time",
                  'host="1"': "host requires format 2",
+                 'tor="1"': "tor requires format 3",
                  'arguments="$(touch x)"': "arguments has a quote, backslash, $, backquote or control character",
                  'arguments="a\\b"': "backslash", 'arguments="`id`"': "backquote",
                  'arguments="a"b"': "quote", 'arguments="a\x01"': "control character"}
@@ -184,6 +185,21 @@ class Validation(Base):
         with self.assertRaisesRegex(apps.CatalogError, "host requires format 2"):
             apps.read_catalog(str(dest))
 
+    def test_format_three_accepts_tor_modes_while_older_formats_refuse_them(self):
+        for mode in ("0", "1"):
+            text = EDGE + f'tor="{mode}"\n'
+            tree = self.tree({"tor-browser.conf": text}, fmt="3\n")
+            self.assertEqual(apps.validate_tree(str(tree)), ("3", {"tor-browser": text.encode()}))
+            for old_fmt in ("1\n", "2\n"):
+                self.refused("tor requires format 3", {"tor-browser.conf": text}, fmt=old_fmt)
+        self.refused("tor is not 0 or 1", {"tor-browser.conf": EDGE + 'tor="yes"\n'}, fmt="3\n")
+        dest = self.root / "format-three-catalog"
+        apps.write_catalog({"tor-browser": (EDGE + 'tor="1"\n').encode()}, str(dest), apps.new_meta("3", "medium"))
+        self.assertEqual(sorted(apps.read_catalog(str(dest))), ["tor-browser"])
+        (dest / "CATALOG").write_text('format="2"\norigin="medium"\n')
+        with self.assertRaisesRegex(apps.CatalogError, "tor requires format 3"):
+            apps.read_catalog(str(dest))
+
     def test_the_catalog_command_writes_a_new_catalog_only_from_a_valid_tree(self):
         dest = self.root / "catalog"
         tree = self.tree({"edge.conf": EDGE})
@@ -196,10 +212,10 @@ class Validation(Base):
         self.assertEqual(sorted(apps.read_catalog(str(dest))), ["edge"])
         p = subprocess.run(command, capture_output=True, text=True)
         self.assertEqual(p.returncode, 1)  # never over an existing one
-        bad = self.tree({"edge.conf": EDGE}, fmt="3\n")
+        bad = self.tree({"edge.conf": EDGE}, fmt="4\n")
         p = subprocess.run(command[:4] + [str(bad), str(self.root / "other")] + command[6:], capture_output=True,
                            text=True)
-        self.assertEqual((p.returncode, p.stderr), (1, "not compatible: format 3\n"))
+        self.assertEqual((p.returncode, p.stderr), (1, "not compatible: format 4\n"))
         self.assertFalse((self.root / "other").exists())
         p = subprocess.run(command[:6] + ["somewhere"] + command[7:], capture_output=True, text=True)
         self.assertEqual(p.returncode, 1)
@@ -222,10 +238,10 @@ class Catalog(Base):
     def test_incompatible_format_keeps_the_old_catalog(self):
         self.install()
         before = {p.name: p.read_bytes() for p in self.catalog().iterdir()}
-        c2 = self.commit({"FORMAT": "3\n", "apps/edge.conf": EDGE.replace("wayland", "x11")}, "Format three")
-        with self.assertRaisesRegex(apps.CatalogError, "not compatible: format 3"):
+        c2 = self.commit({"FORMAT": "4\n", "apps/edge.conf": EDGE.replace("wayland", "x11")}, "Format four")
+        with self.assertRaisesRegex(apps.CatalogError, "not compatible: format 4"):
             apps.check(str(self.apps_dir), self.url, "main", str(self.conf), str(self.signers))
-        with self.assertRaisesRegex(apps.CatalogError, "not compatible: format 3"):
+        with self.assertRaisesRegex(apps.CatalogError, "not compatible: format 4"):
             apps.apply(str(self.apps_dir), c2, str(self.conf), str(self.signers), self.url, "main")
         self.assertEqual({p.name: p.read_bytes() for p in self.catalog().iterdir()}, before)
 

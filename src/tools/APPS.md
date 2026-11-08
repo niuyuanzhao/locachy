@@ -22,10 +22,10 @@ One helper reads and installs the catalog: `src/link/locachy_apps.py`
 updater loads it; `make.sh`, the live entry and `make-installer.sh` run it as
 `python3 -I locachy_apps.py validate|catalog|bootstrap ...`.
 
-## The repository (format 2)
+## The repository (format 3)
 
 ```
-FORMAT          one line: 2
+FORMAT          one line: 3
 apps/NAME.conf  the presets
 README.md, README.zh.md, LICENSE
 tools/check.py  checks it with a system's own helper:
@@ -36,20 +36,21 @@ Its files are data. They are parsed and validated, never sourced or run.
 The first invalid file rejects the whole catalog, and the installed catalog
 stays as it is:
 
-- `FORMAT` must be a format this system reads (`1` or `2`); otherwise
-  `not compatible: format N`. Format 2 adds `host`; format 1 still refuses
-  that key. Update the system before its catalog: older systems reject
-  format 2 visibly and keep their previous catalog.
-- `NAME` is `[a-z0-9][a-z0-9._-]{0,62}`. Each preset is a regular file (not a
+- `FORMAT` must be a format this system reads (`1`, `2` or `3`); otherwise
+  `not compatible: format N`. Format 2 adds `host`; format 3 adds `tor`
+  (earlier formats still refuse keys added after them). Update the system
+  before its catalog: older systems reject a newer format visibly and keep
+  their previous catalog.
+- `NAME` is `[a-z0-9][a-z0-9._-]{0,62}` (not `window-*`). Each preset is a regular file (not a
   link), 16 KiB at most, and UTF-8. `apps/` holds nothing else and at least
   one preset.
 - A line is empty, a `#` comment or `KEY="VALUE"`. Keys are `package`,
   `extras`, `command`, `arguments`, `network`, `camera`, `screencast`, `directories`,
-  `desktop`, `x11`, and in format 2 `host`. An unknown key, a key given twice
-  or any other line rejects the catalog.
+  `desktop`, `x11`, in format 2 `host`, and in format 3 `tor`. An unknown key,
+  a key given twice or any other line rejects the catalog.
 - A value has no `"`, `\`, `$`, backquote or control character. `package` is
   one pacman package name; `extras` are package names separated by spaces;
-  `command` is an absolute path without `..` or spaces; `network`, `camera`,
+  `command` is an absolute path without `..` or spaces; `network`, `tor`, `camera`,
   `screencast` and `x11` (also `host`) are `0` or `1`; `directories` are absolute paths without `..`
   separated by colons; `desktop` are `*.desktop` names. `package` and
   `command` are required.

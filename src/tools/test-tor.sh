@@ -14,10 +14,14 @@
 #      refused); IPv6 goes nowhere but loopback; a socket bound to the
 #      interface leaves nothing; the tor user goes out (bridges) or only to
 #      mihomo (via mihomo), whose marked connections go out, and whose ports
-#      nobody else reaches
-#   3. tor itself (lyrebird for a bridge, when installed): TransPort and
-#      DNSPort taken, tor's own connections out; killed, the kill switch:
-#      a new connection is refused, nothing leaves, the status says so
+#      nobody else reaches; Tor's SocksPort (127.0.0.1:9050) is reached as it
+#      is, the same port elsewhere goes to the TransPort, a port Tor does not
+#      have is refused
+#   3. tor itself (lyrebird for a bridge, when installed): TransPort,
+#      DNSPort and SocksPort taken, the SocksPort in the namespace only (the
+#      host does not reach it), no control port, tor's own connections out;
+#      killed, the kill switch: a new connection, the SocksPort's too, is
+#      refused, nothing leaves, the status says so
 #   4. with MIHOMO (and /dev/net/tun): its configuration for each Tor
 #      arrangement (mihomo -t takes them); with bridges, its TUN leaves the
 #      tor user alone and its own connections come to the TransPort; as
@@ -211,6 +215,14 @@ check "nobody to 192.0.2.1:80: to the TransPort, nothing out" \
 check "root to 192.0.2.1:443: to the TransPort too" \
     "[ \"\$(in_ns python3 -I $out/net.py tcp 192.0.2.1 443)\" = connected ] && grep -qx 192.0.2.1:443 $out/heard/trans && [ \$(left doc1) -eq $d1 ]"
 check "counted as redirected" "[ \$(packets locachy-tor redirected) -gt $r0 ]"
+listen socks tor listen-tcp 127.0.0.1 9050
+s0=$(packets locachy-tor socks)
+check "nobody to Tor's SocksPort (127.0.0.1:9050): reached as it is, not redirected, counted" \
+    "[ \"\$(as nobody python3 -I $out/net.py tcp 127.0.0.1 9050)\" = connected ] && [ -s $out/heard/socks ] && ! grep -q :9050 $out/heard/trans && [ \$(packets locachy-tor socks) -gt $s0 ]"
+check "nobody to 192.0.2.1:9050 (the SocksPort's number elsewhere): to the TransPort, nothing out" \
+    "[ \"\$(as nobody python3 -I $out/net.py tcp 192.0.2.1 9050)\" = connected ] && grep -qx 192.0.2.1:9050 $out/heard/trans && [ \$(grep -c . $out/heard/socks) = 1 ] && [ \$(left doc1) -eq $d1 ]"
+check "nobody to a port Tor does not have (127.0.0.1:9051, no control port): refused, nothing out" \
+    "[ \"\$(as nobody python3 -I $out/net.py tcp 127.0.0.1 9051)\" = refused ] && [ \$(left doc1) -eq $d1 ]"
 in_ns ip addr add 198.51.100.7/32 dev lo
 check "from an address of the machine not on the local network (as mihomo's TUN's): to the TransPort, answered" \
     "[ \"\$(as nobody python3 -I $out/net.py tcp 192.0.2.1 81 src=198.51.100.7)\" = connected ] && grep -qx 192.0.2.1:81 $out/heard/trans && [ \$(left doc1) -eq $d1 ]"
@@ -282,8 +294,8 @@ else
     skip "tor's own connections through a bridge (lyrebird is not installed)"
     rc 'service_tor="tor-client"' 'tor_front="mihomo"' 'service_clash="clash-client"'
 fi
-check "its configuration: TransPort, DNSPort, no SocksPort, the front" \
-    "tc --torrc $front | grep -qx 'TransPort 127.0.0.1:9040 IsolateDestAddr IsolateDestPort' && tc --torrc $front | grep -qx 'SocksPort 0' && tc --torrc $front | grep -q -e '^Bridge obfs4 192.0.2.10:443' -e '^Socks5Proxy 127.0.0.1:7891'"
+check "its configuration: TransPort, DNSPort, SocksPort on loopback, no control port, the front" \
+    "tc --torrc $front | grep -qx 'TransPort 127.0.0.1:9040 IsolateDestAddr IsolateDestPort' && tc --torrc $front | grep -qx 'SocksPort 127.0.0.1:9050 IsolateSOCKSAuth KeepAliveIsolateSOCKSAuth' && [ \$(tc --torrc $front | grep -c '^SocksPort') = 1 ] && ! tc --torrc $front | grep -qi '^ControlPort' && tc --torrc $front | grep -q -e '^Bridge obfs4 192.0.2.10:443' -e '^Socks5Proxy 127.0.0.1:7891'"
 d10=$(left doc10)
 LOCACHY_TOR=/usr/bin/tor bash "$src/link/tor-client" >"$out/service.log" 2>&1 &
 svc=$!
@@ -298,6 +310,20 @@ check "tor runs as the tor user" "[ -n \"\$pid\" ] && [ \"\$(stat -c %U /proc/\$
 check "its status: through $front" "tc --status | grep -q -e '^starting, through' -e '^connecting through'"
 check "nobody to 192.0.2.1:80: tor's TransPort takes it" \
     "[ \"\$(as nobody python3 -I $out/net.py tcp 192.0.2.1 80)\" = connected ]"
+# Its TCP listeners, in the namespace and on the host (the test's own network
+# namespace): TransPort and SocksPort on the namespace's loopback, nothing else.
+in_ns ss -Hltnp >"$out/ss-ns.txt" 2>&1
+ss -Hltnp >"$out/ss-host.txt" 2>&1
+tor_listens=$(grep "pid=$pid," "$out/ss-ns.txt" | awk '{print $4}' | sort | paste -sd' ' -)
+check "tor's TCP ports in the namespace: the TransPort and the SocksPort, on loopback only ($tor_listens)" \
+    "[ '$tor_listens' = '127.0.0.1:9040 127.0.0.1:9050' ]"
+check "the host does not reach the SocksPort: no tor socket there, 127.0.0.1:9050 refused" \
+    "! grep -q \"pid=\$pid,\" $out/ss-host.txt && [ \"\$(python3 -I $out/net.py tcp 127.0.0.1 9050)\" = refused ]"
+check "nobody speaks SOCKS to tor's SocksPort: it answers" \
+    "as nobody python3 -I $out/net.py socks 9050 192.0.2.1 443 | grep -q '^socks '"
+d1=$(left doc1)
+check "nobody to the SocksPort's number on the namespace's own address (10.99.0.2:9050) or to a port Tor does not have (127.0.0.1:9051): refused, nothing out" \
+    "[ \"\$(as nobody python3 -I $out/net.py tcp 10.99.0.2 9050)\" = refused ] && [ \"\$(as nobody python3 -I $out/net.py tcp 127.0.0.1 9051)\" = refused ] && [ \$(left doc1) -eq $d1 ]"
 if [ $front = bridges ]; then
     for _ in $(seq 30); do [ "$(left doc10)" -gt "$d10" ] && break; sleep 0.5; done
     check "tor's own connections go out, to its bridge (192.0.2.10)" "[ \$(left doc10) -gt $d10 ]"
@@ -308,10 +334,74 @@ d1=$(left doc1)
 check "tor killed: the rules stay" "enforce loaded"
 check "the kill switch: nobody to 192.0.2.1:80 is refused, nothing out" \
     "[ \"\$(as nobody python3 -I $out/net.py tcp 192.0.2.1 80)\" = refused ] && [ \$(left doc1) -eq $d1 ]"
+check "the kill switch: the SocksPort (127.0.0.1:9050) refuses too, nothing out" \
+    "[ \"\$(as nobody python3 -I $out/net.py tcp 127.0.0.1 9050)\" = refused ] && [ \$(left doc1) -eq $d1 ]"
 check "its status says so" "tc --status | grep -q 'kill switch holds the network, nothing goes out'"
 wait $svc 2>/dev/null
 enforce remove
 rm -f "$out/state/bridges"
+
+# 3b. A Tor-only container (tor="1"): refused when Tor or its firewall is off,
+# and its own cgroup table permits only 127.0.0.1:9050 even if Tor goes off.
+mkdir -p "$out/conf" "$out/cont" "$out/apprun" "$out/xdg"
+ln -sf /bin/true "$out/app-init"
+python3 -I -c 'import socket,sys; s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.bind(sys.argv[1]); s.listen(1); input()' \
+    "$out/xdg/locachy-0" </dev/zero >/dev/null 2>&1 &
+wsock=$!
+for _ in $(seq 50); do [ -S "$out/xdg/locachy-0" ] && break; sleep 0.05; done
+printf 'package="tor-browser-bin"\ncommand="/bin/true"\nnetwork="1"\ntor="1"\n' >"$out/conf/tor-browser.conf"
+app_try() {
+    XDG_RUNTIME_DIR=$out/xdg LOCACHY_CONT_CONF=$out/conf LOCACHY_CONT_BASE=$out/cont \
+        LOCACHY_APP_RUNTIME=$out/apprun LOCACHY_APP_INIT=$out/app-init \
+        LOCACHY_TOR_ENFORCE=$src/link/tor-enforce LOCACHY_RC_CONF=$out/rc.conf \
+        bash "$src/link/locachy-app" start tor-browser 2>&1
+}
+rc 'tor_front="bridges"'
+check "tor=\"1\": locachy-app refuses to start when service_tor is off" \
+    "! app_try >/dev/null && app_try | grep -q 'requires full-system Tor: turn Tor on'"
+rc 'service_tor="tor-client"' 'tor_front="bridges"'
+check "tor=\"1\": locachy-app refuses to start when Tor's firewall is not loaded" \
+    "! app_try >/dev/null && app_try | grep -q 'firewall is not loaded'"
+kill "$wsock" 2>/dev/null; wait "$wsock" 2>/dev/null
+check "tor-enforce app-load refuses malformed names or cgroup paths" \
+    "! enforce app-load '../bad' '/app_bad' 2>/dev/null && ! enforce app-load 'tor-browser' '/other' 2>/dev/null"
+cg_here=$(sed -n 's/^0:://p' /proc/self/cgroup)
+if [ -n "$cg_here" ] && [ "$cg_here" != / ] || [ -w /sys/fs/cgroup/cgroup.procs ]; then
+    cg_parent="/sys/fs/cgroup${cg_here%/}"
+    if mkdir -p "$cg_parent/host_scope" "$cg_parent/app_tor-browser" 2>/dev/null &&
+       (echo 0 >"$cg_parent/host_scope/cgroup.procs") 2>/dev/null; then
+        echo 0 >"$cg_parent/host_scope/cgroup.procs"
+        cg_target="${cg_here%/}/app_tor-browser"
+        enforce load bridges
+        listen socks tor listen-tcp 127.0.0.1 9050
+        listen trans tor listen-tcp 127.0.0.1 9040
+        listen dns tor listen-dns 5353
+        listen loop6 root listen-tcp ::1 8080
+        check "tor=\"1\": app-load installs the container's cgroup firewall" \
+            "enforce app-load tor-browser '$cg_target'"
+        in_app() {
+            (echo 0 >"$cg_parent/app_tor-browser/cgroup.procs" && as nobody "$@")
+        }
+        a0=$(left all)
+        check "tor=\"1\" (Tor on): reaches 127.0.0.1:9050, while direct TCP, LAN, TransPort, DNS/UDP and IPv6 are all refused" \
+            "[ \"\$(in_app python3 -I $out/net.py tcp 127.0.0.1 9050)\" = connected ] && [ -s $out/heard/socks ] && [ \"\$(in_app python3 -I $out/net.py tcp 192.0.2.1 80)\" = refused ] && [ ! -s $out/heard/trans ] && [ \"\$(in_app python3 -I $out/net.py tcp 10.99.0.7 80)\" = refused ] && [ \"\$(in_app python3 -I $out/net.py tcp 127.0.0.1 9040)\" = refused ] && in_app python3 -I $out/net.py dns 192.0.2.53 53 | grep -q '^error ' && [ ! -s $out/heard/dns ] && in_app python3 -I $out/net.py udp 192.0.2.1 443 | grep -q '^error ' && [ \"\$(in_app python3 -I $out/net.py tcp6 ::1 8080)\" = refused ] && [ \"\$(in_app python3 -I $out/net.py tcp6 2001:db8::99 443)\" = refused ] && [ \$(left all) -eq $a0 ]"
+        check "tor=\"1\" (Tor on): another process outside app_tor-browser still reaches the TransPort" \
+            "[ \"\$(as nobody python3 -I $out/net.py tcp 192.0.2.1 80)\" = connected ] && grep -qx 192.0.2.1:80 $out/heard/trans"
+        # Now switch full-system Tor off (remove locachy-tor and stop the SocksPort):
+        # the running Tor-only container's table stays and still blocks all non-Tor traffic.
+        enforce remove
+        stop_listeners
+        a0=$(left all)
+        check "tor=\"1\" (Tor switched off mid-run): 9050, direct TCP, LAN, UDP and IPv6 all fail closed; zero packets leave" \
+            "! enforce loaded && [ \"\$(in_app python3 -I $out/net.py tcp 127.0.0.1 9050)\" = refused ] && [ \"\$(in_app python3 -I $out/net.py tcp 192.0.2.1 80)\" = refused ] && [ \"\$(in_app python3 -I $out/net.py tcp 10.99.0.7 80)\" = refused ] && in_app python3 -I $out/net.py udp 192.0.2.1 443 | grep -q '^error ' && in_app python3 -I $out/net.py dns 10.99.0.1 53 | grep -q '^error ' && [ \"\$(in_app python3 -I $out/net.py tcp6 2001:db8::99 443)\" = refused ] && [ \$(left all) -eq $a0 ]"
+        check "tor=\"1\": app-remove takes the container's table away once stopped" \
+            "enforce app-remove tor-browser && ! in_ns nft list tables | grep -q locachy_tor_app_"
+    else
+        skip "tor=\"1\" cgroup firewall packet checks (no delegated cgroup)"
+    fi
+else
+    skip "tor=\"1\" cgroup firewall packet checks (no delegated cgroup)"
+fi
 
 # 4. mihomo beside Tor.
 tun=0

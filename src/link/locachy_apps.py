@@ -4,7 +4,7 @@ apart from the system's source. Its files are data, parsed and validated,
 never sourced or run; a catalog is taken whole or not at all, and switched in
 one step, so that a failure keeps the one there was.
 
-A repository has FORMAT (its format: one line, 1 or 2) and its presets in
+A repository has FORMAT (its format: one line, 1, 2 or 3) and its presets in
 apps/NAME.conf. Installed, the catalog is APPS_DIR/catalog: NAME.conf, and
 CATALOG, where it came from (KEY="VALUE" lines, as rc.conf). The updater
 (locachy-pkg) fetches into APPS_DIR/repo.git. A configuration made from a
@@ -33,7 +33,7 @@ import time
 
 APPS_DIR = "/var/lib/locachy/apps"
 SOURCE_COMMIT_FILE = "/usr/local/lib/locachy/source-commit"
-FORMATS = ("1", "2") # format 2 may request real-system access (host)
+FORMATS = ("1", "2", "3") # format 2 adds host; format 3 adds tor
 MAX_BYTES = 16 * 1024
 NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
@@ -65,6 +65,7 @@ CHECKS = {
     "command": (lambda v: _path(v) and " " not in v, "an absolute path"),
     "arguments": (lambda v: True, ""),
     "network": (lambda v: v in ("0", "1"), "0 or 1"),
+    "tor": (lambda v: v in ("0", "1"), "0 or 1"),
     "camera": (lambda v: v in ("0", "1"), "0 or 1"),
     "screencast": (lambda v: v in ("0", "1"), "0 or 1"),
     "x11": (lambda v: v in ("0", "1"), "0 or 1"),
@@ -75,7 +76,7 @@ CHECKS = {
 REQUIRED = ("package", "command")
 
 
-def preset_values(name, data, fmt="2"):
+def preset_values(name, data, fmt="3"):
     """KEY -> VALUE of preset NAME (its bytes), validated: UTF-8, each line
     empty, a comment or KEY="VALUE", each key known and once, each value of
     its kind; package and command there."""
@@ -96,6 +97,8 @@ def preset_values(name, data, fmt="2"):
         key, value = match.groups()
         if key == "host" and fmt == "1":
             raise CatalogError(f"{where}: host requires format 2")
+        if key == "tor" and fmt in ("1", "2"):
+            raise CatalogError(f"{where}: tor requires format 3")
         if key not in CHECKS:
             raise CatalogError(f"{where}: unknown key {key}")
         if key in values:
@@ -127,7 +130,7 @@ def _read(path):
         return f.read(MAX_BYTES + 1)
 
 
-def _presets(directory, extra=(), fmt="2"):
+def _presets(directory, extra=(), fmt="3"):
     """NAME -> bytes of the presets in directory, where every entry but extra
     is a valid NAME.conf: the first that is not rejects them all."""
     found = {}

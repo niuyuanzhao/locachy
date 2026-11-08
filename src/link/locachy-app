@@ -34,7 +34,17 @@
 #   command       the program it runs
 #   arguments     the program's arguments, separated by spaces (no quoting); a
 #                 file or URL it opens goes after them
-#   network       "1": on locachy-net
+#   network       "1": on locachy-net (without it, a network of its own with
+#                 loopback only); with Tor on (service_tor), Tor is its only
+#                 way off the local network: its TCP to the TransPort, DNS to
+#                 the DNSPort, and Tor's SocksPort (127.0.0.1:9050 there) for
+#                 a program that speaks SOCKS, as Tor Browser does
+#                 (tor-client, tor-enforce)
+#   tor           "1": only full-system Tor, through its SocksPort; with
+#                 network="1", refuses to start unless Tor and its firewall
+#                 are on. A separate cgroup firewall permits only TCP to
+#                 127.0.0.1:9050, even if Tor is switched off while it runs.
+#                 network="0" still means entirely offline.
 #   camera        "1": the ordinary cameras (V4L2 capture nodes, /dev/videoN, and
 #                 their media controller nodes, as video calls use them), the
 #                 user's in it, as they come and go; never the face unlock or an
@@ -82,6 +92,8 @@ APP_RUNTIME="${LOCACHY_APP_RUNTIME:-/run/locachy/apps}"
 RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/0}"
 APP_INIT="${LOCACHY_APP_INIT:-/usr/local/lib/locachy/app-init}"
 CLIPBOARD="${LOCACHY_CLIPBOARD_TOOL:-/usr/local/lib/locachy/clipboard}"
+TOR_ENFORCE="${LOCACHY_TOR_ENFORCE:-/usr/local/lib/locachy/tor-enforce}"
+RC_CONF="${LOCACHY_RC_CONF:-/etc/locachy/rc.conf}"
 # The containers' sound: the directories of the restricted sockets of the
 # host's servers (audio-client; 50-locachy-sockets.conf, 50-locachy-pulse.conf).
 # A container gets the directories, not the sockets: servers started again
@@ -100,7 +112,8 @@ DOCS_VIEWS=$DOCS_DIR/views
 # These overrides are intentionally a root-only integration-test seam. They
 # cannot be used to redirect a normal unprivileged invocation, and all paths
 # must be absolute so the test namespace cannot be selected accidentally.
-for override_name in LOCACHY_CONT_BASE LOCACHY_CONT_CONF LOCACHY_APP_RUNTIME LOCACHY_APP_INIT LOCACHY_CLIPBOARD_TOOL; do
+for override_name in LOCACHY_CONT_BASE LOCACHY_CONT_CONF LOCACHY_APP_RUNTIME LOCACHY_APP_INIT LOCACHY_CLIPBOARD_TOOL \
+    LOCACHY_TOR_ENFORCE LOCACHY_RC_CONF; do
     if [ -n "${!override_name+x}" ]; then
         [ "$(id -u)" = 0 ] || die "${override_name} override requires root"
         override_value=${!override_name}
@@ -336,6 +349,11 @@ do_stop() {
         fi
     fi
     rm -f "$APP_RUNTIME/$name/reaper.pid" "$APP_RUNTIME/$name.ready"
+    if [ "$(conf_value "$name" tor)" = 1 ]; then
+        "$TOR_ENFORCE" app-remove "$name" || die "$name: cannot remove its Tor firewall"
+    elif [ -x "$TOR_ENFORCE" ]; then
+        "$TOR_ENFORCE" app-remove "$name" || true
+    fi
     # No host mounts to unmount: the private mount namespace dies with the
     # subtree. Leave upper, work and data untouched.
 }
@@ -347,6 +365,12 @@ do_stop() {
 do_open_running() { # NAME TARGET COMMAND...
     local name=$1 target=$2 pid= ticks= kv uid= gid= home=/ nnp=
     shift 2
+    if [ "$(conf_value "$name" network)" = 1 ] && [ "$(conf_value "$name" tor)" = 1 ]; then
+        grep -qE '^[[:space:]]*service_tor=' "$RC_CONF" 2>/dev/null ||
+            die "$name requires full-system Tor: turn Tor on in settings first"
+        "$TOR_ENFORCE" loaded ||
+            die "$name requires full-system Tor and its firewall is not loaded"
+    fi
     if [ -r "$APP_RUNTIME/$name/reaper.pid" ]; then
         read -r pid ticks <"$APP_RUNTIME/$name/reaper.pid" || true
     fi
@@ -538,6 +562,11 @@ do_rollback() {
 # The container gone: its configuration, its builds; its home only if asked.
 do_remove() {
     local name="$1" cbase="$CONT_BASE/$1"
+    if [ "$(conf_value "$name" tor)" = 1 ]; then
+        "$TOR_ENFORCE" app-remove "$name" || die "$name: cannot remove its Tor firewall"
+    elif [ -x "$TOR_ENFORCE" ]; then
+        "$TOR_ENFORCE" app-remove "$name" || true
+    fi
     rm -f "$CONT_CONF/$name.conf"
     if [ "${2:-}" = --data ]; then
         rm -rf "$cbase"
@@ -881,6 +910,16 @@ if [ "$(conf_value "$name" x11)" = 1 ]; then
     [ -S "/tmp/.X11-unix/X${x11_display#:}" ] ||
         die "$name: it asks for X11 (x11=\"1\") and the shared X11 socket is not there (Xwayland starting again): not started"
 fi
+# Full-system Tor, for a program that may only go out through Tor (tor="1" on
+# the network): refused before any state or cgroup is made, as X11 is above.
+want_tor=0
+if { [ "$want_net" = 1 ] || [ "$(conf_value "$name" network)" = 1 ]; } && [ "$(conf_value "$name" tor)" = 1 ]; then
+    want_tor=1
+    grep -qE '^[[:space:]]*service_tor=' "$RC_CONF" 2>/dev/null ||
+        die "$name requires full-system Tor: turn Tor on in settings first; not started"
+    "$TOR_ENFORCE" loaded ||
+        die "$name requires full-system Tor and its firewall is not loaded; not started"
+fi
 [ -x "$APP_INIT" ] || die "container reaper is not installed: $APP_INIT"
 for tool in unshare chroot mount mkfifo; do
     command -v "$tool" >/dev/null 2>&1 || die "$tool is required"
@@ -946,8 +985,8 @@ if [ "$want_net" = 1 ] && [ -e /run/netns/locachy-net ]; then
 fi
 # The Clash proxy with only its port (clash-client, clash_mode="proxy"): a
 # container on the network is told of it; its programs that honour these use it.
-if [ "$want_net" = 1 ] && grep -q '^[[:space:]]*service_clash=' /etc/locachy/rc.conf 2>/dev/null &&
-    grep -q '^[[:space:]]*clash_mode="proxy"' /etc/locachy/rc.conf; then
+if [ "$want_net" = 1 ] && [ "$want_tor" != 1 ] && grep -q '^[[:space:]]*service_clash=' "$RC_CONF" 2>/dev/null &&
+    grep -q '^[[:space:]]*clash_mode="proxy"' "$RC_CONF"; then
     export http_proxy=http://127.0.0.1:7890 https_proxy=http://127.0.0.1:7890 all_proxy=socks5://127.0.0.1:7890
     export no_proxy=localhost,127.0.0.1,::1,.local,.ts.net
     export HTTP_PROXY=$http_proxy HTTPS_PROXY=$https_proxy ALL_PROXY=$all_proxy NO_PROXY=$no_proxy
@@ -982,8 +1021,16 @@ docs_select "$name"
 # Move the launcher itself before ANY namespace child is forked. From here
 # every helper, unshare parent, PID 1 and descendant inherits app_NAME.
 # An empty cgroup can retain a previous freeze request after forced teardown.
+caller_cg="$CGROUP_BASE$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null)"
 printf '0\n' >"$cg/cgroup.freeze"
 printf '%s\n' "$$" >"$cg/cgroup.procs"
+if [ "$want_tor" = 1 ]; then
+    cg_relative=$(sed -n 's/^0:://p' /proc/self/cgroup)
+    "$TOR_ENFORCE" app-load "$name" "$cg_relative" ||
+        die "$name: cannot load its Tor-only firewall; not started"
+elif [ -x "$TOR_ENFORCE" ]; then
+    "$TOR_ENFORCE" app-remove "$name" || true
+fi
 # Slave: the shared mounts of the host, ~/Drives (the drives service) and
 # the document views (locachy-docs), pass their mounts on to the container
 # as they come and go; nothing passes back.
@@ -1343,7 +1390,10 @@ if ! wait_ready "$READY_FD" "$launcher"; then
     line) printf 'locachy-app: %s wrote a malformed readiness line\n' "$name" >&2 ;;
     *) printf 'locachy-app: %s failed to initialize within six seconds\n' "$name" >&2 ;;
     esac
+    [ ! -w "$caller_cg/cgroup.procs" ] || printf '%s\n' "$$" >"$caller_cg/cgroup.procs" 2>/dev/null || true
     printf '1\n' >"$cg/cgroup.kill"
+    wait_event "$cg" populated 0 || true
+    [ "$want_tor" != 1 ] || is_running "$name" || "$TOR_ENFORCE" app-remove "$name" || true
     exit 125
 fi
 exec {READY_FD}>&-
@@ -1353,4 +1403,6 @@ unlock_app
 status=0
 wait "$launcher" || status=$?
 rm -f "$APP_RUNTIME/$name.ready" "$APP_RUNTIME/$name/reaper.pid"
+[ ! -w "$caller_cg/cgroup.procs" ] || printf '%s\n' "$$" >"$caller_cg/cgroup.procs" 2>/dev/null || true
+[ "$want_tor" != 1 ] || is_running "$name" || "$TOR_ENFORCE" app-remove "$name" || true
 exit "$status"

@@ -22,6 +22,8 @@
 #   - DNS (port 53, UDP and TCP), wherever it is sent, to Tor's DNSPort
 #     (127.0.0.1:5353; Tor answers UDP there, TCP is refused)
 #   - the addresses Tor gives .onion names (127.192.0.0/10) to its TransPort
+#   - Tor's SocksPort (127.0.0.1:9050, for Tor Browser) as it is, not
+#     redirected: on the namespace's loopback, which the host does not reach
 #   - what is for this machine stays on it: loopback (Tor's ports are
 #     there), the answers of Tor's ports and of whatever is on the machine,
 #     to whichever of its addresses (mihomo's TUN's, the local network's)
@@ -41,6 +43,7 @@ TOR_USER=${LOCACHY_TOR_USER:-tor}
 TABLE="inet locachy-tor"
 TRANS_PORT=9040
 DNS_PORT=5353
+SOCKS_PORT=9050        # on 127.0.0.1 (tor-client)
 MIHOMO_PORT=7890       # mihomo's own (clash-client)
 MIHOMO_TOR_PORT=7891   # its port for Tor (clash-client)
 MIHOMO_FRONT_MARK=2023 # its connections as Tor's front (clash-client)
@@ -95,6 +98,7 @@ table $TABLE {
     counter redirected {}
     counter dns {}
     counter onion {}
+    counter socks {}
     counter lan {}
     counter tor {}
     counter front {}
@@ -138,6 +142,7 @@ EOF
         fib daddr type local tcp dport $MIHOMO_TOR_PORT meta skuid != $uid counter name dropped reject with tcp reset
 EOF
     fi
+    echo "        ip daddr 127.0.0.1 tcp dport $SOCKS_PORT counter name socks accept"
     echo "        fib daddr type local accept"
     [ "$front" = none ] || echo "        meta skuid $uid jump tor"
     [ "$front" != mihomo ] || echo "        meta mark $MIHOMO_FRONT_MARK counter name front accept"
@@ -186,7 +191,58 @@ EOF
 EOF
 }
 
+# A Tor-only container gets a separate table: turning full-system Tor off
+# removes locachy-tor, never this restriction. Run before the container starts,
+# after its launcher entered app_NAME; CGROUP is its /proc/self/cgroup path.
+# The filter runs before dstnat, so a direct TCP connection is refused, not
+# transparently redirected; only the SocksPort is reachable (no LAN bypass).
+app_table() {
+    printf 'locachy_tor_app_%s\n' "$(printf '%s' "$1" | sha256sum | cut -c1-16)"
+}
+
+app_rules() { # NAME CGROUP (absolute, from the root cgroup namespace)
+    local name=$1 path=$2 level table
+    [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$ ]] || return 2
+    [[ "$path" =~ ^/[a-zA-Z0-9_.@/-]+$ ]] && [ "${path##*/}" = "app_$name" ] || return 2
+    path=${path#/}
+    level=$(awk -F/ '{print NF}' <<<"$path")
+    table=$(app_table "$name")
+    cat <<EOF
+table inet $table
+delete table inet $table
+table inet $table {
+    counter socks {}
+    counter dropped {}
+    chain output {
+        type filter hook output priority -150; policy accept;
+        socket cgroupv2 level $level "$path" jump tor_only
+    }
+    chain tor_only {
+        ip daddr 127.0.0.1 tcp dport $SOCKS_PORT counter name socks accept
+        meta l4proto tcp counter name dropped reject with tcp reset
+        counter name dropped reject
+    }
+}
+EOF
+}
+
 case "${1:-}" in
+app-load)
+    [ $# -eq 3 ] || exit 2
+    [ -e "/run/netns/$NS" ] || exit 1
+    # nsenter, not ip netns exec (which mounts a fresh sysfs over /sys and
+    # hides /sys/fs/cgroup, where nft resolves socket cgroupv2).
+    text=$(app_rules "$2" "$3") || exit $?
+    nsenter --net="/run/netns/$NS" nft -f - <<<"$text"
+    ;;
+app-remove)
+    [ $# -eq 2 ] && [[ "$2" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$ ]] || exit 2
+    [ -e "/run/netns/$NS" ] || exit 0
+    table=$(app_table "$2")
+    if nsenter --net="/run/netns/$NS" nft list table inet "$table" >/dev/null 2>&1; then
+        nsenter --net="/run/netns/$NS" nft delete table inet "$table"
+    fi
+    ;;
 load)
     [ $# -eq 2 ] || { echo "usage: tor-enforce load mihomo|bridges" >&2; exit 2; }
     if [ ! -e "/run/netns/$NS" ]; then

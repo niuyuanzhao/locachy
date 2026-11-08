@@ -5,7 +5,8 @@
 # machine's network, tor-client (its firewall first) must bring tor to
 # Bootstrapped 100% through the obfs4 or WebTunnel lines of the file BRIDGES,
 # and a program (nobody) must reach check.torproject.org through the DNSPort
-# and the TransPort, which says it came from Tor. Meanwhile nothing but the
+# and the TransPort, and through the SocksPort (as Tor Browser does), which
+# says it came from Tor; the host does not reach the SocksPort. Meanwhile nothing but the
 # tor user's own connections (and the local network) leaves the namespace,
 # counted after the firewall.
 set -u
@@ -64,6 +65,17 @@ done
 cat "$out/check.json"; echo
 check "nobody reaches check.torproject.org (DNSPort, TransPort): it came from Tor" \
     "grep -q '\"IsTor\":true' $out/check.json"
+# As Tor Browser does: SOCKS to Tor's SocksPort, the name resolved by Tor.
+for _ in 1 2 3; do
+    in_ns setpriv --reuid=nobody --regid=nobody --clear-groups \
+        curl -sS --max-time 90 --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip \
+        >"$out/check-socks.json" 2>>"$out/curl.log" && break
+done
+cat "$out/check-socks.json"; echo
+check "nobody reaches check.torproject.org through the SocksPort (127.0.0.1:9050): it came from Tor ($(packets locachy-tor socks) packets counted)" \
+    "grep -q '\"IsTor\":true' $out/check-socks.json && [ \$(packets locachy-tor socks) -gt 0 ]"
+check "the host (outside the namespace) does not reach the SocksPort" \
+    "! curl -sS --max-time 10 --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip >/dev/null 2>&1"
 check "what left the namespace: the tor user's ($(packets probe tor) packets), nothing else ($(packets probe others))" \
     "[ \$(packets probe tor) -gt 0 ] && [ \$(packets probe others) -eq 0 ]"
 printf '%s\n' 'tor_front="bridges"' >"$out/rc.conf"

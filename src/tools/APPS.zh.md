@@ -15,10 +15,10 @@ ChatGPT 直接从商店配方选择安装，不必先手动安装宿主包。其
 `/usr/local/lib/locachy/`）。更新器加载它；`make.sh`、live 入口和 `make-installer.sh` 以
 `python3 -I locachy_apps.py validate|catalog|bootstrap ...` 运行它。
 
-## 仓库（格式 2）
+## 仓库（格式 3）
 
 ```
-FORMAT          一行：2
+FORMAT          一行：3
 apps/NAME.conf  预设
 README.md, README.zh.md, LICENSE
 tools/check.py  用某个系统自己的辅助模块检查本仓库：
@@ -28,15 +28,15 @@ tools/check.py  用某个系统自己的辅助模块检查本仓库：
 其中的文件都是数据：只解析、校验，从不 source 或执行。第一个无效文件会使整个目录被拒绝，
 已安装的目录保持不变：
 
-- `FORMAT` 必须是本系统能读的格式（`1` 或 `2`），否则报 `not compatible: format N`。
-  格式 2 增加 `host`，格式 1 仍不允许该键。先更新系统再更新应用目录：旧系统会明确拒绝格式 2，保留之前的目录。
-- `NAME` 为 `[a-z0-9][a-z0-9._-]{0,62}`。每个预设是普通文件（不是链接），至多 16 KiB，UTF-8。
+- `FORMAT` 必须是本系统能读的格式（`1`、`2` 或 `3`），否则报 `not compatible: format N`。
+  格式 2 增加 `host`，格式 3 增加 `tor`（旧格式仍不允许之后新增的键）。先更新系统再更新应用目录：旧系统会明确拒绝新格式，保留之前的目录。
+- `NAME` 为 `[a-z0-9][a-z0-9._-]{0,62}`（且不以 `window-` 开头）。每个预设是普通文件（不是链接），至多 16 KiB，UTF-8。
   `apps/` 中不能有其他东西，且至少有一个预设。
 - 每行是空行、`#` 注释或 `KEY="VALUE"`。键为 `package`、`extras`、`command`、`arguments`、
-  `network`、`camera`、`screencast`、`directories`、`desktop`、`x11`，格式 2 还有 `host`。
+  `network`、`camera`、`screencast`、`directories`、`desktop`、`x11`，格式 2 增加 `host`，格式 3 增加 `tor`。
   未知键、重复键或其他任何行都会拒绝整个目录。
 - 值中不能有 `"`、`\`、`$`、反引号或控制字符。`package` 是一个 pacman 包名；`extras` 是空格分隔的包名；
-  `command` 是不含 `..` 和空格的绝对路径；`network`、`camera`、`screencast`、`x11`、`host` 为 `0` 或 `1`；
+  `command` 是不含 `..` 和空格的绝对路径；`network`、`tor`、`camera`、`screencast`、`x11`、`host` 为 `0` 或 `1`；
   `directories` 是冒号分隔、不含 `..` 的绝对路径；`desktop` 是 `*.desktop` 文件名。
   `package` 和 `command` 必须有。
 

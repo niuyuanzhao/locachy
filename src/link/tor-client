@@ -9,10 +9,14 @@
 #   bridges   through the bridges of STATE/bridges (obfs4 or WebTunnel, by
 #             lyrebird), Tor's Bridge lines, which settings writes
 # Everyone else's TCP goes to Tor's TransPort and DNS to its DNSPort; the rest
-# is refused (tor-enforce, loaded first). The rules stay while service_tor is
-# in rc.conf, whatever becomes of tor: when it ends, or this ends or starts
-# again, nothing goes out until tor is back. They go when service_tor has gone
-# (Tor off). What it keeps:
+# is refused (tor-enforce, loaded first). A program that speaks SOCKS (Tor
+# Browser, as on Tails) uses Tor's SocksPort, 127.0.0.1:9050 in locachy-net:
+# that loopback is the namespace's own, so only what runs there (the
+# containers on the network) reaches it, never the host. The rules stay while
+# service_tor is in rc.conf, whatever becomes of tor: when it ends, or this
+# ends or starts again, nothing goes out until tor is back (its ports, the
+# SocksPort too, refuse). They go when service_tor has gone (Tor off). What it
+# keeps:
 #   STATE/bridges        the bridge lines (settings'), which containers do not see
 #   RUN/torrc            tor's configuration, made from rc.conf and them
 #   RUN/state            what it waits for, or does (tor-client --status)
@@ -32,9 +36,11 @@ ENFORCE=${LOCACHY_TOR_ENFORCE:-/usr/local/lib/locachy/tor-enforce}
 export LOCACHY_TOR_NETNS=${LOCACHY_TOR_NETNS:-locachy-net} LOCACHY_TOR_USER=${LOCACHY_TOR_USER:-tor}
 NS=$LOCACHY_TOR_NETNS
 USER_=$LOCACHY_TOR_USER
-# What tor-enforce sends where, and mihomo's port for Tor (clash-client).
+# What tor-enforce sends where, the SocksPort it lets through, and mihomo's
+# port for Tor (clash-client).
 TRANS=127.0.0.1:9040
 DNS=127.0.0.1:5353
+SOCKS=127.0.0.1:9050
 MIHOMO_TOR=127.0.0.1:7891
 
 on() {
@@ -68,9 +74,10 @@ DataDirectory $DATA
 PidFile $RUN/tor.pid
 Log notice file $RUN/notices.log
 TruncateLogFile 1
-# Every program's TCP comes transparently (tor-enforce), DNS to the DNSPort;
-# no program speaks SOCKS to it.
-SocksPort 0
+# Every program's TCP comes transparently (tor-enforce), DNS to the DNSPort.
+# The SocksPort is for Tor Browser, which keeps its circuits apart by the SOCKS
+# username and password it sends (IsolateSOCKSAuth, its TorDomainIsolator).
+SocksPort $SOCKS IsolateSOCKSAuth KeepAliveIsolateSOCKSAuth
 TransPort $TRANS IsolateDestAddr IsolateDestPort
 DNSPort $DNS
 AutomapHostsOnResolve 1
