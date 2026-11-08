@@ -118,8 +118,13 @@ struct bar {
         char tray[OPEN_NAME];   /* or (both empty) a scroll arrow: step -1 or 1 */
         int step, x0, x1;
     } buttons[MAX_BUTTONS];     /* the window list as drawn (buffer pixels) */
-    struct panel_hit status[8]; /* the status blocks as drawn (buffer pixels) */
+    struct panel_hit status[9]; /* the status blocks and LOCachy as drawn (buffer pixels) */
     int nstatus;
+    /* While the launcher is up: a transparent surface over the screen that
+     * takes the clicks outside it (launcher_catch). */
+    struct wl_surface *catch_surf;
+    struct zwlr_layer_surface_v1 *catch_lsurf;
+    struct wp_viewport *catch_viewport;
     int first;                  /* the window list scrolled: its first entry shown */
     struct window *focus_seen;  /* the focused window when it was last drawn */
     double wheel;               /* scrolling not yet a whole entry */
@@ -183,6 +188,7 @@ struct window {
 };
 static struct zwlr_foreign_toplevel_manager_v1 *toplevel_mgr;
 static struct window *windows;
+static unsigned focus_changes; /* each time a window gets the focus */
 
 /* The container of w: the one its app id names, else its parent window's
  * (a dialog another program draws for it, as a portal's file chooser);
@@ -258,6 +264,7 @@ static void win_state(void *data, struct zwlr_foreign_toplevel_handle_v1 *h, str
 {
     struct window *w = data;
     uint32_t *state;
+    int was = w->activated;
     (void)h;
     w->activated = w->minimized = 0;
     wl_array_for_each(state, states) {
@@ -270,6 +277,7 @@ static void win_state(void *data, struct zwlr_foreign_toplevel_handle_v1 *h, str
     if (w->activated) {
         w->focused_at = uptime();
     }
+    focus_changes += w->activated && !was;
 }
 
 static void win_done(void *data, struct zwlr_foreign_toplevel_handle_v1 *h)
@@ -1118,10 +1126,20 @@ static void render_bars(void)
     }
 }
 
+/* The launcher (LOCachy's block; see launcher_open). */
+static int launcher_shown;
+static struct wl_surface *launcher_surface(void);
+static void launcher_toggle(struct bar *b);
+static void launcher_close(void);
+static void launcher_click(double y, uint32_t button);
+static void launcher_hover(double y);
+static int launcher_catch(struct wl_surface *s);
+
 /* Pointer: clicks on the window list, with an arrow over the bar. */
 static struct wl_pointer *pointer;
 static struct bar *pointer_bar;
 static int pointer_notes; /* over the notifications */
+static int pointer_launcher, pointer_outside; /* over the launcher, or outside it while it is up */
 static double pointer_x, pointer_y;
 static struct wl_cursor_theme *cursor_theme;
 static struct wl_surface *cursor_surface;
@@ -1139,8 +1157,13 @@ static void pointer_enter(void *data, struct wl_pointer *p, uint32_t serial, str
         }
     }
     pointer_notes = s && s == notes_surface();
+    pointer_launcher = s && s == launcher_surface();
+    pointer_outside = s && launcher_catch(s);
     pointer_x = wl_fixed_to_double(x);
     pointer_y = wl_fixed_to_double(y);
+    if (pointer_launcher) {
+        launcher_hover(pointer_y);
+    }
 #ifdef CORNER_TEST_MOTION
     if (pointer_bar) {
         printf("corner-pointer %u %.3f %.3f\n", pointer_bar->name, pointer_x, pointer_y);
@@ -1170,7 +1193,7 @@ static void pointer_leave(void *data, struct wl_pointer *p, uint32_t serial, str
         pointer_bar->corner_attempt = 0;
     }
     pointer_bar = NULL;
-    pointer_notes = 0;
+    pointer_notes = pointer_launcher = pointer_outside = 0;
 }
 
 static void pointer_motion(void *data, struct wl_pointer *p, uint32_t time, wl_fixed_t x, wl_fixed_t y)
@@ -1180,6 +1203,9 @@ static void pointer_motion(void *data, struct wl_pointer *p, uint32_t time, wl_f
     (void)time;
     pointer_x = wl_fixed_to_double(x);
     pointer_y = wl_fixed_to_double(y);
+    if (pointer_launcher) {
+        launcher_hover(pointer_y);
+    }
 #ifdef CORNER_TEST_MOTION
     if (pointer_bar) {
         printf("corner-pointer %u %.3f %.3f\n", pointer_bar->name, pointer_x, pointer_y);
@@ -1237,6 +1263,14 @@ static void pointer_button(void *data, struct wl_pointer *p, uint32_t serial, ui
     (void)p;
     (void)serial;
     (void)time;
+    if (state == WL_POINTER_BUTTON_STATE_PRESSED && pointer_launcher) {
+        launcher_click(pointer_y, button);
+        return;
+    }
+    if (state == WL_POINTER_BUTTON_STATE_PRESSED && pointer_outside) {
+        launcher_close(); /* a click outside it, taken for that only */
+        return;
+    }
     if (state == WL_POINTER_BUTTON_STATE_PRESSED && pointer_notes) {
         notes_click(pointer_y, button);
         return;
@@ -1247,12 +1281,16 @@ static void pointer_button(void *data, struct wl_pointer *p, uint32_t serial, ui
     double x = pointer_x * (pointer_bar->viewport ? pointer_bar->scale120 : 120) / 120.0;
     for (int i = 0; i < pointer_bar->nstatus; i++) {
         if (x >= pointer_bar->status[i].x0 && x < pointer_bar->status[i].x1) {
-            if (button == BTN_LEFT) {
+            if (button == BTN_LEFT && pointer_bar->status[i].id == PANEL_BLOCK_LOCACHY) {
+                launcher_toggle(pointer_bar);
+            } else if (button == BTN_LEFT) {
+                launcher_close();
                 status_open(pointer_bar->status[i].id);
             }
             return;
         }
     }
+    launcher_close(); /* the window list: the click is its own as well */
     for (int i = 0; i < pointer_bar->nbuttons; i++) {
         if (x >= pointer_bar->buttons[i].x0 && x < pointer_bar->buttons[i].x1) {
             if (pointer_bar->buttons[i].win) {
@@ -1567,11 +1605,13 @@ struct overlay {
     void (*render)(void);       /* draws it anew: configured, the scale changed */
     uint32_t anchor;            /* the edges it is at; none: in the middle */
     int margin;                 /* from them, logical pixels */
+    int top;                    /* more from the top edge (under the bar), logical pixels */
     struct wl_surface *surf;
     struct zwlr_layer_surface_v1 *lsurf;
     struct wp_fractional_scale_v1 *scale;
     struct wp_viewport *viewport;
     struct wl_output *output;   /* the screen asked for; NULL: labwc's choice */
+    struct wl_output *pin;      /* the screen it stays on; NULL: the focused window's */
     uint32_t scale120;
     uint32_t want_w, want_h;    /* logical pixels asked for, and configured: */
     uint32_t w, h;
@@ -1663,11 +1703,12 @@ static const struct wp_fractional_scale_v1_listener overlay_scale_listener = {
 };
 
 /* Ready to draw o, rows cells high and cols wide (0: as wide as the screen,
- * anchored left and right): 1 with o's buffer to draw into, or 0
+ * anchored left and right), on its pinned screen or the focused window's:
+ * 1 with o's buffer to draw into, or 0
  * (its surface, or its new size, is asked for; drawn when configured). */
 static int overlay_begin(struct overlay *o, int cols, int rows)
 {
-    struct wl_output *out = focused_output();
+    struct wl_output *out = o->pin ? o->pin : focused_output();
     if (o->surf && out && out != o->output) {
         overlay_destroy(o); /* the focus went to another screen */
     }
@@ -1686,7 +1727,7 @@ static int overlay_begin(struct overlay *o, int cols, int rows)
         if (cols == 0) {
             zwlr_layer_surface_v1_set_exclusive_zone(o->lsurf, -1); /* over the bar too */
         } /* else kept off the bar by labwc */
-        zwlr_layer_surface_v1_set_margin(o->lsurf, o->margin, o->margin, o->margin, o->margin);
+        zwlr_layer_surface_v1_set_margin(o->lsurf, o->margin + o->top, o->margin, o->margin, o->margin);
         zwlr_layer_surface_v1_add_listener(o->lsurf, &overlay_listener, o);
     }
     uint32_t s120 = o->viewport ? o->scale120 : 120;
@@ -2251,9 +2292,10 @@ static void update_xkb_modifiers(void)
 
 /* The keyboard is the bar's in the input method's modes; in direct input too
  * while a keyboard types in a layout not the system's, else the compositor
- * would give it the system's. */
+ * would give it the system's; and while the launcher is up. */
 static int grab_wanted(void)
 {
+    if (launcher_shown) return 1;
     for (int i = 0; i < nkbds; i++) {
         if (kbd_layout[i] != 0) return 1;
     }
@@ -3564,13 +3606,384 @@ static void notes_click(double y, uint32_t button)
     note_remove(i, 2);
 }
 
-/* An overlay on the screen goes with the focus to another screen. */
+/*
+ * The launcher: LOCachy's block at the left of the top bar clicked, or
+ * Alt+F1 (rc.conf binds no key to it; KDE's launcher key). It lists, under
+ * the bar, on the screen clicked (from the keyboard: the focused window's):
+ * home, full screen; the programs as home groups them, each as a window on
+ * this desktop (window_open: the seat passes it to process 1, as the status
+ * blocks do); and, for home's own file manager, full screen at the home
+ * folder. Up/Down select, Enter or a click runs an entry, Esc closes it. The
+ * keyboard is the bar's while it is up (the presses of keys already held
+ * stay with the window), and a transparent layer surface over each screen
+ * takes a click outside it, which only closes it. It closes when another
+ * window gets the focus or the shared display leaves the screen (home, or
+ * the lock: the bar then has no keyboard and opens nothing). labwc binds no
+ * Alt+F1, so a focused program gets that one press too in direct input.
+ *
+ * Full screen goes through requests home takes already: open_in_home (home's
+ * file manager, with the home folder) and the seat's SIGUSR1 (home). No
+ * other program has a request without a target, so view, settings and the
+ * mixer have no full-screen entry here. Containers are not listed: base_apps
+ * is answered to home only.
+ */
+#ifndef LAUNCH_BIN
+#define LAUNCH_BIN "/usr/local/bin"
+#endif
+#ifndef LAUNCH_MIXER
+#define LAUNCH_MIXER "/usr/bin/wiremix" /* apps.c's mixer, in a term window */
+#endif
+#define LAUNCH_MAX 16
+enum launch_kind { LAUNCH_HEADER, LAUNCH_WINDOW, LAUNCH_HOME_FILES, LAUNCH_HOME };
+struct launch_item {
+    enum launch_kind kind;
+    const char *name; /* the program's, as home names it; NULL for a heading */
+    int system;       /* a heading: System and hardware (else Programs) */
+};
+static struct {
+    struct launch_item items[LAUNCH_MAX];
+    int n, sel, name_cols, cols;
+    unsigned focus_mark; /* focus_changes when it opened */
+} launcher;
+static void render_launcher(void);
+static struct overlay launcher_ovl = {
+    .ns = "locachy-launcher", .render = render_launcher,
+    .anchor = ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT, /* under LOCachy */
+};
+
+static struct wl_surface *launcher_surface(void)
+{
+    return launcher_ovl.surf;
+}
+
+static const char *launch_hint(void)
+{
+    /* TRANSLATORS: Up, Down, Enter and Esc are keys; keep them. */
+    return _("Up/Down: select   Enter: open   Esc: close");
+}
+
+/* An entry's text, translated: a heading, a program's name, home's. */
+static const char *launch_label(const struct launch_item *it)
+{
+    if (it->kind == LAUNCH_HEADER) return it->system ? _("System and hardware") : _("Programs");
+    if (it->kind == LAUNCH_HOME) return _("Home (full screen)");
+    return it->name;
+}
+
+/* An entry's action, translated; NULL: its text says it. */
+static const char *launch_action(const struct launch_item *it)
+{
+    if (it->kind == LAUNCH_WINDOW) return _("Window on this desktop");
+    if (it->kind == LAUNCH_HOME_FILES) return _("Full screen");
+    return NULL;
+}
+
+static void launch_add(enum launch_kind kind, const char *name, int system)
+{
+    if (launcher.n < LAUNCH_MAX) {
+        launcher.items[launcher.n++] = (struct launch_item){ kind, name, system };
+    }
+}
+
+static int launch_installed(const char *path)
+{
+    return access(path, X_OK) == 0;
+}
+
+/* The width of s in cells (2 for a wide character): the same at any size. */
+static int launch_cells(const char *s)
+{
+    const struct panel_font *f = panel_font(TEXT_H, 1);
+    int cw = 0, ch = 0;
+    panel_font_size(f, &cw, &ch);
+    return f && cw > 0 ? panel_text_width(s, f) / cw : (int)strlen(s);
+}
+
+/* The entries: home, then the programs and the system's, as home groups its
+ * own (fixed here: the bar has no list to read the groups from). One not
+ * installed (view without its libraries, the mixer without Audio) is left
+ * out; then the widths of the name column and of the whole. */
+static void launch_items(void)
+{
+    int settings = launch_installed(LAUNCH_BIN "/settings");
+    int mixer = launch_installed(LAUNCH_BIN "/term") && launch_installed(LAUNCH_MIXER);
+    launcher.n = 0;
+    launch_add(LAUNCH_HOME, "home", 0);
+    launch_add(LAUNCH_HEADER, NULL, 0);
+    if (launch_installed(LAUNCH_BIN "/view")) launch_add(LAUNCH_WINDOW, "view", 0);
+    if (launch_installed(LAUNCH_BIN "/files")) launch_add(LAUNCH_WINDOW, "files", 0);
+    launch_add(LAUNCH_HOME_FILES, "files", 0); /* home's own file manager */
+    if (settings || mixer) launch_add(LAUNCH_HEADER, NULL, 1);
+    if (settings) launch_add(LAUNCH_WINDOW, "settings", 0);
+    if (mixer) launch_add(LAUNCH_WINDOW, "mixer", 0);
+    launcher.name_cols = 0;
+    for (int i = 0; i < launcher.n; i++) {
+        int label = launch_cells(launch_label(&launcher.items[i]));
+        if (launch_action(&launcher.items[i]) && label > launcher.name_cols) launcher.name_cols = label;
+    }
+    launcher.cols = launch_cells(launch_hint()) + 2;
+    for (int i = 0; i < launcher.n; i++) {
+        const struct launch_item *it = &launcher.items[i];
+        const char *action = launch_action(it);
+        int width = it->kind == LAUNCH_HEADER ? 1 + launch_cells(launch_label(it)) + 1 :
+                    action ? 3 + launcher.name_cols + 2 + launch_cells(action) + 1 :
+                    3 + launch_cells(launch_label(it)) + 1;
+        if (width > launcher.cols) launcher.cols = width;
+    }
+}
+
+/* The next entry from from in direction dir (1 down, -1 up), headings
+ * passed over; from itself at an end. */
+static int launch_step(int from, int dir)
+{
+    for (int i = from + dir; i >= 0 && i < launcher.n; i += dir) {
+        if (launcher.items[i].kind != LAUNCH_HEADER) return i;
+    }
+    return from;
+}
+
+/* Rows: an entry each, a blank one, the keys. */
+static void render_launcher(void)
+{
+    struct overlay *o = &launcher_ovl;
+    if (!launcher_shown || !compositor || !layer_shell || !overlay_begin(o, launcher.cols, launcher.n + 2)) {
+        return;
+    }
+    ovl_clear(o, OVL_BG);
+    for (int i = 0; i < launcher.n; i++) {
+        const struct launch_item *it = &launcher.items[i];
+        const char *action = launch_action(it);
+        uint32_t bg = i == launcher.sel ? TOAST_BG : OVL_BG;
+        if (it->kind == LAUNCH_HEADER) {
+            ovl_text(o, 1, i, launch_label(it), OVL_FG2, OVL_BG);
+            continue;
+        }
+        ovl_fill(o, 0, i, 0, 1, bg);
+        ovl_text(o, 3, i, launch_label(it), OVL_FG1, bg);
+        if (action) {
+            ovl_text(o, 3 + launcher.name_cols + 2, i, action, OVL_FG1, bg);
+        }
+    }
+    ovl_text(o, 1, launcher.n + 1, launch_hint(), OVL_FG2, OVL_BG);
+    overlay_end(o);
+}
+
+static void catch_hide(struct bar *b)
+{
+    if (b->catch_viewport) {
+        wp_viewport_destroy(b->catch_viewport);
+        b->catch_viewport = NULL;
+    }
+    if (b->catch_lsurf) {
+        zwlr_layer_surface_v1_destroy(b->catch_lsurf);
+        b->catch_lsurf = NULL;
+    }
+    if (b->catch_surf) {
+        wl_surface_destroy(b->catch_surf);
+        b->catch_surf = NULL;
+    }
+}
+
+/* Configured at the screen's size: one transparent pixel stretched over it
+ * (wp_viewport), or a transparent buffer of that size. */
+static void catch_configure(void *data, struct zwlr_layer_surface_v1 *surface, uint32_t serial,
+                            uint32_t width, uint32_t height)
+{
+    struct bar *b = data;
+    uint32_t *px;
+    zwlr_layer_surface_v1_ack_configure(surface, serial);
+    int w = b->catch_viewport ? 1 : (int)width, h = b->catch_viewport ? 1 : (int)height;
+    struct wl_buffer *buf = width && height ? create_shm_buffer(w, h, &px) : NULL;
+    if (!buf) {
+        return;
+    }
+    memset(px, 0, (size_t)w * (size_t)h * 4);
+    munmap(px, (size_t)w * (size_t)h * 4);
+    wl_surface_attach(b->catch_surf, buf, 0, 0);
+    if (b->catch_viewport) {
+        wp_viewport_set_destination(b->catch_viewport, (int32_t)width, (int32_t)height);
+    }
+    wl_surface_damage_buffer(b->catch_surf, 0, 0, w, h);
+    wl_surface_commit(b->catch_surf);
+}
+
+static void catch_closed(void *data, struct zwlr_layer_surface_v1 *surface)
+{
+    (void)surface;
+    catch_hide(data);
+}
+
+static const struct zwlr_layer_surface_v1_listener catch_listener = {
+    .configure = catch_configure,
+    .closed = catch_closed,
+};
+
+/* Over every screen, under the launcher and the overlays (the top layer:
+ * over the windows and, made after it, the bar), or none. */
+static void catchers(int on)
+{
+    for (struct bar *b = bars; b; b = b->next) {
+        if (!on) {
+            catch_hide(b);
+            continue;
+        }
+        if (b->catch_surf || !compositor || !layer_shell) {
+            continue;
+        }
+        b->catch_surf = wl_compositor_create_surface(compositor);
+        if (viewporter) {
+            b->catch_viewport = wp_viewporter_get_viewport(viewporter, b->catch_surf);
+        }
+        b->catch_lsurf = zwlr_layer_shell_v1_get_layer_surface(layer_shell, b->catch_surf, b->output,
+                                                               ZWLR_LAYER_SHELL_V1_LAYER_TOP, "locachy-launcher-outside");
+        zwlr_layer_surface_v1_set_anchor(b->catch_lsurf,
+            ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
+            ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
+        zwlr_layer_surface_v1_set_exclusive_zone(b->catch_lsurf, -1); /* over the bar too */
+        zwlr_layer_surface_v1_add_listener(b->catch_lsurf, &catch_listener, b);
+        wl_surface_commit(b->catch_surf);
+    }
+}
+
+static int launcher_catch(struct wl_surface *s)
+{
+    for (struct bar *b = bars; b; b = b->next) {
+        if (b->catch_surf == s) return 1;
+    }
+    return 0;
+}
+
+/* Opened from bar b's LOCachy (NULL: from the keyboard). Not while the
+ * shared display is off the screen, nor over a question. */
+static void launcher_open(struct bar *b)
+{
+    if (launcher_shown || !active || choose.client >= 0 || again.shown) {
+        return;
+    }
+    launch_items();
+    launcher.sel = launch_step(-1, 1);
+    launcher.focus_mark = focus_changes;
+    launcher_ovl.pin = b ? b->output : NULL;
+    launcher_ovl.top = (int)bar_height(output_scale(b ? b->output : focused_output())); /* under the bar */
+    launcher_shown = 1;
+    want_grab = grab_wanted();
+    if (keys_down == 0) {
+        set_grab(want_grab); /* else at the last key's release */
+    }
+    say("locachy-bar: the launcher");
+    catchers(1);
+    render_launcher();
+    if (display) wl_display_flush(display);
+}
+
+static void launcher_close(void)
+{
+    if (!launcher_shown) {
+        return;
+    }
+    launcher_shown = 0;
+    launcher_ovl.pin = NULL;
+    catchers(0);
+    overlay_destroy(&launcher_ovl);
+    want_grab = grab_wanted();
+    if (keys_down == 0) {
+        set_grab(want_grab);
+    }
+    if (display) wl_display_flush(display);
+}
+
+static void launcher_toggle(struct bar *b)
+{
+    if (launcher_shown) {
+        launcher_close();
+    } else {
+        launcher_open(b);
+    }
+}
+
+/* Each turn: gone when the shared display has left the screen, or another
+ * window got the focus. */
+static void launcher_tick(void)
+{
+    if (launcher_shown && (!active || focus_changes != launcher.focus_mark)) {
+        launcher_close();
+    }
+}
+
+static void launcher_run(int i)
+{
+    enum launch_kind kind = launcher.items[i].kind;
+    const char *name = launcher.items[i].name;
+    char home[4096], dirs[256];
+    launcher_close();
+    if (kind == LAUNCH_WINDOW) {
+        say("locachy-bar: launcher: %s in a window", name);
+        window_open(name, NULL);
+    } else if (kind == LAUNCH_HOME_FILES) {
+        open_user_dirs(home, sizeof home, dirs, sizeof dirs);
+        if (!home[0] || open_in_home(NULL, home) < 0) {
+            say("locachy-bar: launcher: cannot ask home to show the home folder");
+            return;
+        }
+        say("locachy-bar: launcher: home's file manager at %s", home);
+        kill(getppid(), SIGUSR1); /* locachy-seat asks for home */
+    } else if (kind == LAUNCH_HOME) {
+        say("locachy-bar: launcher: home");
+        kill(getppid(), SIGUSR1);
+    }
+}
+
+/* A key pressed (value 1) or repeated (2) while it is up. */
+static void launcher_key(int code, int value)
+{
+    if (code == KEY_UP || code == KEY_DOWN) {
+        int next = launch_step(launcher.sel, code == KEY_UP ? -1 : 1);
+        if (next != launcher.sel) {
+            launcher.sel = next;
+            render_launcher();
+        }
+    } else if (value == 1 && (code == KEY_ENTER || code == KEY_KPENTER)) {
+        launcher_run(launcher.sel);
+    } else if (value == 1 && code == KEY_ESC) {
+        launcher_close();
+    }
+}
+
+/* The entry at y (surface coordinates), or -1 (a heading, the keys). */
+static int launcher_row(double y)
+{
+    struct overlay *o = &launcher_ovl;
+    uint32_t s120 = o->viewport ? o->scale120 : 120;
+    int row = o->ch > 0 && y >= 0 ? (int)(y * s120 / 120) / o->ch : -1;
+    return row >= 0 && row < launcher.n && launcher.items[row].kind != LAUNCH_HEADER ? row : -1;
+}
+
+static void launcher_hover(double y)
+{
+    int i = launcher_row(y);
+    if (i >= 0 && i != launcher.sel) {
+        launcher.sel = i;
+        render_launcher();
+    }
+}
+
+static void launcher_click(double y, uint32_t button)
+{
+    int i = launcher_row(y);
+    if (button == BTN_LEFT && i >= 0) {
+        launcher_run(i);
+    }
+}
+
+/* An overlay on the screen goes with the focus to another screen; one
+ * pinned to a screen stays there. */
 static void overlays_follow(void)
 {
     struct wl_output *out = focused_output();
-    struct overlay *all[] = { &ime_bar, &question, &notes_ovl };
-    for (int i = 0; i < 3; i++) {
-        if (all[i]->surf && out && out != all[i]->output) {
+    struct overlay *all[] = { &ime_bar, &question, &notes_ovl, &launcher_ovl };
+    for (int i = 0; i < 4; i++) {
+        struct wl_output *want = all[i]->pin ? all[i]->pin : out;
+        if (all[i]->surf && want && want != all[i]->output) {
             all[i]->render();
         }
     }
@@ -3888,6 +4301,20 @@ static void handle_kbd_event(int fd)
         }
 
         int act = keys_device_action(fd, ev.code, ctrl, alt, shift, meta);
+        /* The launcher: Alt+F1 opens or closes it (unless rc.conf binds
+         * that); while it is up, every key but rc.conf's is its own. */
+        if (!act && ev.code == KEY_F1 && alt && !ctrl && !shift && !meta) {
+            if (ev.value == 1) {
+                launcher_toggle(NULL);
+            }
+            continue;
+        }
+        if (launcher_shown && !act) {
+            if (!is_mod) {
+                launcher_key(ev.code, ev.value);
+            }
+            continue;
+        }
         if (act == K_ACT_HOME || act == K_ACT_LOCK) {
             /* Process 1 sees the key itself unless it is grabbed here. */
             if (ev.value == 1 && grabbed) {
@@ -4047,9 +4474,11 @@ static void reg_remove(void *data, struct wl_registry *reg, uint32_t name)
         if (b->name == name) {
             say("locachy-bar: screen %u went away", name);
             reset_keyboard_state();
+            launcher_close(); /* the screens it was opened over changed */
+            catch_hide(b);
             *p = b->next;
-            struct overlay *all[] = { &ime_bar, &question, &notes_ovl };
-            for (int i = 0; i < 3; i++) {
+            struct overlay *all[] = { &ime_bar, &question, &notes_ovl, &launcher_ovl };
+            for (int i = 0; i < 4; i++) {
                 if (all[i]->output == b->output) {
                     overlay_destroy(all[i]);
                     all[i]->output = NULL;
@@ -4080,7 +4509,8 @@ static const struct wl_registry_listener reg_listener = {
 /* What the user may still answer or read: bar_exec waits for it to go. */
 static int exec_busy(void)
 {
-    return choose.client >= 0 || again.pending || again.shown || nnotes > 0 || ime_bar.surf != NULL;
+    return choose.client >= 0 || again.pending || again.shown || nnotes > 0 || ime_bar.surf != NULL ||
+           launcher_shown;
 }
 
 /* The changed executable, settled, and nothing on the screen to answer. A
@@ -4305,6 +4735,7 @@ int main(int argc, char **argv)
             answer(choose.client, "error the shared display left the screen%s", "");
             close_chooser();
         }
+        launcher_tick();
         if (toast_active && uptime() >= toast_expire) {
             render_bot_bar();
         }

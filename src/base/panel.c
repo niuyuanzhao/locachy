@@ -384,6 +384,7 @@ void panel_draw(uint32_t *px, int w, int h, int stride, const char *title, const
     panel_font_size(big, &bw, &bh);
     panel_text(px, w, h, stride, bw, (h - bh) / 2, "LOCachy", FG, PANEL_BG, big);
     int lx = panel_text_width("LOCachy", big) + 2 * bw;
+    hit(0, lx < w ? lx : w, PANEL_BLOCK_LOCACHY); /* with the space on each side of it */
     *mid_x0 = *mid_x1 = lx;
     if (!row) {
         char line[200];

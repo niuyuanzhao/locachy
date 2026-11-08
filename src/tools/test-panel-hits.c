@@ -1,5 +1,6 @@
 /* The status blocks' click areas from the real panel_draw. Fonts are made
- * in memory (no font files are read); status text is fixed. */
+ * in memory (no font files are read); status text is fixed.
+ * gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -Isrc/base/include -Isrc/base src/tools/test-panel-hits.c */
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -78,7 +79,7 @@ static void ordered(int w, int h)
     int x0, x1, n = draw(w, h, &x0, &x1, hit);
     const enum panel_block right[] = { PANEL_BLOCK_VOLUME, PANEL_BLOCK_BLUETOOTH, PANEL_BLOCK_NETWORK,
                                        PANEL_BLOCK_BATTERY, PANEL_BLOCK_TIME };
-    assert(n == 7);
+    assert(n == 8);
     int previous = x1;
     for (size_t i = 0; i < sizeof right / sizeof *right; i++) {
         int k = find(hit, n, right[i]);
@@ -87,6 +88,9 @@ static void ordered(int w, int h)
     }
     int mem = find(hit, n, PANEL_BLOCK_MEMORY), cpu = find(hit, n, PANEL_BLOCK_CPU);
     assert(mem >= 0 && cpu >= 0 && hit[mem].x1 <= hit[cpu].x0 && hit[cpu].x1 <= x0);
+    /* LOCachy, from the left edge, before the title block (no area). */
+    int logo = find(hit, n, PANEL_BLOCK_LOCACHY);
+    assert(logo >= 0 && hit[logo].x0 == 0 && hit[logo].x1 > 0 && hit[logo].x1 < hit[mem].x0);
     /* The input method's block starts the right side; no click area has it. */
     for (int i = 0; i < n; i++) {
         assert(!(hit[i].x0 <= x1 && x1 < hit[i].x1));
@@ -98,23 +102,24 @@ int main(void)
     memory_fonts();
     ordered(1920, 36);
     ordered(2880, 54); /* scale 1.5: the same blocks in buffer pixels */
-    puts("PASS each status block's area in drawing order, the input method's own block excluded, at scale 1 and 1.5");
+    puts("PASS each status block's area in drawing order, LOCachy's at the left edge, the input method's own block "
+         "excluded, at scale 1 and 1.5");
 
     struct panel_hit hit[16];
     int x0, x1;
     with_bluetooth = 0;
     int n = draw(1920, 36, &x0, &x1, hit);
-    assert(n == 6 && find(hit, n, PANEL_BLOCK_BLUETOOTH) < 0);
+    assert(n == 7 && find(hit, n, PANEL_BLOCK_BLUETOOTH) < 0);
     with_bluetooth = 1;
     puts("PASS no Bluetooth block, no Bluetooth area");
 
     n = draw(420, 36, &x0, &x1, hit);
-    assert(n > 0 && n < 7 && find(hit, n, PANEL_BLOCK_TIME) >= 0);
+    assert(n > 0 && n < 8 && find(hit, n, PANEL_BLOCK_TIME) >= 0 && find(hit, n, PANEL_BLOCK_LOCACHY) >= 0);
     for (int i = 0; i < n; i++) {
         assert(hit[i].x0 >= 0 && hit[i].x1 <= 420 && hit[i].x0 < hit[i].x1);
     }
     n = draw(1920, 36, &x0, &x1, hit);
-    assert(n == 7);
+    assert(n == 8);
     puts("PASS a narrow bar has areas only for the blocks it draws, and the next draw replaces them");
     return 0;
 }

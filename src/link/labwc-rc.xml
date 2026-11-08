@@ -33,6 +33,9 @@
     <!-- locachy-bar handles the input method keys of rc.conf itself; labwc
          only consumes them, so the focused application never gets them. -->
     <keybind key="IME-KEY"><action name="Execute" command="/usr/bin/true" /></keybind>
+    <!-- Alt+F1 (KDE's application launcher key): locachy-bar opens its
+         launcher (the LOCachy block's list); labwc only consumes it. -->
+    <keybind key="A-F1"><action name="Execute" command="/usr/bin/true" /></keybind>
     <!-- locachy-bar handles the volume and brightness keys too; labwc's
          defaults for them are taken away ("None" removes a keybind: the key
          goes on to the application). -->

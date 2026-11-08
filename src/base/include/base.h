@@ -214,11 +214,13 @@ int panel_fonts_reload(void);
 /* How many containers are frozen; *ram: the memory of container name. */
 int panel_containers(const char *name, unsigned long long *ram);
 /* The status blocks the last panel_draw showed, pixels [x0, x1) of its px,
- * for a caller that opens their settings on a click. The input method's
- * own block is not one of them. */
+ * for a caller that opens their settings on a click, and LOCachy at the
+ * left (locachy-bar's launcher). The input method's own block is not one
+ * of them. */
 enum panel_block {
     PANEL_BLOCK_NONE, PANEL_BLOCK_MEMORY, PANEL_BLOCK_CPU, PANEL_BLOCK_VOLUME,
     PANEL_BLOCK_BLUETOOTH, PANEL_BLOCK_NETWORK, PANEL_BLOCK_BATTERY, PANEL_BLOCK_TIME,
+    PANEL_BLOCK_LOCACHY,
 };
 struct panel_hit {
     int x0, x1;

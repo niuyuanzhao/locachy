@@ -14,7 +14,8 @@ static int keyboard_ioctl(int fd, unsigned long request, ...);
 #define ioctl keyboard_ioctl
 #define keys_device_layout test_device_layout
 #define keys_reload test_keys_reload
-static int fake_signal(pid_t pid, int sig) { (void)pid; (void)sig; return 0; }
+static int signalled; /* the last signal the bar sent its seat */
+static int fake_signal(pid_t pid, int sig) { (void)pid; signalled = sig; return 0; }
 #define kill fake_signal
 #define base_audio_key fake_audio
 #define base_brightness_key fake_brightness
@@ -143,6 +144,8 @@ int open_program(const char *name, const char *target, char *spec, size_t size, 
 { (void)name;(void)target;(void)spec;(void)size;(void)argv;(void)max;return 0; }
 int open_shared(const char *path, char *why, size_t size) { (void)path;(void)why;(void)size;return 0; }
 int open_host(const char *name) { (void)name;return 0; }
+void open_user_dirs(char *home, size_t hsize, char *dirs, size_t dsize)
+{ snprintf(home, hsize, "/nonexistent/home"); snprintf(dirs, dsize, "Documents"); }
 /* open_in_home: control.c's (linked for the seat's link, control_send/control_recv). */
 
 static int events[2];
@@ -307,6 +310,78 @@ static int nothing_fed(void)
         for (int c = 0; c <= KEY_MAX; c++) if (layouts[l].fed[c]) return 0;
     }
     return 1;
+}
+
+/* The launcher (LOCachy's block, or Alt+F1) from the keyboard: the keyboard
+ * the bar's once no key is held (the compositor has the presses of those),
+ * the headings passed over, closed by Esc after its release, by running an
+ * entry, by another window's focus and by the seat's release; none while the
+ * seat is released (home or the lock on the screen). */
+static void launcher_keys(void)
+{
+    assert(active && keys_down == 0 && !launcher_shown);
+    set_grab(grab_wanted());
+    int base = grabbed; /* the keyboard's owner without the launcher */
+    key(KEY_LEFTALT, 1); key(KEY_F1, 1);
+    assert(launcher_shown && grabbed == base && grabs[0] == base);
+    key(KEY_F1, 0); key(KEY_LEFTALT, 0);
+    assert(launcher_shown && grabbed && grabs[0] && keys_down == 0);
+    assert(launcher.sel == 0 && launcher.items[0].kind == LAUNCH_HOME && launcher.items[1].kind == LAUNCH_HEADER);
+    key(KEY_UP, 1); key(KEY_UP, 0);
+    assert(launcher.sel == 0);
+    key(KEY_DOWN, 1); key(KEY_DOWN, 0);
+    assert(launcher.sel > 1 && launcher.items[launcher.sel].kind != LAUNCH_HEADER);
+    for (int i = 0; i < 2 * LAUNCH_MAX; i++) {
+        key(KEY_DOWN, 1); key(KEY_DOWN, 0);
+        assert(launcher.items[launcher.sel].kind != LAUNCH_HEADER);
+    }
+    int last = launcher.n - 1;
+    while (launcher.items[last].kind == LAUNCH_HEADER) last--;
+    assert(launcher.sel == last);
+    for (int i = 0; i < 2 * LAUNCH_MAX; i++) {
+        key(KEY_UP, 1); key(KEY_UP, 0);
+    }
+    assert(launcher.sel == 0 && !layouts[0].down[KEY_DOWN] && !layouts[0].down[KEY_UP]);
+    key(KEY_ESC, 1);
+    assert(!launcher_shown && grabbed); /* Esc held: the window never had its press */
+    key(KEY_ESC, 0);
+    assert(grabbed == base && grabs[0] == base && !layouts[0].down[KEY_ESC]);
+    puts("PASS Alt+F1 opens the launcher; the keyboard is the bar's once no key is held; Up/Down pass over the "
+         "headings and stop at the ends; Esc closes it and gives the keyboard back after its release");
+
+    signalled = 0;
+    key(KEY_LEFTALT, 1); key(KEY_F1, 1); key(KEY_F1, 0); key(KEY_LEFTALT, 0);
+    key(KEY_ENTER, 1);
+    assert(!launcher_shown && signalled == SIGUSR1);
+    key(KEY_ENTER, 0);
+    assert(grabbed == base && !layouts[0].down[KEY_ENTER]);
+    key(KEY_LEFTALT, 1); key(KEY_F1, 1); key(KEY_F1, 0); key(KEY_LEFTALT, 0);
+    assert(launcher_shown);
+    key(KEY_LEFTALT, 1); key(KEY_F1, 1); key(KEY_F1, 0); key(KEY_LEFTALT, 0);
+    assert(!launcher_shown && grabbed == base);
+    puts("PASS Enter on home (full screen) closes the launcher and asks the seat for home; Alt+F1 again closes it");
+
+    launcher_toggle(NULL); /* a click on LOCachy */
+    assert(launcher_shown && grabbed);
+    launcher_tick();
+    assert(launcher_shown);
+    focus_changes++; /* another window got the focus */
+    launcher_tick();
+    assert(!launcher_shown && grabbed == base);
+    launcher_toggle(NULL);
+    assert(launcher_shown);
+    on_sigusr2(SIGUSR2); /* home or the lock comes to the front */
+    keyboard_signals();
+    launcher_tick();
+    assert(!launcher_shown && !active && !grabbed && !grabs[0]);
+    launcher_toggle(NULL);
+    key(KEY_LEFTALT, 1); key(KEY_F1, 1); key(KEY_F1, 0); key(KEY_LEFTALT, 0);
+    assert(!launcher_shown && !grabbed && !grabs[0]);
+    on_sigusr1(SIGUSR1);
+    keyboard_signals();
+    assert(active && !launcher_shown);
+    puts("PASS the launcher closes when another window gets the focus or the seat is released (home, the lock), "
+         "and opens neither from a click nor from Alt+F1 while it is released");
 }
 
 /*
@@ -916,6 +991,7 @@ int main(int argc, char **argv)
     key(KEY_MUTE, 0);
     assert(audio_action == K_VOL_MUTE && keys_down == 0);
     puts("PASS graphical application mode dispatches Fn brightness, volume and mute");
+    launcher_keys();
     layouts[0].down[KEY_LEFTMETA] = 1;
     grabbed = 0;
     set_grab(0);
