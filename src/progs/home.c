@@ -1,9 +1,12 @@
 /*
- * home manages containers above the host's program_NAME launchers.
+ * home lists three sections, each under a title that is never selected: the
+ * containers, then the host's program_NAME launchers of rc.conf split into
+ * the programs and the system and hardware tools (program_sections says
+ * which), reboot and power off ending the last section.
  * Container actions are asynchronous requests, never base_open calls. Only
  * base_apps supplies their displayed state and memory usage. Enter opens: a
  * closed container starts, a running one is shown; the compositor remains one
- * shared host session. The first host entry, files, is home's own file manager
+ * shared host session. The first program, files, is home's own file manager
  * (files.c), also shown when a container asks for a folder.
  *
  * Requires these base interfaces (implemented alongside this UI):
@@ -58,12 +61,38 @@ int base_app_action(const char *action, const char *name, char *why, size_t size
 #define HIT_JOB 200000   /* + a system job's line */
 #define HIT_LOG 300000   /* the log view's lines */
 
+/* The list's sections, top to bottom. */
+enum section { SECTION_CONTAINERS, SECTION_PROGRAMS, SECTION_SYSTEM, SECTIONS };
+
+static const char *const section_titles[SECTIONS] = {
+    N_("Containers"), N_("Programs"), N_("System and hardware")
+};
+
+/* The section of a host program_NAME: this table alone says it. A name not
+ * in it is one of the programs. Within a section rc.conf's order stays.
+ * files, home's own file manager, is not an rc.conf setting: it is always
+ * the first program. */
+static const struct {
+    const char *name;
+    enum section section;
+} program_sections[] = {
+    { "term", SECTION_PROGRAMS },
+    { "admin", SECTION_SYSTEM },   /* root's offline terminal: administration */
+    { "network", SECTION_SYSTEM }, /* nmtui: the network's settings */
+    { "settings", SECTION_SYSTEM },
+    { "packages", SECTION_SYSTEM },
+    { "firmware", SECTION_SYSTEM },
+    { "bluetooth", SECTION_SYSTEM },
+    { "mixer", SECTION_SYSTEM },
+};
+
 struct entry {
     char name[16];
     char spec[256]; /* the command, split in place */
     char *argv[16];
     char key[256];  /* the command joined with spaces: the task's name */
     int builtin;    /* files: part of home, not a task */
+    enum section section;
 };
 
 struct app {
@@ -100,20 +129,33 @@ static int log_shown, log_system, log_from, log_total;
 static char log_name[64], log_buf[32768], *log_all[HOME_LOG_LINES];
 #define HOME_OUTPUTS 32
 static int home_output;
-static int output_first[HOME_OUTPUTS], output_scroll[HOME_OUTPUTS];
+static int output_scroll[HOME_OUTPUTS];
 
-/* One program_NAME="PATH ARGS" setting of rc.conf. */
+static enum section program_section(const char *name)
+{
+    for (size_t i = 0; i < sizeof program_sections / sizeof program_sections[0]; i++) {
+        if (strcmp(program_sections[i].name, name) == 0) {
+            return program_sections[i].section;
+        }
+    }
+    return SECTION_PROGRAMS;
+}
+
+/* One program_NAME="PATH ARGS" setting of rc.conf, taken when it belongs to
+ * the section *arg: load reads rc.conf once per section, so entries stay in
+ * section order. */
 static void program(const char *name, const char *value, void *arg)
 {
-    (void)arg;
+    enum section section = *(const enum section *)arg;
     if (strncmp(name, "program_", 8) != 0 || name[8] == '\0' ||
         strcmp(name + 8, "desktop") == 0 || strcmp(name + 8, "files") == 0 ||
-        nentries == MAX_ENTRIES) {
+        program_section(name + 8) != section || nentries == MAX_ENTRIES) {
         return; /* The compositor is shared container infrastructure, not a host menu entry. */
     }
     struct entry *e = &entries[nentries];
     memset(e, 0, sizeof *e);
     snprintf(e->name, sizeof e->name, "%s", name + 8);
+    e->section = section;
     snprintf(e->spec, sizeof e->spec, "%s", value);
     int argc = 0;
     size_t len = 0;
@@ -132,7 +174,8 @@ static void program(const char *name, const char *value, void *arg)
 static void load(void)
 {
     int host = selected - napps;
-    int power = host == nentries;
+    /* The reboot and power off rows follow the entries: each stays itself. */
+    int tail = host == nentries ? 0 : host == nentries + 1 ? 1 : -1;
     char name[sizeof entries[0].name] = "";
     if (host >= 0 && host < nentries) {
         snprintf(name, sizeof name, "%s", entries[host].name);
@@ -140,12 +183,15 @@ static void load(void)
     memset(&entries[0], 0, sizeof entries[0]);
     snprintf(entries[0].name, sizeof entries[0].name, "files");
     entries[0].builtin = 1;
+    entries[0].section = SECTION_PROGRAMS;
     nentries = 1;
-    rc_read(program, NULL);
+    for (enum section s = SECTION_PROGRAMS; s < SECTIONS; s++) {
+        rc_read(program, &s);
+    }
     if (host < 0) {
         return;
     }
-    selected = napps + (power ? nentries : 0);
+    selected = napps + (tail >= 0 ? nentries + tail : 0);
     for (int i = 0; name[0] && i < nentries; i++) {
         if (strcmp(entries[i].name, name) == 0) {
             selected = napps + i;
@@ -532,10 +578,86 @@ static int grid_width(void)
     return n > 0 ? n : 1;
 }
 
-static int grid_visible(void)
+/* The grid's lines: from row 2 down to the footer. */
+static int list_rows(void)
 {
-    int n = visible_rows() / 3;
+    int n = screen_rows() - footer_rows() - 2;
     return n > 0 ? n : 1;
+}
+
+/* The grid: each section's title on a line of its own, then its tiles,
+ * columns to a tile row, each tile two lines and a blank one under it.
+ * Lines count from the list's top (row 2); tile rows over all sections. The
+ * list's positions run containers, then entries (load keeps them in section
+ * order), then reboot and power off at the end of the last section. */
+struct grid {
+    int columns;
+    int start[SECTIONS], count[SECTIONS]; /* the section's list positions */
+    int title[SECTIONS];                  /* its title's line; -1: empty, not shown */
+    int first_row[SECTIONS];              /* the tile rows above it */
+    int rows, lines;                      /* tile rows; lines down to the last tile's end */
+};
+
+static struct grid grid_layout(void)
+{
+    struct grid g = { .columns = grid_columns() };
+    int programs = 0;
+    while (programs < nentries && entries[programs].section == SECTION_PROGRAMS) {
+        programs++;
+    }
+    g.count[SECTION_CONTAINERS] = napps;
+    g.count[SECTION_PROGRAMS] = programs;
+    g.count[SECTION_SYSTEM] = nentries - programs + 2; /* with reboot and power off */
+    int line = 0;
+    for (int s = 0; s < SECTIONS; s++) {
+        int rows = (g.count[s] + g.columns - 1) / g.columns;
+        g.start[s] = s > 0 ? g.start[s - 1] + g.count[s - 1] : 0;
+        g.first_row[s] = g.rows;
+        g.title[s] = rows > 0 ? line : -1;
+        line += rows > 0 ? 1 + 3 * rows : 0;
+        g.rows += rows;
+    }
+    g.lines = line > 0 ? line - 1 : 0;
+    return g;
+}
+
+/* Where list position pos is: its section (returned), its tile row over
+ * all sections, its column, and the line its tile starts on. */
+static int grid_place(const struct grid *g, int pos, int *row, int *column, int *line)
+{
+    int last = g->start[SECTIONS - 1] + g->count[SECTIONS - 1] - 1;
+    pos = pos < 0 ? 0 : pos > last ? last : pos;
+    int s = SECTIONS - 1;
+    while (s > 0 && (pos < g->start[s] || g->count[s] == 0)) {
+        s--;
+    }
+    int k = pos - g->start[s];
+    *row = g->first_row[s] + k / g->columns;
+    *column = k % g->columns;
+    *line = g->title[s] + 1 + k / g->columns * 3;
+    return s;
+}
+
+/* The position rows tile rows below pos (above it: negative), in its column
+ * or the last one that row fills; past the first or the last row, the first
+ * or the last position. Titles are not positions: moving skips them. */
+static int grid_move(const struct grid *g, int pos, int rows)
+{
+    int row, column, line;
+    grid_place(g, pos, &row, &column, &line);
+    int to = row + rows, last = g->start[SECTIONS - 1] + g->count[SECTIONS - 1] - 1;
+    if (to < 0) {
+        return 0;
+    }
+    if (to >= g->rows) {
+        return last;
+    }
+    int s = SECTIONS - 1;
+    while (s > 0 && (to < g->first_row[s] || g->count[s] == 0)) {
+        s--;
+    }
+    int k = (to - g->first_row[s]) * g->columns, n = g->count[s] - k;
+    return g->start[s] + k + (column < n ? column : n - 1);
 }
 
 static void grid_text(int col, int row, const char *s, uint32_t fg, uint32_t bg)
@@ -560,14 +682,17 @@ static void grid_text(int col, int row, const char *s, uint32_t fg, uint32_t bg)
     text(col, row, out, fg, bg);
 }
 
+/* Left/Right: the previous/next position; Up/Down: a tile row, PgUp/PgDn:
+ * the tile rows a list's height holds, across the section titles. */
 static void move_selection(int key)
 {
-    int columns = grid_columns(), last_item = napps + nentries + 1;
-    int step = key == K_PGUP || key == K_PGDN ? grid_visible() * columns :
-               key == K_UP || key == K_DOWN ? columns : 1;
+    struct grid g = grid_layout();
+    int last_item = napps + nentries + 1, page = list_rows() / 3;
+    int rows = key == K_PGUP || key == K_PGDN ? (page > 0 ? page : 1) : 1;
     if (key == K_BOL) selected = 0;
     else if (key == K_EOL) selected = last_item;
-    else selected += key == K_UP || key == K_LEFT || key == K_PGUP ? -step : step;
+    else if (key == K_LEFT || key == K_RIGHT) selected += key == K_LEFT ? -1 : 1;
+    else selected = grid_move(&g, selected, key == K_UP || key == K_PGUP ? -rows : rows);
     if (selected < 0) selected = 0;
     if (selected > last_item) selected = last_item;
 }
@@ -851,15 +976,30 @@ static void draw_output(int ready)
     } else if (log_shown) {
         draw_logs(footer);
     } else {
-        int columns = grid_columns(), width = grid_width(), shown = grid_visible();
-        int focus = selected / columns, total = (napps + nentries + 2 + columns - 1) / columns;
-        if (scroll > focus) scroll = focus;
-        if (focus >= scroll + shown) scroll = focus - shown + 1;
-        int max_scroll = total > shown ? total - shown : 0;
+        /* scroll: the grid's line at row 2. The selected tile stays in view,
+         * with its section's title when it is in the section's first row. */
+        struct grid g = grid_layout();
+        int width = grid_width(), height = list_rows(), tile_row, column, at;
+        int s = grid_place(&g, selected, &tile_row, &column, &at);
+        int top = tile_row == g.first_row[s] ? g.title[s] : at;
+        if (scroll > top) scroll = top;
+        if (at + 2 > scroll + height) scroll = at + 2 - height;
+        int max_scroll = g.lines > height ? g.lines - height : 0;
         if (scroll > max_scroll) scroll = max_scroll;
-        int first = scroll * columns;
-        for (int pos = first; pos < napps + nentries + 2; pos++) {
-            int row = 3 + ((pos - first) / columns) * 3, col = 1 + ((pos - first) % columns) * width;
+        if (scroll < 0) scroll = 0;
+        for (s = 0; s < SECTIONS; s++) {
+            int row = 2 + g.title[s] - scroll;
+            if (g.title[s] < 0 || row < 2 || row >= footer) continue;
+            const char *title = _(section_titles[s]);
+            text(1, row, title, ACCENT, BG);
+            if (s == SECTION_CONTAINERS) {
+                text(1 + ui_cells(title) + 3, row, _("state, RAM / swap MiB"), FG, BG);
+            }
+        }
+        for (int pos = 0; pos < napps + nentries + 2; pos++) {
+            grid_place(&g, pos, &tile_row, &column, &at);
+            int row = 2 + at - scroll, col = 1 + column * width;
+            if (row < 2) continue;
             if (row + 1 >= footer) break;
             uint32_t fg = pos == selected ? BG : FG, bg = pos == selected ? ACCENT : BG;
             screen_fill(col, row, width - 1, 2, bg);
@@ -881,7 +1021,6 @@ static void draw_output(int ready)
             grid_text(col + 1, row + 1, line, fg, bg);
             ui_hit(col, row, width - 1, 2, HIT_ROW + pos);
         }
-        text(1, 2, _("Containers: state, RAM / swap MiB"), FG, BG);
     }
 
     const struct app *a = error_app();
@@ -949,7 +1088,6 @@ static void draw(int ready)
         scroll = output_scroll[i];
         draw_output(0);
         output_scroll[i] = scroll;
-        output_first[i] = scroll * grid_columns();
     }
     screen_output_select(home_output);
     scroll = output_scroll[home_output];
@@ -1219,8 +1357,8 @@ static int pointer_key(void)
             scroll_log(3 * e->wheel, screen_rows() - footer_rows() - 3);
             return -1;
         }
-        selected -= e->wheel * grid_columns();
-        selected = selected < 0 ? 0 : selected > napps + nentries + 1 ? napps + nentries + 1 : selected;
+        struct grid g = grid_layout();
+        selected = grid_move(&g, selected, -e->wheel); /* a tile row a notch, as Up/Down */
         return -1;
     }
     int id = ui_hit_at(e->col, e->row);
@@ -1257,9 +1395,13 @@ static int pointer_key(void)
         draw(0);
         return row_menu(e->col, e->row);
     }
-    int first = screen_is_extended && screen_is_extended() && home_output < HOME_OUTPUTS ? output_first[home_output] : 0;
-    if (pos < napps && e->col - (1 + (pos - first) % grid_columns() * grid_width()) <= 3) {
-        return ' '; /* the box marks it */
+    if (pos < napps) {
+        struct grid g = grid_layout();
+        int tile_row, column, at;
+        grid_place(&g, pos, &tile_row, &column, &at);
+        if (e->col - (1 + column * grid_width()) <= 3) {
+            return ' '; /* the box marks it */
+        }
     }
     return e->clicks == 2 ? '\n' : -1;
 }

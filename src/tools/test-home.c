@@ -16,7 +16,7 @@ static char fixture_dir[256] = "/tmp";
 #include <sys/stat.h>
 
 static int start_calls, freeze_calls, stop_calls, show_calls, opens, reboots, poweroffs, files_views;
-static int running, beta_failed;
+static int running, beta_failed, gamma_listed;
 static char copied[2][4096];
 static const char *klog_fixture = "";
 
@@ -34,9 +34,10 @@ int home_klog_read(char *buf, int size)
 
 void base_apps(char *out, size_t size)
 {
-    snprintf(out, size, "alpha\t%s\t1048576\t0\t\nbeta\t%s\t0\t1048576\t%s\n",
+    snprintf(out, size, "alpha\t%s\t1048576\t0\t\nbeta\t%s\t0\t1048576\t%s\n%s",
              running ? "running" : "closed", beta_failed ? "failed" : "frozen",
-             beta_failed ? "application exited with status 1; inspect /run/locachy/apps/beta.log" : "");
+             beta_failed ? "application exited with status 1; inspect /run/locachy/apps/beta.log" : "",
+             gamma_listed ? "gamma\tclosed\t0\t0\t\n" : "");
 }
 
 int base_app_action(const char *action, const char *name, char *why, size_t size)
@@ -51,10 +52,15 @@ int base_app_action(const char *action, const char *name, char *why, size_t size
     return 0;
 }
 
+/* rc.conf's settings as a double: rc_settings, name and value pairs. */
+static const char *const default_settings[] = {
+    "program_term", "/usr/local/bin/term",
+    "program_network", "/usr/local/bin/term /usr/bin/nmtui", NULL
+};
+static const char *const *rc_settings = default_settings;
 int rc_read(void (*fn)(const char *, const char *, void *), void *arg)
 {
-    fn("program_term", "/usr/local/bin/term", arg);
-    fn("program_network", "/usr/local/bin/term /usr/bin/nmtui", arg);
+    for (const char *const *p = rc_settings; *p; p += 2) fn(p[0], p[1], arg);
     return 0;
 }
 void base_tasks(char *out, size_t size) { if (size) out[0] = '\0'; }
@@ -185,6 +191,18 @@ static int canvas_has(const char *text)
     return 0;
 }
 
+/* The row a section title starts, at column 1, or -1; its row has no hit. */
+static int title_row(const char *title)
+{
+    for (int r = 0; r < test_rows; r++) {
+        if (strncmp(canvas[r] + 1, title, strlen(title)) == 0) {
+            for (int c = 0; c < test_cols; c++) assert(ui_hit_at(c, r) < 0);
+            return r;
+        }
+    }
+    return -1;
+}
+
 /* The first cell of what was registered as id when last drawn. */
 static void hit_cell(int id, int *col, int *row)
 {
@@ -293,10 +311,11 @@ int main(int argc, char **argv)
     script = (const int[]){ K_POINTER, 0 };
     assert(press(HIT_ROW + 1, BTN_RIGHT, 1, 10) == -1);
     script = NULL;
-    /* The wheel moves the selection, kept on the list. */
+    /* The wheel moves the selection a tile row, as Up/Down, kept on the list:
+     * from alpha to files, the first of the programs under their title. */
     selected = 0;
     mouse = (struct pointer_event){ .wheel = -1 };
-    assert(pointer_key() == -1 && selected == grid_columns());
+    assert(pointer_key() == -1 && selected == napps);
     mouse.wheel = 50;
     assert(pointer_key() == -1 && selected == 0);
     /* The buttons are their keys (the left button only); while a question
@@ -321,12 +340,16 @@ int main(int argc, char **argv)
     hit_cell(HIT_ROW, &x0, &y0); hit_cell(HIT_ROW + 1, &x1, &y1);
     assert(y0 == y1 && x1 > x0);
     hit_cell(HIT_ROW + napps, &x1, &y1);
-    assert(y0 == y1 && x1 > x0);
+    assert(y1 > y0 && x1 == x0); /* files opens its own section, in the first column */
     assert(strstr(canvas[y0 + 1], "running") && strstr(canvas[y0 + 1], "MiB"));
     move_selection(K_RIGHT); assert(selected == 1);
-    move_selection(K_DOWN); assert(selected == 6);
+    move_selection(K_DOWN); assert(selected == napps + 1); /* beta's column among the programs */
     move_selection(K_UP); assert(selected == 1);
     move_selection(K_LEFT); assert(selected == 0);
+    selected = napps + 2; /* network, the last column: Down lands on power off */
+    move_selection(K_DOWN); assert(selected == napps + nentries + 1);
+    move_selection(K_UP); assert(selected == napps + 1);
+    selected = 0;
     assert(press(HIT_ROW + 1, BTN_LEFT, 1, 2) == ' ' && selected == 1);
     test_cols = 110; draw(0); assert(grid_columns() == 4);
     test_cols = 24; test_rows = 12; selected = scroll = 0;
@@ -338,7 +361,7 @@ int main(int argc, char **argv)
     test_cols = 54; test_rows = 11; selected = scroll = 0;
     screen_extended(1);
     draw(0);
-    assert(output_first[0] == 0 && output_first[1] == 0 && output_first[2] == 0);
+    assert(output_scroll[0] == 0 && output_scroll[1] == 0 && output_scroll[2] == 0);
     for (int i = 0; i < 3; i++) {
         screen_output_select(i);
         hit_cell(HIT_ROW, &x0, &y0);
@@ -350,7 +373,8 @@ int main(int argc, char **argv)
     }
     selected = 3;
     draw(0);
-    for (int i = 0; i < 3; i++) assert(output_first[i] == 2);
+    /* term under the Programs title: lines 4-6 of the grid in view on each. */
+    for (int i = 0; i < 3; i++) assert(output_scroll[i] == 2);
     screen_output_select(1);
     hit_cell(HIT_ROW + 2, &x1, &y1);
     mouse = (struct pointer_event){ .output=1, .col=x1+5, .row=y1, .button=BTN_LEFT, .pressed=1, .clicks=2 };
@@ -512,6 +536,150 @@ int main(int argc, char **argv)
     assert(!log_shown);
     unlink(beta_log);
     puts("PASS home logs (L): failed container log and filtered system log, scroll and copy");
+
+    /* Sections: Containers, Programs, System and hardware, each under a title
+     * that has no hit and is never selected. program_sections places
+     * rc.conf's programs: files first, rc.conf's order kept in a section,
+     * desktop and program_files left out, an unknown name among the programs. */
+    static const char *const sectioned[] = {
+        "program_term", "/usr/local/bin/term /usr/local/lib/locachy/user-shell",
+        "program_settings", "/usr/local/bin/settings",
+        "program_admin", "/usr/local/bin/term",
+        "program_desktop", "/usr/bin/labwc",
+        "program_network", "/usr/local/bin/term /usr/bin/nmtui",
+        "program_packages", "/usr/local/bin/packages",
+        "program_edit", "/usr/local/bin/edit",
+        "program_firmware", "/usr/local/bin/firmware",
+        "program_files", "/x",
+        "program_bluetooth", "/usr/local/bin/term /usr/bin/bluetui",
+        "program_mixer", "/usr/local/bin/term /usr/bin/wiremix", NULL
+    };
+    static const char *const order[] = { "files", "term", "edit", "settings", "admin",
+                                         "network", "packages", "firmware", "bluetooth", "mixer" };
+    const char *programs_title = section_titles[SECTION_PROGRAMS];
+    const char *system_title = section_titles[SECTION_SYSTEM];
+    const char *containers_title = section_titles[SECTION_CONTAINERS];
+    beta_failed = 0;
+    log_shown = jobs_shown = 0;
+    confirming = CONF_NONE;
+    rc_settings = sectioned;
+    selected = 0;
+    load();
+    refresh();
+    assert(nentries == 10 && entries[0].builtin);
+    for (int i = 0; i < nentries; i++) {
+        assert(strcmp(entries[i].name, order[i]) == 0);
+        assert(entries[i].section == (i < 3 ? SECTION_PROGRAMS : SECTION_SYSTEM));
+    }
+    int sys = napps + 3, last_pos = napps + nentries + 1;
+    test_cols = 80; test_rows = 22; scroll = 0; /* short enough that the last tile scrolls the list */
+    memset(canvas, 0, sizeof canvas);
+    draw(0);
+    int row_c = title_row(containers_title), row_p = title_row(programs_title), row_s = title_row(system_title);
+    assert(row_c == 2 && row_p > row_c && row_s > row_p && canvas_has("state, RAM / swap MiB"));
+    hit_cell(HIT_ROW + 0, &x0, &y0); assert(y0 == row_c + 1);
+    hit_cell(HIT_ROW + napps, &x0, &y0); assert(y0 == row_p + 1 && x0 == 1);
+    hit_cell(HIT_ROW + sys, &x0, &y0); assert(y0 == row_s + 1 && x0 == 1 && canvas_has("settings"));
+    /* Keys across titles (3 columns): Up/Down keep the column, Left/Right step. */
+    selected = napps + 2; /* edit, column 3 */
+    move_selection(K_DOWN); assert(selected == sys + 2); /* network */
+    move_selection(K_UP); assert(selected == napps + 2);
+    move_selection(K_RIGHT); assert(selected == sys);
+    move_selection(K_LEFT); assert(selected == napps + 2);
+    selected = napps;
+    move_selection(K_UP); assert(selected == 0);
+    selected = 1;
+    move_selection(K_DOWN); assert(selected == napps + 1);
+    move_selection(K_PGDN); assert(selected == last_pos);
+    move_selection(K_PGUP); assert(selected == 0);
+    move_selection(K_EOL); assert(selected == last_pos);
+    draw(0);
+    hit_cell(HIT_ROW + last_pos, &x0, &y0);
+    assert(scroll > 0 && y0 + 1 < test_rows - footer_rows() && title_row(containers_title) < 0);
+    move_selection(K_BOL); assert(selected == 0);
+    draw(0);
+    assert(scroll == 0 && title_row(containers_title) == 2);
+    /* The mouse on the scrolled list: a press selects what it hits. */
+    selected = last_pos; draw(0);
+    hit_cell(HIT_ROW + sys + 2, &x0, &y0);
+    assert(press(HIT_ROW + sys + 2, BTN_LEFT, 2, 4) == '\n' && selected == sys + 2);
+    /* The selection keeps its name across load, with programs gone or added,
+     * and its place across the 500 ms refresh, with a container added. */
+    static const char *const fewer[] = {
+        "program_firmware", "/usr/local/bin/firmware", "program_term", "/usr/local/bin/term",
+        "program_bluetooth", "/usr/local/bin/term /usr/bin/bluetui", NULL
+    };
+    selected = sys + 4; /* firmware */
+    rc_settings = fewer;
+    load();
+    assert(nentries == 4 && strcmp(entries[selected - napps].name, "firmware") == 0);
+    gamma_listed = 1;
+    refresh();
+    assert(napps == 3 && strcmp(entries[selected - napps].name, "firmware") == 0);
+    rc_settings = sectioned;
+    load();
+    assert(strcmp(entries[selected - napps].name, "firmware") == 0);
+    selected = napps + nentries + 1;
+    rc_settings = fewer;
+    load();
+    assert(selected == napps + nentries + 1); /* power off stays power off */
+    selected = napps + nentries;
+    rc_settings = sectioned;
+    load();
+    assert(selected == napps + nentries); /* reboot stays reboot */
+    gamma_listed = 0;
+    refresh();
+    sys = napps + 3;
+    last_pos = napps + nentries + 1;
+    /* Small screens, 24x12 and 54x11 cells (the grid tests' sizes) and 48x12
+     * and 36x12: every position comes into view by keys, and a section's
+     * first tile row shows its title above it. */
+    static const int sizes[][2] = { { 24, 12 }, { 54, 11 }, { 48, 12 }, { 36, 12 } };
+    for (size_t z = 0; z < sizeof sizes / sizeof sizes[0]; z++) {
+        test_cols = sizes[z][0]; test_rows = sizes[z][1];
+        selected = scroll = 0;
+        int columns = grid_columns();
+        for (int step = 0; step < 2; step++) {
+            for (int n = 0; n <= last_pos; n++) {
+                int pos = step == 0 ? n : last_pos - n;
+                assert(selected == pos);
+                memset(canvas, 0, sizeof canvas);
+                draw(0);
+                hit_cell(HIT_ROW + pos, &x0, &y0);
+                assert(y0 >= 2 && y0 + 1 < test_rows - footer_rows());
+                const char *title = pos < napps ? containers_title : pos < sys ? programs_title : system_title;
+                int first = pos < napps ? 0 : pos < sys ? napps : sys;
+                if (pos - first < columns) assert(title_row(title) == y0 - 1);
+                move_selection(step == 0 ? K_RIGHT : K_LEFT);
+            }
+            assert(selected == (step == 0 ? last_pos : 0));
+            selected = step == 0 ? last_pos : 0;
+        }
+        /* Down from the first position visits every tile row in turn, in the
+         * first column, then the last position. */
+        struct grid g = grid_layout();
+        selected = 0;
+        for (int r = 0; r < g.rows; r++) {
+            int tile_row, column, at;
+            grid_place(&g, selected, &tile_row, &column, &at);
+            assert(tile_row == r && column == 0);
+            move_selection(K_DOWN);
+        }
+        assert(selected == last_pos);
+    }
+    selected = sys; /* settings, a host program: K asks to close it */
+    confirm_stop();
+    assert(confirming == CONF_PROGRAM && strcmp(entries[stop_program].name, "settings") == 0);
+    confirm_key('n');
+    selected = 0;
+    test_cols = 140; test_rows = 25; /* the footer's buttons all fit */
+    draw(0);
+    assert(press(HIT_KEY + 'j', BTN_LEFT, 1, 0) == 'j' && press(HIT_KEY + 'l', BTN_LEFT, 1, 0) == 'l' &&
+           press(HIT_KEY + 'k', BTN_LEFT, 1, 0) == 'k');
+    rc_settings = default_settings;
+    load();
+    puts("PASS home sections: Containers, Programs, System and hardware titled, never selected; keys, mouse, "
+         "scrolling and names across load at the smallest screens");
     free(apps);
     free(app_data);
     return 0;
