@@ -461,7 +461,7 @@ do_build() {
             if [ -f /etc/netns/locachy-net/resolv.conf ]; then
                 cp -f /etc/netns/locachy-net/resolv.conf "$root/etc/resolv.conf" 2>/dev/null || true
             fi
-            in_build="setpriv --bounding-set=-mknod,-sys_rawio,-sys_module,-sys_boot,-kexec_load -- chroot $root"
+            in_build="setpriv --bounding-set=-mknod,-sys_rawio,-sys_module,-sys_boot -- chroot $root"
             if [ "$n_repo" -gt 0 ]; then
                 $in_build pacman -S --needed --noconfirm --asexplicit "${@:1:$n_repo}"
                 shift "$n_repo"

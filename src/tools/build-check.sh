@@ -179,4 +179,14 @@ for f in "$src"/link/* "$src"/*.sh "$src"/tools/*.sh; do
     '#!/bin/sh'*) sh -n "$f" || { echo "build-check: $f does not parse" >&2; exit 1; } ;;
     esac
 done
+if command -v setpriv >/dev/null 2>&1; then
+    caps=$(setpriv --list-caps)
+    for spec in $(grep -hoE -- '--bounding-set=[^[:space:]"]+' "$src"/link/*); do
+        for tok in $(printf '%s\n' "${spec#--bounding-set=}" | tr ',' ' '); do
+            cap=${tok#[+-]}
+            [ "$cap" = all ] || printf '%s\n' "$caps" | grep -qxF "$cap" ||
+                { echo "build-check: unknown setpriv capability '$cap' in $spec" >&2; exit 1; }
+        done
+    done
+fi
 printf 'Candidate binaries built in %s; installed system unchanged.\n' "$out"

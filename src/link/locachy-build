@@ -486,7 +486,7 @@ if [ "${LOCACHY_BUILD_STAGE:-}" = ns ]; then
     # A build cannot leave descendants running to rewrite its hand-over.
     # This also keeps package scripts away from the host process tree.
     "${net[@]}" unshare --pid --fork --kill-child --mount-proc="$root/proc" \
-        setpriv --bounding-set=-mknod,-sys_rawio,-sys_module,-sys_boot,-kexec_load -- \
+        setpriv --bounding-set=-mknod,-sys_rawio,-sys_module,-sys_boot -- \
         chroot "$root" "${env[@]}" /usr/local/bin/locachy-build "$@"
     if [ -n "$prepare" ]; then
         install -d -m 0700 -o root -g root "$run/sealed"

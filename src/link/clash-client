@@ -332,7 +332,7 @@ fi
 # Not through in_ns: in the background, a function is a shell of its own, and
 # $! would be that shell, not mihomo (ip netns exec and setpriv become mihomo).
 ip netns exec "$NS" setpriv --regid="$CLASH_GID" --clear-groups --no-new-privs \
-    --bounding-set=-mknod,-sys_rawio,-sys_module,-sys_boot,-kexec_load -- \
+    --bounding-set=-mknod,-sys_rawio,-sys_module,-sys_boot -- \
     "$MIHOMO" -d "$STATE" -f "$STATE/config.yaml" &
 pid=$!
 echo "clash-client: mihomo running ($mode) in $NS (pid $pid)"
