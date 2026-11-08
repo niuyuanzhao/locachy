@@ -123,13 +123,19 @@ efi=importlib.util.module_from_spec(spec);loader.exec_module(efi)
 text=subprocess.run(['efibootmgr','-v'],check=True,text=True,capture_output=True).stdout
 Path('/results/nvram-after.txt').write_text(text)
 order,entries=efi.entries(text)
-assert order==json.loads(Path('/results/order-before.json').read_text())
-assert entries==json.loads(Path('/results/entry-before.json').read_text())
+before_order=json.loads(Path('/results/order-before.json').read_text())
+before_entries=json.loads(Path('/results/entry-before.json').read_text())
+cur=before_entries[0]['number']
+prev=[e['number'] for e in entries if e['label']==efi.PREV_LABEL and e['loader']==efi.PREV_LOADER.lower()]
+assert len(prev)==1, entries
+idx=before_order.index(cur)+1
+assert order==before_order[:idx]+prev+before_order[idx:], (order, before_order, prev)
 a=Path('/efi/EFI/locachy/locachy.efi').read_bytes()
 b=Path('/efi/EFI/BOOT/BOOTX64.EFI').read_bytes()
-assert len(a)>1024*1024 and a==b
-assert 'locachy-efi: Boot' in Path('/results/image-update.log').read_text()
-print('PASS actual boot image rebuild updates ESP and preserves chosen BootOrder',flush=True)
+p=Path('/efi/EFI/locachy/locachy-prev.efi').read_bytes()
+assert len(a)>1024*1024 and a==b and p==b'MZ test image\n'
+assert 'LOCachy (Previous)' in Path('/results/image-update.log').read_text()
+print('PASS actual boot image rebuild updates ESP, keeps locachy-prev.efi entry and preserves chosen BootOrder',flush=True)
 PY
 printf 'PASS EFI VM complete\n'
 CHECKS

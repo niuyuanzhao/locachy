@@ -2,13 +2,16 @@
 
 [中文](EFI.zh.md)
 
-The installed system has a formal `LOCachy` UEFI entry for
-`\EFI\locachy\locachy.efi`. `EFI/BOOT/BOOTX64.EFI` remains the removable-media
-fallback, not the only normal boot route.
+The installed system has two formal UEFI entries: `LOCachy` for
+`\EFI\locachy\locachy.efi` and `LOCachy (Previous)` for
+`\EFI\locachy\locachy-prev.efi` (so firmware without a "boot from file" menu
+still offers the previous signed UKI in its boot menu). `EFI/BOOT/BOOTX64.EFI`
+remains the removable-media fallback, not the only normal boot route.
 
-After writing both images, the installer runs the installed source's
+After writing the images, the installer runs the installed source's
 `locachy-efi --esp TARGET --first`. It registers the selected ESP and puts
-LOCachy first in BootOrder, keeping every other entry and its relative order.
+`LOCachy` and `LOCachy (Previous)` first in BootOrder, keeping every other
+entry and its relative order.
 An unavailable or unwritable firmware-variable store gives a visible warning;
 the target images stay installed and the fallback is retained.
 

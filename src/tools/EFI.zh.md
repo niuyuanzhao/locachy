@@ -2,12 +2,13 @@
 
 [English](EFI.md)
 
-已安装系统使用名为 `LOCachy` 的正式 UEFI 启动项，指向
-`\EFI\locachy\locachy.efi`。`EFI/BOOT/BOOTX64.EFI` 保留为可移动介质标准后备，
-不再是唯一正常启动入口。
+已安装系统登记两个正式 UEFI 启动项：`LOCachy` 指向 `\EFI\locachy\locachy.efi`，
+`LOCachy (Previous)` 指向 `\EFI\locachy\locachy-prev.efi`（即便主板没有“从文件启动”
+菜单，也能直接在开机启动菜单里选回上一版签名映像）。`EFI/BOOT/BOOTX64.EFI` 保留为
+可移动介质标准后备，不再是唯一正常启动入口。
 
-安装器写好两份映像后，运行已安装源码的 `locachy-efi --esp TARGET --first`，
-登记所选 ESP，把 LOCachy 放到 BootOrder 首位，保留所有其他条目及其相对顺序。
+安装器写好映像后，运行已安装源码的 `locachy-efi --esp TARGET --first`，
+登记所选 ESP，把 `LOCachy` 和 `LOCachy (Previous)` 放到 BootOrder 前列，保留所有其他条目及其相对顺序。
 固件变量不可用或不可写时明确警告；目标映像仍安装完成，fallback 保留。
 
 这些改动仍在本地，尚未发布。既有系统首次进行源码优先更新时，先装包管理工具，

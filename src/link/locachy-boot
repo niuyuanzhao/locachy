@@ -258,7 +258,11 @@ if [ ! -d "$esp/locachy" ]; then
 fi
 [ -d "/usr/lib/modules/$version" ] || { echo "locachy-boot: no modules for $version; the ESP is left as it is" >&2; exit 1; }
 if [ -f "$esp/locachy/locachy.efi" ]; then
-    cp -p "$esp/locachy/locachy.efi" "$esp/locachy/locachy-prev.efi"
+    cp -p "$esp/locachy/locachy.efi" "$esp/locachy/locachy-prev.efi.new" &&
+        mv -f "$esp/locachy/locachy-prev.efi.new" "$esp/locachy/locachy-prev.efi"
+else
+    cp "$boot/locachy.efi" "$esp/locachy/locachy-prev.efi.new" &&
+        mv -f "$esp/locachy/locachy-prev.efi.new" "$esp/locachy/locachy-prev.efi"
 fi
 mkdir -p "$esp/BOOT"
 for to in "$esp/locachy/locachy.efi" "$esp/BOOT/BOOTX64.EFI"; do

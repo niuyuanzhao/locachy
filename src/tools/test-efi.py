@@ -24,8 +24,8 @@ SCRATCH = sys.argv.pop(1) if len(sys.argv) > 1 else None
 GUID = "8129ca5c-784a-47e7-921a-d7a952726599"
 
 
-def row(number="0003", active=True, guid=GUID, loader=efi.LOADER, part=1):
-    return f"Boot{number}{'*' if active else ' '} LOCachy\tHD({part},GPT,{guid},0x800,0x100000)/File({loader})\n"
+def row(number="0003", active=True, guid=GUID, loader=efi.LOADER, part=1, label=efi.LABEL):
+    return f"Boot{number}{'*' if active else ' '} {label}\tHD({part},GPT,{guid},0x800,0x100000)/File({loader})\n"
 
 
 class Registration(unittest.TestCase):
@@ -79,7 +79,10 @@ class Registration(unittest.TestCase):
         if self.fail:
             raise RuntimeError(self.fail)
         if "--create-only" in args:
-            self.records.append(row())
+            num = f"{3 + len(self.records):04X}"
+            label = args[args.index("--label") + 1]
+            ldr = args[args.index("--loader") + 1]
+            self.records.append(row(num, label=label, loader=ldr))
         elif "--active" in args:
             number = args[args.index("--bootnum") + 1]
             self.records = [r.replace("Boot" + number + " ", "Boot" + number + "*") for r in self.records]
@@ -127,8 +130,31 @@ class Registration(unittest.TestCase):
         self.order.append("0009")
         self.register()
         self.assertIn(foreign, self.records)
-        self.assertEqual(self.order, ["0001", "0002", "0009", "0003"])
+        self.assertEqual(self.order, ["0001", "0002", "0009", "0004"])
         self.assertFalse(any("--delete-bootnum" in c for c in self.calls))
+
+    def test_previous_entry_is_maintained_beside_current(self):
+        prev = self.esp / "EFI/locachy/locachy-prev.efi"
+        prev.write_bytes(b"MZ\x00prev")
+        self.assertEqual(self.register(True), 0)
+        self.assertEqual(self.order, ["0003", "0004", "0001", "0002"])
+        _, found = efi.entries(self.text())
+        self.assertEqual([(i["label"], i["loader"]) for i in found],
+                         [(efi.LABEL, efi.LOADER.lower()), (efi.PREV_LABEL, efi.PREV_LOADER.lower())])
+        self.calls.clear()
+        self.assertEqual(self.register(), 0)
+        self.assertEqual(self.mutations(), [])
+
+        # Existing single-entry installation upgraded: Previous is inserted right after LOCachy.
+        self.records = [row("0003")]
+        self.order = ["0002", "0003", "0001"]
+        self.assertEqual(self.register(), 0)
+        self.assertEqual(self.order, ["0002", "0003", "0004", "0001"])
+
+        prev.unlink()
+        prev.symlink_to(self.image)
+        with self.assertRaisesRegex(RuntimeError, "linked boot image"):
+            self.register()
 
     def test_wrong_loader_or_partition_is_not_reused(self):
         self.records = [row("0008", loader=r"\EFI\other.efi"), row("0009", part=2)]

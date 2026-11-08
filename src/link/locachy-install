@@ -39,7 +39,8 @@ RESUME_APPS = RESUME_RECORD.with_name("apps-catalog")
 # The source signing keys a build of the target stopped for (locachy-build).
 UNTRUSTED_KEYS = "var/lib/locachy/builder/untrusted-keys"
 # What the installation writes to the ESP, and nothing else.
-ESP_FILES = {"EFI", "EFI/locachy", "EFI/locachy/locachy.efi", "EFI/BOOT", "EFI/BOOT/BOOTX64.EFI"}
+ESP_FILES = {"EFI", "EFI/locachy", "EFI/locachy/locachy.efi", "EFI/locachy/locachy-prev.efi",
+             "EFI/BOOT", "EFI/BOOT/BOOTX64.EFI"}
 sys.dont_write_bytecode = True
 
 # The optional modules chosen as such; the input method's ("choice": "ime")
@@ -1140,6 +1141,7 @@ def install(args, root, esp, root_fs, esp_fs, level):
         destination = saved / "EFI/locachy"
         destination.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(image, destination / "locachy.efi")
+        shutil.copyfile(image, destination / "locachy-prev.efi")
         fallback = saved / "EFI/BOOT"
         fallback.mkdir(exist_ok=True)
         shutil.copyfile(image, fallback / "BOOTX64.EFI")
