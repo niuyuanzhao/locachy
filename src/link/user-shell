@@ -16,6 +16,18 @@ if [ "$net" != 0 ] && [ -e /run/netns/locachy-net ]; then
     # As locachy-net does: the namespace, and its resolv.conf over /etc's.
     set -- ip netns exec locachy-net
 else
-    set --
+    set -- unshare --mount --propagation slave
 fi
-exec "$@" setpriv --reuid=1000 --regid="$gid" --clear-groups --reset-env -- "${shell:-/bin/bash}" -l
+# As locachy-app's host programs: the document portal's bus and FUSE root stay
+# out of reach of the shell.
+exec "$@" sh -euc '
+    uid=$1; gid=$2; home=$3; shell=$4
+    if [ -d "/run/user/$uid" ]; then
+        mount -t tmpfs -o "mode=0700,uid=$uid,gid=$gid,nosuid,nodev" runtime "/run/user/$uid"
+    fi
+    if [ -d /run/locachy/docs ]; then
+        mount -t tmpfs -o mode=0755,size=4k,nosuid,nodev,noexec hidden /run/locachy/docs
+    fi
+    cd "$home"
+    exec setpriv --reuid="$uid" --regid="$gid" --clear-groups --reset-env -- "$shell" -l
+' sh 1000 "$gid" "$home" "${shell:-/bin/bash}"

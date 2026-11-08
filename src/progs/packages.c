@@ -1781,7 +1781,7 @@ static int yes(const char *question)
 
 static int valid_name(const char *s)
 {
-    if (!isalnum((unsigned char)s[0]) || strlen(s) > 63) {
+    if (!isalnum((unsigned char)s[0]) || strlen(s) > 63 || strncmp(s, "window-", 7) == 0) {
         return 0;
     }
     for (; *s; s++) {

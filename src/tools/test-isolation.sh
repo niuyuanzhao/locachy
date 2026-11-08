@@ -104,6 +104,12 @@ for refused in /etc $uhome/Downloads; do
     status=$?
     check "$refused is refused ($(cat $out/refused.log))" "[ $status != 0 ] && grep -q \"cannot have $refused\" $out/refused.log"
 done
+check "CONT_BASE is closed to the host user (0700)" "[ \"$(stat -c %a $out/containers)\" = 700 ]"
+printf "network=\"0\"\n" >$out/conf/isotest.conf
+rm -f $out/containers/isotest/data/.config/user-dirs.dirs
+ln -s /run/locachy/pwn-link $out/containers/isotest/data/.config/user-dirs.dirs
+app start isotest /bin/true >/dev/null 2>>$out/app.log
+check "a link in the container home is not followed by host root" "[ ! -e /run/locachy/pwn-link ]"
 check "/etc/shadow and /root stay closed" "v shadow | grep -q denied && v root_home | grep -q denied"
 check "the host passwd and group are unchanged" "sha256sum -c --quiet $out/host-ids.before"
 [ $fail = 0 ] && echo "ALL PASSED" || { echo "SOME FAILED"; cat $out/result $out/app.log | head -40; }

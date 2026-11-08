@@ -70,6 +70,9 @@
 #ifndef DRIVES_CONTROL
 #define DRIVES_CONTROL "/run/locachy/drives/control" /* files.c asks to eject here */
 #endif
+#ifndef DRIVES_LOCKED
+#define DRIVES_LOCKED "/run/locachy/locked" /* process 1: no new mounts while locked */
+#endif
 #ifndef HOST_BUS
 #define HOST_BUS "/run/user/0/bus" /* root's session bus: locachy-bar's notifications */
 #endif
@@ -698,9 +701,10 @@ static void scan(void)
         if (medium_changed(k)) {
             continue;
         }
-        int may_mount = !disk_held(k->name, why, sizeof why);
-        if (!may_mount && !k->said) say("drives: %s is the system's; not mounted here: %s", k->name, why);
-        k->said = !may_mount;
+        int held = disk_held(k->name, why, sizeof why);
+        if (held && !k->said) say("drives: %s is the system's; not mounted here: %s", k->name, why);
+        k->said = held;
+        int may_mount = !held && access(DRIVES_LOCKED, F_OK) != 0;
         int n = partitions(k->name, parts, MAX_BLOCKS);
         for (int i = 0; i < n; i++) {
             consider(parts[i], k, may_mount);

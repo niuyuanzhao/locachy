@@ -44,13 +44,13 @@ stays as it is:
   link), 16 KiB at most, and UTF-8. `apps/` holds nothing else and at least
   one preset.
 - A line is empty, a `#` comment or `KEY="VALUE"`. Keys are `package`,
-  `extras`, `command`, `arguments`, `network`, `camera`, `directories`,
+  `extras`, `command`, `arguments`, `network`, `camera`, `screencast`, `directories`,
   `desktop`, `x11`, and in format 2 `host`. An unknown key, a key given twice
   or any other line rejects the catalog.
 - A value has no `"`, `\`, `$`, backquote or control character. `package` is
   one pacman package name; `extras` are package names separated by spaces;
-  `command` is an absolute path without `..` or spaces; `network`, `camera`
-  and `x11` (also `host`) are `0` or `1`; `directories` are absolute paths without `..`
+  `command` is an absolute path without `..` or spaces; `network`, `camera`,
+  `screencast` and `x11` (also `host`) are `0` or `1`; `directories` are absolute paths without `..`
   separated by colons; `desktop` are `*.desktop` names. `package` and
   `command` are required.
 

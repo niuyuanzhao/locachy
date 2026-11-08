@@ -217,6 +217,12 @@ check "from an address of the machine not on the local network (as mihomo's TUN'
 l0=$(left lan)
 check "nobody to the local network (10.99.0.7:80): out, not to Tor" \
     "[ \"\$(as nobody python3 -I $out/net.py tcp 10.99.0.7 80 - 1)\" = timeout ] && [ \$(left lan) -gt $l0 ] && ! grep -q 10.99.0.7 $out/heard/trans"
+ip -n "$ns" addr add 8.8.8.2/8 dev dummy0
+enforce lan
+check "a rogue public link subnet (8.0.0.0/8) is excluded from @lan and goes to Tor" \
+    "[ \"\$(as nobody python3 -I $out/net.py tcp 8.8.8.8 80)\" = connected ] && grep -qx 8.8.8.8:80 $out/heard/trans"
+ip -n "$ns" addr del 8.8.8.2/8 dev dummy0
+enforce lan
 dr0=$(packets locachy-tor dropped)
 check "nobody, UDP to 192.0.2.1:9999: refused, nothing out" \
     "as nobody python3 -I $out/net.py udp 192.0.2.1 9999 | grep -q -e error -e timeout && [ \$(left doc1) -eq $d1 ]"

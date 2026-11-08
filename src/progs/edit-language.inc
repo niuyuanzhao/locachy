@@ -198,22 +198,26 @@ static struct language_document *language_attach(struct doc *d, int explicit_req
         struct language_server *candidate = g_ptr_array_index(language_servers, i); if (!strcmp(candidate->key, key)) { s = candidate; break; }
     }
     if (!s) {
+        if (!explicit_request) { g_strfreev(argv); g_free(root); g_free(key); return NULL; }
         s = g_new0(struct language_server, 1); s->key = g_strdup(key); s->language = g_strdup(type); s->root = g_strdup(root);
         char *binary; file_as_user(1); binary = g_find_program_in_path(argv[0]); file_as_user(0);
         if (binary) {
             char *root_uri = g_filename_to_uri(root, NULL, NULL), *settings = NULL, *initialization = NULL;
             JsonNode *v = language_member(config, "settings"); if (v) settings = json_to_string(v, FALSE);
             v = language_member(config, "initializationOptions"); if (v) initialization = json_to_string(v, FALSE);
+            if (!initialization && !strcmp(type, "rust")) {
+                initialization = g_strdup("{\"cargo\":{\"buildScripts\":{\"enable\":false}},\"procMacro\":{\"enable\":false}}");
+            }
             char **spawn = argv;
             char *home = language_home();
             /* The framebuffer program may run as root. Servers are user code,
-             * so permanently drop all IDs and every supplementary group (the
-             * user's input group would give them the keyboard) first. */
+             * so permanently drop all IDs, every supplementary group and new
+             * privileges first. */
             if (getuid() == 0) {
-                guint argc = g_strv_length(argv); spawn = g_new0(char *, argc + 10);
-                spawn[0] = g_strdup("/usr/bin/setpriv"); spawn[1] = g_strdup("--reuid=1000"); spawn[2] = g_strdup("--regid=1000"); spawn[3] = g_strdup("--clear-groups"); spawn[4] = g_strdup("--");
-                spawn[5] = g_strdup("/usr/bin/env"); spawn[6] = g_strdup("-u"); spawn[7] = g_strdup("XDG_RUNTIME_DIR"); spawn[8] = g_strdup_printf("HOME=%s", home);
-                for (guint i = 0; i < argc; i++) spawn[i + 9] = g_strdup(argv[i]);
+                guint argc = g_strv_length(argv); spawn = g_new0(char *, argc + 11);
+                spawn[0] = g_strdup("/usr/bin/setpriv"); spawn[1] = g_strdup("--reuid=1000"); spawn[2] = g_strdup("--regid=1000"); spawn[3] = g_strdup("--clear-groups"); spawn[4] = g_strdup("--no-new-privs"); spawn[5] = g_strdup("--");
+                spawn[6] = g_strdup("/usr/bin/env"); spawn[7] = g_strdup("-u"); spawn[8] = g_strdup("XDG_RUNTIME_DIR"); spawn[9] = g_strdup_printf("HOME=%s", home);
+                for (guint i = 0; i < argc; i++) spawn[i + 10] = g_strdup(argv[i]);
             }
             EdLspConfig c = {.argv = (const char *const *)spawn, .cwd = root, .root_uri = root_uri, .settings_json = settings, .initialization_options_json = initialization};
             GError *error = NULL; s->client = ed_lsp_new(&c, &error);

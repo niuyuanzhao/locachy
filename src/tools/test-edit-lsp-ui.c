@@ -159,6 +159,7 @@ int main(int argc, char **argv)
     struct doc *d = open_file(path); CHECK(d); struct tab *t = cur_tab(); CHECK(t && t->doc == d);
     setbuf(stdout, NULL); puts("LSP UI: attach");
     language_init(); language_auto_completion = language_auto_signature = language_auto_hover = 0;
+    language_tick(); CHECK(language_binding(d) == NULL && language_servers->len == 0);
     struct language_document *binding = language_attach(d, 1); CHECK(binding); lsp_ui_wait(binding);
     t->cursor = t->anchor = (size_t)(strstr(code, "value=") - code) + 2;
     /* Rename prompt -> actual clangd response -> actual doc/undo transaction. */

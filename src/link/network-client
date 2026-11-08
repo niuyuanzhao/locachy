@@ -220,11 +220,39 @@ ip netns list | grep -qw "^$NS" || ip netns add "$NS"
 touch /etc/netns/"$NS"/resolv.conf
 ip netns exec "$NS" resolvconf -u
 ip netns exec "$NS" ip link set lo up
+# Inbound filter: unsolicited traffic from local networks is dropped; loopback,
+# Tailscale, replies to our own connections, ICMP and DHCP client replies pass.
+ip netns exec "$NS" nft -f - <<'EOF'
+table inet locachy-filter
+delete table inet locachy-filter
+table inet locachy-filter {
+    chain input {
+        type filter hook input priority filter; policy drop;
+        iif "lo" accept
+        iifname "tailscale0" accept
+        ct state established,related accept
+        ct state invalid drop
+        meta l4proto { icmp, ipv6-icmp } accept
+        udp sport 67 udp dport 68 accept
+        ip6 daddr fe80::/10 udp sport 547 udp dport 546 accept
+    }
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+    }
+}
+EOF
 # Full-system Tor (service_tor, tor-client): its firewall before any interface
 # is here, or none comes, so that nothing ever goes out past Tor.
 if grep -qE '^[[:space:]]*service_tor=' "$RC" &&
     ! /usr/local/lib/locachy/tor-enforce load "$(rc_value tor_front)"; then
     printf '<3>network-client: Tor is on and its firewall cannot be loaded: no network\n' >/dev/kmsg
+    exit 1
+fi
+# Clash TUN (service_clash without service_tor, clash_mode != proxy): its
+# firewall before any interface is here, so nothing goes direct before mihomo.
+if ! grep -qE '^[[:space:]]*service_tor=' "$RC" && grep -qE '^[[:space:]]*service_clash=' "$RC" &&
+    [ "$(rc_value clash_mode)" != proxy ] && ! /usr/local/lib/locachy/clash-client --enforce; then
+    printf '<3>network-client: Clash TUN is on and its firewall cannot be loaded: no network\n' >/dev/kmsg
     exit 1
 fi
 

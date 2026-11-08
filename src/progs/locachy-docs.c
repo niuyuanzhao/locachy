@@ -432,7 +432,7 @@ static pid_t spawn(char *const argv[], int fd3, int fd4, int nnp)
     if (setgroups(0, NULL) < 0 || setgid(user.pw_gid) < 0 || setuid(user.pw_uid) < 0 || getuid() != user.pw_uid ||
         geteuid() != user.pw_uid || getegid() != user.pw_gid) _exit(125);
     if (prctl(PR_SET_PDEATHSIG, SIGTERM) < 0 || getppid() != parent) _exit(125);
-    if (nnp && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) _exit(125);
+    if (nnp && (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) < 0 || prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0)) _exit(125);
     char data[PATH_MAX];
     snprintf(data, sizeof data, "%s/data", DOCS_USER);
     mkdir(data, 0700);
@@ -915,7 +915,7 @@ static void drop(struct conn *c, const char *text)
 {
     int pid = 0, used = 0;
     char where[16] = "", name[80] = "";
-    if (strcmp(c->comm, "labwc") != 0) {
+    if (c->kind != DOCS_PEER_HOST || strcmp(c->comm, "labwc") != 0) {
         replyf(c, "refuse only the compositor tells drops");
         return;
     }

@@ -646,8 +646,17 @@ def cmd_secure_boot(args):
     if not SB_DB_KEY.is_file():
         subprocess.run(["sbctl", "create-keys"], check=True)
     if not PCR_PRIVATE.is_file():
-        subprocess.run(["ukify", "genkey", f"--pcr-private-key={PCR_PRIVATE}", f"--pcr-public-key={PCR_PUBLIC}"],
-                       check=True)
+        PCR_PRIVATE.parent.mkdir(parents=True, exist_ok=True)
+        old_umask = os.umask(0o077)
+        try:
+            subprocess.run(["ukify", "genkey", f"--pcr-private-key={PCR_PRIVATE}", f"--pcr-public-key={PCR_PUBLIC}"],
+                           check=True)
+        finally:
+            os.umask(old_umask)
+        if PCR_PRIVATE.is_file():
+            PCR_PRIVATE.chmod(0o600)
+        if PCR_PUBLIC.is_file():
+            PCR_PUBLIC.chmod(0o644)
     if not args.enroll:
         return 1 if rebuild_boot() else 0
     if not setup_mode():

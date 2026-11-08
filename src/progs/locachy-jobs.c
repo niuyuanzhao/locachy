@@ -176,7 +176,7 @@ static int path_of(const char *s, int dir)
 
 static int container_name(const char *s)
 {
-    return isalnum((unsigned char)s[0]) && word(s, "._-", 65);
+    return isalnum((unsigned char)s[0]) && strncmp(s, "window-", 7) != 0 && word(s, "._-", 65);
 }
 
 /* flashrom's options after the positional arguments: --chip NAME,

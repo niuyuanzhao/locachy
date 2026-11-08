@@ -252,14 +252,14 @@ static double cg_mib(const struct frame *f, const char *file)
 
 static void mount_kernel_fs(void)
 {
-    static const struct { const char *what, *where, *type; } fs[] = {
-        { "devtmpfs", "/dev", "devtmpfs" },
-        { "proc", "/proc", "proc" },
-        { "sysfs", "/sys", "sysfs" },
-        { "cgroup2", CGROUP, "cgroup2" },
+    static const struct { const char *what, *where, *type; unsigned long flags; } fs[] = {
+        { "devtmpfs", "/dev", "devtmpfs", MS_NOSUID },
+        { "proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC },
+        { "sysfs", "/sys", "sysfs", MS_NOSUID | MS_NODEV | MS_NOEXEC },
+        { "cgroup2", CGROUP, "cgroup2", MS_NOSUID | MS_NODEV | MS_NOEXEC },
     };
     for (size_t i = 0; i < sizeof fs / sizeof fs[0]; i++) {
-        if (mount(fs[i].what, fs[i].where, fs[i].type, 0, NULL) < 0) {
+        if (mount(fs[i].what, fs[i].where, fs[i].type, fs[i].flags, NULL) < 0) {
             say("init: mount %s: %s", fs[i].where, strerror(errno));
         }
     }
@@ -987,7 +987,8 @@ static void save_log(void)
 
     if (path[0] == '\0') {
         int n = 1;
-        mkdir("/var/log/locachy", 0755);
+        mkdir("/var/log/locachy", 0700);
+        chmod("/var/log/locachy", 0700);
         do {
             snprintf(path, sizeof path, "/var/log/locachy/boot-%03d.txt", n);
         } while (access(path, F_OK) == 0 && ++n < 1000);
@@ -995,7 +996,7 @@ static void save_log(void)
     int size = klogctl(10, NULL, 0); /* SYSLOG_ACTION_SIZE_BUFFER */
     char *buf = size > 0 ? malloc((size_t)size) : NULL;
     int len = buf ? klogctl(3, buf, size) : -1; /* SYSLOG_ACTION_READ_ALL */
-    int fd = len > 0 ? open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644) : -1;
+    int fd = len > 0 ? open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600) : -1;
     if (fd < 0 || write(fd, buf, (size_t)len) != len || fsync(fd) < 0) {
         say("init: could not save the log to %s", path);
     } else {
@@ -1850,6 +1851,27 @@ static void lock_start(void)
     arrange();
 }
 
+static void write_locked_state(void)
+{
+#ifdef LOCK_STATE_FILE
+    const char *path = LOCK_STATE_FILE;
+#else
+    if (getpid() != 1) {
+        return;
+    }
+    const char *path = "/run/locachy/locked";
+    mkdir("/run/locachy", 0755);
+#endif
+    if (locked) {
+        int fd = open(path, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+        if (fd >= 0) {
+            close(fd);
+        }
+    } else {
+        unlink(path);
+    }
+}
+
 static void lock(void)
 {
     if (locked) {
@@ -1861,6 +1883,7 @@ static void lock(void)
     }
     say("init: locking");
     locked = 1;
+    write_locked_state();
     stay_on_display = 0;
     lock_start();
 }
@@ -1872,6 +1895,7 @@ static void unlock(void)
         return;
     }
     locked = 0;
+    write_locked_state();
     lock_start_at = -1;
     active_at = now_ms();
     say("init: unlocked");
@@ -2753,6 +2777,7 @@ static void lid_lock(void)
         say("init: SECURITY: %s is missing; locked without it: nothing gets the screens until a restart",
             lock_argv[0]);
         locked = 1;
+        write_locked_state();
         lock_shown = 0;
         lock_start_at = -1;
         stay_on_display = 0;
@@ -3723,6 +3748,16 @@ int main(void)
         mkdir("/run/user", 0755);
         mkdir("/run/user/0", 0711);
         chmod("/run/user/0", 0711);
+        if (access("/usr/lib/systemd/systemd-sysctl", X_OK) == 0) {
+            pid_t kpid = fork();
+            if (kpid == 0) {
+                execl("/usr/lib/systemd/systemd-sysctl", "systemd-sysctl", (char *)NULL);
+                _exit(127);
+            }
+            if (kpid > 0) {
+                waitpid(kpid, NULL, 0);
+            }
+        }
         save_log();
         read_settings();
         modules_start("");
@@ -4088,7 +4123,7 @@ int main(void)
                     go_home(focus_place);
                 } else if (key == K_ACT_LOCK && !shared) {
                     lock();
-                } else if (ctrl_alt_del(key)) {
+                } else if (!locked && ctrl_alt_del(key)) {
                     person_asked(RB_AUTOBOOT); /* "init: Ctrl+Alt+Del" */
                 }
                 break;

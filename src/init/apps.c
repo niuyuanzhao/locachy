@@ -191,7 +191,7 @@ static long long number(const struct app *app, const char *file, const char *fie
 {
     char path[192], line[128];
     snprintf(path, sizeof path, APP_CGROUP_ROOT "/app_%.63s/%s", app->name, file);
-    FILE *in = fopen(path, "r");
+    FILE *in = fopen(path, "re");
     if (!in) {
         return 0;
     }

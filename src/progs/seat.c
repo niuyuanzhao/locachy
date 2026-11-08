@@ -818,6 +818,7 @@ int main(int argc, char **argv)
      * has exited); so do the files display-ready waits for, appearing in
      * the runtime directory (inotify(7)), until it is sent. */
     int comp_fd = comp_pid > 0 ? (int)syscall(SYS_pidfd_open, comp_pid, 0) : -1;
+    if (comp_fd >= 0) fcntl(comp_fd, F_SETFD, FD_CLOEXEC);
     int ready_fd = -1;
     if (is_labwc) {
         ready_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);

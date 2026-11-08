@@ -142,8 +142,9 @@ mk() { # NAME MIMETYPES COMMAND...
         "$name" "$*" "$mime" >$C/$name/upper/usr/share/applications/$name.desktop
 }
 f=$docs/.locachy-open-test
+printf "host=\"1\"\npackage=\"foot\"\ncommand=\"$out/record foot\"\ndesktop=\"foot.desktop\"\n" >/etc/locachy/containers/foot.conf
 mk asker "x-none/x-none;" $out/ask $f.asked $f.only $f.txt $f.txt $f.txt https://example.org/x $docs /etc/os-release \
-    with=program:term=$f.sh
+    with=program:term=$f.sh with=foot=$f.sh
 mk one "image/png;" $out/record one
 mk two "text/plain;" $out/record two
 mk three "text/plain;" $out/record three
@@ -236,9 +237,10 @@ check "a folder opens a file manager window, not home" \
 echo "== 6. outside the shared folders"
 waitfor 7
 check "a file outside the shared folders is refused" "grep -q \"^4 /etc/os-release\" $f.asked && grep -q \"not in a shared folder\" $f.asked.err"
-echo "== 7. --with program:term"
-waitfor 8
-check "program:term for an executable is refused" "grep -q \"^4 with=program:term=\" $f.asked && grep -q \"does not open files of this type\" $f.asked.err"
+echo "== 7. --with program:term and --with foot"
+waitfor 9
+check "program:term for an executable is refused" "grep -q \"^4 with=program:term=\" $f.asked && grep -q \"program:term does not open files of this type\" $f.asked.err"
+check "foot for an executable is refused" "grep -q \"^4 with=foot=\" $f.asked && grep -q \"foot does not open files of this type\" $f.asked.err && [ ! -e $f.foot ]"
 check "home was not asked to run it" "[ ! -e /run/locachy/open-request ] && [ ! -e /run/locachy/open-test-ran ]"
 grep -h "locachy-bar: open" <(dmesg) | tail -6
 [ $fail = 0 ] && echo "ALL PASSED" || { echo "SOME FAILED"; cat $f.asked $f.asked.err $out/asker.log $out/bar.log 2>/dev/null | tail -30; }

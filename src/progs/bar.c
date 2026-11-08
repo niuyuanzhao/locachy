@@ -47,11 +47,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/fsuid.h>
 #include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/time.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -72,6 +74,11 @@
 #include "base.h"
 #include "internal.h"
 #include "ime.h"
+#include "docs-proto.h"
+
+#ifndef SO_PEERPIDFD
+#define SO_PEERPIDFD 77
+#endif
 
 #define FG_COLOR   0xFFD0D0D0u
 #define OVL_BG     0xFF182848u
@@ -2779,12 +2786,19 @@ static void notice(const char *msg)
 static int open_fd = -1;
 static struct {
     int client;               /* the waiting xdg-open; -1: no chooser */
+    int from_root, from_isolated;
     char target[4096], type[128], from[OPEN_NAME];
     char names[CHOICES][OPEN_NAME];
     int n, sel, all;
 } choose = { .client = -1 };
 static void render_chooser(void);
 static struct overlay question = { .ns = "locachy-open", .render = render_chooser };
+
+static void open_as_user(int on)
+{
+    setfsgid(on ? 1000 : 0);
+    setfsuid(on ? 1000 : 0);
+}
 
 static void open_listen(void)
 {
@@ -2806,26 +2820,48 @@ static void open_listen(void)
     }
 }
 
-/* The container a client runs in: its cgroup, app_NAME. */
-static void client_container(int client, char *name, size_t size)
+/* Who connected to OPEN_SOCKET: its cgroup (still alive), whether it is a
+ * root host program (such as files in a window) or an isolated container. */
+static int client_peer(int client)
 {
     struct ucred cred;
     socklen_t len = sizeof cred;
-    char path[64], line[256];
-    snprintf(name, size, "?");
-    if (getsockopt(client, SOL_SOCKET, SO_PEERCRED, &cred, &len) < 0) {
-        return;
+    char path[64], line[256] = "";
+    if (getsockopt(client, SOL_SOCKET, SO_PEERCRED, &cred, &len) < 0 || cred.pid <= 0) {
+        return -1;
+    }
+    int pidfd = -1;
+    len = sizeof pidfd;
+    if (getsockopt(client, SOL_SOCKET, SO_PEERPIDFD, &pidfd, &len) < 0) {
+        pidfd = -1;
     }
     snprintf(path, sizeof path, "/proc/%d/cgroup", (int)cred.pid);
     FILE *in = fopen(path, "re");
-    if (in && fgets(line, sizeof line, in) && strncmp(line, "0::/app_", 8) == 0) {
-        char *s = line + 8;
-        s[strcspn(s, "/\n")] = '\0';
-        snprintf(name, size, "%.63s", s);
+    if (!in || !fgets(line, sizeof line, in)) {
+        line[0] = '\0';
     }
     if (in) {
         fclose(in);
     }
+    int alive = pidfd < 0 || syscall(SYS_pidfd_send_signal, pidfd, 0, NULL, 0) == 0 || errno == EPERM;
+    if (pidfd >= 0) {
+        close(pidfd);
+    }
+    int kind = docs_peer_kind(line);
+    if (!alive || kind == DOCS_PEER_UNKNOWN) {
+        return -1;
+    }
+    if (kind == DOCS_PEER_CONTAINER || kind == DOCS_PEER_WINDOW) {
+        char *s = line + 8;
+        s[strcspn(s, "/\n")] = '\0';
+        snprintf(choose.from, sizeof choose.from, "%.63s", s);
+    } else {
+        snprintf(choose.from, sizeof choose.from, "host");
+    }
+    choose.from_root = cred.uid == 0 && kind != DOCS_PEER_CONTAINER;
+    choose.from_isolated = !choose.from_root &&
+                           !(kind == DOCS_PEER_HOST || (kind == DOCS_PEER_CONTAINER && open_host(choose.from)));
+    return 0;
 }
 
 static void answer(int client, const char *fmt, const char *arg)
@@ -2875,10 +2911,11 @@ static int opens_type(const char *name, const char *type)
 
 /* locachy-app open NAME TARGET, in the background; then the window to the
  * front (raise: not the tray, not the question, since the program may not
- * have shown the file yet). */
-static void deliver(int client, const char *name)
+ * have shown the file yet). user_picked is set when the person chose NAME in
+ * the bar's chooser, in files, or by a rule in open.conf. */
+static void deliver(int client, const char *name, int user_picked)
 {
-    char names[CHOICES][OPEN_NAME], spec[256], *argv[16];
+    char names[CHOICES][OPEN_NAME], spec[256], *argv[16], why[512];
     int known = 0;
     /* A framebuffer program: home opens it, on its own screen, as root. Only
      * one whose .desktop file opens the type: a request (any container can
@@ -2888,12 +2925,14 @@ static void deliver(int client, const char *name)
      * this display instead (process 1's, as root as in home). */
     int words = open_program(name, choose.target, spec, sizeof spec, argv, 16);
     if (words) {
-        char why[512];
+        open_as_user(1);
+        int shared = choose.target[0] != '/' || open_shared(choose.target, why, sizeof why);
+        open_as_user(0);
         if (!opens_type(name, choose.type)) {
             say("locachy-bar: refused %s (%s) from %s with %s: it does not open that", choose.target,
                 choose.type, choose.from, name);
             answer(client, "error %s does not open files of this type", name);
-        } else if (choose.target[0] == '/' && !open_shared(choose.target, why, sizeof why)) {
+        } else if (!shared) {
             answer(client, "error %s", why);
         } else if (words == 2 && strcmp(argv[0], "/usr/local/bin/view") == 0 && choose.target[0] == '/' &&
                    strlen(choose.target) < 1024) {
@@ -2917,11 +2956,22 @@ static void deliver(int client, const char *name)
         answer(client, "error there is no container %s", name);
         return;
     }
-    /* A container sees the shared folders only; a host program, the home. */
-    char why[512];
-    if (choose.target[0] == '/' && !open_host(name) && !open_shared(choose.target, why, sizeof why)) {
-        answer(client, "error %s", why);
+    if (!user_picked && !opens_type(name, choose.type)) {
+        say("locachy-bar: refused %s (%s) from %s with %s: it does not open that", choose.target,
+            choose.type, choose.from, name);
+        answer(client, "error %s does not open files of this type", name);
         return;
+    }
+    /* A container sees the shared folders only; a host program sees the home,
+     * unless an isolated container sent the path. */
+    if (choose.target[0] == '/' && (choose.from_isolated || !open_host(name))) {
+        open_as_user(1);
+        int shared = open_shared(choose.target, why, sizeof why);
+        open_as_user(0);
+        if (!shared) {
+            answer(client, "error %s", why);
+            return;
+        }
     }
     say("locachy-bar: open %s (%s) from %s in %s", choose.target, choose.type, choose.from, name);
     if (run_app("open", name, choose.target) < 0) {
@@ -3534,7 +3584,7 @@ static void close_chooser(void)
     wl_display_flush(display);
 }
 
-static void open_chooser(int client)
+static void open_chooser(int client, const char *prefer)
 {
     char rule[OPEN_NAME] = "";
     if (!active) {
@@ -3549,9 +3599,11 @@ static void open_chooser(int client)
         choose.n = open_containers(choose.names, CHOICES);
     }
     choose.sel = 0;
-    if (open_rule(choose.type, rule, sizeof rule) == OPEN_RULE_CONTAINER) {
+    const char *want = prefer && prefer[0] ? prefer :
+                       open_rule(choose.type, rule, sizeof rule) == OPEN_RULE_CONTAINER ? rule : NULL;
+    if (want) {
         for (int i = 0; i < choose.n; i++) {
-            if (strcmp(choose.names[i], rule) == 0) {
+            if (strcmp(choose.names[i], want) == 0) {
                 choose.sel = i;
             }
         }
@@ -3595,7 +3647,7 @@ static void chooser_key(int code)
         char name[OPEN_NAME];
         snprintf(name, sizeof name, "%s", choose.names[choose.sel]);
         close_chooser();
-        deliver(client, name);
+        deliver(client, name, 1);
         return;
     } else {
         return;
@@ -3609,7 +3661,7 @@ static void open_request(void)
     if (client < 0) {
         return;
     }
-    char request[4300], with[OPEN_NAME] = "", rule[OPEN_NAME];
+    char request[4300], with[OPEN_NAME] = "", rule[OPEN_NAME], why[512];
     struct pollfd wait = { .fd = client, .events = POLLIN };
     ssize_t n = poll(&wait, 1, 500) > 0 ? recv(client, request, sizeof request - 1, 0) : -1;
     if (n <= 0) {
@@ -3617,6 +3669,10 @@ static void open_request(void)
         return;
     }
     request[n] = '\0';
+    if (!active) {
+        answer(client, "error the shared display is not on the screen%s", "");
+        return;
+    }
     if (choose.client >= 0 || again.shown) {
         answer(client, "error a question is on the screen%s", "");
         return;
@@ -3631,17 +3687,36 @@ static void open_request(void)
         answer(client, "error unknown request%s", "");
         return;
     }
-    client_container(client, choose.from, sizeof choose.from);
+    if (client_peer(client) < 0) {
+        answer(client, "error caller is gone%s", "");
+        return;
+    }
     if (open_normalize(target, choose.target, sizeof choose.target) < 0) {
         answer(client, "error %s is neither a path nor a URL", target);
         return;
     }
-    if (open_type(choose.target, choose.type, sizeof choose.type) < 0) {
+    if (choose.from_isolated && choose.target[0] == '/') {
+        open_as_user(1);
+        int shared = open_shared(choose.target, why, sizeof why);
+        open_as_user(0);
+        if (!shared) {
+            answer(client, "error %s", why);
+            return;
+        }
+    }
+    open_as_user(1);
+    int typed = open_type(choose.target, choose.type, sizeof choose.type);
+    open_as_user(0);
+    if (typed < 0) {
         answer(client, "error cannot tell what %s is", choose.target);
         return;
     }
     if (with[0]) {
-        deliver(client, with);
+        if (!choose.from_root && choose.from_isolated && open_host(with) && opens_type(with, choose.type)) {
+            open_chooser(client, with);
+        } else {
+            deliver(client, with, choose.from_root);
+        }
     } else if (strcmp(choose.type, "inode/directory") == 0) {
         /* Folders open in a file manager window of their own on this display
          * (files shows only the user's home, checked as the user). */
@@ -3656,11 +3731,12 @@ static void open_request(void)
         int kind = open_rule(choose.type, rule, sizeof rule);
         char names[2][OPEN_NAME];
         if (kind == OPEN_RULE_CONTAINER) {
-            deliver(client, rule);
-        } else if (kind == OPEN_NO_RULE && open_candidates(choose.type, names, 2) == 1) {
-            deliver(client, names[0]);
+            deliver(client, rule, 1);
+        } else if (kind == OPEN_NO_RULE && open_candidates(choose.type, names, 2) == 1 &&
+                   !(choose.from_isolated && open_host(names[0]))) {
+            deliver(client, names[0], 0);
         } else {
-            open_chooser(client);
+            open_chooser(client, NULL);
         }
     }
 }

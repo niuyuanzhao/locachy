@@ -825,7 +825,7 @@ SOURCE_PENDING_FILE = "/usr/local/lib/locachy/source-pending"
 SELF = "/usr/local/bin/locachy-pkg"
 INIT = "/usr/local/lib/locachy/init"
 PLAN_FILE = "/var/lib/locachy/plan"
-CHECK_DB = "/var/tmp/locachy-checkupdates"
+CHECK_DB = "/var/lib/locachy/checkupdates"
 AUR_RPC = "https://aur.archlinux.org/rpc/v5/info"
 LOCAL_RECORDS = "/var/lib/locachy/local-packages"
 BUILD_TOOL = "/usr/local/bin/locachy-build"
@@ -1405,6 +1405,7 @@ def vercmp(a, b):
 def repo_updates():
     """The host's repository updates and every repository package's newest
     version, from a copy of the sync databases updated aside."""
+    os.makedirs(CHECK_DB, mode=0o755, exist_ok=True)
     env = dict(os.environ, CHECKUPDATES_DB=CHECK_DB)
     p = subprocess.run(in_net(["env", f"CHECKUPDATES_DB={CHECK_DB}", "checkupdates"]),
                        capture_output=True, text=True, env=env)

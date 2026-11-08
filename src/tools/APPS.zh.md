@@ -33,10 +33,10 @@ tools/check.py  用某个系统自己的辅助模块检查本仓库：
 - `NAME` 为 `[a-z0-9][a-z0-9._-]{0,62}`。每个预设是普通文件（不是链接），至多 16 KiB，UTF-8。
   `apps/` 中不能有其他东西，且至少有一个预设。
 - 每行是空行、`#` 注释或 `KEY="VALUE"`。键为 `package`、`extras`、`command`、`arguments`、
-  `network`、`camera`、`directories`、`desktop`、`x11`，格式 2 还有 `host`。
+  `network`、`camera`、`screencast`、`directories`、`desktop`、`x11`，格式 2 还有 `host`。
   未知键、重复键或其他任何行都会拒绝整个目录。
 - 值中不能有 `"`、`\`、`$`、反引号或控制字符。`package` 是一个 pacman 包名；`extras` 是空格分隔的包名；
-  `command` 是不含 `..` 和空格的绝对路径；`network`、`camera`、`x11`、`host` 为 `0` 或 `1`；
+  `command` 是不含 `..` 和空格的绝对路径；`network`、`camera`、`screencast`、`x11`、`host` 为 `0` 或 `1`；
   `directories` 是冒号分隔、不含 `..` 的绝对路径；`desktop` 是 `*.desktop` 文件名。
   `package` 和 `command` 必须有。
 

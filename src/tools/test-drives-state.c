@@ -25,8 +25,9 @@ static int fixture_chown(const char *, uid_t, gid_t);
 static int fixture_fchown(int, uid_t, gid_t);
 static int fixture_unlinkat(int, const char *, int);
 static int fixture_poll(struct pollfd *, nfds_t, int);
-static char control_path[256];
+static char control_path[256], locked_path[256];
 #define DRIVES_CONTROL control_path
+#define DRIVES_LOCKED locked_path
 #define HOST_BUS "/nonexistent/bus"
 #define fopen fixture_fopen
 #define opendir fixture_opendir
@@ -129,6 +130,7 @@ int main(int argc, char **argv)
     snprintf(path, sizeof path, "%s/Drives/Empty", scratch); assert(mkdir(path, 0700) == 0);
     snprintf(path, sizeof path, "%s/control", scratch); assert(mkdir(path, 0700) == 0);
     snprintf(control_path, sizeof control_path, "%s/control/socket", scratch);
+    snprintf(locked_path, sizeof locked_path, "%s/locked", scratch);
     snprintf(mount_table, sizeof mount_table,
              "1 0 0:1 / / rw - tmpfs root rw\n2 1 0:77 / %s/Drives/Cloud rw - fuse.rclone cloud: rw\n", scratch);
     assert(drives_main() == 0 && unmounts == 0 && removals == 0);

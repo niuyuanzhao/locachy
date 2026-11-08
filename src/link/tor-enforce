@@ -50,13 +50,32 @@ in_ns() {
     ip netns exec "$NS" "$@"
 }
 
-# The connected IPv4 subnets of the namespace's Ethernet and Wi-Fi
+# Private or link-local IPv4 CIDR (RFC 1918, RFC 6598, RFC 3927) only: a rogue
+# DHCP server naming public address space as a link subnet never bypasses Tor.
+private_lan_cidr() {
+    awk -F'[./]' '
+        !/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/ { exit 1 }
+        {
+            a = $1 + 0; b = $2 + 0; c = $3 + 0; d = $4 + 0
+            p = (NF == 5 ? $5 + 0 : 32)
+            if (a > 255 || b > 255 || c > 255 || d > 255 || p < 8 || p > 32) exit 1
+            if (a == 10 && p >= 8) exit 0
+            if (a == 172 && b >= 16 && b <= 31 && p >= 12) exit 0
+            if (a == 192 && b == 168 && p >= 16) exit 0
+            if (a == 100 && b >= 64 && b <= 127 && p >= 10) exit 0
+            if (a == 169 && b == 254 && p >= 16) exit 0
+            exit 1
+        }' <<<"$1"
+}
+
+# The connected private IPv4 subnets of the namespace's Ethernet and Wi-Fi
 # interfaces (not loopback, mihomo's TUN or tailscale0), comma-separated.
 lan() {
     local net dev seen=" "
     in_ns ip -4 -o route show table main proto kernel scope link 2>/dev/null |
         while read -r net _ dev _; do
             in_ns ip -o link show dev "$dev" 2>/dev/null | grep -q ' link/ether ' || continue
+            private_lan_cidr "$net" || continue
             case $seen in *" $net "*) continue ;; esac
             seen="$seen$net "
             printf '%s\n' "$net"
@@ -153,6 +172,15 @@ EOF
 
     chain forward {
         type filter hook forward priority filter; policy drop;
+    }
+
+    chain input {
+        type filter hook input priority filter; policy drop;
+        iif "lo" accept
+        ct state established,related accept
+        ct state invalid drop
+        meta nfproto ipv4 meta l4proto icmp accept
+        udp sport 67 udp dport 68 accept
     }
 }
 EOF

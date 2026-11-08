@@ -424,6 +424,7 @@ for preset in "$src"/containers/*.conf; do
         echo "make: host program ${preset##*/}"
     fi
 done
+install -d -m 0700 /var/lib/locachy/containers
 # A container made before its configuration had a file of its own: its cmd,
 # net and packages (in /var/lib/locachy/containers/NAME) become NAME.conf.
 for d in /var/lib/locachy/containers/*; do
@@ -490,7 +491,7 @@ done
 for conf in /etc/locachy/containers/*.conf; do
     [ -f "$conf" ] && grep -qx 'package="freac"' "$conf" || continue
     xml=/var/lib/locachy/containers/$(basename "$conf" .conf)/data/.config/freac/freac.xml
-    if [ -f "$xml" ] && grep -Eq '<value name="Window(Size|Pos)[XY]">-' "$xml"; then
+    if [ -f "$xml" ] && [ ! -L "$xml" ] && grep -Eq '<value name="Window(Size|Pos)[XY]">-' "$xml"; then
         sed -i -E '/<value name="Window(Size|Pos)[XY]">-/d' "$xml"
         echo "make: $xml: the window size a start without X11 saved is dropped"
     fi
@@ -531,6 +532,7 @@ install -D -m 644 "$src/link/50-locachy-cameras.conf" /etc/wireplumber/wireplumb
 install -D -m 644 "$src/link/50-locachy-sockets.conf" /etc/pipewire/pipewire.conf.d/50-locachy-sockets.conf
 install -D -m 644 "$src/link/50-locachy-pulse.conf" /etc/pipewire/pipewire-pulse.conf.d/50-locachy-pulse.conf
 install -D -m 644 "$src/link/locachy-audio.sysusers" /usr/local/lib/sysusers.d/locachy-audio.conf
+install -D -m 644 "$src/link/50-locachy-sysctl.conf" /usr/local/lib/sysctl.d/50-locachy.conf
 install -m 755 "$src/link/tailscale-client" "$lib/tailscale-client"
 install -m 755 "$src/link/clash-client" "$lib/clash-client"
 install -m 755 "$src/link/tor-client" "$lib/tor-client"

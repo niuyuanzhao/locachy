@@ -48,7 +48,7 @@ static int typed(const char *path, const char *want)
 int main(void)
 {
     assert(unshare(CLONE_NEWNS) == 0 && mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) == 0);
-    const char *dirs[] = { "/etc/locachy", CONTAINERS_CONF, CONTAINERS, "/usr/share/applications",
+    const char *dirs[] = { "/etc/locachy", CONTAINERS_CONF, OPEN_CONTAINERS, "/usr/share/applications",
                            OPEN_PROGRAM_DESKTOP, "/run/locachy", "/var/tmp/locachy-open-host" };
     for (int i = 0; i < 7; i++) {
         char dir[512];
@@ -63,9 +63,15 @@ int main(void)
         "[Desktop Entry]\nName=Editor\nMimeType=text/plain;\nStartupWMClass=ed-wm\n");
     put("/usr/share/applications/ed-url.desktop", "[Desktop Entry]\nName=Editor URL\nMimeType=x-scheme-handler/ed;\n");
     put("/usr/share/applications/other.desktop", "[Desktop Entry]\nName=Other\nMimeType=text/plain;image/png;\n");
-    put(CONTAINERS "/box/upper/usr/share/applications/box.desktop", "[Desktop Entry]\nName=Box\nMimeType=image/png;\n");
+    put(OPEN_CONTAINERS "/box/upper/usr/share/applications/box.desktop", "[Desktop Entry]\nName=Box\nMimeType=image/png;\n");
 
-    assert(open_host("editor") && !open_host("box") && !open_host("../editor") && !open_host("none"));
+    put(CONTAINERS_CONF "/window-files-1.conf", "host=\"1\"\ncommand=\"/usr/bin/ed\"\n");
+    assert(open_host("editor") && !open_host("box") && !open_host("../editor") && !open_host("none") &&
+           !open_host("window-files-1"));
+    char norm[256];
+    assert(open_normalize("file:///a%20b", norm, sizeof norm) == 0 && !strcmp(norm, "/a b"));
+    assert(open_normalize("file:///a%00b", norm, sizeof norm) < 0);
+    assert(open_normalize("https://example.org/a\nb", norm, sizeof norm) < 0);
     char ids[8][OPEN_WINDOW_ID];
     int n = open_window_ids("editor", ids, 8);
     assert(n == 3 && !strcmp(ids[0], "ed") && !strcmp(ids[1], "ed-wm") && !strcmp(ids[2], "ed-url"));

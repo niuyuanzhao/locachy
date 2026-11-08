@@ -38,7 +38,9 @@ NS=${LOCACHY_CLASH_NETNS:-locachy-net}
 MIHOMO=${LOCACHY_MIHOMO:-/usr/bin/mihomo}
 RC=${LOCACHY_CLASH_RC:-/etc/locachy/rc.conf}
 DEVICE=mihomo
-TABLE=2022 # mihomo's routing table, and the first of its rules (auto-route)
+TABLE=2022 # mihomo's routing table, its group id for the firewall, and its rules
+CLASH_GID=2022
+ENFORCE_TABLE="inet locachy-clash"
 RULE=9000
 # Under Tor (tor-enforce has the same numbers): mihomo's port for Tor, the
 # mark of its connections as Tor's front, and of its connections above Tor,
@@ -49,11 +51,9 @@ OVER_TOR_MARK=2024
 OVER_TOR_RULE=8999
 TOR_GROUP=LOCachy-Tor-front
 
-# The keys LOCachy sets: the subscription's own are left out.
-OWN_KEYS="port socks-port redir-port tproxy-port mixed-port allow-lan bind-address lan-allowed-ips
-    lan-disallowed-ips authentication skip-auth-prefixes external-controller external-controller-tls
-    external-controller-unix external-controller-pipe external-controller-cors secret external-ui
-    external-ui-name external-ui-url tun dns profile interface-name routing-mark listeners"
+# Only these top-level sections of a Clash subscription are kept; every other
+# key (ports, controllers, dns, tun, providers, hosts, sniffer) is dropped.
+ALLOW_KEYS="mode proxies proxy-groups rules"
 # Rules before the subscription's: tailscaled itself, the time zone guessed
 # from the address (timezone-client) and network time keep away from proxies.
 FIRST_RULES="PROCESS-NAME,tailscaled,DIRECT
@@ -86,9 +86,9 @@ make_config() { # FILE MODE SECRET [TOR]
     if [ "$tor" = mihomo ]; then
         group="{ name: $TOR_GROUP, type: url-test, include-all: true, exclude-type: direct, url: 'https://www.gstatic.com/generate_204', interval: 600 }"
     fi
-    if grep -q '^proxies:' "$file"; then
-        awk -v own=" $(echo $OWN_KEYS) " -v first="$FIRST_RULES" -v group="$group" '
-            BEGIN { n = split(first, add, "\n") }
+    if grep -q '^proxies:' "$file" && ! grep -q '^[[:space:]]*{' "$file"; then
+        awk -v allow=" $(echo $ALLOW_KEYS) " -v first="$FIRST_RULES" -v group="$group" '
+            BEGIN { n = split(first, add, "\n"); keep = 0 }
             function insert(indent) { for (i = 1; i <= n; i++) print indent "- " add[i]; pending = 0 }
             function put_group(indent) { print indent "- " group; grouping = 0 }
             /^[A-Za-z0-9_-]+:/ {
@@ -96,13 +96,13 @@ make_config() { # FILE MODE SECRET [TOR]
                 if (grouping) put_group("  ")
                 key = $0
                 sub(/:.*/, "", key)
-                skip = index(own, " " key " ") > 0
+                keep = index(allow, " " key " ") > 0
                 if (key == "rules") { seen = 1; pending = 1 }
                 if (key == "proxy-groups" && group != "") { grouped = 1; grouping = 1 }
-                if (!skip) print
+                if (keep) print
                 next
             }
-            skip { next }
+            !keep { next }
             pending && /^[ \t]*- / { indent = $0; sub(/-.*/, "", indent); insert(indent) }
             grouping && /^[ \t]*- / { indent = $0; sub(/-.*/, "", indent); put_group(indent) }
             { print }
@@ -199,6 +199,59 @@ in_ns() {
     ip netns exec "$NS" "$@"
 }
 
+clash_tun_enforced() {
+    grep -qE '^[[:space:]]*service_clash=' "$RC" 2>/dev/null &&
+        [ "$(mode)" = tun ] && [ "$(tor)" = none ]
+}
+
+enforce_load() {
+    [ -e "/run/netns/$NS" ] || return 0
+    in_ns nft -f - <<EOF
+table $ENFORCE_TABLE
+delete table $ENFORCE_TABLE
+table $ENFORCE_TABLE {
+    chain output {
+        type filter hook output priority filter; policy drop;
+        oifname { "lo", "$DEVICE", "tailscale0" } accept
+        fib daddr type local accept
+        ip daddr 100.64.0.0/10 accept
+        ip6 daddr { fd7a:115c:a1e0::/48, fe80::/10 } accept
+        meta l4proto ipv6-icmp accept
+        udp sport 68 udp dport 67 accept
+        udp sport 546 udp dport 547 accept
+        meta skgid $CLASH_GID accept
+        meta skuid 0 udp dport { 53, 123 } accept
+        meta skuid 0 tcp dport { 53, 123 } accept
+        meta l4proto tcp reject with tcp reset
+        reject
+    }
+}
+EOF
+}
+
+enforce_remove() {
+    [ -e "/run/netns/$NS" ] || return 0
+    if in_ns nft list table $ENFORCE_TABLE >/dev/null 2>&1; then
+        in_ns nft delete table $ENFORCE_TABLE
+    fi
+}
+
+sync_enforce() {
+    if clash_tun_enforced; then
+        enforce_load
+    else
+        enforce_remove
+    fi
+}
+
+if [ "${1:-}" = --enforce ]; then
+    enforce_load
+    exit $?
+elif [ "${1:-}" = --unenforce ]; then
+    enforce_remove
+    exit 0
+fi
+
 # What auto-route leaves when mihomo is killed: its rules, its table, its
 # interface; and the rule of its connections above Tor.
 clean() {
@@ -218,43 +271,70 @@ clean() {
 # The subscription, asked as a Clash client (which most give their
 # configuration to), into subscription.yaml.
 fetch() {
-    in_ns curl -fsSL --max-time 60 -A "clash.meta" -o "$STATE/subscription.yaml.new" "$(cat "$STATE/subscription")" &&
+    in_ns setpriv --regid="$CLASH_GID" --clear-groups -- \
+        curl -fsSL --max-time 60 -A "clash.meta" -o "$STATE/subscription.yaml.new" "$(cat "$STATE/subscription")" &&
         [ -s "$STATE/subscription.yaml.new" ] && mv "$STATE/subscription.yaml.new" "$STATE/subscription.yaml"
 }
 
-until [ -x "$MIHOMO" ] && [ -s "$STATE/subscription" ] && [ -e "/run/netns/$NS" ]; do
-    sleep 2
+pid=
+on_stop() {
+    [ -z "$pid" ] || { kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; }
+    clean
+    sync_enforce
+    exit 0
+}
+trap on_stop TERM INT
+
+until [ -e "/run/netns/$NS" ]; do
+    sleep 1 & wait $!
+done
+sync_enforce
+
+until [ -x "$MIHOMO" ] && [ -s "$STATE/subscription" ]; do
+    sync_enforce
+    sleep 2 & wait $!
 done
 umask 077
 mkdir -p "$STATE"
 [ -s "$STATE/secret" ] || od -An -tx1 -N16 /dev/urandom | tr -d ' \n' >"$STATE/secret"
-mode=$(mode)
-tor=$(tor)
-sub_time=$(stat -c %Y "$STATE/subscription")
-# As Tor's front, a fetch now would wait for Tor, which waits for mihomo.
-if [ "$tor" = mihomo ] && [ -s "$STATE/subscription.yaml" ]; then
-    :
-elif ! fetch && [ ! -s "$STATE/subscription.yaml" ]; then
-    echo "clash-client: the subscription gave nothing; again in a while" >&2
-    exit 1
-fi
-make_config "$STATE/subscription.yaml" "$mode" "$(cat "$STATE/secret")" "$tor" >"$STATE/config.yaml.new"
-if ! in_ns timeout 120 "$MIHOMO" -t -d "$STATE" -f "$STATE/config.yaml.new" >"$STATE/test.log" 2>&1; then
-    echo "clash-client: mihomo refuses the configuration (see $STATE/test.log); the last one is kept" >&2
-    [ -s "$STATE/config.yaml" ] || exit 1
-else
-    mv "$STATE/config.yaml.new" "$STATE/config.yaml"
-fi
+while :; do
+    sync_enforce
+    mode=$(mode)
+    tor=$(tor)
+    sub_time=$(stat -c %Y "$STATE/subscription")
+    # As Tor's front, a fetch now would wait for Tor, which waits for mihomo.
+    if [ "$tor" = mihomo ] && [ -s "$STATE/subscription.yaml" ]; then
+        :
+    elif ! fetch && [ ! -s "$STATE/subscription.yaml" ]; then
+        echo "clash-client: the subscription gave nothing; again in a while" >&2
+        sleep 5 & wait $!
+        continue
+    fi
+    make_config "$STATE/subscription.yaml" "$mode" "$(cat "$STATE/secret")" "$tor" >"$STATE/config.yaml.new"
+    if ! in_ns timeout 120 setpriv --regid="$CLASH_GID" --clear-groups --no-new-privs -- \
+        "$MIHOMO" -t -d "$STATE" -f "$STATE/config.yaml.new" >"$STATE/test.log" 2>&1; then
+        echo "clash-client: mihomo refuses the configuration (see $STATE/test.log); the last one is kept" >&2
+        if [ ! -s "$STATE/config.yaml" ]; then
+            sleep 5 & wait $!
+            continue
+        fi
+    else
+        mv "$STATE/config.yaml.new" "$STATE/config.yaml"
+    fi
+    break
+done
 
 clean
+sync_enforce
 if [ "$tor" = bridges ] && [ "$mode" = tun ]; then
     in_ns ip -4 rule add fwmark "$OVER_TOR_MARK" lookup main priority "$OVER_TOR_RULE"
 fi
 # Not through in_ns: in the background, a function is a shell of its own, and
-# $! would be that shell, not mihomo (ip netns exec becomes mihomo).
-ip netns exec "$NS" "$MIHOMO" -d "$STATE" -f "$STATE/config.yaml" &
+# $! would be that shell, not mihomo (ip netns exec and setpriv become mihomo).
+ip netns exec "$NS" setpriv --regid="$CLASH_GID" --clear-groups --no-new-privs \
+    --bounding-set=-mknod,-sys_rawio,-sys_module,-sys_boot,-kexec_load -- \
+    "$MIHOMO" -d "$STATE" -f "$STATE/config.yaml" &
 pid=$!
-trap 'kill "$pid" 2>/dev/null; wait "$pid"; clean; exit 0' TERM INT
 echo "clash-client: mihomo running ($mode) in $NS (pid $pid)"
 
 fetched=$(date +%s)
@@ -273,12 +353,16 @@ while kill -0 "$pid" 2>/dev/null; do
         echo "clash-client: $changed changed: starting again"
         kill "$pid"
         wait "$pid"
+        pid=
         clean
+        sync_enforce
         exit 0
     fi
 done
 wait "$pid"
 status=$?
+pid=
 clean
+sync_enforce
 echo "clash-client: mihomo ended (status $status)" >&2
 exit 1

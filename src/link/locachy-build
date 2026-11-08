@@ -444,7 +444,7 @@ if [ "${LOCACHY_BUILD_STAGE:-}" = ns ]; then
         done
     fi
     mount --bind "$run/tmp" "$root/tmp"
-    mount -t tmpfs dev "$root/dev" -o mode=0755,nosuid
+    mount -t tmpfs dev "$root/dev" -o mode=0755,nosuid,nodev
     for d in null zero full random urandom tty; do
         [ -e "/dev/$d" ] || continue
         touch "$root/dev/$d"
@@ -486,6 +486,7 @@ if [ "${LOCACHY_BUILD_STAGE:-}" = ns ]; then
     # A build cannot leave descendants running to rewrite its hand-over.
     # This also keeps package scripts away from the host process tree.
     "${net[@]}" unshare --pid --fork --kill-child --mount-proc="$root/proc" \
+        setpriv --bounding-set=-mknod,-sys_rawio,-sys_module,-sys_boot,-kexec_load -- \
         chroot "$root" "${env[@]}" /usr/local/bin/locachy-build "$@"
     if [ -n "$prepare" ]; then
         install -d -m 0700 -o root -g root "$run/sealed"
@@ -911,14 +912,14 @@ fi
 # describes. Failed local builds leave the previous cache and record intact.
 if [ "$status" = 0 ] || [ "$local_recipe" = 0 ]; then
     for f in "$run"/out/*.pkg.tar.zst; do
-        [ ! -f "$f" ] || install -m 0644 -o root -g root "$f" "$out/"
+        [ ! -f "$f" ] || [ -L "$f" ] || install -m 0644 -o root -g root "$f" "$out/"
     done
 fi
 if [ "$status" = 0 ] && [ "$local_recipe" = 1 ]; then
     name=$2
     artifact=
     for f in "$run"/out/*.pkg.tar.zst; do
-        [ -f "$f" ] || continue
+        [ -f "$f" ] && [ ! -L "$f" ] || continue
         pkg=$(bsdtar -xOf "$f" .PKGINFO | sed -n 's/^pkgname = //p')
         [ "$pkg" != "$name" ] || artifact=$out/${f##*/}
     done

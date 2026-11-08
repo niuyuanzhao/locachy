@@ -39,6 +39,7 @@ static int fixture_ioctl(int, unsigned long, ...);
 #define PROC_SWAPS swaps
 #define HOST_BUS "/nonexistent/bus"
 #define DRIVES_CONTROL "/nonexistent/control"
+#define DRIVES_LOCKED "/nonexistent/locked"
 #define fopen fixture_fopen
 #define popen fixture_popen
 #define pclose fclose

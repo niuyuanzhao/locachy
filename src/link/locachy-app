@@ -389,7 +389,8 @@ do_build() {
         # The same store build action installs a recipe with real-system
         # access on the host. The configuration grants that access; packages
         # must be registered leaves so later reconciliation keeps them.
-        mkdir -p "$cbase"
+        mkdir -p "$CONT_BASE" "$cbase"
+        chmod 0700 "$CONT_BASE"
         rm -f "$cbase/built" "$cbase/built.new"
         saved_packages "$name"
         [ "${#packages[@]}" -gt 0 ] || die "$name has no package (package= in $CONT_CONF/$name.conf)"
@@ -410,7 +411,10 @@ do_build() {
             aur_pkgs+=("$p")
         fi
     done
-    mkdir -p "$cbase/merged" "$cbase/data" "$pkg_cache"
+    mkdir -p "$CONT_BASE" "$cbase/merged" "$pkg_cache"
+    chmod 0700 "$CONT_BASE"
+    [ ! -L "$cbase/data" ] || die "$name: $cbase/data is a symbolic link"
+    mkdir -p "$cbase/data"
     modprobe overlay 2>/dev/null || true
 
     # AUR packages not built yet.
@@ -431,12 +435,13 @@ do_build() {
             mount -t overlay overlay -o "lowerdir=/,upperdir=$cbase/upper.new,workdir=$cbase/work.new" "$root"
             # Package installation needs proc and basic devices, not the host
             # runtime sockets, input devices, disks or DRM card nodes.
-            mkdir -p "$root"/{dev,proc,sys,run,tmp}
+            mkdir -p "$root"/{dev,proc,sys,run,tmp,var/lib/locachy}
             mount -t proc proc "$root/proc" -o nosuid,noexec,nodev
             mount -t sysfs sys "$root/sys" -o nosuid,noexec,nodev,ro
             mount -t tmpfs run "$root/run" -o mode=0755,nosuid,nodev
             mount -t tmpfs tmp "$root/tmp" -o mode=1777,nosuid,nodev
-            mount -t tmpfs dev "$root/dev" -o mode=0755,nosuid
+            mount -t tmpfs hidden "$root/var/lib/locachy" -o mode=0755,nosuid,nodev,size=1m
+            mount -t tmpfs dev "$root/dev" -o mode=0755,nosuid,nodev
             for d in null zero full random urandom tty; do
                 [ -e "/dev/$d" ] || continue
                 touch "$root/dev/$d"
@@ -456,14 +461,15 @@ do_build() {
             if [ -f /etc/netns/locachy-net/resolv.conf ]; then
                 cp -f /etc/netns/locachy-net/resolv.conf "$root/etc/resolv.conf" 2>/dev/null || true
             fi
+            in_build="setpriv --bounding-set=-mknod,-sys_rawio,-sys_module,-sys_boot,-kexec_load -- chroot $root"
             if [ "$n_repo" -gt 0 ]; then
-                chroot "$root" pacman -S --needed --noconfirm --asexplicit "${@:1:$n_repo}"
+                $in_build pacman -S --needed --noconfirm --asexplicit "${@:1:$n_repo}"
                 shift "$n_repo"
             fi
             if [ $# -gt 0 ]; then
                 mapfile -t files < <(/usr/local/bin/locachy-build --files "$root" "$@")
-                chroot "$root" pacman -U --needed --noconfirm --asdeps "${files[@]}"
-                chroot "$root" pacman -D --asexplicit "$@" >/dev/null
+                $in_build pacman -U --needed --noconfirm --asdeps "${files[@]}"
+                $in_build pacman -D --asexplicit "$@" >/dev/null
                 # The libraries its AUR programs need (the host may have moved
                 # on since they were built): "PACKAGE LIBRARY" for each missing.
                 for p in $(for f in "${files[@]}"; do bsdtar -xOf "$f" .PKGINFO | sed -n "s/^pkgname = //p"; done); do
@@ -588,21 +594,18 @@ do_list() {
     done < <(printf '%s\n' "${names[@]}" | sort -u)
 }
 
-# Screen sharing for its programs: xdg-desktop-portal (the container's own,
-# started on its bus when a program asks, as portals.conf says) has its
-# backend, xdg-desktop-portal-wlr, started here from the host on the
-# container's bus and on the shared display itself (wayland-0: capturing the
-# screen is of the interfaces locachy-0 hides). In the container's cgroup:
-# frozen and stopped with it. Asking which screen: slurp, as it does. (The
-# file chooser's backend, xdg-desktop-portal-gtk, needs nothing of the host:
-# the container's bus starts it in the container, on locachy-0.)
+# Screen sharing for containers that may capture (screencast="1", camera="1"
+# or host="1"): xdg-desktop-portal-wlr on the container's bus and on wayland-0
+# (slurp asks which screen; Screenshot is denied on the bus). In the
+# container's cgroup: frozen and stopped with it.
 start_screencast() {
     local name=$1 bus="$APP_RUNTIME/$1/bus/bus" backend=/usr/lib/xdg-desktop-portal-wlr
+    is_host "$name" || [ "$(conf_value "$name" screencast)" = 1 ] || [ "$(conf_value "$name" camera)" = 1 ] || return 0
     [ -x "$backend" ] && [ -S "$bus" ] && [ -S "$RUNTIME_DIR/wayland-0" ] && [ -S "$RUNTIME_DIR/pipewire-0" ] || return 0
     (
         exec {APP_LOCK_FD}>&-
         export DBUS_SESSION_BUS_ADDRESS="unix:path=$bus" WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR="$RUNTIME_DIR"
-        exec "$backend"
+        exec setpriv --no-new-privs -- "$backend"
     ) </dev/null >>"$APP_RUNTIME/$name.log" 2>&1 &
 }
 
@@ -886,7 +889,12 @@ cbase="$CONT_BASE/$name"
 cg=$(cg_path "$name")
 host=0
 is_host "$name" && host=1
-[ "$host" = 1 ] || mkdir -p "$cbase/upper" "$cbase/work" "$cbase/merged" "$cbase/data"
+mkdir -p "$CONT_BASE"
+chmod 0700 "$CONT_BASE"
+if [ "$host" != 1 ]; then
+    [ ! -L "$cbase" ] && [ ! -L "$cbase/data" ] || die "$name: its state directory has a symbolic link"
+    mkdir -p "$cbase/upper" "$cbase/work" "$cbase/merged" "$cbase/data"
+fi
 # Its cgroup open to read, as process 1 makes the windows' (init/apps.c), not
 # 0700 by this script's umask: the document server, the user's, watches its
 # cgroup.events. Only root writes a cgroup's files.
@@ -956,9 +964,6 @@ exec {READY_FD}<>"$ready_dir/ready"
 rm -f "$ready_dir/ready"
 rmdir "$ready_dir"
 trap - EXIT
-[ "$host" = 1 ] || rm -f "$cbase/data"/.config/*/SingletonLock \
-      "$cbase/data"/.config/*/SingletonSocket \
-      "$cbase/data"/.config/*/SingletonCookie 2>/dev/null || true
 rm -f "$APP_RUNTIME/$name/reaper.pid" "$APP_RUNTIME/$name.ready"
 # Its cameras (camera="1", a container: a host program has the host's /dev).
 cameras=
@@ -1087,7 +1092,9 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
         }
         set_entry "$cbase/merged/etc/passwd" "$uid" "$(getent passwd "$uid")"
         set_entry "$cbase/merged/etc/group" "$gid" "$(getent group "$gid")"
-        chown -R "$uid:$gid" "$cbase/data"
+        [ ! -L "$cbase/data" ] || { printf "locachy-app: %s/data is a link\n" "$cbase" >&2; exit 125; }
+        chown -h "$uid:$gid" "$cbase/data"
+        chmod 0700 "$cbase/data"
         touch "$host_runtime/$display"
         chmod 0666 "$host_runtime/$display"
         mount -t proc proc "$cbase/merged/proc" -o nosuid,noexec,nodev
@@ -1161,25 +1168,6 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
             done
             mount --bind "$d" "$cbase/merged$d"
         done
-        if [ ! -e "$cbase/data/.config/user-dirs.dirs" ]; then
-            install -d -o "$uid" -g "$gid" "$cbase/data/.config"
-            for d in $USER_DIRS; do
-                key=$(printf "%s" "$d" | tr a-z A-Z)
-                [ "$key" = DOWNLOADS ] && key=DOWNLOAD
-                printf "XDG_%s_DIR=\"\$HOME/%s\"\n" "$key" "$d"
-            done >"$cbase/data/.config/user-dirs.dirs"
-            chown "$uid:$gid" "$cbase/data/.config/user-dirs.dirs"
-        fi
-        # GSettings in a file of the home (GSETTINGS_BACKEND=keyfile below): dconf
-        # needs a session bus, which a container has not, so nothing was kept.
-        # Its first contents: windows that draw their own title bar (GTK,
-        # Chromium) show minimize and maximize, not only close.
-        keyfile="$cbase/data/.config/glib-2.0/settings/keyfile"
-        if [ ! -e "$keyfile" ]; then
-            install -d -o "$uid" -g "$gid" "$cbase/data/.config/glib-2.0" "${keyfile%/*}"
-            printf "[org/gnome/desktop/wm/preferences]\nbutton-layout=\047appmenu:minimize,maximize,close\047\n" >"$keyfile"
-            chown "$uid:$gid" "$keyfile"
-        fi
         # Host state stays out of sight: the private data of every container, the
         # words the input method has learned, the logs.
         mount -t tmpfs -o mode=0755,nosuid,nodev,size=1m hidden "$cbase/merged/var/lib/locachy"
@@ -1254,6 +1242,27 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
         cd /
         umount -l /tmp/.oldroot
         rmdir /tmp/.oldroot
+        # Inside the container's own root, as the user (never as host root over
+        # user-writable paths): stale Chromium singleton files gone, user-dirs
+        # and GSettings keyfile made when absent.
+        setpriv --reuid="$uid" --regid="$gid" --clear-groups --no-new-privs -- sh -euc '
+            uhome=$1; USER_DIRS=$2
+            rm -f "$uhome"/.config/*/SingletonLock "$uhome"/.config/*/SingletonSocket \
+                  "$uhome"/.config/*/SingletonCookie 2>/dev/null || true
+            if [ ! -e "$uhome/.config/user-dirs.dirs" ] && [ ! -L "$uhome/.config/user-dirs.dirs" ]; then
+                mkdir -p "$uhome/.config"
+                for d in $USER_DIRS; do
+                    key=$(printf "%s" "$d" | tr a-z A-Z)
+                    [ "$key" = DOWNLOADS ] && key=DOWNLOAD
+                    printf "XDG_%s_DIR=\"\$HOME/%s\"\n" "$key" "$d"
+                done >"$uhome/.config/user-dirs.dirs"
+            fi
+            keyfile="$uhome/.config/glib-2.0/settings/keyfile"
+            if [ ! -e "$keyfile" ] && [ ! -L "$keyfile" ]; then
+                mkdir -p "${keyfile%/*}"
+                printf "[org/gnome/desktop/wm/preferences]\nbutton-layout=\047appmenu:minimize,maximize,close\047\n" >"$keyfile"
+            fi
+        ' sh "$uhome" "$USER_DIRS" || true
         app_init=/run/locachy-app-init
         path=/usr/local/sbin:/usr/local/bin:/usr/bin
     fi

@@ -40,7 +40,7 @@
 
 static int valid_name(const char *name)
 {
-    if (!isalnum((unsigned char)name[0]) || strlen(name) >= OPEN_NAME) {
+    if (!isalnum((unsigned char)name[0]) || strlen(name) >= OPEN_NAME || strncmp(name, "window-", 7) == 0) {
         return 0;
     }
     for (const char *p = name; *p; p++) {
@@ -105,7 +105,11 @@ static int file_url_path(const char *url, char *path, size_t size)
     for (; *s && n + 1 < size; s++) {
         if (s[0] == '%' && isxdigit((unsigned char)s[1]) && isxdigit((unsigned char)s[2])) {
             char hex[3] = { s[1], s[2], 0 };
-            path[n++] = (char)strtol(hex, NULL, 16);
+            unsigned long v = strtoul(hex, NULL, 16);
+            if (v == 0) {
+                return -1;
+            }
+            path[n++] = (char)v;
             s += 2;
         } else {
             path[n++] = *s;
@@ -117,14 +121,14 @@ static int file_url_path(const char *url, char *path, size_t size)
 
 int open_normalize(const char *target, char *out, size_t size)
 {
+    int r = -1;
     if (strncmp(target, "file://", 7) == 0) {
-        return file_url_path(target, out, size);
-    }
-    if (target[0] == '/' || isalpha((unsigned char)target[0])) {
+        r = file_url_path(target, out, size);
+    } else if (target[0] == '/' || isalpha((unsigned char)target[0])) {
         snprintf(out, size, "%s", target);
-        return 0;
+        r = 0;
     }
-    return -1;
+    return r == 0 && !strpbrk(out, "\r\n") ? 0 : -1;
 }
 
 static int is_url(const char *target)

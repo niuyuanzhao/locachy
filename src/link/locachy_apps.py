@@ -66,6 +66,7 @@ CHECKS = {
     "arguments": (lambda v: True, ""),
     "network": (lambda v: v in ("0", "1"), "0 or 1"),
     "camera": (lambda v: v in ("0", "1"), "0 or 1"),
+    "screencast": (lambda v: v in ("0", "1"), "0 or 1"),
     "x11": (lambda v: v in ("0", "1"), "0 or 1"),
     "directories": (lambda v: not v or all(_path(d) for d in v.split(":")),
                     "absolute paths separated by colons"),
@@ -134,8 +135,8 @@ def _presets(directory, extra=(), fmt="2"):
         if entry in extra:
             continue
         name = entry[:-5] if entry.endswith(".conf") else ""
-        if not NAME.fullmatch(name):
-            raise CatalogError(f"{entry}: not a preset's name (NAME.conf; NAME of a-z, 0-9, . _ -)")
+        if not NAME.fullmatch(name) or name.startswith("window-"):
+            raise CatalogError(f"{entry}: not a preset's name (NAME.conf; NAME of a-z, 0-9, . _ -, not window-*)")
         data = _read(os.path.join(directory, entry))
         preset_values(name, data, fmt)
         found[name] = data

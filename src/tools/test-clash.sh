@@ -38,6 +38,12 @@ dns:
     - 1.2.3.4
 tun:
   enable: false
+hosts:
+  example.com: 6.6.6.6
+rule-providers:
+  evil:
+    type: http
+    path: ./pwn.yaml
 proxies:
   - { name: node-a, type: socks5, server: 127.0.0.1, port: 1 }
 proxy-groups:
@@ -55,8 +61,8 @@ top() { grep -c "^$1:" "$2"; }
 check "its proxies and group kept" "grep -q 'name: node-a' $out/tun.yaml && grep -q 'name: Choose' $out/tun.yaml"
 check "each own key once: mixed-port, allow-lan, dns, tun, secret, controller" \
     "[ \$(top mixed-port $out/tun.yaml)\$(top allow-lan $out/tun.yaml)\$(top dns $out/tun.yaml)\$(top tun $out/tun.yaml)\$(top secret $out/tun.yaml)\$(top external-controller $out/tun.yaml) = 111111 ]"
-check "theirs gone: port 7891, socks 7892, 0.0.0.0:9091, secret theirs, nameserver 1.2.3.4" \
-    "! grep -q -e 7891 -e 7892 -e 9091 -e theirs -e 1.2.3.4 $out/tun.yaml"
+check "theirs gone: port 7891, socks 7892, 0.0.0.0:9091, secret theirs, nameserver 1.2.3.4, hosts, rule-providers" \
+    "! grep -q -e 7891 -e 7892 -e 9091 -e theirs -e 1.2.3.4 -e 6.6.6.6 -e rule-providers -e pwn.yaml $out/tun.yaml"
 check "the first rules before theirs, at their indentation" \
     "grep -A4 '^rules:' $out/tun.yaml | tr '\n' '|' | grep -q '^rules:|- PROCESS-NAME,tailscaled,DIRECT|- DOMAIN,ipinfo.io,DIRECT|- DST-PORT,123,DIRECT|- DOMAIN-SUFFIX,example.com,Choose|'"
 check "tun: auto-route, Tailscale's addresses left out" \
@@ -104,6 +110,15 @@ for i in $(seq 60); do up && [ "$(rules)" -gt 0 ] && break; sleep 0.5; done
 kill -TERM $svc
 wait $svc
 check "started again and ended: nothing left" "! up && [ \$(rules) = 0 ]"
+
+# 4. Fail-closed TUN firewall when service_clash is enabled in rc.conf.
+printf 'service_clash="/usr/local/lib/locachy/clash-client"\nclash_mode="tun"\n' >"$out/rc.conf"
+LOCACHY_CLASH_RC=$out/rc.conf cc --enforce
+check "TUN firewall loaded: unprivileged direct TCP is refused while mihomo is down" \
+    "ip netns exec $ns nft list table inet locachy-clash >/dev/null 2>&1 && ! ip netns exec $ns setpriv --reuid=1000 --regid=1000 --clear-groups -- python3 -c 'import socket; s=socket.socket(); s.settimeout(1); s.connect((\"10.99.0.7\", 80))' 2>/dev/null"
+: >"$out/rc.conf"
+LOCACHY_CLASH_State=$out/state LOCACHY_CLASH_RC=$out/rc.conf cc --unenforce
+check "Clash off: TUN firewall removed" "! ip netns exec $ns nft list table inet locachy-clash >/dev/null 2>&1"
 ip netns del "$ns"
 
 [ $fail = 0 ] && echo "ALL PASSED" || { echo "SOME FAILED"; tail -5 "$out/service.log"; }
