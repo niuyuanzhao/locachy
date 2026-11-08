@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-08 18:08+0800\n"
+"POT-Creation-Date: 2026-11-08 06:00-0500\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -1101,6 +1101,18 @@ msgstr ""
 
 #: progs/bar.c
 msgid "Home (full screen)"
+msgstr ""
+
+#: progs/bar.c
+msgid "View (full screen)"
+msgstr ""
+
+#: progs/bar.c
+msgid "Settings (full screen)"
+msgstr ""
+
+#: progs/bar.c
+msgid "Mixer (full screen)"
 msgstr ""
 
 #: progs/bar.c
@@ -4297,7 +4309,7 @@ msgstr ""
 msgid "Cannot tell what %s is."
 msgstr ""
 
-#: progs/files.c
+#: progs/files.c progs/home.c
 #, c-format
 msgid "There is no program %s."
 msgstr ""

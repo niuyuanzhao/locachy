@@ -107,6 +107,21 @@ int main(void)
 
     struct panel_hit hit[16];
     int x0, x1;
+    /* The launcher remains on LOCachy's block, not a foreground program's
+     * title: view, settings and mixer use the same panel full screen. */
+    static const char *const titles[] = { "view", "settings", "mixer" };
+    for (int scale = 1; scale <= 2; scale++) {
+        int w = scale == 1 ? 1920 : 2880, h = scale == 1 ? 36 : 54;
+        int n = draw(w, h, &x0, &x1, hit);
+        int logo = find(hit, n, PANEL_BLOCK_LOCACHY), end = hit[logo].x1;
+        for (size_t i = 0; i < sizeof titles / sizeof *titles; i++) {
+            panel_draw(px, w, h, w, titles[i], "", "RAW", 0, &x0, &x1);
+            n = panel_hits(hit, 16);
+            logo = find(hit, n, PANEL_BLOCK_LOCACHY);
+            assert(n == 8 && logo >= 0 && hit[logo].x0 == 0 && hit[logo].x1 == end);
+        }
+    }
+    puts("PASS LOCachy's launcher area stays separate from view, settings and mixer titles at scale 1 and 1.5");
     with_bluetooth = 0;
     int n = draw(1920, 36, &x0, &x1, hit);
     assert(n == 7 && find(hit, n, PANEL_BLOCK_BLUETOOTH) < 0);

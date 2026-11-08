@@ -993,6 +993,21 @@ int main(int argc, char **argv)
     run("a request with a program there is not: an error, nothing opened", (const int[]){ OPEN, END });
     assert(tasks == 2 && opens == 8 && error && strstr(msg, "no program"));
 
+    /* One of home's programs to run by name ("program:NAME", no target: the
+     * top bar's launcher) is home's, not the file manager's: it goes back to
+     * home's list, the request left whole for home to take. */
+    snprintf(request, sizeof request, "program:settings\n\n");
+    run("a program for home to run: back to home's list, the request left for it", (const int[]){ OPEN, END });
+    char asked[OPEN_NAME];
+    assert(tasks == 2 && opens == 8 && !files_request() && access(OPEN_REQUEST, F_OK) == 0);
+    assert(files_program_request(asked, sizeof asked, 0) == 1 && strcmp(asked, "settings") == 0);
+    assert(files_program_request(asked, sizeof asked, 1) == 1 && access(OPEN_REQUEST, F_OK) != 0);
+    assert(files_program_request(asked, sizeof asked, 1) == 0);
+    FILE *req = fopen(OPEN_REQUEST, "w");
+    assert(req && fputs("program:view\n/x/y.pdf\n", req) >= 0 && fclose(req) == 0);
+    assert(files_program_request(asked, sizeof asked, 1) == 0 && files_request() && access(OPEN_REQUEST, F_OK) == 0);
+    unlink(OPEN_REQUEST);
+
     /*
      * FreeDesktop.org Trash 1.0 lifecycle: Delete moves to ~/.local/share/
      * Trash/{files,info} with URL-escaped Path= and DeletionDate=, collisions

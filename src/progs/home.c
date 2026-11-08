@@ -7,7 +7,10 @@
  * base_apps supplies their displayed state and memory usage. Enter opens: a
  * closed container starts, a running one is shown; the compositor remains one
  * shared host session. The first program, files, is home's own file manager
- * (files.c), also shown when a container asks for a folder.
+ * (files.c), also shown when a container asks for a folder. A program on the
+ * shared display (the top bar's launcher) may ask home to run one of its
+ * programs by name (files_program_request): one of these entries, run as
+ * Enter runs it; no command or path comes with the request.
  *
  * Requires these base interfaces (implemented alongside this UI):
  *   void base_apps(char *buf, size_t size);
@@ -1094,9 +1097,48 @@ static void draw(int ready)
     if (ready) say("home> ");
 }
 
+static void open_entry(int host);
+
+/* A program of home's that another asked home to run (files_program_request:
+ * the top bar's launcher), run as Enter on it runs it; a name not among the
+ * entries (rc.conf's program_NAME, files and desktop not) is refused. 1 if
+ * there was a request. */
+static int run_requested(void)
+{
+    char name[OPEN_NAME];
+    if (!files_program_request(name, sizeof name, 1)) {
+        return 0;
+    }
+    load(); /* rc.conf as it is now: settings may have changed it */
+    for (int i = 0; i < nentries; i++) {
+        if (!entries[i].builtin && strcmp(entries[i].name, name) == 0) {
+            say("home: run %s, as asked", entries[i].name);
+            open_entry(i);
+            return 1;
+        }
+    }
+    say("home: a request to run %s refused: not one of home's programs", valid_name(name) ? name : "?");
+    last_customized = 1;
+    snprintf(last, sizeof last, _("There is no program %s."), valid_name(name) ? name : "?");
+    return 1;
+}
+
 static void view_files(void)
 {
     files_view(); /* files keeps native per-output layouts and restores our target */
+    run_requested(); /* the file manager comes back here for one */
+}
+
+/* What other programs asked home for while it was away: one of its programs
+ * to run; a folder or a file for its file manager. 1 if there was any. */
+static int take_requests(void)
+{
+    int took = run_requested();
+    if (files_request()) {
+        view_files();
+        took = 1;
+    }
+    return took;
 }
 
 /* Accepted is not completed: no local state changes, including for show. */
@@ -1440,9 +1482,7 @@ int main(void)
             if (confirming != CONF_NONE) {
                 confirm_key(0); /* Never preserve a destructive prompt across a switch. */
             }
-            if (files_request()) {
-                view_files();
-            }
+            take_requests();
             load();
             refresh();
             draw(1);
@@ -1451,8 +1491,7 @@ int main(void)
         int redraw = uptime() >= refresh_at;
         if (redraw) {
             refresh();
-            if (confirming == CONF_NONE && files_request()) {
-                view_files();
+            if (confirming == CONF_NONE && take_requests()) {
                 refresh();
                 draw(0);
                 continue;

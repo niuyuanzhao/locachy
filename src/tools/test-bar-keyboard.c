@@ -19,6 +19,8 @@ static int fake_signal(pid_t pid, int sig) { (void)pid; signalled = sig; return 
 #define kill fake_signal
 #define base_audio_key fake_audio
 #define base_brightness_key fake_brightness
+static int fake_open_in_home(const char *with, const char *target); /* below */
+#define open_in_home fake_open_in_home
 #ifdef CONFIG_IME
 #define ime_get_commit typed_commit /* the bar's commits, seen here */
 #endif
@@ -33,6 +35,7 @@ static int fake_signal(pid_t pid, int sig) { (void)pid; signalled = sig; return 
 #endif
 #undef base_audio_key
 #undef base_brightness_key
+#undef open_in_home
 #undef kill
 #undef keys_device_layout
 #undef keys_reload
@@ -91,6 +94,17 @@ const char *typed_commit(void)
 }
 #endif
 
+/* What the bar asked home for (open_in_home's request): with and target. */
+static char asked_with[128], asked_target[128];
+static int asked;
+static int fake_open_in_home(const char *with, const char *target)
+{
+    asked++;
+    snprintf(asked_with, sizeof asked_with, "%.127s", with ? with : "");
+    snprintf(asked_target, sizeof asked_target, "%.127s", target);
+    return 0;
+}
+
 static int audio_action, brightness_action;
 static int fake_audio(int key, char *out, size_t size)
 {
@@ -108,9 +122,12 @@ static int fake_brightness(int key, char *out, size_t size)
 }
 void say(const char *fmt, ...) { (void)fmt; }
 static const char *rc_width_cn = NULL; /* rc.conf's key_ime_width_cn, when it has one */
+/* rc.conf's program_NAME settings (home's list), name and value pairs. */
+static const char *const *rc_programs;
 int rc_read(void (*fn)(const char *, const char *, void *), void *arg)
 {
     if (rc_width_cn) fn("key_ime_width_cn", rc_width_cn, arg);
+    for (const char *const *p = rc_programs; p && *p; p += 2) fn(p[0], p[1], arg);
     return 0;
 }
 double uptime(void) { return 1.0; }
@@ -146,7 +163,8 @@ int open_shared(const char *path, char *why, size_t size) { (void)path;(void)why
 int open_host(const char *name) { (void)name;return 0; }
 void open_user_dirs(char *home, size_t hsize, char *dirs, size_t dsize)
 { snprintf(home, hsize, "/nonexistent/home"); snprintf(dirs, dsize, "Documents"); }
-/* open_in_home: control.c's (linked for the seat's link, control_send/control_recv). */
+/* open_in_home: the bar's calls go to fake_open_in_home (control.c is linked
+ * for the seat's link, control_send/control_recv). */
 
 static int events[2];
 #ifdef CONFIG_IME
@@ -360,6 +378,62 @@ static void launcher_keys(void)
     key(KEY_LEFTALT, 1); key(KEY_F1, 1); key(KEY_F1, 0); key(KEY_LEFTALT, 0);
     assert(!launcher_shown && grabbed == base);
     puts("PASS Enter on home (full screen) closes the launcher and asks the seat for home; Alt+F1 again closes it");
+
+    /* View, settings and the mixer full screen, as home lists them (rc.conf's
+     * program_NAME), each after its window entry when there is one: Enter
+     * asks home for the program by its name only ("program:NAME", no
+     * target), then the seat for home. One home does not list has none. */
+    static const char *const listed[] = {
+        "program_view", "/usr/local/bin/view", "program_settings", "/usr/local/bin/settings",
+        "program_mixer", "/usr/local/bin/term /usr/bin/wiremix", NULL
+    };
+    static const char *const full[] = { "view", "settings", "mixer" };
+    rc_programs = listed;
+    for (int k = 0; k < 3; k++) {
+        key(KEY_LEFTALT, 1); key(KEY_F1, 1); key(KEY_F1, 0); key(KEY_LEFTALT, 0);
+        assert(launcher_shown && launcher.n <= LAUNCH_MAX);
+        int at = -1, programs = 0;
+        for (int i = 0; i < launcher.n; i++) {
+            const struct launch_item *it = &launcher.items[i];
+            programs += it->kind == LAUNCH_HOME_PROGRAM;
+            if (it->kind == LAUNCH_HOME_PROGRAM && !strcmp(it->name, full[k])) at = i;
+        }
+        assert(programs == 3 && at > 1 && !launch_action(&launcher.items[at]));
+        assert(strstr(launch_label(&launcher.items[at]), " (full screen)"));
+        assert(launcher.items[at - 1].kind != LAUNCH_WINDOW || !strcmp(launcher.items[at - 1].name, full[k]));
+        while (launcher.sel < at) {
+            key(KEY_DOWN, 1); key(KEY_DOWN, 0);
+        }
+        assert(launcher.sel == at);
+        signalled = asked = 0;
+        key(KEY_ENTER, 1);
+        char want[32];
+        snprintf(want, sizeof want, "program:%s", full[k]);
+        assert(!launcher_shown && signalled == SIGUSR1 && asked == 1);
+        assert(!strcmp(asked_with, want) && asked_target[0] == '\0');
+        key(KEY_ENTER, 0);
+        assert(grabbed == base && !layouts[0].down[KEY_ENTER]);
+    }
+    static const char *const no_audio[] = {
+        "program_settings", "/usr/local/bin/settings", "program_mixer", " ", "program_viewer", "/x", NULL
+    };
+    rc_programs = no_audio;
+    launcher_toggle(NULL);
+    int programs = 0, system = 0;
+    for (int i = 0; i < launcher.n; i++) {
+        programs += launcher.items[i].kind == LAUNCH_HOME_PROGRAM;
+        system += launcher.items[i].kind == LAUNCH_HEADER && launcher.items[i].system;
+        assert(launcher.items[i].kind != LAUNCH_HOME_PROGRAM || !strcmp(launcher.items[i].name, "settings"));
+    }
+    assert(programs == 1 && system == 1);
+    launcher_toggle(NULL);
+    rc_programs = NULL;
+    launcher_toggle(NULL);
+    for (int i = 0; i < launcher.n; i++) assert(launcher.items[i].kind != LAUNCH_HOME_PROGRAM);
+    launcher_toggle(NULL);
+    assert(!launcher_shown && grabbed == base);
+    puts("PASS view, settings and mixer full screen as home lists them: Enter asks home for program:NAME with no "
+         "target and the seat for home; one home does not list has no entry");
 
     launcher_toggle(NULL); /* a click on LOCachy */
     assert(launcher_shown && grabbed);

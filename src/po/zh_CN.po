@@ -2,7 +2,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-08 18:08+0800\n"
+"POT-Creation-Date: 2026-11-08 06:00-0500\n"
 "PO-Revision-Date: 2026-10-24 22:38+0000\n"
 "Last-Translator: LOCachy <38998838+niuyuanzhao@users.noreply.github.com>\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -1095,6 +1095,18 @@ msgstr "系统与硬件"
 #: progs/bar.c
 msgid "Home (full screen)"
 msgstr "主页（全屏）"
+
+#: progs/bar.c
+msgid "View (full screen)"
+msgstr "查看（全屏）"
+
+#: progs/bar.c
+msgid "Settings (full screen)"
+msgstr "设置（全屏）"
+
+#: progs/bar.c
+msgid "Mixer (full screen)"
+msgstr "混音器（全屏）"
 
 #: progs/bar.c
 msgid "Window on this desktop"
@@ -4342,7 +4354,7 @@ msgstr "无法打开 %s 窗口：%.400s"
 msgid "Cannot tell what %s is."
 msgstr "无法识别 %s 的类型。"
 
-#: progs/files.c
+#: progs/files.c progs/home.c
 #, c-format
 msgid "There is no program %s."
 msgstr "没有程序 %s。"

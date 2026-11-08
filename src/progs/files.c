@@ -34,7 +34,9 @@
  * click.
  *
  * A container's request (FILES_REQUEST, from locachy-bar) shows a folder,
- * its newest file selected, or a file's folder with it selected.
+ * its newest file selected, or a file's folder with it selected. A request
+ * for home to run one of its programs (files_program_request) is home's:
+ * the file manager leaves it, and goes back to home's list for it.
  *
  * files_pick is the same browser for choosing one file of a type (settings:
  * the wallpaper): Enter on such a file chooses it; nothing is changed there.
@@ -4492,18 +4494,48 @@ static int take_folder_request(void)
     return got && show_requested(raw);
 }
 
+int files_program_request(char *name, size_t size, int take)
+{
+    char with[OPEN_NAME + 16] = "", target[16] = "";
+    size_t len = strlen(OPEN_PROGRAM);
+    if (in_window()) {
+        return 0; /* home's requests, never a window's */
+    }
+    FILE *in = fopen(OPEN_REQUEST, "re");
+    if (!in) {
+        return 0;
+    }
+    int got = fgets(with, sizeof with, in) && fgets(target, sizeof target, in);
+    fclose(in);
+    if (!got || strcmp(target, "\n") != 0 || strncmp(with, OPEN_PROGRAM, len) != 0 || !strchr(with, '\n')) {
+        return 0; /* a file to open, or not a whole request */
+    }
+    with[strcspn(with, "\n")] = '\0';
+    if (take) {
+        unlink(OPEN_REQUEST);
+    }
+    snprintf(name, size, "%s", with + len);
+    return 1;
+}
+
 static int take_request(void)
 {
+    char program[OPEN_NAME];
     if (in_window()) {
         return 0; /* home's requests, never a window's */
     }
     int folder = take_folder_request();
+    if (files_program_request(program, sizeof program, 0)) {
+        return folder; /* home's to run: left for it */
+    }
     return take_open_request() || folder;
 }
 
 int files_request(void)
 {
-    return access(FILES_REQUEST, F_OK) == 0 || access(OPEN_REQUEST, F_OK) == 0;
+    char program[OPEN_NAME];
+    return access(FILES_REQUEST, F_OK) == 0 ||
+           (access(OPEN_REQUEST, F_OK) == 0 && !files_program_request(program, sizeof program, 0));
 }
 
 /* The user's home, its shared folders and the Trash, as places; the first
@@ -5511,6 +5543,10 @@ static int browse(char *out, size_t size)
                 drag_stop();
                 pull.on = 0;
                 output_ready();
+            }
+            char program[OPEN_NAME];
+            if (!pick_type && files_program_request(program, sizeof program, 0)) {
+                return 0; /* a program for home to run: back to its list, which runs it */
             }
             if ((pick_type || !take_request()) && key == K_SHOWN) {
                 reload_all();

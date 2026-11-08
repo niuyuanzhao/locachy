@@ -10,8 +10,15 @@ void files_view(void);
  * container's request is: only inside the user's home. */
 void files_view_at(const char *folder);
 
-/* Has a container asked home to show a folder (FILES_REQUEST)? */
+/* Has a container asked home to show a folder (FILES_REQUEST), or a program
+ * to open a file (OPEN_REQUEST)? Not for one of home's programs to run. */
 int files_request(void);
+
+/* Has a program asked home to run one of its programs (open_in_home with
+ * "program:NAME" and no target: the top bar's launcher)? 1 with NAME in
+ * name, the request taken if take; else 0 (none, another request, or in a
+ * window), the request left. Home runs NAME only if its list has it. */
+int files_program_request(char *name, size_t size, int take);
 
 /* The same, for choosing a file whose type (open_type) starts with type,
  * from folder dir (with the file keep selected): what is said at the start.

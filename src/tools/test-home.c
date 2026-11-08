@@ -64,13 +64,18 @@ int rc_read(void (*fn)(const char *, const char *, void *), void *arg)
     return 0;
 }
 void base_tasks(char *out, size_t size) { if (size) out[0] = '\0'; }
-static char opened_output[32];
+static char opened_output[32], opened_task[256]; /* the task's argv, joined with spaces */
 void base_open(char *const argv[], char *out, size_t size)
 { (void)argv; opens++; snprintf(out, size, "returned"); }
 void base_open_on(const char *output, char *const argv[], char *out, size_t size)
 {
     assert(argv && argv[0]);
     snprintf(opened_output, sizeof opened_output, "%s", output ? output : "");
+    size_t len = 0;
+    opened_task[0] = '\0';
+    for (int i = 0; argv[i] && len < sizeof opened_task; i++) {
+        len += (size_t)snprintf(opened_task + len, sizeof opened_task - len, i ? " %s" : "%s", argv[i]);
+    }
     opens++;
     snprintf(out, size, "shown %s", argv[0]);
 }
@@ -122,7 +127,18 @@ int jobs_pending(struct jobs_row *running)
 const char *jobs_state_label(const char *state) { return state; }
 void base_poweroff(void) { poweroffs++; }
 void files_view(void) { files_views++; }
-int files_request(void) { return 0; }
+/* What another program asked home for: a folder (files_request), a program
+ * of home's to run by name (files_program_request, taken when asked to). */
+static int folder_asked;
+static char program_asked[64];
+int files_request(void) { return folder_asked; }
+int files_program_request(char *name, size_t size, int take)
+{
+    if (!program_asked[0]) return 0;
+    snprintf(name, size, "%s", program_asked);
+    if (take) program_asked[0] = '\0';
+    return 1;
+}
 void base_status(const char *tag, char *out, size_t size)
 { (void)tag; snprintf(out, size, "Network: test"); }
 int screen_open(const char *font) { (void)font; return 1; }
@@ -680,6 +696,47 @@ int main(int argc, char **argv)
     load();
     puts("PASS home sections: Containers, Programs, System and hardware titled, never selected; keys, mouse, "
          "scrolling and names across load at the smallest screens");
+
+    /* A program another asked home to run by name (the top bar's launcher:
+     * view, settings, mixer full screen): one of home's entries (rc.conf's
+     * program_NAME, read again) runs as Enter runs it, its command rc.conf's,
+     * the request taken. files, desktop, a name rc.conf does not list and
+     * anything not a name run nothing. A folder asked for meanwhile is shown
+     * after the program. */
+    static const char *const launched[] = {
+        "program_view", "/usr/local/bin/view", "program_settings", "/usr/local/bin/settings",
+        "program_mixer", "/usr/local/bin/term /usr/bin/wiremix", "program_desktop", "/usr/bin/labwc", NULL
+    };
+    static const char *const runs[][2] = {
+        { "view", "/usr/local/bin/view" }, { "settings", "/usr/local/bin/settings" },
+        { "mixer", "/usr/local/bin/term /usr/bin/wiremix" },
+    };
+    rc_settings = launched; /* rc.conf changed while home was away: run_requested reads it */
+    selected = 0;
+    confirming = CONF_NONE;
+    assert(take_requests() == 0);
+    for (int k = 0; k < 3; k++) {
+        int before = opens, views = files_views;
+        snprintf(program_asked, sizeof program_asked, "%s", runs[k][0]);
+        assert(take_requests() == 1 && !program_asked[0] && opens == before + 1 && files_views == views);
+        assert(strcmp(opened_task, runs[k][1]) == 0 && strstr(last, "shown"));
+    }
+    static const char *const refused[] = { "files", "desktop", "admin", "../settings", "settings /x" };
+    for (size_t k = 0; k < sizeof refused / sizeof refused[0]; k++) {
+        int before = opens;
+        snprintf(program_asked, sizeof program_asked, "%s", refused[k]);
+        assert(take_requests() == 1 && !program_asked[0] && opens == before);
+        assert(strstr(last, "There is no program") && !strstr(last, "/x") && !strstr(last, ".."));
+    }
+    int before = opens, views = files_views;
+    snprintf(program_asked, sizeof program_asked, "settings");
+    folder_asked = 1;
+    assert(take_requests() == 1 && opens == before + 1 && files_views == views + 1 && !program_asked[0]);
+    folder_asked = 0;
+    rc_settings = default_settings;
+    load();
+    puts("PASS a program asked for by name runs from home's own list as Enter runs it (view, settings, mixer); "
+         "files, desktop, unlisted names and paths run nothing; a folder asked for meanwhile follows");
     free(apps);
     free(app_data);
     return 0;

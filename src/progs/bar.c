@@ -3612,20 +3612,21 @@ static void notes_click(double y, uint32_t button)
  * the bar, on the screen clicked (from the keyboard: the focused window's):
  * home, full screen; the programs as home groups them, each as a window on
  * this desktop (window_open: the seat passes it to process 1, as the status
- * blocks do); and, for home's own file manager, full screen at the home
- * folder. Up/Down select, Enter or a click runs an entry, Esc closes it. The
- * keyboard is the bar's while it is up (the presses of keys already held
+ * blocks do), and full screen: home's own file manager at the home folder,
+ * and view, settings and the mixer as home runs them, those home lists
+ * (rc.conf's program_NAME). Up/Down select, Enter or a click runs an entry,
+ * Esc closes it. The keyboard is the bar's while it is up (the presses of keys already held
  * stay with the window), and a transparent layer surface over each screen
  * takes a click outside it, which only closes it. It closes when another
  * window gets the focus or the shared display leaves the screen (home, or
- * the lock: the bar then has no keyboard and opens nothing). labwc binds no
- * Alt+F1, so a focused program gets that one press too in direct input.
+ * the lock: the bar then has no keyboard and opens nothing). labwc consumes
+ * Alt+F1 (labwc-rc.xml), so the focused window does not receive it.
  *
- * Full screen goes through requests home takes already: open_in_home (home's
- * file manager, with the home folder) and the seat's SIGUSR1 (home). No
- * other program has a request without a target, so view, settings and the
- * mixer have no full-screen entry here. Containers are not listed: base_apps
- * is answered to home only.
+ * Full screen goes through the requests home takes: open_in_home, then the
+ * seat's SIGUSR1 (home). Home's file manager gets the home folder; a program
+ * gets "program:NAME" and no target, its name only: home runs it from its
+ * own list, as Enter on it does, and comes back when it ends. Containers are
+ * not listed: base_apps is answered to home only.
  */
 #ifndef LAUNCH_BIN
 #define LAUNCH_BIN "/usr/local/bin"
@@ -3634,7 +3635,7 @@ static void notes_click(double y, uint32_t button)
 #define LAUNCH_MIXER "/usr/bin/wiremix" /* apps.c's mixer, in a term window */
 #endif
 #define LAUNCH_MAX 16
-enum launch_kind { LAUNCH_HEADER, LAUNCH_WINDOW, LAUNCH_HOME_FILES, LAUNCH_HOME };
+enum launch_kind { LAUNCH_HEADER, LAUNCH_WINDOW, LAUNCH_HOME_FILES, LAUNCH_HOME_PROGRAM, LAUNCH_HOME };
 struct launch_item {
     enum launch_kind kind;
     const char *name; /* the program's, as home names it; NULL for a heading */
@@ -3662,11 +3663,17 @@ static const char *launch_hint(void)
     return _("Up/Down: select   Enter: open   Esc: close");
 }
 
-/* An entry's text, translated: a heading, a program's name, home's. */
+/* An entry's text, translated: a heading, a program's name, home's, and a
+ * program home runs full screen (its name in the label, as the list says). */
 static const char *launch_label(const struct launch_item *it)
 {
     if (it->kind == LAUNCH_HEADER) return it->system ? _("System and hardware") : _("Programs");
     if (it->kind == LAUNCH_HOME) return _("Home (full screen)");
+    if (it->kind == LAUNCH_HOME_PROGRAM) {
+        if (strcmp(it->name, "view") == 0) return _("View (full screen)");
+        if (strcmp(it->name, "settings") == 0) return _("Settings (full screen)");
+        return _("Mixer (full screen)");
+    }
     return it->name;
 }
 
@@ -3690,6 +3697,28 @@ static int launch_installed(const char *path)
     return access(path, X_OK) == 0;
 }
 
+/* Does home list program name: a program_NAME of rc.conf with a command,
+ * as home reads them? */
+struct launch_setting {
+    const char *name;
+    int found;
+};
+
+static void launch_program_setting(const char *key, const char *value, void *arg)
+{
+    struct launch_setting *s = arg;
+    if (strncmp(key, "program_", 8) == 0 && strcmp(key + 8, s->name) == 0 && value[strspn(value, " \t")]) {
+        s->found = 1;
+    }
+}
+
+static int launch_in_home(const char *name)
+{
+    struct launch_setting s = { name, 0 };
+    rc_read(launch_program_setting, &s);
+    return s.found;
+}
+
 /* The width of s in cells (2 for a wide character): the same at any size. */
 static int launch_cells(const char *s)
 {
@@ -3702,20 +3731,25 @@ static int launch_cells(const char *s)
 /* The entries: home, then the programs and the system's, as home groups its
  * own (fixed here: the bar has no list to read the groups from). One not
  * installed (view without its libraries, the mixer without Audio) is left
- * out; then the widths of the name column and of the whole. */
+ * out, as is a full screen one home does not list; then the widths of the
+ * name column and of the whole. */
 static void launch_items(void)
 {
     int settings = launch_installed(LAUNCH_BIN "/settings");
     int mixer = launch_installed(LAUNCH_BIN "/term") && launch_installed(LAUNCH_MIXER);
+    int settings_home = launch_in_home("settings"), mixer_home = launch_in_home("mixer");
     launcher.n = 0;
     launch_add(LAUNCH_HOME, "home", 0);
     launch_add(LAUNCH_HEADER, NULL, 0);
     if (launch_installed(LAUNCH_BIN "/view")) launch_add(LAUNCH_WINDOW, "view", 0);
+    if (launch_in_home("view")) launch_add(LAUNCH_HOME_PROGRAM, "view", 0);
     if (launch_installed(LAUNCH_BIN "/files")) launch_add(LAUNCH_WINDOW, "files", 0);
     launch_add(LAUNCH_HOME_FILES, "files", 0); /* home's own file manager */
-    if (settings || mixer) launch_add(LAUNCH_HEADER, NULL, 1);
+    if (settings || mixer || settings_home || mixer_home) launch_add(LAUNCH_HEADER, NULL, 1);
     if (settings) launch_add(LAUNCH_WINDOW, "settings", 0);
+    if (settings_home) launch_add(LAUNCH_HOME_PROGRAM, "settings", 0);
     if (mixer) launch_add(LAUNCH_WINDOW, "mixer", 0);
+    if (mixer_home) launch_add(LAUNCH_HOME_PROGRAM, "mixer", 0);
     launcher.name_cols = 0;
     for (int i = 0; i < launcher.n; i++) {
         int label = launch_cells(launch_label(&launcher.items[i]));
@@ -3927,6 +3961,15 @@ static void launcher_run(int i)
         }
         say("locachy-bar: launcher: home's file manager at %s", home);
         kill(getppid(), SIGUSR1); /* locachy-seat asks for home */
+    } else if (kind == LAUNCH_HOME_PROGRAM) {
+        char with[OPEN_NAME];
+        snprintf(with, sizeof with, OPEN_PROGRAM "%s", name);
+        if (open_in_home(with, "") < 0) {
+            say("locachy-bar: launcher: cannot ask home to run %s", name);
+            return;
+        }
+        say("locachy-bar: launcher: %s full screen, run by home", name);
+        kill(getppid(), SIGUSR1);
     } else if (kind == LAUNCH_HOME) {
         say("locachy-bar: launcher: home");
         kill(getppid(), SIGUSR1);
