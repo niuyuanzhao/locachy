@@ -197,8 +197,13 @@ $GCC -o /usr/local/bin/settings "$src/progs/settings.c" "$src/progs/files.c" "$s
     "$b"/$WIN-*.o $FT_LIBS -lpam $WIN_LIBS
 # The file manager on its own (home calls files_view itself), for a window.
 $GCC -o /usr/local/bin/files "$src/progs/files-main.c" "$src/progs/files.c" "$b"/$WIN-*.o $FT_LIBS $WIN_LIBS
-$GCC -o /usr/local/bin/lock "$src/progs/lock.c" "$src/progs/auth.c" "$b"/glibc-base-*.o $FT_LIBS -lpam
+$GCC -o /usr/local/bin/lock "$src/progs/lock.c" "$src/progs/auth.c" "$src/progs/duress-shadow.c" "$b"/glibc-base-*.o $FT_LIBS -lpam -lcrypt
 $GCC -shared -fPIC -o /usr/lib/security/pam_locachy_any.so "$src/progs/pam_locachy_any.c" "$src/progs/auth.c" -lpam
+# The duress password (tools/DURESS.md): sudo's PAM module, the wipe and the
+# verifier (base/duress.c, position-independent for the module), locachy-duress.
+$GCC -fPIC -c -o "$b/pam-duress-base.o" "$src/base/duress.c"
+$GCC -shared -fPIC -o /usr/lib/security/pam_locachy_duress.so "$src/progs/pam_locachy_duress.c" "$src/progs/duress-shadow.c" "$b/pam-duress-base.o" -lpam -lcrypt
+$GCC -o /usr/local/bin/locachy-duress "$src/progs/locachy-duress.c" "$src/progs/duress-shadow.c" "$b"/glibc-base-duress.o -lcrypt
 $GCC -o /usr/local/bin/locachy-seat "$src/progs/seat.c" "$b"/glibc-base-*.o $FT_LIBS
 $GCC -o /usr/local/bin/note "$src/progs/note.c" "$b"/glibc-base-*.o $FT_LIBS
 $GCC -o /usr/local/bin/packages "$src/progs/packages.c" "$src/progs/files.c" "$b"/glibc-base-*.o $FT_LIBS

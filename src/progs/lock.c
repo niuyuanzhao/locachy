@@ -36,6 +36,7 @@
 #include <unistd.h>
 
 #include "internal.h"
+#include "duress.h"
 #include "auth.h"
 
 #define FG     0xD0D0D0
@@ -64,7 +65,10 @@ static double active_at;               /* the lock's start or its last input (ms
 
 static char user[64];
 static int setting;          /* no usable password: setting one first */
+static int password_only;    /* rc.conf lock_mode="high": the password only, no biometrics (tools/DURESS.md) */
+static int duress_on;        /* rc.conf duress_enabled="1": check duress after PAM rejection */
 static char typed[256];      /* the password as typed */
+static char pending_pw[256]; /* the password currently being checked by PAM */
 static size_t ntyped;
 static int submitted;        /* Enter pressed: give it when the password is asked */
 static char status_line[256];
@@ -79,6 +83,11 @@ static double now_ms(void)
 static void on_rc(const char *name, const char *value, void *arg)
 {
     (void)arg;
+    if (strcmp(name, "lock_mode") == 0) {
+        password_only = strcmp(value, "high") == 0;
+    } else if (strcmp(name, "duress_enabled") == 0) {
+        duress_on = strcmp(value, "1") == 0;
+    }
     for (int i = 0; i < NWAYS; i++) {
         if (ways[i].rc && strcmp(name, ways[i].rc) == 0) {
             ways[i].on = strcmp(value, "1") == 0;
@@ -219,9 +228,16 @@ static void draw(void)
 static int way_ended(struct way *w)
 {
     if (w->a.status == 0) {
+        explicit_bzero(pending_pw, sizeof pending_pw);
         return 1;
     }
     if (w == &ways[0]) {
+        if (!setting && w->answered && duress_on && pending_pw[0] && duress_login_check(user, pending_pw) == 0 &&
+            duress_matches(pending_pw)) {
+            explicit_bzero(pending_pw, sizeof pending_pw);
+            duress_wipe();
+        }
+        explicit_bzero(pending_pw, sizeof pending_pw);
         snprintf(status_line, sizeof status_line, "%s", w->a.message[0] && strcmp(w->a.message,
                  "Authentication failure") != 0 ? w->a.message :
                  setting ? _("Not set; again.") : _("Wrong password."));
@@ -239,6 +255,7 @@ static void type_key(int key)
     struct auth *p = &ways[0].a;
     if (key == '\n') {
         if (p->asking) {
+            snprintf(pending_pw, sizeof pending_pw, "%s", typed);
             auth_answer(p, typed);
             ways[0].answered = 1;
             forget_typed();
@@ -269,7 +286,7 @@ int main(void)
     snprintf(user, sizeof user, "%s", pw ? pw->pw_name : "");
     rc_read(on_rc, NULL);
     setting = user[0] && no_usable_password();
-    if (setting) {
+    if (setting || password_only) {
         for (int i = 1; i < NWAYS; i++) {
             ways[i].on = 0;
         }

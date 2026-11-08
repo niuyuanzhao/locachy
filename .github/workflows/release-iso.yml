@@ -31,6 +31,7 @@ jobs:
           python3 -I src/tools/test-installer-profile.py /tmp
           python3 -I src/tools/test-build-matrix.py /tmp
           python3 -I src/tools/test-install.py /tmp
+          sh src/tools/test-duress.sh /tmp/duress
 
       - name: Free runner disk space and build ISO in Arch Linux
         run: |

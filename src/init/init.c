@@ -97,6 +97,7 @@
 #include <unistd.h>
 
 #include "internal.h"
+#include "duress.h"
 #include "apps.h"
 #include "jobs.h" /* JOBS_CGROUP, JOBS_DIR: where system jobs run; process 1 speaks none of their protocol */
 
@@ -177,6 +178,7 @@ static char *desktop_argv[] = {
 static char swap_dev[64], esp_dev[64];
 static char resume_dev[16];       /* the swap as MAJOR:MINOR, where hibernation goes */
 static int luks_passphrase_entered; /* 1 when passphrase was entered at boot (0 if TPM auto-unlocked) */
+static int boot_duress_enabled;     /* the duress verifier is in the initramfs (duress.h) */
 static int lid_fds[4], nlid;     /* the system inputs with a lid switch (SW_LID) */
 static int lid_wakes_from_disk = 1; /* until the closed lid wakes it from hibernation */
 static int hibernate_after = 30; /* seconds asleep with the lid closed (config) */
@@ -711,11 +713,16 @@ static int swap_holds_image(void)
     return luks_swap_dev[0] && swap_open && has_signature("/dev/mapper/locachy-swap-crypt", 4096 - 10, "S1SUSPEND");
 }
 
-/* The passphrase prompt, until both partitions are open. */
+/* The passphrase prompt, until both partitions are open. A duress password
+ * (duress.h) is checked only after the passphrase opened neither partition:
+ * the real one always wins. Its verifier is in the initramfs only when
+ * rc.conf has duress_enabled="1" (locachy-boot), so its presence here is the
+ * switch: the root's rc.conf is not readable before the root is open. */
 static void unlock_with_passphrase(const char *why)
 {
     char pass[256];
     const char *wrong = why;
+    boot_duress_enabled = duress_configured();
     if (screen_open("/font.psf")) {
         console_graphics();
     }
@@ -730,6 +737,10 @@ static void unlock_with_passphrase(const char *why)
         }
         if (!root_open && run_cryptsetup(cryptsetup_path, luks_root_dev, "locachy-crypt", pass) == 0) {
             root_open = 1;
+        }
+        if (!(root_open && swap_open) && boot_duress_enabled && duress_matches(pass)) {
+            memset(pass, 0, sizeof pass);
+            duress_wipe();
         }
         memset(pass, 0, sizeof pass);
         wrong = "Wrong passphrase; try again.";
@@ -765,6 +776,20 @@ static const char *unlock_with_tpm(void)
     return NULL;
 }
 
+/* The boot policy (locachy-boot writes it into the initramfs): lock_mode
+ * "high" means the passphrase at power-on and nothing else (no TPM token,
+ * no biometric anywhere). Absent: normal. */
+static int high_mode(void)
+{
+    char buf[96] = "";
+    int fd = open("/etc/locachy/boot-policy", O_RDONLY | O_CLOEXEC);
+    ssize_t n = fd >= 0 ? read(fd, buf, sizeof buf - 1) : -1;
+    if (fd >= 0) close(fd);
+    if (n <= 0) return 0;
+    buf[n] = '\0';
+    return strstr(buf, "lock_mode=high") != NULL;
+}
+
 static void unlock_luks(void)
 {
     luks_root_dev[0] = luks_swap_dev[0] = '\0';
@@ -789,10 +814,11 @@ static void unlock_luks(void)
     ensure_char_node_from_sysfs("/dev/tpmrm0", "/sys/class/tpmrm/tpmrm0/dev");
     measure_phase("enter-initrd");
 
+    const int high = high_mode();
     root_open = !luks_root_dev[0];
     swap_open = !luks_swap_dev[0] ||
-                run_cryptsetup(cryptsetup_path, luks_swap_dev, "locachy-swap-crypt", NULL) == 0;
-    const char *why = unlock_with_tpm();
+                (!high && run_cryptsetup(cryptsetup_path, luks_swap_dev, "locachy-swap-crypt", NULL) == 0);
+    const char *why = high ? NULL : unlock_with_tpm();
     if (swap_holds_image() && luks_root_dev[0] && root_open) {
         resume_image = 1;
         say("init: the TPM opened root and swap; the swap holds a hibernation image");
@@ -811,7 +837,7 @@ static void unlock_after_failed_resume(void)
 {
     if (!luks_root_dev[0] || root_open || !cryptsetup_path) return;
     say("init: the hibernation image did not come back; opening the root");
-    const char *why = unlock_with_tpm();
+    const char *why = high_mode() ? NULL : unlock_with_tpm();
     if (!root_open) {
         unlock_with_passphrase(why ? "The hibernated system could not come back, and the TPM does not open the "
                                      "disk now: the passphrase." : NULL);

@@ -88,9 +88,21 @@ static void keys_leds(int on) { (void)on; }
 static int keys_open(void) { return 1; }
 static void keys_release(void) {}
 static void screen_release(void) {}
+static const char *typed = "fixture passphrase";
 static void ask_secret(const char *title, const char *label, const char *why, char *out, size_t size) {
-    (void)title; (void)label; (void)why; prompts++; snprintf(out, size, "fixture passphrase");
+    (void)title; (void)label; (void)why; prompts++; snprintf(out, size, "%s", typed);
 }
+/* duress.h, doubled: the verifier is there when armed, and "fixture duress"
+ * matches it. The real wipe powers off and never returns; this one records
+ * how many passphrases had been tried at the first call. */
+static int boot_duress_enabled, duress_armed, duress_wipes, wipe_after_passphrases, high;
+static int duress_configured(void) { return duress_armed; }
+static int duress_matches(const char *pw) { return !strcmp(pw, "fixture duress"); }
+static void duress_wipe(void) {
+    if (!duress_wipes++) wipe_after_passphrases = root_passphrases + swap_passphrases;
+}
+/* The boot policy's lock_mode, as init's high_mode reads it. */
+static int high_mode(void) { return high; }
 /* has_tpm_token really forks and reads this metadata through its pipe. It
  * cannot authorize the cryptsetup fixture, whose root token result is independent. */
 static int fixture_execl(const char *path, const char *arg, ...) {
@@ -113,6 +125,8 @@ static void reset(const char *json) {
     root_open = swap_open = resume_image = luks_only = luks_passphrase_entered = 0;
     luks_root_dev[0] = luks_swap_dev[0] = order[0] = '\0';
     cryptsetup_path = NULL; metadata = json;
+    boot_duress_enabled = duress_armed = duress_wipes = wipe_after_passphrases = high = 0;
+    typed = "fixture passphrase";
 }
 static void try_resume(void) {
     luks_only = luks_root_dev[0] != '\0';
@@ -167,6 +181,32 @@ int main(void) {
     unlock_luks(); try_resume();
     assert(root_open && swap_open && !prompts && !resume_image && resume_writes == 1);
     puts("PASS cold TPM boot without a hibernation image is unchanged");
+
+    reset(forged[0]); duress_armed = 1; typed = "fixture duress";
+    unlock_luks();
+    assert(!root_open && duress_wipes >= 1 && wipe_after_passphrases == 1);
+    puts("PASS armed: the duress password wipes, after the passphrase was tried with it first");
+
+    reset(forged[0]); duress_armed = 1; pass_ok = 1;
+    unlock_luks();
+    assert(root_open && swap_open && !duress_wipes && prompts == 1 && luks_passphrase_entered);
+    puts("PASS armed: the real passphrase opens the disk and wipes nothing");
+
+    reset(forged[0]); duress_armed = 1; typed = "fixture duress"; pass_ok = 1;
+    unlock_luks();
+    assert(root_open && swap_open && !duress_wipes);
+    puts("PASS armed: text that opens the disk never wipes, even when it matches the verifier");
+
+    reset(forged[0]); typed = "fixture duress";
+    unlock_luks();
+    assert(!root_open && !duress_wipes && prompts == 5);
+    puts("PASS not armed: the duress password is only a wrong passphrase");
+
+    reset(""); high = 1; root_token_ok = 1; pass_ok = 1;
+    unlock_luks();
+    assert(!root_tokens && !swap_tokens && !order[0] && prompts == 1);
+    assert(root_open && swap_open && root_passphrases == 1 && swap_passphrases == 1 && luks_passphrase_entered);
+    puts("PASS high mode: no TPM token is tried even when it would open the disk; the passphrase opens both");
     return 0;
 }
 '''

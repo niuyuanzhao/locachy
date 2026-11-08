@@ -251,6 +251,15 @@ static const int lock_afters[] = { 0, 1, 2, 5, 10, 15, 30, 60 };
  * sudo) take a fingerprint (fprintd) or a face (howdy) as well as the
  * password. */
 static int fingerprint_on, face_on;
+/* rc.conf's lock_mode="high" (absent or "normal": normal): the password only,
+ * no fingerprint or face, and the disk's passphrase at power-on, never the
+ * TPM (locachy-boot writes it into the boot image's policy). The saved
+ * unlock_fingerprint and unlock_face stay as they are for normal. */
+static int lock_high;
+/* rc.conf's duress_enabled="1": the duress password wipes the disk
+ * (locachy-boot puts its verifier into the boot image; sudo's PAM file has
+ * pam_locachy_duress.so). */
+static int duress_on;
 static char face_dlib[8]; /* rc.conf's face_dlib: what computes faces (below) */
 static int ntp_on;            /* rc.conf has service_ntp */
 static int tz_auto;           /* rc.conf has service_timezone */
@@ -1141,6 +1150,10 @@ static void on_rc(const char *name, const char *value, void *arg)
         fingerprint_on = strcmp(value, "1") == 0;
     } else if (strcmp(name, "unlock_face") == 0) {
         face_on = strcmp(value, "1") == 0;
+    } else if (strcmp(name, "lock_mode") == 0) {
+        lock_high = strcmp(value, "high") == 0;
+    } else if (strcmp(name, "duress_enabled") == 0) {
+        duress_on = strcmp(value, "1") == 0;
     } else if (strcmp(name, "face_dlib") == 0) {
         snprintf(face_dlib, sizeof face_dlib, "%s", value);
     } else if (strcmp(name, "battery_charge_start") == 0 && value[0]) {
@@ -1355,6 +1368,28 @@ static void load_hsi(void)
     }
 }
 
+/* The duress password (tools/DURESS.md), as locachy-duress status says it:
+ * "set luks", "not-set luks" or "not-set no-luks". Set there, and on an
+ * encrypted disk, it can be armed (duress_enabled). */
+#define LOCACHY_DURESS "/usr/local/bin/locachy-duress"
+static int duress_pw_set, duress_luks;
+static int duress_clear_asked; /* Delete pressed once on the duress password's row */
+
+static void load_duress_status(void)
+{
+    char buf[128] = "", word[2][16] = { "", "" };
+    duress_pw_set = duress_luks = 0;
+    if (access(LOCACHY_DURESS, X_OK) != 0) {
+        return;
+    }
+    char *const argv[] = { LOCACHY_DURESS, "status", NULL };
+    command_output(argv, buf, sizeof buf);
+    if (sscanf(buf, "%15s %15s", word[0], word[1]) == 2) {
+        duress_pw_set = strcmp(word[0], "set") == 0;
+        duress_luks = strcmp(word[1], "luks") == 0;
+    }
+}
+
 /* Fingerprints: fprintd installed, and on (unlock_fingerprint), are two rows
  * as for Tailscale: removing it switches it off first. The user's (uid 1000)
  * fingerprints are fprintd's, listed, enrolled and deleted with its tools
@@ -1427,33 +1462,57 @@ static void load_fingers(void)
 }
 
 /* sudo's PAM file: the line of pam_locachy_any.so (the lock screen's other
- * ways beside the typed password) with the ways switched on, before its
- * first auth line; none when they are all off. 0 if written. */
+ * ways beside the typed password) with the ways switched on, and the line of
+ * pam_locachy_duress.so while duress is on: both before its first auth line,
+ * in that order (the duress line after pam_locachy_any.so's). Why before:
+ * Arch's sudo is "auth include system-auth", and system-auth's
+ * "auth [default=die] pam_faillock.so authfail" ends the stack at a wrong
+ * password (which the duress password is), so a line after the auth lines
+ * never runs. None of the two when the lock mode is high (no any) or the ways
+ * are off. Old copies of either line go first. 0 if written; -1 also when a
+ * line is wanted and there is no auth line to place it by (the file is left
+ * as it is). */
 #define SUDO_PAM "/etc/pam.d/sudo"
 
 static int sudo_ways(void)
 {
-    char lines[64][256];
-    int n = 0, put = 0;
+    char lines[64][256], line[256];
+    int n = 0, first_auth = -1, any = !lock_high && (fingerprint_on || face_on);
     FILE *in = fopen(SUDO_PAM, "r");
     if (!in) {
         return -1;
     }
-    while (n < 64 && fgets(lines[n], sizeof lines[n], in)) {
-        if (!strstr(lines[n], "pam_locachy_any.so")) {
-            n++;
+    while (fgets(line, sizeof line, in)) {
+        if (strstr(line, "pam_locachy_any.so") || strstr(line, "pam_locachy_duress.so")) {
+            continue;
         }
+        if (n == 64) { /* longer than kept here: refused, the file is left as it is */
+            fclose(in);
+            return -1;
+        }
+        snprintf(lines[n], sizeof lines[n], "%s", line);
+        if (first_auth < 0 && strncmp(line + strspn(line, " \t"), "auth", 4) == 0) {
+            first_auth = n;
+        }
+        n++;
     }
     fclose(in);
+    if ((any || duress_on) && first_auth < 0) {
+        return -1;
+    }
     FILE *out = fopen(SUDO_PAM ".tmp", "w");
     if (!out) {
         return -1;
     }
     for (int i = 0; i < n; i++) {
-        if (!put && (fingerprint_on || face_on) && strncmp(lines[i] + strspn(lines[i], " \t"), "auth", 4) == 0) {
-            fprintf(out, "auth\t\tsufficient\tpam_locachy_any.so%s%s\n",
-                    fingerprint_on ? " locachy-lock-fingerprint" : "", face_on ? " locachy-lock-face" : "");
-            put = 1;
+        if (i == first_auth) {
+            if (any) {
+                fprintf(out, "auth\t\tsufficient\tpam_locachy_any.so%s%s\n",
+                        fingerprint_on ? " locachy-lock-fingerprint" : "", face_on ? " locachy-lock-face" : "");
+            }
+            if (duress_on) {
+                fputs("auth\t\toptional\tpam_locachy_duress.so\n", out);
+            }
         }
         fputs(lines[i], out);
     }
@@ -2895,9 +2954,22 @@ static int hsi_index(void)
     return tpm_index() + 2;
 }
 
+/* The lock mode (rc.conf lock_mode): normal or high. */
+static int lock_mode_index(void)
+{
+    return hsi_index() + 1;
+}
+
+/* Duress: the duress password (locachy-duress), whether it wipes the disk
+ * (rc.conf duress_enabled). */
+static int duress_index(void)
+{
+    return lock_mode_index() + 1;
+}
+
 static int bri_index(void)
 {
-    return tpm_index() + 3;
+    return duress_index() + 2;
 }
 
 static int mach_index(void)
@@ -4562,8 +4634,15 @@ static void category_entries(int cat)
     case CAT_SECURITY:
         add_title(_("Screen Locking"));
         add_items(sec_index() + 1, 3);
+        add_title(_("Lock Mode"));
+        add_items(lock_mode_index(), 1);
         add_title(_("Disk Encryption"));
         add_items(tpm_index(), 2);
+        add_title(_("Duress"));
+        add_items(duress_index(), 2);
+        add_entry(E_NOTE, _("Typed where a password is asked, it wipes the encrypted disk at once and powers off."));
+        add_entry(E_NOTE, _("The login password and disk passphrase always win: it must differ from both. "
+                            "Needs an encrypted disk."));
         add_title(_("Host Security"));
         add_items(hsi_index(), 1);
         break;
@@ -4995,6 +5074,99 @@ static void boot_check(void)
     }
 }
 
+/* The lock mode and duress are in the boot image (locachy-boot's boot policy,
+ * and the duress verifier while duress is on): changed only while no image
+ * is being made (it may have read them as they were), then made again;
+ * boot_policy_changed's what is the notice once it is being made, else
+ * make_boot_image's stays. */
+static int boot_image_busy(void)
+{
+    if (boot_job) {
+        snprintf(notice, sizeof notice, "%s", _("The boot image is still being made."));
+    }
+    return boot_job != 0;
+}
+
+static void boot_policy_changed(const char *what)
+{
+    make_boot_image();
+    if (boot_job) {
+        snprintf(notice, sizeof notice, "%s", what);
+    }
+}
+
+static const char lock_high_unlock[] = N_("Lock mode high: only the password unlocks. Set the lock mode to normal "
+                                          "first.");
+
+/* The TPM's row in high lock mode: off, Enter and Delete refused. 1 if so. */
+static int tpm_high_refused(void)
+{
+    if (lock_high) {
+        snprintf(notice, sizeof notice, "%s", _("TPM disk auto-unlock is off in high lock mode: the disk asks for "
+                                                "its passphrase at power-on."));
+    }
+    return lock_high;
+}
+
+/* Enter on the duress password's row: locachy-duress set in term (exit 0:
+ * set; else nothing changed, its reason on the terminal). Set while armed,
+ * the boot image's copy of the verifier is made again, else the power-on
+ * prompt checks the old password. */
+static void duress_set_row(void)
+{
+    if (access(LOCACHY_DURESS, X_OK) != 0) {
+        snprintf(notice, sizeof notice, _("%s is not installed."), "locachy-duress");
+        return;
+    }
+    if (duress_on && boot_image_busy()) {
+        return;
+    }
+    /* What it says stays until Enter: why it was not set. */
+    char *const set[] = { "/bin/sh", "-c",
+                          LOCACHY_DURESS " set; s=$?; printf '\\nEnter: back to settings. '; read -r _; exit $s",
+                          NULL };
+    int st = in_term(set);
+    load_duress_status();
+    if (st != 0) {
+        snprintf(notice, sizeof notice, _("%s did not finish."), "locachy-duress set");
+    } else if (duress_on) {
+        boot_policy_changed(_("Duress password set. Making the boot image (it carries the password)..."));
+    } else {
+        snprintf(notice, sizeof notice, "%s", _("Duress password set: switch Duress wipes the disk on to arm it."));
+    }
+}
+
+/* Delete on it, the second time in a row: locachy-duress clear, then duress
+ * off (rc.conf, sudo's PAM file) and the boot image made again. */
+static void duress_clear_row(void)
+{
+    if (!duress_clear_asked) {
+        duress_clear_asked = 1;
+        /* TRANSLATORS: Delete is the Delete key; keep it. */
+        snprintf(notice, sizeof notice, "%s", _("Delete again: remove the duress password (duress goes off)."));
+        return;
+    }
+    if (boot_image_busy()) {
+        return;
+    }
+    char buf[512];
+    char *const cmd[] = { LOCACHY_DURESS, "clear", NULL };
+    duress_clear_asked = 0;
+    command_output(cmd, buf, sizeof buf);
+    load_duress_status();
+    int rc_ok = rc_set("duress_enabled", NULL) == 0;
+    if (rc_ok) {
+        duress_on = 0;
+    }
+    int sudo_ok = sudo_ways() == 0;
+    boot_policy_changed(_("Duress password removed; duress is off. Making the boot image..."));
+    if (duress_pw_set) {
+        snprintf(notice, sizeof notice, "%s", _("The duress password could not be removed."));
+    } else if (!rc_ok || !sudo_ok) {
+        snprintf(notice, sizeof notice, _("Cannot write %s."), !rc_ok ? RC_CONF : SUDO_PAM);
+    }
+}
+
 /* Reopened: the jobs settings asked for that have not ended (locachy-jobs
  * keeps them), followed again. */
 static void adopt_jobs(void)
@@ -5196,6 +5368,7 @@ static int enter_row(int idx)
            idx == repo_index() + NREPO_SECTIONS ||
            idx == sec_index() || idx == sec_index() + 2 || idx == fp_index() + 3 || idx == fc_index() + 4 || idx == fc_index() + 5 ||
            idx == fc_index() + 6 || idx == rclone_index() + 2 || idx == tpm_index() || idx == sb_index() || idx == hsi_index() ||
+           idx == duress_index() ||
            idx == tz_index() || idx == tz_index() + 2 || (idx >= imek_index() && idx < imek_index() + NIME_KEYS) ||
            (idx >= system_keymap_index() && idx < kb_index() + nkeyboards_seen) ||
            idx == bat_page_index() || idx == hwinfo_index() || idx == hwcopy_index() || idx == ts_index() + 2;
@@ -5571,6 +5744,9 @@ static void item_text(int idx, char *line, size_t size)
         } else if (i == 0) {
             snprintf(line, size, "%.95s [%s]", ui_pad(label, sizeof label, _("Fingerprint reader (fprintd)"), 32),
                      installed ? _("YES") : _("NO "));
+        } else if (i == 1 && lock_high) {
+            snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _("Unlock with a fingerprint"), 30),
+                     _("off (high mode)"));
         } else if (i == 1) {
             snprintf(line, size, "  %.95s [%s]%s", ui_pad(label, sizeof label, _("Unlock with a fingerprint"), 30),
                      fingerprint_on ? _("ON ") : _("OFF"), installed ? "" : _("  (not installed)"));
@@ -5604,6 +5780,8 @@ static void item_text(int idx, char *line, size_t size)
             snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _(labels[1]), 30),
                      !cuda_usable() ? _("the CPU (no NVIDIA driver here)") :
                      face_cuda() ? _("< the NVIDIA GPU (CUDA) >") : _("< the CPU >"));
+        } else if (i == 2 && lock_high) {
+            snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _(labels[2]), 30), _("off (high mode)"));
         } else if (!installed) {
             if (i == 2) {
                 snprintf(vbuf, sizeof vbuf, "[%s]%s", face_on ? _("ON ") : _("OFF"), _("  (not installed)"));
@@ -5695,7 +5873,23 @@ static void item_text(int idx, char *line, size_t size)
         return;
     }
     if (idx == tpm_index()) {
-        snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("TPM disk auto-unlock"), 32), tpm_summary);
+        snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("TPM disk auto-unlock"), 32),
+                 lock_high ? _("off in high mode (the passphrase at power-on)") : tpm_summary);
+        return;
+    }
+    if (idx == lock_mode_index()) {
+        snprintf(line, size, "%.95s [%s]", ui_pad(label, sizeof label, _("Lock mode"), 32),
+                 lock_high ? _("high") : _("normal"));
+        return;
+    }
+    if (idx == duress_index()) {
+        snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Duress password"), 32),
+                 duress_pw_set ? _("set") : _("not set"));
+        return;
+    }
+    if (idx == duress_index() + 1) {
+        snprintf(line, size, "  %.95s [%s]", ui_pad(label, sizeof label, _("Duress wipes the disk"), 30),
+                 duress_on ? _("ON ") : _("OFF"));
         return;
     }
     if (idx == sb_index()) {
@@ -6312,6 +6506,10 @@ static void adjust(int dir)
         return;
     }
     if (selected == fc_index() + 2) {
+        if (lock_high) {
+            snprintf(notice, sizeof notice, "%s", _(lock_high_unlock));
+            return;
+        }
         if (!howdy_installed()) {
             snprintf(notice, sizeof notice, "%s", _("howdy is not installed: the Face recognition line installs it."));
             return;
@@ -6452,8 +6650,85 @@ static void adjust(int dir)
         return;
     }
     if (selected == tpm_index()) {
+        if (!tpm_high_refused()) {
+            /* TRANSLATORS: Enter and Delete are key names; keep them. */
+            snprintf(notice, sizeof notice, "%s", _("Enter: bind LUKS2 auto-unlock to TPM (1.2 or 2.0)   Delete: unbind"));
+        }
+        return;
+    }
+    if (selected == lock_mode_index()) {
+        if (boot_image_busy()) {
+            return;
+        }
+        /* High: the TPM opens nothing. Its token is sealed to every image
+         * this machine's PCR key signs (the previous one, an older copy from
+         * the ESP), not to this one, so a key slot left there would still
+         * open the disk under any of them: removed first (locachy-tpm clear:
+         * the token, and its key slots with luksKillSlot in batch mode, which
+         * needs no passphrase), bound again in normal. Not switched while one
+         * is left. */
+        if (!lock_high && (tpm_bound || tpm_pending)) {
+            char buf[512];
+            char *const clear[] = { "/usr/local/bin/locachy-tpm", "clear", NULL };
+            command_output(clear, buf, sizeof buf);
+            load_tpm_status();
+            if (tpm_bound || tpm_pending) {
+                snprintf(notice, sizeof notice, "%s",
+                         _("Not switched: the TPM key slots could not be removed (locachy-tpm clear)."));
+                return;
+            }
+        }
+        if (rc_set("lock_mode", lock_high ? "normal" : "high") < 0) {
+            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+            return;
+        }
+        lock_high = !lock_high;
+        int sudo_ok = sudo_ways() == 0;
+        boot_policy_changed(lock_high ?
+                            _("Lock mode high: only the password unlocks, and the disk asks for its passphrase at "
+                              "power-on (no TPM key slot). Making the boot image...") :
+                            _("Lock mode normal: the unlock ways switched on work again; bind the TPM again to "
+                              "use it. Making the boot image..."));
+        if (!sudo_ok) {
+            snprintf(notice, sizeof notice, _("Cannot write %s."), SUDO_PAM);
+        }
+        return;
+    }
+    if (selected == duress_index()) {
         /* TRANSLATORS: Enter and Delete are key names; keep them. */
-        snprintf(notice, sizeof notice, "%s", _("Enter: bind LUKS2 auto-unlock to TPM (1.2 or 2.0)   Delete: unbind"));
+        snprintf(notice, sizeof notice, "%s", _("Enter: set the duress password (in a terminal)   Delete, twice: remove it"));
+        return;
+    }
+    if (selected == duress_index() + 1) {
+        if (!duress_on) {
+            load_duress_status();
+            if (!duress_pw_set || !duress_luks) {
+                snprintf(notice, sizeof notice, "%s", _("Duress needs the duress password set and an encrypted disk."));
+                return;
+            }
+        }
+        if (boot_image_busy()) {
+            return;
+        }
+        if (rc_set("duress_enabled", duress_on ? NULL : "1") < 0) {
+            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+            return;
+        }
+        duress_on = !duress_on;
+        int sudo_ok = 1;
+        if (!duress_on) {
+            sudo_ok = sudo_ways() == 0;
+        }
+        boot_policy_changed(duress_on ?
+                            _("Duress on: the duress password wipes the disk at power-on, on the lock screen and in "
+                              "sudo. Making the boot image...") :
+                            _("Duress off: the duress password wipes nothing. Making the boot image..."));
+        if (duress_on) {
+            sudo_ok = sudo_ways() == 0;
+        }
+        if (!sudo_ok) {
+            snprintf(notice, sizeof notice, _("Cannot write %s."), SUDO_PAM);
+        }
         return;
     }
     if (selected == sb_index()) {
@@ -6711,6 +6986,10 @@ static void adjust(int dir)
         return;
     }
     if (selected == fp_index() + 1) {
+        if (lock_high) {
+            snprintf(notice, sizeof notice, "%s", _(lock_high_unlock));
+            return;
+        }
         if (!fprintd_installed()) {
             snprintf(notice, sizeof notice, "%s", _("fprintd is not installed: the line above installs it."));
             return;
@@ -7064,6 +7343,7 @@ int main(int argc, char **argv)
     load_faces();
     load_bridges();
     load_tpm_status();
+    load_duress_status();
     load_repos();
     load_kernel_state();
     load_kernel_choices();
@@ -7085,7 +7365,7 @@ int main(int argc, char **argv)
         int key = key_poll_timeout(request_fd, pkg_job || repos_job || boot_job ? 500 : 2000);
         requests();
         if (key != 0 && key != K_DEL) {
-            fp_delete_asked = face_delete_asked = tor_bridges_delete_asked = tpm_clear_asked = 0; /* Delete twice in a row deletes them */
+            fp_delete_asked = face_delete_asked = tor_bridges_delete_asked = tpm_clear_asked = duress_clear_asked = 0; /* Delete twice in a row deletes them */
             remove_asked = -1;
         }
         close_read(key);
@@ -7243,7 +7523,9 @@ int main(int argc, char **argv)
             }
             draw();
         } else if (key == '\n' && selected == tpm_index()) {
-            if (access("/usr/local/bin/locachy-tpm", X_OK) != 0) {
+            if (tpm_high_refused()) {
+                /* the notice says why */
+            } else if (access("/usr/local/bin/locachy-tpm", X_OK) != 0) {
                 snprintf(notice, sizeof notice, _("%s is not installed."), "locachy-tpm");
             } else if (login_skip) {
                 snprintf(notice, sizeof notice, "%s",
@@ -7290,8 +7572,11 @@ int main(int argc, char **argv)
                 load_hsi();
             }
             draw();
-        } else if (key == K_DEL && selected == tpm_index() && access("/usr/local/bin/locachy-tpm", X_OK) == 0) {
-            if (!tpm_clear_asked) {
+        } else if (key == K_DEL && selected == tpm_index() &&
+                   (lock_high || access("/usr/local/bin/locachy-tpm", X_OK) == 0)) {
+            if (tpm_high_refused()) {
+                tpm_clear_asked = 0;
+            } else if (!tpm_clear_asked) {
                 tpm_clear_asked = 1;
                 /* TRANSLATORS: Delete is the Delete key; keep it. */
                 snprintf(notice, sizeof notice, "%s", _("Delete again: unbind TPM disk auto-unlock (boot will ask passphrase)."));
@@ -7303,6 +7588,12 @@ int main(int argc, char **argv)
                 load_tpm_status();
                 snprintf(notice, sizeof notice, "%s", _("TPM disk auto-unlock unbound."));
             }
+            draw();
+        } else if (key == '\n' && selected == duress_index()) {
+            duress_set_row();
+            draw();
+        } else if (key == K_DEL && selected == duress_index() && access(LOCACHY_DURESS, X_OK) == 0) {
+            duress_clear_row();
             draw();
         } else if (key == '\n' && selected == fp_index() + 3) {
             if (fprintd_installed()) {

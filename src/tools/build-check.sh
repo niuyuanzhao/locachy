@@ -88,10 +88,15 @@ gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags \
     -I"$src/base/include" -I"$src/base" "$src/progs/settings.c" "$src/progs/files.c" "$src/progs/auth.c" \
     "$out"/obj/base-*.o $libs -lpam -o "$out/settings"
 gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags \
-    -I"$src/base/include" -I"$src/base" "$src/progs/lock.c" "$src/progs/auth.c" \
-    "$out"/obj/base-*.o $libs -lpam -o "$out/lock"
+    -I"$src/base/include" -I"$src/base" "$src/progs/lock.c" "$src/progs/auth.c" "$src/progs/duress-shadow.c" \
+    "$out"/obj/base-*.o $libs -lpam -lcrypt -o "$out/lock"
 gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -shared -fPIC "$src/progs/pam_locachy_any.c" "$src/progs/auth.c" \
     -lpam -o "$out/pam_locachy_any.so"
+gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -fPIC -I"$src/base/include" -c "$src/base/duress.c" -o "$out/obj/pic-duress.o"
+gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -shared -fPIC -I"$src/base/include" "$src/progs/pam_locachy_duress.c" \
+    "$src/progs/duress-shadow.c" "$out/obj/pic-duress.o" -lpam -lcrypt -o "$out/pam_locachy_duress.so"
+gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -I"$src/base/include" "$src/progs/locachy-duress.c" \
+    "$src/progs/duress-shadow.c" "$out/obj/base-duress.o" -lcrypt -o "$out/locachy-duress"
 gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $ime_flags $flags \
     -I"$src/base/include" "$src/progs/term.c" "$out"/obj/base-*.o \
     "$out/obj/ime.o" $ime_libs $libs -o "$out/term"

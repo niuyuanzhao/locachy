@@ -204,6 +204,25 @@ if [ -f /etc/locachy/keyboards.conf ]; then
         [ -f "$t" ] && printf 'file %s %s 0644 0 0\n' "$t" "$t" >>"$work/initramfs.list"
     done
 fi
+# The boot policy process 1 reads (init.c high_mode, unlock_with_passphrase):
+# rc.conf's lock_mode ("high": the passphrase at power-on, never the TPM) and
+# whether duress is armed. The duress verifier (locachy-duress set) is in the
+# initramfs only then. A change to any of these is a new boot image: signed
+# and measured as any other (PCR 11).
+policy_mode=normal
+[ "$(rc_value lock_mode)" = high ] && policy_mode=high
+policy_duress=0
+if [ "$(rc_value duress_enabled)" = 1 ] && [ -f /etc/locachy/duress ]; then
+    policy_duress=1
+fi
+printf 'lock_mode=%s\nduress=%s\n' "$policy_mode" "$policy_duress" >"$work/boot-policy"
+# Parents before children: the cpio list is read in order.
+grep -qxF "dir /etc 0755 0 0" "$work/initramfs.list" || printf 'dir /etc 0755 0 0\n' >>"$work/initramfs.list"
+grep -qxF "dir /etc/locachy 0755 0 0" "$work/initramfs.list" || printf 'dir /etc/locachy 0755 0 0\n' >>"$work/initramfs.list"
+printf 'file /etc/locachy/boot-policy %s 0644 0 0\n' "$work/boot-policy" >>"$work/initramfs.list"
+if [ "$policy_duress" = 1 ]; then
+    printf 'file /etc/locachy/duress /etc/locachy/duress 0600 0 0\n' >>"$work/initramfs.list"
+fi
 # The file systemd's tools take as "this is an initrd": the TPM token then
 # also looks for the boot image's PCR signature in /.extra, where the stub
 # puts it.
