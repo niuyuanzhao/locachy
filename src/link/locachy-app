@@ -1242,10 +1242,10 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
         cd /
         umount -l /tmp/.oldroot
         rmdir /tmp/.oldroot
-        # Inside the container's own root, as the user (never as host root over
-        # user-writable paths): stale Chromium singleton files gone, user-dirs
-        # and GSettings keyfile made when absent.
-        setpriv --reuid="$uid" --regid="$gid" --clear-groups --no-new-privs -- sh -euc '
+        # Inside the root of the container, as the user (never as host root
+        # over user-writable paths): stale Chromium singleton files gone,
+        # user-dirs and GSettings keyfile made when absent.
+        setpriv --reuid="$uid" --regid="$gid" --clear-groups --no-new-privs -- sh -euc '\''
             uhome=$1; USER_DIRS=$2
             rm -f "$uhome"/.config/*/SingletonLock "$uhome"/.config/*/SingletonSocket \
                   "$uhome"/.config/*/SingletonCookie 2>/dev/null || true
@@ -1262,7 +1262,7 @@ printf '%s\n' "$$" >"$cg/cgroup.procs"
                 mkdir -p "${keyfile%/*}"
                 printf "[org/gnome/desktop/wm/preferences]\nbutton-layout=\047appmenu:minimize,maximize,close\047\n" >"$keyfile"
             fi
-        ' sh "$uhome" "$USER_DIRS" || true
+        '\'' sh "$uhome" "$USER_DIRS" || true
         app_init=/run/locachy-app-init
         path=/usr/local/sbin:/usr/local/bin:/usr/bin
     fi
