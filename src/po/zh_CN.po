@@ -2,7 +2,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-07 02:11-0500\n"
+"POT-Creation-Date: 2026-11-08 18:08+0800\n"
 "PO-Revision-Date: 2026-10-24 22:38+0000\n"
 "Last-Translator: LOCachy <38998838+niuyuanzhao@users.noreply.github.com>\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -1078,6 +1078,31 @@ msgstr "其他容器..."
 #: progs/bar.c
 msgid "Enter: open   A: always use it   Esc: cancel"
 msgstr "Enter: 打开   A: 始终使用此项   Esc: 取消"
+
+#. TRANSLATORS: Up, Down, Enter and Esc are keys; keep them.
+#: progs/bar.c
+msgid "Up/Down: select   Enter: open   Esc: close"
+msgstr "Up/Down: 选择   Enter: 打开   Esc: 关闭"
+
+#: progs/bar.c progs/home.c progs/installer.c
+msgid "Programs"
+msgstr "程序"
+
+#: progs/bar.c progs/home.c
+msgid "System and hardware"
+msgstr "系统与硬件"
+
+#: progs/bar.c
+msgid "Home (full screen)"
+msgstr "主页（全屏）"
+
+#: progs/bar.c
+msgid "Window on this desktop"
+msgstr "在此桌面开窗口"
+
+#: progs/bar.c progs/shot.c
+msgid "Full screen"
+msgstr "全屏"
 
 #: progs/drives.c
 #, c-format
@@ -5073,6 +5098,10 @@ msgstr "已拒绝：镜像大小为 %lld B，但探测到的芯片容量为 %lld
 msgid "Y/N: Write %.100s (%lld KiB) to %s [%s]?"
 msgstr "Y/N: 将 %.100s（%lld KiB）写入 %s [%s]？"
 
+#: progs/home.c progs/packages.c
+msgid "Containers"
+msgstr "容器"
+
 #: progs/home.c
 msgid "Container actions stay here; state refreshes every 500 ms."
 msgstr "容器操作在此进行；状态每 500 毫秒刷新一次。"
@@ -5250,6 +5279,10 @@ msgid_plural "... %d more containers"
 msgstr[0] "……另有 %d 个容器"
 
 #: progs/home.c
+msgid "state, RAM / swap MiB"
+msgstr "状态、内存 / 交换空间 MiB"
+
+#: progs/home.c
 msgid "home and the shared folders"
 msgstr "主目录与共享文件夹"
 
@@ -5260,10 +5293,6 @@ msgstr "关机"
 #: progs/home.c
 msgid "reboot"
 msgstr "重启"
-
-#: progs/home.c
-msgid "Containers: state, RAM / swap MiB"
-msgstr "容器：状态、内存 / 交换空间 MiB"
 
 #: progs/home.c
 msgid "No failure reason reported."
@@ -5600,7 +5629,7 @@ msgstr "自动（%s）"
 msgid "automatic (from the network)"
 msgstr "自动（按网络所在地）"
 
-#: progs/installer.c
+#: progs/installer.c progs/settings.c
 msgid "not set"
 msgstr "未设置"
 
@@ -5831,10 +5860,6 @@ msgstr "输入法"
 #: progs/installer.c
 msgid "Modules"
 msgstr "模块"
-
-#: progs/installer.c
-msgid "Programs"
-msgstr "程序"
 
 #: progs/installer.c
 msgid "a host program"
@@ -6388,10 +6413,6 @@ msgstr "向下拖动以关闭"
 #: progs/overview.c
 msgid "No matching windows"
 msgstr "无匹配窗口"
-
-#: progs/packages.c
-msgid "Containers"
-msgstr "容器"
 
 #: progs/packages.c
 msgid "Host"
@@ -9587,8 +9608,28 @@ msgid "Screen Locking"
 msgstr "锁屏"
 
 #: progs/settings.c
+msgid "Lock Mode"
+msgstr "锁屏模式"
+
+#: progs/settings.c
 msgid "Disk Encryption"
 msgstr "磁盘加密"
+
+#: progs/settings.c
+msgid "Duress"
+msgstr "胁迫"
+
+#: progs/settings.c
+msgid ""
+"Typed where a password is asked, it wipes the encrypted disk at once and "
+"powers off."
+msgstr "在要求输入密码的地方输入此密码，会立即擦除加密磁盘并关机。"
+
+#: progs/settings.c
+msgid ""
+"The login password and disk passphrase always win: it must differ from both. "
+"Needs an encrypted disk."
+msgstr "登录密码和磁盘口令始终优先：胁迫密码必须与两者都不同。需要加密磁盘。"
 
 #: progs/settings.c
 msgid "Host Security"
@@ -9747,6 +9788,48 @@ msgstr "启动镜像已生成：下次开机即使用。"
 #, c-format
 msgid "Could not make the boot image; see %s."
 msgstr "无法生成启动镜像；见 %s。"
+
+#: progs/settings.c
+msgid ""
+"Lock mode high: only the password unlocks. Set the lock mode to normal first."
+msgstr "锁屏模式为高：只有密码能解锁。请先把锁屏模式改回普通。"
+
+#: progs/settings.c
+msgid ""
+"TPM disk auto-unlock is off in high lock mode: the disk asks for its "
+"passphrase at power-on."
+msgstr "高锁屏模式下 TPM 磁盘自动解密关闭：开机时磁盘要求输入口令。"
+
+#: progs/settings.c
+#, c-format
+msgid "%s is not installed."
+msgstr "%s 未安装。"
+
+#: progs/settings.c
+#, c-format
+msgid "%s did not finish."
+msgstr "%s 未正常结束。"
+
+#: progs/settings.c
+msgid "Duress password set. Making the boot image (it carries the password)..."
+msgstr "胁迫密码已设置。正在制作启动映像（其中含有该密码）……"
+
+#: progs/settings.c
+msgid "Duress password set: switch Duress wipes the disk on to arm it."
+msgstr "胁迫密码已设置：打开“胁迫时擦除磁盘”即可启用。"
+
+#. TRANSLATORS: Delete is the Delete key; keep it.
+#: progs/settings.c
+msgid "Delete again: remove the duress password (duress goes off)."
+msgstr "再按一次 Delete：删除胁迫密码（胁迫同时关闭）。"
+
+#: progs/settings.c
+msgid "Duress password removed; duress is off. Making the boot image..."
+msgstr "已删除胁迫密码，胁迫已关闭。正在制作启动映像……"
+
+#: progs/settings.c
+msgid "The duress password could not be removed."
+msgstr "无法删除胁迫密码。"
 
 #: progs/settings.c
 msgid "Kernel options (added to the command line; empty: none): "
@@ -10046,6 +10129,10 @@ msgid "Unlock with a fingerprint"
 msgstr "使用指纹解锁"
 
 #: progs/settings.c
+msgid "off (high mode)"
+msgstr "关闭（高模式）"
+
+#: progs/settings.c
 msgid "Fingerprints"
 msgstr "指纹"
 
@@ -10147,6 +10234,34 @@ msgstr "  （将一并安装 Rime）"
 #: progs/settings.c
 msgid "TPM disk auto-unlock"
 msgstr "TPM 磁盘自动解密"
+
+#: progs/settings.c
+msgid "off in high mode (the passphrase at power-on)"
+msgstr "高模式下关闭（开机时输入口令）"
+
+#: progs/settings.c
+msgid "Lock mode"
+msgstr "锁屏模式"
+
+#: progs/settings.c
+msgid "high"
+msgstr "高"
+
+#: progs/settings.c
+msgid "normal"
+msgstr "普通"
+
+#: progs/settings.c
+msgid "Duress password"
+msgstr "胁迫密码"
+
+#: progs/settings.c
+msgid "set"
+msgstr "已设置"
+
+#: progs/settings.c
+msgid "Duress wipes the disk"
+msgstr "胁迫时擦除磁盘"
 
 #: progs/settings.c
 msgid "Host security (fwupd)"
@@ -10756,6 +10871,49 @@ msgstr "中文拼音：无法运行 locachy-pkg。"
 msgid "Enter: bind LUKS2 auto-unlock to TPM (1.2 or 2.0)   Delete: unbind"
 msgstr "Enter: 将 LUKS2 自动解密绑定到 TPM（1.2 或 2.0）   Delete: 解除绑定"
 
+#: progs/settings.c
+msgid ""
+"Not switched: the TPM key slots could not be removed (locachy-tpm clear)."
+msgstr "未切换：无法删除 TPM 密钥槽（locachy-tpm clear）。"
+
+#: progs/settings.c
+msgid ""
+"Lock mode high: only the password unlocks, and the disk asks for its "
+"passphrase at power-on (no TPM key slot). Making the boot image..."
+msgstr ""
+"锁屏模式为高：只有密码能解锁，开机时磁盘要求输入口令（不留 TPM 密钥槽）。正在"
+"制作启动映像……"
+
+#: progs/settings.c
+msgid ""
+"Lock mode normal: the unlock ways switched on work again; bind the TPM again "
+"to use it. Making the boot image..."
+msgstr ""
+"锁屏模式为普通：已开启的解锁方式重新生效；要用 TPM，需重新绑定。正在制作启动"
+"映像……"
+
+#. TRANSLATORS: Enter and Delete are key names; keep them.
+#: progs/settings.c
+msgid ""
+"Enter: set the duress password (in a terminal)   Delete, twice: remove it"
+msgstr "Enter: 在终端中设置胁迫密码   Delete 连按两次: 删除它"
+
+#: progs/settings.c
+msgid "Duress needs the duress password set and an encrypted disk."
+msgstr "胁迫需要已设置胁迫密码和加密磁盘。"
+
+#: progs/settings.c
+msgid ""
+"Duress on: the duress password wipes the disk at power-on, on the lock "
+"screen and in sudo. Making the boot image..."
+msgstr ""
+"胁迫已开启：在开机、锁屏和 sudo 处输入胁迫密码都会擦除磁盘。正在制作启动映"
+"像……"
+
+#: progs/settings.c
+msgid "Duress off: the duress password wipes nothing. Making the boot image..."
+msgstr "胁迫已关闭：胁迫密码不再擦除任何东西。正在制作启动映像……"
+
 #. TRANSLATORS: Enter and M are key names; keep them.
 #: progs/settings.c
 msgid ""
@@ -11072,20 +11230,10 @@ msgid "Ranking the mirrors (reflector, rate-mirrors)..."
 msgstr "正在给镜像排序（reflector、rate-mirrors）……"
 
 #: progs/settings.c
-#, c-format
-msgid "%s is not installed."
-msgstr "%s 未安装。"
-
-#: progs/settings.c
 msgid ""
 "Not bound: with no lock at boot, anyone who turns it on would be in. Turn "
 "the boot lock on first."
 msgstr "未绑定：开机不锁屏时，谁开机都能直接进入。请先打开开机锁屏。"
-
-#: progs/settings.c
-#, c-format
-msgid "%s did not finish."
-msgstr "%s 未正常结束。"
 
 #: progs/settings.c
 #, c-format
@@ -11175,10 +11323,6 @@ msgstr "在 view 中打开"
 #: progs/shot.c
 msgid "Rectangular region"
 msgstr "矩形区域"
-
-#: progs/shot.c
-msgid "Full screen"
-msgstr "全屏"
 
 #: progs/shot.c
 msgid "Current screen"

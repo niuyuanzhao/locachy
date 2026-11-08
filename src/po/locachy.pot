@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-07 23:22-0500\n"
+"POT-Creation-Date: 2026-11-08 18:08+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -1084,6 +1084,31 @@ msgstr ""
 #. TRANSLATORS: Enter, A and Esc are keys; keep them.
 #: progs/bar.c
 msgid "Enter: open   A: always use it   Esc: cancel"
+msgstr ""
+
+#. TRANSLATORS: Up, Down, Enter and Esc are keys; keep them.
+#: progs/bar.c
+msgid "Up/Down: select   Enter: open   Esc: close"
+msgstr ""
+
+#: progs/bar.c progs/home.c progs/installer.c
+msgid "Programs"
+msgstr ""
+
+#: progs/bar.c progs/home.c
+msgid "System and hardware"
+msgstr ""
+
+#: progs/bar.c
+msgid "Home (full screen)"
+msgstr ""
+
+#: progs/bar.c
+msgid "Window on this desktop"
+msgstr ""
+
+#: progs/bar.c progs/shot.c
+msgid "Full screen"
 msgstr ""
 
 #: progs/drives.c
@@ -5027,6 +5052,10 @@ msgstr ""
 msgid "Y/N: Write %.100s (%lld KiB) to %s [%s]?"
 msgstr ""
 
+#: progs/home.c progs/packages.c
+msgid "Containers"
+msgstr ""
+
 #: progs/home.c
 msgid "Container actions stay here; state refreshes every 500 ms."
 msgstr ""
@@ -5203,6 +5232,10 @@ msgstr[0] ""
 msgstr[1] ""
 
 #: progs/home.c
+msgid "state, RAM / swap MiB"
+msgstr ""
+
+#: progs/home.c
 msgid "home and the shared folders"
 msgstr ""
 
@@ -5212,10 +5245,6 @@ msgstr ""
 
 #: progs/home.c
 msgid "reboot"
-msgstr ""
-
-#: progs/home.c
-msgid "Containers: state, RAM / swap MiB"
 msgstr ""
 
 #: progs/home.c
@@ -5551,7 +5580,7 @@ msgstr ""
 msgid "automatic (from the network)"
 msgstr ""
 
-#: progs/installer.c
+#: progs/installer.c progs/settings.c
 msgid "not set"
 msgstr ""
 
@@ -5779,10 +5808,6 @@ msgstr ""
 
 #: progs/installer.c
 msgid "Modules"
-msgstr ""
-
-#: progs/installer.c
-msgid "Programs"
 msgstr ""
 
 #: progs/installer.c
@@ -6336,10 +6361,6 @@ msgstr ""
 
 #: progs/overview.c
 msgid "No matching windows"
-msgstr ""
-
-#: progs/packages.c
-msgid "Containers"
 msgstr ""
 
 #: progs/packages.c
@@ -9533,7 +9554,27 @@ msgid "Screen Locking"
 msgstr ""
 
 #: progs/settings.c
+msgid "Lock Mode"
+msgstr ""
+
+#: progs/settings.c
 msgid "Disk Encryption"
+msgstr ""
+
+#: progs/settings.c
+msgid "Duress"
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Typed where a password is asked, it wipes the encrypted disk at once and "
+"powers off."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"The login password and disk passphrase always win: it must differ from both. "
+"Needs an encrypted disk."
 msgstr ""
 
 #: progs/settings.c
@@ -9692,6 +9733,48 @@ msgstr ""
 #: progs/settings.c
 #, c-format
 msgid "Could not make the boot image; see %s."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Lock mode high: only the password unlocks. Set the lock mode to normal first."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"TPM disk auto-unlock is off in high lock mode: the disk asks for its "
+"passphrase at power-on."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%s is not installed."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%s did not finish."
+msgstr ""
+
+#: progs/settings.c
+msgid "Duress password set. Making the boot image (it carries the password)..."
+msgstr ""
+
+#: progs/settings.c
+msgid "Duress password set: switch Duress wipes the disk on to arm it."
+msgstr ""
+
+#. TRANSLATORS: Delete is the Delete key; keep it.
+#: progs/settings.c
+msgid "Delete again: remove the duress password (duress goes off)."
+msgstr ""
+
+#: progs/settings.c
+msgid "Duress password removed; duress is off. Making the boot image..."
+msgstr ""
+
+#: progs/settings.c
+msgid "The duress password could not be removed."
 msgstr ""
 
 #: progs/settings.c
@@ -9993,6 +10076,10 @@ msgid "Unlock with a fingerprint"
 msgstr ""
 
 #: progs/settings.c
+msgid "off (high mode)"
+msgstr ""
+
+#: progs/settings.c
 msgid "Fingerprints"
 msgstr ""
 
@@ -10093,6 +10180,34 @@ msgstr ""
 
 #: progs/settings.c
 msgid "TPM disk auto-unlock"
+msgstr ""
+
+#: progs/settings.c
+msgid "off in high mode (the passphrase at power-on)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Lock mode"
+msgstr ""
+
+#: progs/settings.c
+msgid "high"
+msgstr ""
+
+#: progs/settings.c
+msgid "normal"
+msgstr ""
+
+#: progs/settings.c
+msgid "Duress password"
+msgstr ""
+
+#: progs/settings.c
+msgid "set"
+msgstr ""
+
+#: progs/settings.c
+msgid "Duress wipes the disk"
 msgstr ""
 
 #: progs/settings.c
@@ -10686,6 +10801,43 @@ msgstr ""
 msgid "Enter: bind LUKS2 auto-unlock to TPM (1.2 or 2.0)   Delete: unbind"
 msgstr ""
 
+#: progs/settings.c
+msgid ""
+"Not switched: the TPM key slots could not be removed (locachy-tpm clear)."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Lock mode high: only the password unlocks, and the disk asks for its "
+"passphrase at power-on (no TPM key slot). Making the boot image..."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Lock mode normal: the unlock ways switched on work again; bind the TPM again "
+"to use it. Making the boot image..."
+msgstr ""
+
+#. TRANSLATORS: Enter and Delete are key names; keep them.
+#: progs/settings.c
+msgid ""
+"Enter: set the duress password (in a terminal)   Delete, twice: remove it"
+msgstr ""
+
+#: progs/settings.c
+msgid "Duress needs the duress password set and an encrypted disk."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Duress on: the duress password wipes the disk at power-on, on the lock "
+"screen and in sudo. Making the boot image..."
+msgstr ""
+
+#: progs/settings.c
+msgid "Duress off: the duress password wipes nothing. Making the boot image..."
+msgstr ""
+
 #. TRANSLATORS: Enter and M are key names; keep them.
 #: progs/settings.c
 msgid ""
@@ -11000,19 +11152,9 @@ msgid "Ranking the mirrors (reflector, rate-mirrors)..."
 msgstr ""
 
 #: progs/settings.c
-#, c-format
-msgid "%s is not installed."
-msgstr ""
-
-#: progs/settings.c
 msgid ""
 "Not bound: with no lock at boot, anyone who turns it on would be in. Turn "
 "the boot lock on first."
-msgstr ""
-
-#: progs/settings.c
-#, c-format
-msgid "%s did not finish."
 msgstr ""
 
 #: progs/settings.c
@@ -11102,10 +11244,6 @@ msgstr ""
 
 #: progs/shot.c
 msgid "Rectangular region"
-msgstr ""
-
-#: progs/shot.c
-msgid "Full screen"
 msgstr ""
 
 #: progs/shot.c
