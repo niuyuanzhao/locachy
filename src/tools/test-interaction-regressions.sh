@@ -88,7 +88,7 @@ for test in gestures libinput audio-packages audio-client audio-isolation face-c
             local-packages local-build repos firmware pkg-sync; do
     python3 -B "$src/tools/test-$test.py" "$out"
 done
-for test in xwayland tpm rescue-dispatch rescue-storage rescue-link; do # no scratch directory
+for test in xwayland tpm jobs-routing rescue-dispatch rescue-storage rescue-link; do # no scratch directory
     python3 -B "$src/tools/test-$test.py"
 done
 bash "$src/tools/test-timezone-client.sh" "$out/timezone"

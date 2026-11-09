@@ -32,13 +32,13 @@ src=$1 run=$2 t=$3 server=$4 client=$5
 mount -t tmpfs -o mode=0755 tmpfs /run || exit 9
 mkdir -p "$t/cgroup/service" "$t/proc" "$t/bin" "$t/files"
 touch "$t/cgroup/service/cgroup.procs"
-for i in $(seq 1 60); do
+for i in $(seq 1 120); do
     mkdir "$t/cgroup/job-$i"
     touch "$t/cgroup/job-$i/cgroup.procs" "$t/cgroup/job-$i/cgroup.kill"
     echo "populated 0" >"$t/cgroup/job-$i/cgroup.events"
 done
 install -m 755 "$src/tools/test-jobs-tool.sh" "$run/tool"
-for p in locachy-pkg locachy-repos locachy-boot locachy-app locachy-firmware; do ln -s "$run/tool" "$t/bin/$p"; done
+for p in locachy-pkg locachy-repos locachy-boot locachy-tpm locachy-app locachy-firmware; do ln -s "$run/tool" "$t/bin/$p"; done
 install -m 755 "$server" "$run/locachy-jobs"
 install -m 755 "$client" "$run/test-jobs"
 export TEST_JOBS=$t
@@ -124,6 +124,22 @@ check "a path with a space stays one argument" grep -q "fwupd-action local-insta
 check "an SPI write: its options as given" grep -q \
     "spi-write ch341a_spi $t/files/rom.bin --chip W25Q64.V --regions fd,bios --expected-size 4096 \[9\]" "$t/calls"
 check "the boot image: locachy-boot alone" grep -q "locachy-boot  \[0\]" "$t/calls"
+input_reply=$(printf queue-input-probe | J submit-input tpm-enroll)
+printf "TPM input submission: %s\n" "$input_reply"
+input_id=$(id_of "$input_reply")
+check "a TPM input pipe is accepted and the job completes" wait_state "$input_id" done
+check "TPM input never appears in state or log" sh -c "! grep -R -q queue-input-probe \"$t/jobs\""
+check "TPM mutation requires its input pipe" refuse tpm-enroll
+check "TPM input does not serialize into arguments" test "$(field "$input_id" 7)" = ""
+want_input=$(printf queue-input-probe | sha256sum)
+check "the queued TPM worker receives the exact pipe bytes" test "$(cat "$t/input-$input_id.sha256")" = "$want_input"
+check "fixed boot --luks is accepted" accept boot --luks
+check "fixed boot registration is accepted" accept boot --register-only
+check "the rebuild is a fixed queued kind" accept locachy-rebuild
+check "the rebuild permits only its fixed flag" refuse locachy-rebuild --anything
+check "TPM pending is accepted without input" accept tpm-pending
+check "TPM clear is accepted without input" accept tpm-clear
+check "new fixed kinds finish" idle
 # The service keeps its own files to root (umask 077); the files a step
 # writes (mirror lists, pacman.conf, rc.conf) are read by others too.
 check "every step runs with umask 022, not the umask of the service" \
@@ -138,7 +154,8 @@ b=$(id_of "$(J submit pkg-remove fail)")
 c=$(id_of "$(J submit repos-rank)")
 check "the first runs at once, the others wait in order" \
     test "$(field "$a" 3) $(field "$a" 5) $(field "$b" 3) $(field "$b" 5) $(field "$c" 5)" = "running 0 queued 1 2"
-check "the same job asked again while queued is that one" test "$(J submit pkg-remove fail)" = "ok $b 1"
+repeat=$(id_of "$(J submit pkg-remove fail)")
+check "the same queued request registers a separate event" test "$repeat" != "$b"
 touch "$t/release-$a"
 check "the queue runs out" wait_state "$c" done
 check "each ended as its program did" test "$(field "$a" 3)/$(field "$a" 4) $(field "$b" 3)/$(field "$b" 4)" = "done/0 failed/4"
@@ -229,6 +246,9 @@ check "the refusals are in the service'"'"'s log" test "$(grep -c "refused" "$t/
 # The service ended (SIGTERM, as process 1 ends a service) and started again.
 r=$(id_of "$(J submit pkg-install slow)")
 q=$(id_of "$(J submit pkg-sync)")
+lost_reply=$(printf queue-restart-probe | J submit-input tpm-enroll)
+lost=$(id_of "$lost_reply")
+check "an input job waits behind the active operation" test "$(field "$lost" 3)" = queued
 started "$r"
 kill -TERM "$svc"; wait "$svc"; st=$?
 check "SIGTERM ends the service cleanly" test "$st" = 0
@@ -239,6 +259,9 @@ echo "populated 1" >"$t/cgroup/job-$r/cgroup.events" # what the kernel says whil
 check "without the service, the running job is still seen (its cgroup)" test "$(J pending)" = "1 $r"
 echo "populated 0" >"$t/cgroup/job-$r/cgroup.events"
 check "started again" start_service
+check "a queued input job is failed after service restart" test "$(field "$lost" 3)" = failed
+check "lost input has a visible failure status" test "$(field "$lost" 4)" = 125
+check "the lost input job never executed" test "$(grep -c "^start $lost " "$t/calls")" = 0
 check "it finds the running job and the queue" test "$(field "$r" 3) $(field "$q" 3) $(field "$q" 5)" = "running queued 1"
 touch "$t/release-$r"
 check "the job it found ends as it would have" wait_state "$r" done

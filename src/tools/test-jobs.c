@@ -19,6 +19,7 @@
 #define _GNU_SOURCE
 #endif
 #include <errno.h>
+#include <fcntl.h>
 #include <grp.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -97,6 +98,27 @@ int main(int argc, char **argv)
     }
     const char *cmd = argv[i];
     char why[512];
+    if (strcmp(cmd, "submit-input") == 0) {
+        if (i + 1 >= argc) return 2;
+        char secret[JOBS_INPUT_MAX + 1];
+        ssize_t len = read(STDIN_FILENO, secret, sizeof secret);
+        if (len <= 0 || len > JOBS_INPUT_MAX) return 2;
+        int input[2];
+        if (pipe2(input, O_CLOEXEC) < 0) return 2;
+        if (write(input[1], secret, (size_t)len) != len) return 2;
+        memset(secret, 0, sizeof secret);
+        close(input[1]);
+        int id = 0, pos = 0;
+        int result = jobs_submit_input(argv[i + 1], (const char *const *)argv + i + 2,
+                                       input[0], &id, &pos, why, sizeof why);
+        close(input[0]);
+        if (result < 0) {
+            printf("error %s\n", why);
+            return 1;
+        }
+        printf("ok %d %d\n", id, pos);
+        return 0;
+    }
     if (strcmp(cmd, "submit") == 0 || strcmp(cmd, "hold") == 0) {
         if (i + 1 >= argc) return 2;
         int id = 0, pos = 0;

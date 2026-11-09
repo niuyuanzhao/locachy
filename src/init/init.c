@@ -3852,27 +3852,6 @@ int main(void)
         double t0 = uptime();
         esp_mount();
         say("init: ESP checked at %.3f s (%.0f ms)", uptime(), (uptime() - t0) * 1000);
-        /* A TPM 2.0 binding left for a start with Secure Boot on this
-         * machine's keys (the installer's, or one Secure Boot's new keys
-         * made necessary): locachy-tpm enroll --pending, beside the rest of
-         * the start, what it says in the kernel's log; it waits again when
-         * those keys are not on. */
-        if (access("/var/lib/locachy/tpm-pending", F_OK) == 0 && access("/usr/local/bin/locachy-tpm", X_OK) == 0) {
-            pid_t tpid = fork();
-            if (tpid == 0) {
-                setsid();
-                sigprocmask(SIG_UNBLOCK, &handled, NULL);
-                int log = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
-                if (log >= 0) {
-                    dup2(log, STDOUT_FILENO);
-                    dup2(log, STDERR_FILENO);
-                }
-                setenv("PYTHONUNBUFFERED", "1", 1);
-                execl("/usr/local/bin/locachy-tpm", "locachy-tpm", "enroll", "--pending", (char *)NULL);
-                _exit(127);
-            }
-            say("init: a TPM binding waits: locachy-tpm enroll --pending (pid %d)", (int)tpid);
-        }
         t0 = uptime();
         apps_init();
         say("init: applications discovered at %.3f s (%.0f ms)", uptime(), (uptime() - t0) * 1000);
@@ -3915,6 +3894,27 @@ int main(void)
     if (rooted) {
         for (size_t i = 0; i < nservices; i++) {
             service_start(&services[i]);
+        }
+        /* A TPM 2.0 binding left for a start with Secure Boot on this
+         * machine's keys (the installer's, or one Secure Boot's new keys
+         * made necessary): locachy-tpm enroll --pending, submitted after the services start; its writes and
+         * rebuild belong to the single system job queue; it waits again when
+         * those keys are not on. */
+        if (access("/var/lib/locachy/tpm-pending", F_OK) == 0 && access("/usr/local/bin/locachy-tpm", X_OK) == 0) {
+            pid_t tpid = fork();
+            if (tpid == 0) {
+                setsid();
+                sigprocmask(SIG_UNBLOCK, &handled, NULL);
+                int log = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+                if (log >= 0) {
+                    dup2(log, STDOUT_FILENO);
+                    dup2(log, STDERR_FILENO);
+                }
+                setenv("PYTHONUNBUFFERED", "1", 1);
+                execl("/usr/local/bin/locachy-tpm", "locachy-tpm", "enroll", "--pending", "--submit-only", (char *)NULL);
+                _exit(127);
+            }
+            say("init: a TPM binding waits: locachy-tpm enroll --pending (pid %d)", (int)tpid);
         }
     }
 

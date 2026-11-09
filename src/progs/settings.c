@@ -1298,6 +1298,7 @@ static char tpm_summary[160] = "-", sb_summary[160] = "-", hsi_summary[96] = "-"
 static int tpm_pending; /* a TPM binding waits for a start with this computer's Secure Boot keys */
 static int tpm_bound; /* a LUKS2 disk opens with the TPM at power-on */
 static int tpm_clear_asked;
+static int tpm_job; /* TPM writes are system jobs, including their boot rebuild. */
 
 static void load_tpm_status(void)
 {
@@ -5125,10 +5126,6 @@ static void make_boot_image(void)
 {
     char why[256] = "";
     int id = 0, position = 0;
-    if (boot_job) {
-        snprintf(notice, sizeof notice, "%s", _("The boot image is still being made."));
-        return;
-    }
     if (jobs_submit("boot", NULL, &id, &position, why, sizeof why) < 0) {
         snprintf(notice, sizeof notice, _("Could not make the boot image: %s"), why);
         return;
@@ -5254,7 +5251,7 @@ static void adopt_jobs(void)
 {
     static struct jobs_row rows[JOBS_ROWS_MAX];
     int n = jobs_mine(rows, JOBS_ROWS_MAX);
-    int have_repos = repos_job != 0, have_boot = boot_job != 0, have_pkg = pkg_job != 0;
+    int have_repos = repos_job != 0, have_boot = boot_job != 0, have_pkg = pkg_job != 0, have_tpm = tpm_job != 0;
     for (int pass = 0; pass < 2; pass++) {
         for (int i = 0; i < n; i++) {
             const struct jobs_row *r = &rows[i];
@@ -5268,6 +5265,9 @@ static void adopt_jobs(void)
             } else if (!have_boot && strcmp(r->kind, "boot") == 0) {
                 boot_job = r->id;
                 have_boot = 1;
+            } else if (!have_tpm && (strncmp(r->kind, "tpm-", 4) == 0 || strcmp(r->kind, "secure-boot") == 0)) {
+                tpm_job = r->id;
+                have_tpm = 1;
             } else if (!have_pkg && strncmp(r->kind, "kernel-", 7) == 0) {
                 pkg_job = r->id;
                 have_pkg = 1;
@@ -6253,7 +6253,7 @@ static void draw(void)
         draw_sidebar(cols);
     }
     screen_text(2, rows - 2, _(notice), ACCENT, BG);
-    if (pkg_job || repos_job || boot_job) {
+    if (pkg_job || repos_job || boot_job || tpm_job) {
         /* TRANSLATORS: settings and home are programs' names; keep them. */
         screen_text(2, rows - 1, _("A system job of settings' runs or waits: it goes on if settings closes; "
                                    "home lists it."), FG, BG);
@@ -7501,7 +7501,7 @@ int main(int argc, char **argv)
         if (close_due()) {
             return 0; /* the window's close, read in a question or list */
         }
-        int key = key_poll_timeout(request_fd, pkg_job || repos_job || boot_job ? 500 : 2000);
+        int key = key_poll_timeout(request_fd, pkg_job || repos_job || boot_job || tpm_job ? 500 : 2000);
         requests();
         if (key != 0 && key != K_DEL) {
             fp_delete_asked = face_delete_asked = tor_bridges_delete_asked = tpm_clear_asked = duress_clear_asked = 0; /* Delete twice in a row deletes them */
@@ -7509,12 +7509,22 @@ int main(int argc, char **argv)
         }
         close_read(key);
         build_row_maps();
-        if (!pkg_job || !repos_job || !boot_job) {
+        if (!pkg_job || !repos_job || !boot_job || !tpm_job) {
             adopt_jobs();
         }
         pkg_check();
         repos_check();
         boot_check();
+        if (tpm_job) {
+            struct jobs_row r;
+            char log[96];
+            if (job_ended(tpm_job, &r, log, sizeof log)) {
+                tpm_job = 0;
+                load_tpm_status();
+                snprintf(notice, sizeof notice, r.status == 0 ? _("%s done.") : _("%s did not finish."),
+                         "TPM/Secure Boot");
+            }
+        }
         if (close_due()) {
             return 0; /* closed as q does: its jobs go on (locachy-jobs) */
         }
@@ -7726,12 +7736,15 @@ int main(int argc, char **argv)
                 /* TRANSLATORS: Delete is the Delete key; keep it. */
                 snprintf(notice, sizeof notice, "%s", _("Delete again: unbind TPM disk auto-unlock (boot will ask passphrase)."));
             } else {
-                char buf[512];
-                char *const cmd[] = { "/usr/local/bin/locachy-tpm", "clear", NULL };
+                char why[256];
+                int id, position;
                 tpm_clear_asked = 0;
-                command_output(cmd, buf, sizeof buf);
-                load_tpm_status();
-                snprintf(notice, sizeof notice, "%s", _("TPM disk auto-unlock unbound."));
+                if (jobs_submit("tpm-clear", NULL, &id, &position, why, sizeof why) < 0) {
+                    snprintf(notice, sizeof notice, "%s", why);
+                } else {
+                    tpm_job = id;
+                    snprintf(notice, sizeof notice, _("queued (%d before it)"), position);
+                }
             }
             draw();
         } else if (key == '\n' && selected == duress_index()) {

@@ -44,7 +44,13 @@ checks every argument; anything else is refused.
 | `kernel-headers` | `locachy-pkg kernel headers` | `on` or `off` |
 | `repos-rank` | `locachy-repos rank` | none |
 | `repos-set` | `locachy-repos apply --set` | `core`, `extra` or `multilib`, `=on` or `=off` |
-| `boot` | `locachy-boot` | none |
+| `boot` | `locachy-boot` | none, `--luks`, or `--register-only` |
+| `locachy-rebuild` | `locachy-pkg rebuild` | none or `--force` |
+| `tpm-pending` | `locachy-tpm enroll --pending` | none |
+| `tpm-enroll` | `locachy-tpm enroll --passphrase-stdin` | optional PCR list and `/dev` devices; passphrase is an anonymous RAM pipe |
+| `tpm-prepare` | `locachy-tpm prepare --passphrase-stdin` | no arguments; passphrase is an anonymous RAM pipe |
+| `tpm-clear` | `locachy-tpm clear` | `/dev` devices |
+| `secure-boot` | `locachy-tpm secure-boot` | `--enroll`, optionally `--microsoft` and passphrase over an anonymous RAM pipe |
 | `app-build`, `app-rollback` | `locachy-app build` / `rollback` | a container name (as locachy-app's) |
 | `app-remove` | `locachy-app remove` | a container name, optionally `--data` |
 | `fw-refresh`, `fw-update` | `locachy-firmware fwupd-action refresh` / `update` | none |
@@ -55,7 +61,11 @@ checks every argument; anything else is refused.
 | `spi-backup`, `spi-verify` | `locachy-firmware spi-backup` / `spi-verify` | a programmer and a folder (backup) or an image file; `--chip`, `--regions fd,bios,…` |
 | `spi-write` | `locachy-firmware spi-write` | as `spi-verify`, and `--expected-size BYTES` |
 
-A job the same as one still queued (kind and arguments) is that one.
+Every accepted request is a separate queue event, including repeated requests with the same kind and arguments. Interactive TPM input is passed once through a complete anonymous pipe with its writer closed; it is never an argument, environment value, state field, or log. The service does not persist that descriptor: if it restarts before the job runs, that job is marked failed and must be submitted again.
+
+`locachy-boot` and all mutating `locachy-tpm` commands route through this queue on the installed running system. In a verified `/locachy-jobs/job-ID` cgroup, they execute inline, including nested boot rebuilds and pacman hooks; no nested enqueue/wait deadlock. A chroot or a host not running LOCachy's PID 1 is explicitly reported as offline and builds inline. A missing service on the installed running system is an error, never a fallback to direct execution.
+
+An external pacman PostTransaction hook registers its boot event without waiting (pacman still holds its database lock); its result is in home/jobs, not pacman's exit status. Pacman launched inside a job runs the hook inline and propagates failures normally. External root CLI/package transactions themselves are not retroactively managed or made atomic by this integration. The existing advisory locks remain additional defense, not queue substitutes. Secure Boot key enrollment remains an explicit person's choice; no new automatic key registration is added.
 
 ## States
 
@@ -227,9 +237,10 @@ What the programs start, and whether it is a job:
 | settings | `locachy-pkg kernel select / headers` | yes | a pacman transaction and the boot image |
 | settings | `locachy-repos apply --set`, `rank` | yes | rewrites pacman's configuration, checks the declared packages, ranks mirrors on the network |
 | settings | `locachy-boot` | yes | writes the ESP; pacman's hooks run it too, so it must not overlap a transaction |
-| settings | `locachy-tpm enroll`, Secure Boot keys, fwupd's report, `tailscale up --qr`, howdy and its camera, bluetui | no | they need the person at the terminal (a passphrase, a QR code, a face); they run in term on top of settings, in its task |
+| settings | `locachy-tpm enroll`, Secure Boot keys | yes | terminal collects the passphrase and preserves the explicit key choices; writes and nested boot rebuilds are one system job |
+| settings | fwupd's report, `tailscale up --qr`, howdy and its camera, bluetui | no | interactive reports or device interaction |
 | settings | `fprintd-enroll` | no | a finger on the reader, cancelled with q or Esc |
-| settings | `locachy-tpm clear` | no | one LUKS token removed, in seconds |
+| settings | `locachy-tpm clear` | yes | LUKS/pending changes and the boot rebuild share one job |
 | settings | `tor-enforce`, `locachy-setup debug-link`, `nmcli`, `keytable`, the status queries | no | short helpers |
 | packages | `locachy-pkg plan/apply/sync/install/remove`, `locachy-app build/rollback/remove` | yes | package transactions, builds, network |
 | packages | `locachy-pkg plan --cached`, `status`, `info`, `search`, `commands` | no | queries |
@@ -237,7 +248,7 @@ What the programs start, and whether it is a job:
 | firmware | installing fwupd or flashrom | yes | a pacman transaction |
 | firmware | SPI probe, backup, verify, write | yes | flashrom on the chip: never two at once |
 | firmware | `bios-set`, the device, release, attribute and programmer lists | no | one sysfs write, or queries |
-| process 1 | `locachy-tpm enroll --pending` at boot | no | process 1's own, unchanged |
+| process 1 | `locachy-tpm enroll --pending --submit-only` at boot | yes | submitted after services start; no boot write outside the queue |
 | locachy-bar | `locachy-app open/stop` of the tray | no | container lifecycle, process 1's registry |
 
 packages and firmware ran their jobs in the root cgroup before, out of any
@@ -249,7 +260,7 @@ management; settings held its window's close while one ran. Both are gone.
   root of a user namespace with a private `/run`, fixture cgroups and peers'
   `/proc/PID/cgroup`, and `test-jobs-tool.sh` in place of the programs;
   plain and with AddressSanitizer/UBSan. The kinds and their arguments, one at
-  a time and in order, a duplicate queued once, the stopped-for-keys state,
+  a time and in order, every repeated request registered separately, the stopped-for-keys state,
   the files and their modes, a job outliving the client that asked, removing
   and stopping (SIGINT to what the step runs, the kill after the grace),
   the peers (a container, a window, a direct program, the user), the service

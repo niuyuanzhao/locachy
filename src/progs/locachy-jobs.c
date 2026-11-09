@@ -45,6 +45,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/ioctl.h>
+#include <sys/vfs.h>
+#include <linux/magic.h>
 #include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -106,6 +109,7 @@ static double now_s(void)
 enum check {
     C_NONE, C_PACKAGES, C_SWAP, C_KERNEL, C_ONOFF, C_SECTION, C_TARGETS, C_CONTAINER, C_CONTAINER_DATA,
     C_DEVICE, C_RELEASE, C_FILE, C_SPI_PROBE, C_SPI_BACKUP, C_SPI_VERIFY, C_SPI_WRITE,
+    C_TPM, C_TPM_ENROLL, C_SECURE_BOOT, C_BOOT, C_REBUILD,
 };
 
 struct kind {
@@ -125,7 +129,13 @@ static const struct kind kinds[] = {
     { "kernel-headers", "locachy-pkg", { "kernel", "headers" }, C_ONOFF },
     { "repos-rank", "locachy-repos", { "rank" }, C_NONE },
     { "repos-set", "locachy-repos", { "apply", "--set" }, C_SECTION },
-    { "boot", "locachy-boot", { NULL }, C_NONE },
+    { "boot", "locachy-boot", { NULL }, C_BOOT },
+    { "locachy-rebuild", "locachy-pkg", { "rebuild" }, C_REBUILD },
+    { "tpm-pending", "locachy-tpm", { "enroll", "--pending" }, C_NONE },
+    { "tpm-enroll", "locachy-tpm", { "enroll", "--passphrase-stdin" }, C_TPM_ENROLL },
+    { "tpm-prepare", "locachy-tpm", { "prepare", "--passphrase-stdin" }, C_NONE },
+    { "tpm-clear", "locachy-tpm", { "clear" }, C_TPM },
+    { "secure-boot", "locachy-tpm", { "secure-boot" }, C_SECURE_BOOT },
     { "app-build", "locachy-app", { "build" }, C_CONTAINER },
     { "app-rollback", "locachy-app", { "rollback" }, C_CONTAINER },
     { "app-remove", "locachy-app", { "remove" }, C_CONTAINER_DATA },
@@ -254,6 +264,50 @@ static int check_args(const struct kind *k, char **a, int n, char *why, size_t s
     case C_FILE:
         ok = n == 1 && path_of(a[0], 0);
         break;
+    case C_BOOT:
+        ok = n == 0 || (n == 1 && (strcmp(a[0], "--luks") == 0 || strcmp(a[0], "--register-only") == 0));
+        break;
+    case C_REBUILD:
+        ok = n == 0 || (n == 1 && strcmp(a[0], "--force") == 0);
+        break;
+    case C_TPM_ENROLL:
+        /* Only PCR numbers and absolute /dev paths; no worker/offline flags. */
+        if (n >= 2 && strcmp(a[0], "--pcrs") == 0) {
+            const char *p = a[1];
+            if (strcmp(p, "none") != 0 && strcmp(p, "srk") != 0) {
+                if (!p[0] || strlen(p) > 80) break;
+                while (*p) {
+                    char *end;
+                    long v = strtol(p, &end, 10);
+                    if (!isdigit((unsigned char)*p) || end == p || v > 23 || (*end && *end != '+' && *end != ',')) break;
+                    p = *end ? end + 1 : end;
+                    if (*end && !*p) { p = end; break; }
+                }
+                if (*p) break;
+            }
+            a += 2;
+            n -= 2;
+        }
+        /* fall through */
+    case C_TPM:
+        ok = n <= 16;
+        for (int i = 0; ok && i < n; i++) {
+            ok = strncmp(a[i], "/dev/", 5) == 0 && strlen(a[i]) < 256 && !strstr(a[i], "..") &&
+                 strspn(a[i], "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_-.:") == strlen(a[i]);
+        }
+        break;
+    case C_SECURE_BOOT: {
+        int seen = 0;
+        ok = n <= 3;
+        for (int i = 0; ok && i < n; i++) {
+            int bit = strcmp(a[i], "--enroll") == 0 ? 1 : strcmp(a[i], "--microsoft") == 0 ? 2 :
+                      strcmp(a[i], "--passphrase-stdin") == 0 ? 4 : 0;
+            ok = bit && !(seen & bit);
+            seen |= bit;
+        }
+        ok = ok && (!(seen & 6) || (seen & 1));
+        break;
+    }
     case C_SPI_PROBE:
         ok = n >= 1 && word(a[0], "_:=,./-", 128) && spi_options(a + 1, n - 1, 1);
         break;
@@ -277,6 +331,7 @@ struct job {
     char last[ROW_LAST];   /* its output's last line, once it has ended */
     pid_t runner;          /* 0: none */
     int adopted, pidfd;    /* a runner of the last run (not a child) and its pidfd (-1: none) */
+    int input;            /* anonymous pipe, RAM only; -1 without input (never saved) */
     double stop_at;        /* now_s() when a stopping job is killed; 0 */
     long long submitted, started, ended;
 };
@@ -293,6 +348,23 @@ static const char *const *job_args(const struct job *j, const char **out)
     }
     out[j->nargs] = NULL;
     return out;
+}
+
+static int needs_input(const struct job *j)
+{
+    if (strcmp(j->kind, "tpm-enroll") == 0 || strcmp(j->kind, "tpm-prepare") == 0) return 1;
+    const char *a[JOBS_ARGS_MAX + 1];
+    job_args(j, a);
+    for (int i = 0; strcmp(j->kind, "secure-boot") == 0 && i < j->nargs; i++) {
+        if (strcmp(a[i], "--passphrase-stdin") == 0) return 1;
+    }
+    return 0;
+}
+
+static void close_input(struct job *j)
+{
+    if (j->input >= 0) close(j->input);
+    j->input = -1;
 }
 
 static void job_path(const struct job *j, const char *what, char *path, size_t size)
@@ -549,6 +621,7 @@ static int stopped_for_keys(const struct job *j, int status)
 
 static void finish(struct job *j, int status)
 {
+    close_input(j);
     snprintf(j->state, sizeof j->state, "%s", strcmp(j->state, "stopping") == 0 ? "cancelled" :
              status == 0 ? "done" : stopped_for_keys(j, status) ? "keys" : "failed");
     j->status = status;
@@ -612,7 +685,7 @@ static void dprint_log(int fd, const char *fmt, ...)
 static void runner(const struct job *j, int lock)
 {
     for (int fd = 3; fd < 1024; fd++) {
-        if (fd != lock) close(fd); /* the service's sockets and descriptors */
+        if (fd != lock && fd != j->input) close(fd); /* the service's sockets and other jobs' input */
     }
     setsid();
     signal(SIGINT, SIG_IGN); /* a stop's SIGINT is for its steps; it says how they ended */
@@ -635,8 +708,9 @@ static void runner(const struct job *j, int lock)
         char **argv = step_argv(j, step);
         pid_t pid = fork();
         if (pid == 0) {
-            int null = open("/dev/null", O_RDONLY | O_CLOEXEC);
-            if (null >= 0) dup2(null, STDIN_FILENO);
+            int input = j->input >= 0 ? j->input : open("/dev/null", O_RDONLY | O_CLOEXEC);
+            if (input < 0 || dup2(input, STDIN_FILENO) < 0) _exit(126);
+            if (input != STDIN_FILENO) close(input);
             if (log >= 0) {
                 dup2(log, STDOUT_FILENO);
                 dup2(log, STDERR_FILENO);
@@ -706,13 +780,16 @@ static void run_next(void)
     }
     pid_t pid = fork();
     if (pid == 0) runner(j, lock);
-    close(lock); /* the runner holds it now */
     if (pid < 0) {
+        close(lock);
+        close_input(j);
         say("cannot start job %d: %s", j->id, strerror(errno));
         snprintf(j->state, sizeof j->state, "running");
         finish(j, 126);
         return;
     }
+    close(lock); /* the runner holds it now */
+    close_input(j); /* only the runner keeps this job's input */
     j->runner = pid;
     j->started = (long long)time(NULL);
     snprintf(j->state, sizeof j->state, "running");
@@ -753,6 +830,7 @@ static void restore(void)
         memset(j, 0, sizeof *j);
         j->id = id;
         j->pidfd = -1;
+        j->input = -1;
         size_t used = 0;
         while (fgets(line, sizeof line, in)) {
             line[strcspn(line, "\n")] = '\0';
@@ -783,8 +861,11 @@ static void restore(void)
         char why[128];
         if (!k || (!active(j) && !ended(j) && strcmp(j->state, "queued") != 0)) continue;
         njobs++;
-        if (strcmp(j->state, "queued") == 0 && check_args(k, (char **)job_args(j, a), j->nargs, why, sizeof why) < 0) {
-            snprintf(j->state, sizeof j->state, "failed"); /* changed since: never run */
+        if (strcmp(j->state, "queued") == 0 &&
+            (check_args(k, (char **)job_args(j, a), j->nargs, why, sizeof why) < 0 || needs_input(j))) {
+            snprintf(j->state, sizeof j->state, "failed"); /* invalid or RAM-only input lost: never run */
+            j->status = 125;
+            snprintf(j->last, sizeof j->last, "not run after service restart: input unavailable or arguments invalid; submit again");
             j->ended = (long long)time(NULL);
             save(j);
         }
@@ -887,7 +968,23 @@ static void answer(const char *a, const char *b)
     if (b) put(b);
 }
 
-static void submit(char **f, int n, const char *from)
+/* Input must already be complete: a bounded anonymous read pipe with no writer.
+ * Check with non-consuming poll/FIONREAD; never block the service on a peer. */
+static int input_ready(int fd)
+{
+    struct stat st;
+    struct statfs fs;
+    int bytes = 0, flags = fcntl(fd, F_GETFL);
+    struct pollfd p = { .fd = fd, .events = POLLIN };
+    return flags >= 0 && (flags & O_ACCMODE) == O_RDONLY && fstat(fd, &st) == 0 &&
+           S_ISFIFO(st.st_mode) && fstatfs(fd, &fs) == 0 &&
+           fs.f_type == PIPEFS_MAGIC && ioctl(fd, FIONREAD, &bytes) == 0 &&
+           bytes > 0 && bytes <= JOBS_INPUT_MAX && poll(&p, 1, 0) == 1 &&
+           (p.revents & POLLHUP);
+}
+
+/* Takes input only on success; caller closes any descriptor not taken. */
+static void submit(char **f, int n, const char *from, int *input)
 {
     const struct kind *k = kind_named(f[1]);
     char why[160], text[ARGS_TEXT];
@@ -909,16 +1006,18 @@ static void submit(char **f, int n, const char *from)
         memcpy(text + used, f[i], len);
         used += len;
     }
+    struct job candidate = { .nargs = n - 2, .input = -1 };
+    snprintf(candidate.kind, sizeof candidate.kind, "%s", k->name);
+    memcpy(candidate.args, text, used);
+    if ((needs_input(&candidate) && (*input < 0 || !input_ready(*input))) ||
+        (!needs_input(&candidate) && *input >= 0)) {
+        answer("error", "this kind needs exactly its complete RAM-only input pipe, or takes no input");
+        return;
+    }
     struct job *j = NULL;
     int queued = 0;
-    for (int i = 0; i < njobs; i++) {
-        if (strcmp(jobs[i].state, "queued") != 0) continue;
-        queued++;
-        if (strcmp(jobs[i].kind, k->name) == 0 && jobs[i].nargs == n - 2 && memcmp(jobs[i].args, text, used) == 0) {
-            j = &jobs[i]; /* the same, still waiting: once is enough */
-        }
-    }
-    if (!j) {
+    for (int i = 0; i < njobs; i++) queued += strcmp(jobs[i].state, "queued") == 0;
+    { /* Every accepted request is its own event, including repeated requests. */
         if (queued >= JOBS_QUEUED_MAX) {
             answer("error", "the queue is full");
             return;
@@ -932,6 +1031,8 @@ static void submit(char **f, int n, const char *from)
         memset(j, 0, sizeof *j);
         j->id = next_id++;
         j->pidfd = -1;
+        j->input = *input;
+        *input = -1;
         j->status = -1;
         j->nargs = n - 2;
         j->submitted = (long long)time(NULL);
@@ -960,6 +1061,7 @@ static void cancel(struct job *j, int confirm)
     if (ended(j)) {
         answer("ok", "ended");
     } else if (strcmp(j->state, "queued") == 0) {
+        close_input(j);
         snprintf(j->state, sizeof j->state, "cancelled");
         j->ended = (long long)time(NULL);
         save(j);
@@ -986,9 +1088,22 @@ static void request(struct conn *c)
 {
     static char msg[JOBS_MSG_MAX + 1];
     struct iovec iov = { .iov_base = msg, .iov_len = sizeof msg - 1 };
-    struct msghdr m = { .msg_iov = &iov, .msg_iovlen = 1 };
-    ssize_t len = recvmsg(c->fd, &m, MSG_DONTWAIT);
+    union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(int) * 8)]; } control;
+    struct msghdr m = { .msg_iov = &iov, .msg_iovlen = 1,
+                       .msg_control = control.bytes, .msg_controllen = sizeof control.bytes };
+    ssize_t len = recvmsg(c->fd, &m, MSG_DONTWAIT | MSG_CMSG_CLOEXEC);
+    int input = -1, nfds = 0;
+    for (struct cmsghdr *h = CMSG_FIRSTHDR(&m); len >= 0 && h; h = CMSG_NXTHDR(&m, h)) {
+        if (h->cmsg_level != SOL_SOCKET || h->cmsg_type != SCM_RIGHTS || h->cmsg_len < CMSG_LEN(0)) continue;
+        size_t count = (h->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+        int *fds = (int *)CMSG_DATA(h);
+        for (size_t i = 0; i < count; i++) {
+            if (++nfds == 1) input = fds[i];
+            else close(fds[i]);
+        }
+    }
     if (len <= 0) {
+        if (input >= 0) close(input);
         if (len == 0 || (errno != EAGAIN && errno != EINTR)) {
             close(c->fd);
             *c = conns[--nconns];
@@ -1002,10 +1117,11 @@ static void request(struct conn *c)
         f[n++] = msg + i;
     }
     struct job *j = n >= 2 ? job_of(f[1]) : NULL;
-    if ((m.msg_flags & MSG_TRUNC) || n == 0 || (len > 0 && msg[len - 1] == '\0')) {
+    if ((m.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) || nfds > 1 || n == 0 ||
+        (len > 0 && msg[len - 1] == '\0') || (input >= 0 && strcmp(f[0], "submit") != 0)) {
         answer("error", "malformed request");
     } else if (strcmp(f[0], "submit") == 0 && n >= 2) {
-        submit(f, n, c->from);
+        submit(f, n, c->from, &input);
     } else if (strcmp(f[0], "list") == 0 && n == 1) {
         static char text[2048];
         answer("ok", NULL);
@@ -1030,6 +1146,7 @@ static void request(struct conn *c)
     } else {
         answer("error", "unknown request");
     }
+    if (input >= 0) close(input);
     if (send(c->fd, reply, reply_len ? reply_len - 1 : 0, MSG_NOSIGNAL | MSG_DONTWAIT) < 0) {
         close(c->fd);
         *c = conns[--nconns];

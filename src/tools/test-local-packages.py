@@ -502,6 +502,22 @@ class LocalPackages(unittest.TestCase):
         self.assertTrue(pkg.rebuild_locachy(force=True))
         self.assertEqual(len(calls), 2)
 
+    def test_rebuild_cli_is_queued_and_external_hook_does_not_wait(self):
+        accepted = []
+        for ancestor in (False, True):
+            with self.subTest(pacman_ancestor=ancestor):
+                helper = types.SimpleNamespace(
+                    execution_mode=lambda: "queue",
+                    pacman_ancestor=lambda: ancestor,
+                    submit=lambda kind, args, wait: accepted.append((kind, args, wait)) or 0)
+                with mock.patch.object(pkg, "helper_module", return_value=helper), \
+                     mock.patch.object(sys, "argv", ["locachy-pkg", "rebuild", "--force"]), \
+                     mock.patch.object(pkg, "rebuild_locachy", side_effect=AssertionError("unqueued rebuild")), \
+                     self.assertRaises(SystemExit) as ended:
+                    pkg.main()
+                self.assertEqual(ended.exception.code, 0)
+                self.assertEqual(accepted[-1], ("locachy-rebuild", ["--force"], not ancestor))
+
     def test_host_root_is_process_one_s_root_with_locachy_init(self):
         root = os.stat("/")
         other = os.stat(str(self.root))

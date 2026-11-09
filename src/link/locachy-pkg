@@ -2282,7 +2282,18 @@ def main():
         acquire_pkg_lock()
         sys.exit(cmd_update(sys.argv[2:]))
     elif action == "rebuild":
-        sys.exit(0 if rebuild_locachy("--force" in sys.argv[2:]) else 1)
+        args = sys.argv[2:]
+        if args not in ([], ["--force"]):
+            sys.exit("locachy-pkg: rebuild accepts only --force")
+        try:
+            jobs = helper_module("locachy_jobs")
+            if jobs.execution_mode() == "queue":
+                # External pacman holds its DB lock until its hook returns.
+                # A package job already in the queue rebuilds inline below.
+                sys.exit(jobs.submit("locachy-rebuild", args, wait=not jobs.pacman_ancestor()))
+        except (OSError, ValueError, RuntimeError) as e:
+            sys.exit(f"locachy-pkg: rebuild was not registered: {e}")
+        sys.exit(0 if rebuild_locachy("--force" in args) else 1)
     elif action == "info" and len(sys.argv) > 2:
         sys.exit(cmd_info(sys.argv[2:]))
     elif action == "search" and len(sys.argv) > 2:

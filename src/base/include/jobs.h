@@ -11,8 +11,8 @@
  * as root). One request a message, one reply a message; fields separated by
  * NUL:
  *   submit KIND ARG...   ok ID POSITION   queued (POSITION 0: it runs now; N:
- *                                         N jobs before it); a job the same as
- *                                         one still queued: that one
+ *                                         N jobs before it); every request
+ *                                         has a new ID, including repeats
  *                        error WHY        KIND or an argument refused
  *   list                 ok ROW...        every job kept, oldest first
  *   status ID            ok ROW
@@ -53,6 +53,7 @@
 #define JOBS_CONTROL JOBS_DIR "/control"
 #define JOBS_MSG_MAX 65536
 #define JOBS_LOG_TAIL 8192
+#define JOBS_INPUT_MAX 4096 /* complete anonymous input pipe, writer closed */
 #define JOBS_ARGS_MAX 64     /* arguments of one job */
 #define JOBS_ROWS_MAX 96     /* what list answers at most: the queue and the jobs kept */
 
@@ -65,6 +66,11 @@ struct jobs_row {
 /* Queue KIND ARG... (args up to NULL). 0 with its id and position, or -1
  * with why (the service's words, or that it does not run). */
 int jobs_submit(const char *kind, const char *const args[], int *id, int *position, char *why, size_t size);
+/* As jobs_submit, with one SCM_RIGHTS input descriptor (caller retains it).
+ * Only the fixed TPM input kinds accept it: a complete anonymous read pipe,
+ * 1..JOBS_INPUT_MAX bytes, all writers closed. Never saved/logged; a queued
+ * input job fails after service restart instead of running without its input. */
+int jobs_submit_input(const char *kind, const char *const args[], int input, int *id, int *position, char *why, size_t size);
 /* The jobs, oldest first: how many (max at most), or -1 with why. */
 int jobs_list(struct jobs_row *rows, int max, char *why, size_t size);
 int jobs_status(int id, struct jobs_row *row, char *why, size_t size);

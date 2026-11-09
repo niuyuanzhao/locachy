@@ -25,7 +25,13 @@
 | `kernel-headers` | `locachy-pkg kernel headers` | `on` 或 `off` |
 | `repos-rank` | `locachy-repos rank` | 无 |
 | `repos-set` | `locachy-repos apply --set` | `core`、`extra` 或 `multilib`，加 `=on` 或 `=off` |
-| `boot` | `locachy-boot` | 无 |
+| `boot` | `locachy-boot` | 无、`--luks` 或 `--register-only` |
+| `locachy-rebuild` | `locachy-pkg rebuild` | 无或 `--force` |
+| `tpm-pending` | `locachy-tpm enroll --pending` | 无 |
+| `tpm-enroll` | `locachy-tpm enroll --passphrase-stdin` | 可选 PCR 列表及 `/dev` 设备；口令通过匿名 RAM 管道传递 |
+| `tpm-prepare` | `locachy-tpm prepare --passphrase-stdin` | 无；口令通过匿名 RAM 管道传递 |
+| `tpm-clear` | `locachy-tpm clear` | `/dev` 设备 |
+| `secure-boot` | `locachy-tpm secure-boot` | `--enroll`，可加 `--microsoft`；口令通过匿名 RAM 管道传递 |
 | `app-build`、`app-rollback` | `locachy-app build` / `rollback` | 一个容器名（与 locachy-app 的规则相同） |
 | `app-remove` | `locachy-app remove` | 一个容器名，可加 `--data` |
 | `fw-refresh`、`fw-update` | `locachy-firmware fwupd-action refresh` / `update` | 无 |
@@ -36,7 +42,11 @@
 | `spi-backup`、`spi-verify` | `locachy-firmware spi-backup` / `spi-verify` | 编程器，以及文件夹（备份）或镜像文件；`--chip`、`--regions fd,bios,…` |
 | `spi-write` | `locachy-firmware spi-write` | 同 `spi-verify`，另加 `--expected-size 字节数` |
 
-与仍在排队的某个任务完全相同（种类与参数）的请求，就是那个任务。
+每个获接受的请求都是独立的队列事件，重复请求也获得新 ID。交互 TPM 口令只通过写端已关闭的完整匿名管道传递，不进入参数、环境、状态文件或日志。服务不持久保存该描述符；若服务在它运行前重启，该任务明确失败，需重新提交。
+
+已安装的运行系统上，`locachy-boot` 和 `locachy-tpm` 的所有变更命令统一入队。若真实内核 cgroup 为 `/locachy-jobs/job-ID` 且本进程确在其中，则在原任务内执行，包括嵌套 boot 重建和 pacman 钩子，不重复入队等待而死锁。chroot 或并非运行 LOCachy 进程 1 的环境明确报告离线并直接构建；已安装的运行系统缺少服务时是错误，绝不静默绕过。
+
+外部 pacman 的 PostTransaction 钩子只登记启动镜像任务、不等待（pacman 仍持有数据库锁）；结果在 home 的任务中查看，不在 pacman 退出码中。任务内的 pacman 钩子仍直接运行并传播错误。外部 root CLI/软件包事务本身不会因此倒溯变成受管的原子任务。现有咨询锁只是额外防御，不能替代队列。Secure Boot 密钥登记仍由人明确选择，不新增自动登记。
 
 ## 状态
 
@@ -115,9 +125,10 @@ SIGTERM（进程 1 结束该服务、其行从 rc.conf 删除时）只结束服�
 | settings | `locachy-pkg kernel select / headers` | 是 | pacman 事务和启动镜像 |
 | settings | `locachy-repos apply --set`、`rank` | 是 | 改写 pacman 配置、检查声明的软件包、联网为镜像排序 |
 | settings | `locachy-boot` | 是 | 写 ESP；pacman 的钩子也会运行它，不能与事务重叠 |
-| settings | `locachy-tpm enroll`、Secure Boot 密钥、fwupd 报告、`tailscale up --qr`、howdy 及其摄像头、bluetui | 否 | 需要人在终端前（密码、二维码、人脸）；它们在 settings 之上的 term 中运行，属于其任务 |
+| settings | `locachy-tpm enroll`、Secure Boot 密钥 | 是 | 终端只收集口令并保留密钥选择；变更和嵌套启动镜像重建属于同一个系统任务 |
+| settings | fwupd 报告、`tailscale up --qr`、howdy 及其摄像头、bluetui | 否 | 交互报告或设备交互 |
 | settings | `fprintd-enroll` | 否 | 需要手指放在读取器上，用 q 或 Esc 取消 |
-| settings | `locachy-tpm clear` | 否 | 移除一个 LUKS 令牌，几秒钟 |
+| settings | `locachy-tpm clear` | 是 | LUKS/pending 变更和启动镜像重建属于同一个任务 |
 | settings | `tor-enforce`、`locachy-setup debug-link`、`nmcli`、`keytable`、各状态查询 | 否 | 短小的辅助操作 |
 | packages | `locachy-pkg plan/apply/sync/install/remove`、`locachy-app build/rollback/remove` | 是 | 软件包事务、构建、网络 |
 | packages | `locachy-pkg plan --cached`、`status`、`info`、`search`、`commands` | 否 | 查询 |
@@ -125,14 +136,14 @@ SIGTERM（进程 1 结束该服务、其行从 rc.conf 删除时）只结束服�
 | firmware | 安装 fwupd 或 flashrom | 是 | pacman 事务 |
 | firmware | SPI 探测、备份、校验、写入 | 是 | flashrom 操作芯片：绝不能同时两个 |
 | firmware | `bios-set`，设备、版本、属性和编程器列表 | 否 | 一次 sysfs 写入，或查询 |
-| 进程 1 | 启动时的 `locachy-tpm enroll --pending` | 否 | 进程 1 自己的，未改动 |
+| 进程 1 | 启动时的 `locachy-tpm enroll --pending --submit-only` | 是 | 服务启动后提交；不会在队列外写启动镜像 |
 | locachy-bar | 托盘的 `locachy-app open/stop` | 否 | 容器生命周期，属于进程 1 的注册表 |
 
 此前 packages 和 firmware 把任务放进根 cgroup 运行，不受任何管理；settings 在任务运行时扣住窗口的关闭。两者都已去除。
 
 ## 测试
 
-- `tools/test-jobs.sh`（在 `test-interaction-regressions.sh` 中）：在用户命名空间中以 root 运行服务，使用私有的 `/run`、作为夹具的 cgroup 和对端 `/proc/PID/cgroup`，并以 `test-jobs-tool.sh` 代替各程序；分别以普通方式和 AddressSanitizer/UBSan 构建运行。检查种类及其参数、一次一个且按顺序、重复的排队请求只排一次、因密钥停下的状态、文件及其权限、任务比发起请求的客户端活得更久、移除和停止（SIGINT 发给步骤运行的程序、宽限期后杀死）、对端（容器、窗口、直接程序、用户）、服务被结束（SIGTERM）和被杀死后重新启动、服务不在时仍能看到队列。
+- `tools/test-jobs.sh`（在 `test-interaction-regressions.sh` 中）：在用户命名空间中以 root 运行服务，使用私有的 `/run`、作为夹具的 cgroup 和对端 `/proc/PID/cgroup`，并以 `test-jobs-tool.sh` 代替各程序；分别以普通方式和 AddressSanitizer/UBSan 构建运行。检查种类及其参数、一次一个且按顺序、重复请求各自登记、因密钥停下的状态、文件及其权限、任务比发起请求的客户端活得更久、移除和停止（SIGINT 发给步骤运行的程序、宽限期后杀死）、对端（容器、窗口、直接程序、用户）、服务被结束（SIGTERM）和被杀死后重新启动、服务不在时仍能看到队列。
 - `tools/test-home.c`：列出队列，只有按 Y 后才停止或移除，任务运行或排队时拒绝重启和关机。
 - `tools/test-init-shutdown.c`（在 `test-interaction-regressions.sh` 中）：用作为夹具的任务 cgroup 和状态文件测试进程 1：没有任务时立即进行；有任务时等待（屏幕、日志、无定时器的监视），看到下一个排队任务启动，最后一个结束 1 秒后才继续，并且到那时才结束一切；再次按 Ctrl+Alt+Del 和电源键、`--force`；电量严重不足时休眠，或最多等 60 秒；`link/poweroff` 和 `link/reboot` 在用户与 PID 命名空间中以 root 运行，由该命名空间的进程 1 检查各自发送的信号。
 - `tools/test-settings-close.c`：有任务时 settings 立即退出，按种类和参数请求任务，再次打开时重新跟进其任务。

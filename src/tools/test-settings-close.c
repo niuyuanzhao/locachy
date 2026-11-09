@@ -92,11 +92,23 @@ int main(void)
     assert(repos_job && !strcmp(jobs_double_last, "repos-rank"));
     make_boot_image();
     assert(boot_job && !strcmp(jobs_double_last, "boot") && strstr(notice, "Making the boot image"));
-    puts("PASS package, kernel, repositories and boot image jobs go to the queue as their kinds");
+    int first_boot = boot_job;
+    make_boot_image();
+    assert(boot_job != first_boot && !strcmp(jobs_double_last, "boot"));
+    puts("PASS package, kernel, repositories and repeated boot requests register separate jobs");
+    pkg_job = repos_job = boot_job = tpm_job = 0;
+    jobs_double_mine[0] = (struct jobs_row){ .id = 7101, .kind = "tpm-pending", .state = "running" };
+    jobs_double_mine[1] = (struct jobs_row){ .id = 7102, .kind = "secure-boot", .state = "queued" };
+    jobs_double_nmine = 2;
+    adopt_jobs();
+    assert(tpm_job == 7101);
+    closing = 0;
+    assert(close_read(K_CLOSE) && close_due());
+    puts("PASS settings adopts active TPM jobs before queued Secure Boot and closes without cancelling them");
 
     /* A new run of settings: the queue's jobs it asked for that have not
      * ended are followed again; once they end, it says how. */
-    pkg_job = repos_job = boot_job = 0;
+    pkg_job = repos_job = boot_job = tpm_job = 0;
     pkg_action[0] = pkg_name[0] = repos_what[0] = '\0';
     jobs_double_mine[0] = (struct jobs_row){ .id = 7001, .kind = "pkg-install", .state = "running", .args = "tailscale" };
     jobs_double_mine[1] = (struct jobs_row){ .id = 7006, .kind = "repos-set", .state = "queued", .args = "extra=off" };

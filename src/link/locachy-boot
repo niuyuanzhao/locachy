@@ -25,10 +25,25 @@
 # without changing an existing BootOrder; --register-only repairs just that.
 set -eu
 
+# All installed-system writes use the system queue, before taking the lock.
+# A verified job cgroup continues inline (also pacman hooks); offline roots
+# are explicitly reported by the shared helper. Never an environment bypass.
+helper=/usr/local/lib/locachy/locachy_jobs.py
+[ ! -f "$(dirname "$0")/locachy_jobs.py" ] || helper="$(dirname "$0")/locachy_jobs.py"
+route=0
+python3 -I "$helper" boot "$@" || route=$?
+[ "$route" -eq 100 ] || exit "$route"
+
 # Repair only the formal UEFI entry, without rebuilding or changing the image.
 if [ "${1:-}" = --register-only ]; then
     exec /usr/local/bin/locachy-efi --esp /efi
 fi
+
+# Every caller shares one transaction, including the root and ESP publication.
+# Keep the lock file: unlinking it would let a later caller lock another inode.
+mkdir -p /run/lock
+exec 9>>/run/lock/locachy-boot.lock
+flock -x 9
 
 lib=/usr/local/lib/locachy
 boot=$lib/boot
@@ -58,7 +73,7 @@ case "$extra" in
 ?*) cmdline="$cmdline $extra" ;;
 esac
 mkdir -p "$boot"
-work=$(mktemp -d)
+work=$(mktemp -d "${boot}/.work.XXXXXXXX")
 trap 'rm -rf "$work"' EXIT
 
 [ -x "$lib/init" ] || { echo "locachy-boot: no $lib/init (make.sh --boot builds it)" >&2; exit 1; }
@@ -228,7 +243,11 @@ fi
 # puts it.
 printf 'NAME="LOCachy initramfs"\n' >"$work/initrd-release"
 printf 'dir /etc 0755 0 0\nfile /etc/initrd-release %s 0644 0 0\n' "$work/initrd-release" >>"$work/initramfs.list"
-"$lib/gen_init_cpio" "$work/initramfs.list" | gzip -9 >"$boot/initramfs.img.new"
+# Separate commands preserve the producer's failure status under POSIX sh.
+"$lib/gen_init_cpio" "$work/initramfs.list" >"$work/initramfs.cpio"
+gzip -9 <"$work/initramfs.cpio" >"$work/initramfs.img"
+gzip -t "$work/initramfs.img"
+rm -f "$work/initramfs.cpio"
 
 # The unified image, as the Arch Wiki's ukify section makes it: the microcode
 # initrds before the initramfs. With this machine's own keys (locachy-tpm
@@ -251,11 +270,11 @@ fi
 if [ -f "$pcrkey" ] && [ -f "$pcrpub" ]; then
     set -- "$@" --pcr-private-key="$pcrkey" --pcr-public-key="$pcrpub" --phases=enter-initrd
 fi
-ukify build --linux="$kernel" "$@" --initrd="$boot/initramfs.img.new" --cmdline="$cmdline" \
-    --uname="$version" --output="$boot/locachy.efi.new" >"$work/ukify.log" 2>&1 ||
+ukify build --linux="$kernel" "$@" --initrd="$work/initramfs.img" --cmdline="$cmdline" \
+    --uname="$version" --output="$work/locachy.efi" >"$work/ukify.log" 2>&1 ||
     { cat "$work/ukify.log" >&2; echo "locachy-boot: ukify failed; the boot files are left as they are" >&2; exit 1; }
 for f in initramfs.img locachy.efi; do
-    mv -f "$boot/$f.new" "$boot/$f"
+    mv -f "$work/$f" "$boot/$f"
 done
 # What the boot loader era left (GRUB's files): not made any more.
 rm -f "$boot/vmlinuz.efi" "$boot/grub.cfg" "$boot/grubx64.efi" "$boot/intel-ucode.img" "$boot/amd-ucode.img"

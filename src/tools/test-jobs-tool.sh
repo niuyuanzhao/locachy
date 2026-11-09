@@ -25,6 +25,9 @@ echo "start $id $name $* [$#]" >>"$t/calls"
 echo "$id $(umask)" >>"$t/umasks"
 echo "$name: working on $*"
 status=0
+if [ "$name" = locachy-tpm ] && [ "${1:-}" = enroll ] && [ "${2:-}" = --passphrase-stdin ]; then
+    sha256sum >"$t/input-$id.sha256"
+fi
 case " $* " in
 *" slow "*)
     until [ -e "$t/release-$id" ]; do sleep 0.05; done

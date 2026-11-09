@@ -10,6 +10,7 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import struct
 import sys
@@ -51,6 +52,8 @@ class Tpm(unittest.TestCase):
         public = root / "tpm2-pcr-public-key.pem"
         public.write_text("public\n")
         self.calls = []
+        self.passwords = []
+        self.patch("jobs_helper", lambda: types.SimpleNamespace(execution_mode=lambda: "offline"))
         self.failing = set()      # commands (their first two words) that fail
         self.tokens = {}       # dev -> [token]
         self.token_unlocks = set()  # devices whose external TPM token opens now
@@ -74,6 +77,18 @@ class Tpm(unittest.TestCase):
 
     def run_command(self, command, **kwargs):
         env = kwargs.get("env") or {}
+        pass_fds = kwargs.get("pass_fds", ())
+        ram = []
+        for fd in pass_fds:
+            try:
+                ram.append(os.read(fd, 4096))
+            except OSError:
+                ram.append(b"")
+        if ram:
+            self.assertNotIn("PASSWORD", env)
+            self.assertTrue(any(a.startswith("--unlock-key-file=/proc/self/fd/") for a in command) or
+                            command[:2] == ["cryptsetup", "luksAddKey"])
+            self.passwords.extend(ram)
         self.calls.append((command, {k: env[k] for k in ("PASSWORD", "NEWPASSWORD", "NEWPIN", "PIN") if k in env}))
         out = ""
         failed = tuple(command[:2]) in self.failing or any(c in self.failing for c in command)
@@ -135,7 +150,8 @@ class Tpm(unittest.TestCase):
                        "--wipe-slot=tpm2"):
             self.assertIn(option, cmd)
         self.assertFalse(any("pin" in option for option in cmd))
-        self.assertEqual(env, {"PASSWORD": "pass phrase"})
+        self.assertEqual(env, {})
+        self.assertIn(b"pass phrase", self.passwords)
 
     def test_without_own_keys_heads_binding_pcrs_0_7_without_the_pcr_key(self):
         """As HEAD binds, also when a PCR key is on the disk (systemd-cryptenroll
@@ -153,7 +169,8 @@ class Tpm(unittest.TestCase):
             self.assertIn("--tpm2-public-key=", cmd)
             self.assertNotIn("--tpm2-public-key-pcrs=11", cmd)
             self.assertFalse(any("pin" in option for option in cmd))
-            self.assertEqual(env, {"PASSWORD": "pw"})
+            self.assertEqual(env, {})
+            self.assertIn(b"pw", self.passwords)
         # --pcrs is HEAD's literal binding even with own keys on.
         self.calls.clear()
         self.vars["db"] = signature_list([OURS])
@@ -165,6 +182,48 @@ class Tpm(unittest.TestCase):
             self.assertEqual(tpm.main(), 0)
         [(_, cmd, _)] = self.enrolled()
         self.assertIn("--tpm2-pcrs=0+2+7", cmd)
+
+    def test_mutating_cli_registers_fixed_jobs_before_touching_disks(self):
+        accepted = []
+        def submit(kind, args=(), secret=None, wait=True, startup_wait=0):
+            accepted.append((kind, list(args), secret, wait, startup_wait))
+            return 0
+        helper = types.SimpleNamespace(execution_mode=lambda: "queue", submit=submit)
+        self.patch("jobs_helper", lambda: helper)
+        cases = [
+            (["enroll", "--passphrase-stdin", "/dev/root"], "tpm-enroll", ["/dev/root"], "pw"),
+            (["clear", "/dev/root"], "tpm-clear", ["/dev/root"], None),
+            (["prepare", "--passphrase-stdin"], "tpm-prepare", [], "pw"),
+            (["secure-boot", "--enroll", "--microsoft", "--passphrase-stdin"], "secure-boot",
+             ["--enroll", "--microsoft", "--passphrase-stdin"], "pw"),
+            (["enroll", "--pending", "--submit-only"], "tpm-pending", [], None),
+        ]
+        for command, kind, args, secret in cases:
+            with self.subTest(command=command), \
+                 mock.patch.object(sys, "argv", ["locachy-tpm", *command]), \
+                 mock.patch.object(sys, "stdin", io.StringIO("pw\n")), \
+                 mock.patch.object(tpm.os, "geteuid", return_value=0), self.quiet():
+                self.assertEqual(tpm.main(), 0)
+                self.assertEqual(accepted[-1][:3], (kind, args, secret))
+        self.assertEqual(self.calls, [])
+        self.assertFalse(accepted[-1][3])
+
+    def test_rebuild_failure_is_reported_by_enroll_clear_and_pending(self):
+        boot = Path(self.tmp.name) / "locachy-boot"
+        boot.write_text("fixture")
+        self.patch("LOCACHY_BOOT", boot)
+        self.failing.add(str(boot))
+        for command in (["enroll", "--passphrase-stdin", "/dev/root"], ["clear", "/dev/root"]):
+            with self.subTest(command=command), \
+                    mock.patch.object(sys, "argv", ["locachy-tpm"] + command), \
+                    mock.patch.object(sys, "stdin", io.StringIO("pw\n")), \
+                    mock.patch.object(tpm.os, "geteuid", lambda: 0), \
+                    mock.patch.object(tpm, "tpm_info", lambda: (2, "/dev/tpm0")), self.quiet():
+                self.assertEqual(tpm.main(), 1)
+        with self.quiet():
+            tpm.prepare_pending(["/dev/root"], {"/dev/root": ("passphrase", "pw")})
+            self.assertEqual(tpm.cmd_pending(), 1)
+        self.assertIn(([str(boot), "--luks"], {}), self.calls)
 
     def test_no_pcr_key_no_enrollment(self):
         tpm.PCR_PUBLIC.unlink()
@@ -218,7 +277,8 @@ class Tpm(unittest.TestCase):
         for c, env in added:
             key = pending / request["devices"][DISKS[c[-1]]]
             self.assertEqual(key.stat().st_mode & 0o777, 0o600)
-            self.assertEqual(env, {"PASSWORD": "pass phrase", "NEWPASSWORD": key.read_text()})
+            self.assertEqual(env, {"NEWPASSWORD": key.read_text()})
+            self.assertIn(b"pass phrase", self.passwords)
             self.assertEqual(len(key.read_text()), 64)
         self.calls.clear()
 
@@ -281,8 +341,9 @@ class Tpm(unittest.TestCase):
         self.failing = {"--unlock-tpm2-device=auto", "enroll-keys"}
         with self.quiet(), mock.patch.object(tpm.getpass, "getpass", lambda prompt: "typed"):
             self.assertEqual(tpm.cmd_secure_boot(args), 1)
-        added = [env for c, env in self.commands("systemd-cryptenroll") if "--password" in c and env.get("PASSWORD")]
-        self.assertEqual([env["PASSWORD"] for env in added], ["typed"])
+        added = [env for c, env in self.commands("systemd-cryptenroll") if "--password" in c]
+        self.assertTrue(all("PASSWORD" not in env for env in added))
+        self.assertIn(b"typed", self.passwords)
         self.assertFalse(tpm.PENDING.exists())
 
     def test_keys_are_not_enrolled_when_the_signed_image_is_not_on_the_esp(self):

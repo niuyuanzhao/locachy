@@ -46,6 +46,8 @@ Usage:
 import argparse
 import base64
 import getpass
+import importlib.util
+from contextlib import contextmanager
 import hashlib
 import hmac
 import json
@@ -58,6 +60,46 @@ import sys
 import tempfile
 
 sys.dont_write_bytecode = True
+
+
+def jobs_helper():
+    path = Path(__file__).with_name("locachy_jobs.py")
+    if not path.is_file():
+        path = Path("/usr/local/lib/locachy/locachy_jobs.py")
+    spec = importlib.util.spec_from_file_location("locachy_jobs", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"locachy-tpm: required {path} is not installed")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@contextmanager
+def ram_input(passphrase):
+    """stdin-compatible anonymous pipe; no interactive secret is argv/env/file."""
+    read_fd, write_fd = os.pipe()
+    os.set_inheritable(read_fd, False)
+    os.set_inheritable(write_fd, False)
+    try:
+        data = passphrase if isinstance(passphrase, bytes) else passphrase.encode("utf-8")
+        if not data or len(data) > 4096:
+            raise RuntimeError("empty or oversized passphrase")
+        view = memoryview(data)
+        while view:
+            try:
+                n = os.write(write_fd, view)
+            except InterruptedError:
+                continue
+            if n <= 0:
+                raise RuntimeError("incomplete passphrase input")
+            view = view[n:]
+        os.close(write_fd)
+        write_fd = -1
+        yield read_fd
+    finally:
+        if write_fd >= 0:
+            os.close(write_fd)
+        os.close(read_fd)
 
 
 def find_luks_targets():
@@ -357,9 +399,11 @@ def run_cryptenroll(dev, options, unlock, env_extra=None):
         command.append(f"--unlock-key-file={unlock[1]}")
     elif unlock[0] == "tpm2":
         command.append("--unlock-tpm2-device=auto")
-    else:
-        env["PASSWORD"] = unlock[1]
     env.update(env_extra or {})
+    if unlock[0] == "passphrase":
+        with ram_input(unlock[1]) as fd:
+            return subprocess.run(command + [f"--unlock-key-file=/proc/self/fd/{fd}", dev],
+                                  pass_fds=(fd,), env=env, text=True).returncode
     return subprocess.run(command + [dev], env=env, text=True).returncode
 
 
@@ -526,14 +570,12 @@ def enroll_tpm12(dev, tpm_dev, passphrase, pcrs):
     sealed = tpm12_seal_secret(tpm_dev, raw_key, pcrs)
 
     before_slots = set((luks_meta(dev).get("keyslots") or {}).keys())
-    with tempfile.NamedTemporaryFile(prefix="locachy-pw-", delete=True) as pwf, \
-         tempfile.NamedTemporaryFile(prefix="locachy-nk-", delete=True) as nkf:
-        pwf.write(passphrase.encode("utf-8"))
-        pwf.flush()
-        nkf.write(raw_key)
-        nkf.flush()
+    # cryptsetup supports key files on inherited descriptors; both keys stay
+    # in kernel pipes, not /tmp (which need not be RAM on an installed root).
+    with ram_input(passphrase) as pwfd, ram_input(raw_key) as nkfd:
         p = subprocess.run(["cryptsetup", "luksAddKey", "--batch-mode",
-                            "--key-file", pwf.name, dev, nkf.name])
+                            "--key-file", f"/proc/self/fd/{pwfd}", dev, f"/proc/self/fd/{nkfd}"],
+                           pass_fds=(pwfd, nkfd))
         if p.returncode != 0:
             raise RuntimeError(f"cryptsetup luksAddKey failed on {dev} (wrong passphrase?)")
 
@@ -737,8 +779,40 @@ def cmd_pending():
             print(f"locachy-tpm: {e}", file=sys.stderr)
             failed = True
     finish_pending(request)
-    rebuild_boot("--luks")
-    return 1 if failed else 0
+    boot_failed = rebuild_boot("--luks") != 0
+    return 1 if failed or boot_failed else 0
+
+
+def queue_request(args, jobs):
+    """The terminal only collects input; all writes and nested rebuilds are jobs."""
+    options = []
+    secret = None
+    if args.cmd == "enroll" and args.pending:
+        if args.pcrs or args.devices or args.passphrase_stdin:
+            raise RuntimeError("--pending takes no other enrollment options")
+        return jobs.submit("tpm-pending", wait=not args.submit_only, startup_wait=10)
+    if getattr(args, "submit_only", False):
+        raise RuntimeError("--submit-only is for enroll --pending only")
+    if args.cmd in ("enroll", "prepare"):
+        secret = read_passphrase(args.passphrase_stdin)
+        if args.cmd == "enroll" and args.pcrs:
+            options += ["--pcrs", args.pcrs]
+        options += getattr(args, "devices", [])
+    elif args.cmd == "clear":
+        options = args.devices
+    elif args.cmd == "secure-boot":
+        if args.enroll:
+            options.append("--enroll")
+        if args.microsoft:
+            options.append("--microsoft")
+        # A signed-policy token cannot open after leave-initrd. Ask on the
+        # original terminal before enqueueing, never from the detached runner.
+        if args.enroll and (args.passphrase_stdin or any(device_tpm_tokens(d) for d in find_luks_targets())):
+            secret = read_passphrase(args.passphrase_stdin)
+            options.append("--passphrase-stdin")
+    kind = {"enroll": "tpm-enroll", "prepare": "tpm-prepare", "clear": "tpm-clear",
+            "secure-boot": "secure-boot"}[args.cmd]
+    return jobs.submit(kind, options, secret)
 
 
 def main():
@@ -751,6 +825,7 @@ def main():
                       "while Secure Boot runs this machine's keys, else 0+7; TPM 1.2 0: the firmware only)")
     p_en.add_argument("--passphrase-stdin", action="store_true")
     p_en.add_argument("--pending", action="store_true")
+    p_en.add_argument("--submit-only", action="store_true")
     p_en.add_argument("devices", nargs="*")
     p_sb = sub.add_parser("secure-boot")
     p_sb.add_argument("--enroll", action="store_true")
@@ -768,6 +843,14 @@ def main():
         print("locachy-tpm: must run as root", file=sys.stderr)
         return 1
     try:
+        jobs = jobs_helper()
+        mode = jobs.execution_mode()
+        if mode == "queue":
+            return queue_request(args, jobs)
+        if getattr(args, "submit_only", False):
+            raise RuntimeError("--submit-only requires the installed system job service")
+        if mode == "offline":
+            print("locachy-tpm: offline root; executing inline", file=sys.stderr)
         if args.cmd == "secure-boot":
             return cmd_secure_boot(args)
         if args.cmd == "enroll" and args.pending:
@@ -781,8 +864,7 @@ def main():
                 clear_device_tpm(d)
                 print(f"Cleared TPM auto-unlock token from {d}")
             drop_pending()
-            rebuild_boot("--luks")
-            return 0
+            return 1 if rebuild_boot("--luks") else 0
         if args.cmd == "prepare":
             pw = read_passphrase(args.passphrase_stdin)
             prepare_pending(devs, {d: ("passphrase", pw) for d in devs})
@@ -807,7 +889,7 @@ def main():
             for d in devs:
                 enroll_tpm12(d, tdev, pw, pcrs)
                 print(f"Enrolled TPM 1.2 auto-unlock on {d} (PCRs: {'+'.join(map(str, pcrs)) or 'SRK'})")
-        rebuild_boot("--luks")
+        return 1 if rebuild_boot("--luks") else 0
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
         print(f"locachy-tpm: {e}", file=sys.stderr)
         return 1

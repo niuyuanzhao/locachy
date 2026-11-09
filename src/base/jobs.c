@@ -15,7 +15,7 @@
 
 /* Send fields (up to NULL) and take the answer: its fields into out (max at
  * most, NUL separated in buf). How many, or -1 with why. */
-static int ask(const char *const fields[], char *buf, size_t size, char **out, int max, char *why, size_t wsize)
+static int ask_fd(const char *const fields[], int input, char *buf, size_t size, char **out, int max, char *why, size_t wsize)
 {
     static char msg[JOBS_MSG_MAX];
     size_t len = 0;
@@ -39,8 +39,20 @@ static int ask(const char *const fields[], char *buf, size_t size, char **out, i
         if (s >= 0) close(s);
         return -1;
     }
-    ssize_t got = send(s, msg, len ? len - 1 : 0, MSG_NOSIGNAL) == (ssize_t)(len ? len - 1 : 0) ?
-                  recv(s, buf, size - 1, 0) : -1;
+    struct iovec iov = { .iov_base = msg, .iov_len = len ? len - 1 : 0 };
+    union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(int))]; } control;
+    struct msghdr m = { .msg_iov = &iov, .msg_iovlen = 1 };
+    if (input >= 0) {
+        m.msg_control = control.bytes;
+        m.msg_controllen = sizeof control.bytes;
+        memset(control.bytes, 0, sizeof control.bytes);
+        struct cmsghdr *h = CMSG_FIRSTHDR(&m);
+        h->cmsg_level = SOL_SOCKET;
+        h->cmsg_type = SCM_RIGHTS;
+        h->cmsg_len = CMSG_LEN(sizeof(int));
+        memcpy(CMSG_DATA(h), &input, sizeof input);
+    }
+    ssize_t got = sendmsg(s, &m, MSG_NOSIGNAL) == (ssize_t)iov.iov_len ? recv(s, buf, size - 1, 0) : -1;
     int err = errno;
     close(s);
     if (got <= 0) {
@@ -58,6 +70,11 @@ static int ask(const char *const fields[], char *buf, size_t size, char **out, i
         return strcmp(out[0], "confirm") == 0 ? -2 : -1;
     }
     return n;
+}
+
+static int ask(const char *const fields[], char *buf, size_t size, char **out, int max, char *why, size_t wsize)
+{
+    return ask_fd(fields, -1, buf, size, out, max, why, wsize);
 }
 
 /* A ROW (jobs.h) into row: 0, or -1 if it is not one. */
@@ -88,7 +105,7 @@ static int parse_row(char *text, struct jobs_row *row)
     return row->id > 0 ? 0 : -1;
 }
 
-int jobs_submit(const char *kind, const char *const args[], int *id, int *position, char *why, size_t size)
+int jobs_submit_input(const char *kind, const char *const args[], int input, int *id, int *position, char *why, size_t size)
 {
     static char buf[4096];
     const char *fields[JOBS_ARGS_MAX + 3] = { "submit", kind };
@@ -98,7 +115,7 @@ int jobs_submit(const char *kind, const char *const args[], int *id, int *positi
         fields[n] = args[n - 2];
     }
     fields[n] = NULL;
-    int got = ask(fields, buf, sizeof buf, out, 4, why, size);
+    int got = ask_fd(fields, input, buf, sizeof buf, out, 4, why, size);
     if (got != 3) {
         if (got >= 0) snprintf(why, size, "%s", _("The job service gave no job."));
         return -1;
@@ -106,6 +123,11 @@ int jobs_submit(const char *kind, const char *const args[], int *id, int *positi
     if (id) *id = atoi(out[1]);
     if (position) *position = atoi(out[2]);
     return 0;
+}
+
+int jobs_submit(const char *kind, const char *const args[], int *id, int *position, char *why, size_t size)
+{
+    return jobs_submit_input(kind, args, -1, id, position, why, size);
 }
 
 int jobs_list(struct jobs_row *rows, int max, char *why, size_t size)
