@@ -41,6 +41,7 @@ What it writes is 0644 whatever its caller's umask: pacman as the build user
 (makepkg) reads pacman.conf and the mirror lists it includes.
 """
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -445,6 +446,34 @@ def cmd_status(args):
     return 0
 
 
+PKG_LOCK_FD = -1
+
+
+def acquire_pkg_lock(custom_dir=False):
+    global PKG_LOCK_FD
+    lock_path = os.environ.get("LOCACHY_PKG_LOCK")
+    if not lock_path:
+        if custom_dir or os.geteuid() != 0:
+            return
+        try:
+            here, init_root = os.stat("/"), os.stat("/proc/1/root/")
+            if (here.st_dev, here.st_ino) != (init_root.st_dev, init_root.st_ino):
+                return
+            if os.readlink("/proc/1/exe") not in ("/init", "/usr/local/lib/locachy/init"):
+                return
+        except OSError:
+            return
+        os.makedirs("/run/locachy", mode=0o755, exist_ok=True)
+        lock_path = "/run/locachy/pkg.lock"
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        raise RuntimeError("another package or repository operation is running; wait for it to finish (home: J)")
+    PKG_LOCK_FD = fd
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -477,8 +506,11 @@ def main():
             sys.stdout.write(config(level, args.cpu or recorded("cpu", level) or level, args.mirrors, read_conf(args.rc)))
             return 0
         if args.command == "apply":
+            if not args.check_only:
+                acquire_pkg_lock(PACMAN_CONF != "/etc/pacman.conf")
             return cmd_apply(args)
         if args.command == "rank":
+            acquire_pkg_lock(args.dir != "/etc/pacman.d")
             return cmd_rank(args)
         if args.command == "cachyos-levels":
             print(" ".join(cachyos_mirror_levels(args.level, args.cpu)))

@@ -77,8 +77,9 @@ int jobs_cancel(int id, int confirm, char *why, size_t size);
 int jobs_ended(const struct jobs_row *row);
 /* The output of job id (JOBS_DIR/ID.log, root's): its path. */
 void jobs_log_path(int id, char *out, size_t size);
-/* The jobs this program asked for (the service knows a program by its
- * name, /proc/PID/comm), oldest first: how many, or -1 with no service. */
+/* The jobs this program follows (its own by name, -window stripped, and any
+ * running or queued job in the same domain so packages, settings and firmware
+ * see each other's active work), oldest first: how many, or -1 with no service. */
 int jobs_mine(struct jobs_row *rows, int max);
 /* How many jobs have not ended (running or queued), and the one that runs
  * into running (if not NULL). When the service does not answer: the jobs

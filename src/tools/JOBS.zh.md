@@ -69,7 +69,7 @@
 
 任何请求都可能得到 `error 原因`（未知 ID、格式错误）。“行”为 `ID 种类 状态 状态码 位置 来源 参数 最后一行`，以制表符分隔：状态码结束前为 -1（128 + N：信号 N），位置 0 为运行中、N 为排队、-1 为已结束，参数以空格分隔，最后一行为其输出的最后一行。
 
-`base/include/jobs.h`（`base/jobs.c`，链接进各程序，不进入进程 1）封装了它：`jobs_submit`、`jobs_list`、`jobs_status`、`jobs_log`、`jobs_cancel`、`jobs_mine`（本程序请求的任务）、`jobs_pending`。
+`base/include/jobs.h`（`base/jobs.c`，链接进各程序，不进入进程 1）封装了它：`jobs_submit`、`jobs_list`、`jobs_status`、`jobs_log`、`jobs_cancel`、`jobs_mine`（本程序跟踪的任务：按去掉 `-window` 后的名字匹配的自身任务，以及同一领域内所有运行中或排队中的任务，使 `packages`、`settings` 与 `firmware` 互相感知彼此的活动任务）、`jobs_pending`。`locachy-pkg` 与 `locachy-repos` 在执行变更操作时还会持有 `/run/locachy/pkg.lock`，避免 root 终端直接运行命令与正在执行的队列任务冲突。
 
 ## 停止任务
 

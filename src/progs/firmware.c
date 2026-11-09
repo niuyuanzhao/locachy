@@ -427,7 +427,11 @@ static void check_job(void)
 {
     struct jobs_row r;
     char why[256];
-    if (job_id <= 0 || jobs_status(job_id, &r, why, sizeof why) < 0 || !jobs_ended(&r)) return;
+    if (job_id <= 0) {
+        find_job();
+        return;
+    }
+    if (jobs_status(job_id, &r, why, sizeof why) < 0 || !jobs_ended(&r)) return;
     job_id = 0;
     if (strcmp(job_kind, "spi-probe") == 0) {
         parse_probe_log();

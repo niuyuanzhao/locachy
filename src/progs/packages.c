@@ -896,6 +896,18 @@ static void label_of(const struct jobs_row *r, char *out, size_t size)
         snprintf(out, size, _("add %s to the host"), a);
     } else if (strcmp(r->kind, "pkg-remove") == 0) {
         snprintf(out, size, _("remove %s from the host"), a);
+    } else if (strcmp(r->kind, "pkg-swap") == 0) {
+        snprintf(out, size, "swap %s", a);
+    } else if (strcmp(r->kind, "kernel-select") == 0) {
+        snprintf(out, size, "kernel select %s", a);
+    } else if (strcmp(r->kind, "kernel-headers") == 0) {
+        snprintf(out, size, "kernel headers %s", a);
+    } else if (strcmp(r->kind, "repos-rank") == 0) {
+        snprintf(out, size, "%s", "locachy-repos rank");
+    } else if (strcmp(r->kind, "repos-set") == 0) {
+        snprintf(out, size, "locachy-repos %s", a);
+    } else if (strcmp(r->kind, "boot") == 0) {
+        snprintf(out, size, "%s", "locachy-boot");
     } else if (strcmp(r->kind, "app-build") == 0) {
         snprintf(out, size, host ? _("install %s on the host") : _("build %s"), a);
     } else if (strcmp(r->kind, "app-rollback") == 0) {
@@ -907,18 +919,10 @@ static void label_of(const struct jobs_row *r, char *out, size_t size)
     }
 }
 
-/* The last job this program asked for, as the queue has it: followed again
- * while it has not ended; stopped for source signing keys, to be continued;
- * else its output for l. */
-static void find_job(void)
+static void bind_job_row(const struct jobs_row *r)
 {
-    static struct jobs_row rows[JOBS_ROWS_MAX];
-    char text[sizeof rows[0].args], *args[JOB_ARGV + 1], *save = NULL;
-    int n = jobs_mine(rows, JOBS_ROWS_MAX), k = 0;
-    if (n <= 0) {
-        return;
-    }
-    const struct jobs_row *r = &rows[n - 1];
+    char text[sizeof r->args], *args[JOB_ARGV + 1], *save = NULL;
+    int k = 0;
     label_of(r, job_label, sizeof job_label);
     jobs_log_path(r->id, job_log, sizeof job_log);
     snprintf(text, sizeof text, "%s", r->args);
@@ -927,6 +931,33 @@ static void find_job(void)
     }
     args[k] = NULL;
     keep_args(r->kind, args);
+}
+
+/* Pick the running/stopping job first, else the earliest queued job, else (when
+ * allow_ended) the newest ended job of our own. */
+static const struct jobs_row *pick_job_row(const struct jobs_row *rows, int n, int allow_ended)
+{
+    const struct jobs_row *queued_row = NULL;
+    for (int i = 0; i < n; i++) {
+        if (!jobs_ended(&rows[i]) && rows[i].position == 0) return &rows[i];
+        if (!jobs_ended(&rows[i]) && !queued_row) queued_row = &rows[i];
+    }
+    if (queued_row) return queued_row;
+    return allow_ended && n > 0 ? &rows[n - 1] : NULL;
+}
+
+/* The active job in the queue (including one started from settings or
+ * firmware), or the last job this program asked for (stopped for source
+ * signing keys, or its output for l). */
+static void find_job(void)
+{
+    static struct jobs_row rows[JOBS_ROWS_MAX];
+    int n = jobs_mine(rows, JOBS_ROWS_MAX);
+    const struct jobs_row *r = pick_job_row(rows, n, 1);
+    if (!r) {
+        return;
+    }
+    bind_job_row(r);
     if (!jobs_ended(r)) {
         job = r->id;
         snprintf(job_state, sizeof job_state, "%s", r->state);
@@ -942,7 +973,21 @@ static void check_job(void)
 {
     struct jobs_row r;
     char why[256];
-    if (!job || jobs_status(job, &r, why, sizeof why) < 0) {
+    if (!job) {
+        static struct jobs_row rows[JOBS_ROWS_MAX];
+        int n = jobs_mine(rows, JOBS_ROWS_MAX);
+        const struct jobs_row *active_row = pick_job_row(rows, n, 0);
+        if (active_row) {
+            bind_job_row(active_row);
+            job = active_row->id;
+            job_result = -1;
+            nwanted = 0;
+            snprintf(job_state, sizeof job_state, "%s", active_row->state);
+            say_notice(0, _("%s: %s; it goes on if you leave."), job_label, jobs_state_label(active_row->state));
+        }
+        return;
+    }
+    if (jobs_status(job, &r, why, sizeof why) < 0) {
         return;
     }
     if (!jobs_ended(&r)) {

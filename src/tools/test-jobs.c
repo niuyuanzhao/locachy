@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -72,12 +73,14 @@ static int raw(int argc, char **argv)
 
 int main(int argc, char **argv)
 {
-    const char *line = "0::/p1";
+    const char *line = "0::/p1", *comm = NULL;
     int uid = -1, i = 1;
     for (; i + 1 < argc && strncmp(argv[i], "--", 2) == 0; i += 2) {
         if (strcmp(argv[i], "--cgroup") == 0) line = argv[i + 1];
         else if (strcmp(argv[i], "--uid") == 0) uid = atoi(argv[i + 1]);
+        else if (strcmp(argv[i], "--comm") == 0) comm = argv[i + 1];
     }
+    if (comm) prctl(PR_SET_NAME, comm, 0, 0, 0);
     if (i >= argc) return 2;
     char path[256];
     snprintf(path, sizeof path, "%s/%d", JOBS_PROC, (int)getpid());
@@ -139,6 +142,15 @@ int main(int argc, char **argv)
         int r = jobs_cancel(atoi(argv[i + 1]), i + 2 < argc && strcmp(argv[i + 2], "confirm") == 0, why, sizeof why);
         printf("%s %s\n", r == 0 ? "ok" : r == 1 ? "confirm" : "error", why);
         return r < 0;
+    }
+    if (strcmp(cmd, "mine") == 0) {
+        static struct jobs_row rows[JOBS_ROWS_MAX];
+        int n = jobs_mine(rows, JOBS_ROWS_MAX);
+        if (n < 0) return 1;
+        for (int k = 0; k < n; k++) {
+            printf("%d:%s:%s:%s\n", rows[k].id, rows[k].kind, rows[k].state, rows[k].from);
+        }
+        return 0;
     }
     if (strcmp(cmd, "pending") == 0) {
         struct jobs_row r = { 0 };

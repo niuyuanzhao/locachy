@@ -1940,6 +1940,29 @@ static void pkg_progress(char *out, size_t size)
     job_progress(pkg_job, out, size);
 }
 
+static int repos_job;
+static const char *pkg_title(void);
+static void load_repos(void);
+
+static int pkg_busy_notice(void)
+{
+    if (!pkg_job && !repos_job) {
+        return 0;
+    }
+    if (repos_job) {
+        snprintf(notice, sizeof notice, "%s", _("Wait: the repositories' job is still running."));
+    } else if (pkg_name[0] && (strcmp(pkg_action, "install") == 0 || strcmp(pkg_action, "swap") == 0 ||
+                               strcmp(pkg_action, "remove") == 0)) {
+        snprintf(notice, sizeof notice, strcmp(pkg_action, "install") == 0 ?
+                 _("Wait: %s is still being installed.") :
+                 strcmp(pkg_action, "swap") == 0 ? _("Wait: %s is still being switched.") :
+                 _("Wait: %s is still being removed."), pkg_title());
+    } else {
+        snprintf(notice, sizeof notice, "%s", _("Wait: a package job is still running."));
+    }
+    return 1;
+}
+
 /* Job id has ended: 1, with how (r) and its output (log). */
 static int job_ended(int id, struct jobs_row *r, char *log, size_t size)
 {
@@ -1989,6 +2012,24 @@ static void pkg_check(void)
         load_kernel_choices();
         snprintf(notice, sizeof notice, ok ?
                  _("Kernel package choice applied.") : _("Kernel package choice did not finish; see %s."), log);
+        return;
+    }
+    if (strcmp(pkg_action, "apply") == 0 || strcmp(pkg_action, "plan") == 0 || strcmp(pkg_action, "sync") == 0) {
+        rc_read(on_rc, NULL);
+        load_repos();
+        load_kernel_state();
+        load_kernel_choices();
+        load_fingers();
+        load_faces();
+        load_tpm_status();
+        load_duress_status();
+        if (strcmp(pkg_action, "plan") != 0) {
+            if (ok) {
+                snprintf(notice, sizeof notice, "%s", _("Package update finished."));
+            } else {
+                snprintf(notice, sizeof notice, _("Package update did not finish; see %s."), log);
+            }
+        }
         return;
     }
     if (strcmp(pkg_name, "fprintd") == 0) {
@@ -5168,31 +5209,40 @@ static void duress_clear_row(void)
     }
 }
 
-/* Reopened: the jobs settings asked for that have not ended (locachy-jobs
- * keeps them), followed again. */
+/* Reopened or polled: the active system jobs (including ones started from
+ * packages or firmware, or another settings window), followed while they run
+ * or wait. A slot already tracking a job keeps it; otherwise a running job
+ * (position 0) comes before a queued one. */
 static void adopt_jobs(void)
 {
     static struct jobs_row rows[JOBS_ROWS_MAX];
     int n = jobs_mine(rows, JOBS_ROWS_MAX);
-    for (int i = 0; i < n; i++) {
-        const struct jobs_row *r = &rows[i];
-        if (jobs_ended(r)) {
-            continue;
-        }
-        if (strcmp(r->kind, "repos-rank") == 0 || strcmp(r->kind, "repos-set") == 0) {
-            repos_job = r->id;
-            snprintf(repos_what, sizeof repos_what, "%s", strcmp(r->kind, "repos-rank") == 0 ? "rank" : r->args);
-        } else if (strcmp(r->kind, "boot") == 0) {
-            boot_job = r->id;
-        } else if (strncmp(r->kind, "kernel-", 7) == 0) {
-            pkg_job = r->id;
-            snprintf(pkg_action, sizeof pkg_action, "kernel");
-            snprintf(pkg_name, sizeof pkg_name, "%s %.100s", strcmp(r->kind, "kernel-select") == 0 ? "select" : "headers",
-                     r->args);
-        } else if (strncmp(r->kind, "pkg-", 4) == 0) {
-            pkg_job = r->id;
-            snprintf(pkg_action, sizeof pkg_action, "%s", r->kind + 4);
-            snprintf(pkg_name, sizeof pkg_name, "%.127s", r->args);
+    int have_repos = repos_job != 0, have_boot = boot_job != 0, have_pkg = pkg_job != 0;
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < n; i++) {
+            const struct jobs_row *r = &rows[i];
+            if (jobs_ended(r) || (pass == 0 && r->position != 0)) {
+                continue;
+            }
+            if (!have_repos && (strcmp(r->kind, "repos-rank") == 0 || strcmp(r->kind, "repos-set") == 0)) {
+                repos_job = r->id;
+                have_repos = 1;
+                snprintf(repos_what, sizeof repos_what, "%s", strcmp(r->kind, "repos-rank") == 0 ? "rank" : r->args);
+            } else if (!have_boot && strcmp(r->kind, "boot") == 0) {
+                boot_job = r->id;
+                have_boot = 1;
+            } else if (!have_pkg && strncmp(r->kind, "kernel-", 7) == 0) {
+                pkg_job = r->id;
+                have_pkg = 1;
+                snprintf(pkg_action, sizeof pkg_action, "kernel");
+                snprintf(pkg_name, sizeof pkg_name, "%s %.100s",
+                         strcmp(r->kind, "kernel-select") == 0 ? "select" : "headers", r->args);
+            } else if (!have_pkg && strncmp(r->kind, "pkg-", 4) == 0) {
+                pkg_job = r->id;
+                have_pkg = 1;
+                snprintf(pkg_action, sizeof pkg_action, "%s", r->kind + 4);
+                snprintf(pkg_name, sizeof pkg_name, "%.127s", r->args);
+            }
         }
     }
 }
@@ -6205,9 +6255,7 @@ static void adjust(int dir)
     int ts_idx = ts_index();
     if ((selected == ts_idx || selected == ts_idx + 1 || selected == cl_index() || selected == cl_index() + 1 ||
          selected == tr_index() || selected == tr_index() + 1 || selected == bt_index() ||
-         selected == bt_index() + 1) && pkg_job) {
-        snprintf(notice, sizeof notice, strcmp(pkg_action, "install") == 0 ?
-                 _("Wait: %s is still being installed.") : _("Wait: %s is still being removed."), pkg_title());
+         selected == bt_index() + 1) && pkg_busy_notice()) {
         return;
     }
     if (selected == ts_idx) {
@@ -6447,11 +6495,7 @@ static void adjust(int dir)
         snprintf(notice, sizeof notice, "%s", _("Enter: press a new lock key   Delete: none (the lid still locks)"));
         return;
     }
-    if ((selected == fc_index() || selected == fc_index() + 1 || selected == fc_index() + 2) && pkg_job) {
-        snprintf(notice, sizeof notice, strcmp(pkg_action, "install") == 0 ?
-                 _("Wait: %s is still being installed.") :
-                 strcmp(pkg_action, "swap") == 0 ? _("Wait: %s is still being switched.") :
-                 _("Wait: %s is still being removed."), pkg_title());
+    if ((selected == fc_index() || selected == fc_index() + 1 || selected == fc_index() + 2) && pkg_busy_notice()) {
         return;
     }
     if (selected == fc_index()) {
@@ -6551,9 +6595,7 @@ static void adjust(int dir)
                  _("Enter: find and switch on the camera's infrared emitter (linux-enable-ir-emitter configure)."));
         return;
     }
-    if ((selected == rclone_index() || selected == rclone_index() + 1) && pkg_job) {
-        snprintf(notice, sizeof notice, strcmp(pkg_action, "install") == 0 ?
-                 _("Wait: %s is still being installed.") : _("Wait: %s is still being removed."), pkg_title());
+    if ((selected == rclone_index() || selected == rclone_index() + 1) && pkg_busy_notice()) {
         return;
     }
     if (selected == rclone_index()) {
@@ -6620,9 +6662,7 @@ static void adjust(int dir)
         snprintf(notice, sizeof notice, "%s", _("Enter: set this computer's hostname (/etc/hostname)."));
         return;
     }
-    if ((selected == ime_index() || selected == ime_index() + 1) && pkg_job) {
-        snprintf(notice, sizeof notice, strcmp(pkg_action, "install") == 0 ?
-                 _("Wait: %s is still being installed.") : _("Wait: %s is still being removed."), pkg_title());
+    if ((selected == ime_index() || selected == ime_index() + 1) && pkg_busy_notice()) {
         return;
     }
     if (selected == ime_index()) {
@@ -6931,9 +6971,7 @@ static void adjust(int dir)
     if (selected >= opt_index() && selected < opt_index() + NOPT_MODULES) {
         int mi = selected - opt_index();
         const struct opt_module *m = &opt_modules[mi];
-        if (pkg_job) {
-            snprintf(notice, sizeof notice, strcmp(pkg_action, "install") == 0 ?
-                     _("Wait: %s is still being installed.") : _("Wait: %s is still being removed."), pkg_title());
+        if (pkg_busy_notice()) {
             return;
         }
         if (opt_module_installed(mi)) {
@@ -6962,9 +7000,7 @@ static void adjust(int dir)
                  _("%s: cannot run locachy-pkg."), _(m->label));
         return;
     }
-    if ((selected == fp_index() || selected == fp_index() + 1) && pkg_job) {
-        snprintf(notice, sizeof notice, strcmp(pkg_action, "install") == 0 ?
-                 _("Wait: %s is still being installed.") : _("Wait: %s is still being removed."), pkg_title());
+    if ((selected == fp_index() || selected == fp_index() + 1) && pkg_busy_notice()) {
         return;
     }
     if (selected == fp_index()) {
@@ -7197,7 +7233,7 @@ static int page_key(int key)
         return 1;
     }
     if (component && (key == '\n' || key == K_DEL)) {
-        if (pkg_job) {
+        if (pkg_job || repos_job) {
             adjust(+1); /* what is still being done: nothing starts */
         } else if (key == '\n') {
             if (complete) row_hint();
@@ -7372,6 +7408,9 @@ int main(int argc, char **argv)
         }
         close_read(key);
         build_row_maps();
+        if (!pkg_job || !repos_job || !boot_job) {
+            adopt_jobs();
+        }
         pkg_check();
         repos_check();
         boot_check();

@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-09 09:18+0800\n"
+"POT-Creation-Date: 2026-11-09 12:35+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -8779,6 +8779,29 @@ msgid "queued (%d before it)"
 msgstr ""
 
 #: progs/settings.c
+msgid "Wait: the repositories' job is still running."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Wait: %s is still being installed."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Wait: %s is still being switched."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Wait: %s is still being removed."
+msgstr ""
+
+#: progs/settings.c
+msgid "Wait: a package job is still running."
+msgstr ""
+
+#: progs/settings.c
 #, c-format
 msgid "Kernel package choice applied."
 msgstr ""
@@ -8786,6 +8809,16 @@ msgstr ""
 #: progs/settings.c
 #, c-format
 msgid "Kernel package choice did not finish; see %s."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Package update finished."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Package update did not finish; see %s."
 msgstr ""
 
 #: progs/settings.c
@@ -10440,16 +10473,6 @@ msgid ""
 msgstr ""
 
 #: progs/settings.c
-#, c-format
-msgid "Wait: %s is still being installed."
-msgstr ""
-
-#: progs/settings.c
-#, c-format
-msgid "Wait: %s is still being removed."
-msgstr ""
-
-#: progs/settings.c
 msgid "Tailscale: installing it; switch it on below when it is in."
 msgstr ""
 
@@ -10635,11 +10658,6 @@ msgstr ""
 #. TRANSLATORS: Enter and Delete are key names; keep them.
 #: progs/settings.c
 msgid "Enter: press a new lock key   Delete: none (the lid still locks)"
-msgstr ""
-
-#: progs/settings.c
-#, c-format
-msgid "Wait: %s is still being switched."
 msgstr ""
 
 #: progs/settings.c
@@ -10903,10 +10921,6 @@ msgid "The app presets installed: c in packages checks for newer ones."
 msgstr ""
 
 #: progs/settings.c
-msgid "Wait: a package job is still running."
-msgstr ""
-
-#: progs/settings.c
 msgid ""
 "Enter: install and select this kernel; the previous kernel stays available."
 msgstr ""
@@ -10980,10 +10994,6 @@ msgstr ""
 msgid ""
 "Round touchpads scroll around their edge: programs after home, the shared "
 "display from its next start."
-msgstr ""
-
-#: progs/settings.c
-msgid "Wait: the repositories' job is still running."
 msgstr ""
 
 #. TRANSLATORS: Enter is the Enter key; keep it.

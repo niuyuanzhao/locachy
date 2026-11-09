@@ -2,7 +2,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-09 09:18+0800\n"
+"POT-Creation-Date: 2026-11-09 12:35+0800\n"
 "PO-Revision-Date: 2026-10-24 22:38+0000\n"
 "Last-Translator: LOCachy <38998838+niuyuanzhao@users.noreply.github.com>\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -8829,6 +8829,29 @@ msgid "queued (%d before it)"
 msgstr "已排队（前面还有 %d 个）"
 
 #: progs/settings.c
+msgid "Wait: the repositories' job is still running."
+msgstr "请稍候：仓库任务仍在运行。"
+
+#: progs/settings.c
+#, c-format
+msgid "Wait: %s is still being installed."
+msgstr "请稍候：%s 仍在安装中。"
+
+#: progs/settings.c
+#, c-format
+msgid "Wait: %s is still being switched."
+msgstr "请稍候：%s 仍在切换中。"
+
+#: progs/settings.c
+#, c-format
+msgid "Wait: %s is still being removed."
+msgstr "请稍候：%s 仍在卸载中。"
+
+#: progs/settings.c
+msgid "Wait: a package job is still running."
+msgstr "请稍候：软件包任务仍在运行。"
+
+#: progs/settings.c
 #, c-format
 msgid "Kernel package choice applied."
 msgstr "内核软件包选择已应用。"
@@ -8837,6 +8860,15 @@ msgstr "内核软件包选择已应用。"
 #, c-format
 msgid "Kernel package choice did not finish; see %s."
 msgstr "内核软件包选择未完成；请查看 %s。"
+
+#: progs/settings.c
+msgid "Package update finished."
+msgstr "软件包更新已完成。"
+
+#: progs/settings.c
+#, c-format
+msgid "Package update did not finish; see %s."
+msgstr "软件包更新未完成；请查看 %s。"
 
 #: progs/settings.c
 msgid "Faces are computed on the CPU now."
@@ -10495,16 +10527,6 @@ msgstr ""
 "它。"
 
 #: progs/settings.c
-#, c-format
-msgid "Wait: %s is still being installed."
-msgstr "请稍候：%s 仍在安装中。"
-
-#: progs/settings.c
-#, c-format
-msgid "Wait: %s is still being removed."
-msgstr "请稍候：%s 仍在卸载中。"
-
-#: progs/settings.c
 msgid "Tailscale: installing it; switch it on below when it is in."
 msgstr "Tailscale：正在安装；安装完成后可在下方启用。"
 
@@ -10697,11 +10719,6 @@ msgstr "开机时：先显示锁屏，输入密码后继续。"
 #: progs/settings.c
 msgid "Enter: press a new lock key   Delete: none (the lid still locks)"
 msgstr "Enter: 按下新锁屏快捷键   Delete: 无（合盖仍会锁屏）"
-
-#: progs/settings.c
-#, c-format
-msgid "Wait: %s is still being switched."
-msgstr "请稍候：%s 仍在切换中。"
 
 #: progs/settings.c
 msgid ""
@@ -10902,8 +10919,8 @@ msgid ""
 "Threat level low: the unlock ways switched on work again; bind the TPM again "
 "to use it. Making the boot image..."
 msgstr ""
-"威胁烈度为低：已开启的解锁方式重新生效；要用 TPM，需重新绑定。正在制作启动"
-"映像……"
+"威胁烈度为低：已开启的解锁方式重新生效；要用 TPM，需重新绑定。正在制作启动映"
+"像……"
 
 #. TRANSLATORS: Enter and Delete are key names; keep them.
 #: progs/settings.c
@@ -10981,10 +10998,6 @@ msgid "The app presets installed: c in packages checks for newer ones."
 msgstr "已安装的应用预设模板：在 packages 中按 c 检查是否有更新。"
 
 #: progs/settings.c
-msgid "Wait: a package job is still running."
-msgstr "请稍候：软件包任务仍在运行。"
-
-#: progs/settings.c
 msgid ""
 "Enter: install and select this kernel; the previous kernel stays available."
 msgstr "Enter: 安装并选择此内核；保留之前的内核。"
@@ -11060,10 +11073,6 @@ msgid ""
 "Round touchpads scroll around their edge: programs after home, the shared "
 "display from its next start."
 msgstr "圆形触摸板沿边缘绕圈滚动：直连程序回 home 后、共享显示下次启动时生效。"
-
-#: progs/settings.c
-msgid "Wait: the repositories' job is still running."
-msgstr "请稍候：仓库任务仍在运行。"
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c

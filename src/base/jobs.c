@@ -174,17 +174,42 @@ void jobs_log_path(int id, char *out, size_t size)
     snprintf(out, size, "%s/%d.log", JOBS_DIR, id);
 }
 
+static void base_program_name(const char *comm, char *out, size_t size)
+{
+    size_t len = strlen(comm);
+    if (len > 7 && strcmp(comm + len - 7, "-window") == 0) len -= 7;
+    if (len >= size) len = size - 1;
+    memcpy(out, comm, len);
+    out[len] = '\0';
+}
+
+/* Active or queued jobs in the same domain are shared across the UIs that
+ * touch that domain (packages and settings share package, kernel, repository,
+ * boot and container jobs; firmware shares firmware and package jobs). */
+static int shared_active_job(const char *me, const struct jobs_row *r)
+{
+    int fw = strncmp(r->kind, "fw-", 3) == 0 || strncmp(r->kind, "spi-", 4) == 0;
+    if (jobs_ended(r)) return 0;
+    if (strcmp(me, "firmware") == 0) return fw || strncmp(r->kind, "pkg-", 4) == 0;
+    if (strcmp(me, "packages") == 0 || strcmp(me, "settings") == 0) return !fw;
+    return 0;
+}
+
 int jobs_mine(struct jobs_row *rows, int max)
 {
     static struct jobs_row all[JOBS_ROWS_MAX];
-    char why[256], me[32] = "";
+    char why[256], raw[32] = "", me[32] = "", from[32];
     FILE *in = fopen("/proc/self/comm", "re");
-    if (!in || !fgets(me, sizeof me, in)) me[0] = '\0';
+    if (!in || !fgets(raw, sizeof raw, in)) raw[0] = '\0';
     if (in) fclose(in);
-    me[strcspn(me, "\n")] = '\0';
+    raw[strcspn(raw, "\n")] = '\0';
+    base_program_name(raw, me, sizeof me);
     int n = jobs_list(all, JOBS_ROWS_MAX, why, sizeof why), k = 0;
     for (int i = 0; i < n && k < max; i++) {
-        if (me[0] && strcmp(all[i].from, me) == 0) rows[k++] = all[i];
+        base_program_name(all[i].from, from, sizeof from);
+        if (me[0] && (strcmp(from, me) == 0 || shared_active_job(me, &all[i]))) {
+            rows[k++] = all[i];
+        }
     }
     return n < 0 ? -1 : k;
 }

@@ -114,7 +114,12 @@ ARGS its arguments separated by spaces, LAST the last line of its output.
 
 `base/include/jobs.h` (`base/jobs.c`, linked into the programs, not into
 process 1) wraps it: `jobs_submit`, `jobs_list`, `jobs_status`, `jobs_log`,
-`jobs_cancel`, `jobs_mine` (the jobs this program asked for), `jobs_pending`.
+`jobs_cancel`, `jobs_mine` (the jobs this program follows: its own by name,
+`-window` stripped, and any running or queued job in the same domain so
+`packages`, `settings` and `firmware` see each other's active work),
+`jobs_pending`. `locachy-pkg` and `locachy-repos` also hold `/run/locachy/pkg.lock`
+across mutating runs so a direct root terminal command cannot collide with a
+running job.
 
 ## Stopping a job
 

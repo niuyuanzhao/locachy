@@ -147,6 +147,20 @@ check "in the order asked" sh -c "grep -E \"^(start|end) ($a|$b|$c) \" \"$t/call
 check "a row says who asked" test "$(field "$a" 6)" = test-jobs
 check "a row has the last line of the output" test "$(field "$a" 8)" = "locachy-pkg: last line of job $a"
 
+# Cross-program visibility (jobs_mine): settings, settings-window, packages and firmware.
+m1=$(id_of "$(J --comm settings submit pkg-install slow)")
+m2=$(id_of "$(J --comm firmware submit fw-refresh)")
+check "packages sees a running package job from settings, not a queued fw job" \
+    sh -c "\"$run/test-jobs\" --comm packages mine | grep -q \"^$m1:pkg-install:running:settings\$\" && ! \"$run/test-jobs\" --comm packages mine | grep -q \"^$m2:\""
+check "settings-window sees jobs from settings and packages" \
+    sh -c "\"$run/test-jobs\" --comm settings-window mine | grep -q \"^$m1:pkg-install:running:settings\$\""
+check "firmware sees both the active package job and its own queued fw job" \
+    sh -c "\"$run/test-jobs\" --comm firmware mine | grep -q \"^$m1:\" && \"$run/test-jobs\" --comm firmware mine | grep -q \"^$m2:fw-refresh:queued:firmware\$\""
+touch "$t/release-$m1"
+check "cross-program test jobs finish" wait_state "$m2" done
+check "once ended, a job from settings is not in packages mine, still in settings-window" \
+    sh -c "! \"$run/test-jobs\" --comm packages mine | grep -q \"^$m1:\" && \"$run/test-jobs\" --comm settings-window mine | grep -q \"^$m1:pkg-install:done:settings\$\""
+
 # A build stopped for source signing keys: not a failure.
 k1=$(id_of "$(J submit pkg-apply host keys)")
 check "an apply that stopped for keys (untrusted-keys, status 1): waiting for keys" wait_state "$k1" keys

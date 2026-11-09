@@ -43,6 +43,7 @@ What a container's form (packages) shows:
   locachy-pkg search TERM...     the app presets (the catalog, LOCACHY_APPS_CATALOG),
                                  the repositories' and the AUR's packages
 """
+import fcntl
 import glob
 import importlib.util
 import hashlib
@@ -2220,31 +2221,65 @@ def cmd_update(args):
     return cmd_apply([])
 
 
+PKG_LOCK_FD = -1
+
+
+def acquire_pkg_lock():
+    """Mutual exclusion across locachy-jobs and direct root invocations (not
+    taken by rebuild, which runs inside pacman's hook, nor by read-only
+    queries). O_CLOEXEC releases it across execv --after-source so the re-exec
+    takes it anew."""
+    global PKG_LOCK_FD
+    lock_path = os.environ.get("LOCACHY_PKG_LOCK")
+    if not lock_path:
+        if os.geteuid() != 0 or not on_host_root():
+            return
+        os.makedirs("/run/locachy", mode=0o755, exist_ok=True)
+        lock_path = "/run/locachy/pkg.lock"
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        sys.exit("locachy-pkg: another package or repository operation is running; wait for it to finish (home: J)")
+    PKG_LOCK_FD = fd
+
+
 def main():
     # Its files (the manifest, the source in SRC, the plan) and those of what
     # it runs (make.sh, pacman, declare-packages) are made as packages' are,
     # whatever the caller's umask: others read them too.
     os.umask(0o022)
     if len(sys.argv) < 2:
+        acquire_pkg_lock()
         sys.exit(cmd_sync())
 
     action = sys.argv[1]
     if action in ("status", "list", "check"):
         sys.exit(cmd_status("--machine" in sys.argv[2:]))
     elif action == "sync":
+        acquire_pkg_lock()
         sys.exit(cmd_sync("--first-install" in sys.argv[2:]))
     elif action in ("install", "add"):
+        acquire_pkg_lock()
         sys.exit(cmd_install(sys.argv[2:]))
     elif action in ("remove", "uninstall"):
+        acquire_pkg_lock()
         sys.exit(cmd_remove(sys.argv[2:]))
     elif action == "kernel":
+        if sys.argv[2:3] != ["list"]:
+            acquire_pkg_lock()
         sys.exit(cmd_kernel(sys.argv[2:]))
     elif action == "plan":
+        if "--cached" not in sys.argv[2:]:
+            acquire_pkg_lock()
         sys.exit(cmd_plan(sys.argv[2:]))
     elif action == "apply":
+        acquire_pkg_lock()
         args = sys.argv[2:]
         sys.exit(cmd_apply([a for a in args if a != "--after-source"], "--after-source" in args))
     elif action == "update":
+        acquire_pkg_lock()
         sys.exit(cmd_update(sys.argv[2:]))
     elif action == "rebuild":
         sys.exit(0 if rebuild_locachy("--force" in sys.argv[2:]) else 1)
