@@ -318,19 +318,23 @@ rm -f /etc/os-release
 install -m 644 "$src/link/os-release" /etc/os-release
 # The D-Bus buses, services of their own (bus-client): an rc.conf from before,
 # when audio-client and network-client started them in passing, gets them.
+services_changed=0
 for bus in session system; do
     if ! grep -q "^[[:space:]]*service_${bus}_bus=" /etc/locachy/rc.conf; then
         printf 'service_%s_bus="/usr/local/lib/locachy/bus-client %s"\n' "$bus" "$bus" >>/etc/locachy/rc.conf
         echo "make: rc.conf: service_${bus}_bus added"
+        services_changed=1
     fi
 done
 if [ -x "$lib/clipboard" ]; then
     if ! grep -q '^[[:space:]]*service_clipboard=' /etc/locachy/rc.conf; then
         printf 'service_clipboard="/usr/local/lib/locachy/clipboard --serve"\n' >>/etc/locachy/rc.conf
         echo "make: rc.conf: service_clipboard added"
+        services_changed=1
     fi
 elif grep -q '^[[:space:]]*service_clipboard=' /etc/locachy/rc.conf; then
     sed -i '/^[[:space:]]*service_clipboard=/d' /etc/locachy/rc.conf
+    services_changed=1
 fi
 # The document service where the document portal is (the desktop module's
 # xdg-desktop-portal), as the desktop module's rc has it for new systems.
@@ -338,9 +342,11 @@ if [ -x /usr/lib/xdg-document-portal ]; then
     if ! grep -q '^[[:space:]]*service_documents=' /etc/locachy/rc.conf; then
         printf 'service_documents="/usr/local/lib/locachy/locachy-docs"\n' >>/etc/locachy/rc.conf
         echo "make: rc.conf: service_documents added"
+        services_changed=1
     fi
 elif grep -q '^[[:space:]]*service_documents=' /etc/locachy/rc.conf; then
     sed -i '/^[[:space:]]*service_documents=/d' /etc/locachy/rc.conf
+    services_changed=1
 fi
 if ! grep -q '^[[:space:]]*program_firmware=' /etc/locachy/rc.conf; then
     printf 'program_firmware="/usr/local/bin/firmware"\n' >>/etc/locachy/rc.conf
@@ -349,10 +355,19 @@ fi
 if ! grep -q '^[[:space:]]*service_battery=' /etc/locachy/rc.conf; then
     printf 'service_battery="/usr/local/lib/locachy/battery-history"\n' >>/etc/locachy/rc.conf
     echo "make: rc.conf: service_battery added"
+    services_changed=1
 fi
 if ! grep -q '^[[:space:]]*service_jobs=' /etc/locachy/rc.conf; then
     printf 'service_jobs="/usr/local/lib/locachy/locachy-jobs"\n' >>/etc/locachy/rc.conf
     echo "make: rc.conf: service_jobs added"
+    services_changed=1
+fi
+if [ "$services_changed" = 1 ] &&
+    [ "$(stat -c %d:%i / 2>/dev/null)" = "$(stat -c %d:%i /proc/1/root 2>/dev/null)" ]; then
+    p1=$(readlink /proc/1/exe 2>/dev/null || true)
+    if [ "$p1" = /init ] || [ "$p1" = "$lib/init" ]; then
+        kill -HUP 1
+    fi
 fi
 # The debug cable link's port by its card's permanent address (network-client),
 # for a link turned on before debug_link_mac: the card of its name, on the host

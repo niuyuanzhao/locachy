@@ -182,9 +182,7 @@
     "packages": [
       "mihomo"
     ],
-    "rc": {
-      "service_clash": "/usr/local/lib/locachy/clash-client"
-    },
+    "rc": {},
     "default_standalone": false,
     "default_wizard": false
   },

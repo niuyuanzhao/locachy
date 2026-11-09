@@ -181,7 +181,7 @@ for f in "$src"/link/* "$src"/*.sh "$src"/tools/*.sh; do
 done
 if command -v setpriv >/dev/null 2>&1; then
     caps=$(setpriv --list-caps)
-    for spec in $(grep -hoE -- '--bounding-set=[^[:space:]"]+' "$src"/link/*); do
+    for spec in $(grep -d skip -hoE -- '--bounding-set=[^[:space:]"]+' "$src"/link/*); do
         for tok in $(printf '%s\n' "${spec#--bounding-set=}" | tr ',' ' '); do
             cap=${tok#[+-]}
             [ "$cap" = all ] || printf '%s\n' "$caps" | grep -qxF "$cap" ||
