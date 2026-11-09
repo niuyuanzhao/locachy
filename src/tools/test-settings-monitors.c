@@ -1604,10 +1604,10 @@ static const char *sudo_now(void)
 #define SUDO_ANY "auth\t\tsufficient\tpam_locachy_any.so locachy-lock-fingerprint locachy-lock-face\n"
 #define SUDO_DURESS "auth\t\toptional\tpam_locachy_duress.so\n"
 
-/* Lock mode (rc.conf lock_mode): high writes "high", normal "normal", each
+/* Threat level (rc.conf lock_mode): high writes "high", low "low", each
  * made into the boot image; high shows the fingerprint, face and TPM rows
  * off and refuses them, sudo's file loses pam_locachy_any.so, the saved
- * unlock_fingerprint and unlock_face stay and come back with normal. */
+ * unlock_fingerprint and unlock_face stay and come back with low. */
 static void test_lock_mode(void)
 {
     char line[512];
@@ -1621,22 +1621,22 @@ static void test_lock_mode(void)
     assert(sudo_ways() == 0 && !strcmp(sudo_now(), "#%PAM-1.0\n" SUDO_ANY "auth\t\tinclude\t\tsystem-auth\n"
                                                    "account\t\tinclude\t\tsystem-auth\n"));
     item_text(lock_mode_index(), line, sizeof line);
-    assert(strstr(line, "Lock mode") && strstr(line, "[normal]"));
+    assert(strstr(line, "Threat level") && strstr(line, "[low]"));
     rc_log[0] = '\0';
     int f = forks;
     selected = lock_mode_index();
     adjust(+1);
     assert(lock_high && !strcmp(rc_log, "lock_mode=high;") && forks == f + 1 && boot_job &&
-           !strcmp(jobs_double_last, "boot") && strstr(notice, "Lock mode high") && strstr(notice, "boot image"));
+           !strcmp(jobs_double_last, "boot") && strstr(notice, "Threat level high") && strstr(notice, "boot image"));
     assert(!strcmp(sudo_now(), SUDO_BASE));
     item_text(lock_mode_index(), line, sizeof line);
     assert(strstr(line, "[high]"));
     item_text(fp_index() + 1, line, sizeof line);
-    assert(strstr(line, "Unlock with a fingerprint") && strstr(line, "off (high mode)") && !strstr(line, "ON"));
+    assert(strstr(line, "Unlock with a fingerprint") && strstr(line, "off (high threat level)") && !strstr(line, "ON"));
     item_text(fc_index() + 2, line, sizeof line);
-    assert(strstr(line, "Unlock with your face") && strstr(line, "off (high mode)") && !strstr(line, "ON"));
+    assert(strstr(line, "Unlock with your face") && strstr(line, "off (high threat level)") && !strstr(line, "ON"));
     item_text(tpm_index(), line, sizeof line);
-    assert(strstr(line, "off in high mode (the passphrase at power-on)"));
+    assert(strstr(line, "off at high threat level (the passphrase at power-on)"));
     /* An image being made may have read the old policy: no change till it ends. */
     adjust(-1);
     assert(lock_high && !strcmp(rc_log, "lock_mode=high;") && forks == f + 1 && strstr(notice, "still being made"));
@@ -1645,29 +1645,29 @@ static void test_lock_mode(void)
     rc_log[0] = '\0';
     selected = fp_index() + 1;
     adjust(+1);
-    assert(fingerprint_on && !rc_log[0] && strstr(notice, "Lock mode high: only the password"));
+    assert(fingerprint_on && !rc_log[0] && strstr(notice, "High threat level: only the password"));
     selected = fc_index() + 2;
     adjust(-1);
-    assert(face_on && !rc_log[0] && strstr(notice, "Lock mode high: only the password"));
+    assert(face_on && !rc_log[0] && strstr(notice, "High threat level: only the password"));
     selected = tpm_index();
     notice[0] = '\0';
     row_hint();
-    assert(strstr(notice, "off in high lock mode") && strstr(notice, "passphrase at power-on") && forks == f + 1);
-    assert(tpm_high_refused() && strstr(notice, "off in high lock mode"));
+    assert(strstr(notice, "off at high threat level") && strstr(notice, "passphrase at power-on") && forks == f + 1);
+    assert(tpm_high_refused() && strstr(notice, "off at high threat level"));
     selected = lock_mode_index();
     adjust(-1);
-    assert(!lock_high && !strcmp(rc_log, "lock_mode=normal;") && forks == f + 2 && boot_job &&
-           strstr(notice, "Lock mode normal"));
+    assert(!lock_high && !strcmp(rc_log, "lock_mode=low;") && forks == f + 2 && boot_job &&
+           strstr(notice, "Threat level low"));
     boot_check();
     assert(fingerprint_on && face_on && strstr(sudo_now(), SUDO_ANY));
     item_text(fp_index() + 1, line, sizeof line);
-    assert(strstr(line, "[ON ]") && !strstr(line, "high mode"));
+    assert(strstr(line, "[ON ]") && !strstr(line, "high threat level"));
     item_text(tpm_index(), line, sizeof line);
-    assert(!strstr(line, "high mode") && !tpm_high_refused());
+    assert(!strstr(line, "high threat level") && !tpm_high_refused());
     fingerprint_on = face_on = fake_fprintd = fake_howdy = 0;
     assert(sudo_ways() == 0 && !strcmp(sudo_now(), SUDO_BASE));
-    puts("PASS lock mode: rc.conf lock_mode high/normal, boot image made each time (not while one is being made); "
-         "high: fingerprint, face and TPM rows off and refused, no pam_locachy_any.so; saved ways back with normal");
+    puts("PASS threat level: rc.conf lock_mode high/low, boot image made each time (not while one is being made); "
+         "high: fingerprint, face and TPM rows off and refused, no pam_locachy_any.so; saved ways back with low");
 }
 
 /* Duress (tools/DURESS.md): the password's row from locachy-duress status,
@@ -3013,7 +3013,7 @@ int main(int argc, char **argv)
     allow_rc = 0;
     puts("PASS faces: installing needs a camera; dlib on the CPU, or CUDA with NVIDIA's driver (rc.conf's face_dlib, "
          "swapped once installed); on only once howdy is installed; sudo's line names both ways");
-    puts("PASS index chain: lock mode after the host security row, duress password and its switch after it, "
+    puts("PASS index chain: threat level after the host security row, duress password and its switch after it, "
          "brightness after them");
     puts("PASS fingerprints: fprintd installed and unlock on are two rows; on only once installed (sudo's PAM "
          "file gets pam_locachy_any.so before its first auth line), removing switches off first (the line goes); "

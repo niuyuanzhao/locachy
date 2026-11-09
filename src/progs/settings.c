@@ -251,10 +251,11 @@ static const int lock_afters[] = { 0, 1, 2, 5, 10, 15, 30, 60 };
  * sudo) take a fingerprint (fprintd) or a face (howdy) as well as the
  * password. */
 static int fingerprint_on, face_on;
-/* rc.conf's lock_mode="high" (absent or "normal": normal): the password only,
- * no fingerprint or face, and the disk's passphrase at power-on, never the
- * TPM (locachy-boot writes it into the boot image's policy). The saved
- * unlock_fingerprint and unlock_face stay as they are for normal. */
+/* rc.conf's lock_mode="high" (absent, "low" or "normal": low threat level):
+ * the password only, no fingerprint or face, and the disk's passphrase at
+ * power-on, never the TPM (locachy-boot writes it into the boot image's
+ * policy). The saved unlock_fingerprint and unlock_face stay as they are for
+ * low. */
 static int lock_high;
 /* rc.conf's duress_enabled="1": the duress password wipes the disk
  * (locachy-boot puts its verifier into the boot image; sudo's PAM file has
@@ -1468,8 +1469,8 @@ static void load_fingers(void)
  * Arch's sudo is "auth include system-auth", and system-auth's
  * "auth [default=die] pam_faillock.so authfail" ends the stack at a wrong
  * password (which the duress password is), so a line after the auth lines
- * never runs. None of the two when the lock mode is high (no any) or the ways
- * are off. Old copies of either line go first. 0 if written; -1 also when a
+ * never runs. None of pam_locachy_any.so when the threat level is high or the
+ * ways are off. Old copies of either line go first. 0 if written; -1 also when a
  * line is wanted and there is no auth line to place it by (the file is left
  * as it is). */
 #define SUDO_PAM "/etc/pam.d/sudo"
@@ -2954,7 +2955,7 @@ static int hsi_index(void)
     return tpm_index() + 2;
 }
 
-/* The lock mode (rc.conf lock_mode): normal or high. */
+/* The threat level (rc.conf lock_mode): low or high. */
 static int lock_mode_index(void)
 {
     return hsi_index() + 1;
@@ -4634,7 +4635,7 @@ static void category_entries(int cat)
     case CAT_SECURITY:
         add_title(_("Screen Locking"));
         add_items(sec_index() + 1, 3);
-        add_title(_("Lock Mode"));
+        add_title(_("Threat Level"));
         add_items(lock_mode_index(), 1);
         add_title(_("Disk Encryption"));
         add_items(tpm_index(), 2);
@@ -5074,9 +5075,9 @@ static void boot_check(void)
     }
 }
 
-/* The lock mode and duress are in the boot image (locachy-boot's boot policy,
- * and the duress verifier while duress is on): changed only while no image
- * is being made (it may have read them as they were), then made again;
+/* The threat level and duress are in the boot image (locachy-boot's boot
+ * policy, and the duress verifier while duress is on): changed only while no
+ * image is being made (it may have read them as they were), then made again;
  * boot_policy_changed's what is the notice once it is being made, else
  * make_boot_image's stays. */
 static int boot_image_busy(void)
@@ -5095,14 +5096,14 @@ static void boot_policy_changed(const char *what)
     }
 }
 
-static const char lock_high_unlock[] = N_("Lock mode high: only the password unlocks. Set the lock mode to normal "
+static const char lock_high_unlock[] = N_("High threat level: only the password unlocks. Set the threat level to low "
                                           "first.");
 
-/* The TPM's row in high lock mode: off, Enter and Delete refused. 1 if so. */
+/* The TPM's row at high threat level: off, Enter and Delete refused. 1 if so. */
 static int tpm_high_refused(void)
 {
     if (lock_high) {
-        snprintf(notice, sizeof notice, "%s", _("TPM disk auto-unlock is off in high lock mode: the disk asks for "
+        snprintf(notice, sizeof notice, "%s", _("TPM disk auto-unlock is off at high threat level: the disk asks for "
                                                 "its passphrase at power-on."));
     }
     return lock_high;
@@ -5746,7 +5747,7 @@ static void item_text(int idx, char *line, size_t size)
                      installed ? _("YES") : _("NO "));
         } else if (i == 1 && lock_high) {
             snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _("Unlock with a fingerprint"), 30),
-                     _("off (high mode)"));
+                     _("off (high threat level)"));
         } else if (i == 1) {
             snprintf(line, size, "  %.95s [%s]%s", ui_pad(label, sizeof label, _("Unlock with a fingerprint"), 30),
                      fingerprint_on ? _("ON ") : _("OFF"), installed ? "" : _("  (not installed)"));
@@ -5781,7 +5782,8 @@ static void item_text(int idx, char *line, size_t size)
                      !cuda_usable() ? _("the CPU (no NVIDIA driver here)") :
                      face_cuda() ? _("< the NVIDIA GPU (CUDA) >") : _("< the CPU >"));
         } else if (i == 2 && lock_high) {
-            snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _(labels[2]), 30), _("off (high mode)"));
+            snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _(labels[2]), 30),
+                     _("off (high threat level)"));
         } else if (!installed) {
             if (i == 2) {
                 snprintf(vbuf, sizeof vbuf, "[%s]%s", face_on ? _("ON ") : _("OFF"), _("  (not installed)"));
@@ -5874,12 +5876,12 @@ static void item_text(int idx, char *line, size_t size)
     }
     if (idx == tpm_index()) {
         snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("TPM disk auto-unlock"), 32),
-                 lock_high ? _("off in high mode (the passphrase at power-on)") : tpm_summary);
+                 lock_high ? _("off at high threat level (the passphrase at power-on)") : tpm_summary);
         return;
     }
     if (idx == lock_mode_index()) {
-        snprintf(line, size, "%.95s [%s]", ui_pad(label, sizeof label, _("Lock mode"), 32),
-                 lock_high ? _("high") : _("normal"));
+        snprintf(line, size, "%.95s [%s]", ui_pad(label, sizeof label, _("Threat level"), 32),
+                 lock_high ? _("high") : _("low"));
         return;
     }
     if (idx == duress_index()) {
@@ -6678,16 +6680,16 @@ static void adjust(int dir)
                 return;
             }
         }
-        if (rc_set("lock_mode", lock_high ? "normal" : "high") < 0) {
+        if (rc_set("lock_mode", lock_high ? "low" : "high") < 0) {
             snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
             return;
         }
         lock_high = !lock_high;
         int sudo_ok = sudo_ways() == 0;
         boot_policy_changed(lock_high ?
-                            _("Lock mode high: only the password unlocks, and the disk asks for its passphrase at "
+                            _("Threat level high: only the password unlocks, and the disk asks for its passphrase at "
                               "power-on (no TPM key slot). Making the boot image...") :
-                            _("Lock mode normal: the unlock ways switched on work again; bind the TPM again to "
+                            _("Threat level low: the unlock ways switched on work again; bind the TPM again to "
                               "use it. Making the boot image..."));
         if (!sudo_ok) {
             snprintf(notice, sizeof notice, _("Cannot write %s."), SUDO_PAM);

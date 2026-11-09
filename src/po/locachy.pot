@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-08 06:00-0500\n"
+"POT-Creation-Date: 2026-11-09 09:18+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -9566,7 +9566,7 @@ msgid "Screen Locking"
 msgstr ""
 
 #: progs/settings.c
-msgid "Lock Mode"
+msgid "Threat Level"
 msgstr ""
 
 #: progs/settings.c
@@ -9749,12 +9749,13 @@ msgstr ""
 
 #: progs/settings.c
 msgid ""
-"Lock mode high: only the password unlocks. Set the lock mode to normal first."
+"High threat level: only the password unlocks. Set the threat level to low "
+"first."
 msgstr ""
 
 #: progs/settings.c
 msgid ""
-"TPM disk auto-unlock is off in high lock mode: the disk asks for its "
+"TPM disk auto-unlock is off at high threat level: the disk asks for its "
 "passphrase at power-on."
 msgstr ""
 
@@ -10088,7 +10089,7 @@ msgid "Unlock with a fingerprint"
 msgstr ""
 
 #: progs/settings.c
-msgid "off (high mode)"
+msgid "off (high threat level)"
 msgstr ""
 
 #: progs/settings.c
@@ -10195,11 +10196,11 @@ msgid "TPM disk auto-unlock"
 msgstr ""
 
 #: progs/settings.c
-msgid "off in high mode (the passphrase at power-on)"
+msgid "off at high threat level (the passphrase at power-on)"
 msgstr ""
 
 #: progs/settings.c
-msgid "Lock mode"
+msgid "Threat level"
 msgstr ""
 
 #: progs/settings.c
@@ -10207,7 +10208,7 @@ msgid "high"
 msgstr ""
 
 #: progs/settings.c
-msgid "normal"
+msgid "low"
 msgstr ""
 
 #: progs/settings.c
@@ -10820,13 +10821,13 @@ msgstr ""
 
 #: progs/settings.c
 msgid ""
-"Lock mode high: only the password unlocks, and the disk asks for its "
+"Threat level high: only the password unlocks, and the disk asks for its "
 "passphrase at power-on (no TPM key slot). Making the boot image..."
 msgstr ""
 
 #: progs/settings.c
 msgid ""
-"Lock mode normal: the unlock ways switched on work again; bind the TPM again "
+"Threat level low: the unlock ways switched on work again; bind the TPM again "
 "to use it. Making the boot image..."
 msgstr ""
 

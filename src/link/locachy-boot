@@ -205,11 +205,11 @@ if [ -f /etc/locachy/keyboards.conf ]; then
     done
 fi
 # The boot policy process 1 reads (init.c high_mode, unlock_with_passphrase):
-# rc.conf's lock_mode ("high": the passphrase at power-on, never the TPM) and
-# whether duress is armed. The duress verifier (locachy-duress set) is in the
-# initramfs only then. A change to any of these is a new boot image: signed
-# and measured as any other (PCR 11).
-policy_mode=normal
+# rc.conf's lock_mode ("high": high threat level, the passphrase at power-on
+# and never the TPM; else "low") and whether duress is armed. The duress
+# verifier (locachy-duress set) is in the initramfs only then. A change to any
+# of these is a new boot image: signed and measured as any other (PCR 11).
+policy_mode=low
 [ "$(rc_value lock_mode)" = high ] && policy_mode=high
 policy_duress=0
 if [ "$(rc_value duress_enabled)" = 1 ] && [ -f /etc/locachy/duress ]; then

@@ -2,7 +2,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-08 06:00-0500\n"
+"POT-Creation-Date: 2026-11-09 09:18+0800\n"
 "PO-Revision-Date: 2026-10-24 22:38+0000\n"
 "Last-Translator: LOCachy <38998838+niuyuanzhao@users.noreply.github.com>\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -9620,8 +9620,8 @@ msgid "Screen Locking"
 msgstr "锁屏"
 
 #: progs/settings.c
-msgid "Lock Mode"
-msgstr "锁屏模式"
+msgid "Threat Level"
+msgstr "威胁烈度"
 
 #: progs/settings.c
 msgid "Disk Encryption"
@@ -9803,14 +9803,15 @@ msgstr "无法生成启动镜像；见 %s。"
 
 #: progs/settings.c
 msgid ""
-"Lock mode high: only the password unlocks. Set the lock mode to normal first."
-msgstr "锁屏模式为高：只有密码能解锁。请先把锁屏模式改回普通。"
+"High threat level: only the password unlocks. Set the threat level to low "
+"first."
+msgstr "高烈度下只有密码能解锁。请先把威胁烈度设为低。"
 
 #: progs/settings.c
 msgid ""
-"TPM disk auto-unlock is off in high lock mode: the disk asks for its "
+"TPM disk auto-unlock is off at high threat level: the disk asks for its "
 "passphrase at power-on."
-msgstr "高锁屏模式下 TPM 磁盘自动解密关闭：开机时磁盘要求输入口令。"
+msgstr "高烈度下 TPM 磁盘自动解密关闭：开机时磁盘要求输入口令。"
 
 #: progs/settings.c
 #, c-format
@@ -10141,8 +10142,8 @@ msgid "Unlock with a fingerprint"
 msgstr "使用指纹解锁"
 
 #: progs/settings.c
-msgid "off (high mode)"
-msgstr "关闭（高模式）"
+msgid "off (high threat level)"
+msgstr "关闭（高烈度）"
 
 #: progs/settings.c
 msgid "Fingerprints"
@@ -10248,20 +10249,20 @@ msgid "TPM disk auto-unlock"
 msgstr "TPM 磁盘自动解密"
 
 #: progs/settings.c
-msgid "off in high mode (the passphrase at power-on)"
-msgstr "高模式下关闭（开机时输入口令）"
+msgid "off at high threat level (the passphrase at power-on)"
+msgstr "高烈度下关闭（开机时输入口令）"
 
 #: progs/settings.c
-msgid "Lock mode"
-msgstr "锁屏模式"
+msgid "Threat level"
+msgstr "威胁烈度"
 
 #: progs/settings.c
 msgid "high"
 msgstr "高"
 
 #: progs/settings.c
-msgid "normal"
-msgstr "普通"
+msgid "low"
+msgstr "低"
 
 #: progs/settings.c
 msgid "Duress password"
@@ -10890,18 +10891,18 @@ msgstr "未切换：无法删除 TPM 密钥槽（locachy-tpm clear）。"
 
 #: progs/settings.c
 msgid ""
-"Lock mode high: only the password unlocks, and the disk asks for its "
+"Threat level high: only the password unlocks, and the disk asks for its "
 "passphrase at power-on (no TPM key slot). Making the boot image..."
 msgstr ""
-"锁屏模式为高：只有密码能解锁，开机时磁盘要求输入口令（不留 TPM 密钥槽）。正在"
+"威胁烈度为高：只有密码能解锁，开机时磁盘要求输入口令（不留 TPM 密钥槽）。正在"
 "制作启动映像……"
 
 #: progs/settings.c
 msgid ""
-"Lock mode normal: the unlock ways switched on work again; bind the TPM again "
+"Threat level low: the unlock ways switched on work again; bind the TPM again "
 "to use it. Making the boot image..."
 msgstr ""
-"锁屏模式为普通：已开启的解锁方式重新生效；要用 TPM，需重新绑定。正在制作启动"
+"威胁烈度为低：已开启的解锁方式重新生效；要用 TPM，需重新绑定。正在制作启动"
 "映像……"
 
 #. TRANSLATORS: Enter and Delete are key names; keep them.

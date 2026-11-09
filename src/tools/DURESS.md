@@ -1,12 +1,13 @@
-# Lock mode and the duress password
+# Threat level and the duress password
 
 [中文](DURESS.zh.md)
 
 Two separate settings, both in Security:
 
-- **Lock mode** (`lock_mode` in rc.conf: `normal`, or `high`) decides *which ways
-  to unlock exist*. Normal: the password, plus a fingerprint or a face when each is
-  switched on. High: the password only, everywhere it is asked:
+- **Threat level** (`lock_mode` in rc.conf: `low`, or `high`; `normal` is also
+  accepted as `low`) decides *which ways to unlock exist*. Low: the password, plus a
+  fingerprint or a face when each is switched on, and the TPM if bound. High: the
+  password only, everywhere it is asked:
   - at power-on, the LUKS passphrase only (the TPM never opens the disk);
   - at the lock screen, the password only;
   - for `sudo`, the password only.
@@ -14,15 +15,16 @@ Two separate settings, both in Security:
   does not switch while one is left. The TPM token is sealed to every boot image this
   machine's PCR key signs, the previous one and any older copy from the ESP included,
   not to the current image alone; a slot left in place would let such an image open
-  the disk. Switching back to normal restores the fingerprint and face switches as
-  they were; the TPM has to be bound again. High mode is changed in settings; the boot
+  the disk. Switching back to low restores the fingerprint and face switches as they
+  were; the TPM has to be bound again. Threat level is changed in settings; the boot
   image is rebuilt, so the change takes effect at the next start.
 
 - **Duress** (`duress_enabled` in rc.conf, and a verifier in `/etc/locachy/duress`)
   decides *what a second password does*. Typing the duress password where a password
   is asked (power-on passphrase prompt, lock screen, `sudo`) destroys the encrypted
-  disk at once and powers the machine off. It is a different decision from the mode:
-  a machine can run normal mode with duress armed, or high mode without it.
+  disk at once and powers the machine off. It is a different decision from the threat
+  level: a machine can run at low threat level with duress armed, or at high threat
+  level without it.
 
 ## What duress destroys
 
@@ -67,7 +69,7 @@ quick nor final.
    (`pam_faillock.so authfail`, `[default=die]`), so a module after it would never see
    the duress password. It reads the password once (`pam_get_authtok`) and leaves it
    for `pam_unix` (`try_first_pass`), so sudo still asks only once.
-3. Optional: **Lock mode** → high.
+3. Optional: **Threat level** → high.
 
 To undo: Delete twice on the duress password row (it clears the verifier and turns
 duress off), or `locachy-duress clear`.
@@ -84,10 +86,10 @@ duress off), or `locachy-duress clear`.
   from `/etc/pam.d/sudo`; the power-on and lock-screen checks stay.
 - **The previous boot image keeps the policy it was made with.** The firmware's
   "LOCachy (Previous)" entry starts the image from before the last rebuild: after
-  duress is armed, its password changed or the mode switched, that image keeps the
-  old policy until the next rebuild, and its power-on prompt checks no duress
-  password, or the old one. It opens nothing the current one would not: the
-  passphrase still has to be typed, and in high mode no TPM key slot is left.
+  duress is armed, its password changed or the threat level switched, that image
+  keeps the old policy until the next rebuild, and its power-on prompt checks no
+  duress password, or the old one. It opens nothing the current one would not: the
+  passphrase still has to be typed, and at high threat level no TPM key slot is left.
 - The wipe is irreversible by design. Nothing in LOCachy keeps a copy of the headers.
 - The lock screen wipes from a root process; the power-off uses the kernel's reboot
   call, which needs the capability that root has.
@@ -103,11 +105,11 @@ disabled, so no test touches a real disk, key or TPM.
 `tools/test-init-unlock.py` runs process 1's own power-on unlock functions with the
 disks, the TPM and the duress verifier doubled. Armed, the duress password wipes only
 after the passphrase was tried with it; the real passphrase, or any text that opens
-the disk, never wipes. Unarmed, the duress password is a wrong passphrase. In high
-mode no TPM token is tried, even one that would open the disk.
+the disk, never wipes. Unarmed, the duress password is a wrong passphrase. At high
+threat level no TPM token is tried, even one that would open the disk.
 
 In a virtual machine (QEMU with OVMF, a LOCachy installation on LUKS2, each case on a
-fresh copy of its disk), in normal and in high lock mode:
+fresh copy of its disk), at low and at high threat level:
 - power-on: a wrong passphrase asks again and changes nothing on the disk. The
   duress password powers off: both LUKS2 headers (the primary and the secondary
   copy) and the key slots of both partitions are overwritten, the ESP's boot sector
@@ -117,5 +119,5 @@ fresh copy of its disk), in normal and in high lock mode:
 - duress turned off (verifier removed, boot image rebuilt): the same password at
   power-on is only a wrong passphrase.
 
-That machine had no TPM: high mode's skipping of the TPM is tested by the unit test
-alone. Not yet tested on real hardware.
+That machine had no TPM: skipping the TPM at high threat level is tested by the unit
+test alone. Not yet tested on real hardware.
