@@ -349,19 +349,27 @@ python3 -I -c 'import socket,sys; s=socket.socket(socket.AF_UNIX,socket.SOCK_STR
     "$out/xdg/locachy-0" </dev/zero >/dev/null 2>&1 &
 wsock=$!
 for _ in $(seq 50); do [ -S "$out/xdg/locachy-0" ] && break; sleep 0.05; done
-printf 'package="tor-browser-bin"\ncommand="/bin/true"\nnetwork="1"\ntor="1"\n' >"$out/conf/tor-browser.conf"
+printf 'package="tor-browser-bin"\ncommand="/usr/bin/env"\narguments="MOZ_APP_REMOTINGNAME=tor-browser TOR_PROVIDER=none TOR_SOCKS_HOST=127.0.0.1 TOR_SOCKS_PORT=9050 /usr/bin/tor-browser"\nnetwork="1"\ntor="1"\n' >"$out/conf/tor-browser.conf"
+printf 'package="firefox"\ncommand="/bin/true"\nnetwork="1"\n' >"$out/conf/plain-app.conf"
+printf 'package="firefox"\ncommand="/bin/true"\nnetwork="1"\ntor="1"\n' >"$out/conf/tor-only.conf"
 app_try() {
     XDG_RUNTIME_DIR=$out/xdg LOCACHY_CONT_CONF=$out/conf LOCACHY_CONT_BASE=$out/cont \
         LOCACHY_APP_RUNTIME=$out/apprun LOCACHY_APP_INIT=$out/app-init \
         LOCACHY_TOR_ENFORCE=$src/link/tor-enforce LOCACHY_RC_CONF=$out/rc.conf \
-        bash "$src/link/locachy-app" start tor-browser 2>&1
+        bash "$src/link/locachy-app" "$@" 2>&1
 }
 rc 'tor_front="bridges"'
-check "tor=\"1\": locachy-app refuses to start when service_tor is off" \
-    "! app_try >/dev/null && app_try | grep -q 'requires full-system Tor: turn Tor on'"
+check "tor=\"1\": locachy-app refuses to start without --own-tor when service_tor is off" \
+    "! app_try start tor-browser >/dev/null && app_try start tor-browser | grep -q 'pass --own-tor'"
+check "--own-tor is refused on a container without tor=\"1\"" \
+    "! app_try start --own-tor plain-app >/dev/null && app_try start --own-tor plain-app | grep -q 'does not use Tor'"
+check "--own-tor is refused for a non-Tor-Browser tor=\"1\" container" \
+    "! app_try start --own-tor tor-only >/dev/null && app_try start --own-tor tor-only | grep -q 'no supported bundled Tor'"
 rc 'service_tor="tor-client"' 'tor_front="bridges"'
 check "tor=\"1\": locachy-app refuses to start when Tor's firewall is not loaded" \
-    "! app_try >/dev/null && app_try | grep -q 'firewall is not loaded'"
+    "! app_try start tor-browser >/dev/null && app_try start tor-browser | grep -q 'firewall is not loaded'"
+check "tor=\"1\": --own-tor is refused when full-system Tor is on (no Tor over Tor)" \
+    "! app_try start --own-tor tor-browser >/dev/null && app_try start --own-tor tor-browser | grep -q 'do not pass --own-tor'"
 kill "$wsock" 2>/dev/null; wait "$wsock" 2>/dev/null
 check "tor-enforce app-load refuses malformed names or cgroup paths" \
     "! enforce app-load '../bad' '/app_bad' 2>/dev/null && ! enforce app-load 'tor-browser' '/other' 2>/dev/null"
@@ -372,6 +380,21 @@ if [ -n "$cg_here" ] && [ "$cg_here" != / ] || [ -w /sys/fs/cgroup/cgroup.procs 
        (echo 0 >"$cg_parent/host_scope/cgroup.procs") 2>/dev/null; then
         echo 0 >"$cg_parent/host_scope/cgroup.procs"
         cg_target="${cg_here%/}/app_tor-browser"
+        # A live generic tor-only instance must not skip explicit-flag checks
+        # through the start/open/new running fast paths.
+        if [ "$cg_parent" = /sys/fs/cgroup ] && mkdir -p "$cg_parent/app_tor-only"; then
+            (echo 0 >"$cg_parent/app_tor-only/cgroup.procs"; exec sleep 30) &
+            generic_pid=$!
+            for _ in $(seq 50); do grep -q 'populated 1' "$cg_parent/app_tor-only/cgroup.events" && break; sleep 0.05; done
+            check "running generic tor=\"1\": start --own-tor stays rejected" \
+                "! app_try start --own-tor tor-only >/dev/null && app_try start --own-tor tor-only | grep -q 'no supported bundled Tor'"
+            check "running generic tor=\"1\": open --own-tor stays rejected" \
+                "! app_try open --own-tor tor-only https://example.org/ >/dev/null && app_try open --own-tor tor-only https://example.org/ | grep -q 'no supported bundled Tor'"
+            check "running generic tor=\"1\": new --own-tor stays rejected" \
+                "! app_try new --own-tor tor-only >/dev/null && app_try new --own-tor tor-only | grep -q 'no supported bundled Tor'"
+            kill "$generic_pid" 2>/dev/null; wait "$generic_pid" 2>/dev/null
+            rmdir "$cg_parent/app_tor-only" 2>/dev/null || true
+        fi
         enforce load bridges
         listen socks tor listen-tcp 127.0.0.1 9050
         listen trans tor listen-tcp 127.0.0.1 9040

@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-09 12:35+0800\n"
+"POT-Creation-Date: 2026-11-09 11:23-0500\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -69,7 +69,7 @@ msgstr ""
 msgid "queued"
 msgstr ""
 
-#: base/jobs.c progs/home.c progs/packages.c
+#: base/jobs.c progs/bar.c progs/home.c progs/packages.c
 msgid "running"
 msgstr ""
 
@@ -290,7 +290,7 @@ msgstr ""
 msgid "BT off"
 msgstr ""
 
-#: base/status.c progs/home.c
+#: base/status.c progs/bar.c progs/home.c
 msgid "starting"
 msgstr ""
 
@@ -414,7 +414,7 @@ msgid "archive"
 msgstr ""
 
 #. TRANSLATORS: Esc is the key; keep it.
-#: progs/archive.c progs/files.c progs/shot.c
+#: progs/archive.c progs/files.c progs/rescue.c progs/shot.c
 msgid "Esc: cancel"
 msgstr ""
 
@@ -1052,6 +1052,24 @@ msgstr ""
 msgid "default"
 msgstr ""
 
+#: progs/bar.c
+#, c-format
+msgid "Full-system Tor is off: %s will run its own Tor."
+msgstr ""
+
+#: progs/bar.c
+msgid "Turn Tor on in settings for the host Tor firewall, or confirm here."
+msgstr ""
+
+#: progs/bar.c
+msgid "Start it with its own user-space Tor without the host firewall?"
+msgstr ""
+
+#. TRANSLATORS: Enter and Esc are keys; keep them.
+#: progs/bar.c
+msgid "Enter: start with own Tor   Esc: cancel"
+msgstr ""
+
 #. TRANSLATORS: %s is the container name.
 #: progs/bar.c
 #, c-format
@@ -1086,9 +1104,13 @@ msgstr ""
 msgid "Enter: open   A: always use it   Esc: cancel"
 msgstr ""
 
-#. TRANSLATORS: Up, Down, Enter and Esc are keys; keep them.
+#. TRANSLATORS: Up, Down, Enter, F and Esc are keys; keep them.
 #: progs/bar.c
-msgid "Up/Down: select   Enter: open   Esc: close"
+msgid "Up/Down: select   Enter: open   F: full screen   Esc: close"
+msgstr ""
+
+#: progs/bar.c progs/home.c progs/packages.c
+msgid "Containers"
 msgstr ""
 
 #: progs/bar.c progs/home.c progs/installer.c
@@ -1099,28 +1121,32 @@ msgstr ""
 msgid "System and hardware"
 msgstr ""
 
-#: progs/bar.c
-msgid "Home (full screen)"
+#: progs/bar.c progs/home.c progs/packages.c
+msgid "frozen"
+msgstr ""
+
+#: progs/bar.c progs/home.c progs/packages.c
+msgid "closed"
+msgstr ""
+
+#: progs/bar.c progs/home.c
+msgid "home"
+msgstr ""
+
+#: progs/bar.c progs/home.c
+msgid "reboot"
+msgstr ""
+
+#: progs/bar.c progs/home.c
+msgid "power off"
 msgstr ""
 
 #: progs/bar.c
-msgid "View (full screen)"
+msgid "full screen"
 msgstr ""
 
 #: progs/bar.c
-msgid "Settings (full screen)"
-msgstr ""
-
-#: progs/bar.c
-msgid "Mixer (full screen)"
-msgstr ""
-
-#: progs/bar.c
-msgid "Window on this desktop"
-msgstr ""
-
-#: progs/bar.c progs/shot.c
-msgid "Full screen"
+msgid "window"
 msgstr ""
 
 #: progs/drives.c
@@ -3946,7 +3972,7 @@ msgid "-> move"
 msgstr ""
 
 #. TRANSLATORS: the part before the colon is a key; keep it and ": ".
-#: progs/files.c progs/installer.c progs/settings.c
+#: progs/files.c progs/installer.c progs/rescue.c progs/settings.c
 msgid "Enter: choose"
 msgstr ""
 
@@ -4326,6 +4352,16 @@ msgstr ""
 
 #: progs/files.c
 #, c-format
+msgid ""
+"Full-system Tor is off: start %s with its own Tor without the host firewall?"
+msgstr ""
+
+#: progs/files.c progs/home.c
+msgid "Start cancelled."
+msgstr ""
+
+#: progs/files.c
+#, c-format
 msgid "Only the home (%s) is shown for a container."
 msgstr ""
 
@@ -4689,7 +4725,7 @@ msgstr ""
 msgid "%s (+%d more: set Chip model -c)"
 msgstr ""
 
-#: progs/firmware.c
+#: progs/firmware.c progs/rescue.c
 #, c-format
 msgid "%s completed."
 msgstr ""
@@ -4840,11 +4876,11 @@ msgid "Backup directory"
 msgstr ""
 
 #. TRANSLATORS: Y and N are the confirmation keys; keep them.
-#: progs/firmware.c progs/home.c
+#: progs/firmware.c progs/home.c progs/rescue.c
 msgid "Y: confirm"
 msgstr ""
 
-#: progs/firmware.c progs/home.c
+#: progs/firmware.c progs/home.c progs/rescue.c
 msgid "N: cancel"
 msgstr ""
 
@@ -5064,16 +5100,8 @@ msgstr ""
 msgid "Y/N: Write %.100s (%lld KiB) to %s [%s]?"
 msgstr ""
 
-#: progs/home.c progs/packages.c
-msgid "Containers"
-msgstr ""
-
 #: progs/home.c
 msgid "Container actions stay here; state refreshes every 500 ms."
-msgstr ""
-
-#: progs/home.c progs/packages.c
-msgid "closed"
 msgstr ""
 
 #: progs/home.c
@@ -5082,10 +5110,6 @@ msgstr ""
 
 #: progs/home.c
 msgid "freezing"
-msgstr ""
-
-#: progs/home.c progs/packages.c
-msgid "frozen"
 msgstr ""
 
 #: progs/home.c
@@ -5189,10 +5213,6 @@ msgid ""
 msgstr ""
 
 #: progs/home.c
-msgid "home"
-msgstr ""
-
-#: progs/home.c
 #, c-format
 msgid "%d containers   %d marked (operation targets only)%s"
 msgstr ""
@@ -5230,10 +5250,34 @@ msgstr ""
 msgid "Y/N: Remove system job %d from the queue? It has not started."
 msgstr ""
 
+#: progs/home.c
+#, c-format
+msgid ""
+"Full-system Tor is off: %s will run its own Tor without the host Tor "
+"firewall."
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid ""
+"Full-system Tor is off: %d container will run its own Tor without the host "
+"Tor firewall."
+msgid_plural ""
+"Full-system Tor is off: %d containers will run their own Tor without the "
+"host Tor firewall."
+msgstr[0] ""
+msgstr[1] ""
+
 #. TRANSLATORS: Y and N are the confirmation keys; keep them.
 #: progs/home.c
 #, c-format
 msgid "Y/N: Power off the host?"
+msgstr ""
+
+#: progs/home.c
+msgid ""
+"Turn Tor on in settings for full-system Tor enforcement, or confirm to start "
+"anyway."
 msgstr ""
 
 #: progs/home.c
@@ -5252,15 +5296,16 @@ msgid "home and the shared folders"
 msgstr ""
 
 #: progs/home.c
-msgid "power off"
-msgstr ""
-
-#: progs/home.c
-msgid "reboot"
-msgstr ""
-
-#: progs/home.c
 msgid "No failure reason reported."
+msgstr ""
+
+#. TRANSLATORS: Y, Enter, N and Esc are confirmation keys; keep them.
+#: progs/home.c
+msgid "Y / Enter: start with own Tor"
+msgstr ""
+
+#: progs/home.c progs/rescue.c
+msgid "N / Esc: cancel"
 msgstr ""
 
 #: progs/home.c
@@ -5344,6 +5389,11 @@ msgstr ""
 
 #: progs/home.c
 #, c-format
+msgid "Cannot prepare confirmation: out of memory."
+msgstr ""
+
+#: progs/home.c
+#, c-format
 msgid "Select a container or mark containers first."
 msgstr ""
 
@@ -5403,11 +5453,16 @@ msgid "Power off cancelled."
 msgstr ""
 
 #: progs/home.c
+msgid "The system job was left as it is."
+msgstr ""
+
+#: progs/home.c
 msgid "Stop cancelled."
 msgstr ""
 
 #: progs/home.c
-msgid "The system job was left as it is."
+#, c-format
+msgid "open %s: accepted"
 msgstr ""
 
 #. TRANSLATORS: K is the key name; keep it.
@@ -5446,11 +5501,11 @@ msgstr ""
 msgid "Close requested for host program %s."
 msgstr ""
 
-#: progs/home.c progs/installer.c
+#: progs/home.c progs/installer.c progs/rescue.c
 msgid "Reboot"
 msgstr ""
 
-#: progs/home.c progs/installer.c
+#: progs/home.c progs/installer.c progs/rescue.c
 msgid "Power off"
 msgstr ""
 
@@ -5494,11 +5549,6 @@ msgstr ""
 #: progs/home.c
 #, c-format
 msgid "%s is open on %s."
-msgstr ""
-
-#: progs/home.c
-#, c-format
-msgid "open %s: accepted"
 msgstr ""
 
 #: progs/installer.c
@@ -5571,7 +5621,7 @@ msgstr ""
 msgid "The computer's name: letters, digits and -, up to 63."
 msgstr ""
 
-#: progs/installer.c progs/packages.c progs/settings.c
+#: progs/installer.c progs/packages.c progs/rescue.c progs/settings.c
 msgid "off"
 msgstr ""
 
@@ -5993,7 +6043,7 @@ msgstr ""
 msgid "Install LOCachy on this computer"
 msgstr ""
 
-#: progs/installer.c
+#: progs/installer.c progs/rescue.c
 msgid "Keyboard layout"
 msgstr ""
 
@@ -6003,6 +6053,10 @@ msgstr ""
 
 #: progs/installer.c
 msgid "Terminal (a root shell, for repairs)"
+msgstr ""
+
+#: progs/installer.c
+msgid "Rescue mode"
 msgstr ""
 
 #: progs/installer.c
@@ -7415,6 +7469,451 @@ msgstr ""
 msgid "The last check is shown; c checks again."
 msgstr ""
 
+#: progs/rescue.c
+msgid "Inspect status (read-only)"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Rescan disks and interfaces"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Unlock target read-only"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Close target"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Enable repair (read/write)"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Start debug link"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Stop debug link"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Exit Rescue"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Target terminal"
+msgstr ""
+
+#: progs/rescue.c
+#, c-format
+msgid "%s failed; state may be unknown. Inspect the output before continuing."
+msgstr ""
+
+#: progs/rescue.c
+#, c-format
+msgid "Running: %s (close requests stop it, then clean up)."
+msgstr ""
+
+#: progs/rescue.c
+#, c-format
+msgid "Cannot start rescue helper: %s"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Rescue helper reply exceeded the size limit; stopping it."
+msgstr ""
+
+#: progs/rescue.c
+msgid "Rescue helper did not accept the secret; stopping it."
+msgstr ""
+
+#: progs/rescue.c
+msgid "Rescue helper timed out; stopping it. State must be checked again."
+msgstr ""
+
+#: progs/rescue.c
+msgid ""
+"A helper descendant kept its output open; the operation was not verified."
+msgstr ""
+
+#: progs/rescue.c
+#, c-format
+msgid "%s failed (status %d); the closed rescue session remains on screen."
+msgstr ""
+
+#: progs/rescue.c
+msgid "Shutdown requested. Waiting for the live system."
+msgstr ""
+
+#: progs/rescue.c
+#, c-format
+msgid "Rescue keyboard layout: %s. F2 can show a passphrase to check it."
+msgstr ""
+
+#: progs/rescue.c
+msgid "Keyboard layout was not changed; check keytable output."
+msgstr ""
+
+#: progs/rescue.c
+#, c-format
+msgid "Target terminal failed (status %d); Rescue remains open."
+msgstr ""
+
+#: progs/rescue.c
+#, c-format
+msgid "%s failed (status %d); state is not verified. Inspect the output."
+msgstr ""
+
+#: progs/rescue.c
+msgid "All rescue resources are closed. Choose what to do next."
+msgstr ""
+
+#: progs/rescue.c
+msgid ""
+"Cleanup did not finish; Rescue remains open. Release busy resources and "
+"retry Exit."
+msgstr ""
+
+#: progs/rescue.c
+msgid "Stopping the current operation before session cleanup."
+msgstr ""
+
+#: progs/rescue.c
+#, c-format
+msgid "Cannot start target terminal: %s"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Target terminal is open. Exit it to return to Rescue."
+msgstr ""
+
+#: progs/rescue.c
+msgid "Input is too long; nothing was added."
+msgstr ""
+
+#: progs/rescue.c
+msgid "Secrets stay in this UI and the helper's stdin; never in argv or files."
+msgstr ""
+
+#: progs/rescue.c
+msgid "Wait for the current operation, or Exit to stop it and clean up."
+msgstr ""
+
+#: progs/rescue.c
+msgid ""
+"In a Wayland window, change the keyboard layout in desktop settings; Rescue "
+"uses that window's keys."
+msgstr ""
+
+#: progs/rescue.c
+msgid "State is not verified. Rescan or inspect status first."
+msgstr ""
+
+#: progs/rescue.c
+msgid "Close the current target before selecting another."
+msgstr ""
+
+#: progs/rescue.c
+msgid "No encrypted target was found. Rescan after attaching its disk."
+msgstr ""
+
+#: progs/rescue.c
+#, c-format
+msgid "Repair is blocked: %s"
+msgstr ""
+
+#: progs/rescue.c
+msgid "the target ESP is not uniquely identified"
+msgstr ""
+
+#: progs/rescue.c
+msgid "First unlock and inspect the target read-only."
+msgstr ""
+
+#: progs/rescue.c
+msgid ""
+"The debug link is already active. Stop it before selecting another interface."
+msgstr ""
+
+#: progs/rescue.c
+msgid "No eligible wired interface was found. Rescan after attaching one."
+msgstr ""
+
+#: progs/rescue.c
+msgid "Target terminal requires explicitly enabled read/write repair."
+msgstr ""
+
+#: progs/rescue.c
+msgid "A nonempty secret is required."
+msgstr ""
+
+#: progs/rescue.c
+msgid "The debug-link password needs at least 12 characters."
+msgstr ""
+
+#: progs/rescue.c
+msgid "The passwords did not match. Set the debug-link password again."
+msgstr ""
+
+#: progs/rescue.c
+msgid "carrier present"
+msgstr ""
+
+#: progs/rescue.c
+msgid "no carrier"
+msgstr ""
+
+#: progs/rescue.c
+#, c-format
+msgid ""
+"Keyboard: %s (Rescue and its target terminal; system settings are unchanged)"
+msgstr ""
+
+#: progs/rescue.c
+msgid " (not verified)"
+msgstr ""
+
+#: progs/rescue.c
+#, c-format
+msgid "Target: %s%s"
+msgstr ""
+
+#: progs/rescue.c
+msgid "unknown"
+msgstr ""
+
+#: progs/rescue.c
+#, c-format
+msgid "Device: %s   UUID: %s"
+msgstr ""
+
+#: progs/rescue.c
+#, c-format
+msgid "Identity: %s | %s | %s"
+msgstr ""
+
+#: progs/rescue.c
+#, c-format
+msgid "Mount: %s   Swap: %s   ESP: %s"
+msgstr ""
+
+#: progs/rescue.c
+#, c-format
+msgid "ESP note: %s"
+msgstr ""
+
+#: progs/rescue.c
+#, c-format
+msgid "Repair blocked: %s"
+msgstr ""
+
+#: progs/rescue.c
+#, c-format
+msgid "Debug link: %s | %s | %s | %s"
+msgstr ""
+
+#: progs/rescue.c
+msgid "active"
+msgstr ""
+
+#: progs/rescue.c
+#, c-format
+msgid "Host key: %s"
+msgstr ""
+
+#: progs/rescue.c
+#, c-format
+msgid "SFTP: sftp -P %d root@[%s]"
+msgstr ""
+
+#: progs/rescue.c
+msgid ""
+"Replace <local-interface> with the connecting computer's interface. Verify "
+"the host-key fingerprint; never auto-accept it."
+msgstr ""
+
+#: progs/rescue.c
+#, c-format
+msgid ""
+"Found: %d encrypted targets, %d wired interfaces. No automatic unlock, TPM, "
+"fsck or formatting."
+msgstr ""
+
+#: progs/rescue.c
+#, c-format
+msgid "Output: %d-%d / %d%s"
+msgstr ""
+
+#: progs/rescue.c
+msgid " (running)"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Choose the dedicated wired debug interface"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Choose the encrypted target (read-only unlock)"
+msgstr ""
+
+#: progs/rescue.c
+#, c-format
+msgid "Filter: %s_   %d matches"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Keyboard layout (only this Rescue UI)"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Choose US or Japanese JIS, or type a standard console/XKB layout name."
+msgstr ""
+
+#: progs/rescue.c
+#, c-format
+msgid "Layout: %s_"
+msgstr ""
+
+#: progs/rescue.c
+msgid "US"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Japanese JIS"
+msgstr ""
+
+#: progs/rescue.c progs/settings.c
+msgid "Enter: apply"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Enable write repairs on this target?"
+msgstr ""
+
+#: progs/rescue.c
+msgid "The read-only target will close and reopen read/write."
+msgstr ""
+
+#: progs/rescue.c
+msgid ""
+"The next screen asks for the disk passphrase again. Y explicitly authorizes "
+"writes."
+msgstr ""
+
+#: progs/rescue.c
+msgid "Y: enable repair"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Disk passphrase (read-only unlock)"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Disk passphrase (confirmed write repair)"
+msgstr ""
+
+#: progs/rescue.c
+msgid "New debug-link password (at least 12 characters)"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Repeat the debug-link password"
+msgstr ""
+
+#: progs/rescue.c
+#, c-format
+msgid "Keyboard: %s   F2 shows/hides the input so you can check the layout."
+msgstr ""
+
+#: progs/rescue.c
+msgid "Enter: submit"
+msgstr ""
+
+#: progs/rescue.c
+msgid "F2: hide"
+msgstr ""
+
+#: progs/rescue.c
+msgid "F2: show"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Rescue session closed"
+msgstr ""
+
+#: progs/rescue.c
+msgid "The debug link is stopped and target filesystems are unmounted."
+msgstr ""
+
+#: progs/rescue.c
+msgid "No terminal or installer will open automatically."
+msgstr ""
+
+#: progs/rescue.c
+msgid "Power off this computer?"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Reboot this computer?"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Start a new rescue session"
+msgstr ""
+
+#: progs/rescue.c
+msgid ""
+"Up/Down: choose   Enter: open   r: new session   b: reboot   p: power off"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Enlarge the Rescue window. Q exits with cleanup."
+msgstr ""
+
+#: progs/rescue.c
+msgid "Rescue status (Tab: change pane; arrows / wheel: scroll)"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Actions (Enter: run)"
+msgstr ""
+
+#: progs/rescue.c
+msgid " (cleanup required)"
+msgstr ""
+
+#: progs/rescue.c
+msgid ""
+"Tab: pane  PgUp/PgDn: output  y/Ctrl+C: copy  a: SSH  f: fingerprint  q: exit"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Rescue"
+msgstr ""
+
+#: progs/rescue.c
+msgid ""
+"Select status or output text with the pointer; a copies SSH, f copies the "
+"fingerprint."
+msgstr ""
+
+#: progs/rescue.c
+msgid "Cancelled; the rescue session remains closed."
+msgstr ""
+
+#: progs/rescue.c
+msgid "Cancelled; nothing was requested."
+msgstr ""
+
+#: progs/rescue.c
+msgid "Enter a standard console or XKB layout name."
+msgstr ""
+
+#: progs/rescue.c
+msgid "desktop window layout"
+msgstr ""
+
 #: progs/settings-hwinfo.inc
 msgid "Processor"
 msgstr ""
@@ -8812,7 +9311,6 @@ msgid "Kernel package choice did not finish; see %s."
 msgstr ""
 
 #: progs/settings.c
-#, c-format
 msgid "Package update finished."
 msgstr ""
 
@@ -9485,6 +9983,19 @@ msgid "Drag a screen to position it; p edits its exact X,Y coordinates."
 msgstr ""
 
 #: progs/settings.c
+#, c-format
+msgid "%s is not installed."
+msgstr ""
+
+#: progs/settings.c
+msgid "Network connections: nmtui closed."
+msgstr ""
+
+#: progs/settings.c
+msgid "Network connections: nmtui did not finish."
+msgstr ""
+
+#: progs/settings.c
 msgid ""
 "Bluetooth tools are not installed: the Bluetooth tools line installs them."
 msgstr ""
@@ -9790,11 +10301,6 @@ msgstr ""
 msgid ""
 "TPM disk auto-unlock is off at high threat level: the disk asks for its "
 "passphrase at power-on."
-msgstr ""
-
-#: progs/settings.c
-#, c-format
-msgid "%s is not installed."
 msgstr ""
 
 #: progs/settings.c
@@ -10307,10 +10813,6 @@ msgid "Boot kernel"
 msgstr ""
 
 #: progs/settings.c
-msgid "Enter: apply"
-msgstr ""
-
-#: progs/settings.c
 msgid "working..."
 msgstr ""
 
@@ -10415,6 +10917,15 @@ msgstr ""
 
 #: progs/settings.c
 msgid "CPU, memory, storage SMART, sensors, PCI, USB   (Enter: open)"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Connections (Wi-Fi, Ethernet)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter: open nmtui"
 msgstr ""
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
@@ -11092,6 +11603,11 @@ msgstr ""
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
+msgid "Enter: set up Wi-Fi or wired connections in nmtui."
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
 msgid "Enter: copy system and hardware summary to clipboard."
 msgstr ""
 
@@ -11267,6 +11783,10 @@ msgstr ""
 
 #: progs/shot.c
 msgid "Rectangular region"
+msgstr ""
+
+#: progs/shot.c
+msgid "Full screen"
 msgstr ""
 
 #: progs/shot.c

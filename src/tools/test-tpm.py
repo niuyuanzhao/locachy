@@ -53,6 +53,7 @@ class Tpm(unittest.TestCase):
         self.calls = []
         self.failing = set()      # commands (their first two words) that fail
         self.tokens = {}       # dev -> [token]
+        self.token_unlocks = set()  # devices whose external TPM token opens now
         self.pending_slots = set()  # (dev, key text), the extra password slots
         self.absent = set()         # disks blkid cannot find
         for name, value in (("SB_DB_CERT", cert), ("PCR_PUBLIC", public), ("PENDING", root / "pending"),
@@ -94,7 +95,8 @@ class Tpm(unittest.TestCase):
             self.pending_slots.add((command[-1], env["NEWPASSWORD"]))
         elif command[:2] == ["cryptsetup", "open"] and "--test-passphrase" in command and not failed:
             key = Path(command[command.index("--key-file") + 1]).read_text()
-            rc = 0 if (command[-1], key) in self.pending_slots else 2
+            token_opens = command[-1] in self.token_unlocks and "--disable-external-tokens" not in command
+            rc = 0 if token_opens or (command[-1], key) in self.pending_slots else 2
         elif command[:2] == ["cryptsetup", "luksRemoveKey"] and not failed:
             self.pending_slots.discard((command[-1], Path(command[-2]).read_text()))
         return types.SimpleNamespace(returncode=rc, stdout=out, stderr="")
@@ -169,6 +171,40 @@ class Tpm(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "no PCR key"):
             tpm.enroll_tpm2("/dev/root", ("passphrase", "pw"))
         self.assertEqual(self.calls, [])
+
+    def test_pending_key_check_rejects_bogus_key_even_when_tpm_unlocks(self):
+        self.token_unlocks.update(DISKS)
+        key = Path(self.tmp.name) / "bogus.key"
+        key.write_text("not enrolled in any key slot")
+        for dev in DISKS:
+            # cryptsetup can try external tokens before the given key file.
+            # A zero status without disabling them is not proof of this key.
+            result = tpm.subprocess.run(["cryptsetup", "open", "--test-passphrase", "--key-file", str(key), dev])
+            self.assertEqual(result.returncode, 0)
+            self.assertFalse(tpm.pending_key_present(dev, key))
+            self.pending_slots.add((dev, key.read_text()))
+            self.assertTrue(tpm.pending_key_present(dev, key))
+            self.pending_slots.remove((dev, key.read_text()))
+            self.assertFalse(tpm.pending_key_present(dev, key))
+
+    def test_prepare_adds_both_pending_slots_while_tpm_opens_and_retry_reuses_them(self):
+        self.token_unlocks.update(DISKS)
+        unlocks = {dev: ("tpm2",) for dev in DISKS}
+        tpm.prepare_pending(list(DISKS), unlocks)
+        request = tpm.pending_request()
+        keys = {dev: (tpm.PENDING / request["devices"][uuid]).read_text() for dev, uuid in DISKS.items()}
+        self.assertEqual(self.pending_slots, set(keys.items()))
+        added = [cmd for cmd, _ in self.commands("systemd-cryptenroll") if "--password" in cmd]
+        self.assertEqual([cmd[-1] for cmd in added], list(DISKS))
+        self.assertTrue(all("--unlock-tpm2-device=auto" in cmd for cmd in added))
+        self.calls.clear()
+        tpm.prepare_pending(list(DISKS), unlocks)
+        self.assertEqual(self.pending_slots, set(keys.items()))
+        self.assertFalse(any("--password" in cmd for cmd, _ in self.commands("systemd-cryptenroll")))
+        with self.quiet():
+            self.assertEqual(tpm.cmd_pending(), 0)
+        self.assertFalse(tpm.PENDING.exists())
+        self.assertEqual(self.pending_slots, set())
 
     def test_installer_leaves_key_slots_then_the_first_start_with_own_keys_binds_and_removes_them(self):
         with self.quiet():

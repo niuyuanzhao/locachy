@@ -27,6 +27,7 @@ static char *dir_path(const char *rel);
 
 #define INSTALL_CMD D("locachy-install")
 #define TERM_CMD D("term")
+#define RESCUE_CMD D("rescue")
 #define NMTUI "/usr/bin/nmtui"
 #define SYSTEMCTL D("systemctl")
 #define RUN_DIR D("run")
@@ -298,6 +299,7 @@ static const char fake_keytable[] =
     "printf 'console %s\\nlayout %s\\nkey 21 y 7a 5a\\nkey 44 z 79 59\\n' \"$1\" \"$1\" >\"$2\"\n";
 
 static const char fake_term[] = "#!/bin/sh\necho \"$*\" >>\"$(dirname \"$0\")/term-calls\"\n";
+static const char fake_rescue[] = "#!/bin/sh\necho rescue >>\"$(dirname \"$0\")/rescue-calls\"\n";
 static const char fake_systemctl[] = "#!/bin/sh\necho \"$*\" >>\"$(dirname \"$0\")/systemctl-calls\"\n";
 
 static void run(const char *what)
@@ -352,8 +354,16 @@ int main(int argc, char **argv)
     write_file(D("describe.json"), describe, 0644);
     write_file(D("locachy-install"), fake_install, 0755);
     write_file(D("term"), fake_term, 0755);
+    write_file(D("rescue"), fake_rescue, 0755);
     write_file(D("systemctl"), fake_systemctl, 0755);
     write_file(D("keytable"), fake_keytable, 0755);
+
+    /* The start: the terminal and the independent rescue app each come and go. */
+    k(K_DOWN); k(K_DOWN); k('\n'); k(SNAP);
+    run("start: rescue is independent of terminal");
+    assert(access(D("rescue-calls"), F_OK) == 0);
+    assert(access(D("term-calls"), F_OK) != 0);
+    assert(snapped("Rescue mode") && snapped("Terminal (a root shell, for repairs)"));
 
     /* The start: the terminal comes and goes; the language. */
     k(K_DOWN); k('\n'); k(SNAP);

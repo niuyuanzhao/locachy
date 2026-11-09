@@ -77,7 +77,13 @@ int main(void)
     assert(window_request_valid("files", "") && window_request_valid("files", "/home/u/My Files"));
     assert(!window_request_valid("files", "home/u"));
     assert(window_request_valid("mixer", "") && !window_request_valid("mixer", "/usr/bin/sh"));
-    assert(!window_request_valid("edit", "") && !window_request_valid("sh", "") && !window_request_valid("", ""));
+    assert(window_request_valid("bluetooth", "") && !window_request_valid("bluetooth", "/usr/bin/sh"));
+    assert(window_request_valid("network", "") && !window_request_valid("network", "wlan0"));
+    assert(window_request_valid("term", "") && !window_request_valid("term", "/bin/sh"));
+    assert(!window_request_valid("admin", "") && !window_request_valid("edit", "") &&
+           !window_request_valid("sh", "") && !window_request_valid("", ""));
+    assert(app_request_valid("edge") && app_request_valid("tor-browser") && !app_request_valid("window-view-1") &&
+           !app_request_valid("../edge") && !app_request_valid(""));
     char long_target[WINDOW_TARGET_MAX + 2];
     long_target[0] = '/';
     memset(long_target + 1, 'a', WINDOW_TARGET_MAX);
@@ -89,6 +95,13 @@ int main(void)
     assert(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, pair) == 0);
     forward(pair, "window\0settings\0network", 23, "window|settings|network");
     forward(pair, "window\0mixer", 12, "window|mixer");
+    forward(pair, "window\0bluetooth", 16, "window|bluetooth");
+    forward(pair, "window\0network", 14, "window|network");
+    forward(pair, "window\0term", 11, "window|term");
+    forward(pair, "app\0open\0edge", 13, "app|open|edge");
+    forward(pair, "app\0open-own-tor\0tor-browser", 28, "app|open-own-tor|tor-browser");
+    forward(pair, "app\0stop\0edge", 13, "");
+    forward(pair, "app\0open\0window-view-1", 22, "");
     forward(pair, "window\0view\0/home/u/a b.pdf", 27, "window|view|/home/u/a b.pdf");
     forward(pair, "window\0edit", 11, "");
     forward(pair, "window\0settings\0bogus", 21, "");

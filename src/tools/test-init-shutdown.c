@@ -144,6 +144,8 @@ int control_fields(char *msg, int len, char **fields, int max) { (void)msg; (voi
 void apps_list(char *buf, size_t size) { if (size) buf[0] = '\0'; }
 void apps_display_ready(void) {}
 void apps_tick(void) {}
+int apps_open_mode(const char *name, const char *target, int own_tor, char *why, size_t size)
+{ (void)name; (void)target; (void)own_tor; if (size) why[0] = 0; return -1; }
 int apps_open(const char *name, const char *target, char *why, size_t size)
 { (void)name; (void)target; (void)why; (void)size; return -1; }
 int apps_action(const char *action, const char *name, char *why, size_t size)

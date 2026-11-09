@@ -4,6 +4,7 @@
 # into its root file system ROOT (archiso's airootfs), as make.sh builds and
 # installs them on a system:
 #   /usr/local/bin/installer             the full-screen installation (progs/installer.c)
+#   /usr/local/bin/rescue                the independent rescue interface (progs/rescue.c)
 #   /usr/local/bin/term                  its terminal: a root shell, for repairs
 #   /usr/local/lib/locachy/keytable      the key table of the layout chosen (libxkbcommon)
 #   /usr/local/lib/locachy/clipboard     the clipboard they copy and paste with (its socket)
@@ -28,6 +29,8 @@ mkdir -p "$root/usr/local/bin" "$root/usr/local/share/locachy/terminus"
 $gcc $(pkg-config --cflags json-c) -o "$root/usr/local/bin/installer" "$src/progs/installer.c" "$b"/base-*.o \
     $libs $(pkg-config --libs json-c)
 $gcc -o "$root/usr/local/bin/term" "$src/progs/term.c" "$b"/base-*.o $libs
+$gcc $(pkg-config --cflags json-c) -o "$root/usr/local/bin/rescue" "$src/progs/rescue.c" "$b"/base-*.o \
+    $libs $(pkg-config --libs json-c)
 mkdir -p "$root/usr/local/lib/locachy"
 $gcc -o "$root/usr/local/lib/locachy/keytable" "$src/progs/keytable.c" $(pkg-config --cflags --libs xkbcommon)
 p=ext-data-control-v1

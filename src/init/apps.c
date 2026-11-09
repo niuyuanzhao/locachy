@@ -17,7 +17,7 @@
 #include "base.h"
 #include "apps.h"
 
-#define MAX_APPS 32
+#define MAX_APPS 48
 #ifndef APP_CONF
 #define APP_CONF CONTAINERS_CONF
 #endif
@@ -44,6 +44,15 @@
 #ifndef APP_MIXER_COMMAND
 #define APP_MIXER_COMMAND "/usr/bin/wiremix"
 #endif
+#ifndef APP_BLUETOOTH_COMMAND
+#define APP_BLUETOOTH_COMMAND "/usr/bin/bluetui"
+#endif
+#ifndef APP_NETWORK_COMMAND
+#define APP_NETWORK_COMMAND "/usr/bin/nmtui"
+#endif
+#ifndef APP_TERM_COMMAND
+#define APP_TERM_COMMAND "/usr/local/lib/locachy/user-shell"
+#endif
 #ifndef APP_CLIPBOARD
 #define APP_CLIPBOARD "/usr/local/lib/locachy/clipboard"
 #endif
@@ -56,7 +65,7 @@
 #ifndef APP_WINDOW_CONTROL
 #define APP_WINDOW_CONTROL "/run/user/0/locachy-control.sock"
 #endif
-#define MAX_NATIVE 8
+#define MAX_NATIVE 16
 /* The descriptors a native window inherits: it writes one byte to the first
  * once its first window is configured and drawn; it reads requests ("page
  * NAME") from the second until end of file. */
@@ -78,6 +87,9 @@ static const struct native_program natives[] = {
     { "files", "Files", APP_NATIVE_DIR "/files", NULL, 0, TARGET_FOLDER },
     { "settings", "Settings", APP_NATIVE_DIR "/settings", NULL, 1, TARGET_PAGE },
     { "mixer", "Mixer", APP_NATIVE_DIR "/term", APP_MIXER_COMMAND, 1, TARGET_NONE },
+    { "bluetooth", "Bluetooth", APP_NATIVE_DIR "/term", APP_BLUETOOTH_COMMAND, 1, TARGET_NONE },
+    { "network", "Network", APP_NATIVE_DIR "/term", APP_NETWORK_COMMAND, 1, TARGET_NONE },
+    { "term", "Terminal", APP_NATIVE_DIR "/term", APP_TERM_COMMAND, 0, TARGET_NONE },
 };
 
 static const char *const settings_pages[] = { "network", "power", "devices", "date-time", "hardware" };
@@ -85,7 +97,7 @@ static const char *const settings_pages[] = { "network", "power", "devices", "da
 struct app {
     char name[64];
     pid_t launcher, job;
-    int want_start;
+    int want_start, own_tor;
     char pending[16], error[240];
     char target[1024]; /* to open when it has started (apps_open) */
     double deadline;
@@ -251,7 +263,8 @@ static int display_ready(void)
 static void failure(struct app *app, const char *message)
 {
     snprintf(app->error, sizeof app->error, "%s", message);
-    app->want_start = 0;
+    app->want_start = app->own_tor = 0;
+    app->target[0] = '\0';
     app->pending[0] = '\0';
     app->deadline = 0;
     say("apps: %s: %s", app->name, app->error);
@@ -423,6 +436,7 @@ void apps_tick(void)
             pid_t pid = app->native ? launch_native(app) : launch(app, app->target[0] ? "open" : "start", 0);
             if (!app->native) {
                 app->target[0] = '\0';
+                app->own_tor = 0;
             }
             if (pid < 0) {
                 failure(app, app->native ? "cannot start the window's program" : "cannot start container operation");
@@ -579,9 +593,16 @@ static pid_t launch(struct app *app, const char *action, int in_app)
     }
     setenv("LOCACHY_WAYLAND_DISPLAY", "locachy-0", 1);
     if (strcmp(action, "open") == 0) {
-        execl(APP_TOOL, "locachy-app", action, app->name, app->target, (char *)NULL);
+        if (app->own_tor) {
+            execl(APP_TOOL, "locachy-app", action, "--own-tor", app->name, app->target, (char *)NULL);
+        } else {
+            execl(APP_TOOL, "locachy-app", action, app->name, app->target, (char *)NULL);
+        }
+    } else if (strcmp(action, "start") == 0 && app->own_tor) {
+        execl(APP_TOOL, "locachy-app", action, "--own-tor", app->name, (char *)NULL);
+    } else {
+        execl(APP_TOOL, "locachy-app", action, app->name, (char *)NULL);
     }
-    execl(APP_TOOL, "locachy-app", action, app->name, (char *)NULL);
     dprintf(2, "apps: exec %s: %s\n", APP_TOOL, strerror(errno));
     _exit(127);
 }
@@ -888,6 +909,14 @@ int apps_window_open(const char *program, const char *target, char *why, size_t 
 
 int apps_action(const char *action, const char *name, char *why, size_t size)
 {
+    int own_tor = 0;
+    if (strcmp(action, "open-own-tor") == 0) {
+        action = "open";
+        own_tor = 1;
+    } else if (strcmp(action, "start-own-tor") == 0) {
+        action = "start";
+        own_tor = 1;
+    }
     discover();
     struct app *app = valid_name(name) ? lookup(name) : NULL;
     if (!app) {
@@ -895,6 +924,10 @@ int apps_action(const char *action, const char *name, char *why, size_t size)
         return -1;
     }
     if (app->native) {
+        if (own_tor) {
+            snprintf(why, size, "unknown window action");
+            return -1;
+        }
         return native_action(app, action, why, size);
     }
     if (strcmp(action, "open") == 0) {
@@ -958,7 +991,8 @@ int apps_action(const char *action, const char *name, char *why, size_t size)
             kill(app->job, SIGTERM);
             app->job = 0;
         }
-        app->want_start = 0;
+        app->want_start = app->own_tor = 0;
+        app->target[0] = '\0';
         app->pending[0] = '\0';
         app->deadline = 0;
     } else if (app->want_start || app->job || app->pending[0]) {
@@ -968,6 +1002,7 @@ int apps_action(const char *action, const char *name, char *why, size_t size)
     int exists = populated(app);
     if (strcmp(action, "start") == 0 && exists) {
         action = "resume";
+        own_tor = 0;
     }
     if (strcmp(action, "resume") == 0 && !exists) {
         snprintf(why, size, "container is not running");
@@ -982,6 +1017,7 @@ int apps_action(const char *action, const char *name, char *why, size_t size)
     }
     char marker[192];
     if (strcmp(action, "start") == 0) {
+        app->own_tor = own_tor;
         snprintf(marker, sizeof marker, APP_RUN "/%s.ready", app->name);
         unlink(marker);
         snprintf(marker, sizeof marker, APP_RUN "/%s.log", app->name);
@@ -1001,6 +1037,7 @@ int apps_action(const char *action, const char *name, char *why, size_t size)
     int starting = strcmp(action, "start") == 0;
     /* The script holds its start lock before entering the application cgroup. */
     pid_t pid = launch(app, action, 0);
+    app->own_tor = 0;
     if (pid < 0) {
         snprintf(why, size, "cannot start container operation: %s", strerror(errno));
         return -1;
@@ -1024,7 +1061,7 @@ int apps_action(const char *action, const char *name, char *why, size_t size)
 
 /* Open target (a path or URL) in container name (locachy-app open): in it
  * if it runs, else by starting it with target once the display is up. */
-int apps_open(const char *name, const char *target, char *why, size_t size)
+int apps_open_mode(const char *name, const char *target, int own_tor, char *why, size_t size)
 {
     discover();
     struct app *app = valid_name(name) ? lookup(name) : NULL;
@@ -1043,6 +1080,7 @@ int apps_open(const char *name, const char *target, char *why, size_t size)
     snprintf(app->target, sizeof app->target, "%s", target);
     app->error[0] = '\0';
     if (populated(app)) {
+        app->own_tor = 0;
         pid_t pid = launch(app, "open", 0); /* quick: it hands target on and ends */
         app->target[0] = '\0';
         if (pid < 0) {
@@ -1057,6 +1095,7 @@ int apps_open(const char *name, const char *target, char *why, size_t size)
         }
         return 0;
     }
+    app->own_tor = own_tor;
     char marker[192];
     snprintf(marker, sizeof marker, APP_RUN "/%s.ready", app->name);
     unlink(marker);
@@ -1069,6 +1108,7 @@ int apps_open(const char *name, const char *target, char *why, size_t size)
     }
     pid_t pid = launch(app, "open", 0);
     app->target[0] = '\0';
+    app->own_tor = 0;
     if (pid < 0) {
         app->pending[0] = '\0';
         snprintf(why, size, "cannot start container operation: %s", strerror(errno));
@@ -1078,6 +1118,11 @@ int apps_open(const char *name, const char *target, char *why, size_t size)
     app->deadline = uptime() + 20;
     snprintf(why, size, "start accepted");
     return 0;
+}
+
+int apps_open(const char *name, const char *target, char *why, size_t size)
+{
+    return apps_open_mode(name, target, 0, why, size);
 }
 
 /* Why locachy-app ended: the last line of its log, when it is one of its own

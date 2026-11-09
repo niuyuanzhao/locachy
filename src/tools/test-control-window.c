@@ -34,6 +34,14 @@ int main(void)
     seat_requests = pair[0];
     request(pair, "settings network", "ok", "window\0settings\0network", 23);
     request(pair, "mixer", "ok", "window\0mixer", 12);
+    request(pair, "bluetooth", "ok", "window\0bluetooth", 16);
+    request(pair, "network", "ok", "window\0network", 14);
+    request(pair, "term", "ok", "window\0term", 11);
+    open_request("edge", 0, reply, sizeof reply);
+    assert(strncmp(reply, "ok", 2) == 0);
+    { char got[64]; assert(recv(pair[1], got, sizeof got, MSG_DONTWAIT) == 13 && memcmp(got, "app\0open\0edge", 13) == 0); }
+    open_request("window-view-1", 0, reply, sizeof reply);
+    assert(strncmp(reply, "error malformed", 15) == 0);
     request(pair, "view /home/u/a b.pdf", "ok", "window\0view\0/home/u/a b.pdf", 27);
     request(pair, "", "error malformed", NULL, 0);
     request(pair, " network", "error malformed", NULL, 0);

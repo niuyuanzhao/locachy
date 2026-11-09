@@ -6,6 +6,7 @@ is deliberately untrusted; only a successful unlock can authorize resume.
 Requires a C compiler (cc).
 """
 from pathlib import Path
+import os
 import subprocess
 import sys
 import tempfile
@@ -211,6 +212,84 @@ int main(void) {
 }
 '''
 
+CRYPTSETUP_PREFIX = r'''
+#include <assert.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
+static int mapper_nodes;
+static void ensure_mapper_nodes(const char *mapper) {
+    assert(!strcmp(mapper, "locachy-crypt") || !strcmp(mapper, "locachy-swap-crypt"));
+    mapper_nodes++;
+}
+'''
+
+CRYPTSETUP_SUFFIX = r'''
+/* This executable is also the fake cryptsetup child. The real extracted
+ * function forks, pipes the secret, execv's this file and waits for its exit. */
+static int fake_cryptsetup(int argc, char **argv) {
+    int token = !strcmp(getenv("FIXTURE_MODE"), "token");
+    int swap = !strcmp(getenv("FIXTURE_MAPPER"), "locachy-swap-crypt");
+    const char *expected[12] = { "cryptsetup", "open", "--type", "luks" };
+    int n = 4;
+    if (token) expected[n++] = "--token-only";
+    else {
+        expected[n++] = "--disable-external-tokens";
+        expected[n++] = "--key-file";
+        expected[n++] = "-";
+    }
+    if (swap) expected[n++] = "--allow-discards";
+    expected[n++] = "/fixture/luks";
+    expected[n++] = getenv("FIXTURE_MAPPER");
+    assert(argc == n);
+    for (int i = 0; i < n; i++) assert(!strcmp(argv[i], expected[i]));
+    char secret[256] = "";
+    size_t used = 0;
+    ssize_t got;
+    while ((got = read(STDIN_FILENO, secret + used, sizeof secret - 1 - used)) > 0) {
+        used += (size_t)got;
+        assert(used < sizeof secret - 1);
+    }
+    assert(got == 0);
+    if (token) assert(!used); /* The token branch gets /dev/null, never the console. */
+    else assert(!strcmp(secret, getenv("FIXTURE_SECRET")));
+    FILE *log = fopen(getenv("FIXTURE_LOG"), "w");
+    assert(log);
+    for (int i = 0; i < argc; i++) fprintf(log, "%s\n", argv[i]);
+    fprintf(log, "secret-bytes=%zu\n", used);
+    assert(fclose(log) == 0);
+    /* The TPM is usable, but only the explicit token mode can use it.
+     * With passphrase mode isolated, a wrong typed secret must fail. */
+    return token || !strcmp(secret, "fixture exact passphrase") ? 0 : 2;
+}
+static void test_command(const char *executable, const char *mapper, const char *secret, int success) {
+    assert(setenv("FIXTURE_MODE", secret ? "passphrase" : "token", 1) == 0);
+    assert(setenv("FIXTURE_MAPPER", mapper, 1) == 0);
+    assert(setenv("FIXTURE_SECRET", secret ? secret : "", 1) == 0);
+    int before = mapper_nodes;
+    assert(run_cryptsetup(executable, "/fixture/luks", mapper, secret) == (success ? 0 : -1));
+    assert(mapper_nodes == before + success);
+    assert(access(getenv("FIXTURE_LOG"), R_OK) == 0);
+    assert(unlink(getenv("FIXTURE_LOG")) == 0);
+}
+int main(int argc, char **argv) {
+    if (argc > 1) return fake_cryptsetup(argc, argv);
+    test_command(argv[0], "locachy-crypt", "fixture exact passphrase", 1);
+    test_command(argv[0], "locachy-swap-crypt", "fixture exact passphrase", 1);
+    puts("PASS actual cryptsetup subprocess disables external tokens for root/swap passphrases and pipes exact bytes");
+    test_command(argv[0], "locachy-crypt", "wrong passphrase", 0);
+    test_command(argv[0], "locachy-swap-crypt", "wrong passphrase", 0);
+    puts("PASS actual cryptsetup subprocess rejects wrong root/swap passphrases even when the TPM is usable");
+    test_command(argv[0], "locachy-crypt", NULL, 1);
+    test_command(argv[0], "locachy-swap-crypt", NULL, 1);
+    puts("PASS actual cryptsetup token subprocess remains token-only with null stdin; swap alone allows discards");
+    return 0;
+}
+'''
+
 source = (SOURCE / "init/init.c").read_text()
 functions = ["static int has_tpm_token(", "static void unlock_with_passphrase(",
              "static const char *unlock_with_tpm(", "static void unlock_luks(", "static int check_resume_dev("]
@@ -221,3 +300,10 @@ with tempfile.TemporaryDirectory(prefix="init-unlock-", dir=SCRATCH) as tmp:
     subprocess.run(["cc", "-O2", "-Wall", "-Wextra", "-Werror", str(c), "-o", str(root / "test")],
                    check=True, timeout=60)
     subprocess.run([str(root / "test")], check=True, timeout=30)
+    command_c = root / "cryptsetup-command.c"
+    command_c.write_text(CRYPTSETUP_PREFIX + function(source, "static int run_cryptsetup(") + CRYPTSETUP_SUFFIX)
+    executable = root / "cryptsetup-command"
+    subprocess.run(["cc", "-O2", "-Wall", "-Wextra", "-Werror", str(command_c), "-o", str(executable)],
+                   check=True, timeout=60)
+    subprocess.run([str(executable)], env=dict(os.environ, FIXTURE_LOG=str(root / "cryptsetup-argv.log")),
+                   check=True, timeout=30)

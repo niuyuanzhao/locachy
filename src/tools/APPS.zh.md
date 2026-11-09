@@ -39,6 +39,17 @@ tools/check.py  用某个系统自己的辅助模块检查本仓库：
   `command` 是不含 `..` 和空格的绝对路径；`network`、`tor`、`camera`、`screencast`、`x11`、`host` 为 `0` 或 `1`；
   `directories` 是冒号分隔、不含 `..` 的绝对路径；`desktop` 是 `*.desktop` 文件名。
   `package` 和 `command` 必须有。
+- 同时设置 `tor="1"` 与 `network="1"` 时：
+  - 全局 Tor（`service_tor`）开启且 `tor-enforce` 已加载时，`locachy-app` 导出
+    `TOR_PROVIDER=none TOR_SOCKS_HOST=127.0.0.1 TOR_SOCKS_PORT=9050`，并加载独立
+    cgroup `nftables` 表（`locachy_tor_app_NAME`，优先级 `-150`），在容器退出前仅放行到
+    `127.0.0.1:9050` 的 IPv4 TCP。
+  - 全局 Tor 未开启时，其他应用仍拒绝启动。只有 Tor Browser（`package="tor-browser-bin"`，
+    直接运行受支持的 `/usr/bin/tor-browser` 包装器，或使用预设的 `/usr/bin/env` 前缀）能在
+    home、files 或顶栏明确警示并经用户确认后运行自带 Tor（命令行为 `--own-tor`）。启动器导出
+    `TOR_SOCKS_HOST=127.0.0.1 TOR_SOCKS_PORT=9150`（不设 `TOR_PROVIDER=none`），
+    让浏览器启动自带的用户态守护进程，切换模式时不与系统 `9050` 端口冲突；这种模式没有宿主仅限 Tor 的防火墙。
+    旧预设的固定系统 Tor 环境变量前缀会在内存中精确识别，兼容已有配置，不重写用户编辑。
 
 ## 已安装系统上
 

@@ -1,7 +1,7 @@
 /*
  * home lists three sections, each under a title that is never selected: the
  * containers, then the host's program_NAME launchers of rc.conf split into
- * the programs and the system and hardware tools (program_sections says
+ * the programs and the system and hardware tools (program_section says
  * which), reboot and power off ending the last section.
  * Container actions are asynchronous requests, never base_open calls. Only
  * base_apps supplies their displayed state and memory usage. Enter opens: a
@@ -43,10 +43,15 @@
 #include "base.h"
 #include "files.h"
 #include "jobs.h"
+#include "program-sections.h"
 #include "textsel.h"
+#include "tor-browser.h"
 
 #ifndef HOME_APP_RUN
 #define HOME_APP_RUN "/run/locachy/apps"
+#endif
+#ifndef HOME_CONT_CONF
+#define HOME_CONT_CONF CONTAINERS_CONF
 #endif
 
 void base_apps(char *buf, size_t size);
@@ -64,29 +69,8 @@ int base_app_action(const char *action, const char *name, char *why, size_t size
 #define HIT_JOB 200000   /* + a system job's line */
 #define HIT_LOG 300000   /* the log view's lines */
 
-/* The list's sections, top to bottom. */
-enum section { SECTION_CONTAINERS, SECTION_PROGRAMS, SECTION_SYSTEM, SECTIONS };
-
 static const char *const section_titles[SECTIONS] = {
     N_("Containers"), N_("Programs"), N_("System and hardware")
-};
-
-/* The section of a host program_NAME: this table alone says it. A name not
- * in it is one of the programs. Within a section rc.conf's order stays.
- * files, home's own file manager, is not an rc.conf setting: it is always
- * the first program. */
-static const struct {
-    const char *name;
-    enum section section;
-} program_sections[] = {
-    { "term", SECTION_PROGRAMS },
-    { "admin", SECTION_SYSTEM },   /* root's offline terminal: administration */
-    { "network", SECTION_SYSTEM }, /* nmtui: the network's settings */
-    { "settings", SECTION_SYSTEM },
-    { "packages", SECTION_SYSTEM },
-    { "firmware", SECTION_SYSTEM },
-    { "bluetooth", SECTION_SYSTEM },
-    { "mixer", SECTION_SYSTEM },
 };
 
 struct entry {
@@ -104,7 +88,7 @@ struct app {
     int marked;               /* operation target, not running state */
 };
 
-enum confirmation { CONF_NONE, CONF_STOP, CONF_PROGRAM, CONF_REBOOT, CONF_POWEROFF, CONF_JOB };
+enum confirmation { CONF_NONE, CONF_STOP, CONF_PROGRAM, CONF_REBOOT, CONF_POWEROFF, CONF_JOB, CONF_OWN_TOR };
 
 static struct entry entries[MAX_ENTRIES];
 static int nentries, selected, scroll;
@@ -119,7 +103,7 @@ static char action_error[512], list_error[160];
 static double refresh_at;
 static enum confirmation confirming;
 static char **stop_names;
-static int nstop, stop_program;
+static int nstop, stop_program, own_tor_open, own_tor_count;
 /* The system jobs (jobs_list): shown instead of the grid (J); the one
  * selected; the one asked about (CONF_JOB), and whether it was running. */
 static struct jobs_row jobs[JOBS_ROWS_MAX];
@@ -134,14 +118,30 @@ static char log_name[64], log_buf[32768], *log_all[HOME_LOG_LINES];
 static int home_output;
 static int output_scroll[HOME_OUTPUTS];
 
-static enum section program_section(const char *name)
+static int valid_name(const char *name);
+static void clear_confirmation(void);
+
+static void on_service_tor(const char *name, const char *value, void *arg)
 {
-    for (size_t i = 0; i < sizeof program_sections / sizeof program_sections[0]; i++) {
-        if (strcmp(program_sections[i].name, name) == 0) {
-            return program_sections[i].section;
-        }
+    if (strcmp(name, "service_tor") == 0 && value && value[strspn(value, " \t")]) {
+        *(int *)arg = 1;
     }
-    return SECTION_PROGRAMS;
+}
+
+static int service_tor_on(void)
+{
+    int on = 0;
+    rc_read(on_service_tor, &on);
+    return on;
+}
+
+/* Only the known browser wrapper can offer its bundled Tor as an option. */
+static int container_tor_only(const char *name)
+{
+    char path[384];
+    if (!valid_name(name)) return 0;
+    snprintf(path, sizeof path, "%s/%.63s.conf", HOME_CONT_CONF, name);
+    return tor_browser_own_supported(path);
 }
 
 /* One program_NAME="PATH ARGS" setting of rc.conf, taken when it belongs to
@@ -957,12 +957,27 @@ static void draw_output(int ready)
         } else if (confirming == CONF_JOB) {
             /* TRANSLATORS: Y and N are the confirmation keys; keep them. */
             snprintf(line, sizeof line, _("Y/N: Remove system job %d from the queue? It has not started."), job_asked);
+        } else if (confirming == CONF_OWN_TOR) {
+            if (nstop == 1) {
+                /* TRANSLATORS: %s is a container name (e.g. tor-browser). */
+                snprintf(line, sizeof line,
+                         _("Full-system Tor is off: %s will run its own Tor without the host Tor firewall."),
+                         stop_names[0]);
+            } else {
+                snprintf(line, sizeof line,
+                         P_("Full-system Tor is off: %d container will run its own Tor without the host Tor firewall.",
+                            "Full-system Tor is off: %d containers will run their own Tor without the host Tor firewall.",
+                            own_tor_count), own_tor_count);
+            }
         } else {
             /* TRANSLATORS: Y and N are the confirmation keys; keep them. */
             snprintf(line, sizeof line, _("Y/N: Power off the host?"));
         }
         text(1, 2, line, ERROR, BG);
-        if (confirming == CONF_STOP) {
+        if (confirming == CONF_OWN_TOR) {
+            text(1, 3, _("Turn Tor on in settings for full-system Tor enforcement, or confirm to start anyway."),
+                 FG, BG);
+        } else if (confirming == CONF_STOP) {
             for (int i = 0; i < nstop && i < visible; i++) {
                 if (i == visible - 1 && nstop > visible) {
                     snprintf(line, sizeof line,
@@ -1034,9 +1049,10 @@ static void draw_output(int ready)
     wrapped(footer, 1, last_customized ? last : _(last), ACCENT);
     wrapped(footer + 1, 1, action_error[0] ? action_error : list_error[0] ? list_error : failure, ERROR);
     if (confirming != CONF_NONE) {
-        /* TRANSLATORS: Y and N are the confirmation keys; keep them. */
-        int c = ui_button(1, rows - 2, _("Y: confirm"), HIT_KEY + 'y');
-        ui_button(c, rows - 2, _("N: cancel"), HIT_KEY + 'n');
+        /* TRANSLATORS: Y, Enter, N and Esc are confirmation keys; keep them. */
+        int c = ui_button(1, rows - 2, confirming == CONF_OWN_TOR ? _("Y / Enter: start with own Tor") :
+                          _("Y: confirm"), HIT_KEY + 'y');
+        ui_button(c, rows - 2, confirming == CONF_OWN_TOR ? _("N / Esc: cancel") : _("N: cancel"), HIT_KEY + 'n');
         text(1, rows - 1, _("Any other key cancels without acting."), FG, BG);
     } else if (log_shown) {
         /* TRANSLATORS: Tab, y, Y, Esc and J are key names; keep them. */
@@ -1110,6 +1126,14 @@ static int run_requested(void)
         return 0;
     }
     load(); /* rc.conf as it is now: settings may have changed it */
+    if (strcmp(name, HOME_REQUEST_REBOOT) == 0 || strcmp(name, HOME_REQUEST_POWEROFF) == 0) {
+        int reboot = strcmp(name, HOME_REQUEST_REBOOT) == 0;
+        clear_confirmation();
+        log_shown = jobs_shown = 0;
+        selected = napps + nentries + (reboot ? 0 : 1);
+        confirming = reboot ? CONF_REBOOT : CONF_POWEROFF;
+        return 1; /* only the existing Y/N confirmation may perform the action */
+    }
     for (int i = 0; i < nentries; i++) {
         if (!entries[i].builtin && strcmp(entries[i].name, name) == 0) {
             say("home: run %s, as asked", entries[i].name);
@@ -1161,6 +1185,41 @@ static int request(const char *action, const char *name)
     return rc == 0;
 }
 
+static int prepare_own_tor(int is_open)
+{
+    int marked = is_open ? 0 : marked_count(), count = 0;
+    if (service_tor_on()) return 0;
+    for (int i = 0; i < napps; i++) {
+        if ((marked ? apps[i].marked : i == selected) &&
+            (strcmp(apps[i].state, "closed") == 0 || strcmp(apps[i].state, "failed") == 0) &&
+            container_tor_only(apps[i].name)) {
+            count++;
+        }
+    }
+    if (!count) return 0;
+    int total = marked ? marked : 1;
+    stop_names = calloc((size_t)total, sizeof *stop_names);
+    if (stop_names) {
+        for (int i = 0; i < napps; i++) {
+            if (marked ? apps[i].marked : i == selected) {
+                size_t size = strlen(apps[i].name) + 1;
+                stop_names[nstop] = malloc(size);
+                if (!stop_names[nstop]) break;
+                memcpy(stop_names[nstop++], apps[i].name, size);
+            }
+        }
+    }
+    if (nstop != total) {
+        clear_confirmation();
+        snprintf(action_error, sizeof action_error, _("Cannot prepare confirmation: out of memory."));
+        return 1;
+    }
+    own_tor_open = is_open;
+    own_tor_count = count;
+    confirming = CONF_OWN_TOR;
+    return 1;
+}
+
 static void act(const char *action)
 {
     refresh();
@@ -1168,6 +1227,9 @@ static void act(const char *action)
     if (!marked && selected >= napps) {
         last_customized = 1;
         snprintf(last, sizeof last, _("Select a container or mark containers first."));
+        return;
+    }
+    if (strcmp(action, "start") == 0 && prepare_own_tor(0)) {
         return;
     }
     action_error[0] = '\0';
@@ -1202,7 +1264,7 @@ static void clear_confirmation(void)
     }
     free(stop_names);
     stop_names = NULL;
-    nstop = 0;
+    nstop = own_tor_count = 0;
     confirming = CONF_NONE;
 }
 
@@ -1289,16 +1351,50 @@ static int jobs_hold_power(const char *what)
 /* Consume every confirmation key, so Enter cannot fall through to power off. */
 static void confirm_key(int key)
 {
-    if (key != 'y' && key != 'Y') {
+    int confirmed = key == 'y' || key == 'Y' || (confirming == CONF_OWN_TOR && key == '\n');
+    if (!confirmed) {
         last_customized = 1;
         snprintf(last, sizeof last, "%s",
                  confirming == CONF_REBOOT ? _("Reboot cancelled.") :
                  confirming == CONF_POWEROFF ? _("Power off cancelled.") :
-                 confirming == CONF_JOB ? _("The system job was left as it is.") : _("Stop cancelled."));
+                 confirming == CONF_JOB ? _("The system job was left as it is.") :
+                 confirming == CONF_OWN_TOR ? _("Start cancelled.") : _("Stop cancelled."));
         clear_confirmation();
         return;
     }
     action_error[0] = '\0';
+    if (confirming == CONF_OWN_TOR) {
+        if (own_tor_open && nstop == 1) {
+            int accepted = request("open-own-tor", stop_names[0]);
+            last_customized = 1;
+            snprintf(last, sizeof last,
+                     accepted ? _("open %s: accepted") : _("open %s: error"), stop_names[0]);
+            snprintf(opening, sizeof opening, "%s", accepted ? stop_names[0] : "");
+            clear_confirmation();
+            if (!accepted) refresh();
+            return;
+        }
+        int accepted = 0;
+        for (int i = 0; i < nstop; i++) {
+            const char *verb = "start";
+            for (int k = 0; k < napps; k++) {
+                if (strcmp(apps[k].name, stop_names[i]) == 0) {
+                    if (strcmp(apps[k].state, "frozen") == 0) verb = "resume";
+                    else if ((strcmp(apps[k].state, "closed") == 0 || strcmp(apps[k].state, "failed") == 0) &&
+                             container_tor_only(stop_names[i]) && !service_tor_on()) verb = "start-own-tor";
+                    break;
+                }
+            }
+            accepted += request(verb, stop_names[i]);
+        }
+        last_customized = 1;
+        snprintf(last, sizeof last,
+                 _("Start/resume: %d accepted, %d error(s); state is refreshed from base."),
+                 accepted, nstop - accepted);
+        clear_confirmation();
+        refresh();
+        return;
+    }
     if (confirming == CONF_JOB) {
         char why[256] = "";
         int r = jobs_cancel(job_asked, job_asked_running, why, sizeof why);
@@ -1570,6 +1666,15 @@ int main(void)
                    selected >= napps && selected < napps + nentries) {
             confirm_stop(); /* Preserve the old host-program close aliases. */
         } else if (key == '\n' && selected < napps) {
+            refresh();
+            if (selected < napps && prepare_own_tor(1)) {
+                draw(0);
+                continue;
+            }
+            if (selected >= napps) {
+                draw(0);
+                continue;
+            }
             action_error[0] = '\0';
             int accepted = request("open", apps[selected].name);
             last_customized = 1;

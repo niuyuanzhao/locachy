@@ -75,6 +75,8 @@
 #include "internal.h"
 #include "ime.h"
 #include "docs-proto.h"
+#include "program-sections.h"
+#include "tor-browser.h"
 
 #ifndef SO_PEERPIDFD
 #define SO_PEERPIDFD 77
@@ -107,6 +109,8 @@ struct bar {
     struct zwlr_layer_surface_v1 *lsurf;
     uint32_t w, h;              /* logical pixels; the buffer is these at the screen's scale */
     uint32_t want_h;            /* the height asked for (bar_height) */
+    uint32_t screen_h;          /* logical output height from catch_configure; 0 until known */
+    int mode_w, mode_h, transform; /* physical mode size from wl_output */
     struct wp_fractional_scale_v1 *scale;
     struct wp_viewport *viewport;
     uint32_t scale120;          /* the screen's scale, times 120 */
@@ -1222,13 +1226,38 @@ static void pointer_motion(void *data, struct wl_pointer *p, uint32_t time, wl_f
  * starts only programs and targets it knows. The client is run by itself,
  * no shell, in the background (a child of its own waits for it); the
  * window's start or failure shows in home and in the log. */
-static void window_open(const char *program, const char *target)
+#ifndef LAUNCH_BIN
+#define LAUNCH_BIN "/usr/local/bin"
+#endif
+#ifndef LAUNCH_MIXER
+#define LAUNCH_MIXER "/usr/bin/wiremix" /* apps.c's mixer, in a term window */
+#endif
+#ifndef LAUNCH_BLUETOOTH
+#define LAUNCH_BLUETOOTH "/usr/bin/bluetui"
+#endif
+#ifndef LAUNCH_NETWORK
+#define LAUNCH_NETWORK "/usr/bin/nmtui"
+#endif
+#ifndef LAUNCH_USER_SHELL
+#define LAUNCH_USER_SHELL "/usr/local/lib/locachy/user-shell"
+#endif
+#ifndef LAUNCH_CGROUP_ROOT
+#define LAUNCH_CGROUP_ROOT "/sys/fs/cgroup"
+#endif
+#ifndef LAUNCH_APP_RUN
+#define LAUNCH_APP_RUN "/run/locachy/apps"
+#endif
+#ifndef LAUNCH_CONF_DIR
+#define LAUNCH_CONF_DIR CONTAINERS_CONF
+#endif
+
+#ifndef BAR_SEAT_SPAWN
+static void seat_spawn(char *const argv[])
 {
     pid_t pid = fork();
     if (pid == 0) {
         if (fork() == 0) {
             setsid();
-            char *argv[] = { "locachy-seat", "--window", (char *)program, (char *)target, NULL };
             execv(SEAT_CLIENT, argv);
             _exit(127);
         }
@@ -1238,19 +1267,59 @@ static void window_open(const char *program, const char *target)
         waitpid(pid, NULL, 0);
     }
 }
+#define BAR_SEAT_SPAWN seat_spawn
+#endif
 
-/* A status block clicked: its settings page, or the mixer for the volume. */
+static void window_open(const char *program, const char *target)
+{
+    char *argv[] = { "locachy-seat", "--window", (char *)program, (char *)target, NULL };
+    BAR_SEAT_SPAWN(argv);
+}
+
+static void container_open(const char *name, int own_tor)
+{
+    char *argv_plain[] = { "locachy-seat", "--open", (char *)name, NULL };
+    char *argv_tor[] = { "locachy-seat", "--open", "--own-tor", (char *)name, NULL };
+    BAR_SEAT_SPAWN(own_tor ? argv_tor : argv_plain);
+}
+
+static int launch_bin_installed(const char *prog)
+{
+    char path[PATH_MAX + 128];
+    snprintf(path, sizeof path, "%s/%s", LAUNCH_BIN, prog);
+    return access(path, X_OK) == 0;
+}
+
+static void rc_flag_match(const char *name, const char *value, void *arg)
+{
+    struct { const char *key; int found; } *f = arg;
+    if (strcmp(name, f->key) == 0) {
+        f->found = value && value[strspn(value, " \t")] != '\0';
+    }
+}
+
+static int bt_tui_ready(void)
+{
+    struct { const char *key; int found; } f = { "service_bluetooth", 0 };
+    rc_read(rc_flag_match, &f);
+    return f.found && launch_bin_installed("term") && access(LAUNCH_BLUETOOTH, X_OK) == 0;
+}
+
+static void launcher_wheel(double delta);
+
+/* A status block clicked: bluetui / mixer directly, or its settings page. */
 static void status_open(enum panel_block id)
 {
     const char *program = "settings", *page = NULL;
     switch (id) {
     case PANEL_BLOCK_VOLUME: program = "mixer"; break; /* no target */
-    case PANEL_BLOCK_BLUETOOTH: page = "devices"; break;
+    case PANEL_BLOCK_BLUETOOTH:
+        if (bt_tui_ready()) program = "bluetooth";
+        else page = "devices";
+        break;
     case PANEL_BLOCK_NETWORK: page = "network"; break;
     case PANEL_BLOCK_BATTERY: page = "power"; break;
     case PANEL_BLOCK_TIME: page = "date-time"; break;
-    case PANEL_BLOCK_MEMORY:
-    case PANEL_BLOCK_CPU: page = "hardware"; break;
     default: return;
     }
     window_open(program, page);
@@ -1312,7 +1381,14 @@ static void pointer_axis(void *data, struct wl_pointer *p, uint32_t time, uint32
     (void)data;
     (void)p;
     (void)time;
-    if (!pointer_bar || axis != WL_POINTER_AXIS_VERTICAL_SCROLL) {
+    if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL) {
+        return;
+    }
+    if (pointer_launcher) {
+        launcher_wheel(wl_fixed_to_double(value));
+        return;
+    }
+    if (!pointer_bar) {
         return;
     }
     pointer_bar->wheel += wl_fixed_to_double(value);
@@ -1708,6 +1784,7 @@ static const struct wp_fractional_scale_v1_listener overlay_scale_listener = {
  * (its surface, or its new size, is asked for; drawn when configured). */
 static int overlay_begin(struct overlay *o, int cols, int rows)
 {
+    if (!compositor || !layer_shell) return 0;
     struct wl_output *out = o->pin ? o->pin : focused_output();
     if (o->surf && out && out != o->output) {
         overlay_destroy(o); /* the focus went to another screen */
@@ -2278,6 +2355,7 @@ static uint8_t kbd_caps[MAX_KBDS][KEY_MAX + 1]; /* this press is Caps (JIS: Shif
 static uint8_t kbd_dropping[MAX_KBDS]; /* its queue overflowed: dropping up to the next SYN_REPORT */
 static int grabbed, want_grab;
 static int keys_down;
+static int question_active(void);
 static int shift, ctrl, alt, meta, altgr; /* altgr: right Alt where the layout makes it AltGr */
 
 static void update_xkb_modifiers(void)
@@ -2295,7 +2373,7 @@ static void update_xkb_modifiers(void)
  * would give it the system's; and while the launcher is up. */
 static int grab_wanted(void)
 {
-    if (launcher_shown) return 1;
+    if (launcher_shown || question_active()) return 1;
     for (int i = 0; i < nkbds; i++) {
         if (kbd_layout[i] != 0) return 1;
     }
@@ -2914,12 +2992,16 @@ static void answer(int client, const char *fmt, const char *arg)
     close(client);
 }
 
+#ifndef BAR_APP_COMMAND
+#define BAR_APP_COMMAND "/usr/local/bin/locachy-app"
+#endif
+
 /* locachy-app ACTION NAME [TARGET], in the background, its output in the
  * container's log. -1 if it cannot be run. */
-static int run_app(const char *action, const char *name, const char *target)
+static int run_app_mode(const char *action, int own_tor, const char *name, const char *target)
 {
     char log[256];
-    snprintf(log, sizeof log, "/run/locachy/apps/%s.log", name);
+    snprintf(log, sizeof log, "%s/%.63s.log", LAUNCH_APP_RUN, name);
     pid_t pid = fork();
     if (pid == 0) {
         setsid();
@@ -2933,12 +3015,53 @@ static int run_app(const char *action, const char *name, const char *target)
             dup2(null, STDIN_FILENO);
         }
         setenv("LOCACHY_WAYLAND_DISPLAY", "locachy-0", 1);
-        execl("/usr/local/bin/locachy-app", "locachy-app", action, name, target, (char *)NULL);
+        if (own_tor) {
+            execl(BAR_APP_COMMAND, "locachy-app", action, "--own-tor", name, target, (char *)NULL);
+        } else {
+            execl(BAR_APP_COMMAND, "locachy-app", action, name, target, (char *)NULL);
+        }
         _exit(127);
     }
     return pid < 0 ? -1 : 0;
 }
 
+static int run_app(const char *action, const char *name, const char *target)
+{
+    return run_app_mode(action, 0, name, target);
+}
+
+static int bar_needs_own_tor(const char *name);
+static void ask_own_tor_target(int client, const char *name, const char *target);
+
+#ifndef BAR_CONTROL_SOCKET
+#define BAR_CONTROL_SOCKET "/run/user/0/locachy-control.sock"
+#endif
+
+static void raise_container(const char *name)
+{
+    struct sockaddr_un address = { .sun_family = AF_UNIX, .sun_path = BAR_CONTROL_SOCKET };
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    char raise[96];
+    int n = snprintf(raise, sizeof raise, "raise %s", name);
+    if (fd >= 0 && connect(fd, (struct sockaddr *)&address, sizeof address) == 0) {
+        send(fd, raise, (size_t)n, MSG_NOSIGNAL);
+    }
+    if (fd >= 0) {
+        close(fd);
+    }
+}
+
+static void deliver_app(int client, const char *name, const char *target, int own_tor)
+{
+    say("locachy-bar: open %s (%s) from %s in %s%s", target, choose.type, choose.from, name,
+        own_tor ? " (own Tor)" : "");
+    if (run_app_mode("open", own_tor, name, target) < 0) {
+        answer(client, "error cannot run locachy-app%s", "");
+        return;
+    }
+    raise_container(name);
+    answer(client, "ok %s", name);
+}
 /* Whether name is one of what open type (open_candidates). */
 static int opens_type(const char *name, const char *type)
 {
@@ -3015,22 +3138,11 @@ static void deliver(int client, const char *name, int user_picked)
             return;
         }
     }
-    say("locachy-bar: open %s (%s) from %s in %s", choose.target, choose.type, choose.from, name);
-    if (run_app("open", name, choose.target) < 0) {
-        answer(client, "error cannot run locachy-app%s", "");
+    if (bar_needs_own_tor(name)) {
+        ask_own_tor_target(client, name, choose.target);
         return;
     }
-    struct sockaddr_un address = { .sun_family = AF_UNIX, .sun_path = "/run/user/0/locachy-control.sock" };
-    int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
-    char raise[96];
-    int n = snprintf(raise, sizeof raise, "raise %s", name);
-    if (fd >= 0 && connect(fd, (struct sockaddr *)&address, sizeof address) == 0) {
-        send(fd, raise, (size_t)n, MSG_NOSIGNAL);
-    }
-    if (fd >= 0) {
-        close(fd);
-    }
-    answer(client, "ok %s", name);
+    deliver_app(client, name, choose.target, 0);
 }
 
 /*
@@ -3041,12 +3153,56 @@ static void deliver(int client, const char *name, int user_picked)
  * Enter runs locachy-app again, Esc leaves it.
  */
 static struct {
-    char name[OPEN_NAME], why[96];
-    int pending, shown;
+    char name[OPEN_NAME], why[96], target[4096];
+    int pending, shown, own_tor, client, wait_release;
     double until;               /* shown by then, or dropped */
     char watch[OPEN_NAME];      /* a tray item was asked for a window of it */
     double watch_until;
-} again;
+} again = { .client = -1 };
+
+static int question_active(void)
+{
+    return choose.client >= 0 || again.shown || again.pending;
+}
+
+static int bar_needs_own_tor(const char *name)
+{
+    char path[PATH_MAX + 128], ev[128] = "";
+    struct { const char *key; int found; } svc = { "service_tor", 0 };
+    snprintf(path, sizeof path, "%s/app_%.63s/cgroup.events", LAUNCH_CGROUP_ROOT, name);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    ssize_t n = fd >= 0 ? read(fd, ev, sizeof ev - 1) : -1;
+    if (fd >= 0) close(fd);
+    ev[n > 0 ? n : 0] = '\0';
+    if (strstr(ev, "populated 1")) return 0;
+    snprintf(path, sizeof path, "%s/%.63s.conf", LAUNCH_CONF_DIR, name);
+    if (!tor_browser_own_supported(path)) return 0;
+    rc_read(rc_flag_match, &svc);
+    return !svc.found;
+}
+
+static void ask_own_tor_target(int client, const char *name, const char *target)
+{
+    if (again.client >= 0 && again.client != client) {
+        answer(again.client, "error cancelled%s", "");
+    }
+    snprintf(again.name, sizeof again.name, "%s", name);
+    snprintf(again.target, sizeof again.target, "%s", target ? target : "");
+    again.why[0] = '\0';
+    again.own_tor = 1;
+    again.client = client;
+    again.pending = 1;
+    again.wait_release = keys_down != 0;
+    again.until = uptime() + (client >= 0 ? 60.0 : 10.0);
+    if (again.shown) {
+        render_chooser();
+    }
+}
+
+static void ask_own_tor(const char *name)
+{
+    ask_own_tor_target(-1, name, NULL);
+}
 
 /* One question at a time: the user opening a container (replace) puts its
  * question in place of another; a tray item that brought no window does
@@ -3059,9 +3215,16 @@ static void ask_again(const char *name, const char *why, int replace)
     if (again.shown && !replace) {
         return;
     }
+    if ((again.pending || again.shown) && again.client >= 0) {
+        return; /* never clobber a waiting open client */
+    }
     snprintf(again.name, sizeof again.name, "%s", name);
     snprintf(again.why, sizeof again.why, "%s", why);
+    again.target[0] = '\0';
+    again.own_tor = 0;
+    again.client = -1;
     again.pending = 1;
+    again.wait_release = keys_down != 0;
     again.until = uptime() + 10.0;
     if (strcmp(again.watch, name) == 0) {
         again.watch[0] = '\0';
@@ -3079,17 +3242,25 @@ static void watch_window(const char *name)
 
 static void close_again(void)
 {
-    again.pending = again.shown = 0;
+    if (again.client >= 0) {
+        answer(again.client, "error cancelled%s", "");
+        again.client = -1;
+    }
+    again.pending = again.shown = again.own_tor = again.wait_release = 0;
+    again.target[0] = '\0';
     overlay_destroy(&question);
-    set_grab(want_grab);
-    wl_display_flush(display);
+    want_grab = grab_wanted();
+    if (keys_down == 0) set_grab(want_grab);
+    if (display) wl_display_flush(display);
 }
 
 static void again_key(int code)
 {
-    char name[OPEN_NAME];
+    char name[OPEN_NAME], target[4096];
+    int own_tor = again.own_tor, client = again.client;
+    if (!again.shown || again.wait_release || !active) return;
     if (code == KEY_ESC) {
-        say("locachy-bar: %s left without a window", again.name);
+        say("locachy-bar: %s %s", again.name, own_tor ? "own-tor start cancelled" : "left without a window");
         close_again();
         return;
     }
@@ -3097,9 +3268,18 @@ static void again_key(int code)
         return;
     }
     memcpy(name, again.name, sizeof name);
+    memcpy(target, again.target, sizeof target);
+    again.client = -1;
     close_again();
-    say("locachy-bar: %s: its program again", name);
-    run_app("again", name, NULL);
+    if (own_tor && client >= 0) {
+        deliver_app(client, name, target, 1);
+    } else if (own_tor) {
+        say("locachy-bar: %s: starting with its own Tor", name);
+        container_open(name, 1);
+    } else {
+        say("locachy-bar: %s: its program again", name);
+        run_app("again", name, NULL);
+    }
 }
 
 /* Each turn: a tray item that did not bring a window, a question to show
@@ -3113,17 +3293,32 @@ static void again_tick(void)
         }
         again.watch[0] = '\0';
     }
-    if (again.shown && !active) {
-        close_again(); /* home came to the front meanwhile */
+    if (!(again.pending || again.shown)) return;
+    if (!active) {
+        close_again(); /* home or the lock took the seat: no queued confirmation survives */
+        return;
     }
-    if (again.pending && !again.shown) {
-        if (uptime() > again.until) {
-            again.pending = 0;
-        } else if (active && choose.client < 0) {
-            again.shown = 1;
-            set_grab(1); /* the answer is the bar's, not the application's */
-            render_chooser();
+    if (again.client >= 0) {
+        struct pollfd peer = { .fd = again.client, .events = POLLIN };
+        if (poll(&peer, 1, 0) > 0 && (peer.revents & (POLLHUP | POLLERR | POLLNVAL))) {
+            close_again();
+            return;
         }
+    }
+    if (uptime() > again.until) {
+        if (again.client >= 0) {
+            answer(again.client, "error timed out%s", "");
+            again.client = -1;
+        }
+        close_again();
+        return;
+    }
+    if (keys_down == 0) again.wait_release = 0;
+    if (again.pending && !again.shown && choose.client < 0) {
+        again.shown = 1;
+        want_grab = grab_wanted();
+        if (keys_down == 0) set_grab(want_grab);
+        render_chooser();
     }
 }
 
@@ -3212,6 +3407,16 @@ static void render_chooser(void)
     char line[256], cut[160];
     const char *base = strrchr(choose.target, '/');
     ovl_clear(o, OVL_BG);
+    if (again.shown && again.own_tor) {
+        snprintf(line, sizeof line, _("Full-system Tor is off: %s will run its own Tor."), again.name);
+        ovl_text(o, 1, 0, line, OVL_FG1, OVL_BG);
+        ovl_text(o, 1, 1, _("Turn Tor on in settings for the host Tor firewall, or confirm here."), OVL_FG2, OVL_BG);
+        ovl_text(o, 1, 3, _("Start it with its own user-space Tor without the host firewall?"), OVL_FG1, OVL_BG);
+        /* TRANSLATORS: Enter and Esc are keys; keep them. */
+        ovl_text(o, 1, 6, _("Enter: start with own Tor   Esc: cancel"), OVL_FG2, OVL_BG);
+        overlay_end(o);
+        return;
+    }
     if (again.shown) {
         /* TRANSLATORS: %s is the container name. */
         snprintf(line, sizeof line, _("%s runs without a window."), again.name);
@@ -3608,42 +3813,30 @@ static void notes_click(double y, uint32_t button)
 
 /*
  * The launcher: LOCachy's block at the left of the top bar clicked, or
- * Alt+F1 (rc.conf binds no key to it; KDE's launcher key). It lists, under
- * the bar, on the screen clicked (from the keyboard: the focused window's):
- * home, full screen; the programs as home groups them, each as a window on
- * this desktop (window_open: the seat passes it to process 1, as the status
- * blocks do), and full screen: home's own file manager at the home folder,
- * and view, settings and the mixer as home runs them, those home lists
- * (rc.conf's program_NAME). Up/Down select, Enter or a click runs an entry,
- * Esc closes it. The keyboard is the bar's while it is up (the presses of keys already held
- * stay with the window), and a transparent layer surface over each screen
- * takes a click outside it, which only closes it. It closes when another
- * window gets the focus or the shared display leaves the screen (home, or
- * the lock: the bar then has no keyboard and opens nothing). labwc consumes
- * Alt+F1 (labwc-rc.xml), so the focused window does not receive it.
- *
- * Full screen goes through the requests home takes: open_in_home, then the
- * seat's SIGUSR1 (home). Home's file manager gets the home folder; a program
- * gets "program:NAME" and no target, its name only: home runs it from its
- * own list, as Enter on it does, and comes back when it ends. Containers are
- * not listed: base_apps is answered to home only.
+ * Alt+F1 (rc.conf binds no key to it; KDE's launcher key). It mirrors home's
+ * three sections (Containers, Programs, System and hardware) with home at the
+ * top: each container with its live state (Enter / click opens or raises it on
+ * this desktop), files and every program_NAME of rc.conf in home's exact order.
+ * Window-capable host programs (files, view, term, network, settings,
+ * bluetooth, mixer) open as managed windows on Enter / left click and full
+ * screen in home on F / right click; full-screen-only programs (home, edit,
+ * archive, admin, packages, firmware) go through home. Scrolls when taller
+ * than the screen.
  */
-#ifndef LAUNCH_BIN
-#define LAUNCH_BIN "/usr/local/bin"
-#endif
-#ifndef LAUNCH_MIXER
-#define LAUNCH_MIXER "/usr/bin/wiremix" /* apps.c's mixer, in a term window */
-#endif
-#define LAUNCH_MAX 16
-enum launch_kind { LAUNCH_HEADER, LAUNCH_WINDOW, LAUNCH_HOME_FILES, LAUNCH_HOME_PROGRAM, LAUNCH_HOME };
+#define LAUNCH_MAX 96
+enum launch_kind { LAUNCH_HEADER, LAUNCH_HOME, LAUNCH_CONTAINER, LAUNCH_PROGRAM, LAUNCH_REBOOT, LAUNCH_POWEROFF };
 struct launch_item {
     enum launch_kind kind;
-    const char *name; /* the program's, as home names it; NULL for a heading */
-    int system;       /* a heading: System and hardware (else Programs) */
+    enum section section;
+    char name[OPEN_NAME];
+    char state[16];
+    int can_window;
+    int builtin_files;
 };
 static struct {
     struct launch_item items[LAUNCH_MAX];
-    int n, sel, name_cols, cols;
+    int n, sel, scroll, vis, name_cols, cols;
+    double wheel;
     unsigned focus_mark; /* focus_changes when it opened */
 } launcher;
 static void render_launcher(void);
@@ -3659,64 +3852,113 @@ static struct wl_surface *launcher_surface(void)
 
 static const char *launch_hint(void)
 {
-    /* TRANSLATORS: Up, Down, Enter and Esc are keys; keep them. */
-    return _("Up/Down: select   Enter: open   Esc: close");
+    /* TRANSLATORS: Up, Down, Enter, F and Esc are keys; keep them. */
+    return _("Up/Down: select   Enter: open   F: full screen   Esc: close");
 }
 
-/* An entry's text, translated: a heading, a program's name, home's, and a
- * program home runs full screen (its name in the label, as the list says). */
-static const char *launch_label(const struct launch_item *it)
-{
-    if (it->kind == LAUNCH_HEADER) return it->system ? _("System and hardware") : _("Programs");
-    if (it->kind == LAUNCH_HOME) return _("Home (full screen)");
-    if (it->kind == LAUNCH_HOME_PROGRAM) {
-        if (strcmp(it->name, "view") == 0) return _("View (full screen)");
-        if (strcmp(it->name, "settings") == 0) return _("Settings (full screen)");
-        return _("Mixer (full screen)");
-    }
-    return it->name;
-}
-
-/* An entry's action, translated; NULL: its text says it. */
-static const char *launch_action(const struct launch_item *it)
-{
-    if (it->kind == LAUNCH_WINDOW) return _("Window on this desktop");
-    if (it->kind == LAUNCH_HOME_FILES) return _("Full screen");
-    return NULL;
-}
-
-static void launch_add(enum launch_kind kind, const char *name, int system)
-{
-    if (launcher.n < LAUNCH_MAX) {
-        launcher.items[launcher.n++] = (struct launch_item){ kind, name, system };
-    }
-}
+static const char *const launch_section_titles[SECTIONS] = {
+    N_("Containers"), N_("Programs"), N_("System and hardware")
+};
 
 static int launch_installed(const char *path)
 {
     return access(path, X_OK) == 0;
 }
 
-/* Does home list program name: a program_NAME of rc.conf with a command,
- * as home reads them? */
-struct launch_setting {
-    const char *name;
-    int found;
-};
-
-static void launch_program_setting(const char *key, const char *value, void *arg)
+static int launch_window_capable(const char *name)
 {
-    struct launch_setting *s = arg;
-    if (strncmp(key, "program_", 8) == 0 && strcmp(key + 8, s->name) == 0 && value[strspn(value, " \t")]) {
-        s->found = 1;
+    if (strcmp(name, "files") == 0) return launch_bin_installed("files");
+    if (strcmp(name, "view") == 0) return launch_bin_installed("view");
+    if (strcmp(name, "term") == 0) return launch_bin_installed("term") && launch_installed(LAUNCH_USER_SHELL);
+    if (strcmp(name, "settings") == 0) return launch_bin_installed("settings");
+    if (strcmp(name, "network") == 0) return launch_bin_installed("term") && launch_installed(LAUNCH_NETWORK);
+    if (strcmp(name, "bluetooth") == 0) return launch_bin_installed("term") && launch_installed(LAUNCH_BLUETOOTH);
+    if (strcmp(name, "mixer") == 0) return launch_bin_installed("term") && launch_installed(LAUNCH_MIXER);
+    return 0;
+}
+
+static void launch_container_state(const char *name, char *state, size_t size)
+{
+    char path[PATH_MAX + 128], buf[256];
+    snprintf(path, sizeof path, "%s/app_%.63s/cgroup.events", LAUNCH_CGROUP_ROOT, name);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    ssize_t n = fd >= 0 ? read(fd, buf, sizeof buf - 1) : -1;
+    if (fd >= 0) close(fd);
+    buf[n > 0 ? n : 0] = '\0';
+    if (strstr(buf, "populated 1") && strstr(buf, "frozen 1")) {
+        snprintf(state, size, "frozen");
+    } else if (strstr(buf, "populated 1")) {
+        snprintf(path, sizeof path, "%s/%.63s.ready", LAUNCH_APP_RUN, name);
+        snprintf(state, size, "%s", access(path, F_OK) == 0 ? "running" : "starting");
+    } else {
+        snprintf(state, size, "closed");
     }
 }
 
-static int launch_in_home(const char *name)
+static const char *launch_state_label(const char *state)
 {
-    struct launch_setting s = { name, 0 };
-    rc_read(launch_program_setting, &s);
-    return s.found;
+    if (strcmp(state, "running") == 0) return _("running");
+    if (strcmp(state, "frozen") == 0) return _("frozen");
+    if (strcmp(state, "starting") == 0) return _("starting");
+    if (strcmp(state, "closed") == 0) return _("closed");
+    return state;
+}
+
+static const char *launch_label(const struct launch_item *it)
+{
+    if (it->kind == LAUNCH_HEADER) return _(launch_section_titles[it->section]);
+    if (it->kind == LAUNCH_HOME) return _("home");
+    if (it->kind == LAUNCH_REBOOT) return _("reboot");
+    if (it->kind == LAUNCH_POWEROFF) return _("power off");
+    return it->name;
+}
+
+static const char *launch_detail(const struct launch_item *it)
+{
+    if (it->kind == LAUNCH_HEADER) return NULL;
+    if (it->kind == LAUNCH_HOME || it->kind == LAUNCH_REBOOT || it->kind == LAUNCH_POWEROFF) return _("full screen");
+    if (it->kind == LAUNCH_CONTAINER) return launch_state_label(it->state);
+    return it->can_window ? _("window") : _("full screen");
+}
+
+static void launch_add(enum launch_kind kind, enum section section, const char *name,
+                       const char *state, int can_window, int builtin_files)
+{
+    if (launcher.n >= LAUNCH_MAX) return;
+    struct launch_item *it = &launcher.items[launcher.n++];
+    memset(it, 0, sizeof *it);
+    it->kind = kind;
+    it->section = section;
+    if (name) snprintf(it->name, sizeof it->name, "%s", name);
+    if (state) snprintf(it->state, sizeof it->state, "%s", state);
+    it->can_window = can_window;
+    it->builtin_files = builtin_files;
+}
+
+struct launch_rc_scan {
+    enum section section;
+    int added_header;
+};
+
+static void launch_rc_program(const char *key, const char *value, void *arg)
+{
+    struct launch_rc_scan *scan = arg;
+    if (strncmp(key, "program_", 8) != 0 || key[8] == '\0' ||
+        strcmp(key + 8, "desktop") == 0 || strcmp(key + 8, "files") == 0 ||
+        !value[strspn(value, " \t")] || strlen(key + 8) >= OPEN_NAME ||
+        program_section(key + 8) != scan->section || launcher.n >= LAUNCH_MAX) {
+        return;
+    }
+    for (int i = 0; i < launcher.n; i++) {
+        if (launcher.items[i].kind == LAUNCH_PROGRAM && strcmp(launcher.items[i].name, key + 8) == 0) {
+            return;
+        }
+    }
+    if (!scan->added_header) {
+        launch_add(LAUNCH_HEADER, scan->section, NULL, NULL, 0, 0);
+        scan->added_header = 1;
+    }
+    launch_add(LAUNCH_PROGRAM, scan->section, key + 8, NULL, launch_window_capable(key + 8), 0);
 }
 
 /* The width of s in cells (2 for a wide character): the same at any size. */
@@ -3728,39 +3970,43 @@ static int launch_cells(const char *s)
     return f && cw > 0 ? panel_text_width(s, f) / cw : (int)strlen(s);
 }
 
-/* The entries: home, then the programs and the system's, as home groups its
- * own (fixed here: the bar has no list to read the groups from). One not
- * installed (view without its libraries, the mixer without Audio) is left
- * out, as is a full screen one home does not list; then the widths of the
- * name column and of the whole. */
 static void launch_items(void)
 {
-    int settings = launch_installed(LAUNCH_BIN "/settings");
-    int mixer = launch_installed(LAUNCH_BIN "/term") && launch_installed(LAUNCH_MIXER);
-    int settings_home = launch_in_home("settings"), mixer_home = launch_in_home("mixer");
+    char containers[64][OPEN_NAME];
+    int ncontainers = open_containers(containers, 64);
     launcher.n = 0;
-    launch_add(LAUNCH_HOME, "home", 0);
-    launch_add(LAUNCH_HEADER, NULL, 0);
-    if (launch_installed(LAUNCH_BIN "/view")) launch_add(LAUNCH_WINDOW, "view", 0);
-    if (launch_in_home("view")) launch_add(LAUNCH_HOME_PROGRAM, "view", 0);
-    if (launch_installed(LAUNCH_BIN "/files")) launch_add(LAUNCH_WINDOW, "files", 0);
-    launch_add(LAUNCH_HOME_FILES, "files", 0); /* home's own file manager */
-    if (settings || mixer || settings_home || mixer_home) launch_add(LAUNCH_HEADER, NULL, 1);
-    if (settings) launch_add(LAUNCH_WINDOW, "settings", 0);
-    if (settings_home) launch_add(LAUNCH_HOME_PROGRAM, "settings", 0);
-    if (mixer) launch_add(LAUNCH_WINDOW, "mixer", 0);
-    if (mixer_home) launch_add(LAUNCH_HOME_PROGRAM, "mixer", 0);
+    launch_add(LAUNCH_HOME, SECTION_CONTAINERS, "home", NULL, 0, 0);
+    if (ncontainers > 0) {
+        launch_add(LAUNCH_HEADER, SECTION_CONTAINERS, NULL, NULL, 0, 0);
+        for (int i = 0; i < ncontainers; i++) {
+            char st[16];
+            launch_container_state(containers[i], st, sizeof st);
+            launch_add(LAUNCH_CONTAINER, SECTION_CONTAINERS, containers[i], st, 0, 0);
+        }
+    }
+    launch_add(LAUNCH_HEADER, SECTION_PROGRAMS, NULL, NULL, 0, 0);
+    launch_add(LAUNCH_PROGRAM, SECTION_PROGRAMS, "files", NULL, launch_window_capable("files"), 1);
+    struct launch_rc_scan prog_scan = { SECTION_PROGRAMS, 1 };
+    rc_read(launch_rc_program, &prog_scan);
+    struct launch_rc_scan sys_scan = { SECTION_SYSTEM, 0 };
+    rc_read(launch_rc_program, &sys_scan);
+    if (!sys_scan.added_header) launch_add(LAUNCH_HEADER, SECTION_SYSTEM, NULL, NULL, 0, 0);
+    launch_add(LAUNCH_REBOOT, SECTION_SYSTEM, "reboot", NULL, 0, 0);
+    launch_add(LAUNCH_POWEROFF, SECTION_SYSTEM, "power off", NULL, 0, 0);
+
     launcher.name_cols = 0;
     for (int i = 0; i < launcher.n; i++) {
-        int label = launch_cells(launch_label(&launcher.items[i]));
-        if (launch_action(&launcher.items[i]) && label > launcher.name_cols) launcher.name_cols = label;
+        const struct launch_item *it = &launcher.items[i];
+        if (it->kind == LAUNCH_HEADER) continue;
+        int label = launch_cells(launch_label(it));
+        if (label > launcher.name_cols) launcher.name_cols = label;
     }
     launcher.cols = launch_cells(launch_hint()) + 2;
     for (int i = 0; i < launcher.n; i++) {
         const struct launch_item *it = &launcher.items[i];
-        const char *action = launch_action(it);
+        const char *detail = launch_detail(it);
         int width = it->kind == LAUNCH_HEADER ? 1 + launch_cells(launch_label(it)) + 1 :
-                    action ? 3 + launcher.name_cols + 2 + launch_cells(action) + 1 :
+                    detail ? 3 + launcher.name_cols + 3 + launch_cells(detail) + 2 :
                     3 + launch_cells(launch_label(it)) + 1;
         if (width > launcher.cols) launcher.cols = width;
     }
@@ -3776,29 +4022,105 @@ static int launch_step(int from, int dir)
     return from;
 }
 
-/* Rows: an entry each, a blank one, the keys. */
+static int launch_step_count(int from, int steps)
+{
+    int dir = steps < 0 ? -1 : 1, count = steps < 0 ? -steps : steps, pos = from;
+    for (int i = 0; i < count; i++) {
+        int next = launch_step(pos, dir);
+        if (next == pos) break;
+        pos = next;
+    }
+    return pos;
+}
+
+static int launcher_max_rows(struct wl_output *out, uint32_t s120, int ch)
+{
+    struct bar *b = NULL;
+    for (struct bar *p = bars; p; p = p->next) {
+        if (p->output == out || (!out && !b)) b = p;
+    }
+    int sh = 0;
+    if (b && b->screen_h > 0) {
+        sh = (int)b->screen_h;
+    } else if (b && b->mode_h > 0) {
+        int phys_h = (b->transform & 1) ? b->mode_w : b->mode_h;
+        sh = (int)(((uint64_t)phys_h * 120 + s120 - 1) / s120);
+    }
+    if (sh <= 0 || ch <= 0) return launcher.n;
+    int avail_logical = sh - launcher_ovl.top - 8;
+    int avail_px = (int)((uint64_t)(avail_logical > 0 ? avail_logical : 0) * s120 / 120);
+    int fit = avail_px / ch - 2;
+    return fit < 4 ? 4 : fit;
+}
+
+static void launcher_keep_visible(int vis)
+{
+    if (vis >= launcher.n) {
+        launcher.scroll = 0;
+        return;
+    }
+    int top_want = launcher.sel;
+    if (top_want > 0 && launcher.items[top_want - 1].kind == LAUNCH_HEADER) {
+        top_want--;
+    }
+    if (launcher.scroll > top_want) launcher.scroll = top_want;
+    if (launcher.sel >= launcher.scroll + vis) launcher.scroll = launcher.sel - vis + 1;
+    int max_scroll = launcher.n - vis;
+    if (launcher.scroll > max_scroll) launcher.scroll = max_scroll;
+    if (launcher.scroll < 0) launcher.scroll = 0;
+}
+
+/* Rows: up to vis entries starting at scroll, a blank one, the keys. */
 static void render_launcher(void)
 {
     struct overlay *o = &launcher_ovl;
-    if (!launcher_shown || !compositor || !layer_shell || !overlay_begin(o, launcher.cols, launcher.n + 2)) {
+    if (!launcher_shown || !compositor || !layer_shell) return;
+    struct wl_output *out = o->pin ? o->pin : focused_output();
+    uint32_t s120 = output_scale(out);
+    int row_px = text_px(s120 / 120.0), cw = 0, ch = row_px;
+    const struct panel_font *font = panel_font(row_px, 1);
+    if (font) panel_font_size(font, &cw, &ch);
+    int max_vis = launcher_max_rows(out, s120, ch);
+    int vis = launcher.n < max_vis ? launcher.n : max_vis;
+    if (vis < 1 && launcher.n > 0) vis = 1;
+    if (launcher.vis != vis) {
+        launcher.vis = vis;
+        launcher_keep_visible(vis);
+    } else {
+        int max_scroll = launcher.n > vis ? launcher.n - vis : 0;
+        if (launcher.scroll > max_scroll) launcher.scroll = max_scroll;
+        if (launcher.scroll < 0) launcher.scroll = 0;
+    }
+    if (!overlay_begin(o, launcher.cols, vis + 2)) {
         return;
     }
     ovl_clear(o, OVL_BG);
-    for (int i = 0; i < launcher.n; i++) {
+    for (int r = 0; r < vis && launcher.scroll + r < launcher.n; r++) {
+        int i = launcher.scroll + r;
         const struct launch_item *it = &launcher.items[i];
-        const char *action = launch_action(it);
+        const char *detail = launch_detail(it);
         uint32_t bg = i == launcher.sel ? TOAST_BG : OVL_BG;
         if (it->kind == LAUNCH_HEADER) {
-            ovl_text(o, 1, i, launch_label(it), OVL_FG2, OVL_BG);
+            ovl_text(o, 1, r, launch_label(it), OVL_FG2, OVL_BG);
             continue;
         }
-        ovl_fill(o, 0, i, 0, 1, bg);
-        ovl_text(o, 3, i, launch_label(it), OVL_FG1, bg);
-        if (action) {
-            ovl_text(o, 3 + launcher.name_cols + 2, i, action, OVL_FG1, bg);
+        ovl_fill(o, 0, r, 0, 1, bg);
+        ovl_text(o, 3, r, launch_label(it), OVL_FG1, bg);
+        if (detail) {
+            ovl_text(o, 3 + launcher.name_cols + 3, r, detail, i == launcher.sel ? OVL_FG1 : OVL_FG2, bg);
         }
     }
-    ovl_text(o, 1, launcher.n + 1, launch_hint(), OVL_FG2, OVL_BG);
+    if (launcher.n > vis) {
+        char ind[32];
+        snprintf(ind, sizeof ind, "%s %d-%d/%d %s", launcher.scroll > 0 ? "^" : " ",
+                 launcher.scroll + 1, launcher.scroll + vis, launcher.n,
+                 launcher.scroll + vis < launcher.n ? "v" : " ");
+        int icells = launch_cells(ind);
+        if (launcher.cols > icells + 1) {
+            ovl_text(o, launcher.cols - icells - 1, vis, ind, OVL_FG2, OVL_BG);
+        }
+    }
+    ovl_text(o, 1, vis + 1, launch_hint(), OVL_FG2, OVL_BG);
     overlay_end(o);
 }
 
@@ -3826,6 +4148,12 @@ static void catch_configure(void *data, struct zwlr_layer_surface_v1 *surface, u
     struct bar *b = data;
     uint32_t *px;
     zwlr_layer_surface_v1_ack_configure(surface, serial);
+    if (height > 0 && b->screen_h != height) {
+        b->screen_h = height;
+        if (launcher_shown && b->output == (launcher_ovl.pin ? launcher_ovl.pin : focused_output())) {
+            render_launcher();
+        }
+    }
     int w = b->catch_viewport ? 1 : (int)width, h = b->catch_viewport ? 1 : (int)height;
     struct wl_buffer *buf = width && height ? create_shm_buffer(w, h, &px) : NULL;
     if (!buf) {
@@ -3896,6 +4224,9 @@ static void launcher_open(struct bar *b)
     }
     launch_items();
     launcher.sel = launch_step(-1, 1);
+    launcher.scroll = 0;
+    launcher.vis = 0;
+    launcher.wheel = 0;
     launcher.focus_mark = focus_changes;
     launcher_ovl.pin = b ? b->output : NULL;
     launcher_ovl.top = (int)bar_height(output_scale(b ? b->output : focused_output())); /* under the bar */
@@ -3944,49 +4275,90 @@ static void launcher_tick(void)
     }
 }
 
-static void launcher_run(int i)
+static void launcher_run(int i, int full_screen)
 {
-    enum launch_kind kind = launcher.items[i].kind;
-    const char *name = launcher.items[i].name;
-    char home[4096], dirs[256];
+    if (i < 0 || i >= launcher.n || launcher.items[i].kind == LAUNCH_HEADER) return;
+    struct launch_item it = launcher.items[i];
+    if (full_screen && it.kind == LAUNCH_CONTAINER) {
+        return; /* containers only open on this desktop */
+    }
     launcher_close();
-    if (kind == LAUNCH_WINDOW) {
-        say("locachy-bar: launcher: %s in a window", name);
-        window_open(name, NULL);
-    } else if (kind == LAUNCH_HOME_FILES) {
+    if (it.kind == LAUNCH_HOME) {
+        say("locachy-bar: launcher: home");
+        kill(getppid(), SIGUSR1);
+    } else if (it.kind == LAUNCH_REBOOT || it.kind == LAUNCH_POWEROFF) {
+        const char *request = it.kind == LAUNCH_REBOOT ? HOME_REQUEST_REBOOT : HOME_REQUEST_POWEROFF;
+        char with[OPEN_NAME + 16];
+        snprintf(with, sizeof with, OPEN_PROGRAM "%s", request);
+        if (open_in_home(with, "") < 0) {
+            say("locachy-bar: launcher: cannot ask home to confirm %s", it.name);
+            return;
+        }
+        kill(getppid(), SIGUSR1); /* home's existing Y/N confirmation owns power */
+    } else if (it.kind == LAUNCH_CONTAINER) {
+        if (bar_needs_own_tor(it.name)) {
+            say("locachy-bar: launcher: %s needs own-tor confirmation", it.name);
+            ask_own_tor(it.name);
+            return;
+        }
+        say("locachy-bar: launcher: open container %s", it.name);
+        container_open(it.name, 0);
+    } else if (!full_screen && it.can_window) {
+        say("locachy-bar: launcher: %s in a window", it.name);
+        window_open(it.name, NULL);
+    } else if (it.builtin_files) {
+        char home[4096], dirs[256];
         open_user_dirs(home, sizeof home, dirs, sizeof dirs);
         if (!home[0] || open_in_home(NULL, home) < 0) {
             say("locachy-bar: launcher: cannot ask home to show the home folder");
             return;
         }
         say("locachy-bar: launcher: home's file manager at %s", home);
-        kill(getppid(), SIGUSR1); /* locachy-seat asks for home */
-    } else if (kind == LAUNCH_HOME_PROGRAM) {
-        char with[OPEN_NAME];
-        snprintf(with, sizeof with, OPEN_PROGRAM "%s", name);
+        kill(getppid(), SIGUSR1);
+    } else {
+        char with[OPEN_NAME + 16];
+        snprintf(with, sizeof with, OPEN_PROGRAM "%s", it.name);
         if (open_in_home(with, "") < 0) {
-            say("locachy-bar: launcher: cannot ask home to run %s", name);
+            say("locachy-bar: launcher: cannot ask home to run %s", it.name);
             return;
         }
-        say("locachy-bar: launcher: %s full screen, run by home", name);
-        kill(getppid(), SIGUSR1);
-    } else if (kind == LAUNCH_HOME) {
-        say("locachy-bar: launcher: home");
+        say("locachy-bar: launcher: %s full screen, run by home", it.name);
         kill(getppid(), SIGUSR1);
     }
 }
 
 /* A key pressed (value 1) or repeated (2) while it is up. */
-static void launcher_key(int code, int value)
+static void launcher_key(int code, xkb_keysym_t sym, int value)
 {
+    int page = launcher.vis > 1 ? launcher.vis - 1 : 1;
     if (code == KEY_UP || code == KEY_DOWN) {
         int next = launch_step(launcher.sel, code == KEY_UP ? -1 : 1);
-        if (next != launcher.sel) {
+        if (next != launcher.sel || (launcher.vis > 0 &&
+            (launcher.sel < launcher.scroll || launcher.sel >= launcher.scroll + launcher.vis))) {
             launcher.sel = next;
+            if (launcher.vis > 0) launcher_keep_visible(launcher.vis);
+            render_launcher();
+        }
+    } else if (code == KEY_PAGEUP || code == KEY_PAGEDOWN) {
+        int next = launch_step_count(launcher.sel, code == KEY_PAGEUP ? -page : page);
+        if (next != launcher.sel || (launcher.vis > 0 &&
+            (launcher.sel < launcher.scroll || launcher.sel >= launcher.scroll + launcher.vis))) {
+            launcher.sel = next;
+            if (launcher.vis > 0) launcher_keep_visible(launcher.vis);
+            render_launcher();
+        }
+    } else if (code == KEY_HOME || code == KEY_END) {
+        int next = launch_step(code == KEY_HOME ? -1 : launcher.n, code == KEY_HOME ? 1 : -1);
+        if (next >= 0 && next < launcher.n && (next != launcher.sel || (launcher.vis > 0 &&
+            (launcher.sel < launcher.scroll || launcher.sel >= launcher.scroll + launcher.vis)))) {
+            launcher.sel = next;
+            if (launcher.vis > 0) launcher_keep_visible(launcher.vis);
             render_launcher();
         }
     } else if (value == 1 && (code == KEY_ENTER || code == KEY_KPENTER)) {
-        launcher_run(launcher.sel);
+        launcher_run(launcher.sel, 0);
+    } else if (value == 1 && !ctrl && !alt && !meta && (sym == XKB_KEY_f || sym == XKB_KEY_F)) {
+        launcher_run(launcher.sel, 1);
     } else if (value == 1 && code == KEY_ESC) {
         launcher_close();
     }
@@ -3997,8 +4369,10 @@ static int launcher_row(double y)
 {
     struct overlay *o = &launcher_ovl;
     uint32_t s120 = o->viewport ? o->scale120 : 120;
-    int row = o->ch > 0 && y >= 0 ? (int)(y * s120 / 120) / o->ch : -1;
-    return row >= 0 && row < launcher.n && launcher.items[row].kind != LAUNCH_HEADER ? row : -1;
+    int r = o->ch > 0 && y >= 0 ? (int)(y * s120 / 120) / o->ch : -1;
+    if (r < 0 || r >= launcher.vis) return -1;
+    int i = launcher.scroll + r;
+    return i >= 0 && i < launcher.n && launcher.items[i].kind != LAUNCH_HEADER ? i : -1;
 }
 
 static void launcher_hover(double y)
@@ -4013,9 +4387,34 @@ static void launcher_hover(double y)
 static void launcher_click(double y, uint32_t button)
 {
     int i = launcher_row(y);
-    if (button == BTN_LEFT && i >= 0) {
-        launcher_run(i);
+    if (i < 0) return;
+    if (button == BTN_LEFT) {
+        launcher_run(i, 0);
+    } else if (button == BTN_RIGHT) {
+        launcher_run(i, 1);
     }
+}
+
+static void launcher_wheel(double delta)
+{
+    if (!launcher_shown || launcher.n <= launcher.vis) return;
+    launcher.wheel += delta;
+    int changed = 0, max_scroll = launcher.n - launcher.vis;
+    while (launcher.wheel >= 10) {
+        launcher.wheel -= 10;
+        if (launcher.scroll < max_scroll) {
+            launcher.scroll++;
+            changed = 1;
+        }
+    }
+    while (launcher.wheel <= -10) {
+        launcher.wheel += 10;
+        if (launcher.scroll > 0) {
+            launcher.scroll--;
+            changed = 1;
+        }
+    }
+    if (changed) render_launcher();
 }
 
 /* An overlay on the screen goes with the focus to another screen; one
@@ -4036,8 +4435,9 @@ static void close_chooser(void)
 {
     choose.client = -1;
     overlay_destroy(&question);
-    set_grab(want_grab);
-    wl_display_flush(display);
+    want_grab = grab_wanted();
+    if (keys_down == 0) set_grab(want_grab);
+    if (display) wl_display_flush(display);
 }
 
 static void open_chooser(int client, const char *prefer)
@@ -4064,7 +4464,8 @@ static void open_chooser(int client, const char *prefer)
             }
         }
     }
-    set_grab(1); /* the choice is the bar's, not the application's */
+    want_grab = grab_wanted();
+    if (keys_down == 0) set_grab(want_grab);
     render_chooser();
 }
 
@@ -4129,7 +4530,7 @@ static void open_request(void)
         answer(client, "error the shared display is not on the screen%s", "");
         return;
     }
-    if (choose.client >= 0 || again.shown) {
+    if (choose.client >= 0 || again.shown || again.pending) {
         answer(client, "error a question is on the screen%s", "");
         return;
     }
@@ -4317,6 +4718,7 @@ static void handle_kbd_event(int fd)
         }
 
         if (ev.value == 0) {
+            if (keys_down == 0) again.wait_release = 0;
             if (grabbed) {
                 int epoch = input_epoch;
                 ime_key_event(caps_key ? XKB_KEY_Caps_Lock : sym_before, mask_before | (1u << 30));
@@ -4336,8 +4738,9 @@ static void handle_kbd_event(int fd)
             continue;
         }
 
-        if (choose.client >= 0 || again.shown) {
-            if (!is_mod) {
+        if (question_active()) {
+            if (!is_mod && ev.value == 1 && !was_down &&
+                (again.shown || choose.client >= 0)) {
                 chooser_key(ev.code);
             }
             continue;
@@ -4354,7 +4757,7 @@ static void handle_kbd_event(int fd)
         }
         if (launcher_shown && !act) {
             if (!is_mod) {
-                launcher_key(ev.code, ev.value);
+                launcher_key(ev.code, sym_before, ev.value);
             }
             continue;
         }
@@ -4468,6 +4871,32 @@ static void handle_kbd_event(int fd)
     }
 }
 
+static void out_geometry(void *data, struct wl_output *output, int32_t x, int32_t y,
+                         int32_t pw, int32_t ph, int32_t subpixel, const char *make,
+                         const char *model, int32_t transform)
+{
+    struct bar *b = data;
+    (void)output; (void)x; (void)y; (void)pw; (void)ph; (void)subpixel; (void)make; (void)model;
+    b->transform = transform;
+}
+
+static void out_mode(void *data, struct wl_output *output, uint32_t flags, int32_t width, int32_t height, int32_t refresh)
+{
+    struct bar *b = data;
+    (void)output; (void)refresh;
+    if (flags & WL_OUTPUT_MODE_CURRENT) {
+        b->mode_w = width;
+        b->mode_h = height;
+    }
+}
+
+static void out_done(void *data, struct wl_output *output) { (void)data; (void)output; }
+static void out_scale(void *data, struct wl_output *output, int32_t factor) { (void)data; (void)output; (void)factor; }
+
+static const struct wl_output_listener output_listener = {
+    .geometry = out_geometry, .mode = out_mode, .done = out_done, .scale = out_scale,
+};
+
 static void reg_global(void *data, struct wl_registry *reg, uint32_t name,
                        const char *iface, uint32_t ver)
 {
@@ -4498,6 +4927,7 @@ static void reg_global(void *data, struct wl_registry *reg, uint32_t name,
         if (b) {
             b->name = name;
             b->output = wl_registry_bind(reg, name, &wl_output_interface, 1);
+            wl_output_add_listener(b->output, &output_listener, b);
             b->w = 2560;
             b->h = PANEL_H;
             b->since = -10;
@@ -4643,7 +5073,10 @@ static int wait_ms(void)
     if (tray >= 0) DUE(tray);
     if (!host_notes.conn && !host_notes.connecting) DUE(host_notes.retry_at);
     if (again.watch[0]) DUE(again.watch_until);
-    if (again.pending && !again.shown) DUE(active && choose.client < 0 ? now : again.until);
+    if (again.pending || again.shown) {
+        DUE(again.until);
+        if (again.pending && !again.shown && active && choose.client < 0) DUE(now);
+    }
     if (exec_wanted && !exec_busy()) DUE(now + 1.0); /* the new executable settling */
     for (int i = 0; active && i < nnotes; i++) {
         if (notes[i].time > 0 && notes[i].shown_at > 0) DUE(notes[i].shown_at + notes[i].time / 1000.0);

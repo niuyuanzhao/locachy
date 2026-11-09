@@ -6,6 +6,7 @@
 #endif
 static char fixture_dir[256] = "/tmp";
 #define HOME_APP_RUN fixture_dir
+#define HOME_CONT_CONF fixture_dir
 #define main home_program_main
 #include "../progs/home.c"
 #include "i18n-stub.h"
@@ -40,13 +41,16 @@ void base_apps(char *out, size_t size)
              gamma_listed ? "gamma\tclosed\t0\t0\t\n" : "");
 }
 
+static int own_tor_open_calls, own_tor_start_calls;
 int base_app_action(const char *action, const char *name, char *why, size_t size)
 {
     assert(strcmp(name, "alpha") == 0 || strcmp(name, "beta") == 0);
     if (strcmp(action, "start") == 0 || strcmp(action, "resume") == 0) start_calls++;
+    else if (strcmp(action, "start-own-tor") == 0) own_tor_start_calls++;
     else if (strcmp(action, "freeze") == 0) freeze_calls++;
     else if (strcmp(action, "stop") == 0) stop_calls++;
     else if (strcmp(action, "show") == 0 || strcmp(action, "open") == 0) show_calls++;
+    else if (strcmp(action, "open-own-tor") == 0) own_tor_open_calls++;
     else assert(0);
     snprintf(why, size, "accepted");
     return 0;
@@ -733,10 +737,69 @@ int main(int argc, char **argv)
     folder_asked = 1;
     assert(take_requests() == 1 && opens == before + 1 && files_views == views + 1 && !program_asked[0]);
     folder_asked = 0;
+    /* Desktop power items use reserved names, never arbitrary program names,
+     * and only open the same Y/N prompt as selecting power in home. */
+    static const char *const power_collision[] = {
+        "program_reboot", "/usr/local/bin/note",
+        "program_poweroff", "/usr/local/bin/note", NULL
+    };
+    rc_settings = power_collision;
+    int rb = reboots, po = poweroffs;
+    before = opens;
+    snprintf(program_asked, sizeof program_asked, "%s", HOME_REQUEST_REBOOT);
+    assert(take_requests() && confirming == CONF_REBOOT && selected == napps + nentries &&
+           opens == before && reboots == rb && poweroffs == po);
+    confirm_key('\n'); /* launcher Enter must not authorize reboot */
+    assert(confirming == CONF_NONE && reboots == rb && poweroffs == po);
+    snprintf(program_asked, sizeof program_asked, "%s", HOME_REQUEST_POWEROFF);
+    assert(take_requests() && confirming == CONF_POWEROFF && selected == napps + nentries + 1 &&
+           opens == before && reboots == rb && poweroffs == po);
+    confirm_key('n');
+    assert(confirming == CONF_NONE && reboots == rb && poweroffs == po);
+    snprintf(program_asked, sizeof program_asked, "reboot");
+    assert(take_requests() && confirming == CONF_NONE && opens == before + 1 &&
+           !strcmp(opened_task, "/usr/local/bin/note") && reboots == rb && poweroffs == po);
     rc_settings = default_settings;
     load();
+    puts("PASS reserved desktop power requests only open home Y/N prompts; Enter/N cancel and ordinary program names do not collide");
     puts("PASS a program asked for by name runs from home's own list as Enter runs it (view, settings, mixer); "
          "files, desktop, unlisted names and paths run nothing; a folder asked for meanwhile follows");
+
+    /* A Tor container (network="1" and tor="1") while service_tor is off:
+     * Enter and R warn first (CONF_OWN_TOR), N/Esc cancels, Y/Enter starts
+     * with open-own-tor / start-own-tor; with service_tor on, no warning. */
+    char alpha_conf[320];
+    snprintf(alpha_conf, sizeof alpha_conf, "%s/alpha.conf", fixture_dir);
+    FILE *cf = fopen(alpha_conf, "w");
+    assert(cf && fputs("package=\"tor-browser-bin\"\ncommand=\"/usr/bin/tor-browser\"\nnetwork=\"1\"\ntor=\"1\"\n", cf) >= 0 &&
+           fclose(cf) == 0);
+    running = 0;
+    refresh();
+    selected = 0;
+    assert(prepare_own_tor(1) && confirming == CONF_OWN_TOR);
+    confirm_key('n');
+    assert(confirming == CONF_NONE && own_tor_open_calls == 0);
+    assert(prepare_own_tor(1) && confirming == CONF_OWN_TOR);
+    confirm_key('\n');
+    assert(confirming == CONF_NONE && own_tor_open_calls == 1);
+    act("start");
+    assert(confirming == CONF_OWN_TOR);
+    confirm_key('y');
+    assert(confirming == CONF_NONE && own_tor_start_calls == 1);
+    apps[0].marked = apps[1].marked = 1;
+    int regular_before = start_calls, own_before = own_tor_start_calls;
+    assert(prepare_own_tor(0) && nstop == 2 && own_tor_count == 1);
+    confirm_key('y');
+    assert(confirming == CONF_NONE && own_tor_count == 0 &&
+           own_tor_start_calls == own_before + 1 && start_calls == regular_before + 1);
+    apps[0].marked = apps[1].marked = 0;
+    puts("PASS a mixed selection counts only the affected Tor Browser and preserves ordinary resume actions");
+    static const char *const tor_on_rc[] = { "service_tor", "/usr/local/lib/locachy/tor-client", NULL };
+    rc_settings = tor_on_rc;
+    assert(!prepare_own_tor(1));
+    rc_settings = default_settings;
+    unlink(alpha_conf);
+    puts("PASS Tor container with service_tor off warns in home and sends open-own-tor / start-own-tor on Y or Enter");
     free(apps);
     free(app_data);
     return 0;

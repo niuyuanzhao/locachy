@@ -5,5 +5,8 @@ The full-screen installer runs on this console (tty1); to start it again:
 Without it: nmtui (the network), then locachy-install (asks on the console)
 or locachy-install --help (every option).
 The running installation environment is separate from the target root.
-SSH and cloud provisioning are disabled; this console is local root.
+The installer menu offers Rescue mode and Terminal as separate programs.
+Rescue mode also has its own boot entry; it asks before disk unlock or cable access.
+The ordinary SSH service and cloud provisioning are disabled.
+Only Rescue can explicitly start its separate authenticated cable service.
 

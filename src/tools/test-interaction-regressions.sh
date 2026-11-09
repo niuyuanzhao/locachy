@@ -30,6 +30,9 @@ timeout 60 "$out/firmware" "$out/firmware-fixtures"
 "${cc[@]}" $(pkg-config --cflags json-c) "$src/tools/test-installer.c" "$src/base/ui.c" "$src/base/textsel.c" \
     "${link[@]}" $(pkg-config --libs json-c) -o "$out/installer"
 timeout 60 "$out/installer" "$out/installer-fixtures"
+"${cc[@]}" $(pkg-config --cflags json-c) "$src/tools/test-rescue.c" "$src/base/ui.c" "$src/base/textsel.c" \
+    "${link[@]}" $(pkg-config --libs json-c) -o "$out/rescue"
+timeout 90 "$out/rescue" "$out/rescue-fixtures"
 "${cc[@]}" "$src/progs/keytable.c" $(pkg-config --cflags --libs xkbcommon) -o "$out/keytable"
 "${cc[@]}" "$src/tools/test-keytable.c" "${link[@]}" -o "$out/keytable-test"
 LC_ALL=C.UTF-8 "$out/keytable-test" "$out/keytable" "$out/keytable-fixtures"
@@ -41,6 +44,8 @@ for test in keys-name keyboard-devices term-clipboard screen-mirror modules-even
     "${cc[@]}" "$src/tools/test-$test.c" "${link[@]}" -o "$out/$test"
     "$out/$test"
 done
+cc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -I"$src/base/include" "$src/tools/test-tor-browser.c" -o "$out/tor-browser"
+"$out/tor-browser"
 # keyboard-locks: one Caps/Num Lock across process 1, a direct program and the shared display.
 for test in pointer input-hotplug keyboard-locks; do
     "${cc[@]}" "$src/tools/test-$test.c" "${link[@]}" -lm -o "$out/$test"
@@ -79,11 +84,11 @@ timeout 30 dbus-run-session -- "$out/host-notify"
 "${cc[@]}" -fsanitize=address,undefined "$src/tools/test-drives-eject.c" -o "$out/drives-eject"
 "$out/drives-eject" "$out/drives-eject-fixtures"
 for test in gestures libinput audio-packages audio-client audio-isolation face-camera container-migration kernel-choice \
-            boot-kernel root-boot-unit install apps-catalog host-app-build declare-packages efi init-unlock libpaper rclone \
+            boot-kernel root-boot-unit install apps-catalog host-app-build declare-packages efi init-unlock init-storage libpaper rclone \
             local-packages local-build repos firmware pkg-sync; do
     python3 -B "$src/tools/test-$test.py" "$out"
 done
-for test in xwayland tpm; do # no scratch directory
+for test in xwayland tpm rescue-dispatch rescue-storage rescue-link; do # no scratch directory
     python3 -B "$src/tools/test-$test.py"
 done
 bash "$src/tools/test-timezone-client.sh" "$out/timezone"

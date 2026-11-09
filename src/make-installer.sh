@@ -71,6 +71,7 @@ cp -a "$baseline/." "$profile/"
 # The upstream profile remains the template. These are only image metadata
 # overrides, not a copied archiso implementation or a replacement initramfs.
 cat "$src/installer/profiledef.append" >>"$profile/profiledef.sh"
+python3 -I "$src/installer/rescue-boot-entries.py" "$profile"
 # archiso honors a nondefault profile CacheDir. Do not reuse a host cache
 # which may contain a differently built package with the same name/version.
 awk -v cache="$work/cache" '{print; if ($0 == "[options]") print "CacheDir = " cache}' \
@@ -111,7 +112,13 @@ PY
 mkdir -p "$root/usr/local/share/locachy"
 why=$(python3 -I "$src/link/locachy_apps.py" catalog "$apps_src" "$root/usr/local/share/locachy/apps-catalog" \
       medium "$apps_repo" "$apps_branch" "$apps_commit" 2>&1) || die "the app presets in $apps_src: $why"
+mkdir -p "$root/usr/local/lib/locachy"
 install -m 755 "$src/installer/locachy-install" "$root/usr/local/bin/locachy-install"
+install -m 755 "$src/installer/locachy-rescue" "$root/usr/local/bin/locachy-rescue"
+install -m 755 "$src/installer/locachy-rescue-storage" "$root/usr/local/lib/locachy/rescue-storage"
+install -m 755 "$src/installer/rescue-link.py" "$root/usr/local/lib/locachy/rescue-link.py"
+install -m 644 "$src/installer/locachy-rescue.service" "$root/etc/systemd/system/locachy-rescue.service"
+install -m 644 "$src/installer/locachy-rescue-link.service" "$root/etc/systemd/system/locachy-rescue-link.service"
 install -m 644 "$src/installer/issue" "$root/etc/issue"
 install -m 644 "$src/installer/NetworkManager.conf" "$root/etc/NetworkManager/conf.d/20-locachy-installer.conf"
 # The full-screen installer on tty1 (root logged in there, as archiso's
@@ -123,6 +130,10 @@ install -m 644 "$src/installer/bash_profile" "$root/root/.bash_profile"
 install -m 644 "$src/installer/locachy-clipboard.service" "$root/etc/systemd/system/locachy-clipboard.service"
 mkdir -p "$root/etc/systemd/system/multi-user.target.wants"
 ln -sfn ../locachy-clipboard.service "$root/etc/systemd/system/multi-user.target.wants/locachy-clipboard.service"
+ln -sfn ../locachy-rescue.service "$root/etc/systemd/system/multi-user.target.wants/locachy-rescue.service"
+# The rescue boot entry runs its own UI service on tty1, not an autologin shell.
+printf '[Unit]\nConditionKernelCommandLine=!locachy.mode=rescue\n' \
+    >"$root/etc/systemd/system/getty@tty1.service.d/rescue.conf"
 
 # Only local console access is enabled by the live image. Do not carry the
 # baseline's passwordless-root SSH service or cloud-config provisioning path.
@@ -143,7 +154,12 @@ ln -sfn /run/systemd/resolve/stub-resolv.conf "$root/etc/resolv.conf"
 # archiso copies overlay files as 0644 unless its profile specifies otherwise.
 # Preserve executable source entry points without granting execute to data/code.
 printf '\nfile_permissions+=(\n  ["/usr/local/bin/locachy-install"]="0:0:755"\n' >>"$profile/profiledef.sh"
-printf '  ["/usr/local/bin/installer"]="0:0:755"\n  ["/usr/local/bin/term"]="0:0:755"\n' >>"$profile/profiledef.sh"
+for name in installer term rescue locachy-rescue; do
+    printf '  ["/usr/local/bin/%s"]="0:0:755"\n' "$name" >>"$profile/profiledef.sh"
+done
+for name in rescue-storage rescue-link.py; do
+    printf '  ["/usr/local/lib/locachy/%s"]="0:0:755"\n' "$name" >>"$profile/profiledef.sh"
+done
 printf '  ["/usr/local/lib/locachy/keytable"]="0:0:755"\n  ["/usr/local/lib/locachy/clipboard"]="0:0:755"\n' \
     >>"$profile/profiledef.sh"
 while IFS= read -r file; do
@@ -161,7 +177,11 @@ printf 'make-installer: generic x86-64 profile: %s\n' "$profile"
 if [ "$profile_only" = 1 ]; then
     exit 0
 fi
-"$mkarchiso" -w "$work/build" -o "$out" "$profile"
+# Keep the packaged builder intact. This small tracked patch only prevents
+# random-seed writes on read-only optical media; drift in upstream stops here.
+cp "$(command -v "$mkarchiso")" "$work/mkarchiso"
+patch --batch --fuzz=0 -p1 -d "$work" <"$src/installer/archiso-readonly-seed.patch"
+"$work/mkarchiso" -w "$work/build" -o "$out" "$profile"
 python3 -I - "$profile" "$out" <<'PY'
 import hashlib, json, pathlib, sys, time
 profile, out = map(pathlib.Path, sys.argv[1:])

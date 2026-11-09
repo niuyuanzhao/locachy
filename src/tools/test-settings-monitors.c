@@ -257,7 +257,7 @@ static int fixture_fclose(FILE *f)
  * packages "installed" by flags, locachy-pkg and nmcli not run. */
 static int allow_rc, hups, bar_hups, forks, fake_tailscale, fake_mihomo, fake_fprintd, fake_nvidia;
 static int fake_bluetooth, fake_rime, fake_rime_zh, fake_opt, fake_howdy, fail_rc, term_calls, term_status, track_events;
-static int face_term_calls, tailscale_term_calls;
+static int face_term_calls, tailscale_term_calls, fake_nmtui, nmtui_term_calls;
 static char face_term_args[512];
 static char rc_log[1024], events[32];
 
@@ -301,6 +301,7 @@ static int fixture_access(const char *path, int mode)
     if (!strcmp(path, "/usr/lib/bluetooth/bluetoothd")) return fake_bluetooth & 1 ? 0 : -1;
     if (!strcmp(path, "/usr/bin/bluetoothctl")) return fake_bluetooth & 2 ? 0 : -1;
     if (!strcmp(path, "/usr/bin/bluetui")) return fake_bluetooth & 4 ? 0 : -1;
+    if (!strcmp(path, "/usr/bin/nmtui")) return fake_nmtui ? 0 : -1;
     if (!strcmp(path, "/usr/lib/fprintd") || !strcmp(path, "/usr/bin/fprintd-enroll")) return fake_fprintd ? 0 : -1;
     if (!strcmp(path, "/usr/lib/librime.so") || !strcmp(path, "/usr/bin/rime_deployer")) return fake_rime ? 0 : -1;
     if (!strcmp(path, "/usr/share/rime-data/rime_frost.schema.yaml")) return fake_rime_zh ? 0 : -1;
@@ -403,6 +404,11 @@ int base_call(char *const argv[])
     if (!strcmp(argv[1], "/usr/bin/tailscale")) {
         assert(!strcmp(argv[2], "up") && !strcmp(argv[3], "--qr") && argv[4] == NULL);
         tailscale_term_calls++;
+        return term_status;
+    }
+    if (!strcmp(argv[1], "/usr/bin/nmtui")) {
+        assert(argv[2] == NULL);
+        nmtui_term_calls++;
         return term_status;
     }
     assert(!strcmp(argv[1], "/usr/bin/bluetui") && argv[2] == NULL);
@@ -605,7 +611,7 @@ static void test_circular(void)
            system_keymap_index() == imek_index() + NIME_KEYS && kb_index() == system_keymap_index() + 1 &&
            bat_page_index() == kb_index() + nkeyboards_seen && bat_thresh_index() == bat_page_index() + 1 &&
            hwinfo_index() == bat_thresh_index() + power_thresh_count() && hwcopy_index() == hwinfo_index() + 1 &&
-           num_hw_items() == hwcopy_index() + 1);
+           nmtui_index() == hwcopy_index() + 1 && num_hw_items() == nmtui_index() + 1);
     on_rc("touchpad_circular", "0", NULL);
     assert(circular == 0);
     on_rc("touchpad_circular", "yes", NULL);
@@ -2235,7 +2241,22 @@ static void test_time_zone(void)
 /* The top bar's pages: --page names and the window manager's request pipe. */
 static void test_pages(void)
 {
-    assert(open_page("network") && category == CAT_NETWORK && in_page && entry_of(selected) >= 0);
+    int page_before = settings_page;
+    settings_page = 1;
+    fake_nmtui = 0;
+    assert(open_page("network") && category == CAT_NETWORK && in_page && selected == nmtui_index());
+    assert(enter_row(nmtui_index()) && !network_settings_key(K_RIGHT));
+    draw();
+    assert(canvas_has("Connections (Wi-Fi, Ethernet)") && canvas_has("not installed"));
+    assert(network_settings_key('\n') && nmtui_term_calls == 0 && strstr(notice, "nmtui is not installed"));
+    fake_nmtui = 1;
+    draw();
+    assert(canvas_has("Enter: open nmtui"));
+    assert(network_settings_key('\n') && nmtui_term_calls == 1 && strstr(notice, "nmtui closed"));
+    term_status = 7;
+    assert(network_settings_key('\n') && nmtui_term_calls == 2 && strstr(notice, "nmtui did not finish"));
+    term_status = 0;
+    settings_page = page_before;
     assert(open_page("power") && category == CAT_POWER && entry_of(selected) >= 0);
     assert(open_page("devices") && category == CAT_DEVICES && selected == bt_index());
     assert(open_page("date-time") && category == CAT_TIME && selected == tz_index());
@@ -2915,7 +2936,7 @@ int main(int argc, char **argv)
            system_keymap_index() == imek_index() + NIME_KEYS && kb_index() == system_keymap_index() + 1 &&
            bat_page_index() == kb_index() + nkeyboards_seen && bat_thresh_index() == bat_page_index() + 1 &&
            hwinfo_index() == bat_thresh_index() + power_thresh_count() && hwcopy_index() == hwinfo_index() + 1 &&
-           num_hw_items() == hwcopy_index() + 1);
+           nmtui_index() == hwcopy_index() + 1 && num_hw_items() == nmtui_index() + 1);
     forks_before = forks;
     selected = ime_index();
     adjust(+1);

@@ -220,6 +220,8 @@ static const char *drawn_row(int r, int c)
     return line;
 }
 int rc_set(const char *name, const char *value) { (void)name; (void)value; return 0; }
+int rc_read(void (*fn)(const char *, const char *, void *), void *arg)
+{ (void)fn; (void)arg; return 0; }
 
 int clipboard_set(int primary, const void *text, size_t size)
 {
@@ -647,6 +649,11 @@ int base_app_open(const char *name, const char *target, char *why, size_t size)
     snprintf(opened_name, sizeof opened_name, "%s", name);
     snprintf(opened_target, sizeof opened_target, "%s", target);
     return 0;
+}
+
+int base_app_open_own_tor(const char *name, const char *target, char *why, size_t size)
+{
+    return base_app_open(name, target, why, size);
 }
 
 /* scratch/rel; four may be in use at once. */

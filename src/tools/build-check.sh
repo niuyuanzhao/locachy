@@ -40,10 +40,12 @@ for name in note seat drives; do
         -I"$src/base/include" -I"$src/base" "$src/progs/$name.c" \
         "$out"/obj/base-*.o $libs -o "$out/$name"
 done
-# The live medium's full-screen installer (installer/make-live.sh).
-gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags $(pkg-config --cflags json-c) \
-    -I"$src/base/include" -I"$src/base" "$src/progs/installer.c" \
-    "$out"/obj/base-*.o $libs $(pkg-config --libs json-c) -o "$out/installer"
+# The live medium's independent installer and rescue applications.
+for name in installer rescue; do
+    gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags $(pkg-config --cflags json-c) \
+        -I"$src/base/include" -I"$src/base" "$src/progs/$name.c" \
+        "$out"/obj/base-*.o $libs $(pkg-config --libs json-c) -o "$out/$name"
+done
 for name in home packages firmware archive; do
     gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags \
         -I"$src/base/include" -I"$src/base" "$src/progs/$name.c" "$src/progs/files.c" \

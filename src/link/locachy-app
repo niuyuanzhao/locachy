@@ -1,7 +1,9 @@
 #!/bin/bash
 # Daemonless per-app OverlayFS roots and root-level cgroup v2 control.
 #
-#   locachy-app run|start NAME [COMMAND...]  COMMAND: this once, not its own
+#   locachy-app run|start [--own-tor] NAME [COMMAND...]  COMMAND: this once, not its own
+#   locachy-app open [--own-tor] NAME TARGET  --own-tor: confirmed Tor Browser
+#                                            bundled tor, only while system Tor is off
 #   locachy-app [-n] NAME [COMMAND...]       legacy start; -n: network="1" in NAME's
 #                                            configuration
 #   locachy-app resume|freeze|stop NAME      kill is an alias for stop
@@ -40,10 +42,11 @@
 #                 the DNSPort, and Tor's SocksPort (127.0.0.1:9050 there) for
 #                 a program that speaks SOCKS, as Tor Browser does
 #                 (tor-client, tor-enforce)
-#   tor           "1": only full-system Tor, through its SocksPort; with
-#                 network="1", refuses to start unless Tor and its firewall
-#                 are on. A separate cgroup firewall permits only TCP to
-#                 127.0.0.1:9050, even if Tor is switched off while it runs.
+#   tor           "1": only full-system Tor, through its SocksPort. A separate
+#                 cgroup firewall permits only TCP to 127.0.0.1:9050, even if
+#                 Tor is switched off while it runs. Tor Browser alone may
+#                 start its bundled tor with --own-tor while system Tor is off,
+#                 after the caller warns and the user explicitly confirms.
 #                 network="0" still means entirely offline.
 #   camera        "1": the ordinary cameras (V4L2 capture nodes, /dev/videoN, and
 #                 their media controller nodes, as video calls use them), the
@@ -155,6 +158,33 @@ conf_set() {
 saved_command() {
     read -r -a saved_cmd <<<"$(conf_value "$1" command) $(conf_value "$1" arguments)" || true
     [ "${#saved_cmd[@]}" -gt 0 ] || die "$1 has no command (command= in $CONT_CONF/$1.conf)"
+    # Compatibility with the shipped system-Tor-only recipe. Strip only its
+    # exact environment prefix, in memory: user configuration is not rewritten.
+    if [ "$(conf_value "$1" package)" = tor-browser-bin ] &&
+       [ "${#saved_cmd[@]}" -ge 6 ] &&
+       [ "${saved_cmd[0]}" = /usr/bin/env ] &&
+       [ "${saved_cmd[1]}" = MOZ_APP_REMOTINGNAME=tor-browser ] &&
+       [ "${saved_cmd[2]}" = TOR_PROVIDER=none ] &&
+       [ "${saved_cmd[3]}" = TOR_SOCKS_HOST=127.0.0.1 ] &&
+       [ "${saved_cmd[4]}" = TOR_SOCKS_PORT=9050 ] &&
+       [ "${saved_cmd[5]}" = /usr/bin/tor-browser ]; then
+        saved_cmd=(/usr/bin/env MOZ_APP_REMOTINGNAME=tor-browser /usr/bin/tor-browser "${saved_cmd[@]:6}")
+    fi
+}
+
+# Only the known Tor Browser package/wrapper has a bundled tor. tor="1"
+# remains system-Tor-only for every other application; it grants no bypass.
+tor_browser_launch() { # COMMAND...
+    [ "${1:-}" = /usr/bin/tor-browser ] ||
+        { [ "${1:-}" = /usr/bin/env ] && [ "${2:-}" = MOZ_APP_REMOTINGNAME=tor-browser ] &&
+          [ "${3:-}" = /usr/bin/tor-browser ]; }
+}
+
+own_tor_supported() { # NAME
+    [ "$(conf_value "$1" package)" = tor-browser-bin ] || return 1
+    local saved_cmd=()
+    saved_command "$1"
+    tor_browser_launch "${saved_cmd[@]}"
 }
 
 # NAME's packages: its package and extras, into the array packages.
@@ -348,7 +378,7 @@ do_stop() {
             wait_event "$cg" populated 0 || die "timed out stopping $name after cgroup.kill"
         fi
     fi
-    rm -f "$APP_RUNTIME/$name/reaper.pid" "$APP_RUNTIME/$name.ready"
+    rm -f "$APP_RUNTIME/$name/reaper.pid" "$APP_RUNTIME/$name/tor-mode" "$APP_RUNTIME/$name.ready"
     if [ "$(conf_value "$name" tor)" = 1 ]; then
         "$TOR_ENFORCE" app-remove "$name" || die "$name: cannot remove its Tor firewall"
     elif [ -x "$TOR_ENFORCE" ]; then
@@ -366,10 +396,17 @@ do_open_running() { # NAME TARGET COMMAND...
     local name=$1 target=$2 pid= ticks= kv uid= gid= home=/ nnp=
     shift 2
     if [ "$(conf_value "$name" network)" = 1 ] && [ "$(conf_value "$name" tor)" = 1 ]; then
-        grep -qE '^[[:space:]]*service_tor=' "$RC_CONF" 2>/dev/null ||
-            die "$name requires full-system Tor: turn Tor on in settings first"
-        "$TOR_ENFORCE" loaded ||
-            die "$name requires full-system Tor and its firewall is not loaded"
+        local tor_mode=system
+        [ ! -r "$APP_RUNTIME/$name/tor-mode" ] || IFS= read -r tor_mode <"$APP_RUNTIME/$name/tor-mode" || tor_mode=system
+        if [ "$tor_mode" = own ]; then
+            ! grep -qE '^[[:space:]]*service_tor=' "$RC_CONF" 2>/dev/null && ! "$TOR_ENFORCE" loaded ||
+                die "$name is running with its own Tor while full-system Tor is on: stop $name first"
+        else
+            grep -qE '^[[:space:]]*service_tor=' "$RC_CONF" 2>/dev/null ||
+                die "$name requires full-system Tor: turn Tor on in settings first"
+            "$TOR_ENFORCE" loaded ||
+                die "$name requires full-system Tor and its firewall is not loaded"
+        fi
     fi
     if [ -r "$APP_RUNTIME/$name/reaper.pid" ]; then
         read -r pid ticks <"$APP_RUNTIME/$name/reaper.pid" || true
@@ -810,10 +847,23 @@ list|status)
     exit 0
     ;;
 esac
-if [ "$operation" = start ] && [ "${1:-}" = -n ]; then
-    want_net=1
-    shift
-fi
+want_own_tor=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+    -n)
+        [ "$operation" = start ] || break
+        want_net=1
+        shift
+        ;;
+    --own-tor)
+        case "$operation" in
+        start|open|new) want_own_tor=1; shift ;;
+        *) die "--own-tor is only for start, open or new" ;;
+        esac
+        ;;
+    *) break ;;
+    esac
+done
 name="${1:-}"
 [ -n "$name" ] || die 'usage: locachy-app run|start|resume|freeze|stop|install NAME [ARG...]'
 check_name "$name"
@@ -826,6 +876,15 @@ elif [ "$operation" != start ] && [ "$operation" != install ] && [ "$operation" 
     [ $# -eq 0 ] || die "usage: locachy-app $operation NAME"
 fi
 lock_app "$name"
+# Explicit consent applies only to the supported bundled browser, including
+# start/open/new fast paths on a running instance. It never changes its mode.
+if [ "$want_own_tor" = 1 ]; then
+    { [ "$want_net" = 1 ] || [ "$(conf_value "$name" network)" = 1 ]; } &&
+        [ "$(conf_value "$name" tor)" = 1 ] ||
+        die "$name does not use Tor (tor=\"1\" with network=\"1\"): --own-tor does not apply"
+    own_tor_supported "$name" ||
+        die "$name has no supported bundled Tor: --own-tor is only for tor-browser-bin with /usr/bin/tor-browser"
+fi
 case "$operation" in
 resume) do_resume "$name"; exit 0 ;;
 freeze) do_freeze "$name"; exit 0 ;;
@@ -910,15 +969,33 @@ if [ "$(conf_value "$name" x11)" = 1 ]; then
     [ -S "/tmp/.X11-unix/X${x11_display#:}" ] ||
         die "$name: it asks for X11 (x11=\"1\") and the shared X11 socket is not there (Xwayland starting again): not started"
 fi
-# Full-system Tor, for a program that may only go out through Tor (tor="1" on
-# the network): refused before any state or cgroup is made, as X11 is above.
+# Tor container (tor="1" on the network): with full-system Tor on, it runs over
+# the system Tor SocksPort under a per-cgroup firewall; with full-system Tor
+# off, it starts only when --own-tor was explicitly confirmed so it runs its
+# own bundled user-space Tor daemon.
 want_tor=0
+tor_mode=
 if { [ "$want_net" = 1 ] || [ "$(conf_value "$name" network)" = 1 ]; } && [ "$(conf_value "$name" tor)" = 1 ]; then
-    want_tor=1
-    grep -qE '^[[:space:]]*service_tor=' "$RC_CONF" 2>/dev/null ||
+    if grep -qE '^[[:space:]]*service_tor=' "$RC_CONF" 2>/dev/null; then
+        [ "$want_own_tor" != 1 ] ||
+            die "$name: full-system Tor is on; do not pass --own-tor (Tor over Tor); not started"
+        "$TOR_ENFORCE" loaded ||
+            die "$name requires full-system Tor and its firewall is not loaded; not started"
+        want_tor=1
+        tor_mode=system
+    elif "$TOR_ENFORCE" loaded; then
+        die "$name: full-system Tor firewall is still loaded while service_tor is off; not started"
+    elif [ "$want_own_tor" = 1 ]; then
+        own_tor_supported "$name" ||
+            die "$name has no supported bundled Tor: --own-tor is only for tor-browser-bin with /usr/bin/tor-browser; not started"
+        tor_mode=own
+    elif own_tor_supported "$name"; then
+        die "$name: full-system Tor is off; turn Tor on in settings, or pass --own-tor to run Tor Browser own user-space Tor without the host Tor firewall; not started"
+    else
         die "$name requires full-system Tor: turn Tor on in settings first; not started"
-    "$TOR_ENFORCE" loaded ||
-        die "$name requires full-system Tor and its firewall is not loaded; not started"
+    fi
+elif [ "$want_own_tor" = 1 ]; then
+    die "$name does not use Tor (tor=\"1\" with network=\"1\"): --own-tor does not apply"
 fi
 [ -x "$APP_INIT" ] || die "container reaper is not installed: $APP_INIT"
 for tool in unshare chroot mount mkfifo; do
@@ -969,6 +1046,9 @@ if [ $# -eq 0 ]; then
     saved_command "$name"
     set -- "${saved_cmd[@]}"
 fi
+if [ "$tor_mode" = own ]; then
+    tor_browser_launch "$@" || die "$name: --own-tor cannot run an alternative command; not started"
+fi
 # Its directories (of the home), refused before anything is started.
 IFS=: read -r -a directories <<<"$(conf_value "$name" directories)" || true
 for d in "${directories[@]}"; do
@@ -985,11 +1065,19 @@ if [ "$want_net" = 1 ] && [ -e /run/netns/locachy-net ]; then
 fi
 # The Clash proxy with only its port (clash-client, clash_mode="proxy"): a
 # container on the network is told of it; its programs that honour these use it.
-if [ "$want_net" = 1 ] && [ "$want_tor" != 1 ] && grep -q '^[[:space:]]*service_clash=' "$RC_CONF" 2>/dev/null &&
+if [ "$want_net" = 1 ] && [ -z "$tor_mode" ] && grep -q '^[[:space:]]*service_clash=' "$RC_CONF" 2>/dev/null &&
     grep -q '^[[:space:]]*clash_mode="proxy"' "$RC_CONF"; then
     export http_proxy=http://127.0.0.1:7890 https_proxy=http://127.0.0.1:7890 all_proxy=socks5://127.0.0.1:7890
     export no_proxy=localhost,127.0.0.1,::1,.local,.ts.net
     export HTTP_PROXY=$http_proxy HTTPS_PROXY=$https_proxy ALL_PROXY=$all_proxy NO_PROXY=$no_proxy
+fi
+unset TOR_PROVIDER TOR_SKIP_LAUNCH TOR_TRANSPROXY TOR_SOCKS_IPC_PATH TOR_SOCKS_HOST TOR_SOCKS_PORT \
+      TOR_CONTROL_IPC_PATH TOR_CONTROL_HOST TOR_CONTROL_PORT TOR_CONTROL_PASSWD TOR_CONTROL_COOKIE_AUTH_FILE \
+      TOR_FORCE_NET_CONFIG TOR_CONFIGURE_ONLY
+if [ "$tor_mode" = system ]; then
+    export TOR_PROVIDER=none TOR_SOCKS_HOST=127.0.0.1 TOR_SOCKS_PORT=9050
+elif [ "$tor_mode" = own ]; then
+    export TOR_SOCKS_HOST=127.0.0.1 TOR_SOCKS_PORT=9150
 fi
 
 # Keep the lock only until C PID 1 is ready (or setup fails). The FIFO FD
@@ -1003,7 +1091,7 @@ exec {READY_FD}<>"$ready_dir/ready"
 rm -f "$ready_dir/ready"
 rmdir "$ready_dir"
 trap - EXIT
-rm -f "$APP_RUNTIME/$name/reaper.pid" "$APP_RUNTIME/$name.ready"
+rm -f "$APP_RUNTIME/$name/reaper.pid" "$APP_RUNTIME/$name/tor-mode" "$APP_RUNTIME/$name.ready"
 # Its cameras (camera="1", a container: a host program has the host's /dev).
 cameras=
 if [ "$host" != 1 ] && [ "$(conf_value "$name" camera)" = 1 ]; then
@@ -1030,6 +1118,12 @@ if [ "$want_tor" = 1 ]; then
         die "$name: cannot load its Tor-only firewall; not started"
 elif [ -x "$TOR_ENFORCE" ]; then
     "$TOR_ENFORCE" app-remove "$name" || true
+fi
+if [ -n "$tor_mode" ]; then
+    printf '%s\n' "$tor_mode" >"$APP_RUNTIME/$name/tor-mode"
+    if [ "$tor_mode" = own ] && [ -w /dev/kmsg ]; then
+        printf '<5>locachy-app: %s: starting with its own user-space Tor (full-system Tor is off)\n' "$name" >/dev/kmsg 2>/dev/null || true
+    fi
 fi
 # Slave: the shared mounts of the host, ~/Drives (the drives service) and
 # the document views (locachy-docs), pass their mounts on to the container
@@ -1393,6 +1487,7 @@ if ! wait_ready "$READY_FD" "$launcher"; then
     [ ! -w "$caller_cg/cgroup.procs" ] || printf '%s\n' "$$" >"$caller_cg/cgroup.procs" 2>/dev/null || true
     printf '1\n' >"$cg/cgroup.kill"
     wait_event "$cg" populated 0 || true
+    rm -f "$APP_RUNTIME/$name/tor-mode"
     [ "$want_tor" != 1 ] || is_running "$name" || "$TOR_ENFORCE" app-remove "$name" || true
     exit 125
 fi
@@ -1402,7 +1497,7 @@ start_screencast "$name"
 unlock_app
 status=0
 wait "$launcher" || status=$?
-rm -f "$APP_RUNTIME/$name.ready" "$APP_RUNTIME/$name/reaper.pid"
+rm -f "$APP_RUNTIME/$name.ready" "$APP_RUNTIME/$name/reaper.pid" "$APP_RUNTIME/$name/tor-mode"
 [ ! -w "$caller_cg/cgroup.procs" ] || printf '%s\n' "$$" >"$caller_cg/cgroup.procs" 2>/dev/null || true
 [ "$want_tor" != 1 ] || is_running "$name" || "$TOR_ENFORCE" app-remove "$name" || true
 exit "$status"

@@ -186,6 +186,8 @@ void apps_display_ready(void) { abort(); }
 void apps_list(char *buf, size_t size) { (void)buf; (void)size; abort(); }
 int apps_action(const char *action, const char *name, char *why, size_t size)
 { (void)action; (void)name; (void)why; (void)size; abort(); }
+int apps_open_mode(const char *name, const char *target, int own_tor, char *why, size_t size)
+{ (void)name; (void)target; (void)own_tor; if (size) why[0] = 0; return -1; }
 int apps_open(const char *name, const char *target, char *why, size_t size)
 { (void)name; (void)target; (void)why; (void)size; abort(); }
 int apps_window_open(const char *program, const char *target, char *why, size_t size)

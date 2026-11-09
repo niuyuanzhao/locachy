@@ -16,6 +16,24 @@ SOURCE = Path(__file__).resolve().parents[1]
 SCRATCH = sys.argv.pop(1) if len(sys.argv) > 1 else None
 
 
+# Minimal unused upstream context so command doubles exercise the same patch.
+ARCHISO_PATCH_CONTEXT = '''
+    # Copy systemd-boot configuration files
+    cp -r --remove-destination -- "${work_dir}/loader" "${isofs_dir}/"
+
+    # Copy EFI binaries and related files
+    _make_common_bootmode_uefi.systemd-boot_copy_files "${uefi_arch[$arch]}"
+
+    if compgen -G "${isofs_dir}/shell"*'.efi' >/dev/null; then
+        efiboot_rootdir_files+=("${isofs_dir}/shell"*'.efi')
+    fi
+    mcopy -s -i "${efibootimg}" "${efiboot_rootdir_files[@]}" '::/'
+    if [[ -e "${isofs_dir}/boot/memtest86+/memtest.efi" ]]; then
+        mmd -i "${efibootimg}" '::/boot' '::/boot/memtest86+'
+        mcopy -i "${efibootimg}" \\
+'''
+
+
 class InstallerProfile(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="installer-profile-", dir=SCRATCH)
@@ -50,6 +68,18 @@ class InstallerProfile(unittest.TestCase):
                                                       "bootmodes=('bios.syslinux' 'uefi.grub')\n"
                                                       "file_permissions=([\"/etc/shadow\"]=\"0:0:400\")\n")
         (self.baseline / "pacman.conf").write_text("[options]\n[cachyos-v4]\nInclude = bad-host-mirror\n")
+        boot = self.baseline / "efiboot/loader/entries"
+        boot.mkdir(parents=True)
+        (boot / "01-archiso-linux.conf").write_text(
+            "title Arch Linux (%ARCH%, UEFI)\nlinux /%INSTALL_DIR%/boot/%ARCH%/vmlinuz-linux\n"
+            "initrd /%INSTALL_DIR%/boot/%ARCH%/initramfs-linux.img\n"
+            "options archisobasedir=%INSTALL_DIR% archisosearchuuid=%ARCHISO_UUID%\n")
+        (self.baseline / "syslinux").mkdir()
+        (self.baseline / "syslinux/syslinux-linux.cfg").write_text(
+            "LABEL arch\nMENU LABEL Arch Linux (%ARCH%, BIOS)\n"
+            "LINUX /%INSTALL_DIR%/boot/%ARCH%/vmlinuz-linux\n"
+            "INITRD /%INSTALL_DIR%/boot/%ARCH%/initramfs-linux.img\n"
+            "APPEND archisobasedir=%INSTALL_DIR% archisosearchuuid=%ARCHISO_UUID%\n")
         sysroot = self.baseline / "airootfs/etc/systemd/system"
         for target, service in (("multi-user.target.wants", "sshd.service"),
                                 ("multi-user.target.wants", "systemd-networkd.service"),
@@ -66,13 +96,15 @@ class InstallerProfile(unittest.TestCase):
         self.bin.mkdir()
         self.calls = self.root / "calls"
         tool = self.bin / "mkarchiso"
-        tool.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >\"$TEST_CALLS\"\nexit \"${TEST_RESULT:-0}\"\n")
+        tool.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >\"$TEST_CALLS\"\nexit \"${TEST_RESULT:-0}\"\n" +
+                        ARCHISO_PATCH_CONTEXT)
         tool.chmod(0o755)
         # installer/make-live.sh's double: the programs it compiles, and how it was called.
         self.live = self.root / "live-calls"
         live = self.root / "make-live"
         live.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >"$TEST_LIVE"\nmkdir -p "$2/usr/local/bin"\n'
-                        'printf elf >"$2/usr/local/bin/installer"\nprintf elf >"$2/usr/local/bin/term"\n')
+                        'printf elf >"$2/usr/local/bin/installer"\nprintf elf >"$2/usr/local/bin/term"\n'
+                        'printf elf >"$2/usr/local/bin/rescue"\n')
         self.env = dict(os.environ, ARCHISO_BASELINE=str(self.baseline), PATH=str(self.bin) + os.pathsep + os.environ["PATH"],
                         TEST_CALLS=str(self.calls), LIVE_BUILD=str(live), TEST_LIVE=str(self.live),
                         LOCACHY_APPS_SRC=str(self.apps), LOCACHY_APPS_REPO="https://example.org/locachy-apps.git",
@@ -147,9 +179,31 @@ class InstallerProfile(unittest.TestCase):
         root = profile / "airootfs"
         self.assertEqual(self.live.read_text().split(), [str(self.src), str(root)])
         definition = (profile / "profiledef.sh").read_text()
-        for name in ("installer", "term"):
+        for name in ("installer", "term", "rescue", "locachy-rescue"):
             self.assertTrue((root / "usr/local/bin" / name).is_file())
             self.assertIn('["/usr/local/bin/' + name + '"]="0:0:755"', definition)
+        for name in ("rescue-storage", "rescue-link.py"):
+            self.assertTrue((root / "usr/local/lib/locachy" / name).is_file())
+            self.assertIn('["/usr/local/lib/locachy/' + name + '"]="0:0:755"', definition)
+        rescue_unit = (root / "etc/systemd/system/locachy-rescue.service").read_text()
+        self.assertIn("ConditionKernelCommandLine=locachy.mode=rescue", rescue_unit)
+        self.assertIn("ExecStart=/usr/local/bin/rescue", rescue_unit)
+        self.assertIn("Environment=LOCACHY_RESCUE_BOOT=1", rescue_unit)
+        self.assertNotIn("/term", rescue_unit)
+        self.assertNotIn("/bin/bash", rescue_unit)
+        getty = (root / "etc/systemd/system/getty@tty1.service.d/rescue.conf").read_text()
+        self.assertIn("ConditionKernelCommandLine=!locachy.mode=rescue", getty)
+        wants = root / "etc/systemd/system/multi-user.target.wants/locachy-rescue.service"
+        self.assertEqual(os.readlink(wants), "../locachy-rescue.service")
+        self.assertTrue((root / "etc/systemd/system/locachy-rescue-link.service").is_file())
+        self.assertFalse((root / "etc/systemd/system/multi-user.target.wants/locachy-rescue-link.service").exists())
+        rescue_uefi = (profile / "efiboot/loader/entries/02-locachy-rescue.conf").read_text()
+        self.assertIn("title   LOCachy Rescue", rescue_uefi)
+        self.assertIn("locachy.mode=rescue", rescue_uefi)
+        rescue_bios = (profile / "syslinux/syslinux-linux.cfg").read_text()
+        self.assertIn("LABEL locachy-rescue", rescue_bios)
+        self.assertIn("MENU LABEL LOCachy Rescue", rescue_bios)
+        self.assertIn("locachy.mode=rescue", rescue_bios)
         autologin = (root / "etc/systemd/system/getty@tty1.service.d/autologin.conf").read_text()
         self.assertIn("--autologin root", autologin)
         self.assertFalse((root / "etc/systemd/system/serial-getty@.service.d").exists())
@@ -157,7 +211,8 @@ class InstallerProfile(unittest.TestCase):
         self.assertIn('if [ "$(tty)" = /dev/tty1 ]; then', login)
         self.assertLess(login.index("/usr/local/bin/installer\n"), login.index("/usr/local/bin/installer --text"))
         packages = set((profile / "packages.x86_64").read_text().splitlines())
-        self.assertTrue({"freetype2", "libinput", "json-c", "ttf-dejavu", "noto-fonts-cjk", "wayland"} <= packages)
+        self.assertTrue({"freetype2", "libinput", "json-c", "ttf-dejavu", "noto-fonts-cjk", "wayland",
+                         "openssh", "openssl", "iproute2", "util-linux"} <= packages)
         # The clipboard the installer copies to and its terminal pastes from.
         unit = (root / "etc/systemd/system/locachy-clipboard.service").read_text()
         self.assertIn("ExecStart=/usr/local/lib/locachy/clipboard --serve", unit)
@@ -165,6 +220,15 @@ class InstallerProfile(unittest.TestCase):
         wants = root / "etc/systemd/system/multi-user.target.wants/locachy-clipboard.service"
         self.assertEqual(os.readlink(wants), "../locachy-clipboard.service")
         self.assertIn('["/usr/local/lib/locachy/clipboard"]="0:0:755"', definition)
+
+    def test_rescue_boot_template_drift_stops_before_installation_tools(self):
+        path = self.baseline / "efiboot/loader/entries/01-archiso-linux.conf"
+        path.write_text(path.read_text().replace("options ", "changed-options "))
+        result = self.run_builder("--profile-only", self.work, self.out)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("packaged UEFI Linux entry changed", result.stderr)
+        self.assertFalse(self.live.exists())
+        self.assertFalse(self.calls.exists())
 
     def test_source_origin_records_repository_and_branch(self):
         self.env.update(LOCACHY_REPO="https://github.com/me/locachy.git", LOCACHY_BRANCH="next", LOCACHY_COMMIT="b" * 40)
@@ -231,7 +295,8 @@ class InstallerProfile(unittest.TestCase):
 
     def test_success_requires_one_image_and_writes_cpu_source_record(self):
         tool = self.bin / "mkarchiso"
-        tool.write_text('#!/bin/sh\nwhile [ "$1" != -o ]; do shift; done; shift\nprintf fixture-image >"$1/locachy-installer-test-x86_64.iso"\n')
+        tool.write_text('#!/bin/sh\nwhile [ "$1" != -o ]; do shift; done; shift\nprintf fixture-image >"$1/locachy-installer-test-x86_64.iso"\nexit 0\n' +
+                        ARCHISO_PATCH_CONTEXT)
         tool.chmod(0o755)
         result = self.run_builder(self.work, self.out)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -240,6 +305,14 @@ class InstallerProfile(unittest.TestCase):
         self.assertTrue(record["target_built_on_install"])
         self.assertIn("make-root.sh", record["source_sha256"])
         self.assertIn(record["sha256"], (self.out / "SHA256SUMS").read_text())
+
+    def test_upstream_builder_drift_stops_without_running_it(self):
+        tool = self.bin / "mkarchiso"
+        tool.write_text('#!/bin/sh\nprintf ran >"$TEST_CALLS"\n')
+        result = self.run_builder(self.work, self.out)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.calls.exists())
+        self.assertEqual(tool.read_text(), '#!/bin/sh\nprintf ran >"$TEST_CALLS"\n')
 
     def test_existing_destination_refusal_does_not_change_source_or_baseline(self):
         self.out.mkdir()

@@ -67,6 +67,10 @@
 #define KEYMAP_TABLE "/usr/local/share/locachy/keymap.table" /* keys.c's: term reads it too */
 #endif
 
+#ifndef RESCUE_CMD
+#define RESCUE_CMD "/usr/local/bin/rescue"
+#endif
+
 #define MAX_DISKS 16
 #define MAX_PARTS 32
 #define MAX_ITEMS 64
@@ -608,7 +612,7 @@ static int first_problem(void)
  * from the R_ ones), built from the choices each time it is drawn. */
 enum { E_TITLE = -1, E_NOTE = -2, E_WARN = -3, E_GAP = -4 };
 enum {
-    R_START_LANG = 1, R_START_KEYMAP, R_START_INSTALL, R_START_TERM, R_START_REBOOT, R_START_OFF,
+    R_START_LANG = 1, R_START_KEYMAP, R_START_INSTALL, R_START_TERM, R_START_RESCUE, R_START_REBOOT, R_START_OFF,
     R_NET_SETUP, R_NET_COPY, R_NEXT,
     R_DISK_MODE, R_SWAP, R_ESP, R_ROOT, R_SWAP_PART, R_TERMINAL, R_RESCAN,
     R_ENC, R_PASS, R_SB, R_SB_MICROSOFT,
@@ -1031,6 +1035,7 @@ static void build_start(int width)
     add(E_GAP, " ");
     add(R_START_INSTALL, "%s", _("Install LOCachy"));
     add(R_START_TERM, "%s", _("Terminal (a root shell, for repairs)"));
+    add(R_START_RESCUE, "%s", _("Rescue mode"));
     add(R_START_REBOOT, "%s", _("Reboot"));
     add(R_START_OFF, "%s", _("Power off"));
     add(E_GAP, " ");
@@ -1067,6 +1072,7 @@ static int run_on_screen(char *const argv[])
     int status = -1;
     while (pid > 0 && waitpid(pid, &status, 0) < 0 && errno == EINTR) {
     }
+    console_take(); /* the independent child may have restored text input */
     screen_open(BASE_FONT);
     keys_open();
     take_pointer();
@@ -2136,6 +2142,11 @@ static void act(int id, int key)
             go_step(S_NETWORK);
         }
         break;
+    case R_START_RESCUE: {
+        char *const argv[] = { RESCUE_CMD, NULL };
+        run_on_screen(argv);
+        break;
+    }
     case R_START_TERM:
     case R_TERMINAL:
         terminal();

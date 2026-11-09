@@ -629,27 +629,34 @@ static int window_request_valid(const char *program, const char *target)
     if (strcmp(program, "view") == 0 || strcmp(program, "files") == 0) {
         return !len || target[0] == '/';
     }
-    return strcmp(program, "mixer") == 0 && !len;
+    return (strcmp(program, "mixer") == 0 || strcmp(program, "bluetooth") == 0 ||
+            strcmp(program, "network") == 0 || strcmp(program, "term") == 0) && !len;
 }
 
-/* locachy-seat --window PROGRAM [TARGET], as the top bar runs it: through
- * labwc-control's socket to the running seat, which passes it on to process
- * 1. The window's start shows in home and in the log; this only says whether
- * the request was taken. */
-static int window_client(int argc, char **argv)
+static int app_request_valid(const char *name)
 {
-    const char *program = argc > 0 ? argv[0] : "", *target = argc > 1 ? argv[1] : "";
-    if (argc < 1 || argc > 2 || !window_request_valid(program, target)) {
-        fprintf(stderr, "usage: locachy-seat --window view [FILE] | files [FOLDER] | "
-                        "settings [network|power|devices|date-time|hardware] | mixer\n");
-        return 2;
+    size_t len = strlen(name);
+    if (len == 0 || len >= 64 || strncmp(name, "window-", 7) == 0 ||
+        !((name[0] >= 'A' && name[0] <= 'Z') || (name[0] >= 'a' && name[0] <= 'z') ||
+          (name[0] >= '0' && name[0] <= '9'))) {
+        return 0;
     }
+    for (const char *p = name; *p; p++) {
+        if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+              (*p >= '0' && *p <= '9') || *p == '_' || *p == '-' || *p == '.')) {
+            return 0;
+        }
+    }
+    return strcmp(name, ".") != 0 && strcmp(name, "..") != 0;
+}
+
+static int control_client(const char *request, int n)
+{
     const char *runtime = getenv("XDG_RUNTIME_DIR");
     struct sockaddr_un address = { .sun_family = AF_UNIX };
-    char request[16 + 64 + WINDOW_TARGET_MAX], reply[160];
+    char reply[160];
     snprintf(address.sun_path, sizeof address.sun_path, "%s/locachy-control.sock",
              runtime && runtime[0] == '/' ? runtime : "/run/user/0");
-    int n = snprintf(request, sizeof request, target[0] ? "window %s %s" : "window %s", program, target);
     int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
     if (fd < 0 || connect(fd, (struct sockaddr *)&address, sizeof address) < 0 ||
         send(fd, request, (size_t)n, MSG_NOSIGNAL) != n) {
@@ -672,8 +679,39 @@ static int window_client(int argc, char **argv)
     return 0;
 }
 
-/* A window request labwc-control passed on ("window", PROGRAM[, TARGET]),
- * to process 1 when valid. */
+/* locachy-seat --window PROGRAM [TARGET], as the top bar runs it: through
+ * labwc-control's socket to the running seat, which passes it on to process
+ * 1. The window's start shows in home and in the log; this only says whether
+ * the request was taken. */
+static int window_client(int argc, char **argv)
+{
+    const char *program = argc > 0 ? argv[0] : "", *target = argc > 1 ? argv[1] : "";
+    char request[16 + 64 + WINDOW_TARGET_MAX];
+    if (argc < 1 || argc > 2 || !window_request_valid(program, target)) {
+        fprintf(stderr, "usage: locachy-seat --window view [FILE] | files [FOLDER] | "
+                        "settings [network|power|devices|date-time|hardware] | mixer | bluetooth | network | term\n");
+        return 2;
+    }
+    int n = snprintf(request, sizeof request, target[0] ? "window %s %s" : "window %s", program, target);
+    return control_client(request, n);
+}
+
+static int open_client(int argc, char **argv)
+{
+    int own_tor = argc == 2 && strcmp(argv[0], "--own-tor") == 0;
+    const char *name = own_tor ? argv[1] : (argc == 1 ? argv[0] : "");
+    char request[32 + 64];
+    if (!app_request_valid(name)) {
+        fprintf(stderr, "usage: locachy-seat --open [--own-tor] CONTAINER\n");
+        return 2;
+    }
+    int n = snprintf(request, sizeof request, "%s %s", own_tor ? "open-own-tor" : "open", name);
+    return control_client(request, n);
+}
+
+/* A window or container-open request labwc-control passed on ("window",
+ * PROGRAM[, TARGET] or "app", "open"|"open-own-tor", CONTAINER), to process 1
+ * when valid. */
 static void window_forward(int requests, int ctl)
 {
     char msg[16 + 64 + WINDOW_TARGET_MAX + 1], *fields[4];
@@ -686,8 +724,12 @@ static void window_forward(int requests, int ctl)
     for (ssize_t i = 0; i < len && n < 4; i += (ssize_t)strlen(msg + i) + 1) {
         fields[n++] = msg + i;
     }
-    if (n < 2 || n > 3 || strcmp(fields[0], "window") != 0 ||
-        !window_request_valid(fields[1], n == 3 ? fields[2] : "")) {
+    int ok = (n >= 2 && n <= 3 && strcmp(fields[0], "window") == 0 &&
+              window_request_valid(fields[1], n == 3 ? fields[2] : "")) ||
+             (n == 3 && strcmp(fields[0], "app") == 0 &&
+              (strcmp(fields[1], "open") == 0 || strcmp(fields[1], "open-own-tor") == 0) &&
+              app_request_valid(fields[2]));
+    if (!ok) {
         say("seat: a malformed window request refused");
         return;
     }
@@ -705,6 +747,9 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "--window") == 0) {
         return window_client(argc - 2, argv + 2);
+    }
+    if (strcmp(argv[1], "--open") == 0) {
+        return open_client(argc - 2, argv + 2);
     }
     if (pipe2(wake_pipe, O_NONBLOCK | O_CLOEXEC) < 0) {
         say("seat: no wake pipe: %s", strerror(errno));

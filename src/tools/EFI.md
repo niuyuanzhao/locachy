@@ -5,8 +5,14 @@
 The installed system has two formal UEFI entries: `LOCachy` for
 `\EFI\locachy\locachy.efi` and `LOCachy (Previous)` for
 `\EFI\locachy\locachy-prev.efi` (so firmware without a "boot from file" menu
-still offers the previous signed UKI in its boot menu). `EFI/BOOT/BOOTX64.EFI`
+still offers the previous UKI in its boot menu). `EFI/BOOT/BOOTX64.EFI`
 remains the removable-media fallback, not the only normal boot route.
+
+The previous image is copied unchanged from the old current image. It is not
+rebuilt or re-signed with newly created keys. In particular, after first enabling
+own-key Secure Boot, an older unsigned previous image cannot boot with Secure
+Boot enabled. An entry's presence proves neither a valid signature nor a working
+TPM policy; verify those separately before relying on it for recovery.
 
 After writing the images, the installer runs the installed source's
 `locachy-efi --esp TARGET --first`. It registers the selected ESP and puts
@@ -15,10 +21,10 @@ entry and its relative order.
 An unavailable or unwritable firmware-variable store gives a visible warning;
 the target images stay installed and the fallback is retained.
 
-These changes are local, not yet published. On an existing system, the first
-source-first update installs package tools before it finishes compiling LOCachy;
-its earlier pacman hooks may still run the old boot helper. The new EFI helper
-and registration path become available when that update completes `make.sh`.
+On an existing system, the first source-first update installs package tools
+before it finishes compiling LOCachy; its earlier pacman hooks may still run
+the old boot helper. The new EFI helper and registration path become available
+when that update completes `make.sh`.
 No separate installation through the package-tools bootstrap is needed.
 
 Every normal `locachy-boot` image update also checks the entry. It reuses an
@@ -90,5 +96,21 @@ rebuild preserving an intentionally changed order.
 
 This tests real efibootmgr against OVMF (five functional checks and completion),
 not a real machine's firmware or a reboot through the newly registered image.
+
+## Read-only installation media
+
+The installer applies `installer/archiso-readonly-seed.patch` to a working copy
+of packaged mkarchiso. It creates an empty `loader/random-seed` and sets its FAT
+read-only attribute with mtools. No shared random seed is distributed. This
+prevents systemd-boot from trying to update the seed on optical media, including
+USB optical firmware whose FAT protocol initially appears writable. The packaged
+builder is left unchanged; patch-context drift stops the build.
+
+`python3 -B tools/test-optical-boot.py NEW_OUTPUT_DIRECTORY` uses the actual
+upstream EFI construction functions and systemd-boot in sequential two-vCPU,
+512-MiB OVMF usb-bot/scsi-cd guests. It checks the FAT attribute, reproduces the
+unpatched write-protected failure, and boots the patched image to a tiny init.
+It requires the Linux/KVM and packaged tools listed in its help. This is a
+boot-interface test, not a full installation or physical USB-device acceptance.
 
 Reference: [efibootmgr(8)](https://man.archlinux.org/man/efibootmgr.8.en).

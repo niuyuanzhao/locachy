@@ -17,6 +17,8 @@
 void say(const char *fmt, ...) { (void)fmt; }
 void apps_list(char *buf, size_t size) { if (size) buf[0] = 0; }
 int apps_display_state(void) { return APPS_DISPLAY_ACTIVE; }
+int apps_open_mode(const char *name, const char *target, int own_tor, char *why, size_t size)
+{ (void)name; (void)target; (void)own_tor; if (size) why[0] = 0; return -1; }
 int apps_open(const char *name, const char *target, char *why, size_t size)
 { (void)name; (void)target; (void)why; (void)size; abort(); }
 int apps_action(const char *action, const char *name, char *why, size_t size)

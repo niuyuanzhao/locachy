@@ -37,6 +37,7 @@
 #include <strings.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -58,6 +59,7 @@ __attribute__((weak)) int base_brightness_restore(void);
 __attribute__((weak)) void screen_cells(int *w, int *h, int *top);
 __attribute__((weak)) void screen_fill_px(int x, int y, int w, int h, uint32_t rgb);
 __attribute__((weak)) int clipboard_set(int primary, const void *text, size_t size);
+__attribute__((weak)) int key_poll_many(struct pollfd *extra, size_t count, int timeout_ms);
 
 static int power_thresh_count(void);
 static void apply_saved_battery_thresholds(void);
@@ -310,6 +312,12 @@ static int nnets;
 #define CLASH_SERVICE "/usr/local/lib/locachy/clash-client"
 #define BLUETOOTH_SERVICE "/usr/local/lib/locachy/bluetooth-client"
 #define BLUETOOTH_PACKAGES "bluez bluez-utils bluetui"
+#ifndef NMTUI
+#define NMTUI "/usr/bin/nmtui"
+#endif
+#ifndef TERM_BIN
+#define TERM_BIN "/usr/local/bin/term"
+#endif
 #define RCLONE_SERVICE "/usr/local/lib/locachy/rclone-client"
 #define RCLONE_PACKAGES "rclone fuse3"
 #define IME_BASE_PACKAGES "librime words"
@@ -1733,15 +1741,22 @@ static void load_faces(void)
     load_face_camera();
 }
 
-/* argv in term, on the screen in settings' place until it ends: its status. */
+static int in_term_wayland(char *const call[]);
+
+/* argv in term, on the screen in settings' place (or a Wayland window when
+ * running under LOCACHY_BACKEND=wayland) until it ends: its status. */
 static int in_term(char *const argv[])
 {
-    char *call[12] = { "/usr/local/bin/term" };
+    char *call[12] = { TERM_BIN };
     int n = 1;
     for (; argv[n - 1] && n < 11; n++) {
         call[n] = argv[n - 1];
     }
     call[n] = NULL;
+    const char *backend = getenv("LOCACHY_BACKEND");
+    if (backend && strcmp(backend, "wayland") == 0) {
+        return in_term_wayland(call);
+    }
     return base_call(call);
 }
 
@@ -3099,9 +3114,14 @@ static int hwcopy_index(void)
     return hwinfo_index() + 1;
 }
 
-static int num_hw_items(void)
+static int nmtui_index(void)
 {
     return hwcopy_index() + 1;
+}
+
+static int num_hw_items(void)
+{
+    return nmtui_index() + 1;
 }
 
 /* The cloud service's status (rclone-client): name, path, state, last
@@ -4514,6 +4534,22 @@ static void arrange_screens(void)
     }
 }
 
+static int network_settings_key(int key)
+{
+    if (key != '\n' || selected != nmtui_index()) return 0;
+    if (access(NMTUI, X_OK) != 0) {
+        snprintf(notice, sizeof notice, _("%s is not installed."), "nmtui");
+    } else {
+        char *const argv[] = { NMTUI, NULL };
+        int status = in_term(argv);
+        load_nets();
+        snprintf(notice, sizeof notice, "%s", status == 0 ?
+                 _("Network connections: nmtui closed.") :
+                 _("Network connections: nmtui did not finish."));
+    }
+    return 1;
+}
+
 static int bluetooth_settings_key(int key)
 {
     if (key != '\n' || selected != bt_index() + 2) return 0;
@@ -4648,6 +4684,7 @@ static void category_entries(int cat)
         break;
     case CAT_NETWORK:
         add_title(_("Network"));
+        add_items(nmtui_index(), 1);
         add_items(nw_index(), nnets + 1);
         if (nnets == 0) add_entry(E_NOTE, _("No saved network yet."));
         add_title(_("Tailscale"));
@@ -5422,7 +5459,7 @@ static int enter_row(int idx)
            idx == duress_index() ||
            idx == tz_index() || idx == tz_index() + 2 || (idx >= imek_index() && idx < imek_index() + NIME_KEYS) ||
            (idx >= system_keymap_index() && idx < kb_index() + nkeyboards_seen) ||
-           idx == bat_page_index() || idx == hwinfo_index() || idx == hwcopy_index() || idx == ts_index() + 2;
+           idx == bat_page_index() || idx == hwinfo_index() || idx == hwcopy_index() || idx == nmtui_index() || idx == ts_index() + 2;
 }
 
 /* An optional component's line, its packages installed or not: Enter
@@ -6107,6 +6144,12 @@ static void item_text(int idx, char *line, size_t size)
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Hardware & system information"), 32),
                  _("CPU, memory, storage SMART, sensors, PCI, USB   (Enter: open)"));
+        return;
+    }
+    if (idx == nmtui_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Connections (Wi-Fi, Ethernet)"), 32),
+                 access(NMTUI, X_OK) == 0 ? _("Enter: open nmtui") : _("not installed"));
         return;
     }
     if (idx == hwcopy_index()) {
@@ -7103,6 +7146,11 @@ static void adjust(int dir)
         snprintf(notice, sizeof notice, "%s", _("Enter: open hardware, storage SMART and live sensor browser."));
         return;
     }
+    if (selected == nmtui_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, "%s", _("Enter: set up Wi-Fi or wired connections in nmtui."));
+        return;
+    }
     if (selected == hwcopy_index()) {
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(notice, sizeof notice, "%s", _("Enter: copy system and hardware summary to clipboard."));
@@ -7351,6 +7399,59 @@ static void requests(void)
     }
 }
 
+static int in_term_wayland(char *const call[])
+{
+    const char *arg0 = call[1] ? call[1] : call[0];
+    const char *base = strrchr(arg0, '/');
+    base = base && base[1] ? base + 1 : arg0;
+    const char *title = strcmp(base, "sh") == 0 ? "Settings" : base;
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        setsid();
+        unsetenv("LOCACHY_WINDOW_READY_FD");
+        unsetenv("LOCACHY_REQUEST_FD");
+        /* The child stays in settings' cgroup but has its own toplevel id. */
+        char id[96];
+        snprintf(id, sizeof id, "settings-terminal-%d", (int)getpid());
+        setenv("LOCACHY_WINDOW_APP_ID", id, 1);
+        setenv("LOCACHY_WINDOW_TITLE", title, 1);
+        execv(call[0], call);
+        _exit(127);
+    }
+    int pfd = (int)syscall(SYS_pidfd_open, pid, 0);
+    if (pfd >= 0) fcntl(pfd, F_SETFD, FD_CLOEXEC);
+    int status = 0, result = -1;
+    double stop_at = 0;
+    for (;;) {
+        pid_t ended = waitpid(pid, &status, WNOHANG);
+        if (ended == pid) {
+            result = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+            break;
+        }
+        if (ended < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (stop_at && uptime() >= stop_at) {
+            kill(-pid, SIGKILL);
+            kill(pid, SIGKILL);
+        }
+        struct pollfd extra = { .fd = pfd, .events = POLLIN };
+        size_t nextra = pfd >= 0 ? 1 : 0;
+        int key = key_poll_many ? key_poll_many(&extra, nextra, stop_at ? 50 : pfd >= 0 ? 1000 : 100) :
+                  (poll(&extra, (nfds_t)nextra, 100), 0);
+        close_read(key);
+        if (close_due() && !stop_at) {
+            kill(-pid, SIGTERM);
+            kill(pid, SIGTERM);
+            stop_at = uptime() + 2.0;
+        }
+    }
+    if (pfd >= 0) close(pfd);
+    return result;
+}
+
 int main(int argc, char **argv)
 {
     signal(SIGPIPE, SIG_IGN); /* an answer to a PAM child that has ended (auth.c) */
@@ -7452,6 +7553,9 @@ int main(int argc, char **argv)
             if (in_page) row_hint();
             draw();
         } else if (page_key(key)) {
+            draw();
+        } else if (network_settings_key(key)) {
+            build_entries();
             draw();
         } else if (bluetooth_settings_key(key)) {
             draw();

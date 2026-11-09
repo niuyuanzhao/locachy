@@ -288,17 +288,27 @@ int base_app_action(const char *action, const char *name, char *why, size_t size
     return n == 4 && strcmp(fields[1], "ok") == 0 ? 0 : -1;
 }
 
-int base_app_open(const char *name, const char *target, char *why, size_t size)
+static int app_open_verb(const char *verb, const char *name, const char *target, char *why, size_t size)
 {
     static const char *const want[] = { "app-result", NULL };
     char msg[CONTROL_MAX], *fields[4];
-    char *argv[] = { "open", (char *)name, (char *)target, NULL };
+    char *argv[] = { (char *)verb, (char *)name, (char *)target, NULL };
     int n = ask("app", argv, want, msg, sizeof msg, fields, 4);
 
     if (size > 0) {
         snprintf(why, size, "%s", n == 4 ? fields[3] : "container control unavailable");
     }
     return n == 4 && strcmp(fields[1], "ok") == 0 ? 0 : -1;
+}
+
+int base_app_open(const char *name, const char *target, char *why, size_t size)
+{
+    return app_open_verb("open", name, target, why, size);
+}
+
+int base_app_open_own_tor(const char *name, const char *target, char *why, size_t size)
+{
+    return app_open_verb("open-own-tor", name, target, why, size);
 }
 
 int open_in_home(const char *with, const char *target)

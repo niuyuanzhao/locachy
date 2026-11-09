@@ -1,10 +1,11 @@
+# Simplified Chinese translations for LOCachy.
 msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-09 12:35+0800\n"
-"PO-Revision-Date: 2026-10-24 22:38+0000\n"
-"Last-Translator: LOCachy <38998838+niuyuanzhao@users.noreply.github.com>\n"
+"POT-Creation-Date: 2026-11-09 11:23-0500\n"
+"PO-Revision-Date: 2026-11-09 14:16+0000\n"
+"Last-Translator: LOCachy\n"
 "Language-Team: Chinese (Simplified)\n"
 "Language: zh_CN\n"
 "MIME-Version: 1.0\n"
@@ -63,7 +64,7 @@ msgstr "任务服务的回复不是一个任务。"
 msgid "queued"
 msgstr "排队中"
 
-#: base/jobs.c progs/home.c progs/packages.c
+#: base/jobs.c progs/bar.c progs/home.c progs/packages.c
 msgid "running"
 msgstr "运行中"
 
@@ -283,7 +284,7 @@ msgstr "CPU %d%%"
 msgid "BT off"
 msgstr "蓝牙 关"
 
-#: base/status.c progs/home.c
+#: base/status.c progs/bar.c progs/home.c
 msgid "starting"
 msgstr "正在启动"
 
@@ -406,7 +407,7 @@ msgid "archive"
 msgstr "归档管理"
 
 #. TRANSLATORS: Esc is the key; keep it.
-#: progs/archive.c progs/files.c progs/shot.c
+#: progs/archive.c progs/files.c progs/rescue.c progs/shot.c
 msgid "Esc: cancel"
 msgstr "Esc: 取消"
 
@@ -1045,6 +1046,24 @@ msgstr "托盘中没有可显示其窗口的项。"
 msgid "default"
 msgstr "默认"
 
+#: progs/bar.c
+#, c-format
+msgid "Full-system Tor is off: %s will run its own Tor."
+msgstr "全局 Tor 未开启：%s 将运行自带的 Tor。"
+
+#: progs/bar.c
+msgid "Turn Tor on in settings for the host Tor firewall, or confirm here."
+msgstr "如需宿主 Tor 防火墙保护请先在设置中开启 Tor，否则可在此确认启动。"
+
+#: progs/bar.c
+msgid "Start it with its own user-space Tor without the host firewall?"
+msgstr "是否在无宿主防火墙保护下以自带的用户态 Tor 启动？"
+
+#. TRANSLATORS: Enter and Esc are keys; keep them.
+#: progs/bar.c
+msgid "Enter: start with own Tor   Esc: cancel"
+msgstr "Enter: 以自带 Tor 启动   Esc: 取消"
+
 #. TRANSLATORS: %s is the container name.
 #: progs/bar.c
 #, c-format
@@ -1079,10 +1098,14 @@ msgstr "其他容器..."
 msgid "Enter: open   A: always use it   Esc: cancel"
 msgstr "Enter: 打开   A: 始终使用此项   Esc: 取消"
 
-#. TRANSLATORS: Up, Down, Enter and Esc are keys; keep them.
+#. TRANSLATORS: Up, Down, Enter, F and Esc are keys; keep them.
 #: progs/bar.c
-msgid "Up/Down: select   Enter: open   Esc: close"
-msgstr "Up/Down: 选择   Enter: 打开   Esc: 关闭"
+msgid "Up/Down: select   Enter: open   F: full screen   Esc: close"
+msgstr "Up/Down: 选择   Enter: 打开   F: 全屏运行   Esc: 关闭"
+
+#: progs/bar.c progs/home.c progs/packages.c
+msgid "Containers"
+msgstr "容器"
 
 #: progs/bar.c progs/home.c progs/installer.c
 msgid "Programs"
@@ -1092,29 +1115,33 @@ msgstr "程序"
 msgid "System and hardware"
 msgstr "系统与硬件"
 
-#: progs/bar.c
-msgid "Home (full screen)"
-msgstr "主页（全屏）"
+#: progs/bar.c progs/home.c progs/packages.c
+msgid "frozen"
+msgstr "已冻结"
+
+#: progs/bar.c progs/home.c progs/packages.c
+msgid "closed"
+msgstr "已关闭"
+
+#: progs/bar.c progs/home.c
+msgid "home"
+msgstr "主页"
+
+#: progs/bar.c progs/home.c
+msgid "reboot"
+msgstr "重启"
+
+#: progs/bar.c progs/home.c
+msgid "power off"
+msgstr "关机"
 
 #: progs/bar.c
-msgid "View (full screen)"
-msgstr "查看（全屏）"
-
-#: progs/bar.c
-msgid "Settings (full screen)"
-msgstr "设置（全屏）"
-
-#: progs/bar.c
-msgid "Mixer (full screen)"
-msgstr "混音器（全屏）"
-
-#: progs/bar.c
-msgid "Window on this desktop"
-msgstr "在此桌面开窗口"
-
-#: progs/bar.c progs/shot.c
-msgid "Full screen"
+msgid "full screen"
 msgstr "全屏"
+
+#: progs/bar.c
+msgid "window"
+msgstr "窗口"
 
 #: progs/drives.c
 #, c-format
@@ -3993,7 +4020,7 @@ msgid "-> move"
 msgstr "-> 移动"
 
 #. TRANSLATORS: the part before the colon is a key; keep it and ": ".
-#: progs/files.c progs/installer.c progs/settings.c
+#: progs/files.c progs/installer.c progs/rescue.c progs/settings.c
 msgid "Enter: choose"
 msgstr "Enter: 选择"
 
@@ -4371,6 +4398,16 @@ msgstr "已在 %s 中打开。"
 
 #: progs/files.c
 #, c-format
+msgid ""
+"Full-system Tor is off: start %s with its own Tor without the host firewall?"
+msgstr "全局 Tor 未开启：是否在无宿主防火墙保护下以自带 Tor 启动 %s？"
+
+#: progs/files.c progs/home.c
+msgid "Start cancelled."
+msgstr "已取消启动。"
+
+#: progs/files.c
+#, c-format
 msgid "Only the home (%s) is shown for a container."
 msgstr "仅为容器显示主文件夹（%s）内的位置。"
 
@@ -4734,7 +4771,7 @@ msgstr "%s：%s；输出见下方。"
 msgid "%s (+%d more: set Chip model -c)"
 msgstr "%s（另有 %d 个匹配型号，请指定 -c）"
 
-#: progs/firmware.c
+#: progs/firmware.c progs/rescue.c
 #, c-format
 msgid "%s completed."
 msgstr "%s 已完成。"
@@ -4885,11 +4922,11 @@ msgid "Backup directory"
 msgstr "备份保存目录"
 
 #. TRANSLATORS: Y and N are the confirmation keys; keep them.
-#: progs/firmware.c progs/home.c
+#: progs/firmware.c progs/home.c progs/rescue.c
 msgid "Y: confirm"
 msgstr "Y: 确认"
 
-#: progs/firmware.c progs/home.c
+#: progs/firmware.c progs/home.c progs/rescue.c
 msgid "N: cancel"
 msgstr "N: 取消"
 
@@ -5110,17 +5147,9 @@ msgstr "已拒绝：镜像大小为 %lld B，但探测到的芯片容量为 %lld
 msgid "Y/N: Write %.100s (%lld KiB) to %s [%s]?"
 msgstr "Y/N: 将 %.100s（%lld KiB）写入 %s [%s]？"
 
-#: progs/home.c progs/packages.c
-msgid "Containers"
-msgstr "容器"
-
 #: progs/home.c
 msgid "Container actions stay here; state refreshes every 500 ms."
 msgstr "容器操作在此进行；状态每 500 毫秒刷新一次。"
-
-#: progs/home.c progs/packages.c
-msgid "closed"
-msgstr "已关闭"
 
 #: progs/home.c
 msgid "opening"
@@ -5129,10 +5158,6 @@ msgstr "正在打开"
 #: progs/home.c
 msgid "freezing"
 msgstr "正在冻结"
-
-#: progs/home.c progs/packages.c
-msgid "frozen"
-msgstr "已冻结"
 
 #: progs/home.c
 #, c-format
@@ -5236,10 +5261,6 @@ msgid ""
 msgstr "没有选中内容：用鼠标拖过文字，或双击选一个词、三击选一行。"
 
 #: progs/home.c
-msgid "home"
-msgstr "主页"
-
-#: progs/home.c
 #, c-format
 msgid "%d containers   %d marked (operation targets only)%s"
 msgstr "%d 个容器   %d 个已标记（仅作为操作目标）%s"
@@ -5278,11 +5299,35 @@ msgstr ""
 msgid "Y/N: Remove system job %d from the queue? It has not started."
 msgstr "Y/N：把系统任务 %d 移出队列？它还没有开始。"
 
+#: progs/home.c
+#, c-format
+msgid ""
+"Full-system Tor is off: %s will run its own Tor without the host Tor "
+"firewall."
+msgstr "全局 Tor 未开启：%s 将在无宿主 Tor 防火墙保护下运行自带的 Tor。"
+
+#: progs/home.c
+#, c-format
+msgid ""
+"Full-system Tor is off: %d container will run its own Tor without the host "
+"Tor firewall."
+msgid_plural ""
+"Full-system Tor is off: %d containers will run their own Tor without the "
+"host Tor firewall."
+msgstr[0] ""
+"全局 Tor 未开启：%d 个容器将在无宿主 Tor 防火墙保护下运行自带的 Tor。"
+
 #. TRANSLATORS: Y and N are the confirmation keys; keep them.
 #: progs/home.c
 #, c-format
 msgid "Y/N: Power off the host?"
 msgstr "Y/N: 关机？"
+
+#: progs/home.c
+msgid ""
+"Turn Tor on in settings for full-system Tor enforcement, or confirm to start "
+"anyway."
+msgstr "如需整机强制走 Tor 请先在设置中开启 Tor，否则确认后继续启动。"
 
 #: progs/home.c
 #, c-format
@@ -5299,16 +5344,17 @@ msgid "home and the shared folders"
 msgstr "主目录与共享文件夹"
 
 #: progs/home.c
-msgid "power off"
-msgstr "关机"
-
-#: progs/home.c
-msgid "reboot"
-msgstr "重启"
-
-#: progs/home.c
 msgid "No failure reason reported."
 msgstr "未报告失败原因。"
+
+#. TRANSLATORS: Y, Enter, N and Esc are confirmation keys; keep them.
+#: progs/home.c
+msgid "Y / Enter: start with own Tor"
+msgstr "Y / Enter: 以自带 Tor 启动"
+
+#: progs/home.c progs/rescue.c
+msgid "N / Esc: cancel"
+msgstr "N / Esc: 取消"
 
 #: progs/home.c
 msgid "Any other key cancels without acting."
@@ -5392,6 +5438,11 @@ msgstr "请求失败（未返回原因）。"
 
 #: progs/home.c
 #, c-format
+msgid "Cannot prepare confirmation: out of memory."
+msgstr "无法准备确认对话框：内存不足。"
+
+#: progs/home.c
+#, c-format
 msgid "Select a container or mark containers first."
 msgstr "请先选择一个容器或勾选容器。"
 
@@ -5452,12 +5503,17 @@ msgid "Power off cancelled."
 msgstr "已取消关机。"
 
 #: progs/home.c
+msgid "The system job was left as it is."
+msgstr "系统任务保持原样。"
+
+#: progs/home.c
 msgid "Stop cancelled."
 msgstr "已取消停止。"
 
 #: progs/home.c
-msgid "The system job was left as it is."
-msgstr "系统任务保持原样。"
+#, c-format
+msgid "open %s: accepted"
+msgstr "打开 %s：已接受"
 
 #. TRANSLATORS: K is the key name; keep it.
 #: progs/home.c
@@ -5495,11 +5551,11 @@ msgstr "停止：已接受 %d 个，错误 %d 个；状态正从底层刷新。"
 msgid "Close requested for host program %s."
 msgstr "已请求关闭宿主程序 %s。"
 
-#: progs/home.c progs/installer.c
+#: progs/home.c progs/installer.c progs/rescue.c
 msgid "Reboot"
 msgstr "重启"
 
-#: progs/home.c progs/installer.c
+#: progs/home.c progs/installer.c progs/rescue.c
 msgid "Power off"
 msgstr "关机"
 
@@ -5544,11 +5600,6 @@ msgstr "正在打开 %s..."
 #, c-format
 msgid "%s is open on %s."
 msgstr "%s 已在 %s 上打开。"
-
-#: progs/home.c
-#, c-format
-msgid "open %s: accepted"
-msgstr "打开 %s：已接受"
 
 #: progs/installer.c
 msgid "(no model name)"
@@ -5620,7 +5671,7 @@ msgstr "设置用户密码。"
 msgid "The computer's name: letters, digits and -, up to 63."
 msgstr "计算机名：字母、数字和 -，最多 63 个。"
 
-#: progs/installer.c progs/packages.c progs/settings.c
+#: progs/installer.c progs/packages.c progs/rescue.c progs/settings.c
 msgid "off"
 msgstr "关"
 
@@ -6042,7 +6093,7 @@ msgstr "安装"
 msgid "Install LOCachy on this computer"
 msgstr "把 LOCachy 安装到这台计算机"
 
-#: progs/installer.c
+#: progs/installer.c progs/rescue.c
 msgid "Keyboard layout"
 msgstr "键盘布局"
 
@@ -6053,6 +6104,10 @@ msgstr "安装 LOCachy"
 #: progs/installer.c
 msgid "Terminal (a root shell, for repairs)"
 msgstr "终端（root shell，用于救援）"
+
+#: progs/installer.c
+msgid "Rescue mode"
+msgstr "救援模式"
 
 #: progs/installer.c
 msgid ""
@@ -7460,6 +7515,456 @@ msgstr "尚未检查更新：按 c 检查更新。"
 #: progs/packages.c
 msgid "The last check is shown; c checks again."
 msgstr "当前显示上次检查结果；按 c 重新检查更新。"
+
+#: progs/rescue.c
+msgid "Inspect status (read-only)"
+msgstr "检查状态（只读）"
+
+#: progs/rescue.c
+msgid "Rescan disks and interfaces"
+msgstr "重新扫描磁盘与网口"
+
+#: progs/rescue.c
+msgid "Unlock target read-only"
+msgstr "只读解锁目标系统"
+
+#: progs/rescue.c
+msgid "Close target"
+msgstr "关闭目标系统"
+
+#: progs/rescue.c
+msgid "Enable repair (read/write)"
+msgstr "启用修复（读写）"
+
+#: progs/rescue.c
+msgid "Start debug link"
+msgstr "开启调试线"
+
+#: progs/rescue.c
+msgid "Stop debug link"
+msgstr "停止调试线"
+
+#: progs/rescue.c
+msgid "Exit Rescue"
+msgstr "退出救援"
+
+#: progs/rescue.c
+msgid "Target terminal"
+msgstr "目标系统终端"
+
+#: progs/rescue.c
+#, c-format
+msgid "%s failed; state may be unknown. Inspect the output before continuing."
+msgstr "%s 失败，状态可能未知。继续前请检查输出。"
+
+#: progs/rescue.c
+#, c-format
+msgid "Running: %s (close requests stop it, then clean up)."
+msgstr "正在运行：%s（请求关闭会先停止操作，再清理）。"
+
+#: progs/rescue.c
+#, c-format
+msgid "Cannot start rescue helper: %s"
+msgstr "无法启动救援后端：%s"
+
+#: progs/rescue.c
+msgid "Rescue helper reply exceeded the size limit; stopping it."
+msgstr "救援后端的回复超出大小限制，正在停止。"
+
+#: progs/rescue.c
+msgid "Rescue helper did not accept the secret; stopping it."
+msgstr "救援后端未接收口令，正在停止。"
+
+#: progs/rescue.c
+msgid "Rescue helper timed out; stopping it. State must be checked again."
+msgstr "救援后端超时，正在停止。必须重新检查状态。"
+
+#: progs/rescue.c
+msgid ""
+"A helper descendant kept its output open; the operation was not verified."
+msgstr "后端的子进程仍占用输出通道，此操作未获验证。"
+
+#: progs/rescue.c
+#, c-format
+msgid "%s failed (status %d); the closed rescue session remains on screen."
+msgstr "%s 失败（退出码 %d），已关闭的救援会话保留在屏幕上。"
+
+#: progs/rescue.c
+msgid "Shutdown requested. Waiting for the live system."
+msgstr "已请求结束运行，正在等待 live 系统。"
+
+#: progs/rescue.c
+#, c-format
+msgid "Rescue keyboard layout: %s. F2 can show a passphrase to check it."
+msgstr "救援键盘布局：%s。可按 F2 显示口令以核对。"
+
+#: progs/rescue.c
+msgid "Keyboard layout was not changed; check keytable output."
+msgstr "未更改键盘布局，请检查 keytable 输出。"
+
+#: progs/rescue.c
+#, c-format
+msgid "Target terminal failed (status %d); Rescue remains open."
+msgstr "目标终端失败（退出码 %d），救援界面保持打开。"
+
+#: progs/rescue.c
+#, c-format
+msgid "%s failed (status %d); state is not verified. Inspect the output."
+msgstr "%s 失败（退出码 %d），状态未经验证，请检查输出。"
+
+#: progs/rescue.c
+msgid "All rescue resources are closed. Choose what to do next."
+msgstr "所有救援资源均已关闭，请选择下一步。"
+
+#: progs/rescue.c
+msgid ""
+"Cleanup did not finish; Rescue remains open. Release busy resources and "
+"retry Exit."
+msgstr "清理未完成，救援界面保持打开。释放被占用的资源后重试退出。"
+
+#: progs/rescue.c
+msgid "Stopping the current operation before session cleanup."
+msgstr "先停止当前操作，再清理本次会话。"
+
+#: progs/rescue.c
+#, c-format
+msgid "Cannot start target terminal: %s"
+msgstr "无法启动目标系统终端：%s"
+
+#: progs/rescue.c
+msgid "Target terminal is open. Exit it to return to Rescue."
+msgstr "目标系统终端已打开，退出终端会回到救援界面。"
+
+#: progs/rescue.c
+msgid "Input is too long; nothing was added."
+msgstr "输入过长，未添加任何内容。"
+
+#: progs/rescue.c
+msgid "Secrets stay in this UI and the helper's stdin; never in argv or files."
+msgstr "口令只保留在本界面和后端标准输入中，不放入参数或文件。"
+
+#: progs/rescue.c
+msgid "Wait for the current operation, or Exit to stop it and clean up."
+msgstr "请等待当前操作，或选择退出以停止并清理。"
+
+#: progs/rescue.c
+msgid ""
+"In a Wayland window, change the keyboard layout in desktop settings; Rescue "
+"uses that window's keys."
+msgstr ""
+"在 Wayland 窗口中，请在桌面设置更改键盘布局；救援程序使用该窗口的键盘映射。"
+
+#: progs/rescue.c
+msgid "State is not verified. Rescan or inspect status first."
+msgstr "状态未经验证，请先重新扫描或检查状态。"
+
+#: progs/rescue.c
+msgid "Close the current target before selecting another."
+msgstr "请先关闭当前目标系统，再选择另一个。"
+
+#: progs/rescue.c
+msgid "No encrypted target was found. Rescan after attaching its disk."
+msgstr "未找到加密目标系统，连接磁盘后请重新扫描。"
+
+#: progs/rescue.c
+#, c-format
+msgid "Repair is blocked: %s"
+msgstr "无法启用修复：%s"
+
+#: progs/rescue.c
+msgid "the target ESP is not uniquely identified"
+msgstr "无法唯一识别目标 ESP"
+
+#: progs/rescue.c
+msgid "First unlock and inspect the target read-only."
+msgstr "请先只读解锁并检查目标系统。"
+
+#: progs/rescue.c
+msgid ""
+"The debug link is already active. Stop it before selecting another interface."
+msgstr "调试线已开启，请先停止再选择其他网口。"
+
+#: progs/rescue.c
+msgid "No eligible wired interface was found. Rescan after attaching one."
+msgstr "未找到可用有线网口，连接后请重新扫描。"
+
+#: progs/rescue.c
+msgid "Target terminal requires explicitly enabled read/write repair."
+msgstr "必须明确启用读写修复，才能打开目标系统终端。"
+
+#: progs/rescue.c
+msgid "A nonempty secret is required."
+msgstr "口令不能为空。"
+
+#: progs/rescue.c
+msgid "The debug-link password needs at least 12 characters."
+msgstr "调试线密码至少需要 12 个字符。"
+
+#: progs/rescue.c
+msgid "The passwords did not match. Set the debug-link password again."
+msgstr "两次密码不一致，请重新设置调试线密码。"
+
+#: progs/rescue.c
+msgid "carrier present"
+msgstr "已连接网线"
+
+#: progs/rescue.c
+msgid "no carrier"
+msgstr "未连接网线"
+
+#: progs/rescue.c
+#, c-format
+msgid ""
+"Keyboard: %s (Rescue and its target terminal; system settings are unchanged)"
+msgstr "键盘：%s（用于救援及其目标终端，不更改系统设置）"
+
+#: progs/rescue.c
+msgid " (not verified)"
+msgstr "（未经验证）"
+
+#: progs/rescue.c
+#, c-format
+msgid "Target: %s%s"
+msgstr "目标系统：%s%s"
+
+#: progs/rescue.c
+msgid "unknown"
+msgstr "未知"
+
+#: progs/rescue.c
+#, c-format
+msgid "Device: %s   UUID: %s"
+msgstr "设备：%s   UUID：%s"
+
+#: progs/rescue.c
+#, c-format
+msgid "Identity: %s | %s | %s"
+msgstr "身份：%s | %s | %s"
+
+#: progs/rescue.c
+#, c-format
+msgid "Mount: %s   Swap: %s   ESP: %s"
+msgstr "挂载：%s   Swap：%s   ESP：%s"
+
+#: progs/rescue.c
+#, c-format
+msgid "ESP note: %s"
+msgstr "ESP 提示：%s"
+
+#: progs/rescue.c
+#, c-format
+msgid "Repair blocked: %s"
+msgstr "修复受阻：%s"
+
+#: progs/rescue.c
+#, c-format
+msgid "Debug link: %s | %s | %s | %s"
+msgstr "调试线：%s | %s | %s | %s"
+
+#: progs/rescue.c
+msgid "active"
+msgstr "已开启"
+
+#: progs/rescue.c
+#, c-format
+msgid "Host key: %s"
+msgstr "主机密钥：%s"
+
+#: progs/rescue.c
+#, c-format
+msgid "SFTP: sftp -P %d root@[%s]"
+msgstr "SFTP：sftp -P %d root@[%s]"
+
+#: progs/rescue.c
+msgid ""
+"Replace <local-interface> with the connecting computer's interface. Verify "
+"the host-key fingerprint; never auto-accept it."
+msgstr ""
+"将 <local-interface> 替换为控制端电脑的网口名。请核对主机密钥指纹，绝不自动信"
+"任。"
+
+#: progs/rescue.c
+#, c-format
+msgid ""
+"Found: %d encrypted targets, %d wired interfaces. No automatic unlock, TPM, "
+"fsck or formatting."
+msgstr ""
+"找到 %d 个加密目标系统、%d 个有线网口。不自动解锁、使用 TPM、检查修复文件系统"
+"或格式化。"
+
+#: progs/rescue.c
+#, c-format
+msgid "Output: %d-%d / %d%s"
+msgstr "输出：%d-%d / %d%s"
+
+#: progs/rescue.c
+msgid " (running)"
+msgstr "（运行中）"
+
+#: progs/rescue.c
+msgid "Choose the dedicated wired debug interface"
+msgstr "选择专用有线调试网口"
+
+#: progs/rescue.c
+msgid "Choose the encrypted target (read-only unlock)"
+msgstr "选择加密目标系统（只读解锁）"
+
+#: progs/rescue.c
+#, c-format
+msgid "Filter: %s_   %d matches"
+msgstr "筛选：%s_   %d 项匹配"
+
+#: progs/rescue.c
+msgid "Keyboard layout (only this Rescue UI)"
+msgstr "键盘布局（仅用于救援界面）"
+
+#: progs/rescue.c
+msgid "Choose US or Japanese JIS, or type a standard console/XKB layout name."
+msgstr "选择 US 或 Japanese JIS，或输入标准 console/XKB 布局名。"
+
+#: progs/rescue.c
+#, c-format
+msgid "Layout: %s_"
+msgstr "布局：%s_"
+
+#: progs/rescue.c
+msgid "US"
+msgstr "US"
+
+#: progs/rescue.c
+msgid "Japanese JIS"
+msgstr "Japanese JIS"
+
+#: progs/rescue.c progs/settings.c
+msgid "Enter: apply"
+msgstr "Enter: 应用"
+
+#: progs/rescue.c
+msgid "Enable write repairs on this target?"
+msgstr "在此目标系统上启用写修复？"
+
+#: progs/rescue.c
+msgid "The read-only target will close and reopen read/write."
+msgstr "只读目标会被关闭，并以读写方式重新打开。"
+
+#: progs/rescue.c
+msgid ""
+"The next screen asks for the disk passphrase again. Y explicitly authorizes "
+"writes."
+msgstr "下一屏会再次询问磁盘口令。按 Y 明确授权写入。"
+
+#: progs/rescue.c
+msgid "Y: enable repair"
+msgstr "Y：启用修复"
+
+#: progs/rescue.c
+msgid "Disk passphrase (read-only unlock)"
+msgstr "磁盘口令（只读解锁）"
+
+#: progs/rescue.c
+msgid "Disk passphrase (confirmed write repair)"
+msgstr "磁盘口令（已确认写修复）"
+
+#: progs/rescue.c
+msgid "New debug-link password (at least 12 characters)"
+msgstr "新的调试线密码（至少 12 个字符）"
+
+#: progs/rescue.c
+msgid "Repeat the debug-link password"
+msgstr "再次输入调试线密码"
+
+#: progs/rescue.c
+#, c-format
+msgid "Keyboard: %s   F2 shows/hides the input so you can check the layout."
+msgstr "键盘：%s   F2 显示或隐藏输入，以便核对布局。"
+
+#: progs/rescue.c
+msgid "Enter: submit"
+msgstr "Enter：提交"
+
+#: progs/rescue.c
+msgid "F2: hide"
+msgstr "F2：隐藏"
+
+#: progs/rescue.c
+msgid "F2: show"
+msgstr "F2：显示"
+
+#: progs/rescue.c
+msgid "Rescue session closed"
+msgstr "救援会话已关闭"
+
+#: progs/rescue.c
+msgid "The debug link is stopped and target filesystems are unmounted."
+msgstr "调试线已停止，目标文件系统已卸载。"
+
+#: progs/rescue.c
+msgid "No terminal or installer will open automatically."
+msgstr "不会自动打开终端或安装器。"
+
+#: progs/rescue.c
+msgid "Power off this computer?"
+msgstr "关闭这台电脑？"
+
+#: progs/rescue.c
+msgid "Reboot this computer?"
+msgstr "重启这台电脑？"
+
+#: progs/rescue.c
+msgid "Start a new rescue session"
+msgstr "开始新的救援会话"
+
+#: progs/rescue.c
+msgid ""
+"Up/Down: choose   Enter: open   r: new session   b: reboot   p: power off"
+msgstr "Up/Down：选择   Enter：打开   r：新会话   b：重启   p：关机"
+
+#: progs/rescue.c
+msgid "Enlarge the Rescue window. Q exits with cleanup."
+msgstr "请增大救援窗口。按 Q 清理后退出。"
+
+#: progs/rescue.c
+msgid "Rescue status (Tab: change pane; arrows / wheel: scroll)"
+msgstr "救援状态（Tab：切换区域；方向键或滚轮：滚动）"
+
+#: progs/rescue.c
+msgid "Actions (Enter: run)"
+msgstr "操作（Enter：执行）"
+
+#: progs/rescue.c
+msgid " (cleanup required)"
+msgstr "（需要清理）"
+
+#: progs/rescue.c
+msgid ""
+"Tab: pane  PgUp/PgDn: output  y/Ctrl+C: copy  a: SSH  f: fingerprint  q: exit"
+msgstr "Tab：区域  PgUp/PgDn：输出  y/Ctrl+C：复制  a：SSH  f：指纹  q：退出"
+
+#: progs/rescue.c
+msgid "Rescue"
+msgstr "救援"
+
+#: progs/rescue.c
+msgid ""
+"Select status or output text with the pointer; a copies SSH, f copies the "
+"fingerprint."
+msgstr "用指针选择状态或输出文本；a 复制 SSH，f 复制指纹。"
+
+#: progs/rescue.c
+msgid "Cancelled; the rescue session remains closed."
+msgstr "已取消；救援会话仍保持关闭。"
+
+#: progs/rescue.c
+msgid "Cancelled; nothing was requested."
+msgstr "已取消，未请求执行任何操作。"
+
+#: progs/rescue.c
+msgid "Enter a standard console or XKB layout name."
+msgstr "请输入标准 console 或 XKB 布局名。"
+
+#: progs/rescue.c
+msgid "desktop window layout"
+msgstr "桌面窗口布局"
 
 #: progs/settings-hwinfo.inc
 msgid "Processor"
@@ -9538,6 +10043,19 @@ msgid "Drag a screen to position it; p edits its exact X,Y coordinates."
 msgstr "拖动屏幕调整位置；p 编辑精确 X,Y 坐标。"
 
 #: progs/settings.c
+#, c-format
+msgid "%s is not installed."
+msgstr "%s 未安装。"
+
+#: progs/settings.c
+msgid "Network connections: nmtui closed."
+msgstr "网络连接：nmtui 已关闭。"
+
+#: progs/settings.c
+msgid "Network connections: nmtui did not finish."
+msgstr "网络连接：nmtui 未正常完成。"
+
+#: progs/settings.c
 msgid ""
 "Bluetooth tools are not installed: the Bluetooth tools line installs them."
 msgstr "蓝牙工具未安装：可在“蓝牙工具已安装”行安装。"
@@ -9844,11 +10362,6 @@ msgid ""
 "TPM disk auto-unlock is off at high threat level: the disk asks for its "
 "passphrase at power-on."
 msgstr "高烈度下 TPM 磁盘自动解密关闭：开机时磁盘要求输入口令。"
-
-#: progs/settings.c
-#, c-format
-msgid "%s is not installed."
-msgstr "%s 未安装。"
 
 #: progs/settings.c
 #, c-format
@@ -10359,10 +10872,6 @@ msgid "Boot kernel"
 msgstr "启动内核"
 
 #: progs/settings.c
-msgid "Enter: apply"
-msgstr "Enter: 应用"
-
-#: progs/settings.c
 msgid "working..."
 msgstr "正在处理…"
 
@@ -10468,6 +10977,15 @@ msgstr "硬件与系统信息"
 #: progs/settings.c
 msgid "CPU, memory, storage SMART, sensors, PCI, USB   (Enter: open)"
 msgstr "CPU、内存、磁盘 SMART、传感器、PCI、USB   (Enter: 打开)"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Connections (Wi-Fi, Ethernet)"
+msgstr "网络连接（Wi-Fi、有线）"
+
+#: progs/settings.c
+msgid "Enter: open nmtui"
+msgstr "Enter: 打开 nmtui"
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
@@ -11169,6 +11687,11 @@ msgstr "Enter: 打开硬件明细、磁盘 SMART 健康度与实时传感器浏�
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
+msgid "Enter: set up Wi-Fi or wired connections in nmtui."
+msgstr "Enter: 在 nmtui 中配置 Wi-Fi 或有线连接。"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
 msgid "Enter: copy system and hardware summary to clipboard."
 msgstr "Enter: 将系统与硬件摘要复制到剪贴板。"
 
@@ -11345,6 +11868,10 @@ msgstr "在 view 中打开"
 #: progs/shot.c
 msgid "Rectangular region"
 msgstr "矩形区域"
+
+#: progs/shot.c
+msgid "Full screen"
+msgstr "全屏"
 
 #: progs/shot.c
 msgid "Current screen"

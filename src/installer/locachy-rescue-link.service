@@ -1,0 +1,23 @@
+[Unit]
+Description=LOCachy authenticated rescue cable
+Documentation=man:sshd(8)
+After=NetworkManager.service
+ConditionPathExists=/run/locachy-rescue/link/state.json
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/python3 -I /usr/local/lib/locachy/rescue-link.py serve
+ExecStopPost=/usr/bin/nsenter --mount=/proc/1/ns/mnt -- /usr/bin/python3 -I /usr/local/lib/locachy/rescue-link.py cleanup
+PrivateMounts=yes
+BindReadOnlyPaths=/run/locachy-rescue/link/auth/etc/shadow:/etc/shadow
+KillMode=control-group
+SendSIGKILL=yes
+TimeoutStartSec=20s
+TimeoutStopSec=15s
+RuntimeMaxSec=1h
+Restart=no
+UMask=0077
+LimitCORE=0
+StandardInput=null
+StandardOutput=null
+StandardError=null

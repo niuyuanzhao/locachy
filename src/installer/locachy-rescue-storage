@@ -1,0 +1,640 @@
+#!/usr/bin/env python3
+"""Independent Rescue storage backend; one JSON result per non-terminal action.
+
+unlock-readonly DEVICE and enable-repair --confirm read the complete raw key
+from stdin until EOF (no newline is added or removed). Keys are never retained.
+disable-repair closes the target; opening it read-only again needs a fresh key.
+Only target-terminal replaces this process, with arch-chroot and inherited stdio.
+No TPM enrollment/unlocking, filesystem repair, formatting or swap activation.
+"""
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import stat
+import subprocess
+import sys
+
+sys.dont_write_bytecode = True
+RUNTIME = Path("/run/locachy-rescue")
+ENV = {"PATH": "/usr/bin:/usr/sbin", "LC_ALL": "C", "HOME": "/root"}
+LSBLK = ["lsblk", "--json", "--bytes", "--paths", "--tree", "--output",
+         "NAME,PATH,PKNAME,TYPE,SIZE,MODEL,TRAN,RO,FSTYPE,LABEL,UUID,PARTUUID,MAJ:MIN,MOUNTPOINTS"]
+FINDMNT = ["findmnt", "--json", "--list", "--kernel", "--output",
+           "ID,TARGET,SOURCE,FSTYPE,OPTIONS,MAJ:MIN"]
+UUID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z")
+
+
+class RescueError(Exception):
+    pass
+
+
+def command(argv, secret=None, allowed=(0,)):
+    """Never include child diagnostics (or exception repr) in the JSON/logs."""
+    try:
+        result = subprocess.run(argv, input=secret, stdin=None if secret is not None else subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL if secret is not None else subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, env=ENV,
+                                timeout=180 if argv[0] in ("cryptsetup", "mount", "umount") else 30,
+                                check=False)
+    except (OSError, subprocess.SubprocessError):
+        raise RescueError(argv[0] + " could not complete; inspect status before retrying.") from None
+    if result.returncode not in allowed:
+        raise RescueError(argv[0] + " failed (status " + str(result.returncode) + ").")
+    return "" if secret is not None else result.stdout.decode("utf-8", errors="strict")
+
+
+def json_command(argv, key, allowed=(0,)):
+    text = command(argv, allowed=allowed)
+    try:
+        value = json.loads(text) if text.strip() else {key: []}
+        if not isinstance(value, dict) or not isinstance(value.get(key), list):
+            raise ValueError()
+        return value[key]
+    except (ValueError, TypeError):
+        raise RescueError(argv[0] + " returned invalid structured data.") from None
+
+
+def flatten(nodes):
+    for node in nodes:
+        yield node
+        yield from flatten(node.get("children") or [])
+
+
+def inventory():
+    command(["udevadm", "settle", "--timeout=10"])
+    devices = {}
+
+    def visit(nodes, disk="", parent="", model=""):
+        for raw in nodes:
+            node = {k: v for k, v in raw.items() if k != "children"}
+            path = node.get("path", "")
+            if not isinstance(path, str) or not path.startswith("/dev/"):
+                raise RescueError("lsblk returned an invalid device path.")
+            node["disk"] = path if node.get("type") == "disk" else disk
+            node["parent"] = parent
+            node["model"] = node.get("model") or model
+            # A device with multiple parents cannot be associated by disk.
+            if path in devices and devices[path]["parent"] != parent:
+                node["disk"] = ""
+            devices[path] = node
+            visit(raw.get("children") or [], node["disk"], path, node["model"])
+    visit(json_command(LSBLK, "blockdevices"))
+    return devices
+
+
+def probe(path):
+    text = command(["blkid", "-p", "-o", "export", path])
+    return dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+
+
+def mounts():
+    return list(flatten(json_command(FINDMNT, "filesystems")))
+
+
+def root_candidates(devices):
+    return [n for n in devices.values() if n.get("fstype") == "crypto_LUKS"
+            and n.get("label") == "locachy-crypt"]
+
+
+def public_device(node):
+    return {"path": node["path"], "label": node.get("label") or "", "uuid": node.get("uuid") or "",
+            "model": (node.get("model") or "").strip(), "size": int(node.get("size") or 0)}
+
+
+def unused(node, devices):
+    paths = {node["path"]}
+    for _ in devices:
+        paths.update(n["path"] for n in devices.values() if n["parent"] in paths)
+    descendants = [devices[p] for p in paths if p != node["path"]]
+    if any(n.get("type") == "crypt" or n.get("path", "").startswith("/dev/mapper/") for n in descendants):
+        raise RescueError("Selected device has an existing crypt holder; external resources are not adopted.")
+    if len(paths) != 1 or any(devices[p].get("mountpoints") and
+                              any(devices[p]["mountpoints"]) for p in paths):
+        raise RescueError("Selected device is already in use; external resources are not adopted.")
+    number = node.get("maj:min")
+    if not number or any(m.get("maj:min") == number for m in mounts()):
+        raise RescueError("Selected device is already mounted or has no stable identity.")
+
+
+def check_root(node, devices):
+    unused(node, devices)
+    meta = probe(node["path"])
+    if (meta.get("TYPE"), meta.get("LABEL"), meta.get("VERSION")) != ("crypto_LUKS", "locachy-crypt", "2"):
+        raise RescueError("Selected root is not a LOCachy LUKS2 volume.")
+    uuid = meta.get("UUID", "")
+    if not UUID.fullmatch(uuid) or uuid != node.get("uuid"):
+        raise RescueError("Root LUKS UUID changed or is missing.")
+    if sum(n.get("uuid") == uuid for n in devices.values()) != 1:
+        raise RescueError("Root LUKS UUID is not unique; no device was guessed.")
+    return uuid
+
+
+def private_directory(path):
+    try:
+        path.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        raise RescueError("Rescue runtime directory is not private; left untouched.")
+
+
+def private_file(path, flags):
+    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600:
+        os.close(fd)
+        raise RescueError("Rescue state file is not private; left untouched.")
+    return fd
+
+
+class Storage:
+    def __init__(self, runtime=None):
+        self.runtime = runtime or RUNTIME
+        self.target = self.runtime / "target"
+        self.state_path = self.runtime / "storage.json"
+        self.data = None
+        self.lock_fd = None
+
+    def __enter__(self):
+        private_directory(self.runtime)
+        self.lock_fd = private_file(self.runtime / "storage.lock", os.O_RDWR | os.O_CREAT)
+        try:
+            fcntl.flock(self.lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                with os.fdopen(private_file(self.state_path, os.O_RDONLY)) as stream:
+                    self.data = json.load(stream)
+            except FileNotFoundError:
+                pass
+            self.validate_state()
+            return self
+        except BlockingIOError:
+            self.__exit__(None, None, None)
+            raise RescueError("Another Rescue storage operation is running.") from None
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
+
+    def __exit__(self, *ignored):
+        if self.lock_fd is not None:
+            os.close(self.lock_fd)
+            self.lock_fd = None
+
+    def validate_state(self):
+        if self.data is None:
+            return
+        d = self.data
+        if (not isinstance(d, dict) or d.get("version") != 1
+                or not re.fullmatch(r"[0-9a-f]{32}", d.get("session", ""))
+                or not UUID.fullmatch(d.get("uuid", ""))
+                or not isinstance(d.get("device"), str) or not d["device"].startswith("/dev/")
+                or d.get("mode") not in ("closed", "readonly", "readwrite")):
+            raise RescueError("Invalid Rescue storage state; resources left untouched.")
+        for role in ("root", "swap"):
+            r = d.get(role)
+            if r is not None and (not isinstance(r, dict) or r.get("name") != self.mapper_name(role)
+                                  or not UUID.fullmatch(r.get("uuid", ""))
+                                  or not isinstance(r.get("opened"), bool)):
+                raise RescueError("Invalid Rescue resource ownership; resources left untouched.")
+
+        for role, target in (("mount", self.target), ("esp_mount", self.target / "efi")):
+            record = d.get(role)
+            if record is not None and (not isinstance(record, dict) or record.get("target") != str(target)
+                                       or not isinstance(record.get("source"), str)
+                                       or not re.fullmatch(r"[0-9]+:[0-9]+", record.get("maj:min", ""))):
+                raise RescueError("Invalid Rescue mount ownership; resources left untouched.")
+
+    def save(self):
+        if self.data is None:
+            self.state_path.unlink(missing_ok=True)
+            return
+        temporary = self.runtime / (".storage-" + secrets.token_hex(16))
+        try:
+            with os.fdopen(private_file(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL), "w") as stream:
+                json.dump(self.data, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.state_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def mapper_name(self, role):
+        return "locachy-rescue-" + self.data["session"] + "-" + role
+
+    def mapper_identity(self, resource):
+        path = "/dev/mapper/" + resource["name"]
+        # lexists also notices broken symlinks: never overwrite such a name.
+        if not os.path.lexists(path):
+            return None
+        text = command(["udevadm", "info", "--query=property", "--name", path])
+        props = dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+        expected = "CRYPT-LUKS2-" + resource["uuid"].replace("-", "") + "-" + resource["name"]
+        if props.get("DM_NAME") != resource["name"] or props.get("DM_UUID") != expected:
+            raise RescueError("Mapper ownership changed; external mapper left untouched.")
+        number = props.get("MAJOR", "") + ":" + props.get("MINOR", "")
+        if not re.fullmatch(r"[0-9]+:[0-9]+", number):
+            raise RescueError("Mapper identity is incomplete; left untouched.")
+        identity = {"dm_uuid": expected, "maj:min": number}
+        if resource.get("identity") not in (None, identity):
+            raise RescueError("Mapper identity changed; left untouched.")
+        return identity
+
+    def open_mapper(self, role, node, key, readonly=True):
+        resource = {"name": self.mapper_name(role), "device": node["path"], "uuid": node["uuid"],
+                    "readonly": readonly, "identity": None, "opened": False}
+        path = "/dev/mapper/" + resource["name"]
+        if os.path.lexists(path):
+            raise RescueError("Rescue mapper name already exists; not adopted.")
+        # Journal the unique, absent name first, so timeout/interruption can
+        # recover a completed open without ever closing a preexisting mapper.
+        self.data[role] = resource
+        self.save()
+        argv = ["cryptsetup", "open"] + (["--readonly"] if readonly else [])
+        argv += ["--disable-external-tokens", "--key-file=-", "--type", "luks2", node["path"], resource["name"]]
+        command(argv, secret=key)
+        command(["udevadm", "settle", "--timeout=10"])
+        resource["identity"] = self.mapper_identity(resource)
+        if resource["identity"] is None:
+            raise RescueError("Opened mapper did not appear.")
+        resource["opened"] = True
+        self.save()
+        return path
+
+    def checked_mount(self, role="mount"):
+        current = mounts()
+        target = str(self.target / "efi") if role == "esp_mount" else str(self.target)
+        at = [m for m in current if m.get("target") == target]
+        allowed = {str(self.target), str(self.target / "efi")} if self.data.get("esp_mount") else {str(self.target)}
+        if any(m.get("target", "").startswith(str(self.target) + "/")
+               and m.get("target") not in allowed for m in current):
+            raise RescueError("Nested mounts are not owned by Rescue; close them explicitly first.")
+        record = self.data.get(role)
+        if not at:
+            return None
+        if len(at) != 1 or not record:
+            raise RescueError("Target mount is not owned by Rescue; left untouched.")
+        m = at[0]
+        if not record.get("id"):
+            # A completed mount can outlive a timed-out command. Its private
+            # destination was empty and its expected source was journaled.
+            if role == "mount" and self.mapper_identity(self.data["root"]) is None:
+                raise RescueError("Pending root mapper disappeared; mount left untouched.")
+            if any(m.get(k) != record.get(k) for k in ("source", "maj:min", "fstype", "target")):
+                raise RescueError("Pending mount identity changed; left untouched.")
+            record["id"] = m.get("id")
+            if not record["id"]:
+                raise RescueError("Pending mount has no kernel mount ID; left untouched.")
+            self.save()
+        if any(m.get(k) != record.get(k) for k in ("id", "source", "maj:min", "fstype", "target")):
+            raise RescueError("Target mount identity changed; left untouched.")
+        return m
+
+    def verify_mode(self):
+        if not self.data or self.data["mode"] == "closed":
+            return
+        r = self.data["root"]
+        if self.mapper_identity(r) is None:
+            raise RescueError("Owned root mapper disappeared.")
+        m = self.checked_mount()
+        want = "ro" if self.data["mode"] == "readonly" else "rw"
+        if not m or want not in m.get("options", "").split(","):
+            raise RescueError("Target mount is missing or its access mode changed.")
+        devices = inventory()
+        node = devices.get("/dev/mapper/" + r["name"])
+        # lsblk may report /dev/dm-N instead of the friendly mapper path.
+        if node is None:
+            node = next((n for n in devices.values() if n.get("maj:min") == r["identity"]["maj:min"]), None)
+        if node is None or bool(node.get("ro")) != (want == "ro"):
+            raise RescueError("Root mapper access mode could not be verified.")
+        if self.data.get("esp_mount"):
+            esp_mount = self.checked_mount("esp_mount")
+            if not esp_mount or want not in esp_mount.get("options", "").split(","):
+                raise RescueError("ESP mount is missing or its access mode changed.")
+            meta = probe(self.data["esp"])
+            esp = devices.get(self.data["esp"])
+            if (not esp or esp.get("maj:min") != self.data["esp_mount"]["maj:min"]
+                    or esp.get("partuuid") != self.data["esp_partuuid"]
+                    or meta.get("UUID") != self.data["esp_uuid"] or meta.get("TYPE") != "vfat"):
+                raise RescueError("ESP device identity changed.")
+        elif self.data["mode"] == "readwrite":
+            raise RescueError("Write repair requires the identified ESP to remain mounted.")
+
+    def close(self):
+        if not self.data:
+            return
+        m = self.checked_mount()
+        esp = self.checked_mount("esp_mount")
+        if esp:
+            command(["umount", "--", str(self.target / "efi")])
+        self.data["esp_mount"] = None
+        self.save()
+        if m:
+            # No force, lazy, recursive or external unmounts, even on errors.
+            command(["umount", "--", str(self.target)])
+        self.data["mount"] = None
+        self.data["mode"] = "closed"
+        self.save()
+        for role in ("swap", "root"):
+            resource = self.data.get(role)
+            if not resource:
+                continue
+            # A pending open owns this random name only if it was absent
+            # before this session and its LUKS DM_UUID now matches exactly.
+            identity = self.mapper_identity(resource)
+            if identity:
+                if any(m.get("maj:min") == identity["maj:min"] for m in mounts()):
+                    raise RescueError("Owned mapper is mounted elsewhere; left open.")
+                command(["cryptsetup", "close", resource["name"]])
+            self.data[role] = None
+            self.save()
+        self.data = None
+        self.save()
+
+    def target_file(self, relative, optional=False):
+        p = self.target
+        for component in Path(relative).parts:
+            p = p / component
+            try:
+                info = p.lstat()
+            except FileNotFoundError:
+                if optional:
+                    return None
+                raise RescueError("Target LOCachy identity files are missing.") from None
+            if stat.S_ISLNK(info.st_mode):
+                raise RescueError("Target identity/configuration symlinks are not followed.")
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 1024 * 1024:
+            raise RescueError("Target identity/configuration file is not a bounded regular file.")
+        return p
+
+    def check_identity(self):
+        release = self.target_file("etc/os-release").read_text(encoding="utf-8")
+        ids = [line.split("=", 1)[1].strip().strip('\"\'') for line in release.splitlines()
+               if line.startswith("ID=")]
+        if ids != ["locachy"]:
+            raise RescueError("Mounted filesystem is not a LOCachy installation.")
+        self.target_file("etc/locachy/rc.conf")
+
+    def associations(self, devices, root):
+        entries = []
+        fstab = self.target_file("etc/fstab", optional=True)
+        if fstab:
+            entries = json_command(["findmnt", "--fstab", "--tab-file", str(fstab), "--json", "--list",
+                                    "--output", "SOURCE,TARGET,FSTYPE"], "filesystems", allowed=(0, 1))
+        chosen = {}
+        for role, label in (("esp", "LOCACHY_EFI"), ("swap", "locachy-swap-crypt")):
+            refs = [e["source"] for e in entries if (e.get("target") == "/efi" if role == "esp"
+                                                     else e.get("fstype") == "swap")]
+            if len(refs) > 1:
+                if role == "esp":
+                    chosen["esp"] = None
+                    chosen["esp_reason"] = "Multiple ESP configuration references; no device was guessed."
+                    continue
+                raise RescueError("Multiple " + role + " references; no device was guessed.")
+            nodes = []
+            if refs and refs[0].startswith(("UUID=", "PARTUUID=", "LABEL=")):
+                tag, value = refs[0].split("=", 1)
+                nodes = [n for n in devices.values() if n.get(tag.lower()) == value.strip('\"')]
+                # An encrypted swap's fstab UUID identifies its inner header.
+                if not nodes and role == "esp":
+                    chosen["esp"] = None
+                    chosen["esp_reason"] = "Referenced ESP UUID/PARTUUID was not found."
+                    continue
+            if not nodes:
+                nodes = [n for n in devices.values() if n.get("label") == label
+                         and root.get("disk") and n.get("disk") == root["disk"]]
+            if len(nodes) > 1:
+                if role == "esp":
+                    chosen["esp"] = None
+                    chosen["esp_reason"] = "Multiple ESP candidates; no device was guessed."
+                    continue
+                raise RescueError("Multiple " + role + " candidates; no device was guessed.")
+            if role == "esp" and refs and not nodes:
+                chosen["esp"] = None
+                chosen["esp_reason"] = "Referenced ESP could not be identified."
+                continue
+            chosen[role] = nodes[0] if nodes else None
+            if role == "swap" and refs:
+                chosen["swap_reference"] = refs[0]
+        return chosen
+
+    def mount_esp(self, esp, readonly):
+        efi = self.target / "efi"
+        info = efi.lstat()
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise RescueError("Target EFI path is not a real directory; ESP was not mounted.")
+        meta = probe(esp["path"])
+        if (meta.get("TYPE") != "vfat" or not meta.get("UUID")
+                or meta["UUID"] != esp.get("uuid") or not esp.get("partuuid")):
+            raise RescueError("Associated ESP is not an identifiable FAT filesystem.")
+        self.data["esp"] = esp["path"]
+        self.data["esp_uuid"] = meta["UUID"]
+        self.data["esp_partuuid"] = esp.get("partuuid", "")
+        self.data["esp_mount"] = {"target": str(efi), "id": None, "source": esp["path"],
+                                   "maj:min": esp["maj:min"], "fstype": "vfat", "uuid": meta["UUID"]}
+        self.save()
+        command(["mount", "-t", "vfat", "-o", "ro" if readonly else "rw", "--", esp["path"], str(efi)])
+        at = [m for m in mounts() if m.get("target") == str(efi)]
+        if len(at) != 1 or any(at[0].get(k) != self.data["esp_mount"].get(k)
+                               for k in ("source", "maj:min", "fstype", "target")):
+            raise RescueError("Mounted ESP identity could not be verified.")
+        self.data["esp_mount"] = {k: at[0][k] for k in ("id", "target", "source", "maj:min", "fstype")}
+        self.data["esp_mount"]["uuid"] = meta["UUID"]
+        self.save()
+
+    def mount_root(self, mapper, readonly):
+        private_directory(self.target)
+        if any(m.get("target") == str(self.target) or m.get("target", "").startswith(str(self.target) + "/")
+               for m in mounts()) or any(self.target.iterdir()):
+            raise RescueError("Rescue mount directory is occupied; left untouched.")
+        identity = self.data["root"]["identity"]
+        self.data["mount"] = {"target": str(self.target), "id": None, "maj:min": identity["maj:min"],
+                              "fstype": "ext4", "source": mapper}
+        self.save()
+        command(["mount", "-t", "ext4", "-o", "ro,noload" if readonly else "rw", "--", mapper, str(self.target)])
+        at = [m for m in mounts() if m.get("target") == str(self.target)]
+        if len(at) != 1 or at[0].get("maj:min") != identity["maj:min"] or at[0].get("fstype") != "ext4":
+            raise RescueError("Mounted root identity could not be verified.")
+        self.data["mount"] = {k: at[0][k] for k in ("id", "target", "source", "maj:min", "fstype")}
+        self.save()
+        if ("ro" if readonly else "rw") not in at[0].get("options", "").split(","):
+            raise RescueError("Root mount access mode could not be verified.")
+
+    def unlock(self, device, key, readonly=True, expected=None):
+        if self.data:
+            raise RescueError("Close the current target before opening another.")
+        devices = inventory()
+        candidates = root_candidates(devices)
+        if not device:
+            if len(candidates) != 1:
+                raise RescueError("Select an explicit root device; candidates are not unique.")
+            device = candidates[0]["path"]
+        node = next((n for n in candidates if n["path"] == device), None)
+        if node is None:
+            raise RescueError("Selected device is not a scanned LOCachy encrypted root.")
+        uuid = check_root(node, devices)
+        if expected and uuid != expected["uuid"]:
+            raise RescueError("Root LUKS identity changed; repair was not enabled.")
+        self.data = {"version": 1, "session": secrets.token_hex(16), "device": device, "uuid": uuid,
+                     "mode": "closed", "root": None, "swap": None, "mount": None, "esp": "", "swap_device": ""}
+        self.save()
+        try:
+            mapper = self.open_mapper("root", node, key, readonly)
+            inner = probe(mapper)
+            if inner.get("TYPE") != "ext4" or inner.get("LABEL") != "locachy-root" or not inner.get("UUID"):
+                raise RescueError("Unlocked root is not an ext4 locachy-root filesystem.")
+            if expected and inner["UUID"] != expected.get("filesystem_uuid"):
+                raise RescueError("Root filesystem UUID changed; repair was not enabled.")
+            self.data["filesystem_uuid"] = inner["UUID"]
+            self.mount_root(mapper, readonly)
+            self.check_identity()
+            related = self.associations(devices, node)
+            esp = related["esp"]
+            self.data["esp_reason"] = related.get("esp_reason", "No unique associated ESP was found.") if not esp else ""
+            if esp:
+                try:
+                    unused(esp, devices)
+                    meta = probe(esp["path"])
+                    if (meta.get("TYPE") != "vfat" or not meta.get("UUID") or meta["UUID"] != esp.get("uuid")
+                            or not esp.get("partuuid") or sum(n.get("uuid") == meta["UUID"] for n in devices.values()) != 1):
+                        raise RescueError("Associated ESP identity is missing, changed or duplicated.")
+                    if expected and (meta["UUID"] != expected.get("esp_uuid")
+                                     or esp["partuuid"] != expected.get("esp_partuuid")):
+                        raise RescueError("ESP UUID/PARTUUID changed; repair was not enabled.")
+                    efi = self.target / "efi"
+                    info = efi.lstat()
+                    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                        raise RescueError("Target EFI path is not a real directory.")
+                except (RescueError, OSError):
+                    self.data["esp_reason"] = "Associated ESP is in use, ambiguous, or has an unsafe target path."
+                    esp = None
+            if not esp and not readonly:
+                raise RescueError("Write repair requires a uniquely identified, available ESP and a safe /efi directory.")
+            if esp:
+                self.mount_esp(esp, readonly)
+            self.data["repair_blocked"] = not bool(esp)
+            swap = related["swap"]
+            if swap:
+                unused(swap, devices)
+                meta = probe(swap["path"])
+                if (meta.get("TYPE"), meta.get("LABEL"), meta.get("VERSION")) != ("crypto_LUKS", "locachy-swap-crypt", "2"):
+                    raise RescueError("Associated swap is not a LOCachy LUKS2 volume.")
+                if not UUID.fullmatch(meta.get("UUID", "")) or meta["UUID"] != swap.get("uuid"):
+                    raise RescueError("Swap LUKS UUID changed or is missing.")
+                if sum(n.get("uuid") == meta["UUID"] for n in devices.values()) != 1:
+                    raise RescueError("Swap LUKS UUID is not unique.")
+                swap_mapper = self.open_mapper("swap", swap, key, readonly=True)
+                inner_swap = probe(swap_mapper)
+                if inner_swap.get("TYPE") not in ("swap", "swsuspend") or inner_swap.get("LABEL") != "locachy-swap":
+                    raise RescueError("Unlocked swap is not a locachy-swap header.")
+                ref = related.get("swap_reference", "")
+                if ref.startswith("UUID=") and inner_swap.get("UUID") != ref[5:].strip('\"'):
+                    raise RescueError("Swap filesystem UUID does not match the target configuration.")
+                self.data["swap_device"] = swap["path"]
+                self.data["swap_uuid"] = inner_swap.get("UUID", "")
+                self.data["swap_verified"] = True
+                self.data["hibernation_image"] = inner_swap.get("TYPE") == "swsuspend"
+            self.data["mode"] = "readonly" if readonly else "readwrite"
+            self.save()
+            self.verify_mode()
+        except (RescueError, OSError, ValueError, UnicodeError):
+            try:
+                self.close()
+            except (RescueError, OSError, ValueError, UnicodeError):
+                raise RescueError("Open failed; cleanup is incomplete. Retry close; no external resources were removed.") from None
+            raise
+
+    def enable_repair(self, key, confirm):
+        if not confirm:
+            raise RescueError("Write repair requires the explicit --confirm argument.")
+        if not self.data or self.data["mode"] != "readonly":
+            raise RescueError("Open and verify the target read-only before enabling repair.")
+        self.verify_mode()
+        if self.data.get("repair_blocked") or not self.data.get("esp_mount"):
+            raise RescueError(self.data.get("esp_reason") or "Write repair requires an identified mounted ESP.")
+        expected = dict(self.data)
+        self.close()
+        self.unlock(expected["device"], key, readonly=False, expected=expected)
+
+    def result(self, ok=True, error="", devices=None, output=""):
+        d = self.data if isinstance(self.data, dict) else {}
+        return {"ok": ok, "target": {"state": d.get("mode", "closed"), "device": d.get("device", ""),
+                "uuid": d.get("uuid", ""), "mount": str(self.target) if d.get("mount") else "",
+                "swap": d.get("swap_device", ""), "esp": d.get("esp", ""),
+                "filesystem_uuid": d.get("filesystem_uuid", ""), "esp_uuid": d.get("esp_uuid", ""),
+                "esp_partuuid": d.get("esp_partuuid", ""), "esp_reason": d.get("esp_reason", ""),
+                "repair_blocked": bool(d.get("repair_blocked", False)), "swap_verified": d.get("swap_verified", False),
+                "cleanup_pending": bool(d and d.get("mode") == "closed"
+                                        and any(d.get(k) for k in ("root", "swap", "mount", "esp_mount")))},
+                "devices": devices or [], "output": output, "error": error}
+
+    def target_terminal(self):
+        if not self.data or self.data["mode"] != "readwrite":
+            raise RescueError("Target terminal requires explicitly confirmed write repair.")
+        self.verify_mode()
+        # Ownership stays on disk. Do not carry the flock into the terminal;
+        # external mounts/busy files are checked by later cleanup operations.
+        os.execve("/usr/bin/arch-chroot", ["arch-chroot", str(self.target), "/bin/bash"], ENV)
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        raise RescueError("Invalid Rescue storage arguments.")
+
+
+def make_parser():
+    parser = Parser(description=__doc__)
+    sub = parser.add_subparsers(dest="action", required=True)
+    for name in ("status", "scan", "close", "disable-repair", "target-terminal"):
+        sub.add_parser(name)
+    unlock = sub.add_parser("unlock-readonly")
+    unlock.add_argument("device", nargs="?")
+    repair = sub.add_parser("enable-repair")
+    repair.add_argument("--confirm", action="store_true")
+    return parser
+
+
+def read_key():
+    key = sys.stdin.buffer.read(65537)
+    if not key or len(key) > 65536:
+        raise RescueError("A nonempty raw recovery passphrase of at most 65536 bytes is required on stdin.")
+    return key
+
+
+def main(argv=None):
+    storage = Storage()
+    try:
+        args = make_parser().parse_args(argv)
+        if os.geteuid() != 0:
+            raise RescueError("Rescue storage must run as root.")
+        os.umask(0o077)
+        with storage:
+            devices = []
+            if args.action in ("scan", "status"):
+                devices = [public_device(n) for n in root_candidates(inventory())]
+                if args.action == "status":
+                    storage.verify_mode()
+            elif args.action == "unlock-readonly":
+                storage.unlock(args.device, read_key())
+            elif args.action == "enable-repair":
+                if not args.confirm:
+                    raise RescueError("Write repair requires the explicit --confirm argument.")
+                storage.enable_repair(read_key(), args.confirm)
+            elif args.action in ("close", "disable-repair"):
+                storage.close()
+            elif args.action == "target-terminal":
+                storage.target_terminal()
+            result = storage.result(devices=devices)
+    except RescueError as error:
+        result = storage.result(ok=False, error=str(error))
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError):
+        result = storage.result(ok=False, error="Storage operation failed; inspect status and retry close if needed.")
+    print(json.dumps(result, ensure_ascii=True))
+    return 0 if result["ok"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

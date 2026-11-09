@@ -19,6 +19,11 @@ wpa_supplicant
 iw
 wireless-regdb
 rsync
+# The independent rescue mode starts its authenticated cable service explicitly.
+openssh
+openssl
+iproute2
+util-linux
 dosfstools
 e2fsprogs
 efibootmgr
@@ -31,6 +36,7 @@ flashrom
 # installer's encryption step
 fwupd
 kbd
+terminus-font
 nano
 # The full-screen installer and its terminal (installer/make-live.sh): their
 # libraries, and the fonts of their text beside Terminus (symbols, Chinese),

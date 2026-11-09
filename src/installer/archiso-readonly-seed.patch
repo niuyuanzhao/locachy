@@ -1,0 +1,21 @@
+--- a/mkarchiso
++++ b/mkarchiso
+@@ -901,6 +901,10 @@
+
+     # Copy systemd-boot configuration files
+     cp -r --remove-destination -- "${work_dir}/loader" "${isofs_dir}/"
++    # This installation medium cannot save fresh entropy. An empty read-only
++    # placeholder tells systemd-boot not to write it, even if USB optical
++    # firmware reports a writable FAT volume. Never distribute a shared seed.
++    install -m 0444 -- /dev/null "${isofs_dir}/loader/random-seed"
+
+     # Copy EFI binaries and related files
+     _make_common_bootmode_uefi.systemd-boot_copy_files "${uefi_arch[$arch]}"
+@@ -930,6 +934,7 @@
+         efiboot_rootdir_files+=("${isofs_dir}/shell"*'.efi')
+     fi
+     mcopy -s -i "${efibootimg}" "${efiboot_rootdir_files[@]}" '::/'
++    mattrib -i "${efibootimg}" +r '::/loader/random-seed'
+     if [[ -e "${isofs_dir}/boot/memtest86+/memtest.efi" ]]; then
+         mmd -i "${efibootimg}" '::/boot' '::/boot/memtest86+'
+         mcopy -i "${efibootimg}" \

@@ -74,6 +74,7 @@
 #include <fcntl.h>
 #include <linux/input.h>
 #include <linux/kd.h>
+#include <linux/netlink.h>
 #include <net/if.h>
 #include <poll.h>
 #include <sys/inotify.h>
@@ -443,13 +444,49 @@ static void prepare_boot_storage(void)
     static const char *const storage_mods[] = {
         "vmd", "nvme", "sdhci_pci", "mmc_block", "virtio_scsi", NULL
     };
+    /* Subscribe before loading drivers: enumeration can continue after
+     * modprobe returns. Recheck actual block devices after every event,
+     * with a bounded deadline even when no disk ever appears. */
+    int fd = socket(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, NETLINK_KOBJECT_UEVENT);
+    struct sockaddr_nl addr = { .nl_family = AF_NETLINK, .nl_groups = 1 };
+    if (fd >= 0 && bind(fd, (struct sockaddr *)&addr, sizeof addr) < 0) {
+        close(fd);
+        fd = -1;
+    }
     load_early_modules(storage_mods);
-    for (int i = 0; i < 30; i++) {
+    const double began = now_ms(), deadline = began + 10000;
+    int waiting = 0;
+    for (;;) {
         boot_dev_ready = 0;
         each_block_dev(check_boot_dev);
-        if (boot_dev_ready) return;
-        usleep(50 * 1000);
+        if (boot_dev_ready) {
+            if (waiting) say("init: boot storage ready after %.3f s", (now_ms() - began) / 1e3);
+            break;
+        }
+        int left = (int)(deadline - now_ms());
+        if (left <= 0) {
+            say("init: no boot storage found within 10 s");
+            break;
+        }
+        if (!waiting++) say("init: waiting up to 10 s for boot storage (%s)", fd >= 0 ? "uevents" : "polling");
+        if (fd < 0) {
+            usleep((useconds_t)(left < 50 ? left : 50) * 1000);
+            continue;
+        }
+        struct pollfd p = { .fd = fd, .events = POLLIN };
+        int ready = poll(&p, 1, left);
+        if (ready > 0 && (p.revents & POLLIN)) {
+            char event[4096];
+            /* Bound draining so a stream of unrelated events cannot starve
+             * the rescan or its deadline. ENOBUFS also leads to a rescan. */
+            for (int i = 0; i < 64 && recv(fd, event, sizeof event, MSG_DONTWAIT) > 0; i++) {}
+        } else if ((ready < 0 && errno != EINTR) ||
+                   (ready > 0 && (p.revents & (POLLERR | POLLHUP | POLLNVAL)))) {
+            close(fd);
+            fd = -1;
+        }
     }
+    if (fd >= 0) close(fd);
 }
 
 static int check_luks_dev(const char *dev)
@@ -529,6 +566,7 @@ static int run_cryptsetup(const char *cryptsetup, const char *dev, const char *m
     if (!pass) {
         argv[n++] = "--token-only";
     } else {
+        argv[n++] = "--disable-external-tokens";
         argv[n++] = "--key-file";
         argv[n++] = "-";
     }
@@ -2691,7 +2729,7 @@ static void message(struct frame *f)
             send3(&home, "ended", key, "-1");
         } else {
             const char *reply[] = { "app-result", "error", n > 2 ? fields[2] : "", "the screen is locked", NULL };
-            control_send_fields(home.ctl, reply);
+            control_send_fields(f->ctl, reply);
         }
     } else if (strcmp(fields[0], "call") == 0 && n > 1) {
         do_call(f, fields + 1);
@@ -2708,25 +2746,35 @@ static void message(struct frame *f)
         apps_list(rows, sizeof rows);
         const char *reply[] = { "apps", rows, NULL };
         control_send_fields(home.ctl, reply);
-    } else if (strcmp(fields[0], "app") == 0 && (n == 3 || (n == 4 && strcmp(fields[1], "open") == 0)) &&
-               f == &home) {
-        /* app ACTION NAME, or app open NAME TARGET (a file or URL to open in it) */
-        int open_view = strcmp(fields[1], "open") == 0 || strcmp(fields[1], "show") == 0;
-        if (open_view || strcmp(fields[1], "start") == 0 || strcmp(fields[1], "resume") == 0) {
+    } else if (strcmp(fields[0], "app") == 0 &&
+               ((f == &home &&
+                 (n == 3 || (n == 4 && (strcmp(fields[1], "open") == 0 || strcmp(fields[1], "open-own-tor") == 0)))) ||
+                (f->shared_display && n == 3 &&
+                 (strcmp(fields[1], "open") == 0 || strcmp(fields[1], "open-own-tor") == 0)))) {
+        /* app ACTION NAME (from the shared display's launcher: open[-own-tor]
+         * only), or app open[-own-tor] NAME TARGET (from home) */
+        int open_view = strcmp(fields[1], "open") == 0 || strcmp(fields[1], "open-own-tor") == 0 ||
+                        strcmp(fields[1], "show") == 0;
+        if (open_view || strcmp(fields[1], "start") == 0 || strcmp(fields[1], "start-own-tor") == 0 ||
+            strcmp(fields[1], "resume") == 0) {
             struct task *dt = shared_display_task();
             if (dt != NULL && dt->f[0].frozen) {
                 thaw(&dt->f[0]);
             }
         }
         char why[192];
-        int result = n == 4 ? apps_open(fields[2], fields[3], why, sizeof why)
+        int result = n == 4 ? apps_open_mode(fields[2], fields[3], strcmp(fields[1], "open-own-tor") == 0,
+                                             why, sizeof why)
                             : apps_action(fields[1], fields[2], why, sizeof why);
-        if (result == 0 && open_view) {
+        if (f->shared_display) {
+            say("init: app %s %s: %s", fields[1], fields[2], why);
+        }
+        if (result == 0 && open_view && f == &home) {
             stay_on_display = 1;
             do_open(-1, desktop_argv);
         }
         const char *reply[] = { "app-result", result == 0 ? "ok" : "error", fields[2], why, NULL };
-        control_send_fields(home.ctl, reply);
+        control_send_fields(f->ctl, reply);
     } else if (strcmp(fields[0], "window") == 0 && (n == 2 || n == 3) && (f->shared_display || f == &home)) {
         /* window PROGRAM [TARGET]: a host program as a managed window of its
          * own on the shared display (the top bar's status areas, a file

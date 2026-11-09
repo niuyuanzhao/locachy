@@ -1,0 +1,23 @@
+[Unit]
+Description=LOCachy independent rescue interface
+ConditionKernelCommandLine=locachy.mode=rescue
+After=systemd-udev-settle.service NetworkManager.service
+
+[Service]
+Type=simple
+Environment=LOCACHY_RESCUE_BOOT=1
+ExecStart=/usr/local/bin/rescue
+ExecStopPost=/usr/local/bin/locachy-rescue cleanup
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+UtmpIdentifier=tty1
+KillMode=control-group
+LimitCORE=0
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

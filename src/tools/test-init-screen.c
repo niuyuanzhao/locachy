@@ -159,6 +159,8 @@ int control_fields(char *msg, int len, char **fields, int max)
     return n;
 }
 /* Containers: none here (message's app requests are not sent). */
+int apps_open_mode(const char *name, const char *target, int own_tor, char *why, size_t size)
+{ (void)name; (void)target; (void)own_tor; if (size) why[0] = 0; return -1; }
 int apps_open(const char *name, const char *target, char *why, size_t size)
 { (void)name; (void)target; snprintf(why, size, "none"); return -1; }
 int apps_action(const char *action, const char *name, char *why, size_t size)

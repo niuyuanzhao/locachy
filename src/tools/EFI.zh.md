@@ -4,14 +4,18 @@
 
 已安装系统登记两个正式 UEFI 启动项：`LOCachy` 指向 `\EFI\locachy\locachy.efi`，
 `LOCachy (Previous)` 指向 `\EFI\locachy\locachy-prev.efi`（即便主板没有“从文件启动”
-菜单，也能直接在开机启动菜单里选回上一版签名映像）。`EFI/BOOT/BOOTX64.EFI` 保留为
+菜单，也能直接在开机启动菜单里选上一版映像）。`EFI/BOOT/BOOTX64.EFI` 保留为
 可移动介质标准后备，不再是唯一正常启动入口。
+
+上一版直接复制旧的当前映像，不会用新生成的密钥重新构建或签名。尤其首次启用
+本机密钥安全启动之后，较早的未签名 Previous 不能在安全启动开启时引导。启动项
+存在不等于签名有效或 TPM 策略可用，依赖它恢复之前须分别核验。
 
 安装器写好映像后，运行已安装源码的 `locachy-efi --esp TARGET --first`，
 登记所选 ESP，把 `LOCachy` 和 `LOCachy (Previous)` 放到 BootOrder 前列，保留所有其他条目及其相对顺序。
 固件变量不可用或不可写时明确警告；目标映像仍安装完成，fallback 保留。
 
-这些改动仍在本地，尚未发布。既有系统首次进行源码优先更新时，先装包管理工具，
+既有系统首次进行源码优先更新时，先装包管理工具，
 之后才完成 LOCachy 编译；前面的 pacman 钩子仍可能运行旧引导工具。更新完成
 `make.sh` 后才装好新的 EFI 工具并启用登记路径，不另加包管理 bootstrap 安装步骤。
 
@@ -70,5 +74,18 @@ bash tools/test-efi-vm.sh RUNTIME_ROOT PACKAGE_CACHE NEW_OUTPUT
 映像后保留人为调整的顺序。
 
 该测试在 OVMF 上验证真实 efibootmgr（五项功能检查与完成检查），但不是实机固件，也没有再次从新登记的映像重启。
+
+## 只读安装介质
+
+安装器把 `installer/archiso-readonly-seed.patch` 应用到发行包 mkarchiso 的工作副本：
+建立空的 `loader/random-seed`，再用 mtools 设置 FAT 只读属性。不分发共享随机种子。
+这会阻止 systemd-boot 在光盘上更新 seed，包括 FAT 协议起初看似可写的 USB 光驱固件。
+不修改已安装的发行包构建器；上游补丁上下文漂移时构建停止。
+
+`python3 -B tools/test-optical-boot.py 新输出目录` 使用真实上游 EFI 构造函数和
+systemd-boot，依次启动两 vCPU、512 MiB 的 OVMF usb-bot/scsi-cd 客机，检查 FAT
+属性、复现未修补的 write-protected 故障，并让修补后的镜像进入 tiny init。
+依赖其帮助中列出的 Linux/KVM 和发行包工具。它是启动接口测试，不是完整安装或
+实体 USB 设备验收。
 
 参考：[efibootmgr(8)](https://man.archlinux.org/man/efibootmgr.8.en)。

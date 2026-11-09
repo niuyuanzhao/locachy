@@ -194,10 +194,36 @@ static void native_windows(void)
     assert(strstr(env, "program=term\n") && strstr(env, "args=/usr/bin/wiremix\n") && strstr(env, "title=Mixer\n"));
     assert(apps_window_open("mixer", "", why, sizeof why) == 0);
     lacks("window-mixer-2");
+    assert(apps_window_open("bluetooth", "", why, sizeof why) == 0);
+    assert(apps_window_open("bluetooth", "/usr/bin/sh", why, sizeof why) == -1);
+    assert(apps_window_open("network", "", why, sizeof why) == 0);
+    assert(apps_window_open("network", "eth0", why, sizeof why) == -1);
+    assert(apps_window_open("term", "", why, sizeof why) == 0);
+    assert(apps_window_open("term", "", why, sizeof why) == 0);
+    assert(apps_window_open("term", "/bin/sh", why, sizeof why) == -1);
+    tick_for(300);
+    assert(apps_window_open("bluetooth", "", why, sizeof why) == 0);
+    assert(apps_window_open("network", "", why, sizeof why) == 0);
+    lacks("window-bluetooth-2");
+    lacks("window-network-2");
+    contains("window-bluetooth-1\trunning\t");
+    contains("window-network-1\trunning\t");
+    contains("window-term-1\trunning\t");
+    contains("window-term-2\trunning\t");
+    assert(strstr(text_of(ROOT "/runtime/window-bluetooth-1.env"), "args=/usr/bin/bluetui\n") &&
+           strstr(text_of(ROOT "/runtime/window-bluetooth-1.env"), "title=Bluetooth\n"));
+    assert(strstr(text_of(ROOT "/runtime/window-network-1.env"), "args=/usr/bin/nmtui\n") &&
+           strstr(text_of(ROOT "/runtime/window-network-1.env"), "title=Network\n"));
+    assert(strstr(text_of(ROOT "/runtime/window-term-1.env"), "args=/usr/local/lib/locachy/user-shell\n") &&
+           strstr(text_of(ROOT "/runtime/window-term-1.env"), "title=Terminal\n"));
     assert(apps_action("stop", "window-mixer-1", why, sizeof why) == 0);
+    assert(apps_action("stop", "window-bluetooth-1", why, sizeof why) == 0);
+    assert(apps_action("stop", "window-network-1", why, sizeof why) == 0);
+    assert(apps_action("stop", "window-term-1", why, sizeof why) == 0);
+    assert(apps_action("stop", "window-term-2", why, sizeof why) == 0);
     tick_for(800);
     lacks("window-");
-    puts("PASS the first window waits for display-ready; one mixer window");
+    puts("PASS the first window waits for display-ready; single mixer/bluetooth/network, multiple user-shell terms");
 
     /* A container may not be opened as a window, nor a window as one. */
     assert(apps_open("window-mixer-1", "/x", why, sizeof why) == -1);
@@ -279,6 +305,48 @@ int main(void)
     assert(apps_action("stop", "alpha", why, sizeof why) == 0);
     tick_for(300);
     contains("alpha\tclosed\t");
+    /* Confirmation is one launch, including a deferred first display start;
+     * targets and own-Tor consent never survive a cancelled operation. */
+    assert(unlink(APP_DISPLAY_READY) == 0);
+    fd = open(APP_DISPLAY_READY, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    assert(fd >= 0 && close(fd) == 0);
+    assert(apps_action("open-own-tor", "alpha", why, sizeof why) == 0);
+    tick_for(100);
+    contains("alpha\tstarting\t");
+    apps_display_ready();
+    tick_for(200);
+    assert(strcmp(text_of(ROOT "/runtime/tool.argv"), "start\n--own-tor\nalpha\n") == 0);
+    assert(apps_open_mode("alpha", "https://example.org/reopen", 1, why, sizeof why) == 0);
+    tick_for(200);
+    assert(strcmp(text_of(ROOT "/runtime/tool.argv"), "open\nalpha\nhttps://example.org/reopen\n") == 0);
+    assert(apps_action("stop", "alpha", why, sizeof why) == 0);
+    tick_for(300);
+    assert(apps_action("start-own-tor", "alpha", why, sizeof why) == 0);
+    tick_for(200);
+    assert(strcmp(text_of(ROOT "/runtime/tool.argv"), "start\n--own-tor\nalpha\n") == 0);
+    assert(apps_action("stop", "alpha", why, sizeof why) == 0);
+    tick_for(300);
+    assert(unlink(APP_DISPLAY_READY) == 0);
+    fd = open(APP_DISPLAY_READY, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    assert(fd >= 0 && close(fd) == 0);
+    assert(apps_open_mode("alpha", "https://example.org/own", 1, why, sizeof why) == 0);
+    apps_display_ready();
+    tick_for(200);
+    assert(strcmp(text_of(ROOT "/runtime/tool.argv"), "open\n--own-tor\nalpha\nhttps://example.org/own\n") == 0);
+    assert(apps_action("stop", "alpha", why, sizeof why) == 0);
+    tick_for(300);
+    assert(unlink(APP_DISPLAY_READY) == 0);
+    fd = open(APP_DISPLAY_READY, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    assert(fd >= 0 && close(fd) == 0);
+    assert(apps_open_mode("alpha", "https://example.org/cancelled", 1, why, sizeof why) == 0);
+    assert(apps_action("stop", "alpha", why, sizeof why) == 0);
+    assert(apps_action("start", "alpha", why, sizeof why) == 0);
+    apps_display_ready();
+    tick_for(200);
+    assert(strcmp(text_of(ROOT "/runtime/tool.argv"), "start\nalpha\n") == 0);
+    assert(apps_action("stop", "alpha", why, sizeof why) == 0);
+    tick_for(300);
+    puts("PASS own-Tor immediate/deferred starts, target opens, reopens and cancellation isolation");
     native_windows();
     puts("Host registry state transitions passed.");
     return 0;

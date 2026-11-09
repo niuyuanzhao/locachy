@@ -946,6 +946,25 @@ static void window_request(const char *args, char *reply, size_t size)
     snprintf(reply, size, "ok window requested");
 }
 
+static void open_request(const char *name, int own_tor, char *reply, size_t size)
+{
+    char msg[32 + 64];
+    if (seat_requests < 0) {
+        snprintf(reply, size, "error no seat to pass window requests to");
+        return;
+    }
+    if (!valid_name(name) || strncmp(name, "window-", 7) == 0) {
+        snprintf(reply, size, "error malformed container request");
+        return;
+    }
+    int n = snprintf(msg, sizeof msg, "app%c%s%c%s", '\0', own_tor ? "open-own-tor" : "open", '\0', name);
+    if (send(seat_requests, msg, (size_t)n, MSG_NOSIGNAL | MSG_DONTWAIT) != n) {
+        snprintf(reply, size, "error the seat does not take window requests now");
+        return;
+    }
+    snprintf(reply, size, "ok open requested");
+}
+
 static void serve(int listener)
 {
     int client = accept4(listener, NULL, NULL, SOCK_CLOEXEC);
@@ -969,6 +988,10 @@ static void serve(int listener)
         close_windows(request + 6, reply, sizeof reply);
     } else if (strncmp(request, "window ", 7) == 0) {
         window_request(request + 7, reply, sizeof reply);
+    } else if (strncmp(request, "open ", 5) == 0) {
+        open_request(request + 5, 0, reply, sizeof reply);
+    } else if (strncmp(request, "open-own-tor ", 13) == 0) {
+        open_request(request + 13, 1, reply, sizeof reply);
     } else if (strcmp(request, "focused") == 0) {
         wl_display_roundtrip(display);
         focused(reply, sizeof reply);

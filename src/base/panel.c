@@ -404,8 +404,8 @@ void panel_draw(uint32_t *px, int w, int h, int stride, const char *title, const
     struct block left[3], right[6];
     int nright = 0;
     set(&left[0], title, sub, 12, PANEL_BLOCK_NONE);
-    set(&left[1], s.memory, s.swap, 14, PANEL_BLOCK_MEMORY);
-    set(&left[2], s.cpu, s.temp, 7, PANEL_BLOCK_CPU); /* "CPU 99%" */
+    set(&left[1], s.memory, s.swap, 14, PANEL_BLOCK_NONE);
+    set(&left[2], s.cpu, s.temp, 7, PANEL_BLOCK_NONE); /* "CPU 99%" */
     if (ime && ime[0]) {
         set(&right[nright++], "IME", ime, 3, PANEL_BLOCK_NONE); /* the input method's own clicks */
     }

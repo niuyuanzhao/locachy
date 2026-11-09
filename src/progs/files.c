@@ -4344,6 +4344,31 @@ static void open_program_window(const char *program, const char *path, const cha
     }
 }
 
+#include "tor-browser.h"
+
+static void on_files_service_tor(const char *name, const char *value, void *arg)
+{
+    if (strcmp(name, "service_tor") == 0 && value && value[strspn(value, " \t")]) {
+        *(int *)arg = 1;
+    }
+}
+
+static int files_needs_own_tor(const char *name)
+{
+    char path[384], ev[128] = "";
+    int service_on = 0;
+    snprintf(path, sizeof path, "/sys/fs/cgroup/app_%.63s/cgroup.events", name);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    ssize_t n = fd >= 0 ? read(fd, ev, sizeof ev - 1) : -1;
+    if (fd >= 0) close(fd);
+    ev[n > 0 ? n : 0] = '\0';
+    if (strstr(ev, "populated 1")) return 0;
+    snprintf(path, sizeof path, CONTAINERS_CONF "/%.63s.conf", name);
+    if (!tor_browser_own_supported(path)) return 0;
+    rc_read(on_files_service_tor, &service_on);
+    return !service_on;
+}
+
 /* Open path (or a URL) by the rule for its type or the user's choice (pick:
  * always asked), or with the framebuffer program with. */
 static void open_file(const char *path, int pick, const char *with)
@@ -4409,8 +4434,20 @@ static void open_file(const char *path, int pick, const char *with)
         }
         return;
     }
+    int own_tor = 0;
+    if (files_needs_own_tor(name)) {
+        char question[256];
+        snprintf(question, sizeof question,
+                 _("Full-system Tor is off: start %s with its own Tor without the host firewall?"), name);
+        if (!yes(question)) {
+            report(0, "%s", _("Start cancelled."));
+            return;
+        }
+        own_tor = 1;
+    }
     say("home: open %s (%s) in %s", path, type, name);
-    if (base_app_open(name, path, why, sizeof why) == 0) {
+    if ((own_tor ? base_app_open_own_tor(name, path, why, sizeof why) :
+                   base_app_open(name, path, why, sizeof why)) == 0) {
         report(0, _("Opened in %s."), name);
     } else {
         report(1, "%s: %.400s", name, why);

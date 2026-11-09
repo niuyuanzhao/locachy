@@ -17,6 +17,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+static char fake_term_bin[256] = "/usr/local/bin/term";
+#define TERM_BIN fake_term_bin
 #define main settings_main
 #include "../progs/settings.c"
 #include "../base/fontmatch.c" /* without FreeType: fontconfig is not asked */
@@ -26,6 +28,7 @@
 
 static int kept;
 static const int *keys_in;
+static int poll_key;
 
 void key_close_kept(void) { kept++; }
 int key_get(void) { return *keys_in++; }
@@ -45,6 +48,11 @@ void screen_text(int x, int y, const char *text, uint32_t fg, uint32_t bg)
 void screen_flush(void) {}
 void screen_bar(const char *title, const char *ime) { (void)title; (void)ime; abort(); }
 int key_poll_timeout(int fd, int timeout) { (void)fd; (void)timeout; abort(); }
+int key_poll_many(struct pollfd *extra, size_t count, int timeout) {
+    if (poll_key) { int k = poll_key; poll_key = 0; return k; }
+    poll(extra, (nfds_t)count, timeout > 50 ? 50 : timeout);
+    return 0;
+}
 int screen_rescale(void) { abort(); }
 int open_candidates(const char *type, char names[][OPEN_NAME], int max) { (void)type; (void)names; (void)max; abort(); }
 int open_set_rule(const char *type, const char *value) { (void)type; (void)value; abort(); }
@@ -113,6 +121,48 @@ int main(void)
     keys_in = (const int[]){ K_CLOSE };
     assert(prompt("Name: ", text, sizeof text) == 0 && closing && kept == 0 && close_due());
     puts("PASS a question cancelled by the close: due at once, under a job too");
+
+    /* Wayland window mode: in_term spawns TERM_BIN directly (no base_call) with
+     * title set and readiness/request descriptors stripped, waits via pidfd, and
+     * terminates the child session if K_CLOSE arrives. */
+    char tdir[] = "/tmp/settings-interm-XXXXXX", env_out[300];
+    assert(mkdtemp(tdir));
+    snprintf(fake_term_bin, sizeof fake_term_bin, "%s/term", tdir);
+    snprintf(env_out, sizeof env_out, "%s/env", tdir);
+    FILE *tf = fopen(fake_term_bin, "w");
+    assert(tf && fprintf(tf, "#!/bin/sh\n"
+                         "printf 'title=%%s ready=%%s req=%%s args=%%s\\n' "
+                         "\"${LOCACHY_WINDOW_TITLE:-}\" \"${LOCACHY_WINDOW_READY_FD:-none}\" "
+                         "\"${LOCACHY_REQUEST_FD:-none}\" \"$*\" >'%s'\n"
+                         "case \"${LOCACHY_WINDOW_APP_ID:-}\" in settings-terminal-*) ;; *) exit 44 ;; esac\n"
+                         "[ \"$1\" = sleep ] && exec sleep 10\n"
+                         "[ \"$1\" = fail ] && exit 9\n"
+                         "exit 0\n", env_out) > 0 && fclose(tf) == 0 && chmod(fake_term_bin, 0755) == 0);
+    closing = poll_key = 0;
+    setenv("LOCACHY_BACKEND", "wayland", 1);
+    setenv("LOCACHY_WINDOW_READY_FD", "9", 1);
+    setenv("LOCACHY_REQUEST_FD", "10", 1);
+    setenv("LOCACHY_WINDOW_APP_ID", "window-settings-1", 1);
+    char *const ok_cmd[] = { "/usr/bin/nmtui", NULL };
+    assert(in_term(ok_cmd) == 0);
+    char got_env[256] = "";
+    tf = fopen(env_out, "r");
+    assert(tf && fgets(got_env, sizeof got_env, tf) && fclose(tf) == 0);
+    assert(!strcmp(got_env, "title=nmtui ready=none req=none args=/usr/bin/nmtui\n"));
+    char *const fail_cmd[] = { "fail", NULL };
+    assert(in_term(fail_cmd) == 9);
+    poll_key = K_CLOSE;
+    char *const sleep_cmd[] = { "sleep", NULL };
+    (void)in_term(sleep_cmd);
+    assert(closing && close_due());
+    unsetenv("LOCACHY_BACKEND");
+    unsetenv("LOCACHY_WINDOW_READY_FD");
+    unsetenv("LOCACHY_REQUEST_FD");
+    unsetenv("LOCACHY_WINDOW_APP_ID");
+    unlink(env_out);
+    unlink(fake_term_bin);
+    rmdir(tdir);
+    puts("PASS Wayland window in_term: spawns term with clean env, returns exit status, terminates child on K_CLOSE");
     puts("settings: the window's close passed.");
     return 0;
 }

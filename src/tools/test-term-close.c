@@ -16,6 +16,9 @@ static char ready[512], hung[512];
 void say(const char *fmt, ...) { (void)fmt; }
 int screen_open(const char *font) { (void)font; return 0; }
 int keys_open(void) { return 1; }
+static int keymap_loaded;
+int keys_layout_load(const char *path) { assert(path[0] == '/'); keymap_loaded++; return strcmp(path, "/bad-keymap") ? 0 : -1; }
+void screen_release(void) {}
 int screen_cols(void) { return 80; }
 int screen_rows(void) { return 25; }
 void screen_fill(int c, int r, int w, int h, uint32_t rgb) { (void)c; (void)r; (void)w; (void)h; (void)rgb; }
@@ -66,10 +69,14 @@ int main(int argc, char **argv)
     char script[1400];
     /* The shell and a child of its own in its process group: both are hung up. */
     snprintf(script, sizeof script,
+             "test -z \"${LOCACHY_KEYMAP_TABLE+x}\" || exit 19; "
              "trap 'echo \"$$ $child\" >\"%s\"; exit 0' HUP; sleep 30 & child=$!; : >\"%s\"; wait",
              hung, ready);
     char *args[] = { "term", "/bin/sh", "-c", script, NULL };
+    setenv("LOCACHY_KEYMAP_TABLE", "/run/rescue/keymap.table", 1);
     int status = term_main(4, args);
+    unsetenv("LOCACHY_KEYMAP_TABLE");
+    assert(keymap_loaded == 1);
     assert(status == 0);
     /* term waits half a second for its child; on a busy machine the trap may
      * run after that. */
@@ -90,5 +97,9 @@ int main(int argc, char **argv)
     for (int i = 0; i < 500 && !gone(sleeper); i++) usleep(10000);
     assert(gone(shell) && gone(sleeper));
     puts("PASS term closed as a window: SIGHUP to its child's process group, term ends with status 0");
+    setenv("LOCACHY_KEYMAP_TABLE", "/bad-keymap", 1);
+    assert(term_main(1, args) == 1);
+    unsetenv("LOCACHY_KEYMAP_TABLE");
+    puts("PASS term rejects an unreadable explicit keyboard table");
     return 0;
 }

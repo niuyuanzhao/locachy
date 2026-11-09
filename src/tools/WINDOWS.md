@@ -2,30 +2,49 @@
 
 [中文](WINDOWS.zh.md)
 
-view, files, settings and the mixer can be windows of their own on the shared
-display, besides running on the direct screens from home. A window is a
-managed instance of the same program, not a copy of it: process 1 starts,
-freezes and stops it like a container, it never holds a screen lease or an
-input device, and it keeps the shared display running while it is open.
+view, files, settings, mixer, bluetooth, network and term can be windows of
+their own on the shared display, besides running on the direct screens from
+home. A window is a managed instance of the same program, not a copy of it:
+process 1 starts, freezes and stops it like a container, it never holds a
+screen lease or an input device, and it keeps the shared display running while
+it is open.
 
 ## Requests
 
-`locachy-seat --window PROGRAM [TARGET]` asks for one. The top bar runs it
-(its status areas open settings at a page, the volume area the mixer), and
-so does the bar's xdg-open for a container on the shared display: a document
-view opens goes to a view window, a folder to a files window, instead of
-switching to home.
+`locachy-seat --window PROGRAM [TARGET]` asks for one, and `locachy-seat --open
+[--own-tor] CONTAINER` asks process 1 to open or raise a container on the
+shared display. The top bar runs them (its launcher mirrors home's sections,
+its Bluetooth block opens bluetui when the service is on, its volume block the
+mixer, and its other right-hand status blocks open settings at a page), and so
+does the bar's xdg-open for a container on the shared display: a document view
+opens goes to a view window, a folder to a files window, instead of switching
+to home.
 
-| PROGRAM  | TARGET                                              | Command run |
-|----------|-----------------------------------------------------|-------------|
-| settings | none, or `network`, `power`, `devices`, `date-time`, `hardware` | `/usr/local/bin/settings [--page=PAGE]` |
-| view     | none (its chooser), or an absolute path of a file   | `/usr/local/bin/view [FILE]` |
-| files    | none (home), or an absolute path of a folder        | `/usr/local/bin/files [FOLDER]` |
-| mixer    | none                                                | `/usr/local/bin/term /usr/bin/wiremix` |
+| PROGRAM   | TARGET                                              | Command run |
+|-----------|-----------------------------------------------------|-------------|
+| settings  | none, or `network`, `power`, `devices`, `date-time`, `hardware` | `/usr/local/bin/settings [--page=PAGE]` |
+| view      | none (its chooser), or an absolute path of a file   | `/usr/local/bin/view [FILE]` |
+| files     | none (home), or an absolute path of a folder        | `/usr/local/bin/files [FOLDER]` |
+| mixer     | none                                                | `/usr/local/bin/term /usr/bin/wiremix` |
+| bluetooth | none                                                | `/usr/local/bin/term /usr/bin/bluetui` |
+| network   | none                                                | `/usr/local/bin/term /usr/bin/nmtui` |
+| term      | none                                                | `/usr/local/bin/term /usr/local/lib/locachy/user-shell` |
+
+The terminal opens the configured user shell as UID 1000, not an administration
+shell. The settings network page also runs nmtui in a child terminal window in
+settings' managed cgroup and remains responsive while waiting for it to close.
+
+The launcher uses home's shared host-program classification and all registered
+programs, not a fixed short list. Enter or left-click opens a supported window;
+F or right-click opens its full-screen entry through home. Direct-only programs
+use home. Reboot and power off open home's existing confirmation prompt; they
+never execute directly from the launcher. Container state here is a cgroup/ready
+marker snapshot, not home's complete process-1 state, and containers are sorted
+by name. RAM, swap, CPU and temperature blocks are readings, not buttons.
 
 Nothing else is accepted: no other program, no arguments of the caller's, no
-shell. The request travels on existing channels only. The client sends it to
-labwc-control's socket (`/run/user/0/locachy-control.sock`, root only);
+arbitrary shell command. The request travels on existing channels only. The
+client sends it to labwc-control's socket (`/run/user/0/locachy-control.sock`, root only);
 labwc-control passes its fields to the seat on a socket pair the seat gave it
 (`LOCACHY_SEAT_REQUESTS`); the seat sends `window PROGRAM [TARGET]` on its
 control socket to process 1. The client, the seat and process 1 each check the
@@ -53,9 +72,10 @@ A window waits for the shared display's display-ready, as a container does
 display starts for it and is not stopped while a window runs, even when no
 container does.
 
-settings and the mixer have one window each: another request raises it, and a
-settings page goes to the open window as `page NAME` instead of a second copy.
-view and files open a window per request (at most eight windows).
+settings, the mixer, bluetooth and network have one window each: another
+request raises it, and a settings page goes to the open window as `page NAME`
+instead of a second copy. view, files and term open a window per request (at
+most sixteen windows).
 
 Closing the window (its close button, Alt+F4) reaches the program as
 `K_CLOSE`, and the program leaves through its own quit path:

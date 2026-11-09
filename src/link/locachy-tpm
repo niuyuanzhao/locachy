@@ -420,12 +420,13 @@ def save_pending_request(request):
 
 
 def pending_key_present(dev, key):
-    """Whether this key opens a slot. Only cryptsetup's wrong-passphrase
-    status on a readable LUKS header means no; I/O and other failures must
-    not be mistaken for an absent slot (and lose its key)."""
+    """Whether this key opens a slot, never a working external TPM token.
+    Only cryptsetup's wrong-passphrase status on a readable LUKS header
+    means no; I/O and other failures must not lose a pending key."""
     if not key.is_file():
         raise RuntimeError(f"{key}: pending key missing; request kept")
-    p = subprocess.run(["cryptsetup", "open", "--test-passphrase", "--key-file", str(key), dev],
+    p = subprocess.run(["cryptsetup", "open", "--test-passphrase", "--disable-external-tokens",
+                        "--key-file", str(key), dev],
                        capture_output=True, text=True, stdin=subprocess.DEVNULL)
     if p.returncode == 0:
         return True

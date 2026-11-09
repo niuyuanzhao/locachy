@@ -54,6 +54,21 @@ stays as it is:
   `screencast` and `x11` (also `host`) are `0` or `1`; `directories` are absolute paths without `..`
   separated by colons; `desktop` are `*.desktop` names. `package` and
   `command` are required.
+- When `tor="1"` is set with `network="1"`:
+  - While full-system Tor (`service_tor`) is on and `tor-enforce` is loaded,
+    `locachy-app` exports `TOR_PROVIDER=none TOR_SOCKS_HOST=127.0.0.1 TOR_SOCKS_PORT=9050`
+    and loads a per-cgroup `nftables` table (`locachy_tor_app_NAME`, priority `-150`)
+    permitting only IPv4 TCP to `127.0.0.1:9050` until the container stops.
+  - While full-system Tor is off, other applications remain refused. Tor
+    Browser alone (`package="tor-browser-bin"`, the supported `/usr/bin/tor-browser`
+    wrapper, directly or through the recipe's `/usr/bin/env` prefix) can run
+    its bundled Tor after an explicit warning and confirmation in home, files
+    or the top bar (`--own-tor` on the CLI). The launcher exports
+    `TOR_SOCKS_HOST=127.0.0.1 TOR_SOCKS_PORT=9150`, without `TOR_PROVIDER=none`:
+    the browser runs its own user-space daemon without colliding with port
+    `9050` across mode switches. This mode has no host Tor-only firewall.
+    The exact old recipe's fixed system-Tor environment prefix is recognized
+    in memory, so existing configurations work without rewriting user edits.
 
 ## On the installed system
 

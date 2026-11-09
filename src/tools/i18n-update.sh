@@ -9,7 +9,7 @@ cd "$src"
 xgettext --language=C --from-code=UTF-8 --add-comments=TRANSLATORS: \
     --keyword=_ --keyword=N_ --keyword=C_:1c,2 --keyword=P_:1,2 \
     --package-name=LOCachy --add-location=file --sort-by-file \
-    -o po/locachy.pot base/*.c progs/*.c progs/*.h progs/*.inc
+    -o po/locachy.pot base/*.c base/include/*.h progs/*.c progs/*.h progs/*.inc
 for lang in $(cat po/LINGUAS); do
     if [ -f "po/$lang.po" ]; then
         msgmerge --quiet --update --backup=none --add-location=file "po/$lang.po" po/locachy.pot

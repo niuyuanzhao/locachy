@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""Route the independent rescue UI's actions to its storage and cable helpers."""
+import json
+import os
+import resource
+import subprocess
+import sys
+
+STORAGE = "/usr/local/lib/locachy/rescue-storage"
+LINK = "/usr/local/lib/locachy/rescue-link.py"
+LIMIT = 1024 * 1024
+
+
+def call(program, args, secret=None, timeout=240):
+    try:
+        result = subprocess.run([program, *args], input=secret if secret is not None else b"",
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout,
+                                env={k: v for k, v in os.environ.items()
+                                     if k not in ("PASSWORD", "NEWPASSWORD", "PIN", "NEWPIN")})
+        if len(result.stdout) > LIMIT:
+            raise ValueError("rescue helper reply exceeds the limit")
+        reply = json.loads(result.stdout)
+        if not isinstance(reply, dict) or not isinstance(reply.get("ok"), bool):
+            raise ValueError("malformed rescue helper reply")
+        if result.returncode and reply["ok"]:
+            raise ValueError("rescue helper failed without reporting its failure")
+        return reply
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        return {"ok": False, "error": str(error), "output": ""}
+
+
+def combined(storage, link):
+    target = {"state": "unknown", "device": "", "uuid": "", "mount": "", "swap": "", "esp": ""}
+    cable = {"active": False, "state": "unknown", "interface": "", "address": "", "port": 2222, "fingerprint": ""}
+    target.update(storage.get("target", {}))
+    cable.update(link.get("link", {}))
+    reply = {"ok": bool(storage.get("ok") and link.get("ok")),
+             "target": target, "devices": storage.get("devices", []),
+             "interfaces": link.get("interfaces", []), "link": cable}
+    for name in ("error", "output"):
+        reply[name] = "\n".join(str(r[name]) for r in (storage, link) if r.get(name))
+    return reply
+
+
+def snapshot(actions=()):
+    reply = combined(call(STORAGE, ["status"]), call(LINK, ["interfaces"]))
+    reply["ok"] = reply["ok"] and all(action.get("ok") for action in actions)
+    for name in ("error", "output"):
+        messages = [str(action[name]) for action in actions if action.get(name)]
+        if reply.get(name):
+            messages.append(reply[name])
+        reply[name] = "\n".join(dict.fromkeys(messages))
+    return reply
+
+
+def dispatch(args, secret=None):
+    action = args[0] if args else "status"
+    rest = args[1:]
+    if action == "status" and not rest:
+        return snapshot()
+    if action == "scan" and not rest:
+        return combined(call(STORAGE, ["scan"]), call(LINK, ["interfaces"]))
+    if action == "unlock-readonly" and len(rest) == 1:
+        result = call(STORAGE, [action, rest[0]], secret)
+    elif action == "enable-repair" and rest == ["--confirm"]:
+        result = call(STORAGE, [action, "--confirm"], secret)
+    elif action == "disable-repair" and not rest:
+        result = call(STORAGE, [action])
+    elif action == "close-target" and not rest:
+        result = call(STORAGE, ["close"])
+    elif action == "start-link" and len(rest) == 1:
+        result = call(LINK, ["start", rest[0]], secret)
+    elif action == "stop-link" and not rest:
+        result = call(LINK, ["stop"])
+    elif action == "cleanup" and not rest:
+        results = [call(LINK, ["stop"]), call(STORAGE, ["close"])]
+        return snapshot(results)
+    else:
+        return snapshot([{"ok": False, "error": "unknown rescue action or malformed arguments"}])
+    return snapshot([result])
+
+
+def main():
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    if os.geteuid() != 0:
+        print(json.dumps({"ok": False, "error": "rescue actions require root", "output": ""}))
+        return 1
+    args = sys.argv[1:] or ["status"]
+    if args == ["target-terminal"]:
+        os.execv(STORAGE, [STORAGE, "target-terminal"])
+    needs_secret = args[0] in ("unlock-readonly", "enable-repair", "start-link")
+    secret = None
+    if needs_secret:
+        secret = sys.stdin.buffer.read(4097)
+        if not secret or len(secret) > 4096:
+            reply = snapshot([{"ok": False, "error": "a nonempty secret of at most 4096 bytes is required"}])
+            print(json.dumps(reply))
+            return 1
+    reply = dispatch(args, secret)
+    print(json.dumps(reply, ensure_ascii=True))
+    return 0 if reply["ok"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

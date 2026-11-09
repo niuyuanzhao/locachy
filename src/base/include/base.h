@@ -213,14 +213,13 @@ void panel_fill(uint32_t *px, int w, int h, int stride, int x, int y, int bw, in
 int panel_fonts_reload(void);
 /* How many containers are frozen; *ram: the memory of container name. */
 int panel_containers(const char *name, unsigned long long *ram);
-/* The status blocks the last panel_draw showed, pixels [x0, x1) of its px,
- * for a caller that opens their settings on a click, and LOCachy at the
- * left (locachy-bar's launcher). The input method's own block is not one
- * of them. */
+/* The status blocks on the right the last panel_draw showed, pixels [x0, x1)
+ * of its px, for a caller that opens their tool or settings on a click, and
+ * LOCachy at the left (locachy-bar's launcher). The title, memory, CPU and
+ * input method blocks have none. */
 enum panel_block {
-    PANEL_BLOCK_NONE, PANEL_BLOCK_MEMORY, PANEL_BLOCK_CPU, PANEL_BLOCK_VOLUME,
-    PANEL_BLOCK_BLUETOOTH, PANEL_BLOCK_NETWORK, PANEL_BLOCK_BATTERY, PANEL_BLOCK_TIME,
-    PANEL_BLOCK_LOCACHY,
+    PANEL_BLOCK_NONE, PANEL_BLOCK_VOLUME, PANEL_BLOCK_BLUETOOTH, PANEL_BLOCK_NETWORK,
+    PANEL_BLOCK_BATTERY, PANEL_BLOCK_TIME, PANEL_BLOCK_LOCACHY,
 };
 struct panel_hit {
     int x0, x1;
@@ -449,6 +448,7 @@ int base_app_action(const char *action, const char *name, char *why, size_t size
 /* For home: open target (a path or URL) in container name, starting it
  * (and the shared display) if it is not running. */
 int base_app_open(const char *name, const char *target, char *why, size_t size);
+int base_app_open_own_tor(const char *name, const char *target, char *why, size_t size);
 
 /* Containers: each is its configuration, CONTAINERS_CONF/NAME.conf, lines
  * NAME="VALUE" as in rc.conf: command (what it runs), network ("1": in

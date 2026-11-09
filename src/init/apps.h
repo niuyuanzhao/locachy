@@ -22,8 +22,9 @@ int apps_display_state(void);
 void apps_list(char *buf, size_t size);
 int apps_action(const char *action, const char *name, char *why, size_t size);
 int apps_open(const char *name, const char *target, char *why, size_t size);
+int apps_open_mode(const char *name, const char *target, int own_tor, char *why, size_t size);
 /* Open a whitelisted host tool as a managed Wayland window on the shared
- * display: view, files, settings, mixer. For an already running settings
+ * display: view, files, settings, mixer, bluetooth, network, term. For an already running settings
  * window, updates its page via its request channel without spawning a second
  * instance. */
 int apps_window_open(const char *program, const char *target, char *why, size_t size);

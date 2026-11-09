@@ -12,8 +12,9 @@ reviewed against this tree.
 
 **The disk.** The installer makes a LUKS2 root (`locachy-crypt`) and a
 LUKS2 swap (`locachy-swap-crypt`), both opened by the same long passphrase.
-The passphrase is never removed. It is asked whenever the TPM does not open
-a disk.
+Enrollment preserves the recovery-passphrase slot by design; actual disk health
+and recovery access still need verification. When TPM unlock fails, one typed
+passphrase is tried on both root and swap, not one separate prompt per disk.
 
 There is no PIN anywhere. The user decided that the passphrase is long
 enough as the only typed secret.
@@ -108,7 +109,7 @@ binding.
 | Secure Boot turned off, keys cleared or replaced in the firmware | Stopped: PCR 7 measures SecureBoot, PK, KEK, db and dbx. The passphrase is asked. | The binding is to that state already (see above). | Not measured. |
 | Changed boot image on the ESP (evil maid) | Stopped: an unsigned or differently signed image does not start. One signed with this db key but not this PCR key gets no matching PCR 11 signature. | **Not stopped**: the image is unsigned, and the replaced image unseals the key itself. | **Not stopped.** |
 | Command line or extra initrd from a loader | Stopped: with Secure Boot on, systemd-stub ignores command-line overrides (the UKI has `.cmdline`). No signed loader is there to pass an initrd. | **Not stopped**: with Secure Boot off, `initrd=` and `rdinit=` reach the kernel. | **Not stopped.** |
-| An older signed image (downgrade) | **Not stopped.** Every image ever signed with this PCR key and db key opens the disk; `locachy-prev.efi` is one of them, on the ESP. A signed policy has no revocation. This matters if an older image has a flaw before `leave-initrd`. Remedy, not automated: a new PCR key (`ukify genkey`, then `locachy-tpm enroll`) invalidates all older images. | n/a | n/a |
+| An older signed image (downgrade) | **Not stopped.** Every image ever signed with this PCR key and db key opens the disk; `locachy-prev.efi` may be one of them on the ESP, but an old unsigned Previous is not re-signed when keys are first created. A signed policy has no revocation. This matters if an older image has a flaw before `leave-initrd`. Remedy, not automated: a new PCR key (`ukify genkey`, then `locachy-tpm enroll`) invalidates all older images. | n/a | n/a |
 | Root on the running system | Cannot unseal after `leave-initrd`. It can sign images with the PCR and db private keys on the encrypted root (`/etc/systemd`, `/var/lib/sbctl`), so a compromised root can leave a signed backdoor image. | Can unseal at any time; it already has the disk. | Can unseal. |
 | Stolen swap (disk out) | Stopped, as the root. | Stopped. | Stopped. |
 | Hibernated machine taken | The swap opens with nothing typed. The session comes back at the lock screen, which guards it, as after a TPM-only cold start. `leave-initrd` is measured first, so the restored system cannot unseal. The kernel runs with `intel_iommu=on` against DMA. | As own keys, without the `leave-initrd` effect. | As PCR 0+7. |
@@ -117,7 +118,7 @@ binding.
 | TPM bus sniffing (discrete TPM) | Passive sniffing: stopped. systemd salts the unseal session with the SRK recorded at enrollment, and the secret crosses the bus encrypted. **Not stopped**: an active interposer (TPM reset and replayed PCR values, a fake TPM). | Same. | **Not stopped**: TPM 1.2 returns the key in the clear over LPC. |
 | Firmware rewritten (no Boot Guard on the X230) | **Not stopped**: the firmware is the root of trust and can fake measurements. | **Not stopped.** | **Not stopped.** |
 | Microsoft keys enrolled (`--microsoft`) | The disk stays closed to Microsoft-signed systems (PCR 7, above). sbctl enrolls no dbx, so revoked Microsoft binaries still **start**. That breaks only the claim that LOCachy alone starts, not the disk. | n/a | n/a |
-| Recovery path | The passphrase slot always stays. It is asked whenever the TPM refuses, with what happened shown in red. The waiting binding's slot uses a 256-bit random key kept inside the encrypted root, so it adds no way in from outside. It is removed once the binding is done, by `enroll`, or by `clear`. | Same. | Same. |
+| Recovery path | Enrollment preserves the passphrase slot by design; verify recovery access on the actual device. It is asked whenever the TPM refuses, with what happened shown in red. The waiting binding's slot uses a 256-bit random key kept inside the encrypted root, so it adds no way in from outside. It is removed once the binding is done, by `enroll`, or by `clear`. | Same. | Same. |
 | No lock at boot with TPM unlock | Refused together, in the installer and in settings. | Same. | Same. |
 
 Enrollment safeguards:
@@ -127,6 +128,11 @@ Enrollment safeguards:
   existing PCR key.
 - Key enrollment refuses to proceed when no signed image is present on the ESP.
 - Re-binding removes the old TPM token only after the new enrollment succeeds.
+- Pending-key checks and typed-passphrase unlock use cryptsetup's
+  `--disable-external-tokens`: an existing usable TPM token must not make an
+  unrelated key appear valid. Token-only boot unlock remains separate.
+- Previous is copied unchanged from the old current UKI, not re-signed when
+  keys are created. An unsigned old image cannot boot with Secure Boot on.
 - When a hibernation image does not resume, the TPM token is tried before
   falling back to the passphrase.
 
@@ -163,7 +169,8 @@ under arbitrary storage corruption or replace a hardware enrollment test.
   - `status`;
   - failure/retry with a missing disk, failed slot removal, interrupted
     prepare/retire, atomic-save failure, header I/O error and malformed request.
-    The helper suite has 16 tests.
+    The helper suite has 18 tests, including external-token false positives
+    and root/swap transition-slot verification.
 - Real TPM 2.0/LUKS failure/retry in a disposable VM: four checks cover a
   header written before a reported failure, reuse without duplicate slots, a
   hidden swap UUID plus failed root-slot removal, and successful retry with both
@@ -172,10 +179,11 @@ under arbitrary storage corruption or replace a hardware enrollment test.
   power loss and filesystem faults were not simulated; atomic-write interruption
   windows use doubles.
 - `tools/test-init-unlock.py` compiles the actual init unlock/resume functions
-  with block, TPM and UI doubles. Seven checks cover absent/forged root tokens,
-  successful token unlock, passphrase fallback, exhausted attempts, unidentified
-  encrypted root and unchanged unencrypted/cold starts. No real hibernation is
-  performed by this authentication regression.
+  with block, TPM and UI doubles, and runs the actual cryptsetup fork/pipe/exec
+  path against a child executable. Fifteen checks cover root authorization,
+  token/passphrase fallback, duress precedence, high threat level, exact
+  root/swap passphrase bytes and arguments, and token-only null stdin. No real
+  hibernation is performed by this authentication regression.
 - `tools/test-install.py`: the installer's advice, `--secure-boot`
   checks, fwupd's report, and the order (keys made before the image,
   enrolled after it is on the ESP; prepare, or the PCR 0+7 binding when the

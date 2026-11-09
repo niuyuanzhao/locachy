@@ -4,6 +4,7 @@
 #endif
 #include <assert.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <linux/input.h>
 #include <stdarg.h>
 #include <unistd.h>
@@ -21,6 +22,21 @@ static int fake_signal(pid_t pid, int sig) { (void)pid; signalled = sig; return 
 #define base_brightness_key fake_brightness
 static int fake_open_in_home(const char *with, const char *target); /* below */
 #define open_in_home fake_open_in_home
+static void fake_seat_spawn(char *const argv[]);
+#define BAR_SEAT_SPAWN fake_seat_spawn
+static char app_command[256];
+#define BAR_APP_COMMAND app_command
+#define BAR_CONTROL_SOCKET "/no-such-bar-test-control.sock"
+static char launch_bin_dir[128], launch_cg_dir[128], launch_run_dir[128], launch_conf_dir[128];
+static char launch_mixer_path[256], launch_bt_path[256], launch_net_path[256], launch_shell_path[256];
+#define LAUNCH_BIN launch_bin_dir
+#define LAUNCH_MIXER launch_mixer_path
+#define LAUNCH_BLUETOOTH launch_bt_path
+#define LAUNCH_NETWORK launch_net_path
+#define LAUNCH_USER_SHELL launch_shell_path
+#define LAUNCH_CGROUP_ROOT launch_cg_dir
+#define LAUNCH_APP_RUN launch_run_dir
+#define LAUNCH_CONF_DIR launch_conf_dir
 #ifdef CONFIG_IME
 #define ime_get_commit typed_commit /* the bar's commits, seen here */
 #endif
@@ -105,6 +121,22 @@ static int fake_open_in_home(const char *with, const char *target)
     return 0;
 }
 
+static char win_prog[64], win_target[128], opened_container[64];
+static int win_calls, opened_calls, opened_own_tor;
+static void fake_seat_spawn(char *const argv[])
+{
+    if (argv[1] && strcmp(argv[1], "--window") == 0) {
+        win_calls++;
+        snprintf(win_prog, sizeof win_prog, "%s", argv[2] ? argv[2] : "");
+        snprintf(win_target, sizeof win_target, "%s", argv[3] ? argv[3] : "");
+    } else if (argv[1] && strcmp(argv[1], "--open") == 0) {
+        opened_calls++;
+        opened_own_tor = argv[2] && strcmp(argv[2], "--own-tor") == 0;
+        const char *c = opened_own_tor ? argv[3] : argv[2];
+        snprintf(opened_container, sizeof opened_container, "%s", c ? c : "");
+    }
+}
+
 static int audio_action, brightness_action;
 static int fake_audio(int key, char *out, size_t size)
 {
@@ -130,7 +162,8 @@ int rc_read(void (*fn)(const char *, const char *, void *), void *arg)
     for (const char *const *p = rc_programs; p && *p; p += 2) fn(p[0], p[1], arg);
     return 0;
 }
-double uptime(void) { return 1.0; }
+static double test_time = 1.0;
+double uptime(void) { return test_time; }
 int text_px(double scale) { (void)scale; return 18; }
 const struct panel_font *panel_font(int height, int bold) { (void)height; (void)bold; return NULL; }
 static int font_reloads;
@@ -151,7 +184,17 @@ void panel_draw(uint32_t *px, int w, int h, int stride, const char *title, const
 { (void)px;(void)w;(void)h;(void)stride;(void)title;(void)sub;(void)ime;(void)reserve;*x0=0;*x1=0; }
 int panel_hits(struct panel_hit *out, int max) { (void)out;(void)max;return 0; }
 int panel_containers(const char *name, unsigned long long *ram) { (void)name;*ram=0;return 0; }
-int open_containers(char names[][OPEN_NAME], int max) { (void)names;(void)max;return 0; }
+static const char *const *test_containers;
+int open_containers(char names[][OPEN_NAME], int max)
+{
+    int n = 0;
+    for (const char *const *p = test_containers; p && *p && n < max; p++) {
+        snprintf(names[n++], OPEN_NAME, "%s", *p);
+    }
+    return n;
+}
+int open_window_ids(const char *name, char ids[][OPEN_WINDOW_ID], int max)
+{ (void)name; (void)ids; (void)max; return 0; }
 int open_candidates(const char *type, char names[][OPEN_NAME], int max) { (void)type;(void)names;(void)max;return 0; }
 int open_rule(const char *type, char *name, size_t size) { (void)type;(void)name;(void)size;return OPEN_NO_RULE; }
 int open_set_rule(const char *type, const char *value) { (void)type;(void)value;return 0; }
@@ -335,8 +378,195 @@ static int nothing_fed(void)
  * the headings passed over, closed by Esc after its release, by running an
  * entry, by another window's focus and by the seat's release; none while the
  * seat is released (home or the lock on the screen). */
+static void make_exec_file(const char *path)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0755);
+    assert(fd >= 0 && close(fd) == 0);
+}
+
+static void reply_is(int fd, const char *expected)
+{
+    char reply[256];
+    struct pollfd p = { .fd = fd, .events = POLLIN };
+    assert(poll(&p, 1, 1000) > 0);
+    ssize_t n = recv(fd, reply, sizeof reply - 1, 0);
+    assert(n > 0);
+    reply[n] = '\0';
+    assert(strcmp(reply, expected) == 0);
+    p.revents = 0;
+    assert(poll(&p, 1, 1000) > 0); /* a just-forked launcher closes CLOEXEC copies */
+    assert(recv(fd, reply, sizeof reply, MSG_DONTWAIT) == 0);
+    close(fd);
+}
+
+static void warning_targets(int base)
+{
+    int pair[2], replacement[2];
+    char log[512];
+    snprintf(app_command, sizeof app_command, "%s/app", launch_bin_dir);
+    FILE *script = fopen(app_command, "w");
+    assert(script && fputs("#!/bin/sh\nprintf '%s\\n' \"$@\"\n", script) >= 0 && fclose(script) == 0 &&
+           chmod(app_command, 0755) == 0);
+
+    /* The Enter that chose a target is not a confirmation, nor are repeats
+     * or a second Enter from another keyboard while the first remains held. */
+    key(KEY_ENTER, 1);
+    assert(keys_down != 0);
+    assert(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair) == 0);
+    ask_own_tor_target(pair[0], "tor-browser", "https://example.org/a b");
+    again_tick();
+    assert(again.shown && again.wait_release && opened_calls == 1);
+    key(KEY_ENTER, 2);
+    assert(again.shown && again.client == pair[0]);
+    key(KEY_ENTER, 0);
+    again_tick();
+    assert(again.shown && grabbed && want_grab && !again.wait_release);
+    key(KEY_ESC, 1);
+    assert(!again.shown && !want_grab && grabbed); /* dismissal key still ours */
+    key(KEY_ESC, 0);
+    assert(grabbed == base && !layouts[0].down[KEY_ESC] && !layouts[0].down[KEY_ENTER]);
+    reply_is(pair[1], "error cancelled");
+
+    /* A new target cancels and closes exactly the old client, never loses the
+     * new target when the picker closes or touches choose.target later. */
+    assert(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair) == 0);
+    assert(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, replacement) == 0);
+    ask_own_tor_target(pair[0], "tor-browser", "https://old.invalid/");
+    again_tick();
+    ask_own_tor_target(replacement[0], "tor-browser", "https://example.org/a b");
+    reply_is(pair[1], "error cancelled");
+    snprintf(choose.target, sizeof choose.target, "https://changed.invalid/");
+    key(KEY_ENTER, 1);
+    assert(again.client == -1 && !again.pending && !again.shown && grabbed);
+    key(KEY_ENTER, 0);
+    assert(grabbed == base && !layouts[0].down[KEY_ENTER]);
+    reply_is(replacement[1], "ok tor-browser");
+    int status;
+    assert(waitpid(-1, &status, 0) > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    snprintf(log, sizeof log, "%s/tor-browser.log", launch_run_dir);
+    char text[512] = "";
+    FILE *f = fopen(log, "r");
+    assert(f && fread(text, 1, sizeof text - 1, f) > 0 && fclose(f) == 0);
+    assert(strcmp(text, "open\n--own-tor\ntor-browser\nhttps://example.org/a b\n") == 0);
+    unlink(log);
+
+    /* Seat release/lock cancels both pending and displayed warnings. */
+    for (int shown = 0; shown < 2; shown++) {
+        assert(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair) == 0);
+        ask_own_tor_target(pair[0], "tor-browser", "https://locked.invalid/");
+        if (shown) again_tick();
+        on_sigusr2(SIGUSR2);
+        keyboard_signals();
+        again_tick();
+        assert(!again.pending && !again.shown && again.client == -1 && !grabbed);
+        reply_is(pair[1], "error cancelled");
+        on_sigusr1(SIGUSR1);
+        keyboard_signals();
+        assert(active && grabbed == base && !question_active());
+    }
+    assert(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair) == 0);
+    ask_own_tor_target(pair[0], "tor-browser", "https://timeout.invalid/");
+    again_tick();
+    test_time += 61.0;
+    again_tick();
+    assert(!question_active() && grabbed == base);
+    reply_is(pair[1], "error timed out");
+    assert(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair) == 0);
+    ask_own_tor_target(pair[0], "tor-browser", "https://gone.invalid/");
+    close(pair[1]);
+    again_tick();
+    assert(!question_active() && again.client == -1 && grabbed == base);
+    unlink(app_command);
+    puts("PASS own-Tor targets: held Enter/repeats cannot confirm; cancel/replacement/lock/timeout/disconnect close clients; confirmed target retained");
+}
+
 static void launcher_keys(void)
 {
+    char fixdir[] = "/tmp/bar-launch-XXXXXX", cg[256], path[512];
+    assert(mkdtemp(fixdir));
+    snprintf(launch_bin_dir, sizeof launch_bin_dir, "%s/bin", fixdir);
+    snprintf(launch_cg_dir, sizeof launch_cg_dir, "%s/cgroup", fixdir);
+    snprintf(launch_run_dir, sizeof launch_run_dir, "%s/apps", fixdir);
+    snprintf(launch_conf_dir, sizeof launch_conf_dir, "%s/conf", fixdir);
+    assert(mkdir(launch_bin_dir, 0755) == 0 && mkdir(launch_cg_dir, 0755) == 0 &&
+           mkdir(launch_run_dir, 0755) == 0 && mkdir(launch_conf_dir, 0755) == 0);
+    snprintf(launch_mixer_path, sizeof launch_mixer_path, "%s/wiremix", launch_bin_dir);
+    snprintf(launch_bt_path, sizeof launch_bt_path, "%s/bluetui", launch_bin_dir);
+    snprintf(launch_net_path, sizeof launch_net_path, "%s/nmtui", launch_bin_dir);
+    snprintf(launch_shell_path, sizeof launch_shell_path, "%s/user-shell", launch_bin_dir);
+    static const char *const bins[] = { "files", "view", "term", "settings", "wiremix", "bluetui", "nmtui", "user-shell" };
+    for (size_t i = 0; i < sizeof bins / sizeof *bins; i++) {
+        snprintf(path, sizeof path, "%s/%s", launch_bin_dir, bins[i]);
+        make_exec_file(path);
+    }
+    /* Containers: edge (running), wechat (frozen), foot (closed), tor-browser (closed + own Tor). */
+    static const char *const conts[] = { "edge", "foot", "tor-browser", "wechat", NULL };
+    test_containers = conts;
+    snprintf(cg, sizeof cg, "%s/app_edge", launch_cg_dir); assert(mkdir(cg, 0755) == 0);
+    snprintf(path, sizeof path, "%s/cgroup.events", cg);
+    FILE *f = fopen(path, "w"); assert(f && fputs("populated 1\nfrozen 0\n", f) >= 0 && fclose(f) == 0);
+    snprintf(path, sizeof path, "%s/edge.ready", launch_run_dir); make_exec_file(path);
+    snprintf(cg, sizeof cg, "%s/app_wechat", launch_cg_dir); assert(mkdir(cg, 0755) == 0);
+    snprintf(path, sizeof path, "%s/cgroup.events", cg);
+    f = fopen(path, "w"); assert(f && fputs("populated 1\nfrozen 1\n", f) >= 0 && fclose(f) == 0);
+    snprintf(path, sizeof path, "%s/tor-browser.conf", launch_conf_dir);
+    f = fopen(path, "w"); assert(f && fputs("network=\"1\"\ntor=\"1\"\npackage=\"tor-browser-bin\"\ncommand=\"/usr/bin/tor-browser\"\narguments=\"\"\n", f) >= 0 && fclose(f) == 0);
+
+    static const char *const full_rc[] = {
+        "program_view", "/usr/local/bin/view",
+        "program_edit", "/usr/local/bin/edit",
+        "program_archive", "/usr/local/bin/archive",
+        "program_term", "/usr/local/bin/term /usr/local/lib/locachy/user-shell",
+        "program_admin", "/usr/local/bin/term",
+        "program_network", "/usr/local/bin/term /usr/bin/nmtui",
+        "program_settings", "/usr/local/bin/settings",
+        "program_packages", "/usr/local/bin/packages",
+        "program_firmware", "/usr/local/bin/firmware",
+        "program_bluetooth", "/usr/local/bin/term /usr/bin/bluetui",
+        "program_mixer", "/usr/local/bin/term /usr/bin/wiremix",
+        "service_bluetooth", "/usr/local/lib/locachy/bluetooth-client",
+        NULL
+    };
+    rc_programs = full_rc;
+    /* own-Tor is not a package-name shortcut: canonical command form and
+     * last duplicate key are required; generic tor=1 remains system-only. */
+    snprintf(path, sizeof path, "%s/tor-browser.conf", launch_conf_dir);
+    f = fopen(path, "w");
+    assert(f && fputs("network=\"1\"\ntor=\"1\"\npackage=\"tor-browser-bin\"\ncommand=\"/usr/bin/tor-browser\"\narguments=\"--private-window\"\n", f) >= 0 && fclose(f) == 0);
+    assert(bar_needs_own_tor("tor-browser"));
+    f = fopen(path, "w");
+    assert(f && fputs("network=\"1\"\ntor=\"1\"\npackage=\"tor-browser-bin\"\ncommand=\"/usr/bin/env\"\narguments=\"MOZ_APP_REMOTINGNAME=tor-browser /usr/bin/tor-browser --private-window\"\n", f) >= 0 && fclose(f) == 0);
+    assert(bar_needs_own_tor("tor-browser"));
+    f = fopen(path, "w");
+    assert(f && fputs("network=\"1\"\ntor=\"1\"\npackage=\"other\"\ncommand=\"/usr/bin/tor-browser\"\n", f) >= 0 && fclose(f) == 0);
+    assert(!bar_needs_own_tor("tor-browser"));
+    f = fopen(path, "w");
+    assert(f && fputs("network=\"1\"\ntor=\"1\"\npackage=\"other\"\npackage=\"tor-browser-bin\"\ncommand=\"/usr/bin/tor-browser\"\n", f) >= 0 && fclose(f) == 0);
+    assert(bar_needs_own_tor("tor-browser"));
+    f = fopen(path, "w");
+    assert(f && fputs("network=\"1\"\ntor=\"1\"\npackage=\"tor-browser-bin\"\npackage=\"other\"\ncommand=\"/usr/bin/tor-browser\"\n", f) >= 0 && fclose(f) == 0);
+    assert(!bar_needs_own_tor("tor-browser"));
+    f = fopen(path, "w");
+    assert(f && fputs("network=\"1\"\ntor=\"1\"\npackage=\"tor-browser-bin\"\ncommand=\"/usr/bin/env\"\narguments=\"OTHER=1 MOZ_APP_REMOTINGNAME=tor-browser /usr/bin/tor-browser\"\n", f) >= 0 && fclose(f) == 0);
+    assert(!bar_needs_own_tor("tor-browser"));
+    f = fopen(path, "w");
+    assert(f && fputs("network=\"1\"\ntor=\"1\"\npackage=\"tor-browser-bin\"\ncommand=\"/usr/bin/tor-browser\"\narguments=\"\"\n", f) >= 0 && fclose(f) == 0);
+    puts("PASS own-Tor eligibility uses canonical package/argv and last duplicate key; generic tor=1 stays system-only");
+
+    /* Status bar Bluetooth click: bluetui directly when service_bluetooth + bluetui exist, else settings devices. */
+    win_calls = 0;
+    status_open(PANEL_BLOCK_BLUETOOTH);
+    assert(win_calls == 1 && !strcmp(win_prog, "bluetooth") && win_target[0] == '\0');
+    status_open(PANEL_BLOCK_VOLUME);
+    assert(win_calls == 2 && !strcmp(win_prog, "mixer") && win_target[0] == '\0');
+    status_open(PANEL_BLOCK_NETWORK);
+    assert(win_calls == 3 && !strcmp(win_prog, "settings") && !strcmp(win_target, "network"));
+    rc_programs = NULL;
+    status_open(PANEL_BLOCK_BLUETOOTH);
+    assert(win_calls == 4 && !strcmp(win_prog, "settings") && !strcmp(win_target, "devices"));
+    rc_programs = full_rc;
+    puts("PASS top-bar Bluetooth click opens bluetui directly when enabled, falling back to settings devices");
+
     assert(active && keys_down == 0 && !launcher_shown);
     set_grab(grab_wanted());
     int base = grabbed; /* the keyboard's owner without the launcher */
@@ -345,6 +575,31 @@ static void launcher_keys(void)
     key(KEY_F1, 0); key(KEY_LEFTALT, 0);
     assert(launcher_shown && grabbed && grabs[0] && keys_down == 0);
     assert(launcher.sel == 0 && launcher.items[0].kind == LAUNCH_HOME && launcher.items[1].kind == LAUNCH_HEADER);
+    /* Verify sections & exact order mirror home: Containers, Programs, System and hardware. */
+    int hdr_cont = -1, hdr_prog = -1, hdr_sys = -1;
+    for (int i = 0; i < launcher.n; i++) {
+        if (launcher.items[i].kind == LAUNCH_HEADER) {
+            if (launcher.items[i].section == SECTION_CONTAINERS) hdr_cont = i;
+            if (launcher.items[i].section == SECTION_PROGRAMS) hdr_prog = i;
+            if (launcher.items[i].section == SECTION_SYSTEM) hdr_sys = i;
+        }
+    }
+    assert(hdr_cont == 1 && hdr_prog > hdr_cont && hdr_sys > hdr_prog);
+    assert(!strcmp(launcher.items[hdr_cont + 1].name, "edge") && !strcmp(launch_detail(&launcher.items[hdr_cont + 1]), "running"));
+    assert(!strcmp(launcher.items[hdr_cont + 2].name, "foot") && !strcmp(launch_detail(&launcher.items[hdr_cont + 2]), "closed"));
+    assert(!strcmp(launcher.items[hdr_cont + 4].name, "wechat") && !strcmp(launch_detail(&launcher.items[hdr_cont + 4]), "frozen"));
+    assert(!strcmp(launcher.items[hdr_prog + 1].name, "files") && !strcmp(launch_detail(&launcher.items[hdr_prog + 1]), "window"));
+    assert(!strcmp(launcher.items[hdr_prog + 2].name, "view") && !strcmp(launch_detail(&launcher.items[hdr_prog + 2]), "window"));
+    assert(!strcmp(launcher.items[hdr_prog + 3].name, "edit") && !strcmp(launch_detail(&launcher.items[hdr_prog + 3]), "full screen"));
+    assert(!strcmp(launcher.items[hdr_prog + 5].name, "term") && !strcmp(launch_detail(&launcher.items[hdr_prog + 5]), "window"));
+    assert(!strcmp(launcher.items[hdr_sys + 1].name, "admin") && !strcmp(launch_detail(&launcher.items[hdr_sys + 1]), "full screen"));
+    assert(!strcmp(launcher.items[hdr_sys + 2].name, "network") && !strcmp(launch_detail(&launcher.items[hdr_sys + 2]), "window"));
+    assert(!strcmp(launcher.items[hdr_sys + 3].name, "settings") && !strcmp(launch_detail(&launcher.items[hdr_sys + 3]), "window"));
+    assert(!strcmp(launcher.items[hdr_sys + 6].name, "bluetooth") && !strcmp(launch_detail(&launcher.items[hdr_sys + 6]), "window"));
+    assert(!strcmp(launcher.items[hdr_sys + 7].name, "mixer") && !strcmp(launch_detail(&launcher.items[hdr_sys + 7]), "window"));
+    assert(launcher.items[hdr_sys + 8].kind == LAUNCH_REBOOT &&
+           launcher.items[hdr_sys + 9].kind == LAUNCH_POWEROFF && hdr_sys + 10 == launcher.n);
+
     key(KEY_UP, 1); key(KEY_UP, 0);
     assert(launcher.sel == 0);
     key(KEY_DOWN, 1); key(KEY_DOWN, 0);
@@ -364,8 +619,21 @@ static void launcher_keys(void)
     assert(!launcher_shown && grabbed); /* Esc held: the window never had its press */
     key(KEY_ESC, 0);
     assert(grabbed == base && grabs[0] == base && !layouts[0].down[KEY_ESC]);
-    puts("PASS Alt+F1 opens the launcher; the keyboard is the bar's once no key is held; Up/Down pass over the "
-         "headings and stop at the ends; Esc closes it and gives the keyboard back after its release");
+    /* Power rows are requests to home, never direct signals; home owns Y/N. */
+    launcher_open(NULL);
+    while (launcher.items[launcher.sel].kind != LAUNCH_REBOOT) { key(KEY_DOWN, 1); key(KEY_DOWN, 0); }
+    signalled = asked = 0;
+    key(KEY_ENTER, 1); key(KEY_ENTER, 0);
+    assert(!launcher_shown && signalled == SIGUSR1 && asked == 1 &&
+           !strcmp(asked_with, "program:" HOME_REQUEST_REBOOT));
+    launcher_open(NULL);
+    while (launcher.items[launcher.sel].kind != LAUNCH_POWEROFF) { key(KEY_DOWN, 1); key(KEY_DOWN, 0); }
+    signalled = asked = 0;
+    key(KEY_ENTER, 1); key(KEY_ENTER, 0);
+    assert(!launcher_shown && signalled == SIGUSR1 && asked == 1 &&
+           !strcmp(asked_with, "program:" HOME_REQUEST_POWEROFF));
+    puts("PASS desktop power entries ask home through reserved requests, never perform power actions directly");
+    puts("PASS Alt+F1 opens launcher mirroring home's 3 sections, live container states and uniform details");
 
     signalled = 0;
     key(KEY_LEFTALT, 1); key(KEY_F1, 1); key(KEY_F1, 0); key(KEY_LEFTALT, 0);
@@ -377,64 +645,77 @@ static void launcher_keys(void)
     assert(launcher_shown);
     key(KEY_LEFTALT, 1); key(KEY_F1, 1); key(KEY_F1, 0); key(KEY_LEFTALT, 0);
     assert(!launcher_shown && grabbed == base);
-    puts("PASS Enter on home (full screen) closes the launcher and asks the seat for home; Alt+F1 again closes it");
+    puts("PASS Enter on home closes launcher and asks seat for home; Alt+F1 again toggles it closed");
 
-    /* View, settings and the mixer full screen, as home lists them (rc.conf's
-     * program_NAME), each after its window entry when there is one: Enter
-     * asks home for the program by its name only ("program:NAME", no
-     * target), then the seat for home. One home does not list has none. */
-    static const char *const listed[] = {
-        "program_view", "/usr/local/bin/view", "program_settings", "/usr/local/bin/settings",
-        "program_mixer", "/usr/local/bin/term /usr/bin/wiremix", NULL
-    };
-    static const char *const full[] = { "view", "settings", "mixer" };
-    rc_programs = listed;
-    for (int k = 0; k < 3; k++) {
+    /* Enter on container opens it on desktop; Enter on window program opens window;
+     * F on window or full-screen program opens full screen in home. */
+    key(KEY_LEFTALT, 1); key(KEY_F1, 1); key(KEY_F1, 0); key(KEY_LEFTALT, 0);
+    while (strcmp(launcher.items[launcher.sel].name, "edge") != 0) { key(KEY_DOWN, 1); key(KEY_DOWN, 0); }
+    opened_calls = 0;
+    key(KEY_ENTER, 1); key(KEY_ENTER, 0);
+    assert(!launcher_shown && opened_calls == 1 && !strcmp(opened_container, "edge") && !opened_own_tor);
+
+    /* Closed tor="1" container with service_tor off asks own-Tor confirmation on desktop. */
+    key(KEY_LEFTALT, 1); key(KEY_F1, 1); key(KEY_F1, 0); key(KEY_LEFTALT, 0);
+    while (strcmp(launcher.items[launcher.sel].name, "tor-browser") != 0) { key(KEY_DOWN, 1); key(KEY_DOWN, 0); }
+    opened_calls = 0;
+    key(KEY_ENTER, 1); key(KEY_ENTER, 0);
+    assert(!launcher_shown && opened_calls == 0 && again.pending && again.own_tor && !strcmp(again.name, "tor-browser"));
+    again_tick();
+    assert(again.shown && grabbed);
+    key(KEY_ENTER, 1); key(KEY_ENTER, 0);
+    assert(!again.shown && opened_calls == 1 && !strcmp(opened_container, "tor-browser") && opened_own_tor);
+    assert(grabbed == base && !want_grab);
+    warning_targets(base);
+
+    static const char *const win_names[] = { "files", "view", "term", "network", "settings", "bluetooth", "mixer" };
+    for (size_t k = 0; k < sizeof win_names / sizeof *win_names; k++) {
         key(KEY_LEFTALT, 1); key(KEY_F1, 1); key(KEY_F1, 0); key(KEY_LEFTALT, 0);
-        assert(launcher_shown && launcher.n <= LAUNCH_MAX);
-        int at = -1, programs = 0;
-        for (int i = 0; i < launcher.n; i++) {
-            const struct launch_item *it = &launcher.items[i];
-            programs += it->kind == LAUNCH_HOME_PROGRAM;
-            if (it->kind == LAUNCH_HOME_PROGRAM && !strcmp(it->name, full[k])) at = i;
-        }
-        assert(programs == 3 && at > 1 && !launch_action(&launcher.items[at]));
-        assert(strstr(launch_label(&launcher.items[at]), " (full screen)"));
-        assert(launcher.items[at - 1].kind != LAUNCH_WINDOW || !strcmp(launcher.items[at - 1].name, full[k]));
-        while (launcher.sel < at) {
-            key(KEY_DOWN, 1); key(KEY_DOWN, 0);
-        }
-        assert(launcher.sel == at);
-        signalled = asked = 0;
-        key(KEY_ENTER, 1);
-        char want[32];
-        snprintf(want, sizeof want, "program:%s", full[k]);
-        assert(!launcher_shown && signalled == SIGUSR1 && asked == 1);
-        assert(!strcmp(asked_with, want) && asked_target[0] == '\0');
-        key(KEY_ENTER, 0);
-        assert(grabbed == base && !layouts[0].down[KEY_ENTER]);
-    }
-    static const char *const no_audio[] = {
-        "program_settings", "/usr/local/bin/settings", "program_mixer", " ", "program_viewer", "/x", NULL
-    };
-    rc_programs = no_audio;
-    launcher_toggle(NULL);
-    int programs = 0, system = 0;
-    for (int i = 0; i < launcher.n; i++) {
-        programs += launcher.items[i].kind == LAUNCH_HOME_PROGRAM;
-        system += launcher.items[i].kind == LAUNCH_HEADER && launcher.items[i].system;
-        assert(launcher.items[i].kind != LAUNCH_HOME_PROGRAM || !strcmp(launcher.items[i].name, "settings"));
-    }
-    assert(programs == 1 && system == 1);
-    launcher_toggle(NULL);
-    rc_programs = NULL;
-    launcher_toggle(NULL);
-    for (int i = 0; i < launcher.n; i++) assert(launcher.items[i].kind != LAUNCH_HOME_PROGRAM);
-    launcher_toggle(NULL);
-    assert(!launcher_shown && grabbed == base);
-    puts("PASS view, settings and mixer full screen as home lists them: Enter asks home for program:NAME with no "
-         "target and the seat for home; one home does not list has no entry");
+        while (strcmp(launcher.items[launcher.sel].name, win_names[k]) != 0) { key(KEY_DOWN, 1); key(KEY_DOWN, 0); }
+        win_calls = 0;
+        key(KEY_ENTER, 1); key(KEY_ENTER, 0);
+        assert(!launcher_shown && win_calls == 1 && !strcmp(win_prog, win_names[k]));
 
+        key(KEY_LEFTALT, 1); key(KEY_F1, 1); key(KEY_F1, 0); key(KEY_LEFTALT, 0);
+        while (strcmp(launcher.items[launcher.sel].name, win_names[k]) != 0) { key(KEY_DOWN, 1); key(KEY_DOWN, 0); }
+        signalled = asked = 0;
+        key(KEY_F, 1); key(KEY_F, 0);
+        assert(!launcher_shown && signalled == SIGUSR1 && asked == 1);
+        if (!strcmp(win_names[k], "files")) {
+            assert(asked_with[0] == '\0' && !strcmp(asked_target, "/nonexistent/home"));
+        } else {
+            char want[32];
+            snprintf(want, sizeof want, "program:%s", win_names[k]);
+            assert(!strcmp(asked_with, want) && asked_target[0] == '\0');
+        }
+    }
+    key(KEY_LEFTALT, 1); key(KEY_F1, 1); key(KEY_F1, 0); key(KEY_LEFTALT, 0);
+    while (strcmp(launcher.items[launcher.sel].name, "admin") != 0) { key(KEY_DOWN, 1); key(KEY_DOWN, 0); }
+    signalled = asked = win_calls = 0;
+    key(KEY_ENTER, 1); key(KEY_ENTER, 0);
+    assert(!launcher_shown && win_calls == 0 && signalled == SIGUSR1 && asked == 1 && !strcmp(asked_with, "program:admin"));
+
+    /* Scrolling on a short screen keeps selection + section header in view. */
+    launcher_open(NULL);
+    launcher.vis = 6;
+    launcher.scroll = 0;
+    launcher.sel = launcher.n - 1;
+    launcher_keep_visible(6);
+    assert(launcher.scroll == launcher.n - 6 && launcher.sel >= launcher.scroll);
+    launcher.sel = hdr_prog + 1;
+    launcher_keep_visible(6);
+    assert(launcher.scroll == hdr_prog);
+    launcher.sel = 0;
+    launcher.scroll = 0;
+    launcher_wheel(25.0); /* two wheel steps down without snapping back to sel=0 */
+    assert(launcher.scroll == 2);
+    launcher_wheel(-15.0);
+    assert(launcher.scroll == 1);
+    launcher_close();
+    puts("PASS Enter opens containers & desktop windows; F opens full screen in home; scrolling keeps header & item visible");
+
+    test_containers = NULL;
+    rc_programs = NULL;
     launcher_toggle(NULL); /* a click on LOCachy */
     assert(launcher_shown && grabbed);
     launcher_tick();
@@ -456,6 +737,19 @@ static void launcher_keys(void)
     assert(active && !launcher_shown);
     puts("PASS the launcher closes when another window gets the focus or the seat is released (home, the lock), "
          "and opens neither from a click nor from Alt+F1 while it is released");
+
+    /* Cleanup temp fixture */
+    for (size_t i = 0; i < sizeof bins / sizeof *bins; i++) {
+        snprintf(path, sizeof path, "%s/%s", launch_bin_dir, bins[i]);
+        unlink(path);
+    }
+    snprintf(path, sizeof path, "%s/app_edge/cgroup.events", launch_cg_dir); unlink(path);
+    snprintf(path, sizeof path, "%s/app_edge", launch_cg_dir); rmdir(path);
+    snprintf(path, sizeof path, "%s/app_wechat/cgroup.events", launch_cg_dir); unlink(path);
+    snprintf(path, sizeof path, "%s/app_wechat", launch_cg_dir); rmdir(path);
+    snprintf(path, sizeof path, "%s/edge.ready", launch_run_dir); unlink(path);
+    snprintf(path, sizeof path, "%s/tor-browser.conf", launch_conf_dir); unlink(path);
+    rmdir(launch_bin_dir); rmdir(launch_cg_dir); rmdir(launch_run_dir); rmdir(launch_conf_dir); rmdir(fixdir);
 }
 
 /*

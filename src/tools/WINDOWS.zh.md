@@ -2,20 +2,27 @@
 
 [English](WINDOWS.md)
 
-view、files、settings 和混音器除了从 home 在直连屏幕上运行，也可以在共享桌面上各自成为一个窗口。窗口是同一程序的受管理实例，不是另一份实现：进程 1 像管理容器一样启动、冻结、停止它；它从不持有屏幕租约或输入设备；窗口开着时，共享桌面保持运行。
+view、files、settings、混音器、bluetooth、network 和 term 除了从 home 在直连屏幕上运行，也可以在共享桌面上各自成为一个窗口。窗口是同一程序的受管理实例，不是另一份实现：进程 1 像管理容器一样启动、冻结、停止它；它从不持有屏幕租约或输入设备；窗口开着时，共享桌面保持运行。
 
 ## 请求
 
-`locachy-seat --window PROGRAM [TARGET]` 请求一个窗口。顶栏运行它（状态区打开 settings 的对应页面，音量区打开混音器）；共享桌面上的容器通过 bar 的 xdg-open 打开文件时也走这条路：交给 view 的文档开一个 view 窗口，文件夹开一个 files 窗口，不再切回 home。
+`locachy-seat --window PROGRAM [TARGET]` 请求一个窗口，`locachy-seat --open [--own-tor] CONTAINER` 请求进程 1 在共享桌面上启动或置顶容器。顶栏运行它们（其启动器镜像 home 的三个分组，蓝牙开启时点击蓝牙区直接打开 bluetui，音量区打开混音器，右侧其余状态区打开 settings 的对应页面）；共享桌面上的容器通过 bar 的 xdg-open 打开文件时也走这条路：交给 view 的文档开一个 view 窗口，文件夹开一个 files 窗口，不再切回 home。
 
-| PROGRAM  | TARGET                                              | 运行的命令 |
-|----------|-----------------------------------------------------|------------|
-| settings | 无，或 `network`、`power`、`devices`、`date-time`、`hardware` | `/usr/local/bin/settings [--page=PAGE]` |
-| view     | 无（文件选择器），或文件的绝对路径                     | `/usr/local/bin/view [FILE]` |
-| files    | 无（主目录），或文件夹的绝对路径                       | `/usr/local/bin/files [FOLDER]` |
-| mixer    | 无                                                  | `/usr/local/bin/term /usr/bin/wiremix` |
+| PROGRAM   | TARGET                                              | 运行的命令 |
+|-----------|-----------------------------------------------------|------------|
+| settings  | 无，或 `network`、`power`、`devices`、`date-time`、`hardware` | `/usr/local/bin/settings [--page=PAGE]` |
+| view      | 无（文件选择器），或文件的绝对路径                     | `/usr/local/bin/view [FILE]` |
+| files     | 无（主目录），或文件夹的绝对路径                       | `/usr/local/bin/files [FOLDER]` |
+| mixer     | 无                                                  | `/usr/local/bin/term /usr/bin/wiremix` |
+| bluetooth | 无                                                  | `/usr/local/bin/term /usr/bin/bluetui` |
+| network   | 无                                                  | `/usr/local/bin/term /usr/bin/nmtui` |
+| term      | 无                                                  | `/usr/local/bin/term /usr/local/lib/locachy/user-shell` |
 
-其他一律不接受：没有别的程序、没有调用方自带的参数、不经 shell。请求只走已有通道：客户端发到 labwc-control 的 socket（`/run/user/0/locachy-control.sock`，仅 root）；labwc-control 通过 seat 给它的 socketpair（`LOCACHY_SEAT_REQUESTS`）把字段交给 seat；seat 再通过自己的控制 socket 向进程 1 发送 `window PROGRAM [TARGET]`。客户端、seat 和进程 1 各自检查程序与目标；进程 1 还检查 view 的文件确实存在。锁屏期间进程 1 拒绝窗口请求。
+终端以 UID 1000 打开用户 shell，不提供管理员 shell。设置的网络页还会在 settings 自己受管理的 cgroup 内启动 nmtui 子终端窗口，等待关闭期间仍响应窗口事件。
+
+启动器与 home 共用宿主程序分类，列出全部已登记程序，不再固定只列几个。Enter 或左键打开受支持的窗口；F 或右键经 home 打开其全屏入口。仅直连程序使用 home。重启、关机只打开 home 原有的确认框，不从启动器直接执行。这里的容器状态是 cgroup/ready marker 快照，并非 home 的完整进程 1 状态；容器按名称排序。RAM、swap、CPU 和温度是读数，不是按钮。
+
+其他一律不接受：没有别的程序、没有调用方自带的参数、不接受任意 shell 命令。请求只走已有通道：客户端发到 labwc-control 的 socket（`/run/user/0/locachy-control.sock`，仅 root）；labwc-control 通过 seat 给它的 socketpair（`LOCACHY_SEAT_REQUESTS`）把字段交给 seat；seat 再通过自己的控制 socket 向进程 1 发送 `window PROGRAM [TARGET]`。客户端、seat 和进程 1 各自检查程序与目标；进程 1 还检查 view 的文件确实存在。锁屏期间进程 1 拒绝窗口请求。
 
 ## 生命周期
 
@@ -29,7 +36,7 @@ view、files、settings 和混音器除了从 home 在直连屏幕上运行，�
 
 窗口与容器一样等待共享桌面的 display-ready（开机后的第一个窗口），并计入共享桌面的状态：共享桌面会为窗口启动，且只要有窗口在运行就不会停止，即使没有容器在运行。
 
-settings 和混音器各只有一个窗口：再次请求会把它调到前台，settings 的新页面以 `page NAME` 发给已开的窗口，而不是再开一份。view 和 files 每次请求开一个窗口（最多八个窗口）。
+settings、混音器、bluetooth 和 network 各只有一个窗口：再次请求会把它调到前台，settings 的新页面以 `page NAME` 发给已开的窗口，而不是再开一份。view、files 和 term 每次请求开一个窗口（最多十六个窗口）。
 
 关闭窗口（关闭按钮、Alt+F4）以 `K_CLOSE` 交给程序，程序走自己的退出路径：
 

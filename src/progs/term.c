@@ -1225,8 +1225,18 @@ int main(int argc, char **argv)
 {
     static char *default_argv[] = { "/bin/bash", "-l", NULL };
     char **cmd = argc > 1 ? argv + 1 : default_argv;
+    const char *req_env = getenv("LOCACHY_REQUEST_FD");
+    if (req_env) {
+        long rfd = strtol(req_env, NULL, 10);
+        if (rfd >= 3 && rfd <= 1023) fcntl((int)rfd, F_SETFD, FD_CLOEXEC);
+    }
 
     screen_open(BASE_FONT);
+    const char *keymap = getenv("LOCACHY_KEYMAP_TABLE");
+    if (keymap && (keymap[0] != '/' || keys_layout_load(keymap) < 0)) {
+        say("term: cannot load the explicit keyboard table");
+        return 1;
+    }
     keys_open();
     cols = screen_cols();
     rows = screen_rows() - 1;
@@ -1261,6 +1271,12 @@ int main(int argc, char **argv)
         if (s > 2) {
             close(s);
         }
+        unsetenv("LOCACHY_BACKEND");
+        unsetenv("LOCACHY_WINDOW_TITLE");
+        unsetenv("LOCACHY_WINDOW_APP_ID");
+        unsetenv("LOCACHY_WINDOW_READY_FD");
+        unsetenv("LOCACHY_REQUEST_FD");
+        unsetenv("LOCACHY_KEYMAP_TABLE");
         setenv("TERM", "xterm-256color", 1); /* what this terminal is; the rest as process 1 set it */
         filter_rfkill_for_bluetui(cmd[0]);
         execvp(cmd[0], cmd);
