@@ -1,0 +1,269 @@
+#!/usr/bin/env python3
+"""Queued boot-lock, threat-level, biometric and duress policy transitions.
+
+An incomplete journal is an unfinished transition, not an applied policy.
+LUKS headers, PAM and the ESP are separate resources: publication is ordered
+and resumable, not a claim of filesystem-wide rollback.
+"""
+import argparse
+from contextlib import contextmanager
+import fcntl
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+
+sys.dont_write_bytecode = True
+RC_CONF = Path("/etc/locachy/rc.conf")
+SUDO_PAM = Path("/etc/pam.d/sudo")
+LOCK = Path("/run/lock/locachy-security.lock")
+MARKER = Path("/var/lib/locachy/security-policy.json")
+TPM = Path("/usr/local/bin/locachy-tpm")
+BOOT = Path("/usr/local/bin/locachy-boot")
+DURESS = Path("/usr/local/bin/locachy-duress")
+
+
+def helper(name):
+    filename = name if name.startswith("locachy-") else name + ".py"
+    path = Path(__file__).with_name(filename)
+    if not path.is_file():
+        path = Path("/usr/local/bin" if name.startswith("locachy-") else "/usr/local/lib/locachy") / filename
+    loader = importlib.machinery.SourceFileLoader(name.replace("-", "_"), str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def read_values(path=None):
+    """The last valid assignment, with no shell evaluation or interpolation."""
+    values = {}
+    security = {"login_skip", "lock_mode", "duress_enabled", "unlock_face", "unlock_fingerprint"}
+    with Path(path or RC_CONF).open(encoding="utf-8") as source:
+        for line in source:
+            match = re.fullmatch(r'\s*([A-Za-z0-9_]+)=(?:"([^"\r\n]*)"|([^\s#"\r\n]*))\s*(?:#.*)?', line.rstrip("\r\n"))
+            if match:
+                values[match[1]] = match[2] if match[2] is not None else match[3]
+            elif any(re.match(r"\s*" + name + r"\s*=", line) for name in security):
+                raise RuntimeError("invalid security policy assignment")
+    if values.get("lock_mode", "low") not in ("low", "normal", "high"):
+        raise RuntimeError("invalid threat level")
+    return values
+
+
+@contextmanager
+def policy_lock():
+    LOCK.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise RuntimeError("security lock is not a regular file")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def ensure_tpm_allowed():
+    values = read_values()
+    if MARKER.exists():
+        raise RuntimeError("a security policy transition is incomplete; retry that policy before TPM enrollment")
+    if values.get("lock_mode") == "high":
+        raise RuntimeError("TPM auto-unlock is not allowed at the high threat level")
+    if values.get("login_skip") == "1":
+        raise RuntimeError("turn the boot lock on before creating a TPM auto-unlock key")
+
+
+def directory_sync(directory):
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def save_marker(value):
+    if value is None:
+        try:
+            MARKER.unlink()
+        except FileNotFoundError:
+            return
+        directory_sync(MARKER.parent)
+        return
+    MARKER.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, name = tempfile.mkstemp(prefix=".security-policy.", dir=MARKER.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            json.dump(value, out, sort_keys=True)
+            out.write("\n")
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(name, MARKER)
+        directory_sync(MARKER.parent)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def marker():
+    try:
+        data = json.loads(MARKER.read_text())
+    except FileNotFoundError:
+        return None
+    if (not isinstance(data, dict) or data.get("schema") != 1 or
+            data.get("kind") not in ("login-skip", "lock-mode", "duress", "fingerprint", "face", "remove-duress", "refresh") or
+            data.get("value") not in ("on", "off", "high", "low")):
+        raise RuntimeError("invalid security policy journal; left untouched")
+    return data
+
+
+def apply_pam(values):
+    any_auth = values.get("lock_mode") != "high" and any(values.get(key) == "1" for key in
+                                                                ("unlock_fingerprint", "unlock_face"))
+    duress = values.get("duress_enabled") == "1"
+
+    def transform(original):
+        if original is None:
+            raise RuntimeError("sudo PAM policy is missing")
+        lines = [line for line in original.decode("utf-8").splitlines(keepends=True)
+                 if "pam_locachy_any.so" not in line and "pam_locachy_duress.so" not in line]
+        first = next((i for i, line in enumerate(lines) if re.match(r"\s*auth\s", line)), None)
+        if (any_auth or duress) and first is None:
+            raise RuntimeError("sudo PAM policy has no auth line")
+        insert = []
+        if any_auth:
+            methods = [method for key, method in (("unlock_fingerprint", "locachy-lock-fingerprint"),
+                                                  ("unlock_face", "locachy-lock-face")) if values.get(key) == "1"]
+            insert.append("auth\t\tsufficient\tpam_locachy_any.so " + " ".join(methods) + "\n")
+        if duress:
+            insert.append("auth\t\toptional\tpam_locachy_duress.so\n")
+        if insert:
+            lines[first:first] = insert
+        return "".join(lines).encode()
+
+    helper("locachy_config").transaction(SUDO_PAM, transform)
+
+
+def tpm_state():
+    tool = helper("locachy-tpm")
+    targets = tool.find_luks_targets()
+    # luks_meta raises on I/O and malformed metadata; unknown is never unbound.
+    tokens = {d: tool.device_tpm_tokens(d) for d in targets}
+    request = tool.pending_request()
+    return tool, targets, tokens, request
+
+
+def duress_state():
+    result = subprocess.run([str(DURESS), "status"], capture_output=True, text=True, check=True)
+    words = result.stdout.split()
+    if len(words) != 2 or words[0] not in ("set", "not-set") or words[1] not in ("luks", "no-luks"):
+        raise RuntimeError("invalid duress status")
+    return words[0] == "set" and words[1] == "luks"
+
+
+def rebuild():
+    if not BOOT.is_file():
+        raise RuntimeError("boot image builder is not installed")
+    subprocess.run([str(BOOT)], check=True)
+
+
+def notify():
+    jobs = helper("locachy_jobs")
+    if jobs.execution_mode() != "offline":
+        os.kill(1, signal.SIGHUP)
+
+
+def apply_policy(kind, value):
+    with policy_lock():
+        values = read_values()
+        old = marker()
+        if old and (old["kind"], old["value"]) != (kind, value):
+            raise RuntimeError("another security transition is incomplete; retry its target first")
+        tool, targets, tokens, pending = tpm_state()
+        has_tpm = any(tokens.values()) or pending is not None
+        if kind == "login-skip" and value == "on" and (has_tpm or values.get("lock_mode") == "high"):
+            raise RuntimeError("the boot lock cannot be skipped while TPM auto-unlock or the high threat level is active")
+        if kind == "duress" and value == "on" and not duress_state():
+            raise RuntimeError("duress needs a configured password and an encrypted disk")
+        if kind in ("face", "fingerprint") and value == "on" and values.get("lock_mode") == "high":
+            raise RuntimeError("the high threat level allows password authentication only")
+        changes = {}
+        if kind == "login-skip":
+            changes["login_skip"] = "1" if value == "on" else None
+        elif kind == "lock-mode":
+            # Explicit, not silent: high never leaves the boot lock skipped.
+            if value == "high" and values.get("login_skip") == "1":
+                raise RuntimeError("the high threat level keeps the lock at boot: turn the boot lock on first")
+            changes = {"lock_mode": value}
+        elif kind == "duress":
+            changes["duress_enabled"] = "1" if value == "on" else None
+        elif kind in ("face", "fingerprint"):
+            changes["unlock_" + kind] = "1" if value == "on" else None
+        elif kind == "remove-duress":
+            changes["duress_enabled"] = None
+        elif kind != "refresh":
+            raise RuntimeError("unknown security policy")
+        journal = {"schema": 1, "kind": kind, "value": value, "phase": "prepared"}
+        save_marker(journal)
+        if kind == "lock-mode" and value == "high":
+            # The policy lock is held here: do not recursively invoke the CLI.
+            for device in targets:
+                tool.clear_device_tpm(device)
+            tool.drop_pending()
+            if any(tool.device_tpm_tokens(d) for d in targets) or tool.pending_request() is not None:
+                raise RuntimeError("TPM auto-unlock keys remain; threat level was not applied")
+        journal["phase"] = "tokens-checked"
+        save_marker(journal)
+        helper("locachy_config").update(RC_CONF, changes)
+        values = read_values()
+        journal["phase"] = "config-published"
+        save_marker(journal)
+        apply_pam(values)
+        journal["phase"] = "pam-published"
+        save_marker(journal)
+        if kind == "remove-duress":
+            subprocess.run([str(DURESS), "clear"], check=True)
+        if kind not in ("login-skip", "fingerprint", "face"):
+            rebuild()
+        journal["phase"] = "boot-published"
+        save_marker(journal)
+        notify()
+        save_marker(None)
+        print("Security policy applied")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="action", required=True)
+    change = sub.add_parser("set")
+    change.add_argument("kind", choices=("login-skip", "lock-mode", "duress", "fingerprint", "face"))
+    change.add_argument("value", choices=("on", "off", "low", "high"))
+    sub.add_parser("remove-duress")
+    sub.add_parser("refresh")
+    args = parser.parse_args(argv)
+    if args.action == "set" and args.value not in (("low", "high") if args.kind == "lock-mode" else ("on", "off")):
+        parser.error("invalid value for this policy")
+    if os.geteuid() != 0:
+        parser.error("root is required")
+    try:
+        jobs = helper("locachy_jobs")
+        command = ["set", args.kind, args.value] if args.action == "set" else [args.action]
+        if jobs.execution_mode() == "queue":
+            return jobs.submit("security-policy", command)
+        kind = args.kind if args.action == "set" else args.action
+        apply_policy(kind, args.value if args.action == "set" else "off")
+        return 0
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+        print(f"locachy-security: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

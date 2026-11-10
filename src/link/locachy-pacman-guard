@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""locachy-pacman-guard: the PreTransaction hook of a pacman transaction that
+LOCachy did not start (89-locachy-pacman-guard.hook, AbortOnFail).
+
+  pre   Outside a system job and not offline, takes the host package domain
+        (/run/locachy/pkg.lock) without waiting: when a LOCachy job or another
+        package operation holds it, this exits 1 and pacman stops before it
+        changes anything. When it is taken, a child that keeps only that lock
+        and the pidfd of the real pacman waits until pacman has exited, then
+        releases it. The hook returns at once, so pacman goes on; the child
+        has its stdio on /dev/null, so pacman never waits for its output.
+
+Nothing is read from the environment: the job-or-offline decision is
+locachy_jobs.execution_mode(), and pacman is found by its process chain.
+A job's own pacman inherits the job's domain and never reaches this code path.
+
+Boundaries, by design:
+- The domain is held by the guard's child. If that child is killed while
+  pacman runs (SIGKILL, the OOM killer), the kernel releases the lock with its
+  last holder: the domain is free before pacman has finished. Nothing renews
+  it or times it out.
+- pacman -Sy alone (a database refresh) runs no transaction, so no hook: it
+  is not guarded, and neither is anything that writes to the host without pacman.
+"""
+import fcntl
+import importlib.util
+import os
+from pathlib import Path
+import select
+import stat
+import sys
+
+sys.dont_write_bytecode = True
+LOCK = "/run/locachy/pkg.lock"  # the same domain locachy-pkg and the jobs runner use
+
+
+def jobs():
+    path = Path(__file__).with_name("locachy_jobs.py")
+    if not path.is_file():
+        path = Path("/usr/local/lib/locachy/locachy_jobs.py")
+    spec = importlib.util.spec_from_file_location("locachy_jobs", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def comm(pid):
+    try:
+        return Path(f"/proc/{pid}/comm").read_text().strip()
+    except OSError:
+        return ""
+
+
+def pacman_pid():
+    """The nearest ancestor whose program is pacman, or None."""
+    pid = os.getppid()
+    for _ in range(64):
+        if pid <= 1:
+            return None
+        if comm(pid) == "pacman":
+            return pid
+        try:
+            tail = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[-1].split()
+            pid = int(tail[1])
+        except (OSError, ValueError, IndexError):
+            return None
+    return None
+
+
+def fail(message):
+    print(f"locachy-pacman-guard: {message}", file=sys.stderr)
+    return 1
+
+
+def hold(lock_fd, pidfd):
+    """The child: keeps the lock and the pidfd, until the pacman has exited."""
+    try:
+        os.setsid()
+    except OSError:
+        pass
+    null = os.open(os.devnull, os.O_RDWR)
+    for target in (0, 1, 2):
+        os.dup2(null, target)
+    for name in os.listdir("/proc/self/fd"):
+        fd = int(name)
+        if fd > 2 and fd not in (lock_fd, pidfd):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    poller = select.poll()
+    poller.register(pidfd, select.POLLIN)
+    while True:
+        try:
+            poller.poll()
+            break
+        except InterruptedError:
+            continue
+    os._exit(0)
+
+
+def pre():
+    try:
+        module = jobs()
+        mode = module.execution_mode()
+    except (OSError, RuntimeError, ValueError) as e:
+        return fail(f"cannot tell whether this is a system job: {e}; the transaction is refused")
+    if mode != "queue":
+        return 0  # a job holds the domain for its own pacman; offline has none
+    pid = pacman_pid()
+    if pid is None or not module.pacman_ancestor():
+        return fail("not run by pacman; the transaction is refused")
+    os.makedirs(os.path.dirname(LOCK), mode=0o755, exist_ok=True)
+    fd = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+            raise OSError("the package domain is not an owned regular file")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return fail("the host package domain is busy (a LOCachy job or package operation runs); "
+                    "nothing changed, try again later")
+    try:
+        pidfd = os.pidfd_open(pid)
+    except OSError as e:
+        os.close(fd)
+        return fail(f"cannot follow pacman ({e}); nothing changed")
+    if comm(pid) != "pacman" or not pacman_pid_is(pid):
+        os.close(pidfd)
+        os.close(fd)
+        return fail("pacman changed while it was followed; nothing changed")
+    child = os.fork()
+    if child == 0:
+        hold(fd, pidfd)
+    os.close(fd)
+    os.close(pidfd)
+    return 0
+
+
+def pacman_pid_is(pid):
+    """Whether pid is still an ancestor of this hook (identity after pidfd)."""
+    current = os.getppid()
+    for _ in range(64):
+        if current == pid:
+            return True
+        if current <= 1:
+            return False
+        try:
+            tail = Path(f"/proc/{current}/stat").read_text().rsplit(")", 1)[-1].split()
+            current = int(tail[1])
+        except (OSError, ValueError, IndexError):
+            return False
+    return False
+
+
+def main(argv):
+    if argv[1:] != ["pre"]:
+        print("usage: locachy-pacman-guard pre  (a PreTransaction hook)", file=sys.stderr)
+        return 2
+    return pre()
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

@@ -92,6 +92,7 @@
 #include <sys/swap.h>
 #include <sys/sysmacros.h>
 #include <sys/timerfd.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <time.h>
@@ -100,6 +101,7 @@
 #include "internal.h"
 #include "duress.h"
 #include "apps.h"
+#include "session.h"
 #include "jobs.h" /* JOBS_CGROUP, JOBS_DIR: where system jobs run; process 1 speaks none of their protocol */
 
 #define FG    0xD0D0D0
@@ -138,6 +140,7 @@ struct service {
     char command[256];
     pid_t pid;              /* 0: not running */
     double restart_at;      /* when to start it again, ms (now_ms) */
+    int retiring;           /* taken out of rc.conf while it ran: never started again */
 };
 
 static char *home_argv[] = { "/usr/local/bin/home", NULL };
@@ -1439,6 +1442,7 @@ static void freeze(struct frame *f)
     char path[96], amount[32];
     double t0 = now_ms();
 
+    if (apps_sessions_revoke) apps_sessions_revoke(f->cgroup); /* its sessions ask again after a thaw */
     snprintf(path, sizeof path, "%s/cgroup.freeze", f->cgroup);
     write_file(path, "1");
     snprintf(path, sizeof path, "%s/cgroup.events", f->cgroup);
@@ -1948,6 +1952,7 @@ static void lock(void)
     say("init: locking");
     locked = 1;
     write_locked_state();
+    if (apps_sessions_locked) apps_sessions_locked(1); /* their input stops, their inhibitors go */
     stay_on_display = 0;
     lock_start();
 }
@@ -1960,6 +1965,7 @@ static void unlock(void)
     }
     locked = 0;
     write_locked_state();
+    if (apps_sessions_locked) apps_sessions_locked(0); /* sessions ask again: nothing resumes by itself */
     lock_start_at = -1;
     active_at = now_ms();
     say("init: unlocked");
@@ -2353,12 +2359,77 @@ static void shutdown_show(int id)
     screen_flush();
 }
 
+/* The system jobs' drain (locachy-jobs, JOBS_CONTROL): asked when a power off
+ * or reboot starts to wait, so that nothing new is accepted, and answered
+ * "drained EPOCH" once no job is accepted, queued or running. Without the
+ * service (or a connection it does not take) nothing can start: drained at
+ * once, and the cgroups of jobs that run are still watched (jobs_running). */
+static int drain_fd = -1;
+static unsigned long long drain_epoch;
+static int drained;
+
+static void drain_begin(void)
+{
+    struct sockaddr_un a = { .sun_family = AF_UNIX };
+    char text[64];
+    int fd, n, path;
+
+    if (drain_fd >= 0 || drained) {
+        return;
+    }
+    drain_epoch = (unsigned long long)now_ms() + 1;
+    fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    /* A socket path that does not fit is a service that cannot be reached. */
+    path = snprintf(a.sun_path, sizeof a.sun_path, "%s/control", JOBS_DIR);
+    n = snprintf(text, sizeof text, "drain%c%llu", 0, drain_epoch); /* fields NUL separated */
+    if (fd >= 0 && path > 0 && path < (int)sizeof a.sun_path && n > 0 && n < (int)sizeof text &&
+        connect(fd, (struct sockaddr *)&a, sizeof a) == 0 && send(fd, text, (size_t)n, MSG_NOSIGNAL) == n) {
+        drain_fd = fd;
+        say("init: the system jobs are asked to drain (epoch %llu)", drain_epoch);
+        return;
+    }
+    if (fd >= 0) {
+        close(fd);
+    }
+    drained = 1;
+}
+
+/* The service's answer, read without waiting. Its end counts as drained too:
+ * it has gone, and what it accepted cannot start without it. */
+static void drain_look(void)
+{
+    char text[64];
+    ssize_t n;
+
+    if (drain_fd < 0) {
+        return;
+    }
+    n = recv(drain_fd, text, sizeof text - 1, MSG_DONTWAIT);
+    if (n < 0 && (errno == EAGAIN || errno == EINTR)) {
+        return;
+    }
+    close(drain_fd);
+    drain_fd = -1;
+    if (n > 8) {
+        text[n] = '\0';
+        if (strncmp(text, "drained", 7) == 0 && strtoull(text + 8, NULL, 10) == drain_epoch) {
+            say("init: the system jobs have drained");
+        }
+    }
+    drained = 1;
+}
+
 static void shutdown_go(int how)
 {
     if (jobs_watch >= 0) {
         close(jobs_watch);
         jobs_watch = -1;
     }
+    if (drain_fd >= 0) {
+        close(drain_fd);
+        drain_fd = -1;
+    }
+    drained = 0;
     shutdown_how = -1;
     shutdown_at = shutdown_by = jobs_quiet_at = -1;
     shutdown_shown = 0;
@@ -2373,7 +2444,10 @@ static void shutdown_request(int how, int force, int bound_ms)
     char kind[32];
     int id, n = jobs_running(&id);
 
-    if (force || (shutdown_how < 0 && n == 0)) {
+    if (!force && shutdown_how < 0) {
+        drain_begin(); /* from here nothing new is taken; drained says when none is left */
+    }
+    if (force || (shutdown_how < 0 && n == 0 && drained)) {
         if (n > 0) {
             job_kind(id, kind, sizeof kind);
             say("init: %s now, without waiting: system job %d (%s) is cut", what, id, kind[0] ? kind : "kind unknown");
@@ -2416,6 +2490,7 @@ static void shutdown_look(void)
 
     while (jobs_watch >= 0 && read(jobs_watch, events, sizeof events) > 0) {
     }
+    drain_look();
     if (!shutdown_shown) {
         shutdown_shown = 1;
         arrange(); /* nothing gets the screens: they show process 1's */
@@ -2435,7 +2510,8 @@ static void shutdown_look(void)
         shutdown_go(shutdown_how);
         return;
     }
-    if (n == 0 && (now >= jobs_quiet_at || (shutdown_by >= 0 && now >= shutdown_by))) {
+    int bound_passed = shutdown_by >= 0 && now >= shutdown_by;
+    if (n == 0 && (drained || bound_passed) && (now >= jobs_quiet_at || bound_passed)) {
         shutdown_go(shutdown_how);
         return;
     }
@@ -2605,6 +2681,7 @@ static void read_settings(void)
         for (k = 0; k < next.count; k++) {
             if (strcmp(next.services[k].command, services[i].command) == 0) {
                 next.services[k] = services[i];
+                next.services[k].retiring = 0; /* wanted again: it is this service, once it has ended */
                 break;
             }
         }
@@ -2613,9 +2690,21 @@ static void read_settings(void)
         }
         say("init: service no longer in %s: %s", RC_CONF, services[i].command);
         if (services[i].pid > 0) {
-            /* Its session, and itself: just started, it may not have one yet. */
+            /* Its session, and itself: just started, it may not have one yet.
+             * Kept until it has ended (drop_retired): a line written again
+             * meanwhile takes it over, and starts once it has ended. */
             kill(-services[i].pid, SIGTERM);
             kill(services[i].pid, SIGTERM);
+            struct service *p = next.count >= SIZE_MAX / sizeof *p ? NULL :
+                                realloc(next.services, (next.count + 1) * sizeof *p);
+            if (p != NULL) {
+                next.services = p;
+                next.services[next.count] = services[i];
+                next.services[next.count].retiring = 1;
+                next.count++;
+            } else {
+                say("init: cannot keep %s until it ends", services[i].command);
+            }
         }
     }
     free(services);
@@ -2647,6 +2736,19 @@ static void service_start(struct service *s)
     s->pid = pid < 0 ? 0 : pid;
     s->restart_at = pid < 0 ? now_ms() + 5000 : 0;
     say("init: service started (pid %d): %s", (int)pid, s->command);
+}
+
+/* Services taken out of rc.conf while they ran, and now ended: forgotten. */
+static void drop_retired(void)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < nservices; i++) {
+        if (services[i].retiring && services[i].pid == 0) {
+            continue;
+        }
+        services[n++] = services[i];
+    }
+    nservices = n;
 }
 
 /* Wait for every child that has ended: a program's status is kept for gone()
@@ -2693,8 +2795,12 @@ static void reap(void)
                     WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status), services[i].command);
                 services[i].pid = 0;
                 services[i].restart_at = now_ms() + 5000;
+                if (services[i].retiring) {
+                    services[i].restart_at = 0; /* taken out of rc.conf: not started again */
+                }
             }
         }
+        drop_retired();
     }
 }
 
@@ -3539,6 +3645,13 @@ static void lid_changed(int edge)
         say("init: the lid is closed, no other screen");
     }
     lock_wait();
+    /* A session that keeps the machine awake (apps.c) holds a closed lid's
+     * sleep, not its lock: looked at again, as the session may end. */
+    if (apps_sleep_inhibited && apps_sleep_inhibited()) {
+        say("init: the lid is closed; a session keeps the machine awake (it is locked)");
+        lid_check_at = now_ms() + 5000;
+        return;
+    }
     double slept = suspend(1);
     if (slept >= 0) {
         suspend_failures = 0;
@@ -3920,8 +4033,8 @@ int main(void)
 
     for (;;) {
         /* signals, system inputs, keyboards, home, the tasks, uevents, system jobs */
-        struct pollfd p[1 + 8 + MAX_KBD + MAX_ACTIVITY + 2 + MAX_TASKS * MAX_DEPTH + 2];
-        struct frame *who[1 + 8 + MAX_KBD + MAX_ACTIVITY + 2 + MAX_TASKS * MAX_DEPTH + 2];
+        struct pollfd p[1 + 8 + MAX_KBD + MAX_ACTIVITY + 3 + MAX_TASKS * MAX_DEPTH + 2];
+        struct frame *who[1 + 8 + MAX_KBD + MAX_ACTIVITY + 3 + MAX_TASKS * MAX_DEPTH + 2];
         int n = 0;
         int signal_j = n; /* SIGCHLD, SIGHUP, SIGTERM, SIGINT, SIGUSR2, SIG_POWEROFF_NOW, SIG_REBOOT_NOW */
         who[n] = NULL;
@@ -3966,6 +4079,12 @@ int main(void)
             jobs_j = n;
             who[n] = NULL;
             p[n++] = (struct pollfd){ .fd = jobs_watch, .events = POLLIN };
+        }
+        int drain_j = -1; /* while a shutdown waits: the system jobs' drain answer */
+        if (drain_fd >= 0) {
+            drain_j = n;
+            who[n] = NULL;
+            p[n++] = (struct pollfd){ .fd = drain_fd, .events = POLLIN };
         }
         /* Wake up for the next timed thing: a service to start again, the
          * idle measurement, the debug reboot, the lid's second look, the
@@ -4102,6 +4221,13 @@ int main(void)
             }
             if (j == jobs_j) {
                 if (p[j].revents & POLLIN) {
+                    shutdown_look();
+                    break;
+                }
+                continue;
+            }
+            if (j == drain_j) {
+                if (p[j].revents & (POLLIN | POLLHUP | POLLERR)) {
                     shutdown_look();
                     break;
                 }

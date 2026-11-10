@@ -26,6 +26,7 @@
 static char dir[256];
 #define D(rel) (dir_path(rel))
 static char *dir_path(const char *rel);
+static void put(const char *rel, const char *text);
 
 #define SYSTEM_PRESETS D("presets")
 #define APPS_CATALOG D("catalog")
@@ -38,6 +39,7 @@ static char *dir_path(const char *rel);
 #define APP D("app")
 #define UNTRUSTED_KEYS D("untrusted-keys")
 #define RECIPES D("pkgbuilds")
+#define APP_RUNTIME D("run")
 #define main packages_main
 #include "../progs/packages.c"
 #include "i18n-stub.h"
@@ -68,16 +70,28 @@ static int queue_busy(void)
 static pid_t queue_pid[MAX_JOBS + 1];
 static int queued;
 
+static int has(const char *rel, const char *text);
+
 int jobs_submit(const char *kind, const char *const args[], int *id, int *position, char *why, size_t size)
 {
     static const char *const commands[][3] = {
         { "pkg-install", "pkg", "install" }, { "pkg-remove", "pkg", "remove" }, { "pkg-sync", "pkg", "sync" },
         { "pkg-plan", "pkg", "plan" }, { "pkg-apply", "pkg", "apply" }, { "app-build", "app", "build" },
-        { "app-rollback", "app", "rollback" }, { "app-remove", "app", "remove" },
+        { "app-host-build", "app", "build" }, { "app-rollback", "app", "rollback" }, { "app-remove", "app", "remove" },
     };
     char program[512], log[512];
     const char *argv[JOB_ARGV + 4];
     int n = 0;
+    /* The service's check at acceptance: a build's kind follows the app's
+     * host setting (app-host-build for host="1", app-build otherwise). */
+    if ((strcmp(kind, "app-build") == 0 || strcmp(kind, "app-host-build") == 0) && args[0]) {
+        char conf[256];
+        snprintf(conf, sizeof conf, "conf/%s.conf", args[0]);
+        if (has(conf, "host=\"1\"") != (strcmp(kind, "app-host-build") == 0)) {
+            snprintf(why, size, "%s", "the app's host setting changed; open it again");
+            return -1;
+        }
+    }
     for (size_t i = 0; i < sizeof commands / sizeof commands[0]; i++) {
         if (strcmp(kind, commands[i][0]) == 0) {
             snprintf(program, sizeof program, "%s", D(commands[i][1]));
@@ -230,6 +244,7 @@ const char *clipboard_error(int status) { return status == CLIPBOARD_OK ? "ok" :
 #define RESIZE (-3)
 #define NARROW (-4)
 #define FREE_QUEUE (-5) /* the job before it has ended: DIR/queue-busy goes */
+#define TOUCH (-6) /* another writer changes conf/racer.conf here, as the form is open */
 #define CLICK(i) (-100 - (i))
 #define DRAG(i) (-200 - (i))
 static const int *script;
@@ -314,6 +329,10 @@ int key_poll_timeout(int fd, int ms)
     }
     if (key == FREE_QUEUE) {
         unlink(D("queue-busy"));
+        return 0;
+    }
+    if (key == TOUCH) {
+        put("conf/racer.conf", "package=\"sl\"\ncommand=\"/usr/bin/other\"\nnetwork=\"0\"\n");
         return 0;
     }
     if (key == SNAP) {
@@ -1111,6 +1130,44 @@ int main(int argc, char **argv)
     unlink(D("presets/foot.conf"));
     unlink(D("catalog/foot.conf"));
     unlink(D("catalog/chatgpt.conf"));
+
+    /* A Save over a change another writer made since the form was opened is
+     * refused and that change kept; a Save while locachy-app holds the
+     * container's control.lock is told so; and an unchanged one is saved. Save
+     * is the first button, Cancel the third (K_RIGHT twice). */
+    static const char racer[] = "package=\"sl\"\ncommand=\"/usr/bin/sl\"\nnetwork=\"0\"\n";
+    put("conf/racer.conf", racer);
+    mkdir(D("run"), 0700);
+    mkdir(D("run/racer"), 0700);
+    script = (const int[]){ TOUCH, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN,
+                            K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, '\n',
+                            K_RIGHT, K_RIGHT, '\n', END };
+    step = 0;
+    edit_container_with("racer", NULL);
+    assert(notice_error && strstr(notice, "changed since this form was opened") &&
+           has("conf/racer.conf", "command=\"/usr/bin/other\"") && !has("conf/racer.conf", "/usr/bin/sl\"\n"));
+    puts("PASS a Save over a change made since the form was opened: refused, the other writer's bytes kept");
+
+    put("conf/racer.conf", racer);
+    int busy = open(D("run/racer/control.lock"), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    assert(busy >= 0 && flock(busy, LOCK_EX) == 0);
+    script = (const int[]){ K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN,
+                            K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, '\n',
+                            K_RIGHT, K_RIGHT, '\n', END };
+    step = 0;
+    edit_container_with("racer", NULL);
+    assert(notice_error && strstr(notice, "is being started or built") && has("conf/racer.conf", racer));
+    assert(flock(busy, LOCK_UN) == 0 && close(busy) == 0);
+    puts("PASS a Save while the container's control.lock is held: told so, nothing written");
+
+    script = (const int[]){ K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN,
+                            K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, K_DOWN, '\n',
+                            END };
+    step = 0;
+    edit_container_with("racer", NULL);
+    assert(!notice_error && strstr(notice, "racer saved") && has("conf/racer.conf", "package=\"sl\""));
+    puts("PASS an unchanged configuration saved over its snapshot");
+    unlink(D("conf/racer.conf"));
 
     puts("ALL PASSED");
     return 0;

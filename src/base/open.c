@@ -20,12 +20,14 @@
 #endif
 #include <ctype.h>
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <gio/gio.h>
@@ -33,6 +35,7 @@
 #include <limits.h>
 
 #include "base.h"
+#include "config.h"
 
 #ifndef OPEN_CONTAINERS
 #define OPEN_CONTAINERS "/var/lib/locachy/containers" /* their state: locachy-app's CONT_BASE */
@@ -525,33 +528,114 @@ int open_rule(const char *type, char *name, size_t size)
     return found;
 }
 
+struct rule_change { const char *type, *value; };
+
+static int change_rule(const char *original, size_t length, int exists,
+                       char **replacement, size_t *replacement_length, void *arg)
+{
+    (void)exists;
+    const struct rule_change *change = arg;
+    FILE *out = open_memstream(replacement, replacement_length);
+    if (!out) return -1;
+    size_t tlen = strlen(change->type), at = 0;
+    int ok = 1, newline = 1;
+    while (at < length) {
+        size_t end = at;
+        while (end < length && original[end] != '\n') end++;
+        if (end < length) end++;
+        if (end - at <= tlen || memcmp(original + at, change->type, tlen) || original[at + tlen] != '=') {
+            if (fwrite(original + at, 1, end - at, out) != end - at) ok = 0;
+            newline = original[end - 1] == '\n';
+        }
+        at = end;
+    }
+    if (change->value) {
+        if ((!newline && fputc('\n', out) == EOF) ||
+            fprintf(out, "%s=%s\n", change->type, change->value) < 0) ok = 0;
+    }
+    if (fclose(out) != 0) ok = 0;
+    return ok ? 0 : -1;
+}
+
 int open_set_rule(const char *type, const char *value)
 {
-    FILE *in = fopen(OPEN_RULES, "re");
-    FILE *out = fopen(OPEN_RULES ".tmp", "we");
-    char line[256];
-    size_t tlen = strlen(type);
-    if (!out) {
-        if (in) {
-            fclose(in);
-        }
+    if (!type || !type[0] || strpbrk(type, "=\r\n") || (value && strpbrk(value, "\r\n"))) {
+        errno = EINVAL;
         return -1;
     }
-    while (in && fgets(line, sizeof line, in)) {
-        if (strncmp(line, type, tlen) != 0 || line[tlen] != '=') {
-            fputs(line, out);
-        }
-    }
-    if (in) {
-        fclose(in);
-    }
-    if (value) {
-        fprintf(out, "%s=%s\n", type, value);
-    }
-    if (fclose(out) != 0) {
+    struct rule_change change = { type, value };
+    return conf_transaction(OPEN_RULES, change_rule, &change);
+}
+
+static int request_spool(void)
+{
+    struct stat st;
+    if (mkdir(OPEN_REQUEST, 0700) != 0 && errno != EEXIST) return -1;
+    int fd = open(OPEN_REQUEST, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return -1;
+    if (fstat(fd, &st) != 0 || st.st_uid != geteuid() || (st.st_mode & 077)) {
+        close(fd);
+        errno = EPERM;
         return -1;
     }
-    return rename(OPEN_RULES ".tmp", OPEN_RULES);
+    return fd;
+}
+
+int open_request_publish(const char *with, const char *target)
+{
+    char tmp[96], final[96], data[OPEN_REQUEST_BYTES];
+    static unsigned serial;
+    struct timespec now;
+    if (!target || strchr(target, '\n') || (with && (strchr(with, '\n') || strlen(with) >= OPEN_NAME)) ||
+        strlen(target) >= PATH_MAX) {
+        errno = EINVAL;
+        return -1;
+    }
+    int n = snprintf(data, sizeof data, "%s\n%s\n", with ? with : "", target);
+    if (n < 0 || (size_t)n >= sizeof data) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    int dir = request_spool();
+    if (dir < 0) return -1;
+    int queued = 0;
+    DIR *d = fdopendir(dup(dir));
+    struct dirent *e;
+    while (d && (e = readdir(d))) queued += strncmp(e->d_name, "req-", 4) == 0;
+    if (d) closedir(d);
+    if (queued >= OPEN_REQUEST_MAX) {
+        close(dir);
+        errno = EAGAIN;
+        return -1;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    unsigned long long mono = (unsigned long long)now.tv_sec * 1000000000ULL + (unsigned long long)now.tv_nsec;
+    unsigned salt = (unsigned)getpid() ^ (unsigned)now.tv_nsec ^ (++serial * 2654435761U);
+    snprintf(tmp, sizeof tmp, ".tmp-%ld-%llu-%08x", (long)getpid(), mono, salt);
+    int fd = openat(dir, tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) {
+        close(dir);
+        return -1;
+    }
+    int ok = write(fd, data, (size_t)n) == n && fsync(fd) == 0;
+    if (close(fd) != 0) ok = 0;
+    for (int tries = 0; ok && tries < 16; tries++) {
+        snprintf(final, sizeof final, "req-%020llu-%ld-%08x", mono, (long)getpid(), salt + (unsigned)tries);
+        if (renameat2(dir, tmp, dir, final, RENAME_NOREPLACE) == 0) break;
+        if (errno == EINVAL || errno == ENOSYS) {
+            if (linkat(dir, tmp, dir, final, 0) == 0) {
+                unlinkat(dir, tmp, 0);
+                break;
+            }
+        }
+        if (errno != EEXIST || tries == 15) ok = 0;
+    }
+    if (ok && fsync(dir) != 0) ok = 0;
+    int saved = errno;
+    if (!ok) unlinkat(dir, tmp, 0);
+    close(dir);
+    errno = saved;
+    return ok ? 0 : -1;
 }
 
 int open_rules(char types[][OPEN_TYPE], char values[][OPEN_NAME], int max)

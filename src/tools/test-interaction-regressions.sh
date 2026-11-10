@@ -52,7 +52,8 @@ for test in pointer input-hotplug keyboard-locks; do
     "$out/$test"
 done
 # init-shutdown: a power off waiting for a system job; link/poweroff and reboot in user and PID namespaces.
-for test in rtc-alarm suspend-hibernate init-lid init-shutdown status-battery battery-handoff; do
+# init-services: process 1's rc.conf reload (SIGHUP), its growth, restarts and a failed reload.
+for test in rtc-alarm suspend-hibernate init-lid init-shutdown init-services status-battery battery-handoff; do
     "${cc[@]}" "$src/tools/test-$test.c" "${link[@]}" -o "$out/$test"
     "$out/$test" "$out/$test-fixtures"
 done
@@ -108,4 +109,19 @@ bash "$src/tools/test-touchpad-clicks.sh" "$out/touchpad-clicks"
 bash "$src/tools/test-app-ready.sh" "$out/app-ready"
 bash "$src/tools/test-network-handoff.sh" "$out/network-handoff" # unprivileged user and network namespaces
 bash "$src/tools/test-settings-tor.sh" "$out/settings-tor"
+# The security policy job, shared configuration transactions and generated app files (no scratch directory);
+# the external pacman guard and the update journal; the archive worker against its own build.
+for test in security config-transactions app-generation; do
+    python3 -B "$src/tools/test-$test.py"
+done
+for test in pacman-guard update-transaction; do
+    python3 -B "$src/tools/test-$test.py" "$out"
+done
+"${cc[@]}" "$src/progs/archive-worker.c" $(pkg-config --cflags --libs libarchive libcrypto) -o "$out/archive-worker"
+python3 -B "$src/tools/test-archive-worker.py" "$out/archive-worker" "$out"
+# The extended display's receiver and pairing client (FFmpeg, IPC, a stub broker) and the direct screen's power.
+sh "$src/tools/test-kvm.sh"
+# The broker: the pairing code, the cable TLS profile, and the lease in user and network namespaces.
+sh "$src/tools/test-kvm-broker.sh" "$out/kvm-broker"
+sh "$src/tools/test-screen-power.sh" "$out/screen-power"
 printf '%s\n' 'PASS device-free interaction regressions; real KMS/libinput/IME hardware acceptance remains separate.'

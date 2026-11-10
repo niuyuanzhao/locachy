@@ -51,6 +51,7 @@ class Base(unittest.TestCase):
         self.conf.mkdir()
         self.signers = self.root / "trusted-signers"
         env = mock.patch.dict(os.environ, {"HOME": str(self.root), "GIT_CONFIG_NOSYSTEM": "1",
+                                           "LOCACHY_APP_RUNTIME": str(self.root / "run"),
                                            "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "test@example.invalid",
                                            "GIT_COMMITTER_NAME": "test",
                                            "GIT_COMMITTER_EMAIL": "test@example.invalid"})
@@ -350,6 +351,32 @@ class Catalog(Base):
         self.assertEqual(apps.read_meta(str(self.catalog()))["commit"], c3)
         values = apps.conf_values((self.conf / "edge.conf").read_text())
         self.assertEqual((values["camera"], values["x11"]), ("0", "0"))
+
+    def test_a_grant_revoked_while_the_catalog_is_applied_stays_revoked(self):
+        # The merges are read, then the grant is revoked before the configuration
+        # is written (the switch is the hook): Apply must merge what is there
+        # now, so the revoked host mode is not put back.
+        self.install()
+        (self.conf / "edge.conf").write_text(EDGE + 'host="1"\n')
+        commit = self.commit({"apps/edge.conf": EDGE.replace('arguments="--ozone-platform=wayland"',
+                                                             'arguments="--ozone-platform=x11"')},
+                             "Edge on X11")
+        found = apps.check(str(self.apps_dir), self.url, "main", str(self.conf), str(self.signers))
+        self.assertEqual(found["commit"], commit)
+        real_switch = apps.switch
+
+        def revoke_then_switch(*args, **kwargs):
+            text = (self.conf / "edge.conf").read_text()
+            (self.conf / "edge.conf").write_text(text.replace('host="1"', 'host="0"'))
+            return real_switch(*args, **kwargs)
+        with mock.patch.object(apps, "switch", revoke_then_switch):
+            changed = apps.apply(str(self.apps_dir), commit, str(self.conf), str(self.signers),
+                                 self.url, "main")
+        values = apps.conf_values((self.conf / "edge.conf").read_text())
+        self.assertEqual(values["host"], "0")
+        self.assertEqual(values["arguments"], "--ozone-platform=x11")
+        self.assertEqual(changed, [("edge", ["arguments"])])
+        print("PASS a grant revoked while the catalog is applied stays revoked")
 
     def test_catalog_updates_keep_host_permission_in_both_directions(self):
         self.install()

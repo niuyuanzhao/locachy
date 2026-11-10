@@ -1,4 +1,7 @@
 /* Container jobs never own DRM or borrow home's control socket. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE /* struct ucred, SCM_CREDENTIALS: the session owners' peers */
+#endif
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -11,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -90,6 +94,7 @@ static const struct native_program natives[] = {
     { "bluetooth", "Bluetooth", APP_NATIVE_DIR "/term", APP_BLUETOOTH_COMMAND, 1, TARGET_NONE },
     { "network", "Network", APP_NATIVE_DIR "/term", APP_NETWORK_COMMAND, 1, TARGET_NONE },
     { "term", "Terminal", APP_NATIVE_DIR "/term", APP_TERM_COMMAND, 0, TARGET_NONE },
+    { "kvm", "Extended display", APP_NATIVE_DIR "/kvm", NULL, 1, TARGET_NONE },
 };
 
 static const char *const settings_pages[] = { "network", "power", "devices", "date-time", "hardware" };
@@ -97,7 +102,8 @@ static const char *const settings_pages[] = { "network", "power", "devices", "da
 struct app {
     char name[64];
     pid_t launcher, job;
-    int want_start, own_tor;
+    unsigned long long generation, launcher_generation, job_generation;
+    int want_start, own_tor, cancelling;
     char pending[16], error[240];
     char target[1024]; /* to open when it has started (apps_open) */
     double deadline;
@@ -105,11 +111,201 @@ struct app {
      * itself, its readiness and request pipes (-1 when closed). It has no
      * configuration file; it is forgotten once nothing of it runs. */
     const struct native_program *native;
-    int ready_fd, request_fd, seen_ready;
+    int ready_fd, request_fd, seen_ready, session_owner;
 };
 
 static struct app apps[MAX_APPS];
 static int count;
+
+/* Policy owners are independent of the window registry (direct frames use
+ * them too). The socket is only a capability to ask; every message is also
+ * authenticated against the bound live process and real cgroup inode. */
+#define MAX_OWNERS 64
+#ifndef APP_PROC
+#define APP_PROC "/proc" /* the peers' cgroups (a test's fixture files) */
+#endif
+#ifndef APP_SESSION_UID
+#define APP_SESSION_UID 0 /* the frontends': root, as the direct and window programs run */
+#endif
+struct session_owner {
+    int used, fd, directory, pidfd, inhibited, allowed, cancelled, revoking, suspended;
+    pid_t pid;
+    unsigned long long epoch;
+    char cgroup[192];
+};
+static struct session_owner owners[MAX_OWNERS];
+static int sessions_locked;
+
+static int owner_frozen(const struct session_owner *o)
+{
+    char text[128];
+    int fd = openat(o->directory, "cgroup.events", O_RDONLY | O_CLOEXEC), frozen = 0;
+    ssize_t n = fd >= 0 ? read(fd, text, sizeof text - 1) : -1;
+    if (fd >= 0) close(fd);
+    if (n <= 0) return 1;
+    text[n] = 0;
+    char *p = strstr(text, "frozen ");
+    if (p) frozen = atoi(p + 7);
+    return frozen;
+}
+
+static void owner_policy(struct session_owner *o)
+{
+    char text[96];
+    int n = snprintf(text, sizeof text, "policy %llu %d", o->epoch, o->allowed);
+    (void)send(o->fd, text, (size_t)n, MSG_NOSIGNAL | MSG_DONTWAIT);
+}
+
+void apps_session_close(int owner)
+{
+    if (owner < 0 || owner >= MAX_OWNERS || !owners[owner].used) return;
+    struct session_owner *o = &owners[owner];
+    close(o->fd);
+    close(o->directory);
+    if (o->pidfd >= 0) close(o->pidfd);
+    memset(o, 0, sizeof *o);
+}
+
+int apps_session_create(const char *cgroup, int *child)
+{
+    int i, sv[2], yes = 1;
+    for (i = 0; i < MAX_OWNERS && owners[i].used; i++) {}
+    if (i == MAX_OWNERS || strlen(cgroup) >= sizeof owners[i].cgroup) return -1;
+    int dir = open(cgroup, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (dir < 0) return -1;
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sv) < 0) { close(dir); return -1; }
+    if (setsockopt(sv[0], SOL_SOCKET, SO_PASSCRED, &yes, sizeof yes) < 0) {
+        close(dir); close(sv[0]); close(sv[1]); return -1;
+    }
+    fcntl(sv[0], F_SETFL, O_NONBLOCK);
+    owners[i] = (struct session_owner){ .used = 1, .fd = sv[0], .directory = dir,
+        .pidfd = -1, .epoch = 1 };
+    snprintf(owners[i].cgroup, sizeof owners[i].cgroup, "%s", cgroup);
+    *child = sv[1];
+    return i;
+}
+
+void apps_session_bind(int owner, pid_t pid)
+{
+    if (owner < 0 || owner >= MAX_OWNERS || !owners[owner].used) return;
+    struct session_owner *o = &owners[owner];
+    o->pid = pid;
+    o->pidfd = (int)syscall(SYS_pidfd_open, pid, 0);
+    o->allowed = !sessions_locked && !owner_frozen(o);
+    owner_policy(o);
+}
+
+static int owner_peer(const struct session_owner *o, const struct ucred *cred)
+{
+    if (!cred || cred->pid != o->pid || cred->uid != APP_SESSION_UID) return 0;
+    if (o->pidfd < 0 || syscall(SYS_pidfd_send_signal, o->pidfd, 0, NULL, 0) < 0) return 0;
+    char path[256], text[512];
+    snprintf(path, sizeof path, APP_PROC "/%d/cgroup", (int)o->pid);
+    FILE *f = fopen(path, "re");
+    int ok = f && fgets(text, sizeof text, f) && strncmp(text, "0::/", 4) == 0;
+    if (f) fclose(f);
+    if (!ok) return 0;
+    text[strcspn(text, "\r\n")] = 0;
+    snprintf(path, sizeof path, APP_CGROUP_ROOT "%.200s", text + 3);
+    struct stat bound, current;
+    return fstat(o->directory, &bound) == 0 && stat(path, &current) == 0 &&
+        bound.st_dev == current.st_dev && bound.st_ino == current.st_ino;
+}
+
+static void owner_read(int i)
+{
+    struct session_owner *o = &owners[i];
+    char text[160];
+    struct iovec v = { .iov_base = text, .iov_len = sizeof text - 1 };
+    union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(struct ucred)) + CMSG_SPACE(sizeof(int) * 8)]; } space;
+    struct msghdr m = { .msg_iov = &v, .msg_iovlen = 1, .msg_control = space.bytes, .msg_controllen = sizeof space.bytes };
+    ssize_t n = recvmsg(o->fd, &m, MSG_DONTWAIT | MSG_CMSG_CLOEXEC);
+    if (n < 0 && (errno == EAGAIN || errno == EINTR)) return;
+    if (n <= 0) { apps_session_close(i); return; }
+    struct ucred cred = {0};
+    for (struct cmsghdr *c = CMSG_FIRSTHDR(&m); c; c = CMSG_NXTHDR(&m, c)) {
+        if (c->cmsg_level != SOL_SOCKET) continue;
+        if (c->cmsg_type == SCM_CREDENTIALS && c->cmsg_len == CMSG_LEN(sizeof cred)) memcpy(&cred, CMSG_DATA(c), sizeof cred);
+        if (c->cmsg_type == SCM_RIGHTS) {
+            int *fds = (int *)CMSG_DATA(c);
+            for (size_t k = 0; k < (c->cmsg_len - CMSG_LEN(0)) / sizeof(int); k++) close(fds[k]);
+        }
+    }
+    if ((m.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) || !owner_peer(o, &cred)) {
+        apps_session_close(i); return;
+    }
+    text[n] = 0;
+    unsigned long long id, epoch;
+    char verb[24]; int value, end = 0, ok = 0;
+    if (sscanf(text, "%23s %llu %llu %d%n", verb, &id, &epoch, &value, &end) != 4 || text[end] ||
+        (value != 0 && value != 1)) return;
+    int allowed = !sessions_locked && !owner_frozen(o) && !o->revoking;
+    if (allowed != o->allowed) { o->allowed = allowed; o->inhibited = o->cancelled = 0; o->epoch++; owner_policy(o); }
+    if (epoch == o->epoch) {
+        if (!strcmp(verb, "cancelled")) { o->cancelled = 1; o->revoking = 0; ok = 1; }
+        else if (!strcmp(verb, "inhibit") && (!value || (o->allowed && o->cancelled))) { o->inhibited = value; ok = 1; }
+        else if (!strcmp(verb, "display") && (value || (o->allowed && o->cancelled))) ok = 1;
+    }
+    int len = snprintf(text, sizeof text, "result %llu %llu %d", id, o->epoch, ok);
+    (void)send(o->fd, text, (size_t)len, MSG_NOSIGNAL | MSG_DONTWAIT);
+}
+
+void apps_sessions_revoke(const char *cgroup)
+{
+    for (int i = 0; i < MAX_OWNERS; i++) {
+        struct session_owner *o = &owners[i];
+        if (!o->used || (cgroup && strcmp(cgroup, o->cgroup))) continue;
+        o->inhibited = o->allowed = o->cancelled = 0;
+        o->revoking = 1;
+        o->epoch++;
+        owner_policy(o);
+        double until = uptime() + .25;
+        while (o->used && o->revoking && uptime() < until) {
+            struct pollfd p = { .fd = o->fd, .events = POLLIN };
+            if (poll(&p, 1, 10) > 0) owner_read(i);
+        }
+        if (o->used && o->revoking) {
+            int kill = openat(o->directory, "cgroup.kill", O_WRONLY | O_CLOEXEC);
+            if (kill >= 0) { (void)write(kill, "1", 1); close(kill); }
+            apps_session_close(i);
+        }
+    }
+}
+
+void apps_sessions_locked(int locked)
+{
+    sessions_locked = locked;
+    if (locked) apps_sessions_revoke(NULL);
+    else for (int i = 0; i < MAX_OWNERS; i++) if (owners[i].used) {
+        owners[i].allowed = !owner_frozen(&owners[i]); owners[i].epoch++; owner_policy(&owners[i]);
+    }
+}
+
+int apps_sessions_poll(struct pollfd *p, int max)
+{
+    int n = 0;
+    for (int i = 0; i < MAX_OWNERS && n < max; i++) if (owners[i].used) {
+        p[n++] = (struct pollfd){ .fd = owners[i].fd, .events = POLLIN };
+        if (owners[i].pidfd >= 0 && n < max) p[n++] = (struct pollfd){ .fd = owners[i].pidfd, .events = POLLIN };
+    }
+    return n;
+}
+
+void apps_sessions_dispatch(const struct pollfd *p, int n)
+{
+    for (int i = 0; i < MAX_OWNERS; i++) if (owners[i].used) for (int k = 0; k < n; k++) {
+        if (!p[k].revents) continue;
+        if (p[k].fd == owners[i].pidfd) { apps_session_close(i); break; }
+        if (p[k].fd == owners[i].fd) { owner_read(i); break; }
+    }
+}
+
+int apps_sleep_inhibited(void)
+{
+    for (int i = 0; i < MAX_OWNERS; i++) if (owners[i].used && owners[i].inhibited &&
+        owners[i].allowed && !sessions_locked && !owner_frozen(&owners[i])) return 1;
+    return 0;
+}
 
 static int valid_name(const char *name)
 {
@@ -142,6 +338,8 @@ static void native_forget(struct app *app)
     char cg[160];
     if (app->ready_fd >= 0) close(app->ready_fd);
     if (app->request_fd >= 0) close(app->request_fd);
+    if (app->session_owner >= 0) apps_session_close(app->session_owner);
+    app->session_owner = -1;
     app->ready_fd = app->request_fd = -1;
     snprintf(cg, sizeof cg, APP_CGROUP_ROOT "/app_%.63s", app->name);
     rmdir(cg); /* empty now; a cgroup still in use stays */
@@ -271,6 +469,47 @@ static void failure(struct app *app, const char *message)
 }
 
 static pid_t launch(struct app *app, const char *action, int in_app);
+static pid_t native_job(struct app *app, const char *action);
+static void native_kill(const struct app *app);
+/* A container stopped while another of its operations is pending: that
+ * operation's helper (never inside app_NAME) ends now, and so does a launcher
+ * that has put nothing in app_NAME yet (one waiting for the app's lock behind
+ * a build), with its whole session. Their late exits belong to an old
+ * generation. A launcher whose app already runs is stopped as usual (the stop
+ * helper waits for its lock). 1: the stop helper starts once they are reaped
+ * (apps_tick); 0: nothing to wait for, stop now. */
+static int cancel_pending(struct app *app)
+{
+    int wait = 0;
+    app->want_start = app->own_tor = 0;
+    app->target[0] = app->error[0] = 0;
+    app->pending[0] = 0;
+    app->deadline = 0;
+    if (app->job > 0) {
+        kill(-app->job, SIGKILL);
+        kill(app->job, SIGKILL);
+        wait = 1;
+    }
+    if (app->launcher > 0 && !populated(app)) {
+        kill(-app->launcher, SIGKILL);
+        kill(app->launcher, SIGKILL);
+        wait = 1;
+    }
+    if (wait) {
+        app->generation++; /* the ended ones are old: apps_reap ignores them */
+        app->cancelling = 1;
+        snprintf(app->pending, sizeof app->pending, "stopping");
+        app->deadline = uptime() + 12;
+    }
+    return wait;
+}
+
+static int app_session_owner(struct app *app, int *child)
+{
+    char cg[160];
+    snprintf(cg, sizeof cg, APP_CGROUP_ROOT "/app_%.63s", app->name);
+    return apps_session_create(cg, child);
+}
 
 void apps_init(void)
 {
@@ -320,6 +559,11 @@ static pid_t launch_native(struct app *app)
         close(ready[1]);
         return -1;
     }
+    int session_child = -1, owner = -1;
+    if (!strcmp(p->program, "kvm") && (owner = app_session_owner(app, &session_child)) < 0) {
+        close(ready[0]); close(ready[1]); close(request[0]); close(request[1]);
+        return -1;
+    }
     int fd = open(log_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd >= 0) {
         close(fd);
@@ -349,6 +593,10 @@ static pid_t launch_native(struct app *app)
         close(procs);
         /* Out of the way of the fixed numbers first (dup2 onto another
          * number clears close-on-exec only on the copy). */
+        int s = session_child >= 0 ? fcntl(session_child, F_DUPFD_CLOEXEC, 10) : -1;
+        if (session_child >= 0 && (s < 0 || dup2(s, 5) < 0)) _exit(125);
+        if (session_child >= 0) setenv("LOCACHY_SESSION_FD", "5", 1);
+        else unsetenv("LOCACHY_SESSION_FD");
         int r = fcntl(ready[1], F_DUPFD_CLOEXEC, 10), q = fcntl(request[0], F_DUPFD_CLOEXEC, 10);
         if (r < 0 || q < 0 || dup2(r, NATIVE_READY_FD) < 0 || dup2(q, NATIVE_REQUEST_FD) < 0) {
             dprintf(2, "apps: cannot pass the window descriptors: %s\n", strerror(errno));
@@ -384,11 +632,14 @@ static pid_t launch_native(struct app *app)
     }
     close(ready[1]);
     close(request[0]);
+    if (session_child >= 0) close(session_child);
     if (pid < 0) {
+        apps_session_close(owner);
         close(ready[0]);
         close(request[1]);
         return -1;
     }
+    app->session_owner = owner;
     fcntl(ready[0], F_SETFL, O_NONBLOCK);
     fcntl(request[1], F_SETFL, O_NONBLOCK);
     if (app->ready_fd >= 0) close(app->ready_fd);
@@ -412,6 +663,7 @@ static void native_tick(struct app *app)
             app->ready_fd = -1;
             if (n > 0) {
                 app->seen_ready = 1;
+                if (app->session_owner >= 0) apps_session_bind(app->session_owner, app->launcher);
             } else if (app->launcher && strcmp(app->pending, "starting") == 0) {
                 char message[sizeof app->error];
                 snprintf(message, sizeof message, "no window was shown; inspect " APP_RUN "/%.63s.log",
@@ -431,6 +683,15 @@ void apps_tick(void)
 {
     for (int i = 0; i < count; i++) {
         struct app *app = &apps[i];
+        if (app->cancelling) {
+            if (!app->launcher && !app->job) {
+                app->cancelling = 0;
+                pid_t pid = app->native ? native_job(app, "stop") : launch(app, "stop", 0);
+                if (pid < 0) failure(app, "cannot finish cancelling application start");
+                else { app->job = pid; app->job_generation = app->generation; }
+            }
+            continue;
+        }
         if (app->want_start && display_ready()) {
             app->want_start = 0;
             pid_t pid = app->native ? launch_native(app) : launch(app, app->target[0] ? "open" : "start", 0);
@@ -443,6 +704,7 @@ void apps_tick(void)
                 continue;
             }
             app->launcher = pid;
+            app->launcher_generation = app->generation;
         }
         if (app->native) {
             native_tick(app);
@@ -709,6 +971,10 @@ static int native_action(struct app *app, const char *action, char *why, size_t 
     char path[192];
     int exists = populated(app) || app->launcher;
     if (strcmp(action, "open") == 0 || strcmp(action, "show") == 0 || strcmp(action, "resume") == 0) {
+        if (app->pending[0] || app->cancelling) {
+            snprintf(why, size, "window operation still in progress");
+            return -1;
+        }
         if (exists) {
             if (frozen(app)) {
                 snprintf(path, sizeof path, APP_CGROUP_ROOT "/app_%.63s/cgroup.freeze", app->name);
@@ -739,6 +1005,7 @@ static int native_action(struct app *app, const char *action, char *why, size_t 
             snprintf(why, size, exists ? "already running" : "window operation still in progress");
             return exists ? 0 : -1;
         }
+        app->generation++;
         app->error[0] = '\0';
         snprintf(app->pending, sizeof app->pending, "starting");
         if (!display_ready()) {
@@ -754,6 +1021,7 @@ static int native_action(struct app *app, const char *action, char *why, size_t 
             return -1;
         }
         app->launcher = pid;
+        app->launcher_generation = app->generation;
         app->deadline = uptime() + 20;
         snprintf(why, size, "start accepted");
         return 0;
@@ -763,8 +1031,10 @@ static int native_action(struct app *app, const char *action, char *why, size_t 
         return -1;
     }
     int stopping = strcmp(action, "stop") == 0;
+    /* A window's program enters its cgroup before it runs: a stop while it
+     * starts stops it as one that runs (native_job). */
     if (stopping && (app->want_start || strcmp(app->pending, "starting") == 0)) {
-        app->want_start = 0; /* a start that has not shown its window yet */
+        app->want_start = 0;
         app->pending[0] = '\0';
         app->deadline = 0;
     } else if (app->job || app->pending[0]) {
@@ -781,13 +1051,17 @@ static int native_action(struct app *app, const char *action, char *why, size_t 
         snprintf(why, size, "already frozen");
         return 0;
     }
+    if (stopping || !strcmp(action, "freeze")) {
+        snprintf(path, sizeof path, APP_CGROUP_ROOT "/app_%.63s", app->name);
+        apps_sessions_revoke(path);
+    }
     pid_t pid = native_job(app, action);
     if (pid < 0) {
         snprintf(why, size, "cannot start window operation: %s", strerror(errno));
         return -1;
     }
-    app->job = pid;
-    app->error[0] = '\0';
+        app->job = pid;
+        app->job_generation = app->generation;
     snprintf(app->pending, sizeof app->pending, "%s", stopping ? "stopping" : "freezing");
     app->deadline = uptime() + 12;
     snprintf(why, size, "%s accepted", action);
@@ -899,6 +1173,7 @@ int apps_window_open(const char *program, const char *target, char *why, size_t 
     snprintf(app->target, sizeof app->target, "%s", target);
     app->native = p;
     app->ready_fd = app->request_fd = -1;
+    app->session_owner = -1;
     /* Not through apps_action: its look would forget an entry not started. */
     if (native_action(app, "start", why, size) != 0) {
         return -1; /* forgotten at the next look: nothing of it runs */
@@ -930,7 +1205,17 @@ int apps_action(const char *action, const char *name, char *why, size_t size)
         }
         return native_action(app, action, why, size);
     }
+    if (strcmp(action, "open") == 0 || strcmp(action, "show") == 0) {
+        if (app->job || app->cancelling || (app->pending[0] && strcmp(app->pending, "starting"))) {
+            snprintf(why, size, "container operation still in progress");
+            return -1;
+        }
+    }
     if (strcmp(action, "open") == 0) {
+        if (!strcmp(app->pending, "starting")) {
+            snprintf(why, size, "open accepted");
+            return 0;
+        }
         if (populated(app)) {
             if (frozen(app)) {
                 char fpath[192];
@@ -987,14 +1272,10 @@ int apps_action(const char *action, const char *name, char *why, size_t size)
             snprintf(why, size, "stop already in progress");
             return 0;
         }
-        if (app->job > 0) {
-            kill(app->job, SIGTERM);
-            app->job = 0;
+        if (cancel_pending(app)) {
+            snprintf(why, size, "stop accepted");
+            return 0;
         }
-        app->want_start = app->own_tor = 0;
-        app->target[0] = '\0';
-        app->pending[0] = '\0';
-        app->deadline = 0;
     } else if (app->want_start || app->job || app->pending[0]) {
         snprintf(why, size, "container operation still in progress");
         return -1;
@@ -1017,6 +1298,7 @@ int apps_action(const char *action, const char *name, char *why, size_t size)
     }
     char marker[192];
     if (strcmp(action, "start") == 0) {
+        app->generation++;
         app->own_tor = own_tor;
         snprintf(marker, sizeof marker, APP_RUN "/%s.ready", app->name);
         unlink(marker);
@@ -1036,6 +1318,11 @@ int apps_action(const char *action, const char *name, char *why, size_t size)
     }
     int starting = strcmp(action, "start") == 0;
     /* The script holds its start lock before entering the application cgroup. */
+    if (strcmp(action, "stop") == 0 || strcmp(action, "freeze") == 0) {
+        char path[192];
+        snprintf(path, sizeof path, APP_CGROUP_ROOT "/app_%.63s", app->name);
+        apps_sessions_revoke(path);
+    }
     pid_t pid = launch(app, action, 0);
     app->own_tor = 0;
     if (pid < 0) {
@@ -1044,8 +1331,10 @@ int apps_action(const char *action, const char *name, char *why, size_t size)
     }
     if (starting) {
         app->launcher = pid;
+        app->launcher_generation = app->generation;
     } else {
         app->job = pid;
+        app->job_generation = app->generation;
     }
     app->error[0] = '\0';
     snprintf(app->pending, sizeof app->pending, "%s", starting ? "starting" :
@@ -1088,6 +1377,7 @@ int apps_open_mode(const char *name, const char *target, int own_tor, char *why,
             return -1;
         }
         app->job = pid;
+        app->job_generation = app->generation;
         snprintf(app->pending, sizeof app->pending, "opening");
         app->deadline = uptime() + 8;
         if (show_window(app, why, size) != 0) {
@@ -1095,6 +1385,7 @@ int apps_open_mode(const char *name, const char *target, int own_tor, char *why,
         }
         return 0;
     }
+    app->generation++;
     app->own_tor = own_tor;
     char marker[192];
     snprintf(marker, sizeof marker, APP_RUN "/%s.ready", app->name);
@@ -1115,6 +1406,7 @@ int apps_open_mode(const char *name, const char *target, int own_tor, char *why,
         return -1;
     }
     app->launcher = pid;
+    app->launcher_generation = app->generation;
     app->deadline = uptime() + 20;
     snprintf(why, size, "start accepted");
     return 0;
@@ -1177,8 +1469,13 @@ int apps_reap(pid_t pid, int status)
         } else {
             app->job = 0;
         }
+        if (app->cancelling) { apps_tick(); return 1; }
+        unsigned long long generation = launcher ? app->launcher_generation : app->job_generation;
+        if (generation != app->generation) { apps_tick(); return 1; }
         int code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
         if (app->native && launcher) {
+            apps_session_close(app->session_owner);
+            app->session_owner = -1;
             /* Its window closed, it ended, or it was stopped: what it left
              * ends with it, and it takes no more requests. */
             native_kill(app);

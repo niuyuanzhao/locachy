@@ -407,10 +407,22 @@ class LocalPackages(unittest.TestCase):
         calls = []
         self.patch("run", lambda cmd, net=False: calls.append(cmd) or True)
         self.patch("on_host_root", lambda: True)
+        # The marker is cleared only for the tree the recorded commit names.
+        self.patch("recorded_source_commit", lambda: "b" * 40)
+        self.patch("extract_commit_src", lambda commit, dest: shutil.copytree(self.src, dest, dirs_exist_ok=True))
         self.assertTrue(pkg.rebuild_locachy())
         self.assertEqual(calls, [["sh", os.path.join(str(self.src), "make.sh"), "--boot", "x86-64-v2", "x86-64-v2"]])
+        self.assertFalse(unbuilt.exists())
+        # A different tree than the one the commit names keeps the marker.
+        unbuilt.write_text("b" * 40 + "\n")
+        self.patch("extract_commit_src", lambda commit, dest: (os.makedirs(dest, exist_ok=True),
+                                                               Path(dest, "make.sh").write_text("other\n")))
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertFalse(pkg.rebuild_locachy())
+        self.assertTrue(unbuilt.exists())
+        # The build tool's own text must not clear the marker on its own.
         make = (SOURCE.parents[1] / "make.sh").read_text()
-        self.assertLess(make.index('>"$lib/built-host"'), make.index('rm -f "$lib/source-unbuilt"'))
+        self.assertNotIn('rm -f "$lib/source-unbuilt"', make)
         self.assertIn('python3 -I "$src/link/declare-packages" "$src" /etc/locachy/packages', make)
 
     def test_host_only_apply_keeps_the_installed_source_and_failed_source_stops(self):
@@ -421,6 +433,7 @@ class LocalPackages(unittest.TestCase):
         self.patch("apply_target", lambda target, r: applied.append(target) or True)
         self.patch("plan", lambda: [])
         self.patch("save_plan", lambda r: None)
+        self.patch("validate_plan_inputs", lambda: None)  # binding is tested in test-update-transaction
         self.patch("install_source_first", lambda c: self.fail("the source was installed for a host-only apply"))
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(pkg.cmd_apply(["host"]), 0)
@@ -735,9 +748,13 @@ class LocalPackages(unittest.TestCase):
         self.assertIn(("locachy", "rebuild", "new source and recipes from branch main (make.sh --boot)", c1[:7], c2), rows)
 
         rebuilt = []
-        self.patch("rebuild_locachy", lambda force=False: rebuilt.append(force) or True)
-        self.assertTrue(pkg.apply_target("locachy", rows))
-        self.assertEqual(rebuilt, [True])
+        # Production order: the source and its helpers first (install_source_first),
+        # then the programs, which clear the marker only for the checked tree.
+        self.patch("run", lambda cmd, net=False: True)
+        self.patch("rebuild_locachy", lambda force=False: rebuilt.append(force) or pkg.source_built(str(self.src)) == 0)
+        self.assertTrue(pkg.install_source_first(c2))
+        self.assertTrue(pkg.apply_target("locachy", [("locachy", "rebuild", "its programs", "", "")]))
+        self.assertEqual(rebuilt, [False])  # the programs' own build, without a further source install
         self.assertTrue((self.src / "machines/x13.conf").is_file())
         self.assertEqual(self.source_commit.read_text().strip(), c1)  # in place, not yet all applied
         self.assertEqual(Path(pkg.SOURCE_PENDING_FILE).read_text().strip(), c2)

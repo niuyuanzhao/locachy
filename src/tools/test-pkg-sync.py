@@ -3,10 +3,12 @@
   python3 -B tools/test-pkg-sync.py SCRATCH_PARENT
 """
 import contextlib
+import fcntl
 import importlib.machinery
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -233,6 +235,7 @@ class Sync(unittest.TestCase):
         hooks = "".join(p.read_text() for p in (SOURCE / "link").glob("*.hook"))
         self.assertNotIn("--first-install", hooks)
         with mock.patch.object(pkg, "cmd_sync", lambda first=False: first), \
+                mock.patch.object(pkg, "job_route", lambda action, args: None), \
                 mock.patch.object(sys, "argv", ["locachy-pkg", "sync"]), self.assertRaises(SystemExit) as end:
             pkg.main()
         self.assertIs(end.exception.code, False)
@@ -568,6 +571,145 @@ class Lookup(unittest.TestCase):
                 mock.patch.object(pkg, "aur_info", down):
             with self.assertRaises(RuntimeError):
                 pkg.unknown_packages(["xorg-host"])
+
+
+class JobRoute(unittest.TestCase):
+    """Online, every host mutation is a fixed system job; nothing changes the
+    host in the calling process, and forms without a job are refused."""
+
+    def route(self, argv, euid=0):
+        calls = []
+        jobs = types.SimpleNamespace(
+            execution_mode=lambda: "queue",
+            submit=lambda kind, args=(), secret=None, wait=True, startup_wait=0: calls.append((kind, list(args), wait)) or 0)
+        with mock.patch.object(pkg, "helper_module", lambda name: jobs), \
+                mock.patch.object(pkg.os, "geteuid", lambda: euid), \
+                mock.patch.object(pkg, "acquire_pkg_lock", lambda: self.fail("took the domain in the caller")), \
+                mock.patch.object(sys, "argv", ["locachy-pkg"] + argv), \
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as end:
+            pkg.main()
+        return end.exception.code, calls
+
+    def test_each_mutation_is_its_fixed_job_and_waits_for_it(self):
+        for argv, job in ((["install", "gimp"], ("pkg-install", ["gimp"])),
+                          (["remove", "gimp"], ("pkg-remove", ["gimp"])),
+                          (["sync"], ("pkg-sync", [])),
+                          (["plan"], ("pkg-plan", [])),
+                          (["apply", "host"], ("pkg-apply", ["host"])),
+                          (["kernel", "select", "linux-lts"], ("kernel-select", ["linux-lts"])),
+                          (["kernel", "headers", "on"], ("kernel-headers", ["on"]))):
+            with self.subTest(argv=argv):
+                code, calls = self.route(argv)
+                self.assertEqual(code, 0)
+                self.assertEqual(calls, [job + (True,)])
+
+    def test_forms_without_a_job_and_non_root_change_nothing(self):
+        for argv in (["sync", "--first-install"], ["apply", "--after-source"], ["source-built", "/x"]):
+            with self.subTest(argv=argv):
+                code, calls = self.route(argv)
+                self.assertNotIn(code, (0, None))
+                self.assertEqual(calls, [])
+        code, calls = self.route(["install", "gimp"], euid=1000)
+        self.assertIn("must run as root", str(code))
+        self.assertEqual(calls, [])
+
+
+class DomainInheritance(unittest.TestCase):
+    """A nested locachy-pkg reuses the domain its job holds through the
+    inherited open file description; an independent process is refused."""
+
+    CHILD = ("import sys; sys.path.insert(0, sys.argv[1]);"
+             "import importlib.machinery, importlib.util;"
+             "loader = importlib.machinery.SourceFileLoader('pkg', sys.argv[2]);"
+             "spec = importlib.util.spec_from_loader('pkg', loader); m = importlib.util.module_from_spec(spec);"
+             "loader.exec_module(m); m.DOMAIN_LOCK_PATH = sys.argv[3]; m.domain_applies = lambda: True;"
+             "m.domain_mode = lambda: sys.argv[4];"
+             "m.acquire_pkg_lock(); print('domain held')")
+
+    @unittest.skipUnless(os.path.isdir("/proc/self/fd"), "the inherited descriptor is found through /proc")
+    def test_the_builder_drops_an_inherited_domain_before_it_starts_anything(self):
+        text = (SOURCE / "link/locachy-build").read_text()
+        start = text.index("for fdpath in /proc/self/fd/*; do")
+        loop = text[start:text.index("done\n", start) + len("done\n")]
+        with tempfile.TemporaryDirectory(prefix="build-domain-", dir=SCRATCH) as tmp:
+            lock = os.path.join(tmp, "pkg.lock")
+            holder = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            script = ("set -euo pipefail\n" + loop.replace("/run/locachy/pkg.lock", lock) +
+                      f'for p in /proc/self/fd/*; do if [ "$p" -ef "{lock}" ]; then echo LEAKED; fi; done\n'
+                      "echo CHECKED\n")
+            result = subprocess.run(["bash", "-c", script], pass_fds=(holder,), capture_output=True, text=True,
+                                    timeout=30)
+            os.close(holder)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CHECKED", result.stdout)
+        self.assertNotIn("LEAKED", result.stdout)
+
+    @unittest.skipUnless(os.path.isdir("/proc/self/fd"), "the inherited descriptor is found through /proc")
+    def test_a_system_job_never_takes_the_domain_itself(self):
+        loader = importlib.machinery.SourceFileLoader("locachy_transaction",
+                                                      str(SOURCE / "link/locachy_transaction.py"))
+        spec = importlib.util.spec_from_loader("locachy_transaction", loader)
+        tx = importlib.util.module_from_spec(spec)
+        loader.exec_module(tx)
+        with tempfile.TemporaryDirectory(prefix="job-domain-", dir=SCRATCH) as tmp:
+            lock = os.path.join(tmp, "pkg.lock")
+            with self.assertRaisesRegex(RuntimeError, "does not hold"):
+                tx.hold_domain(lock, inside_job=True)
+            self.assertFalse(os.path.exists(lock))  # refused before any lock file is made
+            holder = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            os.set_inheritable(holder, True)  # what the jobs runner passes down
+            try:
+                self.assertGreaterEqual(tx.hold_domain(lock, inside_job=True), 0)
+            finally:
+                os.close(holder)
+
+    def test_production_code_has_no_runtime_override_of_the_domain(self):
+        for name in ("link/locachy-pkg", "link/locachy-repos", "link/locachy_transaction.py",
+                     "link/locachy-pacman-guard"):
+            text = (SOURCE / name).read_text()
+            for variable in ("LOCACHY_PKG_LOCK", "JOBS_PKG_LOCK"):
+                self.assertNotIn(variable, text, name)
+
+    @unittest.skipUnless(os.path.isdir("/proc/self/fd"), "the inherited descriptor is found through /proc")
+    def test_inherited_domain_is_reused_and_an_independent_one_is_refused(self):
+        with tempfile.TemporaryDirectory(prefix="domain-inherit-", dir=SCRATCH) as tmp:
+            lock = os.path.join(tmp, "pkg.lock")
+            holder = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            command = [sys.executable, "-I", "-B", "-c", self.CHILD, str(SOURCE / "link"),
+                       str(SOURCE / "link/locachy-pkg"), lock, "offline"]
+            inherited = subprocess.run(command, pass_fds=(holder,), capture_output=True, text=True, timeout=30)
+            self.assertEqual(inherited.returncode, 0, inherited.stderr)
+            self.assertIn("domain held", inherited.stdout)
+            independent = subprocess.run(command, capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(independent.returncode, 0)
+            self.assertIn("another package or repository operation is running", independent.stderr)
+            os.close(holder)
+
+    @unittest.skipUnless(os.path.isdir("/proc/self/fd"), "the inherited descriptor is found through /proc")
+    def test_the_tool_in_a_job_reuses_the_inherited_domain_and_never_makes_one(self):
+        """The tool's own job branch (acquire_pkg_lock, mode 'job'), run as a
+        real process: refused without the runner's descriptor, with no lock file
+        made; reused with it."""
+        with tempfile.TemporaryDirectory(prefix="job-tool-", dir=SCRATCH) as tmp:
+            lock = os.path.join(tmp, "pkg.lock")
+            command = [sys.executable, "-I", "-B", "-c", self.CHILD, str(SOURCE / "link"),
+                       str(SOURCE / "link/locachy-pkg"), lock, "job"]
+            refused = subprocess.run(command, capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("does not hold", refused.stderr)
+            self.assertFalse(os.path.exists(lock))
+            holder = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            try:
+                inherited = subprocess.run(command, pass_fds=(holder,), capture_output=True, text=True,
+                                           timeout=30)
+                self.assertEqual(inherited.returncode, 0, inherited.stderr)
+                self.assertIn("domain held", inherited.stdout)
+            finally:
+                os.close(holder)
 
 
 if __name__ == "__main__":

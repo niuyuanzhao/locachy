@@ -2,6 +2,7 @@
 """Unit and contract tests for locachy-firmware (fwupd, BIOS settings, flashrom).
   python3 -B tools/test-firmware.py [SCRATCH_PARENT]
 """
+import contextlib
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -30,6 +31,15 @@ class FirmwareHelperTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix="test-fw-", dir=SCRATCH)
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        # Offline unless a test says otherwise; the fixed paths, injected here.
+        for name, value in (("route_mutation", mock.Mock(return_value=(None, "offline"))),
+                            ("FIRMWARE_LOCK_PATH", str(self.root / "firmware.lock")),
+                            ("SNAPSHOT_DIR", str(self.root / "snapshots")),
+                            ("JOB_DIR", str(self.root / "jobs")),
+                            ("SPOOL_OWNER", os.getuid())):
+            p = mock.patch.object(fw, name, value)
+            p.start()
+            self.addCleanup(p.stop)
 
     def make_script(self, name: str, body: str) -> Path:
         p = self.root / name
@@ -68,7 +78,7 @@ elif "get-releases" in args:
         {"Version": "0.1.25", "RemoteId": "lvfs", "Locations": ["https://example.org/025.cab"], "Description": "<p>Older</p>"}
     ]}))
 """)
-        with mock.patch.dict(os.environ, {"LOCACHY_FWUPD_BIN": str(mock_fwupd)}):
+        with mock.patch.object(fw, "FWUPD_BIN_PATH", str(mock_fwupd)):
             buf = io.StringIO()
             with mock.patch("sys.stdout", buf):
                 self.assertEqual(fw.cmd_fwupd_devices(None), 0)
@@ -110,7 +120,7 @@ print("{{}}")
                 return fw.cmd_fwupd_action(args)
 
         argv = ["/usr/local/bin/locachy-firmware", "fwupd-action", "refresh"]
-        with mock.patch.dict(os.environ, {"LOCACHY_FWUPD_BIN": str(stand_in)}), \
+        with mock.patch.object(fw, "FWUPD_BIN_PATH", str(stand_in)), \
                 mock.patch.object(fw.os, "execvp", execvp), mock.patch.object(fw.sys, "argv", argv):
             with mock.patch.object(fw, "NETNS", str(netns)):
                 for name in ("refresh", "update", "install-release"):
@@ -143,7 +153,7 @@ print("{{}}")
         (attrs / "save_settings").write_text("single\n")
         (attrs / "pending_reboot").write_text("1\n")
 
-        with mock.patch.dict(os.environ, {"LOCACHY_BIOS_ATTRS_DIR": str(attrs)}):
+        with mock.patch.object(fw, "BIOS_ATTRS_OVERRIDE", str(attrs)):
             buf = io.StringIO()
             with mock.patch("sys.stdout", buf):
                 self.assertEqual(fw.cmd_bios_list(None), 0)
@@ -189,13 +199,11 @@ print('Found Winbond flash chip "W25Q64.V" (8192 kB, SPI) on ch341a_spi.')
 """)
         ac_file = self.root / "ac_online"
         ac_file.write_text("0\n")
-        env = {
-            "LOCACHY_FLASHROM_BIN": str(mock_fr),
-            "LOCACHY_USB_SYSFS_DIR": str(self.root / "usb"),
-            "LOCACHY_FLASHROM_NO_MODPROBE": "1",
-            "LOCACHY_AC_ONLINE_FILE": str(ac_file),
-        }
-        with mock.patch.dict(os.environ, env):
+        seams = {"FLASHROM_BIN_PATH": str(mock_fr), "USB_SYSFS_DIR": str(self.root / "usb"),
+                 "ITCO_GUARD": False, "AC_ONLINE_FILE": str(ac_file)}
+        with contextlib.ExitStack() as stack:
+            for name, value in seams.items():
+                stack.enter_context(mock.patch.object(fw, name, value))
             pbuf = io.StringIO()
             with mock.patch("sys.stdout", pbuf):
                 fw.cmd_spi_programmers(None)
@@ -240,6 +248,103 @@ print('Found Winbond flash chip "W25Q64.V" (8192 kB, SPI) on ch341a_spi.')
                 "programmer": "ch341a_spi", "image": str(img), "chip": "", "regions": "",
                 "expected_size": img.stat().st_size
             })()), 0)
+    def test_spi_write_consumes_a_private_copy_not_the_path_it_was_given(self):
+        """A writer that replaces the given image while the request runs cannot
+        change what is flashed: flashrom reads the job's own copy."""
+        original = self.root / "image.bin"
+        original.write_bytes(b"ORIGINAL" * 1024)
+        seen = self.root / "seen.bin"
+        mock_fr = self.make_script("flashrom", f"""
+import sys
+from pathlib import Path
+args = sys.argv[1:]
+target = Path(args[args.index("-w") + 1])
+Path({str(original)!r}).write_bytes(b"REPLACED" * 1024)
+Path({str(seen)!r}).write_bytes(target.read_bytes())
+sys.exit(0)
+""")
+        seams = {"FLASHROM_BIN_PATH": str(mock_fr), "ITCO_GUARD": False}
+        with contextlib.ExitStack() as stack:
+            for name, value in seams.items():
+                stack.enter_context(mock.patch.object(fw, name, value))
+            with mock.patch("sys.stdout", io.StringIO()):
+                rc = fw.cmd_spi_write(type("A", (), {"programmer": "ch341a_spi", "image": str(original), "chip": "",
+                                                      "regions": "", "expected_size": 0})())
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen.read_bytes(), b"ORIGINAL" * 1024)
+        self.assertEqual(original.read_bytes(), b"REPLACED" * 1024)
+        self.assertEqual(list((self.root / "snapshots").glob("firmware-input-*")), [])  # removed after use
+
+    def test_spi_backup_options_pass_to_the_job_in_their_checked_form(self):
+        args = type("A", (), {"programmer": "ch341a_spi", "out_dir": "/var/x", "chip": "W25Q64", "regions": "bios"})()
+        self.assertEqual(fw.spi_job_args(args, [args.programmer, args.out_dir]),
+                         ["ch341a_spi", "/var/x", "--chip", "W25Q64", "--regions", "bios"])
+        bare = type("A", (), {"programmer": "internal"})()
+        self.assertEqual(fw.spi_job_args(bare, ["internal"]), ["internal"])
+
+    def test_production_backends_take_no_lock_flasher_or_guard_from_the_environment(self):
+        self.assertNotIn("os.environ", (SOURCE / "link/locachy-firmware").read_text())
+        efi = (SOURCE / "link/locachy-efi").read_text()
+        self.assertNotIn("LOCACHY_EFI_LOCK", efi)
+        self.assertIn('EFI_LOCK_PATH = "/run/locachy/efi.lock"', efi)
+
+    def job_write(self, image):
+        """cmd_spi_write as job 7's runner runs it: its status, what flashrom read."""
+        seen = self.root / "seen.bin"
+        seen.unlink(missing_ok=True)
+        mock_fr = self.make_script("flashrom", f"""
+import sys
+from pathlib import Path
+args = sys.argv[1:]
+Path({str(seen)!r}).write_bytes(Path(args[args.index("-w") + 1]).read_bytes())
+""")
+        with mock.patch.object(fw, "route_mutation", return_value=(None, "job")), \
+                mock.patch.object(fw, "job_number", lambda: "7"), \
+                mock.patch.object(fw, "FLASHROM_BIN_PATH", str(mock_fr)), mock.patch.object(fw, "ITCO_GUARD", False), \
+                mock.patch("sys.stdout", io.StringIO()), mock.patch("sys.stderr", io.StringIO()):
+            rc = fw.cmd_spi_write(type("A", (), {"programmer": "ch341a_spi", "image": str(image), "chip": "",
+                                                  "regions": "", "expected_size": 0})())
+        return rc, (seen.read_bytes() if seen.exists() else None)
+
+    def accept(self, content, number="7", digest=None, size=None):
+        """What the jobs service leaves when it accepts job NUMBER: its copy
+        (JOB_DIR/NUMBER.input) and its record (JOB_DIR/NUMBER.state)."""
+        jobs = self.root / "jobs"
+        jobs.mkdir(exist_ok=True)
+        copy = jobs / f"{number}.input"
+        copy.write_bytes(content)
+        copy.chmod(0o600)
+        (jobs / f"{number}.state").write_text(
+            "kind=spi-write\n"
+            f"image_sha256={digest or hashlib.sha256(content).hexdigest()}\n"
+            f"image_size={len(content) if size is None else size}\n")
+        return copy
+
+    def test_a_job_flashes_only_its_accepted_copy_with_the_recorded_digest_and_size(self):
+        content = b"ACCEPTED" * 512
+        copy = self.accept(content)
+        self.assertEqual(self.job_write(copy), (0, content))
+        # Refused, nothing flashed: another digest or size recorded, no record,
+        # the same bytes elsewhere, another job's copy, a link to the copy, a
+        # copy others may write.
+        self.accept(content, digest="0" * 64)
+        self.assertEqual(self.job_write(copy), (1, None))
+        self.accept(content, size=1)
+        self.assertEqual(self.job_write(copy), (1, None))
+        self.accept(content)
+        (self.root / "jobs/7.state").unlink()
+        self.assertEqual(self.job_write(copy), (1, None))
+        copy = self.accept(content)
+        elsewhere = self.root / "image.bin"
+        elsewhere.write_bytes(content)
+        self.assertEqual(self.job_write(elsewhere), (1, None))
+        other = self.accept(content, number="8")
+        self.assertEqual(self.job_write(other), (1, None))
+        link = self.root / "link.input"
+        link.symlink_to(copy)
+        self.assertEqual(self.job_write(link), (1, None))
+        copy.chmod(0o666)
+        self.assertEqual(self.job_write(copy), (1, None))
 
 
 if __name__ == "__main__":

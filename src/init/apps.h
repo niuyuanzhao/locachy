@@ -4,12 +4,26 @@
 
 #include <stddef.h>
 #include <sys/types.h>
+#include <poll.h>
 
 enum {
     APPS_DISPLAY_STOPPED = 0,
     APPS_DISPLAY_FROZEN  = 1,
     APPS_DISPLAY_ACTIVE  = 2,
 };
+
+/* Dedicated policy owner channels, bound by process 1 to a frontend PID and
+ * an open cgroup directory. The returned descriptor belongs to the child.
+ * Weak: tests that link process 1 without apps.c leave them out. */
+#define APPS_SESSION_POLL_MAX 128
+int apps_session_create(const char *cgroup, int *child);
+void apps_session_bind(int owner, pid_t pid);
+void apps_session_close(int owner);
+__attribute__((weak)) void apps_sessions_revoke(const char *cgroup); /* NULL: every owner */
+__attribute__((weak)) void apps_sessions_locked(int locked);
+__attribute__((weak)) int apps_sessions_poll(struct pollfd *p, int max);
+__attribute__((weak)) void apps_sessions_dispatch(const struct pollfd *p, int n);
+__attribute__((weak)) int apps_sleep_inhibited(void);
 
 void apps_init(void);
 void apps_tick(void);

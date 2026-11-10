@@ -21,7 +21,9 @@ preset it last followed, else the installed catalog's.
                                              there is none (make.sh)
 """
 import ctypes
+import fcntl
 import glob
+import importlib.util
 import os
 import re
 import shutil
@@ -49,6 +51,18 @@ ORIGINS = ("repository", "medium", "bootstrap")
 
 class CatalogError(ValueError):
     """Not a catalog this system takes; the message says why."""
+
+
+def config_helper():
+    """Load only our installed helper or its source-tree sibling, never cwd."""
+    for base in (os.path.dirname(os.path.realpath(__file__)), "/usr/local/lib/locachy"):
+        path = os.path.join(base, "locachy_config.py")
+        if os.path.isfile(path):
+            spec = importlib.util.spec_from_file_location("locachy_config", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+    raise RuntimeError("locachy_config.py is not installed")
 
 
 def _path(value):
@@ -211,14 +225,25 @@ def _directory(path):
 
 
 def _write(path, data, mode=0o644):
-    """path replaced by data in one step, on the disk before it is."""
-    temporary = path + ".tmp"
-    with open(temporary, "wb") as f:
-        f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
-    os.chmod(temporary, mode)
-    os.replace(temporary, path)
+    """Unique staging and durable publication for catalog/baseline data."""
+    parent = os.path.dirname(path)
+    fd, temporary = tempfile.mkstemp(prefix="." + os.path.basename(path) + ".", dir=parent)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            os.fchmod(f.fileno(), mode)
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, path)
+        temporary = ""
+        directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if temporary:
+            os.unlink(temporary)
 
 
 def write_catalog(presets, dest, meta):
@@ -380,6 +405,16 @@ def merged(text, base, new):
     return "".join(lines), sorted(changes)
 
 
+def _app_lock(conf_dir, name):
+    """Stable per-app lifecycle lock shared with locachy-app."""
+    runtime = os.environ.get("LOCACHY_APP_RUNTIME", "/run/locachy/apps")
+    os.makedirs(os.path.join(runtime, name), mode=0o700, exist_ok=True)
+    path = os.path.join(runtime, name, "control.lock")
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
 def merges(conf_dir, apps_dir, old, new):
     """(name, path, text, merged text, keys) of each configuration that
     follows a preset of the new catalog: its base the preset it last followed
@@ -472,11 +507,38 @@ def apply(apps_dir, commit, conf_dir, signers, repo, branch):
                 _write(path, old[name])
     switch(catalog, presets, new_meta(fmt, "repository", repo, branch, commit), keep_bases)
     changed = []
-    for name, path, _, result, keys in todo:
-        if keys:
-            _write(path, result.encode(), stat.S_IMODE(os.stat(path).st_mode))
-            changed.append((name, keys))
-        _write(os.path.join(baseline, name + ".conf"), presets[name])
+    config = config_helper()
+    for name, path, *_ in todo:
+        lock = _app_lock(conf_dir, name)
+        try:
+            try:
+                base = _read(os.path.join(baseline, name + ".conf"))
+            except (CatalogError, OSError):
+                base = old.get(name)
+            if base is None:
+                continue
+            keys = []
+
+            def merge_current(original):
+                nonlocal keys
+                # The preview is not a grant snapshot. A revoke, another edit
+                # or removal since preview must never be overwritten by it.
+                try:
+                    text = original.decode("utf-8") if original is not None else None
+                except UnicodeDecodeError:
+                    text = None # not one this merge reads: left as it is
+                if text is None:
+                    return config.UNCHANGED
+                result, keys = merged(text, conf_values(base.decode("utf-8", "replace")), new[name])
+                return result.encode() if keys else config.UNCHANGED
+
+            config.transaction(path, merge_current)
+            if keys:
+                changed.append((name, keys))
+            _write(os.path.join(baseline, name + ".conf"), presets[name])
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            os.close(lock)
     return changed
 
 

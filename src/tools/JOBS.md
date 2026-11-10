@@ -51,7 +51,9 @@ checks every argument; anything else is refused.
 | `tpm-prepare` | `locachy-tpm prepare --passphrase-stdin` | no arguments; passphrase is an anonymous RAM pipe |
 | `tpm-clear` | `locachy-tpm clear` | `/dev` devices |
 | `secure-boot` | `locachy-tpm secure-boot` | `--enroll`, optionally `--microsoft` and passphrase over an anonymous RAM pipe |
-| `app-build`, `app-rollback` | `locachy-app build` / `rollback` | a container name (as locachy-app's) |
+| `app-build` | `locachy-app build` | a container name whose `host` is not `"1"`, checked at acceptance (not in the package domain) |
+| `app-host-build` | `locachy-app build` | a container name whose `host` is `"1"`, checked at acceptance (in the package domain: its packages go on the host) |
+| `app-rollback` | `locachy-app rollback` | a container name (as locachy-app's) |
 | `app-remove` | `locachy-app remove` | a container name, optionally `--data` |
 | `fw-refresh`, `fw-update` | `locachy-firmware fwupd-action refresh` / `update` | none |
 | `fw-verify`, `fw-unlock` | `locachy-firmware fwupd-action verify` / `unlock` | an fwupd device id |
@@ -60,6 +62,36 @@ checks every argument; anything else is refused.
 | `spi-probe` | `locachy-firmware spi-probe` | a flashrom programmer; `--chip NAME` |
 | `spi-backup`, `spi-verify` | `locachy-firmware spi-backup` / `spi-verify` | a programmer and a folder (backup) or an image file; `--chip`, `--regions fd,bios,…` |
 | `spi-write` | `locachy-firmware spi-write` | as `spi-verify`, and `--expected-size BYTES` |
+| `bios-set` | `locachy-firmware bios-set` | an attribute (a letter or digit, then letters, digits, `_ . : -`; 96 bytes at most) and a value (0–256 bytes, no control character; a leading `-` is text) |
+| `security-policy` | `locachy-security` | `set login-skip`/`duress`/`fingerprint`/`face` `on`/`off`, `set lock-mode low`/`high`, `remove-duress`, or `refresh` |
+
+**The package domain.** The package, kernel and repository kinds, and every
+kind that builds the boot image (`boot`, `locachy-rebuild`, `tpm-*`,
+`secure-boot`, `security-policy`), hold `/run/locachy/pkg.lock` as
+`locachy-pkg` does: the job's runner takes it (`flock`, waiting: an outside
+pacman, whose guard holds it, finishes first) inside the job's cgroup before
+the first step, and every step inherits that descriptor, so the tools find the
+domain held and never open it again. Their own locks come inside it (domain,
+then security, then configuration); the tools never take `pkg.lock`
+themselves. The firmware kinds do not hold it (`locachy-firmware` holds
+`firmware.lock`), nor do the container kinds (`app-build`: an app whose build
+installs nothing on the host). `app-host-build` holds it: an app with
+`host="1"` installs its packages on the host, a host package transaction. The
+kind is the app's own host setting, read and checked by the service at
+acceptance (a mismatch is refused: "the app's host setting changed; open it
+again"); no client argument decides it. The path is fixed: no runtime
+setting changes it, and the runner removes `LOCACHY_PKG_LOCK` from every
+step's environment (a test build moves it at compile time only).
+
+**Images.** A kind whose argument is an image file (`fw-local-install`,
+`spi-verify`, `spi-write`) has that file copied when the job is accepted, not
+when it runs: opened without following a link, a regular file of 64 MiB at
+most, into `/run/locachy/jobs/ID.input` (root's, 0600), its size and SHA-256
+kept in `ID.state`; the job's argument then names the copy. A copy that cannot
+be made refuses the request. Before the first step the runner checks the copy
+against that size and digest, and a job whose copy changed does not run. The
+copy goes when the job ends or is removed from the queue. What runs is what
+was named at acceptance, whatever becomes of the person's file afterwards.
 
 Every accepted request is a separate queue event, including repeated requests with the same kind and arguments. Interactive TPM input is passed once through a complete anonymous pipe with its writer closed; it is never an argument, environment value, state field, or log. The service does not persist that descriptor: if it restarts before the job runs, that job is marked failed and must be submitted again.
 
@@ -116,6 +148,7 @@ One request a message, one reply a message, fields separated by NUL:
 | `log ID` | `ok TEXT`: the end of its output (8 KiB at most, from a line's start) |
 | `cancel ID` | `ok removed` (it was queued), `ok ended`, or `confirm WHY` (it runs) |
 | `cancel ID confirm` | `ok stopping` |
+| `drain EPOCH` | (process 1 only) no reply until no job is accepted, queued or running, then `drained EPOCH`; meanwhile every `submit` is refused |
 
 Any request can be answered `error WHY` (unknown id, malformed request). A
 ROW is `ID KIND STATE STATUS POSITION FROM ARGS LAST`, tab separated: STATUS
@@ -201,6 +234,18 @@ the first line of `/run/locachy/jobs/ID.state` only for the kind it shows.
   only as safe as a power cut there.
 - The waiting screen is in English: process 1 draws with Terminus alone,
   which has no CJK (as its boot passphrase prompt).
+
+**The drain.** A power off or reboot that does not go ahead at once first
+asks the service to drain (`drain EPOCH`, accepted from process 1 only), then
+waits for its answer as well as for the job cgroups: from that request no new
+job is accepted, and the jobs already accepted, the queued ones included, run
+and end before `drained EPOCH` comes. The epoch is kept in
+`/run/locachy/jobs/drain`, so a service started again refuses new jobs too,
+until the next boot. When there is no service, or the connection ends
+without an answer (the service has gone), that counts as drained: what it had
+queued stays on disk, unstarted, through the shutdown, and nothing can start
+it, since only the service starts jobs; a job that still runs is waited for by
+its cgroup as before. `--force` and a second press go ahead as before.
 
 ## The lock
 

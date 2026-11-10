@@ -13,6 +13,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "config.h"
+#include "session.h"
+#include "input-raw.h"
+
 /* Log a line to the console (the serial port in QEMU): printf format, no
  * newline needed. */
 void say(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -378,6 +382,7 @@ struct pointer_event {
     int gesture;   /* GESTURE_PINCH, or an opted-in GESTURE_SCROLL boundary */
     double scale;  /* a pinch: the factor since its last event (above 1: apart, zoom in) */
     int scroll_source, scroll_phase, scroll_fingers;
+    double scroll_dx, scroll_dy; /* opt-in, fractional pixels: right/down; wheel step = 15 pixels */
 };
 enum { GESTURE_NONE, GESTURE_PINCH, GESTURE_SCROLL };
 enum { SCROLL_NONE, SCROLL_WHEEL, SCROLL_FINGER, SCROLL_CONTINUOUS, SCROLL_TOUCH };
@@ -499,7 +504,12 @@ int open_program(const char *name, const char *target, char *spec, size_t size, 
  * program on the screen (view's links), which this asks process 1 for home,
  * and locachy-bar (with a program a container's target is for). 0, or -1. */
 #define OPEN_REQUEST "/run/locachy/open-request"
+#define OPEN_REQUEST_MAX 64
+#define OPEN_REQUEST_BYTES (OPEN_NAME + PATH_MAX + 4)
 int open_in_home(const char *with, const char *target);
+/* OPEN_REQUEST is an owner-only spool. A request is a unique req-* file,
+ * published whole without replacement; consumers claim by rename. */
+int open_request_publish(const char *with, const char *target);
 
 /* Ask process 1 to reboot or power off. */
 void base_reboot(void);

@@ -50,6 +50,18 @@ set -euo pipefail
 # has 077): with it the build root's / would be root's alone, closed to the
 # build user, whose every program then fails to load its libraries.
 umask 022
+# The host package domain (/run/locachy/pkg.lock), when a system job passed it
+# down: a build needs none of it, and what it starts (the build user's keyring
+# daemons, the builds) must never keep the domain past the job. Closed here,
+# in this process only (the job's runner keeps its own); found by device and
+# inode ([ -ef ]), never by a name given at run time.
+for fdpath in /proc/self/fd/*; do
+    fd=${fdpath##*/}
+    [[ "$fd" =~ ^[0-9]+$ ]] && [ "$fd" -gt 2 ] || continue
+    if [ "$fdpath" -ef /run/locachy/pkg.lock ]; then
+        eval "exec ${fd}>&-"
+    fi
+done
 
 bdir=/var/lib/locachy/builder
 home=$bdir/home    # the build user's

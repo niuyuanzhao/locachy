@@ -139,19 +139,102 @@ is_host() { # NAME: managed real-system access (host="1"), no private filesystem
 }
 
 conf_value() {
-    sed -n "s/^[[:space:]]*$2=\"\([^\"]*\)\".*/\1/p" "$CONT_CONF/$1.conf" 2>/dev/null | tail -n 1
+    if [ "${APP_CONFIG_NAME:-}" = "$1" ]; then
+        sed -n "s/^[[:space:]]*$2=\"\([^\"]*\)\".*/\1/p" <<<"$APP_CONFIG_SNAPSHOT" | tail -n 1
+    else
+        sed -n "s/^[[:space:]]*$2=\"\([^\"]*\)\".*/\1/p" "$CONT_CONF/$1.conf" 2>/dev/null | tail -n 1
+    fi
+}
+
+# Short configuration transactions run below control.lock. Every decision of
+# one build/start then uses the same complete snapshot, never per-key rereads.
+config_action() {
+    python3 -I - "$(dirname "$(readlink -f "$0")")" "$@" <<'PY'
+import importlib.util
+import os
+import sys
+for base in (sys.argv[1], "/usr/local/lib/locachy"):
+    path = os.path.join(base, "locachy_config.py")
+    if os.path.isfile(path):
+        spec = importlib.util.spec_from_file_location("locachy_config", path)
+        config = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(config)
+        break
+else:
+    raise RuntimeError("locachy_config.py is not installed")
+action, path, *args = sys.argv[2:]
+if action == "snapshot":
+    # The bytes leave the callback first: nothing is written to the pipe while
+    # the configuration lock is held, so no reader can wait on it.
+    seen = []
+
+    def read(original):
+        if original is None:
+            raise FileNotFoundError(path)
+        seen.append(bytes(original))
+        return config.UNCHANGED
+    config.transaction(path, read)
+    sys.stdout.write(seen[0].decode("utf-8"))
+elif action == "set":
+    config.update(path, [(args[i], args[i + 1]) for i in range(0, len(args), 2)])
+elif action == "remove":
+    config.remove(path) # False: it was not there, which is no error
+else:
+    raise ValueError("invalid app configuration operation")
+PY
+}
+
+# Installed build/rollback/remove are fixed jobs. A job or offline root runs
+# inline below; a queued caller never holds app/config locks while waiting.
+route_app_job() { # KIND NAME [--data]
+    local status=0
+    python3 -I - "$(dirname "$(readlink -f "$0")")" "$@" <<'PY' || status=$?
+import importlib.util
+import os
+import sys
+for base in (sys.argv[1], "/usr/local/lib/locachy"):
+    path = os.path.join(base, "locachy_jobs.py")
+    if os.path.isfile(path):
+        spec = importlib.util.spec_from_file_location("locachy_jobs", path)
+        jobs = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(jobs)
+        break
+else:
+    sys.exit("locachy-app: locachy_jobs.py is not installed")
+try:
+    mode = jobs.execution_mode()
+    if mode in ("job", "offline"):
+        sys.exit(100)
+    sys.exit(jobs.submit(sys.argv[2], sys.argv[3:]))
+except RuntimeError as e:
+    # The service answered: a refusal (its reason as it says it), not a fallback.
+    if str(e).startswith("job service: "):
+        sys.exit(f"locachy-app: {sys.argv[2]}: refused: {str(e)[len('job service: '):]}")
+    sys.exit(f"locachy-app: {sys.argv[2]}: {e}; not run outside the job queue")
+except OSError as e:
+    # The service being unavailable is a failure, never a direct fallback.
+    sys.exit(f"locachy-app: {sys.argv[2]}: {e}; not run outside the job queue")
+PY
+    [ "$status" = 100 ] && return 0
+    exit "$status"
+}
+
+load_config_snapshot() {
+    # No configuration: as before, every key is empty. One that is there is
+    # read whole, or the operation stops: never a key read from elsewhere.
+    APP_CONFIG_NAME=$1
+    APP_CONFIG_SNAPSHOT=
+    [ -e "$CONT_CONF/$1.conf" ] || return 0
+    APP_CONFIG_SNAPSHOT=$(config_action snapshot "$CONT_CONF/$1.conf") || die "$1: cannot read its configuration"
 }
 
 # KEY="VALUE" in NAME's configuration, in place of its line (VALUE: no quote,
 # no newline).
 conf_set() {
-    local file="$CONT_CONF/$1.conf"
+    local name="$1"; shift
     mkdir -p "$CONT_CONF"
-    {
-        grep -v "^[[:space:]]*$2=" "$file" 2>/dev/null || true
-        printf '%s="%s"\n' "$2" "$3"
-    } >"$file.new"
-    mv -f "$file.new" "$file"
+    config_action set "$CONT_CONF/$name.conf" "$@"
+    [ "${APP_CONFIG_NAME:-}" = "$name" ] && load_config_snapshot "$name" || true
 }
 
 # NAME's command and arguments, into the array saved_cmd.
@@ -245,6 +328,160 @@ is_running() {
 
 is_frozen() {
     [ "$(cg_event "$(cg_path "$1")" frozen || true)" = 1 ]
+}
+
+# Build/rollback publication. upper, work and built cannot be renamed as one
+# unit, so a durable generation.state is written before the first visible
+# rename. Recovery is idempotent: build rolls forward from complete *.new
+# stages; rollback compares recorded inodes, so a crash between an exchange
+# and the next state write is never guessed. Start refuses pending state.
+generation_tool() { # build|rollback|recover CBASE
+    python3 -I - "$@" <<'PY'
+import ctypes
+import os
+import shutil
+import sys
+
+op, cbase = sys.argv[1:3]
+state = os.path.join(cbase, "generation.state")
+libc = ctypes.CDLL(None, use_errno=True)
+
+
+def p(name):
+    return os.path.join(cbase, name)
+
+
+def exists(name):
+    return os.path.lexists(p(name))
+
+
+def ino(name):
+    try:
+        return str(os.lstat(p(name)).st_ino)
+    except FileNotFoundError:
+        return "-"
+
+
+def sync_dir(full=False):
+    fd = os.open(cbase, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        if full and libc.syncfs(fd) != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error), cbase)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def write_state(text):
+    tmp = state + ".new"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    try:
+        os.write(fd, text.encode())
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, state)
+    sync_dir()
+
+
+def remove(name):
+    path = p(name)
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path)
+    elif os.path.lexists(path):
+        os.unlink(path)
+
+
+def exchange(a, b):
+    if libc.renameat2(-100, os.fsencode(p(a)), -100, os.fsencode(p(b)), 2) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), p(a))
+
+
+def done():
+    os.unlink(state)
+    sync_dir()
+
+
+def finish_build():
+    for part in ("upper", "work", "built"):
+        if exists(part + ".new"):
+            if exists(part):
+                if exists(part + ".old"):
+                    raise RuntimeError(f"{part}: current and old generations both exist")
+                os.rename(p(part), p(part + ".old"))
+            os.rename(p(part + ".new"), p(part))
+    if not all(exists(part) for part in ("upper", "work", "built")):
+        raise RuntimeError("the pending build is incomplete")
+    sync_dir()
+    for part in ("upper", "built"):
+        if exists(part + ".old"):
+            remove(part + ".prev")
+            os.rename(p(part + ".old"), p(part + ".prev"))
+    remove("work.old")
+    sync_dir()
+    done()
+
+
+def finish_rollback(upper, upper_prev, built, built_prev):
+    current = (ino("upper"), ino("upper.prev"))
+    if current == (upper, upper_prev):
+        if upper == "-":
+            os.rename(p("upper.prev"), p("upper"))
+        else:
+            exchange("upper", "upper.prev")
+    elif ino("upper") != upper_prev:
+        raise RuntimeError("upper does not match the pending rollback")
+    current = (ino("built"), ino("built.prev"))
+    if current == (built, built_prev) and current != (built_prev, built):
+        if built != "-" and built_prev != "-":
+            exchange("built", "built.prev")
+        elif built != "-":
+            os.rename(p("built"), p("built.prev"))
+        else:
+            os.rename(p("built.prev"), p("built"))
+    elif current != (built_prev, built):
+        raise RuntimeError("build record does not match the pending rollback")
+    remove("work")
+    os.mkdir(p("work"), 0o700)
+    sync_dir()
+    done()
+
+
+def recover():
+    try:
+        with open(state, encoding="ascii") as f:
+            fields = f.read().split()
+    except FileNotFoundError:
+        return
+    if fields == ["build"]:
+        finish_build()
+    elif len(fields) == 5 and fields[0] == "rollback":
+        finish_rollback(*fields[1:])
+    else:
+        raise RuntimeError("unknown pending generation state")
+
+
+if op == "recover":
+    recover()
+elif op == "build":
+    recover()
+    if not all(exists(part + ".new") for part in ("upper", "work", "built")):
+        raise RuntimeError("the new build is incomplete")
+    sync_dir(full=True)
+    write_state("build\n")
+    finish_build()
+elif op == "rollback":
+    recover()
+    if not os.path.isdir(p("upper.prev")):
+        raise RuntimeError("no previous build")
+    write_state(f"rollback {ino('upper')} {ino('upper.prev')} {ino('built')} {ino('built.prev')}\n")
+    with open(state, encoding="ascii") as f:
+        finish_rollback(*f.read().split()[1:])
+else:
+    raise ValueError("unknown generation operation")
+PY
 }
 
 # cgroup.events accounts for the entire subtree, even with no direct procs.
@@ -474,6 +711,7 @@ do_build() {
     done
     mkdir -p "$CONT_BASE" "$cbase/merged" "$pkg_cache"
     chmod 0700 "$CONT_BASE"
+    generation_tool recover "$cbase" || die "$name: cannot recover its interrupted generation"
     [ ! -L "$cbase/data" ] || die "$name: $cbase/data is a symbolic link"
     mkdir -p "$cbase/data"
     modprobe overlay 2>/dev/null || true
@@ -554,26 +792,22 @@ do_build() {
         /usr/local/bin/locachy-build -r $missing
     done
     rm -f "$cbase/missing"
-    rm -rf "$cbase/upper.prev"
-    [ ! -d "$cbase/upper" ] || mv "$cbase/upper" "$cbase/upper.prev"
-    mv "$cbase/upper.new" "$cbase/upper"
-    rm -rf "$cbase/work"
-    mv "$cbase/work.new" "$cbase/work"
-    [ ! -f "$cbase/built" ] || mv "$cbase/built" "$cbase/built.prev"
     {
         printf 'date="%s"\n' "$(date +%F\ %T)"
         printf 'packages="%s"\n' "${packages[*]}"
         printf 'host="%s"\n' "$(pacman -Q | sha256sum | cut -c1-16)"
-    } >"$cbase/built"
+    } >"$cbase/built.new"
+    generation_tool build "$cbase" || die "$name: cannot publish its new build"
     command=$(conf_value "$name" command)
     if [ -z "$command" ] || { [ ! -x "$cbase/upper$command" ] && [ ! -x "$command" ]; }; then
         local first_line found_cmd found_args
         first_line=$(/usr/local/bin/locachy-pkg commands "$name" 2>/dev/null | head -n 1 || true)
         IFS=$'\t' read -r found_cmd found_args _ <<<"$first_line" || true
         if [ -n "${found_cmd:-}" ]; then
-            conf_set "$name" command "$found_cmd"
             if [ -z "$(conf_value "$name" arguments)" ] && [ -n "${found_args:-}" ]; then
-                conf_set "$name" arguments "$found_args"
+                conf_set "$name" command "$found_cmd" arguments "$found_args"
+            else
+                conf_set "$name" command "$found_cmd"
             fi
             printf 'locachy-app: %s: command set to %s from its package\n' "$name" "$found_cmd"
         fi
@@ -584,15 +818,7 @@ do_build() {
 # The previous upper back (upper.prev), the current one kept in its place.
 do_rollback() {
     local cbase="$CONT_BASE/$1"
-    [ -d "$cbase/upper.prev" ] || die "$1 has no previous build"
-    mv "$cbase/upper" "$cbase/upper.swap"
-    mv "$cbase/upper.prev" "$cbase/upper"
-    mv "$cbase/upper.swap" "$cbase/upper.prev"
-    rm -rf "$cbase/work"
-    mkdir -p "$cbase/work"
-    [ ! -f "$cbase/built" ] || mv "$cbase/built" "$cbase/built.swap"
-    [ ! -f "$cbase/built.prev" ] || mv "$cbase/built.prev" "$cbase/built"
-    [ ! -f "$cbase/built.swap" ] || mv "$cbase/built.swap" "$cbase/built.prev"
+    generation_tool rollback "$cbase" || die "$1: cannot roll back its build"
     printf 'locachy-app: %s rolled back (the other one is upper.prev)\n' "$1"
 }
 
@@ -604,7 +830,9 @@ do_remove() {
     elif [ -x "$TOR_ENFORCE" ]; then
         "$TOR_ENFORCE" app-remove "$name" || true
     fi
-    rm -f "$CONT_CONF/$name.conf"
+    [ ! -e "$CONT_CONF/$name.conf" ] && [ ! -L "$CONT_CONF/$name.conf" ] ||
+        config_action remove "$CONT_CONF/$name.conf" ||
+        die "$name: $CONT_CONF/$name.conf is not a regular file: nothing removed; remove it by hand"
     if [ "${2:-}" = --data ]; then
         rm -rf "$cbase"
     elif [ -d "$cbase" ]; then
@@ -875,7 +1103,20 @@ elif [ "$operation" = remove ]; then
 elif [ "$operation" != start ] && [ "$operation" != install ] && [ "$operation" != -S ]; then
     [ $# -eq 0 ] || die "usage: locachy-app $operation NAME"
 fi
+case "$operation" in
+build)
+    # The kind follows the configuration as it is now (read as the snapshot
+    # below will read it): a host program's build is a host package
+    # transaction (app-host-build, in the package domain), any other a
+    # container's own build (app-build). The service checks the same at acceptance.
+    load_config_snapshot "$name"
+    kind=app-build
+    [ "$(conf_value "$name" host)" = 1 ] && kind=app-host-build
+    route_app_job "$kind" "$name" "$@" ;;
+rollback|remove) route_app_job "app-$operation" "$name" "$@" ;;
+esac
 lock_app "$name"
+load_config_snapshot "$name"
 # Explicit consent applies only to the supported bundled browser, including
 # start/open/new fast paths on a running instance. It never changes its mode.
 if [ "$want_own_tor" = 1 ]; then
@@ -1009,7 +1250,12 @@ mkdir -p "$CONT_BASE"
 chmod 0700 "$CONT_BASE"
 if [ "$host" != 1 ]; then
     [ ! -L "$cbase" ] && [ ! -L "$cbase/data" ] || die "$name: its state directory has a symbolic link"
-    mkdir -p "$cbase/upper" "$cbase/work" "$cbase/merged" "$cbase/data"
+    # Never an empty upper over the host root in place of a build: a pending
+    # publication, or a built container without its upper, is refused.
+    [ ! -e "$cbase/generation.state" ] ||
+        die "$name: its last build or rollback was interrupted: build or roll it back again"
+    [ -d "$cbase/upper" ] || die "$name is not built (no upper): build it first"
+    mkdir -p "$cbase/work" "$cbase/merged" "$cbase/data"
 fi
 # Its cgroup open to read, as process 1 makes the windows' (init/apps.c), not
 # 0700 by this script's umask: the document server, the user's, watches its

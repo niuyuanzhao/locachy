@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-09 11:23-0500\n"
+"POT-Creation-Date: 2026-11-10 01:27-0500\n"
 "PO-Revision-Date: 2026-11-09 14:16+0000\n"
 "Last-Translator: LOCachy\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -3474,6 +3474,11 @@ msgstr "N: 否"
 msgid "Esc: stay"
 msgstr "Esc: 保留"
 
+#: progs/files.c
+msgid ""
+"This drive cannot rename without overwrite protection: nothing was changed."
+msgstr "此驱动器不支持在不覆盖已有文件的前提下重命名：未做任何更改。"
+
 #: progs/files.c progs/firmware.c
 #, c-format
 msgid "Cannot read %s."
@@ -3615,6 +3620,17 @@ msgstr[0] "已撤销：%s（%d 项）；部分未能撤销（原位置是否已�
 msgid "Undone: %s (%d item)."
 msgid_plural "Undone: %s (%d items)."
 msgstr[0] "已撤销：%s（%d 项）。"
+
+#. TRANSLATORS: %d is the count of items left as they were.
+#: progs/files.c
+#, c-format
+msgid ""
+"This drive cannot rename without overwrite protection: %d item was left as "
+"it was."
+msgid_plural ""
+"This drive cannot rename without overwrite protection: %d items were left as "
+"they were."
+msgstr[0] "此驱动器不支持在不覆盖已有文件的前提下重命名：%d 项保持原样。"
 
 #. TRANSLATORS: %d is the count of items finished before the stop.
 #: progs/files.c
@@ -6387,6 +6403,241 @@ msgstr "应用预设模板分支："
 msgid "Hibernate after (seconds asleep; empty: as the system has it):"
 msgstr "多久后休眠（睡眠的秒数；留空：按系统默认）："
 
+#: progs/kvm-setup.c
+msgid "The broker ended the pairing."
+msgstr "中转进程结束了配对。"
+
+#: progs/kvm-setup.c
+msgid "The sender failed the handshake. Check the code and try again."
+msgstr "发送端握手失败。请核对配对码后重试。"
+
+#: progs/kvm-setup.c
+msgid "The sender did not answer in time."
+msgstr "发送端未及时响应。"
+
+#: progs/kvm-setup.c
+msgid "The cable link went down."
+msgstr "线缆链路已断开。"
+
+#: progs/kvm-setup.c
+msgid "Disconnected."
+msgstr "已断开。"
+
+#: progs/kvm-setup.c
+msgid "Pairing cancelled."
+msgstr "已取消配对。"
+
+#: progs/kvm-setup.c
+msgid "The connection ended, or the broker failed."
+msgstr "连接已结束，或中转进程失败。"
+
+#: progs/kvm.c
+msgid "Unavailable"
+msgstr "不可用"
+
+#: progs/kvm.c
+msgid "A paired dedicated-link transport is required."
+msgstr "需要经过配对的专线传输。"
+
+#: progs/kvm.c
+msgid "Extended display"
+msgstr "扩展屏"
+
+#: progs/kvm.c
+#, c-format
+msgid "Status: %s    Stream: %ux%u"
+msgstr "状态：%s    画面：%ux%u"
+
+#: progs/kvm.c
+msgid "Ctrl+Alt+F12: disconnect    Home, lock and brightness stay local"
+msgstr "Ctrl+Alt+F12：断开    主页、锁屏和亮度留在本机"
+
+#: progs/kvm.c
+msgid "No clipboard, files or commands. The peer keeps its original screen."
+msgstr "不传剪贴板、文件或命令。对端保留原有屏幕。"
+
+#: progs/kvm.c
+msgid "Disconnected"
+msgstr "已断开"
+
+#: progs/kvm.c
+msgid "Remote input could not be released in time; the stream was closed."
+msgstr "未能及时释放远端输入；画面流已关闭。"
+
+#: progs/kvm.c
+msgid "The decoder channel ended."
+msgstr "解码通道已结束。"
+
+#: progs/kvm.c
+msgid "The managed sleep inhibitor was not granted."
+msgstr "未能获得受管的防睡眠许可。"
+
+#: progs/kvm.c
+msgid "Active"
+msgstr "已连接"
+
+#: progs/kvm.c
+msgid "Extended-only companion over the paired dedicated link."
+msgstr "仅作扩展屏的配套程序，经配对专线连接。"
+
+#: progs/kvm.c
+msgid "The decoder sent an invalid picture."
+msgstr "解码器送来了无效画面。"
+
+#: progs/kvm.c
+msgid "The decoder sandbox or FFmpeg is not available."
+msgstr "解码沙箱或 FFmpeg 不可用。"
+
+#: progs/kvm.c
+msgid "The companion handshake or the stream failed."
+msgstr "与配套程序的握手或画面流失败。"
+
+#: progs/kvm.c
+msgid "No managed session owner: remote input stays disabled."
+msgstr "没有受管的会话所有者：远端输入保持关闭。"
+
+#: progs/kvm.c
+msgid "The transport is not a paired local stream from the broker."
+msgstr "传输不是中转进程交来的已配对本地流。"
+
+#: progs/kvm.c
+msgid "The session owner did not accept this session."
+msgstr "会话所有者未接受此会话。"
+
+#: progs/kvm.c
+msgid "The decoder worker could not be started safely."
+msgstr "无法安全启动解码工作进程。"
+
+#: progs/kvm.c
+msgid "Connecting"
+msgstr "正在连接"
+
+#: progs/kvm.c
+msgid "Waiting for the companion's capabilities."
+msgstr "正在等待配套程序报告其能力。"
+
+#: progs/kvm.c
+msgid "The session owner has gone."
+msgstr "会话所有者已退出。"
+
+#: progs/kvm.c
+msgid "The session owner did not accept the release."
+msgstr "会话所有者未接受释放。"
+
+#: progs/kvm.c
+msgid "Remote input could not be delivered."
+msgstr "无法送达远端输入。"
+
+#: progs/kvm.c
+msgid "The companion handshake timed out."
+msgstr "与配套程序握手超时。"
+
+#: progs/kvm.c progs/settings-power.inc
+msgid "Idle"
+msgstr "空闲"
+
+#: progs/kvm.c
+msgid "Scanning"
+msgstr "正在扫描"
+
+#: progs/kvm.c
+msgid "Choose an interface"
+msgstr "选择接口"
+
+#: progs/kvm.c
+msgid "Asking the broker for a code"
+msgstr "正在向中转进程获取配对码"
+
+#: progs/kvm.c
+msgid "Waiting for the Mac to connect"
+msgstr "正在等待 Mac 连接"
+
+#: progs/kvm.c
+msgid "Connected"
+msgstr "已连接"
+
+#: progs/kvm.c
+msgid "Cancelling"
+msgstr "正在取消"
+
+#: progs/kvm.c
+msgid "Releasing"
+msgstr "正在释放"
+
+#: progs/kvm.c
+msgid "Released"
+msgstr "已释放"
+
+#: progs/kvm.c
+msgid "The pairing helper stopped"
+msgstr "配对辅助进程已停止"
+
+#: progs/kvm.c progs/settings-hwinfo.inc progs/settings-power.inc
+#: progs/view-pdf-ui.inc
+msgid "Unknown"
+msgstr "未知"
+
+#: progs/kvm.c
+msgid "Choose the cable interface to pair with the Mac."
+msgstr "选择用于与 Mac 配对的线缆接口。"
+
+#: progs/kvm.c
+msgid "Scanning..."
+msgstr "正在扫描……"
+
+#: progs/kvm.c
+msgid "No cable interface found. Connect the cable, then press F5."
+msgstr "未找到线缆接口。请连接线缆后按 F5。"
+
+#: progs/kvm.c
+msgid "carrier up"
+msgstr "已连接网线"
+
+#: progs/kvm.c progs/rescue.c
+msgid "no carrier"
+msgstr "未连接网线"
+
+#: progs/kvm.c
+#, c-format
+msgid "Address  %s     Port  %s"
+msgstr "地址  %s     端口  %s"
+
+#: progs/kvm.c
+#, c-format
+msgid "Code     %s"
+msgstr "配对码   %s"
+
+#: progs/kvm.c
+#, c-format
+msgid ""
+"On the Mac: locachy-macos-sender --interface <mac-interface> --address %s --"
+"port %s"
+msgstr ""
+"在 Mac 上运行：locachy-macos-sender --interface <mac-interface> --address %s "
+"--port %s"
+
+#: progs/kvm.c
+msgid "Asking the broker for an address and a code..."
+msgstr "正在向中转进程获取地址和配对码……"
+
+#: progs/kvm.c
+#, c-format
+msgid "Status: %s"
+msgstr "状态：%s"
+
+#: progs/kvm.c
+msgid "The broker is busy: a pairing is still active."
+msgstr "中转进程忙：配对仍在进行中。"
+
+#: progs/kvm.c
+msgid ""
+"Up/Down choose   Enter pair   Esc cancel   F5 scan   Ctrl+Alt+F12 release"
+msgstr "上/下 选择   Enter 配对   Esc 取消   F5 扫描   Ctrl+Alt+F12 释放"
+
+#: progs/kvm.c
+msgid "The code and the address are kept in memory only."
+msgstr "配对码和地址只保存在内存中。"
+
 #: progs/lock.c
 msgid "Fingerprint"
 msgstr "指纹"
@@ -7383,8 +7634,25 @@ msgstr[0] "共享目录超出单行配置长度上限（%d 个字符）。"
 
 #: progs/packages.c
 #, c-format
+msgid "Cannot read %s as the form found it: nothing saved."
+msgstr "无法按表单打开时的状态读取 %s：未保存。"
+
+#: progs/packages.c
+#, c-format
 msgid "%s: access not granted; nothing saved or installed."
 msgstr "%s：未授予访问权限；未保存或安装任何内容。"
+
+#: progs/packages.c
+#, c-format
+msgid "%s is being started or built: nothing saved; save it again in a moment."
+msgstr "%s 正在启动或构建：未保存；请稍后再保存一次。"
+
+#: progs/packages.c
+#, c-format
+msgid ""
+"%s changed since this form was opened: nothing saved (leave it and open it "
+"again)."
+msgstr "打开此表单后 %s 已被更改：未保存（请退出后重新打开）。"
 
 #: progs/packages.c
 #, c-format
@@ -7709,10 +7977,6 @@ msgid "carrier present"
 msgstr "已连接网线"
 
 #: progs/rescue.c
-msgid "no carrier"
-msgstr "未连接网线"
-
-#: progs/rescue.c
 #, c-format
 msgid ""
 "Keyboard: %s (Rescue and its target terminal; system settings are unchanged)"
@@ -8034,10 +8298,6 @@ msgstr "处理器标识"
 #: progs/settings-hwinfo.inc progs/view.c
 msgid "Model"
 msgstr "型号"
-
-#: progs/settings-hwinfo.inc progs/settings-power.inc progs/view-pdf-ui.inc
-msgid "Unknown"
-msgstr "未知"
 
 #: progs/settings-hwinfo.inc
 #, c-format
@@ -8601,10 +8861,6 @@ msgstr "已充满"
 #: progs/settings-power.inc
 msgid "Not charging"
 msgstr "未充电"
-
-#: progs/settings-power.inc
-msgid "Idle"
-msgstr "空闲"
 
 #: progs/settings-power.inc
 msgid "Removed (spare)"
@@ -9235,6 +9491,32 @@ msgid "none yet"
 msgstr "尚未录入"
 
 #: progs/settings.c
+msgid "Wait: a security change is still being applied."
+msgstr "请稍候：安全更改仍在应用中。"
+
+#: progs/settings.c
+#, c-format
+msgid "Not changed: %s"
+msgstr "未更改：%s"
+
+#: progs/settings.c
+msgid "Security change queued; it shows here once applied."
+msgstr "安全更改已排队；应用后会在此显示。"
+
+#: progs/settings.c
+msgid "Security settings applied."
+msgstr "安全设置已应用。"
+
+#: progs/settings.c
+#, c-format
+msgid "Security settings not applied: %s"
+msgstr "安全设置未应用：%s"
+
+#: progs/settings.c
+msgid "the job failed"
+msgstr "任务失败"
+
+#: progs/settings.c
 msgid " (infrared candidate)"
 msgstr "（红外候选）"
 
@@ -9568,13 +9850,13 @@ msgstr "网桥行已移除。"
 
 #: progs/settings.c
 #, c-format
-msgid "Cannot load Tor's firewall (%s): Tor left as it was."
-msgstr "无法加载 Tor 防火墙（%s）：Tor 保持原状。"
+msgid "Cannot run %s."
+msgstr "无法运行 %s。"
 
 #: progs/settings.c
 #, c-format
-msgid "Tor off, but its firewall is still there: nothing goes out (%s remove)."
-msgstr "Tor 已关闭，但其防火墙仍在：所有外联已阻断（%s remove）。"
+msgid "The network is blocked until this succeeds: %s"
+msgstr "在此操作成功之前网络保持阻断：%s"
 
 #: progs/settings.c
 msgid "Tor off: the network goes direct."
@@ -10330,10 +10612,6 @@ msgid "App presets follow branch %.100s: c in packages checks it."
 msgstr "应用预设模板改为跟随分支 %.100s：在 packages 中按 c 检查。"
 
 #: progs/settings.c
-msgid "The boot image is still being made."
-msgstr "启动镜像仍在生成中。"
-
-#: progs/settings.c
 #, c-format
 msgid "Could not make the boot image: %s"
 msgstr "无法生成启动镜像：%s"
@@ -10350,6 +10628,14 @@ msgstr "启动镜像已生成：下次开机即使用。"
 #, c-format
 msgid "Could not make the boot image; see %s."
 msgstr "无法生成启动镜像；见 %s。"
+
+#: progs/settings.c
+msgid "A security change is still being applied."
+msgstr "安全更改仍在应用中。"
+
+#: progs/settings.c
+msgid "The boot image is still being made."
+msgstr "启动镜像仍在生成中。"
 
 #: progs/settings.c
 msgid ""
@@ -10382,12 +10668,8 @@ msgid "Delete again: remove the duress password (duress goes off)."
 msgstr "再按一次 Delete：删除胁迫密码（胁迫同时关闭）。"
 
 #: progs/settings.c
-msgid "Duress password removed; duress is off. Making the boot image..."
-msgstr "已删除胁迫密码，胁迫已关闭。正在制作启动映像……"
-
-#: progs/settings.c
-msgid "The duress password could not be removed."
-msgstr "无法删除胁迫密码。"
+msgid "Duress password removed; duress is off."
+msgstr "已删除胁迫密码，胁迫已关闭。"
 
 #: progs/settings.c
 msgid "Kernel options (added to the command line; empty: none): "
@@ -11226,12 +11508,12 @@ msgstr ""
 "未更改：TPM 在开机时就打开磁盘，所以开机锁屏必须保留。请先解除 TPM 绑定。"
 
 #: progs/settings.c
-msgid "At boot: home at once (the lock key and the lid still lock)."
-msgstr "开机时：直接进入主页（锁屏快捷键与合盖仍会锁屏）。"
-
-#: progs/settings.c
 msgid "At boot: the lock screen first, the password to go on."
 msgstr "开机时：先显示锁屏，输入密码后继续。"
+
+#: progs/settings.c
+msgid "At boot: home at once (the lock key and the lid still lock)."
+msgstr "开机时：直接进入主页（锁屏快捷键与合盖仍会锁屏）。"
 
 #. TRANSLATORS: Enter and Delete are key names; keep them.
 #: progs/settings.c
@@ -11298,12 +11580,12 @@ msgid "howdy is not installed: the Face recognition line installs it."
 msgstr "howdy 未安装：可在“人脸识别”行安装。"
 
 #: progs/settings.c
-msgid "The lock screen and sudo take your face as well as the password."
-msgstr "锁屏与 sudo 现已同时支持人脸识别与密码。"
-
-#: progs/settings.c
 msgid "Your face no longer unlocks."
 msgstr "已停用人脸识别解锁。"
+
+#: progs/settings.c
+msgid "The lock screen and sudo take your face as well as the password."
+msgstr "锁屏与 sudo 现已同时支持人脸识别与密码。"
 
 #. TRANSLATORS: Delete is the Delete key; keep it.
 #: progs/settings.c
@@ -11421,8 +11703,11 @@ msgstr "Enter: 将 LUKS2 自动解密绑定到 TPM（1.2 或 2.0）   Delete: �
 
 #: progs/settings.c
 msgid ""
-"Not switched: the TPM key slots could not be removed (locachy-tpm clear)."
-msgstr "未切换：无法删除 TPM 密钥槽（locachy-tpm clear）。"
+"Threat level low: the unlock ways switched on work again; bind the TPM again "
+"to use it. Making the boot image..."
+msgstr ""
+"威胁烈度为低：已开启的解锁方式重新生效；要用 TPM，需重新绑定。正在制作启动映"
+"像……"
 
 #: progs/settings.c
 msgid ""
@@ -11431,14 +11716,6 @@ msgid ""
 msgstr ""
 "威胁烈度为高：只有密码能解锁，开机时磁盘要求输入口令（不留 TPM 密钥槽）。正在"
 "制作启动映像……"
-
-#: progs/settings.c
-msgid ""
-"Threat level low: the unlock ways switched on work again; bind the TPM again "
-"to use it. Making the boot image..."
-msgstr ""
-"威胁烈度为低：已开启的解锁方式重新生效；要用 TPM，需重新绑定。正在制作启动映"
-"像……"
 
 #. TRANSLATORS: Enter and Delete are key names; keep them.
 #: progs/settings.c
@@ -11451,16 +11728,16 @@ msgid "Duress needs the duress password set and an encrypted disk."
 msgstr "胁迫需要已设置胁迫密码和加密磁盘。"
 
 #: progs/settings.c
+msgid "Duress off: the duress password wipes nothing. Making the boot image..."
+msgstr "胁迫已关闭：胁迫密码不再擦除任何东西。正在制作启动映像……"
+
+#: progs/settings.c
 msgid ""
 "Duress on: the duress password wipes the disk at power-on, on the lock "
 "screen and in sudo. Making the boot image..."
 msgstr ""
 "胁迫已开启：在开机、锁屏和 sudo 处输入胁迫密码都会擦除磁盘。正在制作启动映"
 "像……"
-
-#: progs/settings.c
-msgid "Duress off: the duress password wipes nothing. Making the boot image..."
-msgstr "胁迫已关闭：胁迫密码不再擦除任何东西。正在制作启动映像……"
 
 #. TRANSLATORS: Enter and M are key names; keep them.
 #: progs/settings.c
@@ -11604,11 +11881,6 @@ msgstr "正在按仓库检查声明的软件包……"
 
 #: progs/settings.c
 #, c-format
-msgid "Cannot run %s."
-msgstr "无法运行 %s。"
-
-#: progs/settings.c
-#, c-format
 msgid "%s: installing packages in background."
 msgstr "%s：正在后台安装软件包。"
 
@@ -11640,12 +11912,12 @@ msgid "fprintd is not installed: the line above installs it."
 msgstr "fprintd 未安装：可在上方行安装。"
 
 #: progs/settings.c
-msgid "The lock screen and sudo take a fingerprint as well as the password."
-msgstr "锁屏与 sudo 现已同时支持指纹与密码。"
-
-#: progs/settings.c
 msgid "Only the password unlocks, and sudo asks only for it."
 msgstr "仅使用密码解锁，sudo 也仅要求输入密码。"
+
+#: progs/settings.c
+msgid "The lock screen and sudo take a fingerprint as well as the password."
+msgstr "锁屏与 sudo 现已同时支持指纹与密码。"
 
 #. TRANSLATORS: Delete is the Delete key; keep it.
 #: progs/settings.c
@@ -11753,6 +12025,11 @@ msgid "No settings page is named %.40s."
 msgstr "没有名为 %.40s 的设置页面。"
 
 #: progs/settings.c
+#, c-format
+msgid "%s done."
+msgstr "%s 已完成。"
+
+#: progs/settings.c
 msgid "No wallpaper; the shared display shows that when it is next shown."
 msgstr "已取消壁纸；共享桌面下次显示时生效。"
 
@@ -11781,11 +12058,6 @@ msgid ""
 msgstr "未绑定：开机不锁屏时，谁开机都能直接进入。请先打开开机锁屏。"
 
 #: progs/settings.c
-#, c-format
-msgid "%s done."
-msgstr "%s 已完成。"
-
-#: progs/settings.c
 msgid ""
 "Secure Boot keys enrolled. At the next start the passphrase is asked once; "
 "the TPM is bound to the new keys then."
@@ -11801,10 +12073,6 @@ msgstr "安全启动密钥已写入；如果安全启动没有自动开启，请
 #: progs/settings.c
 msgid "Delete again: unbind TPM disk auto-unlock (boot will ask passphrase)."
 msgstr "再按一次 Delete：解除 TPM 磁盘自动解密绑定（开机将改为询问密码）。"
-
-#: progs/settings.c
-msgid "TPM disk auto-unlock unbound."
-msgstr "已解除 TPM 磁盘自动解密绑定。"
 
 #: progs/settings.c
 msgid "fprintd is not installed: the Fingerprint reader line installs it."
@@ -13485,3 +13753,25 @@ msgstr "显示较少详情"
 #: progs/view.c
 msgid "Show more details..."
 msgstr "显示更多详情..."
+
+#~ msgid "The broker reported an error."
+#~ msgstr "中转进程报告了错误。"
+
+#, c-format
+#~ msgid "Cannot load Tor's firewall (%s): Tor left as it was."
+#~ msgstr "无法加载 Tor 防火墙（%s）：Tor 保持原状。"
+
+#, c-format
+#~ msgid ""
+#~ "Tor off, but its firewall is still there: nothing goes out (%s remove)."
+#~ msgstr "Tor 已关闭，但其防火墙仍在：所有外联已阻断（%s remove）。"
+
+#~ msgid "The duress password could not be removed."
+#~ msgstr "无法删除胁迫密码。"
+
+#~ msgid ""
+#~ "Not switched: the TPM key slots could not be removed (locachy-tpm clear)."
+#~ msgstr "未切换：无法删除 TPM 密钥槽（locachy-tpm clear）。"
+
+#~ msgid "TPM disk auto-unlock unbound."
+#~ msgstr "已解除 TPM 磁盘自动解密绑定。"

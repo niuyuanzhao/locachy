@@ -11,6 +11,9 @@ set -eu
 
 NS=locachy-net
 RC=${LOCACHY_NETWORK_RC:-/etc/locachy/rc.conf}
+NETWORK=${LOCACHY_NETWORK_HELPER:-$(dirname "$0")/locachy_network.py}
+export LOCACHY_NETWORK_RC=$RC LOCACHY_NETWORK_NETNS=$NS
+policy() { python3 "$NETWORK" "$@"; }
 
 rc_value() {
     sed -n "s/^[[:space:]]*$1=\"\([^\"]*\)\".*/\1/p" "$RC" | tail -n 1
@@ -241,20 +244,13 @@ table inet locachy-filter {
     }
 }
 EOF
-# Full-system Tor (service_tor, tor-client): its firewall before any interface
-# is here, or none comes, so that nothing ever goes out past Tor.
-if grep -qE '^[[:space:]]*service_tor=' "$RC" &&
-    ! /usr/local/lib/locachy/tor-enforce load "$(rc_value tor_front)"; then
-    printf '<3>network-client: Tor is on and its firewall cannot be loaded: no network\n' >/dev/kmsg
+# Full-system network policy is reconciled by the common helper before any
+# interface is exposed. The helper installs its transition block first and
+# leaves it in place on failure; no service is allowed to go direct.
+policy reconcile || {
+    printf '<3>network-client: network policy failed: no network\n' >/dev/kmsg
     exit 1
-fi
-# Clash TUN (service_clash without service_tor, clash_mode != proxy): its
-# firewall before any interface is here, so nothing goes direct before mihomo.
-if ! grep -qE '^[[:space:]]*service_tor=' "$RC" && grep -qE '^[[:space:]]*service_clash=' "$RC" &&
-    [ "$(rc_value clash_mode)" != proxy ] && ! /usr/local/lib/locachy/clash-client --enforce; then
-    printf '<3>network-client: Clash TUN is on and its firewall cannot be loaded: no network\n' >/dev/kmsg
-    exit 1
-fi
+}
 
 for r in /sys/class/rfkill/rfkill*; do
     [ "$(cat "$r/type" 2>/dev/null)" != wlan ] || printf '0\n' >"$r/soft"

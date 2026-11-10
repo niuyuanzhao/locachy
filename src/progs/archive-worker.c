@@ -40,6 +40,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -1110,16 +1111,65 @@ static struct output {
     char final[PATH_MAX];
     dev_t dev;
     ino_t ino;
+    struct { dev_t dev; ino_t ino; } created[MAX_VOLUMES];
+    char staging[PATH_MAX];
 } out = { .fd = -1 };
+
+static struct stat target_version;
+static int target_existed;
+static int folder_lock = -1;
+
+/* Writers in one folder serialize on a flock of the folder itself: no lock
+ * file is left beside the archives. Held until the worker ends. The source
+ * version is checked again at publication, for writers outside this protocol. */
+static void lock_target(int must_exist)
+{
+    char dir[PATH_MAX], canonical[PATH_MAX], path[PATH_MAX];
+    snprintf(dir, sizeof dir, "%s", archive_path);
+    *strrchr(dir, '/') = '\0';
+    if (!realpath(dir[0] ? dir : "/", canonical)) fail("%s: %s", dir, strerror(errno));
+    path_fmt(path, sizeof path, "%s/%s", canonical, base_name(archive_path));
+    archive_path = strdup(path);
+    if (!archive_path) fail("out of memory");
+    folder_lock = open(canonical, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (folder_lock < 0 || flock(folder_lock, LOCK_EX) != 0) fail("%s: cannot lock its folder", canonical);
+    target_existed = lstat(archive_path, &target_version) == 0;
+    if (target_existed ? !must_exist || !S_ISREG(target_version.st_mode) : must_exist || errno != ENOENT)
+        fail("%s: archive is missing, not regular, or already exists", archive_path);
+}
+
+static void check_target(void)
+{
+    struct stat st;
+    int exists = lstat(archive_path, &st) == 0;
+    if (target_existed ? !exists || st.st_dev != target_version.st_dev || st.st_ino != target_version.st_ino ||
+        st.st_size != target_version.st_size || st.st_mtim.tv_sec != target_version.st_mtim.tv_sec ||
+        st.st_mtim.tv_nsec != target_version.st_mtim.tv_nsec || st.st_ctim.tv_sec != target_version.st_ctim.tv_sec ||
+        st.st_ctim.tv_nsec != target_version.st_ctim.tv_nsec : exists || errno != ENOENT)
+        fail("%s: archive changed while the operation was in progress", archive_path);
+}
+
+static void sync_output_dir(void)
+{
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof dir, "%s", out.final);
+    *strrchr(dir, '/') = '\0';
+    int fd = open(dir[0] ? dir : "/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0 || fsync(fd) != 0) fail("%s: cannot sync archive directory", dir);
+    close(fd);
+}
 
 static void cleanup_output(void)
 {
+    if (out.staging[0]) remove_tree(out.staging);
     if (out.committed) return;
     if (out.vol_size) {
         for (int i = 1; i <= out.vol; i++) {
             char path[PATH_MAX];
+            struct stat st;
             path_fmt(path, sizeof path, "%s.%03d", out.final, i);
-            unlink(path);
+            if (lstat(path, &st) == 0 && st.st_dev == out.created[i - 1].dev && st.st_ino == out.created[i - 1].ino)
+                unlink(path);
         }
     }
 }
@@ -1128,15 +1178,23 @@ static int next_volume(void)
 {
     char path[PATH_MAX];
     struct stat st;
-    if (out.fd >= 0 && (fsync(out.fd) != 0 || close(out.fd) != 0)) return -1;
-    path_fmt(path, sizeof path, "%s.%03d", out.final, ++out.vol);
-    out.fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
-    out.in_vol = 0;
-    if (out.fd >= 0 && fstat(out.fd, &st) == 0) {
-        out.dev = st.st_dev;
-        out.ino = st.st_ino;
+    if (out.fd >= 0) {
+        int fd = out.fd;
+        out.fd = -1;
+        int ok = fsync(fd) == 0;
+        if (close(fd) != 0) ok = 0;
+        if (!ok) return -1;
     }
-    return out.fd < 0 ? -1 : 0;
+    if (out.vol == MAX_VOLUMES) { errno = EFBIG; return -1; }
+    path_fmt(path, sizeof path, "%s.%03d", out.final, out.vol + 1);
+    out.fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+    if (out.fd < 0) return -1;
+    if (fstat(out.fd, &st) != 0) return -1;
+    out.created[out.vol].dev = out.dev = st.st_dev;
+    out.created[out.vol].ino = out.ino = st.st_ino;
+    out.vol++;
+    out.in_vol = 0;
+    return 0;
 }
 
 static la_ssize_t out_write(struct archive *a, void *arg, const void *buf, size_t n)
@@ -1205,16 +1263,88 @@ static void open_output(struct archive *w, const char *final, long long vol_size
 static void commit_output(struct archive *w, const char *old)
 {
     struct stat st;
-    if (archive_write_close(w) != ARCHIVE_OK) fail("%s", archive_error_string(w));
-    archive_write_free(w);
+    if (w) {
+        if (archive_write_close(w) != ARCHIVE_OK) fail("%s", archive_error_string(w));
+        archive_write_free(w);
+    }
+    check_target();
     if (!out.vol_size) {
         mode_t mask = umask(0);
         umask(mask);
-        chmod(temp_path, old && stat(old, &st) == 0 ? st.st_mode & 07777 : 0666 & ~mask);
-        if (rename(temp_path, out.final) != 0) fail("%s: %s", out.final, strerror(errno));
+        if (chmod(temp_path, old ? target_version.st_mode & 07777 : 0666 & ~mask) != 0)
+            fail("%s: %s", temp_path, strerror(errno));
+        int fd = open(temp_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || fsync(fd) != 0)
+            fail("%s: cannot sync archive", temp_path);
+        close(fd);
+        int r = old ? rename(temp_path, out.final) :
+                      renameat2(AT_FDCWD, temp_path, AT_FDCWD, out.final, RENAME_NOREPLACE);
+        if (r != 0) fail("%s: %s", out.final, strerror(errno));
         temp_path[0] = '\0';
     }
     out.committed = 1;
+    sync_output_dir();
+    if (out.staging[0]) { remove_tree(out.staging); out.staging[0] = '\0'; }
+}
+
+/* 7-Zip must never edit the live target. Its private directory is on the
+ * destination filesystem so final no-replace publication stays atomic. */
+static void stage_7z(int copy_old, long long vol_size)
+{
+    char dir[PATH_MAX];
+    snprintf(out.final, sizeof out.final, "%s", archive_path);
+    out.vol_size = vol_size;
+    snprintf(dir, sizeof dir, "%s", archive_path);
+    *strrchr(dir, '/') = '\0';
+    path_fmt(out.staging, sizeof out.staging, "%s/.archive-XXXXXX", dir[0] ? dir : "/");
+    if (!mkdtemp(out.staging)) { out.staging[0] = '\0'; fail("cannot stage archive: %s", strerror(errno)); }
+    path_fmt(temp_path, sizeof temp_path, "%s/%s", out.staging, base_name(archive_path));
+    if (copy_old) {
+        int in = open(archive_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        int fd = open(temp_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        if (in < 0 || fd < 0) fail("cannot stage archive: %s", strerror(errno));
+        char buf[BLOCK];
+        ssize_t n;
+        while ((n = read(in, buf, sizeof buf)) != 0) {
+            if (n < 0 && errno == EINTR) continue;
+            if (n < 0) fail("cannot read archive: %s", strerror(errno));
+            for (ssize_t at = 0; at < n;) {
+                ssize_t w = write(fd, buf + at, (size_t)(n - at));
+                if (w < 0 && errno == EINTR) continue;
+                if (w <= 0) fail("cannot stage archive: %s", strerror(errno));
+                at += w;
+            }
+            check_stop();
+        }
+        if (close(in) != 0 || close(fd) != 0) fail("cannot close archive: %s", strerror(errno));
+        check_target();
+    }
+}
+
+static void commit_7z(long long vol_size, int old)
+{
+    if (!vol_size) { commit_output(NULL, old ? archive_path : NULL); return; }
+    check_target();
+    for (int i = 1; i <= MAX_VOLUMES; i++) {
+        char from[PATH_MAX], to[PATH_MAX];
+        struct stat st;
+        path_fmt(from, sizeof from, "%s.%03d", temp_path, i);
+        int fd = open(from, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (fd < 0 && errno == ENOENT) break;
+        if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || fsync(fd) != 0)
+            fail("cannot sync archive volume: %s", strerror(errno));
+        close(fd);
+        path_fmt(to, sizeof to, "%s.%03d", archive_path, i);
+        if (link(from, to) != 0) fail("%s: %s", to, strerror(errno));
+        out.created[out.vol].dev = st.st_dev;
+        out.created[out.vol].ino = st.st_ino;
+        out.vol++;
+    }
+    if (!out.vol) fail("7-Zip did not create archive volumes");
+    out.committed = 1;
+    sync_output_dir();
+    remove_tree(out.staging);
+    out.staging[0] = temp_path[0] = '\0';
 }
 
 /* The paths written (sorted when looked up), so that the old entries of the
@@ -1297,6 +1427,7 @@ static void create_7z(const char *dir, char **files, int n, int level, long long
 {
     char mx[16], vol[32];
     struct sz_out o;
+    stage_7z(0, vol_size);
     const char *fixed[16];
     int k = 0;
     fixed[k++] = "a";
@@ -1315,12 +1446,13 @@ static void create_7z(const char *dir, char **files, int n, int level, long long
     if (have_password) fixed[k++] = "-p";
     if (headers) fixed[k++] = "-mhe=on";
     fixed[k++] = "--";
-    fixed[k++] = archive_path;
+    fixed[k++] = temp_path;
     fixed[k] = NULL;
     const char **args = sz_args(fixed, files, n);
     int rc = run_7z(args, dir, sz_line, &o);
     free(args);
     if (rc >= 2) fail("7-Zip: %s", o.error[0] ? o.error : "the archive could not be written");
+    commit_7z(vol_size, 0);
 }
 
 static void create_libarchive(const char *dir, char **files, int n, int level, long long vol_size, int encrypt);
@@ -1338,6 +1470,7 @@ static void op_create(int argc, char **argv)
     }
     if (argc - optind < 3) fail("create: ARCHIVE DIR FILE...");
     archive_path = absolute(argv[optind]);
+    lock_target(0);
     const char *dir = argv[optind + 1];
     char **files = argv + optind + 2;
     int n = argc - optind - 2;
@@ -1453,8 +1586,9 @@ static void update_7z(const struct scan *s, const char *dir, char **files, int n
     char staging[] = "/tmp/archive-XXXXXX", at[PATH_MAX];
     struct sz_out o;
     if (s->encrypted && !have_password && !ask_password()) finish(WORKER_NO_PASSWORD);
+    stage_7z(1, 0);
     const char *fixed[] = { n ? "a" : "d", "-bd", "-spd", "-sccUTF-8", s->headers ? "-mhe=on" : "-bb0", "--",
-                            archive_path, NULL };
+                            temp_path, NULL };
     const char **args;
     const char *in_dir = dir;
     if (n && inside && inside[0]) {
@@ -1479,6 +1613,7 @@ static void update_7z(const struct scan *s, const char *dir, char **files, int n
     free(args);
     if (in_dir == staging) remove_tree(staging);
     if (rc >= 2) fail("7-Zip: %s", o.error[0] ? o.error : "the archive could not be written");
+    commit_7z(0, 1);
     emit("D", archive_path, NULL);
 }
 
@@ -1499,6 +1634,7 @@ static void op_add(int argc, char **argv)
         snprintf(inside, strlen(inside) + 1, "%s", strcmp(clean, ".") == 0 ? "" : clean);
     }
     archive_path = absolute(argv[optind]);
+    lock_target(1);
     find_volumes();
     scan(&s, 0);
     if (scan_readonly(&s)) fail("The archive can only be read");
@@ -1511,6 +1647,7 @@ static void op_delete(int argc, char **argv)
     struct scan s;
     if (argc < 3) fail("delete: ARCHIVE ENTRY...");
     archive_path = absolute(argv[1]);
+    lock_target(1);
     for (int i = 2; i < argc; i++) archive_unescape(argv[i]);
     find_volumes();
     scan(&s, 0);

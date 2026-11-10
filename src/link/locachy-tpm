@@ -46,6 +46,7 @@ Usage:
 import argparse
 import base64
 import getpass
+import importlib.machinery
 import importlib.util
 from contextlib import contextmanager
 import hashlib
@@ -60,6 +61,17 @@ import sys
 import tempfile
 
 sys.dont_write_bytecode = True
+
+
+def security_helper():
+    path = Path(__file__).with_name("locachy-security")
+    if not path.is_file():
+        path = Path("/usr/local/bin/locachy-security")
+    loader = importlib.machinery.SourceFileLoader("locachy_security", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
 
 
 def jobs_helper():
@@ -225,11 +237,15 @@ def luks_meta(dev):
     p = subprocess.run(["cryptsetup", "luksDump", "--dump-json-metadata", dev],
                        capture_output=True, text=True)
     if p.returncode != 0:
-        return {}
+        raise RuntimeError(f"cannot read LUKS metadata from {dev}")
     try:
-        return json.loads(p.stdout)
-    except ValueError:
-        return {}
+        metadata = json.loads(p.stdout)
+    except ValueError as error:
+        raise RuntimeError(f"invalid LUKS metadata from {dev}") from error
+    if (not isinstance(metadata, dict) or not isinstance(metadata.get("keyslots"), dict) or
+            not isinstance(metadata.get("tokens"), dict)):
+        raise RuntimeError(f"incomplete LUKS metadata from {dev}")
+    return metadata
 
 
 def device_tpm_tokens(dev):
@@ -384,9 +400,19 @@ def tpm12_seal_secret(dev_path, secret_bytes, pcr_list):
 
 def clear_device_tpm(dev):
     for tid, tok in device_tpm_tokens(dev):
-        subprocess.run(["cryptsetup", "token", "remove", "--token-id", str(tid), dev], check=True)
-        for slot in tok.get("keyslots", []):
-            subprocess.run(["cryptsetup", "luksKillSlot", "--batch-mode", dev, str(slot)], check=False)
+        # Keep the token's slot association until removal succeeds. Removing
+        # the token first loses the only record of a still-live sealed key.
+        slots = tok.get("keyslots", [])
+        if not isinstance(slots, list) or any(not str(s).isdigit() for s in slots):
+            raise RuntimeError(f"invalid TPM key slot association on {dev}")
+        for slot in slots:
+            metadata = luks_meta(dev)
+            if str(slot) in metadata["keyslots"]:
+                subprocess.run(["cryptsetup", "luksKillSlot", "--batch-mode", dev, str(slot)], check=True)
+            if str(slot) in luks_meta(dev)["keyslots"]:
+                raise RuntimeError(f"TPM key slot {slot} remains on {dev}; token retained")
+        if str(tid) in luks_meta(dev)["tokens"]:
+            subprocess.run(["cryptsetup", "token", "remove", "--token-id", str(tid), dev], check=True)
 
 
 def run_cryptenroll(dev, options, unlock, env_extra=None):
@@ -815,6 +841,47 @@ def queue_request(args, jobs):
     return jobs.submit(kind, options, secret)
 
 
+def execute_request(args):
+    """Run under the security policy lock, after execution-time validation."""
+    if args.cmd == "secure-boot":
+        return cmd_secure_boot(args)
+    if args.cmd == "enroll" and args.pending:
+        return cmd_pending()
+    devs = getattr(args, "devices", None) or find_luks_targets()
+    if not devs:
+        raise RuntimeError("no LUKS2 locachy-crypt partitions found")
+    if args.cmd == "clear":
+        for device in devs:
+            clear_device_tpm(device)
+            print(f"Cleared TPM auto-unlock token from {device}")
+        drop_pending()
+        return 1 if rebuild_boot("--luks") else 0
+    if args.cmd == "prepare":
+        pw = read_passphrase(args.passphrase_stdin)
+        prepare_pending(devs, {device: ("passphrase", pw) for device in devs})
+        print("TPM 2.0 unlocking is bound at the first start with Secure Boot on this machine's keys")
+        return 0
+    ver, tdev = tpm_info()
+    if ver == 0:
+        raise RuntimeError("no TPM 2.0 or TPM 1.2 chip found")
+    pw = read_passphrase(args.passphrase_stdin)
+    if ver == 2:
+        own = secure_boot_own() and not args.pcrs
+        pcrs = None if own else parse_pcrs(args.pcrs, ver)
+        for device in devs:
+            enroll_tpm2(device, ("passphrase", pw), pcrs)
+            print(f"Enrolled TPM 2.0 auto-unlock on {device} (" +
+                  ("PCR 7 and the signed PCR 11 policy" if own else
+                   f"PCRs: {'+'.join(map(str, pcrs)) or '0+7'}") + ")")
+        drop_pending()
+    else:
+        pcrs = parse_pcrs(args.pcrs, ver)
+        for device in devs:
+            enroll_tpm12(device, tdev, pw, pcrs)
+            print(f"Enrolled TPM 1.2 auto-unlock on {device} (PCRs: {'+'.join(map(str, pcrs)) or 'SRK'})")
+    return 1 if rebuild_boot("--luks") else 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -851,45 +918,16 @@ def main():
             raise RuntimeError("--submit-only requires the installed system job service")
         if mode == "offline":
             print("locachy-tpm: offline root; executing inline", file=sys.stderr)
-        if args.cmd == "secure-boot":
-            return cmd_secure_boot(args)
-        if args.cmd == "enroll" and args.pending:
-            return cmd_pending()
-        devs = getattr(args, "devices", None) or find_luks_targets()
-        if not devs:
-            print("locachy-tpm: no LUKS2 locachy-crypt partitions found", file=sys.stderr)
-            return 1
-        if args.cmd == "clear":
-            for d in devs:
-                clear_device_tpm(d)
-                print(f"Cleared TPM auto-unlock token from {d}")
-            drop_pending()
-            return 1 if rebuild_boot("--luks") else 0
-        if args.cmd == "prepare":
-            pw = read_passphrase(args.passphrase_stdin)
-            prepare_pending(devs, {d: ("passphrase", pw) for d in devs})
-            print("TPM 2.0 unlocking is bound at the first start with Secure Boot on this machine's keys")
-            return 0
-
-        ver, tdev = tpm_info()
-        if ver == 0:
-            print("locachy-tpm: no TPM 2.0 or TPM 1.2 chip found", file=sys.stderr)
-            return 1
-        pw = read_passphrase(args.passphrase_stdin)
-        if ver == 2:
-            own = secure_boot_own() and not args.pcrs
-            pcrs = None if own else parse_pcrs(args.pcrs, ver)
-            for d in devs:
-                enroll_tpm2(d, ("passphrase", pw), pcrs)
-                print(f"Enrolled TPM 2.0 auto-unlock on {d} (" + ("PCR 7 and the signed PCR 11 policy" if own else
-                      f"PCRs: {'+'.join(map(str, pcrs)) or '0+7'}") + ")")
-            drop_pending()
-        else:
-            pcrs = parse_pcrs(args.pcrs, ver)
-            for d in devs:
-                enroll_tpm12(d, tdev, pw, pcrs)
-                print(f"Enrolled TPM 1.2 auto-unlock on {d} (PCRs: {'+'.join(map(str, pcrs)) or 'SRK'})")
-        return 1 if rebuild_boot("--luks") else 0
+        security = security_helper()
+        with security.policy_lock():
+            if args.cmd in ("enroll", "prepare"):
+                # Pending with no request creates no capability and is a no-op.
+                if not (args.cmd == "enroll" and args.pending and pending_request() is None):
+                    security.ensure_tpm_allowed()
+            elif args.cmd == "secure-boot" and args.enroll:
+                if pending_request() is not None or any(device_tpm_tokens(d) for d in find_luks_targets()):
+                    security.ensure_tpm_allowed()
+            return execute_request(args)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
         print(f"locachy-tpm: {e}", file=sys.stderr)
         return 1

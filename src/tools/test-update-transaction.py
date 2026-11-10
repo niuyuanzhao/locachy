@@ -335,12 +335,30 @@ class UpdateTransaction(unittest.TestCase):
                 ("demo", "rebuild", "host changes", "", "")]
         calls = []
         with mock.patch.object(pkg, "load_plan", return_value=(rows, "checked")), \
+                mock.patch.object(pkg, "validate_plan_inputs", lambda: None), \
                 mock.patch.object(pkg, "containers", return_value=["demo"]), \
                 mock.patch.object(pkg, "apply_target", side_effect=lambda target, _: calls.append(target) or False), \
                 mock.patch.object(pkg, "plan", side_effect=AssertionError("must not overwrite failed plan")), \
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(pkg.cmd_apply([]), 1)
         self.assertEqual(calls, ["host"])
+
+    def test_apply_refuses_a_plan_whose_inputs_changed(self):
+        """The plan's binding: a source, manifest, rc.conf, host, pacman config
+        or app configuration changed after Check means Apply refuses."""
+        with tempfile.TemporaryDirectory(prefix="plan-binding-", dir=SCRATCH) as tmp:
+            plan_file = os.path.join(tmp, "plan")
+            inputs = {"source": "a", "manifest": "m"}
+            with mock.patch.object(pkg, "PLAN_FILE", plan_file), \
+                    mock.patch.object(pkg, "plan_inputs", lambda: self.fail("the plan's own binding is used")), \
+                    mock.patch.object(pkg, "_pending_plan_lock", None):
+                pkg.save_plan(pkg.Plan([("host", "repo", "base", "1", "2")], dict(inputs)))
+            with mock.patch.object(pkg, "PLAN_FILE", plan_file), mock.patch.object(pkg, "plan_inputs", lambda: inputs):
+                pkg.validate_plan_inputs()  # the same inputs: accepted
+            with mock.patch.object(pkg, "PLAN_FILE", plan_file), \
+                    mock.patch.object(pkg, "plan_inputs", lambda: {"source": "a", "manifest": "changed"}):
+                with self.assertRaisesRegex(RuntimeError, "inputs changed"):
+                    pkg.validate_plan_inputs()
 
 
 if __name__ == "__main__":

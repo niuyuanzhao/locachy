@@ -217,6 +217,9 @@ $GCC -o "$lib/drives" "$src/progs/drives.c" "$b"/glibc-base-*.o $FT_LIBS
 $GCC -o "$lib/battery-history" "$src/progs/battery-history.c"
 # The system jobs' queue (tools/JOBS.md): long root operations, one at a time.
 $GCC -o "$lib/locachy-jobs" "$src/progs/locachy-jobs.c"
+# Shared configuration writes from shell (base/include/config.h): rc.conf or one
+# container's configuration, under the same lock as the C and Python writers.
+$GCC -o "$lib/locachy-config" "$src/progs/locachy-config.c" "$b/glibc-base-rc.o" "$b/glibc-base-say.o"
 # Cloud folders' metadata, read as the user so files never waits on the network.
 $GCC $(pkg-config --cflags gio-2.0) -o "$lib/files-cloud-list" "$src/progs/files-cloud-list.c" $(pkg-config --libs gio-2.0)
 # Container session-bus document-portal owner so xdg-desktop-portal stays up without FUSE.
@@ -249,6 +252,26 @@ if pkg-config --exists tree-sitter libpcre2-8 json-glib-1.0; then
 else
     rm -rf /usr/local/bin/edit /usr/local/share/locachy/edit
     echo "make: edit not built: tree-sitter, pcre2 and json-glib are not all installed" >&2
+fi
+# The extended display's receiver (tools/KVM.md): kvm on the direct screen (no
+# compositor), kvm-worker parsing the stream and decoding it with the
+# distribution's FFmpeg, as nobody in a sandbox of its own (progs/kvm-ipc.h).
+KVM_PKGS="json-c libavcodec libavutil libswscale"
+if pkg-config --exists $KVM_PKGS; then
+    $GCC -DCONFIG_KVM_FFMPEG $(pkg-config --cflags $KVM_PKGS) -o "$lib/kvm-worker" "$src/progs/kvm-worker.c" \
+        "$src/progs/kvm-protocol.c" "$src/progs/kvm-decode.c" $(pkg-config --libs $KVM_PKGS) -lm
+    $GCC $(pkg-config --cflags json-c) -o /usr/local/bin/kvm "$src/progs/kvm.c" "$src/progs/kvm-setup.c" \
+        "$src/progs/kvm-client.c" "$src/progs/kvm-protocol.c" "$b"/glibc-base-*.o $FT_LIBS $(pkg-config --libs json-c) -lm
+else
+    rm -f /usr/local/bin/kvm "$lib/kvm-worker"
+    echo "make: kvm not built: json-c and FFmpeg (libavcodec, libavutil, libswscale) are not all installed" >&2
+fi
+# The extended display's broker (tools/KVM.md): the root helper that leases the
+# cable interface, runs the TLS pump and hands the paired stream to kvm, which
+# starts it from this path. Needs OpenSSL 1.1.1 or newer.
+if pkg-config --exists openssl; then
+    $GCC $(pkg-config --cflags openssl) -o "$lib/kvm-broker" "$src/progs/kvm-broker.c" "$src/progs/kvm-broker-net.c" \
+        "$src/progs/kvm-broker-pump.c" "$src/progs/kvm-broker-tls.c" $(pkg-config --libs openssl)
 fi
 if [ -f "$src/progs/app-init.c" ]; then
     $GCC -o "$lib/app-init" "$src/progs/app-init.c"
@@ -559,6 +582,8 @@ install -m 755 "$src/link/tor-client" "$lib/tor-client"
 install -m 755 "$src/link/tor-enforce" "$lib/tor-enforce"
 install -m 755 "$src/link/rclone-client" "$lib/rclone-client"
 install -m 755 "$src/link/locachy-tpm" /usr/local/bin/locachy-tpm
+# Boot lock, threat level, biometrics and duress: one queued policy job.
+install -m 755 "$src/link/locachy-security" /usr/local/bin/locachy-security
 install -m 755 "$src/link/locachy-face-camera" /usr/local/bin/locachy-face-camera
 install -m 755 "$src/link/locachy-firmware" /usr/local/bin/locachy-firmware
 install -m 755 "$src/link/reboot" /usr/local/bin/reboot
@@ -622,6 +647,10 @@ install -D -m 644 "$src/link/pam.d/locachy-lock" /etc/pam.d/locachy-lock
 install -D -m 644 "$src/link/pam.d/locachy-lock-fingerprint" /etc/pam.d/locachy-lock-fingerprint
 install -D -m 644 "$src/link/pam.d/locachy-lock-face" /etc/pam.d/locachy-lock-face
 install -D -m 644 "$src/link/91-locachy-rebuild.hook" /etc/pacman.d/hooks/91-locachy-rebuild.hook
+# External pacman transactions take the host's change domain first (PreTransaction,
+# AbortOnFail: refused while a LOCachy job holds it; held until pacman exits).
+install -m 755 "$src/link/locachy-pacman-guard" "$lib/locachy-pacman-guard"
+install -D -m 644 "$src/link/89-locachy-pacman-guard.hook" /etc/pacman.d/hooks/89-locachy-pacman-guard.hook
 gcc -O2 -o "$lib/gen_init_cpio" "$src/tools/gen_init_cpio.c" # the initramfs (locachy-boot)
 # The shared compositor's configuration (locachy-seat sets XDG_CONFIG_HOME).
 # The shared display's gestures (libinput-gestures, lisgd), which locachy-seat
@@ -681,7 +710,8 @@ if [ "$boot_mode" -eq 1 ]; then
     # What all of it is built against: the packages as locachy-pkg hashes
     # them (host_hash), so that it builds again only when they change.
     pacman -Q | sha256sum | cut -c1-16 >"$lib/built-host"
-    rm -f "$lib/source-unbuilt" # built from the installed source (locachy-pkg apply)
+    # source-unbuilt stays: locachy-pkg clears it under its own lock once the
+    # built tree matches the recorded source (never before that check).
     echo "make: $level: init, home, term, settings, note; boot files made"
 else
     echo "make: $level: home, term, settings, note and services (process 1 and boot files unchanged)"

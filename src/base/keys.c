@@ -20,6 +20,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -764,6 +765,7 @@ void keys_refresh(void)
     for (int i = 0; i < count;) {
         int version;
         if (ioctl(keyboards[i], EVIOCGVERSION, &version) >= 0) { i++; continue; }
+        if (base_raw_cancel) base_raw_cancel();
         close(keyboards[i]);
         memset(dropping, 0, sizeof dropping);
         count--;
@@ -857,13 +859,17 @@ void keys_update(const int *fds, int n)
             memset(modifiers[count++], 0, sizeof modifiers[0]);
         }
     }
-    for (int i = 0; i < old_count; i++) if (!used[i]) close(old[i]);
+    for (int i = 0; i < old_count; i++) if (!used[i]) {
+        if (base_raw_cancel) base_raw_cancel();
+        close(old[i]);
+    }
     memset(dropping, 0, sizeof dropping);
     update_modifiers();
 }
 
 void keys_release(void)
 {
+    if (base_raw_cancel) base_raw_cancel();
     for (int i = 0; i < count; i++) {
         close(keyboards[i]);
     }
@@ -1272,6 +1278,7 @@ int keys_event(int fd)
      * "SYN_DROPPED"). */
     if (ev.type == EV_SYN && ev.code == SYN_DROPPED) {
         if (device >= 0) dropping[device] = 1;
+        if (base_raw_cancel) base_raw_cancel();
         return 0;
     }
     if (device >= 0 && dropping[device]) {
@@ -1286,6 +1293,43 @@ int keys_event(int fd)
     }
     read_table();
     struct table *tb = device >= 0 ? device_table_of(device) : &tables[0];
+    if (base_raw_emit) {
+        int st = (shift ? 1 : 0) | (caps ? 2 : 0) | (altgr ? 4 : 0) | (num ? 8 : 0);
+        uint32_t sym = ev.code < 256 ? tb->syms[st][ev.code] : 0;
+        if (!sym && ev.code < 256) {
+            /* The built-in US fallback has chars but no generated keysyms. */
+            uint32_t c = tb->chars[st][ev.code];
+            sym = c >= 0x20 ? c : c == 27 ? 0xff1b : c == '\n' ? 0xff0d :
+                  c == '\t' ? 0xff09 : c == '\b' ? 0xff08 : 0;
+            if (!sym) switch (ev.code) {
+            case KEY_LEFTSHIFT: sym = 0xffe1; break; case KEY_RIGHTSHIFT: sym = 0xffe2; break;
+            case KEY_LEFTCTRL: sym = 0xffe3; break; case KEY_RIGHTCTRL: sym = 0xffe4; break;
+            case KEY_LEFTALT: sym = 0xffe9; break; case KEY_RIGHTALT: sym = 0xffea; break;
+            case KEY_LEFTMETA: sym = 0xffeb; break; case KEY_RIGHTMETA: sym = 0xffec; break;
+            case KEY_CAPSLOCK: sym = 0xffe5; break; case KEY_NUMLOCK: sym = 0xff7f; break;
+            case KEY_UP: sym = 0xff52; break; case KEY_DOWN: sym = 0xff54; break;
+            case KEY_LEFT: sym = 0xff51; break; case KEY_RIGHT: sym = 0xff53; break;
+            case KEY_HOME: sym = 0xff50; break; case KEY_END: sym = 0xff57; break;
+            case KEY_PAGEUP: sym = 0xff55; break; case KEY_PAGEDOWN: sym = 0xff56; break;
+            case KEY_INSERT: sym = 0xff63; break; case KEY_DELETE: sym = 0xffff; break;
+            case KEY_KPENTER: sym = 0xff8d; break;
+            default:
+                if (ev.code >= KEY_F1 && ev.code <= KEY_F10) sym = 0xffbe + ev.code - KEY_F1;
+                if (ev.code == KEY_F11 || ev.code == KEY_F12) sym = 0xffc8 + ev.code - KEY_F11;
+                break;
+            }
+        }
+        struct stat identity;
+        uint32_t id = fstat(fd, &identity) == 0 && S_ISCHR(identity.st_mode) ?
+                      (uint32_t)identity.st_rdev + 1 : (uint32_t)fd + 1;
+        int action = match_action(tb, ev.code, ctrl, alt, shift, meta);
+        int local = action == K_ACT_HOME || action == K_ACT_LOCK ||
+                    (action >= K_VOL_UP && action <= K_BRI_DOWN);
+        base_raw_emit(id, ev.code, sym,
+            (shift ? KEYS_SHIFT : 0) | (ctrl ? KEYS_CTRL : 0) | (alt ? KEYS_ALT : 0) |
+            (meta ? KEYS_META : 0) | (altgr ? KEYS_ALTGR : 0) | (caps ? KEYS_CAPS : 0) | (num ? 64 : 0),
+            (caps ? 1 : 0) | (num ? 2 : 0), (uint32_t)ev.value, local);
+    }
     int role = ev.code > 0 && ev.code < 256 ? tb->modifier_role[ev.code] : 0;
     if (!role && ev.code > 0 && ev.code < 256 && ev.value == 1 && tb->syms[shift ? 1 : 0][ev.code] == 0xffe5) {
         caps_code = ev.code; /* Caps_Lock at this level: the lock, as xkb has it */
@@ -1349,6 +1393,7 @@ static int window_poll(struct pollfd *extra, size_t nextra, int timeout_ms)
     for (size_t i = 0; i < nextra; i++) extra[i].revents = 0;
     for (;;) {
         if (screen_window_shown()) return K_SHOWN;
+        if (base_raw_pending && base_raw_pending()) return K_RAW_KEY;
         if (pointer_next()) return K_POINTER;
         int key = wl_backend_next_key();
         if (key) return key;
@@ -1383,6 +1428,7 @@ int key_poll_many(struct pollfd *extra, size_t nextra, int timeout_ms)
     for (size_t i = 0; i < nextra; i++) extra[i].revents = 0;
     for (;;) {
         if (control_shown()) { free(p); return K_SHOWN; }
+        if (base_raw_pending && base_raw_pending()) { free(p); return K_RAW_KEY; }
         if (pointer_next()) { free(p); return K_POINTER; }
         int n = 0, ctl = control_fd(), ctl_i = -1, ptr = pointer_fd(), ptr_i = -1;
         for (int i = 0; i < count; i++) {
@@ -1430,6 +1476,7 @@ int key_poll_many(struct pollfd *extra, size_t nextra, int timeout_ms)
             }
             if (key != 0) { free(p); return key; }
         }
+        if (base_raw_pending && base_raw_pending()) { free(p); return K_RAW_KEY; }
         if (pointer_next()) { free(p); return K_POINTER; }
         if (ready) { free(p); return 0; }
     }

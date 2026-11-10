@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-09 11:23-0500\n"
+"POT-Creation-Date: 2026-11-10 01:27-0500\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -3402,6 +3402,11 @@ msgstr ""
 msgid "Esc: stay"
 msgstr ""
 
+#: progs/files.c
+msgid ""
+"This drive cannot rename without overwrite protection: nothing was changed."
+msgstr ""
+
 #: progs/files.c progs/firmware.c
 #, c-format
 msgid "Cannot read %s."
@@ -3545,6 +3550,18 @@ msgstr[1] ""
 #, c-format
 msgid "Undone: %s (%d item)."
 msgid_plural "Undone: %s (%d items)."
+msgstr[0] ""
+msgstr[1] ""
+
+#. TRANSLATORS: %d is the count of items left as they were.
+#: progs/files.c
+#, c-format
+msgid ""
+"This drive cannot rename without overwrite protection: %d item was left as "
+"it was."
+msgid_plural ""
+"This drive cannot rename without overwrite protection: %d items were left as "
+"they were."
 msgstr[0] ""
 msgstr[1] ""
 
@@ -6335,6 +6352,239 @@ msgstr ""
 msgid "Hibernate after (seconds asleep; empty: as the system has it):"
 msgstr ""
 
+#: progs/kvm-setup.c
+msgid "The broker ended the pairing."
+msgstr ""
+
+#: progs/kvm-setup.c
+msgid "The sender failed the handshake. Check the code and try again."
+msgstr ""
+
+#: progs/kvm-setup.c
+msgid "The sender did not answer in time."
+msgstr ""
+
+#: progs/kvm-setup.c
+msgid "The cable link went down."
+msgstr ""
+
+#: progs/kvm-setup.c
+msgid "Disconnected."
+msgstr ""
+
+#: progs/kvm-setup.c
+msgid "Pairing cancelled."
+msgstr ""
+
+#: progs/kvm-setup.c
+msgid "The connection ended, or the broker failed."
+msgstr ""
+
+#: progs/kvm.c
+msgid "Unavailable"
+msgstr ""
+
+#: progs/kvm.c
+msgid "A paired dedicated-link transport is required."
+msgstr ""
+
+#: progs/kvm.c
+msgid "Extended display"
+msgstr ""
+
+#: progs/kvm.c
+#, c-format
+msgid "Status: %s    Stream: %ux%u"
+msgstr ""
+
+#: progs/kvm.c
+msgid "Ctrl+Alt+F12: disconnect    Home, lock and brightness stay local"
+msgstr ""
+
+#: progs/kvm.c
+msgid "No clipboard, files or commands. The peer keeps its original screen."
+msgstr ""
+
+#: progs/kvm.c
+msgid "Disconnected"
+msgstr ""
+
+#: progs/kvm.c
+msgid "Remote input could not be released in time; the stream was closed."
+msgstr ""
+
+#: progs/kvm.c
+msgid "The decoder channel ended."
+msgstr ""
+
+#: progs/kvm.c
+msgid "The managed sleep inhibitor was not granted."
+msgstr ""
+
+#: progs/kvm.c
+msgid "Active"
+msgstr ""
+
+#: progs/kvm.c
+msgid "Extended-only companion over the paired dedicated link."
+msgstr ""
+
+#: progs/kvm.c
+msgid "The decoder sent an invalid picture."
+msgstr ""
+
+#: progs/kvm.c
+msgid "The decoder sandbox or FFmpeg is not available."
+msgstr ""
+
+#: progs/kvm.c
+msgid "The companion handshake or the stream failed."
+msgstr ""
+
+#: progs/kvm.c
+msgid "No managed session owner: remote input stays disabled."
+msgstr ""
+
+#: progs/kvm.c
+msgid "The transport is not a paired local stream from the broker."
+msgstr ""
+
+#: progs/kvm.c
+msgid "The session owner did not accept this session."
+msgstr ""
+
+#: progs/kvm.c
+msgid "The decoder worker could not be started safely."
+msgstr ""
+
+#: progs/kvm.c
+msgid "Connecting"
+msgstr ""
+
+#: progs/kvm.c
+msgid "Waiting for the companion's capabilities."
+msgstr ""
+
+#: progs/kvm.c
+msgid "The session owner has gone."
+msgstr ""
+
+#: progs/kvm.c
+msgid "The session owner did not accept the release."
+msgstr ""
+
+#: progs/kvm.c
+msgid "Remote input could not be delivered."
+msgstr ""
+
+#: progs/kvm.c
+msgid "The companion handshake timed out."
+msgstr ""
+
+#: progs/kvm.c progs/settings-power.inc
+msgid "Idle"
+msgstr ""
+
+#: progs/kvm.c
+msgid "Scanning"
+msgstr ""
+
+#: progs/kvm.c
+msgid "Choose an interface"
+msgstr ""
+
+#: progs/kvm.c
+msgid "Asking the broker for a code"
+msgstr ""
+
+#: progs/kvm.c
+msgid "Waiting for the Mac to connect"
+msgstr ""
+
+#: progs/kvm.c
+msgid "Connected"
+msgstr ""
+
+#: progs/kvm.c
+msgid "Cancelling"
+msgstr ""
+
+#: progs/kvm.c
+msgid "Releasing"
+msgstr ""
+
+#: progs/kvm.c
+msgid "Released"
+msgstr ""
+
+#: progs/kvm.c
+msgid "The pairing helper stopped"
+msgstr ""
+
+#: progs/kvm.c progs/settings-hwinfo.inc progs/settings-power.inc
+#: progs/view-pdf-ui.inc
+msgid "Unknown"
+msgstr ""
+
+#: progs/kvm.c
+msgid "Choose the cable interface to pair with the Mac."
+msgstr ""
+
+#: progs/kvm.c
+msgid "Scanning..."
+msgstr ""
+
+#: progs/kvm.c
+msgid "No cable interface found. Connect the cable, then press F5."
+msgstr ""
+
+#: progs/kvm.c
+msgid "carrier up"
+msgstr ""
+
+#: progs/kvm.c progs/rescue.c
+msgid "no carrier"
+msgstr ""
+
+#: progs/kvm.c
+#, c-format
+msgid "Address  %s     Port  %s"
+msgstr ""
+
+#: progs/kvm.c
+#, c-format
+msgid "Code     %s"
+msgstr ""
+
+#: progs/kvm.c
+#, c-format
+msgid ""
+"On the Mac: locachy-macos-sender --interface <mac-interface> --address %s --"
+"port %s"
+msgstr ""
+
+#: progs/kvm.c
+msgid "Asking the broker for an address and a code..."
+msgstr ""
+
+#: progs/kvm.c
+#, c-format
+msgid "Status: %s"
+msgstr ""
+
+#: progs/kvm.c
+msgid "The broker is busy: a pairing is still active."
+msgstr ""
+
+#: progs/kvm.c
+msgid ""
+"Up/Down choose   Enter pair   Esc cancel   F5 scan   Ctrl+Alt+F12 release"
+msgstr ""
+
+#: progs/kvm.c
+msgid "The code and the address are kept in memory only."
+msgstr ""
+
 #: progs/lock.c
 msgid "Fingerprint"
 msgstr ""
@@ -7335,7 +7585,24 @@ msgstr[1] ""
 
 #: progs/packages.c
 #, c-format
+msgid "Cannot read %s as the form found it: nothing saved."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
 msgid "%s: access not granted; nothing saved or installed."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid "%s is being started or built: nothing saved; save it again in a moment."
+msgstr ""
+
+#: progs/packages.c
+#, c-format
+msgid ""
+"%s changed since this form was opened: nothing saved (leave it and open it "
+"again)."
 msgstr ""
 
 #: progs/packages.c
@@ -7661,10 +7928,6 @@ msgid "carrier present"
 msgstr ""
 
 #: progs/rescue.c
-msgid "no carrier"
-msgstr ""
-
-#: progs/rescue.c
 #, c-format
 msgid ""
 "Keyboard: %s (Rescue and its target terminal; system settings are unchanged)"
@@ -7981,10 +8244,6 @@ msgstr ""
 
 #: progs/settings-hwinfo.inc progs/view.c
 msgid "Model"
-msgstr ""
-
-#: progs/settings-hwinfo.inc progs/settings-power.inc progs/view-pdf-ui.inc
-msgid "Unknown"
 msgstr ""
 
 #: progs/settings-hwinfo.inc
@@ -8547,10 +8806,6 @@ msgstr ""
 
 #: progs/settings-power.inc
 msgid "Not charging"
-msgstr ""
-
-#: progs/settings-power.inc
-msgid "Idle"
 msgstr ""
 
 #: progs/settings-power.inc
@@ -9178,6 +9433,32 @@ msgid "none yet"
 msgstr ""
 
 #: progs/settings.c
+msgid "Wait: a security change is still being applied."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Not changed: %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "Security change queued; it shows here once applied."
+msgstr ""
+
+#: progs/settings.c
+msgid "Security settings applied."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Security settings not applied: %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "the job failed"
+msgstr ""
+
+#: progs/settings.c
 msgid " (infrared candidate)"
 msgstr ""
 
@@ -9513,12 +9794,12 @@ msgstr ""
 
 #: progs/settings.c
 #, c-format
-msgid "Cannot load Tor's firewall (%s): Tor left as it was."
+msgid "Cannot run %s."
 msgstr ""
 
 #: progs/settings.c
 #, c-format
-msgid "Tor off, but its firewall is still there: nothing goes out (%s remove)."
+msgid "The network is blocked until this succeeds: %s"
 msgstr ""
 
 #: progs/settings.c
@@ -10270,10 +10551,6 @@ msgid "App presets follow branch %.100s: c in packages checks it."
 msgstr ""
 
 #: progs/settings.c
-msgid "The boot image is still being made."
-msgstr ""
-
-#: progs/settings.c
 #, c-format
 msgid "Could not make the boot image: %s"
 msgstr ""
@@ -10289,6 +10566,14 @@ msgstr ""
 #: progs/settings.c
 #, c-format
 msgid "Could not make the boot image; see %s."
+msgstr ""
+
+#: progs/settings.c
+msgid "A security change is still being applied."
+msgstr ""
+
+#: progs/settings.c
+msgid "The boot image is still being made."
 msgstr ""
 
 #: progs/settings.c
@@ -10322,11 +10607,7 @@ msgid "Delete again: remove the duress password (duress goes off)."
 msgstr ""
 
 #: progs/settings.c
-msgid "Duress password removed; duress is off. Making the boot image..."
-msgstr ""
-
-#: progs/settings.c
-msgid "The duress password could not be removed."
+msgid "Duress password removed; duress is off."
 msgstr ""
 
 #: progs/settings.c
@@ -11159,11 +11440,11 @@ msgid ""
 msgstr ""
 
 #: progs/settings.c
-msgid "At boot: home at once (the lock key and the lid still lock)."
+msgid "At boot: the lock screen first, the password to go on."
 msgstr ""
 
 #: progs/settings.c
-msgid "At boot: the lock screen first, the password to go on."
+msgid "At boot: home at once (the lock key and the lid still lock)."
 msgstr ""
 
 #. TRANSLATORS: Enter and Delete are key names; keep them.
@@ -11224,11 +11505,11 @@ msgid "howdy is not installed: the Face recognition line installs it."
 msgstr ""
 
 #: progs/settings.c
-msgid "The lock screen and sudo take your face as well as the password."
+msgid "Your face no longer unlocks."
 msgstr ""
 
 #: progs/settings.c
-msgid "Your face no longer unlocks."
+msgid "The lock screen and sudo take your face as well as the password."
 msgstr ""
 
 #. TRANSLATORS: Delete is the Delete key; keep it.
@@ -11345,19 +11626,14 @@ msgstr ""
 
 #: progs/settings.c
 msgid ""
-"Not switched: the TPM key slots could not be removed (locachy-tpm clear)."
+"Threat level low: the unlock ways switched on work again; bind the TPM again "
+"to use it. Making the boot image..."
 msgstr ""
 
 #: progs/settings.c
 msgid ""
 "Threat level high: only the password unlocks, and the disk asks for its "
 "passphrase at power-on (no TPM key slot). Making the boot image..."
-msgstr ""
-
-#: progs/settings.c
-msgid ""
-"Threat level low: the unlock ways switched on work again; bind the TPM again "
-"to use it. Making the boot image..."
 msgstr ""
 
 #. TRANSLATORS: Enter and Delete are key names; keep them.
@@ -11371,13 +11647,13 @@ msgid "Duress needs the duress password set and an encrypted disk."
 msgstr ""
 
 #: progs/settings.c
-msgid ""
-"Duress on: the duress password wipes the disk at power-on, on the lock "
-"screen and in sudo. Making the boot image..."
+msgid "Duress off: the duress password wipes nothing. Making the boot image..."
 msgstr ""
 
 #: progs/settings.c
-msgid "Duress off: the duress password wipes nothing. Making the boot image..."
+msgid ""
+"Duress on: the duress password wipes the disk at power-on, on the lock "
+"screen and in sudo. Making the boot image..."
 msgstr ""
 
 #. TRANSLATORS: Enter and M are key names; keep them.
@@ -11519,11 +11795,6 @@ msgstr ""
 
 #: progs/settings.c
 #, c-format
-msgid "Cannot run %s."
-msgstr ""
-
-#: progs/settings.c
-#, c-format
 msgid "%s: installing packages in background."
 msgstr ""
 
@@ -11555,11 +11826,11 @@ msgid "fprintd is not installed: the line above installs it."
 msgstr ""
 
 #: progs/settings.c
-msgid "The lock screen and sudo take a fingerprint as well as the password."
+msgid "Only the password unlocks, and sudo asks only for it."
 msgstr ""
 
 #: progs/settings.c
-msgid "Only the password unlocks, and sudo asks only for it."
+msgid "The lock screen and sudo take a fingerprint as well as the password."
 msgstr ""
 
 #. TRANSLATORS: Delete is the Delete key; keep it.
@@ -11669,6 +11940,11 @@ msgid "No settings page is named %.40s."
 msgstr ""
 
 #: progs/settings.c
+#, c-format
+msgid "%s done."
+msgstr ""
+
+#: progs/settings.c
 msgid "No wallpaper; the shared display shows that when it is next shown."
 msgstr ""
 
@@ -11697,11 +11973,6 @@ msgid ""
 msgstr ""
 
 #: progs/settings.c
-#, c-format
-msgid "%s done."
-msgstr ""
-
-#: progs/settings.c
 msgid ""
 "Secure Boot keys enrolled. At the next start the passphrase is asked once; "
 "the TPM is bound to the new keys then."
@@ -11716,10 +11987,6 @@ msgstr ""
 #. TRANSLATORS: Delete is the Delete key; keep it.
 #: progs/settings.c
 msgid "Delete again: unbind TPM disk auto-unlock (boot will ask passphrase)."
-msgstr ""
-
-#: progs/settings.c
-msgid "TPM disk auto-unlock unbound."
 msgstr ""
 
 #: progs/settings.c

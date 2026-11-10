@@ -32,7 +32,9 @@
 | `tpm-prepare` | `locachy-tpm prepare --passphrase-stdin` | 无；口令通过匿名 RAM 管道传递 |
 | `tpm-clear` | `locachy-tpm clear` | `/dev` 设备 |
 | `secure-boot` | `locachy-tpm secure-boot` | `--enroll`，可加 `--microsoft`；口令通过匿名 RAM 管道传递 |
-| `app-build`、`app-rollback` | `locachy-app build` / `rollback` | 一个容器名（与 locachy-app 的规则相同） |
+| `app-build` | `locachy-app build` | 一个容器名，其 `host` 不为 `"1"`，受理时检查（不在软件包域内） |
+| `app-host-build` | `locachy-app build` | 一个容器名，其 `host` 为 `"1"`，受理时检查（在软件包域内：其软件包安装到宿主上） |
+| `app-rollback` | `locachy-app rollback` | 一个容器名（与 locachy-app 的规则相同） |
 | `app-remove` | `locachy-app remove` | 一个容器名，可加 `--data` |
 | `fw-refresh`、`fw-update` | `locachy-firmware fwupd-action refresh` / `update` | 无 |
 | `fw-verify`、`fw-unlock` | `locachy-firmware fwupd-action verify` / `unlock` | 一个 fwupd 设备 ID |
@@ -41,6 +43,12 @@
 | `spi-probe` | `locachy-firmware spi-probe` | 一个 flashrom 编程器；`--chip 名称` |
 | `spi-backup`、`spi-verify` | `locachy-firmware spi-backup` / `spi-verify` | 编程器，以及文件夹（备份）或镜像文件；`--chip`、`--regions fd,bios,…` |
 | `spi-write` | `locachy-firmware spi-write` | 同 `spi-verify`，另加 `--expected-size 字节数` |
+| `bios-set` | `locachy-firmware bios-set` | 一个属性（以字母或数字开头，其后为字母、数字或 `_ . : -`，最多 96 字节）和一个值（0–256 字节，不含控制字符；开头的 `-` 只是文字） |
+| `security-policy` | `locachy-security` | `set login-skip`/`duress`/`fingerprint`/`face` `on`/`off`、`set lock-mode low`/`high`、`remove-duress` 或 `refresh` |
+
+**软件包域。** 软件包、内核、软件源类任务，以及所有会构建启动镜像的类型（`boot`、`locachy-rebuild`、`tpm-*`、`secure-boot`、`security-policy`），都像 `locachy-pkg` 一样持有 `/run/locachy/pkg.lock`：任务的 runner 在任务 cgroup 内、第一个步骤之前取得它（`flock` 等待：外部 pacman 的 guard 持有它时，先等 pacman 完成），每个步骤都继承这个描述符，因此工具能发现域已被持有，不会再次打开。工具自己的锁都在域之内取得（先域，再安全锁，再配置）；工具自己从不取 `pkg.lock`。固件类任务不持有它（`locachy-firmware` 持有 `firmware.lock`），容器类任务 `app-build` 也不持有（它不在宿主上安装任何软件包）。`app-host-build` 持有它：`host="1"` 的应用会把其软件包安装到宿主上，这是宿主软件包事务。任务种类由应用自身的 host 设置决定，由服务在受理时读取并检查（不符则拒绝：“the app's host setting changed; open it again”，即应用的 host 设置已改变，请重新打开）；任何客户端参数都不能决定它。路径是固定的：没有任何运行时设置能改变它，runner 会从每个步骤的环境中移除 `LOCACHY_PKG_LOCK`（测试构建只在编译时改动路径）。
+
+**镜像。** 参数是镜像文件的类型（`fw-local-install`、`spi-verify`、`spi-write`）会在任务被接受时复制该文件，而不是在运行时：不跟随链接打开，必须是最多 64 MiB 的普通文件，复制到 `/run/locachy/jobs/ID.input`（root 所有，0600），其大小和 SHA-256 记录在 `ID.state` 中；任务参数随后改为指向这份副本。无法复制时请求被拒绝。runner 在第一个步骤之前按记录的大小和摘要核对副本，副本被改动的任务不会运行。任务结束或从队列移除时副本被删除。运行的内容就是接受时所指定的内容，无论之后用户的文件如何变化。
 
 每个获接受的请求都是独立的队列事件，重复请求也获得新 ID。交互 TPM 口令只通过写端已关闭的完整匿名管道传递，不进入参数、环境、状态文件或日志。服务不持久保存该描述符；若服务在它运行前重启，该任务明确失败，需重新提交。
 
@@ -76,6 +84,7 @@
 | `log ID` | `ok 文本`：其输出的末尾（至多 8 KiB，从某行开头起） |
 | `cancel ID` | `ok removed`（它在排队）、`ok ended`，或 `confirm 原因`（它在运行） |
 | `cancel ID confirm` | `ok stopping` |
+| `drain EPOCH` | （仅限进程 1）在没有任何已接受、排队或运行中的任务之前不回复，之后回复 `drained EPOCH`；期间所有 `submit` 都被拒绝 |
 
 任何请求都可能得到 `error 原因`（未知 ID、格式错误）。“行”为 `ID 种类 状态 状态码 位置 来源 参数 最后一行`，以制表符分隔：状态码结束前为 -1（128 + N：信号 N），位置 0 为运行中、N 为排队、-1 为已结束，参数以空格分隔，最后一行为其输出的最后一行。
 
@@ -103,6 +112,8 @@ SIGTERM（进程 1 结束该服务、其行从 rc.conf 删除时）只结束服�
 - **电量严重不足**时，有恢复设备就休眠，与没有任务时一样：任务在休眠镜像中，恢复后继续。没有恢复设备，或镜像写不进去时就关机，正在运行的任务**最多再等 60 秒**（屏幕上会说明）；到时切断任务，并记录 `POWER: the critical battery's power off waited 60 s; system job ID (KIND) still runs and is cut`。立即切断，pacman 或固件写入必然半途而废；无限等待，电池耗尽同样会切断它，而且根分区仍可写。已经在等待的关机也会得到同样的期限。
 - 恢复时会重新启动固件和启动镜像：正在写它们的任务（`boot`、`kernel-select`、固件类任务）若在中途休眠，安全程度只相当于在那一刻断电。
 - 等待屏幕是英文的：进程 1 只用 Terminus 字体绘制，其中没有中日韩字符（开机磁盘密码提示也是如此）。
+
+**排空（drain）。** 不立即执行的关机或重启，会先请服务排空（`drain EPOCH`，只接受进程 1 的请求），然后在观察任务 cgroup 的同时等待它的回复：从这个请求起，不再接受新任务；已接受的任务（包括排队的）都会运行并结束，之后才回复 `drained EPOCH`。epoch 保存在 `/run/locachy/jobs/drain`，因此重新启动的服务同样拒绝新任务，直到下次开机。没有服务，或连接在回复前结束（服务已退出），都视为已排空：服务排队的任务留在磁盘上，在整个关机过程中都不会启动（只有服务能启动任务）；仍在运行的任务照旧按其 cgroup 等待。`--force` 和再次按键的行为不变。
 
 ## 锁屏
 

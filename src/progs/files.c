@@ -63,6 +63,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/fsuid.h>
+#include <sys/file.h>
 #include <sys/mount.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
@@ -881,24 +882,22 @@ static int copy_tree(const char *from, const char *to)
     return failed ? -1 : 0;
 }
 
-/* to, which is not there, renamed from from: never over something that
- * came meanwhile (on a filesystem without RENAME_NOREPLACE, looked at
- * first). */
+/* Never replace a name created meanwhile. A drive without the atomic
+ * primitive (FUSE without rename2, as rclone's: EINVAL) is refused, not
+ * emulated with a racy look first; rename_unprotected then says so, for the
+ * notice. EINVAL for a folder into itself is not that. */
+static int rename_unprotected;
+
 static int rename_new(const char *from, const char *to)
 {
-    struct stat st;
-    if (renameat2(AT_FDCWD, from, AT_FDCWD, to, RENAME_NOREPLACE) == 0) {
-        return 0;
-    }
-    if (errno != EINVAL && errno != ENOSYS) {
-        return -1;
-    }
-    if (lstat(to, &st) == 0) {
-        errno = EEXIST;
-        return -1;
-    }
-    return rename(from, to);
+    size_t n = strlen(from);
+    int r = renameat2(AT_FDCWD, from, AT_FDCWD, to, RENAME_NOREPLACE);
+    rename_unprotected = r != 0 && (errno == EINVAL || errno == ENOSYS) &&
+                         !(strncmp(to, from, n) == 0 && to[n] == '/');
+    return r;
 }
+
+#define UNPROTECTED_NOTICE N_("This drive cannot rename without overwrite protection: nothing was changed.")
 
 /* from copied whole to to (not there): written under a hidden name in to's
  * folder, then renamed. 0, or -1 (errno; ECANCELED: stopped) with nothing
@@ -2121,7 +2120,7 @@ static void undo_last(void)
  * for undo. */
 static void transfer(char *const *paths, int n, const char *dir, int cut)
 {
-    int done = 0, failed = 0;
+    int done = 0, failed = 0, unprotected = 0;
     struct undo *u = undo_begin(cut ? UNDO_MOVE : UNDO_COPY);
     copy_begin(cut);
     as_user(1);
@@ -2129,6 +2128,7 @@ static void transfer(char *const *paths, int n, const char *dir, int cut)
         const char *base = base_name(paths[i]);
         char to[PATH_MAX], from_dir[PATH_MAX];
         int ok;
+        rename_unprotected = 0;
         parent_of(paths[i], from_dir, sizeof from_dir);
         if (inside(dir, paths[i])) {
             ok = 0; /* into itself */
@@ -2145,10 +2145,20 @@ static void transfer(char *const *paths, int n, const char *dir, int cut)
         }
         done += ok;
         failed += !ok && copying.stop == COPY_GOING; /* the one stopped is not a failure */
+        unprotected += !ok && rename_unprotected;
     }
     as_user(0);
     undo_end(u);
-    if (copy_end()) {
+    if (unprotected && !done && unprotected == failed) {
+        report(1, "%s", _(UNPROTECTED_NOTICE));
+        copy_end();
+    } else if (unprotected) {
+        copy_end();
+        /* TRANSLATORS: %d is the count of items left as they were. */
+        report(1, P_("This drive cannot rename without overwrite protection: %d item was left as it was.",
+                     "This drive cannot rename without overwrite protection: %d items were left as they were.",
+                     unprotected), unprotected);
+    } else if (copy_end()) {
         /* TRANSLATORS: %d is the count of items finished before the stop. */
         report(1, cut ? P_("Move stopped after %d item; the unfinished one is where it was.",
                            "Move stopped after %d items; the unfinished one is where it was.", done) :
@@ -2454,19 +2464,23 @@ static void rename_selected(void)
     const char *name = prompt(_("Rename to:"), old, 0);
     if (name && name[0] && !strchr(name, '/') && strcmp(name, old) != 0) {
         char a[PATH_MAX], b[PATH_MAX], keep[256];
-        struct stat st;
         snprintf(keep, sizeof keep, "%s", name);
+        rename_unprotected = 0;
         as_user(1);
         int ok = join(a, sizeof a, P->cwd, old) == 0 && join(b, sizeof b, P->cwd, keep) == 0 &&
-                 lstat(b, &st) != 0 && rename(a, b) == 0;
+                 rename_new(a, b) == 0;
         as_user(0);
         if (ok) {
             struct undo *u = undo_begin(UNDO_RENAME);
             undo_add(u, a, b, NULL);
             undo_end(u);
         }
-        /* TRANSLATORS: %s is the new name; Ctrl+Z is the key; keep it. */
-        report(!ok, ok ? _("Renamed to %s (Ctrl+Z to undo).") : _("Cannot rename to %s (taken?)."), keep);
+        if (!ok && rename_unprotected) {
+            report(1, "%s", _(UNPROTECTED_NOTICE));
+        } else {
+            /* TRANSLATORS: %s is the new name; Ctrl+Z is the key; keep it. */
+            report(!ok, ok ? _("Renamed to %s (Ctrl+Z to undo).") : _("Cannot rename to %s (taken?)."), keep);
+        }
         load_dir(ok ? keep : old);
     }
 }
@@ -2714,47 +2728,78 @@ static void toggle_bookmark(void)
         report(1, _("Only a folder on disk can be bookmarked."));
         return;
     }
-    char dir[PATH_MAX], bpath[PATH_MAX], tmp[PATH_MAX + 8], line[PATH_MAX + 128];
-    static char kept[MAX_PLACES][PATH_MAX + 128];
-    int nkept = 0, removed = 0;
+    char dir[PATH_MAX], bpath[PATH_MAX], tmp[PATH_MAX + 16];
+    int removed = 0, lock = -1, dirfd = -1, fd = -1, existed = 0, staged = 0;
+    FILE *bf = NULL, *out = NULL;
+    struct stat before = { 0 }, now;
     snprintf(dir, sizeof dir, "%s/.config/gtk-3.0", home);
     bookmarks_path(bpath, sizeof bpath);
-    snprintf(tmp, sizeof tmp, "%s.new", bpath);
+    snprintf(tmp, sizeof tmp, "%s.XXXXXX", bpath);
     as_user(1);
-    FILE *bf = fopen(bpath, "re");
-    while (bf && fgets(line, sizeof line, bf) && nkept < MAX_PLACES) {
-        line[strcspn(line, "\r\n")] = '\0';
-        if (!line[0]) continue;
-        char uri[PATH_MAX + 128], dec[PATH_MAX];
-        snprintf(uri, sizeof uri, "%s", line);
-        char *sp = strchr(uri, ' ');
-        if (sp) *sp = '\0';
-        if (strncmp(uri, "file://", 7) == 0) {
-            url_unescape(uri + 7, dec, sizeof dec);
-            if (strcmp(dec, P->cwd) == 0) {
-                removed = 1;
-                continue;
-            }
-        }
-        snprintf(kept[nkept++], sizeof kept[0], "%s", line);
-    }
-    if (bf) fclose(bf);
     int ok = mkdir_p(dir, 0700) == 0;
     if (ok) {
-        int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-        if (fd >= 0) {
-            for (int i = 0; i < nkept; i++) dprintf(fd, "%s\n", kept[i]);
-            if (!removed) {
-                char esc[PATH_MAX * 3];
-                url_escape(P->cwd, esc, sizeof esc);
-                dprintf(fd, "file://%s\n", esc);
-            }
-            ok = close(fd) == 0 && rename(tmp, bpath) == 0;
-            if (!ok) unlink(tmp);
-        } else {
-            ok = 0;
-        }
+        lock = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        ok = lock >= 0 && flock(lock, LOCK_EX) == 0;
     }
+    if (ok) {
+        existed = lstat(bpath, &before) == 0;
+        ok = existed ? S_ISREG(before.st_mode) : errno == ENOENT;
+    }
+    if (ok && existed) {
+        fd = open(bpath, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        ok = fd >= 0 && fstat(fd, &now) == 0 && now.st_dev == before.st_dev && now.st_ino == before.st_ino;
+        if (ok) { bf = fdopen(fd, "r"); ok = bf != NULL; if (bf) fd = -1; }
+    }
+    if (fd >= 0) { close(fd); fd = -1; }
+    if (ok) {
+        fd = mkostemp(tmp, O_CLOEXEC);
+        ok = staged = fd >= 0;
+        if (ok && existed) ok = fchown(fd, before.st_uid, before.st_gid) == 0 && fchmod(fd, before.st_mode & 07777) == 0;
+        if (ok) { out = fdopen(fd, "w"); ok = out != NULL; if (out) fd = -1; }
+    }
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int newline = 1;
+    while (ok && bf && (n = getline(&line, &cap, bf)) >= 0) {
+        char uri[PATH_MAX * 3 + 8], dec[PATH_MAX];
+        size_t ulen = strcspn(line, " \r\n");
+        if (ulen < sizeof uri) {
+            memcpy(uri, line, ulen); uri[ulen] = '\0';
+            if (strncmp(uri, "file://", 7) == 0) {
+                url_unescape(uri + 7, dec, sizeof dec);
+                if (strcmp(dec, P->cwd) == 0) { removed = 1; continue; }
+            }
+        }
+        ok = fwrite(line, 1, (size_t)n, out) == (size_t)n;
+        newline = n > 0 && line[n - 1] == '\n';
+    }
+    free(line);
+    if (bf) { if (ferror(bf)) ok = 0; fclose(bf); }
+    if (ok && !removed) {
+        char esc[PATH_MAX * 3];
+        url_escape(P->cwd, esc, sizeof esc);
+        ok = (newline || fputc('\n', out) != EOF) && fprintf(out, "file://%s\n", esc) >= 0;
+    }
+    if (out) {
+        if (fflush(out) != 0 || fsync(fileno(out)) != 0) ok = 0;
+        if (fclose(out) != 0) ok = 0;
+    }
+    if (fd >= 0) close(fd);
+    if (ok) {
+        int present = lstat(bpath, &now) == 0;
+        ok = existed ? present && now.st_dev == before.st_dev && now.st_ino == before.st_ino &&
+             now.st_size == before.st_size && now.st_mtim.tv_sec == before.st_mtim.tv_sec &&
+             now.st_mtim.tv_nsec == before.st_mtim.tv_nsec && now.st_ctim.tv_sec == before.st_ctim.tv_sec &&
+             now.st_ctim.tv_nsec == before.st_ctim.tv_nsec : !present && errno == ENOENT;
+    }
+    if (ok) {
+        dirfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        ok = dirfd >= 0 && rename(tmp, bpath) == 0 && fsync(dirfd) == 0;
+    }
+    if (dirfd >= 0) close(dirfd);
+    if (!ok && staged) unlink(tmp);
+    if (lock >= 0) { flock(lock, LOCK_UN); close(lock); }
     as_user(0);
     rebuild_places();
     if (!ok) {
@@ -4454,30 +4499,104 @@ static void open_file(const char *path, int pick, const char *with)
     }
 }
 
+/* The open-request spool (open_request_publish in base/open.c): an
+ * owner-only directory of req-* files, each published whole and never
+ * replaced. One is claimed by an atomic rename to .claim-PID-NAME, read from
+ * that inode and then unlinked, so a newer request is never removed. A claim
+ * whose process is gone is published again. A program request
+ * ("program:NAME" with no target) is home's to claim, never the browser's. */
+#define REQUEST_CLAIM ".claim-"
+
+static int request_name(const struct dirent *e)
+{
+    return strncmp(e->d_name, "req-", 4) == 0 || strncmp(e->d_name, REQUEST_CLAIM, strlen(REQUEST_CLAIM)) == 0;
+}
+
+static int request_order(const struct dirent **a, const struct dirent **b)
+{
+    return strcmp((*a)->d_name, (*b)->d_name); /* req-MONOTONIC-...: publication order */
+}
+
+/* A request file's two lines; 0 when it is not a whole, valid one. */
+static int read_request(int dir, const char *name, char *with, size_t wsize, char *target, size_t tsize)
+{
+    char data[OPEN_REQUEST_BYTES + 1];
+    struct stat st;
+    int fd = openat(dir, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return 0;
+    ssize_t n = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == geteuid() &&
+                st.st_size < (off_t)sizeof data ? read(fd, data, sizeof data - 1) : -1;
+    close(fd);
+    if (n <= 0) return 0;
+    data[n] = '\0';
+    char *nl = strchr(data, '\n'), *end = nl ? strchr(nl + 1, '\n') : NULL;
+    if (!nl || !end || end[1] || (size_t)(nl - data) >= wsize || (size_t)(end - nl - 1) >= tsize) return 0;
+    snprintf(with, wsize, "%.*s", (int)(nl - data), data);
+    snprintf(target, tsize, "%.*s", (int)(end - nl - 1), nl + 1);
+    return 1;
+}
+
+static int is_program_request(const char *with, const char *target)
+{
+    return !target[0] && strncmp(with, OPEN_PROGRAM, strlen(OPEN_PROGRAM)) == 0 && with[strlen(OPEN_PROGRAM)];
+}
+
+/* The first queued request of the kind (program or not), in publication
+ * order. claim: renamed to a claim of this process, read from that inode,
+ * then unlinked. A claim whose process is gone is published again. */
+static int next_request(int program, int claim, char *with, size_t wsize, char *target, size_t tsize)
+{
+    struct dirent **list = NULL;
+    struct stat st;
+    int found = 0, n = -1;
+    int dir = open(OPEN_REQUEST, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (dir >= 0 && fstat(dir, &st) == 0 && st.st_uid == geteuid() && !(st.st_mode & 077)) {
+        n = scandir(OPEN_REQUEST, &list, request_name, request_order);
+    }
+    for (int i = 0; i < n && !found; i++) {
+        const char *name = list[i]->d_name;
+        char claimed[NAME_MAX + 1], *end;
+        if (name[0] == '.') {
+            long pid = strtol(name + strlen(REQUEST_CLAIM), &end, 10);
+            if (claim && pid > 0 && *end == '-' && kill((pid_t)pid, 0) != 0 && errno == ESRCH &&
+                snprintf(claimed, sizeof claimed, "req%s", end) < (int)sizeof claimed) {
+                renameat2(dir, name, dir, claimed, RENAME_NOREPLACE); /* its claimer is gone */
+            }
+            continue;
+        }
+        if (!read_request(dir, name, with, wsize, target, tsize) || is_program_request(with, target) != program) {
+            continue;
+        }
+        if (!claim) {
+            found = 1;
+            break;
+        }
+        if (snprintf(claimed, sizeof claimed, REQUEST_CLAIM "%ld-%s", (long)getpid(), name + 4) >= (int)sizeof claimed ||
+            renameat2(dir, name, dir, claimed, RENAME_NOREPLACE) != 0) {
+            continue; /* another consumer took it */
+        }
+        found = read_request(dir, claimed, with, wsize, target, tsize) && is_program_request(with, target) == program;
+        unlinkat(dir, claimed, 0);
+    }
+    for (int i = 0; i < n; i++) free(list[i]);
+    free(list);
+    if (dir >= 0) close(dir);
+    return found;
+}
+
 /* What a program on the screen or a container asked home to open
  * (open_in_home): its folder shown, it selected, and opened. */
 static int take_open_request(void)
 {
-    char with[512] = "", target[PATH_MAX + 16] = "", path[PATH_MAX];
-    FILE *in = fopen(OPEN_REQUEST, "re");
-    if (!in) {
-        return 0;
-    }
-    int got = fgets(with, sizeof with, in) && fgets(target, sizeof target, in);
-    fclose(in);
-    unlink(OPEN_REQUEST);
-    with[strcspn(with, "\n")] = '\0';
-    target[strcspn(target, "\n")] = '\0';
-    if (!got || strlen(with) >= OPEN_NAME || open_normalize(target, path, sizeof path) < 0) {
-        return 0;
-    }
+    char with[OPEN_NAME + 1] = "", target[PATH_MAX + 1] = "", path[PATH_MAX];
+    if (!next_request(0, 1, with, sizeof with, target, sizeof target)) return 0;
+    if (strlen(with) >= OPEN_NAME || open_normalize(target, path, sizeof path) < 0) return 0;
     char *slash = path[0] == '/' ? strrchr(path, '/') : NULL;
     if (slash && slash != path) {
         char dir[PATH_MAX];
         snprintf(dir, sizeof dir, "%.*s", (int)(slash - path), path);
         go(dir, slash + 1);
     }
-    /* "ask": the user chooses (archive's Open With...). */
     if (strcmp(with, "ask") == 0) open_file(path, 1, NULL);
     else open_file(path, 0, with[0] ? with : NULL);
     return 1;
@@ -4533,46 +4652,32 @@ static int take_folder_request(void)
 
 int files_program_request(char *name, size_t size, int take)
 {
-    char with[OPEN_NAME + 16] = "", target[16] = "";
-    size_t len = strlen(OPEN_PROGRAM);
+    char with[OPEN_NAME + 16] = "", target[PATH_MAX + 1] = "";
     if (in_window()) {
         return 0; /* home's requests, never a window's */
     }
-    FILE *in = fopen(OPEN_REQUEST, "re");
-    if (!in) {
+    /* take: claimed (home runs it); else only looked at, left queued. */
+    if (!next_request(1, take, with, sizeof with, target, sizeof target)) {
         return 0;
     }
-    int got = fgets(with, sizeof with, in) && fgets(target, sizeof target, in);
-    fclose(in);
-    if (!got || strcmp(target, "\n") != 0 || strncmp(with, OPEN_PROGRAM, len) != 0 || !strchr(with, '\n')) {
-        return 0; /* a file to open, or not a whole request */
-    }
-    with[strcspn(with, "\n")] = '\0';
-    if (take) {
-        unlink(OPEN_REQUEST);
-    }
-    snprintf(name, size, "%s", with + len);
+    snprintf(name, size, "%s", with + strlen(OPEN_PROGRAM));
     return 1;
 }
 
 static int take_request(void)
 {
-    char program[OPEN_NAME];
     if (in_window()) {
         return 0; /* home's requests, never a window's */
     }
     int folder = take_folder_request();
-    if (files_program_request(program, sizeof program, 0)) {
-        return folder; /* home's to run: left for it */
-    }
+    /* Program requests stay queued for home; files are claimed past them. */
     return take_open_request() || folder;
 }
 
 int files_request(void)
 {
-    char program[OPEN_NAME];
-    return access(FILES_REQUEST, F_OK) == 0 ||
-           (access(OPEN_REQUEST, F_OK) == 0 && !files_program_request(program, sizeof program, 0));
+    char with[OPEN_NAME + 16], target[PATH_MAX + 1];
+    return access(FILES_REQUEST, F_OK) == 0 || next_request(0, 0, with, sizeof with, target, sizeof target);
 }
 
 /* The user's home, its shared folders and the Trash, as places; the first

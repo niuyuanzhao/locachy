@@ -47,6 +47,7 @@
 #endif
 #include <ctype.h>
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <linux/input-event-codes.h>
@@ -54,6 +55,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -84,6 +86,7 @@
 #define APP "/usr/local/bin/locachy-app"
 #define UNTRUSTED_KEYS "/var/lib/locachy/builder/untrusted-keys" /* locachy-build's: the keys not trusted yet */
 #define RECIPES "/usr/local/src/locachy/pkgbuilds" /* LOCachy's own recipes */
+#define APP_RUNTIME "/run/locachy/apps" /* locachy-app's: NAME/control.lock */
 #endif
 #define TRUST_TOOL "locachy-build --trust-key"
 #define MANIFEST "/etc/locachy/packages"
@@ -625,8 +628,26 @@ static void keep_args(const char *kind, char *const args[])
     job_argv[n] = NULL;
 }
 
+/* Whether the container NAME is a host program (host="1"), read from its
+ * configuration as it is now: a form may have saved it just before (a new
+ * recipe is in no list yet). The job service checks the same again when it
+ * takes the job. */
+static int container_is_host(const char *name)
+{
+    struct container c;
+    char path[512];
+    if (!name[0] || strchr(name, '/')) {
+        return 0;
+    }
+    memset(&c, 0, sizeof c);
+    snprintf(path, sizeof path, "%s/%s.conf", CONF_DIR, name);
+    conf_read(path, container_value, &c);
+    return c.host;
+}
+
 /* The queue's kind of argv (PKG's or APP's command, its own arguments from
- * argv[2]); NULL if it is none. */
+ * argv[2]); NULL if it is none. A host program's build is a host package
+ * transaction: a kind of its own (app-host-build), in the package domain. */
 static const char *job_kind_of(char *const argv[])
 {
     static const char *const pkg[][2] = { { "install", "pkg-install" }, { "remove", "pkg-remove" },
@@ -641,7 +662,12 @@ static const char *job_kind_of(char *const argv[])
         if (strcmp(argv[1], pkg[i][0]) == 0) return pkg[i][1];
     }
     for (size_t i = 0; !of_pkg && i < sizeof app / sizeof app[0]; i++) {
-        if (strcmp(argv[1], app[i][0]) == 0) return app[i][1];
+        if (strcmp(argv[1], app[i][0]) == 0) {
+            if (strcmp(app[i][1], "app-build") == 0 && argv[2] && container_is_host(argv[2])) {
+                return "app-host-build";
+            }
+            return app[i][1];
+        }
     }
     return NULL;
 }
@@ -908,7 +934,7 @@ static void label_of(const struct jobs_row *r, char *out, size_t size)
         snprintf(out, size, "locachy-repos %s", a);
     } else if (strcmp(r->kind, "boot") == 0) {
         snprintf(out, size, "%s", "locachy-boot");
-    } else if (strcmp(r->kind, "app-build") == 0) {
+    } else if (strcmp(r->kind, "app-build") == 0 || strcmp(r->kind, "app-host-build") == 0) {
         snprintf(out, size, host ? _("install %s on the host") : _("build %s"), a);
     } else if (strcmp(r->kind, "app-rollback") == 0) {
         snprintf(out, size, _("roll back %s"), a);
@@ -1945,28 +1971,11 @@ static const char *preset_name(const char *path)
     return name;
 }
 
-static int copy_file(const char *from, const char *to)
-{
-    char buf[4096];
-    FILE *in = fopen(from, "re"), *out = in ? fopen(to, "we") : NULL;
-    size_t n;
-    int ok = in && out;
-    while (ok && (n = fread(buf, 1, sizeof buf, in)) > 0) {
-        ok = fwrite(buf, 1, n, out) == n;
-    }
-    if (in) {
-        fclose(in);
-    }
-    if (out && fclose(out) != 0) {
-        ok = 0;
-    }
-    return ok ? 0 : -1;
-}
-
 /* ---- A container's form: what it is made of, a line each ---- */
 
 #define MAX_PKGS 32
 #define MAX_DIRS 16
+#define CONF_SNAPSHOT_MAX 16384 /* a configuration's bytes, as a preset's at most */
 #define FORM_LINES 64
 #define FORM_TOP 3    /* the screen row of its first line */
 #define FORM_VALUE 16 /* the column of the values */
@@ -1985,6 +1994,11 @@ struct form {
     struct pkg_info info[MAX_PKGS];
     int ninfo;
     int sel, first, button; /* the selected line, the first shown, the button */
+    /* The configuration as the form was filled from it: Save writes only
+     * over these bytes. snapshot_state: 1 these, 0 none there, -1 unread. */
+    char snapshot[CONF_SNAPSHOT_MAX];
+    size_t snapshot_len;
+    int snapshot_state, snapshot_host;
 };
 
 enum field { F_PRESET, F_NAME, F_PACKAGE, F_EXTRAS, F_COMMAND, F_ARGUMENTS, F_NETWORK, F_CAMERA, F_DIRS, F_ACCESS,
@@ -2611,6 +2625,114 @@ static int grant_host_access(const struct form *f)
     }
 }
 
+/* The bytes of a configuration (a regular file, not a link) into buf: 0, or
+ * -1 (errno ENOENT: not there; EFBIG: more than size). */
+static int read_conf_bytes(const char *path, char *buf, size_t size, size_t *len)
+{
+    struct stat st;
+    ssize_t n = 1;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    *len = 0;
+    if (fd < 0) {
+        return -1;
+    }
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        close(fd);
+        errno = EINVAL;
+        return -1;
+    }
+    while (*len < size && (n = read(fd, buf + *len, size - *len)) != 0) {
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) break;
+        *len += (size_t)n;
+    }
+    int saved = n < 0 ? errno : *len == size ? EFBIG : 0;
+    close(fd);
+    errno = saved;
+    return saved ? -1 : 0;
+}
+
+/* What the form was filled from (edit_container_with), for Save. */
+static void form_snapshot(struct form *f, const char *path)
+{
+    f->snapshot_host = f->host;
+    if (read_conf_bytes(path, f->snapshot, sizeof f->snapshot, &f->snapshot_len) == 0) {
+        f->snapshot_state = 1;
+    } else {
+        f->snapshot_state = errno == ENOENT ? 0 : -1;
+    }
+}
+
+/* base with the changes as conf_update makes them (a key's first line
+ * replaced or, for NULL, removed; its other lines dropped; a key not there
+ * appended), whole: a new configuration from a preset is written once. */
+static char *apply_changes(const char *base, size_t len, const struct conf_change *c, size_t n, size_t *out_len)
+{
+    char *text = NULL, done[16] = { 0 };
+    for (size_t i = 0; i < n; i++) {
+        if (n > sizeof done || (c[i].value && strpbrk(c[i].value, "\"\r\n"))) {
+            errno = EINVAL;
+            return NULL;
+        }
+    }
+    FILE *out = open_memstream(&text, out_len);
+    if (!out) {
+        return NULL;
+    }
+    for (size_t at = 0; at < len;) {
+        size_t end = at, k = at, i;
+        while (end < len && base[end] != '\n') end++;
+        size_t next = end < len ? end + 1 : end;
+        while (k < end && (base[k] == ' ' || base[k] == '\t')) k++;
+        for (i = 0; i < n; i++) {
+            size_t kl = strlen(c[i].name);
+            if (end - k > kl && memcmp(base + k, c[i].name, kl) == 0 && base[k + kl] == '=') break;
+        }
+        if (i == n) {
+            fwrite(base + at, 1, next - at, out);
+        } else if (!done[i]++ && c[i].value) {
+            fprintf(out, "%s=\"%s\"\n", c[i].name, c[i].value);
+        }
+        at = next;
+    }
+    fflush(out);
+    if (ferror(out)) {
+        fclose(out);
+        free(text);
+        return NULL;
+    }
+    if (*out_len && text[*out_len - 1] != '\n') fputc('\n', out);
+    for (size_t i = 0; i < n; i++) {
+        if (!done[i] && c[i].value) fprintf(out, "%s=\"%s\"\n", c[i].name, c[i].value);
+    }
+    if (fclose(out) != 0) {
+        free(text);
+        return NULL;
+    }
+    return text;
+}
+
+/* locachy-app's lock of the container (APP_RUNTIME/NAME/control.lock),
+ * only for Save's commit: a start, build or catalog merge of it in progress
+ * is reported (EWOULDBLOCK), never waited for here. The descriptor, or -1. */
+static int app_control_lock(const char *name)
+{
+    char path[320];
+    snprintf(path, sizeof path, "%s/%s", APP_RUNTIME, name);
+    if ((mkdir(APP_RUNTIME, 0700) != 0 && errno != EEXIST) || (mkdir(path, 0700) != 0 && errno != EEXIST)) {
+        return -1;
+    }
+    snprintf(path, sizeof path, "%s/%s/control.lock", APP_RUNTIME, name);
+    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        int saved = errno;
+        close(fd);
+        errno = saved;
+        return -1;
+    }
+    return fd;
+}
+
 /* Its configuration written (CONF_DIR/NAME.conf; a new one from its preset,
  * whose comment it keeps): 0, or -1 with the notice saying why not. */
 static int form_save(struct form *f)
@@ -2640,31 +2762,57 @@ static int form_save(struct form *f)
         }
         len += (size_t)snprintf(dirs_ + len, sizeof dirs_ - len, "%s%s", i ? ":" : "", f->dirs[i]);
     }
-    struct form current = { 0 };
-    if (!f->is_new) conf_read(path, form_value, &current);
-    if (f->host && !current.host && !grant_host_access(f)) {
+    if (f->snapshot_state < 0) {
+        say_notice(1, _("Cannot read %s as the form found it: nothing saved."), path);
+        return -1;
+    }
+    /* Access granted is the configuration's as the form found it: Save
+     * below writes only if it is still so. Nothing is locked while asking. */
+    if (f->host && !f->snapshot_host && !grant_host_access(f)) {
         say_notice(0, _("%s: access not granted; nothing saved or installed."), f->name);
         return -1;
     }
-    if (f->is_new && f->preset[0] && copy_file(f->preset, path) < 0) {
-        say_notice(1, _("Cannot write %s."), path);
-        return -1;
-    }
-    const char *values[][2] = {
+    /* The whole form in one commit, over the bytes it was filled from (a new
+     * one: over its preset, the file not there yet); packages, the key from
+     * before package and extras, goes. */
+    const struct conf_change values[] = {
         { "package", f->package }, { "extras", f->extras }, { "command", f->command },
         { "arguments", f->arguments }, { "network", f->network ? "1" : "0" }, { "camera", f->camera ? "1" : "0" },
-        { "directories", dirs_ }, { "host", f->host ? "1" : "0" },
+        { "directories", dirs_ }, { "host", f->host ? "1" : "0" }, { "packages", NULL },
     };
-    for (size_t i = 0; i < sizeof values / sizeof values[0]; i++) {
-        if (conf_set(path, values[i][0], values[i][1]) < 0) {
-            if (f->is_new) {
-                unlink(path);
-            }
-            say_notice(1, _("Cannot write %s."), path);
-            return -1;
+    size_t nvalues = sizeof values / sizeof values[0];
+    int lock = app_control_lock(f->name), r = -1, why;
+    if (lock < 0) {
+        why = errno;
+    } else if (f->is_new) {
+        char base[CONF_SNAPSHOT_MAX], *text = NULL;
+        size_t blen = 0, tlen = 0;
+        if (!f->preset[0] || read_conf_bytes(f->preset, base, sizeof base, &blen) == 0) {
+            text = apply_changes(base, blen, values, nvalues, &tlen);
         }
+        r = text ? conf_compare_exchange(path, NULL, 0, text, tlen) : -1;
+        why = errno;
+        free(text);
+    } else {
+        r = conf_compare_update(path, f->snapshot_state ? f->snapshot : NULL, f->snapshot_len, values, nvalues);
+        why = errno;
     }
-    conf_set(path, "packages", NULL); /* the key from before package and extras */
+    if (lock >= 0) {
+        close(lock);
+    }
+    if (r < 0) {
+        if (why == EWOULDBLOCK) {
+            say_notice(1, _("%s is being started or built: nothing saved; save it again in a moment."), f->name);
+        } else if (why == ESTALE && f->is_new) {
+            say_notice(1, _("There is a container %s already."), f->name);
+        } else if (why == ESTALE) {
+            say_notice(1, _("%s changed since this form was opened: nothing saved (leave it and open it again)."),
+                       f->name);
+        } else {
+            say_notice(1, _("Cannot write %s."), path);
+        }
+        return -1;
+    }
     say_notice(0, _("%s saved (%s): it is so from its next start, its packages from its next build."), f->name, path);
     f->is_new = f->changed = 0;
     return 0;
@@ -2778,6 +2926,7 @@ static void edit_container_with(const char *name, const struct form *seed)
         snprintf(f.name, sizeof f.name, "%s", name);
         snprintf(path, sizeof path, "%s/%s.conf", CONF_DIR, name);
         conf_read(path, form_value, &f);
+        form_snapshot(&f, path);
         snprintf(path, sizeof path, "%s/%s/built", STATE, name);
         f.built = stat(path, &st) == 0;
         form_lookup(&f);

@@ -1,13 +1,132 @@
 /* The control channel between process 1 and its programs (see internal.h),
  * and the calls programs make through it (base.h). */
+#include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "internal.h"
+#include "session.h"
+
+#ifndef MSG_CMSG_CLOEXEC
+#define MSG_CMSG_CLOEXEC 0
+#endif
+/* A separate restricted owner channel: never the display's privileged
+ * control descriptor, and never given to a network worker. */
+static int session = -2, session_allowed, session_cancelled, session_blanked;
+static unsigned long long session_epoch, session_request;
+
+int base_session_fd(void)
+{
+    if (session == -2) {
+        const char *s = getenv("LOCACHY_SESSION_FD");
+        char *end = NULL;
+        long fd = s ? strtol(s, &end, 10) : -1;
+        session = s && end && !*end && fd >= 3 && fd <= 1048576 ? (int)fd : -1;
+        unsetenv("LOCACHY_SESSION_FD");
+        if (session >= 0) fcntl(session, F_SETFD, FD_CLOEXEC);
+    }
+    return session;
+}
+
+static int session_policy(const char *text)
+{
+    unsigned long long epoch;
+    int allowed, end = 0;
+    if (sscanf(text, "policy %llu %d%n", &epoch, &allowed, &end) != 2 || text[end] ||
+        (allowed != 0 && allowed != 1) || epoch < session_epoch) return 0;
+    int changed = epoch != session_epoch || allowed != session_allowed;
+    session_epoch = epoch;
+    session_allowed = allowed;
+    if (changed) session_cancelled = 0;
+    return changed;
+}
+
+int base_session_service(void)
+{
+    int fd = base_session_fd(), changed = 0;
+    if (fd < 0) return -1;
+    char text[160];
+    for (;;) {
+        ssize_t n = recv(fd, text, sizeof text - 1, MSG_DONTWAIT);
+        if (n < 0 && (errno == EAGAIN || errno == EINTR)) return changed;
+        if (n <= 0) {
+            close(fd);
+            session = -1;
+            session_allowed = session_cancelled = 0;
+            return -1;
+        }
+        text[n] = 0;
+        changed |= session_policy(text);
+    }
+}
+
+int base_session_input_allowed(void)
+{
+    return base_session_fd() >= 0 && session_allowed && session_cancelled;
+}
+
+/* Bounded requests: unsolicited revocations are processed before replies.
+ * A request never retries after a possible side effect. */
+static int session_ask(const char *verb, int value)
+{
+    int fd = base_session_fd();
+    if (fd < 0) return -1;
+    base_session_service();
+    if (session < 0) return -1;
+    unsigned long long id = ++session_request, epoch = session_epoch;
+    char text[160];
+    int len = snprintf(text, sizeof text, "%s %llu %llu %d", verb, id, epoch, value);
+    if (send(fd, text, (size_t)len, MSG_NOSIGNAL | MSG_DONTWAIT) != len) return -1;
+    struct timespec start, current;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    for (;;) {
+        clock_gettime(CLOCK_MONOTONIC, &current);
+        long left = 1000 - (current.tv_sec - start.tv_sec) * 1000 -
+                    (current.tv_nsec - start.tv_nsec) / 1000000;
+        if (left <= 0) return -1;
+        struct pollfd p = { .fd = fd, .events = POLLIN };
+        if (poll(&p, 1, (int)left) < 0 && errno == EINTR) continue;
+        if (!(p.revents & POLLIN)) return -1;
+        ssize_t n = recv(fd, text, sizeof text - 1, MSG_DONTWAIT);
+        if (n <= 0) return -1;
+        text[n] = 0;
+        if (strncmp(text, "policy ", 7) == 0) { session_policy(text); continue; }
+        unsigned long long got, got_epoch;
+        int ok, end = 0;
+        if (sscanf(text, "result %llu %llu %d%n", &got, &got_epoch, &ok, &end) == 3 &&
+            !text[end] && got == id) return ok && got_epoch == epoch && session_epoch == epoch ? 0 : -1;
+    }
+}
+
+int base_session_input_cancelled(void)
+{
+    if (session_blanked && (!base_screen_power || base_screen_power(1) != 0)) return -1;
+    session_blanked = 0;
+    if (session_ask("cancelled", 0) != 0) return -1;
+    session_cancelled = 1;
+    return 0;
+}
+
+int base_sleep_inhibit(int enabled)
+{
+    if (enabled && !base_session_input_allowed()) return -1;
+    return session_ask("inhibit", !!enabled);
+}
+
+int base_display_power(int on)
+{
+    if (!on && !base_session_input_allowed()) return -1;
+    if (session_ask("display", !!on) != 0 || !base_screen_power) return -1;
+    if (base_screen_power(!!on) != 0) return -1;
+    session_blanked = !on;
+    return 0;
+}
 
 static int ctl = -2; /* -2: $LOCACHY_CONTROL not read yet */
 static int shown;    /* a "take" arrived that key_get has not reported */
@@ -311,22 +430,19 @@ int base_app_open_own_tor(const char *name, const char *target, char *why, size_
     return app_open_verb("open-own-tor", name, target, why, size);
 }
 
+/* Published by open.c for programs. Process 1 does not link open.c (make.sh),
+ * so this is weak: process 1 never calls open_in_home. */
+__attribute__((weak)) int open_request_publish(const char *with, const char *target);
+
 int open_in_home(const char *with, const char *target)
 {
     static const char *const home[] = { "home", NULL };
-    char tmp[64];
     if (strchr(target, '\n') || (with && strchr(with, '\n'))) {
         return -1;
     }
-    /* Whole or not at all: home may read it as soon as it is there. */
-    snprintf(tmp, sizeof tmp, "%s.%d", OPEN_REQUEST, (int)getpid());
-    FILE *out = fopen(tmp, "we");
-    if (!out) {
-        return -1;
-    }
-    int ok = fprintf(out, "%s\n%s\n", with ? with : "", target) > 0;
-    if (fclose(out) != 0 || !ok || rename(tmp, OPEN_REQUEST) != 0) {
-        unlink(tmp);
+    /* One unique request in the queue (open.c), never a shared slot that a
+     * second producer could overwrite. */
+    if (!open_request_publish || open_request_publish(with, target) != 0) {
         return -1;
     }
     if (control_fd() >= 0) {

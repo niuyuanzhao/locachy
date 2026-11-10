@@ -206,14 +206,20 @@ static void base_program_name(const char *comm, char *out, size_t size)
 }
 
 /* Active or queued jobs in the same domain are shared across the UIs that
- * touch that domain (packages and settings share package, kernel, repository,
- * boot and container jobs; firmware shares firmware and package jobs). */
+ * touch that domain, by their kind, whoever asked (packages and settings share
+ * package, kernel, repository, boot, container, TPM, Secure Boot and security
+ * policy jobs, a command line's too, whose name /proc cuts to 15 bytes;
+ * firmware shares firmware and package jobs). */
 static int shared_active_job(const char *me, const struct jobs_row *r)
 {
-    int fw = strncmp(r->kind, "fw-", 3) == 0 || strncmp(r->kind, "spi-", 4) == 0;
+    int fw = strncmp(r->kind, "fw-", 3) == 0 || strncmp(r->kind, "spi-", 4) == 0 ||
+             strcmp(r->kind, "bios-set") == 0;
     if (jobs_ended(r)) return 0;
     if (strcmp(me, "firmware") == 0) return fw || strncmp(r->kind, "pkg-", 4) == 0;
     if (strcmp(me, "packages") == 0 || strcmp(me, "settings") == 0) return !fw;
+    /* The TPM and security programs share the package domain's jobs (whose
+     * names /proc cuts to 15 bytes: locachy-securi). */
+    if (strcmp(me, "tpm") == 0 || strcmp(me, "security") == 0 || strcmp(me, "locachy-securi") == 0) return !fw;
     return 0;
 }
 

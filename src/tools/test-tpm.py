@@ -53,6 +53,12 @@ class Tpm(unittest.TestCase):
         public.write_text("public\n")
         self.calls = []
         self.passwords = []
+        self.security = tpm.security_helper()
+        self.security.RC_CONF = root / "rc.conf"
+        self.security.RC_CONF.write_text('login_skip="0"\nlock_mode="low"\n')
+        self.security.LOCK = root / "security.lock"
+        self.security.MARKER = root / "security-policy.json"
+        self.patch("security_helper", lambda: self.security)
         self.patch("jobs_helper", lambda: types.SimpleNamespace(execution_mode=lambda: "offline"))
         self.failing = set()      # commands (their first two words) that fail
         self.tokens = {}       # dev -> [token]

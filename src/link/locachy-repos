@@ -43,6 +43,7 @@ What it writes is 0644 whatever its caller's umask: pacman as the build user
 import argparse
 import fcntl
 import json
+import importlib.util
 import os
 import re
 import shutil
@@ -86,36 +87,29 @@ def read_conf(path):
     return values
 
 
+def config_helper():
+    path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "locachy_config.py")
+    if not os.path.isfile(path):
+        path = "/usr/local/lib/locachy/locachy_config.py"
+    spec = importlib.util.spec_from_file_location("locachy_config", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def conf_set(path, name, value):
     """As base/rc.c's conf_set: NAME="VALUE" in place of NAME's line, or
     added; None removes it."""
-    lines, done = [], False
-    try:
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                if line.lstrip(" \t").startswith(name + "="):
-                    if value is not None and not done:
-                        lines.append(f'{name}="{value}"\n')
-                    done = True
-                    continue
-                lines.append(line)
-    except FileNotFoundError:
-        pass
-    if value is not None and not done:
-        lines.append(f'{name}="{value}"\n')
-    write_public(path, "".join(lines))
+    config_helper().update(path, [(name, value)])
+    os.chmod(path, 0o644)
 
 
 def write_public(path, text):
     """text replaces path whole, 0644 whatever the umask: pacman.conf, the
     mirror lists and rc.conf are read by others (makepkg's pacman as the
     build user, the programs)."""
-    tmp = path + ".locachy-new"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC | os.O_NOFOLLOW, 0o644)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        os.fchmod(f.fileno(), 0o644)
-        f.write(text)
-    os.replace(tmp, path)
+    config_helper().transaction(path, lambda _old: text.encode())
+    os.chmod(path, 0o644)
 
 
 def keep_old(path):
@@ -447,31 +441,56 @@ def cmd_status(args):
 
 
 PKG_LOCK_FD = -1
+# The host package domain (locachy_transaction.DOMAIN_LOCK): fixed, as in
+# locachy-pkg; a test harness may assign another path to this name.
+DOMAIN_LOCK_PATH = "/run/locachy/pkg.lock"
 
 
-def acquire_pkg_lock(custom_dir=False):
+def transaction_helper():
+    path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "locachy_transaction.py")
+    if not os.path.isfile(path):
+        path = "/usr/local/lib/locachy/locachy_transaction.py"
+    spec = importlib.util.spec_from_file_location("locachy_transaction", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def jobs_helper():
+    path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "locachy_jobs.py")
+    if not os.path.isfile(path):
+        path = "/usr/local/lib/locachy/locachy_jobs.py"
+    spec = importlib.util.spec_from_file_location("locachy_jobs", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def job_route(args):
+    """(status, mode). Online, a change to the host's repositories is a fixed
+    system job (repos-set, repos-rank) whose result the terminal follows;
+    another form is refused, never run in this process. In a job or offline,
+    no status: the change runs here."""
+    jobs = jobs_helper()
+    mode = jobs.execution_mode()
+    if mode != "queue":
+        return None, mode
+    if args.command == "apply" and len(args.set) == 1:
+        return jobs.submit("repos-set", list(args.set), wait=True), mode
+    if args.command == "rank" and args.country is None and args.cachyos_levels is None:
+        return jobs.submit("repos-rank", [], wait=True), mode
+    raise RuntimeError("this change has no fixed system job form; nothing changed")
+
+
+def acquire_pkg_lock(custom_dir=False, mode=None):
+    """The host package domain, never waiting: the same lock locachy-pkg takes
+    (locachy_transaction.hold_domain). Inside a system job only the descriptor
+    its runner passed down. A run in a directory of its own, as the tests use,
+    takes none; an offline root has its own /run and takes it there."""
     global PKG_LOCK_FD
-    lock_path = os.environ.get("LOCACHY_PKG_LOCK")
-    if not lock_path:
-        if custom_dir or os.geteuid() != 0:
-            return
-        try:
-            here, init_root = os.stat("/"), os.stat("/proc/1/root/")
-            if (here.st_dev, here.st_ino) != (init_root.st_dev, init_root.st_ino):
-                return
-            if os.readlink("/proc/1/exe") not in ("/init", "/usr/local/lib/locachy/init"):
-                return
-        except OSError:
-            return
-        os.makedirs("/run/locachy", mode=0o755, exist_ok=True)
-        lock_path = "/run/locachy/pkg.lock"
-    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        os.close(fd)
-        raise RuntimeError("another package or repository operation is running; wait for it to finish (home: J)")
-    PKG_LOCK_FD = fd
+    if custom_dir:
+        return
+    PKG_LOCK_FD = transaction_helper().hold_domain(DOMAIN_LOCK_PATH, inside_job=mode == "job")
 
 
 def main():
@@ -505,12 +524,17 @@ def main():
             level = args.level or recorded("level")
             sys.stdout.write(config(level, args.cpu or recorded("cpu", level) or level, args.mirrors, read_conf(args.rc)))
             return 0
+        mode = None
+        if args.command in ("apply", "rank") and not getattr(args, "check_only", False):
+            routed, mode = job_route(args)
+            if routed is not None:
+                return routed
         if args.command == "apply":
             if not args.check_only:
-                acquire_pkg_lock(PACMAN_CONF != "/etc/pacman.conf")
+                acquire_pkg_lock(PACMAN_CONF != "/etc/pacman.conf", mode)
             return cmd_apply(args)
         if args.command == "rank":
-            acquire_pkg_lock(args.dir != "/etc/pacman.d")
+            acquire_pkg_lock(args.dir != "/etc/pacman.d", mode)
             return cmd_rank(args)
         if args.command == "cachyos-levels":
             print(" ".join(cachyos_mirror_levels(args.level, args.cpu)))

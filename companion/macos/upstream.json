@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "name": "opendisplay",
+  "repository": "https://github.com/peetzweg/opendisplay.git",
+  "commit": "0f44853adc5d44646a9e4d74e4516db460efb8bb",
+  "version": "1.30.2",
+  "archive": "https://codeload.github.com/peetzweg/opendisplay/tar.gz/0f44853adc5d44646a9e4d74e4516db460efb8bb",
+  "sha256": "dba0ece10f0d0d810b63f64269d62dd3eaea52058f7566ea1159fb17be0f1a15",
+  "license": "GPL-3.0",
+  "files": {
+    "Mac/VirtualDisplay.swift": "db87b2e61fcbcdaa9e3d89bee41e346e971cd1414339d4ee6d5d07228b39fcee",
+    "Mac/OriginRestore.swift": "831ffdbc2f17595084b274a1d6d71a546087601b48fd80579067e609951712f4",
+    "Mac/VirtualCanvasSizing.swift": "6ce80a4c2740ec2a20a220fe0993107ef7c019918ba27dbeee4ac52a4fbaba90",
+    "Mac/CGVirtualDisplayPrivate.h": "526472a2d9d10b781c80c3c61da5caa024f83db54c4bec5a0b133bf29f39c013",
+    "LICENSE": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+  },
+  "patches": ["patches/session-display.patch"]
+}

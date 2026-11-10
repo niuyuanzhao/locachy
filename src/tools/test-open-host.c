@@ -171,23 +171,35 @@ int main(void)
     assert(open_rule("application/pdf", rule, sizeof rule) == OPEN_NO_RULE);
     puts("PASS rules: a program's, and one written for an alias");
 
-    assert(open_in_home(NULL, "https://example.org/a") == 0);
-    FILE *in = fopen(OPEN_REQUEST, "r");
+    /* The single slot of before is never overwritten: refused instead. */
     char text[512] = "";
-    assert(in && fread(text, 1, sizeof text - 1, in) > 0 && fclose(in) == 0);
-    assert(!strcmp(text, "\nhttps://example.org/a\n"));
+    put(OPEN_REQUEST, "old\n");
+    assert(open_in_home(NULL, "/x") < 0);
+    FILE *in = fopen(OPEN_REQUEST, "r");
+    assert(in && fread(text, 1, sizeof text - 1, in) == 4 && fclose(in) == 0 && !strcmp(text, "old\n"));
+    assert(unlink(OPEN_REQUEST) == 0);
+    puts("PASS open_in_home: a regular file in the spool's place is refused, not overwritten");
+
+    assert(open_in_home(NULL, "https://example.org/a") == 0);
     assert(open_in_home("program:view", "/x/y.pdf") == 0);
-    in = fopen(OPEN_REQUEST, "r");
-    memset(text, 0, sizeof text);
-    assert(in && fread(text, 1, sizeof text - 1, in) > 0 && fclose(in) == 0);
-    assert(!strcmp(text, "program:view\n/x/y.pdf\n"));
     assert(open_in_home(NULL, "/x\n/y") < 0 && open_in_home("a\nb", "/x") < 0);
-    DIR *run = opendir("/run/locachy");
-    struct dirent *e;
-    int files = 0;
-    while (run && (e = readdir(run)) != NULL) files += e->d_name[0] != '.';
-    assert(run && closedir(run) == 0 && files == 1); /* no temporary file left */
-    puts("PASS open_in_home: with and target, whole; a newline is refused");
+    struct stat spool;
+    assert(stat(OPEN_REQUEST, &spool) == 0 && S_ISDIR(spool.st_mode) && (spool.st_mode & 0777) == 0700);
+    struct dirent **queued;
+    int nqueued = scandir(OPEN_REQUEST, &queued, NULL, alphasort), k = 0;
+    const char *want[] = { "\nhttps://example.org/a\n", "program:view\n/x/y.pdf\n" };
+    for (int i = 0; i < nqueued; i++) {
+        const char *name = queued[i]->d_name;
+        if (!strcmp(name, ".") || !strcmp(name, "..")) continue;
+        char path[512];
+        snprintf(path, sizeof path, "%s/%s", OPEN_REQUEST, name);
+        memset(text, 0, sizeof text);
+        in = fopen(path, "r");
+        assert(k < 2 && !strncmp(name, "req-", 4)); /* no temporary left */
+        assert(in && fread(text, 1, sizeof text - 1, in) > 0 && fclose(in) == 0 && !strcmp(text, want[k++]));
+    }
+    assert(k == 2);
+    puts("PASS open_in_home: unique whole requests, queued in order; a newline is refused");
     puts("ALL PASSED");
     return 0;
 }

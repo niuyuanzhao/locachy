@@ -1,11 +1,12 @@
 /* Settings' Tor rows (test-settings-tor.sh builds and runs this): installed
  * and enabled stay apart, Tor's choice is a front that is there, a front Tor
- * uses is never switched off or removed under it, its firewall is loaded
- * before rc.conf says Tor is on and goes with it, and bridge lines are
- * checked as Tor takes them. tor-enforce and tor-client are scripts of the
- * test in TOR_TEST_DIR (they say what they were asked); rc.conf, process 1,
- * the packages and locachy-pkg are the test's own: nothing else is touched.
- * Build with -ffunction-sections -fdata-sections -Wl,--gc-sections. */
+ * uses is never switched off or removed under it, every change of the network
+ * is one transition of locachy_network.py (asked, not done here: its firewall,
+ * rc.conf and rules change together there), and bridge lines are checked as
+ * Tor takes them. The network helper is a double here: it keeps the rc.conf
+ * lines a real transition would commit and reports its status. rc.conf,
+ * process 1, the packages and locachy-pkg are the test's own: nothing else is
+ * touched. Build with -ffunction-sections -fdata-sections -Wl,--gc-sections. */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -22,9 +23,9 @@
 #ifndef TOR_TEST_DIR
 #error "TOR_TEST_DIR: the test's directory"
 #endif
-#define TOR_ENFORCE TOR_TEST_DIR "/tor-enforce"
 #define TOR_SERVICE TOR_TEST_DIR "/tor-client"
 #define TOR_STATE TOR_TEST_DIR "/state"
+#define SETTINGS_NETWORK_SET /* the double below stands in for locachy_network.py */
 
 static int fixture_access(const char *, int);
 static pid_t fixture_fork(void);
@@ -46,10 +47,16 @@ static int fixture_kill(pid_t, int);
 #undef access
 
 /* What is installed; whether a fork is locachy-pkg's (not run) or a script
- * of the test's (run); rc.conf's lines as written, in order. */
+ * of the test's (run); the rc.conf writes settings makes, in order. */
 static int fake_tor, fake_lyrebird, fake_mihomo, fake_pkg_fork, fake_forks, hups, fail_rc;
 static char rc_log[2048];
 static const char *keys_in;
+/* The network helper as a double: its status for the next request, and what
+ * an applied request leaves in rc.conf (the service lines and their modes). */
+static int net_status, net_calls;
+static char net_last[80], net_why[160];
+static int fake_tor_on, fake_clash_on;
+static char fake_front[16] = "mihomo", fake_mode[16] = "tun";
 
 static int fixture_access(const char *path, int mode)
 {
@@ -89,31 +96,45 @@ static int fixture_kill(pid_t pid, int sig)
     return kill(pid, sig);
 }
 
-/* The lines tor-enforce was asked for, as "load mihomo;remove;". */
-static void enforced(char *out, size_t size)
+/* locachy_network.py set [--tor T] [--clash C]: what it was asked (net_last),
+ * and when it applied, the state its rc.conf lines would then show. */
+static int network_set(const char *tor, const char *clash, char *why, size_t size)
 {
-    char line[128];
-    size_t n = 0;
-    out[0] = '\0';
-    FILE *f = fopen(TOR_TEST_DIR "/enforce.log", "r");
-    while (f && fgets(line, sizeof line, f) && n < size) {
-        line[strcspn(line, "\n")] = '\0';
-        n += (size_t)snprintf(out + n, size - n, "%s;", line);
+    net_calls++;
+    snprintf(net_last, sizeof net_last, "tor=%s clash=%s", tor ? tor : "-", clash ? clash : "-");
+    if (net_status == 0) {
+        if (tor) {
+            fake_tor_on = strcmp(tor, "off") != 0;
+            if (fake_tor_on) snprintf(fake_front, sizeof fake_front, "%s", tor);
+        }
+        if (clash) {
+            fake_clash_on = strcmp(clash, "off") != 0;
+            if (fake_clash_on) snprintf(fake_mode, sizeof fake_mode, "%s", clash);
+        }
     }
-    if (f) fclose(f);
+    snprintf(why, size, "%s", net_why);
+    return net_status;
 }
 
 int rc_set(const char *name, const char *value)
 {
-    char before[512];
     if (fail_rc) return -1;
-    enforced(before, sizeof before);
     size_t n = strlen(rc_log);
-    /* Each write with what tor-enforce had done by then. */
-    snprintf(rc_log + n, sizeof rc_log - n, "%s=%s [%s]\n", name, value ? value : "(none)", before);
+    snprintf(rc_log + n, sizeof rc_log - n, "%s=%s\n", name, value ? value : "(none)");
     return 0;
 }
-int rc_read(void (*fn)(const char *, const char *, void *), void *arg) { (void)fn; (void)arg; return 0; }
+int rc_read(void (*fn)(const char *, const char *, void *), void *arg)
+{
+    if (fake_clash_on) {
+        fn("service_clash", CLASH_SERVICE, arg);
+        fn("clash_mode", fake_mode, arg);
+    }
+    if (fake_tor_on) {
+        fn("service_tor", TOR_SERVICE, arg);
+        fn("tor_front", fake_front, arg);
+    }
+    return 0;
+}
 int monitor_internal(const char *name) { (void)name; return 0; } /* no screens here */
 int monitor_profiles_connected(struct monitor_identity *out, int max)
 { (void)out; (void)max; abort(); } /* adjust() retains the screen branches, never exercised here */
@@ -154,10 +175,12 @@ static void script(const char *name, const char *body)
 static void reset(void)
 {
     rc_log[0] = '\0';
-    unlink(TOR_TEST_DIR "/enforce.log");
-    unlink(TOR_TEST_DIR "/enforce.fail");
     notice[0] = '\0';
     hups = 0;
+    net_calls = 0;
+    net_status = 0;
+    net_why[0] = '\0';
+    net_last[0] = '\0';
 }
 
 static void choose(int dir)
@@ -179,8 +202,6 @@ int main(void)
 {
     char done[512], out[1024];
     assert(mkdir(TOR_TEST_DIR, 0700) == 0 || errno == EEXIST);
-    script("tor-enforce", "#!/bin/sh\necho \"$*\" >>" TOR_TEST_DIR "/enforce.log\n"
-                          "[ ! -e " TOR_TEST_DIR "/enforce.fail ] || exit 1\n");
     script("tor-client", "#!/bin/sh\n[ \"$1\" = --status ] && echo 'connecting through bridges: 10% conn_pt'\n");
     unlink(TOR_STATE "/bridges");
 
@@ -207,10 +228,10 @@ int main(void)
     assert(!tor_bridge_line("", out, sizeof out) && !tor_bridge_line("obfs4", out, sizeof out));
     puts("PASS bridge lines: obfs4 and WebTunnel only, as Tor's Bridge takes them");
 
-    /* Not installed: the choice is refused, nothing written. */
+    /* Not installed: the choice is refused, the network is not asked. */
     reset();
     choose(+1);
-    assert(!tor_on && !rc_log[0] && !hups && strstr(notice, "Tor is not installed"));
+    assert(!tor_on && net_calls == 0 && !hups && strstr(notice, "Tor is not installed"));
     puts("PASS enabling without the package is refused");
 
     /* Installing is a package job only: it does not switch Tor on. */
@@ -219,7 +240,7 @@ int main(void)
     selected = tr_index();
     adjust(+1);
     fake_pkg_fork = 0;
-    assert(pkg_job && !strcmp(pkg_action, "install") && !strcmp(pkg_name, TOR_PACKAGES) && !tor_on && !rc_log[0]);
+    assert(pkg_job && !strcmp(pkg_action, "install") && !strcmp(pkg_name, TOR_PACKAGES) && !tor_on && net_calls == 0);
     assert(!strcmp(pkg_title(), "Tor (tor, lyrebird)") && strstr(tor_status(), "installing"));
     choose(+1);
     assert(!tor_on && strstr(notice, "still being installed"));
@@ -229,44 +250,44 @@ int main(void)
     assert(!strcmp(tor_status(), "off: the network goes direct"));
     puts("PASS installing is apart from switching on");
 
-    /* No front at all: refused, never direct; no firewall, no rc.conf. */
+    /* No front at all: refused, never direct; the network is not asked. */
     reset();
     choose(+1);
-    assert(!tor_on && !rc_log[0] && strstr(notice, "Tor never goes out directly"));
-    enforced(done, sizeof done);
-    assert(!done[0]);
+    assert(!tor_on && net_calls == 0 && strstr(notice, "Tor never goes out directly"));
     /* A bridge line but no lyrebird: still nothing to go out through. */
     add_bridge("obfs4 192.0.2.10:443 0123456789ABCDEF0123456789ABCDEF01234567 cert=AAAA iat-mode=0");
     assert(tor_nbridges == 1 && !strcmp(tor_transports, "obfs4") && strstr(notice, "Bridge added (1 now)"));
     reset();
     choose(+1);
-    assert(!tor_on && !rc_log[0] && strstr(notice, "Tor never goes out directly"));
+    assert(!tor_on && net_calls == 0 && strstr(notice, "Tor never goes out directly"));
     puts("PASS without a front (Clash off; bridges without lyrebird) Tor stays off");
 
-    /* Clash on: through Clash, its firewall loaded before rc.conf says so. */
+    /* Clash on: through Clash, one transition (the firewall and rc.conf there). */
     fake_mihomo = 1;
-    clash_on = 1;
+    fake_clash_on = 1;
+    snprintf(fake_mode, sizeof fake_mode, "tun");
+    load_network_policy();
     reset();
     choose(+1);
-    assert(tor_on && tor_choice() == 1 && hups == 1 && strstr(notice, "Tor through Clash"));
-    assert(!strcmp(rc_log, "tor_front=mihomo [load mihomo;]\nservice_tor=" TOR_SERVICE " [load mihomo;]\n"));
-    puts("PASS through Clash: the firewall first, then tor_front and service_tor");
+    assert(tor_on && tor_choice() == 1 && hups == 1 && net_calls == 1 && !strcmp(net_last, "tor=mihomo clash=-") &&
+           strstr(notice, "Tor through Clash"));
+    puts("PASS through Clash: one transition to tor=mihomo, then process 1 told");
 
-    /* Clash is its front: off and removal refused; TUN to port only allowed. */
+    /* Clash is its front: off and removal refused; TUN to its port only allowed. */
     reset();
     selected = cl_index() + 1;
     clash_proxy = 0;
     adjust(+1); /* TUN to its port only */
-    assert(clash_on && clash_proxy && strstr(rc_log, "clash_mode=proxy"));
+    assert(clash_on && clash_proxy && net_calls == 1 && !strcmp(net_last, "tor=- clash=proxy"));
     reset();
-    adjust(+1); /* its port only to off */
-    assert(clash_on && clash_proxy && !rc_log[0] && strstr(notice, "Clash is Tor's front"));
+    adjust(+1); /* its port only to off: refused, Tor uses it */
+    assert(clash_on && clash_proxy && net_calls == 0 && strstr(notice, "Clash is Tor's front"));
     reset();
     fake_pkg_fork = 1;
     selected = cl_index();
     adjust(+1);
     fake_pkg_fork = 0;
-    assert(clash_on && !pkg_job && !rc_log[0] && strstr(notice, "Clash is Tor's front"));
+    assert(clash_on && !pkg_job && net_calls == 0 && strstr(notice, "Clash is Tor's front"));
     /* Nor is Tor removed while it is on. */
     selected = tr_index();
     fake_pkg_fork = 1;
@@ -275,48 +296,48 @@ int main(void)
     assert(!pkg_job && strstr(notice, "Tor is on: switch it off"));
     puts("PASS a front in use: Clash off, Clash removed, Tor removed are refused");
 
-    /* Bridges without lyrebird are passed over: Right from Clash is off. */
+    /* Off: one transition (the firewall and rc.conf together); the bridges
+     * without lyrebird are passed over on the way. */
     reset();
     choose(+1);
-    assert(!tor_on && tor_choice() == 0 && strstr(notice, "Tor off: the network goes direct"));
-    assert(!strcmp(rc_log, "service_tor=(none) []\n"));
-    enforced(done, sizeof done);
-    assert(!strcmp(done, "remove;") && hups == 1);
-    puts("PASS off: rc.conf first, then the firewall goes (bridges without lyrebird passed over)");
+    assert(!tor_on && tor_choice() == 0 && hups == 1 && net_calls == 1 && !strcmp(net_last, "tor=off clash=-") &&
+           strstr(notice, "Tor off: the network goes direct"));
+    puts("PASS off: one transition (tor=off), bridges without lyrebird passed over");
 
     /* lyrebird in: through bridges, then Left back through Clash. */
     fake_lyrebird = 1;
     reset();
     choose(-1); /* off, Left: through bridges */
-    assert(tor_on && tor_choice() == 2);
-    assert(!strcmp(rc_log, "tor_front=bridges [load bridges;]\nservice_tor=" TOR_SERVICE " [load bridges;]\n"));
+    assert(tor_on && tor_choice() == 2 && net_calls == 1 && !strcmp(net_last, "tor=bridges clash=-"));
     assert(!strcmp(tor_status(), "connecting through bridges: 10% conn_pt"));
-    /* Clash may go now; the bridge lines may not. */
+    /* Clash may go now (it is on, through its port only); the bridge lines may not. */
     reset();
     selected = cl_index() + 1;
     adjust(+1); /* its port only to off */
-    assert(!clash_on && strstr(rc_log, "service_clash=(none)") && strstr(notice, "through Tor alone"));
+    assert(!clash_on && net_calls == 1 && !strcmp(net_last, "tor=- clash=off") && strstr(notice, "through Tor alone"));
     tor_remove_bridges();
     assert(tor_nbridges == 1 && strstr(notice, "Tor goes out through these bridges"));
     /* Clash off: through Clash is passed over too. */
     reset();
     choose(-1); /* bridges, Left: Clash (not there), then off */
-    assert(!tor_on && strstr(rc_log, "service_tor=(none)"));
+    assert(!tor_on && net_calls == 1 && !strcmp(net_last, "tor=off clash=-"));
     puts("PASS through bridges; their lines kept while Tor uses them; Clash off passed over");
 
-    /* A failed firewall leaves Tor as it was; so does a failed rc.conf. */
+    /* A blocked network (status 1) leaves Tor as it was, and says why. */
     reset();
-    FILE *fail = fopen(TOR_TEST_DIR "/enforce.fail", "w");
-    assert(fail && fclose(fail) == 0);
-    choose(+1);
-    assert(!tor_on && !rc_log[0] && strstr(notice, "Cannot load Tor's firewall"));
+    net_status = 1;
+    snprintf(net_why, sizeof net_why, "%s", "rule load failed");
+    choose(+1); /* off to bridges */
+    net_status = 0;
+    assert(!tor_on && net_calls == 1 && hups == 1 && strstr(notice, "The network is blocked until this succeeds: rule load failed"));
+    /* A refused change (status 2) changes nothing and says why. */
     reset();
-    fail_rc = 1;
+    net_status = 2;
+    snprintf(net_why, sizeof net_why, "%s", "refused: Tor needs Clash");
     choose(+1);
-    fail_rc = 0;
-    enforced(done, sizeof done);
-    assert(!tor_on && !strcmp(done, "load bridges;remove;") && strstr(notice, "Cannot write"));
-    puts("PASS a firewall or rc.conf that fails leaves Tor as it was");
+    net_status = 0;
+    assert(!tor_on && net_calls == 1 && hups == 0 && strstr(notice, "Not changed: refused: Tor needs Clash"));
+    puts("PASS a blocked network and a refused change leave Tor as it was, and the notice says why");
 
     /* Off, the bridge lines go (Delete twice); a bad line is refused. */
     reset();
@@ -342,5 +363,7 @@ int main(void)
     pkg_check();
     puts("PASS removing with Tor off");
     puts("settings: Tor's rows passed.");
+    (void)done;
+    (void)out;
     return 0;
 }

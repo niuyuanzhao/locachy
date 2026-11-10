@@ -1,0 +1,22 @@
+# /etc/pacman.d/hooks/89-locachy-pacman-guard.hook (make.sh): a pacman
+# transaction that LOCachy did not start (pacman typed as root) takes the host
+# package domain before it changes anything and keeps it until pacman has
+# exited (locachy-pacman-guard), so no LOCachy job reads or changes the host
+# meanwhile. When a job or another package operation holds the domain, the
+# transaction stops here and nothing is changed. A system job's own pacman and
+# an offline root (the installer, container and build roots) pass at once.
+# Not guarded: pacman -Sy alone (a database refresh) runs no transaction and
+# no hook. If the guard's child is killed while pacman runs (SIGKILL), the
+# kernel releases the domain with it, before pacman has finished.
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Target = *
+
+[Action]
+Description = LOCachy: taking the host package domain for this transaction...
+When = PreTransaction
+Exec = /usr/local/lib/locachy/locachy-pacman-guard pre
+AbortOnFail

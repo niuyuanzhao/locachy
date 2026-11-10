@@ -1264,9 +1264,115 @@ int screen_take(int lease)
     return 1;
 }
 
+/* Output power (session.h's base_screen_power: authorized, temporary, never
+ * a brightness setting): the DPMS property of each connector this process
+ * shows. Nothing here sets a mode, disables a CRTC or touches a framebuffer
+ * or the backlight; an atomic driver marks the CRTC inactive, keeping its
+ * mode and framebuffer, and active again on DPMS on, with no mode set from
+ * here.
+ *
+ * What this process turned off it turns on again when it gives the screen
+ * up: screen_release (process 1's "release", a new take) and exit. SIGKILL
+ * leaves the outputs off: the kernel ends the lease without touching them
+ * (drm_lease.c). The next mode set on them turns them on, as it sets the
+ * CRTC active (atomic drivers then report DPMS on; the legacy CRTC helpers
+ * make a full mode set when a connector's DPMS is not on), and process 1
+ * makes one for the outputs it takes back (screen_take_back). */
+#ifndef SCREEN_POWER_IOCTL
+#define SCREEN_POWER_IOCTL ioctl /* tools/test-screen-power.c: a recording fake */
+#endif
+static int dark, dark_exit; /* DPMS off set by this process; the exit hook */
+static pid_t dark_pid;      /* not a child forked since */
+
+/* The id of the connector's DPMS property (0: it has none), by name from the
+ * kernel's list of its properties. Not GETCONNECTOR: asked for no modes, it
+ * probes the connector (an EDID read). -1: the list cannot be read. */
+static int dpms_property(int fd, uint32_t connector, uint32_t *id)
+{
+    *id = 0;
+    for (int retry = 0; retry < 4; retry++) {
+        struct drm_mode_obj_get_properties list = { .obj_id = connector,
+                                                    .obj_type = DRM_MODE_OBJECT_CONNECTOR };
+        if (SCREEN_POWER_IOCTL(fd, DRM_IOCTL_MODE_OBJ_GETPROPERTIES, &list) < 0) return -1;
+        uint32_t n = list.count_props;
+        uint32_t *ids = array(n, sizeof *ids);
+        uint64_t *values = array(n, sizeof *values);
+        int ok = ids != NULL && values != NULL;
+        if (ok) {
+            list.props_ptr = (uintptr_t)ids;
+            list.prop_values_ptr = (uintptr_t)values;
+            ok = SCREEN_POWER_IOCTL(fd, DRM_IOCTL_MODE_OBJ_GETPROPERTIES, &list) == 0;
+        }
+        for (uint32_t i = 0; ok && list.count_props <= n && i < list.count_props && !*id; i++) {
+            struct drm_mode_get_property p = { .prop_id = ids[i] };
+            if (SCREEN_POWER_IOCTL(fd, DRM_IOCTL_MODE_GETPROPERTY, &p) == 0 &&
+                strncmp(p.name, "DPMS", sizeof p.name) == 0) *id = ids[i];
+        }
+        int error = errno;
+        free(ids);
+        free(values);
+        errno = error;
+        if (!ok) return -1;
+        if (list.count_props <= n) return 0;
+    }
+    errno = EAGAIN; /* the list kept growing */
+    return -1;
+}
+
+static int connector_power(int fd, const struct output *o, int on)
+{
+    uint32_t prop;
+    if (dpms_property(fd, o->conn_id, &prop) < 0) {
+        say("screen: %s: cannot list its properties: %m", o->name);
+    } else if (prop == 0) {
+        say("screen: %s has no DPMS property", o->name);
+    } else {
+        struct drm_mode_obj_set_property set = { .value = on ? DRM_MODE_DPMS_ON : DRM_MODE_DPMS_OFF,
+            .prop_id = prop, .obj_id = o->conn_id, .obj_type = DRM_MODE_OBJECT_CONNECTOR };
+        if (SCREEN_POWER_IOCTL(fd, DRM_IOCTL_MODE_OBJ_SETPROPERTY, &set) == 0) return 0;
+        say("screen: %s: DPMS %s refused: %m", o->name, on ? "on" : "off");
+    }
+    return -1;
+}
+
+/* Once: a lease about to end cannot be asked again. */
+static void power_restore(void)
+{
+    if (!dark || dark_pid != getpid()) return;
+    dark = 0;
+    for (uint32_t i = 0; card >= 0 && i < noutputs; i++) connector_power(card, &outputs[i], 1);
+}
+
+int base_screen_power(int on)
+{
+    if (window_mode || card < 0 || noutputs == 0 || lent) return -1;
+    if (!on && !dark_exit) {
+        if (atexit(power_restore) != 0) return -1;
+        dark_exit = 1;
+    }
+    int was_dark = dark;
+    uint32_t i = 0;
+    while (i < noutputs && connector_power(card, &outputs[i], on) == 0) {
+        i++;
+        if (!on) { dark = 1; dark_pid = getpid(); }
+    }
+    if (i == noutputs) {
+        if (on) dark = 0;
+        return 0;
+    }
+    /* Never half off: what this call turned off is turned on again. */
+    if (!on && !was_dark) {
+        int back = 1;
+        while (i > 0) back &= connector_power(card, &outputs[--i], 1) == 0;
+        if (back) dark = 0;
+    }
+    return -1;
+}
+
 void screen_release(void)
 {
     hover_output = -1;
+    power_restore(); /* while the connectors are still this process's */
     clear_outputs(card);
     if (card >= 0) {
         close(card); /* ends the lease; shadow remains for the next take */

@@ -18,6 +18,7 @@ belonging to another process. This is dependency-consistent packaging, not
 filesystem rollback or an atomic guarantee about arbitrary package hooks.
 """
 import contextlib
+import fcntl
 import glob
 import hashlib
 import json
@@ -26,6 +27,7 @@ from pathlib import Path
 import re
 import signal
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -33,6 +35,67 @@ import time
 
 class TransactionError(RuntimeError):
     pass
+
+
+# The host package domain: the jobs runner holds it for every job that changes
+# the host, locachy-pkg and locachy-repos take or inherit it, the pacman guard
+# holds it for a transaction LOCachy did not start. A fixed path: never one
+# given at run time.
+DOMAIN_LOCK = "/run/locachy/pkg.lock"
+
+
+class DomainBusy(RuntimeError):
+    """Another package or repository operation holds the host domain."""
+
+
+def inherited_domain_fd(path=DOMAIN_LOCK):
+    """The descriptor of the domain lock a caller passed down (the jobs
+    runner, an execv of the same tool), matched by the lock file's (st_dev,
+    st_ino), never by a name; -1 when none was inherited."""
+    try:
+        want = os.stat(path)
+    except FileNotFoundError:
+        return -1
+    for name in os.listdir("/proc/self/fd"):
+        try:
+            fd = int(name)
+            if fd <= 2 or fcntl.fcntl(fd, fcntl.F_GETFD) & fcntl.FD_CLOEXEC:
+                continue
+            got = os.fstat(fd)
+        except (OSError, ValueError):
+            continue
+        if stat.S_ISREG(got.st_mode) and (got.st_dev, got.st_ino) == (want.st_dev, want.st_ino):
+            return fd
+    return -1
+
+
+def hold_domain(path=DOMAIN_LOCK, inside_job=False):
+    """Hold the host package domain without waiting: the inherited open file
+    description when the caller holds it, else a new one. Inside a system job
+    only the inherited one: a job never takes the domain itself (its runner
+    holds it for every job that changes the host), so none there means
+    refusal, and no lock file is made. Returns the descriptor (inheritable: an
+    execv of the same tool keeps it), or raises DomainBusy."""
+    fd = inherited_domain_fd(path)
+    if fd < 0 and inside_job:
+        raise DomainBusy("this system job does not hold the host package domain; nothing changed")
+    if fd < 0:
+        os.makedirs(os.path.dirname(path), mode=0o755, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+            raise DomainBusy("the package domain lock is not an owned regular file")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as e:
+        os.close(fd)
+        raise DomainBusy("another package or repository operation is running; "
+                         "wait for it to finish (home: J)") from e
+    except DomainBusy:
+        os.close(fd)
+        raise
+    os.set_inheritable(fd, True)
+    return fd
 
 
 def file_hash(path):
@@ -63,6 +126,14 @@ def tree_hash(path):
                     h.update(data)
             h.update(b"\0")
     return h.hexdigest()
+
+
+def sync_directory(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def write_json(path, value):

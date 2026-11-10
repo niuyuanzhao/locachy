@@ -6,6 +6,7 @@ locachy-efi [--esp /efi] [--first]
 Normal boot-image updates keep the existing order (append if missing).
 """
 import argparse
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -125,7 +126,29 @@ def entries(text):
     return order, found
 
 
+# Every registration's read-modify-write of NVRAM under one lock. Fixed: a test
+# harness may assign another path to this name, nothing at run time does.
+EFI_LOCK_PATH = "/run/locachy/efi.lock"
+
+
+def efi_lock():
+    path = EFI_LOCK_PATH
+    os.makedirs(os.path.dirname(path), mode=0o755, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
 def register(esp, first=False):
+    lock = efi_lock()
+    try:
+        return _register(esp, first)
+    finally:
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        os.close(lock)
+
+
+def _register(esp, first=False):
     esp_path = Path(os.path.abspath(esp))
     disk, partition, guid = esp_target(esp_path)
     prev_file = esp_path / "EFI/locachy/locachy-prev.efi"

@@ -1471,66 +1471,84 @@ static void load_fingers(void)
     }
 }
 
-/* sudo's PAM file: the line of pam_locachy_any.so (the lock screen's other
- * ways beside the typed password) with the ways switched on, and the line of
- * pam_locachy_duress.so while duress is on: both before its first auth line,
- * in that order (the duress line after pam_locachy_any.so's). Why before:
- * Arch's sudo is "auth include system-auth", and system-auth's
- * "auth [default=die] pam_faillock.so authfail" ends the stack at a wrong
- * password (which the duress password is), so a line after the auth lines
- * never runs. None of pam_locachy_any.so when the threat level is high or the
- * ways are off. Old copies of either line go first. 0 if written; -1 also when a
- * line is wanted and there is no auth line to place it by (the file is left
- * as it is). */
-#define SUDO_PAM "/etc/pam.d/sudo"
+/* The boot lock, the threat level, the lock screen's other ways (fingerprint,
+ * face) and duress change rc.conf, sudo's PAM file and the boot image
+ * together: one system job (locachy-security), which checks the change again
+ * against the TPM and the policy as they are when it runs (a queued TPM
+ * binding never outranks a later boot lock or high threat level). Nothing is
+ * shown as changed before it ends; rc.conf is read again then. */
+static int security_job;
+static const char *security_done; /* the notice once it has been applied; NULL: the general one */
 
-static int sudo_ways(void)
+static void on_security_rc(const char *name, const char *value, void *arg)
 {
-    char lines[64][256], line[256];
-    int n = 0, first_auth = -1, any = !lock_high && (fingerprint_on || face_on);
-    FILE *in = fopen(SUDO_PAM, "r");
-    if (!in) {
-        return -1;
+    (void)arg;
+    if (strcmp(name, "login_skip") == 0) {
+        login_skip = strcmp(value, "1") == 0;
+    } else if (strcmp(name, "unlock_fingerprint") == 0) {
+        fingerprint_on = strcmp(value, "1") == 0;
+    } else if (strcmp(name, "unlock_face") == 0) {
+        face_on = strcmp(value, "1") == 0;
+    } else if (strcmp(name, "lock_mode") == 0) {
+        lock_high = strcmp(value, "high") == 0;
+    } else if (strcmp(name, "duress_enabled") == 0) {
+        duress_on = strcmp(value, "1") == 0;
     }
-    while (fgets(line, sizeof line, in)) {
-        if (strstr(line, "pam_locachy_any.so") || strstr(line, "pam_locachy_duress.so")) {
-            continue;
-        }
-        if (n == 64) { /* longer than kept here: refused, the file is left as it is */
-            fclose(in);
-            return -1;
-        }
-        snprintf(lines[n], sizeof lines[n], "%s", line);
-        if (first_auth < 0 && strncmp(line + strspn(line, " \t"), "auth", 4) == 0) {
-            first_auth = n;
-        }
-        n++;
+}
+
+static void load_security_policy(void)
+{
+    int before[5] = { login_skip, fingerprint_on, face_on, lock_high, duress_on };
+    login_skip = fingerprint_on = face_on = lock_high = duress_on = 0;
+    if (rc_read(on_security_rc, NULL) < 0) { /* no file: keep what is shown */
+        login_skip = before[0]; fingerprint_on = before[1]; face_on = before[2];
+        lock_high = before[3]; duress_on = before[4];
     }
-    fclose(in);
-    if ((any || duress_on) && first_auth < 0) {
-        return -1;
+}
+
+/* locachy-security set POLICY VALUE, or remove-duress (policy NULL). 1 once
+ * queued, with queued as the notice (NULL: the general one); 0 with why. */
+static int security_submit(const char *policy, const char *value, const char *queued, const char *done)
+{
+    const char *set[] = { "set", policy, value, NULL };
+    const char *remove[] = { "remove-duress", NULL };
+    char why[160];
+    int id, position;
+    if (security_job) {
+        snprintf(notice, sizeof notice, "%s", _("Wait: a security change is still being applied."));
+        return 0;
     }
-    FILE *out = fopen(SUDO_PAM ".tmp", "w");
-    if (!out) {
-        return -1;
+    if (jobs_submit("security-policy", policy ? set : remove, &id, &position, why, sizeof why) < 0) {
+        snprintf(notice, sizeof notice, _("Not changed: %s"), why);
+        return 0;
     }
-    for (int i = 0; i < n; i++) {
-        if (i == first_auth) {
-            if (any) {
-                fprintf(out, "auth\t\tsufficient\tpam_locachy_any.so%s%s\n",
-                        fingerprint_on ? " locachy-lock-fingerprint" : "", face_on ? " locachy-lock-face" : "");
-            }
-            if (duress_on) {
-                fputs("auth\t\toptional\tpam_locachy_duress.so\n", out);
-            }
-        }
-        fputs(lines[i], out);
+    security_job = id;
+    security_done = done;
+    snprintf(notice, sizeof notice, "%s", queued ? queued : _("Security change queued; it shows here once applied."));
+    return 1;
+}
+
+static int job_ended(int id, struct jobs_row *r, char *log, size_t size);
+
+/* The security job has ended: what it left, read again. */
+static void security_check(void)
+{
+    struct jobs_row r;
+    char log[96];
+    if (!security_job || !job_ended(security_job, &r, log, sizeof log)) {
+        return;
     }
-    if (fclose(out) != 0 || rename(SUDO_PAM ".tmp", SUDO_PAM) != 0) {
-        unlink(SUDO_PAM ".tmp");
-        return -1;
+    security_job = 0;
+    load_security_policy();
+    load_tpm_status();
+    load_duress_status();
+    if (r.status == 0) {
+        snprintf(notice, sizeof notice, "%s", security_done ? security_done : _("Security settings applied."));
+    } else {
+        snprintf(notice, sizeof notice, _("Security settings not applied: %s"),
+                 r.last[0] ? r.last : _("the job failed"));
     }
-    return 0;
+    security_done = NULL;
 }
 
 /* Faces: howdy, with linux-enable-ir-emitter (most laptops' infrared
@@ -2550,23 +2568,148 @@ static void tor_remove_bridges(void)
     snprintf(notice, sizeof notice, "%s", _("Bridge lines removed."));
 }
 
-/* tor-enforce ACTION [FRONT]: 0 if it did it. */
-static int tor_enforce(const char *action, const char *front)
+/* The network layers (Tor, Clash) change only through locachy_network.py:
+ * one fail-closed transition each (a block first, then rc.conf and both
+ * layers' rules together, then the block goes). A failure leaves the network
+ * blocked, never direct. */
+#ifndef NETWORK_POLICY
+#define NETWORK_POLICY "/usr/local/lib/locachy/locachy_network.py"
+#endif
+
+static void on_network_rc(const char *name, const char *value, void *arg)
 {
-    char *const argv[] = { TOR_ENFORCE, (char *)action, (char *)front, NULL };
-    int status = -1;
+    (void)arg;
+    if (strcmp(name, "service_clash") == 0) {
+        clash_on = 1;
+    } else if (strcmp(name, "clash_mode") == 0) {
+        clash_proxy = strcmp(value, "proxy") == 0;
+    } else if (strcmp(name, "service_tor") == 0) {
+        tor_on = 1;
+    } else if (strcmp(name, "tor_front") == 0) {
+        snprintf(tor_front, sizeof tor_front, "%s", value);
+    }
+}
+
+/* rc.conf's network lines read again, as the transition left them. */
+static void load_network_policy(void)
+{
+    int clash = clash_on, proxy = clash_proxy, tor = tor_on;
+    char front[sizeof tor_front];
+    snprintf(front, sizeof front, "%s", tor_front);
+    clash_on = clash_proxy = tor_on = 0;
+    tor_front[0] = '\0';
+    if (rc_read(on_network_rc, NULL) < 0) { /* no file: keep what is shown */
+        clash_on = clash;
+        clash_proxy = proxy;
+        tor_on = tor;
+        snprintf(tor_front, sizeof tor_front, "%s", front);
+    }
+}
+
+static int network_set(const char *tor, const char *clash, char *why, size_t size);
+#ifndef SETTINGS_NETWORK_SET
+/* locachy_network.py set [--tor T] [--clash C], a layer left out staying as
+ * configured. Its exit status (0 applied; 1 failed, the network blocked; 2
+ * refused, nothing changed; 4 failed unprotected; 127 not run; -1 no status),
+ * its last line in why. */
+static int network_set(const char *tor, const char *clash, char *why, size_t size)
+{
+    char *argv[8];
+    int n = 0, p[2], status = 0;
+    argv[n++] = "/usr/bin/python3";
+    argv[n++] = NETWORK_POLICY;
+    argv[n++] = "set";
+    if (tor) {
+        argv[n++] = "--tor";
+        argv[n++] = (char *)tor;
+    }
+    if (clash) {
+        argv[n++] = "--clash";
+        argv[n++] = (char *)clash;
+    }
+    argv[n] = NULL;
+    why[0] = '\0';
+    if (pipe2(p, O_CLOEXEC) < 0) {
+        return -1;
+    }
     pid_t pid = fork();
     if (pid == 0) {
-        int null = open("/dev/null", O_RDWR);
+        int null = open("/dev/null", O_RDONLY);
         if (null >= 0) {
             dup2(null, STDIN_FILENO);
-            dup2(null, STDOUT_FILENO);
-            dup2(null, STDERR_FILENO);
         }
+        dup2(p[1], STDOUT_FILENO);
+        dup2(p[1], STDERR_FILENO);
         execv(argv[0], argv);
         _exit(127);
     }
-    return pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
+    close(p[1]);
+    char out[2048];
+    size_t len = 0;
+    for (;;) {
+        ssize_t got = read(p[0], out + len, sizeof out - 1 - len);
+        if (got < 0 && errno == EINTR) {
+            continue;
+        }
+        if (got <= 0) {
+            break;
+        }
+        len += (size_t)got;
+        if (len == sizeof out - 1) { /* keep the end: its last line says why */
+            size_t keep = len / 2;
+            memmove(out, out + len - keep, keep);
+            len = keep;
+        }
+    }
+    close(p[0]);
+    out[len] = '\0';
+    if (pid < 0) {
+        return -1;
+    }
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) {
+            return -1;
+        }
+    }
+    while (len > 0 && (out[len - 1] == '\n' || out[len - 1] == '\r')) {
+        out[--len] = '\0';
+    }
+    const char *last = strrchr(out, '\n');
+    const char *text = last ? last + 1 : out;
+    size_t text_len = strlen(text);
+    if (size > 0) { /* the notice keeps what fits */
+        if (text_len >= size) {
+            text_len = size - 1;
+        }
+        memcpy(why, text, text_len);
+        why[text_len] = '\0';
+    }
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+#endif
+
+/* A network change, rc.conf read again, and process 1 told when rc.conf may
+ * have changed (it starts or ends tor-client and clash-client as rc.conf
+ * says). 0 when applied; else -1 and the notice says why. */
+static int network_change(const char *tor, const char *clash)
+{
+    char why[200];
+    int status = network_set(tor, clash, why, sizeof why);
+    load_network_policy();
+    if (status == 0 || status == 1) {
+        kill(1, SIGHUP);
+    }
+    if (status == 0) {
+        return 0;
+    }
+    if (status == 2) {
+        snprintf(notice, sizeof notice, _("Not changed: %s"), why);
+    } else if (status == 127 || status < 0) {
+        snprintf(notice, sizeof notice, _("Cannot run %s."), NETWORK_POLICY);
+    } else {
+        snprintf(notice, sizeof notice, _("The network is blocked until this succeeds: %s"), why);
+    }
+    return -1;
 }
 
 /* Is the front of choice (1 Clash, 2 bridges) there to go out through? */
@@ -2576,34 +2719,12 @@ static int tor_front_ready(int choice)
            (choice == 2 && tor_nbridges > 0 && lyrebird_installed());
 }
 
-/* Tor off, or on through a front: its firewall first (none: off), then
- * rc.conf, which process 1 and tor-client take from there. */
+/* Tor off, or on through a front: one network transition (its firewall and
+ * rc.conf together), then process 1 starts or ends tor-client. */
 static void tor_set(int choice)
 {
-    const char *front = choice == 2 ? "bridges" : "mihomo";
-    int was = tor_choice();
-    if (choice > 0 && tor_enforce("load", front) < 0) {
-        snprintf(notice, sizeof notice, _("Cannot load Tor's firewall (%s): Tor left as it was."), TOR_ENFORCE);
-        return;
-    }
-    if ((choice > 0 && rc_set("tor_front", front) < 0) || rc_set("service_tor", choice ? TOR_SERVICE : NULL) < 0) {
-        /* The firewall as it was. */
-        if (was == 0) {
-            tor_enforce("remove", NULL);
-        } else {
-            tor_enforce("load", was == 2 ? "bridges" : "mihomo");
-        }
-        snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
-        return;
-    }
-    tor_on = choice != 0;
-    if (choice) {
-        snprintf(tor_front, sizeof tor_front, "%s", front);
-    }
-    kill(1, SIGHUP); /* process 1 starts or ends tor-client */
-    if (choice == 0 && tor_enforce("remove", NULL) < 0) {
-        snprintf(notice, sizeof notice, _("Tor off, but its firewall is still there: nothing goes out (%s remove)."),
-                 TOR_ENFORCE);
+    static const char *const fronts[] = { "off", "mihomo", "bridges" };
+    if (network_change(fronts[choice], NULL) < 0) {
         return;
     }
     snprintf(notice, sizeof notice, "%s", choice == 0 ? _("Tor off: the network goes direct.") :
@@ -5157,10 +5278,12 @@ static void boot_check(void)
  * make_boot_image's stays. */
 static int boot_image_busy(void)
 {
-    if (boot_job) {
+    if (security_job) {
+        snprintf(notice, sizeof notice, "%s", _("A security change is still being applied."));
+    } else if (boot_job) {
         snprintf(notice, sizeof notice, "%s", _("The boot image is still being made."));
     }
-    return boot_job != 0;
+    return security_job != 0 || boot_job != 0;
 }
 
 static void boot_policy_changed(const char *what)
@@ -5222,25 +5345,10 @@ static void duress_clear_row(void)
         snprintf(notice, sizeof notice, "%s", _("Delete again: remove the duress password (duress goes off)."));
         return;
     }
-    if (boot_image_busy()) {
-        return;
-    }
-    char buf[512];
-    char *const cmd[] = { LOCACHY_DURESS, "clear", NULL };
     duress_clear_asked = 0;
-    command_output(cmd, buf, sizeof buf);
-    load_duress_status();
-    int rc_ok = rc_set("duress_enabled", NULL) == 0;
-    if (rc_ok) {
-        duress_on = 0;
-    }
-    int sudo_ok = sudo_ways() == 0;
-    boot_policy_changed(_("Duress password removed; duress is off. Making the boot image..."));
-    if (duress_pw_set) {
-        snprintf(notice, sizeof notice, "%s", _("The duress password could not be removed."));
-    } else if (!rc_ok || !sudo_ok) {
-        snprintf(notice, sizeof notice, _("Cannot write %s."), !rc_ok ? RC_CONF : SUDO_PAM);
-    }
+    /* Duress off in rc.conf and sudo's PAM file, the password removed, then
+     * the boot image made again: one job, which says what failed. */
+    security_submit(NULL, NULL, NULL, _("Duress password removed; duress is off."));
 }
 
 /* Reopened or polled: the active system jobs (including ones started from
@@ -5252,6 +5360,7 @@ static void adopt_jobs(void)
     static struct jobs_row rows[JOBS_ROWS_MAX];
     int n = jobs_mine(rows, JOBS_ROWS_MAX);
     int have_repos = repos_job != 0, have_boot = boot_job != 0, have_pkg = pkg_job != 0, have_tpm = tpm_job != 0;
+    int have_security = security_job != 0;
     for (int pass = 0; pass < 2; pass++) {
         for (int i = 0; i < n; i++) {
             const struct jobs_row *r = &rows[i];
@@ -5268,6 +5377,9 @@ static void adopt_jobs(void)
             } else if (!have_tpm && (strncmp(r->kind, "tpm-", 4) == 0 || strcmp(r->kind, "secure-boot") == 0)) {
                 tpm_job = r->id;
                 have_tpm = 1;
+            } else if (!have_security && strcmp(r->kind, "security-policy") == 0) {
+                security_job = r->id;
+                have_security = 1;
             } else if (!have_pkg && strncmp(r->kind, "kernel-", 7) == 0) {
                 pkg_job = r->id;
                 have_pkg = 1;
@@ -6344,13 +6456,9 @@ static void adjust(int dir)
             return;
         }
         if (clash_installed()) {
-            if (clash_on) {
-                if (rc_set("service_clash", NULL) < 0) {
-                    snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
-                    return;
-                }
-                clash_on = 0;
-                kill(1, SIGHUP); /* off before it goes */
+            /* Off before it goes; the notice says why when that is refused. */
+            if (clash_on && network_change(NULL, "off") < 0) {
+                return;
             }
             start_pkg_job("remove", "mihomo");
         } else {
@@ -6374,14 +6482,10 @@ static void adjust(int dir)
             snprintf(notice, sizeof notice, "%s", _("Clash is Tor's front: put Tor through bridges or off first."));
             return;
         }
-        if (rc_set("clash_mode", next == 2 ? "proxy" : "tun") < 0 ||
-            rc_set("service_clash", next ? CLASH_SERVICE : NULL) < 0) {
-            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+        static const char *const modes[] = { "off", "tun", "proxy" };
+        if (network_change(NULL, modes[next]) < 0) {
             return;
         }
-        clash_on = next != 0;
-        clash_proxy = next == 2;
-        kill(1, SIGHUP);
         snprintf(notice, sizeof notice, "%s", next == 0 ? (tor_on ? _("Clash off: the network goes through Tor alone.") :
                  _("Clash off: the network goes direct.")) :
                  next == 1 ? _("Clash TUN: every container on the network goes through it.") :
@@ -6523,14 +6627,9 @@ static void adjust(int dir)
                      _("Not changed: the TPM opens the disk at power-on, so the lock at boot must stay. Unbind the TPM first."));
             return;
         }
-        if (rc_set("login_skip", login_skip ? NULL : "1") < 0) {
-            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
-            return;
-        }
-        login_skip = !login_skip;
-        kill(1, SIGHUP);
-        snprintf(notice, sizeof notice, "%s", login_skip ? _("At boot: home at once (the lock key and the lid still lock).") :
-                 _("At boot: the lock screen first, the password to go on."));
+        security_submit("login-skip", login_skip ? "off" : "on", NULL,
+                        login_skip ? _("At boot: the lock screen first, the password to go on.") :
+                        _("At boot: home at once (the lock key and the lid still lock)."));
         return;
     }
     if (selected == sec_index() + 2) {
@@ -6544,13 +6643,9 @@ static void adjust(int dir)
     if (selected == fc_index()) {
         char cam[32];
         if (howdy_installed()) {
-            if (face_on) {
-                if (rc_set("unlock_face", NULL) < 0) {
-                    snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
-                    return;
-                }
-                face_on = 0; /* off before it goes */
-                sudo_ways();
+            /* Off before it goes: the queue runs the policy job first. */
+            if (face_on && !security_submit("face", "off", NULL, NULL)) {
+                return;
             }
             start_pkg_job("remove", "python-dlib python-dlib-cuda " FACE_PACKAGES);
         } else if (!camera(cam, sizeof cam)) {
@@ -6603,17 +6698,9 @@ static void adjust(int dir)
             snprintf(notice, sizeof notice, "%s", _("howdy is not installed: the Face recognition line installs it."));
             return;
         }
-        if (rc_set("unlock_face", face_on ? NULL : "1") < 0) {
-            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
-            return;
-        }
-        face_on = !face_on;
-        if (sudo_ways() < 0) {
-            snprintf(notice, sizeof notice, _("Cannot write %s."), SUDO_PAM);
-            return;
-        }
-        snprintf(notice, sizeof notice, "%s", face_on ? _("The lock screen and sudo take your face as well as the "
-                                                          "password.") : _("Your face no longer unlocks."));
+        security_submit("face", face_on ? "off" : "on", NULL,
+                        face_on ? _("Your face no longer unlocks.") :
+                        _("The lock screen and sudo take your face as well as the password."));
         return;
     }
     if (selected == fc_index() + 3) {
@@ -6742,41 +6829,19 @@ static void adjust(int dir)
         return;
     }
     if (selected == lock_mode_index()) {
-        if (boot_image_busy()) {
-            return;
-        }
         /* High: the TPM opens nothing. Its token is sealed to every image
          * this machine's PCR key signs (the previous one, an older copy from
          * the ESP), not to this one, so a key slot left there would still
-         * open the disk under any of them: removed first (locachy-tpm clear:
-         * the token, and its key slots with luksKillSlot in batch mode, which
-         * needs no passphrase), bound again in normal. Not switched while one
-         * is left. */
-        if (!lock_high && (tpm_bound || tpm_pending)) {
-            char buf[512];
-            char *const clear[] = { "/usr/local/bin/locachy-tpm", "clear", NULL };
-            command_output(clear, buf, sizeof buf);
-            load_tpm_status();
-            if (tpm_bound || tpm_pending) {
-                snprintf(notice, sizeof notice, "%s",
-                         _("Not switched: the TPM key slots could not be removed (locachy-tpm clear)."));
-                return;
-            }
-        }
-        if (rc_set("lock_mode", lock_high ? "low" : "high") < 0) {
-            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
-            return;
-        }
-        lock_high = !lock_high;
-        int sudo_ok = sudo_ways() == 0;
-        boot_policy_changed(lock_high ?
-                            _("Threat level high: only the password unlocks, and the disk asks for its passphrase at "
-                              "power-on (no TPM key slot). Making the boot image...") :
-                            _("Threat level low: the unlock ways switched on work again; bind the TPM again to "
-                              "use it. Making the boot image..."));
-        if (!sudo_ok) {
-            snprintf(notice, sizeof notice, _("Cannot write %s."), SUDO_PAM);
-        }
+         * open the disk under any of them: the job removes them first (the
+         * token's key slots, then the token, and any waiting binding),
+         * checks none is left, and only then writes high and makes the boot
+         * image. Bound again in low. */
+        security_submit("lock-mode", lock_high ? "low" : "high",
+                        lock_high ?
+                        _("Threat level low: the unlock ways switched on work again; bind the TPM again to "
+                          "use it. Making the boot image...") :
+                        _("Threat level high: only the password unlocks, and the disk asks for its passphrase at "
+                          "power-on (no TPM key slot). Making the boot image..."), NULL);
         return;
     }
     if (selected == duress_index()) {
@@ -6792,28 +6857,10 @@ static void adjust(int dir)
                 return;
             }
         }
-        if (boot_image_busy()) {
-            return;
-        }
-        if (rc_set("duress_enabled", duress_on ? NULL : "1") < 0) {
-            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
-            return;
-        }
-        duress_on = !duress_on;
-        int sudo_ok = 1;
-        if (!duress_on) {
-            sudo_ok = sudo_ways() == 0;
-        }
-        boot_policy_changed(duress_on ?
-                            _("Duress on: the duress password wipes the disk at power-on, on the lock screen and in "
-                              "sudo. Making the boot image...") :
-                            _("Duress off: the duress password wipes nothing. Making the boot image..."));
-        if (duress_on) {
-            sudo_ok = sudo_ways() == 0;
-        }
-        if (!sudo_ok) {
-            snprintf(notice, sizeof notice, _("Cannot write %s."), SUDO_PAM);
-        }
+        security_submit("duress", duress_on ? "off" : "on",
+                        duress_on ? _("Duress off: the duress password wipes nothing. Making the boot image...") :
+                        _("Duress on: the duress password wipes the disk at power-on, on the lock screen and in "
+                          "sudo. Making the boot image..."), NULL);
         return;
     }
     if (selected == sb_index()) {
@@ -7048,13 +7095,9 @@ static void adjust(int dir)
     }
     if (selected == fp_index()) {
         if (fprintd_installed()) {
-            if (fingerprint_on) {
-                if (rc_set("unlock_fingerprint", NULL) < 0) {
-                    snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
-                    return;
-                }
-                fingerprint_on = 0; /* off before it goes */
-                sudo_ways();
+            /* Off before it goes: the queue runs the policy job first. */
+            if (fingerprint_on && !security_submit("fingerprint", "off", NULL, NULL)) {
+                return;
             }
             start_pkg_job("remove", "fprintd");
         } else {
@@ -7075,18 +7118,9 @@ static void adjust(int dir)
             snprintf(notice, sizeof notice, "%s", _("fprintd is not installed: the line above installs it."));
             return;
         }
-        if (rc_set("unlock_fingerprint", fingerprint_on ? NULL : "1") < 0) {
-            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
-            return;
-        }
-        fingerprint_on = !fingerprint_on;
-        if (sudo_ways() < 0) {
-            snprintf(notice, sizeof notice, _("Cannot write %s."), SUDO_PAM);
-            return;
-        }
-        snprintf(notice, sizeof notice, "%s", fingerprint_on ? _("The lock screen and sudo take a fingerprint as well "
-                                                                 "as the password.") :
-                 _("Only the password unlocks, and sudo asks only for it."));
+        security_submit("fingerprint", fingerprint_on ? "off" : "on", NULL,
+                        fingerprint_on ? _("Only the password unlocks, and sudo asks only for it.") :
+                        _("The lock screen and sudo take a fingerprint as well as the password."));
         return;
     }
     if (selected == fp_index() + 2) {
@@ -7501,7 +7535,7 @@ int main(int argc, char **argv)
         if (close_due()) {
             return 0; /* the window's close, read in a question or list */
         }
-        int key = key_poll_timeout(request_fd, pkg_job || repos_job || boot_job || tpm_job ? 500 : 2000);
+        int key = key_poll_timeout(request_fd, pkg_job || repos_job || boot_job || tpm_job || security_job ? 500 : 2000);
         requests();
         if (key != 0 && key != K_DEL) {
             fp_delete_asked = face_delete_asked = tor_bridges_delete_asked = tpm_clear_asked = duress_clear_asked = 0; /* Delete twice in a row deletes them */
@@ -7509,12 +7543,13 @@ int main(int argc, char **argv)
         }
         close_read(key);
         build_row_maps();
-        if (!pkg_job || !repos_job || !boot_job || !tpm_job) {
+        if (!pkg_job || !repos_job || !boot_job || !tpm_job || !security_job) {
             adopt_jobs();
         }
         pkg_check();
         repos_check();
         boot_check();
+        security_check();
         if (tpm_job) {
             struct jobs_row r;
             char log[96];

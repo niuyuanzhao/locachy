@@ -64,6 +64,8 @@ gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE "$src/progs/battery-history.c" \
     -o "$out/battery-history"
 gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -I"$src/base/include" "$src/progs/locachy-jobs.c" \
     -o "$out/locachy-jobs"
+gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -I"$src/base/include" "$src/progs/locachy-config.c" \
+    "$out/obj/base-rc.o" "$out/obj/base-say.o" -o "$out/locachy-config"
 # The key table of a keymap: libxkbcommon (make.sh, installer/make-live.sh).
 gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE "$src/progs/keytable.c" \
     $(pkg-config --cflags --libs xkbcommon) -o "$out/keytable"
@@ -85,6 +87,25 @@ if pkg-config --exists tree-sitter libpcre2-8 json-glib-1.0; then
         "$src/progs/edit-tree.c" "$src/progs/edit-layout.c" "$src/progs/edit-lsp.c" \
         "$src/progs/edit-session.c" "$src/progs/edit-filesearch.c" "$src/progs/files.c" "$out"/obj/base-*.o "$out/obj/ime.o" $ime_libs $libs \
         -ltree-sitter -lpcre2-8 $(pkg-config --libs json-glib-1.0) -o "$out/edit"
+fi
+# The extended display's receiver on the direct screen and its sandboxed
+# decoder (make.sh).
+kvm_pkgs="json-c libavcodec libavutil libswscale"
+if pkg-config --exists $kvm_pkgs; then
+    gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -DCONFIG_KVM_FFMPEG $(pkg-config --cflags $kvm_pkgs) \
+        "$src/progs/kvm-worker.c" "$src/progs/kvm-protocol.c" "$src/progs/kvm-decode.c" \
+        $(pkg-config --libs $kvm_pkgs) -lm -o "$out/kvm-worker"
+    gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags $(pkg-config --cflags json-c) \
+        -I"$src/base/include" -I"$src/base" "$src/progs/kvm.c" "$src/progs/kvm-setup.c" "$src/progs/kvm-client.c" \
+        "$src/progs/kvm-protocol.c" "$out"/obj/base-*.o $libs $(pkg-config --libs json-c) -o "$out/kvm"
+else
+    echo "build-check: kvm not built: json-c and FFmpeg (libavcodec, libavutil, libswscale) are not all installed" >&2
+fi
+# The extended display's broker (tools/KVM.md), built under -Werror as make.sh installs it.
+if pkg-config --exists openssl; then
+    gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $(pkg-config --cflags openssl) -o "$out/kvm-broker" \
+        "$src/progs/kvm-broker.c" "$src/progs/kvm-broker-net.c" "$src/progs/kvm-broker-pump.c" \
+        "$src/progs/kvm-broker-tls.c" $(pkg-config --libs openssl)
 fi
 gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags \
     -I"$src/base/include" -I"$src/base" "$src/progs/settings.c" "$src/progs/files.c" "$src/progs/auth.c" \

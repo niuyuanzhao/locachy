@@ -223,6 +223,17 @@ static int special_key(xkb_keysym_t sym)
     return 0;
 }
 
+/* The raw event's modifier and lock bits. w.mods itself stays what existing
+ * window programs read (keys_modifiers); raw events add Caps Lock, Num Lock
+ * and AltGr, which the window has in its keymap state. */
+static void raw_state(uint32_t *mods, uint32_t *locks)
+{
+    *locks = (xkb_state_mod_name_is_active(w.state, XKB_MOD_NAME_CAPS, XKB_STATE_MODS_LOCKED) > 0 ? 1u : 0u) |
+             (xkb_state_mod_name_is_active(w.state, XKB_MOD_NAME_NUM, XKB_STATE_MODS_LOCKED) > 0 ? 2u : 0u);
+    *mods = (uint32_t)w.mods | (*locks & 1 ? (uint32_t)KEYS_CAPS : 0u) | (*locks & 2 ? 64u : 0u) |
+            (xkb_state_mod_name_is_active(w.state, "Mod5", XKB_STATE_MODS_EFFECTIVE) > 0 ? (uint32_t)KEYS_ALTGR : 0u);
+}
+
 static void key_pressed(uint32_t code)
 {
     if (!w.state) return;
@@ -304,6 +315,7 @@ static void keyboard_keymap(void *data, struct wl_keyboard *kb, uint32_t format,
     xkb_keymap_unref(w.keymap);
     w.keymap = keymap;
     w.state = state;
+    if (base_raw_cancel) base_raw_cancel();
     stop_repeat();
 }
 
@@ -318,6 +330,7 @@ static void keyboard_leave(void *data, struct wl_keyboard *kb, uint32_t serial, 
 {
     (void)data; (void)kb; (void)surface;
     w.keyboard_serial = serial;
+    if (base_raw_cancel) base_raw_cancel();
     stop_repeat();
     if (w.compose) xkb_compose_state_reset(w.compose);
 }
@@ -327,6 +340,16 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial, ui
 {
     (void)data; (void)kb; (void)time;
     w.keyboard_serial = serial;
+    if (base_raw_emit && w.state) {
+        int action = keys_match_action((int)code, !!(w.mods & KEYS_CTRL), !!(w.mods & KEYS_ALT),
+                                       !!(w.mods & KEYS_SHIFT), !!(w.mods & KEYS_META));
+        int local = action == K_ACT_HOME || action == K_ACT_LOCK || (action >= K_VOL_UP && action <= K_BRI_DOWN);
+        uint32_t mods, locks;
+        raw_state(&mods, &locks);
+        base_raw_emit(BASE_RAW_WAYLAND_DEVICE, code, xkb_state_key_get_one_sym(w.state, code + 8),
+                      mods, locks, pressed == WL_KEYBOARD_KEY_STATE_PRESSED, local);
+        w.events++;
+    }
     if (pressed != WL_KEYBOARD_KEY_STATE_PRESSED) {
         if (code == w.repeat_code) stop_repeat();
         return;
@@ -552,6 +575,7 @@ static void seat_capabilities(void *data, struct wl_seat *seat, uint32_t caps)
         wl_keyboard_add_listener(w.keyboard, &keyboard_listener, NULL);
     } else if (!(caps & WL_SEAT_CAPABILITY_KEYBOARD) && w.keyboard) {
         stop_repeat();
+        if (base_raw_cancel) base_raw_cancel();
         wl_keyboard_release(w.keyboard);
         w.keyboard = NULL;
     }
@@ -1035,7 +1059,15 @@ int wl_backend_wait(struct pollfd *extra, size_t count, int timeout_ms)
     if (p[1].revents & POLLIN) {
         uint64_t expired = 0;
         if (read(w.repeat_fd, &expired, sizeof expired) == (ssize_t)sizeof expired && w.repeat_code) {
-            for (uint64_t i = 0; i < expired && i < 4; i++) key_pressed(w.repeat_code);
+            for (uint64_t i = 0; i < expired && i < 4; i++) {
+                if (base_raw_emit && w.state) {
+                    uint32_t mods, locks;
+                    raw_state(&mods, &locks);
+                    base_raw_emit(BASE_RAW_WAYLAND_DEVICE, w.repeat_code,
+                                  xkb_state_key_get_one_sym(w.state, w.repeat_code + 8), mods, locks, 2, 0);
+                }
+                key_pressed(w.repeat_code);
+            }
         }
     }
     if (wl_display_dispatch_pending(w.display) < 0) return -1;

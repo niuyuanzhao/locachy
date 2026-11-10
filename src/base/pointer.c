@@ -105,6 +105,7 @@ static double px, py;                /* where the pointer is, in pixels */
 static int held;                     /* buttons held: 1 left, 2 right, 4 middle */
 static double scroll_v, scroll_h;    /* scrolling not yet a whole step */
 static int scroll_events, scroll_source, scroll_fingers, scroll_axes;
+static int scroll_precision;
 static int scroll_x, scroll_y;
 static void *scroll_device;
 static double click_at;
@@ -166,13 +167,14 @@ static void push(struct pointer_event e)
     e.buttons = held;
     if (qlen > 0) {
         struct pointer_event *tail = &queue[(qhead + qlen - 1) % QUEUE];
-        if (!e.button && !e.wheel && !e.hwheel && !e.gesture &&
-            !tail->button && !tail->wheel && !tail->hwheel && !tail->gesture) {
+        if (!e.button && !e.wheel && !e.hwheel && !e.gesture && !e.scroll_dx && !e.scroll_dy &&
+            !tail->button && !tail->wheel && !tail->hwheel && !tail->gesture && !tail->scroll_dx && !tail->scroll_dy) {
             *tail = e; /* motions merge while unread */
             return;
         }
     }
     if (qlen == QUEUE) {
+        if (base_raw_cancel) base_raw_cancel();
         qhead = (qhead + 1) % QUEUE; /* the oldest goes */
         qlen--;
     }
@@ -209,6 +211,13 @@ static void scroll_begin(int source, int fingers, int x, int y, void *device)
     scroll_y = y;
     scroll_device = device;
     scroll_boundary(SCROLL_BEGIN);
+}
+
+int pointer_scroll_precision(int on)
+{
+    int old = scroll_precision;
+    scroll_precision = !!on;
+    return old;
 }
 
 int pointer_scroll_events(int on)
@@ -352,10 +361,12 @@ EVENTS static void scroll(double v, double h)
     int sv = (int)scroll_v, sh = (int)scroll_h;
     scroll_v -= sv;
     scroll_h -= sh;
-    if (sv || sh) {
+    if (sv || sh || (scroll_precision && (v || h))) {
         push((struct pointer_event){ .x = (int)px, .y = (int)py, .wheel = -sv, .hwheel = sh,
                                      .scroll_source = scroll_source, .scroll_phase = SCROLL_UPDATE,
-                                     .scroll_fingers = scroll_fingers });
+                                     .scroll_fingers = scroll_fingers,
+                                     .scroll_dx = scroll_precision ? h * SCROLL_PIXELS : 0,
+                                     .scroll_dy = scroll_precision ? v * SCROLL_PIXELS : 0 });
     }
 }
 
@@ -841,6 +852,7 @@ void pointer_went(void)
 
 void pointer_release(void)
 {
+    if (base_raw_cancel) base_raw_cancel();
     qlen = 0;
     scroll_finish(SCROLL_CANCEL);
     away = 0;

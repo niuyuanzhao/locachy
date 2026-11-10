@@ -149,17 +149,28 @@ case "${1:-}" in
     ;;
 esac
 
+NETWORK=${LOCACHY_NETWORK_HELPER:-$(dirname "$0")/locachy_network.py}
+export LOCACHY_NETWORK_RC=${LOCACHY_NETWORK_RC:-$RC}
+export LOCACHY_NETWORK_NETNS=${LOCACHY_NETWORK_NETNS:-$NS}
+POLICY_STATE=${LOCACHY_NETWORK_STATE:-/run/locachy/network}
+policy() { python3 "$NETWORK" "$@"; }
+
 umask 022
 install -d -m 0700 "$STATE" "$RUN"
+mkdir -p "$POLICY_STATE"
+# Separate from policy.lock: a slow daemon never holds the transition lock.
+# Inherited by tor, so a killed wrapper cannot overlap a new generation.
+exec 9>"$POLICY_STATE/tor.lifecycle.lock"
+flock -x 9
+TOKEN=$(policy daemon claim tor) || exit 1
 front=$(front)
-# The rules first: from here until Tor is off nothing goes out but Tor.
-if ! "$ENFORCE" load "$front"; then
-    state "its firewall cannot be loaded (nftables; see the system log)"
-    printf '<3>tor-client: its firewall cannot be loaded\n' 2>/dev/null >/dev/kmsg
-    exit 1
-fi
-# Ended while it waits: the rules go only if Tor is off.
-trap 'on || "$ENFORCE" remove; exit 0' TERM INT
+pid=
+on_exit() {
+    [ -z "$pid" ] || { kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; }
+    policy daemon release tor "$TOKEN"
+}
+trap on_exit EXIT
+trap 'exit 0' TERM INT
 
 # What it waits for, saying so (RUN/state): tor, its front, locachy-net.
 ready() {
@@ -185,19 +196,13 @@ while why=$(ready) && [ -n "$why" ]; do
     state "$why"
     sleep 2
     if ! on || [ "$(front)" != "$front" ] || [ "$(bridges_time)" != "$sub_time" ]; then
-        on || "$ENFORCE" remove
         exit 0
     fi
 done
 
 # Again, now that the tor user is there (installed while it waited).
-"$ENFORCE" load "$front" || exit 1
-# A tor of an earlier run (this one was killed) holds its ports: end it.
-old=$(cat "$RUN/tor.pid" 2>/dev/null)
-if [ -n "$old" ] && [ "$(cat "/proc/$old/comm" 2>/dev/null)" = tor ]; then
-    kill "$old"
-    for _ in $(seq 50); do kill -0 "$old" 2>/dev/null || break; sleep 0.1; done
-fi
+policy reconcile || exit 1
+# A predecessor cannot still run: it inherits the lifecycle lock.
 rm -f "$RUN/tor.pid"
 chown "$USER_:$USER_" "$RUN"
 install -d -m 0700 -o "$USER_" -g "$USER_" "$DATA"
@@ -223,11 +228,9 @@ stop() {
     if on; then
         state "tor-client ended"
     else
-        "$ENFORCE" remove
         state "off"
     fi
 }
-trap 'stop; exit 0' TERM INT
 printf '<6>tor-client: tor running in %s through %s (pid %d)\n' "$NS" "$front" "$pid" 2>/dev/null >/dev/kmsg
 echo "tor-client: tor running in $NS through $front (pid $pid)"
 
@@ -244,6 +247,7 @@ while kill -0 "$pid" 2>/dev/null; do
     if [ -n "$changed" ]; then
         echo "tor-client: $changed changed: starting again"
         stop
+        pid=
         exit 0
     fi
     now=$(routes)
@@ -254,6 +258,9 @@ while kill -0 "$pid" 2>/dev/null; do
 done
 wait "$pid"
 status=$?
+pid=
+policy daemon release tor "$TOKEN" --failed "tor ended (status $status)"
+trap - EXIT
 rm -f "$RUN/tor.pid"
 state "tor ended (status $status)"
 printf '<4>tor-client: tor ended (status %d); nothing goes out until it is back\n' "$status" 2>/dev/null >/dev/kmsg

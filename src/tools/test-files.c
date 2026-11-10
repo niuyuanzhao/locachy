@@ -18,6 +18,96 @@ static char cloud_status_path[256], cloud_client_path[256], seat_client_path[256
 #include "i18n-stub.h"
 #include <assert.h>
 
+/* The open-request spool as home reads it: one req-* file per request. */
+static int spool_seq;
+
+static void spool_put(const char *text)
+{
+    char path[PATH_MAX];
+    mkdir(OPEN_REQUEST, 0700);
+    snprintf(path, sizeof path, "%s/req-%020d-test", OPEN_REQUEST, ++spool_seq);
+    FILE *f = fopen(path, "w");
+    assert(f && fputs(text, f) >= 0 && fclose(f) == 0);
+}
+
+static int spool_count(void)
+{
+    int n = 0;
+    DIR *d = opendir(OPEN_REQUEST);
+    for (struct dirent *e; d && (e = readdir(d)) != NULL;) n += strncmp(e->d_name, "req-", 4) == 0;
+    if (d) closedir(d);
+    return n;
+}
+
+static void spool_clear(void)
+{
+    DIR *d = opendir(OPEN_REQUEST);
+    for (struct dirent *e; d && (e = readdir(d)) != NULL;) {
+        char path[PATH_MAX];
+        if (strncmp(e->d_name, "req-", 4) != 0 && strncmp(e->d_name, ".claim-", 7) != 0) continue;
+        snprintf(path, sizeof path, "%s/%s", OPEN_REQUEST, e->d_name);
+        unlink(path);
+    }
+    if (d) closedir(d);
+}
+
+/* Interleavings injected into renameat2 (test-files.sh links with --wrap):
+ * another writer creates race_target in the gap just before a no-replace
+ * rename, or the drive refuses the flag (EINVAL, as a FUSE without rename2).
+ * Nothing sleeps: the injection is the gap itself. */
+static char race_target[PATH_MAX], race_text[64];
+static int refuse_noreplace;
+int __real_renameat2(int olddir, const char *from, int newdir, const char *to, unsigned int flags);
+int __wrap_renameat2(int olddir, const char *from, int newdir, const char *to, unsigned int flags)
+{
+    if (flags & RENAME_NOREPLACE) {
+        if (refuse_noreplace) {
+            errno = EINVAL;
+            return -1;
+        }
+        if (race_target[0] && strcmp(to, race_target) == 0) {
+            FILE *f = fopen(to, "we");
+            assert(f && fputs(race_text, f) >= 0 && fclose(f) == 0);
+            race_target[0] = '\0';
+        }
+    }
+    return __real_renameat2(olddir, from, newdir, to, flags);
+}
+
+static void write_file(const char *path, const char *text)
+{
+    FILE *f = fopen(path, "we");
+    assert(f && fputs(text, f) >= 0 && fclose(f) == 0);
+}
+
+/* The bytes of path (NUL-terminated in buf), or NULL when it cannot be read. */
+static char *read_file(const char *path, char *buf, size_t size)
+{
+    FILE *f = fopen(path, "re");
+    if (!f) return NULL;
+    size_t n = fread(buf, 1, size - 1, f);
+    buf[n] = '\0';
+    fclose(f);
+    return buf;
+}
+
+static int same_text(const char *path, const char *want)
+{
+    char buf[256];
+    const char *got = read_file(path, buf, sizeof buf);
+    return got && strcmp(got, want) == 0;
+}
+
+/* How many entries of dir start with prefix. */
+static int entries_with(const char *dir, const char *prefix)
+{
+    int n = 0;
+    DIR *d = opendir(dir);
+    for (struct dirent *e; d && (e = readdir(d)) != NULL;) n += strncmp(e->d_name, prefix, strlen(prefix)) == 0;
+    if (d) closedir(d);
+    return n;
+}
+
 #define END     0
 #define TIMEOUT (-1) /* key_poll_timeout times out */
 #define REQUEST (-2) /* a container asks for the folder in request; a timeout */
@@ -306,10 +396,14 @@ int key_poll_timeout(int fd, int timeout)
         return 0;
     }
     if (key == REQUEST || key == OPEN) {
-        FILE *f = fopen(key == OPEN ? OPEN_REQUEST : FILES_REQUEST, "w");
-        assert(f);
-        fprintf(f, key == OPEN ? "%s" : "%s\n", request);
-        fclose(f);
+        if (key == OPEN) {
+            spool_put(request);
+        } else {
+            FILE *f = fopen(FILES_REQUEST, "w");
+            assert(f);
+            fprintf(f, "%s\n", request);
+            fclose(f);
+        }
     }
     return key == TIMEOUT || key == REQUEST || key == OPEN ? 0 : key;
 }
@@ -1006,14 +1100,13 @@ int main(int argc, char **argv)
     snprintf(request, sizeof request, "program:settings\n\n");
     run("a program for home to run: back to home's list, the request left for it", (const int[]){ OPEN, END });
     char asked[OPEN_NAME];
-    assert(tasks == 2 && opens == 8 && !files_request() && access(OPEN_REQUEST, F_OK) == 0);
+    assert(tasks == 2 && opens == 8 && !files_request() && spool_count() == 1);
     assert(files_program_request(asked, sizeof asked, 0) == 1 && strcmp(asked, "settings") == 0);
-    assert(files_program_request(asked, sizeof asked, 1) == 1 && access(OPEN_REQUEST, F_OK) != 0);
+    assert(files_program_request(asked, sizeof asked, 1) == 1 && spool_count() == 0);
     assert(files_program_request(asked, sizeof asked, 1) == 0);
-    FILE *req = fopen(OPEN_REQUEST, "w");
-    assert(req && fputs("program:view\n/x/y.pdf\n", req) >= 0 && fclose(req) == 0);
-    assert(files_program_request(asked, sizeof asked, 1) == 0 && files_request() && access(OPEN_REQUEST, F_OK) == 0);
-    unlink(OPEN_REQUEST);
+    spool_put("program:view\n/x/y.pdf\n");
+    assert(files_program_request(asked, sizeof asked, 1) == 0 && files_request() && spool_count() == 1);
+    spool_clear();
 
     /*
      * FreeDesktop.org Trash 1.0 lifecycle: Delete moves to ~/.local/share/
@@ -1878,6 +1971,88 @@ int main(int argc, char **argv)
     puts("PASS direct: an open process 1 did not run is reported so, never as opened");
     assert(unlink(doc) == 0 && unlink(wtxt) == 0 && rmdir(at_home("Documents/folder")) == 0 && unlink(big) == 0);
     assert(unlink(seat_client_path) == 0);
+
+    /* The no-replace rename under a race and on a drive that cannot protect a
+     * name: another writer's file is never replaced, and the refusal says
+     * plainly that nothing was changed (renameat2 interposed, see above). */
+    char race_dir[PATH_MAX], src[PATH_MAX];
+    snprintf(race_dir, sizeof race_dir, "%s", at_home("Documents/race"));
+    snprintf(src, sizeof src, "%s", at_home("Documents/race/src.txt"));
+    assert(mkdir(race_dir, 0755) == 0 && mkdir(at_home("Documents/race/a"), 0755) == 0 &&
+           mkdir(at_home("Documents/race/b"), 0755) == 0 && mkdir(at_home("Documents/race/c"), 0755) == 0);
+    write_file(src, "source\n");
+    snprintf(race_text, sizeof race_text, "other writer\n");
+    snprintf(race_target, sizeof race_target, "%s", at_home("Documents/race/taken.txt"));
+    assert(go(race_dir, "src.txt") >= 0);
+    run("F2 onto a name another writer creates in the gap: refused, neither replaced",
+        (const int[]){ 'r', '\b', '\b', '\b', '\b', '\b', '\b', '\b', 't', 'a', 'k', 'e', 'n', '.', 't', 'x', 't', '\n',
+                       END });
+    assert(error && strstr(msg, "Cannot rename to taken.txt") && !race_target[0]);
+    assert(same_text(src, "source\n") && same_text(at_home("Documents/race/taken.txt"), "other writer\n"));
+    puts("PASS F2 onto a name another writer creates in the gap: refused, neither file replaced");
+    refuse_noreplace = 1;
+    run("F2 on a drive that cannot rename without overwrite protection: refused plainly, nothing changed",
+        (const int[]){ 'r', '\b', '\b', '\b', '\b', '\b', '\b', '\b', 'b', 'y', 'e', '.', 't', 'x', 't', '\n', END });
+    refuse_noreplace = 0;
+    assert(error && strstr(msg, "cannot rename without overwrite protection: nothing was changed"));
+    assert(same_text(src, "source\n") && !exists("Documents/race/bye.txt"));
+    puts("PASS F2 on a drive that cannot rename without overwrite protection: refused plainly, nothing changed");
+
+    snprintf(race_target, sizeof race_target, "%s", at_home("Documents/race/copy.txt"));
+    errno = 0;
+    assert(copy_item(src, at_home("Documents/race/copy.txt")) < 0 && errno == EEXIST && !race_target[0]);
+    assert(same_text(at_home("Documents/race/copy.txt"), "other writer\n") && same_text(src, "source\n"));
+    assert(entries_with(race_dir, COPY_TEMP) == 0);
+    snprintf(race_target, sizeof race_target, "%s", at_home("Documents/race/moved.txt"));
+    errno = 0;
+    assert(move_path(src, at_home("Documents/race/moved.txt")) < 0 && errno == EEXIST && !race_target[0]);
+    assert(same_text(at_home("Documents/race/moved.txt"), "other writer\n") && same_text(src, "source\n"));
+    puts("PASS copy and move onto a name another writer creates in the gap: refused, neither replaced, "
+         "no partial copy left");
+
+    refuse_noreplace = 1;
+    errno = 0;
+    assert(copy_item(src, at_home("Documents/race/copy2.txt")) < 0 && errno == EINVAL && rename_unprotected);
+    assert(!exists("Documents/race/copy2.txt") && entries_with(race_dir, COPY_TEMP) == 0);
+    char *moving[] = { src };
+    transfer(moving, 1, at_home("Documents/race/c"), 1);
+    refuse_noreplace = 0;
+    assert(error && strstr(msg, "cannot rename without overwrite protection: nothing was changed"));
+    assert(same_text(src, "source\n") && !exists("Documents/race/c/src.txt"));
+    puts("PASS copy and move on a drive that cannot rename without overwrite protection: refused plainly, "
+         "both paths as they were");
+
+    /* Bookmarks: while another writer holds the folder's lock and adds its
+     * line, two toggles wait for it; afterwards no line of the three is lost. */
+    char bdir[PATH_MAX], bpath[PATH_MAX + 16], marks[4096];
+    snprintf(bdir, sizeof bdir, "%s/.config/gtk-3.0", home);
+    snprintf(bpath, sizeof bpath, "%s/bookmarks", bdir);
+    assert(mkdir_p(bdir, 0700) == 0);
+    int held = open(bdir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    assert(held >= 0 && flock(held, LOCK_EX) == 0);
+    pid_t kids[2];
+    for (int i = 0; i < 2; i++) {
+        kids[i] = fork();
+        assert(kids[i] >= 0);
+        if (kids[i] == 0) {
+            go(at_home(i ? "Documents/race/c" : "Documents/race/a"), NULL);
+            toggle_bookmark();
+            _exit(0);
+        }
+    }
+    FILE *bf = fopen(bpath, "ae");
+    assert(bf && fprintf(bf, "file://%s\n", at_home("Documents/race/b")) > 0 && fclose(bf) == 0);
+    const char *marks_text = read_file(bpath, marks, sizeof marks);
+    assert(marks_text && !strstr(marks_text, "/race/a\n") && !strstr(marks_text, "/race/c\n")); /* both still wait */
+    assert(flock(held, LOCK_UN) == 0 && close(held) == 0);
+    for (int i = 0; i < 2; i++) {
+        int status;
+        assert(waitpid(kids[i], &status, 0) == kids[i] && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    }
+    marks_text = read_file(bpath, marks, sizeof marks);
+    assert(marks_text && strstr(marks_text, "/race/a\n") && strstr(marks_text, "/race/b\n") &&
+           strstr(marks_text, "/race/c\n"));
+    puts("PASS bookmarks: two toggles wait for the writer holding the lock; no line of the three is lost");
 
     puts("ALL PASSED");
     return 0;

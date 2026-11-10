@@ -41,6 +41,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -78,6 +79,17 @@
 #ifndef SO_PEERPIDFD
 #define SO_PEERPIDFD 77
 #endif
+#ifndef JOBS_DRAIN_PID
+#define JOBS_DRAIN_PID 1
+#endif
+/* locachy-pkg's domain: package, kernel, repository and boot jobs hold it
+ * (blocking, inherited by every step, released when the job ends). */
+#ifndef JOBS_PKG_LOCK
+#define JOBS_PKG_LOCK "/run/locachy/pkg.lock"
+#endif
+#ifndef JOBS_CONTAINERS
+#define JOBS_CONTAINERS "/etc/locachy/containers" /* the apps' configurations, root's */
+#endif
 #define JOBS_KEEP 32      /* ended jobs kept, with their output */
 #define JOBS_QUEUED_MAX 32
 #define JOBS_MAX (JOBS_KEEP + JOBS_QUEUED_MAX + 2)
@@ -109,7 +121,7 @@ static double now_s(void)
 enum check {
     C_NONE, C_PACKAGES, C_SWAP, C_KERNEL, C_ONOFF, C_SECTION, C_TARGETS, C_CONTAINER, C_CONTAINER_DATA,
     C_DEVICE, C_RELEASE, C_FILE, C_SPI_PROBE, C_SPI_BACKUP, C_SPI_VERIFY, C_SPI_WRITE,
-    C_TPM, C_TPM_ENROLL, C_SECURE_BOOT, C_BOOT, C_REBUILD,
+    C_TPM, C_TPM_ENROLL, C_SECURE_BOOT, C_BOOT, C_REBUILD, C_BIOS_SET, C_SECURITY,
 };
 
 struct kind {
@@ -136,7 +148,8 @@ static const struct kind kinds[] = {
     { "tpm-prepare", "locachy-tpm", { "prepare", "--passphrase-stdin" }, C_NONE },
     { "tpm-clear", "locachy-tpm", { "clear" }, C_TPM },
     { "secure-boot", "locachy-tpm", { "secure-boot" }, C_SECURE_BOOT },
-    { "app-build", "locachy-app", { "build" }, C_CONTAINER },
+    { "app-build", "locachy-app", { "build" }, C_CONTAINER },      /* an app with host not "1" */
+    { "app-host-build", "locachy-app", { "build" }, C_CONTAINER }, /* an app with host="1" */
     { "app-rollback", "locachy-app", { "rollback" }, C_CONTAINER },
     { "app-remove", "locachy-app", { "remove" }, C_CONTAINER_DATA },
     { "fw-refresh", "locachy-firmware", { "fwupd-action", "refresh" }, C_NONE },
@@ -145,6 +158,8 @@ static const struct kind kinds[] = {
     { "fw-unlock", "locachy-firmware", { "fwupd-action", "unlock" }, C_DEVICE },
     { "fw-local-install", "locachy-firmware", { "fwupd-action", "local-install" }, C_FILE },
     { "fw-install-release", "locachy-firmware", { "fwupd-action", "install-release" }, C_RELEASE },
+    { "bios-set", "locachy-firmware", { "bios-set" }, C_BIOS_SET },
+    { "security-policy", "locachy-security", { NULL }, C_SECURITY },
     { "spi-probe", "locachy-firmware", { "spi-probe" }, C_SPI_PROBE },
     { "spi-backup", "locachy-firmware", { "spi-backup" }, C_SPI_BACKUP },
     { "spi-verify", "locachy-firmware", { "spi-verify" }, C_SPI_VERIFY },
@@ -267,6 +282,28 @@ static int check_args(const struct kind *k, char **a, int n, char *why, size_t s
     case C_BOOT:
         ok = n == 0 || (n == 1 && (strcmp(a[0], "--luks") == 0 || strcmp(a[0], "--register-only") == 0));
         break;
+    case C_BIOS_SET:
+        /* ATTR: letters, digits, _ . : - (from a letter or digit, 1..96 bytes);
+         * VALUE: 0..256 bytes of anything but control characters. The job's
+         * argument vector, not a shell, so a leading '-' is only text. */
+        ok = n == 2 && isalnum((unsigned char)a[0][0]) && word(a[0], "_.:-", 97) && strlen(a[1]) <= 256;
+        for (const char *p = ok ? a[1] : ""; ok && *p; p++) {
+            ok = (unsigned char)*p >= 32 && *p != 127;
+        }
+        break;
+    case C_SECURITY:
+        /* Exactly the helper's grammar, no free key: set KEY VALUE (a switch
+         * or a lock mode), remove-duress, refresh. */
+        ok = 0;
+        if (n == 3 && strcmp(a[0], "set") == 0) {
+            int switchable = strcmp(a[1], "login-skip") == 0 || strcmp(a[1], "duress") == 0 ||
+                             strcmp(a[1], "fingerprint") == 0 || strcmp(a[1], "face") == 0;
+            ok = switchable ? (strcmp(a[2], "on") == 0 || strcmp(a[2], "off") == 0) :
+                 (strcmp(a[1], "lock-mode") == 0 && (strcmp(a[2], "low") == 0 || strcmp(a[2], "high") == 0));
+        } else if (n == 1) {
+            ok = strcmp(a[0], "remove-duress") == 0 || strcmp(a[0], "refresh") == 0;
+        }
+        break;
     case C_REBUILD:
         ok = n == 0 || (n == 1 && strcmp(a[0], "--force") == 0);
         break;
@@ -334,10 +371,17 @@ struct job {
     int input;            /* anonymous pipe, RAM only; -1 without input (never saved) */
     double stop_at;        /* now_s() when a stopping job is killed; 0 */
     long long submitted, started, ended;
+    long long image_size;  /* the image it was given, copied at acceptance (JOBS_DIR/ID.input) */
+    char image_sha256[65]; /* "" without one */
 };
 
 static struct job jobs[JOBS_MAX];
 static int njobs, next_id = 1;
+static unsigned long long drain_epoch;
+static int drain_fd = -1;
+static void drain_save(void);
+static void drain_check(void);
+static int image_intact(const struct job *j);
 
 static const char *const *job_args(const struct job *j, const char **out)
 {
@@ -413,6 +457,7 @@ static void save(const struct job *j)
     job_args(j, a);
     for (int i = 0; i < j->nargs; i++) fprintf(f, "arg=%s\n", a[i]);
     if (j->last[0]) fprintf(f, "last=%s\n", j->last);
+    if (j->image_sha256[0]) fprintf(f, "image_size=%lld\nimage_sha256=%s\n", j->image_size, j->image_sha256);
     if (fclose(f) != 0 || rename(tmp, path) != 0) {
         say("cannot write %s: %s", path, strerror(errno));
         unlink(tmp);
@@ -580,7 +625,7 @@ static void prune(void)
             i++;
             continue;
         }
-        static const char *const files[] = { "state", "log", "exit", "run" };
+        static const char *const files[] = { "state", "log", "exit", "run", "input" };
         for (size_t k = 0; k < sizeof files / sizeof *files; k++) {
             char path[512];
             job_path(&jobs[i], files[k], path, sizeof path);
@@ -638,13 +683,39 @@ static void finish(struct job *j, int status)
     unlink(path);
     job_path(j, "exit", path, sizeof path);
     unlink(path);
+    job_path(j, "input", path, sizeof path); /* its image's copy, if it had one */
+    unlink(path);
     save(j);
     say("job %d (%s) %s, status %d", j->id, j->kind, j->state, status);
     prune();
     run_next();
+    drain_check();
 }
 
 /* --- The runner: a child of the service, in the job's session and cgroup --- */
+
+/* The kinds that hold the package domain (JOBS_PKG_LOCK), as locachy-pkg's
+ * own operations do: package, kernel and repository changes, and every kind
+ * that builds the boot image (boot, locachy-rebuild; tpm-* and secure-boot
+ * through locachy-tpm, security-policy through locachy-security), which must
+ * never read the kernel and modules while an outside pacman changes them.
+ * Their tools take their own locks inside it (domain, then security, then
+ * configuration). Firmware kinds hold firmware.lock in their tool. */
+static int in_pkg_domain(const struct job *j)
+{
+    static const char *const kinds[] = {
+        "pkg-install", "pkg-remove", "pkg-swap", "pkg-sync", "pkg-plan", "pkg-apply",
+        "kernel-select", "kernel-headers", "repos-rank", "repos-set", "locachy-rebuild", "boot",
+        "secure-boot", "security-policy",
+        "app-host-build", /* a host program's build: packages on the host (app-build stays out) */
+        NULL,
+    };
+    if (strncmp(j->kind, "tpm-", 4) == 0) return 1;
+    for (int i = 0; kinds[i]; i++) {
+        if (strcmp(j->kind, kinds[i]) == 0) return 1;
+    }
+    return 0;
+}
 
 static int step_count(const struct job *j)
 {
@@ -703,6 +774,20 @@ static void runner(const struct job *j, int lock)
         if (log >= 0) dprint_log(log, "locachy-jobs: cannot enter %s: %s; not run\n", path, strerror(errno));
         _exit(125); /* never outside its cgroup */
     }
+    /* Not CLOEXEC: each step inherits it, so the package tools see the domain
+     * held (inherited_pkg_lock). Blocking: an operation outside the service
+     * (a pacman, a direct locachy-pkg) finishes first; a hook never waits here. */
+    if (in_pkg_domain(j)) {
+        int domain = open(JOBS_PKG_LOCK, O_RDWR | O_CREAT | O_NOFOLLOW, 0600);
+        if (domain < 0 || flock(domain, LOCK_EX) < 0) {
+            if (log >= 0) dprint_log(log, "locachy-jobs: cannot take %s: %s; not run\n", JOBS_PKG_LOCK, strerror(errno));
+            _exit(125);
+        }
+    }
+    if (j->image_sha256[0] && image_intact(j) < 0) {
+        if (log >= 0) dprint_log(log, "locachy-jobs: its image is not as it was when the job was accepted; not run\n");
+        _exit(125);
+    }
     int status = 0;
     for (int step = 0; step < step_count(j) && status == 0; step++) {
         char **argv = step_argv(j, step);
@@ -723,6 +808,9 @@ static void runner(const struct job *j, int lock)
              * service's own. */
             umask(022);
             unsetenv("LOCACHY_CONTROL");
+            /* One domain, at one fixed path: no runtime override reaches the
+             * tools (they know the inherited lock by its device and inode). */
+            unsetenv("LOCACHY_PKG_LOCK");
             execv(argv[0], argv);
             dprintf(STDERR_FILENO, "locachy-jobs: cannot run %s: %s\n", argv[0], strerror(errno));
             _exit(127);
@@ -797,6 +885,62 @@ static void run_next(void)
     say("job %d (%s) runs (runner %d)", j->id, j->kind, (int)pid);
 }
 
+/* --- Shutdown drain --- */
+
+/* The epoch survives a service restart: accepted jobs keep running, and no
+ * new submit can slip in before process 1's acknowledgement. */
+static void drain_save(void)
+{
+    char path[512], tmp[520];
+    snprintf(path, sizeof path, "%s/drain", JOBS_DIR);
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    if (!drain_epoch) { unlink(path); return; }
+    FILE *f = fopen(tmp, "we");
+    if (!f || fprintf(f, "%llu\n", drain_epoch) < 0 || fflush(f) || fsync(fileno(f)) || fclose(f) || rename(tmp, path)) {
+        if (f) fclose(f);
+        unlink(tmp);
+        say("cannot save drain epoch: %s", strerror(errno));
+    }
+}
+
+static void drain_load(void)
+{
+    char path[512];
+    snprintf(path, sizeof path, "%s/drain", JOBS_DIR);
+    FILE *f = fopen(path, "re");
+    if (f && fscanf(f, "%llu", &drain_epoch) != 1) drain_epoch = 0;
+    if (f) fclose(f);
+}
+
+static int drain_busy(void)
+{
+    for (int i = 0; i < njobs; i++) if (!ended(&jobs[i])) return 1;
+    return 0;
+}
+
+static void drain_check(void)
+{
+    if (drain_fd < 0 || drain_busy()) return;
+    char text[64];
+    int n = snprintf(text, sizeof text, "drained%c%llu", 0, drain_epoch);
+    (void)send(drain_fd, text, (size_t)n, MSG_NOSIGNAL | MSG_DONTWAIT);
+    close(drain_fd);
+    drain_fd = -1;
+}
+
+/* Only process 1 may drain (tests build with JOBS_TEST_DRAIN_ANY: any root). */
+static int drain_peer(int fd)
+{
+    struct ucred cred;
+    socklen_t len = sizeof cred;
+    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) < 0 || cred.uid != JOBS_UID) return 0;
+#ifdef JOBS_TEST_DRAIN_ANY
+    return 1;
+#else
+    return cred.pid == JOBS_DRAIN_PID;
+#endif
+}
+
 /* --- Starting again: the jobs of the last run --- */
 
 static int lock_held(const struct job *j)
@@ -846,6 +990,8 @@ static void restore(void)
             else if (strcmp(line, "started") == 0) j->started = atoll(v);
             else if (strcmp(line, "ended") == 0) j->ended = atoll(v);
             else if (strcmp(line, "last") == 0) snprintf(j->last, sizeof j->last, "%s", v);
+            else if (strcmp(line, "image_size") == 0) j->image_size = atoll(v);
+            else if (strcmp(line, "image_sha256") == 0) snprintf(j->image_sha256, sizeof j->image_sha256, "%s", v);
             else if (strcmp(line, "arg") == 0 && j->nargs < JOBS_ARGS_MAX) {
                 size_t n = strlen(v) + 1;
                 if (used >= sizeof j->args || n > sizeof j->args - used) continue;
@@ -968,6 +1114,267 @@ static void answer(const char *a, const char *b)
     if (b) put(b);
 }
 
+/* --- Images: the file a job is given, copied when the job is accepted --- */
+
+/* A file argument (the image a firmware or SPI job writes or checks) is copied
+ * into the job's own root-only spool at acceptance, so what runs is what was
+ * accepted, whatever happens to the file the person named afterwards. The
+ * copy's size and SHA-256 are kept with the job, and the runner checks them
+ * before its first step. Only these kinds take a file, and it is capped. */
+#define JOBS_IMAGE_MAX (64LL * 1024 * 1024)
+
+/* The argument of a kind that names an image file (-1: none). */
+static int image_argument(const struct kind *k)
+{
+    if (k->check == C_FILE) return 0;                                  /* fw-local-install */
+    if (k->check == C_SPI_VERIFY || k->check == C_SPI_WRITE) return 1; /* after the programmer */
+    return -1;
+}
+
+/* SHA-256 (FIPS 180-4), streamed. Self-contained: this file is built alone. */
+struct sha256 {
+    uint32_t h[8];
+    uint64_t bits;
+    unsigned char buf[64];
+    size_t fill;
+};
+
+static const uint32_t sha256_k[64] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+};
+
+#define SHA256_ROR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
+
+static void sha256_block(uint32_t h[8], const unsigned char *p)
+{
+    uint32_t w[64], a, b, c, d, e, f, g, hh;
+    for (int i = 0; i < 16; i++) {
+        w[i] = (uint32_t)p[4 * i] << 24 | (uint32_t)p[4 * i + 1] << 16 | (uint32_t)p[4 * i + 2] << 8 | p[4 * i + 3];
+    }
+    for (int i = 16; i < 64; i++) {
+        uint32_t s0 = SHA256_ROR(w[i - 15], 7) ^ SHA256_ROR(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        uint32_t s1 = SHA256_ROR(w[i - 2], 17) ^ SHA256_ROR(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    a = h[0]; b = h[1]; c = h[2]; d = h[3]; e = h[4]; f = h[5]; g = h[6]; hh = h[7];
+    for (int i = 0; i < 64; i++) {
+        uint32_t t1 = hh + (SHA256_ROR(e, 6) ^ SHA256_ROR(e, 11) ^ SHA256_ROR(e, 25)) +
+                      ((e & f) ^ (~e & g)) + sha256_k[i] + w[i];
+        uint32_t t2 = (SHA256_ROR(a, 2) ^ SHA256_ROR(a, 13) ^ SHA256_ROR(a, 22)) +
+                      ((a & b) ^ (a & c) ^ (b & c));
+        hh = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+    }
+    h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
+}
+
+static void sha256_init(struct sha256 *s)
+{
+    static const uint32_t iv[8] = {
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    };
+    memcpy(s->h, iv, sizeof iv);
+    s->bits = 0;
+    s->fill = 0;
+}
+
+static void sha256_update(struct sha256 *s, const unsigned char *p, size_t n)
+{
+    s->bits += (uint64_t)n * 8;
+    while (n > 0) {
+        size_t take = 64 - s->fill < n ? 64 - s->fill : n;
+        memcpy(s->buf + s->fill, p, take);
+        s->fill += take;
+        p += take;
+        n -= take;
+        if (s->fill == 64) {
+            sha256_block(s->h, s->buf);
+            s->fill = 0;
+        }
+    }
+}
+
+/* The digest as 64 lowercase hex digits into hex (65 bytes). */
+static void sha256_final(struct sha256 *s, char *hex)
+{
+    unsigned char pad[72] = { 0x80 }, len[8];
+    uint64_t bits = s->bits;
+    size_t padlen = s->fill < 56 ? 56 - s->fill : 120 - s->fill;
+    for (int i = 0; i < 8; i++) len[i] = (unsigned char)(bits >> (56 - 8 * i));
+    sha256_update(s, pad, padlen);
+    sha256_update(s, len, 8);
+    for (int i = 0; i < 8; i++) snprintf(hex + 8 * i, 9, "%08x", (unsigned)s->h[i]);
+}
+
+/* Copies SRC, the regular file the person named (checked by check_args), into
+ * JOBS_DIR/ID.input: root's, 0600, created exclusively, no link followed. What
+ * was copied is hashed as it goes. 0 with the spool path, the size and digest;
+ * -1 with why, and no spool left. */
+static int image_take(int id, const char *src, char *spool, size_t spool_size, long long *bytes,
+                      char *digest, char *why, size_t why_size)
+{
+    char path[512];
+    struct stat st;
+    snprintf(path, sizeof path, "%s/%d.input", JOBS_DIR, id);
+    int in = open(src, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (in < 0 || fstat(in, &st) < 0 || !S_ISREG(st.st_mode)) {
+        snprintf(why, why_size, "the image cannot be read: %s", in < 0 ? strerror(errno) : "not a regular file");
+        if (in >= 0) close(in);
+        return -1;
+    }
+    if (st.st_size > JOBS_IMAGE_MAX) {
+        close(in);
+        snprintf(why, why_size, "the image is larger than %lld MiB", JOBS_IMAGE_MAX / (1024 * 1024));
+        return -1;
+    }
+    int out = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (out < 0) {
+        close(in);
+        snprintf(why, why_size, "the image cannot be taken: %s", strerror(errno));
+        return -1;
+    }
+    struct sha256 s;
+    unsigned char buf[65536];
+    long long total = 0;
+    int ok = 1;
+    sha256_init(&s);
+    for (;;) {
+        ssize_t r = read(in, buf, sizeof buf);
+        if (r < 0 && errno == EINTR) continue;
+        if (r < 0) {
+            ok = 0;
+            break;
+        }
+        if (r == 0) break;
+        total += r;
+        if (total > JOBS_IMAGE_MAX) {
+            ok = 0;
+            break;
+        }
+        sha256_update(&s, buf, (size_t)r);
+        for (ssize_t off = 0; off < r;) {
+            ssize_t w = write(out, buf + off, (size_t)(r - off));
+            if (w < 0 && errno == EINTR) continue;
+            if (w <= 0) {
+                ok = 0;
+                break;
+            }
+            off += w;
+        }
+        if (!ok) break;
+    }
+    if (ok && fsync(out) < 0) ok = 0;
+    if (close(out) < 0) ok = 0;
+    close(in);
+    if (!ok) {
+        unlink(path);
+        snprintf(why, why_size, "the image could not be copied");
+        return -1;
+    }
+    sha256_final(&s, digest);
+    *bytes = total;
+    snprintf(spool, spool_size, "%s", path);
+    return 0;
+}
+
+/* The job's copy as it was accepted: its size and digest. 0, or -1. */
+static int image_intact(const struct job *j)
+{
+    char path[512], digest[65];
+    struct stat st;
+    snprintf(path, sizeof path, "%s/%d.input", JOBS_DIR, j->id);
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return -1;
+    if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) || (long long)st.st_size != j->image_size) {
+        close(fd);
+        return -1;
+    }
+    struct sha256 s;
+    unsigned char buf[65536];
+    sha256_init(&s);
+    for (;;) {
+        ssize_t r = read(fd, buf, sizeof buf);
+        if (r < 0 && errno == EINTR) continue;
+        if (r < 0) {
+            close(fd);
+            return -1;
+        }
+        if (r == 0) break;
+        sha256_update(&s, buf, (size_t)r);
+    }
+    close(fd);
+    sha256_final(&s, digest);
+    return strcmp(digest, j->image_sha256) == 0 ? 0 : -1;
+}
+
+/* --- An app's build: which kind, by its own configuration --- */
+
+/* host="1" in text, as locachy-app reads a key (its conf_value): the value of
+ * the last line that is, after blanks, host="VALUE" with its closing quote. */
+static int host_value(const char *text)
+{
+    int host = 0;
+    for (const char *line = text; *line;) {
+        const char *end = strchr(line, '\n'), *stop = end ? end : line + strlen(line), *p = line;
+        while (p < stop && isspace((unsigned char)*p)) p++;
+        if (stop - p >= 7 && strncmp(p, "host=\"", 6) == 0) {
+            const char *value = p + 6, *quote = memchr(value, '"', (size_t)(stop - value));
+            if (quote) host = quote - value == 1 && value[0] == '1';
+        }
+        if (!end) break;
+        line = end + 1;
+    }
+    return host;
+}
+
+/* Whether app NAME is a host program (host="1"), from its configuration
+ * (JOBS_CONTAINERS/NAME.conf: root's own regular file, written by no one else),
+ * read under the lock its every writer takes (NAME.conf.lock, flock:
+ * base/include/config.h). The service holds no domain, so that lock comes
+ * first and last here. 1 or 0; -1 with why. */
+static int container_host(const char *name, char *why, size_t size)
+{
+    char path[512], lock[520], text[65537];
+    struct stat st;
+    snprintf(path, sizeof path, "%s/%s.conf", JOBS_CONTAINERS, name);
+    snprintf(lock, sizeof lock, "%s.lock", path);
+    if (access(path, F_OK) != 0) {
+        snprintf(why, size, "there is no app %s", name); /* no lock file made for it */
+        return -1;
+    }
+    int l = open(lock, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (l < 0 || fstat(l, &st) < 0 || !S_ISREG(st.st_mode) || st.st_nlink != 1 ||
+        st.st_uid != (uid_t)JOBS_UID || flock(l, LOCK_EX) < 0) {
+        snprintf(why, size, "the configuration of %s cannot be locked", name);
+        if (l >= 0) close(l);
+        return -1;
+    }
+    int host = -1, fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        snprintf(why, size, "the configuration of %s cannot be read: %s", name, strerror(errno));
+    } else if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) || st.st_uid != (uid_t)JOBS_UID || (st.st_mode & 022)) {
+        snprintf(why, size, "the configuration of %s is not root's own file", name);
+    } else if (st.st_size >= (off_t)sizeof text) {
+        snprintf(why, size, "the configuration of %s is too large", name);
+    } else {
+        size_t got = 0;
+        ssize_t r = 0;
+        while (got < sizeof text - 1 && (r = read(fd, text + got, sizeof text - 1 - got)) > 0) got += (size_t)r;
+        text[got] = '\0';
+        if (r < 0) snprintf(why, size, "the configuration of %s cannot be read: %s", name, strerror(errno));
+        else host = host_value(text);
+    }
+    if (fd >= 0) close(fd);
+    close(l); /* the lock goes with its descriptor */
+    return host;
+}
+
 /* Input must already be complete: a bounded anonymous read pipe with no writer.
  * Check with non-consuming poll/FIONREAD; never block the service on a peer. */
 static int input_ready(int fd)
@@ -993,9 +1400,26 @@ static void submit(char **f, int n, const char *from, int *input)
         answer("error", "no such kind of job");
         return;
     }
+    if (drain_epoch) {
+        answer("error", "the system is shutting down; no new system job is accepted");
+        return;
+    }
     if (n - 2 > JOBS_ARGS_MAX - 1 || check_args(k, f + 2, n - 2, why, sizeof why) < 0) {
         answer("error", n - 2 > JOBS_ARGS_MAX - 1 ? "too many arguments" : why);
         return;
+    }
+    /* An app's build: the kind (and so the package domain) is the one its
+     * configuration says now, never the one a caller would rather have. */
+    if (strcmp(k->name, "app-build") == 0 || strcmp(k->name, "app-host-build") == 0) {
+        int host = container_host(f[2], why, sizeof why);
+        if (host < 0) {
+            answer("error", why);
+            return;
+        }
+        if (host != (strcmp(k->name, "app-host-build") == 0)) {
+            answer("error", "the app's host setting changed; open it again");
+            return;
+        }
     }
     for (int i = 2; i < n; i++) {
         size_t len = strlen(f[i]) + 1;
@@ -1027,9 +1451,33 @@ static void submit(char **f, int n, const char *from, int *input)
             answer("error", "too many jobs");
             return;
         }
+        /* Its image, copied now: the job's argument names the copy. */
+        int image = image_argument(k);
+        char spool[512] = "", digest[65] = "";
+        long long image_bytes = 0;
+        if (image >= 0) {
+            if (image_take(next_id, f[2 + image], spool, sizeof spool, &image_bytes, digest, why, sizeof why) < 0) {
+                answer("error", why);
+                return;
+            }
+            used = 0;
+            for (int i = 2; i < n; i++) {
+                const char *a = i == 2 + image ? spool : f[i];
+                size_t len = strlen(a) + 1;
+                if (used + len > sizeof text) {
+                    unlink(spool);
+                    answer("error", "the arguments are too long");
+                    return;
+                }
+                memcpy(text + used, a, len);
+                used += len;
+            }
+        }
         j = &jobs[njobs++];
         memset(j, 0, sizeof *j);
         j->id = next_id++;
+        j->image_size = image_bytes;
+        snprintf(j->image_sha256, sizeof j->image_sha256, "%s", digest);
         j->pidfd = -1;
         j->input = *input;
         *input = -1;
@@ -1061,12 +1509,16 @@ static void cancel(struct job *j, int confirm)
     if (ended(j)) {
         answer("ok", "ended");
     } else if (strcmp(j->state, "queued") == 0) {
+        char spool[512];
         close_input(j);
+        job_path(j, "input", spool, sizeof spool); /* its image's copy, if it had one */
+        unlink(spool);
         snprintf(j->state, sizeof j->state, "cancelled");
         j->ended = (long long)time(NULL);
         save(j);
         say("job %d (%s) removed from the queue", j->id, j->kind);
         prune();
+        drain_check(); /* it may have been the last one a drain waited for */
         answer("ok", "removed");
     } else if (!confirm) {
         snprintf(why, sizeof why, "job %d runs: stopping it can leave the system half-changed; cancel %d confirm",
@@ -1122,6 +1574,20 @@ static void request(struct conn *c)
         answer("error", "malformed request");
     } else if (strcmp(f[0], "submit") == 0 && n >= 2) {
         submit(f, n, c->from, &input);
+    } else if (strcmp(f[0], "drain") == 0 && n == 2) {
+        char *end = NULL;
+        unsigned long long epoch = strtoull(f[1], &end, 10);
+        if (!drain_peer(c->fd) || !f[1][0] || !end || *end || epoch == 0 || epoch < drain_epoch) {
+            answer("error", "drain refused");
+        } else {
+            if (epoch != drain_epoch) { drain_epoch = epoch; drain_save(); }
+            if (drain_fd >= 0) close(drain_fd);
+            drain_fd = c->fd;
+            *c = conns[--nconns];
+            say("draining for process 1, epoch %llu", drain_epoch);
+            drain_check();
+            return;
+        }
     } else if (strcmp(f[0], "list") == 0 && n == 1) {
         static char text[2048];
         answer("ok", NULL);
@@ -1225,6 +1691,7 @@ int main(int argc, char **argv)
     sigprocmask(SIG_BLOCK, &handled, NULL);
     signal(SIGPIPE, SIG_IGN);
     int signals = signalfd(-1, &handled, SFD_CLOEXEC | SFD_NONBLOCK);
+    drain_load();
     restore();
     int listener = listen_control();
     if (signals < 0 || listener < 0) return 1;

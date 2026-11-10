@@ -19,7 +19,8 @@ src=$(cd "$(dirname "$0")/.." && pwd)
 run=/run/test-jobs
 t=$run/t
 defs=(-DJOBS_DIR="\"$t/jobs\"" -DJOBS_CGROUP="\"$t/cgroup\"" -DJOBS_PROC="\"$t/proc\"" -DJOBS_BIN="\"$t/bin\""
-      -DJOBS_UNTRUSTED_KEYS="\"$t/untrusted-keys\"" -DJOBS_STOP_GRACE=2)
+      -DJOBS_UNTRUSTED_KEYS="\"$t/untrusted-keys\"" -DJOBS_STOP_GRACE=2 -DJOBS_PKG_LOCK="\"$t/pkg.lock\""
+      -DJOBS_CONTAINERS="\"$t/containers\"" -DJOBS_TEST_DRAIN_ANY)
 cc=(gcc -O2 -g -Wall -Wextra -Werror -D_GNU_SOURCE -I"$src/base/include" -I"$src/tools" "${defs[@]}")
 "${cc[@]}" "$src/progs/locachy-jobs.c" -o "$out/locachy-jobs" || exit 1
 "${cc[@]}" -fsanitize=address,undefined -fno-omit-frame-pointer "$src/progs/locachy-jobs.c" \
@@ -30,7 +31,11 @@ inner='
 set -u
 src=$1 run=$2 t=$3 server=$4 client=$5
 mount -t tmpfs -o mode=0755 tmpfs /run || exit 9
-mkdir -p "$t/cgroup/service" "$t/proc" "$t/bin" "$t/files"
+mkdir -p "$t/cgroup/service" "$t/proc" "$t/bin" "$t/files" "$t/containers"
+echo "package=\"x\"" >"$t/containers/alpha.conf"
+echo "host=\"1\"" >>"$t/containers/alpha.conf"
+echo "package=\"x\"" >"$t/containers/beta.conf"
+echo "package=\"x\"" >"$t/containers/keys3.conf"
 touch "$t/cgroup/service/cgroup.procs"
 for i in $(seq 1 120); do
     mkdir "$t/cgroup/job-$i"
@@ -38,10 +43,11 @@ for i in $(seq 1 120); do
     echo "populated 0" >"$t/cgroup/job-$i/cgroup.events"
 done
 install -m 755 "$src/tools/test-jobs-tool.sh" "$run/tool"
-for p in locachy-pkg locachy-repos locachy-boot locachy-tpm locachy-app locachy-firmware; do ln -s "$run/tool" "$t/bin/$p"; done
+for p in locachy-pkg locachy-repos locachy-boot locachy-tpm locachy-app locachy-firmware locachy-security; do ln -s "$run/tool" "$t/bin/$p"; done
 install -m 755 "$server" "$run/locachy-jobs"
 install -m 755 "$client" "$run/test-jobs"
 export TEST_JOBS=$t
+export TEST_SRC=$src # the steps call locachy_transaction as locachy-pkg does
 pass=0 fail=0
 check() { local name=$1; shift; if "$@"; then echo "PASS $name"; pass=$((pass + 1)); else echo "FAIL $name"; fail=$((fail + 1)); fi; }
 J() { "$run/test-jobs" "$@"; }
@@ -102,6 +108,13 @@ check "an SPI backup goes into a folder" refuse spi-backup internal "$rom"
 check "an SPI option given twice is refused" refuse spi-verify internal "$rom" --chip A --chip B
 check "an SPI option without its value is refused" refuse spi-verify internal "$rom" --chip
 check "65 arguments are refused" refuse pkg-apply $(seq -f c%g 65)
+check "a BIOS attribute that starts with - is refused" refuse bios-set -Boot 1
+check "a BIOS attribute with a space is refused" refuse bios-set "Boot Order" 1
+check "a BIOS value with a newline is refused" refuse bios-set Boot.Order "$(printf "a\nb")"
+check "a security switch takes on or off" refuse security-policy set login-skip maybe
+check "a security lock mode takes low or high" refuse security-policy set lock-mode on
+check "an unknown security key is refused" refuse security-policy set root on
+check "a security request takes no extra word" refuse security-policy refresh now
 check "a package install is taken" accept pkg-install foo lib32-mesa python-dlib noto-fonts-cjk
 check "a swap is taken" accept pkg-swap python-dlib python-dlib-cuda
 check "a kernel is taken" accept kernel-select linux-cachyos-bore
@@ -114,15 +127,22 @@ check "an SPI write with every option is taken" accept spi-write ch341a_spi "$ro
     --regions fd,bios --expected-size 4096
 check "an SPI backup into a folder is taken" accept spi-backup "linux_spi:dev=/dev/spidev0.0" "$t/files"
 check "the boot image is taken" accept boot
+check "a BIOS setting is taken, its value may start with -" accept bios-set Boot.Order -1
+check "a security switch is taken" accept security-policy set login-skip off
+check "a security lock mode is taken" accept security-policy set lock-mode high
+check "a duress removal is taken" accept security-policy remove-duress
+check "a security refresh is taken" accept security-policy refresh
 check "the jobs above ran" idle
 check "the programs ran as their kinds say, an argument each, no shell" grep -q \
     "locachy-pkg install foo lib32-mesa python-dlib noto-fonts-cjk \[5\]" "$t/calls"
 check "a swap removes, then installs" sh -c "grep -A2 \"locachy-pkg remove python-dlib \[2\]\" \"$t/calls\" | grep -q \"locachy-pkg install python-dlib-cuda \[2\]\""
 check "a kernel: locachy-pkg kernel select" grep -q "locachy-pkg kernel select linux-cachyos-bore \[3\]" "$t/calls"
 check "a section: locachy-repos apply --set" grep -q "locachy-repos apply --set extra=off \[3\]" "$t/calls"
-check "a path with a space stays one argument" grep -q "fwupd-action local-install $t/files/my fw.cab \[3\]" "$t/calls"
-check "an SPI write: its options as given" grep -q \
-    "spi-write ch341a_spi $t/files/rom.bin --chip W25Q64.V --regions fd,bios --expected-size 4096 \[9\]" "$t/calls"
+check "a BIOS setting: locachy-firmware bios-set, two words" grep -q "locachy-firmware bios-set Boot.Order -1 \[3\]" "$t/calls"
+check "a security switch: locachy-security, its words" grep -q "locachy-security set login-skip off \[3\]" "$t/calls"
+check "a named path with a space is taken whole, as one copy" grep -q "fwupd-action local-install $t/jobs/[0-9]*.input \[3\]" "$t/calls"
+check "an SPI write: its options as given, its image as its copy" grep -q \
+    "spi-write ch341a_spi $t/jobs/[0-9]*.input --chip W25Q64.V --regions fd,bios --expected-size 4096 \[9\]" "$t/calls"
 check "the boot image: locachy-boot alone" grep -q "locachy-boot  \[0\]" "$t/calls"
 input_reply=$(printf queue-input-probe | J submit-input tpm-enroll)
 printf "TPM input submission: %s\n" "$input_reply"
@@ -147,6 +167,38 @@ check "every step runs with umask 022, not the umask of the service" \
 check "a malformed request (a trailing NUL) is refused" sh -c "\"$run/test-jobs\" raw submit pkg-sync \"\" | grep -q \"malformed\""
 check "an unknown request is refused" sh -c "\"$run/test-jobs\" raw frobnicate | grep -q \"unknown request\""
 check "an unknown job is refused" sh -c "\"$run/test-jobs\" cancel 99999 | grep -q \"no such job\""
+
+# The package domain: a package job waits while another holder has
+# JOBS_PKG_LOCK, starts nothing, and its step then inherits the domain.
+exec 9>"$t/pkg.lock"
+flock -x 9
+d=$(id_of "$(J submit pkg-sync)")
+sleep 0.5
+check "a package job waits for the package domain, starting nothing" test "$(grep -c "^start $d " "$t/calls")" = 0
+exec 9>&-
+check "then it runs" wait_state "$d" done
+check "its step inherited the domain lock" grep -qx "$d" "$t/domains"
+fwid=$(grep -m1 " locachy-firmware bios-set " "$t/calls" | cut -d" " -f2)
+check "a firmware step does not hold the package domain" sh -c "[ -n \"$fwid\" ] && ! grep -qx \"$fwid\" \"$t/domains\""
+check "the step gets no lock path from the environment" grep -qx "$d " "$t/lockenv"
+# The boot image kinds hold the domain too: a security job, whoever asked,
+# waits for it, and settings follows that job by its kind.
+exec 9>"$t/pkg.lock"
+flock -x 9
+sp=$(id_of "$(J --comm locachy-securi submit security-policy refresh)")
+tp=$(id_of "$(J submit tpm-pending)")
+sleep 0.5
+check "a security-policy job waits for the package domain" test "$(grep -c "^start $sp " "$t/calls")" = 0
+check "settings follows a security job by its kind, whoever asked" \
+    sh -c "\"$run/test-jobs\" --comm settings mine | grep -q \"^$sp:security-policy:running:locachy-securi\$\""
+check "firmware does not follow it" sh -c "! \"$run/test-jobs\" --comm firmware mine | grep -q \"^$sp:\""
+exec 9>&-
+check "then the security job runs" wait_state "$sp" done
+check "then the TPM job runs" wait_state "$tp" done
+sb=$(id_of "$(J submit secure-boot)")
+check "a Secure Boot job runs" wait_state "$sb" done
+check "security, TPM and Secure Boot steps inherited the domain" \
+    sh -c "grep -qx $sp \"$t/domains\" && grep -qx $tp \"$t/domains\" && grep -qx $sb \"$t/domains\""
 
 # One at a time, in order.
 a=$(id_of "$(J submit pkg-install slow)")
@@ -277,6 +329,100 @@ check "started again after its job ended" start_service
 check "the job that ended meanwhile is done" wait_state "$s" done
 u=$(id_of "$(J submit pkg-install fail)")
 check "and the queue runs again" wait_state "$u" failed
+# Images: copied at acceptance. The tool runs on the copy and the digest is the
+# one accepted; a copy changed afterwards does not run; a cancelled copy leaves
+# nothing; a link, or a file over 64 MiB, is refused.
+img=$t/files/fw.cab
+printf "firmware image A" >"$img"
+sum_a=$(sha256sum "$img" | cut -d" " -f1) # not "want": wait_state uses that name
+ia=$(id_of "$(J submit fw-local-install "$img")")
+check "an image job is taken" test -n "$ia"
+check "it runs, and the tool runs its copy, not the named file" wait_state "$ia" done
+check "the tool got the copy with the digest accepted" grep -q "^$ia $sum_a $t/jobs/$ia.input\$" "$t/images"
+check "the job keeps the digest of its copy" grep -qx "image_sha256=$sum_a" "$t/jobs/$ia.state"
+check "the copy goes when the job ends" test ! -e "$t/jobs/$ia.input"
+s3=$(id_of "$(J submit pkg-install slow)")
+started "$s3"
+img2=$t/files/fw2.cab
+printf "firmware image B" >"$img2"
+want2=$(sha256sum "$img2" | cut -d" " -f1)
+q3=$(id_of "$(J submit fw-local-install "$img2")")
+printf "replaced after acceptance" >"$img2"
+touch "$t/release-$s3"
+check "a named file changed after acceptance: the accepted copy runs" wait_state "$q3" done
+check "the digest that ran is the accepted one" grep -q "^$q3 $want2 " "$t/images"
+big=$t/files/big.cab
+truncate -s 67108865 "$big"
+check "an image over 64 MiB is refused" refuse fw-local-install "$big"
+ln -sf "$img" "$t/files/link.cab"
+check "an image given as a link is refused" refuse fw-local-install "$t/files/link.cab"
+s4=$(id_of "$(J submit pkg-install slow)")
+started "$s4"
+img4=$t/files/fw4.cab
+printf "firmware image C" >"$img4"
+q4=$(id_of "$(J submit fw-local-install "$img4")")
+printf "x" >>"$t/jobs/$q4.input"
+touch "$t/release-$s4"
+check "a copy changed after acceptance does not run" wait_state "$q4" failed
+check "its tool never started" test "$(grep -c "^start $q4 " "$t/calls")" = 0
+s5=$(id_of "$(J submit pkg-install slow)")
+started "$s5"
+img5=$t/files/fw5.cab
+printf "firmware image D" >"$img5"
+q5=$(id_of "$(J submit fw-local-install "$img5")")
+check "a queued image job holds its copy" test -e "$t/jobs/$q5.input"
+check "cancelling it removes the copy" sh -c "\"$run/test-jobs\" cancel $q5 | grep -q \"^ok removed\" && test ! -e \"$t/jobs/$q5.input\""
+touch "$t/release-$s5"
+check "the queue goes on after the cancelled image job" wait_state "$s5" done
+
+# App builds: the kind is the app own host setting, checked at acceptance.
+check "a host app build is refused as an ordinary one" refuse app-build alpha
+check "an ordinary app build is refused as a host one" refuse app-host-build beta
+check "a build of an app that is not there is refused" refuse app-host-build nosuch
+hb=$(id_of "$(J submit app-host-build alpha)")
+check "a host app build is taken as the host kind" test -n "$hb"
+check "it runs" wait_state "$hb" done
+check "its step got the package domain descriptor" grep -qx "$hb" "$t/domains"
+check "the one it holds: inherited, not reopened" grep -qx "$hb held refused" "$t/lockuse"
+check "locachy-pkg holds the inherited domain in a host build" grep -qx "$hb held" "$t/pkguse"
+ob=$(id_of "$(J submit app-build beta)")
+check "an ordinary app build is taken" test -n "$ob"
+check "it runs without the package domain" wait_state "$ob" done
+check "its step has no package domain descriptor" sh -c "! grep -qx \"$ob\" \"$t/domains\""
+check "locachy-pkg is refused the domain in an ordinary build" grep -qx "$ob refused" "$t/pkguse"
+s6=$(id_of "$(J submit pkg-install slow)")
+started "$s6"
+hb2=$(id_of "$(J submit app-host-build alpha)")
+sleep 0.5
+check "a host build waits while a package job holds the domain" test "$(grep -c "^start $hb2 " "$t/calls")" = 0
+touch "$t/release-$s6"
+check "then the host build runs" wait_state "$hb2" done
+exec 9>"$t/pkg.lock"
+flock -x 9
+ob2=$(id_of "$(J submit app-build beta)")
+check "an ordinary build runs while the domain is held outside the queue" wait_state "$ob2" done
+hb3=$(id_of "$(J submit app-host-build alpha)")
+sleep 0.5
+check "a host build waits for the domain held outside the queue" test "$(grep -c "^start $hb3 " "$t/calls")" = 0
+exec 9>&-
+check "then the host build runs once the domain is free" wait_state "$hb3" done
+
+# A drain (process 1 shutdown): acknowledged once nothing is accepted or
+# running, and no new job is taken while it waits.
+s2=$(id_of "$(J submit pkg-install slow)")
+started "$s2"
+q2=$(id_of "$(J submit repos-rank)")
+"$run/test-jobs" raw drain 10 >"$t/drain.out" 2>&1 &
+dp=$!
+sleep 0.5
+check "a drain is not acknowledged while a job runs" test ! -s "$t/drain.out"
+check "a drain takes no new job" refuse pkg-sync
+check "a queued job can still be cancelled while it drains" \
+    sh -c "\"$run/test-jobs\" cancel $q2 | grep -q \"^ok removed\""
+touch "$t/release-$s2"
+wait "$dp"
+check "the drain is acknowledged with its epoch" sh -c "grep -qx drained \"$t/drain.out\" && grep -qx 10 \"$t/drain.out\""
+check "the cancelled queued job never started" test "$(grep -c "^start $q2 " "$t/calls")" = 0
 kill -TERM "$svc"; wait "$svc"
 sed "s/^/service: /" "$t/service.log"
 sed "s/^/calls: /" "$t/calls"

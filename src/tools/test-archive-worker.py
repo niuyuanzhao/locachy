@@ -237,6 +237,36 @@ class Worker(unittest.TestCase):
         self.assertEqual(run(["add", arc, self.tmp, "more.txt"], ["ppw-123"])[1], 0)
         self.assertEqual(entries(run(["list", arc])[0])["more.txt"][8], "1")
 
+    def test_target_replaced_between_lock_and_publish_is_refused_and_kept(self):
+        # add asks for the password of this encrypted zip after it has taken
+        # the folder's lock and read the archive: that question is the barrier.
+        # Another writer then replaces the archive (a new file, the same bytes),
+        # and the publish must refuse rather than write over it.
+        arc = self.tmp / "race.zip"
+        msgs, rc, _ = run(["create", "-P", arc, self.src, "top.txt"], first_line="pw-123")
+        self.assertEqual(rc, 0, msgs)
+        other = self.tmp / "other.zip"
+        shutil.copyfile(arc, other)
+        kept = other.read_bytes()
+        env = {"PATH": "/usr/bin", "LANG": "C.UTF-8", "HOME": os.environ.get("HOME", "/")}
+        p = subprocess.Popen([WORKER, "add", str(arc), str(self.tmp), "more.txt"], stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+        msgs = []
+        for line in p.stdout:
+            f = line.rstrip("\n").split("\t")
+            msgs.append(f)
+            if f[0] == "Q":
+                os.replace(other, arc)
+                p.stdin.write("ppw-123\n")
+                p.stdin.flush()
+        p.stdin.close()
+        p.wait(timeout=60)
+        self.assertNotEqual(p.returncode, 0, msgs)
+        self.assertTrue(any(m[0] == "X" and "changed while the operation was in progress" in m[1] for m in msgs), msgs)
+        self.assertEqual(arc.read_bytes(), kept)
+        self.assertEqual([x.name for x in self.tmp.iterdir() if x.name.startswith(".")], [])
+        print("PASS target replaced between lock and publish: refused, the replacement kept")
+
     def test_volumes_written_and_read(self):
         big = self.src / "big.bin"
         big.write_bytes(os.urandom(300000))

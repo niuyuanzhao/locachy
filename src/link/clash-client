@@ -199,14 +199,8 @@ in_ns() {
     ip netns exec "$NS" "$@"
 }
 
-clash_tun_enforced() {
-    grep -qE '^[[:space:]]*service_clash=' "$RC" 2>/dev/null &&
-        [ "$(mode)" = tun ] && [ "$(tor)" = none ]
-}
-
-enforce_load() {
-    [ -e "/run/netns/$NS" ] || return 0
-    in_ns nft -f - <<EOF
+enforce_rules() {
+    cat <<EOF
 table $ENFORCE_TABLE
 delete table $ENFORCE_TABLE
 table $ENFORCE_TABLE {
@@ -229,44 +223,26 @@ table $ENFORCE_TABLE {
 EOF
 }
 
-enforce_remove() {
-    [ -e "/run/netns/$NS" ] || return 0
-    if in_ns nft list table $ENFORCE_TABLE >/dev/null 2>&1; then
-        in_ns nft delete table $ENFORCE_TABLE
-    fi
-}
+NETWORK=${LOCACHY_NETWORK_HELPER:-$(dirname "$0")/locachy_network.py}
+export LOCACHY_NETWORK_RC=${LOCACHY_NETWORK_RC:-$RC}
+export LOCACHY_NETWORK_NETNS=${LOCACHY_NETWORK_NETNS:-$NS}
+POLICY_STATE=${LOCACHY_NETWORK_STATE:-/run/locachy/network}
+policy() { python3 "$NETWORK" "$@"; }
+sync_enforce() { policy reconcile; }
 
-sync_enforce() {
-    if clash_tun_enforced; then
-        enforce_load
-    else
-        enforce_remove
-    fi
-}
+case "${1:-}" in
+--rules) enforce_rules; exit 0 ;;
+--enforce|--unenforce) policy reconcile; exit $? ;;
+esac
 
-if [ "${1:-}" = --enforce ]; then
-    enforce_load
-    exit $?
-elif [ "${1:-}" = --unenforce ]; then
-    enforce_remove
-    exit 0
-fi
-
-# What auto-route leaves when mihomo is killed: its rules, its table, its
-# interface; and the rule of its connections above Tor.
-clean() {
-    local family p
-    for family in -4 -6; do
-        in_ns ip "$family" rule show 2>/dev/null | sed -n 's/^\([0-9]*\):.*/\1/p' | while read -r p; do
-            if [ "$p" -ge "$RULE" ] && [ "$p" -lt $((RULE + 100)) ] || [ "$p" = "$OVER_TOR_RULE" ]; then
-                in_ns ip "$family" rule del priority "$p"
-            fi
-        done
-        in_ns ip "$family" route flush table "$TABLE" 2>/dev/null
-    done
-    in_ns ip link del "$DEVICE" 2>/dev/null
-    true
-}
+# This lifetime lock is NOT the short policy lock. The child inherits it:
+# even SIGKILL of this wrapper cannot let its auto-route cleanup overlap
+# another generation using mihomo's fixed interface/routing table.
+mkdir -p "$POLICY_STATE"
+exec 9>"$POLICY_STATE/clash.lifecycle.lock"
+flock -x 9
+TOKEN=$(policy daemon claim clash) || exit 1
+release() { policy daemon release clash "$TOKEN" "$@"; }
 
 # The subscription, asked as a Clash client (which most give their
 # configuration to), into subscription.yaml.
@@ -277,28 +253,27 @@ fetch() {
 }
 
 pid=
-on_stop() {
+on_exit() {
     [ -z "$pid" ] || { kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; }
-    clean
-    sync_enforce
-    exit 0
+    release
 }
-trap on_stop TERM INT
+trap on_exit EXIT
+trap 'exit 0' TERM INT
 
 until [ -e "/run/netns/$NS" ]; do
     sleep 1 & wait $!
 done
-sync_enforce
+sync_enforce || exit 1
 
 until [ -x "$MIHOMO" ] && [ -s "$STATE/subscription" ]; do
-    sync_enforce
+    sync_enforce || exit 1
     sleep 2 & wait $!
 done
 umask 077
 mkdir -p "$STATE"
 [ -s "$STATE/secret" ] || od -An -tx1 -N16 /dev/urandom | tr -d ' \n' >"$STATE/secret"
 while :; do
-    sync_enforce
+    sync_enforce || exit 1
     mode=$(mode)
     tor=$(tor)
     sub_time=$(stat -c %Y "$STATE/subscription")
@@ -324,8 +299,7 @@ while :; do
     break
 done
 
-clean
-sync_enforce
+sync_enforce || exit 1
 if [ "$tor" = bridges ] && [ "$mode" = tun ]; then
     in_ns ip -4 rule add fwmark "$OVER_TOR_MARK" lookup main priority "$OVER_TOR_RULE"
 fi
@@ -354,15 +328,14 @@ while kill -0 "$pid" 2>/dev/null; do
         kill "$pid"
         wait "$pid"
         pid=
-        clean
-        sync_enforce
+        sync_enforce || exit 1
         exit 0
     fi
 done
 wait "$pid"
 status=$?
 pid=
-clean
-sync_enforce
+release --failed "mihomo ended (status $status)"
+trap - EXIT
 echo "clash-client: mihomo ended (status $status)" >&2
 exit 1

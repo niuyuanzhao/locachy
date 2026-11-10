@@ -46,6 +46,7 @@ static struct passwd *fixture_getpwuid(uid_t);
 #define main settings_main
 #define SETTINGS_COMMAND_OUTPUT
 #define SETTINGS_KEYMAP_GENERATOR
+#define SETTINGS_NETWORK_SET /* network_set below stands in for locachy_network.py */
 #define HW_DISABLE_DEV_IOCTL 1
 #define PACMAN_LOCAL "/fixture/pacman-local"
 #include "../progs/settings.c"
@@ -144,8 +145,6 @@ static const char *map_path(const char *path, char *out, size_t size)
         snprintf(out, size, "%s/monitors.conf", root);
     else if (strcmp(path, MONITORS_CONF ".tmp") == 0)
         snprintf(out, size, "%s/monitors.conf.tmp", root);
-    else if (strcmp(path, SUDO_PAM) == 0 || strcmp(path, SUDO_PAM ".tmp") == 0)
-        snprintf(out, size, "%s/sudo%s", root, path + strlen(SUDO_PAM));
     else if (strcmp(path, PACMAN_LOCAL) == 0)
         snprintf(out, size, "%s/pacman-local", root);
     else if (strcmp(path, KERNEL_MANIFEST) == 0)
@@ -350,9 +349,40 @@ static int rescales;
 int screen_rescale(void) { rescales++; return 0; }
 /* rc.conf: the X230's panel is on DP-3 (monitors.c, the real one, reads it). */
 static const char *rc_internal = "DP-3";
+/* NAME, VALUE pairs (NULL-ended) rc.conf also has: what a security job left. */
+static const char *const *rc_policy;
+/* locachy_network.py as a double: what it was asked (net_last), and the
+ * rc.conf lines an applied transition leaves (rc_read gives them). */
+static int net_status, net_tor_on, net_clash_on;
+static char net_last[80], net_front[16] = "mihomo", net_mode[16] = "tun";
+static int network_set(const char *tor, const char *clash, char *why, size_t size)
+{
+    snprintf(net_last, sizeof net_last, "tor=%s clash=%s", tor ? tor : "-", clash ? clash : "-");
+    if (net_status == 0) {
+        if (tor) {
+            net_tor_on = strcmp(tor, "off") != 0;
+            if (net_tor_on) snprintf(net_front, sizeof net_front, "%s", tor);
+        }
+        if (clash) {
+            net_clash_on = strcmp(clash, "off") != 0;
+            if (net_clash_on) snprintf(net_mode, sizeof net_mode, "%s", clash);
+        }
+    }
+    snprintf(why, size, "%s", net_status ? "refused: test" : "");
+    return net_status;
+}
 int rc_read(void (*fn)(const char *, const char *, void *), void *arg)
 {
     if (rc_internal[0]) fn("internal_screen", rc_internal, arg);
+    for (int i = 0; rc_policy && rc_policy[i]; i += 2) fn(rc_policy[i], rc_policy[i + 1], arg);
+    if (net_clash_on) {
+        fn("service_clash", CLASH_SERVICE, arg);
+        fn("clash_mode", net_mode, arg);
+    }
+    if (net_tor_on) {
+        fn("service_tor", TOR_SERVICE, arg);
+        fn("tor_front", net_front, arg);
+    }
     return 0;
 }
 #define fopen fixture_fopen
@@ -1594,47 +1624,59 @@ static void test_apps_rows(void)
  * line installs on Enter and is removed only by Delete pressed twice;
  * Left/Right never do either. A setting opens on Enter, Left/Right change
  * it then, Enter or Esc close it; Left goes back to the categories. */
-static const char *sudo_now(void)
+/* A security-policy job ends with status, rc.conf as it left it (NAME VALUE
+ * pairs, NULL-ended; NULL: none of its keys); the program reads it again.
+ * rc.conf, sudo's PAM file and the boot image are the job's own
+ * (test-security.py); settings writes none of them. */
+static void security_job_ends(const char *const *rc, int status)
 {
-    static char text[1024];
-    char path[1400];
-    snprintf(path, sizeof path, "%s/sudo", root);
-    FILE *f = fopen(path, "r");
-    size_t len = f ? fread(text, 1, sizeof text - 1, f) : 0;
-    text[len] = '\0';
-    if (f) fclose(f);
-    return text;
+    rc_policy = rc;
+    jobs_double_ended = 1;
+    jobs_double_status = status;
+    security_check();
+    jobs_double_status = 0;
+    rc_policy = NULL;
 }
 
-#define SUDO_BASE "#%PAM-1.0\nauth\t\tinclude\t\tsystem-auth\naccount\t\tinclude\t\tsystem-auth\n"
-#define SUDO_ANY "auth\t\tsufficient\tpam_locachy_any.so locachy-lock-fingerprint locachy-lock-face\n"
-#define SUDO_DURESS "auth\t\toptional\tpam_locachy_duress.so\n"
-
-/* Threat level (rc.conf lock_mode): high writes "high", low "low", each
- * made into the boot image; high shows the fingerprint, face and TPM rows
- * off and refuses them, sudo's file loses pam_locachy_any.so, the saved
- * unlock_fingerprint and unlock_face stay and come back with low. */
+/* Threat level (rc.conf lock_mode): one security-policy job each way and
+ * nothing written here (the job removes TPM key slots, writes rc.conf and
+ * sudo's PAM file and makes the boot image); shown once it has ended, as
+ * rc.conf then says. High shows the fingerprint, face and TPM rows off and
+ * refuses them; the saved unlock_fingerprint and unlock_face stay and come
+ * back with low. */
 static void test_lock_mode(void)
 {
+    static const char *const before[] = { "unlock_fingerprint", "1", "unlock_face", "1", NULL };
+    static const char *const high[] = { "lock_mode", "high", "unlock_fingerprint", "1", "unlock_face", "1", NULL };
+    static const char *const low[] = { "lock_mode", "low", "unlock_fingerprint", "1", "unlock_face", "1", NULL };
     char line[512];
     show_category(CAT_SECURITY, 1);
     build_entries();
     assert(entry_of(lock_mode_index()) >= 0 && !enter_row(lock_mode_index()));
-    file_text("sudo", SUDO_BASE);
     fake_fprintd = fake_howdy = 1;
     fingerprint_on = face_on = 1;
     lock_high = duress_on = 0;
-    assert(sudo_ways() == 0 && !strcmp(sudo_now(), "#%PAM-1.0\n" SUDO_ANY "auth\t\tinclude\t\tsystem-auth\n"
-                                                   "account\t\tinclude\t\tsystem-auth\n"));
     item_text(lock_mode_index(), line, sizeof line);
     assert(strstr(line, "Threat level") && strstr(line, "[low]"));
     rc_log[0] = '\0';
-    int f = forks;
+    int hups_before = hups;
+    jobs_double_ended = 0;
     selected = lock_mode_index();
     adjust(+1);
-    assert(lock_high && !strcmp(rc_log, "lock_mode=high;") && forks == f + 1 && boot_job &&
-           !strcmp(jobs_double_last, "boot") && strstr(notice, "Threat level high") && strstr(notice, "boot image"));
-    assert(!strcmp(sudo_now(), SUDO_BASE));
+    assert(!lock_high && !rc_log[0] && hups == hups_before && security_job &&
+           !strcmp(jobs_double_last, "security-policy set lock-mode high") &&
+           strstr(notice, "Threat level high") && strstr(notice, "boot image"));
+    /* One security change at a time. */
+    int count = jobs_double_count;
+    adjust(-1);
+    assert(jobs_double_count == count && strstr(notice, "still being applied"));
+    /* Failed: nothing shown changed, the job's last words said. */
+    security_job_ends(before, 1);
+    assert(!security_job && !lock_high && fingerprint_on && strstr(notice, "Security settings not applied: working"));
+    jobs_double_ended = 0;
+    adjust(+1);
+    security_job_ends(high, 0);
+    assert(!security_job && lock_high && fingerprint_on && face_on && strstr(notice, "Security settings applied"));
     item_text(lock_mode_index(), line, sizeof line);
     assert(strstr(line, "[high]"));
     item_text(fp_index() + 1, line, sizeof line);
@@ -1643,37 +1685,35 @@ static void test_lock_mode(void)
     assert(strstr(line, "Unlock with your face") && strstr(line, "off (high threat level)") && !strstr(line, "ON"));
     item_text(tpm_index(), line, sizeof line);
     assert(strstr(line, "off at high threat level (the passphrase at power-on)"));
-    /* An image being made may have read the old policy: no change till it ends. */
-    adjust(-1);
-    assert(lock_high && !strcmp(rc_log, "lock_mode=high;") && forks == f + 1 && strstr(notice, "still being made"));
-    boot_check();
-    assert(!boot_job);
-    rc_log[0] = '\0';
+    count = jobs_double_count;
     selected = fp_index() + 1;
     adjust(+1);
-    assert(fingerprint_on && !rc_log[0] && strstr(notice, "High threat level: only the password"));
+    assert(fingerprint_on && !rc_log[0] && jobs_double_count == count &&
+           strstr(notice, "High threat level: only the password"));
     selected = fc_index() + 2;
     adjust(-1);
-    assert(face_on && !rc_log[0] && strstr(notice, "High threat level: only the password"));
+    assert(face_on && !rc_log[0] && jobs_double_count == count &&
+           strstr(notice, "High threat level: only the password"));
     selected = tpm_index();
     notice[0] = '\0';
     row_hint();
-    assert(strstr(notice, "off at high threat level") && strstr(notice, "passphrase at power-on") && forks == f + 1);
+    assert(strstr(notice, "off at high threat level") && strstr(notice, "passphrase at power-on"));
     assert(tpm_high_refused() && strstr(notice, "off at high threat level"));
     selected = lock_mode_index();
+    jobs_double_ended = 0;
     adjust(-1);
-    assert(!lock_high && !strcmp(rc_log, "lock_mode=low;") && forks == f + 2 && boot_job &&
+    assert(lock_high && !rc_log[0] && !strcmp(jobs_double_last, "security-policy set lock-mode low") &&
            strstr(notice, "Threat level low"));
-    boot_check();
-    assert(fingerprint_on && face_on && strstr(sudo_now(), SUDO_ANY));
+    security_job_ends(low, 0);
+    assert(!lock_high && fingerprint_on && face_on && hups == hups_before);
     item_text(fp_index() + 1, line, sizeof line);
     assert(strstr(line, "[ON ]") && !strstr(line, "high threat level"));
     item_text(tpm_index(), line, sizeof line);
     assert(!strstr(line, "high threat level") && !tpm_high_refused());
     fingerprint_on = face_on = fake_fprintd = fake_howdy = 0;
-    assert(sudo_ways() == 0 && !strcmp(sudo_now(), SUDO_BASE));
-    puts("PASS threat level: rc.conf lock_mode high/low, boot image made each time (not while one is being made); "
-         "high: fingerprint, face and TPM rows off and refused, no pam_locachy_any.so; saved ways back with low");
+    puts("PASS threat level: one security-policy job each way, nothing written by settings, shown once it has ended "
+         "(a failure keeps what rc.conf says, with the job's last words); high: fingerprint, face and TPM rows off "
+         "and refused; saved ways back with low");
 }
 
 /* Duress (tools/DURESS.md): the password's row from locachy-duress status,
@@ -1684,6 +1724,8 @@ static void test_lock_mode(void)
  * whenever what it carries changes. */
 static void test_duress(void)
 {
+    static const char *const armed[] = { "duress_enabled", "1", NULL };
+    static const char *const disarmed[] = { NULL };
     char line[512];
     int notes = 0;
     show_category(CAT_SECURITY, 1);
@@ -1695,7 +1737,6 @@ static void test_duress(void)
     assert(strstr(entries[entry_of(duress_index() + 1) + 1].text, "wipes the encrypted disk at once and powers off"));
     assert(strstr(entries[entry_of(duress_index() + 1) + 2].text, "must differ from both") &&
            strstr(entries[entry_of(duress_index() + 1) + 2].text, "Needs an encrypted disk"));
-    file_text("sudo", SUDO_BASE);
     lock_high = duress_on = fingerprint_on = face_on = 0;
     /* Not installed: not set, nothing to arm. */
     fake_duress_status = NULL;
@@ -1703,10 +1744,9 @@ static void test_duress(void)
     item_text(duress_index(), line, sizeof line);
     assert(strstr(line, "Duress password") && strstr(line, "not set"));
     rc_log[0] = '\0';
-    int f = forks;
     selected = duress_index() + 1;
     adjust(+1);
-    assert(!duress_on && !rc_log[0] && forks == f && strstr(notice, "password set and an encrypted disk"));
+    assert(!duress_on && !rc_log[0] && !security_job && strstr(notice, "password set and an encrypted disk"));
     duress_set_row();
     assert(duress_term_calls == 0 && strstr(notice, "locachy-duress is not installed"));
     /* No encrypted disk: set refused by the tool; arming refused here. */
@@ -1717,94 +1757,69 @@ static void test_duress(void)
     term_status = 0;
     fake_duress_status = "set no-luks"; /* only an encrypted disk can be wiped at once */
     adjust(+1);
-    assert(!duress_on && !rc_log[0] && strstr(notice, "encrypted disk"));
-    /* Set on an encrypted disk while off: no image to make. */
+    assert(!duress_on && !rc_log[0] && !security_job && strstr(notice, "encrypted disk"));
+    /* Set on an encrypted disk while off: the password only; no job, no image. */
     fake_duress_status = "not-set luks";
     load_duress_status();
     duress_set_row();
-    assert(duress_term_calls == 2 && duress_pw_set && duress_luks && forks == f && !boot_job &&
+    assert(duress_term_calls == 2 && duress_pw_set && duress_luks && !security_job && !boot_job &&
            strstr(notice, "Duress password set"));
     item_text(duress_index(), line, sizeof line);
     assert(strstr(line, "set") && !strstr(line, "not set"));
     item_text(duress_index() + 1, line, sizeof line);
     assert(strstr(line, "Duress wipes the disk") && strstr(line, "[OFF]"));
-    /* Armed: rc.conf, the boot image, then sudo's line after its auth lines. */
+    /* Armed: one security-policy job; settings writes nothing itself. */
+    jobs_double_ended = 0;
     adjust(+1);
-    assert(duress_on && !strcmp(rc_log, "duress_enabled=1;") && forks == f + 1 && boot_job &&
-           strstr(notice, "Duress on"));
-    assert(!strcmp(sudo_now(), "#%PAM-1.0\n" SUDO_DURESS "auth\t\tinclude\t\tsystem-auth\naccount\t\tinclude\t\tsystem-auth\n"));
-    boot_check();
-    /* With the unlock ways: any, then duress, before the first auth line;
-     * stale copies replaced, never doubled; high drops any only. */
-    fingerprint_on = face_on = 1;
-    assert(sudo_ways() == 0 && sudo_ways() == 0);
-    assert(!strcmp(sudo_now(), "#%PAM-1.0\n" SUDO_ANY SUDO_DURESS "auth\t\tinclude\t\tsystem-auth\naccount\t\tinclude\t\tsystem-auth\n"));
-    lock_high = 1;
-    assert(sudo_ways() == 0 && !strcmp(sudo_now(), "#%PAM-1.0\n" SUDO_DURESS "auth\t\tinclude\t\tsystem-auth\naccount\t\tinclude\t\tsystem-auth\n"));
-    lock_high = fingerprint_on = face_on = 0;
-    /* No auth line to place it by: not written. */
-    file_text("sudo", "#%PAM-1.0\naccount\t\tinclude\t\tsystem-auth");
-    assert(sudo_ways() < 0 && !strcmp(sudo_now(), "#%PAM-1.0\naccount\t\tinclude\t\tsystem-auth"));
-    /* A last auth line without its newline: written as it was, after the line. */
-    file_text("sudo", "#%PAM-1.0\nauth\t\tinclude\t\tsystem-auth");
-    assert(sudo_ways() == 0 && !strcmp(sudo_now(), "#%PAM-1.0\n" SUDO_DURESS "auth\t\tinclude\t\tsystem-auth"));
-    file_text("sudo", SUDO_BASE);
-    assert(sudo_ways() == 0);
-    /* More lines than sudo_ways keeps: refused, and the file is as it was. */
-    char big[1024] = "#%PAM-1.0\n";
-    for (int i = 0; i < 70; i++) strcat(big, "# x\n");
-    file_text("sudo", big);
-    assert(sudo_ways() < 0 && !strcmp(sudo_now(), big));
-    file_text("sudo", SUDO_BASE);
-    assert(sudo_ways() == 0);
-    /* Set again while armed: the image's copy of the verifier is made again. */
-    duress_set_row();
-    assert(duress_term_calls == 3 && forks == f + 2 && boot_job && strstr(notice, "it carries the password"));
-    /* While an image is being made: nothing changes. */
-    rc_log[0] = '\0';
+    assert(!duress_on && !rc_log[0] && security_job && strstr(notice, "Duress on") &&
+           !strcmp(jobs_double_last, "security-policy set duress on"));
+    security_job_ends(armed, 0);
+    assert(duress_on && !security_job && !rc_log[0] && strstr(notice, "applied"));
+    /* While the job runs, nothing else changes: a second change, or the password. */
+    jobs_double_ended = 0;
     adjust(-1);
-    assert(duress_on && !rc_log[0] && strstr(notice, "still being made"));
-    duress_clear_asked = 1;
-    duress_clear_row();
-    assert(duress_clears == 0 && duress_on && strstr(notice, "still being made"));
-    duress_set_row();
-    assert(duress_term_calls == 3 && strstr(notice, "still being made"));
-    boot_check();
-    /* Off: sudo's line goes, the image is made without it. */
-    adjust(-1);
-    assert(!duress_on && !strcmp(rc_log, "duress_enabled=(none);") && forks == f + 3 && boot_job &&
-           strstr(notice, "Duress off") && !strcmp(sudo_now(), SUDO_BASE));
-    boot_check();
+    assert(duress_on && security_job && !strcmp(jobs_double_last, "security-policy set duress off") &&
+           strstr(notice, "Duress off"));
+    int count = jobs_double_count;
     adjust(+1);
-    assert(duress_on && strstr(sudo_now(), SUDO_DURESS));
+    assert(duress_on && jobs_double_count == count && strstr(notice, "still being applied"));
+    duress_set_row();
+    assert(duress_term_calls == 2 && strstr(notice, "still being applied"));
+    security_job_ends(disarmed, 0);
+    assert(!duress_on && !security_job && strstr(notice, "applied"));
+    /* Armed again; then the password set again: the boot image carries it, so it is made again. */
+    jobs_double_ended = 1;
+    adjust(+1);
+    security_job_ends(armed, 0);
+    assert(duress_on && !security_job);
+    duress_set_row();
+    assert(duress_term_calls == 3 && boot_job && strstr(notice, "it carries the password"));
     boot_check();
-    /* Delete twice: cleared, duress off, sudo's line gone, the image made. */
+    assert(!boot_job);
+    /* Delete once asks again; twice: the job removes the password, duress and sudo's line. */
     duress_clear_asked = 0;
-    rc_log[0] = '\0';
-    f = forks;
     duress_clear_row();
-    assert(duress_clear_asked && duress_clears == 0 && duress_on && strstr(notice, "Delete again"));
+    assert(duress_clear_asked && !security_job && duress_on && strstr(notice, "Delete again"));
+    jobs_double_ended = 0;
     duress_clear_row();
-    assert(duress_clears == 1 && !duress_clear_asked && !duress_pw_set && !duress_on &&
-           !strcmp(rc_log, "duress_enabled=(none);") && !strcmp(sudo_now(), SUDO_BASE) && forks == f + 1 &&
-           boot_job && strstr(notice, "Duress password removed"));
-    boot_check();
+    assert(!duress_clear_asked && security_job && duress_clears == 0 &&
+           !strcmp(jobs_double_last, "security-policy remove-duress") && strstr(notice, "queued"));
+    fake_duress_status = "not-set luks"; /* what the job's locachy-duress clear leaves */
+    security_job_ends(disarmed, 0);
+    assert(!duress_on && !duress_pw_set && duress_clears == 0 && strstr(notice, "Duress password removed"));
     item_text(duress_index(), line, sizeof line);
     assert(strstr(line, "not set"));
     /* The row's hint changes nothing. */
     selected = duress_index();
-    f = forks;
+    int f = forks;
     notice[0] = rc_log[0] = '\0';
     row_hint();
     assert(forks == f && !rc_log[0] && duress_term_calls == 3 && strstr(notice, "Delete, twice: remove it"));
     fake_duress_status = NULL;
     load_duress_status();
     puts("PASS duress: password row from locachy-duress status, set in term (exit status kept, words stay till "
-         "Enter), Delete twice clears and switches duress off; armed only when set on an encrypted disk; "
-         "rc.conf duress_enabled, boot image made again on arm, disarm, re-set and clear");
-    puts("PASS sudo PAM: pam_locachy_any.so, then pam_locachy_duress.so while duress is on, both before the first "
-         "auth line (system-auth's faillock ends the stack after it); none for any unless high; stale copies replaced; "
-         "not written without an auth line");
+         "Enter); armed, disarmed and removed by one security-policy job each (settings writes nothing); armed only "
+         "when set on an encrypted disk; the password set again while armed makes the boot image again");
 }
 
 static void test_page_keys(void)
@@ -2789,17 +2804,20 @@ int main(int argc, char **argv)
     adjust(+1);
     assert(!clash_on && strstr(notice, "not installed"));
     fake_mihomo = 1;
-    adjust(+1);
-    assert(clash_on && !clash_proxy && strstr(rc_log, "service_clash=" CLASH_SERVICE ";"));
-    adjust(-1);
-    assert(!clash_on && strstr(rc_log, "service_clash=(none);") && strstr(notice, "direct"));
-    adjust(+1);
     rc_log[0] = '\0';
-    selected = cl_index();
     adjust(+1);
-    assert(!clash_on && strstr(rc_log, "service_clash=(none);") && forks == 3 && !strcmp(pkg_action, "remove"));
+    assert(clash_on && !clash_proxy && !strcmp(net_last, "tor=- clash=tun") && !rc_log[0]);
+    adjust(-1);
+    assert(!clash_on && !strcmp(net_last, "tor=- clash=off") && !rc_log[0] && strstr(notice, "direct"));
+    adjust(+1);
+    selected = cl_index();
+    net_last[0] = '\0';
+    adjust(+1);
+    assert(!clash_on && !strcmp(net_last, "tor=- clash=off") && !rc_log[0] && forks == 3 &&
+           !strcmp(pkg_action, "remove"));
     pkg_job = 0;
-    puts("PASS installed and on are two rows; on only once installed, off goes direct, removing switches off");
+    puts("PASS installed and on are two rows; on only once installed; each change one network transition "
+         "(settings writes no rc.conf line), off goes direct, removing switches off first");
     nnets = 1;
     snprintf(nets[0].name, sizeof nets[0].name, "Home");
     selected = nw_index();
@@ -2833,22 +2851,31 @@ int main(int argc, char **argv)
     int hups_before = hups;
     rc_log[0] = '\0';
     selected = sec_index() + 1;
+    jobs_double_ended = 0;
     adjust(+1);
-    assert(login_skip && !strcmp(rc_log, "login_skip=1;") && hups == hups_before + 1 && strstr(notice, "home at once"));
+    assert(!login_skip && !rc_log[0] && hups == hups_before && security_job &&
+           !strcmp(jobs_double_last, "security-policy set login-skip on"));
+    static const char *const skip[] = { "login_skip", "1", NULL };
+    security_job_ends(skip, 0);
+    assert(login_skip && hups == hups_before && strstr(notice, "home at once"));
+    jobs_double_ended = 0;
     adjust(-1);
-    assert(!login_skip && strstr(rc_log, "login_skip=(none);") && hups == hups_before + 2);
-    assert(strstr(notice, "the lock screen first"));
+    assert(login_skip && !rc_log[0] && security_job &&
+           !strcmp(jobs_double_last, "security-policy set login-skip off"));
+    security_job_ends(NULL, 0);
+    assert(!login_skip && hups == hups_before && strstr(notice, "the lock screen first"));
     assert(sec_index() == link_index() + 1 && fp_index() == sec_index() + 4 && fc_index() == fp_index() + 4);
-    puts("PASS Password at boot: off writes login_skip=\"1\", on takes it out; process 1 reads it again");
+    puts("PASS Password at boot: off and on are one security-policy job each; the job writes login_skip and tells "
+         "process 1, the settings window writes nothing");
     rc_log[0] = '\0';
     selected = sec_index() + 3;
     assert(lock_after == 10);
     adjust(+1);
-    assert(lock_after == 15 && !strcmp(rc_log, "lock_after=15;") && hups == hups_before + 3);
+    assert(lock_after == 15 && !strcmp(rc_log, "lock_after=15;") && hups == hups_before + 1);
     for (int i = 0; i < 5; i++) adjust(-1);
     assert(lock_after == 0 && strstr(rc_log, "lock_after=0;") && strstr(notice, "Never"));
     adjust(-1);
-    assert(lock_after == 60 && strstr(rc_log, "lock_after=60;") && hups == hups_before + 9);
+    assert(lock_after == 60 && strstr(rc_log, "lock_after=60;") && hups == hups_before + 7);
     puts("PASS Lock when idle: 10 min unless set, round never 1 2 5 10 15 30 60, written as lock_after");
     /* Fingerprints: installed and on are two rows, as for Tailscale. */
     rc_log[0] = '\0';
@@ -2864,17 +2891,13 @@ int main(int argc, char **argv)
     assert(strstr(notice, "still being installed") && !fingerprint_on);
     pkg_job = 0;
     fake_fprintd = 1;
-    file_text("sudo", "#%PAM-1.0\nauth\t\tinclude\t\tsystem-auth\naccount\t\tinclude\t\tsystem-auth\n");
+    jobs_double_ended = 0;
     adjust(+1);
-    assert(fingerprint_on && !strcmp(rc_log, "unlock_fingerprint=1;"));
-    char sudo_text[512], sudo_path[1400];
-    snprintf(sudo_path, sizeof sudo_path, "%s/sudo", root);
-    FILE *sudo_file = fopen(sudo_path, "r");
-    size_t sudo_len = sudo_file ? fread(sudo_text, 1, sizeof sudo_text - 1, sudo_file) : 0;
-    sudo_text[sudo_len] = '\0';
-    if (sudo_file) fclose(sudo_file);
-    assert(!strcmp(sudo_text, "#%PAM-1.0\nauth\t\tsufficient\tpam_locachy_any.so locachy-lock-fingerprint\n"
-                              "auth\t\tinclude\t\tsystem-auth\naccount\t\tinclude\t\tsystem-auth\n"));
+    assert(!fingerprint_on && !rc_log[0] && security_job &&
+           !strcmp(jobs_double_last, "security-policy set fingerprint on"));
+    static const char *const fp_on[] = { "unlock_fingerprint", "1", NULL };
+    security_job_ends(fp_on, 0);
+    assert(fingerprint_on && strstr(notice, "take a fingerprint"));
     selected = fp_index() + 3;
     assert(fp_next == 0);
     adjust(-1);
@@ -2882,12 +2905,10 @@ int main(int argc, char **argv)
     rc_log[0] = '\0';
     selected = fp_index();
     adjust(+1);
-    assert(!fingerprint_on && !strcmp(rc_log, "unlock_fingerprint=(none);") && !strcmp(pkg_action, "remove"));
-    sudo_file = fopen(sudo_path, "r");
-    sudo_len = sudo_file ? fread(sudo_text, 1, sizeof sudo_text - 1, sudo_file) : 0;
-    sudo_text[sudo_len] = '\0';
-    if (sudo_file) fclose(sudo_file);
-    assert(!strcmp(sudo_text, "#%PAM-1.0\nauth\t\tinclude\t\tsystem-auth\naccount\t\tinclude\t\tsystem-auth\n"));
+    assert(security_job && !rc_log[0] && !strcmp(pkg_action, "remove") &&
+           !strcmp(jobs_double_last, "pkg-remove fprintd"));
+    security_job_ends(NULL, 0);
+    assert(!fingerprint_on && strstr(notice, "Security settings applied"));
     pkg_job = 0;
     fake_fprintd = 0;
     /* Faces use capture capabilities; enumeration never starts streaming. */
@@ -2996,14 +3017,15 @@ int main(int argc, char **argv)
     adjust(+1);
     assert(!face_on && strstr(notice, "not installed"));
     fingerprint_on = face_on = 1;
-    assert(sudo_ways() == 0);
-    sudo_file = fopen(sudo_path, "r");
-    sudo_len = sudo_file ? fread(sudo_text, 1, sizeof sudo_text - 1, sudo_file) : 0;
-    sudo_text[sudo_len] = '\0';
-    if (sudo_file) fclose(sudo_file);
-    assert(strstr(sudo_text, "pam_locachy_any.so locachy-lock-fingerprint locachy-lock-face\n"));
-    fingerprint_on = face_on = 0;
-    assert(sudo_ways() == 0);
+    fake_howdy = 1;
+    rc_log[0] = '\0';
+    jobs_double_ended = 0;
+    selected = fc_index() + 2;
+    adjust(+1);
+    assert(face_on && !rc_log[0] && security_job && !strcmp(jobs_double_last, "security-policy set face off"));
+    security_job_ends(NULL, 0);
+    assert(!face_on && strstr(notice, "no longer unlocks"));
+    fake_howdy = 0;
     test_lock_mode();
     test_duress();
     test_time_zone();

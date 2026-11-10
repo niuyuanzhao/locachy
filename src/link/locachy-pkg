@@ -43,6 +43,7 @@ What a container's form (packages) shows:
   locachy-pkg search TERM...     the app presets (the catalog, LOCACHY_APPS_CATALOG),
                                  the repositories' and the AUR's packages
 """
+import ctypes
 import fcntl
 import glob
 import importlib.util
@@ -52,6 +53,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -834,6 +836,16 @@ PACMAN_CONFIG = "/etc/pacman.conf"
 _pending_plan_lock = None
 
 
+class Plan(list):
+    """Plan rows with the inputs they were checked against: the binding that
+    save_plan records and Apply verifies. It travels with the rows object."""
+
+    def __init__(self, rows=(), inputs=None):
+        super().__init__(rows)
+        self.inputs = inputs
+
+
+
 def helper_module(name):
     """Source-tree tests and installed tools use the same explicit helper.
     Never import a module from the current working directory."""
@@ -1304,34 +1316,106 @@ def check_source_update():
     return old_short, commit, label, branch
 
 
+def source_journal_path():
+    return SOURCE_PENDING_FILE + ".journal.json"
+
+
+def source_journal():
+    try:
+        journal = state_helper().read_json(source_journal_path())
+    except FileNotFoundError:
+        return None
+    work = journal.get("work", "")
+    parent = os.path.dirname(os.path.abspath(SRC))
+    if (journal.get("source") != os.path.abspath(SRC) or
+            not re.fullmatch(r"[0-9a-f]{40}", journal.get("commit", "")) or
+            not re.fullmatch(r"[0-9a-f]{64}", journal.get("tree", "")) or
+            os.path.dirname(work) != parent or not os.path.basename(work).startswith(".locachy-source-") or
+            os.path.islink(work) or journal.get("phase") not in ("prepared", "publishing", "published", "setup")):
+        raise RuntimeError("invalid source publication journal; left untouched")
+    return journal
+
+
+def save_source_journal(journal):
+    state_helper().write_json(source_journal_path(), journal)
+
+
+def exchange_source(staging, current):
+    """Linux renameat2 keeps SRC present even if publication is interrupted."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise RuntimeError("atomic source publication requires renameat2")
+    if renameat2(-100, os.fsencode(staging), -100, os.fsencode(current), 2) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), current)
+
+
+def recover_source_publication():
+    """Finish the recorded publication, never fetch or choose a different tree.
+
+    The journal is durable before either rename. A crash in the rename gap
+    therefore has exactly one checked staging tree to publish. Keep the old
+    tree until this source's complete update has finished.
+    """
+    journal = source_journal()
+    if journal is None:
+        return False
+    staging, backup = (os.path.join(journal["work"], n) for n in ("new", "old"))
+    digest = source_tree_digest(SRC)
+    if digest != journal["tree"]:
+        if journal["phase"] not in ("prepared", "publishing") or source_tree_digest(staging) != journal["tree"]:
+            raise RuntimeError("source publication inputs changed; journal and previous source kept")
+        journal["phase"] = "publishing"
+        save_source_journal(journal)
+        if os.path.lexists(SRC):
+            exchange_source(staging, SRC)
+            os.rename(staging, backup)
+        else:
+            os.rename(staging, SRC)
+        state_helper().sync_directory(os.path.dirname(SRC))
+    write_commit(SOURCE_PENDING_FILE, journal["commit"])
+    if journal["phase"] != "setup":
+        write_source_unbuilt(journal["commit"], pending=True)
+        journal["phase"] = "published"
+        save_source_journal(journal)
+    return True
+
+
 def apply_source_update(commit):
-    """Verify and atomically install commit's src/ tree into SRC."""
+    """Verify, journal and publish exactly the plan's source; recovery is forward-only."""
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise RuntimeError("invalid target source commit in plan")
+    previous = source_journal()
+    if previous:
+        if previous["commit"] != commit:
+            raise RuntimeError("another source update is unfinished; finish it before replacing the source")
+        recover_source_publication()
+        return
     verify_source_commit(commit)
-    staging = SRC + ".new"
-    backup = SRC + ".old"
-    shutil.rmtree(staging, ignore_errors=True)
-    shutil.rmtree(backup, ignore_errors=True)
-    extract_commit_src(commit, staging)
-    if os.path.exists(SRC):
-        os.rename(SRC, backup)
+    parent = os.path.dirname(os.path.abspath(SRC))
+    os.makedirs(parent, exist_ok=True)
+    work = tempfile.mkdtemp(prefix=".locachy-source-", dir=parent)
+    staging = os.path.join(work, "new")
     try:
-        os.rename(staging, SRC)
-    except OSError:
-        if os.path.exists(backup) and not os.path.exists(SRC):
-            os.rename(backup, SRC)
+        extract_commit_src(commit, staging)
+        digest = source_tree_digest(staging)
+        if not digest:
+            raise RuntimeError("empty source publication")
+        save_source_journal({"schema": 1, "source": os.path.abspath(SRC), "work": work,
+                             "commit": commit, "tree": digest, "phase": "prepared"})
+    except BaseException:
+        if not os.path.exists(source_journal_path()):
+            shutil.rmtree(work)
         raise
-    shutil.rmtree(backup, ignore_errors=True)
-    # Installed in SRC, not yet applied: SOURCE_COMMIT_FILE keeps the commit
-    # applied before until finish_source_update.
-    write_commit(SOURCE_PENDING_FILE, commit)
+    recover_source_publication()
 
 
 def update_unfinished():
     """A source update Apply started and has not finished: its commit pending,
     its setup pending, or its programs not built from it."""
-    return bool(pending_source_commit()) or source_setup_pending() or os.path.exists(SOURCE_UNBUILT_FILE)
+    return (os.path.exists(source_journal_path()) or bool(pending_source_commit()) or
+            source_setup_pending() or os.path.exists(SOURCE_UNBUILT_FILE))
 
 
 def finish_source_update():
@@ -1340,8 +1424,15 @@ def finish_source_update():
     commit = pending_source_commit()
     if not commit or source_setup_pending() or os.path.exists(SOURCE_UNBUILT_FILE):
         return False
+    journal = source_journal()
+    if journal is not None and journal["phase"] == "published":
+        journal["phase"] = "setup"
+        save_source_journal(journal)
     write_commit(SOURCE_COMMIT_FILE, commit)
     os.unlink(SOURCE_PENDING_FILE)
+    if journal is not None:
+        shutil.rmtree(journal["work"], ignore_errors=True)
+        os.unlink(source_journal_path())
     print(f"===> locachy: source {commit[:7]} applied", flush=True)
     return True
 
@@ -1363,8 +1454,9 @@ def settle_source_update(rows):
     if not source_update_left(rows) and finish_source_update():
         return rows
     applied = recorded_source_commit()
-    return rows + [("locachy", "note", f"source {pending[:7]} installed, its update not finished "
-                    f"(last applied: {applied[:7] if applied else 'not recorded'})", "", "")]
+    return Plan(rows + [("locachy", "note", f"source {pending[:7]} installed, its update not finished "
+                         f"(last applied: {applied[:7] if applied else 'not recorded'})", "", "")],
+                getattr(rows, "inputs", None))
 
 
 def conf_packages(conf):
@@ -1691,6 +1783,7 @@ def plan(check_source=True, apps_commit=None):
     app presets are those of apps_commit (the plan before it), not fetched."""
     global _pending_plan_lock
     _pending_plan_lock = None
+    initial_inputs = plan_inputs()
     rows = []
     if source_setup_pending():
         # The installed source may need newer helpers than this process.
@@ -1702,7 +1795,7 @@ def plan(check_source=True, apps_commit=None):
         for name in containers():
             rows += [(name, "state", container_state(name), "", ""),
                      (name, "rebuild", "checked after LOCachy source setup", "", "")]
-        return rows
+        return Plan(rows, initial_inputs)
     updates, newest = repo_updates()
     try:
         src_upd = check_source_update() if check_source else None
@@ -1811,7 +1904,53 @@ def plan(check_source=True, apps_commit=None):
                 rows.append((name, "rebuild", f"the host has changed since it was built ({built.get('date', '?')})", "", ""))
             elif host_changes:
                 rows.append((name, "rebuild", "the host is updated", "", ""))
-    return rows + apps_rows(check_source, apps_commit)
+    return Plan(rows + apps_rows(check_source, apps_commit), initial_inputs)
+
+
+def state_helper():
+    """Durable state primitives are not substituted by recipe/gate helpers."""
+    path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "locachy_transaction.py")
+    if not os.path.isfile(path):
+        path = "/usr/local/lib/locachy/locachy_transaction.py"
+    spec = importlib.util.spec_from_file_location("locachy_state", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def optional_file_hash(path):
+    try:
+        with open(path, "rb") as f:
+            return hashlib.file_digest(f, "sha256").hexdigest()
+    except FileNotFoundError:
+        return None
+
+
+def plan_inputs():
+    """Inputs whose changes invalidate the decisions shown by Check.
+
+    Read under the host mutation domain. A plan never silently becomes an
+    authorization to apply against a different source, manifest or config.
+    """
+    transaction = state_helper()
+    config = transaction.flatten_config(PACMAN_CONFIG) if os.path.isfile(PACMAN_CONFIG) else ""
+    return {"source": source_tree_digest(SRC), "commit": recorded_source_commit(),
+            "pending": pending_source_commit(), "manifest": optional_file_hash(MANIFEST),
+            "rc": optional_file_hash(RC_CONF),
+            "pacman": hashlib.sha256(config.encode()).hexdigest(),
+            "host": hashlib.sha256(json.dumps(local_packages(LOCAL_DB), sort_keys=True).encode()).hexdigest(),
+            "containers": {os.path.basename(p): optional_file_hash(p)
+                           for p in sorted(glob.glob(os.path.join(CONF_DIR, "*.conf")))}}
+
+
+def validate_plan_inputs():
+    transaction = state_helper()
+    try:
+        binding = transaction.read_json(PLAN_FILE + ".inputs.json")
+    except FileNotFoundError as e:
+        raise RuntimeError("update plan has no input binding; check again") from e
+    if binding.get("plan_sha256") != optional_file_hash(PLAN_FILE) or binding.get("inputs") != plan_inputs():
+        raise RuntimeError("update plan inputs changed; check again before applying")
 
 
 def save_plan(rows):
@@ -1822,7 +1961,7 @@ def save_plan(rows):
             f.write("\t".join(r) + "\n")
     # Write the lock reference before replacing the TSV. A mismatched pair
     # fails validation instead of silently applying a different candidate.
-    transaction = helper_module("locachy_transaction")
+    transaction = state_helper()
     if _pending_plan_lock is not None:
         reference = dict(_pending_plan_lock, plan_sha256=transaction.file_hash(PLAN_FILE + ".tmp"))
         transaction.write_json(PLAN_FILE + ".lock.json", reference)
@@ -1831,6 +1970,9 @@ def save_plan(rows):
             os.unlink(PLAN_FILE + ".lock.json")
         except FileNotFoundError:
             pass
+    transaction.write_json(PLAN_FILE + ".inputs.json",
+                           {"schema": 1, "plan_sha256": transaction.file_hash(PLAN_FILE + ".tmp"),
+                            "inputs": getattr(rows, "inputs", None) or plan_inputs()})
     os.replace(PLAN_FILE + ".tmp", PLAN_FILE)
 
 
@@ -2052,7 +2194,7 @@ def on_host_root():
     behind switch_root); INIT is its copy on the root."""
     try:
         here, init_root = os.stat("/"), os.stat("/proc/1/root/")
-        return (os.readlink("/proc/1/exe") in (INIT, "/init") and
+        return (os.readlink("/proc/1/exe").removesuffix(" (deleted)") in (INIT, "/init") and
                 (here.st_dev, here.st_ino) == (init_root.st_dev, init_root.st_ino))
     except OSError:
         return False
@@ -2078,7 +2220,16 @@ def rebuild_locachy(force=False):
             cpu = f.read().strip() or level
     except OSError:
         cpu = level
-    return run(["sh", os.path.join(SRC, "make.sh"), "--boot", level, cpu])
+    if not run(["sh", os.path.join(SRC, "make.sh"), "--boot", level, cpu]):
+        return False
+    # The marker of a source update is cleared here, under the domain this
+    # process owns, only for SRC's exact journaled (or recorded) tree.
+    try:
+        source_built(SRC)
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as e:
+        print(f"locachy-pkg: {e}", file=sys.stderr)
+        return False
+    return True
 
 
 def cmd_plan(args):
@@ -2165,6 +2316,7 @@ def cmd_apply(targets, after_source=False):
         save_plan(rows)
     else:
         rows, _ = load_plan()
+        validate_plan_inputs()
     if not rows:
         sys.exit("locachy-pkg: no plan: run locachy-pkg plan first")
     order = [t for t in targets_of(rows) if not targets or t in targets]
@@ -2222,27 +2374,113 @@ def cmd_update(args):
 
 
 PKG_LOCK_FD = -1
+# The host package domain (locachy_transaction.DOMAIN_LOCK). Fixed: a test
+# harness may assign another path to this name, nothing at run time does.
+DOMAIN_LOCK_PATH = "/run/locachy/pkg.lock"
+
+
+def domain_applies():
+    """Every root run takes the domain of its own root: the host's, or an
+    offline root's (the installer's chroot, a container or build root) on that
+    root's own /run. An unprivileged run takes none."""
+    return os.geteuid() == 0
+
+
+def domain_mode():
+    """job, queue or offline: locachy_jobs.execution_mode()."""
+    return helper_module("locachy_jobs").execution_mode()
 
 
 def acquire_pkg_lock():
-    """Mutual exclusion across locachy-jobs and direct root invocations (not
-    taken by rebuild, which runs inside pacman's hook, nor by read-only
-    queries). O_CLOEXEC releases it across execv --after-source so the re-exec
-    takes it anew."""
+    """The host package domain, never waiting. Inside a system job only the
+    descriptor its runner passed down (that very lock file, found by device and
+    inode): a job never takes the domain itself. Outside one, a new one an
+    independent run must win."""
     global PKG_LOCK_FD
-    lock_path = os.environ.get("LOCACHY_PKG_LOCK")
-    if not lock_path:
-        if os.geteuid() != 0 or not on_host_root():
-            return
-        os.makedirs("/run/locachy", mode=0o755, exist_ok=True)
-        lock_path = "/run/locachy/pkg.lock"
-    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    if not domain_applies():
+        return
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+        inside = domain_mode() == "job"
+        PKG_LOCK_FD = helper_module("locachy_transaction").hold_domain(DOMAIN_LOCK_PATH, inside_job=inside)
+    except (OSError, RuntimeError) as e:
+        sys.exit(f"locachy-pkg: {e}")
+
+
+def source_built(source):
+    """Clear source-unbuilt only for SRC's exact journaled or recorded tree."""
+    if os.path.realpath(source) != os.path.realpath(SRC):
+        raise RuntimeError("source-built SRC is not the installed source; source-unbuilt kept")
+    if not os.path.exists(SOURCE_UNBUILT_FILE):
+        return 0
+    if source_setup_pending():
+        raise RuntimeError("source setup is still pending; source-unbuilt kept")
+    with open(SOURCE_UNBUILT_FILE, encoding="utf-8") as f:
+        marked = f.readline().strip()
+    journal = source_journal()
+    digest = source_tree_digest(SRC)
+    if journal is not None:
+        if journal["phase"] not in ("published", "setup") or journal["commit"] != marked:
+            raise RuntimeError("source publication does not own source-unbuilt; marker kept")
+        if digest != journal["tree"]:
+            raise RuntimeError("installed source does not match its publication journal; source-unbuilt kept")
+    else:
+        commit = marked if re.fullmatch(r"[0-9a-f]{40}", marked) else ""
+        if not commit or commit not in (pending_source_commit(), recorded_source_commit()):
+            raise RuntimeError("no checked source commit owns source-unbuilt; marker kept")
+        with tempfile.TemporaryDirectory(prefix="locachy-built-check-") as tmp:
+            extract_commit_src(commit, tmp)
+            if source_tree_digest(tmp) != digest:
+                raise RuntimeError("installed source does not match its recorded commit; source-unbuilt kept")
+    try:
+        os.unlink(SOURCE_UNBUILT_FILE)
+    except FileNotFoundError:
+        pass
+    fd = os.open(os.path.dirname(SOURCE_UNBUILT_FILE), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(fd)
+    finally:
         os.close(fd)
-        sys.exit("locachy-pkg: another package or repository operation is running; wait for it to finish (home: J)")
-    PKG_LOCK_FD = fd
+    return 0
+
+
+def job_route(action, args):
+    """Online host mutations are fixed system jobs. A job runs inline; an
+    offline root (installer chroot) runs inline under its own lock rules."""
+    if os.geteuid() != 0:
+        sys.exit("locachy-pkg: must run as root; nothing changed")
+    mapping = {"sync": ("pkg-sync", []), "install": ("pkg-install", args), "add": ("pkg-install", args),
+               "remove": ("pkg-remove", args), "uninstall": ("pkg-remove", args),
+               "plan": ("pkg-plan", []), "apply": ("pkg-apply", args)}
+    if action == "kernel" and len(args) == 2 and args[0] == "select":
+        mapping["kernel"] = ("kernel-select", args[1:])
+    elif action == "kernel" and len(args) == 2 and args[0] == "headers":
+        mapping["kernel"] = ("kernel-headers", args[1:])
+    try:
+        jobs = helper_module("locachy_jobs")
+        mode = jobs.execution_mode()
+    except (OSError, ValueError, RuntimeError) as e:
+        sys.exit(f"locachy-pkg: cannot verify system job context: {e}; nothing changed")
+    if mode != "queue":
+        return None
+    if action == "source-built":
+        sys.exit("locachy-pkg: source-built runs only inside the package job or offline; nothing changed")
+    if action == "update":
+        status = jobs.submit("pkg-plan", [], wait=True)
+        if status:
+            return status
+        rows, checked = load_plan()
+        print_plan(rows, checked)
+        if not targets_of(rows):
+            return 0
+        if "--yes" not in args and input("\nApply all of it? [y/N] ").strip().lower() not in ("y", "yes"):
+            print("Nothing done.")
+            return 0
+        return jobs.submit("pkg-apply", [], wait=True)
+    if action not in mapping or (action == "sync" and args) or (action == "plan" and args) or \
+            (action == "apply" and "--after-source" in args):
+        sys.exit("locachy-pkg: this mutation has no fixed system job form; nothing changed")
+    kind, job_args = mapping[action]
+    return jobs.submit(kind, job_args, wait=True)
 
 
 def main():
@@ -2251,10 +2489,25 @@ def main():
     # whatever the caller's umask: others read them too.
     os.umask(0o022)
     if len(sys.argv) < 2:
+        routed = job_route("sync", [])
+        if routed is not None:
+            sys.exit(routed)
         acquire_pkg_lock()
         sys.exit(cmd_sync())
 
     action = sys.argv[1]
+    mutating = action in ("sync", "install", "add", "remove", "uninstall", "apply", "update", "source-built") or \
+        (action == "plan" and "--cached" not in sys.argv[2:]) or (action == "kernel" and sys.argv[2:3] != ["list"])
+    if mutating:
+        routed = job_route(action, sys.argv[2:])
+        if routed is not None:
+            sys.exit(routed)
+    if action == "source-built" and len(sys.argv) == 3:
+        acquire_pkg_lock()
+        try:
+            sys.exit(source_built(sys.argv[2]))
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as e:
+            sys.exit(f"locachy-pkg: {e}")
     if action in ("status", "list", "check"):
         sys.exit(cmd_status("--machine" in sys.argv[2:]))
     elif action == "sync":
@@ -2287,12 +2540,19 @@ def main():
             sys.exit("locachy-pkg: rebuild accepts only --force")
         try:
             jobs = helper_module("locachy_jobs")
-            if jobs.execution_mode() == "queue":
-                # External pacman holds its DB lock until its hook returns.
-                # A package job already in the queue rebuilds inline below.
-                sys.exit(jobs.submit("locachy-rebuild", args, wait=not jobs.pacman_ancestor()))
+            mode = jobs.execution_mode()
+            hook = jobs.pacman_ancestor()
+            if mode == "queue":
+                # External pacman holds its DB lock until its hook returns:
+                # submit only; the job waits for the host domain, which the
+                # pacman guard keeps until that pacman has exited.
+                sys.exit(jobs.submit("locachy-rebuild", args, wait=not hook))
         except (OSError, ValueError, RuntimeError) as e:
             sys.exit(f"locachy-pkg: rebuild was not registered: {e}")
+        # A pacman hook runs below whoever owns the domain (a package job,
+        # or the external pacman's guard): never take it again there.
+        if not hook:
+            acquire_pkg_lock()
         sys.exit(0 if rebuild_locachy("--force" in args) else 1)
     elif action == "info" and len(sys.argv) > 2:
         sys.exit(cmd_info(sys.argv[2:]))

@@ -21,6 +21,11 @@ static void *settings_realloc(void *p, size_t size)
 #undef main
 #undef realloc
 #include <assert.h>
+#include <sys/prctl.h>
+
+void say(const char *fmt, ...) { (void)fmt; }
+void keys_reload(void) {} /* rc.conf's key settings: not this test's */
+int apps_reap(pid_t pid, int status) { (void)pid; (void)status; return 0; } /* no application here */
 
 static const char *const *conf;
 static int read_error;
@@ -89,6 +94,7 @@ int main(void)
     conf = b;
     read_settings();
     usleep(200000);
+    reap(); /* the one taken out has ended: forgotten here, never started again */
     assert(hibernate_after == 45);
     assert(find("sleep 101") == NULL && !alive(one));         /* ended and forgotten */
     assert(find("sleep 102; true")->pid == two && alive(two)); /* untouched */
@@ -101,6 +107,7 @@ int main(void)
     conf = c;
     read_settings();
     usleep(200000);
+    reap(); /* both taken out have ended */
     assert(nservices == 0 && !alive(two) && !alive(three));
     /* sleep 102 ran under sh -c in its own session: it ended with it. */
     assert(system("pgrep -x -f 'sleep 102' >/dev/null") != 0);
@@ -161,9 +168,59 @@ int main(void)
     conf = duplicate;
     read_settings();
     assert(nservices == 1 && find("sleep 102; true")->restart_at == 12345);
+    /* Taken out while it runs, then wanted again before it has ended: the same
+     * service (its pid), started again only once it has ended. */
+    static const char *const d[] = { "service_keep", "sleep 104", NULL };
+    static const char *const e[] = { NULL };
+    conf = d;
+    read_settings();
+    start_waiting();
+    pid_t keep = find("sleep 104")->pid;
+    assert(keep > 0 && alive(keep));
+    conf = e;
+    read_settings();
+    assert(find("sleep 104") && find("sleep 104")->retiring && find("sleep 104")->pid == keep);
+    conf = d;
+    read_settings();
+    assert(find("sleep 104") && !find("sleep 104")->retiring && find("sleep 104")->pid == keep);
+    kill(-keep, SIGTERM);
+    kill(keep, SIGTERM);
+    for (int i = 0; find("sleep 104")->pid != 0 && i < 100; i++) {
+        usleep(10000);
+        reap();
+    }
+    assert(find("sleep 104")->pid == 0 && find("sleep 104")->restart_at > now_ms());
     conf = c;
     read_settings();
     assert(nservices == 0 && services == NULL);
+    /* A child that ends after its parent (as the pacman guard does) is reparented
+     * to the nearest subreaper; here, this process: reap() must end it. */
+    assert(prctl(PR_SET_CHILD_SUBREAPER, 1) == 0);
+    int pfd[2];
+    assert(pipe(pfd) == 0);
+    pid_t parent = fork();
+    if (parent == 0) {
+        close(pfd[0]);
+        pid_t grandchild = fork();
+        if (grandchild == 0) {
+            close(pfd[1]);
+            usleep(100000);
+            _exit(0);
+        }
+        assert(write(pfd[1], &grandchild, sizeof grandchild) == (ssize_t)sizeof grandchild);
+        close(pfd[1]);
+        _exit(0);
+    }
+    close(pfd[1]);
+    pid_t orphan = 0;
+    assert(read(pfd[0], &orphan, sizeof orphan) == (ssize_t)sizeof orphan);
+    close(pfd[0]);
+    for (int i = 0; i < 300 && kill(orphan, 0) == 0; i++) {
+        usleep(10000);
+        reap();
+    }
+    assert(kill(orphan, 0) != 0 && errno == ESRCH); /* ended and reaped: no zombie left */
+    puts("PASS a reparented child that ends is reaped by process 1 (no zombie)");
     puts("init: service reload, growth, restart and failed reload passed.");
     return 0;
 }

@@ -243,25 +243,11 @@ app-remove)
         nsenter --net="/run/netns/$NS" nft delete table inet "$table"
     fi
     ;;
-load)
-    [ $# -eq 2 ] || { echo "usage: tor-enforce load mihomo|bridges" >&2; exit 2; }
-    if [ ! -e "/run/netns/$NS" ]; then
-        echo "tor-enforce: no $NS yet: network-client loads the rules when it makes it" >&2
-        exit 0
-    fi
-    rules "$2" | in_ns nft -f - || { echo "tor-enforce: nft refused the rules" >&2; exit 1; }
-    ;;
-lan)
-    [ -e "/run/netns/$NS" ] && in_ns nft list table $TABLE >/dev/null 2>&1 || exit 0
-    elements=$(lan)
-    { echo "flush set $TABLE lan"; [ -z "$elements" ] || echo "add element $TABLE lan { $elements }"; } |
-        in_ns nft -f -
-    ;;
-remove)
-    [ -e "/run/netns/$NS" ] || exit 0
-    if in_ns nft list table $TABLE >/dev/null 2>&1; then
-        in_ns nft delete table $TABLE
-    fi
+load|lan|remove)
+    # Compatibility entries reconcile the CURRENT combined policy. Never let
+    # an old daemon's captured front or delayed remove erase its replacement.
+    export LOCACHY_NETWORK_NETNS=${LOCACHY_NETWORK_NETNS:-$NS}
+    exec python3 "${LOCACHY_NETWORK_HELPER:-$(dirname "$0")/locachy_network.py}" reconcile
     ;;
 loaded)
     [ -e "/run/netns/$NS" ] && in_ns nft list table $TABLE >/dev/null 2>&1

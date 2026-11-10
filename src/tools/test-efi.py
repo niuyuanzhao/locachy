@@ -49,6 +49,9 @@ class Registration(unittest.TestCase):
         self.records = []
         self.calls = []
         self.fail = None
+        p = mock.patch.object(efi, "EFI_LOCK_PATH", str(self.root / "efi.lock"))
+        p.start()
+        self.addCleanup(p.stop)
         patches = [mock.patch.object(efi, "EFI", self.efi), mock.patch.object(efi, "EFIVARS", self.variables),
                    mock.patch.object(efi, "command", self.command), mock.patch.object(efi.os, "stat", self.stat)]
         self.real_stat = os.stat
