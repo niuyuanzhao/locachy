@@ -1,28 +1,32 @@
 # LOCachy 扩展屏
 
-`kvm` 是 LOCachy 原生的**扩展屏接收器**。发送端保留原有显示器，另外新建一块归发送端本次会话所有的虚拟输出；LOCachy 只显示这块新增输出，并把本机键盘与指针回传。它不是对端屏幕的镜像，不是远程登录桌面，也不是 VNC 查看器。窗口之所以能到 LOCachy 屏上，是因为用户在发送端的显示器排列中把它拖到了这块新增输出上。
+`extdisplay` 是 LOCachy 原生的**扩展屏接收器**。发送端保留原有显示器，另外新建一块归发送端本次会话所有的虚拟输出；LOCachy 只显示这块新增输出，并把本机键盘与指针回传。它不是对端屏幕的镜像，不是远程登录桌面，也不是 VNC 查看器。窗口之所以能到 LOCachy 屏上，是因为用户在发送端的显示器排列中把它拖到了这块新增输出上。
 
 ## 组成
 
 | 文件 | 作用 |
 |---|---|
-| `progs/kvm.c` | 前端：直接屏幕、base 键盘与指针、会话所有者、状态显示；不新建 compositor。 |
-| `progs/kvm-worker.c` | 沙箱 worker：唯一读取对端字节（封包、JSON、视频）的进程。 |
-| `progs/kvm-protocol.[ch]` | 有界封包解析与下述 companion 协议。 |
-| `progs/kvm-decode.[ch]` | 发行版 FFmpeg（`libavcodec`、`libavutil`、`libswscale`），不自写解码器。 |
-| `progs/kvm-ipc.h`、`progs/kvm-client.c` | 定长 `SOCK_SEQPACKET` 消息；画面以封存只读 memfd 传递。 |
-| `progs/kvm-setup.[ch]` | 配对客户端：broker 子进程（只保留 fd 3）、控制行、状态。用作真实子进程的桩 broker 测试。 |
-| `progs/kvm-broker.c`、`kvm-broker-net.c`、`kvm-broker-pump.c`、`kvm-broker-tls.c`、`kvm-broker.h`、`kvm-broker-protocol.h` | broker：线缆租约与会话命名空间、TLS 1.2 PSK 监听与沙箱转发（见下文）。由 `kvm` 启动。 |
+| `progs/extdisplay.c` | 前端：直接屏幕、base 键盘与指针、会话所有者、状态显示；不新建 compositor。 |
+| `progs/extdisplay-worker.c` | 沙箱 worker：唯一读取对端字节（封包、JSON、视频）的进程。 |
+| `progs/extdisplay-protocol.[ch]` | 有界封包解析与下述 companion 协议。 |
+| `progs/extdisplay-decode.[ch]` | 发行版 FFmpeg（`libavcodec`、`libavutil`、`libswscale`），不自写解码器。 |
+| `progs/extdisplay-ipc.h`、`progs/extdisplay-client.c` | 定长 `SOCK_SEQPACKET` 消息；画面以封存只读 memfd 传递。 |
+| `progs/extdisplay-setup.[ch]` | 配对客户端：broker 子进程（只保留 fd 3）、控制行、状态。用作真实子进程的桩 broker 测试。 |
+| `progs/extdisplay-broker.c`、`extdisplay-broker-net.c`、`extdisplay-broker-pump.c`、`extdisplay-broker-tls.c`、`extdisplay-broker.h`、`extdisplay-broker-protocol.h` | broker：线缆租约与会话命名空间、TLS 1.2 PSK 监听与沙箱转发（见下文）。由 `extdisplay` 启动。 |
 | `base/include/input-raw.h`、`base/input-raw.c` | 任何程序可选启用的原始键盘事件（见下）。 |
 
 worker 以 `nobody` 运行，无补充组、`no_new_privs`、Landlock 规则不授予任何路径、资源上限，并以 seccomp 禁止新建 socket、连接、程序、进程、线程和向其他进程发信号；任一条件不满足即拒绝启动，前端显示“不可用”。未编入 FFmpeg 同样显示“不可用”，没有替代解码器或裸像素模式。前端同一时刻只有一幅画面在途；更新的画面替换尚未发出的旧画面，慢屏幕不会积压，也不会卡住数据流。
 
+## 安装
+
+接收器是可选组件“扩展屏 (extdisplay)”：设置 → 系统 → 可选组件。它安装 FFmpeg 和 json-c，并在 rc.conf 里写入 `program_extdisplay`，home 正是靠这一项列出该程序。两者都装好时 `make.sh` 才编译 `extdisplay` 和 `extdisplay-worker`，否则打印 `make: extdisplay not built`。broker 只需要 OpenSSL，基础系统本来就会带上它。
+
 ## 传输与会话所有权
 
-`kvm` 不接受参数。它自己启动 broker：`kvm-broker --control-fd 3`，从安装路径执行，控制通道是一对 socketpair。子进程中 broker 的一端是 fd 3，标准输入输出为 `/dev/null`，其他描述符全部关闭，包括会话所有者的描述符，因此 broker 永远够不到所有者。broker 是 `kvm` 的子进程，留在应用的 cgroup 内，PID 1 的停止与冻结仍然能作用到它。控制通道是 `SOCK_SEQPACKET`，每条消息一行 ASCII，最长 512 字节：`kvm` 发送 `scan`、`pair NAME`、`cancel` 与 `release`；broker 回复 `iface NAME DRIVER up|down` 行与 `end`，`lease NAME LINKLOCAL PORT` 与 `code GROUPS`（或 `error TEXT`），`paired`（恰好带一个描述符，即明文 `AF_UNIX` 流），以及 `ended REASON`。通道 EOF 表示 broker 释放并退出。接收器自己从不监听或拨出网络，TCP socket 会被拒绝。配对后的流承载下面的 companion 协议。已冻结的 broker 传输方案：
+`extdisplay` 不接受参数。它自己启动 broker：`extdisplay-broker --control-fd 3`，从安装路径执行，控制通道是一对 socketpair。子进程中 broker 的一端是 fd 3，标准输入输出为 `/dev/null`，其他描述符全部关闭，包括会话所有者的描述符，因此 broker 永远够不到所有者。broker 是 `extdisplay` 的子进程，留在应用的 cgroup 内，PID 1 的停止与冻结仍然能作用到它。控制通道是 `SOCK_SEQPACKET`，每条消息一行 ASCII，最长 512 字节：`extdisplay` 发送 `scan`、`pair NAME`、`cancel` 与 `release`；broker 回复 `iface NAME DRIVER up|down` 行与 `end`，`lease NAME LINKLOCAL PORT` 与 `code GROUPS`（或 `error TEXT`），`paired`（恰好带一个描述符，即明文 `AF_UNIX` 流），以及 `ended REASON`。通道 EOF 表示 broker 释放并退出。接收器自己从不监听或拨出网络，TCP socket 会被拒绝。配对后的流承载下面的 companion 协议。已冻结的 broker 传输方案：
 
 - 只走专用线缆链路（Thunderbolt/USB4 网络），位于会话私有网络命名空间，仅 link-local，无默认路由、DNS、转发和 Wi-Fi 回退；
-- TLS 1.2，`TLS_PSK_WITH_AES_128_GCM_SHA256`，PSK identity 与 ALPN 均为 `locachy-kvm-v1`，不用会话票据、恢复或重协商；
+- TLS 1.2，`TLS_PSK_WITH_AES_128_GCM_SHA256`，PSK identity 与 ALPN 均为 `locachy-extdisplay-v1`，不用会话票据、恢复或重协商；
 - 每次连接由 LOCachy 新生成 16 字节随机 PSK，以 base32 分组显示在屏幕上，由用户在发送端输入；只在内存中，不保存、不记日志、不进 argv 或环境变量。
 
 采用 TLS 1.2 PSK，是因为发送端平台的系统 TLS 不提供 TLS 1.3 外部 PSK。纯 PSK 密钥交换在**单次会话内没有前向保密**：拿到该次连接 PSK 且录下流量的人可以解密。之所以可以接受，是因为密钥随机、每次连接一份、由用户当场经直连线缆输入、连接结束即丢弃；事后入侵也找不到能解开旧会话的已存密钥。
@@ -37,13 +41,13 @@ worker 以 `nobody` 运行，无补充组、`no_new_privs`、Landlock 规则不�
 
 ## Broker（中转进程）
 
-`kvm-broker` 是接收器传输中的特权部分。`kvm` 以 `/usr/local/lib/locachy/kvm-broker --control-fd 3` 启动它，标准输入、输出和错误都接到 `/dev/null`（此时 broker 把日志写到内核日志），除此之外没有其他打开的描述符。broker 本身保持 root：它租用线缆，并拥有会话命名空间。只有处理网络字节的 TLS 转发进程在建立完成后放弃全部特权。broker 进程自己从不读取数据流；转发进程解密后，把明文作为一条 `AF_UNIX` 流交给 `kvm`。
+`extdisplay-broker` 是接收器传输中的特权部分。`extdisplay` 以 `/usr/local/lib/locachy/extdisplay-broker --control-fd 3` 启动它，标准输入、输出和错误都接到 `/dev/null`（此时 broker 把日志写到内核日志），除此之外没有其他打开的描述符。broker 本身保持 root：它租用线缆，并拥有会话命名空间。只有处理网络字节的 TLS 转发进程在建立完成后放弃全部特权。broker 进程自己从不读取数据流；转发进程解密后，把明文作为一条 `AF_UNIX` 流交给 `extdisplay`。
 
 ### 控制
 
 每条消息是一个 `SOCK_SEQPACKET` 报文，内含一行 ASCII（0x20 到 0x7e），最长 512 字节。末尾的换行可以接受，但不会发送。
 
-`kvm` 发给 broker：
+`extdisplay` 发给 broker：
 
 | 行 | 回复 |
 |---|---|
@@ -59,7 +63,7 @@ broker 主动发出：
 - `paired`，恰好带一个 `SCM_RIGHTS` 描述符：明文一端，是 `AF_UNIX` `SOCK_STREAM`。它跟在 `code` 之后，且先于任何 `ended`。
 - `ended REASON`，每次尝试恰好一次。REASON 为 `handshake-failed`、`timeout`、`carrier-lost`、`released`、`cancelled`、`error` 之一。`error` 表示数据流自行结束（对端关闭，或 TLS 或转发失败）。除 `released` 外的任何 `ended` 之后，broker 保持存活并空闲，租约已释放；`scan` 与 `pair` 重新被接受。
 
-`LINKLOCAL` 是不带区域（zone）的裸 IPv6 链路本地地址：区域属于发送端自己的接口。`PORT` 为 `27183`（`KVM_BROKER_PORT`）。Mac 伴生程序没有默认端口，它通过 `--port` 指定。`GROUPS` 即配对码。
+`LINKLOCAL` 是不带区域（zone）的裸 IPv6 链路本地地址：区域属于发送端自己的接口。`PORT` 为 `27183`（`EXTDISPLAY_BROKER_PORT`）。Mac 伴生程序没有默认端口，它通过 `--port` 指定。`GROUPS` 即配对码。
 
 ### 候选与身份
 
@@ -70,7 +74,7 @@ broker 主动发出：
 收到 `pair` 后，broker：
 
 1. 拒绝不是候选的接口，或无法读取其身份的接口；
-2. 记录租约：在 `/run/locachy/kvm-broker` 下写一个仅 root 可读的文件 `lease-<address>`，内容包括启动标识、名称、索引、地址和设备路径；
+2. 记录租约：在 `/run/locachy/extdisplay-broker` 下写一个仅 root 可读的文件 `lease-<address>`，内容包括启动标识、名称、索引、地址和设备路径；
 3. 创建一个全新的网络命名空间，不带名字，也不做绑定挂载，只包含 `lo`；
 4. 把设备从 locachy-net 移入该命名空间，移动后检查设备上仍然是被租用的地址（只用 netlink 检查；sysfs 显示的是挂载它的命名空间）。locachy-net 不存在时 broker 拒绝运行，从不退回到宿主命名空间；
 5. 在设备本身上把 `accept_ra`、`autoconf`、`forwarding` 和 `accept_redirects` 设为 0，因为设备会保留它原来所在位置的设置；
@@ -81,7 +85,7 @@ broker 主动发出：
 
 ### 归还
 
-在取消、释放、载波丢失、超时、转发失败、控制通道结束或收到信号时，转发进程被停止。对于已建立的会话，broker 先要求它发送 close_notify 并关闭 TCP 连接，最多等 500 毫秒。然后设备回到 locachy-net，前提是它仍然是被租用的那个设备（地址相同）。如果名字已被另一台设备占用，内核会从同一格式中分配一个空闲名字（例如 `kvm0` 对应 `kvm%d`），另一台设备不受影响。设备回到 locachy-net，或从未离开时，记录被删除。
+在取消、释放、载波丢失、超时、转发失败、控制通道结束或收到信号时，转发进程被停止。对于已建立的会话，broker 先要求它发送 close_notify 并关闭 TCP 连接，最多等 500 毫秒。然后设备回到 locachy-net，前提是它仍然是被租用的那个设备（地址相同）。如果名字已被另一台设备占用，内核会从同一格式中分配一个空闲名字（例如 `extdisplay0` 对应 `extdisplay%d`），另一台设备不受影响。设备回到 locachy-net，或从未离开时，记录被删除。
 
 broker 从不驱动 NetworkManager。它不改变 NetworkManager 的运行时 managed 状态，也不恢复它。NetworkManager 对归还的设备应用其配置的策略，与对任何新出现的设备一样。租约前人工设置的运行时状态不会保留，插拔后被清除的状态也不会保留。
 
@@ -93,8 +97,8 @@ broker 从不驱动 NetworkManager。它不改变 NetworkManager 的运行时 ma
 
 - 只允许 TLS 1.2；TLS 1.3 被禁用并拒绝；
 - 密码套件列表为 `PSK-AES128-GCM-SHA256`，握手后再次核对协商的套件；
-- PSK identity `locachy-kvm-v1` 在 broker 自己的 PSK 回调中检查，因为 OpenSSL 本身不比较 identity；
-- 要求 ALPN `locachy-kvm-v1`。没有 ALPN 的 ClientHello 被拒绝，并核对协商的值；
+- PSK identity `locachy-extdisplay-v1` 在 broker 自己的 PSK 回调中检查，因为 OpenSSL 本身不比较 identity；
+- 要求 ALPN `locachy-extdisplay-v1`。没有 ALPN 的 ClientHello 被拒绝，并核对协商的值；
 - 不使用会话票据，不使用会话缓存，不做重新协商。
 
 ### 配对码
@@ -124,18 +128,18 @@ broker 死后没有需要保留的状态。租约记录在磁盘上。会话命�
 
 记录会保留，直到具有该地址的设备再次出现在 locachy-net 中。每次 `scan` 和 `pair` 都会记录它（写到 stderr；stderr 为 `/dev/null` 时写到内核日志），格式为 `lease of NAME did not end cleanly; its device is not back in locachy-net yet`。候选只在 locachy-net 中列出，所以设备在回到那里之前不可能被租用。上一次开机留下的记录会被删除。
 
-`kvm` 必须在宿主挂载命名空间中启动 broker（由 PID 1 在那里启动 `kvm`）。broker 会进入 locachy-net，并在它自己的挂载命名空间中重新挂载 sysfs。
+`extdisplay` 必须在宿主挂载命名空间中启动 broker（由 PID 1 在那里启动 `extdisplay`）。broker 会进入 locachy-net，并在它自己的挂载命名空间中重新挂载 sysfs。
 
 ### broker 测试
 
-`src/tools/test-kvm-broker.sh [WORK_DIRECTORY]` 只能在 Linux 上运行。它接受一个可选的工作目录，只写入该目录。它为每项检查打印一行 `PASS:` 或 `FAIL:`，无法在此运行的部分打印 `SKIP:`。各部分如下：
+`src/tools/test-extdisplay-broker.sh [WORK_DIRECTORY]` 只能在 Linux 上运行。它接受一个可选的工作目录，只写入该目录。它为每项检查打印一行 `PASS:` 或 `FAIL:`，无法在此运行的部分打印 `SKIP:`。各部分如下：
 
 - `build`：使用生产编译参数构建 broker。
 - `code`：配对码的编码、解码与规范性拒绝。
 - `tls`：以 Python 的 `ssl` 作为对端的十个回环用例：TLS 1.3、仅证书的套件以及另一个 PSK 套件（均被拒绝）；提供四个 PSK 套件（选中 `PSK-AES128-GCM-SHA256`）；错误的 identity、错误的密钥、错误的 ALPN 和没有 ALPN（均被拒绝）；正确的 identity、密钥和 ALPN（明文双向回显，正常的 close_notify）；以及第二次连接不恢复会话。
 - `lease`：通过控制套接字驱动 broker，运行在测试自身的用户与网络命名空间中，以一对 veth 作为线缆。覆盖候选过滤、会话命名空间内容、配对、错误配对码、取消、超时、以 link-down 模拟的载波丢失、控制通道结束、协议错误、被杀的 broker 及其记录、期间另一台设备占用了名字的情况，以及转发进程的沙箱探测。
 
-测试固件都在编译时指定：`KVM_BROKER_TEST_DRIVER`、`KVM_BROKER_TEST_HOME_NETNS`、`KVM_BROKER_TEST_STATE_DIR`、`KVM_BROKER_TEST_ATTEMPT_SECONDS` 与 `KVM_BROKER_TEST_PROBES`。生产二进制中没有其中任何一个。
+测试固件都在编译时指定：`EXTDISPLAY_BROKER_TEST_DRIVER`、`EXTDISPLAY_BROKER_TEST_HOME_NETNS`、`EXTDISPLAY_BROKER_TEST_STATE_DIR`、`EXTDISPLAY_BROKER_TEST_ATTEMPT_SECONDS` 与 `EXTDISPLAY_BROKER_TEST_PROBES`。生产二进制中没有其中任何一个。
 
 由本脚本在 Linux 上验证的：上文列出的全部内容，包括被杀与记录行为，以及转发进程的沙箱探测。已设计但未在此验证的：真实的 `thunderbolt-net` 设备（发现、线缆载波、broker 被杀后内核移到初始命名空间，以及经 udev 与 `network-client` 回到 locachy-net，这需要一台可随意重装的虚拟机，因为在测试主机上这样的设备会到达主机的真实命名空间）；NetworkManager 对归还设备的处理；按地址拒绝租约的旧记录；对端一侧的载波丢失（区别于管理员的 link-down）；以及 Mac 发送端通过真实线缆配对。
 
@@ -171,12 +175,12 @@ broker 死后没有需要保留的状态。租约记录在磁盘上。会话命�
 ## 测试
 
 ```sh
-src/tools/test-kvm.sh
+src/tools/test-extdisplay.sh
 ```
 
 它编译协议、FFmpeg 解码部分，在 Linux 上还编译 IPC 客户端，然后运行：封包、握手与输入用例；IPC 边界用例（封存的画面可映射，未封存、尺寸不符、两个描述符、非画面消息上的描述符、错误魔数与保留位都被拒绝）；worker 缺少通道时必须以退出码 78 拒绝运行；配对客户端对桩 broker 的测试（真实子进程，只保留 fd 3，故意留着的描述符不得到达它）；以及用已安装的 `ffmpeg` 编码的 H.264 与 HEVC 流，经接收器自己的分流与解码路径解码，并覆盖尺寸不符拒绝和损坏切片数据。脚本不安装任何东西，不启动显示、VM 或网络。这些测试未覆盖：worker 在沙箱内处理实时数据流（带补充组的测试用户或 root 按设计都会被拒绝）、前端面对真实屏幕，以及任何真实对端。
 
-broker 有自己的测试套件 `src/tools/test-kvm-broker.sh`（仅 Linux，见“broker 测试”）。两者都在 `tools/test-interaction-regressions.sh` 中运行。
+broker 有自己的测试套件 `src/tools/test-extdisplay-broker.sh`（仅 Linux，见“broker 测试”）。两者都在 `tools/test-interaction-regressions.sh` 中运行。
 
 ## 发送端与验收边界
 

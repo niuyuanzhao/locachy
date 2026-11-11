@@ -36,7 +36,7 @@ enum ProtocolTests {
         try Panel(hello: Wire.object(Data(json.utf8)))
     }
 
-    // The exact text kvm-protocol.c emits for a 1920x1200 @2x H.264 panel.
+    // The exact text extdisplay-protocol.c emits for a 1920x1200 @2x H.264 panel.
     static let receiverHello = """
     {"type":"hello","pv":3,"locachy":1,"device":"LOCachy","pixelsWide":1920,"pixelsHigh":1200,"scale":2.000,"panel":{"width":1920,"height":1200,"scale":2.000},"displayMaxFrameRate":60,"extendedOnly":true,"videoCaps":[{"codec":"h264","maxWidth":4096,"maxHeight":4096,"maxFramesPerSecond":60}],"input":["key","button","cancel","pointer","scroll"]}
     """

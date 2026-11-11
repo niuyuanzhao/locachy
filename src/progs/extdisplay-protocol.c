@@ -1,6 +1,6 @@
-/* The companion protocol (kvm-protocol.h). Runs in kvm-worker for anything
+/* The companion protocol (extdisplay-protocol.h). Runs in extdisplay-worker for anything
  * the peer sent; the receiver itself only formats its own messages. */
-#include "kvm-protocol.h"
+#include "extdisplay-protocol.h"
 #include <errno.h>
 #include <json-c/json.h>
 #include <limits.h>
@@ -9,16 +9,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-int kvm_dimensions(uint32_t w, uint32_t h, size_t *bytes)
+int extdisplay_dimensions(uint32_t w, uint32_t h, size_t *bytes)
 {
-    if (!w || !h || w > KVM_DIM_MAX || h > KVM_DIM_MAX || (uint64_t)w * h > KVM_PIXELS_MAX) return -1;
+    if (!w || !h || w > EXTDISPLAY_DIM_MAX || h > EXTDISPLAY_DIM_MAX || (uint64_t)w * h > EXTDISPLAY_PIXELS_MAX) return -1;
     if (bytes) *bytes = (size_t)w * h * 4;
     return 0;
 }
 
-int kvm_annex_b(const unsigned char *s, size_t n)
+int extdisplay_annex_b(const unsigned char *s, size_t n)
 {
-    if (!s || n < 5 || n > KVM_WIRE_MAX || memcmp(s, "\0\0\0\1", 4) != 0) return -1;
+    if (!s || n < 5 || n > EXTDISPLAY_WIRE_MAX || memcmp(s, "\0\0\0\1", 4) != 0) return -1;
     /* Emulation prevention leaves 00 00 01 only in start codes: each must
      * be the long form. */
     for (size_t i = 4; i + 2 < n; i++) {
@@ -27,13 +27,13 @@ int kvm_annex_b(const unsigned char *s, size_t n)
     return 0;
 }
 
-void kvm_parser_clear(struct kvm_parser *p)
+void extdisplay_parser_clear(struct extdisplay_parser *p)
 {
     free(p->payload);
     memset(p, 0, sizeof *p);
 }
 
-int kvm_parser_feed(struct kvm_parser *p, const void *buffer, size_t n, kvm_frame_fn receive, void *opaque)
+int extdisplay_parser_feed(struct extdisplay_parser *p, const void *buffer, size_t n, extdisplay_frame_fn receive, void *opaque)
 {
     const unsigned char *s = buffer;
     if (p->failed || (!buffer && n) || !receive) return -1;
@@ -44,7 +44,7 @@ int kvm_parser_feed(struct kvm_parser *p, const void *buffer, size_t n, kvm_fram
             if (p->header_used < 4) continue;
             p->size = (uint32_t)p->header[0] << 24 | (uint32_t)p->header[1] << 16 |
                       (uint32_t)p->header[2] << 8 | p->header[3];
-            if (!p->size || p->size > KVM_WIRE_MAX || !(p->payload = malloc(p->size))) goto fail;
+            if (!p->size || p->size > EXTDISPLAY_WIRE_MAX || !(p->payload = malloc(p->size))) goto fail;
         }
         size_t take = p->size - p->used;
         if (take > n) take = n;
@@ -69,7 +69,7 @@ fail:
     return -1;
 }
 
-int kvm_parser_eof(const struct kvm_parser *p)
+int extdisplay_parser_eof(const struct extdisplay_parser *p)
 {
     return !p->failed && !p->header_used && !p->used ? 0 : -1;
 }
@@ -100,13 +100,13 @@ static int video(const unsigned char *s, size_t n, size_t *offset)
 {
     size_t i = 0;
     if (s[0] == '{') {
-        while (i < n && i < KVM_PREFIX_MAX && s[i] != 0) {
+        while (i < n && i < EXTDISPLAY_PREFIX_MAX && s[i] != 0) {
             if (s[i] < 0x20 || s[i] > 0x7e) return -1;
             i++;
         }
         if (i == 0 || i >= n || s[i - 1] != '}') return -1;
     }
-    if (kvm_annex_b(s + i, n - i) < 0) return -1;
+    if (extdisplay_annex_b(s + i, n - i) < 0) return -1;
     *offset = i;
     return 0;
 }
@@ -115,7 +115,7 @@ static int welcome(struct json_object *o)
 {
     int64_t version;
     struct json_object *v;
-    if (integer(o, "locachy", KVM_COMPANION_VERSION, KVM_COMPANION_VERSION, &version) < 0 ||
+    if (integer(o, "locachy", EXTDISPLAY_COMPANION_VERSION, EXTDISPLAY_COMPANION_VERSION, &version) < 0 ||
         !(v = field(o, "extended", json_type_boolean)) || !json_object_get_boolean(v)) return -1;
     /* The whole input set, or no session: no mirror or touch-only fallback. */
     if (!(v = field(o, "input", json_type_array)) || json_object_array_length(v) > 16) return -1;
@@ -133,14 +133,14 @@ static int welcome(struct json_object *o)
     return mask == 31 ? 0 : -1;
 }
 
-int kvm_control_parse(const unsigned char *s, size_t n, struct kvm_control *out)
+int extdisplay_control_parse(const unsigned char *s, size_t n, struct extdisplay_control *out)
 {
     memset(out, 0, sizeof *out);
-    if (!s || !n || n > KVM_WIRE_MAX) return -1;
+    if (!s || !n || n > EXTDISPLAY_WIRE_MAX) return -1;
     /* OpenDisplay's demux (its section 4), kept in this one place. */
-    if (s[0] != '{' || n > KVM_CONTROL_MAX || memchr(s, 0, n)) {
+    if (s[0] != '{' || n > EXTDISPLAY_CONTROL_MAX || memchr(s, 0, n)) {
         if (video(s, n, &out->video_offset) < 0) return -1;
-        out->type = KVM_MSG_VIDEO;
+        out->type = EXTDISPLAY_MSG_VIDEO;
         return 0;
     }
     struct json_tokener *tok = json_tokener_new_ex(16);
@@ -161,27 +161,27 @@ int kvm_control_parse(const unsigned char *s, size_t n, struct kvm_control *out)
         goto done;
     } else if (strcmp(t, "welcome") == 0) {
         if (welcome(o) < 0) goto done;
-        out->type = KVM_MSG_WELCOME;
+        out->type = EXTDISPLAY_MSG_WELCOME;
     } else if (strcmp(t, "streamConfig") == 0) {
         int64_t w, h, fps;
-        if (integer(o, "width", 1, KVM_DIM_MAX, &w) < 0 || integer(o, "height", 1, KVM_DIM_MAX, &h) < 0 ||
-            integer(o, "framesPerSecond", 1, KVM_FPS_MAX, &fps) < 0 ||
-            kvm_dimensions((uint32_t)w, (uint32_t)h, NULL) < 0 || !(v = field(o, "codec", json_type_string))) {
+        if (integer(o, "width", 1, EXTDISPLAY_DIM_MAX, &w) < 0 || integer(o, "height", 1, EXTDISPLAY_DIM_MAX, &h) < 0 ||
+            integer(o, "framesPerSecond", 1, EXTDISPLAY_FPS_MAX, &fps) < 0 ||
+            extdisplay_dimensions((uint32_t)w, (uint32_t)h, NULL) < 0 || !(v = field(o, "codec", json_type_string))) {
             goto done;
         }
         const char *codec = json_object_get_string(v);
-        out->codec = strcmp(codec, "h264") == 0 ? KVM_CODEC_H264 : strcmp(codec, "hevc") == 0 ? KVM_CODEC_HEVC
-                                                                                               : KVM_CODEC_NONE;
-        if (out->codec == KVM_CODEC_NONE) goto done;
-        out->type = KVM_MSG_CONFIG;
+        out->codec = strcmp(codec, "h264") == 0 ? EXTDISPLAY_CODEC_H264 : strcmp(codec, "hevc") == 0 ? EXTDISPLAY_CODEC_HEVC
+                                                                                               : EXTDISPLAY_CODEC_NONE;
+        if (out->codec == EXTDISPLAY_CODEC_NONE) goto done;
+        out->type = EXTDISPLAY_MSG_CONFIG;
         out->width = (uint32_t)w;
         out->height = (uint32_t)h;
         out->fps = (uint32_t)fps;
     } else if (strcmp(t, "ping") == 0 || strcmp(t, "pong") == 0) {
-        out->type = strcmp(t, "ping") == 0 ? KVM_MSG_PING : KVM_MSG_PONG;
+        out->type = strcmp(t, "ping") == 0 ? EXTDISPLAY_MSG_PING : EXTDISPLAY_MSG_PONG;
         if (json_object_object_get_ex(o, "t", NULL) && integer(o, "t", 0, INT64_MAX, &out->timestamp) < 0) goto done;
     } else if (strcmp(t, "closing") == 0) {
-        out->type = KVM_MSG_CLOSING;
+        out->type = EXTDISPLAY_MSG_CLOSING;
     }
     r = 0;
 done:
@@ -193,22 +193,22 @@ static int fits(int n, size_t size) { return n >= 0 && (size_t)n < size ? n : -1
 
 static int unit(double v) { return isfinite(v) && v >= 0 && v <= 1; }
 
-int kvm_hello(char *s, size_t size, uint32_t w, uint32_t h, double scale, int h264, int hevc)
+int extdisplay_hello(char *s, size_t size, uint32_t w, uint32_t h, double scale, int h264, int hevc)
 {
-    if (kvm_dimensions(w, h, NULL) < 0 || !isfinite(scale) || scale < 0.5 || scale > 4 || (!h264 && !hevc)) return -1;
+    if (extdisplay_dimensions(w, h, NULL) < 0 || !isfinite(scale) || scale < 0.5 || scale > 4 || (!h264 && !hevc)) return -1;
     return fits(snprintf(s, size,
         "{\"type\":\"hello\",\"pv\":3,\"locachy\":%d,\"device\":\"LOCachy\",\"extendedOnly\":true,"
         "\"pixelsWide\":%u,\"pixelsHigh\":%u,\"scale\":%.3f,"
         "\"panel\":{\"pixelsWide\":%u,\"pixelsHigh\":%u,\"scale\":%.3f},"
         "\"displayMaxFrameRate\":%d,\"maxEncodeWide\":%u,\"maxEncodeHigh\":%u,"
         "\"videoCaps\":[%s%s%s],\"input\":[\"key\",\"button\",\"cancel\",\"pointer\",\"scroll\"]}",
-        KVM_COMPANION_VERSION, w, h, scale, w, h, scale, KVM_FPS_MAX, KVM_DIM_MAX, KVM_DIM_MAX,
+        EXTDISPLAY_COMPANION_VERSION, w, h, scale, w, h, scale, EXTDISPLAY_FPS_MAX, EXTDISPLAY_DIM_MAX, EXTDISPLAY_DIM_MAX,
         h264 ? "{\"codec\":\"h264\",\"maxWidth\":4096,\"maxHeight\":4096,\"maxFrameRate\":60}" : "",
         h264 && hevc ? "," : "",
         hevc ? "{\"codec\":\"hevc\",\"maxWidth\":4096,\"maxHeight\":4096,\"maxFrameRate\":60}" : ""), size);
 }
 
-int kvm_key_json(char *s, size_t size, uint32_t device, uint32_t code, uint32_t sym, uint32_t mods,
+int extdisplay_key_json(char *s, size_t size, uint32_t device, uint32_t code, uint32_t sym, uint32_t mods,
                  uint32_t locks, int state)
 {
     if (!device || code > 767 || state < 0 || state > 2 || mods > 127 || locks > 3) return -1;
@@ -217,30 +217,30 @@ int kvm_key_json(char *s, size_t size, uint32_t device, uint32_t code, uint32_t 
         "\"state\":%d,\"mapping\":\"logical\"}", device, code, sym, mods, locks, state), size);
 }
 
-int kvm_button_json(char *s, size_t size, uint32_t button, int pressed, double x, double y)
+int extdisplay_button_json(char *s, size_t size, uint32_t button, int pressed, double x, double y)
 {
     if (button < 272 || button > 274 || (pressed != 0 && pressed != 1) || !unit(x) || !unit(y)) return -1;
     return fits(snprintf(s, size, "{\"type\":\"button\",\"button\":%u,\"state\":%d,\"x\":%.6f,\"y\":%.6f}",
                          button, pressed, x, y), size);
 }
 
-int kvm_pointer_json(char *s, size_t size, double x, double y)
+int extdisplay_pointer_json(char *s, size_t size, double x, double y)
 {
     if (!unit(x) || !unit(y)) return -1;
     return fits(snprintf(s, size, "{\"type\":\"pointer\",\"x\":%.6f,\"y\":%.6f}", x, y), size);
 }
 
-int kvm_scroll_json(char *s, size_t size, double dx, double dy, int phase, int source)
+int extdisplay_scroll_json(char *s, size_t size, double dx, double dy, int phase, int source)
 {
     if (!isfinite(dx) || !isfinite(dy) || fabs(dx) > 100000 || fabs(dy) > 100000 ||
-        phase < KVM_PHASE_NONE || phase > KVM_PHASE_CANCEL || source < KVM_SOURCE_NONE || source > KVM_SOURCE_TOUCH) {
+        phase < EXTDISPLAY_PHASE_NONE || phase > EXTDISPLAY_PHASE_CANCEL || source < EXTDISPLAY_SOURCE_NONE || source > EXTDISPLAY_SOURCE_TOUCH) {
         return -1;
     }
     return fits(snprintf(s, size, "{\"type\":\"scroll\",\"dx\":%.4f,\"dy\":%.4f,\"phase\":%d,\"source\":%d}",
                          dx, dy, phase, source), size);
 }
 
-int kvm_cancel_json(char *s, size_t size)
+int extdisplay_cancel_json(char *s, size_t size)
 {
     return fits(snprintf(s, size, "{\"type\":\"cancel\",\"scope\":\"all\"}"), size);
 }

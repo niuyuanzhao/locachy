@@ -1,28 +1,32 @@
 # LOCachy Extended Display
 
-`kvm` is a native LOCachy **extended-screen receiver**. The sender keeps its original display and creates one additional, sender-owned virtual output; LOCachy shows only that new output and sends its keyboard and pointer back. It is not a mirror of the sender's screen, not a remote-login desktop and not a VNC viewer. Windows reach the LOCachy screen because the user drags them onto the new output in the sender's display arrangement.
+`extdisplay` is a native LOCachy **extended-screen receiver**. The sender keeps its original display and creates one additional, sender-owned virtual output; LOCachy shows only that new output and sends its keyboard and pointer back. It is not a mirror of the sender's screen, not a remote-login desktop and not a VNC viewer. Windows reach the LOCachy screen because the user drags them onto the new output in the sender's display arrangement.
 
 ## Parts
 
 | File | Role |
 |---|---|
-| `progs/kvm.c` | Frontend: direct screen, base keyboard and pointer, session owner, status. No compositor. |
-| `progs/kvm-worker.c` | Sandboxed worker: the only process that reads the peer's bytes (framing, JSON, video). |
-| `progs/kvm-protocol.[ch]` | Bounded framing parser and the companion protocol below. |
-| `progs/kvm-decode.[ch]` | Distribution FFmpeg (`libavcodec`, `libavutil`, `libswscale`); no codec of its own. |
-| `progs/kvm-ipc.h`, `progs/kvm-client.c` | Fixed-size `SOCK_SEQPACKET` messages; pictures as sealed read-only memfds. |
-| `progs/kvm-setup.[ch]` | Pairing client: the broker's child (fd 3 only), the control lines, the states. Tested against a stub broker that runs as a real child. |
-| `progs/kvm-broker.c`, `kvm-broker-net.c`, `kvm-broker-pump.c`, `kvm-broker-tls.c`, `kvm-broker.h`, `kvm-broker-protocol.h` | Broker: the cable lease in a session namespace, the TLS 1.2 PSK listener and the sandboxed pump (below). Started by `kvm`. |
+| `progs/extdisplay.c` | Frontend: direct screen, base keyboard and pointer, session owner, status. No compositor. |
+| `progs/extdisplay-worker.c` | Sandboxed worker: the only process that reads the peer's bytes (framing, JSON, video). |
+| `progs/extdisplay-protocol.[ch]` | Bounded framing parser and the companion protocol below. |
+| `progs/extdisplay-decode.[ch]` | Distribution FFmpeg (`libavcodec`, `libavutil`, `libswscale`); no codec of its own. |
+| `progs/extdisplay-ipc.h`, `progs/extdisplay-client.c` | Fixed-size `SOCK_SEQPACKET` messages; pictures as sealed read-only memfds. |
+| `progs/extdisplay-setup.[ch]` | Pairing client: the broker's child (fd 3 only), the control lines, the states. Tested against a stub broker that runs as a real child. |
+| `progs/extdisplay-broker.c`, `extdisplay-broker-net.c`, `extdisplay-broker-pump.c`, `extdisplay-broker-tls.c`, `extdisplay-broker.h`, `extdisplay-broker-protocol.h` | Broker: the cable lease in a session namespace, the TLS 1.2 PSK listener and the sandboxed pump (below). Started by `extdisplay`. |
 | `base/include/input-raw.h`, `base/input-raw.c` | Opt-in raw keyboard events for any program (below). |
 
 The worker runs as `nobody` with no supplementary groups, `no_new_privs`, a Landlock ruleset that grants no path at all, resource limits, and a seccomp filter against new sockets, connections, programs, processes, threads and signals to other processes. It refuses to start without any of them and the frontend then shows *Unavailable*. A build without FFmpeg also reports *Unavailable*; there is no fallback decoder and no raw-pixel mode. One picture is in flight to the frontend at a time; a newer picture replaces an unsent one, so a slow screen never builds a backlog and never stalls the stream.
 
+## Installing
+
+The receiver is the optional component *Extended display (extdisplay)*: Settings → System → Optional Components. It installs FFmpeg and json-c and sets `program_extdisplay` in rc.conf, which is what lists the program in home. `make.sh` builds `extdisplay` and `extdisplay-worker` only when both are installed; otherwise it prints `make: extdisplay not built`. The broker needs only OpenSSL, which the base system already pulls in.
+
 ## Transport and session ownership
 
-`kvm` takes no arguments. It starts the broker itself, `kvm-broker --control-fd 3`, from its install path, over a socketpair. In the child the broker's end is fd 3, stdio is `/dev/null`, and every other descriptor is closed, the session owner's included, so the broker can never reach the owner. The broker is a child of `kvm`, so it stays in the app's cgroup and PID 1's stop and freeze still reach it. The control channel is `SOCK_SEQPACKET`, one ASCII line per message of at most 512 bytes: `kvm` sends `scan`, `pair NAME`, `cancel` and `release`; the broker answers with `iface NAME DRIVER up|down` lines and `end`, `lease NAME LINKLOCAL PORT` and `code GROUPS` (or `error TEXT`), `paired` with exactly one descriptor (a plaintext `AF_UNIX` stream), and `ended REASON`. EOF on the channel means the broker releases and exits. The receiver never listens on or dials a network itself; a TCP socket is refused. The paired stream carries the companion protocol below. The broker's frozen transport is:
+`extdisplay` takes no arguments. It starts the broker itself, `extdisplay-broker --control-fd 3`, from its install path, over a socketpair. In the child the broker's end is fd 3, stdio is `/dev/null`, and every other descriptor is closed, the session owner's included, so the broker can never reach the owner. The broker is a child of `extdisplay`, so it stays in the app's cgroup and PID 1's stop and freeze still reach it. The control channel is `SOCK_SEQPACKET`, one ASCII line per message of at most 512 bytes: `extdisplay` sends `scan`, `pair NAME`, `cancel` and `release`; the broker answers with `iface NAME DRIVER up|down` lines and `end`, `lease NAME LINKLOCAL PORT` and `code GROUPS` (or `error TEXT`), `paired` with exactly one descriptor (a plaintext `AF_UNIX` stream), and `ended REASON`. EOF on the channel means the broker releases and exits. The receiver never listens on or dials a network itself; a TCP socket is refused. The paired stream carries the companion protocol below. The broker's frozen transport is:
 
 - the dedicated cable link only (Thunderbolt/USB4 networking), in a session network namespace, link-local, with no default route, DNS, forwarding or Wi-Fi fallback;
-- TLS 1.2 with `TLS_PSK_WITH_AES_128_GCM_SHA256`, PSK identity and ALPN `locachy-kvm-v1`, no session tickets, resumption or renegotiation;
+- TLS 1.2 with `TLS_PSK_WITH_AES_128_GCM_SHA256`, PSK identity and ALPN `locachy-extdisplay-v1`, no session tickets, resumption or renegotiation;
 - a fresh 16-byte random PSK per connection, generated by LOCachy, shown on its screen in base32 groups and typed on the sender; it lives only in memory and is never stored, logged or put in argv or the environment.
 
 TLS 1.2 PSK is used because the sender platform's system TLS stack does not offer TLS 1.3 external PSK. Plain PSK key exchange has **no forward secrecy within a session**: whoever learns that connection's PSK and recorded the traffic can decrypt it. This is accepted because the key is random, per connection, typed by the user at that moment over a direct cable, and discarded when the connection ends; a later compromise finds no stored key to recover old sessions with.
@@ -37,13 +41,13 @@ The setup screen lists the cable interfaces the broker reports, each with its dr
 
 ## Broker
 
-`kvm-broker` is the privileged half of the receiver's transport. `kvm` starts it as `/usr/local/lib/locachy/kvm-broker --control-fd 3`, with stdin, stdout and stderr on `/dev/null` (the broker logs to the kernel log then) and no other descriptor open. The broker itself stays root: it leases the cable and owns the session namespace. Only the TLS pump, which handles the network bytes, drops every privilege after setup. The broker process never reads stream data; the pump decrypts it and passes the plaintext to `kvm` as one `AF_UNIX` stream.
+`extdisplay-broker` is the privileged half of the receiver's transport. `extdisplay` starts it as `/usr/local/lib/locachy/extdisplay-broker --control-fd 3`, with stdin, stdout and stderr on `/dev/null` (the broker logs to the kernel log then) and no other descriptor open. The broker itself stays root: it leases the cable and owns the session namespace. Only the TLS pump, which handles the network bytes, drops every privilege after setup. The broker process never reads stream data; the pump decrypts it and passes the plaintext to `extdisplay` as one `AF_UNIX` stream.
 
 ### Control
 
 Each message is one `SOCK_SEQPACKET` message holding one ASCII line (0x20 to 0x7e), at most 512 bytes. A trailing newline is accepted and not sent.
 
-From `kvm` to the broker:
+From `extdisplay` to the broker:
 
 | Line | Reply |
 |---|---|
@@ -59,7 +63,7 @@ From the broker, unsolicited:
 - `paired`, with exactly one `SCM_RIGHTS` descriptor: the plaintext end, an `AF_UNIX` `SOCK_STREAM`. It follows `code` and precedes any `ended`.
 - `ended REASON`, exactly once per attempt. REASON is one of `handshake-failed`, `timeout`, `carrier-lost`, `released`, `cancelled` or `error`. `error` covers a stream that ends on its own (the peer closed it, or TLS or the pump failed). After any `ended` other than `released` the broker stays alive and idle, with its lease released; `scan` and `pair` are accepted again.
 
-`LINKLOCAL` is the bare IPv6 link-local address, without a zone: the zone is the sender's own interface. `PORT` is `27183` (`KVM_BROKER_PORT`). The Mac companion has no default port; it takes `--port`. `GROUPS` is the pairing code.
+`LINKLOCAL` is the bare IPv6 link-local address, without a zone: the zone is the sender's own interface. `PORT` is `27183` (`EXTDISPLAY_BROKER_PORT`). The Mac companion has no default port; it takes `--port`. `GROUPS` is the pairing code.
 
 ### Candidates and identity
 
@@ -70,7 +74,7 @@ Only network devices whose driver is `thunderbolt-net` (read from sysfs) are can
 On `pair`, the broker:
 
 1. refuses an interface that is not a candidate, or whose identity it cannot read;
-2. records the lease: a root-only file `lease-<address>` under `/run/locachy/kvm-broker`, with the boot identifier, name, index, address and device path;
+2. records the lease: a root-only file `lease-<address>` under `/run/locachy/extdisplay-broker`, with the boot identifier, name, index, address and device path;
 3. creates a fresh network namespace, with no name and no bind mount, holding only `lo`;
 4. moves the device from locachy-net into that namespace, after checking that the device there still has the leased address (netlink only; sysfs shows the namespace that mounted it). The broker refuses to run when locachy-net does not exist; it never falls back to the host namespace;
 5. sets `accept_ra`, `autoconf`, `forwarding` and `accept_redirects` to 0 on the device itself, because a device keeps the settings it had where it came from;
@@ -81,7 +85,7 @@ Nothing else is reachable from the session namespace: no DNS, no forwarding, no 
 
 ### Return
 
-On cancel, release, carrier loss, timeout, pump failure, control end or a signal, the pump is stopped. For an established session the broker first asks it to send close_notify and close the TCP connection, for up to 500 ms. The device then goes back to locachy-net, if it is still the leased device (same address). If another device has taken its name, the kernel gives it a free name from the same pattern (`kvm%d` for `kvm0`), and the other device is not touched. The record is removed when the device is back in locachy-net, or when it never left.
+On cancel, release, carrier loss, timeout, pump failure, control end or a signal, the pump is stopped. For an established session the broker first asks it to send close_notify and close the TCP connection, for up to 500 ms. The device then goes back to locachy-net, if it is still the leased device (same address). If another device has taken its name, the kernel gives it a free name from the same pattern (`extdisplay%d` for `extdisplay0`), and the other device is not touched. The record is removed when the device is back in locachy-net, or when it never left.
 
 The broker never drives NetworkManager. It does not change NetworkManager's runtime managed state, and it does not restore it. NetworkManager applies its configured policy to the returned device, as to any device that appears. A runtime-only setting made by hand before a lease is not kept, and neither is one that a replug clears.
 
@@ -93,8 +97,8 @@ The profile is the one in the transport section above, enforced by the broker's 
 
 - TLS 1.2 only; TLS 1.3 is disabled and refused;
 - the cipher list is `PSK-AES128-GCM-SHA256`, and the negotiated suite is checked again after the handshake;
-- the PSK identity `locachy-kvm-v1` is checked in the broker's own PSK callback, because OpenSSL does not compare identities by itself;
-- ALPN `locachy-kvm-v1` is required. A ClientHello without ALPN is refused, and the negotiated value is checked;
+- the PSK identity `locachy-extdisplay-v1` is checked in the broker's own PSK callback, because OpenSSL does not compare identities by itself;
+- ALPN `locachy-extdisplay-v1` is required. A ClientHello without ALPN is refused, and the negotiated value is checked;
 - no session tickets, no session cache, no renegotiation.
 
 ### Pairing code
@@ -124,18 +128,18 @@ The broker holds no state that matters after it dies. The lease record is on dis
 
 The record stays until the device with that address is seen in locachy-net again. Each `scan` and `pair` logs it (to stderr, or to the kernel log when stderr is `/dev/null`), as `lease of NAME did not end cleanly; its device is not back in locachy-net yet`. A candidate is only listed in locachy-net, so the device cannot be leased before it is back. A record from an earlier boot is removed.
 
-`kvm` must start the broker in the host mount namespace (process 1 starts `kvm` there). The broker enters locachy-net and remounts sysfs in its own mount namespace.
+`extdisplay` must start the broker in the host mount namespace (process 1 starts `extdisplay` there). The broker enters locachy-net and remounts sysfs in its own mount namespace.
 
 ### Broker tests
 
-`src/tools/test-kvm-broker.sh [WORK_DIRECTORY]` is Linux-only. It takes an optional work directory and writes only there. It prints one `PASS:` or `FAIL:` line per check and `SKIP:` for any section that cannot run here. Its sections:
+`src/tools/test-extdisplay-broker.sh [WORK_DIRECTORY]` is Linux-only. It takes an optional work directory and writes only there. It prints one `PASS:` or `FAIL:` line per check and `SKIP:` for any section that cannot run here. Its sections:
 
 - `build`: the broker with the production flags.
 - `code`: encoding, decoding and canonical rejection.
 - `tls`: ten loopback cases against Python's `ssl` as the peer: TLS 1.3, a certificate-only suite and another PSK suite (refused); four PSK suites offered (`PSK-AES128-GCM-SHA256` chosen); a wrong identity, a wrong key, a wrong ALPN and no ALPN (refused); the correct identity, key and ALPN (plaintext echoed both ways, orderly close_notify); and a second connection that is not resumed.
 - `lease`: the broker through its control socket, in a user and network namespace of the test's own, with a veth pair as the cable. It covers the candidate filter, the session namespace contents, pairing, a wrong code, cancel, timeout, carrier loss by link-down, control end, protocol errors, a killed broker and its record, a device that took the name meanwhile, and the pump's sandbox probes.
 
-The fixtures are compile-time: `KVM_BROKER_TEST_DRIVER`, `KVM_BROKER_TEST_HOME_NETNS`, `KVM_BROKER_TEST_STATE_DIR`, `KVM_BROKER_TEST_ATTEMPT_SECONDS` and `KVM_BROKER_TEST_PROBES`. The production binary has none of them.
+The fixtures are compile-time: `EXTDISPLAY_BROKER_TEST_DRIVER`, `EXTDISPLAY_BROKER_TEST_HOME_NETNS`, `EXTDISPLAY_BROKER_TEST_STATE_DIR`, `EXTDISPLAY_BROKER_TEST_ATTEMPT_SECONDS` and `EXTDISPLAY_BROKER_TEST_PROBES`. The production binary has none of them.
 
 Verified on Linux by this script: everything listed above, including the kill and record behaviour and the pump's sandbox probes. Designed, not verified here: real `thunderbolt-net` devices (discovery, the cable's carrier, the kernel's move to the initial namespace after a killed broker, and the udev and `network-client` return into locachy-net, which needs a disposable VM because on a test host such a device would reach the host's real namespace); NetworkManager's handling of a returned device; a stale record refusing a lease by address; carrier loss on the peer's side, as opposed to an administrative link-down; and the Mac sender pairing over a real cable.
 
@@ -171,12 +175,12 @@ Local actions stay local and are never sent: home, lock, brightness, volume, and
 ## Tests
 
 ```sh
-src/tools/test-kvm.sh
+src/tools/test-extdisplay.sh
 ```
 
 It builds the protocol, the FFmpeg decoder and, on Linux, the IPC client, then runs: the framing, handshake and input cases; the IPC boundary cases (a sealed picture maps; an open one, a wrong size, two descriptors, a descriptor on a non-picture message, a wrong magic and reserved bits are refused); the worker's fail-closed exit when its channels are missing; the pairing client against a stub broker that runs as a real child with only fd 3 open (a descriptor left open on purpose must not reach it); and H.264 and HEVC streams encoded with the installed `ffmpeg`, decoded through the receiver's own demux and decoder, including a size-mismatch refusal and corrupt slice data. It installs nothing and starts no display, VM or network. Not covered: the worker inside its sandbox on a live stream (a test user with supplementary groups, or root, is refused by design), the frontend on a real screen, and any real peer.
 
-The broker has its own suite, `src/tools/test-kvm-broker.sh` (Linux only; see *Broker tests*). Both run in `tools/test-interaction-regressions.sh`.
+The broker has its own suite, `src/tools/test-extdisplay-broker.sh` (Linux only; see *Broker tests*). Both run in `tools/test-interaction-regressions.sh`.
 
 ## Sender and acceptance limits
 

@@ -120,8 +120,8 @@ done
 "${cc[@]}" "$src/progs/archive-worker.c" $(pkg-config --cflags --libs libarchive libcrypto) -o "$out/archive-worker"
 python3 -B "$src/tools/test-archive-worker.py" "$out/archive-worker" "$out"
 # The extended display's receiver and pairing client (FFmpeg, IPC, a stub broker) and the direct screen's power.
-sh "$src/tools/test-kvm.sh"
+sh "$src/tools/test-extdisplay.sh"
 # The broker: the pairing code, the cable TLS profile, and the lease in user and network namespaces.
-sh "$src/tools/test-kvm-broker.sh" "$out/kvm-broker"
+sh "$src/tools/test-extdisplay-broker.sh" "$out/extdisplay-broker"
 sh "$src/tools/test-screen-power.sh" "$out/screen-power"
 printf '%s\n' 'PASS device-free interaction regressions; real KMS/libinput/IME hardware acceptance remains separate.'

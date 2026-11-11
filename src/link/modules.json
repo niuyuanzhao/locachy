@@ -124,6 +124,18 @@
     "default_standalone": true,
     "default_wizard": false
   },
+  "extdisplay": {
+    "description": "Extended display receiver: a sender's extra screen over a Thunderbolt/USB4 cable, decoded with FFmpeg",
+    "packages": [
+      "ffmpeg",
+      "json-c"
+    ],
+    "rc": {
+      "program_extdisplay": "/usr/local/bin/extdisplay"
+    },
+    "default_standalone": true,
+    "default_wizard": false
+  },
   "fwupd": {
     "description": "LVFS device firmware update daemon (fwupd)",
     "packages": [

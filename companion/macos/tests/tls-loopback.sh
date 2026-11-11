@@ -1,6 +1,6 @@
 #!/bin/sh
 # Loopback interoperability for the frozen cable profile: TLS 1.2 only,
-# TLS_PSK_WITH_AES_128_GCM_SHA256, PSK identity and ALPN "locachy-kvm-v1",
+# TLS_PSK_WITH_AES_128_GCM_SHA256, PSK identity and ALPN "locachy-extdisplay-v1",
 # 16-byte per-connection PSK typed as base32. The Swift client uses production
 # tlsOptions() and PairingCode.read(). The listener (tls-listener.py, Python's
 # OpenSSL binding) enforces the expected identity and key in its PSK callback
@@ -79,32 +79,32 @@ expect_log() {
     fi
 }
 
-start_listener "$WORK/ready.log" locachy-kvm-v1 locachy-kvm-v1 PSK-AES128-GCM-SHA256 1.2
+start_listener "$WORK/ready.log" locachy-extdisplay-v1 locachy-extdisplay-v1 PSK-AES128-GCM-SHA256 1.2
 run_case 'matching profile and code' "$CODE" ready
 sleep 0.5
 stop_listener
-expect_log "$WORK/ready.log" "IDENTITY 'locachy-kvm-v1'" "the PSK identity locachy-kvm-v1"
+expect_log "$WORK/ready.log" "IDENTITY 'locachy-extdisplay-v1'" "the PSK identity locachy-extdisplay-v1"
 expect_log "$WORK/ready.log" "CIPHER 'PSK-AES128-GCM-SHA256' VERSION TLSv1.2" "TLS 1.2 with PSK-AES128-GCM-SHA256"
-expect_log "$WORK/ready.log" "ALPN 'locachy-kvm-v1'" "the ALPN locachy-kvm-v1"
+expect_log "$WORK/ready.log" "ALPN 'locachy-extdisplay-v1'" "the ALPN locachy-extdisplay-v1"
 expect_log "$WORK/ready.log" "FRAME-PING True" "the framed control message"
 
-start_listener "$WORK/wrong-code.log" locachy-kvm-v1 locachy-kvm-v1 PSK-AES128-GCM-SHA256 1.2
+start_listener "$WORK/wrong-code.log" locachy-extdisplay-v1 locachy-extdisplay-v1 PSK-AES128-GCM-SHA256 1.2
 run_case 'wrong pairing code' "$WRONG_CODE" reject-tls
 stop_listener
 
-start_listener "$WORK/wrong-identity.log" other-identity locachy-kvm-v1 PSK-AES128-GCM-SHA256 1.2
+start_listener "$WORK/wrong-identity.log" other-identity locachy-extdisplay-v1 PSK-AES128-GCM-SHA256 1.2
 run_case 'listener expecting another PSK identity' "$CODE" reject-tls
 stop_listener
 
-start_listener "$WORK/wrong-suite.log" locachy-kvm-v1 locachy-kvm-v1 PSK-AES256-GCM-SHA384 1.2
+start_listener "$WORK/wrong-suite.log" locachy-extdisplay-v1 locachy-extdisplay-v1 PSK-AES256-GCM-SHA384 1.2
 run_case 'listener offering only another PSK suite' "$CODE" refuse
 stop_listener
 
-start_listener "$WORK/wrong-alpn.log" locachy-kvm-v1 other-protocol PSK-AES128-GCM-SHA256 1.2
+start_listener "$WORK/wrong-alpn.log" locachy-extdisplay-v1 other-protocol PSK-AES128-GCM-SHA256 1.2
 run_case 'listener without the locachy ALPN' "$CODE" refuse
 stop_listener
 
-start_listener "$WORK/wrong-version.log" locachy-kvm-v1 locachy-kvm-v1 PSK-AES128-GCM-SHA256 1.3
+start_listener "$WORK/wrong-version.log" locachy-extdisplay-v1 locachy-extdisplay-v1 PSK-AES128-GCM-SHA256 1.3
 run_case 'TLS 1.3-only listener' "$CODE" reject-tls
 stop_listener
 

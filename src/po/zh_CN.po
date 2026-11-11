@@ -6403,211 +6403,211 @@ msgstr "应用预设模板分支："
 msgid "Hibernate after (seconds asleep; empty: as the system has it):"
 msgstr "多久后休眠（睡眠的秒数；留空：按系统默认）："
 
-#: progs/kvm-setup.c
+#: progs/extdisplay-setup.c
 msgid "The broker ended the pairing."
 msgstr "中转进程结束了配对。"
 
-#: progs/kvm-setup.c
+#: progs/extdisplay-setup.c
 msgid "The sender failed the handshake. Check the code and try again."
 msgstr "发送端握手失败。请核对配对码后重试。"
 
-#: progs/kvm-setup.c
+#: progs/extdisplay-setup.c
 msgid "The sender did not answer in time."
 msgstr "发送端未及时响应。"
 
-#: progs/kvm-setup.c
+#: progs/extdisplay-setup.c
 msgid "The cable link went down."
 msgstr "线缆链路已断开。"
 
-#: progs/kvm-setup.c
+#: progs/extdisplay-setup.c
 msgid "Disconnected."
 msgstr "已断开。"
 
-#: progs/kvm-setup.c
+#: progs/extdisplay-setup.c
 msgid "Pairing cancelled."
 msgstr "已取消配对。"
 
-#: progs/kvm-setup.c
+#: progs/extdisplay-setup.c
 msgid "The connection ended, or the broker failed."
 msgstr "连接已结束，或中转进程失败。"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Unavailable"
 msgstr "不可用"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "A paired dedicated-link transport is required."
 msgstr "需要经过配对的专线传输。"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Extended display"
 msgstr "扩展屏"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 #, c-format
 msgid "Status: %s    Stream: %ux%u"
 msgstr "状态：%s    画面：%ux%u"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Ctrl+Alt+F12: disconnect    Home, lock and brightness stay local"
 msgstr "Ctrl+Alt+F12：断开    主页、锁屏和亮度留在本机"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "No clipboard, files or commands. The peer keeps its original screen."
 msgstr "不传剪贴板、文件或命令。对端保留原有屏幕。"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Disconnected"
 msgstr "已断开"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Remote input could not be released in time; the stream was closed."
 msgstr "未能及时释放远端输入；画面流已关闭。"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The decoder channel ended."
 msgstr "解码通道已结束。"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The managed sleep inhibitor was not granted."
 msgstr "未能获得受管的防睡眠许可。"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Active"
 msgstr "已连接"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Extended-only companion over the paired dedicated link."
 msgstr "仅作扩展屏的配套程序，经配对专线连接。"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The decoder sent an invalid picture."
 msgstr "解码器送来了无效画面。"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The decoder sandbox or FFmpeg is not available."
 msgstr "解码沙箱或 FFmpeg 不可用。"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The companion handshake or the stream failed."
 msgstr "与配套程序的握手或画面流失败。"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "No managed session owner: remote input stays disabled."
 msgstr "没有受管的会话所有者：远端输入保持关闭。"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The transport is not a paired local stream from the broker."
 msgstr "传输不是中转进程交来的已配对本地流。"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The session owner did not accept this session."
 msgstr "会话所有者未接受此会话。"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The decoder worker could not be started safely."
 msgstr "无法安全启动解码工作进程。"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Connecting"
 msgstr "正在连接"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Waiting for the companion's capabilities."
 msgstr "正在等待配套程序报告其能力。"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The session owner has gone."
 msgstr "会话所有者已退出。"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The session owner did not accept the release."
 msgstr "会话所有者未接受释放。"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Remote input could not be delivered."
 msgstr "无法送达远端输入。"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The companion handshake timed out."
 msgstr "与配套程序握手超时。"
 
-#: progs/kvm.c progs/settings-power.inc
+#: progs/extdisplay.c progs/settings-power.inc
 msgid "Idle"
 msgstr "空闲"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Scanning"
 msgstr "正在扫描"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Choose an interface"
 msgstr "选择接口"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Asking the broker for a code"
 msgstr "正在向中转进程获取配对码"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Waiting for the Mac to connect"
 msgstr "正在等待 Mac 连接"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Connected"
 msgstr "已连接"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Cancelling"
 msgstr "正在取消"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Releasing"
 msgstr "正在释放"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Released"
 msgstr "已释放"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The pairing helper stopped"
 msgstr "配对辅助进程已停止"
 
-#: progs/kvm.c progs/settings-hwinfo.inc progs/settings-power.inc
+#: progs/extdisplay.c progs/settings-hwinfo.inc progs/settings-power.inc
 #: progs/view-pdf-ui.inc
 msgid "Unknown"
 msgstr "未知"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Choose the cable interface to pair with the Mac."
 msgstr "选择用于与 Mac 配对的线缆接口。"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Scanning..."
 msgstr "正在扫描……"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "No cable interface found. Connect the cable, then press F5."
 msgstr "未找到线缆接口。请连接线缆后按 F5。"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "carrier up"
 msgstr "已连接网线"
 
-#: progs/kvm.c progs/rescue.c
+#: progs/extdisplay.c progs/rescue.c
 msgid "no carrier"
 msgstr "未连接网线"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 #, c-format
 msgid "Address  %s     Port  %s"
 msgstr "地址  %s     端口  %s"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 #, c-format
 msgid "Code     %s"
 msgstr "配对码   %s"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 #, c-format
 msgid ""
 "On the Mac: locachy-macos-sender --interface <mac-interface> --address %s --"
@@ -6616,25 +6616,25 @@ msgstr ""
 "在 Mac 上运行：locachy-macos-sender --interface <mac-interface> --address %s "
 "--port %s"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Asking the broker for an address and a code..."
 msgstr "正在向中转进程获取地址和配对码……"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 #, c-format
 msgid "Status: %s"
 msgstr "状态：%s"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The broker is busy: a pairing is still active."
 msgstr "中转进程忙：配对仍在进行中。"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid ""
 "Up/Down choose   Enter pair   Esc cancel   F5 scan   Ctrl+Alt+F12 release"
 msgstr "上/下 选择   Enter 配对   Esc 取消   F5 扫描   Ctrl+Alt+F12 释放"
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The code and the address are kept in memory only."
 msgstr "配对码和地址只保存在内存中。"
 
@@ -9577,6 +9577,10 @@ msgstr "固件更新 (fwupd)"
 #: progs/settings.c
 msgid "SPI programmer (flashrom)"
 msgstr "SPI 编程器 (flashrom)"
+
+#: progs/settings.c
+msgid "Extended display (extdisplay)"
+msgstr "扩展屏 (extdisplay)"
 
 #: progs/settings.c
 msgid "Kernel packages"

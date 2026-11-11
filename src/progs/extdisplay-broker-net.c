@@ -1,7 +1,7 @@
-/* kvm-broker-net.c: rtnetlink and sysfs for kvm-broker. Every rtnetlink
+/* extdisplay-broker-net.c: rtnetlink and sysfs for extdisplay-broker. Every rtnetlink
  * socket acts on the namespace it was created in; the broker creates one per
  * namespace. sysfs is read through the broker's own mount of it, made in the
- * home namespace (kvm-broker.c). */
+ * home namespace (extdisplay-broker.c). */
 #include <errno.h>
 #include <limits.h>
 #include <poll.h>
@@ -18,13 +18,13 @@
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <net/if_arp.h>
-#ifdef KVM_BROKER_TEST_DRIVER
+#ifdef EXTDISPLAY_BROKER_TEST_DRIVER
 #include <linux/ethtool.h>
 #include <linux/sockios.h>
 #include <sys/ioctl.h>
 #endif
 
-#include "kvm-broker.h"
+#include "extdisplay-broker.h"
 
 static unsigned sequence;
 static char buffer[65536];
@@ -353,7 +353,7 @@ int sysfs_driver(const char *name, char *driver, size_t size)
         strcpy(driver, base);
         return 0;
     }
-#ifdef KVM_BROKER_TEST_DRIVER
+#ifdef EXTDISPLAY_BROKER_TEST_DRIVER
     struct ethtool_drvinfo info = { .cmd = ETHTOOL_GDRVINFO };
     struct ifreq request = { 0 };
     int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);

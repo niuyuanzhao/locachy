@@ -1,5 +1,5 @@
 #!/bin/sh
-# The extended-display broker's tests (tools/KVM.md), Linux only:
+# The extended-display broker's tests (tools/EXTDISPLAY.md), Linux only:
 #   build    the broker with the production flags;
 #   code     pairing-code encoding and canonical decoding;
 #   tls      the cable TLS profile on loopback, through the broker's own
@@ -11,7 +11,7 @@
 #            namespace contents, pairing, refusal, cancel, timeout, carrier
 #            loss, control EOF, protocol errors, a killed broker, a device
 #            that took the name meanwhile, and the pump's sandbox.
-# usage: test-kvm-broker.sh [WORK_DIRECTORY]
+# usage: test-extdisplay-broker.sh [WORK_DIRECTORY]
 # Without a directory a temporary one is used and removed. Nothing is
 # installed, and nothing outside the test's own namespaces is changed.
 set -eu
@@ -20,11 +20,11 @@ if [ $# -ge 1 ]; then
     mkdir -p "$1"
     out=$(CDPATH= cd -- "$1" && pwd)
 else
-    out=$(mktemp -d "${TMPDIR:-/tmp}/locachy-kvm-broker.XXXXXX")
+    out=$(mktemp -d "${TMPDIR:-/tmp}/locachy-extdisplay-broker.XXXXXX")
     trap 'rm -rf "$out"' EXIT
 fi
 if [ "$(uname -s)" != Linux ]; then
-    echo "SKIP: kvm-broker needs Linux (rtnetlink, namespaces, Landlock, seccomp)"
+    echo "SKIP: extdisplay-broker needs Linux (rtnetlink, namespaces, Landlock, seccomp)"
     exit 77
 fi
 if ! pkg-config --exists openssl; then
@@ -32,7 +32,7 @@ if ! pkg-config --exists openssl; then
     exit 77
 fi
 cflags="-O2 -Wall -Wextra -Werror -D_GNU_SOURCE"
-broker_src="$src/progs/kvm-broker.c $src/progs/kvm-broker-net.c $src/progs/kvm-broker-pump.c $src/progs/kvm-broker-tls.c"
+broker_src="$src/progs/extdisplay-broker.c $src/progs/extdisplay-broker-net.c $src/progs/extdisplay-broker-pump.c $src/progs/extdisplay-broker-tls.c"
 fails=0
 note() { # PASS|FAIL text
     echo "$1: $2"
@@ -40,18 +40,18 @@ note() { # PASS|FAIL text
 }
 
 # build
-if cc $cflags $(pkg-config --cflags openssl) -o "$out/kvm-broker" $broker_src $(pkg-config --libs openssl) \
+if cc $cflags $(pkg-config --cflags openssl) -o "$out/extdisplay-broker" $broker_src $(pkg-config --libs openssl) \
     2>"$out/build.log"; then
-    note PASS "build: kvm-broker builds with the production flags"
+    note PASS "build: extdisplay-broker builds with the production flags"
 else
-    note FAIL "build: kvm-broker does not build: $(head -c 400 "$out/build.log" | tr '\n' ' ')"
+    note FAIL "build: extdisplay-broker does not build: $(head -c 400 "$out/build.log" | tr '\n' ' ')"
 fi
-cc $cflags $(pkg-config --cflags openssl) -o "$out/test-kvm-broker-tls" "$src/tools/test-kvm-broker-tls.c" \
-    "$src/progs/kvm-broker-tls.c" $(pkg-config --libs openssl)
-cc $cflags -o "$out/test-kvm-broker-ctl" "$src/tools/test-kvm-broker-ctl.c"
+cc $cflags $(pkg-config --cflags openssl) -o "$out/test-extdisplay-broker-tls" "$src/tools/test-extdisplay-broker-tls.c" \
+    "$src/progs/extdisplay-broker-tls.c" $(pkg-config --libs openssl)
+cc $cflags -o "$out/test-extdisplay-broker-ctl" "$src/tools/test-extdisplay-broker-ctl.c"
 
 # code
-"$out/test-kvm-broker-tls" code >"$out/code.log" 2>&1 || :
+"$out/test-extdisplay-broker-tls" code >"$out/code.log" 2>&1 || :
 grep -E '^(PASS|FAIL): ' "$out/code.log" || :
 fails=$((fails + $(grep -c '^FAIL: ' "$out/code.log" || :)))
 grep -q '^code: 0 failure' "$out/code.log" || note FAIL "code: the code cases did not all run"
@@ -60,7 +60,7 @@ grep -q '^code: 0 failure' "$out/code.log" || note FAIL "code: the code cases di
 if ! python3 -I -c 'import ssl, sys; sys.exit(0 if hasattr(ssl.SSLContext, "set_psk_client_callback") else 1)' \
     2>/dev/null; then
     echo "SKIP: tls and lease: python3 has no TLS PSK client support (Python 3.13 or newer is needed)"
-    echo "kvm-broker tests: $fails failed"
+    echo "extdisplay-broker tests: $fails failed"
     [ "$fails" -eq 0 ]
     exit
 fi
@@ -107,14 +107,14 @@ try:
         conn = connect(ctx)
         print("CLIENT handshake " + conn.version() + " " + conn.cipher()[0])
         if mode == "echo":
-            conn.sendall(b"ping-kvm-1\n")
+            conn.sendall(b"ping-cable\n")
             got = b""
             while len(got) < 11:
                 chunk = conn.recv(64)
                 if not chunk:
                     break
                 got += chunk
-            print("CLIENT echo " + ("ok" if got == b"ping-kvm-1\n" else "mismatch"))
+            print("CLIENT echo " + ("ok" if got == b"ping-cable\n" else "mismatch"))
             conn.unwrap()
         else:
             conn.close()
@@ -123,15 +123,15 @@ except (ssl.SSLError, OSError) as error:
 EOF
 key=00112233445566778899aabbccddeeff
 wrong=ffeeddccbbaa99887766554433221100
-id=locachy-kvm-v1
-profile="PROFILE version=TLSv1.2 cipher=PSK-AES128-GCM-SHA256 alpn=locachy-kvm-v1 identity=locachy-kvm-v1 reused=0"
+id=locachy-extdisplay-v1
+profile="PROFILE version=TLSv1.2 cipher=PSK-AES128-GCM-SHA256 alpn=locachy-extdisplay-v1 identity=locachy-extdisplay-v1 reused=0"
 port=$((30000 + $$ % 20000))
 tls_case() { # NAME COUNT EXPECT(refused|ok|echo|twice) TEXT CLIENT-ARGS...
     name=$1 count=$2 expect=$3 text=$4
     shift 4
     port=$((port + 1))
     log="$out/tls-$name.server"
-    "$out/test-kvm-broker-tls" serve "$port" "$key" "$count" >"$log" 2>&1 &
+    "$out/test-extdisplay-broker-tls" serve "$port" "$key" "$count" >"$log" 2>&1 &
     server=$!
     i=0
     while [ $i -lt 50 ] && ! grep -q READY "$log"; do
@@ -175,9 +175,9 @@ tls_case good 1 echo "the cable profile pairs; plaintext flows both ways; orderl
 tls_case twice 2 twice "a second connection offering the first session is not resumed" \
     "$key" $id $id PSK-AES128-GCM-SHA256 1.2 twice
 
-# lease: the broker itself, through its control socket (test-kvm-broker-ctl),
+# lease: the broker itself, through its control socket (test-extdisplay-broker-ctl),
 # inside a user and network namespace of the test's own. The cable is a veth
-# pair: kvm0 is the leased end, kvmpeer the sender's end, which stays in the
+# pair: extdisplay0 is the leased end, extdisplaypeer the sender's end, which stays in the
 # test's namespace. dum0 is a device of another driver. Fixtures are
 # compile-time: the driver name, the home namespace path, the state directory,
 # the attempt timeout, and the pump's sandbox probes.
@@ -198,8 +198,8 @@ import threading
 import time
 
 W = sys.argv[1]
-CTL = W + "/test-kvm-broker-ctl"
-BROKER = W + "/kvm-broker-test"
+CTL = W + "/test-extdisplay-broker-ctl"
+BROKER = W + "/extdisplay-broker-test"
 results = []
 
 
@@ -314,23 +314,23 @@ def scenario_lease():
     b.send("scan")
     listing = b.collect("< end")
     names = [x.split()[2] for x in listing if x.startswith("< iface ")]
-    check("scan lists the fixture devices only", names == ["kvm0", "kvmpeer"], str(listing))
+    check("scan lists the fixture devices only", names == ["extdisplay0", "extdisplaypeer"], str(listing))
     b.send("pair dum0")
     reply = b.expect("< ")
     check("non-fixture driver refused", reply == "< error not a Thunderbolt/USB4 network interface", reply)
     check("refused pair leaves the device alone", home_has("dum0"))
-    b.send("pair kvm0")
+    b.send("pair extdisplay0")
     lease = b.expect("< lease ")
     code = b.expect("< code ")
     parts = lease.split()
     check("lease line names device, link-local and port",
-          len(parts) == 5 and parts[2] == "kvm0" and parts[3].startswith("fe80:") and parts[4] == "27183", lease)
+          len(parts) == 5 and parts[2] == "extdisplay0" and parts[3].startswith("fe80:") and parts[4] == "27183", lease)
     check("code has 26 symbols in groups", len(code[7:].replace("-", "")) == 26 and code.count("-") == 6, code)
-    check("device left the home namespace", not home_has("kvm0"))
+    check("device left the home namespace", not home_has("extdisplay0"))
     pump = pump_of(b.pid)
     check("pump process found", pump is not None)
     if pump:
-        rc, addrs = in_session(pump, "ip", "-o", "addr", "show", "dev", "kvm0")
+        rc, addrs = in_session(pump, "ip", "-o", "addr", "show", "dev", "extdisplay0")
         check("session namespace: only link-local addresses", rc == 0 and addrs and
               all("inet6 fe80:" in x for x in addrs.splitlines()), addrs)
         rc, routes = in_session(pump, "ip", "-6", "route", "show", "table", "all")
@@ -340,13 +340,13 @@ def scenario_lease():
         check("session namespace: no default route, only kernel link-local routes",
               rc == 0 and rc4 == 0 and len(kernel) == len(lines) and
               not any(x.startswith(("default", "::/0")) for x in lines), routes + routes4)
-        rc, ra = in_session(pump, "cat", "/proc/sys/net/ipv6/conf/kvm0/accept_ra")
+        rc, ra = in_session(pump, "cat", "/proc/sys/net/ipv6/conf/extdisplay0/accept_ra")
         check("session namespace: accept_ra is 0", rc == 0 and ra.strip() == "0", ra)
         rc, lo = in_session(pump, "ip", "-o", "link", "show")
-        check("session namespace: no other devices", "kvmpeer" not in lo and "dum0" not in lo, lo)
+        check("session namespace: no other devices", "extdisplaypeer" not in lo and "dum0" not in lo, lo)
     b.send("cancel")
     check("cancel answers ended cancelled", b.expect("< ended ") == "< ended cancelled")
-    check("device returned to the home namespace", home_has("kvm0"))
+    check("device returned to the home namespace", home_has("extdisplay0"))
     b.send("release")
     check("release answers ended released", b.expect("< ended ") == "< ended released")
     check("broker exits after release", b.expect("exit ") == "exit 0")
@@ -381,15 +381,15 @@ def decode_code(code):
     return bytes(out)
 
 
-def client(pump, addr, port, key_hex, identity="locachy-kvm-v1", mode="pair"):
+def client(pump, addr, port, key_hex, identity="locachy-extdisplay-v1", mode="pair"):
     # The sender's end of the cable stays in this namespace; pump is unused.
-    return subprocess.Popen(["python3", "-I", W + "/ll-client.py", addr, "kvmpeer", port, key_hex, identity,
-                             "locachy-kvm-v1", mode],
+    return subprocess.Popen(["python3", "-I", W + "/ll-client.py", addr, "extdisplaypeer", port, key_hex, identity,
+                             "locachy-extdisplay-v1", mode],
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
 
 def lease_and_code(b):
-    b.send("pair kvm0")
+    b.send("pair extdisplay0")
     lease = b.expect("< lease ").split()
     code = b.expect("< code ")[7:]
     return lease[3], lease[4], code
@@ -406,10 +406,10 @@ def scenario_pair():
     b.plain("to-mac")
     out, _ = c.communicate(timeout=20)
     check("peer completes the cable profile handshake",
-          "CLIENT handshake TLSv1.2 PSK-AES128-GCM-SHA256 alpn=locachy-kvm-v1" in out, out)
+          "CLIENT handshake TLSv1.2 PSK-AES128-GCM-SHA256 alpn=locachy-extdisplay-v1" in out, out)
     check("plaintext from the device reaches the peer", "CLIENT received" in out and "to-mac" in out, out)
     check("peer close ends the attempt: ended error", b.expect("< ended ") == "< ended error")
-    check("device returned to the home namespace", home_has("kvm0"))
+    check("device returned to the home namespace", home_has("extdisplay0"))
     b.send("release")
     check("release answers ended released", b.expect("< ended ") == "< ended released")
     check("broker exits after release", b.expect("exit ") == "exit 0")
@@ -431,7 +431,7 @@ def scenario_refuse():
     check("a wrong code fails the peer's handshake", "CLIENT error" in out, out)
     check("a failed handshake ends the attempt: ended handshake-failed",
           b.expect("< ended ") == "< ended handshake-failed")
-    check("the device is back in the home namespace", home_has("kvm0"))
+    check("the device is back in the home namespace", home_has("extdisplay0"))
     _, _, code2 = lease_and_code(b)
     check("the next pairing shows a new code", code2 != code)
     b.send("cancel")
@@ -449,7 +449,7 @@ def scenario_cancel_paired():
     check("cancel while paired: ended cancelled", b.expect("< ended ") == "< ended cancelled")
     out, _ = c.communicate(timeout=20)
     check("the peer sees the stream end", "CLIENT" in out, out)
-    check("device returned after the cancel", home_has("kvm0"))
+    check("device returned after the cancel", home_has("extdisplay0"))
     finish(b)
 
 
@@ -457,7 +457,7 @@ def scenario_timeout():
     b = Broker()
     lease_and_code(b)
     check("no peer: the attempt times out", b.expect("< ended ", timeout=25) == "< ended timeout")
-    check("device returned after the timeout", home_has("kvm0"))
+    check("device returned after the timeout", home_has("extdisplay0"))
     finish(b)
 
 
@@ -468,11 +468,11 @@ def scenario_carrier():
     c = client(None, addr, port, decode_code(code).hex())
     check("paired before the carrier drops", b.expect("< paired") == "< paired +fd")
     b.expect("plain< ")
-    rc, text = in_session(pump, "ip", "link", "set", "kvm0", "down")
+    rc, text = in_session(pump, "ip", "link", "set", "extdisplay0", "down")
     check("the link goes down inside the session namespace", rc == 0, text)
     check("link down ends the session: ended carrier-lost",
           b.expect("< ended ", timeout=15) == "< ended carrier-lost")
-    check("device returned after carrier loss", home_has("kvm0"))
+    check("device returned after carrier loss", home_has("extdisplay0"))
     c.communicate(timeout=20)
     finish(b)
 
@@ -482,7 +482,7 @@ def scenario_eof():
     lease_and_code(b)
     b.p.stdin.close()
     check("control EOF: the broker exits 0", b.expect("exit ", timeout=15) == "exit 0")
-    check("control EOF: the device is back in the home namespace", home_has("kvm0"))
+    check("control EOF: the device is back in the home namespace", home_has("extdisplay0"))
 
 
 def scenario_protocol():
@@ -494,7 +494,7 @@ def scenario_protocol():
     b.send("bogus")
     check("unknown command is refused", b.expect("< ") == "< error unknown command")
     lease_and_code(b)
-    b.send("pair kvmpeer")
+    b.send("pair extdisplaypeer")
     check("second pair while leased: error busy", b.expect("< ") == "< error busy")
     b.send("scan")
     check("scan while leased: error busy", b.expect("< ") == "< error busy")
@@ -528,7 +528,7 @@ def scenario_kill():
     c.communicate(timeout=20)
     time.sleep(0.5)
     check("the pump dies with the broker", sh("kill", "-0", pump)[0] != 0)
-    check("the leased device is gone with its namespace", not home_has("kvm0"))
+    check("the leased device is gone with its namespace", not home_has("extdisplay0"))
     check("the record stays after an unclean end", os.path.exists(record))
     b2 = Broker()
     b2.send("scan")
@@ -538,10 +538,10 @@ def scenario_kill():
     check("a new broker reports the unfinished lease",
           any("did not end cleanly" in x and "not back in locachy-net yet" in x for x in b2.stderr_lines),
           " | ".join(b2.stderr_lines))
-    rc, text = sh("ip", "link", "add", "kvm0", "address", mac, "type", "veth", "peer", "name", "kvmpeer")
+    rc, text = sh("ip", "link", "add", "extdisplay0", "address", mac, "type", "veth", "peer", "name", "extdisplaypeer")
     check("the device comes back with the same address", rc == 0, text)
-    sh("ip", "link", "set", "kvm0", "up")
-    sh("ip", "link", "set", "kvmpeer", "up")
+    sh("ip", "link", "set", "extdisplay0", "up")
+    sh("ip", "link", "set", "extdisplaypeer", "up")
     b2.send("scan")
     b2.collect("< end")
     time.sleep(0.3)
@@ -558,22 +558,22 @@ def scenario_kill():
 
 def scenario_rename():
     b = Broker()
-    mac = mac_of("kvm0")
+    mac = mac_of("extdisplay0")
     addr, port, code = lease_and_code(b)
     c = client(None, addr, port, decode_code(code).hex())
     check("paired before the return", b.expect("< paired") == "< paired +fd")
     b.expect("plain< ")
-    rc, text = sh("ip", "link", "add", "kvm0", "address", "02:00:00:00:00:99", "type", "dummy")
+    rc, text = sh("ip", "link", "add", "extdisplay0", "address", "02:00:00:00:00:99", "type", "dummy")
     check("another device takes the name in the home namespace", rc == 0, text)
     b.send("cancel")
     check("cancel returns the leased device: ended cancelled", b.expect("< ended ") == "< ended cancelled")
     c.communicate(timeout=20)
-    check("the device that took the name is untouched", mac_of("kvm0") == "02:00:00:00:00:99", str(mac_of("kvm0")))
+    check("the device that took the name is untouched", mac_of("extdisplay0") == "02:00:00:00:00:99", str(mac_of("extdisplay0")))
     lines = [x for x in sh("ip", "-o", "link")[1].splitlines() if mac in x]
     name = lines[0].split(":")[1].strip().split("@")[0] if len(lines) == 1 else ""
-    check("the leased device came back under a free name", len(lines) == 1 and name not in ("", "kvm0"), str(lines))
+    check("the leased device came back under a free name", len(lines) == 1 and name not in ("", "extdisplay0"), str(lines))
     check("its record is gone", not [f for f in os.listdir(W + "/state") if f.startswith("lease-")])
-    sh("ip", "link", "del", "kvm0")
+    sh("ip", "link", "del", "extdisplay0")
     finish(b)
 
 
@@ -632,19 +632,19 @@ W=$1
 shift
 touch "$W/home"
 mount --bind /proc/self/ns/net "$W/home"
-ip link add kvm0 type veth peer name kvmpeer
-ip link set kvm0 up
-ip link set kvmpeer up
+ip link add extdisplay0 type veth peer name extdisplaypeer
+ip link set extdisplay0 up
+ip link set extdisplaypeer up
 ip link add dum0 type dummy
 ip link set dum0 up
 rm -rf "$W/state"
 exec python3 -I "$W/driver.py" "$W" "$@"
 SHEOF
     cc $cflags $(pkg-config --cflags openssl) \
-        -DKVM_BROKER_TEST_DRIVER=\"veth\" -DKVM_BROKER_TEST_HOME_NETNS=\"$lw/home\" \
-        -DKVM_BROKER_TEST_STATE_DIR=\"$lw/state\" -DKVM_BROKER_TEST_ATTEMPT_SECONDS=8 \
-        -DKVM_BROKER_TEST_PROBES -o "$lw/kvm-broker-test" $broker_src $(pkg-config --libs openssl)
-    cp "$out/test-kvm-broker-ctl" "$lw/test-kvm-broker-ctl"
+        -DEXTDISPLAY_BROKER_TEST_DRIVER=\"veth\" -DEXTDISPLAY_BROKER_TEST_HOME_NETNS=\"$lw/home\" \
+        -DEXTDISPLAY_BROKER_TEST_STATE_DIR=\"$lw/state\" -DEXTDISPLAY_BROKER_TEST_ATTEMPT_SECONDS=8 \
+        -DEXTDISPLAY_BROKER_TEST_PROBES -o "$lw/extdisplay-broker-test" $broker_src $(pkg-config --libs openssl)
+    cp "$out/test-extdisplay-broker-ctl" "$lw/test-extdisplay-broker-ctl"
     scenarios="lease pair refuse cancel_paired timeout carrier eof protocol kill rename"
     unshare --user --map-auto --map-root-user --net --mount --propagation private \
         sh "$lw/inner.sh" "$lw" $scenarios >"$lw/driver.log" 2>&1 || :
@@ -656,5 +656,5 @@ SHEOF
         note FAIL "lease: the scenario driver did not finish: $(tail -n 8 "$lw/driver.log" | tr '\n' ' ')"
     fi
 fi
-echo "kvm-broker tests: $fails failed"
+echo "extdisplay-broker tests: $fails failed"
 [ "$fails" -eq 0 ]

@@ -1,5 +1,5 @@
 /*
- * kvm's end of kvm-ipc.h: starting kvm-worker as nobody with no groups and no
+ * extdisplay's end of extdisplay-ipc.h: starting extdisplay-worker as nobody with no groups and no
  * new privileges, and checking everything it sends. A message of the wrong
  * size, a descriptor where none belongs, or a picture memfd that is not
  * sealed or not exactly its picture's size is the worker having failed.
@@ -7,8 +7,8 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include "kvm-ipc.h"
-#include "kvm-protocol.h"
+#include "extdisplay-ipc.h"
+#include "extdisplay-protocol.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
@@ -28,24 +28,24 @@ static void child(int ipc, int transport)
     int null = open("/dev/null", O_RDWR | O_CLOEXEC);
     sigset_t none;
     if (s < 0 || t < 0 || null < 0 || dup2(null, 0) < 0 || dup2(null, 1) < 0 || dup2(null, 2) < 0 ||
-        dup2(s, KVM_IPC_FD) < 0 || dup2(t, KVM_TRANSPORT_FD) < 0 ||
-        close_range(KVM_TRANSPORT_FD + 1, ~0u, 0) < 0) {
+        dup2(s, EXTDISPLAY_IPC_FD) < 0 || dup2(t, EXTDISPLAY_TRANSPORT_FD) < 0 ||
+        close_range(EXTDISPLAY_TRANSPORT_FD + 1, ~0u, 0) < 0) {
         _exit(127);
     }
     sigemptyset(&none);
     if (setsid() < 0 || sigprocmask(SIG_SETMASK, &none, NULL) < 0 ||
-        setgroups(0, NULL) < 0 || setgid(KVM_WORKER_USER) < 0 || setuid(KVM_WORKER_USER) < 0 ||
-        getuid() != KVM_WORKER_USER || geteuid() != KVM_WORKER_USER || setuid(0) == 0 ||
+        setgroups(0, NULL) < 0 || setgid(EXTDISPLAY_WORKER_USER) < 0 || setuid(EXTDISPLAY_WORKER_USER) < 0 ||
+        getuid() != EXTDISPLAY_WORKER_USER || geteuid() != EXTDISPLAY_WORKER_USER || setuid(0) == 0 ||
         prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0 || chdir("/") < 0) {
         _exit(127);
     }
-    char *const argv[] = { "kvm-worker", NULL };
+    char *const argv[] = { "extdisplay-worker", NULL };
     char *const env[] = { "LANG=C", "PATH=/usr/bin", NULL };
-    execve(KVM_WORKER_PATH, argv, env);
+    execve(EXTDISPLAY_WORKER_PATH, argv, env);
     _exit(127);
 }
 
-pid_t kvm_worker_spawn(int transport, int *ipc)
+pid_t extdisplay_worker_spawn(int transport, int *ipc)
 {
     int sv[2];
     if (geteuid() != 0) {
@@ -64,9 +64,9 @@ pid_t kvm_worker_spawn(int transport, int *ipc)
     return pid;
 }
 
-int kvm_ipc_send(int fd, struct kvm_ipc *m)
+int extdisplay_ipc_send(int fd, struct extdisplay_ipc *m)
 {
-    m->magic = KVM_IPC_MAGIC;
+    m->magic = EXTDISPLAY_IPC_MAGIC;
     m->reserved = 0;
     ssize_t n;
     do n = send(fd, m, sizeof *m, MSG_DONTWAIT | MSG_NOSIGNAL);
@@ -74,7 +74,7 @@ int kvm_ipc_send(int fd, struct kvm_ipc *m)
     return n == (ssize_t)sizeof *m ? 0 : -1;
 }
 
-int kvm_ipc_recv(int fd, struct kvm_ipc *m, int *pixels)
+int extdisplay_ipc_recv(int fd, struct extdisplay_ipc *m, int *pixels)
 {
     union { struct cmsghdr align; char bytes[CMSG_SPACE(8 * sizeof(int))]; } c;
     struct iovec iov = { m, sizeof *m };
@@ -100,8 +100,8 @@ int kvm_ipc_recv(int fd, struct kvm_ipc *m, int *pixels)
         }
     }
     if (n != (ssize_t)sizeof *m || bad || nfds > 1 || (msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) ||
-        m->magic != KVM_IPC_MAGIC || m->reserved || m->length > KVM_IPC_TEXT ||
-        (m->op == KVM_IPC_FRAME) != (*pixels >= 0) || (m->op != KVM_IPC_FRAME && m->bytes)) {
+        m->magic != EXTDISPLAY_IPC_MAGIC || m->reserved || m->length > EXTDISPLAY_IPC_TEXT ||
+        (m->op == EXTDISPLAY_IPC_FRAME) != (*pixels >= 0) || (m->op != EXTDISPLAY_IPC_FRAME && m->bytes)) {
         if (*pixels >= 0) close(*pixels);
         *pixels = -1;
         errno = EPROTO;
@@ -110,13 +110,13 @@ int kvm_ipc_recv(int fd, struct kvm_ipc *m, int *pixels)
     return 0;
 }
 
-void *kvm_frame_map(int fd, const struct kvm_ipc *m)
+void *extdisplay_frame_map(int fd, const struct extdisplay_ipc *m)
 {
     const int need = F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL;
     size_t expected;
     struct stat st;
     int seals = fd < 0 ? -1 : fcntl(fd, F_GET_SEALS);
-    if (m->op != KVM_IPC_FRAME || m->length || kvm_dimensions(m->width, m->height, &expected) < 0 ||
+    if (m->op != EXTDISPLAY_IPC_FRAME || m->length || extdisplay_dimensions(m->width, m->height, &expected) < 0 ||
         m->bytes != expected || seals < 0 || (seals & need) != need ||
         fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) || st.st_size != (off_t)expected) {
         return NULL;

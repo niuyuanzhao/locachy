@@ -94,7 +94,7 @@ static const struct native_program natives[] = {
     { "bluetooth", "Bluetooth", APP_NATIVE_DIR "/term", APP_BLUETOOTH_COMMAND, 1, TARGET_NONE },
     { "network", "Network", APP_NATIVE_DIR "/term", APP_NETWORK_COMMAND, 1, TARGET_NONE },
     { "term", "Terminal", APP_NATIVE_DIR "/term", APP_TERM_COMMAND, 0, TARGET_NONE },
-    { "kvm", "Extended display", APP_NATIVE_DIR "/kvm", NULL, 1, TARGET_NONE },
+    { "extdisplay", "Extended display", APP_NATIVE_DIR "/extdisplay", NULL, 1, TARGET_NONE },
 };
 
 static const char *const settings_pages[] = { "network", "power", "devices", "date-time", "hardware" };
@@ -560,7 +560,7 @@ static pid_t launch_native(struct app *app)
         return -1;
     }
     int session_child = -1, owner = -1;
-    if (!strcmp(p->program, "kvm") && (owner = app_session_owner(app, &session_child)) < 0) {
+    if (!strcmp(p->program, "extdisplay") && (owner = app_session_owner(app, &session_child)) < 0) {
         close(ready[0]); close(ready[1]); close(request[0]); close(request[1]);
         return -1;
     }

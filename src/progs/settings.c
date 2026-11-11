@@ -1841,6 +1841,10 @@ static const struct opt_module opt_modules[] = {
       "fwupd", NULL, NULL, NULL, NULL },
     { N_("SPI programmer (flashrom)"), "/usr/bin/flashrom",
       "flashrom", NULL, NULL, NULL, NULL },
+    /* The probe is FFmpeg's header: the packages are present. make.sh builds the
+     * program only with them (tools/EXTDISPLAY.md). */
+    { N_("Extended display (extdisplay)"), "/usr/include/libavcodec/avcodec.h",
+      "ffmpeg json-c", "program_extdisplay", "/usr/local/bin/extdisplay", NULL, NULL },
 };
 #define NOPT_MODULES ((int)(sizeof opt_modules / sizeof opt_modules[0]))
 

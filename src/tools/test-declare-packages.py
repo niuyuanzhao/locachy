@@ -200,6 +200,22 @@ class DeclarePackages(unittest.TestCase):
         self.assertIn("CJK_FONT_PACKAGES", settings[settings.index("static int ime_zh_job(void)"):])
         self.assertIn('font_lang_present("zh")', settings)  # the module's fontconfig_lang
 
+    def test_extdisplay_module_brings_what_make_builds_it_with_and_its_home_entry(self):
+        """make.sh builds the receiver only with json-c and FFmpeg, and home lists
+        only rc.conf's program_ keys: the module carries both, and settings' row
+        installs the same packages and sets the same key."""
+        module = json.loads((SOURCE / "link/modules.json").read_text())["extdisplay"]
+        self.assertLessEqual({"ffmpeg", "json-c"}, set(module["packages"]))
+        make = (SOURCE / "make.sh").read_text()
+        self.assertIn('EXTDISPLAY_PKGS="json-c libavcodec libavutil libswscale"', make)
+        self.assertIn("-o /usr/local/bin/extdisplay ", make)
+        self.assertEqual(module["rc"], {"program_extdisplay": "/usr/local/bin/extdisplay"})
+        settings = (SOURCE / "progs/settings.c").read_text()
+        row = settings[settings.index('{ N_("Extended display (extdisplay)")'):]
+        row = row[:row.index("},")]
+        self.assertIn('"%s"' % " ".join(module["packages"]), row)
+        self.assertIn('"program_extdisplay", "/usr/local/bin/extdisplay"', row)
+
 
 if __name__ == "__main__":
     unittest.main()

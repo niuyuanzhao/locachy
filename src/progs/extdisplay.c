@@ -1,5 +1,5 @@
 /*
- * kvm: the extended-display receiver (tools/KVM.md), with no arguments. The
+ * extdisplay: the extended-display receiver (tools/EXTDISPLAY.md), with no arguments. The
  * peer creates a new virtual output of its own and keeps its original screen;
  * this program shows that new output's pixels and sends LOCachy's keyboard and
  * pointer back. It is not a mirror, a remote login or a VNC viewer, and it
@@ -7,12 +7,12 @@
  * keyboard and pointer.
  *
  * It starts the broker as its own child over a control socketpair
- * (kvm-setup.h: "kvm-broker --control-fd 3", nothing else open in the child,
+ * (extdisplay-setup.h: "extdisplay-broker --control-fd 3", nothing else open in the child,
  * the session owner's descriptor included). The setup screen lists the
  * broker's cable interfaces and pairs one; the broker then hands over the
  * paired plaintext AF_UNIX stream in its "paired" message. This program never
  * listens on or dials a network itself. Everything that stream carries is
- * parsed and decoded by kvm-worker (kvm-ipc.h) in its sandbox; this side only
+ * parsed and decoded by extdisplay-worker (extdisplay-ipc.h) in its sandbox; this side only
  * maps sealed, size-checked pixel buffers. Remote input requires the managed
  * session owner (session.h): revocation, owner EOF, focus loss or device loss
  * cancel every remote-held key and button first.
@@ -23,9 +23,9 @@
 #include "base.h"
 #include "internal.h"
 #include "session.h"
-#include "kvm-ipc.h"
-#include "kvm-protocol.h"
-#include "kvm-setup.h"
+#include "extdisplay-ipc.h"
+#include "extdisplay-protocol.h"
+#include "extdisplay-setup.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -50,8 +50,8 @@
 
 static volatile sig_atomic_t stop;
 static int ipc = -1, active, outside_cancelled;
-/* The broker, kvm's child (kvm-setup.h): its channel and the pairing shown. */
-static struct kvm_setup setup = { .fd = -1, .stream = -1 };
+/* The broker, extdisplay's child (extdisplay-setup.h): its channel and the pairing shown. */
+static struct extdisplay_setup setup = { .fd = -1, .stream = -1 };
 static pid_t broker = -1;
 static int leaving, selected;
 static uint32_t *frame;
@@ -67,10 +67,10 @@ static void set_state(const char *s, const char *d) { state = s; detail = d; }
 
 static int send_text(uint32_t op, const char *text, int n)
 {
-    if (ipc < 0 || n < 0 || n > (int)KVM_IPC_TEXT) return -1;
-    struct kvm_ipc m = { .op = op, .length = (uint32_t)n };
+    if (ipc < 0 || n < 0 || n > (int)EXTDISPLAY_IPC_TEXT) return -1;
+    struct extdisplay_ipc m = { .op = op, .length = (uint32_t)n };
     if (n) memcpy(m.text, text, (size_t)n);
-    return kvm_ipc_send(ipc, &m);
+    return extdisplay_ipc_send(ipc, &m);
 }
 
 /* Remote input only while the owner allows it (the main loop services the
@@ -78,14 +78,14 @@ static int send_text(uint32_t op, const char *text, int n)
 static int send_input(const char *text, int n)
 {
     if (!base_session_input_allowed()) return 0;
-    return send_text(KVM_IPC_INPUT, text, n);
+    return send_text(EXTDISPLAY_IPC_INPUT, text, n);
 }
 
 static int cancel(void)
 {
     char text[96];
     outside_cancelled = 1;
-    return active ? send_text(KVM_IPC_INPUT, text, kvm_cancel_json(text, sizeof text)) : 0;
+    return active ? send_text(EXTDISPLAY_IPC_INPUT, text, extdisplay_cancel_json(text, sizeof text)) : 0;
 }
 
 /* The picture's area: below the bar, above the status rows; the stream
@@ -146,18 +146,18 @@ static int pointer_input(void)
     char s[256];
     int n;
     if (p->button) {
-        n = kvm_button_json(s, sizeof s, (uint32_t)p->button, p->pressed, x, y);
+        n = extdisplay_button_json(s, sizeof s, (uint32_t)p->button, p->pressed, x, y);
     } else if (p->scroll_dx || p->scroll_dy || (p->gesture == GESTURE_SCROLL && p->scroll_source != SCROLL_TOUCH)) {
         /* Content displacement in stream pixels (natural sign: positive dy
          * moves content down, positive dx content right), as LOCachy scrolls
          * it locally. Touch-screen drags are not forwarded: they carry whole
          * steps and no fractional deltas. */
         double kx = frame_w ? (double)frame_w / vw : 1, ky = frame_h ? (double)frame_h / vh : 1;
-        n = kvm_scroll_json(s, sizeof s, -p->scroll_dx * kx, -p->scroll_dy * ky, p->scroll_phase, p->scroll_source);
+        n = extdisplay_scroll_json(s, sizeof s, -p->scroll_dx * kx, -p->scroll_dy * ky, p->scroll_phase, p->scroll_source);
     } else if (p->gesture) {
         return 0; /* pinch and swipe are not advertised, never synthesized */
     } else {
-        n = kvm_pointer_json(s, sizeof s, x, y);
+        n = extdisplay_pointer_json(s, sizeof s, x, y);
     }
     return send_input(s, n);
 }
@@ -171,10 +171,10 @@ static int raw_input(void)
             continue;
         }
         /* evdev KEY_F12: the emergency exit, independent of rc.conf's keys.
-         * The broker is released (that ends any session) and kvm leaves. */
+         * The broker is released (that ends any session) and extdisplay leaves. */
         if (e.code == 88 && e.state == 1 && (e.modifiers & (KEYS_CTRL | KEYS_ALT)) == (KEYS_CTRL | KEYS_ALT)) {
             leaving = 1;
-            if (setup.fd < 0 || kvm_setup_release(&setup) != 0) stop = 1;
+            if (setup.fd < 0 || extdisplay_setup_release(&setup) != 0) stop = 1;
             return 0;
         }
         if (e.flags & BASE_RAW_LOCAL) {
@@ -185,7 +185,7 @@ static int raw_input(void)
         }
         if (!active) continue;
         char text[256];
-        int n = kvm_key_json(text, sizeof text, e.device, e.code, e.keysym, e.modifiers, e.locks, (int)e.state);
+        int n = extdisplay_key_json(text, sizeof text, e.device, e.code, e.keysym, e.modifiers, e.locks, (int)e.state);
         if (n >= 0 && send_input(text, n) < 0) return -1;
     }
     return 0;
@@ -207,8 +207,8 @@ static void end_worker(pid_t worker)
 {
     if (worker <= 0 && ipc < 0) return;
     if (ipc >= 0) {
-        struct kvm_ipc end = { .op = KVM_IPC_STOP };
-        kvm_ipc_send(ipc, &end);
+        struct extdisplay_ipc end = { .op = EXTDISPLAY_IPC_STOP };
+        extdisplay_ipc_send(ipc, &end);
     }
     for (int i = 0; worker > 0 && i < 20; i++) {
         if (waitpid(worker, NULL, WNOHANG) == worker) { worker = -1; break; }
@@ -225,7 +225,7 @@ static void end_worker(pid_t worker)
 /* session.h's epoch change: nothing more goes out, the worker writes cancel
  * into the stream and says so (else it is killed: the stream ends, which the
  * peer treats as a release too), and only then the owner gets its ACK. The
- * owner waits 250 ms; this takes at most KVM_CANCEL_WAIT_MS. */
+ * owner waits 250 ms; this takes at most EXTDISPLAY_CANCEL_WAIT_MS. */
 static int release_remote(pid_t *worker, int *inhibited)
 {
     if (*inhibited) base_sleep_inhibit(0);
@@ -234,25 +234,25 @@ static int release_remote(pid_t *worker, int *inhibited)
     base_raw_enable(1);
     while (pointer_next()) { }
     if (*worker > 0 && ipc >= 0) {
-        struct kvm_ipc m = { .op = KVM_IPC_CANCEL };
+        struct extdisplay_ipc m = { .op = EXTDISPLAY_IPC_CANCEL };
         int confirmed = 0;
-        double deadline = uptime() + KVM_CANCEL_WAIT_MS / 1000.0;
-        if (kvm_ipc_send(ipc, &m) == 0) {
+        double deadline = uptime() + EXTDISPLAY_CANCEL_WAIT_MS / 1000.0;
+        if (extdisplay_ipc_send(ipc, &m) == 0) {
             while (!confirmed) {
                 int left = (int)((deadline - uptime()) * 1000);
                 struct pollfd p = { ipc, POLLIN, 0 };
                 if (left <= 0 || poll(&p, 1, left) <= 0) break;
                 int fd;
-                if (kvm_ipc_recv(ipc, &m, &fd) < 0) {
+                if (extdisplay_ipc_recv(ipc, &m, &fd) < 0) {
                     if (errno == EAGAIN) continue;
                     break;
                 }
                 if (fd >= 0) close(fd); /* a picture meanwhile: the next one comes after FRAME_ACK */
-                if (m.op == KVM_IPC_FRAME) {
-                    struct kvm_ipc ack = { .op = KVM_IPC_FRAME_ACK };
-                    kvm_ipc_send(ipc, &ack);
+                if (m.op == EXTDISPLAY_IPC_FRAME) {
+                    struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK };
+                    extdisplay_ipc_send(ipc, &ack);
                 }
-                confirmed = m.op == KVM_IPC_CANCELLED;
+                confirmed = m.op == EXTDISPLAY_IPC_CANCELLED;
             }
         }
         if (!confirmed) {
@@ -273,28 +273,28 @@ static int release_remote(pid_t *worker, int *inhibited)
 
 static int handle_worker(int *inhibited, double *started)
 {
-    struct kvm_ipc m;
+    struct extdisplay_ipc m;
     int fd;
-    if (kvm_ipc_recv(ipc, &m, &fd) < 0) {
+    if (extdisplay_ipc_recv(ipc, &m, &fd) < 0) {
         if (errno == EAGAIN) return 0;
         set_state(N_("Disconnected"), N_("The decoder channel ended."));
         return -1;
     }
     switch (m.op) {
-    case KVM_IPC_READY: {
+    case EXTDISPLAY_IPC_READY: {
         if (!m.width || m.width > 3) break;
-        char hello[KVM_IPC_TEXT];
+        char hello[EXTDISPLAY_IPC_TEXT];
         int cw, ch, top, w, h;
         screen_cells(&cw, &ch, &top);
         screen_pixels(&w, &h);
         h -= top + ch * (1 + STATUS_ROWS);
         double scale = screen_scale();
-        int n = kvm_hello(hello, sizeof hello, (uint32_t)w, (uint32_t)(h > 0 ? h : 1),
+        int n = extdisplay_hello(hello, sizeof hello, (uint32_t)w, (uint32_t)(h > 0 ? h : 1),
                           scale >= 0.5 && scale <= 4 ? scale : 1.0, m.width & 1, (m.width & 2) != 0);
-        if (send_text(KVM_IPC_HELLO, hello, n) < 0) break;
+        if (send_text(EXTDISPLAY_IPC_HELLO, hello, n) < 0) break;
         return 1;
     }
-    case KVM_IPC_ACTIVE:
+    case EXTDISPLAY_IPC_ACTIVE:
         active = 1;
         /* Held only while remote input is allowed (session.h). */
         if (!*inhibited && base_session_input_allowed()) {
@@ -307,8 +307,8 @@ static int handle_worker(int *inhibited, double *started)
         *started = uptime();
         set_state(N_("Active"), N_("Extended-only companion over the paired dedicated link."));
         return 1;
-    case KVM_IPC_FRAME: {
-        void *pixels = kvm_frame_map(fd, &m);
+    case EXTDISPLAY_IPC_FRAME: {
+        void *pixels = extdisplay_frame_map(fd, &m);
         close(fd);
         if (!pixels) {
             set_state(N_("Disconnected"), N_("The decoder sent an invalid picture."));
@@ -319,13 +319,13 @@ static int handle_worker(int *inhibited, double *started)
         frame_bytes = (size_t)m.bytes;
         frame_w = m.width;
         frame_h = m.height;
-        struct kvm_ipc ack = { .op = KVM_IPC_FRAME_ACK };
-        return kvm_ipc_send(ipc, &ack) < 0 ? -1 : 1;
+        struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK };
+        return extdisplay_ipc_send(ipc, &ack) < 0 ? -1 : 1;
     }
-    case KVM_IPC_UNAVAILABLE:
+    case EXTDISPLAY_IPC_UNAVAILABLE:
         set_state(N_("Unavailable"), N_("The decoder sandbox or FFmpeg is not available."));
         return -1;
-    case KVM_IPC_CANCELLED:
+    case EXTDISPLAY_IPC_CANCELLED:
         return 0; /* a late answer to a cancel already given up on */
     default:
         break;
@@ -351,11 +351,11 @@ static void session_run(int transport)
     } else if (base_session_service() < 0 || base_session_input_cancelled() != 0) {
         /* Nothing is held yet: the first policy is acknowledged at once. */
         set_state(N_("Unavailable"), N_("The session owner did not accept this session."));
-    } else if ((worker = kvm_worker_spawn(transport, &ipc)) < 0) {
+    } else if ((worker = extdisplay_worker_spawn(transport, &ipc)) < 0) {
         set_state(N_("Unavailable"), N_("The decoder worker could not be started safely."));
     } else {
         set_state(N_("Connecting"), N_("Waiting for the companion's capabilities."));
-        say("kvm: decoder worker %d started", (int)worker);
+        say("extdisplay: decoder worker %d started", (int)worker);
         session_started = 1;
     }
     if (transport >= 0) close(transport);
@@ -369,9 +369,9 @@ static void session_run(int transport)
         int redraw = 0;
         /* The broker ends the session (the cable, a timeout), or has gone. */
         if (setup.fd >= 0 && p[2].revents) {
-            enum kvm_setup_event ev = kvm_setup_read(&setup);
-            if (ev == KVM_SETUP_EV_ENDED || ev == KVM_SETUP_EV_BROKEN) {
-                set_state(N_("Disconnected"), kvm_setup_reason_text(setup.reason));
+            enum extdisplay_setup_event ev = extdisplay_setup_read(&setup);
+            if (ev == EXTDISPLAY_SETUP_EV_ENDED || ev == EXTDISPLAY_SETUP_EV_BROKEN) {
+                set_state(N_("Disconnected"), extdisplay_setup_reason_text(setup.reason));
                 break;
             }
         }
@@ -430,7 +430,7 @@ static void session_run(int transport)
     frame_w = frame_h = 0;
     /* Ended here first (the peer, the owner, the user): the broker is told,
      * and answers "ended cancelled" once it is idle again. */
-    if (setup.state == KVM_SETUP_PAIRED) kvm_setup_cancel(&setup);
+    if (setup.state == EXTDISPLAY_SETUP_PAIRED) extdisplay_setup_cancel(&setup);
 }
 
 /* The setup screen: the candidate interfaces with their carrier, and the
@@ -439,16 +439,16 @@ static void session_run(int transport)
 static const char *setup_state_text(void)
 {
     switch (setup.state) {
-    case KVM_SETUP_IDLE: return N_("Idle");
-    case KVM_SETUP_SCANNING: return N_("Scanning");
-    case KVM_SETUP_LIST: return N_("Choose an interface");
-    case KVM_SETUP_PAIRING: return N_("Asking the broker for a code");
-    case KVM_SETUP_WAITING: return N_("Waiting for the Mac to connect");
-    case KVM_SETUP_PAIRED: return N_("Connected");
-    case KVM_SETUP_CANCELLING: return N_("Cancelling");
-    case KVM_SETUP_RELEASING: return N_("Releasing");
-    case KVM_SETUP_RELEASED: return N_("Released");
-    case KVM_SETUP_BROKEN: return N_("The pairing helper stopped");
+    case EXTDISPLAY_SETUP_IDLE: return N_("Idle");
+    case EXTDISPLAY_SETUP_SCANNING: return N_("Scanning");
+    case EXTDISPLAY_SETUP_LIST: return N_("Choose an interface");
+    case EXTDISPLAY_SETUP_PAIRING: return N_("Asking the broker for a code");
+    case EXTDISPLAY_SETUP_WAITING: return N_("Waiting for the Mac to connect");
+    case EXTDISPLAY_SETUP_PAIRED: return N_("Connected");
+    case EXTDISPLAY_SETUP_CANCELLING: return N_("Cancelling");
+    case EXTDISPLAY_SETUP_RELEASING: return N_("Releasing");
+    case EXTDISPLAY_SETUP_RELEASED: return N_("Released");
+    case EXTDISPLAY_SETUP_BROKEN: return N_("The pairing helper stopped");
     }
     return N_("Unknown");
 }
@@ -463,19 +463,19 @@ static void setup_draw(void)
     if (selected >= setup.count) selected = setup.count ? setup.count - 1 : 0;
     screen_text(1, 2, _("Choose the cable interface to pair with the Mac."), ACCENT, BG);
     if (setup.count == 0) {
-        screen_text(1, 4, setup.state == KVM_SETUP_SCANNING ? _("Scanning...")
+        screen_text(1, 4, setup.state == EXTDISPLAY_SETUP_SCANNING ? _("Scanning...")
                                                             : _("No cable interface found. Connect the cable, then press F5."),
                     DIM, BG);
     }
     for (int i = 0; i < setup.count && i < 8; i++) {
-        const struct kvm_iface *f = &setup.ifaces[i];
+        const struct extdisplay_iface *f = &setup.ifaces[i];
         snprintf(text, sizeof text, "%s %-16s %-20s %s", i == selected ? ">" : " ", f->name, f->driver,
                  f->carrier ? _("carrier up") : _("no carrier"));
         screen_text(1, 4 + i, text, i == selected ? ACCENT : FG, BG);
     }
     int top = rows - 9;
     screen_fill(0, top, cols, 4, PANEL);
-    if (setup.state == KVM_SETUP_WAITING) {
+    if (setup.state == EXTDISPLAY_SETUP_WAITING) {
         snprintf(text, sizeof text, _("Address  %s     Port  %s"), setup.linklocal, setup.port);
         screen_text(1, top, text, ACCENT, PANEL);
         snprintf(text, sizeof text, _("Code     %s"), setup.code);
@@ -484,7 +484,7 @@ static void setup_draw(void)
                  _("On the Mac: locachy-macos-sender --interface <mac-interface> --address %s --port %s"),
                  setup.linklocal, setup.port);
         screen_text(1, top + 2, text, FG, PANEL);
-    } else if (setup.state == KVM_SETUP_PAIRING) {
+    } else if (setup.state == EXTDISPLAY_SETUP_PAIRING) {
         screen_text(1, top, _("Asking the broker for an address and a code..."), FG, PANEL);
     }
     screen_fill(0, rows - 4, cols, 4, PANEL);
@@ -495,7 +495,7 @@ static void setup_draw(void)
                     strcmp(setup.error, "busy") == 0 ? _("The broker is busy: a pairing is still active.") : setup.error,
                     WARN, PANEL);
     } else if (setup.reason[0]) {
-        screen_text(1, rows - 3, _(kvm_setup_reason_text(setup.reason)), FG, PANEL);
+        screen_text(1, rows - 3, _(extdisplay_setup_reason_text(setup.reason)), FG, PANEL);
     }
     screen_text(1, rows - 2, _("Up/Down choose   Enter pair   Esc cancel   F5 scan   Ctrl+Alt+F12 release"), FG, PANEL);
     screen_text(1, rows - 1, _("The code and the address are kept in memory only."), DIM, PANEL);
@@ -507,7 +507,7 @@ static void setup_loop(void)
 {
     int quit_ticks = 0;
     setup_draw();
-    while (!stop && setup.state != KVM_SETUP_RELEASED && setup.state != KVM_SETUP_BROKEN) {
+    while (!stop && setup.state != EXTDISPLAY_SETUP_RELEASED && setup.state != EXTDISPLAY_SETUP_BROKEN) {
         struct pollfd p[1] = { { setup.fd, POLLIN, 0 } };
         int key = key_poll_many(p, 1, 100);
         int redraw = 0;
@@ -515,33 +515,33 @@ static void setup_loop(void)
         if (leaving && ++quit_ticks > 30) break;
         if (raw_input() < 0) break;
         if (p[0].revents) {
-            switch (kvm_setup_read(&setup)) {
-            case KVM_SETUP_EV_NONE:
+            switch (extdisplay_setup_read(&setup)) {
+            case EXTDISPLAY_SETUP_EV_NONE:
                 break;
-            case KVM_SETUP_EV_PAIRED: {
+            case EXTDISPLAY_SETUP_EV_PAIRED: {
                 int stream = setup.stream;
                 setup.stream = -1;
                 session_run(stream);
-                if (setup.state == KVM_SETUP_IDLE || setup.state == KVM_SETUP_LIST) kvm_setup_scan(&setup);
+                if (setup.state == EXTDISPLAY_SETUP_IDLE || setup.state == EXTDISPLAY_SETUP_LIST) extdisplay_setup_scan(&setup);
                 redraw = 1;
                 break;
             }
-            case KVM_SETUP_EV_ENDED:
+            case EXTDISPLAY_SETUP_EV_ENDED:
                 /* The device is back on the host: its carrier may have changed. */
-                if (setup.state == KVM_SETUP_IDLE || setup.state == KVM_SETUP_LIST) kvm_setup_scan(&setup);
+                if (setup.state == EXTDISPLAY_SETUP_IDLE || setup.state == EXTDISPLAY_SETUP_LIST) extdisplay_setup_scan(&setup);
                 redraw = 1;
                 break;
             default:
                 redraw = 1;
                 break;
             }
-            if (setup.state == KVM_SETUP_LIST && setup.count && selected >= setup.count) selected = 0;
+            if (setup.state == EXTDISPLAY_SETUP_LIST && setup.count && selected >= setup.count) selected = 0;
         }
         if (key == K_CLOSE || key == K_ACT_HOME || key == K_ACT_LOCK) {
             /* Leaving: the broker releases and answers "ended released"; the
              * loop ends then. Without a channel there is nothing to wait for. */
             leaving = 1;
-            if (kvm_setup_release(&setup) != 0) break;
+            if (extdisplay_setup_release(&setup) != 0) break;
             redraw = 1;
         } else if (key == K_SHOWN) {
             redraw = 1;
@@ -551,21 +551,21 @@ static void setup_loop(void)
         } else if (key == K_DOWN && selected + 1 < setup.count) {
             selected++;
             redraw = 1;
-        } else if (key == '\n' && setup.state == KVM_SETUP_LIST && setup.count > 0) {
+        } else if (key == '\n' && setup.state == EXTDISPLAY_SETUP_LIST && setup.count > 0) {
             setup.error[0] = setup.reason[0] = '\0';
-            kvm_setup_pair(&setup, setup.ifaces[selected].name);
+            extdisplay_setup_pair(&setup, setup.ifaces[selected].name);
             redraw = 1;
-        } else if (key == 27 && (setup.state == KVM_SETUP_PAIRING || setup.state == KVM_SETUP_WAITING)) {
-            kvm_setup_cancel(&setup);
+        } else if (key == 27 && (setup.state == EXTDISPLAY_SETUP_PAIRING || setup.state == EXTDISPLAY_SETUP_WAITING)) {
+            extdisplay_setup_cancel(&setup);
             redraw = 1;
-        } else if (key == K_F1 + 4 && (setup.state == KVM_SETUP_LIST || setup.state == KVM_SETUP_IDLE)) {
+        } else if (key == K_F1 + 4 && (setup.state == EXTDISPLAY_SETUP_LIST || setup.state == EXTDISPLAY_SETUP_IDLE)) {
             setup.error[0] = setup.reason[0] = '\0';
-            kvm_setup_scan(&setup);
+            extdisplay_setup_scan(&setup);
             redraw = 1;
         }
         if (redraw) setup_draw();
     }
-    if (setup.state == KVM_SETUP_BROKEN) {
+    if (setup.state == EXTDISPLAY_SETUP_BROKEN) {
         /* Shown until dismissed: the reason is on screen, the helper is gone. */
         setup_draw();
         for (;;) {
@@ -582,7 +582,7 @@ int main(int argc, char **argv)
 {
     (void)argv;
     if (argc != 1) {
-        fprintf(stderr, "usage: kvm\n");
+        fprintf(stderr, "usage: extdisplay\n");
         return 64;
     }
     signal(SIGTERM, ending);
@@ -598,17 +598,17 @@ int main(int argc, char **argv)
      * (the broker is started with every other descriptor closed). */
     base_session_fd();
     int control = -1;
-    broker = kvm_setup_spawn_broker(KVM_BROKER_PATH, &control);
+    broker = extdisplay_setup_spawn_broker(EXTDISPLAY_BROKER_PATH, &control);
     if (broker < 0) {
-        kvm_setup_init(&setup, -1);
-        setup.state = KVM_SETUP_BROKEN;
+        extdisplay_setup_init(&setup, -1);
+        setup.state = EXTDISPLAY_SETUP_BROKEN;
     } else {
-        kvm_setup_init(&setup, control);
-        kvm_setup_scan(&setup);
+        extdisplay_setup_init(&setup, control);
+        extdisplay_setup_scan(&setup);
     }
     setup_loop();
     if (setup.fd >= 0) close(setup.fd); /* the broker sees the end: it releases and exits */
-    kvm_setup_reap_broker(broker);
+    extdisplay_setup_reap_broker(broker);
     base_raw_enable(0);
     pointer_scroll_events(0);
     pointer_scroll_precision(0);

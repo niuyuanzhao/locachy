@@ -253,25 +253,27 @@ else
     rm -rf /usr/local/bin/edit /usr/local/share/locachy/edit
     echo "make: edit not built: tree-sitter, pcre2 and json-glib are not all installed" >&2
 fi
-# The extended display's receiver (tools/KVM.md): kvm on the direct screen (no
-# compositor), kvm-worker parsing the stream and decoding it with the
-# distribution's FFmpeg, as nobody in a sandbox of its own (progs/kvm-ipc.h).
-KVM_PKGS="json-c libavcodec libavutil libswscale"
-if pkg-config --exists $KVM_PKGS; then
-    $GCC -DCONFIG_KVM_FFMPEG $(pkg-config --cflags $KVM_PKGS) -o "$lib/kvm-worker" "$src/progs/kvm-worker.c" \
-        "$src/progs/kvm-protocol.c" "$src/progs/kvm-decode.c" $(pkg-config --libs $KVM_PKGS) -lm
-    $GCC $(pkg-config --cflags json-c) -o /usr/local/bin/kvm "$src/progs/kvm.c" "$src/progs/kvm-setup.c" \
-        "$src/progs/kvm-client.c" "$src/progs/kvm-protocol.c" "$b"/glibc-base-*.o $FT_LIBS $(pkg-config --libs json-c) -lm
+# Files from this receiver's earlier names: removed, so no stale privileged broker stays.
+rm -f /usr/local/bin/kvm "$lib/kvm-worker" "$lib/kvm-broker"
+# The extended display's receiver (tools/EXTDISPLAY.md): extdisplay on the direct screen (no
+# compositor), extdisplay-worker parsing the stream and decoding it with the
+# distribution's FFmpeg, as nobody in a sandbox of its own (progs/extdisplay-ipc.h).
+EXTDISPLAY_PKGS="json-c libavcodec libavutil libswscale"
+if pkg-config --exists $EXTDISPLAY_PKGS; then
+    $GCC -DCONFIG_EXTDISPLAY_FFMPEG $(pkg-config --cflags $EXTDISPLAY_PKGS) -o "$lib/extdisplay-worker" "$src/progs/extdisplay-worker.c" \
+        "$src/progs/extdisplay-protocol.c" "$src/progs/extdisplay-decode.c" $(pkg-config --libs $EXTDISPLAY_PKGS) -lm
+    $GCC $(pkg-config --cflags json-c) -o /usr/local/bin/extdisplay "$src/progs/extdisplay.c" "$src/progs/extdisplay-setup.c" \
+        "$src/progs/extdisplay-client.c" "$src/progs/extdisplay-protocol.c" "$b"/glibc-base-*.o $FT_LIBS $(pkg-config --libs json-c) -lm
 else
-    rm -f /usr/local/bin/kvm "$lib/kvm-worker"
-    echo "make: kvm not built: json-c and FFmpeg (libavcodec, libavutil, libswscale) are not all installed" >&2
+    rm -f /usr/local/bin/extdisplay "$lib/extdisplay-worker"
+    echo "make: extdisplay not built: json-c and FFmpeg (libavcodec, libavutil, libswscale) are not all installed" >&2
 fi
-# The extended display's broker (tools/KVM.md): the root helper that leases the
-# cable interface, runs the TLS pump and hands the paired stream to kvm, which
+# The extended display's broker (tools/EXTDISPLAY.md): the root helper that leases the
+# cable interface, runs the TLS pump and hands the paired stream to extdisplay, which
 # starts it from this path. Needs OpenSSL 1.1.1 or newer.
 if pkg-config --exists openssl; then
-    $GCC $(pkg-config --cflags openssl) -o "$lib/kvm-broker" "$src/progs/kvm-broker.c" "$src/progs/kvm-broker-net.c" \
-        "$src/progs/kvm-broker-pump.c" "$src/progs/kvm-broker-tls.c" $(pkg-config --libs openssl)
+    $GCC $(pkg-config --cflags openssl) -o "$lib/extdisplay-broker" "$src/progs/extdisplay-broker.c" "$src/progs/extdisplay-broker-net.c" \
+        "$src/progs/extdisplay-broker-pump.c" "$src/progs/extdisplay-broker-tls.c" $(pkg-config --libs openssl)
 fi
 if [ -f "$src/progs/app-init.c" ]; then
     $GCC -o "$lib/app-init" "$src/progs/app-init.c"

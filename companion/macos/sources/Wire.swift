@@ -12,10 +12,10 @@ struct CompanionError: Error, CustomStringConvertible {
 enum Wire {
     static let maxFrame = 4 * 1024 * 1024
     static let maxControl = 32767
-    static let identity = "locachy-kvm-v1"
+    static let identity = "locachy-extdisplay-v1"
     // TLS_PSK_WITH_AES_128_GCM_SHA256: the only PSK suite Network.framework negotiates.
     static let pskSuite: UInt16 = 0x00A8
-    static let alpn = "locachy-kvm-v1"
+    static let alpn = "locachy-extdisplay-v1"
     static let capabilities = ["key", "button", "cancel", "pointer", "scroll"]
 
     static func frame(_ payload: Data) throws -> Data {

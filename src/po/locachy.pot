@@ -6352,236 +6352,236 @@ msgstr ""
 msgid "Hibernate after (seconds asleep; empty: as the system has it):"
 msgstr ""
 
-#: progs/kvm-setup.c
+#: progs/extdisplay-setup.c
 msgid "The broker ended the pairing."
 msgstr ""
 
-#: progs/kvm-setup.c
+#: progs/extdisplay-setup.c
 msgid "The sender failed the handshake. Check the code and try again."
 msgstr ""
 
-#: progs/kvm-setup.c
+#: progs/extdisplay-setup.c
 msgid "The sender did not answer in time."
 msgstr ""
 
-#: progs/kvm-setup.c
+#: progs/extdisplay-setup.c
 msgid "The cable link went down."
 msgstr ""
 
-#: progs/kvm-setup.c
+#: progs/extdisplay-setup.c
 msgid "Disconnected."
 msgstr ""
 
-#: progs/kvm-setup.c
+#: progs/extdisplay-setup.c
 msgid "Pairing cancelled."
 msgstr ""
 
-#: progs/kvm-setup.c
+#: progs/extdisplay-setup.c
 msgid "The connection ended, or the broker failed."
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Unavailable"
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "A paired dedicated-link transport is required."
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Extended display"
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 #, c-format
 msgid "Status: %s    Stream: %ux%u"
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Ctrl+Alt+F12: disconnect    Home, lock and brightness stay local"
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "No clipboard, files or commands. The peer keeps its original screen."
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Disconnected"
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Remote input could not be released in time; the stream was closed."
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The decoder channel ended."
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The managed sleep inhibitor was not granted."
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Active"
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Extended-only companion over the paired dedicated link."
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The decoder sent an invalid picture."
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The decoder sandbox or FFmpeg is not available."
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The companion handshake or the stream failed."
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "No managed session owner: remote input stays disabled."
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The transport is not a paired local stream from the broker."
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The session owner did not accept this session."
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The decoder worker could not be started safely."
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Connecting"
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Waiting for the companion's capabilities."
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The session owner has gone."
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The session owner did not accept the release."
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Remote input could not be delivered."
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The companion handshake timed out."
 msgstr ""
 
-#: progs/kvm.c progs/settings-power.inc
+#: progs/extdisplay.c progs/settings-power.inc
 msgid "Idle"
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Scanning"
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Choose an interface"
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Asking the broker for a code"
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Waiting for the Mac to connect"
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Connected"
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Cancelling"
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Releasing"
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Released"
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The pairing helper stopped"
 msgstr ""
 
-#: progs/kvm.c progs/settings-hwinfo.inc progs/settings-power.inc
+#: progs/extdisplay.c progs/settings-hwinfo.inc progs/settings-power.inc
 #: progs/view-pdf-ui.inc
 msgid "Unknown"
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Choose the cable interface to pair with the Mac."
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Scanning..."
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "No cable interface found. Connect the cable, then press F5."
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "carrier up"
 msgstr ""
 
-#: progs/kvm.c progs/rescue.c
+#: progs/extdisplay.c progs/rescue.c
 msgid "no carrier"
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 #, c-format
 msgid "Address  %s     Port  %s"
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 #, c-format
 msgid "Code     %s"
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 #, c-format
 msgid ""
 "On the Mac: locachy-macos-sender --interface <mac-interface> --address %s --"
 "port %s"
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "Asking the broker for an address and a code..."
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 #, c-format
 msgid "Status: %s"
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The broker is busy: a pairing is still active."
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid ""
 "Up/Down choose   Enter pair   Esc cancel   F5 scan   Ctrl+Alt+F12 release"
 msgstr ""
 
-#: progs/kvm.c
+#: progs/extdisplay.c
 msgid "The code and the address are kept in memory only."
 msgstr ""
 
@@ -9519,6 +9519,10 @@ msgstr ""
 
 #: progs/settings.c
 msgid "SPI programmer (flashrom)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Extended display (extdisplay)"
 msgstr ""
 
 #: progs/settings.c

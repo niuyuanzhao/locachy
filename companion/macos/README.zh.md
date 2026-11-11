@@ -39,7 +39,7 @@ locachy-macos-sender --interface <有线接口> --address <169.254.x.x | fe80::.
 
 **TLS。**
 - 仅 TLS 1.2，套件为 `TLS_PSK_WITH_AES_128_GCM_SHA256`（0x00A8）。
-- PSK 身份为 `locachy-kvm-v1`；必须协商 ALPN `locachy-kvm-v1`。
+- PSK 身份为 `locachy-extdisplay-v1`；必须协商 ALPN `locachy-extdisplay-v1`。
 - 会话票据和会话恢复均已禁用。任何出示的证书都会被拒绝。
 - 已显式禁用重新协商；Network.framework 默认启用它。
 - 对于 PSK，Network.framework 会忽略套件限制：ClientHello 会提供其全部四个 PSK 套件（AES-128/256，GCM 与 CBC；已从监听端验证）。TLS 1.2 握手也可能在未协商 ALPN 的情况下完成。因此，配套程序会在握手完成的那一刻检查协商得到的版本、套件和 ALPN，若有任何不符则在发送任何应用数据之前关闭连接。接入端必须只允许 `PSK-AES128-GCM-SHA256`；其他任何结果都是硬失败，没有回落。
@@ -87,12 +87,12 @@ Network.framework 无法用外部 PSK 完成 TLS 1.3。对 OpenSSL 4.1 的 TLS 1
 参考监听端（强制校验身份，`tests/tls-listener.py`，基于 Python `ssl`）：
 
 ```sh
-python3 -I tests/tls-listener.py 端口 <32 位十六进制> locachy-kvm-v1 locachy-kvm-v1 PSK-AES128-GCM-SHA256 1.2 日志文件
+python3 -I tests/tls-listener.py 端口 <32 位十六进制> locachy-extdisplay-v1 locachy-extdisplay-v1 PSK-AES128-GCM-SHA256 1.2 日志文件
 ```
 
 等效的 OpenSSL 命令同样能完成握手，但它不是身份测试：在 TLS 1.2 下，`s_server -psk_identity` 接受了以不同身份连接的客户端。基于 OpenSSL 的接入端必须在其 PSK 服务端回调中校验身份，并对其他任何身份不返回密钥。
 
 ```sh
 openssl s_server -accept 127.0.0.1:端口 -tls1_2 -cipher PSK-AES128-GCM-SHA256 \
-  -psk <32 位十六进制> -psk_identity locachy-kvm-v1 -nocert -alpn locachy-kvm-v1 -msg
+  -psk <32 位十六进制> -psk_identity locachy-extdisplay-v1 -nocert -alpn locachy-extdisplay-v1 -msg
 ```

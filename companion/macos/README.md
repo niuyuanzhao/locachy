@@ -39,7 +39,7 @@ Before the first run, macOS 14 or later is needed, and the user grants Screen Re
 
 **TLS.**
 - TLS 1.2 only, with suite `TLS_PSK_WITH_AES_128_GCM_SHA256` (0x00A8).
-- PSK identity `locachy-kvm-v1`; ALPN `locachy-kvm-v1` is required.
+- PSK identity `locachy-extdisplay-v1`; ALPN `locachy-extdisplay-v1` is required.
 - Session tickets and resumption are disabled. Any certificate presented is rejected.
 - Renegotiation is disabled explicitly; Network.framework enables it by default.
 - Network.framework ignores the suite restriction for PSK: the ClientHello offers all four of its PSK suites (AES-128/256, GCM and CBC; verified from the listener side). A TLS 1.2 handshake can also complete without the ALPN being agreed. The companion therefore checks the negotiated version, suite, and ALPN the moment the handshake completes, and closes before sending any application data if anything differs. The broker must allow only `PSK-AES128-GCM-SHA256`; any other outcome is a hard failure with no fallback.
@@ -87,12 +87,12 @@ Not verified: creating the virtual display, capture, and input injection in a re
 Reference listener (identity-enforcing, `tests/tls-listener.py`, Python `ssl`):
 
 ```sh
-python3 -I tests/tls-listener.py PORT <32 hex digits> locachy-kvm-v1 locachy-kvm-v1 PSK-AES128-GCM-SHA256 1.2 LOG
+python3 -I tests/tls-listener.py PORT <32 hex digits> locachy-extdisplay-v1 locachy-extdisplay-v1 PSK-AES128-GCM-SHA256 1.2 LOG
 ```
 
 The equivalent OpenSSL command also completes the handshake, but it is not an identity test: with TLS 1.2, `s_server -psk_identity` accepted a client presenting a different identity. A broker built on OpenSSL must check the identity in its PSK server callback and return no key for anything else.
 
 ```sh
 openssl s_server -accept 127.0.0.1:PORT -tls1_2 -cipher PSK-AES128-GCM-SHA256 \
-  -psk <32 hex digits> -psk_identity locachy-kvm-v1 -nocert -alpn locachy-kvm-v1 -msg
+  -psk <32 hex digits> -psk_identity locachy-extdisplay-v1 -nocert -alpn locachy-extdisplay-v1 -msg
 ```

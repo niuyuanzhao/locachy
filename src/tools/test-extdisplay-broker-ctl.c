@@ -1,4 +1,4 @@
-/* Test harness: starts kvm-broker as kvm does (a SOCK_SEQPACKET pair, the
+/* Test harness: starts extdisplay-broker as extdisplay does (a SOCK_SEQPACKET pair, the
  * broker's end as --control-fd 3, nothing else open) and relays for a test
  * script. stdin lines:
  *   > TEXT          send TEXT as one control message
@@ -27,7 +27,7 @@ int main(int argc, char **argv)
     char line[1024];
     size_t have = 0;
     if (argc != 2) {
-        fprintf(stderr, "usage: test-kvm-broker-ctl BROKER\n");
+        fprintf(stderr, "usage: test-extdisplay-broker-ctl BROKER\n");
         return 2;
     }
     signal(SIGPIPE, SIG_IGN);
@@ -40,7 +40,7 @@ int main(int argc, char **argv)
         int null = open("/dev/null", O_RDWR);
         if (null < 0 || dup2(null, 0) < 0 || dup2(null, 1) < 0) _exit(127);
         syscall(SYS_close_range, 4, ~0U, 0);
-        execl(argv[1], "kvm-broker", "--control-fd", "3", (char *)NULL);
+        execl(argv[1], "extdisplay-broker", "--control-fd", "3", (char *)NULL);
         _exit(127);
     }
     close(pair[1]);

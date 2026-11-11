@@ -1,14 +1,14 @@
-/* Internal interfaces of kvm-broker (tools/KVM.md): kvm-broker.c (control,
- * lease lifecycle, NetworkManager, recovery record), kvm-broker-net.c
- * (rtnetlink and sysfs) and kvm-broker-pump.c (the unprivileged TLS pump). */
-#ifndef LOCACHY_KVM_BROKER_H
-#define LOCACHY_KVM_BROKER_H
+/* Internal interfaces of extdisplay-broker (tools/EXTDISPLAY.md): extdisplay-broker.c (control,
+ * lease lifecycle, NetworkManager, recovery record), extdisplay-broker-net.c
+ * (rtnetlink and sysfs) and extdisplay-broker-pump.c (the unprivileged TLS pump). */
+#ifndef LOCACHY_EXTDISPLAY_BROKER_H
+#define LOCACHY_EXTDISPLAY_BROKER_H
 
 #include <net/if.h>
 #include <netinet/in.h>
 #include <sys/types.h>
 
-#include "kvm-broker-protocol.h"
+#include "extdisplay-broker-protocol.h"
 
 /* glibc's net/if.h stops at IFF_DYNAMIC; linux/if.h, which has the rest,
  * conflicts with it. The kernel's value (include/uapi/linux/if.h). */
@@ -18,22 +18,22 @@
 
 /* Compile-time configuration; the tests build with fixtures, there is no
  * runtime override of any of these. */
-#ifdef KVM_BROKER_TEST_DRIVER
-#define BROKER_DRIVER KVM_BROKER_TEST_DRIVER
+#ifdef EXTDISPLAY_BROKER_TEST_DRIVER
+#define BROKER_DRIVER EXTDISPLAY_BROKER_TEST_DRIVER
 #else
 #define BROKER_DRIVER "thunderbolt-net"
 #endif
 /* Where NetworkManager has the network (link/network-client). Required: the
  * broker refuses to start without it, never using the host's namespace. */
-#ifdef KVM_BROKER_TEST_HOME_NETNS
-#define BROKER_HOME_NETNS KVM_BROKER_TEST_HOME_NETNS
+#ifdef EXTDISPLAY_BROKER_TEST_HOME_NETNS
+#define BROKER_HOME_NETNS EXTDISPLAY_BROKER_TEST_HOME_NETNS
 #else
 #define BROKER_HOME_NETNS "/run/netns/locachy-net"
 #endif
-#ifdef KVM_BROKER_TEST_STATE_DIR
-#define BROKER_STATE_DIR KVM_BROKER_TEST_STATE_DIR
+#ifdef EXTDISPLAY_BROKER_TEST_STATE_DIR
+#define BROKER_STATE_DIR EXTDISPLAY_BROKER_TEST_STATE_DIR
 #else
-#define BROKER_STATE_DIR "/run/locachy/kvm-broker"
+#define BROKER_STATE_DIR "/run/locachy/extdisplay-broker"
 #endif
 #define BROKER_PUMP_USER "nobody"
 
@@ -41,7 +41,7 @@
 
 void broker_log(const char *format, ...) __attribute__((format(printf, 1, 2)));
 
-/* kvm-broker-net.c */
+/* extdisplay-broker-net.c */
 struct link_info {
     int ifindex;
     unsigned flags;     /* IFF_* */
@@ -86,7 +86,7 @@ int identity_of(int nl, const char *name, int ifindex, struct identity *id);
 int identity_equal(const struct identity *a, const struct identity *b);
 int valid_ifname(const char *name);
 
-/* kvm-broker-pump.c */
+/* extdisplay-broker-pump.c */
 struct pump_args {
     int netns;      /* session namespace */
     int ifindex;    /* the leased device there */
@@ -97,7 +97,7 @@ struct pump_args {
     gid_t gid;
     pid_t parent;
     long long deadline_ms;
-    struct kvm_broker_key key;
+    struct extdisplay_broker_key key;
 };
 /* Runs in the forked child and never returns. */
 void pump_main(struct pump_args *args) __attribute__((noreturn));

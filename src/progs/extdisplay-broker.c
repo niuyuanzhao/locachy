@@ -1,13 +1,13 @@
-/* kvm-broker: the privileged half of the extended display (tools/KVM.md).
+/* extdisplay-broker: the privileged half of the extended display (tools/EXTDISPLAY.md).
  *
- * kvm starts it as "kvm-broker --control-fd N" with one end of a
+ * extdisplay starts it as "extdisplay-broker --control-fd N" with one end of a
  * SOCK_SEQPACKET pair and nothing else. On "pair NAME" it leases that
  * Thunderbolt/USB4 network interface: it records the lease in a root-only
  * file under /run, moves the interface out of locachy-net (where NetworkManager
  * has the network) into a fresh network namespace with only its IPv6
- * link-local address, and forks the pump (kvm-broker-pump.c), which listens
+ * link-local address, and forks the pump (extdisplay-broker-pump.c), which listens
  * there, completes the TLS 1.2 PSK handshake unprivileged and moves bytes to
- * a plaintext AF_UNIX stream. That stream's other end goes to kvm in the
+ * a plaintext AF_UNIX stream. That stream's other end goes to extdisplay in the
  * "paired" message. On cancel, release, carrier loss, timeout or control EOF
  * the interface goes back to locachy-net if it is still the leased device;
  * NetworkManager then applies its configured policy. The broker never drives
@@ -49,7 +49,7 @@
 
 #include <openssl/crypto.h>
 
-#include "kvm-broker.h"
+#include "extdisplay-broker.h"
 
 enum attempt_state { IDLE, ATTEMPT, SESSION };
 
@@ -83,7 +83,7 @@ void broker_log(const char *format, ...)
 {
     char line[600];
     va_list args;
-    int n = snprintf(line, sizeof line, log_fd == 2 ? "kvm-broker: " : "<6>kvm-broker: ");
+    int n = snprintf(line, sizeof line, log_fd == 2 ? "extdisplay-broker: " : "<6>extdisplay-broker: ");
     va_start(args, format);
     vsnprintf(line + n, sizeof line - (size_t)n - 1, format, args);
     va_end(args);
@@ -165,7 +165,7 @@ static void sync_state_dir(void)
 static int record_write(void)
 {
     char path[PATH_MAX], temp[PATH_MAX + 8], text[1024];
-    int n = snprintf(text, sizeof text, "kvm-broker-lease 1\nboot %s\nname %s\nifindex %d\naddress %s\ndevice %s\n",
+    int n = snprintf(text, sizeof text, "extdisplay-broker-lease 1\nboot %s\nname %s\nifindex %d\naddress %s\ndevice %s\n",
                      boot_id, L.name, L.ifindex, L.id.address, L.id.device);
     if (n <= 0 || (size_t)n >= sizeof text || record_path(L.id.address, path, sizeof path) < 0) return -1;
     snprintf(temp, sizeof temp, "%s.new", path);
@@ -199,7 +199,7 @@ static int record_read(const char *path, struct record *r)
         size_t n;
         if (sscanf(line, "%31s %519s", key, value) != 2) continue;
         n = strlen(value) + 1;
-        if (!strcmp(key, "kvm-broker-lease")) {
+        if (!strcmp(key, "extdisplay-broker-lease")) {
             version = atoi(value);
         } else if (!strcmp(key, "boot") && n <= sizeof r->boot) {
             memcpy(r->boot, value, n);
@@ -363,9 +363,9 @@ static void lease_release(void)
         /* A running session first gets to send close_notify and close its
          * TCP connection (the pump watches the status socket); 500 ms. */
         if (L.state == SESSION && L.status >= 0 && shutdown(L.status, SHUT_WR) == 0) {
-            for (long long deadline = kvm_broker_now_ms() + 500;;) {
+            for (long long deadline = extdisplay_broker_now_ms() + 500;;) {
                 char discard[256];
-                long long left = deadline - kvm_broker_now_ms();
+                long long left = deadline - extdisplay_broker_now_ms();
                 struct pollfd p = { L.status, POLLIN, 0 };
                 if (left <= 0 || poll(&p, 1, (int)left) <= 0) break;
                 if (recv(L.status, discard, sizeof discard, MSG_DONTWAIT) <= 0) break; /* pump gone */
@@ -432,7 +432,7 @@ static int random_bytes(unsigned char *out, size_t length)
 
 static void pump_report(const char *line)
 {
-#ifdef KVM_BROKER_TEST_PROBES
+#ifdef EXTDISPLAY_BROKER_TEST_PROBES
     if (!strncmp(line, "probe ", 6)) {
         broker_log("pump %s", line);
         return;
@@ -442,13 +442,13 @@ static void pump_report(const char *line)
 }
 
 /* Fresh key, plaintext pair (made here, in the home namespace, so the end
- * kvm keeps never references the session namespace), the pump; the code
+ * extdisplay keeps never references the session namespace), the pump; the code
  * is shown only once the listener exists. */
 static const char *start_attempt(void)
 {
     struct pump_args a;
     int plain[2] = { -1, -1 }, status[2] = { -1, -1 };
-    char code[KVM_BROKER_CODE_TEXT], line[KVM_BROKER_LINE_MAX + 1], address[INET6_ADDRSTRLEN];
+    char code[EXTDISPLAY_BROKER_CODE_TEXT], line[EXTDISPLAY_BROKER_LINE_MAX + 1], address[INET6_ADDRSTRLEN];
     const char *error = NULL;
     memset(&a, 0, sizeof a);
     if (random_bytes(a.key.key, sizeof a.key.key) < 0) return "no random bytes";
@@ -466,7 +466,7 @@ static const char *start_attempt(void)
     a.uid = pump_uid;
     a.gid = pump_gid;
     a.parent = getpid();
-    a.deadline_ms = kvm_broker_now_ms() + KVM_BROKER_ATTEMPT_SECONDS * 1000LL;
+    a.deadline_ms = extdisplay_broker_now_ms() + EXTDISPLAY_BROKER_ATTEMPT_SECONDS * 1000LL;
     L.pump = fork();
     if (L.pump == 0) pump_main(&a);
     close_fd(&plain[1]);
@@ -479,9 +479,9 @@ static const char *start_attempt(void)
         error = "cannot start the pump";
         goto out;
     }
-    for (long long deadline = kvm_broker_now_ms() + 5000;;) {
+    for (long long deadline = extdisplay_broker_now_ms() + 5000;;) {
         char reply[256];
-        long long left = deadline - kvm_broker_now_ms();
+        long long left = deadline - extdisplay_broker_now_ms();
         struct pollfd p = { L.status, POLLIN, 0 };
         if (left <= 0 || poll(&p, 1, (int)left) <= 0) {
             error = "the pump did not start";
@@ -500,12 +500,12 @@ static const char *start_attempt(void)
             goto out;
         }
     }
-    if (kvm_broker_code_encode(a.key.key, code, sizeof code) < 0 ||
+    if (extdisplay_broker_code_encode(a.key.key, code, sizeof code) < 0 ||
         !inet_ntop(AF_INET6, &L.linklocal, address, sizeof address)) {
         error = "cannot format the pairing";
         goto out;
     }
-    snprintf(line, sizeof line, "lease %s %s %d", L.name, address, KVM_BROKER_PORT);
+    snprintf(line, sizeof line, "lease %s %s %d", L.name, address, EXTDISPLAY_BROKER_PORT);
     send_line(line);
     snprintf(line, sizeof line, "code %s", code);
     send_line(line);
@@ -569,7 +569,7 @@ static const char *lease_start(const char *name)
     if (device_settings(L.name) < 0) return "cannot set the interface's IPv6 settings";
     if (nl_link_up(L.nl_sess, L.sess_ifindex) < 0) return "cannot bring the interface up";
     int found = 0;
-    for (long long deadline = kvm_broker_now_ms() + 10000; kvm_broker_now_ms() < deadline; sleep_ms(100)) {
+    for (long long deadline = extdisplay_broker_now_ms() + 10000; extdisplay_broker_now_ms() < deadline; sleep_ms(100)) {
         if ((found = nl_linklocal(L.nl_sess, L.sess_ifindex, &L.linklocal, &other)) != 0) break;
     }
     if (found < 0) return "cannot read the interface addresses";
@@ -588,12 +588,12 @@ static int compare_names(const void *a, const void *b)
 
 static void scan(void)
 {
-    char names[KVM_BROKER_SCAN_MAX][IFNAMSIZ], *sorted[KVM_BROKER_SCAN_MAX], driver[64], line[128];
+    char names[EXTDISPLAY_BROKER_SCAN_MAX][IFNAMSIZ], *sorted[EXTDISPLAY_BROKER_SCAN_MAX], driver[64], line[128];
     int count = 0;
     struct dirent *entry;
     DIR *dir = opendir("/sys/class/net");
     stale_check();
-    while (dir && (entry = readdir(dir)) && count < KVM_BROKER_SCAN_MAX) {
+    while (dir && (entry = readdir(dir)) && count < EXTDISPLAY_BROKER_SCAN_MAX) {
         if (entry->d_name[0] == '.' || !valid_ifname(entry->d_name)) continue;
         if (sysfs_driver(entry->d_name, driver, sizeof driver) < 0 || strcmp(driver, BROKER_DRIVER) != 0) continue;
         memcpy(names[count], entry->d_name, strlen(entry->d_name) + 1); /* valid_ifname */
@@ -612,11 +612,11 @@ static void scan(void)
 /* 0 go on, -1 control is gone. */
 static int handle_control(void)
 {
-    char line[KVM_BROKER_LINE_MAX + 2];
+    char line[EXTDISPLAY_BROKER_LINE_MAX + 2];
     ssize_t n = recv(control, line, sizeof line - 1, MSG_TRUNC);
     if (n < 0 && (errno == EINTR || errno == EAGAIN)) return 0;
     if (n <= 0) return -1;
-    if ((size_t)n > KVM_BROKER_LINE_MAX) {
+    if ((size_t)n > EXTDISPLAY_BROKER_LINE_MAX) {
         send_line("error line too long");
         return 0;
     }
@@ -634,7 +634,7 @@ static int handle_control(void)
     } else if (!strncmp(line, "pair ", 5)) {
         const char *error = lease_start(line + 5);
         if (error) {
-            char reply[KVM_BROKER_LINE_MAX + 1];
+            char reply[EXTDISPLAY_BROKER_LINE_MAX + 1];
             if (strcmp(error, "busy") != 0) lease_release();
             snprintf(reply, sizeof reply, "error %s", error);
             send_line(reply);
@@ -675,7 +675,7 @@ static void handle_status(void)
     } else if (!strcmp(line, "timeout") && L.state == ATTEMPT) {
         end_attempt("timeout");
     } else if (!strncmp(line, "closed", 6)) {
-        /* The peer closed, or the stream or TLS failed: kvm sees EOF on its
+        /* The peer closed, or the stream or TLS failed: extdisplay sees EOF on its
          * stream too; the attempt's one "ended" says so and the device goes
          * back now. The fixed reasons have no separate "closed". */
         end_attempt("error");
@@ -686,7 +686,7 @@ static void handle_status(void)
 
 static void __attribute__((noreturn)) startup_fail(const char *text)
 {
-    char line[KVM_BROKER_LINE_MAX + 1];
+    char line[EXTDISPLAY_BROKER_LINE_MAX + 1];
     broker_log("%s", text);
     snprintf(line, sizeof line, "error %s", text);
     send_line(line);
@@ -753,14 +753,14 @@ int main(int argc, char **argv)
     struct passwd *pw;
     char path_boot[] = "/proc/sys/kernel/random/boot_id";
     if (argc != 3 || strcmp(argv[1], "--control-fd") != 0 || (control = take_control(argv[2])) < 0) {
-        fprintf(stderr, "usage: kvm-broker --control-fd N (a SOCK_SEQPACKET socket from kvm)\n");
+        fprintf(stderr, "usage: extdisplay-broker --control-fd N (a SOCK_SEQPACKET socket from extdisplay)\n");
         return 2;
     }
     /* Only the control socket and the standard descriptors stay. */
     for (int i = 0; i <= 2; i++) {
         if (fcntl(i, F_GETFD) < 0 && open("/dev/null", O_RDWR) != i) return 2;
     }
-    /* kvm gives /dev/null as stderr: log to the kernel log, as
+    /* extdisplay gives /dev/null as stderr: log to the kernel log, as
      * network-client does. */
     struct stat err;
     if (fstat(2, &err) == 0 && S_ISCHR(err.st_mode) && major(err.st_rdev) == 1 && minor(err.st_rdev) == 3)
@@ -777,7 +777,7 @@ int main(int argc, char **argv)
     sigaddset(&set, SIGHUP);
     if (sigprocmask(SIG_BLOCK, &set, NULL) < 0 || (signals = signalfd(-1, &set, SFD_CLOEXEC | SFD_NONBLOCK)) < 0)
         startup_fail("cannot handle signals");
-    if (geteuid() != 0) startup_fail("kvm-broker must run as root");
+    if (geteuid() != 0) startup_fail("extdisplay-broker must run as root");
     if (!(pw = getpwnam(BROKER_PUMP_USER)) || !pw->pw_uid || !pw->pw_gid) startup_fail("no unprivileged user for the pump");
     pump_uid = pw->pw_uid;
     pump_gid = pw->pw_gid;
@@ -788,8 +788,8 @@ int main(int argc, char **argv)
     if (state_dir() < 0) startup_fail("another broker is running, or its state directory is unusable");
     if (enter_home() < 0) startup_fail("cannot enter the network namespace of the network");
     if ((nl_home = nl_open(0)) < 0) startup_fail("no rtnetlink");
-    struct kvm_broker_key probe = { .set = 0 };
-    SSL_CTX *ctx = kvm_broker_tls_init() == 0 ? kvm_broker_tls_context(&probe) : NULL;
+    struct extdisplay_broker_key probe = { .set = 0 };
+    SSL_CTX *ctx = extdisplay_broker_tls_init() == 0 ? extdisplay_broker_tls_context(&probe) : NULL;
     if (!ctx) startup_fail("OpenSSL cannot provide the cable TLS profile");
     SSL_CTX_free(ctx);
     stale_check();
@@ -800,7 +800,7 @@ int main(int argc, char **argv)
         int timeout = -1;
         if (L.state == ATTEMPT) {
             /* The pump reports its own timeout; this is the backstop. */
-            long long left = L.deadline + 2000 - kvm_broker_now_ms();
+            long long left = L.deadline + 2000 - extdisplay_broker_now_ms();
             timeout = left < 0 ? 0 : left > 60000 ? 60000 : (int)left;
         }
         if (poll(p, 4, timeout) < 0 && errno != EINTR) startup_fail("poll failed");
@@ -825,6 +825,6 @@ int main(int argc, char **argv)
             if (lost < 0) lost = nl_link_get(L.nl_sess, L.sess_ifindex, &info) < 0 || !(info.flags & IFF_LOWER_UP);
             if (lost) end_attempt("carrier-lost");
         }
-        if (L.state == ATTEMPT && kvm_broker_now_ms() > L.deadline + 2000) end_attempt("timeout");
+        if (L.state == ATTEMPT && extdisplay_broker_now_ms() > L.deadline + 2000) end_attempt("timeout");
     }
 }

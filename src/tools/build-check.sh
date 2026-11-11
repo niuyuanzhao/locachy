@@ -90,22 +90,22 @@ if pkg-config --exists tree-sitter libpcre2-8 json-glib-1.0; then
 fi
 # The extended display's receiver on the direct screen and its sandboxed
 # decoder (make.sh).
-kvm_pkgs="json-c libavcodec libavutil libswscale"
-if pkg-config --exists $kvm_pkgs; then
-    gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -DCONFIG_KVM_FFMPEG $(pkg-config --cflags $kvm_pkgs) \
-        "$src/progs/kvm-worker.c" "$src/progs/kvm-protocol.c" "$src/progs/kvm-decode.c" \
-        $(pkg-config --libs $kvm_pkgs) -lm -o "$out/kvm-worker"
+extdisplay_pkgs="json-c libavcodec libavutil libswscale"
+if pkg-config --exists $extdisplay_pkgs; then
+    gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -DCONFIG_EXTDISPLAY_FFMPEG $(pkg-config --cflags $extdisplay_pkgs) \
+        "$src/progs/extdisplay-worker.c" "$src/progs/extdisplay-protocol.c" "$src/progs/extdisplay-decode.c" \
+        $(pkg-config --libs $extdisplay_pkgs) -lm -o "$out/extdisplay-worker"
     gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags $(pkg-config --cflags json-c) \
-        -I"$src/base/include" -I"$src/base" "$src/progs/kvm.c" "$src/progs/kvm-setup.c" "$src/progs/kvm-client.c" \
-        "$src/progs/kvm-protocol.c" "$out"/obj/base-*.o $libs $(pkg-config --libs json-c) -o "$out/kvm"
+        -I"$src/base/include" -I"$src/base" "$src/progs/extdisplay.c" "$src/progs/extdisplay-setup.c" "$src/progs/extdisplay-client.c" \
+        "$src/progs/extdisplay-protocol.c" "$out"/obj/base-*.o $libs $(pkg-config --libs json-c) -o "$out/extdisplay"
 else
-    echo "build-check: kvm not built: json-c and FFmpeg (libavcodec, libavutil, libswscale) are not all installed" >&2
+    echo "build-check: extdisplay not built: json-c and FFmpeg (libavcodec, libavutil, libswscale) are not all installed" >&2
 fi
-# The extended display's broker (tools/KVM.md), built under -Werror as make.sh installs it.
+# The extended display's broker (tools/EXTDISPLAY.md), built under -Werror as make.sh installs it.
 if pkg-config --exists openssl; then
-    gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $(pkg-config --cflags openssl) -o "$out/kvm-broker" \
-        "$src/progs/kvm-broker.c" "$src/progs/kvm-broker-net.c" "$src/progs/kvm-broker-pump.c" \
-        "$src/progs/kvm-broker-tls.c" $(pkg-config --libs openssl)
+    gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $(pkg-config --cflags openssl) -o "$out/extdisplay-broker" \
+        "$src/progs/extdisplay-broker.c" "$src/progs/extdisplay-broker-net.c" "$src/progs/extdisplay-broker-pump.c" \
+        "$src/progs/extdisplay-broker-tls.c" $(pkg-config --libs openssl)
 fi
 gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags \
     -I"$src/base/include" -I"$src/base" "$src/progs/settings.c" "$src/progs/files.c" "$src/progs/auth.c" \

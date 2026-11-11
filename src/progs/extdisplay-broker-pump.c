@@ -1,4 +1,4 @@
-/* kvm-broker-pump.c: the child that meets the network. Forked by kvm-broker
+/* extdisplay-broker-pump.c: the child that meets the network. Forked by extdisplay-broker
  * for one attempt, it enters the session namespace, binds the listener to the
  * leased device's link-local address, prepares OpenSSL, and then gives up
  * everything before it reads a byte from the peer: nobody, no groups, no
@@ -36,7 +36,7 @@
 #include <openssl/crypto.h>
 #include <openssl/rand.h>
 
-#include "kvm-broker.h"
+#include "extdisplay-broker.h"
 
 #ifndef SO_BINDTOIFINDEX
 #define SO_BINDTOIFINDEX 62
@@ -74,7 +74,7 @@ static int keep_descriptors(const struct pump_args *a)
 
 static int make_listener(int ifindex, const struct in6_addr *address)
 {
-    struct sockaddr_in6 local = { .sin6_family = AF_INET6, .sin6_port = htons(KVM_BROKER_PORT),
+    struct sockaddr_in6 local = { .sin6_family = AF_INET6, .sin6_port = htons(EXTDISPLAY_BROKER_PORT),
                                   .sin6_addr = *address, .sin6_scope_id = (uint32_t)ifindex };
     int one = 1, fd = socket(AF_INET6, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     if (fd < 0) return -1;
@@ -170,7 +170,7 @@ static int landlock(void)
     BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS), \
     BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr))
 #else
-#error "kvm-broker: no seccomp filter for this architecture"
+#error "extdisplay-broker: no seccomp filter for this architecture"
 #endif
 
 static int install(struct sock_filter *filter, unsigned short length)
@@ -225,7 +225,7 @@ static int sandbox(void)
     return landlock() == 0 && seccomp_base() == 0 ? 0 : -1;
 }
 
-#ifdef KVM_BROKER_TEST_PROBES
+#ifdef EXTDISPLAY_BROKER_TEST_PROBES
 /* Test build only: what the sandboxed pump can still do, reported to the
  * broker, which logs it. */
 static void probes(void)
@@ -268,19 +268,19 @@ void pump_main(struct pump_args *a)
     if (setns(PUMP_NETNS, CLONE_NEWNET) < 0) fail("cannot enter the session namespace");
     close(PUMP_NETNS);
     if ((listener = make_listener(a->ifindex, &a->linklocal)) < 0) fail("cannot listen on the link-local address");
-    if (kvm_broker_tls_init() < 0 || !(ctx = kvm_broker_tls_context(&a->key)) || !(ssl = SSL_new(ctx)) ||
+    if (extdisplay_broker_tls_init() < 0 || !(ctx = extdisplay_broker_tls_context(&a->key)) || !(ssl = SSL_new(ctx)) ||
         RAND_bytes(warm, sizeof warm) != 1) {
         fail("TLS setup failed");
     }
     OPENSSL_cleanse(warm, sizeof warm);
     if (drop_privileges(a) < 0 || sandbox() < 0) fail("sandbox unavailable");
-#ifdef KVM_BROKER_TEST_PROBES
+#ifdef EXTDISPLAY_BROKER_TEST_PROBES
     probes();
 #endif
     status_send("listening");
 
     for (;;) {
-        long long left = a->deadline_ms - kvm_broker_now_ms();
+        long long left = a->deadline_ms - extdisplay_broker_now_ms();
         struct pollfd p = { listener, POLLIN, 0 };
         if (left <= 0) {
             status_send("timeout");
@@ -306,23 +306,23 @@ void pump_main(struct pump_args *a)
      * keeps the session namespace, and the leased device, alive. */
     struct linger abort_close = { 1, 0 };
     if (setsockopt(tcp, SOL_SOCKET, SO_LINGER, &abort_close, sizeof abort_close) < 0) fail("socket options");
-    long long deadline = kvm_broker_now_ms() + KVM_BROKER_HANDSHAKE_SECONDS * 1000LL;
+    long long deadline = extdisplay_broker_now_ms() + EXTDISPLAY_BROKER_HANDSHAKE_SECONDS * 1000LL;
     if (deadline > a->deadline_ms) deadline = a->deadline_ms;
-    int handshake = kvm_broker_tls_accept(ssl, tcp, deadline);
+    int handshake = extdisplay_broker_tls_accept(ssl, tcp, deadline);
     OPENSSL_cleanse(&a->key, sizeof a->key);
     if (handshake < 0) {
-        status_send(kvm_broker_now_ms() >= a->deadline_ms ? "timeout" : "handshake-failed");
+        status_send(extdisplay_broker_now_ms() >= a->deadline_ms ? "timeout" : "handshake-failed");
         _exit(0);
     }
     status_send("paired");
     /* The broker shuts its end of the status socket down to stop the pump. */
-    int pumped = kvm_broker_pump(ssl, tcp, PUMP_PLAIN, PUMP_STATUS);
+    int pumped = extdisplay_broker_pump(ssl, tcp, PUMP_PLAIN, PUMP_STATUS);
     /* close_notify is queued: FIN after it, then up to 250 ms for the peer
      * to close too, so the reset of the abortive close cannot overtake it. */
     if (shutdown(tcp, SHUT_WR) == 0) {
         char discard[4096];
-        for (long long end = kvm_broker_now_ms() + 250;;) {
-            long long left = end - kvm_broker_now_ms();
+        for (long long end = extdisplay_broker_now_ms() + 250;;) {
+            long long left = end - extdisplay_broker_now_ms();
             struct pollfd p = { tcp, POLLIN, 0 };
             if (left <= 0 || poll(&p, 1, (int)left) <= 0) break;
             ssize_t n = read(tcp, discard, sizeof discard);
