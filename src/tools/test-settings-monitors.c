@@ -119,7 +119,8 @@ static void command_output(char *const argv[], char *buf, size_t size)
     } else if (strcmp(argv[0], LOCACHY_REPOS) == 0 && argv[1] && !strcmp(argv[1], "status")) {
         /* As locachy-repos says it: the repositories' names carry the level. */
         snprintf(buf, size, "level\tx86-64-v3\ncpu\tznver4\ncore\ton\nextra\ton\nmultilib\toff\n"
-                 "stack\tcachyos-znver4 cachyos-core-znver4 core-x86-64-v3 extra-x86-64-v3 core extra\n");
+                 "stack\tcachyos-znver4 cachyos-core-znver4 core-x86-64-v3 extra-x86-64-v3 core extra\n"
+                 "next\t2026-11-12 03:14\n");
     } else {
         pending_command = argv[0];
         pid_t pid = fixture_fork();
@@ -2877,6 +2878,38 @@ int main(int argc, char **argv)
     adjust(-1);
     assert(lock_after == 60 && strstr(rc_log, "lock_after=60;") && hups == hups_before + 7);
     puts("PASS Lock when idle: 10 min unless set, round never 1 2 5 10 15 30 60, written as lock_after");
+    /* Software sources: the automatic ranking row cycles rc.conf's repos_rank_days
+     * (by hand, 1, 2, 3, 5, 7, 14, and round again); its line says when the next is. */
+    rc_log[0] = '\0';
+    selected = rank_auto_index();
+    assert(repos_rank_days == 1 && tnet_index() == rank_auto_index() + 1 && repo_index() + NREPO_SECTIONS + 2 == tnet_index());
+    adjust(+1);
+    assert(repos_rank_days == 2 && !strcmp(rc_log, "repos_rank_days=2;") && strstr(notice, "every 2 days"));
+    adjust(-1);
+    assert(repos_rank_days == 1 && !strcmp(rc_log, "repos_rank_days=2;repos_rank_days=1;"));
+    adjust(-1);
+    assert(repos_rank_days == 0 && strstr(rc_log, "repos_rank_days=0;") && strstr(notice, "by hand only"));
+    adjust(-1);
+    assert(repos_rank_days == 14); /* past the first, the last */
+    adjust(+1);
+    assert(repos_rank_days == 0);
+    fail_rc = 1;
+    snprintf(notice, sizeof notice, "%s", "untouched");
+    adjust(+1);
+    assert(repos_rank_days == 0 && strstr(notice, "Cannot write") && strstr(notice, "rc.conf"));
+    fail_rc = 0;
+    int category_before = category, page_before_rank = settings_page;
+    settings_page = 1;
+    show_category(CAT_SYSTEM, 1);
+    selected = rank_auto_index();
+    draw();
+    assert(canvas_has("Rank mirrors automatically") && canvas_has("< only by hand >") && canvas_has("next 2026-11-12 03:14"));
+    repos_rank_days = 1;
+    draw();
+    assert(canvas_has("< every 1 day >") && canvas_has("next 2026-11-12 03:14"));
+    show_category(category_before, 1);
+    settings_page = page_before_rank;
+    puts("PASS Software sources: the automatic ranking cycles repos_rank_days by hand, 1 2 3 5 7 14, and says when next");
     /* Fingerprints: installed and on are two rows, as for Tailscale. */
     rc_log[0] = '\0';
     int forks_before = forks;
@@ -2951,7 +2984,8 @@ int main(int argc, char **argv)
            lock_mode_index() == hsi_index() + 1 && duress_index() == lock_mode_index() + 1 &&
            bri_index() == duress_index() + 2 && mach_index() == bri_index() + 1 &&
            upd_index() == mach_index() + 1 && boot_index() == upd_index() + 5 && opt_index() == boot_index() + 5 &&
-           repo_index() == opt_index() + NOPT_MODULES && tnet_index() == repo_index() + NREPO_SECTIONS + 1 &&
+           repo_index() == opt_index() + NOPT_MODULES && rank_auto_index() == repo_index() + NREPO_SECTIONS + 1 &&
+           tnet_index() == rank_auto_index() + 1 &&
            circ_index() == tnet_index() + 1 && clicks_index() == circ_index() + 3 &&
            imek_index() == clicks_index() + 1 &&
            system_keymap_index() == imek_index() + NIME_KEYS && kb_index() == system_keymap_index() + 1 &&

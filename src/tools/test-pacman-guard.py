@@ -18,7 +18,8 @@ SCRATCH = sys.argv.pop(1) if len(sys.argv) > 1 else None
 GUARD = SOURCE / "link/locachy-pacman-guard"
 LINUX = os.path.isdir("/proc/self") and hasattr(os, "pidfd_open")
 
-# Runs the real guard with the lock and the job decision under the test's control.
+# Runs the real guard with the lock, the job decision and the published
+# repository databases (sync directory, pacman.conf, record) under the test's control.
 WRAPPER = """import importlib.machinery, importlib.util, sys, types
 loader = importlib.machinery.SourceFileLoader("guard", sys.argv[1])
 spec = importlib.util.spec_from_loader("guard", loader)
@@ -28,8 +29,13 @@ m.LOCK = sys.argv[2]
 real = m.jobs()
 mode = sys.argv[3]
 m.jobs = lambda: types.SimpleNamespace(execution_mode=lambda: mode, pacman_ancestor=real.pacman_ancestor)
+m.PACMAN_SYNC, m.PACMAN_CONF = sys.argv[4], sys.argv[5]
+stack = m.stack()
+stack.RECORD = sys.argv[6]
+m.stack = lambda: stack
 sys.exit(m.pre())
 """
+STACK = SOURCE / "link/locachy_stack.py"
 
 
 def busy(lock):
@@ -53,6 +59,13 @@ class PacmanGuard(unittest.TestCase):
         self.dir = Path(self.tmp.name)
         self.lock = str(self.dir / "pkg.lock")
         (self.dir / "wrapper.py").write_text(WRAPPER)
+        # The host's repository databases: one repository, no record yet.
+        self.sync = self.dir / "sync"
+        self.sync.mkdir()
+        (self.sync / "core.db").write_bytes(b"core as LOCachy published it")
+        self.conf = self.dir / "pacman.conf"
+        self.conf.write_text("[options]\nArchitecture = x86_64\n[core]\nServer = file:///nonexistent\n")
+        self.record = self.dir / "sync-published.json"
         self.procs = []
         self.addCleanup(self.kill_all)
 
@@ -71,7 +84,8 @@ class PacmanGuard(unittest.TestCase):
         path = self.dir / "pacman"
         path.write_text(
             "#!/bin/sh\n"
-            f'python3 -I -B "{self.dir}/wrapper.py" "{GUARD}" "{self.lock}" "{mode}"\n'
+            f'python3 -I -B "{self.dir}/wrapper.py" "{GUARD}" "{self.lock}" "{mode}" '
+            f'"{self.sync}" "{self.conf}" "{self.record}"\n'
             "status=$?\n"
             'echo "guard=$status"\n'
             f'if [ "$status" = 0 ] && [ "{hold}" = 1 ]; then sleep 30; fi\n'
@@ -130,9 +144,46 @@ class PacmanGuard(unittest.TestCase):
 
     def test_the_guard_refuses_outside_pacman(self):
         result = subprocess.run(["python3", "-I", "-B", str(self.dir / "wrapper.py"), str(GUARD), self.lock,
-                                 "queue"], capture_output=True, text=True, timeout=10)
+                                 "queue", str(self.sync), str(self.conf), str(self.record)],
+                                capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 1)
         self.assertIn("not run by pacman", result.stderr)
+
+    def publish(self):
+        subprocess.run(["python3", "-I", "-B", str(STACK), "record", "--sync", str(self.sync),
+                        "--file", str(self.record)], check=True, timeout=30)
+
+    def test_the_databases_locachy_published_pass(self):
+        self.publish()
+        result = subprocess.run([self.fake_pacman(hold=0)], capture_output=True, text=True, timeout=30)
+        self.assertIn("guard=0", result.stdout, result.stderr)
+        self.wait_until_free()
+
+    def test_databases_a_plain_sync_replaced_are_refused_and_nothing_held(self):
+        self.publish()
+        (self.sync / "core.db").write_bytes(b"core as a plain pacman -Sy fetched it")
+        result = subprocess.run([self.fake_pacman(hold=0)], capture_output=True, text=True, timeout=30)
+        self.assertIn("guard=1", result.stdout)
+        self.assertIn("core.db is not the database LOCachy published", result.stderr)
+        self.assertIn("nothing changed", result.stderr)
+        self.assertNotEqual(result.returncode, 0)  # AbortOnFail: pacman stops
+        self.assertFalse(busy(self.lock))  # refused under the domain, which it then let go
+
+    def test_an_unreadable_record_refuses(self):
+        self.record.write_text("{not json")
+        result = subprocess.run([self.fake_pacman(hold=0)], capture_output=True, text=True, timeout=30)
+        self.assertIn("guard=1", result.stdout)
+        self.assertIn("unreadable", result.stderr)
+        self.assertFalse(busy(self.lock))
+
+    def test_a_system_job_is_not_checked_against_the_record(self):
+        # A LOCachy job's own transaction publishes the databases itself.
+        self.publish()
+        (self.sync / "core.db").write_bytes(b"changed")
+        pacman = self.start([self.fake_pacman(hold=1, mode="job")])
+        self.assertEqual(pacman.stdout.readline().strip(), "guard=0")
+        os.kill(pacman.pid, signal.SIGKILL)
+        pacman.wait(timeout=10)
 
 
 if __name__ == "__main__":

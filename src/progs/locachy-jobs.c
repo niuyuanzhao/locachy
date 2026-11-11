@@ -140,6 +140,7 @@ static const struct kind kinds[] = {
     { "kernel-select", "locachy-pkg", { "kernel", "select" }, C_KERNEL },
     { "kernel-headers", "locachy-pkg", { "kernel", "headers" }, C_ONOFF },
     { "repos-rank", "locachy-repos", { "rank" }, C_NONE },
+    { "repos-rank-due", "locachy-repos", { "rank", "--due" }, C_NONE }, /* the periodic one (rank-timer) */
     { "repos-set", "locachy-repos", { "apply", "--set" }, C_SECTION },
     { "boot", "locachy-boot", { NULL }, C_BOOT },
     { "locachy-rebuild", "locachy-pkg", { "rebuild" }, C_REBUILD },
@@ -705,7 +706,7 @@ static int in_pkg_domain(const struct job *j)
 {
     static const char *const kinds[] = {
         "pkg-install", "pkg-remove", "pkg-swap", "pkg-sync", "pkg-plan", "pkg-apply",
-        "kernel-select", "kernel-headers", "repos-rank", "repos-set", "locachy-rebuild", "boot",
+        "kernel-select", "kernel-headers", "repos-rank", "repos-rank-due", "repos-set", "locachy-rebuild", "boot",
         "secure-boot", "security-policy",
         "app-host-build", /* a host program's build: packages on the host (app-build stays out) */
         NULL,

@@ -29,7 +29,10 @@ Updates of the host, LOCachy, its app presets and the containers (see the part b
   locachy-pkg plan [--cached] [--machine]   check, and show what an update would do
   locachy-pkg apply [TARGET...]             do the last plan (all of it, or TARGET...); with
                                             LOCachy's update: its source and updater first,
-                                            then the rest checked again by it and done
+                                            then the rest checked again by it and done;
+                                            refused before any change (status 3) while a
+                                            source signing key of the host's AUR packages
+                                            is not trusted yet
   locachy-pkg update [--yes]                plan, show it, ask once, apply all
   locachy-pkg rebuild [--force]             LOCachy's programs built again (make.sh --boot)
                                             unless built against the host as it is; pacman's
@@ -198,7 +201,32 @@ def get_installed_size(pkg_name):
     return ""
 
 
+def host_databases_mismatch():
+    """None when the host's repository databases are the ones LOCachy published
+    (or it has published none here yet: a system from before the stack), else
+    what differs. A plain pacman -Sy replaces them with the raw ones, on which
+    pacman takes each package from the first repository that has it."""
+    stack = helper_module("locachy_stack")
+    if not os.path.exists(stack.RECORD):
+        return None
+    return stack.check(os.path.join(os.path.dirname(LOCAL_DB), "sync"),
+                       stack.repositories(PACMAN_CONFIG), stack.RECORD)
+
+
 def run_pacman(cmd):
+    """A pacman command of LOCachy's own on the host. A transaction that reads
+    the repositories (-S) runs only on the databases LOCachy published: a job's
+    pacman passes locachy-pacman-guard without that check."""
+    if re.match(r"pacman -S", cmd):
+        try:
+            mismatch = host_databases_mismatch()
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as e:
+            mismatch = f"the published repository databases cannot be checked ({e})"
+        if mismatch:
+            print(f"locachy-pkg: {mismatch}; nothing changed. A plain pacman replaced the stacked "
+                  "repository databases: check for updates and apply them to publish them again",
+                  file=sys.stderr)
+            return False
     if os.path.exists("/run/netns/locachy-net"):
         cmd = f"ip netns exec locachy-net {cmd}"
     p = subprocess.run(cmd, shell=True)
@@ -355,7 +383,7 @@ def needed_vulkan_drivers(repo_pkgs, aur_pkgs):
         return []
     depends = []
     for p in repo_pkgs:
-        out = subprocess.run(["pacman", "-Si", "--", p], capture_output=True, text=True,
+        out = subprocess.run(["pacman", "-Si"] + sync_options() + ["--", p], capture_output=True, text=True,
                              env=dict(os.environ, LC_ALL="C")).stdout or ""
         for line in out.splitlines():
             if line.startswith("Depends On") and " : " in line:
@@ -382,7 +410,7 @@ def install_missing(missing, tracked):
                 print(f"locachy-pkg: local recipe for {p} is missing; not replaced from the AUR", file=sys.stderr)
                 return False
             local_pkgs.append(p)
-        elif subprocess.run(["pacman", "-Sp", p], stdout=subprocess.DEVNULL,
+        elif subprocess.run(["pacman", "-Sp"] + sync_options() + [p], stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL).returncode == 0:
             repo_pkgs.append(p)
         else:
@@ -569,7 +597,8 @@ def unknown_packages(names):
     leaf nothing provides stops every sync and update after it."""
     local = local_names()
     left = [n for n in names if n not in local and subprocess.run(
-        ["pacman", "-Sp", n], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0]
+        ["pacman", "-Sp"] + sync_options() + [n], stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL).returncode != 0]
     found = aur_info(left) if left else {}
     return [n for n in left if n not in found]
 
@@ -768,9 +797,17 @@ def cmd_remove(pkgs):
 #
 #   host       the repositories' updates (checkupdates: found without
 #              touching pacman's own database) and the AUR's (its RPC, for
-#              the packages pacman calls foreign); applied with pacman -Syu
-#              and locachy-build -i (pikaur)
-#   locachy    LOCachy's own programs built again against the updated host
+#              the packages pacman calls foreign); applied with pacman -Su
+#              over the checked databases as the stack resolves them
+#              (locachy_stack: the newest version, the optimised layer on an
+#              exact tie), published first, and locachy-build -i (pikaur).
+#              Before anything is changed (the source, the presets, the
+#              host), the source signing keys those AUR builds check with
+#              are looked up (locachy-build --check-keys): one not trusted
+#              yet refuses the whole Apply, with what a person checks it
+#              with; nothing trusts a key but locachy-build --trust-key, run
+#              by that person. The build itself stops for one as well.
+#   locachy   LOCachy's own programs built again against the updated host
 #              (make.sh --boot), whatever package changed: the compiler, C
 #              libraries, headers or any library they link. pacman's hook
 #              (91-locachy-rebuild) does it after every transaction, however
@@ -828,7 +865,14 @@ SOURCE_PENDING_FILE = "/usr/local/lib/locachy/source-pending"
 SELF = "/usr/local/bin/locachy-pkg"
 INIT = "/usr/local/lib/locachy/init"
 PLAN_FILE = "/var/lib/locachy/plan"
-CHECK_DB = "/var/lib/locachy/checkupdates"
+CHECK_DB = "/var/lib/locachy/checkupdates"  # the repositories' databases as checkupdates fetched them
+# The same databases as the stack resolves them (locachy_stack: the newest
+# version of each package, the optimised layer only on an exact tie). Every
+# view of the repositories reads this one: the plan and its snapshot, the
+# transaction, the information shown, and what a transaction publishes to the
+# host. CHECK_DB itself is what checkupdates fetched; every Check dates it at
+# the epoch and fetches it again (date_checked_databases).
+MERGED_DB = "/var/lib/locachy/checkupdates/merged"
 AUR_RPC = "https://aur.archlinux.org/rpc/v5/info"
 LOCAL_RECORDS = "/var/lib/locachy/local-packages"
 BUILD_TOOL = "/usr/local/bin/locachy-build"
@@ -1495,26 +1539,87 @@ def vercmp(a, b):
     return int(out or "0")
 
 
+def merge_checked():
+    """MERGED_DB from CHECK_DB as the stack resolves it (locachy_stack). Its
+    local database is the real one, linked as checkupdates links it into
+    CHECK_DB: pacman only ever reads it through MERGED_DB."""
+    stack = helper_module("locachy_stack")
+    os.makedirs(MERGED_DB, mode=0o755, exist_ok=True)
+    local = os.path.join(MERGED_DB, "local")
+    if not (os.path.islink(local) and os.readlink(local) == LOCAL_DB):
+        if os.path.islink(local) or os.path.isfile(local):
+            os.unlink(local)
+        elif os.path.isdir(local):
+            os.rmdir(local)  # only ever empty: nothing is written through it
+        os.symlink(LOCAL_DB, local)
+    stack.merge(os.path.join(CHECK_DB, "sync"), os.path.join(MERGED_DB, "sync"),
+                stack.repositories(PACMAN_CONFIG))
+
+
+def publish_merged():
+    """The checked databases as the stack resolves them (MERGED_DB) as the
+    host's, and recorded as published for locachy-pacman-guard. Under pacman's
+    own lock, so no pacman reads them half replaced; released before pacman
+    runs on them."""
+    sync = os.path.join(MERGED_DB, "sync")
+    if not glob.glob(os.path.join(sync, "*.db")):
+        raise RuntimeError("no checked repository databases; check for updates first")
+    transaction = helper_module("locachy_transaction")
+    db_path = os.path.dirname(LOCAL_DB)
+    with transaction.real_database_lock(db_path):
+        transaction.publish_sync(sync, os.path.join(db_path, "sync"))
+        transaction.record_published(os.path.join(db_path, "sync"))
+
+
+def ignored_packages():
+    """The packages pacman.conf holds back (IgnorePkg, and the members of
+    IgnoreGroup in the checked view): pacman -Qu, and so checkupdates, leave
+    them out of the updates, and so does the plan."""
+    conf = ["pacman-conf", "--config", PACMAN_CONFIG]
+    names = set(subprocess.run(conf + ["IgnorePkg"], capture_output=True, text=True).stdout.split())
+    for group in subprocess.run(conf + ["IgnoreGroup"], capture_output=True, text=True).stdout.split():
+        names |= set(subprocess.run(["pacman", "-Sgq", group, "--dbpath", MERGED_DB],
+                                    capture_output=True, text=True).stdout.split())
+    return names
+
+
+def date_checked_databases():
+    """Date CHECK_DB's databases and their signatures at the epoch, so that
+    checkupdates' refresh fetches each of them whole. pacman keeps a database
+    that is newer than the mirror's copy, and it fetches the signature from the
+    mirror it asks. When a stalled mirror fails over to an older one, the older
+    signature would be checked against the kept database: "signature ... is
+    invalid", and the Check fails until a newer copy turns up."""
+    sync = os.path.join(CHECK_DB, "sync")
+    if not os.path.isdir(sync):
+        return
+    for name in os.listdir(sync):
+        if name.endswith(".db") or name.endswith(".db.sig"):
+            os.utime(os.path.join(sync, name), (0, 0))
+
+
 def repo_updates():
     """The host's repository updates and every repository package's newest
-    version, from a copy of the sync databases updated aside."""
+    version, from a copy of the sync databases updated aside (checkupdates,
+    which only fetches here) and resolved by the stack's rule: not the first
+    repository that has a package, its newest version (merge_checked)."""
     os.makedirs(CHECK_DB, mode=0o755, exist_ok=True)
+    date_checked_databases()
     env = dict(os.environ, CHECKUPDATES_DB=CHECK_DB)
     p = subprocess.run(in_net(["env", f"CHECKUPDATES_DB={CHECK_DB}", "checkupdates"]),
                        capture_output=True, text=True, env=env)
     if p.returncode not in (0, 2):
         raise RuntimeError(f"checkupdates failed: {p.stderr.strip()}")
-    updates = []
-    for line in p.stdout.splitlines():
-        parts = line.split()
-        if len(parts) >= 4 and parts[2] == "->":
-            updates.append((parts[0], parts[1], parts[3]))
+    merge_checked()
     newest = {}
-    out = subprocess.run(["pacman", "-Sl", "--dbpath", CHECK_DB], capture_output=True, text=True).stdout
+    out = subprocess.run(["pacman", "-Sl", "--dbpath", MERGED_DB], capture_output=True, text=True).stdout
     for line in out.splitlines():
         parts = line.split()
         if len(parts) >= 3 and parts[1] not in newest:
             newest[parts[1]] = parts[2]
+    held = ignored_packages()
+    updates = [(name, old, newest[name]) for name, old in sorted(local_packages(LOCAL_DB).items())
+               if name in newest and name not in held and vercmp(newest[name], old) > 0]
     return updates, newest
 
 
@@ -1541,13 +1646,30 @@ def aur_versions(names):
     return {n: v for n, (v, _) in aur_info(names).items()}
 
 
+def sync_options(view=None):
+    """pacman's options for a query of the repositories: the configuration the
+    stack reads (PACMAN_CONFIG), and the stack's view of the databases once
+    checked (MERGED_DB), else the host's own. view: a dbpath to use instead."""
+    options = ["--config", PACMAN_CONFIG]
+    if view:
+        options += ["--dbpath", view]
+    elif os.path.isdir(os.path.join(MERGED_DB, "sync")):
+        options += ["--dbpath", MERGED_DB]
+    return options
+
+
 def repo_info(name):
-    """(repository, version, description) of name in the sync databases (the
-    copy plan updates, if there is one: it is the fresher), None if none has it."""
-    cmd = ["pacman", "-Si"]
-    if os.path.isdir(os.path.join(CHECK_DB, "sync")):
-        cmd += ["--dbpath", CHECK_DB]
-    p = subprocess.run(cmd + ["--", name], capture_output=True, text=True,
+    """(repository, version, description) of name in the sync databases, None if
+    none has it. A bare name is the package as the stack resolves it (MERGED_DB,
+    the copy plan updates, if there is one). REPO/NAME asks what that repository
+    itself carries, so it reads the databases as fetched (CHECK_DB): the merged
+    view leaves out every entry a layer above or below wins, such as [extra]'s
+    labwc once CachyOS has rebuilt it."""
+    if "/" in name and os.path.isdir(os.path.join(CHECK_DB, "sync")):
+        options = sync_options(CHECK_DB)
+    else:
+        options = sync_options()
+    p = subprocess.run(["pacman", "-Si"] + options + ["--", name], capture_output=True, text=True,
                        env=dict(os.environ, LC_ALL="C"))
     if p.returncode != 0:
         return None
@@ -1626,9 +1748,7 @@ def cmd_search(terms):
                 name, "recipe", pkg, extras, conf.get("command", ""),
                 conf.get("arguments", ""), conf.get("network", "1"), desc.replace("\t", " ")
             ]))
-    cmd = ["pacman", "-Ss"]
-    if os.path.isdir(os.path.join(CHECK_DB, "sync")):
-        cmd += ["--dbpath", CHECK_DB]
+    cmd = ["pacman", "-Ss"] + sync_options()
     p = subprocess.run(cmd + ["--"] + terms, capture_output=True, text=True,
                        env=dict(os.environ, LC_ALL="C"))
     repo_rows = []
@@ -1828,7 +1948,7 @@ def plan(check_source=True, apps_commit=None):
         # leaves the host lacks and the repositories have go into the same
         # transaction, so into its build and contract roots too.
         declared = [n for n in declared_missing(host) if n in newest and n not in local_owned]
-        _pending_plan_lock = transaction.snapshot(LOCAL_RECORDS, os.path.join(CHECK_DB, "sync"), PACMAN_CONFIG,
+        _pending_plan_lock = transaction.snapshot(LOCAL_RECORDS, os.path.join(MERGED_DB, "sync"), PACMAN_CONFIG,
                                                    transaction_host_hash(), prepared_recipes, candidate_locks,
                                                    test_source=SRC, missing=declared)
     foreign = {n: v for n, v in host.items() if n not in newest and n not in local_owned}
@@ -2045,7 +2165,7 @@ def install_tracked(missing):
     selected = set(installed) | set(missing)
     candidates, pins = checked_local_candidates(baselines, selected)
     transaction = helper_module("locachy_transaction")
-    reference = transaction.snapshot(LOCAL_RECORDS, os.path.join(CHECK_DB, "sync"), PACMAN_CONFIG,
+    reference = transaction.snapshot(LOCAL_RECORDS, os.path.join(MERGED_DB, "sync"), PACMAN_CONFIG,
                                      transaction_host_hash(), candidates, pins, test_source=SRC)
     return install_prepared_host(reference, baselines)
 
@@ -2137,7 +2257,15 @@ def apply_target(t, rows):
             # The prepared transaction published its sync databases: this
             # resolves against the state just installed.
             return install_planned_missing(mine, tracked)
-        ok = run(["pacman", "-Syu", "--noconfirm"], net=True)
+        # Not -Syu: pacman would fetch the raw databases and take each package
+        # from the first repository that has it. The checked set, as the
+        # stack resolves it, is what the plan showed; publish it, then upgrade.
+        try:
+            publish_merged()
+        except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+            print(f"locachy-pkg: repository databases not published: {e}", file=sys.stderr)
+            return False
+        ok = run(["pacman", "-Su", "--noconfirm"], net=True)
         aur = [r[2] for r in mine if r[1] == "aur"]
         if ok and aur:
             ok = run([BUILD_TOOL, "-i"] + aur)
@@ -2293,6 +2421,83 @@ def install_source_first(commit):
     return finish_source_setup()
 
 
+KEYS_REFUSED = 3  # locachy-build's status for keys not trusted yet; the jobs' "keys" state
+FINGERPRINT = re.compile(r"[0-9A-F]{40}|[0-9A-F]{64}")
+
+
+def shown_field(text):
+    """A field of what the AUR said, as it is shown: printable, one word."""
+    text = "".join(c for c in text if c.isprintable() and not c.isspace())
+    return text if text and text != "-" else ""
+
+
+def check_aur_keys(rows, after_source=False):
+    """0 when every source signing key the plan's AUR packages for the host
+    are checked with is in the build user's keyring. Else the whole Apply is
+    refused before anything is changed: KEYS_REFUSED with each key shown (its
+    package, its fingerprint, the recipe that declares it, its upstream and
+    the command a person runs as root once they have checked it), 1 when the
+    keys could not be looked up. Read only: locachy-build --check-keys
+    builds, fetches into a keyring, imports and trusts nothing, and nothing
+    here does either; a key is trusted by a person, never by an update.
+    after_source: the second part of an Apply whose LOCachy source was
+    installed first; that stays, nothing after it is begun."""
+    aur = sorted({r[2] for r in rows if r[0] == "host" and r[1] == "aur"})
+    if not aur:
+        return 0
+    unchanged = ("Nothing more was changed: the LOCachy source installed first stays; no package, "
+                 "repository database or package record." if after_source else
+                 "Nothing was changed: no package, repository database, package record or plan.")
+    print("===> prepare: source signing keys of the AUR packages, before host changes", flush=True)
+    command = [BUILD_TOOL, "--check-keys"] + aur
+    print("===> " + " ".join(command), flush=True)
+    try:
+        p = subprocess.run(command, capture_output=True, text=True)
+    except OSError as e:
+        p = subprocess.CompletedProcess(command, 1, stdout="", stderr=str(e))
+    if p.returncode == 0:
+        return 0
+    keys = []
+    for line in (p.stdout or "").splitlines() if p.returncode == KEYS_REFUSED else []:
+        fields = line.split("\t")
+        if len(fields) != 5:
+            continue
+        needed, recipe, key = fields[0], fields[1], fields[2].upper()
+        packages = [n for n in needed.split(",") if PACKAGE_NAME.fullmatch(n)]
+        if not FINGERPRINT.fullmatch(key) or not PACKAGE_NAME.fullmatch(recipe) or not packages:
+            continue
+        signed = [s for s in (shown_field(s) for s in fields[4].split(" ")) if s]
+        keys.append((packages, recipe, key, shown_field(fields[3]), signed))
+    if not keys:
+        why = (p.stderr or "").strip().splitlines()
+        print(f"locachy-pkg: the source signing keys of {' '.join(aur)} could not be checked"
+              f"{': ' + why[-1] if why else ''}", flush=True)
+        print("===> refused before any change: host (its AUR source signing keys could not be checked). "
+              f"{unchanged} Apply again when they can be.", flush=True)
+        return 1
+    print("locachy-pkg: apply refused before any change: source signing keys of AUR packages are not "
+          "trusted yet, and none is trusted by itself.", flush=True)
+    for packages, recipe, key, upstream, signed in keys:
+        quoted = urllib.parse.quote(recipe)
+        print(f"Source key to trust: {recipe} {key}")
+        print(f"  package:      {', '.join(packages)}")
+        print(f"  fingerprint:  {key}")
+        print(f"  declared by:  validpgpkeys of the AUR recipe {recipe}: "
+              f"https://aur.archlinux.org/cgit/aur.git/tree/.SRCINFO?h={quoted}")
+        if signed:
+            print(f"  signatures:   {' '.join(signed)}")
+        print(f"  check it at:  {upstream + ' (its upstream project), ' if upstream else ''}"
+              f"https://aur.archlinux.org/packages/{quoted}")
+        print(f"  then, root:   locachy-build --trust-key {key}")
+    fingerprints = sorted({k[2] for k in keys})
+    print("locachy-build --trust-key fetches each key, shows it, and adds it only when answered y. "
+          "Check each fingerprint with its upstream project first, then (as root):")
+    print("Trust them: locachy-build --trust-key " + " ".join(fingerprints))
+    print("===> refused before any change: host (source signing keys not trusted). "
+          f"{unchanged} Trust the keys, then apply again.", flush=True)
+    return KEYS_REFUSED
+
+
 def cmd_apply(targets, after_source=False):
     """The last plan, target by target. With a LOCachy update among the
     targets its source and updater come first; the updated updater then
@@ -2320,8 +2525,37 @@ def cmd_apply(targets, after_source=False):
     if not rows:
         sys.exit("locachy-pkg: no plan: run locachy-pkg plan first")
     order = [t for t in targets_of(rows) if not targets or t in targets]
+    # A plain pacman -Sy since the last publish leaves raw databases in the host's sync
+    # directory. With nothing to upgrade there is no host target, and the host target is
+    # the only thing that publishes them: publish them here whenever they differ from the
+    # record (the guard's advice, tools/UPDATES.md, is plan, then apply host).
+    if (not targets or "host" in targets) and "host" not in order:
+        try:
+            mismatch = host_databases_mismatch()
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as e:
+            mismatch = f"the published repository databases cannot be checked ({e})"
+        if mismatch:
+            print(f"===> host: {mismatch}; publishing the checked databases again", flush=True)
+            try:
+                publish_merged()
+            except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+                print(f"locachy-pkg: repository databases not published: {e}", file=sys.stderr)
+                print("===> not done: host", flush=True)
+                return 1
+            print("===> host: repository databases published", flush=True)
     commits = [r[4] for r in rows if r[:2] == ("locachy", "rebuild") and re.fullmatch(r"[0-9a-f]{40}", r[4])]
-    if commits and "locachy" in order and not after_source:
+    # A LOCachy source commit is installed first, by design, and then the
+    # updated updater checks the keys before any host target. The installed
+    # locachy-build may predate --check-keys, so the first phase asks it nothing.
+    source_first = bool(commits) and "locachy" in order and not after_source
+    # Before the host changes (its packages, its databases, its records): a key
+    # its AUR builds would stop for refuses all of it now, not after the
+    # transaction. (Not "not done": nothing of the host was begun.)
+    if "host" in order and not source_first:
+        refused = check_aur_keys(rows, after_source)
+        if refused:
+            return refused
+    if source_first:
         print("===> locachy: its source and updater first", flush=True)
         if not install_source_first(commits[-1]):
             print("===> locachy: not done", flush=True)

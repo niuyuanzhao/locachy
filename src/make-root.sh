@@ -231,8 +231,8 @@ grep -q '^Server' /etc/pacman.d/mirrorlist || die "/etc/pacman.d/mirrorlist has 
 if [ -n "$resumed" ]; then
     echo "== $level: build on mounted target $root, where the installation stopped (work: $work)"
     rm -f "$root/var/lib/pacman/db.lck" # its run's processes have all ended (a PID namespace of their own)
-    # Its databases are fetched again (-Syy), each with its signature: the
-    # system's own pacman synchronised them since, from its mirrors.
+    # The databases are fetched again (-Syy), each with its signature, and
+    # resolved by the stack again: the system's own pacman replaced them since.
 elif [ -n "$target" ]; then
     echo "== $level: build mounted target $root (work: $work)"
 else
@@ -366,14 +366,32 @@ owned_mounts+=("$root/run")
 mount -t tmpfs tmp "$root/tmp" -o mode=1777,strictatime,nodev,nosuid
 owned_mounts+=("$root/tmp")
 
+echo "== repositories: the stack's databases (log: $work/stack.log)"
+# pacman alone takes each package from the first repository that has it. The
+# stack means the newest version, the optimised layer only on an exact tie
+# (link/locachy_stack.py). So the databases are fetched aside as they are,
+# with their signatures, and the root gets them as the stack resolves them,
+# recorded as published (its locachy-pacman-guard compares them).
+stack=$here/link/locachy_stack.py
+mkdir -p "$work/raw-db"
+pacman --root "$root" --dbpath "$work/raw-db" --gpgdir "$gnupg" --config "$work/pacman.conf" \
+    "-Sy${resumed:+y}" >"$work/stack.log" 2>&1 ||
+    { tail -20 "$work/stack.log"; die "the repositories' databases were not fetched; the log is $work/stack.log"; }
+python3 -I "$stack" merge --config "$work/pacman.conf" --from "$work/raw-db/sync" \
+    --to "$root/var/lib/pacman/sync" >>"$work/stack.log" 2>&1 ||
+    { tail -5 "$work/stack.log"; die "the repositories' databases were not resolved; the log is $work/stack.log"; }
+python3 -I "$stack" record --sync "$root/var/lib/pacman/sync" --file "$root/var/lib/locachy/sync-published.json" ||
+    die "the root's repository databases were not recorded"
+
 echo "== install: ${packages[*]}"
 # The kernel package wants an initramfs generator; we make our own. Its
 # whole output goes to pacman.log; the console gets one line per package
 # fetched or installed, counted against the transaction's "Packages (N)".
+# -S, not -Sy: the databases are the stack's, above.
 pacman --root "$root" --dbpath "$root/var/lib/pacman" \
     --cachedir "$cache" --cachedir /var/cache/pacman/pkg \
     --gpgdir "$gnupg" --hookdir "$root/etc/pacman.d/hooks" --config "$work/pacman.conf" \
-    --noconfirm --needed --assume-installed initramfs "-Sy${resumed:+y}" "${packages[@]}" 2>&1 | tee "$work/pacman.log" |
+    --noconfirm --needed --assume-installed initramfs -S "${packages[@]}" 2>&1 | tee "$work/pacman.log" |
     awk '/^Packages \([0-9]+\)/ { total = substr($2, 2, length($2) - 2) }
          total && $2 == "downloading..." { printf "(%d/%s) downloading %s\n", ++fetched, total, $1; fflush() }
          $1 == "installing" { sub(/\.\.\.$/, "", $2); printf "(%d/%s) installing %s\n", ++installed, total, $2; fflush() }' ||

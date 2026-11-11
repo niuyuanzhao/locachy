@@ -40,6 +40,40 @@ class Routing(unittest.TestCase):
              mock.patch.object(jobs.os, "readlink", return_value="/init"):
             self.assertEqual(jobs.execution_mode(), "queue")
 
+    @mock.patch.object(jobs.os, "stat", return_value=types.SimpleNamespace(st_dev=1, st_ino=2))
+    def test_a_job_under_ip_netns_exec_is_verified_through_process_1s_hierarchy(self, _stat):
+        # ip netns exec mounts a fresh sysfs over /sys: no cgroup2 hierarchy
+        # in that private mount namespace. The hooks pacman runs there (the
+        # guard, the rebuild hook) must still see the job, from the system's.
+        member = str(os.getpid()) + "\n"
+        read = []
+
+        def read_text(p):
+            read.append(str(p))
+            if str(p) == "/proc/self/cgroup":
+                return "0::/locachy-jobs/job-7\n"
+            if str(p).startswith(jobs.CGROUP):
+                raise FileNotFoundError(2, "No such file or directory", str(p))
+            if str(p) == "/proc/1/root" + jobs.CGROUP + "/job-7/cgroup.procs":
+                return member
+            raise AssertionError(f"unexpected read {p}")
+
+        namespaces = {"/proc/self/ns/mnt": "mnt:[2]", "/proc/1/ns/mnt": "mnt:[1]"}
+        with mock.patch.object(jobs.Path, "read_text", read_text), \
+                mock.patch.object(jobs.os, "readlink", lambda p: namespaces[p]):
+            self.assertEqual(jobs.execution_mode(), "job")
+        self.assertEqual(read[-1], "/proc/1/root" + jobs.CGROUP + "/job-7/cgroup.procs")
+        # Not a member of the system's job cgroup: refused, not trusted.
+        member = "1\n"
+        with mock.patch.object(jobs.Path, "read_text", read_text), \
+                mock.patch.object(jobs.os, "readlink", lambda p: namespaces[p]):
+            self.assertRaisesRegex(RuntimeError, "membership", jobs.execution_mode)
+        # In process 1's own mount namespace a missing hierarchy is an error, not a detour.
+        same = {"/proc/self/ns/mnt": "mnt:[1]", "/proc/1/ns/mnt": "mnt:[1]"}
+        with mock.patch.object(jobs.Path, "read_text", read_text), \
+                mock.patch.object(jobs.os, "readlink", lambda p: same[p]):
+            self.assertRaises(FileNotFoundError, jobs.execution_mode)
+
     def test_chroot_is_explicit_offline(self):
         with mock.patch.object(jobs.os, "stat", side_effect=[types.SimpleNamespace(st_dev=1, st_ino=2),
                                                             types.SimpleNamespace(st_dev=1, st_ino=3)]):

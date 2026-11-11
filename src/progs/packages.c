@@ -930,6 +930,8 @@ static void label_of(const struct jobs_row *r, char *out, size_t size)
         snprintf(out, size, "kernel headers %s", a);
     } else if (strcmp(r->kind, "repos-rank") == 0) {
         snprintf(out, size, "%s", "locachy-repos rank");
+    } else if (strcmp(r->kind, "repos-rank-due") == 0) {
+        snprintf(out, size, "%s", "locachy-repos rank --due");
     } else if (strcmp(r->kind, "repos-set") == 0) {
         snprintf(out, size, "locachy-repos %s", a);
     } else if (strcmp(r->kind, "boot") == 0) {

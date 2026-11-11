@@ -94,6 +94,7 @@ check "a swap needs two packages" refuse pkg-swap only
 check "a kernel that is not linux* is refused" refuse kernel-select bash
 check "headers take on or off only" refuse kernel-headers maybe
 check "a repository section that is not settings'"'"' is refused" refuse repos-set core=maybe
+check "the periodic ranking takes no arguments of its own" refuse repos-rank-due --all
 check "a kind without arguments takes none" refuse pkg-sync extra
 check "the boot image takes no arguments" refuse boot --now
 check "a container name with a slash is refused" refuse app-build ../x
@@ -120,6 +121,7 @@ check "a swap is taken" accept pkg-swap python-dlib python-dlib-cuda
 check "a kernel is taken" accept kernel-select linux-cachyos-bore
 check "headers are taken" accept kernel-headers on
 check "a repository section is taken" accept repos-set extra=off
+check "the periodic ranking is taken" accept repos-rank-due
 check "a container removal with its data is taken" accept app-remove alpha.1 --data
 check "a firmware archive with a space in its path is taken" accept fw-local-install "$t/files/my fw.cab"
 check "a release by its address is taken" accept fw-install-release a45df35ac0e9 https://example.org/x.cab
@@ -138,6 +140,7 @@ check "the programs ran as their kinds say, an argument each, no shell" grep -q 
 check "a swap removes, then installs" sh -c "grep -A2 \"locachy-pkg remove python-dlib \[2\]\" \"$t/calls\" | grep -q \"locachy-pkg install python-dlib-cuda \[2\]\""
 check "a kernel: locachy-pkg kernel select" grep -q "locachy-pkg kernel select linux-cachyos-bore \[3\]" "$t/calls"
 check "a section: locachy-repos apply --set" grep -q "locachy-repos apply --set extra=off \[3\]" "$t/calls"
+check "the periodic ranking runs locachy-repos rank --due" grep -q "locachy-repos rank --due \[2\]" "$t/calls"
 check "a BIOS setting: locachy-firmware bios-set, two words" grep -q "locachy-firmware bios-set Boot.Order -1 \[3\]" "$t/calls"
 check "a security switch: locachy-security, its words" grep -q "locachy-security set login-skip off \[3\]" "$t/calls"
 check "a named path with a space is taken whole, as one copy" grep -q "fwupd-action local-install $t/jobs/[0-9]*.input \[3\]" "$t/calls"
@@ -217,6 +220,8 @@ check "a row says who asked" test "$(field "$a" 6)" = test-jobs
 check "a row has the last line of the output" test "$(field "$a" 8)" = "locachy-pkg: last line of job $a"
 
 # Cross-program visibility (jobs_mine): settings, settings-window, packages and firmware.
+# On an empty queue: the repeat above is its last job and may still run once c is done.
+wait_state "$repeat" failed
 m1=$(id_of "$(J --comm settings submit pkg-install slow)")
 m2=$(id_of "$(J --comm firmware submit fw-refresh)")
 check "packages sees a running package job from settings, not a queued fw job" \

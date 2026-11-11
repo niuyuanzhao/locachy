@@ -24,6 +24,7 @@
 | `kernel-select` | `locachy-pkg kernel select` | 由 `[a-z0-9+._-]` 组成、以 `linux` 开头的包名 |
 | `kernel-headers` | `locachy-pkg kernel headers` | `on` 或 `off` |
 | `repos-rank` | `locachy-repos rank` | 无 |
+| `repos-rank-due` | `locachy-repos rank --due` | 无（定期排序，`service_repos_rank`：见 tools/UPDATES.zh.md） |
 | `repos-set` | `locachy-repos apply --set` | `core`、`extra` 或 `multilib`，加 `=on` 或 `=off` |
 | `boot` | `locachy-boot` | 无、`--luks` 或 `--register-only` |
 | `locachy-rebuild` | `locachy-pkg rebuild` | 无或 `--force` |
@@ -58,7 +59,7 @@
 
 ## 状态
 
-`queued` → `running` → `done`（状态码 0）、`failed`（其状态码），或 `keys`：某次构建（locachy-pkg 或 locachy-app 的任务）因有尚未被人信任的源码签名密钥而停下——locachy-build 以 3 退出，或在任务期间把它们写入 `/var/lib/locachy/builder/untrusted-keys`（此时 locachy-pkg 只报告失败）。这不是失败：发起请求的程序列出这些密钥，在它们被信任后请求剩下的部分（packages：`g`）。正在被停止的任务处于 `stopping`，之后为 `cancelled`；被移出队列的排队任务立即为 `cancelled`。除 `queued`、`running`、`stopping` 外的状态都表示已结束，下一个任务随即开始。
+`queued` → `running` → `done`（状态码 0）、`failed`（其状态码），或 `keys`：某次构建（locachy-pkg 或 locachy-app 的任务）因有尚未被人信任的源码签名密钥而停下——locachy-build 以 3 退出，或在任务期间把它们写入 `/var/lib/locachy/builder/untrusted-keys`（此时 locachy-pkg 只报告失败）。`locachy-pkg apply` 在改动任何东西之前，若宿主 AUR 包的密钥尚未被信任，也会自行以 3 退出。这不是失败：发起请求的程序列出这些密钥，在它们被信任后请求剩下的部分（packages：`g`）。正在被停止的任务处于 `stopping`，之后为 `cancelled`；被移出队列的排队任务立即为 `cancelled`。除 `queued`、`running`、`stopping` 外的状态都表示已结束，下一个任务随即开始。
 
 ## 文件
 

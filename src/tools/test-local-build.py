@@ -6,6 +6,7 @@ no mount, user switch, package manager or PKGBUILD execution takes place.
 """
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -173,6 +174,77 @@ class LocalBuild(unittest.TestCase):
                                 env=env, text=True, capture_output=True, input="y\n")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("not a full fingerprint: B467F0BF", result.stderr)
+
+    def test_check_keys_lists_untrusted_keys_and_builds_imports_trusts_nothing(self):
+        """locachy-pkg apply's check before host changes: the AUR's keys for
+        the packages, looked up in the build user's keyring and nowhere else,
+        as the build user in locachy-net; each one not there on a line of its
+        own (package, recipe, fingerprint, upstream, signed sources)."""
+        key, trusted = "5A618CE840883942BAF1334F009DE379FD9B7B90", "07948FFA64160A425BCD27EAC732B1D1C28F4E2F"
+        upstream = "https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird"
+        signed = f"git+{upstream}.git#tag=lyrebird-0.6.2?signed"
+        self.env["TEST_AUR_KEYS"] = (f"lyrebird-proxy {key.lower()} lyrebird-proxy {upstream} {signed}\\n"
+                                     f"go-tool {trusted} lyrebird-proxy - -\\n")
+        self.keyring.write_text(trusted + "\n")
+        netns = self.root / "netns"
+        netns.touch()
+        self.script.write_text(self.script.read_text().replace("/run/netns/locachy-net", str(netns)))
+        self.command("getent", 'exit 0')
+        self.command("gpgconf", 'echo "gpgconf $*" >>"$TEST_LOG"')
+        self.command("ip", 'echo "ip $*" >>"$TEST_LOG"; shift 3; exec "$@"')
+        tmp = self.root / "tmp"
+        tmp.mkdir()
+        env = dict(self.env, TMPDIR=str(tmp))
+        env.pop("LOCACHY_BUILD_STAGE")
+        result = subprocess.run(["bash", str(self.script), "--check-keys", "lyrebird-proxy"],
+                                env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, f"lyrebird-proxy\tlyrebird-proxy\t{key}\t{upstream}\t{signed}\n")
+        self.assertEqual((self.bdir / "untrusted-keys").read_text(), f"lyrebird-proxy {key}\n")
+        calls = self.log.read_text()
+        self.assertIn("ip netns exec locachy-net setpriv", calls)
+        self.assertIn("command=python3 -I - lyrebird-proxy", calls)  # the AUR's answers: read by the build user
+        for word in ("pikaur", "makepkg", "pacman", "--recv-keys", "--import", "--lsign", "--keyserver", "--edit-key"):
+            self.assertNotIn(word, calls)
+        gpg = [c for c in calls.splitlines() if c.startswith("gpg ")]
+        self.assertEqual(gpg, [f"gpg --batch --list-keys {key}", f"gpg --batch --list-keys {trusted}"])
+        self.assertEqual(list(tmp.iterdir()), [])  # its scratch is gone
+        self.assertFalse((self.handover / "untrusted-keys").exists())  # no build's hand-over is touched
+        # Trusted by a person (in the keyring): nothing to show, status 0.
+        self.keyring.write_text(trusted + "\n" + key + "\n")
+        result = subprocess.run(["bash", str(self.script), "--check-keys", "lyrebird-proxy"],
+                                env=env, text=True, capture_output=True)
+        self.assertEqual((result.returncode, result.stdout), (0, ""), result.stderr)
+        self.assertFalse((self.bdir / "untrusted-keys").exists())  # none waits for trust any more
+        # The AUR not answering is no answer about trust: a failure, not 0.
+        self.command("python3", 'cat >/dev/null; exit 1')
+        result = subprocess.run(["bash", str(self.script), "--check-keys", "lyrebird-proxy"],
+                                env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("the AUR did not answer for: lyrebird-proxy", result.stderr)
+        for bad in ("../x", "-r"):
+            result = subprocess.run(["bash", str(self.script), "--check-keys", bad], env=env, text=True,
+                                    capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("not a package name", result.stderr)
+
+    def test_key_lookup_code_names_no_fetch_import_or_trust(self):
+        """The helpers every key lookup runs (check_keys, aur_keys) and the
+        --check-keys mode: GnuPG only lists keys there; no keyserver, import or
+        trust operation, and no variable or option that skips the lookup."""
+        text = SOURCE.read_text()
+        helpers = text[text.index('\n# "NAME FINGERPRINT [NEEDED'):text.index("\nPY\n}\n") + 5]
+        mode = text[text.index('\nif [ "${1:-}" = --check-keys ]; then'):]
+        mode = mode[:mode.index("\nfi\n") + 4]
+        for region in (helpers, mode):
+            code = "\n".join(line for line in region.splitlines() if not line.lstrip().startswith("#"))
+            for word in ("--import", "--recv-keys", "--trust", "--lsign", "--keyserver", "--edit-key",
+                         "--skippgpcheck", "LOCACHY_"):
+                self.assertNotIn(word, code)
+            for call in re.findall(r"\bgpg\b[^\n]*", code):
+                self.assertTrue(call.startswith("gpg --batch --list-keys"), call)
+        self.assertIn("gpg --batch --list-keys", helpers)
+        self.assertIn('keys=$(aur_keys "$@") || die', mode)
 
     def test_build_user_keyring_is_opened_and_closed_by_every_build(self):
         """Locks a build root's keyboxd left (killed with its PID namespace,

@@ -21,6 +21,7 @@ import contextlib
 import fcntl
 import glob
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -345,10 +346,32 @@ def prepared_result(directory, name, data):
     return result
 
 
+def reusable_results(directory, data):
+    """The prepared results this plan directory already holds, when every one is
+    valid for exactly this snapshot (prepared_result: host, recipe, target package
+    set, trusted test sources, artifact hash, passed contract) and they were tested
+    together (verify_combined_results); else None. A retried apply of the same
+    plan, or results built for it on another machine at the same path, then need
+    no second build."""
+    if not data.get("recipes"):
+        return None
+    try:
+        results = {name: prepared_result(directory, name, data) for name in sorted(data["recipes"])}
+        verify_combined_results(results)
+    except (TransactionError, OSError, ValueError, KeyError, TypeError):
+        return None
+    return results
+
+
 def prepare(reference, build_tool, host_hash, run=subprocess.run):
     directory, data = load_snapshot(reference, host_hash())
+    reused = reusable_results(directory, data)
+    if reused is not None:
+        print("===> prepare: " + ", ".join(sorted(reused)) + ": built, sealed and tested together for this "
+              "snapshot already; not built again", flush=True)
+        return directory, data, reused
     for name in sorted(data["recipes"]):
-        # Old successful results cannot survive a failed replacement build.
+        # Old results that do not hold for this snapshot cannot survive a failed replacement build.
         result = directory / "prepared" / name / "result.json"
         if result.exists():
             result.unlink()
@@ -484,24 +507,61 @@ def verify_recorded(transaction_output, real_local):
             raise TransactionError(f"{name}: old local database entries remain: {', '.join(others)}")
 
 
+def _replace_file(source, target):
+    """Copy by rename, keeping source's time: a rewritten repository database
+    keeps time 0, so that a plain pacman -Sy downloads it again whole rather
+    than pairing it with the mirror's signature (locachy_stack.merge)."""
+    temporary = target.with_name(target.name + ".locachy-new")
+    shutil.copyfile(source, temporary)
+    os.chmod(temporary, 0o644)
+    st = os.stat(source)
+    os.utime(temporary, ns=(st.st_atime_ns, st.st_mtime_ns))
+    os.replace(temporary, target)
+
+
 def publish_sync(snapshot_sync, host_sync):
-    """The snapshot's repository databases as the host's, each replaced
-    whole (rename), others left as they are."""
-    host_sync = Path(host_sync)
+    """The snapshot's repository databases as the host's, each replaced whole
+    (rename), others left as they are. The snapshot's databases are the stack's
+    merged set (locachy_stack): a rewritten one has no signature. So the host's
+    old signature goes first, the database follows, and a signature the snapshot
+    has comes last; pacman never pairs a database with another's signature."""
+    snapshot_sync, host_sync = Path(snapshot_sync), Path(host_sync)
     host_sync.mkdir(parents=True, exist_ok=True)
-    for source in sorted(Path(snapshot_sync).iterdir()):
-        if not source.is_file() or source.is_symlink():
+    for source in sorted(snapshot_sync.iterdir()):
+        if not source.is_file() or source.is_symlink() or source.name.endswith(".sig"):
             continue
-        temporary = host_sync / (source.name + ".locachy-new")
-        shutil.copyfile(source, temporary)
-        os.chmod(temporary, 0o644)
-        os.replace(temporary, host_sync / source.name)
+        signature = snapshot_sync / (source.name + ".sig")
+        with contextlib.suppress(FileNotFoundError):
+            (host_sync / signature.name).unlink()
+        _replace_file(source, host_sync / source.name)
+        if signature.is_file() and not signature.is_symlink():
+            _replace_file(signature, host_sync / signature.name)
+
+
+def _stack():
+    path = Path(__file__).with_name("locachy_stack.py")
+    if not path.is_file():
+        path = Path("/usr/local/lib/locachy/locachy_stack.py")
+    spec = importlib.util.spec_from_file_location("locachy_stack", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def record_published(host_sync, record=None):
+    """Note what was published, so locachy-pacman-guard can tell a plain
+    pacman -Sy that replaced it since (locachy_stack.record). record: the
+    record file, the system's own (locachy_stack.RECORD) when None."""
+    stack = _stack()
+    stack.record(str(host_sync), record or stack.RECORD)
 
 
 def install(reference, directory, data, results, host_hash, db_path="/var/lib/pacman",
-            run=subprocess.run, net=lambda c: c):
+            run=subprocess.run, net=lambda c: c, record=None):
     """Prepare has already finished. Hold the real lock until the pacman child
-    exits; its alternate local DB is the real one bind-mounted, not a copy."""
+    exits; its alternate local DB is the real one bind-mounted, not a copy.
+    The snapshot's databases are then the host's, and recorded as published
+    (record_published; record is the record file, the system's when None)."""
     if not results:
         raise TransactionError("prepared update has no validated local packages")
     if set(results) != set(data["recipes"]):
@@ -556,6 +616,7 @@ def install(reference, directory, data, results, host_hash, db_path="/var/lib/pa
                                         real_local, private_db / "local")))
             verify_recorded(selected_manifest, real_local)
             publish_sync(state / "sync", Path(db_path) / "sync")
+            record_published(Path(db_path) / "sync", record)
         return True
     finally:
         shutil.rmtree(workspace)

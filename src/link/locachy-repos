@@ -2,10 +2,14 @@
 """locachy-repos: LOCachy's pacman repositories and their mirror lists.
 
 The repositories are stacked by what each includes, the most optimised
-first, each falling back to the next (as ALHP's README stacks its levels):
-CachyOS's optimised builds for this CPU and each level below it (znver4 on
-AMD Zen 4/5, x86-64-v4, x86-64-v3), then ALHP's (x86-64-v4, -v3, -v2), then
-[cachyos] (CachyOS's kernel and pacman), then Arch's. Which sections are
+first: CachyOS's optimised builds for this CPU and each level below it
+(znver4 on AMD Zen 4/5, x86-64-v4, x86-64-v3), then ALHP's (x86-64-v4, -v3,
+-v2), then [cachyos] (CachyOS's kernel and pacman), then Arch's. Of a
+package, the newest version is taken; of the same version, the highest
+layer's build. pacman alone would take the first repository's, however old
+(a layer that has not rebuilt a release yet), so LOCachy reads the
+repositories only as locachy_stack resolves them: the update, a fresh root,
+the check below. Which sections are
 used is rc.conf's: core (repo_core), extra (repo_extra), multilib
 (repo_multilib), each on unless "0", in every layer that has it. No section
 is held on by name: turning one off is refused while a declared package
@@ -21,14 +25,29 @@ are to be dealt with first.
       repositories it lists; the next update moves packages
   locachy-repos rank [--country CC] [--dir DIR] [--cachyos-levels v3,v4]
       the mirror lists ranked from here: Arch's with reflector, CachyOS's
-      and ALHP's with rate-mirrors (as cachyos-rate-mirrors does: one list
-      for CachyOS, its v3/v4 copies made from it); a list is replaced only
-      when its ranking gave mirrors. Like all that goes out, it runs in
+      and ALHP's with rate-mirrors (one list for CachyOS, its v3/v4 copies
+      made from it). CachyOS's: every https mirror its mirror API lists at
+      most 10000 s behind is timed. A list is replaced only when its ranking gave
+      mirrors, and a list an earlier ranking wrote only by one with at least
+      half as many. Like all that goes out, it runs in
       locachy-net, through the network layers that are on. The country is
       where geoip.kde.org places this machine; while Tor or Clash's TUN is
-      on that would be their exit's, so the last ranking's country is kept
+      on that would be their exit's, so the last ranking's country is kept.
+      ALHP's and CachyOS's lists: the mirrors at least half as fast as the
+      fastest come first, the newest data first (ALHP: the Last-Modified of
+      the database it timed; CachyOS: the API's sync delay); the others
+      follow by speed. --due: only when the last ranking
+      that gave every list mirrors is older than rc.conf's repos_rank_days
+      (1 when unset; 0: only by hand)
+  locachy-repos rank-timer                         (rc.conf service_repos_rank)
+      the periodic ranking: sleeps until the next ranking is due, then
+      submits the fixed system job repos-rank-due (rank --due); after a
+      failure, again an hour later. It also wakes when rc.conf or the
+      ranking record changes (a new repos_rank_days, a ranking by hand) and
+      reckons again from them; at the latest once a day
   locachy-repos status
-      the stack and the lists' ages, for settings: lines KEY TAB VALUE
+      the stack and the lists' ages, for settings: lines KEY TAB VALUE;
+      next: the next automatic ranking (local time, "now", or "off")
   locachy-repos cachyos-levels --level L --cpu C   (for make-root.sh)
       the CachyOS mirror lists the stack uses: v3, v4
   locachy-repos alhp-mirrors                       (for make-root.sh)
@@ -41,11 +60,17 @@ What it writes is 0644 whatever its caller's umask: pacman as the build user
 (makepkg) reads pacman.conf and the mirror lists it includes.
 """
 import argparse
+import contextlib
+import ctypes
+import datetime
+import email.utils
 import fcntl
 import json
 import importlib.util
+import math
 import os
 import re
+import select
 import shutil
 import stat
 import subprocess
@@ -226,17 +251,34 @@ def declared():
     return leaves
 
 
+def stack_module():
+    path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "locachy_stack.py")
+    if not os.path.isfile(path):
+        path = "/usr/local/lib/locachy/locachy_stack.py"
+    spec = importlib.util.spec_from_file_location("locachy_stack", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def resolvable(conf_text, leaves, dbpath):
     """The leaves (with their dependencies) that the repositories of
-    conf_text have, from a sync of their databases into dbpath."""
+    conf_text have, as the stack resolves them: the databases are fetched
+    aside (raw), merged into dbpath's sync (locachy_stack), and pacman
+    resolves against that."""
     with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as f:
         f.write(conf_text)
         conf = f.name
     try:
-        os.makedirs(os.path.join(dbpath, "local"), exist_ok=True)
-        base = ["pacman", "--config", conf, "--dbpath", dbpath, "--logfile", "/dev/null"]
-        if subprocess.run(in_net(base + ["-Sy"]), stdout=subprocess.DEVNULL).returncode != 0:
+        raw = os.path.join(dbpath, "raw")
+        for d in (os.path.join(raw, "local"), os.path.join(dbpath, "local")):
+            os.makedirs(d, exist_ok=True)
+        fetch = ["pacman", "--config", conf, "--dbpath", raw, "--logfile", "/dev/null"]
+        if subprocess.run(in_net(fetch + ["-Sy"]), stdout=subprocess.DEVNULL).returncode != 0:
             raise RuntimeError("the repositories' databases could not be fetched")
+        stack = stack_module()
+        stack.merge(os.path.join(raw, "sync"), os.path.join(dbpath, "sync"), stack.repositories(conf))
+        base = ["pacman", "--config", conf, "--dbpath", dbpath, "--logfile", "/dev/null"]
         if subprocess.run(base + ["-Sp", "--print-format", "%n"] + list(leaves),
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
             return set(leaves)
@@ -329,14 +371,29 @@ def servers(text):
 
 def install_list(path, text, what):
     """text replaces the list at path when it has mirrors (the old one is
-    kept as PATH.locachy-old). Whether it did."""
-    if not servers(text):
+    kept as PATH.locachy-old). Whether the list at path has ranked mirrors now.
+    A list an earlier ranking wrote stays when this ranking gave fewer than
+    half as many mirrors: one test round in which most mirrors timed out
+    once cut CachyOS's list from 16 mirrors to 1. A list from a package (no
+    header of ours) is replaced by any ranking that gave mirrors."""
+    count = len(servers(text))
+    if not count:
         print(f"locachy-repos: {what}: no mirror ranked; {path} left as it is", file=sys.stderr)
         return False
     if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                old = f.read()
+        except OSError:
+            old = ""
+        had = len(servers(old))
+        if old.startswith(f"# {what}, ranked by locachy-repos ") and count * 2 < had:
+            print(f"locachy-repos: {what}: this ranking gave {count} mirrors where the last one gave {had}; "
+                  f"{path} left as it is", file=sys.stderr)
+            return True
         keep_old(path)
     write_public(path, f"# {what}, ranked by locachy-repos {time.strftime('%Y-%m-%d %H:%M')}\n" + text)
-    print(f"locachy-repos: {what}: {len(servers(text))} mirrors in {path}")
+    print(f"locachy-repos: {what}: {count} mirrors in {path}")
     return True
 
 
@@ -372,15 +429,164 @@ def rate_mirrors_env(country):
     return env
 
 
+# CachyOS's mirror API, the source rate-mirrors' cachyos mode reads first (each
+# mirror's health and sync delay), and its fallback.
+CACHYOS_API = ("https://mirrorlist-proxy.cachyos.org/cachyos-mirrors", "https://packages.cachyos.org/api/v1/mirrors")
+CACHYOS_TEST = "x86_64/cachyos/cachyos.files"  # what rate-mirrors times (its cachyos mode's default)
+CACHYOS_MAX_DELAY = 10000  # seconds behind the main mirror at most (cachyos-rate-mirrors' RATE_MIRRORS_MAX_DELAY)
+
+
+def cachyos_candidates():
+    """{mirror base URL: sync delay in seconds} of the https mirrors CachyOS's
+    API lists with a sync delay of at most CACHYOS_MAX_DELAY: the filter
+    rate-mirrors' cachyos mode applies to the API. A mirror that lags within
+    it (out of date, "partial": catching up after a push) stays; its delay only
+    ranks it lower in the window. Mirrors whose checks all fail have no delay
+    and are left out. Empty when no API source answered."""
+    for source in CACHYOS_API:
+        try:
+            items = json.loads(run_tool(["curl", "-fsS", "--max-time", "30", source], timeout=60) or "{}")["mirrors"]
+        except (ValueError, KeyError, TypeError):
+            continue
+        found = {}
+        for m in items if isinstance(items, list) else []:
+            url, delay = m.get("url"), m.get("delay_seconds")
+            if (isinstance(url, str) and url.startswith("https://") and isinstance(delay, int)
+                    and not isinstance(delay, bool) and 0 <= delay <= CACHYOS_MAX_DELAY):
+                found[url if url.endswith("/") else url + "/"] = delay
+        if found:
+            return found
+    return {}
+
+
 def rank_cachyos(d, country, levels):
-    text = run_tool(["rate-mirrors", "cachyos"], env=rate_mirrors_env(country))
-    text = "\n".join(line for line in text.splitlines() if not line.startswith("#")) + "\n"
-    if not install_list(os.path.join(d, "cachyos-mirrorlist"), text, "CachyOS"):
+    """Every mirror cachyos_candidates gives is timed (not rate-mirrors'
+    cachyos mode, which times two mirrors per country near this one, so its
+    list was as long as the few it reached: 16 once, 1 the next time).
+    Without the API, the mirrors of the present list are timed. The list holds
+    every mirror that answered, in the user's order (window_order), the API's
+    sync delay telling the newest data."""
+    path = os.path.join(d, "cachyos-mirrorlist")
+    delays = cachyos_candidates()
+    known = list(delays)
+    if not known:
+        print("locachy-repos: CachyOS: its mirror API did not answer; timing the mirrors of the present list",
+              file=sys.stderr)
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in servers(f.read()):
+                    url = line.split("=", 1)[1].strip().split("$arch")[0]
+                    if url not in known:
+                        known.append(url)
+        except OSError:
+            pass
+    text = ""
+    if known:
+        text = run_tool(["rate-mirrors", "stdin", "--path-to-test", CACHYOS_TEST,
+                         "--path-to-return", "$arch/$repo", "--output-prefix", "Server = "],
+                        env=rate_mirrors_env(country), stdin="\n".join(known) + "\n")
+
+    def freshness(mirror):
+        delay = delays.get(mirror if mirror.endswith("/") else mirror + "/")
+        return (None, "sync delay unknown") if delay is None else (-delay, f"{delay} s behind")
+
+    text = "\n".join(window_order(servers(text), measured_speeds(text), freshness)) + "\n"
+    if not install_list(path, text, "CachyOS"):
         return False
     for lv in levels:
         install_list(os.path.join(d, f"cachyos-{lv}-mirrorlist"), text.replace("/$arch/", f"/$arch_{lv}/"),
                      f"CachyOS {lv}")
     return True
+
+
+ALHP_TEST = "extra-x86-64-v2/os/x86_64/extra-x86-64-v2.db"  # what rate-mirrors times
+# The user's rule for ALHP's list: the fastest mirror first, since one that
+# lags catches up in the end; but among the mirrors at least this fraction of
+# the fastest one's speed, the one with the newest data first.
+ALHP_WINDOW = 0.5
+SPEED_RESULT = re.compile(r"#\s+\d+\.\s+SpeedTestResult \{ speed: ([0-9.]+) ([KMG]?B)/s;.*\}\s+->\s+(\S+)\s*$")
+SPEED_UNITS = {"B": 1, "KB": 1e3, "MB": 1e6, "GB": 1e9}
+
+
+def measured_speeds(text):
+    """{mirror URL: bytes per second} from rate-mirrors' results (its
+    re-tested top mirrors); empty when it printed none."""
+    found = {}
+    for line in text.splitlines():
+        m = SPEED_RESULT.match(line)
+        if m:
+            found.setdefault(m[3], float(m[1]) * SPEED_UNITS[m[2]])
+    return found
+
+
+def data_time(mirror):
+    """When the mirror's copy of the timed database last changed (its
+    Last-Modified, after any redirect), or None. Read with a one-byte GET, not
+    HEAD: a mirror may redirect to storage whose signed links take GET only
+    (mirror.sjtu.edu.cn: HEAD there ends in 403, without a date)."""
+    head = run_tool(["curl", "-sSL", "-r", "0-0", "-D", "-", "-o", "/dev/null", "--max-time", "15",
+                     mirror + ALHP_TEST], timeout=30)
+    stamp = None
+    for line in head.splitlines():
+        if line.lower().startswith("last-modified:"):
+            stamp = line.split(":", 1)[1].strip()
+    try:
+        return email.utils.parsedate_to_datetime(stamp) if stamp else None
+    except (TypeError, ValueError):
+        return None
+
+
+def speed_text(bps):
+    return f"{bps / 1e6:.1f} MB/s" if bps >= 1e6 else f"{bps / 1e3:.1f} KB/s" if bps >= 1e3 else f"{bps:.0f} B/s"
+
+
+def window_order(lines, speeds, freshness):
+    """Server lines in the user's order, each after a comment with what
+    decided it. The mirrors at least ALHP_WINDOW of the fastest one's speed
+    come first, the newest data first (the same or unknown: the faster one);
+    the rest follow by speed, the fastest first. Only the order changes: every line
+    stays. freshness(mirror) is (key, note), a larger key newer data, None
+    unknown; it is asked for the mirrors in the window only. Without measured
+    speeds (rate-mirrors no longer printing them so) the order stays as
+    rate-mirrors gave it."""
+    if not speeds:
+        return lines
+
+    def mirror(line):
+        url = line.split("=", 1)[1].strip()
+        return next((m for m in speeds if url.startswith(m)), None)
+
+    fastest = max(speeds.values())
+    window, rest = [], []
+    for line in lines:
+        m = mirror(line)
+        (window if m and speeds[m] >= ALHP_WINDOW * fastest else rest).append(line)
+    fresh = {line: freshness(mirror(line)) for line in window}
+    window.sort(key=lambda line: (fresh[line][0] is None, -(fresh[line][0] or 0), -speeds[mirror(line)]))
+    # rate-mirrors prints its lines in its own order, not always by speed (seen:
+    # 139.7, 104.0, then 220.6 KB/s); a line without a measured speed goes last.
+    rest.sort(key=lambda line: (mirror(line) is None, -speeds.get(mirror(line), 0)))
+    out = []
+    for line in window + rest:
+        m = mirror(line)
+        note = [speed_text(speeds[m])] if m else []
+        if line in fresh:
+            note.append(fresh[line][1])
+        if note:
+            out.append("# " + ", ".join(note))
+        out.append(line)
+    return out
+
+
+def alhp_order(lines, speeds):
+    """ALHP's lines in the user's order (window_order), the newest data told by
+    the Last-Modified of the database rate-mirrors timed."""
+    def freshness(mirror):
+        when = data_time(mirror)
+        if when is None:
+            return None, "data date unknown"
+        return when.timestamp(), "data " + when.astimezone(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return window_order(lines, speeds, freshness)
 
 
 def rank_alhp(d, country):
@@ -394,14 +600,64 @@ def rank_alhp(d, country):
                     known.append(url)
     except OSError:
         pass
-    text = run_tool(["rate-mirrors", "stdin", "--path-to-test", "extra-x86-64-v2/os/x86_64/extra-x86-64-v2.db",
+    text = run_tool(["rate-mirrors", "stdin", "--path-to-test", ALHP_TEST,
                      "--path-to-return", "$repo/os/$arch/", "--output-prefix", "Server = "],
                     env=rate_mirrors_env(country), stdin="\n".join(known) + "\n")
-    text = "\n".join(line for line in text.splitlines() if not line.startswith("#")) + "\n"
+    text = "\n".join(alhp_order(servers(text), measured_speeds(text))) + "\n"
     return install_list(path, text, "ALHP")
 
 
+def ranked_time(d):
+    """When the last ranking that gave every list mirrors was (seconds since
+    the epoch); None when there was none, or it cannot be read."""
+    try:
+        with open(os.path.join(d, ".locachy-ranked"), encoding="utf-8") as f:
+            r = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not all(r.get(k) for k in ("arch", "cachyos", "alhp")):
+        return None
+    when = r.get("time")
+    if when is None:  # a record from before "time" was written
+        try:
+            when = time.mktime(time.strptime(r.get("at", ""), "%Y-%m-%d %H:%M"))
+        except ValueError:
+            return None
+    return when
+
+
+def ranked_age(d):
+    """Seconds since the last ranking that gave every list mirrors; None when
+    there was none, or it cannot be read."""
+    when = ranked_time(d)
+    return None if when is None else time.time() - when
+
+
+RANK_DAYS = 1  # repos_rank_days when rc.conf has none: ranked again once a day
+RANK_DAYS_MAX = 3650  # longer counts as this: a time the clock can still show
+
+
+def rank_interval(rc):
+    """Days between automatic rankings (rc.conf repos_rank_days); 0 or less:
+    only by hand. A value that is not a number (nan too) counts as the default."""
+    try:
+        days = float(rc.get("repos_rank_days", RANK_DAYS))
+    except (TypeError, ValueError):
+        return RANK_DAYS
+    return RANK_DAYS if math.isnan(days) else min(days, RANK_DAYS_MAX)
+
+
 def cmd_rank(args):
+    if getattr(args, "due", False):
+        days = rank_interval(read_conf(RC_CONF))
+        if days <= 0:
+            print("locachy-repos: the mirrors are ranked only by hand (repos_rank_days=0)")
+            return 0
+        age = ranked_age(args.dir)
+        if age is not None and age < days * 86400:
+            print(f"locachy-repos: the mirrors were ranked {age / 86400:.1f} days ago; "
+                  f"they are ranked again after {days:g}")
+            return 0
     layer = exit_layer(read_conf(RC_CONF))
     if args.country is not None:
         country = args.country
@@ -417,9 +673,115 @@ def cmd_rank(args):
         levels = [lv for lv in ("v3", "v4") if os.path.exists(os.path.join(args.dir, f"cachyos-{lv}-mirrorlist"))]
     done = [rank_arch(args.dir, country), rank_cachyos(args.dir, country, levels), rank_alhp(args.dir, country)]
     write_public(os.path.join(args.dir, ".locachy-ranked"),
-                 json.dumps({"at": time.strftime("%Y-%m-%d %H:%M"), "country": country,
+                 json.dumps({"at": time.strftime("%Y-%m-%d %H:%M"), "time": int(time.time()), "country": country,
                              "arch": done[0], "cachyos": done[1], "alhp": done[2]}) + "\n")
     return 0 if all(done) else 1
+
+
+RETRY_AFTER = 3600  # seconds: an automatic ranking that failed is tried again an hour later
+RECHECK = 86400     # seconds: the longest the timer sleeps before reading rc.conf again
+
+
+def next_rank_time(days, ranked_at, failed_at, now):
+    """When the next automatic ranking is due (seconds since the epoch), or
+    None while the mirrors are ranked only by hand (days <= 0). ranked_at:
+    when the last ranking that gave every list mirrors was (None: there was
+    none, so it is due at once); failed_at: when the last automatic one
+    failed, if it did after that: not again before RETRY_AFTER has passed."""
+    if days <= 0:
+        return None
+    due = now if ranked_at is None else ranked_at + days * 86400
+    if failed_at is not None and (ranked_at is None or failed_at >= ranked_at):
+        due = max(due, failed_at + RETRY_AFTER)
+    return due
+
+
+def rank_timer_step(jobs, d, failed_at, clock=time.time):
+    """One wake of the timer: (failed_at, when to wake next). rc.conf and the
+    record (d/.locachy-ranked, which a ranking by hand writes too) are read
+    each time; the timer wakes when either changes (change_watch), so a new
+    repos_rank_days or a ranking from settings counts at once. When it is
+    due, the fixed job repos-rank-due (rank --due: the same judgment, made
+    again in the job) is submitted and waited for; its output stays in the
+    job's log."""
+    now = clock()
+    days = rank_interval(read_conf(RC_CONF))
+    due = next_rank_time(days, ranked_time(d), failed_at, now)
+    if due is not None and due <= now:
+        print(f"locachy-repos: rank-timer: the mirrors are due for ranking (repos_rank_days={days:g})",
+              file=sys.stderr, flush=True)
+        try:
+            with open(os.devnull, "w") as quiet, contextlib.redirect_stdout(quiet):
+                status = jobs.submit("repos-rank-due", [], wait=True, startup_wait=30)
+        except (OSError, RuntimeError, ValueError) as e:
+            print(f"locachy-repos: rank-timer: {e}", file=sys.stderr)
+            status = 1
+        now = clock()
+        # Done, yet still due (no complete record): a failure too, never at once again.
+        failed_at = now if status != 0 or next_rank_time(days, ranked_time(d), None, now) <= now else None
+        if failed_at is not None:
+            print("locachy-repos: rank-timer: the ranking failed; tried again in an hour", file=sys.stderr, flush=True)
+        due = next_rank_time(days, ranked_time(d), failed_at, now)
+    return failed_at, now + RECHECK if due is None else min(due, now + RECHECK)
+
+
+IN_CLOSE_WRITE, IN_MOVED_TO, IN_DELETE = 0x8, 0x80, 0x200  # <sys/inotify.h>
+
+
+def change_watch(folders):
+    """An inotify descriptor (Linux; Python has no binding of its own) that
+    is readable once a file in one of folders has been written, replaced or
+    removed: rc.conf (settings writes it by rename), the ranking record.
+    None where there is none; the timer then wakes at RECHECK."""
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        fd = libc.inotify_init1(os.O_CLOEXEC | os.O_NONBLOCK)
+    except (OSError, AttributeError):
+        return None
+    if fd < 0:
+        return None
+    for d in folders:
+        if libc.inotify_add_watch(fd, os.fsencode(d), IN_CLOSE_WRITE | IN_MOVED_TO | IN_DELETE) < 0:
+            os.close(fd)
+            return None
+    return fd
+
+
+def sleep_until(when, watch=None):
+    """Until the wall-clock time when, or until watch has events (then all of
+    them are read). The time is a CLOCK_REALTIME timer: it counts the time the
+    machine is suspended or hibernated, and fires on resume once that time has
+    passed (time.sleep and select's timeout count neither)."""
+    if not hasattr(os, "timerfd_create"):  # Python before 3.13
+        time.sleep(max(0.0, when - time.time()))
+        return
+    fd = os.timerfd_create(time.CLOCK_REALTIME, flags=os.TFD_CLOEXEC)
+    try:
+        os.timerfd_settime(fd, flags=os.TFD_TIMER_ABSTIME, initial=max(when, 1.0))
+        select.select([fd] + ([watch] if watch is not None else []), [], [])
+    finally:
+        os.close(fd)
+    while watch is not None:
+        try:
+            if not os.read(watch, 65536):
+                break
+        except BlockingIOError:
+            break
+
+
+def cmd_rank_timer():
+    jobs, failed_at = jobs_helper(), None
+    watch = change_watch([os.path.dirname(RC_CONF), "/etc/pacman.d"])
+    while True:
+        failed_at, wake = rank_timer_step(jobs, "/etc/pacman.d", failed_at)
+        sleep_until(wake, watch)
+
+
+def next_text(d, rc, now=None):
+    """The next automatic ranking for settings: off, now, or local time."""
+    now = time.time() if now is None else now
+    due = next_rank_time(rank_interval(rc), ranked_time(d), None, now)
+    return "off" if due is None else "now" if due <= now else time.strftime("%Y-%m-%d %H:%M", time.localtime(due))
 
 
 def cmd_status(args):
@@ -437,6 +799,7 @@ def cmd_status(args):
         print(f"ranked\t{r.get('at', '')}\t{r.get('country', '')}")
     except (OSError, ValueError):
         print("ranked\t")
+    print(f"next\t{next_text('/etc/pacman.d', rc)}")
     return 0
 
 
@@ -468,7 +831,8 @@ def jobs_helper():
 
 def job_route(args):
     """(status, mode). Online, a change to the host's repositories is a fixed
-    system job (repos-set, repos-rank) whose result the terminal follows;
+    system job (repos-set, repos-rank; repos-rank-due for rank --due) whose
+    result the terminal follows;
     another form is refused, never run in this process. In a job or offline,
     no status: the change runs here."""
     jobs = jobs_helper()
@@ -478,7 +842,7 @@ def job_route(args):
     if args.command == "apply" and len(args.set) == 1:
         return jobs.submit("repos-set", list(args.set), wait=True), mode
     if args.command == "rank" and args.country is None and args.cachyos_levels is None:
-        return jobs.submit("repos-rank", [], wait=True), mode
+        return jobs.submit("repos-rank-due" if args.due else "repos-rank", [], wait=True), mode
     raise RuntimeError("this change has no fixed system job form; nothing changed")
 
 
@@ -508,6 +872,8 @@ def main():
     r.add_argument("--country")
     r.add_argument("--dir", default="/etc/pacman.d")
     r.add_argument("--cachyos-levels")
+    r.add_argument("--due", action="store_true")
+    sub.add_parser("rank-timer")
     sub.add_parser("status")
     cl = sub.add_parser("cachyos-levels")
     cl.add_argument("--level", required=True)
@@ -520,6 +886,8 @@ def main():
             fix_modes(getattr(args, "dir", "/etc/pacman.d"))
         if args.command == "fix-modes":
             return 0
+        if args.command == "rank-timer":
+            return cmd_rank_timer()
         if args.command == "config":
             level = args.level or recorded("level")
             sys.stdout.write(config(level, args.cpu or recorded("cpu", level) or level, args.mirrors, read_conf(args.rc)))

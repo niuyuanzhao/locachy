@@ -385,12 +385,19 @@ if ! grep -q '^[[:space:]]*service_jobs=' /etc/locachy/rc.conf; then
     echo "make: rc.conf: service_jobs added"
     services_changed=1
 fi
-if [ "$services_changed" = 1 ] &&
-    [ "$(stat -c %d:%i / 2>/dev/null)" = "$(stat -c %d:%i /proc/1/root 2>/dev/null)" ]; then
+# Process 1 reads rc.conf's services again on SIGHUP. Only the running system's
+# own process 1: not when this runs in a chroot or a build root, whose / is not
+# process 1's root. stat -L: /proc/1/root is a link, and stat without -L gives
+# the link's own device and inode, never the root's.
+reload_init() {
+    [ "$(stat -L -c %d:%i / 2>/dev/null)" = "$(stat -L -c %d:%i /proc/1/root 2>/dev/null)" ] || return 0
     p1=$(readlink /proc/1/exe 2>/dev/null || true)
     if [ "$p1" = /init ] || [ "$p1" = "$lib/init" ]; then
         kill -HUP 1
     fi
+}
+if [ "$services_changed" = 1 ]; then
+    reload_init
 fi
 # The debug cable link's port by its card's permanent address (network-client),
 # for a link turned on before debug_link_mac: the card of its name, on the host
@@ -607,6 +614,19 @@ install -D -m 644 "$src/link/NetworkManager.conf" /etc/NetworkManager/conf.d/30-
 # Simplified Chinese first (tools/FONTS.md); the user's fonts.conf comes first.
 install -D -m 644 "$src/link/64-locachy-cjk-prefer.conf" /etc/fonts/conf.d/64-locachy-cjk-prefer.conf
 sh "$src/link/install-pkg-tools" "$src"
+# The mirrors ranked again every repos_rank_days days (settings: Software
+# Sources, "Rank mirrors automatically"; 0: only by hand): the value written
+# out, so that rc.conf shows it; and its service (locachy-repos rank-timer,
+# tools/UPDATES.md), once locachy-repos above has it.
+if ! grep -q '^[[:space:]]*repos_rank_days=' /etc/locachy/rc.conf; then
+    printf 'repos_rank_days="1"\n' >>/etc/locachy/rc.conf
+    echo "make: rc.conf: repos_rank_days added"
+fi
+if ! grep -q '^[[:space:]]*service_repos_rank=' /etc/locachy/rc.conf; then
+    printf 'service_repos_rank="/usr/local/bin/locachy-repos rank-timer"\n' >>/etc/locachy/rc.conf
+    echo "make: rc.conf: service_repos_rank added"
+    reload_init
+fi
 # sudo for the user (uid 1000), with its own password. By name: its programs
 # run without supplementary groups (app-init), so %wheel would not match there.
 user=$(getent passwd 1000 | cut -d: -f1 || true)

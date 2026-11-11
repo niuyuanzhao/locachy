@@ -249,6 +249,12 @@ static int login_skip;
 static int lock_after = 10;
 static const int lock_afters[] = { 0, 1, 2, 5, 10, 15, 30, 60 };
 #define NLOCK_AFTERS ((int)(sizeof lock_afters / sizeof lock_afters[0]))
+/* rc.conf's repos_rank_days (the automatic mirror ranking, locachy-repos
+ * rank-timer; 0 or less: by hand; 1 when unset) and the values its row
+ * cycles through, the first being by hand. */
+static double repos_rank_days = 1;
+static const int rank_choices[] = { 0, 1, 2, 3, 5, 7, 14 };
+#define NRANK_CHOICES ((int)(sizeof rank_choices / sizeof rank_choices[0]))
 /* rc.conf's unlock_fingerprint="1" and unlock_face="1": the lock screen (and
  * sudo) take a fingerprint (fprintd) or a face (howdy) as well as the
  * password. */
@@ -1153,6 +1159,11 @@ static void on_rc(const char *name, const char *value, void *arg)
         }
     } else if (strcmp(name, "login_skip") == 0) {
         login_skip = strcmp(value, "1") == 0;
+    } else if (strcmp(name, "repos_rank_days") == 0) {
+        char *end = NULL;
+        double days = strtod(value, &end);
+        if (end == value || *end != '\0' || days != days) days = 1; /* as locachy-repos reads it */
+        repos_rank_days = days < 0 ? 0 : days > 3650 ? 3650 : days;
     } else if (strcmp(name, "lock_after") == 0) {
         lock_after = atoi(value) > 0 ? atoi(value) : 0;
     } else if (strcmp(name, "unlock_fingerprint") == 0) {
@@ -2090,7 +2101,10 @@ static void pkg_check(void)
  * mirror lists. Switching a section, or ranking the mirrors, is a system
  * job (locachy-jobs), as the package jobs are. A section goes off only when every
  * declared package keeps a repository; else locachy-repos says which ones
- * need it, and rc.conf and pacman.conf stay as they were. */
+ * need it, and rc.conf and pacman.conf stay as they were. How often the
+ * mirrors are ranked again by themselves is rc.conf's repos_rank_days, which
+ * the row below the mirrors cycles; locachy-repos rank-timer (the service)
+ * reads it, and locachy-repos status says when the next ranking is. */
 #define LOCACHY_REPOS "/usr/local/bin/locachy-repos"
 static const char *const repo_sections[] = { "core", "extra", "multilib" };
 static const char *const repo_labels[] = {
@@ -2099,6 +2113,7 @@ static const char *const repo_labels[] = {
 #define NREPO_SECTIONS ((int)(sizeof repo_sections / sizeof repo_sections[0]))
 static int repo_on[NREPO_SECTIONS];
 static char repo_ranked[64];
+static char repo_next[40];  /* locachy-repos status's next: "off", "now", or the local time of the next ranking */
 static int repos_job;       /* locachy-repos apply|rank: its system job, until it has ended */
 static char repos_what[24]; /* what it does: "rank", or a section set: "extra=off" */
 
@@ -2109,12 +2124,16 @@ static void load_repos(void)
     char *const cmd[] = { LOCACHY_REPOS, "status", NULL };
     command_output(cmd, out, sizeof out);
     repo_ranked[0] = '\0';
+    repo_next[0] = '\0';
     for (char *line = strtok(out, "\n"); line; line = strtok(NULL, "\n")) {
         char *v = strchr(line, '\t');
         if (!v) {
             continue;
         }
         *v++ = '\0';
+        if (strcmp(line, "next") == 0) {
+            snprintf(repo_next, sizeof repo_next, "%s", v);
+        }
         for (int i = 0; i < NREPO_SECTIONS; i++) {
             if (strcmp(line, repo_sections[i]) == 0) {
                 repo_on[i] = strcmp(v, "on") == 0;
@@ -3174,16 +3193,23 @@ static int opt_index(void)
     return boot_index() + 5;
 }
 
-/* Software sources: a row for each section, the mirrors. */
+/* Software sources: a row for each section, the mirrors, their automatic
+ * ranking. */
 static int repo_index(void)
 {
     return opt_index() + NOPT_MODULES;
 }
 
+/* The mirrors ranked again every repos_rank_days (locachy-repos rank-timer). */
+static int rank_auto_index(void)
+{
+    return repo_index() + NREPO_SECTIONS + 1;
+}
+
 /* The terminal (program_term, user-shell): its shell on the network or not. */
 static int tnet_index(void)
 {
-    return repo_index() + NREPO_SECTIONS + 1;
+    return rank_auto_index() + 1;
 }
 
 /* Touchpads: scrolling around their edge (rc.conf touchpad_circular). */
@@ -4875,7 +4901,7 @@ static void category_entries(int cat)
         /* The switches and the mirrors only: the repositories' names carry
          * the CPU level (core-x86-64-v3, cachyos-znver4), which is not
          * chosen here (locachy-repos status lists them). */
-        add_items(repo_index(), NREPO_SECTIONS + 1);
+        add_items(repo_index(), NREPO_SECTIONS + 2);
         add_title(_("Optional Components"));
         add_items(opt_index(), NOPT_MODULES);
         add_title(_("Debug Cable"));
@@ -5367,10 +5393,11 @@ static void adopt_jobs(void)
             if (jobs_ended(r) || (pass == 0 && r->position != 0)) {
                 continue;
             }
-            if (!have_repos && (strcmp(r->kind, "repos-rank") == 0 || strcmp(r->kind, "repos-set") == 0)) {
+            if (!have_repos && (strcmp(r->kind, "repos-rank") == 0 || strcmp(r->kind, "repos-rank-due") == 0 ||
+                                strcmp(r->kind, "repos-set") == 0)) {
                 repos_job = r->id;
                 have_repos = 1;
-                snprintf(repos_what, sizeof repos_what, "%s", strcmp(r->kind, "repos-rank") == 0 ? "rank" : r->args);
+                snprintf(repos_what, sizeof repos_what, "%s", strcmp(r->kind, "repos-set") == 0 ? r->args : "rank");
             } else if (!have_boot && strcmp(r->kind, "boot") == 0) {
                 boot_job = r->id;
                 have_boot = 1;
@@ -6193,6 +6220,26 @@ static void item_text(int idx, char *line, size_t size)
                  width ? circular_width : circular_delay);
         snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label,
                  width ? _("Edge activation range") : _("Edge activation dwell"), 30), vbuf);
+        return;
+    }
+    if (idx == rank_auto_index()) {
+        char every[48] = "", when[64] = "";
+        if (repos_rank_days <= 0) {
+            snprintf(every, sizeof every, "%s", _("only by hand"));
+        } else if (repos_rank_days == (int)repos_rank_days) {
+            snprintf(every, sizeof every, P_("every %d day", "every %d days", (int)repos_rank_days),
+                     (int)repos_rank_days);
+        } else {
+            snprintf(every, sizeof every, _("every %g days"), repos_rank_days);
+        }
+        if (strcmp(repo_next, "now") == 0) {
+            snprintf(when, sizeof when, "%s", _("due now"));
+        } else if (repo_next[0] && strcmp(repo_next, "off") != 0) {
+            snprintf(when, sizeof when, _("next %s"), repo_next);
+        }
+        snprintf(vbuf, sizeof vbuf, "< %s >", every);
+        snprintf(line, size, "%.95s %s   %s", ui_pad(label, sizeof label, _("Rank mirrors automatically"), 32), vbuf,
+                 when);
         return;
     }
     if ((i = idx - repo_index()) >= 0 && i <= NREPO_SECTIONS) {
@@ -7130,6 +7177,41 @@ static void adjust(int dir)
     }
     if (selected == fp_index() + 3) {
         fp_next = (fp_next + dir + NFINGERS) % NFINGERS;
+        return;
+    }
+    if (selected == rank_auto_index()) {
+        /* The next value above (dir > 0) or below the current one; past either
+         * end, the first (by hand) or the last. */
+        int pick = -1;
+        for (int i = 0; i < NRANK_CHOICES; i++) {
+            if (dir > 0 && rank_choices[i] > repos_rank_days &&
+                (pick < 0 || rank_choices[i] < rank_choices[pick])) {
+                pick = i;
+            }
+            if (dir < 0 && rank_choices[i] < repos_rank_days &&
+                (pick < 0 || rank_choices[i] > rank_choices[pick])) {
+                pick = i;
+            }
+        }
+        if (pick < 0) {
+            pick = dir > 0 ? 0 : NRANK_CHOICES - 1;
+        }
+        char value[16];
+        snprintf(value, sizeof value, "%d", rank_choices[pick]);
+        if (rc_set("repos_rank_days", value) < 0) {
+            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+            return;
+        }
+        repos_rank_days = rank_choices[pick];
+        load_repos(); /* the next ranking, from the new interval */
+        if (repos_rank_days <= 0) {
+            snprintf(notice, sizeof notice, "%s",
+                     _("Mirrors are ranked by hand only (Enter on Mirrors ranks them now)."));
+        } else {
+            snprintf(notice, sizeof notice, P_("Mirrors are ranked again every %d day.",
+                                               "Mirrors are ranked again every %d days.", (int)repos_rank_days),
+                     (int)repos_rank_days);
+        }
         return;
     }
     if (selected == sec_index() + 3) {

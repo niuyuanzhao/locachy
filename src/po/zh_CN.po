@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-10 01:27-0500\n"
+"POT-Creation-Date: 2026-11-11 02:57-0500\n"
 "PO-Revision-Date: 2026-11-09 14:16+0000\n"
 "Last-Translator: LOCachy\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -11212,6 +11212,34 @@ msgid "Edge activation range"
 msgstr "边缘触发范围参数"
 
 #: progs/settings.c
+msgid "only by hand"
+msgstr "只手动"
+
+#: progs/settings.c
+#, c-format
+msgid "every %d day"
+msgid_plural "every %d days"
+msgstr[0] "每 %d 天"
+
+#: progs/settings.c
+#, c-format
+msgid "every %g days"
+msgstr "每 %g 天"
+
+#: progs/settings.c
+msgid "due now"
+msgstr "已到期"
+
+#: progs/settings.c
+#, c-format
+msgid "next %s"
+msgstr "下次 %s"
+
+#: progs/settings.c
+msgid "Rank mirrors automatically"
+msgstr "自动重新排序镜像"
+
+#: progs/settings.c
 #, c-format
 msgid "checking: %s"
 msgstr "检查中：%s"
@@ -11923,6 +11951,16 @@ msgstr "锁屏与 sudo 现已同时支持指纹与密码。"
 #: progs/settings.c
 msgid "Delete: delete these fingerprints (asks once more)."
 msgstr "Delete: 删除已录入的指纹（需再次确认）。"
+
+#: progs/settings.c
+msgid "Mirrors are ranked by hand only (Enter on Mirrors ranks them now)."
+msgstr "镜像只手动排序（在“镜像”一行按 Enter 立即排序）。"
+
+#: progs/settings.c
+#, c-format
+msgid "Mirrors are ranked again every %d day."
+msgid_plural "Mirrors are ranked again every %d days."
+msgstr[0] "每 %d 天重新为镜像排序一次。"
 
 #: progs/settings.c
 #, c-format

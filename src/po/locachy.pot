@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-10 01:27-0500\n"
+"POT-Creation-Date: 2026-11-11 02:57-0500\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -11152,6 +11152,35 @@ msgid "Edge activation range"
 msgstr ""
 
 #: progs/settings.c
+msgid "only by hand"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "every %d day"
+msgid_plural "every %d days"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/settings.c
+#, c-format
+msgid "every %g days"
+msgstr ""
+
+#: progs/settings.c
+msgid "due now"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "next %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "Rank mirrors automatically"
+msgstr ""
+
+#: progs/settings.c
 #, c-format
 msgid "checking: %s"
 msgstr ""
@@ -11837,6 +11866,17 @@ msgstr ""
 #: progs/settings.c
 msgid "Delete: delete these fingerprints (asks once more)."
 msgstr ""
+
+#: progs/settings.c
+msgid "Mirrors are ranked by hand only (Enter on Mirrors ranks them now)."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Mirrors are ranked again every %d day."
+msgid_plural "Mirrors are ranked again every %d days."
+msgstr[0] ""
+msgstr[1] ""
 
 #: progs/settings.c
 #, c-format

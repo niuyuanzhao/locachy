@@ -62,7 +62,9 @@ def run(command,**kw):
     if 'pacman' in command:  # last in the bind-mount wrapper: these are pacman's
         command=command+['--root',str(root),'--dbpath',str(root_db),'--cachedir',str(cache),'--hookdir',str(root/'no-hooks')]
     return subprocess.run(command,**kw)
-tx.install(ref,d,data,results,lambda:'fixture-host',str(root_db),run)
+tx.install(ref,d,data,results,lambda:'fixture-host',str(root_db),run,record=str(out/'sync-published.json'))
+import json
+assert json.loads((out/'sync-published.json').read_text())=={'extra.db':tx.file_hash(root_db/'sync/extra.db')}
 # -Q only lists entry directory names; -Qi, -Qk and -Dk need complete entries.
 def query(*args):
     return subprocess.run(['pacman','--root',str(root),'--dbpath',str(root_db)]+list(args),

@@ -9,6 +9,12 @@ LOCachy did not start (89-locachy-pacman-guard.hook, AbortOnFail).
         and the pidfd of the real pacman waits until pacman has exited, then
         releases it. The hook returns at once, so pacman goes on; the child
         has its stdio on /dev/null, so pacman never waits for its output.
+        Under that domain it also compares the repository databases with
+        those LOCachy published (locachy_stack.check): a plain pacman -Sy
+        replaces them with the raw ones, on which pacman takes each package
+        from the first repository that has it, not the stack's newest; the
+        transaction is then refused, nothing changed. Before LOCachy has
+        published here (no record yet) nothing is refused for this.
 
 Nothing is read from the environment: the job-or-offline decision is
 locachy_jobs.execution_mode(), and pacman is found by its process chain.
@@ -28,10 +34,13 @@ import os
 from pathlib import Path
 import select
 import stat
+import subprocess
 import sys
 
 sys.dont_write_bytecode = True
 LOCK = "/run/locachy/pkg.lock"  # the same domain locachy-pkg and the jobs runner use
+PACMAN_CONF = "/etc/pacman.conf"
+PACMAN_SYNC = "/var/lib/pacman/sync"
 
 
 def jobs():
@@ -42,6 +51,30 @@ def jobs():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def stack():
+    path = Path(__file__).with_name("locachy_stack.py")
+    if not path.is_file():
+        path = Path("/usr/local/lib/locachy/locachy_stack.py")
+    spec = importlib.util.spec_from_file_location("locachy_stack", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def published_mismatch():
+    """What differs from the repository databases LOCachy published, or None.
+    Nothing is refused before LOCachy has published here: a system from before
+    the stacked databases has no record until its first update writes one.
+    A record that cannot be checked refuses (fails closed)."""
+    try:
+        module = stack()
+        if not os.path.exists(module.RECORD):
+            return None
+        return module.check(PACMAN_SYNC, module.repositories(PACMAN_CONF), module.RECORD)
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as e:
+        return f"the published repository databases cannot be checked ({e})"
 
 
 def comm(pid):
@@ -121,6 +154,12 @@ def pre():
         os.close(fd)
         return fail("the host package domain is busy (a LOCachy job or package operation runs); "
                     "nothing changed, try again later")
+    # Checked under the domain: no LOCachy transaction can publish meanwhile.
+    mismatch = published_mismatch()
+    if mismatch:
+        os.close(fd)
+        return fail(f"{mismatch}; nothing changed. A plain pacman replaced the stacked repository "
+                    "databases: LOCachy's update publishes them again")
     try:
         pidfd = os.pidfd_open(pid)
     except OSError as e:

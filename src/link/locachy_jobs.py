@@ -18,6 +18,21 @@ INIT = "/usr/local/lib/locachy/init"
 INPUT_MAX = 4096
 
 
+def job_members(job):
+    """The members of a job's cgroup. Under `ip netns exec` (pacman runs in
+    locachy-net, so the hooks it runs do too: the guard, the rebuild hook) /sys
+    is a fresh sysfs of that network namespace, and /sys/fs/cgroup in it is
+    empty. The same file is then read through process 1's root, where the
+    hierarchy is. Membership is still checked by pid, as before."""
+    path = Path(CGROUP, job, "cgroup.procs")
+    try:
+        return path.read_text().splitlines()
+    except FileNotFoundError:
+        if os.readlink("/proc/self/ns/mnt") == os.readlink("/proc/1/ns/mnt"):
+            raise
+    return Path("/proc/1/root" + str(path)).read_text().splitlines()
+
+
 def execution_mode():
     root = os.stat("/")
     host = os.stat("/proc/1/root")
@@ -27,7 +42,7 @@ def execution_mode():
     for line in lines:
         match = re.fullmatch(r"0::/locachy-jobs/(job-[1-9][0-9]*)", line)
         if match:
-            procs = Path(CGROUP, match[1], "cgroup.procs").read_text().splitlines()
+            procs = job_members(match[1])
             if str(os.getpid()) in procs:
                 return "job"
             raise RuntimeError("job cgroup membership could not be verified")

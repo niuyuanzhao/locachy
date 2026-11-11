@@ -45,6 +45,16 @@
 # merged: one may keep a key's old expiry and miss its newer subkeys),
 # shown (fingerprint, owner, subkeys), and added to the build user's
 # keyring only when answered y. One trusted already is brought up to date.
+# locachy-build --check-keys PKG...: the keys building the AUR packages PKG...
+# would check with, found as a build finds them (in a build root of its own),
+# looked up in the build user's keyring and nothing else: nothing is built,
+# fetched into a keyring or trusted. Exit status 3 when one is not trusted
+# yet (written to untrusted-keys as a build does), with one line for each on
+# standard output, for the caller to show (locachy-pkg apply, before it
+# changes anything): PKG TAB RECIPE TAB FINGERPRINT TAB UPSTREAM TAB SIGNED
+# (PKG: those of PKG... it is needed for, comma-separated; RECIPE: the AUR
+# recipe whose validpgpkeys name it; UPSTREAM: that recipe's url; SIGNED: its
+# signed sources, space-separated; "-": none).
 set -euo pipefail
 # Its files are made as packages' are, whatever the caller's umask (locachy-app
 # has 077): with it the build root's / would be root's alone, closed to the
@@ -104,6 +114,89 @@ keyring_close() {
     as_builder gpgconf --kill all >/dev/null 2>&1 || true
 }
 
+# "NAME FINGERPRINT [NEEDED UPSTREAM SIGNED...]" lines: the keys not in the
+# build user's keyring are written down for the caller (handover/untrusted-
+# keys: NAME FINGERPRINT; with --check-keys, sources_out too: what a person
+# checks each with); keys_stop ends the run if there was one. It only looks
+# keys up: none is fetched, imported or trusted here.
+untrusted=0
+sources_out=
+aur_runner=() # what aur_keys runs its lookup with (--check-keys: the build user, in locachy-net)
+check_keys() {
+    local name key needed upstream signed
+    while read -r name key needed upstream signed; do
+        [ -n "$key" ] || continue
+        [[ "$key" =~ ^[[:xdigit:]]{40}$ || "$key" =~ ^[[:xdigit:]]{64}$ ]] ||
+            die "$name: invalid source PGP fingerprint $key (validpgpkeys takes full fingerprints)"
+        key=${key^^}
+        if ! as_builder gpg --batch --list-keys "$key" >/dev/null 2>&1; then
+            printf '%s %s\n' "$name" "$key" >>"$handover/untrusted-keys"
+            [ -z "$sources_out" ] || printf '%s\t%s\t%s\t%s\t%s\n' "${needed:-$name}" "$name" "$key" \
+                "${upstream:--}" "${signed:--}" >>"$sources_out"
+            untrusted=1
+        fi
+    done
+}
+keys_stop() {
+    [ "$untrusted" = 0 ] || exit 3
+}
+# The validpgpkeys of the AUR packages NAME... and of those of their
+# dependencies the AUR has to give (neither installed nor in a repository),
+# from each one's .SRCINFO: "BASE FINGERPRINT NEEDED UPSTREAM SIGNED..." lines
+# (NEEDED: those of NAME... it is needed for, comma-separated; UPSTREAM: the
+# recipe's url; SIGNED: its signed sources; "-": none). What the AUR says is
+# shown to a person as it is, printable characters only.
+aur_keys() {
+    "${aur_runner[@]}" python3 -I - "$@" <<'PY'
+import json, re, subprocess, sys, urllib.parse, urllib.request
+def found(*cmd):
+    return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+def get(url):
+    with urllib.request.urlopen(url, timeout=30) as r:
+        return r.read().decode("utf-8", "replace")
+def info(batch):
+    return json.loads(get("https://aur.archlinux.org/rpc/v5/info?" +
+                          urllib.parse.urlencode([("arg[]", n) for n in batch])))["results"]
+def shown(text):
+    text = "".join(c for c in text if c.isprintable() and not c.isspace())[:300]
+    return text or "-"
+roots = {n: {n} for n in sys.argv[1:]}
+seen, bases, base_of, todo = set(), {}, {}, list(sys.argv[1:])
+while todo:
+    batch = sorted(set(todo) - seen)
+    todo = []
+    if not batch:
+        break
+    seen |= set(batch)
+    for pkg in info(batch):
+        name, base = pkg["Name"], pkg["PackageBase"]
+        base_of[name] = base
+        bases.setdefault(base, set()).update(roots.get(name, {name}))
+        for dep in pkg.get("Depends", []) + pkg.get("MakeDepends", []) + pkg.get("CheckDepends", []):
+            if not found("pacman", "-T", dep) and not found("pacman", "-Sp", dep):
+                dep = re.split(r"[<>=]", dep, maxsplit=1)[0]
+                roots.setdefault(dep, set()).update(roots.get(name, {name}))
+                if dep in base_of:
+                    bases[base_of[dep]].update(roots[dep])
+                todo.append(dep)
+for base in sorted(bases):
+    keys, url, signed, in_base = [], "-", [], True
+    for line in get("https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h=" + urllib.parse.quote(base)).splitlines():
+        in_base = in_base and not line.startswith("pkgname = ")  # the recipe's own url is pkgbase's
+        key, _, value = line.strip().partition(" = ")
+        value = value.strip()
+        if key == "validpgpkeys":
+            keys.append(value)
+        elif key == "url" and in_base:
+            url = shown(value)
+        elif re.fullmatch(r"source(_[A-Za-z0-9_]+)?", key) and \
+                (re.search(r"\.(sig|asc|sign)$", value) or re.search(r"[?&]signed$", value)):
+            signed.append(shown(value))
+    for value in keys:
+        print(shown(base), value, ",".join(sorted(bases[base])), url, " ".join(signed) or "-")
+PY
+}
+
 if [ "${LOCACHY_BUILD_STAGE:-}" = chroot ]; then
     if [ "${1:-}" = --run ]; then
         shift
@@ -119,59 +212,6 @@ if [ "${LOCACHY_BUILD_STAGE:-}" = chroot ]; then
     keyring_open
     trap keyring_close EXIT
     keyring=(--build-gpgdir "$home/.gnupg")
-    # "NAME FINGERPRINT" lines: the keys not in the build user's keyring are
-    # written down for the caller; keys_stop ends the run if there was one.
-    untrusted=0
-    check_keys() {
-        local name key
-        while read -r name key; do
-            [ -n "$key" ] || continue
-            [[ "$key" =~ ^[[:xdigit:]]{40}$ || "$key" =~ ^[[:xdigit:]]{64}$ ]] ||
-                die "$name: invalid source PGP fingerprint $key (validpgpkeys takes full fingerprints)"
-            key=${key^^}
-            if ! as_builder gpg --batch --list-keys "$key" >/dev/null 2>&1; then
-                printf '%s %s\n' "$name" "$key" >>"$handover/untrusted-keys"
-                untrusted=1
-            fi
-        done
-    }
-    keys_stop() {
-        [ "$untrusted" = 0 ] || exit 3
-    }
-    # The validpgpkeys of the AUR packages NAME... and of those of their
-    # dependencies the AUR has to give (neither installed nor in a
-    # repository): "BASE FINGERPRINT" lines, from each one's .SRCINFO.
-    aur_keys() {
-        python3 -I - "$@" <<'PY'
-import re, subprocess, sys, urllib.parse, urllib.request
-def found(*cmd):
-    return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
-def get(url):
-    with urllib.request.urlopen(url, timeout=30) as r:
-        return r.read().decode("utf-8", "replace")
-def info(batch):
-    import json
-    return json.loads(get("https://aur.archlinux.org/rpc/v5/info?" +
-                          urllib.parse.urlencode([("arg[]", n) for n in batch])))["results"]
-seen, bases, todo = set(), set(), list(sys.argv[1:])
-while todo:
-    batch = sorted(set(todo) - seen)
-    todo = []
-    if not batch:
-        break
-    seen |= set(batch)
-    for pkg in info(batch):
-        bases.add(pkg["PackageBase"])
-        for dep in pkg.get("Depends", []) + pkg.get("MakeDepends", []) + pkg.get("CheckDepends", []):
-            if not found("pacman", "-T", dep) and not found("pacman", "-Sp", dep):
-                todo.append(re.split(r"[<>=]", dep, maxsplit=1)[0])
-for base in sorted(bases):
-    for line in get("https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h=" + urllib.parse.quote(base)).splitlines():
-        key, _, value = line.strip().partition(" = ")
-        if key == "validpgpkeys":
-            print(base, value.strip())
-PY
-    }
     if [ -n "$prepare" ]; then
         # Every candidate starts from the same repository target. Only this
         # disposable root temporarily lacks the old local packages; dependents
@@ -631,6 +671,37 @@ if [ "${1:-}" = --files ]; then
     exit 0
 fi
 
+if [ "${1:-}" = --check-keys ]; then
+    shift
+    [ $# -gt 0 ] || die "--check-keys takes AUR package names"
+    for name in "$@"; do
+        [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9@._+-]*$ ]] || die "not a package name: $name"
+    done
+    getent passwd "$user" >/dev/null && [ -d "$home" ] || die "no build user $user with its home $home: make.sh makes them"
+    # The AUR's answers are read by the build user, in locachy-net when it is
+    # there, as a build reads them; its keyring is only looked in.
+    aur_runner=(setpriv --reuid="$user" --regid="$user" --init-groups --reset-env)
+    [ ! -e /run/netns/locachy-net ] || aur_runner=(ip netns exec locachy-net "${aur_runner[@]}")
+    exec {lock}>"$bdir/lock"
+    flock -n "$lock" || { echo "locachy-build: waiting for the build that runs now" >&2; flock -x "$lock"; }
+    handover=$(mktemp -d -t locachy-check-keys.XXXXXX)
+    sources_out=$handover/untrusted-sources
+    keyring_open
+    trap 'keyring_close; rm -rf "$handover"' EXIT
+    keys=$(aur_keys "$@") || die "the AUR did not answer for: $*"
+    check_keys <<<"$keys"
+    if [ "$untrusted" = 0 ]; then
+        rm -f "$bdir/untrusted-keys" # what the last one stopped for: none now
+        exit 0
+    fi
+    # Listed as a build that stopped lists them: --trust-key takes each one
+    # it trusts out of the list, and the packages interface follows that.
+    sort -u "$handover/untrusted-keys" >"$bdir/untrusted-keys"
+    chmod 0644 "$bdir/untrusted-keys"
+    cat "$sources_out"
+    exit 3
+fi
+
 if [ "${1:-}" = --trust-key ]; then
     shift
     [ $# -gt 0 ] || die "--trust-key takes full fingerprints"
@@ -708,7 +779,7 @@ fi
 bg=0
 inst=0
 local_recipe=0
-usage="usage: locachy-build [-b] [-i] [-r] [--local] PKG... | --files ROOT PKG... | --run COMMAND... | --trust-key FINGERPRINT..."
+usage="usage: locachy-build [-b] [-i] [-r] [--local] PKG... | --files ROOT PKG... | --run COMMAND... | --check-keys PKG... | --trust-key FINGERPRINT..."
 if [ "${1:-}" != --run ]; then
     while [ $# -gt 0 ]; do
         case "$1" in

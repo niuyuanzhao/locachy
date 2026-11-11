@@ -68,12 +68,18 @@ class LocalPackages(unittest.TestCase):
                             ("SOURCE_COMMIT_FILE", str(self.source_commit)),
                             ("TRUSTED_SIGNERS", str(self.signers)),
                             ("SOURCE_PENDING_FILE", str(self.root / "source-pending")),
-                            ("SOURCE_UNBUILT_FILE", str(self.root / "source-unbuilt"))):
+                            ("SOURCE_UNBUILT_FILE", str(self.root / "source-unbuilt")),
+                            # Never the host's checked databases: no merged view here.
+                            ("CHECK_DB", str(self.root / "checkupdates")),
+                            ("MERGED_DB", str(self.root / "checkupdates/merged"))):
             p = mock.patch.object(pkg, name, value)
             p.start()
             self.addCleanup(p.stop)
         self.patch("local_packages", lambda db: dict(self.host) if db == pkg.LOCAL_DB else {})
         self.patch("repo_updates", lambda: ([], {"base": "1"}))
+        # The checked databases, as the stack resolves them, published to the host.
+        self.published = []
+        self.patch("publish_merged", lambda: self.published.append("published"))
         self.patch("aur_versions", lambda names: self.fail(f"AUR must not be queried for {names}"))
         self.patch("host_hash", lambda: "host-current")
         self.patch("build_host_hash", lambda path, recipes=None: "build-current")
@@ -554,10 +560,25 @@ class LocalPackages(unittest.TestCase):
         rows = pkg.plan()
         self.assertTrue(any(r[:3] == ("host", "local", "labwc-locachy") for r in rows))
         calls = []
+        self.patch("publish_merged", lambda: calls.append("publish the checked databases"))
         self.patch("run", lambda cmd, net=False: calls.append((cmd, net)) or True)
         self.assertTrue(pkg.apply_target("host", rows))
-        self.assertEqual(calls[0], (["pacman", "-Syu", "--noconfirm"], True))
-        self.assertEqual(calls[1][0], [pkg.BUILD_TOOL, "-i", "-r", "--local", "labwc-locachy"])
+        # Not -Syu: the checked databases as the stack resolves them, then -Su on them.
+        self.assertEqual(calls[0], "publish the checked databases")
+        self.assertEqual(calls[1], (["pacman", "-Su", "--noconfirm"], True))
+        self.assertEqual(calls[2][0], [pkg.BUILD_TOOL, "-i", "-r", "--local", "labwc-locachy"])
+
+    def test_unpublished_databases_stop_the_host_update_before_pacman(self):
+        calls = []
+        def fail():
+            raise RuntimeError("no checked repository databases; check for updates first")
+        self.patch("publish_merged", fail)
+        self.patch("run", lambda cmd, net=False: calls.append(cmd) or True)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertFalse(pkg.apply_target("host", [("host", "repo", "base", "1", "2")]))
+        self.assertEqual(calls, [])
+        self.assertIn("repository databases not published", err.getvalue())
 
     def test_apply_rechecks_library_changes_not_in_plan(self):
         self.record(host="old")
@@ -574,7 +595,7 @@ class LocalPackages(unittest.TestCase):
         rows = [("host", "local", "labwc-locachy", "0.20.2-1.1", "patch changed")]
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertFalse(pkg.apply_target("host", rows))
-        self.assertEqual(calls, [["pacman", "-Syu", "--noconfirm"]])
+        self.assertEqual(calls, [["pacman", "-Su", "--noconfirm"]])
 
     def test_disappeared_recipe_stays_local_in_plan_and_info(self):
         self.record()
@@ -862,10 +883,13 @@ class LocalPackages(unittest.TestCase):
         calls, queries, result = self.apply_host(rows)
         self.assertTrue(result)
         # The host update first, then the leaf through sync's own repository path.
-        self.assertEqual(calls, [["pacman", "-Syu", "--noconfirm"],
+        self.assertEqual(calls, [["pacman", "-Su", "--noconfirm"],
                                  "pacman -S --needed --noconfirm --assume-installed initramfs sof-firmware"])
+        self.assertEqual(self.published, ["published"])
         # A Vulkan driver is installed (pacman -T): none is added.
-        self.assertEqual(queries, [["pacman", "-Sp", "sof-firmware"], ["pacman", "-T", "vulkan-driver"]])
+        # The query reads the configuration the stack reads (and its view, once checked).
+        self.assertEqual(queries, [["pacman", "-Sp", "--config", pkg.PACMAN_CONFIG, "sof-firmware"],
+                                   ["pacman", "-T", "vulkan-driver"]])
         self.assertNotIn(missing, pkg.plan())
 
     def test_apply_installs_nothing_when_no_declared_leaf_is_missing(self):
@@ -873,17 +897,17 @@ class LocalPackages(unittest.TestCase):
         self.assertFalse(any(r[1] == "missing" for r in pkg.plan()))
         calls, queries, result = self.apply_host([("host", "repo", "base", "1", "2")])
         self.assertTrue(result)
-        self.assertEqual(calls, [["pacman", "-Syu", "--noconfirm"]])
+        self.assertEqual(calls, [["pacman", "-Su", "--noconfirm"]])
         self.assertEqual(queries, [])
         # Planned, then no longer declared (removed) or already installed: left alone.
         rows = [("host", "missing", "sof-firmware", "", "declared, not installed")]
         calls, queries, result = self.apply_host(rows)
         self.assertTrue(result)
-        self.assertEqual((calls, queries), ([["pacman", "-Syu", "--noconfirm"]], []))
+        self.assertEqual((calls, queries), ([["pacman", "-Su", "--noconfirm"]], []))
         self.manifest.write_text("labwc-locachy\nsof-firmware\n")
         self.host["sof-firmware"] = "1"
         calls, queries, result = self.apply_host(rows)
-        self.assertEqual((calls, queries, result), ([["pacman", "-Syu", "--noconfirm"]], [], True))
+        self.assertEqual((calls, queries, result), ([["pacman", "-Su", "--noconfirm"]], [], True))
 
     def test_prepared_host_installs_missing_leaf_only_after_its_transaction(self):
         (self.recipe / "upstream.json").write_text('{"schema":1}\n')

@@ -43,6 +43,7 @@ checks every argument; anything else is refused.
 | `kernel-select` | `locachy-pkg kernel select` | a package `linux…` of `[a-z0-9+._-]` |
 | `kernel-headers` | `locachy-pkg kernel headers` | `on` or `off` |
 | `repos-rank` | `locachy-repos rank` | none |
+| `repos-rank-due` | `locachy-repos rank --due` | none (the periodic ranking, `service_repos_rank`: tools/UPDATES.md) |
 | `repos-set` | `locachy-repos apply --set` | `core`, `extra` or `multilib`, `=on` or `=off` |
 | `boot` | `locachy-boot` | none, `--luks`, or `--register-only` |
 | `locachy-rebuild` | `locachy-pkg rebuild` | none or `--force` |
@@ -105,7 +106,7 @@ An external pacman PostTransaction hook registers its boot event without waiting
 `keys`: a build (a job of locachy-pkg or locachy-app) that stopped for
 source signing keys a person has not trusted yet — locachy-build exits 3,
 or lists them in `/var/lib/locachy/builder/untrusted-keys` during the job
-(locachy-pkg then only says it failed). Not a failure: the program that asked
+(locachy-pkg then only says it failed). `locachy-pkg apply` also exits 3 itself, before anything is changed, when the keys of the host's AUR packages are not trusted yet. Not a failure: the program that asked
 shows the keys and asks for the rest once they are trusted (packages: `g`).
 A running job being stopped is `stopping`, then `cancelled`; a queued job
 removed is `cancelled` at once. Every state but `queued`, `running` and
