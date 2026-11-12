@@ -14,6 +14,6 @@ Parts that come from other projects keep their own licenses:
   src/edit/queries/                 tree-sitter highlight queries, under the
                                     licenses of the projects they come from
                                     (see the LICENSE files there)
-  companion/macos/patches/          a patch to OpenDisplay (peetzweg/opendisplay),
-                                    under OpenDisplay's license, the GNU GPL
-                                    version 3 (see companion/macos/README.md)
+
+The extended display senders for other operating systems are in the
+locachy-companion repository, which has its own NOTICE.

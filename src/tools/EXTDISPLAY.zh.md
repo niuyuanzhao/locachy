@@ -31,7 +31,7 @@ worker 以 `nobody` 运行，无补充组、`no_new_privs`、Landlock 规则不�
 
 采用 TLS 1.2 PSK，是因为发送端平台的系统 TLS 不提供 TLS 1.3 外部 PSK。纯 PSK 密钥交换在**单次会话内没有前向保密**：拿到该次连接 PSK 且录下流量的人可以解密。之所以可以接受，是因为密钥随机、每次连接一份、由用户当场经直连线缆输入、连接结束即丢弃；事后入侵也找不到能解开旧会话的已存密钥。
 
-中转进程（broker）负责线缆租约与 TLS 转发，见下文“Broker（中转进程）”一节。macOS 发送端位于 `companion/macos`，有自己的 README。安装路径上没有 broker 时，配对界面显示“配对助手已停止”。
+中转进程（broker）负责线缆租约与 TLS 转发，见下文“Broker（中转进程）”一节。macOS 发送端位于 `locachy-companion` 仓库的 `extdisplay-sender/macos`，有自己的 README。安装路径上没有 broker 时，配对界面显示“配对助手已停止”。
 
 任何会话都必须有受管会话所有者（`session.h`，由 process 1 仅对本程序设置 `LOCACHY_SESSION_FD`）。前端必须以 root 运行，因为它要把 worker 降权为 `nobody`；以其他用户运行则显示“不可用”。事件循环每一轮都先处理所有者策略，再转发输入。策略变化（锁屏、冻结、停止）时，前端停止转发、丢弃排队的本地输入，要求 worker 把 `cancel` 写进数据流，最多等 150 ms 确认（否则杀掉 worker，数据流随之结束），之后才向所有者确认；所有者最多等 250 ms。仅在已协商的数据流活动且允许输入时持有睡眠抑制。所有者描述符从不交给 worker。
 
