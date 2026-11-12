@@ -1,5 +1,5 @@
 /*
- * The LOCachy companion protocol of the extended-display receiver
+ * The LOCachy sender protocol of the extended-display receiver
  * (tools/EXTDISPLAY.md): OpenDisplay pv 3 framing and hello/streamConfig shapes,
  * plus a mandatory LOCachy capability handshake and key/button/cancel input.
  * It is not VNC and not an unauthenticated OpenDisplay endpoint: it runs only
@@ -21,7 +21,7 @@
 #define EXTDISPLAY_DIM_MAX 4096u
 #define EXTDISPLAY_PIXELS_MAX (16u * 1024u * 1024u)
 #define EXTDISPLAY_FPS_MAX 60
-#define EXTDISPLAY_COMPANION_VERSION 1
+#define EXTDISPLAY_SENDER_VERSION 1
 
 /* Input enums on the wire (numbers): base.h's values, fixed here. */
 enum { EXTDISPLAY_PHASE_NONE, EXTDISPLAY_PHASE_BEGIN, EXTDISPLAY_PHASE_UPDATE, EXTDISPLAY_PHASE_END, EXTDISPLAY_PHASE_CANCEL };

@@ -305,7 +305,7 @@ static int handle_worker(int *inhibited, double *started)
             *inhibited = 1;
         }
         *started = uptime();
-        set_state(N_("Active"), N_("Extended-only companion over the paired dedicated link."));
+        set_state(N_("Active"), N_("Extended-only sender over the paired dedicated link."));
         return 1;
     case EXTDISPLAY_IPC_FRAME: {
         void *pixels = extdisplay_frame_map(fd, &m);
@@ -331,7 +331,7 @@ static int handle_worker(int *inhibited, double *started)
         break;
     }
     if (fd >= 0) close(fd);
-    set_state(N_("Disconnected"), N_("The companion handshake or the stream failed."));
+    set_state(N_("Disconnected"), N_("The sender handshake or the stream failed."));
     return -1;
 }
 
@@ -354,7 +354,7 @@ static void session_run(int transport)
     } else if ((worker = extdisplay_worker_spawn(transport, &ipc)) < 0) {
         set_state(N_("Unavailable"), N_("The decoder worker could not be started safely."));
     } else {
-        set_state(N_("Connecting"), N_("Waiting for the companion's capabilities."));
+        set_state(N_("Connecting"), N_("Waiting for the sender's capabilities."));
         say("extdisplay: decoder worker %d started", (int)worker);
         session_started = 1;
     }
@@ -415,7 +415,7 @@ static void session_run(int transport)
         }
         if (redraw) draw();
         if (worker > 0 && !active && uptime() - started > HANDSHAKE_S) {
-            set_state(N_("Unavailable"), N_("The companion handshake timed out."));
+            set_state(N_("Unavailable"), N_("The sender handshake timed out."));
             break;
         }
     }

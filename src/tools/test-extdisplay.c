@@ -1,6 +1,6 @@
 /*
  * The extended-display receiver's protocol and decoder (progs/extdisplay-*.c):
- * bounded framing, the companion handshake, input encoding, and real FFmpeg
+ * bounded framing, the sender handshake, input encoding, and real FFmpeg
  * decoding of an Annex-B stream an encoder made (test-extdisplay.sh). Usage:
  *   test-extdisplay                      the protocol cases
  *   test-extdisplay h264|hevc W H FILE   decode FILE through the receiver's path

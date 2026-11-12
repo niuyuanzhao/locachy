@@ -1,4 +1,4 @@
-/* The companion protocol (extdisplay-protocol.h). Runs in extdisplay-worker for anything
+/* The sender protocol (extdisplay-protocol.h). Runs in extdisplay-worker for anything
  * the peer sent; the receiver itself only formats its own messages. */
 #include "extdisplay-protocol.h"
 #include <errno.h>
@@ -115,7 +115,7 @@ static int welcome(struct json_object *o)
 {
     int64_t version;
     struct json_object *v;
-    if (integer(o, "locachy", EXTDISPLAY_COMPANION_VERSION, EXTDISPLAY_COMPANION_VERSION, &version) < 0 ||
+    if (integer(o, "locachy", EXTDISPLAY_SENDER_VERSION, EXTDISPLAY_SENDER_VERSION, &version) < 0 ||
         !(v = field(o, "extended", json_type_boolean)) || !json_object_get_boolean(v)) return -1;
     /* The whole input set, or no session: no mirror or touch-only fallback. */
     if (!(v = field(o, "input", json_type_array)) || json_object_array_length(v) > 16) return -1;
@@ -202,7 +202,7 @@ int extdisplay_hello(char *s, size_t size, uint32_t w, uint32_t h, double scale,
         "\"panel\":{\"pixelsWide\":%u,\"pixelsHigh\":%u,\"scale\":%.3f},"
         "\"displayMaxFrameRate\":%d,\"maxEncodeWide\":%u,\"maxEncodeHigh\":%u,"
         "\"videoCaps\":[%s%s%s],\"input\":[\"key\",\"button\",\"cancel\",\"pointer\",\"scroll\"]}",
-        EXTDISPLAY_COMPANION_VERSION, w, h, scale, w, h, scale, EXTDISPLAY_FPS_MAX, EXTDISPLAY_DIM_MAX, EXTDISPLAY_DIM_MAX,
+        EXTDISPLAY_SENDER_VERSION, w, h, scale, w, h, scale, EXTDISPLAY_FPS_MAX, EXTDISPLAY_DIM_MAX, EXTDISPLAY_DIM_MAX,
         h264 ? "{\"codec\":\"h264\",\"maxWidth\":4096,\"maxHeight\":4096,\"maxFrameRate\":60}" : "",
         h264 && hevc ? "," : "",
         hevc ? "{\"codec\":\"hevc\",\"maxWidth\":4096,\"maxHeight\":4096,\"maxFrameRate\":60}" : ""), size);

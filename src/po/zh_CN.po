@@ -6483,8 +6483,8 @@ msgid "Active"
 msgstr "已连接"
 
 #: progs/extdisplay.c
-msgid "Extended-only companion over the paired dedicated link."
-msgstr "仅作扩展屏的配套程序，经配对专线连接。"
+msgid "Extended-only sender over the paired dedicated link."
+msgstr "仅作扩展屏的发送端，经配对专线连接。"
 
 #: progs/extdisplay.c
 msgid "The decoder sent an invalid picture."
@@ -6495,8 +6495,8 @@ msgid "The decoder sandbox or FFmpeg is not available."
 msgstr "解码沙箱或 FFmpeg 不可用。"
 
 #: progs/extdisplay.c
-msgid "The companion handshake or the stream failed."
-msgstr "与配套程序的握手或画面流失败。"
+msgid "The sender handshake or the stream failed."
+msgstr "与发送端的握手或画面流失败。"
 
 #: progs/extdisplay.c
 msgid "No managed session owner: remote input stays disabled."
@@ -6519,8 +6519,8 @@ msgid "Connecting"
 msgstr "正在连接"
 
 #: progs/extdisplay.c
-msgid "Waiting for the companion's capabilities."
-msgstr "正在等待配套程序报告其能力。"
+msgid "Waiting for the sender's capabilities."
+msgstr "正在等待发送端报告其能力。"
 
 #: progs/extdisplay.c
 msgid "The session owner has gone."
@@ -6535,8 +6535,8 @@ msgid "Remote input could not be delivered."
 msgstr "无法送达远端输入。"
 
 #: progs/extdisplay.c
-msgid "The companion handshake timed out."
-msgstr "与配套程序握手超时。"
+msgid "The sender handshake timed out."
+msgstr "与发送端握手超时。"
 
 #: progs/extdisplay.c progs/settings-power.inc
 msgid "Idle"

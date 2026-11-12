@@ -6432,7 +6432,7 @@ msgid "Active"
 msgstr ""
 
 #: progs/extdisplay.c
-msgid "Extended-only companion over the paired dedicated link."
+msgid "Extended-only sender over the paired dedicated link."
 msgstr ""
 
 #: progs/extdisplay.c
@@ -6444,7 +6444,7 @@ msgid "The decoder sandbox or FFmpeg is not available."
 msgstr ""
 
 #: progs/extdisplay.c
-msgid "The companion handshake or the stream failed."
+msgid "The sender handshake or the stream failed."
 msgstr ""
 
 #: progs/extdisplay.c
@@ -6468,7 +6468,7 @@ msgid "Connecting"
 msgstr ""
 
 #: progs/extdisplay.c
-msgid "Waiting for the companion's capabilities."
+msgid "Waiting for the sender's capabilities."
 msgstr ""
 
 #: progs/extdisplay.c
@@ -6484,7 +6484,7 @@ msgid "Remote input could not be delivered."
 msgstr ""
 
 #: progs/extdisplay.c
-msgid "The companion handshake timed out."
+msgid "The sender handshake timed out."
 msgstr ""
 
 #: progs/extdisplay.c progs/settings-power.inc

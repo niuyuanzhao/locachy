@@ -8,7 +8,7 @@
 |---|---|
 | `progs/extdisplay.c` | 前端：直接屏幕、base 键盘与指针、会话所有者、状态显示；不新建 compositor。 |
 | `progs/extdisplay-worker.c` | 沙箱 worker：唯一读取对端字节（封包、JSON、视频）的进程。 |
-| `progs/extdisplay-protocol.[ch]` | 有界封包解析与下述 companion 协议。 |
+| `progs/extdisplay-protocol.[ch]` | 有界封包解析与下述发送端协议。 |
 | `progs/extdisplay-decode.[ch]` | 发行版 FFmpeg（`libavcodec`、`libavutil`、`libswscale`），不自写解码器。 |
 | `progs/extdisplay-ipc.h`、`progs/extdisplay-client.c` | 定长 `SOCK_SEQPACKET` 消息；画面以封存只读 memfd 传递。 |
 | `progs/extdisplay-setup.[ch]` | 配对客户端：broker 子进程（只保留 fd 3）、控制行、状态。用作真实子进程的桩 broker 测试。 |
@@ -23,7 +23,7 @@ worker 以 `nobody` 运行，无补充组、`no_new_privs`、Landlock 规则不�
 
 ## 传输与会话所有权
 
-`extdisplay` 不接受参数。它自己启动 broker：`extdisplay-broker --control-fd 3`，从安装路径执行，控制通道是一对 socketpair。子进程中 broker 的一端是 fd 3，标准输入输出为 `/dev/null`，其他描述符全部关闭，包括会话所有者的描述符，因此 broker 永远够不到所有者。broker 是 `extdisplay` 的子进程，留在应用的 cgroup 内，PID 1 的停止与冻结仍然能作用到它。控制通道是 `SOCK_SEQPACKET`，每条消息一行 ASCII，最长 512 字节：`extdisplay` 发送 `scan`、`pair NAME`、`cancel` 与 `release`；broker 回复 `iface NAME DRIVER up|down` 行与 `end`，`lease NAME LINKLOCAL PORT` 与 `code GROUPS`（或 `error TEXT`），`paired`（恰好带一个描述符，即明文 `AF_UNIX` 流），以及 `ended REASON`。通道 EOF 表示 broker 释放并退出。接收器自己从不监听或拨出网络，TCP socket 会被拒绝。配对后的流承载下面的 companion 协议。已冻结的 broker 传输方案：
+`extdisplay` 不接受参数。它自己启动 broker：`extdisplay-broker --control-fd 3`，从安装路径执行，控制通道是一对 socketpair。子进程中 broker 的一端是 fd 3，标准输入输出为 `/dev/null`，其他描述符全部关闭，包括会话所有者的描述符，因此 broker 永远够不到所有者。broker 是 `extdisplay` 的子进程，留在应用的 cgroup 内，PID 1 的停止与冻结仍然能作用到它。控制通道是 `SOCK_SEQPACKET`，每条消息一行 ASCII，最长 512 字节：`extdisplay` 发送 `scan`、`pair NAME`、`cancel` 与 `release`；broker 回复 `iface NAME DRIVER up|down` 行与 `end`，`lease NAME LINKLOCAL PORT` 与 `code GROUPS`（或 `error TEXT`），`paired`（恰好带一个描述符，即明文 `AF_UNIX` 流），以及 `ended REASON`。通道 EOF 表示 broker 释放并退出。接收器自己从不监听或拨出网络，TCP socket 会被拒绝。配对后的流承载下面的发送端协议。已冻结的 broker 传输方案：
 
 - 只走专用线缆链路（Thunderbolt/USB4 网络），位于会话私有网络命名空间，仅 link-local，无默认路由、DNS、转发和 Wi-Fi 回退；
 - TLS 1.2，`TLS_PSK_WITH_AES_128_GCM_SHA256`，PSK identity 与 ALPN 均为 `locachy-extdisplay-v1`，不用会话票据、恢复或重协商；
@@ -143,7 +143,7 @@ broker 死后没有需要保留的状态。租约记录在磁盘上。会话命�
 
 由本脚本在 Linux 上验证的：上文列出的全部内容，包括被杀与记录行为，以及转发进程的沙箱探测。已设计但未在此验证的：真实的 `thunderbolt-net` 设备（发现、线缆载波、broker 被杀后内核移到初始命名空间，以及经 udev 与 `network-client` 回到 locachy-net，这需要一台可随意重装的虚拟机，因为在测试主机上这样的设备会到达主机的真实命名空间）；NetworkManager 对归还设备的处理；按地址拒绝租约的旧记录；对端一侧的载波丢失（区别于管理员的 link-down）；以及 Mac 发送端通过真实线缆配对。
 
-## Companion 协议
+## 发送端协议
 
 与 OpenDisplay pv 3 的封包及 `hello`/`streamConfig` 形态兼容，另加必需的 LOCachy 握手；不带该握手的普通 OpenDisplay 发送端得不到会话。
 

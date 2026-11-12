@@ -8,7 +8,7 @@
 |---|---|
 | `progs/extdisplay.c` | Frontend: direct screen, base keyboard and pointer, session owner, status. No compositor. |
 | `progs/extdisplay-worker.c` | Sandboxed worker: the only process that reads the peer's bytes (framing, JSON, video). |
-| `progs/extdisplay-protocol.[ch]` | Bounded framing parser and the companion protocol below. |
+| `progs/extdisplay-protocol.[ch]` | Bounded framing parser and the sender protocol below. |
 | `progs/extdisplay-decode.[ch]` | Distribution FFmpeg (`libavcodec`, `libavutil`, `libswscale`); no codec of its own. |
 | `progs/extdisplay-ipc.h`, `progs/extdisplay-client.c` | Fixed-size `SOCK_SEQPACKET` messages; pictures as sealed read-only memfds. |
 | `progs/extdisplay-setup.[ch]` | Pairing client: the broker's child (fd 3 only), the control lines, the states. Tested against a stub broker that runs as a real child. |
@@ -23,7 +23,7 @@ The receiver is the optional component *Extended display (extdisplay)*: Settings
 
 ## Transport and session ownership
 
-`extdisplay` takes no arguments. It starts the broker itself, `extdisplay-broker --control-fd 3`, from its install path, over a socketpair. In the child the broker's end is fd 3, stdio is `/dev/null`, and every other descriptor is closed, the session owner's included, so the broker can never reach the owner. The broker is a child of `extdisplay`, so it stays in the app's cgroup and PID 1's stop and freeze still reach it. The control channel is `SOCK_SEQPACKET`, one ASCII line per message of at most 512 bytes: `extdisplay` sends `scan`, `pair NAME`, `cancel` and `release`; the broker answers with `iface NAME DRIVER up|down` lines and `end`, `lease NAME LINKLOCAL PORT` and `code GROUPS` (or `error TEXT`), `paired` with exactly one descriptor (a plaintext `AF_UNIX` stream), and `ended REASON`. EOF on the channel means the broker releases and exits. The receiver never listens on or dials a network itself; a TCP socket is refused. The paired stream carries the companion protocol below. The broker's frozen transport is:
+`extdisplay` takes no arguments. It starts the broker itself, `extdisplay-broker --control-fd 3`, from its install path, over a socketpair. In the child the broker's end is fd 3, stdio is `/dev/null`, and every other descriptor is closed, the session owner's included, so the broker can never reach the owner. The broker is a child of `extdisplay`, so it stays in the app's cgroup and PID 1's stop and freeze still reach it. The control channel is `SOCK_SEQPACKET`, one ASCII line per message of at most 512 bytes: `extdisplay` sends `scan`, `pair NAME`, `cancel` and `release`; the broker answers with `iface NAME DRIVER up|down` lines and `end`, `lease NAME LINKLOCAL PORT` and `code GROUPS` (or `error TEXT`), `paired` with exactly one descriptor (a plaintext `AF_UNIX` stream), and `ended REASON`. EOF on the channel means the broker releases and exits. The receiver never listens on or dials a network itself; a TCP socket is refused. The paired stream carries the sender protocol below. The broker's frozen transport is:
 
 - the dedicated cable link only (Thunderbolt/USB4 networking), in a session network namespace, link-local, with no default route, DNS, forwarding or Wi-Fi fallback;
 - TLS 1.2 with `TLS_PSK_WITH_AES_128_GCM_SHA256`, PSK identity and ALPN `locachy-extdisplay-v1`, no session tickets, resumption or renegotiation;
@@ -63,7 +63,7 @@ From the broker, unsolicited:
 - `paired`, with exactly one `SCM_RIGHTS` descriptor: the plaintext end, an `AF_UNIX` `SOCK_STREAM`. It follows `code` and precedes any `ended`.
 - `ended REASON`, exactly once per attempt. REASON is one of `handshake-failed`, `timeout`, `carrier-lost`, `released`, `cancelled` or `error`. `error` covers a stream that ends on its own (the peer closed it, or TLS or the pump failed). After any `ended` other than `released` the broker stays alive and idle, with its lease released; `scan` and `pair` are accepted again.
 
-`LINKLOCAL` is the bare IPv6 link-local address, without a zone: the zone is the sender's own interface. `PORT` is `27183` (`EXTDISPLAY_BROKER_PORT`). The Mac companion has no default port; it takes `--port`. `GROUPS` is the pairing code.
+`LINKLOCAL` is the bare IPv6 link-local address, without a zone: the zone is the sender's own interface. `PORT` is `27183` (`EXTDISPLAY_BROKER_PORT`). The Mac sender has no default port; it takes `--port`. `GROUPS` is the pairing code.
 
 ### Candidates and identity
 
@@ -143,7 +143,7 @@ The fixtures are compile-time: `EXTDISPLAY_BROKER_TEST_DRIVER`, `EXTDISPLAY_BROK
 
 Verified on Linux by this script: everything listed above, including the kill and record behaviour and the pump's sandbox probes. Designed, not verified here: real `thunderbolt-net` devices (discovery, the cable's carrier, the kernel's move to the initial namespace after a killed broker, and the udev and `network-client` return into locachy-net, which needs a disposable VM because on a test host such a device would reach the host's real namespace); NetworkManager's handling of a returned device; a stale record refusing a lease by address; carrier loss on the peer's side, as opposed to an administrative link-down; and the Mac sender pairing over a real cable.
 
-## Companion protocol
+## Sender protocol
 
 Compatible with OpenDisplay pv 3 framing and its `hello`/`streamConfig` shapes, plus a mandatory LOCachy handshake; an ordinary OpenDisplay sender without it gets no session.
 
