@@ -18,6 +18,8 @@ link=(-Wl,--gc-sections)
 "$out/settings" "$out/settings-fixtures"
 "${cc[@]}" "$src/tools/test-settings-close.c" "${link[@]}" -o "$out/settings-close"
 "$out/settings-close"
+"${cc[@]}" "$src/tools/test-settings-optional.c" "${link[@]}" -o "$out/settings-optional"
+"$out/settings-optional"
 "${cc[@]}" "$src/tools/test-term-close.c" "${link[@]}" -o "$out/term-close"
 timeout 30 "$out/term-close" "$out/term-close-fixtures"
 "${cc[@]}" "$src/tools/test-monitor-layout.c" "${link[@]}" -o "$out/monitor-layout"

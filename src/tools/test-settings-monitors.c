@@ -384,6 +384,12 @@ int rc_read(void (*fn)(const char *, const char *, void *), void *arg)
         fn("service_tor", TOR_SERVICE, arg);
         fn("tor_front", net_front, arg);
     }
+    /* An installed optional component: its packages (fake_opt) and its rc.conf lines. */
+    for (int i = 0; i < NOPT_MODULES; i++) {
+        if (!(fake_opt & (1 << i))) continue;
+        if (opt_modules[i].rc_key) fn(opt_modules[i].rc_key, opt_modules[i].rc_val, arg);
+        if (opt_modules[i].rc_key2) fn(opt_modules[i].rc_key2, opt_modules[i].rc_val2, arg);
+    }
     return 0;
 }
 #define fopen fixture_fopen

@@ -19,7 +19,7 @@ worker 以 `nobody` 运行，无补充组、`no_new_privs`、Landlock 规则不�
 
 ## 安装
 
-接收器是可选组件“扩展屏 (extdisplay)”：设置 → 系统 → 可选组件。它安装 FFmpeg 和 json-c，并在 rc.conf 里写入 `program_extdisplay`，home 正是靠这一项列出该程序。两者都装好时 `make.sh` 才编译 `extdisplay` 和 `extdisplay-worker`，否则打印 `make: extdisplay not built`。broker 只需要 OpenSSL，基础系统本来就会带上它。
+接收器是可选组件“扩展屏 (extdisplay)”：设置 → 系统 → 可选组件。它安装 FFmpeg 和 json-c，并在 rc.conf 里写入 `program_extdisplay`，home 正是靠这一项列出该程序。两者都在，这一行才显示已安装：FFmpeg 若因别的软件已装上，这一行仍显示未安装，此时按 Enter 只补写 rc.conf 这一行并声明这些包。两者都装好时 `make.sh` 才编译 `extdisplay` 和 `extdisplay-worker`，否则打印 `make: extdisplay not built`。broker 只需要 OpenSSL，基础系统本来就会带上它。
 
 ## 传输与会话所有权
 

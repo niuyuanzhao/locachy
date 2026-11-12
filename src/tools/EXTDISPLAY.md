@@ -19,7 +19,7 @@ The worker runs as `nobody` with no supplementary groups, `no_new_privs`, a Land
 
 ## Installing
 
-The receiver is the optional component *Extended display (extdisplay)*: Settings → System → Optional Components. It installs FFmpeg and json-c and sets `program_extdisplay` in rc.conf, which is what lists the program in home. `make.sh` builds `extdisplay` and `extdisplay-worker` only when both are installed; otherwise it prints `make: extdisplay not built`. The broker needs only OpenSSL, which the base system already pulls in.
+The receiver is the optional component *Extended display (extdisplay)*: Settings → System → Optional Components. It installs FFmpeg and json-c and sets `program_extdisplay` in rc.conf, which is what lists the program in home. The row says installed only when both are there: FFmpeg installed for something else leaves it not installed, and Enter then only adds the rc.conf line and declares the packages. `make.sh` builds `extdisplay` and `extdisplay-worker` only when both are installed; otherwise it prints `make: extdisplay not built`. The broker needs only OpenSSL, which the base system already pulls in.
 
 ## Transport and session ownership
 

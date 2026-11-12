@@ -1842,7 +1842,8 @@ static const struct opt_module opt_modules[] = {
     { N_("SPI programmer (flashrom)"), "/usr/bin/flashrom",
       "flashrom", NULL, NULL, NULL, NULL },
     /* The probe is FFmpeg's header: the packages are present. make.sh builds the
-     * program only with them (tools/EXTDISPLAY.md). */
+     * program only with them (tools/EXTDISPLAY.md). Installed also needs the
+     * program line home lists (opt_module_installed). */
     { N_("Extended display (extdisplay)"), "/usr/include/libavcodec/avcodec.h",
       "ffmpeg json-c", "program_extdisplay", "/usr/local/bin/extdisplay", NULL, NULL },
 };
@@ -1858,9 +1859,34 @@ static int cjk_fonts_present(void)
     return cjk_fonts;
 }
 
+struct rc_has_arg {
+    const char *name;
+    int found;
+};
+
+static void on_rc_has(const char *name, const char *value, void *arg)
+{
+    struct rc_has_arg *a = arg;
+    if (strcmp(name, a->name) == 0) a->found = value[0] != '\0';
+}
+
+/* Whether rc.conf has NAME, with any value. */
+static int rc_has(const char *name)
+{
+    struct rc_has_arg a = { name, 0 };
+    rc_read(on_rc_has, &a);
+    return a.found;
+}
+
+/* Installed: the packages are there and, for a component that names a
+ * service or a program in rc.conf, those lines are there too. FFmpeg present
+ * for something else is not the extended display turned on (home lists
+ * rc.conf's programs); Enter then turns it on instead of removing FFmpeg. */
 static int opt_module_installed(int i)
 {
-    return opt_modules[i].probe ? access(opt_modules[i].probe, R_OK) == 0 : cjk_fonts_present();
+    const struct opt_module *m = &opt_modules[i];
+    int present = m->probe ? access(m->probe, R_OK) == 0 : cjk_fonts_present();
+    return present && (!m->rc_key || rc_has(m->rc_key)) && (!m->rc_key2 || rc_has(m->rc_key2));
 }
 
 /* The manifest is the headers switch; installed state may lag a failed job. */
