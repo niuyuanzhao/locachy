@@ -236,9 +236,14 @@ static int nclouds;
 static struct {
     pid_t pid;
     int fd, stage, top, hidden;
+    unsigned pass; /* the reload_all that began this read; 0: none */
     double deadline;
     char path[PATH_MAX], keep[256];
 } cloud_job;
+/* reload_all's passes (after an operation, whose result stays on the line:
+ * its reads report a failure only), and whether one is reading. */
+static unsigned cloud_passes;
+static int cloud_reloading;
 enum { CLOUD_REFRESH = 1, CLOUD_READ, CLOUD_UNMOUNT };
 /* A drive being ejected by the drives service: its answers, and its name. */
 static struct {
@@ -576,13 +581,14 @@ static int remove_tree(const char *path)
 /*
  * A copy, or a move across filesystems, in progress (copy_begin to
  * copy_end). Each item is written under a hidden name in the destination
- * folder (temp) and renamed to its own name only once it is whole; what is
- * unfinished is removed when it fails, when it is stopped (Esc, the window's
- * close) and when the program is asked to end (SIGTERM, home's Stop: the
- * copy stops at the next chunk, its temp goes, then the program ends as the
- * signal would have ended it). Between chunks the window keeps answering:
- * its progress is drawn, new sizes are taken, Esc and the close are asked
- * about.
+ * folder (temp) and renamed to its own name only once it is whole (on a
+ * drive without the no-replace rename, written under its own name, created
+ * exclusively: copy_item); what is unfinished is removed when it fails, when
+ * it is stopped (Esc, the window's close) and when the program is asked to
+ * end (SIGTERM, home's Stop: the copy stops at the next chunk, its temp
+ * goes, then the program ends as the signal would have ended it). Between
+ * chunks the window keeps answering: its progress is drawn, new sizes are
+ * taken, Esc and the close are asked about.
  */
 enum { COPY_GOING, COPY_STOPPED, COPY_TERMINATED };
 #define COPY_TEMP ".locachy-copy-" /* + the process id and a number */
@@ -593,6 +599,7 @@ static struct {
     char name[256];            /* its name, for the progress */
     char temp[PATH_MAX];       /* what it is written under; "" when none */
 } copying;
+static unsigned copy_serial;   /* for the hidden names */
 static double copy_tick_interval = 0.05; /* seconds between looks at the keys */
 static volatile sig_atomic_t copy_terminated;
 static int copy_wake[2] = { -1, -1 };     /* SIGTERM wakes a question waiting for a key */
@@ -802,6 +809,12 @@ static int add_size(const char *path, const struct stat *st, int flag, struct FT
     return 0;
 }
 
+/* from copied to to, which it creates exclusively (mkdir, O_EXCL, symlink):
+ * never over a name that is there. 0, or -1 (errno; ECANCELED: stopped)
+ * with nothing it made left: a folder goes with what was copied into it, a
+ * file is removed before it is closed (a FUSE drive with a write cache, as
+ * rclone's, uploads a file when it is closed, and never one removed while
+ * open). */
 static int copy_tree(const char *from, const char *to)
 {
     struct stat st;
@@ -830,22 +843,24 @@ static int copy_tree(const char *from, const char *to)
         DIR *d = opendir(from);
         struct dirent *e;
         int failed = d == NULL;
-        while (d && copying.stop == COPY_GOING && (e = readdir(d)) != NULL) {
+        while (!failed && copying.stop == COPY_GOING && (e = readdir(d)) != NULL) {
             char a[PATH_MAX], b[PATH_MAX];
             if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) {
                 continue;
             }
-            failed |= join(a, sizeof a, from, e->d_name) < 0 || join(b, sizeof b, to, e->d_name) < 0 ||
-                      copy_tree(a, b) < 0;
+            failed = join(a, sizeof a, from, e->d_name) < 0 || join(b, sizeof b, to, e->d_name) < 0 ||
+                     copy_tree(a, b) < 0;
         }
+        int saved = copying.stop != COPY_GOING ? ECANCELED : errno;
         if (d) {
             closedir(d);
         }
-        if (copying.stop != COPY_GOING) {
-            errno = ECANCELED;
+        if (failed || copying.stop != COPY_GOING) {
+            remove_tree(to);
+            errno = saved;
             return -1;
         }
-        return failed ? -1 : 0;
+        return 0;
     }
     if (!S_ISREG(st.st_mode)) {
         return 0; /* devices, sockets: not copied */
@@ -874,18 +889,47 @@ static int copy_tree(const char *from, const char *to)
     if (in >= 0) {
         close(in);
     }
-    if (out >= 0 && close(out) < 0) {
+    if (out >= 0 && failed) {
+        unlink(to);
+    }
+    if (out >= 0 && close(out) < 0 && !failed) {
         failed = 1;
         saved = errno;
+        unlink(to);
     }
     errno = copying.stop != COPY_GOING ? ECANCELED : saved;
     return failed ? -1 : 0;
 }
 
-/* Never replace a name created meanwhile. A drive without the atomic
- * primitive (FUSE without rename2, as rclone's: EINVAL) is refused, not
- * emulated with a racy look first; rename_unprotected then says so, for the
- * notice. EINVAL for a folder into itself is not that. */
+/* Has dir's drive no atomic no-replace rename (RENAME_NOREPLACE: EINVAL or
+ * ENOSYS, as FUSE without rename2, rclone's mounts)? Asked of the drive
+ * itself, never by a racy look: an empty file of ours under a hidden name is
+ * so renamed to another, then removed before it is closed (nothing of it
+ * reaches a cloud). 0 too when that file cannot be made: the copy says why. */
+static int no_rename2(const char *dir)
+{
+    char a[PATH_MAX], b[PATH_MAX];
+    const char *d = strcmp(dir, "/") == 0 ? "" : dir;
+    unsigned k = copy_serial++;
+    if (snprintf(a, sizeof a, "%s/" COPY_TEMP "%d-%u", d, (int)getpid(), k) >= (int)sizeof a ||
+        snprintf(b, sizeof b, "%s/" COPY_TEMP "%d-%u-probe", d, (int)getpid(), k) >= (int)sizeof b) {
+        return 0;
+    }
+    int fd = open(a, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        return 0;
+    }
+    int r = renameat2(AT_FDCWD, a, AT_FDCWD, b, RENAME_NOREPLACE);
+    int missing = r != 0 && (errno == EINVAL || errno == ENOSYS);
+    unlink(r == 0 ? b : a);
+    close(fd);
+    return missing;
+}
+
+/* Never replace a name created meanwhile. A rename on a drive without the
+ * atomic primitive (no_rename2) is refused, not emulated with a racy look
+ * first; rename_unprotected then says so, for the notice. EINVAL for a
+ * folder into itself is not that. */
 static int rename_unprotected;
 
 static int rename_new(const char *from, const char *to)
@@ -898,13 +942,17 @@ static int rename_new(const char *from, const char *to)
 }
 
 #define UNPROTECTED_NOTICE N_("This drive cannot rename without overwrite protection: nothing was changed.")
+#define MOVE_UNPROTECTED_NOTICE N_("This drive cannot move within itself without overwrite protection: nothing was moved.")
 
 /* from copied whole to to (not there): written under a hidden name in to's
- * folder, then renamed. 0, or -1 (errno; ECANCELED: stopped) with nothing
- * of it left. A device or a socket is not copied (-1, ENOTSUP). */
+ * folder, then renamed. On a drive without the no-replace rename it is
+ * written under its own name instead, created exclusively as the hidden one
+ * is (rclone's VFS keeps O_EXCL and mkdir, and uploads a file once it is
+ * closed, whole), so a name created meanwhile is still never replaced.
+ * 0, or -1 (errno; ECANCELED: stopped) with nothing of it left. A device or
+ * a socket is not copied (-1, ENOTSUP). */
 static int copy_item(const char *from, const char *to)
 {
-    static unsigned serial;
     char dir[PATH_MAX];
     struct stat st;
     if (lstat(from, &st) < 0) {
@@ -915,9 +963,12 @@ static int copy_item(const char *from, const char *to)
         return -1;
     }
     parent_of(to, dir, sizeof dir);
-    do {
+    int in_place = no_rename2(dir);
+    if (in_place) {
+        snprintf(copying.temp, sizeof copying.temp, "%s", to);
+    } else do {
         if (snprintf(copying.temp, sizeof copying.temp, "%s/" COPY_TEMP "%d-%u", strcmp(dir, "/") == 0 ? "" : dir,
-                     (int)getpid(), serial++) >= (int)sizeof copying.temp) {
+                     (int)getpid(), copy_serial++) >= (int)sizeof copying.temp) {
             copying.temp[0] = '\0';
             errno = ENAMETOOLONG;
             return -1;
@@ -928,25 +979,25 @@ static int copy_item(const char *from, const char *to)
     tree_size_bytes = 0;
     nftw(from, add_size, 16, FTW_PHYS);
     copying.total = tree_size_bytes;
-    int r = copy_tree(from, copying.temp);
+    int r = copy_tree(from, copying.temp); /* failed: nothing of it is there */
     if (r == 0 && copying.stop != COPY_GOING) {
-        errno = ECANCELED; /* stopped after its last chunk */
+        remove_tree(copying.temp); /* stopped after its last chunk: whole, and ours */
+        errno = ECANCELED;
         r = -1;
-    }
-    if (r == 0) {
-        r = rename_new(copying.temp, to);
-    }
-    if (r < 0) {
+    } else if (r == 0 && !in_place && rename_new(copying.temp, to) < 0) {
         int saved = errno;
         remove_tree(copying.temp);
         errno = saved;
+        r = -1;
     }
     copying.temp[0] = '\0';
     return r;
 }
 
 /* from moved to to, copied and removed across filesystems; never over
- * something that is there. 0, or -1. */
+ * something that is there. 0, or -1. Within a drive without the no-replace
+ * rename it is refused (rename_unprotected), not made a copy and a removal:
+ * on a cloud drive that would download and upload all of it again. */
 static int move_path(const char *from, const char *to)
 {
     struct stat st;
@@ -1590,7 +1641,6 @@ static const char *selected_name(const struct pane *p)
     return p->nlist ? p->list[p->sel].name : "";
 }
 
-/* Every pane of every tab read again, each keeping its selected item. */
 static double cloud_now(void)
 {
     struct timespec ts;
@@ -1620,8 +1670,10 @@ static void cloud_cancel(void)
 
 static int cloud_begin(struct pane *p, int stage)
 {
+    unsigned pass = cloud_reloading && stage == CLOUD_READ ? cloud_passes : 0;
     if (cloud_job.pid) {
-        if (!strcmp(cloud_job.path, p->cwd) && stage == CLOUD_READ) return 0;
+        /* The folder's read goes on, unless it began before this pass's operation. */
+        if (!strcmp(cloud_job.path, p->cwd) && stage == CLOUD_READ && (!pass || cloud_job.pass == pass)) return 0;
         cloud_cancel();
     }
     struct passwd *pw = getpwuid(USER);
@@ -1656,11 +1708,14 @@ static int cloud_begin(struct pane *p, int stage)
     cloud_job.stage = stage;
     cloud_job.top = p->top;
     cloud_job.hidden = hidden;
+    cloud_job.pass = pass;
     cloud_job.deadline = cloud_now() + 40;
     snprintf(cloud_job.path, sizeof cloud_job.path, "%s", p->cwd);
     snprintf(cloud_job.keep, sizeof cloud_job.keep, "%s", selected_name(p));
-    report(0, "%s", stage == CLOUD_REFRESH ? _("Refreshing cloud drive...") :
-           stage == CLOUD_READ ? _("Reading cloud drive...") : _("Unmounting cloud drive..."));
+    if (!pass) {
+        report(0, "%s", stage == CLOUD_REFRESH ? _("Refreshing cloud drive...") :
+               stage == CLOUD_READ ? _("Reading cloud drive...") : _("Unmounting cloud drive..."));
+    }
     return 0;
 }
 
@@ -1689,7 +1744,7 @@ static void cloud_tick(void)
     int stage = cloud_job.stage, fd = cloud_job.fd;
     char keep[256];
     snprintf(keep, sizeof keep, "%s", cloud_job.keep);
-    int top = cloud_job.top, was_hidden = cloud_job.hidden;
+    int top = cloud_job.top, was_hidden = cloud_job.hidden, quiet = cloud_job.pass != 0;
     cloud_job.pid = 0;
     int ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
     if (stage == CLOUD_READ && ok && hidden == was_hidden) {
@@ -1720,7 +1775,7 @@ static void cloud_tick(void)
             p->list = next.list; p->cap = next.cap; p->nlist = next.nlist; p->nhidden = next.nhidden;
             sort_pane(p, keep);
             p->top = top;
-            report(0, _("Cloud drive list updated."));
+            if (!quiet) report(0, _("Cloud drive list updated."));
         } else {
             for (int i = 0; i < next.nlist; i++) free_entry(&next.list[i]);
             free(next.list);
@@ -1738,9 +1793,14 @@ static void cloud_tick(void)
     if (!ok) report(1, _("Cloud drive operation failed; the previous list is kept. See Settings > Cloud drives."));
 }
 
+/* Every pane of every tab read again, each keeping its selected item. A
+ * cloud folder's read keeps quiet unless it fails: what was done is told on
+ * the line (Copied..., Moved...), not "Cloud drive list updated.". */
 static void reload_all(void)
 {
     cloud_discover();
+    if (++cloud_passes == 0) cloud_passes = 1;
+    cloud_reloading = 1;
     for (int t = 0; t < ntabs; t++) {
         for (int k = 0; k <= tabs[t].split; k++) {
             struct pane *p = &tabs[t].pane[k];
@@ -1749,6 +1809,7 @@ static void reload_all(void)
             load_pane(p, keep);
         }
     }
+    cloud_reloading = 0;
 }
 
 static void refresh_pane(void)
@@ -2150,7 +2211,7 @@ static void transfer(char *const *paths, int n, const char *dir, int cut)
     as_user(0);
     undo_end(u);
     if (unprotected && !done && unprotected == failed) {
-        report(1, "%s", _(UNPROTECTED_NOTICE));
+        report(1, "%s", cut ? _(MOVE_UNPROTECTED_NOTICE) : _(UNPROTECTED_NOTICE));
         copy_end();
     } else if (unprotected) {
         copy_end();

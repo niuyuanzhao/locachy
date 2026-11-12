@@ -18,7 +18,7 @@ for mode in plain sanitize; do
     [ "$mode" = plain ] || flags="$flags -fsanitize=address,undefined -fno-omit-frame-pointer"
     gcc $flags -Wall -Wextra -Werror -D_GNU_SOURCE -I"$src/base/include" -I"$src/base" \
         -DCLOUD_LIST='"/run/bin/files-cloud-list"' "$src/tools/test-files.c" "$src/base/ui.c" \
-        -Wl,--wrap=renameat2 -o "$out/test-files-$mode"
+        -Wl,--wrap=renameat2 -Wl,--wrap=close -o "$out/test-files-$mode"
     # The test user cannot enter the builder's home: the binaries are copied in.
     unshare --map-auto --map-root-user --mount sh -c '
         mount -t tmpfs -o mode=1777 tmpfs /run || exit 9

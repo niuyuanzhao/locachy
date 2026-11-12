@@ -131,6 +131,17 @@ the progress, takes a new size, and reads Esc and the close. Only a SIGKILL
 (`cgroup.kill` after the 3 s home's Stop gives) or a power loss can leave a
 hidden `.locachy-copy-*` behind.
 
+A drive without the atomic no-replace rename (`renameat2` with
+`RENAME_NOREPLACE` gives EINVAL, as an rclone cloud drive does) is found by
+renaming an empty hidden file of files' own there, which is then removed.
+There each item is written under its own name instead, created exclusively
+(`O_EXCL`, `mkdir`), so a name created meanwhile is still never replaced.
+An unfinished file is removed before it is closed: rclone uploads a file
+when it is closed and never one removed while open, so a cloud gets only
+whole files. Moves within such a drive are refused ("cannot move within
+itself without overwrite protection"): as a copy and a removal they would
+download and upload everything again.
+
 ## Not yet
 
 - Raising an open window relies on labwc-control matching a window's app id to

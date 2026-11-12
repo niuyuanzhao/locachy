@@ -3407,6 +3407,12 @@ msgid ""
 "This drive cannot rename without overwrite protection: nothing was changed."
 msgstr ""
 
+#: progs/files.c
+msgid ""
+"This drive cannot move within itself without overwrite protection: nothing "
+"was moved."
+msgstr ""
+
 #: progs/files.c progs/firmware.c
 #, c-format
 msgid "Cannot read %s."

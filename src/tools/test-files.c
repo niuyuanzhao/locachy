@@ -53,7 +53,8 @@ static void spool_clear(void)
 
 /* Interleavings injected into renameat2 (test-files.sh links with --wrap):
  * another writer creates race_target in the gap just before a no-replace
- * rename, or the drive refuses the flag (EINVAL, as a FUSE without rename2).
+ * rename, or the drive refuses the flag (EINVAL, as a FUSE without rename2;
+ * across filesystems the kernel says EXDEV before a drive is asked).
  * Nothing sleeps: the injection is the gap itself. */
 static char race_target[PATH_MAX], race_text[64];
 static int refuse_noreplace;
@@ -62,7 +63,10 @@ int __wrap_renameat2(int olddir, const char *from, int newdir, const char *to, u
 {
     if (flags & RENAME_NOREPLACE) {
         if (refuse_noreplace) {
-            errno = EINVAL;
+            char up[PATH_MAX];
+            struct stat a, b;
+            parent_of(to, up, sizeof up);
+            errno = lstat(from, &a) == 0 && stat(up, &b) == 0 && a.st_dev != b.st_dev ? EXDEV : EINVAL;
             return -1;
         }
         if (race_target[0] && strcmp(to, race_target) == 0) {
@@ -72,6 +76,18 @@ int __wrap_renameat2(int olddir, const char *from, int newdir, const char *to, u
         }
     }
     return __real_renameat2(olddir, from, newdir, to, flags);
+}
+
+/* Closes of a regular file with bytes and no name left (--wrap=close): an
+ * unfinished copy is removed before it is closed, so a FUSE drive never
+ * uploads it (the empty probe of no_rename2 is not counted). */
+static int closed_unlinked;
+int __real_close(int fd);
+int __wrap_close(int fd)
+{
+    struct stat st;
+    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_nlink == 0 && st.st_size > 0) closed_unlinked++;
+    return __real_close(fd);
 }
 
 static void write_file(const char *path, const char *text)
@@ -1526,6 +1542,39 @@ int main(int argc, char **argv)
     assert(CLOUD_CALLS() == ++calls && P->nlist == listed && strstr(msg, "previous list"));
     unlink(at_home(".cloud-fail"));
 
+    /* v into a cloud drive (its FUSE without rename2: refused here as rclone
+     * refuses it): copied under its own name; the folder read after it keeps
+     * quiet, so what was done stays on the line. A failed read still says so. */
+    put("Documents/cloud-in.txt", 0);
+    char *kept_clip = clip[0];
+    int kept_nclip = nclip;
+    clip[0] = strdup(at_home("Documents/cloud-in.txt")); /* as c leaves it */
+    nclip = 1;
+    clip_cut = 0;
+    go(at_home("Drives/remote"), NULL);
+    run("back in the cloud drive", (const int[]){ WAIT, WAIT, WAIT, WAIT, END });
+    refuse_noreplace = 1;
+    run("v into a cloud drive without rename2: copied; the read after it does not hide that",
+        (const int[]){ 'v', WAIT, WAIT, WAIT, WAIT, END });
+    refuse_noreplace = 0;
+    assert(!error && strstr(msg, "Copied 1 item") &&
+           same_text(at_home("Drives/remote/cloud-in.txt"), "Documents/cloud-in.txt"));
+    assert(temps_in(at_home("Drives/remote")) == 0 && P->nlist == 2 && index_of("cloud-in.txt") >= 0 &&
+           !cloud_job.pid);
+    if (!is_root) {
+        assert(chmod(at_home("Drives/remote"), 0333) == 0); /* written to, not listed */
+        run("v again, and the read after it fails: the failure is said",
+            (const int[]){ 'v', WAIT, WAIT, WAIT, WAIT, END });
+        assert(chmod(at_home("Drives/remote"), 0755) == 0);
+        assert(error && strstr(msg, "previous list") && exists("Drives/remote/cloud-in (2).txt"));
+        assert(unlink(at_home("Drives/remote/cloud-in (2).txt")) == 0);
+    }
+    assert(unlink(at_home("Drives/remote/cloud-in.txt")) == 0 && unlink(at_home("Documents/cloud-in.txt")) == 0);
+    free(clip[0]);
+    clip[0] = kept_clip;
+    nclip = kept_nclip;
+    puts("PASS a paste into a cloud drive is written and told; the folder read after it reports only a failure");
+
     go(at_home("Drives"), "remote");
     run("e unmounts a cloud drive through the service, not as a USB drive",
         (const int[]){ 'e', WAIT, WAIT, WAIT, END });
@@ -1885,6 +1934,40 @@ int main(int argc, char **argv)
     copy_tick_interval = 1e9;
     puts("PASS moves across filesystems are whole or not at all; the source goes only once its copy is whole");
 
+    /* A drive without the no-replace rename (refused here as rclone's FUSE
+     * refuses it): written under its own name, created exclusively. Stopped
+     * or failed, a file is removed before it is closed (rclone uploads a file
+     * when it is closed, never one removed while open). A move into it from
+     * another filesystem is such a copy. */
+    refuse_noreplace = 1;
+    copy_tick_interval = 0;
+    copy_with("in place: a copy under its own name", big, downloads, 0, (const int[]){ IDLE, END });
+    assert(!error && size_of(final_big) == 1 << 20 && temps_in(downloads) == 0 && saw_temp && saw_final);
+    assert(unlink(final_big) == 0);
+    closed_unlinked = 0;
+    copy_with("in place: Esc y after a few chunks", big, downloads, 0,
+              (const int[]){ TIMEOUT, TIMEOUT, TIMEOUT, 27, 'y', END });
+    assert(error && strstr(msg, "Copy stopped") && size_of(final_big) < 0 && temps_in(downloads) == 0);
+    assert(closed_unlinked == 1 && size_of(big) == 1 << 20);
+    copy_tick_interval = 1e9;
+    if (!is_root) {
+        mk("Documents/tree");
+        put("Documents/tree/a.txt", 0);
+        put("Documents/tree/b.txt", 0);
+        assert(chmod(at_home("Documents/tree/b.txt"), 0) == 0);
+        copy_with("in place: a folder that fails midway", at_home("Documents/tree"), downloads, 0, (const int[]){ END });
+        assert(error && strstr(msg, "could not be") && !exists("Downloads/tree") && temps_in(downloads) == 0);
+        assert(chmod(at_home("Documents/tree/b.txt"), 0644) == 0 && remove_tree(at_home("Documents/tree")) == 0);
+    }
+    put_bytes(OTHER_FS "/xin.bin", 200000);
+    copy_with("in place: a move from another filesystem", OTHER_FS "/xin.bin", downloads, 1, (const int[]){ END });
+    assert(!error && strstr(msg, "Moved 1 item") && size_of(at_home("Downloads/xin.bin")) == 200000);
+    assert(access(OTHER_FS "/xin.bin", F_OK) != 0 && temps_in(downloads) == 0);
+    assert(unlink(at_home("Downloads/xin.bin")) == 0);
+    refuse_noreplace = 0;
+    puts("PASS without the no-replace rename a copy is written under its own name, exclusively; stopped or failed, "
+         "nothing is left and the file had no name when closed; a move from another filesystem is such a copy");
+
     /*
      * Opening in a window (LOCACHY_BACKEND=wayland, no process 1 to ask): the
      * document viewer through locachy-seat --window view PATH, a container
@@ -2010,17 +2093,34 @@ int main(int argc, char **argv)
     puts("PASS copy and move onto a name another writer creates in the gap: refused, neither replaced, "
          "no partial copy left");
 
+    /* There a copy is created exclusively under its own name: a file or a
+     * folder that is there (created meanwhile) is neither replaced nor
+     * removed. A move within that drive is refused plainly. */
     refuse_noreplace = 1;
+    assert(no_rename2(race_dir) && entries_with(race_dir, COPY_TEMP) == 0);
+    rename_unprotected = 0;
+    assert(copy_item(src, at_home("Documents/race/copy2.txt")) == 0 && !rename_unprotected);
+    assert(same_text(at_home("Documents/race/copy2.txt"), "source\n") && entries_with(race_dir, COPY_TEMP) == 0);
     errno = 0;
-    assert(copy_item(src, at_home("Documents/race/copy2.txt")) < 0 && errno == EINVAL && rename_unprotected);
-    assert(!exists("Documents/race/copy2.txt") && entries_with(race_dir, COPY_TEMP) == 0);
+    assert(copy_item(src, at_home("Documents/race/copy.txt")) < 0 && errno == EEXIST);
+    assert(same_text(at_home("Documents/race/copy.txt"), "other writer\n") && entries_with(race_dir, COPY_TEMP) == 0);
+    write_file(at_home("Documents/race/a/one.txt"), "one\n");
+    assert(mkdir(at_home("Documents/race/d"), 0755) == 0);
+    write_file(at_home("Documents/race/d/theirs.txt"), "theirs\n");
+    errno = 0;
+    assert(copy_item(at_home("Documents/race/a"), at_home("Documents/race/d")) < 0 && errno == EEXIST);
+    assert(same_text(at_home("Documents/race/d/theirs.txt"), "theirs\n") && !exists("Documents/race/d/one.txt"));
+    assert(copy_item(at_home("Documents/race/a"), at_home("Documents/race/a2")) == 0);
+    assert(same_text(at_home("Documents/race/a2/one.txt"), "one\n") && entries_with(race_dir, COPY_TEMP) == 0);
     char *moving[] = { src };
     transfer(moving, 1, at_home("Documents/race/c"), 1);
     refuse_noreplace = 0;
-    assert(error && strstr(msg, "cannot rename without overwrite protection: nothing was changed"));
+    assert(error && strstr(msg, "cannot move within itself without overwrite protection: nothing was moved"));
     assert(same_text(src, "source\n") && !exists("Documents/race/c/src.txt"));
-    puts("PASS copy and move on a drive that cannot rename without overwrite protection: refused plainly, "
-         "both paths as they were");
+    assert(remove_tree(at_home("Documents/race/a2")) == 0 && remove_tree(at_home("Documents/race/d")) == 0 &&
+           unlink(at_home("Documents/race/copy2.txt")) == 0 && unlink(at_home("Documents/race/a/one.txt")) == 0);
+    puts("PASS on a drive that cannot rename without overwrite protection: a copy is made exclusively under its "
+         "own name, never over a file or folder there; a move within it is refused plainly, both paths as they were");
 
     /* Bookmarks: while another writer holds the folder's lock and adds its
      * line, two toggles wait for it; afterwards no line of the three is lost. */

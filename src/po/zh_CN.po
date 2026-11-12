@@ -3479,6 +3479,12 @@ msgid ""
 "This drive cannot rename without overwrite protection: nothing was changed."
 msgstr "此驱动器不支持在不覆盖已有文件的前提下重命名：未做任何更改。"
 
+#: progs/files.c
+msgid ""
+"This drive cannot move within itself without overwrite protection: nothing "
+"was moved."
+msgstr "此驱动器不支持在不覆盖已有文件的前提下在其内部移动：未移动任何项目。"
+
 #: progs/files.c progs/firmware.c
 #, c-format
 msgid "Cannot read %s."

@@ -26,6 +26,8 @@ Pull to refresh is a finger gesture: one finger on a touch screen, or a touchpad
 
 files reads a cloud folder in a separate process, as the user and without network, with a time limit, so the interface never waits for the network. A failure or time-out keeps the previous list and says so. Types come from file names, as KIO does for slow mounts, so drawing a folder downloads nothing; folder sizes are not counted. `e` on a drive in `~/Drives` unmounts a cloud drive through the service; uploads still pending or open files keep it mounted.
 
+rclone's FUSE mount has no no-replace rename, so files copies into a cloud drive under each item's own name, created exclusively, and removes an unfinished file before closing it; rclone then uploads only whole files (see [Copies](WINDOWS.md#copies)). Moves from another disk are such copies; moves within one cloud drive are refused. The folder read that follows a paste or another operation reports only a failure, so the operation's own result stays on the line.
+
 ## Sign-in and notifications
 
 rclone renews access tokens itself; an expiring token is not a reason to sign in again. Only rclone's own reconnect advice and the standard OAuth errors `invalid_grant` and `invalid_token` mark a remote as needing sign-in. Network failures, 401/403/429/5xx and other errors are never reported as a sign-in problem; unclassified failures say "needs attention". rclone has no backend-independent sign-in status, so nothing more is inferred.
@@ -36,7 +38,7 @@ A change of state is notified once through the standard notification service, wh
 
 - `tools/test-rclone.py`: the supervisor with stand-ins (16 tests).
 - `tools/test-rclone-fuse.sh`: real rclone and FUSE in a disposable user and mount namespace: propagation to the host and to a namespace made before the mount, the private resolver, refresh, status, pending writes and unmount.
-- `tools/test-files.sh`: files over a scratch home with the real folder worker and a stand-in service: places, folder reads, F5, pull, short and cancelled pulls, the TrackPoint, failure, unmount; plain and with ASan/UBSan.
+- `tools/test-files.sh`: files over a scratch home with the real folder worker and a stand-in service: places, folder reads, F5, pull, short and cancelled pulls, the TrackPoint, failure, unmount, a paste into a drive without rename2 and the quiet read after it; plain and with ASan/UBSan.
 - `tools/test-pointer.c`, `tools/test-host-notify.c`, `tools/test-drives-state.c`: scroll lifecycle, host notifications, drive adoption.
 
 A stand-in local remote replaces a cloud backend in these tests. Real accounts, an expired real OAuth grant, and a finger on real hardware must be verified on an installed machine.

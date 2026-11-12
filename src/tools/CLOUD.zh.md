@@ -26,6 +26,8 @@ rclone 会缓存目录列表。重新读文件夹只能看到缓存而不是远�
 
 files 在单独的进程里读取云盘文件夹：以用户身份、无网络、有时限，界面从不等网络。失败或超时保留原来的列表并给出提示。类型按文件名判断（如 KIO 对慢挂载的做法），画文件夹不会下载任何东西；不统计文件夹大小。在 `~/Drives` 里对云盘按 `e` 通过服务卸载；仍有待上传数据或打开的文件时保持挂载。
 
+rclone 的 FUSE 挂载没有不覆盖的改名，因此 files 把复制项以各自的名字直接写入云盘，以独占方式创建，未完成的文件在关闭之前删除；rclone 于是只上传完整的文件（见 [复制](WINDOWS.zh.md#复制)）。从另一块磁盘的移动就是这样的复制；同一云盘内部的移动会被拒绝。粘贴或其他操作之后读取文件夹只报告失败，因此操作本身的结果仍留在提示行上。
+
 ## 登录与通知
 
 rclone 自己续期访问令牌，令牌到期本身不是重新登录的理由。只有 rclone 自己的 reconnect 提示和标准 OAuth 错误 `invalid_grant`、`invalid_token` 才把 remote 标为需重新登录。网络故障、401/403/429/5xx 和其他错误都不会报成登录问题；无法分类的故障显示“需要处理”。rclone 没有与后端无关的登录状态，所以不再多推断。
@@ -36,7 +38,7 @@ rclone 自己续期访问令牌，令牌到期本身不是重新登录的理由�
 
 - `tools/test-rclone.py`：用替身测试 supervisor（16 项）。
 - `tools/test-rclone-fuse.sh`：在一次性用户与挂载命名空间里用真实 rclone 和 FUSE：传到宿主和挂载前已存在的命名空间、私有 resolver、刷新、状态、待上传写入和卸载。
-- `tools/test-files.sh`：在临时 home 上用真实的文件夹 worker 和替身服务测试 files：places、读取文件夹、F5、下拉、未拉够与取消、小红点、失败、卸载；普通构建及 ASan/UBSan。
+- `tools/test-files.sh`：在临时 home 上用真实的文件夹 worker 和替身服务测试 files：places、读取文件夹、F5、下拉、未拉够与取消、小红点、失败、卸载、粘贴到不支持 rename2 的云盘及之后安静的读取；普通构建及 ASan/UBSan。
 - `tools/test-pointer.c`、`tools/test-host-notify.c`、`tools/test-drives-state.c`：滚动生命周期、宿主通知、U 盘接管。
 
 这些测试用本地替身 remote 代替云端后端。真实账号、真实过期的 OAuth 授权，以及在真机上用手指操作，仍需在已安装机器上验证。
