@@ -86,10 +86,12 @@ Caps 也会提交该单词。共享显示上的窗口（term、view）不再启�
 程序和进程 1（它只看自己的快捷键）；控制台上不再排队任何字符，进程 1 启动的程序和
 服务的标准输入是 `/dev/null`。
 
-- **Ctrl+Alt+Del** 由进程 1 处理：只要它看到这组键（直连程序、home、锁屏、开机磁盘
-  口令、直接输入模式下的共享显示），就干净地重启。输入法占用键盘时（CN/EN），按键
-  只到状态栏，与以前一样。有系统任务运行时，重启会先等它结束；再按一次 Ctrl+Alt+Del
-  （新的一次按下，而不是按住 Delete）则立即重启（`JOBS.zh.md`，“关机”一节）。
+- **Ctrl+Alt+Del** 由进程 1 处理，并且先问：只要它看到这组键（直连程序、home、开机
+  磁盘口令、直接输入模式下的共享显示），就在自己的屏幕上问“现在重启电脑吗？”，并写明
+  重启要等哪个系统任务。按 Y 干净地重启；按 N 或 Esc 把屏幕原样还回去；其他键继续等，
+  按住 Delete 也只算一次。锁屏时不响应这组键。输入法占用键盘时（CN/EN），按键只到
+  状态栏，与以前一样。重启或关机已经在等系统任务时，再按一次 Ctrl+Alt+Del（新的一次
+  按下，而不是按住 Delete）则立即重启，和那个屏幕上写的一样（`JOBS.zh.md`，“关机”一节）。
 - **Caps Lock、Num Lock：一个状态**：控制台的处理关闭后，进程 1 为所有程序保存锁定
   状态，并把它显示在每个键盘的指示灯上（`EV_LED`，写法同 libinput），之后插入的键盘
   也一样；开机时所有锁定都是关闭的。指示灯只写不读：任何地方都不从指示灯读回锁定
@@ -115,3 +117,38 @@ Caps 也会提交该单词。共享显示上的窗口（term、view）不再启�
 状态栏所读键盘的布局；`test-input-hotplug.c`
 覆盖共享显示在前台时的热插拔。真实控制台、虚拟机中的撤销和 X230 的 Caps Lock 指示灯
 仍需各自的验收。
+
+## 按键与动作
+
+程序不再对共用按键直接判断原始键值。`base/key-action.c` 把按键和修饰键映射成一个动作（`key_action`；列表里没有文字输入时用 `key_list_action`，此时 q 就是 Esc），程序只对动作作出反应。按键送到程序时的形式是：Ctrl 加字母送出控制码（Ctrl+Q 为 17，Ctrl+C 为 3，Ctrl+Shift+字母送出同一个码并带 Shift）；Ctrl 加数字为 `K_CTRL_0` 加数字；功能键为 `K_F1` 加 n；Alt 与 Super 加字母送出普通字母并带修饰键。`test-key-actions` 固定住这张表，`test-key-literals.py` 会在程序直接判断这些原始键时报错。
+
+| 动作 | 按键 |
+| --- | --- |
+| 退出（有未保存内容时先问） | Ctrl+Q；窗口关闭与 Alt+F4 是同一个请求 |
+| 取消最里层的菜单、对话框、输入框、搜索或选择；没有则回到上一级；顶层无动作 | Esc |
+| 回首页：冻结当前程序并保留状态，不退出 | Super+Esc（Ctrl+Alt+Esc、Ctrl+Alt+Super、ThinkVantage 同样）|
+| 帮助：本程序的按键 | F1 |
+| 下一个、上一个焦点 | Tab、Shift+Tab |
+| 复制、剪切、粘贴 | Ctrl+C、Ctrl+X、Ctrl+V（Ctrl+Insert、Shift+Insert）|
+| 撤销、重做 | Ctrl+Z、Ctrl+Shift+Z |
+| 全选；取消全选 | Ctrl+A；Ctrl+Shift+A（日志或窗格里，Ctrl+A 再 Ctrl+C 复制全部） |
+| 查找；在文件中查找；下一个、上一个匹配 | Ctrl+F；Ctrl+Shift+F；F3、Shift+F3 |
+| 新建、打开、保存、另存为 | Ctrl+N、Ctrl+O、Ctrl+S、Ctrl+Shift+S |
+| 新建文件夹 | Ctrl+Shift+N |
+| 新建标签、重新打开标签、关闭标签 | Ctrl+T、Ctrl+Shift+T、Ctrl+W |
+| 下一个、上一个标签 | Ctrl+PgDn、Ctrl+PgUp（Ctrl+Tab、Ctrl+Shift+Tab）|
+| 后退、前进、上一级 | Alt+Left、Alt+Right、Alt+Up |
+| 重命名；刷新 | F2；F5 |
+| 移到回收站；永久删除 | Delete；Shift+Delete |
+| 属性 | Alt+Enter |
+| 显示或隐藏文件 | Alt+. |
+| 放大、缩小、实际大小 | Ctrl+=（即 Ctrl++）、Ctrl+-、Ctrl+0 |
+| 右键菜单 | Shift+F10 或菜单键 |
+
+有些键不能单独绑定：Ctrl+H、Ctrl+I、Ctrl+J、Ctrl+M 与 Ctrl+[ 分别就是 Backspace、Tab、Enter 和 Esc 的码。共用动作只用表中的键：复制是 Ctrl+C，不是字母 y（c、x、v、u 同样如此）。程序自己的单字母命令，在列表里用该动作英文词的首字母（R 启动、K 结束、L 日志）；在输入框里输入的字母就是文字。
+
+每个程序自己的键（edit 用 Ctrl+Shift+[ 和 ] 折叠，view 用 Ctrl+G 跳到某页，files 用 Ctrl+Alt+C 复制路径，等等）都列在它的 F1 帮助里，位于所有程序共有的键之上。
+
+输入框先于表处理自己的编辑键：Ctrl+W 删除光标前的一个词（输入框里没有标签可关），Ctrl+U 删到开头，Ctrl+K 删到末尾；Home、End 到开头、末尾（Ctrl+A 是全选）。
+
+表中动作不适用的地方：终端把每个键交给它的 shell，回首页和关闭窗口除外；扩展屏会话连着时，每个键都交给 Mac，什么也不会让它离开（见 EXTDISPLAY.zh.md）；安装器在安装进行中不能退出（在步骤页上 Ctrl+Q 会先问，因为已做的选择会丢）；锁屏既不退出，也不回首页。

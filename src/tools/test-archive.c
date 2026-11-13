@@ -5,7 +5,8 @@
  * extraction dialog and defaults, adding, removing, testing, finding, a new
  * encrypted zip and its password, and the file manager's batch actions.
  *   test-archive DIR   (DIR: a new directory; run as a user, not root)
- * Build with base/ui.c and -DARCHIVE_WORKER_TEST_PATH='"WORKER"'.
+ * Build with base/ui.c, base/key-action.c and -DARCHIVE_WORKER_TEST_PATH='"WORKER"'
+ * (test-interaction-regressions.sh, with the worker it builds).
  */
 #define main archive_main
 #include "../progs/archive.c"
@@ -19,7 +20,7 @@
 
 static const int *script;
 static int step, mods;
-static char dir[256], picked[PATH_MAX], opened_with[OPEN_NAME], opened[PATH_MAX];
+static char dir[256], picked[PATH_MAX], opened_with[PATH_MAX], opened[PATH_MAX];
 static struct pointer_event mouse;
 
 void say(const char *fmt, ...) { (void)fmt; }
@@ -71,6 +72,8 @@ int files_pick(const char *from, const char *keep, const char *type, const char 
     picked[0] = '\0';
     return 1;
 }
+
+int files_close_asked(void) { return 0; }
 
 int open_type(const char *target, char *type, size_t size)
 {
@@ -189,8 +192,8 @@ int main(int argc, char **argv)
     check(exists("multi/docs/deep/b.txt") && exists("multi/top.txt"));
     /* Only what is marked, into a subfolder typed for it. */
     sel = row_named("deep");
-    run("extract marked", (const int[]){ ' ', KEY('e' & 0x1F, KEYS_CTRL), K_DOWN, '\n', KEY(21, 0), 'o', 'n', 'l', 'y',
-                                         '\n', K_DOWN, K_DOWN, K_DOWN, K_DOWN, '\n', END });
+    run("extract marked", (const int[]){ ' ', KEY('e' & 0x1F, KEYS_CTRL), K_DOWN, '\n', KEY('a' & 0x1F, KEYS_CTRL), 'o', 'n',
+                                         'l', 'y', '\n', K_DOWN, K_DOWN, K_DOWN, K_DOWN, '\n', END }); /* Ctrl+A: typed over */
     check(exists("only/docs/deep/b.txt") && !exists("only/top.txt") && !exists("only/docs/a.txt"));
     for (int i = 0; i < nnodes; i++) nodes[i].marked = 0;
 
@@ -208,8 +211,39 @@ int main(int argc, char **argv)
     /* Find: what has it in its name, with its folders. */
     run("find", (const int[]){ '/', 'b', '.', 't', '\n', END });
     check(nrows == 3 && row_named("b.txt") == 2);
-    run("find gone", (const int[]){ 27, END });
+    run("find again: F3 to the next found, Shift+F3 none before it; q takes the find text away",
+        (const int[]){ '/', KEY('a' & 0x1F, KEYS_CTRL), 'b', '.', 't', '\n', K_BOL, K_F1 + 2, END }); /* typed over */
+    check(nrows == 3 && sel == row_named("b.txt"));
+    run("Shift+F3: none before it", (const int[]){ KEY(K_F1 + 2, KEYS_SHIFT), END });
+    check(sel == row_named("b.txt"));
+    run("q: the find text away", (const int[]){ 'q', END });
+    check(!quit && !filter[0] && row_named("b.txt") < 0);
+    run("find gone", (const int[]){ '/', 'b', '.', 't', '\n', 27, END });
     check(!quit && nrows == 3 && row_named("b.txt") < 0); /* docs open, deep shut, as they were */
+
+    /* Nothing quits but Ctrl+Q (Alt+F4, the window's close): Esc and q at
+     * the top, Alt+q, home's key; F1 shows the keys; Ctrl+P is no preview.
+     * A question waits through home's key and Alt+y; Enter is no; Ctrl+Q
+     * there is no and quits. */
+    opened[0] = '\0';
+    run("no quit but Ctrl+Q", (const int[]){ 27, 'q', KEY('q', KEYS_ALT), K_ACT_HOME, K_F1, 27, KEY('p' & 0x1F, KEYS_CTRL),
+                                             END });
+    check(!quit && !opened[0]);
+    sel = row_named("docs");
+    run("a question waits; Enter is no", (const int[]){ K_DEL, K_ACT_HOME, KEY('y', KEYS_ALT), '\n', END });
+    check(!quit && find_node("docs") > 0);
+    run("Ctrl+Q in a question: no, and quit", (const int[]){ K_DEL, KEY('q' & 0x1F, KEYS_CTRL), END });
+    check(quit && find_node("docs") > 0);
+    run("Ctrl+Q quits", (const int[]){ KEY('q' & 0x1F, KEYS_CTRL), END });
+    check(quit);
+    run("the window's close quits", (const int[]){ K_CLOSE, END });
+    check(quit);
+    int cur = 0, button = 0;
+    script = (const int[]){ KEY('\t', KEYS_SHIFT), '\t', END };
+    step = 0;
+    int back = dialog_key(&cur, &button, 3), on = dialog_key(&cur, &button, 3);
+    check(back == K_UP && on == '\t'); /* Shift+Tab: the line before, as K_UP is */
+    quit = 0;
 
     /* Ctrl+N: a zip (Right nine times from tar.gz) with a password, made
      * of top.txt; the password kept for the session, then asked again. */

@@ -10,7 +10,10 @@ out=${1:?usage: test-interaction-regressions.sh NEW_OUTPUT_DIRECTORY}
 mkdir -p "$out"
 cc=(gcc -O2 -g -Wall -Wextra -Werror -D_GNU_SOURCE -ffunction-sections -fdata-sections
     -I"$src/base/include" -I"$src/base")
-link=(-Wl,--gc-sections)
+# The key action table (base/key-action.c) and the help panel (base/help.c,
+# ui_help) are part of every program now; they need only base.h, and
+# --gc-sections drops them where a test does not use them.
+link=("$src/base/key-action.c" "$src/base/help.c" -Wl,--gc-sections)
 
 "${cc[@]}" "$src/tools/test-home.c" "$src/base/ui.c" "$src/base/textsel.c" "${link[@]}" -o "$out/home"
 "$out/home" "$out/home-fixtures"
@@ -42,10 +45,16 @@ LC_ALL=C.UTF-8 "$out/keytable-test" "$out/keytable" "$out/keytable-fixtures"
 # The input method's keys per mode (English, Chinese, direct, a window) with a double of Rime's session.
 "${cc[@]}" -DCONFIG_IME -I"$src/tools/rime-double" "$src/tools/test-ime-keys.c" "${link[@]}" -o "$out/ime-keys"
 "$out/ime-keys"
-for test in keys-name keyboard-devices term-clipboard screen-mirror modules-event monitor-modes lock-layout panel-hits; do
+for test in key-actions keys-name keyboard-devices term-clipboard screen-mirror modules-event monitor-modes lock-layout panel-hits; do
     "${cc[@]}" "$src/tools/test-$test.c" "${link[@]}" -o "$out/$test"
     "$out/$test"
 done
+# Quit and the clipboard come from key_action in every program, never from raw key values.
+# seat's fallback labwc configuration: Super+Esc stays a home key without the generated one.
+"${cc[@]}" "$src/tools/test-labwc-fallback.c" "${link[@]}" -o "$out/labwc-fallback"
+mkdir -p "$out/labwc-fallback-fixtures"
+"$out/labwc-fallback" "$out/labwc-fallback-fixtures"
+python3 -I "$src/tools/test-key-literals.py" "$src"
 cc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -I"$src/base/include" "$src/tools/test-tor-browser.c" -o "$out/tor-browser"
 "$out/tor-browser"
 # keyboard-locks: one Caps/Num Lock across process 1, a direct program and the shared display.
@@ -121,6 +130,10 @@ for test in pacman-guard update-transaction; do
 done
 "${cc[@]}" "$src/progs/archive-worker.c" $(pkg-config --cflags --libs libarchive libcrypto) -o "$out/archive-worker"
 python3 -B "$src/tools/test-archive-worker.py" "$out/archive-worker" "$out"
+# The archive manager by its keys, over that worker (as the user, not root): the screen, the keys and the file chooser are doubles.
+"${cc[@]}" -DARCHIVE_WORKER_TEST_PATH="\"$out/archive-worker\"" "$src/tools/test-archive.c" "$src/base/ui.c" \
+    "${link[@]}" -o "$out/archive"
+"$out/archive" "$out/archive-fixtures"
 # The extended display's receiver and pairing client (FFmpeg, IPC, a stub broker) and the direct screen's power.
 sh "$src/tools/test-extdisplay.sh"
 # The broker: the pairing code, the cable TLS profile, and the lease in user and network namespaces.

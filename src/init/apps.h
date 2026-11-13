@@ -24,6 +24,8 @@ __attribute__((weak)) void apps_sessions_locked(int locked);
 __attribute__((weak)) int apps_sessions_poll(struct pollfd *p, int max);
 __attribute__((weak)) void apps_sessions_dispatch(const struct pollfd *p, int n);
 __attribute__((weak)) int apps_sleep_inhibited(void);
+/* The cgroup's owner holds a live link (base_session_hold): not frozen. */
+__attribute__((weak)) int apps_session_holding(const char *cgroup);
 
 void apps_init(void);
 void apps_tick(void);

@@ -206,9 +206,12 @@ static int nplaces;
 static char *clip[MAX_CLIP];
 static int nclip, clip_cut;
 static const char *pick_type; /* files_pick: the type a file must have to be chosen */
-/* The window's close was asked for (K_CLOSE): files leaves as q does, once
- * nothing unfinished (a copy) holds it; files_close_asked tells the caller. */
+/* Quitting was asked for (the window's close, Ctrl+Q, Alt+F4: ACT_QUIT):
+ * files leaves, once nothing unfinished (a copy) holds it; files_close_asked
+ * tells the caller. */
 static int close_asked;
+/* files-main's program of its own, not home's file manager (files.h). */
+static int standalone;
 
 /* A managed window on the shared display, not a screen of home's. */
 static int in_window(void)
@@ -674,7 +677,7 @@ static void copy_show(void)
     draw();
 }
 
-/* Esc while copying (closing 0), or the window's close (1): stop the copy?
+/* Esc while copying (closing 0), or quitting (1: the window's close, Ctrl+Q): stop the copy?
  * Asked on the line above the buttons, as yes() asks; the copy waits. For a
  * close: y stops it and closes, n closes when it is done, Esc keeps the
  * window. Another close meanwhile stops it and closes. */
@@ -719,16 +722,17 @@ static void copy_ask(int closing)
             key = id >= HIT_KEY ? id - HIT_KEY : 0;
             if (!key) continue;
         }
-        if (key == K_CLOSE) {
-            key_close_kept(); /* it closes once the copy is cleaned up */
+        int act = key_action(key, keys_modifiers());
+        if (act == ACT_QUIT) {
+            if (key == K_CLOSE) key_close_kept(); /* it closes once the copy is cleaned up */
             close_asked = 1;
             copying.stop = COPY_STOPPED;
         } else if (key == 'y' || key == 'Y') {
             copying.stop = COPY_STOPPED;
-        } else if (closing && key == 27) {
+        } else if (closing && act == ACT_CANCEL) {
             close_asked = 0;
-        } else if (closing && key != 'n' && key != 'N') {
-            continue;
+        } else if (key == K_ACT_HOME || (closing && key != 'n' && key != 'N')) {
+            continue; /* the home key is process 1's: the question stays */
         }
         return;
     }
@@ -766,14 +770,17 @@ static int copy_tick(void)
             pull.on = 0;
             output_ready();
             copy_show();
-        } else if (key == K_CLOSE) {
-            key_close_kept(); /* it stays open on purpose: the copy is asked about */
-            close_asked = 1;
-            copy_ask(1);
-            copy_show();
-        } else if (key == 27) {
-            copy_ask(0);
-            copy_show();
+        } else {
+            int act = key_action(key, keys_modifiers());
+            if (act == ACT_QUIT) {
+                if (key == K_CLOSE) key_close_kept(); /* it stays open on purpose: the copy is asked about */
+                close_asked = 1;
+                copy_ask(1);
+                copy_show();
+            } else if (act == ACT_CANCEL) {
+                copy_ask(0);
+                copy_show();
+            }
         }
     }
     as_user(1); /* every copy runs as the user */
@@ -3699,8 +3706,8 @@ static void draw_output(void)
         c = ui_button(c, b2, _(".: hidden"), HIT_KEY + '.');
         /* TRANSLATORS: s is the key; keep it. */
         c = ui_button(c, b2, _("s: sort"), HIT_KEY + 's');
-        /* TRANSLATORS: q is the key; keep it. */
-        ui_button(c, b2, _("q: back, nothing chosen"), HIT_KEY + 'q');
+        /* TRANSLATORS: Esc is the key; keep it. */
+        ui_button(c, b2, _("Esc: back, nothing chosen"), HIT_KEY + 27);
         /* TRANSLATORS: Enter and Tab are keys; keep them. */
         screen_text(1, b1, picking_folder() ? _("Enter or a double click: go in   Tab: places") :
                     _("a double click: choose (a folder: go in)   Tab: places"), FG, BG);
@@ -3710,12 +3717,12 @@ static void draw_output(void)
     if (is_trash(P)) {
         /* TRANSLATORS: r is the key; keep it. */
         c = ui_button(1, b2, _("r: restore"), HIT_KEY + 'r');
-        /* TRANSLATORS: d is the key; keep it. */
-        c = ui_button(c, b2, _("d: delete permanently"), HIT_KEY + 'd');
+        /* TRANSLATORS: Del is the Delete key; keep it. */
+        c = ui_button(c, b2, _("Del: delete permanently"), HIT_KEY + K_DEL);
         /* TRANSLATORS: e is the key; keep it. */
         c = ui_button(c, b2, _("e: empty Trash"), HIT_KEY + 'e');
-        /* TRANSLATORS: u is the key; keep it. */
-        c = ui_button(c, b2, _("u: undo"), HIT_KEY + 'u');
+        /* TRANSLATORS: Ctrl+Z is the key; keep it. */
+        c = ui_button(c, b2, _("Ctrl+Z: undo"), HIT_KEY + MODS(KEYS_CTRL) + ('z' & 0x1F));
         /* TRANSLATORS: i is the key; keep it. */
         c = ui_button(c, b2, _("i: properties"), HIT_KEY + 'i');
     } else {
@@ -3723,24 +3730,26 @@ static void draw_output(void)
         c = ui_button(1, b2, _("Enter: open"), HIT_KEY + '\n');
         /* TRANSLATORS: o is the key; keep it. */
         c = ui_button(c, b2, _("o: open with"), HIT_KEY + 'o');
-        /* TRANSLATORS: c is the key; keep it. */
-        c = ui_button(c, b2, _("c: copy"), HIT_KEY + 'c');
-        /* TRANSLATORS: x is the key; keep it. */
-        c = ui_button(c, b2, _("x: cut"), HIT_KEY + 'x');
-        /* TRANSLATORS: v is the key; keep it. */
-        c = ui_button(c, b2, _("v: paste"), HIT_KEY + 'v');
-        /* TRANSLATORS: r is the key; keep it. */
-        c = ui_button(c, b2, _("r: rename"), HIT_KEY + 'r');
-        /* TRANSLATORS: d is the key; keep it. */
-        c = ui_button(c, b2, _("d: trash"), HIT_KEY + 'd');
-        /* TRANSLATORS: n is the key; keep it. */
-        c = ui_button(c, b2, _("n: new folder"), HIT_KEY + 'n');
-        /* TRANSLATORS: u is the key; keep it. */
-        c = ui_button(c, b2, _("u: undo"), HIT_KEY + 'u');
+        /* TRANSLATORS: Ctrl+C is the key; keep it. */
+        c = ui_button(c, b2, _("Ctrl+C: copy"), HIT_KEY + MODS(KEYS_CTRL) + ('c' & 0x1F));
+        /* TRANSLATORS: Ctrl+X is the key; keep it. */
+        c = ui_button(c, b2, _("Ctrl+X: cut"), HIT_KEY + MODS(KEYS_CTRL) + ('x' & 0x1F));
+        /* TRANSLATORS: Ctrl+V is the key; keep it. */
+        c = ui_button(c, b2, _("Ctrl+V: paste"), HIT_KEY + MODS(KEYS_CTRL) + ('v' & 0x1F));
+        /* TRANSLATORS: F2 is the key; keep it. */
+        c = ui_button(c, b2, _("F2: rename"), HIT_KEY + K_F1 + 1);
+        /* TRANSLATORS: Del is the Delete key; keep it. */
+        c = ui_button(c, b2, _("Del: trash"), HIT_KEY + K_DEL);
+        /* TRANSLATORS: Ctrl+Shift+N is the key; keep it. */
+        c = ui_button(c, b2, _("Ctrl+Shift+N: new folder"), HIT_KEY + MODS(KEYS_CTRL | KEYS_SHIFT) + ('n' & 0x1F));
+        /* TRANSLATORS: Ctrl+Z is the key; keep it. */
+        c = ui_button(c, b2, _("Ctrl+Z: undo"), HIT_KEY + MODS(KEYS_CTRL) + ('z' & 0x1F));
     }
-    /* The way back is never the button left out: the others leave it room. */
-    /* TRANSLATORS: q is the key; keep it. */
-    const char *back = _("q: back");
+    /* The way back (inside home: Esc to its list; on its own: Ctrl+Q) is
+     * never the button left out: the others leave it room. */
+    /* TRANSLATORS: Esc and Ctrl+Q are keys; keep them. */
+    const char *back = standalone ? _("Ctrl+Q: quit") : _("Esc: back");
+    int back_key = standalone ? MODS(KEYS_CTRL) + ('q' & 0x1F) : 27;
     int keep = ui_cells(back) + 3;
     /* TRANSLATORS: / is the key; keep it. */
     c = button_before(1, b1, _("/: filter"), HIT_KEY + '/', keep);
@@ -3756,7 +3765,7 @@ static void draw_output(void)
     c = button_before(c, b1, _("w: wallpaper"), HIT_KEY + 'w', keep);
     /* TRANSLATORS: e is the key; keep it. */
     c = button_before(c, b1, _("e: eject"), HIT_KEY + 'e', keep);
-    c = ui_button(c, b1, back, HIT_KEY + 'q');
+    c = ui_button(c, b1, back, HIT_KEY + back_key);
     /* TRANSLATORS: Space, Tab and Ctrl+1/2/3 are keys; keep them. */
     if (c + 10 < cols) {
         screen_text(c, b1, _("Space: mark  Tab: panes  Ctrl+1/2/3: view"), FG, BG);
@@ -3827,7 +3836,8 @@ static void insert_text(char *text, size_t size, size_t *cur, int *all, const ch
 }
 
 /* A line typed at the bottom (UTF-8, Left/Right/Home/End/Delete/Backspace,
- * Ctrl+A, Ctrl+U, Ctrl+K, Ctrl+W, Ctrl+V from the clipboard); NULL if Esc. */
+ * Ctrl+A, Ctrl+U, Ctrl+K, Ctrl+W or Ctrl+Backspace, Ctrl+V from the clipboard); NULL
+ * if Esc or quitting (Ctrl+Q, the window's close). The home key waits. */
 static const char *prompt(const char *question, const char *initial, int select_all)
 {
     static char text[PATH_MAX];
@@ -3859,17 +3869,17 @@ static const char *prompt(const char *question, const char *initial, int select_
             screen_text(ccol, row, ch, BG, ACCENT);
         }
         screen_flush();
-        int key = key_poll_timeout(-1, -1), mods = keys_modifiers();
+        int key = key_poll_timeout(-1, -1), mods = keys_modifiers(), act = key_action(key, mods);
         size_t n = strlen(text);
-        if (key == 27 || key == K_CLOSE) {
-            close_asked |= key == K_CLOSE; /* nothing typed is kept: the window closes */
+        if (act == ACT_CANCEL || act == ACT_QUIT) {
+            close_asked |= act == ACT_QUIT; /* nothing typed is kept: files quits */
             return NULL;
         } else if (key == '\n') {
             return text;
-        } else if (key == 1 && (mods & KEYS_CTRL)) {
+        } else if (act == ACT_SELECT_ALL) {
             cur = n;
             all = n > 0;
-        } else if (key == 22 && (mods & KEYS_CTRL)) {
+        } else if (act == ACT_PASTE) {
             int fd = -1;
             size_t len = 0;
             if (clipboard_get(0, &fd, &len) == CLIPBOARD_OK && fd >= 0) {
@@ -3884,7 +3894,11 @@ static const char *prompt(const char *question, const char *initial, int select_
         } else if (key == 11 && (mods & KEYS_CTRL)) {
             text[all ? 0 : cur] = '\0';
             if (all) cur = all = 0;
-        } else if (key == 23 && (mods & KEYS_CTRL)) {
+        } else if (act == ACT_DESELECT) {
+            all = 0;
+        } else if (act == ACT_CLOSE_TAB || (key == '\b' && (mods & KEYS_CTRL))) {
+            /* Ctrl+W (a field takes it before the table's close-tab) or
+             * Ctrl+Backspace: the word before the cursor */
             if (all) {
                 text[0] = '\0';
                 cur = all = 0;
@@ -3950,7 +3964,11 @@ static int yes(const char *question)
             if (!e->pressed) continue; /* a motion is no answer */
             key = pointer_here(e) && ui_hit_at(e->col, e->row) == HIT_KEY + 'y' ? 'y' : 'n';
         }
-        close_asked |= key == K_CLOSE; /* no: nothing is done, and the window closes */
+        if (key == K_ACT_HOME) continue; /* process 1's: the question waits */
+        if (key_action(key, keys_modifiers()) == ACT_QUIT) {
+            close_asked = 1; /* no: nothing is done, and files quits */
+            return 0;
+        }
         return key == 'y' || key == 'Y';
     }
 }
@@ -4110,7 +4128,7 @@ static void properties(int folder_self)
         ui_button(c, r + 1, _("Enter / Esc: close"), HIT_KEY + 27);
         screen_flush();
 
-        int key = key_poll_timeout(-1, -1);
+        int key = key_poll_timeout(-1, -1), mods = keys_modifiers();
         if (key == K_SHOWN) {
             drag_stop();
             pull.on = 0;
@@ -4148,8 +4166,10 @@ static void properties(int folder_self)
                     }
                 }
             }
-        } else if (key == 27 || key == 'q' || key == '\n' || key == 'i' || key == 'I' || key == K_CLOSE) {
-            close_asked |= key == K_CLOSE;
+        } else if (key_list_action(key, mods) == ACT_QUIT) {
+            close_asked = 1;
+            return;
+        } else if (key_list_action(key, mods) == ACT_CANCEL || key == '\n' || key == 'i' || key == 'I') {
             return;
         }
     }
@@ -4293,7 +4313,7 @@ static int choose(const char *path, const char *type, char *name, size_t size)
         /* TRANSLATORS: Esc is the key; keep it. */
         ui_button(c, r0 + 4 + last, _("Esc: cancel"), HIT_KEY + 27);
         screen_flush();
-        int key = key_poll_timeout(-1, -1);
+        int key = key_poll_timeout(-1, -1), mods = keys_modifiers();
         if (key == K_SHOWN) {
             drag_stop();
             pull.on = 0;
@@ -4312,8 +4332,9 @@ static int choose(const char *path, const char *type, char *name, size_t size)
                 at = at - e->wheel < 0 ? 0 : at - e->wheel > last ? last : at - e->wheel;
             }
         }
-        if (key == 27 || key == 'q' || key == K_CLOSE) {
-            close_asked |= key == K_CLOSE;
+        int act = key_list_action(key, mods);
+        if (act == ACT_CANCEL || act == ACT_QUIT) {
+            close_asked |= act == ACT_QUIT;
             report(0, _("Not opened."));
             return 0;
         } else if (key == K_UP && at > 0) {
@@ -4862,7 +4883,8 @@ static void columns_menu(int col, int row)
 #endif
 enum {
     KEY_EXTRACT_HERE = 0x1E0, KEY_EXTRACT_TRASH, KEY_EXTRACT_TO, KEY_COMPRESS_TGZ, KEY_COMPRESS_ZIP,
-    KEY_COMPRESS_TO, KEY_EXTRACT_MENU, KEY_COMPRESS_MENU
+    KEY_COMPRESS_TO, KEY_EXTRACT_MENU, KEY_COMPRESS_MENU,
+    KEY_INVERT /* the menu's own: no key does it */
 };
 
 /* Item i is an archive archive opens (the types of its .desktop). */
@@ -4998,18 +5020,18 @@ static int file_menu(int col, int row, int on_file)
         if (picking_folder() && P->list[P->sel].dir) ITEM(_("Choose this folder"), 'o');
     } else if (on_file && trash) {
         ITEM(_("Restore"), 'r');
-        ITEM(_("Delete permanently..."), 'd');
+        ITEM(_("Delete permanently..."), K_DEL);
         ITEM(_("Empty Trash..."), 'e');
         ITEM(_("Properties"), 'i');
     } else if (on_file) {
         ITEM(_("Open"), '\n');
         ITEM(_("Open with..."), 'o');
-        ITEM(_("Copy"), 'c');
-        ITEM(_("Cut"), 'x');
-        if (nclip && !search) ITEM(_("Paste"), 'v');
-        ITEM(_("Rename..."), 'r');
-        ITEM(_("Move to Trash"), 'd');
-        ITEM(_("Delete permanently..."), 'D');
+        ITEM(_("Copy"), MODS(KEYS_CTRL) + ('c' & 0x1F));
+        ITEM(_("Cut"), MODS(KEYS_CTRL) + ('x' & 0x1F));
+        if (nclip && !search) ITEM(_("Paste"), MODS(KEYS_CTRL) + ('v' & 0x1F));
+        ITEM(_("Rename..."), K_F1 + 1);
+        ITEM(_("Move to Trash"), K_DEL);
+        ITEM(_("Delete permanently..."), MODS(KEYS_SHIFT) + K_DEL);
         char path[PATH_MAX], other[PATH_MAX];
         if (!P->list[P->sel].dir && strncmp(item_type(P, P->sel), "image/", 6) == 0) {
             ITEM(_("Set as wallpaper"), 'w');
@@ -5022,7 +5044,8 @@ static int file_menu(int col, int row, int on_file)
             ITEM(_("Duplicate (Ctrl+U)"), MODS(KEYS_CTRL) + ('u' & 0x1F));
             ITEM(_("Create link... (L)"), 'L');
         }
-        ITEM(_("Copy path(s) (Ctrl+Shift+C)"), MODS(KEYS_CTRL | KEYS_SHIFT) + ('c' & 0x1F));
+        ITEM(_("Copy path(s) (Ctrl+Alt+C)"), MODS(KEYS_CTRL | KEYS_ALT) + ('c' & 0x1F));
+        if (!search) ITEM(_("Invert selection"), KEY_INVERT); /* Ctrl+Shift+I has Ctrl+Shift+Tab's code */
         /* Ark's, where Dolphin has its service menus: above Properties. */
         if (!search && access(ARCHIVE_PROGRAM, X_OK) == 0) {
             int idx[MAX_CLIP], nt = targets(P, idx, MAX_CLIP), archives = 0;
@@ -5035,16 +5058,17 @@ static int file_menu(int col, int row, int on_file)
     } else if (!pick_type && trash) {
         ITEM(_("Empty Trash..."), 'e');
     } else if (!pick_type && !search) {
-        ITEM(_("New folder..."), 'n');
-        if (nclip) ITEM(_("Paste"), 'v');
-        ITEM(_("New empty file... (N)"), 'N');
+        ITEM(_("New folder... (Ctrl+Shift+N)"), MODS(KEYS_CTRL | KEYS_SHIFT) + ('n' & 0x1F));
+        if (nclip) ITEM(_("Paste"), MODS(KEYS_CTRL) + ('v' & 0x1F));
+        ITEM(_("New empty file... (Ctrl+Alt+N)"), MODS(KEYS_CTRL | KEYS_ALT) + ('n' & 0x1F));
         ITEM(_("Bookmark folder (Ctrl+D)"), MODS(KEYS_CTRL) + ('d' & 0x1F));
-        ITEM(_("Open in terminal (F4)"), K_F1 + 3);
+        ITEM(_("Open in terminal (Shift+F4)"), MODS(KEYS_SHIFT) + K_F1 + 3);
         ITEM(_("Find files... (Ctrl+Shift+F)"), MODS(KEYS_CTRL | KEYS_SHIFT) + ('f' & 0x1F));
+        if (P->nlist > 0) ITEM(_("Invert selection"), KEY_INVERT);
         ITEM(_("Folder properties (I)"), 'I');
     }
     if (!pick_type && nundo) {
-        ITEM(_("Undo"), 'u');
+        ITEM(_("Undo"), MODS(KEYS_CTRL) + ('z' & 0x1F));
     }
     if (!on_file && !trash && !search) ITEM(_("Refresh (F5)"), K_F1 + 4); /* the folder's, as Dolphin's Reload */
     ITEM(_("Sort files... (s)"), 's');
@@ -5635,7 +5659,7 @@ static int pointer_key(int *out_mods)
             draw();
             int raw = file_menu(e->col, e->row, 1);
             if (raw < 0) return -1;
-            *out_mods = raw == 'D' ? KEYS_SHIFT : ((raw >> 16) & 0xF);
+            *out_mods = (raw >> 16) & 0xF;
             return raw & 0xFFFF;
         }
         int clear = 0;
@@ -5676,7 +5700,7 @@ static int pointer_key(int *out_mods)
             draw();
             int raw = file_menu(e->col, e->row, 0);
             if (raw < 0) return -1;
-            *out_mods = raw == 'D' ? KEYS_SHIFT : ((raw >> 16) & 0xF);
+            *out_mods = (raw >> 16) & 0xF;
             return raw & 0xFFFF;
         }
         int col, row, cols, nrows, gc, tc, tr, vr, sx, sy;
@@ -5706,12 +5730,47 @@ static int pointer_key(int *out_mods)
     return 0;
 }
 
-/* Until q (files_view), or a file chosen into out (files_pick: 1; q: 0). */
+/* F1: the file manager's own keys (ui_help adds every program's). */
+static const struct ui_help_line files_help[] = {
+    { "Enter, o", N_("Open; open with...") },
+    { "Space, Ctrl+A", N_("Mark the item; mark all") },
+    { "Ctrl+C, Ctrl+X, Ctrl+V", N_("Copy, cut, paste") },
+    { "Ctrl+Alt+C", N_("Copy the path of the selected item or items") },
+    { "Ctrl+Z", N_("Undo") },
+    { "Delete, Shift+Delete", N_("Move to the Trash; delete permanently") },
+    { "F2", N_("Rename; in the Trash, r restores") },
+    { "Ctrl+Shift+N, Ctrl+Alt+N", N_("New folder; new empty file") },
+    { "Backspace, Alt+Up", N_("The parent folder") },
+    { "Alt+Left, Alt+Right", N_("Back, forward") },
+    { "Ctrl+F, /", N_("Filter by part of the name") },
+    { "Ctrl+Shift+F", N_("Find files") },
+    { "Ctrl+L", N_("Go to a location") },
+    { "Alt+.", N_("Hidden files shown or not") },
+    { "Alt+Enter, i, I", N_("Properties; I: the folder's") },
+    { "Shift+F10", N_("The menu of the selected item") },
+    { "F3, F9", N_("Split view; the places pane") },
+    { "F5", N_("Reload the folder") },
+    { "Shift+F4", N_("A terminal in this folder") },
+    { "Ctrl+T, Ctrl+W", N_("New tab, close the tab") },
+    { "Ctrl+PgDn, Ctrl+PgUp", N_("Next, previous tab") },
+    { "Ctrl+1, Ctrl+2, Ctrl+3", N_("Icons, compact, details") },
+    { "Ctrl++, Ctrl+-, Ctrl+0", N_("Zoom in, out, back") },
+    { "s, C, Ctrl+Alt+1..5", N_("Sort; columns; by name, time, size, type, extension") },
+    { "Ctrl+D, Ctrl+U, L", N_("Bookmark the folder; duplicate; create a link") },
+    { "w, e", N_("Set as wallpaper; eject the drive or empty the Trash") },
+    { "Tab, Shift+Tab", N_("Places and panes") },
+    { "Esc, q", N_("Cancel the drag, filter or marks; then back (inside home: its list)") },
+    { NULL, NULL },
+};
+
+/* Until Esc at the top (home's file manager, files_pick: 0), Ctrl+Q or the
+ * window's close (files_close_asked), or a file chosen into out (files_pick:
+ * 1). Files on its own (files-main) stays at the top. */
 static int browse(char *out, size_t size)
 {
     int show = 1;
     for (;;) {
-        /* The window's close, here or in a question, a menu or a copy: as q. */
+        /* Quitting, asked here or in a question, a menu or a copy. */
         if (close_asked) {
             return 0;
         }
@@ -5723,8 +5782,8 @@ static int browse(char *out, size_t size)
         /* The drives service's answer wakes it as a key does. */
         int key = key_poll_timeout(drive_job.fd, drag.mode == DRAG_BAND ? 40 : cloud_job.pid ? 100 : 2000);
         int mods = keys_modifiers();
-        if (key == K_CLOSE) {
-            close_asked = 1;
+        if (key_action(key, mods) == ACT_QUIT) {
+            close_asked = 1; /* Ctrl+Q, Alt+F4, the window's close: inside home, back to its list */
             continue;
         }
         if (key == K_POINTER) {
@@ -5756,7 +5815,8 @@ static int browse(char *out, size_t size)
             }
             continue;
         }
-        if (key == 27) {
+        int act = key_list_action(key, mods); /* a list: q is Esc */
+        if (act == ACT_CANCEL) {
             if (drag.mode != DRAG_NONE) {
                 if (drag.mode == DRAG_BAND) {
                     struct pane *dp = &tabs[cur_tab].pane[drag.pane];
@@ -5791,13 +5851,32 @@ static int browse(char *out, size_t size)
                 side = 0;
                 continue;
             }
-            if (pick_type) {
-                return 0;
+            if (pick_type || !standalone) {
+                return 0; /* back: nothing chosen, or home's list */
             }
             msg_sticky = 0;
             continue;
         }
+        /* The home key is process 1's: inside home, its list (this place and
+         * its tabs kept for the next time); else nothing changes here. */
+        if (key == K_ACT_HOME) {
+            if (!pick_type && !standalone) return 0;
+            continue;
+        }
         drag_stop();
+        if (act == ACT_HELP) {
+            if (ui_help(_("Files keys"), files_help) == ACT_QUIT) close_asked = 1;
+            continue;
+        }
+        if (act == ACT_CONTEXT_MENU) {
+            int pcol, prow, pcols, pnrows;
+            pane_area(P, tabs[cur_tab].active, &pcol, &prow, &pcols, &pnrows);
+            int raw = file_menu(pcol + 2, prow + 1, P->nlist > 0);
+            if (raw < 0) continue;
+            key = raw & 0xFFFF;
+            mods = (raw >> 16) & 0xF;
+            act = key_list_action(key, mods);
+        }
         /* View modes, zoom, split, tabs, navigation, sorting: available while picking too. */
         if (key == K_CTRL_0 + 1 || key == K_CTRL_0 + 2 || key == K_CTRL_0 + 3) {
             P->view = key - (K_CTRL_0 + 1);
@@ -5809,6 +5888,9 @@ static int browse(char *out, size_t size)
             static const int pcmanfm_sorts[5] = { SORT_NAME, SORT_MTIME, SORT_SIZE, SORT_TYPE, SORT_EXT };
             apply_sort_choice(pcmanfm_sorts[key - '1']);
             continue;
+        }
+        if ((mods & (KEYS_ALT | KEYS_META)) && act == ACT_NONE && key > ' ' && key < 0x7F) {
+            continue; /* Alt+q, Super+s: not the letters */
         }
         if (key == 's') {
             int pcol, prow, pcols, pnrows;
@@ -5828,23 +5910,23 @@ static int browse(char *out, size_t size)
             save_prefs();
             continue;
         }
-        if (key == K_CTRL_0 || ((mods & KEYS_CTRL) && (key == '+' || key == '=' || key == '-' || key == '_'))) {
-            zoom_pane(P, key == K_CTRL_0 ? 0 : (key == '-' || key == '_') ? -1 : 1);
+        if (act == ACT_ZOOM_IN || act == ACT_ZOOM_OUT || act == ACT_ZOOM_RESET) {
+            zoom_pane(P, act == ACT_ZOOM_RESET ? 0 : act == ACT_ZOOM_OUT ? -1 : 1);
             continue;
         }
-        if (key == K_F1 + 4) { /* F5 */
+        if (act == ACT_RELOAD) {
             refresh_pane();
             continue;
         }
-        if (key == K_F1 + 2) { /* F3 */
+        if (key == K_F1 + 2) { /* F3: split (Dolphin's); there is no match to go to */
             toggle_split();
             continue;
         }
-        if (!pick_type && key == K_F1 + 3) { /* F4: open current folder in terminal (PCManFM) */
+        if (!pick_type && key == K_F1 + 3 && (mods & KEYS_SHIFT)) { /* Shift+F4: a terminal here (Dolphin's) */
             open_terminal_here();
             continue;
         }
-        if (key == ('f' & 0x1F) && (mods & (KEYS_CTRL | KEYS_SHIFT)) == (KEYS_CTRL | KEYS_SHIFT)) {
+        if (act == ACT_FIND_IN_FILES) {
             find_files();
             continue;
         }
@@ -5852,32 +5934,35 @@ static int browse(char *out, size_t size)
             toggle_bookmark();
             continue;
         }
-        if (!pick_type && key == ('c' & 0x1F) && (mods & (KEYS_CTRL | KEYS_SHIFT)) == (KEYS_CTRL | KEYS_SHIFT)) {
+        /* The programs' own Ctrl+Alt letters (the table has none): by the letter. */
+        int ctrl_alt = (mods & (KEYS_CTRL | KEYS_ALT | KEYS_META)) == (KEYS_CTRL | KEYS_ALT) && key >= 1 && key <= 26 ?
+                       'a' + key - 1 : 0;
+        if (!pick_type && ctrl_alt == 'c') { /* Dolphin's Copy Location */
             copy_paths();
             continue;
         }
-        if (!pick_type && key == ('i' & 0x1F) && (mods & (KEYS_CTRL | KEYS_SHIFT)) == (KEYS_CTRL | KEYS_SHIFT)) {
+        if (!pick_type && key == KEY_INVERT) {
             invert_selection();
             continue;
         }
-        if (key == ('t' & 0x1F) && (mods & KEYS_CTRL)) {
+        if (act == ACT_NEW_TAB) {
             new_tab();
             continue;
         }
-        if (key == ('w' & 0x1F) && (mods & KEYS_CTRL)) {
+        if (act == ACT_CLOSE_TAB) {
             if (ntabs > 1) close_tab(cur_tab);
-            else return 0;
+            else return 0; /* the last tab: files leaves, as Ctrl+Q does */
             continue;
         }
-        if (key == '\t' && (mods & KEYS_CTRL)) {
-            switch_tab(cur_tab + ((mods & KEYS_SHIFT) ? -1 : 1));
+        if (act == ACT_NEXT_TAB || act == ACT_PREV_TAB) {
+            switch_tab(cur_tab + (act == ACT_PREV_TAB ? -1 : 1));
             continue;
         }
-        if ((mods & KEYS_ALT) && (key == K_LEFT || key == K_RIGHT)) {
-            history(key == K_RIGHT);
+        if (act == ACT_BACK || act == ACT_FORWARD) {
+            history(act == ACT_FORWARD);
             continue;
         }
-        if (((mods & KEYS_ALT) && key == K_UP) || key == '\b' || key == 127) {
+        if (act == ACT_UP || key == '\b' || key == 127) { /* Backspace goes up too */
             go_up();
             continue;
         }
@@ -5893,13 +5978,13 @@ static int browse(char *out, size_t size)
             }
             continue;
         }
-        if (key == '/' || (key == ('i' & 0x1F) && mods == KEYS_CTRL)) {
+        if (act == ACT_FIND || key == '/') { /* Ctrl+F: Dolphin's filter */
             const char *f = prompt(_("Filter (part of the name):"), P->filter, 0);
             snprintf(P->filter, sizeof P->filter, "%s", f ? f : "");
             load_dir(NULL);
             continue;
         }
-        if (key == '.' || (key == ('h' & 0x1F) && (mods & KEYS_CTRL))) {
+        if (act == ACT_HIDDEN || key == '.') {
             char keep[256];
             snprintf(keep, sizeof keep, "%s", selected_name(P));
             hidden = !hidden;
@@ -5907,35 +5992,29 @@ static int browse(char *out, size_t size)
             load_dir(keep);
             continue;
         }
-        if (key == 'i' || key == 'I' || ((mods & KEYS_ALT) && key == '\n')) {
+        if (act == ACT_PROPERTIES || key == 'i' || key == 'I') {
             properties(key == 'I');
             continue;
         }
-        if (key == ('a' & 0x1F) && (mods & KEYS_CTRL)) {
+        if (act == ACT_SELECT_ALL) {
             for (int i = 0; i < P->nlist; i++) P->list[i].marked = 1;
             report(0, P_("Marked %d item.", "Marked all %d items.", P->nlist), P->nlist);
             continue;
         }
-        if (key == 'q') {
-            return 0;
+        if (act == ACT_DESELECT) {
+            for (int i = 0; i < P->nlist; i++) P->list[i].marked = 0;
+            continue;
         }
-        /* The home key (rc.conf key_home), as from any program: home's list,
-         * this place and its tabs kept for the next time. Process 1 does
-         * nothing with it here, the files being home's own. A program
-         * choosing a file keeps its choice open. */
-        if (key == K_ACT_HOME && !pick_type) {
-            return 0;
-        }
-        if (pick_type && ((key > 0 && key < 0x80 && strchr(picking_folder() ? "xcvnNLVrdDweu " : "oxcvnNLVrdDweu ", key)) ||
-                          key == K_DEL || key == K_F1 + 1 || key == K_F1 + 9 || (mods & KEYS_CTRL))) {
+        if (pick_type && ((key > 0 && key < 0x80 && strchr(picking_folder() ? "xcvNLVrweu " : "oxcvNLVrweu ", key)) ||
+                          key == K_DEL || act == ACT_RENAME || act == ACT_PASTE || (mods & KEYS_CTRL))) {
             continue; /* choosing: nothing is changed (o chooses a folder) */
         }
-        if (key == '\t') {
+        if (act == ACT_NEXT_FIELD || act == ACT_PREV_FIELD) {
             if (side_hidden) {
                 if (tabs[cur_tab].split) tabs[cur_tab].active = !tabs[cur_tab].active;
             } else if (tabs[cur_tab].split) {
                 int pos = side ? 0 : tabs[cur_tab].active + 1;
-                pos = (pos + ((mods & KEYS_SHIFT) ? 2 : 1)) % 3;
+                pos = (pos + (act == ACT_PREV_FIELD ? 2 : 1)) % 3;
                 side = pos == 0;
                 if (!side) tabs[cur_tab].active = pos - 1;
             } else {
@@ -6018,29 +6097,27 @@ static int browse(char *out, size_t size)
             P->list[P->sel].marked = !P->list[P->sel].marked;
             P->sel = P->sel < P->nlist - 1 ? P->sel + 1 : P->sel;
             P->follow_sel = 1;
-        } else if ((key == 'c' || key == 'x' ||
-                    ((mods & KEYS_CTRL) && (key == ('c' & 0x1F) || key == ('x' & 0x1F)))) && P->nlist > 0) {
-            to_clip(key == 'x' || key == ('x' & 0x1F));
-        } else if ((key == 'v' || ((mods & KEYS_CTRL) && key == ('v' & 0x1F))) && nclip) {
+        } else if ((act == ACT_COPY || act == ACT_CUT) && P->nlist > 0) {
+            to_clip(act == ACT_CUT);
+        } else if (act == ACT_PASTE && nclip) {
             paste();
-        } else if (key == 'u' || ((mods & KEYS_CTRL) && key == ('z' & 0x1F))) {
+        } else if (act == ACT_UNDO) {
             undo_last();
-        } else if (key == 'n' || key == K_F1 + 9 ||
-                   ((mods & (KEYS_CTRL | KEYS_SHIFT)) == (KEYS_CTRL | KEYS_SHIFT) && !(mods & KEYS_ALT) && key == ('n' & 0x1F))) {
+        } else if (act == ACT_NEW_FOLDER) {
             new_folder();
-        } else if (key == 'N' ||
-                   ((mods & (KEYS_CTRL | KEYS_ALT)) == (KEYS_CTRL | KEYS_ALT) && key == ('n' & 0x1F))) {
+        } else if (ctrl_alt == 'n') {
             new_empty_file();
         } else if (key == 'L' && P->nlist > 0) {
             create_symlink();
         } else if (key == ('u' & 0x1F) && mods == KEYS_CTRL && P->nlist > 0) {
             duplicate_selected();
-        } else if ((key == 'r' || key == K_F1 + 1) && P->nlist > 0) {
-            if (is_trash(P) && key == 'r') restore_targets();
-            else rename_selected();
-        } else if ((key == 'D' || ((key == 'd' || key == K_DEL) && (mods & KEYS_SHIFT))) && P->nlist > 0) {
+        } else if (key == 'r' && is_trash(P) && P->nlist > 0) {
+            restore_targets(); /* the Trash's own command */
+        } else if (act == ACT_RENAME && P->nlist > 0) {
+            rename_selected();
+        } else if (act == ACT_DELETE_PERMANENT && P->nlist > 0) {
             delete_targets();
-        } else if ((key == 'd' || key == K_DEL) && P->nlist > 0) {
+        } else if (act == ACT_DELETE && P->nlist > 0) {
             if (is_trash(P)) {
                 delete_targets();
             } else {
@@ -6129,6 +6206,11 @@ static void view_at(const char *folder)
 void files_view(void)
 {
     view_at(NULL);
+}
+
+void files_standalone(void)
+{
+    standalone = 1;
 }
 
 void files_view_at(const char *folder)

@@ -33,6 +33,9 @@ static char *dir_path(const char *rel);
 #define RUN_DIR D("run")
 #define KEYTABLE D("keytable")
 #define KEYMAP_TABLE D("keymap.table")
+/* Leaving setup is counted, and the run ends there (installer.c exits). */
+static void test_leave(void);
+#define LEAVE_SETUP() test_leave()
 #define main installer_main
 #include "../progs/installer.c"
 #include "i18n-stub.h"
@@ -114,14 +117,24 @@ void screen_flush(void)
 
 /* The keys: a script, built with k() and type(); WAIT lets time pass (the
  * installation goes on); SNAP keeps what is on the screen then (snapped
- * looks there). At its end the program is left (it has no quit key). */
+ * looks there); KEY(k, m) is key k with modifiers m, as the key layer gives
+ * it (Ctrl+A: 1 with KEYS_CTRL). At its end the program is left (it has no
+ * quit key). */
 #define WAIT (-1)
 #define SNAP (-2)
 #define END (-3)
-static int keys[1024], nkeys, at;
+#define KEY(k, m) (-1000000 - ((m) << 16) - (k))
+static int keys[1024], nkeys, at, mods, kept, left;
+int keys_modifiers(void) { return mods; }
+void key_close_kept(void) { kept++; }
 static char snaps[16][ROWS][COLS + 1];
 static int nsnaps;
 static jmp_buf quit;
+static void test_leave(void)
+{
+    left++;
+    longjmp(quit, 1);
+}
 static struct pointer_event mouse;
 const struct pointer_event *pointer_last(void) { return &mouse; }
 /* PTR in the keys: the next of these pointer events (ptr() adds one). */
@@ -144,6 +157,24 @@ int clipboard_set(int primary, const void *text, size_t size)
     return CLIPBOARD_OK;
 }
 const char *clipboard_error(int status) { return status == CLIPBOARD_OK ? "ok" : "failed"; }
+/* The clipboard's text for a paste (Ctrl+V in a line): a pipe holding it. */
+static const char *paste_text = "";
+int clipboard_get(int primary, int *fd, size_t *size)
+{
+    (void)primary;
+    int p[2];
+    size_t n = strlen(paste_text);
+    if (pipe(p) != 0) return -1;
+    if (write(p[1], paste_text, n) != (ssize_t)n) {
+        close(p[0]);
+        close(p[1]);
+        return -1;
+    }
+    close(p[1]);
+    *fd = p[0];
+    *size = n;
+    return 0;
+}
 /* K_TEXT's text: a character beyond ASCII, as keys.c gives it (de: ü). */
 const char *keys_text(void) { return "ü"; }
 
@@ -164,8 +195,14 @@ int key_poll_timeout(int fd, int ms)
     (void)fd;
     (void)ms;
     int key = keys[at];
+    mods = 0;
     if (key == END) longjmp(quit, 1);
     at++;
+    if (key <= KEY(0, 0)) {
+        key = KEY(0, 0) - key;
+        mods = key >> 16;
+        return key & 0xFFFF;
+    }
     if (key == WAIT) {
         usleep(300000);
         return 0;
@@ -311,7 +348,7 @@ static void run(const char *what)
     described = 0;
     mode = M_START;
     job = 0;
-    step = scroll = log_from = 0;
+    step = scroll = log_from = log_all = 0;
     in_page = 1;
     notice[0] = '\0';
     unsetenv("LOCACHY_LANG");
@@ -340,7 +377,7 @@ static void to_summary(const char *pass_again)
     k(K_EOL); k('\n');          /* Next */
     k(K_DOWN); k('\n'); type("correct horse"); k('\n'); type(pass_again); k('\n');
     k(K_EOL); k('\n');          /* Encryption: Next */
-    k('\n'); k(21); type("boot-test"); k('\n');
+    k('\n'); k(KEY('a' & 0x1F, KEYS_CTRL)); type("boot-test"); k('\n'); /* Ctrl+A: typing replaces it */
     k(K_DOWN); k(K_DOWN); k('\n'); type("Locachy123"); k('\n'); type("Locachy123"); k('\n');
     for (int s = S_USER; s < S_SUMMARY; s++) { k(K_EOL); k('\n'); }
     k(SNAP);
@@ -390,6 +427,46 @@ int main(int argc, char **argv)
     assert(snapped("Keyboard layout") && snapped(" de"));
     assert(!strcmp(c.keymap, "de") && strstr(said, "installer: keymap de"));
     assert(strstr(layout_table, "layout de\n") && strstr(slurp(D("keymap.table")), "key 21 y 7a 5a"));
+
+    /* F1's keys, Esc closes them; on the start page Ctrl+Q leaves setup at
+     * once, and so does the window's close. */
+    left = 0;
+    k(K_F1); k(SNAP); k(27); k(SNAP); k(KEY('q' & 0x1F, KEYS_CTRL));
+    run("start: F1's keys, Ctrl+Q leaves");
+    assert(left == 1 && snapped("Installer keys") && snapped("Quit setup (the console comes back)"));
+    assert(!snapped("Between the steps and the step's page") && !snapped("Copy the whole output")); /* the page's own */
+    assert(snapped("Install LOCachy") && snapped("[F1: help]") && snapped("[Ctrl+Q: quit]"));
+    left = 0;
+    k(K_CLOSE);
+    run("start: the window's close leaves");
+    assert(left == 1);
+    /* The button sends Ctrl+Q itself (its modifier with it): it leaves. */
+    left = 0;
+    ptr(30, ROWS - 2, BTN_LEFT, 1, 1);
+    run("start: a click on [Ctrl+Q: quit] leaves");
+    assert(left == 1);
+    /* On the steps it asks (the choices would be lost): n stays, and so do
+     * Ctrl+Q or the close given to the question; y leaves. Alt+F4 quits as
+     * Ctrl+Q does; F1 there, then Ctrl+Q, asks the same. */
+    left = kept = 0;
+    k('\n'); k(KEY('q' & 0x1F, KEYS_CTRL)); k(SNAP); k('n'); k(K_CLOSE); k(K_CLOSE);
+    k(KEY(K_F1 + 3, KEYS_ALT)); k(27); k(K_F1); k(KEY('q' & 0x1F, KEYS_CTRL)); k('y');
+    run("steps: Ctrl+Q asks, n and the close stay, y leaves");
+    assert(left == 1 && mode == M_STEPS && kept >= 3 && snapped("Leave setup? The choices made here are lost."));
+    /* Tab and Shift+Tab: between the steps and the page; q, as Esc, from
+     * the steps to the start. */
+    k('\n'); k(KEY('\t', KEYS_SHIFT));
+    run("steps: Shift+Tab to the steps");
+    assert(mode == M_STEPS && !in_page);
+    k('\n'); k(KEY('\t', KEYS_SHIFT)); k(KEY('\t', KEYS_SHIFT)); k(KEY('\t', KEYS_SHIFT)); k('q');
+    run("steps: Shift+Tab back and forth, q to the start");
+    assert(mode == M_START);
+    /* F1 on the steps: their keys, the lines' and the questions', not the
+     * output's; the steps have the Ctrl+Q button too. */
+    k('\n'); k(K_F1); k(SNAP); k(27); k(SNAP);
+    run("steps: F1 lists the steps' keys");
+    assert(mode == M_STEPS && snapped("The step before or after") && snapped("In a line you type: paste"));
+    assert(snapped("Quit setup: asks first") && !snapped("Copy the whole output") && snapped("[Ctrl+Q: quit]"));
 
     /* The whole way, N at the last question, then Y and the installation. */
     to_summary("correct horse");
@@ -453,13 +530,16 @@ int main(int argc, char **argv)
     k(K_EOL); k('\n');
     k(K_DOWN); k('\n'); type("correct horse"); k('\n'); type("correct horse"); k('\n');
     k(K_EOL); k('\n');          /* Encryption: Next */
-    k('\n'); k(21); type("boot-test"); k('\n');
+    paste_text = "boot-test";
+    k('\n'); k(21); k(KEY('v' & 0x1F, KEYS_CTRL)); k('\n'); /* Ctrl+U, then Ctrl+V: the user's name is pasted */
     k(K_DOWN); k('\n'); type("J"); k(K_TEXT); k(K_TEXT); k('\b'); type("rgen"); k('\n');
     k(K_DOWN); k('\n'); type("Locachy123"); k('\n'); type("Locachy123"); k('\n');
     for (int s = S_USER; s < S_SUMMARY; s++) { k(K_EOL); k('\n'); }
-    k(K_EOL); k('\n'); k('n');  /* Install: --check, then no */
+    k(K_EOL); k('\n');          /* Install: --check, then the question: */
+    k(K_ACT_HOME); k(KEY('y', KEYS_ALT)); k('x'); k(SNAP); k('\n'); /* no answers, then Enter: no */
     run("a full name beyond ASCII");
     assert(strstr(slurp(D("calls")), "--user=boot-test --full-name=Jürgen --hostname=locachy"));
+    assert(snapped("Erase and install? [y/N]") && !strstr(slurp(D("calls")), "--yes"));
 
     /* Another layout after the passphrase and the password: both again. */
     to_summary("correct horse");
@@ -501,8 +581,25 @@ int main(int argc, char **argv)
     assert(strstr(said, "installer: installation failed (1)"));
     unlink(D("install-fail"));
 
+    /* Done: F1 lists the output's keys (reboot, power off; not the steps');
+     * Ctrl+A selects all of the output and Ctrl+C copies the output itself,
+     * from its first line; the Ctrl+Q button is there (not while it runs). */
+    to_summary("correct horse");
+    k(K_EOL); k('\n'); k('y');
+    for (int i = 0; i < 10; i++) k(WAIT);
+    k(K_F1); k(SNAP); k(27);
+    k(KEY('a' & 0x1F, KEYS_CTRL)); k(SNAP); k(KEY('c' & 0x1F, KEYS_CTRL));
+    run("done: the output's F1; Ctrl+A, then Ctrl+C copies all of the output");
+    assert(mode == M_DONE && snapped("LOCachy is installed"));
+    assert(snapped("Copy the whole output") && snapped("Reboot (asks first)") && !snapped("The step before or after"));
+    assert(snapped("The whole output is selected: Ctrl+C copies it.") && snapped("Ctrl+A, Ctrl+C: copy all"));
+    assert(snapped("[Ctrl+Q: quit]"));
+    const char *output = slurp(D("run/install.log"));
+    printf("copied: [%.80s...]\n", copied[0]);
+    assert(copied[0][0] && strchr(copied[0], '\n') && strncmp(copied[0], output, strlen(copied[0])) == 0);
+
     /* A source signing key to trust: the installation waits, says which and
-     * the command (y copies it): this medium's locachy-install by its path
+     * the command (Ctrl+C copies it): this medium's locachy-install by its path
      * with the full fingerprints, whatever "Trust them:" the output had
      * (here only locachy-build's, a program of the target) and never a
      * "key" that is not one; text is selected with the pointer and copied;
@@ -511,9 +608,9 @@ int main(int argc, char **argv)
     to_summary("correct horse");
     k(K_EOL); k('\n'); k('y');
     for (int i = 0; i < 6; i++) k(WAIT);
-    k(SNAP); k('y'); k(SNAP);
+    k(SNAP); k(KEY('c' & 0x1F, KEYS_CTRL)); k(SNAP);
     ptr(2, PAGE_TOP, BTN_LEFT, 1, 1); ptr(12, PAGE_TOP + 1, 0, 0, 0); ptr(12, PAGE_TOP + 1, BTN_LEFT, 0, 0);
-    k('y');
+    k(KEY('c' & 0x1F, KEYS_CTRL));
     ptr(10, PAGE_TOP + 1, BTN_LEFT, 1, 3); ptr(10, PAGE_TOP + 1, BTN_LEFT, 0, 0);
     k('c');
     for (int i = 0; i < 10; i++) k(WAIT);
@@ -559,8 +656,14 @@ int main(int argc, char **argv)
     k(SNAP);
     k(K_DOWN); k(K_DOWN); k(K_RIGHT); k(SNAP);                               /* Microsoft's: yes */
     k(K_EOL); k('\n');
-    k('\n'); k(21); type("boot-test"); k('\n');
-    k(K_DOWN); k(K_DOWN); k('\n'); type("Locachy123"); k('\n'); type("Locachy123"); k('\n');
+    /* A line: Ctrl+A then Ctrl+X cuts what is typed to the clipboard, Ctrl+V
+     * pastes (the double's boot-test); a password, after Ctrl+A, is neither
+     * copied nor cut: the clipboard still has "copy me" at the end. */
+    k('\n'); k(21); type("copy me"); k(KEY('a' & 0x1F, KEYS_CTRL)); k(KEY('x' & 0x1F, KEYS_CTRL));
+    k(KEY('v' & 0x1F, KEYS_CTRL)); k('\n');
+    k(K_DOWN); k(K_DOWN); k('\n'); type("Locachy123");
+    k(KEY('a' & 0x1F, KEYS_CTRL)); k(KEY('c' & 0x1F, KEYS_CTRL)); k(KEY('x' & 0x1F, KEYS_CTRL));
+    k('\n'); type("Locachy123"); k('\n');
     for (int s = S_USER; s < S_SUMMARY; s++) { k(K_EOL); k('\n'); }
     k(SNAP);
     k(K_EOL); k('\n'); k('n');
@@ -571,6 +674,9 @@ int main(int argc, char **argv)
     assert(snapped("this computer's own keys and Microsoft's"));
     calls = slurp(D("calls"));
     assert(strstr(calls, "--check ") && strstr(calls, " --secure-boot --secure-boot-microsoft"));
+    assert(strstr(calls, "--user=boot-test ")); /* what Ctrl+V pasted */
+    printf("copied: [%s]\n", copied[0]);
+    assert(strcmp(copied[0], "copy me") == 0); /* cut from the line; the password never */
     write_file(D("describe.json"), describe, 0644);
     k('\n'); k(K_EOL); k('\n'); k(K_DOWN); k('\n'); k(K_EOL); k('\n'); k(SNAP);
     run("no setup mode: no Secure Boot rows");

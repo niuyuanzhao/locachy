@@ -135,6 +135,7 @@ static int entries_with(const char *dir, const char *prefix)
 #define TERM    (-8) /* SIGTERM to this process (home's Stop); a timeout */
 #define SCROLL(i) (-200 - (i)) /* scrolls[i], as K_POINTER */
 #define KEY(k, m) (-1000000 - ((m) << 16) - (k)) /* key k with modifiers m */
+#define CTRL_KEY(c) KEY((c) & 0x1F, KEYS_CTRL)    /* Ctrl with a letter: its control code */
 #define CLICK(i) (-100 - (i)) /* clicks[i], as K_POINTER */
 
 /* A pointer event: on the first cell registered as id, at (col, row) for
@@ -363,8 +364,9 @@ int key_poll_timeout(int fd, int timeout)
     mods = 0;
     int key = script[step];
     if (key == END) {
-        assert(++extra < 50); /* q does not get out: stuck */
-        return 'q';
+        assert(++extra < 50); /* Ctrl+Q does not get out: stuck */
+        mods = KEYS_CTRL;
+        return 'q' & 0x1F; /* the script's end: quit, as Ctrl+Q does */
     }
     if (key == IDLE && copying.temp[0]) {
         struct stat st;
@@ -405,7 +407,8 @@ int key_poll_timeout(int fd, int timeout)
     }
     if (key == AFTER_HOTPLUG) {
         assert(drag.mode == DRAG_NONE && !pull.on && files_output == 0 && native_output == 0);
-        return 'q';
+        mods = KEYS_CTRL;
+        return 'q' & 0x1F;
     }
     if (key == WAIT) {
         usleep(50000);
@@ -902,19 +905,21 @@ int main(int argc, char **argv)
     assert(strcmp(drawn_row(2, SIDE), "  Name ^                          Size  Modified          Type") == 0);
     assert(strncmp(drawn_row(27, 0), status_start, strlen(status_start)) == 0);
     assert(strstr(drawn_row(27, 0), "  3 items (1 hidden) | "));
-    assert(strcmp(drawn_row(28, 0), " [Enter: open] [o: open with] [c: copy] [x: cut] [v: paste] [r: rename] "
-                                    "[d: trash] [n: new folder]") == 0);
+    /* The buttons name the table keys. Ctrl+Shift+N: new folder and
+     * Ctrl+Z: undo do not fit in 100 columns (F1 and the menu list them). */
+    assert(strcmp(drawn_row(28, 0), " [Enter: open] [o: open with] [Ctrl+C: copy] [Ctrl+X: cut] [Ctrl+V: paste] "
+                                    "[F2: rename] [Del: trash]") == 0);
     assert(strcmp(drawn_row(29, 0), " [/: filter] [.: hidden] [s: sort] [i: props] [F3: split] [w: wallpaper] "
-                                    "[e: eject] [q: back]") == 0);
+                                    "[e: eject] [Esc: back]") == 0);
 
     /* 68 columns (1366 pixels at scale 2): what does not fit is left out,
      * never the way back. */
-    struct click back[] = { { .id = HIT_KEY + 'q', .button = BTN_LEFT, .clicks = 1 } };
+    struct click back[] = { { .id = HIT_KEY + 27, .button = BTN_LEFT, .clicks = 1 } };
     clicks = back;
     ncols = 68;
-    run("a narrow screen: q: back is still shown, and clicking it goes back", (const int[]){ CLICK(0), END });
-    assert(extra == 0 && strcmp(drawn_row(29, 0), " [/: filter] [.: hidden] [s: sort] [i: props] [F3: split] "
-                                                  "[q: back]") == 0);
+    run("a narrow screen: Esc: back is still shown, and clicking it goes back", (const int[]){ CLICK(0), END });
+    assert(extra == 0 && strcmp(drawn_row(29, 0), " [/: filter] [.: hidden] [s: sort] [i: props] [e: eject] "
+                                                  "[Esc: back]") == 0);
     ncols = 100;
 
     run("open: the rule, no chooser", (const int[]){ K_DOWN, K_DOWN, '\n', END });
@@ -926,7 +931,7 @@ int main(int argc, char **argv)
 
     struct stat src_st, copy_st;
     assert(stat(at_home("Documents/a.txt"), &src_st) == 0 && chmod(at_home("Documents/a.txt"), 06755) == 0);
-    run("copy, paste twice", (const int[]){ '\n', K_DOWN, 'c', K_LEFT, K_DOWN, '\n', 'v', 'v', END });
+    run("copy, paste twice", (const int[]){ '\n', K_DOWN, CTRL_KEY('c'), K_LEFT, K_DOWN, '\n', CTRL_KEY('v'), CTRL_KEY('v'), END });
     assert(here("Downloads") && exists("Downloads/a.txt") && exists("Downloads/a (2).txt"));
     assert(exists("Documents/a.txt") && !error);
     assert(!is_root || (owner("Downloads/a.txt") == USER && owner("Downloads/a (2).txt") == USER));
@@ -936,25 +941,25 @@ int main(int argc, char **argv)
     assert(chmod(at_home("Documents/a.txt"), src_st.st_mode & 07777) == 0);
 
     /* Downloads: a (2).txt, a.txt */
-    run("cut, paste: moved", (const int[]){ 'x', K_LEFT, K_BOL, '\n', 'v', END });
+    run("cut, paste: moved", (const int[]){ CTRL_KEY('x'), K_LEFT, K_BOL, '\n', CTRL_KEY('v'), END });
     assert(exists("Documents/a (2).txt") && !exists("Downloads/a (2).txt") && nclip == 0);
 
     /* Documents: sub/ a (2).txt a.txt b.txt */
     run("mark two, delete permanently (Shift+Delete): no, then yes",
-        (const int[]){ K_DOWN, ' ', K_DOWN, ' ', 'D', 'n', 'D', 'y', END });
+        (const int[]){ K_DOWN, ' ', K_DOWN, ' ', KEY(K_DEL, KEYS_SHIFT), 'n', KEY(K_DEL, KEYS_SHIFT), 'y', END });
     assert(!exists("Documents/a (2).txt") && !exists("Documents/b.txt") && exists("Documents/a.txt"));
 
     run("rename, new folder",
-        (const int[]){ K_DOWN, 'r', '\b', '\b', '\b', '\b', '\b', 'c', '.', 'm', 'd', '\n',
-                       'n', 'n', 'e', 'w', '\n', END });
+        (const int[]){ K_DOWN, KEY(K_F1 + 1, 0), '\b', '\b', '\b', '\b', '\b', 'c', '.', 'm', 'd', '\n',
+                       KEY('n' & 0x1F, KEYS_CTRL | KEYS_SHIFT), 'n', 'e', 'w', '\n', END });
     assert(exists("Documents/c.md") && !exists("Documents/a.txt") && exists("Documents/new"));
     assert(!is_root || owner("Documents/new") == USER);
 
     /* Documents: new/ sub/ c.md */
-    run("a folder is not moved into itself", (const int[]){ 'x', '\n', 'v', END });
+    run("a folder is not moved into itself", (const int[]){ CTRL_KEY('x'), '\n', CTRL_KEY('v'), END });
     assert(here("Documents/new") && exists("Documents/new") && error);
 
-    run("delete a folder with what is in it", (const int[]){ K_LEFT, K_DOWN, 'D', 'y', END });
+    run("delete a folder with what is in it", (const int[]){ K_LEFT, K_DOWN, KEY(K_DEL, KEYS_SHIFT), 'y', END });
     assert(!exists("Documents/sub") && here("Documents"));
 
     if (is_root) {
@@ -963,7 +968,7 @@ int main(int argc, char **argv)
         FILE *f = fopen(at_home("Documents/locked/f"), "w");
         assert(f);
         fclose(f);
-        run("the user's permissions: root's files stay", (const int[]){ 'D', 'y', END });
+        run("the user's permissions: root's files stay", (const int[]){ KEY(K_DEL, KEYS_SHIFT), 'y', END });
         assert(exists("Documents/locked/f") && error);
         assert(unlink(at_home("Documents/locked/f")) == 0 && rmdir(at_home("Documents/locked")) == 0);
     }
@@ -995,7 +1000,7 @@ int main(int argc, char **argv)
     assert(here("Documents") && !files_request() && error);
 
     /* Documents: new/ c.md .hidden */
-    run("filter", (const int[]){ '/', 'c', '\n', 'q', END });
+    run("filter (the home key leaves it as it is)", (const int[]){ '/', 'c', '\n', K_ACT_HOME, END });
     assert(P->nlist == 1 && strcmp(P->list[0].name, "c.md") == 0);
     run("hidden files", (const int[]){ '.', 'q', END });
     assert(P->nlist == 3);
@@ -1005,24 +1010,42 @@ int main(int argc, char **argv)
     run("places", (const int[]){ '\t', K_DOWN, K_DOWN, '\n', 'q', END });
     assert(here("Downloads"));
 
+    /* The keys every program has (key_action): q is Esc in the list, Ctrl+Q
+     * quits (inside home: back to its list), Alt+q and Super+q are not q,
+     * F1's help and Shift+F10's menu close with Esc. */
+    run("q clears the marks first, then goes back to home's list", (const int[]){ ' ', 'q', 'q', END });
+    assert(extra == 0 && marked(P) == 0 && !files_close_asked());
+    run("Alt+q and Super+q are not q; F1's help and Shift+F10's menu close with Esc",
+        (const int[]){ KEY('q', KEYS_ALT), KEY('q', KEYS_META), KEY(K_F1, 0), 27, KEY(K_F1 + 9, KEYS_SHIFT), 27, END });
+    assert(extra == 1 && files_close_asked());
+    run("Ctrl+Q leaves at once, the marks kept", (const int[]){ ' ', KEY('q' & 0x1F, KEYS_CTRL), END });
+    assert(extra == 0 && files_close_asked() && marked(P) == 1);
+    for (int i = 0; i < P->nlist; i++) P->list[i].marked = 0;
+    standalone = 1;
+    run("files on its own: Esc and q at the top and the home key change nothing; Ctrl+Q leaves",
+        (const int[]){ 27, 'q', K_ACT_HOME, KEY('q' & 0x1F, KEYS_CTRL), END });
+    assert(extra == 0 && files_close_asked() && here("Downloads"));
+    assert(strstr(drawn_row(29, 0), "[Ctrl+Q: quit]"));
+    standalone = 0;
+
     /* Choosing (settings' wallpaper): only a file of the type; nothing changes. */
     char chosen[PATH_MAX] = "";
     assert(pick("choose: not this one, nor d or x, a folder is gone into, then a text", "text/",
                 at_home("Documents"), "c.md",
-                (const int[]){ '\n', 'd', 'x', K_BOL, '\n', K_LEFT, '\t', K_DOWN, K_DOWN, '\n', K_BOL, '\n', END },
+                (const int[]){ '\n', K_DEL, CTRL_KEY('x'), K_BOL, '\n', K_LEFT, '\t', K_DOWN, K_DOWN, '\n', K_BOL, '\n', END },
                 chosen, sizeof chosen) == 1);
     assert(strcmp(chosen, at_home("Downloads/a.txt")) == 0);
     assert(exists("Documents/c.md") && exists("Documents/new") && nclip == 0);
     chosen[0] = '\0';
     assert(pick("choose: Esc, nothing chosen", "text/", at_home("Downloads"), NULL, (const int[]){ 27, END },
                 chosen, sizeof chosen) == 0 && !chosen[0]);
-    assert(pick("choose: the home key leaves the choice open (q or Esc ends it)", "text/", at_home("Downloads"),
+    assert(pick("choose: the home key leaves the choice open (Ctrl+Q ends it)", "text/", at_home("Downloads"),
                 NULL, (const int[]){ K_ACT_HOME, END }, chosen, sizeof chosen) == 0 && extra == 1);
 
     /* Choosing a folder (packages: a container's directories): o on it. */
     assert(pick("choose a folder: o on a file is refused, nor d; Enter goes in, o chooses",
                 "inode/directory", at_home("Documents"), "c.md",
-                (const int[]){ 'o', 'd', K_BOL, '\n', K_LEFT, 'o', END }, chosen, sizeof chosen) == 1);
+                (const int[]){ 'o', K_DEL, K_BOL, '\n', K_LEFT, 'o', END }, chosen, sizeof chosen) == 1);
     assert(strcmp(chosen, at_home("Documents/new")) == 0 && exists("Documents/new") && exists("Documents/c.md"));
 
     /* The pointer. Documents: new/ c.md; home: Documents/ Downloads/ notes.txt. */
@@ -1033,13 +1056,13 @@ int main(int argc, char **argv)
         { .id = HIT_PATH + (int)strlen(scratch), .button = BTN_LEFT, .clicks = 1 },
         { .id = HIT_FILE + 0, .button = BTN_LEFT, .clicks = 2 },
         { .id = HIT_FILE + 1, .button = BTN_RIGHT, .clicks = 1 },
-        { .id = HIT_KEY + 'v', .button = BTN_LEFT, .clicks = 1 },
+        { .id = HIT_KEY + MODS(KEYS_CTRL) + ('v' & 0x1F), .button = BTN_LEFT, .clicks = 1 },
         { .id = AT, .col = SIDE + 10, .row = 12, .button = BTN_RIGHT, .clicks = 1 },
         { .id = AT, .col = SIDE + 10, .row = 12, .button = BTN_RIGHT, .release = 1 },
         { .id = MENU(0) },
         { .id = MENU(0), .button = BTN_LEFT, .clicks = 1 },
         { .id = MENU(0), .button = BTN_LEFT, .release = 1 },
-        { .id = HIT_KEY + 'q', .button = BTN_LEFT, .clicks = 1 },
+        { .id = HIT_KEY + 27, .button = BTN_LEFT, .clicks = 1 },
     };
     clicks = tour;
     run("pointer: a place, double clicks, a folder of the path, a menu by keys, a button, "
@@ -1062,7 +1085,7 @@ int main(int argc, char **argv)
     };
     clicks = marking;
     run("pointer: Shift marks a range, Ctrl one; delete answered by buttons (a motion is no answer); the wheel keeps selection",
-        (const int[]){ CLICK(0), CLICK(1), CLICK(2), CLICK(3), 'D', CLICK(4), CLICK(5), 'D', CLICK(6),
+        (const int[]){ CLICK(0), CLICK(1), CLICK(2), CLICK(3), KEY(K_DEL, KEYS_SHIFT), CLICK(4), CLICK(5), KEY(K_DEL, KEYS_SHIFT), CLICK(6),
                        CLICK(7), 'q', END });
     assert(!exists("Documents/p") && !exists("Documents/c (2).md"));
     assert(exists("Documents/new") && exists("Documents/c.md") && P->sel == 0 && P->top == 0);
@@ -1146,7 +1169,7 @@ int main(int argc, char **argv)
     /* Same name trashed again: .2 collision handling, then Ctrl+Z undoes it. */
     put("Documents/space name.txt", 0);
     run("Trash collision (.2) and Ctrl+Z undo",
-        (const int[]){ K_EOL, 'd', END });
+        (const int[]){ K_EOL, K_DEL, END });
     assert(!exists("Documents/space name.txt") && exists(".local/share/Trash/files/space name.2.txt"));
     run("Ctrl+Z restores the last trashed item",
         (const int[]){ KEY('z' & 0x1F, KEYS_CTRL), END });
@@ -1165,15 +1188,15 @@ int main(int argc, char **argv)
 
     put("Documents/ doomed.txt", 0);
     run("trash and empty Trash",
-        (const int[]){ '\t', K_DOWN, '\n', K_DOWN, 'd', '\t', K_DOWN, K_DOWN, K_DOWN, '\n', 'e', 'y', END });
+        (const int[]){ '\t', K_DOWN, '\n', K_DOWN, K_DEL, '\t', K_DOWN, K_DOWN, K_DOWN, '\n', 'e', 'y', END });
     assert(strcmp(P->cwd, TRASH_URL) == 0 && P->nlist == 0 && !exists(".local/share/Trash/files/ doomed.txt"));
 
     /* Undo for New Folder, Rename, Cut+Paste Move, and Copy+Paste. */
     run("undo new folder, rename, move, copy",
         (const int[]){ '\t', K_DOWN, '\n',
-                       KEY(K_F1 + 9, 0), 'u', 'd', 'i', 'r', '\n', 'u',
-                       K_DOWN, KEY(K_F1 + 1, 0), '\b', '\b', '\b', 'b', 'a', 'k', '\n', 'u',
-                       KEY('c' & 0x1F, KEYS_CTRL), KEY('v' & 0x1F, KEYS_CTRL), 'u', 'y', END });
+                       KEY('n' & 0x1F, KEYS_CTRL | KEYS_SHIFT), 'u', 'd', 'i', 'r', '\n', CTRL_KEY('z'),
+                       K_DOWN, KEY(K_F1 + 1, 0), '\b', '\b', '\b', 'b', 'a', 'k', '\n', CTRL_KEY('z'),
+                       KEY('c' & 0x1F, KEYS_CTRL), KEY('v' & 0x1F, KEYS_CTRL), CTRL_KEY('z'), 'y', END });
     assert(here("Documents") && !exists("Documents/udir") && exists("Documents/c.md") && !exists("Documents/c.bak"));
     assert(!exists("Documents/c (2).md"));
 
@@ -1186,9 +1209,9 @@ int main(int argc, char **argv)
     }
     px_fills = 0;
     run("Icons view (Ctrl+1), grid navigation, zoom (Ctrl++, Ctrl+-, Ctrl+0), Compact (Ctrl+2), Details (Ctrl+3)",
-        (const int[]){ KEY(K_CTRL_0 + 1, 0), K_RIGHT, K_RIGHT, K_DOWN, K_LEFT,
-                       KEY('+', KEYS_CTRL), KEY('-', KEYS_CTRL), KEY(K_CTRL_0, 0),
-                       KEY(K_CTRL_0 + 2, 0), K_DOWN, KEY(K_CTRL_0 + 3, 0), END });
+        (const int[]){ KEY(K_CTRL_0 + 1, KEYS_CTRL), K_RIGHT, K_RIGHT, K_DOWN, K_LEFT,
+                       KEY('+', KEYS_CTRL), KEY('-', KEYS_CTRL), KEY(K_CTRL_0, KEYS_CTRL),
+                       KEY(K_CTRL_0 + 2, KEYS_CTRL), K_DOWN, KEY(K_CTRL_0 + 3, KEYS_CTRL), END });
     assert(P->view == VIEW_DETAILS && px_fills > 20);
 
     struct click sorts[] = {
@@ -1387,18 +1410,18 @@ int main(int argc, char **argv)
                        KEY('1', KEYS_CTRL | KEYS_ALT), END });
     assert(!mingle_dirs && P->sort == SORT_NAME);
 
-    run("New empty file (N) + undo, Symlink (L) + undo, Copy path (Ctrl+Shift+C), Invert selection (Ctrl+Shift+I)",
-        (const int[]){ 'N', 'b', 'l', 'a', 'n', 'k', '.', 't', 'x', 't', '\n', END });
+    run("New empty file (Ctrl+Alt+N) + undo, Symlink (L) + undo, Copy path (Ctrl+Shift+C), Invert selection (Ctrl+Shift+I)",
+        (const int[]){ KEY('n' & 0x1F, KEYS_CTRL | KEYS_ALT), 'b', 'l', 'a', 'n', 'k', '.', 't', 'x', 't', '\n', END });
     assert(exists("Documents/blank.txt"));
-    run("undo new empty file", (const int[]){ 'u', END });
+    run("undo new empty file", (const int[]){ CTRL_KEY('z'), END });
     assert(!exists("Documents/blank.txt"));
 
     clip_paste[0] = '\0';
-    run("copy path, symlink + undo, duplicate, invert selection",
-        (const int[]){ K_DOWN, KEY('c' & 0x1F, KEYS_CTRL | KEYS_SHIFT),
-                       'L', '\n', 'u',
+    run("copy path, symlink + undo, duplicate, invert selection (the menu's)",
+        (const int[]){ K_DOWN, KEY('c' & 0x1F, KEYS_CTRL | KEYS_ALT), /* Ctrl+Alt+C: Copy path(s) */
+                       'L', '\n', CTRL_KEY('z'),
                        K_DOWN, KEY('u' & 0x1F, KEYS_CTRL),
-                       KEY('i' & 0x1F, KEYS_CTRL | KEYS_SHIFT), END });
+                       KEY(KEY_INVERT, 0), /* the menu's: Invert selection */ END });
     assert(strcmp(clip_paste, at_home("Documents/c.md")) == 0);
     assert(!exists("Documents/c.md.link") && exists("Documents/c (2).md") && marked(P) == P->nlist);
     for (int i = 0; i < P->nlist; i++) P->list[i].marked = 0;
@@ -1408,12 +1431,12 @@ int main(int argc, char **argv)
     put("Documents/subbm/deep.txt", 0);
     go(at_home("Documents/subbm"), NULL);
     run("Ctrl+D bookmark add/remove, F9 side pane toggle, F4 terminal",
-        (const int[]){ KEY('d' & 0x1F, KEYS_CTRL), KEY(K_F1 + 8, 0), KEY(K_F1 + 3, 0), END });
+        (const int[]){ KEY('d' & 0x1F, KEYS_CTRL), KEY(K_F1 + 8, 0), KEY(K_F1 + 3, KEYS_SHIFT), END });
     assert(nplaces == places_before + 1 && strcmp(places[nplaces - 1], TRASH_URL) == 0);
     assert(exists(".config/gtk-3.0/bookmarks") && side_hidden == 1 && strcmp(task[0], "/usr/local/bin/term") == 0);
     assert(strstr(msg, "Terminal closed"));
     open_answer = "shown /usr/local/bin/term";
-    run("F4 terminal on one of several screens: open there, not closed", (const int[]){ KEY(K_F1 + 3, 0), END });
+    run("Shift+F4 terminal on one of several screens: open there, not closed", (const int[]){ KEY(K_F1 + 3, KEYS_SHIFT), END });
     assert(strstr(msg, "Opened with term") && !strstr(msg, "closed"));
     open_answer = "back viewer";
     run("remove bookmark and show side pane again",
@@ -1555,7 +1578,7 @@ int main(int argc, char **argv)
     run("back in the cloud drive", (const int[]){ WAIT, WAIT, WAIT, WAIT, END });
     refuse_noreplace = 1;
     run("v into a cloud drive without rename2: copied; the read after it does not hide that",
-        (const int[]){ 'v', WAIT, WAIT, WAIT, WAIT, END });
+        (const int[]){ CTRL_KEY('v'), WAIT, WAIT, WAIT, WAIT, END });
     refuse_noreplace = 0;
     assert(!error && strstr(msg, "Copied 1 item") &&
            same_text(at_home("Drives/remote/cloud-in.txt"), "Documents/cloud-in.txt"));
@@ -1564,7 +1587,7 @@ int main(int argc, char **argv)
     if (!is_root) {
         assert(chmod(at_home("Drives/remote"), 0333) == 0); /* written to, not listed */
         run("v again, and the read after it fails: the failure is said",
-            (const int[]){ 'v', WAIT, WAIT, WAIT, WAIT, END });
+            (const int[]){ CTRL_KEY('v'), WAIT, WAIT, WAIT, WAIT, END });
         assert(chmod(at_home("Drives/remote"), 0755) == 0);
         assert(error && strstr(msg, "previous list") && exists("Drives/remote/cloud-in (2).txt"));
         assert(unlink(at_home("Drives/remote/cloud-in (2).txt")) == 0);
@@ -1589,7 +1612,8 @@ int main(int argc, char **argv)
 #undef CLOUD_CALLS
 
     /*
-     * Esc never exits files_view (only q / [q: back] / Ctrl+W / K_ACT_HOME do);
+     * Esc leaves files_view only with nothing left to cancel (inside home, to
+     * its list); Ctrl+Q, Ctrl+W on the last tab and K_ACT_HOME leave it too;
      * Icons (Ctrl+1), Compact (Ctrl+2) and Details (Ctrl+3) view hitboxes,
      * margins, column-major Compact layout, background menus, rubberband
      * selection, and wheel scrolling decoupled from selection.
@@ -1609,7 +1633,7 @@ int main(int argc, char **argv)
     P->zoom[VIEW_DETAILS] = zoom_default[VIEW_DETAILS];
 
     /* 1. Esc in files_view: clears filter, marks, sidebar focus, rubberband
-     *    and item drag, and never exits even when pressed repeatedly idle. */
+     *    and item drag one at a time; the script's end (Ctrl+Q) leaves. */
     struct click esc_band[] = {
         { .id = AT, .col = SIDE + 60, .row = 3, .button = BTN_LEFT, .clicks = 1 },
         { .id = AT, .col = SIDE + 5, .row = 8 },
@@ -1617,14 +1641,13 @@ int main(int argc, char **argv)
         { .id = HIT_FILE + 0 },
     };
     clicks = esc_band;
-    run("Esc clears filter, marks, sidebar focus, rubberband (restoring marks) and item drag, never exiting files",
+    run("Esc clears filter, marks, sidebar focus, rubberband (restoring marks) and item drag, one at a time",
         (const int[]){ '/', 'v', '-', '0', '\n', 27,
                        KEY('a' & 0x1F, KEYS_CTRL), 27,
                        '\t', 27,
                        ' ', CLICK(0), CLICK(1), 27,
-                       27, /* clears the restored mark on item 0 */
                        CLICK(2), CLICK(3), 27,
-                       27, 27, 27, END });
+                       END });
     assert(extra == 1 && here("Views") && !P->filter[0] && marked(P) == 0 && side == 0 && drag.mode == DRAG_NONE);
     assert(exists("Views/v-01.txt") && !exists("Views/dir-a/v-01.txt"));
 
@@ -1659,7 +1682,7 @@ int main(int argc, char **argv)
      *    right-clicking an unmarked icon clears stale marks, Up on row 0 stays
      *    in column, Backspace goes up, wheel scrolls 1 icon row keeping P->sel. */
     run("Icons: switch to Ctrl+1 and mark first two items",
-        (const int[]){ KEY(K_CTRL_0 + 1, 0), K_BOL, ' ', ' ', K_LEFT, END });
+        (const int[]){ KEY(K_CTRL_0 + 1, KEYS_CTRL), K_BOL, ' ', ' ', K_LEFT, END });
     assert(P->view == VIEW_ICONS && P->list[0].marked && P->list[1].marked && P->sel == 1);
     /* Tile width at default zoom 2 is 14 (gc = 5 across 82 cols), height 5:
      * col SIDE is left gap, SIDE+13 and SIDE+14 are the 2-cell gap between
@@ -1713,7 +1736,7 @@ int main(int argc, char **argv)
      *    '*' mark, zoom 3 draws second-line size, horizontal scroll & rubberband. */
     px_fills = 0;
     run("Compact: switch to Ctrl+2, check column-major navigation and marks",
-        (const int[]){ KEY(K_CTRL_0 + 2, 0), K_BOL, END });
+        (const int[]){ KEY(K_CTRL_0 + 2, KEYS_CTRL), K_BOL, END });
     /* nrows = 25, tc = 22 (gc = 3 columns of 25 rows):
      * item 0 ("dir-a") at (SIDE, 2), item 1 ("v-01.txt", exec) at (SIDE, 3),
      * item 25 ("v-25.txt") at (SIDE + 22, 2). */
@@ -1867,13 +1890,13 @@ int main(int argc, char **argv)
     run("the window's close leaves files as q does", (const int[]){ K_CLOSE, END });
     assert(extra == 0 && files_close_asked());
     int listed_before = P->nlist;
-    run("a close during a question: nothing done, files closes", (const int[]){ K_BOL, 'D', K_CLOSE, END });
+    run("a close during a question: nothing done, files closes", (const int[]){ K_BOL, KEY(K_DEL, KEYS_SHIFT), K_CLOSE, END });
     assert(extra == 0 && files_close_asked() && P->nlist == listed_before && !error);
     assert(pick("choosing: the close ends it, nothing chosen", "text/", at_home("Documents"), NULL,
                 (const int[]){ K_CLOSE, END }, chosen, sizeof chosen) == 0 && files_close_asked());
-    run("no close: back with q", (const int[]){ END });
-    assert(extra == 1 && !files_close_asked());
-    puts("PASS the window's close quits files as q does, also from a question and from a choice (files_close_asked)");
+    run("no close: q is back to home's list, nothing else closes", (const int[]){ 'q', END });
+    assert(extra == 0 && !files_close_asked());
+    puts("PASS the window's close quits files, also from a question and from a choice (files_close_asked)");
 
     if (!is_root) {
         mk("Documents/tree");
@@ -2068,14 +2091,14 @@ int main(int argc, char **argv)
     snprintf(race_target, sizeof race_target, "%s", at_home("Documents/race/taken.txt"));
     assert(go(race_dir, "src.txt") >= 0);
     run("F2 onto a name another writer creates in the gap: refused, neither replaced",
-        (const int[]){ 'r', '\b', '\b', '\b', '\b', '\b', '\b', '\b', 't', 'a', 'k', 'e', 'n', '.', 't', 'x', 't', '\n',
+        (const int[]){ KEY(K_F1 + 1, 0), '\b', '\b', '\b', '\b', '\b', '\b', '\b', 't', 'a', 'k', 'e', 'n', '.', 't', 'x', 't', '\n',
                        END });
     assert(error && strstr(msg, "Cannot rename to taken.txt") && !race_target[0]);
     assert(same_text(src, "source\n") && same_text(at_home("Documents/race/taken.txt"), "other writer\n"));
     puts("PASS F2 onto a name another writer creates in the gap: refused, neither file replaced");
     refuse_noreplace = 1;
     run("F2 on a drive that cannot rename without overwrite protection: refused plainly, nothing changed",
-        (const int[]){ 'r', '\b', '\b', '\b', '\b', '\b', '\b', '\b', 'b', 'y', 'e', '.', 't', 'x', 't', '\n', END });
+        (const int[]){ KEY(K_F1 + 1, 0), '\b', '\b', '\b', '\b', '\b', '\b', '\b', 'b', 'y', 'e', '.', 't', 'x', 't', '\n', END });
     refuse_noreplace = 0;
     assert(error && strstr(msg, "cannot rename without overwrite protection: nothing was changed"));
     assert(same_text(src, "source\n") && !exists("Documents/race/bye.txt"));

@@ -4738,6 +4738,18 @@ static void handle_kbd_event(int fd)
             continue;
         }
 
+        int act = keys_device_action(fd, ev.code, ctrl, alt, shift, meta);
+        if (act == K_ACT_HOME || act == K_ACT_LOCK) {
+            /* Process 1 sees the key itself unless it is grabbed here. First,
+             * also over a question: home and the lock always work, and the
+             * question stays as it is for when the screen comes back. */
+            if (ev.value == 1 && grabbed) {
+                set_grab(0);
+                /* locachy-seat asks for home, or to lock */
+                kill(getppid(), act == K_ACT_HOME ? SIGUSR1 : SIGUSR2);
+            }
+            continue;
+        }
         if (question_active()) {
             if (!is_mod && ev.value == 1 && !was_down &&
                 (again.shown || choose.client >= 0)) {
@@ -4746,7 +4758,6 @@ static void handle_kbd_event(int fd)
             continue;
         }
 
-        int act = keys_device_action(fd, ev.code, ctrl, alt, shift, meta);
         /* The launcher: Alt+F1 opens or closes it (unless rc.conf binds
          * that); while it is up, every key but rc.conf's is its own. */
         if (!act && ev.code == KEY_F1 && alt && !ctrl && !shift && !meta) {
@@ -4758,15 +4769,6 @@ static void handle_kbd_event(int fd)
         if (launcher_shown && !act) {
             if (!is_mod) {
                 launcher_key(ev.code, sym_before, ev.value);
-            }
-            continue;
-        }
-        if (act == K_ACT_HOME || act == K_ACT_LOCK) {
-            /* Process 1 sees the key itself unless it is grabbed here. */
-            if (ev.value == 1 && grabbed) {
-                set_grab(0);
-                /* locachy-seat asks for home, or to lock */
-                kill(getppid(), act == K_ACT_HOME ? SIGUSR1 : SIGUSR2);
             }
             continue;
         }

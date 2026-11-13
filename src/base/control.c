@@ -128,6 +128,15 @@ int base_display_power(int on)
     return 0;
 }
 
+int base_session_hold(int on)
+{
+    int fd = base_session_fd();
+    if (fd < 0) return -1;
+    char text[16];
+    int len = snprintf(text, sizeof text, "hold %d", on ? 1 : 0);
+    return send(fd, text, (size_t)len, MSG_NOSIGNAL | MSG_DONTWAIT) == len ? 0 : -1;
+}
+
 static int ctl = -2; /* -2: $LOCACHY_CONTROL not read yet */
 static int shown;    /* a "take" arrived that key_get has not reported */
 

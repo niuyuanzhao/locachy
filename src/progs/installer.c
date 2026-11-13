@@ -1087,14 +1087,78 @@ static void terminal(void)
     run_on_screen(argv);
 }
 
+static void draw(void);
+static void quit_setup(void);
+static void copy_text(int primary, const char *text);
+
+static void help_screen(void);
+
+/* The clipboard's text (Ctrl+V, Shift+Insert) at the cursor, as packages'
+ * fields take it: one line, control characters dropped. */
+static void paste_into(char *text, size_t size, size_t *pos)
+{
+    int fd = -1;
+    size_t csize = 0;
+    if (clipboard_get(0, &fd, &csize) != 0 || fd < 0) {
+        return;
+    }
+    char buf[512];
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    for (ssize_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)buf[i];
+        size_t len = strlen(text);
+        if (c < 0x20 || c == 0x7f || len + 1 >= size) {
+            continue;
+        }
+        memmove(text + *pos + 1, text + *pos, len - *pos + 1);
+        text[(*pos)++] = (char)c;
+    }
+}
+
 /* The keys that edit a line of text (as packages' fields): Left/Right,
- * Home/End (^A/^E), Backspace, Delete (^D), ^U, ^K, ^W; what keys type
- * (keys_typed), as the layout chosen on the start page types it. */
-static int edit_line_key(int key, char *text, size_t size, size_t *pos)
+ * Home/End (^E), Backspace, Delete (^D), ^U, ^K, ^W (a field takes it before
+ * the table's close-tab: the word before the cursor); Ctrl+A selects it all
+ * (*all: what is typed, Backspace, Delete or a paste then replace it);
+ * Ctrl+V and Shift+Insert paste; Ctrl+C and Ctrl+X copy or cut what Ctrl+A
+ * selected, as packages' fields do, but never a hidden line (a password);
+ * what keys type (keys_typed), as the layout chosen on the start page types it. */
+static int edit_line_key(int key, int mods, char *text, size_t size, size_t *pos, int *all, int hidden)
 {
     size_t len = strlen(text);
-    const char *typed;
+    const char *typed = keys_typed(key);
+    int act = key_action(key, mods);
     if (*pos > len) *pos = len;
+    if (act == ACT_SELECT_ALL) {
+        *all = len > 0;
+        *pos = len;
+        return 1;
+    }
+    if (act == ACT_COPY || act == ACT_CUT) {
+        if (*all && hidden) {
+            tell(1, "%s", _("A password is never copied."));
+        } else if (*all) {
+            copy_text(0, text);
+            if (act == ACT_CUT) {
+                text[0] = '\0';
+                *pos = 0;
+                *all = 0;
+            }
+        }
+        return 1;
+    }
+    if (*all && (key == K_LEFT || key == K_RIGHT || key == K_BOL || key == K_EOL || key == 5)) {
+        *pos = key == K_LEFT || key == K_BOL ? 0 : len; /* the selection ends where it goes */
+        *all = 0;
+        return 1;
+    }
+    if (*all && (typed || key == '\b' || key == 127 || key == K_DEL || key == 4 || key == 21 || key == 11 ||
+                 act == ACT_CLOSE_TAB || act == ACT_PASTE)) {
+        text[0] = '\0'; /* the selection goes; what is typed or pasted takes its place */
+        len = *pos = 0;
+        *all = 0;
+        if (!typed && act != ACT_PASTE) return 1;
+    }
     if (key == K_LEFT) {
         while (*pos > 0 && (((unsigned char)text[--*pos]) & 0xC0) == 0x80) {
         }
@@ -1103,7 +1167,7 @@ static int edit_line_key(int key, char *text, size_t size, size_t *pos)
             (*pos)++;
             while (*pos < len && ((unsigned char)text[*pos] & 0xC0) == 0x80) (*pos)++;
         }
-    } else if (key == K_BOL || key == 1) {
+    } else if (key == K_BOL) {
         *pos = 0;
     } else if (key == K_EOL || key == 5) {
         *pos = len;
@@ -1125,13 +1189,15 @@ static int edit_line_key(int key, char *text, size_t size, size_t *pos)
         *pos = 0;
     } else if (key == 11) { /* Ctrl+K */
         text[*pos] = '\0';
-    } else if (key == 23) { /* Ctrl+W */
+    } else if (act == ACT_CLOSE_TAB) { /* Ctrl+W */
         size_t prev = *pos;
         while (prev > 0 && text[prev - 1] == ' ') prev--;
         while (prev > 0 && text[prev - 1] != ' ') prev--;
         memmove(text + prev, text + *pos, len - *pos + 1);
         *pos = prev;
-    } else if ((typed = keys_typed(key)) != NULL && len + strlen(typed) < size) {
+    } else if (act == ACT_PASTE) {
+        paste_into(text, size, pos);
+    } else if (typed && len + strlen(typed) < size) {
         size_t n = strlen(typed);
         memmove(text + *pos + n, text + *pos, len - *pos + 1);
         memcpy(text + *pos, typed, n);
@@ -1148,6 +1214,7 @@ static int prompt(const char *label, char *text, size_t size, int hidden)
 {
     char line[1024], was[512], shown[512];
     size_t pos = strlen(text);
+    int all = 0;
     copy(was, sizeof was, text);
     for (;;) {
         size_t len = strlen(text);
@@ -1157,21 +1224,33 @@ static int prompt(const char *label, char *text, size_t size, int hidden)
         } else {
             copy(shown, sizeof shown, text);
         }
-        snprintf(line, sizeof line, "%s %.*s_%s", label, (int)pos, shown, shown + pos);
         screen_fill(0, screen_rows() - 1, screen_cols(), 1, BG);
-        screen_text(1, screen_rows() - 1, line, ACCENT, BG);
+        if (all) { /* Ctrl+A: all of it selected */
+            snprintf(line, sizeof line, "%s ", label);
+            screen_text(1, screen_rows() - 1, line, ACCENT, BG);
+            screen_text(1 + ui_cells(line), screen_rows() - 1, shown, BG, ACCENT);
+        } else {
+            snprintf(line, sizeof line, "%s %.*s_%s", label, (int)pos, shown, shown + pos);
+            screen_text(1, screen_rows() - 1, line, ACCENT, BG);
+        }
         screen_flush();
-        int key = key_get();
-        if (key == 27) {
+        int key = key_get(), mods = keys_modifiers(), act = key_action(key, mods);
+        if (act == ACT_CANCEL) {
             copy(text, size, was);
             explicit_bzero(was, sizeof was);
             return 0;
         }
-        if (key == '\n') {
+        if (key == '\n' && act == ACT_NONE) {
             explicit_bzero(was, sizeof was);
             return 1;
         }
-        edit_line_key(key, text, size, &pos);
+        if (act == ACT_QUIT) {
+            quit_setup(); /* when it stays: what is typed stays */
+        } else if (act == ACT_HELP) {
+            help_screen();
+        } else {
+            edit_line_key(key, mods, text, size, &pos, &all, hidden);
+        }
     }
 }
 
@@ -1226,7 +1305,7 @@ static int pick(const char *title, const char *const *items, int n, int current)
             screen_text(4, list + k, items[match[top + k]], on ? BG : FG, on ? ACCENT : BG);
         }
         screen_flush();
-        int key = key_get();
+        int key = key_get(), act = key_action(key, keys_modifiers());
         size_t len = strlen(filter);
         if (key == K_POINTER) {
             const struct pointer_event *e = pointer_last();
@@ -1237,8 +1316,14 @@ static int pick(const char *title, const char *const *items, int n, int current)
                 sel = top + e->row - list;
                 if (e->clicks == 2) return match[sel];
             }
-        } else if (key == 27) {
-            return -1;
+        } else if (act == ACT_CANCEL) { /* Esc: the filter goes first, then the list */
+            if (!filter[0]) return -1;
+            filter[0] = '\0';
+            sel = 0;
+        } else if (act == ACT_QUIT) {
+            quit_setup();
+        } else if (act == ACT_HELP) {
+            help_screen();
         } else if (key == '\n') {
             if (m > 0) return match[sel];
         } else if (key == K_UP) {
@@ -1287,26 +1372,43 @@ static void pick_part(const char *title, char *out, size_t size, int none)
     if (got >= 0) copy(out, size, parts[got] ? parts[got]->path : "");
 }
 
+/* question, answered: y is yes; n, Esc and Enter are no, and so are Ctrl+Q
+ * and the window's close (setup stays: a question is never a way out); any
+ * other key (home's, Alt+y) is no answer, it waits. */
 static int yes(const char *question)
 {
     char line[512];
-    int row = screen_rows() - 1;
+    int redraw = 1;
     snprintf(line, sizeof line, "%s [y/N] ", question);
-    screen_fill(0, row, screen_cols(), 1, BG);
-    screen_text(1, row, line, ACCENT, BG);
-    /* TRANSLATORS: Y and N are the keys; keep "Y: " and "N: ". */
-    int col = ui_button(2 + ui_cells(line), row, _("Y: yes"), 'y');
-    ui_button(col, row, _("N: no"), 'n');
-    screen_flush();
     for (;;) {
-        int key = key_get();
+        if (redraw) {
+            int row = screen_rows() - 1;
+            screen_fill(0, row, screen_cols(), 1, BG);
+            screen_text(1, row, line, ACCENT, BG);
+            /* TRANSLATORS: Y and N are the keys; keep "Y: " and "N: ". */
+            int col = ui_button(2 + ui_cells(line), row, _("Y: yes"), 'y');
+            ui_button(col, row, _("N: no"), 'n');
+            screen_flush();
+            redraw = 0;
+        }
+        int key = key_get(), mods = keys_modifiers();
         if (key == K_POINTER) {
             const struct pointer_event *e = pointer_last();
             if (!e->pressed) continue;
             key = ui_hit_at(e->col, e->row);
+            mods = 0;
         }
         if (key == 0) continue;
-        return key == 'y' || key == 'Y';
+        int act = key_action(key, mods), plain = !(mods & (KEYS_CTRL | KEYS_ALT | KEYS_META));
+        if (plain && (key == 'y' || key == 'Y')) return 1;
+        if (act == ACT_CANCEL || (plain && (key == 'n' || key == 'N' || key == '\n'))) return 0;
+        if (act == ACT_QUIT) {
+            key_close_kept();
+            return 0;
+        } else if (act == ACT_HELP) {
+            help_screen();
+            redraw = 1;
+        }
     }
 }
 
@@ -1664,10 +1766,88 @@ static void power(const char *how)
  * installation running, done or failed. */
 enum { M_START, M_STEPS, M_RUN, M_DONE, M_FAILED };
 static int mode = M_START, step, in_page = 1, selected, scroll, log_from;
+
+/* F1 over the screen, then the screen again; Ctrl+Q or the window's close
+ * there quits as anywhere else. Its rows are the page's own keys, and only
+ * those: the start, the steps (with the lines typed and the questions asked
+ * there), or an installation's output (running, done, failed or stopped). */
+static void help_screen(void)
+{
+    struct ui_help_line rows[16];
+    int n = 0;
+#define ROW(k, w) (rows[n++] = (struct ui_help_line){ (k), (w) })
+    if (mode == M_START) {
+        ROW("Ctrl+Q", N_("Quit setup (the console comes back)"));
+    } else if (mode == M_STEPS) {
+        ROW("Ctrl+Q", N_("Quit setup: asks first, since the choices made here are lost"));
+    } else if (mode == M_RUN) {
+        ROW("Ctrl+Q", N_("Setup can be left when the installation ends"));
+    } else {
+        ROW("Ctrl+Q", N_("Quit setup (the console comes back)"));
+    }
+    if (mode == M_START || mode == M_STEPS) {
+        ROW("Up, Down, Home, End", N_("Choose an item"));
+        ROW("Enter, Space", N_("Choose, open or change the item"));
+        ROW("Left, Right", N_("Change a choice"));
+    }
+    if (mode == M_STEPS) {
+        ROW("Tab, Shift+Tab", N_("Between the steps and the step's page"));
+        ROW("PgUp, PgDn", N_("The step before or after"));
+        ROW("Esc, q", N_("From a step's page to the steps; from the steps to the start"));
+        ROW("Ctrl+A, Home, End", N_("In a line you type: select all, the start, the end"));
+        ROW("Ctrl+C, Ctrl+X", N_("In a line you type, after Ctrl+A: copy or cut it (a password is never copied)"));
+        ROW("Ctrl+V", N_("In a line you type: paste"));
+        ROW("Ctrl+W, Ctrl+U, Ctrl+K", N_("In a line you type: delete the word before the cursor, to the start, to the end"));
+        ROW("y, n", N_("A question: y yes; n, Esc or Enter no"));
+    }
+    if (mode == M_RUN || mode == M_DONE || mode == M_FAILED) {
+        ROW("t", N_("A terminal (a root shell)"));
+        ROW("Ctrl+C", N_("Copy what is selected, else the command shown"));
+        ROW("Ctrl+A, Ctrl+C", N_("Copy the whole output"));
+        ROW("PgUp, PgDn", N_("Scroll the output"));
+        ROW("Esc, q", N_("Clear the selection"));
+    }
+    if (mode == M_DONE || mode == M_FAILED) {
+        ROW("r", N_("Reboot (asks first)"));
+        ROW("p", N_("Power off (asks first)"));
+    }
+    if (mode == M_FAILED) {
+        if (resumable) {
+            ROW("c", N_("Continue where the installation stopped"));
+        } else {
+            ROW("b", N_("Back to the summary after a failure"));
+        }
+    }
+#undef ROW
+    rows[n] = (struct ui_help_line){ NULL, NULL };
+    if (ui_help(_("Installer keys"), rows) == ACT_QUIT) quit_setup();
+    draw();
+}
+
+/* Ctrl+Q or the window's close: setup ends, and at_exit gives the console
+ * back (root's .bash_profile follows with installer --text). An installation
+ * that runs cannot be left (the table's rule); on the steps the choices made
+ * would be lost, so it asks first; on the start page, and when it is done or
+ * failed, it just ends. */
+#ifndef LEAVE_SETUP
+#define LEAVE_SETUP() exit(0)
+#endif
+static void quit_setup(void)
+{
+    if (mode == M_RUN) {
+        tell(1, "%s", _("The installation is running: setup can be left when it ends."));
+        return;
+    }
+    if (mode == M_STEPS && !yes(_("Leave setup? The choices made here are lost."))) {
+        key_close_kept(); /* the answer was no: setup stays */
+        return;
+    }
+    LEAVE_SETUP();
+}
 #define PAGE_TOP 2
 #define HIT_STEP   10000 /* + the step */
-#define HIT_KEY    20000 /* + the key a button stands for */
 #define HIT_PANE   30000
+#define HIT_KEY    0x1000000 /* + the key a button stands for, with MODS(its modifiers); above the rest */
 
 static int sidebar_width(void)
 {
@@ -1826,8 +2006,8 @@ static void copy_text(int primary, const char *text)
     if (msg[0]) tell(failed, "%s", msg);
 }
 
-/* y, Ctrl+C: what is selected; else the command that trusts the keys the
- * installation waits for, else its error. */
+/* Ctrl+C (or its button): what is selected; else the command that trusts the
+ * keys the installation waits for, else its error. */
 static void copy_key(void)
 {
     char *text = textsel_get();
@@ -1843,12 +2023,50 @@ static void copy_key(void)
     free(text);
 }
 
+/* Ctrl+A in an installation's output: all of it is selected, and Ctrl+C then
+ * copies the output itself (the last 256 KiB, from a whole line), not what
+ * the pointer selected. Any other key, the pointer or Esc ends it. */
+static int log_all;
+#define COPY_OUTPUT_MAX (256 * 1024)
+
+static void copy_output(void)
+{
+    char path[512];
+    log_path(path, sizeof path);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    off_t end = fd < 0 ? 0 : lseek(fd, 0, SEEK_END);
+    if (fd < 0 || end <= 0) {
+        if (fd >= 0) close(fd);
+        tell(1, "%s", _("There is no output to copy yet."));
+        return;
+    }
+    off_t start = end > COPY_OUTPUT_MAX ? end - COPY_OUTPUT_MAX : 0;
+    size_t size = (size_t)(end - start);
+    char *text = malloc(size + 1);
+    ssize_t got = text ? pread(fd, text, size, start) : -1;
+    close(fd);
+    if (got <= 0) {
+        free(text);
+        tell(1, "%s", _("There is no output to copy yet."));
+        return;
+    }
+    text[got] = '\0';
+    char *from = text;
+    if (start > 0) { /* the cut line at the start is not whole: it goes */
+        char *nl = memchr(text, '\n', (size_t)got);
+        from = nl ? nl + 1 : text;
+    }
+    copy_text(0, from);
+    free(text);
+}
+
 /* The pointer on an installation's page: 1 if it is about a selection. */
 static int select_pointer(const struct pointer_event *e, int on_button)
 {
     int got = textsel_pointer(e, !on_button);
     if (got == TEXTSEL_MADE) {
         char *text = textsel_get();
+        log_all = 0;
         if (text && text[0]) copy_text(1, text);
         free(text);
     }
@@ -1886,7 +2104,8 @@ static void draw_progress(void)
         }
         textsel_put(2, ++r, _("Check each with its upstream project; then trust them in the terminal (t):"), FG, BG);
         textsel_put(4, ++r, trust_command, ACCENT, BG);
-        textsel_put(2, ++r, _("y copies the command; c then continues where the installation stopped."), DIM, BG);
+        textsel_put(2, ++r, _("Ctrl+C copies the command; c then continues where the installation stopped."), DIM,
+                    BG);
     } else {
         textsel_put(2, r, _("The installation failed. Nothing more is written; the output below says why."), ERROR, BG);
         if (error_line[0]) textsel_put(4, ++r, error_line, ERROR, BG);
@@ -1929,8 +2148,8 @@ static void draw_progress(void)
     screen_fill(0, top, cols, 1, DIM);
     char logp[512];
     log_path(logp, sizeof logp);
-    /* TRANSLATORS: PgUp/PgDn are key names; keep them. */
-    snprintf(line, sizeof line, _("Output: %s   %s   PgUp/PgDn: scroll"), logp, where);
+    /* TRANSLATORS: PgUp/PgDn and Ctrl+A, Ctrl+C are key names; keep them. */
+    snprintf(line, sizeof line, _("Output: %s   %s   Ctrl+A, Ctrl+C: copy all   PgUp/PgDn: scroll"), logp, where);
     textsel_put(1, top, line, BG, DIM);
     ui_hit(0, top, cols, height, HIT_PANE);
     for (int i = 0; i < n; i++) textsel_put(2, top + 1 + i, lines[i], log_color(lines[i]), PANE);
@@ -1938,6 +2157,8 @@ static void draw_progress(void)
 }
 
 /* The buttons at the bottom: label, the key it stands for. */
+#define MODS(m) ((m) << 16) /* a button's key, with the modifiers in its high bits */
+#define QUIT_BUTTON (MODS(KEYS_CTRL) + ('q' & 0x1F))
 static void draw_buttons(void)
 {
     struct button {
@@ -1945,19 +2166,27 @@ static void draw_buttons(void)
         int key;
     };
     /* TRANSLATORS: the part before the colon is a key; keep it and ": ". */
-    static const struct button start[] = { { N_("Enter: choose"), '\n' }, { NULL, 0 } };
+    /* The buttons send the keys they name: Ctrl+Q with its modifier, as
+     * packages' does. There is no quit button while it installs (refused). */
+    static const struct button start[] = { { N_("Enter: choose"), '\n' }, { N_("F1: help"), K_F1 },
+                                           { N_("Ctrl+Q: quit"), QUIT_BUTTON }, { NULL, 0 } };
     static const struct button steps[] = { { N_("Tab: steps"), '\t' }, { N_("PgUp: back"), K_PGUP },
-                                           { N_("PgDn: next"), K_PGDN }, { N_("Esc: start"), 27 }, { NULL, 0 } };
-    static const struct button run[] = { { N_("t: terminal"), 't' }, { N_("y: copy"), 'y' }, { NULL, 0 } };
+                                           { N_("PgDn: next"), K_PGDN }, { N_("Esc: start"), 27 },
+                                           { N_("F1: help"), K_F1 }, { N_("Ctrl+Q: quit"), QUIT_BUTTON }, { NULL, 0 } };
+    static const struct button run[] = { { N_("t: terminal"), 't' }, { N_("Ctrl+C: copy"), K_ACT_COPY },
+                                         { N_("F1: help"), K_F1 }, { NULL, 0 } };
     static const struct button done[] = { { N_("r: reboot"), 'r' }, { N_("p: power off"), 'p' },
-                                          { N_("t: terminal"), 't' }, { N_("y: copy"), 'y' }, { NULL, 0 } };
+                                          { N_("t: terminal"), 't' }, { N_("Ctrl+C: copy"), K_ACT_COPY },
+                                          { N_("F1: help"), K_F1 }, { N_("Ctrl+Q: quit"), QUIT_BUTTON }, { NULL, 0 } };
     static const struct button failed[] = { { N_("t: terminal"), 't' }, { N_("b: back to the summary"), 'b' },
-                                            { N_("y: copy"), 'y' }, { N_("r: reboot"), 'r' },
-                                            { N_("p: power off"), 'p' }, { NULL, 0 } };
+                                            { N_("Ctrl+C: copy"), K_ACT_COPY }, { N_("r: reboot"), 'r' },
+                                            { N_("p: power off"), 'p' }, { N_("F1: help"), K_F1 },
+                                            { N_("Ctrl+Q: quit"), QUIT_BUTTON }, { NULL, 0 } };
     /* Stopped on a disk it partitioned: on from there, not over again. */
     static const struct button stopped[] = { { N_("t: terminal"), 't' }, { N_("c: continue"), 'c' },
-                                             { N_("y: copy"), 'y' }, { N_("r: reboot"), 'r' },
-                                             { N_("p: power off"), 'p' }, { NULL, 0 } };
+                                             { N_("Ctrl+C: copy"), K_ACT_COPY }, { N_("r: reboot"), 'r' },
+                                             { N_("p: power off"), 'p' }, { N_("F1: help"), K_F1 },
+                                             { N_("Ctrl+Q: quit"), QUIT_BUTTON }, { NULL, 0 } };
     const struct button *b = mode == M_START ? start : mode == M_STEPS ? steps : mode == M_RUN ? run :
                              mode == M_DONE ? done : resumable ? stopped : failed;
     int x = 1;
@@ -2356,6 +2585,8 @@ static void sidebar_key(int key)
 
 static void after_key(int key)
 {
+    int select_all = log_all && key == K_ACT_COPY;
+    if (key != K_ACT_COPY) log_all = 0; /* any key but Ctrl+C ends the selection of all */
     if (key == 't') {
         terminal();
     } else if (key == K_PGUP || key == K_PGDN) {
@@ -2372,19 +2603,29 @@ static void after_key(int key)
     } else if (mode == M_FAILED && key == 'c' && resumable) {
         textsel_clear();
         continue_install();
-    } else if (key == 'y' || key == 3) {
-        copy_key();
+    } else if (key == K_ACT_SELECT_ALL) { /* Ctrl+A: the whole output, then Ctrl+C copies it */
+        textsel_clear();
+        log_all = 1;
+        tell(0, "%s", _("The whole output is selected: Ctrl+C copies it."));
+    } else if (key == K_ACT_COPY) { /* Ctrl+C, or its button */
+        if (select_all) {
+            copy_output();
+        } else {
+            copy_key();
+        }
     } else if (key == 27) {
         textsel_clear();
     }
 }
 
-/* A click: what it stands for as a key (0: dealt with here). A click on
- * an item selects and does it, as Enter. */
-static int pointer_key(void)
+/* A click: what it stands for as a key (0: dealt with here), with the
+ * modifiers its button carries in *mods. A click on an item selects and does
+ * it, as Enter. */
+static int pointer_key(int *mods)
 {
     const struct pointer_event *e = pointer_last();
     int hit = ui_hit_at(e->col, e->row);
+    *mods = 0;
     if (e->wheel) {
         if (hit == HIT_PANE) {
             log_from += e->wheel * 3;
@@ -2395,12 +2636,13 @@ static int pointer_key(void)
         }
         return 0;
     }
-    if ((mode == M_RUN || mode == M_DONE || mode == M_FAILED) && select_pointer(e, hit >= HIT_KEY && hit < HIT_PANE)) {
+    if ((mode == M_RUN || mode == M_DONE || mode == M_FAILED) && select_pointer(e, hit >= HIT_KEY)) {
         return 0;
     }
     if (e->button != BTN_LEFT || !e->pressed) return 0;
-    if (hit >= HIT_KEY && hit < HIT_PANE) {
-        int key = hit - HIT_KEY;
+    if (hit >= HIT_KEY) {
+        int key = (hit - HIT_KEY) & 0xFFFF;
+        *mods = (hit - HIT_KEY) >> 16;
         if (key == 27 && mode == M_STEPS) { /* the button goes to the start from anywhere */
             mode = M_START;
             selected = R_START_INSTALL;
@@ -2423,8 +2665,28 @@ static int pointer_key(void)
     return 0;
 }
 
-static void handle(int key)
+static void handle(int key, int mods)
 {
+    int act = key_list_action(key, mods);
+    if (act == ACT_QUIT) {
+        quit_setup();
+        return;
+    } else if (act == ACT_HELP) {
+        help_screen();
+        return;
+    } else if (act == ACT_CANCEL) {
+        key = 27; /* Esc, and q in these lists */
+    } else if (act == ACT_NEXT_FIELD || act == ACT_PREV_FIELD) {
+        key = '\t'; /* two places, the steps and a step's page: either way to the other */
+    } else if (act == ACT_COPY) {
+        key = K_ACT_COPY;
+    } else if (act == ACT_SELECT_ALL) {
+        key = K_ACT_SELECT_ALL; /* an installation's output: all of it */
+    } else if (act != ACT_NONE) {
+        return; /* the table's other keys are nothing here */
+    } else if (key >= ' ' && key < 0x7F && (mods & (KEYS_ALT | KEYS_META))) {
+        return; /* a letter's command is the letter alone: Alt+y is not y */
+    }
     if (mode == M_START) {
         page_key(key);
     } else if (mode == M_STEPS) {
@@ -2471,14 +2733,16 @@ int main(int argc, char **argv)
     selected = R_START_INSTALL;
     for (;;) {
         draw();
-        int key = key_poll_timeout(-1, job ? 500 : 1000);
+        int key = key_poll_timeout(-1, job ? 500 : 1000), mods = keys_modifiers();
         if (job) {
             int result = check_install();
             if (result >= 0) mode = result == 0 ? M_DONE : M_FAILED;
         }
-        if (key == K_POINTER) key = pointer_key();
+        if (key == K_POINTER) {
+            key = pointer_key(&mods);
+        }
         if (key == 0 || key == K_SHOWN) continue;
-        handle(key);
+        handle(key, mods);
     }
 }
 

@@ -179,9 +179,9 @@ static void test_folding_gutter_and_actions(void)
     CHECK(fold_marker(t, 0) == '-' && fold_marker(t, 1) == '+' && fold_marker(t, 2) == '+');
     editor_action(EA_UNFOLD_ALL);
     CHECK(fold_marker(t, 1) == '-' && fold_marker(t, 2) == '-');
-    key('-', KEYS_CTRL | KEYS_SHIFT);
+    key('{', KEYS_CTRL | KEYS_SHIFT); /* Ctrl+Shift+[: fold the top level */
     CHECK(fold_marker(t, 0) == '+');
-    key('+', KEYS_CTRL | KEYS_SHIFT);
+    key('}', KEYS_CTRL | KEYS_SHIFT); /* Ctrl+Shift+]: unfold it */
     CHECK(fold_marker(t, 0) == '-');
     puts("PASS folding real editor: actual gutter click, menu commands and top-level keyboard shortcuts");
 }

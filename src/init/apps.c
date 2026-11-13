@@ -129,6 +129,7 @@ static int count;
 #endif
 struct session_owner {
     int used, fd, directory, pidfd, inhibited, allowed, cancelled, revoking, suspended;
+    int holding; /* a live link (base_session_hold): process 1 does not freeze it */
     pid_t pid;
     unsigned long long epoch;
     char cgroup[192];
@@ -212,6 +213,21 @@ static int owner_peer(const struct session_owner *o, const struct ucred *cred)
         bound.st_dev == current.st_dev && bound.st_ino == current.st_ino;
 }
 
+#ifndef APP_HOLD_EXE
+#define APP_HOLD_EXE "/usr/local/bin/extdisplay" /* the one program a live link keeps running */
+#endif
+/* Only the extended display's frontend may hold: any other program asking
+ * not to be frozen would run on hidden. Its executable, as the kernel has it. */
+static int owner_may_hold(const struct session_owner *o)
+{
+    char path[64], exe[256];
+    snprintf(path, sizeof path, APP_PROC "/%d/exe", (int)o->pid);
+    ssize_t n = readlink(path, exe, sizeof exe - 1);
+    if (n <= 0) return 0;
+    exe[n] = 0;
+    return strcmp(exe, APP_HOLD_EXE) == 0;
+}
+
 static void owner_read(int i)
 {
     struct session_owner *o = &owners[i];
@@ -235,6 +251,11 @@ static void owner_read(int i)
         apps_session_close(i); return;
     }
     text[n] = 0;
+    int held, held_end = 0;
+    if (sscanf(text, "hold %d%n", &held, &held_end) == 1 && !text[held_end] && (held == 0 || held == 1)) {
+        o->holding = held && owner_may_hold(o); /* a report from the authenticated owner: no answer */
+        return;
+    }
     unsigned long long id, epoch;
     char verb[24]; int value, end = 0, ok = 0;
     if (sscanf(text, "%23s %llu %llu %d%n", verb, &id, &epoch, &value, &end) != 4 || text[end] ||
@@ -279,6 +300,15 @@ void apps_sessions_locked(int locked)
     else for (int i = 0; i < MAX_OWNERS; i++) if (owners[i].used) {
         owners[i].allowed = !owner_frozen(&owners[i]); owners[i].epoch++; owner_policy(&owners[i]);
     }
+}
+
+int apps_session_holding(const char *cgroup)
+{
+    for (int i = 0; i < MAX_OWNERS; i++) {
+        const struct session_owner *o = &owners[i];
+        if (o->used && o->holding && cgroup && strcmp(cgroup, o->cgroup) == 0) return 1;
+    }
+    return 0;
 }
 
 int apps_sessions_poll(struct pollfd *p, int max)

@@ -37,7 +37,19 @@ The managed session owner (`session.h`, `LOCACHY_SESSION_FD` set by process 1 fo
 
 ## Pairing screen
 
-The setup screen lists the cable interfaces the broker reports, each with its driver and carrier state; nothing is hard-coded. Up/Down choose, Enter pairs with the chosen one, Esc cancels a pairing that is waiting, F5 scans again, and Ctrl+Alt+F12 releases the broker and leaves. While the broker waits for the Mac, the address, port and code appear together in their own region, with the Mac's command shape (`locachy-macos-sender --interface <mac-interface> --address ADDRESS --port PORT`). The code and address stay in memory and are wiped when they leave the screen; they are never logged or put in argv or the environment. When the stream is paired, the session runs; when it ends, the broker's reason appears in the status line and the list comes back. An unexpected or malformed line from the broker ends the channel, and the screen says the helper stopped.
+The setup screen lists the cable interfaces the broker reports, each with its driver and carrier state; nothing is hard-coded. Up/Down choose, Enter pairs with the chosen one, Esc cancels a pairing that is waiting, F5 scans again, F1 shows the keys, and Ctrl+Q (also Ctrl+Alt+F12, the window's close, home or the lock) releases the broker and leaves. While the broker waits for the Mac, the address, port and code appear together in their own region, with the Mac's command shape (`locachy-macos-sender --interface <mac-interface> --address ADDRESS --port PORT`). The code and address stay in memory and are wiped when they leave the screen; they are never logged or put in argv or the environment. When the stream is paired, the session runs; when it ends, the broker's reason appears in the status line and the list comes back. An unexpected or malformed line from the broker ends the channel, and the screen says the helper stopped.
+
+## Leaving a session
+
+A live session is never left by a key. While the link is up:
+
+- Ctrl+Q, Esc, q and every other key go to the Mac. None of them ends the session or closes `extdisplay`.
+- Home (Super+Esc) and the lock take the screen as they do for any program. The frontend has reported a live link to process 1 (`base_session_hold`, honoured only for `/usr/local/bin/extdisplay`), so process 1 does not freeze it and the link stays up. Remote input stops as the owner policy says (the lock revokes it; without the screen the frontend gets no keys), and keys held on the Mac are released first. Coming back shows the session again.
+- The idle lock (`lock_after`) does not lock while a screen shows the live session: the session is the Mac's, and the link is a cable to it. If no LOCachy input came for that long meanwhile, the lock is due: process 1 locks as soon as no screen shows the session any more (the cable out, the program gone), whatever was typed since, and home (Super+Esc) then shows the lock first. The lock asked for directly (Super+L, the lid) works as before and keeps the link.
+- Ctrl+Alt+F12 ends the session only. The broker cancels it, as at the end of any session, and the setup screen comes back; `extdisplay` stays open.
+- When the cable comes out (`ended carrier-lost`), the session ends and the setup screen says so. The next key closes `extdisplay`.
+
+Other ends (the Mac stops, a timeout, the owner gone) bring the setup screen back. Without a session, on the setup screen, Ctrl+Q, the window's close, home and the lock release the broker and leave: frozen there, the broker would keep the cable leased.
 
 ## Broker
 

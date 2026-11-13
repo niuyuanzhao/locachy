@@ -357,6 +357,12 @@ const char *ime_mode_desc(void)
 {
     return " [CN] Pinyin ";
 }
+int ime_width_key(int key, int mods) /* no width keys: Rime's are not set up here */
+{
+    (void)key; (void)mods;
+    return 0;
+}
+void key_close_kept(void) {}
 const char *ime_toggle_width(void)
 {
     return NULL;
@@ -899,15 +905,18 @@ static void test_view(void)
     puts("PASS dynamic word wrap: CJK and words, continuation rows indented (80%), Home/End by rows, the cursor's "
          "cell on the wrapped row");
 
-    key(K_F1 + 10, 0); /* F11 */
+    editor_action(EA_NUMBERS); /* View > Show Line Numbers: the menu's only */
     draw();
     /* Without line numbers: the folding markers' column and, the document
      * having a file, the line modification markers' (Line Modification). */
     CHECK(!t->numbers && gutter(t) == 2 && grid[y0][2].cp == 'a');
-    key(K_F1 + 10, 0);
-    key(K_F1 + 9, 0); /* F10 */
+    editor_action(EA_NUMBERS);
+    editor_action(EA_WRAP); /* View > Dynamic Word Wrap: the menu's only */
     CHECK(!t->wrap && line_rows(t, text_width(0, t), 0) == 1);
-    key(K_F1 + 9, 0);
+    editor_action(EA_WRAP);
+    key(K_F1 + 9, 0); /* F10 alone is no key, F11 is not line numbers */
+    key(K_F1 + 10, 0);
+    CHECK(t->wrap && t->numbers);
     draw();
     CHECK(on_screen("INSERT") == ROWS - 1 && on_screen("Soft Tabs: 4") == ROWS - 1 && on_screen("UTF-8") == ROWS - 1);
     CHECK(on_screen(" LF ") == ROWS - 1 && on_screen("Normal") == ROWS - 1);
@@ -1123,7 +1132,7 @@ static void test_disk(void)
     put_file(at_dir("ext.txt"), "other\n");
     disk_events();
     CHECK(d->disk == DISK_MODIFIED && ui_of(d)->nnotes == 1);
-    note_action(d, 0, ACT_IGNORE);
+    note_action(d, 0, MSG_IGNORE);
     put_file(at_dir("ext.txt"), "other again\n");
     disk_events();
     CHECK(ui_of(d)->nnotes == 0); /* not asked again for the same */
@@ -1136,7 +1145,7 @@ static void test_disk(void)
     CHECK(on_screen("was deleted or moved on disk.") >= 0 && on_screen("[Close File]") >= 0 &&
           on_screen("[Save As...]") >= 0);
     push('d', 0, NULL); /* modified: Discard */
-    note_action(d, 0, ACT_CLOSE_FILE);
+    note_action(d, 0, MSG_CLOSE_FILE);
     CHECK(ndocs == 0);
     puts("PASS deleted on disk: Kate's message and buttons (Close File, Save As, Ignore); Close File closes it");
 
@@ -1253,7 +1262,7 @@ static void test_notes(void)
     CHECK(on_screen("Line Length") >= 0 && on_screen("[Temporarily raise limit and reload file]") >= 0);
     keys("z");
     CHECK(byte_at(t->doc, 0) == 'q'); /* read-only */
-    note_action(t->doc, 0, ACT_RAISE_LIMIT);
+    note_action(t->doc, 0, MSG_RAISE_LIMIT);
     CHECK(!t->doc->readonly && t->doc->buf.lines == 1 && ui_of(t->doc)->limit == 32768);
     if (is_root) {
         put_file(at_dir("secret"), "s\n");
@@ -1283,7 +1292,7 @@ static void test_correctness(const char *which)
         memset(line, 'a', 400);
         line[400] = '\0';
         struct tab *t = open_text("horizontal.txt", line);
-        key(K_F1 + 9, 0);
+        editor_action(EA_WRAP); /* View > Dynamic Word Wrap: F10 alone is no key */
         key(K_EOL, 0);
         draw();
         int y, h;

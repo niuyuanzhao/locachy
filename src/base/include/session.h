@@ -14,6 +14,11 @@ int base_session_input_cancelled(void);
 int base_sleep_inhibit(int enabled);
 /* Authorized temporary output power, never a saved brightness preference. */
 int base_display_power(int on);
+/* A live link to another computer (extdisplay): while held, process 1 takes
+ * the screen away for home or the lock but does not freeze this program, so
+ * the link stays up; remote input still follows the policy. 0 drops it. A
+ * report, not a request: no answer is awaited. */
+int base_session_hold(int on);
 /* Implemented by the display backend. Missing/unsupported is an error. */
 int base_screen_power(int on) __attribute__((weak));
 

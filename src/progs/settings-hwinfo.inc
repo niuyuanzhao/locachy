@@ -2385,13 +2385,27 @@ static void hwinfo_page(void)
             }
             continue;
         }
-        if (key == 'q' || (key == 27 && !hw_in_pane) || close_read(key)) {
+        int mods = mods_now(), act = key_list_action(key, mods);
+        if ((act == ACT_CANCEL && !hw_in_pane) || close_read(key)) { /* Esc, q: back; Ctrl+Q, the close: quit */
             if (!closing) notice[0] = '\0';
             return;
         }
-        if (key == 27 && hw_in_pane) {
+        if (act == ACT_CANCEL) { /* from the pane to the categories */
             hw_in_pane = 0;
             hwinfo_draw();
+            continue;
+        }
+        if (act == ACT_HELP) {
+            help_screen();
+            if (closing) return;
+            hwinfo_draw();
+            continue;
+        }
+        if (act == ACT_COPY) {
+            key = 'c'; /* Ctrl+C copies as c does */
+        } else if (act == ACT_NEXT_FIELD || act == ACT_PREV_FIELD) {
+            key = '\t'; /* two places: either way to the other */
+        } else if (act != ACT_NONE || (key >= ' ' && key < 0x7F && (mods & (KEYS_ALT | KEYS_META)))) {
             continue;
         }
         if (key == '\t') {

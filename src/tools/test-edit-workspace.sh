@@ -21,5 +21,5 @@ cc -O2 -g -Wall -Wextra -Werror -D_GNU_SOURCE -DCONFIG_IME -DCONFIG_FREETYPE $fl
     "$src/tools/test-edit-workspace.c" "$src/progs/edit-buffer.c" "$src/progs/edit-doc.c" \
     "$src/progs/edit-file.c" "$src/progs/edit-search.c" "$src/progs/edit-syntax.c" "$src/progs/edit-tree.c" \
     "$src/progs/edit-layout.c" "$src/progs/edit-lsp.c" "$src/progs/edit-session.c" "$src/progs/edit-filesearch.c" \
-    "$src/base/ui.c" $(pkg-config --libs freetype2 json-glib-1.0) -ltree-sitter -lpcre2-8 -lm -o "$out/test"
+    "$src/base/ui.c" "$src/base/key-action.c" "$src/base/help.c" $(pkg-config --libs freetype2 json-glib-1.0) -ltree-sitter -lpcre2-8 -lm -o "$out/test"
 ASAN_OPTIONS=detect_leaks=0 timeout 30 "$out/test" "$out/fixtures"

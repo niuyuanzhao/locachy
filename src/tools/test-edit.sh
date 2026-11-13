@@ -48,7 +48,7 @@ for kind in plain asan; do
         [ "$t" != ui ] || files="$src/tools/test-edit-$t.c $src/progs/edit-buffer.c $src/progs/edit-doc.c
             $src/progs/edit-file.c $src/progs/edit-search.c $src/progs/edit-syntax.c $src/progs/edit-tree.c
             $src/progs/edit-layout.c $src/progs/edit-lsp.c $src/progs/edit-session.c $src/progs/edit-filesearch.c
-            $src/base/ui.c"
+            $src/base/ui.c $src/base/key-action.c $src/base/help.c"
         # shellcheck disable=SC2086
         $cc -DCONFIG_IME -DCONFIG_FREETYPE $(pkg-config --cflags freetype2 fontconfig json-glib-1.0) $queries $extra -o "$out/test-edit-$t-$kind" $files \
             -ltree-sitter -lpcre2-8 $(pkg-config --libs freetype2 fontconfig json-glib-1.0) -lm

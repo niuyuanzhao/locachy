@@ -189,8 +189,8 @@ static void auto_bracket_check(void);
  * above the text until one of its actions (or Close) is chosen, or at the
  * bottom of the view until it hides itself. */
 enum { NOTE_INFO, NOTE_WARNING, NOTE_ERROR, NOTE_POSITIVE };
-enum { ACT_RELOAD = 1, ACT_AUTO_RELOAD, ACT_IGNORE, ACT_CLOSE_FILE, ACT_SAVE_AS, ACT_RAISE_LIMIT, ACT_CLOSE,
-       ACT_TRY_AGAIN, ACT_REOPEN_ENCODING, ACT_READ_WRITE };
+enum { MSG_RELOAD = 1, MSG_AUTO_RELOAD, MSG_IGNORE, MSG_CLOSE_FILE, MSG_SAVE_AS, MSG_RAISE_LIMIT, MSG_CLOSE,
+       MSG_TRY_AGAIN, MSG_REOPEN_ENCODING, MSG_READ_WRITE };
 struct note {
     char text[768];
     int kind, above;
@@ -405,6 +405,44 @@ static int real_key(int key, int mods)
     return key;
 }
 
+/* F1: edit's own keys (ui_help adds every program's). */
+static const struct ui_help_line edit_help[] = {
+    { "Ctrl+N, Ctrl+O, Ctrl+S", N_("New, open, save") },
+    { "Ctrl+Shift+S, Ctrl+L", N_("Save as; save all") },
+    { "F5", N_("Reload the document") },
+    { "Ctrl+W, Ctrl+Q", N_("Close the document; quit (asks about changes)") },
+    { "Ctrl+Z, Ctrl+Shift+Z", N_("Undo, redo") },
+    { "Ctrl+X, Ctrl+C, Ctrl+V", N_("Cut, copy, paste") },
+    { "Ctrl+A, Ctrl+Shift+A", N_("Select all; deselect") },
+    { "Ctrl+F, F3, Shift+F3", N_("Find; the next, the previous match") },
+    { "Ctrl+R, Ctrl+Shift+F", N_("Replace; find in files") },
+    { "Ctrl+G, Ctrl+D, Ctrl+/", N_("Go to a line; comment; toggle the comment") },
+    { "Ctrl+Shift+[, Ctrl+Shift+]", N_("Fold, unfold the top level") },
+    { "Ctrl+=, Ctrl+-, Ctrl+0", N_("Zoom in, out, to 100%") },
+    { "Ctrl+PgDn, Ctrl+PgUp", N_("Next, previous document") },
+    { "Ctrl+Tab", N_("The documents list") },
+    { "Ctrl+., F12, Shift+F12", N_("Code actions; definition, declaration") },
+    { "Shift+F10", N_("The Edit menu") },
+    { "Alt+F", N_("The File menu; the other menus by their letters") },
+    { NULL, NULL },
+};
+
+/* What a key as real_key gives it means in every program (key_action):
+ * Ctrl with a letter back to its control character, as keys.c gives it.
+ * Ctrl+H, Ctrl+I and Ctrl+J share Backspace's, Tab's and Enter's codes;
+ * real_key told them apart, so they stay edit's own letters (Ctrl+I
+ * indents, as Kate's), never the table's Ctrl+Tab. */
+static int key_meaning(int key, int mods)
+{
+    if ((mods & KEYS_CTRL) && key >= 'a' && key <= 'z') {
+        if (key == 'h' || key == 'i' || key == 'j') {
+            return ACT_NONE;
+        }
+        key &= 0x1F;
+    }
+    return key_action(key, mods);
+}
+
 /* A note for d's views. */
 __attribute__((format(printf, 5, 6)))
 static struct note *post(struct doc *d, int kind, int above, double seconds, const char *fmt, ...)
@@ -451,16 +489,16 @@ static void drop_notes_with(struct doc *d, int action)
 static const char *action_label(int a)
 {
     switch (a) {
-    case ACT_RELOAD: return _("&Reload");
-    case ACT_AUTO_RELOAD: return _("Enable Auto Reload");
-    case ACT_IGNORE: return _("&Ignore");
-    case ACT_CLOSE_FILE: return _("&Close File");
-    case ACT_SAVE_AS: return _("&Save As...");
-    case ACT_RAISE_LIMIT: return _("Temporarily raise limit and reload file");
-    case ACT_CLOSE: return _("&Close");
-    case ACT_TRY_AGAIN: return _("Try Again");
-    case ACT_REOPEN_ENCODING: return _("Reopen with &Encoding...");
-    case ACT_READ_WRITE: return _("Enable Read-&Write Mode");
+    case MSG_RELOAD: return _("&Reload");
+    case MSG_AUTO_RELOAD: return _("Enable Auto Reload");
+    case MSG_IGNORE: return _("&Ignore");
+    case MSG_CLOSE_FILE: return _("&Close File");
+    case MSG_SAVE_AS: return _("&Save As...");
+    case MSG_RAISE_LIMIT: return _("Temporarily raise limit and reload file");
+    case MSG_CLOSE: return _("&Close");
+    case MSG_TRY_AGAIN: return _("Try Again");
+    case MSG_REOPEN_ENCODING: return _("Reopen with &Encoding...");
+    case MSG_READ_WRITE: return _("Enable Read-&Write Mode");
     }
     return "";
 }
@@ -3306,7 +3344,7 @@ static int field_key(struct field *f, int key, int mods, int *changed)
         f->all = 0;
         return 1;
     }
-    if ((mods & KEYS_CTRL) && key == 'a') {
+    if (key_meaning(key, mods) == ACT_SELECT_ALL) { /* Ctrl+A; Home and End move to the ends */
         f->all = 1;
         f->cur = f->len;
         return 1;
@@ -3860,7 +3898,7 @@ static int bar_key(int key, int mods)
             !isdigit(key) && key != '-') {
             return 1; /* a spin box: numbers only */
         }
-        if ((mods & KEYS_CTRL) && key == 'v') {
+        if (key_meaning(key, mods) == ACT_PASTE) { /* Ctrl+V, Shift+Insert */
             int fd;
             size_t size;
             if (clipboard_get(0, &fd, &size) == CLIPBOARD_OK) {
@@ -4124,8 +4162,8 @@ static int load(struct doc *d)
         struct note *n = post(d, NOTE_ERROR, 1, 0,
                               _("The file %s could not be loaded, as it was not possible to read from it.<br />"
                                 "Check if you have read access to this file."), display_path(d));
-        n->actions[n->nactions++] = ACT_TRY_AGAIN;
-        n->actions[n->nactions++] = ACT_CLOSE;
+        n->actions[n->nactions++] = MSG_TRY_AGAIN;
+        n->actions[n->nactions++] = MSG_CLOSE;
         say("edit: %s: %s", d->path, strerror(err));
         return -1;
     }
@@ -4154,8 +4192,8 @@ static int load(struct doc *d)
                "It is set to read-only mode, as saving might destroy its content.<br />"
                "Reopen with the correct encoding, or explicitly enable read-write mode to edit these bytes."),
              display_path(d), file_encoding_name(&d->format));
-        n->actions[n->nactions++] = ACT_REOPEN_ENCODING;
-        n->actions[n->nactions++] = ACT_READ_WRITE;
+        n->actions[n->nactions++] = MSG_REOPEN_ENCODING;
+        n->actions[n->nactions++] = MSG_READ_WRITE;
     }
     if (flags & FILE_WRAPPED) {
         d->readonly = 1;
@@ -4164,8 +4202,8 @@ static int load(struct doc *d)
                                 "Limit (%zu characters).<br />The longest of those lines was %zu characters long<br/>"
                                 "Those lines were wrapped and the document is set to read-only mode, as saving will "
                                 "modify its content."), display_path(d), u->limit, longest);
-        n->actions[n->nactions++] = ACT_RAISE_LIMIT;
-        n->actions[n->nactions++] = ACT_CLOSE;
+        n->actions[n->nactions++] = MSG_RAISE_LIMIT;
+        n->actions[n->nactions++] = MSG_CLOSE;
     }
     d->disk = d->disk_shown = DISK_NONE;
     doc_detect_syntax(d);
@@ -4252,7 +4290,7 @@ static void toggle_readonly(struct doc *d)
                 "Enable editing anyway?"), go, 2, 1, 1) != 0) return;
     }
     d->readonly = !d->readonly;
-    if (!d->readonly) drop_notes_with(d, ACT_READ_WRITE);
+    if (!d->readonly) drop_notes_with(d, MSG_READ_WRITE);
 }
 
 static struct doc *doc_for_path(const char *path)
@@ -4396,7 +4434,7 @@ static int save(struct doc *d)
     doc_mark_saved(d);
     lines_saved(d);
     d->disk = d->disk_shown = DISK_NONE;
-    drop_notes_with(d, ACT_IGNORE);
+    drop_notes_with(d, MSG_IGNORE);
     say("edit: saved %s", final);
     language_saved(d);
     return 0;
@@ -4712,7 +4750,7 @@ static void check_disk(struct doc *d)
     if (reason == DISK_NONE) {
         if (d->disk == DISK_DELETED && there) {
             d->disk = d->disk_shown = DISK_NONE;
-            drop_notes_with(d, ACT_IGNORE);
+            drop_notes_with(d, MSG_IGNORE);
         }
         return;
     }
@@ -4726,17 +4764,17 @@ static void check_disk(struct doc *d)
         return; /* not asked again for the same */
     }
     d->disk_shown = reason;
-    drop_notes_with(d, ACT_IGNORE);
+    drop_notes_with(d, MSG_IGNORE);
     struct note *n = post(d, NOTE_INFO, 1, 0, reason == DISK_DELETED ? _("The file '%s' was deleted or moved on disk.") :
                                                                      _("The file '%s' was modified on disk."), d->path);
     if (reason == DISK_DELETED) {
-        n->actions[n->nactions++] = ACT_CLOSE_FILE;
-        n->actions[n->nactions++] = ACT_SAVE_AS;
+        n->actions[n->nactions++] = MSG_CLOSE_FILE;
+        n->actions[n->nactions++] = MSG_SAVE_AS;
     } else {
-        n->actions[n->nactions++] = ACT_AUTO_RELOAD;
-        n->actions[n->nactions++] = ACT_RELOAD;
+        n->actions[n->nactions++] = MSG_AUTO_RELOAD;
+        n->actions[n->nactions++] = MSG_RELOAD;
     }
-    n->actions[n->nactions++] = ACT_IGNORE;
+    n->actions[n->nactions++] = MSG_IGNORE;
 }
 
 /* inotify's events: the documents whose names they are, looked at. */
@@ -4777,23 +4815,23 @@ static void note_action(struct doc *d, int note, int action)
 {
     struct docui *u = ui_of(d);
     switch (action) {
-    case ACT_RELOAD:
-    case ACT_TRY_AGAIN:
+    case MSG_RELOAD:
+    case MSG_TRY_AGAIN:
         d->disk = d->disk_shown = DISK_NONE;
         reload(d);
         break;
-    case ACT_AUTO_RELOAD:
+    case MSG_AUTO_RELOAD:
         d->auto_reload = 1;
         d->disk = d->disk_shown = DISK_NONE;
         reload(d);
         break;
-    case ACT_IGNORE:
-    case ACT_CLOSE:
+    case MSG_IGNORE:
+    case MSG_CLOSE:
         if (note < u->nnotes) {
             drop_note(d, note);
         }
         break;
-    case ACT_CLOSE_FILE: {
+    case MSG_CLOSE_FILE: {
         /* Without the prompt about the file on disk (onModOnHdClose), with
          * the one about unsaved changes. */
         int disk = d->disk;
@@ -4803,18 +4841,18 @@ static void note_action(struct doc *d, int note, int action)
         }
         break;
     }
-    case ACT_SAVE_AS:
+    case MSG_SAVE_AS:
         if (save_as(d) == 0) {
-            drop_notes_with(d, ACT_SAVE_AS);
+            drop_notes_with(d, MSG_SAVE_AS);
         }
         break;
-    case ACT_REOPEN_ENCODING:
+    case MSG_REOPEN_ENCODING:
         reopen_encoding(d);
         break;
-    case ACT_READ_WRITE:
+    case MSG_READ_WRITE:
         toggle_readonly(d);
         break;
-    case ACT_RAISE_LIMIT: {
+    case MSG_RAISE_LIMIT: {
         /* The next power of two above the longest line. */
         size_t limit = 1;
         while (limit <= u->longest) {
@@ -5404,28 +5442,26 @@ static int view_action(int s, struct tab *t, int key, int mods)
 {
     if (mc_action(s, t, key, mods)) return 1;
     int shift = (mods & KEYS_SHIFT) != 0, ctrl = (mods & KEYS_CTRL) != 0, alt = (mods & KEYS_ALT) != 0;
+    switch (key_meaning(key, mods)) { /* the keys every program has */
+    case ACT_SAVE: save(t->doc); return 1;
+    case ACT_SAVE_AS: save_as(t->doc); return 1;
+    case ACT_CLOSE_TAB: close_tab(s, spaces[s].cur); return 1;
+    case ACT_UNDO: undo_redo(s, t, 0); return 1;
+    case ACT_REDO: undo_redo(s, t, 1); return 1;
+    case ACT_FIND: open_search(0); return 1;
+    case ACT_SELECT_ALL:
+        t->anchor = 0;
+        t->cursor = doc_len(t->doc);
+        set_primary(t);
+        return 1;
+    case ACT_DESELECT: t->anchor = t->cursor; return 1;
+    case ACT_COPY: copy(t, 0); return 1;
+    case ACT_CUT: copy(t, 1); show_cursor(s, t, 0); return 1;
+    case ACT_PASTE: paste(s, t, 0); return 1;
+    default: break;
+    }
     if (ctrl && !alt) {
         switch (key) {
-        case 's':
-            if (shift) {
-                save_as(t->doc);
-            } else {
-                save(t->doc);
-            }
-            return 1;
-        case 'w':
-            if (!shift) {
-                close_tab(s, spaces[s].cur);
-            }
-            return 1;
-        case 'z':
-            undo_redo(s, t, shift);
-            return 1;
-        case 'f':
-            if (!shift) {
-                open_search(0);
-            }
-            return 1;
         case 'r':
             if (shift) {
                 drop_space(active); /* Close Current View */
@@ -5439,15 +5475,6 @@ static int view_action(int s, struct tab *t, int key, int mods)
         case 'h':
             find_selected(s, shift);
             return 1;
-        case 'a':
-            if (shift) {
-                t->anchor = t->cursor; /* Deselect */
-            } else {
-                t->anchor = 0;
-                t->cursor = doc_len(t->doc);
-                set_primary(t);
-            }
-            return 1;
         case 'd':
             comment(s, t, shift ? UNCOMMENT : COMMENT);
             return 1;
@@ -5460,16 +5487,6 @@ static int view_action(int s, struct tab *t, int key, int mods)
             return 1;
         case 'k':
             delete_lines(s, t);
-            return 1;
-        case 'c':
-            copy(t, 0);
-            return 1;
-        case 'x':
-            copy(t, 1);
-            show_cursor(s, t, 0);
-            return 1;
-        case 'v':
-            paste(s, t, 0);
             return 1;
         case 0x1E: /* Ctrl+Shift+6 */
             to_bracket(s, t, 1);
@@ -5485,25 +5502,14 @@ static int view_action(int s, struct tab *t, int key, int mods)
             return 1;
         }
     }
-    if (key == K_F1 + 9 && !mods) {
-        t->wrap = !t->wrap; /* Dynamic Word Wrap */
-        t->sub = 0;
-        t->left = 0;
-        show_cursor(s, t, 0);
-        return 1;
-    }
-    if (key == K_F1 + 10 && !mods) {
-        t->numbers = !t->numbers; /* Show Line Numbers */
-        show_cursor(s, t, 0);
-        return 1;
-    }
+    /* Dynamic Word Wrap and Show Line Numbers are the View menu's (F10 alone is no key). */
     if (key == K_F1 + 5 && !mods) {
         t->icons = !t->icons; /* Show Icon Border */
         show_cursor(s, t, 0);
         return 1;
     }
-    if (key == K_F1 + 2) {
-        find_next(shift);
+    if (key_meaning(key, mods) == ACT_FIND_NEXT || key_meaning(key, mods) == ACT_FIND_PREV) {
+        find_next(shift); /* F3, Shift+F3 */
         return 1;
     }
     if (alt && !ctrl && !shift && (key == K_PGUP || key == K_PGDN)) {
@@ -5614,8 +5620,9 @@ static void view_key(int s, struct tab *t, int key, int mods)
 static void global_or_view_key(int key, int mods)
 {
     int shift = (mods & KEYS_SHIFT) != 0, ctrl = (mods & KEYS_CTRL) != 0, alt = (mods & KEYS_ALT) != 0;
-    if (key == K_F1 + 9 && !ctrl && !alt && shift) {
-        editor_menu(0);
+    int act = key_meaning(key, mods);
+    if (act == ACT_CONTEXT_MENU) {
+        editor_menu(1); /* Shift+F10: the Edit menu (MENU_EDIT) as the context menu; File stays on Alt+F */
         return;
     }
     if (alt && !ctrl && !shift && !(bar_kind && bar.focus == FOCUS_BAR)) {
@@ -5623,16 +5630,27 @@ static void global_or_view_key(int key, int mods)
         const char *m = key > 0 && key < 0x80 ? strchr(mnemonics, key) : NULL;
         if (m) { editor_menu((int)(m - mnemonics)); return; }
     }
-    if (ctrl && !alt && key == 'n' && !shift) {
+    if (act == ACT_NEW) {
         new_document();
         return;
     }
-    if (ctrl && !alt && key == 'o' && !shift) {
+    if (act == ACT_OPEN) {
         open_dialog();
         return;
     }
-    if (ctrl && alt && !shift && key == 'o') {
-        quick_open(); /* View > Quick Open */
+    if (ctrl && alt) {
+        switch (key) { /* Kate's own Ctrl+Alt letters, as real_key gives them (the table has none) */
+        case 'o':
+            if (!shift) { quick_open(); return; } /* View > Quick Open */
+            break;
+        case 'f':
+            if (shift) { toggle_sidebar(); return; } /* Show Sidebars */
+            break;
+        }
+    }
+    if (act == ACT_RELOAD) { /* F5: File > Reload */
+        struct tab *rt = cur_tab();
+        if (rt && rt->doc->path[0] && (!doc_modified(rt->doc) || query_close(rt->doc))) reload(rt->doc);
         return;
     }
     if (alt && !ctrl && !shift && (key == K_UP || key == K_DOWN)) {
@@ -5640,23 +5658,13 @@ static void global_or_view_key(int key, int mods)
         return;
     }
     if (language_key(key, mods)) return;
-    if (ctrl && !alt && key == 'q') {
-        if (session_quit()) {
-            quitting = 1;
-        }
+    if (ctrl && shift && !alt && (key == '{' || key == '}')) {
+        /* Ctrl+Shift+[ and Ctrl+Shift+]: fold, unfold the top level (Ctrl+Shift+= zooms) */
+        if (cur_tab()) fold_top_level(cur_tab(), key == '{', 0);
         return;
     }
-    if (ctrl && shift && !alt && (key == '+' || key == '=' || key == '-')) {
-        if (cur_tab()) fold_top_level(cur_tab(), key == '-', 0);
-        return;
-    }
-    if (ctrl && !alt && (key == '+' || key == '=' || key == '-' || key == '0' || key == K_CTRL_0)) {
-        /* Ctrl+0 comes as K_CTRL_0 (keys.c gives Ctrl+digits so) */
-        font_zoom(key == '-' ? -1 : 1, key == '0' || key == K_CTRL_0);
-        return;
-    }
-    if (ctrl && !alt && shift && key == 't') {
-        split_direction(0);
+    if (act == ACT_ZOOM_IN || act == ACT_ZOOM_OUT || act == ACT_ZOOM_RESET) {
+        font_zoom(act == ACT_ZOOM_OUT ? -1 : 1, act == ACT_ZOOM_RESET);
         return;
     }
     if (ctrl && !alt && key == 'l') {
@@ -5667,12 +5675,8 @@ static void global_or_view_key(int key, int mods)
         }
         return;
     }
-    if (ctrl && shift && !alt && key == 'f') {
+    if (act == ACT_FIND_IN_FILES) {
         filesearch_menu();
-        return;
-    }
-    if (ctrl && alt && shift && key == 'f') {
-        toggle_sidebar(); /* Show Sidebars */
         return;
     }
     if (key == K_F1 + 7 && !ctrl && !alt) {
@@ -5684,9 +5688,8 @@ static void global_or_view_key(int key, int mods)
         }
         return;
     }
-    if ((alt && !ctrl && !shift && (key == K_LEFT || key == K_RIGHT)) ||
-        (ctrl && !alt && !shift && (key == K_PGUP || key == K_PGDN))) {
-        tab_step(key == K_RIGHT || key == K_PGDN ? 1 : -1);
+    if ((alt && !ctrl && !shift && (key == K_LEFT || key == K_RIGHT)) || act == ACT_NEXT_TAB || act == ACT_PREV_TAB) {
+        tab_step(key == K_RIGHT || act == ACT_NEXT_TAB ? 1 : -1); /* Ctrl+PgDn, Ctrl+PgUp */
         return;
     }
     if (alt && !ctrl && !shift && key >= '0' && key <= '9') {
@@ -5711,7 +5714,7 @@ static void global_or_view_key(int key, int mods)
     if (view_action(active, t, key, mods)) {
         return;
     }
-    if (key == 27 && bar_kind && !ctrl && !alt) {
+    if (act == ACT_CANCEL && bar_kind) {
         close_bar(); /* Esc: the bar first */
         return;
     }
@@ -5741,6 +5744,23 @@ static void key_event(int key)
     if (key == K_POINTER) {
         pointer(pointer_last());
         auto_bracket_check();
+        return;
+    }
+    int act = key_action(key, mods); /* the raw key: Ctrl+Q is 17 */
+    if (act == ACT_QUIT) {
+        /* Ctrl+Q, Alt+F4, the window's close: with a modified document, the
+         * Save Documents question first, sessions or not; asked, it stays. */
+        if (ask_quit()) {
+            quitting = 1;
+        } else if (key == K_CLOSE) {
+            key_close_kept();
+        }
+        return;
+    }
+    if (act == ACT_HELP) {
+        if (ui_help(_("Edit keys"), edit_help) == ACT_QUIT && ask_quit()) {
+            quitting = 1;
+        }
         return;
     }
     if (switcher_key(real_key(key, mods), mods)) {

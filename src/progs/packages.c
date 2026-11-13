@@ -15,14 +15,14 @@
  *               is made of (its package and extras, as the repositories or
  *               the AUR have them; its command, from what its packages
  *               bring once built; its arguments, network and directories);
- *               b build, r roll back, d remove, l output. Each row: what
+ *               b build, r roll back, Delete remove, l output. Each row: what
  *               its build installed over the host's (its upper's pacman
  *               database), how many packages, how much; its details list
  *               them, each one's version and size (PgUp/PgDn scroll them
  *               when they do not fit)
  *   Host        its manifest (/etc/locachy/packages), each package's version
- *               and size as installed: i adds a package, x removes the
- *               selected one, s brings the system to it
+ *               and size as installed: i adds a package, Delete removes
+ *               the selected one, s brings the system to it
  * Above the lists, what the host has installed in all (how many packages,
  * how much, declared, with what they need, foreign; drift and missing).
  * What takes time is a system job (locachy-jobs, tools/JOBS.md): queued with
@@ -38,7 +38,7 @@
  * A build that stops for source signing keys (locachy-build's "Source key to
  * trust" lines, exit status 3) is not a failure but a person's decision: the
  * pane lists the keys (each one's package, fingerprint, and the recipe whose
- * validpgpkeys name it) and the command that trusts them, which y copies; a
+ * validpgpkeys name it) and the command that trusts them, which Ctrl+C copies; a
  * person checks them and runs it as root, and g then continues the job: a
  * new job, queued, with what is left of it.
  */
@@ -103,14 +103,17 @@
 #define HIT_TAB    100000  /* + the page */
 #define HIT_LOWER  200000  /* the output/details pane */
 #define HIT_BUTTON 300000  /* + a button of the form */
-#define HIT_KEY    400000  /* + the key a button stands for */
+#define HIT_KEY    0x1000000 /* + the key a button stands for, with MODS(its modifiers) */
+#define MODS(m)    ((m) << 16)
 
 enum { UPDATES, CONTAINERS, HOST, PAGES };
 static const char *const page_names[PAGES] = { N_("Updates"), N_("Containers"), N_("Host") };
 static int page, sel[PAGES], log_from, log_total; /* the output: lines back from its end, how many */
 static int show_log; /* the job's output in the lower half, not the selected row's details */
+static int pane_all; /* Ctrl+A on the pane: the next Ctrl+C copies all of it */
 static char notice[512];
 static int notice_error;
+static int quit_asked; /* Ctrl+Q or the window's close, read in a prompt or a list: the program quits */
 
 /* The plan: target, kind (repo, aur, rebuild, state; the app presets'
  * catalog, merge), what, old, new. */
@@ -1187,8 +1190,8 @@ static uint32_t log_color(const char *s)
 static void pane_title(int row, const char *text, int copy)
 {
     char line[700];
-    /* TRANSLATORS: Y is the Y key (Shift+y); keep "Y: ". */
-    snprintf(line, sizeof line, "%s%s%s", text, copy ? "   " : "", copy ? _("Y: copy all") : "");
+    /* TRANSLATORS: Ctrl+A and Ctrl+C are key names; keep them. */
+    snprintf(line, sizeof line, "%s%s%s", text, copy ? "   " : "", copy ? _("Ctrl+A, Ctrl+C: copy all") : "");
     screen_fill(0, row, screen_cols(), 1, DIM);
     textsel_put(1, row, line, BG, DIM);
 }
@@ -1306,7 +1309,7 @@ static const char *keys_check(void)
 static const char *keys_then(void)
 {
     /* TRANSLATORS: y and g are the y and g keys; keep them. */
-    return _("y copies the command; once they are trusted, g continues where it stopped.");
+    return _("Ctrl+C copies the command; once they are trusted, g continues where it stopped.");
 }
 
 /* The keys and their origins whole (each origin wrapped to the pane, not
@@ -1616,16 +1619,41 @@ static void copy_pane(void)
     free(text);
 }
 
-/* Each page's actions: label, then key; the buttons at the bottom. */
-/* TRANSLATORS: The part before the colon (c, Space, a, l, /, n, Enter, b, r, d, i, x, s) is the key; keep it and ": ". */
-static const char *const help[PAGES][8][2] = {
-    { { N_("c: check"), "c" }, { N_("Space: mark"), " " }, { N_("a: apply the marked"), "a" },
-      { N_("l: output/details"), "l" } },
-    { { N_("/: search & install"), "/" }, { N_("n: new"), "n" }, { N_("Enter: edit"), "\n" }, { N_("b: build"), "b" },
-      { N_("r: roll back"), "r" }, { N_("d: remove"), "d" }, { N_("l: output/details"), "l" } },
-    { { N_("/: search"), "/" }, { N_("i: add a package"), "i" }, { N_("x: remove the selected one"), "x" },
-      { N_("s: bring the system to the manifest"), "s" }, { N_("l: output/details"), "l" } },
+/* Each page's actions: label, then the key they stand for; the buttons at the bottom. */
+/* TRANSLATORS: The part before the colon (c, Space, a, l, /, n, Enter, b, r, Delete, i, s) is the key; keep it and ": ". */
+static const struct { const char *label; int key; } help[PAGES][8] = {
+    { { N_("c: check"), 'c' }, { N_("Space: mark"), ' ' }, { N_("Enter: details"), '\n' },
+      { N_("a: apply the marked"), 'a' }, { N_("l: output/details"), 'l' } },
+    { { N_("/: search & install"), '/' }, { N_("n: new"), 'n' }, { N_("Enter: edit"), '\n' }, { N_("b: build"), 'b' },
+      { N_("r: roll back"), 'r' }, { N_("Delete: remove"), K_DEL }, { N_("l: output/details"), 'l' } },
+    { { N_("/: search"), '/' }, { N_("i: add a package"), 'i' }, { N_("Delete: remove the selected one"), K_DEL },
+      { N_("s: bring the system to the manifest"), 's' }, { N_("l: output/details"), 'l' } },
 };
+
+/* F1's own keys (ui_help; every program's follow them). */
+static const struct ui_help_line packages_keys[] = {
+    { "Tab, Shift+Tab", N_("Next or previous page: Updates, Containers, Host") },
+    { "Up, Down, PgUp, PgDn, Home, End", N_("Choose a row; PgUp and PgDn scroll the output or the details") },
+    { "Enter", N_("Updates: the row's packages; Containers: edit it; a form: its value") },
+    { "Space", N_("Updates: mark a row to apply") },
+    { "c, a", N_("Updates: check again (on the network); apply the marked rows") },
+    { "n, b, r, Delete", N_("Containers: new, build, roll back, remove") },
+    { "/, Ctrl+F", N_("Search and install (Containers, Host)") },
+    { "i, Delete, s", N_("Host: add a package, remove the selected one, bring the system to the manifest") },
+    { "g", N_("Continue a job that stopped for source signing keys") },
+    { "Ctrl+C", N_("Copy what is selected, else the command or the notice") },
+    { "Ctrl+A, Ctrl+C", N_("Select the whole output or details pane, then copy it") },
+    { "l", N_("Show the output or the details") },
+    { "Ctrl+A, Home, End", N_("In a line you type: select all, the start, the end") },
+    { "y, n, Enter", N_("A question: y yes; n, Esc or Enter no") },
+    { NULL, NULL },
+};
+
+/* F1 over the screen; Ctrl+Q or the window's close there quits. */
+static void help_screen(void)
+{
+    if (ui_help(_("Packages keys"), packages_keys) == ACT_QUIT) quit_asked = 1;
+}
 
 static void draw(void)
 {
@@ -1681,19 +1709,20 @@ static void draw(void)
     draw_lower(top + height, rows_n - 2 - (top + height));
     ui_hit(0, top + height, cols, rows_n - 2 - (top + height), HIT_LOWER);
     x = 1;
-    for (int b = 0; b < 8 && help[page][b][0]; b++) {
-        x = ui_button(x, rows_n - 2, _(help[page][b][0]), HIT_KEY + help[page][b][1][0]);
+    for (int b = 0; b < 8 && help[page][b].label; b++) {
+        x = ui_button(x, rows_n - 2, _(help[page][b].label), HIT_KEY + help[page][b].key);
     }
     if (!job && nwanted) {
         /* TRANSLATORS: g is the g key; keep "g: ". */
         x = ui_button(x, rows_n - 2, _("g: continue"), HIT_KEY + 'g');
     }
-    /* TRANSLATORS: y is the y key; keep "y: ". */
-    x = ui_button(x, rows_n - 2, _("y: copy"), HIT_KEY + 'y');
+    /* TRANSLATORS: Ctrl+C is a key name; keep it. */
+    x = ui_button(x, rows_n - 2, _("Ctrl+C: copy"), HIT_KEY + K_ACT_COPY);
     /* TRANSLATORS: Tab is the Tab key; keep "Tab: ". */
     x = ui_button(x, rows_n - 2, _("Tab: page"), HIT_KEY + '\t');
-    /* TRANSLATORS: q is the q key; keep "q: ". */
-    ui_button(x, rows_n - 2, _("q: back"), HIT_KEY + 'q');
+    /* TRANSLATORS: Ctrl+Q and F1 are key names; keep them. */
+    x = ui_button(x, rows_n - 2, _("Ctrl+Q: quit"), HIT_KEY + MODS(KEYS_CTRL) + ('q' & 0x1F));
+    ui_button(x, rows_n - 2, _("F1: help"), HIT_KEY + K_F1);
     textsel_put(1, rows_n - 1, notice, notice_error ? ERROR : ACCENT, BG);
     textsel_draw(BG, ACCENT);
     screen_flush();
@@ -1701,6 +1730,10 @@ static void draw(void)
 
 __attribute__((weak)) int clipboard_get(int primary, int *fd, size_t *size);
 __attribute__((weak)) int keys_modifiers(void);
+static int mods_now(void)
+{
+    return keys_modifiers ? keys_modifiers() : 0;
+}
 
 static void paste_into(char *text, size_t size, size_t *pos, int primary)
 {
@@ -1723,11 +1756,47 @@ static void paste_into(char *text, size_t size, size_t *pos, int primary)
     }
 }
 
-static int edit_line_key(int key, char *text, size_t size, size_t *pos)
+/* The keys that edit a line (a prompt, a form's value): Left/Right, Home/End
+ * (^E), Backspace, Delete (^D), ^U, ^K, what keys type; Ctrl+A selects it all
+ * (*all: what is typed, Backspace or Delete then replace it), Ctrl+C copies
+ * the selection, Ctrl+X cuts it, Ctrl+V and Shift+Insert paste over it, the
+ * middle button pastes the primary selection. 1 when the key edited. */
+static int edit_line_key(int key, int mods, char *text, size_t size, size_t *pos, int *all)
 {
     size_t len = strlen(text);
     const char *typed;
+    int act = key_action(key, mods);
     if (*pos > len) *pos = len;
+    if (act == ACT_SELECT_ALL) {
+        *all = len > 0;
+        *pos = len;
+        return 1;
+    } else if (act == ACT_COPY || act == ACT_CUT) {
+        if (*all) {
+            copy_text(0, text);
+        }
+        if (*all && act == ACT_CUT) {
+            text[0] = '\0';
+            *pos = 0;
+            *all = 0;
+        }
+        return 1;
+    }
+    if (*all && (key == K_LEFT || key == K_RIGHT || key == K_BOL || key == K_EOL || key == 5)) {
+        *pos = key == K_LEFT || key == K_BOL ? 0 : len; /* the selection ends where it goes */
+        *all = 0;
+        return 1;
+    }
+    const struct pointer_event *e = key == K_POINTER ? pointer_last() : NULL;
+    int pastes = act == ACT_PASTE || (e && e->pressed && e->button == BTN_MIDDLE);
+    int word = act == ACT_CLOSE_TAB; /* Ctrl+W: a field takes it before the table's close-tab */
+    if (*all && (pastes || key == '\b' || key == 8 || key == K_DEL || key == 4 || key == 21 || key == 11 || word ||
+                 (key != '"' && keys_typed(key) != NULL))) {
+        text[0] = '\0'; /* the selection goes; what is typed or pasted takes its place */
+        len = *pos = 0;
+        *all = 0;
+        if (key == '\b' || key == 8 || key == K_DEL || key == 4 || key == 21 || key == 11 || word) return 1;
+    }
     if (key == K_LEFT) {
         if (*pos > 0) {
             (*pos)--;
@@ -1740,7 +1809,7 @@ static int edit_line_key(int key, char *text, size_t size, size_t *pos)
             while (*pos < len && ((unsigned char)text[*pos] & 0xC0) == 0x80) (*pos)++;
         }
         return 1;
-    } else if (key == K_BOL || key == 1) {
+    } else if (key == K_BOL) {
         *pos = 0;
         return 1;
     } else if (key == K_EOL || key == 5) {
@@ -1768,22 +1837,19 @@ static int edit_line_key(int key, char *text, size_t size, size_t *pos)
     } else if (key == 11) { /* Ctrl+K */
         text[*pos] = '\0';
         return 1;
-    } else if (key == 23) { /* Ctrl+W */
+    } else if (word) { /* the word before the cursor */
         size_t prev = *pos;
         while (prev > 0 && text[prev - 1] == ' ') prev--;
         while (prev > 0 && text[prev - 1] != ' ') prev--;
         memmove(text + prev, text + *pos, len - *pos + 1);
         *pos = prev;
         return 1;
-    } else if (key == 22 || (key == K_INS && keys_modifiers && (keys_modifiers() & KEYS_SHIFT))) {
+    } else if (act == ACT_PASTE) {
         paste_into(text, size, pos, 0);
         return 1;
-    } else if (key == K_POINTER) {
-        const struct pointer_event *e = pointer_last();
-        if (e && e->pressed && e->button == BTN_MIDDLE) {
-            paste_into(text, size, pos, 1);
-            return 1;
-        }
+    } else if (pastes) {
+        paste_into(text, size, pos, 1);
+        return 1;
     } else if (key != '"' && (typed = keys_typed(key)) != NULL && len + strlen(typed) < size) {
         size_t n = strlen(typed);
         memmove(text + *pos + n, text + *pos, len - *pos + 1);
@@ -1794,31 +1860,60 @@ static int edit_line_key(int key, char *text, size_t size, size_t *pos)
     return 0;
 }
 
-/* A line typed at the bottom, starting as text: 1 with Enter, 0 with Esc. */
-static int prompt(const char *label, char *text, size_t size)
+/* The line at row from col: label, then text with the cursor (pos), the
+ * whole of it marked while it is all selected. */
+static void draw_line(int row, const char *label, const char *text, size_t pos, int all)
 {
     char line[512];
+    int col = 1;
+    screen_fill(0, row, screen_cols(), 1, BG);
+    if (label[0]) {
+        screen_text(col, row, label, ACCENT, BG);
+        col += ui_cells(label) + 1;
+    }
+    if (all) {
+        screen_text(col, row, text, BG, ACCENT);
+        screen_text(col + ui_cells(text), row, "_", ACCENT, BG);
+    } else {
+        snprintf(line, sizeof line, "%.*s_%s", (int)pos, text, text + pos);
+        screen_text(col, row, line, ACCENT, BG);
+    }
+}
+
+/* A line typed at the bottom, starting as text: 1 with Enter, 0 with Esc (or
+ * Ctrl+Q, the window's close: quit_asked). */
+static int prompt(const char *label, char *text, size_t size)
+{
     size_t pos = strlen(text);
+    int all = 0;
     for (;;) {
         size_t len = strlen(text);
         if (pos > len) pos = len;
-        snprintf(line, sizeof line, "%s %.*s_%s", label, (int)pos, text, text + pos);
-        screen_fill(0, screen_rows() - 1, screen_cols(), 1, BG);
-        screen_text(1, screen_rows() - 1, line, ACCENT, BG);
+        draw_line(screen_rows() - 1, label, text, pos, all);
         screen_flush();
-        int key = key_get();
-        if (key == 27) {
+        int key = key_get(), mods = mods_now(), act = key_action(key, mods);
+        if (act == ACT_QUIT) {
+            quit_asked = 1;
             return 0;
-        } else if (key == '\n') {
+        } else if (act == ACT_CANCEL) {
+            return 0;
+        } else if (key == '\n' && act == ACT_NONE) {
             return 1;
+        } else if (act == ACT_HELP) {
+            help_screen();
+            if (quit_asked) return 0;
+            draw();
         } else if (key == K_SHOWN) {
             draw();
         } else {
-            edit_line_key(key, text, size, &pos);
+            edit_line_key(key, mods, text, size, &pos, &all);
         }
     }
 }
 
+/* question, answered: y is yes; n, Esc and Enter are no; other keys (home's,
+ * Alt+y) are none, it waits. 0 also with Ctrl+Q or the window's close
+ * (quit_asked). */
 static int yes(const char *question)
 {
     char line[512];
@@ -1836,7 +1931,7 @@ static int yes(const char *question)
             screen_flush();
             redraw = 0;
         }
-        int key = key_get();
+        int key = key_get(), mods = mods_now();
         if (key == K_SHOWN) {
             draw();
             redraw = 1;
@@ -1847,8 +1942,22 @@ static int yes(const char *question)
             const struct pointer_event *e = pointer_last();
             if (!e->pressed) continue; /* a motion is no answer */
             key = ui_hit_at(e->col, e->row) == HIT_KEY + 'y' ? 'y' : 'n';
+            mods = 0;
         }
-        return key == 'y' || key == 'Y';
+        int act = key_action(key, mods), plain = !(mods & (KEYS_CTRL | KEYS_ALT | KEYS_META));
+        if (act == ACT_QUIT) {
+            quit_asked = 1;
+            return 0;
+        } else if (act == ACT_HELP) {
+            help_screen();
+            if (quit_asked) return 0;
+            draw();
+            redraw = 1;
+        } else if (plain && (key == 'y' || key == 'Y')) {
+            return 1;
+        } else if (act == ACT_CANCEL || (plain && (key == 'n' || key == 'N' || key == '\n'))) {
+            return 0;
+        }
     }
 }
 
@@ -1865,7 +1974,8 @@ static int valid_name(const char *s)
     return 1;
 }
 
-/* One of n items, on a screen of their own: its index, -1 with Esc or q. */
+/* One of n items, on a screen of their own: its index, -1 with Esc or q (or
+ * Ctrl+Q, the window's close: quit_asked). */
 static int choose(const char *title, char items[][320], int n)
 {
     int at = 0;
@@ -1882,7 +1992,7 @@ static int choose(const char *title, char items[][320], int n)
         screen_text(1, screen_rows() - 2, _("Up/Down or the wheel   Enter or a double click: choose   Esc: back"),
                     FG, BG);
         screen_flush();
-        int key = key_get();
+        int key = key_get(), act = key_list_action(key, mods_now());
         if (key == K_POINTER) {
             const struct pointer_event *e = pointer_last();
             if (e->wheel) {
@@ -1895,7 +2005,13 @@ static int choose(const char *title, char items[][320], int n)
             }
             continue;
         }
-        if (key == 27 || key == 'q') {
+        if (act == ACT_QUIT) {
+            quit_asked = 1;
+            return -1;
+        } else if (act == ACT_HELP) {
+            help_screen();
+            if (quit_asked) return -1;
+        } else if (act == ACT_CANCEL) {
             return -1;
         } else if (key == K_UP && at > 0) {
             at--;
@@ -2332,12 +2448,14 @@ static void form_show(struct form *f)
 }
 
 /* The selected line's value, edited where it is shown: 1 with Enter (text
- * holds it then), 0 with Esc (text as it was). Printable ASCII but ". */
+ * holds it then), 0 with Esc (text as it was; Ctrl+Q and the window's close
+ * too: quit_asked). Printable ASCII but ". */
 static int form_edit(struct form *f, char *text, size_t size)
 {
     char copy[VALUE_MAX + 1], line[VALUE_MAX + 8];
     snprintf(copy, sizeof copy, "%s", text);
     size_t pos = strlen(copy), limit = size < sizeof copy ? size : sizeof copy;
+    int all = 0;
     for (;;) {
         int row = FORM_TOP + f->sel - f->first, width = screen_cols() - FORM_VALUE - 2;
         size_t len = strlen(copy);
@@ -2350,18 +2468,30 @@ static int form_edit(struct form *f, char *text, size_t size)
         }
         snprintf(line, sizeof line, "%.*s_%.*s", before, copy + start, after > 0 ? after : 0, copy + pos);
         screen_fill(FORM_VALUE, row, screen_cols() - FORM_VALUE, 1, BG);
-        screen_text(FORM_VALUE, row, line, ACCENT, BG);
+        if (all) { /* Ctrl+A: all of it selected */
+            snprintf(line, sizeof line, "%.*s", width > 1 ? width - 1 : 0, copy);
+            screen_text(FORM_VALUE, row, line, BG, ACCENT);
+        } else {
+            screen_text(FORM_VALUE, row, line, ACCENT, BG);
+        }
         screen_flush();
-        int key = key_get();
-        if (key == 27) {
+        int key = key_get(), mods = mods_now(), act = key_action(key, mods);
+        if (act == ACT_QUIT) {
+            quit_asked = 1;
             return 0;
-        } else if (key == '\n') {
+        } else if (act == ACT_CANCEL) {
+            return 0;
+        } else if (key == '\n' && act == ACT_NONE) {
             snprintf(text, size, "%s", copy);
             return 1;
+        } else if (act == ACT_HELP) {
+            help_screen();
+            if (quit_asked) return 0;
+            form_show(f);
         } else if (key == K_SHOWN) {
             form_show(f);
         } else {
-            edit_line_key(key, copy, limit, &pos);
+            edit_line_key(key, mods, copy, limit, &pos, &all);
         }
     }
 }
@@ -2537,6 +2667,9 @@ static void add_directory(struct form *f)
     snprintf(what, sizeof what, _("A folder of your home for %.60s: o on it."),
              f->name[0] ? f->name : _("the container"));
     if (!files_pick(home_, NULL, "inode/directory", what, path, sizeof path)) {
+        if (files_close_asked()) {
+            quit_asked = 1; /* the window's close, read by the file chooser */
+        }
         return;
     }
     if (directory_refused(path, why, sizeof why)) {
@@ -2609,21 +2742,35 @@ static int grant_host_access(const struct form *f)
         for (size_t i = 0; i < sizeof details / sizeof details[0]; i++) {
             row = access_text(row, _(details[i]));
         }
-        /* TRANSLATORS: Y and N are the Y and N keys; keep them. */
-        screen_text(1, screen_rows() - 3, _("Y: allow and save   N or Esc: cancel without saving"), WARN, BG);
+        /* TRANSLATORS: Y, N, Esc and Enter are key names; keep them. */
+        screen_text(1, screen_rows() - 3, _("Y: allow and save   N, Esc or Enter: cancel without saving"), WARN, BG);
         /* TRANSLATORS: Y is the Y key; keep "Y: ". */
         int x = ui_button(1, screen_rows() - 2, _("Y: yes"), HIT_KEY + 'y');
         /* TRANSLATORS: N is the N key; keep "N: ". */
         ui_button(x, screen_rows() - 2, _("N: no"), HIT_KEY + 'n');
         screen_flush();
-        int key = key_get();
+        int key = key_get(), mods = mods_now();
         if (key == 0 || key == K_SHOWN) continue;
         if (key == K_POINTER) {
             const struct pointer_event *e = pointer_last();
             if (!e->pressed) continue;
             key = ui_hit_at(e->col, e->row) == HIT_KEY + 'y' ? 'y' : 'n';
+            mods = 0;
         }
-        return key == 'y' || key == 'Y';
+        /* y allows; n, Esc and Enter do not; any other key (home's, Alt+y) is
+         * no answer: the question stays. */
+        int act = key_action(key, mods), plain = !(mods & (KEYS_CTRL | KEYS_ALT | KEYS_META));
+        if (act == ACT_QUIT) {
+            quit_asked = 1;
+            return 0;
+        } else if (act == ACT_HELP) {
+            help_screen();
+            if (quit_asked) return 0;
+        } else if (plain && (key == 'y' || key == 'Y')) {
+            return 1;
+        } else if (act == ACT_CANCEL || (plain && (key == 'n' || key == 'N' || key == '\n'))) {
+            return 0;
+        }
     }
 }
 
@@ -2941,9 +3088,10 @@ static void edit_container_with(const char *name, const struct form *seed)
         }
         if (!quiet) form_draw(&f, l, n);
         quiet = 0;
-        int key = key_poll_timeout(-1, job ? 500 : 2000);
+        int key = key_poll_timeout(-1, job ? 500 : 2000), mods = mods_now();
         check_job();
         if (key == K_POINTER) { /* a click picks a line (a double click: Enter), or a button */
+            mods = 0;
             const struct pointer_event *e = pointer_last();
             int id = e->button == BTN_LEFT && e->pressed ? ui_hit_at(e->col, e->row) : -1;
             key = e->wheel > 0 ? K_UP : e->wheel < 0 ? K_DOWN : 0;
@@ -2959,7 +3107,14 @@ static void edit_container_with(const char *name, const struct form *seed)
                 continue;
             }
         }
-        if (key == 27 || key == 'q') {
+        int act = key_list_action(key, mods);
+        if (act == ACT_QUIT) {
+            quit_asked = 1;
+            break;
+        } else if (act == ACT_HELP) {
+            help_screen();
+            if (quit_asked) break;
+        } else if (act == ACT_CANCEL) {
             if (f.changed) {
                 say_notice(0, _("%s: not saved."), f.name[0] ? f.name : _("The new container"));
             }
@@ -2979,8 +3134,11 @@ static void edit_container_with(const char *name, const struct form *seed)
             memmove(f.dirs[i], f.dirs[i + 1], sizeof f.dirs[0] * (size_t)(f.ndirs - i - 1));
             f.ndirs--;
             f.changed = 1;
-        } else if (key == '\n' && form_enter(&f, &l[f.sel])) {
+        } else if (key == '\n' && act == ACT_NONE && form_enter(&f, &l[f.sel])) {
             break;
+        }
+        if (quit_asked) {
+            break; /* Ctrl+Q or the window's close in one of its questions */
         }
     }
     load_containers();
@@ -3108,7 +3266,7 @@ static void container_key(int key)
         } else if (key == 'b' || yes(_("Roll back to its previous build?"))) {
             start_job(label, argv);
         }
-    } else if (key == 'd') {
+    } else if (key == K_DEL) {
         snprintf(text, sizeof text, c->host ? _("Remove %s from home? Host packages and your files will be kept.") :
                  _("Remove %s (its configuration and builds)?"), c->name);
         if (strcmp(c->state, "closed") != 0) {
@@ -3159,7 +3317,7 @@ static void host_key(int key)
                 start_job(label, argv);
             }
         }
-    } else if (key == 'x' && sel[HOST] < nleaves) {
+    } else if (key == K_DEL && sel[HOST] < nleaves) {
         char *name = leaves[sel[HOST]];
         snprintf(text, sizeof text, _("Remove %s from the host (and what only it needs)?"), name);
         if (yes(text)) {
@@ -3178,8 +3336,10 @@ static void updates_key(int key)
     if (key == 'c') {
         char *argv[] = { PKG, "plan", NULL };
         start_job(_("check for updates"), argv);
-    } else if ((key == ' ' || key == '\n') && sel[UPDATES] < ntargets) {
+    } else if (key == ' ' && sel[UPDATES] < ntargets) {
         targets[sel[UPDATES]].marked = !targets[sel[UPDATES]].marked;
+    } else if (key == '\n' && sel[UPDATES] < ntargets) {
+        show_log = 0; /* its details, not the output */
     } else if (key == 'a') {
         char *argv[MAX_TARGETS + 3], question[512];
         snprintf(question, sizeof question, "%s", _("Apply:"));
@@ -3203,11 +3363,13 @@ static void updates_key(int key)
     }
 }
 
-/* What a pointer event does on a page, as a key: -1 to redraw, 0 nothing. */
-static int pointer_key(int n)
+/* What a pointer event does on a page, as a key (a button's, with its
+ * modifiers in *mods): -1 to redraw, 0 nothing. */
+static int pointer_key(int n, int *mods)
 {
     const struct pointer_event *e = pointer_last();
     int id = ui_hit_at(e->col, e->row);
+    *mods = 0;
     if (e->wheel) {
         if (id == HIT_LOWER && page == CONTAINERS && !job && !show_log) {
             details_from -= 3 * e->wheel; /* draw_lower keeps it in range */
@@ -3232,7 +3394,10 @@ static int pointer_key(int n)
     }
     if (got != TEXTSEL_NONE) return -1;
     if (e->button != BTN_LEFT || !e->pressed) return 0;
-    if (id >= HIT_KEY) return id - HIT_KEY;
+    if (id >= HIT_KEY) {
+        *mods = (id - HIT_KEY) >> 16;
+        return (id - HIT_KEY) & 0xFFFF;
+    }
     textsel_clear(); /* a row or a page: the pane shows another's */
     if (id >= HIT_TAB && id < HIT_LOWER) {
         page = id - HIT_TAB;
@@ -3257,26 +3422,64 @@ int main(void)
     }
     draw();
     for (;;) {
-        int key = key_poll_timeout(-1, job ? 500 : 2000);
+        if (quit_asked) {
+            return 0; /* Ctrl+Q or the window's close, read in a question, a list or a form */
+        }
+        int key = key_poll_timeout(-1, job ? 500 : 2000), mods = mods_now();
         check_job();
         int n = list_len();
         if (key == K_POINTER) {
-            key = pointer_key(n);
+            key = pointer_key(n, &mods);
             if (key == 0) continue;
         }
-        if (key > 0 && key != 'y' && key != 'Y' && key != 3) {
-            textsel_clear(); /* what the pane shows may change */
+        if (key == K_ACT_HOME) {
+            continue; /* process 1's: a selection stays */
         }
-        if (key == 'q' || key == 27) {
-            return 0;
-        } else if (key == 'y' || key == 3) { /* 3: Ctrl+C */
-            copy_key();
-        } else if (key == 'Y') {
-            copy_pane();
+        int act = key_list_action(key, mods);
+        if (act == ACT_QUIT) {
+            return 0; /* its jobs go on (locachy-jobs) */
+        } else if (act == ACT_HELP) {
+            help_screen();
+            if (quit_asked) return 0;
+            draw();
+            continue;
+        } else if (act == ACT_CANCEL) {
+            textsel_clear(); /* Esc, q: the selection goes; nothing else at the top */
+            draw();
+            continue;
+        }
+        if (act == ACT_COPY) {
+            key = K_ACT_COPY; /* Ctrl+C: the selection, or the whole pane after Ctrl+A */
+        } else if (act == ACT_SELECT_ALL) {
+            key = K_ACT_SELECT_ALL; /* Ctrl+A on the pane: all of it, for Ctrl+C */
+        } else if (act == ACT_FIND) {
+            key = '/'; /* Ctrl+F searches as / does */
+        } else if (act == ACT_DELETE || act == ACT_DELETE_PERMANENT) {
+            key = K_DEL;
+        } else if (act != ACT_NEXT_FIELD && act != ACT_PREV_FIELD && act != ACT_NONE) {
+            key = 0; /* the table's other actions are nothing here */
+        } else if (key >= ' ' && key < 0x7F && (mods & (KEYS_ALT | KEYS_META))) {
+            key = 0; /* a letter's command is the letter alone: Alt+y is not y */
+        }
+        if (key > 0 && key != K_ACT_COPY && key != K_ACT_SELECT_ALL) {
+            textsel_clear(); /* what the pane shows may change */
+            pane_all = 0;
+        }
+        if (key == K_ACT_COPY) {
+            if (pane_all) {
+                copy_pane();
+            } else {
+                copy_key();
+            }
+            pane_all = 0;
+        } else if (key == K_ACT_SELECT_ALL) {
+            textsel_clear();
+            pane_all = 1;
+            show_notice(0, _("The whole pane is selected: Ctrl+C copies it."));
         } else if (key == 'g' && !job && nwanted) {
             continue_job();
-        } else if (key == '\t') {
-            page = (page + 1) % PAGES;
+        } else if (act == ACT_NEXT_FIELD || act == ACT_PREV_FIELD) {
+            page = (page + (act == ACT_PREV_FIELD ? PAGES - 1 : 1)) % PAGES;
         } else if (key == K_UP && sel[page] > 0) {
             sel[page]--;
         } else if (key == K_DOWN && sel[page] < n - 1) {

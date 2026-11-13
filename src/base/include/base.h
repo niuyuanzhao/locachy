@@ -260,6 +260,11 @@ int panel_hits(struct panel_hit *out, int max);
 #define K_NAMED      0x1F9 /* while keys_name_any: a key that types nothing, bound to nothing */
 #define K_TEXT       0x1FA /* a key typed text that is not one ASCII character (ä, €, a dead key's é): keys_text */
 #define K_ACT_LOCK   0x1FB /* key_lock: process 1 locks the screen */
+/* A button standing for a key of the table: a click comes without the
+ * modifiers, so the button gives these and key_action reads them as the
+ * keys' actions. */
+#define K_ACT_COPY       0x1EE /* Ctrl+C: ACT_COPY */
+#define K_ACT_SELECT_ALL 0x1EF /* Ctrl+A: ACT_SELECT_ALL */
 #define K_ACT_HOME   0x1FE
 /* Not a key: closing the window was asked for (its close button, or the
  * compositor's close binding). Only a window (LOCACHY_BACKEND=wayland) gets
@@ -320,6 +325,59 @@ void keys_name_any(int on);
 #define KEYS_ALTGR 16
 #define KEYS_CAPS  32
 int keys_modifiers(void);
+/* What a key means, the same in every program (key-action.c; KEYS.md).
+ * Programs react to the action and never test the raw key for these: Ctrl
+ * with a letter comes as its control character (Ctrl+Q is 17, Ctrl+C is 3,
+ * Ctrl+Shift+Z is 26 with KEYS_SHIFT) and Ctrl with a digit as K_CTRL_0 + n,
+ * so a test for 'q', or for 'q' with KEYS_CTRL, never sees Ctrl+Q. A line of
+ * text being typed takes its own editing keys (Delete, Backspace, Home, End,
+ * the arrows, the letters) before asking. key_list_action is the same for a
+ * list where nothing is being typed, with q also meaning Esc there. K_ACT_HOME
+ * is process 1's: a program changes nothing on it, its questions stay. */
+enum key_action {
+    ACT_NONE,
+    ACT_QUIT,             /* Ctrl+Q, the window's close (K_CLOSE), Alt+F4: quit, asking first when work would be lost */
+    ACT_CANCEL,           /* Esc: the innermost menu, dialog, field, search, drag or selection; else back one level; nothing at the top */
+    ACT_HELP,             /* F1 */
+    ACT_BACK,             /* Alt+Left */
+    ACT_FORWARD,          /* Alt+Right */
+    ACT_UP,               /* Alt+Up: the parent folder or page */
+    ACT_NEXT_FIELD,       /* Tab */
+    ACT_PREV_FIELD,       /* Shift+Tab */
+    ACT_COPY,             /* Ctrl+C, Ctrl+Insert, Ctrl+Shift+C */
+    ACT_CUT,              /* Ctrl+X */
+    ACT_PASTE,            /* Ctrl+V, Shift+Insert, Ctrl+Shift+V */
+    ACT_UNDO,             /* Ctrl+Z */
+    ACT_REDO,             /* Ctrl+Shift+Z */
+    ACT_SELECT_ALL,       /* Ctrl+A */
+    ACT_DESELECT,         /* Ctrl+Shift+A */
+    ACT_FIND,             /* Ctrl+F: find in text, filter a list */
+    ACT_FIND_IN_FILES,    /* Ctrl+Shift+F */
+    ACT_FIND_NEXT,        /* F3 */
+    ACT_FIND_PREV,        /* Shift+F3 */
+    ACT_NEW,              /* Ctrl+N */
+    ACT_NEW_FOLDER,       /* Ctrl+Shift+N */
+    ACT_OPEN,             /* Ctrl+O */
+    ACT_SAVE,             /* Ctrl+S */
+    ACT_SAVE_AS,          /* Ctrl+Shift+S */
+    ACT_NEW_TAB,          /* Ctrl+T */
+    ACT_REOPEN_TAB,       /* Ctrl+Shift+T */
+    ACT_CLOSE_TAB,        /* Ctrl+W */
+    ACT_NEXT_TAB,         /* Ctrl+PgDn, Ctrl+Tab */
+    ACT_PREV_TAB,         /* Ctrl+PgUp, Ctrl+Shift+Tab */
+    ACT_RENAME,           /* F2 */
+    ACT_DELETE,           /* Delete: the selection to the trash, or removed */
+    ACT_DELETE_PERMANENT, /* Shift+Delete */
+    ACT_PROPERTIES,       /* Alt+Enter */
+    ACT_RELOAD,           /* F5 */
+    ACT_HIDDEN,           /* Alt+. : hidden files shown or not */
+    ACT_ZOOM_IN,          /* Ctrl++, Ctrl+= */
+    ACT_ZOOM_OUT,         /* Ctrl+- */
+    ACT_ZOOM_RESET,       /* Ctrl+0 */
+    ACT_CONTEXT_MENU,     /* Shift+F10 */
+};
+int key_action(int key, int mods);
+int key_list_action(int key, int mods);
 /* Caps Lock and Num Lock on the keyboards' LEDs, written as libinput writes
  * them, by a process whose own keyboards they are: process 1, which holds
  * the one lock state for every program (the programs it lends keyboards to
@@ -412,6 +470,15 @@ int ui_button(int col, int row, const char *label, int id);
 int ui_cells(const char *s);
 const char *ui_pad(char *out, size_t size, const char *s, int cells);
 int ui_menu(int col, int row, const char *const *items);
+/* F1's panel over the whole screen: the program's own keys, then the keys
+ * every program has (key_action's table). lines ends with { NULL, NULL };
+ * what is translated when shown (a static table marks it N_). Esc, F1 or q
+ * closes it: ACT_NONE, then redraw. The window's close or Ctrl+Q there:
+ * ACT_QUIT, for the program to quit as it does. */
+struct ui_help_line {
+    const char *keys, *what;
+};
+int ui_help(const char *title, const struct ui_help_line *lines);
 
 int base_audio_key(int action_key, char *toast, size_t size);
 

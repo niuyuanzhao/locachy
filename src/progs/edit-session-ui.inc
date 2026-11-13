@@ -186,10 +186,10 @@ static int session_apply(const struct edit_session_state *state)
              * File > Reload asks Save/Discard first; Save asks Save
              * Nevertheless while d->disk is set. */
             if (d->disk == DISK_DELETED) {
-                n->actions[n->nactions++] = ACT_CLOSE_FILE;
-                n->actions[n->nactions++] = ACT_SAVE_AS;
+                n->actions[n->nactions++] = MSG_CLOSE_FILE;
+                n->actions[n->nactions++] = MSG_SAVE_AS;
             }
-            n->actions[n->nactions++] = ACT_IGNORE;
+            n->actions[n->nactions++] = MSG_IGNORE;
         }
     }
     follow_project();
@@ -357,6 +357,27 @@ static int session_quit(void)
                    buttons, 2, 1, 1) == 0;
     }
     return session_checkpoint(1, 1) == 0;
+}
+
+/* A document changed and not saved (an empty unnamed one is nothing). */
+static int any_modified(void)
+{
+    for (int i = 0; i < ndocs; i++) {
+        if (doc_modified(docs[i]) && !(doc_len(docs[i]) == 0 && !docs[i]->path[0])) return 1;
+    }
+    return 0;
+}
+
+/* Ctrl+Q, Alt+F4 and the window's close: with a modified document, Kate's
+ * Save Documents question first, also with a session (Save, Discard,
+ * Cancel). Discarded changes are not kept as the session's recovery. */
+static int ask_quit(void)
+{
+    if (any_modified()) {
+        if (!query_quit()) return 0;
+        if (any_modified()) return 1; /* Discard */
+    }
+    return session_quit();
 }
 
 /* Paginate because ui_menu itself has no scrolling and names may exceed the

@@ -1080,9 +1080,25 @@ static void power_curves_page(void)
             if (power_curves_pointer(pointer_last())) power_curves_draw();
             continue;
         }
-        if (key == 27 || key == 'q' || close_read(key)) {
+        int mods = mods_now(), act = key_list_action(key, mods);
+        if (act == ACT_CANCEL || close_read(key)) { /* Esc, q: back; Ctrl+Q, the window's close: quit */
             if (!closing) notice[0] = '\0';
             return;
+        }
+        if (act == ACT_HELP) {
+            help_screen();
+            if (closing) return;
+            power_curves_draw();
+            continue;
+        }
+        if (act == ACT_COPY) {
+            key = 'c'; /* Ctrl+C copies as c does */
+        } else if (act == ACT_NEXT_FIELD || act == ACT_PREV_FIELD) {
+            key = '\t';
+        } else if (act != ACT_NONE && act != ACT_DELETE) {
+            continue; /* Delete is the cursor's: off */
+        } else if (key >= ' ' && key < 0x7F && (mods & (KEYS_ALT | KEYS_META))) {
+            continue; /* Alt+m is not m */
         }
         int cols = screen_cols();
         int plot_w = (cols - 4) - 10;
@@ -1099,8 +1115,8 @@ static void power_curves_page(void)
         } else if (key == '+' || key == '=' || key == ']') {
             power_span = (power_span + 1) % NPSPANS;
             power_load_selected_history();
-        } else if (key == '\t' && npower_devs > 1) {
-            power_sel_dev = (power_sel_dev + 1) % npower_devs;
+        } else if (key == '\t' && npower_devs > 1) { /* Tab, Shift+Tab: the next, the previous pack */
+            power_sel_dev = (power_sel_dev + (act == ACT_PREV_FIELD ? npower_devs - 1 : 1)) % npower_devs;
             power_cursor = -1;
             power_load_selected_history();
         } else if (key == K_LEFT) {

@@ -1842,13 +1842,14 @@ static void pdf_action(int a)
 static int pdf_key_global(int key, int mods)
 {
     if (!doc.open) return 0;
-    int ctrl = mods & KEYS_CTRL, shift = mods & KEYS_SHIFT;
-    if (key == 19 && ctrl && pdf_on()) {
-        do_action(shift ? A_SAVE_AS : A_SAVE);
+    int act = key_action(key, mods);
+    if (act == ACT_SAVE || act == ACT_SAVE_AS) {
+        if (!pdf_on()) return 0;
+        do_action(act == ACT_SAVE_AS ? A_SAVE_AS : A_SAVE);
         return 1;
     }
-    if (key == 26 && ctrl && pdf_on() && ui.focus != FOCUS_FIND) {
-        do_action(shift ? A_REDO : A_UNDO);
+    if ((act == ACT_UNDO || act == ACT_REDO) && pdf_on() && ui.focus != FOCUS_FIND) {
+        do_action(act == ACT_REDO ? A_REDO : A_UNDO);
         return 1;
     }
     if (key == K_F1 + 5 && !mods) {
@@ -1925,14 +1926,15 @@ static void save_as_named(void)
 
 static int pdf_key_prompt(int key, int mods)
 {
-    int yes = key == 'y' || key == 'Y';
+    int yes = key == 'y' || key == 'Y', act = key_action(key, mods);
+    if (key == K_ACT_HOME) return 0; /* process 1's: every question waits */
     switch (prompt.kind) {
     case P_PDF_TEXT:
         edit_key(key, mods);
         return 1;
     case P_PDF_SAVE_AS:
         if (key == '\n') save_as_named();
-        else if (key == 27) {
+        else if (act == ACT_CANCEL) {
             prompt_close();
             toast(0, _("Not saved."));
         } else return 0;
@@ -1958,7 +1960,7 @@ static int pdf_key_prompt(int key, int mods)
         } else if (key == 'd' || key == 'D') {
             prompt_close();
             pdf_resume();
-        } else if (key == 27 || key == 'c' || key == 'C') {
+        } else if (act == ACT_CANCEL || key == 'c' || key == 'C') {
             prompt_close();
             pdf.resume = 0;
         }

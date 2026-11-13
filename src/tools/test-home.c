@@ -200,6 +200,7 @@ int key_poll_timeout(int fd, int timeout)
     return key;
 }
 double uptime(void) { return 1.0; }
+int keys_modifiers(void) { return 0; }
 void say(const char *format, ...) { (void)format; }
 
 /* Some row of the screen shows text. */
@@ -262,6 +263,8 @@ int main(int argc, char **argv)
     act("freeze");
     assert(freeze_calls == 2 && opens == 0);
     confirm_stop();
+    assert(confirming == CONF_STOP && nstop == 2 && stop_calls == 0);
+    confirm_key(K_ACT_HOME); /* process 1's home key: the question waits */
     assert(confirming == CONF_STOP && nstop == 2 && stop_calls == 0);
     confirm_key('n');
     assert(confirming == CONF_NONE && stop_calls == 0);

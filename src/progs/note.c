@@ -91,6 +91,9 @@ int main(int argc, char **argv)
             for (int i = 0; i < nlines; i++) {
                 screen_text(1, 4 + i, lines[i], FG, BG);
             }
+        } else if (key_action(key, keys_modifiers()) == ACT_QUIT) {
+            say("note %s: quit (Ctrl+Q or the window's close)", name);
+            return 0; /* as exit 0 */
         } else if (key == '\n' && len == 4 && memcmp(cur, "call", 4) == 0) {
             /* run another note on top of this one and wait for it */
             char *callee[] = { "/usr/local/bin/note", "x", "16", NULL };

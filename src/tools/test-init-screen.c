@@ -9,6 +9,7 @@
 #include "../init/init.c"
 #undef main
 #include <assert.h>
+#include <stdarg.h>
 #include <sys/stat.h>
 
 static int refreshed, lends, returns, releases, available = 1, send_fail, kbd_count, ndev;
@@ -20,7 +21,24 @@ static int nouts;
 static uint32_t lessee_of[4], next_lessee = 40;
 
 static void step(char c) { size_t n = strlen(order); if (n + 1 < sizeof order) { order[n] = c; order[n + 1] = 0; } }
-void say(const char *fmt, ...) { (void)fmt; }
+static char said[4096]; /* process 1's log lines since it was last emptied */
+void say(const char *fmt, ...)
+{
+    size_t n = strlen(said);
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(said + n, sizeof said - n, fmt, ap);
+    va_end(ap);
+    n = strlen(said);
+    if (n + 1 < sizeof said) {
+        said[n] = '\n';
+        said[n + 1] = 0;
+    }
+}
+/* The one program holding a live link (extdisplay's base_session_hold), by
+ * its cgroup; none for NULL. */
+static const char *holding;
+int apps_session_holding(const char *cgroup) { return holding && cgroup && strcmp(cgroup, holding) == 0; }
 void apps_list(char *buf, size_t size) { if (size) buf[0] = 0; }
 
 static const char *who(int fd)
@@ -626,6 +644,78 @@ static void one_screen(void)
     puts("PASS a focused screen home does not show: the built-in panel, else the first home shows; never all");
 }
 
+/* extdisplay holding a live link on the screen: the idle lock waits; run
+ * out meanwhile, it comes once no screen shows the link (the cable out, the
+ * program gone, home), whatever input came since. lock_argv names no
+ * program here, so the lock is seen asked for by its log line. */
+static void idle_link(void)
+{
+    char *lock_program = lock_argv[0];
+    lock_argv[0] = "/nonexistent/lock";
+    reset(1, 1, 0);
+    struct frame *ext = task(0, "extdisplay");
+    char *argv[] = { "extdisplay", NULL };
+    assert(do_open(-1, argv) == 0);
+    home_wait(argv);
+    assert(places[0].task == &tasks[0] && !ext->frozen);
+    holding = ext->cgroup;
+    lock_after = 2;
+    lock_due = 0;
+    active_at = now_ms() - 2500;
+    said[0] = 0;
+    assert(held_in_front() && idle_lock_check() == 0 && lock_due && !strstr(said, "not locking"));
+    assert(idle_lock_at() < 0); /* nothing to wake up for while the link holds the screen */
+    input_seen(); /* the input path: due stays due */
+    assert(lock_due && idle_lock_check() == 0 && idle_lock_at() < 0);
+    holding = NULL; /* the cable out: the program reports hold 0 */
+    assert(!held_in_front() && idle_lock_at() == 0);
+    assert(idle_lock_check() == 1 && !lock_due && strstr(said, "not locking"));
+    puts("PASS a live link on the screen holds the idle lock off; run out meanwhile, it locks once the link ends, input since or not");
+
+    holding = ext->cgroup;
+    active_at = now_ms() - 2500;
+    assert(idle_lock_check() == 0 && lock_due);
+    said[0] = 0;
+    go_home(0);
+    assert(places[0].task == NULL && !lock_due && strstr(said, "not locking"));
+    assert(!ext->frozen); /* its link goes on behind home */
+    puts("PASS home from a live link the idle time ran out on asks for the lock first");
+
+    /* Input and the home key in one poll pass, the input first: the expiry
+     * is latched before the input moves active_at, so home still locks. */
+    assert(do_open(-1, argv) == 0);
+    home_wait(argv);
+    holding = ext->cgroup;
+    lock_due = 0;
+    active_at = now_ms() - 2500;
+    said[0] = 0;
+    input_seen();
+    assert(lock_due && idle_lock_at() < 0 && active_at > now_ms() - 1000);
+    go_home(0);
+    assert(strstr(said, "not locking") && !lock_due);
+    puts("PASS input in the same pass as home does not cancel a run-out idle lock");
+
+    /* Home's screen, the link behind it: the idle lock as ever. */
+    assert(!held_in_front());
+    active_at = now_ms() - 2500;
+    said[0] = 0;
+    assert(idle_lock_check() == 1 && strstr(said, "no input for 2 s: locking"));
+    assert(do_open(-1, argv) == 0);
+    home_wait(argv);
+    active_at = now_ms();
+    said[0] = 0;
+    go_home(0);
+    assert(places[0].task == NULL && !strstr(said, "not locking"));
+    lock_due = 1;
+    lock_after = 0;
+    assert(idle_lock_at() < 0);
+    puts("PASS the link behind home locks as ever; home before the idle time ran out does not lock; 0 never locks");
+    holding = NULL;
+    lock_due = 0;
+    lock_after = 600;
+    lock_argv[0] = lock_program;
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2 && mkdir(argv[1], 0700) == 0);
@@ -637,6 +727,7 @@ int main(int argc, char **argv)
     three();
     one_screen();
     waiting();
+    idle_link();
     puts("ALL PASSED");
     return 0;
 }

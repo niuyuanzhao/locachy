@@ -54,6 +54,12 @@ static int ipc = -1, active, outside_cancelled;
 static struct extdisplay_setup setup = { .fd = -1, .stream = -1 };
 static pid_t broker = -1;
 static int leaving, selected;
+/* The cable came out during a session: the next key closes extdisplay. A
+ * live link is never left by a key (the user's rule): only this ends it. */
+static int unplugged;
+/* Ctrl+Alt+F12 during a session: the session ends (the broker cancels it,
+ * as at any session's end) and the setup screen comes back. */
+static int disconnecting;
 static uint32_t *frame;
 static size_t frame_bytes;
 static uint32_t frame_w, frame_h;
@@ -128,7 +134,7 @@ static void draw(void)
     snprintf(text, sizeof text, _("Status: %s    Stream: %ux%u"), _(state), frame_w, frame_h);
     screen_text(1, rows - 4, text, ACCENT, PANEL);
     screen_text(1, rows - 3, _(detail), FG, PANEL);
-    screen_text(1, rows - 2, _("Ctrl+Alt+F12: disconnect    Home, lock and brightness stay local"), FG, PANEL);
+    screen_text(1, rows - 2, _("Ctrl+Alt+F12: disconnect    Home, lock and brightness stay local; the link stays up"), FG, PANEL);
     screen_text(1, rows - 1, _("No clipboard, files or commands. The peer keeps its original screen."), DIM, PANEL);
     screen_flush();
 }
@@ -170,9 +176,15 @@ static int raw_input(void)
             if (cancel() < 0) return -1;
             continue;
         }
-        /* evdev KEY_F12: the emergency exit, independent of rc.conf's keys.
-         * The broker is released (that ends any session) and extdisplay leaves. */
+        /* evdev KEY_F12: the emergency disconnect, independent of rc.conf's keys.
+         * With a session it ends that session (not the broker: a release would
+         * end extdisplay) and the setup screen comes back. Without one, nothing
+         * is lost: extdisplay leaves. */
         if (e.code == 88 && e.state == 1 && (e.modifiers & (KEYS_CTRL | KEYS_ALT)) == (KEYS_CTRL | KEYS_ALT)) {
+            if (ipc >= 0 || active) {
+                disconnecting = 1;
+                return 0;
+            }
             leaving = 1;
             if (setup.fd < 0 || extdisplay_setup_release(&setup) != 0) stop = 1;
             return 0;
@@ -296,6 +308,7 @@ static int handle_worker(int *inhibited, double *started)
     }
     case EXTDISPLAY_IPC_ACTIVE:
         active = 1;
+        (void)base_session_hold(1); /* the link is live: home and the lock do not freeze this program */
         /* Held only while remote input is allowed (session.h). */
         if (!*inhibited && base_session_input_allowed()) {
             if (base_sleep_inhibit(1) < 0) {
@@ -362,15 +375,18 @@ static void session_run(int transport)
     draw();
 
     double started = uptime();
-    while (!stop && !leaving) {
+    while (!stop && !leaving && !disconnecting) {
         struct pollfd p[3] = { { ipc, POLLIN, 0 }, { owner, POLLIN, 0 }, { setup.fd, POLLIN, 0 } };
         int key = key_poll_many(p, 3, 100);
-        if (key == K_CLOSE || key == K_ACT_HOME || key == K_ACT_LOCK || (ipc < 0 && key == 27)) break;
+        /* A live link is not left by a key: home and the lock take the screen
+         * and the link stays (base_session_hold). Without one these leave it. */
+        if (ipc < 0 && (key == K_CLOSE || key == K_ACT_HOME || key == K_ACT_LOCK || key == 27)) break;
         int redraw = 0;
         /* The broker ends the session (the cable, a timeout), or has gone. */
         if (setup.fd >= 0 && p[2].revents) {
             enum extdisplay_setup_event ev = extdisplay_setup_read(&setup);
             if (ev == EXTDISPLAY_SETUP_EV_ENDED || ev == EXTDISPLAY_SETUP_EV_BROKEN) {
+                if (ev == EXTDISPLAY_SETUP_EV_ENDED && strcmp(setup.reason, "carrier-lost") == 0) unplugged = 1;
                 set_state(N_("Disconnected"), extdisplay_setup_reason_text(setup.reason));
                 break;
             }
@@ -419,10 +435,12 @@ static void session_run(int transport)
             break;
         }
     }
+    if (disconnecting) set_state(N_("Disconnected"), N_("Disconnected with Ctrl+Alt+F12; extdisplay stays open."));
     /* session.h's order: no input, cancel, inhibitor off, then the worker
      * (STOP writes cancel again before it exits). */
     if (active) cancel();
     active = 0;
+    (void)base_session_hold(0);
     if (inhibited) base_sleep_inhibit(0);
     end_worker(worker);
     if (frame) munmap(frame, frame_bytes);
@@ -431,6 +449,7 @@ static void session_run(int transport)
     /* Ended here first (the peer, the owner, the user): the broker is told,
      * and answers "ended cancelled" once it is idle again. */
     if (setup.state == EXTDISPLAY_SETUP_PAIRED) extdisplay_setup_cancel(&setup);
+    disconnecting = 0;
 }
 
 /* The setup screen: the candidate interfaces with their carrier, and the
@@ -497,10 +516,23 @@ static void setup_draw(void)
     } else if (setup.reason[0]) {
         screen_text(1, rows - 3, _(extdisplay_setup_reason_text(setup.reason)), FG, PANEL);
     }
-    screen_text(1, rows - 2, _("Up/Down choose   Enter pair   Esc cancel   F5 scan   Ctrl+Alt+F12 release"), FG, PANEL);
+    if (unplugged) {
+        screen_fill(0, rows - 3, cols, 1, PANEL);
+        screen_text(1, rows - 3, _("The cable was unplugged. Press any key to close."), WARN, PANEL);
+    }
+    screen_text(1, rows - 2, _("Up/Down choose   Enter pair   Esc cancel   F5 scan   F1 help   Ctrl+Q quit"), FG, PANEL);
     screen_text(1, rows - 1, _("The code and the address are kept in memory only."), DIM, PANEL);
     screen_flush();
 }
+
+static const struct ui_help_line setup_keys[] = {
+    { "Up, Down", N_("Choose the cable interface") },
+    { "Enter", N_("Pair with the Mac on it") },
+    { "Esc", N_("Cancel the pairing") },
+    { "F5", N_("Look for cable interfaces again") },
+    { "Ctrl+Alt+F12", N_("Disconnect a session; extdisplay stays open") },
+    { NULL, NULL },
+};
 
 /* Pairs and sessions one after another until the broker releases (or stops). */
 static void setup_loop(void)
@@ -537,7 +569,15 @@ static void setup_loop(void)
             }
             if (setup.state == EXTDISPLAY_SETUP_LIST && setup.count && selected >= setup.count) selected = 0;
         }
-        if (key == K_CLOSE || key == K_ACT_HOME || key == K_ACT_LOCK) {
+        if (unplugged && key && key != K_SHOWN && key != K_POINTER) {
+            key = K_CLOSE; /* the cable came out during the session: any key closes */
+        }
+        int act = key_action(key, keys_modifiers());
+        if (act == ACT_HELP) {
+            if (ui_help(_("Extended display keys"), setup_keys) == ACT_QUIT) act = ACT_QUIT;
+            redraw = 1;
+        }
+        if (act == ACT_QUIT || key == K_ACT_HOME || key == K_ACT_LOCK) {
             /* Leaving: the broker releases and answers "ended released"; the
              * loop ends then. Without a channel there is nothing to wait for. */
             leaving = 1;

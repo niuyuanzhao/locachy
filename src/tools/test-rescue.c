@@ -180,6 +180,11 @@ static char grid[MAX_ROWS][MAX_COLS + 1], history[256 * 1024], copied[2][2048], 
 static struct pointer_event mouse;
 static int events[8192], nevents, event_at, resizing, when;
 #define WAIT_JOB (-1)
+/* KEY(k, m): key k with modifiers m, as the key layer gives it; Ctrl+Q is 17 with KEYS_CTRL. */
+#define KEY(k, m) (-1000000 - ((m) << 16) - (k))
+#define CTRL_Q KEY('q' & 0x1F, KEYS_CTRL)
+static int mods; /* the modifiers of the key being read */
+int keys_modifiers(void) { return mods; }
 #define SNAP (-2)
 #define WAIT_HANG (-3)
 #define REMOVE_BUSY (-4)
@@ -261,13 +266,22 @@ static void wheel(int col, int row, int amount)
 int key_poll_timeout(int fd, int ms)
 {
     (void)fd;
-    assert(ms >= 0 && ms <= 500);
+    assert(ms >= -1 && ms <= 500); /* -1: ui_help waits for a key */
     assert(++polls < 20000);
     if (event_at == nevents) {
         fprintf(stderr, "Missing test event: modal=%d child=%d exiting=%d notice=%s\n", modal, (int)child.pid, exiting, notice);
         abort();
     }
     int key = events[event_at];
+    mods = 0;
+    if (key <= KEY(0, 0)) {
+        key = KEY(0, 0) - key;
+        mods = key >> 16;
+        key &= 0xFFFF;
+        event_at++;
+        when++;
+        return key;
+    }
     if (key == WAIT_JOB || key == WAIT_HANG) {
         if ((key == WAIT_JOB && child.pid) || (key == WAIT_HANG && !exists("hang-ready"))) {
             struct pollfd p = { .fd = -1 }; poll(&p, 0, 5); return 0;
@@ -323,7 +337,7 @@ static void run(const char *name)
     assert(!secret[0] && !first_secret[0] && !child.input[0]);
     assert(!strcmp(state.state, "closed") && !state.active && done);
 }
-static void exit_events(void) { k('q'); k(WAIT_JOB); }
+static void exit_events(void) { k(CTRL_Q); k(WAIT_JOB); }
 static void lock_tests(void)
 {
     assert(session_lock() == 0);
@@ -405,7 +419,7 @@ int main(int argc, char **argv)
     assert(strstr(history, "Cleanup did not finish")); assert(close_kept >= 3);
 
     reset(); write_file("lying-cleanup", "");
-    k(WAIT_JOB); k('q'); k(WAIT_JOB); k(SNAP); k(REMOVE_LIE); exit_events();
+    k(WAIT_JOB); k(CTRL_Q); k(WAIT_JOB); k(SNAP); k(REMOVE_LIE); exit_events();
     run("cleanup ok alone is insufficient: target must actually be closed");
     assert(strstr(history, "Cleanup did not finish"));
 
@@ -435,7 +449,7 @@ int main(int argc, char **argv)
 
     reset();
     k(WAIT_JOB); action(A_SCAN); k(WAIT_JOB); k(SNAP); k(K_PGUP); k(SNAP);
-    wheel(70, 18, -2); k(SNAP); click(3, 3, 3); k('y'); k(SNAP); exit_events();
+    wheel(70, 18, -2); k(SNAP); click(3, 3, 3); k(KEY('c' & 0x1F, KEYS_CTRL)); k(SNAP); exit_events();
     run("separate output scroll, pointer text selection and clipboard");
     assert(strstr(history, "Scan result")); assert(copied[0][0] && copied[1][0]);
 
@@ -449,7 +463,7 @@ int main(int argc, char **argv)
     assert(!strstr(slurp("calls"), "check-layout"));
 
     reset(); write_file("esp-blocked", "");
-    k(WAIT_JOB); action(A_UNLOCK); k(K_DOWN); k('\n'); type("disk-secret"); k('\n'); k(WAIT_JOB); action(A_REPAIR); k(SNAP); k('q'); k(WAIT_JOB);
+    k(WAIT_JOB); action(A_UNLOCK); k(K_DOWN); k('\n'); type("disk-secret"); k('\n'); k(WAIT_JOB); action(A_REPAIR); k(SNAP); k(CTRL_Q); k(WAIT_JOB);
     run("read-only target with ambiguous ESP blocks repair and shows reason");
     assert(strstr(history, "ESP identity is ambiguous") && strstr(history, "Repair blocked"));
 
@@ -462,9 +476,9 @@ int main(int argc, char **argv)
     run("target terminal failure returns to Rescue instead of exiting it");
     assert(strstr(history, "Target terminal failed"));
     reset(); setenv("LOCACHY_RESCUE_BOOT", "1", 1);
-    k(WAIT_JOB); k('q'); k(WAIT_JOB); k(SNAP);
-    k('b'); k(SNAP); k('\n'); k(SNAP); k('p'); k(SNAP); k('n'); k(SNAP);
-    k('r'); k(WAIT_JOB); k(SNAP); k('q'); k(WAIT_JOB); k(SNAP); k(STOP_UI);
+    k(WAIT_JOB); k(CTRL_Q); k(WAIT_JOB); k(SNAP);
+    k('b'); k(SNAP); k('\n'); k(SNAP); k('n'); k('p'); k(SNAP); k(27); k(SNAP); /* Enter waits; n, Esc: no */
+    k('r'); k(WAIT_JOB); k(SNAP); k(CTRL_Q); k(WAIT_JOB); k(SNAP); k(STOP_UI);
     run("dedicated boot cleanup shows a usable closed page, power needs Y, and a new session stays independent");
     assert(strstr(history, "Rescue session closed") && strstr(history, "Start a new rescue session"));
     assert(strstr(history, "No terminal or installer will open automatically"));
@@ -473,17 +487,58 @@ int main(int argc, char **argv)
     assert(strstr(slurp("calls"), "helper|status\nhelper|cleanup\nhelper|status\nhelper|cleanup\n"));
 
     reset(); setenv("LOCACHY_RESCUE_BOOT", "1", 1); write_file("power-fail", "");
-    k(WAIT_JOB); k('q'); k(WAIT_JOB); k('b'); k('y'); k(WAIT_JOB); k(SNAP); k(STOP_UI);
+    k(WAIT_JOB); k(CTRL_Q); k(WAIT_JOB); k('b'); k('y'); k(WAIT_JOB); k(SNAP); k(STOP_UI);
     run("dedicated boot power failure leaves the closed page usable");
     assert(strstr(slurp("calls"), "systemctl|reboot\n"));
     assert(strstr(history, "closed rescue session remains on screen"));
 
     reset(); setenv("LOCACHY_RESCUE_BOOT", "1", 1);
-    k(WAIT_JOB); k('q'); k(WAIT_JOB); k('p'); k('Y'); k(WAIT_JOB); k(SNAP); k(STOP_UI);
+    k(WAIT_JOB); k(CTRL_Q); k(WAIT_JOB); k('p'); k('Y'); k(WAIT_JOB); k(SNAP); k(STOP_UI);
     run("dedicated boot power off is requested only after explicit Y");
     assert(strstr(slurp("calls"), "systemctl|poweroff\n"));
     assert(strstr(history, "Shutdown requested"));
     unsetenv("LOCACHY_RESCUE_BOOT");
+
+    /* Esc and q at the top stay; F1 lists the keys (Esc closes them); Shift+Tab
+     * goes back a pane; the layout is typed over with Ctrl+A; Ctrl+Q exits. */
+    reset();
+    k(WAIT_JOB); k(27); k('q'); k(KEY('q', KEYS_ALT)); k(K_F1); k(SNAP); k(27); k(KEY('\t', KEYS_SHIFT)); k(SNAP);
+    exit_events();
+    run("Esc and q at the top stay; F1 lists the keys; Shift+Tab goes back a pane; Ctrl+Q exits");
+    assert(strstr(history, "Rescue keys") && strstr(history, "Exit Rescue, with its cleanup"));
+    assert(strstr(history, "Ctrl+Q: exit") && focus == F_OUTPUT && !strstr(slurp("calls"), "keytable"));
+    puts("PASS rescue: Esc and q at the top stay; F1 lists the keys; Shift+Tab goes back; Ctrl+Q exits");
+
+    reset();
+    k(WAIT_JOB); action(A_KEYMAP); type("xx"); k(KEY('a' & 0x1F, KEYS_CTRL)); type("de"); k(K_BOL); k('\n');
+    k(WAIT_JOB); k(SNAP); exit_events();
+    run("layout: Ctrl+A selects what is typed over, Home goes to the start");
+    assert(strstr(slurp("calls"), "keytable|de|") && !strstr(slurp("calls"), "xx"));
+    puts("PASS rescue: Ctrl+A selects the layout text; typing replaces it");
+
+    /* The power question takes y, n and Esc: Enter, home's key and Alt+y wait. */
+    reset(); setenv("LOCACHY_RESCUE_BOOT", "1", 1);
+    k(WAIT_JOB); k(CTRL_Q); k(WAIT_JOB); k('p'); k('\n'); k(K_ACT_HOME); k(KEY('y', KEYS_ALT)); k(SNAP); k(27); k(SNAP);
+    k(STOP_UI);
+    run("power question: Enter, home's key and Alt+y wait; Esc cancels");
+    assert(strstr(history, "Power off this computer?") && strstr(history, "remains closed"));
+    assert(!strstr(slurp("calls"), "systemctl|poweroff"));
+    unsetenv("LOCACHY_RESCUE_BOOT");
+    puts("PASS rescue: the power question waits for y, n or Esc");
+
+    /* In a line typed, q is a letter (not Esc): it goes into the passphrase,
+     * and into the device filter; Esc takes the filter first, then the dialog. */
+    reset(); write_file("calls", "");
+    k(WAIT_JOB); action(A_UNLOCK); k(K_DOWN); k('\n'); type("qa"); k(K_F1 + 1); k(SNAP); k(27); k(SNAP);
+    exit_events();
+    run("a passphrase keeps q as a letter; Esc cancels the dialog");
+    assert(strstr(history, "qa_") && strstr(history, "Actions (Enter: run)") && !strstr(slurp("calls"), "unlock-readonly"));
+    reset();
+    k(WAIT_JOB); action(A_UNLOCK); type("q"); k(SNAP); k(27); k(SNAP); k(27); k(SNAP);
+    exit_events();
+    run("the device filter keeps q as a letter; Esc clears it, then closes the list");
+    assert(strstr(history, "Filter: q_") && strstr(history, "Filter: _") && strstr(history, "Actions (Enter: run)"));
+    puts("PASS rescue: q typed in a passphrase or a filter is a letter; Esc clears the filter, then the dialog");
     printf("PASS rescue UI (native helper argv/stdin, lifecycle, timeout, clipboard and keyboard layout)\n");
     return 0;
 }

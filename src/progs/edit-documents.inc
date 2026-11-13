@@ -668,7 +668,8 @@ static int switcher_key(int key, int mods)
         switcher_close(1); /* Ctrl went up before this key: switched, then the key as ever */
         return 0;
     }
-    if (key == 27) {
+    int act = key_meaning(key, mods);
+    if (act == ACT_CANCEL) {
         switcher_close(0);
     } else if (key == '\n') {
         switcher_close(1);
@@ -678,8 +679,8 @@ static int switcher_key(int key, int mods)
         doc_switcher.sel += key == K_UP ? (doc_switcher.sel > 0 ? -1 : 0) : (doc_switcher.sel + 1 < doc_switcher.n ? 1 : 0);
     } else if (key == K_BOL || key == K_EOL) {
         doc_switcher.sel = key == K_BOL ? 0 : doc_switcher.n - 1;
-    } else if (key == 'w' && ctrl && !shift) {
-        /* Close View: the selected document; the list stays. */
+    } else if (act == ACT_CLOSE_TAB) {
+        /* Close View (Ctrl+W): the selected document; the list stays. */
         struct doc *d = doc_switcher.list[doc_switcher.sel];
         close_doc(d);
         int sel = doc_switcher.sel;

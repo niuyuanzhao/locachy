@@ -28,7 +28,7 @@ for kind in plain sanitized; do
         "$src/progs/edit-buffer.c" "$src/progs/edit-doc.c" "$src/progs/edit-file.c" \
         "$src/progs/edit-search.c" "$src/progs/edit-syntax.c" "$src/progs/edit-tree.c" \
         "$src/progs/edit-layout.c" "$src/progs/edit-lsp.c" "$src/progs/edit-session.c" \
-        "$src/progs/edit-filesearch.c" "$src/base/ui.c" \
+        "$src/progs/edit-filesearch.c" "$src/base/ui.c" "$src/base/key-action.c" "$src/base/help.c" \
         -o "$out/test-edit-folding-ui-$kind" -ltree-sitter -lpcre2-8 $(pkg-config --libs freetype2 json-glib-1.0) -lm
     dir=$(mktemp -d "$out/run-$kind-XXXXXX")
     rmdir "$dir"

@@ -26,7 +26,7 @@ cc -std=gnu11 -Wall -Wextra -Werror -Wno-unused-function -D_GNU_SOURCE -g -O1 $f
     "$tmp/test-edit-session-ui.c" "$src/progs/edit-buffer.c" "$src/progs/edit-doc.c" \
     "$src/progs/edit-file.c" "$src/progs/edit-search.c" "$src/progs/edit-syntax.c" \
     "$src/progs/edit-tree.c" "$src/progs/edit-layout.c" "$src/progs/edit-session.c" \
-    "$src/progs/edit-lsp.c" "$src/progs/edit-filesearch.c" "$src/base/ui.c" \
+    "$src/progs/edit-lsp.c" "$src/progs/edit-filesearch.c" "$src/base/ui.c" "$src/base/key-action.c" "$src/base/help.c" \
     -Wl,--wrap=getpwuid $(pkg-config --libs freetype2 json-glib-1.0) -ltree-sitter -lpcre2-8 -lm \
     -o "$tmp/test-edit-session-ui"
 ASAN_OPTIONS=detect_leaks=0 timeout 120 "$tmp/test-edit-session-ui" "$tmp/home"

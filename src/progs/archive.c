@@ -3,13 +3,14 @@
  * archive's entries as a tree (Name, Size, Modified, Permissions, Owner);
  * archive-worker reads and writes the archives (archive-proto.h), as the
  * user in its sandbox: this program, root for the screen, parses none.
- *   Enter, Ctrl+P: preview (in view or edit, the framebuffer program for the
- *   type; a folder opens or closes)   o: open in its application
+ *   Enter: preview (in view or edit, the framebuffer program for the type;
+ *   a folder opens or closes)   o: open in its application
  *   O: open with...   Ctrl+E: extract...   Ctrl+Shift+E: extract all...
  *   Alt+A: add files...   Delete: remove from the archive   Alt+T: test
  *   integrity   Alt+Return: properties   Ctrl+N: new   Ctrl+O: open
- *   Ctrl+F /: find   Space: mark   Ctrl+A: mark all   Left/Right: close,
- *   open a folder   q Ctrl+Q: quit   Esc: the find text away, or quit
+ *   Ctrl+F /: find   F3, Shift+F3: the next, previous found   Space: mark
+ *   Ctrl+A, Ctrl+Shift+A: mark all, none   Left/Right: close, open a folder
+ *   Ctrl+Q: quit   Esc, q: the find text away   F1: these keys
  * The pointer: a click selects, a double click previews, the wheel
  * scrolls, the right button gives the menu, the toolbar's buttons click.
  * What the file manager asks for (Ark's command line, Dolphin's menu):
@@ -577,9 +578,12 @@ static int run_worker(struct job *j, const char *title, char *const args[], cons
             shown = t;
         }
         struct pollfd p = { from, POLLIN, 0 };
-        int key = key_poll_many(&p, 1, 200);
-        /* TRANSLATORS: the question when Esc is pressed while the archive is worked on. */
-        if (key == 27 && yes(_("Cancel it?"))) kill(-pid, SIGTERM);
+        int key = key_poll_many(&p, 1, 200), act = key_action(key, keys_modifiers());
+        /* TRANSLATORS: the question when Esc (or Ctrl+Q) is pressed while the archive is worked on. */
+        if ((act == ACT_CANCEL || act == ACT_QUIT) && yes(_("Cancel it?"))) {
+            kill(-pid, SIGTERM);
+            if (act == ACT_QUIT) quit = 1; /* then the program leaves */
+        }
         if (!(p.revents & (POLLIN | POLLHUP | POLLERR))) continue;
         ssize_t got = read(from, buf + len, sizeof buf - len - 1);
         if (got <= 0) break;
@@ -609,6 +613,47 @@ static int run_worker(struct job *j, const char *title, char *const args[], cons
 
 /* ---- Lines typed, questions ---- */
 
+/* F1's own keys (ui_help; every program's follow them). */
+static const struct ui_help_line archive_keys[] = {
+    { "Up, Down, PgUp, PgDn, Home, End", N_("Choose an entry") },
+    { "Left, Right", N_("Close a folder, or go to the one it is in; open a folder") },
+    { "Enter", N_("Preview the entry (in view or edit); a folder opens or closes") },
+    { "o, O", N_("Open in its application; open with...") },
+    { "Space", N_("Mark the entry") },
+    { "Ctrl+A, Ctrl+Shift+A", N_("Mark all; mark none") },
+    { "Ctrl+E, Ctrl+Shift+E", N_("Extract the marked (or the selected); extract all") },
+    { "Alt+A", N_("Add files to the archive") },
+    { "Delete", N_("Remove the marked (or the selected) from the archive") },
+    { "Alt+T", N_("Test the archive's integrity") },
+    { "Alt+Enter", N_("The archive's properties") },
+    { "Ctrl+N, Ctrl+O", N_("A new archive; open another") },
+    { "Ctrl+F, /", N_("Find (the entries whose names have the text)") },
+    { "F3, Shift+F3", N_("The next or previous found") },
+    { "Esc, q", N_("The find text away") },
+    { "Shift+F10", N_("The entry's menu") },
+    { "Tab, Shift+Tab", N_("A dialog's next or previous line") },
+    { "y, n", N_("A question: y yes; n, Esc or Enter no") },
+    { "Ctrl+A, Home, End", N_("In a line you type: select all, the start, the end") },
+    { NULL, NULL },
+};
+
+/* F1 over the screen; Ctrl+Q or the window's close there quits. */
+static void help_screen(void)
+{
+    if (ui_help(_("Archive keys"), archive_keys) == ACT_QUIT) quit = 1;
+}
+
+/* A screen that any key leaves (not home's key); Ctrl+Q and the window's
+ * close leave the program too. */
+static void any_key(void)
+{
+    int key;
+    while ((key = key_get()) == K_ACT_HOME || key == K_SHOWN || (key == K_POINTER && !pointer_last()->pressed)) {
+    }
+    if (key_action(key, keys_modifiers()) == ACT_QUIT) quit = 1;
+}
+
+
 /* s cut to cells (an ellipsis where it was cut) and padded to them. */
 static void fit(char *out, size_t size, const char *s, int cells)
 {
@@ -637,20 +682,37 @@ static void fit(char *out, size_t size, const char *s, int cells)
     ui_pad(out, size, s, cells);
 }
 
-/* Left/Right/Home/End/Backspace/Delete, Ctrl+U, Ctrl+K and what keys type
- * (keys_typed) on text at *pos. */
-static void edit_key(int key, char *text, size_t size, size_t *pos)
+/* Left/Right/Home/End (^E)/Backspace/Delete, Ctrl+U, Ctrl+K and what keys
+ * type (keys_typed) on text at *pos; Ctrl+A selects it all (*all: what is
+ * typed, Backspace or Delete then replace it). */
+static void edit_key(int key, int mods, char *text, size_t size, size_t *pos, int *all)
 {
     size_t len = strlen(text);
-    const char *typed;
+    const char *typed = keys_typed(key);
     if (*pos > len) *pos = len;
+    if (key_action(key, mods) == ACT_SELECT_ALL) {
+        *all = len > 0;
+        *pos = len;
+        return;
+    }
+    if (*all && (key == K_LEFT || key == K_RIGHT || key == K_BOL || key == K_EOL || key == 5)) {
+        *pos = key == K_LEFT || key == K_BOL ? 0 : len; /* the selection ends where it goes */
+        *all = 0;
+        return;
+    }
+    if (*all && (typed || key == '\b' || key == 127 || key == K_DEL || key == 21 || key == 11)) {
+        text[0] = '\0'; /* the selection goes; what is typed takes its place */
+        len = *pos = 0;
+        *all = 0;
+        if (!typed) return;
+    }
     if (key == K_LEFT && *pos > 0) {
         do (*pos)--;
         while (*pos > 0 && ((unsigned char)text[*pos] & 0xC0) == 0x80);
     } else if (key == K_RIGHT && *pos < len) {
         do (*pos)++;
         while (*pos < len && ((unsigned char)text[*pos] & 0xC0) == 0x80);
-    } else if (key == K_BOL || key == 1) {
+    } else if (key == K_BOL) {
         *pos = 0;
     } else if (key == K_EOL || key == 5) {
         *pos = len;
@@ -668,7 +730,7 @@ static void edit_key(int key, char *text, size_t size, size_t *pos)
         *pos = 0;
     } else if (key == 11) {
         text[*pos] = '\0';
-    } else if ((typed = keys_typed(key)) != NULL && len + strlen(typed) < size) {
+    } else if (typed && len + strlen(typed) < size) {
         size_t n = strlen(typed);
         memmove(text + *pos + n, text + *pos, len - *pos + 1);
         memcpy(text + *pos, typed, n);
@@ -677,10 +739,11 @@ static void edit_key(int key, char *text, size_t size, size_t *pos)
 }
 
 /* A line typed at the bottom, after label; masked: shown as stars. 1 with
- * Enter, 0 with Esc. */
+ * Enter, 0 with Esc (Ctrl+Q and the window's close too: quit). */
 static int edit_text(const char *label, char *text, size_t size, int masked)
 {
     size_t pos = strlen(text);
+    int all = 0;
     for (;;) {
         char shown[1100], line[2400];
         size_t len = strlen(text);
@@ -692,18 +755,35 @@ static int edit_text(const char *label, char *text, size_t size, int masked)
             snprintf(shown, sizeof shown, "%s", text);
         }
         if (pos > strlen(shown)) pos = strlen(shown);
-        snprintf(line, sizeof line, "%s %.*s_%s", label, (int)pos, shown, shown + pos);
         int row = screen_rows() - 1;
         screen_fill(0, row, screen_cols(), 1, BG);
-        screen_text(1, row, line, ACCENT, BG);
+        if (all) { /* Ctrl+A: all of it selected */
+            snprintf(line, sizeof line, "%s ", label);
+            screen_text(1, row, line, ACCENT, BG);
+            screen_text(1 + ui_cells(line), row, shown, BG, ACCENT);
+        } else {
+            snprintf(line, sizeof line, "%s %.*s_%s", label, (int)pos, shown, shown + pos);
+            screen_text(1, row, line, ACCENT, BG);
+        }
         screen_flush();
-        int key = key_get();
-        if (key == 27) return 0;
-        if (key == '\n') return 1;
-        edit_key(key, text, size, &pos);
+        int key = key_get(), mods = keys_modifiers(), act = key_action(key, mods);
+        if (act == ACT_QUIT) {
+            quit = 1;
+            return 0;
+        }
+        if (act == ACT_CANCEL) return 0;
+        if (key == '\n' && act == ACT_NONE) return 1;
+        if (act == ACT_HELP) {
+            help_screen();
+            continue;
+        }
+        edit_key(key, mods, text, size, &pos, &all);
     }
 }
 
+/* question, answered: y is yes; n, Esc and Enter are no; other keys (home's,
+ * Alt+y) are none, it waits. Ctrl+Q and the window's close: no, and the
+ * program leaves once what it does has ended (quit). */
 static int yes(const char *question)
 {
     char line[1024];
@@ -713,8 +793,16 @@ static int yes(const char *question)
     screen_fill(0, row, screen_cols(), 1, BG);
     screen_text(1, row, line, ACCENT, BG);
     screen_flush();
-    int key = key_get();
-    return key == 'y' || key == 'Y';
+    for (;;) {
+        int key = key_get(), mods = keys_modifiers();
+        int act = key_action(key, mods), plain = !(mods & (KEYS_CTRL | KEYS_ALT | KEYS_META));
+        if (plain && (key == 'y' || key == 'Y')) return 1;
+        if (act == ACT_CANCEL || (plain && (key == 'n' || key == 'N' || key == '\n'))) return 0;
+        if (act == ACT_QUIT) {
+            quit = 1;
+            return 0;
+        }
+    }
 }
 
 /* Ark's overwrite question: the worker's answer in answer. */
@@ -729,11 +817,12 @@ static void ask_exists(const char *path, int dir, char *answer, size_t size)
         screen_fill(0, row, screen_cols(), 1, BG);
         screen_text(1, row, line, ACCENT, BG);
         screen_flush();
-        int key = key_get();
+        int key = key_get(), act = key_action(key, keys_modifiers());
         if (key == 'o' || key == 'O' || key == 's' || key == 'S') {
             snprintf(answer, size, "%c", key);
             return;
-        } else if (key == 27) {
+        } else if (act == ACT_CANCEL || act == ACT_QUIT) {
+            quit |= act == ACT_QUIT;
             snprintf(answer, size, "c");
             return;
         } else if (key == 'r' && !dir) {
@@ -772,7 +861,7 @@ static void show_problems(const struct job *j, const char *what)
     }
     screen_text(1, rows_n - 1, _("Any key: back"), DIM, BG);
     screen_flush();
-    key_get();
+    any_key();
 }
 
 /* ---- The archive ---- */
@@ -858,7 +947,7 @@ static const struct {
     { N_("Open"), MODS(KEYS_CTRL) + ('o' & 0x1F) },
     { N_("New"), MODS(KEYS_CTRL) + ('n' & 0x1F) },
     { N_("Extract"), MODS(KEYS_CTRL) + ('e' & 0x1F) },
-    { N_("Preview"), MODS(KEYS_CTRL) + ('p' & 0x1F) },
+    { N_("Preview"), '\n' },
     { N_("Add Files"), MODS(KEYS_ALT) + 'a' },
     { N_("Remove"), K_DEL },
     { N_("Test"), MODS(KEYS_ALT) + 't' },
@@ -1005,9 +1094,9 @@ static void draw(void)
         fit(name, sizeof name, msg, cols - 2);
         screen_text(1, rows_n - 1, name, msg_error ? ERROR : ACCENT, BG);
     } else {
-        /* TRANSLATORS: key names (Enter, Ctrl+E, Alt+A, Del, Alt+T, Alt+Return, q); keep them. */
+        /* TRANSLATORS: key names (Enter, Ctrl+E, Alt+A, Del, Alt+T, Alt+Return, Ctrl+F, Ctrl+Q, F1); keep them. */
         fit(name, sizeof name, _("Enter preview  o open  Ctrl+E extract  Alt+A add  Del remove  "
-                                 "Alt+T test  Alt+Return properties  Ctrl+F find  q quit"), cols - 2);
+                                 "Alt+T test  Alt+Return properties  Ctrl+F find  Ctrl+Q quit  F1 help"), cols - 2);
         screen_text(1, rows_n - 1, name, DIM, BG);
     }
     screen_flush();
@@ -1152,7 +1241,17 @@ static void draw_dialog(const char *title, const struct dialog_line *l, int n, i
 static int dialog_key(int *cur, int *button, int n)
 {
     int key = key_get();
-    if (key != K_POINTER) return key;
+    if (key != K_POINTER) {
+        int mods = keys_modifiers(), act = key_action(key, mods);
+        if (act == ACT_QUIT) {
+            quit = 1; /* the dialog goes as with Esc, then the program */
+            return 27;
+        } else if (act == ACT_HELP) {
+            help_screen();
+            return 0;
+        }
+        return act == ACT_PREV_FIELD ? K_UP : key; /* Shift+Tab: the line before, as Tab goes to the next */
+    }
     const struct pointer_event *e = pointer_last();
     if (!e->button || !e->pressed) return 0;
     int id = ui_hit_at(e->col, e->row) - HIT_FORM;
@@ -1177,7 +1276,10 @@ struct extraction {
 static int pick_folder(char *dir, size_t size, const char *what)
 {
     char out[PATH_MAX];
-    if (!files_pick(dir, NULL, "inode/directory", what, out, sizeof out)) return 0;
+    if (!files_pick(dir, NULL, "inode/directory", what, out, sizeof out)) {
+        quit |= files_close_asked(); /* the window's close, read by the file chooser */
+        return 0;
+    }
     snprintf(dir, size, "%s", out);
     return 1;
 }
@@ -1467,6 +1569,7 @@ static int pick_to_add(char *dir, size_t dsize, char *name, size_t nsize)
     if (!files_pick(from, NULL, got ? "inode/directory" : "", got ? _("Add: o chooses the selected folder.")
                                                               : _("Add: Enter chooses the selected file."),
                     out, sizeof out)) {
+        quit |= files_close_asked();
         return 0;
     }
     dir_of(out, dir, dsize);
@@ -1609,7 +1712,7 @@ static void properties(void)
     }
     screen_text(1, screen_rows() - 1, _("Any key: back"), DIM, BG);
     screen_flush();
-    key_get();
+    any_key();
 }
 
 /* ---- Keys and the pointer ---- */
@@ -1639,6 +1742,7 @@ static void open_other(void)
     else snprintf(from, sizeof from, "%s", user_home);
     if (!files_pick(from, arc.path[0] ? base_name(arc.path) : NULL, "", _("Open an archive: Enter chooses it."),
                     out, sizeof out)) {
+        quit |= files_close_asked();
         return;
     }
     filter[0] = '\0';
@@ -1652,7 +1756,7 @@ static int entry_menu(int col, int row)
     int keys[12], n = 0;
 #define ITEM(label, k) (items[n] = (label), keys[n++] = (k))
     if (sel < nrows && nodes[rows[sel]].type != 'd') {
-        ITEM(_("Preview"), MODS(KEYS_CTRL) + ('p' & 0x1F));
+        ITEM(_("Preview"), '\n');
         ITEM(_("Open in External Application"), 'o');
         ITEM(_("Open With..."), 'O');
     }
@@ -1675,14 +1779,55 @@ static void move_sel(int to)
     if (nrows) sel = clampi(to, 0, nrows - 1);
 }
 
+/* F3, Shift+F3: the next or previous entry whose name has the find text. */
+static void find_step(int dir)
+{
+    for (int i = sel + dir; filter[0] && i >= 0 && i < nrows; i += dir) {
+        if (has_text(nodes[rows[i]].name, filter)) {
+            sel = i;
+            return;
+        }
+    }
+}
+
 /* One key, with MODS() of the modifiers held. */
 static void handle(int key)
 {
-    int mods = (key >> 16) & 0xF, ctrl = mods & KEYS_CTRL, alt = mods & KEYS_ALT;
+    int mods = (key >> 16) & 0xF, plain = !(mods & (KEYS_CTRL | KEYS_ALT | KEYS_META));
     struct node *e = sel < nrows ? &nodes[rows[sel]] : NULL;
     key &= 0xFFFF;
+    if (key == K_ACT_HOME) return; /* process 1's: nothing here changes on it */
     if (key != K_SHOWN) report(0, "%s", "");
-    if (key == K_UP) {
+    int act = key_list_action(key, mods);
+    if (act == ACT_QUIT) {
+        quit = 1;
+    } else if (act == ACT_HELP) {
+        help_screen();
+    } else if (act == ACT_CANCEL) { /* Esc, q: the find text away, else nothing */
+        if (filter[0]) {
+            filter[0] = '\0';
+            build_rows(-1);
+        }
+    } else if (act == ACT_FIND || (key == '/' && plain)) { /* Ctrl+F; / as before */
+        find();
+    } else if (act == ACT_FIND_NEXT || act == ACT_FIND_PREV) {
+        find_step(act == ACT_FIND_NEXT ? 1 : -1);
+    } else if (act == ACT_OPEN) {
+        open_other();
+    } else if (act == ACT_NEW) {
+        new_archive();
+    } else if (act == ACT_SELECT_ALL || act == ACT_DESELECT) {
+        for (int i = 1; i < nnodes; i++) nodes[i].marked = act == ACT_SELECT_ALL;
+    } else if (act == ACT_DELETE || act == ACT_DELETE_PERMANENT) {
+        remove_entries();
+    } else if (act == ACT_PROPERTIES) {
+        properties();
+    } else if (act == ACT_CONTEXT_MENU) {
+        int k = entry_menu(2, LIST_TOP + sel - top);
+        if (k) handle(k);
+    } else if (act != ACT_NONE) {
+        /* the table's other actions are nothing here */
+    } else if (key == K_UP) {
         move_sel(sel - 1);
     } else if (key == K_DOWN) {
         move_sel(sel + 1);
@@ -1708,47 +1853,21 @@ static void handle(int key)
         } else {
             move_sel(sel + 1);
         }
-    } else if (key == '\n' && alt) {
-        properties();
-    } else if (key == '\n' || (key == ('p' & 0x1F) && ctrl)) {
+    } else if (key == '\n' && plain) {
         open_entry(OPEN_PREVIEW);
-    } else if (key == 'o' && !ctrl && !alt) {
+    } else if (key == 'o' && plain) {
         open_entry(OPEN_APP);
-    } else if (key == 'O' && !ctrl && !alt) {
+    } else if (key == 'O' && plain) {
         open_entry(OPEN_ASK);
-    } else if (key == ('e' & 0x1F) && ctrl) {
+    } else if (key == ('e' & 0x1F) && (mods & KEYS_CTRL)) { /* Ctrl+E, Ctrl+Shift+E: the program's own */
         extract(mods & KEYS_SHIFT);
-    } else if ((key == 'a' || key == 'A') && alt) {
+    } else if ((key == 'a' || key == 'A') && (mods & KEYS_ALT)) {
         add_files();
-    } else if (key == K_DEL) {
-        remove_entries();
-    } else if ((key == 't' || key == 'T') && alt) {
+    } else if ((key == 't' || key == 'T') && (mods & KEYS_ALT)) {
         test_archive();
-    } else if (key == ('n' & 0x1F) && ctrl) {
-        new_archive();
-    } else if (key == ('o' & 0x1F) && ctrl) {
-        open_other();
-    } else if ((key == ('f' & 0x1F) && ctrl) || key == '/') {
-        find();
-    } else if (key == ' ' && e) {
+    } else if (key == ' ' && e && plain) {
         e->marked = !e->marked;
         move_sel(sel + 1);
-    } else if (key == ('a' & 0x1F) && ctrl) {
-        int all = 1;
-        for (int i = 1; i < nnodes; i++) all &= nodes[i].marked;
-        for (int i = 1; i < nnodes; i++) nodes[i].marked = !all;
-    } else if (key == 'q' || (key == ('q' & 0x1F) && ctrl)) {
-        quit = 1;
-    } else if (key == 27) {
-        if (filter[0]) {
-            filter[0] = '\0';
-            build_rows(-1);
-        } else {
-            quit = 1;
-        }
-    } else if (key == K_F1 + 9 && (mods & KEYS_SHIFT)) {
-        int k = entry_menu(2, LIST_TOP + sel - top);
-        if (k) handle(k);
     }
 }
 

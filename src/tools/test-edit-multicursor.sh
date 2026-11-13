@@ -23,7 +23,7 @@ PY
 modules="$src/progs/edit-buffer.c $src/progs/edit-doc.c $src/progs/edit-file.c
 $src/progs/edit-search.c $src/progs/edit-syntax.c $src/progs/edit-tree.c
 $src/progs/edit-layout.c $src/progs/edit-lsp.c $src/progs/edit-session.c $src/progs/edit-filesearch.c
-$src/base/ui.c"
+$src/base/ui.c $src/base/key-action.c $src/base/help.c"
 for kind in plain asan; do
     extra=
     [ "$kind" = plain ] || extra='-g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all'

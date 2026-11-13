@@ -6,6 +6,11 @@
 /* Show the file manager until the user leaves it. */
 void files_view(void);
 
+/* files is a program of its own (files-main), not home's file manager:
+ * Esc at the top does nothing, the home key is process 1's, and only Ctrl+Q
+ * (or the window's close) leaves. Before files_view or files_view_at. */
+void files_standalone(void);
+
 /* The same at folder (or at a file, selected in its folder), checked as a
  * container's request is: only inside the user's home. */
 void files_view_at(const char *folder);
@@ -26,8 +31,9 @@ int files_program_request(char *name, size_t size, int take);
  * The type inode/directory chooses a folder (o, on the selected one). */
 int files_pick(const char *dir, const char *keep, const char *type, const char *what, char *out, size_t size);
 
-/* 1 when the last files_view or files_pick ended because the window's
- * close was asked for (K_CLOSE): the caller closes too, as its quit does. */
+/* 1 when the last files_view or files_pick ended because quitting was asked
+ * for (the window's close, K_CLOSE, or Ctrl+Q and Alt+F4: ACT_QUIT): the
+ * caller closes too, as its quit does. */
 int files_close_asked(void);
 
 #endif

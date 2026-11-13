@@ -58,7 +58,8 @@
 
 #define HIT_ROW    0
 #define HIT_TAB    100000
-#define HIT_KEY    200000
+#define HIT_KEY    0x1000000 /* + the key a button stands for, with MODS(its modifiers) */
+#define MODS(m)    ((m) << 16)
 
 enum { PAGE_FWUPD, PAGE_BIOS, PAGE_SPI, NPAGES };
 enum { SPI_ROW_PROG, SPI_ROW_CHIP, SPI_ROW_REGIONS, SPI_ROW_DETECTED, SPI_ROW_BACKUP_DIR, NSPI_ROWS };
@@ -126,6 +127,25 @@ static int confirming;
 static char pending_path[PATH_MAX];
 static char notice[320];
 static int notice_err;
+static int quit_asked; /* Ctrl+Q or the window's close, read in a question or the file chooser */
+
+/* F1's own keys (ui_help; every program's follow them). */
+static const struct ui_help_line firmware_keys[] = {
+    { "Tab, Shift+Tab", N_("Next or previous page: Devices, BIOS Settings, SPI Flash") },
+    { "Up, Down, PgUp, PgDn", N_("Choose a line") },
+    { "Enter", N_("A device's releases; install the release; change the setting") },
+    { "Esc, q", N_("From the releases back to the devices") },
+    { "r", N_("Refresh the LVFS metadata; BIOS Settings: read them again") },
+    { "u, i", N_("Update all devices; install a .cab firmware archive") },
+    { "v, k", N_("Verify the device; unlock it for updates") },
+    { "P", N_("Install fwupd or flashrom") },
+    { "Left, Right", N_("Change the setting or the option") },
+    { "p, b", N_("SPI Flash: probe the chip; 3x verified backup") },
+    { "v, w, c", N_("SPI Flash: verify or write an image; a custom programmer") },
+    { "l", N_("Show or hide the output") },
+    { "y, n", N_("Answer a question (Esc or Enter: no)") },
+    { NULL, NULL },
+};
 
 __attribute__((format(printf, 2, 3)))
 static void say_notice(int err, const char *fmt, ...)
@@ -447,21 +467,40 @@ static void check_job(void)
     }
 }
 
+/* A line typed after question: 1 with Enter, 0 with Esc (or Ctrl+Q, the
+ * window's close: quit_asked). Ctrl+A selects it all; what is typed then
+ * replaces it. */
 static int prompt_text(const char *question, char *buf, size_t size)
 {
-    size_t pos = strlen(buf);
+    int all = 0;
     for (;;) {
         int row = screen_rows() - 3, cols = screen_cols();
         char line[512];
-        snprintf(line, sizeof line, "%s %.300s_", question, buf);
+        snprintf(line, sizeof line, "%s ", question);
         screen_fill(0, row, cols, 1, BG);
         screen_text(1, row, line, ACCENT, BG);
+        int at = 1 + ui_cells(line);
+        snprintf(line, sizeof line, "%.300s", buf);
+        screen_text(at, row, line, all ? BG : ACCENT, all ? ACCENT : BG);
+        screen_text(at + ui_cells(line), row, "_", ACCENT, BG);
         screen_flush();
-        int key = key_poll_timeout(-1, -1);
+        int key = key_poll_timeout(-1, -1), act = key_action(key, keys_modifiers());
         size_t len = strlen(buf);
-        if (pos > len) pos = len;
-        if (key == 27) return 0;
+        if (act == ACT_QUIT) {
+            quit_asked = 1;
+            return 0;
+        }
+        if (act == ACT_CANCEL) return 0;
         if (key == '\n') return 1;
+        if (act == ACT_SELECT_ALL) {
+            all = len > 0;
+            continue;
+        }
+        if (all && (key == '\b' || key == 21 || keys_typed(key))) {
+            buf[0] = '\0'; /* the selection goes; what is typed takes its place */
+            len = 0;
+        }
+        if (key != 0 && key != K_SHOWN && key != K_ACT_HOME) all = 0;
         if (key == '\b' || key == 8) {
             while (len > 1 && ((unsigned char)buf[len - 1] & 0xC0) == 0x80) len--; /* a whole character */
             if (len > 0) buf[len - 1] = '\0';
@@ -523,6 +562,15 @@ static int list_count(void)
     return NSPI_ROWS;
 }
 
+/* The last row: quit and help, then what the page's other keys do. */
+static void quit_row(int row, const char *hint)
+{
+    /* TRANSLATORS: Ctrl+Q and F1 are key names; keep them. */
+    int c = ui_button(1, row, _("Ctrl+Q: quit"), HIT_KEY + MODS(KEYS_CTRL) + ('q' & 0x1F));
+    c = ui_button(c, row, _("F1: help"), HIT_KEY + K_F1);
+    screen_text(c, row, hint, DIM, BG);
+}
+
 static void draw(void)
 {
     int cols = screen_cols(), rows = screen_rows();
@@ -575,8 +623,8 @@ static void draw(void)
             /* TRANSLATORS: P is the key; keep it. */
             screen_text(2, 4, _("fwupd is not installed. Press P to install fwupd with locachy-pkg."), DIM, BG);
         } else if (ndevs == 0) {
-            /* TRANSLATORS: R is the key; keep it. */
-            screen_text(2, 4, _("No updatable devices reported yet (press R to refresh LVFS metadata)."), DIM, BG);
+            /* TRANSLATORS: r is the key; keep it. */
+            screen_text(2, 4, _("No updatable devices reported yet (press r to refresh LVFS metadata)."), DIM, BG);
         } else {
             for (int r = 0; r < list_h && *cur_top + r < ndevs; r++) {
                 int i = *cur_top + r, on = i == *cur_sel;
@@ -598,7 +646,8 @@ static void draw(void)
         screen_fill(0, 2, cols, 1, BAR_BG);
         screen_text(0, 2, line, ACCENT, BAR_BG);
         if (nrels == 0) {
-            screen_text(2, 4, _("No LVFS releases listed for this device (refresh metadata with R first)."), DIM, BG);
+            /* TRANSLATORS: r is the key; keep it. */
+            screen_text(2, 4, _("No LVFS releases listed for this device (refresh metadata with r first)."), DIM, BG);
         } else {
             for (int r = 0; r < list_h && *cur_top + r < nrels; r++) {
                 int i = *cur_top + r, on = i == *cur_sel;
@@ -697,12 +746,13 @@ static void draw(void)
         /* TRANSLATORS: Y and N are the confirmation keys; keep them. */
         bc = ui_button(bc, b2, _("Y: confirm"), HIT_KEY + 'y');
         ui_button(bc, b2, _("N: cancel"), HIT_KEY + 'n');
-        screen_text(1, b1, _("Flashing firmware is irreversible; any other key cancels."), FG, BG);
+        /* TRANSLATORS: N, Esc and Enter are key names; keep them. */
+        screen_text(1, b1, _("Flashing firmware is irreversible; N, Esc or Enter cancels."), FG, BG);
     } else if (page == PAGE_FWUPD && in_releases) {
         bc = ui_button(bc, b2, _("Enter: install release"), HIT_KEY + '\n');
         bc = ui_button(bc, b2, _("l: output"), HIT_KEY + 'l');
         ui_button(bc, b2, _("Esc: back to devices"), HIT_KEY + 27);
-        screen_text(1, b1, _("Tab: switch page   Up/Down: select release"), DIM, BG);
+        quit_row(b1, _("Tab: switch page   Up/Down: select release"));
     } else if (page == PAGE_FWUPD) {
         if (fwupd_missing) {
             bc = ui_button(bc, b2, _("P: install fwupd"), HIT_KEY + 'P');
@@ -715,14 +765,12 @@ static void draw(void)
             bc = ui_button(bc, b2, _("k: unlock"), HIT_KEY + 'k');
         }
         bc = ui_button(bc, b2, _("l: output"), HIT_KEY + 'l');
-        ui_button(1, b1, _("q: home"), HIT_KEY + 'q');
-        screen_text(14, b1, _("Tab: BIOS Settings / SPI Flash"), DIM, BG);
+        quit_row(b1, _("Tab: BIOS Settings / SPI Flash"));
     } else if (page == PAGE_BIOS) {
         bc = ui_button(bc, b2, _("Enter: choose value"), HIT_KEY + '\n');
         bc = ui_button(bc, b2, _("r: reload"), HIT_KEY + 'r');
         bc = ui_button(bc, b2, _("l: output"), HIT_KEY + 'l');
-        ui_button(1, b1, _("q: home"), HIT_KEY + 'q');
-        screen_text(14, b1, _("Left/Right: cycle option   Tab: switch page"), DIM, BG);
+        quit_row(b1, _("Left/Right: cycle option   Tab: switch page"));
     } else {
         if (flashrom_missing) {
             bc = ui_button(bc, b2, _("P: install flashrom"), HIT_KEY + 'P');
@@ -734,8 +782,7 @@ static void draw(void)
             bc = ui_button(bc, b2, _("c: custom -p"), HIT_KEY + 'c');
         }
         bc = ui_button(bc, b2, _("l: output"), HIT_KEY + 'l');
-        ui_button(1, b1, _("q: home"), HIT_KEY + 'q');
-        screen_text(14, b1, _("Left/Right/Enter: configure programmer & region   Tab: switch page"), DIM, BG);
+        quit_row(b1, _("Left/Right/Enter: configure programmer & region   Tab: switch page"));
     }
     screen_flush();
 }
@@ -789,11 +836,21 @@ static void change_bios_attr(int idx, int step)
     }
 }
 
-static void confirm_action(int key)
+/* The answer key gives the question asked: 1 yes (y), 0 no (n, Esc, Enter),
+ * -1 none (any other key, Alt+y, home's key): the question waits. */
+static int confirm_answer(int key, int mods)
+{
+    int plain = !(mods & (KEYS_CTRL | KEYS_ALT | KEYS_META));
+    if (plain && (key == 'y' || key == 'Y')) return 1;
+    if (key_action(key, mods) == ACT_CANCEL || (plain && (key == 'n' || key == 'N' || key == '\n'))) return 0;
+    return -1;
+}
+
+static void confirm_action(int yes)
 {
     int which = confirming;
     confirming = CONF_NONE;
-    if (key != 'y' && key != 'Y') {
+    if (!yes) {
         say_notice(0, _("Cancelled; nothing written."));
         return;
     }
@@ -833,11 +890,14 @@ static void confirm_action(int key)
     }
 }
 
-static int pointer_to_key(void)
+/* A pointer event as a key (a button's, with its modifiers in *mods), -1 to
+ * redraw, 0 for nothing. */
+static int pointer_to_key(int *mods)
 {
     const struct pointer_event *e = pointer_last();
     int *cur_sel = (page == PAGE_FWUPD && in_releases) ? &sel_rel : &sel[page];
     int cnt = list_count();
+    *mods = 0;
     if (e->wheel && confirming == CONF_NONE) {
         *cur_sel = *cur_sel - e->wheel;
         if (*cur_sel < 0) *cur_sel = 0;
@@ -846,7 +906,10 @@ static int pointer_to_key(void)
     }
     if (!e->pressed || e->button != BTN_LEFT) return 0;
     int id = ui_hit_at(e->col, e->row);
-    if (id >= HIT_KEY) return id - HIT_KEY;
+    if (id >= HIT_KEY) {
+        *mods = (id - HIT_KEY) >> 16;
+        return (id - HIT_KEY) & 0xFFFF;
+    }
     if (confirming != CONF_NONE) return 0;
     if (id >= HIT_TAB && id - HIT_TAB < NPAGES) {
         page = id - HIT_TAB;
@@ -870,19 +933,23 @@ int main(void)
     draw();
 
     for (;;) {
+        if (quit_asked) {
+            return 0; /* Ctrl+Q or the window's close, read in a question or the file chooser */
+        }
         int timeout = job_id > 0 ? 300 : -1;
         int key = key_poll_timeout(-1, timeout);
         int mods = keys_modifiers();
         check_job();
 
         if (key == K_SHOWN) {
-            confirming = CONF_NONE;
-            load_all();
+            if (confirming == CONF_NONE) {
+                load_all(); /* a question stays, on what it was asked about */
+            }
             draw();
             continue;
         }
         if (key == K_POINTER) {
-            key = pointer_to_key();
+            key = pointer_to_key(&mods);
             if (key <= 0) {
                 if (key < 0 || job_id > 0) draw();
                 continue;
@@ -893,32 +960,42 @@ int main(void)
             continue;
         }
 
-        if (confirming != CONF_NONE) {
-            confirm_action(key);
+        int act = key_list_action(key, mods);
+        if (act == ACT_QUIT) {
+            return 0; /* its jobs go on (locachy-jobs); a question not answered writes nothing */
+        }
+        if (act == ACT_HELP) {
+            if (ui_help(_("Firmware keys"), firmware_keys) == ACT_QUIT) return 0;
             draw();
             continue;
         }
+        if (confirming != CONF_NONE) {
+            int yes = confirm_answer(key, mods);
+            if (yes >= 0) {
+                confirm_action(yes);
+                draw();
+            }
+            continue;
+        }
 
-        if (key == '\t') {
+        if (act == ACT_NEXT_FIELD || act == ACT_PREV_FIELD) {
             in_releases = 0;
-            page = (page + ((mods & KEYS_SHIFT) ? NPAGES - 1 : 1)) % NPAGES;
+            page = (page + (act == ACT_PREV_FIELD ? NPAGES - 1 : 1)) % NPAGES;
             draw();
             continue;
+        }
+        if (act == ACT_CANCEL || act == ACT_UP || act == ACT_BACK || key == '\b') {
+            in_releases = 0; /* from the releases back to the devices; elsewhere nothing */
+            draw();
+            continue;
+        }
+        if (mods & (KEYS_ALT | KEYS_META)) {
+            continue; /* a key's command is the key's alone, not with Alt or Super */
         }
         if (key == 'l') {
             show_log = !show_log;
             draw();
             continue;
-        }
-        if (key == 'q' || key == 27 || key == '\b') {
-            if (page == PAGE_FWUPD && in_releases) {
-                in_releases = 0;
-                draw();
-                continue;
-            }
-            if (key == 'q' || key == 27) {
-                return 0;
-            }
         }
 
         int *cur_sel = (page == PAGE_FWUPD && in_releases) ? &sel_rel : &sel[page];
@@ -952,6 +1029,8 @@ int main(void)
                     snprintf(pending_path, sizeof pending_path, "%s", chosen);
                     confirming = CONF_LOCAL_CAB;
                     say_notice(1, _("Y/N: Install firmware archive %.180s?"), chosen);
+                } else if (files_close_asked()) {
+                    quit_asked = 1;
                 }
             } else if (!fwupd_missing && !in_releases && key == 'v' && ndevs > 0) {
                 char *const argv[] = { FW_HELPER, "fwupd-action", "verify", devs[*cur_sel].id, NULL };
@@ -1001,6 +1080,8 @@ int main(void)
                 if (files_pick(backup_dir, NULL, "inode/directory",
                                _("Choose backup folder (o on folder):"), chosen, sizeof chosen)) {
                     snprintf(backup_dir, sizeof backup_dir, "%s", chosen);
+                } else if (files_close_asked()) {
+                    quit_asked = 1;
                 }
             } else if (!flashrom_missing && key == 'p') {
                 char *argv[8];
@@ -1054,6 +1135,8 @@ int main(void)
                                        _(region_labels[cur_region_preset]));
                         }
                     }
+                } else if (files_close_asked()) {
+                    quit_asked = 1;
                 }
             }
         }

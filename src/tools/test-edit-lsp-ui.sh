@@ -29,6 +29,6 @@ cc -std=gnu11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-function -Wno-form
     "$src/progs/edit-file.c" "$src/progs/edit-search.c" "$src/progs/edit-syntax.c" \
     "$src/progs/edit-tree.c" "$src/progs/edit-layout.c" "$src/progs/edit-lsp.c" \
     "$src/progs/edit-session.c" "$src/progs/edit-filesearch.c" \
-    "$src/base/ui.c" -o "$tmp/test-edit-lsp-ui" \
+    "$src/base/ui.c" "$src/base/key-action.c" "$src/base/help.c" -o "$tmp/test-edit-lsp-ui" \
     -ltree-sitter -lpcre2-8 $(pkg-config --libs freetype2 json-glib-1.0) -lm
 ASAN_OPTIONS=detect_leaks=0 timeout 45 "$tmp/test-edit-lsp-ui" "$tmp/run"

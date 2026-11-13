@@ -881,8 +881,9 @@ static int mc_action(int s, struct tab *t, int key, int mods)
     }
     if (alt && !ctrl && !shift && key == 'k') { mc_skip(t); return 1; }
     if (ctrl && shift && !alt && key == 'b') { mc_toggle_block(t); return 1; }
-    if (ctrl && !alt && key == 'a') {
-        if (shift) mc_deselect(t); else mc_select_all(t);
+    int act = key_meaning(key, mods);
+    if (act == ACT_SELECT_ALL || act == ACT_DESELECT) { /* Ctrl+A, Ctrl+Shift+A */
+        if (act == ACT_DESELECT) mc_deselect(t); else mc_select_all(t);
         return 1;
     }
     return 0;

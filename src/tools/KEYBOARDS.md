@@ -112,12 +112,16 @@ watches for its own keys; nothing is queued on the console, and the
 programs and services process 1 starts have `/dev/null` as their standard
 input.
 
-- **Ctrl+Alt+Del** is process 1's: a clean reboot wherever it sees the keys
-  (direct programs, home, the lock, the boot passphrase, the shared display in
-  direct input). While the input method holds the keyboard (CN/EN), the keys
-  go to the bar only, as they did before. While a system job runs, the reboot
-  waits for it; Ctrl+Alt+Del pressed again (a new press, not Delete held)
-  reboots at once (`JOBS.md`, "Shutdown").
+- **Ctrl+Alt+Del** is process 1's, and it asks first: wherever it sees the
+  keys (direct programs, home, the boot passphrase, the shared display in
+  direct input) it shows "restart the computer now?" on its own screen, with
+  the system job a restart would wait for. Y restarts cleanly; N or Esc gives
+  the screens back as they were; other keys wait, and Delete held is one
+  question. The lock does not act on it. While the input method holds the
+  keyboard (CN/EN), the keys go to the bar only, as they did before. While a
+  restart or power off already waits for a system job, Ctrl+Alt+Del pressed
+  again (a new press, not Delete held) reboots at once, as that screen says
+  (`JOBS.md`, "Shutdown").
 - **Caps Lock and Num Lock: one state.** With the console's handler off,
   process 1 holds the lock state for every program and shows it on every
   keyboard's LEDs (`EV_LED`, as libinput writes them), a keyboard plugged in
@@ -154,3 +158,38 @@ draining, revocation and its locks; `test-keytable.c` the layout of a keyboard t
 `test-input-hotplug.c` hotplug with the shared display in front.
 The real console, revocation in a VM and the X230's Caps Lock LED still need
 their acceptance runs.
+
+## Keys and actions
+
+Programs do not test raw keys for the shared keys. `base/key-action.c` maps a key and its modifiers to one action (`key_action`; `key_list_action` for a list where nothing is typed, where q is Esc), and programs react to the action. The keys arrive like this: a Ctrl letter as its control code (Ctrl+Q is 17, Ctrl+C is 3, Ctrl+Shift+letter the same code with Shift); Ctrl with a digit as `K_CTRL_0` plus the digit; the function keys as `K_F1` plus n; Alt and Super letters as the plain letter with the modifier. `test-key-actions` pins the table, and `test-key-literals.py` fails on a program that tests a raw key for these actions.
+
+| Action | Key |
+| --- | --- |
+| Quit (asks first when work would be lost) | Ctrl+Q; the window's close and Alt+F4 are the same request |
+| Cancel the innermost menu, dialog, field, search or selection; else back one level; at the top, nothing | Esc |
+| Home: freezes the program, keeps its state, does not quit | Super+Esc (also Ctrl+Alt+Esc, Ctrl+Alt+Super, ThinkVantage) |
+| Help: this program's keys | F1 |
+| Next and previous field | Tab, Shift+Tab |
+| Copy, cut, paste | Ctrl+C, Ctrl+X, Ctrl+V (Ctrl+Insert, Shift+Insert) |
+| Undo, redo | Ctrl+Z, Ctrl+Shift+Z |
+| Select all; deselect | Ctrl+A; Ctrl+Shift+A (in a log or a pane, Ctrl+A then Ctrl+C copies all of it) |
+| Find; find in files; next and previous match | Ctrl+F; Ctrl+Shift+F; F3, Shift+F3 |
+| New, open, save, save as | Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S |
+| New folder | Ctrl+Shift+N |
+| New tab, reopen tab, close tab | Ctrl+T, Ctrl+Shift+T, Ctrl+W |
+| Next and previous tab | Ctrl+PgDn, Ctrl+PgUp (Ctrl+Tab, Ctrl+Shift+Tab) |
+| Back, forward, parent | Alt+Left, Alt+Right, Alt+Up |
+| Rename; reload | F2; F5 |
+| Delete to the trash; delete for good | Delete; Shift+Delete |
+| Properties | Alt+Enter |
+| Hidden files | Alt+. |
+| Zoom in, out, actual size | Ctrl+= (Ctrl++), Ctrl+-, Ctrl+0 |
+| Context menu | Shift+F10 or the Menu key |
+
+Some keys cannot be bound on their own: Ctrl+H, Ctrl+I, Ctrl+J, Ctrl+M and Ctrl+[ are the codes of Backspace, Tab, Enter and Esc. A shared action has only its key from the table: copy is Ctrl+C, never a letter (no y, c, x, v or u). A program's own single-letter command in a list is the first letter of its action (R start, K stop, L logs); a letter typed into a field is text.
+
+Each program's own keys (edit's folding on Ctrl+Shift+[ and ], view's Ctrl+G to a page, files' Ctrl+Alt+C to copy a path, and the rest) are listed by its F1 help, above the keys every program has.
+
+A text field takes its editing keys before the table: Ctrl+W deletes the word before the cursor (a field has no tab to close), Ctrl+U deletes to the start and Ctrl+K to the end; Home and End go to the start and the end (Ctrl+A selects all).
+
+Where the table does not apply: the terminal hands every key to its shell except home and the window's close; the extended display's session hands every key to the Mac, and nothing leaves it while the link is up (EXTDISPLAY.md); the installer cannot be left while it installs (on its steps Ctrl+Q asks first, since the choices made would be lost); the lock neither quits nor goes home.

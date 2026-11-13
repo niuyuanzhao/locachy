@@ -195,8 +195,9 @@ home refuses to reboot or power off while a job runs or waits, saying which
 counts).
 
 Process 1's own power off and reboot wait while a job runs, before anything
-is ended: `poweroff` and `reboot` as root (SIGUSR2, SIGTERM), Ctrl+Alt+Del,
-the power button, home's request and the critical battery. A job runs while
+is ended: `poweroff` and `reboot` as root (SIGUSR2, SIGTERM), Ctrl+Alt+Del
+(after its question is answered Y, KEYBOARDS.md), the power button, home's
+request and the critical battery. A job runs while
 a `/sys/fs/cgroup/locachy-jobs/job-*/cgroup.events` says `populated 1`;
 process 1 looks at nothing else of the jobs (no socket, no queue), and reads
 the first line of `/run/locachy/jobs/ID.state` only for the kind it shows.

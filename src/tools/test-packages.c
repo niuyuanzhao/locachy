@@ -237,7 +237,8 @@ const char *clipboard_error(int status) { return status == CLIPBOARD_OK ? "ok" :
  * on the screen then (snapped looks there); CLICK(i) is clicks[i], on the
  * first place its text is shown (none: a motion); DRAG(i) is drags[i], so
  * and offset cells into it, the left button pressed, held (a motion) or
- * released; at its end, q. */
+ * released; KEY(k, m) is key k with modifiers m, as the key layer gives it
+ * (Ctrl+Q: 17 with KEYS_CTRL); at its end, Ctrl+Q. */
 #define END 0
 #define WAIT (-1)
 #define SNAP (-2)
@@ -247,8 +248,10 @@ const char *clipboard_error(int status) { return status == CLIPBOARD_OK ? "ok" :
 #define TOUCH (-6) /* another writer changes conf/racer.conf here, as the form is open */
 #define CLICK(i) (-100 - (i))
 #define DRAG(i) (-200 - (i))
+#define KEY(k, m) (-1000000 - ((m) << 16) - (k))
 static const int *script;
-static int step;
+static int step, mods;
+int keys_modifiers(void) { return mods; }
 static char snaps[8][ROWS][COLS + 1];
 static int nsnaps;
 
@@ -301,10 +304,17 @@ int key_poll_timeout(int fd, int ms)
     (void)fd;
     (void)ms;
     int key = script[step];
+    mods = 0;
     if (key == END) {
-        return 'q';
+        mods = KEYS_CTRL;
+        return 'q' & 0x1F;
     }
     step++;
+    if (key <= KEY(0, 0)) {
+        key = KEY(0, 0) - key;
+        mods = key >> 16;
+        return key & 0xFFFF;
+    }
     if (key <= DRAG(0)) {
         drag(&drags[DRAG(0) - key]);
         return K_POINTER;
@@ -389,6 +399,8 @@ int files_pick(const char *from, const char *keep, const char *type, const char 
     return out[0] != '\0';
 }
 
+int files_close_asked(void) { return 0; }
+
 void open_user_dirs(char *home, size_t hsize, char *dirs, size_t dsize)
 {
     snprintf(home, hsize, "%s", D("home"));
@@ -399,7 +411,7 @@ static void run(const char *what, const int *keys)
 {
     printf("== %s\n", what);
     script = keys;
-    step = nsnaps = npicks = 0;
+    step = nsnaps = npicks = quit_asked = 0;
     current_cols = COLS;
     current_rows = ROWS;
     page = UPDATES;
@@ -589,11 +601,32 @@ int main(int argc, char **argv)
     assert(has("calls", "pkg apply host locachy\n"));
     assert(on_screen("done"));
 
+    /* Esc, q and Alt+q at the top: nothing; F1: the keys (Esc closes them);
+     * only Ctrl+Q (the script's end) quits. Shift+Tab: the page before. */
+    run("Esc, q and Alt+q do not quit; F1 shows the keys; Shift+Tab goes back a page",
+        (const int[]){ 27, 'q', KEY('q', KEYS_ALT), K_F1, SNAP, 27, SNAP, KEY('\t', KEYS_SHIFT), END });
+    assert(snap_has(0, "Packages keys") && snap_has(0, "Ctrl+Q") && !snap_has(1, "Packages keys"));
+    assert(snap_has(1, "[Ctrl+Q: quit]") && snap_has(1, "[F1: help]") && !snap_has(1, "q: back") && page == HOST);
+    /* A question waits through home's key, Alt+y and other keys; Enter is
+     * no; y after them is yes. */
+    unlink(D("calls"));
+    run("a question: home's key, Alt+y and x are no answer, Enter is no",
+        (const int[]){ 'a', K_ACT_HOME, KEY('y', KEYS_ALT), 'x', SNAP, '\n', WAIT, END });
+    assert(snap_has(0, "Apply: host locachy edge [y/N]") && !has("calls", "pkg apply"));
+    run("a question: y after home's key is yes",
+        (const int[]){ 'a', K_ACT_HOME, 'y', WAIT, WAIT, WAIT, END });
+    assert(has("calls", "pkg apply host locachy edge\n"));
+    /* Ctrl+Q in a question quits, with nothing done. */
+    unlink(D("calls"));
+    run("Ctrl+Q in a question quits", (const int[]){ 'a', KEY('q' & 0x1F, KEYS_CTRL), END });
+    assert(!has("calls", "pkg apply"));
+
     /* An apply stops for source signing keys: not a failure, a person's
      * decision. The keys are listed (package, fingerprint as gpg groups it,
      * the recipe whose validpgpkeys name it: LOCachy's own, else the AUR's);
-     * y copies the command that trusts them; the pane's text is selected
-     * with the pointer (the primary selection), y copies it; Y all of it. */
+     * Ctrl+C copies the command that trusts them; the pane's text is
+     * selected with the pointer (the primary selection), Ctrl+C copies it;
+     * Ctrl+A then Ctrl+C all of it. */
     char command[256], expect[1024], cell[1024];
     snprintf(command, sizeof command, "locachy-build --trust-key %s %s", obfs, lyre);
     mkdir(D("pkgbuilds"), 0755);
@@ -603,7 +636,7 @@ int main(int argc, char **argv)
     struct click line_click[] = { { "Source key to trust: lyrebird-proxy", BTN_LEFT, 3, 0 } }; /* triple */
     clicks = line_click;
     run("apply stopped for source signing keys: listed, the command copied, a line selected",
-        (const int[]){ 'a', 'y', WAIT, WAIT, WAIT, SNAP, 'y', SNAP, CLICK(0), END });
+        (const int[]){ 'a', 'y', WAIT, WAIT, WAIT, SNAP, KEY('c' & 0x1F, KEYS_CTRL), SNAP, CLICK(0), END });
     snprintf(expect, sizeof expect, "Source key to trust: lyrebird-proxy %s", lyre);
     assert(strcmp(copied[1], expect) == 0); /* the triple click: its line, as the primary selection */
     assert(strcmp(copied[0], command) == 0); /* y, nothing selected: the command, as locachy-build printed it */
@@ -620,9 +653,9 @@ int main(int argc, char **argv)
     assert(strcmp(expect, cell) == 0);
     assert(snap_has(0, "Check each with its upstream project; then run this as root (admin, from home):"));
     assert(snap_has(0, command) && snap_has(0, "once they are trusted, g continues where it stopped."));
-    assert(snap_has(0, "Output: Apply: host locachy edge (stopped)") && snap_has(0, "Y: copy all"));
+    assert(snap_has(0, "Output: Apply: host locachy edge (stopped)") && snap_has(0, "Ctrl+A, Ctrl+C: copy all"));
     assert(snap_has(0, "Apply: host locachy edge: stopped for source signing keys to trust (below)"));
-    assert(snap_has(0, "[g: continue]") && snap_has(0, "[y: copy]"));
+    assert(snap_has(0, "[g: continue]") && snap_has(0, "[Ctrl+C: copy]"));
     snprintf(expect, sizeof expect, "Copied: %s", command);
     assert(snap_has(1, expect));
     assert(has("calls", "pkg apply host locachy edge\n") && nwanted == 2);
@@ -638,8 +671,9 @@ int main(int argc, char **argv)
     struct click row_click[] = { { "[x] host", BTN_LEFT, 1, 0 } };
     drags = selecting;
     clicks = row_click;
-    run("stopped, found again: a drag selects, y copies it; Y copies all the output",
-        (const int[]){ DRAG(0), DRAG(1), DRAG(2), 'y', SNAP, CLICK(0), 'Y', SNAP, END });
+    run("stopped, found again: a drag selects, Ctrl+C copies it; Ctrl+A then Ctrl+C copies all the output",
+        (const int[]){ DRAG(0), DRAG(1), DRAG(2), KEY('c' & 0x1F, KEYS_CTRL), SNAP, CLICK(0),
+                       KEY('a' & 0x1F, KEYS_CTRL), KEY('c' & 0x1F, KEYS_CTRL), SNAP, END });
     snprintf(expect, sizeof expect, "Source key to trust: lyrebird-proxy %s\n  Source key", lyre);
     assert(strcmp(copied[1], expect) == 0); /* the drag: the primary selection; y: the same (below) */
     assert(snap_has(0, "Copied 2 lines: Source key to trust: lyrebird-proxy"));
@@ -649,7 +683,7 @@ int main(int argc, char **argv)
                              "https://aur.archlinux.org/cgit/aur.git/tree/PKGBUILD?h=lyrebird-proxy\n"));
     snprintf(cell, sizeof cell, "validpgpkeys of LOCachy's recipe: %s/pkgbuilds/obfs4proxy\n", dir);
     assert(strstr(copied[0], cell));
-    snprintf(cell, sizeof cell, "\n  %s\ny copies the command; once they are trusted, g continues where it stopped.\n"
+    snprintf(cell, sizeof cell, "\n  %s\nCtrl+C copies the command; once they are trusted, g continues where it stopped.\n"
              "===> host\n===> host: done\n===> edge\n", command);
     assert(strstr(copied[0], cell));
     snprintf(expect, sizeof expect, "\nTrust them: %s\n===> edge: not done\n===> not done: edge", command);
@@ -680,7 +714,8 @@ int main(int argc, char **argv)
      * untrusted-keys): it shows as trusted, the command has the other only. */
     snprintf(expect, sizeof expect, "obfs4proxy %s\n", obfs);
     put("untrusted-keys", expect);
-    run("one trusted in a terminal: marked so, the command for the rest", (const int[]){ SNAP, 'y', END });
+    run("one trusted in a terminal: marked so, the command for the rest; Ctrl+C copies it as y does",
+        (const int[]){ SNAP, KEY('c' & 0x1F, KEYS_CTRL), END });
     snprintf(expect, sizeof expect, "%-24s %s   trusted now", "lyrebird-proxy",
              "40BB CBED 223F 5EB2 A03E  F657 D7D7 A110 ABC7 9A6C");
     assert(snap_has(0, expect));
@@ -738,6 +773,7 @@ int main(int argc, char **argv)
     assert(snap_has(0, "check for updates: queued (1 before it); it goes on if you leave."));
     assert(snap_has(1, "Output: check for updates (done)"));
 
+    run("containers: Ctrl+Q in a form quits", (const int[]){ '\t', '\n', KEY('q' & 0x1F, KEYS_CTRL), END });
     unlink(D("calls"));
     run("containers: edge, its form (looked up), back: the list",
         (const int[]){ '\t', '\n', SNAP, END });
@@ -837,12 +873,14 @@ int main(int argc, char **argv)
     assert(on_screen("0 packages, 0 B"));
 
     unlink(D("calls"));
-    run("edge2 removed (its home kept)", (const int[]){ '\t', K_DOWN, 'd', 'y', 'n', WAIT, WAIT, END });
-    assert(has("calls", "app remove edge2\n"));
+    run("edge2 removed with Delete (its home kept); d is not a remove",
+        (const int[]){ '\t', K_DOWN, 'd', SNAP, K_DEL, 'y', 'n', WAIT, WAIT, END });
+    assert(!snap_has(0, "Remove edge2") && has("calls", "app remove edge2\n"));
 
     unlink(D("calls"));
-    run("host: its manifest, add foo, remove labwc",
-        (const int[]){ '\t', '\t', 'i', 'f', 'o', 'o', '\n', WAIT, WAIT, K_DOWN, 'x', 'y', WAIT, WAIT, END });
+    run("host: its manifest, add foo, remove labwc (Shift+Delete)",
+        (const int[]){ '\t', '\t', 'i', 'f', 'o', 'o', '\n', WAIT, WAIT, K_DOWN, KEY(K_DEL, KEYS_SHIFT), 'y', WAIT,
+                       WAIT, END });
     assert(has("calls", "pkg install foo\n") && has("calls", "pkg remove labwc\n"));
     assert(on_screen("labwc"));
 
@@ -897,15 +935,21 @@ int main(int argc, char **argv)
     run("pointer: the wheel moves the selection; the Tab button", (const int[]){ CLICK(0), CLICK(1), END });
     assert(sel[UPDATES] == 2 && page == CONTAINERS);
 
-    /* Enter on Updates marks/unmarks, Home/End move the selection, and line
-     * editing supports Left/Right/Home/Delete. */
-    run("updates: Enter unmarks the selected one; End goes to the last, Home to the first",
-        (const int[]){ K_BOL, '\n', SNAP, K_EOL, END });
-    assert(snapped("[ ] host") && !targets[0].marked && sel[UPDATES] == 4);
+    /* Enter on Updates opens the row's details (from the output), Space
+     * marks/unmarks, Home/End move the selection, and line editing supports
+     * Left/Right/Home/Delete. */
+    run("updates: Enter opens the selected one's details, Space unmarks it; End goes to the last, Home to the first",
+        (const int[]){ K_BOL, 'l', SNAP, '\n', SNAP, ' ', SNAP, K_EOL, END });
+    assert(snap_has(0, "Output: ") && snap_has(1, "Details: host") && snap_has(1, "[x] host"));
+    assert(snap_has(2, "[ ] host") && !targets[0].marked && sel[UPDATES] == 4);
     unlink(D("calls"));
     run("host: the prompt edits where the cursor is (Left, Home, Delete)",
         (const int[]){ '\t', '\t', 'i', 'a', 'c', K_LEFT, 'b', K_BOL, K_DEL, '\n', WAIT, WAIT, END });
     assert(has("calls", "pkg install bc\n"));
+    unlink(D("calls"));
+    run("host: Ctrl+A selects the line, what is typed replaces it; Home goes to the start",
+        (const int[]){ '\t', '\t', 'i', 'x', 'y', KEY('a' & 0x1F, KEYS_CTRL), 'z', K_BOL, 'a', '\n', WAIT, WAIT, END });
+    assert(has("calls", "pkg install az\n"));
 
     unlink(D("calls"));
     run("containers: / searches recipes/repos/AUR, Enter picks firefox, Enter saves and builds it",
@@ -1004,7 +1048,7 @@ int main(int argc, char **argv)
                            "commit=\"fedcba9876543210fedcba9876543210fedcba98\"\ninstalled=\"2026-10-30 10:00\"\n");
     run("a long app presets repository: installed first, nothing pushed off", (const int[]){ END });
     assert(on_screen("App presets: fedcba9 from the installation medium; updates: https://example.org/0000"));
-    assert(on_screen("[ ] apps") && on_screen("[c: check]") && on_screen("[q: back]") && !on_screen("(null)"));
+    assert(on_screen("[ ] apps") && on_screen("[c: check]") && on_screen("[Ctrl+Q: quit]") && !on_screen("(null)"));
     /* A source update that stopped (its builds waiting for keys): the one
      * applied stays the installed one, the other is said to be unfinished. */
     put("rc.conf", "update_repo=\"off\"\napps_repo=\"off\"\n");
@@ -1066,8 +1110,8 @@ int main(int argc, char **argv)
 
     put("search.txt", "chatgpt\trecipe\tchatgpt-desktop\t\t/usr/bin/chatgpt\t\t1\tChatGPT recipe\n");
     unlink(D("calls"));
-    run("store search: downloaded full recipe, permissions shown; cancel saves and installs nothing",
-        (const int[]){ '\t', '/', 'c', '\n', '\n', SNAP, '\n', SNAP, 27, 27, END });
+    run("store search (Ctrl+F): downloaded full recipe, permissions shown; cancel saves and installs nothing",
+        (const int[]){ '\t', KEY('f' & 0x1F, KEYS_CTRL), 'c', '\n', '\n', SNAP, '\n', SNAP, 27, 27, END });
     assert(snapped("real system and full home") && snapped("Allow chatgpt to access your real system?"));
     assert(!has("conf/chatgpt.conf", "host=") && !has("calls", "app build chatgpt"));
     run("narrow store form: install remains visible; disclosure wraps; Enter refuses by default",
@@ -1106,7 +1150,7 @@ int main(int argc, char **argv)
     assert(has("conf/chatgpt.conf", "arguments=\"-x\"") && has("conf/chatgpt.conf", "host=\"1\""));
     unlink(D("calls"));
     run("host-access app has no overlay rollback; removing it keeps host packages and user files",
-        (const int[]){ '\t', 'r', SNAP, 'd', SNAP, 'y', WAIT, WAIT, END });
+        (const int[]){ '\t', 'r', SNAP, K_DEL, SNAP, 'y', WAIT, WAIT, END });
     assert(snapped("there is no private build to roll back") && !has("calls", "app rollback"));
     assert(snapped("Host packages and your files will be kept") && has("calls", "app remove chatgpt\n"));
     assert(!has("calls", "--data"));

@@ -26,7 +26,8 @@ protocols=("$out"/proto/*-protocol.c)
     -Wl,--gc-sections -lwayland-client -lm -o "$out/state"
 "${cc[@]}" "$src/tools/test-monitor-layout.c" -o "$out/layout-test"
 "$out/layout-test"
-"${cc[@]}" "$src/tools/test-settings-monitors.c" -Wl,--gc-sections -o "$out/settings-test"
+"${cc[@]}" "$src/tools/test-settings-monitors.c" "$src/base/key-action.c" "$src/base/help.c" \
+    -Wl,--gc-sections -o "$out/settings-test"
 "$out/settings-test" "$out/ui-fixtures"
 export src out
 exec timeout 120 unshare --mount --propagation private --pid --fork --kill-child --mount-proc bash -euc '

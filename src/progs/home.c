@@ -113,6 +113,7 @@ static int njobs, jobs_shown, job_selected, job_asked, job_asked_running;
  * log_from: lines back from its end, log_total: how many lines it holds. */
 #define HOME_LOG_LINES 2048
 static int log_shown, log_system, log_from, log_total;
+static int log_all_selected; /* Ctrl+A in the log: the next Ctrl+C copies all of it */
 static char log_name[64], log_buf[32768], *log_all[HOME_LOG_LINES];
 #define HOME_OUTPUTS 32
 static int home_output;
@@ -842,8 +843,8 @@ static void draw_logs(int footer)
     } else {
         snprintf(target, sizeof target, "%s/%s.log", HOME_APP_RUN, log_name);
     }
-    /* TRANSLATORS: Tab, PgUp/PgDn, y, Y and Esc are key names; keep them. */
-    snprintf(line, sizeof line, _("Log: %s  %s%sTab: %s  PgUp/PgDn: scroll  y/Y: copy  Esc: back"),
+    /* TRANSLATORS: Tab, PgUp/PgDn, Ctrl+C, Ctrl+A and Esc are key names; keep them. */
+    snprintf(line, sizeof line, _("Log: %s  %s%sTab: %s  PgUp/PgDn: scroll  Ctrl+A, Ctrl+C: copy all  Esc: back"),
              target, where, where[0] ? "  " : "",
              log_system && log_name[0] ? _("container log") : _("system log"));
     text(1, 2, line, ACCENT, BG);
@@ -1055,11 +1056,11 @@ static void draw_output(int ready)
         ui_button(c, rows - 2, confirming == CONF_OWN_TOR ? _("N / Esc: cancel") : _("N: cancel"), HIT_KEY + 'n');
         text(1, rows - 1, _("Any other key cancels without acting."), FG, BG);
     } else if (log_shown) {
-        /* TRANSLATORS: Tab, y, Y, Esc and J are key names; keep them. */
+        /* TRANSLATORS: Tab, Ctrl+C, Ctrl+A, Esc and J are key names; keep them. */
         int c = ui_button(1, rows - 2, log_system && log_name[0] ? _("Tab: container log") : _("Tab: system log"),
                           HIT_KEY + '\t');
-        c = ui_button(c, rows - 2, _("y: copy"), HIT_KEY + 'y');
-        c = ui_button(c, rows - 2, _("Y: copy all"), HIT_KEY + 'Y');
+        c = ui_button(c, rows - 2, _("Ctrl+C: copy"), HIT_KEY + K_ACT_COPY);
+        c = ui_button(c, rows - 2, _("Ctrl+A: select all"), HIT_KEY + K_ACT_SELECT_ALL);
         c = ui_button(c, rows - 2, _("J: system jobs"), HIT_KEY + 'j');
         ui_button(c, rows - 2, _("Esc: back"), HIT_KEY + 27);
         /* TRANSLATORS: Up/Down/PgUp/PgDn and Super+Esc are key names; keep them. */
@@ -1348,9 +1349,27 @@ static int jobs_hold_power(const char *what)
     return 1;
 }
 
-/* Consume every confirmation key, so Enter cannot fall through to power off. */
+/* F1: home's own keys (ui_help adds every program's). */
+static const struct ui_help_line home_help[] = {
+    { "Arrows, Home, End", N_("Move the selection") },
+    { "Enter", N_("Open the selected container or program") },
+    { "Space", N_("Mark a container") },
+    { "R, F, K", N_("Start, freeze, stop") },
+    { "J", N_("The system jobs (K stops the selected one)") },
+    { "L", N_("The logs (Tab: the system's or the program's)") },
+    { "Ctrl+C", N_("Copy the selected text") },
+    { "Ctrl+A, Ctrl+C", N_("The logs: select all of the log, then copy it") },
+    { "Esc", N_("Back from the logs or the jobs") },
+    { NULL, NULL },
+};
+
+/* Consume every confirmation key, so Enter cannot fall through to power off.
+ * The home key is process 1's: the question waits. */
 static void confirm_key(int key)
 {
+    if (key == K_ACT_HOME) {
+        return;
+    }
     int confirmed = key == 'y' || key == 'Y' || (confirming == CONF_OWN_TOR && key == '\n');
     if (!confirmed) {
         last_customized = 1;
@@ -1606,15 +1625,23 @@ int main(void)
             }
             continue;
         }
-        if (key > 0 && key != 'y' && key != 'Y' && key != 3) {
-            textsel_clear();
+        int ka = key_action(key, keys_modifiers()); /* the key's meaning in every program */
+        if (key > 0 && ka != ACT_COPY && ka != ACT_SELECT_ALL && key != K_ACT_HOME) {
+            textsel_clear(); /* the home key changes nothing: the selection stays */
+            log_all_selected = 0;
         }
         if (confirming != CONF_NONE) {
             confirm_key(key);
-        } else if (key == 'y' || key == 3) { /* 3: Ctrl+C */
-            copy_log(0);
-        } else if (key == 'Y' && log_shown) {
-            copy_log(1);
+        } else if (ka == ACT_HELP) {
+            ui_help(_("Home keys"), home_help); /* home does not quit: Ctrl+Q there is nothing */
+        } else if (ka == ACT_COPY) {
+            copy_log(log_shown && log_all_selected);
+            log_all_selected = 0;
+        } else if (ka == ACT_SELECT_ALL && log_shown) {
+            textsel_clear();
+            log_all_selected = 1;
+            last_customized = 1;
+            snprintf(last, sizeof last, "%s", _("All of the log is selected: Ctrl+C copies it."));
         } else if (key == 'j' || key == 'J') {
             log_shown = 0;
             jobs_shown = !jobs_shown;
@@ -1638,16 +1665,16 @@ int main(void)
             else if (key == K_UP) scroll_log(1, page_rows);
             else if (key == K_DOWN) scroll_log(-1, page_rows);
             else scroll_log(key == K_PGUP ? page_rows : -page_rows, page_rows);
-        } else if (log_shown && key == 27) {
+        } else if (log_shown && ka == ACT_CANCEL) {
             log_shown = 0;
         } else if (log_shown) {
             /* the containers' keys act on the grid only */
         } else if (jobs_shown && (key == K_UP || key == K_DOWN)) {
             job_selected += key == K_UP ? -1 : 1;
             job_selected = job_selected < 0 ? 0 : job_selected >= njobs ? (njobs > 0 ? njobs - 1 : 0) : job_selected;
-        } else if (jobs_shown && (key == 'k' || key == 'K' || key == K_DEL)) {
+        } else if (jobs_shown && (key == 'k' || key == 'K')) {
             confirm_job();
-        } else if (jobs_shown && key == 27) {
+        } else if (jobs_shown && ka == ACT_CANCEL) {
             jobs_shown = 0;
         } else if (jobs_shown) {
             /* the containers' keys act on the grid only */
@@ -1662,9 +1689,8 @@ int main(void)
             act("freeze");
         } else if (key == 'k' || key == 'K') {
             confirm_stop();
-        } else if ((key == 'x' || key == K_DEL) && !marked_count() &&
-                   selected >= napps && selected < napps + nentries) {
-            confirm_stop(); /* Preserve the old host-program close aliases. */
+        } else if (key == 'x' && !marked_count() && selected >= napps && selected < napps + nentries) {
+            confirm_stop(); /* Preserve the old host-program close alias; Delete stops nothing (K does). */
         } else if (key == '\n' && selected < napps) {
             refresh();
             if (selected < napps && prepare_own_tor(1)) {

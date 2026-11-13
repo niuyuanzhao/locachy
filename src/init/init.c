@@ -13,8 +13,9 @@
  * all that: never frozen, without the screen or the keyboard, started again
  * 5 s after they exit. SIGHUP reads rc.conf again (settings sends it after
  * saving): a service whose line has gone is ended, a new one is started, the
- * others keep running. SIGTERM and Ctrl+Alt+Del reboot, SIGUSR2 powers off
- * (as busybox's init); both end everything first and leave / read-only. A
+ * others keep running. SIGTERM reboots, and Ctrl+Alt+Del once its question
+ * is answered Y (restart_show); SIGUSR2 powers off (as busybox's init); both
+ * end everything first and leave / read-only. A
  * system job that runs (tools/JOBS.md) is waited for first, its screen and
  * the log saying so; asked again (Ctrl+Alt+Del, poweroff --force or reboot
  * --force: systemd's SIGRTMIN+14, +15) it goes ahead at once (shutdown_request).
@@ -154,6 +155,8 @@ static int login_skip;             /* rc.conf login_skip="1": not locked at boot
 static int lock_after = 600;       /* rc.conf lock_after (minutes), in s: locked after that
                                     * long without input; 0: never */
 static double active_at;           /* the last input (ms) */
+static int lock_due;               /* lock_after ran out while a live link held a screen:
+                                    * locked once it no longer does (idle_lock_at) */
 #define MAX_ACTIVITY 32
 static int *afd;                   /* the input devices, read only to see input */
 static size_t nafd;
@@ -196,6 +199,7 @@ static int battery_critical = 5; /* percent: on battery at or below it, hibernat
 static double battery_act_at = -1;   /* ms: the critical battery's action, unless power comes back */
 static double battery_check_at = -1; /* ms: look at batteries without a trip point again (fallback) */
 static int shutdown_how = -1;        /* RB_POWER_OFF, RB_AUTOBOOT: asked for, waiting for a system job */
+static int restart_asked;            /* Ctrl+Alt+Del: a question on process 1's screen, Y or N */
 static double shutdown_at = -1;      /* ms: shutdown_look is due then */
 static struct service *services;
 static size_t nservices;
@@ -685,24 +689,84 @@ static void measure_phase(const char *word)
     }
 }
 
+/* Process 1's own pages on every screen, each canvas at that screen's own
+ * size and scale (screen_extended, as the lock draws): with one mirrored
+ * canvas the first screen's picture was scaled onto the others, and that
+ * picture is what every screen shows between two programs (take_back).
+ * draw is called once per screen. */
+static void each_screen(void (*draw)(const void *), const void *arg)
+{
+    int extended = screen_is_extended && screen_is_extended() && screen_output_count && screen_output_select &&
+                   screen_output_current;
+    int count = extended ? screen_output_count() : 1, previous = extended ? screen_output_current() : 0;
+    for (int i = 0; i < count; i++) {
+        if (extended && screen_output_select(i) < 0) {
+            continue;
+        }
+        draw(arg);
+    }
+    if (extended && previous >= 0 && previous < count) {
+        screen_output_select(previous);
+    }
+    screen_flush();
+}
+
+/* Per-screen canvases once the screen is open; a failure keeps the mirrored
+ * one, which still works. */
+static void screen_per_output(void)
+{
+    if (screen_extended) {
+        screen_extended(1);
+    }
+}
+
+/* Lines from row 2 down, a blank row between (NULL ended), on a clean page. */
+static void lines_draw(const void *arg)
+{
+    const char *const *lines = arg;
+    screen_fill(0, 0, screen_cols(), screen_rows(), BG);
+    for (int i = 0; lines[i]; i++) {
+        screen_text(2, 2 + 2 * i, lines[i], FG, BG);
+    }
+}
+
+/* The first line, at the top: what process 1 is doing as it starts. */
+static void boot_draw(const void *arg)
+{
+    screen_text(1, 0, arg, FG, BG);
+}
+
+struct secret_page {
+    const char *title, *partition, *wrong, *typed, *question;
+};
+
+static void secret_draw(const void *arg)
+{
+    const struct secret_page *p = arg;
+    screen_fill(0, 0, screen_cols(), screen_rows(), BG);
+    screen_text(2, 2, p->title, FG, BG);
+    screen_text(2, 4, p->partition, FG, BG);
+    if (p->wrong) {
+        screen_text(2, 6, p->wrong, 0xCC4444, BG);
+    }
+    screen_text(2, 8, p->typed, FG, BG);
+    if (p->question) {
+        screen_text(2, 10, p->question, FG, BG);
+    }
+}
+
 /* A line typed at the boot prompt, shown as stars: title, the partitions,
  * wrong in red when there is something to say (the last one did not open
  * them, or why it is asked), then label and the stars. The keyboard types
  * as the system does (the key table rc.conf's keymap made, base keys.c). */
 static void ask_secret(const char *title, const char *label, const char *wrong, char *out, size_t size)
 {
-    char stars[68], line[160];
+    char stars[68], line[160], partition[160];
     size_t len = 0;
     memset(out, 0, size);
     for (;;) {
-        screen_fill(0, 0, screen_cols(), screen_rows(), BG);
-        screen_text(2, 2, title, FG, BG);
-        snprintf(line, sizeof line, "Partition: %s%s%s", luks_root_dev[0] ? luks_root_dev : "",
+        snprintf(partition, sizeof partition, "Partition: %s%s%s", luks_root_dev[0] ? luks_root_dev : "",
                  luks_root_dev[0] && luks_swap_dev[0] ? ", " : "", luks_swap_dev[0] ? luks_swap_dev : "");
-        screen_text(2, 4, line, FG, BG);
-        if (wrong) {
-            screen_text(2, 6, wrong, 0xCC4444, BG);
-        }
         size_t nstars = 0; /* a star for each character */
         for (size_t i = 0; i < len && nstars < sizeof stars - 2; i++) {
             nstars += ((unsigned char)out[i] & 0xC0) != 0x80;
@@ -711,14 +775,28 @@ static void ask_secret(const char *title, const char *label, const char *wrong, 
         stars[nstars] = '_';
         stars[nstars + 1] = '\0';
         snprintf(line, sizeof line, "%s: %s", label, stars);
-        screen_text(2, 8, line, FG, BG);
-        screen_flush();
+        struct secret_page page = { title, partition, wrong, line, NULL };
+        each_screen(secret_draw, &page);
         int k = key_get();
         if (k == '\n') return;
-        if (ctrl_alt_del(k)) { /* before the root: nothing to stop or write back */
-            say("init: Ctrl+Alt+Del at the passphrase: rebooting");
-            sync();
-            reboot(RB_AUTOBOOT);
+        if (ctrl_alt_del(k)) { /* before the root: nothing to stop or write back; asked first */
+            int yes = 0;
+            for (;;) {
+                page.question = "Restart the computer now? Y: yes, N or Esc: no";
+                each_screen(secret_draw, &page);
+                int a = key_get();
+                if (a == 'y' || a == 'Y') {
+                    yes = 1;
+                    break;
+                }
+                if (a == 'n' || a == 'N' || a == 27) break;
+            }
+            if (yes) {
+                say("init: Ctrl+Alt+Del at the passphrase: rebooting");
+                sync();
+                reboot(RB_AUTOBOOT);
+            }
+            continue; /* the prompt again, as it was */
         }
         if (k == 21) { /* Ctrl+U */
             memset(out, 0, size);
@@ -766,6 +844,7 @@ static void unlock_with_passphrase(const char *why)
     boot_duress_enabled = duress_configured();
     if (screen_open("/font.psf")) {
         console_graphics();
+        screen_per_output();
     }
     keys_leds(1);
     keys_open();
@@ -1175,12 +1254,13 @@ static struct frame *top(struct task *t)
 }
 
 /* The program screen i should show: the lock's, the shared display's while
- * in front, its task's, or home's; NULL for none (it is starting again, or
- * the machine goes down once a system job ends: process 1 says so there). */
+ * in front, its task's, or home's; NULL for none (it is starting again, the
+ * machine goes down once a system job ends, or a restart is asked: process 1
+ * says so there). */
 static struct frame *showing(int i)
 {
     struct frame *f;
-    if (shutdown_how >= 0) {
+    if (shutdown_how >= 0 || restart_asked) {
         return NULL;
     }
     if (locked) {
@@ -1199,6 +1279,23 @@ static struct frame *showing(int i)
 static struct frame *focused(void)
 {
     return showing(focus_place);
+}
+
+/* A screen shows a program holding a live link (extdisplay,
+ * base_session_hold): what it shows is the other computer's session, so
+ * the idle lock waits until no screen does (idle_lock_at). */
+static int held_in_front(void)
+{
+    if (!apps_session_holding) {
+        return 0;
+    }
+    for (int i = 0; i < nplaces; i++) {
+        struct frame *f = showing(i);
+        if (f != NULL && f != &locker && apps_session_holding(f->cgroup)) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 /* The screen a task is on; -1 if none. */
@@ -1442,6 +1539,10 @@ static void freeze(struct frame *f)
     char path[96], amount[32];
     double t0 = now_ms();
 
+    /* A program holding a live link (extdisplay) keeps running without the
+     * screen: frozen, the link would end. Its remote input stops all the same
+     * (the lock revokes it; without the screen it has no keys). */
+    if (apps_session_holding && apps_session_holding(f->cgroup)) return;
     if (apps_sessions_revoke) apps_sessions_revoke(f->cgroup); /* its sessions ask again after a thaw */
     snprintf(path, sizeof path, "%s/cgroup.freeze", f->cgroup);
     write_file(path, "1");
@@ -1858,6 +1959,8 @@ static void do_kill(char *const argv[])
 }
 
 static int stay_on_display;
+static void lock(void);
+static void latch_lock_due(void);
 
 /* What screen at shows goes home, frozen as it is: the shared display from
  * every screen (they show what they did before it), or the task there from
@@ -1869,8 +1972,12 @@ static void go_home(int at)
     if (t == NULL) {
         return;
     }
+    latch_lock_due(); /* the idle time may have run out on this live link, with no input since */
     unplace(t);
     answer_home(t, "back", NULL);
+    if (lock_due) {
+        lock(); /* due: home only past the lock (lock() clears lock_due) */
+    }
     arrange(); /* locked: nothing changes until it unlocks */
 }
 
@@ -1945,10 +2052,12 @@ static void lock(void)
     if (locked) {
         return;
     }
+    lock_due = 0; /* due or not, the lock is asked for now */
     if (access(lock_argv[0], X_OK) != 0) {
         say("init: %s is not installed; not locking", lock_argv[0]);
         return;
     }
+    restart_asked = 0; /* a restart question goes: the lock's screen shows */
     say("init: locking");
     locked = 1;
     write_locked_state();
@@ -2009,13 +2118,62 @@ static void input_refresh(void)
 /* When the screen locks for want of input (ms), or -1: never with lock_after
  * 0, nor while locked, nor while the shared display has the screens: labwc
  * knows its idleness, and what holds it off (a video playing), and
- * labwc-control asks for the lock. */
+ * labwc-control asks for the lock. A live link on a screen (held_in_front)
+ * holds it off too: run out meanwhile, the lock is due (lock_due) and comes
+ * at once when no screen shows the link any more (the cable out, the
+ * program gone, home), whatever input came since. */
 static double idle_lock_at(void)
 {
     if (lock_after <= 0 || locked || display_front != NULL) {
         return -1;
     }
+    if (lock_due) {
+        return held_in_front() ? -1 : 0;
+    }
     return active_at + lock_after * 1e3;
+}
+
+/* The idle time ran out while a live link held a screen: from now on the
+ * lock is due, whatever input comes (lock_due). Called before input may move
+ * active_at, and before home leaves the session's screen: input and the home
+ * key can come in one poll pass, in either order. */
+static void latch_lock_due(void)
+{
+    if (!lock_due && lock_after > 0 && !locked && display_front == NULL && held_in_front() &&
+        active_at + lock_after * 1e3 <= now_ms()) {
+        lock_due = 1;
+    }
+}
+
+/* An input came: the idle time starts again, after a due lock is latched. */
+static void input_seen(void)
+{
+    latch_lock_due();
+    active_at = now_ms();
+}
+
+/* The main loop once idle_lock_at has come: the lock, or with a live link
+ * on a screen, lock_due. 1 if the lock was asked for. */
+static int idle_lock_check(void)
+{
+    latch_lock_due();
+    double at = idle_lock_at();
+    if (at < 0 || at > now_ms()) {
+        return 0;
+    }
+    if (held_in_front()) {
+        say("init: no input for %d s: locking once the live link no longer holds the screen", lock_after);
+        lock_due = 1;
+        return 0;
+    }
+    if (lock_due) {
+        say("init: the live link no longer holds the screen: locking");
+    } else {
+        say("init: no input for %d s: locking", lock_after);
+    }
+    active_at = now_ms(); /* without the lock program: not again at once */
+    lock();
+    return 1;
 }
 
 /* Start, thaw, freeze or stop the shared display (labwc) following container
@@ -2350,13 +2508,10 @@ static void shutdown_show(int id)
         snprintf(job, sizeof job, "No system job runs now: %s.", going);
         say("init: %s: no system job runs; going on in %d ms unless the next one starts", going, JOBS_QUIET_MS);
     }
-    screen_fill(0, 0, screen_cols(), screen_rows(), BG);
-    screen_text(2, 2, head, FG, BG);
-    screen_text(2, 4, job, FG, BG);
-    screen_text(2, 6, "Ending it midway can leave packages, the boot image or firmware half written.", FG, BG);
-    screen_text(2, 8, "To go ahead now anyway: Ctrl+Alt+Del reboots; as root, poweroff --force or reboot --force.",
-                FG, BG);
-    screen_flush();
+    const char *lines[] = { head, job, "Ending it midway can leave packages, the boot image or firmware half written.",
+                            "To go ahead now anyway: Ctrl+Alt+Del reboots; as root, poweroff --force or reboot --force.",
+                            NULL };
+    each_screen(lines_draw, lines);
 }
 
 /* The system jobs' drain (locachy-jobs, JOBS_CONTROL): asked when a power off
@@ -2444,6 +2599,7 @@ static void shutdown_request(int how, int force, int bound_ms)
     char kind[32];
     int id, n = jobs_running(&id);
 
+    restart_asked = 0; /* a restart question goes: this answers for the machine (the battery, poweroff) */
     if (!force && shutdown_how < 0) {
         drain_begin(); /* from here nothing new is taken; drained says when none is left */
     }
@@ -2524,16 +2680,62 @@ static void shutdown_look(void)
     }
 }
 
+/* Ctrl+Alt+Del with nothing going down asks first (KEYBOARDS.md): a question
+ * on process 1's own screen, the programs' screens taken as while a shutdown
+ * waits (showing). What it would wait for is said. */
+static void restart_show(void)
+{
+    char job[128] = "No system job runs.", kind[32] = "";
+    int id;
+
+    if (jobs_running(&id) > 0) {
+        job_kind(id, kind, sizeof kind);
+        snprintf(job, sizeof job, "System job %d runs%s%s: the restart waits for it to end.", id,
+                 kind[0] ? ": " : "", kind);
+    }
+    const char *lines[] = { "LOCachy: restart the computer now?", job, "Y: restart        N or Esc: stay", NULL };
+    each_screen(lines_draw, lines);
+}
+
+/* A key while it asks: y restarts (the usual wait for system jobs), n or
+ * Esc gives the screens back as they were; any other key waits. */
+static void restart_key(int key)
+{
+    if (!restart_asked) {
+        return;
+    }
+    if (key == 'y' || key == 'Y') {
+        say("init: restart: yes");
+        shutdown_request(RB_AUTOBOOT, 0, -1);
+    } else if (key == 'n' || key == 'N' || key == 27) {
+        restart_asked = 0;
+        say("init: restart: no, staying");
+        arrange();
+    }
+}
+
 /* Ctrl+Alt+Del (how: RB_AUTOBOOT) or the power button (RB_POWER_OFF): a
- * person asks. While a shutdown waits that is asking again: it goes ahead at
- * once. Within AGAIN_MS of the last one it is that press still (Delete
- * repeats while held) or seen on another device: nothing. */
+ * person asks. Ctrl+Alt+Del with nothing going down asks first (not while
+ * locked, as its key is not acted on there; asked already, nothing more).
+ * While a shutdown waits that is asking again: it goes ahead at once, as its
+ * screen says. Within AGAIN_MS of the last one it is that press still
+ * (Delete repeats while held) or seen on another device: nothing. */
 static void person_asked(int how)
 {
     double last = asked_at;
 
     asked_at = now_ms();
     if (last >= 0 && asked_at - last < AGAIN_MS) {
+        return;
+    }
+    if (how == RB_AUTOBOOT && shutdown_how < 0) {
+        if (locked || restart_asked) {
+            return;
+        }
+        say("init: Ctrl+Alt+Del: asking whether to restart");
+        restart_asked = 1;
+        arrange(); /* nothing gets the screens: they show the question */
+        restart_show();
         return;
     }
     say(how == RB_AUTOBOOT ? "init: Ctrl+Alt+Del" : "init: power button");
@@ -2716,6 +2918,9 @@ static void read_settings(void)
     snprintf(mem_sleep, sizeof mem_sleep, "%s", next.mem_sleep);
     login_skip = next.login_skip;
     lock_after = next.lock_after;
+    if (lock_after <= 0) {
+        lock_due = 0; /* never locked for want of input now */
+    }
     keys_reload(); /* key_home, key_lock */
     say("init: settings: hibernate_after %d s, lid_holdoff %d s, battery_critical %d %%, mem_sleep %s, "
         "login_skip %d, lock_after %d s, %zu services", hibernate_after, lid_holdoff, battery_critical,
@@ -3972,9 +4177,9 @@ int main(void)
     say("init: opening screen at %.3f s", uptime());
     if (screen_open(rooted ? BASE_FONT : "/font.psf")) {
         console_graphics();
+        screen_per_output();
         screen_describe();
-        screen_text(1, 0, rooted ? "LOCachy: starting home" : "LOCachy: no root (locachy-root)", FG, BG);
-        screen_flush();
+        each_screen(boot_draw, rooted ? "LOCachy: starting home" : "LOCachy: no root (locachy-root)");
     }
     keys_leds(1);
     int nk = keys_open(), npfd = system_inputs(pfd, 8), npfd_boot = npfd, system_lost = 0;
@@ -4168,10 +4373,7 @@ int main(void)
             shutdown_look();
             continue;
         }
-        if (idle_lock_at() >= 0 && idle_lock_at() <= now_ms()) {
-            say("init: no input for %d s: locking", lock_after);
-            active_at = now_ms(); /* without the lock program: not again at once */
-            lock();
+        if (idle_lock_check()) {
             continue;
         }
         if (reboot_s > 0 && measured.t == 0 && uptime() >= MEASURE_FROM) {
@@ -4310,7 +4512,7 @@ int main(void)
                     char events[64 * sizeof(struct input_event)];
                     while (read(p[j].fd, events, sizeof events) > 0) {
                     }
-                    active_at = now_ms();
+                    input_seen();
                 }
                 break;
             }
@@ -4319,7 +4521,9 @@ int main(void)
                 /* The compositor consumes its own global keybinds before
                  * notifying us; acting on this observer would race delivery. */
                 int shared = display_front != NULL;
-                if (key == K_HOME && !locked && !shared) {
+                if (restart_asked) {
+                    restart_key(key); /* process 1's question has the keys */
+                } else if (key == K_HOME && !locked && !shared) {
                     go_home(focus_place);
                 } else if (key == K_ACT_LOCK && !shared) {
                     lock();

@@ -2001,22 +2001,28 @@ static const struct wl_pointer_listener pointer_listener = {
     .axis = pointer_axis,
 };
 
-static void key_pressed(xkb_keysym_t sym, int ctrl)
+/* A key, with the modifiers held (base.h's KEYS_*). The keys every program
+ * has come from key_action, as keys.c would give them: Ctrl with a letter as
+ * its control character. Nothing is typed here, so q is Esc (key_list_action);
+ * the letters below are plain letters only, never with Ctrl, Alt or Super. */
+static void key_pressed(xkb_keysym_t sym, int mods)
 {
-    if (ctrl && (sym == XKB_KEY_z || sym == XKB_KEY_Z)) {
-        undo_anno();
-        return;
+    int key = sym < 0x80 ? (int)sym : 0; /* never a keysym that is a K_ value */
+    if (sym == XKB_KEY_Escape) {
+        key = 27;
+    } else if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+        key = '\n';
+    } else if (sym >= XKB_KEY_F1 && sym <= XKB_KEY_F12) {
+        key = K_F1 + (int)(sym - XKB_KEY_F1); /* Alt+F4 */
+    } else if ((mods & KEYS_CTRL) && (sym | 0x20) >= 'a' && (sym | 0x20) <= 'z') {
+        key = (int)((sym | 0x20) & 0x1F);
     }
-    if (ctrl && (sym == XKB_KEY_c || sym == XKB_KEY_C)) {
-        finish_with(FINISH_COPY);
+    switch (key_list_action(key, mods)) {
+    case ACT_QUIT: /* Ctrl+Q, Alt+F4: nothing captured, as the last Esc */
+        exit_code = 1;
+        finished = 1;
         return;
-    }
-    if (ctrl && (sym == XKB_KEY_s || sym == XKB_KEY_S)) {
-        finish_with(FINISH_SAVE);
-        return;
-    }
-    switch (sym) {
-    case XKB_KEY_Escape:
+    case ACT_CANCEL:
         if (picking_window) {
             picking_window = 0;
             dirty_all();
@@ -2034,12 +2040,24 @@ static void key_pressed(xkb_keysym_t sym, int ctrl)
             exit_code = 1;
             finished = 1;
         }
+        return;
+    case ACT_COPY:
+        finish_with(FINISH_COPY);
+        return;
+    case ACT_SAVE:
+    case ACT_SAVE_AS:
+        finish_with(FINISH_SAVE);
+        return;
+    case ACT_UNDO:
+        undo_anno();
+        return;
+    default:
         break;
-    case XKB_KEY_q:
-    case XKB_KEY_Q:
-        exit_code = 1;
-        finished = 1;
-        break;
+    }
+    if (mods & (KEYS_CTRL | KEYS_ALT | KEYS_META)) {
+        return; /* Ctrl+A, Ctrl+V, Alt+q: not the letters */
+    }
+    switch (sym) {
     case XKB_KEY_Return:
     case XKB_KEY_KP_Enter:
         finish_with(FINISH_COPY);
@@ -2124,8 +2142,12 @@ static void kb_key(void *data, struct wl_keyboard *k, uint32_t serial, uint32_t 
     (void)data; (void)k; (void)serial; (void)time;
     if (state != WL_KEYBOARD_KEY_STATE_PRESSED || !xkb_st) return;
     xkb_keysym_t sym = xkb_state_key_get_one_sym(xkb_st, key + 8);
-    int ctrl = xkb_state_mod_name_is_active(xkb_st, XKB_MOD_NAME_CTRL, XKB_STATE_MODS_EFFECTIVE) > 0;
-    key_pressed(sym, ctrl);
+    int mods = 0;
+    if (xkb_state_mod_name_is_active(xkb_st, XKB_MOD_NAME_SHIFT, XKB_STATE_MODS_EFFECTIVE) > 0) mods |= KEYS_SHIFT;
+    if (xkb_state_mod_name_is_active(xkb_st, XKB_MOD_NAME_CTRL, XKB_STATE_MODS_EFFECTIVE) > 0) mods |= KEYS_CTRL;
+    if (xkb_state_mod_name_is_active(xkb_st, XKB_MOD_NAME_ALT, XKB_STATE_MODS_EFFECTIVE) > 0) mods |= KEYS_ALT;
+    if (xkb_state_mod_name_is_active(xkb_st, XKB_MOD_NAME_LOGO, XKB_STATE_MODS_EFFECTIVE) > 0) mods |= KEYS_META;
+    key_pressed(sym, mods);
 }
 
 static void kb_modifiers(void *data, struct wl_keyboard *k, uint32_t serial, uint32_t dep, uint32_t lat,

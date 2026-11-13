@@ -85,6 +85,7 @@ static int write_file(const char *path, const char *value) {
 }
 static int screen_open(const char *font) { (void)font; return 1; }
 static void console_graphics(void) {}
+static void screen_per_output(void) {}
 static void keys_leds(int on) { (void)on; }
 static int keys_open(void) { return 1; }
 static void keys_release(void) {}

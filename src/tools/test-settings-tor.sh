@@ -15,7 +15,8 @@ for kind in plain sanitized; do
     # shellcheck disable=SC2086
     "$cc" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -ffunction-sections -fdata-sections $extra \
         -I"$src/base/include" -I"$src/base" "-DTOR_TEST_DIR=\"$out/$kind\"" \
-        "$src/tools/test-settings-tor.c" -Wl,--gc-sections -o "$out/test-settings-tor-$kind"
+        "$src/tools/test-settings-tor.c" "$src/base/key-action.c" "$src/base/help.c" \
+        -Wl,--gc-sections -o "$out/test-settings-tor-$kind"
     ASAN_OPTIONS=detect_leaks=0 "$out/test-settings-tor-$kind"
 done
 echo 'PASS settings: Tor rows, plain and AddressSanitizer/UBSan'

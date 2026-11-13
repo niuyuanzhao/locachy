@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-11 02:57-0500\n"
+"POT-Creation-Date: 2026-11-12 18:28-0500\n"
 "PO-Revision-Date: 2026-11-09 14:16+0000\n"
 "Last-Translator: LOCachy\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -33,6 +33,50 @@ msgstr "剪贴板传输尚未完成"
 #: base/clipboard.c
 msgid "clipboard service unavailable or transfer failed"
 msgstr "剪贴板服务不可用或传输失败"
+
+#: base/help.c
+msgid "Quit, asking first when work would be lost"
+msgstr "退出；会丢失工作时先询问"
+
+#: base/help.c
+msgid "Close the innermost menu, dialog or search; else back one level"
+msgstr "关闭最内层的菜单、对话框或搜索；否则返回上一级"
+
+#: base/help.c
+msgid "Home; the program waits where it is"
+msgstr "回到主页；程序停在原处等待"
+
+#: base/help.c
+msgid "This help"
+msgstr "本帮助"
+
+#: base/help.c
+msgid "Next or previous field"
+msgstr "下一个或上一个字段"
+
+#: base/help.c progs/files.c
+msgid "Copy, cut, paste"
+msgstr "复制、剪切、粘贴"
+
+#: base/help.c progs/edit.c
+msgid "Undo, redo"
+msgstr "撤销、重做"
+
+#: base/help.c
+msgid "Select all"
+msgstr "全选"
+
+#: base/help.c
+msgid "Find; next, previous match"
+msgstr "查找；下一个、上一个匹配"
+
+#: base/help.c
+msgid "Every program"
+msgstr "所有程序"
+
+#: base/help.c
+msgid "Esc, F1 or q: close"
+msgstr "Esc、F1 或 q：关闭"
 
 #: base/jobs.c
 msgid "The request is too long."
@@ -407,7 +451,9 @@ msgid "archive"
 msgstr "归档管理"
 
 #. TRANSLATORS: Esc is the key; keep it.
-#: progs/archive.c progs/files.c progs/rescue.c progs/shot.c
+#. TRANSLATORS: Esc is the Esc key; keep it.
+#. TRANSLATORS: Esc is the key; keep it.
+#: progs/archive.c progs/files.c progs/rescue.c progs/settings.c progs/shot.c
 msgid "Esc: cancel"
 msgstr "Esc: 取消"
 
@@ -426,7 +472,7 @@ msgstr "密码错误。%s 的密码："
 msgid "Cannot start archive-worker: %s."
 msgstr "无法启动 archive-worker：%s。"
 
-#. TRANSLATORS: the question when Esc is pressed while the archive is worked on.
+#. TRANSLATORS: the question when Esc (or Ctrl+Q) is pressed while the archive is worked on.
 #: progs/archive.c
 msgid "Cancel it?"
 msgstr "取消吗？"
@@ -435,6 +481,87 @@ msgstr "取消吗？"
 #, c-format
 msgid "archive-worker stopped (status %d)."
 msgstr "archive-worker 已停止（状态 %d）。"
+
+#: progs/archive.c
+msgid "Choose an entry"
+msgstr "选择一项"
+
+#: progs/archive.c
+msgid "Close a folder, or go to the one it is in; open a folder"
+msgstr "折叠文件夹，或转到其所在的文件夹；展开文件夹"
+
+#: progs/archive.c
+msgid "Preview the entry (in view or edit); a folder opens or closes"
+msgstr "预览该项（用 view 或 edit）；文件夹则展开或折叠"
+
+#: progs/archive.c
+msgid "Open in its application; open with..."
+msgstr "用其应用程序打开；打开方式…"
+
+#: progs/archive.c
+msgid "Mark the entry"
+msgstr "标记该项"
+
+#: progs/archive.c
+msgid "Mark all; mark none"
+msgstr "全部标记；全部取消标记"
+
+#: progs/archive.c
+msgid "Extract the marked (or the selected); extract all"
+msgstr "解压已标记项（或选中项）；全部解压"
+
+#: progs/archive.c
+msgid "Add files to the archive"
+msgstr "向归档添加文件"
+
+#: progs/archive.c
+msgid "Remove the marked (or the selected) from the archive"
+msgstr "从归档中移除已标记项（或选中项）"
+
+#: progs/archive.c
+msgid "Test the archive's integrity"
+msgstr "测试归档的完整性"
+
+#: progs/archive.c
+msgid "The archive's properties"
+msgstr "归档属性"
+
+#: progs/archive.c
+msgid "A new archive; open another"
+msgstr "新建归档；打开其他归档"
+
+#: progs/archive.c
+msgid "Find (the entries whose names have the text)"
+msgstr "查找（名称含该文本的项）"
+
+#: progs/archive.c
+msgid "The next or previous found"
+msgstr "下一个或上一个找到的项"
+
+#: progs/archive.c
+msgid "The find text away"
+msgstr "清除查找文本"
+
+#: progs/archive.c
+msgid "The entry's menu"
+msgstr "该项的菜单"
+
+#: progs/archive.c
+msgid "A dialog's next or previous line"
+msgstr "对话框中的下一行或上一行"
+
+#: progs/archive.c progs/installer.c progs/packages.c
+msgid "A question: y yes; n, Esc or Enter no"
+msgstr "提问时：y 是；n、Esc 或 Enter 否"
+
+#: progs/archive.c progs/installer.c progs/packages.c progs/rescue.c
+#: progs/settings.c
+msgid "In a line you type: select all, the start, the end"
+msgstr "输入行中：全选、行首、行尾"
+
+#: progs/archive.c
+msgid "Archive keys"
+msgstr "归档管理快捷键"
 
 #. TRANSLATORS: y and N are the keys answering; keep them.
 #: progs/archive.c
@@ -575,14 +702,14 @@ msgstr "没有名称含此文字的项。"
 msgid "The archive is empty."
 msgstr "归档为空。"
 
-#. TRANSLATORS: key names (Enter, Ctrl+E, Alt+A, Del, Alt+T, Alt+Return, q); keep them.
+#. TRANSLATORS: key names (Enter, Ctrl+E, Alt+A, Del, Alt+T, Alt+Return, Ctrl+F, Ctrl+Q, F1); keep them.
 #: progs/archive.c
 msgid ""
 "Enter preview  o open  Ctrl+E extract  Alt+A add  Del remove  Alt+T test  "
-"Alt+Return properties  Ctrl+F find  q quit"
+"Alt+Return properties  Ctrl+F find  Ctrl+Q quit  F1 help"
 msgstr ""
 "Enter 预览  o 打开  Ctrl+E 解压  Alt+A 添加  Del 移除  Alt+T 测试  "
-"Alt+Return 属性  Ctrl+F 查找  q 退出"
+"Alt+Return 属性  Ctrl+F 查找  Ctrl+Q 退出  F1 帮助"
 
 #: progs/archive.c
 msgid "No archive is open."
@@ -2862,6 +2989,70 @@ msgid "Session saved"
 msgstr "会话已保存"
 
 #: progs/edit.c
+msgid "New, open, save"
+msgstr "新建、打开、保存"
+
+#: progs/edit.c
+msgid "Save as; save all"
+msgstr "另存为；全部保存"
+
+#: progs/edit.c
+msgid "Reload the document"
+msgstr "重新加载文档"
+
+#: progs/edit.c
+msgid "Close the document; quit (asks about changes)"
+msgstr "关闭文档；退出（有更改时询问）"
+
+#: progs/edit.c
+msgid "Cut, copy, paste"
+msgstr "剪切、复制、粘贴"
+
+#: progs/edit.c
+msgid "Select all; deselect"
+msgstr "全选；取消选择"
+
+#: progs/edit.c progs/view.c
+msgid "Find; the next, the previous match"
+msgstr "查找；下一个、上一个匹配"
+
+#: progs/edit.c
+msgid "Replace; find in files"
+msgstr "替换；在文件中查找"
+
+#: progs/edit.c
+msgid "Go to a line; comment; toggle the comment"
+msgstr "转到行；注释；切换注释"
+
+#: progs/edit.c
+msgid "Fold, unfold the top level"
+msgstr "折叠、展开顶层节点"
+
+#: progs/edit.c progs/view.c
+msgid "Zoom in, out, to 100%"
+msgstr "放大、缩小、缩放至 100%"
+
+#: progs/edit.c
+msgid "Next, previous document"
+msgstr "下一个、上一个文档"
+
+#: progs/edit.c
+msgid "The documents list"
+msgstr "文档列表"
+
+#: progs/edit.c
+msgid "Code actions; definition, declaration"
+msgstr "代码操作；转到定义、声明"
+
+#: progs/edit.c
+msgid "The Edit menu"
+msgstr "“编辑”菜单"
+
+#: progs/edit.c
+msgid "The File menu; the other menus by their letters"
+msgstr "“文件”菜单；其他菜单按各自的字母键"
+
+#: progs/edit.c
 msgid "&Reload"
 msgstr "重新加载(&R)"
 
@@ -3404,6 +3595,279 @@ msgstr "无法加载正文内容字体。"
 #: progs/edit.c
 msgid "Bookmark"
 msgstr "书签"
+
+#: progs/edit.c
+msgid "Edit keys"
+msgstr "编辑器快捷键"
+
+#: progs/extdisplay-setup.c
+msgid "The broker ended the pairing."
+msgstr "中转进程结束了配对。"
+
+#: progs/extdisplay-setup.c
+msgid "The sender failed the handshake. Check the code and try again."
+msgstr "发送端握手失败。请核对配对码后重试。"
+
+#: progs/extdisplay-setup.c
+msgid "The sender did not answer in time."
+msgstr "发送端未及时响应。"
+
+#: progs/extdisplay-setup.c
+msgid "The cable link went down."
+msgstr "线缆链路已断开。"
+
+#: progs/extdisplay-setup.c
+msgid "Disconnected."
+msgstr "已断开。"
+
+#: progs/extdisplay-setup.c
+msgid "Pairing cancelled."
+msgstr "已取消配对。"
+
+#: progs/extdisplay-setup.c
+msgid "The connection ended, or the broker failed."
+msgstr "连接已结束，或中转进程失败。"
+
+#: progs/extdisplay.c
+msgid "Unavailable"
+msgstr "不可用"
+
+#: progs/extdisplay.c
+msgid "A paired dedicated-link transport is required."
+msgstr "需要经过配对的专线传输。"
+
+#: progs/extdisplay.c
+msgid "Extended display"
+msgstr "扩展屏"
+
+#: progs/extdisplay.c
+#, c-format
+msgid "Status: %s    Stream: %ux%u"
+msgstr "状态：%s    画面：%ux%u"
+
+#: progs/extdisplay.c
+msgid ""
+"Ctrl+Alt+F12: disconnect    Home, lock and brightness stay local; the link "
+"stays up"
+msgstr "Ctrl+Alt+F12：断开    主页、锁屏和亮度留在本机；链路保持连接"
+
+#: progs/extdisplay.c
+msgid "No clipboard, files or commands. The peer keeps its original screen."
+msgstr "不传剪贴板、文件或命令。对端保留原有屏幕。"
+
+#: progs/extdisplay.c
+msgid "Disconnected"
+msgstr "已断开"
+
+#: progs/extdisplay.c
+msgid "Remote input could not be released in time; the stream was closed."
+msgstr "未能及时释放远端输入；画面流已关闭。"
+
+#: progs/extdisplay.c
+msgid "The decoder channel ended."
+msgstr "解码通道已结束。"
+
+#: progs/extdisplay.c
+msgid "The managed sleep inhibitor was not granted."
+msgstr "未能获得受管的防睡眠许可。"
+
+#: progs/extdisplay.c
+msgid "Active"
+msgstr "已连接"
+
+#: progs/extdisplay.c
+msgid "Extended-only sender over the paired dedicated link."
+msgstr "仅作扩展屏的发送端，经配对专线连接。"
+
+#: progs/extdisplay.c
+msgid "The decoder sent an invalid picture."
+msgstr "解码器送来了无效画面。"
+
+#: progs/extdisplay.c
+msgid "The decoder sandbox or FFmpeg is not available."
+msgstr "解码沙箱或 FFmpeg 不可用。"
+
+#: progs/extdisplay.c
+msgid "The sender handshake or the stream failed."
+msgstr "与发送端的握手或画面流失败。"
+
+#: progs/extdisplay.c
+msgid "No managed session owner: remote input stays disabled."
+msgstr "没有受管的会话所有者：远端输入保持关闭。"
+
+#: progs/extdisplay.c
+msgid "The transport is not a paired local stream from the broker."
+msgstr "传输不是中转进程交来的已配对本地流。"
+
+#: progs/extdisplay.c
+msgid "The session owner did not accept this session."
+msgstr "会话所有者未接受此会话。"
+
+#: progs/extdisplay.c
+msgid "The decoder worker could not be started safely."
+msgstr "无法安全启动解码工作进程。"
+
+#: progs/extdisplay.c
+msgid "Connecting"
+msgstr "正在连接"
+
+#: progs/extdisplay.c
+msgid "Waiting for the sender's capabilities."
+msgstr "正在等待发送端报告其能力。"
+
+#: progs/extdisplay.c
+msgid "The session owner has gone."
+msgstr "会话所有者已退出。"
+
+#: progs/extdisplay.c
+msgid "The session owner did not accept the release."
+msgstr "会话所有者未接受释放。"
+
+#: progs/extdisplay.c
+msgid "Remote input could not be delivered."
+msgstr "无法送达远端输入。"
+
+#: progs/extdisplay.c
+msgid "The sender handshake timed out."
+msgstr "与发送端握手超时。"
+
+#: progs/extdisplay.c
+msgid "Disconnected with Ctrl+Alt+F12; extdisplay stays open."
+msgstr "已用 Ctrl+Alt+F12 断开；extdisplay 保持打开。"
+
+#: progs/extdisplay.c progs/settings-power.inc
+msgid "Idle"
+msgstr "空闲"
+
+#: progs/extdisplay.c
+msgid "Scanning"
+msgstr "正在扫描"
+
+#: progs/extdisplay.c
+msgid "Choose an interface"
+msgstr "选择接口"
+
+#: progs/extdisplay.c
+msgid "Asking the broker for a code"
+msgstr "正在向中转进程获取配对码"
+
+#: progs/extdisplay.c
+msgid "Waiting for the Mac to connect"
+msgstr "正在等待 Mac 连接"
+
+#: progs/extdisplay.c
+msgid "Connected"
+msgstr "已连接"
+
+#: progs/extdisplay.c
+msgid "Cancelling"
+msgstr "正在取消"
+
+#: progs/extdisplay.c
+msgid "Releasing"
+msgstr "正在释放"
+
+#: progs/extdisplay.c
+msgid "Released"
+msgstr "已释放"
+
+#: progs/extdisplay.c
+msgid "The pairing helper stopped"
+msgstr "配对辅助进程已停止"
+
+#: progs/extdisplay.c progs/settings-hwinfo.inc progs/settings-power.inc
+#: progs/view-pdf-ui.inc
+msgid "Unknown"
+msgstr "未知"
+
+#: progs/extdisplay.c
+msgid "Choose the cable interface to pair with the Mac."
+msgstr "选择用于与 Mac 配对的线缆接口。"
+
+#: progs/extdisplay.c
+msgid "Scanning..."
+msgstr "正在扫描……"
+
+#: progs/extdisplay.c
+msgid "No cable interface found. Connect the cable, then press F5."
+msgstr "未找到线缆接口。请连接线缆后按 F5。"
+
+#: progs/extdisplay.c
+msgid "carrier up"
+msgstr "已连接网线"
+
+#: progs/extdisplay.c progs/rescue.c
+msgid "no carrier"
+msgstr "未连接网线"
+
+#: progs/extdisplay.c
+#, c-format
+msgid "Address  %s     Port  %s"
+msgstr "地址  %s     端口  %s"
+
+#: progs/extdisplay.c
+#, c-format
+msgid "Code     %s"
+msgstr "配对码   %s"
+
+#: progs/extdisplay.c
+#, c-format
+msgid ""
+"On the Mac: locachy-macos-sender --interface <mac-interface> --address %s --"
+"port %s"
+msgstr ""
+"在 Mac 上运行：locachy-macos-sender --interface <mac-interface> --address %s "
+"--port %s"
+
+#: progs/extdisplay.c
+msgid "Asking the broker for an address and a code..."
+msgstr "正在向中转进程获取地址和配对码……"
+
+#: progs/extdisplay.c
+#, c-format
+msgid "Status: %s"
+msgstr "状态：%s"
+
+#: progs/extdisplay.c
+msgid "The broker is busy: a pairing is still active."
+msgstr "中转进程忙：配对仍在进行中。"
+
+#: progs/extdisplay.c
+msgid "The cable was unplugged. Press any key to close."
+msgstr "线缆已拔出。按任意键关闭。"
+
+#: progs/extdisplay.c
+msgid ""
+"Up/Down choose   Enter pair   Esc cancel   F5 scan   F1 help   Ctrl+Q quit"
+msgstr "Up/Down 选择   Enter 配对   Esc 取消   F5 扫描   F1 帮助   Ctrl+Q 退出"
+
+#: progs/extdisplay.c
+msgid "The code and the address are kept in memory only."
+msgstr "配对码和地址只保存在内存中。"
+
+#: progs/extdisplay.c
+msgid "Choose the cable interface"
+msgstr "选择线缆接口"
+
+#: progs/extdisplay.c
+msgid "Pair with the Mac on it"
+msgstr "与该接口上的 Mac 配对"
+
+#: progs/extdisplay.c
+msgid "Cancel the pairing"
+msgstr "取消配对"
+
+#: progs/extdisplay.c
+msgid "Look for cable interfaces again"
+msgstr "重新查找线缆接口"
+
+#: progs/extdisplay.c
+msgid "Disconnect a session; extdisplay stays open"
+msgstr "断开会话；extdisplay 保持打开"
+
+#: progs/extdisplay.c
+msgid "Extended display keys"
+msgstr "扩展屏快捷键"
 
 #: progs/files.c progs/settings.c
 msgid "sign in again"
@@ -4042,6 +4506,8 @@ msgid "-> move"
 msgstr "-> 移动"
 
 #. TRANSLATORS: the part before the colon is a key; keep it and ": ".
+#. The buttons send the keys they name: Ctrl+Q with its modifier, as
+#. * packages' does. There is no quit button while it installs (refused).
 #: progs/files.c progs/installer.c progs/rescue.c progs/settings.c
 msgid "Enter: choose"
 msgstr "Enter: 选择"
@@ -4066,10 +4532,10 @@ msgstr ".: 隐藏文件"
 msgid "s: sort"
 msgstr "s: 排序"
 
-#. TRANSLATORS: q is the key; keep it.
+#. TRANSLATORS: Esc is the key; keep it.
 #: progs/files.c
-msgid "q: back, nothing chosen"
-msgstr "q: 返回，不作选择"
+msgid "Esc: back, nothing chosen"
+msgstr "Esc: 返回，不作选择"
 
 #. TRANSLATORS: Enter and Tab are keys; keep them.
 #: progs/files.c
@@ -4085,20 +4551,20 @@ msgstr "双击: 选择（文件夹: 进入）   Tab: 位置"
 msgid "r: restore"
 msgstr "r: 还原"
 
-#. TRANSLATORS: d is the key; keep it.
+#. TRANSLATORS: Del is the Delete key; keep it.
 #: progs/files.c
-msgid "d: delete permanently"
-msgstr "d: 永久删除"
+msgid "Del: delete permanently"
+msgstr "Del: 永久删除"
 
 #. TRANSLATORS: e is the key; keep it.
 #: progs/files.c
 msgid "e: empty Trash"
 msgstr "e: 清空回收站"
 
-#. TRANSLATORS: u is the key; keep it.
+#. TRANSLATORS: Ctrl+Z is the key; keep it.
 #: progs/files.c
-msgid "u: undo"
-msgstr "u: 撤销"
+msgid "Ctrl+Z: undo"
+msgstr "Ctrl+Z：撤销"
 
 #. TRANSLATORS: i is the key; keep it.
 #: progs/files.c
@@ -4116,41 +4582,46 @@ msgstr "Enter: 打开"
 msgid "o: open with"
 msgstr "o: 打开方式"
 
-#. TRANSLATORS: c is the key; keep it.
-#: progs/files.c
-msgid "c: copy"
-msgstr "c: 复制"
+#. TRANSLATORS: Ctrl+C is the key; keep it.
+#. TRANSLATORS: Ctrl+C is a key name; keep it.
+#: progs/files.c progs/home.c progs/installer.c progs/packages.c
+msgid "Ctrl+C: copy"
+msgstr "Ctrl+C：复制"
 
-#. TRANSLATORS: x is the key; keep it.
+#. TRANSLATORS: Ctrl+X is the key; keep it.
 #: progs/files.c
-msgid "x: cut"
-msgstr "x: 剪切"
+msgid "Ctrl+X: cut"
+msgstr "Ctrl+X：剪切"
 
-#. TRANSLATORS: v is the key; keep it.
+#. TRANSLATORS: Ctrl+V is the key; keep it.
 #: progs/files.c
-msgid "v: paste"
-msgstr "v: 粘贴"
+msgid "Ctrl+V: paste"
+msgstr "Ctrl+V：粘贴"
 
-#. TRANSLATORS: r is the key; keep it.
+#. TRANSLATORS: F2 is the key; keep it.
 #: progs/files.c
-msgid "r: rename"
-msgstr "r: 重命名"
+msgid "F2: rename"
+msgstr "F2：重命名"
 
-#. TRANSLATORS: d is the key; keep it.
+#. TRANSLATORS: Del is the Delete key; keep it.
 #: progs/files.c
-msgid "d: trash"
-msgstr "d: 移入回收站"
+msgid "Del: trash"
+msgstr "Del: 移入回收站"
 
-#. TRANSLATORS: n is the key; keep it.
+#. TRANSLATORS: Ctrl+Shift+N is the key; keep it.
 #: progs/files.c
-msgid "n: new folder"
-msgstr "n: 新建文件夹"
+msgid "Ctrl+Shift+N: new folder"
+msgstr "Ctrl+Shift+N: 新建文件夹"
 
-#. TRANSLATORS: q is the key; keep it.
-#. TRANSLATORS: q is the q key; keep "q: ".
-#: progs/files.c progs/packages.c
-msgid "q: back"
-msgstr "q: 返回"
+#. TRANSLATORS: Esc and Ctrl+Q are keys; keep them.
+#. TRANSLATORS: Ctrl+Q and F1 are key names; keep them.
+#: progs/files.c progs/firmware.c progs/installer.c progs/packages.c
+msgid "Ctrl+Q: quit"
+msgstr "Ctrl+Q: 退出"
+
+#: progs/files.c progs/home.c
+msgid "Esc: back"
+msgstr "Esc：返回"
 
 #. TRANSLATORS: i is the key; keep it.
 #: progs/files.c
@@ -4599,24 +5070,28 @@ msgid "Create link... (L)"
 msgstr "创建软链接... (L)"
 
 #: progs/files.c
-msgid "Copy path(s) (Ctrl+Shift+C)"
-msgstr "复制完整路径 (Ctrl+Shift+C)"
+msgid "Copy path(s) (Ctrl+Alt+C)"
+msgstr "复制路径 (Ctrl+Alt+C)"
 
 #: progs/files.c
-msgid "New folder..."
-msgstr "新建文件夹..."
+msgid "Invert selection"
+msgstr "反向选择"
 
 #: progs/files.c
-msgid "New empty file... (N)"
-msgstr "新建空文件... (N)"
+msgid "New folder... (Ctrl+Shift+N)"
+msgstr "新建文件夹... (Ctrl+Shift+N)"
+
+#: progs/files.c
+msgid "New empty file... (Ctrl+Alt+N)"
+msgstr "新建空白文件…（Ctrl+Alt+N）"
 
 #: progs/files.c
 msgid "Bookmark folder (Ctrl+D)"
 msgstr "收藏此文件夹 (Ctrl+D)"
 
 #: progs/files.c
-msgid "Open in terminal (F4)"
-msgstr "在终端中打开 (F4)"
+msgid "Open in terminal (Shift+F4)"
+msgstr "在终端中打开 (Shift+F4)"
 
 #: progs/files.c
 msgid "Find files... (Ctrl+Shift+F)"
@@ -4698,6 +5173,114 @@ msgid "Release to refresh"
 msgstr "松开即刷新"
 
 #: progs/files.c
+msgid "Open; open with..."
+msgstr "打开；打开方式..."
+
+#: progs/files.c
+msgid "Mark the item; mark all"
+msgstr "标记该项；全部标记"
+
+#: progs/files.c
+msgid "Copy the path of the selected item or items"
+msgstr "复制所选项的路径"
+
+#: progs/files.c
+msgid "Move to the Trash; delete permanently"
+msgstr "移入回收站；永久删除"
+
+#: progs/files.c
+msgid "Rename; in the Trash, r restores"
+msgstr "重命名；在回收站中按 r 还原"
+
+#: progs/files.c
+msgid "New folder; new empty file"
+msgstr "新建文件夹；新建空文件"
+
+#: progs/files.c
+msgid "The parent folder"
+msgstr "上级文件夹"
+
+#: progs/files.c
+msgid "Back, forward"
+msgstr "后退、前进"
+
+#: progs/files.c
+msgid "Filter by part of the name"
+msgstr "按名称的一部分筛选"
+
+#: progs/files.c
+msgid "Find files"
+msgstr "查找文件"
+
+#: progs/files.c
+msgid "Go to a location"
+msgstr "转到位置"
+
+#: progs/files.c
+msgid "Hidden files shown or not"
+msgstr "显示或隐藏隐藏文件"
+
+#: progs/files.c
+msgid "Properties; I: the folder's"
+msgstr "属性；I：文件夹的属性"
+
+#: progs/files.c
+msgid "The menu of the selected item"
+msgstr "所选项的菜单"
+
+#: progs/files.c
+msgid "Split view; the places pane"
+msgstr "分栏视图；位置窗格"
+
+#: progs/files.c
+msgid "Reload the folder"
+msgstr "刷新文件夹"
+
+#: progs/files.c
+msgid "A terminal in this folder"
+msgstr "在此文件夹中打开终端"
+
+#: progs/files.c
+msgid "New tab, close the tab"
+msgstr "新建标签页、关闭标签页"
+
+#: progs/files.c progs/view.c
+msgid "Next, previous tab"
+msgstr "下一个、上一个标签页"
+
+#: progs/files.c
+msgid "Icons, compact, details"
+msgstr "图标、紧凑、详细信息"
+
+#: progs/files.c
+msgid "Zoom in, out, back"
+msgstr "放大、缩小、恢复默认"
+
+#: progs/files.c
+msgid "Sort; columns; by name, time, size, type, extension"
+msgstr "排序；显示列；按名称、时间、大小、类型、扩展名"
+
+#: progs/files.c
+msgid "Bookmark the folder; duplicate; create a link"
+msgstr "将文件夹加入书签；创建副本；创建链接"
+
+#: progs/files.c
+msgid "Set as wallpaper; eject the drive or empty the Trash"
+msgstr "设为壁纸；弹出驱动器或清空回收站"
+
+#: progs/files.c
+msgid "Places and panes"
+msgstr "位置与窗格"
+
+#: progs/files.c
+msgid "Cancel the drag, filter or marks; then back (inside home: its list)"
+msgstr "取消拖动、筛选或标记；然后返回（在主页内：回到主页列表）"
+
+#: progs/files.c
+msgid "Files keys"
+msgstr "文件管理快捷键"
+
+#: progs/files.c
 msgid "Filter (part of the name):"
 msgstr "筛选（名称的一部分）："
 
@@ -4765,6 +5348,58 @@ msgstr "IFD 分区：仅描述符 (fd)"
 msgid "IFD: Ethernet NVM (gbe) only"
 msgstr "IFD 分区：仅网卡 NVM (gbe)"
 
+#: progs/firmware.c
+msgid "Next or previous page: Devices, BIOS Settings, SPI Flash"
+msgstr "下一页或上一页：设备更新、BIOS 设置、SPI 编程器"
+
+#: progs/firmware.c
+msgid "Choose a line"
+msgstr "选择一行"
+
+#: progs/firmware.c
+msgid "A device's releases; install the release; change the setting"
+msgstr "设备的可用版本；安装此版本；修改设置项"
+
+#: progs/firmware.c
+msgid "From the releases back to the devices"
+msgstr "从版本列表返回设备列表"
+
+#: progs/firmware.c
+msgid "Refresh the LVFS metadata; BIOS Settings: read them again"
+msgstr "刷新 LVFS 元数据；BIOS 设置：重新读取"
+
+#: progs/firmware.c
+msgid "Update all devices; install a .cab firmware archive"
+msgstr "更新所有设备；安装 .cab 固件包"
+
+#: progs/firmware.c
+msgid "Verify the device; unlock it for updates"
+msgstr "校验设备；解锁设备以允许更新"
+
+#: progs/firmware.c
+msgid "Install fwupd or flashrom"
+msgstr "安装 fwupd 或 flashrom"
+
+#: progs/firmware.c
+msgid "Change the setting or the option"
+msgstr "修改设置项或选项"
+
+#: progs/firmware.c
+msgid "SPI Flash: probe the chip; 3x verified backup"
+msgstr "SPI 编程器：探测芯片；三次校验备份"
+
+#: progs/firmware.c
+msgid "SPI Flash: verify or write an image; a custom programmer"
+msgstr "SPI 编程器：校验或写入镜像；自定义编程器"
+
+#: progs/firmware.c
+msgid "Show or hide the output"
+msgstr "显示或隐藏输出"
+
+#: progs/firmware.c
+msgid "Answer a question (Esc or Enter: no)"
+msgstr "回答提问（Esc 或 Enter：否）"
+
 #: progs/firmware.c progs/packages.c
 #, c-format
 msgid "Wait: %s is still running."
@@ -4827,6 +5462,10 @@ msgstr " 输出（%.200s） "
 msgid "no job yet"
 msgstr "尚无任务"
 
+#: progs/firmware.c progs/installer.c progs/packages.c
+msgid "F1: help"
+msgstr "F1: 帮助"
+
 #: progs/firmware.c
 msgid "firmware"
 msgstr "固件"
@@ -4864,20 +5503,21 @@ msgstr "状态"
 msgid "fwupd is not installed. Press P to install fwupd with locachy-pkg."
 msgstr "未安装 fwupd。按 P 使用 locachy-pkg 安装 fwupd。"
 
-#. TRANSLATORS: R is the key; keep it.
+#. TRANSLATORS: r is the key; keep it.
 #: progs/firmware.c
-msgid "No updatable devices reported yet (press R to refresh LVFS metadata)."
-msgstr "暂未发现可更新设备（按 R 刷新 LVFS 元数据）。"
+msgid "No updatable devices reported yet (press r to refresh LVFS metadata)."
+msgstr "暂未发现可更新设备（按 r 刷新 LVFS 元数据）。"
 
 #: progs/firmware.c
 #, c-format
 msgid " Releases for %.50s (current %s) — Esc: back "
 msgstr " %.50s 的可用版本（当前 %s）— Esc：返回 "
 
+#. TRANSLATORS: r is the key; keep it.
 #: progs/firmware.c
 msgid ""
-"No LVFS releases listed for this device (refresh metadata with R first)."
-msgstr "此设备暂无 LVFS 发布记录（请先按 R 刷新元数据）。"
+"No LVFS releases listed for this device (refresh metadata with r first)."
+msgstr "此设备暂无 LVFS 发布记录（请先按 r 刷新元数据）。"
 
 #: progs/firmware.c
 msgid "BIOS Setting"
@@ -4952,9 +5592,10 @@ msgstr "Y: 确认"
 msgid "N: cancel"
 msgstr "N: 取消"
 
+#. TRANSLATORS: N, Esc and Enter are key names; keep them.
 #: progs/firmware.c
-msgid "Flashing firmware is irreversible; any other key cancels."
-msgstr "刷写固件不可逆；按其他任意键取消。"
+msgid "Flashing firmware is irreversible; N, Esc or Enter cancels."
+msgstr "刷写固件不可逆；按 N、Esc 或 Enter 取消。"
 
 #: progs/firmware.c
 msgid "Enter: install release"
@@ -4999,10 +5640,6 @@ msgstr "v: 校验"
 #: progs/firmware.c
 msgid "k: unlock"
 msgstr "k: 解锁"
-
-#: progs/firmware.c
-msgid "q: home"
-msgstr "q: 主页"
 
 #: progs/firmware.c
 msgid "Tab: BIOS Settings / SPI Flash"
@@ -5087,6 +5724,10 @@ msgid ""
 "Tab switches between fwupd Devices, BIOS Settings and SPI Flash (flashrom)."
 msgstr ""
 "按 Tab 在设备更新 (fwupd)、BIOS 设置与 SPI 编程器 (flashrom) 之间切换。"
+
+#: progs/firmware.c
+msgid "Firmware keys"
+msgstr "固件快捷键"
 
 #: progs/firmware.c
 msgid "Install fwupd"
@@ -5254,11 +5895,13 @@ msgstr "第 %d-%d 行，共 %d 行"
 msgid "system log"
 msgstr "系统日志"
 
-#. TRANSLATORS: Tab, PgUp/PgDn, y, Y and Esc are key names; keep them.
+#. TRANSLATORS: Tab, PgUp/PgDn, Ctrl+C, Ctrl+A and Esc are key names; keep them.
 #: progs/home.c
 #, c-format
-msgid "Log: %s  %s%sTab: %s  PgUp/PgDn: scroll  y/Y: copy  Esc: back"
-msgstr "日志：%s  %s%sTab：%s  PgUp/PgDn：滚动  y/Y：复制  Esc：返回"
+msgid ""
+"Log: %s  %s%sTab: %s  PgUp/PgDn: scroll  Ctrl+A, Ctrl+C: copy all  Esc: back"
+msgstr ""
+"日志：%s  %s%sTab：%s  PgUp/PgDn：滚动  Ctrl+A、Ctrl+C：全部复制  Esc：返回"
 
 #: progs/home.c
 msgid "container log"
@@ -5382,7 +6025,7 @@ msgstr "N / Esc: 取消"
 msgid "Any other key cancels without acting."
 msgstr "按其他任意键取消。"
 
-#. TRANSLATORS: Tab, y, Y, Esc and J are key names; keep them.
+#. TRANSLATORS: Tab, Ctrl+C, Ctrl+A, Esc and J are key names; keep them.
 #: progs/home.c
 msgid "Tab: container log"
 msgstr "Tab：容器日志"
@@ -5391,23 +6034,13 @@ msgstr "Tab：容器日志"
 msgid "Tab: system log"
 msgstr "Tab：系统日志"
 
-#. TRANSLATORS: y is the y key; keep "y: ".
-#: progs/home.c progs/installer.c progs/packages.c
-msgid "y: copy"
-msgstr "y: 复制"
-
-#. TRANSLATORS: Y is the Y key (Shift+y); keep "Y: ".
-#: progs/home.c progs/packages.c
-msgid "Y: copy all"
-msgstr "Y: 全部复制"
+#: progs/home.c
+msgid "Ctrl+A: select all"
+msgstr "Ctrl+A：全选"
 
 #: progs/home.c
 msgid "J: system jobs"
 msgstr "J：系统任务"
-
-#: progs/home.c
-msgid "Esc: back"
-msgstr "Esc：返回"
 
 #. TRANSLATORS: Up/Down/PgUp/PgDn and Super+Esc are key names; keep them.
 #: progs/home.c
@@ -5517,6 +6150,42 @@ msgstr[0] ""
 "系统任务（J）中停止它们。"
 
 #: progs/home.c
+msgid "Move the selection"
+msgstr "移动选中项"
+
+#: progs/home.c
+msgid "Open the selected container or program"
+msgstr "打开选中的容器或程序"
+
+#: progs/home.c
+msgid "Mark a container"
+msgstr "勾选容器"
+
+#: progs/home.c
+msgid "Start, freeze, stop"
+msgstr "启动、冻结、停止"
+
+#: progs/home.c
+msgid "The system jobs (K stops the selected one)"
+msgstr "系统任务（K 停止选中的任务）"
+
+#: progs/home.c
+msgid "The logs (Tab: the system's or the program's)"
+msgstr "日志（Tab：系统日志或程序日志）"
+
+#: progs/home.c
+msgid "Copy the selected text"
+msgstr "复制选中的文本"
+
+#: progs/home.c
+msgid "The logs: select all of the log, then copy it"
+msgstr "日志：全选整份日志，再复制"
+
+#: progs/home.c
+msgid "Back from the logs or the jobs"
+msgstr "从日志或任务列表返回"
+
+#: progs/home.c
 msgid "Reboot cancelled."
 msgstr "已取消重启。"
 
@@ -5622,6 +6291,14 @@ msgstr "正在打开 %s..."
 #, c-format
 msgid "%s is open on %s."
 msgstr "%s 已在 %s 上打开。"
+
+#: progs/home.c
+msgid "Home keys"
+msgstr "主页快捷键"
+
+#: progs/home.c
+msgid "All of the log is selected: Ctrl+C copies it."
+msgstr "已选中整份日志：按 Ctrl+C 复制。"
 
 #: progs/installer.c
 msgid "(no model name)"
@@ -6140,6 +6817,10 @@ msgstr ""
 "install --help 都能用。输入 exit 回到这里。"
 
 #: progs/installer.c
+msgid "A password is never copied."
+msgstr "密码从不复制。"
+
+#: progs/installer.c
 msgid "The two were not the same; nothing changed."
 msgstr "两次输入不一致；没有修改。"
 
@@ -6216,6 +6897,109 @@ msgid "Erase and install?"
 msgstr "抹掉并安装？"
 
 #: progs/installer.c
+msgid "Quit setup (the console comes back)"
+msgstr "退出安装器（回到控制台）"
+
+#: progs/installer.c
+msgid "Quit setup: asks first, since the choices made here are lost"
+msgstr "退出安装器：先询问，因为在这里所做的选择会丢失"
+
+#: progs/installer.c
+msgid "Setup can be left when the installation ends"
+msgstr "安装结束后才能退出安装器"
+
+#: progs/installer.c
+msgid "Choose an item"
+msgstr "选择一项"
+
+#: progs/installer.c
+msgid "Choose, open or change the item"
+msgstr "选择、打开或更改该项"
+
+#: progs/installer.c
+msgid "Change a choice"
+msgstr "更改选项"
+
+#: progs/installer.c
+msgid "Between the steps and the step's page"
+msgstr "在步骤列表和步骤页面之间切换"
+
+#: progs/installer.c
+msgid "The step before or after"
+msgstr "上一步或下一步"
+
+#: progs/installer.c
+msgid "From a step's page to the steps; from the steps to the start"
+msgstr "从步骤页面回到步骤列表；从步骤列表回到开始"
+
+#: progs/installer.c
+msgid ""
+"In a line you type, after Ctrl+A: copy or cut it (a password is never copied)"
+msgstr "输入行中，先按 Ctrl+A：复制或剪切（密码从不复制）"
+
+#: progs/installer.c
+msgid "In a line you type: paste"
+msgstr "输入行中：粘贴"
+
+#: progs/installer.c
+msgid ""
+"In a line you type: delete the word before the cursor, to the start, to the "
+"end"
+msgstr "输入行中：删除光标前的词、删到行首、删到行尾"
+
+#: progs/installer.c
+msgid "A terminal (a root shell)"
+msgstr "终端（root shell）"
+
+#: progs/installer.c
+msgid "Copy what is selected, else the command shown"
+msgstr "复制选中内容，否则复制显示的命令"
+
+#: progs/installer.c
+msgid "Copy the whole output"
+msgstr "复制全部输出"
+
+#: progs/installer.c progs/rescue.c
+msgid "Scroll the output"
+msgstr "滚动输出"
+
+#: progs/installer.c
+msgid "Clear the selection"
+msgstr "取消选择"
+
+#: progs/installer.c
+msgid "Reboot (asks first)"
+msgstr "重启（先确认）"
+
+#: progs/installer.c
+msgid "Power off (asks first)"
+msgstr "关机（先确认）"
+
+#: progs/installer.c
+msgid "Continue where the installation stopped"
+msgstr "从安装停下的地方继续"
+
+#: progs/installer.c
+msgid "Back to the summary after a failure"
+msgstr "失败后回到摘要"
+
+#: progs/installer.c
+msgid "Installer keys"
+msgstr "安装器快捷键"
+
+#: progs/installer.c
+msgid "The installation is running: setup can be left when it ends."
+msgstr "安装正在进行：结束后才能退出安装器。"
+
+#: progs/installer.c
+msgid "Leave setup? The choices made here are lost."
+msgstr "退出安装器吗？在这里所做的选择将丢失。"
+
+#: progs/installer.c
+msgid "There is no output to copy yet."
+msgstr "还没有可复制的输出。"
+
+#: progs/installer.c
 #, c-format
 msgid "Continuing the installation   %s"
 msgstr "正在继续安装   %s"
@@ -6242,8 +7026,9 @@ msgid ""
 msgstr "请逐一到其上游项目核对；然后在终端（t）里信任它们："
 
 #: progs/installer.c
-msgid "y copies the command; c then continues where the installation stopped."
-msgstr "y 复制这条命令；之后按 c 从安装停下的地方继续。"
+msgid ""
+"Ctrl+C copies the command; c then continues where the installation stopped."
+msgstr "Ctrl+C 复制这条命令；之后按 c 从安装停下的地方继续。"
 
 #: progs/installer.c
 msgid ""
@@ -6266,11 +7051,11 @@ msgstr "LOCachy 源码：%s"
 msgid "%s %8s   fetched %d, installed %d of %d"
 msgstr "%s %8s   已下载 %d，已安装 %d / %d"
 
-#. TRANSLATORS: PgUp/PgDn are key names; keep them.
+#. TRANSLATORS: PgUp/PgDn and Ctrl+A, Ctrl+C are key names; keep them.
 #: progs/installer.c
 #, c-format
-msgid "Output: %s   %s   PgUp/PgDn: scroll"
-msgstr "输出：%s   %s   PgUp/PgDn：滚动"
+msgid "Output: %s   %s   Ctrl+A, Ctrl+C: copy all   PgUp/PgDn: scroll"
+msgstr "输出：%s   %s   Ctrl+A、Ctrl+C：全部复制   PgUp/PgDn：滚动"
 
 #: progs/installer.c
 msgid "PgUp: back"
@@ -6409,240 +7194,9 @@ msgstr "应用预设模板分支："
 msgid "Hibernate after (seconds asleep; empty: as the system has it):"
 msgstr "多久后休眠（睡眠的秒数；留空：按系统默认）："
 
-#: progs/extdisplay-setup.c
-msgid "The broker ended the pairing."
-msgstr "中转进程结束了配对。"
-
-#: progs/extdisplay-setup.c
-msgid "The sender failed the handshake. Check the code and try again."
-msgstr "发送端握手失败。请核对配对码后重试。"
-
-#: progs/extdisplay-setup.c
-msgid "The sender did not answer in time."
-msgstr "发送端未及时响应。"
-
-#: progs/extdisplay-setup.c
-msgid "The cable link went down."
-msgstr "线缆链路已断开。"
-
-#: progs/extdisplay-setup.c
-msgid "Disconnected."
-msgstr "已断开。"
-
-#: progs/extdisplay-setup.c
-msgid "Pairing cancelled."
-msgstr "已取消配对。"
-
-#: progs/extdisplay-setup.c
-msgid "The connection ended, or the broker failed."
-msgstr "连接已结束，或中转进程失败。"
-
-#: progs/extdisplay.c
-msgid "Unavailable"
-msgstr "不可用"
-
-#: progs/extdisplay.c
-msgid "A paired dedicated-link transport is required."
-msgstr "需要经过配对的专线传输。"
-
-#: progs/extdisplay.c
-msgid "Extended display"
-msgstr "扩展屏"
-
-#: progs/extdisplay.c
-#, c-format
-msgid "Status: %s    Stream: %ux%u"
-msgstr "状态：%s    画面：%ux%u"
-
-#: progs/extdisplay.c
-msgid "Ctrl+Alt+F12: disconnect    Home, lock and brightness stay local"
-msgstr "Ctrl+Alt+F12：断开    主页、锁屏和亮度留在本机"
-
-#: progs/extdisplay.c
-msgid "No clipboard, files or commands. The peer keeps its original screen."
-msgstr "不传剪贴板、文件或命令。对端保留原有屏幕。"
-
-#: progs/extdisplay.c
-msgid "Disconnected"
-msgstr "已断开"
-
-#: progs/extdisplay.c
-msgid "Remote input could not be released in time; the stream was closed."
-msgstr "未能及时释放远端输入；画面流已关闭。"
-
-#: progs/extdisplay.c
-msgid "The decoder channel ended."
-msgstr "解码通道已结束。"
-
-#: progs/extdisplay.c
-msgid "The managed sleep inhibitor was not granted."
-msgstr "未能获得受管的防睡眠许可。"
-
-#: progs/extdisplay.c
-msgid "Active"
-msgstr "已连接"
-
-#: progs/extdisplay.c
-msgid "Extended-only sender over the paired dedicated link."
-msgstr "仅作扩展屏的发送端，经配对专线连接。"
-
-#: progs/extdisplay.c
-msgid "The decoder sent an invalid picture."
-msgstr "解码器送来了无效画面。"
-
-#: progs/extdisplay.c
-msgid "The decoder sandbox or FFmpeg is not available."
-msgstr "解码沙箱或 FFmpeg 不可用。"
-
-#: progs/extdisplay.c
-msgid "The sender handshake or the stream failed."
-msgstr "与发送端的握手或画面流失败。"
-
-#: progs/extdisplay.c
-msgid "No managed session owner: remote input stays disabled."
-msgstr "没有受管的会话所有者：远端输入保持关闭。"
-
-#: progs/extdisplay.c
-msgid "The transport is not a paired local stream from the broker."
-msgstr "传输不是中转进程交来的已配对本地流。"
-
-#: progs/extdisplay.c
-msgid "The session owner did not accept this session."
-msgstr "会话所有者未接受此会话。"
-
-#: progs/extdisplay.c
-msgid "The decoder worker could not be started safely."
-msgstr "无法安全启动解码工作进程。"
-
-#: progs/extdisplay.c
-msgid "Connecting"
-msgstr "正在连接"
-
-#: progs/extdisplay.c
-msgid "Waiting for the sender's capabilities."
-msgstr "正在等待发送端报告其能力。"
-
-#: progs/extdisplay.c
-msgid "The session owner has gone."
-msgstr "会话所有者已退出。"
-
-#: progs/extdisplay.c
-msgid "The session owner did not accept the release."
-msgstr "会话所有者未接受释放。"
-
-#: progs/extdisplay.c
-msgid "Remote input could not be delivered."
-msgstr "无法送达远端输入。"
-
-#: progs/extdisplay.c
-msgid "The sender handshake timed out."
-msgstr "与发送端握手超时。"
-
-#: progs/extdisplay.c progs/settings-power.inc
-msgid "Idle"
-msgstr "空闲"
-
-#: progs/extdisplay.c
-msgid "Scanning"
-msgstr "正在扫描"
-
-#: progs/extdisplay.c
-msgid "Choose an interface"
-msgstr "选择接口"
-
-#: progs/extdisplay.c
-msgid "Asking the broker for a code"
-msgstr "正在向中转进程获取配对码"
-
-#: progs/extdisplay.c
-msgid "Waiting for the Mac to connect"
-msgstr "正在等待 Mac 连接"
-
-#: progs/extdisplay.c
-msgid "Connected"
-msgstr "已连接"
-
-#: progs/extdisplay.c
-msgid "Cancelling"
-msgstr "正在取消"
-
-#: progs/extdisplay.c
-msgid "Releasing"
-msgstr "正在释放"
-
-#: progs/extdisplay.c
-msgid "Released"
-msgstr "已释放"
-
-#: progs/extdisplay.c
-msgid "The pairing helper stopped"
-msgstr "配对辅助进程已停止"
-
-#: progs/extdisplay.c progs/settings-hwinfo.inc progs/settings-power.inc
-#: progs/view-pdf-ui.inc
-msgid "Unknown"
-msgstr "未知"
-
-#: progs/extdisplay.c
-msgid "Choose the cable interface to pair with the Mac."
-msgstr "选择用于与 Mac 配对的线缆接口。"
-
-#: progs/extdisplay.c
-msgid "Scanning..."
-msgstr "正在扫描……"
-
-#: progs/extdisplay.c
-msgid "No cable interface found. Connect the cable, then press F5."
-msgstr "未找到线缆接口。请连接线缆后按 F5。"
-
-#: progs/extdisplay.c
-msgid "carrier up"
-msgstr "已连接网线"
-
-#: progs/extdisplay.c progs/rescue.c
-msgid "no carrier"
-msgstr "未连接网线"
-
-#: progs/extdisplay.c
-#, c-format
-msgid "Address  %s     Port  %s"
-msgstr "地址  %s     端口  %s"
-
-#: progs/extdisplay.c
-#, c-format
-msgid "Code     %s"
-msgstr "配对码   %s"
-
-#: progs/extdisplay.c
-#, c-format
-msgid ""
-"On the Mac: locachy-macos-sender --interface <mac-interface> --address %s --"
-"port %s"
-msgstr ""
-"在 Mac 上运行：locachy-macos-sender --interface <mac-interface> --address %s "
-"--port %s"
-
-#: progs/extdisplay.c
-msgid "Asking the broker for an address and a code..."
-msgstr "正在向中转进程获取地址和配对码……"
-
-#: progs/extdisplay.c
-#, c-format
-msgid "Status: %s"
-msgstr "状态：%s"
-
-#: progs/extdisplay.c
-msgid "The broker is busy: a pairing is still active."
-msgstr "中转进程忙：配对仍在进行中。"
-
-#: progs/extdisplay.c
-msgid ""
-"Up/Down choose   Enter pair   Esc cancel   F5 scan   Ctrl+Alt+F12 release"
-msgstr "上/下 选择   Enter 配对   Esc 取消   F5 扫描   Ctrl+Alt+F12 释放"
-
-#: progs/extdisplay.c
-msgid "The code and the address are kept in memory only."
-msgstr "配对码和地址只保存在内存中。"
+#: progs/installer.c
+msgid "The whole output is selected: Ctrl+C copies it."
+msgstr "已选中全部输出：按 Ctrl+C 复制。"
 
 #: progs/lock.c
 msgid "Fingerprint"
@@ -7021,6 +7575,11 @@ msgstr "（保留上一版）"
 msgid "not installed"
 msgstr "未安装"
 
+#. TRANSLATORS: Ctrl+A and Ctrl+C are key names; keep them.
+#: progs/packages.c
+msgid "Ctrl+A, Ctrl+C: copy all"
+msgstr "Ctrl+A、Ctrl+C：全部复制"
+
 #: progs/packages.c
 msgid "trusted now"
 msgstr "现已信任"
@@ -7039,8 +7598,9 @@ msgstr "逐一与其上游项目核对；然后以 root 运行（home 中的 adm
 #. TRANSLATORS: y and g are the y and g keys; keep them.
 #: progs/packages.c
 msgid ""
-"y copies the command; once they are trusted, g continues where it stopped."
-msgstr "按 y 复制该命令；信任之后，按 g 从暂停处继续。"
+"Ctrl+C copies the command; once they are trusted, g continues where it "
+"stopped."
+msgstr "Ctrl+C 复制该命令；信任之后，按 g 从暂停处继续。"
 
 #: progs/packages.c
 msgid "extras"
@@ -7208,12 +7768,16 @@ msgid "Details: nothing selected"
 msgstr "详细信息：未选中任何项"
 
 #: progs/packages.c
-msgid "a: apply the marked"
-msgstr "a: 应用所选更新"
+msgid "Enter: details"
+msgstr "Enter: 详情"
 
 #: progs/packages.c
 msgid "c: check"
 msgstr "c: 检查更新"
+
+#: progs/packages.c
+msgid "a: apply the marked"
+msgstr "a: 应用所选更新"
 
 #: progs/packages.c
 msgid "l: output/details"
@@ -7236,8 +7800,8 @@ msgid "n: new"
 msgstr "n: 新建"
 
 #: progs/packages.c
-msgid "d: remove"
-msgstr "d: 卸载"
+msgid "Delete: remove"
+msgstr "Delete: 卸载"
 
 #: progs/packages.c
 msgid "r: roll back"
@@ -7248,16 +7812,70 @@ msgid "/: search"
 msgstr "/: 搜索"
 
 #: progs/packages.c
+msgid "Delete: remove the selected one"
+msgstr "Delete: 卸载所选软件包"
+
+#: progs/packages.c
 msgid "i: add a package"
 msgstr "i: 安装软件包"
 
 #: progs/packages.c
-msgid "x: remove the selected one"
-msgstr "x: 卸载所选软件包"
-
-#: progs/packages.c
 msgid "s: bring the system to the manifest"
 msgstr "s: 同步至软件清单"
+
+#: progs/packages.c
+msgid "Next or previous page: Updates, Containers, Host"
+msgstr "下一页或上一页：更新、容器、宿主"
+
+#: progs/packages.c
+msgid "Choose a row; PgUp and PgDn scroll the output or the details"
+msgstr "选择一行；PgUp 和 PgDn 滚动输出或详情"
+
+#: progs/packages.c
+msgid "Updates: the row's packages; Containers: edit it; a form: its value"
+msgstr "更新：该行的软件包；容器：编辑；表单：编辑其值"
+
+#: progs/packages.c
+msgid "Updates: mark a row to apply"
+msgstr "更新：标记要应用的行"
+
+#: progs/packages.c
+msgid "Updates: check again (on the network); apply the marked rows"
+msgstr "更新：重新检查（需联网）；应用已标记的行"
+
+#: progs/packages.c
+msgid "Containers: new, build, roll back, remove"
+msgstr "容器：新建、构建、回滚、卸载"
+
+#: progs/packages.c
+msgid "Search and install (Containers, Host)"
+msgstr "搜索并安装（容器、宿主）"
+
+#: progs/packages.c
+msgid ""
+"Host: add a package, remove the selected one, bring the system to the "
+"manifest"
+msgstr "宿主：安装软件包、卸载所选软件包、同步至软件清单"
+
+#: progs/packages.c
+msgid "Continue a job that stopped for source signing keys"
+msgstr "继续因源码签名密钥而暂停的任务"
+
+#: progs/packages.c
+msgid "Copy what is selected, else the command or the notice"
+msgstr "复制选中内容，否则复制显示的命令或提示"
+
+#: progs/packages.c
+msgid "Select the whole output or details pane, then copy it"
+msgstr "全选整个输出或详情窗格，再复制"
+
+#: progs/packages.c
+msgid "Show the output or the details"
+msgstr "显示输出或详情"
+
+#: progs/packages.c
+msgid "Packages keys"
+msgstr "软件包快捷键"
 
 #: progs/packages.c
 msgid "packages"
@@ -7612,10 +8230,10 @@ msgstr "home 仍负责启动、冻结、恢复和停止它的整棵进程树。"
 msgid "Allow %s to access your real system?"
 msgstr "允许 %s 访问你的真实系统吗？"
 
-#. TRANSLATORS: Y and N are the Y and N keys; keep them.
+#. TRANSLATORS: Y, N, Esc and Enter are key names; keep them.
 #: progs/packages.c
-msgid "Y: allow and save   N or Esc: cancel without saving"
-msgstr "Y：允许并保存   N 或 Esc：取消且不保存"
+msgid "Y: allow and save   N, Esc or Enter: cancel without saving"
+msgstr "Y：允许并保存   N、Esc 或 Enter：取消且不保存"
 
 #: progs/packages.c
 msgid "A name is letters, digits, . _ - (from a letter or digit)."
@@ -7789,6 +8407,10 @@ msgstr "尚未检查更新：按 c 检查更新。"
 #: progs/packages.c
 msgid "The last check is shown; c checks again."
 msgstr "当前显示上次检查结果；按 c 重新检查更新。"
+
+#: progs/packages.c
+msgid "The whole pane is selected: Ctrl+C copies it."
+msgstr "已选中整个窗格：按 Ctrl+C 复制。"
 
 #: progs/rescue.c
 msgid "Inspect status (read-only)"
@@ -8190,8 +8812,8 @@ msgid ""
 msgstr "Up/Down：选择   Enter：打开   r：新会话   b：重启   p：关机"
 
 #: progs/rescue.c
-msgid "Enlarge the Rescue window. Q exits with cleanup."
-msgstr "请增大救援窗口。按 Q 清理后退出。"
+msgid "Enlarge the Rescue window. Ctrl+Q exits with cleanup."
+msgstr "请增大救援窗口。按 Ctrl+Q 清理后退出。"
 
 #: progs/rescue.c
 msgid "Rescue status (Tab: change pane; arrows / wheel: scroll)"
@@ -8205,10 +8827,14 @@ msgstr "操作（Enter：执行）"
 msgid " (cleanup required)"
 msgstr "（需要清理）"
 
+#. TRANSLATORS: Tab, PgUp, PgDn, Ctrl+C, Ctrl+Q and F1 are key names; keep them.
 #: progs/rescue.c
 msgid ""
-"Tab: pane  PgUp/PgDn: output  y/Ctrl+C: copy  a: SSH  f: fingerprint  q: exit"
-msgstr "Tab：区域  PgUp/PgDn：输出  y/Ctrl+C：复制  a：SSH  f：指纹  q：退出"
+"Tab: pane  PgUp/PgDn: output  y/Ctrl+C: copy  a: SSH  f: fingerprint  "
+"Ctrl+Q: exit  F1: help"
+msgstr ""
+"Tab：区域  PgUp/PgDn：输出  y/Ctrl+C：复制  a：SSH  f：指纹  Ctrl+Q：退出  "
+"F1：帮助"
 
 #: progs/rescue.c
 msgid "Rescue"
@@ -8223,6 +8849,46 @@ msgstr "用指针选择状态或输出文本；a 复制 SSH，f 复制指纹。"
 #: progs/rescue.c
 msgid "Cancelled; the rescue session remains closed."
 msgstr "已取消；救援会话仍保持关闭。"
+
+#: progs/rescue.c
+msgid "The next or previous pane: status, actions, output"
+msgstr "下一个或上一个区域：状态、操作、输出"
+
+#: progs/rescue.c
+msgid "Choose an action; scroll the status or the output"
+msgstr "选择操作；滚动状态或输出"
+
+#: progs/rescue.c
+msgid "Run the chosen action; choose in a list"
+msgstr "执行选中的操作；在列表中选择"
+
+#: progs/rescue.c
+msgid "Copy the text selected with the pointer"
+msgstr "复制用鼠标选中的文本"
+
+#: progs/rescue.c
+msgid "Copy the SSH command or the fingerprint"
+msgstr "复制 SSH 命令或指纹"
+
+#: progs/rescue.c
+msgid "Cancel a question or a list; nothing at the top"
+msgstr "取消提问或列表；在最上层时无作用"
+
+#: progs/rescue.c
+msgid "Show or hide what is typed (a passphrase)"
+msgstr "显示或隐藏输入内容（口令）"
+
+#: progs/rescue.c
+msgid "Exit Rescue, with its cleanup"
+msgstr "清理后退出救援"
+
+#: progs/rescue.c
+msgid "A question: y yes; n or Esc no"
+msgstr "提问时：y 是；n 或 Esc 否"
+
+#: progs/rescue.c
+msgid "Rescue keys"
+msgstr "救援快捷键"
 
 #: progs/rescue.c
 msgid "Cancelled; nothing was requested."
@@ -9345,14 +10011,14 @@ msgstr "主屏"
 msgid "Right"
 msgstr "右侧"
 
-#. TRANSLATORS: Up/Down, Enter, Left, Tab, / and q are key names; keep them.
+#. TRANSLATORS: Up/Down, Enter, Left, Tab, /, F1 and Ctrl+Q are key names; keep them.
 #: progs/settings.c
 msgid ""
 "Up/Down: choose   Enter: change or open   Left/Tab: categories   /: find   "
-"q: back to home"
+"F1: keys   Ctrl+Q: quit"
 msgstr ""
-"Up/Down: 选择   Enter: 修改或打开   Left/Tab: 回到分类   /: 查找   q: 返回主"
-"页"
+"Up/Down: 选择   Enter: 修改或打开   Left/Tab: 回到分类   /: 查找   F1: 快捷"
+"键   Ctrl+Q: 退出"
 
 #: progs/settings.c
 msgid ""
@@ -9935,10 +10601,6 @@ msgid "Touch or swipe the finger on the reader, again each time it asks."
 msgstr "请按提示反复在指纹识别器上按压或滑过手指。"
 
 #: progs/settings.c
-msgid "q / Esc: cancel"
-msgstr "q / Esc: 取消"
-
-#: progs/settings.c
 msgid "Fingerprint not added."
 msgstr "未添加指纹。"
 
@@ -9996,6 +10658,58 @@ msgstr "壁纸保持原状。"
 #: progs/settings.c
 msgid "Wallpaper saved; the shared display shows it when it is next shown."
 msgstr "壁纸已保存；共享桌面下次显示时生效。"
+
+#: progs/settings.c
+msgid "Choose a category or a setting"
+msgstr "选择分类或设置项"
+
+#: progs/settings.c
+msgid "From the categories into the page"
+msgstr "从分类进入页面"
+
+#: progs/settings.c
+msgid "From the page back to the categories"
+msgstr "从页面返回分类"
+
+#: progs/settings.c
+msgid "Open a setting; Enter again: done; a line of its own: do it"
+msgstr "打开设置项；再按 Enter：完成；自带操作的行：执行"
+
+#: progs/settings.c
+msgid "Change the open setting"
+msgstr "修改已打开的设置项"
+
+#: progs/settings.c
+msgid "Close the open setting (a chooser: as it was); leave what was found"
+msgstr "关闭已打开的设置项（选择器：恢复原样）；离开查找结果"
+
+#: progs/settings.c
+msgid "Remove the selected key, entry or component (some ask: Delete again)"
+msgstr "移除选中的密钥、条目或组件（部分需再按 Delete 确认）"
+
+#: progs/settings.c
+msgid "Find a setting"
+msgstr "查找设置项"
+
+#: progs/settings.c
+msgid "The next or previous setting found"
+msgstr "下一个或上一个找到的设置项"
+
+#: progs/settings.c
+msgid "Secure Boot: enroll with Microsoft's keys too"
+msgstr "安全启动：同时写入微软的密钥"
+
+#: progs/settings.c
+msgid "Screens: a screen's exact X,Y; move it (Ctrl+Shift: by 1 pixel)"
+msgstr "显示器：设定精确的 X,Y；移动显示器（Ctrl+Shift：每次 1 像素）"
+
+#: progs/settings.c
+msgid "Battery and hardware pages: copy the page"
+msgstr "电池与硬件页面：复制本页"
+
+#: progs/settings.c
+msgid "Settings keys"
+msgstr "设置快捷键"
 
 #: progs/settings.c
 msgid "Chinese input key"
@@ -13676,6 +14390,50 @@ msgid "Click to see the magnified view."
 msgstr "点击查看放大视图。"
 
 #: progs/view.c
+msgid "Open a document"
+msgstr "打开文档"
+
+#: progs/view.c
+msgid "Go to a page"
+msgstr "转到页面"
+
+#: progs/view.c
+msgid "Bookmark the page"
+msgstr "将本页加入书签"
+
+#: progs/view.c
+msgid "Back, forward in the pages seen"
+msgstr "在看过的页面中后退、前进"
+
+#: progs/view.c
+msgid "The first, the last page"
+msgstr "第一页、最后一页"
+
+#: progs/view.c
+msgid "New tab, close the tab, reopen it"
+msgstr "新建标签页、关闭标签页、重新打开"
+
+#: progs/view.c
+msgid "Browse, zoom, area, text, table, magnifier tools"
+msgstr "浏览、缩放、区域选择、文本选择、表格选择、放大镜工具"
+
+#: progs/view.c
+msgid "Rotate an image right, left"
+msgstr "向右、向左旋转图像"
+
+#: progs/view.c
+msgid "An image's information; the sidebar"
+msgstr "图像信息；侧边栏"
+
+#: progs/view.c
+msgid "Copy the selection"
+msgstr "复制所选内容"
+
+#: progs/view.c
+msgid "View keys"
+msgstr "查看器快捷键"
+
+#: progs/view.c
 msgid "Date"
 msgstr "日期"
 
@@ -13801,6 +14559,49 @@ msgstr "显示较少详情"
 #: progs/view.c
 msgid "Show more details..."
 msgstr "显示更多详情..."
+
+#~ msgid ""
+#~ "Quit setup (the console comes back); asks first on the steps; not while "
+#~ "it installs"
+#~ msgstr "退出安装器（回到控制台）；在步骤中先询问；安装进行中不能退出"
+
+#~ msgid "u: undo"
+#~ msgstr "u: 撤销"
+
+#~ msgid "c: copy"
+#~ msgstr "c: 复制"
+
+#~ msgid "x: cut"
+#~ msgstr "x: 剪切"
+
+#~ msgid "v: paste"
+#~ msgstr "v: 粘贴"
+
+#~ msgid "y: copy"
+#~ msgstr "y: 复制"
+
+#~ msgid "Y: copy all"
+#~ msgstr "Y: 全部复制"
+
+#~ msgid "Reboot; power off"
+#~ msgstr "重启；关机"
+
+#~ msgid ""
+#~ "Copy what is selected, else the command or the notice; Y copies the whole "
+#~ "pane"
+#~ msgstr "复制选中内容，否则复制命令或提示；Y 复制整个区域"
+
+#~ msgid "q: back"
+#~ msgstr "q: 返回"
+
+#~ msgid "New folder..."
+#~ msgstr "新建文件夹..."
+
+#~ msgid "q: home"
+#~ msgstr "q: 主页"
+
+#~ msgid "q / Esc: cancel"
+#~ msgstr "q / Esc: 取消"
 
 #~ msgid "The broker reported an error."
 #~ msgstr "中转进程报告了错误。"

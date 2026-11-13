@@ -739,6 +739,64 @@ static void window_forward(int requests, int ctl)
     }
 }
 
+/* Without the configuration settings --apply writes (the apply failed), labwc
+ * would read the template's HOME-KEY, LOCK-KEY and TERMINAL-KEY placeholders
+ * and drop those bindings: Super+Esc would reach a window as a plain Esc. This
+ * writes the template with rc.conf's defaults instead, in labwc's spelling:
+ * the four home keys (Super+Esc, Ctrl+Alt+Esc, Ctrl+Alt+Super, ThinkVantage),
+ * Super+l and Ctrl+Alt+t. The input method keys stay the bar's, as settings
+ * leaves them. Runs in the child before labwc starts. */
+static void emit_keybind(FILE *out, const char *line, const char *placeholder, const char *key)
+{
+    const char *at = strstr(line, placeholder);
+    if (!at) {
+        fputs(line, out);
+        return;
+    }
+    fwrite(line, 1, (size_t)(at - line), out);
+    fputs(key, out);
+    fputs(at + strlen(placeholder), out);
+}
+
+static const char *labwc_fallback_from(const char *template_path, const char *out_path)
+{
+    static const char *const home_keys[] = { "W-Escape", "C-A-Escape", "C-A-Super_L", "XF86Launch1" };
+    char tmp_path[256], line[2048];
+    if (snprintf(tmp_path, sizeof tmp_path, "%s.tmp", out_path) >= (int)sizeof tmp_path) return template_path;
+    FILE *in = fopen(template_path, "re");
+    if (!in) return template_path;
+    FILE *out = fopen(tmp_path, "we");
+    if (!out) {
+        fclose(in);
+        return template_path;
+    }
+    while (fgets(line, sizeof line, in)) {
+        if (strstr(line, "IME-KEY")) continue;
+        if (strstr(line, "key=\"HOME-KEY\"")) {
+            for (size_t k = 0; k < sizeof home_keys / sizeof home_keys[0]; k++) {
+                emit_keybind(out, line, "HOME-KEY", home_keys[k]);
+            }
+        } else if (strstr(line, "key=\"LOCK-KEY\"")) {
+            emit_keybind(out, line, "LOCK-KEY", "W-l");
+        } else if (strstr(line, "key=\"TERMINAL-KEY\"")) {
+            emit_keybind(out, line, "TERMINAL-KEY", "C-A-t");
+        } else {
+            fputs(line, out);
+        }
+    }
+    fclose(in);
+    if (fclose(out) != 0 || rename(tmp_path, out_path) != 0) {
+        unlink(tmp_path);
+        return template_path;
+    }
+    return out_path;
+}
+
+static const char *labwc_fallback_rc(void)
+{
+    return labwc_fallback_from("/etc/locachy/labwc/rc.xml", "/run/locachy/labwc-rc.fallback.xml");
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -827,7 +885,7 @@ int main(int argc, char **argv)
             unsetenv("DISPLAY");
             unsetenv("XAUTHORITY");
             /* settings --apply (above) wrote the configuration with rc.conf's values. */
-            const char *rc = access(LABWC_RC, R_OK) == 0 ? LABWC_RC : "/etc/locachy/labwc/rc.xml";
+            const char *rc = access(LABWC_RC, R_OK) == 0 ? LABWC_RC : labwc_fallback_rc();
             execl(argv[1], argv[1], "-C", "/etc/locachy/labwc", "-c", rc, (char *)NULL);
         } else {
             execvp(argv[1], argv + 1);

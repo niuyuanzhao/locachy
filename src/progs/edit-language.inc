@@ -1071,7 +1071,7 @@ static int language_key(int key, int mods)
     if (key == K_F1 + 11 && !(mods & (KEYS_CTRL | KEYS_ALT))) { language_request_action(mods & KEYS_SHIFT ? ED_LSP_DECLARATION : ED_LSP_DEFINITION); return 1; }
     if ((key == 'k' || key == 'K') && (mods & (KEYS_CTRL | KEYS_ALT)) == (KEYS_CTRL | KEYS_ALT)) { language_menu(); return 1; }
     if (key == K_F1 + 1 && (mods & KEYS_CTRL)) { language_request_action(ED_LSP_RENAME); return 1; }
-    if (key == '\n' && (mods & KEYS_ALT)) { language_request_action(ED_LSP_CODE_ACTION); return 1; }
+    if (key == '.' && (mods & (KEYS_CTRL | KEYS_ALT | KEYS_SHIFT)) == KEYS_CTRL) { language_request_action(ED_LSP_CODE_ACTION); return 1; } /* Ctrl+. (Alt+Enter is properties) */
     return 0;
 }
 static void language_done(void)

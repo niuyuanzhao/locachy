@@ -39,9 +39,14 @@ static char *dpath(const char *rel)
 #define ROWS 32
 static char grid[ROWS][COLS + 1], shown[ROWS][COLS + 1];
 static const int *script;
-static int step;
+static int step, mods;
 static struct pointer_event mouse;
 static char picked_file[PATH_MAX];
+
+/* A key with modifiers in a script, as the key layer gives it: Ctrl+Q is
+ * 17 with KEYS_CTRL, Alt+y is 'y' with KEYS_ALT. */
+#define KEY(k, m) (-1000000 - ((m) << 16) - (k))
+#define CTRL_Q KEY('q' & 0x1F, KEYS_CTRL)
 
 void say(const char *fmt, ...) { (void)fmt; }
 
@@ -119,7 +124,7 @@ int screen_rows(void) { return ROWS; }
 int screen_char_cells(uint32_t cp) { (void)cp; return 1; }
 void screen_bar(const char *title, const char *ime) { (void)title; (void)ime; }
 const struct pointer_event *pointer_last(void) { return &mouse; }
-int keys_modifiers(void) { return 0; }
+int keys_modifiers(void) { return mods; }
 
 void screen_fill(int col, int row, int cols, int rows, uint32_t rgb)
 {
@@ -166,18 +171,45 @@ int files_pick(const char *start_dir, const char *keep, const char *type,
     return 1;
 }
 
+int files_close_asked(void) { return 0; }
+
 int key_poll_timeout(int fd, int timeout)
 {
     (void)fd;
     (void)timeout;
     int k = script[step];
-    if (k == 0) return 'q';
+    mods = 0;
+    if (k == 0) {
+        mods = KEYS_CTRL; /* the script has ended: Ctrl+Q */
+        return 'q' & 0x1F;
+    }
     step++;
     if (k == -1) {
         usleep(40000);
         return 0;
     }
+    if (k <= -1000000) {
+        k = -1000000 - k;
+        mods = k >> 16;
+        return k & 0xFFFF;
+    }
     return k;
+}
+
+static int count_of(const char *haystack, const char *needle)
+{
+    int n = 0;
+    for (const char *p = haystack; (p = strstr(p, needle)) != NULL; p++) n++;
+    return n;
+}
+
+static void read_calls(char *calls, size_t size)
+{
+    FILE *cf = fopen(dpath("calls"), "r");
+    assert(cf);
+    size_t nr = fread(calls, 1, size - 1, cf);
+    fclose(cf);
+    calls[nr] = '\0';
 }
 
 static int screen_contains(const char *needle)
@@ -190,6 +222,7 @@ static int screen_contains(const char *needle)
 
 int main(int argc, char **argv)
 {
+    setvbuf(stdout, NULL, _IOLBF, 0); /* a line at once: the job double forks, and a child flushes what is buffered */
     assert(argc == 2);
     snprintf(dir, sizeof dir, "%s", argv[1]);
     assert(mkdir(dir, 0755) == 0);
@@ -236,41 +269,68 @@ int main(int argc, char **argv)
     assert(fwrite(zeros, 1, 4096, rf) == 4096);
     fclose(rf);
 
-    /* 1. Devices page -> Enter releases -> select downgrade -> N cancel -> Y confirm -> wait -> Esc -> Tab BIOS -> Right cycles -> Tab SPI -> Right selects ch341a_spi -> 'p' probe -> wait */
+    /* 0. Esc, q and Alt+q at the top do not quit, nor does home's key; F1
+     * shows the keys (Esc closes them); Ctrl+Q quits, as the window's close
+     * does. */
+    script = (const int[]){ 27, 'q', KEY('q', KEYS_ALT), K_ACT_HOME, K_F1, 27, KEY('q' & 0x1F, KEYS_CTRL), 0 };
+    step = 0;
+    assert(firmware_main() == 0 && step == 7);
+    assert(screen_contains("Ctrl+Q: quit") && !screen_contains("q: home"));
+    script = (const int[]){ K_F1, CTRL_Q, 0 }; /* Ctrl+Q in the help quits too */
+    step = 0;
+    assert(firmware_main() == 0 && step == 2);
+    script = (const int[]){ K_CLOSE, 0 };
+    step = 0;
+    assert(firmware_main() == 0 && step == 1);
+    puts("PASS firmware: Esc, q, Alt+q and home's key at the top stay; F1 helps; Ctrl+Q and the window's close quit");
+
+    /* 1. Devices page -> Enter releases -> select downgrade -> N cancel -> Y confirm -> wait -> Esc -> Tab BIOS -> Right cycles -> Tab SPI -> Right selects ch341a_spi -> 'p' probe -> wait;
+     * q in the releases goes back as Esc does; Shift+Tab goes back a page. */
     script = (const int[]){
         '\n', K_DOWN, '\n', 'n', '\n', 'y', -1, -1, 27,
-        '\t', K_RIGHT,
+        '\n', 'q', KEY('\t', KEYS_SHIFT), KEY('\t', KEYS_SHIFT), K_RIGHT,
         '\t', K_RIGHT, 'p', -1, -1,
-        'q', 0
+        CTRL_Q, 0
     };
     step = 0;
     assert(firmware_main() == 0);
     assert(detected_bytes == 4096 && strstr(detected_chip, "W25Q64.V") != NULL);
+    assert(page == PAGE_SPI && !in_releases);
 
     /* 2. SPI write guard: wrong-sized 2048B image is refused before confirmation; 4096B image asks Y/N, N cancels, Y writes */
     snprintf(picked_file, sizeof picked_file, "%s", bad_rom);
-    script = (const int[]){ 'w', 'q', 0 };
+    script = (const int[]){ 'w', CTRL_Q, 0 };
     step = 0;
     assert(firmware_main() == 0);
     assert(screen_contains("Refused: image is 2048 B, but probed chip is 4096 B."));
 
+    /* The question: Alt+y, home's key, q and other keys are no answer; it
+     * waits (Ctrl+Q quits with it unanswered, nothing written); Enter is no. */
+    char calls[4096] = "";
     snprintf(picked_file, sizeof picked_file, "%s", good_rom);
-    script = (const int[]){ 'w', 'n', 'w', 'y', -1, -1, 'q', 0 };
+    script = (const int[]){ 'w', KEY('y', KEYS_ALT), K_ACT_HOME, 'q', 'x', K_SHOWN, CTRL_Q, 0 };
+    step = 0;
+    assert(firmware_main() == 0 && confirming == CONF_SPI_WRITE);
+    confirming = CONF_NONE;
+    script = (const int[]){ 'w', '\n', CTRL_Q, 0 };
+    step = 0;
+    assert(firmware_main() == 0 && confirming == CONF_NONE && screen_contains("Cancelled; nothing written."));
+    read_calls(calls, sizeof calls);
+    assert(count_of(calls, "spi-write") == 0);
+    puts("PASS firmware: a question waits through Alt+y, home's key, q and a return to the screen; Enter is no");
+
+    script = (const int[]){ 'w', 'n', 'w', 'y', -1, -1, CTRL_Q, 0 };
     step = 0;
     assert(firmware_main() == 0);
 
-    char calls[4096] = "";
-    FILE *cf = fopen(dpath("calls"), "r");
-    assert(cf);
-    size_t nr = fread(calls, 1, sizeof calls - 1, cf);
-    fclose(cf);
-    calls[nr] = '\0';
+    read_calls(calls, sizeof calls);
     assert(strstr(calls, "fwupd-action install-release sys01 https://lvfs/25.cab") != NULL);
     assert(strstr(calls, "bios-set SecurityChip Disable") != NULL);
     assert(strstr(calls, "spi-probe ch341a_spi") != NULL);
     assert(strstr(calls, "spi-write ch341a_spi") != NULL);
     assert(strstr(calls, "--expected-size 4096") != NULL);
     assert(!strstr(calls, "bad.rom"));
+    assert(count_of(calls, "spi-write") == 1);
 
     puts("test-firmware C UI: fwupd releases, BIOS settings, SPI probe, size guard and Y/N confirmations PASSED.");
     return 0;

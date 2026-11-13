@@ -4233,8 +4233,14 @@ static void pres_play(void)
 
 static void pres_key(int key, int mods)
 {
-    if (key == 17 && (mods & KEYS_CTRL)) {
+    int act = key_action(key, mods);
+    if (act == ACT_QUIT) {
         do_action(A_QUIT);
+        return;
+    }
+    if (act == ACT_CANCEL) { /* the bar, else back to the document */
+        if (pres.bar) { pres.bar = 0; ui.dirty = 1; }
+        else pres_exit();
         return;
     }
     /* The actions it has (setupActions): back and forward, and Ctrl+Home
@@ -4251,10 +4257,6 @@ static void pres_key(int key, int mods)
     case K_BOL: pres_go(0); break;
     case K_EOL: pres_go(doc.pages - 1); break;
     case 'b': case 'B': pres.black = !pres.black; ui.dirty = 1; break; /* switch_blackscreen_mode */
-    case 27:
-        if (pres.bar) { pres.bar = 0; ui.dirty = 1; }
-        else pres_exit();
-        break;
     }
 }
 
@@ -4629,29 +4631,29 @@ static void do_action(int a)
 /* The keys every focus has (Okular's window shortcuts): 1 if key was one. */
 static int key_global(int key, int mods)
 {
-    int ctrl = mods & KEYS_CTRL, a = A_NONE;
+    int ctrl = mods & KEYS_CTRL, a = A_NONE, act = key_action(key, mods);
     if (pdf_key_global(key, mods)) return 1;
-    if (key == 17 && ctrl) a = A_QUIT;
-    else if (key == 15 && ctrl) a = A_OPEN;
-    else if (key == 6 && ctrl) a = A_FIND;
-    else if (key == 7 && ctrl) a = A_GOTO;
-    else if (key == 2 && ctrl) a = A_BOOKMARK;
-    else if (key == K_F1 + 4) a = A_RELOAD;
-    else if (key == 23 && mods == KEYS_CTRL) a = A_CLOSE_TAB;
-    else if (key == 20 && mods == (KEYS_CTRL | KEYS_SHIFT)) a = A_REOPEN_TAB;
-    else if (key == '\t' && mods == KEYS_CTRL) a = A_NEXT_TAB;
-    else if (key == '\t' && mods == (KEYS_CTRL | KEYS_SHIFT)) a = A_PREV_TAB;
-    else if (key == 3 && mods == KEYS_CTRL) a = A_COPY;
-    else if (key == K_F1 + 2) a = mods & KEYS_SHIFT ? A_FIND_PREV : A_FIND_NEXT;
+    if (act == ACT_QUIT) a = A_QUIT;
+    else if (act == ACT_OPEN) a = A_OPEN;
+    else if (act == ACT_FIND) a = A_FIND;
+    else if (key == 7 && ctrl) a = A_GOTO;     /* Okular's Ctrl+G */
+    else if (key == 2 && ctrl) a = A_BOOKMARK; /* Okular's Ctrl+B */
+    else if (act == ACT_RELOAD) a = A_RELOAD;
+    else if (act == ACT_CLOSE_TAB) a = A_CLOSE_TAB;
+    else if (act == ACT_REOPEN_TAB) a = A_REOPEN_TAB;
+    else if (act == ACT_NEXT_TAB) a = A_NEXT_TAB; /* Ctrl+PgDn, Ctrl+Tab */
+    else if (act == ACT_PREV_TAB) a = A_PREV_TAB; /* Ctrl+PgUp, Ctrl+Shift+Tab */
+    else if (act == ACT_COPY) a = A_COPY;
+    else if (act == ACT_FIND_NEXT || act == ACT_FIND_PREV) a = act == ACT_FIND_PREV ? A_FIND_PREV : A_FIND_NEXT;
     else if (key == K_F1 + 6) a = A_SIDEBAR;
     else if (key == K_F1 + 3 && gal_info_able()) a = A_INFO_PANEL; /* Gwenview's sidebar, F4 */
     else if (key == 18 && (mods == KEYS_CTRL || mods == (KEYS_CTRL | KEYS_SHIFT)) && gal_info_able()) {
         a = mods & KEYS_SHIFT ? A_ROTATE_LEFT : A_ROTATE_RIGHT; /* Gwenview's Ctrl+R, Ctrl+Shift+R */
     }
-    else if (key == '\n' && mods == KEYS_ALT) a = A_PROPERTIES;
-    else if ((key == '+' || key == '=') && ctrl) a = A_ZOOM_IN;
-    else if (key == '-' && ctrl) a = A_ZOOM_OUT;
-    else if (key == K_CTRL_0) a = A_ZOOM_100;
+    else if (act == ACT_PROPERTIES) a = A_PROPERTIES;
+    else if (act == ACT_ZOOM_IN) a = A_ZOOM_IN;
+    else if (act == ACT_ZOOM_OUT) a = A_ZOOM_OUT;
+    else if (act == ACT_ZOOM_RESET) a = A_ZOOM_100;
     else if (key == K_CTRL_0 + 1) a = A_BROWSE;
     else if (key == K_CTRL_0 + 2) a = A_ZOOM_TOOL;
     else if (key == K_CTRL_0 + 3) a = A_AREA_TOOL;
@@ -4659,8 +4661,8 @@ static int key_global(int key, int mods)
     else if (key == K_CTRL_0 + 5) a = A_TABLE_TOOL;
     else if (key == K_CTRL_0 + 6) a = A_MAGNIFIER;
     else if (key == 16 && mods == (KEYS_CTRL | KEYS_SHIFT)) a = A_PRESENTATION;
-    else if (key == K_LEFT && mods == (KEYS_ALT | KEYS_SHIFT)) a = A_BACK;
-    else if (key == K_RIGHT && mods == (KEYS_ALT | KEYS_SHIFT)) a = A_FORWARD;
+    else if (act == ACT_BACK) a = A_BACK;       /* Alt+Left, and Okular's Alt+Shift+Left */
+    else if (act == ACT_FORWARD) a = A_FORWARD; /* Alt+Right, Alt+Shift+Right */
     else if (key == K_BOL && mods == KEYS_CTRL) a = A_FIRST;
     else if (key == K_EOL && mods == KEYS_CTRL) a = A_LAST;
     if (a != A_NONE) {
@@ -4921,17 +4923,19 @@ static int line_key(struct line *l, int key, int mods)
 {
     size_t n = strlen(l->text), lo, hi;
     line_selection(l, &lo, &hi);
-    if (key == 1 && mods == KEYS_CTRL) { l->mark = 0; l->cursor = n; l->replace = 1; return 1; }
-    if ((key == 3 || key == 24) && mods == KEYS_CTRL) {
+    int act = key_action(key, mods);
+    if (act == ACT_SELECT_ALL) { l->mark = 0; l->cursor = n; l->replace = 1; return 1; }
+    if (act == ACT_DESELECT) { l->mark = l->cursor; l->replace = 0; return 1; }
+    if (act == ACT_COPY || act == ACT_CUT) {
         /* A password is not copied (QLineEdit's Password echo mode). */
         if (l->masked || hi <= lo) return 1;
         int status = clipboard_set(0, l->text + lo, hi - lo);
         if (status != CLIPBOARD_OK) toast(1, "%s", clipboard_error(status));
-        if (key == 3) return 1;
+        if (act == ACT_COPY) return 1;
         line_insert(l, "", 0);
         return 2;
     }
-    if (key == 22 && mods == KEYS_CTRL) { line_paste(l, 0); return 2; }
+    if (act == ACT_PASTE) { line_paste(l, 0); return 2; }
     const char *ime_notice;
     if (key == K_CTRL_SPACE || key == K_ACT_IME_CN || key == K_ACT_IME_RAW || key == K_ACT_IME_WIDTH) {
         if (!l->masked && ime_action(key, &ime_notice) && key == K_ACT_IME_WIDTH && ime_notice) {
@@ -5037,7 +5041,7 @@ static void key_find(int key, int mods)
     } else if (key == '\n') {
         find.in.replace = 0;
         find_go(mods & KEYS_SHIFT ? -1 : 1);
-    } else if (key == 27) find_bar(0);
+    } else if (key_action(key, mods) == ACT_CANCEL) find_bar(0);
     else if (key == K_PGUP || key == K_PGDN) screen_step(key == K_PGDN ? 1 : -1);
     else if (key == '\t') ui.focus = FOCUS_DOC;
     ui.dirty = 1;
@@ -5058,6 +5062,7 @@ static void key_prompt(int key, int mods)
         return;
     }
     if (prompt.kind == P_OVERWRITE) {
+        if (key == K_ACT_HOME) return; /* process 1's: the question waits */
         int then = prompt.then;
         prompt_close();
         if (key == 'y' || key == 'Y') {
@@ -5069,7 +5074,7 @@ static void key_prompt(int key, int mods)
         }
     } else if (key == '\n') {
         prompt_done(1);
-    } else if (key == 27) {
+    } else if (key_action(key, mods) == ACT_CANCEL) {
         prompt_done(0);
     } else {
         line_key(&prompt.in, key, mods);
@@ -5079,7 +5084,6 @@ static void key_prompt(int key, int mods)
 
 static void key_list(int key, int mods)
 {
-    (void)mods;
     int rows = side_last() - 1 - 5;
     if (key == K_UP) list.sel--;
     else if (key == K_DOWN) list.sel++;
@@ -5088,7 +5092,7 @@ static void key_list(int key, int mods)
     else if (key == K_BOL) list.sel = 0;
     else if (key == K_EOL) list.sel = list.n - 1;
     else if (key == '\n' && list.kind == L_EMBEDDED) save_embedded();
-    else if (key == '\n' || key == 27 || key == 'q') list_close();
+    else if (key == '\n' || key_list_action(key, mods) == ACT_CANCEL) list_close(); /* q is Esc here */
     list.sel = clampi(list.sel, 0, list.n > 0 ? list.n - 1 : 0);
     ui.dirty = 1;
 }
@@ -6242,6 +6246,27 @@ static void pointer(const struct pointer_event *e)
     }
 }
 
+/* F1: the viewer's own keys (ui_help adds every program's). */
+static const struct ui_help_line view_help[] = {
+    { "Ctrl+O", N_("Open a document") },
+    { "Ctrl+F, F3, Shift+F3", N_("Find; the next, the previous match") },
+    { "Ctrl+G", N_("Go to a page") },
+    { "Ctrl+B", N_("Bookmark the page") },
+    { "Alt+Left, Alt+Right", N_("Back, forward in the pages seen") },
+    { "Ctrl+Home, Ctrl+End", N_("The first, the last page") },
+    { "Ctrl+T, Ctrl+W, Ctrl+Shift+T", N_("New tab, close the tab, reopen it") },
+    { "Ctrl+PgDn, Ctrl+PgUp", N_("Next, previous tab") },
+    { "Ctrl++, Ctrl+-, Ctrl+0", N_("Zoom in, out, to 100%") },
+    { "Ctrl+1 .. Ctrl+6", N_("Browse, zoom, area, text, table, magnifier tools") },
+    { "Ctrl+Shift+P", N_("Presentation") },
+    { "Ctrl+R, Ctrl+Shift+R", N_("Rotate an image right, left") },
+    { "F4, F7", N_("An image's information; the sidebar") },
+    { "F5", N_("Reload") },
+    { "Alt+Enter", N_("Properties") },
+    { "Ctrl+C", N_("Copy the selection") },
+    { NULL, NULL },
+};
+
 static void handle(int key)
 {
     if (key == K_SHOWN) {
@@ -6284,15 +6309,24 @@ static void handle(int key)
         do_action(A_TRIM_SELECTION);
         return;
     }
-    if (ui.focus == FOCUS_FIND && mods == KEYS_CTRL && (key == 3 || key == 24 || key == 22 || key == 1)) {
-        key_find(key, mods);
+    int act = key_action(key, mods);
+    if (act == ACT_QUIT) {
+        do_action(A_QUIT); /* Ctrl+Q, Alt+F4, from any focus: asks first, as the window's close */
+        return;
+    }
+    if (act == ACT_HELP) { /* a question shown stays, unanswered */
+        if (ui_help(_("View keys"), view_help) == ACT_QUIT) do_action(A_QUIT);
+        ui.dirty = 1;
+        return;
+    }
+    if (ui.focus == FOCUS_FIND && (act == ACT_COPY || act == ACT_CUT || act == ACT_PASTE || act == ACT_SELECT_ALL)) {
+        key_find(key, mods); /* the find bar's text, before the document's copy */
         return;
     }
     if (ui.focus == FOCUS_PROMPT) {
         key_prompt(key, mods);
     } else if (ui.focus == FOCUS_LIST) {
-        if (key == 17 && (mods & KEYS_CTRL)) do_action(A_QUIT);
-        else key_list(key, mods);
+        key_list(key, mods);
     } else if (gal.on && ui.focus != FOCUS_FIND && key_gallery(key, mods)) {
         /* Browse mode's */
     } else if (!key_global(key, mods)) {

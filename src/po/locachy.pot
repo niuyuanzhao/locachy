@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-11 02:57-0500\n"
+"POT-Creation-Date: 2026-11-12 18:28-0500\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -37,6 +37,50 @@ msgstr ""
 
 #: base/clipboard.c
 msgid "clipboard service unavailable or transfer failed"
+msgstr ""
+
+#: base/help.c
+msgid "Quit, asking first when work would be lost"
+msgstr ""
+
+#: base/help.c
+msgid "Close the innermost menu, dialog or search; else back one level"
+msgstr ""
+
+#: base/help.c
+msgid "Home; the program waits where it is"
+msgstr ""
+
+#: base/help.c
+msgid "This help"
+msgstr ""
+
+#: base/help.c
+msgid "Next or previous field"
+msgstr ""
+
+#: base/help.c progs/files.c
+msgid "Copy, cut, paste"
+msgstr ""
+
+#: base/help.c progs/edit.c
+msgid "Undo, redo"
+msgstr ""
+
+#: base/help.c
+msgid "Select all"
+msgstr ""
+
+#: base/help.c
+msgid "Find; next, previous match"
+msgstr ""
+
+#: base/help.c
+msgid "Every program"
+msgstr ""
+
+#: base/help.c
+msgid "Esc, F1 or q: close"
 msgstr ""
 
 #: base/jobs.c
@@ -414,7 +458,9 @@ msgid "archive"
 msgstr ""
 
 #. TRANSLATORS: Esc is the key; keep it.
-#: progs/archive.c progs/files.c progs/rescue.c progs/shot.c
+#. TRANSLATORS: Esc is the Esc key; keep it.
+#. TRANSLATORS: Esc is the key; keep it.
+#: progs/archive.c progs/files.c progs/rescue.c progs/settings.c progs/shot.c
 msgid "Esc: cancel"
 msgstr ""
 
@@ -433,7 +479,7 @@ msgstr ""
 msgid "Cannot start archive-worker: %s."
 msgstr ""
 
-#. TRANSLATORS: the question when Esc is pressed while the archive is worked on.
+#. TRANSLATORS: the question when Esc (or Ctrl+Q) is pressed while the archive is worked on.
 #: progs/archive.c
 msgid "Cancel it?"
 msgstr ""
@@ -441,6 +487,87 @@ msgstr ""
 #: progs/archive.c
 #, c-format
 msgid "archive-worker stopped (status %d)."
+msgstr ""
+
+#: progs/archive.c
+msgid "Choose an entry"
+msgstr ""
+
+#: progs/archive.c
+msgid "Close a folder, or go to the one it is in; open a folder"
+msgstr ""
+
+#: progs/archive.c
+msgid "Preview the entry (in view or edit); a folder opens or closes"
+msgstr ""
+
+#: progs/archive.c
+msgid "Open in its application; open with..."
+msgstr ""
+
+#: progs/archive.c
+msgid "Mark the entry"
+msgstr ""
+
+#: progs/archive.c
+msgid "Mark all; mark none"
+msgstr ""
+
+#: progs/archive.c
+msgid "Extract the marked (or the selected); extract all"
+msgstr ""
+
+#: progs/archive.c
+msgid "Add files to the archive"
+msgstr ""
+
+#: progs/archive.c
+msgid "Remove the marked (or the selected) from the archive"
+msgstr ""
+
+#: progs/archive.c
+msgid "Test the archive's integrity"
+msgstr ""
+
+#: progs/archive.c
+msgid "The archive's properties"
+msgstr ""
+
+#: progs/archive.c
+msgid "A new archive; open another"
+msgstr ""
+
+#: progs/archive.c
+msgid "Find (the entries whose names have the text)"
+msgstr ""
+
+#: progs/archive.c
+msgid "The next or previous found"
+msgstr ""
+
+#: progs/archive.c
+msgid "The find text away"
+msgstr ""
+
+#: progs/archive.c
+msgid "The entry's menu"
+msgstr ""
+
+#: progs/archive.c
+msgid "A dialog's next or previous line"
+msgstr ""
+
+#: progs/archive.c progs/installer.c progs/packages.c
+msgid "A question: y yes; n, Esc or Enter no"
+msgstr ""
+
+#: progs/archive.c progs/installer.c progs/packages.c progs/rescue.c
+#: progs/settings.c
+msgid "In a line you type: select all, the start, the end"
+msgstr ""
+
+#: progs/archive.c
+msgid "Archive keys"
 msgstr ""
 
 #. TRANSLATORS: y and N are the keys answering; keep them.
@@ -583,11 +710,11 @@ msgstr ""
 msgid "The archive is empty."
 msgstr ""
 
-#. TRANSLATORS: key names (Enter, Ctrl+E, Alt+A, Del, Alt+T, Alt+Return, q); keep them.
+#. TRANSLATORS: key names (Enter, Ctrl+E, Alt+A, Del, Alt+T, Alt+Return, Ctrl+F, Ctrl+Q, F1); keep them.
 #: progs/archive.c
 msgid ""
 "Enter preview  o open  Ctrl+E extract  Alt+A add  Del remove  Alt+T test  "
-"Alt+Return properties  Ctrl+F find  q quit"
+"Alt+Return properties  Ctrl+F find  Ctrl+Q quit  F1 help"
 msgstr ""
 
 #: progs/archive.c
@@ -2839,6 +2966,70 @@ msgid "Session saved"
 msgstr ""
 
 #: progs/edit.c
+msgid "New, open, save"
+msgstr ""
+
+#: progs/edit.c
+msgid "Save as; save all"
+msgstr ""
+
+#: progs/edit.c
+msgid "Reload the document"
+msgstr ""
+
+#: progs/edit.c
+msgid "Close the document; quit (asks about changes)"
+msgstr ""
+
+#: progs/edit.c
+msgid "Cut, copy, paste"
+msgstr ""
+
+#: progs/edit.c
+msgid "Select all; deselect"
+msgstr ""
+
+#: progs/edit.c progs/view.c
+msgid "Find; the next, the previous match"
+msgstr ""
+
+#: progs/edit.c
+msgid "Replace; find in files"
+msgstr ""
+
+#: progs/edit.c
+msgid "Go to a line; comment; toggle the comment"
+msgstr ""
+
+#: progs/edit.c
+msgid "Fold, unfold the top level"
+msgstr ""
+
+#: progs/edit.c progs/view.c
+msgid "Zoom in, out, to 100%"
+msgstr ""
+
+#: progs/edit.c
+msgid "Next, previous document"
+msgstr ""
+
+#: progs/edit.c
+msgid "The documents list"
+msgstr ""
+
+#: progs/edit.c
+msgid "Code actions; definition, declaration"
+msgstr ""
+
+#: progs/edit.c
+msgid "The Edit menu"
+msgstr ""
+
+#: progs/edit.c
+msgid "The File menu; the other menus by their letters"
+msgstr ""
+
+#: progs/edit.c
 msgid "&Reload"
 msgstr ""
 
@@ -3331,6 +3522,277 @@ msgstr ""
 
 #: progs/edit.c
 msgid "Bookmark"
+msgstr ""
+
+#: progs/edit.c
+msgid "Edit keys"
+msgstr ""
+
+#: progs/extdisplay-setup.c
+msgid "The broker ended the pairing."
+msgstr ""
+
+#: progs/extdisplay-setup.c
+msgid "The sender failed the handshake. Check the code and try again."
+msgstr ""
+
+#: progs/extdisplay-setup.c
+msgid "The sender did not answer in time."
+msgstr ""
+
+#: progs/extdisplay-setup.c
+msgid "The cable link went down."
+msgstr ""
+
+#: progs/extdisplay-setup.c
+msgid "Disconnected."
+msgstr ""
+
+#: progs/extdisplay-setup.c
+msgid "Pairing cancelled."
+msgstr ""
+
+#: progs/extdisplay-setup.c
+msgid "The connection ended, or the broker failed."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Unavailable"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "A paired dedicated-link transport is required."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Extended display"
+msgstr ""
+
+#: progs/extdisplay.c
+#, c-format
+msgid "Status: %s    Stream: %ux%u"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid ""
+"Ctrl+Alt+F12: disconnect    Home, lock and brightness stay local; the link "
+"stays up"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "No clipboard, files or commands. The peer keeps its original screen."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Disconnected"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Remote input could not be released in time; the stream was closed."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "The decoder channel ended."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "The managed sleep inhibitor was not granted."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Active"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Extended-only sender over the paired dedicated link."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "The decoder sent an invalid picture."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "The decoder sandbox or FFmpeg is not available."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "The sender handshake or the stream failed."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "No managed session owner: remote input stays disabled."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "The transport is not a paired local stream from the broker."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "The session owner did not accept this session."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "The decoder worker could not be started safely."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Connecting"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Waiting for the sender's capabilities."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "The session owner has gone."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "The session owner did not accept the release."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Remote input could not be delivered."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "The sender handshake timed out."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Disconnected with Ctrl+Alt+F12; extdisplay stays open."
+msgstr ""
+
+#: progs/extdisplay.c progs/settings-power.inc
+msgid "Idle"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Scanning"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Choose an interface"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Asking the broker for a code"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Waiting for the Mac to connect"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Connected"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Cancelling"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Releasing"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Released"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "The pairing helper stopped"
+msgstr ""
+
+#: progs/extdisplay.c progs/settings-hwinfo.inc progs/settings-power.inc
+#: progs/view-pdf-ui.inc
+msgid "Unknown"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Choose the cable interface to pair with the Mac."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Scanning..."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "No cable interface found. Connect the cable, then press F5."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "carrier up"
+msgstr ""
+
+#: progs/extdisplay.c progs/rescue.c
+msgid "no carrier"
+msgstr ""
+
+#: progs/extdisplay.c
+#, c-format
+msgid "Address  %s     Port  %s"
+msgstr ""
+
+#: progs/extdisplay.c
+#, c-format
+msgid "Code     %s"
+msgstr ""
+
+#: progs/extdisplay.c
+#, c-format
+msgid ""
+"On the Mac: locachy-macos-sender --interface <mac-interface> --address %s --"
+"port %s"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Asking the broker for an address and a code..."
+msgstr ""
+
+#: progs/extdisplay.c
+#, c-format
+msgid "Status: %s"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "The broker is busy: a pairing is still active."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "The cable was unplugged. Press any key to close."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid ""
+"Up/Down choose   Enter pair   Esc cancel   F5 scan   F1 help   Ctrl+Q quit"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "The code and the address are kept in memory only."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Choose the cable interface"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Pair with the Mac on it"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Cancel the pairing"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Look for cable interfaces again"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Disconnect a session; extdisplay stays open"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Extended display keys"
 msgstr ""
 
 #: progs/files.c progs/settings.c
@@ -3995,6 +4457,8 @@ msgid "-> move"
 msgstr ""
 
 #. TRANSLATORS: the part before the colon is a key; keep it and ": ".
+#. The buttons send the keys they name: Ctrl+Q with its modifier, as
+#. * packages' does. There is no quit button while it installs (refused).
 #: progs/files.c progs/installer.c progs/rescue.c progs/settings.c
 msgid "Enter: choose"
 msgstr ""
@@ -4019,9 +4483,9 @@ msgstr ""
 msgid "s: sort"
 msgstr ""
 
-#. TRANSLATORS: q is the key; keep it.
+#. TRANSLATORS: Esc is the key; keep it.
 #: progs/files.c
-msgid "q: back, nothing chosen"
+msgid "Esc: back, nothing chosen"
 msgstr ""
 
 #. TRANSLATORS: Enter and Tab are keys; keep them.
@@ -4038,9 +4502,9 @@ msgstr ""
 msgid "r: restore"
 msgstr ""
 
-#. TRANSLATORS: d is the key; keep it.
+#. TRANSLATORS: Del is the Delete key; keep it.
 #: progs/files.c
-msgid "d: delete permanently"
+msgid "Del: delete permanently"
 msgstr ""
 
 #. TRANSLATORS: e is the key; keep it.
@@ -4048,9 +4512,9 @@ msgstr ""
 msgid "e: empty Trash"
 msgstr ""
 
-#. TRANSLATORS: u is the key; keep it.
+#. TRANSLATORS: Ctrl+Z is the key; keep it.
 #: progs/files.c
-msgid "u: undo"
+msgid "Ctrl+Z: undo"
 msgstr ""
 
 #. TRANSLATORS: i is the key; keep it.
@@ -4069,40 +4533,45 @@ msgstr ""
 msgid "o: open with"
 msgstr ""
 
-#. TRANSLATORS: c is the key; keep it.
-#: progs/files.c
-msgid "c: copy"
+#. TRANSLATORS: Ctrl+C is the key; keep it.
+#. TRANSLATORS: Ctrl+C is a key name; keep it.
+#: progs/files.c progs/home.c progs/installer.c progs/packages.c
+msgid "Ctrl+C: copy"
 msgstr ""
 
-#. TRANSLATORS: x is the key; keep it.
+#. TRANSLATORS: Ctrl+X is the key; keep it.
 #: progs/files.c
-msgid "x: cut"
+msgid "Ctrl+X: cut"
 msgstr ""
 
-#. TRANSLATORS: v is the key; keep it.
+#. TRANSLATORS: Ctrl+V is the key; keep it.
 #: progs/files.c
-msgid "v: paste"
+msgid "Ctrl+V: paste"
 msgstr ""
 
-#. TRANSLATORS: r is the key; keep it.
+#. TRANSLATORS: F2 is the key; keep it.
 #: progs/files.c
-msgid "r: rename"
+msgid "F2: rename"
 msgstr ""
 
-#. TRANSLATORS: d is the key; keep it.
+#. TRANSLATORS: Del is the Delete key; keep it.
 #: progs/files.c
-msgid "d: trash"
+msgid "Del: trash"
 msgstr ""
 
-#. TRANSLATORS: n is the key; keep it.
+#. TRANSLATORS: Ctrl+Shift+N is the key; keep it.
 #: progs/files.c
-msgid "n: new folder"
+msgid "Ctrl+Shift+N: new folder"
 msgstr ""
 
-#. TRANSLATORS: q is the key; keep it.
-#. TRANSLATORS: q is the q key; keep "q: ".
-#: progs/files.c progs/packages.c
-msgid "q: back"
+#. TRANSLATORS: Esc and Ctrl+Q are keys; keep them.
+#. TRANSLATORS: Ctrl+Q and F1 are key names; keep them.
+#: progs/files.c progs/firmware.c progs/installer.c progs/packages.c
+msgid "Ctrl+Q: quit"
+msgstr ""
+
+#: progs/files.c progs/home.c
+msgid "Esc: back"
 msgstr ""
 
 #. TRANSLATORS: i is the key; keep it.
@@ -4554,15 +5023,19 @@ msgid "Create link... (L)"
 msgstr ""
 
 #: progs/files.c
-msgid "Copy path(s) (Ctrl+Shift+C)"
+msgid "Copy path(s) (Ctrl+Alt+C)"
 msgstr ""
 
 #: progs/files.c
-msgid "New folder..."
+msgid "Invert selection"
 msgstr ""
 
 #: progs/files.c
-msgid "New empty file... (N)"
+msgid "New folder... (Ctrl+Shift+N)"
+msgstr ""
+
+#: progs/files.c
+msgid "New empty file... (Ctrl+Alt+N)"
 msgstr ""
 
 #: progs/files.c
@@ -4570,7 +5043,7 @@ msgid "Bookmark folder (Ctrl+D)"
 msgstr ""
 
 #: progs/files.c
-msgid "Open in terminal (F4)"
+msgid "Open in terminal (Shift+F4)"
 msgstr ""
 
 #: progs/files.c
@@ -4653,6 +5126,114 @@ msgid "Release to refresh"
 msgstr ""
 
 #: progs/files.c
+msgid "Open; open with..."
+msgstr ""
+
+#: progs/files.c
+msgid "Mark the item; mark all"
+msgstr ""
+
+#: progs/files.c
+msgid "Copy the path of the selected item or items"
+msgstr ""
+
+#: progs/files.c
+msgid "Move to the Trash; delete permanently"
+msgstr ""
+
+#: progs/files.c
+msgid "Rename; in the Trash, r restores"
+msgstr ""
+
+#: progs/files.c
+msgid "New folder; new empty file"
+msgstr ""
+
+#: progs/files.c
+msgid "The parent folder"
+msgstr ""
+
+#: progs/files.c
+msgid "Back, forward"
+msgstr ""
+
+#: progs/files.c
+msgid "Filter by part of the name"
+msgstr ""
+
+#: progs/files.c
+msgid "Find files"
+msgstr ""
+
+#: progs/files.c
+msgid "Go to a location"
+msgstr ""
+
+#: progs/files.c
+msgid "Hidden files shown or not"
+msgstr ""
+
+#: progs/files.c
+msgid "Properties; I: the folder's"
+msgstr ""
+
+#: progs/files.c
+msgid "The menu of the selected item"
+msgstr ""
+
+#: progs/files.c
+msgid "Split view; the places pane"
+msgstr ""
+
+#: progs/files.c
+msgid "Reload the folder"
+msgstr ""
+
+#: progs/files.c
+msgid "A terminal in this folder"
+msgstr ""
+
+#: progs/files.c
+msgid "New tab, close the tab"
+msgstr ""
+
+#: progs/files.c progs/view.c
+msgid "Next, previous tab"
+msgstr ""
+
+#: progs/files.c
+msgid "Icons, compact, details"
+msgstr ""
+
+#: progs/files.c
+msgid "Zoom in, out, back"
+msgstr ""
+
+#: progs/files.c
+msgid "Sort; columns; by name, time, size, type, extension"
+msgstr ""
+
+#: progs/files.c
+msgid "Bookmark the folder; duplicate; create a link"
+msgstr ""
+
+#: progs/files.c
+msgid "Set as wallpaper; eject the drive or empty the Trash"
+msgstr ""
+
+#: progs/files.c
+msgid "Places and panes"
+msgstr ""
+
+#: progs/files.c
+msgid "Cancel the drag, filter or marks; then back (inside home: its list)"
+msgstr ""
+
+#: progs/files.c
+msgid "Files keys"
+msgstr ""
+
+#: progs/files.c
 msgid "Filter (part of the name):"
 msgstr ""
 
@@ -4721,6 +5302,58 @@ msgstr ""
 msgid "IFD: Ethernet NVM (gbe) only"
 msgstr ""
 
+#: progs/firmware.c
+msgid "Next or previous page: Devices, BIOS Settings, SPI Flash"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Choose a line"
+msgstr ""
+
+#: progs/firmware.c
+msgid "A device's releases; install the release; change the setting"
+msgstr ""
+
+#: progs/firmware.c
+msgid "From the releases back to the devices"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Refresh the LVFS metadata; BIOS Settings: read them again"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Update all devices; install a .cab firmware archive"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Verify the device; unlock it for updates"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Install fwupd or flashrom"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Change the setting or the option"
+msgstr ""
+
+#: progs/firmware.c
+msgid "SPI Flash: probe the chip; 3x verified backup"
+msgstr ""
+
+#: progs/firmware.c
+msgid "SPI Flash: verify or write an image; a custom programmer"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Show or hide the output"
+msgstr ""
+
+#: progs/firmware.c
+msgid "Answer a question (Esc or Enter: no)"
+msgstr ""
+
 #: progs/firmware.c progs/packages.c
 #, c-format
 msgid "Wait: %s is still running."
@@ -4782,6 +5415,10 @@ msgstr ""
 msgid "no job yet"
 msgstr ""
 
+#: progs/firmware.c progs/installer.c progs/packages.c
+msgid "F1: help"
+msgstr ""
+
 #: progs/firmware.c
 msgid "firmware"
 msgstr ""
@@ -4819,9 +5456,9 @@ msgstr ""
 msgid "fwupd is not installed. Press P to install fwupd with locachy-pkg."
 msgstr ""
 
-#. TRANSLATORS: R is the key; keep it.
+#. TRANSLATORS: r is the key; keep it.
 #: progs/firmware.c
-msgid "No updatable devices reported yet (press R to refresh LVFS metadata)."
+msgid "No updatable devices reported yet (press r to refresh LVFS metadata)."
 msgstr ""
 
 #: progs/firmware.c
@@ -4829,9 +5466,10 @@ msgstr ""
 msgid " Releases for %.50s (current %s) — Esc: back "
 msgstr ""
 
+#. TRANSLATORS: r is the key; keep it.
 #: progs/firmware.c
 msgid ""
-"No LVFS releases listed for this device (refresh metadata with R first)."
+"No LVFS releases listed for this device (refresh metadata with r first)."
 msgstr ""
 
 #: progs/firmware.c
@@ -4907,8 +5545,9 @@ msgstr ""
 msgid "N: cancel"
 msgstr ""
 
+#. TRANSLATORS: N, Esc and Enter are key names; keep them.
 #: progs/firmware.c
-msgid "Flashing firmware is irreversible; any other key cancels."
+msgid "Flashing firmware is irreversible; N, Esc or Enter cancels."
 msgstr ""
 
 #: progs/firmware.c
@@ -4953,10 +5592,6 @@ msgstr ""
 
 #: progs/firmware.c
 msgid "k: unlock"
-msgstr ""
-
-#: progs/firmware.c
-msgid "q: home"
 msgstr ""
 
 #: progs/firmware.c
@@ -5040,6 +5675,10 @@ msgstr ""
 #: progs/firmware.c
 msgid ""
 "Tab switches between fwupd Devices, BIOS Settings and SPI Flash (flashrom)."
+msgstr ""
+
+#: progs/firmware.c
+msgid "Firmware keys"
 msgstr ""
 
 #: progs/firmware.c
@@ -5207,10 +5846,11 @@ msgstr ""
 msgid "system log"
 msgstr ""
 
-#. TRANSLATORS: Tab, PgUp/PgDn, y, Y and Esc are key names; keep them.
+#. TRANSLATORS: Tab, PgUp/PgDn, Ctrl+C, Ctrl+A and Esc are key names; keep them.
 #: progs/home.c
 #, c-format
-msgid "Log: %s  %s%sTab: %s  PgUp/PgDn: scroll  y/Y: copy  Esc: back"
+msgid ""
+"Log: %s  %s%sTab: %s  PgUp/PgDn: scroll  Ctrl+A, Ctrl+C: copy all  Esc: back"
 msgstr ""
 
 #: progs/home.c
@@ -5335,7 +5975,7 @@ msgstr ""
 msgid "Any other key cancels without acting."
 msgstr ""
 
-#. TRANSLATORS: Tab, y, Y, Esc and J are key names; keep them.
+#. TRANSLATORS: Tab, Ctrl+C, Ctrl+A, Esc and J are key names; keep them.
 #: progs/home.c
 msgid "Tab: container log"
 msgstr ""
@@ -5344,22 +5984,12 @@ msgstr ""
 msgid "Tab: system log"
 msgstr ""
 
-#. TRANSLATORS: y is the y key; keep "y: ".
-#: progs/home.c progs/installer.c progs/packages.c
-msgid "y: copy"
-msgstr ""
-
-#. TRANSLATORS: Y is the Y key (Shift+y); keep "Y: ".
-#: progs/home.c progs/packages.c
-msgid "Y: copy all"
+#: progs/home.c
+msgid "Ctrl+A: select all"
 msgstr ""
 
 #: progs/home.c
 msgid "J: system jobs"
-msgstr ""
-
-#: progs/home.c
-msgid "Esc: back"
 msgstr ""
 
 #. TRANSLATORS: Up/Down/PgUp/PgDn and Super+Esc are key names; keep them.
@@ -5468,6 +6098,42 @@ msgstr[0] ""
 msgstr[1] ""
 
 #: progs/home.c
+msgid "Move the selection"
+msgstr ""
+
+#: progs/home.c
+msgid "Open the selected container or program"
+msgstr ""
+
+#: progs/home.c
+msgid "Mark a container"
+msgstr ""
+
+#: progs/home.c
+msgid "Start, freeze, stop"
+msgstr ""
+
+#: progs/home.c
+msgid "The system jobs (K stops the selected one)"
+msgstr ""
+
+#: progs/home.c
+msgid "The logs (Tab: the system's or the program's)"
+msgstr ""
+
+#: progs/home.c
+msgid "Copy the selected text"
+msgstr ""
+
+#: progs/home.c
+msgid "The logs: select all of the log, then copy it"
+msgstr ""
+
+#: progs/home.c
+msgid "Back from the logs or the jobs"
+msgstr ""
+
+#: progs/home.c
 msgid "Reboot cancelled."
 msgstr ""
 
@@ -5572,6 +6238,14 @@ msgstr ""
 #: progs/home.c
 #, c-format
 msgid "%s is open on %s."
+msgstr ""
+
+#: progs/home.c
+msgid "Home keys"
+msgstr ""
+
+#: progs/home.c
+msgid "All of the log is selected: Ctrl+C copies it."
 msgstr ""
 
 #: progs/installer.c
@@ -6089,6 +6763,10 @@ msgid ""
 msgstr ""
 
 #: progs/installer.c
+msgid "A password is never copied."
+msgstr ""
+
+#: progs/installer.c
 msgid "The two were not the same; nothing changed."
 msgstr ""
 
@@ -6165,6 +6843,109 @@ msgid "Erase and install?"
 msgstr ""
 
 #: progs/installer.c
+msgid "Quit setup (the console comes back)"
+msgstr ""
+
+#: progs/installer.c
+msgid "Quit setup: asks first, since the choices made here are lost"
+msgstr ""
+
+#: progs/installer.c
+msgid "Setup can be left when the installation ends"
+msgstr ""
+
+#: progs/installer.c
+msgid "Choose an item"
+msgstr ""
+
+#: progs/installer.c
+msgid "Choose, open or change the item"
+msgstr ""
+
+#: progs/installer.c
+msgid "Change a choice"
+msgstr ""
+
+#: progs/installer.c
+msgid "Between the steps and the step's page"
+msgstr ""
+
+#: progs/installer.c
+msgid "The step before or after"
+msgstr ""
+
+#: progs/installer.c
+msgid "From a step's page to the steps; from the steps to the start"
+msgstr ""
+
+#: progs/installer.c
+msgid ""
+"In a line you type, after Ctrl+A: copy or cut it (a password is never copied)"
+msgstr ""
+
+#: progs/installer.c
+msgid "In a line you type: paste"
+msgstr ""
+
+#: progs/installer.c
+msgid ""
+"In a line you type: delete the word before the cursor, to the start, to the "
+"end"
+msgstr ""
+
+#: progs/installer.c
+msgid "A terminal (a root shell)"
+msgstr ""
+
+#: progs/installer.c
+msgid "Copy what is selected, else the command shown"
+msgstr ""
+
+#: progs/installer.c
+msgid "Copy the whole output"
+msgstr ""
+
+#: progs/installer.c progs/rescue.c
+msgid "Scroll the output"
+msgstr ""
+
+#: progs/installer.c
+msgid "Clear the selection"
+msgstr ""
+
+#: progs/installer.c
+msgid "Reboot (asks first)"
+msgstr ""
+
+#: progs/installer.c
+msgid "Power off (asks first)"
+msgstr ""
+
+#: progs/installer.c
+msgid "Continue where the installation stopped"
+msgstr ""
+
+#: progs/installer.c
+msgid "Back to the summary after a failure"
+msgstr ""
+
+#: progs/installer.c
+msgid "Installer keys"
+msgstr ""
+
+#: progs/installer.c
+msgid "The installation is running: setup can be left when it ends."
+msgstr ""
+
+#: progs/installer.c
+msgid "Leave setup? The choices made here are lost."
+msgstr ""
+
+#: progs/installer.c
+msgid "There is no output to copy yet."
+msgstr ""
+
+#: progs/installer.c
 #, c-format
 msgid "Continuing the installation   %s"
 msgstr ""
@@ -6191,7 +6972,8 @@ msgid ""
 msgstr ""
 
 #: progs/installer.c
-msgid "y copies the command; c then continues where the installation stopped."
+msgid ""
+"Ctrl+C copies the command; c then continues where the installation stopped."
 msgstr ""
 
 #: progs/installer.c
@@ -6215,10 +6997,10 @@ msgstr ""
 msgid "%s %8s   fetched %d, installed %d of %d"
 msgstr ""
 
-#. TRANSLATORS: PgUp/PgDn are key names; keep them.
+#. TRANSLATORS: PgUp/PgDn and Ctrl+A, Ctrl+C are key names; keep them.
 #: progs/installer.c
 #, c-format
-msgid "Output: %s   %s   PgUp/PgDn: scroll"
+msgid "Output: %s   %s   Ctrl+A, Ctrl+C: copy all   PgUp/PgDn: scroll"
 msgstr ""
 
 #: progs/installer.c
@@ -6358,237 +7140,8 @@ msgstr ""
 msgid "Hibernate after (seconds asleep; empty: as the system has it):"
 msgstr ""
 
-#: progs/extdisplay-setup.c
-msgid "The broker ended the pairing."
-msgstr ""
-
-#: progs/extdisplay-setup.c
-msgid "The sender failed the handshake. Check the code and try again."
-msgstr ""
-
-#: progs/extdisplay-setup.c
-msgid "The sender did not answer in time."
-msgstr ""
-
-#: progs/extdisplay-setup.c
-msgid "The cable link went down."
-msgstr ""
-
-#: progs/extdisplay-setup.c
-msgid "Disconnected."
-msgstr ""
-
-#: progs/extdisplay-setup.c
-msgid "Pairing cancelled."
-msgstr ""
-
-#: progs/extdisplay-setup.c
-msgid "The connection ended, or the broker failed."
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "Unavailable"
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "A paired dedicated-link transport is required."
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "Extended display"
-msgstr ""
-
-#: progs/extdisplay.c
-#, c-format
-msgid "Status: %s    Stream: %ux%u"
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "Ctrl+Alt+F12: disconnect    Home, lock and brightness stay local"
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "No clipboard, files or commands. The peer keeps its original screen."
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "Disconnected"
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "Remote input could not be released in time; the stream was closed."
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "The decoder channel ended."
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "The managed sleep inhibitor was not granted."
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "Active"
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "Extended-only sender over the paired dedicated link."
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "The decoder sent an invalid picture."
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "The decoder sandbox or FFmpeg is not available."
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "The sender handshake or the stream failed."
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "No managed session owner: remote input stays disabled."
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "The transport is not a paired local stream from the broker."
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "The session owner did not accept this session."
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "The decoder worker could not be started safely."
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "Connecting"
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "Waiting for the sender's capabilities."
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "The session owner has gone."
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "The session owner did not accept the release."
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "Remote input could not be delivered."
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "The sender handshake timed out."
-msgstr ""
-
-#: progs/extdisplay.c progs/settings-power.inc
-msgid "Idle"
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "Scanning"
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "Choose an interface"
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "Asking the broker for a code"
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "Waiting for the Mac to connect"
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "Connected"
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "Cancelling"
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "Releasing"
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "Released"
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "The pairing helper stopped"
-msgstr ""
-
-#: progs/extdisplay.c progs/settings-hwinfo.inc progs/settings-power.inc
-#: progs/view-pdf-ui.inc
-msgid "Unknown"
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "Choose the cable interface to pair with the Mac."
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "Scanning..."
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "No cable interface found. Connect the cable, then press F5."
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "carrier up"
-msgstr ""
-
-#: progs/extdisplay.c progs/rescue.c
-msgid "no carrier"
-msgstr ""
-
-#: progs/extdisplay.c
-#, c-format
-msgid "Address  %s     Port  %s"
-msgstr ""
-
-#: progs/extdisplay.c
-#, c-format
-msgid "Code     %s"
-msgstr ""
-
-#: progs/extdisplay.c
-#, c-format
-msgid ""
-"On the Mac: locachy-macos-sender --interface <mac-interface> --address %s --"
-"port %s"
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "Asking the broker for an address and a code..."
-msgstr ""
-
-#: progs/extdisplay.c
-#, c-format
-msgid "Status: %s"
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "The broker is busy: a pairing is still active."
-msgstr ""
-
-#: progs/extdisplay.c
-msgid ""
-"Up/Down choose   Enter pair   Esc cancel   F5 scan   Ctrl+Alt+F12 release"
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "The code and the address are kept in memory only."
+#: progs/installer.c
+msgid "The whole output is selected: Ctrl+C copies it."
 msgstr ""
 
 #: progs/lock.c
@@ -6972,6 +7525,11 @@ msgstr ""
 msgid "not installed"
 msgstr ""
 
+#. TRANSLATORS: Ctrl+A and Ctrl+C are key names; keep them.
+#: progs/packages.c
+msgid "Ctrl+A, Ctrl+C: copy all"
+msgstr ""
+
 #: progs/packages.c
 msgid "trusted now"
 msgstr ""
@@ -6990,7 +7548,8 @@ msgstr ""
 #. TRANSLATORS: y and g are the y and g keys; keep them.
 #: progs/packages.c
 msgid ""
-"y copies the command; once they are trusted, g continues where it stopped."
+"Ctrl+C copies the command; once they are trusted, g continues where it "
+"stopped."
 msgstr ""
 
 #: progs/packages.c
@@ -7161,11 +7720,15 @@ msgid "Details: nothing selected"
 msgstr ""
 
 #: progs/packages.c
-msgid "a: apply the marked"
+msgid "Enter: details"
 msgstr ""
 
 #: progs/packages.c
 msgid "c: check"
+msgstr ""
+
+#: progs/packages.c
+msgid "a: apply the marked"
 msgstr ""
 
 #: progs/packages.c
@@ -7189,7 +7752,7 @@ msgid "n: new"
 msgstr ""
 
 #: progs/packages.c
-msgid "d: remove"
+msgid "Delete: remove"
 msgstr ""
 
 #: progs/packages.c
@@ -7201,15 +7764,69 @@ msgid "/: search"
 msgstr ""
 
 #: progs/packages.c
+msgid "Delete: remove the selected one"
+msgstr ""
+
+#: progs/packages.c
 msgid "i: add a package"
 msgstr ""
 
 #: progs/packages.c
-msgid "x: remove the selected one"
+msgid "s: bring the system to the manifest"
 msgstr ""
 
 #: progs/packages.c
-msgid "s: bring the system to the manifest"
+msgid "Next or previous page: Updates, Containers, Host"
+msgstr ""
+
+#: progs/packages.c
+msgid "Choose a row; PgUp and PgDn scroll the output or the details"
+msgstr ""
+
+#: progs/packages.c
+msgid "Updates: the row's packages; Containers: edit it; a form: its value"
+msgstr ""
+
+#: progs/packages.c
+msgid "Updates: mark a row to apply"
+msgstr ""
+
+#: progs/packages.c
+msgid "Updates: check again (on the network); apply the marked rows"
+msgstr ""
+
+#: progs/packages.c
+msgid "Containers: new, build, roll back, remove"
+msgstr ""
+
+#: progs/packages.c
+msgid "Search and install (Containers, Host)"
+msgstr ""
+
+#: progs/packages.c
+msgid ""
+"Host: add a package, remove the selected one, bring the system to the "
+"manifest"
+msgstr ""
+
+#: progs/packages.c
+msgid "Continue a job that stopped for source signing keys"
+msgstr ""
+
+#: progs/packages.c
+msgid "Copy what is selected, else the command or the notice"
+msgstr ""
+
+#: progs/packages.c
+msgid "Select the whole output or details pane, then copy it"
+msgstr ""
+
+#: progs/packages.c
+msgid "Show the output or the details"
+msgstr ""
+
+#: progs/packages.c
+msgid "Packages keys"
 msgstr ""
 
 #: progs/packages.c
@@ -7562,9 +8179,9 @@ msgstr ""
 msgid "Allow %s to access your real system?"
 msgstr ""
 
-#. TRANSLATORS: Y and N are the Y and N keys; keep them.
+#. TRANSLATORS: Y, N, Esc and Enter are key names; keep them.
 #: progs/packages.c
-msgid "Y: allow and save   N or Esc: cancel without saving"
+msgid "Y: allow and save   N, Esc or Enter: cancel without saving"
 msgstr ""
 
 #: progs/packages.c
@@ -7740,6 +8357,10 @@ msgstr ""
 #. TRANSLATORS: c is the c key; keep it.
 #: progs/packages.c
 msgid "The last check is shown; c checks again."
+msgstr ""
+
+#: progs/packages.c
+msgid "The whole pane is selected: Ctrl+C copies it."
 msgstr ""
 
 #: progs/rescue.c
@@ -8137,7 +8758,7 @@ msgid ""
 msgstr ""
 
 #: progs/rescue.c
-msgid "Enlarge the Rescue window. Q exits with cleanup."
+msgid "Enlarge the Rescue window. Ctrl+Q exits with cleanup."
 msgstr ""
 
 #: progs/rescue.c
@@ -8152,9 +8773,11 @@ msgstr ""
 msgid " (cleanup required)"
 msgstr ""
 
+#. TRANSLATORS: Tab, PgUp, PgDn, Ctrl+C, Ctrl+Q and F1 are key names; keep them.
 #: progs/rescue.c
 msgid ""
-"Tab: pane  PgUp/PgDn: output  y/Ctrl+C: copy  a: SSH  f: fingerprint  q: exit"
+"Tab: pane  PgUp/PgDn: output  y/Ctrl+C: copy  a: SSH  f: fingerprint  "
+"Ctrl+Q: exit  F1: help"
 msgstr ""
 
 #: progs/rescue.c
@@ -8169,6 +8792,46 @@ msgstr ""
 
 #: progs/rescue.c
 msgid "Cancelled; the rescue session remains closed."
+msgstr ""
+
+#: progs/rescue.c
+msgid "The next or previous pane: status, actions, output"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Choose an action; scroll the status or the output"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Run the chosen action; choose in a list"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Copy the text selected with the pointer"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Copy the SSH command or the fingerprint"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Cancel a question or a list; nothing at the top"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Show or hide what is typed (a passphrase)"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Exit Rescue, with its cleanup"
+msgstr ""
+
+#: progs/rescue.c
+msgid "A question: y yes; n or Esc no"
+msgstr ""
+
+#: progs/rescue.c
+msgid "Rescue keys"
 msgstr ""
 
 #: progs/rescue.c
@@ -9289,11 +9952,11 @@ msgstr ""
 msgid "Right"
 msgstr ""
 
-#. TRANSLATORS: Up/Down, Enter, Left, Tab, / and q are key names; keep them.
+#. TRANSLATORS: Up/Down, Enter, Left, Tab, /, F1 and Ctrl+Q are key names; keep them.
 #: progs/settings.c
 msgid ""
 "Up/Down: choose   Enter: change or open   Left/Tab: categories   /: find   "
-"q: back to home"
+"F1: keys   Ctrl+Q: quit"
 msgstr ""
 
 #: progs/settings.c
@@ -9879,10 +10542,6 @@ msgid "Touch or swipe the finger on the reader, again each time it asks."
 msgstr ""
 
 #: progs/settings.c
-msgid "q / Esc: cancel"
-msgstr ""
-
-#: progs/settings.c
 msgid "Fingerprint not added."
 msgstr ""
 
@@ -9940,6 +10599,58 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Wallpaper saved; the shared display shows it when it is next shown."
+msgstr ""
+
+#: progs/settings.c
+msgid "Choose a category or a setting"
+msgstr ""
+
+#: progs/settings.c
+msgid "From the categories into the page"
+msgstr ""
+
+#: progs/settings.c
+msgid "From the page back to the categories"
+msgstr ""
+
+#: progs/settings.c
+msgid "Open a setting; Enter again: done; a line of its own: do it"
+msgstr ""
+
+#: progs/settings.c
+msgid "Change the open setting"
+msgstr ""
+
+#: progs/settings.c
+msgid "Close the open setting (a chooser: as it was); leave what was found"
+msgstr ""
+
+#: progs/settings.c
+msgid "Remove the selected key, entry or component (some ask: Delete again)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Find a setting"
+msgstr ""
+
+#: progs/settings.c
+msgid "The next or previous setting found"
+msgstr ""
+
+#: progs/settings.c
+msgid "Secure Boot: enroll with Microsoft's keys too"
+msgstr ""
+
+#: progs/settings.c
+msgid "Screens: a screen's exact X,Y; move it (Ctrl+Shift: by 1 pixel)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Battery and hardware pages: copy the page"
+msgstr ""
+
+#: progs/settings.c
+msgid "Settings keys"
 msgstr ""
 
 #: progs/settings.c
@@ -13594,6 +14305,50 @@ msgstr ""
 
 #: progs/view.c
 msgid "Click to see the magnified view."
+msgstr ""
+
+#: progs/view.c
+msgid "Open a document"
+msgstr ""
+
+#: progs/view.c
+msgid "Go to a page"
+msgstr ""
+
+#: progs/view.c
+msgid "Bookmark the page"
+msgstr ""
+
+#: progs/view.c
+msgid "Back, forward in the pages seen"
+msgstr ""
+
+#: progs/view.c
+msgid "The first, the last page"
+msgstr ""
+
+#: progs/view.c
+msgid "New tab, close the tab, reopen it"
+msgstr ""
+
+#: progs/view.c
+msgid "Browse, zoom, area, text, table, magnifier tools"
+msgstr ""
+
+#: progs/view.c
+msgid "Rotate an image right, left"
+msgstr ""
+
+#: progs/view.c
+msgid "An image's information; the sidebar"
+msgstr ""
+
+#: progs/view.c
+msgid "Copy the selection"
+msgstr ""
+
+#: progs/view.c
+msgid "View keys"
 msgstr ""
 
 #: progs/view.c

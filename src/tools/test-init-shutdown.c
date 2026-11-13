@@ -251,6 +251,7 @@ static void reset_case(void)
     log_text[0] = screen_lines[0] = '\0';
     assert(shutdown_how < 0 && jobs_watch < 0 && shutdown_at < 0);
     asked_at = -1;
+    restart_asked = 0;
     mono_s = 100;
     boot_s = 1000;
     resume_dev[0] = '\0';
@@ -402,17 +403,46 @@ int main(int argc, char **argv)
     assert(reboots == 1 && last_how == RB_AUTOBOOT && logged("init: Ctrl+Alt+Del"));
     assert(logged("reboot now, without waiting: system job 7 (pkg-install) is cut"));
     reset_case(); job(7, 1);
-    person_asked(RB_AUTOBOOT);
-    assert(reboots == 0 && shutdown_how == RB_AUTOBOOT);
-    shutdown_look();
-    for (int i = 0; i < 40; i++) { /* held: Delete repeats every 33 ms after 0.5 s */
+    person_asked(RB_AUTOBOOT); /* Ctrl+Alt+Del asks first: nothing goes down yet */
+    assert(reboots == 0 && shutdown_how < 0 && restart_asked && logged("init: Ctrl+Alt+Del: asking whether to restart"));
+    assert(shown("LOCachy: restart the computer now?") && shown("Y: restart        N or Esc: stay"));
+    assert(shown("System job 7 runs: pkg-install: the restart waits for it to end."));
+    for (int i = 0; i < 40; i++) { /* held: Delete repeats every 33 ms after 0.5 s: still the one question */
         mono_s += i ? 0.033 : 0.5;
         person_asked(RB_AUTOBOOT);
     }
-    assert(reboots == 0);
+    assert(reboots == 0 && restart_asked && shutdown_how < 0);
+    restart_key('x'); /* any other key waits */
+    restart_key(K_HOME);
+    assert(reboots == 0 && restart_asked && shutdown_how < 0);
+    restart_key('n'); /* no: nothing restarts, the programs' screens come back */
+    assert(reboots == 0 && !restart_asked && shutdown_how < 0 && logged("init: restart: no, staying"));
+    puts("PASS Ctrl+Alt+Del asks first, on process 1's screen: a held Delete is one question, other keys wait, "
+         "n stays");
+
+    reset_case(); job(7, 1);
+    person_asked(RB_AUTOBOOT);
+    restart_key('y'); /* yes: the restart waits for the job, as it did before */
+    assert(reboots == 0 && !restart_asked && shutdown_how == RB_AUTOBOOT && logged("init: restart: yes"));
+    shutdown_look();
+    assert(shown("LOCachy: restart the computer now?") == 0 && reboots == 0);
     mono_s += 1.5;
-    person_asked(RB_AUTOBOOT); /* released, pressed again */
+    person_asked(RB_AUTOBOOT); /* released, pressed again while it waits: at once, as its screen says */
     assert(reboots == 1 && last_how == RB_AUTOBOOT);
+    assert(logged("reboot now, without waiting: system job 7 (pkg-install) is cut"));
+    puts("PASS a yes restarts through the wait for system jobs; asked again during that wait, at once");
+
+    reset_case(); job(7, 1);
+    person_asked(RB_AUTOBOOT);
+    battery_power_off(); /* the critical battery's power off takes the question's place */
+    assert(!restart_asked && reboots == 0 && shutdown_how == RB_POWER_OFF);
+    shutdown_request(RB_POWER_OFF, 1, -1); /* poweroff --force ends the wait */
+    assert(reboots == 1 && last_how == RB_POWER_OFF && shutdown_how < 0);
+    reset_case(); locked = 1; /* its key is not acted on while locked */
+    person_asked(RB_AUTOBOOT);
+    assert(!restart_asked && reboots == 0 && shutdown_how < 0);
+    locked = 0;
+    puts("PASS the question is none while locked, and the critical battery's power off replaces it");
     reset_case(); job(7, 1);
     restart();
     person_asked(RB_POWER_OFF); /* the power button while the reboot waits */

@@ -37,7 +37,19 @@ worker 以 `nobody` 运行，无补充组、`no_new_privs`、Landlock 规则不�
 
 ## 配对界面
 
-配对界面列出 broker 报告的线缆接口，每个带驱动与载波状态；没有硬编码的接口名。上下键选择，回车与所选接口配对，Esc 取消等待中的配对，F5 重新扫描，Ctrl+Alt+F12 释放 broker 并退出。broker 等待 Mac 时，地址、端口与配对码一起显示在各自的区域里，并附 Mac 上的命令形式（`locachy-macos-sender --interface <mac-interface> --address 地址 --port 端口`）。配对码与地址只在内存中，离开屏幕时清除；从不写入日志，也不放进 argv 或环境变量。配对成功后进入会话；会话结束时，broker 给出的原因显示在状态行，列表随即回到屏幕上。broker 发来的意外或格式错误的行会结束通道，界面显示助手已停止。
+配对界面列出 broker 报告的线缆接口，每个带驱动与载波状态；没有硬编码的接口名。上下键选择，回车与所选接口配对，Esc 取消等待中的配对，F5 重新扫描，F1 显示按键，Ctrl+Q（以及 Ctrl+Alt+F12、关闭窗口、回首页或锁屏）释放 broker 并退出。broker 等待 Mac 时，地址、端口与配对码一起显示在各自的区域里，并附 Mac 上的命令形式（`locachy-macos-sender --interface <mac-interface> --address 地址 --port 端口`）。配对码与地址只在内存中，离开屏幕时清除；从不写入日志，也不放进 argv 或环境变量。配对成功后进入会话；会话结束时，broker 给出的原因显示在状态行，列表随即回到屏幕上。broker 发来的意外或格式错误的行会结束通道，界面显示助手已停止。
+
+## 离开会话
+
+活动中的会话不会因为按键而离开。链路连着时：
+
+- Ctrl+Q、Esc、q 以及其他所有键都发给 Mac，没有一个会结束会话或关闭 `extdisplay`。
+- 回首页（Super+Esc）和锁屏照常把屏幕拿走。前端已向 process 1 报告链路活动（`base_session_hold`，只认 `/usr/local/bin/extdisplay`），所以 process 1 不冻结它，链路保持。远端输入按所有者策略停止（锁屏会收回；没有屏幕时前端也收不到按键），Mac 上按住的键先被释放。回来时会话照常显示。
+- 屏幕显示着活动会话时，空闲锁屏（`lock_after`）不锁：会话是 Mac 的，链路是一根接到它的线。其间若 LOCachy 本机已有那么久没有输入，就记下“该锁了”：一旦没有屏幕再显示该会话（拔线、程序退出），process 1 立即锁屏，不管之后有没有按键；此时按回首页（Super+Esc）也先出锁屏。直接要求的锁屏（Super+L、合盖）与以前相同，并保持链路。
+- Ctrl+Alt+F12 只结束这次会话：broker 像任何会话结束时一样取消它，回到配对界面，`extdisplay` 保持打开。
+- 线缆拔出（`ended carrier-lost`）时会话结束，配对界面说明原因，之后按任意键关闭 `extdisplay`。
+
+其他结束方式（Mac 端停止、超时、所有者消失）回到配对界面。没有会话时（在配对界面），Ctrl+Q、关闭窗口、回首页和锁屏都会释放 broker 并退出：若在那里被冻结，broker 会一直占着线缆租约。
 
 ## Broker（中转进程）
 

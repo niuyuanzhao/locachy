@@ -101,6 +101,7 @@ static struct snapshot state;
 static int known, selected, action_top, focus, status_scroll, output_scroll, modal, pick_sel, pick_top, pick_offset;
 static char pending[256], filter[128], secret[SECRET_MAX + 1], first_secret[SECRET_MAX + 1];
 static size_t secret_pos;
+static int text_all; /* Ctrl+A: the text being edited is all selected (a modal opens with it empty) */
 static int reveal, exiting, done, notice_error, own_keyboard;
 static int boot_session, session_closed, closed_selected, power_confirmation, signal_exit;
 static char notice[1024], ssh[768], keyboard[128], next_keyboard[128];
@@ -593,13 +594,37 @@ static size_t characters(const char *s)
     for (size_t at = 0; s[at]; at = next_char(s, at)) n++;
     return n;
 }
-static int edit(int key, char *text, size_t size, size_t *pos)
+/* The keys that edit a line of text (a filter, a secret, a layout name):
+ * Left/Right, Home/End (^E), Backspace, Delete (^D), ^U, ^K, ^W (a field
+ * takes it before the table's close-tab: the word before the cursor), what
+ * keys type. Ctrl+A selects it all (text_all: what is typed, Backspace or
+ * Delete then replaces it; no copy or cut: a secret is not copied). */
+static int edit(int key, int mods, char *text, size_t size, size_t *pos)
 {
     size_t len = strlen(text);
+    const char *typed = keys_typed(key);
+    int act = key_action(key, mods);
     if (*pos > len) *pos = len;
+    if (act == ACT_SELECT_ALL) {
+        text_all = len > 0;
+        *pos = len;
+        return 1;
+    }
+    if (text_all && (key == K_LEFT || key == K_RIGHT || key == K_BOL || key == K_EOL || key == 5)) {
+        *pos = key == K_LEFT || key == K_BOL ? 0 : len; /* the selection ends where it goes */
+        text_all = 0;
+        return 1;
+    }
+    if (text_all && (typed || key == '\b' || key == 127 || key == K_DEL || key == 4 || key == 21 || key == 11 ||
+                     act == ACT_CLOSE_TAB)) {
+        text[0] = '\0'; /* the selection goes; what is typed takes its place */
+        len = *pos = 0;
+        text_all = 0;
+        if (!typed) return 1;
+    }
     if (key == K_LEFT) *pos = prev_char(text, *pos);
     else if (key == K_RIGHT) *pos = next_char(text, *pos);
-    else if (key == K_BOL || key == 1) *pos = 0;
+    else if (key == K_BOL) *pos = 0;
     else if (key == K_EOL || key == 5) *pos = len;
     else if (key == '\b' || key == 127) {
         size_t p = prev_char(text, *pos);
@@ -613,14 +638,13 @@ static int edit(int key, char *text, size_t size, size_t *pos)
         *pos = 0;
     } else if (key == 11) {
         text[*pos] = '\0';
-    } else if (key == 23) {
+    } else if (act == ACT_CLOSE_TAB) { /* Ctrl+W */
         size_t p = *pos;
         while (p && text[p - 1] == ' ') p = prev_char(text, p);
         while (p && text[p - 1] != ' ') p = prev_char(text, p);
         memmove(text + p, text + *pos, len - *pos + 1);
         *pos = p;
     } else {
-        const char *typed = keys_typed(key);
         if (!typed) return 0;
         size_t n = strlen(typed);
         if (len + n >= size) { tell(1, "%s", _("Input is too long; nothing was added.")); return 0; }
@@ -634,6 +658,7 @@ static void secret_prompt(int which)
 {
     wipe_secrets();
     textsel_clear();
+    text_all = 0;
     modal = which;
     tell(0, "%s", _("Secrets stay in this UI and the helper's stdin; never in argv or files."));
 }
@@ -646,7 +671,7 @@ static void do_action(int which)
         if (windowed()) {
             tell(0, "%s", _("In a Wayland window, change the keyboard layout in desktop settings; Rescue uses that window's keys."));
         } else {
-            modal = M_LAYOUT; filter[0] = '\0'; textsel_clear();
+            modal = M_LAYOUT; filter[0] = '\0'; text_all = 0; textsel_clear();
         }
         return;
     }
@@ -655,7 +680,7 @@ static void do_action(int which)
     case A_UNLOCK:
         if (strcmp(state.state, "closed")) tell(1, "%s", _("Close the current target before selecting another."));
         else if (!state.ndevices) tell(1, "%s", _("No encrypted target was found. Rescan after attaching its disk."));
-        else { modal = M_DEVICE; pick_sel = pick_top = 0; filter[0] = '\0'; textsel_clear(); }
+        else { modal = M_DEVICE; pick_sel = pick_top = 0; filter[0] = '\0'; text_all = 0; textsel_clear(); }
         break;
     case A_REPAIR:
         if (state.repair_blocked) tell(1, _("Repair is blocked: %s"), state.esp_reason[0] ? state.esp_reason : _("the target ESP is not uniquely identified"));
@@ -666,7 +691,7 @@ static void do_action(int which)
     case A_START_LINK:
         if (state.active) tell(1, "%s", _("The debug link is already active. Stop it before selecting another interface."));
         else if (!state.ninterfaces) tell(1, "%s", _("No eligible wired interface was found. Rescan after attaching one."));
-        else { modal = M_INTERFACE; pick_sel = pick_top = 0; filter[0] = '\0'; textsel_clear(); }
+        else { modal = M_INTERFACE; pick_sel = pick_top = 0; filter[0] = '\0'; text_all = 0; textsel_clear(); }
         break;
     case A_STOP_LINK: start_helper("stop-link", NULL, NULL); break;
     case A_TERMINAL:
@@ -942,7 +967,7 @@ static void draw(void)
     ui_hits_clear(); textsel_frame();
     screen_fill(0, 0, cols, rows, BG);
     if (rows < 16 || cols < 24) {
-        screen_text(1, 2, _("Enlarge the Rescue window. Q exits with cleanup."), ERROR, BG);
+        screen_text(1, 2, _("Enlarge the Rescue window. Ctrl+Q exits with cleanup."), ERROR, BG);
     } else if (session_closed) {
         draw_closed();
     } else if (modal != M_NONE) {
@@ -970,7 +995,9 @@ static void draw(void)
             ui_hit(0, list_y + 1 + i, action_w, 1, HIT_ACTION + k);
         }
         draw_output(); textsel_draw(BG, ACCENT);
-        screen_text(1, rows - 3, _("Tab: pane  PgUp/PgDn: output  y/Ctrl+C: copy  a: SSH  f: fingerprint  q: exit"), DIM, BG);
+        /* TRANSLATORS: Tab, PgUp, PgDn, Ctrl+C, Ctrl+Q and F1 are key names; keep them. */
+        screen_text(1, rows - 3, _("Tab: pane  PgUp/PgDn: output  y/Ctrl+C: copy  a: SSH  f: fingerprint  Ctrl+Q: exit  F1: help"),
+                    DIM, BG);
     }
     screen_text(1, rows - 1, notice, notice_error ? ERROR : ACCENT, BG);
     screen_bar(_("Rescue"), NULL);
@@ -1028,15 +1055,17 @@ static int pointer_key(void)
     if (hit == HIT_OUTPUT) focus = F_OUTPUT;
     return 0;
 }
-static void handle_closed(int key)
+static void handle_closed(int key, int mods, int act)
 {
     if (child.pid) return;
     if (power_confirmation) {
-        int requested = power_confirmation;
-        power_confirmation = 0;
-        if (key == 'y' || key == 'Y') {
+        /* y answers yes; n and Esc no; any other key (home's, Enter) waits */
+        int requested = power_confirmation, plain = !(mods & (KEYS_CTRL | KEYS_ALT | KEYS_META));
+        if (plain && (key == 'y' || key == 'Y')) {
+            power_confirmation = 0;
             start_helper(requested == 1 ? "reboot" : "poweroff", NULL, NULL);
-        } else {
+        } else if (act == ACT_CANCEL || (plain && (key == 'n' || key == 'N'))) {
+            power_confirmation = 0;
             tell(0, "%s", _("Cancelled; the rescue session remains closed."));
         }
         return;
@@ -1062,18 +1091,56 @@ static void handle_closed(int key)
         start_helper("status", NULL, NULL);
     }
 }
+/* F1's own keys (ui_help; every program's follow them). Rescue runs on the
+ * live medium, without process 1. */
+static const struct ui_help_line rescue_keys[] = {
+    { "Tab, Shift+Tab", N_("The next or previous pane: status, actions, output") },
+    { "Up, Down, Home, End", N_("Choose an action; scroll the status or the output") },
+    { "PgUp, PgDn", N_("Scroll the output") },
+    { "Enter, Space", N_("Run the chosen action; choose in a list") },
+    { "Ctrl+C", N_("Copy the text selected with the pointer") },
+    { "a, f", N_("Copy the SSH command or the fingerprint") },
+    { "Esc", N_("Cancel a question or a list; nothing at the top") },
+    { "F2", N_("Show or hide what is typed (a passphrase)") },
+    { "Ctrl+Q", N_("Exit Rescue, with its cleanup") },
+    { "Ctrl+A, Home, End", N_("In a line you type: select all, the start, the end") },
+    { "y, n", N_("A question: y yes; n or Esc no") },
+    { NULL, NULL },
+};
+
+/* F1 over the screen; the window's close or Ctrl+Q there exits, as it does here. */
+static void help_screen(void)
+{
+    if (ui_help(_("Rescue keys"), rescue_keys) == ACT_QUIT) begin_exit();
+}
+
+/* One key, or a pointer event (as its button's key, with no modifiers). */
 static void handle(int key)
 {
-    if (key == K_CLOSE) { begin_exit(); return; }
-    if (key == K_POINTER) key = pointer_key();
+    int mods = keys_modifiers();
+    if (key == K_POINTER) {
+        key = pointer_key();
+        mods = 0;
+    }
     if (!key || key == K_SHOWN) return;
+    /* In a question or a line typed, q is a letter: only Esc is cancel there. */
+    int act = modal ? key_action(key, mods) : key_list_action(key, mods), plain = !(mods & (KEYS_ALT | KEYS_META));
+    if (act == ACT_QUIT) { begin_exit(); return; } /* Ctrl+Q, the window's close, Alt+F4 */
+    if (act == ACT_HELP) { help_screen(); return; }
     if (exiting) return;
-    if (session_closed) { handle_closed(key); return; }
+    if (session_closed) { handle_closed(key, mods, act); return; }
     if (modal) {
-        if (key == 27 || (modal == M_CONFIRM && (key == 'n' || key == 'N'))) {
+        int picker = modal == M_DEVICE || modal == M_INTERFACE;
+        if (act == ACT_CANCEL && picker && filter[0]) { /* Esc: the filter goes first */
+            filter[0] = '\0';
+            pick_sel = pick_top = 0;
+            text_all = 0;
+            return;
+        }
+        if (act == ACT_CANCEL || (modal == M_CONFIRM && plain && (key == 'n' || key == 'N'))) {
             wipe_secrets(); modal = M_NONE; tell(0, "%s", _("Cancelled; nothing was requested.")); return;
         }
-        if (modal == M_CONFIRM) { if (key == 'y' || key == 'Y') secret_prompt(M_REPAIR); return; }
+        if (modal == M_CONFIRM) { if (plain && (key == 'y' || key == 'Y')) secret_prompt(M_REPAIR); return; }
         if (modal == M_LAYOUT) {
             if (key == K_F1 + 1 || key == K_F1 + 2) {
                 snprintf(filter, sizeof filter, "%s", key == K_F1 + 1 ? "us" : "jp");
@@ -1088,10 +1155,10 @@ static void handle(int key)
                     start_helper("keytable", next_keyboard, NULL);
                     modal = M_NONE;
                 }
-            } else { size_t pos = strlen(filter); edit(key, filter, sizeof filter, &pos); }
+            } else { size_t pos = strlen(filter); edit(key, mods, filter, sizeof filter, &pos); }
             return;
         }
-        if (modal == M_DEVICE || modal == M_INTERFACE) {
+        if (picker) {
             if (key == '\n') choose_pick();
             else if (key == K_UP) pick_sel--;
             else if (key == K_DOWN) pick_sel++;
@@ -1101,15 +1168,19 @@ static void handle(int key)
             else if (key == K_EOL) pick_sel = ITEMS_MAX;
             else if (key == K_LEFT) pick_offset = clamp(pick_offset - 8, LINE_MAXIMUM);
             else if (key == K_RIGHT) pick_offset = clamp(pick_offset + 8, LINE_MAXIMUM);
-            else { size_t pos = strlen(filter); if (edit(key, filter, sizeof filter, &pos)) pick_sel = pick_top = 0; }
+            else { size_t pos = strlen(filter); if (edit(key, mods, filter, sizeof filter, &pos)) pick_sel = pick_top = 0; }
         } else if (key == '\n') submit_secret();
         else if (key == K_F1 + 1) reveal = !reveal;
-        else edit(key, secret, sizeof secret, &secret_pos);
+        else edit(key, mods, secret, sizeof secret, &secret_pos);
         return;
     }
-    if (key == 'q' || key == 27) { begin_exit(); return; }
-    if (key == 'y' || key == 3 || key == 'a' || key == 'f') { copy_key(key); return; }
-    if (key == '\t') { focus = (focus + 1) % 3; return; }
+    if (act == ACT_CANCEL) { textsel_clear(); return; } /* at the top, nothing: q is Esc too */
+    if (act == ACT_NEXT_FIELD) { focus = (focus + 1) % 3; return; }
+    if (act == ACT_PREV_FIELD) { focus = (focus + 2) % 3; return; }
+    if (act == ACT_COPY || (plain && (key == 'a' || key == 'f'))) {
+        copy_key(act == ACT_COPY ? 0 : key); /* 0: what is selected */
+        return;
+    }
     if (key == K_PGUP || key == K_PGDN) {
         output_scroll = clamp(output_scroll + (key == K_PGUP ? 8 : -8), LOG_MAX * 64); return;
     }

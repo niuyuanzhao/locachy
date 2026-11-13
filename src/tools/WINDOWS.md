@@ -80,12 +80,12 @@ most sixteen windows).
 Closing the window (its close button, Alt+F4) reaches the program as
 `K_CLOSE`, and the program leaves through its own quit path:
 
-- files leaves as `q` does, also from a question or a list (the question is
-  answered no). During a copy it asks first: `y` stops the copy now, `n`
+- files leaves as Ctrl+Q does, also from a question or a list (the
+  question is answered no). During a copy it asks first: `y` stops the copy now, `n`
   closes once the copy is done, Esc keeps the window.
 - view leaves as Ctrl+Q does; with unsaved changes it asks to save or
   discard them first, and the window stays open meanwhile.
-- settings leaves as `q` does, also while one of its package, repositories
+- settings leaves as Ctrl+Q does, also while one of its package, repositories
   or boot image jobs runs or waits: those are system jobs (`locachy-jobs`,
   [JOBS.md](JOBS.md)), run apart from the window, which go on without it;
   home lists them, and settings, opened again, follows them again.

@@ -196,7 +196,7 @@ static int editor_items(int menu, struct editor_item *items)
         ACTION(_("Previous Split View"), "Shift+F8", EA_PREV_VIEW, 0, nspaces > 1);
         ACTION(_("Next Split View"), "F8", EA_NEXT_VIEW, 0, nspaces > 1);
         ACTION(_("Split Vertical"), "Ctrl+Shift+L", EA_SPLIT_V, 0, nspaces < MAX_SPACES);
-        ACTION(_("Split Horizontal"), "Ctrl+Shift+T", EA_SPLIT_H, 0, nspaces < MAX_SPACES);
+        ACTION(_("Split Horizontal"), "", EA_SPLIT_H, 0, nspaces < MAX_SPACES);
         ACTION(_("Toggle Orientation"), "", EA_TOGGLE_SPLIT, 0, nspaces > 1);
         ACTION(_("Close Current View"), "Ctrl+Shift+R", EA_CLOSE_VIEW, 0, nspaces > 1);
         ACTION(_("Close Inactive Views"), "", EA_CLOSE_OTHER_VIEWS, 0, nspaces > 1);
@@ -207,19 +207,19 @@ static int editor_items(int menu, struct editor_item *items)
         ACTION(_("Show Projects"), "", EA_PROJECTS, sidebar && side_view == SIDE_PROJECTS, 1);
         break;
     case SUB_WORD_WRAP:
-        ACTION(_("Dynamic Word Wrap"), "F10", EA_WRAP, opened && t->wrap, opened);
+        ACTION(_("Dynamic Word Wrap"), "", EA_WRAP, opened && t->wrap, opened);
         break;
     case SUB_BORDERS:
         ACTION(_("Show Icon Border"), "F6", EA_ICON_BORDER, opened && t->icons, opened);
-        ACTION(_("Show Line Numbers"), "F11", EA_NUMBERS, opened && t->numbers, opened);
+        ACTION(_("Show Line Numbers"), "", EA_NUMBERS, opened && t->numbers, opened);
         ACTION(_("Show Scrollbar Marks"), "", EA_SCROLLBAR_MARKS, opened && t->marks, opened && t->scrollbar);
         ACTION(_("Show Scrollbar Mini-Map"), "", EA_MINIMAP, opened && t->minimap, opened && t->scrollbar);
         break;
     case SUB_CODE_FOLDING:
         ACTION(_("Fold Current Node"), "", EA_FOLD_CURRENT, 0, opened);
         ACTION(_("Unfold Current Node"), "", EA_UNFOLD_CURRENT, 0, opened);
-        ACTION(_("Fold Toplevel Nodes"), "Ctrl+Shift+-", EA_FOLD_TOP, 0, opened);
-        ACTION(_("Unfold Toplevel Nodes"), "Ctrl+Shift++", EA_UNFOLD_TOP, 0, opened);
+        ACTION(_("Fold Toplevel Nodes"), "Ctrl+Shift+[", EA_FOLD_TOP, 0, opened);
+        ACTION(_("Unfold Toplevel Nodes"), "Ctrl+Shift+]", EA_UNFOLD_TOP, 0, opened);
         ACTION(_("Fold All Recursively"), "", EA_FOLD_ALL, 0, opened);
         ACTION(_("Unfold All Recursively"), "", EA_UNFOLD_ALL, 0, opened);
         break;

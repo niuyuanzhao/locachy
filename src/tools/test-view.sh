@@ -62,7 +62,7 @@ for mode in normal sanitizer; do
     fi
     gcc $flags -Wall -Wextra -Werror -D_GNU_SOURCE -I"$src/base/include" -I"$src/base" -Iprogs \
         -DVIEW_RENDER_TEST_PATH="\"$b/view-render\"" -o "$b/test-view-$mode" \
-        tools/test-view.c progs/view-layout.c progs/view-client.c base/ui.c -lm
+        tools/test-view.c progs/view-layout.c progs/view-client.c base/ui.c base/key-action.c base/help.c -lm
     if env $run_env "$b/test-view-$mode" "$b/samples" "$b/work-$mode" "$b/pdf"; then
         echo "PASS test-view ($mode)"
     else
@@ -77,7 +77,7 @@ if pkg-config --exists rime; then
     lua=$(ldd /usr/lib/rime-plugins/librime-lua.so 2>/dev/null | sed -n 's/^[[:space:]]*\(liblua[^ ]*\) => .*/\1/p' | head -n 1)
     gcc -O1 -g -Wall -Wextra -Werror -D_GNU_SOURCE -DCONFIG_IME -I"$src/base/include" -I"$src/base" -Iprogs \
         -DVIEW_RENDER_TEST_PATH="\"$b/view-render\"" -o "$b/test-view-ime" \
-        tools/test-view.c progs/view-layout.c progs/view-client.c base/ui.c base/ime.c \
+        tools/test-view.c progs/view-layout.c progs/view-client.c base/ui.c base/key-action.c base/help.c base/ime.c \
         $(pkg-config --cflags --libs rime) ${lua:+-Wl,--push-state,--no-as-needed -l:$lua -Wl,--pop-state} -lm
     if "$b/test-view-ime" "$b/samples" "$b/work-ime" "$b/pdf"; then
         echo "PASS test-view (real Rime IME)"

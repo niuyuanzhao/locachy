@@ -2179,8 +2179,9 @@ static void test_bluetooth(void)
     test_cols = 110; assert(machine_columns() == 4);
     test_cols = 24; assert(machine_columns() == 1);
     test_cols = 100;
-    nkeys = keypos = 0; keys[nkeys++] = 'P'; keys[nkeys++] = 27;
+    nkeys = keypos = 0; keys[nkeys++] = 'P'; keys[nkeys++] = 27; keys[nkeys++] = 27; /* the filter, then the list */
     pick_machine();
+    assert(keypos == nkeys);
     assert(!rc_log[0] && canvas_has("Panasonic") && !canvas_has("ThinkPad fixture"));
     nkeys = keypos = 0; keys[nkeys++] = 27;
     pick_machine();
@@ -2461,6 +2462,15 @@ int main(int argc, char **argv)
     arrange_screens();
     assert(arrangement_selected == monitor_anchor());
     puts("PASS origin selection survives the arrangement page refresh");
+    /* The window's close in its X,Y question: the question is cancelled, and the view leaves at once. */
+    closing = 0;
+    nkeys = keypos = 0;
+    keys[nkeys++] = 'p';
+    keys[nkeys++] = K_CLOSE;
+    arrange_screens();
+    assert(closing && close_due() && keypos == nkeys);
+    closing = 0;
+    puts("PASS arrange screens: the window's close in its X,Y question leaves the view at once");
     /* The main page: a click selects a row, on its value it changes it, the
      * wheel moves; a double click is Enter only where Enter acts. */
     build_row_maps();
@@ -3077,22 +3087,34 @@ int main(int argc, char **argv)
     test_system_keymap();
     test_power_and_hwinfo();
     test_pages();
-    /* Line editing in prompts: cursor movement, Delete and Ctrl+U. */
+    /* Line editing in prompts: cursor movement, Delete and Ctrl+U; Ctrl+A
+     * selects it all (what is typed replaces it), Home is the start. */
     char edited[64] = "abc";
     size_t epos = strlen(edited);
-    edit_line_key(K_LEFT, edited, sizeof edited, &epos);
-    edit_line_key('X', edited, sizeof edited, &epos);
-    edit_line_key(K_BOL, edited, sizeof edited, &epos);
-    edit_line_key(K_DEL, edited, sizeof edited, &epos);
+    int eall = 0;
+    edit_line_key(K_LEFT, 0, edited, sizeof edited, &epos, &eall);
+    edit_line_key('X', 0, edited, sizeof edited, &epos, &eall);
+    edit_line_key(K_BOL, 0, edited, sizeof edited, &epos, &eall);
+    edit_line_key(K_DEL, 0, edited, sizeof edited, &epos, &eall);
     assert(strcmp(edited, "bXc") == 0);
     /* A character beyond ASCII: inserted whole, gone whole with Backspace. */
-    edit_line_key(K_EOL, edited, sizeof edited, &epos);
-    edit_line_key(K_TEXT, edited, sizeof edited, &epos);
-    edit_line_key('!', edited, sizeof edited, &epos);
+    edit_line_key(K_EOL, 0, edited, sizeof edited, &epos, &eall);
+    edit_line_key(K_TEXT, 0, edited, sizeof edited, &epos, &eall);
+    edit_line_key('!', 0, edited, sizeof edited, &epos, &eall);
     assert(strcmp(edited, "bXcé!") == 0 && epos == strlen(edited));
-    edit_line_key(K_LEFT, edited, sizeof edited, &epos);
-    edit_line_key('\b', edited, sizeof edited, &epos);
+    edit_line_key(K_LEFT, 0, edited, sizeof edited, &epos, &eall);
+    edit_line_key('\b', 0, edited, sizeof edited, &epos, &eall);
     assert(strcmp(edited, "bXc!") == 0 && epos == 3);
+    edit_line_key('a' & 0x1F, KEYS_CTRL, edited, sizeof edited, &epos, &eall);
+    assert(eall && strcmp(edited, "bXc!") == 0);
+    edit_line_key('z', 0, edited, sizeof edited, &epos, &eall);
+    edit_line_key(K_BOL, 0, edited, sizeof edited, &epos, &eall);
+    edit_line_key('y', 0, edited, sizeof edited, &epos, &eall);
+    assert(!eall && strcmp(edited, "yz") == 0 && epos == 1);
+    edit_line_key('a' & 0x1F, KEYS_CTRL, edited, sizeof edited, &epos, &eall);
+    edit_line_key('\b', 0, edited, sizeof edited, &epos, &eall);
+    assert(!eall && edited[0] == '\0' && epos == 0);
+    puts("PASS line editing: Ctrl+A selects it all, typing or Backspace replaces it; Home is the start");
     allow_rc = 0;
     puts("PASS faces: installing needs a camera; dlib on the CPU, or CUDA with NVIDIA's driver (rc.conf's face_dlib, "
          "swapped once installed); on only once howdy is installed; sudo's line names both ways");

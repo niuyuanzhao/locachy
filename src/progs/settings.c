@@ -60,6 +60,13 @@ __attribute__((weak)) void screen_cells(int *w, int *h, int *top);
 __attribute__((weak)) void screen_fill_px(int x, int y, int w, int h, uint32_t rgb);
 __attribute__((weak)) int clipboard_set(int primary, const void *text, size_t size);
 __attribute__((weak)) int key_poll_many(struct pollfd *extra, size_t count, int timeout_ms);
+__attribute__((weak)) int keys_modifiers(void);
+
+/* The modifiers held at the last key read (none in tests without keys.c). */
+static int mods_now(void)
+{
+    return keys_modifiers ? keys_modifiers() : 0;
+}
 
 static int power_thresh_count(void);
 static void apply_saved_battery_thresholds(void);
@@ -375,11 +382,11 @@ static struct monitor monitors[MAX_MONITORS];
 static int nmonitors;
 
 static int selected;
-/* TRANSLATORS: Up/Down, Enter, Left, Tab, / and q are key names; keep them. */
+/* TRANSLATORS: Up/Down, Enter, Left, Tab, /, F1 and Ctrl+Q are key names; keep them. */
 static const char default_notice[] = N_("Up/Down: choose   Enter: change or open   Left/Tab: categories   "
-                                        "/: find   q: back to home");
+                                        "/: find   F1: keys   Ctrl+Q: quit");
 static char notice[512] = N_("Up/Down: choose   Enter: change or open   Left/Tab: categories   "
-                             "/: find   q: back to home");
+                             "/: find   F1: keys   Ctrl+Q: quit");
 
 static int is_internal_output(const char *name)
 {
@@ -2218,17 +2225,17 @@ static void repos_check(void)
 }
 
 /*
- * The window's close (K_CLOSE, only a window gets it): settings leaves as q
- * does. Its package, repositories and boot image jobs are system jobs
- * (locachy-jobs), which go on without it (tools/JOBS.md).
+ * Quitting (ACT_QUIT: Ctrl+Q, Alt+F4, the window's close K_CLOSE, which only
+ * a window gets): settings leaves. Its package, repositories and boot image
+ * jobs are system jobs (locachy-jobs), which go on without it (tools/JOBS.md).
  */
-static int closing; /* a close was asked for */
+static int closing; /* quitting was asked for */
 
-/* key, read in the main loop or in a question or list: 1 if it was the
- * window's close (the caller cancels what it was asking, as Esc does). */
+/* key, read in the main loop or in a question or list: 1 if it asks to quit
+ * (the caller cancels what it was asking, as Esc does; settings then leaves). */
 static int close_read(int key)
 {
-    if (key != K_CLOSE) {
+    if (key_action(key, mods_now()) != ACT_QUIT) {
         return 0;
     }
     closing = 1;
@@ -2965,7 +2972,7 @@ static void tailscale_login(void)
              _("Tailscale login failed (status %d)."), status);
 }
 
-/* fprintd-enroll -f FINGER USER: what it says, until it ends or q / Esc
+/* fprintd-enroll -f FINGER USER: what it says, until it ends or Esc
  * cancels it. The reader asks for the finger several times. */
 static void enroll_finger(const char *finger)
 {
@@ -3026,16 +3033,14 @@ static void enroll_finger(const char *finger)
             }
             end = start > out ? start - 1 : out;
         }
-        screen_text(2, screen_rows() - 2, _("q / Esc: cancel"), ACCENT, BG);
+        /* TRANSLATORS: Esc is the Esc key; keep it. */
+        screen_text(2, screen_rows() - 2, _("Esc: cancel"), ACCENT, BG);
         screen_flush();
         if (ended) {
             break;
         }
         int key = key_poll_timeout(p[0], 500);
-        if (close_read(key)) {
-            key = 27;
-        }
-        if (key == 'q' || key == 27) {
+        if (close_read(key) || key_action(key, mods_now()) == ACT_CANCEL) {
             kill(-pid, SIGTERM);
             waitpid(pid, &status, 0);
             cancelled = 1;
@@ -3413,13 +3418,37 @@ static void choose_wallpaper(void)
 
 static void draw(void);
 
+/* F1's own keys (ui_help; every program's follow them). */
+static const struct ui_help_line settings_keys[] = {
+    { "Up, Down, PgUp, PgDn, Home, End", N_("Choose a category or a setting") },
+    { "Enter, Space, Right, Tab", N_("From the categories into the page") },
+    { "Left, Esc, q, Tab, Shift+Tab", N_("From the page back to the categories") },
+    { "Enter", N_("Open a setting; Enter again: done; a line of its own: do it") },
+    { "Left, Right, -, +", N_("Change the open setting") },
+    { "Esc", N_("Close the open setting (a chooser: as it was); leave what was found") },
+    { "Delete", N_("Remove the selected key, entry or component (some ask: Delete again)") },
+    { "/, Ctrl+F", N_("Find a setting") },
+    { "F3, Shift+F3", N_("The next or previous setting found") },
+    { "m", N_("Secure Boot: enroll with Microsoft's keys too") },
+    { "p, Shift+arrows", N_("Screens: a screen's exact X,Y; move it (Ctrl+Shift: by 1 pixel)") },
+    { "Ctrl+C", N_("Battery and hardware pages: copy the page") },
+    { "Ctrl+A, Home, End", N_("In a line you type: select all, the start, the end") },
+    { NULL, NULL },
+};
+
+/* F1 over the screen; Ctrl+Q or the window's close there quits (closing). */
+static void help_screen(void)
+{
+    if (ui_help(_("Settings keys"), settings_keys) == ACT_QUIT) closing = 1;
+}
+
 /* The labels of the input method's key rows. */
 static const char *const ime_key_labels[NIME_KEYS] = {
     N_("Input method key"), N_("Chinese input key"), N_("Direct input key"), N_("Punctuation width key"),
 };
 
 /* The action keys.c gives for rc_name's keys (0: none of its own). */
-static int key_action(const char *rc_name)
+static int rc_key_action(const char *rc_name)
 {
     static const struct { const char *name; int action; } actions[] = {
         { "key_lock", K_ACT_LOCK }, { "key_ime", K_CTRL_SPACE }, { "key_ime_cn", K_ACT_IME_CN },
@@ -3461,7 +3490,7 @@ static void choose_key(const char *label, const char *rc_name, char *value, size
                        void (*applied)(void))
 {
     const char *now = value[0] ? value : _("none");
-    int own = key_action(rc_name);
+    int own = rc_key_action(rc_name);
     /* TRANSLATORS: %s is a row's label (Lock key); Ctrl, Alt, Super and Esc are key names; keep them. */
     snprintf(notice, sizeof notice, bare ? _("%s: press it, alone if it types nothing (Henkan_Mode), "
                                              "else with Ctrl, Alt or Super   Esc: keep %.40s") :
@@ -3469,9 +3498,9 @@ static void choose_key(const char *label, const char *rc_name, char *value, size
     draw();
     keys_name_any(1);
     for (;;) {
-        int key = key_get(), mods = keys_modifiers();
+        int key = key_get(), mods = mods_now();
         char name[128];
-        if (close_read(key)) {
+        if (key == K_CLOSE && close_read(key)) { /* the window's close; Ctrl+Q is a key to record here */
             key = 27;
             mods = 0;
         }
@@ -3479,8 +3508,8 @@ static void choose_key(const char *label, const char *rc_name, char *value, size
             draw();
             continue;
         }
-        if (key == 0 || key == K_POINTER) {
-            continue;
+        if (key == 0 || key == K_POINTER || key == K_ACT_HOME) {
+            continue; /* home's key is process 1's: the key asked for is still to come, silently */
         }
         if (key == 27 && mods == 0) {
             snprintf(notice, sizeof notice, _("%s left as it is."), label);
@@ -3771,10 +3800,10 @@ static void pick_zone(void)
             screen_text(4, list + k, line, on ? BG : FG, on ? ACCENT : BG);
         }
         screen_flush();
-        int key = key_get();
+        int key = key_get(), act = key_action(key, mods_now());
         size_t len = strlen(filter);
         if (close_read(key)) {
-            key = 27;
+            return;
         }
         if (key == K_POINTER) {
             const struct pointer_event *e = pointer_last();
@@ -3786,8 +3815,12 @@ static void pick_zone(void)
                 key = e->clicks == 2 ? '\n' : 0;
             }
         }
-        if (key == 27) {
-            return;
+        if (act == ACT_CANCEL) { /* Esc: the filter goes first, then the list */
+            if (!filter[0]) return;
+            filter[0] = '\0';
+            sel = top = 0;
+        } else if (act == ACT_HELP) {
+            help_screen();
         } else if (key == '\n' && n > 0) {
             choose_zone(zones[match[sel]]);
             return;
@@ -4030,10 +4063,10 @@ static void pick_keymap(const struct keys_keyboard *kb)
             screen_text(4, list + k, line, on ? BG : FG, on ? ACCENT : BG);
         }
         screen_flush();
-        int key = key_get();
+        int key = key_get(), act = key_action(key, mods_now());
         size_t len = strlen(filter);
         if (close_read(key)) {
-            key = 27;
+            return;
         }
         if (key == K_POINTER) {
             const struct pointer_event *e = pointer_last();
@@ -4045,8 +4078,12 @@ static void pick_keymap(const struct keys_keyboard *kb)
                 key = e->clicks == 2 ? '\n' : 0;
             }
         }
-        if (key == 27) {
-            return;
+        if (act == ACT_CANCEL) { /* Esc: the filter goes first, then the list */
+            if (!filter[0]) return;
+            filter[0] = '\0';
+            sel = top = 0;
+        } else if (act == ACT_HELP) {
+            help_screen();
         } else if (key == '\n' && n > 0) {
             if (kb) set_keyboard_keymap(kb, match[sel] < 0 ? NULL : keymap_names[match[sel]]);
             else set_system_keymap(keymap_names[match[sel]]);
@@ -4095,11 +4132,36 @@ static void paste_into(char *text, size_t size, size_t *pos, int primary)
     }
 }
 
-static int edit_line_key(int key, char *text, size_t size, size_t *pos)
+/* The keys that edit a line: Left/Right, Home/End (^E), Backspace, Delete
+ * (^D), ^U, ^K, ^W (a field takes it before the table's close-tab: the word
+ * before the cursor), Ctrl+V and Shift+Insert (the clipboard), the middle button
+ * (the primary selection), what keys type; Ctrl+A selects it all (*all: what
+ * is typed, pasted, Backspace or Delete then replace it). */
+static int edit_line_key(int key, int mods, char *text, size_t size, size_t *pos, int *all)
 {
     size_t len = strlen(text);
-    const char *typed;
+    const char *typed = keys_typed(key);
+    int act = key_action(key, mods);
+    const struct pointer_event *e = key == K_POINTER && pointer_last ? pointer_last() : NULL;
+    int middle = e && e->pressed && e->button == BTN_MIDDLE, byte = key >= 0x80 && key <= 0xff;
     if (*pos > len) *pos = len;
+    if (act == ACT_SELECT_ALL) {
+        *all = len > 0;
+        *pos = len;
+        return 1;
+    }
+    if (*all && (key == K_LEFT || key == K_RIGHT || key == K_BOL || key == K_EOL || key == 5)) {
+        *pos = key == K_LEFT || key == K_BOL ? 0 : len; /* the selection ends where it goes */
+        *all = 0;
+        return 1;
+    }
+    if (*all && (typed || byte || middle || act == ACT_PASTE || key == '\b' || key == 8 || key == K_DEL || key == 4 ||
+                 key == 21 || key == 11 || act == ACT_CLOSE_TAB)) {
+        text[0] = '\0'; /* the selection goes; what is typed or pasted takes its place */
+        len = *pos = 0;
+        *all = 0;
+        if (!typed && !byte && !middle && act != ACT_PASTE) return 1;
+    }
     if (key == K_LEFT) {
         if (*pos > 0) {
             (*pos)--;
@@ -4112,7 +4174,7 @@ static int edit_line_key(int key, char *text, size_t size, size_t *pos)
             while (*pos < len && ((unsigned char)text[*pos] & 0xC0) == 0x80) (*pos)++;
         }
         return 1;
-    } else if (key == K_BOL || key == 1) {
+    } else if (key == K_BOL) {
         *pos = 0;
         return 1;
     } else if (key == K_EOL || key == 5) {
@@ -4140,27 +4202,24 @@ static int edit_line_key(int key, char *text, size_t size, size_t *pos)
     } else if (key == 11) { /* Ctrl+K */
         text[*pos] = '\0';
         return 1;
-    } else if (key == 23) { /* Ctrl+W */
+    } else if (act == ACT_CLOSE_TAB) { /* Ctrl+W: the word before the cursor */
         size_t prev = *pos;
         while (prev > 0 && text[prev - 1] == ' ') prev--;
         while (prev > 0 && text[prev - 1] != ' ') prev--;
         memmove(text + prev, text + *pos, len - *pos + 1);
         *pos = prev;
         return 1;
-    } else if (key == 22 || (key == K_INS && keys_modifiers && (keys_modifiers() & KEYS_SHIFT))) {
+    } else if (act == ACT_PASTE) {
         paste_into(text, size, pos, 0);
         return 1;
-    } else if (key == K_POINTER && pointer_last) {
-        const struct pointer_event *e = pointer_last();
-        if (e && e->pressed && e->button == BTN_MIDDLE) {
-            paste_into(text, size, pos, 1);
-            return 1;
-        }
-    } else if (key >= 0x80 && key <= 0xff && len + 1 < size) {
+    } else if (middle) {
+        paste_into(text, size, pos, 1);
+        return 1;
+    } else if (byte && len + 1 < size) {
         memmove(text + *pos + 1, text + *pos, len - *pos + 1);
         text[(*pos)++] = (char)key;
         return 1;
-    } else if ((typed = keys_typed(key)) != NULL && len + strlen(typed) < size) {
+    } else if (typed && len + strlen(typed) < size) {
         size_t n = strlen(typed);
         memmove(text + *pos + n, text + *pos, len - *pos + 1);
         memcpy(text + *pos, typed, n);
@@ -4176,6 +4235,7 @@ static int prompt_as(const char *label, char *text, size_t size, int hidden)
 {
     char line[256], stars[65];
     size_t pos = strlen(text);
+    int all = 0;
     for (;;) {
         size_t len = strlen(text);
         if (pos > len) pos = len;
@@ -4197,15 +4257,21 @@ static int prompt_as(const char *label, char *text, size_t size, int hidden)
         snprintf(line, sizeof line, "%s%.*s_%.*s", label, before, typed + start,
                  after > 0 ? after : 0, typed + cur);
         screen_fill(0, screen_rows() - 2, screen_cols(), 1, BG);
-        screen_text(2, screen_rows() - 2, line, ACCENT, BG);
+        if (all) { /* Ctrl+A: all of it selected */
+            screen_text(2, screen_rows() - 2, label, ACCENT, BG);
+            snprintf(line, sizeof line, "%.*s", room, typed_len > room ? typed + typed_len - room : typed);
+            screen_text(2 + ui_cells(label), screen_rows() - 2, line, BG, ACCENT);
+        } else {
+            screen_text(2, screen_rows() - 2, line, ACCENT, BG);
+        }
         screen_flush();
-        int key = key_get();
-        if (key == 27 || close_read(key)) {
+        int key = key_get(), mods = mods_now(), act = key_action(key, mods);
+        if (act == ACT_CANCEL || close_read(key)) {
             return 0;
-        } else if (key == '\n') {
+        } else if (key == '\n' && act == ACT_NONE) {
             return 1;
         } else {
-            edit_line_key(key, text, size, &pos);
+            edit_line_key(key, mods, text, size, &pos, &all);
         }
     }
 }
@@ -4648,7 +4714,7 @@ static int arrangement_pointer(const struct pointer_event *event)
 
 static int arrangement_key(int key)
 {
-    if (key == 27 || key == 'q') {
+    if (key == 27) {
         if (arrangement_drag >= 0) {
             memcpy(monitors, arrangement_before_drag, sizeof monitors);
             arrangement_drag = -1;
@@ -4687,7 +4753,7 @@ static void arrange_screens(void)
     snprintf(notice, sizeof notice, "%s", _("Drag a screen to position it; p edits its exact X,Y coordinates."));
     arrangement_draw();
     for (;;) {
-        int key = key_poll_timeout(-1, 1000);
+        int key = key_poll_timeout(-1, 1000), mods = mods_now(), act = key_list_action(key, mods);
         if (close_read(key)) {
             if (arrangement_drag >= 0) arrangement_key(27); /* the drag undone, as Esc does */
             return;
@@ -4696,7 +4762,21 @@ static void arrange_screens(void)
             if (arrangement_pointer(pointer_last())) arrangement_draw();
             continue;
         }
+        if (act == ACT_HELP) {
+            help_screen();
+            if (close_due()) return;
+            arrangement_draw();
+            continue;
+        }
+        if (act == ACT_CANCEL) {
+            key = 27; /* Esc, q: a drag undone, else back */
+        } else if (act != ACT_NONE || (key >= ' ' && key < 0x7F && (mods & (KEYS_ALT | KEYS_META)))) {
+            continue; /* nothing of these here (Alt+p is not p) */
+        }
         if (!arrangement_key(key)) return;
+        if (close_due()) {
+            return; /* Ctrl+Q or the window's close in its X,Y question */
+        }
         if ((key == 0 || key == K_SHOWN) && arrangement_drag < 0) {
             char name[32] = "";
             if (arrangement_selected >= 0) snprintf(name, sizeof name, "%s", monitors[arrangement_selected].name);
@@ -5585,9 +5665,9 @@ static void pick_machine(void)
         if (!n) screen_text(2, 5, _("No matching machine profile."), DIM, BG);
         if (n) screen_text(2, screen_rows() - 3, machine_labels[match[sel]], FG, BG);
         screen_flush();
-        int key = key_get();
+        int key = key_get(), act = key_action(key, mods_now());
         if (close_read(key)) {
-            key = 27;
+            return;
         }
         if (key == K_POINTER) {
             const struct pointer_event *e = pointer_last();
@@ -5597,7 +5677,17 @@ static void pick_machine(void)
                 if (hit >= 0 && hit < n) { sel = hit; if (e->clicks == 2) key = '\n'; }
             }
         }
-        if (key == 27 || key == K_SHOWN) return;
+        if (act == ACT_CANCEL) { /* Esc: the filter goes first, then the list */
+            if (!filter[0]) return;
+            filter[0] = '\0';
+            sel = top = 0;
+            continue;
+        }
+        if (act == ACT_HELP) {
+            help_screen();
+            continue;
+        }
+        if (key == K_SHOWN) continue;
         if (key == '\n' && n) { choose_machine(match[sel]); return; }
         if (n && (key == K_LEFT || key == K_RIGHT || key == K_UP || key == K_DOWN)) sel = machine_next(sel, key);
         else if (n && (key == K_PGUP || key == K_PGDN)) {
@@ -7648,9 +7738,12 @@ int main(int argc, char **argv)
             return 0; /* the window's close, read in a question or list */
         }
         int key = key_poll_timeout(request_fd, pkg_job || repos_job || boot_job || tpm_job || security_job ? 500 : 2000);
+        int mods = mods_now();
         requests();
-        if (key != 0 && key != K_DEL) {
-            fp_delete_asked = face_delete_asked = tor_bridges_delete_asked = tpm_clear_asked = duress_clear_asked = 0; /* Delete twice in a row deletes them */
+        /* Delete twice in a row deletes them; home's key (process 1's) and the
+         * return from it change nothing. */
+        if (key != 0 && key != K_DEL && key != K_ACT_HOME && key != K_SHOWN) {
+            fp_delete_asked = face_delete_asked = tor_bridges_delete_asked = tpm_clear_asked = duress_clear_asked = 0;
             remove_asked = -1;
         }
         close_read(key);
@@ -7673,15 +7766,45 @@ int main(int argc, char **argv)
             }
         }
         if (close_due()) {
-            return 0; /* closed as q does: its jobs go on (locachy-jobs) */
+            return 0; /* Ctrl+Q, Alt+F4, the window's close: its jobs go on (locachy-jobs) */
         }
         if (key == K_POINTER) {
             key = settings_pointer();
+            mods = 0;
             if (key == 0) continue;
             if (key == -1) {
                 draw();
                 continue;
             }
+        }
+        if (key == K_ACT_HOME) {
+            continue; /* process 1's: an open setting stays open */
+        }
+        int act = key_list_action(key, mods);
+        if (act == ACT_HELP) {
+            help_screen();
+            draw();
+            continue;
+        } else if (act == ACT_FIND_NEXT || act == ACT_FIND_PREV) {
+            if (search[0]) { /* the page holds what was found: the next or the one before */
+                in_page = 1;
+                editing = 0;
+                page_move(act == ACT_FIND_NEXT ? 1 : -1);
+                row_hint();
+            }
+            draw();
+            continue;
+        } else if (act == ACT_CANCEL) {
+            key = 27; /* Esc, q (the lists') */
+        } else if (act == ACT_FIND) {
+            key = '/';
+        } else if (act == ACT_NEXT_FIELD || act == ACT_PREV_FIELD) {
+            key = '\t'; /* two places, the categories and a page: either way to the other */
+        } else if (act == ACT_DELETE || act == ACT_DELETE_PERMANENT) {
+            key = K_DEL;
+        } else if (act != ACT_NONE || (key >= ' ' && key < 0x7F && (mods & (KEYS_ALT | KEYS_META)))) {
+            draw();
+            continue; /* the table's other keys are nothing here; Alt+m is not m */
         }
         if (key == 0 || key == K_SHOWN) {
             load_monitors();
@@ -7695,8 +7818,6 @@ int main(int argc, char **argv)
                 selected = first_setting();
             }
             draw();
-        } else if (key == 'q' || (key == 27 && !in_page && !search[0])) {
-            return 0;
         } else if (key == '/') {
             find_setting();
             draw();
