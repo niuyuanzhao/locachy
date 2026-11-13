@@ -218,8 +218,10 @@ if ! ip netns exec "$NS" timeout 60 setpriv --reuid="$USER_" --regid="$USER_" --
 fi
 state "starting tor"
 # Not through a function: $! must be tor (ip netns exec and setpriv become it).
+# --pdeathsig: tor dies with this shell, even when it is SIGKILLed. It inherits
+# the lifecycle lock (fd 9), so no next generation starts while it lives.
 ip netns exec "$NS" setpriv --reuid="$USER_" --regid="$USER_" --init-groups --no-new-privs --inh-caps=-all \
-    --bounding-set=-all "$TOR" -f "$RUN/torrc" >/dev/null 2>&1 &
+    --bounding-set=-all --pdeathsig KILL "$TOR" -f "$RUN/torrc" >/dev/null 2>&1 &
 pid=$!
 stop() {
     kill "$pid" 2>/dev/null

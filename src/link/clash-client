@@ -305,7 +305,9 @@ if [ "$tor" = bridges ] && [ "$mode" = tun ]; then
 fi
 # Not through in_ns: in the background, a function is a shell of its own, and
 # $! would be that shell, not mihomo (ip netns exec and setpriv become mihomo).
-ip netns exec "$NS" setpriv --regid="$CLASH_GID" --clear-groups --no-new-privs \
+# --pdeathsig: mihomo dies with this shell, even when it is SIGKILLed. It
+# inherits the lifecycle lock (fd 9), so no next generation starts while it lives.
+ip netns exec "$NS" setpriv --regid="$CLASH_GID" --clear-groups --no-new-privs --pdeathsig KILL \
     --bounding-set=-mknod,-sys_rawio,-sys_module,-sys_boot -- \
     "$MIHOMO" -d "$STATE" -f "$STATE/config.yaml" &
 pid=$!

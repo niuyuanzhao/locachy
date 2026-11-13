@@ -1,5 +1,10 @@
 /* Process 1's rc.conf reload (SIGHUP): additions, removals and restarts, no
- * fixed service count, and a failed read or allocation leaves it unchanged. */
+ * fixed service count, and a failed read or allocation leaves it unchanged.
+ * Last, a service taken out and written back at once while its TERM cleanup
+ * runs (test-init-services-svc.sh, ordered by its events on a pipe and a FIFO
+ * gate): the new instance starts only once the old one's tree has ended, its
+ * own cleanup and that of a child of its session alike.
+ *   test-init-services NEW_DIRECTORY */
 #include <stdlib.h>
 
 static int allocations_left = -1;
@@ -52,7 +57,7 @@ static struct service *find(const char *command)
 static void start_waiting(void)
 {
     for (size_t i = 0; i < nservices; i++) {
-        if (services[i].pid == 0 && services[i].restart_at <= now_ms()) {
+        if (service_due(&services[i], now_ms())) {
             service_start(&services[i]);
         }
     }
@@ -63,7 +68,142 @@ static int alive(pid_t pid)
     return waitpid(pid, NULL, WNOHANG) == 0;
 }
 
-int main(void)
+/* The services' events (test-init-services-svc.sh writes "EVENT TAG PID" to
+ * $SVC_EVFD), in the order they came. */
+static char events[8192];
+static int event_fd = -1;
+
+static const char *event_line(const char *head)
+{
+    for (const char *line = events; *line;) {
+        if (!strncmp(line, head, strlen(head))) return line;
+        const char *next = strchr(line, '\n');
+        if (!next) break;
+        line = next + 1;
+    }
+    return NULL;
+}
+
+static pid_t event_pid(const char *head)
+{
+    const char *line = event_line(head);
+    return line ? (pid_t)atoi(line + strlen(head)) : 0;
+}
+
+/* What the services said within 20 ms, into events. */
+static void collect(void)
+{
+    struct pollfd p = { .fd = event_fd, .events = POLLIN };
+    if (poll(&p, 1, 20) == 1) {
+        size_t n = strlen(events);
+        ssize_t got = read(event_fd, events + n, sizeof events - n - 1);
+        if (got > 0) events[n + (size_t)got] = '\0';
+    }
+}
+
+/* Up to ms for an event line that starts with head. */
+static pid_t wait_event(const char *head, int ms)
+{
+    for (int left = ms; !event_line(head) && left > 0; left -= 20) {
+        collect();
+    }
+    return event_pid(head);
+}
+
+static long event_at(const char *head)
+{
+    const char *line = event_line(head);
+    return line ? (long)(line - events) : -1;
+}
+
+static void release(const char *dir, const char *tag)
+{
+    char path[1024];
+    snprintf(path, sizeof path, "%s/gate-%s", dir, tag);
+    int fd = open(path, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    unlink(path);
+    assert(fd >= 0 && write(fd, "\n", 1) == 1);
+    close(fd);
+}
+
+/* Reap until service command has ended (pid 0), up to 3 s. */
+static int ended_service(const char *command)
+{
+    for (int i = 0; i < 300 && find(command) && find(command)->pid != 0; i++) {
+        usleep(10000);
+        reap();
+    }
+    return !find(command) || find(command)->pid == 0;
+}
+
+/* A service stopped (its line taken out) and wanted again at once: the new
+ * instance starts only after the old one's cleanup has ended. tag one: the
+ * cleanup is the service's own (TERM trapped); tag tree: its main process
+ * ends at once, a child of its session still cleans up. */
+static int restart_waits(const char *dir, const char *script, const char *tag)
+{
+    char command[256], gate[1024], head[64];
+    snprintf(command, sizeof command, "exec sh %s %s %s", script, dir, tag);
+    snprintf(gate, sizeof gate, "%s/gate-%s", dir, tag);
+    assert(mkfifo(gate, 0600) == 0);
+    const char *with[] = { "service_test", command, NULL }, *without[] = { NULL };
+    conf = with;
+    read_settings();
+    start_waiting();
+    snprintf(head, sizeof head, "start %s ", tag);
+    pid_t old = wait_event(head, 3000);
+    assert(old > 0 && old == find(command)->pid);
+    snprintf(head, sizeof head, "child-ready %s ", tag);
+    assert(strcmp(tag, "tree") || wait_event(head, 3000)); /* its child's TERM trap is set */
+    conf = without;
+    read_settings(); /* SIGTERM to its session */
+    snprintf(head, sizeof head, "%s %s ", strcmp(tag, "tree") ? "term" : "child-term", tag);
+    assert(wait_event(head, 3000));
+    conf = with;
+    for (int i = 0; i < 20; i++) { /* the main loop goes round while the cleanup runs */
+        usleep(10000);
+        reap();
+        read_settings();
+        start_waiting();
+    }
+    snprintf(head, sizeof head, "start %s ", tag);
+    pid_t during = 0;
+    for (int i = 0; i < 5; i++) {
+        collect(); /* what came meanwhile */
+    }
+    for (const char *line = events; (line = strstr(line, head)) != NULL; line++) {
+        if ((pid_t)atoi(line + strlen(head)) != old) during = (pid_t)atoi(line + strlen(head));
+    }
+    release(dir, tag);
+    snprintf(head, sizeof head, "%s %s ", strcmp(tag, "tree") ? "end" : "child-end", tag);
+    long cleaned = wait_event(head, 3000) ? event_at(head) : -1;
+    pid_t now = 0;
+    for (int i = 0; i < 300 && !now; i++) { /* the main loop: reap, then start what is due */
+        usleep(10000);
+        reap();
+        struct service *s = find(command);
+        if (s && s->pid == 0 && s->restart_at > now_ms()) {
+            s->restart_at = 0; /* its 5 s are not this test's */
+        }
+        start_waiting();
+        if (s && s->pid != 0 && s->pid != old) {
+            now = s->pid;
+        }
+    }
+    char started[64];
+    snprintf(started, sizeof started, "start %s %d", tag, (int)now);
+    wait_event(started, 3000);
+    int ok = !during && cleaned >= 0 && now > 0 && now != old && event_at(started) > cleaned;
+    if (!ok) printf("  %s: a new instance during the cleanup: %d; cleanup ended: %s; then: %d\n%s", tag,
+                    (int)during, cleaned >= 0 ? "yes" : "no", (int)now, events);
+    conf = without;
+    read_settings();
+    ended_service(command);
+    reap();
+    return ok;
+}
+
+int main(int argc, char **argv)
 {
     /* As process 1: these blocked, read from a signalfd; services unblock them. */
     sigemptyset(&handled);
@@ -221,6 +361,30 @@ int main(void)
     }
     assert(kill(orphan, 0) != 0 && errno == ESRCH); /* ended and reaped: no zombie left */
     puts("PASS a reparented child that ends is reaped by process 1 (no zombie)");
+
+    /* Stopped and wanted again at once, with real cleanups: the new instance
+     * never overlaps the old one's. */
+    assert(argc == 2 && mkdir(argv[1], 0700) == 0);
+    char script[1024];
+    snprintf(script, sizeof script, "%s", __FILE__);
+    char *slash = strrchr(script, '/');
+    assert(slash);
+    snprintf(slash + 1, sizeof script - (size_t)(slash + 1 - script), "test-init-services-svc.sh");
+    int ev[2];
+    assert(pipe2(ev, O_CLOEXEC) == 0 && fcntl(ev[1], F_SETFD, 0) == 0);
+    event_fd = ev[0];
+    char number[16];
+    snprintf(number, sizeof number, "%d", ev[1]);
+    setenv("SVC_EVFD", number, 1);
+    int failed = 0, ok = restart_waits(argv[1], script, "one");
+    printf("%s a service taken out while its TERM cleanup runs, written back at once: no second instance until "
+           "that cleanup has ended, then a new one\n", ok ? "PASS" : "FAIL");
+    failed |= !ok;
+    ok = restart_waits(argv[1], script, "tree");
+    printf("%s a service whose main process ends at once while a child of its session still cleans up, written "
+           "back at once: the new instance waits for that cleanup too\n", ok ? "PASS" : "FAIL");
+    failed |= !ok;
+    if (failed) return 1;
     puts("init: service reload, growth, restart and failed reload passed.");
     return 0;
 }

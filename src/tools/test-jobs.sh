@@ -8,7 +8,9 @@
 # order), the peers, a job
 # outliving the program that asked, cancelling (queued; running only when
 # confirmed, SIGINT then kill), the log and state files, the service ended or
-# killed and started again. Once with the service as built, once with
+# killed and started again, a drain (acknowledged only when every accepted job
+# has ended, a queued one runs first; it outlives a killed service). Once with
+# the service as built, once with
 # AddressSanitizer and UndefinedBehaviorSanitizer.
 set -u
 [ "$#" = 1 ] || { echo "usage: test-jobs.sh NEW_OUTPUT" >&2; exit 2; }
@@ -428,6 +430,60 @@ touch "$t/release-$s2"
 wait "$dp"
 check "the drain is acknowledged with its epoch" sh -c "grep -qx drained \"$t/drain.out\" && grep -qx 10 \"$t/drain.out\""
 check "the cancelled queued job never started" test "$(grep -c "^start $q2 " "$t/calls")" = 0
+# The drain holds while the service ends and starts again. A service started again
+# has no drain (its drain file removed); a drain it takes is acknowledged only
+# when every job it accepted has ended, a queued one included: it runs first.
+kill -TERM "$svc"; wait "$svc"; rm -f "$t/jobs/drain"
+check "the service starts again with no drain held" start_service
+r1=$(id_of "$(J submit pkg-install slow)")
+started "$r1"
+r2=$(id_of "$(J submit pkg-install slow)")
+check "a job submitted behind the running one is queued" test "$(field "$r2" 3)" = queued
+"$run/test-jobs" raw drain 20 >"$t/drain2.out" 2>&1 &
+dp2=$!
+sleep 0.3
+check "a drain takes no new job while accepted ones run" refuse pkg-sync
+touch "$t/release-$r1"
+check "the queued job runs before the drain is acknowledged" started "$r2"
+sleep 0.3
+check "the drain is not acknowledged while that queued job runs" test ! -s "$t/drain2.out"
+touch "$t/release-$r2"
+wait "$dp2"
+check "the drain is acknowledged once it ended, with its epoch" \
+    sh -c "grep -qx drained \"$t/drain2.out\" && grep -qx 20 \"$t/drain2.out\""
+check "the job it waited for is done" wait_state "$r2" done
+n0=$(grep -c "^start" "$t/calls")
+check "after the acknowledgement a new job is refused" refuse pkg-sync
+sleep 0.3
+check "after the acknowledgement no job starts" test "$(grep -c "^start" "$t/calls")" = "$n0"
+# A drain outlives its service: the service is killed midway and started again.
+# The job it had goes on, the queued one runs once that has ended, the drain is
+# not acknowledged before then, an older epoch is refused and new jobs too.
+kill -TERM "$svc"; wait "$svc"; rm -f "$t/jobs/drain"
+check "the service starts again for a drain that outlives it" start_service
+d1=$(id_of "$(J submit pkg-install slow)")
+started "$d1"
+d2=$(id_of "$(J submit pkg-install slow)")
+"$run/test-jobs" raw drain 30 >"$t/drain3.out" 2>&1 &
+dp3=$!
+sleep 0.3
+kill -KILL "$svc"; wait "$svc" 2>/dev/null
+wait "$dp3" 2>/dev/null
+rm -f "$t/jobs/control" # a killed service leaves its socket: the next one binds it again
+check "a service killed mid-drain never acknowledged it" sh -c "! grep -qx drained \"$t/drain3.out\""
+check "the service starts again" start_service
+check "a drain with an older epoch is refused" sh -c "\"$run/test-jobs\" raw drain 5 | grep -q \"drain refused\""
+check "a new job is refused while the drain holds" refuse pkg-sync
+check "the job it had goes on, found by its lock" test "$(field "$d1" 3)" = running
+"$run/test-jobs" raw drain 30 >"$t/drain4.out" 2>&1 &
+dp4=$!
+touch "$t/release-$d1"
+check "the queued job it had runs next" started "$d2"
+sleep 0.3
+check "the drain is not acknowledged while that job runs" test ! -s "$t/drain4.out"
+touch "$t/release-$d2"
+wait "$dp4"
+check "the drain is acknowledged once every accepted job ended" grep -qx drained "$t/drain4.out"
 kill -TERM "$svc"; wait "$svc"
 sed "s/^/service: /" "$t/service.log"
 sed "s/^/calls: /" "$t/calls"

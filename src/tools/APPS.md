@@ -69,6 +69,19 @@ stays as it is:
     `9050` across mode switches. This mode has no host Tor-only firewall.
     The exact old recipe's fixed system-Tor environment prefix is recognized
     in memory, so existing configurations work without rewriting user edits.
+  - Full-system Tor's and Clash's tables change only through
+    `link/locachy_network.py` (settings, network-client, tor-client and
+    clash-client; tor-enforce `load|lan|remove` reconcile through it). Each
+    change blocks everything but loopback and DHCP (table
+    `locachy-transition`), replaces both layers' tables in one nft batch,
+    commits rc.conf, and only then lifts the block. A failure keeps the block
+    and `status` says `failed`: an uncommitted request stays blocked until a
+    later `set` succeeds, a committed one is finished by `reconcile`. Tor
+    through mihomo with Clash off is refused (exit 2), and so is turning a
+    layer on when its program (`mihomo`, `tor`, or `lyrebird` for bridges) is
+    not installed. tor-client and
+    clash-client hold a lifecycle lock that tor and mihomo inherit and die
+    with (pdeathsig), so a killed generation never runs beside the next one.
 
 ## On the installed system
 
@@ -212,6 +225,35 @@ signatures, the merge rules, the rebuild row, an apps-only Apply that builds
 nothing, the bootstrap, and search. `test-install.py` and
 `test-installer-profile.py` cover the installer, the live entry and the
 medium's catalog, including format 2 and host package/extras selection.
+
+`tools/test-network-policy.sh`, `test-tor.sh` and `test-clash.sh` (in
+`test-interaction-regressions.sh`) run as any user, in user and network
+namespaces, with nothing leaving them. Subordinate ids (`/etc/subuid`,
+`/etc/subgid`) add the nobody, tor-user and group checks. They count the
+packets that leave under every network policy: in each transition, with a
+failure injected at each step, through repeated toggles and when tor,
+mihomo or their services are killed. `test-tor.sh` also checks that
+`locachy-app` refuses a `tor="1"` container while full-system Tor is off or
+its firewall is not loaded. The parts that need the tor program or a
+delegated cgroup are skipped without them.
+
+`tools/test-apps-lifecycle.sh` (in `test-interaction-regressions.sh`) drives
+process 1's application operations (`init/apps.c`) with real processes: the
+launcher, its helpers and the application are forked by the code under test,
+and `locachy-app` is a stand-in (`tools/test-apps-lifecycle-tool.sh`) that puts
+its processes in fixture cgroups and reports each step on a pipe, waiting at
+FIFO gates the test opens, so no step is timed by a sleep. As built and with
+AddressSanitizer and UBSan it checks: a stop while the launcher still waits
+outside the application's cgroup kills that launcher with its process group,
+the application ends stopped, and the launcher's late exit changes nothing;
+open, show, resume and start are refused while a start or a stop is pending,
+never a second launcher; a stale freeze or open helper that ends after a stop
+overwrites nothing; a stop of a running application whose freeze or open helper
+is under way stops it; a start after a stop, or after an application ended
+while its launcher still cleans up, waits for that cleanup; a start whose
+launcher timed out while still outside the cgroup is refused until that
+launcher has ended, and a stop kills it. The display is fixture files and the
+clock is offset for the timeouts.
 
 Real-flow application acceptance additionally starts at the store UI, then
 opens from home as the first app after boot and in a second display session.

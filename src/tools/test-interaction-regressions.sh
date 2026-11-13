@@ -108,6 +108,8 @@ bash "$src/tools/test-monitor-profiles.sh" "$out/monitor-profiles"
 sh "$src/tools/test-files.sh" "$out/files"
 sh "$src/tools/test-fonts.sh" "$out/fonts" # fontconfig's fonts in fixture configurations
 sh "$src/tools/test-app-init.sh" "$out/app-init"
+# Process 1's application start, stop and cleanup generations: real processes and fixture cgroups.
+sh "$src/tools/test-apps-lifecycle.sh" "$out/apps-lifecycle"
 sh "$src/tools/test-seat-release.sh" "$out/seat-release"
 bash "$src/tools/test-window-routing.sh" "$out/window-routing"
 sh "$src/tools/test-container-documents.sh" "$out/container-documents"
@@ -119,6 +121,12 @@ bash "$src/tools/test-camera-nodes.sh" "$out/camera-nodes"
 bash "$src/tools/test-touchpad-clicks.sh" "$out/touchpad-clicks"
 bash "$src/tools/test-app-ready.sh" "$out/app-ready"
 bash "$src/tools/test-network-handoff.sh" "$out/network-handoff" # unprivileged user and network namespaces
+# The network layers' fail-closed transitions, Tor's firewall and clash-client: packets counted in user and
+# network namespaces (subordinate ids give nobody, tor and mihomo's group); mihomo where installed.
+bash "$src/tools/test-network-policy.sh" "$out/network-policy"
+mihomo=$(command -v mihomo || true)
+bash "$src/tools/test-tor.sh" "$mihomo" "$out/tor"
+[ -z "$mihomo" ] || bash "$src/tools/test-clash.sh" "$mihomo" "$out/clash"
 bash "$src/tools/test-settings-tor.sh" "$out/settings-tor"
 # The security policy job, shared configuration transactions and generated app files (no scratch directory);
 # the external pacman guard and the update journal; the archive worker against its own build.

@@ -1,7 +1,12 @@
 #!/bin/bash
-# test-clash.sh MIHOMO: clash-client's configuration and its routes, as root
-# on a built system, with the mihomo program MIHOMO (it need not be
-# installed). Offline, apart from what mihomo itself fetches when it checks.
+# test-clash.sh MIHOMO [DIR]: clash-client's configuration and its routes,
+# with the mihomo program MIHOMO (it need not be installed), in network,
+# mount and PID namespaces of the test's own with a private /run (as any
+# user: a user namespace too, with the subordinate ids of /etc/subuid and
+# /etc/subgid). Offline: the test's network namespace has no way out. The
+# network policy (locachy_network.py, which clash-client claims, releases
+# and reconciles with) keeps its rc.conf and state in DIR, never
+# /etc/locachy or /var/lib/locachy.
 #   1. a subscription that gives a Clash configuration: its proxies, groups
 #      and rules are kept, LOCachy's keys take the place of its own (ports,
 #      controller, secret, dns, tun), FIRST_RULES go before its rules;
@@ -12,14 +17,34 @@
 #      takes them away when ended; those of an mihomo that was killed go when
 #      it starts again
 set -u
-mihomo=${1:?usage: test-clash.sh MIHOMO}
+mihomo=${1:?usage: test-clash.sh MIHOMO [DIR]}
 src=$(cd "$(dirname "$0")/.." && pwd)
-out=/var/tmp/locachy-clash-test
+out=${2:-/var/tmp/locachy-clash-test}
 ns=locachy-clash-test
+if [ "${LOCACHY_CLASH_TEST:-}" != inner ]; then
+    mkdir -p "$out"
+    out=$(cd "$out" && pwd)
+    user=()
+    if [ "$(id -u)" != 0 ]; then
+        sub() { awk -F: -v n="$(id -un)" -v u="$(id -u)" '($1 == n || $1 == u) && $3 >= 65535 { print $2; exit }' "$1" 2>/dev/null; }
+        subuid=$(sub /etc/subuid) subgid=$(sub /etc/subgid)
+        [ -n "$subuid" ] && [ -n "$subgid" ] || { echo "FAIL subordinate ids for $(id -un) (/etc/subuid, /etc/subgid)"; exit 1; }
+        user=(--map-users="1:$subuid:65535" --map-groups="1:$subgid:65535" --map-root-user)
+    fi
+    LOCACHY_CLASH_TEST=inner exec timeout 600 unshare "${user[@]}" --net --mount --pid --fork --mount-proc \
+        bash "$0" "$mihomo" "$out"
+fi
 fail=0
 check() { if eval "$2"; then echo "PASS $1"; else echo "FAIL $1"; fail=1; fi; }
-rm -rf "$out"
-mkdir -p "$out/state"
+find "$out" -mindepth 1 -delete
+mkdir -p "$out/state" "$out/network"
+mount -t tmpfs tmpfs /run
+mkdir -p /run/netns
+# Clash on, TUN (rc.conf), the policy's files in DIR.
+printf 'service_clash="/usr/local/lib/locachy/clash-client"\nclash_mode="tun"\n' >"$out/rc.conf"
+export LOCACHY_CLASH_RC=$out/rc.conf LOCACHY_NETWORK_RC=$out/rc.conf LOCACHY_NETWORK_STATE=$out/network \
+    LOCACHY_NETWORK_NETNS=$ns
+unset LOCACHY_NETWORK_HELPER LOCACHY_CLASH_CLIENT LOCACHY_TOR_ENFORCE
 cc() { LOCACHY_CLASH_STATE=$out/state LOCACHY_CLASH_NETNS=$ns LOCACHY_MIHOMO=$mihomo bash "$src/link/clash-client" "$@"; }
 # The service, in the background: exec, so that $! is clash-client itself,
 # not a shell around it (which a signal would end, leaving it running).
@@ -102,7 +127,7 @@ svc=$!
 for i in $(seq 60); do up && [ "$(rules)" -gt 0 ] && break; sleep 0.5; done
 kill -KILL $svc
 pkill -KILL -f "$mihomo -d $out/state"
-sleep 1
+for i in $(seq 50); do up || break; sleep 0.1; done
 check "killed: its interface and rules are left ($(rules) rules)" "[ \$(rules) -gt 0 ]"
 service >"$out/service.log" 2>&1 &
 svc=$!
@@ -113,11 +138,11 @@ check "started again and ended: nothing left" "! up && [ \$(rules) = 0 ]"
 
 # 4. Fail-closed TUN firewall when service_clash is enabled in rc.conf.
 printf 'service_clash="/usr/local/lib/locachy/clash-client"\nclash_mode="tun"\n' >"$out/rc.conf"
-LOCACHY_CLASH_RC=$out/rc.conf cc --enforce
+cc --enforce
 check "TUN firewall loaded: unprivileged direct TCP is refused while mihomo is down" \
     "ip netns exec $ns nft list table inet locachy-clash >/dev/null 2>&1 && ! ip netns exec $ns setpriv --reuid=1000 --regid=1000 --clear-groups -- python3 -c 'import socket; s=socket.socket(); s.settimeout(1); s.connect((\"10.99.0.7\", 80))' 2>/dev/null"
 : >"$out/rc.conf"
-LOCACHY_CLASH_State=$out/state LOCACHY_CLASH_RC=$out/rc.conf cc --unenforce
+cc --unenforce
 check "Clash off: TUN firewall removed" "! ip netns exec $ns nft list table inet locachy-clash >/dev/null 2>&1"
 ip netns del "$ns"
 

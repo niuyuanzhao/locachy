@@ -50,6 +50,12 @@ tools/check.py  用某个系统自己的辅助模块检查本仓库：
     `TOR_SOCKS_HOST=127.0.0.1 TOR_SOCKS_PORT=9150`（不设 `TOR_PROVIDER=none`），
     让浏览器启动自带的用户态守护进程，切换模式时不与系统 `9050` 端口冲突；这种模式没有宿主仅限 Tor 的防火墙。
     旧预设的固定系统 Tor 环境变量前缀会在内存中精确识别，兼容已有配置，不重写用户编辑。
+  - 全局 Tor 与 Clash 的规则表只经 `link/locachy_network.py` 变更（settings、network-client、
+    tor-client 和 clash-client；tor-enforce 的 `load|lan|remove` 也经它对账）。每次变更先封锁除回环和
+    DHCP 外的一切（`locachy-transition` 表），在同一个 nft 批次里替换两层的表，提交 rc.conf，之后才解除封锁。
+    失败时封锁保留，`status` 显示 `failed`：未提交的请求保持封锁，直到之后的 `set` 成功；已提交的请求由 `reconcile` 完成。
+    Clash 关闭时经 mihomo 的 Tor 被拒绝（退出码 2）；开启未安装对应程序（`mihomo`、`tor` 或网桥所需的 `lyrebird`）的层同样被拒绝。tor-client 与 clash-client 持有生命周期锁，tor 与 mihomo 继承它并随之退出（pdeathsig），
+    被杀的一代不会与下一代同时运行。
 
 ## 已安装系统上
 
@@ -143,6 +149,20 @@ source-unbuilt 标记。系统更新从不删除或覆盖该目录。
 覆盖每条校验规则、保留旧目录的不兼容格式和获取失败、中断的切换、Check 之后远端前进、签名要求、合并规则、
 重建行、什么都不构建的仅应用预设 Apply、引导和搜索。`test-install.py` 与 `test-installer-profile.py`
 覆盖安装器、live 入口和介质自带的目录，包括格式 2、宿主软件包及 extras 的选择。
+
+`tools/test-network-policy.sh`、`test-tor.sh` 和 `test-clash.sh`（已加入 `test-interaction-regressions.sh`）
+以任意用户运行，在用户与网络命名空间里进行，不向外发出任何数据包。从属 ID（`/etc/subuid`、`/etc/subgid`）
+会加入 nobody、tor 用户和组的检查。它们统计每种网络策略下离开的数据包：每次切换中、在每一步注入失败时、
+反复切换时，以及 tor、mihomo 或其服务被杀时。`test-tor.sh` 还检查全局 Tor 关闭或其防火墙未加载时，
+`locachy-app` 拒绝 `tor="1"` 容器。需要 tor 程序或委派 cgroup 的部分在缺少时跳过。
+
+`tools/test-apps-lifecycle.sh`（在 `test-interaction-regressions.sh` 中）以真实进程驱动进程 1 的应用操作（`init/apps.c`）：
+启动器、其辅助进程和应用都由被测代码派生；`locachy-app` 由替身（`tools/test-apps-lifecycle-tool.sh`）代替，它把自己的进程放进夹具
+cgroup，并在管道上报告每一步，在测试打开的 FIFO 门处等待，因此没有任何步骤靠 sleep 计时。分别以普通方式和 AddressSanitizer/UBSan
+构建运行，检查：启动器仍在应用 cgroup 之外等待时停止它，启动器连同其进程组一并被杀死，应用以停止结束，启动器之后的退出不改变任何状态；
+启动或停止未完成时 open、show、resume 和 start 被拒绝，绝不出现第二个启动器；停止之后才结束的旧 freeze 或 open 辅助进程不覆盖任何状态；
+停止一个正在 freeze 或 open 的运行中应用，会让它停止；停止之后的 start，或应用已结束而其启动器仍在清理时的 start，都等待该清理结束；
+超时但启动器仍在 cgroup 之外的 start，在该启动器结束之前被拒绝，stop 则杀死它。显示为夹具文件，时钟为超时计算加了偏移。
 
 应用的真实流程验收还必须从商店 UI 开始，再作为重启后的第一个应用从 home 打开，并验证第二次显示会话。
 有窗口、网络路径或进程检查不等于账号登录或登录后的 Codex 终端执行已通过；后两项须单独报告。

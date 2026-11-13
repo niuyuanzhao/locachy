@@ -140,8 +140,10 @@ struct task {
 struct service {
     char command[256];
     pid_t pid;              /* 0: not running */
+    pid_t tree;             /* its session and group (its pid at its start): what it runs; 0: never ran */
     double restart_at;      /* when to start it again, ms (now_ms) */
-    int retiring;           /* taken out of rc.conf while it ran: never started again */
+    int retiring;           /* taken out of rc.conf while its tree runs: never started again */
+    int wanted;             /* retiring, and wanted again: started once its tree has ended */
 };
 
 static char *home_argv[] = { "/usr/local/bin/home", NULL };
@@ -2864,6 +2866,20 @@ static void apply_hostname(void)
     }
 }
 
+/* Whether a service's process tree still has a process (a zombie included):
+ * the group its session is, which kill(-tree) reaches. */
+static int tree_alive(const struct service *s)
+{
+    return s->tree > 0 && kill(-s->tree, 0) == 0;
+}
+
+/* Whether a service is to be started now: not running, not taken out of
+ * rc.conf (retiring), and its restart time has come. */
+static int service_due(const struct service *s, double now)
+{
+    return s->pid == 0 && !s->retiring && s->restart_at <= now;
+}
+
 /* Read a new list before changing anything: a failed allocation must not
  * stop the services already running. Unchanged commands keep their pid and
  * restart time; removed ones are ended, new ones start in the main loop. */
@@ -2883,7 +2899,14 @@ static void read_settings(void)
         for (k = 0; k < next.count; k++) {
             if (strcmp(next.services[k].command, services[i].command) == 0) {
                 next.services[k] = services[i];
-                next.services[k].retiring = 0; /* wanted again: it is this service, once it has ended */
+                /* Wanted again: it is this service, once it has ended. While
+                 * its tree still runs after its main process ended (retiring,
+                 * pid 0), it starts once that tree has ended (drop_retired). */
+                if (services[i].retiring && services[i].pid == 0 && tree_alive(&services[i])) {
+                    next.services[k].wanted = 1;
+                } else {
+                    next.services[k].retiring = 0;
+                }
                 break;
             }
         }
@@ -2891,18 +2914,23 @@ static void read_settings(void)
             continue;
         }
         say("init: service no longer in %s: %s", RC_CONF, services[i].command);
-        if (services[i].pid > 0) {
+        if (services[i].pid > 0 || tree_alive(&services[i])) {
             /* Its session, and itself: just started, it may not have one yet.
-             * Kept until it has ended (drop_retired): a line written again
-             * meanwhile takes it over, and starts once it has ended. */
-            kill(-services[i].pid, SIGTERM);
-            kill(services[i].pid, SIGTERM);
+             * Kept until its tree has ended (drop_retired): a line written
+             * again meanwhile takes it over, and starts once it has ended. */
+            if (services[i].pid > 0) {
+                kill(-services[i].pid, SIGTERM);
+                kill(services[i].pid, SIGTERM);
+            } else {
+                kill(-services[i].tree, SIGTERM); /* its main process ended; what it started did not */
+            }
             struct service *p = next.count >= SIZE_MAX / sizeof *p ? NULL :
                                 realloc(next.services, (next.count + 1) * sizeof *p);
             if (p != NULL) {
                 next.services = p;
                 next.services[next.count] = services[i];
                 next.services[next.count].retiring = 1;
+                next.services[next.count].wanted = 0;
                 next.count++;
             } else {
                 say("init: cannot keep %s until it ends", services[i].command);
@@ -2939,19 +2967,34 @@ static void service_start(struct service *s)
         _exit(127);
     }
     s->pid = pid < 0 ? 0 : pid;
+    if (pid > 0) {
+        s->tree = pid; /* setsid above: its session and group */
+    }
     s->restart_at = pid < 0 ? now_ms() + 5000 : 0;
     say("init: service started (pid %d): %s", (int)pid, s->command);
 }
 
-/* Services taken out of rc.conf while they ran, and now ended: forgotten. */
+/* Services taken out of rc.conf while they ran are forgotten once their tree
+ * has ended: the main process and what its session still ran (tree_alive).
+ * A line written again meanwhile (wanted) starts the service then instead. A
+ * tree that has ended loses its record: its pid may be another's by then. */
 static void drop_retired(void)
 {
     size_t n = 0;
     for (size_t i = 0; i < nservices; i++) {
-        if (services[i].retiring && services[i].pid == 0) {
-            continue;
+        struct service *s = &services[i];
+        if (s->pid == 0 && s->tree > 0 && !tree_alive(s)) {
+            s->tree = 0;
         }
-        services[n++] = services[i];
+        if (s->retiring && s->pid == 0 && s->tree == 0) {
+            if (!s->wanted) {
+                continue;
+            }
+            s->retiring = 0;
+            s->wanted = 0;
+            s->restart_at = 0;
+        }
+        services[n++] = *s;
     }
     nservices = n;
 }
@@ -4297,7 +4340,7 @@ int main(void)
          * shutdown's look. */
         double next = -1;
         for (size_t i = 0; i < nservices; i++) {
-            if (services[i].pid == 0 && (next < 0 || services[i].restart_at < next)) {
+            if (services[i].pid == 0 && !services[i].retiring && (next < 0 || services[i].restart_at < next)) {
                 next = services[i].restart_at;
             }
         }
@@ -4348,7 +4391,7 @@ int main(void)
             }
         }
         for (size_t i = 0; i < nservices; i++) {
-            if (services[i].pid == 0 && services[i].restart_at <= now_ms()) {
+            if (service_due(&services[i], now_ms())) {
                 service_start(&services[i]);
             }
         }

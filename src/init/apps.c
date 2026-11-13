@@ -501,6 +501,14 @@ static void failure(struct app *app, const char *message)
 static pid_t launch(struct app *app, const char *action, int in_app);
 static pid_t native_job(struct app *app, const char *action);
 static void native_kill(const struct app *app);
+/* A launcher that lives outside app_NAME: one still waiting to enter it (for
+ * the app's lock behind a build, also after its start timed out), or one
+ * cleaning up after its application ended. It is an operation of the app
+ * until it is reaped: nothing else starts meanwhile, and a stop ends it. */
+static int launcher_outside(const struct app *app)
+{
+    return app->launcher > 0 && !populated(app);
+}
 /* A container stopped while another of its operations is pending: that
  * operation's helper (never inside app_NAME) ends now, and so does a launcher
  * that has put nothing in app_NAME yet (one waiting for the app's lock behind
@@ -714,7 +722,9 @@ void apps_tick(void)
     for (int i = 0; i < count; i++) {
         struct app *app = &apps[i];
         if (app->cancelling) {
-            if (!app->launcher && !app->job) {
+            /* What was killed has been reaped; a launcher whose application
+             * runs in app_NAME is the stop helper's to end. */
+            if (!app->job && !launcher_outside(app)) {
                 app->cancelling = 0;
                 pid_t pid = app->native ? native_job(app, "stop") : launch(app, "stop", 0);
                 if (pid < 0) failure(app, "cannot finish cancelling application start");
@@ -1297,7 +1307,8 @@ int apps_action(const char *action, const char *name, char *why, size_t size)
         snprintf(why, size, "unknown container action");
         return -1;
     }
-    if (strcmp(action, "stop") == 0 && (app->want_start || app->job || app->pending[0])) {
+    int outside = launcher_outside(app);
+    if (strcmp(action, "stop") == 0 && (app->want_start || app->job || app->pending[0] || outside)) {
         if (strcmp(app->pending, "stopping") == 0) {
             snprintf(why, size, "stop already in progress");
             return 0;
@@ -1306,7 +1317,7 @@ int apps_action(const char *action, const char *name, char *why, size_t size)
             snprintf(why, size, "stop accepted");
             return 0;
         }
-    } else if (app->want_start || app->job || app->pending[0]) {
+    } else if (app->want_start || app->job || app->pending[0] || outside) {
         snprintf(why, size, "container operation still in progress");
         return -1;
     }
@@ -1392,7 +1403,7 @@ int apps_open_mode(const char *name, const char *target, int own_tor, char *why,
         snprintf(why, size, "cannot open that");
         return -1;
     }
-    if (app->want_start || app->job || app->pending[0]) {
+    if (app->want_start || app->job || app->pending[0] || launcher_outside(app)) {
         snprintf(why, size, "container operation still in progress");
         return -1;
     }

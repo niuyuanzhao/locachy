@@ -105,7 +105,7 @@ SIGTERM（进程 1 结束该服务、其行从 rc.conf 删除时）只结束服�
 
 有任务运行或排队时，home 拒绝重启或关机，并说明是哪个任务（`jobs_pending`；服务不在时，仍有进程的任务 cgroup 也算）。
 
-进程 1 自己的关机与重启在有任务运行时先等待，再结束任何东西：root 执行的 `poweroff` 和 `reboot`（SIGUSR2、SIGTERM）、Ctrl+Alt+Del、电源键、home 的请求以及电量严重不足。只要某个 `/sys/fs/cgroup/locachy-jobs/job-*/cgroup.events` 写着 `populated 1`，就算有任务在运行；进程 1 不看任务的其他任何东西（不连 socket，不看队列），读 `/run/locachy/jobs/ID.state` 的第一行只是为了显示任务种类。
+进程 1 自己的关机与重启在有任务运行时先等待，再结束任何东西：root 执行的 `poweroff` 和 `reboot`（SIGUSR2、SIGTERM）、Ctrl+Alt+Del（在其询问页按 Y 之后，见 KEYBOARDS.zh.md）、电源键、home 的请求以及电量严重不足。只要某个 `/sys/fs/cgroup/locachy-jobs/job-*/cgroup.events` 写着 `populated 1`，就算有任务在运行；进程 1 不看任务的其他任何东西（不连 socket，不看队列），读 `/run/locachy/jobs/ID.state` 的第一行只是为了显示任务种类。
 
 - 它用 inotify 监视这些文件及其所在文件夹，没有定时器。等待期间谁也拿不到屏幕：进程 1 自己的屏幕和内核日志说明在等哪个任务（编号与种类），以及如何立即继续。该服务和其他所有服务照常运行，因此需要网络或驱动的任务能继续下去。等待期间合盖不做任何事，正如 logind 在一个动作进行中时忽略它。
 - 服务在一个任务结束后立即启动下一个排队的任务，这个任务同样会被等待。没有任务运行满 1 秒后，关机照旧进行：结束一切（SIGTERM，2 秒后 SIGKILL）、卸载 ESP、根分区改为只读。
@@ -139,9 +139,9 @@ SIGTERM（进程 1 结束该服务、其行从 rc.conf 删除时）只结束服�
 | settings | `locachy-boot` | 是 | 写 ESP；pacman 的钩子也会运行它，不能与事务重叠 |
 | settings | `locachy-tpm enroll`、Secure Boot 密钥 | 是 | 终端只收集口令并保留密钥选择；变更和嵌套启动镜像重建属于同一个系统任务 |
 | settings | fwupd 报告、`tailscale up --qr`、howdy 及其摄像头、bluetui | 否 | 交互报告或设备交互 |
-| settings | `fprintd-enroll` | 否 | 需要手指放在读取器上，用 q 或 Esc 取消 |
+| settings | `fprintd-enroll` | 否 | 需要手指放在读取器上，用 Esc 取消 |
 | settings | `locachy-tpm clear` | 是 | LUKS/pending 变更和启动镜像重建属于同一个任务 |
-| settings | `tor-enforce`、`locachy-setup debug-link`、`nmcli`、`keytable`、各状态查询 | 否 | 短小的辅助操作 |
+| settings | `locachy_network.py set`（Tor 与 Clash）、`locachy-setup debug-link`、`nmcli`、`keytable`、各状态查询 | 否 | 短小的辅助操作 |
 | packages | `locachy-pkg plan/apply/sync/install/remove`、`locachy-app build/rollback/remove` | 是 | 软件包事务、构建、网络 |
 | packages | `locachy-pkg plan --cached`、`status`、`info`、`search`、`commands` | 否 | 查询 |
 | firmware | fwupd 刷新、更新、校验、解锁、本地安装、版本安装 | 是 | 写入固件和下载 |
@@ -155,7 +155,7 @@ SIGTERM（进程 1 结束该服务、其行从 rc.conf 删除时）只结束服�
 
 ## 测试
 
-- `tools/test-jobs.sh`（在 `test-interaction-regressions.sh` 中）：在用户命名空间中以 root 运行服务，使用私有的 `/run`、作为夹具的 cgroup 和对端 `/proc/PID/cgroup`，并以 `test-jobs-tool.sh` 代替各程序；分别以普通方式和 AddressSanitizer/UBSan 构建运行。检查种类及其参数、一次一个且按顺序、重复请求各自登记、因密钥停下的状态、文件及其权限、任务比发起请求的客户端活得更久、移除和停止（SIGINT 发给步骤运行的程序、宽限期后杀死）、对端（容器、窗口、直接程序、用户）、服务被结束（SIGTERM）和被杀死后重新启动、服务不在时仍能看到队列。
+- `tools/test-jobs.sh`（在 `test-interaction-regressions.sh` 中）：在用户命名空间中以 root 运行服务，使用私有的 `/run`、作为夹具的 cgroup 和对端 `/proc/PID/cgroup`，并以 `test-jobs-tool.sh` 代替各程序；分别以普通方式和 AddressSanitizer/UBSan 构建运行。检查种类及其参数、一次一个且按顺序、重复请求各自登记、因密钥停下的状态、文件及其权限、任务比发起请求的客户端活得更久、移除和停止（SIGINT 发给步骤运行的程序、宽限期后杀死）、对端（容器、窗口、直接程序、用户）、服务被结束（SIGTERM）和被杀死后重新启动、服务不在时仍能看到队列。排空（drain）：只有当它接受的每个任务都已结束（排队的先运行，确认等待它）时才确认；等待期间以及确认之后都不接受新任务；被杀死的服务留下的排空仍然有效（保留其 epoch，拒绝更早的 epoch，凭锁找到运行中的任务，之后是排队的任务）。
 - `tools/test-home.c`：列出队列，只有按 Y 后才停止或移除，任务运行或排队时拒绝重启和关机。
 - `tools/test-init-shutdown.c`（在 `test-interaction-regressions.sh` 中）：用作为夹具的任务 cgroup 和状态文件测试进程 1：没有任务时立即进行；有任务时等待（屏幕、日志、无定时器的监视），看到下一个排队任务启动，最后一个结束 1 秒后才继续，并且到那时才结束一切；再次按 Ctrl+Alt+Del 和电源键、`--force`；电量严重不足时休眠，或最多等 60 秒；`link/poweroff` 和 `link/reboot` 在用户与 PID 命名空间中以 root 运行，由该命名空间的进程 1 检查各自发送的信号。
 - `tools/test-settings-close.c`：有任务时 settings 立即退出，按种类和参数请求任务，再次打开时重新跟进其任务。

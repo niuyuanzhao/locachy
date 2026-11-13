@@ -1,11 +1,18 @@
 #!/bin/bash
-# test-tor.sh [MIHOMO]: full-system Tor's firewall (tor-enforce), its service
-# (tor-client) and mihomo beside it (clash-client), as root on a built system
-# with tor, nftables and python3, in a throwaway namespace (a dummy interface
-# its default route and local network, not locachy-net). Offline: nothing it
-# sends reaches anything; what leaves is counted on the dummy interface (a
-# table of its own, after the firewall), and what Tor's ports would get is
-# taken by listeners of the test where tor is not running.
+# test-tor.sh [MIHOMO [DIR]]: full-system Tor's firewall (tor-enforce), its
+# service (tor-client) and mihomo beside it (clash-client), in network, mount
+# and PID namespaces of the test's own with a private /run (as any user: a
+# user namespace too, the subordinate ids of /etc/subuid and /etc/subgid
+# giving it nobody, a tor user and the others), in a throwaway namespace (a
+# dummy interface its default route and local network, not locachy-net).
+# The network policy (locachy_network.py, which tor-enforce load, lan and
+# remove reconcile with) keeps its rc.conf and state in DIR, never
+# /etc/locachy or /var/lib/locachy: "load FRONT" is rc.conf saying so, then
+# a reconcile. Offline: nothing it sends reaches anything; what leaves is
+# counted on the dummy interface (a table of its own, after the firewall),
+# and what Tor's ports would get is taken by listeners of the test where tor
+# is not running. Part 3 needs the tor program (skipped without it), 3b a
+# delegated cgroup (as root), 4 MIHOMO and /dev/net/tun.
 #   1. the rules load for each front and go with the layer; the service loads
 #      them first, keeps them while Tor is on, removes them when it is off
 #   2. a program (nobody, root) connecting to 192.0.2.1 (TEST-NET-1) comes to
@@ -30,17 +37,65 @@
 set -u
 mihomo=${1:-}
 src=$(cd "$(dirname "$0")/.." && pwd)
-out=/var/tmp/locachy-tor-test
+out=${2:-/var/tmp/locachy-tor-test}
 ns=locachy-tor-test
+if [ "${LOCACHY_TOR_TEST:-}" != inner ]; then
+    mkdir -p "$out"
+    out=$(cd "$out" && pwd)
+    user=()
+    if [ "$(id -u)" != 0 ]; then
+        sub() { awk -F: -v n="$(id -un)" -v u="$(id -u)" '($1 == n || $1 == u) && $3 >= 65535 { print $2; exit }' "$1" 2>/dev/null; }
+        subuid=$(sub /etc/subuid) subgid=$(sub /etc/subgid)
+        [ -n "$subuid" ] && [ -n "$subgid" ] || { echo "FAIL subordinate ids for $(id -un) (/etc/subuid, /etc/subgid)"; exit 1; }
+        user=(--map-users="1:$subuid:65535" --map-groups="1:$subgid:65535" --map-root-user)
+    fi
+    LOCACHY_TOR_TEST=inner exec timeout 900 unshare "${user[@]}" --net --mount --pid --fork --mount-proc \
+        bash "$0" "$mihomo" "$out"
+fi
 fail=0
 check() { if eval "$2"; then echo "PASS $1"; else echo "FAIL $1"; fail=1; fi; }
 skip() { echo "SKIP $1"; }
-rm -rf "$out"
-mkdir -p "$out/state" "$out/run" "$out/data" "$out/clash"
+find "$out" -mindepth 1 -delete
+mkdir -p "$out/state" "$out/run" "$out/data" "$out/clash" "$out/network"
 chmod 755 "$out"
+mount -t tmpfs tmpfs /run
+mkdir -p /run/netns /run/tor-test
+# DIR where nobody and the tor user reach it (its parents may be private).
+mount --bind "$out" /run/tor-test
+out=/run/tor-test
+# A tor user where tor is not installed (tor-enforce looks it up by name).
+if ! getent passwd tor >/dev/null; then
+    cp /etc/passwd "$out/passwd"
+    cp /etc/group "$out/group"
+    echo 'tor:x:4343:4343:Tor (test):/:/usr/bin/nologin' >>"$out/passwd"
+    echo 'tor:x:4343:' >>"$out/group"
+    mount --bind "$out/passwd" /etc/passwd
+    mount --bind "$out/group" /etc/group
+fi
+# tor itself only in part 3; elsewhere tor-client needs a program there.
+tor_bin=/usr/bin/tor
+if [ ! -x "$tor_bin" ]; then
+    tor_bin=$out/no-tor
+    printf '#!/bin/sh\nexit 1\n' >"$tor_bin"
+    chmod 755 "$tor_bin"
+fi
 export LOCACHY_TOR_NETNS=$ns LOCACHY_TOR_STATE=$out/state LOCACHY_TOR_RUN=$out/run LOCACHY_TOR_DATA=$out/data \
-    LOCACHY_TOR_RC=$out/rc.conf LOCACHY_TOR_ENFORCE=$src/link/tor-enforce
+    LOCACHY_TOR_RC=$out/rc.conf LOCACHY_TOR_ENFORCE=$src/link/tor-enforce LOCACHY_TOR=$tor_bin \
+    LOCACHY_NETWORK_RC=$out/rc.conf LOCACHY_NETWORK_STATE=$out/network LOCACHY_NETWORK_NETNS=$ns \
+    LOCACHY_CLASH_RC=$out/rc.conf
+unset LOCACHY_NETWORK_HELPER LOCACHY_CLASH_CLIENT
 enforce() { bash "$src/link/tor-enforce" "$@"; }
+# Tor on through FRONT in rc.conf (Clash on too, for mihomo; none: no front),
+# then the policy reconciled: what tor-enforce load FRONT was.
+load() {
+    case $1 in
+    mihomo) rc 'service_tor="tor-client"' 'tor_front="mihomo"' 'service_clash="clash-client"' 'clash_mode="proxy"' ;;
+    bridges) rc 'service_tor="tor-client"' 'tor_front="bridges"' ;;
+    *) rc 'service_tor="tor-client"' ;;
+    esac
+    enforce load
+}
+off() { rc; enforce remove; } # Tor off in rc.conf, reconciled
 tc() { bash "$src/link/tor-client" "$@"; }
 in_ns() { ip netns exec "$ns" "$@"; }
 as() { local who=$1; shift; in_ns setpriv --reuid="$who" --regid="$(id -g "$who")" --clear-groups "$@"; }
@@ -183,12 +238,17 @@ rc() { printf '%s\n' "$@" >"$out/rc.conf"; }
 
 # 1. The rules, with the layer.
 for f in bridges mihomo none; do
-    check "the rules for front $f load" "enforce load $f && enforce loaded"
+    check "the rules for front $f load" "load $f && enforce loaded"
 done
+check "tor-enforce load FRONT with Tor off in rc.conf: no rules (the policy, not the front asked)" \
+    "rc && enforce load bridges && ! enforce loaded"
+load bridges
 enforce remove
+check "tor-enforce remove with Tor on in rc.conf: the rules stay" "enforce loaded"
+off
 check "removed: no rules" "! enforce loaded && ! in_ns nft list table inet locachy-tor >/dev/null 2>&1"
 rc 'service_tor="tor-client"' 'tor_front="mihomo"'
-LOCACHY_TOR=/usr/bin/tor bash "$src/link/tor-client" >"$out/service.log" 2>&1 &
+bash "$src/link/tor-client" >"$out/service.log" 2>&1 &
 svc=$!
 for _ in $(seq 50); do grep -q waiting "$out/run/state" 2>/dev/null && break; sleep 0.1; done
 check "the service loads them first, waiting for its front" "enforce loaded && grep -q 'waiting for Clash' $out/run/state"
@@ -196,9 +256,10 @@ check "its status: waiting, nothing goes out" "tc --status | grep -q 'waiting fo
 kill -TERM $svc
 wait $svc
 check "ended while Tor is on: the rules stay" "enforce loaded"
-LOCACHY_TOR=/usr/bin/tor bash "$src/link/tor-client" >"$out/service.log" 2>&1 &
+rm -f "$out/run/state"
+bash "$src/link/tor-client" >"$out/service.log" 2>&1 &
 svc=$!
-sleep 1
+for _ in $(seq 50); do grep -q waiting "$out/run/state" 2>/dev/null && break; sleep 0.1; done
 rc 'tor_front="mihomo"'
 for _ in $(seq 60); do kill -0 $svc 2>/dev/null || break; sleep 0.1; done
 check "Tor off: the service removes them and ends" "! kill -0 $svc 2>/dev/null && ! enforce loaded"
@@ -206,7 +267,7 @@ check "its status: off, direct" "tc --status | grep -q '^off: the network goes d
 wait $svc 2>/dev/null
 
 # 2. What the rules do with each kind of traffic (front: bridges, then mihomo).
-enforce load bridges
+load bridges
 listen trans tor listen-tcp 127.0.0.1 9040
 listen dns tor listen-dns 5353
 r0=$(packets locachy-tor redirected) d1=$(left doc1)
@@ -264,7 +325,7 @@ d1=$(left doc1)
 check "the tor user, other UDP and IPv6: refused, nothing out" \
     "as tor python3 -I $out/net.py udp 192.0.2.1 9999 | grep -q -e error -e timeout && as tor python3 -I $out/net.py tcp6 2001:db8::99 443 | grep -q -e refused -e error && [ \$(left doc1) -eq $d1 ] && [ \$(left v6) -eq $v0 ]"
 
-enforce load mihomo
+load mihomo
 listen front root listen-tcp 127.0.0.1 7891
 listen mixed root listen-tcp 127.0.0.1 7890
 d1=$(left doc1)
@@ -284,62 +345,67 @@ stop_listeners
 
 # 3. tor itself, through a bridge (lyrebird) or, without lyrebird, through
 # mihomo's port (nobody there); then killed.
-if [ -x /usr/bin/lyrebird ]; then
-    front=bridges
-    echo 'obfs4 192.0.2.10:443 0123456789ABCDEF0123456789ABCDEF01234567 cert=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA iat-mode=0' \
-        >"$out/state/bridges"
-    rc 'service_tor="tor-client"' 'tor_front="bridges"'
+if [ "$tor_bin" != /usr/bin/tor ]; then
+    skip "tor itself: its ports, its own connections, the kill switch (tor is not installed)"
 else
-    front=mihomo
-    skip "tor's own connections through a bridge (lyrebird is not installed)"
-    rc 'service_tor="tor-client"' 'tor_front="mihomo"' 'service_clash="clash-client"'
+    if [ -x /usr/bin/lyrebird ]; then
+        front=bridges
+        echo 'obfs4 192.0.2.10:443 0123456789ABCDEF0123456789ABCDEF01234567 cert=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA iat-mode=0' \
+            >"$out/state/bridges"
+        rc 'service_tor="tor-client"' 'tor_front="bridges"'
+    else
+        front=mihomo
+        skip "tor's own connections through a bridge (lyrebird is not installed)"
+        rc 'service_tor="tor-client"' 'tor_front="mihomo"' 'service_clash="clash-client"'
+    fi
+    check "its configuration: TransPort, DNSPort, SocksPort on loopback, no control port, the front" \
+        "tc --torrc $front | grep -qx 'TransPort 127.0.0.1:9040 IsolateDestAddr IsolateDestPort' && tc --torrc $front | grep -qx 'SocksPort 127.0.0.1:9050 IsolateSOCKSAuth KeepAliveIsolateSOCKSAuth' && [ \$(tc --torrc $front | grep -c '^SocksPort') = 1 ] && ! tc --torrc $front | grep -qi '^ControlPort' && tc --torrc $front | grep -q -e '^Bridge obfs4 192.0.2.10:443' -e '^Socks5Proxy 127.0.0.1:7891'"
+    d10=$(left doc10)
+    bash "$src/link/tor-client" >"$out/service.log" 2>&1 &
+    svc=$!
+    for _ in $(seq 100); do
+        pid=$(cat "$out/run/tor.pid" 2>/dev/null)
+        # A well-formed query: Arch's tor dies of a malformed one (bugs.archlinux.org/task/65313).
+        [ -n "$pid" ] && [ "$(in_ns python3 -I "$out/net.py" dns 127.0.0.1 5353)" != error ] && break
+        sleep 0.2
+    done
+    sleep 2
+    check "tor runs as the tor user" "[ -n \"\$pid\" ] && [ \"\$(stat -c %U /proc/\$pid)\" = tor ]"
+    check "its status: through $front" "tc --status | grep -q -e '^starting, through' -e '^connecting through'"
+    check "nobody to 192.0.2.1:80: tor's TransPort takes it" \
+        "[ \"\$(as nobody python3 -I $out/net.py tcp 192.0.2.1 80)\" = connected ]"
+    # Its TCP listeners, in the namespace and on the host (the test's own network
+    # namespace): TransPort and SocksPort on the namespace's loopback, nothing else.
+    in_ns ss -Hltnp >"$out/ss-ns.txt" 2>&1
+    ss -Hltnp >"$out/ss-host.txt" 2>&1
+    tor_listens=$(grep "pid=$pid," "$out/ss-ns.txt" | awk '{print $4}' | sort | paste -sd' ' -)
+    check "tor's TCP ports in the namespace: the TransPort and the SocksPort, on loopback only ($tor_listens)" \
+        "[ '$tor_listens' = '127.0.0.1:9040 127.0.0.1:9050' ]"
+    check "the host does not reach the SocksPort: no tor socket there, 127.0.0.1:9050 refused" \
+        "! grep -q \"pid=\$pid,\" $out/ss-host.txt && [ \"\$(python3 -I $out/net.py tcp 127.0.0.1 9050)\" = refused ]"
+    check "nobody speaks SOCKS to tor's SocksPort: it answers" \
+        "as nobody python3 -I $out/net.py socks 9050 192.0.2.1 443 | grep -q '^socks '"
+    d1=$(left doc1)
+    check "nobody to the SocksPort's number on the namespace's own address (10.99.0.2:9050) or to a port Tor does not have (127.0.0.1:9051): refused, nothing out" \
+        "[ \"\$(as nobody python3 -I $out/net.py tcp 10.99.0.2 9050)\" = refused ] && [ \"\$(as nobody python3 -I $out/net.py tcp 127.0.0.1 9051)\" = refused ] && [ \$(left doc1) -eq $d1 ]"
+    if [ $front = bridges ]; then
+        for _ in $(seq 30); do [ "$(left doc10)" -gt "$d10" ] && break; sleep 0.5; done
+        check "tor's own connections go out, to its bridge (192.0.2.10)" "[ \$(left doc10) -gt $d10 ]"
+    fi
+    kill -KILL "$pid"
+    for _ in $(seq 60); do kill -0 $svc 2>/dev/null || break; sleep 0.1; done
+    d1=$(left doc1)
+    check "tor killed: the rules stay" "enforce loaded"
+    check "the kill switch: nobody to 192.0.2.1:80 is refused, nothing out" \
+        "[ \"\$(as nobody python3 -I $out/net.py tcp 192.0.2.1 80)\" = refused ] && [ \$(left doc1) -eq $d1 ]"
+    check "the kill switch: the SocksPort (127.0.0.1:9050) refuses too, nothing out" \
+        "[ \"\$(as nobody python3 -I $out/net.py tcp 127.0.0.1 9050)\" = refused ] && [ \$(left doc1) -eq $d1 ]"
+    check "its status says so" "tc --status | grep -q 'kill switch holds the network, nothing goes out'"
+    wait $svc 2>/dev/null
+    off
+    rm -f "$out/state/bridges"
 fi
-check "its configuration: TransPort, DNSPort, SocksPort on loopback, no control port, the front" \
-    "tc --torrc $front | grep -qx 'TransPort 127.0.0.1:9040 IsolateDestAddr IsolateDestPort' && tc --torrc $front | grep -qx 'SocksPort 127.0.0.1:9050 IsolateSOCKSAuth KeepAliveIsolateSOCKSAuth' && [ \$(tc --torrc $front | grep -c '^SocksPort') = 1 ] && ! tc --torrc $front | grep -qi '^ControlPort' && tc --torrc $front | grep -q -e '^Bridge obfs4 192.0.2.10:443' -e '^Socks5Proxy 127.0.0.1:7891'"
-d10=$(left doc10)
-LOCACHY_TOR=/usr/bin/tor bash "$src/link/tor-client" >"$out/service.log" 2>&1 &
-svc=$!
-for _ in $(seq 100); do
-    pid=$(cat "$out/run/tor.pid" 2>/dev/null)
-    # A well-formed query: Arch's tor dies of a malformed one (bugs.archlinux.org/task/65313).
-    [ -n "$pid" ] && [ "$(in_ns python3 -I "$out/net.py" dns 127.0.0.1 5353)" != error ] && break
-    sleep 0.2
-done
-sleep 2
-check "tor runs as the tor user" "[ -n \"\$pid\" ] && [ \"\$(stat -c %U /proc/\$pid)\" = tor ]"
-check "its status: through $front" "tc --status | grep -q -e '^starting, through' -e '^connecting through'"
-check "nobody to 192.0.2.1:80: tor's TransPort takes it" \
-    "[ \"\$(as nobody python3 -I $out/net.py tcp 192.0.2.1 80)\" = connected ]"
-# Its TCP listeners, in the namespace and on the host (the test's own network
-# namespace): TransPort and SocksPort on the namespace's loopback, nothing else.
-in_ns ss -Hltnp >"$out/ss-ns.txt" 2>&1
-ss -Hltnp >"$out/ss-host.txt" 2>&1
-tor_listens=$(grep "pid=$pid," "$out/ss-ns.txt" | awk '{print $4}' | sort | paste -sd' ' -)
-check "tor's TCP ports in the namespace: the TransPort and the SocksPort, on loopback only ($tor_listens)" \
-    "[ '$tor_listens' = '127.0.0.1:9040 127.0.0.1:9050' ]"
-check "the host does not reach the SocksPort: no tor socket there, 127.0.0.1:9050 refused" \
-    "! grep -q \"pid=\$pid,\" $out/ss-host.txt && [ \"\$(python3 -I $out/net.py tcp 127.0.0.1 9050)\" = refused ]"
-check "nobody speaks SOCKS to tor's SocksPort: it answers" \
-    "as nobody python3 -I $out/net.py socks 9050 192.0.2.1 443 | grep -q '^socks '"
-d1=$(left doc1)
-check "nobody to the SocksPort's number on the namespace's own address (10.99.0.2:9050) or to a port Tor does not have (127.0.0.1:9051): refused, nothing out" \
-    "[ \"\$(as nobody python3 -I $out/net.py tcp 10.99.0.2 9050)\" = refused ] && [ \"\$(as nobody python3 -I $out/net.py tcp 127.0.0.1 9051)\" = refused ] && [ \$(left doc1) -eq $d1 ]"
-if [ $front = bridges ]; then
-    for _ in $(seq 30); do [ "$(left doc10)" -gt "$d10" ] && break; sleep 0.5; done
-    check "tor's own connections go out, to its bridge (192.0.2.10)" "[ \$(left doc10) -gt $d10 ]"
-fi
-kill -KILL "$pid"
-for _ in $(seq 60); do kill -0 $svc 2>/dev/null || break; sleep 0.1; done
-d1=$(left doc1)
-check "tor killed: the rules stay" "enforce loaded"
-check "the kill switch: nobody to 192.0.2.1:80 is refused, nothing out" \
-    "[ \"\$(as nobody python3 -I $out/net.py tcp 192.0.2.1 80)\" = refused ] && [ \$(left doc1) -eq $d1 ]"
-check "the kill switch: the SocksPort (127.0.0.1:9050) refuses too, nothing out" \
-    "[ \"\$(as nobody python3 -I $out/net.py tcp 127.0.0.1 9050)\" = refused ] && [ \$(left doc1) -eq $d1 ]"
-check "its status says so" "tc --status | grep -q 'kill switch holds the network, nothing goes out'"
-wait $svc 2>/dev/null
-enforce remove
-rm -f "$out/state/bridges"
+off # Tor off, its firewall removed (part 3 does it too, when it runs)
 
 # 3b. A Tor-only container (tor="1"): refused when Tor or its firewall is off,
 # and its own cgroup table permits only 127.0.0.1:9050 even if Tor goes off.
@@ -395,7 +461,7 @@ if [ -n "$cg_here" ] && [ "$cg_here" != / ] || [ -w /sys/fs/cgroup/cgroup.procs 
             kill "$generic_pid" 2>/dev/null; wait "$generic_pid" 2>/dev/null
             rmdir "$cg_parent/app_tor-only" 2>/dev/null || true
         fi
-        enforce load bridges
+        load bridges
         listen socks tor listen-tcp 127.0.0.1 9050
         listen trans tor listen-tcp 127.0.0.1 9040
         listen dns tor listen-dns 5353
@@ -412,6 +478,7 @@ if [ -n "$cg_here" ] && [ "$cg_here" != / ] || [ -w /sys/fs/cgroup/cgroup.procs 
             "[ \"\$(as nobody python3 -I $out/net.py tcp 192.0.2.1 80)\" = connected ] && grep -qx 192.0.2.1:80 $out/heard/trans"
         # Now switch full-system Tor off (remove locachy-tor and stop the SocksPort):
         # the running Tor-only container's table stays and still blocks all non-Tor traffic.
+        rc 'tor_front="bridges"'
         enforce remove
         stop_listeners
         a0=$(left all)
@@ -472,7 +539,7 @@ EOF
         listen trans tor listen-tcp 127.0.0.1 9040
         listen dns tor listen-dns 5353
         rc 'service_tor="tor-client"' 'tor_front="bridges"' 'service_clash="clash-client"' 'clash_mode="tun"'
-        enforce load bridges
+        enforce load
         clash >"$out/clash.log" 2>&1 &
         svc=$!
         for _ in $(seq 120); do up && controller version | grep -q version && break; sleep 0.5; done
@@ -490,7 +557,7 @@ EOF
         check "bridges: nobody to 192.0.2.1:80 goes into mihomo, whose connection to its proxy comes to the TransPort" \
             "grep -qx 192.0.2.10:1080 $out/heard/trans && [ \$(left doc1) -eq $d1 ] && [ \$(left doc10) -eq $d10 ]"
         rc 'service_tor="tor-client"' 'tor_front="mihomo"' 'service_clash="clash-client"' 'clash_mode="tun"'
-        enforce load mihomo
+        enforce load
         for _ in $(seq 100); do kill -0 $svc 2>/dev/null || break; sleep 0.1; done
         check "Tor's arrangement changed: clash-client ends (process 1 starts it again)" \
             "! kill -0 $svc 2>/dev/null && grep -q \"Tor's arrangement changed\" $out/clash.log && ! ip -n $ns rule show | grep -q '^8999:'"
@@ -514,7 +581,7 @@ EOF
     fi
 fi
 
-enforce remove
+off
 ip netns del "$ns"
 [ $fail = 0 ] && echo "ALL PASSED" || { echo "SOME FAILED"; tail -5 "$out/service.log"; }
 exit $fail

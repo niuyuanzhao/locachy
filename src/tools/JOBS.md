@@ -286,9 +286,9 @@ What the programs start, and whether it is a job:
 | settings | `locachy-boot` | yes | writes the ESP; pacman's hooks run it too, so it must not overlap a transaction |
 | settings | `locachy-tpm enroll`, Secure Boot keys | yes | terminal collects the passphrase and preserves the explicit key choices; writes and nested boot rebuilds are one system job |
 | settings | fwupd's report, `tailscale up --qr`, howdy and its camera, bluetui | no | interactive reports or device interaction |
-| settings | `fprintd-enroll` | no | a finger on the reader, cancelled with q or Esc |
+| settings | `fprintd-enroll` | no | a finger on the reader, cancelled with Esc |
 | settings | `locachy-tpm clear` | yes | LUKS/pending changes and the boot rebuild share one job |
-| settings | `tor-enforce`, `locachy-setup debug-link`, `nmcli`, `keytable`, the status queries | no | short helpers |
+| settings | `locachy_network.py set` (Tor and Clash), `locachy-setup debug-link`, `nmcli`, `keytable`, the status queries | no | short helpers |
 | packages | `locachy-pkg plan/apply/sync/install/remove`, `locachy-app build/rollback/remove` | yes | package transactions, builds, network |
 | packages | `locachy-pkg plan --cached`, `status`, `info`, `search`, `commands` | no | queries |
 | firmware | fwupd refresh, update, verify, unlock, local install, release install | yes | firmware writes and downloads |
@@ -312,7 +312,11 @@ management; settings held its window's close while one ran. Both are gone.
   and stopping (SIGINT to what the step runs, the kill after the grace),
   the peers (a container, a window, a direct program, the user), the service
   ended (SIGTERM) and killed and started again, the queue seen without the
-  service.
+  service. The drain: acknowledged only once every job it accepted has ended
+  (a queued one runs first, and the acknowledgement waits for it); no job is
+  taken while it waits or after the acknowledgement; a drain outlives a killed
+  service (its epoch kept, an older one refused, the job it had found by its
+  lock, then the queued one).
 - `tools/test-home.c`: the queue listed, stopping and removing only after Y,
   reboot and power off refused while jobs run or wait.
 - `tools/test-init-shutdown.c` (in `test-interaction-regressions.sh`):

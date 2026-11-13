@@ -5,7 +5,9 @@ tor-client and clash-client). A short synchronous request, not a service:
 it never waits for a daemon.
 
   set [--tor off|mihomo|bridges] [--clash off|tun|proxy]
-        the target policy (an omitted layer stays as configured)
+        the target policy (an omitted layer stays as configured); a layer
+        that is on needs its program (mihomo; tor; lyrebird for bridges),
+        else the request is refused (exit 2)
   reconcile   enforce what rc.conf says (network-client, the daemons)
   status [--text]   desired / applied / phase / error, and the daemons
   lan         refresh Tor's local networks (tor-client)
@@ -99,12 +101,28 @@ def configured():
     return {"tor": tor, "clash": clash}
 
 
+def installed(variable, default):
+    """Is the program there that settings checks before it offers its layer:
+    the same path, and the override the daemons take (clash-client's
+    LOCACHY_MIHOMO, tor-client's LOCACHY_TOR and LOCACHY_LYREBIRD)."""
+    return os.access(os.environ.get(variable, default), os.X_OK)
+
+
 def refused(target):
     """Why the target is refused; None when it is allowed."""
     if target["tor"] == "none":
         return "Tor needs a way out: mihomo or bridges"
     if target["tor"] == "mihomo" and target["clash"] == "off":
         return "Clash is Tor's front: put Tor through bridges or off first, or both off together"
+    # A layer that is on needs its program: settings offers a layer only then
+    # (settings.c: clash_installed, tor_installed, and lyrebird_installed for
+    # the bridges front). Off needs nothing.
+    if target["clash"] != "off" and not installed("LOCACHY_MIHOMO", "/usr/bin/mihomo"):
+        return "Clash is on, but mihomo is not installed: install it in settings first"
+    if target["tor"] != "off" and not installed("LOCACHY_TOR", "/usr/bin/tor"):
+        return "Tor is on, but tor is not installed: install it in settings first"
+    if target["tor"] == "bridges" and not installed("LOCACHY_LYREBIRD", "/usr/bin/lyrebird"):
+        return "the bridges need lyrebird, which is not installed: install it in settings first"
     return None
 
 
@@ -213,9 +231,10 @@ def detail(error):
 def transition(target, commit):
     """Enforce target (and commit it to rc.conf). Holds policy.lock."""
     state = load_state()
-    state.update(generation=uuid.uuid4().hex, phase="applying", error="")
+    # The phase as the last transition left it, before this one's.
     if commit or state["desired"] is None or state["phase"] != "failed":
         state["desired"] = target
+    state.update(generation=uuid.uuid4().hex, phase="applying", error="")
     pending = state["desired"]
     save_state(state)
     step = "the transition block"

@@ -243,6 +243,14 @@ app-remove)
         nsenter --net="/run/netns/$NS" nft delete table inet "$table"
     fi
     ;;
+lan-locked)
+    # locachy_network.py lan, under its policy.lock: the local networks of
+    # the loaded table refreshed in place; never adds or removes a table.
+    [ -e "/run/netns/$NS" ] && in_ns nft list table $TABLE >/dev/null 2>&1 || exit 0
+    elements=$(lan)
+    { echo "flush set $TABLE lan"; [ -z "$elements" ] || echo "add element $TABLE lan { $elements }"; } |
+        in_ns nft -f -
+    ;;
 load|lan|remove)
     # Compatibility entries reconcile the CURRENT combined policy. Never let
     # an old daemon's captured front or delayed remove erase its replacement.
