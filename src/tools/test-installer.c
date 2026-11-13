@@ -301,6 +301,11 @@ static const char fake_install[] =
     "#!/bin/sh\n"
     "d=$(dirname \"$0\")\n"
     "if [ \"$1\" = --describe-json ]; then cat \"$d/describe.json\"; exit 0; fi\n"
+    "if [ \"$1\" = --refresh-live ]; then\n"
+    "  echo refresh >>\"$d/refresh-calls\"\n"
+    "  if [ -e \"$d/refresh-fail\" ]; then exit 1; fi\n"
+    "  printf '{\"frontend\":\"%s/installer-next\",\"revision\":\"89abcdef0123\",\"input_hash\":\"fixture\",\"source\":\"%s/src\"}\\n' \"$d\" \"$d\"; exit 0\n"
+    "fi\n"
     "echo \"$*\" >>\"$d/calls\"\n"
     "for a in \"$@\"; do case $a in --luks-passphrase-file=*|--password-file=*) f=${a#*=};\n"
     "  printf '%s %s %s\\n' \"${a%%=*}\" \"$(stat -c %a \"$f\")\" \"$(cat \"$f\")\" >>\"$d/secrets\";; esac; done\n"
@@ -352,6 +357,7 @@ static void run(const char *what)
     in_page = 1;
     notice[0] = '\0';
     unsetenv("LOCACHY_LANG");
+    setenv("LOCACHY_INSTALLER_INPUT_HASH", "fixture", 1); /* this binary already matches the refreshed one */
     for (int i = 0; i < ROWS; i++) {
         memset(grid[i], ' ', COLS);
         grid[i][COLS] = '\0';

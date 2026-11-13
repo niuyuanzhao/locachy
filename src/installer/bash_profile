@@ -3,6 +3,8 @@
 # the installer ended. Elsewhere (the serial console): a shell, as before.
 [ -f ~/.bashrc ] && . ~/.bashrc
 if [ "$(tty)" = /dev/tty1 ]; then
-    /usr/local/bin/installer
+    # The interface is built from the fetched source too, not frozen to the ISO.
+    # A failed refresh never starts an old interface pretending to be current.
+    /usr/local/bin/locachy-install --ui
     /usr/local/bin/installer --text
 fi

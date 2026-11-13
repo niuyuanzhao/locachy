@@ -44,6 +44,7 @@ nano
 freetype2
 fontconfig
 libinput
+libnm
 json-c
 libxkbcommon
 libx11

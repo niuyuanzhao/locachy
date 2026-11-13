@@ -23,7 +23,15 @@ origin=${LOCACHY_SOURCE_ORIGIN:-/etc/locachy/source-origin.json}
 record=${LOCACHY_RESUME_RECORD:-/run/locachy-install/resume.json}
 export GIT_ALLOW_PROTOCOL=${GIT_ALLOW_PROTOCOL:-https:ssh} GIT_TERMINAL_PROMPT=0
 
-repo= branch= apps_repo= apps_branch= again=1 prev= continued=0
+repo= branch= apps_repo= apps_branch= again=1 prev= continued=0 live_mode=
+forward=()
+for a in "$@"; do
+    case $a in
+    --refresh-live) live_mode=refresh ;;
+    --ui) live_mode=ui ;;
+    *) forward+=("$a") ;;
+    esac
+done
 for a in "$@"; do
     case $prev in
     --update-repo) repo=$a ;;
@@ -36,9 +44,9 @@ for a in "$@"; do
     --update-branch=*) branch=${a#*=} ;;
     --apps-repo=*) apps_repo=${a#*=} ;;
     --apps-branch=*) apps_branch=${a#*=} ;;
-    --describe-json | --check | --help | -h) again=0 ;;
-    --trust-key) again=0 continued=1 ;;
-    --resume) continued=1 ;;
+    --describe-json | --check | --preflight | --help | -h) again=0 ;;
+    --trust-key | --resume-info | --resume-status) again=0 continued=1 ;;
+    --resume | --refresh-live | --ui) continued=1 ;;
     esac
     prev=$a
 done
@@ -60,6 +68,15 @@ print(r.get("update_repo") or o.get("repo") or "-", r.get("update_branch") or o.
 [ -n "$apps_repo" ] || apps_repo=$o_apps_repo
 [ -n "$apps_branch" ] || apps_branch=$o_apps_branch
 
+# A live interface and its checks/install use one fetched snapshot. Refresh
+# explicitly ignores that pin, so every press of c checks the repository again.
+if [ -z "$live_mode" ] && [ "${LOCACHY_INSTALL_SNAPSHOT_ROOT:-}" = "$fetched" ] &&
+   [ "$(cat "$fetched.from" 2>/dev/null)" = "$repo $branch" ] &&
+   [ -n "${LOCACHY_INSTALL_SNAPSHOT_COMMIT:-}" ] &&
+   [ "$(git -C "$fetched" rev-parse HEAD 2>/dev/null)" = "$LOCACHY_INSTALL_SNAPSHOT_COMMIT" ]; then
+    pinned=1
+    again=0
+fi
 why= now=0
 if [ "$repo" = off ]; then
     why="updates are off"
@@ -146,4 +163,12 @@ else
     LOCACHY_APPS_CATALOG=$apps_bundled
 fi
 export LOCACHY_APPS LOCACHY_APPS_CATALOG
-exec python3 -I "$entry/link/locachy-install" "$@"
+if [ -n "$live_mode" ]; then
+    if [ ! -f "$entry/installer/live-update.py" ]; then
+        echo "Installer refresh failed: the selected source has no live updater" >&2
+        exit 1
+    fi
+    exec python3 -I "$entry/installer/live-update.py" --source "$entry" --mode "$live_mode" \
+        --update-repo "$repo" --update-branch "$branch" --apps-repo "$apps_repo" --apps-branch "$apps_branch"
+fi
+exec python3 -I "$entry/link/locachy-install" "${forward[@]}"

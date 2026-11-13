@@ -37,6 +37,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <termios.h>
@@ -120,6 +121,9 @@ static struct {
     unsigned char repos[4];
 } dflt;
 static int described; /* the description was read */
+static struct json_object *stopped_installation; /* non-secret backend resume information */
+static int recovered_installation; /* choices restored without secrets from an older live interface */
+static char backend_revision[48];
 
 /* What is chosen. */
 enum { WHOLE, PARTS, MOUNTED };
@@ -222,6 +226,10 @@ static int write_secret(const char *name, const char *text, char *path, size_t s
     return close(fd) == 0 && ok ? 0 : -1;
 }
 
+/* Only the live refresh needs separate machine-readable stdout and a
+ * persistent diagnostic log. Ordinary captures keep their original policy. */
+static const char *capture_error_log;
+
 /* Run argv and keep what it prints (and its errors, with both), at most
  * size - 1 bytes: its exit status, or -1. */
 static int capture(char *const argv[], char *out, size_t size, int both)
@@ -234,7 +242,8 @@ static int capture(char *const argv[], char *out, size_t size, int both)
         int null = open("/dev/null", O_RDWR | O_CLOEXEC);
         dup2(null, STDIN_FILENO);
         dup2(fds[1], STDOUT_FILENO);
-        dup2(both ? fds[1] : null, STDERR_FILENO);
+        int errors = capture_error_log ? open(capture_error_log, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600) : -1;
+        dup2(errors >= 0 ? errors : both ? fds[1] : null, STDERR_FILENO);
         execv(argv[0], argv);
         _exit(127);
     }
@@ -338,6 +347,12 @@ static int load_description(void)
     if (capture(argv, buf, sizeof buf, 0) != 0) return -1;
     struct json_object *d = json_tokener_parse(buf);
     if (!d) return -1;
+    if (stopped_installation) json_object_put(stopped_installation);
+    stopped_installation = jget(d, "installation");
+    if (stopped_installation && json_object_is_type(stopped_installation, json_type_object))
+        json_object_get(stopped_installation);
+    else
+        stopped_installation = NULL;
     struct json_object *def = jget(d, "defaults"), *a, *o;
     copy(dflt.user, sizeof dflt.user, jstr(def, "user"));
     copy(dflt.hostname, sizeof dflt.hostname, jstr(def, "hostname"));
@@ -415,6 +430,7 @@ static int load_description(void)
     o = jget(d, "apps");
     copy(apps_text, sizeof apps_text, jstr(o, "text"));
     apps_not_newest = json_object_get_boolean(jget(o, "not_newest"));
+    copy(backend_revision, sizeof backend_revision, jstr(jget(d, "source_revision"), "commit"));
     net_profiles = (int)jint(d, "network_profiles");
     memory_bytes = jint(d, "memory_bytes");
     esp_bytes = jint(d, "esp_bytes");
@@ -2279,7 +2295,9 @@ static void choose_keymap(void)
     }
 }
 
-static void begin_install(void)
+#include "installer-session.inc"
+
+static void begin_install_current(void)
 {
     static struct args a;
     char why[256];
@@ -2309,10 +2327,19 @@ static void begin_install(void)
 
 /* c on the stopped installation's page: on where it stopped, its disk as
  * it is (locachy-install --resume), with the secrets written again. */
-static void continue_install(void)
+static void continue_install_current(void)
 {
     static struct args a;
     char path[512];
+    if (recovered_installation) {
+        if (c.encrypt != ENC_OFF && !c.passphrase[0] &&
+            !prompt(_("Disk passphrase:"), c.passphrase, sizeof c.passphrase, 1)) return;
+        if (!c.password[0] && !prompt(_("Installed user's password:"), c.password, sizeof c.password, 1)) return;
+        if (!c.password[0] || (c.encrypt != ENC_OFF && !c.passphrase[0])) {
+            tell(1, "%s", _("A nonempty password and disk passphrase are needed to continue."));
+            return;
+        }
+    }
     a.n = 0;
     a.used = 0;
     arg(&a, "%s", INSTALL_CMD);
@@ -2337,6 +2364,16 @@ static void continue_install(void)
     return;
 cannot:
     tell(1, _("Cannot write %s."), RUN_DIR);
+}
+
+static void begin_install(void)
+{
+    if (refresh_installer("begin") == 0) begin_install_current();
+}
+
+static void continue_install(void)
+{
+    if (refresh_installer("continue") == 0) continue_install_current();
 }
 
 /* The rows Left and Right change in place (elsewhere Left goes to the
@@ -2702,7 +2739,13 @@ static void handle(int key, int mods)
 
 int main(int argc, char **argv)
 {
-    int vt;
+    int vt, state_fd = -1;
+    if (argc > 1 && strncmp(argv[1], "--state-fd=", 11) == 0) {
+        char *end;
+        long n = strtol(argv[1] + 11, &end, 10);
+        if (*end || n < 3 || n > 1048576) return 2;
+        state_fd = (int)n;
+    }
     if (argc > 1 && strcmp(argv[1], "--text") == 0) { /* after a crash: the console as it was */
         if (ioctl(STDIN_FILENO, KDGETMODE, &vt) == 0) {
             console = STDIN_FILENO;
@@ -2731,6 +2774,28 @@ int main(int argc, char **argv)
     tell(0, "%s", "");
     if (!described) tell(1, "%s", _("locachy-install --describe-json failed; the terminal shows why."));
     selected = R_START_INSTALL;
+    if (stopped_installation) {
+        /* Only the backend's non-secret status enters the new UI. Secrets
+         * are deliberately absent and are asked again before resume. */
+        if (recover_installation() < 0) {
+            tell(1, "%s", _("The stopped installation record cannot be restored safely; nothing was continued."));
+        }
+    }
+    if (state_fd >= 0) {
+        char action[16];
+        if (!described || restore_session(state_fd, action, sizeof action) < 0) {
+            tell(1, "%s", _("The updated installer cannot restore the choices. Nothing was continued."));
+        } else {
+            set_ui_language();
+            if (!strcmp(action, "continue")) {
+                continue_install_current();
+            } else {
+                mode = M_STEPS;
+                go_step(S_SUMMARY);
+                begin_install_current();
+            }
+        }
+    }
     for (;;) {
         draw();
         int key = key_poll_timeout(-1, job ? 500 : 1000), mods = keys_modifiers();

@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""Build a local LOCachy target from the generic live installer.
-The caller prepares and mounts empty ext4/FAT32 filesystems. No partitioning,
-formatting or reboot is performed here. After copying the boot image, the
-installer registers its LOCachy UEFI entry; fallback stays if that fails.
-An installation that stops (a failure, or source signing keys for a person to
-trust) can be continued where it stopped, on its target as it is:
---resume, in the same live session (RESUME_RECORD).
+"""Install a local LOCachy target from the generic live installer.
+Explicit empty mounts are built without formatting; --disk/--format-* require
+an explicit confirmation, after source-key preflight. Resume never repeats
+partitioning or formatting. The installer publishes the boot image and
+registers its UEFI entry, retaining the removable-media fallback.
 """
 import argparse
 import getpass
@@ -54,6 +52,9 @@ FEATURE_RC = {k: next(iter(rc.items())) for k, rc in FEATURE_RC_MAP.items() if r
 _spec = importlib.util.spec_from_file_location("locachy_apps", SOURCE / "link/locachy_apps.py")
 APPS = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(APPS)
+_state_spec = importlib.util.spec_from_file_location("locachy_install_state", SOURCE / "link/locachy_install_state.py")
+INSTALL_STATE = importlib.util.module_from_spec(_state_spec)
+_state_spec.loader.exec_module(INSTALL_STATE)
 
 
 def host_preset_packages(containers, presets_dir=None, known=None):
@@ -230,16 +231,60 @@ def read_resume_record():
     return record
 
 
-def write_resume_record(install_id, root, argv, args):
-    RESUME_RECORD.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    new = RESUME_RECORD.with_name(RESUME_RECORD.name + ".new")
-    new.write_text(json.dumps({"install_id": install_id, "root": str(root), "argv": argv,
-                               "update_repo": args.update_repo or "", "update_branch": args.update_branch or "",
-                               "apps_repo": args.apps_repo or "", "apps_branch": args.apps_branch or "",
-                               "apps_commit": apps_meta().get("commit", "")},
-                              indent=1) + "\n", encoding="utf-8")
-    os.chmod(new, 0o600)
-    os.replace(new, RESUME_RECORD)
+def source_revision():
+    """The backend's exact input tree, even for a tree without git metadata."""
+    repo, branch, commit = detect_source_git()
+    return {"repo": repo, "branch": branch, "commit": commit,
+            "tree": INSTALL_STATE.files_digest(SOURCE, INSTALL_STATE.SOURCE_INPUTS)}
+
+
+def public_resume_record():
+    try:
+        record = read_resume_record()
+    except ValueError:
+        return None
+    shown = {key: record[key] for key in ("schema", "phase", "install_id", "root", "source") if key in record}
+    # Older records are accepted, but never echo a secret option someone
+    # may have added to one by hand into describe-json or a UI session file.
+    argv, skip = [], False
+    for value in record["argv"]:
+        if skip:
+            skip = False
+            continue
+        if value in ("--password-file", "--luks-passphrase-file"):
+            skip = True
+        elif not value.startswith(("--password-file=", "--luks-passphrase-file=")):
+            argv.append(value)
+    shown["argv"] = argv
+    return shown
+
+
+def safe_arguments(args):
+    """Parser choices without secret values/paths, flags internal to this run, or trust requests."""
+    values = vars(args).copy()
+    for key in ("password_file", "luks_passphrase_file", "trust_key", "private", "describe_json", "preflight", "check",
+                "resume", "install_id", "yes", "wizard"):
+        values.pop(key, None)
+    argv = []
+    for key, value in values.items():
+        if value is None or value is False or value == "":
+            continue
+        option = "--" + key.replace("_", "-")
+        if value is True:
+            argv.append(option)
+        else:
+            argv.extend((option, str(value)))
+    if args.copy_network is False:
+        argv.append("--no-copy-network")
+    return argv
+
+
+def write_resume_record(install_id, root, argv, args, phase="target"):
+    INSTALL_STATE.write_json(RESUME_RECORD, {"schema": 2, "phase": phase, "install_id": install_id,
+                             "root": str(root), "argv": argv, "update_repo": args.update_repo or "",
+                             "update_branch": args.update_branch or "", "apps_repo": args.apps_repo or "",
+                             "apps_branch": args.apps_branch or "", "apps_commit": apps_meta().get("commit", ""),
+                             "source": source_revision()})
     # Its app presets beside it, as long as it can be continued: before the
     # target has its own copy, a continued run installs from these (pinned).
     # A run without app presets (a medium from before them, none fetched)
@@ -833,6 +878,8 @@ def describe(parser):
         "memory_bytes": memory, "esp_bytes": ESP_BYTES, "min_root_bytes": MIN_ROOT_BYTES,
         "disks": disks(),
         "source": dict(zip(("text", "not_newest"), source_line())),
+        "source_revision": source_revision(),
+        "installation": public_resume_record(),
         "apps": dict(zip(("text", "not_newest"), apps_line())),
     }
 
@@ -1035,6 +1082,73 @@ def effective_ime(args):
     return choice
 
 
+def selected_package_roots(args):
+    """The installer's effective package definitions, not the live system's installed set."""
+    modules = json.loads((SOURCE / "link/modules.json").read_text(encoding="utf-8"))
+    names = {name for line in (SOURCE / "packages").read_text(encoding="utf-8").splitlines()
+             for name in line.split("#", 1)[0].split()}
+    ime = effective_ime(args)
+    if ime == "off":
+        names = {name for name in names if name not in ("librime", "words") and not name.startswith("rime-")}
+    chosen = parse_csv_items(args.features)
+    choice = {"en": "ime", "zh": "ime-zh"}.get(ime)
+    if choice:
+        chosen.append(choice)
+    seen = set()
+    while chosen:
+        name = chosen.pop()
+        if name in seen:
+            continue
+        if name not in modules:
+            raise ValueError("Unknown selected module: " + name)
+        seen.add(name)
+        names.update(modules[name].get("packages", []))
+        chosen.extend(modules[name].get("requires", []))
+    if args.encrypt:
+        names.add("cryptsetup")
+    known = presets()
+    for name in parse_csv_items(args.containers):
+        if name not in known:
+            raise ValueError("Unknown app: " + name)
+        values = APPS.conf_values(known[name][0].read_text(encoding="utf-8"))
+        names.update(APPS.packages(values).split())
+    # Machine profiles currently select devices and policy, not packages.
+    # Should a profile grow an explicit package list it is preflighted too.
+    if args.machine and args.machine != "generic":
+        profile = SOURCE / "machines" / (args.machine + ".conf")
+        if not profile.is_file():
+            raise ValueError("Unknown machine profile: " + args.machine)
+        text = profile.read_text(encoding="utf-8")
+        machine_packages = next((line.split("=", 1)[1].strip().strip('"') for line in text.splitlines()
+                                 if line.startswith("packages=")), "")
+        names.update(machine_packages.split())
+    if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9@._+\-]*", name) for name in names):
+        raise ValueError("The selected package definitions contain an invalid package name")
+    return sorted(names)
+
+
+def install_key_helper():
+    spec = importlib.util.spec_from_file_location("locachy_install_keys", SOURCE / "link/locachy_install_keys.py")
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    return helper
+
+
+def preflight_keys(args):
+    # A mounted explicit target may already contain an approved build keyring;
+    # a --disk run has no target until after the key preflight.
+    target = Path(args.root) if args.root else None
+    level = cpu_level(args.level)
+    cpu = args.cpu if args.cpu != "auto" else cpu_model(level)
+    print("Installation preflight: checking package source signing keys before target writes", flush=True)
+    return install_key_helper().check(SOURCE, RESUME_RECORD.parent, selected_package_roots(args), level, cpu,
+                                      repo_sections(args.repos), target)
+
+
+def trust_install_keys(fingerprints, target=None):
+    return install_key_helper().trust(SOURCE, RESUME_RECORD.parent, fingerprints, target)
+
+
 def install(args, root, esp, root_fs, esp_fs, level):
     # A private mount namespace keeps the original ESP mount intact for the
     # live shell, while no build or package script can reach it through root.
@@ -1079,6 +1193,8 @@ def install(args, root, esp, root_fs, esp_fs, level):
                    "--work-dir", str(work), "--cache-dir", str(cache), "--cpu", cpu, level]
         if getattr(args, "install_id", None):
             command[2:2] = ["--install-id", args.install_id] + (["--resume"] if getattr(args, "resume", False) else [])
+        if not getattr(args, "resume", False):
+            install_key_helper().preserve(SOURCE, root)
         build_log = saved.parent / (saved.name + ".build.log")
         with build_log.open("w") as log:
             # tee preserves progress in the live console and the failure log.
@@ -1092,38 +1208,80 @@ def install(args, root, esp, root_fs, esp_fs, level):
         log_copy.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(build_log, log_copy)
         build_log.unlink()
-        useradd_cmd = ["arch-chroot", str(root), "useradd", "--uid", "1000", "--create-home",
-                       "--groups", "wheel,video,audio", "--shell", "/bin/bash"]
-        if getattr(args, "full_name", ""):
-            useradd_cmd.extend(["--comment", args.full_name])
-        useradd_cmd.append(args.user)
+        stages = INSTALL_STATE.Stages(root / ".locachy-installer")
+        account_inputs = {"user": args.user, "full_name": args.full_name}
+        account_hash = INSTALL_STATE.digest(account_inputs)
         passwd = root / "etc/passwd"
         users = {line.split(":", 1)[0] for line in passwd.read_text(encoding="utf-8").splitlines()} \
             if passwd.is_file() else set()
-        if args.user not in users:  # a continued installation may have made it
-            run(useradd_cmd)
-        if getattr(args, "password_file", None):
-            args.password_stdin = read_secret(args.password_file)
-        if getattr(args, "password_stdin", None) is not None:
-            run(["arch-chroot", str(root), "chpasswd"],
-                input=f"{args.user}:{args.password_stdin}\n", text=True)
-        else:
-            print("Set the installed user's password (standard passwd; not recorded in the build log).", flush=True)
-            run(["arch-chroot", str(root), "passwd", args.user])
-        run(["arch-chroot", str(root), "passwd", "-l", "root"])
-        if apply_customizations(args, root):
-            run(["arch-chroot", str(root), "/usr/local/bin/locachy-pkg", "sync", "--first-install"])
-        run(["arch-chroot", str(root), "sh", "/usr/local/src/locachy/make.sh", level, cpu])
+        # Account creation is once-only. A changed display name or a missing
+        # stage journal must never make a continued installation ask for, or
+        # overwrite, the user's password again.
+        account_needed = args.user not in users or ("account" in stages.stages and
+                                                     stages.stages["account"].get("success") is not True)
+        if not account_needed and "account" not in stages.stages:
+            stages.complete("account", account_hash)
+        if account_needed:
+            stages.begin("account")
+            # useradd may succeed before chpasswd fails. Keep an unfinished
+            # account marker so that retry completes it instead of mistaking
+            # the new user for an old installation's existing account.
+            stages.stages["account"] = {"input": account_hash, "success": False}
+            stages.save()
+            useradd_cmd = ["arch-chroot", str(root), "useradd", "--uid", "1000", "--create-home",
+                           "--groups", "wheel,video,audio", "--shell", "/bin/bash"]
+            if getattr(args, "full_name", ""):
+                useradd_cmd.extend(["--comment", args.full_name])
+            useradd_cmd.append(args.user)
+            if args.user not in users:
+                run(useradd_cmd)
+            if getattr(args, "password_file", None):
+                args.password_stdin = read_secret(args.password_file)
+            if getattr(args, "password_stdin", None) is not None:
+                run(["arch-chroot", str(root), "chpasswd"],
+                    input=f"{args.user}:{args.password_stdin}\n", text=True)
+            else:
+                print("Set the installed user's password (standard passwd; not recorded in the build log).", flush=True)
+                run(["arch-chroot", str(root), "passwd", args.user])
+            run(["arch-chroot", str(root), "passwd", "-l", "root"])
+            stages.complete("account", account_hash)
+        config_values = {k: v for k, v in vars(args).items()
+                         if k not in ("password_file", "luks_passphrase_file", "password_stdin", "resume", "private",
+                                      "install_id", "preflight", "yes", "check", "describe_json", "trust_key")}
+        config_inputs = {"options": config_values, "files": INSTALL_STATE.files_digest(
+            SOURCE, ("link/modules.json", "link/locachy-install", "machines", "containers", "rc.conf")),
+                         "system": stages.stages.get("system", {}), "apps": apps_meta().get("commit", "")}
+        def configure():
+            if apply_customizations(args, root):
+                run(["arch-chroot", str(root), "/usr/local/bin/locachy-pkg", "sync", "--first-install"])
+            run(["arch-chroot", str(root), "sh", "/usr/local/src/locachy/make.sh", level, cpu])
+        stages.run("configuration", config_inputs, configure)
         secure_boot = getattr(args, "secure_boot", False)
         if getattr(args, "encrypt", False) and getattr(args, "tpm", False) and not secure_boot:
-            tpm_install(args, root)
+            tpm_inputs = {"encrypted": True, "tpm": True}
+            # Old records may already have bound disks. Query the real token
+            # state; missing bookkeeping is not permission to enroll twice.
+            if args.resume and "tpm" not in stages.stages:
+                status = target_tpm_status(root)
+                devices = status.get("luks_devices", [])
+                if devices and all(status.get("enrolled", {}).get(device) for device in devices):
+                    stages.complete("tpm", INSTALL_STATE.digest(tpm_inputs))
+            stages.run("tpm", tpm_inputs, lambda: tpm_install(args, root))
         if secure_boot:
-            # This machine's keys made, so that the image below is signed.
-            run(["arch-chroot", str(root), "/usr/local/bin/locachy-tpm", "secure-boot"])
+            # Existing key material is a successful once-only operation even
+            # for an old resume with no stage record. Do not regenerate it.
+            key_dir = root / "var/lib/sbctl/keys"
+            keys_input = INSTALL_STATE.digest({"secure_boot": True})
+            if key_dir.is_dir() and (root / "etc/systemd/tpm2-pcr-private-key.pem").is_file() and "secure-boot-keys" not in stages.stages:
+                stages.complete("secure-boot-keys", keys_input)
+            stages.run("secure-boot-keys", {"secure_boot": True},
+                       lambda: run(["arch-chroot", str(root), "/usr/local/bin/locachy-tpm", "secure-boot"]))
         boot_cmd = ["arch-chroot", str(root), "/usr/local/bin/locachy-boot"]
         if getattr(args, "encrypt", False):
             boot_cmd.append("--luks")
-        run(boot_cmd)
+        stages.run("boot", {"configuration": stages.stages.get("configuration", {}), "secure_boot": secure_boot,
+                            "encrypted": bool(args.encrypt)}, lambda: run(boot_cmd),
+                   present=(root / "usr/local/lib/locachy/boot/locachy.efi").is_file())
         run(["arch-chroot", str(root), "/usr/local/bin/locachy-pkg", "status"])
         (root / "etc/resolv.conf").unlink(missing_ok=True)
         (root / "etc/resolv.conf").touch()
@@ -1147,7 +1305,12 @@ def install(args, root, esp, root_fs, esp_fs, level):
         shutil.copyfile(image, fallback / "BOOTX64.EFI")
         os.sync()
         if secure_boot:
-            secure_boot_install(args, root, saved)
+            enrollment_inputs = {"secure_boot": True, "microsoft": args.secure_boot_microsoft, "tpm": bool(args.tpm)}
+            if args.resume and "secure-boot-enroll" not in stages.stages:
+                status = target_tpm_status(root)
+                if status.get("own_keys_in_db") and (not args.tpm or status.get("bound_own_keys") or status.get("pending")):
+                    stages.complete("secure-boot-enroll", INSTALL_STATE.digest(enrollment_inputs))
+            stages.run("secure-boot-enroll", enrollment_inputs, lambda: secure_boot_install(args, root, saved))
         # Run the installed source's helper in the live system: saved is the
         # verified ESP mount, hidden from target builds and package scripts.
         registered = run([sys.executable, "-I", str(root / "usr/local/bin/locachy-efi"),
@@ -1176,6 +1339,13 @@ def install(args, root, esp, root_fs, esp_fs, level):
     finally:
         run(["umount", str(saved)])
         saved.rmdir()
+
+
+def target_tpm_status(root):
+    try:
+        return json.loads(output(["arch-chroot", str(root), "/usr/local/bin/locachy-tpm", "status", "--json"]))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return {}
 
 
 def tpm_install(args, root):
@@ -1512,6 +1682,8 @@ def make_parser():
     parser.add_argument("--wizard", action="store_true", help="run the interactive configuration wizard")
     parser.add_argument("--yes", action="store_true", help="confirm the explicitly supplied empty target mounts")
     parser.add_argument("--check", action="store_true", help="validate and show targets without writing")
+    parser.add_argument("--preflight", action="store_true",
+                        help="check selected package source keys before any partition, format or target write")
     parser.add_argument("--describe-json", action="store_true",
                         help="print the choices, their defaults and the disks as JSON, and exit")
     parser.add_argument("--resume", action="store_true",
@@ -1521,6 +1693,10 @@ def make_parser():
                         help="source signing keys the installation stopped for: each shown, and trusted "
                              "when answered y (locachy-build --trust-key, in its target); then --resume")
     parser.add_argument("--install-id", help=argparse.SUPPRESS)
+    parser.add_argument("--resume-info", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--resume-status", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--ui", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--refresh-live", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--private", action="store_true", help=argparse.SUPPRESS)
     return parser
 
@@ -1531,24 +1707,38 @@ def main():
     if args.describe_json:
         print(json.dumps(describe(parser), indent=1))
         return 0
+    if args.resume_info or args.resume_status:
+        print(json.dumps(public_resume_record(), indent=1) if public_resume_record() else "null")
+        return 0
+    if args.ui or args.refresh_live:
+        parser.error("the live wrapper must handle --ui/--refresh-live")
     if (args.resume or args.trust_key) and not args.private:
         if os.geteuid() != 0:
             parser.error("Run from the live installer as root")
         try:
             record = read_resume_record()
-            root = resumed_target(record)
+            before_target = record.get("phase") == "preflight"
+            if record.get("phase") == "partitioning":
+                raise ValueError("Partitioning was interrupted; inspect the target in the terminal. "
+                                 "Resume never repeats partitioning or formatting.")
+            root = None if before_target else resumed_target(record)
         except ValueError as e:
             parser.error(str(e))
         if args.trust_key:
-            return subprocess.run(["arch-chroot", str(root), "/usr/local/bin/locachy-build", "--trust-key"] +
-                                  args.trust_key).returncode
-        # Its options as recorded; those given now (its secrets) after them.
+            return trust_install_keys(args.trust_key, root)
+        # Old records have no phase: they are target resumes, never fresh
+        # formatting requests. Preflight records have not touched a target.
         args = parser.parse_args(record["argv"] + [a for a in sys.argv[1:] if a != "--resume"])
-        args.resume, args.install_id = True, record["install_id"]
-        print("Continuing the installation on " + str(root) + ", where it stopped.", flush=True)
-        # The app presets it started with (pinned): its target's, else those
-        # kept beside its record; only without either, this run's.
-        pinned = resume_catalog(root)
+        args.resume, args.install_id = not before_target, record["install_id"]
+        if not before_target:
+            if args.disk or args.format_root or args.format_esp or args.format_swap:
+                parser.error("A target resume record must not partition or format")
+            print("Continuing the installation on " + str(root) + ", where it stopped.", flush=True)
+        else:
+            print("Continuing installation preflight; no target was partitioned or formatted.", flush=True)
+        # The app presets it started with stay pinned, including a preflight
+        # that stopped before it had a target to hold them.
+        pinned = resume_catalog(root) if root else (RESUME_APPS if RESUME_APPS.is_dir() else None)
         if pinned:
             os.environ["LOCACHY_APPS_CATALOG"] = str(pinned)
             os.environ["LOCACHY_APPS"] = ""
@@ -1597,6 +1787,17 @@ def main():
                   ("; LUKS2" + (" + TPM" if args.tpm else "") if args.encrypt else "") +
                   f"; CPU {level}, own builds for {args.cpu}", flush=True)
             return 0
+        if not args.private and not args.check:
+            args.install_id = args.install_id or uuid.uuid4().hex
+            status = preflight_keys(args)
+            if status:
+                if not args.resume:
+                    write_resume_record(args.install_id, args.root or "", safe_arguments(args), args, phase="preflight")
+                print("Continue with: locachy-install --resume", flush=True)
+                return status
+            if args.preflight:
+                print("Installation preflight completed; no target was changed.", flush=True)
+                return 0
         if not args.private and (args.disk or args.format_root):
             passphrase = None
             if args.encrypt:
@@ -1611,8 +1812,19 @@ def main():
             if not args.yes and input("Type INSTALL to partition/format and install LOCachy: ") != "INSTALL":
                 print("Nothing changed.")
                 return 0
+            # A crash anywhere in formatting must never leave a preflight
+            # record that a later c could mistake for permission to do it again.
+            write_resume_record(args.install_id, args.root or "", safe_arguments(args), args, phase="partitioning")
             prepare_partitions(args, passphrase)
             args.yes = True
+            # Replace all destructive options with the prepared target's
+            # mounts immediately, before starting any package operation.
+            args.disk = args.format_root = args.format_esp = args.format_swap = None
+            write_resume_record(args.install_id, args.root, safe_arguments(args), args)
+            marker = Path(args.root) / ".locachy-installer/install-id"
+            marker.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            marker.write_text(args.install_id + "\n", encoding="utf-8")
+            args.resume = True
         root, esp, root_fs, esp_fs = validate(args.root, args.esp, args.install_id if args.resume else None)
         print("Root: " + root_fs["source"] + " at " + str(root), flush=True)
         print("ESP:  " + esp_fs["source"] + " at " + str(esp), flush=True)
@@ -1627,8 +1839,7 @@ def main():
                     input("Type INSTALL to build into these empty filesystems: ") != "INSTALL":
                 print("Nothing changed.")
                 return 0
-            if not args.resume:
-                args.install_id = uuid.uuid4().hex
+            args.install_id = args.install_id or uuid.uuid4().hex
             fwd = []
             for k, v in (("--root", str(root)), ("--esp", str(esp)), ("--level", args.level),
                          ("--cpu", args.cpu), ("--repos", args.repos),

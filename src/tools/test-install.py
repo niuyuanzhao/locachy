@@ -64,8 +64,94 @@ class Install(unittest.TestCase):
         patch = mock.patch.dict(os.environ, {"LOCACHY_APPS_CATALOG": str(self.apps), "LOCACHY_APPS": ""})
         patch.start()
         self.addCleanup(patch.stop)
+        # AUR metadata/key handling has its own tests. These mount/option
+        # cases never query the network or execute a package helper.
+        patch = mock.patch.object(i, "preflight_keys", return_value=0)
+        patch.start()
+        self.addCleanup(patch.stop)
+        def trust(keys, root=None):
+            return i.subprocess.run(["arch-chroot", str(root), "/usr/local/bin/locachy-build", "--trust-key"] + keys).returncode
+        patch = mock.patch.object(i, "trust_install_keys", side_effect=trust)
+        patch.start()
+        self.addCleanup(patch.stop)
 
     APPS_URL = "https://example.org/locachy-apps.git"
+
+    def test_preflight_unknown_keys_stop_before_partition_and_target_mutations(self):
+        argv = ["locachy-install", "--disk=/dev/vdb", "--yes", "--features=howdy"]
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(i.os, "geteuid", return_value=0), \
+             mock.patch.object(i, "check_choices"), mock.patch.object(i, "check_targets"), \
+             mock.patch.object(i, "preflight_keys", return_value=3), \
+             mock.patch.object(i, "prepare_partitions") as partition, mock.patch.object(i, "run") as run, \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(i.main(), 3)
+        partition.assert_not_called()
+        run.assert_not_called()
+        record = json.loads(self.record.read_text())
+        self.assertEqual(record["phase"], "preflight")
+        self.assertIn("--disk", record["argv"])
+        self.assertNotIn("--password-file", record["argv"])
+        self.assertIn("Continue with: locachy-install --resume", out.getvalue())
+        # The record has no mounted target yet; a retry checks again, never
+        # calls resumed_target or treats it as a partially installed disk.
+        with mock.patch.object(sys, "argv", ["locachy-install", "--resume", "--yes"]), \
+             mock.patch.object(i.os, "geteuid", return_value=0), mock.patch.object(i, "check_choices"), \
+             mock.patch.object(i, "check_targets"), mock.patch.object(i, "preflight_keys", return_value=1), \
+             mock.patch.object(i, "resumed_target") as target, mock.patch.object(i, "prepare_partitions") as partition, \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(i.main(), 1)
+        target.assert_not_called()
+        partition.assert_not_called()
+
+    def test_preflight_success_is_read_only_and_trust_works_before_target_exists(self):
+        argv = ["locachy-install", "--preflight", "--disk=/dev/vdb", "--yes"]
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(i.os, "geteuid", return_value=0), \
+             mock.patch.object(i, "check_choices"), mock.patch.object(i, "check_targets"), \
+             mock.patch.object(i, "prepare_partitions") as partition, mock.patch.object(i, "run") as run, \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(i.main(), 0)
+        partition.assert_not_called()
+        run.assert_not_called()
+        args = self.args("--disk=/dev/vdb")
+        i.write_resume_record("a" * 32, "", i.safe_arguments(args), args, phase="preflight")
+        key = "A" * 40
+        with mock.patch.object(sys, "argv", ["locachy-install", "--trust-key", key]), \
+             mock.patch.object(i.os, "geteuid", return_value=0), mock.patch.object(i, "resumed_target") as target, \
+             mock.patch.object(i, "trust_install_keys", return_value=0) as trust:
+            self.assertEqual(i.main(), 0)
+        target.assert_not_called()
+        trust.assert_called_once_with([key], None)
+
+    def test_target_resume_record_cannot_smuggle_partition_or_format_options(self):
+        args = self.args("--root=" + str(self.root), "--esp=" + str(self.esp))
+        i.write_resume_record("a" * 32, self.root, ["--disk", "/dev/vdb"], args)
+        with mock.patch.object(sys, "argv", ["locachy-install", "--resume"]), \
+             mock.patch.object(i.os, "geteuid", return_value=0), \
+             mock.patch.object(i, "resumed_target", return_value=self.root), \
+             mock.patch.object(i, "prepare_partitions") as partition, \
+             contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            i.main()
+        partition.assert_not_called()
+
+    def test_partitioning_resume_refuses_to_repeat_after_formatter_interruption(self):
+        args = self.args("--disk=/dev/vdb", "--yes")
+        i.write_resume_record("a" * 32, "", i.safe_arguments(args), args, phase="partitioning")
+        with mock.patch.object(sys, "argv", ["locachy-install", "--resume"]), \
+             mock.patch.object(i.os, "geteuid", return_value=0), \
+             mock.patch.object(i, "prepare_partitions") as partition, \
+             contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit):
+            i.main()
+        partition.assert_not_called()
+        self.assertIn("never repeats partitioning", err.getvalue())
+
+    def test_complete_preflight_package_roots_include_modules_ime_and_selected_apps(self):
+        self.make_catalog({"demo": 'package="demo-aur"\nextras="another-package"\ncommand="/usr/bin/demo"\n'}, fmt="2")
+        args = self.args("--features=howdy", "--ime=zh", "--encrypt", "--containers=demo")
+        roots = i.selected_package_roots(args)
+        for name in ("howdy-git", "python-dlib", "linux-enable-ir-emitter-git", "cryptsetup",
+                     "demo-aur", "another-package", "librime", "rime-frost-git", "noto-fonts-cjk"):
+            self.assertIn(name, roots)
+        self.assertIn("base", roots)
 
     def make_catalog(self, presets, commit="c" * 40, dest=None, origin="repository", fmt="1"):
         dest = dest or self.apps
@@ -552,6 +638,9 @@ class Install(unittest.TestCase):
         self.assertIn(f"Trust them: locachy-install --trust-key {key}\n", said)
         self.assertIn("Continue with: locachy-install --resume\n", said)
         record = json.loads(self.record.read_text())
+        self.assertEqual(record["schema"], 2)
+        self.assertEqual(record["phase"], "target")
+        self.assertIn("source", record)
         install_id = record["install_id"]
         self.assertRegex(install_id, "^[0-9a-f]{32}$")
         self.assertEqual(oct(self.record.stat().st_mode & 0o777), "0o600")

@@ -90,8 +90,34 @@ die() {
     exit 1
 }
 
+key_uid= key_gid=
 as_builder() {
-    setpriv --reuid="$user" --regid="$user" --init-groups --reset-env "$@"
+    if [ -n "$key_uid" ]; then
+        # Enter as root before dropping the identity: the install target
+        # may be below a root-only mountpoint. No ancestor needs opening.
+        (cd "$home" && setpriv --reuid="$key_uid" --regid="$key_gid" --clear-groups --reset-env \
+            env HOME=. GNUPGHOME=.gnupg "$@")
+    else
+        setpriv --reuid="$user" --regid="$user" --init-groups --reset-env "$@"
+    fi
+}
+
+# Only key lookup/trust may use an installation target's existing keyring.
+# Its account comes from that root, not an unrelated UID allocated by the
+# live medium. This changes no target packages and executes no target code.
+key_root() {
+    [ "$(id -u)" = 0 ] || die "--key-root requires root"
+    local target=$1 identity
+    [ -d "$target" ] && [ ! -L "$target" ] && [ "$(realpath -e "$target")" = "$target" ] ||
+        die "--key-root must be a canonical directory"
+    identity=$(awk -F: '$1 == "locachy-builder" {print $3, $4}' "$target/etc/passwd")
+    read -r key_uid key_gid <<<"$identity"
+    [[ "$key_uid" =~ ^[0-9]+$ && "$key_gid" =~ ^[0-9]+$ ]] && [ "$key_uid" != 0 ] && [ "$key_gid" != 0 ] ||
+        die "no unprivileged build identity in $target"
+    bdir=${target%/}/var/lib/locachy/builder
+    home=$bdir/home
+    [ -d "$home" ] && [ ! -L "$home" ] && [ "$(realpath -e "$home")" = "$home" ] ||
+        die "invalid build home in $target"
 }
 
 # The build user's keyring, opened by every run that reads or changes it
@@ -148,8 +174,20 @@ keys_stop() {
 # shown to a person as it is, printable characters only.
 aur_keys() {
     "${aur_runner[@]}" python3 -I - "$@" <<'PY'
-import json, re, subprocess, sys, urllib.parse, urllib.request
+import json, os, re, subprocess, sys, urllib.parse, urllib.request
+# Installation queries use fresh private sync databases, never the live
+# system's installed set: a dependency present on the medium may be built
+# from the AUR on the target.
+installation = len(sys.argv) > 1 and sys.argv[1] == '--installation-db'
+config = db = source = ''
+if installation:
+    config, db, source = sys.argv[2:5]
+    sys.argv = [sys.argv[0]] + sys.argv[5:]
 def found(*cmd):
+    if installation and cmd[:2] == ('pacman', '-T'):
+        return False
+    if installation and cmd[:2] == ('pacman', '-Sp'):
+        cmd = ('pacman', '--config', config, '--dbpath', db, '-Sp', '--', *cmd[2:])
     return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 def get(url):
     with urllib.request.urlopen(url, timeout=30) as r:
@@ -160,15 +198,35 @@ def info(batch):
 def shown(text):
     text = "".join(c for c in text if c.isprintable() and not c.isspace())[:300]
     return text or "-"
-roots = {n: {n} for n in sys.argv[1:]}
-seen, bases, base_of, todo = set(), {}, {}, list(sys.argv[1:])
+# Repository roots do not have AUR recipes. Tracked split packages use the
+# official package named by their upstream metadata, not an AUR namesake.
+local = {}
+if installation:
+    from pathlib import Path
+    for metadata in (Path(source) / 'pkgbuilds').glob('*/upstream.json'):
+        entry = json.loads(metadata.read_text())
+        local[metadata.parent.name] = entry['package']
+    requested = []
+    for name in sys.argv[1:]:
+        package = local.get(name, name)
+        if not found('pacman', '-Sp', package):
+            if name in local:
+                raise RuntimeError('tracked package is missing from its repositories: ' + name)
+            requested.append(name)
+else:
+    requested = sys.argv[1:]
+roots = {n: {n} for n in requested}
+seen, bases, base_of, todo = set(), {}, {}, list(requested)
 while todo:
     batch = sorted(set(todo) - seen)
     todo = []
     if not batch:
         break
     seen |= set(batch)
-    for pkg in info(batch):
+    answers = info(batch)
+    if installation and set(batch) - {p['Name'] for p in answers}:
+        raise RuntimeError('the AUR returned no recipe for: ' + ', '.join(sorted(set(batch) - {p['Name'] for p in answers})))
+    for pkg in answers:
         name, base = pkg["Name"], pkg["PackageBase"]
         base_of[name] = base
         bases.setdefault(base, set()).update(roots.get(name, {name}))
@@ -673,14 +731,29 @@ fi
 
 if [ "${1:-}" = --check-keys ]; then
     shift
+    if [ "${1:-}" = --key-root ]; then
+        [ $# -ge 3 ] || die "--key-root needs a target and package names"
+        key_root "$2"
+        shift 2
+    fi
+    lookup=()
+    if [ "${1:-}" = --installation-db ]; then
+        [ $# -ge 5 ] || die "--installation-db needs CONFIG DATABASE SOURCE and package names"
+        lookup=(--installation-db "$2" "$3" "$4")
+        shift 4
+    fi
     [ $# -gt 0 ] || die "--check-keys takes AUR package names"
     for name in "$@"; do
         [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9@._+-]*$ ]] || die "not a package name: $name"
     done
-    getent passwd "$user" >/dev/null && [ -d "$home" ] || die "no build user $user with its home $home: make.sh makes them"
+    if [ -z "$key_uid" ]; then
+        getent passwd "$user" >/dev/null && [ -d "$home" ] || die "no build user $user with its home $home: make.sh makes them"
+        aur_runner=(setpriv --reuid="$user" --regid="$user" --init-groups --reset-env)
+    else
+        aur_runner=(setpriv --reuid="$key_uid" --regid="$key_gid" --clear-groups --reset-env)
+    fi
     # The AUR's answers are read by the build user, in locachy-net when it is
     # there, as a build reads them; its keyring is only looked in.
-    aur_runner=(setpriv --reuid="$user" --regid="$user" --init-groups --reset-env)
     [ ! -e /run/netns/locachy-net ] || aur_runner=(ip netns exec locachy-net "${aur_runner[@]}")
     exec {lock}>"$bdir/lock"
     flock -n "$lock" || { echo "locachy-build: waiting for the build that runs now" >&2; flock -x "$lock"; }
@@ -688,7 +761,7 @@ if [ "${1:-}" = --check-keys ]; then
     sources_out=$handover/untrusted-sources
     keyring_open
     trap 'keyring_close; rm -rf "$handover"' EXIT
-    keys=$(aur_keys "$@") || die "the AUR did not answer for: $*"
+    keys=$(aur_keys "${lookup[@]}" "$@") || die "the AUR did not answer for: $*"
     check_keys <<<"$keys"
     if [ "$untrusted" = 0 ]; then
         rm -f "$bdir/untrusted-keys" # what the last one stopped for: none now
@@ -704,8 +777,15 @@ fi
 
 if [ "${1:-}" = --trust-key ]; then
     shift
+    if [ "${1:-}" = --key-root ]; then
+        [ $# -ge 3 ] || die "--key-root needs a target and fingerprints"
+        key_root "$2"
+        shift 2
+    fi
     [ $# -gt 0 ] || die "--trust-key takes full fingerprints"
-    getent passwd "$user" >/dev/null && [ -d "$home" ] || die "no build user $user with its home $home: make.sh makes them"
+    if [ -z "$key_uid" ]; then
+        getent passwd "$user" >/dev/null && [ -d "$home" ] || die "no build user $user with its home $home: make.sh makes them"
+    fi
     for key in "$@"; do
         [[ "$key" =~ ^[[:xdigit:]]{40}$ || "$key" =~ ^[[:xdigit:]]{64}$ ]] || die "not a full fingerprint: $key"
     done

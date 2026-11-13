@@ -209,7 +209,8 @@ class InstallerProfile(unittest.TestCase):
         self.assertFalse((root / "etc/systemd/system/serial-getty@.service.d").exists())
         login = (root / "root/.bash_profile").read_text()
         self.assertIn('if [ "$(tty)" = /dev/tty1 ]; then', login)
-        self.assertLess(login.index("/usr/local/bin/installer\n"), login.index("/usr/local/bin/installer --text"))
+        self.assertTrue((root / "usr/local/src/locachy/installer/live-update.py").is_file())
+        self.assertLess(login.index('/usr/local/bin/locachy-install --ui'), login.index('/usr/local/bin/installer --text'))
         packages = set((profile / "packages.x86_64").read_text().splitlines())
         self.assertTrue({"freetype2", "libinput", "json-c", "ttf-dejavu", "noto-fonts-cjk", "wayland",
                          "openssh", "openssl", "iproute2", "util-linux"} <= packages)

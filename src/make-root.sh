@@ -13,8 +13,8 @@
 # files stay in DIR/usr/local/lib/locachy/boot for the installer to commit.
 # --install-id ID marks the target as that installation's (in its work
 # directory); with --resume, a target so marked is built on where a run of
-# that installation stopped: what is there stays (packages, builds), each
-# step is done again and finds its part done.
+# that installation stopped: what is there stays (packages, builds), and
+# successful software stages are reused only for identical content inputs.
 # A root caller uses private mount/PID/cgroup namespaces; an unprivileged
 # caller maps their /etc/subuid range, as pacstrap -N does.
 #
@@ -436,8 +436,24 @@ w=$(chroot "$root" pacman -Q 2>&1 >/dev/null | wc -l)
 chroot "$root" pacman -Sl | cut -d' ' -f1 | uniq -c | tr -s ' ' | tr '\n' ';'
 echo
 
-echo "== sources and package helpers in /usr/local/src/locachy"
+# Successful software stages are reusable only for their exact inputs. The
+# disk identity checks above always run; no stage ever partitions or formats.
+state=$here/link/locachy_install_state.py
+stage_dir=$root/.locachy-installer
+stage_fingerprint() {
+    python3 -I "$state" fingerprint "$here" "$1" "$root" "$level" "$cpu"
+}
+stage_needed() {
+    local status=0
+    python3 -I "$state" needed "$stage_dir" "$1" "$2" || status=$?
+    [ "$status" = 0 ] || [ "$status" = 10 ] || die "cannot read installer stage $1"
+    return $((status == 10 ? 1 : 0))
+}
+source_input=$(stage_fingerprint sources) || die "cannot fingerprint installation sources"
 s=$root/usr/local/src/locachy
+if [ ! -d "$s" ] || stage_needed sources "$source_input"; then
+python3 -I "$state" begin "$stage_dir" sources
+ echo "== sources and package helpers in /usr/local/src/locachy"
 rm -rf "$s" # this run's source, all of it (a run continued may have newer)
 mkdir -p "$s"
 cp -r "$here/base" "$here/init" "$here/progs" "$here/edit" "$here/link" "$here/tools" "$here/containers" \
@@ -520,6 +536,10 @@ if [ -n "$cachy" ]; then
 fi
 # The repositories' sections chosen, as rc.conf says them to settings.
 repo_choice >>"$s/rc.conf"
+python3 -I "$state" complete "$stage_dir" sources "$source_input"
+else
+    echo "Installer stage sources: unchanged successful inputs, reused"
+fi
 # makepkg reads these drop-ins after the packaged flags. Replace only the
 # architecture choice (CPU: a CPU model, or the level, then tuned generic),
 # retaining security, ABI, optimization and linker flags; Rust's the same,
@@ -544,15 +564,36 @@ EOF
 [ "$level" = x86-64 ] || echo "export GOAMD64=v${level#x86-64-v}" >>"$root/etc/makepkg.conf.d/99-locachy-cpu.conf"
 cp -L /etc/resolv.conf "$root/etc/resolv.conf"
 chroot "$root" sh /usr/local/src/locachy/link/install-pkg-tools /usr/local/src/locachy
+# Existing targets have a manifest already: install-pkg-tools deliberately
+# preserves it. Declare newly added base/module definitions before syncing.
+chroot "$root" python3 -I /usr/local/src/locachy/link/declare-packages /usr/local/src/locachy
 # AUR builds need an unprivileged identity. The first run can bootstrap
 # pikaur without either helper already installed; its dependencies stay in
 # the disposable build root. No LOCachy package hooks are installed yet.
 chroot "$root" pacman -Q pikaur-static >/dev/null 2>&1 || chroot "$root" /usr/local/bin/locachy-build -i pikaur-static
-chroot "$root" /usr/local/bin/locachy-pkg sync --first-install
+package_input=$(stage_fingerprint packages) || die "cannot fingerprint installation packages"
+if stage_needed packages "$package_input"; then
+    python3 -I "$state" begin "$stage_dir" packages
+    # A changed patch must rebuild an already installed AUR package, even
+    # when the package version itself is unchanged. Mark only after success.
+    python3 -I "$state" rebuild-patches "$here" packages "$root"
+    chroot "$root" /usr/local/bin/locachy-pkg sync --first-install
+    package_input=$(stage_fingerprint packages) || die "cannot fingerprint installed package inputs"
+    python3 -I "$state" complete "$stage_dir" packages "$package_input"
+else
+    echo "Installer stage packages: unchanged successful inputs, reused"
+fi
 chroot "$root" /usr/local/bin/locachy-pkg status
 
-echo "== our part: built against the complete package set"
-chroot "$root" /usr/local/src/locachy/make.sh --boot "$level" "$cpu"
+system_input=$(stage_fingerprint system) || die "cannot fingerprint system build"
+if [ ! -f "$root/usr/local/lib/locachy/boot/locachy.efi" ] || stage_needed system "$system_input"; then
+    python3 -I "$state" begin "$stage_dir" system
+    echo "== our part: built against the complete package set"
+    chroot "$root" /usr/local/src/locachy/make.sh --boot "$level" "$cpu"
+    python3 -I "$state" complete "$stage_dir" system "$system_input"
+else
+    echo "Installer stage system: unchanged successful inputs, reused"
+fi
 # The builder only stages boot files; it never writes the caller's ESP.
 if [ -z "$target" ]; then
     cp "$root"/usr/local/lib/locachy/boot/locachy.efi "$out/esp/"
