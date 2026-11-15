@@ -2,7 +2,7 @@
 
 [中文](WINDOWS.zh.md)
 
-view, files, settings, mixer, bluetooth, network and term can be windows of
+view, edit, archive, packages, firmware, files, settings, mixer, bluetooth, network and term can be windows of
 their own on the shared display, besides running on the direct screens from
 home. A window is a managed instance of the same program, not a copy of it:
 process 1 starts, freezes and stops it like a container, it never holds a
@@ -16,15 +16,19 @@ it is open.
 shared display. The top bar runs them (its launcher mirrors home's sections,
 its Bluetooth block opens bluetui when the service is on, its volume block the
 mixer, and its other right-hand status blocks open settings at a page), and so
-does the bar's xdg-open for a container on the shared display: a document view
-opens goes to a view window, a folder to a files window, instead of switching
-to home.
+does the bar's xdg-open for a container on the shared display: document and text
+files open in view or edit windows, archives in an archive window, and folders in
+a files window, instead of switching to home.
 
 | PROGRAM   | TARGET                                              | Command run |
 |-----------|-----------------------------------------------------|-------------|
 | settings  | none, or `network`, `power`, `devices`, `date-time`, `hardware` | `/usr/local/bin/settings [--page=PAGE]` |
 | view      | none (its chooser), or an absolute path of a file   | `/usr/local/bin/view [FILE]` |
+| edit      | none, or an absolute path of a file                 | `/usr/local/bin/edit [FILE]` |
+| archive   | none (its chooser), or an absolute path of a file   | `/usr/local/bin/archive [FILE]` |
 | files     | none (home), or an absolute path of a folder        | `/usr/local/bin/files [FOLDER]` |
+| packages  | none                                                | `/usr/local/bin/packages` |
+| firmware  | none                                                | `/usr/local/bin/firmware` |
 | mixer     | none                                                | `/usr/local/bin/term /usr/bin/wiremix` |
 | bluetooth | none                                                | `/usr/local/bin/term /usr/bin/bluetui` |
 | network   | none                                                | `/usr/local/bin/term /usr/bin/nmtui` |
@@ -72,9 +76,9 @@ A window waits for the shared display's display-ready, as a container does
 display starts for it and is not stopped while a window runs, even when no
 container does.
 
-settings, the mixer, bluetooth and network have one window each: another
+settings, packages, firmware, the mixer, bluetooth and network have one window each: another
 request raises it, and a settings page goes to the open window as `page NAME`
-instead of a second copy. view, files and term open a window per request (at
+instead of a second copy. view, edit, archive, files and term open a window per request (at
 most sixteen windows).
 
 Closing the window (its close button, Alt+F4) reaches the program as
@@ -85,10 +89,13 @@ Closing the window (its close button, Alt+F4) reaches the program as
   closes once the copy is done, Esc keeps the window.
 - view leaves as Ctrl+Q does; with unsaved changes it asks to save or
   discard them first, and the window stays open meanwhile.
-- settings leaves as Ctrl+Q does, also while one of its package, repositories
-  or boot image jobs runs or waits: those are system jobs (`locachy-jobs`,
+- edit leaves as Ctrl+Q does; with unsaved changes it asks to save or
+  discard them first, and the window stays open meanwhile.
+- archive leaves as Ctrl+Q does, and confirms cancelling if a job is in progress.
+- settings, packages and firmware leave as Ctrl+Q does, also while their system jobs
+  run or wait: those are system jobs (`locachy-jobs`,
   [JOBS.md](JOBS.md)), run apart from the window, which go on without it;
-  home lists them, and settings, opened again, follows them again.
+  home lists them, and the programs follow them again when reopened.
 - the mixer (`term`) hangs up its program's process group (SIGHUP), as a
   terminal does when it closes, and ends.
 
@@ -107,14 +114,15 @@ on SIGTERM during a copy it removes the unfinished copy first (below).
 A window has no process 1 to ask, so files opens what it is asked to
 differently from home's file manager, and says when it cannot:
 
-- a file whose program is the document viewer as installed
-  (`/usr/local/bin/view`) opens in a view window of its own, through
-  `locachy-seat --window view PATH`, run by itself as the top bar runs it;
+- a file whose program is view, edit or archive as installed
+  (`/usr/local/bin/view`, `/usr/local/bin/edit`, `/usr/local/bin/archive`) opens in a window
+  of its own, through `locachy-seat --window PROGRAM PATH`, run by itself as the top bar runs it;
+- opening a terminal in the current folder opens a managed `term` window;
 - a file for a container goes to the top bar's open socket
   (`/run/locachy/open/socket`, `with NAME TARGET`, xdg-open's protocol). The
   bar and files both keep a container to the shared folders;
 - a folder is browsed in the window;
-- any other framebuffer program (edit, archive, term) is refused with a
+- any other framebuffer program (admin) is refused with a
   message that it opens from home only;
 - the requests left for home (`/run/locachy/files-request`, `open-request`)
   stay home's.

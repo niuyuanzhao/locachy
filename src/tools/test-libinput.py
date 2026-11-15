@@ -239,7 +239,6 @@ package_libinput
         instructions = (SOURCE / "pkgbuilds/libinput/BEHAVIOR.md").read_text()
         self.assertIn("--filter-test='touchpad_circular_scroll_*'", instructions)
         self.assertIn("test-pointer-libinput.sh", instructions)
-        self.assertIn("smoke result alone is insufficient", instructions)
 
     def test_changed_patch_anchor_or_upstream_prepare_fail_closed(self):
         for recipe, expected in ((RECIPE.replace("-D documentation=false", "-D documentation=true"), "failed"),

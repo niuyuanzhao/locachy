@@ -88,8 +88,12 @@ struct native_program {
 
 static const struct native_program natives[] = {
     { "view", "View", APP_NATIVE_DIR "/view", NULL, 0, TARGET_FILE },
+    { "edit", "Edit", APP_NATIVE_DIR "/edit", NULL, 0, TARGET_FILE },
+    { "archive", "Archive", APP_NATIVE_DIR "/archive", NULL, 0, TARGET_FILE },
     { "files", "Files", APP_NATIVE_DIR "/files", NULL, 0, TARGET_FOLDER },
     { "settings", "Settings", APP_NATIVE_DIR "/settings", NULL, 1, TARGET_PAGE },
+    { "packages", "Packages", APP_NATIVE_DIR "/packages", NULL, 1, TARGET_NONE },
+    { "firmware", "Firmware", APP_NATIVE_DIR "/firmware", NULL, 1, TARGET_NONE },
     { "mixer", "Mixer", APP_NATIVE_DIR "/term", APP_MIXER_COMMAND, 1, TARGET_NONE },
     { "bluetooth", "Bluetooth", APP_NATIVE_DIR "/term", APP_BLUETOOTH_COMMAND, 1, TARGET_NONE },
     { "network", "Network", APP_NATIVE_DIR "/term", APP_NETWORK_COMMAND, 1, TARGET_NONE },
@@ -1133,9 +1137,31 @@ static int native_valid_target(const struct native_program *p, const char *targe
         snprintf(why, size, "unknown settings page");
         return 0;
     case TARGET_FILE:
+        if (target[0] != '/') {
+            snprintf(why, size, "%s cannot open %.200s", p->program, target);
+            return 0;
+        }
+        if (stat(target, &st) == 0) {
+            if (S_ISREG(st.st_mode) || (strcmp(p->program, "view") == 0 && S_ISDIR(st.st_mode))) {
+                return 1;
+            }
+            snprintf(why, size, "%s cannot open %.200s", p->program, target);
+            return 0;
+        }
+        if (errno == ENOENT && strcmp(p->program, "edit") == 0 && target[len - 1] != '/') {
+            char parent[1024];
+            snprintf(parent, sizeof parent, "%s", target);
+            char *slash = strrchr(parent, '/');
+            if (slash && slash == parent) parent[1] = '\0';
+            else if (slash) *slash = '\0';
+            if (stat(parent, &st) == 0 && S_ISDIR(st.st_mode)) {
+                return 1;
+            }
+        }
+        snprintf(why, size, "%s cannot open %.200s", p->program, target);
+        return 0;
     case TARGET_FOLDER:
-        if (target[0] != '/' || stat(target, &st) != 0 ||
-            (p->target == TARGET_FOLDER ? !S_ISDIR(st.st_mode) : !S_ISREG(st.st_mode))) {
+        if (target[0] != '/' || stat(target, &st) != 0 || !S_ISDIR(st.st_mode)) {
             snprintf(why, size, "%s cannot open %.200s", p->program, target);
             return 0;
         }

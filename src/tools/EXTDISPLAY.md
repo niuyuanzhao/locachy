@@ -43,10 +43,9 @@ When `extdisplay` is opened on LOCachy:
 
 While the link is active:
 
-- All keyboard input (including `Ctrl+Q`, `Esc`, and `q`), trackpad gestures, and pointer movements are forwarded to the sender.
+- All keyboard input (including `Ctrl+Q`, `Esc`, `q`, and `Ctrl+Alt+F12`), trackpad gestures, and pointer movements are forwarded to the sender.
 - `Super+Esc` (Home) and `Super+L` (Lock) switch the local screen while keeping the link alive (`base_session_hold`).
 - Idle auto-lock is deferred while the live extended display is shown, and takes effect immediately once the cable is unplugged or the session closes.
-- `Ctrl+Alt+F12` disconnects the current session and returns to the setup screen.
 - When the cable is unplugged, the session ends and the next key closes `extdisplay`.
 
 ## Tests

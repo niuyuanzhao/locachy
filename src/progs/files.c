@@ -98,6 +98,14 @@
 #ifndef VIEW_PROGRAM
 #define VIEW_PROGRAM "/usr/local/bin/view"
 #endif
+#ifndef EDIT_PROGRAM
+#define EDIT_PROGRAM "/usr/local/bin/edit"
+#endif
+#ifndef ARCHIVE_PROGRAM_BIN
+#define ARCHIVE_PROGRAM_BIN "/usr/local/bin/archive"
+#endif
+
+static int seat_window(const char *program, const char *target, char *why, size_t size);
 
 #ifndef CLOUD_STATUS
 #define CLOUD_STATUS "/run/locachy/cloud/status"
@@ -2668,8 +2676,11 @@ static void open_terminal_here(void)
         "cd -- \"$1\" 2>/dev/null || true; exec /bin/bash -l", "sh", (char *)dir, NULL
     };
     if (in_window()) {
-        /* TRANSLATORS: %s is a program's name (term, edit, archive). */
-        report(1, _("%s opens from home only, not from a window."), "term");
+        if (seat_window("term", "", why, sizeof why) == 0) {
+            report(0, _("Opened with %s in a window."), "term");
+        } else {
+            report(1, _("Cannot open a %s window: %.400s"), "term", why);
+        }
         return;
     }
     base_open(argv, why, sizeof why);
@@ -4374,7 +4385,8 @@ static int seat_window(const char *program, const char *target, char *why, size_
         int null = open("/dev/null", O_RDONLY | O_CLOEXEC);
         if (null >= 0) dup2(null, STDIN_FILENO);
         dup2(err[1], STDERR_FILENO);
-        char *argv[] = { "locachy-seat", "--window", (char *)program, (char *)target, NULL };
+        char *argv[5] = { "locachy-seat", "--window", (char *)program, NULL, NULL };
+        if (target && target[0]) argv[3] = (char *)target;
         execv(SEAT_CLIENT, argv);
         dprintf(STDERR_FILENO, "cannot run %s: %s", SEAT_CLIENT, strerror(errno));
         _exit(127);
@@ -4455,14 +4467,17 @@ static int bar_open(const char *name, const char *target, char *why, size_t size
 static void open_program_window(const char *program, const char *path, const char *type, int words, char *const *argv)
 {
     char why[512];
+    const char *win = words == 2 ? (strcmp(argv[0], VIEW_PROGRAM) == 0 ? "view" :
+                                    strcmp(argv[0], EDIT_PROGRAM) == 0 ? "edit" :
+                                    strcmp(argv[0], ARCHIVE_PROGRAM_BIN) == 0 ? "archive" : NULL) : NULL;
     if (strcmp(type, "inode/directory") == 0 && path[0] == '/') {
         if (go(path, NULL) == 0) report(0, _("Folders are browsed here in a window."));
-    } else if (words == 2 && strcmp(argv[0], VIEW_PROGRAM) == 0 && path[0] == '/') {
+    } else if (win && path[0] == '/') {
         say("files: open %s with %s in a window", path, program);
-        if (seat_window("view", path, why, sizeof why) == 0) {
+        if (seat_window(win, path, why, sizeof why) == 0) {
             report(0, _("Opened with %s in a window."), program);
         } else {
-            say("files: no view window: %s", why);
+            say("files: no %s window: %s", win, why);
             /* TRANSLATORS: first %s is a program's name, second %s why it did not open. */
             report(1, _("Cannot open a %s window: %.400s"), program, why);
         }
@@ -4959,7 +4974,13 @@ static void archive_action(int code)
     char *argv[MAX_CLIP + 8], name[NAME_MAX + 16] = "", made[PATH_MAX];
     if (n == 0 || is_trash(P) || is_search(P)) return;
     if (in_window()) {
-        report(1, _("%s opens from home only, not from a window."), "archive");
+        char why[512];
+        if (seat_window("archive", (code == KEY_EXTRACT_HERE || code == KEY_EXTRACT_TRASH || code == KEY_EXTRACT_TO) &&
+                        item_path(P, idx[0], made, sizeof made) == 0 ? made : "", why, sizeof why) == 0) {
+            report(0, _("Opened with %s in a window."), "archive");
+        } else {
+            report(1, _("Cannot open a %s window: %.400s"), "archive", why);
+        }
         return;
     }
     argv[k++] = ARCHIVE_PROGRAM;

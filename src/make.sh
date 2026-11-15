@@ -206,13 +206,13 @@ $GCC -shared -fPIC -o /usr/lib/security/pam_locachy_duress.so "$src/progs/pam_lo
 $GCC -o /usr/local/bin/locachy-duress "$src/progs/locachy-duress.c" "$src/progs/duress-shadow.c" "$b"/glibc-base-duress.o -lcrypt
 $GCC -o /usr/local/bin/locachy-seat "$src/progs/seat.c" "$b"/glibc-base-*.o $FT_LIBS
 $GCC -o /usr/local/bin/note "$src/progs/note.c" "$b"/glibc-base-*.o $FT_LIBS
-$GCC -o /usr/local/bin/packages "$src/progs/packages.c" "$src/progs/files.c" "$b"/glibc-base-*.o $FT_LIBS
-$GCC -o /usr/local/bin/firmware "$src/progs/firmware.c" "$src/progs/files.c" "$b"/glibc-base-*.o $FT_LIBS
+$GCC -o /usr/local/bin/packages "$src/progs/packages.c" "$src/progs/files.c" "$b"/$WIN-*.o $FT_LIBS $WIN_LIBS
+$GCC -o /usr/local/bin/firmware "$src/progs/firmware.c" "$src/progs/files.c" "$b"/$WIN-*.o $FT_LIBS $WIN_LIBS
 # The archive manager: archive on the screen, archive-worker reading and
 # writing the archives as the user in a sandbox (progs/archive-proto.h), with
 # libarchive and OpenSSL, which pacman itself needs.
 $GCC -o "$lib/archive-worker" "$src/progs/archive-worker.c" $(pkg-config --cflags --libs libarchive libcrypto)
-$GCC -o /usr/local/bin/archive "$src/progs/archive.c" "$src/progs/files.c" "$b"/glibc-base-*.o $FT_LIBS
+$GCC -o /usr/local/bin/archive "$src/progs/archive.c" "$src/progs/files.c" "$b"/$WIN-*.o $FT_LIBS $WIN_LIBS
 $GCC -o "$lib/drives" "$src/progs/drives.c" "$b"/glibc-base-*.o $FT_LIBS
 $GCC -o "$lib/battery-history" "$src/progs/battery-history.c"
 # The system jobs' queue (tools/JOBS.md): long root operations, one at a time.
@@ -245,7 +245,8 @@ if pkg-config --exists tree-sitter libpcre2-8 json-glib-1.0; then
     $GCC $IME_CFLAGS $(pkg-config --cflags json-glib-1.0) -o /usr/local/bin/edit "$src/progs/edit.c" "$src/progs/edit-buffer.c" "$src/progs/edit-doc.c" \
         "$src/progs/edit-file.c" "$src/progs/edit-search.c" "$src/progs/edit-syntax.c" "$src/progs/edit-tree.c" \
         "$src/progs/edit-layout.c" "$src/progs/edit-lsp.c" "$src/progs/edit-session.c" \
-        "$src/progs/edit-filesearch.c" "$src/progs/files.c" "$b"/glibc-base-*.o "$b/glibc-ime.o" $IME_LIBS $FT_LIBS -ltree-sitter -lpcre2-8 $(pkg-config --libs json-glib-1.0)
+        "$src/progs/edit-filesearch.c" "$src/progs/files.c" "$b"/$WIN-*.o "$b/glibc-ime.o" $IME_LIBS $FT_LIBS \
+        -ltree-sitter -lpcre2-8 $(pkg-config --libs json-glib-1.0) $WIN_LIBS
     rm -rf /usr/local/share/locachy/edit
     install -d /usr/local/share/locachy/edit/queries
     cp -R "$src/edit/queries/." /usr/local/share/locachy/edit/queries/

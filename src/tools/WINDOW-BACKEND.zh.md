@@ -2,7 +2,7 @@
 
 [English](WINDOW-BACKEND.md)
 
-基础库程序（term、settings、view、files）都画在软件画布上。在自己的屏幕上时，它们经 DRM 显示，输入设备由进程 1 出借。同一程序也可以在共享桌面上以普通窗口显示。只有受信任的窗口启动器能选择这一方式，方法是设置 `LOCACHY_BACKEND=wayland`；其他取值以及未设置时，都走原来的直连路径，行为不变。
+基础库程序（term、settings、view、edit、archive、packages、firmware、files）都画在软件画布上。在自己的屏幕上时，它们经 DRM 显示，输入设备由进程 1 出借。同一程序也可以在共享桌面上以普通窗口显示。只有受信任的窗口启动器能选择这一方式，方法是设置 `LOCACHY_BACKEND=wayland`；其他取值以及未设置时，都走原来的直连路径，行为不变。
 
 ## 选择是显式的，失败即关闭
 

@@ -494,7 +494,7 @@ static void launcher_keys(void)
     snprintf(launch_bt_path, sizeof launch_bt_path, "%s/bluetui", launch_bin_dir);
     snprintf(launch_net_path, sizeof launch_net_path, "%s/nmtui", launch_bin_dir);
     snprintf(launch_shell_path, sizeof launch_shell_path, "%s/user-shell", launch_bin_dir);
-    static const char *const bins[] = { "files", "view", "term", "settings", "wiremix", "bluetui", "nmtui", "user-shell" };
+    static const char *const bins[] = { "files", "view", "edit", "archive", "packages", "firmware", "term", "settings", "wiremix", "bluetui", "nmtui", "user-shell" };
     for (size_t i = 0; i < sizeof bins / sizeof *bins; i++) {
         snprintf(path, sizeof path, "%s/%s", launch_bin_dir, bins[i]);
         make_exec_file(path);
@@ -590,11 +590,14 @@ static void launcher_keys(void)
     assert(!strcmp(launcher.items[hdr_cont + 4].name, "wechat") && !strcmp(launch_detail(&launcher.items[hdr_cont + 4]), "frozen"));
     assert(!strcmp(launcher.items[hdr_prog + 1].name, "files") && !strcmp(launch_detail(&launcher.items[hdr_prog + 1]), "window"));
     assert(!strcmp(launcher.items[hdr_prog + 2].name, "view") && !strcmp(launch_detail(&launcher.items[hdr_prog + 2]), "window"));
-    assert(!strcmp(launcher.items[hdr_prog + 3].name, "edit") && !strcmp(launch_detail(&launcher.items[hdr_prog + 3]), "full screen"));
+    assert(!strcmp(launcher.items[hdr_prog + 3].name, "edit") && !strcmp(launch_detail(&launcher.items[hdr_prog + 3]), "window"));
+    assert(!strcmp(launcher.items[hdr_prog + 4].name, "archive") && !strcmp(launch_detail(&launcher.items[hdr_prog + 4]), "window"));
     assert(!strcmp(launcher.items[hdr_prog + 5].name, "term") && !strcmp(launch_detail(&launcher.items[hdr_prog + 5]), "window"));
     assert(!strcmp(launcher.items[hdr_sys + 1].name, "admin") && !strcmp(launch_detail(&launcher.items[hdr_sys + 1]), "full screen"));
     assert(!strcmp(launcher.items[hdr_sys + 2].name, "network") && !strcmp(launch_detail(&launcher.items[hdr_sys + 2]), "window"));
     assert(!strcmp(launcher.items[hdr_sys + 3].name, "settings") && !strcmp(launch_detail(&launcher.items[hdr_sys + 3]), "window"));
+    assert(!strcmp(launcher.items[hdr_sys + 4].name, "packages") && !strcmp(launch_detail(&launcher.items[hdr_sys + 4]), "window"));
+    assert(!strcmp(launcher.items[hdr_sys + 5].name, "firmware") && !strcmp(launch_detail(&launcher.items[hdr_sys + 5]), "window"));
     assert(!strcmp(launcher.items[hdr_sys + 6].name, "bluetooth") && !strcmp(launch_detail(&launcher.items[hdr_sys + 6]), "window"));
     assert(!strcmp(launcher.items[hdr_sys + 7].name, "mixer") && !strcmp(launch_detail(&launcher.items[hdr_sys + 7]), "window"));
     assert(launcher.items[hdr_sys + 8].kind == LAUNCH_REBOOT &&
@@ -668,7 +671,7 @@ static void launcher_keys(void)
     assert(grabbed == base && !want_grab);
     warning_targets(base);
 
-    static const char *const win_names[] = { "files", "view", "term", "network", "settings", "bluetooth", "mixer" };
+    static const char *const win_names[] = { "files", "view", "edit", "archive", "packages", "firmware", "term", "network", "settings", "bluetooth", "mixer" };
     for (size_t k = 0; k < sizeof win_names / sizeof *win_names; k++) {
         key(KEY_LEFTALT, 1); key(KEY_F1, 1); key(KEY_F1, 0); key(KEY_LEFTALT, 0);
         while (strcmp(launcher.items[launcher.sel].name, win_names[k]) != 0) { key(KEY_DOWN, 1); key(KEY_DOWN, 0); }

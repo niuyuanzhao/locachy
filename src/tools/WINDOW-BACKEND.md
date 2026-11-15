@@ -2,7 +2,7 @@
 
 [中文](WINDOW-BACKEND.zh.md)
 
-The base's programs (term, settings, view, files) draw into a software canvas.
+The base's programs (term, settings, view, edit, archive, packages, firmware, files) draw into a software canvas.
 On a screen of their own they show it through DRM, with input devices lent by
 process 1. The same programs can instead show it as an ordinary window on the
 shared display. Only the trusted window launcher chooses this, by setting

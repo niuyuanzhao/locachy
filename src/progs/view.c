@@ -3976,6 +3976,26 @@ static void open_containing_folder(void)
     char *slash = strrchr(dir, '/');
     if (slash && slash != dir) *slash = '\0';
     else if (slash) dir[1] = '\0';
+    const char *backend = getenv("LOCACHY_BACKEND");
+    if (backend && strcmp(backend, "wayland") == 0) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            setsid();
+            char *argv[] = { "locachy-seat", "--window", "files", dir, NULL };
+            execv("/usr/local/bin/locachy-seat", argv);
+            _exit(127);
+        }
+        if (pid > 0) {
+            int st = 0;
+            waitpid(pid, &st, 0);
+            if (WIFEXITED(st) && WEXITSTATUS(st) == 0) {
+                toast(0, _("%.200s shown in the file manager."), dir);
+                return;
+            }
+        }
+        toast(1, _("Cannot open a files window for %.200s."), dir);
+        return;
+    }
     snprintf(tmp, sizeof tmp, "%s.%d", FILES_REQUEST, (int)getpid());
     FILE *out = strchr(dir, '\n') ? NULL : fopen(tmp, "we");
     int ok = out && fprintf(out, "%s\n", dir) > 0;

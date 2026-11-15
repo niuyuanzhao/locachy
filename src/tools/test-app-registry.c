@@ -88,7 +88,7 @@ static void native_windows(void)
 {
     char why[256];
     assert(apps_display_state() == APPS_DISPLAY_STOPPED);
-    assert(apps_window_open("edit", "", why, sizeof why) == -1);
+    assert(apps_window_open("admin", "", why, sizeof why) == -1);
     assert(apps_window_open("../settings", "", why, sizeof why) == -1);
     assert(apps_window_open("settings", "bogus", why, sizeof why) == -1);
     assert(apps_window_open("settings", "network\n", why, sizeof why) == -1);
@@ -97,7 +97,7 @@ static void native_windows(void)
     assert(apps_window_open("files", "runtime", why, sizeof why) == -1);
     assert(apps_window_open("view", "doc.txt", why, sizeof why) == -1);
     assert(apps_window_open("view", ROOT "/missing.txt", why, sizeof why) == -1);
-    assert(apps_window_open("view", ROOT, why, sizeof why) == -1); /* a folder is no file */
+    assert(apps_window_open("edit", ROOT "/missing/deep/file.txt", why, sizeof why) == -1);
     lacks("window-");
     puts("PASS window requests: only the fixed programs, settings pages, view files, files folders");
 
@@ -222,6 +222,27 @@ static void native_windows(void)
     assert(apps_action("stop", "window-term-1", why, sizeof why) == 0);
     assert(apps_action("stop", "window-term-2", why, sizeof why) == 0);
     tick_for(800);
+
+    /* edit, archive, packages and firmware can also open as managed windows */
+    assert(apps_window_open("edit", ROOT "/doc.txt", why, sizeof why) == 0);
+    assert(apps_window_open("archive", ROOT "/doc.txt", why, sizeof why) == 0);
+    assert(apps_window_open("packages", "", why, sizeof why) == 0);
+    assert(apps_window_open("firmware", "", why, sizeof why) == 0);
+    tick_for(300);
+    contains("window-edit-1\trunning\t");
+    contains("window-archive-1\trunning\t");
+    contains("window-packages-1\trunning\t");
+    contains("window-firmware-1\trunning\t");
+    assert(apps_window_open("packages", "", why, sizeof why) == 0);
+    assert(apps_window_open("firmware", "", why, sizeof why) == 0);
+    lacks("window-packages-2");
+    lacks("window-firmware-2");
+    assert(apps_action("stop", "window-edit-1", why, sizeof why) == 0);
+    assert(apps_action("stop", "window-archive-1", why, sizeof why) == 0);
+    assert(apps_action("stop", "window-packages-1", why, sizeof why) == 0);
+    assert(apps_action("stop", "window-firmware-1", why, sizeof why) == 0);
+    tick_for(800);
+    lacks("window-");
     lacks("window-");
     puts("PASS the first window waits for display-ready; single mixer/bluetooth/network, multiple user-shell terms");
 

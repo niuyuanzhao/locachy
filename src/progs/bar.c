@@ -3093,17 +3093,19 @@ static void deliver(int client, const char *name, int user_picked)
         open_as_user(1);
         int shared = choose.target[0] != '/' || open_shared(choose.target, why, sizeof why);
         open_as_user(0);
+        const char *win_prog = words == 2 ? (strcmp(argv[0], "/usr/local/bin/view") == 0 ? "view" :
+                                             strcmp(argv[0], "/usr/local/bin/edit") == 0 ? "edit" :
+                                             strcmp(argv[0], "/usr/local/bin/archive") == 0 ? "archive" : NULL) : NULL;
         if (!opens_type(name, choose.type)) {
             say("locachy-bar: refused %s (%s) from %s with %s: it does not open that", choose.target,
                 choose.type, choose.from, name);
             answer(client, "error %s does not open files of this type", name);
         } else if (!shared) {
             answer(client, "error %s", why);
-        } else if (words == 2 && strcmp(argv[0], "/usr/local/bin/view") == 0 && choose.target[0] == '/' &&
-                   strlen(choose.target) < 1024) {
+        } else if (win_prog && choose.target[0] == '/' && strlen(choose.target) < 1024) {
             say("locachy-bar: open %s (%s) from %s with %s in a window", choose.target, choose.type, choose.from,
                 name);
-            window_open("view", choose.target);
+            window_open(win_prog, choose.target);
             answer(client, "ok %s", name);
         } else if (open_in_home(name, choose.target) < 0) {
             answer(client, "error cannot ask home to open it%s", "");
@@ -3869,6 +3871,10 @@ static int launch_window_capable(const char *name)
 {
     if (strcmp(name, "files") == 0) return launch_bin_installed("files");
     if (strcmp(name, "view") == 0) return launch_bin_installed("view");
+    if (strcmp(name, "edit") == 0) return launch_bin_installed("edit");
+    if (strcmp(name, "archive") == 0) return launch_bin_installed("archive");
+    if (strcmp(name, "packages") == 0) return launch_bin_installed("packages");
+    if (strcmp(name, "firmware") == 0) return launch_bin_installed("firmware");
     if (strcmp(name, "term") == 0) return launch_bin_installed("term") && launch_installed(LAUNCH_USER_SHELL);
     if (strcmp(name, "settings") == 0) return launch_bin_installed("settings");
     if (strcmp(name, "network") == 0) return launch_bin_installed("term") && launch_installed(LAUNCH_NETWORK);

@@ -86,7 +86,7 @@ int screen_is_extended(void) { return 0; }
 int screen_output_current(void) { return 0; }
 static char canvas[100][256];
 static uint32_t colors[100][256];
-static int keys[64], nkeys, keypos;
+static int keys[64], nkeys, keypos, key_at = -1, key_mods[64];
 static struct pointer_event mouse;
 static char snapshot[32];
 static const char *camera_listing = "", *pending_command;
@@ -524,6 +524,7 @@ int key_poll_timeout(int fd, int timeout)
 {
     (void)fd; (void)timeout;
     assert(keypos < nkeys);
+    key_at = keypos;
     int key = keys[keypos++];
     return key == -2 ? K_POINTER : key;
 }
@@ -864,7 +865,7 @@ static void test_touchpad_clicks(void)
 /* key_get for choose_key: keys[] with the modifiers held at each and the
  * name keys_last_name gives it (NULL: none), as keys.c has them; the notice
  * as each key is asked for (what the one before it got). */
-static int key_mods[64], key_at = -1, name_any;
+static int name_any;
 static const char *key_names[64];
 static char notices[64][sizeof notice];
 int key_get(void)
@@ -873,7 +874,14 @@ int key_get(void)
     snprintf(notices[keypos], sizeof notices[0], "%s", notice);
     return key_poll_timeout(-1, -1);
 }
-int keys_modifiers(void) { return key_at >= 0 ? key_mods[key_at] : 0; }
+int keys_modifiers(void)
+{
+    if (key_at >= 0 && key_mods[key_at]) return key_mods[key_at];
+    if (key_at >= 0 && keys[key_at] > 0 && keys[key_at] <= 26 &&
+        keys[key_at] != '\t' && keys[key_at] != '\n' && keys[key_at] != '\r' && keys[key_at] != '\b')
+        return KEYS_CTRL;
+    return 0;
+}
 int keys_last_name(char *out, size_t size)
 {
     if (key_at < 0 || !key_names[key_at]) return -1;
@@ -1205,6 +1213,7 @@ static void test_power_and_hwinfo(void)
     /* Interactive battery curves subpage: modes, spans, cursor, spare pack tab, copy */
     clip_buf[0] = '\0';
     nkeys = keypos = 0;
+    memset(key_mods, 0, sizeof key_mods);
     keys[nkeys++] = 'm';     /* switch to Power (W) */
     keys[nkeys++] = '1';     /* 1h span */
     keys[nkeys++] = K_LEFT;  /* cursor active */
@@ -1424,6 +1433,7 @@ static void test_power_and_hwinfo(void)
     /* Full interactive loop navigation & copy */
     clip_buf[0] = '\0';
     nkeys = keypos = 0;
+    memset(key_mods, 0, sizeof key_mods);
     keys[nkeys++] = K_DOWN; /* Processor */
     keys[nkeys++] = K_DOWN; /* Memory & Slots */
     keys[nkeys++] = 3;      /* Ctrl+C: copy Memory & Slots page */

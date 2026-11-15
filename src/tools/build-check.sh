@@ -90,7 +90,7 @@ if pkg-config --exists tree-sitter libpcre2-8 json-glib-1.0; then
 fi
 # The extended display's receiver on the direct screen and its sandboxed
 # decoder (make.sh).
-extdisplay_pkgs="json-c libavcodec libavutil libswscale"
+extdisplay_pkgs="json-c libavcodec libavutil libswscale avahi-core"
 if pkg-config --exists $extdisplay_pkgs; then
     gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -DCONFIG_EXTDISPLAY_FFMPEG $(pkg-config --cflags $extdisplay_pkgs) \
         "$src/progs/extdisplay-worker.c" "$src/progs/extdisplay-protocol.c" "$src/progs/extdisplay-decode.c" \
@@ -99,13 +99,15 @@ if pkg-config --exists $extdisplay_pkgs; then
         -I"$src/base/include" -I"$src/base" "$src/progs/extdisplay.c" "$src/progs/extdisplay-setup.c" "$src/progs/extdisplay-client.c" \
         "$src/progs/extdisplay-protocol.c" "$out"/obj/base-*.o $libs $(pkg-config --libs json-c) -o "$out/extdisplay"
 else
-    echo "build-check: extdisplay not built: json-c and FFmpeg (libavcodec, libavutil, libswscale) are not all installed" >&2
+    echo "build-check: extdisplay not built: json-c, Avahi and FFmpeg (libavcodec, libavutil, libswscale) are not all installed" >&2
 fi
 # The extended display's broker (tools/EXTDISPLAY.md), built under -Werror as make.sh installs it.
-if pkg-config --exists openssl; then
+if pkg-config --exists $extdisplay_pkgs openssl; then
+    gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $(pkg-config --cflags avahi-core) -o "$out/extdisplay-advertise" \
+        "$src/progs/extdisplay-advertise.c" $(pkg-config --libs avahi-core)
     gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $(pkg-config --cflags openssl) -o "$out/extdisplay-broker" \
         "$src/progs/extdisplay-broker.c" "$src/progs/extdisplay-broker-net.c" "$src/progs/extdisplay-broker-pump.c" \
-        "$src/progs/extdisplay-broker-tls.c" $(pkg-config --libs openssl)
+        "$src/progs/extdisplay-broker-tls.c" "$src/progs/extdisplay-discovery.c" $(pkg-config --libs openssl)
 fi
 gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags \
     -I"$src/base/include" -I"$src/base" "$src/progs/settings.c" "$src/progs/files.c" "$src/progs/auth.c" \
@@ -180,10 +182,25 @@ if command -v wayland-scanner >/dev/null 2>&1 && pkg-config --exists wayland-cli
         -o "$out/settings-window"
     gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags -I"$src/base/include" -I"$src/base" -I"$out" \
         "$src/progs/files-main.c" "$src/progs/files.c" "$out"/obj/win-*.o $win $libs -o "$out/files"
+    gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags -I"$src/base/include" -I"$src/base" -I"$out" \
+        "$src/progs/packages.c" "$src/progs/files.c" "$out"/obj/win-*.o $win $libs -o "$out/packages-window"
+    gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags -I"$src/base/include" -I"$src/base" -I"$out" \
+        "$src/progs/firmware.c" "$src/progs/files.c" "$out"/obj/win-*.o $win $libs -o "$out/firmware-window"
+    gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags -I"$src/base/include" -I"$src/base" -I"$out" \
+        "$src/progs/archive.c" "$src/progs/files.c" "$out"/obj/win-*.o $win $libs -o "$out/archive-window"
     if [ -e "$out/view" ]; then
         gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $ime_flags $flags -I"$src/base/include" -I"$src/base" -I"$out" \
             "$src/progs/view.c" "$src/progs/view-layout.c" "$src/progs/view-client.c" "$src/progs/files.c" \
             "$out"/obj/win-*.o "$out/obj/ime.o" $win $ime_libs $libs -o "$out/view-window"
+    fi
+    if [ -e "$out/edit" ]; then
+        gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $ime_flags $flags \
+            $(pkg-config --cflags json-glib-1.0) -I"$src/base/include" -I"$src/base" -I"$out" \
+            "$src/progs/edit.c" "$src/progs/edit-buffer.c" "$src/progs/edit-doc.c" "$src/progs/edit-file.c" \
+            "$src/progs/edit-search.c" "$src/progs/edit-syntax.c" "$src/progs/edit-tree.c" \
+            "$src/progs/edit-layout.c" "$src/progs/edit-lsp.c" "$src/progs/edit-session.c" \
+            "$src/progs/edit-filesearch.c" "$src/progs/files.c" "$out"/obj/win-*.o "$out/obj/ime.o" \
+            $win $ime_libs $libs -ltree-sitter -lpcre2-8 $(pkg-config --libs json-glib-1.0) -o "$out/edit-window"
     fi
 fi
 if pkg-config --exists libcryptsetup json-c openssl; then

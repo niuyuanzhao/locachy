@@ -461,7 +461,8 @@ int open_program(const char *name, const char *target, char *spec, size_t size, 
 {
     const char *binary = !strcmp(name, "program:viewer") ? "/usr/local/bin/viewer" :
                          !strcmp(name, "program:view") ? "/usr/local/bin/view" :
-                         !strcmp(name, "program:edit") ? "/usr/local/bin/edit" : NULL;
+                         !strcmp(name, "program:edit") ? "/usr/local/bin/edit" :
+                         !strcmp(name, "program:admin") ? "/usr/local/bin/admin" : NULL;
     if (!binary || max < 3) {
         return 0;
     }
@@ -2028,7 +2029,11 @@ int main(int argc, char **argv)
     assert(unlink(seat_fail) == 0 && unlink(seat_calls) == 0);
     puts("PASS window: the viewer opens a view window (locachy-seat --window view PATH); a refusal says why");
     open_file(doc, 0, "program:edit");
-    assert(error && strstr(msg, "edit opens from home only") && size_of(seat_calls) < 0 && tasks == tasks_before);
+    snprintf(want, sizeof want, "--window edit %s\n", doc);
+    assert(!error && strstr(msg, "Opened with edit in a window") && !strcmp(text_of(seat_calls), want));
+    unlink(seat_calls);
+    open_file(doc, 0, "program:admin");
+    assert(error && strstr(msg, "admin opens from home only") && size_of(seat_calls) < 0 && tasks == tasks_before);
     open_file(at_home("Documents/folder"), 0, "program:view");
     assert(!error && here("Documents/folder") && size_of(seat_calls) < 0);
     go(at_home("Documents"), NULL);
@@ -2057,13 +2062,16 @@ int main(int argc, char **argv)
     assert(!take_request() && access(FILES_REQUEST, F_OK) == 0 && unlink(FILES_REQUEST) == 0);
     error = 0;
     open_terminal_here();
-    assert(error && strstr(msg, "term opens from home only") && tasks == tasks_before);
+    assert(!error && strstr(msg, "Opened with term in a window") && !strcmp(text_of(seat_calls), "--window term\n"));
+    unlink(seat_calls);
     ncalled = 0;
     P->sel = index_of("w.txt");
     archive_action(KEY_EXTRACT_HERE);
-    assert(error && strstr(msg, "archive opens from home only") && ncalled == 0);
+    snprintf(want, sizeof want, "--window archive %s\n", wtxt);
+    assert(!error && strstr(msg, "Opened with archive in a window") && !strcmp(text_of(seat_calls), want));
+    unlink(seat_calls);
     unsetenv("LOCACHY_BACKEND");
-    puts("PASS window: home's requests stay home's; term and archive say they open from home only");
+    puts("PASS window: home's requests stay home's; term and archive open in windows when window backend is on");
 
     open_answer = "no process 1 to ask";
     open_file(doc, 0, "program:viewer");

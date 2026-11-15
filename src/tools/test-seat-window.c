@@ -80,8 +80,11 @@ int main(void)
     assert(window_request_valid("bluetooth", "") && !window_request_valid("bluetooth", "/usr/bin/sh"));
     assert(window_request_valid("network", "") && !window_request_valid("network", "wlan0"));
     assert(window_request_valid("term", "") && !window_request_valid("term", "/bin/sh"));
-    assert(!window_request_valid("admin", "") && !window_request_valid("edit", "") &&
-           !window_request_valid("sh", "") && !window_request_valid("", ""));
+    assert(window_request_valid("edit", "") && window_request_valid("edit", "/home/u/new.txt"));
+    assert(window_request_valid("archive", "") && window_request_valid("archive", "/home/u/bundle.tar.gz"));
+    assert(window_request_valid("packages", "") && !window_request_valid("packages", "/x"));
+    assert(window_request_valid("firmware", "") && !window_request_valid("firmware", "/x"));
+    assert(!window_request_valid("admin", "") && !window_request_valid("sh", "") && !window_request_valid("", ""));
     assert(app_request_valid("edge") && app_request_valid("tor-browser") && !app_request_valid("window-view-1") &&
            !app_request_valid("../edge") && !app_request_valid(""));
     char long_target[WINDOW_TARGET_MAX + 2];
@@ -98,12 +101,16 @@ int main(void)
     forward(pair, "window\0bluetooth", 16, "window|bluetooth");
     forward(pair, "window\0network", 14, "window|network");
     forward(pair, "window\0term", 11, "window|term");
+    forward(pair, "window\0edit\0/home/u/a.txt", sizeof("window\0edit\0/home/u/a.txt"), "window|edit|/home/u/a.txt");
+    forward(pair, "window\0archive\0/home/u/a.tar", sizeof("window\0archive\0/home/u/a.tar"), "window|archive|/home/u/a.tar");
+    forward(pair, "window\0packages", sizeof("window\0packages"), "window|packages");
+    forward(pair, "window\0firmware", sizeof("window\0firmware"), "window|firmware");
     forward(pair, "app\0open\0edge", 13, "app|open|edge");
     forward(pair, "app\0open-own-tor\0tor-browser", 28, "app|open-own-tor|tor-browser");
     forward(pair, "app\0stop\0edge", 13, "");
     forward(pair, "app\0open\0window-view-1", 22, "");
     forward(pair, "window\0view\0/home/u/a b.pdf", 27, "window|view|/home/u/a b.pdf");
-    forward(pair, "window\0edit", 11, "");
+    forward(pair, "window\0admin", 12, "");
     forward(pair, "window\0settings\0bogus", 21, "");
     forward(pair, "open\0view", 9, "");
     forward(pair, "window\0settings\0network\0x", 25, "");
@@ -112,15 +119,17 @@ int main(void)
     char dir[] = "/tmp/seat-window-XXXXXX", got[2048];
     assert(mkdtemp(dir));
     setenv("XDG_RUNTIME_DIR", dir, 1);
-    char *settings[] = { "settings", "network" }, *mixer[] = { "mixer" }, *view[] = { "view", "/home/u/a b.pdf" };
+    char *settings[] = { "settings", "network" }, *mixer[] = { "mixer" }, *view[] = { "view", "/home/u/a b.pdf" }, *edit[] = { "edit" };
     assert(client(dir, 2, settings, "ok window requested", got, sizeof got) == 0);
     assert(strcmp(got, "window settings network") == 0);
     assert(client(dir, 1, mixer, "ok window requested", got, sizeof got) == 0);
     assert(strcmp(got, "window mixer") == 0);
+    assert(client(dir, 1, edit, "ok window requested", got, sizeof got) == 0);
+    assert(strcmp(got, "window edit") == 0);
     assert(client(dir, 2, view, "error the seat does not take window requests now", got, sizeof got) == 1);
     assert(strcmp(got, "window view /home/u/a b.pdf") == 0);
-    char *edit[] = { "edit" }, *bad_page[] = { "settings", "bogus" };
-    assert(window_client(1, edit) == 2 && window_client(2, bad_page) == 2 && window_client(0, edit) == 2);
+    char *admin[] = { "admin" }, *bad_page[] = { "settings", "bogus" };
+    assert(window_client(1, admin) == 2 && window_client(2, bad_page) == 2 && window_client(0, admin) == 2);
     char sock[300];
     snprintf(sock, sizeof sock, "%s/locachy-control.sock", dir);
     unlink(sock);

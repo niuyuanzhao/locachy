@@ -144,6 +144,9 @@ static int pointer_input(void)
     return send_input(s, n);
 }
 
+/* Every key goes to the sender while the link is up, Ctrl+Alt+F12 included:
+ * no key ends the session or the program; the cable coming out does. Only
+ * process 1's bindings (home, lock, volume, brightness) stay local. */
 static int raw_input(void)
 {
     struct base_raw_key e;

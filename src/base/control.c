@@ -7,6 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/wait.h>
+#include <limits.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -452,12 +455,54 @@ __attribute__((weak)) int open_request_publish(const char *with, const char *tar
 int open_in_home(const char *with, const char *target)
 {
     static const char *const home[] = { "home", NULL };
-    if (strchr(target, '\n') || (with && strchr(with, '\n'))) {
+    if ((target && strchr(target, '\n')) || (with && strchr(with, '\n'))) {
         return -1;
+    }
+    const char *backend = getenv("LOCACHY_BACKEND");
+    if (backend && strcmp(backend, "wayland") == 0) {
+        const char *prog = with;
+        if (prog && strncmp(prog, "program:", 8) == 0) prog += 8;
+        if (prog && (!strcmp(prog, "view") || !strcmp(prog, "edit") || !strcmp(prog, "archive") ||
+                     !strcmp(prog, "files") || !strcmp(prog, "term") || !strcmp(prog, "settings") ||
+                     !strcmp(prog, "packages") || !strcmp(prog, "firmware"))) {
+            pid_t pid = fork();
+            if (pid == 0) {
+                setsid();
+                char *argv[] = { "locachy-seat", "--window", (char *)prog, (char *)(target && target[0] ? target : NULL), NULL };
+                execv("/usr/local/bin/locachy-seat", argv);
+                _exit(127);
+            }
+            if (pid > 0) {
+                int st = 0;
+                waitpid(pid, &st, 0);
+                return (WIFEXITED(st) && WEXITSTATUS(st) == 0) ? 0 : -1;
+            }
+            return -1;
+        }
+        struct sockaddr_un address = { .sun_family = AF_UNIX, .sun_path = "/run/locachy/open/socket" };
+        char req[PATH_MAX + 128], reply[512];
+        int n;
+        if (prog && prog[0]) n = snprintf(req, sizeof req, "with %s %s", prog, target ? target : "");
+        else n = snprintf(req, sizeof req, "open %s", target ? target : "");
+        int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+        if (fd >= 0) {
+            if (connect(fd, (struct sockaddr *)&address, sizeof address) == 0 &&
+                send(fd, req, (size_t)n, MSG_NOSIGNAL) == n) {
+                struct pollfd wait = { .fd = fd, .events = POLLIN };
+                ssize_t got = poll(&wait, 1, 10000) > 0 ? recv(fd, reply, sizeof reply - 1, 0) : -1;
+                close(fd);
+                if (got > 0) {
+                    reply[got] = '\0';
+                    if (strncmp(reply, "ok", 2) == 0) return 0;
+                }
+            } else {
+                close(fd);
+            }
+        }
     }
     /* One unique request in the queue (open.c), never a shared slot that a
      * second producer could overwrite. */
-    if (!open_request_publish || open_request_publish(with, target) != 0) {
+    if (!open_request_publish || open_request_publish(with, target ? target : "") != 0) {
         return -1;
     }
     if (control_fd() >= 0) {

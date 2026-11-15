@@ -626,10 +626,12 @@ static int window_request_valid(const char *program, const char *target)
         }
         return !len;
     }
-    if (strcmp(program, "view") == 0 || strcmp(program, "files") == 0) {
+    if (strcmp(program, "view") == 0 || strcmp(program, "edit") == 0 ||
+        strcmp(program, "archive") == 0 || strcmp(program, "files") == 0) {
         return !len || target[0] == '/';
     }
-    return (strcmp(program, "mixer") == 0 || strcmp(program, "bluetooth") == 0 ||
+    return (strcmp(program, "packages") == 0 || strcmp(program, "firmware") == 0 ||
+            strcmp(program, "mixer") == 0 || strcmp(program, "bluetooth") == 0 ||
             strcmp(program, "network") == 0 || strcmp(program, "term") == 0) && !len;
 }
 
@@ -688,8 +690,9 @@ static int window_client(int argc, char **argv)
     const char *program = argc > 0 ? argv[0] : "", *target = argc > 1 ? argv[1] : "";
     char request[16 + 64 + WINDOW_TARGET_MAX];
     if (argc < 1 || argc > 2 || !window_request_valid(program, target)) {
-        fprintf(stderr, "usage: locachy-seat --window view [FILE] | files [FOLDER] | "
-                        "settings [network|power|devices|date-time|hardware] | mixer | bluetooth | network | term\n");
+        fprintf(stderr, "usage: locachy-seat --window view|edit|archive [FILE] | files [FOLDER] | "
+                        "settings [network|power|devices|date-time|hardware] | packages | firmware | "
+                        "mixer | bluetooth | network | term\n");
         return 2;
     }
     int n = snprintf(request, sizeof request, target[0] ? "window %s %s" : "window %s", program, target);
