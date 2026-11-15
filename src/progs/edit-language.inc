@@ -224,7 +224,7 @@ static struct language_document *language_attach(struct doc *d, int explicit_req
             if (!s->client) post(d, NOTE_WARNING, 0, 5, _("Cannot start %s: %s"), argv[0], error ? error->message : _("unknown error"));
             g_clear_error(&error); if (spawn != argv) g_strfreev(spawn);
             g_free(root_uri); g_free(settings); g_free(initialization); g_free(binary); g_free(home);
-        } else if (explicit_request) post(d, NOTE_INFO, 0, 5, _("Language server '%s' is not installed. Configure an existing server; no server is installed automatically."), argv[0]);
+        } else if (explicit_request) post(d, NOTE_INFO, 0, 5, _("Language server '%s' is not installed."), argv[0]);
         g_ptr_array_add(language_servers, s);
     }
     g_strfreev(argv); g_free(root); g_free(key);

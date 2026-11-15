@@ -79,6 +79,30 @@ Apply installs it after the source and before the host, merges the
 configurations that follow a preset, and never builds or installs packages
 for it. A failure there stops nothing else. See [APPS.md](APPS.md).
 
+## If the running updater cannot check
+
+The `c` / Check action runs the current updater first. If it reports that it cannot fetch updates, the message must include pacman's actual repository, HTTP, signature, database, or filesystem reason; `checkupdates`'s generic `Cannot fetch updates` is not enough. A failed check changes no host package database, published repository database, package, or successful plan. The full job log is available in the output pane.
+
+If an older installed updater is the thing that hides the reason, repair it in the managed administrator terminal without reinstalling or rebooting:
+
+1. Obtain the candidate `locachy-pkg` file from the exact reviewed LOCachy source and save it as a normal file. Do not pipe a download into a shell. Verify the complete SHA-256 supplied with that source:
+
+   ```sh
+   sha256sum locachy-pkg
+   ```
+
+2. Run the repository's `tools/repair-updater.py` with the candidate path and the complete lowercase SHA-256. The helper parses the candidate without executing it, refuses a symlink or writable target, takes `/run/locachy/pkg.lock` without waiting, refuses a running pacman database, saves the old file as a hash-named hard link, and atomically installs the checked file. It performs no package transaction and does not restart a service.
+
+   ```sh
+   python3 -I tools/repair-updater.py ./locachy-pkg FULL_SHA256
+   ```
+
+3. Press `c` again. The next Check is a normal `pkg-plan` job and uses the repaired updater. If it still fails, the displayed pacman error is the reason to fix; no network failure should be guessed from it.
+
+An accepted package job is not killed by the repair helper. If the package-domain lock is busy, wait for the job shown in Home/Packages and run the repair again. The old updater remains in place on every failed verification or interrupted publication.
+
+This is an administrator recovery path for a stale updater, not a second update mechanism. Once the normal source-first update completes, `install-pkg-tools` installs the updater from that committed source in the ordinary job.
+
 ## Repository stack
 
 LOCachy reads its repositories as one stack, most optimised first: CachyOS's
@@ -97,8 +121,9 @@ newer openssl was offered: the update then broke.
 
 `locachy_stack.py` applies the rule. It is used by:
 
-- Check and the plan. `checkupdates` fetches the databases into
-  `/var/lib/locachy/checkupdates`, each time whole: they are dated at the epoch
+- Check and the plan. A bounded `pacman -Sy` with an explicit private DBPath
+  fetches the databases into `/var/lib/locachy/checkupdates`, each time whole:
+  they are dated at the epoch
   first. pacman's refresh keeps a database that is newer than the mirror's copy,
   and fetches the signature from the mirror it asks. When a stalled mirror fails
   over to an older one, that older signature would be checked against the kept
@@ -218,8 +243,7 @@ test sources and artifact hash) and the set was tested together. A retried apply
 of the same plan therefore builds nothing; any change to those inputs builds again.
 
 `tools/test-local-packages.py`, `test-update-transaction.py` and
-`test-prepared-builder.py` check this orchestration with doubles. These are not
-evidence that a new set of real package archives passed its contracts.
+`test-prepared-builder.py` check this orchestration with doubles.
 
 ## Adding package names
 
@@ -233,5 +257,4 @@ Adding or removing leaves still runs reconciliation, not only a one-package
 pacman command. A failed operation retains its output in
 its system job's log, `/run/locachy/jobs/ID.log` (home lists the jobs,
 [JOBS.md](JOBS.md)); a failed prepared update retains its plan and gate
-logs under `/var/lib/locachy/local-packages/transactions/`. Do not delete those
-logs or skip their contracts to get past a failure.
+logs under `/var/lib/locachy/local-packages/transactions/`.

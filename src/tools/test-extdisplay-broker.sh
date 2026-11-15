@@ -27,12 +27,12 @@ if [ "$(uname -s)" != Linux ]; then
     echo "SKIP: extdisplay-broker needs Linux (rtnetlink, namespaces, Landlock, seccomp)"
     exit 77
 fi
-if ! pkg-config --exists openssl; then
-    echo "SKIP: OpenSSL development files are not installed"
+if ! pkg-config --exists openssl avahi-core; then
+    echo "SKIP: OpenSSL and Avahi development files are not installed"
     exit 77
 fi
 cflags="-O2 -Wall -Wextra -Werror -D_GNU_SOURCE"
-broker_src="$src/progs/extdisplay-broker.c $src/progs/extdisplay-broker-net.c $src/progs/extdisplay-broker-pump.c $src/progs/extdisplay-broker-tls.c"
+broker_src="$src/progs/extdisplay-broker.c $src/progs/extdisplay-broker-net.c $src/progs/extdisplay-broker-pump.c $src/progs/extdisplay-broker-tls.c $src/progs/extdisplay-discovery.c"
 fails=0
 note() { # PASS|FAIL text
     echo "$1: $2"
@@ -48,6 +48,8 @@ else
 fi
 cc $cflags $(pkg-config --cflags openssl) -o "$out/test-extdisplay-broker-tls" "$src/tools/test-extdisplay-broker-tls.c" \
     "$src/progs/extdisplay-broker-tls.c" $(pkg-config --libs openssl)
+cc $cflags $(pkg-config --cflags avahi-core) -o "$out/extdisplay-advertise-test" \
+    "$src/progs/extdisplay-advertise.c" $(pkg-config --libs avahi-core)
 cc $cflags -o "$out/test-extdisplay-broker-ctl" "$src/tools/test-extdisplay-broker-ctl.c"
 
 # code
@@ -216,8 +218,23 @@ def sh(*argv):
 
 
 def pump_of(pid):
+    """The discovery child is also a direct child; select the TLS pump by its
+    /proc comm rather than assuming it was forked first."""
     rc, out = sh("pgrep", "-P", str(pid))
-    return out.split()[0] if rc == 0 and out.split() else None
+    if rc != 0:
+        return None
+    try:
+        expected = open("/proc/" + str(pid) + "/comm").read().strip()
+    except OSError:
+        return None
+    for child in out.split():
+        try:
+            comm = open("/proc/" + child + "/comm").read().strip()
+        except OSError:
+            continue
+        if comm == expected:
+            return child
+    return None
 
 
 def in_session(pump, *argv):
@@ -556,6 +573,46 @@ def scenario_kill():
     finish(b2)
 
 
+def scenario_watch():
+    # The carrier-loss case deliberately returned an administratively down link.
+    sh("ip", "link", "set", "dev", "extdisplay0", "up")
+    sh("ip", "link", "set", "dev", "extdisplaypeer", "up")
+    b = Broker()
+    b.send("watch")
+    listing = b.collect("< end")
+    lines = [x.split() for x in listing if x.startswith("< iface ")]
+    check("watch snapshots include kernel index and hardware identity", len(lines) == 2 and
+          all(len(x) == 7 and int(x[5]) > 0 and ":" in x[6] for x in lines), str(listing))
+    b.send("pair extdisplay0 2147483647 02:00:00:00:00:ff")
+    check("stale identity cannot lease a same-name interface", b.expect("< error ").startswith("< error the selected interface changed"))
+    check("stale identity leaves the interface at home", home_has("extdisplay0"))
+    sh("ip", "link", "set", "extdisplaypeer", "down")
+    check("carrier change is reported without manual scan", b.expect("< changed") == "< changed")
+    b.send("scan")
+    listing = b.collect("< end")
+    fields = next(x.split() for x in listing if x.startswith("< iface extdisplay0 "))
+    check("snapshot sees the carrier change", fields[4] == "down", str(fields))
+    b.send("pair " + fields[2] + " " + fields[5] + " " + fields[6])
+    progress = b.expect("< preparing ")
+    check("carrier wait is explicit", progress == "< preparing extdisplay0 carrier", progress)
+    started = time.monotonic()
+    b.send("cancel")
+    check("carrier preparation is cancellable without the old ten-second wait", b.expect("< ended ") == "< ended cancelled" and
+          time.monotonic() - started < 2)
+    check("cancel returns the waiting interface", home_has("extdisplay0"))
+    try:
+        extra = b.line(timeout=0.3)
+    except TimeoutError:
+        extra = None
+    check("own lease return does not trigger a connection notification", extra is None, str(extra))
+    # Moving a veth back resets administrative state; a real returned device
+    # is brought up by NetworkManager. Model that policy before the new cable.
+    sh("ip", "link", "set", "dev", "extdisplay0", "up")
+    sh("ip", "link", "set", "dev", "extdisplaypeer", "up")
+    check("new physical-link event is noticed after cancel", b.expect("< changed") == "< changed")
+    finish(b)
+
+
 def scenario_rename():
     b = Broker()
     mac = mac_of("extdisplay0")
@@ -640,12 +697,14 @@ ip link set dum0 up
 rm -rf "$W/state"
 exec python3 -I "$W/driver.py" "$W" "$@"
 SHEOF
+    cp "$out/extdisplay-advertise-test" "$lw/extdisplay-advertise-test"
     cc $cflags $(pkg-config --cflags openssl) \
+        -DEXTDISPLAY_DISCOVERY_PATH=\"$lw/extdisplay-advertise-test\" \
         -DEXTDISPLAY_BROKER_TEST_DRIVER=\"veth\" -DEXTDISPLAY_BROKER_TEST_HOME_NETNS=\"$lw/home\" \
         -DEXTDISPLAY_BROKER_TEST_STATE_DIR=\"$lw/state\" -DEXTDISPLAY_BROKER_TEST_ATTEMPT_SECONDS=8 \
         -DEXTDISPLAY_BROKER_TEST_PROBES -o "$lw/extdisplay-broker-test" $broker_src $(pkg-config --libs openssl)
     cp "$out/test-extdisplay-broker-ctl" "$lw/test-extdisplay-broker-ctl"
-    scenarios="lease pair refuse cancel_paired timeout carrier eof protocol kill rename"
+    scenarios="lease pair refuse cancel_paired timeout carrier eof protocol watch kill rename"
     unshare --user --map-auto --map-root-user --net --mount --propagation private \
         sh "$lw/inner.sh" "$lw" $scenarios >"$lw/driver.log" 2>&1 || :
     grep -E '^(== |PASS: |FAIL: |SUMMARY: )' "$lw/driver.log" || :

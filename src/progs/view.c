@@ -18,7 +18,7 @@
  *   Down, J / Up, K: a step down / up (Shift+J, Shift+K: ten)
  *   Left, H / Right, L: sideways, or the previous / next page
  *   Ctrl+Home, Ctrl+End: the beginning, the end of the document
- *   Alt+Shift+Left / Alt+Shift+Right: back / forward (after links, ...)
+ *   Alt+Left / Alt+Right: back / forward (after links, ...)
  *   Ctrl+1 to Ctrl+6, Tools: Browse, Zoom, Area Selection, Text Selection,
  *   Table Selection, Magnifier (Okular's mouse modes)
  *   Ctrl+Shift+P, View > Presentation: a page at a time on the whole screen
@@ -3694,8 +3694,8 @@ static int menu_items(int m, struct item *it)
         ITEM(_("Next Page"), "", A_NEXT_PAGE, 0);
         ITEM(_("Beginning of the document"), "Ctrl+Home", A_FIRST, 0);
         ITEM(_("End of the document"), "Ctrl+End", A_LAST, 0);
-        ITEM(_("Back"), "Alt+Shift+Left", A_BACK, 0);
-        ITEM(_("Forward"), "Alt+Shift+Right", A_FORWARD, 0);
+        ITEM(_("Back"), "Alt+Left", A_BACK, 0);
+        ITEM(_("Forward"), "Alt+Right", A_FORWARD, 0);
         ITEM(_("Go to Page..."), "Ctrl+G", A_GOTO, 0);
         ITEM(_("Add/Remove Bookmark"), "Ctrl+B", A_BOOKMARK, doc.open && doc.bookmark[current_page()] != NULL);
         ITEM(_("Previous Bookmark"), "", A_BOOKMARK_PREV, 0);
@@ -6249,21 +6249,25 @@ static void pointer(const struct pointer_event *e)
 /* F1: the viewer's own keys (ui_help adds every program's). */
 static const struct ui_help_line view_help[] = {
     { "Ctrl+O", N_("Open a document") },
-    { "Ctrl+F, F3, Shift+F3", N_("Find; the next, the previous match") },
+    { "Ctrl+S, Ctrl+Shift+S", N_("Save, save a copy (PDF)") },
+    { "Space, PgDn / Shift+Space, PgUp, Backspace", N_("A screen down / up") },
+    { "Up, Down, Left, Right, H, J, K, L", N_("Scroll or turn pages") },
+    { "Ctrl+F, /, F3, Shift+F3", N_("Find; the next, the previous match") },
     { "Ctrl+G", N_("Go to a page") },
     { "Ctrl+B", N_("Bookmark the page") },
     { "Alt+Left, Alt+Right", N_("Back, forward in the pages seen") },
     { "Ctrl+Home, Ctrl+End", N_("The first, the last page") },
-    { "Ctrl+T, Ctrl+W, Ctrl+Shift+T", N_("New tab, close the tab, reopen it") },
+    { "Ctrl+W, Ctrl+Shift+T", N_("Close the tab, reopen it") },
     { "Ctrl+PgDn, Ctrl+PgUp", N_("Next, previous tab") },
-    { "Ctrl++, Ctrl+-, Ctrl+0", N_("Zoom in, out, to 100%") },
+    { "Ctrl++, Ctrl+-, Ctrl+0, f, <, >", N_("Zoom in, out, 100%, fit image, reflow text size") },
     { "Ctrl+1 .. Ctrl+6", N_("Browse, zoom, area, text, table, magnifier tools") },
+    { "F6", N_("PDF annotation tools") },
     { "Ctrl+Shift+P", N_("Presentation") },
     { "Ctrl+R, Ctrl+Shift+R", N_("Rotate an image right, left") },
     { "F4, F7", N_("An image's information; the sidebar") },
     { "F5", N_("Reload") },
     { "Alt+Enter", N_("Properties") },
-    { "Ctrl+C", N_("Copy the selection") },
+    { "Alt+F, E, V, G, T, S", N_("File, Edit, View, Go, Tools, Settings menus") },
     { NULL, NULL },
 };
 

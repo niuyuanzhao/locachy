@@ -138,7 +138,7 @@ int main(void)
     selected = opt_index() + ext;
     adjust(+1);
     assert(test_rc("program_extdisplay") && strcmp(test_rc("program_extdisplay"), "/usr/local/bin/extdisplay") == 0);
-    assert(strcmp(jobs_double_last, "pkg-install ffmpeg json-c") == 0 && reloads == 1);
+    assert(strcmp(jobs_double_last, "pkg-install ffmpeg json-c avahi") == 0 && reloads == 1);
     assert(opt_module_installed(ext));
     puts("PASS Enter on it then writes the program line, asks for the package job and reloads process 1");
 
@@ -147,7 +147,7 @@ int main(void)
     pkg_action[0] = pkg_name[0] = '\0';
     adjust(+1);
     assert(!test_rc("program_extdisplay"));
-    assert(strcmp(jobs_double_last, "pkg-remove ffmpeg json-c") == 0 && reloads == 2);
+    assert(strcmp(jobs_double_last, "pkg-remove ffmpeg json-c avahi") == 0 && reloads == 2);
     puts("PASS with its packages and its program line it is installed, and Enter turns it off");
 
     /* The program line without FFmpeg: not installed either. */

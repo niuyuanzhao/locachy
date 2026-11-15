@@ -2078,7 +2078,7 @@ static int sig_build(void)
         if (!s->signatory[0]) sig_line(k, "  %s", _("(the name the document gives, not verified)"));
         sig_line(k, "  %s", digest_text(s));
         sig_line(k, "  %s", certificate_text(s));
-        if (s->changes == 0) sig_line(k, "  %s", _("Changes: unchanged (no disallowed changes since signing; not a cryptographic check)"));
+        if (s->changes == 0) sig_line(k, "  %s", _("Changes: none since signing"));
         /* TRANSLATORS: %d is the number of saved revisions after the signature. */
         else if (s->changes > 0) {
             char chg[280];

@@ -2286,9 +2286,9 @@ static void hwinfo_draw(void)
         }
     }
 
-    /* TRANSLATORS: Tab, r, c and Esc are key names; keep them. */
-    screen_text(2, rows - 3, cols < 70 ? _("Up/Down: move  Tab: pane  r: refresh  c: copy  Esc: back") :
-                _("Up/Down: select   Tab / Left / Right: switch pane   r: refresh   c: copy page   Esc: back"),
+    /* TRANSLATORS: Tab, r, Ctrl+C and Esc are key names; keep them. */
+    screen_text(2, rows - 3, cols < 70 ? _("Up/Down: move  Tab: pane  r: refresh  Ctrl+C: copy  Esc: back") :
+                _("Up/Down: select   Tab / Left / Right: switch pane   r: refresh   Ctrl+C: copy page   Esc: back"),
                 DIM, BG);
     screen_text(2, rows - 2, _(notice), ACCENT, BG);
     screen_flush();
@@ -2402,7 +2402,9 @@ static void hwinfo_page(void)
             continue;
         }
         if (act == ACT_COPY) {
-            key = 'c'; /* Ctrl+C copies as c does */
+            hw_copy_current_page();
+            hwinfo_draw();
+            continue;
         } else if (act == ACT_NEXT_FIELD || act == ACT_PREV_FIELD) {
             key = '\t'; /* two places: either way to the other */
         } else if (act != ACT_NONE || (key >= ' ' && key < 0x7F && (mods & (KEYS_ALT | KEYS_META)))) {
@@ -2445,8 +2447,6 @@ static void hwinfo_page(void)
             hw_populate_category(hw_cat);
             hw_update_sensor_spark();
             hw_scpy(notice, sizeof notice, _("Hardware readings refreshed."));
-        } else if (key == 'c' || key == 'C') {
-            hw_copy_current_page();
         } else {
             continue;
         }

@@ -693,10 +693,13 @@ class CheckedDatabases(unittest.TestCase):
         seen = {}
 
         def run(command, **kwargs):
-            if command[0] == "env":  # checkupdates, the fetch
+            if command[:2] == ["pacman", "-Sy"]:
                 seen.update({name: os.stat(self.checked / "sync" / name).st_mtime
                              for name in ("multilib-x86-64-v2.db", "multilib-x86-64-v2.db.sig", "notes.txt")})
-            return subprocess.CompletedProcess(command, 2, stdout="", stderr="")
+                self.assertEqual(command, ["pacman", "-Sy", "--disable-sandbox-filesystem", "--dbpath",
+                                          str(self.checked), "--logfile", "/dev/null", "--config", pkg.PACMAN_CONFIG])
+                self.assertEqual(kwargs["timeout"], pkg.CHECK_TIMEOUT)
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
         with mock.patch.object(pkg.subprocess, "run", run), \
                 mock.patch.object(pkg, "in_net", lambda command: command), \
@@ -718,11 +721,15 @@ class CheckedDatabases(unittest.TestCase):
             if command[0] == "vercmp":
                 return real_run(command, **kwargs)
             if command[:2] == ["pacman", "-Sl"]:
-                self.assertEqual(command, ["pacman", "-Sl", "--dbpath", str(self.merged)])
+                self.assertEqual(command, ["pacman", "-Sl", "--dbpath", str(self.merged), "--config", pkg.PACMAN_CONFIG])
                 return subprocess.CompletedProcess(command, 0, stdout=listed, stderr="")
-            # checkupdates only fetches here; its own count (none) is not used.
+            if command[:2] == ["pacman", "-Sy"]:
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            # Any other subprocess belongs to the fixture's local queries.
             return subprocess.CompletedProcess(command, 2, stdout="", stderr="")
 
+        (self.checked / "sync").mkdir(parents=True)
+        (self.checked / "sync/core.db").write_bytes(b"fixture database")
         installed = {"openssl": "3.6.5-1.1", "tor": "0.4.9.14-1.1", "linux": "7.3-2", "zlib": "1.3-1",
                      "bash": "5.3-1"}
         with mock.patch.object(pkg.subprocess, "run", run), \
@@ -734,6 +741,118 @@ class CheckedDatabases(unittest.TestCase):
         self.assertEqual(newest, {"openssl": "4.1.0-1", "tor": "0.4.9.16-1", "linux": "7.4-1", "zlib": "1.3-1"})
         # Held back: linux. Not in the view: bash. Equal: zlib.
         self.assertEqual(updates, [("openssl", "3.6.5-1.1", "4.1.0-1"), ("tor", "0.4.9.14-1.1", "0.4.9.16-1")])
+
+    def test_refresh_failures_preserve_real_reason_and_never_merge_or_save(self):
+        reasons = ("error: failed retrieving file 'extra.db': HTTP 404\n",
+                   "error: core: signature from Example is unknown trust\n",
+                   "error: failed to initialize alpm library: database is incorrect version\n",
+                   "error: could not lock database: File exists\n")
+        for reason in reasons:
+            with self.subTest(reason=reason), \
+                    mock.patch.object(pkg.subprocess, "run", return_value=subprocess.CompletedProcess(
+                        [], 1, stdout=":: Synchronizing package databases...\n", stderr=reason)), \
+                    mock.patch.object(pkg, "in_net", side_effect=lambda c: ["ip", "netns", "exec", "locachy-net"] + c), \
+                    mock.patch.object(pkg, "merge_checked") as merge, \
+                    mock.patch.object(pkg, "save_plan") as save:
+                with self.assertRaises(RuntimeError) as error:
+                    pkg.repo_updates()
+                self.assertIn(reason.strip(), str(error.exception))
+                self.assertIn("Synchronizing package databases", str(error.exception))
+                self.assertNotIn("Cannot fetch updates", str(error.exception))
+                merge.assert_not_called()
+                save.assert_not_called()
+                command = pkg.subprocess.run.call_args.args[0]
+                self.assertEqual(command[:5], ["ip", "netns", "exec", "locachy-net", "pacman"])
+                self.assertEqual(command[command.index("--dbpath") + 1], str(self.checked))
+                self.assertNotIn("-Syu", command)
+                self.assertNotIn("--noconfirm", command)  # never auto-import a signing key
+                self.assertEqual(pkg.subprocess.run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(os.readlink(self.checked / "local"), str(self.db / "local"))
+
+    def test_refresh_timeout_reports_partial_stdout_and_stderr(self):
+        failure = subprocess.TimeoutExpired(["pacman"], pkg.CHECK_TIMEOUT,
+                    output=b":: Synchronizing...\n", stderr=b"error: mirror connection stalled\n")
+        with mock.patch.object(pkg.subprocess, "run", side_effect=failure), \
+                mock.patch.object(pkg, "in_net", side_effect=lambda c: c), \
+                mock.patch.object(pkg, "merge_checked") as merge:
+            with self.assertRaisesRegex(RuntimeError, "timed out") as error:
+                pkg.repo_updates()
+        self.assertIn("Synchronizing", str(error.exception))
+        self.assertIn("mirror connection stalled", str(error.exception))
+        merge.assert_not_called()
+
+    def test_misplaced_local_database_is_not_replaced_or_read_through(self):
+        wrong = self.checked / "local"
+        wrong.mkdir(parents=True)
+        (wrong / "keep").write_text("private database")
+        with mock.patch.object(pkg.subprocess, "run") as run:
+            self.assertRaisesRegex(RuntimeError, "local database link", pkg.checked_pacman_sync)
+        run.assert_not_called()
+        self.assertEqual((wrong / "keep").read_text(), "private database")
+
+    def test_query_failure_is_not_an_empty_successful_update_check(self):
+        def run(command, **kwargs):
+            if "-Sy" in command:
+                (self.checked / "sync/core.db").write_bytes(b"fixture")
+                return subprocess.CompletedProcess(command, 0, "", "")
+            return subprocess.CompletedProcess(command, 1, "", "error: core.db is unreadable")
+        with mock.patch.object(pkg.subprocess, "run", side_effect=run), \
+                mock.patch.object(pkg, "in_net", side_effect=lambda c: c), \
+                mock.patch.object(pkg, "merge_checked"), mock.patch.object(pkg, "ignored_packages") as ignored:
+            self.assertRaisesRegex(RuntimeError, "core.db is unreadable", pkg.repo_updates)
+        ignored.assert_not_called()
+
+    def test_plan_error_is_readable_and_keeps_previous_plan(self):
+        old = self.root / "plan"
+        old.write_text("# checked earlier\nhost\\trepo\\tbase\\t1\\t2\n")
+        before = old.read_bytes()
+        reason = "repository refresh failed:\nerror: extra.db: HTTP 404"
+        stderr, stdout = io.StringIO(), io.StringIO()
+        with mock.patch.object(pkg, "PLAN_FILE", str(old)), \
+                mock.patch.object(pkg, "plan", side_effect=RuntimeError(reason)), \
+                mock.patch.object(pkg, "save_plan") as save, \
+                contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(stdout):
+            self.assertEqual(pkg.cmd_plan([]), 1)
+        save.assert_not_called()
+        self.assertEqual(old.read_bytes(), before)
+        self.assertIn(reason, stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+        self.assertNotIn("Everything is up to date", stdout.getvalue())
+
+    @unittest.skipUnless(HAVE_PACMAN and os.geteuid() == 0, "real private refresh needs Linux root (a user namespace suffices)")
+    def test_real_private_refresh_success_and_failure_never_touch_host_databases(self):
+        mirror = self.root / "mirror"
+        mirror.mkdir()
+        # A real pacman database is copied from the fixture helper below.
+        sync_db(mirror / "fixture.db", [("sample", "2-1")])
+        local_db(self.db / "local")
+        host_sync = self.db / "sync"
+        host_sync.mkdir()
+        (host_sync / "fixture.db").write_bytes(b"host database sentinel")
+        conf = self.root / "pacman.conf"
+        # Signature policy and root downloader apply only to these synthetic
+        # file:// fixtures inside the private test root, never the real host.
+        conf.write_text(f"[options]\nArchitecture = x86_64\nSigLevel = Never\nDownloadUser = root\n"
+                        f"[fixture]\nServer = file://{mirror}\n")
+        stack = load("stack_refresh_fixture", LINK / "locachy_stack.py")
+        with mock.patch.object(pkg, "PACMAN_CONFIG", str(conf)), \
+                mock.patch.object(pkg, "in_net", side_effect=lambda c: c), \
+                mock.patch.object(pkg, "helper_module", return_value=stack), \
+                contextlib.redirect_stderr(io.StringIO()):
+            updates, newest = pkg.repo_updates()
+            self.assertEqual(newest, {"sample": "2-1"})
+            self.assertEqual(updates, [])
+            self.assertEqual(os.readlink(self.checked / "local"), str(self.db / "local"))
+            self.assertEqual((host_sync / "fixture.db").read_bytes(), b"host database sentinel")
+            (mirror / "fixture.db").unlink()
+            # No mirror has the requested database, although the host itself
+            # has network access. The actual pacman reason must survive.
+            with self.assertRaises(RuntimeError) as error:
+                pkg.repo_updates()
+            self.assertIn("fixture.db", str(error.exception))
+            self.assertNotIn("Cannot fetch updates", str(error.exception))
+            self.assertEqual((host_sync / "fixture.db").read_bytes(), b"host database sentinel")
+        self.assertEqual(sorted(p.name for p in host_sync.iterdir()), ["fixture.db"])
 
     @unittest.skipUnless(HAVE_PACMAN, "pacman is not installed here")
     def test_a_repository_lookup_reads_the_fetched_databases_a_bare_name_the_stack(self):

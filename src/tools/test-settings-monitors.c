@@ -1209,7 +1209,7 @@ static void test_power_and_hwinfo(void)
     keys[nkeys++] = '1';     /* 1h span */
     keys[nkeys++] = K_LEFT;  /* cursor active */
     keys[nkeys++] = '\t';    /* switch to offline Spare pack SANYO_45N1029_8899 */
-    keys[nkeys++] = 'c';     /* copy battery report */
+    keys[nkeys++] = 3;       /* Ctrl+C: copy battery report */
     keys[nkeys++] = 27;      /* back */
     power_curves_page();
     assert(keypos == nkeys);
@@ -1426,7 +1426,7 @@ static void test_power_and_hwinfo(void)
     nkeys = keypos = 0;
     keys[nkeys++] = K_DOWN; /* Processor */
     keys[nkeys++] = K_DOWN; /* Memory & Slots */
-    keys[nkeys++] = 'c';    /* copy Memory & Slots page */
+    keys[nkeys++] = 3;      /* Ctrl+C: copy Memory & Slots page */
     keys[nkeys++] = 'q';    /* exit */
     hwinfo_page();
     assert(keypos == nkeys && strstr(clip_buf, "Samsung K4U6E3S4AA-MGCL"));

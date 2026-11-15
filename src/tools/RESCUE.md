@@ -18,7 +18,7 @@ getty login or installer. Other boot entries keep the normal installer behavior.
 Rescue starts without unlocking disks or enabling remote access. Select an
 action with the keyboard or pointer. Status, selectable operation output and
 controls occupy separate regions. Tab changes panes; arrows, wheel and
-PgUp/PgDn scroll. Copy the selected text with y/Ctrl+C; a copies SSH connection
+PgUp/PgDn scroll. Copy the selected text with Ctrl+C; a copies SSH connection
 information and f copies the host-key fingerprint.
 
 The keyboard-layout action selects US, Japanese JIS or a standard console/XKB
@@ -63,8 +63,7 @@ The helper journals random session mapper names, DM UUIDs, device numbers and
 kernel mount IDs in root-only `/run/locachy-rescue/storage.json`. It does not
 adopt an existing mapper or unmount another program's nested mounts. Closing
 the target leaves the cable service alone; stopping the cable leaves the target
-alone. These are operational safeguards, not restrictions on an already
-trusted root administrator.
+alone.
 
 ## Authenticated debug cable
 
@@ -118,6 +117,4 @@ link does not exit Rescue or close its target.
 exact argv/stdin, cancellation, malformed replies, timeout escalation, output,
 layout changes and cleanup refusal. The `test-rescue-{dispatch,storage,link}.py`
 unit suites exercise backend contracts; `test-rescue-link.py --linux-auth` uses
-real OpenSSH in private Linux namespaces. These checks do not replace a real
-LUKS/systemd VM or full ISO rescue-session acceptance. No test authorizes
-changing a physical installation's disk, TPM, firmware keys or boot state.
+real OpenSSH in private Linux namespaces.

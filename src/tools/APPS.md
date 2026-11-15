@@ -254,8 +254,3 @@ while its launcher still cleans up, waits for that cleanup; a start whose
 launcher timed out while still outside the cgroup is refused until that
 launcher has ended, and a stop kills it. The display is fixture files and the
 clock is offset for the timeouts.
-
-Real-flow application acceptance additionally starts at the store UI, then
-opens from home as the first app after boot and in a second display session.
-A rendered window, network path or process checks do not prove account login
-or authenticated Codex terminal execution; report those separately.

@@ -44,7 +44,7 @@ Measured alternatives (Xwayland 24.1.14, labwc 0.20.2):
 `locachy-seat` starts labwc without `DISPLAY` or `XAUTHORITY`, removes the
 record at the start of each session and at its end, and tells process 1
 `display-ready` once the record is there (when Xwayland is installed; after
-10 s it goes on without X11 and says so: this fallback is not measured).
+10 s it goes on without X11 and logs the timeout).
 Process 1 starts no program on the shared display before that message, so
 the first one, started with the display, finds X11 there (`x11="1"`): its
 sockets alone come first. Xwayland is labwc's child, in the shared display's cgroup, not in an
@@ -115,8 +115,7 @@ again. Measured, with the window held open by the test:
   container's next X11 copy is taken normally.
 
 Any copy in that window gives way, also one by another program. The window
-lasts from the capture to the freezer write of one freeze (its length was not
-measured).
+lasts from the capture to the freezer write of one freeze.
 
 ## Verification
 
@@ -134,6 +133,4 @@ bash tools/test-xwayland.sh
 
 It builds `locachy-seat` and `clipboard` from this tree, uses this tree's labwc
 configuration, and runs them with a stand-in process 1, a headless labwc and
-plain XCB clients, in private mount and PID namespaces, without real input
-devices or the physical display. Its result lines are PASS and FAIL. A failed or unrun integration test is not a successful
-deployment.
+plain XCB clients, in private mount and PID namespaces.

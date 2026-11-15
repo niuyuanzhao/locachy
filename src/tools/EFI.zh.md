@@ -8,8 +8,7 @@
 可移动介质标准后备，不再是唯一正常启动入口。
 
 上一版直接复制旧的当前映像，不会用新生成的密钥重新构建或签名。尤其首次启用
-本机密钥安全启动之后，较早的未签名 Previous 不能在安全启动开启时引导。启动项
-存在不等于签名有效或 TPM 策略可用，依赖它恢复之前须分别核验。
+本机密钥安全启动之后，较早的未签名 Previous 不能在安全启动开启时引导。
 
 安装器写好映像后，运行已安装源码的 `locachy-efi --esp TARGET --first`，
 登记所选 ESP，把 `LOCachy` 和 `LOCachy (Previous)` 放到 BootOrder 前列，保留所有其他条目及其相对顺序。
@@ -26,7 +25,6 @@
 安全启动登记之后、记录安装完成之前。Boot####/BootOrder 可能影响固件度量，例如
 PCR 1；LOCachy 默认绑定不使用 PCR 1（自有密钥为 PCR 7 加签名 PCR 11，
 仅 TPM 为 0+7，TPM 1.2 为 0）。自定义 PCR 策略可能需要重新绑定。
-下面的 OVMF 测试未组合 TPM/安全启动下的登记验证。
 
 已安装系统仅修复启动项，在 root 下运行：
 
@@ -73,8 +71,6 @@ bash tools/test-efi-vm.sh RUNTIME_ROOT PACKAGE_CACHE NEW_OUTPUT
 重复无重复项、禁用/缺顺序修复、删除后 `--register-only` 补建，以及真实重建引导
 映像后保留人为调整的顺序。
 
-该测试在 OVMF 上验证真实 efibootmgr（五项功能检查与完成检查），但不是实机固件，也没有再次从新登记的映像重启。
-
 ## 只读安装介质
 
 安装器把 `installer/archiso-readonly-seed.patch` 应用到发行包 mkarchiso 的工作副本：
@@ -85,7 +81,5 @@ bash tools/test-efi-vm.sh RUNTIME_ROOT PACKAGE_CACHE NEW_OUTPUT
 `python3 -B tools/test-optical-boot.py 新输出目录` 使用真实上游 EFI 构造函数和
 systemd-boot，依次启动两 vCPU、512 MiB 的 OVMF usb-bot/scsi-cd 客机，检查 FAT
 属性、复现未修补的 write-protected 故障，并让修补后的镜像进入 tiny init。
-依赖其帮助中列出的 Linux/KVM 和发行包工具。它是启动接口测试，不是完整安装或
-实体 USB 设备验收。
 
 参考：[efibootmgr(8)](https://man.archlinux.org/man/efibootmgr.8.en)。

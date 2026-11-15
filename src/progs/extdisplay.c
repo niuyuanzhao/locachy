@@ -1,21 +1,5 @@
 /*
- * extdisplay: the extended-display receiver (tools/EXTDISPLAY.md), with no arguments. The
- * peer creates a new virtual output of its own and keeps its original screen;
- * this program shows that new output's pixels and sends LOCachy's keyboard and
- * pointer back. It is not a mirror, a remote login or a VNC viewer, and it
- * creates no compositor: it draws with the base screen and reads the base
- * keyboard and pointer.
- *
- * It starts the broker as its own child over a control socketpair
- * (extdisplay-setup.h: "extdisplay-broker --control-fd 3", nothing else open in the child,
- * the session owner's descriptor included). The setup screen lists the
- * broker's cable interfaces and pairs one; the broker then hands over the
- * paired plaintext AF_UNIX stream in its "paired" message. This program never
- * listens on or dials a network itself. Everything that stream carries is
- * parsed and decoded by extdisplay-worker (extdisplay-ipc.h) in its sandbox; this side only
- * maps sealed, size-checked pixel buffers. Remote input requires the managed
- * session owner (session.h): revocation, owner EOF, focus loss or device loss
- * cancel every remote-held key and button first.
+ * extdisplay: extended-display receiver (tools/EXTDISPLAY.md).
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -45,27 +29,27 @@
 #define ACCENT 0xD0E8FF
 #define DIM    0x90A8C0
 #define WARN   0xFFB080
-#define STATUS_ROWS 4
 #define HANDSHAKE_S 8.0
 
 static volatile sig_atomic_t stop;
 static int ipc = -1, active, outside_cancelled;
-/* The broker, extdisplay's child (extdisplay-setup.h): its channel and the pairing shown. */
 static struct extdisplay_setup setup = { .fd = -1, .stream = -1 };
 static pid_t broker = -1;
-static int leaving, selected;
-/* The cable came out during a session: the next key closes extdisplay. A
- * live link is never left by a key (the user's rule): only this ends it. */
+static int leaving, selected, diagnostics, auto_pair = 1;
+static struct extdisplay_iface selection, suppressed;
+static int suppress_auto;
+
+static int same_interface(const struct extdisplay_iface *a, const struct extdisplay_iface *b)
+{
+    return a->ifindex == b->ifindex && !strcmp(a->address, b->address);
+}
 static int unplugged;
-/* Ctrl+Alt+F12 during a session: the session ends (the broker cancels it,
- * as at any session's end) and the setup screen comes back. */
-static int disconnecting;
 static uint32_t *frame;
 static size_t frame_bytes;
 static uint32_t frame_w, frame_h;
 static int vx, vy, vw, vh, panel_w, panel_h;
 static const char *state = N_("Unavailable");
-static const char *detail = N_("A paired dedicated-link transport is required.");
+static const char *detail = N_("Waiting for the sender.");
 
 static void ending(int sig) { (void)sig; stop = 1; }
 
@@ -79,11 +63,14 @@ static int send_text(uint32_t op, const char *text, int n)
     return extdisplay_ipc_send(ipc, &m);
 }
 
-/* Remote input only while the owner allows it (the main loop services the
- * policy first each turn); input meanwhile is dropped, cancel never is. */
+static int input_allowed(void)
+{
+    return base_session_fd() >= 0 ? base_session_input_allowed() : control_fd() >= 0;
+}
+
 static int send_input(const char *text, int n)
 {
-    if (!base_session_input_allowed()) return 0;
+    if (!input_allowed()) return 0;
     return send_text(EXTDISPLAY_IPC_INPUT, text, n);
 }
 
@@ -94,48 +81,40 @@ static int cancel(void)
     return active ? send_text(EXTDISPLAY_IPC_INPUT, text, extdisplay_cancel_json(text, sizeof text)) : 0;
 }
 
-/* The picture's area: below the bar, above the status rows; the stream
- * fitted into it with its aspect ratio. */
 static void viewport(void)
 {
-    int cw, ch, top;
     screen_pixels(&panel_w, &panel_h);
-    screen_cells(&cw, &ch, &top);
-    int y0 = top + ch, available = panel_h - y0 - ch * STATUS_ROWS;
-    if (available < 1) available = 1;
-    vx = 0; vy = y0; vw = panel_w > 0 ? panel_w : 1; vh = available;
+    vx = 0;
+    vy = 0;
+    vw = panel_w > 0 ? panel_w : 1;
+    vh = panel_h > 0 ? panel_h : 1;
     if (frame_w && frame_h) {
         if ((uint64_t)vw * frame_h <= (uint64_t)vh * frame_w) vh = (int)((uint64_t)vw * frame_h / frame_w);
         else vw = (int)((uint64_t)vh * frame_w / frame_h);
         if (vw < 1) vw = 1;
         if (vh < 1) vh = 1;
         vx = (panel_w - vw) / 2;
-        vy = y0 + (available - vh) / 2;
+        vy = (panel_h - vh) / 2;
     }
 }
 
 static void draw(void)
 {
     viewport();
-    screen_fill_px(0, 0, panel_w, panel_h, BG);
+    screen_fill_px(0, 0, panel_w, panel_h, 0x000000);
     if (frame && frame_w && frame_h) {
-        uint32_t *line = malloc((size_t)vw * sizeof *line);
-        for (int y = 0; line && y < vh; y++) {
-            const uint32_t *src = frame + (size_t)((uint64_t)y * frame_h / (unsigned)vh) * frame_w;
-            for (int x = 0; x < vw; x++) line[x] = src[(uint64_t)x * frame_w / (unsigned)vw];
-            screen_blit(vx, vy + y, vw, 1, line, vw);
+        if (vw == (int)frame_w && vh == (int)frame_h) {
+            screen_blit(vx, vy, vw, vh, frame, vw);
+        } else {
+            uint32_t *line = malloc((size_t)vw * sizeof *line);
+            for (int y = 0; line && y < vh; y++) {
+                const uint32_t *src = frame + (size_t)((uint64_t)y * frame_h / (unsigned)vh) * frame_w;
+                for (int x = 0; x < vw; x++) line[x] = src[(uint64_t)x * frame_w / (unsigned)vw];
+                screen_blit(vx, vy + y, vw, 1, line, vw);
+            }
+            free(line);
         }
-        free(line);
     }
-    screen_bar(_("Extended display"), NULL);
-    int rows = screen_rows(), cols = screen_cols();
-    char text[256];
-    screen_fill(0, rows - STATUS_ROWS, cols, STATUS_ROWS, PANEL);
-    snprintf(text, sizeof text, _("Status: %s    Stream: %ux%u"), _(state), frame_w, frame_h);
-    screen_text(1, rows - 4, text, ACCENT, PANEL);
-    screen_text(1, rows - 3, _(detail), FG, PANEL);
-    screen_text(1, rows - 2, _("Ctrl+Alt+F12: disconnect    Home, lock and brightness stay local; the link stays up"), FG, PANEL);
-    screen_text(1, rows - 1, _("No clipboard, files or commands. The peer keeps its original screen."), DIM, PANEL);
     screen_flush();
 }
 
@@ -143,7 +122,6 @@ static int pointer_input(void)
 {
     const struct pointer_event *p = pointer_last();
     if (p->x < vx || p->x >= vx + vw || p->y < vy || p->y >= vy + vh) {
-        /* Off the picture: release what the peer holds, once. */
         return outside_cancelled ? 0 : cancel();
     }
     outside_cancelled = 0;
@@ -154,14 +132,12 @@ static int pointer_input(void)
     if (p->button) {
         n = extdisplay_button_json(s, sizeof s, (uint32_t)p->button, p->pressed, x, y);
     } else if (p->scroll_dx || p->scroll_dy || (p->gesture == GESTURE_SCROLL && p->scroll_source != SCROLL_TOUCH)) {
-        /* Content displacement in stream pixels (natural sign: positive dy
-         * moves content down, positive dx content right), as LOCachy scrolls
-         * it locally. Touch-screen drags are not forwarded: they carry whole
-         * steps and no fractional deltas. */
         double kx = frame_w ? (double)frame_w / vw : 1, ky = frame_h ? (double)frame_h / vh : 1;
         n = extdisplay_scroll_json(s, sizeof s, -p->scroll_dx * kx, -p->scroll_dy * ky, p->scroll_phase, p->scroll_source);
     } else if (p->gesture) {
-        return 0; /* pinch and swipe are not advertised, never synthesized */
+        return 0;
+    } else if (p->dx || p->dy) {
+        n = extdisplay_pointer_delta_json(s, sizeof s, x, y, p->dx, p->dy);
     } else {
         n = extdisplay_pointer_json(s, sizeof s, x, y);
     }
@@ -176,22 +152,7 @@ static int raw_input(void)
             if (cancel() < 0) return -1;
             continue;
         }
-        /* evdev KEY_F12: the emergency disconnect, independent of rc.conf's keys.
-         * With a session it ends that session (not the broker: a release would
-         * end extdisplay) and the setup screen comes back. Without one, nothing
-         * is lost: extdisplay leaves. */
-        if (e.code == 88 && e.state == 1 && (e.modifiers & (KEYS_CTRL | KEYS_ALT)) == (KEYS_CTRL | KEYS_ALT)) {
-            if (ipc >= 0 || active) {
-                disconnecting = 1;
-                return 0;
-            }
-            leaving = 1;
-            if (setup.fd < 0 || extdisplay_setup_release(&setup) != 0) stop = 1;
-            return 0;
-        }
         if (e.flags & BASE_RAW_LOCAL) {
-            /* Process 1 may freeze this program for home or the lock right
-             * after this key: release the modifiers already sent first. */
             if (e.state == 1 && cancel() < 0) return -1;
             continue;
         }
@@ -213,8 +174,6 @@ static int paired_stream(int fd)
            getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &type_size) == 0 && type == SOCK_STREAM;
 }
 
-/* A bounded end: the worker gets STOP (it sends cancel to the peer), then is
- * killed; a stopped or hostile worker never holds up the local exit. */
 static void end_worker(pid_t worker)
 {
     if (worker <= 0 && ipc < 0) return;
@@ -234,15 +193,11 @@ static void end_worker(pid_t worker)
     ipc = -1;
 }
 
-/* session.h's epoch change: nothing more goes out, the worker writes cancel
- * into the stream and says so (else it is killed: the stream ends, which the
- * peer treats as a release too), and only then the owner gets its ACK. The
- * owner waits 250 ms; this takes at most EXTDISPLAY_CANCEL_WAIT_MS. */
 static int release_remote(pid_t *worker, int *inhibited)
 {
     if (*inhibited) base_sleep_inhibit(0);
     *inhibited = 0;
-    base_raw_enable(0); /* queued keys and held mappings go */
+    base_raw_enable(0);
     base_raw_enable(1);
     while (pointer_next()) { }
     if (*worker > 0 && ipc >= 0) {
@@ -259,7 +214,7 @@ static int release_remote(pid_t *worker, int *inhibited)
                     if (errno == EAGAIN) continue;
                     break;
                 }
-                if (fd >= 0) close(fd); /* a picture meanwhile: the next one comes after FRAME_ACK */
+                if (fd >= 0) close(fd);
                 if (m.op == EXTDISPLAY_IPC_FRAME) {
                     struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK };
                     extdisplay_ipc_send(ipc, &ack);
@@ -296,21 +251,19 @@ static int handle_worker(int *inhibited, double *started)
     case EXTDISPLAY_IPC_READY: {
         if (!m.width || m.width > 3) break;
         char hello[EXTDISPLAY_IPC_TEXT];
-        int cw, ch, top, w, h;
-        screen_cells(&cw, &ch, &top);
+        int w, h;
         screen_pixels(&w, &h);
-        h -= top + ch * (1 + STATUS_ROWS);
         double scale = screen_scale();
-        int n = extdisplay_hello(hello, sizeof hello, (uint32_t)w, (uint32_t)(h > 0 ? h : 1),
+        int n = extdisplay_hello(hello, sizeof hello, (uint32_t)(w > 0 ? w : 1), (uint32_t)(h > 0 ? h : 1),
                           scale >= 0.5 && scale <= 4 ? scale : 1.0, m.width & 1, (m.width & 2) != 0);
         if (send_text(EXTDISPLAY_IPC_HELLO, hello, n) < 0) break;
         return 1;
     }
     case EXTDISPLAY_IPC_ACTIVE:
         active = 1;
-        (void)base_session_hold(1); /* the link is live: home and the lock do not freeze this program */
-        /* Held only while remote input is allowed (session.h). */
-        if (!*inhibited && base_session_input_allowed()) {
+        screen_cursor(CURSOR_NONE);
+        (void)base_session_hold(1);
+        if (base_session_fd() >= 0 && !*inhibited && base_session_input_allowed()) {
             if (base_sleep_inhibit(1) < 0) {
                 set_state(N_("Unavailable"), N_("The managed sleep inhibitor was not granted."));
                 return -1;
@@ -318,7 +271,7 @@ static int handle_worker(int *inhibited, double *started)
             *inhibited = 1;
         }
         *started = uptime();
-        set_state(N_("Active"), N_("Extended-only sender over the paired dedicated link."));
+        set_state(N_("Active"), "");
         return 1;
     case EXTDISPLAY_IPC_FRAME: {
         void *pixels = extdisplay_frame_map(fd, &m);
@@ -339,7 +292,7 @@ static int handle_worker(int *inhibited, double *started)
         set_state(N_("Unavailable"), N_("The decoder sandbox or FFmpeg is not available."));
         return -1;
     case EXTDISPLAY_IPC_CANCELLED:
-        return 0; /* a late answer to a cancel already given up on */
+        return 0;
     default:
         break;
     }
@@ -348,41 +301,41 @@ static int handle_worker(int *inhibited, double *started)
     return -1;
 }
 
-/* One session on the paired stream, until it ends: the peer, the session
- * owner, the broker or the user. The setup screen comes back after it. */
 static void session_run(int transport)
 {
     pid_t worker = -1;
     int owner = base_session_fd(), inhibited = 0, session_started = 0;
-    set_state(N_("Unavailable"), N_("A paired dedicated-link transport is required."));
+    set_state(N_("Unavailable"), N_("Waiting for the sender."));
     if (transport < 0) {
         /* nothing to run */
-    } else if (owner < 0) {
-        set_state(N_("Unavailable"), N_("No managed session owner: remote input stays disabled."));
+    } else if (owner < 0 && control_fd() < 0) {
+        set_state(N_("Unavailable"), N_("No session control channel."));
     } else if (!paired_stream(transport)) {
-        set_state(N_("Unavailable"), N_("The transport is not a paired local stream from the broker."));
-    } else if (base_session_service() < 0 || base_session_input_cancelled() != 0) {
-        /* Nothing is held yet: the first policy is acknowledged at once. */
+        set_state(N_("Unavailable"), N_("The transport is not a local stream from the broker."));
+    } else if (owner >= 0 && (base_session_service() < 0 || base_session_input_cancelled() != 0)) {
         set_state(N_("Unavailable"), N_("The session owner did not accept this session."));
     } else if ((worker = extdisplay_worker_spawn(transport, &ipc)) < 0) {
-        set_state(N_("Unavailable"), N_("The decoder worker could not be started safely."));
+        set_state(N_("Unavailable"), N_("The decoder worker could not be started."));
     } else {
-        set_state(N_("Connecting"), N_("Waiting for the sender's capabilities."));
+        set_state(N_("Connecting"), N_("Waiting for the sender."));
         say("extdisplay: decoder worker %d started", (int)worker);
         session_started = 1;
     }
     if (transport >= 0) close(transport);
+    if (!session_started) {
+        if (setup.state == EXTDISPLAY_SETUP_PAIRED) extdisplay_setup_cancel(&setup);
+        return;
+    }
+    screen_cursor(CURSOR_NONE);
+    (void)base_session_hold(1);
     draw();
 
     double started = uptime();
-    while (!stop && !leaving && !disconnecting) {
+    while (!stop && !leaving) {
         struct pollfd p[3] = { { ipc, POLLIN, 0 }, { owner, POLLIN, 0 }, { setup.fd, POLLIN, 0 } };
         int key = key_poll_many(p, 3, 100);
-        /* A live link is not left by a key: home and the lock take the screen
-         * and the link stays (base_session_hold). Without one these leave it. */
         if (ipc < 0 && (key == K_CLOSE || key == K_ACT_HOME || key == K_ACT_LOCK || key == 27)) break;
         int redraw = 0;
-        /* The broker ends the session (the cable, a timeout), or has gone. */
         if (setup.fd >= 0 && p[2].revents) {
             enum extdisplay_setup_event ev = extdisplay_setup_read(&setup);
             if (ev == EXTDISPLAY_SETUP_EV_ENDED || ev == EXTDISPLAY_SETUP_EV_BROKEN) {
@@ -391,9 +344,6 @@ static void session_run(int transport)
                 break;
             }
         }
-        /* Policy first, every turn, also without a session: a hang-up here
-         * must not spin the loop. Nothing gathered before a change goes out
-         * after its cancel. */
         if (owner >= 0 && p[1].revents) {
             int policy = base_session_service();
             if (policy < 0) {
@@ -403,7 +353,7 @@ static void session_run(int transport)
                 break;
             }
             if (policy > 0) {
-                key = 0; /* a pointer read before the change is stale */
+                key = 0;
                 if (release_remote(&worker, &inhibited) < 0) {
                     set_state(N_("Disconnected"), N_("The session owner did not accept the release."));
                     break;
@@ -426,7 +376,7 @@ static void session_run(int transport)
             break;
         }
         if (key == K_SHOWN) {
-            cancel(); /* the screen was away: what the peer held is stale */
+            cancel();
             redraw = 1;
         }
         if (redraw) draw();
@@ -435,33 +385,29 @@ static void session_run(int transport)
             break;
         }
     }
-    if (disconnecting) set_state(N_("Disconnected"), N_("Disconnected with Ctrl+Alt+F12; extdisplay stays open."));
-    /* session.h's order: no input, cancel, inhibitor off, then the worker
-     * (STOP writes cancel again before it exits). */
     if (active) cancel();
     active = 0;
-    (void)base_session_hold(0);
+    screen_cursor(CURSOR_ARROW);
+    if (unplugged || leaving) (void)base_session_hold(0);
     if (inhibited) base_sleep_inhibit(0);
     end_worker(worker);
     if (frame) munmap(frame, frame_bytes);
     frame = NULL;
     frame_w = frame_h = 0;
-    /* Ended here first (the peer, the owner, the user): the broker is told,
-     * and answers "ended cancelled" once it is idle again. */
     if (setup.state == EXTDISPLAY_SETUP_PAIRED) extdisplay_setup_cancel(&setup);
-    disconnecting = 0;
 }
 
-/* The setup screen: the candidate interfaces with their carrier, and the
- * pairing region (address, port, code and the Mac's command shape, drawn only
- * while the broker waits for the sender), the status line and the keys. */
 static const char *setup_state_text(void)
 {
     switch (setup.state) {
     case EXTDISPLAY_SETUP_IDLE: return N_("Idle");
     case EXTDISPLAY_SETUP_SCANNING: return N_("Scanning");
-    case EXTDISPLAY_SETUP_LIST: return N_("Choose an interface");
-    case EXTDISPLAY_SETUP_PAIRING: return N_("Asking the broker for a code");
+    case EXTDISPLAY_SETUP_LIST: return setup.count ? N_("Ready to connect") : N_("Waiting for a Thunderbolt/USB4 network");
+    case EXTDISPLAY_SETUP_PAIRING:
+        if (!strcmp(setup.progress, "carrier")) return N_("Waiting for the cable link");
+        if (!strcmp(setup.progress, "address")) return N_("Preparing the link-local address");
+        if (!strcmp(setup.progress, "discovery")) return N_("Making the receiver discoverable");
+        return N_("Preparing the connection");
     case EXTDISPLAY_SETUP_WAITING: return N_("Waiting for the Mac to connect");
     case EXTDISPLAY_SETUP_PAIRED: return N_("Connected");
     case EXTDISPLAY_SETUP_CANCELLING: return N_("Cancelling");
@@ -480,61 +426,69 @@ static void setup_draw(void)
     screen_bar(_("Extended display"), NULL);
     int rows = screen_rows(), cols = screen_cols();
     if (selected >= setup.count) selected = setup.count ? setup.count - 1 : 0;
-    screen_text(1, 2, _("Choose the cable interface to pair with the Mac."), ACCENT, BG);
+    screen_text(1, 2, _("Connect a Thunderbolt/USB4 link to the Mac."), ACCENT, BG);
+    if (setup.state == EXTDISPLAY_SETUP_LIST && setup.count > 0 && !diagnostics) {
+        for (int i = 0; i < setup.count && i < 8; i++) {
+            snprintf(text, sizeof text, "%s %s  %s", i == selected ? ">" : " ", setup.ifaces[i].name,
+                     setup.ifaces[i].carrier ? _("link ready") : _("waiting for link"));
+            screen_text(1, 4 + i, text, i == selected ? ACCENT : FG, BG);
+        }
+    }
     if (setup.count == 0) {
-        screen_text(1, 4, setup.state == EXTDISPLAY_SETUP_SCANNING ? _("Scanning...")
-                                                            : _("No cable interface found. Connect the cable, then press F5."),
+        screen_text(1, 4, setup.state == EXTDISPLAY_SETUP_SCANNING ? _("Looking for a Thunderbolt/USB4 network...")
+                                                            : _("Waiting for a Thunderbolt/USB4 network."),
                     DIM, BG);
     }
-    for (int i = 0; i < setup.count && i < 8; i++) {
-        const struct extdisplay_iface *f = &setup.ifaces[i];
-        snprintf(text, sizeof text, "%s %-16s %-20s %s", i == selected ? ">" : " ", f->name, f->driver,
-                 f->carrier ? _("carrier up") : _("no carrier"));
-        screen_text(1, 4 + i, text, i == selected ? ACCENT : FG, BG);
+    if (diagnostics && setup.count) {
+        for (int i = 0; i < setup.count && i < 8; i++) {
+            const struct extdisplay_iface *f = &setup.ifaces[i];
+            snprintf(text, sizeof text, "%s  %s  %s  #%d  %s", f->name, f->driver,
+                     f->carrier ? _("carrier up") : _("waiting for carrier"), f->ifindex,
+                     f->address[0] ? f->address : _("identity unavailable"));
+            screen_text(1, 4 + i, text, DIM, BG);
+        }
     }
-    int top = rows - 9;
-    screen_fill(0, top, cols, 4, PANEL);
+    int top = rows - 8;
+    screen_fill(0, top, cols, 3, PANEL);
     if (setup.state == EXTDISPLAY_SETUP_WAITING) {
-        snprintf(text, sizeof text, _("Address  %s     Port  %s"), setup.linklocal, setup.port);
-        screen_text(1, top, text, ACCENT, PANEL);
-        snprintf(text, sizeof text, _("Code     %s"), setup.code);
-        screen_text(1, top + 1, text, ACCENT, PANEL);
-        snprintf(text, sizeof text,
-                 _("On the Mac: locachy-macos-sender --interface <mac-interface> --address %s --port %s"),
-                 setup.linklocal, setup.port);
-        screen_text(1, top + 2, text, FG, PANEL);
+        screen_text(1, top, _("Waiting for the Mac service to connect automatically..."), ACCENT, PANEL);
+        if (diagnostics) {
+            snprintf(text, sizeof text, _("Interface %s   Address %s   Port %s"), setup.pairing, setup.linklocal, setup.port);
+            screen_text(1, top + 1, text, DIM, PANEL);
+        }
     } else if (setup.state == EXTDISPLAY_SETUP_PAIRING) {
-        screen_text(1, top, _("Asking the broker for an address and a code..."), FG, PANEL);
+        screen_text(1, top, _(setup_state_text()), FG, PANEL);
     }
-    screen_fill(0, rows - 4, cols, 4, PANEL);
+    screen_fill(0, rows - 3, cols, 3, PANEL);
     snprintf(text, sizeof text, _("Status: %s"), _(setup_state_text()));
-    screen_text(1, rows - 4, text, ACCENT, PANEL);
+    screen_text(1, rows - 3, text, ACCENT, PANEL);
     if (setup.error[0]) {
-        screen_text(1, rows - 3,
+        screen_text(1, rows - 2,
                     strcmp(setup.error, "busy") == 0 ? _("The broker is busy: a pairing is still active.") : setup.error,
                     WARN, PANEL);
     } else if (setup.reason[0]) {
-        screen_text(1, rows - 3, _(extdisplay_setup_reason_text(setup.reason)), FG, PANEL);
+        screen_text(1, rows - 2, _(extdisplay_setup_reason_text(setup.reason)), FG, PANEL);
     }
     if (unplugged) {
-        screen_fill(0, rows - 3, cols, 1, PANEL);
-        screen_text(1, rows - 3, _("The cable was unplugged. Press any key to close."), WARN, PANEL);
+        screen_fill(0, rows - 2, cols, 1, PANEL);
+        screen_text(1, rows - 2, _("The cable was unplugged. Press any key to close."), WARN, PANEL);
     }
-    screen_text(1, rows - 2, _("Up/Down choose   Enter pair   Esc cancel   F5 scan   F1 help   Ctrl+Q quit"), FG, PANEL);
-    screen_text(1, rows - 1, _("The code and the address are kept in memory only."), DIM, PANEL);
+    screen_text(1, rows - 1, _("Enter connect   Esc cancel   F2 details   F1 help   Ctrl+Q quit"), FG, PANEL);
     screen_flush();
 }
 
 static const struct ui_help_line setup_keys[] = {
     { "Up, Down", N_("Choose the cable interface") },
-    { "Enter", N_("Pair with the Mac on it") },
-    { "Esc", N_("Cancel the pairing") },
-    { "F5", N_("Look for cable interfaces again") },
-    { "Ctrl+Alt+F12", N_("Disconnect a session; extdisplay stays open") },
+    { "Enter", N_("Connect the selected link") },
+    { "Esc", N_("Cancel waiting") },
+    { "F2", N_("Show interface and address details") },
+    { "F5", N_("Rescan cable interfaces") },
+    { "F1", N_("Help") },
+    { "Super+Esc", N_("Home") },
+    { "Ctrl+Q", N_("Quit") },
     { NULL, NULL },
 };
 
-/* Pairs and sessions one after another until the broker releases (or stops). */
 static void setup_loop(void)
 {
     int quit_ticks = 0;
@@ -543,23 +497,67 @@ static void setup_loop(void)
         struct pollfd p[1] = { { setup.fd, POLLIN, 0 } };
         int key = key_poll_many(p, 1, 100);
         int redraw = 0;
-        /* Leaving but no answer from the broker in 3 s: leave anyway. */
         if (leaving && ++quit_ticks > 30) break;
         if (raw_input() < 0) break;
         if (p[0].revents) {
             switch (extdisplay_setup_read(&setup)) {
             case EXTDISPLAY_SETUP_EV_NONE:
                 break;
+            case EXTDISPLAY_SETUP_EV_CHANGED:
+                if (!unplugged && (setup.state == EXTDISPLAY_SETUP_LIST || setup.state == EXTDISPLAY_SETUP_SCANNING)) auto_pair = 1;
+                redraw = 1;
+                break;
+            case EXTDISPLAY_SETUP_EV_LIST: {
+                int blocked_present = 0;
+                for (int i = 0; i < setup.count; i++) {
+                    if (same_interface(&selection, &setup.ifaces[i])) selected = i;
+                    if (same_interface(&suppressed, &setup.ifaces[i])) {
+                        blocked_present = 1;
+                        if (setup.ifaces[i].carrier != suppressed.carrier) {
+                            suppressed.carrier = setup.ifaces[i].carrier;
+                            if (suppressed.carrier) suppress_auto = 0;
+                        }
+                    }
+                }
+                if (!blocked_present) suppress_auto = 0;
+                redraw = 1;
+                break;
+            }
+            case EXTDISPLAY_SETUP_EV_ERROR:
+                (void)base_session_hold(0);
+                auto_pair = 0;
+                suppress_auto = 1;
+                suppressed = selection;
+                if (setup.state == EXTDISPLAY_SETUP_LIST) extdisplay_setup_scan(&setup);
+                redraw = 1;
+                break;
+            case EXTDISPLAY_SETUP_EV_CODE:
+                (void)base_session_hold(1);
+                redraw = 1;
+                break;
             case EXTDISPLAY_SETUP_EV_PAIRED: {
+                auto_pair = 0;
                 int stream = setup.stream;
                 setup.stream = -1;
                 session_run(stream);
+                /* After a session ends without unplugging, immediately re-arm
+                 * so a reconnected sender can attach again without user action. */
+                auto_pair = !unplugged;
+                suppress_auto = unplugged;
+                suppressed = selection;
                 if (setup.state == EXTDISPLAY_SETUP_IDLE || setup.state == EXTDISPLAY_SETUP_LIST) extdisplay_setup_scan(&setup);
                 redraw = 1;
                 break;
             }
             case EXTDISPLAY_SETUP_EV_ENDED:
-                /* The device is back on the host: its carrier may have changed. */
+                if (unplugged || leaving || strcmp(setup.reason, "cancelled") == 0) {
+                    (void)base_session_hold(0);
+                }
+                if (strcmp(setup.reason, "cancelled") != 0) {
+                    suppress_auto = unplugged;
+                }
+                auto_pair = !suppress_auto;
+                suppressed = selection;
                 if (setup.state == EXTDISPLAY_SETUP_IDLE || setup.state == EXTDISPLAY_SETUP_LIST) extdisplay_setup_scan(&setup);
                 redraw = 1;
                 break;
@@ -570,7 +568,7 @@ static void setup_loop(void)
             if (setup.state == EXTDISPLAY_SETUP_LIST && setup.count && selected >= setup.count) selected = 0;
         }
         if (unplugged && key && key != K_SHOWN && key != K_POINTER) {
-            key = K_CLOSE; /* the cable came out during the session: any key closes */
+            key = K_CLOSE;
         }
         int act = key_action(key, keys_modifiers());
         if (act == ACT_HELP) {
@@ -578,35 +576,68 @@ static void setup_loop(void)
             redraw = 1;
         }
         if (act == ACT_QUIT || key == K_ACT_HOME || key == K_ACT_LOCK) {
-            /* Leaving: the broker releases and answers "ended released"; the
-             * loop ends then. Without a channel there is nothing to wait for. */
+            (void)base_session_hold(0);
             leaving = 1;
             if (extdisplay_setup_release(&setup) != 0) break;
             redraw = 1;
         } else if (key == K_SHOWN) {
             redraw = 1;
+        } else if (key == K_F1 + 1) {
+            diagnostics = !diagnostics;
+            redraw = 1;
         } else if (key == K_UP && selected > 0) {
+            auto_pair = 0;
+            suppress_auto = 0;
             selected--;
+            selection = setup.ifaces[selected];
             redraw = 1;
         } else if (key == K_DOWN && selected + 1 < setup.count) {
+            auto_pair = 0;
+            suppress_auto = 0;
             selected++;
+            selection = setup.ifaces[selected];
             redraw = 1;
         } else if (key == '\n' && setup.state == EXTDISPLAY_SETUP_LIST && setup.count > 0) {
             setup.error[0] = setup.reason[0] = '\0';
+            auto_pair = 0;
+            selection = setup.ifaces[selected];
+            (void)base_session_hold(1);
             extdisplay_setup_pair(&setup, setup.ifaces[selected].name);
             redraw = 1;
         } else if (key == 27 && (setup.state == EXTDISPLAY_SETUP_PAIRING || setup.state == EXTDISPLAY_SETUP_WAITING)) {
+            (void)base_session_hold(0);
+            auto_pair = 0;
+            suppress_auto = 1;
+            suppressed = selection;
             extdisplay_setup_cancel(&setup);
             redraw = 1;
         } else if (key == K_F1 + 4 && (setup.state == EXTDISPLAY_SETUP_LIST || setup.state == EXTDISPLAY_SETUP_IDLE)) {
-            setup.error[0] = setup.reason[0] = '\0';
+            auto_pair = 0;
+            suppress_auto = 1;
+            suppressed = selection;
             extdisplay_setup_scan(&setup);
             redraw = 1;
+        }
+        if (!leaving && !unplugged && setup.state == EXTDISPLAY_SETUP_LIST) {
+            if (setup.changed) {
+                extdisplay_setup_scan(&setup);
+                redraw = 1;
+            } else if (auto_pair && !suppress_auto) {
+                int choice = extdisplay_setup_automatic(&setup);
+                if (choice >= 0) {
+                    selected = choice;
+                    selection = setup.ifaces[selected];
+                    setup.error[0] = setup.reason[0] = '\0';
+                    auto_pair = 0;
+                    (void)base_session_hold(1);
+                    extdisplay_setup_pair(&setup, selection.name);
+                    redraw = 1;
+                }
+            }
         }
         if (redraw) setup_draw();
     }
     if (setup.state == EXTDISPLAY_SETUP_BROKEN) {
-        /* Shown until dismissed: the reason is on screen, the helper is gone. */
         setup_draw();
         for (;;) {
             int key = key_poll_timeout(-1, 250);
@@ -634,8 +665,6 @@ int main(int argc, char **argv)
     base_raw_enable(1);
     pointer_scroll_events(1);
     pointer_scroll_precision(1);
-    /* Takes the session owner's descriptor out of reach of everything below
-     * (the broker is started with every other descriptor closed). */
     base_session_fd();
     int control = -1;
     broker = extdisplay_setup_spawn_broker(EXTDISPLAY_BROKER_PATH, &control);
@@ -644,14 +673,13 @@ int main(int argc, char **argv)
         setup.state = EXTDISPLAY_SETUP_BROKEN;
     } else {
         extdisplay_setup_init(&setup, control);
-        extdisplay_setup_scan(&setup);
+        extdisplay_setup_watch(&setup);
     }
     setup_loop();
-    if (setup.fd >= 0) close(setup.fd); /* the broker sees the end: it releases and exits */
+    if (setup.fd >= 0) close(setup.fd);
     extdisplay_setup_reap_broker(broker);
     base_raw_enable(0);
     pointer_scroll_events(0);
     pointer_scroll_precision(0);
     return 0;
 }
-

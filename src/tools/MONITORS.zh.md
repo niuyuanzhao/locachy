@@ -31,4 +31,4 @@
 
 `tools/test-monitor-profiles.sh NEW_ABSOLUTE_DIRECTORY` 检查独立组合、fallback 保留、
 身份和接口变化、相同身份、原子保存失败、精确毫赫兹往返、晚启用事件以及控制器事务失败和
-取消。档案测试还会跑 ASan 和 UBSan。真实链路带宽及显示器热插拔验收另做。
+取消。档案测试还会跑 ASan 和 UBSan。

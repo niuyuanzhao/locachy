@@ -3,7 +3,7 @@
  * textsel_frame at the start of each picture. A drag selects from where it
  * was pressed to where it is, a double click a word, a triple click a line;
  * the program offers what was selected as the primary selection when it is
- * made (TEXTSEL_MADE), and to the clipboard with y or Ctrl+C. */
+ * made (TEXTSEL_MADE), and to the clipboard with Ctrl+C. */
 #ifndef LOCACHY_TEXTSEL_H
 #define LOCACHY_TEXTSEL_H
 

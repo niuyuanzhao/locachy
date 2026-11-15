@@ -15,6 +15,8 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
+#include <limits.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -113,6 +115,7 @@ static int split(char *line, char *tok[], int max)
 static enum extdisplay_setup_event broken(struct extdisplay_setup *s, const int *fds, int nfds)
 {
     for (int i = 0; i < nfds; i++) close(fds[i]);
+    extdisplay_setup_forget(s);
     s->state = EXTDISPLAY_SETUP_BROKEN;
     return EXTDISPLAY_SETUP_EV_BROKEN;
 }
@@ -149,22 +152,49 @@ int extdisplay_setup_scan(struct extdisplay_setup *s)
     memset(s->ifaces, 0, sizeof s->ifaces);
     s->count = 0;
     s->scanned = 0;
+    s->changed = 0;
+    s->scanning = 1;
     s->state = EXTDISPLAY_SETUP_SCANNING;
     return send_line(s, "scan");
+}
+
+int extdisplay_setup_watch(struct extdisplay_setup *s)
+{
+    if (s->state != EXTDISPLAY_SETUP_IDLE || s->watching) return -1;
+    s->watching = 1;
+    s->scanning = 1;
+    s->state = EXTDISPLAY_SETUP_SCANNING;
+    return send_line(s, "watch");
+}
+
+int extdisplay_setup_automatic(const struct extdisplay_setup *s)
+{
+    if (s->state != EXTDISPLAY_SETUP_LIST || s->changed) return -1;
+    if (s->count == 1) return 0;
+    int choice = -1;
+    for (int i = 0; i < s->count; i++) {
+        if (!s->ifaces[i].carrier) continue;
+        if (choice >= 0) return -1;
+        choice = i;
+    }
+    return choice;
 }
 
 int extdisplay_setup_pair(struct extdisplay_setup *s, const char *name)
 {
     char line[EXTDISPLAY_SETUP_LINE];
     if (!name || s->state != EXTDISPLAY_SETUP_LIST || !ifname_ok(name, strlen(name))) return -1;
-    int listed = 0;
+    const struct extdisplay_iface *listed = NULL;
     for (int i = 0; i < s->count; i++) {
-        if (strcmp(s->ifaces[i].name, name) == 0) listed = 1;
+        if (strcmp(s->ifaces[i].name, name) == 0) listed = &s->ifaces[i];
     }
-    if (!listed) return -1;
+    if (!listed || s->changed) return -1;
     extdisplay_setup_forget(s);
+    s->progress[0] = '\0';
     snprintf(s->pairing, sizeof s->pairing, "%s", name);
-    snprintf(line, sizeof line, "pair %s", name);
+    if (s->watching && listed->ifindex > 0 && listed->address[0])
+        snprintf(line, sizeof line, "pair %s %d %s", name, listed->ifindex, listed->address);
+    else snprintf(line, sizeof line, "pair %s", name);
     s->state = EXTDISPLAY_SETUP_PAIRING;
     return send_line(s, line);
 }
@@ -197,12 +227,13 @@ enum extdisplay_setup_event extdisplay_setup_line(struct extdisplay_setup *s, co
     /* "error TEXT" carries spaces in its text: taken before the split. */
     if (strncmp(text, "error ", 6) == 0) {
         if ((s->state != EXTDISPLAY_SETUP_PAIRING && s->state != EXTDISPLAY_SETUP_CANCELLING &&
-             s->state != EXTDISPLAY_SETUP_SCANNING) || nfds || n == 6) {
+             s->state != EXTDISPLAY_SETUP_SCANNING && s->state != EXTDISPLAY_SETUP_RELEASING) || nfds || n == 6) {
             return broken(s, fds, nfds);
         }
         /* A scan refused ("error busy" while a lease is active): shown, and
          * the (empty) list stays, for F5 later. */
         if (s->state == EXTDISPLAY_SETUP_SCANNING) s->scanned = 1;
+        s->scanning = 0;
         extdisplay_setup_forget(s);
         s->reason[0] = '\0';
         s->error[0] = '\0';
@@ -214,6 +245,7 @@ enum extdisplay_setup_event extdisplay_setup_line(struct extdisplay_setup *s, co
             return EXTDISPLAY_SETUP_EV_ENDED;
         }
         snprintf(s->error, sizeof s->error, "%.*s", REPLY_TEXT, text + 6);
+        if (s->state == EXTDISPLAY_SETUP_RELEASING) return EXTDISPLAY_SETUP_EV_NONE;
         s->state = s->scanned ? EXTDISPLAY_SETUP_LIST : EXTDISPLAY_SETUP_IDLE;
         return EXTDISPLAY_SETUP_EV_ERROR;
     }
@@ -231,8 +263,8 @@ enum extdisplay_setup_event extdisplay_setup_line(struct extdisplay_setup *s, co
         int plain = getsockopt(stream, SOL_SOCKET, SO_TYPE, &type, &size) == 0 && type == SOCK_STREAM &&
                     getsockname(stream, (struct sockaddr *)&addr, &length) == 0 && addr.ss_family == AF_UNIX;
         if (!plain) return broken(s, fds, nfds);
-        if (s->state == EXTDISPLAY_SETUP_CANCELLING) {
-            /* The sender paired as the cancel went out: the stream is refused. */
+        if (s->state == EXTDISPLAY_SETUP_CANCELLING || s->state == EXTDISPLAY_SETUP_RELEASING) {
+            /* The sender paired as cancel/release went out: refuse the stream. */
             close(stream);
             return EXTDISPLAY_SETUP_EV_NONE;
         }
@@ -245,29 +277,63 @@ enum extdisplay_setup_event extdisplay_setup_line(struct extdisplay_setup *s, co
     }
     if (nfds) return broken(s, fds, nfds);
 
+    if (strcmp(tok[0], "changed") == 0) {
+        if (ntok != 1 || !s->watching) return broken(s, fds, nfds);
+        s->changed = 1;
+        return EXTDISPLAY_SETUP_EV_CHANGED;
+    }
+    if (strcmp(tok[0], "preparing") == 0) {
+        int crossing = s->state == EXTDISPLAY_SETUP_CANCELLING || s->state == EXTDISPLAY_SETUP_RELEASING;
+        if (ntok != 3 || (s->state != EXTDISPLAY_SETUP_PAIRING && !crossing) || strcmp(tok[1], s->pairing) ||
+            (strcmp(tok[2], "carrier") && strcmp(tok[2], "address") && strcmp(tok[2], "discovery") && strcmp(tok[2], "listener")))
+            return broken(s, fds, nfds);
+        if (crossing) return EXTDISPLAY_SETUP_EV_NONE;
+        snprintf(s->progress, sizeof s->progress, "%s", tok[2]);
+        return EXTDISPLAY_SETUP_EV_PROGRESS;
+    }
     if (strcmp(tok[0], "iface") == 0) {
-        if (s->state != EXTDISPLAY_SETUP_SCANNING || ntok != 4) return broken(s, fds, nfds);
+        int releasing = s->state == EXTDISPLAY_SETUP_RELEASING && s->scanning;
+        if ((s->state != EXTDISPLAY_SETUP_SCANNING && !releasing) || ntok != (s->watching ? 6 : 4)) return broken(s, fds, nfds);
         size_t driver = strlen(tok[2]);
         if (!ifname_ok(tok[1], strlen(tok[1])) || driver < 1 || driver > 32) return broken(s, fds, nfds);
         int up = strcmp(tok[3], "up") == 0, down = strcmp(tok[3], "down") == 0;
         if (!up && !down) return broken(s, fds, nfds);
+        int ifindex = 0;
+        if (s->watching) {
+            char *end;
+            long value = strtol(tok[4], &end, 10);
+            size_t length = strlen(tok[5]);
+            if (tok[4][0] < '1' || tok[4][0] > '9' || *end || value < 1 || value > INT_MAX ||
+                length < 2 || length >= sizeof s->ifaces[0].address) return broken(s, fds, nfds);
+            for (size_t j = 0; j < length; j++) {
+                char c = tok[5][j];
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || c == ':')) return broken(s, fds, nfds);
+            }
+            ifindex = (int)value;
+        }
+        for (int j = 0; j < s->count; j++)
+            if (!strcmp(s->ifaces[j].name, tok[1])) return broken(s, fds, nfds);
         if (s->count < EXTDISPLAY_SETUP_IFACES) {
             struct extdisplay_iface *i = &s->ifaces[s->count++];
             snprintf(i->name, sizeof i->name, "%s", tok[1]);
             snprintf(i->driver, sizeof i->driver, "%s", tok[2]);
             i->carrier = up;
+            i->ifindex = ifindex;
+            if (s->watching) snprintf(i->address, sizeof i->address, "%s", tok[5]);
         }
         return EXTDISPLAY_SETUP_EV_NONE;
     }
     if (strcmp(tok[0], "end") == 0) {
-        if (s->state != EXTDISPLAY_SETUP_SCANNING || ntok != 1) return broken(s, fds, nfds);
+        int releasing = s->state == EXTDISPLAY_SETUP_RELEASING && s->scanning;
+        if ((s->state != EXTDISPLAY_SETUP_SCANNING && !releasing) || ntok != 1) return broken(s, fds, nfds);
         s->scanned = 1;
-        s->state = EXTDISPLAY_SETUP_LIST;
-        return EXTDISPLAY_SETUP_EV_LIST;
+        s->scanning = 0;
+        if (s->state != EXTDISPLAY_SETUP_RELEASING) s->state = EXTDISPLAY_SETUP_LIST;
+        return releasing ? EXTDISPLAY_SETUP_EV_NONE : EXTDISPLAY_SETUP_EV_LIST;
     }
     /* The broker answers "pair" before it reads a cancel sent meanwhile: in
      * CANCELLING its lease and code still come, checked and not kept. */
-    int crossing = s->state == EXTDISPLAY_SETUP_CANCELLING;
+    int crossing = s->state == EXTDISPLAY_SETUP_CANCELLING || s->state == EXTDISPLAY_SETUP_RELEASING;
     if (strcmp(tok[0], "lease") == 0) {
         if ((s->state != EXTDISPLAY_SETUP_PAIRING && !crossing) || ntok != 4 || strcmp(tok[1], s->pairing) != 0 ||
             (!crossing && s->linklocal[0]) || !linklocal_ok(tok[2], strlen(tok[2])) ||

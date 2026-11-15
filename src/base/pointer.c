@@ -169,6 +169,8 @@ static void push(struct pointer_event e)
         struct pointer_event *tail = &queue[(qhead + qlen - 1) % QUEUE];
         if (!e.button && !e.wheel && !e.hwheel && !e.gesture && !e.scroll_dx && !e.scroll_dy &&
             !tail->button && !tail->wheel && !tail->hwheel && !tail->gesture && !tail->scroll_dx && !tail->scroll_dy) {
+            e.dx += tail->dx;
+            e.dy += tail->dy;
             *tail = e; /* motions merge while unread */
             return;
         }
@@ -290,7 +292,7 @@ EVENTS static void absolute_area(int *x, int *y, int *w, int *h)
 
 /* The pointer at (px, py), kept on the picture; onto another program's
  * screen, unless a button is held (a drag stays). */
-EVENTS static void moved(void)
+EVENTS static void moved_delta(double dx, double dy)
 {
     int w, h, gx, gy;
     if (away) return;
@@ -313,7 +315,12 @@ EVENTS static void moved(void)
     }
     screen_cursor_move((int)px, (int)py);
     hover();
-    push((struct pointer_event){ .x = (int)px, .y = (int)py });
+    push((struct pointer_event){ .x = (int)px, .y = (int)py, .dx = dx, .dy = dy });
+}
+
+EVENTS static void moved(void)
+{
+    moved_delta(0, 0);
 }
 
 /* A press or release of an evdev button code; a second press within slack
@@ -668,12 +675,15 @@ static void handle(struct libinput_event *ev)
         hover(); /* the frame, once the pointer that came over has its devices */
         break;
     }
-    case LIBINPUT_EVENT_POINTER_MOTION:
+    case LIBINPUT_EVENT_POINTER_MOTION: {
         /* Deltas are for a picture at scale 1, as on the shared display. */
-        px += libinput_event_pointer_get_dx(p) * (extended_screen() ? 1.0 : screen_scale());
-        py += libinput_event_pointer_get_dy(p) * (extended_screen() ? 1.0 : screen_scale());
-        moved();
+        double dx = libinput_event_pointer_get_dx(p);
+        double dy = libinput_event_pointer_get_dy(p);
+        px += dx * (extended_screen() ? 1.0 : screen_scale());
+        py += dy * (extended_screen() ? 1.0 : screen_scale());
+        moved_delta(dx, dy);
         break;
+    }
     case LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE:
         px = ax + libinput_event_pointer_get_absolute_x_transformed(p, (uint32_t)w);
         py = ay + libinput_event_pointer_get_absolute_y_transformed(p, (uint32_t)hgt);

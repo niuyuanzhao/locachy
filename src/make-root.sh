@@ -564,6 +564,11 @@ EOF
 [ "$level" = x86-64 ] || echo "export GOAMD64=v${level#x86-64-v}" >>"$root/etc/makepkg.conf.d/99-locachy-cpu.conf"
 cp -L /etc/resolv.conf "$root/etc/resolv.conf"
 chroot "$root" sh /usr/local/src/locachy/link/install-pkg-tools /usr/local/src/locachy
+if [ "${LOCACHY_INSTALLER:-0}" = 1 ]; then
+    # Bootstrap has established the target's build UID. Carry only keys the
+    # person approved in this live session, before the first source build.
+    python3 -I "$here/link/locachy_install_keys.py" preserve "$root"
+fi
 # Existing targets have a manifest already: install-pkg-tools deliberately
 # preserves it. Declare newly added base/module definitions before syncing.
 chroot "$root" python3 -I /usr/local/src/locachy/link/declare-packages /usr/local/src/locachy

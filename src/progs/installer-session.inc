@@ -18,6 +18,23 @@ static struct json_object *selected_names(const struct named *items, const unsig
     return array;
 }
 
+/* json-c owns both the parsed strings and, after serialization, its output
+ * buffer. Erase both before releasing a document that may contain secrets. */
+static void clear_session_json(struct json_object *value)
+{
+    if (!value) return;
+    if (json_object_is_type(value, json_type_string)) {
+        explicit_bzero((void *)json_object_get_string(value), (size_t)json_object_get_string_len(value));
+    } else if (json_object_is_type(value, json_type_array)) {
+        for (int i = 0; i < jlen(value); i++) clear_session_json(jat(value, i));
+    } else if (json_object_is_type(value, json_type_object)) {
+        json_object_object_foreach(value, key, child) {
+            (void)key;
+            clear_session_json(child);
+        }
+    }
+}
+
 static int session_fd(const char *action)
 {
     struct json_object *state = json_object_new_object();
@@ -50,10 +67,8 @@ static int session_fd(const char *action)
         if (n <= 0) break;
         done += (size_t)n;
     }
-    if (fd >= 0 && fcntl(fd, F_SETFD, 0) < 0) {
-        close(fd);
-        fd = -1;
-    }
+    /* Keep CLOEXEC until the immediate exec boundary; the next frontend
+     * restores it before starting any helper. */
     if (fd >= 0 && (done != size || fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) < 0 ||
                     lseek(fd, 0, SEEK_SET) < 0)) {
         close(fd);
@@ -62,14 +77,19 @@ static int session_fd(const char *action)
     /* json-c owns copies of the secrets; erase the serialized copy before
      * freeing it. The sealed fd is the only copy crossing exec. */
     if (text) explicit_bzero((void *)text, size);
+    clear_session_json(state);
     json_object_put(state);
     return fd;
 }
 
 static int restore_names(struct json_object *names, const struct named *items, unsigned char *on, int count)
 {
+    if (!json_object_is_type(names, json_type_array)) return -1;
     memset(on, 0, (size_t)count);
     for (int i = 0; i < jlen(names); i++) {
+        struct json_object *name = jat(names, i);
+        if (!json_object_is_type(name, json_type_string) ||
+            (size_t)json_object_get_string_len(name) != strlen(jtext(names, i))) return -1;
         int found = 0;
         for (int k = 0; k < count; k++) {
             if (!strcmp(jtext(names, i), items[k].name)) on[k] = found = 1;
@@ -77,6 +97,13 @@ static int restore_names(struct json_object *names, const struct named *items, u
         if (!found) return -1; /* never silently drop a chosen module or app */
     }
     return 0;
+}
+
+static int session_string(struct json_object *state, const char *key)
+{
+    struct json_object *value = jget(state, key);
+    return json_object_is_type(value, json_type_string) &&
+           (size_t)json_object_get_string_len(value) == strlen(json_object_get_string(value));
 }
 
 static int restore_session(int fd, char *action, size_t action_size)
@@ -89,53 +116,78 @@ static int restore_session(int fd, char *action, size_t action_size)
     }
     char *text = calloc(1, (size_t)st.st_size + 1);
     if (!text) { close(fd); return -1; }
-    ssize_t got = pread(fd, text, (size_t)st.st_size, 0);
+    ssize_t got;
+    do { got = pread(fd, text, (size_t)st.st_size, 0); } while (got < 0 && errno == EINTR);
     close(fd);
-    struct json_object *state = got == st.st_size ? json_tokener_parse(text) : NULL;
+    struct json_tokener *tok = json_tokener_new();
+    struct json_object *state = NULL;
+    if (tok && got == st.st_size) {
+        json_tokener_set_flags(tok, JSON_TOKENER_STRICT);
+        state = json_tokener_parse_ex(tok, text, (int)st.st_size);
+    }
+    int parsed = tok && json_tokener_get_error(tok) == json_tokener_success;
+    if (tok) json_tokener_free(tok);
     explicit_bzero(text, (size_t)st.st_size);
     free(text);
-    if (!state || jint(state, "format") != 1) {
+    int ok = parsed && json_object_is_type(state, json_type_object) &&
+             json_object_is_type(jget(state, "format"), json_type_int) && jint(state, "format") == 1;
+    if (!ok) {
+        clear_session_json(state);
         if (state) json_object_put(state);
         return -1;
     }
-    int ok = 1;
-#define LOAD_INT(k) c.k = (int)jint(state, #k);
+    struct choices next = {0};
+    /* Decode into a separate value. An incompatible catalog or malformed
+     * field must never leave partial choices (especially secrets) in c. */
+#define LOAD_INT(k) do { struct json_object *v = jget(state, #k); long long n = jint(state, #k); \
+    if (!json_object_is_type(v, json_type_int) || n < INT_MIN || n > INT_MAX) ok = 0; \
+    else next.k = (int)n; } while (0);
     SESSION_INTS(LOAD_INT)
 #undef LOAD_INT
-#define LOAD_TEXT(k) do { const char *s = jstr(state, #k); if (strlen(s) >= sizeof c.k) ok = 0; \
-                         else copy(c.k, sizeof c.k, s); } while (0);
+#define LOAD_TEXT(k) do { struct json_object *v = jget(state, #k); const char *s = jstr(state, #k); \
+    if (!json_object_is_type(v, json_type_string) || (size_t)json_object_get_string_len(v) != strlen(s) || \
+        strlen(s) >= sizeof next.k) ok = 0; else copy(next.k, sizeof next.k, s); } while (0);
     SESSION_TEXT(LOAD_TEXT)
 #undef LOAD_TEXT
-    ok &= restore_names(jget(state, "modules"), modules, c.module_on, nmodules) == 0;
-    ok &= restore_names(jget(state, "containers"), containers, c.container_on, ncontainers) == 0;
-    memset(c.repo_on, 0, sizeof c.repo_on);
-    for (int i = 0; i < jlen(jget(state, "repos")); i++) {
+    ok &= restore_names(jget(state, "modules"), modules, next.module_on, nmodules) == 0;
+    ok &= restore_names(jget(state, "containers"), containers, next.container_on, ncontainers) == 0;
+    struct json_object *repos = jget(state, "repos");
+    ok &= json_object_is_type(repos, json_type_array);
+    for (int i = 0; i < jlen(repos); i++) {
         int found = 0;
         for (int k = 0; k < nrepos; k++) {
-            if (!strcmp(repo_names[k], jtext(jget(state, "repos"), i))) c.repo_on[k] = found = 1;
+            if (json_object_is_type(jat(repos, i), json_type_string) && !strcmp(repo_names[k], jtext(repos, i))) {
+                next.repo_on[k] = found = 1;
+            }
         }
         ok &= found;
     }
-    c.ime = c.machine = c.level = 0;
+    next.ime = next.machine = next.level = 0;
     const char *ime = jstr(state, "ime_name"), *machine = jstr(state, "machine_name"), *level = jstr(state, "level_name");
     int have_ime = !nimes && !strcmp(ime, "off"), have_machine = !machine[0], have_level = !strcmp(level, "auto");
-    for (int i = 0; i < nimes; i++) if (!strcmp(imes[i].name, ime)) { c.ime = i; have_ime = 1; }
-    for (int i = 0; i < nmachines; i++) if (!strcmp(machines[i].name, machine)) { c.machine = i; have_machine = 1; }
-    for (int i = 0; i < nlevels; i++) if (!strcmp(levels[i], level)) { c.level = i + 1; have_level = 1; }
-    ok &= have_ime && have_machine && have_level;
-    recovered_installation = json_object_get_boolean(jget(state, "recovered"));
-    ui_lang = (int)jint(state, "ui_lang");
-    ok &= ui_lang >= 0 && ui_lang <= 1 && c.lang >= 0 && c.lang <= 1 &&
-          c.disk_mode >= WHOLE && c.disk_mode <= MOUNTED && c.encrypt >= ENC_OFF && c.encrypt <= ENC_TPM;
+    for (int i = 0; i < nimes; i++) if (!strcmp(imes[i].name, ime)) { next.ime = i; have_ime = 1; }
+    for (int i = 0; i < nmachines; i++) if (!strcmp(machines[i].name, machine)) { next.machine = i; have_machine = 1; }
+    for (int i = 0; i < nlevels; i++) if (!strcmp(levels[i], level)) { next.level = i + 1; have_level = 1; }
+    ok &= have_ime && have_machine && have_level && session_string(state, "ime_name") &&
+          session_string(state, "machine_name") && session_string(state, "level_name");
+    int next_recovered = json_object_is_type(jget(state, "recovered"), json_type_boolean) ?
+                         json_object_get_boolean(jget(state, "recovered")) : 0;
+    long long next_lang = jint(state, "ui_lang");
+    ok &= json_object_is_type(jget(state, "recovered"), json_type_boolean) &&
+          json_object_is_type(jget(state, "ui_lang"), json_type_int) && next_lang >= 0 && next_lang <= 1 &&
+          next.lang >= 0 && next.lang <= 1 && next.swap_gib >= 0 && next.swap_gib <= 1024 && next.hibernate >= -1 &&
+          next.disk_mode >= WHOLE && next.disk_mode <= MOUNTED && next.encrypt >= ENC_OFF && next.encrypt <= ENC_TPM;
     const char *operation = jstr(state, "action");
-    ok &= !strcmp(operation, "begin") || !strcmp(operation, "continue");
-    copy(action, action_size, operation);
-    /* Erase json-c's secret strings too; their lengths are unchanged. */
-    struct json_object *secret = jget(state, "passphrase");
-    if (secret) explicit_bzero((void *)json_object_get_string(secret), (size_t)json_object_get_string_len(secret));
-    secret = jget(state, "password");
-    if (secret) explicit_bzero((void *)json_object_get_string(secret), (size_t)json_object_get_string_len(secret));
-    json_object_put(state);
+    ok &= session_string(state, "action") && (!strcmp(operation, "begin") || !strcmp(operation, "continue")) && strlen(operation) < action_size;
+    if (ok) {
+        c = next;
+        recovered_installation = next_recovered;
+        ui_lang = (int)next_lang;
+        copy(action, action_size, operation);
+    }
+    explicit_bzero(&next, sizeof next);
+    clear_session_json(state);
+    if (state) json_object_put(state);
     return ok ? 0 : -1;
 }
 
@@ -173,7 +225,7 @@ static int recover_installation(void)
         else RECOVER_TEXT(apps_repo, "--apps-repo")
         else RECOVER_TEXT(apps_branch, "--apps-branch")
 #undef RECOVER_TEXT
-        else if (!strcmp(option, "--encrypt")) c.encrypt = ENC_PASS;
+        else if (!strcmp(option, "--encrypt") && c.encrypt != ENC_TPM) c.encrypt = ENC_PASS;
         else if (!strcmp(option, "--tpm")) c.encrypt = ENC_TPM;
         else if (!strcmp(option, "--language")) c.lang = !strncmp(value, "zh", 2);
         else if (!strcmp(option, "--root")) { c.disk_mode = MOUNTED; copy(c.root, sizeof c.root, value); }
@@ -181,10 +233,9 @@ static int recover_installation(void)
     }
     if (!strcmp(phase, "preflight")) {
         tell(0, "%s", _("The package keys were not trusted; c will check them again before any target write."));
-        recovered_installation = 0;
-    } else {
-        recovered_installation = 1;
     }
+    /* Every recovered record omits secrets, including a stop at preflight. */
+    recovered_installation = 1;
     resumable = resumed_run = 1;
     mode = M_FAILED;
     started = ended = now();
@@ -238,11 +289,15 @@ static int refresh_installer(const char *action)
             tell(0, _("The installer was updated; the stopped target will be checked again before continuing."));
         }
     }
-    setenv("LOCACHY_INSTALL_SNAPSHOT_ROOT", checkout, 1);
-    setenv("LOCACHY_INSTALL_SNAPSHOT_COMMIT", revision, 1);
     const char *current = getenv("LOCACHY_INSTALLER_INPUT_HASH");
     if (current && !strcmp(current, hash)) {
-        setenv("LOCACHY_INSTALLER_REVISION", revision, 1);
+        if (setenv("LOCACHY_INSTALL_SNAPSHOT_ROOT", checkout, 1) < 0 ||
+            setenv("LOCACHY_INSTALL_SNAPSHOT_COMMIT", revision, 1) < 0 ||
+            setenv("LOCACHY_INSTALLER_REVISION", revision, 1) < 0) {
+            json_object_put(result);
+            tell(1, "%s", _("Cannot preserve the installer choices for its update."));
+            return -1;
+        }
         json_object_put(result);
         return 0;
     }
@@ -252,8 +307,35 @@ static int refresh_installer(const char *action)
         tell(1, "%s", _("Cannot preserve the installer choices for its update."));
         return -1;
     }
-    setenv("LOCACHY_INSTALLER_INPUT_HASH", hash, 1);
-    setenv("LOCACHY_INSTALLER_REVISION", revision, 1);
+    /* Only exec's environment may claim the new executable's input hash.
+     * On failure this process must still identify its original binary. */
+    const char *names[] = { "LOCACHY_INSTALL_SNAPSHOT_ROOT=", "LOCACHY_INSTALL_SNAPSHOT_COMMIT=",
+                            "LOCACHY_INSTALLER_INPUT_HASH=", "LOCACHY_INSTALLER_REVISION=" };
+    const char *values[] = { checkout, revision, hash, revision };
+    char *updates[4] = {0};
+    size_t count = 0, used = 0;
+    while (environ[count]) count++;
+    char **environment = calloc(count + 5, sizeof *environment);
+    int ready = environment != NULL;
+    for (size_t i = 0; i < 4 && ready; i++) {
+        if (asprintf(&updates[i], "%s%s", names[i], values[i]) < 0) ready = 0;
+    }
+    if (ready) {
+        for (size_t i = 0; i < count; i++) {
+            int replace = 0;
+            for (size_t k = 0; k < 4; k++) replace |= !strncmp(environ[i], names[k], strlen(names[k]));
+            if (!replace) environment[used++] = environ[i];
+        }
+        for (size_t i = 0; i < 4; i++) environment[used++] = updates[i];
+    }
+    if (!ready || fcntl(fd, F_SETFD, 0) < 0) {
+        for (size_t i = 0; i < 4; i++) free(updates[i]);
+        free(environment);
+        close(fd);
+        json_object_put(result);
+        tell(1, "%s", _("Cannot preserve the installer choices for its update."));
+        return -1;
+    }
     char state_arg[48];
     snprintf(state_arg, sizeof state_arg, "--state-fd=%d", fd);
     char *const next[] = { (char *)frontend, state_arg, NULL };
@@ -261,8 +343,10 @@ static int refresh_installer(const char *action)
     keys_release();
     screen_release();
     console_restore();
-    execv(frontend, next);
+    execve(frontend, next, environment);
     close(fd);
+    for (size_t i = 0; i < 4; i++) free(updates[i]);
+    free(environment);
     json_object_put(result);
     console_take();
     screen_open(BASE_FONT);

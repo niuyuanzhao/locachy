@@ -441,6 +441,7 @@ struct pointer_event {
     double scale;  /* a pinch: the factor since its last event (above 1: apart, zoom in) */
     int scroll_source, scroll_phase, scroll_fingers;
     double scroll_dx, scroll_dy; /* opt-in, fractional pixels: right/down; wheel step = 15 pixels */
+    double dx, dy; /* relative motion delta in logical points (mouse, touchpad, TrackPoint) */
 };
 enum { GESTURE_NONE, GESTURE_PINCH, GESTURE_SCROLL };
 enum { SCROLL_NONE, SCROLL_WHEEL, SCROLL_FINGER, SCROLL_CONTINUOUS, SCROLL_TOUCH };
@@ -492,13 +493,13 @@ int base_audio_key(int action_key, char *toast, size_t size);
  * freezes it, starts argv[0] (a full path) on top of it, and
  * when that exits, thaws this program, gives them back and base_call
  * returns its exit status (-1 if it could not be asked, 127 if it would not
- * start). Ctrl+Alt+Esc meanwhile goes to home with the whole stack frozen.
+ * start). Super+Esc meanwhile goes to home with the whole stack frozen.
  */
 int base_call(char *const argv[]);
 
 /* For home: show the task argv (start it if it is not running) on one
  * screen and wait until home has the screen again; why says what happened:
- * "back NAME" (Ctrl+Alt+Esc) or "ended NAME STATUS" (its last program
+ * "back NAME" (Super+Esc) or "ended NAME STATUS" (its last program
  * exited). base_open's screen is the one the request came from (the one
  * home was last pressed on, or the program that asked home was on);
  * base_open_on's, the screen named (a connector). With several screens,

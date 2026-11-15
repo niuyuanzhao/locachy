@@ -795,7 +795,7 @@ def cmd_remove(pkgs):
 # Updates of the host and the containers: a plan, shown before anything is
 # done, and its application, target by target.
 #
-#   host       the repositories' updates (checkupdates: found without
+#   host       the repositories' updates (a private pacman refresh, without
 #              touching pacman's own database) and the AUR's (its RPC, for
 #              the packages pacman calls foreign); applied with pacman -Su
 #              over the checked databases as the stack resolves them
@@ -865,12 +865,13 @@ SOURCE_PENDING_FILE = "/usr/local/lib/locachy/source-pending"
 SELF = "/usr/local/bin/locachy-pkg"
 INIT = "/usr/local/lib/locachy/init"
 PLAN_FILE = "/var/lib/locachy/plan"
-CHECK_DB = "/var/lib/locachy/checkupdates"  # the repositories' databases as checkupdates fetched them
+CHECK_DB = "/var/lib/locachy/checkupdates"  # raw repository databases, refreshed only here
+CHECK_TIMEOUT = 300  # includes mirror fallback; never wait indefinitely for a check
 # The same databases as the stack resolves them (locachy_stack: the newest
 # version of each package, the optimised layer only on an exact tie). Every
 # view of the repositories reads this one: the plan and its snapshot, the
 # transaction, the information shown, and what a transaction publishes to the
-# host. CHECK_DB itself is what checkupdates fetched; every Check dates it at
+# host. CHECK_DB itself is the raw fetched set; every Check dates it at
 # the epoch and fetches it again (date_checked_databases).
 MERGED_DB = "/var/lib/locachy/checkupdates/merged"
 AUR_RPC = "https://aur.archlinux.org/rpc/v5/info"
@@ -1541,8 +1542,8 @@ def vercmp(a, b):
 
 def merge_checked():
     """MERGED_DB from CHECK_DB as the stack resolves it (locachy_stack). Its
-    local database is the real one, linked as checkupdates links it into
-    CHECK_DB: pacman only ever reads it through MERGED_DB."""
+    local database links to the host's local database, as CHECK_DB does:
+    pacman only ever reads it through MERGED_DB."""
     stack = helper_module("locachy_stack")
     os.makedirs(MERGED_DB, mode=0o755, exist_ok=True)
     local = os.path.join(MERGED_DB, "local")
@@ -1572,9 +1573,8 @@ def publish_merged():
 
 
 def ignored_packages():
-    """The packages pacman.conf holds back (IgnorePkg, and the members of
-    IgnoreGroup in the checked view): pacman -Qu, and so checkupdates, leave
-    them out of the updates, and so does the plan."""
+    """Packages held back by IgnorePkg and IgnoreGroup in pacman.conf.
+    Match pacman's exclusions when computing updates from the merged view."""
     conf = ["pacman-conf", "--config", PACMAN_CONFIG]
     names = set(subprocess.run(conf + ["IgnorePkg"], capture_output=True, text=True).stdout.split())
     for group in subprocess.run(conf + ["IgnoreGroup"], capture_output=True, text=True).stdout.split():
@@ -1584,8 +1584,8 @@ def ignored_packages():
 
 
 def date_checked_databases():
-    """Date CHECK_DB's databases and their signatures at the epoch, so that
-    checkupdates' refresh fetches each of them whole. pacman keeps a database
+    """Date CHECK_DB's databases and signatures at the epoch, so that the
+    private pacman refresh fetches each of them whole. pacman keeps a database
     that is newer than the mirror's copy, and it fetches the signature from the
     mirror it asks. When a stalled mirror fails over to an older one, the older
     signature would be checked against the kept database: "signature ... is
@@ -1598,21 +1598,64 @@ def date_checked_databases():
             os.utime(os.path.join(sync, name), (0, 0))
 
 
+def checked_pacman_sync():
+    """Refresh CHECK_DB only, retaining pacman's complete diagnostics.
+
+    checkupdates hides pacman's stderr and collapses every failure to one line.
+    The updater needs the actual repository, HTTP, signature, filesystem or
+    lock error, while still keeping the refresh outside the host database.
+    """
+    sync = os.path.join(CHECK_DB, "sync")
+    os.makedirs(CHECK_DB, mode=0o755, exist_ok=True)
+    os.makedirs(sync, mode=0o755, exist_ok=True)
+    local = os.path.join(CHECK_DB, "local")
+    if os.path.lexists(local):
+        if not os.path.islink(local) or os.path.realpath(local) != os.path.realpath(LOCAL_DB):
+            raise RuntimeError(f"{local} is not the checked view's local database link")
+    else:
+        os.symlink(LOCAL_DB, local)
+    command = in_net(["pacman", "-Sy", "--disable-sandbox-filesystem",
+                      "--dbpath", CHECK_DB, "--logfile", "/dev/null",
+                      "--config", PACMAN_CONFIG])
+    try:
+        p = subprocess.run(command, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                           env=dict(os.environ, LC_ALL="C"), timeout=CHECK_TIMEOUT)
+    except subprocess.TimeoutExpired as e:
+        partial = "\n".join(x.decode(errors="replace") if isinstance(x, bytes) else x
+                            for x in (e.stdout, e.stderr) if x).strip()
+        raise RuntimeError("repository refresh timed out after " + str(CHECK_TIMEOUT) + " s" +
+                           (":\n" + partial if partial else "")) from e
+    output = "\n".join(x for x in (p.stdout or "", p.stderr or "") if x).strip()
+    if p.returncode != 0:
+        raise RuntimeError("repository refresh failed" + (":\n" + output if output else
+                                                            f" (pacman exit {p.returncode})"))
+    if output:
+        print(output, file=sys.stderr, flush=True)
+    if not glob.glob(os.path.join(sync, "*.db")):
+        raise RuntimeError("repository refresh returned success but no repository databases were written")
+
+
+def pacman_list_checked():
+    """List the merged view, preserving a query failure instead of treating it as empty."""
+    command = ["pacman", "-Sl", "--dbpath", MERGED_DB, "--config", PACMAN_CONFIG]
+    p = subprocess.run(command, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                       env=dict(os.environ, LC_ALL="C"))
+    output = "\n".join(x for x in (p.stdout or "", p.stderr or "") if x).strip()
+    if p.returncode != 0:
+        raise RuntimeError("repository listing failed" + (":\n" + output if output else
+                                                            f" (pacman exit {p.returncode})"))
+    return p.stdout
+
+
 def repo_updates():
     """The host's repository updates and every repository package's newest
-    version, from a copy of the sync databases updated aside (checkupdates,
-    which only fetches here) and resolved by the stack's rule: not the first
-    repository that has a package, its newest version (merge_checked)."""
-    os.makedirs(CHECK_DB, mode=0o755, exist_ok=True)
+    version, from a private database refresh and the stack's resolution. The
+    host pacman database is never refreshed or published by Check."""
     date_checked_databases()
-    env = dict(os.environ, CHECKUPDATES_DB=CHECK_DB)
-    p = subprocess.run(in_net(["env", f"CHECKUPDATES_DB={CHECK_DB}", "checkupdates"]),
-                       capture_output=True, text=True, env=env)
-    if p.returncode not in (0, 2):
-        raise RuntimeError(f"checkupdates failed: {p.stderr.strip()}")
+    checked_pacman_sync()
     merge_checked()
     newest = {}
-    out = subprocess.run(["pacman", "-Sl", "--dbpath", MERGED_DB], capture_output=True, text=True).stdout
+    out = pacman_list_checked()
     for line in out.splitlines():
         parts = line.split()
         if len(parts) >= 3 and parts[1] not in newest:
@@ -2361,12 +2404,18 @@ def rebuild_locachy(force=False):
 
 
 def cmd_plan(args):
-    if "--cached" in args:
-        rows, checked = load_plan()
-    else:
-        rows = settle_source_update(plan())
-        save_plan(rows)
-        rows, checked = load_plan()
+    try:
+        if "--cached" in args:
+            rows, checked = load_plan()
+        else:
+            rows = settle_source_update(plan())
+            save_plan(rows)
+            rows, checked = load_plan()
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+        print(f"locachy-pkg: update check failed: {e}", file=sys.stderr, flush=True)
+        print("No update plan was completed. No packages were changed; "
+              "the previous plan is not a new successful check.", file=sys.stderr, flush=True)
+        return 1
     if "--machine" in args:
         print(f"checked\t{checked}")
         for r in rows:
@@ -2800,4 +2849,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+        print(f"locachy-pkg: {error}", file=sys.stderr, flush=True)
+        sys.exit(1)

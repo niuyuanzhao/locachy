@@ -634,6 +634,7 @@ static const struct ui_help_line archive_keys[] = {
     { "Tab, Shift+Tab", N_("A dialog's next or previous line") },
     { "y, n", N_("A question: y yes; n, Esc or Enter no") },
     { "Ctrl+A, Home, End", N_("In a line you type: select all, the start, the end") },
+    { "Ctrl+W, Ctrl+U, Ctrl+K", N_("In a line you type: delete the word before the cursor, to the start, to the end") },
     { NULL, NULL },
 };
 
@@ -682,15 +683,16 @@ static void fit(char *out, size_t size, const char *s, int cells)
     ui_pad(out, size, s, cells);
 }
 
-/* Left/Right/Home/End (^E)/Backspace/Delete, Ctrl+U, Ctrl+K and what keys
+/* Left/Right/Home/End (^E)/Backspace/Delete, Ctrl+W, Ctrl+U, Ctrl+K and what keys
  * type (keys_typed) on text at *pos; Ctrl+A selects it all (*all: what is
  * typed, Backspace or Delete then replace it). */
 static void edit_key(int key, int mods, char *text, size_t size, size_t *pos, int *all)
 {
     size_t len = strlen(text);
     const char *typed = keys_typed(key);
+    int act = key_action(key, mods);
     if (*pos > len) *pos = len;
-    if (key_action(key, mods) == ACT_SELECT_ALL) {
+    if (act == ACT_SELECT_ALL) {
         *all = len > 0;
         *pos = len;
         return;
@@ -700,7 +702,7 @@ static void edit_key(int key, int mods, char *text, size_t size, size_t *pos, in
         *all = 0;
         return;
     }
-    if (*all && (typed || key == '\b' || key == 127 || key == K_DEL || key == 21 || key == 11)) {
+    if (*all && (typed || key == '\b' || key == 127 || key == K_DEL || key == 21 || key == 11 || act == ACT_CLOSE_TAB)) {
         text[0] = '\0'; /* the selection goes; what is typed takes its place */
         len = *pos = 0;
         *all = 0;
@@ -725,6 +727,13 @@ static void edit_key(int key, int mods, char *text, size_t size, size_t *pos, in
         size_t next = *pos + 1;
         while (next < len && ((unsigned char)text[next] & 0xC0) == 0x80) next++;
         memmove(text + *pos, text + next, len - next + 1);
+        *pos = *pos;
+    } else if (act == ACT_CLOSE_TAB && *pos > 0) {
+        size_t prev = *pos;
+        while (prev > 0 && text[prev - 1] == ' ') prev--;
+        while (prev > 0 && text[prev - 1] != ' ' && text[prev - 1] != '/') prev--;
+        memmove(text + prev, text + *pos, len - *pos + 1);
+        *pos = prev;
     } else if (key == 21) {
         memmove(text, text + *pos, len - *pos + 1);
         *pos = 0;

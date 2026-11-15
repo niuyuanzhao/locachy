@@ -28,8 +28,8 @@
  *
  * L shows the selected or failed container's log (/run/locachy/apps/NAME.log)
  * or the system log (LOCachy's lines in the kernel ring buffer, toggled with
- * Tab), scrolled with Up/Down/PgUp/PgDn or the wheel and copyable with y/Y or
- * pointer selection.
+ * Tab), scrolled with Up/Down/PgUp/PgDn or the wheel and copyable with Ctrl+C
+ * (Ctrl+A then Ctrl+C for all) or pointer selection.
  */
 #include <fcntl.h>
 #include <limits.h>

@@ -48,7 +48,6 @@ initramfs 中是键位表和设备覆盖的副本。开机磁盘口令只有在�
 
 `test-settings-monitors.c` 覆盖系统默认与设备覆盖的区分、US 默认加明确 JIS 和跟随
 默认的 USB、选择确认与取消、生成/配置/替换失败的回滚，以及 labwc 用户选项保留。
-运行时键盘交接和焦点客户端输入由单独的输入测试验证；界面测试不证明交接安全。
 
 ## 锁定键与输入法
 
@@ -63,10 +62,8 @@ Caps Lock 状态变化识别，不再假定其未按 Shift 时就是锁定键。
 提供从未记录的 Num 状态符号。正常 LOCachy 重建会重新生成这些表，不需要手工
 装包或修改键盘配置。
 
-`tools/test-input-delivery.sh` 在真实 Rime 和无头焦点客户端中验证：JIS/US 实际大写
-文字、关闭 Caps 后恢复普通组字、Num 开关后的小键盘数字/导航，以及 RAW/CN/EN
-下英文空闲标点不变。`tools/test-caps-ime.c` 使用生成的 JIS/US 表和真实 Rime 验证直连路径。
-这些测试不验证实体键盘 LED，也不替代硬件验收。
+`tools/test-input-delivery.sh` 在无头焦点客户端中验证共享显示上的 Rime 输入，
+`tools/test-caps-ime.c` 通过 `keytable` 验证直连输入路径。
 
 参考：[fcitx5-rime](https://github.com/fcitx/fcitx5-rime) 的 Rime 按键事件/修饰适配。
 
@@ -115,8 +112,7 @@ Caps 也会提交该单词。共享显示上的窗口（term、view）不再启�
 键盘不一致、抓取键盘的桌面上报、热插拔）；`test-bar-keyboard.c` 覆盖状态栏借到的键盘、
 清空旧事件、撤销和它的锁定状态；`test-keytable.c` 覆盖
 状态栏所读键盘的布局；`test-input-hotplug.c`
-覆盖共享显示在前台时的热插拔。真实控制台、虚拟机中的撤销和 X230 的 Caps Lock 指示灯
-仍需各自的验收。
+覆盖共享显示在前台时的热插拔。
 
 ## 按键与动作
 

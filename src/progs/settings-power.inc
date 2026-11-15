@@ -999,9 +999,9 @@ static void power_curves_draw(void)
         }
     }
 
-    /* TRANSLATORS: m, Tab, Left/Right, r, c and Esc are key names; keep them. */
+    /* TRANSLATORS: m, Tab, Left/Right, r, Ctrl+C and Esc are key names; keep them. */
     screen_text(2, rows - 3, cols < 72 ? _("m: %/W  1-6: span  Arrows: cursor  r: refresh  Esc: back") :
-                _("m: %/W   1-6: span   Left/Right: cursor   Tab: pack   r: refresh   c: copy   Esc: back"),
+                _("m: %/W   1-6: span   Left/Right: cursor   Tab: pack   r: refresh   Ctrl+C: copy   Esc: back"),
                 DIM, BG);
     screen_text(2, rows - 2, _(notice), ACCENT, BG);
     screen_flush();
@@ -1092,7 +1092,14 @@ static void power_curves_page(void)
             continue;
         }
         if (act == ACT_COPY) {
-            key = 'c'; /* Ctrl+C copies as c does */
+            char rep[4096];
+            power_build_clipboard_report(rep, sizeof rep);
+            if (clipboard_set && clipboard_set(0, rep, strlen(rep)) == 0)
+                snprintf(notice, sizeof notice, "%s", _("Copied battery report to clipboard."));
+            else
+                snprintf(notice, sizeof notice, "%s", _("Clipboard service is not running."));
+            power_curves_draw();
+            continue;
         } else if (act == ACT_NEXT_FIELD || act == ACT_PREV_FIELD) {
             key = '\t';
         } else if (act != ACT_NONE && act != ACT_DELETE) {
@@ -1135,13 +1142,6 @@ static void power_curves_page(void)
             power_refresh_devices();
             power_load_selected_history();
             snprintf(notice, sizeof notice, "%s", _("Battery readings refreshed."));
-        } else if (key == 'c' || key == 'C') {
-            char rep[4096];
-            power_build_clipboard_report(rep, sizeof rep);
-            if (clipboard_set && clipboard_set(0, rep, strlen(rep)) == 0)
-                snprintf(notice, sizeof notice, "%s", _("Copied battery report to clipboard."));
-            else
-                snprintf(notice, sizeof notice, "%s", _("Clipboard service is not running."));
         } else {
             continue;
         }

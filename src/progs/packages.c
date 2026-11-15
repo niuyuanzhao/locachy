@@ -33,8 +33,8 @@
  * (a background of its own, under a title bar: what runs, how it ended,
  * which lines; PgUp/PgDn scroll it).
  * The lower pane and the notice can be selected with the pointer, as in term
- * (textsel.h), and copied: y or Ctrl+C what is selected (else the command
- * below, else the notice), Y all the pane holds.
+ * (textsel.h), and copied: Ctrl+C what is selected (else the command
+ * below, else the notice), Ctrl+A then Ctrl+C all the pane holds.
  * A build that stops for source signing keys (locachy-build's "Source key to
  * trust" lines, exit status 3) is not a failure but a person's decision: the
  * pane lists the keys (each one's package, fingerprint, and the recipe whose
@@ -1564,7 +1564,7 @@ static void copy_text(int primary, const char *text)
     }
 }
 
-/* y, Ctrl+C: what is selected; else, stopped for source signing keys, the
+/* Ctrl+C: what is selected; else, stopped for source signing keys, the
  * command that trusts those not trusted yet; else the notice. */
 static void copy_key(void)
 {

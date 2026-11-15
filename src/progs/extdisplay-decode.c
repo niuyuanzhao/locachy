@@ -19,6 +19,38 @@ static const AVCodec *codec_for(enum extdisplay_codec codec)
     return avcodec_find_decoder(codec == EXTDISPLAY_CODEC_H264 ? AV_CODEC_ID_H264 :
                                 codec == EXTDISPLAY_CODEC_HEVC ? AV_CODEC_ID_HEVC : AV_CODEC_ID_NONE);
 }
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((optimize("O3")))
+#endif
+static void yuv444p_to_rgb32(const AVFrame *f, uint32_t *dst, int w, int h)
+{
+    const int full = (f->color_range == AVCOL_RANGE_JPEG);
+    const int bt709 = (f->colorspace == AVCOL_SPC_BT709);
+    const int y_off = full ? 0 : 16;
+    const int y_mul = full ? 256 : 298;
+    const int rv = bt709 ? (full ? 403 : 459) : (full ? 359 : 409);
+    const int gu = bt709 ? (full ? -48 : -55) : (full ? -88 : -100);
+    const int gv = bt709 ? (full ? -120 : -136) : (full ? -183 : -208);
+    const int bu = bt709 ? (full ? 475 : 541) : (full ? 454 : 516);
+    for (int y = 0; y < h; y++) {
+        const uint8_t *yp = f->data[0] + y * f->linesize[0];
+        const uint8_t *up = f->data[1] + y * f->linesize[1];
+        const uint8_t *vp = f->data[2] + y * f->linesize[2];
+        uint32_t *dr = dst + (size_t)y * w;
+        for (int x = 0; x < w; x++) {
+            int Y = ((int)yp[x] - y_off) * y_mul + 128;
+            int U = (int)up[x] - 128;
+            int V = (int)vp[x] - 128;
+            int r = (Y + rv * V) >> 8;
+            int g = (Y + gu * U + gv * V) >> 8;
+            int b = (Y + bu * U) >> 8;
+            r = r < 0 ? 0 : (r > 255 ? 255 : r);
+            g = g < 0 ? 0 : (g > 255 ? 255 : g);
+            b = b < 0 ? 0 : (b > 255 ? 255 : b);
+            dr[x] = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+        }
+    }
+}
 int extdisplay_decoder_available(enum extdisplay_codec codec) { return codec_for(codec) != NULL; }
 void extdisplay_decoder_close(struct extdisplay_decoder *d)
 {
@@ -70,14 +102,22 @@ int extdisplay_decoder_push(struct extdisplay_decoder *d, const void *data, size
         if (f->width != (int)d->width || f->height != (int)d->height ||
             extdisplay_dimensions((uint32_t)f->width, (uint32_t)f->height, NULL) < 0 ||
             f->crop_top || f->crop_bottom || f->crop_left || f->crop_right) return -1;
-        d->scale = sws_getCachedContext(d->scale, f->width, f->height, f->format,
-                        f->width, f->height, AV_PIX_FMT_RGB32, SWS_BILINEAR, NULL, NULL, NULL);
-        if (!d->scale) return -1;
-        uint8_t *dest[4] = { (uint8_t *)d->pixels, NULL, NULL, NULL };
-        int strides[4] = { (int)d->width * 4, 0, 0, 0 };
-        if (sws_scale(d->scale, (const uint8_t *const *)f->data, f->linesize, 0,
-                      f->height, dest, strides) != f->height) return -1;
-        for (size_t i = 0, end = (size_t)d->width * d->height; i < end; i++) d->pixels[i] &= 0x00ffffff;
+        if (f->format == AV_PIX_FMT_YUV444P || f->format == AV_PIX_FMT_YUVJ444P) {
+            yuv444p_to_rgb32(f, d->pixels, f->width, f->height);
+        } else {
+            d->scale = sws_getCachedContext(d->scale, f->width, f->height, f->format,
+                            f->width, f->height, AV_PIX_FMT_RGB32, SWS_FAST_BILINEAR, NULL, NULL, NULL);
+            if (!d->scale) return -1;
+            /* The stream's own matrix and range (its VUI), not swscale's guess. */
+            const int *coefficients = sws_getCoefficients(f->colorspace == AVCOL_SPC_BT709 ? SWS_CS_ITU709 : SWS_CS_ITU601);
+            sws_setColorspaceDetails(d->scale, coefficients, f->color_range == AVCOL_RANGE_JPEG,
+                                     coefficients, 1, 0, 1 << 16, 1 << 16);
+            uint8_t *dest[4] = { (uint8_t *)d->pixels, NULL, NULL, NULL };
+            int strides[4] = { (int)d->width * 4, 0, 0, 0 };
+            if (sws_scale(d->scale, (const uint8_t *const *)f->data, f->linesize, 0,
+                          f->height, dest, strides) != f->height) return -1;
+            for (size_t i = 0, end = (size_t)d->width * d->height; i < end; i++) d->pixels[i] &= 0x00ffffff;
+        }
         if (receive(opaque, d->pixels, d->width, d->height) < 0) return -1;
         av_frame_unref(f);
     }

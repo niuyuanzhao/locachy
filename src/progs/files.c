@@ -15,11 +15,11 @@
  *   Details view): up, as far as /; Ctrl+L: the location (trash:// too)
  *   Enter: open (a folder: go in)   Tab: places, the panes   o: open with...
  *   (a folder too, with what lists inode/directory; it is never the default)
- *   Ctrl+C c, Ctrl+X x, Ctrl+V v: copy, cut, paste   Ctrl+A: select all
- *   Space: mark   F2 r: rename   F10 Ctrl+Shift+N n: new folder
- *   Delete d: move to the Trash   Shift+Delete D: delete permanently
- *   Ctrl+Z u: undo (Trash, rename, new folder, copy, move)
- *   Alt+Return i: properties   Ctrl+H .: hidden files   / Ctrl+I: filter
+ *   Ctrl+C, Ctrl+X, Ctrl+V: copy, cut, paste   Ctrl+A: select all
+ *   Space: mark   F2: rename   Ctrl+Shift+N: new folder   Ctrl+Alt+N: new file
+ *   Delete: move to the Trash   Shift+Delete: delete permanently
+ *   Ctrl+Z: undo (Trash, rename, new folder, copy, move)
+ *   Alt+Return: properties   Alt+. .: hidden files   / Ctrl+F: filter
  *   F5: reload   q/Esc, the home key: back   e: eject (a drive in ~/Drives, which the
  *   drives service mounts there)   w: the image as the wallpaper of the
  *   shared display (rc.conf wallpaper)
@@ -2283,13 +2283,13 @@ static void to_clip(int cut)
     }
     clip_cut = cut;
     if (cut) {
-        /* TRANSLATORS: v is the key; keep it. */
-        report(0, P_("Cut %d item; v puts it in the folder shown.",
-                     "Cut %d items; v puts them in the folder shown.", nclip), nclip);
+        /* TRANSLATORS: Ctrl+V is the key; keep it. */
+        report(0, P_("Cut %d item; Ctrl+V puts it in the folder shown.",
+                     "Cut %d items; Ctrl+V puts them in the folder shown.", nclip), nclip);
     } else {
-        /* TRANSLATORS: v is the key; keep it. */
-        report(0, P_("Copied %d item; v puts it in the folder shown.",
-                     "Copied %d items; v puts them in the folder shown.", nclip), nclip);
+        /* TRANSLATORS: Ctrl+V is the key; keep it. */
+        report(0, P_("Copied %d item; Ctrl+V puts it in the folder shown.",
+                     "Copied %d items; Ctrl+V puts them in the folder shown.", nclip), nclip);
     }
 }
 
@@ -3507,9 +3507,9 @@ static void draw_toolbar(void)
         if (cloud) snprintf(shown_cwd, sizeof shown_cwd, "[%s] %.700s", cloud_state(cloud), P->cwd);
         else snprintf(shown_cwd, sizeof shown_cwd, "%.800s", P->cwd);
     }
-    /* TRANSLATORS: v is the key; keep it. */
+    /* TRANSLATORS: Ctrl+V is the key; keep it. */
     snprintf(raw, sizeof raw, "%s%s%s%s", shown_cwd, P->filter[0] ? _("   filter: ") : "", P->filter,
-             nclip ? (clip_cut ? _("   (cut: v moves here)") : _("   (copied: v pastes here)")) : "");
+             nclip ? (clip_cut ? _("   (cut: Ctrl+V moves here)") : _("   (copied: Ctrl+V pastes here)")) : "");
     fit(line, sizeof line, raw, max_path);
     screen_text(path_col, 1, line, ACCENT, BAR_BG);
     if (!is_trash(P) && !is_search(P)) {

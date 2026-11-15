@@ -3,7 +3,7 @@
  * (cage, labwc) using the seatd protocol (libseat backend).
  *
  * It links base.h so process 1 treats it as a normal payload (frozen on
- * Ctrl+Alt+Esc, memory pushed to swap, restored on switch back). It runs a
+ * Super+Esc, memory pushed to swap, restored on switch back). It runs a
  * private seatd server on $SEATD_SOCK, has udevd (udev-client) describe the
  * input and display devices for libinput, launches the compositor, and
  * coordinates DRM master and seat transitions.

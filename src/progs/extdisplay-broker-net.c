@@ -308,6 +308,36 @@ int nl_carrier_event(int nl, int ifindex)
     }
 }
 
+/* Event sockets never share the request/reply socket. On loss the caller
+ * takes another kernel snapshot; a truncated event is not trusted. */
+static int drain_events(int nl, int ifindex, int addresses)
+{
+    int changed = 0;
+    for (;;) {
+        ssize_t got = recv(nl, buffer, sizeof buffer, MSG_DONTWAIT | MSG_TRUNC);
+        if (got < 0 && errno == EINTR) continue;
+        if (got < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return changed;
+        if (got <= 0 || got > (ssize_t)sizeof buffer) return -1;
+        int n = (int)got;
+        for (struct nlmsghdr *h = (struct nlmsghdr *)buffer; NLMSG_OK(h, n); h = NLMSG_NEXT(h, n)) {
+            if (h->nlmsg_type == NLMSG_OVERRUN || h->nlmsg_type == NLMSG_ERROR) return -1;
+            if (h->nlmsg_type == RTM_NEWLINK || h->nlmsg_type == RTM_DELLINK) {
+                if (h->nlmsg_len < NLMSG_LENGTH(sizeof(struct ifinfomsg))) return -1;
+                const struct ifinfomsg *i = NLMSG_DATA(h);
+                if (!ifindex || i->ifi_index == ifindex) changed = 1;
+            } else if (addresses && (h->nlmsg_type == RTM_NEWADDR || h->nlmsg_type == RTM_DELADDR)) {
+                if (h->nlmsg_len < NLMSG_LENGTH(sizeof(struct ifaddrmsg))) return -1;
+                const struct ifaddrmsg *a = NLMSG_DATA(h);
+                if ((int)a->ifa_index == ifindex) changed = 1;
+            }
+        }
+        if (n) return -1;
+    }
+}
+
+int nl_prepare_event(int nl, int ifindex) { return drain_events(nl, ifindex, 1); }
+int nl_link_event(int nl) { return drain_events(nl, 0, 0); }
+
 static int read_line(const char *path, char *out, size_t size)
 {
     FILE *f = fopen(path, "re");

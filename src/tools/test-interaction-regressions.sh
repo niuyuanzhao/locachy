@@ -133,7 +133,7 @@ bash "$src/tools/test-settings-tor.sh" "$out/settings-tor"
 for test in security config-transactions app-generation; do
     python3 -B "$src/tools/test-$test.py"
 done
-for test in pacman-guard update-transaction; do
+for test in pacman-guard update-transaction updater-repair; do
     python3 -B "$src/tools/test-$test.py" "$out"
 done
 "${cc[@]}" "$src/progs/archive-worker.c" $(pkg-config --cflags --libs libarchive libcrypto) -o "$out/archive-worker"
@@ -146,5 +146,6 @@ python3 -B "$src/tools/test-archive-worker.py" "$out/archive-worker" "$out"
 sh "$src/tools/test-extdisplay.sh"
 # The broker: the pairing code, the cable TLS profile, and the lease in user and network namespaces.
 sh "$src/tools/test-extdisplay-broker.sh" "$out/extdisplay-broker"
+sh "$src/tools/test-extdisplay-discovery.sh" "$out/extdisplay-discovery"
 sh "$src/tools/test-screen-power.sh" "$out/screen-power"
 printf '%s\n' 'PASS device-free interaction regressions; real KMS/libinput/IME hardware acceptance remains separate.'

@@ -1193,8 +1193,6 @@ def install(args, root, esp, root_fs, esp_fs, level):
                    "--work-dir", str(work), "--cache-dir", str(cache), "--cpu", cpu, level]
         if getattr(args, "install_id", None):
             command[2:2] = ["--install-id", args.install_id] + (["--resume"] if getattr(args, "resume", False) else [])
-        if not getattr(args, "resume", False):
-            install_key_helper().preserve(SOURCE, root)
         build_log = saved.parent / (saved.name + ".build.log")
         with build_log.open("w") as log:
             # tee preserves progress in the live console and the failure log.
@@ -1711,7 +1709,28 @@ def main():
         print(json.dumps(public_resume_record(), indent=1) if public_resume_record() else "null")
         return 0
     if args.ui or args.refresh_live:
-        parser.error("the live wrapper must handle --ui/--refresh-live")
+        # Older media forward these flags after fetching this backend. Enter
+        # the selected snapshot's updater directly, never recurse through the
+        # old wrapper or mix live bootstrap with an installation request.
+        allowed = {"--ui", "--refresh-live", "--update-repo", "--update-branch", "--apps-repo", "--apps-branch"}
+        if args.ui and args.refresh_live or any(a.startswith("-") and a.split("=", 1)[0] not in allowed
+                                               for a in sys.argv[1:]):
+            parser.error("Live bootstrap accepts only one mode and source repository options")
+        if os.geteuid() != 0:
+            parser.error("Run from the live installer as root")
+        helper = SOURCE / "installer/live-update.py"
+        if not helper.is_file():
+            parser.error("The selected source has no live updater")
+        try:
+            repo, branch, _ = update_source(args)
+            apps_repo, apps_branch = apps_source(args)
+        except ValueError as error:
+            parser.error(str(error))
+        os.execv(sys.executable, [sys.executable, "-I", str(helper), "--source", str(SOURCE),
+                                 "--mode", "refresh" if args.refresh_live else "ui",
+                                 "--update-repo=" + repo, "--update-branch=" + branch,
+                                 "--apps-repo=" + apps_repo, "--apps-branch=" + apps_branch])
+        return 0
     if (args.resume or args.trust_key) and not args.private:
         if os.geteuid() != 0:
             parser.error("Run from the live installer as root")

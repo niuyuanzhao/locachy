@@ -19,7 +19,15 @@ import tempfile
 def revision(source):
     result = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"],
                             capture_output=True, text=True, timeout=10)
-    return result.stdout.strip() if result.returncode == 0 else ""
+    if result.returncode == 0:
+        return result.stdout.strip()
+    # An ISO exports the source without .git; its recorded base commit is
+    # still the identity used by the wrapper's snapshot and local-fix guard.
+    try:
+        origin = Path(os.environ.get("LOCACHY_SOURCE_ORIGIN", "/etc/locachy/source-origin.json"))
+        return str(json.loads(origin.read_text(encoding="utf-8")).get("commit", ""))
+    except (OSError, ValueError, AttributeError):
+        return ""
 
 
 def input_hash(source):
@@ -40,6 +48,13 @@ def input_hash(source):
     return digest.hexdigest()
 
 
+def check_programs(stage):
+    for name in ("installer", "term", "rescue"):
+        program = stage / "usr/local/bin" / name
+        if not program.is_file() or not os.access(program, os.X_OK):
+            raise RuntimeError("the live build did not produce an executable " + name)
+
+
 def build(source, root=Path("/"), state=Path("/run/locachy-installer/live")):
     fingerprint = input_hash(source)
     stage = state / fingerprint
@@ -52,9 +67,7 @@ def build(source, root=Path("/"), state=Path("/run/locachy-installer/live")):
                   file=sys.stderr, flush=True)
             subprocess.run(["sh", str(source / "installer/make-live.sh"), str(source), str(temporary)],
                            check=True, stdout=sys.stderr, stderr=sys.stderr, timeout=600)
-            for name in ("installer", "term", "rescue"):
-                if not (temporary / "usr/local/bin" / name).is_file():
-                    raise RuntimeError("the live build did not produce " + name)
+            check_programs(temporary)
             data = {"format": 1, "input_hash": fingerprint, "revision": revision(source),
                     "source": str(source), "frontend": str(stage / "usr/local/bin/installer")}
             (temporary / "live.json").write_text(json.dumps(data) + "\n", encoding="utf-8")
@@ -63,8 +76,10 @@ def build(source, root=Path("/"), state=Path("/run/locachy-installer/live")):
             if temporary.exists():
                 shutil.rmtree(temporary)
     data = json.loads(metadata.read_text(encoding="utf-8"))
-    if data.get("input_hash") != fingerprint or not Path(data["frontend"]).is_file():
+    if (data.get("format") != 1 or data.get("input_hash") != fingerprint or
+            data.get("frontend") != str(stage / "usr/local/bin/installer")):
         raise RuntimeError("the staged live programs are incomplete")
+    check_programs(stage)
     # Compiled tools and catalogs are published through a same-directory rename.
     # Do not replace the clipboard daemon: its protocol is shared, and it may
     # hold the text a person is copying between this interface and its terminal.
@@ -103,7 +118,8 @@ def main():
     source = args.source.resolve()
     how = os.environ.get("LOCACHY_SOURCE", "")
     if args.mode == "refresh" and (how.startswith("fetched before:") or
-                                  how.startswith("bundled:") and how != "bundled: updates are off"):
+                                  how.startswith("bundled:") and how not in (
+                                      "bundled: updates are off", "bundled: local changes over the fetched commit")):
         raise RuntimeError("the source could not be refreshed: " + how)
     data = build(source)
     if args.mode == "refresh":
@@ -113,7 +129,6 @@ def main():
     os.environ["LOCACHY_INSTALL_SNAPSHOT_COMMIT"] = data["revision"]
     os.environ["LOCACHY_INSTALLER_INPUT_HASH"] = data["input_hash"]
     os.environ["LOCACHY_INSTALLER_REVISION"] = data["revision"]
-    record = Path("/run/locachy-install/resume.json")
     # The new frontend starts in its normal state; installer.c can consume the
     # non-secret resume-info record and offer its stopped page. Never put the
     # record or a secret in argv.

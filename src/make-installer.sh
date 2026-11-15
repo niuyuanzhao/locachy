@@ -65,6 +65,8 @@ fi
 
 mkdir -m 755 "$work" "$out"
 mkdir -m 755 "$work/cache"
+cache=${PACMAN_CACHE:-$work/cache}
+[ -d "$cache" ] && [ ! -L "$cache" ] || die "package cache is missing: $cache"
 profile=$work/profile
 mkdir "$profile"
 cp -a "$baseline/." "$profile/"
@@ -74,7 +76,7 @@ cat "$src/installer/profiledef.append" >>"$profile/profiledef.sh"
 python3 -I "$src/installer/rescue-boot-entries.py" "$profile"
 # archiso honors a nondefault profile CacheDir. Do not reuse a host cache
 # which may contain a differently built package with the same name/version.
-awk -v cache="$work/cache" '{print; if ($0 == "[options]") print "CacheDir = " cache}' \
+awk -v cache="$cache" '{print; if ($0 == "[options]") print "CacheDir = " cache}' \
     "$src/installer/pacman.conf" >"$profile/pacman.conf"
 { cat "$baseline/packages.x86_64"; printf '\n'; cat "$src/installer/packages.x86_64"; } |
     awk 'NF && $1 !~ /^#/ && !seen[$1]++ {print $1}' >"$profile/packages.x86_64"
@@ -103,8 +105,10 @@ def git_out(*args):
 repo = os.environ.get("LOCACHY_REPO") or git_out("remote", "get-url", "origin")
 branch = os.environ.get("LOCACHY_BRANCH") or git_out("symbolic-ref", "--short", "HEAD")
 commit = os.environ.get("LOCACHY_COMMIT") or git_out("rev-parse", "HEAD")
+# Exported build snapshots can declare the same fact without carrying .git.
+changed = os.environ.get("LOCACHY_SOURCE_CHANGED") == "1" or bool(git_out("status", "--porcelain", "--", src))
 with open(dest, "w", encoding="utf-8") as f:
-    json.dump({"repo": repo, "branch": branch or "main", "commit": commit,
+    json.dump({"repo": repo, "branch": branch or "main", "commit": commit, "source_changed": changed,
                "apps_repo": apps_repo, "apps_branch": apps_branch, "apps_commit": apps_commit}, f)
     f.write("\n")
 PY

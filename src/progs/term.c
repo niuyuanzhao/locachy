@@ -2,7 +2,7 @@
  * term [PROGRAM ARG...]: a terminal for LOCachy (TERM=linux). It opens a
  * pseudo-terminal sized to the screen, and runs PROGRAM ARG... in it, or
  * /bin/bash -l when given none. The shell and all it starts live in this
- * program's cgroup: Ctrl+Alt+Esc freezes the whole session and pushes its
+ * program's cgroup: Super+Esc freezes the whole session and pushes its
  * memory to swap; opening it again from home continues where it was. When
  * the child exits, term exits with its status. Lines scrolled off the top
  * are kept (HISTORY of them) to scroll back to with the wheel or Shift+PgUp.

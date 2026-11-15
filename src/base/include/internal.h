@@ -46,7 +46,7 @@ static inline int input_same(int a, int b)
  *     call ARG...          run ARG... and come back here when it exits
  *     open ARG...          (home) show the task ARG..., starting it if need be
  *     tasks?               (home) which tasks there are
- *     home                 (the program on the screen) show home, as Ctrl+Alt+Esc
+ *     home                 (the program on the screen) show home, as Super+Esc
  *     poweroff             power off
  * Process 1 revokes the screen and keyboards after "release" whether or not
  * the answer comes, so a program that hangs cannot keep them.
@@ -137,7 +137,7 @@ int modules_event(void); /* MODULES_DISPLAY | MODULES_POWER: what the events dra
 #define MODULES_POWER 2    /* a power_supply add, change or remove */
 
 /* Process 1: the keyboards' own fds, to poll them with other things, and the
- * key for one evdev event (0 if none). Ctrl+Alt+Esc gives K_HOME. */
+ * key for one evdev event (0 if none). Super+Esc gives K_HOME. */
 #define K_HOME 0x1FE
 int keys_fds(int *fds, int max);
 int keys_event(int fd);

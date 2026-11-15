@@ -15,7 +15,7 @@
  *              and trusts (in the terminal), or failed on a disk it has
  *              partitioned, and continued from there (c: --resume)
  * What these pages show can be selected with the pointer, as in term, and
- * copied (y, Ctrl+C) for the terminal: the host clipboard's socket.
+ * copied (Ctrl+C) for the terminal: the host clipboard's socket.
  * The live system's process 1 is systemd, not ours: the screen and the
  * keyboards are opened directly, and while this runs the console it was
  * started on (tty1) is in graphics mode with its keyboard off, so what is
@@ -31,6 +31,7 @@
 #include <json-c/json.h>
 #include <linux/input-event-codes.h>
 #include <linux/kd.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -128,7 +129,7 @@ static char backend_revision[48];
 /* What is chosen. */
 enum { WHOLE, PARTS, MOUNTED };
 enum { ENC_OFF, ENC_PASS, ENC_TPM };
-static struct {
+static struct choices {
     int lang; /* 0 English, 1 Chinese: the system's */
     int disk_mode, swap_gib, encrypt, boot_lock, ntp, ime, machine, level, rank, copy_network, hibernate;
     int secure_boot, secure_boot_microsoft; /* own Secure Boot keys (firmware in setup mode) */
@@ -1745,6 +1746,7 @@ static int check_choices(void)
 /* The last word before anything is written, on a screen of its own. */
 static int confirm_install(void)
 {
+    say("installer: waiting for erase confirmation");
     char line[512];
     int width = screen_cols() - 6;
     nentries = 0;
@@ -1811,7 +1813,7 @@ static void help_screen(void)
         ROW("PgUp, PgDn", N_("The step before or after"));
         ROW("Esc, q", N_("From a step's page to the steps; from the steps to the start"));
         ROW("Ctrl+A, Home, End", N_("In a line you type: select all, the start, the end"));
-        ROW("Ctrl+C, Ctrl+X", N_("In a line you type, after Ctrl+A: copy or cut it (a password is never copied)"));
+        ROW("Ctrl+C, Ctrl+X", N_("In a line you type, after Ctrl+A: copy or cut it"));
         ROW("Ctrl+V", N_("In a line you type: paste"));
         ROW("Ctrl+W, Ctrl+U, Ctrl+K", N_("In a line you type: delete the word before the cursor, to the start, to the end"));
         ROW("y, n", N_("A question: y yes; n, Esc or Enter no"));
@@ -2014,7 +2016,7 @@ static int log_lines(char lines[][256], int n, int from, int *total)
 /* What the installation's pages show is drawn with textsel_put, to select
  * with the pointer as in term (a drag; a double click: a word; a triple one:
  * a line) and copy: to the primary selection as a selection is made, to the
- * clipboard with y or Ctrl+C (textsel.h). */
+ * clipboard with Ctrl+C (textsel.h). */
 static void copy_text(int primary, const char *text)
 {
     char msg[512];
@@ -2742,9 +2744,17 @@ int main(int argc, char **argv)
     int vt, state_fd = -1;
     if (argc > 1 && strncmp(argv[1], "--state-fd=", 11) == 0) {
         char *end;
+        errno = 0;
         long n = strtol(argv[1] + 11, &end, 10);
-        if (*end || n < 3 || n > 1048576) return 2;
+        if (errno || *end || n < 3 || n > 1048576) return 2;
         state_fd = (int)n;
+        /* The descriptor crosses exactly one exec. No description helper,
+         * terminal or backend may inherit the sealed choices and secrets. */
+        int flags = fcntl(state_fd, F_GETFD);
+        if (flags < 0 || fcntl(state_fd, F_SETFD, flags | FD_CLOEXEC) < 0) {
+            close(state_fd);
+            return 2;
+        }
     }
     if (argc > 1 && strcmp(argv[1], "--text") == 0) { /* after a crash: the console as it was */
         if (ioctl(STDIN_FILENO, KDGETMODE, &vt) == 0) {
@@ -2783,7 +2793,9 @@ int main(int argc, char **argv)
     }
     if (state_fd >= 0) {
         char action[16];
-        if (!described || restore_session(state_fd, action, sizeof action) < 0) {
+        int restored = described ? restore_session(state_fd, action, sizeof action) : -1;
+        if (!described) close(state_fd);
+        if (restored < 0) {
             tell(1, "%s", _("The updated installer cannot restore the choices. Nothing was continued."));
         } else {
             set_ui_language();

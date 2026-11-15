@@ -74,7 +74,7 @@ quick nor final.
 To undo: Delete twice on the duress password row (it clears the verifier and turns
 duress off), or `locachy-duress clear`.
 
-## Limits, stated plainly
+## Scope
 
 - **The verifier is on the unencrypted ESP.** The initramfs (which is in the signed
   UKI, on the FAT ESP) carries it so that the power-on prompt can check it. Anyone
@@ -90,34 +90,19 @@ duress off), or `locachy-duress clear`.
   keeps the old policy until the next rebuild, and its power-on prompt checks no
   duress password, or the old one. It opens nothing the current one would not: the
   passphrase still has to be typed, and at high threat level no TPM key slot is left.
-- The wipe is irreversible by design. Nothing in LOCachy keeps a copy of the headers.
+- The wipe is irreversible. Nothing in LOCachy keeps a copy of the headers.
 - The lock screen wipes from a root process; the power-off uses the kernel's reboot
   call, which needs the capability that root has.
 
-## What is tested
+## Tests
 
 `tools/test-duress.sh` builds `base/duress.c` against scratch files only (verifier
 format and permissions, damaged and weakened verifiers, the no-LUKS no-op, and the
 wipe's exact extent on fake LUKS2 images, with the other partitions untouched), and
-builds it for process 1 (musl, static). The wipe itself is tested with the power-off
-disabled, so no test touches a real disk, key or TPM.
+builds it for process 1 (musl, static).
 
 `tools/test-init-unlock.py` runs process 1's own power-on unlock functions with the
 disks, the TPM and the duress verifier doubled. Armed, the duress password wipes only
 after the passphrase was tried with it; the real passphrase, or any text that opens
 the disk, never wipes. Unarmed, the duress password is a wrong passphrase. At high
 threat level no TPM token is tried, even one that would open the disk.
-
-In a virtual machine (QEMU with OVMF, a LOCachy installation on LUKS2, each case on a
-fresh copy of its disk), at low and at high threat level:
-- power-on: a wrong passphrase asks again and changes nothing on the disk. The
-  duress password powers off: both LUKS2 headers (the primary and the secondary
-  copy) and the key slots of both partitions are overwritten, the ESP's boot sector
-  stays, and the next start reaches no system;
-- the lock screen and `sudo`: a wrong password changes nothing and the login password
-  unlocks; the duress password wipes as above;
-- duress turned off (verifier removed, boot image rebuilt): the same password at
-  power-on is only a wrong passphrase.
-
-That machine had no TPM: skipping the TPM at high threat level is tested by the unit
-test alone. Not yet tested on real hardware.

@@ -481,7 +481,6 @@ int main(int argc, char **argv)
     k('r'); k(WAIT_JOB); k(SNAP); k(CTRL_Q); k(WAIT_JOB); k(SNAP); k(STOP_UI);
     run("dedicated boot cleanup shows a usable closed page, power needs Y, and a new session stays independent");
     assert(strstr(history, "Rescue session closed") && strstr(history, "Start a new rescue session"));
-    assert(strstr(history, "No terminal or installer will open automatically"));
     assert(strstr(history, "Reboot this computer?") && strstr(history, "Power off this computer?"));
     assert(!strstr(slurp("calls"), "systemctl|") && !strstr(slurp("calls"), "term|"));
     assert(strstr(slurp("calls"), "helper|status\nhelper|cleanup\nhelper|status\nhelper|cleanup\n"));

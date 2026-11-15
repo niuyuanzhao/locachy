@@ -205,9 +205,13 @@ class DeclarePackages(unittest.TestCase):
         only rc.conf's program_ keys: the module carries both, and settings' row
         installs the same packages and sets the same key."""
         module = json.loads((SOURCE / "link/modules.json").read_text())["extdisplay"]
-        self.assertLessEqual({"ffmpeg", "json-c"}, set(module["packages"]))
+        self.assertLessEqual({"ffmpeg", "json-c", "avahi"}, set(module["packages"]))
         make = (SOURCE / "make.sh").read_text()
-        self.assertIn('EXTDISPLAY_PKGS="json-c libavcodec libavutil libswscale"', make)
+        self.assertIn('EXTDISPLAY_PKGS="json-c libavcodec libavutil libswscale avahi-core"', make)
+        self.assertIn('"$lib/extdisplay-advertise"', make)
+        self.assertIn('"$src/progs/extdisplay-discovery.c"', make)
+        self.assertIn('"$src/progs/extdisplay-advertise.c"', make)
+        self.assertIn('$(pkg-config --libs avahi-core)', make)
         self.assertIn("-o /usr/local/bin/extdisplay ", make)
         self.assertEqual(module["rc"], {"program_extdisplay": "/usr/local/bin/extdisplay"})
         settings = (SOURCE / "progs/settings.c").read_text()

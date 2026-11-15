@@ -119,6 +119,7 @@ struct frame {
     int ctl;                /* our end of its control socket */
     int reaped, status;     /* waited for already (by reap), and how it ended */
     int frozen;
+    int holding;            /* base_session_hold: live link, not frozen */
     int shared_display;     /* release display without freezing shared infrastructure */
     uint32_t lessee;        /* its DRM lease while it has the screen */
     uint32_t screens;       /* the screens it has (bits of places), while it has them */
@@ -1288,12 +1289,10 @@ static struct frame *focused(void)
  * the idle lock waits until no screen does (idle_lock_at). */
 static int held_in_front(void)
 {
-    if (!apps_session_holding) {
-        return 0;
-    }
     for (int i = 0; i < nplaces; i++) {
         struct frame *f = showing(i);
-        if (f != NULL && f != &locker && apps_session_holding(f->cgroup)) {
+        if (f != NULL && f != &locker &&
+            (f->holding || (apps_session_holding && apps_session_holding(f->cgroup)))) {
             return 1;
         }
     }
@@ -1544,7 +1543,7 @@ static void freeze(struct frame *f)
     /* A program holding a live link (extdisplay) keeps running without the
      * screen: frozen, the link would end. Its remote input stops all the same
      * (the lock revokes it; without the screen it has no keys). */
-    if (apps_session_holding && apps_session_holding(f->cgroup)) return;
+    if (f->holding || (apps_session_holding && apps_session_holding(f->cgroup))) return;
     if (apps_sessions_revoke) apps_sessions_revoke(f->cgroup); /* its sessions ask again after a thaw */
     snprintf(path, sizeof path, "%s/cgroup.freeze", f->cgroup);
     write_file(path, "1");
@@ -3181,6 +3180,8 @@ static void message(struct frame *f)
     } else if (strcmp(fields[0], "switch") == 0 && n == 2 && f->screens && !locked) {
         do_switch(display_front != NULL ? focus_place : place_of_frame(f),
                   strcmp(fields[1], "next") == 0 ? 1 : strcmp(fields[1], "prev") == 0 ? -1 : 0);
+    } else if (strcmp(fields[0], "hold") == 0 && n == 2 && strcmp(f->name, "extdisplay") == 0) {
+        f->holding = atoi(fields[1]) != 0;
     } else if (strcmp(fields[0], "reboot") == 0) {
         restart();
     } else if (strcmp(fields[0], "poweroff") == 0) {

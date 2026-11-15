@@ -131,10 +131,16 @@ int base_display_power(int on)
 int base_session_hold(int on)
 {
     int fd = base_session_fd();
-    if (fd < 0) return -1;
-    char text[16];
-    int len = snprintf(text, sizeof text, "hold %d", on ? 1 : 0);
-    return send(fd, text, (size_t)len, MSG_NOSIGNAL | MSG_DONTWAIT) == len ? 0 : -1;
+    if (fd >= 0) {
+        char text[16];
+        int len = snprintf(text, sizeof text, "hold %d", on ? 1 : 0);
+        return send(fd, text, (size_t)len, MSG_NOSIGNAL | MSG_DONTWAIT) == len ? 0 : -1;
+    }
+    if (control_fd() >= 0) {
+        const char *fields[] = { "hold", on ? "1" : "0", NULL };
+        return control_send_fields(control_fd(), fields);
+    }
+    return -1;
 }
 
 static int ctl = -2; /* -2: $LOCACHY_CONTROL not read yet */

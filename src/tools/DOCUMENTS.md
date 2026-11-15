@@ -238,7 +238,3 @@ refused.
   coreutils' base64, a bad key, `StartTransfer`, `AddFiles`, `StopTransfer`.
 - `tools/test-drop-gate.sh` (labwc, in the VM's gate): a native window as
   the drag's source and as its target, and a window named as a container.
-
-Not covered by these: the service as the real root of LOCachy (its cgroup,
-`/sys/fs/cgroup/app_NAME`, `link/locachy-app` starting a real container)
-except by `test-docs-view.sh`, and a browser reading a dropped document.

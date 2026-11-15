@@ -40,5 +40,3 @@ A change of state is notified once through the standard notification service, wh
 - `tools/test-rclone-fuse.sh`: real rclone and FUSE in a disposable user and mount namespace: propagation to the host and to a namespace made before the mount, the private resolver, refresh, status, pending writes and unmount.
 - `tools/test-files.sh`: files over a scratch home with the real folder worker and a stand-in service: places, folder reads, F5, pull, short and cancelled pulls, the TrackPoint, failure, unmount, a paste into a drive without rename2 and the quiet read after it; plain and with ASan/UBSan.
 - `tools/test-pointer.c`, `tools/test-host-notify.c`, `tools/test-drives-state.c`: scroll lifecycle, host notifications, drive adoption.
-
-A stand-in local remote replaces a cloud backend in these tests. Real accounts, an expired real OAuth grant, and a finger on real hardware must be verified on an installed machine.

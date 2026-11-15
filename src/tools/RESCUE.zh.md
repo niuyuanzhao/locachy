@@ -8,7 +8,7 @@ Rescue 是安装介质中的独立程序，与 Terminal 分开。它有自己的
 
 安装器菜单单独提供 **Rescue mode**，UEFI 和 BIOS 菜单也提供 **LOCachy Rescue**。它们沿用 archiso 的 kernel、initramfs 和介质搜索选项，并添加 `locachy.mode=rescue`。Rescue 启动时直接在 tty1 运行 `locachy-rescue.service`，不会进入 getty 登录或安装器；其他启动项保持普通安装器行为。
 
-Rescue 启动时不会解锁磁盘，也不会启用远程访问。用键盘或指针选择操作。状态、可选择的操作输出和控制区分开显示。Tab 切换区域；方向键、滚轮、PgUp/PgDn 滚动。y/Ctrl+C 复制选中文本，a 复制 SSH 连接信息，f 复制主机密钥指纹。
+Rescue 启动时不会解锁磁盘，也不会启用远程访问。用键盘或指针选择操作。状态、可选择的操作输出和控制区分开显示。Tab 切换区域；方向键、滚轮、PgUp/PgDn 滚动。Ctrl+C 复制选中文本，a 复制 SSH 连接信息，f 复制主机密钥指纹。
 
 键盘布局操作可以选择 US、Japanese JIS 或标准 console/XKB 布局名，使用已安装的 `keytable`。布局表放在 `/run`，只作用于 Rescue 及其可选的目标终端，不改变已安装系统的设置。恢复口令默认隐藏；显示口令必须显式操作。
 
@@ -23,7 +23,7 @@ Rescue 启动时不会解锁磁盘，也不会启用远程访问。用键盘或�
 
 **Enable repair** 是单独的确认流程。Rescue 再次要求输入恢复口令，关闭只读资源，重新核验相同身份，然后以读写方式重新打开 root 和已识别的 ESP。只有此授权之后，**Target terminal** 才会运行 `arch-chroot`。它本身不会更新包、重建启动文件、修改 keyslot 或注册 TPM。第二次口令错误会让目标保持关闭，不会静默变成可写。
 
-程序在 root-only 的 `/run/locachy-rescue/storage.json` 中记录随机 session 映射名、DM UUID、设备号和内核 mount ID。它不会接管已有映射，也不会卸载其他程序的 nested mount。关闭目标不会影响调试线服务；停止调试线也不会关闭目标。这些是运行安全措施，不是限制已获信任的 root 管理员。
+程序在 root-only 的 `/run/locachy-rescue/storage.json` 中记录随机 session 映射名、DM UUID、设备号和内核 mount ID。它不会接管已有映射，也不会卸载其他程序的 nested mount。关闭目标不会影响调试线服务；停止调试线也不会关闭目标。
 
 ## 认证调试线
 
@@ -53,4 +53,4 @@ sftp -P 2222 'root@[fe80::ADDRESS%LOCAL_INTERFACE]'
 - `installer/locachy-rescue*.service`：直接 Rescue 启动以及独立的调试线 cgroup。
 - `installer/rescue-boot-entries.py`：从打包模板生成启动项；上游模板变化会明确失败。
 
-`tools/test-rescue.c` 使用可执行 helper double 驱动真实 UI 循环，覆盖精确 argv/stdin、取消、畸形回复、超时升级、输出、布局变化和清理拒绝。`test-rescue-{dispatch,storage,link}.py` 覆盖后端契约；`test-rescue-link.py --linux-auth` 在私有 Linux namespace 中使用真实 OpenSSH。这些检查不能替代真实 LUKS/systemd VM 或完整 ISO Rescue session 验收。任何测试都不授权修改实体安装的磁盘、TPM、固件密钥或启动状态。
+`tools/test-rescue.c` 使用可执行 helper double 驱动真实 UI 循环，覆盖精确 argv/stdin、取消、畸形回复、超时升级、输出、布局变化和清理拒绝。`test-rescue-{dispatch,storage,link}.py` 覆盖后端契约；`test-rescue-link.py --linux-auth` 在私有 Linux namespace 中使用真实 OpenSSH。

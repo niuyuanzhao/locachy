@@ -54,7 +54,3 @@ back to a first-output mirrored canvas.
   layouts, output-local hit testing and scaled pointer conversion, rubberband
   crossing, real browse-loop `K_SHOWN` handling and mirror/native transitions;
   plain and AddressSanitizer/UndefinedBehaviorSanitizer builds.
-
-These device-free checks are separate from real KMS/display acceptance. They
-do not claim output rotation support: the monitor configuration currently
-stores mode, scale and position, not a rotation transform.

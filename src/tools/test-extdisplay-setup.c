@@ -449,10 +449,58 @@ static void spawned(const char *self)
     close(owner);
 }
 
+static void automatic_flow(void)
+{
+    int sv[2];
+    CHECK(channel(sv) == 0);
+    struct extdisplay_setup s;
+    extdisplay_setup_init(&s, sv[0]);
+    CHECK(extdisplay_setup_watch(&s) == 0);
+    CHECK(!strcmp(request(sv[1]), "watch"));
+    CHECK(extdisplay_setup_line(&s, "iface cable0 thunderbolt-net down 8 02:00:00:00:00:01", NULL, 0) == EXTDISPLAY_SETUP_EV_NONE);
+    CHECK(extdisplay_setup_line(&s, "end", NULL, 0) == EXTDISPLAY_SETUP_EV_LIST);
+    CHECK(extdisplay_setup_automatic(&s) == 0); /* bring up the only candidate even without carrier */
+    CHECK(extdisplay_setup_pair(&s, "cable0") == 0);
+    CHECK(!strcmp(request(sv[1]), "pair cable0 8 02:00:00:00:00:01"));
+    CHECK(extdisplay_setup_line(&s, "preparing cable0 carrier", NULL, 0) == EXTDISPLAY_SETUP_EV_PROGRESS);
+    CHECK(!strcmp(s.progress, "carrier"));
+    CHECK(extdisplay_setup_line(&s, "preparing cable0 address", NULL, 0) == EXTDISPLAY_SETUP_EV_PROGRESS);
+    CHECK(extdisplay_setup_line(&s, "preparing cable0 discovery", NULL, 0) == EXTDISPLAY_SETUP_EV_PROGRESS);
+    CHECK(extdisplay_setup_cancel(&s) == 0);
+    CHECK(extdisplay_setup_line(&s, "preparing cable0 listener", NULL, 0) == EXTDISPLAY_SETUP_EV_NONE);
+    CHECK(extdisplay_setup_line(&s, "ended cancelled", NULL, 0) == EXTDISPLAY_SETUP_EV_ENDED);
+    CHECK(extdisplay_setup_line(&s, "changed", NULL, 0) == EXTDISPLAY_SETUP_EV_CHANGED);
+    CHECK(s.changed && extdisplay_setup_automatic(&s) == -1);
+    CHECK(extdisplay_setup_pair(&s, "cable0") == -1); /* stale list cannot select a new same-name device */
+    CHECK(extdisplay_setup_scan(&s) == 0);
+    CHECK(extdisplay_setup_line(&s, "iface cable0 thunderbolt-net down 9 02:00:00:00:00:02", NULL, 0) == EXTDISPLAY_SETUP_EV_NONE);
+    CHECK(extdisplay_setup_line(&s, "iface cable1 thunderbolt-net up 10 02:00:00:00:00:03", NULL, 0) == EXTDISPLAY_SETUP_EV_NONE);
+    CHECK(extdisplay_setup_line(&s, "end", NULL, 0) == EXTDISPLAY_SETUP_EV_LIST);
+    CHECK(extdisplay_setup_automatic(&s) == 1);
+    s.ifaces[0].carrier = 1;
+    CHECK(extdisplay_setup_automatic(&s) == -1); /* multiple live links need a choice */
+    s.ifaces[0].carrier = s.ifaces[1].carrier = 0;
+    CHECK(extdisplay_setup_automatic(&s) == -1);
+    close(sv[0]);
+    close(sv[1]);
+    extdisplay_setup_init(&s, -1);
+    CHECK(extdisplay_setup_line(&s, "changed", NULL, 0) == EXTDISPLAY_SETUP_EV_BROKEN);
+    extdisplay_setup_init(&s, -1);
+    s.watching = 1; s.state = EXTDISPLAY_SETUP_SCANNING;
+    CHECK(extdisplay_setup_line(&s, "iface cable0 thunderbolt-net up 0 02:00", NULL, 0) == EXTDISPLAY_SETUP_EV_BROKEN);
+    extdisplay_setup_init(&s, -1);
+    s.watching = 1; s.state = EXTDISPLAY_SETUP_SCANNING;
+    CHECK(extdisplay_setup_line(&s, "iface cable0 thunderbolt-net up 8 invalid", NULL, 0) == EXTDISPLAY_SETUP_EV_BROKEN);
+    extdisplay_setup_init(&s, -1);
+    s.state = EXTDISPLAY_SETUP_PAIRING; strcpy(s.pairing, "cable0");
+    CHECK(extdisplay_setup_line(&s, "preparing cable1 carrier", NULL, 0) == EXTDISPLAY_SETUP_EV_BROKEN);
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 3 && strcmp(argv[1], "--control-fd") == 0 && strcmp(argv[2], "3") == 0) return stub();
     flow();
+    automatic_flow();
     cancelled();
     released();
     errors_and_eof();

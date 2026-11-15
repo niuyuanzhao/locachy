@@ -71,6 +71,12 @@ int nl_default_route(int nl);
  * 1 when ifindex lost its carrier or vanished, 0 otherwise, -1 on overrun
  * (the caller re-reads the link). */
 int nl_carrier_event(int nl, int ifindex);
+/* Drains link and IPv6-address events. Returns 1 when the selected link
+ * changed, 0 when unrelated events were received, -1 on an overrun/error. */
+int nl_prepare_event(int nl, int ifindex);
+/* Drains a home-namespace link monitor. Returns 1 when a link event arrived,
+ * 0 when there was nothing, and -1 when the kernel reported an overrun. */
+int nl_link_event(int nl);
 
 /* The identity that names a device whatever its name or namespace: its
  * permanent hardware address (or the current one when it has none) and the

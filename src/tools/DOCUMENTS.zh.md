@@ -186,7 +186,3 @@ xdg-desktop-portal-wlr 也算该容器）。原生窗口（`app_window-PROGRAM-N
   `RetrieveFiles`、错误的密钥、`StartTransfer`、`AddFiles`、`StopTransfer`。
 - `tools/test-drop-gate.sh`（labwc，在虚拟机的闸门中）：原生窗口作为拖放的来源和目标，以及
   以容器名义出现的窗口。
-
-这些检查不覆盖：服务以 LOCachy 真正的 root 运行（它的 cgroup、
-`/sys/fs/cgroup/app_NAME`、`link/locachy-app` 启动真实容器），`test-docs-view.sh` 所测
-部分除外；以及浏览器读取被放置的文档。

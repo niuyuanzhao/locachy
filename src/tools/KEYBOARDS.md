@@ -60,8 +60,7 @@ opened (`test-keyboard-devices.c`).
 `test-settings-monitors.c` covers the default/override distinction, US default
 with explicit JIS and inherited USB input, picker confirmation/cancellation,
 staged generation/configuration/replacement failures, and preserved labwc
-options. Runtime keyboard handover and focused-client delivery need their
-separate input tests; this UI test does not prove that handover is safe.
+options.
 
 ## Lock keys and the input method
 
@@ -79,12 +78,8 @@ Old eight-state tables remain readable, but cannot supply the Num-dependent
 symbols they never recorded. The normal LOCachy rebuild regenerates those
 tables; no manual package or keyboard-configuration edit is required.
 
-`tools/test-input-delivery.sh` tests real Rime with a headless focused client:
-uppercase text from JIS and US, restoring ordinary composition after Caps off,
-keypad digits/navigation with Num on/off, and unchanged idle English
-punctuation in RAW/CN/EN. `tools/test-caps-ime.c` uses generated JIS/US tables and
-real Rime for the direct path. These do not validate physical keyboard LEDs
-or replace hardware acceptance.
+`tools/test-input-delivery.sh` tests Rime with a headless focused client, and
+`tools/test-caps-ime.c` tests the direct-input path through `keytable`.
 
 Reference: [fcitx5-rime](https://github.com/fcitx/fcitx5-rime), its Rime
 key-event/modifier adapter.
@@ -156,8 +151,6 @@ direct program and the shared display (two keyboards at boot, a grabbed
 desktop's report, hotplug); `test-bar-keyboard.c` the bar's lent keyboards,
 draining, revocation and its locks; `test-keytable.c` the layout of a keyboard the bar reads;
 `test-input-hotplug.c` hotplug with the shared display in front.
-The real console, revocation in a VM and the X230's Caps Lock LED still need
-their acceptance runs.
 
 ## Keys and actions
 

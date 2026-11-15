@@ -40,5 +40,3 @@ rclone 自己续期访问令牌，令牌到期本身不是重新登录的理由�
 - `tools/test-rclone-fuse.sh`：在一次性用户与挂载命名空间里用真实 rclone 和 FUSE：传到宿主和挂载前已存在的命名空间、私有 resolver、刷新、状态、待上传写入和卸载。
 - `tools/test-files.sh`：在临时 home 上用真实的文件夹 worker 和替身服务测试 files：places、读取文件夹、F5、下拉、未拉够与取消、小红点、失败、卸载、粘贴到不支持 rename2 的云盘及之后安静的读取；普通构建及 ASan/UBSan。
 - `tools/test-pointer.c`、`tools/test-host-notify.c`、`tools/test-drives-state.c`：滚动生命周期、宿主通知、U 盘接管。
-
-这些测试用本地替身 remote 代替云端后端。真实账号、真实过期的 OAuth 授权，以及在真机上用手指操作，仍需在已安装机器上验证。

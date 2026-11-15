@@ -81,8 +81,8 @@ int main(int argc, char **argv)
             screen_fill(0, 0, screen_cols(), screen_rows(), BG);
             snprintf(text, sizeof text, "note %s", name);
             screen_bar(text, NULL);
-            /* TRANSLATORS: Ctrl+Alt+Esc is a key name; keep it. */
-            snprintf(text, sizeof text, _("note %s (pid %d): Ctrl+Alt+Esc for the menu"), name, (int)getpid());
+            /* TRANSLATORS: Super+Esc is a key name; keep it. */
+            snprintf(text, sizeof text, _("note %s (pid %d): Super+Esc for the menu"), name, (int)getpid());
             screen_text(1, 1, text, FG, BG);
             snprintf(text, sizeof text,
                      bad == words ? _("shown %d times; %zu MiB: intact") : _("shown %d times; %zu MiB: BAD"),

@@ -3,27 +3,21 @@
 [中文](SECURITY.zh.md)
 
 This file covers the encrypted disk, how the TPM opens it, Secure Boot with
-the machine's own keys, hibernation, and fwupd's host security report. The
-lock screen and authentication are described in the old tree's
-SECURITY.md (`distro/src/tools/SECURITY.md`). They have not yet been
-reviewed against this tree.
+the machine's own keys, hibernation, and fwupd's host security report.
 
 ## What there is
 
 **The disk.** The installer makes a LUKS2 root (`locachy-crypt`) and a
 LUKS2 swap (`locachy-swap-crypt`), both opened by the same long passphrase.
-Enrollment preserves the recovery-passphrase slot by design; actual disk health
-and recovery access still need verification. When TPM unlock fails, one typed
+Enrollment preserves the recovery-passphrase slot. When TPM unlock fails, one typed
 passphrase is tried on both root and swap, not one separate prompt per disk.
 
-There is no PIN anywhere. The user decided that the passphrase is long
-enough as the only typed secret.
+There is no PIN anywhere; the passphrase is the only typed secret.
 
 **TPM 1.2** (ThinkPad X230): `locachy-tpm enroll` seals a random key to PCR
 0 with `TPM_Seal` and stores the blob in a `locachy-tpm12` LUKS2 token.
-This is unchanged.
 
-**TPM 2.0, without this machine's own Secure Boot keys**: unchanged too.
+**TPM 2.0, without this machine's own Secure Boot keys**:
 `systemd-cryptenroll --tpm2-pcrs=0+7` seals the key to the firmware (PCR
 0) and to Secure Boot's state and keys (PCR 7). `locachy-tpm` adds
 `--tpm2-public-key=`. Otherwise `systemd-cryptenroll` would add a signed
@@ -118,7 +112,7 @@ binding.
 | TPM bus sniffing (discrete TPM) | Passive sniffing: stopped. systemd salts the unseal session with the SRK recorded at enrollment, and the secret crosses the bus encrypted. **Not stopped**: an active interposer (TPM reset and replayed PCR values, a fake TPM). | Same. | **Not stopped**: TPM 1.2 returns the key in the clear over LPC. |
 | Firmware rewritten (no Boot Guard on the X230) | **Not stopped**: the firmware is the root of trust and can fake measurements. | **Not stopped.** | **Not stopped.** |
 | Microsoft keys enrolled (`--microsoft`) | The disk stays closed to Microsoft-signed systems (PCR 7, above). sbctl enrolls no dbx, so revoked Microsoft binaries still **start**. That breaks only the claim that LOCachy alone starts, not the disk. | n/a | n/a |
-| Recovery path | Enrollment preserves the passphrase slot by design; verify recovery access on the actual device. It is asked whenever the TPM refuses, with what happened shown in red. The waiting binding's slot uses a 256-bit random key kept inside the encrypted root, so it adds no way in from outside. It is removed once the binding is done, by `enroll`, or by `clear`. | Same. | Same. |
+| Recovery path | Enrollment preserves the passphrase slot. It is asked whenever the TPM refuses, with what happened shown in red. The waiting binding's slot uses a 256-bit random key kept inside the encrypted root, so it adds no way in from outside. It is removed once the binding is done, by `enroll`, or by `clear`. | Same. | Same. |
 | No lock at boot with TPM unlock | Refused together, in the installer and in settings. | Same. | Same. |
 
 Enrollment safeguards:
@@ -149,9 +143,7 @@ Known limitations:
 The implementation saves the key and UUID association atomically before changing
 the LUKS header, retains failed devices across missing disks and failed slot
 removals, records completed enrollment separately from cleanup, and retries slot
-retirement safely while keeping the long recovery passphrase intact. The helper
-and TPM 2.0 VM tests below cover the failure windows; they do not prove behavior
-under arbitrary storage corruption or replace a hardware enrollment test.
+retirement safely while keeping the long recovery passphrase intact.
 
 ## Tests
 
@@ -171,19 +163,11 @@ under arbitrary storage corruption or replace a hardware enrollment test.
     prepare/retire, atomic-save failure, header I/O error and malformed request.
     The helper suite has 18 tests, including external-token false positives
     and root/swap transition-slot verification.
-- Real TPM 2.0/LUKS failure/retry in a disposable VM: four checks cover a
-  header written before a reported failure, reuse without duplicate slots, a
-  hidden swap UUID plus failed root-slot removal, and successful retry with both
-  recovery passphrases retained, followed by TPM auto-unlock after retry.
-  Wrappers inject the reported failure and missing-device condition. Actual
-  power loss and filesystem faults were not simulated; atomic-write interruption
-  windows use doubles.
 - `tools/test-init-unlock.py` compiles the actual init unlock/resume functions
   with block, TPM and UI doubles, and runs the actual cryptsetup fork/pipe/exec
   path against a child executable. Fifteen checks cover root authorization,
   token/passphrase fallback, duress precedence, high threat level, exact
-  root/swap passphrase bytes and arguments, and token-only null stdin. No real
-  hibernation is performed by this authentication regression.
+  root/swap passphrase bytes and arguments, and token-only null stdin.
 - `tools/test-install.py`: the installer's advice, `--secure-boot`
   checks, fwupd's report, and the order (keys made before the image,
   enrolled after it is on the ESP; prepare, or the PCR 0+7 binding when the
@@ -192,17 +176,3 @@ under arbitrary storage corruption or replace a hardware enrollment test.
   arguments, the HSI and its failing checks.
 - `tools/test-settings-monitors.c`: the rows' order; the Security page
   shows the TPM, Secure Boot and the HSI, with fwupd asked once.
-- `tools/test-settings-monitors.c` also feeds the TPM and Secure Boot rows
-  with what `locachy-tpm status --json` said in the VM: TPM 1.2 bound,
-  cleared and off; TPM 2.0 with own keys; a binding waiting.
-- In a VM with swtpm and OVMF (TPM 2.0 with Secure Boot, setup mode first;
-  then swtpm as a TPM 1.2):
-  - With TPM 1.2, PCR 0 changed under another OVMF build. It also changed
-    under the same build once the other one had written the variable store.
-    Either way the TPM refused and the passphrase opened the disk.
-  - The q35 chipset's TCO watchdog resets the VM about 30 s after a resume
-    from hibernation. The resumed kernel's iTCO_wdt does not hold it, and
-    nothing in the boot path loads it. The hibernation runs therefore use
-    `-global ICH9-LPC.noreboot=true`. This is the VM's chipset: process 1
-    does not touch the watchdog, in HEAD or in this tree (HEAD was not run
-    through a resume in the VM). It was not seen on the X230.

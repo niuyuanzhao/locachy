@@ -142,13 +142,6 @@ whole files. Moves within such a drive are refused ("cannot move within
 itself without overwrite protection"): as a copy and a removal they would
 download and upload everything again.
 
-## Not yet
-
-- Raising an open window relies on labwc-control matching a window's app id to
-  its `window-PROGRAM-N` name.
-- The programs need the Wayland backend (`LOCACHY_BACKEND=wayland`); without
-  it a window fails visibly instead of taking a screen.
-
 ## Checks
 
 - `tools/test-app-registry.sh OUT`: the registry with stand-ins for the

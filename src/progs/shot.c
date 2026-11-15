@@ -1412,15 +1412,15 @@ static void draw_hud(struct output *o, uint32_t *px, int W, int H, const struct 
     } else if (sel_has) {
         /* TRANSLATORS: Enter is the key; keep it. */
         ITEM(_("Enter or double-click: copy"), 0, 0, 0, keys_row);
-        /* TRANSLATORS: Ctrl+S is the key; keep it. */
-        ITEM(_("Ctrl+S: save"), 0, 0, 0, 0);
+        /* TRANSLATORS: Ctrl+S and v are keys; keep them. */
+        ITEM(_("Ctrl+S: save   v: view   1..5: tools   Ctrl+Z: undo"), 0, 0, 0, 0);
         ITEM(_("Drag the handles: resize"), 0, 0, 0, 0);
         /* TRANSLATORS: Esc is the key; keep it. */
         ITEM(_("Esc: clear"), 0, 0, 0, 0);
     } else {
         ITEM(_("Drag: select a region"), 0, 0, 0, keys_row);
-        /* TRANSLATORS: Enter is the key; keep it. */
-        ITEM(_("Enter: copy the whole desktop"), 0, 0, 0, 0);
+        /* TRANSLATORS: Enter and r/f/m/a/w are keys; keep them. */
+        ITEM(_("Enter: copy desktop   r/f/m/a/w: mode"), 0, 0, 0, 0);
         /* TRANSLATORS: Esc is the key; keep it. */
         ITEM(_("Esc: cancel"), 0, 0, 0, 0);
     }
@@ -2085,10 +2085,6 @@ static void key_pressed(xkb_keysym_t sym, int mods)
     case XKB_KEY_5:
         active_tool = active_tool == TOOL_NUMBER ? TOOL_NONE : TOOL_NUMBER;
         dirty_all();
-        break;
-    case XKB_KEY_u:
-    case XKB_KEY_U:
-        undo_anno();
         break;
     case XKB_KEY_f:
     case XKB_KEY_F:

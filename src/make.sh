@@ -258,7 +258,7 @@ rm -f /usr/local/bin/kvm "$lib/kvm-worker" "$lib/kvm-broker"
 # The extended display's receiver (tools/EXTDISPLAY.md): extdisplay on the direct screen (no
 # compositor), extdisplay-worker parsing the stream and decoding it with the
 # distribution's FFmpeg, as nobody in a sandbox of its own (progs/extdisplay-ipc.h).
-EXTDISPLAY_PKGS="json-c libavcodec libavutil libswscale"
+EXTDISPLAY_PKGS="json-c libavcodec libavutil libswscale avahi-core"
 if pkg-config --exists $EXTDISPLAY_PKGS; then
     $GCC -DCONFIG_EXTDISPLAY_FFMPEG $(pkg-config --cflags $EXTDISPLAY_PKGS) -o "$lib/extdisplay-worker" "$src/progs/extdisplay-worker.c" \
         "$src/progs/extdisplay-protocol.c" "$src/progs/extdisplay-decode.c" $(pkg-config --libs $EXTDISPLAY_PKGS) -lm
@@ -266,14 +266,17 @@ if pkg-config --exists $EXTDISPLAY_PKGS; then
         "$src/progs/extdisplay-client.c" "$src/progs/extdisplay-protocol.c" "$b"/glibc-base-*.o $FT_LIBS $(pkg-config --libs json-c) -lm
 else
     rm -f /usr/local/bin/extdisplay "$lib/extdisplay-worker"
-    echo "make: extdisplay not built: json-c and FFmpeg (libavcodec, libavutil, libswscale) are not all installed" >&2
+    echo "make: extdisplay not built: json-c, Avahi and FFmpeg (libavcodec, libavutil, libswscale) are not all installed" >&2
 fi
 # The extended display's broker (tools/EXTDISPLAY.md): the root helper that leases the
 # cable interface, runs the TLS pump and hands the paired stream to extdisplay, which
-# starts it from this path. Needs OpenSSL 1.1.1 or newer.
-if pkg-config --exists openssl; then
+# starts it from this path. Discovery is a separate keyless child, not a host service.
+if pkg-config --exists $EXTDISPLAY_PKGS openssl; then
+    $GCC $(pkg-config --cflags avahi-core) -o "$lib/extdisplay-advertise" "$src/progs/extdisplay-advertise.c" $(pkg-config --libs avahi-core)
     $GCC $(pkg-config --cflags openssl) -o "$lib/extdisplay-broker" "$src/progs/extdisplay-broker.c" "$src/progs/extdisplay-broker-net.c" \
-        "$src/progs/extdisplay-broker-pump.c" "$src/progs/extdisplay-broker-tls.c" $(pkg-config --libs openssl)
+        "$src/progs/extdisplay-broker-pump.c" "$src/progs/extdisplay-broker-tls.c" "$src/progs/extdisplay-discovery.c" $(pkg-config --libs openssl)
+else
+    rm -f "$lib/extdisplay-broker" "$lib/extdisplay-advertise"
 fi
 if [ -f "$src/progs/app-init.c" ]; then
     $GCC -o "$lib/app-init" "$src/progs/app-init.c"

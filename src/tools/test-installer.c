@@ -300,7 +300,10 @@ static void describe_with(const char *tpm_json)
 static const char fake_install[] =
     "#!/bin/sh\n"
     "d=$(dirname \"$0\")\n"
-    "if [ \"$1\" = --describe-json ]; then cat \"$d/describe.json\"; exit 0; fi\n"
+    "if [ \"$1\" = --describe-json ]; then\n"
+    "  for f in /proc/$$/fd/*; do case $(readlink \"$f\") in *locachy-installer-session*) touch \"$d/state-leaked\";; esac; done\n"
+    "  cat \"$d/describe.json\"; exit 0\n"
+    "fi\n"
     "if [ \"$1\" = --refresh-live ]; then\n"
     "  echo refresh >>\"$d/refresh-calls\"\n"
     "  if [ -e \"$d/refresh-fail\" ]; then exit 1; fi\n"
@@ -387,6 +390,124 @@ static void to_summary(const char *pass_again)
     k(K_DOWN); k(K_DOWN); k('\n'); type("Locachy123"); k('\n'); type("Locachy123"); k('\n');
     for (int s = S_USER; s < S_SUMMARY; s++) { k(K_EOL); k('\n'); }
     k(SNAP);
+}
+
+static int fixture_session(struct json_object *state, int sealed)
+{
+    const char *text = json_object_to_json_string_ext(state, JSON_C_TO_STRING_PLAIN);
+    int fd = memfd_create("locachy-installer-session", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    assert(fd >= 0 && write(fd, text, strlen(text)) == (ssize_t)strlen(text));
+    if (sealed) assert(fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) == 0);
+    return fd;
+}
+
+static void test_session_handoff(void)
+{
+    printf("== sealed choices: atomic restore, rejected input and one-exec descriptor\n");
+    assert(load_description() == 0);
+    memset(&c, 0, sizeof c);
+    set_defaults();
+    copy(c.password, sizeof c.password, "fixture-user-secret");
+    copy(c.passphrase, sizeof c.passphrase, "fixture-disk-secret");
+    c.lang = ui_lang = 1;
+    recovered_installation = 1;
+    struct choices expected = c;
+    int fd = session_fd("begin");
+    assert(fd >= 0 && (fcntl(fd, F_GETFD) & FD_CLOEXEC));
+    char text[65537], action[16] = "unchanged";
+    ssize_t size = pread(fd, text, sizeof text - 1, 0);
+    assert(size > 0);
+    text[size] = '\0';
+    struct json_object *state = json_tokener_parse(text);
+    assert(state);
+    memset(&c, 0, sizeof c);
+    assert(restore_session(fd, action, sizeof action) == 0);
+    assert(!memcmp(&c, &expected, sizeof c) && !strcmp(action, "begin") && ui_lang == 1 && recovered_installation);
+    assert(fcntl(fd, F_GETFD) == -1 && errno == EBADF);
+
+    /* Missing fields, wrong types, unknown names and overlong secrets must
+     * preserve every prior choice, the action and the non-secret UI flags. */
+    for (int test = 0; test < 6; test++) {
+        struct json_object *bad = json_tokener_parse(text);
+        if (test == 0) json_object_object_del(bad, "disk_mode");
+        if (test == 1) json_object_object_add(bad, "encrypt", json_object_new_string("2"));
+        if (test == 2) json_object_array_add(jget(bad, "modules"), json_object_new_string("removed-module"));
+        if (test == 3) json_object_object_add(bad, "password", json_object_new_string_len(text, 300));
+        if (test == 4) json_object_object_add(bad, "action", json_object_new_string("other"));
+        fd = fixture_session(bad, test != 5);
+        copy(action, sizeof action, "unchanged");
+        assert(restore_session(fd, action, sizeof action) == -1);
+        assert(!memcmp(&c, &expected, sizeof c) && !strcmp(action, "unchanged") && ui_lang == 1 && recovered_installation);
+        assert(fcntl(fd, F_GETFD) == -1 && errno == EBADF);
+        clear_session_json(bad);
+        json_object_put(bad);
+    }
+    fd = fixture_session(state, 1);
+    assert(fcntl(fd, F_SETFD, 0) == 0); /* what the previous executable passes */
+    char state_arg[48];
+    snprintf(state_arg, sizeof state_arg, "--state-fd=%d", fd);
+    at = nkeys = 0;
+    keys[0] = END;
+    described = recovered_installation = 0;
+    stopped_installation = NULL;
+    if (setjmp(quit) == 0) installer_main(2, (char *[]){ "installer", state_arg, NULL });
+    assert(access(D("state-leaked"), F_OK) < 0);
+    assert(fcntl(fd, F_GETFD) == -1 && errno == EBADF);
+    clear_session_json(state);
+    json_object_put(state);
+    explicit_bzero(text, sizeof text);
+    explicit_bzero(&expected, sizeof expected);
+    printf("PASS installer session: sealed roundtrip, atomic rejection, no helper inheritance\n");
+}
+
+static void test_refresh_exec_failure(void)
+{
+    printf("== exec failure: the running binary never claims the new input hash\n");
+    setenv("LOCACHY_INSTALLER_INPUT_HASH", "old-fixture", 1);
+    setenv("LOCACHY_INSTALLER_REVISION", "old-revision", 1);
+    setenv("LOCACHY_INSTALL_SNAPSHOT_ROOT", "old-root", 1);
+    unsetenv("LOCACHY_INSTALL_SNAPSHOT_COMMIT");
+    unlink(D("refresh-calls"));
+    for (int attempt = 0; attempt < 2; attempt++) {
+        assert(refresh_installer("begin") == -1); /* installer-next does not exist */
+        assert(!strcmp(getenv("LOCACHY_INSTALLER_INPUT_HASH"), "old-fixture"));
+        assert(!strcmp(getenv("LOCACHY_INSTALLER_REVISION"), "old-revision"));
+        assert(!strcmp(getenv("LOCACHY_INSTALL_SNAPSHOT_ROOT"), "old-root"));
+        assert(!getenv("LOCACHY_INSTALL_SNAPSHOT_COMMIT"));
+    }
+    assert(!strcmp(slurp(D("refresh-calls")), "refresh\nrefresh\n"));
+    setenv("LOCACHY_INSTALLER_INPUT_HASH", "fixture", 1);
+    printf("PASS installer refresh: repeated exec failure leaves original identity\n");
+}
+
+static void test_recovered_preflight(void)
+{
+    printf("== recovered preflight: both secrets are prompted; TPM wins in either order\n");
+    const char *records[] = {
+        "{\"phase\":\"preflight\",\"argv\":[\"--tpm\",\"--encrypt\",\"--user=boot-test\"]}",
+        "{\"phase\":\"preflight\",\"argv\":[\"--encrypt\",\"--tpm\",\"--user=boot-test\"]}",
+        "{\"phase\":\"preflight\",\"argv\":[\"--user=boot-test\"]}"
+    };
+    for (int test = 0; test < 3; test++) {
+        stopped_installation = json_tokener_parse(records[test]);
+        assert(recover_installation() == 1 && recovered_installation);
+        assert(c.encrypt == (test == 2 ? ENC_OFF : ENC_TPM) && !c.password[0] && !c.passphrase[0]);
+        at = nkeys = 0;
+        if (test != 2) { type("recovered-disk"); k('\n'); }
+        type("recovered-user"); k('\n');
+        continue_install_current();
+        assert(at == nkeys && !strcmp(c.password, "recovered-user"));
+        if (test != 2) assert(!strcmp(c.passphrase, "recovered-disk"));
+        assert(job);
+        int result;
+        do { usleep(10000); result = check_install(); } while (result < 0);
+        assert(result == 0);
+        json_object_put(stopped_installation);
+        stopped_installation = NULL;
+    }
+    at = nkeys = recovered_installation = 0;
+    keys[0] = END;
+    printf("PASS installer recovery: preflight secrets prompted, encryption order independent\n");
 }
 
 int main(int argc, char **argv)
@@ -723,6 +844,9 @@ int main(int argc, char **argv)
     calls = slurp(D("calls"));
     assert(strstr(calls, "--check ") && strstr(calls, " --update-branch=main --apps-repo=off --apps-branch=next"));
 
+    test_session_handoff();
+    test_refresh_exec_failure();
+    test_recovered_preflight();
     printf("PASS installer\n");
     return 0;
 }

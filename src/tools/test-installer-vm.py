@@ -387,10 +387,11 @@ def install_tui(args, iso, out, kernel, initrd, stops=False):
         screenshots["summary"] = guest.shot("tui-summary")
         guest.key("end")
         guest.key("ret")                                  # Install: --check, then the question
+        wait_kmsg(guest, "installer: waiting for erase confirmation", 120)
         guest.pump(15)
         screenshots["confirm"] = guest.shot("tui-confirm")
         guest.key("y")
-        wait_kmsg(guest, "installer: installing", 60)
+        wait_kmsg(guest, "installer: installing", 600)
         guest.pump(60)
         screenshots["progress"] = guest.shot("tui-progress")
         target = "/run/locachy-install-target"

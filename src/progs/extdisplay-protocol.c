@@ -230,6 +230,12 @@ int extdisplay_pointer_json(char *s, size_t size, double x, double y)
     return fits(snprintf(s, size, "{\"type\":\"pointer\",\"x\":%.6f,\"y\":%.6f}", x, y), size);
 }
 
+int extdisplay_pointer_delta_json(char *s, size_t size, double x, double y, double dx, double dy)
+{
+    if (!unit(x) || !unit(y) || !isfinite(dx) || !isfinite(dy) || fabs(dx) > 16384 || fabs(dy) > 16384) return -1;
+    return fits(snprintf(s, size, "{\"type\":\"pointer\",\"x\":%.6f,\"y\":%.6f,\"dx\":%.4f,\"dy\":%.4f}", x, y, dx, dy), size);
+}
+
 int extdisplay_scroll_json(char *s, size_t size, double dx, double dy, int phase, int source)
 {
     if (!isfinite(dx) || !isfinite(dy) || fabs(dx) > 100000 || fabs(dy) > 100000 ||

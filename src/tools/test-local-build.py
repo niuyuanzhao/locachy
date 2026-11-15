@@ -244,7 +244,7 @@ class LocalBuild(unittest.TestCase):
             for call in re.findall(r"\bgpg\b[^\n]*", code):
                 self.assertTrue(call.startswith("gpg --batch --list-keys"), call)
         self.assertIn("gpg --batch --list-keys", helpers)
-        self.assertIn('keys=$(aur_keys "$@") || die', mode)
+        self.assertIn('keys=$(aur_keys "${lookup[@]}" "$@") || die', mode)
 
     def test_build_user_keyring_is_opened_and_closed_by_every_build(self):
         """Locks a build root's keyboxd left (killed with its PID namespace,

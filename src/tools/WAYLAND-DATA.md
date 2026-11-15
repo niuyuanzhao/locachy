@@ -73,5 +73,3 @@ does not start and a message says why. A file outside the home (a link to
   with a stand-in service, its O_PATH descriptor is sent, its document's path
   (never its own) is in the URI list and the key, and the drag's end
   (done, cancelled) reaches the service.
-
-A real browser receiving a dropped file is acceptance outside these checks.

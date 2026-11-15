@@ -198,24 +198,45 @@ def info(batch):
 def shown(text):
     text = "".join(c for c in text if c.isprintable() and not c.isspace())[:300]
     return text or "-"
-# Repository roots do not have AUR recipes. Tracked split packages use the
-# official package named by their upstream metadata, not an AUR namesake.
-local = {}
+# Repository packages need no source build. Tracked overlays do: inspect
+# their validated, version-locked metadata too, not an AUR namesake.
+local, local_info = {}, {}
 if installation:
     from pathlib import Path
+    import importlib.util, tempfile
+    spec = importlib.util.spec_from_file_location('locachy_upstream', Path(source) / 'link/locachy_upstream.py')
+    upstream = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(upstream)
     for metadata in (Path(source) / 'pkgbuilds').glob('*/upstream.json'):
-        entry = json.loads(metadata.read_text())
-        local[metadata.parent.name] = entry['package']
+        local[metadata.parent.name] = json.loads(metadata.read_text())
     requested = []
     for name in sys.argv[1:]:
-        package = local.get(name, name)
-        if not found('pacman', '-Sp', package):
-            if name in local:
-                raise RuntimeError('tracked package is missing from its repositories: ' + name)
+        if name in local:
+            package = local[name]['package']
+            # The raw extra DB preserves the stable authority even when a
+            # newer optimized package wins the merged repository view.
+            raw = str(Path(db).parent / 'raw')
+            details = subprocess.run(['pacman', '--config', config, '--dbpath', raw, '-Si', 'extra/' + package],
+                                     check=True, capture_output=True, text=True, env=dict(os.environ, LC_ALL='C')).stdout
+            version = re.search(r'^Version\s*:\s*(\S+)', details, re.M)
+            if not version:
+                raise RuntimeError('no stable metadata for tracked package: ' + name)
+            with tempfile.TemporaryDirectory(prefix='locachy-key-recipe-') as state:
+                lock = upstream.prepare_candidate(name, Path(source) / 'pkgbuilds' / name,
+                         'extra', version[1], state, stable_version=version[1])
+                local_info[name] = upstream.read_srcinfo((lock.parent / 'upstream/.SRCINFO').read_bytes())
+        elif not found('pacman', '-Sp', name):
             requested.append(name)
 else:
     requested = sys.argv[1:]
 roots = {n: {n} for n in requested}
+for name, fields in local_info.items():
+    for kind in ('depends', 'makedepends', 'checkdepends'):
+        for dep in fields.get(kind, []) + fields.get(kind + '_x86_64', []):
+            if not found('pacman', '-Sp', dep):
+                dep = re.split(r'[<>=]', dep, maxsplit=1)[0]
+                roots.setdefault(dep, set()).add(name)
+                requested.append(dep)
 seen, bases, base_of, todo = set(), {}, {}, list(requested)
 while todo:
     batch = sorted(set(todo) - seen)
@@ -237,6 +258,12 @@ while todo:
                 if dep in base_of:
                     bases[base_of[dep]].update(roots[dep])
                 todo.append(dep)
+for name, fields in sorted(local_info.items()):
+    url = shown(fields.get('url', ['-'])[0])
+    signed = [shown(value) for key, values in fields.items() if re.fullmatch(r'source(_[A-Za-z0-9_]+)?', key)
+              for value in values if re.search(r'\.(sig|asc|sign)$|[?&]signed$', value)]
+    for key in fields.get('validpgpkeys', []):
+        print(name, key, name, url, ' '.join(signed) or '-')
 for base in sorted(bases):
     keys, url, signed, in_base = [], "-", [], True
     for line in get("https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h=" + urllib.parse.quote(base)).splitlines():
@@ -1143,7 +1170,10 @@ elif [ "$inst" = 1 ]; then
     mapfile -t files <<<"$listing"
     # --ask 4: yes to removing a package one of these conflicts with (asked
     # for: a variant in place of another, python-dlib-cuda for python-dlib).
-    pacman -U --needed --noconfirm --ask 4 --asdeps "${files[@]}"
+    needed=(--needed)
+    # -r means a new build, including a changed patch with the same version.
+    [ "${LOCACHY_BUILD_REBUILD:-0}" != 1 ] || needed=()
+    pacman -U "${needed[@]}" --noconfirm --ask 4 --asdeps "${files[@]}"
     pacman -D --asexplicit "$@" >/dev/null
 fi
 echo "== locachy-build: done ($*): $(ls -t "$out"/*.pkg.tar.zst 2>/dev/null | head -3 | tr '\n' ' ')"

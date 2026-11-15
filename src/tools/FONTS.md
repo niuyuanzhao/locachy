@@ -183,6 +183,3 @@ the bar sees that its executable is a new file and runs it in place (same
 PID, argv and environment). It waits while a chooser, question, notification
 or composition is on the screen; `progs/bar.c` lists what goes across and
 what is made again. `tools/test-bar-keyboard.c` tests it.
-
-Not covered by these tests: the real shared display reloading Rime, and
-re-executing itself, after a settings job.

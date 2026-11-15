@@ -50,10 +50,13 @@
 #include <openssl/crypto.h>
 
 #include "extdisplay-broker.h"
+#include "extdisplay-discovery.h"
 
-enum attempt_state { IDLE, ATTEMPT, SESSION };
+enum attempt_state { IDLE, WAIT_CARRIER, WAIT_ADDRESS, DISCOVERY, STARTING, ATTEMPT, SESSION };
 
-static int control = -1, home_ns = -1, nl_home = -1, lock_fd = -1, signals = -1, log_fd = 2;
+static int control = -1, home_ns = -1, nl_home = -1, home_monitor = -1, lock_fd = -1, signals = -1, log_fd = 2;
+static int watching;
+static void candidate_baseline(void);
 static uid_t pump_uid;
 static gid_t pump_gid;
 static char boot_id[64];
@@ -68,6 +71,8 @@ static struct lease {
     struct in6_addr linklocal;
     pid_t pump;
     int status, front;
+    struct extdisplay_discovery discovery;
+    char code[EXTDISPLAY_BROKER_CODE_TEXT]; /* only until the listener reports ready */
     long long deadline;
 } L;
 
@@ -77,6 +82,8 @@ static void lease_clear(void)
     L.state = IDLE;
     L.sess_ns = L.nl_sess = L.nl_mon = L.status = L.front = -1;
     L.pump = -1;
+    L.discovery.pid = -1;
+    L.discovery.status = -1;
 }
 
 void broker_log(const char *format, ...)
@@ -118,11 +125,6 @@ static int send_fd_line(const char *text, int fd)
     c->cmsg_len = CMSG_LEN(sizeof(int));
     memcpy(CMSG_DATA(c), &fd, sizeof fd);
     return sendmsg(control, &m, MSG_NOSIGNAL) == (ssize_t)iov.iov_len ? 0 : -1;
-}
-
-static void sleep_ms(int ms)
-{
-    poll(NULL, 0, ms);
 }
 
 /* The lease record, one root-only file per device under /run (gone at boot):
@@ -337,7 +339,7 @@ static int session_namespace(void)
     if (unshare(CLONE_NEWNET) < 0) return -1;
     L.sess_ns = open("/proc/thread-self/ns/net", O_RDONLY | O_CLOEXEC);
     L.nl_sess = nl_open(0);
-    L.nl_mon = nl_open(RTMGRP_LINK);
+    L.nl_mon = nl_open(RTMGRP_LINK | RTMGRP_IPV6_IFADDR);
     if (L.sess_ns < 0 || L.nl_sess < 0 || L.nl_mon < 0) ok = 0;
     for (size_t i = 0; ok && i < sizeof settings / sizeof settings[0]; i++) {
         if (write_sysctl(settings[i][0], settings[i][1]) < 0) {
@@ -353,12 +355,11 @@ static int session_namespace(void)
     return ok ? 0 : -1;
 }
 
-/* Back to the namespace it came from, by the original name or, when another
- * device took that name meanwhile, by its pattern (as network-client does).
- * NetworkManager gets it back only if it is still the recorded device. */
-static void lease_release(void)
+static void stop_attempt(void)
 {
-    int returned = 0;
+    if (L.discovery.pid > 0) extdisplay_discovery_stop(&L.discovery);
+    close_fd(&L.discovery.status);
+    OPENSSL_cleanse(L.code, sizeof L.code);
     if (L.pump > 0) {
         /* A running session first gets to send close_notify and close its
          * TCP connection (the pump watches the status socket); 500 ms. */
@@ -374,8 +375,20 @@ static void lease_release(void)
         kill(L.pump, SIGKILL);
         while (waitpid(L.pump, NULL, 0) < 0 && errno == EINTR) {}
     }
+    L.pump = -1;
     close_fd(&L.status);
     close_fd(&L.front);
+    L.state = IDLE;
+    L.deadline = 0;
+}
+
+/* Back to the namespace it came from, by the original name or, when another
+ * device took that name meanwhile, by its pattern (as network-client does).
+ * NetworkManager gets it back only if it is still the recorded device. */
+static void lease_release(void)
+{
+    int returned = 0;
+    stop_attempt();
     close_fd(&L.nl_mon);
     if (L.moved && L.nl_sess >= 0) {
         if (!same_device(L.nl_sess, L.sess_ifindex, &L.id)) {
@@ -408,11 +421,26 @@ static void lease_release(void)
      * Otherwise it stays, and the device cannot be leased again until it is. */
     if (L.recorded && (returned || !L.moved)) record_remove(L.id.address);
     lease_clear();
+    /* Returning our own device is not a new user connection. Drain those
+     * events before storing the baseline so cancellation cannot auto-loop. */
+    if (home_monitor >= 0) (void)nl_link_event(home_monitor);
+    candidate_baseline();
 }
 
 static void end_attempt(const char *reason)
 {
     char line[64];
+#ifndef EXTDISPLAY_BROKER_TEST_DRIVER
+    struct link_info info;
+    if (strcmp(reason, "released") != 0 && strcmp(reason, "carrier-lost") != 0 &&
+        L.moved && L.nl_sess >= 0 && nl_link_get(L.nl_sess, L.sess_ifindex, &info) == 0 &&
+        (info.flags & IFF_LOWER_UP) && same_device(L.nl_sess, L.sess_ifindex, &L.id)) {
+        stop_attempt();
+        snprintf(line, sizeof line, "ended %s", reason);
+        send_line(line);
+        return;
+    }
+#endif
     lease_release();
     snprintf(line, sizeof line, "ended %s", reason);
     send_line(line);
@@ -448,10 +476,13 @@ static const char *start_attempt(void)
 {
     struct pump_args a;
     int plain[2] = { -1, -1 }, status[2] = { -1, -1 };
-    char code[EXTDISPLAY_BROKER_CODE_TEXT], line[EXTDISPLAY_BROKER_LINE_MAX + 1], address[INET6_ADDRSTRLEN];
+    char code[EXTDISPLAY_BROKER_CODE_TEXT];
     const char *error = NULL;
     memset(&a, 0, sizeof a);
-    if (random_bytes(a.key.key, sizeof a.key.key) < 0) return "no random bytes";
+    if (random_bytes(a.key.key, sizeof a.key.key) < 0) {
+        OPENSSL_cleanse(&a, sizeof a);
+        return "no random bytes";
+    }
     a.key.set = 1;
     if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, plain) < 0 ||
         socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, status) < 0) {
@@ -479,41 +510,16 @@ static const char *start_attempt(void)
         error = "cannot start the pump";
         goto out;
     }
-    for (long long deadline = extdisplay_broker_now_ms() + 5000;;) {
-        char reply[256];
-        long long left = deadline - extdisplay_broker_now_ms();
-        struct pollfd p = { L.status, POLLIN, 0 };
-        if (left <= 0 || poll(&p, 1, (int)left) <= 0) {
-            error = "the pump did not start";
-            goto out;
-        }
-        ssize_t n = recv(L.status, reply, sizeof reply - 1, 0);
-        if (n <= 0) {
-            error = "the pump did not start";
-            goto out;
-        }
-        reply[n] = 0;
-        if (!strcmp(reply, "listening")) break;
-        pump_report(reply);
-        if (!strncmp(reply, "error ", 6)) {
-            error = "the pump could not listen or sandbox itself";
-            goto out;
-        }
-    }
-    if (extdisplay_broker_code_encode(a.key.key, code, sizeof code) < 0 ||
-        !inet_ntop(AF_INET6, &L.linklocal, address, sizeof address)) {
+    if (extdisplay_broker_code_encode(a.key.key, code, sizeof code) < 0) {
         error = "cannot format the pairing";
         goto out;
     }
-    snprintf(line, sizeof line, "lease %s %s %d", L.name, address, EXTDISPLAY_BROKER_PORT);
-    send_line(line);
-    snprintf(line, sizeof line, "code %s", code);
-    send_line(line);
-    L.state = ATTEMPT;
+    memcpy(L.code, code, sizeof L.code);
+    L.state = STARTING;
+    L.deadline = extdisplay_broker_now_ms() + 5000;
 out:
     OPENSSL_cleanse(&a, sizeof a);
     OPENSSL_cleanse(code, sizeof code);
-    OPENSSL_cleanse(line, sizeof line);
     close_fd(&plain[0]);
     close_fd(&plain[1]);
     close_fd(&status[0]);
@@ -541,17 +547,62 @@ static int device_settings(const char *name)
     return ok ? 0 : -1;
 }
 
-static const char *lease_start(const char *name)
+static void preparing(const char *step)
+{
+    if (!watching) return;
+    char line[80];
+    snprintf(line, sizeof line, "preparing %s %s", L.name, step);
+    send_line(line);
+}
+
+/* Called only after link/address events (and once after bringing the device
+ * up). There is no periodic scan while a cable is absent. */
+static const char *prepare_link(void)
+{
+    struct link_info info;
+    int other = 0;
+    if (nl_link_get(L.nl_sess, L.sess_ifindex, &info) < 0 || !same_device(L.nl_sess, L.sess_ifindex, &L.id))
+        return "the cable interface disappeared";
+    if (!(info.flags & IFF_LOWER_UP)) {
+        if (L.state == WAIT_CARRIER) return NULL;
+        return "the cable link went down while preparing";
+    }
+    if (L.state == WAIT_CARRIER) {
+        L.state = WAIT_ADDRESS;
+        L.deadline = extdisplay_broker_now_ms() + 10000;
+        preparing("address");
+    }
+    int found = nl_linklocal(L.nl_sess, L.sess_ifindex, &L.linklocal, &other);
+    if (found < 0) return "cannot read the interface addresses";
+    if (other || nl_default_route(L.nl_sess) != 0) return "the session namespace is not link-local only";
+    if (!found) return NULL;
+    preparing("listener");
+    return start_attempt();
+}
+
+static const char *lease_start(const char *name, int expected_index, const char *expected_address)
 {
     char driver[64];
     struct link_info links[8];
-    int other = 0;
     if (L.state != IDLE) return "busy";
+    if (L.moved && L.nl_sess >= 0) {
+        if (!strcmp(name, L.name) && (!expected_index || (L.ifindex == expected_index && !strcmp(L.id.address, expected_address))) &&
+            same_device(L.nl_sess, L.sess_ifindex, &L.id)) {
+            (void)nl_prepare_event(L.nl_mon, L.sess_ifindex);
+            L.state = WAIT_CARRIER;
+            L.deadline = 0;
+            preparing("carrier");
+            return prepare_link();
+        }
+        lease_release();
+    }
     if (!valid_ifname(name) || sysfs_driver(name, driver, sizeof driver) < 0 || strcmp(driver, BROKER_DRIVER) != 0)
         return "not a Thunderbolt/USB4 network interface";
     memcpy(L.name, name, strlen(name) + 1); /* valid_ifname: below IFNAMSIZ */
     if ((L.ifindex = sysfs_ifindex(name)) < 0 || identity_of(nl_home, name, L.ifindex, &L.id) < 0)
         return "cannot identify the interface";
+    if (expected_index && (L.ifindex != expected_index || strcmp(L.id.address, expected_address)))
+        return "the selected interface changed; choose it again";
     stale_check();
     if (stale_record_for(&L.id)) {
         return "the previous lease of this device did not end cleanly; it is not back in locachy-net yet";
@@ -568,17 +619,11 @@ static const char *lease_start(const char *name)
     if (!L.sess_ifindex || !same_device(L.nl_sess, L.sess_ifindex, &L.id)) return "the interface changed while moving";
     if (device_settings(L.name) < 0) return "cannot set the interface's IPv6 settings";
     if (nl_link_up(L.nl_sess, L.sess_ifindex) < 0) return "cannot bring the interface up";
-    int found = 0;
-    for (long long deadline = extdisplay_broker_now_ms() + 10000; extdisplay_broker_now_ms() < deadline; sleep_ms(100)) {
-        if ((found = nl_linklocal(L.nl_sess, L.sess_ifindex, &L.linklocal, &other)) != 0) break;
-    }
-    if (found < 0) return "cannot read the interface addresses";
-    if (!found) return "no link-local address (no carrier?)";
-    if (other || nl_default_route(L.nl_sess) != 0) return "the session namespace is not link-local only";
-    struct link_info info;
-    if (nl_link_get(L.nl_sess, L.sess_ifindex, &info) < 0 || !(info.flags & IFF_LOWER_UP)) return "no carrier";
-    (void)nl_carrier_event(L.nl_mon, L.sess_ifindex); /* setup's own events */
-    return start_attempt();
+    (void)nl_prepare_event(L.nl_mon, L.sess_ifindex); /* discard our own move/up events */
+    L.state = WAIT_CARRIER;
+    L.deadline = 0;
+    preparing("carrier");
+    return prepare_link();
 }
 
 static int compare_names(const void *a, const void *b)
@@ -586,24 +631,84 @@ static int compare_names(const void *a, const void *b)
     return strcmp(*(char *const *)a, *(char *const *)b);
 }
 
-static void scan(void)
+struct candidate {
+    char name[IFNAMSIZ];
+    int ifindex, carrier;
+    struct identity id;
+};
+static struct candidate previous[EXTDISPLAY_BROKER_SCAN_MAX];
+static int previous_count, candidates_notified;
+
+static int candidates(struct candidate *out)
 {
-    char names[EXTDISPLAY_BROKER_SCAN_MAX][IFNAMSIZ], *sorted[EXTDISPLAY_BROKER_SCAN_MAX], driver[64], line[128];
-    int count = 0;
+    char names[EXTDISPLAY_BROKER_SCAN_MAX][IFNAMSIZ], *sorted[EXTDISPLAY_BROKER_SCAN_MAX], driver[64];
+    int count = 0, used = 0;
     struct dirent *entry;
     DIR *dir = opendir("/sys/class/net");
-    stale_check();
+    memset(out, 0, sizeof previous);
     while (dir && (entry = readdir(dir)) && count < EXTDISPLAY_BROKER_SCAN_MAX) {
         if (entry->d_name[0] == '.' || !valid_ifname(entry->d_name)) continue;
         if (sysfs_driver(entry->d_name, driver, sizeof driver) < 0 || strcmp(driver, BROKER_DRIVER) != 0) continue;
-        memcpy(names[count], entry->d_name, strlen(entry->d_name) + 1); /* valid_ifname */
+        memcpy(names[count], entry->d_name, strlen(entry->d_name) + 1);
         sorted[count] = names[count];
         count++;
     }
     if (dir) closedir(dir);
     qsort(sorted, (size_t)count, sizeof sorted[0], compare_names);
     for (int i = 0; i < count; i++) {
-        snprintf(line, sizeof line, "iface %s %s %s", sorted[i], BROKER_DRIVER, sysfs_carrier(sorted[i]) ? "up" : "down");
+        struct candidate *c = &out[used];
+        c->ifindex = sysfs_ifindex(sorted[i]);
+        if (c->ifindex < 1 || identity_of(nl_home, sorted[i], c->ifindex, &c->id) < 0) {
+            memset(c, 0, sizeof *c);
+            continue;
+        }
+        strcpy(c->name, sorted[i]);
+        c->carrier = sysfs_carrier(sorted[i]);
+        used++;
+    }
+    if (L.moved && L.nl_sess >= 0 && used < EXTDISPLAY_BROKER_SCAN_MAX) {
+        struct link_info info;
+        if (nl_link_get(L.nl_sess, L.sess_ifindex, &info) == 0 && same_device(L.nl_sess, L.sess_ifindex, &L.id)) {
+            struct candidate *c = &out[used++];
+            strcpy(c->name, L.name);
+            c->ifindex = L.ifindex;
+            c->carrier = (info.flags & IFF_LOWER_UP) != 0;
+            c->id = L.id;
+        }
+    }
+    return used;
+}
+
+static void candidate_baseline(void)
+{
+    if (nl_home < 0) return;
+    previous_count = candidates(previous);
+    candidates_notified = 0;
+}
+
+static void candidate_changed(void)
+{
+    struct candidate now[EXTDISPLAY_BROKER_SCAN_MAX];
+    int count = candidates(now);
+    int changed = count != previous_count || memcmp(now, previous, sizeof previous) != 0;
+    if (watching && !candidates_notified && changed) {
+        send_line("changed");
+        candidates_notified = 1;
+    }
+}
+
+static void scan(void)
+{
+    char line[256];
+    stale_check();
+    (void)nl_link_event(home_monitor);
+    candidate_baseline();
+    for (int i = 0; i < previous_count; i++) {
+        struct candidate *c = &previous[i];
+        if (watching)
+            snprintf(line, sizeof line, "iface %.15s %.63s %s %d %.95s", c->name, BROKER_DRIVER,
+                     c->carrier ? "up" : "down", c->ifindex, c->id.address);
+        else snprintf(line, sizeof line, "iface %.15s %.63s %s", c->name, BROKER_DRIVER, c->carrier ? "up" : "down");
         send_line(line);
     }
     send_line("end");
@@ -628,11 +733,26 @@ static int handle_control(void)
             return 0;
         }
     }
-    if (!strcmp(line, "scan")) {
+    if (!strcmp(line, "scan") || !strcmp(line, "watch")) {
         if (L.state != IDLE) send_line("error busy");
-        else scan();
+        else {
+            if (!strcmp(line, "watch")) watching = 1;
+            scan();
+        }
     } else if (!strncmp(line, "pair ", 5)) {
-        const char *error = lease_start(line + 5);
+        char name[IFNAMSIZ], address[3 * HWADDR_MAX], index[16], extra;
+        int expected = 0;
+        int fields = sscanf(line + 5, "%15s %15s %95s %c", name, index, address, &extra);
+        const char *error = NULL;
+        if ((watching && fields != 3) || (!watching && fields != 1)) error = "invalid pair request";
+        if (!error && watching) {
+            char *end;
+            long value = strtol(index, &end, 10);
+            if (index[0] < '1' || index[0] > '9' || *end || value < 1 || value > INT_MAX) error = "invalid pair identity";
+            else expected = (int)value;
+        }
+        if (L.state != IDLE) error = "busy";
+        if (!error) error = lease_start(name, expected, watching ? address : "");
         if (error) {
             char reply[EXTDISPLAY_BROKER_LINE_MAX + 1];
             if (strcmp(error, "busy") != 0) lease_release();
@@ -652,6 +772,14 @@ static int handle_control(void)
     return 0;
 }
 
+static void fail_preparation(const char *error)
+{
+    char reply[EXTDISPLAY_BROKER_LINE_MAX + 1];
+    lease_release();
+    snprintf(reply, sizeof reply, "error %s", error);
+    send_line(reply);
+}
+
 static void handle_status(void)
 {
     char line[256];
@@ -663,21 +791,46 @@ static void handle_status(void)
         return;
     }
     line[n] = 0;
-    if (!strcmp(line, "paired") && L.state == ATTEMPT) {
+    if (!strcmp(line, "listening") && L.state == STARTING) {
+        if (extdisplay_discovery_start(&L.discovery, L.sess_ns, L.sess_ifindex, L.name, &L.linklocal, L.code) < 0) {
+            fail_preparation("cannot start cable discovery");
+            return;
+        }
+        L.state = DISCOVERY;
+        L.deadline = extdisplay_broker_now_ms() + 10000;
+        preparing("discovery");
+    } else if (!strcmp(line, "paired") && (L.state == ATTEMPT || L.state == DISCOVERY)) {
+        extdisplay_discovery_stop(&L.discovery);
+        if (L.state == DISCOVERY) {
+            char address[INET6_ADDRSTRLEN], reply[EXTDISPLAY_BROKER_LINE_MAX + 1];
+            if (!inet_ntop(AF_INET6, &L.linklocal, address, sizeof address)) {
+                end_attempt("error");
+                return;
+            }
+            snprintf(reply, sizeof reply, "lease %s %s %d", L.name, address, EXTDISPLAY_BROKER_PORT);
+            send_line(reply);
+            snprintf(reply, sizeof reply, "code %s", L.code);
+            send_line(reply);
+            OPENSSL_cleanse(reply, sizeof reply);
+            OPENSSL_cleanse(L.code, sizeof L.code);
+        }
         if (send_fd_line("paired", L.front) < 0) {
             end_attempt("error");
             return;
         }
         close_fd(&L.front);
         L.state = SESSION;
-    } else if (!strcmp(line, "handshake-failed") && L.state == ATTEMPT) {
+    } else if (!strcmp(line, "handshake-failed") && (L.state == ATTEMPT || L.state == DISCOVERY)) {
         end_attempt("handshake-failed");
-    } else if (!strcmp(line, "timeout") && L.state == ATTEMPT) {
+    } else if (!strcmp(line, "timeout") && (L.state == ATTEMPT || L.state == DISCOVERY)) {
         end_attempt("timeout");
     } else if (!strncmp(line, "closed", 6)) {
         /* The peer closed, or the stream or TLS failed: extdisplay sees EOF on its
          * stream too; the attempt's one "ended" says so and the device goes
          * back now. The fixed reasons have no separate "closed". */
+        end_attempt("error");
+    } else if (!strncmp(line, "error ", 6)) {
+        pump_report(line);
         end_attempt("error");
     } else {
         pump_report(line);
@@ -787,23 +940,29 @@ int main(int argc, char **argv)
     boot_id[strcspn(boot_id, "\n")] = 0;
     if (state_dir() < 0) startup_fail("another broker is running, or its state directory is unusable");
     if (enter_home() < 0) startup_fail("cannot enter the network namespace of the network");
-    if ((nl_home = nl_open(0)) < 0) startup_fail("no rtnetlink");
+    /* Subscribe before the first snapshot, using a separate socket from
+     * synchronous netlink requests so those cannot consume our events. */
+    if ((home_monitor = nl_open(RTMGRP_LINK)) < 0 || (nl_home = nl_open(0)) < 0) startup_fail("no rtnetlink");
     struct extdisplay_broker_key probe = { .set = 0 };
     SSL_CTX *ctx = extdisplay_broker_tls_init() == 0 ? extdisplay_broker_tls_context(&probe) : NULL;
     if (!ctx) startup_fail("OpenSSL cannot provide the cable TLS profile");
     SSL_CTX_free(ctx);
     stale_check();
 
+    candidate_baseline();
     for (;;) {
-        struct pollfd p[4] = { { control, POLLIN, 0 }, { signals, POLLIN, 0 }, { L.status, POLLIN, 0 },
-                               { L.nl_mon, POLLIN, 0 } };
+        struct pollfd p[6] = { { control, POLLIN, 0 }, { signals, POLLIN, 0 }, { L.status, POLLIN, 0 },
+                               { L.nl_mon, POLLIN, 0 }, { home_monitor, POLLIN, 0 }, { L.discovery.status, POLLIN, 0 } };
         int timeout = -1;
-        if (L.state == ATTEMPT) {
-            /* The pump reports its own timeout; this is the backstop. */
-            long long left = L.deadline + 2000 - extdisplay_broker_now_ms();
+        if (L.deadline && L.state != IDLE && L.state != SESSION) {
+            long long left = L.deadline + (L.state == ATTEMPT ? 2000 : 0) - extdisplay_broker_now_ms();
             timeout = left < 0 ? 0 : left > 60000 ? 60000 : (int)left;
         }
-        if (poll(p, 4, timeout) < 0 && errno != EINTR) startup_fail("poll failed");
+        int ready = poll(p, 6, timeout);
+        if (ready < 0) {
+            if (errno == EINTR) continue;
+            startup_fail("poll failed");
+        }
         if (p[1].revents & POLLIN) {
             struct signalfd_siginfo info;
             if (read(signals, &info, sizeof info) == sizeof info) {
@@ -818,13 +977,51 @@ int main(int argc, char **argv)
             }
             continue; /* the lease may have changed */
         }
-        if (L.status >= 0 && (p[2].revents & (POLLIN | POLLHUP | POLLERR))) handle_status();
-        if (L.nl_mon >= 0 && (p[3].revents & (POLLIN | POLLERR))) {
-            int lost = nl_carrier_event(L.nl_mon, L.sess_ifindex);
-            struct link_info info;
-            if (lost < 0) lost = nl_link_get(L.nl_sess, L.sess_ifindex, &info) < 0 || !(info.flags & IFF_LOWER_UP);
-            if (lost) end_attempt("carrier-lost");
+        if (p[4].revents & (POLLIN | POLLERR)) {
+            (void)nl_link_event(home_monitor);
+            if (L.state == IDLE) candidate_changed();
         }
-        if (L.state == ATTEMPT && extdisplay_broker_now_ms() > L.deadline + 2000) end_attempt("timeout");
+        if (L.status >= 0 && p[2].fd == L.status && (p[2].revents & (POLLIN | POLLHUP | POLLERR))) handle_status();
+        if (L.nl_mon >= 0 && p[3].fd == L.nl_mon && (p[3].revents & (POLLIN | POLLERR))) {
+            if (L.state == WAIT_CARRIER || L.state == WAIT_ADDRESS) {
+                if (nl_prepare_event(L.nl_mon, L.sess_ifindex) != 0) {
+                    const char *error = prepare_link();
+                    if (error) fail_preparation(error);
+                }
+            } else {
+                int lost = nl_carrier_event(L.nl_mon, L.sess_ifindex);
+                struct link_info info;
+                if (lost < 0) lost = nl_link_get(L.nl_sess, L.sess_ifindex, &info) < 0 || !(info.flags & IFF_LOWER_UP);
+                if (lost) end_attempt("carrier-lost");
+            }
+        }
+        if (L.discovery.status >= 0 && p[5].fd == L.discovery.status &&
+            (p[5].revents & (POLLIN | POLLHUP | POLLERR))) {
+            int state = extdisplay_discovery_status(&L.discovery);
+            if (state < 0) {
+                if (L.state == DISCOVERY) fail_preparation("cable discovery could not publish; retry the connection");
+                else end_attempt("error");
+            } else if (state > 0 && L.state == DISCOVERY) {
+                char address[INET6_ADDRSTRLEN], reply[EXTDISPLAY_BROKER_LINE_MAX + 1];
+                if (!inet_ntop(AF_INET6, &L.linklocal, address, sizeof address)) {
+                    end_attempt("error");
+                } else {
+                    snprintf(reply, sizeof reply, "lease %s %s %d", L.name, address, EXTDISPLAY_BROKER_PORT);
+                    send_line(reply);
+                    snprintf(reply, sizeof reply, "code %s", L.code);
+                    send_line(reply);
+                    OPENSSL_cleanse(reply, sizeof reply);
+                    OPENSSL_cleanse(L.code, sizeof L.code);
+                    L.state = ATTEMPT;
+                    L.deadline = extdisplay_broker_now_ms() + EXTDISPLAY_BROKER_ATTEMPT_SECONDS * 1000LL;
+                }
+            }
+        }
+        if (L.deadline && extdisplay_broker_now_ms() >= L.deadline + (L.state == ATTEMPT ? 2000 : 0)) {
+            if (L.state == ATTEMPT) end_attempt("timeout");
+            else if (L.state == WAIT_ADDRESS) fail_preparation("the cable has carrier but no usable IPv6 link-local address");
+            else if (L.state == DISCOVERY) fail_preparation("cable discovery did not become ready");
+            else if (L.state == STARTING) fail_preparation("the TLS listener did not become ready");
+        }
     }
 }

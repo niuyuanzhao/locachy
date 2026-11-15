@@ -1,9 +1,5 @@
 /*
- * Rescue is an independent native full-screen program, not a shell or term
- * mode. locachy-rescue owns the storage/link policy; this UI sends only its
- * fixed argv and a secret through stdin, and displays its structured reply.
- * A single UI holds ui.lock for the whole session. Nothing is unlocked or
- * enabled at startup. Only a successful, verified cleanup permits exit.
+ * Rescue full-screen interface for locachy-rescue (tools/RESCUE.md).
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -660,7 +656,7 @@ static void secret_prompt(int which)
     textsel_clear();
     text_all = 0;
     modal = which;
-    tell(0, "%s", _("Secrets stay in this UI and the helper's stdin; never in argv or files."));
+    notice[0] = '\0';
 }
 static void do_action(int which)
 {
@@ -788,7 +784,7 @@ static void status_line(int width, const char *fmt, ...)
 static void build_status(int width)
 {
     nstatus = 0; ssh[0] = '\0';
-    status_line(width, _("Keyboard: %s (Rescue and its target terminal; system settings are unchanged)"), keyboard);
+    status_line(width, _("Keyboard: %s"), keyboard);
     status_line(width, _("Target: %s%s"), state.state[0] ? state.state : _("unknown"), known ? "" : _(" (not verified)"));
     status_line(width, _("Device: %s   UUID: %s"), state.device[0] ? state.device : "-", state.uuid[0] ? state.uuid : "-");
     for (int i = 0; i < state.ndevices; i++) {
@@ -810,9 +806,9 @@ static void build_status(int width)
         snprintf(ssh, sizeof ssh, "ssh -S none -p %d root@%s", state.port, host);
         status_line(width, "%s", ssh);
         status_line(width, _("SFTP: sftp -P %d root@[%s]"), state.port, host);
-        status_line(width, "%s", _("Replace <local-interface> with the connecting computer's interface. Verify the host-key fingerprint; never auto-accept it."));
+        status_line(width, "%s", _("Replace <local-interface> with the connecting computer's interface and verify the host-key fingerprint."));
     }
-    status_line(width, _("Found: %d encrypted targets, %d wired interfaces. No automatic unlock, TPM, fsck or formatting."),
+    status_line(width, _("Found: %d encrypted targets, %d wired interfaces."),
                 state.ndevices, state.ninterfaces);
 }
 static int clamp(int value, int max)
@@ -899,7 +895,7 @@ static void draw_modal(void)
         int x = ui_button(1, rows - 3, _("Enter: choose"), HIT_KEY + '\n');
         ui_button(x, rows - 3, _("Esc: cancel"), HIT_KEY + 27);
     } else if (modal == M_LAYOUT) {
-        screen_text(2, 2, _("Keyboard layout (only this Rescue UI)"), ACCENT, BG);
+        screen_text(2, 2, _("Keyboard layout"), ACCENT, BG);
         screen_text(2, 4, _("Choose US or Japanese JIS, or type a standard console/XKB layout name."), FG, BG);
         snprintf(line, sizeof line, _("Layout: %s_"), filter);
         screen_text(2, 6, line, FG, BG);
@@ -944,7 +940,6 @@ static void draw_closed(void)
     int cols = screen_cols(), rows = screen_rows();
     screen_text(2, 2, _("Rescue session closed"), ACCENT, BG);
     screen_text(2, 4, _("The debug link is stopped and target filesystems are unmounted."), FG, BG);
-    screen_text(2, 5, _("No terminal or installer will open automatically."), DIM, BG);
     if (power_confirmation) {
         screen_text(2, 7, power_confirmation == 1 ? _("Reboot this computer?") : _("Power off this computer?"), ERROR, BG);
         int x = ui_button(2, 9, _("Y: confirm"), HIT_KEY + 'y');
@@ -996,7 +991,7 @@ static void draw(void)
         }
         draw_output(); textsel_draw(BG, ACCENT);
         /* TRANSLATORS: Tab, PgUp, PgDn, Ctrl+C, Ctrl+Q and F1 are key names; keep them. */
-        screen_text(1, rows - 3, _("Tab: pane  PgUp/PgDn: output  y/Ctrl+C: copy  a: SSH  f: fingerprint  Ctrl+Q: exit  F1: help"),
+        screen_text(1, rows - 3, _("Tab: pane  PgUp/PgDn: output  Ctrl+C: copy  a: SSH  f: fingerprint  Ctrl+Q: exit  F1: help"),
                     DIM, BG);
     }
     screen_text(1, rows - 1, notice, notice_error ? ERROR : ACCENT, BG);

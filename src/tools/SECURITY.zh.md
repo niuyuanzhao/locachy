@@ -2,17 +2,17 @@
 
 [English](SECURITY.md)
 
-本文说明加密磁盘、TPM 如何打开它、使用本机自有密钥的安全启动、休眠，以及 fwupd 的主机安全报告。锁屏与认证见旧树的 SECURITY.md（`distro/src/tools/SECURITY.md`），尚未对照本树复核。
+本文说明加密磁盘、TPM 如何打开它、使用本机自有密钥的安全启动、休眠，以及 fwupd 的主机安全报告。
 
 ## 现有内容
 
-**磁盘。** 安装程序建立 LUKS2 根分区（`locachy-crypt`）和 LUKS2 交换分区（`locachy-swap-crypt`），两者用同一个长口令打开。系统设计保留恢复口令槽；实体磁盘状态及恢复能力仍需实际核验。TPM 解锁失败时，会用一次手输口令尝试打开 root 和 swap，而不是每块盘各弹一个独立口令框。
+**磁盘。** 安装程序建立 LUKS2 根分区（`locachy-crypt`）和 LUKS2 交换分区（`locachy-swap-crypt`），两者用同一个长口令打开。登记保留恢复口令槽。TPM 解锁失败时，会用一次手输口令尝试打开 root 和 swap，而不是每块盘各弹一个独立口令框。
 
-任何地方都没有 PIN。用户已决定：口令足够长，作为唯一需要输入的秘密即可。
+任何地方都没有 PIN，口令是唯一需要输入的秘密。
 
-**TPM 1.2**（ThinkPad X230）：`locachy-tpm enroll` 用 `TPM_Seal` 把一把随机密钥封装到 PCR 0，封装块存入 `locachy-tpm12` LUKS2 令牌。此部分未改动。
+**TPM 1.2**（ThinkPad X230）：`locachy-tpm enroll` 用 `TPM_Seal` 把一把随机密钥封装到 PCR 0，封装块存入 `locachy-tpm12` LUKS2 令牌。
 
-**TPM 2.0，未使用本机自有安全启动密钥**：同样未改动。`systemd-cryptenroll --tpm2-pcrs=0+7` 把密钥封装到固件（PCR 0）以及安全启动的状态和密钥（PCR 7）。`locachy-tpm` 另加 `--tpm2-public-key=`；否则只要 `/etc/systemd/tpm2-pcr-public-key.pem` 存在，`systemd-cryptenroll` 就会自行加上带签名的 PCR 11 策略。
+**TPM 2.0，未使用本机自有安全启动密钥**：`systemd-cryptenroll --tpm2-pcrs=0+7` 把密钥封装到固件（PCR 0）以及安全启动的状态和密钥（PCR 7）。`locachy-tpm` 另加 `--tpm2-public-key=`；否则只要 `/etc/systemd/tpm2-pcr-public-key.pem` 存在，`systemd-cryptenroll` 就会自行加上带签名的 PCR 11 策略。
 
 **TPM 2.0，使用本机自有安全启动密钥**：按 Arch Wiki、systemd 和 sbctl 的做法。
 
@@ -49,7 +49,7 @@
 | 嗅探 TPM 总线（独立 TPM） | 被动嗅探：挡住。systemd 用登记时记下的 SRK 为解封会话加盐，秘密加密后才过总线。**挡不住**：主动中间人（复位 TPM 后重放 PCR 值、伪造的 TPM）。 | 同上。 | **挡不住**：TPM 1.2 经 LPC 以明文返回密钥。 |
 | 固件被改写（X230 没有 Boot Guard） | **挡不住**：固件是信任根，可以伪造度量。 | **挡不住。** | **挡不住。** |
 | 登记了微软密钥（`--microsoft`） | 磁盘仍对微软签名的系统关闭（PCR 7，见上）。sbctl 不登记 dbx，所以已吊销的微软二进制仍**能启动**。这只破坏"只有 LOCachy 能启动"这一说法，不影响磁盘。 | 不适用 | 不适用 |
-| 恢复途径 | 登记按设计保留口令槽；实体设备上的恢复能力仍需实际验证。TPM 拒绝时就会询问口令，并以红字说明发生了什么。等待中的绑定所用槽位用的是存放在加密根分区内的 256 位随机密钥，不会从外部增加入口；绑定完成、`enroll` 或 `clear` 时即删除。 | 同上。 | 同上。 |
+| 恢复途径 | 登记保留口令槽。TPM 拒绝时就会询问口令，并以红字说明发生了什么。等待中的绑定所用槽位用的是存放在加密根分区内的 256 位随机密钥，不会从外部增加入口；绑定完成、`enroll` 或 `clear` 时即删除。 | 同上。 | 同上。 |
 | 开机不锁屏又用 TPM 解锁 | 安装程序和设置都拒绝这种组合。 | 同上。 | 同上。 |
 
 登记保护措施：
@@ -70,7 +70,7 @@
 
 ## 等待绑定的故障恢复
 
-等待绑定先原子保存密钥与 UUID 关联再更改 LUKS header；磁盘缺失或删槽失败时保留恢复请求，登记完成与清理完成分别记录，删槽可安全重试且始终保留长恢复口令。下面的 helper 和真实 TPM 2.0 VM 测试覆盖故障窗口，不证明任意存储损坏下的行为，也不替代硬件登记测试。
+等待绑定先原子保存密钥与 UUID 关联再更改 LUKS header；磁盘缺失或删槽失败时保留恢复请求，登记完成与清理完成分别记录，删槽可安全重试且始终保留长恢复口令。
 
 ## 测试
 
@@ -82,12 +82,7 @@
   - `secure-boot --enroll`：生成密钥、映像先上 ESP、先用 TPM 自有密钥再用口令、sbctl 拒绝时不留等待中的绑定；
   - `status`；
   - 缺盘、删槽失败、prepare/retire 中断、原子保存失败、header I/O 错误及损坏请求的恢复；helper 测试共 18 项，含外部 token 假阳性和 root/swap 过渡槽核验。
-- 一次性虚拟机中的真实 TPM 2.0/LUKS 故障重试：覆盖 header 已写后报告失败、重试复用不增重复槽、隐藏 swap UUID 加 root 删槽失败、恢复后成功重试且保留两个恢复口令，以及重试后的 TPM 自动解锁。真实工具在一次性 VM 内执行，包装器注入报错和缺盘条件。没有模拟真实断电或文件系统故障；原子写入中断窗口用替身测试。
-- `tools/test-init-unlock.py` 编译实际 init 解锁/恢复函数，并用子进程可执行文件走真实 cryptsetup fork/pipe/exec 路径。15 项检查覆盖根分区授权、token/口令回退、胁迫优先级、高威胁烈度、root/swap 精确口令字节与参数，以及 token-only 的空 stdin。此认证回归不执行真实休眠。
+- `tools/test-init-unlock.py` 编译实际 init 解锁/恢复函数，并用子进程可执行文件走真实 cryptsetup fork/pipe/exec 路径。15 项检查覆盖根分区授权、token/口令回退、胁迫优先级、高威胁烈度、root/swap 精确口令字节与参数，以及 token-only 的空 stdin。
 - `tools/test-install.py`：安装程序的建议、`--secure-boot` 检查、fwupd 报告，以及顺序（密钥先于映像生成，映像上了 ESP 之后才登记；然后 prepare，或密钥没登记进去时用 PCR 0+7 绑定）。
 - `tools/test-installer.c`：设置模式下的安全启动选项、参数、HSI 及其未通过的检查项。
 - `tools/test-settings-monitors.c`：各行的顺序；"安全"页显示 TPM、安全启动和 HSI，且只向 fwupd 询问一次。
-- `tools/test-settings-monitors.c` 还用虚拟机中 `locachy-tpm status --json` 的输出驱动 TPM 和安全启动两行：TPM 1.2 已绑定、已清除、已关闭；TPM 2.0 使用自有密钥；有绑定在等待。
-- 在带 swtpm 和 OVMF 的虚拟机中（先是带安全启动的 TPM 2.0，先处于设置模式；再把 swtpm 作为 TPM 1.2）：
-  - 使用 TPM 1.2 时，换用另一个 OVMF 构建后 PCR 0 改变；另一个构建写过变量存储之后，即使换回同一构建 PCR 0 也会改变。两种情况下 TPM 都拒绝，口令都能打开磁盘。
-  - q35 芯片组的 TCO 看门狗会在从休眠恢复约 30 秒后复位虚拟机：恢复后的内核里的 iTCO_wdt 没有接管它，启动路径中也没有任何东西加载它。因此休眠测试使用 `-global ICH9-LPC.noreboot=true`。这是虚拟机芯片组的问题：无论 HEAD 还是本树，1 号进程都不碰看门狗（HEAD 未在虚拟机中经历过恢复）。在 X230 上没有见过。

@@ -58,6 +58,28 @@ AUR 包在宿主的 pacman 事务之后才构建。Apply 在改动应用预设�
 `apps` 目标；应用在源码之后、宿主之前安装它，合并跟随预设的配置，从不为此构建或安装软件包。
 这一步失败不阻止其他部分。见 [APPS.zh.md](APPS.zh.md)。
 
+## 运行中的旧更新器无法检查时
+
+`c` / 检查操作先运行当前更新器。同步失败必须显示 pacman 的具体软件源、HTTP、签名、数据库或文件系统错误；`checkupdates` 那句笼统的 `Cannot fetch updates` 不足以诊断，也不代表没有网络。检查失败不更改宿主软件包数据库、已发布的软件源数据库、软件包或成功计划；完整错误进入已有任务输出区与日志。
+
+旧系统若正是更新器本身吞掉了原因，可在受管理的管理员终端热替换脚本，不必重装或重启：
+
+1. 从核对过的确切 LOCachy 源码取得候选 `locachy-pkg`，保存成普通文件，核对随该修复提供的完整 SHA-256；不把下载内容直接接给 shell。
+
+   ```sh
+   sha256sum locachy-pkg
+   ```
+
+2. 用仓库里的 `tools/repair-updater.py`，传入候选文件及完整 SHA-256。它只解析语法而不执行候选，拒绝 symlink 或可被其他用户写入的目标，不等待地取得 `/run/locachy/pkg.lock`，在 pacman 数据库忙时拒绝；用带旧哈希名称的硬链接保存旧文件，再原子换入已核验文件。不执行包事务、不重启任何服务。
+
+   ```sh
+   python3 -I tools/repair-updater.py ./locachy-pkg FULL_SHA256
+   ```
+
+3. 回软件包界面再按 `c`。下一次检查仍是普通 `pkg-plan` 任务，只是执行修正后的更新器。若仍失败，就按它保留下来的 pacman 原因处理，不能猜成断网。
+
+恢复工具不会杀掉已登记的包任务。包域锁忙时，等 Home/Packages 显示的任务结束后重试。校验失败或发布中断时，原更新器保持完整。此入口仅用于旧更新器恢复，不是另一套更新机制；后续正常源码优先更新完成后，仍由普通任务中的 `install-pkg-tools` 安装该已提交源码的更新器。
+
 ## 软件源分层
 
 LOCachy 把软件源当作一组分层来读，优化程度最高的在最前：本 CPU 及其以下各级的
@@ -73,7 +95,7 @@ openssl 以及基于它构建的 tor 因此可能被压住，而 Arch 较新的 
 
 `locachy_stack.py` 实现这一规则，用于：
 
-- 检查与计划。`checkupdates` 把数据库整份取回到 `/var/lib/locachy/checkupdates`，取回
+- 检查与计划。有超时限制的 `pacman -Sy` 使用明确指定的私有 DBPath，把数据库整份取回到 `/var/lib/locachy/checkupdates`，取回
   前先把它们的时间设为纪元。pacman 的刷新会保留比镜像副本新的数据库，并从它所请求的镜像
   取签名。某个镜像停滞而故障切换到较旧的镜像时，旧镜像的签名会去校验被保留的数据库，检查便
   会失败，直到出现更新的副本。分层视图位于 `/var/lib/locachy/checkupdates/merged`。更新
@@ -161,7 +183,7 @@ ALHP 和 CachyOS 的顺序遵循用户的规则。规则只决定顺序，每个
 重试不编译任何东西；这些输入一旦变化，就重新编译。
 
 `tools/test-local-packages.py`、`test-update-transaction.py` 及
-`test-prepared-builder.py` 用替身检查流程，不证明新的一组真实软件包已通过合约。
+`test-prepared-builder.py` 用替身检查流程。
 
 ## 添加包名
 
@@ -171,5 +193,4 @@ ALHP 和 CachyOS 的顺序遵循用户的规则。规则只决定顺序，每个
 
 添加、删除声明仍会运行系统对账，而不只是单包 pacman 命令。
 失败输出保存在其系统任务的日志 `/run/locachy/jobs/ID.log` 中（home 列出各任务，见 [JOBS.zh.md](JOBS.zh.md)）；prepared 更新失败时，计划及合约日志
-保留在 `/var/lib/locachy/local-packages/transactions/` 下。不能为了越过错误而删除
-这些日志或跳过合约。
+保留在 `/var/lib/locachy/local-packages/transactions/` 下。

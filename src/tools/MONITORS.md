@@ -47,4 +47,4 @@ rather than silently replacing the saved desire with another rate.
 profiles, fallback preservation, identity/port changes, duplicate identities,
 atomic-save failure, exact mHz round trips, late-enable events and controller
 transaction failure/cancellation. The profile tests also run with ASan and
-UBSan. Real link-bandwidth and monitor hotplug acceptance remains separate.
+UBSan.

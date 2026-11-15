@@ -98,6 +98,9 @@ def query_view(source, directory, level, cpu, sections):
     result = subprocess.run(command, capture_output=True, text=True, timeout=300)
     if result.returncode:
         raise RuntimeError('installation repository lookup failed: ' + (result.stderr or result.stdout)[-2000:])
+    # libalpm initializes this marker while refreshing raw. The read-only,
+    # unprivileged lookup cannot initialize a new local DB itself.
+    shutil.copyfile(raw / 'local/ALPM_DB_VERSION', merged / 'local/ALPM_DB_VERSION')
     stack = load(source, 'locachy_stack.py')
     stack.merge(str(raw / 'sync'), str(merged / 'sync'), stack.repositories(str(config)))
     # Metadata is public. The lookup process is unprivileged and must reach it.
@@ -147,8 +150,6 @@ def trust(source, runtime, fingerprints, target=None):
         raise ValueError('invalid source signing fingerprint')
     root = key_root(target)
     if root != Path('/'):
-        target_home = root / HOME.relative_to('/')
-        target_gnupg = target_home / '.gnupg'
         command = [str(Path(source) / 'link/locachy-build'), '--trust-key', '--key-root', str(root), *keys]
     else:
         identity()
@@ -156,18 +157,31 @@ def trust(source, runtime, fingerprints, target=None):
     return subprocess.run(command).returncode
 
 
-def preserve(source, target):
-    """Carry the live session's explicitly trusted public keys to a fresh target.
+def preserve(target):
+    """Transfer already approved public keys after target bootstrap, before builds.
 
-    This copies an existing keyring; it never fetches a key or creates a new
-    trust decision. A resumed target owns its keyring already and is untouched.
+    Only public certificates cross the boundary; no secret keys, trust database,
+    daemon socket or live UID is copied. Repeating an interrupted transfer is safe.
     """
-    target = Path(target)
-    destination = target / HOME.relative_to('/') / '.gnupg'
     original = HOME / '.gnupg'
-    if destination.exists() or not original.is_dir():
+    if not original.is_dir():
         return
     account = identity()
-    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    shutil.copytree(original, destination, ignore=shutil.ignore_patterns('*.lock', '.#lk*', 'S.gpg-agent*', 'S.dirmngr'))
-    subprocess.run(['chown', '-R', f'{account.pw_uid}:{account.pw_gid}', str(destination)], check=True)
+    live = ['setpriv', '--reuid=' + str(account.pw_uid), '--regid=' + str(account.pw_gid),
+            '--clear-groups', '--reset-env', 'env', 'HOME=' + str(HOME), 'GNUPGHOME=' + str(original)]
+    installed = ['chroot', str(target), 'setpriv', '--reuid=' + BUILDER, '--regid=' + BUILDER,
+                 '--init-groups', '--reset-env', 'env', 'HOME=' + str(HOME), 'GNUPGHOME=' + str(HOME / '.gnupg')]
+    try:
+        public = subprocess.run(live + ['gpg', '--batch', '--export'], check=True, capture_output=True).stdout
+        if public:
+            subprocess.run(installed + ['install', '-d', '-m', '0700', str(HOME / '.gnupg')], check=True)
+            subprocess.run(installed + ['gpg', '--batch', '--import'], input=public, check=True)
+    finally:
+        for command in (live, installed):
+            subprocess.run(command + ['gpgconf', '--kill', 'all'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+if __name__ == '__main__':
+    if len(sys.argv) != 3 or sys.argv[1] != 'preserve':
+        raise SystemExit('usage: locachy_install_keys.py preserve TARGET')
+    preserve(Path(sys.argv[2]))

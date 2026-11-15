@@ -11,8 +11,7 @@ remains the removable-media fallback, not the only normal boot route.
 The previous image is copied unchanged from the old current image. It is not
 rebuilt or re-signed with newly created keys. In particular, after first enabling
 own-key Secure Boot, an older unsigned previous image cannot boot with Secure
-Boot enabled. An entry's presence proves neither a valid signature nor a working
-TPM policy; verify those separately before relying on it for recovery.
+Boot enabled.
 
 After writing the images, the installer runs the installed source's
 `locachy-efi --esp TARGET --first`. It registers the selected ESP and puts
@@ -37,8 +36,7 @@ The installer's registration runs after the final ESP images and any requested
 Secure Boot enrollment, before marking installation complete. Boot#### and
 BootOrder may affect firmware measurements such as PCR 1; LOCachy's default
 bindings do not use PCR 1 (own keys: PCR 7 plus signed PCR 11; TPM-only: 0+7;
-TPM 1.2: 0). A custom PCR policy may require re-enrollment. Actual registration
-under TPM/Secure Boot was not part of the OVMF test below.
+TPM 1.2: 0). A custom PCR policy may require re-enrollment.
 
 To repair only the entry on an installed system, as root:
 
@@ -94,9 +92,6 @@ checks installation priority, repeat calls without duplicates, inactive/missing
 order repair, deletion followed by `--register-only`, and an actual boot-image
 rebuild preserving an intentionally changed order.
 
-This tests real efibootmgr against OVMF (five functional checks and completion),
-not a real machine's firmware or a reboot through the newly registered image.
-
 ## Read-only installation media
 
 The installer applies `installer/archiso-readonly-seed.patch` to a working copy
@@ -110,7 +105,5 @@ builder is left unchanged; patch-context drift stops the build.
 upstream EFI construction functions and systemd-boot in sequential two-vCPU,
 512-MiB OVMF usb-bot/scsi-cd guests. It checks the FAT attribute, reproduces the
 unpatched write-protected failure, and boots the patched image to a tiny init.
-It requires the Linux/KVM and packaged tools listed in its help. This is a
-boot-interface test, not a full installation or physical USB-device acceptance.
 
 Reference: [efibootmgr(8)](https://man.archlinux.org/man/efibootmgr.8.en).

@@ -2,125 +2,23 @@
 
 [English](SNAPPING.md)
 
-## 报告、复现原因和修复
+## 拖窗跨屏边缘停留
 
-用户报告的**不是**外边缘分屏，也不是能否把指针精确停在两屏交界后松手。正常
-拖窗时，指针直接越过屏幕交界，无法顶住边缘选择半屏分屏。之前的 174 项精确
-坐标几何检查没有测试这个问题，不能再用它们声称该问题已验收。
+上游 labwc 的 `screenEdgeStrength` 仅对窗口矩形边缘施加阻力，不在屏幕交界处拦住光标。`pkgbuilds/labwc-locachy/inner-edge-hold.patch` 在交互式移动浮动窗口时提供内边缘停留：
 
-已在 labwc 0.20.2、三个真实无头输出上用连续相对指针运动复现。两处屏幕交界的
-四个方向，无论合成器标题栏还是客户端标题栏，都无法顶住。未打修复补丁时，
-同一份最终测试为 **21 PASS、53 FAIL**（`INNER_EDGE_FAILURES=53`），包含下文补充的
-纵向、混合缩放和生命周期检查。
-
-上游的 `screenEdgeStrength` 只给**窗口矩形**的边缘施加阻力，不会把指针挡在
-内边缘的分屏触发点。`snapping/range/inner` 只识别指针当前坐标，预览延迟只影响
-提示出现时间，都不能挡住连续指针运动。对应上游代码是 `resistance.c` 的
-`resistance_move_apply`、`input/cursor.c` 的 `preprocess_cursor_motion`，以及
-`interactive.c` 的 `edge_from_cursor`。
-
-跟踪配方中的 `pkgbuilds/labwc-locachy/inner-edge-hold.patch` 在合成器层补上这个
-行为，不使用单机补丁：
-
-- 仅在交互式移动浮动窗口时，指针试图跨过真正相邻的输出边缘，会在原屏幕一侧
-  停留 750 毫秒。
-- 超过该有限阻力时间后继续拖动，即可穿过交界。反向退回立即取消停留；停留期间
-  松手，走 labwc 原来的半屏吸附。原有的 500 毫秒预览有时间出现。
-- 普通指针移动和交互式调整大小不受影响。外边缘仍使用原有输出布局约束；不相邻
-  的屏幕或布局空隙不会产生虚假的内边缘。
-- 补丁的上游文档说明 `<snapping><innerEdgeHold>750</innerEdgeHold></snapping>`；
-  设零关闭，且要求内边缘吸附范围非零。不写入新的单机配置。
-
-配方适配器在原有剪贴板闸门补丁之后应用此小补丁，要求零 fuzz。不可变输入清单和
-补丁版本已更新，正常 Check/Apply 会重编并验证跟踪的稳定包。行为合约编号为
-`labwc-clipboard-corner-drop-v4`，同时包含内边缘拖窗吸附和下文的热角行为，不再复用只检查剪贴板的旧合约。
-
-## 连续运动验收
-
-在一次性 Linux 测试根中指定候选合成器：
-
-```sh
-LOCACHY_TEST_LABWC=/absolute/path/to/candidate-labwc \
-  bash tools/test-snapping.sh /absolute/new/inner-result --inner-edge
-```
-
-测试编译当前 LOCachy 顶栏和屏幕控制器，通过真实控制器配置三个并排的 1280x720
-输出。虚拟指针重复发送**相对**运动，而不是抵达精确坐标后松手。针对两处交界的
-各自两个方向、SSD 和 CSD 客户端分别检查：
-
-1. 连续推向交界能被顶住：额外输入 150 像素后，截图中的拖动抓取点仍在交界。
-2. 松手之前，原屏幕一侧实际出现分屏预览轮廓。
-3. 松手后吸附到原屏幕一侧的半屏区域。
-4. 有意超过有限停留时间后继续拖动，能跨到相邻屏幕。
-5. 不拖窗时普通指针立即穿过相同交界，用接收客户端的指针事件验证。
-
-额外的小范围检查包括纵向交界双向、缩放 1/1.5 交界双向、立即退回取消后在同一
-窗口重新拖动、关闭 `innerEdgeHold`，以及一个跨过两处交界的 1900 像素事件
-（必须停在第一处）。错位相邻屏幕的斜向测试复现了原型的端点检查错误：运动线段
-穿过共享边界，但终点已经离开共享区间。补丁现在求运动线段与边界的交点并停在
-交点，不再仅检查终点。
-
-同时应用剪贴板和内边缘补丁的版本通过全部 74 项检查（零失败），而不带内边缘补丁的原版 labwc 在同一套测试中有 53 项失败。
-
-这验证了无头隔离环境中的合成器行为，物理指针加速和交互式调整大小仍需在实体设备上单独确认。合约在未安装可选 Rime 模块时也能编译顶栏；启用和未启用 Rime 的构建均通过全部 74 项检查。
-
-## 独立的精确目标几何回归
-
-```sh
-LOCACHY_TEST_LABWC=/absolute/path/to/candidate-labwc \
-  bash tools/test-snapping.sh /absolute/new/geometry-result
-```
-
-测试使用双输出或三输出私有无头合成器、真实输出管理、当前编译的顶栏及其预留
-区域和可调整大小的窗口。真实输入设备不可见，不打开 uinput 或物理显示器。
-日志和截图（`.ppm.gz`）保留在结果目录。
-
-矩阵包括四种双屏布局（横向、缩放 1/1.5、负 X、负 Y 纵向），以及三屏横向和
-三屏混合缩放 1/1.5/1.25。在每个输出上分别拖动 SSD、CSD 窗口到左、右、下、上、
-左上、右下。测试会有意越过短暂阻力抵达最终坐标；它**不是**连续顶边测试。
-
-输出状态回读、xdg-shell 尺寸和吸附/最大化状态、截图像素必须一致。客户端矩形
-只能出现在目标输出，扣除装饰和顶栏后必须符合指定分屏区域。
-带补丁版本通过全部 174 项检查（168 次拖动、6 次输出回读），其中两种三屏布局占 72 次拖动和 2 次配置检查。
+- 交互式拖动浮动窗口跨过相邻屏幕交界时，光标在原屏幕边缘停留 750 毫秒（`<snapping><innerEdgeHold>750</innerEdgeHold></snapping>`；设为 `0` 关闭）。
+- 停留期间松手触发原屏幕的半屏分屏；继续推动超过 750 毫秒穿过交界进入相邻屏幕；反向拉回立即取消停留。
+- 普通指针移动和调整窗口大小不受影响。
 
 ## 多屏交界处的概览热角
 
-左上角触发概览是另一个缺陷。顶栏本来已经使用各自表面的局部逻辑坐标，但要求指针
-在一个像素的角落里持续发出负方向相对运动。内部交界没有阻挡，指针在 75 毫秒的
-触发尝试结束前就跑到相邻屏幕了。原注释声称这与 KWin 一样并不正确：KWin 的
-`ElectricBorderAllScreenCorner` 默认开启。
+`pkgbuilds/labwc-locachy/corner-edge-hold.patch` 在指针斜向接近屏幕左上角 30 逻辑像素内的上／左边界时停留至多 350 毫秒，使顶栏 75 毫秒的左上角概览热角在共享屏幕交界处同样能够触发。纯水平或纯垂直移动仅在 1 像素触发角捕获；拖窗、调整大小、按键拖拽和全屏窗口覆盖时不受影响。
 
-新增 `corner-edge-hold.patch` 在未改动的 `inner-edge-hold.patch` 之后应用，补上
-必要的合成器配合。仅当指针斜向接近、运动线段从屏幕内部跨过上/左边界，且交点位于
-左上角 30 个逻辑像素之内时，才会在这两条边界停留至多 350 毫秒；纯水平或纯垂直
-接近则仅在另一条边的一个触发像素上捕获，不会拦截整个 30 像素邻域。另一个方向的运动
-仍可抵达一个像素的触发角。角落的实际命中表面必须是顶栏，被全屏窗口覆盖的角落
-不会暗中被预留。普通水平/垂直穿越、拖窗、调整大小、按键拖动以及远离角落的运动
-都直接通过。反向立刻取消；到期后放行，并在离开角落区域前不重新捕获，避免困住指针。
-
-顶栏的 75 毫秒尝试和 275 毫秒安静期改成**每屏独立**，不再跨屏串状态；离开或销毁
-该顶栏会清掉未完成的尝试。坐标始终是逻辑坐标，负坐标布局和分数缩放不改变局部
-触发位置。不增加空闲计时器或周期性指针轮询。
+## 测试
 
 ```sh
-bash tools/test-bar-corner.sh /absolute/new/corner-unit
-LOCACHY_TEST_LABWC=/absolute/path/to/candidate-labwc \
-  bash tools/test-snapping.sh /absolute/new/corner-result --corner
+bash tools/test-bar-corner.sh /tmp/locachy-corner-unit
+LOCACHY_TEST_LABWC=/path/to/labwc bash tools/test-snapping.sh /tmp/locachy-inner --inner-edge
+LOCACHY_TEST_LABWC=/path/to/labwc bash tools/test-snapping.sh /tmp/locachy-corner --corner
+LOCACHY_TEST_LABWC=/path/to/labwc bash tools/test-snapping.sh /tmp/locachy-geometry
 ```
-
-第一条不需要显示器，直接执行生产用状态机。第二条在私有无头合成器上使用真实顶栏
-表面和虚拟相对指针输入，仅把概览可执行程序换成请求标记。16 项检查包括外角、左右/
-上下共享角、快速斜向跨越、缓慢亚像素输入、沿触发边纯水平/垂直接近、反向取消、普通
-穿越、持续推动冷却、350 毫秒后实际越屏、重入、负坐标和 1.5 倍缩放。不带新角落补丁的
-合成器在同一套测试中有 7 项失败；候选全部 16 项通过。原来的 74 项内边缘吸附测试也全部通过。这些是
-无头合成器检查，不是物理指针或真显示器验收。
-
-## 上游依据
-
-- [labwc-config(5)](https://labwc.github.io/labwc-config.5.html)
-- [0.20.2 interactive.c](https://github.com/labwc/labwc/blob/0.20.2/src/interactive.c)
-- [0.20.2 input/cursor.c](https://github.com/labwc/labwc/blob/0.20.2/src/input/cursor.c)
-- [0.20.2 resistance.c](https://github.com/labwc/labwc/blob/0.20.2/src/resistance.c)
-- [0.20.2 view.c](https://github.com/labwc/labwc/blob/0.20.2/src/view.c)
-- [上游问题 2602](https://github.com/labwc/labwc/issues/2602) 把默认识别范围从 1 增至
-  10，但没有增加指针停留阻力。

@@ -19,7 +19,7 @@
  *   find the selection   Ctrl+G go to line   Ctrl+D, Ctrl+Shift+D, Ctrl+/: comment,
  *   uncomment, toggle   Ctrl+I, Ctrl+Shift+I: indent   Ctrl+K delete line
  *   Ctrl+6, Ctrl+Shift+6: the matching bracket   Insert: overwrite
- *   F10 dynamic word wrap, F11 line numbers (Kate's handbook; its code has none)
+ *   View menu: dynamic word wrap, line numbers
  *   F6 the icon border (a click on it sets or clears the line's bookmark)
  *   Ctrl+Alt+O Quick Open   Ctrl+Tab, Ctrl+Shift+Tab: the last used documents
  *   Alt+Up, Alt+Down: the previous, next document of the Documents list
@@ -29,7 +29,7 @@
  * selection, the wheel scrolls; tabs, the tree and the buttons click.
  *
  * Ctrl+Space (Kate: code completion) is the system's input method key, and
- * Ctrl+Alt+Esc process 1's: neither reaches edit.
+ * Super+Esc process 1's: neither reaches edit.
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -410,18 +410,24 @@ static const struct ui_help_line edit_help[] = {
     { "Ctrl+N, Ctrl+O, Ctrl+S", N_("New, open, save") },
     { "Ctrl+Shift+S, Ctrl+L", N_("Save as; save all") },
     { "F5", N_("Reload the document") },
-    { "Ctrl+W, Ctrl+Q", N_("Close the document; quit (asks about changes)") },
-    { "Ctrl+Z, Ctrl+Shift+Z", N_("Undo, redo") },
-    { "Ctrl+X, Ctrl+C, Ctrl+V", N_("Cut, copy, paste") },
-    { "Ctrl+A, Ctrl+Shift+A", N_("Select all; deselect") },
-    { "Ctrl+F, F3, Shift+F3", N_("Find; the next, the previous match") },
+    { "Ctrl+W", N_("Close the document (asks about changes)") },
+    { "Ctrl+Shift+A", N_("Deselect") },
     { "Ctrl+R, Ctrl+Shift+F", N_("Replace; find in files") },
-    { "Ctrl+G, Ctrl+D, Ctrl+/", N_("Go to a line; comment; toggle the comment") },
+    { "Ctrl+H, Ctrl+Shift+H", N_("Find the selection forwards, backwards") },
+    { "Ctrl+G, Ctrl+6, Ctrl+Shift+6", N_("Go to a line; matching bracket, select to it") },
+    { "Ctrl+D, Ctrl+Shift+D, Ctrl+/", N_("Comment, uncomment, toggle comment") },
+    { "Ctrl+I, Ctrl+Shift+I, Ctrl+K", N_("Indent, unindent; delete the line") },
+    { "Ctrl+B, Alt+PgUp, Alt+PgDn, F6", N_("Toggle, previous, next bookmark; icon border") },
     { "Ctrl+Shift+[, Ctrl+Shift+]", N_("Fold, unfold the top level") },
+    { "Ctrl+Shift+B, Ctrl+Alt+Up/Down, Shift+Alt+I", N_("Block selection; carets above/below, at line ends") },
+    { "Alt+J, Ctrl+Alt+Shift+J, Alt+K", N_("Add next, all, skip occurrence") },
+    { "Ctrl+Shift+L, Ctrl+Shift+R, F8, Shift+F8", N_("Split vertical, close split, next/previous split") },
+    { "Ctrl+Alt+O, Ctrl+Alt+Shift+F", N_("Quick Open; toggle sidebars") },
+    { "Ctrl+PgDn, Ctrl+PgUp, Alt+Left/Right, Alt+1..0", N_("Next, previous, Nth tab") },
+    { "Ctrl+Tab, Alt+Up, Alt+Down", N_("Documents list; previous, next document") },
     { "Ctrl+=, Ctrl+-, Ctrl+0", N_("Zoom in, out, to 100%") },
-    { "Ctrl+PgDn, Ctrl+PgUp", N_("Next, previous document") },
-    { "Ctrl+Tab", N_("The documents list") },
-    { "Ctrl+., F12, Shift+F12", N_("Code actions; definition, declaration") },
+    { "Ctrl+., F12, Shift+F12, Ctrl+F2", N_("Code actions; definition, declaration; rename symbol") },
+    { "Ctrl+Alt+Space, Ctrl+Alt+K", N_("Code completion; Language Server menu") },
     { "Shift+F10", N_("The Edit menu") },
     { "Alt+F", N_("The File menu; the other menus by their letters") },
     { NULL, NULL },

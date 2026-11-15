@@ -125,10 +125,11 @@
     "default_wizard": false
   },
   "extdisplay": {
-    "description": "Extended display receiver: a sender's extra screen over a Thunderbolt/USB4 cable, decoded with FFmpeg",
+    "description": "Extended display receiver over Thunderbolt/USB4 networking, with automatic discovery and FFmpeg decoding",
     "packages": [
       "ffmpeg",
-      "json-c"
+      "json-c",
+      "avahi"
     ],
     "rc": {
       "program_extdisplay": "/usr/local/bin/extdisplay"

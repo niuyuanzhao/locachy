@@ -39,6 +39,3 @@ home 不再把 files 切回按第一屏绘制的镜像模式。
 - `tools/test-files.sh`：文件浏览与操作，以及原生不同尺寸字符格布局、逐屏命中、
   缩放指针坐标转换、框选跨屏、真实浏览循环的 `K_SHOWN` 处理、镜像/原生模式切换；
   普通和 AddressSanitizer/UndefinedBehaviorSanitizer 构建。
-
-这些设备无关检查与真实 KMS/显示器验收分开。它们不代表已经支持输出旋转：
-当前显示器配置保存模式、缩放和位置，没有旋转变换字段。

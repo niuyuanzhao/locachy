@@ -115,6 +115,26 @@ else
     LOCACHY_SOURCE="bundled: $why"
     entry=$bundled
 fi
+# A development medium may contain explicitly recorded local fixes over the
+# fetched commit. Keep those bytes for that exact revision, visibly; a newer
+# remote commit still wins. Never turn repository updates off implicitly.
+if [ -z "$why" ] && python3 -I - "$origin" "$fetched" "$repo" "$branch" <<'PY'
+import json, subprocess, sys
+try:
+    with open(sys.argv[1], encoding='utf-8') as stream:
+        medium = json.load(stream)
+    commit = subprocess.check_output(['git', '-C', sys.argv[2], 'rev-parse', 'HEAD'], text=True).strip()
+    same = (medium.get('source_changed') is True and medium.get('repo') == sys.argv[3]
+            and medium.get('branch') == sys.argv[4] and medium.get('commit') == commit)
+except (OSError, ValueError, subprocess.SubprocessError):
+    same = False
+raise SystemExit(0 if same else 1)
+PY
+then
+    LOCACHY_SOURCE="bundled: local changes over the fetched commit"
+    entry=$bundled
+    echo "Source: keeping this medium's recorded local changes over the same fetched commit" >&2
+fi
 export LOCACHY_SOURCE
 
 why= now=0

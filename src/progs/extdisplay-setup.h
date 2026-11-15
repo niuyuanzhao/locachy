@@ -2,8 +2,9 @@
  * extdisplay's end of the broker's control socket (tools/EXTDISPLAY.md): a SOCK_SEQPACKET
  * channel of ASCII lines, one per message, at most EXTDISPLAY_SETUP_LINE bytes.
  *
- *   extdisplay -> broker   scan | pair NAME | cancel | release
- *   broker -> extdisplay   iface NAME DRIVER CARRIER ... end      (after scan)
+ *   extdisplay -> broker   scan | watch | pair NAME [INDEX ADDRESS] | cancel | release
+ *   broker -> extdisplay   iface NAME DRIVER CARRIER [INDEX ADDRESS] ... end
+ *                   changed, preparing NAME carrier|address|discovery|listener
  *                   lease NAME LINKLOCAL PORT, code GROUPS (after pair)
  *                   error TEXT
  *                   paired      with exactly one SCM_RIGHTS stream
@@ -37,6 +38,8 @@ enum extdisplay_setup_state {
 enum extdisplay_setup_event {
     EXTDISPLAY_SETUP_EV_NONE,    /* nothing (yet), or a line that changes nothing shown */
     EXTDISPLAY_SETUP_EV_LIST,    /* the scan is complete */
+    EXTDISPLAY_SETUP_EV_CHANGED, /* subscribed candidates changed; rescan when idle */
+    EXTDISPLAY_SETUP_EV_PROGRESS,/* carrier/address/discovery preparation changed */
     EXTDISPLAY_SETUP_EV_CODE,    /* lease and code are there to show */
     EXTDISPLAY_SETUP_EV_ERROR,   /* the pair was refused: error[] */
     EXTDISPLAY_SETUP_EV_PAIRED,  /* stream is the plaintext stream, now the caller's */
@@ -47,13 +50,16 @@ enum extdisplay_setup_event {
 struct extdisplay_iface {
     char name[EXTDISPLAY_SETUP_NAME], driver[33];
     int carrier; /* 1 up, 0 down */
+    int ifindex; /* watch snapshots bind a choice to its kernel identity */
+    char address[96]; /* permanent hardware address; empty for a legacy scan */
 };
 
 struct extdisplay_setup {
     int fd;
     enum extdisplay_setup_state state;
     struct extdisplay_iface ifaces[EXTDISPLAY_SETUP_IFACES];
-    int count, scanned;
+    int count, scanned, scanning, watching, changed;
+    char progress[16]; /* carrier, address, discovery or listener */
     char pairing[EXTDISPLAY_SETUP_NAME];  /* the interface asked for */
     char linklocal[65], port[8], code[65]; /* shown while waiting; wiped after */
     char reason[24], error[201];
@@ -63,6 +69,11 @@ struct extdisplay_setup {
 void extdisplay_setup_init(struct extdisplay_setup *s, int fd);
 /* 0, or -1 when not allowed in this state or not sent. */
 int extdisplay_setup_scan(struct extdisplay_setup *s);
+/* Subscribe before taking the first snapshot; changes are coalesced until
+ * the caller asks for another scan. Does not auto-pair by itself. */
+int extdisplay_setup_watch(struct extdisplay_setup *s);
+/* Index of the only candidate, or the only one with carrier, otherwise -1. */
+int extdisplay_setup_automatic(const struct extdisplay_setup *s);
 int extdisplay_setup_pair(struct extdisplay_setup *s, const char *name);
 int extdisplay_setup_cancel(struct extdisplay_setup *s);
 int extdisplay_setup_release(struct extdisplay_setup *s);

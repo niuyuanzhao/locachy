@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-12 18:28-0500\n"
+"POT-Creation-Date: 2026-11-14 16:00-0500\n"
 "PO-Revision-Date: 2026-11-09 14:16+0000\n"
 "Last-Translator: LOCachy\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -58,7 +58,7 @@ msgstr "下一个或上一个字段"
 msgid "Copy, cut, paste"
 msgstr "复制、剪切、粘贴"
 
-#: base/help.c progs/edit.c
+#: base/help.c
 msgid "Undo, redo"
 msgstr "撤销、重做"
 
@@ -558,6 +558,12 @@ msgstr "提问时：y 是；n、Esc 或 Enter 否"
 #: progs/settings.c
 msgid "In a line you type: select all, the start, the end"
 msgstr "输入行中：全选、行首、行尾"
+
+#: progs/archive.c progs/installer.c
+msgid ""
+"In a line you type: delete the word before the cursor, to the start, to the "
+"end"
+msgstr "输入行中：删除光标前的词、删到行首、删到行尾"
 
 #: progs/archive.c
 msgid "Archive keys"
@@ -1375,7 +1381,7 @@ msgstr "关闭"
 msgid "Close All"
 msgstr "全部关闭"
 
-#: progs/edit-actions.inc progs/view.c
+#: progs/edit-actions.inc progs/extdisplay.c progs/view.c
 msgid "Quit"
 msgstr "退出"
 
@@ -1451,7 +1457,7 @@ msgstr "向后查找所选内容"
 msgid "Select All"
 msgstr "全选"
 
-#: progs/edit-actions.inc
+#: progs/edit-actions.inc progs/edit.c
 msgid "Deselect"
 msgstr "取消选择"
 
@@ -2077,10 +2083,8 @@ msgstr "未知错误"
 
 #: progs/edit-language.inc
 #, c-format
-msgid ""
-"Language server '%s' is not installed. Configure an existing server; no "
-"server is installed automatically."
-msgstr "未安装语言服务器“%s”。请配置现有服务器；系统不会自动安装服务器。"
+msgid "Language server '%s' is not installed."
+msgstr "语言服务器“%s”未安装。"
 
 #: progs/edit-language.inc
 #, c-format
@@ -3001,48 +3005,72 @@ msgid "Reload the document"
 msgstr "重新加载文档"
 
 #: progs/edit.c
-msgid "Close the document; quit (asks about changes)"
-msgstr "关闭文档；退出（有更改时询问）"
-
-#: progs/edit.c
-msgid "Cut, copy, paste"
-msgstr "剪切、复制、粘贴"
-
-#: progs/edit.c
-msgid "Select all; deselect"
-msgstr "全选；取消选择"
-
-#: progs/edit.c progs/view.c
-msgid "Find; the next, the previous match"
-msgstr "查找；下一个、上一个匹配"
+msgid "Close the document (asks about changes)"
+msgstr "关闭文档（有更改时询问）"
 
 #: progs/edit.c
 msgid "Replace; find in files"
 msgstr "替换；在文件中查找"
 
 #: progs/edit.c
-msgid "Go to a line; comment; toggle the comment"
-msgstr "转到行；注释；切换注释"
+msgid "Find the selection forwards, backwards"
+msgstr "向前、向后查找所选内容"
+
+#: progs/edit.c
+msgid "Go to a line; matching bracket, select to it"
+msgstr "转到行；转到或选至匹配括号"
+
+#: progs/edit.c
+msgid "Comment, uncomment, toggle comment"
+msgstr "注释、取消注释、切换注释"
+
+#: progs/edit.c
+msgid "Indent, unindent; delete the line"
+msgstr "缩进、取消缩进；删除当前行"
+
+#: progs/edit.c
+msgid "Toggle, previous, next bookmark; icon border"
+msgstr "切换、上一个、下一个书签；图标边栏"
 
 #: progs/edit.c
 msgid "Fold, unfold the top level"
 msgstr "折叠、展开顶层节点"
 
-#: progs/edit.c progs/view.c
+#: progs/edit.c
+msgid "Block selection; carets above/below, at line ends"
+msgstr "块选择；在上方／下方、行尾添加光标"
+
+#: progs/edit.c
+msgid "Add next, all, skip occurrence"
+msgstr "添加下一个、全部匹配项，跳过当前项"
+
+#: progs/edit.c
+msgid "Split vertical, close split, next/previous split"
+msgstr "左右分屏、关闭分屏、下一／上一分屏"
+
+#: progs/edit.c
+msgid "Quick Open; toggle sidebars"
+msgstr "快速打开；切换侧边栏"
+
+#: progs/edit.c
+msgid "Next, previous, Nth tab"
+msgstr "下一个、上一个、第 N 个标签页"
+
+#: progs/edit.c
+msgid "Documents list; previous, next document"
+msgstr "文档列表；上一个、下一个文档"
+
+#: progs/edit.c
 msgid "Zoom in, out, to 100%"
 msgstr "放大、缩小、缩放至 100%"
 
 #: progs/edit.c
-msgid "Next, previous document"
-msgstr "下一个、上一个文档"
+msgid "Code actions; definition, declaration; rename symbol"
+msgstr "代码操作；转到定义、声明；重命名符号"
 
 #: progs/edit.c
-msgid "The documents list"
-msgstr "文档列表"
-
-#: progs/edit.c
-msgid "Code actions; definition, declaration"
-msgstr "代码操作；转到定义、声明"
+msgid "Code completion; Language Server menu"
+msgstr "代码补全；语言服务器菜单"
 
 #: progs/edit.c
 msgid "The Edit menu"
@@ -3633,27 +3661,8 @@ msgid "Unavailable"
 msgstr "不可用"
 
 #: progs/extdisplay.c
-msgid "A paired dedicated-link transport is required."
-msgstr "需要经过配对的专线传输。"
-
-#: progs/extdisplay.c
-msgid "Extended display"
-msgstr "扩展屏"
-
-#: progs/extdisplay.c
-#, c-format
-msgid "Status: %s    Stream: %ux%u"
-msgstr "状态：%s    画面：%ux%u"
-
-#: progs/extdisplay.c
-msgid ""
-"Ctrl+Alt+F12: disconnect    Home, lock and brightness stay local; the link "
-"stays up"
-msgstr "Ctrl+Alt+F12：断开    主页、锁屏和亮度留在本机；链路保持连接"
-
-#: progs/extdisplay.c
-msgid "No clipboard, files or commands. The peer keeps its original screen."
-msgstr "不传剪贴板、文件或命令。对端保留原有屏幕。"
+msgid "Waiting for the sender."
+msgstr "正在等待发送端。"
 
 #: progs/extdisplay.c
 msgid "Disconnected"
@@ -3676,10 +3685,6 @@ msgid "Active"
 msgstr "已连接"
 
 #: progs/extdisplay.c
-msgid "Extended-only sender over the paired dedicated link."
-msgstr "仅作扩展屏的发送端，经配对专线连接。"
-
-#: progs/extdisplay.c
 msgid "The decoder sent an invalid picture."
 msgstr "解码器送来了无效画面。"
 
@@ -3692,28 +3697,24 @@ msgid "The sender handshake or the stream failed."
 msgstr "与发送端的握手或画面流失败。"
 
 #: progs/extdisplay.c
-msgid "No managed session owner: remote input stays disabled."
-msgstr "没有受管的会话所有者：远端输入保持关闭。"
+msgid "No session control channel."
+msgstr "无会话控制通道。"
 
 #: progs/extdisplay.c
-msgid "The transport is not a paired local stream from the broker."
-msgstr "传输不是中转进程交来的已配对本地流。"
+msgid "The transport is not a local stream from the broker."
+msgstr "传输通道不是来自中转进程的本地流。"
 
 #: progs/extdisplay.c
 msgid "The session owner did not accept this session."
 msgstr "会话所有者未接受此会话。"
 
 #: progs/extdisplay.c
-msgid "The decoder worker could not be started safely."
-msgstr "无法安全启动解码工作进程。"
+msgid "The decoder worker could not be started."
+msgstr "无法启动解码工作进程。"
 
 #: progs/extdisplay.c
 msgid "Connecting"
 msgstr "正在连接"
-
-#: progs/extdisplay.c
-msgid "Waiting for the sender's capabilities."
-msgstr "正在等待发送端报告其能力。"
 
 #: progs/extdisplay.c
 msgid "The session owner has gone."
@@ -3731,10 +3732,6 @@ msgstr "无法送达远端输入。"
 msgid "The sender handshake timed out."
 msgstr "与发送端握手超时。"
 
-#: progs/extdisplay.c
-msgid "Disconnected with Ctrl+Alt+F12; extdisplay stays open."
-msgstr "已用 Ctrl+Alt+F12 断开；extdisplay 保持打开。"
-
 #: progs/extdisplay.c progs/settings-power.inc
 msgid "Idle"
 msgstr "空闲"
@@ -3744,12 +3741,28 @@ msgid "Scanning"
 msgstr "正在扫描"
 
 #: progs/extdisplay.c
-msgid "Choose an interface"
-msgstr "选择接口"
+msgid "Ready to connect"
+msgstr "可以连接"
 
 #: progs/extdisplay.c
-msgid "Asking the broker for a code"
-msgstr "正在向中转进程获取配对码"
+msgid "Waiting for a Thunderbolt/USB4 network"
+msgstr "正在等待雷电／USB4 网络"
+
+#: progs/extdisplay.c
+msgid "Waiting for the cable link"
+msgstr "正在等待线缆链路"
+
+#: progs/extdisplay.c
+msgid "Preparing the link-local address"
+msgstr "正在准备链路本地地址"
+
+#: progs/extdisplay.c
+msgid "Making the receiver discoverable"
+msgstr "正在发布接收端发现服务"
+
+#: progs/extdisplay.c
+msgid "Preparing the connection"
+msgstr "正在准备连接"
 
 #: progs/extdisplay.c
 msgid "Waiting for the Mac to connect"
@@ -3781,47 +3794,49 @@ msgid "Unknown"
 msgstr "未知"
 
 #: progs/extdisplay.c
-msgid "Choose the cable interface to pair with the Mac."
-msgstr "选择用于与 Mac 配对的线缆接口。"
+msgid "Extended display"
+msgstr "扩展屏"
 
 #: progs/extdisplay.c
-msgid "Scanning..."
-msgstr "正在扫描……"
+msgid "Connect a Thunderbolt/USB4 link to the Mac."
+msgstr "请连接通往 Mac 的雷电／USB4 线缆。"
 
 #: progs/extdisplay.c
-msgid "No cable interface found. Connect the cable, then press F5."
-msgstr "未找到线缆接口。请连接线缆后按 F5。"
+msgid "link ready"
+msgstr "链路已就绪"
+
+#: progs/extdisplay.c
+msgid "waiting for link"
+msgstr "等待链路"
+
+#: progs/extdisplay.c
+msgid "Looking for a Thunderbolt/USB4 network..."
+msgstr "正在查找雷电／USB4 网络……"
+
+#: progs/extdisplay.c
+msgid "Waiting for a Thunderbolt/USB4 network."
+msgstr "正在等待雷电／USB4 网络。"
 
 #: progs/extdisplay.c
 msgid "carrier up"
 msgstr "已连接网线"
 
-#: progs/extdisplay.c progs/rescue.c
-msgid "no carrier"
-msgstr "未连接网线"
+#: progs/extdisplay.c
+msgid "waiting for carrier"
+msgstr "等待载波"
+
+#: progs/extdisplay.c
+msgid "identity unavailable"
+msgstr "身份不可用"
+
+#: progs/extdisplay.c
+msgid "Waiting for the Mac service to connect automatically..."
+msgstr "正在等待 Mac 端自动连接……"
 
 #: progs/extdisplay.c
 #, c-format
-msgid "Address  %s     Port  %s"
-msgstr "地址  %s     端口  %s"
-
-#: progs/extdisplay.c
-#, c-format
-msgid "Code     %s"
-msgstr "配对码   %s"
-
-#: progs/extdisplay.c
-#, c-format
-msgid ""
-"On the Mac: locachy-macos-sender --interface <mac-interface> --address %s --"
-"port %s"
-msgstr ""
-"在 Mac 上运行：locachy-macos-sender --interface <mac-interface> --address %s "
-"--port %s"
-
-#: progs/extdisplay.c
-msgid "Asking the broker for an address and a code..."
-msgstr "正在向中转进程获取地址和配对码……"
+msgid "Interface %s   Address %s   Port %s"
+msgstr "接口 %s   地址 %s   端口 %s"
 
 #: progs/extdisplay.c
 #, c-format
@@ -3837,33 +3852,36 @@ msgid "The cable was unplugged. Press any key to close."
 msgstr "线缆已拔出。按任意键关闭。"
 
 #: progs/extdisplay.c
-msgid ""
-"Up/Down choose   Enter pair   Esc cancel   F5 scan   F1 help   Ctrl+Q quit"
-msgstr "Up/Down 选择   Enter 配对   Esc 取消   F5 扫描   F1 帮助   Ctrl+Q 退出"
-
-#: progs/extdisplay.c
-msgid "The code and the address are kept in memory only."
-msgstr "配对码和地址只保存在内存中。"
+msgid "Enter connect   Esc cancel   F2 details   F1 help   Ctrl+Q quit"
+msgstr "Enter 连接   Esc 取消   F2 详情   F1 帮助   Ctrl+Q 退出"
 
 #: progs/extdisplay.c
 msgid "Choose the cable interface"
 msgstr "选择线缆接口"
 
 #: progs/extdisplay.c
-msgid "Pair with the Mac on it"
-msgstr "与该接口上的 Mac 配对"
+msgid "Connect the selected link"
+msgstr "连接选中的链路"
 
 #: progs/extdisplay.c
-msgid "Cancel the pairing"
-msgstr "取消配对"
+msgid "Cancel waiting"
+msgstr "取消等待"
 
 #: progs/extdisplay.c
-msgid "Look for cable interfaces again"
-msgstr "重新查找线缆接口"
+msgid "Show interface and address details"
+msgstr "显示接口和地址详情"
 
 #: progs/extdisplay.c
-msgid "Disconnect a session; extdisplay stays open"
-msgstr "断开会话；extdisplay 保持打开"
+msgid "Rescan cable interfaces"
+msgstr "重新扫描线缆接口"
+
+#: progs/extdisplay.c
+msgid "Help"
+msgstr "帮助"
+
+#: progs/extdisplay.c progs/files.c
+msgid "Home"
+msgstr "主文件夹"
 
 #: progs/extdisplay.c
 msgid "Extended display keys"
@@ -4151,18 +4169,18 @@ msgstr "不能向回收站粘贴：按 Delete 将项目移入回收站。"
 msgid "Items in the Trash are restored (r), not copied."
 msgstr "回收站中的项目请还原（r），不能复制。"
 
-#. TRANSLATORS: v is the key; keep it.
+#. TRANSLATORS: Ctrl+V is the key; keep it.
 #: progs/files.c
 #, c-format
-msgid "Cut %d item; v puts it in the folder shown."
-msgid_plural "Cut %d items; v puts them in the folder shown."
+msgid "Cut %d item; Ctrl+V puts it in the folder shown."
+msgid_plural "Cut %d items; Ctrl+V puts them in the folder shown."
 msgstr[0] "已剪切 %d 项；按 v 放入当前文件夹。"
 
-#. TRANSLATORS: v is the key; keep it.
+#. TRANSLATORS: Ctrl+V is the key; keep it.
 #: progs/files.c
 #, c-format
-msgid "Copied %d item; v puts it in the folder shown."
-msgid_plural "Copied %d items; v puts them in the folder shown."
+msgid "Copied %d item; Ctrl+V puts it in the folder shown."
+msgid_plural "Copied %d items; Ctrl+V puts them in the folder shown."
 msgstr[0] "已复制 %d 项；按 v 放入当前文件夹。"
 
 #: progs/files.c
@@ -4454,17 +4472,17 @@ msgstr "刷新"
 msgid "Search '%s' in %s"
 msgstr "在 %2$s 中搜索“%1$s”"
 
-#. TRANSLATORS: v is the key; keep it.
+#. TRANSLATORS: Ctrl+V is the key; keep it.
 #: progs/files.c
 msgid "   filter: "
 msgstr "   筛选: "
 
 #: progs/files.c
-msgid "   (copied: v pastes here)"
+msgid "   (copied: Ctrl+V pastes here)"
 msgstr "   （已复制：按 v 粘贴到此处）"
 
 #: progs/files.c
-msgid "   (cut: v moves here)"
+msgid "   (cut: Ctrl+V moves here)"
 msgstr "   （已剪切：按 v 移到此处）"
 
 #: progs/files.c
@@ -4474,10 +4492,6 @@ msgstr "搜索"
 #: progs/files.c
 msgid "Trash"
 msgstr "回收站"
-
-#: progs/files.c
-msgid "Home"
-msgstr "主文件夹"
 
 #: progs/files.c
 #, c-format
@@ -6300,6 +6314,40 @@ msgstr "主页快捷键"
 msgid "All of the log is selected: Ctrl+C copies it."
 msgstr "已选中整份日志：按 Ctrl+C 复制。"
 
+#: progs/installer-session.inc
+msgid ""
+"The package keys were not trusted; c will check them again before any target "
+"write."
+msgstr "软件包密钥尚未受信任；按 c 会在写入目标盘之前重新检查。"
+
+#: progs/installer-session.inc
+msgid "Updating the source and the installer..."
+msgstr "正在更新源码和安装器……"
+
+#: progs/installer-session.inc
+msgid "The source or installer could not be updated. The terminal shows why."
+msgstr "无法更新源码或安装器。终端中显示了原因。"
+
+#: progs/installer-session.inc
+msgid ""
+"The source or installer could not be updated. Nothing was continued; the "
+"terminal shows why."
+msgstr "无法更新源码或安装器，未继续任何操作；终端中显示了原因。"
+
+#: progs/installer-session.inc
+msgid ""
+"The installer was updated; the stopped target will be checked again before "
+"continuing."
+msgstr "安装器已更新；继续之前会重新检查已停止的安装目标。"
+
+#: progs/installer-session.inc
+msgid "Cannot preserve the installer choices for its update."
+msgstr "无法为安装器更新保留所选设置。"
+
+#: progs/installer-session.inc
+msgid "The updated installer could not start. The choices are kept; try again."
+msgstr "更新后的安装器无法启动。已保留所选设置，请重试。"
+
 #: progs/installer.c
 msgid "(no model name)"
 msgstr "（无型号名）"
@@ -6933,19 +6981,12 @@ msgid "From a step's page to the steps; from the steps to the start"
 msgstr "从步骤页面回到步骤列表；从步骤列表回到开始"
 
 #: progs/installer.c
-msgid ""
-"In a line you type, after Ctrl+A: copy or cut it (a password is never copied)"
-msgstr "输入行中，先按 Ctrl+A：复制或剪切（密码从不复制）"
+msgid "In a line you type, after Ctrl+A: copy or cut it"
+msgstr "输入行中，先按 Ctrl+A：复制或剪切"
 
 #: progs/installer.c
 msgid "In a line you type: paste"
 msgstr "输入行中：粘贴"
-
-#: progs/installer.c
-msgid ""
-"In a line you type: delete the word before the cursor, to the start, to the "
-"end"
-msgstr "输入行中：删除光标前的词、删到行首、删到行尾"
 
 #: progs/installer.c
 msgid "A terminal (a root shell)"
@@ -7123,6 +7164,18 @@ msgid "Nothing was written."
 msgstr "没有写入任何东西。"
 
 #: progs/installer.c
+msgid "Disk passphrase:"
+msgstr "磁盘口令："
+
+#: progs/installer.c
+msgid "Installed user's password:"
+msgstr "安装目标用户的密码："
+
+#: progs/installer.c
+msgid "A nonempty password and disk passphrase are needed to continue."
+msgstr "继续需要非空的用户密码和磁盘口令。"
+
+#: progs/installer.c
 msgid "Reboot now?"
 msgstr "现在重启？"
 
@@ -7145,10 +7198,6 @@ msgstr "根分区（格式化为 ext4）"
 #: progs/installer.c
 msgid "The swap partition (formatted)"
 msgstr "交换分区（会格式化）"
-
-#: progs/installer.c
-msgid "Disk passphrase:"
-msgstr "磁盘口令："
 
 #: progs/installer.c
 msgid "The same again:"
@@ -7197,6 +7246,17 @@ msgstr "多久后休眠（睡眠的秒数；留空：按系统默认）："
 #: progs/installer.c
 msgid "The whole output is selected: Ctrl+C copies it."
 msgstr "已选中全部输出：按 Ctrl+C 复制。"
+
+#: progs/installer.c
+msgid ""
+"The stopped installation record cannot be restored safely; nothing was "
+"continued."
+msgstr "无法安全恢复已停止的安装记录；未继续任何操作。"
+
+#: progs/installer.c
+msgid ""
+"The updated installer cannot restore the choices. Nothing was continued."
+msgstr "更新后的安装器无法恢复所选设置；未继续任何操作。"
 
 #: progs/lock.c
 msgid "Fingerprint"
@@ -7259,11 +7319,11 @@ msgstr "正在验证..."
 msgid "There is no user (uid 1000) to unlock for."
 msgstr "没有可解锁的用户 (uid 1000)。"
 
-#. TRANSLATORS: Ctrl+Alt+Esc is a key name; keep it.
+#. TRANSLATORS: Super+Esc is a key name; keep it.
 #: progs/note.c
 #, c-format
-msgid "note %s (pid %d): Ctrl+Alt+Esc for the menu"
-msgstr "note %s (pid %d): Ctrl+Alt+Esc: 菜单"
+msgid "note %s (pid %d): Super+Esc for the menu"
+msgstr "note %s (pid %d): Super+Esc 返回主菜单"
 
 #: progs/note.c
 #, c-format
@@ -8536,10 +8596,6 @@ msgid "Input is too long; nothing was added."
 msgstr "输入过长，未添加任何内容。"
 
 #: progs/rescue.c
-msgid "Secrets stay in this UI and the helper's stdin; never in argv or files."
-msgstr "口令只保留在本界面和后端标准输入中，不放入参数或文件。"
-
-#: progs/rescue.c
 msgid "Wait for the current operation, or Exit to stop it and clean up."
 msgstr "请等待当前操作，或选择退出以停止并清理。"
 
@@ -8605,10 +8661,13 @@ msgid "carrier present"
 msgstr "已连接网线"
 
 #: progs/rescue.c
+msgid "no carrier"
+msgstr "未连接网线"
+
+#: progs/rescue.c
 #, c-format
-msgid ""
-"Keyboard: %s (Rescue and its target terminal; system settings are unchanged)"
-msgstr "键盘：%s（用于救援及其目标终端，不更改系统设置）"
+msgid "Keyboard: %s"
+msgstr "键盘：%s"
 
 #: progs/rescue.c
 msgid " (not verified)"
@@ -8669,20 +8728,14 @@ msgstr "SFTP：sftp -P %d root@[%s]"
 
 #: progs/rescue.c
 msgid ""
-"Replace <local-interface> with the connecting computer's interface. Verify "
-"the host-key fingerprint; never auto-accept it."
-msgstr ""
-"将 <local-interface> 替换为控制端电脑的网口名。请核对主机密钥指纹，绝不自动信"
-"任。"
+"Replace <local-interface> with the connecting computer's interface and "
+"verify the host-key fingerprint."
+msgstr "请将 <local-interface> 替换为连接端电脑的网口，并核对主机密钥指纹。"
 
 #: progs/rescue.c
 #, c-format
-msgid ""
-"Found: %d encrypted targets, %d wired interfaces. No automatic unlock, TPM, "
-"fsck or formatting."
-msgstr ""
-"找到 %d 个加密目标系统、%d 个有线网口。不自动解锁、使用 TPM、检查修复文件系统"
-"或格式化。"
+msgid "Found: %d encrypted targets, %d wired interfaces."
+msgstr "找到 %d 个加密目标系统、%d 个有线网口。"
 
 #: progs/rescue.c
 #, c-format
@@ -8705,10 +8758,6 @@ msgstr "选择加密目标系统（只读解锁）"
 #, c-format
 msgid "Filter: %s_   %d matches"
 msgstr "筛选：%s_   %d 项匹配"
-
-#: progs/rescue.c
-msgid "Keyboard layout (only this Rescue UI)"
-msgstr "键盘布局（仅用于救援界面）"
 
 #: progs/rescue.c
 msgid "Choose US or Japanese JIS, or type a standard console/XKB layout name."
@@ -8791,10 +8840,6 @@ msgid "The debug link is stopped and target filesystems are unmounted."
 msgstr "调试线已停止，目标文件系统已卸载。"
 
 #: progs/rescue.c
-msgid "No terminal or installer will open automatically."
-msgstr "不会自动打开终端或安装器。"
-
-#: progs/rescue.c
 msgid "Power off this computer?"
 msgstr "关闭这台电脑？"
 
@@ -8830,11 +8875,11 @@ msgstr "（需要清理）"
 #. TRANSLATORS: Tab, PgUp, PgDn, Ctrl+C, Ctrl+Q and F1 are key names; keep them.
 #: progs/rescue.c
 msgid ""
-"Tab: pane  PgUp/PgDn: output  y/Ctrl+C: copy  a: SSH  f: fingerprint  "
-"Ctrl+Q: exit  F1: help"
+"Tab: pane  PgUp/PgDn: output  Ctrl+C: copy  a: SSH  f: fingerprint  Ctrl+Q: "
+"exit  F1: help"
 msgstr ""
-"Tab：区域  PgUp/PgDn：输出  y/Ctrl+C：复制  a：SSH  f：指纹  Ctrl+Q：退出  "
-"F1：帮助"
+"Tab: 区域  PgUp/PgDn: 输出  Ctrl+C: 复制  a: SSH  f: 指纹  Ctrl+Q: 退出  F1: "
+"帮助"
 
 #: progs/rescue.c
 msgid "Rescue"
@@ -9497,17 +9542,17 @@ msgstr "设置 — 硬件信息"
 msgid "Live curve: %.28s / %.36s = %.1f %s  (min %.1f, max %.1f %s)"
 msgstr "实时曲线：%.28s / %.36s = %.1f %s  （最低 %.1f，最高 %.1f %s）"
 
-#. TRANSLATORS: Tab, r, c and Esc are key names; keep them.
+#. TRANSLATORS: Tab, r, Ctrl+C and Esc are key names; keep them.
 #: progs/settings-hwinfo.inc
-msgid "Up/Down: move  Tab: pane  r: refresh  c: copy  Esc: back"
-msgstr "上下键: 选择  Tab: 切换栏  r: 刷新  c: 复制  Esc: 返回"
+msgid "Up/Down: move  Tab: pane  r: refresh  Ctrl+C: copy  Esc: back"
+msgstr "上下键: 选择  Tab: 切换栏  r: 刷新  Ctrl+C: 复制  Esc: 返回"
 
 #: progs/settings-hwinfo.inc
 msgid ""
-"Up/Down: select   Tab / Left / Right: switch pane   r: refresh   c: copy "
-"page   Esc: back"
+"Up/Down: select   Tab / Left / Right: switch pane   r: refresh   Ctrl+C: "
+"copy page   Esc: back"
 msgstr ""
-"上下键: 选择   Tab / 左右键: 切换栏   r: 刷新   c: 复制本页   Esc: 返回"
+"上下键: 选择   Tab / 左右键: 切换栏   r: 刷新   Ctrl+C: 复制本页   Esc: 返回"
 
 #: progs/settings-hwinfo.inc
 #, c-format
@@ -9942,15 +9987,15 @@ msgstr "阈值与换电记录"
 msgid "Energy & Handoff"
 msgstr "能量与换电记录"
 
-#. TRANSLATORS: m, Tab, Left/Right, r, c and Esc are key names; keep them.
+#. TRANSLATORS: m, Tab, Left/Right, r, Ctrl+C and Esc are key names; keep them.
 #: progs/settings-power.inc
 msgid "m: %/W  1-6: span  Arrows: cursor  r: refresh  Esc: back"
 msgstr "m: 电量/功率  1-6: 范围  方向键: 游标  r: 刷新  Esc: 返回"
 
 #: progs/settings-power.inc
 msgid ""
-"m: %/W   1-6: span   Left/Right: cursor   Tab: pack   r: refresh   c: copy   "
-"Esc: back"
+"m: %/W   1-6: span   Left/Right: cursor   Tab: pack   r: refresh   Ctrl+C: "
+"copy   Esc: back"
 msgstr ""
 "m: 电量/功率   1-6: 时间范围   左右键: 游标   Tab: 切换电池包   r: 刷新   c: "
 "复制   Esc: 返回"
@@ -12944,10 +12989,10 @@ msgstr "点击要截取的窗口"
 msgid "Enter or double-click: copy"
 msgstr "Enter 或双击: 复制"
 
-#. TRANSLATORS: Ctrl+S is the key; keep it.
+#. TRANSLATORS: Ctrl+S and v are keys; keep them.
 #: progs/shot.c
-msgid "Ctrl+S: save"
-msgstr "Ctrl+S: 保存"
+msgid "Ctrl+S: save   v: view   1..5: tools   Ctrl+Z: undo"
+msgstr "Ctrl+S: 保存   v: 在查看器打开   1..5: 标注工具   Ctrl+Z: 撤销"
 
 #: progs/shot.c
 msgid "Drag the handles: resize"
@@ -12962,10 +13007,10 @@ msgstr "Esc: 清除选区"
 msgid "Drag: select a region"
 msgstr "拖动: 框选区域"
 
-#. TRANSLATORS: Enter is the key; keep it.
+#. TRANSLATORS: Enter and r/f/m/a/w are keys; keep them.
 #: progs/shot.c
-msgid "Enter: copy the whole desktop"
-msgstr "Enter: 复制整个桌面"
+msgid "Enter: copy desktop   r/f/m/a/w: mode"
+msgstr "Enter: 复制全屏   r/f/m/a/w: 切换模式"
 
 #: progs/term.c
 #, c-format
@@ -13548,10 +13593,8 @@ msgid "(the name the document gives, not verified)"
 msgstr "（文档所列名称，未经验证）"
 
 #: progs/view-pdf-ui.inc
-msgid ""
-"Changes: unchanged (no disallowed changes since signing; not a cryptographic "
-"check)"
-msgstr "更改：未更改（签名后无不允许的更改；非密码学检查）"
+msgid "Changes: none since signing"
+msgstr "更改：签名后无更改"
 
 #: progs/view-pdf-ui.inc
 #, c-format
@@ -14394,6 +14437,22 @@ msgid "Open a document"
 msgstr "打开文档"
 
 #: progs/view.c
+msgid "Save, save a copy (PDF)"
+msgstr "保存、另存副本（PDF）"
+
+#: progs/view.c
+msgid "A screen down / up"
+msgstr "向下／向上翻一屏"
+
+#: progs/view.c
+msgid "Scroll or turn pages"
+msgstr "滚动或翻页"
+
+#: progs/view.c
+msgid "Find; the next, the previous match"
+msgstr "查找；下一个、上一个匹配项"
+
+#: progs/view.c
 msgid "Go to a page"
 msgstr "转到页面"
 
@@ -14410,12 +14469,20 @@ msgid "The first, the last page"
 msgstr "第一页、最后一页"
 
 #: progs/view.c
-msgid "New tab, close the tab, reopen it"
-msgstr "新建标签页、关闭标签页、重新打开"
+msgid "Close the tab, reopen it"
+msgstr "关闭标签页、重新打开标签页"
+
+#: progs/view.c
+msgid "Zoom in, out, 100%, fit image, reflow text size"
+msgstr "放大、缩小、100%、适应图像、重排字号"
 
 #: progs/view.c
 msgid "Browse, zoom, area, text, table, magnifier tools"
 msgstr "浏览、缩放、区域选择、文本选择、表格选择、放大镜工具"
+
+#: progs/view.c
+msgid "PDF annotation tools"
+msgstr "PDF 批注工具"
 
 #: progs/view.c
 msgid "Rotate an image right, left"
@@ -14426,8 +14493,8 @@ msgid "An image's information; the sidebar"
 msgstr "图像信息；侧边栏"
 
 #: progs/view.c
-msgid "Copy the selection"
-msgstr "复制所选内容"
+msgid "File, Edit, View, Go, Tools, Settings menus"
+msgstr "文件、编辑、视图、转到、工具、设置菜单"
 
 #: progs/view.c
 msgid "View keys"
@@ -14560,51 +14627,33 @@ msgstr "显示较少详情"
 msgid "Show more details..."
 msgstr "显示更多详情..."
 
+#, c-format
 #~ msgid ""
-#~ "Quit setup (the console comes back); asks first on the steps; not while "
-#~ "it installs"
-#~ msgstr "退出安装器（回到控制台）；在步骤中先询问；安装进行中不能退出"
+#~ "Language server '%s' is not installed. Configure an existing server; no "
+#~ "server is installed automatically."
+#~ msgstr "未安装语言服务器“%s”。请配置现有服务器；系统不会自动安装服务器。"
 
-#~ msgid "u: undo"
-#~ msgstr "u: 撤销"
+#, c-format
+#~ msgid "Status: %s    Stream: %ux%u"
+#~ msgstr "状态：%s    画面：%ux%u"
 
-#~ msgid "c: copy"
-#~ msgstr "c: 复制"
-
-#~ msgid "x: cut"
-#~ msgstr "x: 剪切"
-
-#~ msgid "v: paste"
-#~ msgstr "v: 粘贴"
-
-#~ msgid "y: copy"
-#~ msgstr "y: 复制"
-
-#~ msgid "Y: copy all"
-#~ msgstr "Y: 全部复制"
-
-#~ msgid "Reboot; power off"
-#~ msgstr "重启；关机"
-
+#, c-format
 #~ msgid ""
-#~ "Copy what is selected, else the command or the notice; Y copies the whole "
-#~ "pane"
-#~ msgstr "复制选中内容，否则复制命令或提示；Y 复制整个区域"
+#~ "Keyboard: %s (Rescue and its target terminal; system settings are "
+#~ "unchanged)"
+#~ msgstr "键盘：%s（用于救援及其目标终端，不更改系统设置）"
 
-#~ msgid "q: back"
-#~ msgstr "q: 返回"
+#, c-format
+#~ msgid "Code     %s"
+#~ msgstr "配对码   %s"
 
-#~ msgid "New folder..."
-#~ msgstr "新建文件夹..."
-
-#~ msgid "q: home"
-#~ msgstr "q: 主页"
-
-#~ msgid "q / Esc: cancel"
-#~ msgstr "q / Esc: 取消"
-
-#~ msgid "The broker reported an error."
-#~ msgstr "中转进程报告了错误。"
+#, c-format
+#~ msgid ""
+#~ "On the Mac: locachy-macos-sender --interface <mac-interface> --address %s "
+#~ "--port %s"
+#~ msgstr ""
+#~ "在 Mac 上运行：locachy-macos-sender --interface <mac-interface> --address "
+#~ "%s --port %s"
 
 #, c-format
 #~ msgid "Cannot load Tor's firewall (%s): Tor left as it was."
@@ -14615,12 +14664,4 @@ msgstr "显示更多详情..."
 #~ "Tor off, but its firewall is still there: nothing goes out (%s remove)."
 #~ msgstr "Tor 已关闭，但其防火墙仍在：所有外联已阻断（%s remove）。"
 
-#~ msgid "The duress password could not be removed."
-#~ msgstr "无法删除胁迫密码。"
 
-#~ msgid ""
-#~ "Not switched: the TPM key slots could not be removed (locachy-tpm clear)."
-#~ msgstr "未切换：无法删除 TPM 密钥槽（locachy-tpm clear）。"
-
-#~ msgid "TPM disk auto-unlock unbound."
-#~ msgstr "已解除 TPM 磁盘自动解密绑定。"

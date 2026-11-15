@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-12 18:28-0500\n"
+"POT-Creation-Date: 2026-11-14 16:00-0500\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -63,7 +63,7 @@ msgstr ""
 msgid "Copy, cut, paste"
 msgstr ""
 
-#: base/help.c progs/edit.c
+#: base/help.c
 msgid "Undo, redo"
 msgstr ""
 
@@ -564,6 +564,12 @@ msgstr ""
 #: progs/archive.c progs/installer.c progs/packages.c progs/rescue.c
 #: progs/settings.c
 msgid "In a line you type: select all, the start, the end"
+msgstr ""
+
+#: progs/archive.c progs/installer.c
+msgid ""
+"In a line you type: delete the word before the cursor, to the start, to the "
+"end"
 msgstr ""
 
 #: progs/archive.c
@@ -1381,7 +1387,7 @@ msgstr ""
 msgid "Close All"
 msgstr ""
 
-#: progs/edit-actions.inc progs/view.c
+#: progs/edit-actions.inc progs/extdisplay.c progs/view.c
 msgid "Quit"
 msgstr ""
 
@@ -1457,7 +1463,7 @@ msgstr ""
 msgid "Select All"
 msgstr ""
 
-#: progs/edit-actions.inc
+#: progs/edit-actions.inc progs/edit.c
 msgid "Deselect"
 msgstr ""
 
@@ -2084,9 +2090,7 @@ msgstr ""
 
 #: progs/edit-language.inc
 #, c-format
-msgid ""
-"Language server '%s' is not installed. Configure an existing server; no "
-"server is installed automatically."
+msgid "Language server '%s' is not installed."
 msgstr ""
 
 #: progs/edit-language.inc
@@ -2978,19 +2982,7 @@ msgid "Reload the document"
 msgstr ""
 
 #: progs/edit.c
-msgid "Close the document; quit (asks about changes)"
-msgstr ""
-
-#: progs/edit.c
-msgid "Cut, copy, paste"
-msgstr ""
-
-#: progs/edit.c
-msgid "Select all; deselect"
-msgstr ""
-
-#: progs/edit.c progs/view.c
-msgid "Find; the next, the previous match"
+msgid "Close the document (asks about changes)"
 msgstr ""
 
 #: progs/edit.c
@@ -2998,27 +2990,63 @@ msgid "Replace; find in files"
 msgstr ""
 
 #: progs/edit.c
-msgid "Go to a line; comment; toggle the comment"
+msgid "Find the selection forwards, backwards"
+msgstr ""
+
+#: progs/edit.c
+msgid "Go to a line; matching bracket, select to it"
+msgstr ""
+
+#: progs/edit.c
+msgid "Comment, uncomment, toggle comment"
+msgstr ""
+
+#: progs/edit.c
+msgid "Indent, unindent; delete the line"
+msgstr ""
+
+#: progs/edit.c
+msgid "Toggle, previous, next bookmark; icon border"
 msgstr ""
 
 #: progs/edit.c
 msgid "Fold, unfold the top level"
 msgstr ""
 
-#: progs/edit.c progs/view.c
+#: progs/edit.c
+msgid "Block selection; carets above/below, at line ends"
+msgstr ""
+
+#: progs/edit.c
+msgid "Add next, all, skip occurrence"
+msgstr ""
+
+#: progs/edit.c
+msgid "Split vertical, close split, next/previous split"
+msgstr ""
+
+#: progs/edit.c
+msgid "Quick Open; toggle sidebars"
+msgstr ""
+
+#: progs/edit.c
+msgid "Next, previous, Nth tab"
+msgstr ""
+
+#: progs/edit.c
+msgid "Documents list; previous, next document"
+msgstr ""
+
+#: progs/edit.c
 msgid "Zoom in, out, to 100%"
 msgstr ""
 
 #: progs/edit.c
-msgid "Next, previous document"
+msgid "Code actions; definition, declaration; rename symbol"
 msgstr ""
 
 #: progs/edit.c
-msgid "The documents list"
-msgstr ""
-
-#: progs/edit.c
-msgid "Code actions; definition, declaration"
+msgid "Code completion; Language Server menu"
 msgstr ""
 
 #: progs/edit.c
@@ -3561,26 +3589,7 @@ msgid "Unavailable"
 msgstr ""
 
 #: progs/extdisplay.c
-msgid "A paired dedicated-link transport is required."
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "Extended display"
-msgstr ""
-
-#: progs/extdisplay.c
-#, c-format
-msgid "Status: %s    Stream: %ux%u"
-msgstr ""
-
-#: progs/extdisplay.c
-msgid ""
-"Ctrl+Alt+F12: disconnect    Home, lock and brightness stay local; the link "
-"stays up"
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "No clipboard, files or commands. The peer keeps its original screen."
+msgid "Waiting for the sender."
 msgstr ""
 
 #: progs/extdisplay.c
@@ -3604,10 +3613,6 @@ msgid "Active"
 msgstr ""
 
 #: progs/extdisplay.c
-msgid "Extended-only sender over the paired dedicated link."
-msgstr ""
-
-#: progs/extdisplay.c
 msgid "The decoder sent an invalid picture."
 msgstr ""
 
@@ -3620,11 +3625,11 @@ msgid "The sender handshake or the stream failed."
 msgstr ""
 
 #: progs/extdisplay.c
-msgid "No managed session owner: remote input stays disabled."
+msgid "No session control channel."
 msgstr ""
 
 #: progs/extdisplay.c
-msgid "The transport is not a paired local stream from the broker."
+msgid "The transport is not a local stream from the broker."
 msgstr ""
 
 #: progs/extdisplay.c
@@ -3632,15 +3637,11 @@ msgid "The session owner did not accept this session."
 msgstr ""
 
 #: progs/extdisplay.c
-msgid "The decoder worker could not be started safely."
+msgid "The decoder worker could not be started."
 msgstr ""
 
 #: progs/extdisplay.c
 msgid "Connecting"
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "Waiting for the sender's capabilities."
 msgstr ""
 
 #: progs/extdisplay.c
@@ -3659,10 +3660,6 @@ msgstr ""
 msgid "The sender handshake timed out."
 msgstr ""
 
-#: progs/extdisplay.c
-msgid "Disconnected with Ctrl+Alt+F12; extdisplay stays open."
-msgstr ""
-
 #: progs/extdisplay.c progs/settings-power.inc
 msgid "Idle"
 msgstr ""
@@ -3672,11 +3669,27 @@ msgid "Scanning"
 msgstr ""
 
 #: progs/extdisplay.c
-msgid "Choose an interface"
+msgid "Ready to connect"
 msgstr ""
 
 #: progs/extdisplay.c
-msgid "Asking the broker for a code"
+msgid "Waiting for a Thunderbolt/USB4 network"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Waiting for the cable link"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Preparing the link-local address"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Making the receiver discoverable"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Preparing the connection"
 msgstr ""
 
 #: progs/extdisplay.c
@@ -3709,44 +3722,48 @@ msgid "Unknown"
 msgstr ""
 
 #: progs/extdisplay.c
-msgid "Choose the cable interface to pair with the Mac."
+msgid "Extended display"
 msgstr ""
 
 #: progs/extdisplay.c
-msgid "Scanning..."
+msgid "Connect a Thunderbolt/USB4 link to the Mac."
 msgstr ""
 
 #: progs/extdisplay.c
-msgid "No cable interface found. Connect the cable, then press F5."
+msgid "link ready"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "waiting for link"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Looking for a Thunderbolt/USB4 network..."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Waiting for a Thunderbolt/USB4 network."
 msgstr ""
 
 #: progs/extdisplay.c
 msgid "carrier up"
 msgstr ""
 
-#: progs/extdisplay.c progs/rescue.c
-msgid "no carrier"
+#: progs/extdisplay.c
+msgid "waiting for carrier"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "identity unavailable"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Waiting for the Mac service to connect automatically..."
 msgstr ""
 
 #: progs/extdisplay.c
 #, c-format
-msgid "Address  %s     Port  %s"
-msgstr ""
-
-#: progs/extdisplay.c
-#, c-format
-msgid "Code     %s"
-msgstr ""
-
-#: progs/extdisplay.c
-#, c-format
-msgid ""
-"On the Mac: locachy-macos-sender --interface <mac-interface> --address %s --"
-"port %s"
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "Asking the broker for an address and a code..."
+msgid "Interface %s   Address %s   Port %s"
 msgstr ""
 
 #: progs/extdisplay.c
@@ -3763,12 +3780,7 @@ msgid "The cable was unplugged. Press any key to close."
 msgstr ""
 
 #: progs/extdisplay.c
-msgid ""
-"Up/Down choose   Enter pair   Esc cancel   F5 scan   F1 help   Ctrl+Q quit"
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "The code and the address are kept in memory only."
+msgid "Enter connect   Esc cancel   F2 details   F1 help   Ctrl+Q quit"
 msgstr ""
 
 #: progs/extdisplay.c
@@ -3776,19 +3788,27 @@ msgid "Choose the cable interface"
 msgstr ""
 
 #: progs/extdisplay.c
-msgid "Pair with the Mac on it"
+msgid "Connect the selected link"
 msgstr ""
 
 #: progs/extdisplay.c
-msgid "Cancel the pairing"
+msgid "Cancel waiting"
 msgstr ""
 
 #: progs/extdisplay.c
-msgid "Look for cable interfaces again"
+msgid "Show interface and address details"
 msgstr ""
 
 #: progs/extdisplay.c
-msgid "Disconnect a session; extdisplay stays open"
+msgid "Rescan cable interfaces"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Help"
+msgstr ""
+
+#: progs/extdisplay.c progs/files.c
+msgid "Home"
 msgstr ""
 
 #: progs/extdisplay.c
@@ -4088,19 +4108,19 @@ msgstr ""
 msgid "Items in the Trash are restored (r), not copied."
 msgstr ""
 
-#. TRANSLATORS: v is the key; keep it.
+#. TRANSLATORS: Ctrl+V is the key; keep it.
 #: progs/files.c
 #, c-format
-msgid "Cut %d item; v puts it in the folder shown."
-msgid_plural "Cut %d items; v puts them in the folder shown."
+msgid "Cut %d item; Ctrl+V puts it in the folder shown."
+msgid_plural "Cut %d items; Ctrl+V puts them in the folder shown."
 msgstr[0] ""
 msgstr[1] ""
 
-#. TRANSLATORS: v is the key; keep it.
+#. TRANSLATORS: Ctrl+V is the key; keep it.
 #: progs/files.c
 #, c-format
-msgid "Copied %d item; v puts it in the folder shown."
-msgid_plural "Copied %d items; v puts them in the folder shown."
+msgid "Copied %d item; Ctrl+V puts it in the folder shown."
+msgid_plural "Copied %d items; Ctrl+V puts them in the folder shown."
 msgstr[0] ""
 msgstr[1] ""
 
@@ -4402,17 +4422,17 @@ msgstr ""
 msgid "Search '%s' in %s"
 msgstr ""
 
-#. TRANSLATORS: v is the key; keep it.
+#. TRANSLATORS: Ctrl+V is the key; keep it.
 #: progs/files.c
 msgid "   filter: "
 msgstr ""
 
 #: progs/files.c
-msgid "   (copied: v pastes here)"
+msgid "   (copied: Ctrl+V pastes here)"
 msgstr ""
 
 #: progs/files.c
-msgid "   (cut: v moves here)"
+msgid "   (cut: Ctrl+V moves here)"
 msgstr ""
 
 #: progs/files.c
@@ -4421,10 +4441,6 @@ msgstr ""
 
 #: progs/files.c
 msgid "Trash"
-msgstr ""
-
-#: progs/files.c
-msgid "Home"
 msgstr ""
 
 #: progs/files.c
@@ -6248,6 +6264,40 @@ msgstr ""
 msgid "All of the log is selected: Ctrl+C copies it."
 msgstr ""
 
+#: progs/installer-session.inc
+msgid ""
+"The package keys were not trusted; c will check them again before any target "
+"write."
+msgstr ""
+
+#: progs/installer-session.inc
+msgid "Updating the source and the installer..."
+msgstr ""
+
+#: progs/installer-session.inc
+msgid "The source or installer could not be updated. The terminal shows why."
+msgstr ""
+
+#: progs/installer-session.inc
+msgid ""
+"The source or installer could not be updated. Nothing was continued; the "
+"terminal shows why."
+msgstr ""
+
+#: progs/installer-session.inc
+msgid ""
+"The installer was updated; the stopped target will be checked again before "
+"continuing."
+msgstr ""
+
+#: progs/installer-session.inc
+msgid "Cannot preserve the installer choices for its update."
+msgstr ""
+
+#: progs/installer-session.inc
+msgid "The updated installer could not start. The choices are kept; try again."
+msgstr ""
+
 #: progs/installer.c
 msgid "(no model name)"
 msgstr ""
@@ -6879,18 +6929,11 @@ msgid "From a step's page to the steps; from the steps to the start"
 msgstr ""
 
 #: progs/installer.c
-msgid ""
-"In a line you type, after Ctrl+A: copy or cut it (a password is never copied)"
+msgid "In a line you type, after Ctrl+A: copy or cut it"
 msgstr ""
 
 #: progs/installer.c
 msgid "In a line you type: paste"
-msgstr ""
-
-#: progs/installer.c
-msgid ""
-"In a line you type: delete the word before the cursor, to the start, to the "
-"end"
 msgstr ""
 
 #: progs/installer.c
@@ -7069,6 +7112,18 @@ msgid "Nothing was written."
 msgstr ""
 
 #: progs/installer.c
+msgid "Disk passphrase:"
+msgstr ""
+
+#: progs/installer.c
+msgid "Installed user's password:"
+msgstr ""
+
+#: progs/installer.c
+msgid "A nonempty password and disk passphrase are needed to continue."
+msgstr ""
+
+#: progs/installer.c
 msgid "Reboot now?"
 msgstr ""
 
@@ -7090,10 +7145,6 @@ msgstr ""
 
 #: progs/installer.c
 msgid "The swap partition (formatted)"
-msgstr ""
-
-#: progs/installer.c
-msgid "Disk passphrase:"
 msgstr ""
 
 #: progs/installer.c
@@ -7142,6 +7193,17 @@ msgstr ""
 
 #: progs/installer.c
 msgid "The whole output is selected: Ctrl+C copies it."
+msgstr ""
+
+#: progs/installer.c
+msgid ""
+"The stopped installation record cannot be restored safely; nothing was "
+"continued."
+msgstr ""
+
+#: progs/installer.c
+msgid ""
+"The updated installer cannot restore the choices. Nothing was continued."
 msgstr ""
 
 #: progs/lock.c
@@ -7205,10 +7267,10 @@ msgstr ""
 msgid "There is no user (uid 1000) to unlock for."
 msgstr ""
 
-#. TRANSLATORS: Ctrl+Alt+Esc is a key name; keep it.
+#. TRANSLATORS: Super+Esc is a key name; keep it.
 #: progs/note.c
 #, c-format
-msgid "note %s (pid %d): Ctrl+Alt+Esc for the menu"
+msgid "note %s (pid %d): Super+Esc for the menu"
 msgstr ""
 
 #: progs/note.c
@@ -8487,10 +8549,6 @@ msgid "Input is too long; nothing was added."
 msgstr ""
 
 #: progs/rescue.c
-msgid "Secrets stay in this UI and the helper's stdin; never in argv or files."
-msgstr ""
-
-#: progs/rescue.c
 msgid "Wait for the current operation, or Exit to stop it and clean up."
 msgstr ""
 
@@ -8555,9 +8613,12 @@ msgid "carrier present"
 msgstr ""
 
 #: progs/rescue.c
+msgid "no carrier"
+msgstr ""
+
+#: progs/rescue.c
 #, c-format
-msgid ""
-"Keyboard: %s (Rescue and its target terminal; system settings are unchanged)"
+msgid "Keyboard: %s"
 msgstr ""
 
 #: progs/rescue.c
@@ -8619,15 +8680,13 @@ msgstr ""
 
 #: progs/rescue.c
 msgid ""
-"Replace <local-interface> with the connecting computer's interface. Verify "
-"the host-key fingerprint; never auto-accept it."
+"Replace <local-interface> with the connecting computer's interface and "
+"verify the host-key fingerprint."
 msgstr ""
 
 #: progs/rescue.c
 #, c-format
-msgid ""
-"Found: %d encrypted targets, %d wired interfaces. No automatic unlock, TPM, "
-"fsck or formatting."
+msgid "Found: %d encrypted targets, %d wired interfaces."
 msgstr ""
 
 #: progs/rescue.c
@@ -8650,10 +8709,6 @@ msgstr ""
 #: progs/rescue.c
 #, c-format
 msgid "Filter: %s_   %d matches"
-msgstr ""
-
-#: progs/rescue.c
-msgid "Keyboard layout (only this Rescue UI)"
 msgstr ""
 
 #: progs/rescue.c
@@ -8737,10 +8792,6 @@ msgid "The debug link is stopped and target filesystems are unmounted."
 msgstr ""
 
 #: progs/rescue.c
-msgid "No terminal or installer will open automatically."
-msgstr ""
-
-#: progs/rescue.c
 msgid "Power off this computer?"
 msgstr ""
 
@@ -8776,8 +8827,8 @@ msgstr ""
 #. TRANSLATORS: Tab, PgUp, PgDn, Ctrl+C, Ctrl+Q and F1 are key names; keep them.
 #: progs/rescue.c
 msgid ""
-"Tab: pane  PgUp/PgDn: output  y/Ctrl+C: copy  a: SSH  f: fingerprint  "
-"Ctrl+Q: exit  F1: help"
+"Tab: pane  PgUp/PgDn: output  Ctrl+C: copy  a: SSH  f: fingerprint  Ctrl+Q: "
+"exit  F1: help"
 msgstr ""
 
 #: progs/rescue.c
@@ -9441,15 +9492,15 @@ msgstr ""
 msgid "Live curve: %.28s / %.36s = %.1f %s  (min %.1f, max %.1f %s)"
 msgstr ""
 
-#. TRANSLATORS: Tab, r, c and Esc are key names; keep them.
+#. TRANSLATORS: Tab, r, Ctrl+C and Esc are key names; keep them.
 #: progs/settings-hwinfo.inc
-msgid "Up/Down: move  Tab: pane  r: refresh  c: copy  Esc: back"
+msgid "Up/Down: move  Tab: pane  r: refresh  Ctrl+C: copy  Esc: back"
 msgstr ""
 
 #: progs/settings-hwinfo.inc
 msgid ""
-"Up/Down: select   Tab / Left / Right: switch pane   r: refresh   c: copy "
-"page   Esc: back"
+"Up/Down: select   Tab / Left / Right: switch pane   r: refresh   Ctrl+C: "
+"copy page   Esc: back"
 msgstr ""
 
 #: progs/settings-hwinfo.inc
@@ -9885,15 +9936,15 @@ msgstr ""
 msgid "Energy & Handoff"
 msgstr ""
 
-#. TRANSLATORS: m, Tab, Left/Right, r, c and Esc are key names; keep them.
+#. TRANSLATORS: m, Tab, Left/Right, r, Ctrl+C and Esc are key names; keep them.
 #: progs/settings-power.inc
 msgid "m: %/W  1-6: span  Arrows: cursor  r: refresh  Esc: back"
 msgstr ""
 
 #: progs/settings-power.inc
 msgid ""
-"m: %/W   1-6: span   Left/Right: cursor   Tab: pack   r: refresh   c: copy   "
-"Esc: back"
+"m: %/W   1-6: span   Left/Right: cursor   Tab: pack   r: refresh   Ctrl+C: "
+"copy   Esc: back"
 msgstr ""
 
 #: progs/settings-power.inc
@@ -12858,9 +12909,9 @@ msgstr ""
 msgid "Enter or double-click: copy"
 msgstr ""
 
-#. TRANSLATORS: Ctrl+S is the key; keep it.
+#. TRANSLATORS: Ctrl+S and v are keys; keep them.
 #: progs/shot.c
-msgid "Ctrl+S: save"
+msgid "Ctrl+S: save   v: view   1..5: tools   Ctrl+Z: undo"
 msgstr ""
 
 #: progs/shot.c
@@ -12876,9 +12927,9 @@ msgstr ""
 msgid "Drag: select a region"
 msgstr ""
 
-#. TRANSLATORS: Enter is the key; keep it.
+#. TRANSLATORS: Enter and r/f/m/a/w are keys; keep them.
 #: progs/shot.c
-msgid "Enter: copy the whole desktop"
+msgid "Enter: copy desktop   r/f/m/a/w: mode"
 msgstr ""
 
 #: progs/term.c
@@ -13463,9 +13514,7 @@ msgid "(the name the document gives, not verified)"
 msgstr ""
 
 #: progs/view-pdf-ui.inc
-msgid ""
-"Changes: unchanged (no disallowed changes since signing; not a cryptographic "
-"check)"
+msgid "Changes: none since signing"
 msgstr ""
 
 #: progs/view-pdf-ui.inc
@@ -14312,6 +14361,22 @@ msgid "Open a document"
 msgstr ""
 
 #: progs/view.c
+msgid "Save, save a copy (PDF)"
+msgstr ""
+
+#: progs/view.c
+msgid "A screen down / up"
+msgstr ""
+
+#: progs/view.c
+msgid "Scroll or turn pages"
+msgstr ""
+
+#: progs/view.c
+msgid "Find; the next, the previous match"
+msgstr ""
+
+#: progs/view.c
 msgid "Go to a page"
 msgstr ""
 
@@ -14328,11 +14393,19 @@ msgid "The first, the last page"
 msgstr ""
 
 #: progs/view.c
-msgid "New tab, close the tab, reopen it"
+msgid "Close the tab, reopen it"
+msgstr ""
+
+#: progs/view.c
+msgid "Zoom in, out, 100%, fit image, reflow text size"
 msgstr ""
 
 #: progs/view.c
 msgid "Browse, zoom, area, text, table, magnifier tools"
+msgstr ""
+
+#: progs/view.c
+msgid "PDF annotation tools"
 msgstr ""
 
 #: progs/view.c
@@ -14344,7 +14417,7 @@ msgid "An image's information; the sidebar"
 msgstr ""
 
 #: progs/view.c
-msgid "Copy the selection"
+msgid "File, Edit, View, Go, Tools, Settings menus"
 msgstr ""
 
 #: progs/view.c

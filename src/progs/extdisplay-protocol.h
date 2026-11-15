@@ -79,6 +79,7 @@ int extdisplay_key_json(char *out, size_t size, uint32_t device, uint32_t code,
 int extdisplay_button_json(char *out, size_t size, uint32_t button, int pressed,
                     double x, double y);
 int extdisplay_pointer_json(char *out, size_t size, double x, double y);
+int extdisplay_pointer_delta_json(char *out, size_t size, double x, double y, double dx, double dy);
 int extdisplay_scroll_json(char *out, size_t size, double dx, double dy, int phase, int source);
 int extdisplay_cancel_json(char *out, size_t size);
 #endif

@@ -3,6 +3,7 @@
   python3 -B tools/test-installer-profile.py SCRATCH_PARENT
 """
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -235,6 +236,7 @@ class InstallerProfile(unittest.TestCase):
         self.env.update(LOCACHY_REPO="https://github.com/me/locachy.git", LOCACHY_BRANCH="next", LOCACHY_COMMIT="b" * 40)
         origin = json.loads((self.profile() / "airootfs/etc/locachy/source-origin.json").read_text())
         self.assertEqual(origin, {"repo": "https://github.com/me/locachy.git", "branch": "next", "commit": "b" * 40,
+                                  "source_changed": False,
                                   "apps_repo": "https://example.org/locachy-apps.git", "apps_branch": "main",
                                   "apps_commit": "c" * 40})
 
@@ -434,6 +436,17 @@ class LiveEntry(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in self.fetched.parent.iterdir()),
                          ["locachy-source", "locachy-source.from"])
 
+    def test_recorded_local_changes_are_kept_only_over_the_same_remote_commit(self):
+        commit = subprocess.check_output(['git', '-C', str(self.repo), 'rev-parse', 'HEAD'], text=True).strip()
+        self.origin.write_text(json.dumps({'repo': self.URL, 'branch': 'main', 'commit': commit,
+                                          'source_changed': True}))
+        out, err = self.entry('--yes')
+        self.assertTrue(out.startswith('bundled bundled: local changes over the fetched commit '), out)
+        self.assertIn("keeping this medium's recorded local changes", err)
+        self.commit('v2')
+        out, _ = self.entry('--yes')
+        self.assertEqual(out, 'v2 fetched --yes')
+
     def test_updates_off_or_no_repository_run_the_medium_own(self):
         out, _ = self.entry("--yes", "--update-repo=off")
         self.assertEqual(out, "bundled bundled: updates are off --yes --update-repo=off")
@@ -523,6 +536,23 @@ class LiveEntry(unittest.TestCase):
         self.git("-C", str(self.repo), "commit", "-q", "-am", "v3")
         self.entry("--yes")
         self.assertEqual(self.apps_seen(), ("bundled: this source has no app presets helper", str(self.apps_bundled)))
+
+    def test_live_update_stages_executable_and_rejects_stale_metadata(self):
+        updater = SOURCE / "installer/live-update.py"
+        spec = importlib.util.spec_from_file_location("live_update_test", updater)
+        live = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(live)
+        stage = self.root / "stage"
+        (stage / "usr/local/bin").mkdir(parents=True)
+        for name in ("installer", "term", "rescue"):
+            path = stage / "usr/local/bin" / name
+            path.write_text("fixture")
+            if name != "rescue":
+                path.chmod(0o755)
+        with self.assertRaises(RuntimeError):
+            live.check_programs(stage)
+        (stage / "usr/local/bin/rescue").chmod(0o755)
+        live.check_programs(stage)
 
     def test_fetches_over_https_and_ssh_only(self):
         del self.env["GIT_ALLOW_PROTOCOL"]

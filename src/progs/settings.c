@@ -1852,7 +1852,7 @@ static const struct opt_module opt_modules[] = {
      * program only with them (tools/EXTDISPLAY.md). Installed also needs the
      * program line home lists (opt_module_installed). */
     { N_("Extended display (extdisplay)"), "/usr/include/libavcodec/avcodec.h",
-      "ffmpeg json-c", "program_extdisplay", "/usr/local/bin/extdisplay", NULL, NULL },
+      "ffmpeg json-c avahi", "program_extdisplay", "/usr/local/bin/extdisplay", NULL, NULL },
 };
 #define NOPT_MODULES ((int)(sizeof opt_modules / sizeof opt_modules[0]))
 
