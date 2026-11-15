@@ -784,6 +784,32 @@ class LocalPackages(unittest.TestCase):
         self.assertEqual(self.source_commit.read_text().strip(), c2)
         self.assertFalse(Path(pkg.SOURCE_PENDING_FILE).exists())
 
+        # If a newer commit lands while the previous source update is still
+        # unfinished, applying the newer source replaces the unfinished journal
+        # and staging directory rather than getting permanently stuck.
+        (origin / "src/machines/x13-v2.conf").write_text('description="ThinkPad X13 v2"\n')
+        git("add", "-A")
+        git("commit", "-m", "Add X13 v2")
+        c3 = git("rev-parse", "HEAD")
+        pkg.plan()
+        self.assertTrue(pkg.install_source_first(c3))
+        self.assertTrue((self.src / "machines/x13-v2.conf").is_file())
+        (origin / "src/machines/x13-v3.conf").write_text('description="ThinkPad X13 v3"\n')
+        git("add", "-A")
+        git("commit", "-m", "Add X13 v3")
+        c4 = git("rev-parse", "HEAD")
+        pkg.plan()
+        self.assertTrue(pkg.install_source_first(c4))
+        self.assertTrue((self.src / "machines/x13-v3.conf").is_file())
+        self.assertEqual(Path(pkg.SOURCE_PENDING_FILE).read_text().strip(), c4)
+        self.assertEqual(pkg.source_journal()["commit"], c4)
+        self.assertEqual([p.name for p in self.src.parent.glob(".locachy-source-*")],
+                         [Path(pkg.source_journal()["work"]).name])
+        self.assertTrue(pkg.apply_target("locachy", [("locachy", "rebuild", "its programs", "", "")]))
+        self.assertEqual(pkg.settle_source_update(pkg.plan()), [])
+        self.assertEqual(self.source_commit.read_text().strip(), c4)
+        self.assertFalse(Path(pkg.SOURCE_PENDING_FILE).exists())
+
         # When trusted-signers is populated, an unsigned commit is rejected.
         self.signers.write_text("user@example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n")
         (origin / "src/machines/untrusted.conf").write_text('description="bad"\n')

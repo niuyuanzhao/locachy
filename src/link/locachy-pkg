@@ -1433,10 +1433,16 @@ def apply_source_update(commit):
         raise RuntimeError("invalid target source commit in plan")
     previous = source_journal()
     if previous:
-        if previous["commit"] != commit:
-            raise RuntimeError("another source update is unfinished; finish it before replacing the source")
-        recover_source_publication()
-        return
+        if previous["commit"] == commit:
+            recover_source_publication()
+            return
+        if previous.get("phase") == "publishing":
+            recover_source_publication()
+        shutil.rmtree(previous.get("work", ""), ignore_errors=True)
+        try:
+            os.unlink(source_journal_path())
+        except FileNotFoundError:
+            pass
     verify_source_commit(commit)
     parent = os.path.dirname(os.path.abspath(SRC))
     os.makedirs(parent, exist_ok=True)
