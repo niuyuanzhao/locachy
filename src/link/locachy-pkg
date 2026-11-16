@@ -139,8 +139,10 @@ def load_installed_db(db_path=LOCAL_DB):
 def compute_closure(leaves, packages, provides_map):
     """Computes the full transitive dependency closure (KEEP set)."""
     leaf_set = set(leaves)
+    if "ffmpeg" in packages or "libva" in packages:
+        leaf_set |= {d for d in gpu_vaapi_drivers() if d in packages}
     visited = set()
-    stack = [pkg for pkg in leaves if pkg in packages]
+    stack = [pkg for pkg in leaf_set if pkg in packages]
 
     while stack:
         curr = stack.pop()
@@ -157,8 +159,8 @@ def compute_closure(leaves, packages, provides_map):
             if real_dep and real_dep in packages and real_dep not in visited:
                 stack.append(real_dep)
 
-    sel_installed = leaf_set & set(packages.keys())
-    dep_closure = visited - leaf_set
+    sel_installed = (set(leaves) & set(packages.keys()))
+    dep_closure = visited - sel_installed
     return sel_installed, dep_closure, visited
 
 
@@ -2119,6 +2121,8 @@ def plan(check_source=True, apps_commit=None):
     # the repositories' ones), as sync would install them.
     for n in declared_missing(host):
         rows.append(("host", "missing", n, "", "declared, not installed"))
+    for d in needed_vaapi_drivers([], [], host):
+        rows.append(("host", "missing", d, "", "hardware video driver for this GPU"))
     host_changes = any(r[0] == "host" for r in rows)
     current = host_hash()
     if src_upd:
@@ -2348,10 +2352,19 @@ def install_planned_missing(mine, tracked):
     planned = {r[2] for r in mine if r[1] == "missing"}
     installed = local_packages(LOCAL_DB)
     missing = [n for n in declared_missing(installed) if n in planned]
-    if not missing:
+    vaapi = [d for d in needed_vaapi_drivers([], [], installed) if d in planned and d not in missing]
+    if not missing and not vaapi:
         return True
-    print(f"===> Installing declared packages that are not installed: {' '.join(missing)}", flush=True)
-    return install_missing(missing, tracked, installed)
+    if missing:
+        print(f"===> Installing declared packages that are not installed: {' '.join(missing)}", flush=True)
+        if not install_missing(missing, tracked, installed):
+            return False
+        installed = local_packages(LOCAL_DB)
+        vaapi = [d for d in needed_vaapi_drivers([], [], installed) if d in planned]
+    if vaapi:
+        print(f"===> Installing hardware video drivers: {' '.join(vaapi)}", flush=True)
+        return run_pacman("pacman -S --needed --noconfirm --asdeps " + shlex.join(vaapi))
+    return True
 
 
 def apply_apps(mine):

@@ -403,6 +403,18 @@ class VulkanDriver(unittest.TestCase):
             self.assertEqual(pkg.needed_vaapi_drivers([], [], {"base"}), [])
             self.assertEqual(pkg.needed_vaapi_drivers(["ffmpeg"], [], {"base"}), ["intel-media-driver", "mesa"])
             self.assertEqual(pkg.needed_vaapi_drivers([], [], {"ffmpeg", "mesa"}), ["intel-media-driver"])
+            sel, dep, keep = pkg.compute_closure(["ffmpeg"], {"ffmpeg": ["libva"], "libva": [], "intel-media-driver": ["libva"], "mesa": []},
+                                                {"ffmpeg": ["ffmpeg"], "libva": ["libva"], "intel-media-driver": ["intel-media-driver"], "mesa": ["mesa"]})
+            self.assertEqual(sel, {"ffmpeg"})
+            self.assertEqual(keep, {"ffmpeg", "libva", "intel-media-driver", "mesa"})
+            self.assertEqual(dep, {"libva", "intel-media-driver", "mesa"})
+        with mock.patch.object(pkg, "needed_vaapi_drivers", lambda r, a, i=None: ["intel-media-driver"]):
+            with mock.patch.object(pkg, "local_packages", lambda db: {"ffmpeg": "1"}):
+                with mock.patch.object(pkg, "declared_missing", lambda h: []):
+                    calls = []
+                    with mock.patch.object(pkg, "run_pacman", lambda cmd: calls.append(cmd) or True):
+                        self.assertTrue(pkg.install_planned_missing([("host", "missing", "intel-media-driver", "", "hardware video driver for this GPU")], {}))
+                    self.assertEqual(calls, ["pacman -S --needed --noconfirm --asdeps intel-media-driver"])
 
     def needed(self, satisfied, repo_depends, aur_depends, repo=("repo-program",), aur=("aur-program",)):
         def run(cmd, **kwargs):
