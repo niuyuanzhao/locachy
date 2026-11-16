@@ -13,6 +13,7 @@ int extdisplay_decoder_push(struct extdisplay_decoder *, const void *, size_t, e
 int extdisplay_decoder_step(struct extdisplay_decoder *, const void *, size_t);
 int extdisplay_decoder_size(const struct extdisplay_decoder *, uint32_t *width, uint32_t *height);
 int extdisplay_decoder_export_dmabuf(struct extdisplay_decoder *, int *fd, struct extdisplay_dmabuf *info);
+int extdisplay_decoder_reexport_dmabuf(struct extdisplay_decoder *, int *fd, struct extdisplay_dmabuf *info);
 int extdisplay_decoder_render(struct extdisplay_decoder *, uint32_t *dst);
 void extdisplay_decoder_disable_dmabuf(struct extdisplay_decoder *);
 void extdisplay_decoder_close(struct extdisplay_decoder *);

@@ -47,6 +47,7 @@ static int unplugged;
 static uint32_t *frame;
 static size_t frame_bytes;
 static uint32_t frame_w, frame_h;
+static int dmabuf_active;
 static int vx, vy, vw, vh, panel_w, panel_h;
 static char decode_mode[16] = "auto";
 static const char *state = N_("Unavailable");
@@ -132,6 +133,8 @@ static void draw(void)
             }
             free(line);
         }
+    } else if (dmabuf_active) {
+        return;
     } else {
         screen_fill_px(0, 0, panel_w, panel_h, 0x000000);
     }
@@ -310,6 +313,7 @@ static int handle_worker(int *inhibited, double *started)
             return -1;
         }
         if (frame) munmap(frame, frame_bytes);
+        dmabuf_active = 0;
         frame = pixels;
         frame_bytes = (size_t)m.bytes;
         frame_w = m.width;
@@ -324,15 +328,25 @@ static int handle_worker(int *inhibited, double *started)
             break;
         }
         memcpy(&info, m.text, sizeof info);
+        errno = 0;
         int ok = screen_present_dmabuf(fd, m.width, m.height, info.fourcc, info.pitch, info.offset, info.modifier);
+        int err = errno;
         close(fd);
         if (ok < 0) {
-            struct extdisplay_ipc off = { .op = EXTDISPLAY_IPC_DMABUF_OFF };
-            (void)extdisplay_ipc_send(ipc, &off);
-        } else if (frame) {
-            munmap(frame, frame_bytes);
-            frame = NULL;
-            frame_w = frame_h = 0;
+            if (err != EAGAIN && err != EACCES && err != EPERM) {
+                dmabuf_active = 0;
+                struct extdisplay_ipc off = { .op = EXTDISPLAY_IPC_DMABUF_OFF };
+                (void)extdisplay_ipc_send(ipc, &off);
+            }
+        } else {
+            dmabuf_active = 1;
+            frame_w = m.width;
+            frame_h = m.height;
+            viewport();
+            if (frame) {
+                munmap(frame, frame_bytes);
+                frame = NULL;
+            }
         }
         struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK };
         return extdisplay_ipc_send(ipc, &ack) < 0 ? -1 : 0;
@@ -417,7 +431,11 @@ static void session_run(int transport)
                     break;
                 }
                 if (session_started && worker < 0) break;
-                redraw = 1;
+                if (!dmabuf_active) redraw = 1;
+                else if (base_session_input_allowed() && ipc >= 0) {
+                    struct extdisplay_ipc ref = { .op = EXTDISPLAY_IPC_REFRESH };
+                    (void)extdisplay_ipc_send(ipc, &ref);
+                }
             }
         }
         if (ipc >= 0 && p[0].revents) {
@@ -435,6 +453,10 @@ static void session_run(int transport)
         }
         if (key == K_SHOWN) {
             cancel();
+            if (dmabuf_active && ipc >= 0) {
+                struct extdisplay_ipc ref = { .op = EXTDISPLAY_IPC_REFRESH };
+                (void)extdisplay_ipc_send(ipc, &ref);
+            }
             redraw = 1;
         }
         if (redraw) draw();
@@ -453,6 +475,7 @@ static void session_run(int transport)
     if (frame) munmap(frame, frame_bytes);
     frame = NULL;
     frame_w = frame_h = 0;
+    dmabuf_active = 0;
     if (setup.state == EXTDISPLAY_SETUP_PAIRED) extdisplay_setup_cancel(&setup);
 }
 

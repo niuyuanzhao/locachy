@@ -44,6 +44,7 @@ static struct {
     size_t tx_start, tx_end;
     double last_rx, last_ping;
     int hello, welcomed, active, frame_pending, dmabuf_off;
+    uint32_t width, height;
     unsigned hw_caps;
 } session;
 
@@ -195,6 +196,8 @@ static int receive(void *unused, const unsigned char *data, size_t n)
         extdisplay_decoder_close(session.decoder);
         if (!(session.decoder = extdisplay_decoder_open(c.codec, c.width, c.height))) return -1;
         if (session.dmabuf_off) extdisplay_decoder_disable_dmabuf(session.decoder);
+        session.width = c.width;
+        session.height = c.height;
         session.active = 1;
         return status(EXTDISPLAY_IPC_ACTIVE);
     case EXTDISPLAY_MSG_VIDEO: {
@@ -327,6 +330,20 @@ static int frontend(void)
         session.dmabuf_off = 1;
         extdisplay_decoder_disable_dmabuf(session.decoder);
         return 0;
+    case EXTDISPLAY_IPC_REFRESH: {
+        if (!session.active || session.frame_pending || session.dmabuf_off) return 0;
+        int dmabuf_fd = -1;
+        struct extdisplay_dmabuf info;
+        if (extdisplay_decoder_reexport_dmabuf(session.decoder, &dmabuf_fd, &info) > 0 && dmabuf_fd >= 0) {
+            struct extdisplay_ipc dm = {
+                .magic = EXTDISPLAY_IPC_MAGIC, .op = EXTDISPLAY_IPC_DMABUF,
+                .width = session.width, .height = session.height, .length = sizeof info,
+            };
+            memcpy(dm.text, &info, sizeof info);
+            return send_fd_msg(&dm, dmabuf_fd);
+        }
+        return 0;
+    }
     case EXTDISPLAY_IPC_HELLO:
         if (session.hello || !m.length || enqueue(m.text, m.length) < 0) return -1;
         session.hello = 1;

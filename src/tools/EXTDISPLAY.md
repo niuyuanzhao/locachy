@@ -41,7 +41,7 @@ When `extdisplay` is opened on LOCachy:
 1. `extdisplay-broker` moves the verified `thunderbolt-net` interface into an isolated network namespace, configures link-local IPv6, and starts `extdisplay-advertise` to publish `_locachy-ext._tcp.local.` with a fresh per-session 128-bit PSK on that link.
 2. The macOS background service discovers the advertisement on the Thunderbolt link and dials `TLS_PSK_WITH_AES_128_GCM_SHA256` (identity and ALPN `locachy-extdisplay-v1`) automatically.
 3. The receiver sends `hello` with its physical panel dimensions (`pixelsWide × pixelsHigh`), scale, supported codecs (`h264`, `hevc`), and input capabilities.
-4. From the receiver's reported panel dimensions, the sender computes an exact 1:1 virtual display mode (`pixels ÷ 2` points at `@2x` HiDPI when divisible into even points for high-density panels, otherwise `1×`) with no saved mode presets or fractional downscaling, and streams at the panel's physical resolution.
+4. From the receiver's reported panel dimensions, the sender computes the exact 1:1 virtual display mode (`pixels ÷ 2` points at `@2x` HiDPI when divisible into even points for high-density panels, otherwise `1×`) with no cross-session mode presets, and exposes five proportional scaling steps (`2.0×`, `1.75×`, `1.5×`, `1.25×`, `1.0×`) in System Settings → Displays (**Larger Text ↔ More Space**). At `1:1` modes, frames stream untouched; at intermediate HiDPI scaling steps, the sender captures natively and applies Metal Mitchell bicubic downscaling (`B=1/3, C=1/3`) before streaming at the panel's physical resolution.
 
 ## Session Behavior
 

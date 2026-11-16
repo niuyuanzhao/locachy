@@ -30,6 +30,7 @@ enum extdisplay_ipc_op {
     EXTDISPLAY_IPC_FRAME_ACK,  /* the last FRAME is mapped: the next may come */
     EXTDISPLAY_IPC_CANCEL,     /* cancel to the peer now, answered by CANCELLED once written */
     EXTDISPLAY_IPC_DMABUF_OFF, /* frontend cannot import dma-bufs: send sealed memfd */
+    EXTDISPLAY_IPC_REFRESH,    /* re-export the last dma-buf frame after VT/lease restore */
     /* worker to frontend */
     EXTDISPLAY_IPC_READY = 16, /* width: decoders (1 H.264, 2 HEVC, 4 HW H.264, 8 HW HEVC420, 16 HW HEVC444) */
     EXTDISPLAY_IPC_ACTIVE,     /* streamConfig accepted, decoder open */

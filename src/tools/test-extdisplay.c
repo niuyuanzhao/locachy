@@ -330,6 +330,10 @@ static void ipc(void)
     CHECK(send_raw(sv[0], &dmabuf, &sealed, 1) == 0);
     CHECK(extdisplay_ipc_recv(sv[1], &r, &fd) == 0 && r.op == EXTDISPLAY_IPC_DMABUF && fd >= 0);
     if (fd >= 0) close(fd);
+    /* A refresh request round-trips with zero descriptors and zero bytes. */
+    struct extdisplay_ipc refresh = { .op = EXTDISPLAY_IPC_REFRESH };
+    CHECK(extdisplay_ipc_send(sv[0], &refresh) == 0);
+    CHECK(extdisplay_ipc_recv(sv[1], &r, &fd) == 0 && r.op == EXTDISPLAY_IPC_REFRESH && fd < 0);
     /* Malformed dma-buf metadata (wrong length or nonzero bytes) is refused. */
     struct extdisplay_ipc bad_dma = dmabuf;
     bad_dma.length = 4;

@@ -2163,7 +2163,8 @@ int screen_render_node(char *path, size_t size)
 int screen_present_dmabuf(int dmabuf_fd, uint32_t w, uint32_t h, uint32_t fourcc,
                           uint32_t pitch, uint32_t offset, uint64_t modifier)
 {
-    if (dmabuf_fd < 0 || window_mode || card < 0 || noutputs != 1 || lent || extended) return -1;
+    if (dmabuf_fd < 0 || window_mode || extended) { errno = EINVAL; return -1; }
+    if (card < 0 || noutputs != 1 || lent) { errno = EAGAIN; return -1; }
     struct output *o = &outputs[0];
     if (o->mode.hdisplay != w || o->mode.vdisplay != h) return -1;
     struct drm_prime_handle prime = { .fd = (uint32_t)dmabuf_fd };

@@ -31,7 +31,7 @@ struct extdisplay_decoder {
     VASurfaceID vpp_surf[2];
     VAConfigID vpp_cfg;
     VAContextID vpp_ctx;
-    int vpp_ready, vpp_idx;
+    int vpp_ready, vpp_idx, vpp_has_last;
 #endif
 };
 int extdisplay_vaapi_init(int render_fd, unsigned *hw_caps)
@@ -289,10 +289,12 @@ int extdisplay_decoder_export_dmabuf(struct extdisplay_decoder *d, int *fd, stru
     }
     VASurfaceID src = (VASurfaceID)(uintptr_t)d->ready->data[3];
     VASurfaceID dst = d->vpp_surf[d->vpp_idx];
+    VAProcColorStandardType cs = d->ready->colorspace == AVCOL_SPC_BT709
+        ? VAProcColorStandardBT709 : VAProcColorStandardBT601;
     VAProcPipelineParameterBuffer param = {
         .surface = src,
-        .surface_color_standard = d->ready->colorspace == AVCOL_SPC_BT709 ? VAProcColorStandardBT709 : VAProcColorStandardBT601,
-        .output_color_standard = VAProcColorStandardBT709,
+        .surface_color_standard = cs,
+        .output_color_standard = cs,
         .input_color_properties = {
             .color_range = d->ready->color_range == AVCOL_RANGE_JPEG ? VA_SOURCE_RANGE_FULL : VA_SOURCE_RANGE_REDUCED,
         },
@@ -335,8 +337,39 @@ int extdisplay_decoder_export_dmabuf(struct extdisplay_decoder *d, int *fd, stru
         .modifier = prime.objects[0].drm_format_modifier,
     };
     d->vpp_idx ^= 1;
+    d->vpp_has_last = 1;
     av_frame_unref(d->ready);
     d->has_ready = 0;
+    return 1;
+#else
+    (void)d; (void)fd; (void)info;
+    return 0;
+#endif
+}
+int extdisplay_decoder_reexport_dmabuf(struct extdisplay_decoder *d, int *fd, struct extdisplay_dmabuf *info)
+{
+#ifdef CONFIG_EXTDISPLAY_VAAPI
+    if (!d || d->dmabuf_off || !va_vpp_ok || !va_disp || !d->vpp_ready || !d->vpp_has_last) return 0;
+    VASurfaceID dst = d->vpp_surf[d->vpp_idx ^ 1];
+    VADRMPRIMESurfaceDescriptor prime;
+    memset(&prime, 0, sizeof prime);
+    if (vaExportSurfaceHandle(va_disp, dst, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+                              VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_COMPOSED_LAYERS, &prime) != VA_STATUS_SUCCESS) {
+        return 0;
+    }
+    if (prime.num_objects != 1 || prime.num_layers != 1 || prime.layers[0].num_planes != 1 || prime.objects[0].fd < 0) {
+        for (uint32_t i = 0; i < prime.num_objects && i < 4; i++) {
+            if (prime.objects[i].fd >= 0) close(prime.objects[i].fd);
+        }
+        return 0;
+    }
+    *fd = prime.objects[0].fd;
+    *info = (struct extdisplay_dmabuf){
+        .fourcc = prime.layers[0].drm_format,
+        .pitch = prime.layers[0].pitch[0],
+        .offset = prime.layers[0].offset[0],
+        .modifier = prime.objects[0].drm_format_modifier,
+    };
     return 1;
 #else
     (void)d; (void)fd; (void)info;
@@ -393,6 +426,8 @@ int extdisplay_decoder_step(struct extdisplay_decoder *d, const void *p, size_t 
 int extdisplay_decoder_size(const struct extdisplay_decoder *d, uint32_t *w, uint32_t *h)
 { (void)d; (void)w; (void)h; return 0; }
 int extdisplay_decoder_export_dmabuf(struct extdisplay_decoder *d, int *fd, struct extdisplay_dmabuf *info)
+{ (void)d; (void)fd; (void)info; return 0; }
+int extdisplay_decoder_reexport_dmabuf(struct extdisplay_decoder *d, int *fd, struct extdisplay_dmabuf *info)
 { (void)d; (void)fd; (void)info; return 0; }
 int extdisplay_decoder_render(struct extdisplay_decoder *d, uint32_t *dst)
 { (void)d; (void)dst; errno = ENOTSUP; return -1; }
