@@ -78,7 +78,8 @@ static int make_listener(int ifindex, const struct in6_addr *address)
                                   .sin6_addr = *address, .sin6_scope_id = (uint32_t)ifindex };
     int one = 1, fd = socket(AF_INET6, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     if (fd < 0) return -1;
-    if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof one) < 0 ||
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one) < 0 ||
+        setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof one) < 0 ||
         setsockopt(fd, SOL_SOCKET, SO_BINDTOIFINDEX, &ifindex, sizeof ifindex) < 0 ||
         bind(fd, (struct sockaddr *)&local, sizeof local) < 0 || listen(fd, 1) < 0) {
         close(fd);

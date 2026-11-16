@@ -19,6 +19,7 @@
 #define EXTDISPLAY_IPC_TEXT 1024u
 #define EXTDISPLAY_IPC_FD 3        /* the worker's: this channel */
 #define EXTDISPLAY_TRANSPORT_FD 4  /* the worker's: the paired stream */
+#define EXTDISPLAY_RENDER_FD 5     /* optional DRM render node for VA-API */
 #define EXTDISPLAY_CANCEL_WAIT_MS 150 /* session.h's owner waits 250 ms for the ACK */
 
 enum extdisplay_ipc_op {
@@ -28,13 +29,19 @@ enum extdisplay_ipc_op {
     EXTDISPLAY_IPC_STOP,       /* cancel to the peer, then exit */
     EXTDISPLAY_IPC_FRAME_ACK,  /* the last FRAME is mapped: the next may come */
     EXTDISPLAY_IPC_CANCEL,     /* cancel to the peer now, answered by CANCELLED once written */
+    EXTDISPLAY_IPC_DMABUF_OFF, /* frontend cannot import dma-bufs: send sealed memfd */
     /* worker to frontend */
-    EXTDISPLAY_IPC_READY = 16, /* width: decoders, 1 H.264, 2 HEVC */
+    EXTDISPLAY_IPC_READY = 16, /* width: decoders (1 H.264, 2 HEVC, 4 HW H.264, 8 HW HEVC420, 16 HW HEVC444) */
     EXTDISPLAY_IPC_ACTIVE,     /* streamConfig accepted, decoder open */
     EXTDISPLAY_IPC_FRAME,      /* width, height, bytes; one memfd */
     EXTDISPLAY_IPC_UNAVAILABLE,
     EXTDISPLAY_IPC_FAILED,
     EXTDISPLAY_IPC_CANCELLED,  /* the cancel is in the transport */
+    EXTDISPLAY_IPC_DMABUF,     /* width, height, text=extdisplay_dmabuf; one dma-buf fd */
+};
+struct extdisplay_dmabuf {
+    uint32_t fourcc, pitch, offset, reserved;
+    uint64_t modifier;
 };
 struct extdisplay_ipc {
     uint32_t magic, op, width, height;
@@ -44,6 +51,7 @@ struct extdisplay_ipc {
 };
 /* transport: the broker's paired AF_UNIX stream (never a raw TCP socket). */
 pid_t extdisplay_worker_spawn(int transport, int *ipc);
+pid_t extdisplay_worker_spawn_hw(int transport, int render_fd, int *ipc);
 int extdisplay_ipc_send(int fd, struct extdisplay_ipc *message);
 /* 0 and *pixels_fd (-1 unless FRAME), or -1 (errno EAGAIN: nothing there). */
 int extdisplay_ipc_recv(int fd, struct extdisplay_ipc *message, int *pixels_fd);

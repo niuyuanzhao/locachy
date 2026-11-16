@@ -12,11 +12,12 @@ static struct {
 int base_raw_enable(int on)
 {
     int old = enabled;
-    enabled = !!on;
+    enabled = on > 1 ? 2 : !!on;
     head = length = 0;
     memset(held, 0, sizeof held);
     return old;
 }
+int base_raw_forward_home(void) { return enabled == 2; }
 int base_raw_pending(void) { return enabled && length != 0; }
 int base_raw_next(struct base_raw_key *out)
 {

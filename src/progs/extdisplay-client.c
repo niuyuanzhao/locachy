@@ -21,15 +21,18 @@
 #include <unistd.h>
 
 /* In the child, before exec: every step works, or it exits. */
-static void child(int ipc, int transport)
+static void child(int ipc, int transport, int render_fd)
 {
     int s = fcntl(ipc, F_DUPFD_CLOEXEC, 10);
     int t = fcntl(transport, F_DUPFD_CLOEXEC, 10);
+    int r = render_fd >= 0 ? fcntl(render_fd, F_DUPFD_CLOEXEC, 10) : -1;
     int null = open("/dev/null", O_RDWR | O_CLOEXEC);
     sigset_t none;
-    if (s < 0 || t < 0 || null < 0 || dup2(null, 0) < 0 || dup2(null, 1) < 0 || dup2(null, 2) < 0 ||
+    if (s < 0 || t < 0 || (render_fd >= 0 && r < 0) || null < 0 ||
+        dup2(null, 0) < 0 || dup2(null, 1) < 0 || dup2(null, 2) < 0 ||
         dup2(s, EXTDISPLAY_IPC_FD) < 0 || dup2(t, EXTDISPLAY_TRANSPORT_FD) < 0 ||
-        close_range(EXTDISPLAY_TRANSPORT_FD + 1, ~0u, 0) < 0) {
+        (r >= 0 && dup2(r, EXTDISPLAY_RENDER_FD) < 0) ||
+        close_range((r >= 0 ? EXTDISPLAY_RENDER_FD : EXTDISPLAY_TRANSPORT_FD) + 1, ~0u, 0) < 0) {
         _exit(127);
     }
     sigemptyset(&none);
@@ -45,7 +48,7 @@ static void child(int ipc, int transport)
     _exit(127);
 }
 
-pid_t extdisplay_worker_spawn(int transport, int *ipc)
+pid_t extdisplay_worker_spawn_hw(int transport, int render_fd, int *ipc)
 {
     int sv[2];
     if (geteuid() != 0) {
@@ -54,7 +57,7 @@ pid_t extdisplay_worker_spawn(int transport, int *ipc)
     }
     if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, sv) < 0) return -1;
     pid_t pid = fork();
-    if (pid == 0) child(sv[1], transport);
+    if (pid == 0) child(sv[1], transport, render_fd);
     close(sv[1]);
     if (pid < 0) {
         close(sv[0]);
@@ -62,6 +65,11 @@ pid_t extdisplay_worker_spawn(int transport, int *ipc)
     }
     *ipc = sv[0];
     return pid;
+}
+
+pid_t extdisplay_worker_spawn(int transport, int *ipc)
+{
+    return extdisplay_worker_spawn_hw(transport, -1, ipc);
 }
 
 int extdisplay_ipc_send(int fd, struct extdisplay_ipc *m)
@@ -99,9 +107,11 @@ int extdisplay_ipc_recv(int fd, struct extdisplay_ipc *m, int *pixels)
             else close(f);
         }
     }
+    int has_fd = m->op == EXTDISPLAY_IPC_FRAME || m->op == EXTDISPLAY_IPC_DMABUF;
     if (n != (ssize_t)sizeof *m || bad || nfds > 1 || (msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) ||
         m->magic != EXTDISPLAY_IPC_MAGIC || m->reserved || m->length > EXTDISPLAY_IPC_TEXT ||
-        (m->op == EXTDISPLAY_IPC_FRAME) != (*pixels >= 0) || (m->op != EXTDISPLAY_IPC_FRAME && m->bytes)) {
+        has_fd != (*pixels >= 0) || (m->op != EXTDISPLAY_IPC_FRAME && m->bytes) ||
+        (m->op == EXTDISPLAY_IPC_DMABUF && m->length != sizeof(struct extdisplay_dmabuf))) {
         if (*pixels >= 0) close(*pixels);
         *pixels = -1;
         errno = EPROTO;

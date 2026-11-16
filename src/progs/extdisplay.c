@@ -48,8 +48,18 @@ static uint32_t *frame;
 static size_t frame_bytes;
 static uint32_t frame_w, frame_h;
 static int vx, vy, vw, vh, panel_w, panel_h;
+static char decode_mode[16] = "auto";
 static const char *state = N_("Unavailable");
 static const char *detail = N_("Waiting for the sender.");
+
+static void on_rc_decode(const char *name, const char *value, void *arg)
+{
+    (void)arg;
+    if (strcmp(name, "extdisplay_decode") == 0 &&
+        (strcmp(value, "auto") == 0 || strcmp(value, "hw") == 0 || strcmp(value, "sw") == 0)) {
+        snprintf(decode_mode, sizeof decode_mode, "%s", value);
+    }
+}
 
 static void ending(int sig) { (void)sig; stop = 1; }
 
@@ -101,11 +111,19 @@ static void viewport(void)
 static void draw(void)
 {
     viewport();
-    screen_fill_px(0, 0, panel_w, panel_h, 0x000000);
     if (frame && frame_w && frame_h) {
         if (vw == (int)frame_w && vh == (int)frame_h) {
+            if (vx > 0) {
+                screen_fill_px(0, 0, vx, panel_h, 0x000000);
+                screen_fill_px(vx + vw, 0, panel_w - (vx + vw), panel_h, 0x000000);
+            }
+            if (vy > 0) {
+                screen_fill_px(0, 0, panel_w, vy, 0x000000);
+                screen_fill_px(0, vy + vh, panel_w, panel_h - (vy + vh), 0x000000);
+            }
             screen_blit(vx, vy, vw, vh, frame, vw);
         } else {
+            screen_fill_px(0, 0, panel_w, panel_h, 0x000000);
             uint32_t *line = malloc((size_t)vw * sizeof *line);
             for (int y = 0; line && y < vh; y++) {
                 const uint32_t *src = frame + (size_t)((uint64_t)y * frame_h / (unsigned)vh) * frame_w;
@@ -114,6 +132,8 @@ static void draw(void)
             }
             free(line);
         }
+    } else {
+        screen_fill_px(0, 0, panel_w, panel_h, 0x000000);
     }
     screen_flush();
 }
@@ -144,9 +164,9 @@ static int pointer_input(void)
     return send_input(s, n);
 }
 
-/* Every key goes to the sender while the link is up, Ctrl+Alt+F12 included:
- * no key ends the session or the program; the cable coming out does. Only
- * process 1's bindings (home, lock, volume, brightness) stay local. */
+/* Every key goes to the sender while the link is up, Super+Esc and Ctrl+Alt+F12
+ * included: no key switches away or ends the program; the cable coming out
+ * does. Only lock, volume, and brightness bindings stay local. */
 static int raw_input(void)
 {
     struct base_raw_key e;
@@ -218,7 +238,7 @@ static int release_remote(pid_t *worker, int *inhibited)
                     break;
                 }
                 if (fd >= 0) close(fd);
-                if (m.op == EXTDISPLAY_IPC_FRAME) {
+                if (m.op == EXTDISPLAY_IPC_FRAME || m.op == EXTDISPLAY_IPC_DMABUF) {
                     struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK };
                     extdisplay_ipc_send(ipc, &ack);
                 }
@@ -237,7 +257,11 @@ static int release_remote(pid_t *worker, int *inhibited)
     }
     outside_cancelled = 1;
     if (base_session_input_cancelled() != 0) return -1;
-    if (active && base_session_input_allowed() && base_sleep_inhibit(1) == 0) *inhibited = 1;
+    if (base_session_input_allowed()) {
+        base_raw_enable(0);
+        base_raw_enable(2);
+        if (active && base_sleep_inhibit(1) == 0) *inhibited = 1;
+    }
     return 0;
 }
 
@@ -252,13 +276,15 @@ static int handle_worker(int *inhibited, double *started)
     }
     switch (m.op) {
     case EXTDISPLAY_IPC_READY: {
-        if (!m.width || m.width > 3) break;
+        if (!(m.width & 3u) || m.width > 31u) break;
         char hello[EXTDISPLAY_IPC_TEXT];
         int w, h;
         screen_pixels(&w, &h);
         double scale = screen_scale();
+        int use_hevc = (m.width & 2u) != 0;
+        if (strcmp(decode_mode, "hw") == 0 && !(m.width & 16u) && (m.width & 4u)) use_hevc = 0;
         int n = extdisplay_hello(hello, sizeof hello, (uint32_t)(w > 0 ? w : 1), (uint32_t)(h > 0 ? h : 1),
-                          scale >= 0.5 && scale <= 4 ? scale : 1.0, m.width & 1, (m.width & 2) != 0);
+                          scale >= 0.5 && scale <= 4 ? scale : 1.0, m.width & 1u, use_hevc);
         if (send_text(EXTDISPLAY_IPC_HELLO, hello, n) < 0) break;
         return 1;
     }
@@ -291,6 +317,26 @@ static int handle_worker(int *inhibited, double *started)
         struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK };
         return extdisplay_ipc_send(ipc, &ack) < 0 ? -1 : 1;
     }
+    case EXTDISPLAY_IPC_DMABUF: {
+        struct extdisplay_dmabuf info;
+        if (m.length != sizeof info) {
+            if (fd >= 0) close(fd);
+            break;
+        }
+        memcpy(&info, m.text, sizeof info);
+        int ok = screen_present_dmabuf(fd, m.width, m.height, info.fourcc, info.pitch, info.offset, info.modifier);
+        close(fd);
+        if (ok < 0) {
+            struct extdisplay_ipc off = { .op = EXTDISPLAY_IPC_DMABUF_OFF };
+            (void)extdisplay_ipc_send(ipc, &off);
+        } else if (frame) {
+            munmap(frame, frame_bytes);
+            frame = NULL;
+            frame_w = frame_h = 0;
+        }
+        struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK };
+        return extdisplay_ipc_send(ipc, &ack) < 0 ? -1 : 0;
+    }
     case EXTDISPLAY_IPC_UNAVAILABLE:
         set_state(N_("Unavailable"), N_("The decoder sandbox or FFmpeg is not available."));
         return -1;
@@ -307,7 +353,14 @@ static int handle_worker(int *inhibited, double *started)
 static void session_run(int transport)
 {
     pid_t worker = -1;
-    int owner = base_session_fd(), inhibited = 0, session_started = 0;
+    int owner = base_session_fd(), inhibited = 0, session_started = 0, render_fd = -1;
+    char render_path[64];
+    snprintf(decode_mode, sizeof decode_mode, "auto");
+    rc_read(on_rc_decode, NULL);
+    if (strcmp(decode_mode, "sw") != 0 && screen_output_count() == 1 &&
+        screen_render_node(render_path, sizeof render_path) == 0) {
+        render_fd = open(render_path, O_RDWR | O_CLOEXEC);
+    }
     set_state(N_("Unavailable"), N_("Waiting for the sender."));
     if (transport < 0) {
         /* nothing to run */
@@ -317,19 +370,21 @@ static void session_run(int transport)
         set_state(N_("Unavailable"), N_("The transport is not a local stream from the broker."));
     } else if (owner >= 0 && (base_session_service() < 0 || base_session_input_cancelled() != 0)) {
         set_state(N_("Unavailable"), N_("The session owner did not accept this session."));
-    } else if ((worker = extdisplay_worker_spawn(transport, &ipc)) < 0) {
+    } else if ((worker = extdisplay_worker_spawn_hw(transport, render_fd, &ipc)) < 0) {
         set_state(N_("Unavailable"), N_("The decoder worker could not be started."));
     } else {
         set_state(N_("Connecting"), N_("Waiting for the sender."));
-        say("extdisplay: decoder worker %d started", (int)worker);
+        say("extdisplay: decoder worker %d started%s", (int)worker, render_fd >= 0 ? " (VA-API enabled)" : "");
         session_started = 1;
     }
+    if (render_fd >= 0) close(render_fd);
     if (transport >= 0) close(transport);
     if (!session_started) {
         if (setup.state == EXTDISPLAY_SETUP_PAIRED) extdisplay_setup_cancel(&setup);
         return;
     }
     screen_cursor(CURSOR_NONE);
+    base_raw_enable(2);
     (void)base_session_hold(1);
     draw();
 
@@ -391,7 +446,8 @@ static void session_run(int transport)
     if (active) cancel();
     active = 0;
     screen_cursor(CURSOR_ARROW);
-    if (unplugged || leaving) (void)base_session_hold(0);
+    base_raw_enable(1);
+    (void)base_session_hold(0);
     if (inhibited) base_sleep_inhibit(0);
     end_worker(worker);
     if (frame) munmap(frame, frame_bytes);
@@ -527,7 +583,6 @@ static void setup_loop(void)
                 break;
             }
             case EXTDISPLAY_SETUP_EV_ERROR:
-                (void)base_session_hold(0);
                 auto_pair = 0;
                 suppress_auto = 1;
                 suppressed = selection;
@@ -535,7 +590,6 @@ static void setup_loop(void)
                 redraw = 1;
                 break;
             case EXTDISPLAY_SETUP_EV_CODE:
-                (void)base_session_hold(1);
                 redraw = 1;
                 break;
             case EXTDISPLAY_SETUP_EV_PAIRED: {
@@ -553,9 +607,6 @@ static void setup_loop(void)
                 break;
             }
             case EXTDISPLAY_SETUP_EV_ENDED:
-                if (unplugged || leaving || strcmp(setup.reason, "cancelled") == 0) {
-                    (void)base_session_hold(0);
-                }
                 if (strcmp(setup.reason, "cancelled") != 0) {
                     suppress_auto = unplugged;
                 }
@@ -604,11 +655,9 @@ static void setup_loop(void)
             setup.error[0] = setup.reason[0] = '\0';
             auto_pair = 0;
             selection = setup.ifaces[selected];
-            (void)base_session_hold(1);
             extdisplay_setup_pair(&setup, setup.ifaces[selected].name);
             redraw = 1;
         } else if (key == 27 && (setup.state == EXTDISPLAY_SETUP_PAIRING || setup.state == EXTDISPLAY_SETUP_WAITING)) {
-            (void)base_session_hold(0);
             auto_pair = 0;
             suppress_auto = 1;
             suppressed = selection;
@@ -632,7 +681,6 @@ static void setup_loop(void)
                     selection = setup.ifaces[selected];
                     setup.error[0] = setup.reason[0] = '\0';
                     auto_pair = 0;
-                    (void)base_session_hold(1);
                     extdisplay_setup_pair(&setup, selection.name);
                     redraw = 1;
                 }

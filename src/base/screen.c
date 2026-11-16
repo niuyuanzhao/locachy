@@ -19,6 +19,7 @@
  * TEXT_H pixels high times the first output's scale (MONITORS_CONF, as on the
  * shared display), so the cells, not the picture, grow with the scale.
  */
+#include <dirent.h>
 #include <drm/drm.h>
 #include <drm/drm_mode.h>
 #include <errno.h>
@@ -29,8 +30,15 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <time.h>
 #include <unistd.h>
+#if defined(__AVX2__)
+#include <immintrin.h>
+#elif defined(__SSE2__)
+#include <emmintrin.h>
+#endif
 
 #ifdef CONFIG_FREETYPE
 #include <ft2build.h>
@@ -67,6 +75,7 @@ struct output {
     uint8_t *map;
     uint64_t map_size;
     uint32_t pitch, fb_id, handle;
+    uint32_t dmabuf_fb_id;           /* zero-copy DRM PRIME scanout FB, when shown */
     int soft_cursor;                 /* no cursor plane: drawn into the scanout */
     struct drm_clip_rect cursor_at;  /* where it was drawn there; empty if x1 == x2 */
     uint32_t lessee;                 /* process 1: the lease it is lent in; 0 if none */
@@ -539,6 +548,16 @@ static void *array(uint32_t count, size_t each)
 /* Each successful step owns its resources immediately, including on failure. */
 static void destroy_output(int fd, struct output *o)
 {
+    if (o->dmabuf_fb_id != 0) {
+        if (o->fb_id != 0 && fd >= 0) {
+            struct drm_mode_crtc set = { .crtc_id = o->crtc_id, .fb_id = o->fb_id,
+                                         .set_connectors_ptr = (uintptr_t)&o->conn_id,
+                                         .count_connectors = 1, .mode = o->mode, .mode_valid = 1 };
+            (void)ioctl(fd, DRM_IOCTL_MODE_SETCRTC, &set);
+        }
+        ioctl(fd, DRM_IOCTL_MODE_RMFB, &o->dmabuf_fb_id);
+        o->dmabuf_fb_id = 0;
+    }
     if (o->map != NULL) {
         munmap(o->map, (size_t)o->map_size);
         o->map = NULL;
@@ -869,6 +888,9 @@ static struct drm_clip_rect fit_rect(uint32_t sw, uint32_t sh, uint32_t dw, uint
 
 /* Pure memory copy: identical sizes keep dirty rows; scaled outputs redraw
  * the entire frame, including borders, on any logical damage. Pitch is bytes. */
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((optimize("O3")))
+#endif
 static struct drm_clip_rect copy_picture(uint8_t *dst, uint32_t pitch, uint32_t dw, uint32_t dh,
                                          const uint32_t *src, uint32_t sw, uint32_t sh,
                                          struct drm_clip_rect clip)
@@ -1552,6 +1574,10 @@ int screen_take_back(uint32_t lessee)
     int result = 0;
     for (uint32_t i = 0; i < noutputs; i++) {
         if (i < 32 && !back[i]) continue; /* still lent to another program */
+        if (outputs[i].dmabuf_fb_id != 0) {
+            ioctl(card, DRM_IOCTL_MODE_RMFB, &outputs[i].dmabuf_fb_id);
+            outputs[i].dmabuf_fb_id = 0;
+        }
         if (set_crtc(card, &outputs[i]) < 0) {
             say("screen: master restored; connector %u needs rescan: %m", outputs[i].conn_id);
             result = 1;
@@ -1847,6 +1873,11 @@ void screen_flush(void)
         if (o->map == NULL) {
             continue;
         }
+        if (o->dmabuf_fb_id != 0) {
+            (void)set_crtc(card, o);
+            ioctl(card, DRM_IOCTL_MODE_RMFB, &o->dmabuf_fb_id);
+            o->dmabuf_fb_id = 0;
+        }
         soft_cursor_flush(o, 0);
         struct drm_clip_rect clip = copy_picture(o->map, o->pitch,
             o->mode.hdisplay, o->mode.vdisplay, shadow, width, height, dirty);
@@ -2021,6 +2052,9 @@ static int clip_px(int *x, int *y, int *w, int *h, int *sx, int *sy)
     return 1;
 }
 
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((optimize("O3")))
+#endif
 void screen_blit(int x, int y, int w, int h, const uint32_t *px, int stride)
 {
     int sx, sy;
@@ -2028,15 +2062,35 @@ void screen_blit(int x, int y, int w, int h, const uint32_t *px, int stride)
         return;
     }
     touch((uint32_t)x, (uint32_t)y, (uint32_t)(x + w), (uint32_t)(y + h));
+#if defined(__AVX2__)
+    const __m256i mask = _mm256_set1_epi32(0x00FFFFFF);
+#elif defined(__SSE2__)
+    const __m128i mask = _mm_set1_epi32(0x00FFFFFF);
+#endif
     for (int r = 0; r < h; r++) {
         const uint32_t *from = px + (uint64_t)(sy + r) * (uint64_t)stride + sx;
         uint32_t *to = shadow + (uint64_t)(y + r) * width + (uint64_t)x;
-        for (int c = 0; c < w; c++) {
+        int c = 0;
+#if defined(__AVX2__)
+        for (; c + 8 <= w; c += 8) {
+            __m256i v = _mm256_loadu_si256((const __m256i *)(from + c));
+            _mm256_storeu_si256((__m256i *)(to + c), _mm256_and_si256(v, mask));
+        }
+#elif defined(__SSE2__)
+        for (; c + 4 <= w; c += 4) {
+            __m128i v = _mm_loadu_si128((const __m128i *)(from + c));
+            _mm_storeu_si128((__m128i *)(to + c), _mm_and_si128(v, mask));
+        }
+#endif
+        for (; c < w; c++) {
             to[c] = from[c] & 0xFFFFFF;
         }
     }
 }
 
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((optimize("O3")))
+#endif
 void screen_fill_px(int x, int y, int w, int h, uint32_t rgb)
 {
     int sx, sy;
@@ -2044,12 +2098,107 @@ void screen_fill_px(int x, int y, int w, int h, uint32_t rgb)
         return;
     }
     touch((uint32_t)x, (uint32_t)y, (uint32_t)(x + w), (uint32_t)(y + h));
+    rgb &= 0xFFFFFF;
+#if defined(__AVX2__)
+    const __m256i fill = _mm256_set1_epi32((int)rgb);
+#elif defined(__SSE2__)
+    const __m128i fill = _mm_set1_epi32((int)rgb);
+#endif
     for (int r = 0; r < h; r++) {
         uint32_t *to = shadow + (uint64_t)(y + r) * width + (uint64_t)x;
-        for (int c = 0; c < w; c++) {
-            to[c] = rgb & 0xFFFFFF;
+        int c = 0;
+#if defined(__AVX2__)
+        for (; c + 8 <= w; c += 8) {
+            _mm256_storeu_si256((__m256i *)(to + c), fill);
+        }
+#elif defined(__SSE2__)
+        for (; c + 4 <= w; c += 4) {
+            _mm_storeu_si128((__m128i *)(to + c), fill);
+        }
+#endif
+        for (; c < w; c++) {
+            to[c] = rgb;
         }
     }
+}
+
+int screen_render_node(char *path, size_t size)
+{
+    struct stat st;
+    if (!path || size == 0 || window_mode || card < 0 || fstat(card, &st) < 0) return -1;
+    char drvlink[128], drv[256];
+    snprintf(drvlink, sizeof drvlink, "/sys/dev/char/%u:%u/device/driver",
+             (unsigned)major(st.st_rdev), (unsigned)minor(st.st_rdev));
+    ssize_t dn = readlink(drvlink, drv, sizeof drv - 1);
+    if (dn <= 0) return -1;
+    drv[dn] = '\0';
+    const char *base = strrchr(drv, '/');
+    base = base ? base + 1 : drv;
+    /* Only expose VA-API + DRM PRIME scanout on drivers verified to export
+     * direct BGRX scanout surfaces cleanly; skip nouveau/nvidia-drm/simpledrm. */
+    if (strcmp(base, "i915") != 0 && strcmp(base, "xe") != 0 &&
+        strcmp(base, "amdgpu") != 0 && strcmp(base, "radeon") != 0) {
+        return -1;
+    }
+    char dir[128];
+    snprintf(dir, sizeof dir, "/sys/dev/char/%u:%u/device/drm",
+             (unsigned)major(st.st_rdev), (unsigned)minor(st.st_rdev));
+    DIR *d = opendir(dir);
+    if (!d) return -1;
+    int found = -1;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, "renderD", 7) == 0 && strlen(e->d_name) < 32) {
+            int n = snprintf(path, size, "/dev/dri/%s", e->d_name);
+            if (n > 0 && (size_t)n < size && access(path, R_OK | W_OK) == 0) {
+                found = 0;
+                break;
+            }
+        }
+    }
+    closedir(d);
+    return found;
+}
+
+int screen_present_dmabuf(int dmabuf_fd, uint32_t w, uint32_t h, uint32_t fourcc,
+                          uint32_t pitch, uint32_t offset, uint64_t modifier)
+{
+    if (dmabuf_fd < 0 || window_mode || card < 0 || noutputs != 1 || lent || extended) return -1;
+    struct output *o = &outputs[0];
+    if (o->mode.hdisplay != w || o->mode.vdisplay != h) return -1;
+    struct drm_prime_handle prime = { .fd = (uint32_t)dmabuf_fd };
+    if (ioctl(card, DRM_IOCTL_PRIME_FD_TO_HANDLE, &prime) < 0) return -1;
+    struct drm_mode_fb_cmd2 fb = {
+        .width = w,
+        .height = h,
+        .pixel_format = fourcc,
+        .flags = modifier ? DRM_MODE_FB_MODIFIERS : 0,
+        .handles = { prime.handle },
+        .pitches = { pitch },
+        .offsets = { offset },
+        .modifier = { modifier },
+    };
+    int added = ioctl(card, DRM_IOCTL_MODE_ADDFB2, &fb);
+    /* ADDFB2 keeps its own kernel reference on the GEM object; drop our handle immediately. */
+    struct drm_gem_close gc = { .handle = prime.handle };
+    ioctl(card, DRM_IOCTL_GEM_CLOSE, &gc);
+    if (added < 0 || fb.fb_id == 0) return -1;
+    struct drm_mode_crtc set = {
+        .crtc_id = o->crtc_id,
+        .fb_id = fb.fb_id,
+        .set_connectors_ptr = (uintptr_t)&o->conn_id,
+        .count_connectors = 1,
+        .mode = o->mode,
+        .mode_valid = 1,
+    };
+    if (ioctl(card, DRM_IOCTL_MODE_SETCRTC, &set) < 0) {
+        ioctl(card, DRM_IOCTL_MODE_RMFB, &fb.fb_id);
+        return -1;
+    }
+    if (o->dmabuf_fb_id != 0) ioctl(card, DRM_IOCTL_MODE_RMFB, &o->dmabuf_fb_id);
+    o->dmabuf_fb_id = fb.fb_id;
+    dirty.x2 = dirty.x1;
+    return 0;
 }
 
 void screen_cells(int *w, int *h, int *t)

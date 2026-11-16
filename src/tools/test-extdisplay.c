@@ -188,6 +188,40 @@ static int decode(const char *codec, uint32_t w, uint32_t h, const char *path)
     for (size_t i = first_unit / 2; i < first_unit; i++) au[i] = (unsigned char)(au[i] * 33 + 7) | 1;
     extdisplay_decoder_push(d, au, first_unit, picture, NULL);
     extdisplay_decoder_close(d);
+
+    /* Split step + deferred direct render matches push output. */
+    d = extdisplay_decoder_open(hevc ? EXTDISPLAY_CODEC_HEVC : EXTDISPLAY_CODEC_H264, w, h);
+    size_t out_bytes = 0;
+    CHECK(extdisplay_dimensions(w, h, &out_bytes) == 0);
+    uint32_t *direct = malloc(out_bytes);
+    CHECK(direct != NULL);
+    int got = 0;
+    used = 0; has_vcl = 0;
+    for (size_t i = 0; i <= count; i++) {
+        int vcl = 0, first = 0, leading = 0;
+        if (i < count) kind(hevc, data + list[i].at, list[i].len, &vcl, &first, &leading);
+        if (i == count || (has_vcl && (leading || first))) {
+            int step = extdisplay_decoder_step(d, au, used);
+            CHECK(step >= 0);
+            if (step > 0) {
+                uint32_t rw = 0, rh = 0;
+                CHECK(extdisplay_decoder_size(d, &rw, &rh) == 1 && rw == w && rh == h);
+                CHECK(extdisplay_decoder_render(d, direct) == 0);
+                CHECK(extdisplay_decoder_size(d, &rw, &rh) == 0);
+                got++;
+                break;
+            }
+            used = 0; has_vcl = 0;
+        }
+        if (i == count) break;
+        memcpy(au + used, "\0\0\0\1", 4);
+        memcpy(au + used + 4, data + list[i].at, list[i].len);
+        used += 4 + list[i].len;
+        has_vcl |= vcl;
+    }
+    CHECK(got == 1 && direct[0] <= 0x00ffffff && direct[(size_t)w * h - 1] <= 0x00ffffff);
+    free(direct);
+    extdisplay_decoder_close(d);
     printf("%s: %s: %zu access units, decoded and checked\n", failures ? "FAIL" : "PASS", codec, units);
     return 0;
 }
@@ -288,6 +322,19 @@ static void ipc(void)
     /* A well-formed input message round-trips; then the socket is empty. */
     CHECK(extdisplay_ipc_send(sv[0], &input) == 0);
     CHECK(extdisplay_ipc_recv(sv[1], &r, &fd) == 0 && r.op == EXTDISPLAY_IPC_INPUT && r.length == 2 && fd < 0);
+    /* A dma-buf frame message round-trips with one descriptor and zero bytes. */
+    struct extdisplay_dmabuf info = { .fourcc = 0x34325258u, .pitch = 8704, .offset = 0, .modifier = 0 };
+    struct extdisplay_ipc dmabuf = { .magic = EXTDISPLAY_IPC_MAGIC, .op = EXTDISPLAY_IPC_DMABUF,
+                                     .width = 2160, .height = 1440, .length = sizeof info };
+    memcpy(dmabuf.text, &info, sizeof info);
+    CHECK(send_raw(sv[0], &dmabuf, &sealed, 1) == 0);
+    CHECK(extdisplay_ipc_recv(sv[1], &r, &fd) == 0 && r.op == EXTDISPLAY_IPC_DMABUF && fd >= 0);
+    if (fd >= 0) close(fd);
+    /* Malformed dma-buf metadata (wrong length or nonzero bytes) is refused. */
+    struct extdisplay_ipc bad_dma = dmabuf;
+    bad_dma.length = 4;
+    CHECK(send_raw(sv[0], &bad_dma, &sealed, 1) == 0);
+    CHECK(extdisplay_ipc_recv(sv[1], &r, &fd) < 0 && fd < 0);
     CHECK(extdisplay_ipc_recv(sv[1], &r, &fd) < 0 && errno == EAGAIN);
     close(sv[0]);
     close(sv[1]);

@@ -51,6 +51,7 @@ class Sync(unittest.TestCase):
                                                 set(self.installed)))
         self.patch("install_tracked", self.tracked)
         self.patch("needed_vulkan_drivers", lambda repo, aur: [])
+        self.patch("needed_vaapi_drivers", lambda repo, aur, installed=None: [])
         self.patch("run_pacman", self.pacman)
         self.patch("run", self.run_command)
         p = mock.patch.object(pkg.subprocess, "run", self.query)
@@ -353,12 +354,14 @@ class VulkanDriver(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.drm = Path(self.tmp.name) / "drm"
 
-    def card(self, name, driver):
+    def card(self, name, driver, device_id=None):
         device = self.drm.parent / (self.drm.name + "-devices") / name
-        (device / "drivers" / driver).mkdir(parents=True)
+        (device / "drivers" / driver).mkdir(parents=True, exist_ok=True)
         (self.drm / name).mkdir(parents=True)
         (self.drm / name / "device").symlink_to(device)
         (device / "driver").symlink_to(device / "drivers" / driver)
+        if device_id is not None:
+            (device / "device").write_text(device_id + "\n", encoding="utf-8")
 
     def test_each_gpus_driver_once_else_the_software_one(self):
         self.card("card0", "i915")
@@ -366,12 +369,40 @@ class VulkanDriver(unittest.TestCase):
         self.card("card1", "nouveau")
         self.card("card2", "xe")
         self.card("card3", "evdi")
-        self.assertEqual(pkg.gpu_vulkan_drivers(str(self.drm)), ["vulkan-intel", "vulkan-nouveau"])
+        empty_pci = self.drm.parent / "pci-empty"
+        empty_pci.mkdir()
+        self.assertEqual(pkg.gpu_vulkan_drivers(str(self.drm), str(empty_pci)), ["vulkan-intel", "vulkan-nouveau"])
         other = Path(self.tmp.name) / "other"
         other.mkdir()
         self.drm = other
         self.card("card0", "bochs-drm")
-        self.assertEqual(pkg.gpu_vulkan_drivers(str(other)), ["vulkan-swrast"])
+        self.assertEqual(pkg.gpu_vulkan_drivers(str(other), str(empty_pci)), ["vulkan-swrast"])
+
+    def test_vaapi_drivers_follow_each_real_gpu_topology(self):
+        empty_pci = self.drm.parent / "pci-va"
+        empty_pci.mkdir()
+        # Tiger Lake Iris Xe + MX-series nouveau (Optimus)
+        self.card("card0", "i915", "0x9a49")
+        self.card("card1", "nouveau", "0x1d10")
+        self.assertEqual(pkg.gpu_vaapi_drivers(str(self.drm), str(empty_pci)), ["intel-media-driver", "mesa"])
+        # Ivy Bridge (X230) -> libva-intel-driver
+        legacy = self.drm.parent / "drm-legacy"
+        legacy.mkdir()
+        self.drm = legacy
+        self.card("card0", "i915", "0x0166")
+        self.assertEqual(pkg.gpu_vaapi_drivers(str(legacy), str(empty_pci)), ["libva-intel-driver"])
+        # Intel + proprietary NVIDIA (PCI 0x030200 without drm card node)
+        pci_nv = self.drm.parent / "pci-nv"
+        dev = pci_nv / "0000:01:00.0"
+        (dev / "drivers/nvidia").mkdir(parents=True)
+        (dev / "class").write_text("0x030200\n", encoding="utf-8")
+        (dev / "driver").symlink_to(dev / "drivers/nvidia")
+        self.assertEqual(pkg.gpu_vaapi_drivers(str(legacy), str(pci_nv)),
+                         ["libva-intel-driver", "libva-nvidia-driver"])
+        with mock.patch.object(pkg, "gpu_vaapi_drivers", lambda: ["intel-media-driver", "mesa"]):
+            self.assertEqual(pkg.needed_vaapi_drivers([], [], {"base"}), [])
+            self.assertEqual(pkg.needed_vaapi_drivers(["ffmpeg"], [], {"base"}), ["intel-media-driver", "mesa"])
+            self.assertEqual(pkg.needed_vaapi_drivers([], [], {"ffmpeg", "mesa"}), ["intel-media-driver"])
 
     def needed(self, satisfied, repo_depends, aur_depends, repo=("repo-program",), aur=("aur-program",)):
         def run(cmd, **kwargs):

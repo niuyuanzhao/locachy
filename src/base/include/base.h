@@ -166,6 +166,12 @@ void screen_fill_px(int x, int y, int w, int h, uint32_t rgb);
 void screen_cells(int *w, int *h, int *top);
 /* Make damage on every drawn output visible, regardless of the selected target. */
 void screen_flush(void);
+/* Path to the active DRM card's render node (/dev/dri/renderD*); -1 if none. */
+int screen_render_node(char *path, size_t size);
+/* Present a single-plane DRM PRIME dma-buf full-screen on the primary output
+ * without copying pixels through CPU memory; -1 if unsupported or multi-output. */
+int screen_present_dmabuf(int dmabuf_fd, uint32_t w, uint32_t h, uint32_t fourcc,
+                          uint32_t pitch, uint32_t offset, uint64_t modifier);
 /* The status bar at the top, as on the shared display (panel.c), with title
  * (the program) and ime (its input method mode, or NULL). The cells start
  * half a row below the top, so that row 0 is within the bar:

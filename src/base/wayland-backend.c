@@ -343,7 +343,8 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial, ui
     if (base_raw_emit && w.state) {
         int action = keys_match_action((int)code, !!(w.mods & KEYS_CTRL), !!(w.mods & KEYS_ALT),
                                        !!(w.mods & KEYS_SHIFT), !!(w.mods & KEYS_META));
-        int local = action == K_ACT_HOME || action == K_ACT_LOCK || (action >= K_VOL_UP && action <= K_BRI_DOWN);
+        int local = (action == K_ACT_HOME && !(base_raw_forward_home && base_raw_forward_home())) ||
+                    action == K_ACT_LOCK || (action >= K_VOL_UP && action <= K_BRI_DOWN);
         uint32_t mods, locks;
         raw_state(&mods, &locks);
         base_raw_emit(BASE_RAW_WAYLAND_DEVICE, code, xkb_state_key_get_one_sym(w.state, code + 8),

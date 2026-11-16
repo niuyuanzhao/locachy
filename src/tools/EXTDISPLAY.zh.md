@@ -16,9 +16,13 @@
 | `progs/extdisplay-advertise.c`、`extdisplay-discovery.[ch]` | 在租用的雷电链路上发布限定接口的 mDNS/DNS-SD 发现信息。 |
 | `base/include/input-raw.h`、`base/input-raw.c` | 原始键盘事件队列。 |
 
-## 安装
+## 安装与硬件加速
 
 在 LOCachy 的 **设置 → 系统 → 可选组件** 中启用 **扩展屏 (extdisplay)**（依赖 FFmpeg、json-c、Avahi 与 OpenSSL）。
+
+- 在 Linux 上，当活动显示设备的 DRM 驱动为 `i915`、`xe`、`amdgpu` 或 `radeon` 且存在可用 VA-API 驱动时，`extdisplay-worker` 会在进入 Landlock + seccomp 沙箱前完成 `libva` 初始化，使用 FFmpeg VA-API 硬件解码并通过 `VA-API VPP` → `DRM_PRIME_2` 零拷贝直出扫描帧；若运行在 `nouveau`、`nvidia-drm`、`simpledrm`、镜像多屏或老 GPU 不支持 4:4:4 硬解的环境，将自动无缝回退至 AVX2/SSE2 CPU 解码与 `MADV_HUGEPAGE` 只读 `memfd` 路径。
+- 在系统安装、组件安装及同步更新期间，`locachy-pkg` 会自动扫描 `/sys/class/drm` 与 PCI 显示设备，为本机硬件自动补全匹配的 Vulkan 与 VA-API 驱动（Intel Gen8+ 自动安装 `intel-media-driver`，Gen4–7.5 安装 `libva-intel-driver`，AMD/Nouveau 安装 `mesa`，专有 NVIDIA 安装 `libva-nvidia-driver`，并在双显卡 Optimus / MX 笔记本上按实际驱动各自匹配）。
+- 可在 **设置 → 输入与输出 → Extended display video**（`rc.conf` 的 `extdisplay_decode`：`"auto"` / `"hw"` / `"sw"`）中切换：自动模式（支持时走 GPU + 4:4:4）、优先硬件解码（老 GPU 上自动协商硬件 H.264），或仅使用纯 CPU 沙箱解码。
 
 在 macOS 上通过 `niuyuanzhao/locachy` Homebrew tap 安装并启动后台发送端服务：
 
@@ -37,14 +41,14 @@ Thunderbolt/USB4 网络支持线缆直连，或经过兼容的雷电／USB4 Hub�
 1. `extdisplay-broker` 将已验证的 `thunderbolt-net` 接口移入独立网络命名空间，配置 IPv6 链路本地地址，并启动 `extdisplay-advertise` 在该链路上发布携带当次会话随机 128 位 PSK 的 `_locachy-ext._tcp.local.` 服务。
 2. macOS 后台服务在雷电链路上自动发现该广播，并使用 `TLS_PSK_WITH_AES_128_GCM_SHA256`（身份与 ALPN 为 `locachy-extdisplay-v1`）自动建立连接。
 3. 接收端在 `hello` 中上报其面板的物理像素尺寸（`pixelsWide × pixelsHigh`）、缩放系数、支持的编码格式（`h264`、`hevc`）及输入能力。
-4. 发送端根据接收端上报的物理像素尺寸创建虚拟显示器，并按面板尺寸比例自动派生 5 档缩放模式（`2.0×`、`1.75×`、`1.5×`、`1.25×`、`1.0×`）供 macOS **系统设置 → 显示器** 选择与记忆，同时始终以面板物理像素分辨率传输画面。
+4. 发送端仅在握手后按该物理像素尺寸计算一对一的虚拟显示器几何（高密度且可整除为偶数逻辑点时采用 `@2x` HiDPI，否则为 `@1x`，不保存本地预设模式，也不使用分数降采样缩放），并始终以面板物理像素分辨率传输画面。
 
 ## 会话行为
 
 链路保持连接期间：
 
-- 所有按键（含 `Ctrl+Q`、`Esc`、`q`、`Ctrl+Alt+F12`）、触摸板手势与鼠标移动均转发给发送端，不会退出或断开 `extdisplay`。
-- `Super+Esc`（回首页）与 `Super+L`（锁屏）照常切换本地画面，同时保持扩展屏连接不断开（`base_session_hold`）。
+- 所有按键（含 `Super+Esc`、`Ctrl+Q`、`Esc`、`q`、`Ctrl+Alt+F12`）、触摸板手势与鼠标移动均转发给发送端，不会退出或断开 `extdisplay`。
+- `Super+Esc`（回首页）与三指首页/切换手势不会切出活动扩展屏；`Super+L`（锁屏）仍可本地锁屏，同时保持扩展屏连接不断开（`base_session_hold`）。
 - 扩展屏活动期间不触发空闲自动锁屏；若本机空闲已达锁屏时长，在拔出线缆或退出会话后立即锁屏。
 - 拔出线缆后会话结束，按任意键关闭 `extdisplay`。
 

@@ -1286,13 +1286,18 @@ static struct frame *focused(void)
 
 /* A screen shows a program holding a live link (extdisplay,
  * base_session_hold): what it shows is the other computer's session, so
- * the idle lock waits until no screen does (idle_lock_at). */
+ * the idle lock waits until no screen does (idle_lock_at), and Super+Esc /
+ * swipe switches stay blocked while that session is focused. */
+static int frame_holding(const struct frame *f)
+{
+    return f != NULL && f != &locker &&
+           (f->holding || (apps_session_holding && apps_session_holding(f->cgroup)));
+}
+
 static int held_in_front(void)
 {
     for (int i = 0; i < nplaces; i++) {
-        struct frame *f = showing(i);
-        if (f != NULL && f != &locker &&
-            (f->holding || (apps_session_holding && apps_session_holding(f->cgroup)))) {
+        if (frame_holding(showing(i))) {
             return 1;
         }
     }
@@ -3171,13 +3176,14 @@ static void message(struct frame *f)
         /* The shared display's locks while it has the keyboards: its bar may
          * hold them (EVIOCGRAB), so process 1 does not see those keys. */
         keys_set_locks(atoi(fields[1]));
-    } else if (strcmp(fields[0], "home") == 0 && f->screens && !locked) {
+    } else if (strcmp(fields[0], "home") == 0 && f->screens && !locked && !frame_holding(f)) {
         go_home(place_of_frame(f));
     } else if (strcmp(fields[0], "lock") == 0 && f->screens) {
         lock();
     } else if (strcmp(fields[0], "locked") == 0 && f == &locker) {
         lock_shown = 1;
-    } else if (strcmp(fields[0], "switch") == 0 && n == 2 && f->screens && !locked) {
+    } else if (strcmp(fields[0], "switch") == 0 && n == 2 && f->screens && !locked &&
+               !frame_holding(focused()) && !frame_holding(f)) {
         do_switch(display_front != NULL ? focus_place : place_of_frame(f),
                   strcmp(fields[1], "next") == 0 ? 1 : strcmp(fields[1], "prev") == 0 ? -1 : 0);
     } else if (strcmp(fields[0], "hold") == 0 && n == 2 && strcmp(f->name, "extdisplay") == 0) {
@@ -4531,7 +4537,7 @@ int main(void)
                     if (ev[k].type == EV_KEY && ev[k].code == KEY_POWER && ev[k].value == 1) {
                         person_asked(RB_POWER_OFF); /* "init: power button" */
                     } else if (ev[k].type == EV_KEY && ev[k].value == 1 && keys_alone_action(ev[k].code) == K_HOME) {
-                        if (!locked) {
+                        if (!locked && !frame_holding(focused())) {
                             say("init: key_home key %d -> home", ev[k].code);
                             go_home(focus_place);
                         }
@@ -4567,7 +4573,7 @@ int main(void)
                 int shared = display_front != NULL;
                 if (restart_asked) {
                     restart_key(key); /* process 1's question has the keys */
-                } else if (key == K_HOME && !locked && !shared) {
+                } else if (key == K_HOME && !locked && !shared && !frame_holding(focused())) {
                     go_home(focus_place);
                 } else if (key == K_ACT_LOCK && !shared) {
                     lock();

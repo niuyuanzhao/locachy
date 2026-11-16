@@ -16,9 +16,13 @@
 | `progs/extdisplay-advertise.c`, `extdisplay-discovery.[ch]` | Interface-scoped mDNS/DNS-SD discovery publisher on the leased Thunderbolt link. |
 | `base/include/input-raw.h`, `base/input-raw.c` | Raw keyboard event queue. |
 
-## Installation
+## Installation and Hardware Acceleration
 
- Enable **Extended display (extdisplay)** in **Settings → System → Optional Components** on LOCachy (requires FFmpeg, json-c, Avahi, and OpenSSL).
+Enable **Extended display (extdisplay)** in **Settings → System → Optional Components** on LOCachy (requires FFmpeg, json-c, Avahi, and OpenSSL).
+
+- On Linux, `extdisplay-worker` automatically uses FFmpeg VA-API (`libva` + `libva-drm`) and zero-copy `VA-API VPP` → `DRM_PRIME_2` scanout over a pre-opened `/dev/dri/renderD*` descriptor (when the active display DRM driver is `i915`, `xe`, `amdgpu`, or `radeon`) initialized before entering its Landlock + seccomp sandbox. On `nouveau`, `nvidia-drm`, `simpledrm`, or when a GPU lacks hardware `4:4:4` decoding, it falls back seamlessly to CPU AVX2/SSE2 decoding and sealed `MADV_HUGEPAGE` `memfd` frames.
+- During installation, `extdisplay` setup, and updates, `locachy-pkg` automatically scans `/sys/class/drm` and PCI display controllers to install the matching VA-API/Vulkan drivers for each machine's GPU (`intel-media-driver` on Intel Gen8+, `libva-intel-driver` on Intel Gen4–7.5, `mesa` on AMD/Nouveau, `libva-nvidia-driver` on proprietary NVIDIA, and per-GPU packages on dual-GPU Optimus/MX laptops).
+- **Settings → Input & Output → Extended display video** (`extdisplay_decode` in `rc.conf`: `"auto"`, `"hw"`, or `"sw"`) lets you choose between automatic GPU+4:4:4, forcing GPU H.264 on older GPUs without 4:4:4 HW decode, or CPU-only sandboxed decoding.
 
 On macOS, install the companion sender service from the `niuyuanzhao/locachy` Homebrew tap:
 
@@ -37,14 +41,14 @@ When `extdisplay` is opened on LOCachy:
 1. `extdisplay-broker` moves the verified `thunderbolt-net` interface into an isolated network namespace, configures link-local IPv6, and starts `extdisplay-advertise` to publish `_locachy-ext._tcp.local.` with a fresh per-session 128-bit PSK on that link.
 2. The macOS background service discovers the advertisement on the Thunderbolt link and dials `TLS_PSK_WITH_AES_128_GCM_SHA256` (identity and ALPN `locachy-extdisplay-v1`) automatically.
 3. The receiver sends `hello` with its physical panel dimensions (`pixelsWide × pixelsHigh`), scale, supported codecs (`h264`, `hevc`), and input capabilities.
-4. From the receiver's reported panel dimensions, the sender creates a virtual display and derives five proportional scaled modes (`2.0×`, `1.75×`, `1.5×`, `1.25×`, `1.0×` of the panel size) for macOS **System Settings → Displays**, while streaming at the panel's physical resolution.
+4. From the receiver's reported panel dimensions, the sender computes an exact 1:1 virtual display mode (`pixels ÷ 2` points at `@2x` HiDPI when divisible into even points for high-density panels, otherwise `1×`) with no saved mode presets or fractional downscaling, and streams at the panel's physical resolution.
 
 ## Session Behavior
 
 While the link is active:
 
-- All keyboard input (including `Ctrl+Q`, `Esc`, `q`, and `Ctrl+Alt+F12`), trackpad gestures, and pointer movements are forwarded to the sender.
-- `Super+Esc` (Home) and `Super+L` (Lock) switch the local screen while keeping the link alive (`base_session_hold`).
+- All keyboard input (including `Super+Esc`, `Ctrl+Q`, `Esc`, `q`, and `Ctrl+Alt+F12`), trackpad gestures, and pointer movements are forwarded to the sender.
+- `Super+Esc` (Home) and three-finger home/switch swipes do not switch away from the live extended display; `Super+L` (Lock) still locks locally while keeping the link alive (`base_session_hold`).
 - Idle auto-lock is deferred while the live extended display is shown, and takes effect immediately once the cable is unplugged or the session closes.
 - When the cable is unplugged, the session ends and the next key closes `extdisplay`.
 

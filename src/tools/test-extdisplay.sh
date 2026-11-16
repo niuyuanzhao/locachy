@@ -22,8 +22,13 @@ cc $cflags -DCONFIG_EXTDISPLAY_FFMPEG $(pkg-config --cflags $pkgs) "$src/tools/t
     "$src/progs/extdisplay-protocol.c" "$src/progs/extdisplay-decode.c" $extra $(pkg-config --libs $pkgs) -lm -o "$out/test-extdisplay"
 "$out/test-extdisplay"
 if [ "$(uname -s)" = Linux ]; then
-    cc $cflags -DCONFIG_EXTDISPLAY_FFMPEG $(pkg-config --cflags $pkgs) "$src/progs/extdisplay-worker.c" \
-        "$src/progs/extdisplay-protocol.c" "$src/progs/extdisplay-decode.c" $(pkg-config --libs $pkgs) -lm -o "$out/extdisplay-worker"
+    va_flags= va_libs=
+    if pkg-config --exists libva libva-drm; then
+        va_flags="-DCONFIG_EXTDISPLAY_VAAPI $(pkg-config --cflags libva libva-drm)"
+        va_libs="$(pkg-config --libs libva libva-drm)"
+    fi
+    cc $cflags -O3 -DCONFIG_EXTDISPLAY_FFMPEG $va_flags $(pkg-config --cflags $pkgs) "$src/progs/extdisplay-worker.c" \
+        "$src/progs/extdisplay-protocol.c" "$src/progs/extdisplay-decode.c" $(pkg-config --libs $pkgs) $va_libs -lm -o "$out/extdisplay-worker"
     cc $cflags -c "$src/progs/extdisplay-client.c" -o "$out/extdisplay-client.o"
     echo "PASS: extdisplay-worker and extdisplay-client build"
     # The pairing client against a stub broker: a real child process, fd 3 only.
@@ -39,6 +44,52 @@ if [ "$(uname -s)" = Linux ]; then
         echo "FAIL: extdisplay-worker exited $rc without its channels (expected 78)"
         exit 1
     fi
+    # Raw mode 1 keeps Super+Esc local; mode 2 (live extdisplay link) forwards it.
+    cat >"$out/raw.c" <<'EOF'
+#include "base.h"
+#include "input-raw.h"
+#include "internal.h"
+#include <assert.h>
+#include <linux/input.h>
+#include <stdio.h>
+#include <unistd.h>
+void say(const char *fmt, ...) { (void)fmt; }
+int rc_read(void (*fn)(const char *, const char *, void *), void *arg) { (void)fn; (void)arg; return 0; }
+int main(void) {
+    int p[2];
+    assert(pipe(p) == 0);
+    struct input_event seq[] = {
+        { .type = EV_KEY, .code = KEY_LEFTMETA, .value = 1 },
+        { .type = EV_KEY, .code = KEY_ESC, .value = 1 },
+        { .type = EV_KEY, .code = KEY_ESC, .value = 0 },
+        { .type = EV_KEY, .code = KEY_LEFTMETA, .value = 0 },
+    };
+    base_raw_enable(1);
+    for (size_t i = 0; i < 4; i++) {
+        assert(write(p[1], &seq[i], sizeof seq[i]) == sizeof seq[i]);
+        (void)keys_event(p[0]);
+    }
+    struct base_raw_key rk;
+    int saw_local = 0;
+    while (base_raw_next(&rk)) if (rk.code == KEY_ESC && rk.state == 1) saw_local = !!(rk.flags & BASE_RAW_LOCAL);
+    assert(saw_local == 1);
+    base_raw_enable(2);
+    for (size_t i = 0; i < 4; i++) {
+        assert(write(p[1], &seq[i], sizeof seq[i]) == sizeof seq[i]);
+        (void)keys_event(p[0]);
+    }
+    int saw_fwd = 0;
+    while (base_raw_next(&rk)) if (rk.code == KEY_ESC && rk.state == 1) saw_fwd = !(rk.flags & BASE_RAW_LOCAL);
+    assert(saw_fwd == 1);
+    base_raw_enable(0);
+    puts("PASS: raw mode 1 keeps Super+Esc local while mode 2 forwards it");
+    return 0;
+}
+EOF
+    cc $cflags -DKEYS_TABLE=\"/nonexistent/keymap.table\" -ffunction-sections -fdata-sections \
+        -I"$src/base/include" -I"$src/base" "$out/raw.c" "$src/base/keys.c" "$src/base/input-raw.c" \
+        "$src/base/key-action.c" -Wl,--gc-sections -lm -o "$out/raw"
+    "$out/raw"
 else
     echo "SKIP: extdisplay-worker, extdisplay-client and the IPC cases need Linux (Landlock, seccomp, memfd seals)"
 fi

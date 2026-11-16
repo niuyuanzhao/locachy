@@ -70,11 +70,36 @@ for arg in "$@"; do
     fi
 done
 [ -n "$level" ] || { echo "usage: make.sh [--boot] LEVEL [CPU]" >&2; exit 2; }
-cpu=${cpu:-$level}
+cpu_arg=${cpu:-$level}
 
 src=$(cd "$(dirname "$0")" && pwd)
 b=$(mktemp -d)
 trap 'rm -rf "$b"' EXIT
+
+detect_cpu() {
+    cand=$(gcc -march=native -Q --help=target 2>/dev/null | sed -n 's/^[[:space:]]*-march=[[:space:]]*\([^[:space:]]*\).*/\1/p' | head -n 1)
+    [ -n "$cand" ] && [ "$cand" != "native" ] || { printf '%s\n' "$1"; return; }
+    if ! printf 'int f(void){return 0;}\n' | gcc -O2 -march="$cand" -x c - -c -o "$b/cpu-probe.o" 2>/dev/null; then
+        printf '%s\n' "$1"
+        return
+    fi
+    gcc -march="$cand" -dM -E -x c /dev/null 2>/dev/null | sed -n 's/^#define \(__[A-Za-z0-9_]*\).*/\1/p' | sort -u >"$b/cpu-cand"
+    gcc -march=native -dM -E -x c /dev/null 2>/dev/null | sed -n 's/^#define \(__[A-Za-z0-9_]*\).*/\1/p' | sort -u >"$b/cpu-nat"
+    if [ -s "$b/cpu-cand" ] && [ -s "$b/cpu-nat" ] && [ -z "$(comm -23 "$b/cpu-cand" "$b/cpu-nat")" ]; then
+        printf '%s\n' "$cand"
+    elif printf 'int f(void){return 0;}\n' | gcc -O2 -march=native -x c - -c -o "$b/cpu-probe.o" 2>/dev/null; then
+        printf '%s\n' native
+    else
+        printf '%s\n' "$1"
+    fi
+}
+
+if [ "$cpu_arg" = auto ]; then
+    cpu=$(detect_cpu "$level")
+else
+    cpu=$cpu_arg
+fi
+
 lib=/usr/local/lib/locachy
 mkdir -p /usr/local/bin "$lib" /usr/local/share/locachy
 # For locachy-pkg, which builds it again after updates, and locachy-repos.
@@ -261,8 +286,15 @@ rm -f /usr/local/bin/kvm "$lib/kvm-worker" "$lib/kvm-broker"
 # distribution's FFmpeg, as nobody in a sandbox of its own (progs/extdisplay-ipc.h).
 EXTDISPLAY_PKGS="json-c libavcodec libavutil libswscale avahi-core"
 if pkg-config --exists $EXTDISPLAY_PKGS; then
-    $GCC -DCONFIG_EXTDISPLAY_FFMPEG $(pkg-config --cflags $EXTDISPLAY_PKGS) -o "$lib/extdisplay-worker" "$src/progs/extdisplay-worker.c" \
-        "$src/progs/extdisplay-protocol.c" "$src/progs/extdisplay-decode.c" $(pkg-config --libs $EXTDISPLAY_PKGS) -lm
+    VA_CFLAGS=""
+    VA_LIBS=""
+    if pkg-config --exists libva libva-drm; then
+        VA_CFLAGS="-DCONFIG_EXTDISPLAY_VAAPI $(pkg-config --cflags libva libva-drm)"
+        VA_LIBS="$(pkg-config --libs libva libva-drm)"
+    fi
+    $GCC -O3 -DCONFIG_EXTDISPLAY_FFMPEG $VA_CFLAGS $(pkg-config --cflags $EXTDISPLAY_PKGS) -c "$src/progs/extdisplay-decode.c" -o "$b/extdisplay-decode.o"
+    $GCC -DCONFIG_EXTDISPLAY_FFMPEG $VA_CFLAGS $(pkg-config --cflags $EXTDISPLAY_PKGS) -o "$lib/extdisplay-worker" "$src/progs/extdisplay-worker.c" \
+        "$src/progs/extdisplay-protocol.c" "$b/extdisplay-decode.o" $(pkg-config --libs $EXTDISPLAY_PKGS) $VA_LIBS -lm
     $GCC $(pkg-config --cflags json-c) -o /usr/local/bin/extdisplay "$src/progs/extdisplay.c" "$src/progs/extdisplay-setup.c" \
         "$src/progs/extdisplay-client.c" "$src/progs/extdisplay-protocol.c" "$b"/glibc-base-*.o $FT_LIBS $(pkg-config --libs json-c) -lm
 else

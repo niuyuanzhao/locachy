@@ -92,9 +92,16 @@ fi
 # decoder (make.sh).
 extdisplay_pkgs="json-c libavcodec libavutil libswscale avahi-core"
 if pkg-config --exists $extdisplay_pkgs; then
-    gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -DCONFIG_EXTDISPLAY_FFMPEG $(pkg-config --cflags $extdisplay_pkgs) \
-        "$src/progs/extdisplay-worker.c" "$src/progs/extdisplay-protocol.c" "$src/progs/extdisplay-decode.c" \
-        $(pkg-config --libs $extdisplay_pkgs) -lm -o "$out/extdisplay-worker"
+    va_cflags= va_libs=
+    if pkg-config --exists libva libva-drm; then
+        va_cflags="-DCONFIG_EXTDISPLAY_VAAPI $(pkg-config --cflags libva libva-drm)"
+        va_libs="$(pkg-config --libs libva libva-drm)"
+    fi
+    gcc -O3 -Wall -Wextra -Werror -D_GNU_SOURCE -DCONFIG_EXTDISPLAY_FFMPEG $va_cflags $(pkg-config --cflags $extdisplay_pkgs) \
+        -c "$src/progs/extdisplay-decode.c" -o "$out/obj/extdisplay-decode.o"
+    gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -DCONFIG_EXTDISPLAY_FFMPEG $va_cflags $(pkg-config --cflags $extdisplay_pkgs) \
+        "$src/progs/extdisplay-worker.c" "$src/progs/extdisplay-protocol.c" "$out/obj/extdisplay-decode.o" \
+        $(pkg-config --libs $extdisplay_pkgs) $va_libs -lm -o "$out/extdisplay-worker"
     gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags $(pkg-config --cflags json-c) \
         -I"$src/base/include" -I"$src/base" "$src/progs/extdisplay.c" "$src/progs/extdisplay-setup.c" "$src/progs/extdisplay-client.c" \
         "$src/progs/extdisplay-protocol.c" "$out"/obj/base-*.o $libs $(pkg-config --libs json-c) -o "$out/extdisplay"

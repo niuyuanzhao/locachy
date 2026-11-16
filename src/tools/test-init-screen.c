@@ -702,6 +702,32 @@ static void idle_link(void)
     assert(idle_lock_check() == 1 && strstr(said, "no input for 2 s: locking"));
     assert(do_open(-1, argv) == 0);
     home_wait(argv);
+    holding = ext->cgroup;
+    /* While focused on a live link, K_HOME does not exit to home. */
+    assert(held_in_front() && frame_holding(focused()));
+    go_home(0);
+    assert(places[0].task == NULL); /* direct go_home helper works */
+    assert(do_open(-1, argv) == 0);
+    home_wait(argv);
+    assert(places[0].task == &tasks[0]);
+    /* A holding frame ignores "home" and "switch" control messages (swipe / Super+Esc)
+     * until the live link ends. */
+    assert(frame_holding(ext) && focused() == ext);
+    assert(send(peer[ext->ctl], "home", 4, 0) == 4);
+    message(ext);
+    assert(places[0].task == &tasks[0]);
+    static const char sw_next[] = "switch\0next";
+    assert(send(peer[ext->ctl], sw_next, sizeof sw_next - 1, 0) == sizeof sw_next - 1);
+    message(ext);
+    assert(places[0].task == &tasks[0]);
+    holding = NULL;
+    assert(send(peer[ext->ctl], "home", 4, 0) == 4);
+    message(ext);
+    assert(places[0].task == NULL);
+    puts("PASS live link ignores home/switch while held and exits once the link ends");
+
+    assert(do_open(-1, argv) == 0);
+    home_wait(argv);
     active_at = now_ms();
     said[0] = 0;
     go_home(0);

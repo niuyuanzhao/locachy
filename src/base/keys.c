@@ -1323,8 +1323,8 @@ int keys_event(int fd)
         uint32_t id = fstat(fd, &identity) == 0 && S_ISCHR(identity.st_mode) ?
                       (uint32_t)identity.st_rdev + 1 : (uint32_t)fd + 1;
         int action = match_action(tb, ev.code, ctrl, alt, shift, meta);
-        int local = action == K_ACT_HOME || action == K_ACT_LOCK ||
-                    (action >= K_VOL_UP && action <= K_BRI_DOWN);
+        int local = (action == K_ACT_HOME && !(base_raw_forward_home && base_raw_forward_home())) ||
+                    action == K_ACT_LOCK || (action >= K_VOL_UP && action <= K_BRI_DOWN);
         base_raw_emit(id, ev.code, sym,
             (shift ? KEYS_SHIFT : 0) | (ctrl ? KEYS_CTRL : 0) | (alt ? KEYS_ALT : 0) |
             (meta ? KEYS_META : 0) | (altgr ? KEYS_ALTGR : 0) | (caps ? KEYS_CAPS : 0) | (num ? 64 : 0),

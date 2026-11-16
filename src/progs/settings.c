@@ -292,6 +292,11 @@ enum { CLICKS_TAP, CLICKS_PRESS, CLICKS_POINTING, NCLICKS };
 static const char *const clicks_values[NCLICKS] = { NULL, "press", "pointing" };
 static const char *const clicks_labels[NCLICKS] = { N_("tap and press"), N_("press only"), N_("pointing only") };
 static int clicks;
+enum { EXTD_AUTO, EXTD_HW, EXTD_SW, NEXTD };
+static const char *const extd_values[NEXTD] = { NULL, "hw", "sw" };
+static const char *const extd_labels[NEXTD] = { N_("auto (GPU if supported)"), N_("GPU hardware (prefer H.264)"), N_("CPU sandbox only") };
+static int extd_decode;
+static int cpu_opt_auto = -1; /* 1 auto native ISA, 0 baseline; -1 unset (read from /usr/local/lib/locachy/cpu) */
 static char link_dev[32];     /* rc.conf's debug_link_interface: the port it reserves */
 static int clash_on;          /* rc.conf has service_clash */
 static int clash_proxy;       /* rc.conf's clash_mode is "proxy": its port only, no TUN */
@@ -1181,6 +1186,13 @@ static void on_rc(const char *name, const char *value, void *arg)
         lock_high = strcmp(value, "high") == 0;
     } else if (strcmp(name, "duress_enabled") == 0) {
         duress_on = strcmp(value, "1") == 0;
+    } else if (strcmp(name, "extdisplay_decode") == 0) {
+        extd_decode = EXTD_AUTO;
+        for (int i = 1; i < NEXTD; i++) {
+            if (strcmp(value, extd_values[i]) == 0) extd_decode = i;
+        }
+    } else if (strcmp(name, "cpu_opt") == 0) {
+        cpu_opt_auto = strcmp(value, "auto") == 0 ? 1 : strcmp(value, "baseline") == 0 ? 0 : -1;
     } else if (strcmp(name, "face_dlib") == 0) {
         snprintf(face_dlib, sizeof face_dlib, "%s", value);
     } else if (strcmp(name, "battery_charge_start") == 0 && value[0]) {
@@ -1990,6 +2002,8 @@ static void start_pkg_job(const char *action, const char *package)
         kind = strcmp(args[0], "select") == 0 ? "kernel-select" : strcmp(args[0], "headers") == 0 ? "kernel-headers" : NULL;
         args[0] = args[1];
         args[1] = NULL;
+    } else if (strcmp(action, "rebuild") == 0) {
+        kind = "locachy-rebuild";
     }
     pkg_job = kind && jobs_submit(kind, (const char *const *)args, &id, &position, why, sizeof why) == 0 ? id : 0;
     if (!pkg_job) {
@@ -2086,6 +2100,12 @@ static void pkg_check(void)
     cjk_fonts = -1; /* fonts may have come or gone */
     if (ime_job()) {
         signal_programs("locachy-bar", SIGHUP); /* it starts Rime again for Chinese Pinyin */
+    }
+    if (strcmp(pkg_action, "rebuild") == 0) {
+        snprintf(notice, sizeof notice, ok ?
+                 _("LOCachy rebuilt with the selected CPU optimization.") :
+                 _("LOCachy rebuild did not finish; see %s."), log);
+        return;
     }
     if (strcmp(pkg_action, "kernel") == 0) {
         snprintf(boot_kernel, sizeof boot_kernel, "linux-cachyos-bore");
@@ -3302,9 +3322,19 @@ static int nmtui_index(void)
     return hwcopy_index() + 1;
 }
 
-static int num_hw_items(void)
+static int extd_index(void)
 {
     return nmtui_index() + 1;
+}
+
+static int cpu_opt_index(void)
+{
+    return extd_index() + 1;
+}
+
+static int num_hw_items(void)
+{
+    return cpu_opt_index() + 1;
 }
 
 /* The cloud service's status (rclone-client): name, path, state, last
@@ -4927,6 +4957,7 @@ static void category_entries(int cat)
         add_title(_("Display & Monitor"));
         add_items(bri_index(), 1);
         add_items(hw, 1 + nrow_maps);
+        add_items(extd_index(), 1);
         break;
     case CAT_DEVICES:
         add_title(_("Bluetooth"));
@@ -5007,6 +5038,7 @@ static void category_entries(int cat)
         add_items(boot_index(), 5);
         add_title(_("Software Update"));
         add_items(upd_index(), 5);
+        add_items(cpu_opt_index(), 1);
         add_title(_("Software Sources"));
         /* The switches and the mirrors only: the repositories' names carry
          * the CPU level (core-x86-64-v3, cachyos-znver4), which is not
@@ -5712,6 +5744,7 @@ static int enter_row(int idx)
            idx == wp_index() || idx == tk_index() || idx == host_index() || idx == mach_index() ||
            (idx >= upd_index() && idx < upd_index() + 4) ||
            idx == boot_index() + 1 || idx == boot_index() + 2 || idx == boot_index() + 3 ||
+           idx == cpu_opt_index() ||
            idx == repo_index() + NREPO_SECTIONS ||
            idx == sec_index() || idx == sec_index() + 2 || idx == fp_index() + 3 || idx == fc_index() + 4 || idx == fc_index() + 5 ||
            idx == fc_index() + 6 || idx == rclone_index() + 2 || idx == tpm_index() || idx == sb_index() || idx == hsi_index() ||
@@ -5750,7 +5783,7 @@ static int component_row(int idx, int *present, int *complete)
  * a camera, a finger): Enter opens them, Enter again does it. */
 static int picker_row(int idx)
 {
-    return idx == boot_index() + 3 || idx == fc_index() + 4 || idx == fp_index() + 3;
+    return idx == boot_index() + 3 || idx == fc_index() + 4 || idx == fp_index() + 3 || idx == cpu_opt_index();
 }
 
 /* Lines that only show something; Enter says what it is. */
@@ -6429,6 +6462,22 @@ static void item_text(int idx, char *line, size_t size)
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Connections (Wi-Fi, Ethernet)"), 32),
                  access(NMTUI, X_OK) == 0 ? _("Enter: open nmtui") : _("not installed"));
+        return;
+    }
+    if (idx == extd_index()) {
+        snprintf(line, size, "%.95s < %s >", ui_pad(label, sizeof label, _("Extended display video"), 32),
+                 _(extd_labels[extd_decode]));
+        return;
+    }
+    if (idx == cpu_opt_index()) {
+        char cpu_cur[48] = "", cpu_lvl[48] = "";
+        read_one_line("/usr/local/lib/locachy/cpu", cpu_cur, sizeof cpu_cur);
+        read_one_line("/usr/local/lib/locachy/level", cpu_lvl, sizeof cpu_lvl);
+        int is_auto = cpu_opt_auto >= 0 ? cpu_opt_auto : (cpu_cur[0] && strcmp(cpu_cur, cpu_lvl) != 0);
+        const char *shown = is_auto ? (cpu_cur[0] ? cpu_cur : "native") : (cpu_lvl[0] ? cpu_lvl : "baseline");
+        snprintf(vbuf, sizeof vbuf, is_auto ? _("auto (%s)") : _("baseline (%s)"), shown);
+        snprintf(line, size, "%.95s < %s >  %s", ui_pad(label, sizeof label, _("CPU build optimization"), 32), vbuf,
+                 pkg_job && strcmp(pkg_action, "rebuild") == 0 ? _("rebuilding...") : _("Enter: rebuild"));
         return;
     }
     if (idx == hwcopy_index()) {
@@ -7387,6 +7436,36 @@ static void adjust(int dir)
         snprintf(notice, sizeof notice, "%s", _("Enter: set up Wi-Fi or wired connections in nmtui."));
         return;
     }
+    if (selected == extd_index()) {
+        int next = (extd_decode + (dir < 0 ? NEXTD - 1 : 1)) % NEXTD;
+        if (rc_set("extdisplay_decode", extd_values[next]) < 0) {
+            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+            return;
+        }
+        extd_decode = next;
+        snprintf(notice, sizeof notice, "%s", next == EXTD_AUTO ?
+                 _("Extended display uses GPU VA-API when supported and crisp 4:4:4; applies on next session.") :
+                 next == EXTD_HW ?
+                 _("Extended display prefers GPU hardware decoding (H.264 if GPU lacks 4:4:4 HEVC); applies on next session.") :
+                 _("Extended display uses the CPU-only sandbox decoder; applies on next session."));
+        return;
+    }
+    if (selected == cpu_opt_index()) {
+        char cpu_cur[48] = "", cpu_lvl[48] = "";
+        read_one_line("/usr/local/lib/locachy/cpu", cpu_cur, sizeof cpu_cur);
+        read_one_line("/usr/local/lib/locachy/level", cpu_lvl, sizeof cpu_lvl);
+        int cur_auto = cpu_opt_auto >= 0 ? cpu_opt_auto : (cpu_cur[0] && strcmp(cpu_cur, cpu_lvl) != 0);
+        int next = !cur_auto;
+        if (rc_set("cpu_opt", next ? "auto" : "baseline") < 0) {
+            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+            return;
+        }
+        cpu_opt_auto = next;
+        snprintf(notice, sizeof notice, "%s", next ?
+                 _("Saved native CPU auto-optimization; press Enter to rebuild LOCachy now.") :
+                 _("Saved portable baseline ISA; press Enter to rebuild LOCachy now."));
+        return;
+    }
     if (selected == hwcopy_index()) {
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(notice, sizeof notice, "%s", _("Enter: copy system and hardware summary to clipboard."));
@@ -7934,6 +8013,16 @@ int main(int argc, char **argv)
             draw();
         } else if (key == '\n' && selected == boot_index() + 2) {
             make_boot_image();
+            draw();
+        } else if (key == '\n' && selected == cpu_opt_index()) {
+            if (pkg_job || repos_job) {
+                snprintf(notice, sizeof notice, "%s", _("Wait: a package job is still running."));
+            } else {
+                start_pkg_job("rebuild", "--force");
+                snprintf(notice, sizeof notice, pkg_job ?
+                         _("Rebuilding LOCachy with the selected CPU optimization in background...") :
+                         _("Cannot start rebuild job."));
+            }
             draw();
         } else if (key == '\n' && selected == repo_index() + NREPO_SECTIONS) {
             if (repos_job || pkg_job) {

@@ -43,9 +43,8 @@ static struct {
     unsigned char tx[TX_MAX];
     size_t tx_start, tx_end;
     double last_rx, last_ping;
-    int hello, welcomed, active, frame_pending;
-    const uint32_t *latest; /* the decoder's newest picture, not yet sent */
-    uint32_t latest_w, latest_h;
+    int hello, welcomed, active, frame_pending, dmabuf_off;
+    unsigned hw_caps;
 } session;
 
 static double now(void)
@@ -59,7 +58,9 @@ static int status(uint32_t op)
 {
     struct extdisplay_ipc m = { .magic = EXTDISPLAY_IPC_MAGIC, .op = op };
     if (op == EXTDISPLAY_IPC_READY) {
-        m.width = (extdisplay_decoder_available(EXTDISPLAY_CODEC_H264) ? 1u : 0u) | (extdisplay_decoder_available(EXTDISPLAY_CODEC_HEVC) ? 2u : 0u);
+        m.width = (extdisplay_decoder_available(EXTDISPLAY_CODEC_H264) ? 1u : 0u) |
+                  (extdisplay_decoder_available(EXTDISPLAY_CODEC_HEVC) ? 2u : 0u) |
+                  ((session.hw_caps & 7u) << 2);
     }
     return send(EXTDISPLAY_IPC_FD, &m, sizeof m, MSG_NOSIGNAL | MSG_DONTWAIT) == (ssize_t)sizeof m ? 0 : -1;
 }
@@ -118,26 +119,9 @@ static int send_cancel(void)
     return enqueue(cancel, sizeof cancel - 1) == 0 && flush_all() == 0 ? 0 : -1;
 }
 
-static int send_frame(const uint32_t *px, uint32_t w, uint32_t h)
+static int send_fd_msg(struct extdisplay_ipc *m, int fd)
 {
-    size_t size;
-    if (extdisplay_dimensions(w, h, &size) < 0) return -1;
-    int fd = memfd_create("extdisplay-frame", MFD_CLOEXEC | MFD_ALLOW_SEALING);
-    if (fd < 0) return -1;
-    void *dest = ftruncate(fd, (off_t)size) == 0 ? mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)
-                                                  : MAP_FAILED;
-    if (dest == MAP_FAILED) {
-        close(fd);
-        return -1;
-    }
-    memcpy(dest, px, size);
-    munmap(dest, size);
-    if (fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL) < 0) {
-        close(fd);
-        return -1;
-    }
-    struct extdisplay_ipc m = { .magic = EXTDISPLAY_IPC_MAGIC, .op = EXTDISPLAY_IPC_FRAME, .width = w, .height = h, .bytes = size };
-    struct iovec iov = { &m, sizeof m };
+    struct iovec iov = { m, sizeof *m };
     union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(int))]; } c;
     memset(&c, 0, sizeof c);
     struct msghdr msg = { .msg_iov = &iov, .msg_iovlen = 1, .msg_control = c.bytes, .msg_controllen = sizeof c.bytes };
@@ -148,22 +132,50 @@ static int send_frame(const uint32_t *px, uint32_t w, uint32_t h)
     memcpy(CMSG_DATA(cm), &fd, sizeof fd);
     ssize_t n = sendmsg(EXTDISPLAY_IPC_FD, &msg, MSG_NOSIGNAL | MSG_DONTWAIT);
     close(fd);
-    if (n == (ssize_t)sizeof m) {
+    if (n == (ssize_t)sizeof *m) {
         session.frame_pending = 1;
-        session.latest = NULL;
         return 0;
     }
-    /* A full channel keeps the picture for the next chance; not an error. */
+    /* A full channel keeps the loop going; not an error. */
     return n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
 }
 
-static int pixels(void *unused, const uint32_t *px, uint32_t w, uint32_t h)
+static int send_latest(void)
 {
-    (void)unused;
-    session.latest = px; /* the decoder's buffer: valid until its next picture */
-    session.latest_w = w;
-    session.latest_h = h;
-    return session.frame_pending ? 0 : send_frame(px, w, h);
+    uint32_t w, h;
+    size_t size;
+    if (session.frame_pending || !extdisplay_decoder_size(session.decoder, &w, &h)) return 0;
+    if (!session.dmabuf_off) {
+        int dmabuf_fd = -1;
+        struct extdisplay_dmabuf info;
+        if (extdisplay_decoder_export_dmabuf(session.decoder, &dmabuf_fd, &info) > 0 && dmabuf_fd >= 0) {
+            struct extdisplay_ipc m = {
+                .magic = EXTDISPLAY_IPC_MAGIC, .op = EXTDISPLAY_IPC_DMABUF,
+                .width = w, .height = h, .length = sizeof info,
+            };
+            memcpy(m.text, &info, sizeof info);
+            return send_fd_msg(&m, dmabuf_fd);
+        }
+    }
+    if (extdisplay_dimensions(w, h, &size) < 0) return -1;
+    int fd = memfd_create("extdisplay-frame", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    if (fd < 0) return -1;
+    uint32_t *dest = ftruncate(fd, (off_t)size) == 0
+                         ? mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)
+                         : MAP_FAILED;
+    if (dest == MAP_FAILED) {
+        close(fd);
+        return -1;
+    }
+    (void)madvise(dest, size, MADV_HUGEPAGE);
+    int rendered = extdisplay_decoder_render(session.decoder, dest);
+    munmap(dest, size);
+    if (rendered < 0 || fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL) < 0) {
+        close(fd);
+        return -1;
+    }
+    struct extdisplay_ipc m = { .magic = EXTDISPLAY_IPC_MAGIC, .op = EXTDISPLAY_IPC_FRAME, .width = w, .height = h, .bytes = size };
+    return send_fd_msg(&m, fd);
 }
 
 static int receive(void *unused, const unsigned char *data, size_t n)
@@ -180,14 +192,17 @@ static int receive(void *unused, const unsigned char *data, size_t n)
     case EXTDISPLAY_MSG_CONFIG:
         if (!session.welcomed) return -1;
         session.active = 0;
-        session.latest = NULL;
         extdisplay_decoder_close(session.decoder);
         if (!(session.decoder = extdisplay_decoder_open(c.codec, c.width, c.height))) return -1;
+        if (session.dmabuf_off) extdisplay_decoder_disable_dmabuf(session.decoder);
         session.active = 1;
         return status(EXTDISPLAY_IPC_ACTIVE);
-    case EXTDISPLAY_MSG_VIDEO:
+    case EXTDISPLAY_MSG_VIDEO: {
         if (!session.active) return -1; /* video before streamConfig */
-        return extdisplay_decoder_push(session.decoder, data + c.video_offset, n - c.video_offset, pixels, NULL);
+        int r = extdisplay_decoder_step(session.decoder, data + c.video_offset, n - c.video_offset);
+        if (r < 0) return -1;
+        return r > 0 && !session.frame_pending ? send_latest() : 0;
+    }
     case EXTDISPLAY_MSG_PING: {
         char s[96];
         int len = snprintf(s, sizeof s, "{\"type\":\"pong\",\"t\":%lld}", (long long)c.timestamp);
@@ -262,12 +277,12 @@ static int seccomp(void)
     return prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program);
 }
 
-static int sandbox(void)
+static int sandbox(int hw)
 {
     /* The FFmpeg decoder at 4096x4096 with its references, the picture and
-     * the sealed copy: well under 1.5 GiB. */
-    struct rlimit memory = { 1536ul << 20, 1536ul << 20 }, files = { 16, 16 }, none = { 0, 0 },
-                  frame = { 64ul << 20, 64ul << 20 };
+     * the sealed copy: well under 1.5 GiB. VA-API keeps DRM surface fds open. */
+    struct rlimit memory = { 1536ul << 20, 1536ul << 20 }, files = { hw ? 64 : 16, hw ? 64 : 16 },
+                  none = { 0, 0 }, frame = { 64ul << 20, 64ul << 20 };
     if (!getuid() || getuid() != geteuid() || getgid() != getegid() || getgroups(0, NULL) != 0 ||
         prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1 || prctl(PR_SET_DUMPABLE, 0) < 0 ||
         setrlimit(RLIMIT_AS, &memory) < 0 || setrlimit(RLIMIT_NOFILE, &files) < 0 ||
@@ -307,7 +322,11 @@ static int frontend(void)
         return send_cancel() == 0 && status(EXTDISPLAY_IPC_CANCELLED) == 0 ? 0 : -1;
     case EXTDISPLAY_IPC_FRAME_ACK:
         session.frame_pending = 0;
-        return session.latest ? send_frame(session.latest, session.latest_w, session.latest_h) : 0;
+        return send_latest();
+    case EXTDISPLAY_IPC_DMABUF_OFF:
+        session.dmabuf_off = 1;
+        extdisplay_decoder_disable_dmabuf(session.decoder);
+        return 0;
     case EXTDISPLAY_IPC_HELLO:
         if (session.hello || !m.length || enqueue(m.text, m.length) < 0) return -1;
         session.hello = 1;
@@ -330,7 +349,17 @@ static int frontend(void)
 
 int main(void)
 {
-    if (channel(EXTDISPLAY_IPC_FD, SOCK_SEQPACKET) < 0 || channel(EXTDISPLAY_TRANSPORT_FD, SOCK_STREAM) < 0 || sandbox() < 0 ||
+    int render_fd = fcntl(EXTDISPLAY_RENDER_FD, F_GETFD) >= 0 ? EXTDISPLAY_RENDER_FD : -1;
+    if (channel(EXTDISPLAY_IPC_FD, SOCK_SEQPACKET) < 0 || channel(EXTDISPLAY_TRANSPORT_FD, SOCK_STREAM) < 0) {
+        if (render_fd >= 0) close(render_fd);
+        status(EXTDISPLAY_IPC_UNAVAILABLE);
+        return 78;
+    }
+    if (render_fd >= 0 && extdisplay_vaapi_init(render_fd, &session.hw_caps) < 0) {
+        close(render_fd);
+        render_fd = -1;
+    }
+    if (sandbox(render_fd >= 0) < 0 ||
         (!extdisplay_decoder_available(EXTDISPLAY_CODEC_H264) && !extdisplay_decoder_available(EXTDISPLAY_CODEC_HEVC))) {
         status(EXTDISPLAY_IPC_UNAVAILABLE);
         return 78;

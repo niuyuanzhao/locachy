@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-14 16:00-0500\n"
+"POT-Creation-Date: 2026-11-16 10:30+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -4313,10 +4313,15 @@ msgid_plural "Inverted selection: %d items marked."
 msgstr[0] ""
 msgstr[1] ""
 
-#. TRANSLATORS: %s is a program's name (term, edit, archive).
 #: progs/files.c
 #, c-format
-msgid "%s opens from home only, not from a window."
+msgid "Opened with %s in a window."
+msgstr ""
+
+#. TRANSLATORS: first %s is a program's name, second %s why it did not open.
+#: progs/files.c
+#, c-format
+msgid "Cannot open a %s window: %.400s"
 msgstr ""
 
 #. TRANSLATORS: %s is a program's name, then process 1's answer.
@@ -4829,13 +4834,7 @@ msgstr ""
 
 #: progs/files.c
 #, c-format
-msgid "Opened with %s in a window."
-msgstr ""
-
-#. TRANSLATORS: first %s is a program's name, second %s why it did not open.
-#: progs/files.c
-#, c-format
-msgid "Cannot open a %s window: %.400s"
+msgid "%s opens from home only, not from a window."
 msgstr ""
 
 #: progs/files.c
@@ -6380,7 +6379,7 @@ msgstr ""
 msgid "with a passphrase"
 msgstr ""
 
-#: progs/installer.c
+#: progs/installer.c progs/settings.c
 #, c-format
 msgid "auto (%s)"
 msgstr ""
@@ -9972,6 +9971,18 @@ msgid "tap and press"
 msgstr ""
 
 #: progs/settings.c
+msgid "CPU sandbox only"
+msgstr ""
+
+#: progs/settings.c
+msgid "GPU hardware (prefer H.264)"
+msgstr ""
+
+#: progs/settings.c
+msgid "auto (GPU if supported)"
+msgstr ""
+
+#: progs/settings.c
 msgid "a new one each time"
 msgstr ""
 
@@ -10303,6 +10314,16 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Wait: a package job is still running."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "LOCachy rebuilt with the selected CPU optimization."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "LOCachy rebuild did not finish; see %s."
 msgstr ""
 
 #: progs/settings.c
@@ -12010,6 +12031,27 @@ msgstr ""
 msgid "Enter: open nmtui"
 msgstr ""
 
+#: progs/settings.c
+msgid "Extended display video"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "baseline (%s)"
+msgstr ""
+
+#: progs/settings.c
+msgid "CPU build optimization"
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter: rebuild"
+msgstr ""
+
+#: progs/settings.c
+msgid "rebuilding..."
+msgstr ""
+
 #. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
 msgid "Copy system summary"
@@ -12689,6 +12731,31 @@ msgstr ""
 msgid "Enter: set up Wi-Fi or wired connections in nmtui."
 msgstr ""
 
+#: progs/settings.c
+msgid ""
+"Extended display uses GPU VA-API when supported and crisp 4:4:4; applies on "
+"next session."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Extended display prefers GPU hardware decoding (H.264 if GPU lacks 4:4:4 "
+"HEVC); applies on next session."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Extended display uses the CPU-only sandbox decoder; applies on next session."
+msgstr ""
+
+#: progs/settings.c
+msgid "Saved native CPU auto-optimization; press Enter to rebuild LOCachy now."
+msgstr ""
+
+#: progs/settings.c
+msgid "Saved portable baseline ISA; press Enter to rebuild LOCachy now."
+msgstr ""
+
 #. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
 msgid "Enter: copy system and hardware summary to clipboard."
@@ -12771,6 +12838,16 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Applying the kernel choice through the host package manifest..."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Rebuilding LOCachy with the selected CPU optimization in background..."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Cannot start rebuild job."
 msgstr ""
 
 #: progs/settings.c
@@ -14108,16 +14185,21 @@ msgstr ""
 msgid "Clear List"
 msgstr ""
 
-#. TRANSLATORS: %.200s is the folder path; %s is the system error message.
-#: progs/view.c
-#, c-format
-msgid "Cannot open the folder %.200s: %s."
-msgstr ""
-
 #. TRANSLATORS: %.200s is the folder path.
 #: progs/view.c
 #, c-format
 msgid "%.200s shown in the file manager."
+msgstr ""
+
+#: progs/view.c
+#, c-format
+msgid "Cannot open a files window for %.200s."
+msgstr ""
+
+#. TRANSLATORS: %.200s is the folder path; %s is the system error message.
+#: progs/view.c
+#, c-format
+msgid "Cannot open the folder %.200s: %s."
 msgstr ""
 
 #. TRANSLATORS: follows the current page number in the presentation bar; %d is the total page count.

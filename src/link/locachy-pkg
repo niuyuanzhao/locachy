@@ -353,14 +353,19 @@ def declared_missing(installed):
     return [p for p in load_manifest(MANIFEST) if p not in installed]
 
 
-# Each GPU's Vulkan driver by its kernel driver (Arch Wiki, Vulkan:
-# Installation). With none of these, Mesa's software one.
+# Each GPU's Vulkan and VA-API drivers by its kernel driver (Arch Wiki,
+# Vulkan & Hardware video acceleration).
 VULKAN_DRIVERS = {"i915": "vulkan-intel", "xe": "vulkan-intel", "amdgpu": "vulkan-radeon",
                   "nouveau": "vulkan-nouveau", "nvidia": "nvidia-utils", "virtio_gpu": "vulkan-virtio"}
+# Intel Gen4-7.5 PCI device high-byte families needing libva-intel-driver (i965);
+# Broadwell (Gen8, 0x16xx) and newer use intel-media-driver (iHD).
+INTEL_LEGACY_FAMILIES = {0x0000, 0x0100, 0x0400, 0x0A00, 0x0C00, 0x0D00, 0x0F00,
+                         0x2500, 0x2700, 0x2900, 0x2A00, 0x2E00}
 
 
-def gpu_vulkan_drivers(drm="/sys/class/drm"):
-    drivers = []
+def gpu_drivers(drm="/sys/class/drm", pci="/sys/bus/pci/devices"):
+    """Observed DRM (and display/3D PCI) kernel drivers -> (driver, pci_device_id_or_None)."""
+    seen = []
     for card in sorted(glob.glob(os.path.join(drm, "card[0-9]*"))):
         if "-" in os.path.basename(card):  # a connector
             continue
@@ -368,9 +373,82 @@ def gpu_vulkan_drivers(drm="/sys/class/drm"):
             driver = os.path.basename(os.readlink(os.path.join(card, "device/driver")))
         except OSError:
             continue
-        if driver in VULKAN_DRIVERS and VULKAN_DRIVERS[driver] not in drivers:
-            drivers.append(VULKAN_DRIVERS[driver])
+        dev_id = None
+        try:
+            with open(os.path.join(card, "device/device"), encoding="utf-8") as f:
+                dev_id = int(f.read().strip(), 16)
+        except (OSError, ValueError):
+            pass
+        if (driver, dev_id) not in seen:
+            seen.append((driver, dev_id))
+    for dev in sorted(glob.glob(os.path.join(pci, "*"))):
+        try:
+            with open(os.path.join(dev, "class"), encoding="utf-8") as f:
+                cls = int(f.read().strip(), 16)
+            if (cls >> 16) != 0x03:
+                continue
+            driver = os.path.basename(os.readlink(os.path.join(dev, "driver")))
+        except (OSError, ValueError):
+            continue
+        dev_id = None
+        try:
+            with open(os.path.join(dev, "device"), encoding="utf-8") as f:
+                dev_id = int(f.read().strip(), 16)
+        except (OSError, ValueError):
+            pass
+        if (driver, dev_id) not in seen:
+            seen.append((driver, dev_id))
+    return seen
+
+
+def gpu_vulkan_drivers(drm="/sys/class/drm", pci="/sys/bus/pci/devices"):
+    drivers = []
+    for driver, _ in gpu_drivers(drm, pci):
+        pkg_name = VULKAN_DRIVERS.get(driver)
+        if pkg_name and pkg_name not in drivers:
+            drivers.append(pkg_name)
     return drivers or ["vulkan-swrast"]
+
+
+def gpu_vaapi_drivers(drm="/sys/class/drm", pci="/sys/bus/pci/devices"):
+    drivers = []
+    def add(name):
+        if name not in drivers:
+            drivers.append(name)
+    for driver, dev_id in gpu_drivers(drm, pci):
+        if driver == "xe":
+            add("intel-media-driver")
+        elif driver == "i915":
+            if dev_id is None:
+                add("intel-media-driver")
+                add("libva-intel-driver")
+            elif (dev_id & 0xFF00) in INTEL_LEGACY_FAMILIES:
+                add("libva-intel-driver")
+            else:
+                add("intel-media-driver")
+        elif driver in ("amdgpu", "radeon", "nouveau"):
+            add("mesa")
+        elif driver == "nvidia":
+            add("libva-nvidia-driver")
+    return drivers
+
+
+def package_depends(repo_pkgs, aur_pkgs):
+    depends = []
+    for p in repo_pkgs:
+        res = subprocess.run(["pacman", "-Si"] + sync_options() + ["--", p], capture_output=True, text=True,
+                             env=dict(os.environ, LC_ALL="C"))
+        out = getattr(res, "stdout", None) or ""
+        for line in out.splitlines():
+            if line.startswith("Depends On") and " : " in line:
+                depends += line.split(" : ", 1)[1].split()
+    if aur_pkgs:
+        try:
+            for r in aur_results(aur_pkgs):
+                depends += r.get("Depends") or []
+        except (RuntimeError, ValueError):
+            pass  # the build says what is missing
+    return [re.split(r"[<>=]", d, maxsplit=1)[0] for d in depends]
 
 
 def needed_vulkan_drivers(repo_pkgs, aur_pkgs):
@@ -381,23 +459,20 @@ def needed_vulkan_drivers(repo_pkgs, aur_pkgs):
     if not (repo_pkgs or aur_pkgs) or subprocess.run(["pacman", "-T", "vulkan-driver"],
                                                      stdout=subprocess.DEVNULL).returncode == 0:
         return []
-    depends = []
-    for p in repo_pkgs:
-        out = subprocess.run(["pacman", "-Si"] + sync_options() + ["--", p], capture_output=True, text=True,
-                             env=dict(os.environ, LC_ALL="C")).stdout or ""
-        for line in out.splitlines():
-            if line.startswith("Depends On") and " : " in line:
-                depends += line.split(" : ", 1)[1].split()
-    if aur_pkgs:
-        try:
-            for r in aur_results(aur_pkgs):
-                depends += r.get("Depends") or []
-        except (RuntimeError, ValueError):
-            pass  # the build says what is missing
-    return gpu_vulkan_drivers() if any(re.split(r"[<>=]", d, maxsplit=1)[0] == "vulkan-driver" for d in depends) else []
+    return gpu_vulkan_drivers() if "vulkan-driver" in package_depends(repo_pkgs, aur_pkgs) else []
 
 
-def install_missing(missing, tracked):
+def needed_vaapi_drivers(repo_pkgs, aur_pkgs, installed=None):
+    """This machine's VA-API video drivers when ffmpeg or libva is installed or
+    being installed (their drivers are optional in Arch)."""
+    installed = installed or ()
+    need = any(p in installed for p in ("ffmpeg", "libva")) or any(p in repo_pkgs for p in ("ffmpeg", "libva"))
+    if not need:
+        return []
+    return [d for d in gpu_vaapi_drivers() if d not in installed]
+
+
+def install_missing(missing, tracked, installed=()):
     """Install declared leaves that are not installed, with their dependencies;
     sync and apply share this. Nothing is removed here."""
     repo_pkgs, aur_pkgs, local_pkgs = [], [], []
@@ -416,6 +491,9 @@ def install_missing(missing, tracked):
         else:
             aur_pkgs.append(p)
     drivers = needed_vulkan_drivers(repo_pkgs, aur_pkgs)
+    for d in needed_vaapi_drivers(repo_pkgs, aur_pkgs, installed):
+        if d not in drivers:
+            drivers.append(d)
     if drivers and not run_pacman("pacman -S --needed --noconfirm --asdeps " + shlex.join(drivers)):
         return False
     # Complete the repository ABI before compiling local/AUR packages.
@@ -465,10 +543,18 @@ def cmd_sync(first_install=False, install=True):
               f"({len(missing)}): {' '.join(missing)}")
     elif missing:
         print(f"===> [1/4] Installing missing declared packages ({len(missing)}): {' '.join(missing)}")
-        if not install_missing(missing, tracked):
+        if not install_missing(missing, tracked, installed_all):
             return 1
         # Reload after installs
         packages, provides_map, explicit_set = load_installed_db()
+        installed_all = set(packages.keys())
+    if install:
+        vaapi = needed_vaapi_drivers([], [], installed_all)
+        if vaapi:
+            print(f"===> Installing hardware video drivers ({' '.join(vaapi)})...")
+            if not run_pacman("pacman -S --needed --noconfirm --asdeps " + shlex.join(vaapi)):
+                return 1
+            packages, provides_map, explicit_set = load_installed_db()
 
     if install and set(leaves) - set(packages):
         print("locachy-pkg: install left declared packages missing; nothing is pruned", file=sys.stderr)
@@ -2260,11 +2346,12 @@ def install_planned_missing(mine, tracked):
     """The plan's declared-but-missing leaves that still are, once the host
     update has succeeded. No sync: nothing is pruned or re-marked."""
     planned = {r[2] for r in mine if r[1] == "missing"}
-    missing = [n for n in declared_missing(local_packages(LOCAL_DB)) if n in planned]
+    installed = local_packages(LOCAL_DB)
+    missing = [n for n in declared_missing(installed) if n in planned]
     if not missing:
         return True
     print(f"===> Installing declared packages that are not installed: {' '.join(missing)}", flush=True)
-    return install_missing(missing, tracked)
+    return install_missing(missing, tracked, installed)
 
 
 def apply_apps(mine):
@@ -2396,6 +2483,11 @@ def rebuild_locachy(force=False):
         with open(CPU_FILE, encoding="utf-8") as f:
             cpu = f.read().strip() or level
     except OSError:
+        cpu = level
+    cpu_opt = read_conf(RC_CONF).get("cpu_opt", "")
+    if cpu_opt == "auto":
+        cpu = "auto"
+    elif cpu_opt == "baseline":
         cpu = level
     if not run(["sh", os.path.join(SRC, "make.sh"), "--boot", level, cpu]):
         return False

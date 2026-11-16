@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-14 16:00-0500\n"
+"POT-Creation-Date: 2026-11-16 10:30+0800\n"
 "PO-Revision-Date: 2026-11-09 14:16+0000\n"
 "Last-Translator: LOCachy\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -4364,11 +4364,16 @@ msgid "Inverted selection: %d item marked."
 msgid_plural "Inverted selection: %d items marked."
 msgstr[0] "已反向选择：标记 %d 项。"
 
-#. TRANSLATORS: %s is a program's name (term, edit, archive).
 #: progs/files.c
 #, c-format
-msgid "%s opens from home only, not from a window."
-msgstr "%s 只能从 home 打开，不能从窗口打开。"
+msgid "Opened with %s in a window."
+msgstr "已用 %s 在单独的窗口中打开。"
+
+#. TRANSLATORS: first %s is a program's name, second %s why it did not open.
+#: progs/files.c
+#, c-format
+msgid "Cannot open a %s window: %.400s"
+msgstr "无法打开 %s 窗口：%.400s"
 
 #. TRANSLATORS: %s is a program's name, then process 1's answer.
 #: progs/files.c
@@ -4874,14 +4879,8 @@ msgstr "在窗口中，文件夹就在这里浏览。"
 
 #: progs/files.c
 #, c-format
-msgid "Opened with %s in a window."
-msgstr "已用 %s 在单独的窗口中打开。"
-
-#. TRANSLATORS: first %s is a program's name, second %s why it did not open.
-#: progs/files.c
-#, c-format
-msgid "Cannot open a %s window: %.400s"
-msgstr "无法打开 %s 窗口：%.400s"
+msgid "%s opens from home only, not from a window."
+msgstr "%s 只能从 home 打开，不能从窗口打开。"
 
 #: progs/files.c
 #, c-format
@@ -6430,7 +6429,7 @@ msgstr "口令加 TPM 自动解锁"
 msgid "with a passphrase"
 msgstr "用口令"
 
-#: progs/installer.c
+#: progs/installer.c progs/settings.c
 #, c-format
 msgid "auto (%s)"
 msgstr "自动（%s）"
@@ -10025,6 +10024,18 @@ msgid "tap and press"
 msgstr "轻触和按压"
 
 #: progs/settings.c
+msgid "CPU sandbox only"
+msgstr "仅 CPU 沙箱解码"
+
+#: progs/settings.c
+msgid "GPU hardware (prefer H.264)"
+msgstr "GPU 硬件解码（优先 H.264）"
+
+#: progs/settings.c
+msgid "auto (GPU if supported)"
+msgstr "自动（支持时用 GPU）"
+
+#: progs/settings.c
 msgid "a new one each time"
 msgstr "每次连接生成新地址"
 
@@ -10358,6 +10369,16 @@ msgstr "请稍候：%s 仍在卸载中。"
 #: progs/settings.c
 msgid "Wait: a package job is still running."
 msgstr "请稍候：软件包任务仍在运行。"
+
+#: progs/settings.c
+#, c-format
+msgid "LOCachy rebuilt with the selected CPU optimization."
+msgstr "已按所选 CPU 指令集优化重新构建 LOCachy。"
+
+#: progs/settings.c
+#, c-format
+msgid "LOCachy rebuild did not finish; see %s."
+msgstr "LOCachy 重新构建未完成；请查看 %s。"
 
 #: progs/settings.c
 #, c-format
@@ -12066,6 +12087,27 @@ msgstr "网络连接（Wi-Fi、有线）"
 msgid "Enter: open nmtui"
 msgstr "Enter: 打开 nmtui"
 
+#: progs/settings.c
+msgid "Extended display video"
+msgstr "扩展屏视频解码"
+
+#: progs/settings.c
+#, c-format
+msgid "baseline (%s)"
+msgstr "基准 (%s)"
+
+#: progs/settings.c
+msgid "CPU build optimization"
+msgstr "CPU 编译指令集优化"
+
+#: progs/settings.c
+msgid "Enter: rebuild"
+msgstr "Enter: 重新构建"
+
+#: progs/settings.c
+msgid "rebuilding..."
+msgstr "正在重新构建…"
+
 #. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
 msgid "Copy system summary"
@@ -12769,6 +12811,31 @@ msgstr "Enter: 打开硬件明细、磁盘 SMART 健康度与实时传感器浏�
 msgid "Enter: set up Wi-Fi or wired connections in nmtui."
 msgstr "Enter: 在 nmtui 中配置 Wi-Fi 或有线连接。"
 
+#: progs/settings.c
+msgid ""
+"Extended display uses GPU VA-API when supported and crisp 4:4:4; applies on "
+"next session."
+msgstr "扩展屏在硬件支持时使用 GPU VA-API 并保持 4:4:4 清晰文本；下次连接生效。"
+
+#: progs/settings.c
+msgid ""
+"Extended display prefers GPU hardware decoding (H.264 if GPU lacks 4:4:4 "
+"HEVC); applies on next session."
+msgstr "扩展屏优先使用 GPU 硬件解码（不支持 4:4:4 HEVC 时用 H.264）；下次连接生效。"
+
+#: progs/settings.c
+msgid ""
+"Extended display uses the CPU-only sandbox decoder; applies on next session."
+msgstr "扩展屏仅使用纯 CPU 沙箱解码；下次连接生效。"
+
+#: progs/settings.c
+msgid "Saved native CPU auto-optimization; press Enter to rebuild LOCachy now."
+msgstr "已保存本机指令集自动优化；按 Enter 立即重新构建 LOCachy。"
+
+#: progs/settings.c
+msgid "Saved portable baseline ISA; press Enter to rebuild LOCachy now."
+msgstr "已保存通用基准指令集；按 Enter 立即重新构建 LOCachy。"
+
 #. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
 msgid "Enter: copy system and hardware summary to clipboard."
@@ -12852,6 +12919,16 @@ msgstr "%s：无，已保存并生效。"
 #: progs/settings.c
 msgid "Applying the kernel choice through the host package manifest..."
 msgstr "正在通过宿主软件清单应用内核选择…"
+
+#: progs/settings.c
+#, c-format
+msgid "Rebuilding LOCachy with the selected CPU optimization in background..."
+msgstr "正在后台按所选 CPU 优化重新构建 LOCachy…"
+
+#: progs/settings.c
+#, c-format
+msgid "Cannot start rebuild job."
+msgstr "无法启动重新构建任务。"
 
 #: progs/settings.c
 #, c-format
@@ -14185,17 +14262,22 @@ msgstr "选择要打开的文档。"
 msgid "Clear List"
 msgstr "清空列表"
 
-#. TRANSLATORS: %.200s is the folder path; %s is the system error message.
-#: progs/view.c
-#, c-format
-msgid "Cannot open the folder %.200s: %s."
-msgstr "无法打开文件夹 %.200s：%s。"
-
 #. TRANSLATORS: %.200s is the folder path.
 #: progs/view.c
 #, c-format
 msgid "%.200s shown in the file manager."
 msgstr "已在文件管理器中显示 %.200s。"
+
+#: progs/view.c
+#, c-format
+msgid "Cannot open a files window for %.200s."
+msgstr "无法为 %.200s 打开文件窗口。"
+
+#. TRANSLATORS: %.200s is the folder path; %s is the system error message.
+#: progs/view.c
+#, c-format
+msgid "Cannot open the folder %.200s: %s."
+msgstr "无法打开文件夹 %.200s：%s。"
 
 #. TRANSLATORS: follows the current page number in the presentation bar; %d is the total page count.
 #: progs/view.c
@@ -14663,5 +14745,3 @@ msgstr "显示更多详情..."
 #~ msgid ""
 #~ "Tor off, but its firewall is still there: nothing goes out (%s remove)."
 #~ msgstr "Tor 已关闭，但其防火墙仍在：所有外联已阻断（%s remove）。"
-
-

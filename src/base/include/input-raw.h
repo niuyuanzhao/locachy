@@ -29,6 +29,7 @@ int pointer_scroll_precision(int on);
 /* Backend hooks are weak so existing standalone keyboard tests need not link
  * this optional consumer. Programs use the strong API above. */
 __attribute__((weak)) int base_raw_pending(void);
+__attribute__((weak)) int base_raw_forward_home(void);
 __attribute__((weak)) void base_raw_emit(uint32_t device, uint32_t code, uint32_t keysym,
                                         uint32_t mods, uint32_t locks, uint32_t state, int local);
 __attribute__((weak)) void base_raw_cancel(void);

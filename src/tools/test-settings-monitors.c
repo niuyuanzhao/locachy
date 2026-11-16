@@ -190,6 +190,10 @@ static const char *map_path(const char *path, char *out, size_t size)
         snprintf(out, size, "%s/os-release", root);
     else if (strcmp(path, "/usr/local/lib/locachy/source-commit") == 0)
         snprintf(out, size, "%s/source-commit", root);
+    else if (strcmp(path, "/usr/local/lib/locachy/cpu") == 0)
+        snprintf(out, size, "%s/cpu", root);
+    else if (strcmp(path, "/usr/local/lib/locachy/level") == 0)
+        snprintf(out, size, "%s/level", root);
     else if (strcmp(path, "/var/lib/locachy/battery") == 0 || strncmp(path, "/var/lib/locachy/battery/", 25) == 0)
         snprintf(out, size, "%s/battery%s", root, path + 24);
     else if (strcmp(path, "/usr/share/hwdata") == 0 || strncmp(path, "/usr/share/hwdata/", 18) == 0)
@@ -649,7 +653,8 @@ static void test_circular(void)
            system_keymap_index() == imek_index() + NIME_KEYS && kb_index() == system_keymap_index() + 1 &&
            bat_page_index() == kb_index() + nkeyboards_seen && bat_thresh_index() == bat_page_index() + 1 &&
            hwinfo_index() == bat_thresh_index() + power_thresh_count() && hwcopy_index() == hwinfo_index() + 1 &&
-           nmtui_index() == hwcopy_index() + 1 && num_hw_items() == nmtui_index() + 1);
+           nmtui_index() == hwcopy_index() + 1 && extd_index() == nmtui_index() + 1 &&
+           cpu_opt_index() == extd_index() + 1 && num_hw_items() == cpu_opt_index() + 1);
     on_rc("touchpad_circular", "0", NULL);
     assert(circular == 0);
     on_rc("touchpad_circular", "yes", NULL);
@@ -3017,7 +3022,22 @@ int main(int argc, char **argv)
            system_keymap_index() == imek_index() + NIME_KEYS && kb_index() == system_keymap_index() + 1 &&
            bat_page_index() == kb_index() + nkeyboards_seen && bat_thresh_index() == bat_page_index() + 1 &&
            hwinfo_index() == bat_thresh_index() + power_thresh_count() && hwcopy_index() == hwinfo_index() + 1 &&
-           nmtui_index() == hwcopy_index() + 1 && num_hw_items() == nmtui_index() + 1);
+           nmtui_index() == hwcopy_index() + 1 && extd_index() == nmtui_index() + 1 &&
+           cpu_opt_index() == extd_index() + 1 && num_hw_items() == cpu_opt_index() + 1);
+    selected = extd_index();
+    adjust(+1);
+    assert(extd_decode == EXTD_HW);
+    adjust(+1);
+    assert(extd_decode == EXTD_SW);
+    adjust(+1);
+    assert(extd_decode == EXTD_AUTO);
+    selected = cpu_opt_index();
+    adjust(+1);
+    assert(cpu_opt_auto >= 0);
+    cpu_opt_auto = -1;
+    rc_set("cpu_opt", NULL);
+    rc_set("extdisplay_decode", NULL);
+    puts("PASS extended display video mode and CPU optimization settings rows toggle cleanly");
     forks_before = forks;
     selected = ime_index();
     adjust(+1);
