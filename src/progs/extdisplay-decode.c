@@ -28,7 +28,7 @@ struct extdisplay_decoder {
     int has_ready, dmabuf_off;
     uint32_t *pixels;
 #ifdef CONFIG_EXTDISPLAY_VAAPI
-    VASurfaceID vpp_surf[2];
+    VASurfaceID vpp_surf[3];
     VAConfigID vpp_cfg;
     VAContextID vpp_ctx;
     int vpp_ready, vpp_idx, vpp_has_last;
@@ -179,7 +179,7 @@ void extdisplay_decoder_close(struct extdisplay_decoder *d)
     if (d->vpp_ready && va_disp) {
         if (d->vpp_ctx != VA_INVALID_ID) vaDestroyContext(va_disp, d->vpp_ctx);
         if (d->vpp_cfg != VA_INVALID_ID) vaDestroyConfig(va_disp, d->vpp_cfg);
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < 3; i++) {
             if (d->vpp_surf[i] != VA_INVALID_ID) vaDestroySurfaces(va_disp, &d->vpp_surf[i], 1);
         }
     }
@@ -199,7 +199,7 @@ struct extdisplay_decoder *extdisplay_decoder_open(enum extdisplay_codec codec, 
     struct extdisplay_decoder *d = calloc(1, sizeof *d);
     if (!d) return NULL;
 #ifdef CONFIG_EXTDISPLAY_VAAPI
-    d->vpp_surf[0] = d->vpp_surf[1] = VA_INVALID_ID;
+    d->vpp_surf[0] = d->vpp_surf[1] = d->vpp_surf[2] = VA_INVALID_ID;
     d->vpp_cfg = VA_INVALID_ID;
     d->vpp_ctx = VA_INVALID_ID;
 #endif
@@ -278,10 +278,10 @@ int extdisplay_decoder_export_dmabuf(struct extdisplay_decoder *d, int *fd, stru
                                          VA_SURFACE_ATTRIB_USAGE_HINT_EXPORT } } },
         };
         if (vaCreateSurfaces(va_disp, VA_RT_FORMAT_RGB32, d->width, d->height,
-                             d->vpp_surf, 2, attrs, 2) != VA_STATUS_SUCCESS ||
+                             d->vpp_surf, 3, attrs, 2) != VA_STATUS_SUCCESS ||
             vaCreateConfig(va_disp, VAProfileNone, VAEntrypointVideoProc, NULL, 0, &d->vpp_cfg) != VA_STATUS_SUCCESS ||
             vaCreateContext(va_disp, d->vpp_cfg, (int)d->width, (int)d->height, VA_PROGRESSIVE,
-                            d->vpp_surf, 2, &d->vpp_ctx) != VA_STATUS_SUCCESS) {
+                            d->vpp_surf, 3, &d->vpp_ctx) != VA_STATUS_SUCCESS) {
             d->dmabuf_off = 1;
             return 0;
         }
@@ -336,7 +336,7 @@ int extdisplay_decoder_export_dmabuf(struct extdisplay_decoder *d, int *fd, stru
         .offset = prime.layers[0].offset[0],
         .modifier = prime.objects[0].drm_format_modifier,
     };
-    d->vpp_idx ^= 1;
+    d->vpp_idx = (d->vpp_idx + 1) % 3;
     d->vpp_has_last = 1;
     av_frame_unref(d->ready);
     d->has_ready = 0;
@@ -350,7 +350,7 @@ int extdisplay_decoder_reexport_dmabuf(struct extdisplay_decoder *d, int *fd, st
 {
 #ifdef CONFIG_EXTDISPLAY_VAAPI
     if (!d || d->dmabuf_off || !va_vpp_ok || !va_disp || !d->vpp_ready || !d->vpp_has_last) return 0;
-    VASurfaceID dst = d->vpp_surf[d->vpp_idx ^ 1];
+    VASurfaceID dst = d->vpp_surf[(d->vpp_idx + 2) % 3];
     VADRMPRIMESurfaceDescriptor prime;
     memset(&prime, 0, sizeof prime);
     if (vaExportSurfaceHandle(va_disp, dst, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,

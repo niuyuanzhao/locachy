@@ -74,6 +74,8 @@ int extdisplay_control_parse(const unsigned char *data, size_t size, struct extd
 /* The receiver's messages: their length, or -1 (invalid or does not fit). */
 int extdisplay_hello(char *out, size_t size, uint32_t width, uint32_t height, double scale,
               int h264, int hevc);
+int extdisplay_hello_named(char *out, size_t size, uint32_t width, uint32_t height, double scale,
+                    int h264, int hevc, const char *host, const char *model);
 int extdisplay_key_json(char *out, size_t size, uint32_t device, uint32_t code,
                  uint32_t keysym, uint32_t mods, uint32_t locks, int state);
 int extdisplay_button_json(char *out, size_t size, uint32_t button, int pressed,

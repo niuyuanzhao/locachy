@@ -61,6 +61,8 @@ static void protocol(void)
     char s[2048];
     CHECK(extdisplay_hello(s, sizeof s, 1920, 1080, 1.25, 1, 1) > 0 && strstr(s, "\"extendedOnly\":true") &&
           strstr(s, "\"panel\":{\"pixelsWide\":1920") && strstr(s, "\"codec\":\"hevc\""));
+    CHECK(extdisplay_hello_named(s, sizeof s, 2160, 1440, 2.0, 1, 1, "cf-fv1\n", "CF-\"FV1\\R ") > 0 &&
+          strstr(s, "\"host\":\"cf-fv1\"") && strstr(s, "\"model\":\"CF-FV1R\""));
     CHECK(extdisplay_hello(s, sizeof s, 1920, 1080, 1.0, 1, 0) > 0 && !strstr(s, "hevc"));
     CHECK(extdisplay_hello(s, sizeof s, 0, 1080, 1.0, 1, 0) < 0 && extdisplay_hello(s, sizeof s, 64, 64, 1.0, 0, 0) < 0);
     CHECK(extdisplay_hello(s, 32, 1920, 1080, 1.0, 1, 0) < 0);

@@ -193,19 +193,52 @@ static int fits(int n, size_t size) { return n >= 0 && (size_t)n < size ? n : -1
 
 static int unit(double v) { return isfinite(v) && v >= 0 && v <= 1; }
 
-int extdisplay_hello(char *s, size_t size, uint32_t w, uint32_t h, double scale, int h264, int hevc)
+static void sanitize_label(const char *src, char *dst, size_t size)
+{
+    size_t used = 0;
+    if (!src || !dst || !size) {
+        if (dst && size) dst[0] = '\0';
+        return;
+    }
+    for (const unsigned char *p = (const unsigned char *)src; *p && used + 1 < size; p++) {
+        unsigned char c = *p;
+        if (c < 0x20 || c > 0x7e || c == '"' || c == '\\') continue;
+        if (c == ' ' && (used == 0 || dst[used - 1] == ' ')) continue;
+        dst[used++] = (char)c;
+    }
+    while (used > 0 && dst[used - 1] == ' ') used--;
+    dst[used] = '\0';
+}
+
+int extdisplay_hello_named(char *s, size_t size, uint32_t w, uint32_t h, double scale,
+                    int h264, int hevc, const char *host, const char *model)
 {
     if (extdisplay_dimensions(w, h, NULL) < 0 || !isfinite(scale) || scale < 0.5 || scale > 4 || (!h264 && !hevc)) return -1;
+    char safe_host[64], safe_model[64], extra[192] = "";
+    sanitize_label(host, safe_host, sizeof safe_host);
+    sanitize_label(model, safe_model, sizeof safe_model);
+    if (safe_host[0] && safe_model[0]) {
+        snprintf(extra, sizeof extra, ",\"host\":\"%s\",\"model\":\"%s\"", safe_host, safe_model);
+    } else if (safe_host[0]) {
+        snprintf(extra, sizeof extra, ",\"host\":\"%s\"", safe_host);
+    } else if (safe_model[0]) {
+        snprintf(extra, sizeof extra, ",\"model\":\"%s\"", safe_model);
+    }
     return fits(snprintf(s, size,
-        "{\"type\":\"hello\",\"pv\":3,\"locachy\":%d,\"device\":\"LOCachy\",\"extendedOnly\":true,"
+        "{\"type\":\"hello\",\"pv\":3,\"locachy\":%d,\"device\":\"LOCachy\",\"extendedOnly\":true%s,"
         "\"pixelsWide\":%u,\"pixelsHigh\":%u,\"scale\":%.3f,"
         "\"panel\":{\"pixelsWide\":%u,\"pixelsHigh\":%u,\"scale\":%.3f},"
         "\"displayMaxFrameRate\":%d,\"maxEncodeWide\":%u,\"maxEncodeHigh\":%u,"
         "\"videoCaps\":[%s%s%s],\"input\":[\"key\",\"button\",\"cancel\",\"pointer\",\"scroll\"]}",
-        EXTDISPLAY_SENDER_VERSION, w, h, scale, w, h, scale, EXTDISPLAY_FPS_MAX, EXTDISPLAY_DIM_MAX, EXTDISPLAY_DIM_MAX,
+        EXTDISPLAY_SENDER_VERSION, extra, w, h, scale, w, h, scale, EXTDISPLAY_FPS_MAX, EXTDISPLAY_DIM_MAX, EXTDISPLAY_DIM_MAX,
         h264 ? "{\"codec\":\"h264\",\"maxWidth\":4096,\"maxHeight\":4096,\"maxFrameRate\":60}" : "",
         h264 && hevc ? "," : "",
         hevc ? "{\"codec\":\"hevc\",\"maxWidth\":4096,\"maxHeight\":4096,\"maxFrameRate\":60}" : ""), size);
+}
+
+int extdisplay_hello(char *s, size_t size, uint32_t w, uint32_t h, double scale, int h264, int hevc)
+{
+    return extdisplay_hello_named(s, size, w, h, scale, h264, hevc, NULL, NULL);
 }
 
 int extdisplay_key_json(char *s, size_t size, uint32_t device, uint32_t code, uint32_t sym, uint32_t mods,

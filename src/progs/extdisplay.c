@@ -71,7 +71,14 @@ static int send_text(uint32_t op, const char *text, int n)
     if (ipc < 0 || n < 0 || n > (int)EXTDISPLAY_IPC_TEXT) return -1;
     struct extdisplay_ipc m = { .op = op, .length = (uint32_t)n };
     if (n) memcpy(m.text, text, (size_t)n);
-    return extdisplay_ipc_send(ipc, &m);
+    if (extdisplay_ipc_send(ipc, &m) == 0) return 0;
+    if (errno != EAGAIN && errno != EWOULDBLOCK) return -1;
+    if (op == EXTDISPLAY_IPC_INPUT && n >= 17 && memcmp(text, "{\"type\":\"pointer\"", 17) == 0) {
+        return 0;
+    }
+    struct pollfd p = { ipc, POLLOUT, 0 };
+    if (poll(&p, 1, 50) > 0 && (p.revents & POLLOUT) && extdisplay_ipc_send(ipc, &m) == 0) return 0;
+    return op == EXTDISPLAY_IPC_INPUT && (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
 }
 
 static int input_allowed(void)
@@ -164,7 +171,7 @@ static int pointer_input(void)
     } else {
         n = extdisplay_pointer_json(s, sizeof s, x, y);
     }
-    return send_input(s, n);
+    return n >= 0 ? send_input(s, n) : 0;
 }
 
 /* Every key goes to the sender while the link is up, Super+Esc and Ctrl+Alt+F12
@@ -268,6 +275,31 @@ static int release_remote(pid_t *worker, int *inhibited)
     return 0;
 }
 
+static void read_trimmed_line(const char *path, char *out, size_t size)
+{
+    out[0] = '\0';
+    FILE *f = fopen(path, "re");
+    if (!f) return;
+    if (fgets(out, (int)size, f)) {
+        size_t n = strlen(out);
+        while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r' || out[n - 1] == ' ')) out[--n] = '\0';
+    }
+    fclose(f);
+}
+
+static void read_identity(char *host, size_t host_sz, char *model, size_t model_sz)
+{
+    host[0] = model[0] = '\0';
+    if (gethostname(host, host_sz) == 0) host[host_sz - 1] = '\0';
+    if (!host[0] || !strcmp(host, "(none)") || !strcmp(host, "localhost")) {
+        read_trimmed_line("/etc/hostname", host, host_sz);
+    }
+    read_trimmed_line("/sys/class/dmi/id/product_name", model, model_sz);
+    if (!model[0] || !strcmp(model, "System Product Name") || !strcmp(model, "To Be Filled By O.E.M.")) {
+        read_trimmed_line("/sys/class/dmi/id/board_name", model, model_sz);
+    }
+}
+
 static int handle_worker(int *inhibited, double *started)
 {
     struct extdisplay_ipc m;
@@ -280,14 +312,15 @@ static int handle_worker(int *inhibited, double *started)
     switch (m.op) {
     case EXTDISPLAY_IPC_READY: {
         if (!(m.width & 3u) || m.width > 31u) break;
-        char hello[EXTDISPLAY_IPC_TEXT];
+        char hello[EXTDISPLAY_IPC_TEXT], host[64], model[64];
         int w, h;
         screen_pixels(&w, &h);
         double scale = screen_scale();
+        read_identity(host, sizeof host, model, sizeof model);
         int use_hevc = (m.width & 2u) != 0;
         if (strcmp(decode_mode, "hw") == 0 && !(m.width & 16u) && (m.width & 4u)) use_hevc = 0;
-        int n = extdisplay_hello(hello, sizeof hello, (uint32_t)(w > 0 ? w : 1), (uint32_t)(h > 0 ? h : 1),
-                          scale >= 0.5 && scale <= 4 ? scale : 1.0, m.width & 1u, use_hevc);
+        int n = extdisplay_hello_named(hello, sizeof hello, (uint32_t)(w > 0 ? w : 1), (uint32_t)(h > 0 ? h : 1),
+                          scale >= 0.5 && scale <= 4 ? scale : 1.0, m.width & 1u, use_hevc, host, model);
         if (send_text(EXTDISPLAY_IPC_HELLO, hello, n) < 0) break;
         return 1;
     }

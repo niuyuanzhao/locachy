@@ -2166,7 +2166,7 @@ int screen_present_dmabuf(int dmabuf_fd, uint32_t w, uint32_t h, uint32_t fourcc
     if (dmabuf_fd < 0 || window_mode || extended) { errno = EINVAL; return -1; }
     if (card < 0 || noutputs != 1 || lent) { errno = EAGAIN; return -1; }
     struct output *o = &outputs[0];
-    if (o->mode.hdisplay != w || o->mode.vdisplay != h) return -1;
+    if (o->mode.hdisplay != w || o->mode.vdisplay != h) { errno = EINVAL; return -1; }
     struct drm_prime_handle prime = { .fd = (uint32_t)dmabuf_fd };
     if (ioctl(card, DRM_IOCTL_PRIME_FD_TO_HANDLE, &prime) < 0) return -1;
     struct drm_mode_fb_cmd2 fb = {

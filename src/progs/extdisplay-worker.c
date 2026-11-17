@@ -307,61 +307,70 @@ static int channel(int fd, int expected)
            flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 ? 0 : -1;
 }
 
-/* One message from extdisplay: 0, 1 to end (STOP), -1 on a broken channel. */
+/* Drain queued messages from extdisplay: 0, 1 to end (STOP), -1 on a broken channel. */
 static int frontend(void)
 {
-    struct extdisplay_ipc m;
-    /* recv, not recvmsg: a descriptor from the frontend is never taken. */
-    ssize_t n = recv(EXTDISPLAY_IPC_FD, &m, sizeof m, MSG_TRUNC | MSG_DONTWAIT);
-    if (n < 0 && (errno == EAGAIN || errno == EINTR)) return 0;
-    if (n != (ssize_t)sizeof m || m.magic != EXTDISPLAY_IPC_MAGIC || m.reserved || m.length > EXTDISPLAY_IPC_TEXT || m.bytes) return -1;
-    switch (m.op) {
-    case EXTDISPLAY_IPC_STOP:
-        send_cancel();
-        return 1;
-    case EXTDISPLAY_IPC_CANCEL:
-        /* Answered only once the cancel is in the stream; else the stream
-         * ends here, which the peer treats as a release as well. */
-        return send_cancel() == 0 && status(EXTDISPLAY_IPC_CANCELLED) == 0 ? 0 : -1;
-    case EXTDISPLAY_IPC_FRAME_ACK:
-        session.frame_pending = 0;
-        return send_latest();
-    case EXTDISPLAY_IPC_DMABUF_OFF:
-        session.dmabuf_off = 1;
-        extdisplay_decoder_disable_dmabuf(session.decoder);
-        return 0;
-    case EXTDISPLAY_IPC_REFRESH: {
-        if (!session.active || session.frame_pending || session.dmabuf_off) return 0;
-        int dmabuf_fd = -1;
-        struct extdisplay_dmabuf info;
-        if (extdisplay_decoder_reexport_dmabuf(session.decoder, &dmabuf_fd, &info) > 0 && dmabuf_fd >= 0) {
-            struct extdisplay_ipc dm = {
-                .magic = EXTDISPLAY_IPC_MAGIC, .op = EXTDISPLAY_IPC_DMABUF,
-                .width = session.width, .height = session.height, .length = sizeof info,
-            };
-            memcpy(dm.text, &info, sizeof info);
-            return send_fd_msg(&dm, dmabuf_fd);
+    for (int count = 0; count < 128; count++) {
+        struct extdisplay_ipc m;
+        /* recv, not recvmsg: a descriptor from the frontend is never taken. */
+        ssize_t n = recv(EXTDISPLAY_IPC_FD, &m, sizeof m, MSG_TRUNC | MSG_DONTWAIT);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
+        if (n != (ssize_t)sizeof m || m.magic != EXTDISPLAY_IPC_MAGIC || m.reserved || m.length > EXTDISPLAY_IPC_TEXT || m.bytes) return -1;
+        switch (m.op) {
+        case EXTDISPLAY_IPC_STOP:
+            send_cancel();
+            return 1;
+        case EXTDISPLAY_IPC_CANCEL:
+            /* Answered only once the cancel is in the stream; else the stream
+             * ends here, which the peer treats as a release as well. */
+            if (send_cancel() != 0 || status(EXTDISPLAY_IPC_CANCELLED) != 0) return -1;
+            break;
+        case EXTDISPLAY_IPC_FRAME_ACK:
+            session.frame_pending = 0;
+            if (send_latest() < 0) return -1;
+            break;
+        case EXTDISPLAY_IPC_DMABUF_OFF:
+            session.dmabuf_off = 1;
+            extdisplay_decoder_disable_dmabuf(session.decoder);
+            break;
+        case EXTDISPLAY_IPC_REFRESH: {
+            if (!session.active || session.frame_pending || session.dmabuf_off) break;
+            int dmabuf_fd = -1;
+            struct extdisplay_dmabuf info;
+            if (extdisplay_decoder_reexport_dmabuf(session.decoder, &dmabuf_fd, &info) > 0 && dmabuf_fd >= 0) {
+                struct extdisplay_ipc dm = {
+                    .magic = EXTDISPLAY_IPC_MAGIC, .op = EXTDISPLAY_IPC_DMABUF,
+                    .width = session.width, .height = session.height, .length = sizeof info,
+                };
+                memcpy(dm.text, &info, sizeof info);
+                if (send_fd_msg(&dm, dmabuf_fd) < 0) return -1;
+            }
+            break;
         }
-        return 0;
-    }
-    case EXTDISPLAY_IPC_HELLO:
-        if (session.hello || !m.length || enqueue(m.text, m.length) < 0) return -1;
-        session.hello = 1;
-        session.last_rx = now();
-        return 0;
-    case EXTDISPLAY_IPC_INPUT:
-        if (!m.length) return -1;
-        if (!session.active) return 0;
-        /* Pointer motion is a rate, not a record: when the peer lags, the next
-         * position replaces the backlog instead of ending the stream. */
-        if (m.length >= 17 && memcmp(m.text, "{\"type\":\"pointer\"", 17) == 0 &&
-            session.tx_end - session.tx_start > POINTER_SHED) {
-            return 0;
+        case EXTDISPLAY_IPC_HELLO:
+            if (session.hello || !m.length || enqueue(m.text, m.length) < 0) return -1;
+            session.hello = 1;
+            session.last_rx = now();
+            break;
+        case EXTDISPLAY_IPC_INPUT:
+            if (!m.length) return -1;
+            if (!session.active) break;
+            /* Rate-shed pointer motion and scroll updates when the peer lags
+             * so a transient stall never overflows tx or ends the stream. */
+            if (session.tx_end - session.tx_start > POINTER_SHED &&
+                ((m.length >= 17 && memcmp(m.text, "{\"type\":\"pointer\"", 17) == 0) ||
+                 (m.length >= 16 && memcmp(m.text, "{\"type\":\"scroll\"", 16) == 0 &&
+                  strstr(m.text, "\"phase\":2") != NULL))) {
+                break;
+            }
+            if (enqueue(m.text, m.length) < 0) return -1;
+            break;
+        default:
+            return -1;
         }
-        return enqueue(m.text, m.length);
-    default:
-        return -1;
     }
+    return 0;
 }
 
 int main(void)
@@ -393,11 +402,23 @@ int main(void)
         if (r < 0 || (p[0].revents & (POLLHUP | POLLERR | POLLNVAL)) || (p[1].revents & (POLLERR | POLLNVAL))) break;
         if ((p[0].revents & POLLIN) && (r = frontend()) != 0) break;
         if (p[1].revents & (POLLIN | POLLHUP)) {
-            unsigned char data[16384];
-            ssize_t n = recv(EXTDISPLAY_TRANSPORT_FD, data, sizeof data, MSG_DONTWAIT);
-            if (n == 0) break; /* the peer or the broker ended the stream */
-            if (n < 0 && errno != EAGAIN && errno != EINTR) break;
-            if (n > 0 && extdisplay_parser_feed(&session.parser, data, (size_t)n, receive, NULL) < 0) break;
+            int ended = 0;
+            for (int reads = 0; reads < 8; reads++) {
+                unsigned char data[65536];
+                ssize_t n = recv(EXTDISPLAY_TRANSPORT_FD, data, sizeof data, MSG_DONTWAIT);
+                if (n == 0) { ended = 1; break; } /* the peer or the broker ended the stream */
+                if (n < 0) {
+                    if (errno == EINTR) continue;
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                    ended = 1;
+                    break;
+                }
+                if (extdisplay_parser_feed(&session.parser, data, (size_t)n, receive, NULL) < 0) {
+                    ended = 1;
+                    break;
+                }
+            }
+            if (ended) break;
         }
         double t = now();
         if (t - session.last_rx > TIMEOUT_S) break;

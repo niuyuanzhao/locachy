@@ -40,8 +40,8 @@ Thunderbolt/USB4 网络支持线缆直连，或经过兼容的雷电／USB4 Hub�
 
 1. `extdisplay-broker` 将已验证的 `thunderbolt-net` 接口移入独立网络命名空间，配置 IPv6 链路本地地址，并启动 `extdisplay-advertise` 在该链路上发布携带当次会话随机 128 位 PSK 的 `_locachy-ext._tcp.local.` 服务。
 2. macOS 后台服务在雷电链路上自动发现该广播，并使用 `TLS_PSK_WITH_AES_128_GCM_SHA256`（身份与 ALPN 为 `locachy-extdisplay-v1`）自动建立连接。
-3. 接收端在 `hello` 中上报其面板的物理像素尺寸（`pixelsWide × pixelsHigh`）、缩放系数、支持的编码格式（`h264`、`hevc`）及输入能力。
-4. 发送端仅在握手后按该物理像素尺寸计算 1:1 初始虚拟显示器几何（高密度且可整除为偶数逻辑点时采用 `@2x` HiDPI，否则为 `@1x`，不保留跨会话模式预设），并在系统“显示器”设置中提供五档比例缩放模式（`2.0×`、`1.75×`、`1.5×`、`1.25×`、`1.0×`，对应“更大文字 ↔ 更多空间”）。处于 `1:1` 档位时零缩放直出；切换到中间分数 HiDPI 档位时按原生 HiDPI 采样并经 Metal Mitchell 双三次（`B=1/3, C=1/3`）降采样至面板物理像素后编码传输。
+3. 接收端在已认证的 `hello` 中上报其面板物理像素尺寸（`pixelsWide × pixelsHigh`）、缩放系数、脱敏后的 `host` 与 `model` 机器标识、支持的编码格式（`h264`、`hevc`）及输入能力。
+4. 发送端按握手物理像素计算 `1:1` 基础几何（高密度且可整除为偶数逻辑点时采用 `@2x` HiDPI，否则 `@1x`），在系统“显示器”设置提供五档比例缩放（`2.0×`、`1.75×`、`1.5×`、`1.25×`、`1.0×`，对应“更大文字 ↔ 更多空间”），并按 `(host, model, pixelsWide × pixelsHigh)` 查询本机模式数据库（`~/Library/Application Support/LOCachy/display-modes.json`）：首次连接默认使用 `1:1`，用户在系统设置切换后自动记入该机器对应的表项，下次重连或重新插拔直接按表恢复所选大小。处于 `1:1` 档位时零缩放直出；中间分数 HiDPI 档位按原生 HiDPI 采样并经 Metal Mitchell 双三次（`B=1/3, C=1/3`）降采样至面板物理像素后编码传输。
 
 ## 会话行为
 
