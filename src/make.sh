@@ -324,7 +324,7 @@ $cc -o "$lib/xdg-open" "$src/progs/xdg-open.c"
 # module's Wayland libraries are installed).
 if command -v wayland-scanner >/dev/null 2>&1 && pkg-config --exists wayland-client wayland-cursor xkbcommon libpng; then
     for p in security-context-v1 wlr-foreign-toplevel-management-unstable-v1 \
-             wlr-output-management-unstable-v1 wlr-layer-shell-unstable-v1 \
+             wlr-output-management-unstable-v1 wlr-output-power-management-unstable-v1 wlr-layer-shell-unstable-v1 \
              virtual-keyboard-unstable-v1 xdg-shell fractional-scale-v1 viewporter ext-data-control-v1 \
              ext-idle-notify-v1 relative-pointer-unstable-v1 ext-foreign-toplevel-list-v1 \
              ext-image-capture-source-v1 ext-image-copy-capture-v1; do
@@ -336,7 +336,8 @@ if command -v wayland-scanner >/dev/null 2>&1 && pkg-config --exists wayland-cli
         "$b/proto-ext-data-control-v1.o" -lwayland-client
     $GCC -I"$b" -o "$lib/labwc-control" "$src/progs/labwc-control.c" \
         "$b/proto-security-context-v1.o" "$b/proto-wlr-foreign-toplevel-management-unstable-v1.o" \
-        "$b/proto-wlr-output-management-unstable-v1.o" "$b/proto-ext-idle-notify-v1.o" "$b"/glibc-base-*.o \
+        "$b/proto-wlr-output-management-unstable-v1.o" "$b/proto-wlr-output-power-management-unstable-v1.o" \
+        "$b/proto-ext-idle-notify-v1.o" "$b"/glibc-base-*.o \
         $FT_LIBS -lwayland-client -lm
     $GCC $IME_CFLAGS -I"$b" -o /usr/local/bin/locachy-bar "$src/progs/bar.c" \
         "$b/proto-wlr-layer-shell-unstable-v1.o" "$b/proto-virtual-keyboard-unstable-v1.o" \

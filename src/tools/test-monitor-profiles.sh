@@ -10,7 +10,7 @@ cc=(gcc -O2 -g -Wall -Wextra -Werror -D_GNU_SOURCE -I"$src/base/include" -I"$src
 "$out/profiles" "$out/fixtures"
 "${cc[@]}" -fsanitize=address,undefined "$src/tools/test-monitor-profiles.c" -o "$out/profiles-san"
 ASAN_OPTIONS=detect_leaks=0 "$out/profiles-san" "$out/fixtures-san"
-for p in security-context-v1 wlr-foreign-toplevel-management-unstable-v1 wlr-output-management-unstable-v1 ext-idle-notify-v1; do
+for p in security-context-v1 wlr-foreign-toplevel-management-unstable-v1 wlr-output-management-unstable-v1 wlr-output-power-management-unstable-v1 ext-idle-notify-v1; do
     wayland-scanner client-header "$src/base/protocols/$p.xml" "$out/protocols/$p-client-protocol.h"
     wayland-scanner private-code "$src/base/protocols/$p.xml" "$out/protocols/$p-protocol.c"
 done

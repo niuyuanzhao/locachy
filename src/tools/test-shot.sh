@@ -27,7 +27,7 @@ cd "$out"
 for p in wlr-foreign-toplevel-management-unstable-v1 wlr-layer-shell-unstable-v1 virtual-keyboard-unstable-v1 \
          xdg-shell wlr-screencopy-unstable-v1 wlr-virtual-pointer-unstable-v1 fractional-scale-v1 viewporter \
          relative-pointer-unstable-v1 ext-foreign-toplevel-list-v1 ext-image-capture-source-v1 \
-         ext-image-copy-capture-v1 security-context-v1 wlr-output-management-unstable-v1 ext-idle-notify-v1 \
+         ext-image-copy-capture-v1 security-context-v1 wlr-output-management-unstable-v1 wlr-output-power-management-unstable-v1 ext-idle-notify-v1 \
          ext-data-control-v1; do
     wayland-scanner client-header "$src/base/protocols/$p.xml" "$p-client-protocol.h"
     wayland-scanner private-code "$src/base/protocols/$p.xml" "$p-protocol.c"
@@ -37,7 +37,7 @@ libs="$(pkg-config --libs freetype2 fontconfig libnm) -lwayland-client -lm"
 base=$(ls "$src"/base/*.c | grep -v '/ime.c$')
 $cc -DCONFIG_FREETYPE -DCONFIG_NETWORKMANAGER -o labwc-control "$src/progs/labwc-control.c" $base \
     security-context-v1-protocol.c wlr-foreign-toplevel-management-unstable-v1-protocol.c \
-    wlr-output-management-unstable-v1-protocol.c ext-idle-notify-v1-protocol.c $libs || exit 1
+    wlr-output-management-unstable-v1-protocol.c wlr-output-power-management-unstable-v1-protocol.c ext-idle-notify-v1-protocol.c $libs || exit 1
 $cc -o clipboard "$src/progs/clipboard.c" "$src/base/clipboard.c" ext-data-control-v1-protocol.c -lwayland-client || exit 1
 $cc -DCONFIG_FREETYPE -o locachy-shot "$src/progs/shot.c" $base \
     wlr-layer-shell-unstable-v1-protocol.c wlr-foreign-toplevel-management-unstable-v1-protocol.c \

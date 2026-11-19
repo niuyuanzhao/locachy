@@ -297,8 +297,9 @@ static int check_args(const struct kind *k, char **a, int n, char *why, size_t s
          * or a lock mode), remove-duress, refresh. */
         ok = 0;
         if (n == 3 && strcmp(a[0], "set") == 0) {
-            int switchable = strcmp(a[1], "login-skip") == 0 || strcmp(a[1], "duress") == 0 ||
-                             strcmp(a[1], "fingerprint") == 0 || strcmp(a[1], "face") == 0;
+            int switchable = strcmp(a[1], "login-skip") == 0 || strcmp(a[1], "auto-lock") == 0 ||
+                             strcmp(a[1], "duress") == 0 || strcmp(a[1], "fingerprint") == 0 ||
+                             strcmp(a[1], "face") == 0;
             ok = switchable ? (strcmp(a[2], "on") == 0 || strcmp(a[2], "off") == 0) :
                  (strcmp(a[1], "lock-mode") == 0 && (strcmp(a[2], "low") == 0 || strcmp(a[2], "high") == 0));
         } else if (n == 1) {

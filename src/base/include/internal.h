@@ -98,6 +98,9 @@ int screen_lend(uint32_t *lessee);
 int screen_lend_outputs(const char *const *names, int n, uint32_t *lessee);
 int screen_places(struct screen_output *out, int max);
 int screen_drop_master(uint32_t lessee);
+/* Process 1's idle power: the DRM lessor can still change connector DPMS
+ * during direct leases. Never use this while the compositor owns master. */
+int screen_idle_power(int on) __attribute__((weak));
 /* -1: lease/master not reclaimed; 0: reclaimed and scanout restored;
  * 1: master reclaimed but stale scanout needs screen_refresh, not a kill. */
 int screen_take_back(uint32_t lessee);

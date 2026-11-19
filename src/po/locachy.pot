@@ -11139,6 +11139,10 @@ msgid "Power Management"
 msgstr ""
 
 #: progs/settings.c
+msgid "Display"
+msgstr ""
+
+#: progs/settings.c
 msgid "Battery & Energy"
 msgstr ""
 
@@ -11675,14 +11679,15 @@ msgid "Debug cable link"
 msgstr ""
 
 #: progs/settings.c
-#, c-format
-msgid "%d min"
-msgid_plural "%d min"
-msgstr[0] ""
-msgstr[1] ""
+msgid "[Enter: change]"
+msgstr ""
 
 #: progs/settings.c
-msgid "[Enter: change]"
+msgid "Auto-lock"
+msgstr ""
+
+#: progs/settings.c
+msgid "on (high threat level)"
 msgstr ""
 
 #: progs/settings.c
@@ -11694,7 +11699,22 @@ msgid "Lock key"
 msgstr ""
 
 #: progs/settings.c
-msgid "Lock when idle"
+#, c-format
+msgid "%d min"
+msgid_plural "%d min"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/settings.c
+msgid "Lock screen after"
+msgstr ""
+
+#: progs/settings.c
+msgid "Turn off display automatically"
+msgstr ""
+
+#: progs/settings.c
+msgid "Turn off display after"
 msgstr ""
 
 #: progs/settings.c
@@ -12283,16 +12303,38 @@ msgid ""
 msgstr ""
 
 #: progs/settings.c
+msgid "Not changed: the high threat level requires automatic locking."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Auto-lock off: closing the lid, sleeping and idling do not lock the screen."
+msgstr ""
+
+#: progs/settings.c
+msgid "Auto-lock on: closing the lid, sleeping and idling lock the screen."
+msgstr ""
+
+#: progs/settings.c
 msgid "At boot: the lock screen first, the password to go on."
 msgstr ""
 
 #: progs/settings.c
-msgid "At boot: home at once (the lock key and the lid still lock)."
+msgid "At boot: home at once (the lock key and auto-lock still lock)."
+msgstr ""
+
+#: progs/settings.c
+msgid "At boot: home at once."
 msgstr ""
 
 #. TRANSLATORS: Enter and Delete are key names; keep them.
 #: progs/settings.c
-msgid "Enter: press a new lock key   Delete: none (the lid still locks)"
+msgid "Enter: press a new lock key   Delete: none (auto-lock still locks)"
+msgstr ""
+
+#. TRANSLATORS: Enter and Delete are key names; keep them.
+#: progs/settings.c
+msgid "Enter: press a new lock key   Delete: none"
 msgstr ""
 
 #: progs/settings.c
@@ -12693,6 +12735,23 @@ msgstr[0] ""
 msgstr[1] ""
 
 #: progs/settings.c
+msgid ""
+"Not changed: the high threat level keeps automatic locking. Turn Auto-lock "
+"on first."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Idle lock set to %d min (off until Auto-lock is turned on)."
+msgid_plural "Idle lock set to %d min (off until Auto-lock is turned on)."
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/settings.c
+msgid "Never locked for want of input (auto-lock is off)."
+msgstr ""
+
+#: progs/settings.c
 #, c-format
 msgid ""
 "Locked after %d min without input (on the shared display, not while a video "
@@ -12909,7 +12968,11 @@ msgid "Fingerprints: %.100s."
 msgstr ""
 
 #: progs/settings.c
-msgid "No lock key: the lid still locks."
+msgid "No lock key: auto-lock still locks."
+msgstr ""
+
+#: progs/settings.c
+msgid "No lock key."
 msgstr ""
 
 #: progs/settings.c
@@ -14633,4 +14696,34 @@ msgstr ""
 
 #: progs/view.c
 msgid "Show more details..."
+msgstr ""
+
+#: progs/settings.c
+msgid "Unlock without password within"
+msgstr ""
+
+#: progs/settings.c
+msgid "no (high threat level)"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%d s"
+msgid_plural "%d s"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/settings.c
+msgid "Not changed: at the high threat level every lock asks for the password."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "After an idle lock, a key or the pointer within %d second unlocks it without the password. The lock key, the lid and sleep always ask."
+msgid_plural "After an idle lock, a key or the pointer within %d seconds unlocks it without the password. The lock key, the lid and sleep always ask."
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/settings.c
+msgid "Every lock asks for the password at once."
 msgstr ""

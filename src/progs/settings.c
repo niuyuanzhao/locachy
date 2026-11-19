@@ -232,7 +232,7 @@ static int current_language(void)
 static char wallpaper_path[512]; /* rc.conf's wallpaper: the shared display's (swaybg) */
 /* rc.conf's key_terminal ("": none): labwc's keys for a window of foot. */
 static char terminal_key[128] = "Ctrl+Alt+T";
-/* rc.conf's key_lock (process 1 locks the screen), login_skip (not at boot)
+/* rc.conf's key_lock (process 1 locks the screen), login_skip (not at boot),
  * and lock_after (minutes without input; 0: never; 10 if not set). */
 static char lock_key[128] = "Super+L";
 static char home_key[256] = "Super+Esc Ctrl+Alt+Esc Ctrl+Alt+Super ThinkVantage";
@@ -253,9 +253,18 @@ static int nkeyboards_seen;
 #define LABWC_ENV "/etc/locachy/labwc/environment"
 #define KBD_KEYMAPS "/usr/share/kbd/keymaps"
 static int login_skip;
+static int auto_lock = 1;
 static int lock_after = 10;
-static const int lock_afters[] = { 0, 1, 2, 5, 10, 15, 30, 60 };
-#define NLOCK_AFTERS ((int)(sizeof lock_afters / sizeof lock_afters[0]))
+/* rc.conf lock_grace: seconds after an idle lock in which input unlocks
+ * without the password; KDE's LockGrace, its presets and default 5. */
+static int lock_grace = 5;
+static const int lock_graces[] = { 0, 5, 30, 60, 300, 900 };
+#define NLOCK_GRACES ((int)(sizeof lock_graces / sizeof lock_graces[0]))
+#define DEFAULT_BLANK_AFTER 5
+static int auto_blank, blank_after = DEFAULT_BLANK_AFTER;
+/* The idle timers share these presets; zero is only for locking. */
+static const int idle_afters[] = { 0, 1, 2, 5, 10, 15, 30, 60 };
+#define NIDLE_AFTERS ((int)(sizeof idle_afters / sizeof idle_afters[0]))
 /* rc.conf's repos_rank_days (the automatic mirror ranking, locachy-repos
  * rank-timer; 0 or less: by hand; 1 when unset) and the values its row
  * cycles through, the first being by hand. */
@@ -1171,6 +1180,8 @@ static void on_rc(const char *name, const char *value, void *arg)
         }
     } else if (strcmp(name, "login_skip") == 0) {
         login_skip = strcmp(value, "1") == 0;
+    } else if (strcmp(name, "auto_lock") == 0) {
+        auto_lock = strcmp(value, "0") != 0;
     } else if (strcmp(name, "repos_rank_days") == 0) {
         char *end = NULL;
         double days = strtod(value, &end);
@@ -1178,6 +1189,16 @@ static void on_rc(const char *name, const char *value, void *arg)
         repos_rank_days = days < 0 ? 0 : days > 3650 ? 3650 : days;
     } else if (strcmp(name, "lock_after") == 0) {
         lock_after = atoi(value) > 0 ? atoi(value) : 0;
+    } else if (strcmp(name, "lock_grace") == 0) {
+        size_t digits = strspn(value, "0123456789");
+        int seconds = digits > 0 && digits < 6 && value[digits] == '\0' ? atoi(value) : -1;
+        lock_grace = seconds >= 0 && seconds <= 900 ? seconds : 5; /* as process 1 reads it */
+    } else if (strcmp(name, "auto_blank") == 0) {
+        auto_blank = strcmp(value, "1") == 0;
+    } else if (strcmp(name, "blank_after") == 0) {
+        size_t digits = strspn(value, "0123456789");
+        int minutes = digits < 6 && value[digits] == '\0' ? atoi(value) : 0;
+        blank_after = minutes >= 1 && minutes <= idle_afters[NIDLE_AFTERS - 1] ? minutes : DEFAULT_BLANK_AFTER;
     } else if (strcmp(name, "unlock_fingerprint") == 0) {
         fingerprint_on = strcmp(value, "1") == 0;
     } else if (strcmp(name, "unlock_face") == 0) {
@@ -1515,6 +1536,8 @@ static void on_security_rc(const char *name, const char *value, void *arg)
     (void)arg;
     if (strcmp(name, "login_skip") == 0) {
         login_skip = strcmp(value, "1") == 0;
+    } else if (strcmp(name, "auto_lock") == 0) {
+        auto_lock = strcmp(value, "0") != 0;
     } else if (strcmp(name, "unlock_fingerprint") == 0) {
         fingerprint_on = strcmp(value, "1") == 0;
     } else if (strcmp(name, "unlock_face") == 0) {
@@ -1528,11 +1551,12 @@ static void on_security_rc(const char *name, const char *value, void *arg)
 
 static void load_security_policy(void)
 {
-    int before[5] = { login_skip, fingerprint_on, face_on, lock_high, duress_on };
+    int before[6] = { login_skip, auto_lock, fingerprint_on, face_on, lock_high, duress_on };
     login_skip = fingerprint_on = face_on = lock_high = duress_on = 0;
+    auto_lock = 1;
     if (rc_read(on_security_rc, NULL) < 0) { /* no file: keep what is shown */
-        login_skip = before[0]; fingerprint_on = before[1]; face_on = before[2];
-        lock_high = before[3]; duress_on = before[4];
+        login_skip = before[0]; auto_lock = before[1]; fingerprint_on = before[2]; face_on = before[3];
+        lock_high = before[4]; duress_on = before[5];
     }
 }
 
@@ -3151,8 +3175,9 @@ static int link_index(void)
     return tz_index() + 3;
 }
 
-/* The password, whether the screen is locked at boot, the lock key, when it
- * locks for want of input. */
+/* The password, automatic locking, whether the screen is locked at boot, the
+ * lock key, when it locks for want of input, and how soon after an idle lock
+ * input still unlocks without the password (lock_grace). */
 static int sec_index(void)
 {
     return link_index() + 1;
@@ -3161,7 +3186,7 @@ static int sec_index(void)
 /* Fingerprints: fprintd installed, unlock with one, the user's, add one. */
 static int fp_index(void)
 {
-    return sec_index() + 4;
+    return sec_index() + 6;
 }
 
 /* Faces: howdy installed, what computes them (dlib on the CPU or CUDA),
@@ -3332,9 +3357,15 @@ static int cpu_opt_index(void)
     return extd_index() + 1;
 }
 
-static int num_hw_items(void)
+/* Automatic display off, then its idle timeout. */
+static int blank_index(void)
 {
     return cpu_opt_index() + 1;
+}
+
+static int num_hw_items(void)
+{
+    return blank_index() + 2;
 }
 
 /* The cloud service's status (rclone-client): name, path, state, last
@@ -4967,6 +4998,8 @@ static void category_entries(int cat)
         add_title(_("Power Management"));
         add_items(tp_present ? 4 : 1, 3);
         add_items(bat_thresh_index(), power_thresh_count());
+        add_title(_("Display"));
+        add_items(blank_index(), 2);
         add_title(_("Battery & Energy"));
         add_items(bat_page_index(), 1);
         add_power_category_notes();
@@ -5001,7 +5034,7 @@ static void category_entries(int cat)
         break;
     case CAT_SECURITY:
         add_title(_("Screen Locking"));
-        add_items(sec_index() + 1, 3);
+        add_items(sec_index() + 1, 5);
         add_title(_("Threat Level"));
         add_items(lock_mode_index(), 1);
         add_title(_("Disk Encryption"));
@@ -5746,7 +5779,7 @@ static int enter_row(int idx)
            idx == boot_index() + 1 || idx == boot_index() + 2 || idx == boot_index() + 3 ||
            idx == cpu_opt_index() ||
            idx == repo_index() + NREPO_SECTIONS ||
-           idx == sec_index() || idx == sec_index() + 2 || idx == fp_index() + 3 || idx == fc_index() + 4 || idx == fc_index() + 5 ||
+           idx == sec_index() || idx == sec_index() + 3 || idx == fp_index() + 3 || idx == fc_index() + 4 || idx == fc_index() + 5 ||
            idx == fc_index() + 6 || idx == rclone_index() + 2 || idx == tpm_index() || idx == sb_index() || idx == hsi_index() ||
            idx == duress_index() ||
            idx == tz_index() || idx == tz_index() + 2 || (idx >= imek_index() && idx < imek_index() + NIME_KEYS) ||
@@ -6092,25 +6125,55 @@ static void item_text(int idx, char *line, size_t size)
         snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Debug cable link"), 32), vbuf);
         return;
     }
-    if ((i = idx - sec_index()) >= 0 && i < 4) {
-        char after[32];
-        if (lock_after) {
-            snprintf(after, sizeof after, P_("%d min", "%d min", lock_after), lock_after);
-        } else {
-            snprintf(after, sizeof after, "%s", _("never"));
-        }
+    if ((i = idx - sec_index()) >= 0 && i < 6) {
         if (i == 0) {
             /* TRANSLATORS: Enter is the Enter key; keep it. */
             snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Password"), 32), _("[Enter: change]"));
         } else if (i == 1) {
+            if (lock_high) {
+                snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Auto-lock"), 32),
+                         _("on (high threat level)"));
+            } else {
+                snprintf(line, size, "%.95s [%s]", ui_pad(label, sizeof label, _("Auto-lock"), 32),
+                         auto_lock ? _("ON ") : _("OFF"));
+            }
+        } else if (i == 2) {
             snprintf(line, size, "%.95s [%s]", ui_pad(label, sizeof label, _("Password at boot"), 32),
                      login_skip ? _("OFF") : _("ON "));
-        } else if (i == 2) {
+        } else if (i == 3) {
             snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Lock key"), 32),
                      lock_key[0] ? lock_key : _("none"));
+        } else if (i == 4) {
+            if (lock_after) {
+                snprintf(vbuf, sizeof vbuf, P_("%d min", "%d min", lock_after), lock_after);
+            } else {
+                snprintf(vbuf, sizeof vbuf, "%s", _("never"));
+            }
+            snprintf(line, size, "%.95s < %s >", ui_pad(label, sizeof label, _("Lock screen after"), 32), vbuf);
+        } else if (lock_high) {
+            snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Unlock without password within"), 32),
+                     _("no (high threat level)"));
         } else {
-            snprintf(line, size, "%.95s < %s >", ui_pad(label, sizeof label, _("Lock when idle"), 32), after);
+            if (lock_grace >= 60 && lock_grace % 60 == 0) {
+                snprintf(vbuf, sizeof vbuf, P_("%d min", "%d min", lock_grace / 60), lock_grace / 60);
+            } else if (lock_grace > 0) {
+                snprintf(vbuf, sizeof vbuf, P_("%d s", "%d s", lock_grace), lock_grace);
+            } else {
+                snprintf(vbuf, sizeof vbuf, "%s", _("no"));
+            }
+            snprintf(line, size, "%.95s < %s >", ui_pad(label, sizeof label, _("Unlock without password within"), 32),
+                     vbuf);
         }
+        return;
+    }
+    if (idx == blank_index()) {
+        snprintf(line, size, "%.95s [%s]", ui_pad(label, sizeof label, _("Turn off display automatically"), 32),
+                 auto_blank ? _("ON ") : _("OFF"));
+        return;
+    }
+    if (idx == blank_index() + 1) {
+        snprintf(vbuf, sizeof vbuf, P_("%d min", "%d min", blank_after), blank_after);
+        snprintf(line, size, "%.95s < %s >", ui_pad(label, sizeof label, _("Turn off display after"), 32), vbuf);
         return;
     }
     if ((i = idx - fp_index()) >= 0 && i < 4) {
@@ -6836,6 +6899,16 @@ static void adjust(int dir)
         return;
     }
     if (selected == sec_index() + 1) {
+        if (lock_high) {
+            snprintf(notice, sizeof notice, "%s", _("Not changed: the high threat level requires automatic locking."));
+            return;
+        }
+        security_submit("auto-lock", auto_lock ? "off" : "on", NULL,
+                        auto_lock ? _("Auto-lock off: closing the lid, sleeping and idling do not lock the screen.") :
+                        _("Auto-lock on: closing the lid, sleeping and idling lock the screen."));
+        return;
+    }
+    if (selected == sec_index() + 2) {
         /* With the TPM opening the disk at power-on, the lock at boot is all
          * there is between turning it on and the disk. */
         if (!login_skip && tpm_bound) {
@@ -6845,12 +6918,15 @@ static void adjust(int dir)
         }
         security_submit("login-skip", login_skip ? "off" : "on", NULL,
                         login_skip ? _("At boot: the lock screen first, the password to go on.") :
-                        _("At boot: home at once (the lock key and the lid still lock)."));
+                        auto_lock ? _("At boot: home at once (the lock key and auto-lock still lock).") :
+                        _("At boot: home at once."));
         return;
     }
-    if (selected == sec_index() + 2) {
+    if (selected == sec_index() + 3) {
         /* TRANSLATORS: Enter and Delete are key names; keep them. */
-        snprintf(notice, sizeof notice, "%s", _("Enter: press a new lock key   Delete: none (the lid still locks)"));
+        snprintf(notice, sizeof notice, "%s",
+                 auto_lock ? _("Enter: press a new lock key   Delete: none (auto-lock still locks)") :
+                 _("Enter: press a new lock key   Delete: none"));
         return;
     }
     if ((selected == fc_index() || selected == fc_index() + 1 || selected == fc_index() + 2) && pkg_busy_notice()) {
@@ -7045,6 +7121,11 @@ static void adjust(int dir)
         return;
     }
     if (selected == lock_mode_index()) {
+        if (!lock_high && !auto_lock) {
+            snprintf(notice, sizeof notice, "%s",
+                     _("Not changed: the high threat level keeps automatic locking. Turn Auto-lock on first."));
+            return;
+        }
         /* High: the TPM opens nothing. Its token is sealed to every image
          * this machine's PCR key signs (the previous one, an older copy from
          * the ESP), not to this one, so a key slot left there would still
@@ -7383,21 +7464,79 @@ static void adjust(int dir)
         }
         return;
     }
-    if (selected == sec_index() + 3) {
-        int i = 0;
-        while (i < NLOCK_AFTERS - 1 && lock_afters[i] < lock_after) {
-            i++;
-        }
-        i = (i + dir + NLOCK_AFTERS) % NLOCK_AFTERS;
-        char value[8];
-        snprintf(value, sizeof value, "%d", lock_afters[i]);
-        if (rc_set("lock_after", value) < 0) {
+    if (selected == blank_index()) {
+        if (rc_set("auto_blank", auto_blank ? "0" : "1") < 0) {
             snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
             return;
         }
-        lock_after = lock_afters[i];
+        auto_blank = !auto_blank;
+        kill(1, SIGHUP);
+        snprintf(notice, sizeof notice, _("Saved to %s."), RC_CONF);
+        return;
+    }
+    if (selected == sec_index() + 5) {
+        if (lock_high) {
+            snprintf(notice, sizeof notice, "%s", _("Not changed: at the high threat level every lock asks for the password."));
+            return;
+        }
+        int i = dir > 0 ? 0 : NLOCK_GRACES - 1;
+        while (i >= 0 && i < NLOCK_GRACES && (dir > 0 ? lock_graces[i] <= lock_grace : lock_graces[i] >= lock_grace)) {
+            i += dir;
+        }
+        if (i >= NLOCK_GRACES) i = 0;
+        if (i < 0) i = NLOCK_GRACES - 1;
+        char value[8];
+        snprintf(value, sizeof value, "%d", lock_graces[i]);
+        if (rc_set("lock_grace", value) < 0) {
+            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+            return;
+        }
+        lock_grace = lock_graces[i];
+        kill(1, SIGHUP);
+        if (lock_grace) {
+            snprintf(notice, sizeof notice, P_("After an idle lock, a key or the pointer within %d second unlocks it "
+                                               "without the password. The lock key, the lid and sleep always ask.",
+                                               "After an idle lock, a key or the pointer within %d seconds unlocks it "
+                                               "without the password. The lock key, the lid and sleep always ask.",
+                                               lock_grace), lock_grace);
+        } else {
+            snprintf(notice, sizeof notice, "%s", _("Every lock asks for the password at once."));
+        }
+        return;
+    }
+    int blank = selected == blank_index() + 1;
+    if (blank || selected == sec_index() + 4) {
+        int first = blank ? 1 : 0, last = NIDLE_AFTERS - 1;
+        int minutes = blank ? blank_after : lock_after;
+        int i = dir > 0 ? first : last;
+        while (i >= first && i <= last && (dir > 0 ? idle_afters[i] <= minutes : idle_afters[i] >= minutes)) {
+            i += dir;
+        }
+        if (i > last) i = first;
+        if (i < first) i = last;
+        char value[8];
+        snprintf(value, sizeof value, "%d", idle_afters[i]);
+        if (rc_set(blank ? "blank_after" : "lock_after", value) < 0) {
+            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+            return;
+        }
+        if (blank) {
+            blank_after = idle_afters[i];
+        } else {
+            lock_after = idle_afters[i];
+        }
         kill(1, SIGHUP); /* labwc-control sees rc.conf change itself */
-        if (lock_after) {
+        if (blank) {
+            snprintf(notice, sizeof notice, _("Saved to %s."), RC_CONF);
+        } else if (!auto_lock && !lock_high) {
+            if (lock_after) {
+                snprintf(notice, sizeof notice, P_("Idle lock set to %d min (off until Auto-lock is turned on).",
+                                                   "Idle lock set to %d min (off until Auto-lock is turned on).",
+                                                   lock_after), lock_after);
+            } else {
+                snprintf(notice, sizeof notice, "%s", _("Never locked for want of input (auto-lock is off)."));
+            }
+        } else if (lock_after) {
             snprintf(notice, sizeof notice, P_("Locked after %d min without input (on the shared display, not "
                                                "while a video plays).",
                                                "Locked after %d min without input (on the shared display, not "
@@ -8168,14 +8307,15 @@ int main(int argc, char **argv)
                 snprintf(notice, sizeof notice, _("Fingerprints: %.100s."), fp_enrolled);
             }
             draw();
-        } else if (key == '\n' && selected == sec_index() + 2) {
+        } else if (key == '\n' && selected == sec_index() + 3) {
             choose_key(_("Lock key"), "key_lock", lock_key, sizeof lock_key, 0, reread_keys);
             draw();
-        } else if (key == K_DEL && selected == sec_index() + 2) {
+        } else if (key == K_DEL && selected == sec_index() + 3) {
             if (rc_set("key_lock", "") == 0) {
                 lock_key[0] = '\0';
                 reread_keys();
-                snprintf(notice, sizeof notice, "%s", _("No lock key: the lid still locks."));
+                snprintf(notice, sizeof notice, "%s",
+                         auto_lock ? _("No lock key: auto-lock still locks.") : _("No lock key."));
             }
             draw();
         } else if (key == '\n' && selected == tz_index()) {

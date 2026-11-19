@@ -79,6 +79,7 @@ struct output {
     int soft_cursor;                 /* no cursor plane: drawn into the scanout */
     struct drm_clip_rect cursor_at;  /* where it was drawn there; empty if x1 == x2 */
     uint32_t lessee;                 /* process 1: the lease it is lent in; 0 if none */
+    int idle_off;                    /* process 1 turned this connector off */
 };
 static struct output *outputs;
 static uint32_t noutputs;
@@ -1309,7 +1310,7 @@ static pid_t dark_pid;      /* not a child forked since */
 /* The id of the connector's DPMS property (0: it has none), by name from the
  * kernel's list of its properties. Not GETCONNECTOR: asked for no modes, it
  * probes the connector (an EDID read). -1: the list cannot be read. */
-static int dpms_property(int fd, uint32_t connector, uint32_t *id)
+static int dpms_property(int fd, uint32_t connector, uint32_t *id, uint64_t *mode)
 {
     *id = 0;
     for (int retry = 0; retry < 4; retry++) {
@@ -1328,7 +1329,10 @@ static int dpms_property(int fd, uint32_t connector, uint32_t *id)
         for (uint32_t i = 0; ok && list.count_props <= n && i < list.count_props && !*id; i++) {
             struct drm_mode_get_property p = { .prop_id = ids[i] };
             if (SCREEN_POWER_IOCTL(fd, DRM_IOCTL_MODE_GETPROPERTY, &p) == 0 &&
-                strncmp(p.name, "DPMS", sizeof p.name) == 0) *id = ids[i];
+                strncmp(p.name, "DPMS", sizeof p.name) == 0) {
+                *id = ids[i];
+                if (mode) *mode = values[i];
+            }
         }
         int error = errno;
         free(ids);
@@ -1341,20 +1345,55 @@ static int dpms_property(int fd, uint32_t connector, uint32_t *id)
     return -1;
 }
 
-static int connector_power(int fd, const struct output *o, int on)
+/* When changed is supplied, leave an already-dark connector alone. */
+static int connector_power_change(int fd, const struct output *o, int on, int *changed)
 {
     uint32_t prop;
-    if (dpms_property(fd, o->conn_id, &prop) < 0) {
+    uint64_t mode = DRM_MODE_DPMS_ON;
+    if (changed) *changed = 0;
+    if (dpms_property(fd, o->conn_id, &prop, &mode) < 0) {
         say("screen: %s: cannot list its properties: %m", o->name);
     } else if (prop == 0) {
         say("screen: %s has no DPMS property", o->name);
     } else {
+        if (changed && !on && mode != DRM_MODE_DPMS_ON) return 0;
         struct drm_mode_obj_set_property set = { .value = on ? DRM_MODE_DPMS_ON : DRM_MODE_DPMS_OFF,
             .prop_id = prop, .obj_id = o->conn_id, .obj_type = DRM_MODE_OBJECT_CONNECTOR };
-        if (SCREEN_POWER_IOCTL(fd, DRM_IOCTL_MODE_OBJ_SETPROPERTY, &set) == 0) return 0;
+        if (SCREEN_POWER_IOCTL(fd, DRM_IOCTL_MODE_OBJ_SETPROPERTY, &set) == 0) {
+            if (changed) *changed = 1;
+            return 0;
+        }
         say("screen: %s: DPMS %s refused: %m", o->name, on ? "on" : "off");
     }
     return -1;
+}
+
+static int connector_power(int fd, const struct output *o, int on)
+{
+    return connector_power_change(fd, o, on, NULL);
+}
+
+int screen_idle_power(int on)
+{
+    if (window_mode || card < 0 || !noutputs) return -1;
+    if (!on) {
+        for (uint32_t i = 0; i < noutputs; i++) {
+            int changed;
+            if (connector_power_change(card, &outputs[i], 0, &changed) < 0) {
+                screen_idle_power(1);
+                return -1;
+            }
+            outputs[i].idle_off |= changed;
+        }
+        return 0;
+    }
+    int result = 0;
+    for (uint32_t i = 0; i < noutputs; i++) {
+        if (!outputs[i].idle_off) continue;
+        if (connector_power(card, &outputs[i], 1) == 0) outputs[i].idle_off = 0;
+        else result = -1;
+    }
+    return result;
 }
 
 /* Once: a lease about to end cannot be asked again. */

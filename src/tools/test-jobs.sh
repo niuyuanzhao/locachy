@@ -133,6 +133,7 @@ check "an SPI backup into a folder is taken" accept spi-backup "linux_spi:dev=/d
 check "the boot image is taken" accept boot
 check "a BIOS setting is taken, its value may start with -" accept bios-set Boot.Order -1
 check "a security switch is taken" accept security-policy set login-skip off
+check "the auto-lock security switch is taken" accept security-policy set auto-lock off
 check "a security lock mode is taken" accept security-policy set lock-mode high
 check "a duress removal is taken" accept security-policy remove-duress
 check "a security refresh is taken" accept security-policy refresh

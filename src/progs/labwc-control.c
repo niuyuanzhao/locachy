@@ -37,15 +37,10 @@
  * may include exact millihertz (WIDTHxHEIGHT@MILLIHZ); scale and signed
  * logical coordinates are restored together.
  *
- * Idleness: after rc.conf's lock_after minutes (default 10; 0: never) without
- * input on the shared display, as labwc tells (ext-idle-notify-v1, which
- * respects what holds it off: a video playing asks for that), its parent,
- * locachy-seat, is sent SIGUSR2: the seat asks process 1 to lock the screen,
- * which it does while the shared display has the screen. Asked again
- * whenever rc.conf changes, and when the shared display gets the screen back
- * (its screens come back): switching to it was input that labwc did not see,
- * and an idleness labwc reported while it was away would otherwise not be
- * reported again until labwc sees input.
+ * Idleness: labwc's inhibitable notifications separately time automatic
+ * locking and display-off. The private link to locachy-seat forwards idle
+ * events to process 1 and resets the timers on a seat handover. Display-off
+ * uses retained output-power objects to restore only outputs switched off here.
  */
 #include <ctype.h>
 #include <dirent.h>
@@ -68,6 +63,7 @@
 #include "security-context-v1-client-protocol.h"
 #include "wlr-foreign-toplevel-management-unstable-v1-client-protocol.h"
 #include "wlr-output-management-unstable-v1-client-protocol.h"
+#include "wlr-output-power-management-unstable-v1-client-protocol.h"
 #include "base.h"
 #include "monitor-layout.h"
 #include "monitor-profile.h"
@@ -82,9 +78,19 @@ static struct zwlr_foreign_toplevel_manager_v1 *toplevels;
 static struct zwlr_output_manager_v1 *outputs;
 static uint32_t output_version;
 static struct ext_idle_notifier_v1 *idle_notifier;
-static struct ext_idle_notification_v1 *idle;
-static int idle_minutes = -1; /* what idle was asked for with; -1: ask again */
+static struct ext_idle_notification_v1 *idle, *blank_idle;
+static int idle_minutes = -1, blank_minutes = -1;
+static int seat_active = 1;
+/* Private, bidirectional link to locachy-seat (LOCACHY_SEAT_REQUESTS). */
+static int seat_requests = -1;
 static char container_path[108], control_path[108], bar_path[108];
+
+static int idle_report(const char *event)
+{
+    size_t len = strlen(event);
+    return seat_requests >= 0 &&
+           send(seat_requests, event, len, MSG_NOSIGNAL | MSG_DONTWAIT) == (ssize_t)len;
+}
 
 /* Windows */
 
@@ -396,6 +402,7 @@ static struct head *heads;
 static uint32_t output_serial;
 static int heads_changed, reload_wanted;
 static double apply_at; /* apply MONITORS_CONF then (uptime), if not 0 */
+static enum { POWER_AWAKE, POWER_PROBING, POWER_BLANKING, POWER_DARK, POWER_WAKING } power_phase;
 
 static void mode_size(void *data, struct zwlr_output_mode_v1 *m, int32_t width, int32_t height)
 {
@@ -625,7 +632,7 @@ static void config_succeeded(void *data, struct zwlr_output_configuration_v1 *c)
 {
     struct monitor_transaction *t = data;
     zwlr_output_configuration_v1_destroy(c);
-    if (!t->applying && t->serial == output_serial && !heads_changed) {
+    if (!t->applying && t->serial == output_serial && !heads_changed && seat_active) {
         t->applying = 1;
         send_monitor_transaction(t);
         return;
@@ -695,7 +702,9 @@ static int apply_monitors(void)
     if (!outputs) {
         return -1;
     }
-    if (pending_monitors) { reload_wanted = 1; return 0; }
+    /* A powered-off head must not be disabled in the layout. Its power
+     * object can bring it back only while the compositor still owns it. */
+    if (pending_monitors || power_phase != POWER_AWAKE || !seat_active) { reload_wanted = 1; return 0; }
     struct monitor_identity connected[MONITOR_PROFILE_MAX];
     int nconnected = monitor_profiles_connected(connected, MONITOR_PROFILE_MAX);
     if (!nconnected) {
@@ -749,19 +758,11 @@ static int apply_monitors(void)
     return 0;
 }
 
-static void watch_idle(void);
-
 static void outputs_done(void *data, struct zwlr_output_manager_v1 *m, uint32_t serial)
 {
     (void)data;
     (void)m;
-    static int had_heads;
     output_serial = serial;
-    if (heads != NULL && !had_heads) {
-        idle_minutes = -1; /* the screen is back: idleness counted from now */
-        watch_idle();
-    }
-    had_heads = heads != NULL;
     if (heads_changed || reload_wanted) {
         heads_changed = reload_wanted = 0;
         apply_monitors();
@@ -781,63 +782,297 @@ static const struct zwlr_output_manager_v1_listener outputs_listener = {
     .finished = outputs_finished,
 };
 
-/* Idleness: the notification that respects idle inhibitors asks for the
- * lock; one of input alone (version 2), only to log that there was no input
- * though a program held idleness off (labwc does not say which). */
+/* Output power is separate from layout. Acquire the controls only for an
+ * idle cycle; the mode event on acquisition is the initial state, not an
+ * acknowledgement. Keep the same controls across OFF and ON, even if a
+ * wl_output global goes away, until the power object itself fails. */
+struct power_output {
+    uint32_t name;
+    struct wl_output *output;
+    struct zwlr_output_power_v1 *control;
+    int known, on, requested_off, owned_off;
+    struct power_output *next;
+};
+
+static struct zwlr_output_power_manager_v1 *power_manager;
+static uint32_t power_manager_name;
+static struct power_output *power_outputs;
+static struct wl_callback *power_barrier;
+static int power_cancelled, power_reported, power_lost, wake_tries, loss_reported;
+static int power_inventory_failed;
+static double wake_at;
+
+static void power_wake(void);
+static void power_sync(void);
+
+static void power_mode(void *data, struct zwlr_output_power_v1 *control, uint32_t mode)
+{
+    (void)control;
+    struct power_output *o = data;
+    if (mode != ZWLR_OUTPUT_POWER_V1_MODE_OFF && mode != ZWLR_OUTPUT_POWER_V1_MODE_ON) return;
+    o->known = 1;
+    o->on = mode == ZWLR_OUTPUT_POWER_V1_MODE_ON;
+    if (!o->on && o->requested_off) o->owned_off = 1;
+    if (o->on) {
+        o->owned_off = 0;
+        /* The compositor re-enabled a dark head; restore the rest too. */
+        if (power_phase == POWER_DARK || (power_phase == POWER_WAKING && !power_barrier)) power_wake();
+    }
+}
+
+static void power_failed(void *data, struct zwlr_output_power_v1 *control)
+{
+    struct power_output *o = data;
+    if (o->owned_off) power_lost = 1;
+    o->known = o->owned_off = 0;
+    o->control = NULL;
+    zwlr_output_power_v1_destroy(control);
+    if (power_phase == POWER_PROBING || power_phase == POWER_BLANKING) power_cancelled = 1;
+    if (power_phase == POWER_DARK || (power_phase == POWER_WAKING && !power_barrier)) power_wake();
+}
+
+static const struct zwlr_output_power_v1_listener power_listener = { power_mode, power_failed };
+
+static void power_finish(void)
+{
+    if (power_lost && !loss_reported) idle_report("idle-power-lost");
+    else if (!power_lost && power_reported) idle_report("idle-unblanked");
+    power_reported = power_lost = loss_reported = 0;
+    power_phase = POWER_AWAKE;
+    wake_at = 0;
+    for (struct power_output **p = &power_outputs; *p;) {
+        struct power_output *o = *p;
+        if (o->control) zwlr_output_power_v1_destroy(o->control);
+        o->control = NULL;
+        o->known = o->on = o->requested_off = o->owned_off = 0;
+        if (o->output) p = &o->next;
+        else { *p = o->next; free(o); }
+    }
+    if (reload_wanted && seat_active) {
+        reload_wanted = 0;
+        apply_at = uptime() + 0.1;
+    }
+}
+
+/* OFF and ON are synchronous commits in labwc, but a KMS commit failure
+ * need not produce a failed event. A sync after each batch lets us detect
+ * missing mode acknowledgements without a blocking roundtrip. */
+static void power_check(void *data, struct wl_callback *cb, uint32_t serial)
+{
+    (void)data;
+    (void)serial;
+    wl_callback_destroy(cb);
+    power_barrier = NULL;
+    if (power_phase == POWER_PROBING) {
+        for (struct power_output *o = power_outputs; o; o = o->next) {
+            if (!o->output || !o->known) power_cancelled = 1;
+        }
+        if (power_cancelled || !seat_active) { power_finish(); return; }
+        int sent = 0;
+        for (struct power_output *o = power_outputs; o; o = o->next) {
+            if (!o->on) continue; /* never wake an already-off output */
+            o->requested_off = 1;
+            zwlr_output_power_v1_set_mode(o->control, ZWLR_OUTPUT_POWER_V1_MODE_OFF);
+            sent = 1;
+        }
+        if (sent) { power_phase = POWER_BLANKING; power_sync(); }
+        else power_finish();
+    } else if (power_phase == POWER_BLANKING) {
+        int owned = 0;
+        for (struct power_output *o = power_outputs; o; o = o->next) {
+            if (o->requested_off && !o->owned_off) power_cancelled = 1;
+            o->requested_off = 0;
+            owned |= o->owned_off;
+        }
+        if (!owned) { power_finish(); return; }
+        if (!power_cancelled && seat_active && idle_report("idle-blanked")) {
+            power_phase = POWER_DARK;
+            power_reported = 1;
+        } else {
+            power_wake(); /* partial OFF, activity or seat release raced the commit */
+        }
+    } else if (power_phase == POWER_WAKING) {
+        for (struct power_output *o = power_outputs; o; o = o->next) {
+            if (!o->owned_off) continue;
+            if (seat_active && wake_tries < 4) {
+                wake_at = uptime() + 0.1 * wake_tries;
+            } else if (seat_active) {
+                say("labwc-control: the compositor did not restore all idle-powered outputs");
+                if (!loss_reported) loss_reported = idle_report("idle-power-lost");
+                /* Keep controls and defer layout changes. Try again on an
+                 * explicit wake or when the seat is taken back. */
+            }
+            return;
+        }
+        power_finish();
+    }
+}
+
+static void power_sync(void)
+{
+    static const struct wl_callback_listener checked = { power_check };
+    if (power_barrier) return;
+    power_barrier = wl_display_sync(display);
+    if (power_barrier) wl_callback_add_listener(power_barrier, &checked, NULL);
+    else say("labwc-control: cannot check output power changes");
+}
+
+static void power_restore(void)
+{
+    wake_at = 0;
+    int sent = 0;
+    for (struct power_output *o = power_outputs; o; o = o->next) {
+        if (!o->owned_off) continue;
+        if (!seat_active) return;
+        if (!o->control) { power_lost = 1; continue; }
+        zwlr_output_power_v1_set_mode(o->control, ZWLR_OUTPUT_POWER_V1_MODE_ON);
+        sent = 1;
+    }
+    if (sent) { wake_tries++; power_sync(); }
+    else power_finish();
+}
+
+static void power_wake(void)
+{
+    if (power_phase == POWER_AWAKE) return;
+    if (power_barrier) {
+        if (power_phase == POWER_PROBING || power_phase == POWER_BLANKING) power_cancelled = 1;
+        return;
+    }
+    power_phase = POWER_WAKING;
+    wake_tries = 0;
+    power_restore();
+}
+
+static void power_blank(void)
+{
+    if (!seat_active || !power_manager || !power_outputs || power_inventory_failed ||
+        pending_monitors || power_phase != POWER_AWAKE) return;
+    power_cancelled = 0;
+    power_phase = POWER_PROBING;
+    for (struct power_output *o = power_outputs; o; o = o->next) {
+        o->control = zwlr_output_power_manager_v1_get_output_power(power_manager, o->output);
+        if (o->control) zwlr_output_power_v1_add_listener(o->control, &power_listener, o);
+    }
+    power_sync();
+}
+
+/* Idleness: the notifications that respect idle inhibitors ask for the lock
+ * and display-off. The input-only notification only logs the lack of input. */
 
 static struct ext_idle_notification_v1 *input_idle;
 
 static void idled(void *data, struct ext_idle_notification_v1 *n)
 {
     (void)data;
+    if (!seat_active) return;
     if (n == input_idle) {
         say("labwc-control: no input for %d minutes", idle_minutes);
-        return;
+    } else if (n == blank_idle) {
+        power_blank();
+    } else if (n == idle) {
+        say("labwc-control: no input for %d minutes, and nothing holds idleness off: asking for the lock",
+            idle_minutes);
+        idle_report("idle-lock");
     }
-    say("labwc-control: no input for %d minutes, and nothing holds idleness off: asking for the lock",
-        idle_minutes);
-    kill(getppid(), SIGUSR2);
 }
 
 static void resumed(void *data, struct ext_idle_notification_v1 *n)
 {
     (void)data;
-    (void)n;
+    if (n == blank_idle) power_wake();
 }
 
 static const struct ext_idle_notification_v1_listener idle_listener = { idled, resumed };
 
-static void lock_after_setting(const char *name, const char *value, void *arg)
+struct idle_rc {
+    int minutes;
+    int auto_lock;
+    int lock_high;
+    int auto_blank;
+    int blank_after;
+};
+
+static void idle_rc_setting(const char *name, const char *value, void *arg)
 {
+    struct idle_rc *rc = arg;
     if (strcmp(name, "lock_after") == 0) {
-        *(int *)arg = atoi(value) > 0 ? atoi(value) : 0;
+        rc->minutes = atoi(value) > 0 ? atoi(value) : 0;
+    } else if (strcmp(name, "auto_lock") == 0) {
+        rc->auto_lock = strcmp(value, "0") != 0;
+    } else if (strcmp(name, "lock_mode") == 0) {
+        rc->lock_high = strcmp(value, "high") == 0;
+    } else if (strcmp(name, "auto_blank") == 0) {
+        rc->auto_blank = strcmp(value, "1") == 0;
+    } else if (strcmp(name, "blank_after") == 0) {
+        size_t len = strlen(value);
+        int minutes = len > 0 && len < 6 && strspn(value, "0123456789") == len ? atoi(value) : 0;
+        rc->blank_after = minutes >= 1 && minutes <= 60 ? minutes : 5;
     }
 }
 
-/* rc.conf's lock_after, asked of labwc again if it changed. */
+static void reset_idle(struct ext_idle_notification_v1 **n, int minutes, int input_only)
+{
+    if (*n) ext_idle_notification_v1_destroy(*n);
+    *n = NULL;
+    if (minutes <= 0) return;
+    uint32_t timeout = (uint32_t)minutes * 60000;
+    *n = input_only ? ext_idle_notifier_v1_get_input_idle_notification(idle_notifier, timeout, seat) :
+        ext_idle_notifier_v1_get_idle_notification(idle_notifier, timeout, seat);
+    if (*n) ext_idle_notification_v1_add_listener(*n, &idle_listener, NULL);
+}
+
+/* Independent timers: a display-off must not postpone a due idle-lock. */
 static void watch_idle(void)
 {
-    int minutes = 10;
-    rc_read(lock_after_setting, &minutes);
-    if (minutes == idle_minutes || !idle_notifier || !seat) {
-        return;
+    struct idle_rc rc = { .minutes = 10, .auto_lock = 1, .blank_after = 5 };
+    rc_read(idle_rc_setting, &rc);
+    int available = seat_active && seat_requests >= 0 && idle_notifier && seat;
+    int minutes = available && (rc.auto_lock || rc.lock_high) ? rc.minutes : 0;
+    int blank = available && rc.auto_blank && power_manager && !power_inventory_failed ? rc.blank_after : 0;
+    if (blank != blank_minutes) {
+        power_wake();
+        reset_idle(&blank_idle, blank, 0);
+        blank_minutes = blank;
     }
-    if (idle) {
-        ext_idle_notification_v1_destroy(idle);
-        idle = NULL;
+    if (minutes != idle_minutes) {
+        reset_idle(&idle, minutes, 0);
+        int log_input = minutes > 0 && ext_idle_notifier_v1_get_version(idle_notifier) >= 2;
+        reset_idle(&input_idle, log_input ? minutes : 0, 1);
+        idle_minutes = minutes;
     }
-    if (input_idle) {
-        ext_idle_notification_v1_destroy(input_idle);
-        input_idle = NULL;
-    }
-    idle_minutes = minutes;
-    if (minutes > 0) {
-        idle = ext_idle_notifier_v1_get_idle_notification(idle_notifier, (uint32_t)minutes * 60000, seat);
-        ext_idle_notification_v1_add_listener(idle, &idle_listener, NULL);
-        if (ext_idle_notifier_v1_get_version(idle_notifier) >= 2) {
-            input_idle = ext_idle_notifier_v1_get_input_idle_notification(idle_notifier,
-                                                                          (uint32_t)minutes * 60000, seat);
-            ext_idle_notification_v1_add_listener(input_idle, &idle_listener, NULL);
+}
+
+static void seat_request(void)
+{
+    char msg[32];
+    ssize_t n = recv(seat_requests, msg, sizeof msg, MSG_DONTWAIT | MSG_TRUNC);
+    if (n <= 0) {
+        if (n < 0 && (errno == EAGAIN || errno == EINTR)) return;
+        close(seat_requests);
+        seat_requests = -1;
+        /* If still active, restore what we switched off before parking the timers. */
+        watch_idle();
+    } else if (n == 12 && memcmp(msg, "seat-release", 12) == 0) {
+        seat_active = 0;
+        power_wake();
+        watch_idle();
+    } else if (n == 9 && memcmp(msg, "seat-take", 9) == 0) {
+        seat_active = 1;
+        idle_minutes = blank_minutes = -1;
+        watch_idle(); /* also restores any retained OFF controls */
+        if (reload_wanted && power_phase == POWER_AWAKE) apply_at = uptime() + 0.1;
+    } else if (n == 11 && memcmp(msg, "wake-screen", 11) == 0) {
+        power_wake();
+    } else if (n == 12 && memcmp(msg, "bar-activity", 12) == 0) {
+        power_wake();
+        if (seat_active && idle_notifier && seat) {
+            if (blank_minutes > 0) reset_idle(&blank_idle, blank_minutes, 0);
+            if (idle_minutes > 0) {
+                int log_input = ext_idle_notifier_v1_get_version(idle_notifier) >= 2;
+                reset_idle(&idle, idle_minutes, 0);
+                reset_idle(&input_idle, log_input ? idle_minutes : 0, 1);
+            }
         }
     }
 }
@@ -850,6 +1085,27 @@ static void global(void *data, struct wl_registry *registry, uint32_t name,
     (void)data;
     if (strcmp(interface, wl_seat_interface.name) == 0 && !seat) {
         seat = wl_registry_bind(registry, name, &wl_seat_interface, 1);
+    } else if (strcmp(interface, wl_output_interface.name) == 0) {
+        struct power_output *o = calloc(1, sizeof *o);
+        if (o) {
+            o->output = wl_registry_bind(registry, name, &wl_output_interface, version < 3 ? version : 3);
+            if (o->output) {
+                o->name = name;
+                o->next = power_outputs;
+                power_outputs = o;
+            } else {
+                free(o);
+                power_inventory_failed = 1;
+            }
+        } else {
+            power_inventory_failed = 1;
+        }
+        /* A changed inventory is not the one we checked before blanking. */
+        power_wake();
+    } else if (strcmp(interface, zwlr_output_power_manager_v1_interface.name) == 0 && !power_manager) {
+        power_manager = wl_registry_bind(registry, name, &zwlr_output_power_manager_v1_interface, 1);
+        power_manager_name = name;
+        watch_idle();
     } else if (strcmp(interface, ext_idle_notifier_v1_interface.name) == 0) {
         idle_notifier = wl_registry_bind(registry, name, &ext_idle_notifier_v1_interface, version < 2 ? version : 2);
     } else if (strcmp(interface, wp_security_context_manager_v1_interface.name) == 0) {
@@ -870,7 +1126,23 @@ static void global_remove(void *data, struct wl_registry *registry, uint32_t nam
 {
     (void)data;
     (void)registry;
-    (void)name;
+    if (power_manager && name == power_manager_name) {
+        zwlr_output_power_manager_v1_destroy(power_manager);
+        power_manager = NULL;
+        watch_idle();
+        return;
+    }
+    for (struct power_output **p = &power_outputs; *p; p = &(*p)->next) {
+        struct power_output *o = *p;
+        if (!o->output || o->name != name) continue;
+        if (wl_output_get_version(o->output) >= WL_OUTPUT_RELEASE_SINCE_VERSION) wl_output_release(o->output);
+        else wl_output_destroy(o->output);
+        o->output = NULL;
+        if (power_phase == POWER_AWAKE) { *p = o->next; free(o); }
+        /* During a power cycle global removal alone does not invalidate
+         * the retained control. Its failed event does. */
+        break;
+    }
 }
 
 static const struct wl_registry_listener registry_listener = { global, global_remove };
@@ -914,9 +1186,6 @@ static int open_container_display(void)
     }
     return keep[1];
 }
-
-/* To locachy-seat, which passes it on to process 1 (LOCACHY_SEAT_REQUESTS). */
-static int seat_requests = -1;
 
 /* window PROGRAM [TARGET] (locachy-seat --window): a host program as a
  * managed window. Its fields, bounded, as process 1 takes them; the seat and
@@ -1118,28 +1387,32 @@ int main(int argc, char **argv)
         watch = -1;
     }
     watch_idle();
-    say("labwc-control: containers' display %s (window control %s, output management %s, idleness %s)",
-        container_path, toplevels ? "yes" : "no", outputs ? "yes" : "no", idle_notifier ? "yes" : "no");
+    say("labwc-control: containers' display %s (window control %s, output management %s, idle notify %s, output power %s)",
+        container_path, toplevels ? "yes" : "no", outputs ? "yes" : "no", idle_notifier ? "yes" : "no",
+        power_manager ? "yes" : "no");
     signal(SIGTERM, on_term);
     signal(SIGINT, on_term);
 
     while (!stop) {
-        struct pollfd p[3] = {
+        struct pollfd p[] = {
             { .fd = wl_display_get_fd(display), .events = POLLIN },
             { .fd = listener, .events = POLLIN },
-            { .fd = watch, .events = POLLIN }, /* -1: ignored */
+            { .fd = watch, .events = POLLIN },
+            { .fd = seat_requests, .events = POLLIN },
         };
-        int timeout = -1;
-        if (apply_at > 0) {
-            double left = apply_at - uptime();
-            timeout = left > 0 ? (int)(left * 1000) + 1 : 0;
-        }
-        wl_display_flush(display);
-        if (poll(p, 3, timeout) < 0) {
+        double next = apply_at > 0 && (wake_at <= 0 || apply_at < wake_at) ? apply_at : wake_at;
+        double left = next - uptime();
+        int timeout = next <= 0 ? -1 : left > 0 ? (int)(left * 1000) + 1 : 0;
+        if (wl_display_flush(display) < 0 && errno == EAGAIN) p[0].events |= POLLOUT;
+        if (poll(p, sizeof p / sizeof *p, timeout) < 0) {
             if (errno == EINTR) {
                 continue;
             }
             break;
+        }
+        if (p[3].revents & (POLLIN | POLLHUP | POLLERR)) {
+            /* Take/release before activity already queued by the compositor. */
+            seat_request();
         }
         if (p[0].revents & (POLLIN | POLLHUP | POLLERR)) {
             if (wl_display_dispatch(display) < 0) {
@@ -1156,13 +1429,14 @@ int main(int argc, char **argv)
                 struct inotify_event *ev = (struct inotify_event *)e;
                 if (ev->len && (!strcmp(ev->name, strrchr(MONITORS_CONF, '/') + 1) ||
                                 !strcmp(ev->name, strrchr(MONITOR_PROFILES_CONF, '/') + 1))) {
-                    apply_at = uptime() + 0.3; /* settled: written, and renamed */
+                    apply_at = uptime() + 0.3;
                 } else if (ev->len && strcmp(ev->name, strrchr(RC_CONF, '/') + 1) == 0) {
                     watch_idle();
                 }
                 e += sizeof *ev + ev->len;
             }
         }
+        if (wake_at > 0 && uptime() >= wake_at && power_phase == POWER_WAKING) power_restore();
         if (apply_at > 0 && uptime() >= apply_at) {
             apply_at = 0;
             wl_display_roundtrip(display); /* the screens as they are now */

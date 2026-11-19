@@ -63,7 +63,7 @@ exec unshare --mount --propagation private --pid --fork --kill-child --mount-pro
         # host ABI. Only our trusted sources are compiled as root here.
         run_logged host-clients-build.log sh "$src/tools/build-check.sh" "$out"
         test -x /usr/bin/labwc
-        for p in security-context-v1 wlr-foreign-toplevel-management-unstable-v1 wlr-output-management-unstable-v1 ext-idle-notify-v1; do
+        for p in security-context-v1 wlr-foreign-toplevel-management-unstable-v1 wlr-output-management-unstable-v1 wlr-output-power-management-unstable-v1 ext-idle-notify-v1; do
             wayland-scanner client-header "$src/base/protocols/$p.xml" "$out/$p-client-protocol.h"
             wayland-scanner private-code "$src/base/protocols/$p.xml" "$out/$p-protocol.c"
         done
@@ -72,7 +72,7 @@ exec unshare --mount --propagation private --pid --fork --kill-child --mount-pro
             $(pkg-config --cflags freetype2 libnm) -I"$src/base/include" -I"$out" \
             "$src/progs/labwc-control.c" "$out"/security-context-v1-protocol.c \
             "$out"/wlr-foreign-toplevel-management-unstable-v1-protocol.c \
-            "$out"/wlr-output-management-unstable-v1-protocol.c "$out"/ext-idle-notify-v1-protocol.c "$out/base.a" \
+            "$out"/wlr-output-management-unstable-v1-protocol.c "$out"/wlr-output-power-management-unstable-v1-protocol.c "$out"/ext-idle-notify-v1-protocol.c "$out/base.a" \
             $(pkg-config --libs freetype2 libnm) -lwayland-client -lm -o "$out/labwc-control"
         install -m 755 "$out/labwc-control" /usr/local/lib/locachy/labwc-control
         # Each test uses its own mount/PID namespace, runtime sockets and

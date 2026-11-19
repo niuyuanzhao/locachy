@@ -231,6 +231,27 @@ static void two_outputs(void)
     pass("every connector shown; one refused: -1 and the others turned on again");
 }
 
+static void idle_owner(void)
+{
+    backend(2);
+    lent = 1; /* process 1 still holds the primary DRM master */
+    outputs[0].lessee = 8;
+    outputs[1].lessee = 9;
+    conns[1].dpms = DRM_MODE_DPMS_OFF; /* not ours to wake */
+    CHECK(screen_idle_power(0) == 0 && sets == 1 && outputs[0].idle_off && !outputs[1].idle_off);
+    conns[0].dpms = DRM_MODE_DPMS_ON; /* a new front-end modeset while idle */
+    CHECK(screen_idle_power(0) == 0 && sets == 2 && outputs[0].idle_off);
+    CHECK(screen_idle_power(1) == 0 && sets == 3 && !outputs[0].idle_off);
+    CHECK(conns[0].dpms == DRM_MODE_DPMS_ON && conns[1].dpms == DRM_MODE_DPMS_OFF && !other_calls);
+    CHECK(outputs[0].lessee == 8 && outputs[1].lessee == 9);
+    conns[1].dpms = DRM_MODE_DPMS_ON;
+    fail_set = conns[1].id;
+    CHECK(screen_idle_power(0) == -1 && sets == 6 && !outputs[0].idle_off && !outputs[1].idle_off);
+    CHECK(conns[0].dpms == DRM_MODE_DPMS_ON && conns[1].dpms == DRM_MODE_DPMS_ON);
+    screen_release();
+    pass("idle DPMS uses the lessor without touching leases, restores only its own outputs and rolls back failure");
+}
+
 static void release_restores(void)
 {
     backend(1);
@@ -285,6 +306,7 @@ int main(void)
     ioctl_failure();
     success();
     two_outputs();
+    idle_owner();
     release_restores();
     exit_restores();
     if (failures) {

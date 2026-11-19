@@ -130,6 +130,22 @@ class SecurityTest(unittest.TestCase):
         self.assertEqual(self.ran(), [])
         self.assertFalse(security.MARKER.exists())
 
+    def test_auto_lock_policy_and_high_threat_level(self):
+        self.tpm.tokens["/dev/root"] = [{"type": "systemd-tpm2"}]
+        self.apply("auto-lock", "off")
+        self.assertEqual(self.rc()["auto_lock"], "0")
+        self.assertEqual(self.ran(), [])
+        with self.assertRaisesRegex(RuntimeError, "turn auto-lock on first"):
+            self.apply("lock-mode", "high")
+        self.apply("auto-lock", "on")
+        self.assertEqual(self.rc()["auto_lock"], "1")
+        self.assertEqual(self.ran(), [])
+        security.RC_CONF.write_text('lock_mode="high"\n')
+        with self.assertRaisesRegex(RuntimeError, "requires automatic locking"):
+            self.apply("auto-lock", "off")
+        self.assertNotIn("auto_lock", self.rc())
+        self.assertFalse(security.MARKER.exists())
+
     def test_high_clears_tpm_first_then_writes_policy_and_boot_image(self):
         self.tpm.tokens["/dev/root"] = [{"type": "systemd-tpm2"}]
         self.tpm.pending = {"devices": {}}

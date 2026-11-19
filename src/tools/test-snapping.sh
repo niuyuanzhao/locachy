@@ -11,7 +11,7 @@ mkdir -p "$out/gen" "$out/etc/labwc"
 for p in security-context-v1 wlr-foreign-toplevel-management-unstable-v1 \
          wlr-output-management-unstable-v1 wlr-layer-shell-unstable-v1 virtual-keyboard-unstable-v1 \
          xdg-shell wlr-screencopy-unstable-v1 wlr-virtual-pointer-unstable-v1 \
-         fractional-scale-v1 viewporter relative-pointer-unstable-v1 ext-idle-notify-v1; do
+         fractional-scale-v1 viewporter relative-pointer-unstable-v1 wlr-output-power-management-unstable-v1 ext-idle-notify-v1; do
     wayland-scanner client-header "$src/base/protocols/$p.xml" "$out/gen/$p-client-protocol.h"
     wayland-scanner private-code "$src/base/protocols/$p.xml" "$out/gen/$p-protocol.c"
 done
@@ -25,12 +25,12 @@ read -r -a libs <<<"$(pkg-config --libs freetype2 fontconfig libnm)"
 "${cc[@]}" "${flags[@]}" -DCONFIG_FREETYPE -DCONFIG_NETWORKMANAGER \
     "$src/progs/labwc-control.c" "${base[@]}" "$out/gen/security-context-v1-protocol.c" \
     "$out/gen/wlr-foreign-toplevel-management-unstable-v1-protocol.c" \
-    "$out/gen/wlr-output-management-unstable-v1-protocol.c" "$out/gen/ext-idle-notify-v1-protocol.c" \
+    "$out/gen/wlr-output-management-unstable-v1-protocol.c" "$out/gen/wlr-output-power-management-unstable-v1-protocol.c" "$out/gen/ext-idle-notify-v1-protocol.c" \
     "${libs[@]}" -lwayland-client -lm -o "$out/control"
 "${cc[@]}" "${flags[@]}" -DCONFIG_FREETYPE -DCONFIG_NETWORKMANAGER \
     "$src/tools/test-output-state.c" "${base[@]}" "$out/gen/security-context-v1-protocol.c" \
     "$out/gen/wlr-foreign-toplevel-management-unstable-v1-protocol.c" \
-    "$out/gen/wlr-output-management-unstable-v1-protocol.c" "$out/gen/ext-idle-notify-v1-protocol.c" \
+    "$out/gen/wlr-output-management-unstable-v1-protocol.c" "$out/gen/wlr-output-power-management-unstable-v1-protocol.c" "$out/gen/ext-idle-notify-v1-protocol.c" \
     "${libs[@]}" -lwayland-client -lm -o "$out/outputs"
 # Rime is optional on the target host; snapping does not need an input method.
 ime_flags=() ime_libs=() bar_flags=()

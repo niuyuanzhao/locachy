@@ -29,7 +29,7 @@ f=$uhome/Documents/.locachy-bar-test-notify # a container writes only shared fol
 for p in security-context-v1 wlr-foreign-toplevel-management-unstable-v1 \
          wlr-output-management-unstable-v1 wlr-layer-shell-unstable-v1 \
          virtual-keyboard-unstable-v1 xdg-shell wlr-screencopy-unstable-v1 \
-         wlr-virtual-pointer-unstable-v1 fractional-scale-v1 viewporter ext-idle-notify-v1 \
+         wlr-virtual-pointer-unstable-v1 fractional-scale-v1 viewporter wlr-output-power-management-unstable-v1 ext-idle-notify-v1 \
          relative-pointer-unstable-v1; do
     wayland-scanner client-header "$src/base/protocols/$p.xml" "$p-client-protocol.h"
     wayland-scanner private-code "$src/base/protocols/$p.xml" "$p-protocol.c"
@@ -39,7 +39,7 @@ libs="$(pkg-config --libs freetype2 fontconfig libnm) -lwayland-client -lm"
 base=$(ls "$src"/base/*.c | grep -v '/ime.c$')
 $cc -DCONFIG_FREETYPE -DCONFIG_NETWORKMANAGER -o labwc-control "$src/progs/labwc-control.c" $base \
     security-context-v1-protocol.c wlr-foreign-toplevel-management-unstable-v1-protocol.c \
-    wlr-output-management-unstable-v1-protocol.c ext-idle-notify-v1-protocol.c $libs || exit 1
+    wlr-output-management-unstable-v1-protocol.c wlr-output-power-management-unstable-v1-protocol.c ext-idle-notify-v1-protocol.c $libs || exit 1
 $cc -DCONFIG_FREETYPE -DCONFIG_NETWORKMANAGER -DCONFIG_IME -o locachy-bar "$src/progs/bar.c" $base \
     "$src/base/ime.c" wlr-layer-shell-unstable-v1-protocol.c virtual-keyboard-unstable-v1-protocol.c \
     xdg-shell-protocol.c wlr-foreign-toplevel-management-unstable-v1-protocol.c \

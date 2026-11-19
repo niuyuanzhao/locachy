@@ -11197,6 +11197,10 @@ msgid "Power Management"
 msgstr "电源管理"
 
 #: progs/settings.c
+msgid "Display"
+msgstr "显示"
+
+#: progs/settings.c
 msgid "Battery & Energy"
 msgstr "电池与能耗"
 
@@ -11733,14 +11737,16 @@ msgid "Debug cable link"
 msgstr "调试线连接"
 
 #: progs/settings.c
-#, c-format
-msgid "%d min"
-msgid_plural "%d min"
-msgstr[0] "%d 分钟"
-
-#: progs/settings.c
 msgid "[Enter: change]"
 msgstr "[Enter: 修改]"
+
+#: progs/settings.c
+msgid "Auto-lock"
+msgstr "自动锁屏"
+
+#: progs/settings.c
+msgid "on (high threat level)"
+msgstr "开启（高威胁烈度）"
 
 #: progs/settings.c
 msgid "Password at boot"
@@ -11751,8 +11757,22 @@ msgid "Lock key"
 msgstr "锁屏快捷键"
 
 #: progs/settings.c
-msgid "Lock when idle"
-msgstr "空闲自动锁屏"
+#, c-format
+msgid "%d min"
+msgid_plural "%d min"
+msgstr[0] "%d 分钟"
+
+#: progs/settings.c
+msgid "Lock screen after"
+msgstr "空闲后锁屏"
+
+#: progs/settings.c
+msgid "Turn off display automatically"
+msgstr "自动关闭显示屏"
+
+#: progs/settings.c
+msgid "Turn off display after"
+msgstr "空闲后关闭显示屏"
 
 #: progs/settings.c
 msgid "Unlock with a fingerprint"
@@ -12347,17 +12367,39 @@ msgstr ""
 "未更改：TPM 在开机时就打开磁盘，所以开机锁屏必须保留。请先解除 TPM 绑定。"
 
 #: progs/settings.c
+msgid "Not changed: the high threat level requires automatic locking."
+msgstr "未更改：高威胁烈度必须启用自动锁屏。"
+
+#: progs/settings.c
+msgid ""
+"Auto-lock off: closing the lid, sleeping and idling do not lock the screen."
+msgstr "自动锁屏已关：合盖、睡眠与空闲均不再锁屏。"
+
+#: progs/settings.c
+msgid "Auto-lock on: closing the lid, sleeping and idling lock the screen."
+msgstr "自动锁屏已开：合盖、睡眠与空闲时都会锁屏。"
+
+#: progs/settings.c
 msgid "At boot: the lock screen first, the password to go on."
 msgstr "开机时：先显示锁屏，输入密码后继续。"
 
 #: progs/settings.c
-msgid "At boot: home at once (the lock key and the lid still lock)."
-msgstr "开机时：直接进入主页（锁屏快捷键与合盖仍会锁屏）。"
+msgid "At boot: home at once (the lock key and auto-lock still lock)."
+msgstr "开机时：直接进入主页（锁屏快捷键和自动锁屏仍会锁屏）。"
+
+#: progs/settings.c
+msgid "At boot: home at once."
+msgstr "开机时：直接进入主页。"
 
 #. TRANSLATORS: Enter and Delete are key names; keep them.
 #: progs/settings.c
-msgid "Enter: press a new lock key   Delete: none (the lid still locks)"
-msgstr "Enter: 按下新锁屏快捷键   Delete: 无（合盖仍会锁屏）"
+msgid "Enter: press a new lock key   Delete: none (auto-lock still locks)"
+msgstr "Enter: 按下新锁屏快捷键   Delete: 无（自动锁屏仍会锁屏）"
+
+#. TRANSLATORS: Enter and Delete are key names; keep them.
+#: progs/settings.c
+msgid "Enter: press a new lock key   Delete: none"
+msgstr "Enter: 按下新锁屏快捷键   Delete: 无"
 
 #: progs/settings.c
 msgid ""
@@ -12774,6 +12816,22 @@ msgid_plural "Mirrors are ranked again every %d days."
 msgstr[0] "每 %d 天重新为镜像排序一次。"
 
 #: progs/settings.c
+msgid ""
+"Not changed: the high threat level keeps automatic locking. Turn Auto-lock "
+"on first."
+msgstr "未更改：高威胁烈度会保持自动锁屏。请先打开自动锁屏。"
+
+#: progs/settings.c
+#, c-format
+msgid "Idle lock set to %d min (off until Auto-lock is turned on)."
+msgid_plural "Idle lock set to %d min (off until Auto-lock is turned on)."
+msgstr[0] "空闲锁屏已设为 %d 分钟（需先开启自动锁屏才生效）。"
+
+#: progs/settings.c
+msgid "Never locked for want of input (auto-lock is off)."
+msgstr "不会因无操作而锁屏（自动锁屏已关）。"
+
+#: progs/settings.c
 #, c-format
 msgid ""
 "Locked after %d min without input (on the shared display, not while a video "
@@ -12989,8 +13047,12 @@ msgid "Fingerprints: %.100s."
 msgstr "指纹：%.100s。"
 
 #: progs/settings.c
-msgid "No lock key: the lid still locks."
-msgstr "已取消锁屏快捷键：合盖仍会锁屏。"
+msgid "No lock key: auto-lock still locks."
+msgstr "已取消锁屏快捷键：自动锁屏仍会锁屏。"
+
+#: progs/settings.c
+msgid "No lock key."
+msgstr "已取消锁屏快捷键。"
 
 #: progs/settings.c
 msgid "rclone is not installed: the Cloud drives installed line installs it."
@@ -14709,6 +14771,9 @@ msgstr "显示较少详情"
 msgid "Show more details..."
 msgstr "显示更多详情..."
 
+#~ msgid "Lock when idle"
+#~ msgstr "空闲后锁屏"
+
 #, c-format
 #~ msgid ""
 #~ "Language server '%s' is not installed. Configure an existing server; no "
@@ -14745,3 +14810,31 @@ msgstr "显示更多详情..."
 #~ msgid ""
 #~ "Tor off, but its firewall is still there: nothing goes out (%s remove)."
 #~ msgstr "Tor 已关闭，但其防火墙仍在：所有外联已阻断（%s remove）。"
+
+#: progs/settings.c
+msgid "Unlock without password within"
+msgstr "免密码解锁窗口"
+
+#: progs/settings.c
+msgid "no (high threat level)"
+msgstr "否（高威胁烈度）"
+
+#: progs/settings.c
+#, c-format
+msgid "%d s"
+msgid_plural "%d s"
+msgstr[0] "%d 秒"
+
+#: progs/settings.c
+msgid "Not changed: at the high threat level every lock asks for the password."
+msgstr "未更改：高威胁烈度下每次锁屏都要求密码。"
+
+#: progs/settings.c
+#, c-format
+msgid "After an idle lock, a key or the pointer within %d second unlocks it without the password. The lock key, the lid and sleep always ask."
+msgid_plural "After an idle lock, a key or the pointer within %d seconds unlocks it without the password. The lock key, the lid and sleep always ask."
+msgstr[0] "空闲锁屏后，%d 秒内按键或移动指针可免密码解锁；锁屏键、合盖和睡眠始终要求密码。"
+
+#: progs/settings.c
+msgid "Every lock asks for the password at once."
+msgstr "每次锁屏都立即要求密码。"

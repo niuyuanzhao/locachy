@@ -54,12 +54,13 @@
  *                 next or previous of home and the running tasks not on
  *                 another screen, in turn, there.
  *   lock          (from the program on the screen; key_lock, which process 1
- *                 also sees on its own fds; the lid closing; at boot unless
- *                 rc.conf has login_skip="1"; rc.conf's lock_after minutes
- *                 without input: process 1 reads every input device for
- *                 that, but on the shared display labwc knows, and
- *                 labwc-control asks) /usr/local/bin/lock on top of
- *                 everything, what had the screen waiting as for home; while
+ *                 also sees on its own fds; the lid closing, at boot unless
+ *                 rc.conf has login_skip="1", and rc.conf's lock_after minutes
+ *                 without input unless auto_lock="0" turns automatic locking
+ *                 off: process 1 reads every input device for that, but on the
+ *                 shared display labwc knows, and labwc-control asks)
+ *                 /usr/local/bin/lock on top of everything, what had the screen
+ *                 waiting as for home; while
  *                 it is there nothing else gets the screen and the home and
  *                 switch requests do nothing. It exiting 0 (someone
  *                 authenticated, through PAM) unlocks; any other end starts it
@@ -110,7 +111,9 @@
 #define MAX_TASKS 8
 #define MAX_DEPTH 6
 #define MAX_KBD 8
+#ifndef CGROUP
 #define CGROUP "/sys/fs/cgroup"
+#endif
 #define MIB (1024.0 * 1024.0)
 
 struct frame {
@@ -155,11 +158,18 @@ static int locked;
 static int lock_shown;             /* it has drawn its first picture ("locked") */
 static double lock_start_at = -1;  /* start it again then (ms): it ended, not unlocking */
 static int login_skip;             /* rc.conf login_skip="1": not locked at boot */
+static int auto_lock = 1;          /* rc.conf auto_lock="0": no automatic lock (lid, sleep, idle) */
 static int lock_after = 600;       /* rc.conf lock_after (minutes), in s: locked after that
                                     * long without input; 0: never */
 static double active_at;           /* the last input (ms) */
+static int blank_after;             /* seconds; 0 if automatic display-off is disabled */
+static double blank_active_at;      /* activity or display-off setting change (ms) */
+static int blank_tried, direct_dark, shared_dark, lock_in_dark;
 static int lock_due;               /* lock_after ran out while a live link held a screen:
                                     * locked once it no longer does (idle_lock_at) */
+static int lock_grace = 5;         /* rc.conf lock_grace (seconds): after an idle lock, input
+                                    * this soon unlocks without the password (KDE's LockGrace) */
+static double lock_grace_until = -1; /* ms: the present idle lock's grace ends; -1: none */
 #define MAX_ACTIVITY 32
 static int *afd;                   /* the input devices, read only to see input */
 static size_t nafd;
@@ -1500,6 +1510,14 @@ static void reclaim(struct frame *f)
             if (screen_take_back(0) < 0) say("init: DRM master still not free after ending %s", f->name);
         }
     }
+    if (f->shared_display) shared_dark = 0;
+    /* A modeset in screen_take_back or the next lease can turn DPMS on.
+     * An idle lock restores darkness after its first rendered frame. */
+    if (f->screens && direct_dark && !lock_in_dark) {
+        if (screen_idle_power && screen_idle_power(1) < 0) display_changed();
+        direct_dark = 0;
+        blank_tried = 0;
+    }
     f->lessee = 0;
     f->screens = 0;
 }
@@ -1701,6 +1719,12 @@ static void answer_home(struct task *t, const char *verb, const char *code)
  * and given a screen again, is told the task it opened is "shown". */
 static void arrange(void)
 {
+    /* A new owner will modeset the outputs. Do not leave stale DPMS ownership
+     * across the raw-master handoff or a screen rescan. */
+    if (direct_dark && ((!locked && display_front != NULL) || shutdown_how >= 0 || restart_asked)) {
+        if (screen_idle_power && screen_idle_power(1) < 0) display_changed();
+        direct_dark = 0;
+    }
     struct frame *all[2 + MAX_TASKS * MAX_DEPTH];
     int n = frames(all);
     for (int k = 0; k < n; k++) {
@@ -2053,23 +2077,72 @@ static void write_locked_state(void)
     }
 }
 
+/* Any lock asked for while locked (the lock key, the lid, sleep, the critical
+ * battery) ends an idle lock's grace, as KSldApp::lock does. */
 static void lock(void)
 {
     if (locked) {
+        lock_grace_until = -1;
         return;
     }
     lock_due = 0; /* due or not, the lock is asked for now */
+    lock_grace_until = -1;
     if (access(lock_argv[0], X_OK) != 0) {
         say("init: %s is not installed; not locking", lock_argv[0]);
         return;
     }
     restart_asked = 0; /* a restart question goes: the lock's screen shows */
     say("init: locking");
+    lock_in_dark = blank_after > 0 && (direct_dark || shared_dark);
     locked = 1;
     write_locked_state();
     if (apps_sessions_locked) apps_sessions_locked(1); /* their input stops, their inhibitors go */
     stay_on_display = 0;
     lock_start();
+}
+
+static void idle_power_wake(void)
+{
+    lock_in_dark = 0;
+    if (direct_dark) {
+        if (screen_idle_power && screen_idle_power(1) < 0) display_changed();
+        direct_dark = 0;
+    }
+    if (shared_dark) {
+        struct frame *f = display_front ? top(display_front) : NULL;
+        if (f && f->screens && f->shared_display) {
+            (void)send(f->ctl, "wake-screen", 11, MSG_DONTWAIT | MSG_NOSIGNAL);
+        }
+        shared_dark = 0;
+    }
+}
+
+/* One deadline per period of activity, even if an output refuses DPMS. A
+ * foreground extended-display session is not idle: leave its output and
+ * lease alone, and try only after its existing hold has been released. */
+static double idle_blank_at(void)
+{
+    struct frame *f = focused();
+    if (!screen_idle_power || blank_after <= 0 || blank_tried || direct_dark || restart_asked || shutdown_how >= 0 ||
+        !f || f->shared_display || !f->screens || (locked && !lock_shown) || held_in_front()) return -1;
+    for (int i = 0; i < nplaces; i++) {
+        struct frame *shown = showing(i);
+        /* Pairing and the decoder's scanout handoff also need a lit output,
+         * including the interval before extdisplay reports its live hold. */
+        if (shown && strcmp(shown->name, "extdisplay") == 0) return -1;
+    }
+    return blank_active_at + blank_after * 1e3;
+}
+
+static void idle_blank_check(void)
+{
+    double at = idle_blank_at();
+    if (at >= 0 && at <= now_ms()) {
+        blank_tried = 1;
+        /* Retain ownership of anything not rolled back after a failed off. */
+        direct_dark = 1;
+        if (screen_idle_power(0) < 0) idle_power_wake();
+    }
 }
 
 /* The lock exited 0: the screens show what they did before. */
@@ -2082,33 +2155,81 @@ static void unlock(void)
     write_locked_state();
     if (apps_sessions_locked) apps_sessions_locked(0); /* sessions ask again: nothing resumes by itself */
     lock_start_at = -1;
-    active_at = now_ms();
+    idle_power_wake();
+    blank_tried = 0;
+    active_at = blank_active_at = now_ms();
     say("init: unlocked");
     arrange();
 }
 
 /* Every keyboard, mouse, touchpad, touch screen and pen (pointer_lend's
  * devices), read only to see that there was input: the program on the screen
- * reads copies of its own, and nothing is grabbed. Opened again when devices
- * come or go. */
-static void activity_open(void)
+ * reads copies of its own, and nothing is grabbed. Keep still-live descriptors
+ * across unrelated uevents (e.g. a charger change) so unread events stay in
+ * their queues; drain and close any descriptor that went away or is not evdev.
+ * Returns 1 if a closed descriptor still held unread input. */
+static int activity_open(void)
 {
     char paths[MAX_ACTIVITY][POINTER_PATH];
+    int seen = 0;
+    size_t keep = 0;
     if (afd != NULL) {
-        pointer_take_back(afd, nafd);
+        for (size_t i = 0; i < nafd; i++) {
+            int version;
+            if (ioctl(afd[i], EVIOCGVERSION, &version) >= 0) {
+                afd[keep++] = afd[i];
+                continue;
+            }
+            char events[64 * sizeof(struct input_event)];
+            struct pollfd p = { .fd = afd[i], .events = POLLIN };
+            while (poll(&p, 1, 0) > 0 && (p.revents & POLLIN)) {
+                ssize_t r = read(afd[i], events, sizeof events);
+                if (r <= 0) break;
+                seen = 1;
+            }
+            close(afd[i]);
+        }
+        nafd = keep;
     }
-    afd = pointer_lend(&nafd, paths, MAX_ACTIVITY);
+    size_t nfresh = 0;
+    int *fresh = pointer_lend(&nfresh, paths, MAX_ACTIVITY);
+    if (nfresh > 0 && fresh != NULL) {
+        int *merged = realloc(afd, (nafd + nfresh) * sizeof *merged);
+        if (merged != NULL) {
+            afd = merged;
+            for (size_t i = 0; i < nfresh; i++) {
+                int have = 0;
+                for (size_t k = 0; k < nafd && !have; k++) {
+                    have = input_same(afd[k], fresh[i]);
+                }
+                if (have || nafd >= MAX_ACTIVITY) {
+                    close(fresh[i]);
+                } else {
+                    afd[nafd++] = fresh[i];
+                }
+            }
+        } else {
+            for (size_t i = 0; i < nfresh; i++) close(fresh[i]);
+        }
+    }
+    free(fresh);
+    if (nafd == 0) {
+        free(afd);
+        afd = NULL;
+    }
+    return seen;
 }
 
 /* Called after existing module events and dead input descriptors. Only the
  * programs on screens receive updates (the lock included): the keyboard's
  * program its keyboards, each with pointer devices those of its kinds; labwc
- * discovers its own devices. No screen handover, input grab or synthetic key. */
-static void input_refresh(void)
+ * discovers its own devices. No screen handover, input grab or synthetic key.
+ * 1 if input was waiting on the old activity descriptors (activity_open). */
+static int input_refresh(void)
 {
     struct frame *all[2 + MAX_TASKS * MAX_DEPTH], *to = focused();
     keys_refresh();
-    activity_open();
+    int seen = activity_open();
     /* The shared display's go to its bar (locachy-bar reads the keyboards
      * seat passes on, no others). */
     if (to != NULL && to->screens && keys_sync(to->kbd, &to->nkbd, MAX_KBD)) {
@@ -2119,18 +2240,19 @@ static void input_refresh(void)
         if (all[k]->pointer_kinds) pointer_refresh(all[k], all[k]->pointer_kinds);
     }
     pointer_place();
+    return seen;
 }
 
-/* When the screen locks for want of input (ms), or -1: never with lock_after
- * 0, nor while locked, nor while the shared display has the screens: labwc
- * knows its idleness, and what holds it off (a video playing), and
- * labwc-control asks for the lock. A live link on a screen (held_in_front)
- * holds it off too: run out meanwhile, the lock is due (lock_due) and comes
- * at once when no screen shows the link any more (the cable out, the
- * program gone, home), whatever input came since. */
+/* When the screen locks for want of input (ms), or -1: never with Auto-lock
+ * off or lock_after 0, nor while locked, nor while the shared display has
+ * the screens: labwc knows its idleness, and what holds it off (a video
+ * playing), and labwc-control asks for the lock. A live link on a screen
+ * (held_in_front) holds it off too: run out meanwhile, the lock is due
+ * (lock_due) and comes at once when no screen shows the link any more (the
+ * cable out, the program gone, home), whatever input came since. */
 static double idle_lock_at(void)
 {
-    if (lock_after <= 0 || locked || display_front != NULL) {
+    if (!auto_lock || lock_after <= 0 || locked || display_front != NULL) {
         return -1;
     }
     if (lock_due) {
@@ -2145,17 +2267,66 @@ static double idle_lock_at(void)
  * key can come in one poll pass, in either order. */
 static void latch_lock_due(void)
 {
-    if (!lock_due && lock_after > 0 && !locked && display_front == NULL && held_in_front() &&
+    if (auto_lock && !lock_due && lock_after > 0 && !locked && display_front == NULL && held_in_front() &&
         active_at + lock_after * 1e3 <= now_ms()) {
         lock_due = 1;
     }
 }
 
-/* An input came: the idle time starts again, after a due lock is latched. */
+/* An idle lock, with its grace (KDE's LockGrace: KSldApp's idle timeout
+ * locks with EstablishLock::Delayed and starts m_graceTimer). Only the idle
+ * timeout has one: the lock key, the lid, sleep and the critical battery
+ * lock at once (EstablishLock::Immediate). */
+static void idle_lock(void)
+{
+    lock();
+    if (locked && lock_grace > 0) {
+        lock_grace_until = now_ms() + lock_grace * 1e3;
+    }
+}
+
+/* Input within an idle lock's grace (KSldApp::userActivity, then unlock()
+ * while isGraceTime()): unlocked without the password, the lock program
+ * ended. 1 if it unlocked. */
+static int grace_unlock(void)
+{
+    if (!locked || lock_grace_until < 0 || now_ms() >= lock_grace_until) {
+        lock_grace_until = -1;
+        return 0;
+    }
+    say("init: input within the lock's %d s grace: unlocked without the password", lock_grace);
+    lock_grace_until = -1;
+    if (locker.pid > 0) {
+        char kill_path[96], ev_path[96];
+        snprintf(kill_path, sizeof kill_path, "%s/cgroup.kill", locker.cgroup);
+        write_file(kill_path, "1");
+        kill(locker.pid, SIGKILL);
+        if (!locker.reaped) {
+            waitpid(locker.pid, NULL, 0);
+        }
+        snprintf(ev_path, sizeof ev_path, "%s/cgroup.events", locker.cgroup);
+        double t0 = now_ms();
+        while (read_value(ev_path, "populated") > 0 && now_ms() - t0 < 200) {
+            usleep(1000);
+        }
+        reclaim(&locker);
+        close(locker.ctl);
+        rmdir(locker.cgroup);
+        locker.pid = 0;
+    }
+    unlock();
+    return 1;
+}
+
+/* An input came: the idle time starts again, after a due lock is latched;
+ * within an idle lock's grace, it unlocks. */
 static void input_seen(void)
 {
     latch_lock_due();
-    active_at = now_ms();
+    grace_unlock();
+    idle_power_wake();
+    blank_tried = 0;
+    active_at = blank_active_at = now_ms();
 }
 
 /* The main loop once idle_lock_at has come: the lock, or with a live link
@@ -2173,12 +2344,15 @@ static int idle_lock_check(void)
         return 0;
     }
     if (lock_due) {
+        /* Run out long ago, on the link: no grace, as the input since did not count either. */
         say("init: the live link no longer holds the screen: locking");
-    } else {
-        say("init: no input for %d s: locking", lock_after);
+        active_at = now_ms();
+        lock();
+        return 1;
     }
+    say("init: no input for %d s: locking", lock_after);
     active_at = now_ms(); /* without the lock program: not again at once */
-    lock();
+    idle_lock();
     return 1;
 }
 
@@ -2771,8 +2945,8 @@ static void battery_power_off(void)
 struct settings_read {
     struct service *services;
     size_t count;
-    int hibernate_after, login_skip, lock_after, failed;
-    int lid_holdoff, battery_critical;
+    int hibernate_after, login_skip, auto_lock, lock_high, lock_after, lock_grace, failed;
+    int auto_blank, blank_minutes, lid_holdoff, battery_critical;
     char mem_sleep[8];
 };
 
@@ -2792,9 +2966,15 @@ struct settings_read {
  *   mem_sleep="deep"            how the machine suspends: "deep" (S3),
  *                               "s2idle" or "shallow"; unset, the kernel's
  *                               choice (a machine profile sets it)
- *   login_skip="1"              not locked at boot (key_lock and the lid lock)
+ *   login_skip="1"              not locked at boot (key_lock and auto-lock)
+ *   auto_lock="0"               no automatic lock (lid, sleep, hibernate, idle)
  *   lock_after="MINUTES"        locked after that long without input
  *                               (default 10; 0: never)
+ *   lock_grace="SECONDS"        after an idle lock, input this soon unlocks
+ *                               without the password (0..900, default 5;
+ *                               0: at once; always 0 with lock_mode="high")
+ *   auto_blank="1"              turn off idle displays (default: off)
+ *   blank_after="MINUTES"       display-off delay (1..60, default 5)
  *   service_NAME="COMMAND"      a service (shell command line) */
 static void setting(const char *name, const char *value, void *arg)
 {
@@ -2815,8 +2995,19 @@ static void setting(const char *name, const char *value, void *arg)
         }
     } else if (strcmp(name, "login_skip") == 0) {
         next->login_skip = strcmp(value, "1") == 0;
+    } else if (strcmp(name, "auto_lock") == 0) {
+        next->auto_lock = strcmp(value, "0") != 0;
+    } else if (strcmp(name, "lock_mode") == 0) {
+        next->lock_high = strcmp(value, "high") == 0;
     } else if (strcmp(name, "lock_after") == 0) {
         next->lock_after = atoi(value) > 0 ? atoi(value) * 60 : 0;
+    } else if (strcmp(name, "lock_grace") == 0) {
+        next->lock_grace = number && atoi(value) <= 900 ? atoi(value) : 5;
+    } else if (strcmp(name, "auto_blank") == 0) {
+        next->auto_blank = strcmp(value, "1") == 0;
+    } else if (strcmp(name, "blank_after") == 0) {
+        int minutes = number ? atoi(value) : 0;
+        next->blank_minutes = minutes >= 1 && minutes <= 60 ? minutes : 5;
     } else if (strncmp(name, "service_", 8) == 0 && !next->failed) {
         if (strlen(value) >= sizeof services[0].command) {
             say("init: rc.conf: %s is too long; left out", name);
@@ -2890,8 +3081,8 @@ static int service_due(const struct service *s, double now)
 static void read_settings(void)
 {
     apply_hostname();
-    struct settings_read next = { .hibernate_after = hibernate_after, .lock_after = 600, .lid_holdoff = 30,
-                                  .battery_critical = 5 };
+    struct settings_read next = { .hibernate_after = hibernate_after, .auto_lock = 1, .lock_after = 600,
+                                  .lock_grace = 5, .blank_minutes = 5, .lid_holdoff = 30, .battery_critical = 5 };
     int read = rc_read(setting, &next);
     if (read < 0 || next.failed) {
         say("init: cannot %s %s; services unchanged", read < 0 ? "read" : "allocate services for", RC_CONF);
@@ -2949,14 +3140,25 @@ static void read_settings(void)
     battery_critical = next.battery_critical;
     snprintf(mem_sleep, sizeof mem_sleep, "%s", next.mem_sleep);
     login_skip = next.login_skip;
+    auto_lock = next.lock_high ? 1 : next.auto_lock;
     lock_after = next.lock_after;
-    if (lock_after <= 0) {
+    lock_grace = next.lock_high ? 0 : next.lock_grace;
+    if (lock_grace <= 0) lock_grace_until = -1; /* a grace running now ends with it */
+    int seconds = next.auto_blank ? next.blank_minutes * 60 : 0;
+    if (blank_after != seconds) {
+        blank_after = seconds;
+        idle_power_wake();
+        blank_tried = 0;
+        blank_active_at = now_ms();
+    }
+    if (!auto_lock || lock_after <= 0) {
         lock_due = 0; /* never locked for want of input now */
     }
     keys_reload(); /* key_home, key_lock */
     say("init: settings: hibernate_after %d s, lid_holdoff %d s, battery_critical %d %%, mem_sleep %s, "
-        "login_skip %d, lock_after %d s, %zu services", hibernate_after, lid_holdoff, battery_critical,
-        mem_sleep[0] ? mem_sleep : "(the kernel's)", login_skip, lock_after, nservices);
+        "login_skip %d, auto_lock %d, lock_after %d s, lock_grace %d s, display-off after %d s, %zu services",
+        hibernate_after, lid_holdoff, battery_critical, mem_sleep[0] ? mem_sleep : "(the kernel's)",
+        login_skip, auto_lock, lock_after, lock_grace, blank_after, nservices);
 }
 
 static void service_start(struct service *s)
@@ -3180,14 +3382,35 @@ static void message(struct frame *f)
         go_home(place_of_frame(f));
     } else if (strcmp(fields[0], "lock") == 0 && f->screens) {
         lock();
+    } else if (n == 1 && f->shared_display && f->screens && display_front && f == top(display_front) &&
+               strcmp(fields[0], "idle-lock") == 0) {
+        if (auto_lock && lock_after > 0 && !held_in_front()) idle_lock();
+    } else if (n == 1 && f->shared_display && f->screens && display_front && f == top(display_front) &&
+               strcmp(fields[0], "idle-blanked") == 0) {
+        shared_dark = 1;
+        if (blank_after <= 0) idle_power_wake();
+    } else if (n == 1 && f->shared_display && strcmp(fields[0], "idle-unblanked") == 0) {
+        shared_dark = 0;
+    } else if (n == 1 && f->shared_display && f->screens && !locked && display_front && f == top(display_front) &&
+               strcmp(fields[0], "idle-power-lost") == 0) {
+        /* The output owner could not wake it. Regain DRM through the normal
+         * seat handoff so the user can see home rather than a stuck screen. */
+        shared_dark = 0;
+        blank_active_at = now_ms();
+        go_home(focus_place);
     } else if (strcmp(fields[0], "locked") == 0 && f == &locker) {
         lock_shown = 1;
+        if (lock_in_dark && blank_after > 0 && screen_idle_power) {
+            blank_tried = direct_dark = 1;
+            if (screen_idle_power(0) < 0) idle_power_wake();
+        }
     } else if (strcmp(fields[0], "switch") == 0 && n == 2 && f->screens && !locked &&
                !frame_holding(focused()) && !frame_holding(f)) {
         do_switch(display_front != NULL ? focus_place : place_of_frame(f),
                   strcmp(fields[1], "next") == 0 ? 1 : strcmp(fields[1], "prev") == 0 ? -1 : 0);
     } else if (strcmp(fields[0], "hold") == 0 && n == 2 && strcmp(f->name, "extdisplay") == 0) {
         f->holding = atoi(fields[1]) != 0;
+        if (f->screens && f->holding) idle_power_wake();
     } else if (strcmp(fields[0], "reboot") == 0) {
         restart();
     } else if (strcmp(fields[0], "poweroff") == 0) {
@@ -3207,6 +3430,9 @@ static void message(struct frame *f)
 #define LOCK_WAIT_MS 5000
 static void lid_lock(void)
 {
+    if (!auto_lock) {
+        return;
+    }
     lock();
     if (!locked) {
         say("init: SECURITY: %s is missing; locked without it: nothing gets the screens until a restart",
@@ -3713,6 +3939,9 @@ static void suspend_failed(int err)
 static void woke_up(double slept)
 {
     say("init: woke up after %.1f s asleep", slept);
+    idle_power_wake();
+    blank_tried = 0;
+    blank_active_at = now_ms();
     if (fork() == 0) {
         execl("/usr/local/bin/settings", "settings", "--apply", (char *)NULL);
         _exit(0);
@@ -3903,7 +4132,7 @@ static void lid_changed(int edge)
     /* A session that keeps the machine awake (apps.c) holds a closed lid's
      * sleep, not its lock: looked at again, as the session may end. */
     if (apps_sleep_inhibited && apps_sleep_inhibited()) {
-        say("init: the lid is closed; a session keeps the machine awake (it is locked)");
+        say("init: the lid is closed; a session keeps the machine awake%s", locked ? " (it is locked)" : "");
         lid_check_at = now_ms() + 5000;
         return;
     }
@@ -4243,7 +4472,7 @@ int main(void)
         lid_check_at = lid_holdoff_until;
     }
     battery_check();
-    active_at = now_ms();
+    active_at = blank_active_at = now_ms();
     say("init: keyboards: %d, power button and lid: %d, swap: %s, root: %s, esp: %s", nk, npfd,
         swap_dev[0] ? swap_dev : "none", rooted ? data : "none", esp_dev[0] ? esp_dev : "none");
     reboot_s = cmdline_int("locachy.reboot");
@@ -4363,9 +4592,10 @@ int main(void)
                 next = timers[i];
             }
         }
-        double idle_at = idle_lock_at();
-        if (idle_at >= 0 && (next < 0 || idle_at < next)) {
-            next = idle_at;
+        double idle_timers[] = { idle_lock_at(), idle_blank_at() };
+        for (size_t i = 0; i < sizeof idle_timers / sizeof idle_timers[0]; i++) {
+            double at = idle_timers[i];
+            if (at >= 0 && (next < 0 || at < next)) next = at;
         }
         if (reboot_s > 0) {
             double at = now_ms() + ((measured.t == 0 ? MEASURE_FROM : reboot_s) - uptime()) * 1e3;
@@ -4423,8 +4653,11 @@ int main(void)
             shutdown_look();
             continue;
         }
-        if (idle_lock_check()) {
-            continue;
+        /* Drain ready input/control messages before acting on idle timeouts.
+         * This includes compositor activity and an extended-display hold. */
+        if (ready == 0) {
+            if (idle_lock_check()) continue;
+            idle_blank_check();
         }
         if (reboot_s > 0 && measured.t == 0 && uptime() >= MEASURE_FROM) {
             if (sleeptest_s > 0) {
@@ -4489,7 +4722,9 @@ int main(void)
                 if (p[j].revents & POLLIN) {
                     int events = modules_event();
                     if (events & MODULES_DISPLAY) display_changed();
-                    input_refresh(); /* an input device may have come or gone */
+                    /* An input device may have come or gone; a charger's
+                     * uevent too reopens the activity devices. */
+                    if (input_refresh()) input_seen();
                     int lid_again = 0;
                     if (system_lost) {
                         for (int i = 0; i < npfd; i++) close(pfd[i]);
@@ -4532,19 +4767,25 @@ int main(void)
                  * the lid by its level after them, never by an old edge. */
                 struct input_event ev[64];
                 ssize_t got = read(p[j].fd, ev, sizeof ev);
-                int lid = 0, closing = 0;
+                int lid = 0, closing = 0, saw_key = 0;
                 for (ssize_t k = 0; got > 0 && k < got / (ssize_t)sizeof *ev; k++) {
                     if (ev[k].type == EV_KEY && ev[k].code == KEY_POWER && ev[k].value == 1) {
                         person_asked(RB_POWER_OFF); /* "init: power button" */
                     } else if (ev[k].type == EV_KEY && ev[k].value == 1 && keys_alone_action(ev[k].code) == K_HOME) {
+                        saw_key = 1;
                         if (!locked && !frame_holding(focused())) {
                             say("init: key_home key %d -> home", ev[k].code);
                             go_home(focus_place);
                         }
+                    } else if (ev[k].type == EV_KEY && ev[k].code != KEY_POWER && ev[k].value == 1) {
+                        saw_key = 1;
                     } else if (ev[k].type == EV_SW && ev[k].code == SW_LID) {
                         lid = 1;
                         closing |= ev[k].value == 1;
                     }
+                }
+                if (saw_key) {
+                    input_seen();
                 }
                 if (lid) {
                     lid_changed(closing);
@@ -4552,12 +4793,12 @@ int main(void)
                 break;
             }
             if (j > npfd && j < activity_j && (p[j].revents & (POLLERR | POLLHUP | POLLNVAL))) {
-                input_refresh();
+                if (input_refresh()) input_seen();
                 break;
             }
             if (j >= activity_j && j < activity_end && p[j].revents) {
                 if (p[j].revents & (POLLERR | POLLHUP | POLLNVAL)) {
-                    input_refresh(); /* the device has gone */
+                    if (input_refresh()) input_seen(); /* the device has gone */
                 } else {
                     char events[64 * sizeof(struct input_event)];
                     while (read(p[j].fd, events, sizeof events) > 0) {
@@ -4579,6 +4820,9 @@ int main(void)
                     lock();
                 } else if (!locked && ctrl_alt_del(key)) {
                     person_asked(RB_AUTOBOOT); /* "init: Ctrl+Alt+Del" */
+                }
+                if (key != 0 && key != K_ACT_LOCK && !restart_asked) {
+                    input_seen();
                 }
                 break;
             }

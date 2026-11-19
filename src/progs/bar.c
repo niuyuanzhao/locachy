@@ -2589,6 +2589,18 @@ static void set_grab(int on)
     sigprocmask(SIG_SETMASK, &previous, NULL);
 }
 
+/* Consumed keys while grabbing (Chinese IME via zwp_input_method_v2, launcher,
+ * volume/brightness) do not reach labwc's input handlers; report activity so
+ * the compositor's idle-lock and blank timers wake and reset. */
+static void report_activity(void)
+{
+    static uint32_t last;
+    uint32_t now = now_ms32();
+    if (keys_link < 0 || !active || !grabbed || (last && now - last < 500)) return;
+    last = now ? now : 1;
+    control_send(keys_link, "activity", 8, NULL, 0);
+}
+
 
 /* The signals wake the main loop through a pipe: it may wait without a
  * timeout, and a signal between keyboard_signals and poll would otherwise
@@ -4759,6 +4771,7 @@ static void handle_kbd_event(int fd)
         if (question_active()) {
             if (!is_mod && ev.value == 1 && !was_down &&
                 (again.shown || choose.client >= 0)) {
+                report_activity();
                 chooser_key(ev.code);
             }
             continue;
@@ -4768,12 +4781,14 @@ static void handle_kbd_event(int fd)
          * that); while it is up, every key but rc.conf's is its own. */
         if (!act && ev.code == KEY_F1 && alt && !ctrl && !shift && !meta) {
             if (ev.value == 1) {
+                report_activity();
                 launcher_toggle(NULL);
             }
             continue;
         }
         if (launcher_shown && !act) {
             if (!is_mod) {
+                if (ev.value == 1) report_activity();
                 launcher_key(ev.code, sym_before, ev.value);
             }
             continue;
@@ -4781,6 +4796,7 @@ static void handle_kbd_event(int fd)
         if (act == K_CTRL_SPACE || act == K_ACT_IME_CN || act == K_ACT_IME_RAW || act == K_ACT_IME_WIDTH) {
             const char *msg;
             int epoch = input_epoch;
+            if (ev.value == 1) report_activity();
             if (ev.value == 1 && ime_action(act, &msg)) {
                 /* English mode's word is committed when the mode changes:
                  * typed now, while the keyboard is still the bar's. */
@@ -4797,6 +4813,7 @@ static void handle_kbd_event(int fd)
         }
         if (act == K_VOL_UP || act == K_VOL_DOWN || act == K_VOL_MUTE || act == K_MIC_MUTE) {
             char msg[64];
+            if (ev.value == 1) report_activity();
             if ((ev.value == 1 || act == K_VOL_UP || act == K_VOL_DOWN) &&
                 base_audio_key(act, msg, sizeof msg) == 0) {
                 notice(msg);
@@ -4805,6 +4822,7 @@ static void handle_kbd_event(int fd)
         }
         if (act == K_BRI_UP || act == K_BRI_DOWN) {
             char msg[64];
+            if (ev.value == 1) report_activity();
             if ((ev.value == 1 || ev.value == 2) &&
                 base_brightness_key(act, msg, sizeof msg) == 0) {
                 notice(msg);
@@ -4813,16 +4831,18 @@ static void handle_kbd_event(int fd)
         }
         if (!grabbed) continue;
         if (is_mod || (role & ROLE_NUM)) {
+            if (ev.value == 1) report_activity();
             int epoch = input_epoch;
             ime_key_event(caps_key ? XKB_KEY_Caps_Lock : sym_before, mask_before);
             if (!drain_ime_commit(epoch)) continue;
             render_bot_bar();
-            wl_display_flush(display);
+            if (display) wl_display_flush(display);
             continue;
         }
         /* Chinese mode's width: key_ime_width_cn (Ctrl+. and Shift+Space, as in
          * Chinese input methods). */
         if (ime_mode() == IME_MODE_CN && width_key(dl, ev.code)) {
+            if (ev.value == 1) report_activity();
             const char *msg = ev.value == 1 ? ime_toggle_width() : NULL;
             if (msg) {
                 notice(msg);
@@ -4846,6 +4866,7 @@ static void handle_kbd_event(int fd)
                 wl_display_flush(display);
             }
             if (status != XKB_COMPOSE_NOTHING) {
+                if (ev.value == 1 && status != XKB_COMPOSE_COMPOSED) report_activity();
                 if (status != XKB_COMPOSE_COMPOSING) xkb_compose_state_reset(compose_st);
                 continue;
             }
@@ -4858,8 +4879,9 @@ static void handle_kbd_event(int fd)
         int taken = candidate ? ime_process_key(k) : ime_key_event(sym_before, mask_before);
         if (!drain_ime_commit(epoch)) continue;
         if (taken) {
+            if (ev.value == 1) report_activity();
             render_bot_bar();
-            wl_display_flush(display);
+            if (display) wl_display_flush(display);
         } else if (ev.code <= KEY_MAX && layout_vkbd(&layouts[dl])) {
             /* Through the keyboard's layout's virtual keyboard; released
              * and repeated through the one it was pressed on. */

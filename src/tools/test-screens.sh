@@ -12,7 +12,7 @@ fi
 mkdir -p "$out/proto"
 out=$(realpath "$out")
 for p in security-context-v1 wlr-foreign-toplevel-management-unstable-v1 wlr-output-management-unstable-v1 \
-         ext-idle-notify-v1; do
+         wlr-output-power-management-unstable-v1 ext-idle-notify-v1; do
     wayland-scanner client-header "$src/base/protocols/$p.xml" "$out/proto/$p-client-protocol.h"
     wayland-scanner private-code "$src/base/protocols/$p.xml" "$out/proto/$p-protocol.c"
 done

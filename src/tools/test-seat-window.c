@@ -25,6 +25,22 @@ int control_send_fields(int sock, const char *const *fields)
     return 0;
 }
 
+/* The bar's link, as base/control.c reads it (no descriptors here). */
+int control_recv(int sock, char *msg, size_t size, int *fds, int *nfds)
+{
+    (void)fds;
+    *nfds = 0;
+    ssize_t n = recv(sock, msg, size - 1, MSG_DONTWAIT);
+    if (n >= 0) msg[n] = '\0';
+    return (int)n;
+}
+int control_fields(char *msg, int len, char **fields, int max)
+{
+    int n = 0;
+    for (int i = 0; i < len && n < max; i += (int)strlen(msg + i) + 1) fields[n++] = msg + i;
+    return n;
+}
+
 static void forward(int pair[2], const char *msg, size_t len, const char *expect)
 {
     forwarded[0] = '\0';
@@ -115,6 +131,36 @@ int main(void)
     forward(pair, "open\0view", 9, "");
     forward(pair, "window\0settings\0network\0x", 25, "");
     puts("PASS the seat passes on only valid window requests to process 1");
+
+    active_seat = 1;
+    idle_blanked = 0;
+    forward(pair, "idle-lock", sizeof("idle-lock") - 1, "idle-lock");
+    forward(pair, "idle-blanked", sizeof("idle-blanked") - 1, "idle-blanked");
+    assert(idle_blanked);
+    active_seat = 0;
+    forward(pair, "idle-lock", sizeof("idle-lock") - 1, "");
+    active_seat = 1;
+    forward(pair, "idle-power-lost", sizeof("idle-power-lost") - 1, "idle-power-lost");
+    assert(!idle_blanked);
+    forward(pair, "idle-unblanked", sizeof("idle-unblanked") - 1, "");
+    assert(!idle_blanked);
+    {
+        int bp[2], rp[2];
+        char got[32] = "";
+        assert(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, bp) == 0);
+        assert(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, rp) == 0);
+        bar_keys = bp[0]; window_requests = rp[0]; is_labwc = 1; active_seat = 1;
+        assert(send(bp[1], "activity", 8, 0) == 8);
+        bar_reports(-1);
+        assert(recv(rp[1], got, sizeof got - 1, MSG_DONTWAIT) == 12 && strcmp(got, "bar-activity") == 0);
+        active_seat = 0;
+        assert(send(bp[1], "activity", 8, 0) == 8);
+        bar_reports(-1);
+        assert(recv(rp[1], got, sizeof got - 1, MSG_DONTWAIT) < 0);
+        bar_keys = window_requests = -1; is_labwc = 0;
+        close(bp[0]); close(bp[1]); close(rp[0]); close(rp[1]);
+    }
+    puts("PASS private seat lifecycle forwards distinct idle lock and display-power states");
 
     char dir[] = "/tmp/seat-window-XXXXXX", got[2048];
     assert(mkdtemp(dir));

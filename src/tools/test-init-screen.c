@@ -5,6 +5,9 @@
  * operations are doubles recording their ordering and their leases. Frozen
  * frames write their cgroup files in a scratch directory only
  * (test-init-screen DIR). */
+/* start()'s cgroups (the lock started in the grace tests): in the scratch
+ * directory the test runs in, never under /sys/fs/cgroup. */
+#define CGROUP "."
 #define main init_main
 #include "../init/init.c"
 #undef main
@@ -58,6 +61,13 @@ static void note(int fd, const char *text)
 }
 
 int screen_refresh(void) { refreshed++; step('R'); return available; }
+static int power_offs, power_ons, power_fail;
+int screen_idle_power(int on)
+{
+    if (on) power_ons++;
+    else power_offs++;
+    return !on && power_fail ? -1 : 0;
+}
 int screen_places(struct screen_output *out, int max)
 {
     if (available <= 0) return 0;
@@ -245,6 +255,9 @@ static void reset(int screens, int keyboards, int devices)
     nplaces = focus_place = hover_place = 0;
     display_front = NULL;
     locked = 0;
+    lock_shown = 0;
+    blank_after = blank_tried = direct_dark = shared_dark = lock_in_dark = 0;
+    power_offs = power_ons = power_fail = 0;
     home_waits[0] = 0;
     stay_on_display = 0;
     nouts = 0;
@@ -742,8 +755,179 @@ static void idle_link(void)
     lock_argv[0] = lock_program;
 }
 
+static void idle_power(void)
+{
+    reset(2, 0, 0);
+    auto_lock = 0;
+    lock_after = 10;
+    active_at = blank_active_at = now_ms() - 20000;
+    assert(idle_blank_at() < 0 && idle_lock_at() < 0);
+    blank_after = 5;
+    idle_blank_check();
+    assert(direct_dark && power_offs == 1 && !locked);
+    idle_blank_check();
+    assert(power_offs == 1 && idle_blank_at() < 0);
+    input_seen();
+    assert(!direct_dark && power_ons == 1 && idle_blank_at() > now_ms() && !locked);
+    auto_lock = 1;
+    active_at = blank_active_at = now_ms() - 6000;
+    idle_blank_check();
+    assert(direct_dark && power_offs == 2 && idle_lock_at() > now_ms());
+    active_at -= 5000;
+    assert(idle_lock_at() >= 0 && idle_lock_at() < now_ms());
+    input_seen();
+    power_fail = 1;
+    blank_active_at -= 6000;
+    idle_blank_check();
+    assert(!direct_dark && power_offs == 3 && idle_blank_at() < 0);
+    puts("PASS autonomous display-off and idle lock use independent deadlines; input wakes and an off failure does not spin");
+
+    reset(2, 0, 0);
+    blank_after = 5;
+    blank_active_at = now_ms() - 6000;
+    struct frame *ext = task(0, "extdisplay");
+    char *argv[] = { "extdisplay", NULL };
+    assert(do_open(-1, argv) == 0);
+    assert(ext->screens && !held_in_front() && idle_blank_at() < 0);
+    holding = ext->cgroup;
+    idle_blank_check();
+    assert(held_in_front() && power_offs == 0 && !direct_dark);
+    go_home(0);
+    assert(!ext->frozen);
+    holding = NULL;
+    assert(!ext->screens && idle_blank_at() > 0);
+    puts("PASS automatic display-off never touches a foreground extended display, during pairing or a live link");
+
+    reset(1, 0, 0);
+    struct frame *seat = task(0, "locachy-seat");
+    seat->shared_display = 1;
+    seat->screens = 1;
+    display_front = &tasks[0];
+    blank_after = 5;
+    assert(idle_blank_at() < 0); /* the compositor owns power while it is in front */
+    tell(seat, (const char *const[]){ "idle-blanked", NULL });
+    assert(shared_dark);
+    input_seen();
+    char command[32] = "";
+    assert(recv(peer[seat->ctl], command, sizeof command, MSG_DONTWAIT) == 11 && !strcmp(command, "wake-screen"));
+    assert(!shared_dark && !power_ons);
+    auto_lock = 0;
+    said[0] = 0;
+    tell(seat, (const char *const[]){ "idle-lock", NULL });
+    assert(!locked && !strstr(said, "locking"));
+    puts("PASS compositor-owned display wakes through its seat, and a late idle lock cannot override Auto-lock off");
+
+    /* KDE's LockGrace: after an idle lock (direct or compositor), input within
+     * lock_grace s unlocks without the password and wakes a blanked panel. */
+    char *lock_program = lock_argv[0];
+    lock_argv[0] = "/proc/self/exe";
+    reset(1, 0, 0);
+    auto_lock = 1;
+    lock_after = 2;
+    lock_grace = 5;
+    blank_after = 5;
+    direct_dark = 1;
+    active_at = now_ms() - 2500;
+    assert(idle_lock_check() == 1 && locked && locker.pid > 0 && lock_grace_until > now_ms());
+    pid_t graced = locker.pid;
+    assert(poll(&(struct pollfd){ .fd = locker.ctl, .events = POLLIN }, 1, 2000) == 1);
+    message(&locker);
+    assert(lock_shown && power_offs == 1);
+    input_seen();
+    assert(!locked && locker.pid == 0 && home.screens == 1 && !home.frozen && lock_grace_until < 0);
+    assert(power_ons == 1 && !direct_dark && kill(graced, 0) != 0);
+    puts("PASS input within an idle lock's grace unlocks without the password and lights a blanked screen");
+
+    /* Early input while lock is still starting (before "locked") also cancels it;
+     * late input past lock_grace keeps the lock. */
+    active_at = now_ms() - 2500;
+    assert(idle_lock_check() == 1 && locked && !lock_shown && locker.pid > 0);
+    graced = locker.pid;
+    input_seen();
+    assert(!locked && locker.pid == 0 && kill(graced, 0) != 0 && home.screens == 1);
+    active_at = now_ms() - 2500;
+    assert(idle_lock_check() == 1 && locked && locker.pid > 0);
+    lock_grace_until = now_ms() - 1;
+    input_seen();
+    assert(locked && locker.pid > 0);
+    kill(locker.pid, SIGKILL);
+    waitpid(locker.pid, NULL, 0);
+    reclaim(&locker);
+    close(locker.ctl);
+    rmdir(locker.cgroup);
+    locker.pid = 0;
+    unlock();
+    puts("PASS early input during lock startup cancels idle lock; input after lock_grace keeps it");
+
+    /* Shared desktop idle-lock gets grace; manual lock() and lock_grace 0 do not,
+     * and manual/lid lock() cancels an active grace. */
+    reset(1, 0, 0);
+    seat = task(0, "locachy-seat");
+    seat->shared_display = 1;
+    seat->screens = 1;
+    display_front = &tasks[0];
+    auto_lock = 1;
+    lock_after = 2;
+    lock_grace = 5;
+    tell(seat, (const char *const[]){ "idle-lock", NULL });
+    assert(locked && lock_grace_until > now_ms() && locker.pid > 0);
+    lock(); /* lid/key_lock while already locked in grace ends the grace */
+    assert(locked && lock_grace_until < 0);
+    input_seen();
+    assert(locked && locker.pid > 0);
+    kill(locker.pid, SIGKILL);
+    waitpid(locker.pid, NULL, 0);
+    reclaim(&locker);
+    close(locker.ctl);
+    rmdir(locker.cgroup);
+    locker.pid = 0;
+    unlock();
+    tell(seat, (const char *const[]){ "idle-lock", NULL });
+    assert(locked && lock_grace_until > now_ms() && locker.pid > 0);
+    input_seen();
+    assert(!locked && locker.pid == 0 && display_front == &tasks[0] && seat->screens == 1);
+    lock_grace = 0;
+    tell(seat, (const char *const[]){ "idle-lock", NULL });
+    assert(locked && lock_grace_until < 0 && locker.pid > 0);
+    input_seen();
+    assert(locked);
+    kill(locker.pid, SIGKILL);
+    waitpid(locker.pid, NULL, 0);
+    reclaim(&locker);
+    close(locker.ctl);
+    rmdir(locker.cgroup);
+    locker.pid = 0;
+    unlock();
+    lock_grace = 5;
+    lock_argv[0] = lock_program;
+    puts("PASS shared idle-lock unlocks within grace; manual/lid lock and lock_grace 0 have none");
+
+    /* Unrelated uevent (e.g. AC unplug) refreshing input devices drains pending
+     * activity events before closing the old read-only fds. */
+    reset(1, 0, 0);
+    int ap[2];
+    assert(pipe2(ap, O_NONBLOCK | O_CLOEXEC) == 0);
+    afd = calloc(1, sizeof *afd);
+    assert(afd);
+    afd[0] = ap[0];
+    nafd = 1;
+    struct input_event ev = { .type = EV_KEY, .code = KEY_A, .value = 1 };
+    assert(write(ap[1], &ev, sizeof ev) == sizeof ev);
+    assert(activity_open() == 1); /* a descriptor that is not a live evdev: its queued event read, then closed */
+    assert(activity_open() == 0); /* nothing new: nothing counted */
+    close(ap[1]);
+    pointer_take_back(afd, nafd);
+    afd = NULL;
+    nafd = 0;
+    puts("PASS uevent input refresh drains pending activity before reopening fds");
+}
+
 int main(int argc, char **argv)
 {
+    if (strcmp(argv[0], "/proc/self/exe") == 0) {
+        if (send(3, "locked", 6, 0) < 0) {}
+        for (;;) pause();
+    }
     assert(argc == 2 && mkdir(argv[1], 0700) == 0);
     snprintf(dir, sizeof dir, "%s", argv[1]); /* short and relative, as the cgroup paths are */
     hotplug();
@@ -754,6 +938,7 @@ int main(int argc, char **argv)
     one_screen();
     waiting();
     idle_link();
+    idle_power();
     puts("ALL PASSED");
     return 0;
 }

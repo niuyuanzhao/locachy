@@ -1459,6 +1459,27 @@ int main(int argc, char **argv)
     keyboards_message();
     assert(nkbds == 1 && !caps_locked() && mod(0, XKB_MOD_NAME_NUM, XKB_STATE_MODS_LOCKED));
     puts("PASS the seat taken back: the bar starts again from the locks given (Num Lock only)");
+    /* While grabbing, consumed modifier/IME keys report activity to the seat;
+     * when ungrabbed (or released), nothing extra is sent. */
+    grabbed = 0;
+    tap = (struct input_event){ .type = EV_KEY, .code = KEY_LEFTSHIFT, .value = 1 };
+    assert(write(board[1], &tap, sizeof tap) == sizeof tap);
+    handle_kbd_event(kbds[0]);
+    tap.value = 0;
+    assert(write(board[1], &tap, sizeof tap) == sizeof tap);
+    handle_kbd_event(kbds[0]);
+    assert(control_recv(link[1], msg, sizeof msg, rfds, &nfds) < 0 && errno == EAGAIN);
+    grabbed = 1;
+    tap.value = 1;
+    assert(write(board[1], &tap, sizeof tap) == sizeof tap);
+    handle_kbd_event(kbds[0]);
+    tap.value = 0;
+    assert(write(board[1], &tap, sizeof tap) == sizeof tap);
+    handle_kbd_event(kbds[0]);
+    got = control_recv(link[1], msg, sizeof msg, rfds, &nfds);
+    assert(got == 8 && strcmp(msg, "activity") == 0 && nfds == 0);
+    grabbed = 0;
+    puts("PASS grabbed modifier/IME input reports activity over the seat link");
     take_keyboards(NULL, 0);
     keys_link = -1;
     close(link[0]); close(link[1]);

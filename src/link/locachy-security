@@ -45,7 +45,7 @@ def helper(name):
 def read_values(path=None):
     """The last valid assignment, with no shell evaluation or interpolation."""
     values = {}
-    security = {"login_skip", "lock_mode", "duress_enabled", "unlock_face", "unlock_fingerprint"}
+    security = {"login_skip", "auto_lock", "lock_mode", "duress_enabled", "unlock_face", "unlock_fingerprint"}
     with Path(path or RC_CONF).open(encoding="utf-8") as source:
         for line in source:
             match = re.fullmatch(r'\s*([A-Za-z0-9_]+)=(?:"([^"\r\n]*)"|([^\s#"\r\n]*))\s*(?:#.*)?', line.rstrip("\r\n"))
@@ -118,7 +118,7 @@ def marker():
     except FileNotFoundError:
         return None
     if (not isinstance(data, dict) or data.get("schema") != 1 or
-            data.get("kind") not in ("login-skip", "lock-mode", "duress", "fingerprint", "face", "remove-duress", "refresh") or
+            data.get("kind") not in ("login-skip", "auto-lock", "lock-mode", "duress", "fingerprint", "face", "remove-duress", "refresh") or
             data.get("value") not in ("on", "off", "high", "low")):
         raise RuntimeError("invalid security policy journal; left untouched")
     return data
@@ -190,6 +190,8 @@ def apply_policy(kind, value):
         has_tpm = any(tokens.values()) or pending is not None
         if kind == "login-skip" and value == "on" and (has_tpm or values.get("lock_mode") == "high"):
             raise RuntimeError("the boot lock cannot be skipped while TPM auto-unlock or the high threat level is active")
+        if kind == "auto-lock" and value == "off" and values.get("lock_mode") == "high":
+            raise RuntimeError("the high threat level requires automatic locking")
         if kind == "duress" and value == "on" and not duress_state():
             raise RuntimeError("duress needs a configured password and an encrypted disk")
         if kind in ("face", "fingerprint") and value == "on" and values.get("lock_mode") == "high":
@@ -197,10 +199,14 @@ def apply_policy(kind, value):
         changes = {}
         if kind == "login-skip":
             changes["login_skip"] = "1" if value == "on" else None
+        elif kind == "auto-lock":
+            changes["auto_lock"] = "1" if value == "on" else "0"
         elif kind == "lock-mode":
-            # Explicit, not silent: high never leaves the boot lock skipped.
+            # Explicit, not silent: high never leaves the boot lock skipped or auto-lock off.
             if value == "high" and values.get("login_skip") == "1":
                 raise RuntimeError("the high threat level keeps the lock at boot: turn the boot lock on first")
+            if value == "high" and values.get("auto_lock") == "0":
+                raise RuntimeError("the high threat level keeps automatic locking: turn auto-lock on first")
             changes = {"lock_mode": value}
         elif kind == "duress":
             changes["duress_enabled"] = "1" if value == "on" else None
@@ -230,7 +236,7 @@ def apply_policy(kind, value):
         save_marker(journal)
         if kind == "remove-duress":
             subprocess.run([str(DURESS), "clear"], check=True)
-        if kind not in ("login-skip", "fingerprint", "face"):
+        if kind not in ("login-skip", "auto-lock", "fingerprint", "face"):
             rebuild()
         journal["phase"] = "boot-published"
         save_marker(journal)
@@ -243,7 +249,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
     change = sub.add_parser("set")
-    change.add_argument("kind", choices=("login-skip", "lock-mode", "duress", "fingerprint", "face"))
+    change.add_argument("kind", choices=("login-skip", "auto-lock", "lock-mode", "duress", "fingerprint", "face"))
     change.add_argument("value", choices=("on", "off", "low", "high"))
     sub.add_parser("remove-duress")
     sub.add_parser("refresh")

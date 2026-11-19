@@ -654,7 +654,8 @@ static void test_circular(void)
            bat_page_index() == kb_index() + nkeyboards_seen && bat_thresh_index() == bat_page_index() + 1 &&
            hwinfo_index() == bat_thresh_index() + power_thresh_count() && hwcopy_index() == hwinfo_index() + 1 &&
            nmtui_index() == hwcopy_index() + 1 && extd_index() == nmtui_index() + 1 &&
-           cpu_opt_index() == extd_index() + 1 && num_hw_items() == cpu_opt_index() + 1);
+           cpu_opt_index() == extd_index() + 1 && blank_index() == cpu_opt_index() + 1 &&
+           num_hw_items() == blank_index() + 2);
     on_rc("touchpad_circular", "0", NULL);
     assert(circular == 0);
     on_rc("touchpad_circular", "yes", NULL);
@@ -1102,6 +1103,69 @@ static void file_bytes(const char *rel, const void *data, size_t n)
     assert(f && fwrite(data, 1, n, f) == n && fclose(f) == 0);
 }
 
+static void test_display_off(void)
+{
+    int expected_hups = hups, saved_lock_after = lock_after, saved_auto_lock = auto_lock;
+    char line[512], expected[32];
+    int toggle = blank_index(), timeout = toggle + 1, title = entry_of(toggle) - 1;
+    assert(title >= 0 && entries[title].idx == E_TITLE && !strcmp(entries[title].text, "Display"));
+    assert(entry_of(timeout) == title + 2 && !enter_row(toggle) && !enter_row(timeout));
+    assert(!auto_blank && blank_after == 5);
+    selected = timeout;
+    draw();
+    assert(canvas_has("Display") && canvas_has("Turn off display automatically") &&
+           canvas_has("Turn off display after") && canvas_has("< 5 min >"));
+    item_text(toggle, line, sizeof line);
+    assert(strstr(line, "Turn off display automatically") && strstr(line, "[OFF]"));
+    item_text(timeout, line, sizeof line);
+    assert(strstr(line, "Turn off display after") && strstr(line, "< 5 min >"));
+
+    selected = timeout;
+    const int presets[] = { 10, 15, 30, 60, 1, 2, 5, 10 };
+    for (size_t i = 0; i < sizeof presets / sizeof presets[0]; i++) {
+        rc_log[0] = '\0';
+        adjust(+1);
+        snprintf(expected, sizeof expected, "blank_after=%d;", presets[i]);
+        expected_hups++;
+        assert(!auto_blank && blank_after == presets[i] && !strcmp(rc_log, expected) && hups == expected_hups);
+    }
+    selected = toggle;
+    rc_log[0] = '\0';
+    adjust(+1);
+    assert(auto_blank && blank_after == 10 && !strcmp(rc_log, "auto_blank=1;") && hups == expected_hups + 1);
+    adjust(-1);
+    expected_hups += 2;
+    assert(!auto_blank && blank_after == 10 && !strcmp(rc_log, "auto_blank=1;auto_blank=0;") && hups == expected_hups);
+    item_text(timeout, line, sizeof line);
+    assert(strstr(line, "< 10 min >"));
+    assert(lock_after == saved_lock_after && auto_lock == saved_auto_lock);
+
+    rc_log[0] = '\0';
+    fail_rc = 1;
+    adjust(+1);
+    assert(!auto_blank && !rc_log[0] && hups == expected_hups && strstr(notice, "Cannot write"));
+    selected = timeout;
+    adjust(+1);
+    assert(blank_after == 10 && !rc_log[0] && hups == expected_hups && strstr(notice, "Cannot write"));
+    fail_rc = 0;
+
+    on_rc("auto_blank", "1", NULL);
+    assert(auto_blank);
+    const char *invalid[] = { "0", "", "10 min", "-1", "61", "99999999999999999999" };
+    for (size_t i = 0; i < sizeof invalid / sizeof invalid[0]; i++) {
+        on_rc("blank_after", "60", NULL);
+        assert(blank_after == 60);
+        on_rc("blank_after", invalid[i], NULL);
+        assert(blank_after == 5 && auto_blank);
+    }
+    on_rc("auto_blank", "0", NULL);
+    assert(!auto_blank && blank_after == 5);
+    selected = toggle;
+    draw();
+    assert(canvas_has("Turn off display automatically") && canvas_has("Turn off display after") && canvas_has("< 5 min >"));
+    puts("PASS Display: independent toggle and saved idle timeout, preset wrap, rc writes and SIGHUP, invalid time defaults to 5");
+}
+
 static void test_power_and_hwinfo(void)
 {
     int page_before = settings_page;
@@ -1187,6 +1251,7 @@ static void test_power_and_hwinfo(void)
     assert(canvas_has("Charge start threshold") && canvas_has("Charge stop threshold"));
     assert(canvas_has("Lid Close Holdoff") && canvas_has("Critical Battery Level"));
     assert(canvas_has("+1 spare") && canvas_has("Spare (removed)") && canvas_has("Last handoff:"));
+    test_display_off();
 
     /* Power management: lid holdoff, critical battery */
     rc_log[0] = '\0';
@@ -1701,6 +1766,13 @@ static void test_lock_mode(void)
     assert(!security_job && lock_high && fingerprint_on && face_on && strstr(notice, "Security settings applied"));
     item_text(lock_mode_index(), line, sizeof line);
     assert(strstr(line, "[high]"));
+    item_text(sec_index() + 1, line, sizeof line);
+    assert(strstr(line, "Auto-lock") && strstr(line, "on (high threat level)"));
+    count = jobs_double_count;
+    selected = sec_index() + 1;
+    adjust(+1);
+    assert(auto_lock && !rc_log[0] && jobs_double_count == count &&
+           strstr(notice, "requires automatic locking"));
     item_text(fp_index() + 1, line, sizeof line);
     assert(strstr(line, "Unlock with a fingerprint") && strstr(line, "off (high threat level)") && !strstr(line, "ON"));
     item_text(fc_index() + 2, line, sizeof line);
@@ -2885,6 +2957,45 @@ int main(int argc, char **argv)
     selected = sec_index() + 1;
     jobs_double_ended = 0;
     adjust(+1);
+    assert(auto_lock && !rc_log[0] && hups == hups_before && security_job &&
+           !strcmp(jobs_double_last, "security-policy set auto-lock off"));
+    static const char *const auto_off[] = { "auto_lock", "0", NULL };
+    security_job_ends(auto_off, 0);
+    assert(!auto_lock && hups == hups_before && strstr(notice, "do not lock"));
+    char auto_line[512];
+    int lock_row = sec_index() + 4, category_before_lock = category;
+    show_category(CAT_SECURITY, 1);
+    int screen_locking = entry_of(sec_index() + 1) - 1;
+    assert(screen_locking >= 0 && entries[screen_locking].idx == E_TITLE &&
+           !strcmp(entries[screen_locking].text, "Screen Locking") && entry_of(lock_row) == screen_locking + 4);
+    item_text(sec_index() + 1, auto_line, sizeof auto_line);
+    assert(strstr(auto_line, "Auto-lock") && strstr(auto_line, "[OFF]"));
+    item_text(lock_row, auto_line, sizeof auto_line);
+    assert(strstr(auto_line, "Lock screen after") && strstr(auto_line, "< 10 min >"));
+    selected = lock_row;
+    adjust(-1);
+    assert(!auto_lock && lock_after == 5 && !strcmp(rc_log, "lock_after=5;") && hups == hups_before + 1);
+    item_text(lock_row, auto_line, sizeof auto_line);
+    assert(strstr(auto_line, "< 5 min >"));
+    show_category(category_before_lock, 1);
+    rc_log[0] = '\0';
+    hups_before = hups;
+    selected = lock_mode_index();
+    int jobs_before = jobs_double_count;
+    adjust(+1);
+    assert(!lock_high && jobs_double_count == jobs_before && strstr(notice, "Turn Auto-lock on first"));
+    selected = sec_index() + 1;
+    jobs_double_ended = 0;
+    adjust(-1);
+    assert(!auto_lock && !rc_log[0] && security_job &&
+           !strcmp(jobs_double_last, "security-policy set auto-lock on"));
+    static const char *const auto_on[] = { "auto_lock", "1", NULL };
+    security_job_ends(auto_on, 0);
+    assert(auto_lock && lock_after == 5 && hups == hups_before && strstr(notice, "lock the screen"));
+    puts("PASS Auto-lock: off and on are one security-policy job each; off retains its editable idle timeout");
+    selected = sec_index() + 2;
+    jobs_double_ended = 0;
+    adjust(+1);
     assert(!login_skip && !rc_log[0] && hups == hups_before && security_job &&
            !strcmp(jobs_double_last, "security-policy set login-skip on"));
     static const char *const skip[] = { "login_skip", "1", NULL };
@@ -2896,19 +3007,52 @@ int main(int argc, char **argv)
            !strcmp(jobs_double_last, "security-policy set login-skip off"));
     security_job_ends(NULL, 0);
     assert(!login_skip && hups == hups_before && strstr(notice, "the lock screen first"));
-    assert(sec_index() == link_index() + 1 && fp_index() == sec_index() + 4 && fc_index() == fp_index() + 4);
+    assert(sec_index() == link_index() + 1 && fp_index() == sec_index() + 6 && fc_index() == fp_index() + 4);
     puts("PASS Password at boot: off and on are one security-policy job each; the job writes login_skip and tells "
          "process 1, the settings window writes nothing");
     rc_log[0] = '\0';
-    selected = sec_index() + 3;
-    assert(lock_after == 10);
+    selected = lock_row;
     adjust(+1);
-    assert(lock_after == 15 && !strcmp(rc_log, "lock_after=15;") && hups == hups_before + 1);
-    for (int i = 0; i < 5; i++) adjust(-1);
+    assert(lock_after == 10 && !strcmp(rc_log, "lock_after=10;") && hups == hups_before + 1);
+    for (int i = 0; i < 4; i++) adjust(-1);
     assert(lock_after == 0 && strstr(rc_log, "lock_after=0;") && strstr(notice, "Never"));
+    on_rc("lock_after", "0", NULL);
+    item_text(lock_row, auto_line, sizeof auto_line);
+    assert(strstr(auto_line, "< never >"));
     adjust(-1);
-    assert(lock_after == 60 && strstr(rc_log, "lock_after=60;") && hups == hups_before + 7);
-    puts("PASS Lock when idle: 10 min unless set, round never 1 2 5 10 15 30 60, written as lock_after");
+    assert(lock_after == 60 && strstr(rc_log, "lock_after=60;") && hups == hups_before + 6);
+    puts("PASS Lock screen after: 10 min by default, presets include never, written as lock_after");
+
+    int grace_row = sec_index() + 5;
+    show_category(CAT_SECURITY, 1);
+    assert(entry_of(grace_row) == entry_of(lock_row) + 1);
+    assert(lock_grace == 5);
+    item_text(grace_row, auto_line, sizeof auto_line);
+    assert(strstr(auto_line, "Unlock without password within") && strstr(auto_line, "< 5 s >"));
+    rc_log[0] = '\0';
+    hups_before = hups;
+    selected = grace_row;
+    adjust(-1);
+    assert(lock_grace == 0 && !strcmp(rc_log, "lock_grace=0;") && hups == hups_before + 1);
+    item_text(grace_row, auto_line, sizeof auto_line);
+    assert(strstr(auto_line, "< no >"));
+    adjust(+1);
+    adjust(+1);
+    assert(lock_grace == 30 && strstr(rc_log, "lock_grace=30;") && strstr(notice, "30 seconds"));
+    adjust(+1);
+    assert(lock_grace == 60);
+    item_text(grace_row, auto_line, sizeof auto_line);
+    assert(strstr(auto_line, "< 1 min >"));
+    on_rc("lock_grace", "bogus", NULL);
+    assert(lock_grace == 5);
+    lock_high = 1;
+    item_text(grace_row, auto_line, sizeof auto_line);
+    assert(strstr(auto_line, "high threat level"));
+    adjust(+1);
+    assert(lock_grace == 5 && strstr(notice, "high threat level"));
+    lock_high = 0;
+    show_category(category_before_lock, 1);
+    puts("PASS Unlock without password within: 5 s by default, cycles presets, refused at high threat level");
     /* Software sources: the automatic ranking row cycles rc.conf's repos_rank_days
      * (by hand, 1, 2, 3, 5, 7, 14, and round again); its line says when the next is. */
     rc_log[0] = '\0';
@@ -3023,7 +3167,8 @@ int main(int argc, char **argv)
            bat_page_index() == kb_index() + nkeyboards_seen && bat_thresh_index() == bat_page_index() + 1 &&
            hwinfo_index() == bat_thresh_index() + power_thresh_count() && hwcopy_index() == hwinfo_index() + 1 &&
            nmtui_index() == hwcopy_index() + 1 && extd_index() == nmtui_index() + 1 &&
-           cpu_opt_index() == extd_index() + 1 && num_hw_items() == cpu_opt_index() + 1);
+           cpu_opt_index() == extd_index() + 1 && blank_index() == cpu_opt_index() + 1 &&
+           num_hw_items() == blank_index() + 2);
     selected = extd_index();
     adjust(+1);
     assert(extd_decode == EXTD_HW);

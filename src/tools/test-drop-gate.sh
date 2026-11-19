@@ -17,7 +17,7 @@ labwc=${2:-/usr/bin/labwc}
 [[ $out = /* && ! -e $out ]] || exit 2
 mkdir -p "$out/gen" "$out/etc/labwc" "$out/etc/containers"
 for p in security-context-v1 wlr-foreign-toplevel-management-unstable-v1 \
-         wlr-output-management-unstable-v1 ext-idle-notify-v1 xdg-shell wlr-virtual-pointer-unstable-v1 \
+         wlr-output-management-unstable-v1 wlr-output-power-management-unstable-v1 ext-idle-notify-v1 xdg-shell wlr-virtual-pointer-unstable-v1 \
          virtual-keyboard-unstable-v1; do
     wayland-scanner client-header "$src/base/protocols/$p.xml" "$out/gen/$p-client-protocol.h"
     wayland-scanner private-code "$src/base/protocols/$p.xml" "$out/gen/$p-protocol.c"
@@ -29,7 +29,7 @@ read -r -a libs <<<"$(pkg-config --libs freetype2 fontconfig libnm)"
 "${cc[@]}" "${flags[@]}" -DCONFIG_FREETYPE -DCONFIG_NETWORKMANAGER \
     "$src/progs/labwc-control.c" "${base[@]}" "$out/gen/security-context-v1-protocol.c" \
     "$out/gen/wlr-foreign-toplevel-management-unstable-v1-protocol.c" \
-    "$out/gen/wlr-output-management-unstable-v1-protocol.c" "$out/gen/ext-idle-notify-v1-protocol.c" \
+    "$out/gen/wlr-output-management-unstable-v1-protocol.c" "$out/gen/wlr-output-power-management-unstable-v1-protocol.c" "$out/gen/ext-idle-notify-v1-protocol.c" \
     "${libs[@]}" -lwayland-client -lm -o "$out/control"
 # These two clients define _GNU_SOURCE themselves.
 "${cc[@]}" -U_GNU_SOURCE "$src/tools/test-drop-client.c" "$out/gen/xdg-shell-protocol.c" \

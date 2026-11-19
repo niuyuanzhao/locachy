@@ -64,7 +64,7 @@ checks every argument; anything else is refused.
 | `spi-backup`, `spi-verify` | `locachy-firmware spi-backup` / `spi-verify` | a programmer and a folder (backup) or an image file; `--chip`, `--regions fd,bios,…` |
 | `spi-write` | `locachy-firmware spi-write` | as `spi-verify`, and `--expected-size BYTES` |
 | `bios-set` | `locachy-firmware bios-set` | an attribute (a letter or digit, then letters, digits, `_ . : -`; 96 bytes at most) and a value (0–256 bytes, no control character; a leading `-` is text) |
-| `security-policy` | `locachy-security` | `set login-skip`/`duress`/`fingerprint`/`face` `on`/`off`, `set lock-mode low`/`high`, `remove-duress`, or `refresh` |
+| `security-policy` | `locachy-security` | `set login-skip`/`auto-lock`/`duress`/`fingerprint`/`face` `on`/`off`, `set lock-mode low`/`high`, `remove-duress`, or `refresh` |
 
 **The package domain.** The package, kernel and repository kinds, and every
 kind that builds the boot image (`boot`, `locachy-rebuild`, `tpm-*`,

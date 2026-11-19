@@ -142,10 +142,11 @@ if command -v wayland-scanner >/dev/null 2>&1 && pkg-config --exists wayland-cli
     gcc -O2 -Wall -Wextra -Werror -I"$src/base/include" -I"$out" \
         "$src/progs/clipboard.c" "$src/base/clipboard.c" "$out/ext-data-control-v1-protocol.c" \
         -lwayland-client -o "$out/clipboard"
-    # The shared compositor's bar, overview and screenshot tool, with the protocols they speak.
+    # The shared compositor's bar, window control, overview and screenshot tool, with the protocols they speak.
     wl="wlr-layer-shell-unstable-v1 virtual-keyboard-unstable-v1 xdg-shell wlr-foreign-toplevel-management-unstable-v1
-        wlr-output-management-unstable-v1 fractional-scale-v1 viewporter relative-pointer-unstable-v1
-        ext-foreign-toplevel-list-v1 ext-image-capture-source-v1 ext-image-copy-capture-v1"
+        wlr-output-management-unstable-v1 wlr-output-power-management-unstable-v1 fractional-scale-v1 viewporter
+        relative-pointer-unstable-v1 ext-foreign-toplevel-list-v1 ext-image-capture-source-v1
+        ext-image-copy-capture-v1 security-context-v1 ext-idle-notify-v1"
     for p in $wl; do
         wayland-scanner client-header "$src/base/protocols/$p.xml" "$out/$p-client-protocol.h"
         wayland-scanner private-code "$src/base/protocols/$p.xml" "$out/$p-protocol.c"
@@ -157,6 +158,11 @@ if command -v wayland-scanner >/dev/null 2>&1 && pkg-config --exists wayland-cli
             wlr-foreign-toplevel-management-unstable-v1 fractional-scale-v1 viewporter relative-pointer-unstable-v1) \
         "$out"/obj/base-*.o "$out/obj/ime.o" $ime_libs $libs \
         -lwayland-client -lwayland-cursor -lxkbcommon -o "$out/locachy-bar"
+    gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags $(pkg-config --cflags gio-2.0) \
+        -I"$src/base/include" -I"$src/base" -I"$out" "$src/progs/labwc-control.c" \
+        $(proto security-context-v1 wlr-foreign-toplevel-management-unstable-v1 wlr-output-management-unstable-v1 \
+            wlr-output-power-management-unstable-v1 ext-idle-notify-v1) \
+        "$out"/obj/base-*.o $(pkg-config --libs gio-2.0) $libs -lwayland-client -o "$out/labwc-control"
     gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags \
         -I"$src/base/include" -I"$src/base" -I"$out" "$src/progs/overview.c" \
         $(proto wlr-layer-shell-unstable-v1 wlr-foreign-toplevel-management-unstable-v1 ext-foreign-toplevel-list-v1 \

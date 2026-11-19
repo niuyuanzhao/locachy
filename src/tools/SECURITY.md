@@ -78,7 +78,7 @@ nothing is typed. Before resuming an image, the root must also have been
 successfully unlocked, either by its actual TPM token or by the long passphrase.
 Token metadata in the LUKS header is not authentication and cannot authorize
 resume by itself. Root and swap are unlocked before `leave-initrd`; successful
-TPM-only resume still asks for nothing and keeps the session lock. Failed or
+TPM-only resume still asks for nothing at boot and preserves the session's lock state. Failed or
 forged root tokens fall back to the passphrase, and failed passphrase attempts
 never release a root key from the hibernation image. Each start's `swapon` and each
 shutdown discard the whole swap (`SWAP_FLAG_DISCARD`, `DISCARD_ONCE`;
@@ -89,6 +89,31 @@ installer shows the HSI and the checks that failed at the encryption step,
 which needs fwupd on the live medium (`installer/packages.x86_64`).
 Settings shows the HSI under Security, Host Security. Enter there runs
 fwupd's whole report in a terminal, with the fixes fwupd offers.
+
+## Idle lock and display power
+
+In **Settings → Security → Screen Locking**, **Auto-lock** controls idle locking
+and locking before lid sleep or critical-battery hibernation. Its independent
+idle time (`lock_after`, 10 minutes by default) is kept when the switch is off.
+A saved time of `0` means never lock for idle alone. After an idle lock, the
+separate **Unlock without password within** grace (`lock_grace`, 5 seconds by
+default; `0` asks immediately) lets a key or pointer input unlock without the
+password. It does not apply to the lock key, lid, sleep, critical-battery lock,
+or a high-threat lock. Both manual locking and the separate boot lock still
+work. The high threat level keeps Auto-lock enabled and disables the grace.
+
+In **Settings → Power → Display**, **Automatic display-off** and its idle time
+(`auto_blank` and `blank_after`, off and 5 minutes by default) affect the
+outputs only. Input lights them without dismissing an existing lock. Either
+idle action can fire first; turning one off does not turn the other off. An
+active Wayland idle inhibitor (for example a video) holds off both timers on
+the shared desktop. While Extended Display is on screen, automatic display-off
+leaves its output alone, and a live link keeps its existing idle-lock deferral.
+The feature does not change the lid sleep action, brightness or the extended
+display connection.
+
+With Auto-lock off, an unlocked session can resume from hibernation unlocked;
+this does not change the checks that authorize access to the encrypted disks.
 
 ## Threat model
 
@@ -106,7 +131,7 @@ binding.
 | An older signed image (downgrade) | **Not stopped.** Every image ever signed with this PCR key and db key opens the disk; `locachy-prev.efi` may be one of them on the ESP, but an old unsigned Previous is not re-signed when keys are first created. A signed policy has no revocation. This matters if an older image has a flaw before `leave-initrd`. Remedy, not automated: a new PCR key (`ukify genkey`, then `locachy-tpm enroll`) invalidates all older images. | n/a | n/a |
 | Root on the running system | Cannot unseal after `leave-initrd`. It can sign images with the PCR and db private keys on the encrypted root (`/etc/systemd`, `/var/lib/sbctl`), so a compromised root can leave a signed backdoor image. | Can unseal at any time; it already has the disk. | Can unseal. |
 | Stolen swap (disk out) | Stopped, as the root. | Stopped. | Stopped. |
-| Hibernated machine taken | The swap opens with nothing typed. The session comes back at the lock screen, which guards it, as after a TPM-only cold start. `leave-initrd` is measured first, so the restored system cannot unseal. The kernel runs with `intel_iommu=on` against DMA. | As own keys, without the `leave-initrd` effect. | As PCR 0+7. |
+| Hibernated machine taken | The swap opens with nothing typed. With Auto-lock on, the session comes back at the lock screen; an unlocked image made with Auto-lock off resumes unlocked. `leave-initrd` is measured first, so the restored system cannot unseal. The kernel runs with `intel_iommu=on` against DMA. | As own keys, without the `leave-initrd` effect. | As PCR 0+7. |
 | Swap bound to the TPM, root to its passphrase only | Stopped: process 1 requires an actual successful root unlock before any encrypted resume. Merely adding unauthenticated TPM-token JSON to the root header cannot bypass the passphrase. | Same. | Same. |
 | Stale hibernation image or swapped-out pages | Discarded at each start and each shutdown on disks with discard. **Not removed** on disks without discard (hard disks), where they stay encrypted with the swap's key. The SSD may keep physical copies after TRIM. Discards through dm-crypt show which blocks are used (the cryptsetup FAQ's trade-off), for the swap only. | Same. | Same. |
 | TPM bus sniffing (discrete TPM) | Passive sniffing: stopped. systemd salts the unseal session with the SRK recorded at enrollment, and the secret crosses the bus encrypted. **Not stopped**: an active interposer (TPM reset and replayed PCR values, a fake TPM). | Same. | **Not stopped**: TPM 1.2 returns the key in the clear over LPC. |

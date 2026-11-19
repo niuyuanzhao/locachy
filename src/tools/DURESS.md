@@ -18,6 +18,8 @@ Two separate settings, both in Security:
   the disk. Switching back to low restores the fingerprint and face switches as they
   were; the TPM has to be bound again. Threat level is changed in settings; the boot
   image is rebuilt, so the change takes effect at the next start.
+  Automatic locking is a separate switch (`auto_lock` in rc.conf, Security → Screen
+  Locking, on by default): at high it stays on, and settings does not turn it off.
 
 - **Duress** (`duress_enabled` in rc.conf, and a verifier in `/etc/locachy/duress`)
   decides *what a second password does*. Typing the duress password where a password

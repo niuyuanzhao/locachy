@@ -342,11 +342,8 @@ static void handle_client_msg(int cfd)
     }
 }
 
-/* A host client of the compositor; it waits for wayland-0 itself. keys: a
- * socket it keeps (LOCACHY_BAR_KEYS), or -1. */
-/* A host client, given fd (kept across exec) named in environment variable
- * env: the bar its keyboards (LOCACHY_BAR_KEYS), labwc-control the way to
- * pass on window requests (LOCACHY_SEAT_REQUESTS). */
+/* A host client, given the display and (for labwc-control) the private
+ * bidirectional LOCACHY_SEAT_REQUESTS socket. */
 static pid_t start_client(const char *path, int fd, const char *env)
 {
     if (access(path, X_OK) != 0) {
@@ -376,6 +373,15 @@ static pid_t start_client(const char *path, int fd, const char *env)
  * process 1 gave with them (-1: none given), passed on as it gave them. */
 #define MAX_KEYBOARDS 8
 static int keyboards[MAX_KEYBOARDS], nkeyboards, bar_keys = -1, lent_locks = -1;
+static int is_labwc, window_requests = -1;
+
+static void seat_notify(int requests, const char *msg)
+{
+    if (requests >= 0 && send(requests, msg, strlen(msg), MSG_NOSIGNAL | MSG_DONTWAIT) < 0) {
+        say("seat: could not notify labwc-control (%s): %m", msg);
+        shutdown(requests, SHUT_RDWR); /* the helper stops watching idleness */
+    }
+}
 
 static void send_keyboards(void)
 {
@@ -398,6 +404,10 @@ static void bar_reports(int ctl)
         for (int i = 0; i < nfds; i++) close(fds[i]);
         char *end = msg, *fields[3];
         int n = control_fields(msg, len, fields, 3);
+        if (n == 1 && strcmp(fields[0], "activity") == 0) {
+            if (is_labwc && active_seat) seat_notify(window_requests, "bar-activity");
+            continue;
+        }
         long locks = n == 2 && strcmp(fields[0], "locks") == 0 ? strtol(fields[1], &end, 10) : -1;
         if (locks < 0 || locks > (KEYS_LOCK_CAPS | KEYS_LOCK_NUM) || *end) continue;
         if (ctl >= 0) {
@@ -559,9 +569,9 @@ static void wallpaper(void)
 }
 
 /* From locachy-bar, which holds the keyboard in the input method's modes so
- * that process 1 does not see the keys: SIGUSR1 key_home, SIGUSR2 key_lock
- * (and labwc-control: idle); from labwc-control's touchpad swipes, SIGRTMIN
- * the next task, SIGRTMIN + 1 the previous. Passed on to process 1. */
+ * that process 1 does not see the keys: SIGUSR1 key_home, SIGUSR2 key_lock.
+ * From labwc-control's touchpad swipes, SIGRTMIN the next task, SIGRTMIN + 1
+ * the previous. Passed on to process 1. */
 static volatile sig_atomic_t want_home, want_lock, want_switch;
 /* The signals wake the loop through a pipe (poll waits without a timeout:
  * a signal between its flag's check and poll would otherwise wait until
@@ -712,17 +722,33 @@ static int open_client(int argc, char **argv)
     return control_client(request, n);
 }
 
-/* A window or container-open request labwc-control passed on ("window",
- * PROGRAM[, TARGET] or "app", "open"|"open-own-tor", CONTAINER), to process 1
- * when valid. */
-static void window_forward(int requests, int ctl)
+/* The idle messages are only accepted from the helper's private socket.
+ * Keep the last reported state to clear it if the helper disconnects. */
+static int idle_blanked;
+
+static int window_forward(int requests, int ctl)
 {
     char msg[16 + 64 + WINDOW_TARGET_MAX + 1], *fields[4];
-    ssize_t len = recv(requests, msg, sizeof msg - 1, MSG_DONTWAIT);
-    if (len <= 0) {
-        return;
-    }
+    ssize_t len = recv(requests, msg, sizeof msg - 1, MSG_DONTWAIT | MSG_TRUNC);
+    if (len <= 0) return len < 0 && (errno == EAGAIN || errno == EINTR) ? 0 : -1;
+    if ((size_t)len >= sizeof msg) return 0;
     msg[len] = '\0';
+    if ((size_t)len == strlen(msg)) {
+        if (strcmp(msg, "idle-blanked") == 0 || strcmp(msg, "idle-lock") == 0) {
+            if (!active_seat) return 0;
+            if (strcmp(msg, "idle-blanked") == 0) idle_blanked = 1;
+        } else if (strcmp(msg, "idle-unblanked") == 0) {
+            if (!idle_blanked) return 0;
+            idle_blanked = 0;
+        } else if (strcmp(msg, "idle-power-lost") == 0) {
+            if (!active_seat && !idle_blanked) return 0;
+            idle_blanked = 0;
+        } else {
+            return 0;
+        }
+        if (ctl >= 0) control_send_fields(ctl, (const char *const[]){ msg, NULL });
+        return 0;
+    }
     int n = 0;
     for (ssize_t i = 0; i < len && n < 4; i += (ssize_t)strlen(msg + i) + 1) {
         fields[n++] = msg + i;
@@ -734,12 +760,13 @@ static void window_forward(int requests, int ctl)
               app_request_valid(fields[2]));
     if (!ok) {
         say("seat: a malformed window request refused");
-        return;
+        return 0;
     }
     fields[n] = NULL;
     if (ctl >= 0) {
         control_send_fields(ctl, (const char *const *)fields);
     }
+    return 0;
 }
 
 /* Without the configuration settings --apply writes (the apply failed), labwc
@@ -853,7 +880,7 @@ int main(int argc, char **argv)
     }
     chmod(sock_path, 0600);
 
-    int is_labwc = strcmp(argv[1], "/usr/bin/labwc") == 0;
+    is_labwc = strcmp(argv[1], "/usr/bin/labwc") == 0;
     if (is_labwc) {
         /* Left over when the last session was killed: never offer them. */
         unlink("/run/user/0/locachy-0");
@@ -900,7 +927,7 @@ int main(int argc, char **argv)
     int display_ready_sent = 0;
     double display_started = uptime();
     pid_t bar_pid = -1, control_pid = -1;
-    int window_requests = -1; /* from labwc-control: window PROGRAM [TARGET] */
+    window_requests = -1; /* private link to labwc-control */
     if (is_labwc) {
         int pair[2] = { -1, -1 }, requests[2] = { -1, -1 };
         if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, pair) < 0) {
@@ -1027,11 +1054,15 @@ int main(int argc, char **argv)
         if (p[reports_i].revents & (POLLIN | POLLHUP | POLLERR)) {
             bar_reports(ctl);
         }
-        if (p[requests_i].revents & POLLIN) {
-            window_forward(window_requests, ctl);
-        } else if (p[requests_i].revents & (POLLHUP | POLLERR)) {
-            close(window_requests); /* labwc-control has ended */
-            window_requests = -1;
+        if (p[requests_i].revents & (POLLIN | POLLHUP | POLLERR)) {
+            if (window_forward(window_requests, ctl) < 0 || !(p[requests_i].revents & POLLIN)) {
+                if (idle_blanked) {
+                    idle_blanked = 0;
+                    if (ctl >= 0) control_send_fields(ctl, (const char *const[]){ "idle-power-lost", NULL });
+                }
+                close(window_requests); /* labwc-control has ended */
+                window_requests = -1;
+            }
         }
 
         if (ctl_i >= 0 && (p[ctl_i].revents & (POLLIN | POLLHUP))) {
@@ -1053,6 +1084,7 @@ int main(int argc, char **argv)
                 if (cfd >= 0) {
                     send_msg(cfd, SERVER_ENABLE_SEAT, NULL, 0);
                 }
+                if (is_labwc) seat_notify(window_requests, "seat-take");
                 if (bar_pid > 0) {
                     kill(bar_pid, SIGUSR1);
                 }
@@ -1071,6 +1103,7 @@ int main(int argc, char **argv)
                 bar_reports(ctl); /* its last locks, before "released" */
                 keyboards_lent(NULL, 0); /* process 1 revokes them after "released" */
                 active_seat = 0;
+                if (is_labwc) seat_notify(window_requests, "seat-release");
                 disable_ack_received = 0;
                 revoke_input_devices();
                 if (cfd >= 0) {
@@ -1098,6 +1131,8 @@ int main(int argc, char **argv)
                     say("seat: released in %.0f ms (gestures %.0f ms)",
                         (uptime() - release_started) * 1000, (gestures_stopped - release_started) * 1000);
                 }
+            } else if (len == 11 && nfds == 0 && strcmp(msg, "wake-screen") == 0 && is_labwc && active_seat) {
+                seat_notify(window_requests, "wake-screen");
             }
         }
 
@@ -1143,6 +1178,10 @@ int main(int argc, char **argv)
     }
     gestures(0);
     if (is_labwc) {
+        if (idle_blanked && ctl >= 0) {
+            idle_blanked = 0;
+            control_send_fields(ctl, (const char *const[]){ "idle-power-lost", NULL });
+        }
         unlink("/run/user/0/wayland-0");
         unlink("/run/user/0/wayland-0.lock");
         unlink("/run/user/0/locachy-0");

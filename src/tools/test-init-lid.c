@@ -403,11 +403,31 @@ int main(int argc, char **argv)
     file_text("power/BAT0/power_now", "10000000\n");
     puts("PASS no trip point: one look at half the time left (at least 30 s), only while discharging");
 
-    struct settings_read next = { .lid_holdoff = 30, .battery_critical = 5 };
+    reset_case(); auto_lock = 0; lid_shut = 1; lid_holdoff = 0; lid_holdoff_until = 0;
+    lid_changed(1);
+    assert(!locked && sleeps == 1 && !lid_shut);
+    lock_after = 2;
+    active_at = now_ms() - 5000;
+    assert(idle_lock_at() < 0);
+    latch_lock_due();
+    assert(!lock_due);
+    battery("Discharging", 4);
+    battery_check();
+    mono_s += BATTERY_ACTION_MS / 1e3;
+    battery_act();
+    assert(!locked && disk_writes == 1 && poweroffs == 0);
+    auto_lock = 1;
+    puts("PASS auto_lock 0: lid close, sleep, idle and critical-battery hibernate leave the screen unlocked");
+
+    struct settings_read next = { .lid_holdoff = 30, .battery_critical = 5, .auto_lock = 1 };
     setting("lid_holdoff", "0", &next);
     setting("battery_critical", "7", &next);
     setting("mem_sleep", "deep", &next);
-    assert(next.lid_holdoff == 0 && next.battery_critical == 7 && !strcmp(next.mem_sleep, "deep"));
+    setting("auto_lock", "0", &next);
+    assert(next.lid_holdoff == 0 && next.battery_critical == 7 && !strcmp(next.mem_sleep, "deep") &&
+           next.auto_lock == 0);
+    setting("lock_mode", "high", &next);
+    assert(next.lock_high == 1);
     setting("lid_holdoff", "-3", &next);
     setting("lid_holdoff", "soon", &next);
     setting("battery_critical", "60", &next);
