@@ -9,6 +9,18 @@ process 1 starts, freezes and stops it like a container, it never holds a
 screen lease or an input device, and it keeps the shared display running while
 it is open.
 
+## Graphical Session
+
+Choose **Graphical Session**, the first item under **Programs** in Home, to
+open the shared desktop without launching an application. Only this explicit
+mode shows the **Waiting for applications** panel. It hides as soon as a
+container or managed window starts and returns when all have closed, provided
+the desktop is still on screen. A frozen application is still open. Launching
+an application directly does not enable this mode.
+
+Choose **Close** or press `Ctrl+Q` on the panel to close the empty session and
+return to Home. `Super+Esc` still takes you to Home.
+
 ## Requests
 
 `locachy-seat --window PROGRAM [TARGET]` asks for one, and `locachy-seat --open

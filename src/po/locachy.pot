@@ -1282,6 +1282,18 @@ msgstr ""
 msgid "window"
 msgstr ""
 
+#: progs/bar.c progs/home.c
+msgid "Graphical Session"
+msgstr ""
+
+#: progs/bar.c
+msgid "Waiting for applications"
+msgstr ""
+
+#: progs/bar.c
+msgid "Ctrl+Q: close"
+msgstr ""
+
 #: progs/drives.c
 #, c-format
 msgid "%s was not ejected"
@@ -1378,8 +1390,8 @@ msgstr ""
 msgid "Reload"
 msgstr ""
 
-#: progs/edit-actions.inc progs/edit-documents.inc progs/edit-filesearch-ui.inc
-#: progs/view.c
+#: progs/bar.c progs/edit-actions.inc progs/edit-documents.inc
+#: progs/edit-filesearch-ui.inc progs/view.c
 msgid "Close"
 msgstr ""
 
@@ -5782,6 +5794,10 @@ msgid "Container actions stay here; state refreshes every 500 ms."
 msgstr ""
 
 #: progs/home.c
+msgid "Open the shared desktop"
+msgstr ""
+
+#: progs/home.c
 msgid "opening"
 msgstr ""
 
@@ -6078,6 +6094,11 @@ msgstr ""
 #: progs/home.c
 #, c-format
 msgid "%s is part of home: nothing to close."
+msgstr ""
+
+#: progs/home.c
+#, c-format
+msgid "%s cannot be closed from home."
 msgstr ""
 
 #. TRANSLATORS: K is the key name; keep it.

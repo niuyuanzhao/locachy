@@ -13,10 +13,12 @@ static char fixture_dir[256] = "/tmp";
 #include "clipboard.h"
 #undef main
 #include <assert.h>
+#include <setjmp.h>
 #include <stdarg.h>
 #include <sys/stat.h>
 
-static int start_calls, freeze_calls, stop_calls, show_calls, opens, reboots, poweroffs, files_views;
+static int start_calls, freeze_calls, stop_calls, show_calls, opens, desktop_opens, kills;
+static int reboots, poweroffs, files_views;
 static int running, beta_failed, gamma_listed;
 static char copied[2][4096];
 static const char *klog_fixture = "";
@@ -83,7 +85,12 @@ void base_open_on(const char *output, char *const argv[], char *out, size_t size
     opens++;
     snprintf(out, size, "shown %s", argv[0]);
 }
-void base_kill(char *const argv[]) { (void)argv; }
+void base_desktop_open(char *out, size_t size)
+{
+    desktop_opens++;
+    snprintf(out, size, "shown desktop");
+}
+void base_kill(char *const argv[]) { (void)argv; kills++; }
 void base_reboot(void) { reboots++; }
 
 /* The system jobs' queue (jobs.h) as a double: the rows it lists, what was
@@ -189,11 +196,14 @@ void screen_bar(const char *title, const char *ime) { (void)title; (void)ime; }
 static const int *script;
 static const struct pointer_event *events;
 static struct pointer_event mouse;
+static jmp_buf home_done;
+static int driving_home;
 const struct pointer_event *pointer_last(void) { return &mouse; }
 int key_poll_timeout(int fd, int timeout)
 {
-    (void)fd; (void)timeout;
+    (void)fd;
     if (!script) return 0;
+    if (!*script && driving_home && timeout >= 0) longjmp(home_done, 1);
     assert(*script); /* a menu waits for no more than is scripted */
     int key = *script++;
     if (key == K_POINTER) mouse = *events++;
@@ -243,6 +253,19 @@ static int press(int id, int button, int clicks, int offset)
     return pointer_key();
 }
 
+static void drive_home(const int *keys, const struct pointer_event *pointer)
+{
+    script = keys;
+    events = pointer;
+    driving_home = 1;
+    if (setjmp(home_done) == 0) {
+        home_program_main();
+        assert(0); /* home waits for the next event after handling the script */
+    }
+    driving_home = 0;
+    script = NULL;
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1) {
@@ -251,7 +274,9 @@ int main(int argc, char **argv)
     }
     load();
     refresh();
-    assert(napps == 2 && nentries == 3 && entries[0].builtin && strcmp(entries[0].name, "files") == 0);
+    assert(napps == 2 && nentries == 4 && entries[0].builtin == BUILTIN_DESKTOP &&
+           strcmp(entries[0].name, DESKTOP_NAME) == 0 && !entries[0].argv[0] &&
+           entries[1].builtin == BUILTIN_FILES && strcmp(entries[1].name, "files") == 0);
     selected = 0;
     apps[0].marked = 1;
     apps[1].marked = 1;
@@ -280,7 +305,10 @@ int main(int argc, char **argv)
     assert(freeze_calls == 3);
     assert(request("show", "alpha"));
     assert(show_calls == 1 && opens == 0);
-    selected = napps; /* files: part of home, nothing to close */
+    selected = napps; /* Graphical Session: fixed built-in, nothing to close */
+    confirm_stop();
+    assert(confirming == CONF_NONE && kills == 0 && strstr(last, "Graphical Session"));
+    selected = napps + 1; /* files: part of home, nothing to close */
     confirm_stop();
     assert(confirming == CONF_NONE && strstr(last, "part of home"));
     /* Reboot and power off rows: both require Y confirmation, Enter/N cancel. */
@@ -311,6 +339,23 @@ int main(int argc, char **argv)
     assert(press(HIT_ROW + 1, BTN_LEFT, 2, 10) == '\n');
     assert(press(HIT_ROW + 0, BTN_LEFT, 1, 2) == ' ' && selected == 0);
     assert(press(HIT_ROW + napps, BTN_LEFT, 2, 10) == '\n' && selected == napps);
+    /* Enter, double click, and the context menu all reach the actual event
+     * loop, with no normal host task launch or close for this tile. */
+    int desktop_col, desktop_row;
+    hit_cell(HIT_ROW + napps, &desktop_col, &desktop_row);
+    drive_home((const int[]){ K_DOWN, '\n', 'k', 'x', 0 }, NULL);
+    assert(selected == napps && desktop_opens == 1 && opens == 0 && kills == 0 && confirming == CONF_NONE);
+    for (int i = 0; i < 2; i++) {
+        struct pointer_event open = { .col = desktop_col + 2, .row = desktop_row, .pressed = 1,
+                                      .button = i == 0 ? BTN_LEFT : BTN_RIGHT, .clicks = i == 0 ? 2 : 1 };
+        /* Down then Enter still means Open in this menu (there is no Close). */
+        drive_home(i == 0 ? (const int[]){ K_POINTER, 0 } : (const int[]){ K_POINTER, K_DOWN, '\n', 0 }, &open);
+        assert(selected == napps && desktop_opens == i + 2 && opens == 0 && kills == 0);
+        assert(strcmp(last, "shown desktop") == 0);
+    }
+    screen_extended(0);
+    assert(canvas_has("Graphical Session") && canvas_has("Open the shared desktop"));
+    puts("PASS Graphical Session: opens by Enter, double click and context menu, with no Close");
     /* The right button: the row's actions, by keys or by the pointer (the
      * opening release chooses nothing; a press outside closes it). */
     draw(0);
@@ -335,7 +380,7 @@ int main(int argc, char **argv)
     assert(press(HIT_ROW + 1, BTN_RIGHT, 1, 10) == -1);
     script = NULL;
     /* The wheel moves the selection a tile row, as Up/Down, kept on the list:
-     * from alpha to files, the first of the programs under their title. */
+     * from alpha to Graphical Session, the first program under its title. */
     selected = 0;
     mouse = (struct pointer_event){ .wheel = -1 };
     assert(pointer_key() == -1 && selected == napps);
@@ -363,15 +408,15 @@ int main(int argc, char **argv)
     hit_cell(HIT_ROW, &x0, &y0); hit_cell(HIT_ROW + 1, &x1, &y1);
     assert(y0 == y1 && x1 > x0);
     hit_cell(HIT_ROW + napps, &x1, &y1);
-    assert(y1 > y0 && x1 == x0); /* files opens its own section, in the first column */
+    assert(y1 > y0 && x1 == x0); /* Graphical Session is first in Programs. */
     assert(strstr(canvas[y0 + 1], "running") && strstr(canvas[y0 + 1], "MiB"));
     move_selection(K_RIGHT); assert(selected == 1);
     move_selection(K_DOWN); assert(selected == napps + 1); /* beta's column among the programs */
     move_selection(K_UP); assert(selected == 1);
     move_selection(K_LEFT); assert(selected == 0);
-    selected = napps + 2; /* network, the last column: Down lands on power off */
+    selected = napps + 2; /* term: Down same column, to power off */
     move_selection(K_DOWN); assert(selected == napps + nentries + 1);
-    move_selection(K_UP); assert(selected == napps + 1);
+    move_selection(K_UP); assert(selected == napps + 2);
     selected = 0;
     assert(press(HIT_ROW + 1, BTN_LEFT, 1, 2) == ' ' && selected == 1);
     test_cols = 110; draw(0); assert(grid_columns() == 4);
@@ -394,9 +439,9 @@ int main(int argc, char **argv)
         draw(0);
         assert(home_output == i && screen_output_current() == i);
     }
-    selected = 3;
+    selected = napps + 1;
     draw(0);
-    /* term under the Programs title: lines 4-6 of the grid in view on each. */
+    /* files and Graphical Session share the first programs row of the two-column grid. */
     for (int i = 0; i < 3; i++) assert(output_scroll[i] == 2);
     screen_output_select(1);
     hit_cell(HIT_ROW + 2, &x1, &y1);
@@ -420,7 +465,9 @@ int main(int argc, char **argv)
     puts("PASS home focus loss: cancelled text drag does not copy or change outputs");
     /* A menu opened on one output: a press at its cells on another closes it
      * and chooses nothing; on its own output the same press chooses. */
-    hit_cell(HIT_ROW + 3, &x1, &y1);
+    selected = napps + 2; /* term, whose menu includes Close */
+    draw(0);
+    hit_cell(HIT_ROW + selected, &x1, &y1);
     struct pointer_event elsewhere[] = {
         { .output = 1, .col = x1 + 5, .row = y1, .button = BTN_RIGHT },
         { .output = 0, .col = x1 + 7, .row = y1 + 1 },
@@ -430,7 +477,7 @@ int main(int argc, char **argv)
     events = elsewhere;
     script = (const int[]){ K_POINTER, K_POINTER, K_POINTER, K_POINTER, 0 };
     mouse = (struct pointer_event){ .output = 1, .col = x1 + 5, .row = y1, .button = BTN_RIGHT, .pressed = 1 };
-    assert(pointer_key() == -1 && selected == 3 && *script == K_POINTER); /* the release never read */
+    assert(pointer_key() == -1 && selected == napps + 2 && *script == K_POINTER); /* the release never read */
     struct pointer_event here[] = {
         { .output = 1, .col = x1 + 5, .row = y1, .button = BTN_RIGHT },
         { .output = 1, .col = x1 + 7, .row = y1 + 1 },
@@ -440,21 +487,28 @@ int main(int argc, char **argv)
     events = here;
     script = (const int[]){ K_POINTER, K_POINTER, K_POINTER, K_POINTER, 0 };
     mouse = (struct pointer_event){ .output = 1, .col = x1 + 5, .row = y1, .button = BTN_RIGHT, .pressed = 1 };
-    assert(pointer_key() == 'k' && selected == 3 && !*script);
+    assert(pointer_key() == 'k' && selected == napps + 2 && !*script);
     script = NULL;
     puts("PASS extended menu: a press on another output closes it and chooses nothing");
-    test_cols = 160; test_rows = 35; selected = napps + 1; scroll = 0;
+    test_cols = 160; test_rows = 35; selected = napps + 2; scroll = 0;
     memset(output_scroll, 0, sizeof output_scroll);
     draw(0);
     /* The first output can hold the entire list: the other two must still
-     * offer every program and keep their activation's connector. */
+     * offer every program and keep their activation's connector. Graphical
+     * Session uses the dedicated request from any output. */
     for (int i = 0; i < 3; i++) {
         screen_output_select(i);
-        hit_cell(HIT_ROW + napps + 1, &x0, &y0);
+        hit_cell(HIT_ROW + napps, &x0, &y0);
         mouse = (struct pointer_event){ .output=i, .col=x0+5, .row=y0, .button=BTN_LEFT, .pressed=1, .clicks=2 };
-        assert(pointer_key() == '\n' && selected == napps + 1);
+        assert(pointer_key() == '\n' && selected == napps);
+        int before = desktop_opens, task_before = opens;
+        open_entry(0);
+        assert(desktop_opens == before + 1 && opens == task_before && home_output == i);
+        hit_cell(HIT_ROW + napps + 2, &x0, &y0);
+        mouse = (struct pointer_event){ .output=i, .col=x0+5, .row=y0, .button=BTN_LEFT, .pressed=1, .clicks=2 };
+        assert(pointer_key() == '\n' && selected == napps + 2);
         draw(0);
-        open_entry(1);
+        open_entry(2);
         assert(strcmp(opened_output, output_names[i]) == 0 && home_output == i);
         /* Motion and the common Open button do not revert to output 0. */
         mouse = (struct pointer_event){ .output=i, .col=5, .row=2 };
@@ -463,7 +517,7 @@ int main(int argc, char **argv)
         hit_cell(HIT_KEY + '\n', &x0, &y0);
         mouse = (struct pointer_event){ .output=i, .col=x0, .row=y0, .button=BTN_LEFT, .pressed=1, .clicks=1 };
         assert(pointer_key() == '\n');
-        open_entry(1);
+        open_entry(2);
         assert(strcmp(opened_output, output_names[i]) == 0);
     }
     screen_extended(0);
@@ -577,13 +631,14 @@ int main(int argc, char **argv)
 
     /* Sections: Containers, Programs, System and hardware, each under a title
      * that has no hit and is never selected. program_sections places
-     * rc.conf's programs: files first, rc.conf's order kept in a section,
-     * desktop and program_files left out, an unknown name among the programs. */
+     * rc.conf's programs: Graphical Session and files first, rc.conf's order
+     * kept in a section; but overrides for the built-ins are not listed. */
     static const char *const sectioned[] = {
         "program_term", "/usr/local/bin/term /usr/local/lib/locachy/user-shell",
         "program_settings", "/usr/local/bin/settings",
         "program_admin", "/usr/local/bin/term",
         "program_desktop", "/usr/bin/labwc",
+        "program_graphical-session", "/usr/bin/labwc",
         "program_network", "/usr/local/bin/term /usr/bin/nmtui",
         "program_packages", "/usr/local/bin/packages",
         "program_edit", "/usr/local/bin/edit",
@@ -592,8 +647,8 @@ int main(int argc, char **argv)
         "program_bluetooth", "/usr/local/bin/term /usr/bin/bluetui",
         "program_mixer", "/usr/local/bin/term /usr/bin/wiremix", NULL
     };
-    static const char *const order[] = { "files", "term", "edit", "settings", "admin",
-                                         "network", "packages", "firmware", "bluetooth", "mixer" };
+    static const char *const order[] = { "graphical-session", "files", "term", "edit", "settings",
+                                         "admin", "network", "packages", "firmware", "bluetooth", "mixer" };
     const char *programs_title = section_titles[SECTION_PROGRAMS];
     const char *system_title = section_titles[SECTION_SYSTEM];
     const char *containers_title = section_titles[SECTION_CONTAINERS];
@@ -604,12 +659,12 @@ int main(int argc, char **argv)
     selected = 0;
     load();
     refresh();
-    assert(nentries == 10 && entries[0].builtin);
+    assert(nentries == 11 && entries[0].builtin == BUILTIN_DESKTOP);
     for (int i = 0; i < nentries; i++) {
         assert(strcmp(entries[i].name, order[i]) == 0);
-        assert(entries[i].section == (i < 3 ? SECTION_PROGRAMS : SECTION_SYSTEM));
+        assert(entries[i].section == (i < 4 ? SECTION_PROGRAMS : SECTION_SYSTEM));
     }
-    int sys = napps + 3, last_pos = napps + nentries + 1;
+    int sys = napps + 4, last_pos = napps + nentries + 1;
     test_cols = 80; test_rows = 22; scroll = 0; /* short enough that the last tile scrolls the list */
     memset(canvas, 0, sizeof canvas);
     draw(0);
@@ -619,17 +674,18 @@ int main(int argc, char **argv)
     hit_cell(HIT_ROW + napps, &x0, &y0); assert(y0 == row_p + 1 && x0 == 1);
     hit_cell(HIT_ROW + sys, &x0, &y0); assert(y0 == row_s + 1 && x0 == 1 && canvas_has("settings"));
     /* Keys across titles (3 columns): Up/Down keep the column, Left/Right step. */
-    selected = napps + 2; /* edit, column 3 */
-    move_selection(K_DOWN); assert(selected == sys + 2); /* network */
-    move_selection(K_UP); assert(selected == napps + 2);
+    selected = napps + 2; /* term, column 3 */
+    move_selection(K_DOWN); assert(selected == napps + 3); /* next row only has edit */
+    move_selection(K_DOWN); assert(selected == sys); /* settings, column 1 */
+    move_selection(K_UP); assert(selected == napps + 3);
     move_selection(K_RIGHT); assert(selected == sys);
-    move_selection(K_LEFT); assert(selected == napps + 2);
+    move_selection(K_LEFT); assert(selected == napps + 3);
     selected = napps;
     move_selection(K_UP); assert(selected == 0);
     selected = 1;
     move_selection(K_DOWN); assert(selected == napps + 1);
     move_selection(K_PGDN); assert(selected == last_pos);
-    move_selection(K_PGUP); assert(selected == 0);
+    move_selection(K_PGUP); assert(selected == 1); /* page back to the same column */
     move_selection(K_EOL); assert(selected == last_pos);
     draw(0);
     hit_cell(HIT_ROW + last_pos, &x0, &y0);
@@ -650,7 +706,7 @@ int main(int argc, char **argv)
     selected = sys + 4; /* firmware */
     rc_settings = fewer;
     load();
-    assert(nentries == 4 && strcmp(entries[selected - napps].name, "firmware") == 0);
+    assert(nentries == 5 && strcmp(entries[selected - napps].name, "firmware") == 0);
     gamma_listed = 1;
     refresh();
     assert(napps == 3 && strcmp(entries[selected - napps].name, "firmware") == 0);
@@ -667,7 +723,7 @@ int main(int argc, char **argv)
     assert(selected == napps + nentries); /* reboot stays reboot */
     gamma_listed = 0;
     refresh();
-    sys = napps + 3;
+    sys = napps + 4;
     last_pos = napps + nentries + 1;
     /* Small screens, 24x12 and 54x11 cells (the grid tests' sizes) and 48x12
      * and 36x12: every position comes into view by keys, and a section's
@@ -705,7 +761,7 @@ int main(int argc, char **argv)
         }
         assert(selected == last_pos);
     }
-    selected = sys; /* settings, a host program: K asks to close it */
+    selected = sys; /* settings, a host program: K asks to close */
     confirm_stop();
     assert(confirming == CONF_PROGRAM && strcmp(entries[stop_program].name, "settings") == 0);
     confirm_key('n');
@@ -722,12 +778,13 @@ int main(int argc, char **argv)
     /* A program another asked home to run by name (the top bar's launcher:
      * view, settings, mixer full screen): one of home's entries (rc.conf's
      * program_NAME, read again) runs as Enter runs it, its command rc.conf's,
-     * the request taken. files, desktop, a name rc.conf does not list and
-     * anything not a name run nothing. A folder asked for meanwhile is shown
+     * the request taken. Built-ins, desktop, an unlisted name, and anything
+     * not a name run nothing. A folder asked for meanwhile is shown
      * after the program. */
     static const char *const launched[] = {
         "program_view", "/usr/local/bin/view", "program_settings", "/usr/local/bin/settings",
-        "program_mixer", "/usr/local/bin/term /usr/bin/wiremix", "program_desktop", "/usr/bin/labwc", NULL
+        "program_mixer", "/usr/local/bin/term /usr/bin/wiremix", "program_desktop", "/usr/bin/labwc",
+        "program_graphical-session", "/usr/bin/labwc", NULL
     };
     static const char *const runs[][2] = {
         { "view", "/usr/local/bin/view" }, { "settings", "/usr/local/bin/settings" },
@@ -743,11 +800,11 @@ int main(int argc, char **argv)
         assert(take_requests() == 1 && !program_asked[0] && opens == before + 1 && files_views == views);
         assert(strcmp(opened_task, runs[k][1]) == 0 && strstr(last, "shown"));
     }
-    static const char *const refused[] = { "files", "desktop", "admin", "../settings", "settings /x" };
+    static const char *const refused[] = { "files", "desktop", "graphical-session", "admin", "../settings", "settings /x" };
     for (size_t k = 0; k < sizeof refused / sizeof refused[0]; k++) {
-        int before = opens;
+        int before = opens, desktop_before = desktop_opens;
         snprintf(program_asked, sizeof program_asked, "%s", refused[k]);
-        assert(take_requests() == 1 && !program_asked[0] && opens == before);
+        assert(take_requests() == 1 && !program_asked[0] && opens == before && desktop_opens == desktop_before);
         assert(strstr(last, "There is no program") && !strstr(last, "/x") && !strstr(last, ".."));
     }
     int before = opens, views = files_views;

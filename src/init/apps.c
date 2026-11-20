@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <poll.h>
+#include <sys/inotify.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <stdio.h>
@@ -806,6 +807,97 @@ int apps_busy(void)
         }
     }
     return 0;
+}
+
+static int app_cgroup_name(const char *name)
+{
+    return strncmp(name, "app_", 4) == 0 && valid_name(name + 4);
+}
+
+#define DISPLAY_CGROUP_CHILDREN (IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO)
+
+/* Arm the parent first: an app created during the scan will either be found
+ * here or queue another notification. cgroup2 makes cgroup.events visible
+ * before it reports IN_CREATE for the cgroup. No state is sampled here. */
+static int display_watch_arm(int fd)
+{
+    if (inotify_add_watch(fd, APP_CGROUP_ROOT, IN_ONLYDIR | IN_DONT_FOLLOW |
+                          IN_DELETE_SELF | IN_MOVE_SELF | DISPLAY_CGROUP_CHILDREN) < 0) {
+        return -1;
+    }
+    DIR *dir = opendir(APP_CGROUP_ROOT);
+    if (!dir) return -1;
+    int error = 0;
+    for (;;) {
+        errno = 0;
+        struct dirent *e = readdir(dir);
+        if (!e) { error = errno; break; }
+        if (!app_cgroup_name(e->d_name)) continue;
+        if (e->d_type != DT_DIR) {
+            if (e->d_type != DT_UNKNOWN) continue;
+            struct stat st;
+            if (fstatat(dirfd(dir), e->d_name, &st, AT_SYMLINK_NOFOLLOW) < 0) {
+                if (errno == ENOENT) continue; /* removed during the scan */
+                error = errno;
+                break;
+            }
+            if (!S_ISDIR(st.st_mode)) continue;
+        }
+        char path[sizeof APP_CGROUP_ROOT + sizeof apps[0].name + sizeof "/app_/cgroup.events"];
+        snprintf(path, sizeof path, APP_CGROUP_ROOT "/app_%.63s/cgroup.events", e->d_name + 4);
+        if (inotify_add_watch(fd, path, IN_MODIFY | IN_DELETE_SELF | IN_MOVE_SELF |
+                              IN_DONT_FOLLOW) < 0 && errno != ENOENT) {
+            error = errno;
+            break;
+        }
+    }
+    closedir(dir);
+    errno = error;
+    return error ? -1 : 0;
+}
+
+int apps_display_watch_open(void)
+{
+    int fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    if (fd < 0) return -1;
+    if (display_watch_arm(fd) == 0) return fd;
+    int error = errno;
+    close(fd);
+    errno = error;
+    return -1;
+}
+
+int apps_display_watch_drain(int fd)
+{
+    union { struct inotify_event align; char bytes[4096]; } buf;
+    int changed = 0, refresh = 0;
+    for (;;) {
+        ssize_t n = read(fd, buf.bytes, sizeof buf.bytes);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && errno == EAGAIN) break;
+        if (n <= 0) { if (n == 0) errno = EIO; return -1; }
+        for (size_t i = 0; i < (size_t)n;) {
+            const struct inotify_event *e = (const void *)(buf.bytes + i);
+            if ((e->mask & (IN_Q_OVERFLOW | IN_IGNORED | IN_UNMOUNT | IN_DELETE_SELF | IN_MOVE_SELF)) ||
+                ((e->mask & IN_ISDIR) && (e->mask & DISPLAY_CGROUP_CHILDREN) &&
+                 e->len && app_cgroup_name(e->name))) {
+                refresh = 1;
+            }
+            if (e->mask & IN_MODIFY) changed = 1;
+            i += sizeof *e + e->len;
+        }
+    }
+    if (!refresh) return changed;
+
+    /* Build the new watch set before the caller re-reads app state. Swap the
+     * poll fd in place: now there are no stale watches on moved-out cgroups,
+     * and any events that raced with the scan are queued on the new instance. */
+    int next = apps_display_watch_open();
+    if (next < 0) return -1;
+    int replaced = dup3(next, fd, O_CLOEXEC), error = errno;
+    close(next);
+    if (replaced < 0) { errno = error; return -1; }
+    return 1;
 }
 
 int apps_display_state(void)

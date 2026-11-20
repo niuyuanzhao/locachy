@@ -39,6 +39,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <linux/input.h>
 #include <poll.h>
 #include <signal.h>
@@ -1152,6 +1153,11 @@ static void catchers(int on);
 static void catch_input_region(struct bar *b);
 static void launcher_clear_wheel(void);
 static uint32_t pointer_scale(struct wl_surface *s);
+static int question_active(void);
+
+static struct wl_surface *desktop_wait_surface(void);
+static void desktop_wait_button(uint32_t state);
+static uint64_t desktop_wait_pressed;
 
 #define SCROLL_STEP 15.0
 
@@ -1209,6 +1215,7 @@ static void pointer_reset(void)
     pointer_bar = NULL;
     pointer_surface = NULL;
     middle_pressed_win = NULL;
+    desktop_wait_pressed = 0;
     pointer_notes = pointer_launcher = pointer_question = pointer_outside = 0;
     if (was_question) question_clear_hover(1);
 }
@@ -1395,6 +1402,10 @@ static void pointer_button(void *data, struct wl_pointer *p, uint32_t serial, ui
     }
     if (state == WL_POINTER_BUTTON_STATE_PRESSED && pointer_notes) {
         notes_click(pointer_y, button);
+        return;
+    }
+    if (button == BTN_LEFT && pointer_surface && pointer_surface == desktop_wait_surface()) {
+        desktop_wait_button(state);
         return;
     }
     if (!pointer_bar || pointer_y < 0 || pointer_y >= pointer_bar->h) {
@@ -1737,11 +1748,9 @@ static void check_bars(void)
 /*
  * The overlays: the input method's bar at the bottom (with the notices of
  * mode and volume), the questions in the middle (which program opens a file,
- * whether to start one again) and the notifications at the top right, under
- * the bar. Each is a layer surface on the screen
- * of the focused window, made anew there when the focus goes to another
- * screen, and drawn at that screen's scale as the bars are: text in cells of
- * the bold font text_px high at the scale, as the direct screens' text.
+ * whether to start one again), the notifications at the top right, and the
+ * graphical session's waiting panel behind app windows. They use the bars'
+ * scaled bold font and follow the focused window's screen unless pinned.
  */
 struct overlay {
     const char *ns;             /* the layer surface's namespace */
@@ -1749,6 +1758,7 @@ struct overlay {
     uint32_t anchor;            /* the edges it is at; none: in the middle */
     int margin;                 /* from them, logical pixels */
     int passive;                /* display only: no pointer input */
+    int below_windows;          /* use the bottom layer instead of the overlay layer */
     struct wl_surface *surf;
     struct zwlr_layer_surface_v1 *lsurf;
     struct wp_fractional_scale_v1 *scale;
@@ -1770,9 +1780,7 @@ struct overlay {
 static struct wl_output *focused_output(void)
 {
     for (struct window *w = windows; w; w = w->next) {
-        if (w->activated && !w->minimized && w->noutputs > 0) {
-            return w->outputs[0];
-        }
+        if (w->activated && !w->minimized && w->noutputs > 0) return w->outputs[0];
     }
     return NULL;
 }
@@ -1871,8 +1879,8 @@ static int overlay_begin(struct overlay *o, int cols, int rows)
             wp_fractional_scale_v1_add_listener(o->scale, &overlay_scale_listener, o);
             o->viewport = wp_viewporter_get_viewport(viewporter, o->surf);
         }
-        o->lsurf = zwlr_layer_shell_v1_get_layer_surface(layer_shell, o->surf, out,
-                                                         ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, o->ns);
+        uint32_t layer = o->below_windows ? ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM : ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY;
+        o->lsurf = zwlr_layer_shell_v1_get_layer_surface(layer_shell, o->surf, out, layer, o->ns);
         zwlr_layer_surface_v1_set_anchor(o->lsurf, o->anchor);
         if (cols == 0) {
             zwlr_layer_surface_v1_set_exclusive_zone(o->lsurf, -1); /* over the bar too */
@@ -1941,6 +1949,15 @@ static void ovl_fill(struct overlay *o, int col, int row, int cols, int rows, ui
 static void ovl_text(struct overlay *o, int col, int row, const char *s, uint32_t fg, uint32_t bg)
 {
     panel_text(o->px, o->bw, o->bh, o->bw, col * o->cw, row * o->ch, s, fg, bg, o->font);
+}
+
+/* The width of text in cells (2 for a wide character): the same at any size. */
+static int overlay_cells(const char *s)
+{
+    const struct panel_font *f = panel_font(TEXT_H, 1);
+    int cw = 0, ch = 0;
+    panel_font_size(f, &cw, &ch);
+    return f && cw > 0 ? panel_text_width(s, f) / cw : (int)strlen(s);
 }
 
 /* The input method's bar: shown only while composing, or for a notice. */
@@ -2435,7 +2452,6 @@ static uint8_t kbd_caps[MAX_KBDS][KEY_MAX + 1]; /* this press is Caps (JIS: Shif
 static uint8_t kbd_dropping[MAX_KBDS]; /* its queue overflowed: dropping up to the next SYN_REPORT */
 static int grabbed, want_grab;
 static int keys_down;
-static int question_active(void);
 static int shift, ctrl, alt, meta, altgr; /* altgr: right Alt where the layout makes it AltGr */
 
 static void update_xkb_modifiers(void)
@@ -2552,6 +2568,145 @@ static void reconcile_keyboards(const int *next, int nnext)
  * grab) the bar can no longer read. */
 static int keys_link = -1;
 
+/* The seat owns the waiting state. This surface and any press that began on
+ * it belong to exactly one generation; an update never reuses either. */
+static uint64_t desktop_wait_generation;
+static int desktop_wait_x, desktop_wait_y, desktop_wait_w, desktop_wait_h;
+static void render_desktop_wait(void);
+static struct overlay desktop_wait = {
+    .ns = "locachy-desktop-wait", .render = render_desktop_wait, .below_windows = 1,
+};
+
+static struct wl_surface *desktop_wait_surface(void)
+{
+    return desktop_wait.surf;
+}
+
+static void render_desktop_wait(void)
+{
+    struct overlay *o = &desktop_wait;
+    if (!active || !desktop_wait_generation) return;
+    if (!o->pin) {
+        /* Keep the chosen output until it goes away, even if a window gets
+         * the focus. Without a focused window, prefer the oldest global. */
+        o->pin = focused_output();
+        if (!o->pin) {
+            const struct bar *first = NULL;
+            for (const struct bar *b = bars; b; b = b->next) {
+                if (!first || b->name < first->name) first = b;
+            }
+            if (!first) return;
+            o->pin = first->output;
+        }
+    }
+    const char *title = _("Graphical Session"), *waiting = _("Waiting for applications");
+    const char *close_label = _("Close"), *hint = _("Ctrl+Q: close");
+    int cols = 30, title_cols = overlay_cells(title), waiting_cols = overlay_cells(waiting);
+    int button_cols = overlay_cells(close_label) + 4, hint_cols = overlay_cells(hint);
+    const int widths[] = { title_cols, waiting_cols, button_cols, hint_cols };
+    for (size_t i = 0; i < sizeof widths / sizeof *widths; i++) {
+        if (widths[i] + 4 > cols) cols = widths[i] + 4;
+    }
+    if (!overlay_begin(o, cols, 8)) return;
+
+    int col = (cols - button_cols) / 2, row = 4;
+    ovl_clear(o, OVL_BG);
+    ovl_text(o, (cols - title_cols) / 2, 1, title, OVL_FG1, OVL_BG);
+    ovl_text(o, (cols - waiting_cols) / 2, 2, waiting, OVL_FG2, OVL_BG);
+    ovl_fill(o, col, row, button_cols, 1, TOAST_BG);
+    ovl_text(o, col + 2, row, close_label, OVL_FG1, TOAST_BG);
+    ovl_text(o, (cols - hint_cols) / 2, 6, hint, OVL_FG2, OVL_BG);
+
+    /* Only the Close button takes pointer input. Use the same logical box
+     * for hit testing, also during Wayland's implicit button grab. */
+    desktop_wait_x = col * o->cw * o->w / o->bw;
+    desktop_wait_y = row * o->ch * o->h / o->bh;
+    desktop_wait_w = ((col + button_cols) * o->cw * o->w + o->bw - 1) / o->bw - desktop_wait_x;
+    desktop_wait_h = ((row + 1) * o->ch * o->h + o->bh - 1) / o->bh - desktop_wait_y;
+    struct wl_region *region = wl_compositor_create_region(compositor);
+    if (region) {
+        wl_region_add(region, desktop_wait_x, desktop_wait_y, desktop_wait_w, desktop_wait_h);
+        wl_surface_set_input_region(o->surf, region);
+        wl_region_destroy(region);
+    }
+    overlay_end(o);
+}
+
+static void desktop_wait_set(uint64_t generation)
+{
+    if (!active) generation = 0;
+    if (desktop_wait_generation == generation) return;
+    desktop_wait_generation = generation;
+    desktop_wait_pressed = 0;
+    overlay_destroy(&desktop_wait);
+    if (!generation) desktop_wait.pin = desktop_wait.output = NULL;
+    else render_desktop_wait();
+}
+
+/* The overview is a separate Wayland client (also started by labwc), not a
+ * foreign toplevel. Use the same runtime pid file and comm check it uses to
+ * detect another instance, without signalling that process. */
+static int overview_active(void)
+{
+    const char *runtime = getenv("XDG_RUNTIME_DIR");
+    char path[128], comm[32] = "";
+    int pid;
+    snprintf(path, sizeof path, "%s/locachy-overview.pid", runtime && *runtime ? runtime : "/tmp");
+    FILE *file = fopen(path, "re");
+    if (!file) return 0;
+    int valid = fscanf(file, "%d", &pid) == 1 && pid > 0;
+    fclose(file);
+    if (!valid) return 0;
+    snprintf(path, sizeof path, "/proc/%d/comm", pid);
+    file = fopen(path, "re");
+    if (!file) return 0;
+    valid = fgets(comm, sizeof comm, file) && strcmp(comm, "locachy-overvie\n") == 0;
+    fclose(file);
+    return valid;
+}
+
+static int desktop_wait_accepts_input(void)
+{
+    return active && !sig_release && keys_link >= 0 && desktop_wait_generation &&
+           !launcher_shown && !question_active() && !overview_active();
+}
+
+static void desktop_wait_close(void)
+{
+    char number[32];
+    snprintf(number, sizeof number, "%" PRIu64, desktop_wait_generation);
+    control_send_fields(keys_link, (const char *const[]){ "desktop-close", number, NULL });
+}
+
+static void desktop_wait_button(uint32_t state)
+{
+    int hit = pointer_x >= desktop_wait_x && pointer_x < desktop_wait_x + desktop_wait_w &&
+              pointer_y >= desktop_wait_y && pointer_y < desktop_wait_y + desktop_wait_h;
+    uint64_t pressed = desktop_wait_pressed;
+    desktop_wait_pressed = 0;
+    if (!hit || !desktop_wait_accepts_input()) return;
+    if (state == WL_POINTER_BUTTON_STATE_PRESSED) desktop_wait_pressed = desktop_wait_generation;
+    else if (state == WL_POINTER_BUTTON_STATE_RELEASED && pressed == desktop_wait_generation) desktop_wait_close();
+}
+
+static void desktop_wait_query(void)
+{
+    if (keys_link >= 0) control_send_fields(keys_link, (const char *const[]){ "desktop-wait?", NULL });
+}
+
+static void desktop_wait_message(const char *number, int len)
+{
+    uint64_t generation = 0;
+    if (len <= 0) return;
+    for (int i = 0; i < len; i++) {
+        if (number[i] < '0' || number[i] > '9') return;
+        unsigned int digit = (unsigned int)(number[i] - '0');
+        if (generation > (UINT64_MAX - digit) / 10) return;
+        generation = generation * 10 + digit;
+    }
+    desktop_wait_set(generation);
+}
+
 static int keyboard_alive(int fd)
 {
     int version;
@@ -2599,8 +2754,10 @@ static void keyboards_message(void)
     int fds[CONTROL_MAX_FDS], n = 0;
     int len = control_recv(keys_link, msg, sizeof msg, fds, &n);
     if (len <= 0) {
+        if (len < 0 && (errno == EINTR || errno == EAGAIN)) return;
         close(keys_link);
         keys_link = -1;
+        desktop_wait_set(0);
         take_keyboards(NULL, 0);
         bar_locks = -1;
     } else if (strcmp(msg, "keys") == 0) {
@@ -2609,6 +2766,9 @@ static void keyboards_message(void)
         if (nkbds == 0) bar_locks = -1;
         else if (had == 0 && locks >= 0) take_given_locks(locks);
     } else {
+        if (n == 0 && strcmp(msg, "desktop-wait") == 0) {
+            desktop_wait_message(msg + sizeof "desktop-wait", len - (int)sizeof "desktop-wait");
+        }
         for (int i = 0; i < n; i++) close(fds[i]);
     }
 }
@@ -2853,11 +3013,12 @@ static void bar_inherit(void)
 static void keyboard_signals(void)
 {
     if (sig_release) {
+        desktop_wait_set(0);
         sig_release = 0;
         reset_keyboard_state();
     }
     if (sig_regrab || sig_reload) {
-        int hup = sig_reload;
+        int hup = sig_reload, resumed = sig_regrab;
         sig_regrab = sig_reload = 0;
         if (hup && exe_changed()) exec_wanted = 1; /* bar_exec, once nothing is shown */
         reset_keyboard_state();
@@ -2869,6 +3030,7 @@ static void keyboard_signals(void)
         init_xkb();
         if (bar_locks >= 0) layouts_take_locks(bar_locks); /* the new layouts keep the locks */
         if (active) restore_passthrough_keymap();
+        if (resumed) desktop_wait_query();
         bars_dirty = 1;
         want_grab = grab_wanted();
         set_grab(want_grab);
@@ -4109,15 +4271,6 @@ static void launch_rc_program(const char *key, const char *value, void *arg)
     launch_add(LAUNCH_PROGRAM, scan->section, key + 8, NULL, launch_window_capable(key + 8), 0);
 }
 
-/* The width of s in cells (2 for a wide character): the same at any size. */
-static int launch_cells(const char *s)
-{
-    const struct panel_font *f = panel_font(TEXT_H, 1);
-    int cw = 0, ch = 0;
-    panel_font_size(f, &cw, &ch);
-    return f && cw > 0 ? panel_text_width(s, f) / cw : (int)strlen(s);
-}
-
 static void launch_items(void)
 {
     char containers[64][OPEN_NAME];
@@ -4146,16 +4299,16 @@ static void launch_items(void)
     for (int i = 0; i < launcher.n; i++) {
         const struct launch_item *it = &launcher.items[i];
         if (it->kind == LAUNCH_HEADER) continue;
-        int label = launch_cells(launch_label(it));
+        int label = overlay_cells(launch_label(it));
         if (label > launcher.name_cols) launcher.name_cols = label;
     }
-    launcher.cols = launch_cells(launch_hint()) + 2;
+    launcher.cols = overlay_cells(launch_hint()) + 2;
     for (int i = 0; i < launcher.n; i++) {
         const struct launch_item *it = &launcher.items[i];
         const char *detail = launch_detail(it);
-        int width = it->kind == LAUNCH_HEADER ? 1 + launch_cells(launch_label(it)) + 1 :
-                    detail ? 3 + launcher.name_cols + 3 + launch_cells(detail) + 2 :
-                    3 + launch_cells(launch_label(it)) + 1;
+        int width = it->kind == LAUNCH_HEADER ? 1 + overlay_cells(launch_label(it)) + 1 :
+                    detail ? 3 + launcher.name_cols + 3 + overlay_cells(detail) + 2 :
+                    3 + overlay_cells(launch_label(it)) + 1;
         if (width > launcher.cols) launcher.cols = width;
     }
 }
@@ -4263,7 +4416,7 @@ static void render_launcher(void)
         snprintf(ind, sizeof ind, "%s %d-%d/%d %s", launcher.scroll > 0 ? "^" : " ",
                  launcher.scroll + 1, launcher.scroll + vis, launcher.n,
                  launcher.scroll + vis < launcher.n ? "v" : " ");
-        int icells = launch_cells(ind);
+        int icells = overlay_cells(ind);
         if (launcher.cols > icells + 1) {
             ovl_text(o, launcher.cols - icells - 1, vis, ind, OVL_FG2, OVL_BG);
         }
@@ -4377,7 +4530,7 @@ static uint32_t pointer_scale(struct wl_surface *s)
     for (struct bar *b = bars; s && b; b = b->next) {
         if (b->surf == s || b->catch_surf == s) return b->scale120;
     }
-    const struct overlay *all[] = { &notes_ovl, &question, &launcher_ovl };
+    const struct overlay *all[] = { &notes_ovl, &question, &launcher_ovl, &desktop_wait };
     for (size_t i = 0; s && i < sizeof all / sizeof *all; i++) {
         if (s == all[i]->surf) return all[i]->scale120;
     }
@@ -4588,7 +4741,7 @@ static void overlays_follow(void)
 {
     struct wl_output *out = focused_output();
     struct overlay *all[] = { &ime_bar, &question, &notes_ovl, &launcher_ovl };
-    for (int i = 0; i < 4; i++) {
+    for (size_t i = 0; i < sizeof all / sizeof *all; i++) {
         struct wl_output *want = all[i]->pin ? all[i]->pin : out;
         if (all[i]->surf && want && want != all[i]->output) {
             all[i]->render();
@@ -5029,6 +5182,18 @@ static void handle_kbd_event(int fd)
             }
             continue;
         }
+        if (!act && desktop_wait_generation && ctrl) {
+            int mods = KEYS_CTRL | (alt ? KEYS_ALT : 0) | (shift ? KEYS_SHIFT : 0) |
+                       (meta ? KEYS_META : 0) | (altgr ? KEYS_ALTGR : 0);
+            if (key_action(translate_code(fd, ev.code), mods) == ACT_QUIT && desktop_wait_accepts_input()) {
+                if (ev.value == 1 && !was_down) {
+                    report_activity();
+                    desktop_wait_pressed = 0;
+                    desktop_wait_close();
+                }
+                continue;
+            }
+        }
         if (act == K_CTRL_SPACE || act == K_ACT_IME_CN || act == K_ACT_IME_RAW || act == K_ACT_IME_WIDTH) {
             const char *msg;
             int epoch = input_epoch;
@@ -5216,8 +5381,9 @@ static void reg_remove(void *data, struct wl_registry *reg, uint32_t name)
             launcher_close(); /* the screens it was opened over changed */
             catch_hide(b);
             *p = b->next;
-            struct overlay *all[] = { &ime_bar, &question, &notes_ovl, &launcher_ovl };
-            for (int i = 0; i < 4; i++) {
+            struct overlay *all[] = { &ime_bar, &question, &notes_ovl, &launcher_ovl, &desktop_wait };
+            for (size_t i = 0; i < sizeof all / sizeof *all; i++) {
+                if (all[i]->pin == b->output) all[i]->pin = NULL;
                 if (all[i]->output == b->output) {
                     overlay_destroy(all[i]);
                     all[i]->output = NULL;
@@ -5385,6 +5551,7 @@ int main(int argc, char **argv)
     ime_init(NULL, NULL);
     bar_inherit();
     register_keyboard_signals();
+    desktop_wait_query(); /* the seat replays its state, including after bar_exec */
 
     if (vkbd_mgr && wl_seat_obj) {
         text_vkbd = zwp_virtual_keyboard_manager_v1_create_virtual_keyboard(vkbd_mgr, wl_seat_obj);
@@ -5404,6 +5571,7 @@ int main(int argc, char **argv)
 
     for (;;) {
         keyboard_signals();
+        if (active && desktop_wait_generation && !desktop_wait.surf) render_desktop_wait();
         if (exec_wanted && exec_ready()) {
             bar_exec(); /* returns only if the new executable cannot be run */
         }
@@ -5476,7 +5644,7 @@ int main(int argc, char **argv)
         if (dead) {
             drop_dead_keyboards();
         }
-        if (p[3].revents & (POLLIN | POLLHUP | POLLERR)) {
+        if (p[3].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) {
             keyboards_message(); /* after the keys already queued */
         }
         if (choose.client >= 0 && !active) { /* home came to the front meanwhile */

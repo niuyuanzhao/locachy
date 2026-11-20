@@ -362,15 +362,11 @@ void base_open(char *const argv[], char *why, size_t size)
     base_open_on(NULL, argv, why, size);
 }
 
-void base_open_on(const char *screen, char *const argv[], char *why, size_t size)
+static void ask_open(const char *verb, char *const argv[], char *why, size_t size)
 {
     static const char *const want[] = { "back", "ended", "shown", NULL };
-    char msg[CONTROL_MAX], *f[3], *on[16];
-    int k = 0;
-    if (screen) on[k++] = (char *)screen;
-    for (int i = 0; argv[i] && k < 15; i++) on[k++] = argv[i];
-    on[k] = NULL;
-    int n = ask(screen ? "open-on" : "open", on, want, msg, sizeof msg, f, 3);
+    char msg[CONTROL_MAX], *f[3];
+    int n = ask(verb, argv, want, msg, sizeof msg, f, 3);
 
     if (n == 0) {
         snprintf(why, size, "no process 1 to ask");
@@ -379,6 +375,21 @@ void base_open_on(const char *screen, char *const argv[], char *why, size_t size
     } else {
         snprintf(why, size, "%s %s", f[0], n > 1 ? f[1] : "?");
     }
+}
+
+void base_open_on(const char *screen, char *const argv[], char *why, size_t size)
+{
+    char *on[16];
+    int k = 0;
+    if (screen) on[k++] = (char *)screen;
+    for (int i = 0; argv[i] && k < 15; i++) on[k++] = argv[i];
+    on[k] = NULL;
+    ask_open(screen ? "open-on" : "open", on, why, size);
+}
+
+void base_desktop_open(char *why, size_t size)
+{
+    ask_open("desktop-open", NULL, why, size);
 }
 
 void base_tasks(char *buf, size_t size)

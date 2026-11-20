@@ -42,6 +42,9 @@
  *                 TASK", else, left without one, is frozen until it is told
  *                 "back" or "ended".
  *   open-on SCREEN ARG...  (from home) the same on that screen (a connector).
+ *   desktop-open  (from home) open the shared display, retaining it even
+ *                 with no applications; only its current seat can close it
+ *                 while empty.
  *   kill ARG...   (from home) the task ARG... is killed and cleaned up.
  *   call ARG...   (from the top of a task) it is frozen; ARG... starts on top.
  *   a program exits: the one below is thawed and told "returned NAME
@@ -74,6 +77,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <linux/input.h>
 #include <linux/kd.h>
 #include <linux/netlink.h>
@@ -114,6 +118,9 @@
 #ifndef CGROUP
 #define CGROUP "/sys/fs/cgroup"
 #endif
+#ifndef DESKTOP_RUNTIME
+#define DESKTOP_RUNTIME "/run/user/0"
+#endif
 #define MIB (1024.0 * 1024.0)
 
 struct frame {
@@ -124,6 +131,8 @@ struct frame {
     int frozen;
     int holding;            /* base_session_hold: live link, not frozen */
     int shared_display;     /* release display without freezing shared infrastructure */
+    int display_ready, display_retained, display_bar_lost;
+    uint64_t desktop_wait;  /* visible empty-panel generation, or zero */
     uint32_t lessee;        /* its DRM lease while it has the screen */
     uint32_t screens;       /* the screens it has (bits of places), while it has them */
     int pointer_kinds;      /* the pointer devices it has: POINTER_MOVING, POINTER_DIRECT */
@@ -189,6 +198,10 @@ struct place {
 static struct place places[MAX_SCREENS];
 static int nplaces, focus_place, hover_place;
 static struct task *display_front;
+static int desktop_watch = -1; /* app cgroup changes, only while explicitly retained */
+static int stay_on_display;    /* ordinary launch/switch: don't yield at the first ready */
+static int display_sync_due;    /* reap or lost retention can require a display handoff */
+static uint64_t desktop_generation;
 #define POINTER_MOVING 1    /* mice, touchpads, TrackPoints (and keyboards, for typing detection) */
 #define POINTER_DIRECT 2    /* touch screens and pens on a screen (INPUT_PROP_DIRECT) */
 static int next_cgroup;
@@ -1522,30 +1535,111 @@ static void reclaim(struct frame *f)
     f->screens = 0;
 }
 
+static void desktop_forget(struct frame *f)
+{
+    f->desktop_wait = 0;
+    if (!f->display_retained) return;
+    f->display_retained = 0;
+    if (desktop_watch >= 0) close(desktop_watch);
+    desktop_watch = -1;
+}
+
+static void desktop_wait_lost(struct frame *f)
+{
+    f->display_bar_lost = 1;
+    if (f->display_retained) display_sync_due = 1;
+    desktop_forget(f);
+}
+
+static void desktop_number(char number[21], uint64_t generation)
+{
+    snprintf(number, 21, "%" PRIu64, generation);
+}
+
+static void desktop_wait_send(struct frame *f, uint64_t generation)
+{
+    char number[21];
+    desktop_number(number, generation);
+    const char *const fields[] = { "desktop-wait", number, NULL };
+    if (control_send_fields(f->ctl, fields) < 0) desktop_wait_lost(f);
+    else f->desktop_wait = generation;
+}
+
+static void desktop_wait_hide(struct frame *f)
+{
+    if (f->desktop_wait) desktop_wait_send(f, 0);
+}
+
+/* The wait panel is only for the live seat holding the displays, not the
+ * retained desktop that waits in the background (or underneath the lock). */
+static int desktop_current(const struct frame *f)
+{
+    return f->shared_display && f->display_retained && f->display_ready && !f->reaped &&
+           f->pid > 0 && f->screens && !locked && display_front && f == &display_front->f[0] &&
+           f == focused();
+}
+
+static void desktop_refresh(struct frame *f, int state, int apps_changed)
+{
+    if (!desktop_current(f) || state != APPS_DISPLAY_STOPPED) {
+        desktop_wait_hide(f);
+    } else if (!f->desktop_wait || apps_changed) {
+        /* Registry notifications can coalesce a short empty/busy cycle. A
+         * queued Close from before such a notification must not be reused. */
+        if (++desktop_generation == 0) ++desktop_generation;
+        desktop_wait_send(f, desktop_generation);
+    }
+}
+
+static void desktop_app_changed(void)
+{
+    if (desktop_watch < 0) return;
+    struct frame *f = top(display_front);
+    if (f && f->display_retained) desktop_refresh(f, apps_display_state(), 0);
+}
+
+static void desktop_open_denied(void)
+{
+    char key[128];
+    join(desktop_argv, key, sizeof key);
+    send3(&home, "ended", key, "-1");
+}
+
 /* Take its screens, the keyboard and the pointer back from f: ask, then
- * revoke anyway. */
+ * revoke anyway. Invalidate the panel before taking the seat. */
 static void take_back(struct frame *f)
 {
     char msg[CONTROL_MAX];
     int fds[CONTROL_MAX_FDS], n = 0, len = 0;
     double t0 = now_ms();
 
-    control_send(f->ctl, "release", 7, NULL, 0);
+    desktop_wait_hide(f);
+    control_send(f->ctl, "release", sizeof "release" - 1, NULL, 0);
     for (;;) {
         struct pollfd w = { .fd = f->ctl, .events = POLLIN };
         int left = 500 - (int)(now_ms() - t0);
         if (left <= 0 || poll(&w, 1, left) <= 0 || (len = control_recv(f->ctl, msg, sizeof msg, fds, &n)) <= 0) {
             say("init: %s did not release the screen in time; revoking", f->name);
+            if (f->display_retained) desktop_wait_lost(f);
             break;
         }
         for (int i = 0; i < n; i++) {
             close(fds[i]);
         }
-        if (strcmp(msg, "released") == 0) {
+        if (n == 0 && len == sizeof "released" - 1 && strcmp(msg, "released") == 0) {
             break;
         }
-        if (f->shared_display && f->nkbd > 0 && strcmp(msg, "locks") == 0 && n == 0 && len > 6) {
-            keys_set_locks(atoi(msg + 6)); /* the bar's last, sent on before "released" */
+        if (f->shared_display && n == 0) {
+            char *fields[3];
+            int count = control_fields(msg, len, fields, 3);
+            if (count == 2 && f->nkbd > 0 && strcmp(fields[0], "locks") == 0) {
+                keys_set_locks(atoi(fields[1])); /* the bar's last, sent on before "released" */
+            } else if (len == sizeof "display-ready" - 1 && strcmp(msg, "display-ready") == 0) {
+                f->display_ready = 1;
+                apps_display_ready();
+            } else if (len == sizeof "desktop-wait-lost" - 1 && strcmp(msg, "desktop-wait-lost") == 0) {
+                desktop_wait_lost(f);
+            }
         } else if (f == &home && strcmp(msg, "apps?") == 0) {
             char rows[CONTROL_MAX - 8];
             apps_list(rows, sizeof rows);
@@ -1553,6 +1647,8 @@ static void take_back(struct frame *f)
             control_send_fields(home.ctl, reply);
         } else if (f == &home && strcmp(msg, "tasks?") == 0) {
             tell_tasks();
+        } else if (f == &home && n == 0 && len == sizeof "desktop-open" - 1 && strcmp(msg, "desktop-open") == 0) {
+            desktop_open_denied(); /* a concurrent lock or screen handoff won */
         }
     }
     reclaim(f);
@@ -1755,6 +1851,7 @@ static void arrange(void)
         send3(&home, "shown", home_waits, NULL);
         home_waits[0] = '\0';
     }
+    if (desktop_watch >= 0) display_sync_due = 1; /* a retained frame may have returned */
 }
 
 /* Topology changes never freeze/restart a direct task. The shared display
@@ -1918,6 +2015,38 @@ static void home_wait(char *const argv[])
     }
 }
 
+static void desktop_open(void)
+{
+    struct task *t = shared_display_task();
+    struct frame *f = t ? &t->f[0] : NULL;
+    if (locked || shutdown_how >= 0 || restart_asked || !home.screens || held_in_front() ||
+        (f && (t->depth != 1 || f->reaped || f->display_bar_lost))) {
+        desktop_open_denied();
+        return;
+    }
+    /* Watch before sampling the app state, on the first pin only. An open
+     * without notifications could strand the empty panel behind a direct start. */
+    if (desktop_watch < 0) {
+        desktop_watch = apps_display_watch_open();
+        if (desktop_watch < 0) {
+            say("init: cannot watch application cgroups for the shared desktop: %s", strerror(errno));
+            desktop_open_denied();
+            return;
+        }
+    }
+    if (do_open(-1, desktop_argv) < 0) {
+        close(desktop_watch);
+        desktop_watch = -1;
+        return;
+    }
+    t = display_front;
+    f = &t->f[0];
+    stay_on_display = 0;
+    f->display_retained = 1;
+    home_wait(desktop_argv);
+    desktop_refresh(f, apps_display_state(), 1);
+}
+
 static struct task *task_of(const struct frame *f)
 {
     for (int i = 0; i < MAX_TASKS; i++) {
@@ -1947,6 +2076,19 @@ static void unplace(struct task *t)
     }
 }
 
+/* The seat normally removes these itself. A cgroup kill cannot run its
+ * cleanup, so do it once this session is dead, before another can start. */
+static void desktop_unlink_sockets(void)
+{
+    unlink(DESKTOP_RUNTIME "/seatd.sock");
+    unlink(DESKTOP_RUNTIME "/locachy-0");
+    unlink(DESKTOP_RUNTIME "/locachy-control.sock");
+    unlink(DESKTOP_RUNTIME "/locachy-bar.sock");
+    unlink(DESKTOP_RUNTIME "/locachy-x11-display");
+    unlink(DESKTOP_RUNTIME "/wayland-0");
+    unlink(DESKTOP_RUNTIME "/wayland-0.lock");
+}
+
 static void do_kill(char *const argv[])
 {
     char key[128];
@@ -1960,6 +2102,7 @@ static void do_kill(char *const argv[])
         say("init: killing task %s", t->key);
         for (int d = t->depth - 1; d >= 0; d--) {
             struct frame *f = &t->f[d];
+            desktop_forget(f);
             if (f->frozen) {
                 thaw(f);
             }
@@ -1988,7 +2131,6 @@ static void do_kill(char *const argv[])
     send3(&home, "ended", key, "0");
 }
 
-static int stay_on_display;
 static void lock(void);
 static void latch_lock_due(void);
 
@@ -2030,6 +2172,7 @@ static void do_switch(int at, int dir)
     struct task *to = ring[(k + dir + n) % n];
     if (n < 2 || dir == 0 || to == now) return;
     if (to != NULL && to->f[0].shared_display) {
+        if (to->f[0].display_retained && held_in_front()) return;
         display_front = to;
         stay_on_display = 1; /* as when home opens its view */
     } else if (now != NULL && now == display_front) {
@@ -2356,45 +2499,13 @@ static int idle_lock_check(void)
     return 1;
 }
 
-/* Start, thaw, freeze or stop the shared display (labwc) following container
- * state; it starts while every screen shows home. Returns 1 if it did any of
- * it: the programs' sockets may then have been read (take_back) or closed
- * since the last poll. */
-static int sync_display(void)
+/* End only the shared compositor's infrastructure, never an app cgroup or
+ * a direct task underneath it. Give back its screens before ending it. */
+static void stop_display(struct task *t)
 {
-    int state = apps_display_state();
-    struct task *t = shared_display_task();
-
-    if (state == APPS_DISPLAY_ACTIVE) {
-        if (t == NULL) {
-            int all_home = display_front == NULL && !locked;
-            for (int i = 0; i < nplaces; i++) all_home &= places[i].task == NULL;
-            if (access(desktop_argv[1], X_OK) == 0 && all_home) {
-                do_open(-1, desktop_argv);
-                return 1;
-            }
-        } else if (t->f[0].frozen) {
-            thaw(&t->f[0]);
-            return 1;
-        }
-        return 0;
-    }
-    if (t == NULL) {
-        return 0;
-    }
-    int did = display_front == t;
-    if (did) {
-        go_home(-1);
-    }
     struct frame *f = &t->f[0];
-    if (state == APPS_DISPLAY_FROZEN) {
-        if (!f->frozen && !f->screens) {
-            freeze(f);
-            did = 1;
-        }
-        return did;
-    }
-    say("init: stopping shared display (all containers closed)");
+    if (display_front == t) go_home(-1);
+    desktop_forget(f);
     if (f->frozen) {
         thaw(f);
     }
@@ -2414,9 +2525,83 @@ static int sync_display(void)
     rmdir(f->cgroup);
     f->pid = 0;
     t->depth = 0;
-    unlink("/run/user/0/wayland-0");
-    unlink("/run/user/0/wayland-0.lock");
+    desktop_unlink_sockets();
+}
+
+/* Explicit retention changes only the seat lifetime, not its place in the
+ * task ring. In particular, never move a pinned background desktop forward. */
+static int sync_display(int apps_changed)
+{
+    int state = apps_display_state();
+    struct task *t = shared_display_task();
+
+    if (t && t->f[0].display_retained) {
+        struct frame *f = &t->f[0];
+        desktop_refresh(f, state, apps_changed);
+        if (f->display_retained) return 0;
+    }
+    if (state == APPS_DISPLAY_ACTIVE) {
+        if (t == NULL) {
+            int all_home = display_front == NULL && !locked;
+            for (int i = 0; i < nplaces; i++) all_home &= places[i].task == NULL;
+            if (access(desktop_argv[1], X_OK) == 0 && all_home) {
+                do_open(-1, desktop_argv);
+                return 1;
+            }
+        } else if (t->f[0].frozen) {
+            thaw(&t->f[0]);
+            return 1;
+        }
+        return 0;
+    }
+    if (t == NULL) return 0;
+    if (state == APPS_DISPLAY_FROZEN) {
+        int did = display_front == t;
+        if (did) go_home(-1);
+        struct frame *f = &t->f[0];
+        if (!f->frozen && !f->screens) {
+            freeze(f);
+            did = 1;
+        }
+        return did;
+    }
+    say("init: stopping shared display (all containers closed)");
+    stop_display(t);
     return 1;
+}
+
+static int desktop_watch_refresh(struct frame *f)
+{
+    int changed = apps_display_watch_drain(desktop_watch);
+    if (changed < 0) {
+        say("init: lost application cgroup watch: %s", strerror(errno));
+        desktop_wait_hide(f);
+        desktop_forget(f);
+        display_sync_due = 1;
+    }
+    return changed;
+}
+
+static void desktop_close(struct frame *f, const char *generation)
+{
+    if (!desktop_current(f) || !f->desktop_wait) return;
+    char expected[21];
+    desktop_number(expected, f->desktop_wait);
+    if (strcmp(generation, expected) != 0) return;
+
+    /* Re-read the registry, including a direct launch that raced the click.
+     * A cgroup notification can also mean the old panel saw an empty state
+     * which has since been busy and then empty again. */
+    int changed = desktop_watch_refresh(f);
+    if (changed < 0) return;
+    apps_tick();
+    int state = apps_display_state();
+    if (changed || state != APPS_DISPLAY_STOPPED) {
+        desktop_refresh(f, state, changed);
+        return;
+    }
+    say("init: closing empty shared desktop");
+    stop_display(display_front);
 }
 
 static void tell_tasks(void)
@@ -2449,7 +2634,9 @@ static void tell_tasks(void)
 static void gone(struct frame *f)
 {
     int status = 0;
+    int retained = f->display_retained;
 
+    desktop_forget(f);
     if (f->frozen) {
         thaw(f); /* a frozen process cannot finish exiting */
     }
@@ -2469,6 +2656,7 @@ static void gone(struct frame *f)
     while (read_value(ev_path, "populated") != 0 && now_ms() - t0 < 200) {
         usleep(1000);
     }
+    if (retained) desktop_unlink_sockets();
     reclaim(f);
     close(f->ctl);
     rmdir(f->cgroup);
@@ -3208,12 +3396,8 @@ static void drop_retired(void)
 /* Wait for every child that has ended: a program's status is kept for gone()
  * (which runs when its control socket closes); a service is started again 5 s
  * later; anything else (orphans, which become ours) is just let go. An
- * application's launcher or job that ended sets apps_reaped: the display
- * follows the containers at once (sync_display), not at the next event, of
- * which there may be none (a refused start left the empty shared display in
- * front until something else woke process 1). */
-static int apps_reaped;
-
+ * application's launcher or job that ended schedules display sync now,
+ * not at the next event (there might not be one). */
 static void reap(void)
 {
     int status;
@@ -3221,7 +3405,7 @@ static void reap(void)
 
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
         if (apps_reap(pid, status)) {
-            apps_reaped = 1;
+            display_sync_due = 1;
             continue;
         }
         if (home.pid == pid) {
@@ -3273,6 +3457,7 @@ static void message(struct frame *f)
         return;
     }
     int n = control_fields(msg, len, fields, 15);
+    if (n < 1) return;
     fields[n] = NULL;
     int open_on = strcmp(fields[0], "open-on") == 0 && n > 2;
     if (locked && f != &locker && (strcmp(fields[0], "call") == 0 || strcmp(fields[0], "open") == 0 ||
@@ -3291,6 +3476,12 @@ static void message(struct frame *f)
             const char *reply[] = { "app-result", "error", n > 2 ? fields[2] : "", "the screen is locked", NULL };
             control_send_fields(f->ctl, reply);
         }
+    } else if (strcmp(fields[0], "desktop-open") == 0 && n == 1 && f == &home && nfds == 0 &&
+               len == sizeof "desktop-open" - 1) {
+        desktop_open();
+    } else if (strcmp(fields[0], "desktop-close") == 0 && n == 2 && f->shared_display && f->screens &&
+               nfds == 0 && msg[len - 1] != '\0') {
+        desktop_close(f, fields[1]);
     } else if (strcmp(fields[0], "call") == 0 && n > 1) {
         do_call(f, fields + 1);
     } else if (((strcmp(fields[0], "open") == 0 && n > 1) || open_on) && f == &home) {
@@ -3333,6 +3524,7 @@ static void message(struct frame *f)
             stay_on_display = 1;
             do_open(-1, desktop_argv);
         }
+        desktop_app_changed();
         const char *reply[] = { "app-result", result == 0 ? "ok" : "error", fields[2], why, NULL };
         control_send_fields(f->ctl, reply);
     } else if (strcmp(fields[0], "window") == 0 && (n == 2 || n == 3) && (f->shared_display || f == &home)) {
@@ -3351,6 +3543,7 @@ static void message(struct frame *f)
             stay_on_display = 1;
             do_open(-1, desktop_argv);
         }
+        desktop_app_changed();
         const char *reply[] = { "window-result", result == 0 ? "ok" : "error", fields[1], why, NULL };
         control_send_fields(f->ctl, reply);
     } else if (strcmp(fields[0], "pointer?") == 0 && f->screens && !f->shared_display) {
@@ -3364,16 +3557,21 @@ static void message(struct frame *f)
         int result = screen_drop_master(f->lessee);
         f->lessee = 0;
         control_send(f->ctl, result == 0 ? "mastered" : "master-error", result == 0 ? 8 : 12, NULL, 0);
-    } else if (strcmp(fields[0], "display-ready") == 0 && f->shared_display) {
+    } else if (strcmp(fields[0], "display-ready") == 0 && f->shared_display && nfds == 0 &&
+               len == sizeof "display-ready" - 1) {
+        if (f->display_ready) return;
+        f->display_ready = 1;
         apps_display_ready(); /* with or without the screens (the lock may have them) */
-        if (!f->screens) {
+        if (!f->screens || f->display_retained || stay_on_display) {
+            if (f->screens) stay_on_display = 0;
             apps_tick();
-        } else if (stay_on_display) {
-            stay_on_display = 0;
-            apps_tick();
+            if (f->display_retained) desktop_refresh(f, apps_display_state(), 0);
         } else {
             go_home(-1);
         }
+    } else if (strcmp(fields[0], "desktop-wait-lost") == 0 && n == 1 && f->shared_display && nfds == 0 &&
+               len == sizeof "desktop-wait-lost" - 1) {
+        desktop_wait_lost(f);
     } else if (strcmp(fields[0], "locks") == 0 && n == 2 && f->shared_display && f->nkbd > 0) {
         /* The shared display's locks while it has the keyboards: its bar may
          * hold them (EVIOCGRAB), so process 1 does not see those keys. */
@@ -4516,9 +4714,9 @@ int main(void)
     }
 
     for (;;) {
-        /* signals, system inputs, keyboards, home, the tasks, uevents, system jobs */
-        struct pollfd p[1 + 8 + MAX_KBD + MAX_ACTIVITY + 3 + MAX_TASKS * MAX_DEPTH + 2];
-        struct frame *who[1 + 8 + MAX_KBD + MAX_ACTIVITY + 3 + MAX_TASKS * MAX_DEPTH + 2];
+        /* signals, system inputs, keyboards, home, tasks, uevents, jobs, app cgroups */
+        struct pollfd p[1 + 8 + MAX_KBD + MAX_ACTIVITY + 3 + MAX_TASKS * MAX_DEPTH + 3];
+        struct frame *who[sizeof p / sizeof p[0]];
         int n = 0;
         int signal_j = n; /* SIGCHLD, SIGHUP, SIGTERM, SIGINT, SIGUSR2, SIG_POWEROFF_NOW, SIG_REBOOT_NOW */
         who[n] = NULL;
@@ -4551,6 +4749,12 @@ int main(void)
                 who[n] = &tasks[i].f[d];
                 p[n++] = (struct pollfd){ .fd = tasks[i].f[d].ctl, .events = POLLIN };
             }
+        }
+        int desktop_j = -1;
+        if (desktop_watch >= 0) {
+            desktop_j = n;
+            who[n] = NULL;
+            p[n++] = (struct pollfd){ .fd = desktop_watch, .events = POLLIN };
         }
         int uevent_j = -1; /* devices that appear, to load their drivers */
         if (modules_fd() >= 0) {
@@ -4611,21 +4815,23 @@ int main(void)
         if (apps_busy() && (timeout < 0 || timeout > 100)) {
             timeout = 100;
         }
-        if (apps_reaped) {
-            timeout = 0;
-        }
+        if (display_sync_due) timeout = 0;
         int ready = poll(p, (nfds_t)n, timeout);
         if (refresh_display()) {
             continue; /* take_back consumed control messages: rebuild poll */
         }
+        int apps_changed = 0;
+        if (ready > 0 && desktop_j >= 0 && p[desktop_j].revents) {
+            struct task *t = shared_display_task();
+            if (t && t->f[0].display_retained) apps_changed = desktop_watch_refresh(&t->f[0]) > 0;
+        }
         apps_tick();
         /* What poll found ready may be stale after it (home's message read by
-         * take_back, then waited for again while home is frozen): poll again. */
-        if (ready == 0 || !apps_busy()) {
-            apps_reaped = 0;
-            if (sync_display()) {
-                continue;
-            }
+         * take_back, then waited for again while home is frozen): poll again.
+         * A retained seat must hide its empty panel even while apps are busy. */
+        if (desktop_watch >= 0 || ready == 0 || !apps_busy()) {
+            display_sync_due = 0;
+            if (sync_display(apps_changed)) continue;
         }
         for (size_t i = 0; i < nservices; i++) {
             if (service_due(&services[i], now_ms())) {
@@ -4704,6 +4910,7 @@ int main(void)
                 }
                 continue;
             }
+            if (j == desktop_j) continue; /* already handled before control messages */
             if (j == jobs_j) {
                 if (p[j].revents & POLLIN) {
                     shutdown_look();

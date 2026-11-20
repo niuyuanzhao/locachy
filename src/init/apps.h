@@ -35,6 +35,12 @@ void apps_display_ready(void);
 int apps_reap(pid_t pid, int status);
 int apps_busy(void);
 int apps_display_state(void);
+/* Opt in to app cgroup notifications before reading display state. The caller
+ * polls and closes the returned nonblocking fd. Drain returns 1 to re-read
+ * state, 0 for unrelated events, or -1 on failure (close the fd). It may
+ * replace the watch set under the same fd number; use poll, not epoll. */
+int apps_display_watch_open(void);
+int apps_display_watch_drain(int fd);
 void apps_list(char *buf, size_t size);
 int apps_action(const char *action, const char *name, char *why, size_t size);
 int apps_open(const char *name, const char *target, char *why, size_t size);

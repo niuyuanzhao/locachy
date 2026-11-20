@@ -8,6 +8,7 @@
 /* start()'s cgroups (the lock started in the grace tests): in the scratch
  * directory the test runs in, never under /sys/fs/cgroup. */
 #define CGROUP "."
+#define DESKTOP_RUNTIME "init-fixtures/runtime-unused"
 #define main init_main
 #include "../init/init.c"
 #undef main
@@ -195,8 +196,23 @@ int apps_action(const char *action, const char *name, char *why, size_t size)
 { (void)action; (void)name; snprintf(why, size, "none"); return -1; }
 int apps_window_open(const char *program, const char *target, char *why, size_t size)
 { (void)program; (void)target; snprintf(why, size, "none"); return -1; }
+static int app_display, app_watch_changes, app_watch_opens, app_watch_fail;
 void apps_display_ready(void) {}
 void apps_tick(void) {}
+int apps_display_watch_open(void)
+{
+    app_watch_opens++;
+    if (app_watch_fail) { errno = EIO; return -1; }
+    return open("/dev/null", O_RDONLY | O_CLOEXEC);
+}
+int apps_display_watch_drain(int fd)
+{
+    assert(fd == desktop_watch && fd >= 0);
+    int changes = app_watch_changes;
+    app_watch_changes = 0;
+    return changes;
+}
+int apps_display_state(void) { return app_display; }
 
 /* A frame with its own control socket and a scratch cgroup whose freezing
  * is done at once. */
@@ -247,6 +263,7 @@ static void reset(int screens, int keyboards, int devices)
     for (int k = 0; k < n; k++) {
         if (all[k]->pid) close(all[k]->ctl);
     }
+    if (desktop_watch >= 0) close(desktop_watch);
     memset(tasks, 0, sizeof tasks);
     memset(&home, 0, sizeof home);
     memset(&locker, 0, sizeof locker);
@@ -254,6 +271,10 @@ static void reset(int screens, int keyboards, int devices)
     memset(lessee_of, 0, sizeof lessee_of);
     nplaces = focus_place = hover_place = 0;
     display_front = NULL;
+    desktop_watch = -1;
+    display_sync_due = 0;
+    app_display = APPS_DISPLAY_STOPPED;
+    app_watch_changes = app_watch_opens = app_watch_fail = 0;
     locked = 0;
     lock_shown = 0;
     blank_after = blank_tried = direct_dark = shared_dark = lock_in_dark = 0;
@@ -922,6 +943,133 @@ static void idle_power(void)
     puts("PASS uevent input refresh drains pending activity before reopening fds");
 }
 
+static struct frame *desktop_fixture(int slot)
+{
+    struct frame *seat = task(slot, "locachy-seat");
+    join(desktop_argv, tasks[slot].key, sizeof tasks[slot].key);
+    seat->shared_display = 1;
+    return seat;
+}
+
+static void tell_close(struct frame *f, uint64_t generation)
+{
+    char number[21];
+    desktop_number(number, generation);
+    tell(f, (const char *const[]){ "desktop-close", number, NULL });
+}
+
+static void desktop_session(void)
+{
+    const char *const open_desktop[] = { "desktop-open", NULL };
+    const char *const ready[] = { "display-ready", NULL };
+    reset(2, 0, 0);
+    struct frame *other = task(0, "extdisplay");
+    assert(do_open(1, (char *[]){ "extdisplay", NULL }) == 0);
+    struct frame *seat = desktop_fixture(1);
+    tell(other, open_desktop);
+    assert(!app_watch_opens && !display_front);
+    holding = other->cgroup;
+    tell(&home, open_desktop);
+    assert(!app_watch_opens && !display_front && other->screens == 2);
+    holding = NULL;
+    tell(&home, open_desktop);
+    assert(display_front == &tasks[1] && home_waits[0]);
+    assert(app_watch_opens == 1 && seat->display_retained && !seat->desktop_wait);
+    tell(seat, ready);
+    assert(display_front == &tasks[1] && seat->screens == 3 && seat->desktop_wait);
+    uint64_t before = seat->desktop_wait;
+    tell_close(other, before);
+    assert(seat->desktop_wait == before);
+    idle_power_wake();
+    frame(&locker, "lock");
+    locked = 1;
+    arrange();
+    tell_close(seat, before);
+    assert(seat->display_retained && !seat->desktop_wait && !seat->screens);
+    unlock();
+    assert(sync_display(0) == 0 && seat->desktop_wait > before);
+    before = seat->desktop_wait;
+    tell(seat, (const char *const[]){ "home", NULL });
+    assert(!display_front && home.screens == 1 && other->screens == 2);
+    assert(seat->display_retained && !seat->desktop_wait && strstr(log_, "home:back "));
+    assert(sync_display(0) == 0 && !display_front);
+    tell(&home, open_desktop);
+    assert(display_front == &tasks[1] && seat->desktop_wait > before && app_watch_opens == 1);
+    do_switch(0, 1);
+    assert(!display_front && seat->display_retained && !seat->desktop_wait);
+    holding = other->cgroup;
+    do_switch(0, -1);
+    assert(!display_front && seat->display_retained);
+    holding = NULL;
+    do_switch(0, -1);
+    assert(display_front == &tasks[1] && sync_display(0) == 0 && seat->desktop_wait > before);
+    puts("PASS only Home pins the current seat; extended-display hold, Home, task switch and lock preserve ownership");
+
+    before = seat->desktop_wait;
+    app_display = APPS_DISPLAY_ACTIVE; /* two apps, then one */
+    assert(sync_display(1) == 0 && seat->display_retained && !seat->desktop_wait);
+    assert(sync_display(1) == 0 && !seat->desktop_wait);
+    app_display = APPS_DISPLAY_FROZEN;
+    assert(sync_display(1) == 0 && !seat->desktop_wait && !seat->frozen && seat->screens);
+    app_display = APPS_DISPLAY_STOPPED;
+    assert(sync_display(1) == 0 && seat->desktop_wait > before);
+    tell_close(seat, before); /* even an empty session rejects a stale click */
+    assert(seat->display_retained);
+    before = seat->desktop_wait;
+    app_display = APPS_DISPLAY_ACTIVE; /* managed native window racing Close */
+    tell_close(seat, before);
+    assert(seat->display_retained && !seat->desktop_wait);
+    app_display = APPS_DISPLAY_STOPPED;
+    assert(sync_display(1) == 0 && seat->desktop_wait > before);
+    before = seat->desktop_wait;
+    app_watch_changes = 1;
+    tell_close(seat, before);
+    assert(seat->desktop_wait > before); /* coalesced activity also invalidates Close */
+    char events[96];
+    snprintf(events, sizeof events, "%s/cgroup.events", seat->cgroup);
+    assert(write_file(events, "populated 0\nfrozen 0\n") == 0);
+    tell_close(seat, seat->desktop_wait);
+    assert(!seat->pid && !display_front && desktop_watch == -1);
+    assert(home.screens == 1 && other->screens == 2 && places[1].task == &tasks[0]);
+    puts("PASS busy, frozen, stale and raced Close rejected; only empty Close ends the seat and restores other outputs");
+
+    reset(1, 0, 0);
+    seat = desktop_fixture(0);
+    assert(do_open(-1, desktop_argv) == 0);
+    app_display = APPS_DISPLAY_ACTIVE;
+    tell(seat, ready);
+    assert(!display_front && !seat->display_retained && !app_watch_opens);
+    tell(&home, open_desktop);
+    assert(seat->display_retained && !seat->desktop_wait);
+    tell(seat, (const char *const[]){ "desktop-wait-lost", NULL });
+    assert(seat->display_bar_lost && !seat->display_retained && desktop_watch == -1);
+    assert(sync_display(0) == 0 && seat->screens); /* don't disrupt a live app */
+    app_display = APPS_DISPLAY_STOPPED;
+    snprintf(events, sizeof events, "%s/cgroup.events", seat->cgroup);
+    assert(write_file(events, "populated 0\nfrozen 0\n") == 0);
+    assert(sync_display(0) == 1 && !seat->pid && !display_front && home.screens);
+    puts("PASS ordinary readiness returns Home and bar loss clears the pin without killing live apps");
+
+    reset(1, 0, 0);
+    app_watch_fail = 1;
+    tell(&home, open_desktop);
+    assert(!display_front && desktop_watch == -1 && strstr(log_, "home:ended "));
+    app_watch_fail = 0;
+    char *old = desktop_argv[0];
+    desktop_argv[0] = "/does-not-exist/locachy-seat";
+    tell(&home, open_desktop);
+    assert(display_front && desktop_watch >= 0);
+    seat = &display_front->f[0];
+    assert(seat->display_retained && !seat->display_ready && !seat->desktop_wait);
+    struct pollfd child = { .fd = seat->ctl, .events = POLLIN };
+    assert(poll(&child, 1, 2000) == 1);
+    message(seat);
+    assert(!display_front && !shared_display_task() && home.screens && desktop_watch == -1);
+    assert(strstr(log_, "home:ended "));
+    desktop_argv[0] = old;
+    puts("PASS cold desktop start waits for readiness, and exec/watch failure returns Home without a pin");
+}
+
 int main(int argc, char **argv)
 {
     if (strcmp(argv[0], "/proc/self/exe") == 0) {
@@ -939,6 +1087,7 @@ int main(int argc, char **argv)
     waiting();
     idle_link();
     idle_power();
+    desktop_session();
     puts("ALL PASSED");
     return 0;
 }

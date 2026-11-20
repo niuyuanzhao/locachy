@@ -1276,6 +1276,18 @@ msgstr "全屏"
 msgid "window"
 msgstr "窗口"
 
+#: progs/bar.c progs/home.c
+msgid "Graphical Session"
+msgstr "图形会话"
+
+#: progs/bar.c
+msgid "Waiting for applications"
+msgstr "正在等待应用"
+
+#: progs/bar.c
+msgid "Ctrl+Q: close"
+msgstr "Ctrl+Q：关闭"
+
 #: progs/drives.c
 #, c-format
 msgid "%s was not ejected"
@@ -1372,8 +1384,8 @@ msgstr "全部保存"
 msgid "Reload"
 msgstr "重新加载"
 
-#: progs/edit-actions.inc progs/edit-documents.inc progs/edit-filesearch-ui.inc
-#: progs/view.c
+#: progs/bar.c progs/edit-actions.inc progs/edit-documents.inc
+#: progs/edit-filesearch-ui.inc progs/view.c
 msgid "Close"
 msgstr "关闭"
 
@@ -5828,6 +5840,10 @@ msgid "Container actions stay here; state refreshes every 500 ms."
 msgstr "容器操作在此进行；状态每 500 毫秒刷新一次。"
 
 #: progs/home.c
+msgid "Open the shared desktop"
+msgstr "打开共享桌面"
+
+#: progs/home.c
 msgid "opening"
 msgstr "正在打开"
 
@@ -6128,6 +6144,11 @@ msgstr "冻结：已接受 %d 个，错误 %d 个；状态正从底层刷新。"
 #, c-format
 msgid "%s is part of home: nothing to close."
 msgstr "%s 属于主页的一部分：无需关闭。"
+
+#: progs/home.c
+#, c-format
+msgid "%s cannot be closed from home."
+msgstr "无法从主页关闭%s。"
 
 #. TRANSLATORS: K is the key name; keep it.
 #: progs/home.c

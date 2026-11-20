@@ -18,6 +18,10 @@ void say(const char *fmt, ...) { (void)fmt; }
 double uptime(void) { ticks += 0.02; return ticks; }
 int control_send(int fd, const char *msg, size_t len, const int *fds, int n)
 { (void)fd; (void)fds; assert(n == 0 && len == 6 && strcmp(msg, "master") == 0); return 0; }
+int control_send_fields(int fd, const char *const *fields)
+{ (void)fd; (void)fields; assert(0 && "unexpected desktop message"); return -1; }
+int control_fields(char *msg, int len, char **fields, int max)
+{ (void)msg; (void)len; (void)fields; (void)max; assert(0 && "unexpected desktop message"); return 0; }
 int control_recv(int fd, char *msg, size_t size, int *fds, int *n)
 { (void)fd; (void)fds; *n = 0; snprintf(msg, size, "%s", reply_ok ? "mastered" : "master-error"); return (int)strlen(msg); }
 static int fake_ioctl(int fd, unsigned long request, ...)

@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include "apps.h"
@@ -71,7 +72,88 @@ static void put(const char *path, const char *text)
     assert(out && fputs(text, out) >= 0 && fclose(out) == 0);
 }
 
-/* The program of a native window ends as when its window is closed. */
+static void watch_event(int fd, int changed)
+{
+    struct pollfd p = { .fd = fd, .events = POLLIN };
+    assert(poll(&p, 1, 1000) == 1 && p.revents == POLLIN);
+    assert(apps_display_watch_drain(fd) == changed);
+    assert(poll(&p, 1, 0) == 0); /* no wakeup remains on an unchanged fixture */
+}
+
+static void display_watch(void)
+{
+    const char active[] = "populated 1\nfrozen 0\n", frozen[] = "populated 1\nfrozen 1\n";
+    const char stopped[] = "populated 0\nfrozen 0\n";
+    struct pollfd idle;
+    int fd = apps_display_watch_open();
+    assert(fd >= 0 && (fcntl(fd, F_GETFL) & O_NONBLOCK) && (fcntl(fd, F_GETFD) & FD_CLOEXEC));
+    idle = (struct pollfd){ .fd = fd, .events = POLLIN };
+    assert(apps_display_watch_drain(fd) == 0 && poll(&idle, 1, 0) == 0);
+    assert(apps_display_state() == APPS_DISPLAY_STOPPED);
+
+    /* An app invoked outside PID 1: no tracked launch or reap. An existing
+     * group can cycle through all occupancy states without directory changes. */
+    put(APP_CGROUP_ROOT "/app_alpha/cgroup.events", active);
+    watch_event(fd, 1);
+    assert(apps_display_state() == APPS_DISPLAY_ACTIVE);
+    put(APP_CGROUP_ROOT "/app_alpha/cgroup.events", frozen);
+    watch_event(fd, 1);
+    assert(apps_display_state() == APPS_DISPLAY_FROZEN);
+    put(APP_CGROUP_ROOT "/app_alpha/cgroup.events", stopped);
+    watch_event(fd, 1);
+    assert(apps_display_state() == APPS_DISPLAY_STOPPED && !apps_busy());
+    puts("PASS display watch wakes for external app occupancy and last exit without a reaped launcher");
+
+    /* As with a real cgroup mkdir, cgroup.events is present when PID 1
+     * receives the directory event. Re-read only after reconciling watches. */
+    put(APP_CONF "/watch.conf", "package=\"x\"\ncommand=\"/bin/true\"\n");
+    assert(mkdir(APP_CGROUP_ROOT "/app_watch", 0700) == 0);
+    put(APP_CGROUP_ROOT "/app_watch/cgroup.events", active);
+    watch_event(fd, 1);
+    assert(apps_display_state() == APPS_DISPLAY_ACTIVE);
+    put(APP_CGROUP_ROOT "/app_watch/cgroup.events", frozen);
+    watch_event(fd, 1);
+    assert(apps_display_state() == APPS_DISPLAY_FROZEN);
+    assert(rename(APP_CGROUP_ROOT "/app_watch", ROOT "/watch-away") == 0);
+    watch_event(fd, 1);
+    assert(apps_display_state() == APPS_DISPLAY_STOPPED);
+    put(ROOT "/watch-away/cgroup.events", active);
+    assert(poll(&idle, 1, 0) == 0); /* no stale watch on the moved-out inode */
+    assert(rename(ROOT "/watch-away", APP_CGROUP_ROOT "/app_watch") == 0);
+    watch_event(fd, 1);
+    assert(apps_display_state() == APPS_DISPLAY_ACTIVE);
+    put(APP_CGROUP_ROOT "/app_watch/cgroup.events", stopped);
+    watch_event(fd, 1);
+    assert(apps_display_state() == APPS_DISPLAY_STOPPED);
+    assert(unlink(APP_CGROUP_ROOT "/app_watch/cgroup.events") == 0);
+    assert(rmdir(APP_CGROUP_ROOT "/app_watch") == 0);
+    watch_event(fd, 1);
+    assert(unlink(APP_CONF "/watch.conf") == 0);
+    puts("PASS display watch reconciles new, deleted and moved app cgroups before sampling state");
+
+    assert(mkdir(APP_CGROUP_ROOT "/unrelated", 0700) == 0);
+    watch_event(fd, 0);
+    put(APP_CGROUP_ROOT "/unrelated/cgroup.events", active);
+    assert(poll(&idle, 1, 0) == 0);
+    assert(unlink(APP_CGROUP_ROOT "/unrelated/cgroup.events") == 0);
+    assert(rmdir(APP_CGROUP_ROOT "/unrelated") == 0);
+    watch_event(fd, 0);
+    put(APP_CGROUP_ROOT "/app_not-a-directory", active);
+    watch_event(fd, 0);
+    assert(unlink(APP_CGROUP_ROOT "/app_not-a-directory") == 0);
+    watch_event(fd, 0);
+    assert(close(fd) == 0);
+    put(APP_CGROUP_ROOT "/app_alpha/cgroup.events", active);
+    fd = apps_display_watch_open();
+    assert(fd >= 0 && apps_display_watch_drain(fd) == 0);
+    assert(apps_display_state() == APPS_DISPLAY_ACTIVE);
+    put(APP_CGROUP_ROOT "/app_alpha/cgroup.events", stopped);
+    watch_event(fd, 1);
+    assert(close(fd) == 0);
+    puts("PASS display watch ignores unrelated entries and reopens without stale events");
+}
+
+/* The program of a native window ends as when the window is closed. */
 static void close_window(const char *name)
 {
     char path[256];
@@ -255,6 +337,7 @@ int main(void)
 {
     char why[256];
     apps_init();
+    display_watch();
     contains("alpha\tclosed\t");
     assert(apps_action("start", "../invalid", why, sizeof why) == -1);
     assert(apps_action("start", "alpha", why, sizeof why) == 0);

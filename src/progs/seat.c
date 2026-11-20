@@ -139,10 +139,10 @@ static void send_err(int sock, int err)
     send_msg(sock, SERVER_ERROR, &e, sizeof e);
 }
 
-static void message_fds(const char *msg, int len, int *fds, int n);
+static void seat_control_message(int ctl, char *msg, int len, int *fds, int n, int taking);
 
-/* DRM master from process 1, within 400 ms; a message that comes first (a
- * "keys" for the bar) is taken as it comes, not as a refusal. */
+/* DRM master from process 1, within 400 ms; other messages (e.g. "keys" or
+ * a fresh "desktop-wait") may precede the reply. */
 static int request_master(int ctl)
 {
     if (ctl < 0) return 0;
@@ -162,7 +162,7 @@ static int request_master(int ctl)
             for (int i = 0; i < nfds; i++) close(fds[i]);
             break;
         }
-        message_fds(msg, len, fds, nfds);
+        seat_control_message(ctl, msg, len, fds, nfds, 1);
     }
     say("seat: process 1 did not hand over DRM master");
     return -1;
@@ -342,8 +342,7 @@ static void handle_client_msg(int cfd)
     }
 }
 
-/* A host client, given the display and (for labwc-control) the private
- * bidirectional LOCACHY_SEAT_REQUESTS socket. */
+/* A host client, given the display and its private seat link, if any. */
 static pid_t start_client(const char *path, int fd, const char *env)
 {
     if (access(path, X_OK) != 0) {
@@ -375,6 +374,87 @@ static pid_t start_client(const char *path, int fd, const char *env)
 static int keyboards[MAX_KEYBOARDS], nkeyboards, bar_keys = -1, lent_locks = -1;
 static int is_labwc, window_requests = -1;
 
+/* Process 1 owns the wait panel's lifetime. The seat caches its visible
+ * generation on the private keyboard link (also across a bar self-exec). */
+static uint64_t desktop_wait_generation;
+
+static int desktop_generation(const char *text, uint64_t *generation)
+{
+    uint64_t value = 0;
+    if (!*text) return 0;
+    for (; *text; text++) {
+        if (*text < '0' || *text > '9') return 0;
+        unsigned int digit = (unsigned int)(*text - '0');
+        if (value > (UINT64_MAX - digit) / 10) return 0;
+        value = value * 10 + digit;
+    }
+    *generation = value;
+    return 1;
+}
+
+static void desktop_wait_lost(int ctl)
+{
+    if (ctl >= 0) {
+        int sent;
+        do {
+            sent = control_send_fields(ctl, (const char *const[]){ "desktop-wait-lost", NULL });
+        } while (sent < 0 && errno == EINTR);
+    }
+}
+
+static void bar_link_lost(int ctl)
+{
+    say("seat: locachy-bar's link is unavailable");
+    if (bar_keys >= 0) close(bar_keys);
+    bar_keys = -1;
+    desktop_wait_generation = 0;
+    desktop_wait_lost(ctl);
+}
+
+static int desktop_generation_send(int fd, const char *verb, uint64_t generation)
+{
+    char number[24];
+    snprintf(number, sizeof number, "%llu", (unsigned long long)generation);
+    const char *const fields[] = { verb, number, NULL };
+    int sent;
+    do {
+        sent = control_send_fields(fd, fields);
+    } while (sent < 0 && errno == EINTR);
+    return sent;
+}
+
+static void desktop_wait_publish(int ctl)
+{
+    uint64_t generation = desktop_wait_generation;
+    if (bar_keys < 0) {
+        /* Process 1 may have missed the loss before it captured the desktop. */
+        if (generation) desktop_wait_lost(ctl);
+        desktop_wait_generation = 0;
+    } else if (desktop_generation_send(bar_keys, "desktop-wait", generation) < 0) {
+        bar_link_lost(ctl);
+    }
+}
+
+static void desktop_wait_replay(int ctl)
+{
+    if (active_seat && desktop_wait_generation) desktop_wait_publish(ctl);
+}
+
+static void seat_activate(int ctl)
+{
+    active_seat = 1;
+    desktop_wait_replay(ctl); /* only a new wait received during this take */
+}
+
+static void seat_release(int ctl)
+{
+    active_seat = 0;
+    if (desktop_wait_generation) {
+        desktop_wait_generation = 0;
+        desktop_wait_publish(ctl);
+    }
+}
+
 static void seat_notify(int requests, const char *msg)
 {
     if (requests >= 0 && send(requests, msg, strlen(msg), MSG_NOSIGNAL | MSG_DONTWAIT) < 0) {
@@ -383,29 +463,42 @@ static void seat_notify(int requests, const char *msg)
     }
 }
 
-static void send_keyboards(void)
+static void send_keyboards(int ctl)
 {
     char msg[16] = "keys";
     int len = lent_locks >= 0 ? snprintf(msg, sizeof msg, "keys%c%d", 0, lent_locks) : 4;
     if (bar_keys >= 0 && control_send(bar_keys, msg, (size_t)len, keyboards, nkeyboards) < 0) {
         say("seat: cannot pass the keyboards to locachy-bar: %s", strerror(errno));
+        bar_link_lost(ctl);
     }
 }
 
-/* The bar's reports on its link: "locks LOCKS", the locks as its keyboards
- * have them after a lock key (it may hold the keyboards out of process 1's
- * sight), passed on to process 1. Every report waiting is passed on; the
- * bar gone, its link is closed. */
+/* The bar reports locks (its grab may hide them from process 1), activity,
+ * and wait-panel actions. A query after self-exec only replays a panel that
+ * still belongs to the active seat. */
 static void bar_reports(int ctl)
 {
     char msg[64];
     int fds[CONTROL_MAX_FDS], nfds = 0, len = -1;
     while (bar_keys >= 0 && (len = control_recv(bar_keys, msg, sizeof msg, fds, &nfds)) > 0) {
         for (int i = 0; i < nfds; i++) close(fds[i]);
+        if (nfds || len >= (int)sizeof msg - 1 || msg[len - 1] == '\0') continue;
         char *end = msg, *fields[3];
         int n = control_fields(msg, len, fields, 3);
         if (n == 1 && strcmp(fields[0], "activity") == 0) {
             if (is_labwc && active_seat) seat_notify(window_requests, "bar-activity");
+            continue;
+        }
+        if (len == sizeof "desktop-wait?" - 1 && strcmp(fields[0], "desktop-wait?") == 0) {
+            desktop_wait_replay(ctl);
+            continue;
+        }
+        if (n == 2 && strcmp(fields[0], "desktop-close") == 0) {
+            uint64_t generation;
+            if (ctl >= 0 && active_seat && desktop_wait_generation &&
+                desktop_generation(fields[1], &generation) && generation == desktop_wait_generation) {
+                desktop_generation_send(ctl, "desktop-close", generation);
+            }
             continue;
         }
         long locks = n == 2 && strcmp(fields[0], "locks") == 0 ? strtol(fields[1], &end, 10) : -1;
@@ -415,14 +508,10 @@ static void bar_reports(int ctl)
             control_send_fields(ctl, report);
         }
     }
-    if (bar_keys >= 0 && (len == 0 || (len < 0 && errno != EAGAIN && errno != EINTR))) {
-        say("seat: locachy-bar's link has closed");
-        close(bar_keys);
-        bar_keys = -1;
-    }
+    if (bar_keys >= 0 && (len == 0 || (len < 0 && errno != EAGAIN && errno != EINTR))) bar_link_lost(ctl);
 }
 
-static void keyboards_lent(const int *fds, int n)
+static void keyboards_lent(int ctl, const int *fds, int n)
 {
     for (int i = 0; i < nkeyboards; i++) close(keyboards[i]);
     nkeyboards = 0;
@@ -430,22 +519,31 @@ static void keyboards_lent(const int *fds, int n)
         if (nkeyboards < MAX_KEYBOARDS) keyboards[nkeyboards++] = fds[i];
         else close(fds[i]);
     }
-    send_keyboards();
+    send_keyboards(ctl);
 }
 
-/* A message's descriptors: a "take"'s keyboards (after its screen lease,
- * which seat does not use: it asks for DRM master) and a "keys"'s are the
- * bar's, with the locks they come with; any other's are closed. */
-static void message_fds(const char *msg, int len, int *fds, int n)
+/* A "take"'s keyboards (after the unused screen lease) and a "keys"'s
+ * belong to the bar. All other messages must have no descriptors. */
+static void seat_control_message(int ctl, char *msg, int len, int *fds, int n, int taking)
 {
     int take = strcmp(msg, "take") == 0;
     if ((take && n >= 1) || strcmp(msg, "keys") == 0) {
         if (len > 5) lent_locks = atoi(msg + 5);
         if (take) close(fds[0]);
-        keyboards_lent(fds + take, n - take);
+        keyboards_lent(ctl, fds + take, n - take);
         return;
     }
     for (int i = 0; i < n; i++) close(fds[i]);
+    if (n || len >= CONTROL_MAX - 1 || msg[len - 1] == '\0' || strcmp(msg, "desktop-wait") != 0) return;
+
+    char *fields[3];
+    uint64_t generation;
+    if (control_fields(msg, len, fields, 3) != 2 || !desktop_generation(fields[1], &generation)) return;
+    if (generation && bar_keys >= 0 && !active_seat && !taking) return;
+    desktop_wait_generation = generation;
+    /* A fresh generation can arrive before "mastered". Hold it until the
+     * seat has finished taking over; release already discarded the old one. */
+    if (!taking || !generation || bar_keys < 0) desktop_wait_publish(ctl);
 }
 
 /* The gestures (libinput-gestures, lisgd: link/gestures), in a process
@@ -857,7 +955,7 @@ int main(int argc, char **argv)
                 for (int i = 0; i < nfds; i++) close(fds[i]);
                 return 1;
             }
-            message_fds(msg, len, fds, nfds);
+            seat_control_message(ctl, msg, len, fds, nfds, 0);
             if (strcmp(msg, "take") == 0) {
                 if (request_master(ctl) < 0) return 1;
                 break;
@@ -942,7 +1040,9 @@ int main(int argc, char **argv)
         bar_pid = start_client("/usr/local/bin/locachy-bar", pair[1], "LOCACHY_BAR_KEYS");
         if (pair[1] >= 0) close(pair[1]);
         bar_keys = pair[0];
-        send_keyboards(); /* those of the first take */
+        if (bar_pid < 0 || bar_keys < 0) bar_link_lost(ctl);
+        send_keyboards(ctl); /* those of the first take */
+        desktop_wait_replay(ctl);
     }
 
     int cfd = -1;
@@ -1049,9 +1149,10 @@ int main(int argc, char **argv)
         }
         while (ready_fd >= 0 && read(ready_fd, drain, sizeof drain) > 0) {
         }
-        /* The bar's locks before anything process 1 is told after them
-         * (a "home" it asked for). */
-        if (p[reports_i].revents & (POLLIN | POLLHUP | POLLERR)) {
+        /* Let any queued control message (in particular hide or release)
+         * invalidate the generation before processing the bar's actions. */
+        if ((ctl_i < 0 || !(p[ctl_i].revents & (POLLIN | POLLHUP))) &&
+            (p[reports_i].revents & (POLLIN | POLLHUP | POLLERR))) {
             bar_reports(ctl);
         }
         if (p[requests_i].revents & (POLLIN | POLLHUP | POLLERR)) {
@@ -1073,14 +1174,13 @@ int main(int argc, char **argv)
                 for (int i = 0; i < nfds; i++) close(fds[i]);
                 break;
             }
-            message_fds(msg, len, fds, nfds);
+            seat_control_message(ctl, msg, len, fds, nfds, 0);
             if (strcmp(msg, "take") == 0) {
                 if (request_master(ctl) < 0 || acquire_drm_masters() < 0) {
                     say("seat: refusing to enable a compositor without DRM master");
                     kill(comp_pid, SIGTERM);
                     break;
                 }
-                active_seat = 1;
                 if (cfd >= 0) {
                     send_msg(cfd, SERVER_ENABLE_SEAT, NULL, 0);
                 }
@@ -1088,12 +1188,14 @@ int main(int argc, char **argv)
                 if (bar_pid > 0) {
                     kill(bar_pid, SIGUSR1);
                 }
+                seat_activate(ctl);
                 if (is_labwc) {
                     wallpaper();
                     gestures(display_ready_sent);
                 }
             } else if (strcmp(msg, "release") == 0) {
                 double release_started = uptime();
+                seat_release(ctl);
                 gestures(0);
                 double gestures_stopped = uptime();
                 if (bar_pid > 0) {
@@ -1101,8 +1203,7 @@ int main(int argc, char **argv)
                     usleep(10000);
                 }
                 bar_reports(ctl); /* its last locks, before "released" */
-                keyboards_lent(NULL, 0); /* process 1 revokes them after "released" */
-                active_seat = 0;
+                keyboards_lent(ctl, NULL, 0); /* process 1 revokes them after "released" */
                 if (is_labwc) seat_notify(window_requests, "seat-release");
                 disable_ack_received = 0;
                 revoke_input_devices();

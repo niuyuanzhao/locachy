@@ -514,6 +514,10 @@ int base_call(char *const argv[]);
 void base_open(char *const argv[], char *why, size_t size);
 void base_open_on(const char *screen, char *const argv[], char *why, size_t size);
 
+/* Home's private control request to open the fixed shared desktop, with the
+ * same reply as base_open_on. No command or connector is passed. */
+void base_desktop_open(char *why, size_t size);
+
 /* For home: the tasks there are, one line each: "NAME: prog > prog ...",
  * NAME being the argv that opened it, joined with spaces. */
 void base_tasks(char *buf, size_t size);

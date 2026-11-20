@@ -6,11 +6,12 @@
  * Container actions are asynchronous requests, never base_open calls. Only
  * base_apps supplies their displayed state and memory usage. Enter opens: a
  * closed container starts, a running one is shown; the compositor remains one
- * shared host session. The first program, files, is home's own file manager
+ * shared host session. The first two program tiles are built in: Graphical
+ * Session opens the shared desktop, and files shows home's file manager
  * (files.c), also shown when a container asks for a folder. A program on the
- * shared display (the top bar's launcher) may ask home to run one of its
- * programs by name (files_program_request): one of these entries, run as
- * Enter runs it; no command or path comes with the request.
+ * shared display (the top bar's launcher) may ask home to run a configured
+ * program by name (files_program_request), as Enter runs it; no command or
+ * path comes with the request.
  *
  * Requires these base interfaces (implemented alongside this UI):
  *   void base_apps(char *buf, size_t size);
@@ -61,7 +62,7 @@ int base_app_action(const char *action, const char *name, char *why, size_t size
 #define BG     0x101820
 #define ACCENT 0x80C0FF
 #define ERROR  0xFF9090
-#define MAX_ENTRIES 16
+#define MAX_ENTRIES 17 /* two built-ins and up to 15 configured programs */
 #define REFRESH_MS 500
 #define MIB 1048576ULL
 #define HIT_ROW 0        /* + the list position */
@@ -73,14 +74,23 @@ static const char *const section_titles[SECTIONS] = {
     N_("Containers"), N_("Programs"), N_("System and hardware")
 };
 
+#define DESKTOP_NAME "graphical-session"
+static const char *const desktop_label = N_("Graphical Session");
+enum builtin_entry { BUILTIN_NONE, BUILTIN_DESKTOP, BUILTIN_FILES };
+
 struct entry {
-    char name[16];
+    char name[sizeof DESKTOP_NAME];
     char spec[256]; /* the command, split in place */
     char *argv[16];
     char key[256];  /* the command joined with spaces: the task's name */
-    int builtin;    /* files: part of home, not a task */
+    enum builtin_entry builtin;
     enum section section;
 };
+
+static const char *entry_label(const struct entry *e)
+{
+    return e->builtin == BUILTIN_DESKTOP ? _(desktop_label) : e->name;
+}
 
 struct app {
     char *name, *state, *error; /* owned by app_data */
@@ -153,8 +163,9 @@ static void program(const char *name, const char *value, void *arg)
     enum section section = *(const enum section *)arg;
     if (strncmp(name, "program_", 8) != 0 || name[8] == '\0' ||
         strcmp(name + 8, "desktop") == 0 || strcmp(name + 8, "files") == 0 ||
+        strcmp(name + 8, DESKTOP_NAME) == 0 ||
         program_section(name + 8) != section || nentries == MAX_ENTRIES) {
-        return; /* The compositor is shared container infrastructure, not a host menu entry. */
+        return; /* The compositor and the built-ins are not configured launchers. */
     }
     struct entry *e = &entries[nentries];
     memset(e, 0, sizeof *e);
@@ -175,6 +186,14 @@ static void program(const char *name, const char *value, void *arg)
     }
 }
 
+static void builtin(struct entry *e, const char *name, enum builtin_entry type)
+{
+    memset(e, 0, sizeof *e);
+    snprintf(e->name, sizeof e->name, "%s", name);
+    e->builtin = type;
+    e->section = SECTION_PROGRAMS;
+}
+
 static void load(void)
 {
     int host = selected - napps;
@@ -185,10 +204,9 @@ static void load(void)
         snprintf(name, sizeof name, "%s", entries[host].name);
     }
     memset(&entries[0], 0, sizeof entries[0]);
-    snprintf(entries[0].name, sizeof entries[0].name, "files");
-    entries[0].builtin = 1;
-    entries[0].section = SECTION_PROGRAMS;
-    nentries = 1;
+    builtin(&entries[0], DESKTOP_NAME, BUILTIN_DESKTOP);
+    builtin(&entries[1], "files", BUILTIN_FILES);
+    nentries = 2;
     for (enum section s = SECTION_PROGRAMS; s < SECTIONS; s++) {
         rc_read(program, &s);
     }
@@ -1029,10 +1047,11 @@ static void draw_output(int ready)
                 snprintf(line, sizeof line, "%s  %llu/%llu MiB", state_label(apps[pos].state),
                          apps[pos].ram / MIB, apps[pos].swap / MIB);
             } else if (pos < napps + nentries) {
-                int i = pos - napps;
-                grid_text(col + 1, row, entries[i].name, fg, bg);
-                snprintf(line, sizeof line, "%s", entries[i].builtin ? _("home and the shared folders") :
-                         task_of(entries[i].key, state, sizeof state));
+                const struct entry *e = &entries[pos - napps];
+                grid_text(col + 1, row, entry_label(e), fg, bg);
+                snprintf(line, sizeof line, "%s", e->builtin == BUILTIN_DESKTOP ? _("Open the shared desktop") :
+                         e->builtin == BUILTIN_FILES ? _("home and the shared folders") :
+                         task_of(e->key, state, sizeof state));
             } else {
                 grid_text(col + 1, row, pos == napps + nentries ? _("reboot") : _("power off"), fg, bg);
                 line[0] = '\0';
@@ -1118,7 +1137,7 @@ static void open_entry(int host);
 
 /* A program of home's that another asked home to run (files_program_request:
  * the top bar's launcher), run as Enter on it runs it; a name not among the
- * entries (rc.conf's program_NAME, files and desktop not) is refused. 1 if
+ * configured program_NAME entries (not the built-ins) is refused. 1 if
  * there was a request. */
 static int run_requested(void)
 {
@@ -1278,7 +1297,7 @@ static void confirm_stop(void)
         int host = selected - napps;
         if (host < nentries && entries[host].builtin) {
             last_customized = 1;
-            snprintf(last, sizeof last, _("%s is part of home: nothing to close."), entries[host].name);
+            snprintf(last, sizeof last, _("%s is part of home: nothing to close."), entry_label(&entries[host]));
         } else if (host < nentries) {
             stop_program = host;
             confirming = CONF_PROGRAM;
@@ -1566,16 +1585,27 @@ static int pointer_key(void)
 
 static void open_entry(int host)
 {
+    const struct entry *e = &entries[host];
+    if (e->builtin == BUILTIN_FILES) {
+        view_files();
+        refresh();
+        return;
+    }
     last_customized = 1;
-    snprintf(last, sizeof last, _("opening %s..."), entries[host].name);
+    snprintf(last, sizeof last, _("opening %s..."), entry_label(e));
     draw(0);
+    if (e->builtin == BUILTIN_DESKTOP) {
+        base_desktop_open(last, sizeof last);
+        say("home: %s", last);
+        return;
+    }
     struct screen_output on;
     int several = screen_is_extended && screen_is_extended() && screen_output_count &&
                   screen_output_count() > 1 && screen_output_get(home_output, &on) == 0;
-    base_open_on(several ? on.name : NULL, entries[host].argv, last, sizeof last);
+    base_open_on(several ? on.name : NULL, e->argv, last, sizeof last);
     say("home: %s", last);
     if (several && strncmp(last, "shown ", 6) == 0) {
-        snprintf(last, sizeof last, _("%s is open on %s."), entries[host].name, on.name);
+        snprintf(last, sizeof last, _("%s is open on %s."), e->name, on.name);
     }
 }
 
@@ -1720,9 +1750,6 @@ int main(void)
             confirming = CONF_REBOOT;
         } else if (key == '\n' && selected == napps + nentries + 1) {
             confirming = CONF_POWEROFF;
-        } else if (key == '\n' && entries[selected - napps].builtin) {
-            view_files();
-            refresh();
         } else if (key == '\n') {
             open_entry(selected - napps);
         }
