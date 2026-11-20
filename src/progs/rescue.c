@@ -546,6 +546,7 @@ static void begin_exit(void)
 static void terminal(void)
 {
     if (!windowed()) {
+        textsel_clear();
         pointer_release(); keys_release(); screen_release();
         handed_screen = 1;
     }
@@ -1018,6 +1019,10 @@ static void copy_key(int key)
 static int pointer_key(void)
 {
     const struct pointer_event *e = pointer_last();
+    if (e->cancelled) {
+        textsel_pointer(e, 0);
+        return 0;
+    }
     int hit = ui_hit_at(e->col, e->row);
     if (e->wheel) {
         if (session_closed) closed_selected = clamp(closed_selected - e->wheel, 2);

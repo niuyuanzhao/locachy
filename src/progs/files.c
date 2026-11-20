@@ -86,6 +86,9 @@
 #include "files-cloud.h"
 #include "docs-proto.h"
 
+/* The active canvas scale (screen.c). */
+double screen_scale(void);
+
 /* In a window (LOCACHY_BACKEND=wayland) there is no process 1 to ask: the
  * document viewer opens through the seat's window requests, containers
  * through the top bar's open socket (xdg-open's protocol). */
@@ -273,11 +276,11 @@ static void cloud_tick(void);
 enum { DRAG_NONE, DRAG_PENDING, DRAG_ITEMS, DRAG_BAND };
 static struct {
     int mode, pane, item, mods, clear;
-    int ax, ay;          /* the band's anchor, in the pane's document pixels */
+    int ax, ay;          /* item press cell, or band anchor in document pixels */
+    int apx, apy;        /* item press in canvas pixels */
     int x, y, col, row;  /* the pointer now */
     char *base;          /* the marks at the press */
-    int nbase;
-    int out;             /* tried to leave the window as a drag to other programs */
+    int nbase, base_sel;
 } drag;
 /* A drag to other programs with private files (tools/DOCUMENTS.md): the
  * document service's connection until the drag ends, and its session. */
@@ -618,6 +621,33 @@ static struct sigaction copy_saved_term;
 static void draw(void);
 static void output_ready(void);
 static void drag_stop(void);
+static int pointer_here(const struct pointer_event *e);
+
+static void question_draw(const char *line, int stay)
+{
+    int row = screen_rows() - 3, cols = screen_cols();
+    /* TRANSLATORS: Y, N and Esc are keys; keep them. */
+    const char *yes_label = _("Y: yes"), *no_label = _("N: no"), *stay_label = _("Esc: stay");
+    int buttons = ui_cells(yes_label) + ui_cells(no_label) + 5 + (stay ? ui_cells(stay_label) + 3 : 0);
+    char shown[600];
+    fit(shown, sizeof shown, line, cols - buttons - 2);
+    ui_hits_clear();
+    screen_fill(0, row, cols, 1, BG);
+    screen_text(1, row, shown, ERROR, BG);
+    int c = ui_button(2 + ui_cells(shown), row, yes_label, HIT_KEY + 'y');
+    c = ui_button(c, row, no_label, HIT_KEY + 'n');
+    if (stay) ui_button(c, row, stay_label, HIT_KEY + 27);
+    screen_flush();
+}
+
+static int question_click(int stay)
+{
+    const struct pointer_event *e = pointer_last();
+    if (!e->pressed || e->button != BTN_LEFT || !pointer_here(e)) return 0;
+    int id = ui_hit_at(e->col, e->row);
+    if (id == HIT_KEY + 'y' || id == HIT_KEY + 'n' || (stay && id == HIT_KEY + 27)) return id - HIT_KEY;
+    return 0;
+}
 
 static double copy_clock(void)
 {
@@ -692,24 +722,9 @@ static void copy_show(void)
 static void copy_ask(int closing)
 {
     for (;;) {
-        char line[400];
-        int row = screen_rows() - 3;
-        snprintf(line, sizeof line, "%s ", closing ?
-                 /* TRANSLATORS: y, n and Esc are keys; keep them. */
-                 _("The copy is not finished. y: stop it now and close, n: close when it is done, Esc: stay.") :
-                 /* TRANSLATORS: y and N are keys; keep them. */
-                 _("Stop copying? What is not copied yet is not kept. y/N"));
-        screen_fill(0, row, screen_cols(), 1, BG);
-        screen_text(1, row, line, ERROR, BG);
-        /* TRANSLATORS: Y is the key; keep it. */
-        int c = ui_button(2 + ui_cells(line), row, _("Y: yes"), HIT_KEY + 'y');
-        /* TRANSLATORS: N is the key; keep it. */
-        c = ui_button(c, row, _("N: no"), HIT_KEY + 'n');
-        if (closing) {
-            /* TRANSLATORS: Esc is the key; keep it. */
-            ui_button(c, row, _("Esc: stay"), HIT_KEY + 27);
-        }
-        screen_flush();
+        /* TRANSLATORS: y, n and Esc are keys; keep them. */
+        question_draw(closing ? _("The copy is not finished. y: stop it now and close, n: close when it is done, Esc: stay.") :
+                                _("Stop copying? What is not copied yet is not kept. y/N"), closing);
         int key = key_poll_timeout(copy_wake[0], -1);
         if (copy_terminated) {
             copying.stop = COPY_TERMINATED;
@@ -724,10 +739,7 @@ static void copy_ask(int closing)
             continue;
         }
         if (key == K_POINTER) {
-            const struct pointer_event *e = pointer_last();
-            if (!e->pressed || e->button != BTN_LEFT) continue; /* a motion is no answer */
-            int id = ui_hit_at(e->col, e->row);
-            key = id >= HIT_KEY ? id - HIT_KEY : 0;
+            key = question_click(closing);
             if (!key) continue;
         }
         int act = key_action(key, keys_modifiers());
@@ -1630,6 +1642,7 @@ static void load_pane(struct pane *p, const char *keep)
         cloud_begin(p, CLOUD_READ);
         return;
     }
+    if (drag.mode != DRAG_NONE && p == &tabs[cur_tab].pane[drag.pane]) drag_stop();
     for (int i = 0; i < p->nlist; i++) {
         free_entry(&p->list[i]);
     }
@@ -1785,6 +1798,7 @@ static void cloud_tick(void)
             f->exec = S_ISREG(f->mode) && (f->mode & 0111);
         }
         if (ok) {
+            if (drag.mode != DRAG_NONE && p == &tabs[cur_tab].pane[drag.pane]) drag_stop();
             for (int i = 0; i < p->nlist; i++) free_entry(&p->list[i]);
             free(p->list);
             p->list = next.list; p->cap = next.cap; p->nlist = next.nlist; p->nhidden = next.nhidden;
@@ -3510,30 +3524,40 @@ static void draw_toolbar(void)
     }
 
     int path_col = c, max_path = right - path_col - 1;
-    char raw[PATH_MAX + 512], shown_cwd[PATH_MAX + 256], line[1024];
+    char raw[PATH_MAX + 512], prefix[128] = "", search[PATH_MAX + 256], line[sizeof raw];
+    const char *cwd = P->cwd;
     if (is_search(P)) {
-        snprintf(shown_cwd, sizeof shown_cwd, _("Search '%s' in %s"), P->search_query, P->search_root);
+        snprintf(search, sizeof search, _("Search '%s' in %s"), P->search_query, P->search_root);
+        cwd = search;
     } else {
-        const struct cloud_mount *cloud = cloud_at(P->cwd);
-        if (cloud) snprintf(shown_cwd, sizeof shown_cwd, "[%s] %.700s", cloud_state(cloud), P->cwd);
-        else snprintf(shown_cwd, sizeof shown_cwd, "%.800s", P->cwd);
+        const struct cloud_mount *cloud = cloud_at(cwd);
+        if (cloud) snprintf(prefix, sizeof prefix, "[%s] ", cloud_state(cloud));
     }
     /* TRANSLATORS: Ctrl+V is the key; keep it. */
-    snprintf(raw, sizeof raw, "%s%s%s%s", shown_cwd, P->filter[0] ? _("   filter: ") : "", P->filter,
+    snprintf(raw, sizeof raw, "%s%s%s%s%s", prefix, cwd, P->filter[0] ? _("   filter: ") : "", P->filter,
              nclip ? (clip_cut ? _("   (cut: Ctrl+V moves here)") : _("   (copied: Ctrl+V pastes here)")) : "");
     fit(line, sizeof line, raw, max_path);
     screen_text(path_col, 1, line, ACCENT, BAR_BG);
-    if (!is_trash(P) && !is_search(P)) {
-        ui_hit(path_col, 1, 1, 1, HIT_PATH + 0); /* / */
-        int len = (int)strlen(P->cwd);
-        for (int k = 1, start = 1; k <= len && path_col + start < right; k++) {
-            if (P->cwd[k] == '/' || P->cwd[k] == '\0') {
-                int w = k - start;
-                if (w > 0 && path_col + start + w <= right) {
-                    ui_hit(path_col + start, 1, w, 1, HIT_PATH + k);
-                }
-                start = k + 1;
-            }
+    if (cwd[0] == '/' && max_path > 0) {
+        /* Only complete components of the path as drawn, not the ellipsis
+         * or the status suffix. Hit IDs retain the actual path byte offset. */
+        size_t visible = strlen(line), prefix_len = strlen(prefix);
+        if (strcmp(raw, line) != 0) visible = utf_fit(raw, max_path - 1);
+        if (visible <= prefix_len) return;
+        visible -= prefix_len;
+        int col = path_col + ui_cells(prefix);
+        ui_hit(col++, 1, 1, 1, HIT_PATH); /* / */
+        for (size_t start = 1; start < visible && cwd[start];) {
+            size_t bytes = strcspn(cwd + start, "/"), end = start + bytes;
+            if (end > visible) break;
+            char component[PATH_MAX];
+            memcpy(component, cwd + start, bytes);
+            component[bytes] = '\0';
+            int w = ui_cells(component);
+            ui_hit(col, 1, w, 1, HIT_PATH + (int)end);
+            col += w + 1;
+            if (!cwd[end]) break;
+            start = end + 1;
         }
     }
 }
@@ -3960,20 +3984,17 @@ static int yes(const char *question)
 {
     char line[600];
     snprintf(line, sizeof line, "%s y/N ", question);
-    int row = screen_rows() - 3;
-    screen_fill(0, row, screen_cols(), 1, BG);
-    screen_text(1, row, line, ERROR, BG);
-    /* TRANSLATORS: Y is the key; keep it. */
-    int c = ui_button(2 + ui_cells(line), row, _("Y: yes"), HIT_KEY + 'y');
-    /* TRANSLATORS: N is the key; keep it. */
-    ui_button(c, row, _("N: no"), HIT_KEY + 'n');
-    screen_flush();
+    question_draw(line, 0);
     for (;;) {
         int key = key_poll_timeout(-1, -1);
+        if (key == K_SHOWN) {
+            draw();
+            question_draw(line, 0);
+            continue;
+        }
         if (key == K_POINTER) {
-            const struct pointer_event *e = pointer_last();
-            if (!e->pressed) continue; /* a motion is no answer */
-            key = pointer_here(e) && ui_hit_at(e->col, e->row) == HIT_KEY + 'y' ? 'y' : 'n';
+            key = question_click(0);
+            if (!key) continue;
         }
         if (key == K_ACT_HOME) continue; /* process 1's: the question waits */
         if (key_action(key, keys_modifiers()) == ACT_QUIT) {
@@ -4144,7 +4165,7 @@ static void properties(int folder_self)
             drag_stop();
             pull.on = 0;
             draw();
-            return;
+            continue;
         }
         if (key == K_POINTER) {
             const struct pointer_event *e = pointer_last();
@@ -4329,7 +4350,7 @@ static int choose(const char *path, const char *type, char *name, size_t size)
             drag_stop();
             pull.on = 0;
             draw();
-            return 0;
+            continue;
         }
         if (key == K_POINTER) {
             const struct pointer_event *e = pointer_last();
@@ -4453,7 +4474,7 @@ static int bar_open(const char *name, const char *target, char *why, size_t size
         return -1;
     }
     reply[got] = '\0';
-    if (strncmp(reply, "ok", 2) == 0) {
+    if (strcmp(reply, "ok") == 0 || strncmp(reply, "ok ", 3) == 0) {
         return 0;
     }
     snprintf(why, size, "%s", strncmp(reply, "error ", 6) == 0 ? reply + 6 : reply);
@@ -4965,6 +4986,28 @@ static int archive_menu(int col, int row, int extract)
     return got < 0 ? -1 : codes[got];
 }
 
+/* The batch window belongs to this files task, not to a new seat request
+ * (which accepts only one pathname). Wait for the result, as base_call does. */
+static int archive_batch_window(char *const argv[])
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (close_range(3, ~0u, 0) < 0) _exit(127);
+        unsetenv("LOCACHY_CONTROL");
+        unsetenv("LOCACHY_SESSION_FD");
+        unsetenv("LOCACHY_REQUEST_FD");
+        unsetenv("LOCACHY_WINDOW_READY_FD");
+        setenv("LOCACHY_WINDOW_TITLE", "Archive", 1);
+        execv(argv[0], argv);
+        _exit(127);
+    }
+    if (pid < 0) return -1;
+    int st;
+    pid_t done;
+    do { done = waitpid(pid, &st, 0); } while (done < 0 && errno == EINTR);
+    return done == pid && WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+}
+
 /* archive, as the menus' code says, on the targets; then this folder again,
  * a new archive selected in it. Extract and trash: the archives go to the
  * Trash when all came out (Dolphin's plugin does it in Ark). */
@@ -4972,17 +5015,7 @@ static void archive_action(int code)
 {
     int idx[MAX_CLIP], n = targets(P, idx, MAX_CLIP), k = 0, status;
     char *argv[MAX_CLIP + 8], name[NAME_MAX + 16] = "", made[PATH_MAX];
-    if (n == 0 || is_trash(P) || is_search(P)) return;
-    if (in_window()) {
-        char why[512];
-        if (seat_window("archive", (code == KEY_EXTRACT_HERE || code == KEY_EXTRACT_TRASH || code == KEY_EXTRACT_TO) &&
-                        item_path(P, idx[0], made, sizeof made) == 0 ? made : "", why, sizeof why) == 0) {
-            report(0, _("Opened with %s in a window."), "archive");
-        } else {
-            report(1, _("Cannot open a %s window: %.400s"), "archive", why);
-        }
-        return;
-    }
+    if (n == 0 || pick_type || is_trash(P) || is_search(P)) return;
     argv[k++] = ARCHIVE_PROGRAM;
     if (code == KEY_EXTRACT_HERE || code == KEY_EXTRACT_TRASH) {
         argv[k++] = "--batch";
@@ -5007,7 +5040,7 @@ static void archive_action(int code)
         if (item_path(P, idx[i], path, sizeof path) == 0 && (argv[k] = strdup(path)) != NULL) k++;
     }
     argv[k] = NULL;
-    status = base_call(argv);
+    status = k - first != n ? -1 : in_window() ? archive_batch_window(argv) : base_call(argv);
     for (int i = first; i < k; i++) free(argv[i]);
     if (code == KEY_EXTRACT_TRASH && status == 0) {
         trash_items(P, idx, n);
@@ -5125,6 +5158,16 @@ static void drag_stop(void)
 {
     free(drag.base);
     memset(&drag, 0, sizeof drag);
+}
+
+static void drag_cancel(void)
+{
+    if (drag.mode == DRAG_BAND) {
+        struct pane *p = &tabs[cur_tab].pane[drag.pane];
+        for (int i = 0; i < drag.nbase; i++) p->list[i].marked = drag.base[i];
+        p->sel = drag.base_sel;
+    }
+    drag_stop();
 }
 
 /* The marks of drag.pane's items updated from the rubberband rectangle in
@@ -5343,16 +5386,15 @@ static int docs_begin(char (*path)[PATH_MAX], const int *private, int n, char **
  * the program it is dropped on may read (the compositor asks the service
  * before it lets the drop through), and a FileTransfer key of the same
  * paths. A real path of such a file is never offered. Nothing outside the
- * home; all or nothing. 1: the drag left. */
+ * home; all or nothing. 1: the internal drag ended (handed off or refused). */
 static int drag_out(int px, int py)
 {
     int w, h;
-    if (drag.out || pick_type || !wl_data_active || !wl_data_drag_start || !wl_data_press_serial ||
+    if (pick_type || !wl_data_active || !wl_data_drag_start || !wl_data_press_serial ||
         !wl_data_active()) return 0;
     screen_pixels(&w, &h);
     if (px >= 0 && py >= 0 && px < w && py < h) return 0;
-    drag.out = 1;
-    if (wl_data_drag_active && wl_data_drag_active()) return 0;
+    if (wl_data_drag_active && wl_data_drag_active()) return 1;
     if (docs_drag.fd >= 0) docs_drag_ended(0, NULL); /* a drag that never told its end */
     struct pane *fp = &tabs[cur_tab].pane[drag.pane];
     int idx[MAX_CLIP], n = 0;
@@ -5427,7 +5469,14 @@ static int drag_out(int px, int py)
     free(real);
     free(uris);
     free(paths);
-    return !refused;
+    return 1;
+}
+
+static int pointer_cell_only(const struct pointer_event *e)
+{
+    /* Synthetic events can provide only cells; the real origin is in
+     * column 0, either in row 0 or above it in the top bar. */
+    return !e->x && !e->y && (e->col != 0 || e->row > 0);
 }
 
 static void pointer_xy(const struct pointer_event *e, int *x, int *y)
@@ -5435,10 +5484,11 @@ static void pointer_xy(const struct pointer_event *e, int *x, int *y)
     cell_metrics();
     /* Extended pointer pixels are desktop logical coordinates; drawing and
      * rubberband anchors use the selected output's native pixels. */
-    if (native_outputs() && screen_output_at && (e->x || e->y) &&
+    int cell_only = pointer_cell_only(e);
+    if (!cell_only && native_outputs() && screen_output_at &&
         screen_output_at(e->x, e->y, x, y) == e->output) return;
-    *x = e->x || e->y ? e->x : e->col * cell_w + cell_w / 2;
-    *y = e->x || e->y ? e->y : top_px + e->row * cell_h + cell_h / 2;
+    *x = cell_only ? e->col * cell_w + cell_w / 2 : e->x;
+    *y = cell_only ? top_px + e->row * cell_h + cell_h / 2 : e->y;
 }
 
 static void place_go(int i)
@@ -5456,6 +5506,13 @@ static void place_go(int i)
 static int pointer_key(int *out_mods)
 {
     const struct pointer_event *e = pointer_last();
+    if (e->cancelled) {
+        /* Only the local left-button gesture ends here. The compositor
+         * owns any drag already handed off to Wayland. */
+        if (e->button != BTN_LEFT || drag.mode == DRAG_NONE) return 0;
+        drag_cancel();
+        return -1;
+    }
     int mods = keys_modifiers(), px, py;
     if (native_outputs()) {
         if (e->output < 0 || e->output >= screen_output_count()) return 0;
@@ -5514,8 +5571,9 @@ static int pointer_key(int *out_mods)
         }
         return 0;
     }
-    if (e->wheel) {
-        if (e->col < SIDE) {
+    if (e->wheel || e->hwheel) {
+        if (!side_hidden && e->col < SIDE) {
+            if (!e->wheel) return 0;
             side_sel = clampi(side_sel - e->wheel, 0, nplaces - 1);
             return -1;
         }
@@ -5525,9 +5583,10 @@ static int pointer_key(int *out_mods)
             pane_cols(0, &c0, &w0);
             which = e->col > c0 + w0;
         }
+        if (!e->wheel && tabs[cur_tab].pane[which].view != VIEW_COMPACT) return 0;
         tabs[cur_tab].active = which;
         set_active();
-        if (mods & KEYS_CTRL) {
+        if ((mods & KEYS_CTRL) && e->wheel) {
             zoom_pane(P, e->wheel > 0 ? 1 : -1);
             return -1;
         }
@@ -5535,29 +5594,33 @@ static int pointer_key(int *out_mods)
         pane_area(P, which, &col, &row, &cols, &nrows);
         pane_grid(P, cols, nrows, &gc, &tc, &tr, &vr);
         pane_units(P, gc, vr, &unit, &span);
-        int step = (P->view == VIEW_DETAILS ? 3 : 1) * e->wheel;
+        int delta = P->view == VIEW_COMPACT && e->hwheel ? e->hwheel :
+                    -(P->view == VIEW_DETAILS ? 3 : 1) * e->wheel;
         int total = P->nlist > 0 ? (P->nlist - 1) / unit + 1 : 0;
         int max_u = total > span ? total - span : 0;
-        int u0 = clampi(P->top / unit - step, 0, max_u);
+        int u0 = clampi(P->top / unit + delta, 0, max_u);
         P->top = u0 * unit;
         P->follow_sel = 0;
         return -1;
     }
 
-    /* A drag in progress: a motion extends the rubberband (or starts a drag
-     * of items once the pointer moves to another cell); the release drops. */
-    if (!e->button && drag.mode != DRAG_NONE) {
+    /* A motion extends the band or starts an item drag past the threshold;
+     * the release drops. */
+    if (!e->button && !e->hwheel && !e->gesture && drag.mode != DRAG_NONE) {
+        if (drag.mode == DRAG_PENDING) {
+            int cell_only = pointer_cell_only(e);
+            int moved = cell_only ? e->col != drag.ax || e->row != drag.ay :
+                        abs(px - drag.apx) + abs(py - drag.apy) >= (int)(6 * screen_scale() + 0.5);
+            if (!moved) return 0;
+            drag.mode = DRAG_ITEMS;
+        }
         drag.x = px;
         drag.y = py;
         drag.col = e->col;
         drag.row = e->row;
         drag.mods = mods;
-        if ((drag.mode == DRAG_PENDING || drag.mode == DRAG_ITEMS) && !pick_type && drag_out(px, py)) {
-            drag_stop(); /* the compositor has the pointer until the drop */
-            return -1;
-        }
-        if (drag.mode == DRAG_PENDING && (e->col != drag.ax || e->row != drag.ay)) {
-            drag.mode = DRAG_ITEMS;
+        if (drag.mode == DRAG_ITEMS && drag_out(px, py)) {
+            drag_stop(); /* handed to the compositor, or refused */
             return -1;
         }
         if (drag.mode == DRAG_BAND) {
@@ -5696,16 +5759,18 @@ static int pointer_key(int *out_mods)
         P->sel = i;
         P->follow_sel = 1;
         msg_sticky = 0;
-        if (e->clicks == 2 && !(mods & (KEYS_SHIFT | KEYS_CTRL))) {
-            drag_stop();
-            return '\n';
+        if (e->clicks == 2 && !(mods & (KEYS_SHIFT | KEYS_CTRL))) return '\n';
+        if (pick_type) {
+            if (clear) for (int k = 0; k < P->nlist; k++) P->list[k].marked = 0;
+            return -1;
         }
-        drag_stop();
         drag.mode = DRAG_PENDING;
         drag.pane = which;
         drag.item = i;
         drag.ax = e->col;
         drag.ay = e->row;
+        drag.apx = px;
+        drag.apy = py;
         drag.col = e->col;
         drag.row = e->row;
         drag.mods = mods;
@@ -5729,9 +5794,14 @@ static int pointer_key(int *out_mods)
         pane_grid(P, cols, nrows, &gc, &tc, &tr, &vr);
         pane_scroll_px(P, gc, tc, tr, vr, &sx, &sy);
         drag_stop();
-        if (!(mods & (KEYS_SHIFT | KEYS_CTRL))) {
-            for (int k = 0; k < P->nlist; k++) P->list[k].marked = 0;
+        /* Capture before the plain band's first update replaces the marks. */
+        if (P->nlist > 0) {
+            drag.base = malloc((size_t)P->nlist);
+            if (!drag.base) return -1;
+            drag.nbase = P->nlist;
+            for (int k = 0; k < P->nlist; k++) drag.base[k] = (char)P->list[k].marked;
         }
+        drag.base_sel = P->sel;
         drag.mode = DRAG_BAND;
         drag.pane = which;
         drag.mods = mods;
@@ -5741,10 +5811,6 @@ static int pointer_key(int *out_mods)
         drag.y = py;
         drag.col = e->col;
         drag.row = e->row;
-        if (P->nlist > 0 && (drag.base = calloc((size_t)P->nlist, 1)) != NULL) {
-            drag.nbase = P->nlist;
-            for (int k = 0; k < P->nlist; k++) drag.base[k] = (char)P->list[k].marked;
-        }
         band_mark();
         return -1;
     }
@@ -5839,13 +5905,7 @@ static int browse(char *out, size_t size)
         int act = key_list_action(key, mods); /* a list: q is Esc */
         if (act == ACT_CANCEL) {
             if (drag.mode != DRAG_NONE) {
-                if (drag.mode == DRAG_BAND) {
-                    struct pane *dp = &tabs[cur_tab].pane[drag.pane];
-                    for (int k = 0; k < dp->nlist; k++) {
-                        dp->list[k].marked = k < drag.nbase ? drag.base[k] : 0;
-                    }
-                }
-                drag_stop();
+                drag_cancel();
                 continue;
             }
             if (pull.on) {

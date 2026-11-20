@@ -7,8 +7,13 @@
  *   (no argument)              commands:
  *   key                        press a key: a keyboard serial of ours
  *   set [primary|png] TEXT     wl_data_clipboard_set (png: hex bytes)
+ *   set-get [primary|png] TEXT set, then get in the same dispatch turn
  *   get [primary|png]          wl_data_clipboard_get: status, size, hex bytes
  *   clear [primary]            wl_data_clipboard_clear
+ *   input normal|no-focus|no-serial
+ *                              mask the backend's input reports, not Wayland focus
+ *   watch-offer [primary]      record the current offer before starting a source
+ *   wait-offer [primary]       wait for a different non-null offer
  *   where                      our window's content origin, in layout pixels
  *   drag X Y X2 Y2 PATH        press at X,Y, drag PATH's URI to X2,Y2, release
  *   quit
@@ -25,9 +30,15 @@
 #include "virtual-keyboard-unstable-v1-client-protocol.h"
 #include "wlr-virtual-pointer-unstable-v1-client-protocol.h"
 
-static uint32_t key_serial, button_serial;
-uint32_t wl_backend_keyboard_serial(void) { return key_serial; }
-uint32_t wl_backend_button_serial(void) { return button_serial; }
+static uint32_t key_serial, button_serial, press_serial;
+static int focused;
+static unsigned focus_generation;
+static enum { INPUT_NORMAL, INPUT_NO_FOCUS, INPUT_NO_SERIAL } input_mode;
+uint32_t wl_backend_keyboard_serial(void) { return input_mode == INPUT_NO_SERIAL ? 0 : key_serial; }
+uint32_t wl_backend_button_serial(void) { return input_mode == INPUT_NO_SERIAL ? 0 : button_serial; }
+uint32_t wl_backend_press_serial(void) { return input_mode == INPUT_NO_SERIAL ? 0 : press_serial; }
+int wl_backend_keyboard_focused(void) { return input_mode != INPUT_NO_FOCUS && focused; }
+unsigned wl_backend_keyboard_focus_generation(void) { return focus_generation; }
 
 static struct wl_display *display;
 static struct wl_compositor *compositor;
@@ -46,9 +57,9 @@ static struct wl_output *output;
 static struct wl_buffer *buffer;
 static struct xdg_surface *xsurf;
 static struct xdg_toplevel *toplevel;
-static int configured, focused, keys_seen, presses_seen, entered, out_w = 1920, out_h = 1080;
+static int configured, keys_seen, presses_seen, entered, out_w = 1920, out_h = 1080;
 static double enter_x, enter_y;
-static uint32_t ticks;
+static uint32_t ticks, watched_offer[CLIPBOARD_SELECTIONS];
 
 #define WIN_W 200
 #define WIN_H 150
@@ -85,9 +96,20 @@ static const struct xdg_toplevel_listener top_listener = { .configure = top_conf
 
 static void kb_keymap(void *d, struct wl_keyboard *k, uint32_t f, int32_t fd, uint32_t s) { (void)d; (void)k; (void)f; (void)s; close(fd); }
 static void kb_enter(void *d, struct wl_keyboard *k, uint32_t serial, struct wl_surface *s, struct wl_array *a)
-{ (void)d; (void)k; (void)a; if (s == surface) { focused = 1; key_serial = serial; } }
+{
+    (void)d; (void)k; (void)a;
+    if (s != surface) return;
+    focused = 1;
+    focus_generation++;
+    key_serial = serial;
+}
 static void kb_leave(void *d, struct wl_keyboard *k, uint32_t serial, struct wl_surface *s)
-{ (void)d; (void)k; (void)serial; if (s == surface) focused = 0; }
+{
+    (void)d; (void)k; (void)serial;
+    if (s != surface) return;
+    focused = 0;
+    focus_generation++;
+}
 static void kb_key(void *d, struct wl_keyboard *k, uint32_t serial, uint32_t t, uint32_t key, uint32_t state)
 { (void)d; (void)k; (void)t; (void)key; (void)state; key_serial = serial; keys_seen++; }
 static void kb_mods(void *d, struct wl_keyboard *k, uint32_t serial, uint32_t a, uint32_t b, uint32_t c, uint32_t g)
@@ -108,7 +130,11 @@ static void pt_button(void *d, struct wl_pointer *p, uint32_t serial, uint32_t t
 {
     (void)d; (void)p; (void)t; (void)b;
     button_serial = serial;
-    if (state == WL_POINTER_BUTTON_STATE_PRESSED) presses_seen++;
+    if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
+        press_serial = serial;
+        wl_data_pointer_pressed();
+        presses_seen++;
+    }
 }
 static void pt_axis(void *d, struct wl_pointer *p, uint32_t t, uint32_t a, wl_fixed_t v) { (void)d; (void)p; (void)t; (void)a; (void)v; }
 static void pt_frame(void *d, struct wl_pointer *p) { (void)d; (void)p; }
@@ -234,6 +260,12 @@ static void print_get(int primary, const char *mime)
     printf("\n");
 }
 
+static uint32_t current_offer_id(int primary)
+{
+    struct wl_proxy *offer = primary ? (struct wl_proxy *)ds.primary_offer : (struct wl_proxy *)ds.offer;
+    return offer ? wl_proxy_get_id(offer) : 0;
+}
+
 static size_t unhex(char *out, size_t size, const char *in)
 {
     size_t n = strlen(in) / 2;
@@ -257,24 +289,43 @@ static int command(char *line)
         zwp_virtual_keyboard_v1_key(vk, ticks += 10, KEY_C, WL_KEYBOARD_KEY_STATE_RELEASED);
         int ok = wait_until(&keys_seen, before + 2, 2000);
         printf("key ok=%d focused=%d serial=%u\n", ok, focused, key_serial);
-    } else if (!strcmp(line, "set")) {
+    } else if (!strcmp(line, "set") || !strcmp(line, "set-get")) {
         const char *text = arg ? arg + (primary ? 8 : png ? 4 : 0) : "";
+        const char *mime = png ? "image/png" : "text/plain;charset=utf-8";
         char bytes[256];
         size_t len = strlen(text);
         if (png) {
             len = unhex(bytes, sizeof bytes, text);
             text = bytes;
         }
-        int status = wl_data_clipboard_set(primary, png ? "image/png" : "text/plain;charset=utf-8", text, len);
-        int *confirmed = &ds.own[primary ? 1 : 0].confirmed;
-        wait_until(confirmed, 1, 1000);
-        printf("set status=%d confirmed=%d\n", status, *confirmed);
+        int status = wl_data_clipboard_set(primary, mime, text, len);
+        printf("set status=%d confirmed=%d", status, ds.own[primary] != NULL);
+        if (!strcmp(line, "set-get")) {
+            /* No pump or settle: the set's return value is the commit point. */
+            printf("; ");
+            print_get(primary, mime);
+        } else {
+            printf("\n");
+        }
     } else if (!strcmp(line, "clear")) {
         printf("clear status=%d\n", wl_data_clipboard_clear(primary));
-        settle(100);
     } else if (!strcmp(line, "get")) {
-        settle(100);
         print_get(primary, png ? "image/png" : "text/plain;charset=utf-8");
+    } else if (!strcmp(line, "input") && arg) {
+        if (!strcmp(arg, "normal")) input_mode = INPUT_NORMAL;
+        else if (!strcmp(arg, "no-focus")) input_mode = INPUT_NO_FOCUS;
+        else if (!strcmp(arg, "no-serial")) input_mode = INPUT_NO_SERIAL;
+        else arg = "unknown";
+        printf("input %s\n", arg);
+    } else if (!strcmp(line, "watch-offer")) {
+        watched_offer[primary] = current_offer_id(primary);
+        printf("watch-offer\n");
+    } else if (!strcmp(line, "wait-offer")) {
+        int64_t until = now_ms() + 2000;
+        uint32_t id;
+        while ((!(id = current_offer_id(primary)) || id == watched_offer[primary]) &&
+               now_ms() < until) pump(20, 0);
+        printf("wait-offer ok=%d\n", id != 0 && id != watched_offer[primary]);
     } else if (!strcmp(line, "where")) {
         entered = 0;
         pointer_to(out_w / 2, out_h / 2);
@@ -449,6 +500,21 @@ static void unit(void)
     offered_clear(&ds.drag);
     assert(ended_calls == 2 && ended_finished == 0 && !ds.drag_ended);
     puts("PASS the end of a drag with a key is told once: finished, or cancelled when it is cleared without one");
+
+    ds.drag = (struct offered){ .blob = blob_new(uris, strlen(uris)), .key = blob_new(key, sizeof key) };
+    ds.drag_ended = ended;
+    ds.drag_active = ds.drag_dropped = 1;
+    wl_data_pointer_pressed();
+    assert(ds.drag_active && ds.drag.blob && ended_calls == 2); /* target still reading */
+    ds.drag_dropped = 0;
+    wl_data_pointer_pressed();
+    wl_data_pointer_pressed();
+    assert(!ds.drag_active && !ds.drag.blob && !ds.drag.key && ended_calls == 3 && ended_finished == 0);
+    puts("PASS a new press clears an ignored drag once, but not a drop still being read");
+
+    assert(wl_data_clipboard_set(0, "text/plain;charset=utf-8", "x", 1) == CLIPBOARD_FAILED &&
+           wl_data_clipboard_set(1, "text/plain;charset=utf-8", "x", 1) == CLIPBOARD_FAILED);
+    puts("PASS clipboard ownership is rejected when no display is attached");
 }
 
 /* Everything this harness made, so that a leak report names wayland-data.c. */

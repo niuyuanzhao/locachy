@@ -396,6 +396,21 @@ static struct monitor monitors[MAX_MONITORS];
 static int nmonitors;
 
 static int selected;
+
+/* Above the range of the pickers' item indices. */
+#define SETTINGS_HIT_BACK 10000
+
+static int settings_back_button(int row)
+{
+    /* TRANSLATORS: Esc is the Esc key; keep it. */
+    return ui_button(2, row, _("Esc: back"), SETTINGS_HIT_BACK);
+}
+
+static int settings_back_clicked(const struct pointer_event *e)
+{
+    return e->button == BTN_LEFT && e->pressed && ui_hit_at(e->col, e->row) == SETTINGS_HIT_BACK;
+}
+
 /* TRANSLATORS: Up/Down, Enter, Left, Tab, /, F1 and Ctrl+Q are key names; keep them. */
 static const char default_notice[] = N_("Up/Down: choose   Enter: change or open   Left/Tab: categories   "
                                         "/: find   F1: keys   Ctrl+Q: quit");
@@ -3860,6 +3875,8 @@ static void pick_zone(void)
             screen_fill(0, list + k, screen_cols(), 1, on ? ACCENT : BG);
             screen_text(4, list + k, line, on ? BG : FG, on ? ACCENT : BG);
         }
+        ui_hits_clear();
+        settings_back_button(screen_rows() - 2);
         screen_flush();
         int key = key_get(), act = key_action(key, mods_now());
         size_t len = strlen(filter);
@@ -3868,6 +3885,7 @@ static void pick_zone(void)
         }
         if (key == K_POINTER) {
             const struct pointer_event *e = pointer_last();
+            if (settings_back_clicked(e)) return;
             if (e->wheel) {
                 sel = sel - 3 * e->wheel < 0 ? 0 : sel - 3 * e->wheel;
             } else if (e->button == BTN_LEFT && e->pressed && e->row >= list && e->row - list < height &&
@@ -4123,6 +4141,8 @@ static void pick_keymap(const struct keys_keyboard *kb)
             screen_fill(0, list + k, screen_cols(), 1, on ? ACCENT : BG);
             screen_text(4, list + k, line, on ? BG : FG, on ? ACCENT : BG);
         }
+        ui_hits_clear();
+        settings_back_button(screen_rows() - 2);
         screen_flush();
         int key = key_get(), act = key_action(key, mods_now());
         size_t len = strlen(filter);
@@ -4131,6 +4151,7 @@ static void pick_keymap(const struct keys_keyboard *kb)
         }
         if (key == K_POINTER) {
             const struct pointer_event *e = pointer_last();
+            if (settings_back_clicked(e)) return;
             if (e->wheel) {
                 sel = sel - 3 * e->wheel < 0 ? 0 : sel - 3 * e->wheel;
             } else if (e->button == BTN_LEFT && e->pressed && e->row >= list && e->row - list < height &&
@@ -4706,12 +4727,24 @@ static void arrangement_draw(void)
     screen_text(1, rows - 3, cols < 44 ? _("Drag; p: X,Y; Esc: back") :
                 _("Drag: move  p: X,Y  Hold Shift and arrows: move  Enter: preset  Esc: back"), FG, BG);
     screen_text(1, rows - 2, _(notice), ACCENT, BG);
+    ui_hits_clear();
+    settings_back_button(rows - 1);
     screen_flush();
+}
+
+static int arrangement_cancel_drag(void)
+{
+    if (arrangement_drag < 0) return 0;
+    memcpy(monitors, arrangement_before_drag, sizeof monitors);
+    arrangement_drag = -1;
+    arrangement_drag_moved = 0;
+    return 1;
 }
 
 /* 1 if it changed what is shown. */
 static int arrangement_pointer(const struct pointer_event *event)
 {
+    if (event->cancelled) return event->button == BTN_LEFT && arrangement_cancel_drag();
     arrangement_pointer_col = event->col;
     arrangement_pointer_row = event->row;
     arrangement_pointer_seen = 1;
@@ -4738,12 +4771,8 @@ static int arrangement_pointer(const struct pointer_event *event)
             m->y = y;
         }
         if (event->button == BTN_LEFT && !event->pressed) {
-            arrangement_drag = -1;
-            if (arrangement_drag_moved) {
-                if (!monitor_saved()) memcpy(monitors, arrangement_before_drag, sizeof monitors);
-            } else {
-                memcpy(monitors, arrangement_before_drag, sizeof monitors);
-            }
+            if (arrangement_drag_moved && monitor_saved()) arrangement_drag = -1;
+            else arrangement_cancel_drag();
         }
         return 1;
     }
@@ -4775,16 +4804,12 @@ static int arrangement_pointer(const struct pointer_event *event)
 
 static int arrangement_key(int key)
 {
-    if (key == 27) {
-        if (arrangement_drag >= 0) {
-            memcpy(monitors, arrangement_before_drag, sizeof monitors);
-            arrangement_drag = -1;
-            return 1;
-        }
-        return 0;
-    }
-    if (key == 'p') arrangement_position();
-    else if ((keys_modifiers() & KEYS_SHIFT) && (key == K_UP || key == K_DOWN || key == K_LEFT || key == K_RIGHT)) {
+    if (key == 27) return arrangement_cancel_drag();
+    if (key == 'p') {
+        arrangement_cancel_drag();
+        arrangement_position();
+    } else if ((keys_modifiers() & KEYS_SHIFT) && (key == K_UP || key == K_DOWN || key == K_LEFT || key == K_RIGHT)) {
+        arrangement_cancel_drag();
         int step = keys_modifiers() & KEYS_CTRL ? 1 : 10;
         arrangement_move(key == K_LEFT ? -step : key == K_RIGHT ? step : 0,
                          key == K_UP ? -step : key == K_DOWN ? step : 0);
@@ -4796,7 +4821,10 @@ static int arrangement_key(int key)
         }
     } else if (key == K_LEFT) arrangement_button = (arrangement_button + 3) % 4;
     else if (key == K_RIGHT) arrangement_button = (arrangement_button + 1) % 4;
-    else if (key == '\n') arrangement_apply();
+    else if (key == '\n') {
+        arrangement_cancel_drag();
+        arrangement_apply();
+    }
     return 1;
 }
 
@@ -4820,7 +4848,13 @@ static void arrange_screens(void)
             return;
         }
         if (key == K_POINTER) {
-            if (arrangement_pointer(pointer_last())) arrangement_draw();
+            const struct pointer_event *e = pointer_last();
+            if (settings_back_clicked(e)) {
+                if (!arrangement_key(27)) return;
+                arrangement_draw();
+            } else if (arrangement_pointer(e)) {
+                arrangement_draw();
+            }
             continue;
         }
         if (act == ACT_HELP) {
@@ -5729,6 +5763,7 @@ static void pick_machine(void)
         }
         if (!n) screen_text(2, 5, _("No matching machine profile."), DIM, BG);
         if (n) screen_text(2, screen_rows() - 3, machine_labels[match[sel]], FG, BG);
+        settings_back_button(screen_rows() - 2);
         screen_flush();
         int key = key_get(), act = key_action(key, mods_now());
         if (close_read(key)) {
@@ -5739,6 +5774,7 @@ static void pick_machine(void)
             if (e->wheel && n) sel = machine_next(sel, e->wheel > 0 ? K_UP : K_DOWN);
             else if (e->button == BTN_LEFT && e->pressed) {
                 int hit = ui_hit_at(e->col, e->row);
+                if (hit == SETTINGS_HIT_BACK) return;
                 if (hit >= 0 && hit < n) { sel = hit; if (e->clicks == 2) key = '\n'; }
             }
         }
@@ -5827,14 +5863,13 @@ static int info_row(int idx)
 }
 
 static void row_hint(void);
+static void picker_cancel(void);
 
-/* What a pointer event does, as a key: on the sidebar a click opens that
- * category's page (the wheel goes through them); on the page a click
- * selects a setting, on the value of a setting that has one (from column 33
- * of its line) opens it and changes it, as a spin box's arrows do: by "<"
- * down, else up; a component's line never changes by a click, a double
- * click is Enter there (it installs) as where Enter does something; the
- * wheel moves. -1: redraw only; 0: nothing. */
+#define SETTINGS_HIT_CONTROL 20000 /* + twice the setting index, +1 for Right */
+
+/* Click a category to open its page. A page click selects a setting; only
+ * its rendered control also changes it. Double-click an action or picker
+ * to run it. -1: redraw only; 0: nothing. */
 static int settings_pointer(void)
 {
     const struct pointer_event *e = pointer_last();
@@ -5843,7 +5878,12 @@ static int settings_pointer(void)
         if (on_sidebar) {
             show_category(category - e->wheel, 0);
         } else {
+            int prev = selected;
             page_move(-e->wheel);
+            if (selected != prev || !in_page) {
+                editing = 0;
+                row_hint();
+            }
             in_page = 1;
         }
         return -1;
@@ -5851,25 +5891,32 @@ static int settings_pointer(void)
     if (e->button != BTN_LEFT || !e->pressed) return 0;
     if (on_sidebar) {
         int c = e->row - PAGE_TOP;
-        if (c < 0 || c >= NCATS) return 0;
+        if (c < 0 || c >= NCATS || e->row >= screen_rows() - 2) return 0;
         show_category(c, 1);
         return -1;
     }
-    int idx = item_at(e->row), col = e->col - text_x() + 2;
-    if (idx < 0) return 0;
-    int moved = idx != selected || !in_page, component = component_row(idx, NULL, NULL);
-    if (moved) editing = 0;
+    if (!sw && settings_back_clicked(e)) {
+        if (editing && picker_row(selected)) picker_cancel();
+        editing = 0;
+        return 27;
+    }
+    int idx = item_at(e->row);
+    if (idx < 0 || (sw && e->col == sw) || e->col < 0 || e->col >= screen_cols()) return 0;
+    int was_editing = editing, moved = idx != selected || !in_page;
+    int picker = picker_row(idx), action = enter_row(idx) || component_row(idx, NULL, NULL);
     selected = idx;
     in_page = 1;
-    if (e->clicks == 2 && (enter_row(idx) || component)) {
-        editing = 0;
+    if (e->clicks == 2 && (action || picker)) {
+        editing = picker; /* Enter must reach the picker action, not just open editing. */
         return '\n';
     }
-    if (col >= 33 && !enter_row(idx) && !component && !info_row(idx)) {
+    int hit = ui_hit_at(e->col, e->row), control = SETTINGS_HIT_CONTROL + 2 * idx;
+    if ((picker || (!action && !info_row(idx))) && (hit == control || hit == control + 1)) {
         editing = 1;
-        return col < 37 ? K_LEFT : K_RIGHT;
+        return hit == control ? K_LEFT : K_RIGHT;
     }
-    if (moved) row_hint();
+    editing = 0;
+    if (moved || was_editing) row_hint();
     return -1;
 }
 
@@ -6596,11 +6643,39 @@ static void draw_sidebar(int width)
     }
 }
 
+/* Locate the widget in the rendered line, after the padded label. The
+ * widget's closing delimiter ends its hitbox, not the hint after it. */
+static void hit_control(int idx, int x, int row, char *line)
+{
+    for (char *p = strpbrk(line, "[<"); p; p = strpbrk(p + 1, "[<")) {
+        if (p == line || p[-1] != ' ') continue;
+        char open = *p;
+        *p = '\0';
+        int offset = ui_cells(line);
+        *p = open;
+        if (offset < 33) continue;
+        char *end = open == '[' ? strchr(p + 1, ']') : p[1] == ' ' ? strstr(p + 2, " >") : NULL;
+        if (!end) return;
+        end += open == '[' ? 1 : 2;
+        char next = *end;
+        *end = '\0';
+        int width = ui_cells(p), col = x + offset;
+        *end = next;
+        int split = open == '<' || p[1 + strspn(p + 1, "#-")] == ']';
+        int left = split ? width / 2 : 0, visible = screen_cols() - col;
+        if (width > visible) width = visible;
+        int id = SETTINGS_HIT_CONTROL + 2 * idx;
+        ui_hit(col, row, left < width ? left : width, 1, id);
+        ui_hit(col + left, row, width - left, 1, id + 1);
+        return;
+    }
+}
+
 /* The page from column px: its groups' titles, their settings, notes. */
 static void draw_page(int px)
 {
     char line[512];
-    int x = px + 2;
+    int x = text_x();
     page_scroll_to_selected();
     for (int r = 0; r < page_rows() && page_scroll + r < nentries; r++) {
         const struct entry *e = &entries[page_scroll + r];
@@ -6615,6 +6690,7 @@ static void draw_page(int px)
             item_text(e->idx, line, sizeof line);
             screen_fill(px, row, screen_cols() - px, 1, bg);
             screen_text(x, row, line, on && in_page ? BG : FG, bg);
+            hit_control(e->idx, x, row, line);
         }
     }
 }
@@ -6632,6 +6708,7 @@ static void draw(void)
         }
     }
     if (entry_of(selected) < 0) selected = first_setting();
+    ui_hits_clear();
     screen_fill(0, 0, cols, rows, BG);
     screen_bar(_("settings"), NULL);
     if (sw) {
@@ -6644,9 +6721,10 @@ static void draw(void)
         draw_sidebar(cols);
     }
     screen_text(2, rows - 2, _(notice), ACCENT, BG);
+    int footer = in_page && !sw ? settings_back_button(rows - 1) : 2;
     if (pkg_job || repos_job || boot_job || tpm_job) {
         /* TRANSLATORS: settings and home are programs' names; keep them. */
-        screen_text(2, rows - 1, _("A system job of settings' runs or waits: it goes on if settings closes; "
+        screen_text(footer, rows - 1, _("A system job of settings' runs or waits: it goes on if settings closes; "
                                    "home lists it."), FG, BG);
     }
     screen_flush();

@@ -1141,8 +1141,14 @@ static double screen_time(void)
  * row of content at the window's top), screen_bar draws nothing, and those
  * rows are never shown. */
 static int window_mode;
-#ifdef CONFIG_WAYLAND
 static uint32_t window_hidden; /* the top bar's pixel rows, above the window */
+
+int screen_window_top(void)
+{
+    return window_mode ? (int)window_hidden : 0;
+}
+
+#ifdef CONFIG_WAYLAND
 static int window_new_size;
 
 static int window_resize(int w, int h, double s)
@@ -1169,11 +1175,6 @@ static int window_resize(int w, int h, double s)
     mark_all();
     window_new_size = 1;
     return 0;
-}
-
-int screen_window_top(void)
-{
-    return window_mode ? (int)window_hidden : 0;
 }
 
 static void window_frame(void)
@@ -2333,11 +2334,16 @@ void screen_pixels(int *w, int *h)
     *h = (int)height;
 }
 
+static int cell_index(int64_t px, uint32_t step)
+{
+    if (!step) return 0;
+    return (int)(px / step - (px % step < 0));
+}
+
 void screen_cell_at(int x, int y, int *col, int *row)
 {
-    *col = glyph_w ? x / (int)glyph_w : 0;
-    *row = glyph_h ? (y - (int)top) / (int)glyph_h : 0;
-    if (y < (int)top) *row = -1;
+    *col = cell_index(x, glyph_w);
+    *row = cell_index((int64_t)y - top, glyph_h);
 }
 
 void screen_bar(const char *title, const char *ime)

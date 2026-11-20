@@ -66,19 +66,19 @@ static void ending(int sig) { (void)sig; stop = 1; }
 
 static void set_state(const char *s, const char *d) { state = s; detail = d; }
 
-static int send_text(uint32_t op, const char *text, int n)
+static int send_text(uint32_t op, const char *text, int n, int droppable)
 {
     if (ipc < 0 || n < 0 || n > (int)EXTDISPLAY_IPC_TEXT) return -1;
     struct extdisplay_ipc m = { .op = op, .length = (uint32_t)n };
     if (n) memcpy(m.text, text, (size_t)n);
     if (extdisplay_ipc_send(ipc, &m) == 0) return 0;
     if (errno != EAGAIN && errno != EWOULDBLOCK) return -1;
-    if (op == EXTDISPLAY_IPC_INPUT && n >= 17 && memcmp(text, "{\"type\":\"pointer\"", 17) == 0) {
-        return 0;
-    }
+    /* Only motion and scroll updates may be shed. Losing a transition would
+     * leave the sender's input state out of sync until disconnect. */
+    if (droppable) return 0;
     struct pollfd p = { ipc, POLLOUT, 0 };
-    if (poll(&p, 1, 50) > 0 && (p.revents & POLLOUT) && extdisplay_ipc_send(ipc, &m) == 0) return 0;
-    return op == EXTDISPLAY_IPC_INPUT && (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
+    if (poll(&p, 1, 50) > 0 && (p.revents & POLLOUT)) return extdisplay_ipc_send(ipc, &m);
+    return -1;
 }
 
 static int input_allowed(void)
@@ -86,17 +86,17 @@ static int input_allowed(void)
     return base_session_fd() >= 0 ? base_session_input_allowed() : control_fd() >= 0;
 }
 
-static int send_input(const char *text, int n)
+static int send_input(const char *text, int n, int droppable)
 {
     if (!input_allowed()) return 0;
-    return send_text(EXTDISPLAY_IPC_INPUT, text, n);
+    return send_text(EXTDISPLAY_IPC_INPUT, text, n, droppable);
 }
 
 static int cancel(void)
 {
     char text[96];
     outside_cancelled = 1;
-    return active ? send_text(EXTDISPLAY_IPC_INPUT, text, extdisplay_cancel_json(text, sizeof text)) : 0;
+    return active ? send_text(EXTDISPLAY_IPC_INPUT, text, extdisplay_cancel_json(text, sizeof text), 0) : 0;
 }
 
 static void viewport(void)
@@ -151,27 +151,30 @@ static void draw(void)
 static int pointer_input(void)
 {
     const struct pointer_event *p = pointer_last();
-    if (p->x < vx || p->x >= vx + vw || p->y < vy || p->y >= vy + vh) {
-        return outside_cancelled ? 0 : cancel();
-    }
+    /* Focus loss must clear the peer's held buttons, not commit a click. */
+    if (p->cancelled) return cancel();
+    if (vw < 1 || vh < 1) return outside_cancelled ? 0 : cancel();
+    int px = p->x < vx ? vx : p->x >= vx + vw ? vx + vw - 1 : p->x;
+    int py = p->y < vy ? vy : p->y >= vy + vh ? vy + vh - 1 : p->y;
     outside_cancelled = 0;
-    double x = vw > 1 ? (double)(p->x - vx) / (vw - 1) : 0;
-    double y = vh > 1 ? (double)(p->y - vy) / (vh - 1) : 0;
+    double x = vw > 1 ? (double)(px - vx) / (vw - 1) : 0;
+    double y = vh > 1 ? (double)(py - vy) / (vh - 1) : 0;
     char s[256];
-    int n;
+    int n, droppable = 0;
     if (p->button) {
         n = extdisplay_button_json(s, sizeof s, (uint32_t)p->button, p->pressed, x, y);
     } else if (p->scroll_dx || p->scroll_dy || (p->gesture == GESTURE_SCROLL && p->scroll_source != SCROLL_TOUCH)) {
         double kx = frame_w ? (double)frame_w / vw : 1, ky = frame_h ? (double)frame_h / vh : 1;
         n = extdisplay_scroll_json(s, sizeof s, -p->scroll_dx * kx, -p->scroll_dy * ky, p->scroll_phase, p->scroll_source);
+        droppable = p->scroll_phase == SCROLL_UPDATE;
     } else if (p->gesture) {
         return 0;
-    } else if (p->dx || p->dy) {
-        n = extdisplay_pointer_delta_json(s, sizeof s, x, y, p->dx, p->dy);
     } else {
-        n = extdisplay_pointer_json(s, sizeof s, x, y);
+        n = p->dx || p->dy ? extdisplay_pointer_delta_json(s, sizeof s, x, y, p->dx, p->dy) :
+                            extdisplay_pointer_json(s, sizeof s, x, y);
+        droppable = 1;
     }
-    return n >= 0 ? send_input(s, n) : 0;
+    return n >= 0 ? send_input(s, n, droppable) : 0;
 }
 
 /* Every key goes to the sender while the link is up, Super+Esc and Ctrl+Alt+F12
@@ -192,7 +195,7 @@ static int raw_input(void)
         if (!active) continue;
         char text[256];
         int n = extdisplay_key_json(text, sizeof text, e.device, e.code, e.keysym, e.modifiers, e.locks, (int)e.state);
-        if (n >= 0 && send_input(text, n) < 0) return -1;
+        if (n >= 0 && send_input(text, n, 0) < 0) return -1;
     }
     return 0;
 }
@@ -321,7 +324,7 @@ static int handle_worker(int *inhibited, double *started)
         if (strcmp(decode_mode, "hw") == 0 && !(m.width & 16u) && (m.width & 4u)) use_hevc = 0;
         int n = extdisplay_hello_named(hello, sizeof hello, (uint32_t)(w > 0 ? w : 1), (uint32_t)(h > 0 ? h : 1),
                           scale >= 0.5 && scale <= 4 ? scale : 1.0, m.width & 1u, use_hevc, host, model);
-        if (send_text(EXTDISPLAY_IPC_HELLO, hello, n) < 0) break;
+        if (send_text(EXTDISPLAY_IPC_HELLO, hello, n, 0) < 0) break;
         return 1;
     }
     case EXTDISPLAY_IPC_ACTIVE:
@@ -485,7 +488,10 @@ static void session_run(int transport)
             break;
         }
         if (key == K_SHOWN) {
-            cancel();
+            if (cancel() < 0) {
+                set_state(N_("Disconnected"), N_("Remote input could not be delivered."));
+                break;
+            }
             if (dmabuf_active && ipc >= 0) {
                 struct extdisplay_ipc ref = { .op = EXTDISPLAY_IPC_REFRESH };
                 (void)extdisplay_ipc_send(ipc, &ref);

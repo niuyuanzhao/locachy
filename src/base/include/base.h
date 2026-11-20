@@ -438,6 +438,7 @@ struct pointer_event {
     int col, row;  /* its cell; row -1: the top bar */
     int button;    /* BTN_LEFT, BTN_RIGHT or BTN_MIDDLE pressed or released; 0: a motion or scroll */
     int pressed;   /* 1 pressed, 0 released */
+    int cancelled; /* lost pointer ownership: clear the grab, do not commit an action */
     int clicks;    /* a press: 1, 2 for a double click, 3 for a triple one */
     int wheel;     /* scroll steps, positive up */
     int hwheel;    /* positive right */

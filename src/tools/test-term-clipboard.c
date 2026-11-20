@@ -204,6 +204,19 @@ int main(void)
     assert(strcmp(copied, "ab cd") == 0 && !selection.dragging);
     puts("PASS double click a word, triple click a line, a drag: each copied as the primary selection");
 
+    point(3, 0, BTN_LEFT, 1, 1, 0);
+    point(6, 0, 0, 0, 0, 0);
+    const struct pointer_event lost = { .col = 6, .row = 1, .button = BTN_LEFT, .cancelled = 1 };
+    pointer_input(&lost);
+    assert(strcmp(copied, "ab cd") == 0 && !selection.dragging);
+    feed_text("\033[?1003;1006h");
+    point(6, 0, BTN_LEFT, 1, 1, 0);
+    pointer_input(&lost);
+    pointer_input(&(struct pointer_event){ .x = -1, .y = -1 });
+    output_is("\033[<0;7;1M\033[<0;7;1m");
+    feed_text("\033[?1003;1006l");
+    puts("PASS losing the pointer ends the PTY grab without a bogus motion or publishing local selection");
+
     feed_text("\033[?1049h");
     assert(in_alt);
     point(0, 0, 0, 0, 0, 1);

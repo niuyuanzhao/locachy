@@ -55,8 +55,11 @@ localedef -i C -f UTF-8 "$out/locales/C.UTF-8"
 gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -I"$src/base/include" -I"$src/base" \
     "$src/tools/test-i18n.c" "$src/base/i18n.c" "$src/base/rc.c" "$src/base/say.c" "$src/base/ui.c" \
     -o "$out/test-i18n"
-LOCPATH="$out/locales" "$out/test-i18n" "$out/catalogs"
+mkdir -p "$out/real/zh_CN/LC_MESSAGES"
+msgfmt --check --statistics -o "$out/real/zh_CN/LC_MESSAGES/locachy.mo" "$src/po/zh_CN.po"
+LOCPATH="$out/locales" "$out/test-i18n" "$out/catalogs" "$out/real"
 for lang in $(cat "$src/po/LINGUAS"); do
     printf '== po/%s.po: ' "$lang"
     msgfmt --check --statistics -o /dev/null "$src/po/$lang.po"
 done
+python3 -I "$src/tools/test-po-keys.py" "$src"/po/*.po

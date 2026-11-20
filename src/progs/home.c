@@ -1500,6 +1500,7 @@ static int row_menu(int col, int row)
 static int pointer_key(void)
 {
     const struct pointer_event *e = pointer_last();
+    if (e->cancelled) return textsel_pointer(e, 0) != TEXTSEL_NONE ? -1 : 0;
     if (screen_is_extended && screen_is_extended() && screen_output_select) {
         int previous = home_output;
         if (e->output < 0 || e->output >= HOME_OUTPUTS || screen_output_select(e->output) < 0) return 0;
@@ -1593,6 +1594,10 @@ int main(void)
         double remaining = (refresh_at - uptime()) * 1000.0;
         int timeout = remaining <= 0 ? 0 : remaining < REFRESH_MS ? (int)remaining + 1 : REFRESH_MS;
         int key = key_poll_timeout(-1, timeout);
+        if (key == K_POINTER && pointer_last()->cancelled) {
+            if (pointer_key() == -1) draw(0);
+            continue;
+        }
         if (key == K_SHOWN) {
             if (confirming != CONF_NONE) {
                 confirm_key(0); /* Never preserve a destructive prompt across a switch. */

@@ -38,6 +38,15 @@ read -r -a winproto <<<"$(proto xdg-shell fractional-scale-v1 viewporter primary
     -lwayland-client -o "$out/click"
 "${cc[@]}" "$src/tools/test-screenshot.c" "$out/gen/wlr-screencopy-unstable-v1-protocol.c" \
     -lwayland-client -o "$out/shot"
+# Listener sequences that a compositor or input grab may coalesce or omit.
+winobj=()
+for obj in "$out"/obj/win-*.o; do
+    [[ $obj == */win-wayland-backend.o ]] || winobj+=("$obj")
+done
+"${cc[@]}" "${deps[@]}" -DCONFIG_WAYLAND -DWINDOW_INPUT_UNIT "$src/tools/test-window-backend.c" \
+    "${winobj[@]}" "${winproto[@]}" "${libs[@]}" -lwayland-client -lwayland-cursor -lxkbcommon -o "$out/window-input"
+timeout 10 "$out/window-input"
+
 # The window in a screenshot: its colour's pixels and their box, the output's
 # size, and how many of the box's first BAND rows are of the colour.
 cat >"$out/box.py" <<'PY'

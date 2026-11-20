@@ -48,6 +48,7 @@
 #include "base.h"
 #include "archive-proto.h"
 #include "files.h"
+#include "wayland-backend.h"
 
 /* Tests run a worker they built; never chosen at run time (archive is root). */
 #ifdef ARCHIVE_WORKER_TEST_PATH
@@ -443,6 +444,16 @@ static int split_fields(char *line, char **f, int max)
 static int edit_text(const char *label, char *text, size_t size, int masked);
 static void ask_exists(const char *path, int dir, char *answer, size_t size);
 static int yes(const char *question);
+/* The direct test harness has no window to keep. */
+__attribute__((weak)) void key_close_kept(void);
+
+static int button_key(void)
+{
+    const struct pointer_event *e = pointer_last();
+    if (e->cancelled || e->button != BTN_LEFT || !e->pressed) return 0;
+    int id = ui_hit_at(e->col, e->row);
+    return id >= HIT_KEY ? id - HIT_KEY : 0;
+}
 
 static void draw_job(const struct job *j)
 {
@@ -462,7 +473,7 @@ static void draw_job(const struct job *j)
     archive_display(j->at, at, sizeof at);
     screen_text(2, r + 2, at, DIM, BG);
     /* TRANSLATORS: Esc is the key; keep it. */
-    screen_text(2, r + 4, _("Esc: cancel"), DIM, BG);
+    ui_button(2, r + 4, _("Esc: cancel"), HIT_KEY + 27);
     screen_flush();
 }
 
@@ -578,11 +589,21 @@ static int run_worker(struct job *j, const char *title, char *const args[], cons
             shown = t;
         }
         struct pollfd p = { from, POLLIN, 0 };
-        int key = key_poll_many(&p, 1, 200), act = key_action(key, keys_modifiers());
-        /* TRANSLATORS: the question when Esc (or Ctrl+Q) is pressed while the archive is worked on. */
-        if ((act == ACT_CANCEL || act == ACT_QUIT) && yes(_("Cancel it?"))) {
-            kill(-pid, SIGTERM);
-            if (act == ACT_QUIT) quit = 1; /* then the program leaves */
+        int key = key_poll_many(&p, 1, 200), mods = keys_modifiers();
+        if (!j->quiet && key == K_SHOWN) draw_job(j);
+        if (key == K_POINTER) {
+            key = !j->quiet && button_key() == 27 ? 27 : 0;
+            mods = 0;
+        }
+        int act = key_action(key, mods);
+        if (act == ACT_CANCEL || act == ACT_QUIT) {
+            if (key == K_CLOSE && key_close_kept) key_close_kept();
+            /* TRANSLATORS: the question when Esc (or Ctrl+Q) is pressed while the archive is worked on. */
+            if (yes(_("Cancel it?"))) {
+                kill(-pid, SIGTERM);
+                if (act == ACT_QUIT) quit = 1; /* then the program leaves */
+            }
+            if (!j->quiet) draw_job(j);
         }
         if (!(p.revents & (POLLIN | POLLHUP | POLLERR))) continue;
         ssize_t got = read(from, buf + len, sizeof buf - len - 1);
@@ -646,12 +667,20 @@ static void help_screen(void)
 
 /* A screen that any key leaves (not home's key); Ctrl+Q and the window's
  * close leave the program too. */
-static void any_key(void)
+static int any_key(void)
 {
     int key;
-    while ((key = key_get()) == K_ACT_HOME || key == K_SHOWN || (key == K_POINTER && !pointer_last()->pressed)) {
+    for (;;) {
+        key = key_get();
+        if (key == K_ACT_HOME) continue;
+        if (key == K_POINTER) {
+            const struct pointer_event *e = pointer_last();
+            if (e->cancelled || !e->pressed || e->button != BTN_LEFT) continue;
+        }
+        break;
     }
     if (key_action(key, keys_modifiers()) == ACT_QUIT) quit = 1;
+    return key == K_SHOWN; /* the caller redraws its own screen */
 }
 
 
@@ -764,8 +793,9 @@ static int edit_text(const char *label, char *text, size_t size, int masked)
             snprintf(shown, sizeof shown, "%s", text);
         }
         if (pos > strlen(shown)) pos = strlen(shown);
-        int row = screen_rows() - 1;
-        screen_fill(0, row, screen_cols(), 1, BG);
+        int row = screen_rows() - 2, cols = screen_cols();
+        ui_hits_clear();
+        screen_fill(0, row, cols, 2, BG);
         if (all) { /* Ctrl+A: all of it selected */
             snprintf(line, sizeof line, "%s ", label);
             screen_text(1, row, line, ACCENT, BG);
@@ -774,8 +804,17 @@ static int edit_text(const char *label, char *text, size_t size, int masked)
             snprintf(line, sizeof line, "%s %.*s_%s", label, (int)pos, shown, shown + pos);
             screen_text(1, row, line, ACCENT, BG);
         }
+        /* TRANSLATORS: Enter and Esc are keys; keep them. */
+        int c = ui_button(1, row + 1, _("Enter: ok"), HIT_KEY + '\n');
+        ui_button(c, row + 1, _("Esc: cancel"), HIT_KEY + 27);
         screen_flush();
-        int key = key_get(), mods = keys_modifiers(), act = key_action(key, mods);
+        int key = key_get(), mods = keys_modifiers();
+        if (key == K_SHOWN) continue;
+        if (key == K_POINTER) {
+            key = button_key();
+            mods = 0;
+        }
+        int act = key_action(key, mods);
         if (act == ACT_QUIT) {
             quit = 1;
             return 0;
@@ -786,7 +825,7 @@ static int edit_text(const char *label, char *text, size_t size, int masked)
             help_screen();
             continue;
         }
-        edit_key(key, mods, text, size, &pos, &all);
+        if (key != 0 && key != K_SHOWN) edit_key(key, mods, text, size, &pos, &all);
     }
 }
 
@@ -795,15 +834,24 @@ static int edit_text(const char *label, char *text, size_t size, int masked)
  * program leaves once what it does has ended (quit). */
 static int yes(const char *question)
 {
-    char line[1024];
-    /* TRANSLATORS: y and N are the keys answering; keep them. */
-    snprintf(line, sizeof line, _("%s [y/N]"), question);
-    int row = screen_rows() - 1;
-    screen_fill(0, row, screen_cols(), 1, BG);
-    screen_text(1, row, line, ACCENT, BG);
-    screen_flush();
     for (;;) {
+        int row = screen_rows() - 1, cols = screen_cols();
+        /* TRANSLATORS: Y and N are keys; keep them. */
+        const char *yes_label = _("Y: yes"), *no_label = _("N: no");
+        char line[1024];
+        fit(line, sizeof line, question, cols - ui_cells(yes_label) - ui_cells(no_label) - 7);
+        ui_hits_clear();
+        screen_fill(0, row, cols, 1, BG);
+        screen_text(1, row, line, ACCENT, BG);
+        int c = ui_button(2 + ui_cells(line), row, yes_label, HIT_KEY + 'y');
+        ui_button(c, row, no_label, HIT_KEY + 'n');
+        screen_flush();
         int key = key_get(), mods = keys_modifiers();
+        if (key == K_SHOWN) continue;
+        if (key == K_POINTER) {
+            key = button_key();
+            mods = 0;
+        }
         int act = key_action(key, mods), plain = !(mods & (KEYS_CTRL | KEYS_ALT | KEYS_META));
         if (plain && (key == 'y' || key == 'Y')) return 1;
         if (act == ACT_CANCEL || (plain && (key == 'n' || key == 'N' || key == '\n'))) return 0;
@@ -817,16 +865,35 @@ static int yes(const char *question)
 /* Ark's overwrite question: the worker's answer in answer. */
 static void ask_exists(const char *path, int dir, char *answer, size_t size)
 {
-    char line[PATH_MAX + 200];
-    snprintf(line, sizeof line, dir ? _("%s is there and not a folder: o overwrite  O all  s skip  S all  Esc cancel")
-                                    : _("%s is there already: o overwrite  O all  s skip  S all  r another name  Esc cancel"),
-             path);
+    char line[PATH_MAX + 200], shown[PATH_MAX];
+    snprintf(line, sizeof line, dir ? _("%s is there and not a folder.") : _("%s is there already."), path);
+    /* TRANSLATORS: the letters and Esc are keys; keep them. */
+    static const struct { const char *label; int key; } choices[] = {
+        { N_("o: overwrite"), 'o' }, { N_("O: all"), 'O' }, { N_("s: skip"), 's' },
+        { N_("S: all"), 'S' }, { N_("r: rename"), 'r' }, { N_("Esc: cancel"), 27 },
+    };
     for (;;) {
-        int row = screen_rows() - 1;
-        screen_fill(0, row, screen_cols(), 1, BG);
-        screen_text(1, row, line, ACCENT, BG);
+        int bottom = screen_rows() - 1, row = bottom - 1, cols = screen_cols();
+        int c = 1;
+        ui_hits_clear();
+        screen_fill(0, bottom - 2, cols, 3, BG);
+        fit(shown, sizeof shown, line, cols - 2);
+        screen_text(1, bottom - 2, shown, ACCENT, BG);
+        for (size_t i = 0; i < sizeof choices / sizeof *choices; i++) {
+            if (dir && choices[i].key == 'r') continue;
+            const char *label = _(choices[i].label);
+            int w = ui_cells(label) + 2;
+            if (c + w > cols && row < bottom) { c = 1; row++; }
+            c = ui_button(c, row, label, HIT_KEY + choices[i].key);
+        }
         screen_flush();
-        int key = key_get(), act = key_action(key, keys_modifiers());
+        int key = key_get(), mods = keys_modifiers();
+        if (key == K_SHOWN) continue;
+        if (key == K_POINTER) {
+            key = button_key();
+            mods = 0;
+        }
+        int act = key_action(key, mods);
         if (key == 'o' || key == 'O' || key == 's' || key == 'S') {
             snprintf(answer, size, "%c", key);
             return;
@@ -849,28 +916,30 @@ static void ask_exists(const char *path, int dir, char *answer, size_t size)
  * that failed. Any key goes back. */
 static void show_problems(const struct job *j, const char *what)
 {
-    int cols = screen_cols(), rows_n = screen_rows();
     char line[PATH_MAX];
-    screen_fill(0, 0, cols, rows_n, BG);
-    ui_hits_clear();
-    screen_bar(_("archive"), NULL);
-    screen_text(1, 1, what, ERROR, BG);
-    if (j->error[0]) {
-        fit(line, sizeof line, j->error, cols - 2);
-        screen_text(1, 2, line, ERROR, BG);
+    for (;;) {
+        int cols = screen_cols(), rows_n = screen_rows();
+        screen_fill(0, 0, cols, rows_n, BG);
+        ui_hits_clear();
+        screen_bar(_("archive"), NULL);
+        screen_text(1, 1, what, ERROR, BG);
+        if (j->error[0]) {
+            fit(line, sizeof line, j->error, cols - 2);
+            screen_text(1, 2, line, ERROR, BG);
+        }
+        int r = 4;
+        for (int i = 0; i < j->nwarnings && r < rows_n - 2; i++, r++) {
+            fit(line, sizeof line, j->warnings[i], cols - 4);
+            screen_text(3, r, line, FG, BG);
+        }
+        if (j->more_warnings) {
+            snprintf(line, sizeof line, P_("and %d more", "and %d more", j->more_warnings), j->more_warnings);
+            screen_text(3, r, line, DIM, BG);
+        }
+        screen_text(1, rows_n - 1, _("Any key: back"), DIM, BG);
+        screen_flush();
+        if (!any_key()) break;
     }
-    int r = 4;
-    for (int i = 0; i < j->nwarnings && r < rows_n - 2; i++, r++) {
-        fit(line, sizeof line, j->warnings[i], cols - 4);
-        screen_text(3, r, line, FG, BG);
-    }
-    if (j->more_warnings) {
-        snprintf(line, sizeof line, P_("and %d more", "and %d more", j->more_warnings), j->more_warnings);
-        screen_text(3, r, line, DIM, BG);
-    }
-    screen_text(1, rows_n - 1, _("Any key: back"), DIM, BG);
-    screen_flush();
-    any_key();
 }
 
 /* ---- The archive ---- */
@@ -1200,9 +1269,13 @@ static void open_entry(int how)
         }
     }
     if (open_in_home(with, path) < 0) {
-        report(1, _("Cannot ask home to open %s."), base_name(path));
+        if (wl_backend_requested() > 0) {
+            report(1, _("Could not open %s on the shared display. See the log for the reason."), base_name(path));
+        } else {
+            report(1, _("Cannot ask home to open %s."), base_name(path));
+        }
     } else {
-        report(0, _("Opened %s."), base_name(path));
+        report(0, _("Open request accepted for %s."), base_name(path));
     }
 }
 
@@ -1214,11 +1287,12 @@ struct dialog_line {
     char value[PATH_MAX + 64];
     int id;
 };
+enum { FIELD_LEVEL = 3 }; /* creation dialog's compression level */
 
 static void draw_dialog(const char *title, const struct dialog_line *l, int n, int cur, const char *const *buttons,
-                        int button, const char *hint)
+                        int button, const char *hint, int level_row)
 {
-    int cols = screen_cols(), rows_n = screen_rows(), vx = 34;
+    int cols = screen_cols(), rows_n = screen_rows(), vx = clampi(cols - 18, 2, 34);
     char text[PATH_MAX + 64];
     screen_fill(0, 0, cols, rows_n, BG);
     ui_hits_clear();
@@ -1227,10 +1301,18 @@ static void draw_dialog(const char *title, const struct dialog_line *l, int n, i
     for (int i = 0; i < n; i++) {
         int r = 3 + i, on = i == cur;
         screen_fill(0, r, cols, 1, on ? ACCENT : BG);
-        screen_text(2, r, l[i].label, on ? BG : DIM, on ? ACCENT : BG);
-        fit(text, sizeof text, l[i].value, cols - vx - 1);
-        screen_text(vx, r, text, on ? BG : FG, on ? ACCENT : BG);
+        fit(text, sizeof text, l[i].label, vx - 3);
+        screen_text(2, r, text, on ? BG : DIM, on ? ACCENT : BG);
         ui_hit(0, r, cols, 1, HIT_FORM + i);
+        if (i == level_row && cols - vx >= 14) {
+            int x = ui_button(vx, r, "<", HIT_KEY + K_LEFT);
+            fit(text, sizeof text, l[i].value, cols - x - 4);
+            screen_text(x, r, text, on ? BG : FG, on ? ACCENT : BG);
+            ui_button(cols - 4, r, ">", HIT_KEY + K_RIGHT);
+        } else {
+            fit(text, sizeof text, l[i].value, cols - vx - 1);
+            screen_text(vx, r, text, on ? BG : FG, on ? ACCENT : BG);
+        }
     }
     int x = vx, r = 4 + n;
     for (int b = 0; buttons[b]; b++) {
@@ -1262,8 +1344,18 @@ static int dialog_key(int *cur, int *button, int n)
         return act == ACT_PREV_FIELD ? K_UP : key; /* Shift+Tab: the line before, as Tab goes to the next */
     }
     const struct pointer_event *e = pointer_last();
-    if (!e->button || !e->pressed) return 0;
-    int id = ui_hit_at(e->col, e->row) - HIT_FORM;
+    if (e->cancelled) return 0;
+    if (e->wheel) {
+        *cur = clampi(*cur - e->wheel, 0, n);
+        return 0;
+    }
+    if (e->button != BTN_LEFT || !e->pressed) return 0;
+    int hit = ui_hit_at(e->col, e->row);
+    if (hit == HIT_KEY + K_LEFT || hit == HIT_KEY + K_RIGHT) {
+        *cur = e->row - 3;
+        return hit - HIT_KEY;
+    }
+    int id = hit - HIT_FORM;
     if (id >= 0 && id < n) {
         *cur = id;
         return e->clicks == 2 ? '\n' : 0;
@@ -1316,7 +1408,7 @@ static int extraction_dialog(struct extraction *x, int can_select)
         snprintf(l[4].value, sizeof l[4].value, "[%c]", x->close_after ? 'x' : ' ');
         /* TRANSLATORS: key names; keep them. */
         draw_dialog(_("Extract"), l, 5, cur, buttons, button,
-                    _("Up/Down: line   Enter: choose or edit   Space: switch   F2: type the destination   Esc: cancel"));
+                    _("Up/Down: line   Enter: choose or edit   Space: switch   F2: type the destination   Esc: cancel"), -1);
         int key = dialog_key(&cur, &button, 5);
         if (key == 27) return 0;
         if (key == K_UP) cur = clampi(cur - 1, 0, 5);
@@ -1442,7 +1534,8 @@ static int creation_dialog(struct creation *c, const char *title)
         LINE(_("Folder:"), 0, "%s", c->folder);
         LINE(_("Filename:"), 1, "%s%s", c->name, archive_ends_with(c->name, t->suffix) ? "" : t->suffix);
         LINE(_("Type:"), 2, "%s (%s)", _(t->name), t->suffix);
-        if (t->lmax) LINE(_("Compression level:"), 3, "%d   (%d-%d)", c->level, t->lmin, t->lmax);
+        int level_row = t->lmax ? n : -1;
+        if (t->lmax) LINE(_("Compression level:"), FIELD_LEVEL, "%d   (%d-%d)", c->level, t->lmin, t->lmax);
         if (t->password) LINE(_("Password:"), 4, "%s", c->password[0] ? "********" : _("(none)"));
         if (t->password == 2 && c->password[0]) {
             LINE(_("Encrypt the file list too:"), 5, "[%c]", c->encrypt_list ? 'x' : ' ');
@@ -1452,7 +1545,8 @@ static int creation_dialog(struct creation *c, const char *title)
 #undef LINE
         /* TRANSLATORS: key names; keep them. */
         draw_dialog(title, l, n, cur, buttons, button,
-                    _("Up/Down: line   Enter: edit or choose   Left/Right: type, level   Space: switch   Esc: cancel"));
+                    _("Up/Down: line   Enter: edit or choose   Left/Right: type, level   Space: switch   Esc: cancel"),
+                    level_row);
         int key = dialog_key(&cur, &button, n), id = cur < n ? ids[cur] : -1;
         if (key == 27) return 0;
         if (key == K_UP) cur = clampi(cur - 1, 0, n);
@@ -1495,7 +1589,7 @@ static int creation_dialog(struct creation *c, const char *title)
                 c->type = (c->type + (key == K_RIGHT ? 1 : ntypes - 1)) % ntypes;
             }
             c->level = ctype(c)->ldef;
-        } else if (id == 3 && (key == K_LEFT || key == K_RIGHT)) {
+        } else if (id == FIELD_LEVEL && (key == K_LEFT || key == K_RIGHT)) {
             c->level = clampi(c->level + (key == K_RIGHT ? 1 : -1), t->lmin, t->lmax);
         } else if (id == 4 && key == '\n') {
             char pw[sizeof c->password] = "", again[sizeof c->password] = "";
@@ -1709,19 +1803,20 @@ static void properties(void)
     PROP(_("SHA-1 hash:"), j.hashes[1]);
     PROP(_("SHA-256 hash:"), j.hashes[2]);
 #undef PROP
-    int cols = screen_cols();
     char cut[PATH_MAX];
-    screen_fill(0, 0, cols, screen_rows(), BG);
-    ui_hits_clear();
-    screen_bar(_("archive"), NULL);
-    screen_text(1, 1, _("Properties"), ACCENT, BG);
-    for (int i = 0; i < n; i++) {
-        fit(cut, sizeof cut, lines[i], cols - 4);
-        screen_text(2, 3 + i, cut, FG, BG);
-    }
-    screen_text(1, screen_rows() - 1, _("Any key: back"), DIM, BG);
-    screen_flush();
-    any_key();
+    do {
+        int cols = screen_cols(), rows_n = screen_rows();
+        screen_fill(0, 0, cols, rows_n, BG);
+        ui_hits_clear();
+        screen_bar(_("archive"), NULL);
+        screen_text(1, 1, _("Properties"), ACCENT, BG);
+        for (int i = 0; i < n && 3 + i < rows_n - 1; i++) {
+            fit(cut, sizeof cut, lines[i], cols - 4);
+            screen_text(2, 3 + i, cut, FG, BG);
+        }
+        screen_text(1, rows_n - 1, _("Any key: back"), DIM, BG);
+        screen_flush();
+    } while (any_key());
 }
 
 /* ---- Keys and the pointer ---- */
@@ -1883,18 +1978,19 @@ static void handle(int key)
 static void pointer(void)
 {
     const struct pointer_event *e = pointer_last();
+    if (e->cancelled) return;
     if (e->wheel) {
         move_sel(sel - 3 * e->wheel);
         return;
     }
-    if (!e->button || !e->pressed) return;
+    if (!e->pressed || (e->button != BTN_LEFT && e->button != BTN_RIGHT)) return;
     int id = ui_hit_at(e->col, e->row);
     if (id >= HIT_KEY) {
-        handle(id - HIT_KEY);
+        if (e->button == BTN_LEFT) handle(id - HIT_KEY);
     } else if (id >= HIT_ROW && id < HIT_ROW + nrows) {
         sel = id - HIT_ROW;
         if (e->button == BTN_RIGHT) {
-            int k = entry_menu(e->col, e->row);
+            int k = entry_menu(e->col + 1, e->row);
             if (k) handle(k);
         } else if (e->clicks == 2) {
             handle('\n');

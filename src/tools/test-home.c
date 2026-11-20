@@ -403,6 +403,21 @@ int main(int argc, char **argv)
     mouse = (struct pointer_event){ .output=1, .col=x1+5, .row=y1, .button=BTN_LEFT, .pressed=1, .clicks=2 };
     assert(pointer_key() == '\n' && selected == 2 && home_output == 1);
     draw(0);
+    /* Focus can go away while dragging text, including when an output disappears. */
+    int footer = screen_rows() - footer_rows();
+    snprintf(copied[1], sizeof copied[1], "previous primary selection");
+    int cancelled_outputs[] = { 0, screen_output_count() };
+    for (size_t i = 0; i < sizeof cancelled_outputs / sizeof *cancelled_outputs; i++) {
+        mouse = (struct pointer_event){ .output = 1, .col = 1, .row = footer,
+                                        .button = BTN_LEFT, .pressed = 1, .buttons = 1 };
+        assert(pointer_key() == -1 && textsel_active());
+        mouse = (struct pointer_event){ .output = cancelled_outputs[i], .col = 8, .row = footer,
+                                        .button = BTN_LEFT, .cancelled = 1 };
+        assert(pointer_key() == -1 && !textsel_active());
+        assert(home_output == 1 && screen_output_current() == 1 && selected == 2);
+        assert(strcmp(copied[1], "previous primary selection") == 0);
+    }
+    puts("PASS home focus loss: cancelled text drag does not copy or change outputs");
     /* A menu opened on one output: a press at its cells on another closes it
      * and chooses nothing; on its own output the same press chooses. */
     hit_cell(HIT_ROW + 3, &x1, &y1);

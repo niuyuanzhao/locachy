@@ -2165,6 +2165,11 @@ static int hw_sidebar_w(int cols)
     return w;
 }
 
+static int hw_spark_visible(int pw, int rows)
+{
+    return hw_cat == HWCAT_SENSORS && nhw_sensors > 0 && rows >= 22 && pw >= 30;
+}
+
 static void hwinfo_draw(void)
 {
     int cols = screen_cols(), rows = screen_rows();
@@ -2187,7 +2192,7 @@ static void hwinfo_draw(void)
     int top = PAGE_TOP;
 
     /* Live rolling sparkline card at top of Sensors category */
-    if (hw_cat == HWCAT_SENSORS && nhw_sensors > 0 && rows >= 22 && pw >= 30) {
+    if (hw_spark_visible(pw, rows)) {
         int sidx = 0;
         if (hw_sel_row >= 0 && hw_sel_row < nhw_rows && hw_rows[hw_sel_row].sensor_idx >= 0)
             sidx = hw_rows[hw_sel_row].sensor_idx;
@@ -2246,7 +2251,6 @@ static void hwinfo_draw(void)
     }
 
     int avail = rows - 3 - top;
-    if (avail < 1) avail = 1;
     if (hw_sel_row >= nhw_rows) hw_sel_row = nhw_rows > 0 ? nhw_rows - 1 : 0;
     if (hw_sel_row < hw_scroll) hw_scroll = hw_sel_row;
     if (hw_sel_row >= hw_scroll + avail) hw_scroll = hw_sel_row - avail + 1;
@@ -2291,6 +2295,8 @@ static void hwinfo_draw(void)
                 _("Up/Down: select   Tab / Left / Right: switch pane   r: refresh   Ctrl+C: copy page   Esc: back"),
                 DIM, BG);
     screen_text(2, rows - 2, _(notice), ACCENT, BG);
+    ui_hits_clear();
+    settings_back_button(rows - 1);
     screen_flush();
 }
 
@@ -2339,8 +2345,16 @@ static void hwinfo_page(void)
         }
         if (key == K_POINTER) {
             const struct pointer_event *ev = pointer_last();
-            int cols = screen_cols(), sw = hw_sidebar_w(cols);
+            if (settings_back_clicked(ev)) {
+                notice[0] = '\0';
+                return;
+            }
+            int cols = screen_cols(), rows = screen_rows(), sw = hw_sidebar_w(cols);
+            int px = sw > 0 ? sw + 2 : 2;
+            int top = PAGE_TOP + (hw_spark_visible(cols - px - 1, rows) ? 6 : 0);
+            if (ev->row < PAGE_TOP || ev->row >= rows - 3) continue;
             int on_side = sw > 0 && ev->col < sw;
+            if (!on_side && ev->col < px) continue;
             if (ev->wheel) {
                 if (on_side) {
                     int nc = hw_cat - ev->wheel;
@@ -2353,6 +2367,8 @@ static void hwinfo_page(void)
                         hw_update_sensor_spark();
                     }
                 } else {
+                    if (ev->row < top || !nhw_rows) continue;
+                    hw_in_pane = 1;
                     hw_sel_row -= ev->wheel * 2;
                     if (hw_sel_row < 0) hw_sel_row = 0;
                     if (hw_sel_row >= nhw_rows) hw_sel_row = nhw_rows > 0 ? nhw_rows - 1 : 0;
@@ -2373,10 +2389,9 @@ static void hwinfo_page(void)
                         hwinfo_draw();
                     }
                 } else {
-                    hw_in_pane = 1;
-                    int top = PAGE_TOP + (hw_cat == HWCAT_SENSORS && nhw_sensors > 0 && screen_rows() >= 22 ? 6 : 0);
                     int r = ev->row - top;
                     if (r >= 0 && hw_scroll + r < nhw_rows) {
+                        hw_in_pane = 1;
                         hw_sel_row = hw_scroll + r;
                         hw_update_sensor_spark();
                         hwinfo_draw();

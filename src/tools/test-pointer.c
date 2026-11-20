@@ -492,6 +492,26 @@ int main(void)
     extended_fixture = selected_fixture = desk_fixture = 0;
     puts("PASS extended presses name the screen pressed on");
 
+    pointer_came(300, 100);
+    next();
+    button(BTN_MIDDLE, 1);
+    e = next();
+    assert(e.button == BTN_MIDDLE && e.pressed && !e.cancelled);
+    pointer_went();
+    e = next();
+    assert(e.button == BTN_MIDDLE && !e.pressed && e.cancelled && !e.buttons);
+    pointer_came(300, 100);
+    next();
+    button(BTN_MIDDLE, 0);
+    assert(!pointer_next());
+    button(BTN_MIDDLE, 1);
+    e = next();
+    assert(e.pressed && !e.cancelled && e.clicks == 1);
+    button(BTN_MIDDLE, 0);
+    e = next();
+    assert(e.button == BTN_MIDDLE && !e.pressed && !e.cancelled);
+    puts("PASS direct pointer handoff cancels a grab and discards its late release");
+
     assert(pointer_scroll_events(1) == 0);
     away = 0;
     scroll_input(SCROLL_FINGER, -1, 0, 1, &pipes[0]);

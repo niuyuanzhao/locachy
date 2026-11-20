@@ -9,7 +9,8 @@
  * what the drawing registered. Build with base/ui.c, and with CLOUD_LIST
  * set to a built files-cloud-list; the cloud service is a stand-in script.
  */
-#define ARCHIVE_PROGRAM "/bin/true" /* there and runnable: its menus are shown */
+#define ARCHIVE_PROGRAM archive_program
+static char *archive_program = "/bin/true"; /* runnable: its menus are shown */
 #define CLOUD_STATUS cloud_status_path
 #define CLOUD_CLIENT cloud_client_path
 #define SEAT_CLIENT seat_client_path /* a script of the test's: what it was asked */
@@ -142,7 +143,7 @@ static int entries_with(const char *dir, const char *prefix)
  * AT, or on item k of the menu the last right press opened for MENU(k). */
 struct click {
     int id, col, row;
-    int button, release, clicks, wheel, mods;
+    int button, release, clicks, wheel, mods, cancelled;
 };
 #define AT (-1)
 #define MENU(k) (-10 - (k))
@@ -180,7 +181,7 @@ static void point(const struct click *c)
     }
     mouse = (struct pointer_event){ .x = col * 8 + 4, .y = row * 16 + 8, .col = col, .row = row,
                                     .button = c->button, .pressed = c->button && !c->release,
-                                    .clicks = c->clicks, .wheel = c->wheel };
+                                    .clicks = c->clicks, .wheel = c->wheel, .cancelled = c->cancelled };
     mods = c->mods;
     if (c->button == BTN_RIGHT && !c->release) { menu_col = col; menu_row = row; }
 }
@@ -204,6 +205,7 @@ static const char *native_names[] = { "eDP-1", "HDMI-A-1" };
 static char bar_title[64];
 int screen_cols(void) { return native_on ? native_cols[native_output] : ncols; }
 int screen_rows(void) { return native_on ? native_rows[native_output] : 30; }
+double screen_scale(void) { return native_on && native_output == 1 ? 1.5 : 1.0; }
 void screen_cells(int *w, int *h, int *t)
 {
     *w = native_on ? native_cell_w[native_output] : 8;
@@ -1083,11 +1085,13 @@ int main(int argc, char **argv)
         { .id = HIT_KEY + 'n', .button = BTN_LEFT, .clicks = 1 },
         { .id = HIT_KEY + 'y', .button = BTN_LEFT, .clicks = 1 },
         { .id = HIT_FILE + 0, .wheel = -5 },
+        { .id = AT, .col = 5, .row = 5, .button = BTN_LEFT },
+        { .id = HIT_KEY + 'y', .button = BTN_RIGHT },
     };
     clicks = marking;
-    run("pointer: Shift marks a range, Ctrl one; delete answered by buttons (a motion is no answer); the wheel keeps selection",
-        (const int[]){ CLICK(0), CLICK(1), CLICK(2), CLICK(3), KEY(K_DEL, KEYS_SHIFT), CLICK(4), CLICK(5), KEY(K_DEL, KEYS_SHIFT), CLICK(6),
-                       CLICK(7), 'q', END });
+    run("pointer: Shift marks a range, Ctrl one; delete waits through stray clicks and resize; wheel keeps selection",
+        (const int[]){ CLICK(0), CLICK(1), CLICK(2), CLICK(3), KEY(K_DEL, KEYS_SHIFT), CLICK(4), CLICK(8), CLICK(9),
+                       K_SHOWN, CLICK(5), KEY(K_DEL, KEYS_SHIFT), K_SHOWN, CLICK(6), CLICK(7), 'q', END });
     assert(!exists("Documents/p") && !exists("Documents/c (2).md"));
     assert(exists("Documents/new") && exists("Documents/c.md") && P->sel == 0 && P->top == 0);
 
@@ -1263,12 +1267,86 @@ int main(int argc, char **argv)
                        TIMEOUT, TIMEOUT, TIMEOUT, TIMEOUT, TIMEOUT, TIMEOUT, TIMEOUT, TIMEOUT,
                        TIMEOUT, TIMEOUT, TIMEOUT, TIMEOUT, TIMEOUT, TIMEOUT, CLICK(5), K_LEFT, END });
     assert(here("Documents") && P->top == 0);
+    assert(go(at_home("Documents/many"), NULL) == 0);
+    side_hidden = 1;
+    int old_side_sel = side_sel;
+    mouse = (struct pointer_event){ .col = 2, .row = 4, .wheel = -1 };
+    mods = 0;
+    assert(pointer_key(&mods) == -1 && P->top == 3 && side_sel == old_side_sel);
+    side_hidden = 0;
+    assert(go(at_home("Documents"), "many") == 0);
     assert(remove_tree(at_home("Documents/many")) == 0);
+    puts("PASS a wheel over the file pane scrolls it when Places is hidden");
 
     /* Drag and drop: into a folder, and onto the Trash place in the sidebar. */
     run("reload Documents", (const int[]){ KEY(K_F1 + 4, 0), END });
     int item1 = index_of("item-01.txt"), item2 = index_of("item-02.txt");
+    int drag_col, drag_row, ox, oy;
+    hit_cell(HIT_FILE + item1, &drag_col, &drag_row);
+    struct pointer_event press = { .x = drag_col * 8 + 7, .y = drag_row * 16 + 4, .col = drag_col, .row = drag_row,
+                                   .button = BTN_LEFT, .pressed = 1, .clicks = 1 };
+    mouse = press;
+    assert(pointer_key(&mods) == -1 && drag.mode == DRAG_PENDING);
+    mouse = (struct pointer_event){ .x = press.x + 1, .y = press.y, .col = drag_col + 1, .row = drag_row };
+    assert(pointer_key(&mods) == 0 && drag.mode == DRAG_PENDING);
+    mouse.x = press.x + 6;
+    mouse.hwheel = 1;
+    assert(pointer_key(&mods) == 0 && drag.mode == DRAG_PENDING);
+    mouse.hwheel = 0;
+    assert(pointer_key(&mods) == -1 && drag.mode == DRAG_ITEMS);
+    drag_stop();
+    mouse = press;
+    assert(pointer_key(&mods) == -1 && drag.mode == DRAG_PENDING);
+    mouse = (struct pointer_event){ .col = drag_col, .row = drag_row + 1 };
+    assert(pointer_key(&mods) == -1 && drag.mode == DRAG_ITEMS);
+    drag_stop();
+    pick_type = "text/";
+    mouse = press;
+    assert(pointer_key(&mods) == -1 && drag.mode == DRAG_NONE);
+    pick_type = NULL;
+    pointer_xy(&(struct pointer_event){ 0 }, &ox, &oy);
+    assert(ox == 0 && oy == 0);
+    puts("PASS item drag requires six pixels, ignores horizontal wheel input, supports cell-only events, and is disabled in the picker");
     inew = index_of("new");
+    mods = 0;
+    P->list[item1].marked = P->list[item2].marked = 1;
+    mouse = press;
+    assert(pointer_key(&mods) == -1 && drag.mode == DRAG_PENDING && drag.clear);
+    mouse.pressed = 0;
+    mouse.cancelled = 1;
+    mouse.button = BTN_RIGHT;
+    assert(pointer_key(&mods) == 0 && drag.mode == DRAG_PENDING);
+    mouse.button = BTN_LEFT;
+    assert(pointer_key(&mods) == -1 && drag.mode == DRAG_NONE && marked(P) == 2);
+    assert(P->sel == item1 && P->list[item1].marked && P->list[item2].marked);
+    puts("PASS focus loss cancels a pending item gesture without clearing existing marks");
+
+    point(&(struct click){ .id = AT, .col = SIDE + 70, .row = drag_row, .button = BTN_LEFT });
+    assert(pointer_key(&mods) == -1 && drag.mode == DRAG_BAND);
+    point(&(struct click){ .id = HIT_FILE + inew });
+    assert(pointer_key(&mods) == -1 && drag.mode == DRAG_BAND && P->sel != item1);
+    mouse.button = BTN_LEFT;
+    mouse.cancelled = 1;
+    assert(pointer_key(&mods) == -1 && drag.mode == DRAG_NONE && !drag.base);
+    assert(P->sel == item1 && marked(P) == 2 && P->list[item1].marked && P->list[item2].marked);
+    P->list[item1].marked = P->list[item2].marked = 0;
+    puts("PASS focus loss restores the rubberband's pre-gesture marks and keyboard selection");
+
+    struct click lost_drop[] = {
+        { .id = HIT_FILE + item1, .button = BTN_LEFT, .clicks = 1 },
+        { .id = HIT_FILE + inew },
+        { .id = HIT_FILE + inew, .button = BTN_LEFT, .release = 1, .cancelled = 1 },
+        { .id = AT, .col = -1, .row = -1 },
+    };
+    clicks = lost_drop;
+    int undo_before = nundo;
+    wl_on = 1;
+    run("Wayland focus loss over a folder while dragging an item", (const int[]){ CLICK(0), CLICK(1), CLICK(2), CLICK(3), END });
+    assert(drag.mode == DRAG_NONE && nundo == undo_before && wl_starts == 0 && wl_key_starts == 0);
+    assert(exists("Documents/item-01.txt") && !exists("Documents/new/item-01.txt"));
+    wl_on = 0;
+    puts("PASS focus loss over a folder neither drops the item nor starts external DnD");
+
     struct click dnd[] = {
         { .id = HIT_FILE + item1, .button = BTN_LEFT, .clicks = 1 },
         { .id = HIT_FILE + inew },
@@ -1299,6 +1377,8 @@ int main(int argc, char **argv)
         { .id = AT, .col = -1, .row = 6, .button = BTN_LEFT, .release = 1 },
         { .id = HIT_FILE + index_of("to-secret"), .button = BTN_LEFT, .clicks = 1 },
         { .id = HIT_FILE + index_of("to-etc"), .button = BTN_LEFT, .clicks = 1 },
+        { .id = AT, .col = -1, .row = 6, .button = BTN_LEFT, .release = 1, .cancelled = 1 },
+        { .id = AT, .col = -1, .row = -1 },
     };
     clicks = out;
     wl_starts = 0;
@@ -1316,7 +1396,12 @@ int main(int argc, char **argv)
     run("Wayland window: a link out of the home is refused, nothing starts",
         (const int[]){ CLICK(4), CLICK(1), CLICK(2), END });
     assert(wl_starts == 1 && wl_key_starts == 0 && error && strstr(msg, "home folder"));
-    puts("PASS a file outside the home (here through a symbolic link) never leaves as a drag");
+    draw();
+    point(&out[4]);
+    assert(pointer_key(&mods) == -1 && drag.mode == DRAG_PENDING);
+    point(&out[1]);
+    assert(pointer_key(&mods) == -1 && drag.mode == DRAG_NONE && error);
+    puts("PASS a refused drag outside the home (here through a symbolic link) stops before release");
     error = 0;
     run("Wayland window: a private file without the document service is refused, nothing starts",
         (const int[]){ CLICK(3), CLICK(1), CLICK(2), END });
@@ -1333,8 +1418,8 @@ int main(int argc, char **argv)
     puts("PASS a private file the document service refuses: nothing starts, the connection closes (all or nothing)");
     error = 0;
     svc = fake_docs(NULL);
-    run("Wayland window: a private file dragged out is a document of the document service",
-        (const int[]){ CLICK(3), CLICK(1), CLICK(2), END });
+    run("Wayland window: focus loss after handing off a private document drag",
+        (const int[]){ CLICK(3), CLICK(1), CLICK(5), CLICK(6), END });
     char doc_uri[] = "file:///run/user/1000/doc/d1/secret.txt\r\n", decoded[512];
     long n = docs_key_decode(wl_key, decoded, sizeof decoded);
     assert(wl_key_starts == 1 && wl_starts == 1 && !error && wl_serial == 4242 && strcmp(wl_uris, doc_uri) == 0);
@@ -1345,8 +1430,8 @@ int main(int argc, char **argv)
     char seen[PATH_MAX + 64];
     snprintf(seen, sizeof seen, "begin\nname secret.txt %s/secret.txt O_PATH\nend 7 done\n", scratch);
     assert(strcmp(svc_log, seen) == 0 && docs_drag.fd < 0);
-    puts("PASS a private file dragged out: an O_PATH descriptor of it to the document service, its document's "
-         "path in the URI list and the key (never its own), the end told when the drop was read");
+    puts("PASS focus loss leaves handed-off private DnD intact: an O_PATH descriptor to the document service, "
+         "its document path in the URI list and key, and end done only when the drop was read");
     svc = fake_docs(NULL);
     run("Wayland window: a private drag that is cancelled tells the document service",
         (const int[]){ CLICK(3), CLICK(1), CLICK(2), END });
@@ -1526,6 +1611,21 @@ int main(int argc, char **argv)
     assert(here("Drives/remote") && P->nlist == 1 && strcmp(P->list[0].name, "old.txt") == 0);
     assert(strcmp(P->list[0].type, "text/plain") == 0); /* by its name: nothing downloaded */
     assert(strstr(drawn_row(1, 0), "[online]"));
+    char remote[PATH_MAX];
+    snprintf(remote, sizeof remote, "%s", P->cwd);
+    assert(join(P->cwd, sizeof P->cwd, remote, "中/next/this-part-of-the-path-is-long-enough-to-be-truncated") == 0);
+    ui_hits_clear();
+    draw_toolbar();
+    int root_col = 7 + ui_cells("[online] "), wide_col = root_col + ui_cells(remote) + 1;
+    int wide_hit = HIT_PATH + (int)strlen(remote) + 4; /* / plus the three UTF-8 bytes */
+    assert(ui_hit_at(7, 1) < 0 && ui_hit_at(root_col, 1) == HIT_PATH);
+    assert(ui_hit_at(wide_col, 1) == wide_hit && ui_hit_at(wide_col + 1, 1) == wide_hit);
+    assert(ui_hit_at(wide_col + 3, 1) == wide_hit + 5);
+    int ellipsis = -1;
+    for (int c = wide_col + 3; c < screen_cols(); c++) if (drawn[1][c] == 0x2026) ellipsis = c;
+    assert(ellipsis >= 0 && ui_hit_at(ellipsis, 1) < 0);
+    snprintf(P->cwd, sizeof P->cwd, "%s", remote);
+    puts("PASS cloud breadcrumb hit regions use displayed cells and exclude the ellipsis");
 
     run("F5 on a cloud drive asks the service to refresh, then reads the folder again",
         (const int[]){ KEY(K_F1 + 4, 0), WAIT, WAIT, WAIT, WAIT, WAIT, WAIT, END });
@@ -1774,6 +1874,12 @@ int main(int argc, char **argv)
                        CLICK(2), CLICK(3), CLICK(4), CLICK(5), 'c', 'm', 'p', '\n',
                        K_BOL, K_DOWN, CLICK(6), END });
     assert(exists("Views/cmp") && marked(P) == 0 && P->sel == 1 && P->top == 25);
+    mouse = (struct pointer_event){ .col = SIDE + 10, .row = 4, .hwheel = -1 };
+    mods = 0;
+    assert(pointer_key(&mods) == -1 && P->top == 0 && P->sel == 1);
+    mouse.hwheel = 1;
+    assert(pointer_key(&mods) == -1 && P->top == 25 && P->sel == 1);
+    puts("PASS Compact horizontal wheel scrolls by columns without moving selection");
     assert(rmdir(at_home("Views/cmp")) == 0);
 
     run("Compact: horizontal rubberband auto-scrolls across columns",
@@ -1863,7 +1969,13 @@ int main(int argc, char **argv)
     copy_with("Esc while copying: y stops it", big, downloads, 0, (const int[]){ 27, 'y', END });
     assert(error && strstr(msg, "Copy stopped") && size_of(final_big) < 0 && temps_in(downloads) == 0);
     assert(size_of(big) == 1 << 20);
-    copy_with("Esc while copying: n goes on", big, downloads, 0, (const int[]){ 27, 'n', IDLE, END });
+    struct click copy_question[] = {
+        { .id = AT, .col = 1, .row = 28, .button = BTN_LEFT },
+        { .id = HIT_KEY + 'n', .button = BTN_LEFT },
+    };
+    clicks = copy_question;
+    copy_with("Esc while copying: n goes on, even after a stray click and resize", big, downloads, 0,
+              (const int[]){ 27, CLICK(0), K_SHOWN, CLICK(1), IDLE, END });
     assert(!error && size_of(final_big) == 1 << 20 && temps_in(downloads) == 0);
     assert(unlink(final_big) == 0);
     puts("PASS Esc while copying asks; y stops it with nothing left, n goes on");
@@ -2064,14 +2176,49 @@ int main(int argc, char **argv)
     open_terminal_here();
     assert(!error && strstr(msg, "Opened with term in a window") && !strcmp(text_of(seat_calls), "--window term\n"));
     unlink(seat_calls);
+    char archive_client[PATH_MAX], archive_log[PATH_MAX], archive_fail[PATH_MAX], archive_want[PATH_MAX * 2 + 128];
+    char got[PATH_MAX * 2 + 128];
+    snprintf(archive_client, sizeof archive_client, "%s", at_home(".archive-client"));
+    snprintf(archive_log, sizeof archive_log, "%s", at_home(".archive-args"));
+    snprintf(archive_fail, sizeof archive_fail, "%s", at_home(".archive-fail"));
+    write_file(archive_client, "#!/bin/sh\nd=$(dirname \"$0\")\nprintf '%s\\n' \"$LOCACHY_BACKEND\" \"$@\" >\"$d/.archive-args\"\n"
+                               "[ ! -e \"$d/.archive-fail\" ] || exit 2\n");
+    assert(chmod(archive_client, 0755) == 0);
+    archive_program = archive_client;
     ncalled = 0;
-    P->sel = index_of("w.txt");
-    archive_action(KEY_EXTRACT_HERE);
-    snprintf(want, sizeof want, "--window archive %s\n", wtxt);
-    assert(!error && strstr(msg, "Opened with archive in a window") && !strcmp(text_of(seat_calls), want));
-    unlink(seat_calls);
+    static const struct { int code; const char *args; } archive_ops[] = {
+        { KEY_EXTRACT_HERE, "--batch\n--autodestination\n--autosubfolder\n" },
+        { KEY_EXTRACT_TO, "--batch\n--dialog\n" },
+        { KEY_COMPRESS_TO, "--add\n--changetofirstpath\n" },
+    };
+    for (size_t i = 0; i < sizeof archive_ops / sizeof *archive_ops; i++) {
+        P->sel = index_of("w.txt");
+        archive_action(archive_ops[i].code);
+        snprintf(archive_want, sizeof archive_want, "wayland\n%s%s\n", archive_ops[i].args, wtxt);
+        assert(!error && read_file(archive_log, got, sizeof got) && !strcmp(got, archive_want));
+    }
+    for (int code = KEY_COMPRESS_TGZ; code <= KEY_COMPRESS_ZIP; code++) {
+        P->sel = index_of("w.txt");
+        archive_action(code);
+        snprintf(archive_want, sizeof archive_want, "wayland\n--add-to\n%s/Documents/w.%s\n--changetofirstpath\n%s\n", scratch,
+                 code == KEY_COMPRESS_TGZ ? "tar.gz" : "zip", wtxt);
+        assert(!error && read_file(archive_log, got, sizeof got) && !strcmp(got, archive_want));
+    }
+    put("Documents/to-trash.zip", 0);
+    put(".archive-fail", 0);
+    reload_all();
+    P->sel = index_of("to-trash.zip");
+    archive_action(KEY_EXTRACT_TRASH);
+    assert(error && strstr(msg, "Cancelled") && exists("Documents/to-trash.zip"));
+    assert(unlink(archive_fail) == 0);
+    P->sel = index_of("to-trash.zip");
+    archive_action(KEY_EXTRACT_TRASH);
+    assert(!error && !exists("Documents/to-trash.zip") && exists(".local/share/Trash/files/to-trash.zip"));
+    assert(ncalled == 0 && size_of(seat_calls) < 0);
+    archive_program = "/bin/true";
+    assert(unlink(archive_client) == 0 && unlink(archive_log) == 0);
     unsetenv("LOCACHY_BACKEND");
-    puts("PASS window: home's requests stay home's; term and archive open in windows when window backend is on");
+    puts("PASS window: home's requests stay home's, term uses the seat, and archive runs batch options and checks the exit status");
 
     open_answer = "no process 1 to ask";
     open_file(doc, 0, "program:viewer");

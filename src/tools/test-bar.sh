@@ -195,15 +195,25 @@ check "and it stays scrolled (redrawn each second)" "! buttons | grep -q \"32:on
 pkill -f "$out/test-window"
 sleep 0.5
 
+$out/test-click 20 14 $L 2>>$out/client.log
+shot 0.4
+launch=$(python3 $out/box.py $out/shot-HEADLESS-1.ppm 183860)
+check "launcher is visible ($launch)" "[ \"$launch\" != none ]"
+$out/test-click 20 14 $L 2>>$out/client.log
+shot 0.4
+check "the top bar remains clickable and toggles the launcher closed" \
+    "[ \"\$(python3 $out/box.py $out/shot-HEADLESS-1.ppm 183860)\" = none ]"
+
 echo "== 2. the question, on the focused window s screen"
 window "First: the focus"
 sleep 1
-python3 -c "
+show_plain() { python3 -c "
 import socket
 s = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
 s.connect(\"/run/user/0/locachy-bar.sock\")
 s.send(b\"show plain\")
-print(s.recv(256).decode())" >$out/show.reply
+print(s.recv(256).decode())" >$out/show.reply; }
+show_plain
 shot 1.5
 b1=$(python3 $out/box.py $out/shot-HEADLESS-1.ppm 182848); b2=$(python3 $out/box.py $out/shot-HEADLESS-2.ppm 182848)
 check "on the first screen at scale 1: 72 by 7 cells of 10x18, 720x126 ($b1; second: $b2; $(cat $out/show.reply))" \

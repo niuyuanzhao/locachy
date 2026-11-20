@@ -1453,6 +1453,25 @@ static void tool_click(const struct pointer_event *e)
     pdf.ay = by;
 }
 
+/* Pointer ownership was lost during a held annotation drag.  The line and
+ * polygon tools are different: after a click they keep their point-placement
+ * preview until the next click, so a cancelled release must not erase it. */
+static void pdf_drag_cancel(void)
+{
+    if (pdf.drag == D_DRAW) {
+        pdf.drag = D_NONE;
+        pdf.npts = 0;
+        pdf.moved = 0;
+        ui.dirty = 1;
+    } else if (pdf.drag == D_SELECT) {
+        pdf.drag = D_NONE;
+        pdf.bx = pdf.ax;
+        pdf.by = pdf.ay;
+        pdf.moved = 0;
+        ui.dirty = 1;
+    }
+}
+
 /* Events while a press is held, or a line or polygon is placed. */
 static int drag_event(const struct pointer_event *e)
 {
@@ -1627,9 +1646,18 @@ static void annot_properties(int col, int row)
 /* The pointer on the pages. 1: it was this file's. */
 static int pdf_pointer(const struct pointer_event *e, int in_area)
 {
-    if (pdf.drag) return drag_event(e);
-    if (!pdf_on() || !in_area || list.kind || prompt.kind || !e->pressed || e->button != BTN_LEFT ||
-        ui_hit_at(e->col, e->row) >= 0) return 0;
+    int hit = ui_hit_at(e->col, e->row);
+    if (pdf.drag) {
+        if (pdf.drag == D_LINE || pdf.drag == D_POLYGON) {
+            /* A pending vertex must not swallow the controls above the page. */
+            if (e->button && e->pressed && hit >= 0) return 0;
+            if (e->button && !in_area) return 1;
+            /* Focus loss sends an offscreen hover; leave the preview in place. */
+            if (!e->button && e->x == -1 && e->y == -1) return 1;
+        }
+        return drag_event(e);
+    }
+    if (!pdf_on() || !in_area || list.kind || prompt.kind || !e->pressed || e->button != BTN_LEFT || hit >= 0) return 0;
     double px, py;
     int i = page_point(e->x, e->y, 0, &px, &py);
     /* The fields first: Okular's widgets are over the page. */
@@ -1714,6 +1742,7 @@ static void choose_tool(int t)
     pdf.npts = 0;
     /* Okular: the tool's button again stops annotating. */
     pdf.tool = pdf.tool == t ? T_NONE : t;
+    cursor_shape(CURSOR_ARROW);
     if (pdf.tool) {
         unselect();
         if (!pdf.toolbar) {
@@ -2163,7 +2192,7 @@ static int pdf_draw_sidebar(void)
 {
     if (ui.tab != TAB_ANNOTATIONS && ui.tab != TAB_SIGNATURES) return 0;
     char text[600], line[700];
-    int last = side_last(), rows = last - 3 + 1, focus = ui.focus == FOCUS_SIDEBAR;
+    int last = side_last(), rows = side_rows(), focus = ui.focus == FOCUS_SIDEBAR;
     if (!pdf_on()) {
         screen_text(0, 3, _("Not a PDF"), DIM, BG);
         return 1;
@@ -2178,7 +2207,7 @@ static int pdf_draw_sidebar(void)
     *sel = clampi(*sel, 0, n - 1);
     if (*sel < *first) *first = *sel;
     if (*sel >= *first + rows) *first = *sel - rows + 1;
-    *first = clampi(*first, 0, n - 1);
+    *first = side_top(*first, n);
     for (int r = 3; r <= last && *first + r - 3 < n; r++) {
         int k = *first + r - 3, mark = 0;
         if (ui.tab == TAB_ANNOTATIONS) {
@@ -2228,8 +2257,8 @@ static int pdf_wheel_sidebar(int wheel)
 {
     if (ui.tab != TAB_ANNOTATIONS && ui.tab != TAB_SIGNATURES) return 0;
     int *first = ui.tab == TAB_ANNOTATIONS ? &pdf.atop : &pdf.stop, *sel = ui.tab == TAB_ANNOTATIONS ? &pdf.asel : &pdf.ssel;
-    *first = *first - 3 * wheel > 0 ? *first - 3 * wheel : 0;
-    if (*sel < *first) *sel = *first;
+    int loading, n = ui.tab == TAB_ANNOTATIONS ? annot_rows(&loading) : sig_build();
+    side_wheel(wheel, n, first, sel);
     ui.dirty = 1;
     return 1;
 }

@@ -57,6 +57,8 @@
 #define MAX_PROGS      16
 
 #define HIT_ROW    0
+#define HIT_LOG    1000
+#define HIT_SPI    2000 /* + twice the SPI row, +1 for Right */
 #define HIT_TAB    100000
 #define HIT_KEY    0x1000000 /* + the key a button stands for, with MODS(its modifiers) */
 #define MODS(m)    ((m) << 16)
@@ -119,7 +121,7 @@ static int flashrom_missing;
 
 static int page;
 static int sel[NPAGES], top_row[NPAGES];
-static int show_log = 1, log_scroll;
+static int show_log = 1, log_scroll, log_max_scroll;
 static int job_id;              /* the job asked for (the queue's id), until it has ended; 0: none */
 static char job_label[128], job_kind[24];
 static char job_log[512];       /* its output: the job shown last */
@@ -485,6 +487,7 @@ static int prompt_text(const char *question, char *buf, size_t size)
         screen_text(at + ui_cells(line), row, "_", ACCENT, BG);
         screen_flush();
         int key = key_poll_timeout(-1, -1), act = key_action(key, keys_modifiers());
+        if (key == K_POINTER) continue; /* the prompt has no pointer actions */
         size_t len = strlen(buf);
         if (act == ACT_QUIT) {
             quit_asked = 1;
@@ -525,6 +528,7 @@ static void draw_log_pane(int top_r, int h)
         snprintf(hdr, sizeof hdr, _(" Output (%.200s) "), job_log[0] ? job_log : _("no job yet"));
     }
     screen_text(1, top_r, hdr, ACCENT, BAR_BG);
+    ui_hit(0, top_r, cols, h, HIT_LOG);
     if (h <= 1) return;
 
     if (!job_id && in_releases && nrels > 0 && sel_rel < nrels && rels[sel_rel].notes[0]) {
@@ -545,8 +549,9 @@ static void draw_log_pane(int top_r, int h)
     int total = nlines < 256 ? nlines : 256;
     int base = nlines < 256 ? 0 : nlines % 256;
     int body = h - 1;
-    int start = total > body ? total - body - log_scroll : 0;
-    if (start < 0) start = 0;
+    log_max_scroll = total > body ? total - body : 0;
+    if (log_scroll > log_max_scroll) log_scroll = log_max_scroll;
+    int start = log_max_scroll - log_scroll;
     for (int i = 0; i < body && start + i < total; i++) {
         const char *ln = lines[(base + start + i) % 256];
         char cut[256];
@@ -697,8 +702,8 @@ static void draw(void)
             screen_text(2, 3 + NSPI_ROWS + 1,
                         _("flashrom is not installed. Press P to install flashrom with locachy-pkg."), ERROR, BG);
         }
-        for (int i = 0; i < NSPI_ROWS && i < list_h; i++) {
-            int on = i == *cur_sel;
+        for (int r = 0; r < list_h && *cur_top + r < NSPI_ROWS; r++) {
+            int i = *cur_top + r, on = i == *cur_sel;
             char val[256] = "";
             const char *lbl = "";
             if (i == SPI_ROW_PROG) {
@@ -727,15 +732,24 @@ static void draw(void)
             }
             snprintf(line, sizeof line, " %s %.240s", ui_pad(c1, sizeof c1, lbl, 24), val);
             fit_cells(c4, sizeof c4, line, cols);
-            screen_fill(0, 3 + i, cols, 1, on ? ACCENT : BG);
-            screen_text(0, 3 + i, c4, on ? BG : FG, on ? ACCENT : BG);
-            ui_hit(0, 3 + i, cols, 1, HIT_ROW + i);
+            screen_fill(0, 3 + r, cols, 1, on ? ACCENT : BG);
+            screen_text(0, 3 + r, c4, on ? BG : FG, on ? ACCENT : BG);
+            ui_hit(0, 3 + r, cols, 1, HIT_ROW + i);
+            if (val[0] == '<') {
+                int x = 2 + ui_cells(c1), width = ui_cells(val), left = width / 2;
+                int visible = ui_cells(c4) - x;
+                if (strcmp(c4, line) != 0) visible--; /* the ellipsis is not a control */
+                if (width > visible) width = visible;
+                ui_hit(x, 3 + r, left < width ? left : width, 1, HIT_SPI + 2 * i);
+                ui_hit(x + left, 3 + r, width - left, 1, HIT_SPI + 2 * i + 1);
+            }
         }
     }
 
-    if (show_log && log_h > 0) {
-        draw_log_pane(3 + list_h, log_h);
-    }
+    log_max_scroll = 0;
+    int log_top = 3 + list_h;
+    if (log_h > rows - 3 - log_top) log_h = rows - 3 - log_top;
+    if (log_h > 0) draw_log_pane(log_top, log_h);
 
     /* Notice / confirmation row (rows - 3) and buttons (rows - 2, rows - 1) */
     screen_fill(0, rows - 3, cols, 3, BG);
@@ -811,7 +825,9 @@ static void change_bios_attr(int idx, int step)
             int next = cur_i < 0 ? 0 : (cur_i + (step > 0 ? 1 : n - 1)) % n;
             snprintf(target_val, sizeof target_val, "%.63s", storage[next]);
         } else {
-            int ch = ui_menu(36, 4, opts);
+            char label[128];
+            ui_pad(label, sizeof label, a->name, 34);
+            int ch = ui_menu(2 + ui_cells(label), 3 + idx - top_row[PAGE_BIOS], opts);
             if (ch < 0) return;
             snprintf(target_val, sizeof target_val, "%.63s", storage[ch]);
         }
@@ -895,9 +911,19 @@ static void confirm_action(int yes)
 static int pointer_to_key(int *mods)
 {
     const struct pointer_event *e = pointer_last();
+    *mods = 0;
+    if (e->cancelled) return 0;
     int *cur_sel = (page == PAGE_FWUPD && in_releases) ? &sel_rel : &sel[page];
     int cnt = list_count();
-    *mods = 0;
+    int id = ui_hit_at(e->col, e->row);
+    if (e->wheel && id == HIT_LOG) {
+        if (!log_max_scroll) return 0;
+        int prev = log_scroll;
+        log_scroll += 3 * e->wheel;
+        if (log_scroll < 0) log_scroll = 0;
+        if (log_scroll > log_max_scroll) log_scroll = log_max_scroll;
+        return log_scroll != prev ? -1 : 0;
+    }
     if (e->wheel && confirming == CONF_NONE) {
         *cur_sel = *cur_sel - e->wheel;
         if (*cur_sel < 0) *cur_sel = 0;
@@ -905,7 +931,6 @@ static int pointer_to_key(int *mods)
         return -1;
     }
     if (!e->pressed || e->button != BTN_LEFT) return 0;
-    int id = ui_hit_at(e->col, e->row);
     if (id >= HIT_KEY) {
         *mods = (id - HIT_KEY) >> 16;
         return (id - HIT_KEY) & 0xFFFF;
@@ -915,6 +940,10 @@ static int pointer_to_key(int *mods)
         page = id - HIT_TAB;
         in_releases = 0;
         return -1;
+    }
+    if (page == PAGE_SPI && id >= HIT_SPI && id - HIT_SPI < 2 * NSPI_ROWS) {
+        *cur_sel = (id - HIT_SPI) / 2;
+        return (id - HIT_SPI) % 2 ? K_RIGHT : K_LEFT;
     }
     if (id >= HIT_ROW && id - HIT_ROW < cnt) {
         *cur_sel = id - HIT_ROW;

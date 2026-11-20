@@ -1188,7 +1188,11 @@ static void test_ime_mouse(void)
     text_rows(0, &y0, &h);
     click(4 + 7, y0, BTN_LEFT, 1, 2); /* in "world" */
     CHECK(t->anchor == 6 && t->cursor == 11 && strcmp(clip[1], "world") == 0);
-    click(4 + 7, y0, BTN_LEFT, 0, 0);
+    ptr_now = (struct pointer_event){ .x = (4 + 13) * 10 + 2, .col = 4 + 13, .row = y0,
+                                      .y = y0 * 20 + 5, .buttons = 1 };
+    key_event(K_POINTER);
+    click(4 + 13, y0, BTN_LEFT, 0, 0);
+    CHECK(strcmp(clip[1], "world foo") == 0);
     click(4 + 7, y0, BTN_LEFT, 1, 3);
     CHECK(t->anchor == 0 && t->cursor == 16 && strcmp(clip[1], "hello world foo\n") == 0);
     click(4 + 7, y0, BTN_LEFT, 0, 0);

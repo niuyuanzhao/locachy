@@ -4174,14 +4174,14 @@ msgstr "回收站中的项目请还原（r），不能复制。"
 #, c-format
 msgid "Cut %d item; Ctrl+V puts it in the folder shown."
 msgid_plural "Cut %d items; Ctrl+V puts them in the folder shown."
-msgstr[0] "已剪切 %d 项；按 v 放入当前文件夹。"
+msgstr[0] "已剪切 %d 项；按 Ctrl+V 放入当前文件夹。"
 
 #. TRANSLATORS: Ctrl+V is the key; keep it.
 #: progs/files.c
 #, c-format
 msgid "Copied %d item; Ctrl+V puts it in the folder shown."
 msgid_plural "Copied %d items; Ctrl+V puts them in the folder shown."
-msgstr[0] "已复制 %d 项；按 v 放入当前文件夹。"
+msgstr[0] "已复制 %d 项；按 Ctrl+V 放入当前文件夹。"
 
 #: progs/files.c
 #, c-format
@@ -4484,11 +4484,11 @@ msgstr "   筛选: "
 
 #: progs/files.c
 msgid "   (copied: Ctrl+V pastes here)"
-msgstr "   （已复制：按 v 粘贴到此处）"
+msgstr "   （已复制：按 Ctrl+V 粘贴到此处）"
 
 #: progs/files.c
 msgid "   (cut: Ctrl+V moves here)"
-msgstr "   （已剪切：按 v 移到此处）"
+msgstr "   （已剪切：按 Ctrl+V 移到此处）"
 
 #: progs/files.c
 msgid "Search"
@@ -9996,8 +9996,8 @@ msgid ""
 "m: %/W   1-6: span   Left/Right: cursor   Tab: pack   r: refresh   Ctrl+C: "
 "copy   Esc: back"
 msgstr ""
-"m: 电量/功率   1-6: 时间范围   左右键: 游标   Tab: 切换电池包   r: 刷新   c: "
-"复制   Esc: 返回"
+"m: 电量/功率   1-6: 时间范围   左右键: 游标   Tab: 切换电池包   r: 刷新   "
+"Ctrl+C: 复制   Esc: 返回"
 
 #: progs/settings-power.inc
 msgid "Battery readings refreshed."

@@ -44,7 +44,7 @@ if [ "$(uname -s)" = Linux ]; then
         echo "FAIL: extdisplay-worker exited $rc without its channels (expected 78)"
         exit 1
     fi
-    # Raw mode 1 keeps Super+Esc local; mode 2 (live extdisplay link) forwards it.
+    # Raw input: local bindings, autorepeat and cancellation through evdev.
     cat >"$out/raw.c" <<'EOF'
 #include "base.h"
 #include "input-raw.h"
@@ -55,34 +55,88 @@ if [ "$(uname -s)" = Linux ]; then
 #include <unistd.h>
 void say(const char *fmt, ...) { (void)fmt; }
 int rc_read(void (*fn)(const char *, const char *, void *), void *arg) { (void)fn; (void)arg; return 0; }
+static int key(const int p[2], unsigned short code, int value)
+{
+    struct input_event ev = { .type = EV_KEY, .code = code, .value = value };
+    assert(write(p[1], &ev, sizeof ev) == (ssize_t)sizeof ev);
+    return keys_event(p[0]);
+}
+
+static struct base_raw_key expect_key(uint32_t code, uint32_t state)
+{
+    struct base_raw_key rk;
+    assert(base_raw_next(&rk) && rk.code == code && rk.state == state);
+    return rk;
+}
+
 int main(void) {
     int p[2];
     assert(pipe(p) == 0);
-    struct input_event seq[] = {
-        { .type = EV_KEY, .code = KEY_LEFTMETA, .value = 1 },
-        { .type = EV_KEY, .code = KEY_ESC, .value = 1 },
-        { .type = EV_KEY, .code = KEY_ESC, .value = 0 },
-        { .type = EV_KEY, .code = KEY_LEFTMETA, .value = 0 },
-    };
-    base_raw_enable(1);
-    for (size_t i = 0; i < 4; i++) {
-        assert(write(p[1], &seq[i], sizeof seq[i]) == sizeof seq[i]);
-        (void)keys_event(p[0]);
+    for (int mode = 1; mode <= 2; mode++) {
+        base_raw_enable(mode);
+        key(p, KEY_LEFTMETA, 1);
+        assert(key(p, KEY_ESC, 1) == K_ACT_HOME);
+        key(p, KEY_ESC, 0);
+        key(p, KEY_LEFTMETA, 0);
+        expect_key(KEY_LEFTMETA, 1);
+        assert(!!(expect_key(KEY_ESC, 1).flags & BASE_RAW_LOCAL) == (mode == 1));
+        expect_key(KEY_ESC, 0);
+        expect_key(KEY_LEFTMETA, 0);
+
+        key(p, KEY_LEFTCTRL, 1);
+        key(p, KEY_LEFTALT, 1);
+        assert(key(p, KEY_LEFTMETA, 1) == K_ACT_HOME);
+        key(p, KEY_LEFTMETA, 0);
+        key(p, KEY_LEFTALT, 0);
+        key(p, KEY_LEFTCTRL, 0);
+        expect_key(KEY_LEFTCTRL, 1);
+        expect_key(KEY_LEFTALT, 1);
+        struct base_raw_key combo = expect_key(KEY_LEFTMETA, 1);
+        assert(combo.modifiers == (KEYS_CTRL | KEYS_ALT));
+        assert(!!(combo.flags & BASE_RAW_LOCAL) == (mode == 1));
+        assert(!!(expect_key(KEY_LEFTMETA, 0).flags & BASE_RAW_LOCAL) == (mode == 1));
+        expect_key(KEY_LEFTALT, 0);
+        expect_key(KEY_LEFTCTRL, 0);
+        assert(!base_raw_pending());
     }
-    struct base_raw_key rk;
-    int saw_local = 0;
-    while (base_raw_next(&rk)) if (rk.code == KEY_ESC && rk.state == 1) saw_local = !!(rk.flags & BASE_RAW_LOCAL);
-    assert(saw_local == 1);
-    base_raw_enable(2);
-    for (size_t i = 0; i < 4; i++) {
-        assert(write(p[1], &seq[i], sizeof seq[i]) == sizeof seq[i]);
-        (void)keys_event(p[0]);
-    }
-    int saw_fwd = 0;
-    while (base_raw_next(&rk)) if (rk.code == KEY_ESC && rk.state == 1) saw_fwd = !(rk.flags & BASE_RAW_LOCAL);
-    assert(saw_fwd == 1);
+    puts("PASS: raw mode 1 keeps both Home chords local while mode 2 forwards them");
+
+    key(p, KEY_LEFTMETA, 1);
+    key(p, KEY_LEFTMETA, 2);
+    key(p, KEY_A, 1);
+    key(p, KEY_A, 2);
+    key(p, KEY_LEFTMETA, 2);
+    key(p, KEY_A, 0);
+    key(p, KEY_LEFTMETA, 0);
+    assert(expect_key(KEY_LEFTMETA, 1).modifiers == 0);
+    assert(expect_key(KEY_A, 1).modifiers == KEYS_META);
+    assert(expect_key(KEY_A, 2).modifiers == KEYS_META);
+    expect_key(KEY_A, 0);
+    assert(expect_key(KEY_LEFTMETA, 0).modifiers == KEYS_META);
+    key(p, KEY_A, 1);
+    key(p, KEY_A, 0);
+    assert(expect_key(KEY_A, 1).modifiers == 0);
+    assert(expect_key(KEY_A, 0).modifiers == 0);
+    assert(!base_raw_pending());
+    puts("PASS: ordinary keys repeat, but held Meta does not emit raw repeats or stay held after release");
+
+    key(p, KEY_LEFTMETA, 1);
+    expect_key(KEY_LEFTMETA, 1);
+    base_raw_cancel();
+    expect_key(0, 3);
+    assert(keys_modifiers() == KEYS_META); /* Local state still sees the held key. */
+    key(p, KEY_A, 1);
+    key(p, KEY_A, 2);
+    key(p, KEY_LEFTMETA, 0);
+    key(p, KEY_A, 0);
+    assert(expect_key(KEY_A, 1).modifiers == 0);
+    assert(expect_key(KEY_A, 2).modifiers == 0);
+    assert(expect_key(KEY_A, 0).modifiers == 0);
+    assert(!base_raw_pending());
+    puts("PASS: raw cancel discards held modifiers without changing local state");
     base_raw_enable(0);
-    puts("PASS: raw mode 1 keeps Super+Esc local while mode 2 forwards it");
+    close(p[0]);
+    close(p[1]);
     return 0;
 }
 EOF

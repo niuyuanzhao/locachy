@@ -25,11 +25,12 @@
 static uint32_t pic[SH][SW];
 static char grid[ROWS][COLS + 1];
 static int shape = -1, flushes;
-static int screen_w = SW, screen_h = SH;
+static int screen_w = SW, screen_h = SH, window_top;
 
 int screen_open(const char *font) { (void)font; return 1; }
 int screen_cols(void) { return COLS; }
 int screen_rows(void) { return ROWS; }
+int screen_window_top(void) { return window_top; }
 void screen_pixels(int *w, int *h) { *w = screen_w; *h = screen_h; }
 void screen_cells(int *w, int *h, int *t) { *w = CW; *h = CH; *t = TOP; }
 double screen_scale(void) { return 1; }
@@ -1135,6 +1136,9 @@ static void parity_find_utf8(void)
     e.button = BTN_LEFT; e.pressed = 0; pointer(&e);
     assert(ui.focus == FOCUS_FIND && find.in.cursor > find.in.mark);
     key_find(3, KEYS_CTRL); assert(!strcmp(clip[0], "文中"));
+    e.pressed = 1; e.clicks = 2; pointer(&e);
+    e.pressed = 0; pointer(&e);
+    assert(find.in.replace && !ptr.find_drag && find.in.mark == 0 && find.in.cursor == strlen(find.in.text));
     find_bar(0);
     printf("PASS find UTF-8 insertion cursor, codepoint backspace/delete, selection, clipboard cut/copy/paste\n");
 }
@@ -1208,7 +1212,17 @@ static void parity_bookmarks(void)
     go(pos_page(1)); draw();
     assert(doc.item[0].hidden && !doc.item[1].hidden && current_page() == 1);
     screen_step(-1); assert(current_page() == 0);
-    do_action(A_CONTINUOUS); assert(!settings.paged);
+    zoom_to(VL_FIXED, 1, ax + aw / 2, ay + ah / 2);
+    struct pointer_event wheel = { .x = ax + aw / 2, .y = ay + ah / 2, .wheel = -1 };
+    v.sy = doc.full_h - ah;
+    assert(v.sy > 0);
+    pointer(&wheel);
+    assert(current_page() == 1 && v.sy == 0);
+    wheel.wheel = 1;
+    pointer(&wheel);
+    assert(current_page() == 0 && v.sy == doc.full_h - ah);
+    do_action(A_CONTINUOUS);
+    go(pos_page(0)); assert(!settings.paged);
     do_action(A_FIT_AUTO); assert(v.mode == VL_FIT_AUTO);
     do_action(A_RELOAD);
 }
@@ -1728,7 +1742,7 @@ static void signed_opened(void)
     draw();
     assert(on_screen("Rev. 1: Signed By Generated test signer") && on_screen("(the name the document gives, not verified)"));
     assert(on_screen("Validity: unavailable") && on_screen("Certificate has not yet been verified."));
-    assert(on_screen("Changes: unchanged") && on_screen("Reason: Backend tests") && on_screen("Field: signed-fixture on page 1"));
+    assert(on_screen("Changes: none since signing") && on_screen("Reason: Backend tests") && on_screen("Field: signed-fixture on page 1"));
     assert(!on_screen("cryptographically valid") && !on_screen("Trusted"));
     printf("PASS signatures: the signatures bar and panel: signer name, reason, field; validity unavailable, never valid; unchanged\n");
 }
@@ -2057,6 +2071,29 @@ static void pres_first(void)
     int side = SW / 16, ox = SW - side - 4, oy = 4;
     assert(pic[oy + side / 2][ox + side / 2] == 0 && pic[oy + side / 8][ox + side / 2] == SELECTED && on_screen("1"));
     printf("PASS presentation (Ctrl+Shift+P): page 1 fit to the whole screen on black, the page indicator lit in the top right\n");
+}
+
+static void pres_window(void)
+{
+    window_top = TOP + CH;
+    int w, h, x, y;
+    pres_zoom(0, &w, &h, &x, &y);
+    assert(y == window_top && h == SH - window_top);
+    pres.overlay_until = now() + 2.5;
+    draw();
+    int ox = SW - pres_side() / 2 - 4;
+    assert(!pres_in_overlay(ox, window_top + 3) && pres_in_overlay(ox, window_top + 4));
+    assert(pic[window_top + 4 + pres_side() / 8][ox] == SELECTED);
+    pres_pointer(&(struct pointer_event){ .x = 500, .y = window_top + 1 });
+    assert(pres.bar);
+    draw();
+    int col, row;
+    assert(hit_cell(HIT_PRES + 2, &col, &row) && row == 1);
+    pres_pointer(&(struct pointer_event){ .x = 500, .y = window_top + CH + 2 });
+    assert(!pres.bar);
+    window_top = 0;
+    draw();
+    printf("PASS presentation: window slide, progress ring and toolbar start below the hidden canvas bar\n");
 }
 
 static void pres_second(void)
@@ -2593,6 +2630,8 @@ static void browse_opened(void)
     assert(gal.sel == 2 && settings.thumbnail_size == 128);
     assert(on_screen("a.jpg") && on_screen("pack.cbz") && on_screen("sub") && on_screen("5 images") && on_screen("128 x 128"));
     assert(on_screen(" Browse ") && on_screen(" View "));
+    int col, row;
+    assert(!hit_cell(HIT_ZOOM, &col, &row) && !hit_cell(HIT_GOTO, &col, &row) && !hit_cell(HIT_SIDEBAR, &col, &row));
     assert(red_px(gal_pixel(2, 0.8, 0.8)) && blue_px(gal_pixel(5, 0.75, 0.5)) && red_px(gal_pixel(5, 0.25, 0.5)));
     printf("PASS Browse mode (a folder): the grid of its images by name, the folder and the archive first, the first "
            "image selected, names, \"5 images\", \"128 x 128\", the JPEG's and the DNG's thumbnails\n");
@@ -3225,7 +3264,7 @@ int main(int argc, char **argv)
     run("table.pdf: Table Selection", table_path);
 
     /* Presentation. */
-    idle(); key(K_BOL, KEYS_CTRL); key(16, KEYS_CTRL | KEYS_SHIFT); until(slide_drawn); check(pres_first);
+    idle(); key(K_BOL, KEYS_CTRL); key(16, KEYS_CTRL | KEYS_SHIFT); until(slide_drawn); check(pres_first); check(pres_window);
     key(K_RIGHT, 0); until(slide_drawn); check(pres_second);
     key(K_LEFT, 0); check(pres_page0); key(' ', 0); check(pres_page1); key('\b', 0); check(pres_page0);
     key(K_PGDN, 0); check(pres_page1); key(K_PGUP, 0); check(pres_page0); key(K_DOWN, 0); check(pres_page1);

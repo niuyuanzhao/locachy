@@ -30,7 +30,8 @@ static struct minimap_cache {
     const struct doc *doc;
     unsigned long version;
     size_t total;
-    int rows, cols, h, folded;
+    int rows, cols, h, width;
+    uint64_t folds;
     uint32_t *cells;         /* rows x cols, the margin column's included */
     unsigned char *marks;    /* rows: LINE_* of its lines */
 } minimap_cache[MAX_SPACES];
@@ -199,8 +200,11 @@ static void marks_moved(struct doc *d, size_t at, size_t removed, size_t inserte
     }
 }
 
+static void scroll_forget(const struct doc *d);
+
 static void marks_free(struct doc *d)
 {
+    scroll_forget(d);
     struct docui *u = ui_of(d);
     for (int s = 0; s < MAX_SPACES; s++) {
         if (minimap_cache[s].doc == d) minimap_cache[s].doc = NULL;
@@ -371,6 +375,8 @@ static void modified_line_step(int s, struct tab *t, int dir)
  */
 struct scroll_geom {
     size_t total, page, max, value;
+    const size_t *offsets;    /* visual row offsets by document line */
+    int width;               /* wrap width, zero for logical rows */
     int x, y, w, h;          /* its cells */
     int doc_rows;            /* the mini-map: the rows its lines take (m_mapGroveRect) */
     int slider_a, slider_b;  /* the rows of the slider, [a, b) */
@@ -392,6 +398,103 @@ static int scroll_cols(int s, const struct tab *t)
     return n > r.w / 4 ? r.w / 4 : n;
 }
 
+/* Cache wrapped row offsets; never lay out a whole document per scroll event. */
+static struct {
+    const struct doc *doc;
+    unsigned long version;
+    uint64_t folds;
+    int width;
+    size_t *at, capacity;
+} scroll_index[MAX_SPACES];
+
+static void scroll_forget(const struct doc *d)
+{
+    for (int s = 0; s < MAX_SPACES; s++) if (scroll_index[s].doc == d) {
+        free(scroll_index[s].at);
+        memset(&scroll_index[s], 0, sizeof scroll_index[s]);
+    }
+}
+
+static int scroll_line_rows(const struct tab *t, int width, size_t line)
+{
+    const struct buffer *b = &t->doc->buf;
+    size_t len = buffer_line_length(b, line);
+    if (len <= (size_t)width / TAB_WIDTH) return 1;
+    if (len <= (size_t)width) {
+        /* Without tabs, each UTF-8 character takes at most its byte length. */
+        size_t span;
+        const char *text = buffer_chunk(b, buffer_line_start(b, line), &span);
+        if (span >= len && !memchr(text, '\t', len)) return 1;
+    }
+    return line_rows(t, width, line);
+}
+
+static const size_t *scroll_offsets(int s, struct tab *t, int width)
+{
+    typeof(scroll_index[0]) *c = &scroll_index[s];
+    const struct edit_folding *f = fold_sync(t);
+    size_t hidden = f && f->live ? f->nhidden : 0;
+    uint64_t folds = 0;
+    for (size_t i = 0; i < hidden; i++) {
+        folds = (folds ^ f->hidden[i].first) * UINT64_C(1099511628211);
+        folds = (folds ^ f->hidden[i].last) * UINT64_C(1099511628211);
+    }
+    size_t n = t->doc->buf.lines;
+    unsigned long version = ui_of(t->doc)->version;
+    if (c->doc == t->doc && c->version == version && c->width == width && c->folds == folds) return c->at;
+    if (n >= c->capacity) {
+        size_t *at = realloc(c->at, (n + 1) * sizeof *at);
+        if (!at) return NULL;
+        c->at = at;
+        c->capacity = n + 1;
+    }
+    size_t value = 0;
+    for (size_t line = 0, i = 0; line < n; line++) {
+        c->at[line] = value;
+        if (i == hidden || line < f->hidden[i].first) value += scroll_line_rows(t, width, line);
+        else if (line == f->hidden[i].last) i++;
+    }
+    c->at[n] = value;
+    c->doc = t->doc;
+    c->version = version;
+    c->width = width;
+    c->folds = folds;
+    return c->at;
+}
+
+/* A visual row maps to its document line and wrapped subrow. */
+static size_t scroll_position(const struct tab *t, const struct scroll_geom *g, size_t value, int *sub)
+{
+    *sub = 0;
+    if (!g->width) return fold_document_line(t, value);
+    size_t lo = 0, hi = t->doc->buf.lines;
+    while (lo + 1 < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (g->offsets[mid] <= value) lo = mid;
+        else hi = mid;
+    }
+    *sub = (int)(value - g->offsets[lo]);
+    return lo;
+}
+
+static size_t scroll_value(const struct tab *t, const struct scroll_geom *g, size_t line, int sub)
+{
+    if (!g->width) return fold_visible_index(t, line);
+    line = fold_line(t, line);
+    size_t value = g->offsets[line];
+    if (sub <= 0) return value;
+    int rows = scroll_line_rows(t, g->width, line);
+    return value + (size_t)(sub >= rows ? rows - 1 : sub);
+}
+
+/* The scrollbar's or the mini-map's drag: keep the range at press time. */
+static struct {
+    int on, space;
+    int row, rows;
+    size_t max, page;
+    long value;
+} scroll_drag;
+
 static void scroll_geometry(int s, struct tab *t, struct scroll_geom *g)
 {
     struct edit_rect r = space_rect(s);
@@ -399,15 +502,25 @@ static void scroll_geometry(int s, struct tab *t, struct scroll_geom *g)
     text_rows(s, &text_y, &text_h);
     g->w = scroll_cols(s, t);
     g->x = r.x + r.w - g->w;
-    g->y = text_first_row(s);
-    g->h = r.y + r.h - 1 - bar_rows(s) - g->y;
+    g->y = text_y;
+    g->h = text_end_row(s) - g->y;
     if (g->h < 1) g->h = 1;
-    g->total = fold_visible_index(t, t->doc->buf.lines - 1) + 1;
+    g->width = t->wrap ? text_width(s, t) : 0;
+    g->offsets = g->width ? scroll_offsets(s, t, g->width) : NULL;
+    if (!g->offsets) g->width = 0; /* fall back to logical lines on allocation failure */
+    size_t last = t->doc->buf.lines - 1;
+    g->total = g->offsets ? g->offsets[last + 1] : fold_visible_index(t, last) + 1;
     g->page = (size_t)text_h;
     g->max = g->total > g->page ? g->total - g->page : 0;
-    g->value = fold_visible_index(t, line_of(t->doc, t->top));
-    if (g->value > g->max) g->max = g->value;
+    size_t line = line_of(t->doc, t->top);
+    g->value = scroll_value(t, g, line, t->sub);
+    if (scroll_drag.on && scroll_drag.space == s) {
+        g->max = scroll_drag.max;
+        g->page = scroll_drag.page;
+    }
+    g->value = min_z(g->value, g->max);
     size_t range = g->max + g->page;
+    if (!range) range = 1;
     int rows = g->h;
     if (t->minimap) {
         /* At most two pixel rows a line: a short document takes the top. */
@@ -422,8 +535,8 @@ static void scroll_geometry(int s, struct tab *t, struct scroll_geom *g)
     g->slider_b = (int)((g->value + g->page) * (size_t)rows / range);
     if (g->slider_b > rows) g->slider_b = rows;
     if (g->slider_b <= g->slider_a) g->slider_b = g->slider_a + 1;
-    if (g->slider_b > g->h) {
-        g->slider_b = g->h;
+    if (g->slider_b > rows) {
+        g->slider_b = rows;
         g->slider_a = g->slider_b - 1;
     }
 }
@@ -434,12 +547,25 @@ static void scroll_to(int s, struct tab *t, long value)
     struct scroll_geom g;
     scroll_geometry(s, t, &g);
     value = value < 0 ? 0 : (size_t)value > g.max ? (long)g.max : value;
-    t->top = line_start(t->doc, fold_document_line(t, (size_t)value));
-    t->sub = 0;
+    t->top = line_start(t->doc, scroll_position(t, &g, min_z((size_t)value, g.total - 1), &t->sub));
     clamp_top(s, t);
 }
 
-/* A cell row's first visible line and its count. */
+/* Map a visual row to the byte range drawn in the minimap and preview. */
+static void scroll_row_range(const struct tab *t, const struct scroll_geom *g, size_t row, size_t *ls, size_t *le)
+{
+    int sub, shift;
+    size_t line = scroll_position(t, g, row, &sub);
+    *ls = line_start(t->doc, line);
+    *le = line_end(t->doc, line);
+    if (g->width && scroll_line_rows(t, g->width, line) > 1) {
+        int rows = layout(t, g->width, line, row_buf, MAX_ROWS, &shift);
+        *ls = row_buf[sub];
+        if (sub + 1 < rows) *le = row_buf[sub + 1];
+    }
+}
+
+/* The visual rows covered by a single cell of the minimap. */
 static void minimap_lines(const struct scroll_geom *g, int row, size_t *first, size_t *count)
 {
     size_t a = (size_t)row * g->total / (size_t)g->doc_rows, b = (size_t)(row + 1) * g->total / (size_t)g->doc_rows;
@@ -477,7 +603,8 @@ static void minimap_build(int s, struct tab *t, const struct scroll_geom *g, str
         size_t step = count > MINIMAP_SAMPLE ? count / MINIMAP_SAMPLE : 1;
         memset(column, 0, (size_t)cols * sizeof *column);
         for (size_t i = 0; i < count; i += step) {
-            size_t line = fold_document_line(t, first + i), ls = line_start(d, line), le = line_end(d, line);
+            size_t ls, le;
+            scroll_row_range(t, g, first + i, &ls, &le);
             size_t end = le - ls > MINIMAP_CHARS * 4 ? ls + MINIMAP_CHARS * 4 : le;
             uint32_t *colour = d->syntax && end > ls ? colours_of(d, ls, end) : NULL;
             int x = 0;
@@ -524,15 +651,14 @@ static void minimap_build(int s, struct tab *t, const struct scroll_geom *g, str
     if (d->buf.lines < 50000) {
         lines_sync(d);
         for (size_t i = 0; i < u->lines.n; i++) {
-            size_t vis = fold_visible_index(t, line_of(d, u->lines.at[i]));
+            size_t vis = scroll_value(t, g, line_of(d, u->lines.at[i]), 0);
             int r = (int)(vis * (size_t)rows / (g->total ? g->total : 1));
             if (r < rows) marks[r] |= u->lines.flag[i];
         }
     }
     free(c->cells);
     free(c->marks);
-    *c = (struct minimap_cache){ d, u->version, g->total, rows, g->w, g->h, 0, out, marks };
-    (void)s;
+    *c = (struct minimap_cache){ d, u->version, g->total, rows, g->w, g->h, g->width, g->width ? scroll_index[s].folds : 0, out, marks };
 }
 
 /* The rows of the marks (bookmarks; Find All's and Replace All's matches as
@@ -544,12 +670,15 @@ static void scroll_marks(struct tab *t, const struct scroll_geom *g, int rows, u
     size_t lines = g->total > 1 ? g->total - 1 : 1;
     for (int r = 0; r < rows; r++) mark[r] = 0;
     for (size_t i = 0; i < u->nhl; i++) {
-        size_t vis = fold_visible_index(t, line_of(d, u->hl[2 * i]));
+        size_t line = line_of(d, u->hl[2 * i]);
+        int sub = 0, x;
+        if (g->width && fold_line(t, line) == line) place_of(t, g->width, u->hl[2 * i], &sub, &x);
+        size_t vis = scroll_value(t, g, line, sub);
         int r = (int)((double)(rows - 1) * (double)vis / (double)lines + 0.5);
         if (r >= 0 && r < rows) mark[r] = C_TEXT;
     }
     for (size_t i = 0; i < u->bookmarks.n; i++) {
-        size_t vis = fold_visible_index(t, line_of(d, u->bookmarks.at[i]));
+        size_t vis = scroll_value(t, g, line_of(d, u->bookmarks.at[i]), 0);
         int r = (int)((double)(rows - 1) * (double)vis / (double)lines + 0.5);
         if (r >= 0 && r < rows) mark[r] = C_BOOKMARK;
     }
@@ -581,7 +710,8 @@ static void draw_scrollbar(int s, struct tab *t)
     }
     struct minimap_cache *c = &minimap_cache[s];
     if (c->doc != t->doc || c->version != ui_of(t->doc)->version || c->total != g.total || c->rows != g.doc_rows ||
-        c->cols != g.w || c->h != g.h || !c->cells) {
+        c->cols != g.w || c->h != g.h || c->width != g.width ||
+        (g.width && c->folds != scroll_index[s].folds) || !c->cells) {
         minimap_build(s, t, &g, c);
     }
     if (mark) scroll_marks(t, &g, g.doc_rows, mark);
@@ -606,13 +736,6 @@ static void draw_scrollbar(int s, struct tab *t)
     free(mark);
     ui_hit(g.x, g.y, g.w, g.h, HIT_SCROLL + s);
 }
-
-/* The scrollbar's or the mini-map's drag: the slider follows the pointer. */
-static struct {
-    int on, space;
-    int row;                 /* where it was pressed */
-    long value;              /* the value then */
-} scroll_drag;
 
 static int scroll_pointer(int id, const struct pointer_event *e)
 {
@@ -643,9 +766,17 @@ static int scroll_pointer(int id, const struct pointer_event *e)
     scroll_drag.on = 1;
     scroll_drag.space = s;
     scroll_drag.row = e->row;
+    scroll_drag.rows = rows;
+    scroll_drag.max = g.max;
+    scroll_drag.page = g.page;
     active = s;
     drag.mode = DRAG_NONE;
     return 1;
+}
+
+static void scroll_drag_end(void)
+{
+    scroll_drag.on = 0;
 }
 
 static int scroll_dragging(const struct pointer_event *e)
@@ -653,18 +784,15 @@ static int scroll_dragging(const struct pointer_event *e)
     if (!scroll_drag.on) return 0;
     struct tab *t = tab_of(scroll_drag.space);
     if (!t || ((e->button == BTN_LEFT || e->button == BTN_MIDDLE) && !e->pressed)) {
-        scroll_drag.on = 0;
+        scroll_drag_end();
         return 1;
     }
-    if (!e->button && !e->wheel) {
-        struct scroll_geom g;
-        scroll_geometry(scroll_drag.space, t, &g);
-        int rows = t->minimap ? g.doc_rows : g.h;
-        double per_row = (double)(g.max + g.page) / (rows > 0 ? rows : 1);
+    if (e->gesture || e->wheel || e->hwheel) return 1;
+    if (!e->button) {
+        double per_row = (double)(scroll_drag.max + scroll_drag.page) / scroll_drag.rows;
         scroll_to(scroll_drag.space, t, scroll_drag.value + (long)((e->row - scroll_drag.row) * per_row));
-        return 1;
     }
-    return e->button != 0;
+    return 1;
 }
 
 /*
@@ -711,10 +839,9 @@ static int preview_timeout(void)
     return left <= 0 ? 0 : (int)(left * 1000) + 1;
 }
 
-/* A line of the preview: from its start, not wrapped, in its colours. */
-static void preview_line(struct doc *d, size_t line, int x, int y, int w)
+/* A row of the preview, in its text colours. */
+static void preview_line(struct doc *d, size_t ls, size_t le, int x, int y, int w)
 {
-    size_t ls = line_start(d, line), le = line_end(d, line);
     size_t end = le - ls > (size_t)w * 4 + 64 ? ls + (size_t)w * 4 + 64 : le;
     uint32_t *colour = end > ls ? colours_of(d, ls, end) : NULL;
     int cx = 0;
@@ -761,7 +888,7 @@ static void preview_draw(void)
     }
     struct scroll_geom g;
     scroll_geometry(s, t, &g);
-    if (g.max == 0) return; /* minimum() == maximum() */
+    if (g.max == 0) { preview_hide(); return; }
     int rows = t->minimap ? g.doc_rows : g.h, cw, ch, top;
     screen_cells(&cw, &ch, &top);
     double pos = cw > 0 && ch > 0 ? (double)(preview.y - top - g.y * ch) / ((double)rows * ch) :
@@ -786,7 +913,9 @@ static void preview_draw(void)
     screen_fill(x, y, w, bh, C_SEPARATOR); /* QFrame::StyledPanel */
     screen_fill(x + 1, y + 1, w - 2, n, C_BG);
     for (int i = 0; i < n && (size_t)(first + i) < g.total; i++) {
-        preview_line(t->doc, fold_document_line(t, (size_t)(first + i)), x + 1, y + 1 + i, w - 2);
+        size_t ls, le;
+        scroll_row_range(t, &g, (size_t)(first + i), &ls, &le);
+        preview_line(t->doc, ls, le, x + 1, y + 1 + i, w - 2);
     }
 }
 

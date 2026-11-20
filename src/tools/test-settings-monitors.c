@@ -1980,6 +1980,29 @@ static void test_page_keys(void)
     assert(page_key(K_RIGHT) && fp_next == (finger + 1) % NFINGERS);
     assert(!page_key('\n') && !editing);
     fp_next = finger;
+    fake_fprintd = 1;
+    draw();
+    int picker_y = item_row(selected);
+    assert(picker_y >= PAGE_TOP);
+    mouse = (struct pointer_event){ .col = text_x() + 33, .row = picker_y,
+                                    .button = BTN_LEFT, .pressed = 1, .clicks = 1 };
+    int key = settings_pointer();
+    assert(key == K_LEFT && editing && page_key(key));
+    assert(fp_next == (finger + NFINGERS - 1) % NFINGERS);
+    draw();
+    char picker_text[512];
+    item_text(selected, picker_text, sizeof picker_text);
+    const char *arrow = strchr(picker_text, '>');
+    assert(arrow);
+    mouse.col = text_x() + (int)(arrow - picker_text);
+    key = settings_pointer();
+    assert(key == K_RIGHT && editing && page_key(key) && fp_next == finger);
+    mouse.clicks = 2;
+    key = settings_pointer();
+    assert(key == '\n' && editing && !page_key(key) && !editing);
+    mouse.col = text_x() + 3;
+    assert(settings_pointer() == '\n' && editing && !page_key('\n') && !editing);
+    fake_fprintd = 0;
 
     /* What row_hint asks of adjust on the lines of their own Enter and on
      * those that only show something changes nothing. */
@@ -2032,7 +2055,7 @@ static void test_bluetooth(void)
         /* A click on a value opens it and changes it; the component's line
          * (installed) never changes by a click, a double click is its Enter. */
         for (int i = 0; i < 3; i++) {
-            mouse = (struct pointer_event){ .col = text_x() + 38, .row = item_row(bt_index() + i),
+            mouse = (struct pointer_event){ .col = text_x() + 37, .row = item_row(bt_index() + i),
                                             .button = BTN_LEFT, .pressed = 1, .clicks = 1 };
             assert(item_at(mouse.row) == bt_index() + i);
             assert(settings_pointer() == (i == 1 ? K_RIGHT : -1) && editing == (i == 1));
@@ -2479,6 +2502,9 @@ int main(int argc, char **argv)
         if (arrangement_hits[i].monitor == arrangement_selected) external_hit = arrangement_hits[i];
     select_event = (struct pointer_event){ .col = external_hit.x + external_hit.width / 2,
         .row = external_hit.y + external_hit.height / 2, .button = BTN_LEFT, .pressed = 1 };
+    struct pointer_event drag_press = select_event;
+    struct monitor before_drag[MAX_MONITORS];
+    memcpy(before_drag, monitors, sizeof before_drag);
     arrangement_pointer(&select_event);
     assert(arrangement_drag == arrangement_selected);
     int original_x = monitors[arrangement_selected].x, original_y = monitors[arrangement_selected].y;
@@ -2488,6 +2514,23 @@ int main(int argc, char **argv)
     /* Down, beyond the snapping distance; still touching the other screen. */
     assert(monitors[arrangement_selected].x == original_x &&
            monitors[arrangement_selected].y > original_y + ARRANGEMENT_SNAP);
+    int moving_monitor = arrangement_selected, moving_preset = arrangement_button;
+    struct pointer_event lost_focus = select_event;
+    lost_focus.button = BTN_RIGHT;
+    lost_focus.cancelled = 1;
+    assert(!arrangement_pointer(&lost_focus) && arrangement_drag == moving_monitor);
+    lost_focus.button = BTN_LEFT;
+    assert(arrangement_pointer(&lost_focus) && arrangement_drag < 0 && !arrangement_drag_moved);
+    assert(arrangement_selected == moving_monitor && arrangement_button == moving_preset);
+    assert(memcmp(monitors, before_drag, sizeof before_drag) == 0);
+    assert(!arrangement_pointer(&(struct pointer_event){ .col = -1, .row = -1 }));
+    load_monitors();
+    assert(memcmp(monitors, before_drag, sizeof before_drag) == 0);
+    puts("PASS monitor arrangement focus loss rolls back preview geometry without saving");
+
+    arrangement_draw();
+    assert(arrangement_pointer(&drag_press) && arrangement_drag == moving_monitor);
+    arrangement_pointer(&select_event);
     int saved_x = monitors[arrangement_selected].x, saved_y = monitors[arrangement_selected].y;
     select_event.button = BTN_LEFT;
     arrangement_pointer(&select_event);
@@ -2573,10 +2616,17 @@ int main(int argc, char **argv)
     int phys = item_row(scale_item);
     selected = bri_index();
     mouse = (struct pointer_event){ .col = text_x() + 3, .row = phys, .button = BTN_LEFT, .pressed = 1, .clicks = 1 };
-    assert(settings_pointer() == -1 && selected == scale_item);
+    double scale_before = monitors[row_maps[scale_item - num_hw_items() - 1].mon_idx].scale;
+    assert(settings_pointer() == -1 && selected == scale_item && !editing);
+    mouse.col = text_x() + 43; /* (text and windows) */
+    selected = bri_index();
+    assert(settings_pointer() == -1 && selected == scale_item && !editing);
+    mouse.col = screen_cols() - 1; /* blank past the hint */
+    assert(settings_pointer() == -1 && !editing);
+    assert(monitors[row_maps[scale_item - num_hw_items() - 1].mon_idx].scale == scale_before);
     mouse.col = text_x() + 38;
     assert(settings_pointer() == K_RIGHT);
-    mouse.col = text_x() + 32;
+    mouse.col = text_x() + 33;
     assert(settings_pointer() == K_LEFT);
     mouse.clicks = 2;
     assert(settings_pointer() == K_LEFT); /* not Enter: Enter here would leave */
@@ -2587,7 +2637,16 @@ int main(int argc, char **argv)
     assert(settings_pointer() == -1 && selected == num_hw_items() + 2);
     mouse = (struct pointer_event){ .col = 5, .row = 7 }; /* a motion */
     assert(settings_pointer() == 0);
-    puts("PASS main page clicks select and change rows, double click enters, wheel moves");
+    test_cols = 48;
+    draw();
+    assert(!sidebar_width() && canvas_has("[Esc: back]"));
+    mouse = (struct pointer_event){ .col = 3, .row = screen_rows() - 1,
+                                    .button = BTN_LEFT, .pressed = 1, .clicks = 1 };
+    assert(settings_pointer() == 27 && page_key(27) && !in_page);
+    test_cols = 100;
+    draw();
+    puts("PASS settings clicks: labels, hints and blank space only select; controls change; double click enters; "
+         "wheel moves; narrow page has Back");
     /* The sidebar: every setting is in exactly one category; a click on a
      * category opens its page; keys go to the sidebar or the page. */
     int counted[512] = { 0 }, total = num_hw_items() + 1 + nrow_maps + nrules;

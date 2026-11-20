@@ -15,6 +15,7 @@
 
 #include "internal.h"
 #include "session.h"
+#include "wayland-backend.h"
 
 #ifndef MSG_CMSG_CLOEXEC
 #define MSG_CMSG_CLOEXEC 0
@@ -458,8 +459,7 @@ int open_in_home(const char *with, const char *target)
     if ((target && strchr(target, '\n')) || (with && strchr(with, '\n'))) {
         return -1;
     }
-    const char *backend = getenv("LOCACHY_BACKEND");
-    if (backend && strcmp(backend, "wayland") == 0) {
+    if (wl_backend_requested() > 0) {
         const char *prog = with;
         if (prog && strncmp(prog, "program:", 8) == 0) prog += 8;
         if (prog && (!strcmp(prog, "view") || !strcmp(prog, "edit") || !strcmp(prog, "archive") ||
@@ -473,10 +473,15 @@ int open_in_home(const char *with, const char *target)
                 _exit(127);
             }
             if (pid > 0) {
-                int st = 0;
-                waitpid(pid, &st, 0);
-                return (WIFEXITED(st) && WEXITSTATUS(st) == 0) ? 0 : -1;
+                int st;
+                pid_t done;
+                do { done = waitpid(pid, &st, 0); } while (done < 0 && errno == EINTR);
+                if (done == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0) return 0;
+                say("open_in_home: locachy-seat --window %s failed (status %d)",
+                    prog, done == pid && WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+                return -1;
             }
+            say("open_in_home: fork for locachy-seat failed: %s", strerror(errno));
             return -1;
         }
         struct sockaddr_un address = { .sun_family = AF_UNIX, .sun_path = "/run/locachy/open/socket" };
@@ -484,21 +489,33 @@ int open_in_home(const char *with, const char *target)
         int n;
         if (prog && prog[0]) n = snprintf(req, sizeof req, "with %s %s", prog, target ? target : "");
         else n = snprintf(req, sizeof req, "open %s", target ? target : "");
-        int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
-        if (fd >= 0) {
-            if (connect(fd, (struct sockaddr *)&address, sizeof address) == 0 &&
-                send(fd, req, (size_t)n, MSG_NOSIGNAL) == n) {
-                struct pollfd wait = { .fd = fd, .events = POLLIN };
-                ssize_t got = poll(&wait, 1, 10000) > 0 ? recv(fd, reply, sizeof reply - 1, 0) : -1;
-                close(fd);
-                if (got > 0) {
-                    reply[got] = '\0';
-                    if (strncmp(reply, "ok", 2) == 0) return 0;
-                }
-            } else {
-                close(fd);
-            }
+        if (n < 0 || n >= (int)sizeof req) {
+            say("open_in_home: open request too long");
+            return -1;
         }
+        int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+        if (fd < 0) {
+            say("open_in_home: socket failed: %s", strerror(errno));
+            return -1;
+        }
+        if (connect(fd, (struct sockaddr *)&address, sizeof address) < 0 ||
+            send(fd, req, (size_t)n, MSG_NOSIGNAL) != n) {
+            say("open_in_home: cannot reach %s: %s", address.sun_path, strerror(errno));
+            close(fd);
+            return -1;
+        }
+        /* The bar can wait for a choice, as with xdg-open. */
+        struct pollfd wait = { .fd = fd, .events = POLLIN };
+        ssize_t got = poll(&wait, 1, 5 * 60 * 1000) > 0 ? recv(fd, reply, sizeof reply - 1, 0) : -1;
+        close(fd);
+        if (got <= 0) {
+            say("open_in_home: no reply from %s", address.sun_path);
+            return -1;
+        }
+        reply[got] = '\0';
+        if (strcmp(reply, "ok") == 0 || strncmp(reply, "ok ", 3) == 0) return 0;
+        say("open_in_home: bar refused open: %s", reply);
+        return -1;
     }
     /* One unique request in the queue (open.c), never a shared slot that a
      * second producer could overwrite. */

@@ -93,6 +93,7 @@ struct output {
     uint32_t scale120, w, h; /* logical size, from the configure */
     int configured, dirty, keyboard;
     struct image bg, veiled;  /* captured (then blurred, small), and veiled at the drawn size */
+    int field_x, field_y, field_w, field_h; /* search field, in buffer pixels */
     int heap_bottom;          /* the windows' area's bottom, in the screen's pixels */
     int selected, hovered, hover_close;
     struct output *next;
@@ -151,6 +152,7 @@ static struct ext_image_copy_capture_manager_v1 *copier;
 static struct wp_fractional_scale_manager_v1 *scale_mgr;
 static struct wp_viewporter *viewporter;
 static struct wl_cursor_theme *cursor_theme;
+static int cursor_size;
 static struct wl_surface *cursor_surface;
 static struct xkb_context *xkb_ctx;
 static struct xkb_keymap *xkb_map;
@@ -161,6 +163,12 @@ static struct window *windows;
 static struct listed *listed;
 static struct output *pointer_output;
 static double pointer_x, pointer_y;
+static struct {
+    uint32_t button;
+    struct output *output;
+    struct window *win;
+    int on_close, on_search;
+} pressed;
 static char search[128];
 static volatile sig_atomic_t stopping;
 static int finished; /* a window activated, or the overview closed */
@@ -174,7 +182,8 @@ static struct {
     int32_t id;                  /* the finger followed; -1: none */
     struct output *o;
     double x0, y0, x, y;         /* where it was pressed and is, logical */
-    int win, on_close, dragging; /* the window pressed (-1: none), on its close button */
+    struct window *win;          /* the window pressed, or NULL */
+    int on_close, on_search, dragging;
 } touching = { .id = -1 };
 static int touched;
 static char pid_path[128];
@@ -644,6 +653,8 @@ static void win_closed(void *data, struct zwlr_foreign_toplevel_handle_v1 *h)
             o->parent = NULL; /* its handle is gone with it */
         }
     }
+    if (pressed.win == w) pressed.button = 0, pressed.win = NULL;
+    if (touching.win == w) touching.id = -1, touching.win = NULL;
     cap_free(&w->cap);
     free(w->thumb.px);
     free(w->scaled.px);
@@ -946,9 +957,15 @@ static const struct wl_buffer_listener buffer_listener = { buffer_release };
 
 static void close_button(const struct window *w, int row, int *cx, int *cy, int *r)
 {
+    int inset = row / 4;
     *r = row * 2 / 3;
-    *cx = w->x + w->w - *r - row / 4;
-    *cy = w->y + *r + row / 4;
+    if (*r * 2 + inset > w->w || *r * 2 + inset > w->h) {
+        inset = 0;
+        int side = w->w < w->h ? w->w : w->h;
+        if (*r > side / 2) *r = side / 2;
+    }
+    *cx = w->x + w->w - *r - inset;
+    *cy = w->y + *r + inset;
 }
 
 /* A label on a rounded ground, centred on cx, its top at y. */
@@ -1026,6 +1043,10 @@ static void draw(struct output *o)
     /* The search field, at the top in the middle. */
     int margin = row, field_w = cw * 40 < W - 2 * margin ? cw * 40 : W - 2 * margin, field_h = row * 3 / 2;
     int fx = (W - field_w) / 2, fy = margin, line = s120 >= 180 ? 3 : 2;
+    o->field_x = fx;
+    o->field_y = fy;
+    o->field_w = field_w;
+    o->field_h = field_h;
     round_rect(px, W, H, fx, fy, field_w, field_h, row / 3, 0, FIELD_BG);
     if (o->keyboard) round_rect(px, W, H, fx, fy, field_w, field_h, row / 3, line / 2 + 1, HIGHLIGHT);
     char text[192];
@@ -1044,7 +1065,7 @@ static void draw(struct output *o)
     for (int pass = 0; pass < 2; pass++) { /* the window dragged over the others */
         for (int i = 0; i < n; i++) {
             struct window *w = list[i];
-            int dragged = touching.id >= 0 && touching.dragging && touching.o == o && touching.win == i;
+            int dragged = touching.id >= 0 && touching.dragging && touching.o == o && touching.win == w;
             if (dragged != pass) continue;
             int dx = dragged ? (int)((touching.x - touching.x0) * sc) : 0;
             int dy = dragged ? (int)((touching.y - touching.y0) * sc) : 0;
@@ -1062,9 +1083,15 @@ static void draw(struct output *o)
                 round_rect(px, W, H, w->x - 2 * line, w->y - 2 * line, w->w + 4 * line, w->h + 4 * line, row / 3,
                            line, HIGHLIGHT);
             }
+            const char *name = win_container(w)[0] ? win_container(w) : w->app_id[0] ? w->app_id : "?";
+            int ly = w->y + w->h - ch / 2;
+            label(px, W, H, w->x + w->w / 2, ly, w->w + gap, name, bold, ch, 0xFF000000u, HIGHLIGHT);
+            label(px, W, H, w->x + w->w / 2, ly + ch + ch / 2, w->w + gap, w->title[0] ? w->title : name, font, ch,
+                  TEXT, LABEL_BG);
             if (i == o->hovered || touched) {
                 int cx, cy, r;
                 close_button(w, row, &cx, &cy, &r);
+                if (!r) continue;
                 round_rect(px, W, H, cx - r, cy - r, 2 * r, 2 * r, r, 0,
                            i == o->hovered && o->hover_close ? CLOSE_RED : LABEL_BG);
                 for (int t = -r / 2; t <= r / 2; t++) { /* its cross */
@@ -1075,11 +1102,7 @@ static void draw(struct output *o)
                     }
                 }
             }
-            const char *name = win_container(w)[0] ? win_container(w) : w->app_id[0] ? w->app_id : "?";
-            int ly = w->y + w->h - ch / 2;
-            label(px, W, H, w->x + w->w / 2, ly, w->w + gap, name, bold, ch, 0xFF000000u, HIGHLIGHT);
-            label(px, W, H, w->x + w->w / 2, ly + ch + ch / 2, w->w + gap, w->title[0] ? w->title : name, font, ch,
-                  TEXT, LABEL_BG);
+
         }
     }
     if (n == 0 && search[0]) {
@@ -1100,6 +1123,13 @@ static void draw(struct output *o)
 
 /* Input */
 
+static int search_at(const struct output *o, double lx, double ly)
+{
+    double x = lx * o->scale120 / 120, y = ly * o->scale120 / 120;
+    return x >= o->field_x && x < o->field_x + o->field_w &&
+           y >= o->field_y && y < o->field_y + o->field_h;
+}
+
 static int window_at(struct output *o, double lx, double ly, int *on_close)
 {
     struct window *list[MAX_SHOWN];
@@ -1113,7 +1143,7 @@ static int window_at(struct output *o, double lx, double ly, int *on_close)
         if (x >= w->x && x < w->x + w->w && y >= w->y && y < w->y + w->h + under) {
             int cx, cy, r;
             close_button(w, row, &cx, &cy, &r);
-            *on_close = y < w->y + w->h && (x - cx) * (x - cx) + (y - cy) * (y - cy) <= (double)r * r;
+            *on_close = r > 0 && (x - cx) * (x - cx) + (y - cy) * (y - cy) <= (double)r * r;
             return i;
         }
     }
@@ -1122,6 +1152,7 @@ static int window_at(struct output *o, double lx, double ly, int *on_close)
 
 static void activate(struct window *w)
 {
+    if (finished || !seat) return;
     /* Unmap the exclusive overlay surfaces first so labwc clears
      * seat->focused_layer before handling request_activate. */
     for (struct output *o = outputs; o; o = o->next) {
@@ -1144,25 +1175,72 @@ static struct window *nth_shown(struct output *o, int i)
     return i >= 0 && i < n ? list[i] : NULL;
 }
 
+static void pointer_hover(void)
+{
+    struct output *o = pointer_output;
+    if (!o) return;
+    int on_close, i = window_at(o, pointer_x, pointer_y, &on_close);
+    if (i != o->hovered || on_close != o->hover_close) {
+        o->hovered = i;
+        o->hover_close = on_close;
+        if (i >= 0) o->selected = i;
+        o->dirty = 1;
+    }
+}
+
+static void pointer_cursor(struct wl_pointer *p, uint32_t serial, uint32_t scale120)
+{
+    if (!cursor_surface) return;
+    int scale = (int)((scale120 + 119) / 120);
+    scale = scale < 1 ? 1 : scale > 4 ? 4 : scale;
+    const char *env = getenv("XCURSOR_SIZE");
+    int size = env ? atoi(env) : 0;
+    size = (size > 0 && size <= 128 ? size : 24) * scale;
+    if (!cursor_theme || cursor_size != size) {
+        if (cursor_theme) wl_cursor_theme_destroy(cursor_theme);
+        cursor_theme = wl_cursor_theme_load(getenv("XCURSOR_THEME"), size, shm);
+        cursor_size = size;
+    }
+    if (!cursor_theme) return;
+    struct wl_cursor *cursor = wl_cursor_theme_get_cursor(cursor_theme, "left_ptr");
+    if (!cursor) cursor = wl_cursor_theme_get_cursor(cursor_theme, "default");
+    if (!cursor || !cursor->image_count) return;
+    struct wl_cursor_image *image = cursor->images[0];
+    struct wl_buffer *buffer = wl_cursor_image_get_buffer(image);
+    if (!buffer) return;
+    if (image->width % scale || image->height % scale) scale = 1;
+    wl_surface_set_buffer_scale(cursor_surface, scale);
+    wl_surface_attach(cursor_surface, buffer, 0, 0);
+    wl_surface_damage_buffer(cursor_surface, 0, 0, (int32_t)image->width, (int32_t)image->height);
+    wl_surface_commit(cursor_surface);
+    wl_pointer_set_cursor(p, serial, cursor_surface, (int32_t)image->hotspot_x / scale,
+                          (int32_t)image->hotspot_y / scale);
+}
+
 static void pointer_enter(void *data, struct wl_pointer *p, uint32_t serial, struct wl_surface *s, wl_fixed_t x,
                           wl_fixed_t y)
 {
     (void)data;
     pointer_output = NULL;
-    for (struct output *o = outputs; o; o = o->next) {
+    for (struct output *o = outputs; s && o; o = o->next) {
         if (o->surf == s) pointer_output = o;
     }
+    if (!pointer_output) return;
     pointer_x = wl_fixed_to_double(x);
     pointer_y = wl_fixed_to_double(y);
-    struct wl_cursor *cursor = cursor_theme ? wl_cursor_theme_get_cursor(cursor_theme, "left_ptr") : NULL;
-    if (!cursor && cursor_theme) cursor = wl_cursor_theme_get_cursor(cursor_theme, "default");
-    if (cursor && cursor_surface) {
-        struct wl_cursor_image *image = cursor->images[0];
-        wl_surface_attach(cursor_surface, wl_cursor_image_get_buffer(image), 0, 0);
-        wl_surface_damage_buffer(cursor_surface, 0, 0, (int32_t)image->width, (int32_t)image->height);
-        wl_surface_commit(cursor_surface);
-        wl_pointer_set_cursor(p, serial, cursor_surface, (int32_t)image->hotspot_x, (int32_t)image->hotspot_y);
+    pointer_hover();
+    pointer_cursor(p, serial, pointer_output->scale120);
+}
+
+static void pointer_reset(void)
+{
+    if (pointer_output) {
+        pointer_output->hovered = -1;
+        pointer_output->hover_close = 0;
+        pointer_output->dirty = 1;
     }
+    pointer_output = NULL;
+    memset(&pressed, 0, sizeof pressed);
 }
 
 static void pointer_leave(void *data, struct wl_pointer *p, uint32_t serial, struct wl_surface *s)
@@ -1171,11 +1249,7 @@ static void pointer_leave(void *data, struct wl_pointer *p, uint32_t serial, str
     (void)p;
     (void)serial;
     (void)s;
-    if (pointer_output && pointer_output->hovered >= 0) {
-        pointer_output->hovered = -1;
-        pointer_output->dirty = 1;
-    }
-    pointer_output = NULL;
+    pointer_reset();
 }
 
 /* The keys to this screen's search and windows: KWin's active screen is
@@ -1183,9 +1257,10 @@ static void pointer_leave(void *data, struct wl_pointer *p, uint32_t serial, str
  * it (the overview starts on the activated window's). */
 static void keyboard_to(struct output *o)
 {
-    if (o->keyboard) return;
+    if (!o->layer || o->keyboard) return;
     for (struct output *e = outputs; e; e = e->next) {
         e->keyboard = e == o;
+        if (!e->layer) continue;
         zwlr_layer_surface_v1_set_keyboard_interactivity(e->layer, e == o ?
             ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE : ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE);
         e->dirty = 1; /* committed when drawn */
@@ -1206,45 +1281,45 @@ static void pointer_motion(void *data, struct wl_pointer *p, uint32_t time, wl_f
         touched = 0;
         dirty_all();
     }
-    int on_close, i = window_at(o, pointer_x, pointer_y, &on_close);
-    if (i != o->hovered || on_close != o->hover_close) {
-        o->hovered = i;
-        o->hover_close = on_close;
-        if (i >= 0) o->selected = i; /* KDE: hovering selects */
-        o->dirty = 1;
-    }
+    pointer_hover();
 }
 
 static void pointer_button(void *data, struct wl_pointer *p, uint32_t serial, uint32_t time, uint32_t button,
                            uint32_t state)
 {
-    static int press_handled;
     (void)data;
     (void)p;
     (void)serial;
     (void)time;
-    struct output *o = pointer_output ? pointer_output : (outputs && !outputs->next ? outputs : NULL);
-    if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
-        if (!o) {
-            press_handled = 0;
-            return;
-        }
-        press_handled = 1;
-    } else {
-        if (press_handled) {
-            press_handled = 0;
-            return;
-        }
-        if (!o) return;
+    if (finished || (button != BTN_LEFT && button != BTN_MIDDLE)) return;
+    struct output *o = pointer_output;
+    if (!o || !o->layer || pointer_x < 0 || pointer_y < 0 || pointer_x >= o->w || pointer_y >= o->h) {
+        if (pressed.button == button) memset(&pressed, 0, sizeof pressed);
+        return;
     }
-    keyboard_to(o);
-    int on_close, i = window_at(o, pointer_x, pointer_y, &on_close);
+    int on_search = search_at(o, pointer_x, pointer_y), on_close = 0;
+    int i = on_search ? -1 : window_at(o, pointer_x, pointer_y, &on_close);
     struct window *w = nth_shown(o, i);
+    if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
+        if (pressed.button) return;
+        keyboard_to(o);
+        pressed.button = button;
+        pressed.output = o;
+        pressed.win = w;
+        pressed.on_close = on_close;
+        pressed.on_search = on_search;
+        return;
+    }
+    if (pressed.button != button) return;
+    int same = pressed.output == o && pressed.win == w && pressed.on_search == on_search &&
+               (button == BTN_MIDDLE || pressed.on_close == on_close);
+    memset(&pressed, 0, sizeof pressed);
+    if (!same || on_search) return;
     if (!w) {
-        finished = button == BTN_LEFT; /* a click on nothing */
-    } else if (button == BTN_MIDDLE || (button == BTN_LEFT && on_close)) {
+        if (button == BTN_LEFT) finished = 1; /* a click on nothing */
+    } else if (button == BTN_MIDDLE || on_close) {
         zwlr_foreign_toplevel_handle_v1_close(w->handle);
-    } else if (button == BTN_LEFT) {
+    } else {
         activate(w);
     }
 }
@@ -1268,14 +1343,16 @@ static void touch_down(void *data, struct wl_touch *t, uint32_t serial, uint32_t
     for (struct output *e = outputs; e; e = e->next) {
         if (e->surf == s) o = e;
     }
-    if (touching.id >= 0 || !o) return; /* one finger at a time */
+    if (finished || touching.id >= 0 || !o || !o->layer) return; /* one finger at a time */
     keyboard_to(o);
     touched = 1;
     touching.id = id;
     touching.o = o;
     touching.x0 = touching.x = wl_fixed_to_double(x);
     touching.y0 = touching.y = wl_fixed_to_double(y);
-    touching.win = window_at(o, touching.x, touching.y, &touching.on_close);
+    touching.on_search = search_at(o, touching.x, touching.y);
+    touching.on_close = 0;
+    touching.win = touching.on_search ? NULL : nth_shown(o, window_at(o, touching.x, touching.y, &touching.on_close));
     touching.dragging = 0;
     o->hovered = -1;
     dirty_all(); /* the close buttons */
@@ -1289,7 +1366,7 @@ static void touch_motion(void *data, struct wl_touch *t, uint32_t time, int32_t 
     if (id != touching.id) return;
     touching.x = wl_fixed_to_double(x);
     touching.y = wl_fixed_to_double(y);
-    if (!touching.dragging && touching.win >= 0 &&
+    if (!touching.dragging && touching.win &&
         hypot(touching.x - touching.x0, touching.y - touching.y0) > DRAG_START) {
         touching.dragging = 1;
     }
@@ -1303,11 +1380,11 @@ static void touch_up(void *data, struct wl_touch *t, uint32_t serial, uint32_t t
     (void)serial;
     (void)time;
     if (id != touching.id) return;
-    struct window *w = nth_shown(touching.o, touching.win);
+    struct window *w = touching.win;
     if (touching.dragging) {
         if (w && down_progress() > 0.6) zwlr_foreign_toplevel_handle_v1_close(w->handle);
     } else if (!w) {
-        finished = 1; /* a tap on nothing */
+        if (!touching.on_search) finished = 1; /* a tap on nothing */
     } else if (touching.on_close) {
         zwlr_foreign_toplevel_handle_v1_close(w->handle);
     } else {
@@ -1467,7 +1544,7 @@ static void kb_key(void *data, struct wl_keyboard *k, uint32_t serial, uint32_t 
     for (struct output *e = outputs; e; e = e->next) {
         if (e->keyboard) o = e;
     }
-    if (state != WL_KEYBOARD_KEY_STATE_PRESSED || !xkb_st || !o) return;
+    if (finished || state != WL_KEYBOARD_KEY_STATE_PRESSED || !xkb_st || !o || !o->layer) return;
     char utf8[16];
     xkb_keysym_t sym = xkb_state_key_get_one_sym(xkb_st, key + 8);
     xkb_state_key_get_utf8(xkb_st, key + 8, utf8, sizeof utf8);
@@ -1504,6 +1581,7 @@ static void seat_capabilities(void *data, struct wl_seat *s, uint32_t caps)
     } else if (!(caps & WL_SEAT_CAPABILITY_POINTER) && pointer) {
         wl_pointer_destroy(pointer);
         pointer = NULL;
+        pointer_reset();
     }
     if ((caps & WL_SEAT_CAPABILITY_KEYBOARD) && !keyboard) {
         keyboard = wl_seat_get_keyboard(s);
@@ -1640,7 +1718,6 @@ int main(int argc, char **argv)
         return 1;
     }
     xkb_ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
-    cursor_theme = wl_cursor_theme_load(NULL, 24, shm);
     cursor_surface = wl_compositor_create_surface(compositor);
     pair_windows();
     for (struct window *w = windows; w && copier; w = w->next) {

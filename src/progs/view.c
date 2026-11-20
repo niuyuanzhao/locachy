@@ -91,6 +91,8 @@
 #include "view-layout.h"
 #include "view-proto.h"
 
+__attribute__((weak)) int screen_window_top(void);
+
 #define FG      0xD0D0D0
 #define BG      0x101820
 #define DESK    0x2E3238 /* around the pages */
@@ -235,6 +237,7 @@ static int pdf_key_sidebar(int key, int mods);
 static int pdf_wheel_sidebar(int wheel);
 static int pdf_click(int id, const struct pointer_event *e);
 static int pdf_pointer(const struct pointer_event *e, int in_area);
+static void pdf_drag_cancel(void);
 static int pdf_context_menu(int X, int Y, int col, int row);
 static int pdf_key_global(int key, int mods);
 static int pdf_key_doc(int key, int mods);
@@ -474,6 +477,8 @@ static struct {
     double changed;           /* when the place or a setting last changed (0: saved) */
 } ui = { .cursor = -1 };
 
+static void cursor_shape(int shape);
+
 static struct {
     int x, y;
     int grab, grab_x, grab_y, moved; /* Browse: dragging the pages */
@@ -523,7 +528,7 @@ static struct {
 #define MAG_H 201
 #define MAG_SCALE 10
 static struct {
-    int on, X, Y, page, asked, seq, done_seq;
+    int on, button, X, Y, page, asked, seq, done_seq;
     double px, py;
     int w, h;
     uint32_t *px_buf;
@@ -2213,6 +2218,8 @@ static void list_open(int kind, const char *data, size_t size)
         }
     }
     list.kind = kind;
+    ptr.find_drag = 0;
+    cursor_shape(CURSOR_ARROW);
     ui.focus = FOCUS_LIST;
     ui.dirty = 1;
 }
@@ -2929,9 +2936,49 @@ static int toc_current(void)
     return at;
 }
 
+/* Keep a list's selection in view after moving either its selection or its top. */
+static int side_rows(void)
+{
+    int rows = side_last() - 2;
+    return rows > 0 ? rows : 1;
+}
+
+static int side_top(int first, int n)
+{
+    int max = n - side_rows();
+    return clampi(first, 0, max > 0 ? max : 0);
+}
+
+static void side_wheel(int wheel, int n, int *first, int *selected)
+{
+    *first = side_top(*first - 3 * wheel, n);
+    *selected = clampi(*selected, *first, clampi(*first + side_rows() - 1, 0, n > 0 ? n - 1 : 0));
+}
+
+static int bookmark_count(void)
+{
+    int n = 0;
+    for (int i = 0; i < doc.pages; i++) n += doc.bookmark[i] != NULL;
+    return n;
+}
+
+static int thumb_bottom(void)
+{
+    return top + (side_last() + 1) * ch;
+}
+
+static int thumb_max_top(void)
+{
+    long long height = 0;
+    for (int i = 0; i < doc.pages; i++) height += thumb_entry(i);
+    long long max = height - (thumb_bottom() - thumbs_y0());
+    return max < 0 ? 0 : max > INT_MAX ? INT_MAX : (int)max;
+}
+
 static void draw_sidebar(void)
 {
     char line[600], text[512], label[64];
+    if (gal.on) return;
     int focus = ui.focus == FOCUS_SIDEBAR;
     screen_fill_px(0, top + 2 * ch, side_px, H - (top + 2 * ch), BG);
     if (tabs.n > 1) screen_fill_px(side_px, top + 2 * ch, splitter_px, ch, DIM);
@@ -2964,11 +3011,11 @@ static void draw_sidebar(void)
     }
     int last = side_last();
     if (ui.tab == TAB_BOOKMARKS) {
-        int n = 0, rows = last - 3 + 1;
-        for (int i = 0; i < doc.pages; i++) n += doc.bookmark[i] != NULL;
+        int n = bookmark_count(), rows = side_rows();
         ui.bm_sel = clampi(ui.bm_sel, 0, n > 0 ? n - 1 : 0);
         if (ui.bm_sel < ui.bm_top) ui.bm_top = ui.bm_sel;
         if (ui.bm_sel >= ui.bm_top + rows) ui.bm_top = ui.bm_sel - rows + 1;
+        ui.bm_top = side_top(ui.bm_top, n);
         int row = 3, k = 0;
         for (int i = 0; i < doc.pages && row <= last; i++) if (doc.bookmark[i]) {
             if (k++ < ui.bm_top) continue;
@@ -2984,9 +3031,10 @@ static void draw_sidebar(void)
         return;
     }
     if (ui.tab == TAB_CONTENTS) {
-        int cur = toc_current(), rows = last - 3 + 1;
+        int cur = toc_current(), rows = side_rows();
         if (ui.toc_sel < ui.toc_top) ui.toc_top = ui.toc_sel;
         if (ui.toc_sel >= ui.toc_top + rows) ui.toc_top = ui.toc_sel - rows + 1;
+        ui.toc_top = side_top(ui.toc_top, doc.noutline);
         for (int r = 3; r <= last; r++) {
             int k = ui.toc_top + r - 3;
             if (k >= doc.noutline) break;
@@ -3005,7 +3053,7 @@ static void draw_sidebar(void)
         }
         return;
     }
-    int y0 = thumbs_y0(), y1 = last >= 0 ? top + (last + 1) * ch : H, cur = current_page();
+    int y0 = thumbs_y0(), y1 = thumb_bottom(), cur = current_page();
     if (ui.follow_thumbs) {
         int at;
         if (!thumb_seen(cur, &at) || at < ui.thumb_top || at + thumb_entry(cur) > ui.thumb_top + (y1 - y0)) {
@@ -3014,6 +3062,7 @@ static void draw_sidebar(void)
         ui.follow_thumbs = 0;
         ui.thumb_sel = cur;
     }
+    if (ui.thumb_top > 0) ui.thumb_top = clampi(ui.thumb_top, 0, thumb_max_top());
     novl = 0;
     for (int i = 0, y = y0 - ui.thumb_top; i < doc.pages && y < y1; i++) {
         int e = thumb_entry(i);
@@ -3074,7 +3123,8 @@ static void draw_menubar(void)
 {
     char page[64], zoom[16], text[300];
     screen_fill(0, 1, ncols, 1, BG);
-    int col = ui_button(0, 1, settings.sidebar ? _("Hide Sidebar") : _("Show Sidebar"), HIT_SIDEBAR);
+    int col = 1;
+    if (!gal.on) col = ui_button(0, 1, settings.sidebar ? _("Hide Sidebar") : _("Show Sidebar"), HIT_SIDEBAR);
     for (int m = 0; m < MENUS; m++) {
         const char *name = menu_name(m);
         int len = ui_cells(name);
@@ -3093,8 +3143,14 @@ static void draw_menubar(void)
             col += w + 1;
         }
     }
-    if (!doc.open) {
-        if (gal.on) screen_text(col + 1, 1, gal.dir, DIM, BG);
+    if (!doc.open || gal.on) {
+        if (gal.on) {
+            int room = ncols - col - 2;
+            if (room > 4) {
+                fit(text, sizeof text, gal.dir, room);
+                screen_text(col + 1, 1, text, DIM, BG);
+            }
+        }
         return;
     }
     char title[300];
@@ -3205,7 +3261,7 @@ static void draw_list(void)
 
 static void draw_document_tabs(void)
 {
-    if (!tab_rows()) return;
+    if (gal.on || !tab_rows()) return;
     int start = (ax + cw - 1) / cw;
     screen_fill(start, 2, ncols - start, 1, BG);
     int width = (ncols - start) / tabs.n;
@@ -3263,9 +3319,12 @@ static void draw(void)
     if (side_px) screen_fill_px(side_px, ay, splitter_px, ah, ptr.splitter ? ACCENT : DIM);
     draw_menubar();
     draw_document_tabs();
-    pdf_draw();
+    if (!gal.on) pdf_draw();
     if (bottom_used()) draw_bottom();
-    if (list.kind) draw_list();
+    if (list.kind && !prompt.kind) {
+        ui_hits_clear();
+        draw_list();
+    }
     if (ui.toast[0] && now() < ui.toast_until) {
         char text[300];
         snprintf(text, sizeof text, " %s ", ui.toast);
@@ -3366,17 +3425,20 @@ static void sideways(int dir, int steps)
     else go(pos_page(current_page() + dir * columns()));
 }
 
+static int paged_next_page(int dir)
+{
+    int page = current_page(), count = columns();
+    int offset = v.facing == VL_FIRST_CENTERED && doc.pages >= 3 ? 1 : 0;
+    int row = (page + offset) / count;
+    return clampi((row + dir) * count - offset, 0, doc.pages - 1);
+}
+
 /* A screen less Okular's ScrollOverlap (10%). */
 static void screen_step(int dir)
 {
     int limit = doc.full_h - ah > 0 ? doc.full_h - ah : 0;
     if (settings.paged && ((dir > 0 && v.sy >= limit) || (dir < 0 && v.sy <= 0))) {
-        int next = current_page() + dir * columns();
-        if (v.facing == VL_FIRST_CENTERED && doc.pages >= 3) {
-            if (dir > 0 && current_page() == 0) next = 1;
-            else if (dir < 0 && current_page() <= 2) next = 0;
-        }
-        go(pos_page(next));
+        go(pos_page(paged_next_page(dir)));
     } else scroll_by(0, dir * (int)(ah * 0.9));
 }
 
@@ -3384,6 +3446,7 @@ static void find_bar(int on)
 {
     struct anchor a = anchor_at(ax, ay);
     find.bar = on;
+    ptr.find_drag = 0;
     if (on) {
         find.in.limit = sizeof find.active - 1;
         find.in.replace = 1;
@@ -3419,6 +3482,8 @@ static void prompt_open(int kind, const char *question, const char *initial, int
 {
     struct anchor a = anchor_at(ax, ay);
     prompt.kind = kind;
+    ptr.find_drag = 0;
+    cursor_shape(CURSOR_ARROW);
     prompt.masked = masked;
     snprintf(prompt.question, sizeof prompt.question, "%s", question);
     memset(&prompt.in, 0, sizeof prompt.in);
@@ -3435,6 +3500,7 @@ static void prompt_close(void)
 {
     struct anchor a = anchor_at(ax, ay);
     prompt.kind = P_NONE;
+    ptr.find_drag = 0;
     if (prompt.masked) memset(prompt.in.text, 0, sizeof prompt.in.text); /* a password */
     ui.focus = find.bar ? FOCUS_FIND : list.kind ? FOCUS_LIST : FOCUS_DOC;
     geometry();
@@ -3748,6 +3814,7 @@ static int run_menu(int col, int row, const struct item *it, int n)
     }
     ptrs[n < MENU_ITEMS ? n : MENU_ITEMS] = NULL;
     if (ui.dirty) draw();
+    cursor_shape(CURSOR_ARROW);
     int k = ui_menu(col, row, ptrs);
     refresh();
     return k >= 0 && k < n ? it[k].action : A_NONE;
@@ -3755,7 +3822,7 @@ static int run_menu(int col, int row, const struct item *it, int n)
 
 static int menu_col(int m)
 {
-    int col = ui_cells(settings.sidebar ? _("Hide Sidebar") : _("Show Sidebar")) + 3;
+    int col = gal.on ? 1 : ui_cells(settings.sidebar ? _("Hide Sidebar") : _("Show Sidebar")) + 3;
     for (int k = 0; k < m; k++) col += ui_cells(menu_name(k)) + 2;
     return col;
 }
@@ -3777,6 +3844,7 @@ static void zoom_menu(int col)
     for (int k = 0; k < 18; k++) ptrs[k] = lines[k];
     ptrs[18] = NULL;
     if (ui.dirty) draw();
+    cursor_shape(CURSOR_ARROW);
     int k = ui_menu(col, 2, ptrs);
     refresh();
     if (k == 0 || k == 1) zoom_to(k == 0 ? VL_FIT_WIDTH : VL_FIT_PAGE, 1, ax + aw / 2, ay + ah / 2);
@@ -4062,16 +4130,22 @@ static int pres_side(void)
     return (int)(W / 16.0);
 }
 
+static int pres_top(void)
+{
+    return screen_window_top ? screen_window_top() : 0;
+}
+
 /* Page i on the screen: its zoom, size and top left. */
 static double pres_zoom(int i, int *w, int *h, int *X, int *Y)
 {
     float rw, rh;
+    int y_top = pres_top(), view_h = H - y_top;
     vl_rotated(v.rotate, doc.pw[i] > 0 ? doc.pw[i] : 1, doc.ph[i] > 0 ? doc.ph[i] : 1, &rw, &rh);
-    double z = fmin(W / (double)rw, H / (double)rh);
+    double z = fmin(W / (double)rw, view_h / (double)rh);
     *w = (int)(rw * (float)z + .5f);
     *h = (int)(rh * (float)z + .5f);
     *X = (W - *w) / 2;
-    *Y = (H - *h) / 2;
+    *Y = y_top + (view_h - *h) / 2;
     return (float)z;
 }
 
@@ -4092,6 +4166,7 @@ static void pres_enter(void)
     if (!doc.open) return;
     memset(&pres, 0, sizeof pres);
     pres.on = 1;
+    cursor_shape(CURSOR_ARROW);
     pres.page = current_page();
     pres.overlay_until = now() + 2.5;
     pres.press_link = -1;
@@ -4159,14 +4234,15 @@ static int pres_link_at(int X, int Y)
 
 static int pres_in_overlay(int X, int Y)
 {
-    int side = pres_side();
-    return now() < pres.overlay_until && X >= W - side - 4 && X < W - 4 && Y >= 4 && Y < 4 + side;
+    int side = pres_side(), y0 = pres_top() + 4;
+    return side >= 8 && now() < pres.overlay_until && X >= W - side - 4 && X < W - 4 && Y >= y0 && Y < y0 + side;
 }
 
 /* overlayClick: the page at the angle of the click round the circle. */
 static void pres_overlay_click(int X, int Y)
 {
-    int side = pres_side(), x = X - (W - side - 4) - side / 2, y = side / 2 - (Y - 4);
+    int side = pres_side(), y0 = pres_top() + 4;
+    int x = X - (W - side - 4) - side / 2, y = side / 2 - (Y - y0);
     if (!x && !y) return;
     double angle = 0.5 + 0.5 * atan2(-x, -y) / M_PI;
     pres_go((int)(angle * (doc.pages - 1) + 0.5));
@@ -4176,7 +4252,7 @@ static void pres_overlay_click(int X, int Y)
 static void pres_draw_overlay(void)
 {
     if (now() >= pres.overlay_until) return;
-    int side = pres_side(), x0 = W - side - 4, y0 = 4;
+    int side = pres_side(), x0 = W - side - 4, y0 = pres_top() + 4;
     if (side < 8) return;
     uint32_t *px = scratch;
     double r = side / 2.0, inner = r / 2;
@@ -4204,23 +4280,23 @@ static void pres_draw_overlay(void)
 static void pres_draw_bar(void)
 {
     char page[32], of[32];
-    screen_fill_px(0, 0, W, top + ch, BG);
-    screen_fill(0, 0, ncols, 1, BG);
-    int col = ui_button(0, 0, _("Previous Page"), HIT_PRES + 0);
+    int y_top = pres_top(), row = y_top ? 1 : 0;
+    screen_fill_px(0, y_top, W, y_top ? ch : top + ch, BG);
+    int col = ui_button(0, row, _("Previous Page"), HIT_PRES + 0);
     snprintf(page, sizeof page, " %d ", pres.page + 1);
-    screen_text(col, 0, page, BG, ACCENT);
-    ui_hit(col, 0, (int)strlen(page), 1, HIT_PRES + 1);
+    screen_text(col, row, page, BG, ACCENT);
+    ui_hit(col, row, (int)strlen(page), 1, HIT_PRES + 1);
     col += (int)strlen(page);
     /* TRANSLATORS: follows the current page number in the presentation bar; %d is the total page count. */
     snprintf(of, sizeof of, " %s", _("of %d"));
     char total[48];
     snprintf(total, sizeof total, of, doc.pages);
-    screen_text(col, 0, total, FG, BG);
+    screen_text(col, row, total, FG, BG);
     col += ui_cells(total) + 1;
-    col = ui_button(col, 0, _("Next Page"), HIT_PRES + 2);
-    col = ui_button(col + 1, 0, pres.playing ? _("Pause") : _("Play"), HIT_PRES + 3);
+    col = ui_button(col, row, _("Next Page"), HIT_PRES + 2);
+    col = ui_button(col + 1, row, pres.playing ? _("Pause") : _("Play"), HIT_PRES + 3);
     const char *exit_ = _("Exit Presentation Mode");
-    ui_button(ncols - ui_cells(exit_) - 3, 0, exit_, HIT_PRES + 4);
+    ui_button(ncols - ui_cells(exit_) - 3, row, exit_, HIT_PRES + 4);
 }
 
 static void draw_presentation(void)
@@ -4282,15 +4358,16 @@ static void pres_key(int key, int mods)
 
 static void pres_pointer(const struct pointer_event *e)
 {
-    int bar_h = top + ch;
+    int y_top = pres_top();
     if (e->wheel) { /* a step a notch, at most 3 */
         int n = clampi(abs(e->wheel), 0, 3);
         for (int k = 0; k < n; k++) pres_go(pres.page + (e->wheel > 0 ? -1 : 1));
         return;
     }
+    if (e->hwheel) return;
     if (!e->button) {
-        if (pres.bar && e->y > bar_h + 1) { pres.bar = 0; ui.dirty = 1; }
-        else if (!pres.bar && e->y <= 1) { pres.bar = 1; ui.dirty = 1; }
+        if (pres.bar && e->y > y_top + ch + 1) { pres.bar = 0; ui.dirty = 1; }
+        else if (!pres.bar && e->y >= y_top && e->y <= y_top + 1) { pres.bar = 1; ui.dirty = 1; }
         else if ((e->buttons & 1) && pres_in_overlay(e->x, e->y)) pres_overlay_click(e->x, e->y);
         return;
     }
@@ -5125,16 +5202,20 @@ static int page_point(int X, int Y, int nearest, double *px, double *py)
                                         px, py) : -1;
 }
 
-static void set_cursor(int X, int Y)
+static void cursor_shape(int shape)
 {
-    double px, py;
-    int in_area = X >= ax && X < ax + aw && Y >= ay && Y < ay + ah;
-    int shape = settings.tool == TOOL_TEXT && in_area && list.kind == L_NONE && page_point(X, Y, 0, &px, &py) >= 0 ?
-                CURSOR_TEXT : CURSOR_ARROW;
     if (shape != ui.cursor) {
         ui.cursor = shape;
         screen_cursor(shape);
     }
+}
+
+static void set_cursor(int X, int Y)
+{
+    double px, py;
+    int in_area = X >= ax && X < ax + aw && Y >= ay && Y < ay + ah;
+    cursor_shape(settings.tool == TOOL_TEXT && in_area && !list.kind && !prompt.kind &&
+                 page_point(X, Y, 0, &px, &py) >= 0 ? CURSOR_TEXT : CURSOR_ARROW);
 }
 
 static void words_clear(void)
@@ -5769,9 +5850,10 @@ static void mag_move(int X, int Y)
     ui.dirty = 1;
 }
 
-static void mag_start(int X, int Y)
+static void mag_start(const struct pointer_event *e)
 {
     mag.on = 1;
+    mag.button = e->button;
     mag.w = (int)lround(MAG_W * scale);
     mag.h = (int)lround(MAG_H * scale);
     free(mag.px_buf);
@@ -5782,7 +5864,7 @@ static void mag_start(int X, int Y)
         mag.on = 0;
         return;
     }
-    mag_move(X, Y);
+    mag_move(e->x, e->y);
 }
 
 static void got_magnify(const struct job *j, const struct view_reply *rep, const void *data, size_t size)
@@ -5898,7 +5980,7 @@ static int mouse_tool_press(const struct pointer_event *e)
         return 1;
     }
     if (t == TOOL_MAGNIFIER && e->button != BTN_MIDDLE) {
-        mag_start(e->x, e->y);
+        mag_start(e);
         return 1;
     }
     return 0;
@@ -5908,7 +5990,7 @@ static int mouse_tool_press(const struct pointer_event *e)
 static int mouse_tool_pointer(const struct pointer_event *e)
 {
     if (mag.on) {
-        if (!e->button && !e->wheel) mag_move(e->x, e->y);
+        if (!e->button && !e->wheel && !e->hwheel && !e->gesture) mag_move(e->x, e->y);
         else if (e->button && !e->pressed) {
             mag.on = 0;
             ui.dirty = 1;
@@ -5916,7 +5998,7 @@ static int mouse_tool_pointer(const struct pointer_event *e)
         return 1;
     }
     if (!rsel.dragging) return 0;
-    if (e->wheel || (e->button && e->button != rsel.button)) return 1;
+    if (e->wheel || e->hwheel || e->gesture || (e->button && e->button != rsel.button)) return 1;
     rsel.x1 = clampi(e->x, ax, ax + aw) - ax + v.sx;
     rsel.y1 = clampi(e->y, ay, ay + ah) - ay + v.sy;
     ui.dirty = 1;
@@ -5947,6 +6029,7 @@ static void tool_set(int tool)
 {
     tools_reset();
     settings.tool = tool;
+    cursor_shape(CURSOR_ARROW);
     sel_clear();
     if (tool_messages[tool]) toast(0, "%s", _(tool_messages[tool]));
     changed();
@@ -5999,7 +6082,7 @@ static void click(int id, const struct pointer_event *e)
         l->cursor = at;
         if (!(keys_modifiers() & KEYS_SHIFT)) l->mark = at;
         l->replace = 0;
-        ptr.find_drag = e->button == BTN_LEFT ? (id == HIT_FIND_INPUT ? 1 : 2) : 0;
+        ptr.find_drag = e->button == BTN_LEFT && e->clicks < 2 ? (id == HIT_FIND_INPUT ? 1 : 2) : 0;
         if (e->clicks >= 2) { l->mark = 0; l->cursor = strlen(l->text); l->replace = 1; }
     } else if (id >= HIT_FIND) {
         if (id == HIT_FIND + 2) find_bar(0);
@@ -6019,14 +6102,50 @@ static void click(int id, const struct pointer_event *e)
     ui.dirty = 1;
 }
 
+/* Losing pointer ownership ends the held operation, not a successful click. */
+static void pointer_cancel(int button)
+{
+    if (button == BTN_LEFT) {
+        ptr.find_drag = ptr.splitter = ptr.grab = 0;
+        ptr.press_page = ptr.press_link = -1;
+        if (trim.dragging) {
+            trim.dragging = 0;
+            ui.dirty = 1;
+        }
+        if (sel.dragging) {
+            sel.dragging = 0;
+            sel.started = 0;
+            sel.final = 0;
+        }
+        pdf_drag_cancel();
+        pres.press_link = -1;
+        if (pres.press > 0) pres.press = 0;
+    } else if (button == BTN_RIGHT) {
+        ptr.right = 0;
+        if (pres.press < 0) pres.press = 0;
+    } else if (button == BTN_MIDDLE) {
+        ptr.mid = 0;
+    }
+    if (rsel.dragging && button == rsel.button) {
+        rsel.dragging = 0;
+        if (rsel.prev_tool >= 0) settings.tool = rsel.prev_tool;
+        rsel.prev_tool = -1;
+        ui.dirty = 1;
+    }
+    if (mag.on && button == mag.button) {
+        mag.on = 0;
+        ui.dirty = 1;
+    }
+}
+
 static void pointer(const struct pointer_event *e)
 {
-    if (pres.on && doc.open && !prompt.kind) {
-        pres_pointer(e);
+    if (e->cancelled) {
+        pointer_cancel(e->button);
         return;
     }
-    if (gal.on && !prompt.kind && !list.kind && !ptr.find_drag) {
-        gal_pointer(e);
+    if (pres.on && doc.open && !prompt.kind) {
+        pres_pointer(e);
         return;
     }
     int mods = keys_modifiers(), page;
@@ -6034,9 +6153,11 @@ static void pointer(const struct pointer_event *e)
     int in_area = e->x >= ax && e->x < ax + aw && e->y >= ay && e->y < ay + ah;
     ptr.x = e->x;
     ptr.y = e->y;
+    int id = ui_hit_at(e->col, e->row), motion = !e->button && !e->wheel && !e->hwheel && !e->gesture;
+    if (!in_area || prompt.kind || list.kind || gal.on) cursor_shape(CURSOR_ARROW);
     /* What a held button is doing has the pointer until it is let go. */
     if (ptr.find_drag) {
-        if (!e->button || (e->button == BTN_LEFT && !e->pressed)) {
+        if (motion || (e->button == BTN_LEFT && !e->pressed)) {
             struct line *l = ptr.find_drag == 1 ? &find.in : &prompt.in;
             l->cursor = line_at_cell(l, e->col);
             l->replace = 0;
@@ -6045,8 +6166,30 @@ static void pointer(const struct pointer_event *e)
         if (e->button == BTN_LEFT && !e->pressed) ptr.find_drag = 0;
         return;
     }
+    if (prompt.kind) {
+        if (id == HIT_PROMPT_INPUT && e->row == nrows - 1 && e->pressed &&
+            (e->button == BTN_LEFT || e->button == BTN_MIDDLE)) {
+            click(id, e);
+            if (e->button == BTN_MIDDLE) line_paste(&prompt.in, 1);
+        }
+        return;
+    }
+    if (list.kind) {
+        if (e->wheel) {
+            list.sel = clampi(list.sel - 3 * e->wheel, 0, list.n > 0 ? list.n - 1 : 0);
+            ui.dirty = 1;
+        } else if (e->pressed && e->button == BTN_LEFT &&
+                   ((id >= HIT_LIST && id < HIT_LIST + 2) || (id >= HIT_LINE && id - HIT_LINE < list.n))) {
+            click(id, e);
+        }
+        return;
+    }
+    if (gal.on) {
+        gal_pointer(e);
+        return;
+    }
     if (ptr.splitter) {
-        if (!e->button || (e->button == BTN_LEFT && !e->pressed)) {
+        if (motion || (e->button == BTN_LEFT && !e->pressed)) {
             struct anchor a = anchor_at(ax + aw / 2, ay + ah / 2);
             settings.side_width = clampi((int)lround((e->x - ptr.split_offset) / scale), 90, 600);
             geometry();
@@ -6059,7 +6202,7 @@ static void pointer(const struct pointer_event *e)
         return;
     }
     if (trim.dragging) {
-        if (!e->button || (e->button == BTN_LEFT && !e->pressed)) {
+        if (motion || (e->button == BTN_LEFT && !e->pressed)) {
             struct vl_params p = params();
             const struct vl_item *it = &doc.item[trim.page];
             double lx = e->x - ax + v.sx - it->x, ly = e->y - ay + v.sy - it->y;
@@ -6086,7 +6229,7 @@ static void pointer(const struct pointer_event *e)
     if (ptr.mid) {
         if (e->button == BTN_MIDDLE && !e->pressed) {
             ptr.mid = 0;
-        } else if (!e->button && e->y != ptr.mid_y) {
+        } else if (motion && e->y != ptr.mid_y) {
             /* Okular's continuous zoom: up zooms in. */
             zoom_to(VL_FIXED, zoom_now() * (1 + (ptr.mid_y - e->y) / (500.0 * scale)), ax + aw / 2, ay + ah / 2);
             ptr.mid_y = e->y;
@@ -6100,7 +6243,7 @@ static void pointer(const struct pointer_event *e)
             if (ptr.moved < 10 * scale && ptr.press_link >= 0 && k == ptr.press_link && page == ptr.press_page) {
                 follow_link(page, k);
             }
-        } else if (!e->button && !e->wheel) {
+        } else if (motion) {
             int dx = e->x - ptr.grab_x, dy = e->y - ptr.grab_y;
             ptr.moved += abs(dx) + abs(dy);
             ptr.grab_x = e->x;
@@ -6110,7 +6253,7 @@ static void pointer(const struct pointer_event *e)
         return;
     }
     if (sel.dragging) {
-        if (!e->button && !e->wheel) {
+        if (motion) {
             if (!sel.started && abs(e->x - sel.press_x) + abs(e->y - sel.press_y) > 5 * scale) sel.started = 1;
             int i = sel.started ? page_point(e->x, e->y, 1, &px, &py) : -1;
             if (i >= 0) {
@@ -6145,18 +6288,15 @@ static void pointer(const struct pointer_event *e)
         return;
     }
     if (e->wheel || e->hwheel) {
-        if (list.kind) {
-            list.sel = clampi(list.sel - 3 * e->wheel, 0, list.n > 0 ? list.n - 1 : 0);
-            ui.dirty = 1;
-        } else if (side_cols && e->x < side_cols * cw && e->y >= ay) {
-            int last = doc.noutline > 0 ? doc.noutline - 1 : 0;
-            if (pdf_wheel_sidebar(e->wheel)) {
-                /* its panels' */
-            } else if (ui.tab == TAB_CONTENTS) {
-                ui.toc_top = clampi(ui.toc_top - 3 * e->wheel, 0, last);
-                ui.toc_sel = clampi(ui.toc_sel, ui.toc_top, last);
-            } else {
-                ui.thumb_top = ui.thumb_top - 3 * ch * e->wheel > 0 ? ui.thumb_top - 3 * ch * e->wheel : 0;
+        if (doc.open && side_cols && e->x >= 0 && e->x < side_px && e->row >= 3 && e->row <= side_last()) {
+            if (!e->wheel || pdf_wheel_sidebar(e->wheel)) return;
+            if (ui.tab == TAB_CONTENTS) side_wheel(e->wheel, doc.noutline, &ui.toc_top, &ui.toc_sel);
+            else if (ui.tab == TAB_BOOKMARKS) side_wheel(e->wheel, bookmark_count(), &ui.bm_top, &ui.bm_sel);
+            else if (ui.tab == TAB_THUMBNAILS) {
+                long long next = (long long)ui.thumb_top - 3LL * ch * e->wheel;
+                int max = thumb_max_top();
+                ui.thumb_top = next < 0 ? 0 : next > max ? max : (int)next;
+                ui.follow_thumbs = 0;
             }
             ui.dirty = 1;
         } else if (in_area && (mods & KEYS_CTRL) && e->wheel) {
@@ -6166,7 +6306,18 @@ static void pointer(const struct pointer_event *e)
             zoom_to(VL_FIXED, f, e->x, e->y);
         } else if (in_area) {
             int times = mods & KEYS_SHIFT ? 10 : 1; /* Okular: Shift, ten times as far */
-            scroll_by(3 * ch * e->hwheel * times, -3 * ch * e->wheel * times);
+            int limit = doc.full_h > ah ? doc.full_h - ah : 0;
+            if (doc.open && settings.paged && ((e->wheel > 0 && v.sy <= 0) || (e->wheel < 0 && v.sy >= limit))) {
+                int page = paged_next_page(e->wheel > 0 ? -1 : 1);
+                if (doc.item[page].hidden) {
+                    struct pos to = pos_page(page);
+                    const struct vl_item *it = &doc.item[page];
+                    int y = e->wheel > 0 && doc.full_h > ah ? doc.full_h - ah : 0;
+                    to.ny = (y - it->y) / (double)it->h;
+                    go(to);
+                }
+                if (e->hwheel) scroll_by(3 * ch * e->hwheel * times, 0);
+            } else scroll_by(3 * ch * e->hwheel * times, -3 * ch * e->wheel * times);
         }
         return;
     }
@@ -6186,23 +6337,19 @@ static void pointer(const struct pointer_event *e)
         return;
     }
     if (e->button == BTN_LEFT && e->pressed && side_px && e->x >= side_px && e->x < ax &&
-        e->y >= ay && e->y < ay + ah && !list.kind && !prompt.kind) {
+        e->y >= ay && e->y < ay + ah) {
         ptr.splitter = 1;
         ptr.split_offset = e->x - side_px;
         ui.focus = FOCUS_SIDEBAR;
         return;
     }
-    if (e->pressed && e->y >= ay && !list.kind && !prompt.kind) {
+    if (e->pressed && e->y >= ay) {
         if (in_area) ui.focus = FOCUS_DOC;
         else if (side_px && e->x < side_px && (!find.bar || e->row < nrows - 1)) ui.focus = FOCUS_SIDEBAR;
         ui.dirty = 1;
     }
-    int id = ui_hit_at(e->col, e->row);
     if (id == HIT_FIND_INPUT && e->button == BTN_MIDDLE && e->pressed) {
         click(id, e); line_paste(&find.in, 1); find.failed = 0; find.typed = now(); return;
-    }
-    if (id == HIT_PROMPT_INPUT && e->button == BTN_MIDDLE && e->pressed) {
-        click(id, e); line_paste(&prompt.in, 1); return;
     }
     if (e->pressed && e->button == BTN_RIGHT && id >= HIT_BOOKMARK && id < HIT_BOOKMARK + 1000000) {
         ui.focus = FOCUS_SIDEBAR;
@@ -6214,7 +6361,7 @@ static void pointer(const struct pointer_event *e)
         click(id, e);
         return;
     }
-    if (list.kind || !in_area || !doc.open) return;
+    if (!in_area || !doc.open) return;
     if (trim.picking && e->button == BTN_LEFT && e->pressed) {
         int i = page_point(e->x, e->y, 0, &px, &py);
         if (i >= 0) {
@@ -6339,6 +6486,7 @@ static void handle(int key)
         return;
     }
     if (act == ACT_HELP) { /* a question shown stays, unanswered */
+        cursor_shape(CURSOR_ARROW);
         if (ui_help(_("View keys"), view_help) == ACT_QUIT) do_action(A_QUIT);
         ui.dirty = 1;
         return;
@@ -6928,7 +7076,8 @@ static void gal_pointer(const struct pointer_event *e)
     }
     if (!e->pressed || e->button != BTN_LEFT) return;
     int id = ui_hit_at(e->col, e->row);
-    if (id >= 0) click(id, e);
+    if (id >= HIT_GAL || (id >= HIT_GAL_SMALLER && id <= HIT_MODE + 1) ||
+        (id >= HIT_MENU && id < HIT_MENU + MENUS)) click(id, e);
 }
 
 /* A click on an item selects it; a double click activates it. */

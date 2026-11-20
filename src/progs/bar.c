@@ -74,6 +74,7 @@
 #include "base.h"
 #include "internal.h"
 #include "ime.h"
+#include "archive-proto.h"
 #include "docs-proto.h"
 #include "program-sections.h"
 #include "tor-browser.h"
@@ -109,7 +110,7 @@ struct bar {
     struct zwlr_layer_surface_v1 *lsurf;
     uint32_t w, h;              /* logical pixels; the buffer is these at the screen's scale */
     uint32_t want_h;            /* the height asked for (bar_height) */
-    uint32_t screen_h;          /* logical output height from catch_configure; 0 until known */
+    uint32_t screen_w, screen_h; /* logical output size from catch_configure */
     int mode_w, mode_h, transform; /* physical mode size from wl_output */
     struct wp_fractional_scale_v1 *scale;
     struct wp_viewport *viewport;
@@ -124,11 +125,11 @@ struct bar {
     } buttons[MAX_BUTTONS];     /* the window list as drawn (buffer pixels) */
     struct panel_hit status[9]; /* the status blocks and LOCachy as drawn (buffer pixels) */
     int nstatus;
-    /* While the launcher is up: a transparent surface over the screen that
-     * takes the clicks outside it (launcher_catch). */
+    /* A transparent surface that catches clicks outside a launcher or question. */
     struct wl_surface *catch_surf;
     struct zwlr_layer_surface_v1 *catch_lsurf;
     struct wp_viewport *catch_viewport;
+    int catch_mapped;
     int first;                  /* the window list scrolled: its first entry shown */
     struct window *focus_seen;  /* the focused window when it was last drawn */
     double wheel;               /* scrolling not yet a whole entry */
@@ -192,6 +193,7 @@ struct window {
 };
 static struct zwlr_foreign_toplevel_manager_v1 *toplevel_mgr;
 static struct window *windows;
+static struct window *middle_pressed_win;
 static unsigned focus_changes; /* each time a window gets the focus */
 
 /* The container of w: the one its app id names, else its parent window's
@@ -305,6 +307,9 @@ static void win_closed(void *data, struct zwlr_foreign_toplevel_handle_v1 *h)
         if (b->focus_seen == w) {
             b->focus_seen = NULL;
         }
+    }
+    if (middle_pressed_win == w) {
+        middle_pressed_win = NULL;
     }
     for (struct window *o = windows; o; o = o->next) {
         if (o->parent == h) {
@@ -421,6 +426,12 @@ static void notes_serve(struct tray *t);
 static void notes_drop(struct tray *t);
 static struct wl_surface *notes_surface(void);
 static void notes_click(double y, uint32_t button);
+static struct wl_surface *question_surface(void);
+static void question_hover(double x, double y);
+static void question_click(double x, double y, uint32_t button);
+static void question_outside_click(void);
+static void question_wheel(double delta);
+static void question_clear_hover(int redraw);
 
 static struct tray *tray_find(const char *name)
 {
@@ -1029,8 +1040,8 @@ static void draw_windows(struct bar *b, uint32_t *px, int bw_px, int bh, int x0,
     if (!scroll) {
         b->first = 0;
     } else {
-        width = BUTTON_MIN * cw;
         avail -= 2 * arrow;
+        width = avail < BUTTON_MIN * cw ? avail : BUTTON_MIN * cw;
         left += arrow;
         shown = avail / width;
         shown = shown < 1 ? 1 : shown > MAX_BUTTONS - 2 ? MAX_BUTTONS - 2 : shown;
@@ -1137,54 +1148,94 @@ static void launcher_toggle(struct bar *b);
 static void launcher_close(void);
 static void launcher_click(double y, uint32_t button);
 static void launcher_hover(double y);
-static int launcher_catch(struct wl_surface *s);
+static void catchers(int on);
+static void catch_input_region(struct bar *b);
+static void launcher_clear_wheel(void);
+static uint32_t pointer_scale(struct wl_surface *s);
+
+#define SCROLL_STEP 15.0
 
 /* Pointer: clicks on the window list, with an arrow over the bar. */
 static struct wl_pointer *pointer;
 static struct bar *pointer_bar;
-static int pointer_notes; /* over the notifications */
-static int pointer_launcher, pointer_outside; /* over the launcher, or outside it while it is up */
+static struct wl_surface *pointer_surface;
+static int pointer_notes, pointer_question, pointer_launcher, pointer_outside;
 static double pointer_x, pointer_y;
 static struct wl_cursor_theme *cursor_theme;
+static int cursor_size;
 static struct wl_surface *cursor_surface;
 static struct zwp_relative_pointer_manager_v1 *relative_mgr;
 static struct zwp_relative_pointer_v1 *relative;
+
+/* Match the window backend: load the cursor at an integer buffer scale. */
+static void pointer_cursor(struct wl_pointer *p, uint32_t serial, uint32_t scale120)
+{
+    if (!cursor_surface) return;
+    int scale = (int)((scale120 + 119) / 120);
+    scale = scale < 1 ? 1 : scale > 4 ? 4 : scale;
+    const char *env = getenv("XCURSOR_SIZE");
+    int size = env ? atoi(env) : 0;
+    size = (size > 0 && size <= 128 ? size : 24) * scale;
+    if (!cursor_theme || cursor_size != size) {
+        if (cursor_theme) wl_cursor_theme_destroy(cursor_theme);
+        cursor_theme = wl_cursor_theme_load(getenv("XCURSOR_THEME"), size, shm);
+        cursor_size = size;
+    }
+    if (!cursor_theme) return;
+    struct wl_cursor *cursor = wl_cursor_theme_get_cursor(cursor_theme, "left_ptr");
+    if (!cursor) cursor = wl_cursor_theme_get_cursor(cursor_theme, "default");
+    if (!cursor || !cursor->image_count) return;
+    struct wl_cursor_image *image = cursor->images[0];
+    struct wl_buffer *buffer = wl_cursor_image_get_buffer(image);
+    if (!buffer) return;
+    /* A theme can return a non-divisible bitmap for the requested size. */
+    if (image->width % scale || image->height % scale) scale = 1;
+    wl_surface_set_buffer_scale(cursor_surface, scale);
+    wl_surface_attach(cursor_surface, buffer, 0, 0);
+    wl_surface_damage_buffer(cursor_surface, 0, 0, (int32_t)image->width, (int32_t)image->height);
+    wl_surface_commit(cursor_surface);
+    wl_pointer_set_cursor(p, serial, cursor_surface, (int32_t)image->hotspot_x / scale,
+                          (int32_t)image->hotspot_y / scale);
+}
+
+static void pointer_reset(void)
+{
+    if (pointer_bar) {
+        pointer_bar->corner_attempt = 0;
+        pointer_bar->wheel = 0;
+    }
+    if (pointer_launcher) launcher_clear_wheel();
+    int was_question = pointer_question;
+    pointer_bar = NULL;
+    pointer_surface = NULL;
+    middle_pressed_win = NULL;
+    pointer_notes = pointer_launcher = pointer_question = pointer_outside = 0;
+    if (was_question) question_clear_hover(1);
+}
 
 static void pointer_enter(void *data, struct wl_pointer *p, uint32_t serial, struct wl_surface *s,
                           wl_fixed_t x, wl_fixed_t y)
 {
     (void)data;
-    pointer_bar = NULL;
-    for (struct bar *b = bars; b; b = b->next) {
-        if (b->surf == s) {
-            pointer_bar = b;
-        }
+    pointer_surface = s;
+    for (struct bar *b = bars; s && b; b = b->next) {
+        if (b->surf == s) pointer_bar = b;
+        if (b->catch_surf == s) pointer_outside = 1;
     }
     pointer_notes = s && s == notes_surface();
     pointer_launcher = s && s == launcher_surface();
-    pointer_outside = s && launcher_catch(s);
+    pointer_question = s && s == question_surface();
     pointer_x = wl_fixed_to_double(x);
     pointer_y = wl_fixed_to_double(y);
-    if (pointer_launcher) {
-        launcher_hover(pointer_y);
-    }
+    if (pointer_launcher) launcher_hover(pointer_y);
+    if (pointer_question) question_hover(pointer_x, pointer_y);
 #ifdef CORNER_TEST_MOTION
     if (pointer_bar) {
         printf("corner-pointer %u %.3f %.3f\n", pointer_bar->name, pointer_x, pointer_y);
         fflush(stdout);
     }
 #endif
-    struct wl_cursor *cursor = cursor_theme ? wl_cursor_theme_get_cursor(cursor_theme, "left_ptr") : NULL;
-    if (!cursor && cursor_theme) {
-        cursor = wl_cursor_theme_get_cursor(cursor_theme, "default");
-    }
-    if (cursor && cursor_surface) {
-        struct wl_cursor_image *image = cursor->images[0];
-        wl_surface_attach(cursor_surface, wl_cursor_image_get_buffer(image), 0, 0);
-        wl_surface_damage_buffer(cursor_surface, 0, 0, (int32_t)image->width, (int32_t)image->height);
-        wl_surface_commit(cursor_surface);
-        wl_pointer_set_cursor(p, serial, cursor_surface, (int32_t)image->hotspot_x, (int32_t)image->hotspot_y);
-    }
+    pointer_cursor(p, serial, pointer_scale(s));
 }
 
 static void pointer_leave(void *data, struct wl_pointer *p, uint32_t serial, struct wl_surface *s)
@@ -1192,12 +1243,7 @@ static void pointer_leave(void *data, struct wl_pointer *p, uint32_t serial, str
     (void)data;
     (void)p;
     (void)serial;
-    (void)s;
-    if (pointer_bar) {
-        pointer_bar->corner_attempt = 0;
-    }
-    pointer_bar = NULL;
-    pointer_notes = pointer_launcher = pointer_outside = 0;
+    if (s == pointer_surface) pointer_reset();
 }
 
 static void pointer_motion(void *data, struct wl_pointer *p, uint32_t time, wl_fixed_t x, wl_fixed_t y)
@@ -1207,9 +1253,8 @@ static void pointer_motion(void *data, struct wl_pointer *p, uint32_t time, wl_f
     (void)time;
     pointer_x = wl_fixed_to_double(x);
     pointer_y = wl_fixed_to_double(y);
-    if (pointer_launcher) {
-        launcher_hover(pointer_y);
-    }
+    if (pointer_launcher) launcher_hover(pointer_y);
+    if (pointer_question) question_hover(pointer_x, pointer_y);
 #ifdef CORNER_TEST_MOTION
     if (pointer_bar) {
         printf("corner-pointer %u %.3f %.3f\n", pointer_bar->name, pointer_x, pointer_y);
@@ -1332,6 +1377,14 @@ static void pointer_button(void *data, struct wl_pointer *p, uint32_t serial, ui
     (void)p;
     (void)serial;
     (void)time;
+    if (question_surface()) {
+        middle_pressed_win = NULL;
+        if (state == WL_POINTER_BUTTON_STATE_PRESSED && (button == BTN_LEFT || button == BTN_RIGHT)) {
+            if (pointer_question) question_click(pointer_x, pointer_y, button);
+            else question_outside_click();
+        }
+        return;
+    }
     if (state == WL_POINTER_BUTTON_STATE_PRESSED && pointer_launcher) {
         launcher_click(pointer_y, button);
         return;
@@ -1344,10 +1397,24 @@ static void pointer_button(void *data, struct wl_pointer *p, uint32_t serial, ui
         notes_click(pointer_y, button);
         return;
     }
-    if (state != WL_POINTER_BUTTON_STATE_PRESSED || !pointer_bar) {
+    if (!pointer_bar || pointer_y < 0 || pointer_y >= pointer_bar->h) {
+        if (button == BTN_MIDDLE) middle_pressed_win = NULL;
         return;
     }
     double x = pointer_x * (pointer_bar->viewport ? pointer_bar->scale120 : 120) / 120.0;
+    if (button == BTN_MIDDLE && state == WL_POINTER_BUTTON_STATE_RELEASED) {
+        struct window *w = middle_pressed_win;
+        middle_pressed_win = NULL;
+        for (int i = 0; w && i < pointer_bar->nbuttons; i++) {
+            if (w == pointer_bar->buttons[i].win && x >= pointer_bar->buttons[i].x0 &&
+                x < pointer_bar->buttons[i].x1) {
+                click(w, BTN_MIDDLE);
+                break;
+            }
+        }
+        return;
+    }
+    if (state != WL_POINTER_BUTTON_STATE_PRESSED) return;
     for (int i = 0; i < pointer_bar->nstatus; i++) {
         if (x >= pointer_bar->status[i].x0 && x < pointer_bar->status[i].x1) {
             if (button == BTN_LEFT && pointer_bar->status[i].id == PANEL_BLOCK_LOCACHY) {
@@ -1363,7 +1430,8 @@ static void pointer_button(void *data, struct wl_pointer *p, uint32_t serial, ui
     for (int i = 0; i < pointer_bar->nbuttons; i++) {
         if (x >= pointer_bar->buttons[i].x0 && x < pointer_bar->buttons[i].x1) {
             if (pointer_bar->buttons[i].win) {
-                click(pointer_bar->buttons[i].win, button);
+                if (button == BTN_MIDDLE) middle_pressed_win = pointer_bar->buttons[i].win;
+                else click(pointer_bar->buttons[i].win, button);
             } else if (pointer_bar->buttons[i].tray[0] && button == BTN_LEFT) {
                 tray_activate(pointer_bar->buttons[i].tray);
             } else if (pointer_bar->buttons[i].step && button == BTN_LEFT) {
@@ -1381,26 +1449,21 @@ static void pointer_axis(void *data, struct wl_pointer *p, uint32_t time, uint32
     (void)data;
     (void)p;
     (void)time;
-    if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL) {
-        return;
-    }
-    if (pointer_launcher) {
-        launcher_wheel(wl_fixed_to_double(value));
-        return;
-    }
-    if (!pointer_bar) {
-        return;
-    }
-    pointer_bar->wheel += wl_fixed_to_double(value);
-    while (pointer_bar->wheel >= 10) {
-        pointer_bar->wheel -= 10;
-        pointer_bar->first++;
-        bars_dirty = 1;
-    }
-    while (pointer_bar->wheel <= -10) {
-        pointer_bar->wheel += 10;
-        pointer_bar->first = pointer_bar->first > 0 ? pointer_bar->first - 1 : 0;
-        bars_dirty = 1;
+    if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL && axis != WL_POINTER_AXIS_HORIZONTAL_SCROLL) return;
+    double delta = wl_fixed_to_double(value);
+    if (question_surface()) {
+        if (pointer_question) question_wheel(delta);
+    } else if (pointer_launcher) {
+        launcher_wheel(delta);
+    } else if (pointer_bar) {
+        pointer_bar->wheel += delta;
+        int steps = (int)(pointer_bar->wheel / SCROLL_STEP);
+        pointer_bar->wheel -= steps * SCROLL_STEP;
+        if (steps) {
+            int first = pointer_bar->first + steps;
+            pointer_bar->first = first < 0 ? 0 : first > MAX_ENTRIES ? MAX_ENTRIES : first;
+            bars_dirty = 1;
+        }
     }
 }
 
@@ -1498,7 +1561,7 @@ static void seat_capabilities(void *data, struct wl_seat *seat, uint32_t caps)
         }
         wl_pointer_destroy(pointer);
         pointer = NULL;
-        pointer_bar = NULL;
+        pointer_reset();
     }
 }
 
@@ -1523,7 +1586,13 @@ static void bar_configure(void *data, struct zwlr_layer_surface_v1 *surface,
 {
     struct bar *b = data;
     if (width > 0) b->w = width;
-    if (height > 0) b->h = height;
+    if (height > 0 && b->h != height) {
+        b->h = height;
+        if (b->catch_mapped && launcher_shown) {
+            catch_input_region(b);
+            wl_surface_commit(b->catch_surf);
+        }
+    }
     zwlr_layer_surface_v1_ack_configure(surface, serial);
     b->configured = 1;
     bars_dirty = 1;
@@ -1547,9 +1616,7 @@ static void destroy_bar_surface(struct bar *b)
         wl_surface_destroy(b->surf);
         b->surf = NULL;
     }
-    if (pointer_bar == b) {
-        pointer_bar = NULL;
-    }
+    if (pointer_bar == b) pointer_reset();
     b->configured = b->shown = 0;
     b->corner_attempt = b->corner_triggered = 0;
     b->nbuttons = 0;
@@ -1681,7 +1748,7 @@ struct overlay {
     void (*render)(void);       /* draws it anew: configured, the scale changed */
     uint32_t anchor;            /* the edges it is at; none: in the middle */
     int margin;                 /* from them, logical pixels */
-    int top;                    /* more from the top edge (under the bar), logical pixels */
+    int passive;                /* display only: no pointer input */
     struct wl_surface *surf;
     struct zwlr_layer_surface_v1 *lsurf;
     struct wp_fractional_scale_v1 *scale;
@@ -1735,6 +1802,12 @@ static void overlay_destroy(struct overlay *o)
         o->lsurf = NULL;
     }
     if (o->surf) {
+        /* Clear before destroying: a leave for this proxy may not arrive. */
+        if (pointer_surface == o->surf) {
+            if (pointer_question) question_clear_hover(0);
+            pointer_question = 0;
+            pointer_reset();
+        }
         wl_surface_destroy(o->surf);
         o->surf = NULL;
     }
@@ -1804,7 +1877,14 @@ static int overlay_begin(struct overlay *o, int cols, int rows)
         if (cols == 0) {
             zwlr_layer_surface_v1_set_exclusive_zone(o->lsurf, -1); /* over the bar too */
         } /* else kept off the bar by labwc */
-        zwlr_layer_surface_v1_set_margin(o->lsurf, o->margin + o->top, o->margin, o->margin, o->margin);
+        zwlr_layer_surface_v1_set_margin(o->lsurf, o->margin, o->margin, o->margin, o->margin);
+        if (o->passive) {
+            struct wl_region *region = wl_compositor_create_region(compositor);
+            if (region) {
+                wl_surface_set_input_region(o->surf, region);
+                wl_region_destroy(region);
+            }
+        }
         zwlr_layer_surface_v1_add_listener(o->lsurf, &overlay_listener, o);
     }
     uint32_t s120 = o->viewport ? o->scale120 : 120;
@@ -1866,7 +1946,7 @@ static void ovl_text(struct overlay *o, int col, int row, const char *s, uint32_
 /* The input method's bar: shown only while composing, or for a notice. */
 static void render_bot_bar(void);
 static struct overlay ime_bar = {
-    .ns = "locachy-ime", .render = render_bot_bar,
+    .ns = "locachy-ime", .render = render_bot_bar, .passive = 1,
     .anchor = ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM | ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT |
               ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT,
 };
@@ -2918,7 +2998,7 @@ static void notice(const char *msg)
 static int open_fd = -1;
 static struct {
     int client;               /* the waiting xdg-open; -1: no chooser */
-    int from_root, from_isolated;
+    int from_root, from_isolated, from_archive;
     char target[4096], type[128], from[OPEN_NAME];
     char names[CHOICES][OPEN_NAME];
     int n, sel, all;
@@ -2991,6 +3071,10 @@ static int client_peer(int client)
         snprintf(choose.from, sizeof choose.from, "host");
     }
     choose.from_root = cred.uid == 0 && kind != DOCS_PEER_CONTAINER;
+    const char prefix[] = "window-archive-", *seq = choose.from + sizeof prefix - 1;
+    choose.from_archive = choose.from_root && kind == DOCS_PEER_WINDOW &&
+                          strncmp(choose.from, prefix, sizeof prefix - 1) == 0 &&
+                          seq[0] && seq[strspn(seq, "0123456789")] == '\0';
     choose.from_isolated = !choose.from_root &&
                            !(kind == DOCS_PEER_HOST || (kind == DOCS_PEER_CONTAINER && open_host(choose.from)));
     return 0;
@@ -3086,6 +3170,20 @@ static int opens_type(const char *name, const char *type)
     return 0;
 }
 
+/* A private preview may go from the managed root archive window to view/edit.
+ * Resolve it as the user, and do not allow a cache-directory symlink to
+ * expand the exception to another part of the filesystem. */
+static int archive_preview(const char *path, char real[PATH_MAX])
+{
+    char home[PATH_MAX], dirs[256], base[PATH_MAX], canonical[PATH_MAX];
+    struct stat st;
+    open_user_dirs(home, sizeof home, dirs, sizeof dirs);
+    if (!home[0] || !realpath(home, canonical)) return 0;
+    int n = snprintf(base, sizeof base, "%s/" ARCHIVE_PREVIEW_DIR "/", canonical);
+    return n > 0 && n < (int)sizeof base && realpath(path, real) &&
+           strncmp(real, base, (size_t)n) == 0 && stat(real, &st) == 0 && S_ISREG(st.st_mode);
+}
+
 /* locachy-app open NAME TARGET, in the background; then the window to the
  * front (raise: not the tray, not the question, since the program may not
  * have shown the file yet). user_picked is set when the person chose NAME in
@@ -3102,22 +3200,25 @@ static void deliver(int client, const char *name, int user_picked)
      * this display instead (process 1's, as root as in home). */
     int words = open_program(name, choose.target, spec, sizeof spec, argv, 16);
     if (words) {
-        open_as_user(1);
-        int shared = choose.target[0] != '/' || open_shared(choose.target, why, sizeof why);
-        open_as_user(0);
+        char real[PATH_MAX];
         const char *win_prog = words == 2 ? (strcmp(argv[0], "/usr/local/bin/view") == 0 ? "view" :
                                              strcmp(argv[0], "/usr/local/bin/edit") == 0 ? "edit" :
                                              strcmp(argv[0], "/usr/local/bin/archive") == 0 ? "archive" : NULL) : NULL;
+        open_as_user(1);
+        int shared = choose.target[0] != '/' || open_shared(choose.target, why, sizeof why);
+        int preview = !shared && choose.from_archive && win_prog && strcmp(win_prog, "archive") != 0 &&
+                      archive_preview(choose.target, real) && strlen(real) < 1024;
+        open_as_user(0);
         if (!opens_type(name, choose.type)) {
             say("locachy-bar: refused %s (%s) from %s with %s: it does not open that", choose.target,
                 choose.type, choose.from, name);
             answer(client, "error %s does not open files of this type", name);
-        } else if (!shared) {
+        } else if (!shared && !preview) {
             answer(client, "error %s", why);
-        } else if (win_prog && choose.target[0] == '/' && strlen(choose.target) < 1024) {
+        } else if (preview || (win_prog && choose.target[0] == '/' && strlen(choose.target) < 1024)) {
             say("locachy-bar: open %s (%s) from %s with %s in a window", choose.target, choose.type, choose.from,
                 name);
-            window_open(win_prog, choose.target);
+            window_open(win_prog, preview ? real : choose.target);
             answer(client, "ok %s", name);
         } else if (open_in_home(name, choose.target) < 0) {
             answer(client, "error cannot ask home to open it%s", "");
@@ -3260,9 +3361,12 @@ static void close_again(void)
         answer(again.client, "error cancelled%s", "");
         again.client = -1;
     }
+    if (again.shown) {
+        overlay_destroy(&question);
+        catchers(0);
+    }
     again.pending = again.shown = again.own_tor = again.wait_release = 0;
     again.target[0] = '\0';
-    overlay_destroy(&question);
     want_grab = grab_wanted();
     if (keys_down == 0) set_grab(want_grab);
     if (display) wl_display_flush(display);
@@ -3329,7 +3433,9 @@ static void again_tick(void)
     }
     if (keys_down == 0) again.wait_release = 0;
     if (again.pending && !again.shown && choose.client < 0) {
+        launcher_close();
         again.shown = 1;
+        catchers(1);
         want_grab = grab_wanted();
         if (keys_down == 0) set_grab(want_grab);
         render_chooser();
@@ -3410,6 +3516,30 @@ static void chooser_line(const struct overlay *o, int i, char *out, size_t size)
 }
 
 #define CH_COLS 72
+#define CH_ROW_FIRST 2
+static int question_hover_key;
+static double question_scroll;
+
+static int question_action_row(void)
+{
+    return again.shown ? 6 : CH_ROW_FIRST + choose.n + !choose.all + 1;
+}
+
+static void question_buttons(struct overlay *o, const char *confirm, const char *middle)
+{
+    const char *labels[] = { confirm, middle, _("Esc: cancel") };
+    const int keys[] = { KEY_ENTER, KEY_A, KEY_ESC };
+    int row = question_action_row();
+    for (int i = 0; i < 3; i++) {
+        if (!labels[i]) continue;
+        int col = i * (CH_COLS / 3) + 1;
+        uint32_t bg = question_hover_key == keys[i] ? WIN_ON : TOAST_BG;
+        char fit[160];
+        panel_text_fit(fit, sizeof fit, labels[i], (CH_COLS / 3 - 4) * o->cw, o->font);
+        ovl_fill(o, col, row, CH_COLS / 3 - 2, 1, bg);
+        ovl_text(o, col + 1, row, fit, OVL_FG1, bg);
+    }
+}
 
 static void render_chooser(void)
 {
@@ -3427,7 +3557,7 @@ static void render_chooser(void)
         ovl_text(o, 1, 1, _("Turn Tor on in settings for the host Tor firewall, or confirm here."), OVL_FG2, OVL_BG);
         ovl_text(o, 1, 3, _("Start it with its own user-space Tor without the host firewall?"), OVL_FG1, OVL_BG);
         /* TRANSLATORS: Enter and Esc are keys; keep them. */
-        ovl_text(o, 1, 6, _("Enter: start with own Tor   Esc: cancel"), OVL_FG2, OVL_BG);
+        question_buttons(o, _("Enter: start with Tor"), NULL);
         overlay_end(o);
         return;
     }
@@ -3439,7 +3569,7 @@ static void render_chooser(void)
         ovl_text(o, 1, 3, _("Start its program again? One that runs only once shows its"), OVL_FG1, OVL_BG);
         ovl_text(o, 1, 4, _("window; any other starts a second copy."), OVL_FG1, OVL_BG);
         /* TRANSLATORS: Enter and Esc are keys; keep them. */
-        ovl_text(o, 1, 6, _("Enter: start it again   Esc: leave it"), OVL_FG2, OVL_BG);
+        question_buttons(o, _("Enter: start again"), NULL);
         overlay_end(o);
         return;
     }
@@ -3449,7 +3579,7 @@ static void render_chooser(void)
     ovl_text(o, 1, 0, line, OVL_FG1, OVL_BG);
     snprintf(line, sizeof line, "(%s)", choose.type);
     ovl_text(o, 1, 1, line, OVL_FG2, OVL_BG);
-    int r = 2;
+    int r = CH_ROW_FIRST;
     for (int i = 0; i < choose.n; i++, r++) {
         chooser_line(o, i, line, sizeof line);
         uint32_t bg = i == choose.sel ? TOAST_BG : OVL_BG;
@@ -3460,10 +3590,10 @@ static void render_chooser(void)
         uint32_t bg = choose.sel == choose.n ? TOAST_BG : OVL_BG;
         snprintf(line, sizeof line, " %2d  %s", choose.n + 1, _("Other container..."));
         ovl_fill(o, 0, r, 0, 1, bg);
-        ovl_text(o, 0, r++, line, OVL_FG2, bg);
+        ovl_text(o, 0, r, line, OVL_FG2, bg);
     }
     /* TRANSLATORS: Enter, A and Esc are keys; keep them. */
-    ovl_text(o, 1, r + 1, _("Enter: open   A: always use it   Esc: cancel"), OVL_FG2, OVL_BG);
+    question_buttons(o, _("Enter: open"), _("A: always use it"));
     overlay_end(o);
 }
 
@@ -4065,7 +4195,7 @@ static int launcher_max_rows(struct wl_output *out, uint32_t s120, int ch)
         sh = (int)(((uint64_t)phys_h * 120 + s120 - 1) / s120);
     }
     if (sh <= 0 || ch <= 0) return launcher.n;
-    int avail_logical = sh - launcher_ovl.top - 8;
+    int avail_logical = sh - (int)bar_height(s120) - 8;
     int avail_px = (int)((uint64_t)(avail_logical > 0 ? avail_logical : 0) * s120 / 120);
     int fit = avail_px / ch - 2;
     return fit < 4 ? 4 : fit;
@@ -4153,9 +4283,24 @@ static void catch_hide(struct bar *b)
         b->catch_lsurf = NULL;
     }
     if (b->catch_surf) {
+        if (pointer_surface == b->catch_surf) pointer_reset();
         wl_surface_destroy(b->catch_surf);
         b->catch_surf = NULL;
     }
+    b->catch_mapped = 0;
+}
+
+static void catch_input_region(struct bar *b)
+{
+    if (!launcher_shown) return;
+    /* Leave the top bar clickable, without changing the full-screen geometry. */
+    struct wl_region *region = wl_compositor_create_region(compositor);
+    if (!region) return;
+    if (b->h < b->screen_h) {
+        wl_region_add(region, 0, (int32_t)b->h, (int32_t)b->screen_w, (int32_t)(b->screen_h - b->h));
+    }
+    wl_surface_set_input_region(b->catch_surf, region);
+    wl_region_destroy(region);
 }
 
 /* Configured at the screen's size: one transparent pixel stretched over it
@@ -4166,6 +4311,7 @@ static void catch_configure(void *data, struct zwlr_layer_surface_v1 *surface, u
     struct bar *b = data;
     uint32_t *px;
     zwlr_layer_surface_v1_ack_configure(surface, serial);
+    b->screen_w = width;
     if (height > 0 && b->screen_h != height) {
         b->screen_h = height;
         if (launcher_shown && b->output == (launcher_ovl.pin ? launcher_ovl.pin : focused_output())) {
@@ -4183,6 +4329,8 @@ static void catch_configure(void *data, struct zwlr_layer_surface_v1 *surface, u
     if (b->catch_viewport) {
         wp_viewport_set_destination(b->catch_viewport, (int32_t)width, (int32_t)height);
     }
+    catch_input_region(b);
+    b->catch_mapped = 1;
     wl_surface_damage_buffer(b->catch_surf, 0, 0, w, h);
     wl_surface_commit(b->catch_surf);
 }
@@ -4198,8 +4346,7 @@ static const struct zwlr_layer_surface_v1_listener catch_listener = {
     .closed = catch_closed,
 };
 
-/* Over every screen, under the launcher and the overlays (the top layer:
- * over the windows and, made after it, the bar), or none. */
+/* Outside clicks are intercepted while a launcher or question is shown. */
 static void catchers(int on)
 {
     for (struct bar *b = bars; b; b = b->next) {
@@ -4215,7 +4362,7 @@ static void catchers(int on)
             b->catch_viewport = wp_viewporter_get_viewport(viewporter, b->catch_surf);
         }
         b->catch_lsurf = zwlr_layer_shell_v1_get_layer_surface(layer_shell, b->catch_surf, b->output,
-                                                               ZWLR_LAYER_SHELL_V1_LAYER_TOP, "locachy-launcher-outside");
+                                                               ZWLR_LAYER_SHELL_V1_LAYER_TOP, "locachy-bar-outside");
         zwlr_layer_surface_v1_set_anchor(b->catch_lsurf,
             ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
             ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
@@ -4225,12 +4372,16 @@ static void catchers(int on)
     }
 }
 
-static int launcher_catch(struct wl_surface *s)
+static uint32_t pointer_scale(struct wl_surface *s)
 {
-    for (struct bar *b = bars; b; b = b->next) {
-        if (b->catch_surf == s) return 1;
+    for (struct bar *b = bars; s && b; b = b->next) {
+        if (b->surf == s || b->catch_surf == s) return b->scale120;
     }
-    return 0;
+    const struct overlay *all[] = { &notes_ovl, &question, &launcher_ovl };
+    for (size_t i = 0; s && i < sizeof all / sizeof *all; i++) {
+        if (s == all[i]->surf) return all[i]->scale120;
+    }
+    return 120;
 }
 
 /* Opened from bar b's LOCachy (NULL: from the keyboard). Not while the
@@ -4247,7 +4398,6 @@ static void launcher_open(struct bar *b)
     launcher.wheel = 0;
     launcher.focus_mark = focus_changes;
     launcher_ovl.pin = b ? b->output : NULL;
-    launcher_ovl.top = (int)bar_height(output_scale(b ? b->output : focused_output())); /* under the bar */
     launcher_shown = 1;
     want_grab = grab_wanted();
     if (keys_down == 0) {
@@ -4413,26 +4563,23 @@ static void launcher_click(double y, uint32_t button)
     }
 }
 
+static void launcher_clear_wheel(void)
+{
+    launcher.wheel = 0;
+}
+
 static void launcher_wheel(double delta)
 {
     if (!launcher_shown || launcher.n <= launcher.vis) return;
     launcher.wheel += delta;
-    int changed = 0, max_scroll = launcher.n - launcher.vis;
-    while (launcher.wheel >= 10) {
-        launcher.wheel -= 10;
-        if (launcher.scroll < max_scroll) {
-            launcher.scroll++;
-            changed = 1;
-        }
+    int steps = (int)(launcher.wheel / SCROLL_STEP);
+    launcher.wheel -= steps * SCROLL_STEP;
+    int next = launcher.scroll + steps, max_scroll = launcher.n - launcher.vis;
+    next = next < 0 ? 0 : next > max_scroll ? max_scroll : next;
+    if (next != launcher.scroll) {
+        launcher.scroll = next;
+        render_launcher();
     }
-    while (launcher.wheel <= -10) {
-        launcher.wheel += 10;
-        if (launcher.scroll > 0) {
-            launcher.scroll--;
-            changed = 1;
-        }
-    }
-    if (changed) render_launcher();
 }
 
 /* An overlay on the screen goes with the focus to another screen; one
@@ -4453,6 +4600,7 @@ static void close_chooser(void)
 {
     choose.client = -1;
     overlay_destroy(&question);
+    catchers(0);
     want_grab = grab_wanted();
     if (keys_down == 0) set_grab(want_grab);
     if (display) wl_display_flush(display);
@@ -4465,8 +4613,10 @@ static void open_chooser(int client, const char *prefer)
         answer(client, "error the shared display is not on the screen to choose the program%s", "");
         return;
     }
+    launcher_close();
     choose.client = client;
     choose.all = 0;
+    catchers(1);
     choose.n = open_candidates(choose.type, choose.names, CHOICES);
     if (choose.n == 0) {
         choose.all = 1;
@@ -4490,7 +4640,8 @@ static void open_chooser(int client, const char *prefer)
 /* A key while the chooser is up. */
 static void chooser_key(int code)
 {
-    int last = choose.n + (choose.all ? 0 : 1) - 1;
+    int last = choose.n + !choose.all - 1;
+    if (!active || (!again.shown && choose.client < 0)) return;
     if (again.shown) {
         again_key(code);
         return;
@@ -4507,6 +4658,7 @@ static void chooser_key(int code)
     } else if (code >= KEY_1 && code <= KEY_9 && code - KEY_1 <= last) {
         choose.sel = code - KEY_1;
     } else if (code == KEY_ENTER || code == KEY_KPENTER || code == KEY_A) {
+        if (choose.sel > last) return;
         if (choose.sel == choose.n) { /* Other container... */
             choose.all = 1;
             choose.n = open_containers(choose.names, CHOICES);
@@ -4528,6 +4680,88 @@ static void chooser_key(int code)
         return;
     }
     render_chooser();
+}
+
+static struct wl_surface *question_surface(void)
+{
+    return question.surf;
+}
+
+static int question_row(double x, double y, int *col)
+{
+    const struct overlay *o = &question;
+    if (!o->configured || o->cw <= 0 || o->ch <= 0 || x < 0 || y < 0 || x >= o->w || y >= o->h) return -1;
+    double scale = (o->viewport ? o->scale120 : 120) / 120.0;
+    *col = (int)(x * scale) / o->cw;
+    return (int)(y * scale) / o->ch;
+}
+
+static int question_key_at(int row, int col)
+{
+    int width = CH_COLS / 3;
+    if (row != question_action_row() || col >= CH_COLS || col % width < 1 || col % width >= width - 1) return 0;
+    if (col < width) return KEY_ENTER;
+    if (col >= 2 * width) return KEY_ESC;
+    return again.shown ? 0 : KEY_A;
+}
+
+static void question_hover(double x, double y)
+{
+    int col = 0, row = question_row(x, y, &col), key = question_key_at(row, col);
+    int item = row - CH_ROW_FIRST;
+    int changed = question_hover_key != key;
+    question_hover_key = key;
+    if (!again.shown && item >= 0 && item < choose.n + !choose.all && choose.sel != item) {
+        choose.sel = item;
+        changed = 1;
+    }
+    if (changed) render_chooser();
+}
+
+static void question_clear_hover(int redraw)
+{
+    question_scroll = 0;
+    if (question_hover_key) {
+        question_hover_key = 0;
+        if (redraw && question.surf) render_chooser();
+    }
+}
+
+static void question_outside_click(void)
+{
+    if (again.shown && active) close_again();
+    else chooser_key(KEY_ESC);
+}
+
+static void question_click(double x, double y, uint32_t button)
+{
+    if (button == BTN_RIGHT) {
+        question_outside_click();
+        return;
+    }
+    int col = 0, row = question_row(x, y, &col), item = row - CH_ROW_FIRST;
+    if (!again.shown && item >= 0 && item < choose.n + !choose.all) {
+        choose.sel = item;
+        chooser_key(KEY_ENTER);
+    } else {
+        int key = question_key_at(row, col);
+        if (key == KEY_ESC || row < 0) question_outside_click();
+        else if (key) chooser_key(key);
+    }
+}
+
+static void question_wheel(double delta)
+{
+    if (again.shown || choose.client < 0) return;
+    question_scroll += delta;
+    int steps = (int)(question_scroll / SCROLL_STEP);
+    question_scroll -= steps * SCROLL_STEP;
+    int next = choose.sel + steps, last = choose.n + !choose.all - 1;
+    next = next < 0 ? 0 : next > last ? last : next;
+    if (last >= 0 && next != choose.sel) {
+        choose.sel = next;
+        render_chooser();
+    }
 }
 
 static void open_request(void)
@@ -4587,7 +4821,9 @@ static void open_request(void)
         return;
     }
     if (with[0]) {
-        if (!choose.from_root && choose.from_isolated && open_host(with) && opens_type(with, choose.type)) {
+        if (choose.from_root && strcmp(with, "ask") == 0) {
+            open_chooser(client, NULL);
+        } else if (choose.from_isolated && open_host(with) && opens_type(with, choose.type)) {
             open_chooser(client, with);
         } else {
             deliver(client, with, choose.from_root);
@@ -5142,7 +5378,6 @@ int main(int argc, char **argv)
     wl_display_roundtrip(display);
     if (!compositor || !shm || !layer_shell) return 1;
 
-    cursor_theme = wl_cursor_theme_load(NULL, 24, shm);
     cursor_surface = wl_compositor_create_surface(compositor);
     init_xkb();
     if (!nlayouts) return 1;
@@ -5178,7 +5413,7 @@ int main(int argc, char **argv)
         g_main_context_prepare(gctx, &gmax);
         int ngfds = g_main_context_query(gctx, gmax, &gtimeout, gfds, 32);
         ngfds = ngfds > 32 ? 32 : ngfds;
-        struct pollfd p[4 + MAX_KBDS + 32 + 2];
+        struct pollfd p[4 + MAX_KBDS + 32 + 3];
         int nbase = 4 + nkbds;
         p[0] = (struct pollfd){ .fd = wl_fd, .events = POLLIN };
         p[1] = (struct pollfd){ .fd = open_fd, .events = POLLIN }; /* -1: ignored */
@@ -5192,11 +5427,13 @@ int main(int argc, char **argv)
         }
         p[nbase + ngfds] = (struct pollfd){ .fd = tray_watch, .events = POLLIN }; /* -1, -2: ignored */
         p[nbase + ngfds + 1] = (struct pollfd){ .fd = wake_pipe[0], .events = POLLIN };
+        int chooser_poll = nbase + ngfds + 2;
+        p[chooser_poll] = (struct pollfd){ .fd = choose.client, .events = POLLERR | POLLHUP };
         int timeout = wait_ms();
         if (gtimeout >= 0 && (timeout < 0 || gtimeout < timeout)) {
             timeout = gtimeout;
         }
-        int polled = poll(p, (nfds_t)(nbase + ngfds + 2), timeout);
+        int polled = poll(p, (nfds_t)(chooser_poll + 1), timeout);
         char drain[4096];
         if (polled > 0 && (p[nbase + ngfds].revents & POLLIN)) {
             while (read(tray_watch, drain, sizeof drain) > 0) {
@@ -5217,6 +5454,11 @@ int main(int argc, char **argv)
         }
         if (p[0].revents & (POLLIN | POLLHUP | POLLERR)) {
             if (wl_display_dispatch(display) < 0) break;
+        }
+        if (p[chooser_poll].fd >= 0 && p[chooser_poll].fd == choose.client &&
+            (p[chooser_poll].revents & (POLLERR | POLLHUP | POLLNVAL))) {
+            close(choose.client);
+            close_chooser();
         }
         if (p[1].revents & POLLIN) {
             open_request();

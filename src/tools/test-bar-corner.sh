@@ -14,6 +14,7 @@ done
 gcc -O2 -g -Wall -Wextra -Werror -D_GNU_SOURCE -ffunction-sections -fdata-sections \
     $(pkg-config --cflags gio-2.0) -I"$src/base/include" -I"$src/base" -I"$out/protocols" \
     "$src/tools/test-bar-corner.c" "$out/protocols/"*-protocol.c \
+    "$src/base/"{panel,screen,font,fontmatch,open,rc,i18n,say}.c \
     $(pkg-config --libs gio-2.0 xkbcommon wayland-client wayland-cursor) \
     -Wl,--gc-sections -lm -o "$out/test"
 "$out/test"

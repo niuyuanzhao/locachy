@@ -302,6 +302,7 @@ static uint64_t language_send(struct language_document *b, EdLspRequest *request
 static int language_pick(const char *title, GPtrArray *labels)
 {
     if (!labels || !labels->len) return -1;
+    screen_cursor(CURSOR_ARROW);
     int selected = 0, top = 0; language_pick_help_requested = 0;
     for (;;) {
         draw(); int width = screen_cols() - 6, height = screen_rows() - 8;
@@ -328,8 +329,16 @@ static int language_pick(const char *title, GPtrArray *labels)
         else if (key == K_EOL) selected = (int)labels->len - 1;
         else if (key == K_POINTER) {
             const struct pointer_event *p = pointer_last();
-            if (p->button == BTN_LEFT && p->pressed && p->row >= 4 && p->row < 4 + height && p->col >= 3 && p->col < 3 + width) {
-                int at = top + p->row - 4; if (at < (int)labels->len) { if (at == selected) return at; selected = at; }
+            int inside = p->col >= 3 && p->col < 3 + width && p->row >= 3 && p->row < 5 + height;
+            if (inside && p->wheel) {
+                long to = selected - (long)p->wheel;
+                selected = to < 0 ? 0 : to >= (long)labels->len ? (int)labels->len - 1 : (int)to;
+            } else if (p->button && p->pressed) {
+                if (!inside) return -1;
+                if (p->button == BTN_LEFT && p->row >= 4 && p->row < 4 + height) {
+                    int at = top + p->row - 4;
+                    if (at < (int)labels->len) { if (at == selected) return at; selected = at; }
+                }
             }
         } else if (key == K_CTRL_SPACE && !(mods & KEYS_ALT)) { ime_cycle_mode(); }
     }
@@ -981,6 +990,17 @@ static void language_hover_at(struct doc *d, size_t at)
 {
     if (!language_auto_hover || (language_hover_doc == d && language_hover_offset == at)) return;
     language_hover_doc = d; language_hover_offset = at; language_hover_due = now() + 0.6;
+}
+static void language_hover_cancel(void)
+{
+    language_hover_doc = NULL;
+    for (guint i = 0; language_requests && i < language_requests->len;) {
+        struct language_request_ui *r = g_ptr_array_index(language_requests, i);
+        if (r->pointer_hover) {
+            ed_lsp_cancel(r->server->client, r->id);
+            g_ptr_array_remove_index(language_requests, i);
+        } else i++;
+    }
 }
 static void language_saved(struct doc *d)
 {

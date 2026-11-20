@@ -318,6 +318,23 @@ run_suite() {
     inside2=$(python3 -I $out/hud-inside.py $out/hud-$SHOT_RENDERER-HEADLESS-2.ppm 2>/dev/null || echo "0 -1")
     check "toolbar buttons inside the panel (rows, outside: $inside1 at 1, $inside2 at 1.5)" \
         "[ \"${inside1%% *}\" -gt 0 ] && [ \"${inside1##* }\" = 0 ] && [ \"${inside2##* }\" = 0 ]"
+    # Click the top border of the HUD, where there is no button. The same
+    # 300x200 selection below must still be exported.
+    read -r hud_x hud_y <<<"$(python3 - "$out/hud-$SHOT_RENDERER-HEADLESS-1.ppm" <<"EOF"
+import sys
+p = open(sys.argv[1], "rb").read().split(b"\n", 3)
+w, h = map(int, p[1].split())
+for y in range(301, h):
+    row = p[3][y * w * 3:(y + 1) * w * 3]
+    b = bytes.fromhex("3daee9") * 50
+    x = row.find(b)
+    if x >= 0 and x % 3 == 0:
+        print(x // 3 + 25, y + 2)
+        break
+EOF
+)"
+    check "HUD padding has a test point" "[ -n \"$hud_x\" ] && [ -n \"$hud_y\" ]"
+    if [ -n "$hud_x" ] && [ -n "$hud_y" ]; then click "$hud_x" "$hud_y" $L; fi
     # Press 1 to select Arrow annotation tool, drag inside region from (150, 150) to (300, 250)
     keys 1
     sleep 0.2

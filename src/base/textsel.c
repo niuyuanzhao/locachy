@@ -12,7 +12,7 @@
 #include "textsel.h"
 
 #define SHOWN_ROWS 160
-#define SHOWN_COLS 320
+#define SHOWN_COLS 512
 static char (*shown)[SHOWN_COLS][5]; /* from the first picture: a program that draws none has none */
 static struct { int active, dragging, anchor, end; } sel;
 
@@ -110,8 +110,23 @@ static int word_cell(int row, int col)
 
 int textsel_pointer(const struct pointer_event *e, int may_start)
 {
-    if (!shown || e->row < 0 || e->row >= SHOWN_ROWS || e->col < 0 || e->col >= SHOWN_COLS) return TEXTSEL_NONE;
-    int at = e->row * SHOWN_COLS + e->col;
+    int inside = shown && e->row >= 0 && e->row < SHOWN_ROWS && e->col >= 0 && e->col < SHOWN_COLS;
+    int at = inside ? e->row * SHOWN_COLS + e->col : sel.end;
+    if (e->cancelled) {
+        if (!sel.dragging || e->button != BTN_LEFT) return TEXTSEL_NONE;
+        textsel_clear();
+        return TEXTSEL_ON;
+    }
+    if (sel.dragging && e->button == BTN_LEFT && !e->pressed) {
+        sel.end = at;
+        sel.dragging = 0;
+        if (sel.anchor != sel.end) return TEXTSEL_MADE;
+        sel.active = 0; /* a click: no selection */
+        return TEXTSEL_ON;
+    }
+    if (sel.dragging && (e->wheel || e->hwheel || e->gesture || e->scroll_dx || e->scroll_dy ||
+                         (e->button && e->button != BTN_LEFT))) return TEXTSEL_ON;
+    if (!inside) return TEXTSEL_NONE;
     if (e->button == BTN_LEFT && e->pressed) {
         if (!may_start) return TEXTSEL_NONE;
         sel.active = sel.dragging = 1;
@@ -134,14 +149,6 @@ int textsel_pointer(const struct pointer_event *e, int may_start)
     }
     if (!sel.dragging) return TEXTSEL_NONE;
     sel.end = at;
-    if (e->button == BTN_LEFT && !e->pressed) {
-        sel.dragging = 0;
-        if (sel.anchor == sel.end) {
-            sel.active = 0; /* a click: no selection */
-            return TEXTSEL_ON;
-        }
-        return TEXTSEL_MADE;
-    }
     return TEXTSEL_ON;
 }
 

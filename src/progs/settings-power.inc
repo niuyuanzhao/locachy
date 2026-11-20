@@ -288,7 +288,7 @@ static int power_sel_dev;
 static int power_mode;      /* 0: Charge %, 1: Power (W) */
 static int power_span = PSPAN_12H;
 static int power_cursor = -1;
-static int power_detail_scroll;
+static int power_detail_scroll, power_detail_max;
 static struct power_hit power_hits[32];
 static int npower_hits;
 static int64_t power_now_override;
@@ -464,10 +464,14 @@ static void power_curves_draw(void)
 {
     int cols = screen_cols(), rows = screen_rows();
     npower_hits = 0;
+    power_detail_max = 0;
+    ui_hits_clear();
     screen_fill(0, 0, cols, rows, BG);
     screen_bar(_("settings — Power & Battery"), NULL);
+    settings_back_button(rows - 1);
 
     if (cols < 36 || rows < 14) {
+        power_detail_scroll = 0;
         screen_text(1, 2, _("Window too small for battery curves."), FG, BG);
         screen_flush();
         return;
@@ -953,6 +957,10 @@ static void power_curves_draw(void)
         snprintf(g3[n3].v, sizeof g3[0].v, "%.44s", sel_bat->pack_id);
         g3[n3++].col = DIM;
 
+        int right = cols >= 108 ? (n2 > n3 ? n2 : n3) : n2 + n3;
+        int lines = n1 > right ? n1 : right;
+        power_detail_max = lines > det_rows - 1 ? lines - (det_rows - 1) : 0;
+        if (power_detail_scroll > power_detail_max) power_detail_scroll = power_detail_max;
         if (cols >= 108) {
             int cw3 = (cols - 6) / 3;
             int c0 = 2, c1 = 2 + cw3 + 1, c2 = 2 + 2 * (cw3 + 1);
@@ -999,6 +1007,7 @@ static void power_curves_draw(void)
         }
     }
 
+    if (!power_detail_max) power_detail_scroll = 0;
     /* TRANSLATORS: m, Tab, Left/Right, r, Ctrl+C and Esc are key names; keep them. */
     screen_text(2, rows - 3, cols < 72 ? _("m: %/W  1-6: span  Arrows: cursor  r: refresh  Esc: back") :
                 _("m: %/W   1-6: span   Left/Right: cursor   Tab: pack   r: refresh   Ctrl+C: copy   Esc: back"),
@@ -1010,9 +1019,11 @@ static void power_curves_draw(void)
 static int power_curves_pointer(const struct pointer_event *ev)
 {
     if (ev->wheel) {
-        power_detail_scroll -= ev->wheel;
-        if (power_detail_scroll < 0) power_detail_scroll = 0;
-        if (power_detail_scroll > 6) power_detail_scroll = 6;
+        int next = power_detail_scroll - ev->wheel;
+        if (next < 0) next = 0;
+        if (next > power_detail_max) next = power_detail_max;
+        if (next == power_detail_scroll) return 0;
+        power_detail_scroll = next;
         return 1;
     }
     for (int i = 0; i < npower_hits; i++) {
@@ -1022,8 +1033,11 @@ static int power_curves_pointer(const struct pointer_event *ev)
             continue;
         }
         if (h->kind == 6) {
-            int nc = ev->col - h->x;
+            int nc;
             if (ev->button == BTN_RIGHT && ev->pressed) nc = -1;
+            else if ((ev->button == BTN_LEFT && ev->pressed) || (!ev->button && (ev->buttons & 1)))
+                nc = ev->col - h->x;
+            else return 0;
             if (nc != power_cursor) {
                 power_cursor = nc;
                 return 1;
@@ -1077,8 +1091,12 @@ static void power_curves_page(void)
             continue;
         }
         if (key == K_POINTER) {
-            if (power_curves_pointer(pointer_last())) power_curves_draw();
-            continue;
+            const struct pointer_event *e = pointer_last();
+            if (settings_back_clicked(e)) key = 27;
+            else {
+                if (power_curves_pointer(e)) power_curves_draw();
+                continue;
+            }
         }
         int mods = mods_now(), act = key_list_action(key, mods);
         if (act == ACT_CANCEL || close_read(key)) { /* Esc, q: back; Ctrl+Q, the window's close: quit */
@@ -1136,7 +1154,7 @@ static void power_curves_page(void)
             power_cursor = -1;
         } else if (key == K_UP && power_detail_scroll > 0) {
             power_detail_scroll--;
-        } else if (key == K_DOWN && power_detail_scroll < 6) {
+        } else if (key == K_DOWN && power_detail_scroll < power_detail_max) {
             power_detail_scroll++;
         } else if (key == 'r' || key == 'R') {
             power_refresh_devices();

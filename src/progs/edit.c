@@ -146,6 +146,7 @@ static int language_active(void);
 static void language_done(void);
 static void language_menu(void);
 static void language_hover_at(struct doc *d, size_t at);
+static void language_hover_cancel(void);
 static int session_quit(void);
 static void filesearch_menu(void);
 /* edit-scrollbar.inc, edit-documents.inc, edit-quickopen.inc */
@@ -165,6 +166,7 @@ static int scroll_cols(int s, const struct tab *t);
 static void draw_scrollbar(int s, struct tab *t);
 static int scroll_pointer(int id, const struct pointer_event *e);
 static int scroll_dragging(const struct pointer_event *e);
+static void scroll_drag_end(void);
 static void scroll_hover(int id, const struct pointer_event *e);
 static void preview_draw(void);
 static void preview_hide(void);
@@ -937,12 +939,17 @@ static int text_first_row(int s)
     return space_rect(s).y + 1 + notes_above(s);
 }
 
-/* Space s's text rows: from *y, *h visual document lines. */
-static void text_rows(int s, int *y, int *h)
+static int text_end_row(int s)
 {
     struct edit_rect r = space_rect(s);
+    return r.y + r.h - 1 - bar_rows(s);
+}
+
+/* Space s's text rows: from base-cell row *y, *h visual document lines. */
+static void text_rows(int s, int *y, int *h)
+{
     *y = text_first_row(s);
-    *h = r.y + r.h - 1 - bar_rows(s) - *y;
+    *h = text_end_row(s) - *y;
     int base_w, base_h, top, cw, ch;
     screen_cells(&base_w, &base_h, &top);
     if (content_metrics(s, &cw, &ch, &top)) *h = *h * base_h / ch;
@@ -1267,6 +1274,7 @@ struct field {
     char s[1024];
     int len, cur; /* bytes */
     int all;      /* all of it selected: what is typed replaces it */
+    int col, width; /* where the field was drawn */
 };
 
 enum { FOCUS_VIEW, FOCUS_BAR };
@@ -1851,10 +1859,9 @@ static void draw_status(int s)
     }
 }
 
-static void draw_field(int col, int row, int width, const struct field *f, int focused, uint32_t bg)
+/* The first displayed byte, with the cursor's cell relative to it. */
+static const char *field_start(const struct field *f, int width, int *cursor)
 {
-    screen_fill(col, row, width, 1, bg);
-    /* Scrolled so that its cursor shows. */
     int before = 0;
     for (int i = 0; i < f->cur;) {
         size_t k;
@@ -1870,10 +1877,33 @@ static void draw_field(int col, int row, int width, const struct field *f, int f
         x += screen_char_cells(cp);
         p += k;
     }
+    *cursor = before - x;
+    return p;
+}
+
+static void draw_field(int col, int row, int width, const struct field *f, int focused, uint32_t bg)
+{
+    if (width <= 0) return;
+    screen_fill(col, row, width, 1, bg);
+    int cursor;
+    const char *p = field_start(f, width, &cursor);
     put_text(col, row, col + width, p, C_WTEXT, bg);
-    if (focused) {
-        draw_caret(col + before - skip, row, 0, " ", bg);
+    if (focused) draw_caret(col + cursor, row, 0, " ", bg);
+}
+
+static void field_click(struct field *f, int col, int width, const struct pointer_event *e)
+{
+    int cell = e->col - col, cursor;
+    int at = (int)(field_start(f, width, &cursor) - f->s);
+    while (at < f->len && cell > 0) {
+        size_t bytes;
+        int n = screen_char_cells(text_decode(f->s + at, (size_t)(f->len - at), &bytes));
+        if (n > cell) break;
+        cell -= n;
+        at += (int)bytes;
     }
+    f->cur = at;
+    f->all = 0;
 }
 
 static int bar_button(int col, int row, int max, const char *label, int item, int enabled)
@@ -1943,6 +1973,7 @@ static void draw_bar(void)
         const char *line_lbl = _("Line:");
         screen_text(x0 + 1, row, line_lbl, C_WTEXT, C_WINDOW);
         int lx = x0 + 2 + ui_cells(line_lbl);
+        bar.line.col = lx; bar.line.width = 12;
         draw_field(lx, row, 12, &bar.line, bar.focus == FOCUS_BAR && bar.item == ITEM_LINE, C_FIELD);
         ui_hit(lx, row, 12, 1, HIT_BAR + ITEM_LINE);
         /* TRANSLATORS: Total line count in Go to Line bar, e.g. "Line: [12] of 100". */
@@ -1956,6 +1987,7 @@ static void draw_bar(void)
     int lw = ui_cells(find_lbl);
     if (bar_kind == BAR_POWER && ui_cells(rep_lbl) > lw) lw = ui_cells(rep_lbl);
     int fx = x0 + 2 + lw;
+    bar.find.col = fx; bar.find.width = fw;
     draw_field(fx, row, fw, &bar.find, bar.focus == FOCUS_BAR && bar.item == ITEM_FIND,
                bar_kind == BAR_FIND || bar.match ? field_bg : C_FIELD);
     ui_hit(fx, row, fw, 1, HIT_BAR + ITEM_FIND);
@@ -1979,6 +2011,7 @@ static void draw_bar(void)
     }
     row++;
     screen_text(x0 + 1, row, rep_lbl, C_WTEXT, C_WINDOW);
+    bar.replace.col = fx; bar.replace.width = fw;
     draw_field(fx, row, fw, &bar.replace, bar.focus == FOCUS_BAR && bar.item == ITEM_REPLACE, C_FIELD);
     ui_hit(fx, row, fw, 1, HIT_BAR + ITEM_REPLACE);
     c = fx + fw + 1;
@@ -4070,6 +4103,9 @@ static int ask(const char *title, const char *text, const char *const *buttons, 
 static int prompt_line(const char *label, struct field *f)
 {
     f->cur = f->len;
+    preview_hide();
+    language_hover_cancel();
+    screen_cursor(CURSOR_ARROW);
     for (;;) {
         draw();
         int rows = screen_rows(), cols = screen_cols(), n = text_cells(label);
@@ -4078,9 +4114,17 @@ static int prompt_line(const char *label, struct field *f)
         draw_field(n + 2, rows - 1, cols - n - 3, f, 1, C_FIELD);
         screen_flush();
         int key = key_poll_timeout(-1, -1), mods = keys_modifiers(), changed;
-        if (key == K_POINTER || key == K_SHOWN || key == 0) {
+        if (key == K_POINTER) {
+            const struct pointer_event *e = pointer_last();
+            int in_field = e->row == rows - 1 && e->col >= n + 2 && e->col < cols - 1;
+            screen_cursor(in_field ? CURSOR_TEXT : CURSOR_ARROW);
+            if (e->button && e->pressed) {
+                if (e->row != rows - 1 || e->button == BTN_RIGHT) break;
+                if (in_field && e->button == BTN_LEFT) field_click(f, n + 2, cols - n - 3, e);
+            }
             continue;
         }
+        if (key == K_SHOWN || key == 0) continue;
         const char *ime_notice;
         if (ime_action(key, &ime_notice)) {
             if (ime_notice) say_toast(ime_notice);
@@ -4094,14 +4138,15 @@ static int prompt_line(const char *label, struct field *f)
         if (taken) {
             continue;
         }
-        if (key == 27) {
-            return 0;
-        }
+        if (key_meaning(key, mods) == ACT_CANCEL) break;
         if (key == '\n') {
+            screen_cursor(CURSOR_ARROW);
             return 1;
         }
         field_key(f, real_key(key, mods), mods, &changed);
     }
+    screen_cursor(CURSOR_ARROW);
+    return 0;
 }
 
 static void error_box(const char *text)
@@ -5239,9 +5284,33 @@ static void icon_border_click(int s, size_t line, int button, const struct point
     bookmark_set(t->doc, line, !on);
 }
 
+static int over_text_gutter(int s, struct tab *t, const struct pointer_event *e)
+{
+    int x, w, bw, bh, top, cw, ch;
+    space_cols(s, &x, &w);
+    screen_cells(&bw, &bh, &top);
+    if (!content_metrics(s, &cw, &ch, &top)) cw = bw;
+    return bw > 0 ? e->x < x * bw + gutter(t) * cw : e->col < x + gutter(t);
+}
+
 static void pointer(const struct pointer_event *e)
 {
+    if (e->cancelled) {
+        /* Focus loss ends the grabs, not the selection already made. The
+         * old coordinates must not count as a click or a completed drag. */
+        icon_press.on = 0;
+        drag.mode = DRAG_NONE;
+        split_drag = NULL;
+        sidebar_drag = 0;
+        scroll_drag_end();
+        preview_hide();
+        language_hover_cancel();
+        return;
+    }
     int id = ui_hit_at(e->col, e->row), s = space_at(e->col, e->row);
+    int motion = !e->button && !e->wheel && !e->hwheel && !e->gesture;
+    if (!motion || id < HIT_SCROLL || id >= HIT_SCROLL + MAX_SPACES) preview_hide();
+    if (!motion || drag.mode || split_drag || sidebar_drag || switcher_open()) language_hover_cancel();
     if (scroll_dragging(e)) {
         return;
     }
@@ -5252,7 +5321,7 @@ static void pointer(const struct pointer_event *e)
         if (e->button == BTN_LEFT && !e->pressed) {
             split_drag = NULL;
             sidebar_drag = 0;
-        } else if (!e->button && !e->wheel) {
+        } else if (motion) {
             if (split_drag) edit_layout_resize(split_drag, split_drag_area, e->col, e->row,
                                                split_drag->vertical ? 8 : 4);
             else {
@@ -5271,7 +5340,7 @@ static void pointer(const struct pointer_event *e)
         split_drag = edit_layout_separator(&view_layout, editor_area(), e->col, e->row, &split_drag_area);
         if (split_drag) { drag.mode = DRAG_NONE; return; }
     }
-    if (!e->button && !e->wheel) {
+    if (motion) {
         if (drag.mode && (e->buttons & 1)) {
             struct tab *t = tab_of(drag.space);
             size_t at;
@@ -5282,14 +5351,17 @@ static void pointer(const struct pointer_event *e)
         } else {
             size_t at;
             scroll_hover(id, e); /* the scrollbar's text preview */
-            int over_text = s >= 0 && point_at(s, e, &at, 0);
+            struct tab *t = s >= 0 ? tab_of(s) : NULL;
+            int over_text = t && !over_text_gutter(s, t, e) && point_at(s, e, &at, 0);
             screen_cursor(over_text ? CURSOR_TEXT : CURSOR_ARROW);
-            if (over_text && tab_of(s)) language_hover_at(tab_of(s)->doc, at);
+            if (over_text) language_hover_at(t->doc, at);
+            else language_hover_cancel();
         }
         return;
     }
-    if (e->wheel) {
-        if ((keys_modifiers() & KEYS_CTRL) && s >= 0 && tab_of(s)) {
+    if (e->gesture) return;
+    if (e->wheel || e->hwheel) {
+        if (e->wheel && (keys_modifiers() & KEYS_CTRL) && s >= 0 && tab_of(s)) {
             active = s;
             font_zoom(e->wheel > 0 ? 1 : -1, 0);
             return;
@@ -5304,10 +5376,14 @@ static void pointer(const struct pointer_event *e)
             return;
         }
         struct tab *t = s >= 0 ? tab_of(s) : NULL;
-        if (t) {
+        if (t && e->wheel) {
             int y, h;
             text_rows(s, &y, &h);
-            scroll_rows(s, t, (keys_modifiers() & KEYS_SHIFT ? h : WHEEL_LINES) * -e->wheel);
+            scroll_rows(s, t, (keys_modifiers() & KEYS_SHIFT ? h : WHEEL_LINES) * -(long)e->wheel);
+        }
+        if (t && !t->wrap && e->hwheel) {
+            long left = t->left + (long)WHEEL_LINES * e->hwheel;
+            t->left = left < 0 ? 0 : left > INT_MAX - screen_cols() ? INT_MAX - screen_cols() : (int)left;
         }
         return;
     }
@@ -5329,7 +5405,7 @@ static void pointer(const struct pointer_event *e)
     }
     if (e->button == BTN_LEFT && !e->pressed) {
         struct tab *t = drag.mode ? tab_of(drag.space) : NULL;
-        if (t && drag.mode == DRAG_CHARS && has_sel(t)) {
+        if (t) {
             set_primary(t); /* the selection the user made, as Kate's release */
         }
         drag.mode = DRAG_NONE;
@@ -5339,9 +5415,9 @@ static void pointer(const struct pointer_event *e)
         return; /* the scrollbar, the mini-map, the Documents list */
     }
     if (e->button == BTN_MIDDLE && e->pressed) {
-        if (id >= HIT_TAB && id < HIT_TAB + MAX_SPACES * 1000) {
-            close_tab((id - HIT_TAB) / 1000, (id - HIT_TAB) % 1000); /* a middle click closes a tab */
-        }
+        int tab = id >= HIT_CLOSE && id < HIT_CLOSE + MAX_SPACES * 1000 ? id - HIT_CLOSE :
+                  id >= HIT_TAB && id < HIT_TAB + MAX_SPACES * 1000 ? id - HIT_TAB : -1;
+        if (tab >= 0) close_tab(tab / 1000, tab % 1000); /* a middle click closes a tab */
         return;
     }
     if (e->button == BTN_MIDDLE && !e->pressed) {
@@ -5399,12 +5475,11 @@ static void pointer(const struct pointer_event *e)
         int item = id - HIT_BAR;
         bar.focus = FOCUS_BAR;
         tree_focus = 0;
-        if (item == ITEM_FIND || item == ITEM_REPLACE || item == ITEM_LINE) {
-            bar.item = item;
-        } else {
-            bar.item = item;
-            bar_activate(item, 0);
-        }
+        bar.item = item;
+        struct field *f = item == ITEM_FIND ? &bar.find : item == ITEM_REPLACE ? &bar.replace :
+                          item == ITEM_LINE ? &bar.line : NULL;
+        if (f) field_click(f, f->col, f->width, e);
+        else bar_activate(item, 0);
     } else if (id >= HIT_ACTION) {
         int sp = (id - HIT_ACTION) / 100, note = (id - HIT_ACTION) % 100 / 10, k = (id - HIT_ACTION) % 10;
         struct tab *t = tab_of(sp);
@@ -5744,7 +5819,9 @@ static void global_or_view_key(int key, int mods)
 static void key_event(int key)
 {
     int mods = keys_modifiers();
-    if (key == K_SHOWN || key == 0) {
+    if (key == 0) return;
+    if (key == K_SHOWN) {
+        preview_hide();
         return;
     }
     if (key == K_POINTER) {
@@ -5752,6 +5829,8 @@ static void key_event(int key)
         auto_bracket_check();
         return;
     }
+    preview_hide();
+    language_hover_cancel();
     int act = key_action(key, mods); /* the raw key: Ctrl+Q is 17 */
     if (act == ACT_QUIT) {
         /* Ctrl+Q, Alt+F4, the window's close: with a modified document, the
@@ -5872,10 +5951,11 @@ static void step(void)
     }
     int preview_due = preview_timeout(); /* the scrollbar's text preview, 250 ms after the pointer came */
     if (preview_due >= 0 && (timeout < 0 || timeout > preview_due)) timeout = preview_due;
-    int y0 = 0, h = 0;
+    int y0 = 0, end = 0;
     if (drag.mode && tab_of(drag.space)) {
-        text_rows(drag.space, &y0, &h);
-        if (drag.y < y0 || drag.y >= y0 + h) {
+        y0 = text_first_row(drag.space);
+        end = text_end_row(drag.space);
+        if (drag.y < y0 || drag.y >= end) {
             timeout = timeout < 0 || timeout > 50 ? 50 : timeout;
         }
     }
@@ -5895,11 +5975,14 @@ static void step(void)
         primary_pending = 0;
     }
     struct tab *t = drag.mode ? tab_of(drag.space) : NULL;
-    if (t && (drag.y < y0 || drag.y >= y0 + h)) {
+    if (t && (drag.y < y0 || drag.y >= end)) {
         /* Dragged past the text: it scrolls a row each 50 ms. */
         scroll_rows(drag.space, t, drag.y < y0 ? -1 : 1);
         struct pointer_event e = *pointer_last();
-        e.row = drag.y < y0 ? y0 : y0 + h - 1;
+        int cw, ch, top;
+        screen_cells(&cw, &ch, &top);
+        e.row = drag.y < y0 ? y0 : end - 1;
+        e.y = top + e.row * ch + (drag.y < y0 ? 0 : ch - 1);
         size_t at;
         if (point_at(drag.space, &e, &at, 1)) {
             drag_to(t, at);

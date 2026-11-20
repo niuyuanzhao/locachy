@@ -710,9 +710,9 @@ static void launcher_keys(void)
     assert(launcher.scroll == hdr_prog);
     launcher.sel = 0;
     launcher.scroll = 0;
-    launcher_wheel(25.0); /* two wheel steps down without snapping back to sel=0 */
+    launcher_wheel(2 * SCROLL_STEP); /* two 15-unit wheel steps down without snapping back to sel=0 */
     assert(launcher.scroll == 2);
-    launcher_wheel(-15.0);
+    launcher_wheel(-SCROLL_STEP);
     assert(launcher.scroll == 1);
     launcher_close();
     puts("PASS Enter opens containers & desktop windows; F opens full screen in home; scrolling keeps header & item visible");

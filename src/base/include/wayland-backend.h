@@ -24,6 +24,9 @@ static inline int wl_backend_requested(void)
 #define WL_EXIT_CONFIG 78      /* an unknown backend, or not built in */
 #define WL_EXIT_UNAVAILABLE 69 /* no compositor, or no window from it */
 
+/* The pixel rows of the canvas above the window (the hidden top bar's). */
+__attribute__((weak)) int screen_window_top(void);
+
 #ifdef CONFIG_WAYLAND
 struct wl_display;
 struct wl_seat;
@@ -50,6 +53,7 @@ int wl_backend_next_key(void);
 const char *wl_backend_text(void);
 const char *wl_backend_key_name(void);
 int wl_backend_modifiers(void);
+void wl_backend_live_modifiers(void);
 /* While on, a key that types nothing (Henkan_Mode) comes as K_NAMED (keys_name_any). */
 void wl_backend_name_keys(int on);
 /* A close request is K_CLOSE (base.h); after reading it the program stays
@@ -62,24 +66,33 @@ int wl_backend_close_forced(void);
 int wl_backend_decoration(void);
 void wl_backend_cursor(int shape);
 /* For the data device (wayland-data.c): the connection, the seat, the
- * window's surface, and the serials of the last key and button events. */
+ * window's surface, and the serials of the last key, button and press events. */
 struct wl_display *wl_backend_display(void);
 struct wl_seat *wl_backend_seat(void);
 struct wl_surface *wl_backend_surface(void);
 uint32_t wl_backend_keyboard_serial(void);
 uint32_t wl_backend_button_serial(void);
+uint32_t wl_backend_press_serial(void);
+int wl_backend_keyboard_focused(void);
+unsigned wl_backend_keyboard_focus_generation(void);
+/* A fresh pointer press cannot arrive during the compositor's drag grab. */
+void wl_data_pointer_pressed(void);
 
 /* The base's side, for the transport: a new size is told as K_SHOWN once
  * (screen.c); pointer events become the pointer's own (pointer.c), in
  * pixels of the picture; scrolling in wheel steps, positive down. */
 int screen_window_shown(void);
-/* The pixel rows of the canvas above the window (the hidden top bar's). */
-int screen_window_top(void);
 void pointer_window_motion(int x, int y);
 void pointer_window_button(int code, int pressed);
 void pointer_window_scroll(int source, double v, double h, int axes);
 void pointer_window_present(int on);
 void pointer_window_leave(void);
+void pointer_window_touch_down(int slot, int x, int y);
+void pointer_window_touch_motion(int slot, int x, int y);
+void pointer_window_touch_up(int slot);
+void pointer_window_touch_cancel(void);
+int pointer_window_touch_fd(void);
+void pointer_window_touch_timer(void);
 #else
 static inline int wl_backend_active(void) { return 0; }
 #endif

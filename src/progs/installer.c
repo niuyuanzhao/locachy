@@ -1076,6 +1076,7 @@ static void take_pointer(void)
  * screen and the input up, waits for it, and takes them back. */
 static int run_on_screen(char *const argv[])
 {
+    textsel_clear();
     pointer_release();
     keys_release();
     screen_release();
@@ -1326,6 +1327,7 @@ static int pick(const char *title, const char *const *items, int n, int current)
         size_t len = strlen(filter);
         if (key == K_POINTER) {
             const struct pointer_event *e = pointer_last();
+            if (e->cancelled) continue;
             if (e->wheel) {
                 sel -= e->wheel;
             } else if (e->button == BTN_LEFT && e->pressed && e->row >= list && e->row - list < height &&
@@ -1411,6 +1413,10 @@ static int yes(const char *question)
         int key = key_get(), mods = keys_modifiers();
         if (key == K_POINTER) {
             const struct pointer_event *e = pointer_last();
+            if (e->cancelled) {
+                textsel_pointer(e, 0);
+                continue;
+            }
             if (!e->pressed) continue;
             key = ui_hit_at(e->col, e->row);
             mods = 0;
@@ -2663,8 +2669,12 @@ static void after_key(int key)
 static int pointer_key(int *mods)
 {
     const struct pointer_event *e = pointer_last();
-    int hit = ui_hit_at(e->col, e->row);
     *mods = 0;
+    if (e->cancelled) {
+        textsel_pointer(e, 0);
+        return 0;
+    }
+    int hit = ui_hit_at(e->col, e->row);
     if (e->wheel) {
         if (hit == HIT_PANE) {
             log_from += e->wheel * 3;

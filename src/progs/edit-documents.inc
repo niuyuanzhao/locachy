@@ -586,6 +586,7 @@ static struct {
     int open, sel, n;
     int held;                /* opened with Ctrl held: its release switches */
     struct doc **list;
+    struct edit_rect box;
 } doc_switcher;
 
 static int switcher_open(void)
@@ -756,6 +757,7 @@ static void switcher_draw(void)
     w = w > cols * 3 / 4 ? cols * 3 / 4 : w;
     h = h > rows * 3 / 4 ? rows * 3 / 4 : h;
     int x = (cols - w) / 2, y = (rows - h) / 2, top = doc_switcher.sel >= h ? doc_switcher.sel - h + 1 : 0;
+    doc_switcher.box = (struct edit_rect){ .x = x, .y = y, .w = w, .h = h };
     screen_fill(x, y, w, h, C_WINDOW);
     int pw = wpath < w - wide - 4 ? wpath : w - wide - 4;
     pw = pw < 0 ? 0 : pw;
@@ -773,12 +775,18 @@ static void switcher_draw(void)
 
 static int switcher_pointer(int id, const struct pointer_event *e)
 {
-    if (!doc_switcher.open || (!e->button && !e->wheel)) return 0;
-    if (e->button == BTN_LEFT && e->pressed && id >= HIT_SWITCHER && id < HIT_SWITCHER + doc_switcher.n) {
-        doc_switcher.sel = id - HIT_SWITCHER; /* pressed: switched to */
+    if (!doc_switcher.open) return 0;
+    struct edit_rect r = doc_switcher.box;
+    int inside = e->col >= r.x && e->col < r.x + r.w && e->row >= r.y && e->row < r.y + r.h;
+    if (inside && e->wheel) {
+        long to = doc_switcher.sel - (long)e->wheel;
+        doc_switcher.sel = to < 0 ? 0 : to >= doc_switcher.n ? doc_switcher.n - 1 : (int)to;
+    } else if (inside && e->button == BTN_LEFT && e->pressed && id >= HIT_SWITCHER && id < HIT_SWITCHER + doc_switcher.n) {
+        doc_switcher.sel = id - HIT_SWITCHER;
         switcher_close(1);
-    } else if (e->pressed && !(id >= HIT_SWITCHER && id < HIT_SWITCHER + doc_switcher.n)) {
+    } else if (!inside && e->button && e->pressed) {
         switcher_close(0); /* a popup: a press outside closes it */
     }
+    screen_cursor(CURSOR_ARROW);
     return 1;
 }

@@ -176,7 +176,6 @@ static void push(struct pointer_event e)
         }
     }
     if (qlen == QUEUE) {
-        if (base_raw_cancel) base_raw_cancel();
         qhead = (qhead + 1) % QUEUE; /* the oldest goes */
         qlen--;
     }
@@ -323,12 +322,18 @@ EVENTS static void moved(void)
     moved_delta(0, 0);
 }
 
+static int button_mask(int code)
+{
+    return code == BTN_LEFT ? 1 : code == BTN_RIGHT ? 2 : code == BTN_MIDDLE ? 4 : 0;
+}
+
 /* A press or release of an evdev button code; a second press within slack
  * pixels of the first (and soon) is a double click. */
 EVENTS static void press(int code, int pressed, int slack)
 {
-    int mask = code == BTN_LEFT ? 1 : code == BTN_RIGHT ? 2 : code == BTN_MIDDLE ? 4 : 0;
-    if (!mask) return;
+    int mask = button_mask(code);
+    /* A release received after ownership was lost has no matching press. */
+    if (!mask || (!pressed && !(held & mask))) return;
     held = pressed ? held | mask : held & ~mask;
     struct pointer_event e = { .x = (int)px, .y = (int)py, .button = code, .pressed = pressed };
     if (pressed) {
@@ -849,10 +854,23 @@ void pointer_came(int gx, int gy)
     moved();
 }
 
+static void cancel_held(void)
+{
+    static const int buttons[] = { BTN_LEFT, BTN_RIGHT, BTN_MIDDLE };
+    for (size_t i = 0; i < sizeof buttons / sizeof *buttons; i++) {
+        int mask = button_mask(buttons[i]);
+        if (!(held & mask)) continue;
+        held &= ~mask;
+        push((struct pointer_event){ .x = (int)px, .y = (int)py, .button = buttons[i], .cancelled = 1 });
+    }
+    click_button = 0;
+}
+
 /* From process 1: the pointer went to another program (it took the
  * devices), not across an edge of ours. */
 void pointer_went(void)
 {
+    cancel_held();
     scroll_finish(SCROLL_CANCEL);
     touch_reset();
     away = 1;
@@ -943,6 +961,9 @@ void pointer_dispatch(void)
 int pointer_next(void)
 {
     if (qlen == 0) return 0;
+#ifdef CONFIG_WAYLAND
+    if (wl_backend_active()) wl_backend_live_modifiers();
+#endif
     last = queue[qhead];
     qhead = (qhead + 1) % QUEUE;
     qlen--;
@@ -963,11 +984,15 @@ int pointer_present(void)
 /* A window's pointer (wayland-backend.c): the seat's events, already in
  * pixels of the picture, become this program's as a device's would; the
  * compositor draws the cursor. */
+static int window_y(int y)
+{
+    /* Above the window stays off the canvas, not in the hidden bar. */
+    return y >= 0 && screen_window_top ? y + screen_window_top() : y;
+}
+
 void pointer_window_motion(int x, int y)
 {
-    /* The canvas keeps the hidden top bar's rows above the window. A point
-     * above the window (during a held button) stays negative: off the canvas. */
-    if (y >= 0) y += screen_window_top();
+    y = window_y(y);
     px = x;
     py = y;
     push((struct pointer_event){ .x = x, .y = y });
@@ -991,6 +1016,64 @@ void pointer_window_present(int on)
 
 void pointer_window_leave(void)
 {
+    cancel_held();
     scroll_finish(SCROLL_CANCEL);
+    /* End hover even if no button or scroll gesture was active. */
+    pointer_window_motion(-1, -1);
 }
+
+/* Wayland gives contact IDs, not contiguous libinput slots. */
+static int32_t touch_ids[TOUCHES];
+
+static int touch_slot(int32_t id)
+{
+    for (int i = 0; i < TOUCHES; i++) {
+        if (touches[i].down && touch_ids[i] == id) return i;
+    }
+    return -1;
+}
+
+void pointer_window_touch_down(int slot, int x, int y)
+{
+    if (touch_slot(slot) >= 0) return;
+    int i = 0;
+    while (i < TOUCHES && touches[i].down) i++;
+    if (i == TOUCHES) return;
+    if (timer_fd < 0) timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+    touch_ids[i] = slot;
+    /* The compositor supplies pixels, not the device's physical dimensions. */
+    if (touch_state == TOUCH_IDLE) touch_ppmm = 4.0 * screen_scale();
+    int py = window_y(y);
+    touch_down(i, x, py, x / touch_ppmm, py / touch_ppmm);
+}
+
+void pointer_window_touch_motion(int slot, int x, int y)
+{
+    int py = window_y(y);
+    touch_motion(touch_slot(slot), x, py, x / touch_ppmm, py / touch_ppmm);
+}
+
+void pointer_window_touch_up(int slot)
+{
+    touch_up(touch_slot(slot));
+}
+
+void pointer_window_touch_cancel(void)
+{
+    touch_reset();
+    if (timer_fd >= 0) close(timer_fd);
+    timer_fd = -1;
+}
+
+int pointer_window_touch_fd(void)
+{
+    return timer_fd;
+}
+
+void pointer_window_touch_timer(void)
+{
+    uint64_t expired;
+    if (timer_fd >= 0 && read(timer_fd, &expired, sizeof expired) == (ssize_t)sizeof expired) touch_timer();
+}
+
 #endif

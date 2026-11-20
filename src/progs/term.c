@@ -46,7 +46,7 @@ struct cell {
 
 static struct cell *grid, *alt_grid;
 static uint8_t *dirty, *soft, *alt_soft;
-static int bracketed_paste, mouse_sgr;
+static int bracketed_paste, mouse_tracking, mouse_sgr;
 /* Positions are row * cols + col of what is shown (history when scrolled back). */
 static struct { int active, dragging, anchor, end; } selection;
 #define HISTORY 10000
@@ -344,6 +344,7 @@ static void reset_term(void)
     bot = rows - 1;
     wrap = 0;
     autowrap = cursor_vis = 1;
+    mouse_tracking = mouse_sgr = bracketed_paste = 0;
     cur_fg = DEF_FG;
     cur_bg = DEF_BG;
     bold = rev = 0;
@@ -399,8 +400,6 @@ static void resize(int pty)
     say("term: resized to %dx%d", cols, rows);
 }
 
-static int mouse_tracking;
-
 static void csi(uint8_t c, int pty)
 {
     (void)pty;
@@ -408,38 +407,42 @@ static void csi(uint8_t c, int pty)
     int n = p0 > 0 ? p0 : 1;
 
     if (csi_priv) {
-        if (p0 == 25 && (c == 'h' || c == 'l')) {
-            cursor_vis = (c == 'h');
-        } else if (p0 == 7 && (c == 'h' || c == 'l')) {
-            autowrap = (c == 'h');
-        } else if ((p0 == 1000 || p0 == 1002 || p0 == 1003) && (c == 'h' || c == 'l')) {
-            mouse_tracking = c == 'h' ? p0 : 0;
-        } else if (p0 == 1006 && (c == 'h' || c == 'l')) {
-            mouse_sgr = c == 'h';
-        } else if (p0 == 2004 && (c == 'h' || c == 'l')) {
-            bracketed_paste = c == 'h';
-        } else if ((p0 == 1049 || p0 == 47 || p0 == 1047) && (c == 'h' || c == 'l')) {
-            if (c == 'h' && !in_alt) {
-                selection_clear();
-                memcpy(alt_grid, grid, sizeof *grid * (size_t)(cols * rows));
-                if (soft && alt_soft) { memcpy(alt_soft, soft, (size_t)rows); memset(soft, 0, (size_t)rows); }
-                alt_cx = cx;
-                alt_cy = cy;
-                in_alt = 1;
-                for (int r = 0; r < rows; r++) {
-                    clear_span(r, 0, cols);
+        if (csi_priv != '?' || (c != 'h' && c != 'l')) return;
+        int on = c == 'h';
+        for (int i = 0; i < nparam; i++) {
+            int p = param[i];
+            if (p == 25) {
+                cursor_vis = on;
+            } else if (p == 7) {
+                autowrap = on;
+            } else if (p == 1000 || p == 1002 || p == 1003) {
+                if (on) mouse_tracking = p;
+                else if (mouse_tracking == p) mouse_tracking = 0;
+            } else if (p == 1006) {
+                mouse_sgr = on;
+            } else if (p == 2004) {
+                bracketed_paste = on;
+            } else if (p == 1049 || p == 47 || p == 1047) {
+                if (on && !in_alt) {
+                    selection_clear();
+                    memcpy(alt_grid, grid, sizeof *grid * (size_t)(cols * rows));
+                    if (soft && alt_soft) { memcpy(alt_soft, soft, (size_t)rows); memset(soft, 0, (size_t)rows); }
+                    alt_cx = cx;
+                    alt_cy = cy;
+                    in_alt = 1;
+                    for (int r = 0; r < rows; r++) {
+                        clear_span(r, 0, cols);
+                    }
+                    cx = cy = 0;
+                } else if (!on && in_alt) {
+                    selection_clear();
+                    memcpy(grid, alt_grid, sizeof *grid * (size_t)(cols * rows));
+                    if (soft && alt_soft) memcpy(soft, alt_soft, (size_t)rows);
+                    memset(dirty, 1, (size_t)rows);
+                    cx = alt_cx;
+                    cy = alt_cy;
+                    in_alt = 0;
                 }
-                cx = cy = 0;
-            } else if (c == 'l' && in_alt) {
-                selection_clear();
-                memcpy(grid, alt_grid, sizeof *grid * (size_t)(cols * rows));
-                if (soft && alt_soft) memcpy(soft, alt_soft, (size_t)rows);
-                for (int r = 0; r < rows; r++) {
-                    dirty[r] = 1;
-                }
-                cx = alt_cx;
-                cy = alt_cy;
-                in_alt = 0;
             }
         }
         return;
@@ -940,7 +943,7 @@ static void copy_selection(int primary)
 {
     size_t size;
     char *text = selection_text(&size);
-    if (!text) { if (!primary) show_toast(_("No selection")); return; }
+    if (!text || !size) { free(text); if (!primary) show_toast(_("No selection")); return; }
     int status = clipboard_set(primary, text, size);
     free(text);
     if (!primary || status != CLIPBOARD_OK) show_toast(status == CLIPBOARD_OK ? _("Copied") : _(clipboard_error(status)));
@@ -1007,6 +1010,8 @@ static int word_class(uint32_t cp)
 
 static void pointer_input(const struct pointer_event *event)
 {
+    if (event->gesture || (event->hwheel && !event->wheel) ||
+        (!event->button && !event->buttons && !event->wheel && (event->x < 0 || event->y < 0))) return;
     int col = clamp(event->col, 0, cols - 1), row = clamp(event->row - 1, 0, rows - 1); /* row 0: the bar */
     if (mouse_tracking && !(keys_modifiers() & KEYS_SHIFT)) {
         char sequence[64];
@@ -1031,6 +1036,15 @@ static void pointer_input(const struct pointer_event *event)
         }
         return;
     }
+    if (event->cancelled) {
+        /* The PTY above needs a release to end a mouse grab. A local text
+         * selection, on the other hand, must not publish a clipboard offer. */
+        if (event->button == BTN_LEFT && selection.dragging) {
+            selection.dragging = 0;
+            memset(dirty, 1, (size_t)rows);
+        }
+        return;
+    }
     if (event->wheel) {
         if (in_alt) { /* a full-screen program: the wheel is the arrow keys */
             for (int i = 0; i < 3 * abs(event->wheel); i++) {
@@ -1043,32 +1057,44 @@ static void pointer_input(const struct pointer_event *event)
     }
     if (event->button == BTN_MIDDLE && event->pressed) { paste_clipboard(1); return; }
     if (event->button == BTN_LEFT && event->pressed) {
-        selection.active = selection.dragging = 1;
+        selection.active = 0;
+        selection.dragging = 1;
         selection.anchor = selection.end = row * cols + col;
         const struct cell *line = shown_row(row);
         int n = shown_cols(row);
-        if (event->clicks == 2 && col < n) { /* a word */
+        if (event->clicks == 2 && col < n) { /* a word, stepping over wide placeholders */
+            if (col > 0 && !line[col].ch) col--;
             int k = word_class(line[col].ch), a = col, b = col;
-            while (a > 0 && word_class(line[a - 1].ch) == k) a--;
-            while (b + 1 < n && word_class(line[b + 1].ch) == k) b++;
+            while (a > 0) {
+                int prev = a - 1;
+                if (prev > 0 && !line[prev].ch) prev--;
+                if (word_class(line[prev].ch) != k) break;
+                a = prev;
+            }
+            for (int next = b + 1; next < n; next++) {
+                if (line[next].ch && word_class(line[next].ch) != k) break;
+                b = next;
+            }
             selection.anchor = row * cols + a;
             selection.end = row * cols + b;
-        } else if (event->clicks == 3) { /* a line */
+            selection.active = 1;
+        } else if (event->clicks >= 3 && n > 0) { /* a line */
             selection.anchor = row * cols;
             selection.end = row * cols + n - 1;
+            selection.active = 1;
         }
-        if (event->clicks > 1) {
-            selection.dragging = 0;
-            copy_selection(1);
-        }
-    } else if (selection.dragging) {
+        if (event->clicks >= 2) selection.dragging = 0;
+        if (selection.active) copy_selection(1);
+    } else if (selection.dragging && (!event->button || event->button == BTN_LEFT)) {
         int end = row * cols + col;
-        if (end == selection.end && event->button != BTN_LEFT) return;
-        selection.end = end;
+        if (end != selection.end) {
+            selection.end = end;
+            if (end != selection.anchor) selection.active = 1;
+        }
         if (event->button == BTN_LEFT && !event->pressed) {
             selection.dragging = 0;
-            copy_selection(1);
-        }
+            if (selection.active) copy_selection(1);
+        } else if (!selection.active) return;
     } else {
         return; /* a motion: the screen's cursor moved by itself */
     }

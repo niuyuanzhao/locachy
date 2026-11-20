@@ -93,17 +93,20 @@ static struct {
 
     struct wl_keyboard *keyboard;
     struct wl_pointer *pointer;
+    struct wl_touch *touch;
     struct xkb_context *xkb;
     struct xkb_keymap *keymap;
     struct xkb_state *state;
     struct xkb_compose_table *compose_table;
     struct xkb_compose_state *compose;
-    int mods, repeat_fd, repeat_rate, repeat_delay;
-    uint32_t repeat_code, keyboard_serial, button_serial, enter_serial;
+    int mods, use_key_mods, keyboard_focused, repeat_fd, repeat_rate, repeat_delay;
+    unsigned keyboard_focus_generation;
+    uint32_t repeat_code, keyboard_serial, button_serial, press_serial, enter_serial;
 
     struct wl_cursor_theme *cursor_theme;
     int cursor_size, cursor_shape;
     struct wl_surface *cursor_surface;
+    struct wp_viewport *cursor_viewport;
 
     int (*resize)(int width, int height, double scale);
     void (*on_frame)(void);
@@ -115,9 +118,10 @@ static struct {
     double fractional_scale, scale;
     unsigned events;          /* what a caller would see changed: keys, pointer, size, close */
 
+    int last_axis_source, active_axes;
     struct {
         double v, h, v120, h120;
-        int dv, dh, source, axes, value120;
+        int dv, dh, source, axes, value120_axes;
     } axis;
 } w = { .repeat_fd = -1, .integer_scale = 1, .cursor_shape = CURSOR_ARROW };
 
@@ -129,8 +133,12 @@ struct wl_seat *wl_backend_seat(void) { return w.seat; }
 struct wl_surface *wl_backend_surface(void) { return w.surface; }
 uint32_t wl_backend_keyboard_serial(void) { return w.keyboard_serial; }
 uint32_t wl_backend_button_serial(void) { return w.button_serial; }
+uint32_t wl_backend_press_serial(void) { return w.press_serial; }
+int wl_backend_keyboard_focused(void) { return w.keyboard_focused; }
+unsigned wl_backend_keyboard_focus_generation(void) { return w.keyboard_focus_generation; }
 int wl_backend_active(void) { return w.display != NULL && w.configured; }
-int wl_backend_modifiers(void) { return last_key.mods; }
+int wl_backend_modifiers(void) { return w.use_key_mods ? last_key.mods : w.mods; }
+void wl_backend_live_modifiers(void) { w.use_key_mods = 0; }
 const char *wl_backend_text(void) { return last_key.text; }
 const char *wl_backend_key_name(void) { return last_key.name; }
 void wl_backend_name_keys(int on) { w.name_keys = !!on; }
@@ -139,6 +147,7 @@ int wl_backend_next_key(void)
 {
     if (klen == 0) return 0;
     last_key = keyq[khead];
+    w.use_key_mods = 1;
     khead = (khead + 1) % KEYS;
     klen--;
     if (last_key.key == K_CLOSE) {
@@ -223,15 +232,20 @@ static int special_key(xkb_keysym_t sym)
     return 0;
 }
 
-/* The raw event's modifier and lock bits. w.mods itself stays what existing
- * window programs read (keys_modifiers); raw events add Caps Lock, Num Lock
- * and AltGr, which the window has in its keymap state. */
-static void raw_state(uint32_t *mods, uint32_t *locks)
+/* base_raw_emit derives momentary modifiers from the keys held in the raw
+ * session before this event, including on release and repeat. Only pass lock
+ * bits from the compositor's current mask, as on evdev: a key that changes
+ * them is reported before the change. Do not advance the client XKB state;
+ * wl_keyboard.modifiers owns it for local text and actions. */
+static void raw_key(uint32_t code, xkb_keysym_t sym, uint32_t state, int local)
 {
-    *locks = (xkb_state_mod_name_is_active(w.state, XKB_MOD_NAME_CAPS, XKB_STATE_MODS_LOCKED) > 0 ? 1u : 0u) |
-             (xkb_state_mod_name_is_active(w.state, XKB_MOD_NAME_NUM, XKB_STATE_MODS_LOCKED) > 0 ? 2u : 0u);
-    *mods = (uint32_t)w.mods | (*locks & 1 ? (uint32_t)KEYS_CAPS : 0u) | (*locks & 2 ? 64u : 0u) |
-            (xkb_state_mod_name_is_active(w.state, "Mod5", XKB_STATE_MODS_EFFECTIVE) > 0 ? (uint32_t)KEYS_ALTGR : 0u);
+    int caps = xkb_state_mod_name_is_active(w.state, XKB_MOD_NAME_CAPS, XKB_STATE_MODS_LOCKED) > 0;
+    int num = xkb_state_mod_name_is_active(w.state, XKB_MOD_NAME_NUM, XKB_STATE_MODS_LOCKED) > 0;
+    uint32_t locks = (caps ? 1u : 0u) | (num ? 2u : 0u);
+    uint32_t mods = (caps ? KEYS_CAPS : 0u) | (num ? 64u : 0u) |
+                    (xkb_state_mod_name_is_active(w.state, "Mod5", XKB_STATE_MODS_EFFECTIVE) > 0 ?
+                     (uint32_t)KEYS_ALTGR : 0u);
+    base_raw_emit(BASE_RAW_WAYLAND_DEVICE, code, sym, mods, locks, state, local);
 }
 
 static void key_pressed(uint32_t code)
@@ -324,15 +338,37 @@ static void keyboard_enter(void *data, struct wl_keyboard *kb, uint32_t serial, 
 {
     (void)data; (void)kb; (void)surface; (void)keys;
     w.keyboard_serial = serial;
+    w.keyboard_focused = 1;
+    w.keyboard_focus_generation++;
+}
+
+static void keyboard_unfocus(void)
+{
+    w.keyboard_focused = 0;
+    w.keyboard_focus_generation++;
+    w.mods = 0;
+    wl_backend_live_modifiers();
+    if (base_raw_cancel) base_raw_cancel();
+    stop_repeat();
+    if (w.compose) xkb_compose_state_reset(w.compose);
 }
 
 static void keyboard_leave(void *data, struct wl_keyboard *kb, uint32_t serial, struct wl_surface *surface)
 {
-    (void)data; (void)kb; (void)surface;
-    w.keyboard_serial = serial;
-    if (base_raw_cancel) base_raw_cancel();
-    stop_repeat();
-    if (w.compose) xkb_compose_state_reset(w.compose);
+    (void)data; (void)kb; (void)serial; (void)surface;
+    keyboard_unfocus();
+}
+
+static int modifier_role(xkb_keysym_t sym)
+{
+    switch (sym) {
+    case XKB_KEY_Shift_L: case XKB_KEY_Shift_R: return KEYS_SHIFT;
+    case XKB_KEY_Control_L: case XKB_KEY_Control_R: return KEYS_CTRL;
+    case XKB_KEY_Alt_L: case XKB_KEY_Alt_R: return KEYS_ALT;
+    case XKB_KEY_Meta_L: case XKB_KEY_Meta_R:
+    case XKB_KEY_Super_L: case XKB_KEY_Super_R: return KEYS_META;
+    default: return 0;
+    }
 }
 
 static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial, uint32_t time, uint32_t code,
@@ -341,14 +377,16 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial, ui
     (void)data; (void)kb; (void)time;
     w.keyboard_serial = serial;
     if (base_raw_emit && w.state) {
-        int action = keys_match_action((int)code, !!(w.mods & KEYS_CTRL), !!(w.mods & KEYS_ALT),
-                                       !!(w.mods & KEYS_SHIFT), !!(w.mods & KEYS_META));
+        xkb_keysym_t sym = xkb_state_key_get_one_sym(w.state, code + 8);
+        int down = pressed == WL_KEYBOARD_KEY_STATE_PRESSED;
+        /* The compositor sends the new modifier mask after the key. Include
+         * the pressed key's role for local modifier-only bindings. */
+        int held = w.mods | (down ? modifier_role(sym) : 0);
+        int action = keys_match_action((int)code, !!(held & KEYS_CTRL), !!(held & KEYS_ALT),
+                                       !!(held & KEYS_SHIFT), !!(held & KEYS_META));
         int local = (action == K_ACT_HOME && !(base_raw_forward_home && base_raw_forward_home())) ||
                     action == K_ACT_LOCK || (action >= K_VOL_UP && action <= K_BRI_DOWN);
-        uint32_t mods, locks;
-        raw_state(&mods, &locks);
-        base_raw_emit(BASE_RAW_WAYLAND_DEVICE, code, xkb_state_key_get_one_sym(w.state, code + 8),
-                      mods, locks, pressed == WL_KEYBOARD_KEY_STATE_PRESSED, local);
+        raw_key(code, sym, (uint32_t)down, local);
         w.events++;
     }
     if (pressed != WL_KEYBOARD_KEY_STATE_PRESSED) {
@@ -372,7 +410,8 @@ static void keyboard_modifiers(void *data, struct wl_keyboard *kb, uint32_t seri
                                uint32_t latched, uint32_t locked, uint32_t group)
 {
     (void)data; (void)kb;
-    w.keyboard_serial = serial;
+    if (klen == 0) wl_backend_live_modifiers();
+    if (w.keyboard_focused) w.keyboard_serial = serial;
     if (!w.state) return;
     xkb_state_update_mask(w.state, depressed, latched, locked, 0, 0, group);
     w.mods = 0;
@@ -402,12 +441,14 @@ static const struct wl_keyboard_listener keyboard_listener = {
 
 static int picture_x(wl_fixed_t x)
 {
-    return w.logical_w > 0 ? (int)(wl_fixed_to_double(x) * w.pixel_w / w.logical_w) : wl_fixed_to_int(x);
+    double px = wl_fixed_to_double(x);
+    return (int)floor(w.logical_w > 0 ? px * w.pixel_w / w.logical_w : px);
 }
 
 static int picture_y(wl_fixed_t y)
 {
-    return w.logical_h > 0 ? (int)(wl_fixed_to_double(y) * w.pixel_h / w.logical_h) : wl_fixed_to_int(y);
+    double py = wl_fixed_to_double(y);
+    return (int)floor(w.logical_h > 0 ? py * w.pixel_h / w.logical_h : py);
 }
 
 /* The cursor the base asked for, at the window's scale (in whole pixels:
@@ -423,7 +464,8 @@ static void show_cursor(void)
     if (s < 1) s = 1;
     if (s > 4) s = 4;
     const char *size_text = getenv("XCURSOR_SIZE");
-    int size = (size_text && atoi(size_text) > 0 && atoi(size_text) <= 128 ? atoi(size_text) : 24) * s;
+    int base_size = size_text && atoi(size_text) > 0 && atoi(size_text) <= 128 ? atoi(size_text) : 24;
+    int size = base_size * s;
     if (!w.cursor_theme || w.cursor_size != size) {
         if (w.cursor_theme) wl_cursor_theme_destroy(w.cursor_theme);
         w.cursor_theme = wl_cursor_theme_load(getenv("XCURSOR_THEME"), size, w.shm);
@@ -436,16 +478,30 @@ static void show_cursor(void)
     for (int i = 0; names[i] && !cursor; i++) cursor = wl_cursor_theme_get_cursor(w.cursor_theme, names[i]);
     if (!cursor || cursor->image_count == 0) return;
     struct wl_cursor_image *image = cursor->images[0];
+    if (!image->width || !image->height) return;
     struct wl_buffer *buffer = wl_cursor_image_get_buffer(image);
     if (!buffer) return;
     if (!w.cursor_surface) w.cursor_surface = wl_compositor_create_surface(w.compositor);
     if (!w.cursor_surface) return;
-    wl_surface_set_buffer_scale(w.cursor_surface, s);
+    if (w.viewporter && !w.cursor_viewport)
+        w.cursor_viewport = wp_viewporter_get_viewport(w.viewporter, w.cursor_surface);
+    int d = 1, x, y;
+    if (w.cursor_viewport) {
+        wp_viewport_set_destination(w.cursor_viewport, base_size, base_size);
+        x = (int)((uint64_t)image->hotspot_x * base_size / image->width);
+        y = (int)((uint64_t)image->hotspot_y * base_size / image->height);
+    } else {
+        /* A theme's actual image need not be a multiple of its nominal scale. */
+        d = s;
+        while (image->width % d || image->height % d) d--;
+        x = (int)(image->hotspot_x / d);
+        y = (int)(image->hotspot_y / d);
+    }
+    wl_surface_set_buffer_scale(w.cursor_surface, d);
     wl_surface_attach(w.cursor_surface, buffer, 0, 0);
     wl_surface_damage_buffer(w.cursor_surface, 0, 0, (int32_t)image->width, (int32_t)image->height);
     wl_surface_commit(w.cursor_surface);
-    wl_pointer_set_cursor(w.pointer, w.enter_serial, w.cursor_surface,
-                          (int32_t)image->hotspot_x / s, (int32_t)image->hotspot_y / s);
+    wl_pointer_set_cursor(w.pointer, w.enter_serial, w.cursor_surface, x, y);
 }
 
 void wl_backend_cursor(int shape)
@@ -465,10 +521,19 @@ static void pointer_enter(void *data, struct wl_pointer *p, uint32_t serial, str
     w.events++;
 }
 
+static void pointer_unfocus(void)
+{
+    w.enter_serial = 0;
+    memset(&w.axis, 0, sizeof w.axis);
+    w.last_axis_source = w.active_axes = 0;
+    pointer_window_leave();
+    w.events++;
+}
+
 static void pointer_leave(void *data, struct wl_pointer *p, uint32_t serial, struct wl_surface *surface)
 {
     (void)data; (void)p; (void)serial; (void)surface;
-    pointer_window_leave();
+    pointer_unfocus();
 }
 
 static void pointer_motion(void *data, struct wl_pointer *p, uint32_t time, wl_fixed_t x, wl_fixed_t y)
@@ -484,6 +549,10 @@ static void pointer_button(void *data, struct wl_pointer *p, uint32_t serial, ui
     (void)data; (void)p; (void)time;
     w.button_serial = serial;
     if (button != BTN_LEFT && button != BTN_RIGHT && button != BTN_MIDDLE) return;
+    if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
+        w.press_serial = serial;
+        wl_data_pointer_pressed();
+    }
     pointer_window_button((int)button, state == WL_POINTER_BUTTON_STATE_PRESSED);
     w.events++;
 }
@@ -512,11 +581,13 @@ static void pointer_axis_stop(void *data, struct wl_pointer *p, uint32_t time, u
 {
     (void)data; (void)p; (void)time;
     w.axis.axes |= axis == WL_POINTER_AXIS_VERTICAL_SCROLL ? 1 : 2;
+    if (!w.axis.source) w.axis.source = w.last_axis_source;
 }
 
 static void pointer_axis_discrete(void *data, struct wl_pointer *p, uint32_t axis, int32_t discrete)
 {
     (void)data; (void)p;
+    w.axis.axes |= axis == WL_POINTER_AXIS_VERTICAL_SCROLL ? 1 : 2;
     if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL) w.axis.dv += discrete;
     else w.axis.dh += discrete;
 }
@@ -524,7 +595,8 @@ static void pointer_axis_discrete(void *data, struct wl_pointer *p, uint32_t axi
 static void pointer_axis_value120(void *data, struct wl_pointer *p, uint32_t axis, int32_t value120)
 {
     (void)data; (void)p;
-    w.axis.value120 = 1;
+    w.axis.value120_axes |= axis == WL_POINTER_AXIS_VERTICAL_SCROLL ? 1 : 2;
+    w.axis.axes |= axis == WL_POINTER_AXIS_VERTICAL_SCROLL ? 1 : 2;
     if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL) w.axis.v120 += value120;
     else w.axis.h120 += value120;
 }
@@ -539,19 +611,22 @@ static void pointer_axis_direction(void *data, struct wl_pointer *p, uint32_t ax
 static void pointer_frame(void *data, struct wl_pointer *p)
 {
     (void)data; (void)p;
-    if (!w.axis.axes) return;
-    int source = w.axis.source ? w.axis.source : SCROLL_WHEEL;
-    double v, h;
-    if (source == SCROLL_WHEEL) {
-        v = w.axis.value120 ? w.axis.v120 / 120.0 : w.axis.dv ? w.axis.dv : w.axis.v / SCROLL_PIXELS;
-        h = w.axis.value120 ? w.axis.h120 / 120.0 : w.axis.dh ? w.axis.dh : w.axis.h / SCROLL_PIXELS;
-    } else {
-        v = w.axis.v / SCROLL_PIXELS;
-        h = w.axis.h / SCROLL_PIXELS;
+    if (w.axis.axes) {
+        int source = w.axis.source ? w.axis.source : SCROLL_WHEEL;
+        double v = w.axis.v / SCROLL_PIXELS, h = w.axis.h / SCROLL_PIXELS;
+        if (source == SCROLL_WHEEL) {
+            if (w.axis.value120_axes & 1) v = w.axis.v120 / 120.0;
+            else if (w.axis.dv) v = w.axis.dv;
+            if (w.axis.value120_axes & 2) h = w.axis.h120 / 120.0;
+            else if (w.axis.dh) h = w.axis.dh;
+        }
+        if (source != w.last_axis_source) w.active_axes = 0;
+        w.active_axes = (w.active_axes & ~w.axis.axes) | (v != 0 ? 1 : 0) | (h != 0 ? 2 : 0);
+        w.last_axis_source = w.active_axes ? source : SCROLL_NONE;
+        pointer_window_scroll(source, v, h, w.axis.axes);
+        w.events++;
     }
-    pointer_window_scroll(source, v, h, w.axis.axes);
     memset(&w.axis, 0, sizeof w.axis);
-    w.events++;
 }
 
 static const struct wl_pointer_listener pointer_listener = {
@@ -568,6 +643,58 @@ static const struct wl_pointer_listener pointer_listener = {
     .axis_relative_direction = pointer_axis_direction,
 };
 
+static void touch_down(void *data, struct wl_touch *t, uint32_t serial, uint32_t time,
+                       struct wl_surface *surface, int32_t id, wl_fixed_t x, wl_fixed_t y)
+{
+    (void)data; (void)t; (void)time;
+    if (surface != w.surface) return;
+    w.button_serial = serial;
+    pointer_window_touch_down(id, picture_x(x), picture_y(y));
+    w.events++;
+}
+
+static void touch_motion(void *data, struct wl_touch *t, uint32_t time, int32_t id, wl_fixed_t x, wl_fixed_t y)
+{
+    (void)data; (void)t; (void)time;
+    pointer_window_touch_motion(id, picture_x(x), picture_y(y));
+    w.events++;
+}
+
+static void touch_up(void *data, struct wl_touch *t, uint32_t serial, uint32_t time, int32_t id)
+{
+    (void)data; (void)t; (void)time;
+    w.button_serial = serial;
+    pointer_window_touch_up(id);
+    w.events++;
+}
+
+static void touch_frame(void *data, struct wl_touch *t)
+{
+    (void)data; (void)t;
+}
+
+static void touch_cancel(void *data, struct wl_touch *t)
+{
+    (void)data; (void)t;
+    pointer_window_touch_cancel();
+    w.events++;
+}
+
+static void touch_shape(void *data, struct wl_touch *t, int32_t id, wl_fixed_t major, wl_fixed_t minor)
+{
+    (void)data; (void)t; (void)id; (void)major; (void)minor;
+}
+
+static void touch_orientation(void *data, struct wl_touch *t, int32_t id, wl_fixed_t orientation)
+{
+    (void)data; (void)t; (void)id; (void)orientation;
+}
+
+static const struct wl_touch_listener touch_listener = {
+    .down = touch_down, .motion = touch_motion, .up = touch_up, .frame = touch_frame,
+    .cancel = touch_cancel, .shape = touch_shape, .orientation = touch_orientation,
+};
+
 static void seat_capabilities(void *data, struct wl_seat *seat, uint32_t caps)
 {
     (void)data;
@@ -575,21 +702,28 @@ static void seat_capabilities(void *data, struct wl_seat *seat, uint32_t caps)
         w.keyboard = wl_seat_get_keyboard(seat);
         wl_keyboard_add_listener(w.keyboard, &keyboard_listener, NULL);
     } else if (!(caps & WL_SEAT_CAPABILITY_KEYBOARD) && w.keyboard) {
-        stop_repeat();
-        if (base_raw_cancel) base_raw_cancel();
+        keyboard_unfocus();
         wl_keyboard_release(w.keyboard);
         w.keyboard = NULL;
     }
     if ((caps & WL_SEAT_CAPABILITY_POINTER) && !w.pointer) {
         w.pointer = wl_seat_get_pointer(seat);
         wl_pointer_add_listener(w.pointer, &pointer_listener, NULL);
-        pointer_window_present(1);
     } else if (!(caps & WL_SEAT_CAPABILITY_POINTER) && w.pointer) {
+        pointer_unfocus();
         wl_pointer_release(w.pointer);
         w.pointer = NULL;
-        w.enter_serial = 0;
-        pointer_window_present(0);
     }
+    if ((caps & WL_SEAT_CAPABILITY_TOUCH) && !w.touch) {
+        w.touch = wl_seat_get_touch(seat);
+        wl_touch_add_listener(w.touch, &touch_listener, NULL);
+    } else if (!(caps & WL_SEAT_CAPABILITY_TOUCH) && w.touch) {
+        touch_cancel(NULL, w.touch);
+        if (wl_touch_get_version(w.touch) >= WL_TOUCH_RELEASE_SINCE_VERSION) wl_touch_release(w.touch);
+        else wl_touch_destroy(w.touch);
+        w.touch = NULL;
+    }
+    pointer_window_present(w.pointer || w.touch);
 }
 
 static void seat_name(void *data, struct wl_seat *seat, const char *name)
@@ -632,7 +766,10 @@ static void apply_size(void)
     w.logical_h = lh;
     w.pixel_w = (int)pw;
     w.pixel_h = (int)ph;
-    w.scale = s;
+    if (w.scale != s) {
+        w.scale = s;
+        show_cursor();
+    }
     w.events++;
 }
 
@@ -1009,6 +1146,7 @@ int wl_backend_open(int (*resize)(int width, int height, double scale), void (*f
 
 int wl_backend_wait(struct pollfd *extra, size_t count, int timeout_ms)
 {
+    wl_backend_live_modifiers();
     if (!w.display || w.closed) return -1;
     if (count > 64) count = 64;
     if (w.frame_due) {
@@ -1031,14 +1169,16 @@ int wl_backend_wait(struct pollfd *extra, size_t count, int timeout_ms)
         }
         out = POLLOUT;
     }
-    struct pollfd p[2 + 64 + DATA_FDS];
-    p[0] = (struct pollfd){ .fd = wl_display_get_fd(w.display), .events = POLLIN | out };
-    p[1] = (struct pollfd){ .fd = w.repeat_fd, .events = POLLIN };
+    enum { DISPLAY, REPEAT, TOUCH, EXTRA };
+    struct pollfd p[EXTRA + 64 + DATA_FDS];
+    p[DISPLAY] = (struct pollfd){ .fd = wl_display_get_fd(w.display), .events = POLLIN | out };
+    p[REPEAT] = (struct pollfd){ .fd = w.repeat_fd, .events = POLLIN };
+    p[TOUCH] = (struct pollfd){ .fd = pointer_window_touch_fd(), .events = POLLIN };
     for (size_t i = 0; i < count; i++) {
-        p[2 + i] = extra[i];
-        p[2 + i].revents = 0;
+        p[EXTRA + i] = extra[i];
+        p[EXTRA + i].revents = 0;
     }
-    int ndata = wl_data_poll(p + 2 + count, DATA_FDS);
+    int ndata = wl_data_poll(p + EXTRA + count, DATA_FDS);
     if (ndata < 0) ndata = 0;
     if (ndata > DATA_FDS) ndata = DATA_FDS;
     int timeout = timeout_ms, data_timeout = wl_data_timeout(), shortened = 0;
@@ -1046,36 +1186,33 @@ int wl_backend_wait(struct pollfd *extra, size_t count, int timeout_ms)
         timeout = data_timeout;
         shortened = 1;
     }
-    int r = poll(p, (nfds_t)(2 + count + (size_t)ndata), timeout);
+    int r = poll(p, (nfds_t)(EXTRA + count + (size_t)ndata), timeout);
     if (r < 0) {
         int error = errno;
         wl_display_cancel_read(w.display);
         return error == EINTR ? 1 : -1;
     }
-    if (p[0].revents & (POLLIN | POLLERR | POLLHUP)) {
+    if (p[DISPLAY].revents & (POLLIN | POLLERR | POLLHUP)) {
         if (wl_display_read_events(w.display) < 0) return -1;
     } else {
         wl_display_cancel_read(w.display);
     }
-    if (p[1].revents & POLLIN) {
+    if (p[REPEAT].revents & POLLIN) {
         uint64_t expired = 0;
         if (read(w.repeat_fd, &expired, sizeof expired) == (ssize_t)sizeof expired && w.repeat_code) {
             for (uint64_t i = 0; i < expired && i < 4; i++) {
-                if (base_raw_emit && w.state) {
-                    uint32_t mods, locks;
-                    raw_state(&mods, &locks);
-                    base_raw_emit(BASE_RAW_WAYLAND_DEVICE, w.repeat_code,
-                                  xkb_state_key_get_one_sym(w.state, w.repeat_code + 8), mods, locks, 2, 0);
-                }
+                if (base_raw_emit && w.state)
+                    raw_key(w.repeat_code, xkb_state_key_get_one_sym(w.state, w.repeat_code + 8), 2, 0);
                 key_pressed(w.repeat_code);
             }
         }
     }
     if (wl_display_dispatch_pending(w.display) < 0) return -1;
-    if (ndata > 0) wl_data_dispatch(p + 2 + count, (size_t)ndata);
+    if (p[TOUCH].revents & POLLIN) pointer_window_touch_timer();
+    if (ndata > 0) wl_data_dispatch(p + EXTRA + count, (size_t)ndata);
     int ready = 0;
     for (size_t i = 0; i < count; i++) {
-        extra[i].revents = p[2 + i].revents;
+        extra[i].revents = p[EXTRA + i].revents;
         ready |= extra[i].revents != 0;
     }
     if (w.closed) return -1;
@@ -1094,9 +1231,19 @@ void wl_backend_close(void)
     stop_repeat();
     if (w.frame) wl_callback_destroy(w.frame);
     for (int i = 0; i < 2; i++) buffer_free(&w.buffers[i]);
+    if (w.cursor_viewport) wp_viewport_destroy(w.cursor_viewport);
     if (w.cursor_surface) wl_surface_destroy(w.cursor_surface);
     if (w.cursor_theme) wl_cursor_theme_destroy(w.cursor_theme);
-    if (w.pointer) wl_pointer_release(w.pointer);
+    if (w.pointer) {
+        pointer_unfocus();
+        wl_pointer_release(w.pointer);
+    }
+    if (w.touch) {
+        pointer_window_touch_cancel();
+        if (wl_touch_get_version(w.touch) >= WL_TOUCH_RELEASE_SINCE_VERSION) wl_touch_release(w.touch);
+        else wl_touch_destroy(w.touch);
+    }
+    pointer_window_present(0);
     if (w.keyboard) wl_keyboard_release(w.keyboard);
     if (w.decoration) zxdg_toplevel_decoration_v1_destroy(w.decoration); /* before its toplevel */
     if (w.toplevel) xdg_toplevel_destroy(w.toplevel);

@@ -103,12 +103,13 @@
 #define HIT_TAB    100000  /* + the page */
 #define HIT_LOWER  200000  /* the output/details pane */
 #define HIT_BUTTON 300000  /* + a button of the form */
+#define HIT_REMOVE 400000  /* + a shared folder row */
 #define HIT_KEY    0x1000000 /* + the key a button stands for, with MODS(its modifiers) */
 #define MODS(m)    ((m) << 16)
 
 enum { UPDATES, CONTAINERS, HOST, PAGES };
 static const char *const page_names[PAGES] = { N_("Updates"), N_("Containers"), N_("Host") };
-static int page, sel[PAGES], log_from, log_total; /* the output: lines back from its end, how many */
+static int page, sel[PAGES], log_from; /* the output: lines back from its end */
 static int show_log; /* the job's output in the lower half, not the selected row's details */
 static int pane_all; /* Ctrl+A on the pane: the next Ctrl+C copies all of it */
 static char notice[512];
@@ -1085,18 +1086,14 @@ static int log_split(void)
     return count;
 }
 
-/* The last lines of the job's output, from the end, skipping from of them;
- * n of them at most. How many lines there are into total. */
-static int log_lines(char lines[][256], int n, int from, int *total)
+/* Scrolling bounds of the output pane as last drawn, after any key notices. */
+static int log_max_scroll, log_visible_rows;
+
+static void scroll_log(int delta)
 {
-    int count = log_split();
-    char **all = log_all;
-    *total = count;
-    int last = count - from, first = last - n < 0 ? 0 : last - n, k = 0;
-    for (int i = first; i < last && i >= 0; i++) {
-        snprintf(lines[k++], 256, "%s", all[i]);
-    }
-    return k;
+    log_from += delta;
+    if (log_from < 0) log_from = 0;
+    if (log_from > log_max_scroll) log_from = log_max_scroll;
 }
 
 static int list_len(void)
@@ -1469,29 +1466,34 @@ static void draw_lower(int top, int height)
     char line[512];
     int r = top + 1, bottom = top + height;
     screen_fill(0, top, screen_cols(), height, PANE);
+    log_visible_rows = 0;
     if (job || show_log) {
-        char lines[64][256];
         int stopped = !job && nwanted;
         if (stopped) {
             r = draw_keys(r, bottom);
         }
-        int total, n = log_lines(lines, bottom - r < 0 ? 0 : bottom - r < 64 ? bottom - r : 64, log_from, &total);
-        log_total = total;
+        int total = log_split();
+        log_visible_rows = bottom > r ? bottom - r : 0;
+        if (log_visible_rows > 64) log_visible_rows = 64;
+        log_max_scroll = total > log_visible_rows ? total - log_visible_rows : 0;
+        scroll_log(0);
+        int last = total - log_from, first = last > log_visible_rows ? last - log_visible_rows : 0;
         const char *how = job ? jobs_state_label(job_state[0] ? job_state : "running") :
                           stopped ? _("stopped") : job_result == 0 ? _("done") :
                           job_result == 1 ? _("failed") : job_result == 2 ? _("ended") : "";
         char where[64] = "";
-        if (n) {
-            int last = total - log_from;
-            snprintf(where, sizeof where, _("lines %d-%d of %d"), last - n + 1, last, total);
+        if (first < last) {
+            snprintf(where, sizeof where, _("lines %d-%d of %d"), first + 1, last, total);
         }
         /* TRANSLATORS: PgUp/PgDn and l are key names; keep them. */
         snprintf(line, sizeof line, _("Output: %s%s%s%s   %s   PgUp/PgDn: scroll   l: %s"),
-                 job || job_result >= 0 ? job_label : n ? _("the last job") : _("no job yet"),
+                 job || job_result >= 0 ? job_label : total ? _("the last job") : _("no job yet"),
                  how[0] ? " (" : "", how, how[0] ? ")" : "", where, page == HOST ? _("the manifest") : _("details"));
         pane_title(top, line, total > 0);
-        for (int i = 0; i < n; i++) {
-            pane_put(&r, bottom, 2, lines[i], log_color(lines[i]));
+        for (int i = first; i < last; i++) {
+            char text[256];
+            snprintf(text, sizeof text, "%s", log_all[i]);
+            pane_put(&r, bottom, 2, text, log_color(text));
         }
         return;
     }
@@ -1788,6 +1790,7 @@ static int edit_line_key(int key, int mods, char *text, size_t size, size_t *pos
         return 1;
     }
     const struct pointer_event *e = key == K_POINTER ? pointer_last() : NULL;
+    if (e && e->cancelled) return 0;
     int pastes = act == ACT_PASTE || (e && e->pressed && e->button == BTN_MIDDLE);
     int word = act == ACT_CLOSE_TAB; /* Ctrl+W: a field takes it before the table's close-tab */
     if (*all && (pastes || key == '\b' || key == 8 || key == K_DEL || key == 4 || key == 21 || key == 11 || word ||
@@ -1911,6 +1914,16 @@ static int prompt(const char *label, char *text, size_t size)
     }
 }
 
+static int confirmation_click(void)
+{
+    const struct pointer_event *e = pointer_last();
+    if (e->cancelled || e->button != BTN_LEFT || !e->pressed) return 0;
+    int hit = ui_hit_at(e->col, e->row);
+    if (hit == HIT_KEY + 'y') return 'y';
+    if (hit == HIT_KEY + 'n') return 'n';
+    return 0;
+}
+
 /* question, answered: y is yes; n, Esc and Enter are no; other keys (home's,
  * Alt+y) are none, it waits. 0 also with Ctrl+Q or the window's close
  * (quit_asked). */
@@ -1922,10 +1935,18 @@ static int yes(const char *question)
     for (;;) {
         if (redraw) {
             int row = screen_rows() - 1;
+            ui_hits_clear();
             screen_fill(0, row, screen_cols(), 1, BG);
-            screen_text(1, row, line, ACCENT, BG);
+            int c = 2 + ui_cells(line);
+            if (c + ui_cells(_("Y: yes")) + ui_cells(_("N: no")) + 5 > screen_cols()) {
+                screen_fill(0, row - 1, screen_cols(), 1, BG);
+                screen_text(1, row - 1, line, ACCENT, BG);
+                c = 1;
+            } else {
+                screen_text(1, row, line, ACCENT, BG);
+            }
             /* TRANSLATORS: Y is the Y key; keep "Y: ". */
-            int c = ui_button(2 + ui_cells(line), row, _("Y: yes"), HIT_KEY + 'y');
+            c = ui_button(c, row, _("Y: yes"), HIT_KEY + 'y');
             /* TRANSLATORS: N is the N key; keep "N: ". */
             ui_button(c, row, _("N: no"), HIT_KEY + 'n');
             screen_flush();
@@ -1939,9 +1960,8 @@ static int yes(const char *question)
         }
         if (key == 0) continue;
         if (key == K_POINTER) {
-            const struct pointer_event *e = pointer_last();
-            if (!e->pressed) continue; /* a motion is no answer */
-            key = ui_hit_at(e->col, e->row) == HIT_KEY + 'y' ? 'y' : 'n';
+            key = confirmation_click();
+            if (!key) continue;
             mods = 0;
         }
         int act = key_action(key, mods), plain = !(mods & (KEYS_CTRL | KEYS_ALT | KEYS_META));
@@ -1991,10 +2011,14 @@ static int choose(const char *title, char items[][320], int n)
         /* TRANSLATORS: Up/Down, Enter and Esc are key names; keep them. */
         screen_text(1, screen_rows() - 2, _("Up/Down or the wheel   Enter or a double click: choose   Esc: back"),
                     FG, BG);
+        ui_hits_clear();
+        ui_button(1, screen_rows() - 1, _("Esc: back"), HIT_KEY + 27);
         screen_flush();
         int key = key_get(), act = key_list_action(key, mods_now());
         if (key == K_POINTER) {
             const struct pointer_event *e = pointer_last();
+            if (e->cancelled) continue;
+            if (e->button == BTN_LEFT && e->pressed && ui_hit_at(e->col, e->row) == HIT_KEY + 27) return -1;
             if (e->wheel) {
                 at -= e->wheel;
                 at = at < 0 ? 0 : at >= n ? n - 1 : at;
@@ -2112,6 +2136,7 @@ struct form {
     struct pkg_info info[MAX_PKGS];
     int ninfo;
     int sel, first, button; /* the selected line, the first shown, the button */
+    int pending_hit, pending_clicks; /* click that committed an inline edit */
     /* The configuration as the form was filled from it: Save writes only
      * over these bytes. snapshot_state: 1 these, 0 none there, -1 unread. */
     char snapshot[CONF_SNAPSHOT_MAX];
@@ -2373,8 +2398,7 @@ static uint32_t form_row(const struct form *f, const struct form_line *l, char *
             return DIM;
         }
         snprintf(value, vsize, "%s", f->dirs[l->index]);
-        /* TRANSLATORS: Delete is the Delete key; keep it. */
-        snprintf(info, isize, "%s", _("at the same path in it   Delete: remove"));
+        snprintf(info, isize, "%s", _("at the same path in it"));
         return DIM;
     case F_ACCESS:
         snprintf(value, vsize, "%s", f->host ? _("real system and full home") : _("isolated filesystem"));
@@ -2426,13 +2450,21 @@ static void form_draw(struct form *f, const struct form_line *l, int n)
             continue;
         }
         uint32_t color = form_row(f, &l[i], value, sizeof value, info, sizeof info);
-        fit(value, FORM_INFO - FORM_VALUE - 2);
+        int removable = l[i].field == F_DIRS && l[i].index < f->ndirs;
+        const char *remove = _("Delete: remove");
+        int remove_col = cols - ui_cells(remove) - 3;
+        if (remove_col > FORM_INFO) remove_col = FORM_INFO;
+        fit(value, (removable && remove_col > FORM_VALUE + 2 ? remove_col : FORM_INFO) - FORM_VALUE - 2);
         const char *label = i > 0 && l[i - 1].field == l[i].field ? "" : _(field_names[l[i].field]);
         screen_fill(0, r, cols, 1, on ? ACCENT : BG);
         screen_text(2, r, label, on ? BG : ACCENT, on ? ACCENT : BG);
         screen_text(FORM_VALUE, r, value, on ? BG : FG, on ? ACCENT : BG);
-        screen_text(FORM_INFO, r, info, on ? BG : color, on ? ACCENT : BG);
         ui_hit(0, r, cols, 1, HIT_ROW + i);
+        int info_col = FORM_INFO;
+        if (removable && remove_col > FORM_VALUE + 2) {
+            info_col = ui_button(remove_col, r, remove, HIT_REMOVE + i);
+        }
+        screen_text(info_col, r, info, on ? BG : color, on ? ACCENT : BG);
     }
     /* TRANSLATORS: Up/Down, Enter, Delete, Left/Right and Esc are key names; keep them. */
     screen_text(1, rows_n - 2, _("Up/Down: line   Enter: edit, choose or switch   Delete: remove a directory   "
@@ -2447,15 +2479,16 @@ static void form_show(struct form *f)
     form_draw(f, l, form_lines(f, l));
 }
 
-/* The selected line's value, edited where it is shown: 1 with Enter (text
- * holds it then), 0 with Esc (text as it was; Ctrl+Q and the window's close
- * too: quit_asked). Printable ASCII but ". */
+/* Enter or a click on another field or button commits the draft. A click
+ * is dispatched by the form after it has validated the new value. Esc
+ * discards the draft (Ctrl+Q and window close also set quit_asked). */
 static int form_edit(struct form *f, char *text, size_t size)
 {
     char copy[VALUE_MAX + 1], line[VALUE_MAX + 8];
     snprintf(copy, sizeof copy, "%s", text);
     size_t pos = strlen(copy), limit = size < sizeof copy ? size : sizeof copy;
     int all = 0;
+    form_show(f);
     for (;;) {
         int row = FORM_TOP + f->sel - f->first, width = screen_cols() - FORM_VALUE - 2;
         size_t len = strlen(copy);
@@ -2475,7 +2508,21 @@ static int form_edit(struct form *f, char *text, size_t size)
             screen_text(FORM_VALUE, row, line, ACCENT, BG);
         }
         screen_flush();
-        int key = key_get(), mods = mods_now(), act = key_action(key, mods);
+        int key = key_get(), mods = mods_now();
+        if (key == K_POINTER) {
+            const struct pointer_event *e = pointer_last();
+            if (e->cancelled) continue;
+            if (e->button == BTN_LEFT && e->pressed && e->row != row) {
+                int id = ui_hit_at(e->col, e->row);
+                if (id >= 0) {
+                    f->pending_hit = id;
+                    f->pending_clicks = e->clicks;
+                    key = '\n';
+                    mods = 0;
+                }
+            }
+        }
+        int act = key_action(key, mods);
         if (act == ACT_QUIT) {
             quit_asked = 1;
             return 0;
@@ -2576,6 +2623,7 @@ static void edit_command(struct form *f)
         return;
     }
     if (strchr(text, ' ')) {
+        f->pending_hit = -1;
         say_notice(1, "%s", _("The command is one program; its arguments go on the next line."));
         return;
     }
@@ -2752,9 +2800,8 @@ static int grant_host_access(const struct form *f)
         int key = key_get(), mods = mods_now();
         if (key == 0 || key == K_SHOWN) continue;
         if (key == K_POINTER) {
-            const struct pointer_event *e = pointer_last();
-            if (!e->pressed) continue;
-            key = ui_hit_at(e->col, e->row) == HIT_KEY + 'y' ? 'y' : 'n';
+            key = confirmation_click();
+            if (!key) continue;
             mods = 0;
         }
         /* y allows; n, Esc and Enter do not; any other key (home's, Alt+y) is
@@ -2980,6 +3027,7 @@ static int form_enter(struct form *f, const struct form_line *l)
         if (!form_edit(f, text, sizeof f->name)) {
             return 0;
         } else if (text[0] && !valid_name(text)) {
+            f->pending_hit = -1;
             say_notice(1, "%s", _("A name is letters, digits, . _ - (from a letter or digit)."));
         } else {
             snprintf(f->name, sizeof f->name, "%.63s", text);
@@ -2993,6 +3041,7 @@ static int form_enter(struct form *f, const struct form_line *l)
         if (!form_edit(f, text, size) || strcmp(text, to) == 0) {
             return 0;
         } else if (!valid_packages(text, one ? 1 : MAX_PKGS - 1)) {
+            f->pending_hit = -1;
             if (one) {
                 say_notice(1, "%s", _("One package: letters, digits and @ . _ + -."));
             } else {
@@ -3081,6 +3130,7 @@ static void edit_container_with(const char *name, const struct form *seed)
         form_lookup(&f);
     }
     int quiet = 0; /* a motion: nothing to draw */
+    f.pending_hit = -1;
     for (;;) {
         int n = form_lines(&f, l);
         if (f.sel >= n) {
@@ -3088,21 +3138,35 @@ static void edit_container_with(const char *name, const struct form *seed)
         }
         if (!quiet) form_draw(&f, l, n);
         quiet = 0;
-        int key = key_poll_timeout(-1, job ? 500 : 2000), mods = mods_now();
+        int pending = f.pending_hit, clicks = f.pending_clicks;
+        f.pending_hit = -1;
+        int key = pending >= 0 ? K_POINTER : key_poll_timeout(-1, job ? 500 : 2000), mods = mods_now();
         check_job();
         if (key == K_POINTER) { /* a click picks a line (a double click: Enter), or a button */
             mods = 0;
-            const struct pointer_event *e = pointer_last();
-            int id = e->button == BTN_LEFT && e->pressed ? ui_hit_at(e->col, e->row) : -1;
-            key = e->wheel > 0 ? K_UP : e->wheel < 0 ? K_DOWN : 0;
-            if (id >= HIT_BUTTON && id < HIT_KEY) {
+            int id = pending;
+            key = 0;
+            if (pending < 0) {
+                const struct pointer_event *e = pointer_last();
+                if (e->cancelled) {
+                    quiet = 1;
+                    continue;
+                }
+                id = e->button == BTN_LEFT && e->pressed ? ui_hit_at(e->col, e->row) : -1;
+                clicks = e->clicks;
+                key = e->wheel > 0 ? K_UP : e->wheel < 0 ? K_DOWN : 0;
+            }
+            if (id >= HIT_REMOVE && id - HIT_REMOVE < n) {
+                f.sel = id - HIT_REMOVE;
+                key = K_DEL;
+            } else if (id >= HIT_BUTTON && id - HIT_BUTTON < BUTTONS) {
                 for (int i = 0; i < n; i++) if (l[i].field == F_BUTTONS) f.sel = i;
                 f.button = id - HIT_BUTTON;
                 key = '\n';
             } else if (id >= HIT_ROW && id < n && l[id].field != F_ALWAYS && l[id].field != F_BUTTONS) {
                 f.sel = id;
-                key = e->clicks == 2 ? '\n' : 0;
-            } else if (!e->wheel) {
+                key = clicks == 2 ? '\n' : 0;
+            } else if (!key) {
                 quiet = 1;
                 continue;
             }
@@ -3134,8 +3198,23 @@ static void edit_container_with(const char *name, const struct form *seed)
             memmove(f.dirs[i], f.dirs[i + 1], sizeof f.dirs[0] * (size_t)(f.ndirs - i - 1));
             f.ndirs--;
             f.changed = 1;
-        } else if (key == '\n' && act == ACT_NONE && form_enter(&f, &l[f.sel])) {
-            break;
+        } else if (key == '\n' && act == ACT_NONE) {
+            if (form_enter(&f, &l[f.sel])) break;
+            /* Editing Extras can move the clicked field. Keep its identity,
+             * not its old screen coordinates or row number. */
+            int base = f.pending_hit >= HIT_REMOVE ? HIT_REMOVE : HIT_ROW;
+            int at = f.pending_hit - base;
+            if (at >= 0 && at < n) {
+                struct form_line clicked = l[at];
+                int count = form_lines(&f, l);
+                f.pending_hit = -1;
+                for (int i = 0; i < count; i++) {
+                    if (l[i].field == clicked.field && l[i].index == clicked.index) {
+                        f.pending_hit = base + i;
+                        break;
+                    }
+                }
+            }
         }
         if (quit_asked) {
             break; /* Ctrl+Q or the window's close in one of its questions */
@@ -3368,14 +3447,15 @@ static void updates_key(int key)
 static int pointer_key(int n, int *mods)
 {
     const struct pointer_event *e = pointer_last();
-    int id = ui_hit_at(e->col, e->row);
     *mods = 0;
+    if (e->cancelled) return textsel_pointer(e, 0) != TEXTSEL_NONE ? -1 : 0;
+    int id = ui_hit_at(e->col, e->row);
     if (e->wheel) {
         if (id == HIT_LOWER && page == CONTAINERS && !job && !show_log) {
             details_from -= 3 * e->wheel; /* draw_lower keeps it in range */
         } else if (id == HIT_LOWER) {
-            log_from += 3 * e->wheel;
-            log_from = log_from < 0 ? 0 : log_from > log_total - 1 ? (log_total > 0 ? log_total - 1 : 0) : log_from;
+            if (!log_visible_rows || !log_max_scroll) return 0;
+            scroll_log(3 * e->wheel);
         } else {
             sel[page] -= e->wheel;
             sel[page] = sel[page] < 0 ? 0 : sel[page] >= n ? (n > 0 ? n - 1 : 0) : sel[page];
@@ -3485,10 +3565,10 @@ int main(void)
         } else if (key == K_DOWN && sel[page] < n - 1) {
             sel[page]++;
         } else if ((key == K_PGUP || key == K_PGDN) && (job || show_log)) { /* the output pane scrolls */
-            int step = (screen_rows() - 6) / 2 - 2;
-            step = step > 0 ? step : 1;
-            log_from += key == K_PGUP ? step : -step;
-            log_from = log_from < 0 ? 0 : log_from > log_total - 1 ? (log_total > 0 ? log_total - 1 : 0) : log_from;
+            if (log_visible_rows > 0) {
+                int step = log_visible_rows > 2 ? log_visible_rows - 2 : 1;
+                scroll_log(key == K_PGUP ? step : -step);
+            }
         } else if ((key == K_PGUP || key == K_PGDN) && page == CONTAINERS && n > 0 &&
                    details_total > details_rows) { /* its details, more than they fit, scroll */
             int step = details_rows > 1 ? details_rows - 1 : 1;

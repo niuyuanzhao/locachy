@@ -1293,7 +1293,15 @@ int keys_event(int fd)
     }
     read_table();
     struct table *tb = device >= 0 ? device_table_of(device) : &tables[0];
-    if (base_raw_emit) {
+    int role = ev.code > 0 && ev.code < 256 ? tb->modifier_role[ev.code] : 0;
+    if (!role && ev.code > 0 && ev.code < 256 && ev.value == 1 && tb->syms[shift ? 1 : 0][ev.code] == 0xffe5) {
+        caps_code = ev.code; /* Caps_Lock at this level: the lock, as xkb has it */
+    }
+    if (!role && ev.code == caps_code && caps_code) {
+        role = KEYS_CAPS;
+        if (ev.value == 0) caps_code = 0;
+    }
+    if (base_raw_emit && !(ev.value == 2 && role)) {
         int st = (shift ? 1 : 0) | (caps ? 2 : 0) | (altgr ? 4 : 0) | (num ? 8 : 0);
         uint32_t sym = ev.code < 256 ? tb->syms[st][ev.code] : 0;
         if (!sym && ev.code < 256) {
@@ -1322,21 +1330,17 @@ int keys_event(int fd)
         struct stat identity;
         uint32_t id = fstat(fd, &identity) == 0 && S_ISCHR(identity.st_mode) ?
                       (uint32_t)identity.st_rdev + 1 : (uint32_t)fd + 1;
-        int action = match_action(tb, ev.code, ctrl, alt, shift, meta);
+        int pressed_role = ev.value != 0 ? role : 0;
+        int action = match_action(tb, ev.code, ctrl || (pressed_role & KEYS_CTRL),
+                                  alt || (pressed_role & KEYS_ALT), shift || (pressed_role & KEYS_SHIFT),
+                                  meta || (pressed_role & KEYS_META));
         int local = (action == K_ACT_HOME && !(base_raw_forward_home && base_raw_forward_home())) ||
                     action == K_ACT_LOCK || (action >= K_VOL_UP && action <= K_BRI_DOWN);
-        base_raw_emit(id, ev.code, sym,
-            (shift ? KEYS_SHIFT : 0) | (ctrl ? KEYS_CTRL : 0) | (alt ? KEYS_ALT : 0) |
-            (meta ? KEYS_META : 0) | (altgr ? KEYS_ALTGR : 0) | (caps ? KEYS_CAPS : 0) | (num ? 64 : 0),
-            (caps ? 1 : 0) | (num ? 2 : 0), (uint32_t)ev.value, local);
-    }
-    int role = ev.code > 0 && ev.code < 256 ? tb->modifier_role[ev.code] : 0;
-    if (!role && ev.code > 0 && ev.code < 256 && ev.value == 1 && tb->syms[shift ? 1 : 0][ev.code] == 0xffe5) {
-        caps_code = ev.code; /* Caps_Lock at this level: the lock, as xkb has it */
-    }
-    if (!role && ev.code == caps_code && caps_code) {
-        role = KEYS_CAPS;
-        if (ev.value == 0) caps_code = 0;
+        uint32_t raw_mods = (shift ? KEYS_SHIFT : 0) | (ctrl ? KEYS_CTRL : 0) | (alt ? KEYS_ALT : 0) |
+                            (meta ? KEYS_META : 0) | (altgr ? KEYS_ALTGR : 0) |
+                            (caps ? KEYS_CAPS : 0) | (num ? 64u : 0);
+        base_raw_emit(id, ev.code, sym, raw_mods,
+            (caps ? 1u : 0u) | (num ? 2u : 0u), (uint32_t)ev.value, local);
     }
     if (role == ROLE_NUM) {
         if (ev.value == 1) {

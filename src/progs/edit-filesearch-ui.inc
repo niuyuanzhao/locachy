@@ -177,6 +177,7 @@ static void filesearch_replace_checked(void)
  * asks its caller to rebuild the labels after progress, without losing focus. */
 static int filesearch_result_menu(const char *const *items, int n, int *focus)
 {
+    screen_cursor(CURSOR_ARROW);
     if (*focus < 0 || *focus >= n) *focus = 0;
     for (;;) {
         draw(); ui_hits_clear();
@@ -207,9 +208,14 @@ static int filesearch_result_menu(const char *const *items, int n, int *focus)
         else if (key == K_PGDN) *focus = *focus + visible < n ? *focus + visible : n - 1;
         else if (key == K_POINTER) {
             const struct pointer_event *event = pointer_last();
-            if (event->button == BTN_LEFT && event->pressed) {
+            int inside = event->col >= x && event->col < x + width && event->row >= y && event->row < y + visible;
+            if (inside && event->wheel) {
+                long to = *focus - (long)event->wheel;
+                *focus = to < 0 ? 0 : to >= n ? n - 1 : (int)to;
+            } else if (event->button && event->pressed) {
+                if (!inside) return -1;
                 int id = ui_hit_at(event->col, event->row) - HIT_DIALOG;
-                if (id >= 0 && id < n) return id;
+                if (event->button == BTN_LEFT && id >= 0 && id < n) return id;
             }
         }
         if (before != edit_filesearch_count(filesearch_ui.search) || active_before != filesearch_active()) return -2;

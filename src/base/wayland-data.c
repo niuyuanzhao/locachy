@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -79,7 +80,14 @@ struct offered {
     void *source; /* wl_data_source, or zwp_primary_selection_source_v1 */
     struct blob *blob, *key; /* key: what M_KEY types get (a drag with one) */
     unsigned kind;
-    int confirmed; /* the compositor's selection event came back for it */
+    int primary;
+};
+
+/* The receive request hands this exact pipe to the selection's source. */
+struct selection_probe {
+    struct offered *source;
+    struct stat pipe;
+    int matched;
 };
 
 struct pending {
@@ -100,8 +108,11 @@ static struct {
     /* Received: the regular and primary selections, and a drag over us. */
     struct wl_data_offer *offer, *dnd_offer;
     struct zwp_primary_selection_offer_v1 *primary_offer;
-    struct offered own[2], drag; /* own[0] regular, own[1] primary */
-    int drag_active, drag_finished;
+    struct offered slots[CLIPBOARD_SELECTIONS][2], *own[CLIPBOARD_SELECTIONS], drag;
+    struct selection_probe *probe;
+    unsigned observed_focus[CLIPBOARD_SELECTIONS], observed_revision[CLIPBOARD_SELECTIONS];
+    int observed[CLIPBOARD_SELECTIONS], selection_busy;
+    int drag_active, drag_dropped, drag_finished;
     /* Told once when a drag with a key ends: finished 1 when a target read
      * it, 0 when it was cancelled (or the data device went). */
     void (*drag_ended)(int finished, void *data);
@@ -167,14 +178,39 @@ static void drag_end(int finished)
 
 static void offered_clear(struct offered *o)
 {
-    if (o == &ds.drag) drag_end(0); /* gone without a finish: cancelled */
+    for (int i = 0; i < CLIPBOARD_SELECTIONS; i++) {
+        if (ds.own[i] == o) ds.own[i] = NULL;
+    }
     if (o->source) {
-        if (o == &ds.own[1]) zwp_primary_selection_source_v1_destroy(o->source);
+        if (o->primary) zwp_primary_selection_source_v1_destroy(o->source);
         else wl_data_source_destroy(o->source);
     }
     blob_put(o->blob);
     blob_put(o->key);
     memset(o, 0, sizeof *o);
+    if (o == &ds.drag) {
+        ds.drag_active = ds.drag_dropped = 0;
+        if (ds.drag_ended) drag_end(0); /* gone without a finish: cancelled */
+    }
+}
+
+static int accept_probe(struct offered *o, int fd)
+{
+    struct selection_probe *probe = ds.probe;
+    if (!probe || probe->source != o) return 0;
+    struct stat st;
+    if (fstat(fd, &st) < 0 || !S_ISFIFO(st.st_mode) || st.st_dev != probe->pipe.st_dev ||
+        st.st_ino != probe->pipe.st_ino) return 0;
+    probe->matched = 1;
+    close(fd); /* Ownership was proved; no payload needs to cross the pipe. */
+    return 1;
+}
+
+static void selection_observed(int which)
+{
+    ds.observed[which] = wl_backend_keyboard_focused();
+    ds.observed_focus[which] = wl_backend_keyboard_focus_generation();
+    ds.observed_revision[which]++;
 }
 
 static void data_offer_drop(struct wl_data_offer **offer)
@@ -207,6 +243,7 @@ static void source_send(void *data, struct wl_data_source *src, const char *mime
     struct offered *o = data;
     unsigned bit = mime_bit(mime);
     if (o->source == src && (bit & o->kind)) {
+        if (accept_probe(o, fd)) return;
         queue_write(fd, bit & M_KEY ? o->key : o->blob);
         /* Before version 3 nothing else says a drop was read (a drag with a
          * key needs version 3: receivers ask for it on entering). */
@@ -231,7 +268,8 @@ static void source_cancelled(void *data, struct wl_data_source *src)
 
 static void source_drop_performed(void *data, struct wl_data_source *src)
 {
-    (void)data; (void)src;
+    struct offered *o = data;
+    if (o == &ds.drag && o->source == src) ds.drag_dropped = 1;
 }
 
 static void source_finished(void *data, struct wl_data_source *src)
@@ -261,8 +299,9 @@ static const struct wl_data_source_listener data_source_listener = {
 static void primary_send(void *data, struct zwp_primary_selection_source_v1 *src, const char *mime, int32_t fd)
 {
     struct offered *o = data;
-    if (o->source == src && (mime_bit(mime) & o->kind)) queue_write(fd, o->blob);
-    else close(fd);
+    if (o->source == src && (mime_bit(mime) & o->kind)) {
+        if (!accept_probe(o, fd)) queue_write(fd, o->blob);
+    } else close(fd);
 }
 
 static void primary_cancelled(void *data, struct zwp_primary_selection_source_v1 *src)
@@ -340,8 +379,7 @@ static void dd_selection(void *data, struct wl_data_device *dev, struct wl_data_
     (void)data; (void)dev;
     if (ds.offer != id) data_offer_drop(&ds.offer);
     ds.offer = id;
-    /* The first selection event after our set is its echo: we own it. */
-    if (ds.own[0].source) ds.own[0].confirmed = 1;
+    selection_observed(CLIPBOARD_REGULAR);
 }
 
 static const struct wl_data_device_listener data_device_listener = {
@@ -377,7 +415,7 @@ static void psd_selection(void *data, struct zwp_primary_selection_device_v1 *de
     (void)data; (void)dev;
     if (ds.primary_offer != offer) primary_offer_drop(&ds.primary_offer);
     ds.primary_offer = offer;
-    if (ds.own[1].source) ds.own[1].confirmed = 1;
+    selection_observed(CLIPBOARD_PRIMARY);
 }
 
 static const struct zwp_primary_selection_device_v1_listener primary_device_listener = {
@@ -401,8 +439,12 @@ static void devices_release(void)
     data_offer_drop(&ds.offer);
     data_offer_drop(&ds.dnd_offer);
     primary_offer_drop(&ds.primary_offer);
-    offered_clear(&ds.own[0]);
-    offered_clear(&ds.own[1]);
+    for (int i = 0; i < CLIPBOARD_SELECTIONS; i++) {
+        offered_clear(&ds.slots[i][0]);
+        offered_clear(&ds.slots[i][1]);
+        ds.observed[i] = 0;
+        ds.observed_revision[i]++;
+    }
     offered_clear(&ds.drag);
     ds.drag_active = 0;
     if (ds.device) {
@@ -503,46 +545,198 @@ static unsigned kind_of(const char *mime)
     return bit & M_ANY_TEXT ? M_ANY_TEXT : bit;
 }
 
+static void sync_done(void *data, struct wl_callback *cb, uint32_t serial)
+{
+    (void)cb; (void)serial;
+    *(int *)data = 1;
+}
+
+/* Sync orders the replies; it does not acknowledge set_selection. Dispatch
+ * while waiting so clipboard readers and our own source can make progress. */
+static int selection_sync_until(struct wl_display *display, int64_t until)
+{
+    static const struct wl_callback_listener listener = { .done = sync_done };
+    struct wl_callback *cb = wl_display_sync(display);
+    if (!cb) return CLIPBOARD_FAILED;
+    int done = 0, status = CLIPBOARD_FAILED;
+    wl_callback_add_listener(cb, &listener, &done);
+    while (!done) {
+        if (wl_display_dispatch_pending(display) < 0) break;
+        if (done) break;
+        int64_t left = until - now_ms();
+        if (left <= 0) { status = CLIPBOARD_BUSY; break; }
+        if (wl_display_prepare_read(display) < 0) continue;
+        struct pollfd fds[1 + WRITES_MAX] = { { .fd = wl_display_get_fd(display), .events = POLLIN } };
+        if (wl_display_flush(display) < 0) {
+            if (errno != EAGAIN && errno != EINTR) {
+                wl_display_cancel_read(display);
+                break;
+            }
+            fds[0].events |= POLLOUT;
+        }
+        int n = wl_data_poll(fds + 1, WRITES_MAX);
+        int r = poll(fds, (nfds_t)(1 + n), (int)left);
+        int error = errno;
+        if (r > 0 && (fds[0].revents & (POLLIN | POLLERR | POLLHUP))) {
+            if (wl_display_read_events(display) < 0) break;
+        } else {
+            wl_display_cancel_read(display);
+        }
+        if (r < 0 && error == EINTR) continue;
+        if (r < 0 || (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL))) break;
+        if (!r) { status = CLIPBOARD_BUSY; break; }
+        wl_data_dispatch(fds + 1, (size_t)n);
+    }
+    wl_callback_destroy(cb);
+    return done ? CLIPBOARD_OK : status;
+}
+
+static int selection_focused(unsigned focus)
+{
+    return wl_backend_keyboard_focused() && wl_backend_keyboard_focus_generation() == focus;
+}
+
+static int selection_ready(int which, unsigned focus)
+{
+    return selection_focused(focus) &&
+           (which == CLIPBOARD_PRIMARY ? ds.primary_device != NULL : ds.device != NULL);
+}
+
+static int selection_known(int which, unsigned focus)
+{
+    return ds.observed[which] && ds.observed_focus[which] == focus;
+}
+
+static void *selection_offer(int which)
+{
+    return which == CLIPBOARD_PRIMARY ? (void *)ds.primary_offer : ds.offer;
+}
+
+static const char *selection_mime(int which, void *offer, unsigned want)
+{
+    if (!offer) return NULL;
+    const unsigned *mimes = which == CLIPBOARD_PRIMARY ? zwp_primary_selection_offer_v1_get_user_data(offer) :
+                                                       wl_data_offer_get_user_data(offer);
+    for (size_t i = 0; mimes && i < NMIMES; i++) {
+        if (mime_names[i].bit & want & *mimes) return mime_names[i].name;
+    }
+    return NULL;
+}
+
+static void selection_receive(int which, void *offer, const char *name, int fd)
+{
+    if (which == CLIPBOARD_PRIMARY) zwp_primary_selection_offer_v1_receive(offer, name, fd);
+    else wl_data_offer_receive(offer, name, fd);
+}
+
+static void selection_request(int which, void *source, uint32_t serial)
+{
+    if (which == CLIPBOARD_PRIMARY) zwp_primary_selection_device_v1_set_selection(ds.primary_device, source, serial);
+    else wl_data_device_set_selection(ds.device, source, serial);
+}
+
+static int selection_publish(int which, struct offered *o)
+{
+    o->primary = which == CLIPBOARD_PRIMARY;
+    if (o->primary) {
+        o->source = zwp_primary_selection_device_manager_v1_create_source(ds.primary_manager);
+        if (!o->source) return -1;
+        zwp_primary_selection_source_v1_add_listener(o->source, &primary_source_listener, o);
+    } else {
+        o->source = wl_data_device_manager_create_data_source(ds.manager);
+        if (!o->source) return -1;
+        wl_data_source_add_listener(o->source, &data_source_listener, o);
+    }
+    for (size_t i = 0; i < NMIMES; i++) {
+        if (!(mime_names[i].bit & o->kind)) continue;
+        if (o->primary) zwp_primary_selection_source_v1_offer(o->source, mime_names[i].name);
+        else wl_data_source_offer(o->source, mime_names[i].name);
+    }
+    return 0;
+}
+
+static int selection_confirm(int which, struct offered *o, int64_t until)
+{
+    void *offer = selection_offer(which);
+    const char *name = selection_mime(which, offer, o->kind);
+    if (!name) return CLIPBOARD_FAILED;
+    int fds[2];
+    if (pipe2(fds, O_CLOEXEC | O_NONBLOCK) < 0) return CLIPBOARD_FAILED;
+    struct selection_probe probe = { .source = o };
+    int status = CLIPBOARD_FAILED;
+    if (fstat(fds[1], &probe.pipe) == 0) {
+        unsigned revision = ds.observed_revision[which];
+        ds.probe = &probe;
+        selection_receive(which, offer, name, fds[1]);
+        status = selection_sync_until(ds.display, until);
+        ds.probe = NULL;
+        if (status == CLIPBOARD_OK && (!probe.matched || !o->source || revision != ds.observed_revision[which]))
+            status = CLIPBOARD_FAILED;
+    }
+    close(fds[1]);
+    close(fds[0]);
+    return status;
+}
+
+static int selection_change(int which, unsigned kind, const void *data, size_t size)
+{
+    unsigned focus = wl_backend_keyboard_focus_generation();
+    uint32_t serial = input_serial();
+    if (!ds.display || !serial || !selection_ready(which, focus)) return CLIPBOARD_FAILED;
+    if (ds.selection_busy) return CLIPBOARD_BUSY;
+    ds.selection_busy = 1;
+    int64_t until = now_ms() + CLIPBOARD_TIMEOUT_MS;
+    int status = selection_sync_until(ds.display, until);
+    struct offered *o = NULL;
+    if (status != CLIPBOARD_OK) goto out;
+    status = CLIPBOARD_FAILED;
+    if (!selection_ready(which, focus)) goto out;
+    if (!kind && selection_known(which, focus) && !selection_offer(which)) {
+        status = CLIPBOARD_OK; /* Already empty while focused. */
+        goto out;
+    }
+    if (kind) {
+        o = &ds.slots[which][ds.own[which] == &ds.slots[which][0]];
+        o->blob = blob_new(data, size);
+        o->kind = kind;
+        if (!o->blob || selection_publish(which, o) < 0) goto out;
+    }
+    unsigned revision = ds.observed_revision[which];
+    selection_request(which, o ? o->source : NULL, serial);
+    status = selection_sync_until(ds.display, until);
+    if (status != CLIPBOARD_OK) goto out;
+    status = CLIPBOARD_FAILED;
+    if (!selection_ready(which, focus) || !selection_known(which, focus) || revision == ds.observed_revision[which])
+        goto out;
+    if (o) {
+        if (!o->source) goto out;
+        status = selection_confirm(which, o, until);
+        if (status != CLIPBOARD_OK) goto out;
+        if (!selection_ready(which, focus)) { status = CLIPBOARD_FAILED; goto out; }
+        /* The compositor cancelled the old source when it accepted the new one. */
+        if (ds.own[which]) offered_clear(ds.own[which]);
+        ds.own[which] = o;
+        o = NULL;
+    } else if (!selection_offer(which)) {
+        if (ds.own[which]) offered_clear(ds.own[which]);
+        status = CLIPBOARD_OK;
+    }
+
+out:
+    if (o) offered_clear(o);
+    ds.selection_busy = 0;
+    return status;
+}
+
 int wl_data_clipboard_set(int primary, const char *mime, const void *data, size_t size)
 {
     unsigned kind = kind_of(mime);
-    if (!ds.display || !kind || (primary ? !ds.primary_device : !ds.device)) return CLIPBOARD_FAILED;
-    struct blob *b = blob_new(data, size);
-    if (!b) return CLIPBOARD_FAILED;
-    struct offered *o = &ds.own[primary ? 1 : 0];
-    offered_clear(o);
-    o->blob = b;
-    o->kind = kind;
-    if (primary) {
-        struct zwp_primary_selection_source_v1 *src =
-            zwp_primary_selection_device_manager_v1_create_source(ds.primary_manager);
-        zwp_primary_selection_source_v1_add_listener(src, &primary_source_listener, o);
-        for (size_t i = 0; i < NMIMES; i++) {
-            if (mime_names[i].bit & kind) zwp_primary_selection_source_v1_offer(src, mime_names[i].name);
-        }
-        o->source = src;
-        zwp_primary_selection_device_v1_set_selection(ds.primary_device, src, input_serial());
-    } else {
-        struct wl_data_source *src = wl_data_device_manager_create_data_source(ds.manager);
-        wl_data_source_add_listener(src, &data_source_listener, o);
-        for (size_t i = 0; i < NMIMES; i++) {
-            if (mime_names[i].bit & kind) wl_data_source_offer(src, mime_names[i].name);
-        }
-        o->source = src;
-        wl_data_device_set_selection(ds.device, src, input_serial());
-    }
-    wl_display_flush(ds.display);
-    return CLIPBOARD_OK;
+    return kind ? selection_change(primary ? CLIPBOARD_PRIMARY : CLIPBOARD_REGULAR, kind, data, size) : CLIPBOARD_FAILED;
 }
 
 int wl_data_clipboard_clear(int primary)
 {
-    if (!ds.display || (primary ? !ds.primary_device : !ds.device)) return CLIPBOARD_FAILED;
-    offered_clear(&ds.own[primary ? 1 : 0]);
-    if (primary) zwp_primary_selection_device_v1_set_selection(ds.primary_device, NULL, input_serial());
-    else wl_data_device_set_selection(ds.device, NULL, input_serial());
-    wl_display_flush(ds.display);
-    return CLIPBOARD_OK;
+    return selection_change(primary ? CLIPBOARD_PRIMARY : CLIPBOARD_REGULAR, 0, NULL, 0);
 }
 
 /* Bytes as the host clipboard service returns them: a sealed memfd. */
@@ -609,29 +803,24 @@ int wl_data_clipboard_get(int primary, const char *mime, int *out_fd, size_t *ou
     *out_fd = -1;
     *out_size = 0;
     unsigned want = kind_of(mime);
+    int which = primary ? CLIPBOARD_PRIMARY : CLIPBOARD_REGULAR;
     if (!ds.display || !want || (primary ? !ds.primary_device : !ds.device)) return CLIPBOARD_FAILED;
     /* Our own selection is read here: asking the compositor for it would
      * wait for this very loop to answer. */
-    struct offered *o = &ds.own[primary ? 1 : 0];
-    if (o->source && o->confirmed) {
+    struct offered *o = ds.own[which];
+    if (o) {
         if (!(o->kind & want)) return CLIPBOARD_NO_TEXT;
         int status = sealed(o->blob->data, o->blob->size, out_fd);
         if (status == CLIPBOARD_OK) *out_size = o->blob->size;
         return status;
     }
-    void *offer = primary ? (void *)ds.primary_offer : (void *)ds.offer;
+    void *offer = selection_offer(which);
     if (!offer) return CLIPBOARD_EMPTY;
-    unsigned *mimes = primary ? zwp_primary_selection_offer_v1_get_user_data(offer) :
-                                wl_data_offer_get_user_data(offer);
-    const char *name = NULL;
-    for (size_t i = 0; i < NMIMES && !name; i++) {
-        if ((mime_names[i].bit & want) && mimes && (*mimes & mime_names[i].bit)) name = mime_names[i].name;
-    }
+    const char *name = selection_mime(which, offer, want);
     if (!name) return CLIPBOARD_NO_TEXT;
     int p[2];
     if (pipe2(p, O_CLOEXEC) < 0) return CLIPBOARD_FAILED;
-    if (primary) zwp_primary_selection_offer_v1_receive(offer, name, p[1]);
-    else wl_data_offer_receive(offer, name, p[1]);
+    selection_receive(which, offer, name, p[1]);
     close(p[1]);
     wl_display_flush(ds.display);
     return read_offer(p[0], out_fd, out_size);
@@ -639,7 +828,15 @@ int wl_data_clipboard_get(int primary, const char *mime, int *out_fd, size_t *ou
 
 uint32_t wl_data_press_serial(void)
 {
-    return wl_backend_button_serial();
+    return wl_backend_press_serial();
+}
+
+void wl_data_pointer_pressed(void)
+{
+    if (ds.drag_active && !ds.drag_dropped) {
+        offered_clear(&ds.drag);
+        ds.drag_finished = 0;
+    }
 }
 
 static int drag_start(const char *uris, size_t size, const char *key, uint32_t press_serial,

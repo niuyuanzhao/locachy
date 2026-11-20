@@ -32,7 +32,7 @@ static void language(const char *l)
 
 int main(int argc, char **argv)
 {
-    if (argc != 2) return 2;
+    if (argc < 2 || argc > 3) return 2;
     setenv("LOCACHY_LOCALE_DIR", argv[1], 1);
     setenv("LOCACHY_LANG", "zh_CN.UTF-8", 1);
 
@@ -72,6 +72,23 @@ int main(int argc, char **argv)
     assert(strcmp(ui_pad(b, sizeof b, "\xe4\xbf\x9d\xe5\xad\x98", 6), "\xe4\xbf\x9d\xe5\xad\x98  ") == 0);
     assert(strcmp(ui_pad(b, sizeof b, "longer", 3), "longer") == 0);
     assert(strcmp(ui_pad(b, 6, "abc", 10), "abc  ") == 0); /* cut to the buffer, terminated */
+
+    if (argc == 3) {
+        bindtextdomain(I18N_DOMAIN, argv[2]);
+        language("zh_CN.UTF-8");
+        const char *copied = _("   (copied: Ctrl+V pastes here)");
+        const char *cut = _("   (cut: Ctrl+V moves here)");
+        const char *p_cut = P_("Cut %d item; Ctrl+V puts it in the folder shown.",
+                               "Cut %d items; Ctrl+V puts them in the folder shown.", 2);
+        const char *p_copy = P_("Copied %d item; Ctrl+V puts it in the folder shown.",
+                                "Copied %d items; Ctrl+V puts them in the folder shown.", 2);
+        const char *bat = _("m: %/W   1-6: span   Left/Right: cursor   Tab: pack   r: refresh   Ctrl+C: copy   Esc: back");
+        assert(strstr(copied, "Ctrl+V") && !strstr(copied, "\xe6\x8c\x89 v"));
+        assert(strstr(cut, "Ctrl+V") && !strstr(cut, "\xe6\x8c\x89 v"));
+        assert(strstr(p_cut, "Ctrl+V") && !strstr(p_cut, "\xe6\x8c\x89 v"));
+        assert(strstr(p_copy, "Ctrl+V") && !strstr(p_copy, "\xe6\x8c\x89 v"));
+        assert(strstr(bat, "Ctrl+C") && !strstr(bat, "c: \xe5\xa4\x8d\xe5\x88\xb6"));
+    }
 
     printf("ALL PASSED\n");
     return 0;

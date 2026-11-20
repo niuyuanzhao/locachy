@@ -1,7 +1,6 @@
 /* F1's help panel (base.h ui_help): the program's own keys, then the keys every
  * program has. The table is key-action.c's, so a program that shows this links it. */
-#include <stdlib.h>
-#include <string.h>
+#include <linux/input-event-codes.h>
 
 #include "base.h"
 
@@ -16,6 +15,7 @@
  * whether it is there. */
 __attribute__((weak)) int keys_modifiers(void);
 __attribute__((weak)) const struct pointer_event *pointer_last(void);
+__attribute__((weak)) void screen_cursor(int shape);
 
 static const struct ui_help_line every_program[] = {
     { "Ctrl+Q", N_("Quit, asking first when work would be lost") },
@@ -44,30 +44,44 @@ int ui_help(const char *title, const struct ui_help_line *lines)
 {
     int keyw = 0, own = help_count(lines, &keyw), all = help_count(every_program, &keyw);
     int gap = own ? 1 : 0, total = own + gap + 1 + all, top = 0;
+    int dirty = 1, drawn_top = -1, drawn_cols = 0, drawn_rows = 0;
+    if (screen_cursor) screen_cursor(CURSOR_ARROW);
     for (;;) {
-        int cols = screen_cols(), rows = screen_rows(), body = rows > 2 ? rows - 2 : 1;
+        int cols = screen_cols(), rows = screen_rows(), body = rows > 3 ? rows - 3 : 0;
+        int close_col = cols > 1 ? 1 : 0;
+        const char *close_label = _("[Esc / F1: close]");
+        int close_w = ui_cells(close_label);
+        if (close_w > cols - close_col) close_w = cols - close_col;
         if (top > total - body) top = total - body;
         if (top < 0) top = 0;
-        screen_fill(0, 0, cols, rows, MENU_BG);
-        screen_text(1, 0, title, MENU_ON, MENU_BG);
-        for (int r = 0; r < body && top + r < total; r++) {
-            int i = top + r;
-            const struct ui_help_line *l = NULL;
-            if (i < own) {
-                l = &lines[i];
-            } else if (i == own + gap) {
-                screen_text(1, r + 1, _("Every program"), MENU_ON, MENU_BG);
-            } else if (i > own + gap) {
-                l = &every_program[i - own - gap - 1];
+        if (dirty || top != drawn_top || cols != drawn_cols || rows != drawn_rows) {
+            if (cols > 0 && rows > 1) {
+                screen_fill(0, 1, cols, rows - 1, MENU_BG);
+                if (rows > 2) screen_text(1, 1, title, MENU_ON, MENU_BG);
+                for (int r = 0; r < body && top + r < total; r++) {
+                    int i = top + r;
+                    const struct ui_help_line *l = NULL;
+                    if (i < own) {
+                        l = &lines[i];
+                    } else if (i == own + gap) {
+                        screen_text(1, r + 2, _("Every program"), MENU_ON, MENU_BG);
+                    } else if (i > own + gap) {
+                        l = &every_program[i - own - gap - 1];
+                    }
+                    if (l) {
+                        char pad[256];
+                        screen_text(2, r + 2, ui_pad(pad, sizeof pad, l->keys, keyw), MENU_FG, MENU_BG);
+                        screen_text(4 + keyw, r + 2, _(l->what), MENU_FG, MENU_BG);
+                    }
+                }
+                screen_text(close_col, rows - 1, close_label, MENU_BG, MENU_ON);
+                screen_flush();
             }
-            if (l) {
-                char pad[256];
-                screen_text(2, r + 1, ui_pad(pad, sizeof pad, l->keys, keyw), MENU_FG, MENU_BG);
-                screen_text(4 + keyw, r + 1, _(l->what), MENU_FG, MENU_BG);
-            }
+            drawn_top = top;
+            drawn_cols = cols;
+            drawn_rows = rows;
+            dirty = 0;
         }
-        screen_text(1, rows - 1, _("Esc, F1 or q: close"), MENU_ON, MENU_BG);
-        screen_flush();
         int key = key_poll_timeout(-1, -1);
         int mods = keys_modifiers ? keys_modifiers() : 0;
         if (key == K_UP) {
@@ -82,8 +96,19 @@ int ui_help(const char *title, const struct ui_help_line *lines)
             top = 0;
         } else if (key == K_EOL) {
             top = total;
+        } else if (key == K_SHOWN) {
+            dirty = 1;
         } else if (key == K_POINTER) {
-            if (pointer_last) top -= 3 * pointer_last()->wheel;
+            const struct pointer_event *e = pointer_last ? pointer_last() : NULL;
+            if (!e) continue;
+            int output = screen_is_extended && screen_is_extended() && screen_output_current ? screen_output_current() : 0;
+            int inside = e->output == output && e->col >= 0 && e->col < cols && e->row >= 1 && e->row < rows;
+            if (e->pressed && !inside) return ACT_NONE;
+            if (!inside) continue;
+            if (e->button == BTN_LEFT && e->pressed && e->row == rows - 1 &&
+                e->col >= close_col && e->col < close_col + close_w) return ACT_NONE;
+            int64_t next = (int64_t)top - 3LL * e->wheel;
+            top = next < 0 ? 0 : next > total ? total : (int)next;
         } else {
             int act = key_list_action(key, mods);
             if (act == ACT_QUIT) return ACT_QUIT;

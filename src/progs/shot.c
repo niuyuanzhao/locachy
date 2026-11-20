@@ -162,6 +162,7 @@ struct output {
     struct image bg, scaled;  /* captured raw output image, and scaled to drawn WxH */
     struct hit hits[MAX_HITS];
     int nhits, hovered_hit;
+    int hud_x, hud_y, hud_w, hud_h; /* in buffer pixels */
     struct output *next;
 };
 
@@ -214,7 +215,8 @@ struct pt {
 struct annotation {
     enum tool type;
     struct output *out;
-    int x0, y0, x1, y1; /* in buffer pixels of out */
+    struct window *win; /* NULL for screen annotations */
+    int x0, y0, x1, y1; /* buffer pixels, relative to the window if any */
     int num;
     struct pt *pts;
     int npts, cap_pts;
@@ -236,6 +238,7 @@ static struct ext_image_copy_capture_manager_v1 *copier;
 static struct wp_fractional_scale_manager_v1 *scale_mgr;
 static struct wp_viewporter *viewporter;
 static struct wl_cursor_theme *cursor_theme;
+static int cursor_size;
 static struct wl_surface *cursor_surface;
 static struct xkb_context *xkb_ctx;
 static struct xkb_keymap *xkb_map;
@@ -248,6 +251,7 @@ static struct listed *listed;
 static struct output *pointer_output;
 static double pointer_x, pointer_y;
 static uint32_t last_click_ms;
+static int last_click_valid;
 static double last_click_x, last_click_y;
 
 static volatile sig_atomic_t stopping;
@@ -266,7 +270,8 @@ static struct output *sel_out;
 static int sel_has;
 static int sel_x, sel_y, sel_w, sel_h;
 static enum drag_kind drag_state = DRAG_NONE;
-static int drag_x0, drag_y0;
+static struct output *drag_out;
+static int drag_x0, drag_y0, drag_moved;
 static int drag_orig_x, drag_orig_y, drag_orig_w, drag_orig_h;
 static int cur_bx, cur_by; /* pointer in buffer pixels of active output */
 
@@ -455,19 +460,22 @@ static int scale_image(const struct image *src, struct image *dst, int w, int h)
     return 0;
 }
 
-static void render_annotations(uint32_t *px, int W, int H, const struct output *o, int ox, int oy)
+static void render_annotations(uint32_t *px, int W, int H, const struct output *o, const struct window *win)
 {
     uint32_t s120 = o && o->viewport ? o->scale120 : 120;
-    int row = text_px(s120 / 120.0), cw = row / 2, ch = row;
+    /* Compose into the original window capture without resampling its pixels. */
+    double sx = win ? (double)W / sel_w : 1, sy = win ? (double)H / sel_h : 1;
+    double scale = fmin(sx, sy);
+    int row = text_px(s120 / 120.0 * scale), cw = row / 2, ch = row;
     const struct panel_font *bold = panel_font(row, 1);
     panel_font_size(bold, &cw, &ch);
-    int rad = s120 >= 180 ? 3 : 2;
+    int rad = (int)lround((s120 >= 180 ? 3 : 2) * scale);
 
     for (int i = 0; i < nannos; i++) {
         const struct annotation *a = &annos[i];
-        if (o && a->out != o) continue;
-        int x0 = a->x0 - ox, y0 = a->y0 - oy;
-        int x1 = a->x1 - ox, y1 = a->y1 - oy;
+        if (a->out != o || a->win != win) continue;
+        int x0 = (int)lround(a->x0 * sx), y0 = (int)lround(a->y0 * sy);
+        int x1 = (int)lround(a->x1 * sx), y1 = (int)lround(a->y1 * sy);
         switch (a->type) {
         case TOOL_ARROW:
             draw_arrow(px, W, H, x0, y0, x1, y1, rad, ANNO_RED);
@@ -480,11 +488,13 @@ static void render_annotations(uint32_t *px, int W, int H, const struct output *
         }
         case TOOL_PEN:
             if (a->npts == 1) {
-                draw_disc(px, W, H, a->pts[0].x - ox, a->pts[0].y - oy, rad, ANNO_RED);
+                draw_disc(px, W, H, (int)lround(a->pts[0].x * sx),
+                          (int)lround(a->pts[0].y * sy), rad, ANNO_RED);
             }
             for (int k = 1; k < a->npts; k++) {
-                draw_thick_line(px, W, H, a->pts[k - 1].x - ox, a->pts[k - 1].y - oy,
-                                a->pts[k].x - ox, a->pts[k].y - oy, rad, ANNO_RED);
+                draw_thick_line(px, W, H, (int)lround(a->pts[k - 1].x * sx),
+                                (int)lround(a->pts[k - 1].y * sy),
+                                (int)lround(a->pts[k].x * sx), (int)lround(a->pts[k].y * sy), rad, ANNO_RED);
             }
             break;
         case TOOL_HILITE: {
@@ -1098,18 +1108,27 @@ static int stitch_fullscreen(struct image *out)
         int ox = o->lx - min_x, oy = o->ly - min_y;
         int ow = o->lw > 0 ? o->lw : o->bg.w;
         int oh = o->lh > 0 ? o->lh : o->bg.h;
-        struct image tmp = { 0 };
-        if (scale_image(&o->bg, &tmp, ow, oh) == 0) {
-            render_annotations(tmp.px, tmp.w, tmp.h, o, 0, 0);
-            for (int y = 0; y < tmp.h && oy + y < H; y++) {
-                if (oy + y < 0) continue;
-                for (int x = 0; x < tmp.w && ox + x < W; x++) {
-                    if (ox + x < 0) continue;
-                    px[(oy + y) * W + (ox + x)] = tmp.px[y * tmp.w + x];
+        struct image annotated = { 0 };
+        const struct image *src = &o->bg;
+        for (int i = 0; i < nannos; i++) {
+            if (annos[i].out == o && !annos[i].win) {
+                if (scale_image(src, &annotated, buf_w(o), buf_h(o)) < 0) {
+                    free(px);
+                    return -1;
                 }
+                render_annotations(annotated.px, annotated.w, annotated.h, o, NULL);
+                src = &annotated;
+                break;
             }
-            free(tmp.px);
         }
+        for (int y = 0; y < oh; y++) {
+            int sy = (int)((long)y * src->h / oh);
+            for (int x = 0; x < ow; x++) {
+                int sx = (int)((long)x * src->w / ow);
+                px[(oy + y) * W + ox + x] = src->px[sy * src->w + sx];
+            }
+        }
+        free(annotated.px);
     }
     out->px = px;
     out->w = W;
@@ -1121,20 +1140,27 @@ static int stitch_fullscreen(struct image *out)
 static int build_export_image(struct image *out)
 {
     memset(out, 0, sizeof *out);
-    if (picked_window && picked_window->img.px) {
-        int w = picked_window->img.w, h = picked_window->img.h;
-        out->px = malloc((size_t)w * (size_t)h * 4);
-        if (!out->px) return -1;
-        memcpy(out->px, picked_window->img.px, (size_t)w * (size_t)h * 4);
-        out->w = w;
-        out->h = h;
-        return 0;
+    if (picking_window || (sel_has && (sel_w <= 0 || sel_h <= 0 || !sel_out))) return -1;
+    if (picked_window && sel_has && picked_window->img.px) {
+        const struct image *img = &picked_window->img, *src = img;
+        struct image annotated = { 0 };
+        for (int i = 0; i < nannos; i++) {
+            if (annos[i].out == sel_out && annos[i].win == picked_window) {
+                if (scale_image(img, &annotated, sel_w, sel_h) < 0) return -1;
+                render_annotations(annotated.px, sel_w, sel_h, sel_out, picked_window);
+                src = &annotated;
+                break;
+            }
+        }
+        int ret = scale_image(src, out, img->w, img->h);
+        free(annotated.px);
+        return ret;
     }
-    if (sel_has && sel_out && sel_w > 0 && sel_h > 0) {
+    if (sel_has) {
         int W = buf_w(sel_out), H = buf_h(sel_out);
         struct image full = { 0 };
         if (scale_image(&sel_out->bg, &full, W, H) < 0) return -1;
-        render_annotations(full.px, W, H, sel_out, 0, 0);
+        render_annotations(full.px, W, H, sel_out, NULL);
         int x0 = sel_x < 0 ? 0 : sel_x, y0 = sel_y < 0 ? 0 : sel_y;
         int x1 = sel_x + sel_w > W ? W : sel_x + sel_w;
         int y1 = sel_y + sel_h > H ? H : sel_y + sel_h;
@@ -1174,7 +1200,7 @@ static int build_export_image(struct image *out)
             out->px = malloc((size_t)w * (size_t)h * 4);
             if (!out->px) return -1;
             memcpy(out->px, o->bg.px, (size_t)w * (size_t)h * 4);
-            render_annotations(out->px, w, h, o, 0, 0);
+            render_annotations(out->px, w, h, o, NULL);
             out->w = w;
             out->h = h;
             return 0;
@@ -1249,9 +1275,27 @@ static void select_full_output(struct output *o)
     dirty_all();
 }
 
+static void select_window(struct window *w, struct output *o)
+{
+    if (!w || !w->img.px || !o) return;
+    int W = buf_w(o), H = buf_h(o);
+    picked_window = w;
+    picking_window = 0;
+    sel_out = o;
+    sel_has = 1;
+    sel_w = w->img.w <= W ? w->img.w : W;
+    sel_h = w->img.h <= H ? w->img.h : H;
+    sel_x = (W - sel_w) / 2;
+    sel_y = (H - sel_h) / 2;
+    dirty_all();
+}
+
 static void trigger_mode(enum mode m)
 {
     opt_mode = m;
+    drag_state = DRAG_NONE;
+    drag_out = NULL;
+    last_click_valid = 0;
     picked_window = NULL;
     picking_window = 0;
     if (m == MODE_FULLSCREEN) {
@@ -1260,23 +1304,10 @@ static void trigger_mode(enum mode m)
     } else if (m == MODE_CURRENT) {
         select_full_output(focused_output());
     } else if (m == MODE_ACTIVEWIN) {
-        struct window *w = active_window();
-        if (w && w->img.px) {
-            picked_window = w;
-            struct output *o = focused_output();
-            if (o) {
-                int W = buf_w(o), H = buf_h(o);
-                sel_out = o;
-                sel_has = 1;
-                sel_w = w->img.w <= W ? w->img.w : W;
-                sel_h = w->img.h <= H ? w->img.h : H;
-                sel_x = (W - sel_w) / 2;
-                sel_y = (H - sel_h) / 2;
-            }
-            dirty_all();
-        }
+        select_window(active_window(), focused_output());
     } else if (m == MODE_UNDERCURSOR) {
         picking_window = 1;
+        sel_has = 0;
         dirty_all();
     } else if (m == MODE_REGION) {
         dirty_all();
@@ -1464,6 +1495,10 @@ static void draw_hud(struct output *o, uint32_t *px, int W, int H, const struct 
     if (py0 > H - margin - ph) py0 = H - margin - ph;
     if (py0 < margin) py0 = margin;
 
+    o->hud_x = px0;
+    o->hud_y = py0;
+    o->hud_w = pw;
+    o->hud_h = ph;
     round_rect(px, W, H, px0, py0, pw, ph, ch / 3, 0, PANEL_DARK);
     round_rect(px, W, H, px0, py0, pw, ph, ch / 3, 1, HIGHLIGHT);
     for (int i = 0; i < n; i++) {
@@ -1482,6 +1517,55 @@ static void draw_hud(struct output *o, uint32_t *px, int W, int H, const struct 
             o->hits[o->nhits++] = (struct hit){ .id = it[i].id, .x = bx, .y = by, .w = it[i].w, .h = item_h };
         }
     }
+}
+
+static int pickable(const struct window *w, const struct output *o)
+{
+    if (!w->img.px) return 0;
+    for (int i = 0; i < w->noutputs; i++) {
+        if (w->outputs[i] == o->wl) return 1;
+    }
+    return 0;
+}
+
+/* The window protocols do not expose desktop positions. Use the same grid
+ * for painting and hit testing, above the HUD and on each window's output. */
+static struct window *window_picker(struct output *o, int bx, int by, uint32_t *px,
+                                    const struct panel_font *font, int ch)
+{
+    int n = 0, W = buf_w(o), H = buf_h(o), area_h = o->hud_y;
+    for (struct window *w = windows; w; w = w->next) n += pickable(w, o);
+    if (!n || area_h <= 0) return NULL;
+    int cols = (int)ceil(sqrt((double)n * W / area_h));
+    if (cols > n) cols = n;
+    int rows = (n + cols - 1) / cols, i = 0, gap = ch > 4 ? ch / 4 : 1;
+    for (struct window *w = windows; w; w = w->next) {
+        if (!pickable(w, o)) continue;
+        int col = i % cols, row = i++ / cols;
+        int x = col * W / cols + gap, y = row * area_h / rows + gap;
+        int cw = (col + 1) * W / cols - gap - x, rh = (row + 1) * area_h / rows - gap - y;
+        if (cw <= 0 || rh <= ch) continue;
+        if (!px) {
+            if (bx >= x && bx < x + cw && by >= y && by < y + rh) return w;
+            continue;
+        }
+        fill_rect(px, W, H, x, y, cw, rh, PANEL_DARK);
+        double scale = fmin((double)cw / w->img.w, (double)(rh - ch) / w->img.h);
+        int tw = (int)fmax(1, w->img.w * scale), th = (int)fmax(1, w->img.h * scale);
+        int tx = x + (cw - tw) / 2, ty = y + (rh - ch - th) / 2;
+        for (int yy = 0; yy < th; yy++) {
+            int sy = (int)((long)yy * w->img.h / th);
+            for (int xx = 0; xx < tw; xx++) {
+                int sx = (int)((long)xx * w->img.w / tw);
+                px[(ty + yy) * W + tx + xx] = w->img.px[sy * w->img.w + sx];
+            }
+        }
+        char title[160];
+        panel_text_fit(title, sizeof title, w->title[0] ? w->title : w->app_id, cw - 2 * gap, font);
+        text_clip(px, W, H, x + gap, y + rh - ch, title, TEXT, font, ch, cw - 2 * gap);
+        round_rect(px, W, H, x, y, cw, rh, 0, 1, HIGHLIGHT);
+    }
+    return NULL;
 }
 
 /* Magnifier loupe near cursor when dragging selection or handle */
@@ -1553,9 +1637,10 @@ static void draw(struct output *o)
     annotated.px = malloc(size);
     annotated.w = W;
     annotated.h = H;
-    if (annotated.px && o->scaled.px) {
-        memcpy(annotated.px, o->scaled.px, size);
-        render_annotations(annotated.px, W, H, o, 0, 0);
+    if (annotated.px) {
+        if (o->scaled.px) memcpy(annotated.px, o->scaled.px, size);
+        else memset(annotated.px, 0, size);
+        render_annotations(annotated.px, W, H, o, NULL);
     }
 
     /* Darkened veil everywhere outside the selection; none with the whole
@@ -1575,6 +1660,7 @@ static void draw(struct output *o)
         if (picked_window && picked_window->img.px) {
             struct image wsc = { 0 };
             if (scale_image(&picked_window->img, &wsc, sel_w, sel_h) == 0) {
+                render_annotations(wsc.px, wsc.w, wsc.h, o, picked_window);
                 for (int y = y0; y < y1; y++) {
                     memcpy(px + (size_t)y * W + x0, wsc.px + (size_t)(y - sel_y) * sel_w + (x0 - sel_x),
                            (size_t)(x1 - x0) * 4);
@@ -1611,12 +1697,14 @@ static void draw(struct output *o)
     }
 
     /* Magnifier loupe while dragging a new selection or resizing handles */
-    if (sel_out == o && (drag_state == DRAG_NEW || (drag_state >= DRAG_NW && drag_state <= DRAG_W))) {
+    if (drag_out == o && pointer_output == o &&
+        (drag_state == DRAG_NEW || (drag_state >= DRAG_NW && drag_state <= DRAG_W))) {
         draw_magnifier(px, W, H, &annotated, cur_bx, cur_by, font, ch);
     }
     free(annotated.px);
 
     draw_hud(o, px, W, H, font, bold, ch, row);
+    if (picking_window) window_picker(o, 0, 0, px, font, ch);
 
     munmap(px, size);
     struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, (int32_t)size);
@@ -1632,18 +1720,20 @@ static void draw(struct output *o)
 
 /* Input handling */
 
-static uint32_t now_ms(void)
+static int hud_at(const struct output *o, int x, int y)
 {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+    return x >= o->hud_x && x < o->hud_x + o->hud_w && y >= o->hud_y && y < o->hud_y + o->hud_h;
 }
 
 static void keyboard_to(struct output *o)
 {
-    if (!o || o->keyboard) return;
+    if (!o || !o->layer || o->keyboard) return;
     for (struct output *e = outputs; e; e = e->next) {
+        if (!e->layer) continue;
         e->keyboard = e == o;
+        zwlr_layer_surface_v1_set_keyboard_interactivity(e->layer, e == o ?
+            ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE : ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE);
+        e->dirty = 1;
     }
 }
 
@@ -1694,6 +1784,10 @@ static void normalize_rect(int x0, int y0, int x1, int y1, int W, int H, int *rx
 static void undo_anno(void)
 {
     if (nannos > 0) {
+        if (drag_state == DRAG_ANNO) {
+            drag_state = DRAG_NONE;
+            drag_out = NULL;
+        }
         nannos--;
         if (annos[nannos].type == TOOL_NUMBER && next_badge_num > 1) {
             next_badge_num--;
@@ -1762,35 +1856,95 @@ static void handle_hud_click(int id)
     }
 }
 
+static void stop_drag(void)
+{
+    if (drag_out) drag_out->dirty = 1;
+    drag_out = NULL;
+    drag_state = DRAG_NONE;
+    cur_bx = cur_by = -1;
+}
+
+static void cancel_stage(void)
+{
+    last_click_valid = 0;
+    stop_drag();
+    if (picking_window) {
+        picking_window = 0;
+        opt_mode = MODE_REGION;
+    } else if (active_tool != TOOL_NONE) {
+        active_tool = TOOL_NONE;
+    } else if (sel_has) {
+        sel_has = 0;
+        picked_window = NULL;
+        opt_mode = MODE_REGION;
+    } else if (opt_mode == MODE_FULLSCREEN) {
+        opt_mode = MODE_REGION;
+    } else {
+        exit_code = 1;
+        finished = 1;
+    }
+    dirty_all();
+}
+
+static void pointer_cursor(struct wl_pointer *p, uint32_t serial, uint32_t scale120)
+{
+    if (!cursor_surface) return;
+    int scale = (int)((scale120 + 119) / 120);
+    scale = scale < 1 ? 1 : scale > 4 ? 4 : scale;
+    const char *env = getenv("XCURSOR_SIZE");
+    int size = env ? atoi(env) : 0;
+    size = (size > 0 && size <= 128 ? size : 24) * scale;
+    if (!cursor_theme || cursor_size != size) {
+        if (cursor_theme) wl_cursor_theme_destroy(cursor_theme);
+        cursor_theme = wl_cursor_theme_load(getenv("XCURSOR_THEME"), size, shm);
+        cursor_size = size;
+    }
+    if (!cursor_theme) return;
+    struct wl_cursor *cursor = wl_cursor_theme_get_cursor(cursor_theme, "crosshair");
+    if (!cursor) cursor = wl_cursor_theme_get_cursor(cursor_theme, "left_ptr");
+    if (!cursor) cursor = wl_cursor_theme_get_cursor(cursor_theme, "default");
+    if (!cursor || !cursor->image_count) return;
+    struct wl_cursor_image *image = cursor->images[0];
+    struct wl_buffer *buffer = wl_cursor_image_get_buffer(image);
+    if (!buffer) return;
+    if (image->width % scale || image->height % scale) scale = 1;
+    wl_surface_set_buffer_scale(cursor_surface, scale);
+    wl_surface_attach(cursor_surface, buffer, 0, 0);
+    wl_surface_damage_buffer(cursor_surface, 0, 0, (int32_t)image->width, (int32_t)image->height);
+    wl_surface_commit(cursor_surface);
+    wl_pointer_set_cursor(p, serial, cursor_surface, (int32_t)image->hotspot_x / scale,
+                          (int32_t)image->hotspot_y / scale);
+}
+
 static void pointer_enter(void *data, struct wl_pointer *p, uint32_t serial, struct wl_surface *s,
                           wl_fixed_t x, wl_fixed_t y)
 {
     (void)data;
     pointer_output = NULL;
-    for (struct output *o = outputs; o; o = o->next) {
+    for (struct output *o = outputs; s && o; o = o->next) {
         if (o->surf == s) pointer_output = o;
     }
+    if (!pointer_output) return;
     pointer_x = wl_fixed_to_double(x);
     pointer_y = wl_fixed_to_double(y);
-    struct wl_cursor *cursor = cursor_theme ? wl_cursor_theme_get_cursor(cursor_theme, "crosshair") : NULL;
-    if (!cursor && cursor_theme) cursor = wl_cursor_theme_get_cursor(cursor_theme, "left_ptr");
-    if (!cursor && cursor_theme) cursor = wl_cursor_theme_get_cursor(cursor_theme, "default");
-    if (cursor && cursor_surface) {
-        struct wl_cursor_image *image = cursor->images[0];
-        wl_surface_attach(cursor_surface, wl_cursor_image_get_buffer(image), 0, 0);
-        wl_surface_damage_buffer(cursor_surface, 0, 0, (int32_t)image->width, (int32_t)image->height);
-        wl_surface_commit(cursor_surface);
-        wl_pointer_set_cursor(p, serial, cursor_surface, (int32_t)image->hotspot_x, (int32_t)image->hotspot_y);
+    pointer_cursor(p, serial, pointer_output->scale120);
+}
+
+static void pointer_reset(void)
+{
+    if (pointer_output && pointer_output->hovered_hit >= 0) {
+        pointer_output->hovered_hit = -1;
+        pointer_output->dirty = 1;
     }
+    pointer_output = NULL;
+    last_click_valid = 0;
+    stop_drag();
 }
 
 static void pointer_leave(void *data, struct wl_pointer *p, uint32_t serial, struct wl_surface *s)
 {
     (void)data; (void)p; (void)serial; (void)s;
-    if (pointer_output && pointer_output->hovered_hit >= 0) {
-        pointer_output->hovered_hit = -1;
-        pointer_output->dirty = 1;
-    }
+    pointer_reset();
 }
 
 static void pointer_motion(void *data, struct wl_pointer *p, uint32_t time, wl_fixed_t x, wl_fixed_t y)
@@ -1798,38 +1952,39 @@ static void pointer_motion(void *data, struct wl_pointer *p, uint32_t time, wl_f
     (void)data; (void)p; (void)time;
     pointer_x = wl_fixed_to_double(x);
     pointer_y = wl_fixed_to_double(y);
-    struct output *o = pointer_output ? pointer_output : focused_output();
+    struct output *o = pointer_output;
     if (!o) return;
     keyboard_to(o);
-    uint32_t s120 = o->viewport ? o->scale120 : 120;
-    int bx = (int)(pointer_x * s120 / 120.0 + 0.5);
-    int by = (int)(pointer_y * s120 / 120.0 + 0.5);
+    double sc = (o->viewport ? o->scale120 : 120) / 120.0;
+    int bx = (int)lround(pointer_x * sc), by = (int)lround(pointer_y * sc);
     int W = buf_w(o), H = buf_h(o);
+    int hx = (int)floor(pointer_x * sc), hy = (int)floor(pointer_y * sc);
+    int in_hud = hud_at(o, hx, hy);
+    int h = in_hud ? hit_at(o, hx, hy) : -1;
+    if (h != o->hovered_hit) {
+        o->hovered_hit = h;
+        o->dirty = 1;
+    }
+    if (drag_state == DRAG_NONE || in_hud) return;
     cur_bx = bx;
     cur_by = by;
 
-    if (drag_state == DRAG_NONE) {
-        int h = hit_at(o, bx, by);
-        if (h != o->hovered_hit) {
-            o->hovered_hit = h;
-            o->dirty = 1;
-        }
-        return;
-    }
-
     if (drag_state == DRAG_ANNO && nannos > 0) {
         struct annotation *a = &annos[nannos - 1];
-        a->x1 = bx;
-        a->y1 = by;
-        if (a->type == TOOL_PEN && a->npts < a->cap_pts) {
-            a->pts[a->npts++] = (struct pt){ bx, by };
+        if (a->out != o) return;
+        int x = bx < 0 ? 0 : bx >= W ? W - 1 : bx;
+        int y = by < 0 ? 0 : by >= H ? H - 1 : by;
+        a->x1 = x - (a->win ? sel_x : 0);
+        a->y1 = y - (a->win ? sel_y : 0);
+        if (a->type == TOOL_PEN && a->pts && a->npts < a->cap_pts) {
+            a->pts[a->npts++] = (struct pt){ a->x1, a->y1 };
         }
-        o->dirty = 1;
+        a->out->dirty = 1;
         return;
     }
 
-    if (sel_out != o) return;
-    picked_window = NULL;
+    if (drag_out != o || sel_out != o) return;
+    drag_moved |= bx != drag_x0 || by != drag_y0;
 
     if (drag_state == DRAG_NEW) {
         normalize_rect(drag_x0, drag_y0, bx, by, W, H, &sel_x, &sel_y, &sel_w, &sel_h);
@@ -1846,11 +2001,18 @@ static void pointer_motion(void *data, struct wl_pointer *p, uint32_t time, wl_f
     } else {
         int x0 = drag_orig_x, y0 = drag_orig_y;
         int x1 = drag_orig_x + drag_orig_w, y1 = drag_orig_y + drag_orig_h;
-        if (drag_state == DRAG_NW || drag_state == DRAG_W || drag_state == DRAG_SW) x0 = bx;
-        if (drag_state == DRAG_NE || drag_state == DRAG_E || drag_state == DRAG_SE) x1 = bx;
-        if (drag_state == DRAG_NW || drag_state == DRAG_N || drag_state == DRAG_NE) y0 = by;
-        if (drag_state == DRAG_SW || drag_state == DRAG_S || drag_state == DRAG_SE) y1 = by;
+        int dx = bx - drag_x0, dy = by - drag_y0;
+        if (drag_state == DRAG_NW || drag_state == DRAG_W || drag_state == DRAG_SW) x0 += dx;
+        if (drag_state == DRAG_NE || drag_state == DRAG_E || drag_state == DRAG_SE) x1 += dx;
+        if (drag_state == DRAG_NW || drag_state == DRAG_N || drag_state == DRAG_NE) y0 += dy;
+        if (drag_state == DRAG_SW || drag_state == DRAG_S || drag_state == DRAG_SE) y1 += dy;
         normalize_rect(x0, y0, x1, y1, W, H, &sel_x, &sel_y, &sel_w, &sel_h);
+        if (sel_w == 0) { sel_w = 1; if (sel_x == W) sel_x--; }
+        if (sel_h == 0) { sel_h = 1; if (sel_y == H) sel_y--; }
+        if (sel_w != drag_orig_w || sel_h != drag_orig_h || sel_x != drag_orig_x || sel_y != drag_orig_y) {
+            picked_window = NULL; /* resizing a captured window turns it into a region */
+            opt_mode = MODE_REGION;
+        }
     }
     o->dirty = 1;
 }
@@ -1858,79 +2020,56 @@ static void pointer_motion(void *data, struct wl_pointer *p, uint32_t time, wl_f
 static void pointer_button(void *data, struct wl_pointer *p, uint32_t serial, uint32_t time, uint32_t button,
                            uint32_t state)
 {
-    (void)data; (void)p; (void)serial; (void)time;
-    struct output *o = pointer_output ? pointer_output : focused_output();
-    if (!o) return;
-    keyboard_to(o);
-    uint32_t s120 = o->viewport ? o->scale120 : 120;
-    int bx = (int)(pointer_x * s120 / 120.0 + 0.5);
-    int by = (int)(pointer_y * s120 / 120.0 + 0.5);
-    cur_bx = bx;
-    cur_by = by;
-
+    (void)data; (void)p; (void)serial;
+    struct output *o = pointer_output;
     if (state != WL_POINTER_BUTTON_STATE_PRESSED) {
-        if (drag_state != DRAG_NONE) {
-            drag_state = DRAG_NONE;
-            o->dirty = 1;
+        if (button == BTN_LEFT && drag_out) {
+            last_click_valid = drag_state == DRAG_MOVE && !drag_moved && o == drag_out &&
+                               pointer_x >= 0 && pointer_y >= 0 && pointer_x < o->w && pointer_y < o->h;
+            last_click_ms = time;
+            stop_drag();
         }
         return;
     }
+    if (finished || !o || drag_out || pointer_x < 0 || pointer_y < 0 || pointer_x >= o->w || pointer_y >= o->h) return;
+    keyboard_to(o);
+    double sc = (o->viewport ? o->scale120 : 120) / 120.0;
+    int bx = (int)lround(pointer_x * sc), by = (int)lround(pointer_y * sc);
+    cur_bx = bx;
+    cur_by = by;
 
+    int hx = (int)floor(pointer_x * sc), hy = (int)floor(pointer_y * sc);
+    if (hud_at(o, hx, hy)) {
+        last_click_valid = 0;
+        if (button == BTN_LEFT) handle_hud_click(hit_at(o, hx, hy));
+        return;
+    }
     if (button == BTN_RIGHT) {
-        if (sel_has) {
-            sel_has = 0;
-            picked_window = NULL;
-            dirty_all();
-        } else {
-            exit_code = 1;
-            finished = 1;
-        }
+        cancel_stage();
         return;
     }
     if (button != BTN_LEFT) return;
 
-    /* Check HUD buttons first */
-    int hit = hit_at(o, bx, by);
-    if (hit > 0) {
-        handle_hud_click(hit);
-        return;
-    }
-
-    /* Window picker mode: select window on this output */
     if (picking_window) {
-        picking_window = 0;
-        struct window *pick = NULL;
-        for (struct window *w = windows; w; w = w->next) {
-            if (!w->img.px) continue;
-            for (int i = 0; i < w->noutputs; i++) {
-                if (w->outputs[i] == o->wl) {
-                    if (!pick || w->activated) pick = w;
-                }
-            }
-        }
-        if (!pick) pick = active_window();
-        if (pick && pick->img.px) {
-            picked_window = pick;
-            int W = buf_w(o), H = buf_h(o);
-            sel_out = o;
-            sel_has = 1;
-            sel_w = pick->img.w <= W ? pick->img.w : W;
-            sel_h = pick->img.h <= H ? pick->img.h : H;
-            sel_x = (W - sel_w) / 2;
-            sel_y = (H - sel_h) / 2;
-        }
-        dirty_all();
+        uint32_t s120 = o->viewport ? o->scale120 : 120;
+        int row = text_px(s120 / 120.0), cw = row / 2, ch = row;
+        panel_font_size(panel_font(row, 0), &cw, &ch);
+        select_window(window_picker(o, hx, hy, NULL, NULL, ch), o);
         return;
     }
 
+    int inside = sel_has && sel_out == o && bx >= sel_x && bx < sel_x + sel_w && by >= sel_y && by < sel_y + sel_h;
     /* Annotation tool active */
-    if (active_tool != TOOL_NONE && nannos < MAX_ANNOS) {
+    if (active_tool != TOOL_NONE) {
+        last_click_valid = 0;
+        if (nannos >= MAX_ANNOS || (picked_window && !inside)) return;
         struct annotation *a = &annos[nannos++];
         memset(a, 0, sizeof *a);
         a->type = active_tool;
         a->out = o;
-        a->x0 = a->x1 = bx;
-        a->y0 = a->y1 = by;
+        a->win = picked_window;
+        a->x0 = a->x1 = bx - (a->win ? sel_x : 0);
+        a->y0 = a->y1 = by - (a->win ? sel_y : 0);
         if (active_tool == TOOL_NUMBER) {
             a->num = next_badge_num++;
             o->dirty = 1;
@@ -1939,30 +2078,32 @@ static void pointer_button(void *data, struct wl_pointer *p, uint32_t serial, ui
         if (active_tool == TOOL_PEN) {
             a->cap_pts = MAX_PTS;
             a->pts = malloc((size_t)a->cap_pts * sizeof *a->pts);
-            if (a->pts) a->pts[a->npts++] = (struct pt){ bx, by };
+            if (a->pts) a->pts[a->npts++] = (struct pt){ a->x0, a->y0 };
         }
         drag_state = DRAG_ANNO;
+        drag_out = o;
         o->dirty = 1;
         return;
     }
 
-    /* Double-click inside the selection: accept it, copied */
-    uint32_t ms = now_ms();
-    int inside = sel_has && sel_out == o && bx >= sel_x && bx < sel_x + sel_w && by >= sel_y && by < sel_y + sel_h;
-    if (inside && ms - last_click_ms < 350 && hypot(pointer_x - last_click_x, pointer_y - last_click_y) < 10) {
+    enum drag_kind hk = handle_at(o, bx, by);
+    int copy = inside && hk == DRAG_NONE && last_click_valid && time - last_click_ms < 350 &&
+               hypot(pointer_x - last_click_x, pointer_y - last_click_y) < 10;
+    last_click_valid = 0;
+    if (copy) {
         finish_with(FINISH_COPY);
         return;
     }
-    last_click_ms = ms;
     last_click_x = pointer_x;
     last_click_y = pointer_y;
+    drag_out = o;
+    drag_moved = 0;
+    drag_x0 = bx;
+    drag_y0 = by;
 
     /* Resize handle? */
-    enum drag_kind hk = handle_at(o, bx, by);
     if (hk != DRAG_NONE) {
         drag_state = hk;
-        drag_x0 = bx;
-        drag_y0 = by;
         drag_orig_x = sel_x;
         drag_orig_y = sel_y;
         drag_orig_w = sel_w;
@@ -1974,8 +2115,6 @@ static void pointer_button(void *data, struct wl_pointer *p, uint32_t serial, ui
     /* Move existing selection? */
     if (inside) {
         drag_state = DRAG_MOVE;
-        drag_x0 = bx;
-        drag_y0 = by;
         drag_orig_x = sel_x;
         drag_orig_y = sel_y;
         o->dirty = 1;
@@ -1986,10 +2125,8 @@ static void pointer_button(void *data, struct wl_pointer *p, uint32_t serial, ui
     sel_out = o;
     sel_has = 0;
     picked_window = NULL;
-    if (opt_mode == MODE_FULLSCREEN) opt_mode = MODE_REGION;
+    opt_mode = MODE_REGION;
     drag_state = DRAG_NEW;
-    drag_x0 = bx;
-    drag_y0 = by;
     dirty_all();
 }
 
@@ -2023,23 +2160,7 @@ static void key_pressed(xkb_keysym_t sym, int mods)
         finished = 1;
         return;
     case ACT_CANCEL:
-        if (picking_window) {
-            picking_window = 0;
-            dirty_all();
-        } else if (active_tool != TOOL_NONE) {
-            active_tool = TOOL_NONE;
-            dirty_all();
-        } else if (sel_has) {
-            sel_has = 0;
-            picked_window = NULL;
-            dirty_all();
-        } else if (opt_mode == MODE_FULLSCREEN) {
-            opt_mode = MODE_REGION;
-            dirty_all();
-        } else {
-            exit_code = 1;
-            finished = 1;
-        }
+        cancel_stage();
         return;
     case ACT_COPY:
         finish_with(FINISH_COPY);
@@ -2169,6 +2290,7 @@ static void seat_capabilities(void *data, struct wl_seat *s, uint32_t caps)
     } else if (!(caps & WL_SEAT_CAPABILITY_POINTER) && pointer) {
         wl_pointer_destroy(pointer);
         pointer = NULL;
+        pointer_reset();
     }
     if ((caps & WL_SEAT_CAPABILITY_KEYBOARD) && !keyboard) {
         keyboard = wl_seat_get_keyboard(s);
@@ -2338,7 +2460,6 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    cursor_theme = wl_cursor_theme_load(NULL, 24, shm);
     cursor_surface = wl_compositor_create_surface(compositor);
 
     if (opt_mode == MODE_UNDERCURSOR) {

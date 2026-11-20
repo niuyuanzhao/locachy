@@ -201,6 +201,9 @@ shot 0.5
 check "the pointer over the second window: it is framed, the others not" "framed 1 2 && ! framed 1 1 && ! framed 1 3"
 
 echo "== 3. search"
+click 1706 30 $L # the search field in the middle of the second output
+sleep 0.3
+check "clicking the search field on the second output keeps the overview up" "up"
 keys t w o
 shot 0.5
 check "typing two: only First: two ($(blobs 1); second screen: $(blobs 2))" "[ \"\$(count 1)\" = 1 ] && [ \"\$(count 2)\" = 0 ]"

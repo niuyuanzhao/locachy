@@ -7,6 +7,9 @@
 
 #include "base.h"
 
+__attribute__((weak)) void screen_cursor(int shape);
+__attribute__((weak)) void key_close_kept(void);
+
 #define BUTTON_FG 0xD0D0D0
 #define BUTTON_BG 0x304860
 #define MENU_FG   0xD0D0D0
@@ -99,7 +102,9 @@ int ui_button(int col, int row, const char *label, int id)
 
 int ui_menu(int col, int row, const char *const *items)
 {
-    int n = 0, w = 0, sel = 0, armed = 0; /* the release of the opening click chooses nothing */
+    int n = 0, w = 0, sel = 0, top = 0, armed = 0;
+    const struct pointer_event *opening = pointer_last();
+    int press_row = opening && opening->pressed ? opening->row : row;
     while (items[n]) {
         int len = ui_cells(items[n]);
         w = len > w ? len : w;
@@ -110,37 +115,59 @@ int ui_menu(int col, int row, const char *const *items)
     /* Drawn on the selected output: a press on another is outside. */
     int output = screen_is_extended && screen_is_extended() && screen_output_current ? screen_output_current() : 0;
     int cols = screen_cols(), rows = screen_rows();
-    if (col + w > cols) col = cols - w;
-    if (row + n > rows) row = rows - n;
-    col = col < 0 ? 0 : col;
-    row = row < 0 ? 0 : row;
+    if (cols <= 0 || rows <= 0) return -1;
+    int min_row = rows > 1, max_rows = rows - min_row;
+    int visible = n < max_rows ? n : max_rows;
+    if (w > cols) w = cols;
+    if (col > cols - w) col = cols - w;
+    if (row > rows - visible) row = rows - visible;
+    if (col < 0) col = 0;
+    if (row < min_row) row = min_row;
+    if (screen_cursor) screen_cursor(CURSOR_ARROW);
+    int drawn_top = -1, drawn_sel = -1;
     for (;;) {
-        for (int i = 0; i < n; i++) {
-            uint32_t bg = i == sel ? MENU_ON : MENU_BG, fg = i == sel ? MENU_BG : MENU_FG;
-            screen_fill(col, row + i, w, 1, bg);
-            screen_text(col + 1, row + i, items[i], fg, bg);
+        if (drawn_top != top || drawn_sel != sel) {
+            for (int i = 0; i < visible; i++) {
+                int selected = top + i == sel;
+                uint32_t bg = selected ? MENU_ON : MENU_BG, fg = selected ? MENU_BG : MENU_FG;
+                screen_fill(col, row + i, w, 1, bg);
+                screen_text(col + 1, row + i, items[top + i], fg, bg);
+            }
+            screen_flush();
+            drawn_top = top;
+            drawn_sel = sel;
         }
-        screen_flush();
         int key = key_poll_timeout(-1, -1);
-        if (key == K_UP) {
-            sel = (sel + n - 1) % n;
-        } else if (key == K_DOWN) {
-            sel = (sel + 1) % n;
+        if (key == K_UP || key == K_DOWN) {
+            sel = (sel + (key == K_UP ? n - 1 : 1)) % n;
+            if (sel < top) top = sel;
+            if (sel >= top + visible) top = sel - visible + 1;
         } else if (key == '\n') {
             return sel;
         } else if (key == 27 || key == K_SHOWN || key == K_CLOSE) {
-            return -1; /* the window's close: the menu goes; closing again closes the window */
+            if (key == K_CLOSE && key_close_kept) key_close_kept();
+            return -1;
         } else if (key == K_POINTER) {
             const struct pointer_event *e = pointer_last();
+            if (!e) continue;
+            if (e->cancelled) { armed = 0; continue; }
             int inside = e->output == output && e->col >= col && e->col < col + w &&
-                         e->row >= row && e->row < row + n;
-            if (!e->button && !e->wheel) {
-                armed = 1;
-                if (inside) sel = e->row - row; /* follows the pointer */
-            } else if (e->button == BTN_LEFT || e->button == BTN_RIGHT) {
+                         e->row >= row && e->row < row + visible;
+            if (inside && e->wheel && visible < n) {
+                int64_t next = (int64_t)top - e->wheel;
+                top = next < 0 ? 0 : next > n - visible ? n - visible : (int)next;
+                sel = top + e->row - row;
+            } else if (!e->button && !e->wheel && !e->hwheel && !e->gesture &&
+                       !e->scroll_dx && !e->scroll_dy) {
+                /* The opening release alone must not choose an item. */
+                if (!e->buttons || e->row != press_row) armed = 1;
+                if (inside) sel = top + e->row - row;
+            } else if (e->button == BTN_LEFT || e->button == BTN_RIGHT || e->button == BTN_MIDDLE) {
                 if (!inside && e->pressed) return -1;
-                if (inside && e->pressed) armed = 1;
-                if (inside && !e->pressed && armed) return e->row - row; /* on release, as menus do */
+                if (e->button == BTN_MIDDLE) continue;
+                if (inside && !e->pressed && armed) return top + e->row - row;
+                armed = e->pressed && inside;
+                if (armed) sel = top + e->row - row;
             }
         }
     }

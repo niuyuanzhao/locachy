@@ -551,6 +551,32 @@ static void test_scrollbar(void)
     puts("PASS the mini-map of a million lines: drawn, jumped and edited (the times above)");
 }
 
+static void test_wrapped_scrollbar(void)
+{
+    reset();
+    char text[8192];
+    memset(text, 'a', sizeof text - 1);
+    text[sizeof text - 1] = '\0';
+    struct tab *t = open_text("wrapped-scroll.txt", text);
+    t->scrollbar = t->minimap = 1;
+    struct scroll_geom g;
+    scroll_geometry(0, t, &g);
+    CHECK(t->wrap && g.total == (size_t)line_rows(t, text_width(0, t), 0) && g.max > 10);
+    scroll_to(0, t, 10);
+    scroll_geometry(0, t, &g);
+    CHECK(t->top == 0 && t->sub == 10 && g.value == 10);
+    size_t max = g.max;
+    draw();
+    click(g.x + 1, g.y + g.slider_a, BTN_LEFT, 1, 1);
+    CHECK(scroll_drag.on);
+    pointer_at(g.x + 1, g.y + g.slider_a + 2, 0, 0, 0, 1, 0, 0);
+    scroll_geometry(0, t, &g);
+    CHECK(g.max == max && g.value > 10 && t->top == 0 && t->sub == (int)g.value);
+    click(g.x + 1, g.y + g.slider_a, BTN_LEFT, 0, 0);
+    CHECK(!scroll_drag.on);
+    puts("PASS wrapped mini-map: visual total, smooth subrow jumping and stable drag range");
+}
+
 static void test_auto_brackets(void)
 {
     reset();
@@ -642,6 +668,16 @@ static void test_remove_spaces(void)
          "spaces, the others keep them; undo back to the file leaves it");
 }
 
+static void toggle_line_numbers(void)
+{
+    for (int i = 0; i < 6; i++) push(K_DOWN, 0, NULL); /* View > Borders */
+    push('\n', 0, NULL);
+    push(K_DOWN, 0, NULL);
+    push('\n', 0, NULL); /* Show Line Numbers */
+    key('v', KEYS_ALT);
+    CHECK(qhead == qtail);
+}
+
 static void test_menus_views_zoom(void)
 {
     reset();
@@ -665,13 +701,23 @@ static void test_menus_views_zoom(void)
     push('\n', 0, NULL);
     key('f', KEYS_ALT); /* File > New */
     CHECK(ndocs == 2 && !cur_tab()->doc->path[0]);
-    /* Shift+F10 opens the menu (File). */
-    push(K_DOWN, 0, NULL);
+    /* Shift+F10 opens Edit; Esc cancels, Enter runs Undo, Down then Enter runs Redo. */
+    d = cur_tab()->doc;
+    keys("x");
+    draw();
     push(27, 0, NULL);
     key(K_F1 + 9, KEYS_SHIFT);
-    CHECK(qhead == qtail && on_screen("Open...") == 3);
+    CHECK(qhead == qtail && on_screen("Undo ") > 1 && on_screen("Paste Selection") > 1 && on_screen("Open...") < 0);
+    CHECK(text_is(d, "x"));
+    push('\n', 0, NULL);
+    key(K_F1 + 9, KEYS_SHIFT);
+    CHECK(qhead == qtail && text_is(d, ""));
+    push(K_DOWN, 0, NULL);
+    push('\n', 0, NULL);
+    key(K_F1 + 9, KEYS_SHIFT);
+    CHECK(qhead == qtail && text_is(d, "x"));
     puts("PASS menus: the menu bar File, Edit, Selection, Go, View, LSP Client, Tools, Sessions; Alt+F/E/C/G/V/L/T/I "
-         "open them, Enter runs an item, Shift+F10 opens the menu bar's first");
+         "open them, Enter runs an item, Shift+F10 opens Edit, Esc cancels and Undo/Redo work there");
 
     /* Each item under Kate's menu: find and replace under Edit, Go to Line,
      * brackets, modified lines and Bookmarks under Go, the borders under
@@ -698,9 +744,10 @@ static void test_menus_views_zoom(void)
         { SUB_BOOKMARKS, EA_NEXT_BOOKMARK, "Next: 4 - \"four\"", "Alt+PgDown" },
         { SUB_BOOKMARKS, EA_PREV_BOOKMARK, "Previous: 1 - \"one\"", "Alt+PgUp" },
         { SUB_SPLIT_VIEW, EA_SPLIT_V, "Split Vertical", "Ctrl+Shift+L" },
+        { SUB_SPLIT_VIEW, EA_SPLIT_H, "Split Horizontal", "" },
         { SUB_TOOL_VIEWS, EA_SIDEBARS, "Show Sidebars", "Ctrl+Alt+Shift+F" },
-        { SUB_BORDERS, EA_ICON_BORDER, "Show Icon Border", "F6" }, { SUB_BORDERS, EA_NUMBERS, "Show Line Numbers", "F11" },
-        { SUB_WORD_WRAP, EA_WRAP, "Dynamic Word Wrap", "F10" }, { MENU_TOOLS, EA_INDENT, "Indent", "Ctrl+I" },
+        { SUB_BORDERS, EA_ICON_BORDER, "Show Icon Border", "F6" }, { SUB_BORDERS, EA_NUMBERS, "Show Line Numbers", "" },
+        { SUB_WORD_WRAP, EA_WRAP, "Dynamic Word Wrap", "" }, { MENU_TOOLS, EA_INDENT, "Indent", "Ctrl+I" },
         { MENU_LSP, EA_LANGUAGE, "Language Server...", "Ctrl+Alt+K" }, { MENU_SESSIONS, EA_SESSION_MANAGE, "Manage Sessions...", "" },
     };
     struct editor_item list[EDITOR_ITEMS];
@@ -730,6 +777,14 @@ static void test_menus_views_zoom(void)
     push('\n', 0, NULL);
     key('v', KEYS_ALT);
     CHECK(qhead == qtail && t->icons);
+    int wrap = t->wrap;
+    key(K_F1 + 9, 0); /* F10 alone must not toggle word wrap. */
+    CHECK(t->wrap == wrap);
+    for (int i = 0; i < 5; i++) push(K_DOWN, 0, NULL); /* View > Word Wrap */
+    push('\n', 0, NULL);
+    push('\n', 0, NULL);
+    key('v', KEYS_ALT);
+    CHECK(qhead == qtail && t->wrap != wrap);
     int n = editor_items(SUB_BOOKMARKS, list);
     CHECK(n == 6 && strcmp(list[4].label, "1 - \"one\"") == 0 && strcmp(list[5].label, "4 - \"four\"") == 0);
     for (int i = 0; i < 12; i++) push(K_DOWN, 0, NULL); /* to Bookmarks */
@@ -744,8 +799,13 @@ static void test_menus_views_zoom(void)
 
     reset();
     t = open_text("views.txt", "one\ntwo\n");
-    key('t', KEYS_CTRL | KEYS_SHIFT); /* Split Horizontal */
-    CHECK(nspaces == 2 && active == 1 && tab_of(0)->doc == tab_of(1)->doc);
+    key('t', KEYS_CTRL | KEYS_SHIFT); /* No longer a shortcut for Split Horizontal. */
+    CHECK(nspaces == 1);
+    push('\n', 0, NULL); /* View > Split View */
+    for (int i = 0; i < 3; i++) push(K_DOWN, 0, NULL);
+    push('\n', 0, NULL); /* Split Horizontal */
+    key('v', KEYS_ALT);
+    CHECK(qhead == qtail && nspaces == 2 && active == 1 && tab_of(0)->doc == tab_of(1)->doc);
     struct edit_rect upper = space_rect(0), lower = space_rect(1);
     CHECK(lower.y > upper.y && lower.x == upper.x && lower.w == upper.w);
     key('l', KEYS_CTRL | KEYS_SHIFT);
@@ -764,7 +824,7 @@ static void test_menus_views_zoom(void)
     CHECK(nspaces == 1 && ndocs == 1 && cur_tab());
     key('r', KEYS_CTRL | KEYS_SHIFT);
     CHECK(nspaces == 1 && cur_tab()); /* the only view stays */
-    puts("PASS views: Ctrl+Shift+T splits horizontally (the new view below, active), F8 and Shift+F8 go round, "
+    puts("PASS views: View > Split View splits horizontally (the new view below, active), F8 and Shift+F8 go round, "
          "Ctrl+Shift+R closes the current view, never the last");
 
     /* Font zoom on the content font (a recording one here). */
@@ -939,10 +999,13 @@ static void test_line_markers(void)
     draw();
     CHECK(grid[y0 + 5][g - 1].fg == C_MODIFIED && grid[y0 + 2][g - 1].fg == C_SAVED);
     /* Without line numbers: a column of their own after the folding markers'. */
-    key(K_F1 + 10, 0);
+    key(K_F1 + 10, 0); /* F11 alone must not change the border. */
+    CHECK(t->numbers);
+    toggle_line_numbers();
     draw();
     CHECK(gutter(t) == 2 && grid[y0 + 5][1].cp == 0x258C && grid[y0 + 5][1].fg == C_MODIFIED && grid[y0 + 5][2].cp == 'a');
-    key(K_F1 + 10, 0);
+    toggle_line_numbers();
+    CHECK(t->numbers);
     /* A wrapped line has it on each of its rows. */
     char long_line[400];
     memset(long_line, 'w', 300);
@@ -959,7 +1022,7 @@ static void test_line_markers(void)
     keys("new text");
     draw();
     CHECK(gutter(cur_tab()) == 4 && grid[y0][3].cp != 0x258C);
-    key(K_F1 + 10, 0);
+    toggle_line_numbers();
     CHECK(gutter(cur_tab()) == 1);
     show_doc(active, d);
     t = cur_tab();
@@ -1071,6 +1134,18 @@ static void test_scroll_preview(void)
     clock_now += 0.3;
     draw();
     CHECK(row_from(3, "int value149;") == 12 && col_of(12, "int value149;") == g.x - w + 1 + 4);
+    pointer_at(g.x, g.y + 13, 0, 0, 0, 0, -1, 0);
+    CHECK(preview.space < 0 && !preview.shown && preview_timeout() < 0);
+    hover(g.x, g.y + 13, (g.y + 13) * 20 + 5);
+    clock_now += 0.3;
+    draw();
+    CHECK(preview.shown);
+    key(K_RIGHT, 0);
+    CHECK(preview.space < 0 && !preview.shown);
+    hover(g.x, g.y + 13, (g.y + 13) * 20 + 5);
+    CHECK(preview_timeout() > 0);
+    hover(-1, -1, -1);
+    CHECK(preview.space < 0 && preview_timeout() < 0);
     editor_action(EA_MINIMAP);
     /* A document that fits has no range to preview. */
     t = open_text("fits.c", "int a;\nint b;\n");
@@ -1086,7 +1161,7 @@ static void test_scroll_preview(void)
     reset();
     puts("PASS Scroll Bar Preview (on by default): 250 ms after the pointer comes over the mini-map or the scrollbar, "
          "the lines at its place in their colours, beside it; it follows the pointer, fills to the end, goes on a press "
-         "or when the pointer leaves; none for a document that fits");
+         "or key, wheel or pointer leave; none for a document that fits");
 }
 
 int main(int argc, char **argv)
@@ -1101,6 +1176,7 @@ int main(int argc, char **argv)
     test_documents();
     test_switcher();
     test_scrollbar();
+    test_wrapped_scrollbar();
     test_auto_brackets();
     test_remove_spaces();
     test_menus_views_zoom();
