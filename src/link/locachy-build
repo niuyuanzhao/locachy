@@ -29,9 +29,13 @@
 # as the build user (never sourced by root). Dependencies are installed only
 # in that root. Its root-owned build record follows the packages into the
 # cache; locachy-pkg uses it to notice recipe/patch and host-library changes.
+# locachy-build --prepare-batch DIR SHA256: build pinned candidates in
+# independent disposable roots, then test their exact outputs together.
 # locachy-build --prepare DIR --local NAME: build and seal one pinned output;
 # --validate-prepared DIR installs all sealed outputs together in a disposable
-# target root and runs each contract there before any host transaction.
+# target root and runs its installed-package smoke checks before any host
+# transaction. --regress-prepared DIR SHA256 runs the full developer
+# regressions against the sealed outputs; it never writes update proofs.
 # locachy-build --run COMMAND...: COMMAND in a build root, as the build user
 # (what a build sees; for the tests).
 # Source signing keys: makepkg checks a recipe's signed sources against its
@@ -74,8 +78,15 @@ for fdpath in /proc/self/fd/*; do
 done
 
 bdir=/var/lib/locachy/builder
-home=$bdir/home    # the build user's
+home=$bdir/home    # the build user's logical home inside a build root
+home_source=$home
 run=$bdir/run      # this run's root (upper, work, the root itself, tmp, out)
+case ${LOCACHY_BUILD_STAGE:-} in
+    ns|batch-worker)
+        run=${LOCACHY_BUILD_RUN:-$run}
+        home_source=${LOCACHY_BUILD_HOME_SOURCE:-$home}
+        ;;
+esac
 handover=$bdir/out # in the build root: what it made
 out=/var/cache/locachy-pkgs
 user=locachy-builder
@@ -83,7 +94,14 @@ recipes=/usr/local/src/locachy/pkgbuilds
 patches=/usr/local/src/locachy/aur-patches
 records=/var/lib/locachy/local-packages
 prepare=${LOCACHY_BUILD_PREPARE:-}
+build_jobserver=${LOCACHY_BUILD_JOBSERVER:-}
+build_jobs=${LOCACHY_BUILD_JOBS:-}
+root_jobserver=/run/locachy-jobserver
 validate=0
+regress=0
+batch=0
+batch_hash=
+regression_hash=
 
 die() {
     echo "locachy-build: $*" >&2
@@ -282,6 +300,49 @@ for base in sorted(bases):
 PY
 }
 
+defer_jobserver() {
+    printf 'locachy-build: %s: serial build required: %s\n' "$name" "$*" >&2
+    exit 76
+}
+
+check_jobserver() {
+    local features version
+    # Use the tools installed in this target, as seen by the build user.
+    as_builder test -r "$root_jobserver" && as_builder test -w "$root_jobserver" ||
+        die "build user cannot read and write the mounted jobserver FIFO"
+    if grep -Eq '^[[:space:]]*options(_[[:alnum:]_]+)?[[:space:]]*=[[:space:]]*!makeflags[[:space:]]*$' /run/locachy-local.srcinfo; then
+        defer_jobserver 'the recipe disables MAKEFLAGS'
+    fi
+    # Do not override an explicit makepkg configuration opt-out.
+    local flags_option
+    flags_option=$(as_builder bash -c '
+        source /usr/share/makepkg/util/config.sh
+        source /usr/share/makepkg/util/option.sh
+        source_makepkg_config /etc/makepkg.conf >/dev/null
+        if check_option makeflags n; then printf disabled; fi
+    ') || die 'could not check makepkg jobserver configuration'
+    [ "$flags_option" != disabled ] || defer_jobserver 'makepkg configuration disables MAKEFLAGS'
+    # Only audited tracked recipes can use the pool. Neither GNU Make nor
+    # Ninja joins it if the recipe forces its own -j; the known MuPDF -j1
+    # is safe and is not changed here.
+    case "$name" in
+        libmupdf|libpaper)
+            features=$(as_builder /usr/bin/make --no-print-directory -f - <<'MAKE'
+probe:
+	@printf '%s\n' '$(.FEATURES)'
+MAKE
+            ) || defer_jobserver 'could not query target GNU Make features'
+            [[ " $features " == *' jobserver-fifo '* ]] || defer_jobserver 'target GNU Make lacks FIFO jobserver support'
+            ;;
+        labwc-locachy|libinput|libinput-tools)
+            version=$(as_builder /usr/bin/ninja --version) || defer_jobserver 'could not query target Ninja version'
+            [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ "$(vercmp "$version" 1.13.0)" -ge 0 ] ||
+                defer_jobserver "target Ninja $version lacks supported FIFO jobserver (need 1.13 or newer)"
+            ;;
+        *) defer_jobserver 'recipe is not approved for the shared jobserver' ;;
+    esac
+}
+
 if [ "${LOCACHY_BUILD_STAGE:-}" = chroot ]; then
     if [ "${1:-}" = --run ]; then
         shift
@@ -294,13 +355,17 @@ if [ "${LOCACHY_BUILD_STAGE:-}" = chroot ]; then
     # One keyring checks every source signature: the build user's, which
     # --trust-key keeps. pikaur run as root would take pacman's
     # (/etc/pacman.d/gnupg, the packages' signers) unless told this one.
-    keyring_open
-    trap keyring_close EXIT
+    if [ "${1:-}:${2:-}" != --validate-prepared:--regression ]; then
+        keyring_open
+        trap keyring_close EXIT
+    fi
     keyring=(--build-gpgdir "$home/.gnupg")
     if [ -n "$prepare" ]; then
         # Every candidate starts from the same repository target. Only this
         # disposable root temporarily lacks the old local packages; dependents
         # stay installed and all exact replacements are restored before tests.
+        base_started=$SECONDS
+        echo "== locachy-build: preparing the pinned repository base"
         local_names=()
         while read -r name; do local_names+=("$name"); done < <(python3 -I - "$prepare/plan.json" <<'PY'
 import json, re, sys
@@ -365,9 +430,10 @@ for name in names: print(name)
 PY
         )
         [ "${#declared[@]}" -eq 0 ] || pacman -S --needed --noscriptlet --noconfirm "${assume[@]}" "${declared[@]}"
-        pacman -Q >"$handover/target-base-packages.txt"
-        [ "${1:-}" != --validate-prepared ] || exit 0
+        pacman -Q >"${LOCACHY_BUILD_BASE_MANIFEST:-$handover/target-base-packages.txt}"
+        echo "== locachy-build: pinned repository base ready ($((SECONDS - base_started)) s)"
     fi
+    [ "${1:-}" != --validate-prepared ] || exit 0
     if [ "${1:-}" = --local ]; then
         name=${2:?local recipe name required}
         src="$home/local/$name"
@@ -377,7 +443,8 @@ PY
         chown -hR "$user:$user" "$src"
         # Even --printsrcinfo sources PKGBUILD: only the build user runs it,
         # in the isolated root. No host-side shell evaluation of recipes.
-        as_builder bash -c 'cd "$1"; makepkg --printsrcinfo' bash "$src" > /run/locachy-local.srcinfo
+        # A metadata error is a build failure, not a scheduler status.
+        as_builder bash -c 'cd "$1" && makepkg --printsrcinfo' bash "$src" > /run/locachy-local.srcinfo || exit 1
         repo_deps=() aur_deps=()
         while read -r dep; do
             [ -n "$dep" ] || continue
@@ -391,7 +458,16 @@ PY
         done < <(awk -v arch="$(uname -m)" '$1 == "depends" || $1 == "makedepends" || $1 == "checkdepends" || \
             $1 == "depends_" arch || $1 == "makedepends_" arch || $1 == "checkdepends_" arch {print $3}' \
             /run/locachy-local.srcinfo | sort -u)
-        [ "${#repo_deps[@]}" -eq 0 ] || pacman -S --needed --noconfirm --asdeps "${repo_deps[@]}"
+        if [ "${LOCACHY_BUILD_REPO_ONLY:-0}" = 1 ] && [ "${#aur_deps[@]}" -gt 0 ]; then
+            printf 'locachy-build: %s: serial dependency resolution required: %s\n' "$name" "${aur_deps[*]}"
+            exit 76
+        fi
+        if [ "${#repo_deps[@]}" -gt 0 ]; then
+            deps_started=$SECONDS
+            echo "== locachy-build: $name: installing build dependencies in its disposable root"
+            pacman -S --needed --noconfirm --asdeps "${repo_deps[@]}"
+            echo "== locachy-build: $name: build dependencies ready ($((SECONDS - deps_started)) s)"
+        fi
         # Every key this build checks with, before anything is built.
         if [ "${#aur_deps[@]}" -gt 0 ]; then
             keys=$(aur_keys "${aur_deps[@]}") || die "the AUR did not answer for: ${aur_deps[*]}"
@@ -410,9 +486,48 @@ PY
                 [ ! -f "$f" ] || cp -f "$f" "$handover/"
             done
         fi
+        config_args=()
+        if [ -n "$build_jobserver" ] || [ -n "$build_jobs" ]; then
+            config=/run/locachy-makepkg.conf
+            # --config skips loading the default/user configuration. Load it
+            # first through makepkg's own helper so only job settings change.
+            printf '%s\n' 'source_makepkg_config /etc/makepkg.conf' >"$config"
+            if [ -n "$build_jobserver" ]; then
+                check_jobserver
+                # Each worker already has one implicit slot. Make and Ninja
+                # borrow any additional slots from the same FIFO. Tools that
+                # do not join it get only that one slot.
+                flags="-j --jobserver-auth=fifo:$root_jobserver"
+                printf '%s\n' 'export NINJA=/usr/bin/ninja' >>"$config"
+                echo "== locachy-build: $name: using the shared FIFO jobserver"
+            else
+                flags="-j$build_jobs"
+                echo "== locachy-build: $name: using the serial build path ($build_jobs Make jobs)"
+            fi
+            {
+                printf 'export MAKEFLAGS=%q\n' "$flags"
+                # These tools do not consume the GNU FIFO protocol; keep them
+                # single-threaded so they cannot multiply a worker's slots.
+                printf 'COMPRESSZST=(zstd -c --single-thread -)\n'
+                printf 'export MESON_NUM_PROCESSES=1 CARGO_BUILD_JOBS=1 CMAKE_BUILD_PARALLEL_LEVEL=1\n'
+            } >>"$config"
+            config_args=(--config "$config")
+        fi
         # makepkg verifies the source signatures against validpgpkeys with the
-        # keys checked above (never --skippgpcheck).
-        as_builder env LANG=C.UTF-8 PKGDEST="$handover" bash -c 'cd "$1"; makepkg --force --noconfirm' bash "$src"
+        # keys checked above (never --skippgpcheck). Do not turn a compile
+        # failure into a request to retry on the serial path.
+        build_started=$SECONDS
+        printf '== locachy-build: %s: makepkg start %s\n' "$name" "$(date +%s.%N)"
+        as_builder env LANG=C.UTF-8 PKGDEST="$handover" \
+            bash -c 'cd "$1" || exit; shift; exec makepkg "$@" --force --noconfirm' bash "$src" "${config_args[@]}" || {
+                status=$?
+                if [ -n "$build_jobserver" ] && { [ "$status" = 3 ] || [ "$status" = 76 ]; }; then
+                    exit 1 # These statuses are reserved for pre-makepkg checks.
+                fi
+                exit "$status"
+            }
+        printf '== locachy-build: %s: makepkg end %s\n' "$name" "$(date +%s.%N)"
+        echo "== locachy-build: $name: makepkg complete ($((SECONDS - build_started)) s)"
         exit 0
     fi
     if [ -n "$tool" ]; then
@@ -551,17 +666,37 @@ PY
     exit 0
 fi
 
+mount_build_overlay() {
+    # userxattr lets mapped root create overlay whiteouts without trusted.*
+    mount -t overlay overlay -o "lowerdir=$1,upperdir=$2/upper,workdir=$2/work,userxattr" "$2/root"
+}
+
+new_build_run() {
+    mkdir -p "$run/upper" "$run/work" "$run/root" "$run/sealed"
+    chmod 0700 "$run/sealed"
+    install -d -m 1777 "$run/tmp"
+    install -d -m 0755 -o "$user" -g "$user" "$run/out"
+}
+
 if [ "${LOCACHY_BUILD_STAGE:-}" = ns ]; then
     root=$run/root
-    # userxattr lets mapped root create overlay whiteouts without trusted.*
-    # xattrs, so package removal and build-root cleanup work rootlessly.
-    mount -t overlay overlay -o "lowerdir=/,upperdir=$run/upper,workdir=$run/work,userxattr" "$root"
+    mount_build_overlay / "$run"
     # Its own /proc, /sys (read-only), /run and /tmp; of /dev, what builds use.
     mount -t proc proc "$root/proc" -o nosuid,noexec,nodev
     # A fresh sysfs mount is refused in a mapped user namespace. Clone the
     # existing tree recursively read-only, including any cgroup mounts.
     mount -o rbind,ro=recursive /sys "$root/sys"
     mount -t tmpfs run "$root/run" -o mode=0755,nosuid,nodev
+    if [ -n "$build_jobserver" ]; then
+        [[ "$build_jobserver" = /* && -p "$build_jobserver" && ! -L "$build_jobserver" ]] ||
+            die "jobserver must be an absolute path to the coordinator's FIFO"
+        # Bind just the inode, not its directory. Each worker opens this
+        # same FIFO read/write; no other state becomes shared.
+        touch "$root$root_jobserver"
+        mount --bind -o rw "$build_jobserver" "$root$root_jobserver"
+        [[ -p "$root$root_jobserver" && "$build_jobserver" -ef "$root$root_jobserver" ]] ||
+            die "mount did not expose the coordinator's FIFO"
+    fi
     if [ "${1:-}" = --local ]; then
         mkdir -p "$root/run/locachy-recipe"
         mount --bind -o ro "$run/recipe" "$root/run/locachy-recipe"
@@ -602,11 +737,22 @@ if [ "${LOCACHY_BUILD_STAGE:-}" = ns ]; then
     mount -t tmpfs -o mode=0755,nosuid,nodev,size=1m hidden "$root/home"
     mount -t tmpfs -o mode=0700,nosuid,nodev hidden "$root/root" # root's home, for pikaur run as root
     mkdir -p "$root$home" "$root$handover"
-    mount --bind "$home" "$root$home"
+    if [ "${1:-}:${2:-}" != --validate-prepared:--regression ]; then
+        mount --bind "$home_source" "$root$home"
+    fi
     mount --bind "$run/out" "$root$handover"
     mkdir -p "$root$out"
     mount --bind -o ro "$out" "$root$out"
-    mount --bind /var/cache/pacman/pkg "$root/var/cache/pacman/pkg"
+    if [ -n "${LOCACHY_BUILD_PRIVATE_HOME:-}" ] || [ "${2:-}" = --regression ]; then
+        # Concurrent workers and developer checks see the host package
+        # cache as read-only. Pacman's first cache is private to this run.
+        mkdir -p "$root/run/locachy-pacman-cache"
+        mount --bind -o ro /var/cache/pacman/pkg "$root/run/locachy-pacman-cache"
+        mount --bind "$run/cache" "$root/var/cache/pacman/pkg"
+        sed -i '/^\[options\][[:space:]]*$/a CacheDir = /var/cache/pacman/pkg\nCacheDir = /run/locachy-pacman-cache' "$root/etc/pacman.conf"
+    else
+        mount --bind /var/cache/pacman/pkg "$root/var/cache/pacman/pkg"
+    fi
     if [ -f /etc/netns/locachy-net/resolv.conf ]; then
         cp -f /etc/netns/locachy-net/resolv.conf "$root/etc/resolv.conf" 2>/dev/null || true
     else
@@ -617,9 +763,19 @@ if [ "${LOCACHY_BUILD_STAGE:-}" = ns ]; then
     # runs as root first; the build user's is set when it becomes it).
     env=(env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/bin HOME=/root LANG=C.UTF-8 TERM="${TERM:-dumb}"
         LOCACHY_BUILD_STAGE=chroot ${LOCACHY_BUILD_REBUILD:+LOCACHY_BUILD_REBUILD=1}
-        ${prepare:+LOCACHY_BUILD_PREPARE=/run/locachy-update})
+        ${prepare:+LOCACHY_BUILD_PREPARE=/run/locachy-update}
+        ${build_jobserver:+LOCACHY_BUILD_JOBSERVER=$root_jobserver}
+        ${build_jobs:+LOCACHY_BUILD_JOBS=$build_jobs}
+        LOCACHY_BUILD_REPO_ONLY="${LOCACHY_BUILD_REPO_ONLY:-0}")
     net=()
     [ ! -e /run/netns/locachy-net ] || net=(ip netns exec locachy-net)
+    base_manifest=$run/out/target-base-packages.txt
+    if [ -n "${LOCACHY_BUILD_PRIVATE_HOME:-}" ]; then
+        mkdir -m 0700 "$root/run/locachy-build-proof"
+        mount --bind "$run/sealed" "$root/run/locachy-build-proof"
+        env+=(LOCACHY_BUILD_BASE_MANIFEST=/run/locachy-build-proof/target-base-packages.txt)
+        base_manifest=$run/sealed/target-base-packages.txt
+    fi
     # A build cannot leave descendants running to rewrite its hand-over.
     # This also keeps package scripts away from the host process tree.
     "${net[@]}" unshare --pid --fork --kill-child --mount-proc="$root/proc" \
@@ -640,15 +796,15 @@ if [ "${LOCACHY_BUILD_STAGE:-}" = ns ]; then
                 artifact=$run/sealed/${f##*/}
             done
             [ -n "$artifact" ] || die "prepared build did not produce $2"
-            bsdtar -xOf "$artifact" .BUILDINFO >"$run/out/BUILDINFO"
+            bsdtar -xOf "$artifact" .BUILDINFO >"$run/sealed/BUILDINFO"
         else
             # All unprivileged builds have ended. Copy their sealed exact
             # outputs, checking bytes and the common repository base first.
-            python3 -B - "$prepare" "$run" <<'PY'
+            python3 -B - "$prepare" "$run" "$base_manifest" <<'PY'
 import hashlib, json, os, pathlib, shutil, sys
-plan, run = map(pathlib.Path, sys.argv[1:])
+plan, run, manifest = map(pathlib.Path, sys.argv[1:])
 data = json.loads((plan / 'plan.json').read_text())
-base = hashlib.sha256((run / 'out/target-base-packages.txt').read_bytes()).hexdigest()
+base = hashlib.sha256(manifest.read_bytes()).hexdigest()
 builds = {}
 for name in sorted(data['recipes']):
     directory = plan / 'prepared' / name
@@ -686,9 +842,13 @@ PY
             chroot "$root" pacman -Q >"$run/out/target-packages.txt"
             test_source=$(python3 -I - "$prepare/plan.json" <<'PY'
 import json, sys
-with open(sys.argv[1]) as f: plan=json.load(f)
-source=plan.get('test_source',{}).get('snapshot')
-if not source: raise RuntimeError('update plan has no pinned test sources')
+from pathlib import Path
+plan_path = Path(sys.argv[1])
+with plan_path.open() as f:
+    plan = json.load(f)
+source = plan.get('test_source', {}).get('snapshot')
+if source != str(plan_path.parent / 'test-source'):
+    raise RuntimeError('update plan has no pinned test-source directory')
 print(source)
 PY
             )
@@ -699,12 +859,26 @@ import json, sys
 with open(sys.argv[1]) as f: print('\n'.join(sorted(json.load(f)['recipes'])))
 PY
             )
+            gate_mode=()
+            gate_label='update smoke'
+            gate_timeout=30
+            if [ "${2:-}" = --regression ]; then
+                gate_mode=(--regression)
+                gate_label='developer regression'
+                gate_timeout=600
+            fi
             for name in "${names[@]}"; do
                 mkdir -p "$run/gate/$name"
-                timeout 600 bash -x "$gate" "$name" "$root" "$test_source" "$run/gate/$name" \
-                    >"$run/gate/$name/runner.log" 2>&1 || {
-                    tail -n 50 "$run/gate/$name/runner.log"; exit 1;
-                }
+                gate_started=$SECONDS
+                echo "== locachy-build: $name: running $gate_label against all installed candidates"
+                if timeout --kill-after=5 "$gate_timeout" bash -x "$gate" "$name" "$root" "$test_source" "$run/gate/$name" "${gate_mode[@]}" \
+                    >"$run/gate/$name/runner.log" 2>&1; then
+                    echo "== locachy-build: $name: $gate_label passed ($((SECONDS - gate_started)) s)"
+                else
+                    echo "== locachy-build: $name: $gate_label failed ($((SECONDS - gate_started)) s)" >&2
+                    tail -n 50 "$run/gate/$name/runner.log"
+                    exit 1
+                fi
             done
             chroot "$root" pacman -Q >"$run/out/target-after-tests.txt"
             cmp -s "$run/out/target-packages.txt" "$run/out/target-after-tests.txt" || die "contracts changed the tested package set"
@@ -887,7 +1061,15 @@ bg=0
 inst=0
 local_recipe=0
 usage="usage: locachy-build [-b] [-i] [-r] [--local] PKG... | --files ROOT PKG... | --run COMMAND... | --check-keys PKG... | --trust-key FINGERPRINT..."
-if [ "${1:-}" != --run ]; then
+if [ "${1:-}" = --prepare-batch ]; then
+    [ $# -eq 3 ] && [[ "$3" =~ ^[0-9a-f]{64}$ ]] || die "--prepare-batch needs a pinned update directory and SHA256"
+    batch=1
+    prepare=$2
+    batch_hash=$3
+    [[ "$prepare" = /* && -d "$prepare" && ! -L "$prepare" && "$(realpath -e -- "$prepare")" = "$prepare" ]] ||
+        die "prepare directory must be an absolute canonical pinned directory"
+    export LOCACHY_BUILD_PREPARE=$prepare
+elif [ "${1:-}" != --run ]; then
     while [ $# -gt 0 ]; do
         case "$1" in
         -b) bg=1; shift ;;
@@ -906,15 +1088,27 @@ if [ "${1:-}" != --run ]; then
             shift 2
             break
             ;;
+        --regress-prepared)
+            [ $# -eq 3 ] && [[ "$3" =~ ^[0-9a-f]{64}$ ]] ||
+                die "--regress-prepared needs a pinned update directory and its SHA256"
+            prepare=$2
+            regression_hash=$3
+            validate=1
+            regress=1
+            break
+            ;;
         --) shift; break ;;
         -*) echo "$usage" >&2; exit 2 ;;
         *) break ;;
         esac
     done
 fi
-if [ "$validate" = 1 ]; then set -- --validate-prepared; fi
+if [ "$validate" = 1 ]; then
+    set -- --validate-prepared
+    [ "$regress" = 0 ] || set -- "$@" --regression
+fi
 [ $# -gt 0 ] || { echo "$usage" >&2; exit 2; }
-if [ -n "$prepare" ]; then
+if [ -n "$prepare" ] && [ "$batch" = 0 ]; then
     { [ "$local_recipe" = 1 ] || [ "$validate" = 1 ]; } && [ "$inst" = 0 ] && [ "$bg" = 0 ] || die "--prepare needs --local without -i or -b"
     [[ "$prepare" = /* ]] && [ -d "$prepare" ] && [ ! -L "$prepare" ] || die "prepare directory must be an absolute pinned directory"
     prepare=$(realpath -e -- "$prepare")
@@ -941,12 +1135,99 @@ fi
 
 getent passwd "$user" >/dev/null && [ -d "$home" ] || die "no build user $user with its home $home: make.sh makes them"
 install -d -m 0755 -o root -g root "$out"
-exec {lock}>"$bdir/lock"
-flock -x "$lock"
+if [ "${LOCACHY_BUILD_STAGE:-}" = batch-worker ]; then
+    [ -n "$prepare" ] && [ "$inst" = 0 ] && [ "$bg" = 0 ] && [ "$batch" = 0 ] &&
+        [ "$regress" = 0 ] && { [ "$local_recipe" = 1 ] || [ "$validate" = 1 ]; } || die "invalid batch worker action"
+    if [ -n "$build_jobserver" ]; then
+        [ "$local_recipe" = 1 ] && [ "${LOCACHY_BUILD_PRIVATE_HOME:-}" = 1 ] &&
+            [ "${LOCACHY_BUILD_REPO_ONLY:-0}" = 1 ] || die "the jobserver requires a private repo-only batch worker"
+    fi
+    if [ -n "$build_jobs" ]; then
+        [[ "$build_jobs" =~ ^[1-9][0-9]*$ ]] || die "LOCACHY_BUILD_JOBS must be a positive integer"
+    fi
+else
+    # Job controls only apply to the coordinator's prepared workers.
+    unset LOCACHY_BUILD_JOBSERVER LOCACHY_BUILD_JOBS
+    exec {lock}>"$bdir/lock"
+    flock -x "$lock"
+fi
+if [ "$batch" = 1 ]; then
+    # The one coordinator retains the builder lock. Only its independent
+    # workers enter chroots; none installs anything into the host.
+    batchdir=$(mktemp -d "$bdir/prepare.XXXXXXXX")
+    trap 'rm -rf -- "$batchdir"' EXIT
+    python3 -IB - "$0" "$prepare" "$batch_hash" "$batchdir" <<'PY'
+import sys
+sys.path.insert(0, '/usr/local/lib/locachy')
+from locachy_transaction import build_batch, TransactionError
+try:
+    sys.exit(build_batch(*sys.argv[1:]))
+except (OSError, ValueError, TransactionError) as e:
+    sys.exit(f'locachy-build: {e}')
+PY
+    exit 0
+fi
+if [ "$regress" = 1 ]; then
+    # Use the installed verifier, never a module from the plan being checked.
+    python3 -IB - "$prepare" "$regression_hash" <<'PY'
+import hashlib, os, re, stat, subprocess, sys
+from pathlib import Path
+sys.path.insert(0, '/usr/local/lib/locachy')
+from locachy_transaction import load_snapshot, read_json, TransactionError
+try:
+    directory = Path(sys.argv[1])
+    # Check's plans and their snapshots must not be writable by the builder.
+    # Check this before opening plan.json and again for the copied inputs.
+    def protected(path, kind, owners):
+        info = path.lstat()
+        if info.st_uid not in owners or info.st_mode & 0o022 or not kind(info.st_mode):
+            raise TransactionError(f'unprotected regression input: {path}')
+    owner = {os.geteuid()}
+    for parent in reversed(directory.parents):
+        protected(parent, stat.S_ISDIR, owner | {0})
+    protected(directory, stat.S_ISDIR, owner)
+    for name in ('plan.json', 'pacman.conf'):
+        protected(directory / name, stat.S_ISREG, owner)
+    for name in ('test-source', 'sync'):
+        tree = directory / name
+        protected(tree, stat.S_ISDIR, owner)
+        for path in tree.rglob('*'):
+            protected(path, lambda mode: stat.S_ISDIR(mode) or stat.S_ISREG(mode), owner)
+    host = hashlib.sha256(subprocess.check_output(['pacman', '-Q'])).hexdigest()
+    directory, data = load_snapshot({'directory': str(directory), 'sha256': sys.argv[2]}, host)
+    if data.get('test_source', {}).get('snapshot') != str(directory / 'test-source'):
+        raise TransactionError('update plan has no pinned test sources in its own directory')
+    prepared = directory / 'prepared'
+    protected(prepared, stat.S_ISDIR, owner)
+    for name in data['recipes']:
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9@._+-]*', name):
+            raise TransactionError(f'invalid package name: {name}')
+        package = prepared / name
+        protected(package, stat.S_ISDIR, owner)
+        metadata = package / 'build.json'
+        protected(metadata, stat.S_ISREG, owner)
+        archive = Path(read_json(metadata)['artifact'])
+        if archive.parent != package or not archive.name.endswith('.pkg.tar.zst'):
+            raise TransactionError(f'{name}: regression input is not a sealed package archive')
+        protected(archive, stat.S_ISREG, owner)
+except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError, TransactionError) as e:
+    sys.exit(f'locachy-build: {e}')
+PY
+fi
 rm -rf "$run" # what a run that was cut short left
-mkdir -p "$run/upper" "$run/work" "$run/root"
-install -d -m 1777 "$run/tmp"
-install -d -m 0755 -o "$user" -g "$user" "$run/out"
+new_build_run
+if [ "$regress" = 1 ]; then
+    install -d -m 0755 -o root -g root "$run/cache"
+fi
+if [ -n "${LOCACHY_BUILD_PRIVATE_HOME:-}" ]; then
+    # The persistent builder home is unchanged. Copy cached source inputs
+    # and the already approved signing state into this worker's own home.
+    # Reflink where available; never hardlink writeable build state.
+    install -d -m 0700 -o "$user" -g "$user" "$run/home"
+    cp -a --reflink=auto "$home_source/." "$run/home/"
+    home_source=$run/home
+    install -d -m 0755 -o root -g root "$run/cache"
+fi
 if [ "${1:-}" = --local ]; then
     # Freeze the exact trusted inputs before entering the disposable root;
     # the compiler cannot change the recipe used for the build record.
@@ -1003,8 +1284,14 @@ PY
 fi
 modprobe overlay 2>/dev/null || true
 status=0
-unshare --mount --propagation private env LOCACHY_BUILD_STAGE=ns "$0" "$@" || status=$?
-if [ -s "$run/out/untrusted-keys" ]; then
+unshare --mount --propagation private env LOCACHY_BUILD_STAGE=ns LOCACHY_BUILD_RUN="$run" \
+    LOCACHY_BUILD_HOME_SOURCE="$home_source" "$0" "$@" || status=$?
+if [ "${LOCACHY_BUILD_STAGE:-}" = batch-worker ]; then
+    # The coordinator publishes deferred key requests after workers stop.
+    if [ "$status" = 3 ] && [ -s "$run/out/untrusted-keys" ]; then exit 3; fi
+    if [ "$status" = 76 ] && [ "${LOCACHY_BUILD_REPO_ONLY:-0}" = 1 ]; then exit 76; fi
+fi
+if [ "$regress" = 0 ] && [ "${LOCACHY_BUILD_STAGE:-}" != batch-worker ] && [ -s "$run/out/untrusted-keys" ]; then
     sort -u "$run/out/untrusted-keys" >"$bdir/untrusted-keys"
     chmod 0644 "$bdir/untrusted-keys"
     echo "locachy-build: source signing keys not trusted yet; none is added by itself. Nothing was built:"
@@ -1014,21 +1301,40 @@ if [ -s "$run/out/untrusted-keys" ]; then
     echo "locachy-build: check each with its upstream project, then (as root):"
     echo "Trust them: locachy-build --trust-key $(awk '{print $2}' "$bdir/untrusted-keys" | sort -u | tr '\n' ' ' | sed 's/ $//')"
     status=3
-elif [ "$status" = 0 ]; then
+elif [ "$regress" = 0 ] && [ "${LOCACHY_BUILD_STAGE:-}" != batch-worker ] && [ "$status" = 0 ]; then
     rm -f "$bdir/untrusted-keys"
 fi
 if [ -n "$prepare" ]; then
+    if [ "$regress" = 1 ]; then
+        # Keep separate logs for the exact co-installed set; never update
+        # prepared/*/result.json or overwrite the update smoke proofs.
+        logdir=$(mktemp -d "$prepare/regression.XXXXXXXX")
+        if [ -d "$run/gate" ]; then cp -a "$run/gate/." "$logdir/"; fi
+        for manifest in target-base-packages.txt target-packages.txt; do
+            if [ -f "$run/out/$manifest" ]; then cp "$run/out/$manifest" "$logdir/"; fi
+        done
+        if [ -f "$run/sealed/builds.json" ]; then cp "$run/sealed/builds.json" "$logdir/"; fi
+        rm -rf "$run"
+        echo "== locachy-build: developer regression logs: $logdir (exit $status; host packages unchanged)"
+        exit "$status"
+    fi
     if [ "$status" != 0 ]; then
         failed=$prepare/failed/${2:-contracts}
         install -d -m 0700 -o root -g root "$failed"
-        if [ -d "$run/gate" ]; then cp -a "$run/gate/." "$failed/"; fi
+        if [ -d "$run/gate" ]; then
+            attempt=$(mktemp -d "$failed/attempt.XXXXXXXX")
+            cp -a "$run/gate/." "$attempt/"
+            echo "== locachy-build: failed update smoke logs: $attempt" >&2
+        fi
         rm -rf "$run"
         exit "$status"
     fi
     if [ "$validate" = 1 ]; then
-        python3 -B - "$prepare" "$run" <<'PY'
+        validation_base=$run/out/target-base-packages.txt
+        [ -z "${LOCACHY_BUILD_PRIVATE_HOME:-}" ] || validation_base=$run/sealed/target-base-packages.txt
+        python3 -B - "$prepare" "$run" "$validation_base" <<'PY'
 import importlib.util, json, pathlib, shutil, sys
-plan, run = map(pathlib.Path, sys.argv[1:])
+plan, run, base_manifest = map(pathlib.Path, sys.argv[1:])
 data = json.loads((plan / 'plan.json').read_text())
 source = pathlib.Path(data['test_source']['snapshot'])
 spec = importlib.util.spec_from_file_location('locachy_transaction', source / 'link/locachy_transaction.py')
@@ -1050,8 +1356,8 @@ for name, item in builds.items():
         raise RuntimeError(f"{name}: package contract did not pass: expected id={expected!r}, "
                            f"got name={gate.get('name')!r}, id={gate.get('id')!r}, "
                            f"passed={gate.get('passed')!r}; trusted source {data['test_source']['sha256']}")
-    for filename in ('target-packages.txt', 'target-base-packages.txt'):
-        shutil.copyfile(run / 'out' / filename, directory / filename)
+    shutil.copyfile(run / 'out' / 'target-packages.txt', directory / 'target-packages.txt')
+    shutil.copyfile(base_manifest, directory / 'target-base-packages.txt')
     old = directory / 'gate'
     if old.exists(): shutil.rmtree(old)
     shutil.copytree(run / 'gate' / name, old)
@@ -1069,7 +1375,15 @@ PY
         find "$destination" -maxdepth 1 -type f -name '*.pkg.tar.zst' -delete
         cp -a "$run/sealed/"*.pkg.tar.zst "$destination/"
         for metadata in target-base-packages.txt BUILDINFO; do
-            cp "$run/out/$metadata" "$destination/$metadata"
+            case "$metadata" in
+                BUILDINFO) cp "$run/sealed/BUILDINFO" "$destination/$metadata" ;;
+                target-base-packages.txt)
+                    if [ -n "${LOCACHY_BUILD_PRIVATE_HOME:-}" ]; then
+                        cp "$run/sealed/target-base-packages.txt" "$destination/$metadata"
+                    else
+                        cp "$run/out/$metadata" "$destination/$metadata"
+                    fi ;;
+            esac
         done
         cp "$run/local-record.json" "$destination/build-record.json"
         python3 -B - "$destination" "$2" "$prepare" <<'PY'

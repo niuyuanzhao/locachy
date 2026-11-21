@@ -18,6 +18,8 @@ belonging to another process. This is dependency-consistent packaging, not
 filesystem rollback or an atomic guarantee about arbitrary package hooks.
 """
 import contextlib
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from threading import RLock
 import fcntl
 import glob
 import hashlib
@@ -25,6 +27,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import signal
 import shutil
@@ -36,6 +39,11 @@ import time
 
 class TransactionError(RuntimeError):
     pass
+
+
+# A shared worker cannot use the jobserver path (e.g. an AUR dependency).
+# Only a pre-compilation deferral uses this status, never a makepkg failure.
+SERIAL_DEPS = 76
 
 
 # The host package domain: the jobs runner holds it for every job that changes
@@ -296,6 +304,19 @@ def _invoke(run, command, **kwargs):
     return p
 
 
+@contextlib.contextmanager
+def timed_stage(label):
+    """Separate package work from the setup, contracts, and host hooks."""
+    started = time.monotonic()
+    status = "failed"
+    print(f"===> {label}", flush=True)
+    try:
+        yield
+        status = "done"
+    finally:
+        print(f"===> {label}: {status} ({time.monotonic() - started:.1f} s)", flush=True)
+
+
 def package_versions(text):
     packages = {}
     for line in text.splitlines():
@@ -363,6 +384,285 @@ def reusable_results(directory, data):
     return results
 
 
+def build_resources(workspace):
+    """Return the CPU ceiling and available RAM and disk in bytes."""
+    limit = len(os.sched_getaffinity(0))
+    try:
+        available = next(int(line.split()[1]) * 1024
+                         for line in Path('/proc/meminfo').read_text().splitlines()
+                         if line.startswith('MemAvailable:'))
+        group = next(line[3:] for line in Path('/proc/self/cgroup').read_text().splitlines()
+                     if line.startswith('0::/'))
+        mount = Path('/sys/fs/cgroup')
+        relative = Path(group.lstrip('/'))
+        current = mount / relative
+        # Only visible cgroup v2 ancestors can constrain this estimate.
+        if '..' in relative.parts or not current.is_dir():
+            return 1, 0, 0
+        while True:
+            if (current / 'cpu.max').is_file():
+                quota, period = (current / 'cpu.max').read_text().split()
+                if quota != 'max':
+                    limit = min(limit, int(quota) // int(period))
+            if (current / 'memory.max').is_file():
+                cap = (current / 'memory.max').read_text().strip()
+                if cap != 'max':
+                    used = int((current / 'memory.current').read_text())
+                    available = min(available, int(cap) - used)
+            if current == mount:
+                break
+            current = current.parent
+        free = shutil.disk_usage(workspace).free
+    except (StopIteration, OSError, ValueError):
+        return 1, 0, 0
+    return max(1, limit), available, free
+
+
+def build_slot_budget(workspace):
+    """Estimate slots from the effective CPUs, available RAM and workspace."""
+    cpus, available, free = build_resources(workspace)
+    gib = 1024 ** 3
+    return max(1, min(cpus, available // gib, free // (2 * gib)))
+
+
+def build_resource_headroom(workspace):
+    """Do not start an additional root when RAM or disk is tight."""
+    _, available, free = build_resources(workspace)
+    gib = 1024 ** 3
+    return available >= 2 * gib and free >= 4 * gib
+
+
+@contextlib.contextmanager
+def build_jobserver(workspace, slots):
+    """Own and seed the batch's GNU jobserver FIFO, including implicit slots."""
+    info = workspace.lstat()
+    if (os.geteuid() != 0 or info.st_uid != 0 or not stat.S_ISDIR(info.st_mode) or
+            info.st_mode & 0o077):
+        raise TransactionError('build jobserver needs a private root-owned workspace')
+    try:
+        builder_gid = pwd.getpwnam('locachy-builder').pw_gid
+    except KeyError:
+        raise TransactionError('build jobserver needs the locachy-builder account') from None
+    path = workspace / 'build-jobserver.fifo'
+    with contextlib.ExitStack() as cleanup:
+        os.mkfifo(path, 0o600)
+        cleanup.callback(path.unlink, missing_ok=True)
+        # Linux permits a read/write FIFO open without another participant.
+        # Keep both ends alive; children open the path independently so their
+        # blocking I/O cannot change the coordinator's nonblocking descriptor.
+        fd = os.open(path, os.O_RDWR | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW)
+        cleanup.callback(os.close, fd)
+        # Root owns the inode; only the build group can open the bind-mounted
+        # FIFO inside the worker. The host workspace itself remains private.
+        os.fchown(fd, 0, builder_gid)
+        os.fchmod(fd, 0o660)
+        # A partial read does not free its pipe buffer until the entire page
+        # is drained. Leave a page of headroom for nonblocking token returns.
+        capacity = slots + os.sysconf('SC_PAGESIZE')
+        if capacity > fcntl.fcntl(fd, fcntl.F_GETPIPE_SZ):
+            fcntl.fcntl(fd, fcntl.F_SETPIPE_SZ, capacity)
+        if os.write(fd, b'+' * slots) != slots:
+            raise TransactionError('could not seed the build jobserver FIFO')
+        yield path, fd
+
+
+def run_build_workers(names, slots, active_limit, fd, launch, cancelled, has_headroom=lambda: True):
+    """Reserve one global token per active package worker."""
+    def run(name, token):
+        try:
+            return launch(name)
+        finally:
+            os.write(fd, token)
+
+    pending = iter(names)
+    name = next(pending, None)
+    codes = {}
+    # The executor need not create more threads than the FIFO can admit.
+    workers = min(slots, active_limit)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        active = {}
+        while True:
+            for future in tuple(active):
+                if future.done():
+                    finished = active.pop(future)
+                    code = future.result()
+                    if code:
+                        codes[finished] = code
+            if (name is not None and len(active) < workers and not cancelled() and
+                    all(code == SERIAL_DEPS for code in codes.values()) and
+                    (not active or has_headroom())):
+                try:
+                    token = os.read(fd, 1)
+                except BlockingIOError:
+                    if not active:
+                        raise TransactionError('build jobserver has no tokens with no active workers') from None
+                    # A child can return an extra token without exiting. Do
+                    # not wait indefinitely for either FIFO I/O or worker exit.
+                    wait(active, timeout=0.1, return_when=FIRST_COMPLETED)
+                else:
+                    if not token:
+                        raise TransactionError('build jobserver closed while admitting a worker')
+                    try:
+                        future = pool.submit(run, name, token)
+                    except BaseException:
+                        os.write(fd, token)
+                        raise
+                    active[future] = name
+                    name = next(pending, None)
+            elif active:
+                # Under resource pressure wait for a build to finish before
+                # admitting a new root; running clients still share the FIFO.
+                wait(active, return_when=FIRST_COMPLETED)
+            else:
+                return codes
+
+
+def build_batch(build_tool, directory, digest, workspace):
+    """Entry point from the builder-lock holder; no operation installs on host."""
+    def installed_hash():
+        installed = subprocess.check_output(['pacman', '-Q'])
+        return hashlib.sha256(installed).hexdigest()
+
+    reference = {'directory': directory, 'sha256': digest}
+    directory, data = load_snapshot(reference, installed_hash())
+    workspace = Path(workspace).absolute()
+    names = sorted(data['recipes'], key=lambda name: (name != 'libmupdf', name))
+    if not names:
+        raise TransactionError('prepared update has no packages')
+    override = os.environ.get('LOCACHY_BUILD_WORKERS')
+    active_limit = len(names)
+    if override is not None:
+        try:
+            active_limit = min(active_limit, int(override))
+        except ValueError:
+            raise TransactionError('LOCACHY_BUILD_WORKERS must be a positive integer') from None
+        if active_limit < 1:
+            raise TransactionError('LOCACHY_BUILD_WORKERS must be a positive integer')
+    slots = build_slot_budget(workspace)
+    logs = directory / 'build-logs'
+    logs.mkdir(mode=0o700, exist_ok=True)
+    print(f'===> prepare: up to {min(slots, active_limit)} package build worker(s), '
+          f'{slots} shared job slot(s), separate target roots', flush=True)
+
+    processes = set()
+    process_lock = RLock()
+    cancelled = False
+
+    def stop(signum, _frame):
+        nonlocal cancelled
+        cancelled = True
+        with process_lock:
+            for child in processes:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(child.pid, signal.SIGTERM)
+
+    def run_stage(name, params, jobserver=None):
+        run = workspace / name
+        work = dict(os.environ, LOCACHY_BUILD_STAGE='batch-worker', LOCACHY_BUILD_RUN=str(run),
+                    LOCACHY_BUILD_PRIVATE_HOME='1' if name != 'contracts' else '',
+                    LOCACHY_BUILD_REPO_ONLY='1' if jobserver is not None else '0')
+        for key in ('LOCACHY_BUILD_CPUS', 'LOCACHY_BUILD_JOBSERVER', 'LOCACHY_BUILD_JOBS'):
+            work.pop(key, None)
+        if jobserver is not None:
+            work['LOCACHY_BUILD_JOBSERVER'] = str(jobserver)
+            work['LOCACHY_BUILD_JOBS'] = str(slots)
+        log = logs / (name + '.log')
+        started = time.monotonic()
+        print(f'===> prepare: {name} start ({time.time():.3f}); log: {log}', flush=True)
+        with log.open('a', encoding='utf-8') as output:
+            with process_lock:
+                if cancelled:
+                    return 130
+                child = subprocess.Popen([build_tool, *params], env=work, stdin=subprocess.DEVNULL,
+                                         stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+                processes.add(child)
+                if cancelled:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(child.pid, signal.SIGTERM)
+            try:
+                code = child.wait()
+            finally:
+                with process_lock:
+                    processes.discard(child)
+        print(f'===> prepare: {name} {"done" if code == 0 else "stopped"} '
+              f'({time.monotonic() - started:.1f} s, exit {code})', flush=True)
+        if code:
+            with log.open('rb') as stream:
+                stream.seek(max(0, log.stat().st_size - 6000))
+                print(stream.read().decode(errors='replace').rstrip(), flush=True)
+        return code
+
+    def build(name, jobserver=None):
+        return run_stage('pkg-' + name, ['--prepare', str(directory), '--local', name],
+                         jobserver=jobserver)
+
+    def report_keys(failed):
+        keys = set()
+        for name, code in failed.items():
+            if code == 3:
+                report = workspace / ('pkg-' + name) / 'out/untrusted-keys'
+                if report.is_symlink() or not report.exists() or not stat.S_ISREG(report.lstat().st_mode):
+                    raise TransactionError(f'{name}: missing regular signing-key report')
+                with report.open(encoding='utf-8') as entries:
+                    content = entries.read(64 * 1024 + 1)
+                if len(content) > 64 * 1024:
+                    raise TransactionError(f'{name}: signing-key report is too large')
+                for line in content.splitlines():
+                    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9@._+-]* (?:[0-9A-F]{40}|[0-9A-F]{64})', line):
+                        raise TransactionError(f'{name}: invalid signing-key report')
+                    keys.add(line)
+        if not keys:
+            return False
+        # Only the coordinator writes this legacy notification file.
+        path = workspace.parent / 'untrusted-keys'
+        fd, tmp = tempfile.mkstemp(dir=workspace.parent, prefix='.untrusted-keys.')
+        try:
+            with os.fdopen(fd, 'w') as output:
+                output.write('\n'.join(sorted(keys)) + '\n')
+                os.fchmod(output.fileno(), 0o644)
+            os.replace(tmp, path)
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+        for line in sorted(keys):
+            print('Source key to trust: ' + line, flush=True)
+        fingerprints = sorted({line.split()[1] for line in keys})
+        print('Trust them: locachy-build --trust-key ' + ' '.join(fingerprints), flush=True)
+        return True
+
+    with contextlib.ExitStack() as cleanup:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            cleanup.callback(signal.signal, sig, signal.signal(sig, stop))
+        with build_jobserver(workspace, slots) as (jobserver, jobserver_fd):
+            failed = run_build_workers(
+                names, slots, active_limit, jobserver_fd,
+                lambda name: build(name, jobserver),
+                lambda: cancelled, lambda: build_resource_headroom(workspace))
+        if cancelled:
+            return 130
+        if report_keys(failed):
+            return 3
+        if any(code != SERIAL_DEPS for code in failed.values()):
+            return 1
+        # Only pre-compilation deferrals are retried, after shared workers
+        # drain. Keep the recipe's normal job settings outside the jobserver.
+        for name in names:
+            if name in failed:
+                print(f'===> prepare: {name} uses the serial build path', flush=True)
+                code = build(name)
+                if code or cancelled:
+                    return 130 if cancelled else (3 if report_keys({name: code}) else 1)
+        (workspace.parent / 'untrusted-keys').unlink(missing_ok=True)
+        load_snapshot(reference, installed_hash())
+        code = run_stage('contracts', ['--validate-prepared', str(directory)])
+        if cancelled:
+            return 130
+        if code:
+            return 1
+        load_snapshot(reference, installed_hash())
+        verify_combined_results({name: prepared_result(directory, name, data) for name in names})
+    return 0
+
+
 def prepare(reference, build_tool, host_hash, run=subprocess.run):
     directory, data = load_snapshot(reference, host_hash())
     reused = reusable_results(directory, data)
@@ -375,12 +675,7 @@ def prepare(reference, build_tool, host_hash, run=subprocess.run):
         result = directory / "prepared" / name / "result.json"
         if result.exists():
             result.unlink()
-    for name in sorted(data["recipes"]):
-        print(f"===> prepare: build and seal {name} before host changes", flush=True)
-        _invoke(run, [build_tool, "--prepare", str(directory), "--local", name])
-        load_snapshot(reference, host_hash())
-    print("===> prepare: test all local outputs together before host changes", flush=True)
-    _invoke(run, [build_tool, "--validate-prepared", str(directory)])
+    _invoke(run, [build_tool, "--prepare-batch", str(directory), reference["sha256"]])
     load_snapshot(reference, host_hash())
     results = {name: prepared_result(directory, name, data) for name in sorted(data["recipes"])}
     verify_combined_results(results)
@@ -611,9 +906,9 @@ def install(reference, directory, data, results, host_hash, db_path="/var/lib/pa
                 raise TransactionError("package manager returned no pinned transaction preview")
             selected_manifest = preview_manifest(preview.stdout)
             verify_install_versions(selected_manifest, directory, results)
-            print("===> install: repository updates and validated local packages in one transaction", flush=True)
-            _invoke(run, net(with_local(pacman + ["-Su", "--noconfirm", "--ask", "4"] + targets,
-                                        real_local, private_db / "local")))
+            with timed_stage("install: pacman transaction and hooks"):
+                _invoke(run, net(with_local(pacman + ["-Su", "--noconfirm", "--ask", "4"] + targets,
+                                            real_local, private_db / "local")))
             verify_recorded(selected_manifest, real_local)
             publish_sync(state / "sync", Path(db_path) / "sync")
             record_published(Path(db_path) / "sync", record)

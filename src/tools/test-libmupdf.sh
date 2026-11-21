@@ -1,22 +1,46 @@
 #!/bin/bash
 # The libmupdf contract in a disposable target root: the candidate opens
-# Markdown by itself (its bundled cmark-gfm gives headings their ids, so
-# links to them resolve), still opens PDF and EPUB, and view-render builds
-# against it and passes its own test.
+# Markdown by itself (its bundled cmark-gfm gives headings their ids).
+# The full regression also opens PDF and EPUB and tests view-render.
 set -euo pipefail
-out=${1:?usage: test-libmupdf.sh RESULT_DIRECTORY}
+usage='usage: test-libmupdf.sh RESULT_DIRECTORY [--update-smoke]'
+out=${1:?$usage}
+if [ "$#" -gt 2 ] || { [ "$#" -eq 2 ] && [ "$2" != --update-smoke ]; }; then
+    printf '%s\n' "$usage" >&2
+    exit 2
+fi
+mode=${2-}
+probe() {
+    if [ "$mode" = --update-smoke ]; then
+        timeout --kill-after=5 30 "$@"
+    else
+        "$@"
+    fi
+}
 src=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 mkdir -p "$out"
 exec > >(tee "$out/libmupdf.log") 2>&1
+rm -f "$out/gate.json"
 dir=/tmp/libmupdf-test
 rm -rf "$dir"
 mkdir -p "$dir"
-gcc -O2 -Wall -Wextra -Werror "$src/tools/test-libmupdf.c" -o "$dir/alone" -lmupdf
+probe gcc -O2 -Wall -Wextra -Werror "$src/tools/test-libmupdf.c" -o "$dir/alone" -lmupdf
 # Nothing but libmupdf may supply cmark-gfm here.
-ldd "$dir/alone" >"$out/alone.ldd"
+probe ldd "$dir/alone" >"$out/alone.ldd"
 if grep -q 'libcmark-gfm' "$out/alone.ldd"; then
     echo 'FAIL libmupdf loads a system cmark-gfm'
     exit 1
+fi
+if [ "$mode" = --update-smoke ]; then
+    probe "$dir/alone" "$dir" --update-smoke
+    probe python3 -I - "$out/gate.json" <<'PY'
+import json, sys
+json.dump({'name': 'libmupdf', 'id': 'libmupdf-markdown-smoke-v1', 'passed': True,
+           'scope': 'update-smoke', 'tests': ['markdown-heading-anchors', 'no-system-cmark-gfm']},
+          open(sys.argv[1], 'w'), sort_keys=True)
+PY
+    printf '%s\n' 'PASS libmupdf Markdown heading anchors without system cmark-gfm'
+    exit 0
 fi
 timeout 60 "$dir/alone" "$dir"
 # Our renderer, built against the candidate's headers and library. Its test

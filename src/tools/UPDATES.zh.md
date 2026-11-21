@@ -173,17 +173,43 @@ ALHP 和 CachyOS 的顺序遵循用户的规则。规则只决定顺序，每个
 
 ## 软件包合约
 
-本地补丁包在一次性根中以非特权用户构建，使用固定的软件源快照。精确封存的
-产物一同装进另一个一次性根，可信合约在其中执行，不暴露宿主显示或输入设备。
-证据记录完整产物集合、目标包、源码哈希及必需合约编号。不一致则停止宿主更新，
-不能以编译器成功退出来绕过。
+准备好的更新针对一个固定的宿主快照构建和测试。`locachy-build
+--validate-prepared DIR` 在一次性目标根中一起安装封存的候选包，再运行可信的
+更新冒烟检查，然后才允许宿主软件包事务。证明绑定完整候选包集合、目标包、源码哈希
+和合约 ID。检查失败、证明缺失或不匹配都会在宿主事务前停止更新。
 
-同一快照下，之前一次尝试留下的结果，只要上述各项校验仍然成立（宿主、配方、目标包集合、
-可信测试源和产物哈希都与本次快照一致，且是一起测试的），就直接沿用、不再编译。因此同一计划的
-重试不编译任何东西；这些输入一旦变化，就重新编译。
+| 软件包 | 更新冒烟中保留的检查 | 单独运行的完整检查 |
+| --- | --- | --- |
+| `labwc-locachy` | 无头启动，以及 Wayland 和 clipboard-guard 套接字 | 宿主客户端重建；clipboard、restricted clipboard、guard 策略、cgroup freezer；inner-edge、bar-corner、corner snapping 与 drop gate |
+| `libmupdf` | 独立打开 Markdown 标题锚点，且不加载系统 `cmark-gfm` | PDF、EPUB 和 `view-render` |
+| `libpaper` | 重复 init/done、目录清理和 XDG 所有权 | 启用泄漏检测的 ASan/UBSan |
+| `libinput` | epoch、`libinput.so` 提供项、Panasonic 圆形触控板 quirks、链接和 context 创建 | 修补后的 circular-scroll litest 与 pointer VM 仍是单独的发布检查 |
+| `libinput-tools` | CLI 命令和辅助程序、无 debug GUI、ELF/运行库依赖及与 `libinput` 的版本匹配 | 没有另一套完整套件 |
 
-`tools/test-local-packages.py`、`test-update-transaction.py` 及
-`test-prepared-builder.py` 用替身检查流程。
+仅供开发者使用：通常在应用前，于一次性开发宿主或根环境中对同一批封存候选包运行
+`locachy-build --regress-prepared DIR SHA256`。传入事务快照／检查锁定时输出的固定
+`plan.json` 的可信 SHA-256，不要事后对不可信的计划计算摘要来授权。命令在运行任何测试
+之前校验固定的输入和原始已安装软件包指纹。
+
+labwc 的完整检查会创建专用的 cgroup 子树和命名空间；没有可写的委派 cgroup v2 就会
+失败。日志写到 `DIR/regression.*`；密钥信任通知、更新证明和宿主软件包均不变。两个
+libinput 包在两种模式中使用同样的已安装检查。
+
+每个独立构建的软件包都有自己的一次性根、包数据库、构建 home、密钥环和可写缓存。
+同时运行的构建根数量由 CPU 亲和性和配额，以及运行时的可用内存和磁盘空间决定。
+可用 `LOCACHY_BUILD_WORKERS` 另设上限。
+
+GNU Make 和 Ninja 1.13 及以上版本通过 GNU Make FIFO jobserver 共享 CPU 槽位。
+每个活动构建根自带一个隐式槽位，每个额外任务从共享池领取一个槽位。不为 worker
+静态绑核，保留上游显式指定的 `-j1`。不使用 jobserver 的压缩和测试按 worker 限制并发。
+
+工具不受支持或依赖需要从 AUR 获取时，走原来的串行阶段；编译或签名失败不会触发回退。
+每个包的日志记录实际的 `makepkg` 开始和结束时间。最终验证仍会在新的一次性根中
+一起安装全部候选包，之后才允许唯一的宿主事务。
+
+构建检查会复用可信检查中相同的文件管理器对象，并分别记录准备、包构建、合约和宿主事务的耗时；输出显示最长路径，而不会把整个更新错误归给最后出现的包。它不会跳过合约或事务后重建。失败的批次保留在 `/var/lib/locachy/local-packages/transactions/`，不会静默复用未经验证的产物。
+
+`tools/test-local-packages.py`、`test-update-transaction.py` 和 `test-prepared-builder.py` 会用替身检查这套编排。
 
 ## 添加包名
 

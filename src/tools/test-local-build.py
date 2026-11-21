@@ -233,7 +233,8 @@ class LocalBuild(unittest.TestCase):
         --check-keys mode: GnuPG only lists keys there; no keyserver, import or
         trust operation, and no variable or option that skips the lookup."""
         text = SOURCE.read_text()
-        helpers = text[text.index('\n# "NAME FINGERPRINT [NEEDED'):text.index("\nPY\n}\n") + 5]
+        start = text.index('\n# "NAME FINGERPRINT [NEEDED')
+        helpers = text[start:text.index("\nPY\n}\n", start) + 5]
         mode = text[text.index('\nif [ "${1:-}" = --check-keys ]; then'):]
         mode = mode[:mode.index("\nfi\n") + 4]
         for region in (helpers, mode):

@@ -19,5 +19,5 @@
     "locachy-drop.h"
   ],
   "source_directory": "labwc",
-  "gate": "labwc-clipboard-corner-drop-v4"
+  "gate": "labwc-locachy-update-smoke-v1"
 }

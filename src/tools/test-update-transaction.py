@@ -119,6 +119,9 @@ class UpdateTransaction(unittest.TestCase):
         with self.assertRaisesRegex(tx.TransactionError, "repository snapshot changed"):
             tx.load_snapshot(self.reference, self.host)
 
+    def batch_command(self, builder="builder"):
+        return [builder, "--prepare-batch", str(self.directory), self.reference["sha256"]]
+
     def test_failed_build_occurs_before_any_package_transaction(self):
         calls = []
         def run(command):
@@ -126,7 +129,7 @@ class UpdateTransaction(unittest.TestCase):
             return subprocess.CompletedProcess(command, 7)
         with self.assertRaises(tx.TransactionError):
             tx.prepare(self.reference, "/candidate/locachy-build", lambda: self.host, run)
-        self.assertEqual(calls, [["/candidate/locachy-build", "--prepare", str(self.directory), "--local", "example"]])
+        self.assertEqual(calls, [self.batch_command("/candidate/locachy-build")])
         self.assertEqual((self.db / "local/unchanged").read_text(), "old")
         self.assertFalse((self.db / "db.lck").exists())
 
@@ -151,9 +154,125 @@ class UpdateTransaction(unittest.TestCase):
         directory, data, results = tx.prepare(self.reference, "builder", lambda: self.host, run)
         self.assertEqual(directory, self.directory)
         self.assertEqual(set(results), {"example"})
-        self.assertEqual(calls, [["builder", "--prepare", str(self.directory), "--local", "example"],
-                                 ["builder", "--validate-prepared", str(self.directory)]])
+        self.assertEqual(calls, [self.batch_command()])
         self.assertFalse(any("pacman" in c for c in calls))
+
+    @contextlib.contextmanager
+    def worker_tokens(self, count):
+        fifo = self.root / 'worker-tokens'
+        os.mkfifo(fifo, 0o600)
+        fd = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
+        try:
+            os.write(fd, b'+' * count)
+            yield fd
+            self.assertEqual(os.read(fd, count + 1), b'+' * count)
+            with self.assertRaises(BlockingIOError):
+                os.read(fd, 1)
+        finally:
+            os.close(fd)
+            fifo.unlink()
+
+    def test_pooled_workers_reserve_implicit_tokens(self):
+        import threading
+
+        both_started = threading.Barrier(2, timeout=5)
+        observed_tokens = threading.Barrier(2, timeout=5)
+        calls = []
+        with self.worker_tokens(4) as fd:
+            def launch(name):
+                calls.append(name)
+                if name in ('a', 'b'):
+                    both_started.wait()
+                    if name == 'a':
+                        extra = os.read(fd, 4)
+                        self.assertEqual(extra, b'++')
+                        os.write(fd, extra)
+                    observed_tokens.wait()
+                return tx.SERIAL_DEPS if name == 'c' else 0
+
+            self.assertEqual(tx.run_build_workers(['a', 'b', 'c'], 4, 2, fd, launch, lambda: False),
+                             {'c': tx.SERIAL_DEPS})
+        self.assertCountEqual(calls, ['a', 'b', 'c'])
+
+    def test_worker_failure_stops_serial_dispatch(self):
+        calls = []
+
+        def launch(name):
+            calls.append(name)
+            return 7
+
+        with self.worker_tokens(1) as fd:
+            self.assertEqual(tx.run_build_workers(['a', 'b'], 1, 1, fd, launch, lambda: False), {'a': 7})
+        self.assertEqual(calls, ['a'])
+
+    def test_worker_failure_drains_other_worker_and_stops_dispatch(self):
+        import threading
+
+        both_started = threading.Barrier(2, timeout=5)
+        finished = []
+
+        def launch(name):
+            self.assertIn(name, ('a', 'b'))
+            both_started.wait()
+            finished.append(name)
+            return 7
+
+        with self.worker_tokens(2) as fd:
+            self.assertEqual(tx.run_build_workers(['a', 'b', 'c'], 2, 2, fd, launch, lambda: False),
+                             {'a': 7, 'b': 7})
+        self.assertCountEqual(finished, ['a', 'b'])
+
+    def test_worker_cancellation_stops_dispatch_and_returns_slot(self):
+        cancelled = False
+        calls = []
+
+        def launch(name):
+            nonlocal cancelled
+            calls.append(name)
+            cancelled = True
+            return 130
+
+        with self.worker_tokens(2) as fd:
+            self.assertEqual(tx.run_build_workers(['a', 'b'], 2, 1, fd, launch, lambda: cancelled), {'a': 130})
+        self.assertEqual(calls, ['a'])
+
+    def test_pool_rechecks_headroom_before_starting_another_root(self):
+        # Even when several job slots are free, a new root needs RAM/disk.
+        import threading
+
+        checked = threading.Event()
+        running = False
+
+        def headroom():
+            checked.set()
+            return False
+
+        def launch(name):
+            nonlocal running
+            if name == 'first':
+                running = True
+                self.assertTrue(checked.wait(5))
+                running = False
+            else:
+                self.assertFalse(running)
+            return 0
+
+        with self.worker_tokens(4) as fd:
+            self.assertEqual(tx.run_build_workers(['first', 'second'], 4, 4, fd, launch,
+                                                  lambda: False, headroom), {})
+
+    def test_batch_revalidates_inputs_before_returning_results(self):
+        for result_written in (False, True):
+            with self.subTest(result_written=result_written):
+                def run(command):
+                    self.assertEqual(command, self.batch_command())
+                    if result_written:
+                        self.result()
+                        (self.directory / "sync/extra.db").write_bytes(b"changed during preparation")
+                    return subprocess.CompletedProcess(command, 0)
+                error = tx.TransactionError if result_written else FileNotFoundError
+                with self.assertRaises(error):
+                    tx.prepare(self.reference, "builder", lambda: self.host, run)
 
     def test_preview_notice_is_shown_but_not_parsed_as_package(self):
         output = io.StringIO()
@@ -207,8 +326,7 @@ class UpdateTransaction(unittest.TestCase):
         tx.write_json(self.directory / "prepared/example/result.json", stale)
         with contextlib.redirect_stdout(io.StringIO()):
             tx.prepare(self.reference, "builder", lambda: self.host, run)
-        self.assertEqual(calls, [["builder", "--prepare", str(self.directory), "--local", "example"],
-                                 ["builder", "--validate-prepared", str(self.directory)]])
+        self.assertEqual(calls, [self.batch_command()])
 
     def test_failed_combined_contract_does_not_leave_old_success_result(self):
         old = self.result()
@@ -217,11 +335,12 @@ class UpdateTransaction(unittest.TestCase):
         calls = []
         def run(command):
             calls.append(command)
-            return subprocess.CompletedProcess(command, 7 if "--validate-prepared" in command else 0)
+            self.assertFalse((self.directory / "prepared/example/result.json").exists())
+            return subprocess.CompletedProcess(command, 7)
         with self.assertRaises(tx.TransactionError):
             tx.prepare(self.reference, "builder", lambda: self.host, run)
         self.assertFalse((self.directory / "prepared/example/result.json").exists())
-        self.assertEqual(calls[-1], ["builder", "--validate-prepared", str(self.directory)])
+        self.assertEqual(calls, [self.batch_command()])
 
     def test_one_fixed_snapshot_transaction_holds_actual_lock(self):
         result = self.result()

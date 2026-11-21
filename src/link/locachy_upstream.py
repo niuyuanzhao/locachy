@@ -209,19 +209,20 @@ def _config(name, baseline_dir):
         cfg = json.loads(Path(baseline_dir, "upstream.json").read_text())
     except (OSError, ValueError) as e:
         raise UpstreamError("upstream tracking configuration is unavailable") from e
+    # Gate IDs describe the required proof, independently of patch_revision.
     overlays = {
         "labwc-locachy": ("labwc", "labwc", ["labwc"],
                          ["clipboard-guard.patch", "inner-edge-hold.patch", "corner-edge-hold.patch",
                           "drop-gate.patch", "keyboard-locks.patch", "locachy-clipboard.c", "locachy-clipboard.h",
                           "locachy-drop.c", "locachy-drop.h"],
-                         "labwc-clipboard-corner-drop-v4"),
+                         "labwc-locachy-update-smoke-v1"),
         "libinput": ("libinput", "libinput", ["libinput", "libinput-tools"],
                      ["library.patch", "circular-scroll.patch"], "libinput-circular-scroll-v2"),
         "libinput-tools": ("libinput-tools", "libinput", ["libinput", "libinput-tools"],
                           ["cli.patch"], "libinput-tools-cli-v1"),
         "libmupdf": ("libmupdf", "mupdf", ["libmupdf", "mupdf", "mupdf-gl", "mupdf-tools", "python-mupdf"],
-                     ["bundled-cmark-gfm.patch"], "libmupdf-markdown-v1"),
-        "libpaper": ("libpaper", "libpaper", ["libpaper"], ["lifecycle.patch"], "libpaper-lifecycle-v1"),
+                     ["bundled-cmark-gfm.patch"], "libmupdf-markdown-smoke-v1"),
+        "libpaper": ("libpaper", "libpaper", ["libpaper"], ["lifecycle.patch"], "libpaper-lifecycle-smoke-v1"),
     }
     if cfg.get("schema") != SCHEMA or cfg.get("name") != name or name not in overlays:
         raise UpstreamError("unsupported upstream overlay")
