@@ -28,6 +28,7 @@
 | `repos-set` | `locachy-repos apply --set` | `core`、`extra` 或 `multilib`，加 `=on` 或 `=off` |
 | `boot` | `locachy-boot` | 无、`--luks` 或 `--register-only` |
 | `locachy-rebuild` | `locachy-pkg rebuild` | 无或 `--force` |
+| `locachy-source` | `locachy-pkg source-update` | 无 |
 | `tpm-pending` | `locachy-tpm enroll --pending` | 无 |
 | `tpm-enroll` | `locachy-tpm enroll --passphrase-stdin` | 可选 PCR 列表及 `/dev` 设备；口令通过匿名 RAM 管道传递 |
 | `tpm-prepare` | `locachy-tpm prepare --passphrase-stdin` | 无；口令通过匿名 RAM 管道传递 |
@@ -47,7 +48,7 @@
 | `bios-set` | `locachy-firmware bios-set` | 一个属性（以字母或数字开头，其后为字母、数字或 `_ . : -`，最多 96 字节）和一个值（0–256 字节，不含控制字符；开头的 `-` 只是文字） |
 | `security-policy` | `locachy-security` | `set login-skip`/`auto-lock`/`duress`/`fingerprint`/`face` `on`/`off`、`set lock-mode low`/`high`、`remove-duress` 或 `refresh` |
 
-**软件包域。** 软件包、内核、软件源类任务，以及所有会构建启动镜像的类型（`boot`、`locachy-rebuild`、`tpm-*`、`secure-boot`、`security-policy`），都像 `locachy-pkg` 一样持有 `/run/locachy/pkg.lock`：任务的 runner 在任务 cgroup 内、第一个步骤之前取得它（`flock` 等待：外部 pacman 的 guard 持有它时，先等 pacman 完成），每个步骤都继承这个描述符，因此工具能发现域已被持有，不会再次打开。工具自己的锁都在域之内取得（先域，再安全锁，再配置）；工具自己从不取 `pkg.lock`。固件类任务不持有它（`locachy-firmware` 持有 `firmware.lock`），容器类任务 `app-build` 也不持有（它不在宿主上安装任何软件包）。`app-host-build` 持有它：`host="1"` 的应用会把其软件包安装到宿主上，这是宿主软件包事务。任务种类由应用自身的 host 设置决定，由服务在受理时读取并检查（不符则拒绝：“the app's host setting changed; open it again”，即应用的 host 设置已改变，请重新打开）；任何客户端参数都不能决定它。路径是固定的：没有任何运行时设置能改变它，runner 会从每个步骤的环境中移除 `LOCACHY_PKG_LOCK`（测试构建只在编译时改动路径）。
+**软件包域。** 软件包、内核、软件源类任务、`locachy-source`，以及所有会构建启动镜像的类型（`boot`、`locachy-rebuild`、`tpm-*`、`secure-boot`、`security-policy`），都像 `locachy-pkg` 一样持有 `/run/locachy/pkg.lock`：任务的 runner 在任务 cgroup 内、第一个步骤之前取得它（`flock` 等待：外部 pacman 的 guard 持有它时，先等 pacman 完成），每个步骤都继承这个描述符，因此工具能发现域已被持有，不会再次打开。工具自己的锁都在域之内取得（先域，再安全锁，再配置）；工具自己从不取 `pkg.lock`。固件类任务不持有它（`locachy-firmware` 持有 `firmware.lock`），容器类任务 `app-build` 也不持有（它不在宿主上安装任何软件包）。`app-host-build` 持有它：`host="1"` 的应用会把其软件包安装到宿主上，这是宿主软件包事务。任务种类由应用自身的 host 设置决定，由服务在受理时读取并检查（不符则拒绝：“the app's host setting changed; open it again”，即应用的 host 设置已改变，请重新打开）；任何客户端参数都不能决定它。路径是固定的：没有任何运行时设置能改变它，runner 会从每个步骤的环境中移除 `LOCACHY_PKG_LOCK`（测试构建只在编译时改动路径）。
 
 **镜像。** 参数是镜像文件的类型（`fw-local-install`、`spi-verify`、`spi-write`）会在任务被接受时复制该文件，而不是在运行时：不跟随链接打开，必须是最多 64 MiB 的普通文件，复制到 `/run/locachy/jobs/ID.input`（root 所有，0600），其大小和 SHA-256 记录在 `ID.state` 中；任务参数随后改为指向这份副本。无法复制时请求被拒绝。runner 在第一个步骤之前按记录的大小和摘要核对副本，副本被改动的任务不会运行。任务结束或从队列移除时副本被删除。运行的内容就是接受时所指定的内容，无论之后用户的文件如何变化。
 

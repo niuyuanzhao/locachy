@@ -7445,6 +7445,10 @@ msgid "check for updates"
 msgstr ""
 
 #: progs/packages.c
+msgid "update LOCachy source"
+msgstr ""
+
+#: progs/packages.c
 msgid "bring the host to its manifest"
 msgstr ""
 
@@ -7504,6 +7508,12 @@ msgstr ""
 #: progs/packages.c
 #, c-format
 msgid "%s: done."
+msgstr ""
+
+#. TRANSLATORS: c is the c key; keep it.
+#: progs/packages.c
+#, c-format
+msgid "%s: done; c checks updates."
 msgstr ""
 
 #: progs/packages.c
@@ -7821,6 +7831,11 @@ msgid "a: apply the marked"
 msgstr ""
 
 #: progs/packages.c
+#, c-format
+msgid "%s: failed; u updates LOCachy's source and updater alone. Output below (and in %s)."
+msgstr ""
+
+#: progs/packages.c
 msgid "l: output/details"
 msgstr ""
 
@@ -7882,6 +7897,10 @@ msgstr ""
 
 #: progs/packages.c
 msgid "Updates: check again (on the network); apply the marked rows"
+msgstr ""
+
+#: progs/packages.c
+msgid "Updates: update LOCachy source and updater alone (without checking repositories)"
 msgstr ""
 
 #: progs/packages.c
@@ -8431,6 +8450,10 @@ msgstr ""
 
 #: progs/packages.c
 msgid "Install what the manifest names and remove what it does not?"
+msgstr ""
+
+#: progs/packages.c
+msgid "Update LOCachy source and updater now (without host packages)?"
 msgstr ""
 
 #. TRANSLATORS: Space is the Space key; keep it.

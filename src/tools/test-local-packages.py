@@ -818,6 +818,140 @@ class LocalPackages(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "signature verification"):
             pkg.plan()
 
+    def test_source_update_takes_the_source_and_updater_without_checking_anything_else(self):
+        """The fallback entry: LOCachy's source and its updater tools, alone.
+        Check's inputs (repositories, local recipes, AUR, the host's and the
+        containers' packages) are not read at all."""
+        self.record()
+        origin, git, c1 = self.source_origin()
+        (origin / "src/machines").mkdir(exist_ok=True)
+        (origin / "src/machines/x13.conf").write_text('description="ThinkPad X13"\n')
+        git("add", "-A")
+        git("commit", "-m", "Add the X13 machine profile")
+        c2 = git("rev-parse", "HEAD")
+
+        def refused(name):
+            def fail(*args, **kwargs):
+                raise AssertionError(f"{name} is not read by a source update")
+            return fail
+        for name in ("plan", "repo_updates", "checked_local_candidates", "aur_versions", "local_packages"):
+            self.patch(name, refused(name))
+        helpers = []
+        self.patch("run", lambda cmd, net=False: helpers.append(cmd) or True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(pkg.cmd_source_update([]), 0)
+        self.assertEqual(helpers, [["sh", os.path.join(pkg.SRC, "link/install-pkg-tools"), pkg.SRC],
+                                   ["python3", "-I", os.path.join(pkg.SRC, "link/declare-packages"), pkg.SRC,
+                                    pkg.MANIFEST]])
+        self.assertTrue((self.src / "machines/x13.conf").is_file())
+        self.assertEqual(Path(pkg.SOURCE_PENDING_FILE).read_text().strip(), c2)
+        self.assertEqual(Path(pkg.SOURCE_UNBUILT_FILE).read_text().splitlines(), [c2])  # helpers done
+        self.assertNotEqual(pkg.recorded_source_commit(), c2)  # not applied yet
+        self.assertTrue(pkg.update_unfinished())
+
+        # Again, with the same commit: only the tools are verified; nothing moves.
+        helpers.clear()
+        with contextlib.redirect_stdout(io.StringIO()) as again:
+            self.assertEqual(pkg.cmd_source_update([]), 0)
+        self.assertEqual(len(helpers), 2)
+        self.assertIn("updater tools verified", again.getvalue())
+        self.assertEqual(Path(pkg.SOURCE_PENDING_FILE).read_text().strip(), c2)
+
+        # Pending setup from a failed earlier run is retried and cleared.
+        pkg.write_source_unbuilt(c2, pending=True)
+        self.assertTrue(pkg.source_setup_pending())
+        helpers.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(pkg.cmd_source_update([]), 0)
+        self.assertFalse(pkg.source_setup_pending())
+        self.assertEqual(Path(pkg.SOURCE_UNBUILT_FILE).read_text().splitlines(), [c2])
+        self.assertEqual(len(helpers), 2)
+
+        # Already applied and settled: verifies tools without marking unbuilt.
+        Path(pkg.SOURCE_UNBUILT_FILE).unlink()
+        self.assertTrue(pkg.finish_source_update())
+        self.assertFalse(pkg.update_unfinished())
+        helpers.clear()
+        with contextlib.redirect_stdout(io.StringIO()) as settled:
+            self.assertEqual(pkg.cmd_source_update([]), 0)
+        self.assertEqual(len(helpers), 2)
+        self.assertIn("already installed", settled.getvalue())
+        self.assertFalse(pkg.update_unfinished())
+        self.assertFalse(Path(pkg.SOURCE_UNBUILT_FILE).exists())
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(pkg.cmd_source_update(["--now"]), 2)  # no options: one fixed job
+
+    def test_source_update_enforces_signers_and_invalidates_stale_plan(self):
+        self.record()
+        self.patch("PLAN_FILE", str(self.root / "plan"))
+        origin, git, c1 = self.source_origin()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(pkg.cmd_plan([]), 0)
+        # Disabling update_repo refuses without changing anything.
+        self.rc.write_text('update_repo="off"\n')
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            self.assertEqual(pkg.cmd_source_update([]), 1)
+        self.assertIn("source updates are disabled", err.getvalue())
+        self.rc.write_text(f'update_repo="file://{origin}"\n')
+
+        # Unsigned commit with trusted-signers is refused before modifying SRC.
+        (origin / "src/machines").mkdir(exist_ok=True)
+        (origin / "src/machines/x13.conf").write_text('description="ThinkPad X13"\n')
+        git("add", "-A")
+        git("commit", "-m", "Add X13")
+        self.signers.write_text("user@example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n")
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            self.assertEqual(pkg.cmd_source_update([]), 1)
+        self.assertIn("signature verification", err.getvalue())
+        self.assertFalse((self.src / "machines/x13.conf").exists())
+        self.signers.unlink()
+
+        # Once installed, the earlier plan's input binding is rejected until Check runs again.
+        self.patch("run", lambda cmd, net=False: True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(pkg.cmd_source_update([]), 0)
+        with self.assertRaisesRegex(RuntimeError, "update plan inputs changed"):
+            pkg.validate_plan_inputs()
+
+    def test_source_update_says_why_the_repository_is_unreachable_and_changes_nothing(self):
+        self.record()
+        self.patch("in_net", lambda cmd: cmd)
+        gone = self.root / "gone"
+        self.rc.write_text(f'update_repo="file://{gone}"\nupdate_branch="main"\n')
+        before = self.source_commit.read_text() if self.source_commit.exists() else None
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            self.assertEqual(pkg.cmd_source_update([]), 1)
+        self.assertIn("locachy-pkg: source update failed: could not fetch", err.getvalue())
+        self.assertIn(f"file://{gone} (main)", err.getvalue())
+        self.assertFalse(Path(pkg.SOURCE_PENDING_FILE).exists())
+        self.assertEqual(self.source_commit.read_text() if self.source_commit.exists() else None, before)
+
+    def test_source_update_cli_is_one_fixed_queued_job(self):
+        accepted = []
+        helper = types.SimpleNamespace(
+            execution_mode=lambda: "queue",
+            pacman_ancestor=lambda: False,
+            submit=lambda kind, args, wait: accepted.append((kind, args, wait)) or 0)
+        with mock.patch.object(pkg, "helper_module", return_value=helper), \
+             mock.patch.object(sys, "argv", ["locachy-pkg", "source-update"]), \
+             mock.patch.object(pkg, "cmd_source_update", side_effect=AssertionError("unqueued source update")), \
+             mock.patch.object(pkg.os, "geteuid", return_value=0), \
+             self.assertRaises(SystemExit) as ended:
+            pkg.main()
+        self.assertEqual(ended.exception.code, 0)
+        self.assertEqual(accepted, [("locachy-source", [], True)])
+        with mock.patch.object(pkg, "helper_module", return_value=helper), \
+             mock.patch.object(sys, "argv", ["locachy-pkg", "source-update", "--now"]), \
+             mock.patch.object(pkg.os, "geteuid", return_value=0), \
+             self.assertRaises(SystemExit) as refused:
+            pkg.main()
+        self.assertNotEqual(refused.exception.code, 0)
+        self.assertEqual(len(accepted), 1)
+
     def test_upstream_requests_are_made_again_and_say_why_they_failed(self):
         self.patch("in_net", lambda cmd: cmd)
         self.patch("time", types.SimpleNamespace(sleep=lambda s: None))

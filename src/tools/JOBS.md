@@ -47,6 +47,7 @@ checks every argument; anything else is refused.
 | `repos-set` | `locachy-repos apply --set` | `core`, `extra` or `multilib`, `=on` or `=off` |
 | `boot` | `locachy-boot` | none, `--luks`, or `--register-only` |
 | `locachy-rebuild` | `locachy-pkg rebuild` | none or `--force` |
+| `locachy-source` | `locachy-pkg source-update` | none |
 | `tpm-pending` | `locachy-tpm enroll --pending` | none |
 | `tpm-enroll` | `locachy-tpm enroll --passphrase-stdin` | optional PCR list and `/dev` devices; passphrase is an anonymous RAM pipe |
 | `tpm-prepare` | `locachy-tpm prepare --passphrase-stdin` | no arguments; passphrase is an anonymous RAM pipe |
@@ -66,7 +67,7 @@ checks every argument; anything else is refused.
 | `bios-set` | `locachy-firmware bios-set` | an attribute (a letter or digit, then letters, digits, `_ . : -`; 96 bytes at most) and a value (0–256 bytes, no control character; a leading `-` is text) |
 | `security-policy` | `locachy-security` | `set login-skip`/`auto-lock`/`duress`/`fingerprint`/`face` `on`/`off`, `set lock-mode low`/`high`, `remove-duress`, or `refresh` |
 
-**The package domain.** The package, kernel and repository kinds, and every
+**The package domain.** The package, kernel and repository kinds, `locachy-source`, and every
 kind that builds the boot image (`boot`, `locachy-rebuild`, `tpm-*`,
 `secure-boot`, `security-policy`), hold `/run/locachy/pkg.lock` as
 `locachy-pkg` does: the job's runner takes it (`flock`, waiting: an outside

@@ -65,11 +65,35 @@ Apply 在改动应用预设、软件源数据库或软件包之前，仍先用 `
 `apps` 目标；应用在源码之后、宿主之前安装它，合并跟随预设的配置，从不为此构建或安装软件包。
 这一步失败不阻止其他部分。见 [APPS.zh.md](APPS.zh.md)。
 
+## 容器重建
+
+`apps`、`host` 与 `locachy` 完成后，Apply 再处理剩余的容器目标。正在运行或已冻结的容器会报告
+未完成并保持原样，不阻塞已关闭的容器。多个已关闭容器一起更新时，Apply 先合并去重它们计划中的
+AUR 与本地包，在重建 overlay 之前先把每个唯一的包统一构建一次到 `/var/cache/locachy-pkgs`
+（批量 AUR 构建失败时按单包拆分隔离，避免拖累无关容器）。
+
+随后，隔离容器的 overlay 构建（`locachy-app build`）按有界并发数并行执行（默认
+`min(4, max(1, cpus // 2))`，可用 `LOCACHY_CONTAINER_WORKERS` 覆写），每个容器的输出单独缓冲，
+完成后再整段输出到对应目标标题下以免日志交错。每次 overlay 构建的挂载命名空间内，宿主共享缓存
+`/var/cache/pacman/pkg` 以只读方式作为第一个 pacman `--cachedir` 挂载，容器私有的临时缓存目录
+作为第二个；下载完成的包在构建成功后按先签名后归档的顺序原子提升回宿主共享缓存。具有真实系统
+访问权限的应用（`host="1"`）会修改宿主 pacman 数据库，始终在隔离容器构建全部结束后串行执行。
+
 ## 运行中的旧更新器无法检查时
 
 `c` / 检查操作先运行当前更新器。同步失败必须显示 pacman 的具体软件源、HTTP、签名、数据库或文件系统错误；`checkupdates` 那句笼统的 `Cannot fetch updates` 不足以诊断，也不代表没有网络。检查失败不更改宿主软件包数据库、已发布的软件源数据库、软件包或成功计划；完整错误进入已有任务输出区与日志。
 
-旧系统若正是更新器本身吞掉了原因，可在受管理的管理员终端热替换脚本，不必重装或重启：
+若检查因软件源、镜像、本地补丁配方、验收门或 AUR 问题失败——或者需要先单独把 LOCachy 源码与更新器升级到最新再检查宿主——可以单独更新 LOCachy 源码与更新器：
+
+- 在 `packages` 的「更新」页按 `u`（确认 `y`），或以 root 运行：
+
+  ```sh
+  locachy-pkg source-update
+  ```
+
+该操作作为固定系统任务 `locachy-source` 运行（持有 `/run/locachy/pkg.lock`），只拉取 `update_repo` 的 `update_branch`（配置了 `trusted-signers` 时照常校验签名），复用与正常应用相同的源码发布日志原子更新 `/usr/local/src/locachy`，并运行 `install-pkg-tools` 与 `declare-packages`，不碰 pacman 数据库、本地配方、AUR、宿主包或容器。原有旧计划会被 `plan_inputs()` 自动作废，`source-unbuilt` 保持到下次按 `c` 检查、`a` 应用更新宿主并重编程序为止。
+
+如果更早期的旧更新器还没有 `source-update`，或更新器本身已损坏无法执行，可在受管理的管理员终端热替换脚本，不必重装或重启：
 
 1. 从核对过的确切 LOCachy 源码取得候选 `locachy-pkg`，保存成普通文件，核对随该修复提供的完整 SHA-256；不把下载内容直接接给 shell。
 

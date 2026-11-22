@@ -7503,6 +7503,10 @@ msgid "check for updates"
 msgstr "检查更新"
 
 #: progs/packages.c
+msgid "update LOCachy source"
+msgstr "更新 LOCachy 源码"
+
+#: progs/packages.c
 msgid "bring the host to its manifest"
 msgstr "同步宿主至软件清单"
 
@@ -7563,6 +7567,12 @@ msgstr "%s：已在 home 中被停止；输出见下方。"
 #, c-format
 msgid "%s: done."
 msgstr "%s：已完成。"
+
+#. TRANSLATORS: c is the c key; keep it.
+#: progs/packages.c
+#, c-format
+msgid "%s: done; c checks updates."
+msgstr "%s：已完成；按 c 检查更新。"
 
 #: progs/packages.c
 #, c-format
@@ -7872,6 +7882,11 @@ msgid "a: apply the marked"
 msgstr "a: 应用所选更新"
 
 #: progs/packages.c
+#, c-format
+msgid "%s: failed; u updates LOCachy's source and updater alone. Output below (and in %s)."
+msgstr "%s：失败；按 u 可只更新 LOCachy 源码与更新器。输出见下方（亦保存于 %s）。"
+
+#: progs/packages.c
 msgid "l: output/details"
 msgstr "l: 输出/详情"
 
@@ -7934,6 +7949,10 @@ msgstr "更新：标记要应用的行"
 #: progs/packages.c
 msgid "Updates: check again (on the network); apply the marked rows"
 msgstr "更新：重新检查（需联网）；应用已标记的行"
+
+#: progs/packages.c
+msgid "Updates: update LOCachy source and updater alone (without checking repositories)"
+msgstr "更新：单独更新 LOCachy 源码与更新器（不检查软件源）"
 
 #: progs/packages.c
 msgid "Containers: new, build, roll back, remove"
@@ -8485,6 +8504,10 @@ msgstr "从宿主卸载 %s（及其独占依赖）？"
 #: progs/packages.c
 msgid "Install what the manifest names and remove what it does not?"
 msgstr "安装软件清单中列出的软件包，并卸载未列出的软件包？"
+
+#: progs/packages.c
+msgid "Update LOCachy source and updater now (without host packages)?"
+msgstr "现在更新 LOCachy 源码和更新器（不改动宿主软件包）？"
 
 #. TRANSLATORS: Space is the Space key; keep it.
 #: progs/packages.c

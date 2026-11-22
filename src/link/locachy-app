@@ -735,11 +735,14 @@ do_build() {
     done
     [ "${#unbuilt[@]}" -eq 0 ] || /usr/local/bin/locachy-build "${unbuilt[@]}"
 
-    local net_prefix=()
+    local net_prefix=() build_rc f base dst tmp
     [ -e /run/netns/locachy-net ] && net_prefix=(ip netns exec locachy-net)
+    install -d -m 0755 /var/cache/pacman/pkg
     for attempt in 1 2; do
-        rm -rf "$cbase/upper.new" "$cbase/work.new" "$cbase/missing"
-        mkdir -p "$cbase/upper.new" "$cbase/work.new"
+        rm -rf "$cbase/upper.new" "$cbase/work.new" "$cbase/missing" "$cbase/pkg-cache"
+        mkdir -p "$cbase/upper.new" "$cbase/work.new" "$cbase/pkg-cache"
+        chmod 0755 "$cbase/pkg-cache"
+        build_rc=0
         "${net_prefix[@]}" unshare --mount --propagation private bash -euc '
             cbase=$1; n_repo=$2; shift 2
             root=$cbase/merged
@@ -766,20 +769,25 @@ do_build() {
             ln -sf /proc/self/fd/0 "$root/dev/stdin"
             ln -sf /proc/self/fd/1 "$root/dev/stdout"
             ln -sf /proc/self/fd/2 "$root/dev/stderr"
-            mkdir -p "$root/var/cache/pacman/pkg" "$root/var/cache/locachy-pkgs"
-            mount --bind /var/cache/pacman/pkg "$root/var/cache/pacman/pkg"
+            # Concurrent container builds read the shared host package cache
+            # read-only and download only uncached packages into their own
+            # private directory; completed archives are promoted below.
+            mkdir -p "$root/var/cache/pacman/pkg" "$root/var/cache/locachy-pkgs" "$root/run/locachy-pkg-cache"
+            mount --bind -o ro /var/cache/pacman/pkg "$root/var/cache/pacman/pkg"
+            mount --bind "$cbase/pkg-cache" "$root/run/locachy-pkg-cache"
             mount --bind /var/cache/locachy-pkgs "$root/var/cache/locachy-pkgs"
             if [ -f /etc/netns/locachy-net/resolv.conf ]; then
                 cp -f /etc/netns/locachy-net/resolv.conf "$root/etc/resolv.conf" 2>/dev/null || true
             fi
             in_build="setpriv --bounding-set=-mknod,-sys_rawio,-sys_module,-sys_boot -- chroot $root"
+            cache_args=(--cachedir /var/cache/pacman/pkg --cachedir /run/locachy-pkg-cache)
             if [ "$n_repo" -gt 0 ]; then
-                $in_build pacman -S --needed --noconfirm --asexplicit "${@:1:$n_repo}"
+                $in_build pacman -S --needed --noconfirm --asexplicit "${cache_args[@]}" "${@:1:$n_repo}"
                 shift "$n_repo"
             fi
             if [ $# -gt 0 ]; then
                 mapfile -t files < <(/usr/local/bin/locachy-build --files "$root" "$@")
-                $in_build pacman -U --needed --noconfirm --asdeps "${files[@]}"
+                $in_build pacman -U --needed --noconfirm --asdeps "${cache_args[@]}" "${files[@]}"
                 $in_build pacman -D --asexplicit "$@" >/dev/null
                 # The libraries its AUR programs need (the host may have moved
                 # on since they were built): "PACKAGE LIBRARY" for each missing.
@@ -792,7 +800,27 @@ do_build() {
                     done
                 done | sort -u >"$cbase/missing"
             fi
-        ' bash "$cbase" "${#repo_pkgs[@]}" "${repo_pkgs[@]}" "${aur_pkgs[@]}"
+        ' bash "$cbase" "${#repo_pkgs[@]}" "${repo_pkgs[@]}" "${aur_pkgs[@]}" || build_rc=$?
+        if [ "$build_rc" -eq 0 ]; then
+            # Promote signatures before archives so concurrent readers never see
+            # a newly cached package before its signature is in place.
+            for f in "$cbase/pkg-cache"/*.pkg.tar.*.sig "$cbase/pkg-cache"/*.pkg.tar.*; do
+                [ -f "$f" ] && [ ! -L "$f" ] || continue
+                case "$f" in
+                *.part*|*.tmp) continue ;;
+                esac
+                base=${f##*/}
+                dst="/var/cache/pacman/pkg/$base"
+                [ ! -e "$dst" ] || continue
+                tmp="/var/cache/pacman/pkg/.locachy-cache.$$.$base"
+                if install -m 0644 -o root -g root "$f" "$tmp" 2>/dev/null; then
+                    ln "$tmp" "$dst" 2>/dev/null || { [ -e "$dst" ] || mv -n "$tmp" "$dst" 2>/dev/null || true; }
+                fi
+                rm -f "$tmp"
+            done
+        fi
+        rm -rf "$cbase/pkg-cache"
+        [ "$build_rc" -eq 0 ] || return "$build_rc"
         [ -s "$cbase/missing" ] || break
         missing=$(cut -d" " -f1 "$cbase/missing" | sort -u | tr '\n' ' ')
         printf 'locachy-app: %s: libraries missing: %s\n' "$name" "$(tr '\n' ',' <"$cbase/missing")" >&2

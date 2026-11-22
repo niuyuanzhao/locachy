@@ -574,7 +574,7 @@ class UpdateTransaction(unittest.TestCase):
     UPSTREAM = "https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird"
 
     def apply_with_keys(self, rows, check_status, targets=(), build_status=0, tracked=False, source_ok=False,
-                        after_source=False, mismatch=None):
+                        after_source=False, mismatch=None, containers=(), states=None):
         """cmd_apply over rows, every program it would start a double: the
         key check (locachy-build --check-keys) answers check_status, an AUR
         build build_status. seq: what was started and done, in order."""
@@ -584,7 +584,9 @@ class UpdateTransaction(unittest.TestCase):
             command = list(command)
             seq.append(command)
             if command[:2] == [pkg.BUILD_TOOL, "--check-keys"]:
-                out = (f"lyrebird-proxy\tlyrebird-proxy\t{self.KEY}\t{self.UPSTREAM}\t"
+                checked = ",".join(command[2:])
+                recipe = command[2] if len(command) > 2 else "lyrebird-proxy"
+                out = (f"{checked}\t{recipe}\t{self.KEY}\t{self.UPSTREAM}\t"
                        f"git+{self.UPSTREAM}.git#tag=lyrebird-0.6.2?signed\n" if check_status == 3 else "")
                 return subprocess.CompletedProcess(command, check_status, stdout=out,
                                                    stderr="locachy-build: the AUR did not answer" if check_status == 1 else "")
@@ -592,8 +594,10 @@ class UpdateTransaction(unittest.TestCase):
 
         output = io.StringIO()
         installed = {"labwc-locachy": "1"} if tracked else {}
+        container_states = dict(states or {})
         patches = {"load_plan": mock.Mock(return_value=(rows, "checked")), "validate_plan_inputs": lambda: None,
-                   "source_setup_pending": lambda: False, "containers": mock.Mock(return_value=[]),
+                   "source_setup_pending": lambda: False, "containers": mock.Mock(return_value=list(containers)),
+                   "container_state": lambda name: container_states.get(name, "closed"),
                    "CONF_DIR": str(self.root / "no-containers"), "in_net": lambda command: command,
                    "publish_merged": lambda: seq.append("publish databases"), "transaction_reference": lambda: {},
                    "host_databases_mismatch": lambda: mismatch,
@@ -667,9 +671,106 @@ class UpdateTransaction(unittest.TestCase):
         self.assertIn("could not be checked: locachy-build: the AUR did not answer", out)
         self.assertIn("===> refused before any change: host", out)
         self.assertNotIn("not done", out)
-        # Only the host's AUR packages are looked up: a container's are not.
-        status, seq, out = self.apply_with_keys([("demo", "aur", "lyrebird-proxy", "1", "2")], 3, targets=["host"])
+        # Unselected targets are not looked up: a host-only apply ignores a container's AUR row.
+        status, seq, out = self.apply_with_keys([("demo", "aur", "lyrebird-proxy", "1", "2")], 3,
+                                                targets=["host"], containers=["demo"])
         self.assertEqual((status, seq), (0, ["save plan"]))
+
+    def test_untrusted_container_aur_key_refuses_apply_before_any_change(self):
+        """An untrusted AUR key for a closed container refuses the whole Apply
+        before host updates, database publication or any container build."""
+        rows = [("host", "repo", "openssl", "3.6.5-1", "4.1.0-1"),
+                ("demo", "aur", "tor-browser-bin", "14.0-1", "14.5-1")]
+        with mock.patch.object(pkg, "apply_target", side_effect=AssertionError("apply_target must not run")):
+            status, seq, out = self.apply_with_keys(rows, 3, containers=["demo"])
+        self.assertEqual(status, pkg.KEYS_REFUSED, out)
+        self.assertEqual(seq, [[pkg.BUILD_TOOL, "--check-keys", "tor-browser-bin"]])
+        self.assertIn("===> refused before any change: demo (source signing keys not trusted).", out)
+        self.assertIn("Nothing was changed: no package, repository database, package record or plan.", out)
+        self.assertIn(f"Trust them: locachy-build --trust-key {self.KEY}", out)
+        self.assertNotIn("not done", out)
+
+        # Container-only apply (no host target in order) also refuses before
+        # any database publication or build, whether targeted or apply-all.
+        container_only = [("demo", "aur", "tor-browser-bin", "14.0-1", "14.5-1")]
+        for selected in (["demo"], []):
+            with self.subTest(targets=selected), \
+                    mock.patch.object(pkg, "apply_target", side_effect=AssertionError("apply_target must not run")):
+                status, seq, out = self.apply_with_keys(container_only, 3, targets=selected, containers=["demo"],
+                                                        mismatch="extra.db differs")
+            self.assertEqual(status, pkg.KEYS_REFUSED, out)
+            self.assertEqual(seq, [[pkg.BUILD_TOOL, "--check-keys", "tor-browser-bin"]])
+            self.assertNotIn("publish databases", seq)
+
+        # Host and multiple closed containers are deduplicated into one --check-keys call.
+        combined = [("host", "aur", "lyrebird-proxy", "0.6.1-1", "0.6.2-1"),
+                    ("demo", "aur", "lyrebird-proxy", "0.6.1-1", "0.6.2-1"),
+                    ("demo", "aur", "tor-browser-bin", "14.0-1", "14.5-1"),
+                    ("other", "aur", "tor-browser-bin", "14.0-1", "14.5-1")]
+        with mock.patch.object(pkg, "apply_target", side_effect=AssertionError("apply_target must not run")):
+            status, seq, out = self.apply_with_keys(combined, 3, containers=["demo", "other"])
+        self.assertEqual(status, pkg.KEYS_REFUSED, out)
+        self.assertEqual(seq, [[pkg.BUILD_TOOL, "--check-keys", "lyrebird-proxy", "tor-browser-bin"]])
+        self.assertIn("===> refused before any change: host, demo, other (source signing keys not trusted).", out)
+
+        # Second phase after a LOCachy source update checks container AUR keys too.
+        after_src_rows = [("demo", "aur", "tor-browser-bin", "14.0-1", "14.5-1"),
+                          ("locachy", "rebuild", "new source", "404a02c", "a" * 40)]
+        status, seq, out = self.apply_with_keys(after_src_rows, 3, source_ok=True, containers=["demo"])
+        self.assertEqual((status, seq), ("exec", ["source"]), out)
+        with mock.patch.object(pkg, "apply_target", side_effect=AssertionError("apply_target must not run")):
+            status, seq, out = self.apply_with_keys(after_src_rows, 3, after_source=True, containers=["demo"])
+        self.assertEqual((status, seq),
+                         (pkg.KEYS_REFUSED, ["save plan", [pkg.BUILD_TOOL, "--check-keys", "tor-browser-bin"]]), out)
+        self.assertIn("Nothing more was changed: the LOCachy source installed first stays; no package, "
+                      "repository database or package record.", out)
+
+    def test_trusted_container_aur_key_lets_apply_proceed(self):
+        rows = [("host", "repo", "openssl", "3.6.5-1", "4.1.0-1"),
+                ("demo", "aur", "tor-browser-bin", "14.0-1", "14.5-1")]
+        status, seq, out = self.apply_with_keys(rows, 0, containers=["demo"])
+        self.assertEqual(status, 0, out)
+        self.assertEqual(seq, [[pkg.BUILD_TOOL, "--check-keys", "tor-browser-bin"],
+                               "publish databases",
+                               ["pacman", "-Su", "--noconfirm"],
+                               [pkg.BUILD_TOOL, "tor-browser-bin"],
+                               ["/usr/local/bin/locachy-app", "build", "demo"],
+                               "save plan"])
+        self.assertIn("===> host: done", out)
+        self.assertIn("===> demo: done", out)
+
+        # Container-only apply with trusted key proceeds directly to container build.
+        status, seq, out = self.apply_with_keys([("demo", "aur", "tor-browser-bin", "14.0-1", "14.5-1")],
+                                                0, targets=["demo"], containers=["demo"])
+        self.assertEqual(status, 0, out)
+        self.assertEqual(seq, [[pkg.BUILD_TOOL, "--check-keys", "tor-browser-bin"],
+                               [pkg.BUILD_TOOL, "tor-browser-bin"],
+                               ["/usr/local/bin/locachy-app", "build", "demo"],
+                               "save plan"])
+
+    def test_open_container_does_not_trigger_key_refusal(self):
+        """A running or frozen container is skipped by apply_target and must
+        not trigger a key refusal or block the host update."""
+        rows = [("host", "repo", "openssl", "3.6.5-1", "4.1.0-1"),
+                ("demo", "aur", "tor-browser-bin", "14.0-1", "14.5-1")]
+        for state in ("running", "frozen"):
+            with self.subTest(state=state):
+                status, seq, out = self.apply_with_keys(rows, 3, containers=["demo"], states={"demo": state})
+                self.assertEqual(status, 1, out)  # demo skipped by apply_target, not KEYS_REFUSED
+                self.assertEqual(seq, ["publish databases", ["pacman", "-Su", "--noconfirm"]])
+                self.assertIn("===> host: done", out)
+                self.assertIn(f"===> demo is {state}: stop it first; left as it is", out)
+                self.assertNotIn("refused before any change", out)
+
+        # When both host and a running container have AUR updates, only the
+        # host's AUR packages are passed to --check-keys.
+        mixed = [("host", "aur", "lyrebird-proxy", "0.6.1-1", "0.6.2-1"),
+                 ("demo", "aur", "tor-browser-bin", "14.0-1", "14.5-1")]
+        status, seq, out = self.apply_with_keys(mixed, 0, containers=["demo"], states={"demo": "running"})
+        self.assertEqual(status, 1, out)
+        self.assertEqual(seq, [[pkg.BUILD_TOOL, "--check-keys", "lyrebird-proxy"], "prepared transaction"])
+        self.assertIn("===> host: done", out)
+        self.assertIn("===> demo is running: stop it first; left as it is", out)
 
     def test_a_locachy_source_update_checks_keys_only_after_its_source_is_installed(self):
         """An Apply that also installs a LOCachy source commit installs it first
@@ -744,7 +845,8 @@ class UpdateTransaction(unittest.TestCase):
             self.assertIn("print(", line)
         # No switch around it: apply has no option or variable that skips the check.
         apply_source = inspect.getsource(pkg.cmd_apply)
-        self.assertIn('if "host" in order and not source_first:\n        refused = check_aur_keys(rows, after_source)',
+        self.assertIn('if not source_first and any(r[0] in order and r[1] == "aur" for r in rows):\n'
+                      '        refused = check_aur_keys(rows, after_source, order)',
                       apply_source)
 
     def test_apply_refuses_a_plan_whose_inputs_changed(self):
@@ -955,6 +1057,7 @@ class CheckedDatabases(unittest.TestCase):
         save.assert_not_called()
         self.assertEqual(old.read_bytes(), before)
         self.assertIn(reason, stderr.getvalue())
+        self.assertIn("locachy-pkg source-update", stderr.getvalue())  # the way out, when Check cannot
         self.assertNotIn("Traceback", stderr.getvalue())
         self.assertNotIn("Everything is up to date", stdout.getvalue())
 
@@ -1232,6 +1335,221 @@ class PreparedAurRebuild(unittest.TestCase):
         ordered = tx.order_aur_names(["howdy-git", "python-dlib-cuda", "unrelated"], local)
         self.assertLess(ordered.index("python-dlib-cuda"), ordered.index("howdy-git"))
         self.assertEqual(set(ordered), {"howdy-git", "python-dlib-cuda", "unrelated"})
+
+
+class ContainerParallelApply(unittest.TestCase):
+    """Deduplicated container AUR/local prebuilds and bounded parallel isolated
+    container overlay builds, keeping host="1" app targets serialized."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="container-parallel-", dir=SCRATCH)
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.conf = self.root / "containers"
+        self.conf.mkdir()
+
+    def write_conf(self, name, body):
+        (self.conf / f"{name}.conf").write_text(body, encoding="utf-8")
+
+    def run_apply(self, rows, run_mock, states=None, recipes=None, env=None):
+        container_states = dict(states or {})
+        local_recs = dict(recipes or {})
+        saved = []
+        output = io.StringIO()
+        patches = {
+            "CONF_DIR": str(self.conf),
+            "load_plan": mock.Mock(return_value=(rows, "checked")),
+            "validate_plan_inputs": lambda: None,
+            "source_setup_pending": lambda: False,
+            "container_state": lambda name: container_states.get(name, "closed"),
+            "in_net": lambda cmd: cmd,
+            "host_databases_mismatch": lambda: None,
+            "local_recipes": lambda build=True: dict(local_recs),
+            "plan": lambda *a, **k: pkg.Plan([]),
+            "settle_source_update": lambda r: r,
+            "save_plan": lambda r: saved.append(r),
+        }
+        with contextlib.ExitStack() as stack:
+            for k, v in patches.items():
+                stack.enter_context(mock.patch.object(pkg, k, v))
+            if env:
+                stack.enter_context(mock.patch.dict(os.environ, env))
+            stack.enter_context(mock.patch.object(pkg.subprocess, "run", run_mock))
+            stack.enter_context(contextlib.redirect_stdout(output))
+            stack.enter_context(contextlib.redirect_stderr(output))
+            status = pkg.cmd_apply([])
+        return status, output.getvalue(), saved
+
+    def test_shared_container_aur_and_local_packages_build_once_before_overlays(self):
+        self.write_conf("alpha", 'package="shared-aur"\nextras="only-a shared-local"\n')
+        self.write_conf("beta", 'package="shared-aur"\nextras="shared-local"\n')
+        rows = [
+            ("alpha", "aur", "shared-aur", "1-1", "2-1"),
+            ("alpha", "aur", "only-a", "1-1", "2-1"),
+            ("alpha", "local", "shared-local", "1-1", "recipe changed"),
+            ("beta", "aur", "shared-aur", "1-1", "2-1"),
+            ("beta", "local", "shared-local", "1-1", "recipe changed"),
+        ]
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            cmd = list(cmd)
+            calls.append(cmd)
+            if kwargs.get("stdout") and hasattr(kwargs["stdout"], "write"):
+                kwargs["stdout"].write(f"built {cmd[-1]}\n".encode("utf-8"))
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        status, out, saved = self.run_apply(
+            rows, fake_run, recipes={"shared-local": "/fixture/shared-local"},
+            env={"LOCACHY_CONTAINER_WORKERS": "2"},
+        )
+        self.assertEqual(status, 0, out)
+        self.assertEqual(len(saved), 1)
+        # Check-keys once, AUR batch build once, local build once, all BEFORE any overlay build.
+        build_cmds = [c for c in calls if c[0] == pkg.BUILD_TOOL]
+        self.assertEqual(build_cmds, [
+            [pkg.BUILD_TOOL, "--check-keys", "only-a", "shared-aur"],
+            [pkg.BUILD_TOOL, "only-a", "shared-aur"],
+            [pkg.BUILD_TOOL, "-r", "--local", "shared-local"],
+        ])
+        app_indices = [i for i, c in enumerate(calls) if c[:2] == ["/usr/local/bin/locachy-app", "build"]]
+        build_indices = [i for i, c in enumerate(calls) if c[0] == pkg.BUILD_TOOL]
+        self.assertEqual(len(app_indices), 2)
+        self.assertTrue(all(bi < ai for bi in build_indices for ai in app_indices), calls)
+        self.assertCountEqual([calls[i][2] for i in app_indices], ["alpha", "beta"])
+        self.assertIn("===> alpha: done", out)
+        self.assertIn("===> beta: done", out)
+        self.assertIn("===> all done", out)
+
+    def test_container_aur_batch_failure_isolates_only_affected_container(self):
+        self.write_conf("alpha", 'package="good-aur"\n')
+        self.write_conf("beta", 'package="bad-aur"\n')
+        rows = [
+            ("alpha", "aur", "good-aur", "1-1", "2-1"),
+            ("beta", "aur", "bad-aur", "1-1", "2-1"),
+        ]
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            cmd = list(cmd)
+            calls.append(cmd)
+            if cmd[:2] == [pkg.BUILD_TOOL, "--check-keys"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            if cmd[0] == pkg.BUILD_TOOL and "bad-aur" in cmd[1:]:
+                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        status, out, saved = self.run_apply(rows, fake_run, env={"LOCACHY_CONTAINER_WORKERS": "2"})
+        self.assertEqual(status, 1, out)
+        self.assertEqual(saved, [])
+        self.assertIn(["/usr/local/bin/locachy-app", "build", "alpha"], calls)
+        self.assertNotIn(["/usr/local/bin/locachy-app", "build", "beta"], calls)
+        self.assertIn("===> alpha: done", out)
+        self.assertIn("===> beta: not done", out)
+        self.assertIn("===> not done: beta", out)
+
+    def test_isolated_containers_build_concurrently_while_open_and_failed_are_isolated(self):
+        import threading
+
+        for name in ("alpha", "beta", "gamma", "delta"):
+            self.write_conf(name, f'package="{name}-pkg"\n')
+        rows = [(name, "rebuild", "the host is updated", "", "") for name in ("alpha", "beta", "gamma", "delta")]
+        barrier = threading.Barrier(2, timeout=5)
+        lock = threading.Lock()
+        active = 0
+        max_active = 0
+        built = []
+
+        def fake_run(cmd, **kwargs):
+            nonlocal active, max_active
+            cmd = list(cmd)
+            self.assertEqual(cmd[:2], ["/usr/local/bin/locachy-app", "build"])
+            name = cmd[2]
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                if name in ("alpha", "beta"):
+                    barrier.wait()  # proves true concurrent execution
+                buf = kwargs.get("stdout")
+                if buf and hasattr(buf, "write"):
+                    buf.write(f"log-start-{name}\nlog-end-{name}\n".encode("utf-8"))
+                with lock:
+                    built.append(name)
+                return subprocess.CompletedProcess(cmd, 1 if name == "delta" else 0)
+            finally:
+                with lock:
+                    active -= 1
+
+        status, out, saved = self.run_apply(
+            rows, fake_run, states={"gamma": "running"},
+            env={"LOCACHY_CONTAINER_WORKERS": "3"},
+        )
+        self.assertEqual(status, 1, out)
+        self.assertEqual(saved, [])
+        self.assertGreaterEqual(max_active, 2)
+        self.assertCountEqual(built, ["alpha", "beta", "delta"])
+        self.assertNotIn("gamma", built)
+        self.assertIn("===> gamma is running: stop it first; left as it is", out)
+        self.assertIn("===> alpha: done", out)
+        self.assertIn("===> beta: done", out)
+        self.assertIn("===> delta: not done", out)
+        # Buffered output stays grouped per container without interleaving.
+        self.assertIn("log-start-alpha\nlog-end-alpha\n===> alpha: done", out)
+        self.assertIn("log-start-beta\nlog-end-beta\n===> beta: done", out)
+        not_done_line = [line for line in out.splitlines() if line.startswith("===> not done:")][-1]
+        self.assertIn("gamma", not_done_line)
+        self.assertIn("delta", not_done_line)
+        self.assertNotIn("alpha", not_done_line)
+        self.assertNotIn("beta", not_done_line)
+
+    def test_host_access_app_targets_stay_serialized(self):
+        import threading
+
+        self.write_conf("alpha", 'package="alpha-pkg"\n')
+        self.write_conf("beta", 'package="beta-pkg"\n')
+        self.write_conf("host1", 'host="1"\npackage="host1-pkg"\n')
+        self.write_conf("host2", 'host="1"\npackage="host2-pkg"\n')
+        rows = [
+            ("alpha", "rebuild", "the host is updated", "", ""),
+            ("beta", "rebuild", "the host is updated", "", ""),
+            ("host1", "rebuild", pkg.PRESET_REBUILD, "host1-pkg", "host1-pkg extra"),
+            ("host2", "rebuild", pkg.PRESET_REBUILD, "host2-pkg", "host2-pkg extra"),
+        ]
+        barrier = threading.Barrier(2, timeout=5)
+        lock = threading.Lock()
+        active = 0
+        completed_isolated = set()
+        host_observations = []
+
+        def fake_run(cmd, **kwargs):
+            nonlocal active
+            cmd = list(cmd)
+            name = cmd[2]
+            with lock:
+                active += 1
+                cur = active
+                iso_done = set(completed_isolated)
+            try:
+                if name in ("alpha", "beta"):
+                    barrier.wait()
+                else:
+                    # host="1" target must see no concurrent build and all isolated builds finished.
+                    host_observations.append((name, cur, iso_done))
+                return subprocess.CompletedProcess(cmd, 0)
+            finally:
+                with lock:
+                    if name in ("alpha", "beta"):
+                        completed_isolated.add(name)
+                    active -= 1
+
+        status, out, saved = self.run_apply(rows, fake_run, env={"LOCACHY_CONTAINER_WORKERS": "4"})
+        self.assertEqual(status, 0, out)
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(host_observations, [
+            ("host1", 1, {"alpha", "beta"}),
+            ("host2", 1, {"alpha", "beta"}),
+        ])
 
 
 if __name__ == "__main__":

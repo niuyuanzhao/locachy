@@ -31,9 +31,12 @@ Updates of the host, LOCachy, its app presets and the containers (see the part b
                                             LOCachy's update: its source and updater first,
                                             then the rest checked again by it and done;
                                             refused before any change (status 3) while a
-                                            source signing key of the host's AUR packages
+                                            source signing key of the planned AUR packages
                                             is not trusted yet
   locachy-pkg update [--yes]                plan, show it, ask once, apply all
+  locachy-pkg source-update                 update LOCachy's own source and updater
+                                            tools alone, without checking repositories,
+                                            local recipes, AUR or containers
   locachy-pkg rebuild [--force]             LOCachy's programs built again (make.sh --boot)
                                             unless built against the host as it is; pacman's
                                             hook runs it after every transaction
@@ -46,6 +49,7 @@ What a container's form (packages) shows:
   locachy-pkg search TERM...     the app presets (the catalog, LOCACHY_APPS_CATALOG),
                                  the repositories' and the AUR's packages
 """
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import ctypes
 import fcntl
 import glob
@@ -1394,15 +1398,15 @@ class SourceNotChecked(Exception):
     """update_repo could not be fetched: the plan says so and goes on."""
 
 
-def check_source_update():
+def fetch_source_commit():
     """Fetch update_branch of update_repo into SOURCE_REPO_DIR and return
-    (old_short, new_commit, new_label) when the remote src/ tree differs from SRC;
-    None when it is the commit applied (SOURCE_COMMIT_FILE) with nothing pending.
-    SourceNotChecked when it cannot be fetched (RuntimeError with
-    LOCACHY_UPDATE_STRICT=1)."""
+    (branch, commit): commit is '' when git names no commit hash. A commit
+    that is fetched is verified (trusted-signers) before it is returned."""
     url = source_repo_url()
-    if not url or not shutil.which("git"):
-        return None
+    if not url:
+        raise RuntimeError("source updates are disabled (update_repo is off)")
+    if not shutil.which("git"):
+        raise RuntimeError("git is not installed")
     branch = source_branch()
     print(f"locachy-pkg: source updates from {url} ({branch})", file=sys.stderr)
     os.makedirs(SOURCE_REPO_DIR, exist_ok=True)
@@ -1416,14 +1420,31 @@ def check_source_update():
     except subprocess.TimeoutExpired:
         msg = "no answer in 300 s"
     if msg:
-        if os.environ.get("LOCACHY_UPDATE_STRICT") == "1":
-            raise RuntimeError(f"source repo fetch failed: {msg}")
         raise SourceNotChecked(f"could not fetch {url} ({branch}): {msg}".replace("\t", " "))
     commit = subprocess.run(["git", "-C", SOURCE_REPO_DIR, "rev-parse", "FETCH_HEAD"],
                             check=True, capture_output=True, text=True).stdout.strip()
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
-        return None
+        return branch, ""
     verify_source_commit(commit)
+    return branch, commit
+
+
+def check_source_update():
+    """Fetch update_branch of update_repo into SOURCE_REPO_DIR and return
+    (old_short, new_commit, new_label, branch) when the remote src/ tree differs from SRC;
+    None when it is the commit applied (SOURCE_COMMIT_FILE) with nothing pending.
+    SourceNotChecked when it cannot be fetched (RuntimeError with
+    LOCACHY_UPDATE_STRICT=1)."""
+    if not source_repo_url() or not shutil.which("git"):
+        return None
+    try:
+        branch, commit = fetch_source_commit()
+    except SourceNotChecked as e:
+        if os.environ.get("LOCACHY_UPDATE_STRICT") == "1":
+            raise RuntimeError(f"source repo fetch failed: {e}") from e
+        raise
+    if not commit:
+        return None
     if commit == recorded_source_commit() and not update_unfinished():
         # The commit applied, all of it. Its tree is not compared: the
         # installation (make-root.sh) put only what the system builds from
@@ -2553,6 +2574,159 @@ def apply_target(t, rows):
     return run(["/usr/local/bin/locachy-app", "build", t])
 
 
+def container_is_host(name):
+    """True when container configuration NAME uses host="1" (real-system access)."""
+    return read_conf(os.path.join(CONF_DIR, name + ".conf")).get("host") == "1"
+
+
+def container_worker_limit(count):
+    """Bounded worker count for concurrent isolated container overlay builds."""
+    if count <= 1:
+        return 1
+    env = os.environ.get("LOCACHY_CONTAINER_WORKERS", "").strip()
+    if env:
+        try:
+            n = int(env)
+            if n >= 1:
+                return min(count, n)
+        except ValueError:
+            pass
+    default = max(1, min(4, (os.cpu_count() or 2) // 2))
+    return min(count, default)
+
+
+def prebuild_container_packages(targets, rows):
+    """Build deduplicated AUR and local packages shared by closed container
+    targets once before running container overlay builds. Returns (failed_aur,
+    failed_local) sets of package names that failed to build."""
+    aur_by_target = {t: sorted({r[2] for r in rows if r[0] == t and r[1] == "aur"}) for t in targets}
+    local_by_target = {t: sorted({r[2] for r in rows if r[0] == t and r[1] == "local"}) for t in targets}
+    all_aur = sorted({p for pkgs in aur_by_target.values() for p in pkgs})
+    all_local = sorted({p for pkgs in local_by_target.values() for p in pkgs})
+    failed_aur, failed_local = set(), set()
+    if all_aur:
+        print(f"===> prepare: container AUR packages ({' '.join(all_aur)})", flush=True)
+        if not run([BUILD_TOOL] + all_aur):
+            if len(all_aur) == 1:
+                failed_aur.update(all_aur)
+            else:
+                # Isolate which package failed so unrelated containers still build.
+                for pkg_name in all_aur:
+                    if not run([BUILD_TOOL, pkg_name]):
+                        failed_aur.add(pkg_name)
+    if all_local:
+        print(f"===> prepare: container local packages ({' '.join(all_local)})", flush=True)
+        recipes = local_recipes()
+        for name in all_local:
+            if name not in recipes:
+                print(f"locachy-pkg: local recipe for {name} is missing; not replaced from the AUR", file=sys.stderr)
+                failed_local.add(name)
+            elif not run([BUILD_TOOL, "-r", "--local", name]):
+                failed_local.add(name)
+    return failed_aur, failed_local
+
+
+def run_container_build_buffered(name):
+    """Run locachy-app build NAME with its combined output captured in a temp
+    file, so concurrent container builds never interleave their logs."""
+    with tempfile.TemporaryFile(mode="w+b") as buf:
+        p = subprocess.run(["/usr/local/bin/locachy-app", "build", name], stdout=buf, stderr=subprocess.STDOUT)
+        buf.seek(0)
+        return p.returncode == 0, buf.read().decode("utf-8", errors="replace")
+
+
+def apply_container_targets(container_order, rows, failed):
+    """Apply container targets (isolated and host="1"): deduplicate AUR/local
+    builds across closed targets, then run isolated container overlay builds
+    with a bounded worker pool while keeping host="1" targets serialized."""
+    active_targets = set(targets_of(rows))
+    remaining = [t for t in container_order if t in active_targets]
+    if not remaining:
+        return
+    # Single container target: keep the original live-streaming path via apply_target.
+    if len(remaining) == 1:
+        t = remaining[0]
+        print(f"===> {t}", flush=True)
+        if not apply_target(t, rows):
+            failed.append(t)
+            print(f"===> {t}: not done", flush=True)
+        else:
+            print(f"===> {t}: done", flush=True)
+        return
+
+    closed_isolated, closed_host = [], []
+    for t in remaining:
+        state = container_state(t)
+        if state != "closed":
+            print(f"===> {t}", flush=True)
+            print(f"===> {t} is {state}: stop it first; left as it is", flush=True)
+            failed.append(t)
+            print(f"===> {t}: not done", flush=True)
+        elif container_is_host(t):
+            closed_host.append(t)
+        else:
+            closed_isolated.append(t)
+
+    closed_all = closed_isolated + closed_host
+    if not closed_all:
+        return
+
+    # Deduplicated batch AUR and local package builds across all closed targets.
+    failed_aur, failed_local = prebuild_container_packages(closed_all, rows)
+
+    def ready_after_prebuild(t):
+        mine = [r for r in rows if r[0] == t]
+        bad_aur = [r[2] for r in mine if r[1] == "aur" and r[2] in failed_aur]
+        bad_local = [r[2] for r in mine if r[1] == "local" and r[2] in failed_local]
+        if bad_aur or bad_local:
+            print(f"===> {t}", flush=True)
+            print(f"===> {t}: not done", flush=True)
+            failed.append(t)
+            return False
+        return True
+
+    build_isolated = [t for t in closed_isolated if ready_after_prebuild(t)]
+    build_host = [t for t in closed_host if ready_after_prebuild(t)]
+
+    # Isolated containers build concurrently up to the worker limit.
+    workers = container_worker_limit(len(build_isolated))
+    if workers > 1:
+        print(f"===> building containers in parallel: {', '.join(build_isolated)}", flush=True)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(run_container_build_buffered, t): t for t in build_isolated}
+            for fut in as_completed(futures):
+                t = futures[fut]
+                ok, out = fut.result()
+                print(f"===> {t}", flush=True)
+                if out:
+                    sys.stdout.write(out)
+                    if not out.endswith("\n"):
+                        sys.stdout.write("\n")
+                    sys.stdout.flush()
+                if not ok:
+                    failed.append(t)
+                    print(f"===> {t}: not done", flush=True)
+                else:
+                    print(f"===> {t}: done", flush=True)
+    else:
+        for t in build_isolated:
+            print(f"===> {t}", flush=True)
+            if not run(["/usr/local/bin/locachy-app", "build", t]):
+                failed.append(t)
+                print(f"===> {t}: not done", flush=True)
+            else:
+                print(f"===> {t}: done", flush=True)
+
+    # Real-system host="1" apps mutate host pacman DB and must stay serialized.
+    for t in build_host:
+        print(f"===> {t}", flush=True)
+        if not run(["/usr/local/bin/locachy-app", "build", t]):
+            failed.append(t)
+            print(f"===> {t}: not done", flush=True)
+        else:
+            print(f"===> {t}: done", flush=True)
+
+
 def locachy_built_host():
     try:
         with open(BUILT_HOST_FILE, encoding="utf-8") as f:
@@ -2623,6 +2797,8 @@ def cmd_plan(args):
         print(f"locachy-pkg: update check failed: {e}", file=sys.stderr, flush=True)
         print("No update plan was completed. No packages were changed; "
               "the previous plan is not a new successful check.", file=sys.stderr, flush=True)
+        print("To update LOCachy's own source and updater without checking repositories or recipes, "
+              "run: locachy-pkg source-update", file=sys.stderr, flush=True)
         return 1
     if "--machine" in args:
         print(f"checked\t{checked}")
@@ -2631,6 +2807,11 @@ def cmd_plan(args):
     else:
         print_plan(rows, checked)
     return 0
+
+
+def run_source_helpers():
+    return (run(["sh", os.path.join(SRC, "link/install-pkg-tools"), SRC]) and
+            run(["python3", "-I", os.path.join(SRC, "link/declare-packages"), SRC, MANIFEST]))
 
 
 def write_source_unbuilt(commit, pending=False):
@@ -2651,14 +2832,68 @@ def finish_source_setup():
     try:
         with open(SOURCE_UNBUILT_FILE, encoding="utf-8") as f:
             commit = f.readline().strip()
-        if not (run(["sh", os.path.join(SRC, "link/install-pkg-tools"), SRC]) and
-                run(["python3", "-I", os.path.join(SRC, "link/declare-packages"), SRC, MANIFEST])):
+        if not run_source_helpers():
             return False
         write_source_unbuilt(commit)
         return True
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
         print(f"locachy-pkg: source setup failed: {e}", file=sys.stderr)
         return False
+
+
+def cmd_source_update(args):
+    """Update only LOCachy's source tree and package tools (install-pkg-tools
+    and declare-packages), without touching pacman repositories, local recipes,
+    AUR, host packages or containers. Its own job (locachy-source): the host
+    update and the program builds are the next Check and Apply."""
+    if args:
+        print("usage: locachy-pkg source-update", file=sys.stderr)
+        return 2
+    try:
+        branch, commit = fetch_source_commit()
+        if not commit:
+            raise RuntimeError(f"branch {branch} names no commit")
+        if commit == recorded_source_commit() and not update_unfinished() and os.path.isdir(SRC):
+            if not run_source_helpers():
+                print("===> locachy: not done", flush=True)
+                return 1
+            print(f"===> locachy: source {commit[:7]} is already installed (branch {branch}); "
+                  "updater tools verified", flush=True)
+            return 0
+        same_tree = False
+        if os.path.isdir(SRC):
+            with tempfile.TemporaryDirectory(prefix="locachy-src-check-") as tmp:
+                extract_commit_src(commit, tmp)
+                same_tree = source_tree_digest(SRC) == source_tree_digest(tmp)
+        if same_tree:
+            # The installed tree is this commit's: only the setup it may still
+            # need, then the record, as check_source_update keeps it.
+            if source_setup_pending():
+                if not finish_source_setup():
+                    print("===> locachy: not done", flush=True)
+                    return 1
+            elif not run_source_helpers():
+                print("===> locachy: not done", flush=True)
+                return 1
+            if not update_unfinished() and recorded_source_commit() != commit:
+                write_commit(SOURCE_COMMIT_FILE, commit)
+            print(f"===> locachy: source {commit[:7]} is installed (branch {branch}); updater tools verified",
+                  flush=True)
+            if update_unfinished():
+                print("===> locachy: the host and LOCachy's programs follow: check (c), then apply (a)",
+                      flush=True)
+            return 0
+        print(f"===> locachy: source and updater from branch {branch}: {commit[:7]}", flush=True)
+        if not install_source_first(commit):
+            print("===> locachy: not done", flush=True)
+            return 1
+        print(f"===> locachy: source {commit[:7]} and its updater installed", flush=True)
+        print("===> locachy: the host and LOCachy's programs follow: check (c), then apply (a)", flush=True)
+        return 0
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, SourceNotChecked) as e:
+        print(f"locachy-pkg: source update failed: {e}", file=sys.stderr, flush=True)
+        print("===> locachy: not done", flush=True)
+        return 1
 
 
 def install_source_first(commit):
@@ -2688,24 +2923,35 @@ def shown_field(text):
     return text if text and text != "-" else ""
 
 
-def check_aur_keys(rows, after_source=False):
-    """0 when every source signing key the plan's AUR packages for the host
-    are checked with is in the build user's keyring. Else the whole Apply is
-    refused before anything is changed: KEYS_REFUSED with each key shown (its
-    package, its fingerprint, the recipe that declares it, its upstream and
-    the command a person runs as root once they have checked it), 1 when the
-    keys could not be looked up. Read only: locachy-build --check-keys
-    builds, fetches into a keyring, imports and trusts nothing, and nothing
-    here does either; a key is trusted by a person, never by an update.
+def check_aur_keys(rows, after_source=False, order=None):
+    """0 when every source signing key the plan's AUR packages for the targets
+    to build (the host and closed containers in order) are checked with is in
+    the build user's keyring. Else the whole Apply is refused before anything
+    is changed: KEYS_REFUSED with each key shown (its package, its fingerprint,
+    the recipe that declares it, its upstream and the command a person runs as
+    root once they have checked it), 1 when the keys could not be looked up.
+    Read only: locachy-build --check-keys builds, fetches into a keyring,
+    imports and trusts nothing, and nothing here does either; a key is trusted
+    by a person, never by an update.
     after_source: the second part of an Apply whose LOCachy source was
     installed first; that stays, nothing after it is begun."""
-    aur = sorted({r[2] for r in rows if r[0] == "host" and r[1] == "aur"})
+    candidates = ("host",) if order is None else dict.fromkeys(order)
+    aur_by_target = {}
+    for target, kind, name, *_ in rows:
+        if kind == "aur":
+            aur_by_target.setdefault(target, set()).add(name)
+    aur_targets = [t for t in candidates if t in aur_by_target and
+                   (t == "host" or (t not in ("apps", "locachy") and container_state(t) == "closed"))]
+    aur = sorted({name for t in aur_targets for name in aur_by_target[t]})
     if not aur:
         return 0
+    scope = ", ".join(aur_targets)
+    possessive = "its" if len(aur_targets) == 1 else "their"
+    when = "host" if aur_targets == ["host"] else "any"
     unchanged = ("Nothing more was changed: the LOCachy source installed first stays; no package, "
                  "repository database or package record." if after_source else
                  "Nothing was changed: no package, repository database, package record or plan.")
-    print("===> prepare: source signing keys of the AUR packages, before host changes", flush=True)
+    print(f"===> prepare: source signing keys of the AUR packages, before {when} changes", flush=True)
     command = [BUILD_TOOL, "--check-keys"] + aur
     print("===> " + " ".join(command), flush=True)
     try:
@@ -2729,7 +2975,7 @@ def check_aur_keys(rows, after_source=False):
         why = (p.stderr or "").strip().splitlines()
         print(f"locachy-pkg: the source signing keys of {' '.join(aur)} could not be checked"
               f"{': ' + why[-1] if why else ''}", flush=True)
-        print("===> refused before any change: host (its AUR source signing keys could not be checked). "
+        print(f"===> refused before any change: {scope} ({possessive} AUR source signing keys could not be checked). "
               f"{unchanged} Apply again when they can be.", flush=True)
         return 1
     print("locachy-pkg: apply refused before any change: source signing keys of AUR packages are not "
@@ -2750,7 +2996,7 @@ def check_aur_keys(rows, after_source=False):
     print("locachy-build --trust-key fetches each key, shows it, and adds it only when answered y. "
           "Check each fingerprint with its upstream project first, then (as root):")
     print("Trust them: locachy-build --trust-key " + " ".join(fingerprints))
-    print("===> refused before any change: host (source signing keys not trusted). "
+    print(f"===> refused before any change: {scope} (source signing keys not trusted). "
           f"{unchanged} Trust the keys, then apply again.", flush=True)
     return KEYS_REFUSED
 
@@ -2782,6 +3028,19 @@ def cmd_apply(targets, after_source=False):
     if not rows:
         sys.exit("locachy-pkg: no plan: run locachy-pkg plan first")
     order = [t for t in targets_of(rows) if not targets or t in targets]
+    commits = [r[4] for r in rows if r[:2] == ("locachy", "rebuild") and re.fullmatch(r"[0-9a-f]{40}", r[4])]
+    # A LOCachy source commit is installed first, by design, and then the
+    # updated updater checks the keys before any host or container target. The
+    # installed locachy-build may predate --check-keys, so the first phase asks
+    # it nothing.
+    source_first = bool(commits) and "locachy" in order and not after_source
+    # Before any host or container change (packages, databases, records): a key
+    # any planned AUR build would stop for refuses all of it now, not after the
+    # host transaction. (Not "not done": nothing of the apply was begun.)
+    if not source_first and any(r[0] in order and r[1] == "aur" for r in rows):
+        refused = check_aur_keys(rows, after_source, order)
+        if refused:
+            return refused
     # A plain pacman -Sy since the last publish leaves raw databases in the host's sync
     # directory. With nothing to upgrade there is no host target, and the host target is
     # the only thing that publishes them: publish them here whenever they differ from the
@@ -2800,18 +3059,6 @@ def cmd_apply(targets, after_source=False):
                 print("===> not done: host", flush=True)
                 return 1
             print("===> host: repository databases published", flush=True)
-    commits = [r[4] for r in rows if r[:2] == ("locachy", "rebuild") and re.fullmatch(r"[0-9a-f]{40}", r[4])]
-    # A LOCachy source commit is installed first, by design, and then the
-    # updated updater checks the keys before any host target. The installed
-    # locachy-build may predate --check-keys, so the first phase asks it nothing.
-    source_first = bool(commits) and "locachy" in order and not after_source
-    # Before the host changes (its packages, its databases, its records): a key
-    # its AUR builds would stop for refuses all of it now, not after the
-    # transaction. (Not "not done": nothing of the host was begun.)
-    if "host" in order and not source_first:
-        refused = check_aur_keys(rows, after_source)
-        if refused:
-            return refused
     if source_first:
         print("===> locachy: its source and updater first", flush=True)
         if not install_source_first(commits[-1]):
@@ -2822,7 +3069,10 @@ def cmd_apply(targets, after_source=False):
         sys.stderr.flush()
         os.execv(SELF, [SELF, "apply", "--after-source"] + list(targets))
     failed = []
-    for t in order:
+    system_targets = [t for t in order if t in ("apps", "host", "locachy")]
+    container_targets = [t for t in order if t not in ("apps", "host", "locachy")]
+    host_failed = False
+    for t in system_targets:
         if t not in targets_of(rows):
             continue  # its rebuild was for a preset merge that was not done
         print(f"===> {t}", flush=True)
@@ -2831,12 +3081,15 @@ def cmd_apply(targets, after_source=False):
             print(f"===> {t}: not done", flush=True)
             if t == "host":
                 print("===> stopping: LOCachy and container updates depend on the host", flush=True)
+                host_failed = True
                 break
             if t == "apps":
                 # The configurations were not merged: nothing to build for that.
                 rows = [r for r in rows if r[1:3] != ("rebuild", PRESET_REBUILD)]
         else:
             print(f"===> {t}: done", flush=True)
+    if not host_failed and container_targets:
+        apply_container_targets(container_targets, rows, failed)
     if failed:
         # Preserve the exact failed plan/candidate for diagnosis; a fresh
         # network check must not hide the failure or overwrite its lock.
@@ -2941,7 +3194,8 @@ def job_route(action, args):
         sys.exit("locachy-pkg: must run as root; nothing changed")
     mapping = {"sync": ("pkg-sync", []), "install": ("pkg-install", args), "add": ("pkg-install", args),
                "remove": ("pkg-remove", args), "uninstall": ("pkg-remove", args),
-               "plan": ("pkg-plan", []), "apply": ("pkg-apply", args)}
+               "plan": ("pkg-plan", []), "apply": ("pkg-apply", args),
+               "source-update": ("locachy-source", [])}
     if action == "kernel" and len(args) == 2 and args[0] == "select":
         mapping["kernel"] = ("kernel-select", args[1:])
     elif action == "kernel" and len(args) == 2 and args[0] == "headers":
@@ -2967,7 +3221,7 @@ def job_route(action, args):
             print("Nothing done.")
             return 0
         return jobs.submit("pkg-apply", [], wait=True)
-    if action not in mapping or (action == "sync" and args) or (action == "plan" and args) or \
+    if action not in mapping or (action in ("sync", "plan", "source-update") and args) or \
             (action == "apply" and "--after-source" in args):
         sys.exit("locachy-pkg: this mutation has no fixed system job form; nothing changed")
     kind, job_args = mapping[action]
@@ -2987,7 +3241,8 @@ def main():
         sys.exit(cmd_sync())
 
     action = sys.argv[1]
-    mutating = action in ("sync", "install", "add", "remove", "uninstall", "apply", "update", "source-built") or \
+    mutating = action in ("sync", "install", "add", "remove", "uninstall", "apply", "update",
+                          "source-update", "source-built") or \
         (action == "plan" and "--cached" not in sys.argv[2:]) or (action == "kernel" and sys.argv[2:3] != ["list"])
     if mutating:
         routed = job_route(action, sys.argv[2:])
@@ -3022,6 +3277,9 @@ def main():
         acquire_pkg_lock()
         args = sys.argv[2:]
         sys.exit(cmd_apply([a for a in args if a != "--after-source"], "--after-source" in args))
+    elif action == "source-update":
+        acquire_pkg_lock()
+        sys.exit(cmd_source_update(sys.argv[2:]))
     elif action == "update":
         acquire_pkg_lock()
         sys.exit(cmd_update(sys.argv[2:]))

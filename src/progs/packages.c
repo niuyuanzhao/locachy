@@ -657,7 +657,8 @@ static int container_is_host(const char *name)
 static const char *job_kind_of(char *const argv[])
 {
     static const char *const pkg[][2] = { { "install", "pkg-install" }, { "remove", "pkg-remove" },
-                                          { "sync", "pkg-sync" }, { "plan", "pkg-plan" }, { "apply", "pkg-apply" } };
+                                          { "sync", "pkg-sync" }, { "plan", "pkg-plan" }, { "apply", "pkg-apply" },
+                                          { "source-update", "locachy-source" } };
     static const char *const app[][2] = { { "build", "app-build" }, { "rollback", "app-rollback" },
                                           { "remove", "app-remove" } };
     int of_pkg = strcmp(argv[0], PKG) == 0;
@@ -922,6 +923,8 @@ static void label_of(const struct jobs_row *r, char *out, size_t size)
         snprintf(out, size, "%s %s", _("Apply:"), a);
     } else if (strcmp(r->kind, "pkg-plan") == 0) {
         snprintf(out, size, "%s", _("check for updates"));
+    } else if (strcmp(r->kind, "locachy-source") == 0) {
+        snprintf(out, size, "%s", _("update LOCachy source"));
     } else if (strcmp(r->kind, "pkg-sync") == 0) {
         snprintf(out, size, "%s", _("bring the host to its manifest"));
     } else if (strcmp(r->kind, "pkg-install") == 0) {
@@ -1038,7 +1041,18 @@ static void check_job(void)
         /* TRANSLATORS: home is the program's name; keep it. */
         say_notice(1, _("%s: stopped from home; its output is below."), job_label);
     } else if (ok) {
-        say_notice(0, _("%s: done."), job_label);
+        if (strcmp(r.kind, "locachy-source") == 0) {
+            /* TRANSLATORS: c is the c key; keep it. */
+            say_notice(0, _("%s: done; c checks updates."), job_label);
+        } else {
+            say_notice(0, _("%s: done."), job_label);
+        }
+    } else if (strcmp(r.kind, "pkg-plan") == 0) {
+        /* A Check that fails leaves the others' updates unchecked: say where the
+         * updater's own way is (u), whatever the reason (its output is below). */
+        /* TRANSLATORS: u is the u key; keep it. */
+        say_notice(1, _("%s: failed; u updates LOCachy's source and updater alone. Output below (and in %s)."),
+                   job_label, job_log);
     } else {
         say_notice(1, _("%s: failed; its output is below (and in %s)."), job_label, job_log);
     }
@@ -1642,6 +1656,7 @@ static const struct ui_help_line packages_keys[] = {
     { "Enter", N_("Updates: the row's packages; Containers: edit it; a form: its value") },
     { "Space", N_("Updates: mark a row to apply") },
     { "c, a", N_("Updates: check again (on the network); apply the marked rows") },
+    { "u", N_("Updates: update LOCachy source and updater alone (without checking repositories)") },
     { "n, b, r, Delete", N_("Containers: new, build, roll back, remove") },
     { "/, Ctrl+F", N_("Search and install (Containers, Host)") },
     { "i, Delete, s", N_("Host: add a package, remove the selected one, bring the system to the manifest") },
@@ -3442,6 +3457,9 @@ static void updates_key(int key)
         } else if (yes(question)) {
             start_job(question, argv);
         }
+    } else if (key == 'u' && yes(_("Update LOCachy source and updater now (without host packages)?"))) {
+        char *argv[] = { PKG, "source-update", NULL };
+        start_job(_("update LOCachy source"), argv);
     }
 }
 

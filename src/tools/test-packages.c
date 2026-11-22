@@ -77,6 +77,7 @@ int jobs_submit(const char *kind, const char *const args[], int *id, int *positi
     static const char *const commands[][3] = {
         { "pkg-install", "pkg", "install" }, { "pkg-remove", "pkg", "remove" }, { "pkg-sync", "pkg", "sync" },
         { "pkg-plan", "pkg", "plan" }, { "pkg-apply", "pkg", "apply" }, { "app-build", "app", "build" },
+        { "locachy-source", "pkg", "source-update" },
         { "app-host-build", "app", "build" }, { "app-rollback", "app", "rollback" }, { "app-remove", "app", "remove" },
     };
     char program[512], log[512];
@@ -520,14 +521,15 @@ int main(int argc, char **argv)
      * With keys-wanted, apply and build stop as locachy-build does for
      * source signing keys not trusted yet (its lines, its untrusted-keys). */
     const char *lyre = "40BBCBED223F5EB2A03EF657D7D7A110ABC79A6C", *obfs = "07948FFA64160A425BCD27EAC732B1D1C28F4E2F";
-    char script_text[4096];
+    char script_text[8192];
     snprintf(script_text, sizeof script_text,
              "#!/bin/sh\necho \"pkg $*\" >>%s/calls\n"
              "[ \"$1\" != install ] || echo \"pkg install: $# arguments\" >>%s/calls\n"
              "case \"$*\" in \"plan --cached --machine\") cat %s/plan.txt ;;\n"
              "\"status --machine\") cat %s/status.txt ;; info\\ *) cat %s/info.txt ;;\n"
              "search\\ *) echo \"catalog $LOCACHY_APPS_CATALOG\" >>%s/calls; cat %s/search.txt ;;\n"
-             "plan) seq 1 60; sleep 0.2 ;;\n"
+             "plan) if [ -e %s/plan-fails ]; then echo 'update check failed: test' >&2; exit 1; fi\n"
+             "  seq 1 60; sleep 0.2 ;;\n"
              "commands\\ *) cat %s/commands.txt ;;\n"
              "apply\\ *) if [ -e %s/keys-wanted ]; then\n"
              "  echo '===> host'; echo '===> host: done'; echo '===> edge'\n"
@@ -541,7 +543,7 @@ int main(int argc, char **argv)
              "  echo '===> edge: not done'; echo '===> not done: edge'; exit 1\n"
              "  fi; echo working; sleep 0.2 ;;\n"
              "*) echo working; sleep 0.2 ;; esac\n",
-             dir, dir, dir, dir, dir, dir, dir, dir, dir, lyre, obfs, obfs, lyre, lyre, obfs, dir);
+             dir, dir, dir, dir, dir, dir, dir, dir, dir, dir, lyre, obfs, obfs, lyre, lyre, obfs, dir);
     put("pkg", script_text);
     snprintf(script_text, sizeof script_text,
              "#!/bin/sh\necho \"app $*\" >>%s/calls\n"
@@ -975,6 +977,22 @@ int main(int argc, char **argv)
     run("resize: confirmation waits for an answer and stays clickable",
         (const int[]){ 'a', RESIZE, SNAP, CLICK(4), WAIT, WAIT, END });
     assert(has("calls", "pkg apply host locachy edge\n") && snapped("Y: yes"));
+
+    /* u: LOCachy's source and updater alone, its own job, asked first; a Check
+     * that fails names it. */
+    unlink(D("calls"));
+    run("updates: u asks first, and no answer starts nothing",
+        (const int[]){ 'u', 'n', WAIT, END });
+    assert(!has("calls", "pkg source-update\n") && !has("submitted", "locachy-source"));
+    run("updates: u, then y: LOCachy's source update is a job of its own",
+        (const int[]){ 'u', 'y', WAIT, WAIT, SNAP, END });
+    assert(has("submitted", "locachy-source \n") && has("calls", "pkg source-update\n"));
+    assert(snapped("update LOCachy source: done; c checks updates."));
+    put("plan-fails", "");
+    run("a Check that fails names u, the updater's own way",
+        (const int[]){ 'c', WAIT, WAIT, SNAP, END });
+    assert(snapped("check for updates: failed; u updates LOCachy's source and updater alone."));
+    unlink(D("plan-fails"));
 
     clicks = editing;
     run("resize: a container field redraws and keeps its draft",

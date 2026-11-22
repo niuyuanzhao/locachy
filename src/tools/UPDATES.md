@@ -91,11 +91,41 @@ Apply installs it after the source and before the host, merges the
 configurations that follow a preset, and never builds or installs packages
 for it. A failure there stops nothing else. See [APPS.md](APPS.md).
 
+## Container rebuilds
+
+After `apps`, `host`, and `locachy` complete, Apply processes the remaining
+container targets. Running or frozen containers are reported as not done and
+left untouched without blocking closed containers. When multiple closed
+containers are updated, Apply deduplicates their planned AUR and local packages
+and builds each unique package once into `/var/cache/locachy-pkgs` before
+rebuilding overlays (if a batched AUR build fails, it isolates per package so
+unrelated containers still proceed).
+
+Isolated container overlay builds (`locachy-app build`) then run in parallel
+up to a bounded worker count (`min(4, max(1, cpus // 2))`, overrideable with
+`LOCACHY_CONTAINER_WORKERS`), buffering each container's output so logs stay
+grouped under its target header. Inside each overlay build namespace,
+`/var/cache/pacman/pkg` is mounted read-only as the first pacman `--cachedir`
+and a per-container temporary directory is listed second; completed downloads
+are promoted atomically (signatures before archives) back into the shared
+host cache. Apps with real-system access (`host="1"`) mutate the host pacman
+database and always stay serialized after isolated container builds finish.
+
 ## If the running updater cannot check
 
 The `c` / Check action runs the current updater first. If it reports that it cannot fetch updates, the message must include pacman's actual repository, HTTP, signature, database, or filesystem reason; `checkupdates`'s generic `Cannot fetch updates` is not enough. A failed check changes no host package database, published repository database, package, or successful plan. The full job log is available in the output pane.
 
-If an older installed updater is the thing that hides the reason, repair it in the managed administrator terminal without reinstalling or rebooting:
+When Check fails because of a repository, mirror, recipe, contract-gate, or AUR error — or whenever LOCachy's own source and updater should move forward before checking the host — update LOCachy's source and updater alone:
+
+- In `packages` (Updates page), press `u` (confirm `y`); or as root run:
+
+  ```sh
+  locachy-pkg source-update
+  ```
+
+This runs as its own fixed system job (`locachy-source`, holding `/run/locachy/pkg.lock`), fetches `update_branch` of `update_repo` (checking `trusted-signers` when configured), atomically publishes `/usr/local/src/locachy` through the same source journal as Apply, and runs `install-pkg-tools` and `declare-packages` without touching pacman databases, local recipes, AUR, host packages, or containers. Any previously saved plan is invalidated by `plan_inputs()`, and `source-unbuilt` remains until the next `c` / Check and `a` / Apply updates the host and rebuilds LOCachy's programs.
+
+If an older installed updater predates `source-update` or itself fails before `source-update` can run, repair it in the managed administrator terminal without reinstalling or rebooting:
 
 1. Obtain the candidate `locachy-pkg` file from the exact reviewed LOCachy source and save it as a normal file. Do not pipe a download into a shell. Verify the complete SHA-256 supplied with that source:
 

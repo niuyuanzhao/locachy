@@ -163,6 +163,8 @@ check "fixed boot --luks is accepted" accept boot --luks
 check "fixed boot registration is accepted" accept boot --register-only
 check "the rebuild is a fixed queued kind" accept locachy-rebuild
 check "the rebuild permits only its fixed flag" refuse locachy-rebuild --anything
+check "the LOCachy source update is a fixed queued kind" accept locachy-source
+check "the LOCachy source update takes no argument" refuse locachy-source --anything
 check "TPM pending is accepted without input" accept tpm-pending
 check "TPM clear is accepted without input" accept tpm-clear
 check "new fixed kinds finish" idle
