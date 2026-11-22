@@ -146,6 +146,7 @@ FT_LIBS="$FT_LIBS $NM_LIBS $INPUT_LIBS"
 GCC="gcc -O2 -march=$cpu -Wall -Wextra -D_GNU_SOURCE -I$src/base/include -I$src/base $FT_CFLAGS $NM_CFLAGS $INPUT_CFLAGS"
 IME_CFLAGS=""
 IME_LIBS=""
+rime_redeployed=0
 if [ "${IME:-1}" != 0 ] && [ -f /usr/include/rime_api.h ] && [ -f /usr/lib/librime.so ]; then
     IME_CFLAGS="-DCONFIG_IME"
     # Rime's Lua plugin and libinput link different Lua versions, whose
@@ -172,9 +173,26 @@ if [ "${IME:-1}" != 0 ] && [ -f /usr/include/rime_api.h ] && [ -f /usr/lib/libri
         if [ ! -f /var/lib/locachy/rime/easy_en.dict.yaml ] && [ -f /usr/share/dict/words ]; then
             python3 "$src/base/rime/build_dict.py" /usr/share/dict/words /var/lib/locachy/rime/easy_en.dict.yaml
         fi
-        # Deployed again when its configuration changed (as when it is missing).
+        # Redeploy whenever our configuration changed, the build output is
+        # missing, or /usr/share/rime-data (e.g. rime-frost-git) was updated:
+        # librime loads prism.bin from user_data_dir before shared_data_dir, so
+        # a stale prism.bin paired with an upgraded shared table.bin shifts
+        # every syllable ID.
+        rime_shared_stamp=""
+        if [ -d /usr/share/rime-data ]; then
+            rime_shared_stamp=$(find /usr/share/rime-data -maxdepth 2 -type f \
+                \( -name '*.bin' -o -name '*.yaml' -o -name '*.gram' \) \
+                -printf '%P %s %T@\n' 2>/dev/null | LC_ALL=C sort | sha256sum | cut -d ' ' -f 1)
+        fi
+        rime_prev_stamp=$(cat /var/lib/locachy/rime/build/.shared-stamp 2>/dev/null || true)
+        if [ -n "$rime_shared_stamp" ] && [ "$rime_shared_stamp" != "$rime_prev_stamp" ]; then
+            rime_changed=1
+        fi
         if [ "$rime_changed" = 1 ] || [ ! -f /var/lib/locachy/rime/build/default.yaml ] ||
            [ ! -f /var/lib/locachy/rime/build/easy_en.prism.bin ]; then
+            # Drop stale user-dir compiled tables/prisms so librime rebuilds
+            # them cleanly against the current shared_data_dir (preserves userdb).
+            rm -rf /var/lib/locachy/rime/build
             rime_deployer --build /var/lib/locachy/rime /usr/share/rime-data >/dev/null 2>&1 || true
             rime_deployer --compile /var/lib/locachy/rime/easy_en.schema.yaml /var/lib/locachy/rime /usr/share/rime-data >/dev/null 2>&1 || true
             # The Chinese schema ime.c takes first when it is there; not in the
@@ -182,6 +200,10 @@ if [ "${IME:-1}" != 0 ] && [ -f /usr/include/rime_api.h ] && [ -f /usr/lib/libri
             if [ -f /var/lib/locachy/rime/context_pinyin.schema.yaml ]; then
                 rime_deployer --compile /var/lib/locachy/rime/context_pinyin.schema.yaml /var/lib/locachy/rime /usr/share/rime-data >/dev/null 2>&1 || true
             fi
+            if [ -d /var/lib/locachy/rime/build ] && [ -n "$rime_shared_stamp" ]; then
+                printf '%s\n' "$rime_shared_stamp" >/var/lib/locachy/rime/build/.shared-stamp
+            fi
+            rime_redeployed=1
         fi
     fi
 fi
@@ -440,6 +462,16 @@ reload_init() {
 }
 if [ "$services_changed" = 1 ]; then
     reload_init
+fi
+if [ "$rime_redeployed" = 1 ] &&
+   [ "$(stat -L -c %d:%i / 2>/dev/null)" = "$(stat -L -c %d:%i /proc/1/root 2>/dev/null)" ]; then
+    # Running locachy-bar keeps the previous Rime deployment mapped until SIGHUP.
+    for _proc in /proc/[0-9]*; do
+        [ -r "$_proc/comm" ] || continue
+        if [ "$(cat "$_proc/comm" 2>/dev/null || true)" = "locachy-bar" ]; then
+            kill -HUP "${_proc#/proc/}" 2>/dev/null || true
+        fi
+    done
 fi
 # The debug cable link's port by its card's permanent address (network-client),
 # for a link turned on before debug_link_mac: the card of its name, on the host
