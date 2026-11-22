@@ -40,7 +40,7 @@ class PreparedBuilder(m.LocalBuild):
         self.assertNotIn('mount -t sysfs', text)
         self.assertIn('pacman -U --noscriptlet --noconfirm --ask 4 --assume-installed initramfs --asdeps', text)
         self.assertIn('--assume-installed initramfs', calls)
-        self.assertIn("hashlib.sha256(artifact.read_bytes()).hexdigest() != item['sha256']", text)
+        self.assertIn("hashlib.sha256(artifact.read_bytes()).hexdigest() != digest", text)
         self.assertIn('all prepared outputs tested together', text)
         self.assertIn('python3 -B - "$run/recipe"', text)
         self.assertIn('pacman -Rdd --noscriptlet --noconfirm example', calls)
@@ -302,6 +302,48 @@ class PreparedBuilder(m.LocalBuild):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         removal = [s for s in self.log.read_text().splitlines() if s.startswith('pacman -Rdd')]
         self.assertEqual(removal, ['pacman -Rdd --noscriptlet --noconfirm labwc-locachy'])
+
+    def test_prepared_aur_removes_blocking_aur_package_and_uses_full_job_budget(self):
+        plan = self.root / 'plan'
+        (plan / 'prepared/example').mkdir(parents=True)
+        local_art = plan / 'prepared/example/example-1-1-x86_64.pkg.tar.zst'
+        local_art.write_text('sealed local')
+        (plan / 'prepared/example/build.json').write_text(json.dumps({'artifact': str(local_art)}))
+        (plan / 'plan.json').write_text(json.dumps({
+            'recipes': {'example': {'candidate': {'package_version': '1-1'}}},
+            'aur': {'python-dlib': {
+                'installed_version': '20.1-1', 'target_version': '20.1-1',
+                'reason': 'rebuilt for libjxl (0.13.0-1.1) (libjxl.so=0.12-64)',
+                'provides': ['dlib=20.1-1'],
+            }},
+        }))
+        self.env['LOCACHY_BUILD_PREPARE'] = str(plan)
+        self.env['LOCACHY_BUILD_JOBS'] = '6'
+        self.script.write_text(self.script.read_text().replace('/run/locachy-makepkg.conf',
+                                                               str(self.root / 'makepkg.conf')))
+        self.command('pacman', 'echo "pacman $*" >>"$TEST_LOG"; '
+                     'case "$1:${2:-}" in -Qq:) printf "example\\npython-dlib\\n" ;; '
+                     '-Q:) echo "libjxl 0.13.0-1.1" ;; *) exit 0 ;; esac')
+        self.command('pikaur', 'echo "pikaur $*" >>"$TEST_LOG"; '
+                     'mkdir -p "$TEST_HOME/.cache/pikaur/pkg"; '
+                     'printf rebuilt >"$TEST_HOME/.cache/pikaur/pkg/python-dlib-20.1-1-x86_64.pkg.tar.zst"')
+        result = subprocess.run(['bash', str(self.script), '--aur', 'python-dlib'],
+                                env=self.env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.log.read_text()
+        self.assertIn('pacman -Rdd --noscriptlet --noconfirm example python-dlib', calls)
+        self.assertIn('--ignore example,python-dlib', calls)
+        self.assertIn('--assume-installed python-dlib=20.1-1', calls)
+        self.assertIn('--assume-installed dlib=20.1-1', calls)
+        self.assertIn(f'pacman -U --noscriptlet --noconfirm --ask 4 --assume-installed initramfs --asdeps {local_art}', calls)
+        self.assertIn('--rebuild', calls)
+        self.assertIn(f'--makepkg-config {self.root / "makepkg.conf"}', calls)
+        cfg = (self.root / 'makepkg.conf').read_text()
+        self.assertIn('export MAKEFLAGS=-j6', cfg)
+        self.assertIn('export CMAKE_BUILD_PARALLEL_LEVEL=6', cfg)
+        self.assertIn('export MESON_NUM_PROCESSES=6', cfg)
+        self.assertIn('export CARGO_BUILD_JOBS=6', cfg)
+        self.assertTrue((self.handover / 'python-dlib-20.1-1-x86_64.pkg.tar.zst').is_file())
 
 
 if __name__ == '__main__':

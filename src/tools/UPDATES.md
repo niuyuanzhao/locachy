@@ -46,15 +46,27 @@ script only declares packages; it does not install them.
 Missing declared repository packages are pinned with the host transaction and
 installed in each candidate's disposable build/test root as well as the host's
 final transaction. A newly required library must not be supplied manually just
-to make the new tests compile. AUR and local builds retain their separate,
-explicit failure paths.
+to make the new tests compile. Local and AUR builds fail separately, and
+either failure stops before the host transaction.
 
-## AUR source signing keys
+## AUR source signing keys and pre-transaction rebuilds
 
-AUR packages are built after the host's pacman transaction. Before Apply changes
-the app presets, the repository databases or the packages, it looks up the source
-signing keys that those builds will check against, using
-`locachy-build --check-keys`. When the same Apply also installs a LOCachy source
+Host AUR packages that have a newer AUR version, or whose current dependencies
+would block the pinned repository upgrade (such as a shared-library soname bump
+like `libjxl` `0.12` to `0.13` while the AUR package keeps the same version),
+are built before the host transaction inside a disposable target root upgraded
+to the pinned repository snapshot. Local patched packages build first using the
+shared jobserver pool, then prepared AUR packages build serially with the full
+slot budget and persistent builder home caches so compilation stays fast. All
+sealed local and AUR outputs are co-installed and verified together in a fresh
+disposable root (target dependency and soname closure via `pacman -T` for AUR
+outputs, smoke gates for tracked local packages), then installed alongside the repository
+upgrades in one host `pacman -Su` transaction. A build or validation failure
+stops before any host package or database changes.
+
+Before Apply changes the app presets, the repository databases or the packages,
+it looks up the source signing keys that those AUR builds will check against,
+using `locachy-build --check-keys`. When the same Apply also installs a LOCachy source
 commit, that source is installed first, as always, and the updated updater looks
 the keys up before any host target; a refusal then leaves that source in place
 and changes nothing else. That command reads each recipe's
