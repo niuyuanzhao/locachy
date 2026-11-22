@@ -44,10 +44,13 @@ static struct {
     size_t tx_start, tx_end;
     double last_rx, last_ping;
     int hello, welcomed, active, frame_pending, dmabuf_off;
+    unsigned char slot_busy[EXTDISPLAY_DMABUF_SLOTS];
+    unsigned char slot_exported[EXTDISPLAY_DMABUF_SLOTS];
+    int ready_slot, last_sent_slot;
     uint32_t width, height;
     unsigned hw_caps;
     uint32_t input_caps;
-} session;
+} session = { .ready_slot = -1, .last_sent_slot = -1 };
 
 static double now(void)
 {
@@ -155,23 +158,103 @@ static int send_fd_msg(struct extdisplay_ipc *m, int fd)
     return send_fds_msg(m, &fd, 1);
 }
 
+static void reset_dmabuf_slots(void)
+{
+    memset(session.slot_busy, 0, sizeof session.slot_busy);
+    memset(session.slot_exported, 0, sizeof session.slot_exported);
+    session.ready_slot = -1;
+    session.last_sent_slot = -1;
+}
+
+static int prepare_dmabuf_slot(void)
+{
+    if (session.dmabuf_off || !session.decoder) return 0;
+    int slot = session.ready_slot;
+    if (slot < 0) {
+        for (int s = 0; s < (int)EXTDISPLAY_DMABUF_SLOTS; s++) {
+            if (!session.slot_busy[s]) {
+                slot = s;
+                break;
+            }
+        }
+    }
+    if (slot < 0) return -1; /* all slots currently owned by frontend; wait for ACK */
+    if (extdisplay_decoder_prepare_dmabuf(session.decoder, (uint32_t)slot) <= 0) {
+        session.ready_slot = -1;
+        return 0;
+    }
+    session.ready_slot = slot;
+    return 1;
+}
+
+static int send_latest(void);
+
+static int send_ready_slot(void)
+{
+    if (session.frame_pending || session.ready_slot < 0 || session.dmabuf_off) return 0;
+    int s = session.ready_slot;
+    uint32_t gen = extdisplay_decoder_dmabuf_gen(session.decoder);
+    if (!gen) {
+        session.ready_slot = -1;
+        return 0;
+    }
+    if (!session.slot_exported[s]) {
+        int dmabuf_fds[EXTDISPLAY_DMABUF_MAX_PLANES] = { -1, -1, -1, -1 };
+        struct extdisplay_dmabuf info;
+        if (extdisplay_decoder_export_slot(session.decoder, (uint32_t)s, dmabuf_fds, &info) <= 0 ||
+            info.num_objects < 1 || info.num_objects > EXTDISPLAY_DMABUF_MAX_PLANES) {
+            for (unsigned i = 0; i < EXTDISPLAY_DMABUF_MAX_PLANES; i++) {
+                if (dmabuf_fds[i] >= 0) close(dmabuf_fds[i]);
+            }
+            session.dmabuf_off = 1;
+            reset_dmabuf_slots();
+            return send_latest();
+        }
+        struct extdisplay_ipc m = {
+            .magic = EXTDISPLAY_IPC_MAGIC, .op = EXTDISPLAY_IPC_DMABUF,
+            .width = session.width, .height = session.height, .length = sizeof info,
+        };
+        memcpy(m.text, &info, sizeof info);
+        if (send_fds_msg(&m, dmabuf_fds, info.num_objects) < 0) return -1;
+        if (session.frame_pending) {
+            session.ready_slot = -1;
+            session.slot_exported[s] = 1;
+            session.slot_busy[s] = 1;
+            session.last_sent_slot = s;
+        }
+        return 0;
+    }
+    struct extdisplay_dmabuf info = {
+        .slot = (uint32_t)s,
+        .generation = gen,
+    };
+    struct extdisplay_ipc m = {
+        .magic = EXTDISPLAY_IPC_MAGIC, .op = EXTDISPLAY_IPC_DMABUF,
+        .width = session.width, .height = session.height, .length = sizeof info,
+    };
+    memcpy(m.text, &info, sizeof info);
+    ssize_t n = send(EXTDISPLAY_IPC_FD, &m, sizeof m, MSG_NOSIGNAL | MSG_DONTWAIT);
+    if (n == (ssize_t)sizeof m) {
+        session.frame_pending = 1;
+        session.ready_slot = -1;
+        session.slot_busy[s] = 1;
+        session.last_sent_slot = s;
+        return 0;
+    }
+    return n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
+}
+
 static int send_latest(void)
 {
     uint32_t w, h;
     size_t size;
-    if (session.frame_pending || !extdisplay_decoder_size(session.decoder, &w, &h)) return 0;
+    if (session.frame_pending) return 0;
+    if (session.ready_slot >= 0) return send_ready_slot();
+    if (!extdisplay_decoder_size(session.decoder, &w, &h)) return 0;
     if (!session.dmabuf_off) {
-        int dmabuf_fds[EXTDISPLAY_DMABUF_MAX_PLANES] = { -1, -1, -1, -1 };
-        struct extdisplay_dmabuf info;
-        if (extdisplay_decoder_export_dmabuf(session.decoder, dmabuf_fds, &info) > 0 &&
-            info.num_objects >= 1 && info.num_objects <= EXTDISPLAY_DMABUF_MAX_PLANES) {
-            struct extdisplay_ipc m = {
-                .magic = EXTDISPLAY_IPC_MAGIC, .op = EXTDISPLAY_IPC_DMABUF,
-                .width = w, .height = h, .length = sizeof info,
-            };
-            memcpy(m.text, &info, sizeof info);
-            return send_fds_msg(&m, dmabuf_fds, info.num_objects);
-        }
+        int prep = prepare_dmabuf_slot();
+        if (prep > 0) return send_ready_slot();
+        if (prep < 0) return 0;
     }
     if (extdisplay_dimensions(w, h, &size) < 0) return -1;
     int fd = memfd_create("extdisplay-frame", MFD_CLOEXEC | MFD_ALLOW_SEALING);
@@ -209,6 +292,8 @@ static int receive(void *unused, const unsigned char *data, size_t n)
     case EXTDISPLAY_MSG_CONFIG:
         if (!session.welcomed) return -1;
         session.active = 0;
+        session.frame_pending = 0;
+        reset_dmabuf_slots();
         extdisplay_decoder_close(session.decoder);
         if (!(session.decoder = extdisplay_decoder_open(c.codec, c.width, c.height))) return -1;
         if (session.dmabuf_off) extdisplay_decoder_disable_dmabuf(session.decoder);
@@ -220,7 +305,15 @@ static int receive(void *unused, const unsigned char *data, size_t n)
         if (!session.active) return -1; /* video before streamConfig */
         int r = extdisplay_decoder_step(session.decoder, data + c.video_offset, n - c.video_offset);
         if (r < 0) return -1;
-        return r > 0 && !session.frame_pending ? send_latest() : 0;
+        if (r > 0) {
+            if (!session.dmabuf_off) {
+                int prep = prepare_dmabuf_slot();
+                if (prep > 0) return !session.frame_pending ? send_ready_slot() : 0;
+                if (prep < 0) return 0;
+            }
+            return !session.frame_pending ? send_latest() : 0;
+        }
+        return 0;
     }
     case EXTDISPLAY_MSG_PING: {
         char s[96];
@@ -344,24 +437,31 @@ static int frontend(void)
             break;
         case EXTDISPLAY_IPC_FRAME_ACK:
             session.frame_pending = 0;
-            if (send_latest() < 0) return -1;
+            if (m.width >= 1 && m.width <= EXTDISPLAY_DMABUF_SLOTS) {
+                session.slot_busy[m.width - 1] = 0;
+            }
+            if (session.ready_slot >= 0) {
+                if (send_ready_slot() < 0) return -1;
+            } else if (send_latest() < 0) {
+                return -1;
+            }
             break;
         case EXTDISPLAY_IPC_DMABUF_OFF:
             session.dmabuf_off = 1;
+            reset_dmabuf_slots();
             extdisplay_decoder_disable_dmabuf(session.decoder);
             break;
         case EXTDISPLAY_IPC_REFRESH: {
-            if (!session.active || session.frame_pending || session.dmabuf_off) break;
-            int dmabuf_fds[EXTDISPLAY_DMABUF_MAX_PLANES] = { -1, -1, -1, -1 };
-            struct extdisplay_dmabuf info;
-            if (extdisplay_decoder_reexport_dmabuf(session.decoder, dmabuf_fds, &info) > 0 &&
-                info.num_objects >= 1 && info.num_objects <= EXTDISPLAY_DMABUF_MAX_PLANES) {
-                struct extdisplay_ipc dm = {
-                    .magic = EXTDISPLAY_IPC_MAGIC, .op = EXTDISPLAY_IPC_DMABUF,
-                    .width = session.width, .height = session.height, .length = sizeof info,
-                };
-                memcpy(dm.text, &info, sizeof info);
-                if (send_fds_msg(&dm, dmabuf_fds, info.num_objects) < 0) return -1;
+            if (!session.active || session.dmabuf_off) break;
+            int target = session.ready_slot >= 0 ? session.ready_slot : session.last_sent_slot;
+            reset_dmabuf_slots();
+            session.frame_pending = 0;
+            if (m.width >= 1 && m.width <= EXTDISPLAY_DMABUF_SLOTS) {
+                session.slot_busy[m.width - 1] = 1;
+            }
+            if (target >= 0) {
+                session.ready_slot = target;
+                if (send_ready_slot() < 0) return -1;
             }
             break;
         }
@@ -416,6 +516,8 @@ int main(void)
         if (r < 0 && errno == EINTR) continue;
         if (r < 0 || (p[0].revents & (POLLHUP | POLLERR | POLLNVAL)) || (p[1].revents & (POLLERR | POLLNVAL))) break;
         if ((p[0].revents & POLLIN) && (r = frontend()) != 0) break;
+        /* Flush outbound input/control to the broker before spending time decoding inbound video. */
+        if (session.tx_end > session.tx_start && flush() < 0) break;
         if (p[1].revents & (POLLIN | POLLHUP)) {
             int ended = 0;
             for (int reads = 0; reads < 8; reads++) {

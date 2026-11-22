@@ -49,6 +49,7 @@ static size_t frame_bytes;
 static uint32_t frame_w, frame_h;
 static int dmabuf_active;
 static int flip_ack_pending;
+static int scanning_slot = -1, pending_slot = -1;
 static uint32_t peer_input;
 static struct extdisplay_touch_frame touch_frame;
 static int vx, vy, vw, vh, panel_w, panel_h;
@@ -218,35 +219,93 @@ static int raw_pointer_input(void)
     return 0;
 }
 
-static int pointer_input(void)
+static int send_pointer_motion(double x, double y, double dx, double dy, int has_delta)
 {
-    const struct pointer_event *p = pointer_last();
-    if (raw_pointer_input() < 0) return -1;
-    if (!active || p->gesture == GESTURE_RAW) return 0;
-    /* Focus loss must clear the peer's held buttons, not commit a click. */
-    if (p->cancelled) return cancel();
-    if (vw < 1 || vh < 1) return outside_cancelled ? 0 : cancel();
-    int px = p->x < vx ? vx : p->x >= vx + vw ? vx + vw - 1 : p->x;
-    int py = p->y < vy ? vy : p->y >= vy + vh ? vy + vh - 1 : p->y;
-    outside_cancelled = 0;
-    double x = vw > 1 ? (double)(px - vx) / (vw - 1) : 0;
-    double y = vh > 1 ? (double)(py - vy) / (vh - 1) : 0;
     char s[256];
-    int n, droppable = 0;
-    if (p->button) {
-        n = extdisplay_button_json(s, sizeof s, (uint32_t)p->button, p->pressed, x, y);
-    } else if (p->scroll_dx || p->scroll_dy || (p->gesture == GESTURE_SCROLL && p->scroll_source != SCROLL_TOUCH)) {
-        double kx = frame_w ? (double)frame_w / vw : 1, ky = frame_h ? (double)frame_h / vh : 1;
-        n = extdisplay_scroll_json(s, sizeof s, -p->scroll_dx * kx, -p->scroll_dy * ky, p->scroll_phase, p->scroll_source);
-        droppable = p->scroll_phase == SCROLL_UPDATE;
-    } else if (p->gesture) {
-        return 0;
-    } else {
-        n = p->dx || p->dy ? extdisplay_pointer_delta_json(s, sizeof s, x, y, p->dx, p->dy) :
-                            extdisplay_pointer_json(s, sizeof s, x, y);
-        droppable = 1;
+    int n = has_delta ? extdisplay_pointer_delta_json(s, sizeof s, x, y, dx, dy) :
+                        extdisplay_pointer_json(s, sizeof s, x, y);
+    return n >= 0 ? send_input(s, n, 1) : 0;
+}
+
+/* Drain the current pointer_last() (if have_first) plus every remaining queued
+ * pointer event in one pass, coalescing consecutive pure motion events so
+ * relative dx/dy deltas sum into a single wire packet before any button,
+ * scroll, cancel, or raw event. */
+static int pointer_drain_input(int have_first)
+{
+    int have_motion = 0, motion_has_delta = 0;
+    double mx = 0, my = 0, mdx = 0, mdy = 0;
+    for (;;) {
+        if (!have_first && !pointer_next()) break;
+        have_first = 0;
+        const struct pointer_event *p = pointer_last();
+        if (pointer_raw_pending()) {
+            if (have_motion) {
+                if (send_pointer_motion(mx, my, mdx, mdy, motion_has_delta) < 0) return -1;
+                have_motion = motion_has_delta = 0;
+                mdx = mdy = 0;
+            }
+            if (raw_pointer_input() < 0) return -1;
+        }
+        if (!active || p->gesture == GESTURE_RAW) continue;
+        /* Focus loss must clear the peer's held buttons, not commit a click. */
+        if (p->cancelled) {
+            have_motion = motion_has_delta = 0;
+            mdx = mdy = 0;
+            if (cancel() < 0) return -1;
+            continue;
+        }
+        if (vw < 1 || vh < 1) {
+            have_motion = motion_has_delta = 0;
+            mdx = mdy = 0;
+            if (!outside_cancelled && cancel() < 0) return -1;
+            continue;
+        }
+        int px = p->x < vx ? vx : p->x >= vx + vw ? vx + vw - 1 : p->x;
+        int py = p->y < vy ? vy : p->y >= vy + vh ? vy + vh - 1 : p->y;
+        outside_cancelled = 0;
+        double x = vw > 1 ? (double)(px - vx) / (vw - 1) : 0;
+        double y = vh > 1 ? (double)(py - vy) / (vh - 1) : 0;
+        if (!p->button && !p->gesture && !p->wheel && !p->hwheel && !p->scroll_dx && !p->scroll_dy) {
+            int is_delta = p->dx != 0 || p->dy != 0;
+            if (have_motion && (motion_has_delta != is_delta ||
+                                (is_delta && (mdx + p->dx > 16000 || mdx + p->dx < -16000 ||
+                                              mdy + p->dy > 16000 || mdy + p->dy < -16000)))) {
+                if (send_pointer_motion(mx, my, mdx, mdy, motion_has_delta) < 0) return -1;
+                have_motion = motion_has_delta = 0;
+                mdx = mdy = 0;
+            }
+            mx = x;
+            my = y;
+            if (is_delta) {
+                mdx += p->dx;
+                mdy += p->dy;
+                motion_has_delta = 1;
+            }
+            have_motion = 1;
+            continue;
+        }
+        if (have_motion) {
+            if (send_pointer_motion(mx, my, mdx, mdy, motion_has_delta) < 0) return -1;
+            have_motion = motion_has_delta = 0;
+            mdx = mdy = 0;
+        }
+        char s[256];
+        int n, droppable = 0;
+        if (p->button) {
+            n = extdisplay_button_json(s, sizeof s, (uint32_t)p->button, p->pressed, x, y);
+        } else if (p->scroll_dx || p->scroll_dy || (p->gesture == GESTURE_SCROLL && p->scroll_source != SCROLL_TOUCH)) {
+            double kx = frame_w ? (double)frame_w / vw : 1, ky = frame_h ? (double)frame_h / vh : 1;
+            n = extdisplay_scroll_json(s, sizeof s, -p->scroll_dx * kx, -p->scroll_dy * ky, p->scroll_phase, p->scroll_source);
+            droppable = p->scroll_phase == SCROLL_UPDATE;
+        } else {
+            continue;
+        }
+        if (n >= 0 && send_input(s, n, droppable) < 0) return -1;
     }
-    return n >= 0 ? send_input(s, n, droppable) : 0;
+    if (have_motion && send_pointer_motion(mx, my, mdx, mdy, motion_has_delta) < 0) return -1;
+    if (pointer_raw_pending() && raw_pointer_input() < 0) return -1;
+    return 0;
 }
 
 /* Every key goes to the sender while the link is up, Super+Esc and Ctrl+Alt+F12
@@ -314,9 +373,21 @@ static int release_remote(pid_t *worker, int *inhibited)
         touch_frame.count = 0;
     }
     if (flip_ack_pending && ipc >= 0) {
-        flip_ack_pending = 0;
-        struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK };
-        (void)extdisplay_ipc_send(ipc, &ack);
+        if (screen_flip_complete() > 0) {
+            int retired = scanning_slot;
+            scanning_slot = pending_slot;
+            pending_slot = -1;
+            flip_ack_pending = 0;
+            uint32_t released = retired >= 0 && retired != scanning_slot ? (uint32_t)(retired + 1) : 0u;
+            struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK, .width = released };
+            (void)extdisplay_ipc_send(ipc, &ack);
+        } else if (screen_flip_fd() < 0) {
+            flip_ack_pending = 0;
+            scanning_slot = -1;
+            pending_slot = -1;
+            struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK };
+            (void)extdisplay_ipc_send(ipc, &ack);
+        }
     }
     if (*worker > 0 && ipc >= 0) {
         struct extdisplay_ipc m = { .op = EXTDISPLAY_IPC_CANCEL };
@@ -338,6 +409,14 @@ static int release_remote(pid_t *worker, int *inhibited)
                 }
                 if (m.op == EXTDISPLAY_IPC_FRAME || m.op == EXTDISPLAY_IPC_DMABUF) {
                     struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK };
+                    if (m.op == EXTDISPLAY_IPC_DMABUF && m.length == sizeof(struct extdisplay_dmabuf)) {
+                        struct extdisplay_dmabuf di;
+                        memcpy(&di, m.text, sizeof di);
+                        if (di.generation != 0 && di.slot < EXTDISPLAY_DMABUF_SLOTS &&
+                            (int)di.slot != scanning_slot && (int)di.slot != pending_slot) {
+                            ack.width = di.slot + 1u;
+                        }
+                    }
                     extdisplay_ipc_send(ipc, &ack);
                 }
                 confirmed = m.op == EXTDISPLAY_IPC_CANCELLED;
@@ -447,6 +526,8 @@ static int handle_worker(int *inhibited, double *started)
         if (frame) munmap(frame, frame_bytes);
         dmabuf_active = 0;
         flip_ack_pending = 0;
+        scanning_slot = -1;
+        pending_slot = -1;
         frame = pixels;
         frame_bytes = (size_t)m.bytes;
         frame_w = m.width;
@@ -464,6 +545,8 @@ static int handle_worker(int *inhibited, double *started)
         struct screen_dmabuf_planes planes = {
             .fourcc = info.fourcc,
             .num_planes = info.num_planes,
+            .slot = info.slot,
+            .generation = info.generation,
             .fds = { -1, -1, -1, -1 },
         };
         for (uint32_t i = 0; i < info.num_planes && i < SCREEN_DMABUF_MAX_PLANES; i++) {
@@ -476,31 +559,50 @@ static int handle_worker(int *inhibited, double *started)
         int ok = screen_present_dmabuf_planes(&planes, m.width, m.height);
         int err = errno;
         for (unsigned i = 0; i < nfds; i++) if (fds[i] >= 0) close(fds[i]);
+        int slot_valid = info.generation != 0 && info.slot < EXTDISPLAY_DMABUF_SLOTS;
         if (ok < 0) {
+            if (err == ENOENT && slot_valid && info.num_planes == 0) {
+                /* Frontend DRM FB cache was cleared (e.g. lease/VT restore): ask
+                 * the worker to re-export PRIME fds without disabling dmabuf. */
+                scanning_slot = -1;
+                pending_slot = -1;
+                flip_ack_pending = 0;
+                struct extdisplay_ipc ref = { .op = EXTDISPLAY_IPC_REFRESH };
+                return extdisplay_ipc_send(ipc, &ref) < 0 ? -1 : 0;
+            }
             if (err != EAGAIN && err != EBUSY && err != EACCES && err != EPERM) {
                 say("extdisplay: dma-buf scanout disabled (%s, fourcc=0x%x, planes=%u, mod=0x%llx); falling back to CPU copy",
                     strerror(err), info.fourcc, info.num_planes, (unsigned long long)info.modifiers[0]);
                 dmabuf_active = 0;
+                scanning_slot = -1;
+                pending_slot = -1;
                 struct extdisplay_ipc off = { .op = EXTDISPLAY_IPC_DMABUF_OFF };
                 (void)extdisplay_ipc_send(ipc, &off);
             }
-        } else {
-            dmabuf_active = 1;
-            frame_w = m.width;
-            frame_h = m.height;
-            viewport();
-            if (frame) {
-                munmap(frame, frame_bytes);
-                frame = NULL;
-            }
-            if (ok == 1) {
-                /* Async DRM page flip in flight: send FRAME_ACK once vblank completes
-                 * so the worker never overwrites a surface still being scanned out. */
-                flip_ack_pending = 1;
-                return 0;
-            }
+            uint32_t released = slot_valid && (int)info.slot != scanning_slot ? info.slot + 1u : 0u;
+            struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK, .width = released };
+            return extdisplay_ipc_send(ipc, &ack) < 0 ? -1 : 0;
         }
-        struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK };
+        dmabuf_active = 1;
+        frame_w = m.width;
+        frame_h = m.height;
+        viewport();
+        if (frame) {
+            munmap(frame, frame_bytes);
+            frame = NULL;
+        }
+        if (ok == 1) {
+            /* Async DRM page flip in flight: send FRAME_ACK once vblank completes
+             * so the worker never overwrites a surface still being scanned out. */
+            pending_slot = slot_valid ? (int)info.slot : -1;
+            flip_ack_pending = 1;
+            return 0;
+        }
+        int retired = scanning_slot;
+        scanning_slot = slot_valid ? (int)info.slot : -1;
+        pending_slot = -1;
+        uint32_t released = retired >= 0 && retired != scanning_slot ? (uint32_t)(retired + 1) : 0u;
+        struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK, .width = released };
         return extdisplay_ipc_send(ipc, &ack) < 0 ? -1 : 0;
     }
     case EXTDISPLAY_IPC_UNAVAILABLE:
@@ -563,8 +665,12 @@ static void session_run(int transport)
         int redraw = 0;
         if (drm_fd >= 0 && (p[3].revents & POLLIN)) {
             if (screen_flip_complete() > 0 && flip_ack_pending && ipc >= 0) {
+                int retired = scanning_slot;
+                scanning_slot = pending_slot;
+                pending_slot = -1;
                 flip_ack_pending = 0;
-                struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK };
+                uint32_t released = retired >= 0 && retired != scanning_slot ? (uint32_t)(retired + 1) : 0u;
+                struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK, .width = released };
                 if (extdisplay_ipc_send(ipc, &ack) < 0) {
                     set_state(N_("Disconnected"), N_("The decoder channel ended."));
                     break;
@@ -595,8 +701,11 @@ static void session_run(int transport)
                 }
                 if (session_started && worker < 0) break;
                 if (!dmabuf_active) redraw = 1;
-                else if (base_session_input_allowed() && ipc >= 0) {
-                    struct extdisplay_ipc ref = { .op = EXTDISPLAY_IPC_REFRESH };
+                else if (base_session_input_allowed() && !flip_ack_pending && ipc >= 0) {
+                    struct extdisplay_ipc ref = {
+                        .op = EXTDISPLAY_IPC_REFRESH,
+                        .width = scanning_slot >= 0 ? (uint32_t)(scanning_slot + 1) : 0u,
+                    };
                     (void)extdisplay_ipc_send(ipc, &ref);
                 }
             }
@@ -610,7 +719,7 @@ static void session_run(int transport)
             set_state(N_("Disconnected"), N_("Remote input could not be delivered."));
             break;
         }
-        if (key == K_POINTER && pointer_input() < 0) {
+        if (pointer_drain_input(key == K_POINTER) < 0) {
             set_state(N_("Disconnected"), N_("Remote input could not be delivered."));
             break;
         }
@@ -620,6 +729,9 @@ static void session_run(int transport)
                 break;
             }
             if (dmabuf_active && ipc >= 0) {
+                scanning_slot = -1;
+                pending_slot = -1;
+                flip_ack_pending = 0;
                 struct extdisplay_ipc ref = { .op = EXTDISPLAY_IPC_REFRESH };
                 (void)extdisplay_ipc_send(ipc, &ref);
             }
@@ -637,6 +749,8 @@ static void session_run(int transport)
     touch_frame.count = 0;
     peer_input = 0;
     flip_ack_pending = 0;
+    scanning_slot = -1;
+    pending_slot = -1;
     screen_cursor(CURSOR_ARROW);
     base_raw_enable(1);
     (void)base_session_hold(0);

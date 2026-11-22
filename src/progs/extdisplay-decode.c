@@ -19,6 +19,7 @@
 static VADisplay va_disp;
 static AVBufferRef *va_hwctx;
 static int va_vpp_ok;
+static uint32_t vpp_gen_seq;
 #endif
 struct extdisplay_decoder {
     AVCodecContext *context;
@@ -28,10 +29,11 @@ struct extdisplay_decoder {
     int has_ready, dmabuf_off;
     uint32_t *pixels;
 #ifdef CONFIG_EXTDISPLAY_VAAPI
-    VASurfaceID vpp_surf[3];
+    VASurfaceID vpp_surf[EXTDISPLAY_DMABUF_SLOTS];
     VAConfigID vpp_cfg;
     VAContextID vpp_ctx;
-    int vpp_ready, vpp_idx, vpp_has_last;
+    uint32_t vpp_gen;
+    int vpp_ready, vpp_idx, vpp_last_slot, vpp_has_last;
 #endif
 };
 int extdisplay_vaapi_init(int render_fd, unsigned *hw_caps)
@@ -176,10 +178,10 @@ void extdisplay_decoder_close(struct extdisplay_decoder *d)
 {
     if (!d) return;
 #ifdef CONFIG_EXTDISPLAY_VAAPI
-    if (d->vpp_ready && va_disp) {
+    if (va_disp) {
         if (d->vpp_ctx != VA_INVALID_ID) vaDestroyContext(va_disp, d->vpp_ctx);
         if (d->vpp_cfg != VA_INVALID_ID) vaDestroyConfig(va_disp, d->vpp_cfg);
-        for (int i = 0; i < 3; i++) {
+        for (uint32_t i = 0; i < EXTDISPLAY_DMABUF_SLOTS; i++) {
             if (d->vpp_surf[i] != VA_INVALID_ID) vaDestroySurfaces(va_disp, &d->vpp_surf[i], 1);
         }
     }
@@ -199,9 +201,10 @@ struct extdisplay_decoder *extdisplay_decoder_open(enum extdisplay_codec codec, 
     struct extdisplay_decoder *d = calloc(1, sizeof *d);
     if (!d) return NULL;
 #ifdef CONFIG_EXTDISPLAY_VAAPI
-    d->vpp_surf[0] = d->vpp_surf[1] = d->vpp_surf[2] = VA_INVALID_ID;
+    for (uint32_t i = 0; i < EXTDISPLAY_DMABUF_SLOTS; i++) d->vpp_surf[i] = VA_INVALID_ID;
     d->vpp_cfg = VA_INVALID_ID;
     d->vpp_ctx = VA_INVALID_ID;
+    d->vpp_last_slot = -1;
 #endif
     d->context = avcodec_alloc_context3(c);
     d->frame = av_frame_alloc();
@@ -301,10 +304,10 @@ static int export_surface_prime(VASurfaceID dst, int *fds, struct extdisplay_dma
 }
 #endif
 
-int extdisplay_decoder_export_dmabuf(struct extdisplay_decoder *d, int *fds, struct extdisplay_dmabuf *info)
+int extdisplay_decoder_prepare_dmabuf(struct extdisplay_decoder *d, uint32_t slot)
 {
 #ifdef CONFIG_EXTDISPLAY_VAAPI
-    if (!d || !d->has_ready || d->dmabuf_off || !va_vpp_ok || !va_disp ||
+    if (!d || slot >= EXTDISPLAY_DMABUF_SLOTS || !d->has_ready || d->dmabuf_off || !va_vpp_ok || !va_disp ||
         d->ready->format != AV_PIX_FMT_VAAPI) {
         return 0;
     }
@@ -319,17 +322,19 @@ int extdisplay_decoder_export_dmabuf(struct extdisplay_decoder *d, int *fds, str
                                          VA_SURFACE_ATTRIB_USAGE_HINT_EXPORT } } },
         };
         if (vaCreateSurfaces(va_disp, VA_RT_FORMAT_RGB32, d->width, d->height,
-                             d->vpp_surf, 3, attrs, 2) != VA_STATUS_SUCCESS ||
+                             d->vpp_surf, EXTDISPLAY_DMABUF_SLOTS, attrs, 2) != VA_STATUS_SUCCESS ||
             vaCreateConfig(va_disp, VAProfileNone, VAEntrypointVideoProc, NULL, 0, &d->vpp_cfg) != VA_STATUS_SUCCESS ||
             vaCreateContext(va_disp, d->vpp_cfg, (int)d->width, (int)d->height, VA_PROGRESSIVE,
-                            d->vpp_surf, 3, &d->vpp_ctx) != VA_STATUS_SUCCESS) {
+                            d->vpp_surf, EXTDISPLAY_DMABUF_SLOTS, &d->vpp_ctx) != VA_STATUS_SUCCESS) {
             d->dmabuf_off = 1;
             return 0;
         }
+        if (++vpp_gen_seq == 0) vpp_gen_seq = 1;
+        d->vpp_gen = vpp_gen_seq;
         d->vpp_ready = 1;
     }
     VASurfaceID src = (VASurfaceID)(uintptr_t)d->ready->data[3];
-    VASurfaceID dst = d->vpp_surf[d->vpp_idx];
+    VASurfaceID dst = d->vpp_surf[slot];
     VAProcColorStandardType cs = d->ready->colorspace == AVCOL_SPC_BT709
         ? VAProcColorStandardBT709 : VAProcColorStandardBT601;
     VAProcPipelineParameterBuffer param = {
@@ -348,22 +353,62 @@ int extdisplay_decoder_export_dmabuf(struct extdisplay_decoder *d, int *fds, str
         d->dmabuf_off = 1;
         return 0;
     }
+    /* vaEndPicture submits the VPP batch and attaches the kernel dma_resv write
+     * fence to dst's GEM BO; DRM page-flip awaits that fence in kernel space
+     * without stalling the worker CPU or delaying outbound input. */
     VAStatus st = vaBeginPicture(va_disp, d->vpp_ctx, dst);
     if (st == VA_STATUS_SUCCESS) st = vaRenderPicture(va_disp, d->vpp_ctx, &vbuf, 1);
     if (st == VA_STATUS_SUCCESS) st = vaEndPicture(va_disp, d->vpp_ctx);
     vaDestroyBuffer(va_disp, vbuf);
-    if (st != VA_STATUS_SUCCESS || vaSyncSurface(va_disp, dst) != VA_STATUS_SUCCESS) {
+    if (st != VA_STATUS_SUCCESS) {
         d->dmabuf_off = 1;
         return 0;
     }
-    if (!export_surface_prime(dst, fds, info)) {
-        d->dmabuf_off = 1;
-        return 0;
-    }
-    d->vpp_idx = (d->vpp_idx + 1) % 3;
+    d->vpp_last_slot = (int)slot;
     d->vpp_has_last = 1;
     av_frame_unref(d->ready);
     d->has_ready = 0;
+    return 1;
+#else
+    (void)d; (void)slot;
+    return 0;
+#endif
+}
+int extdisplay_decoder_export_slot(struct extdisplay_decoder *d, uint32_t slot, int *fds, struct extdisplay_dmabuf *info)
+{
+#ifdef CONFIG_EXTDISPLAY_VAAPI
+    if (!d || slot >= EXTDISPLAY_DMABUF_SLOTS || d->dmabuf_off || !va_vpp_ok || !va_disp || !d->vpp_ready) {
+        return 0;
+    }
+    if (!export_surface_prime(d->vpp_surf[slot], fds, info)) {
+        d->dmabuf_off = 1;
+        return 0;
+    }
+    info->slot = slot;
+    info->generation = d->vpp_gen;
+    return 1;
+#else
+    (void)d; (void)slot; (void)fds; (void)info;
+    return 0;
+#endif
+}
+uint32_t extdisplay_decoder_dmabuf_gen(const struct extdisplay_decoder *d)
+{
+#ifdef CONFIG_EXTDISPLAY_VAAPI
+    return d && !d->dmabuf_off && d->vpp_ready ? d->vpp_gen : 0;
+#else
+    (void)d;
+    return 0;
+#endif
+}
+int extdisplay_decoder_export_dmabuf(struct extdisplay_decoder *d, int *fds, struct extdisplay_dmabuf *info)
+{
+#ifdef CONFIG_EXTDISPLAY_VAAPI
+    if (!d) return 0;
+    uint32_t slot = (uint32_t)d->vpp_idx;
+    if (!extdisplay_decoder_prepare_dmabuf(d, slot)) return 0;
+    if (!extdisplay_decoder_export_slot(d, slot, fds, info)) return 0;
+    d->vpp_idx = (d->vpp_idx + 1) % (int)EXTDISPLAY_DMABUF_SLOTS;
     return 1;
 #else
     (void)d; (void)fds; (void)info;
@@ -373,9 +418,8 @@ int extdisplay_decoder_export_dmabuf(struct extdisplay_decoder *d, int *fds, str
 int extdisplay_decoder_reexport_dmabuf(struct extdisplay_decoder *d, int *fds, struct extdisplay_dmabuf *info)
 {
 #ifdef CONFIG_EXTDISPLAY_VAAPI
-    if (!d || d->dmabuf_off || !va_vpp_ok || !va_disp || !d->vpp_ready || !d->vpp_has_last) return 0;
-    VASurfaceID dst = d->vpp_surf[(d->vpp_idx + 2) % 3];
-    return export_surface_prime(dst, fds, info);
+    if (!d || !d->vpp_has_last || d->vpp_last_slot < 0) return 0;
+    return extdisplay_decoder_export_slot(d, (uint32_t)d->vpp_last_slot, fds, info);
 #else
     (void)d; (void)fds; (void)info;
     return 0;
@@ -430,6 +474,11 @@ int extdisplay_decoder_step(struct extdisplay_decoder *d, const void *p, size_t 
 { (void)d; (void)p; (void)n; errno = ENOTSUP; return -1; }
 int extdisplay_decoder_size(const struct extdisplay_decoder *d, uint32_t *w, uint32_t *h)
 { (void)d; (void)w; (void)h; return 0; }
+int extdisplay_decoder_prepare_dmabuf(struct extdisplay_decoder *d, uint32_t slot)
+{ (void)d; (void)slot; return 0; }
+int extdisplay_decoder_export_slot(struct extdisplay_decoder *d, uint32_t slot, int *fds, struct extdisplay_dmabuf *info)
+{ (void)d; (void)slot; (void)fds; (void)info; return 0; }
+uint32_t extdisplay_decoder_dmabuf_gen(const struct extdisplay_decoder *d) { (void)d; return 0; }
 int extdisplay_decoder_export_dmabuf(struct extdisplay_decoder *d, int *fds, struct extdisplay_dmabuf *info)
 { (void)d; (void)fds; (void)info; return 0; }
 int extdisplay_decoder_reexport_dmabuf(struct extdisplay_decoder *d, int *fds, struct extdisplay_dmabuf *info)

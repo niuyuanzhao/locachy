@@ -27,7 +27,7 @@ enum extdisplay_ipc_op {
     EXTDISPLAY_IPC_HELLO = 1,  /* text: the hello JSON */
     EXTDISPLAY_IPC_INPUT,      /* text: one input JSON; dropped unless the stream is active */
     EXTDISPLAY_IPC_STOP,       /* cancel to the peer, then exit */
-    EXTDISPLAY_IPC_FRAME_ACK,  /* the last FRAME is mapped: the next may come */
+    EXTDISPLAY_IPC_FRAME_ACK,  /* frame done; width: retired dma-buf slot + 1 (1..3), or 0 */
     EXTDISPLAY_IPC_CANCEL,     /* cancel to the peer now, answered by CANCELLED once written */
     EXTDISPLAY_IPC_DMABUF_OFF, /* frontend cannot import dma-bufs: send sealed memfd */
     EXTDISPLAY_IPC_REFRESH,    /* re-export the last dma-buf frame after VT/lease restore */
@@ -38,13 +38,16 @@ enum extdisplay_ipc_op {
     EXTDISPLAY_IPC_UNAVAILABLE,
     EXTDISPLAY_IPC_FAILED,
     EXTDISPLAY_IPC_CANCELLED,  /* the cancel is in the transport */
-    EXTDISPLAY_IPC_DMABUF,     /* width, height, text=extdisplay_dmabuf; 1..4 dma-buf fds */
+    EXTDISPLAY_IPC_DMABUF,     /* width, height, text=extdisplay_dmabuf; 1..4 fds, or 0 fds for cached slot */
 };
 #define EXTDISPLAY_DMABUF_MAX_PLANES 4u
+#define EXTDISPLAY_DMABUF_SLOTS 3u
 struct extdisplay_dmabuf {
     uint32_t fourcc;
     uint32_t num_planes;
     uint32_t num_objects;
+    uint32_t slot;
+    uint32_t generation;
     uint32_t object_index[EXTDISPLAY_DMABUF_MAX_PLANES];
     uint32_t pitches[EXTDISPLAY_DMABUF_MAX_PLANES];
     uint32_t offsets[EXTDISPLAY_DMABUF_MAX_PLANES];

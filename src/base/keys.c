@@ -1429,13 +1429,15 @@ int key_poll_many(struct pollfd *extra, size_t nextra, int timeout_ms)
     if (wl_backend_active()) return window_poll(extra, nextra, timeout_ms);
 #endif
     size_t size = MAX_KEYBOARDS + 2 + nextra;
-    struct pollfd *p = calloc(size, sizeof *p);
+    struct pollfd stack_p[64];
+    struct pollfd *p = size <= 64 ? stack_p : calloc(size, sizeof *p);
     if (!p) return 0;
+    int result = 0;
     for (size_t i = 0; i < nextra; i++) extra[i].revents = 0;
     for (;;) {
-        if (control_shown()) { free(p); return K_SHOWN; }
-        if (base_raw_pending && base_raw_pending()) { free(p); return K_RAW_KEY; }
-        if (pointer_next()) { free(p); return K_POINTER; }
+        if (control_shown()) { result = K_SHOWN; break; }
+        if (base_raw_pending && base_raw_pending()) { result = K_RAW_KEY; break; }
+        if (pointer_next()) { result = K_POINTER; break; }
         int n = 0, ctl = control_fd(), ctl_i = -1, ptr = pointer_fd(), ptr_i = -1;
         for (int i = 0; i < count; i++) {
             p[n++] = (struct pollfd){ .fd = keyboards[i], .events = POLLIN };
@@ -1451,15 +1453,15 @@ int key_poll_many(struct pollfd *extra, size_t nextra, int timeout_ms)
         for (size_t i = 0; i < nextra; i++) p[n + i] = extra[i];
         int r = poll(p, (nfds_t)((size_t)n + nextra), timeout_ms);
         if (r < 0 && errno == EINTR) continue;
-        if (r <= 0) { free(p); return 0; }
+        if (r <= 0) { result = 0; break; }
         if (ctl_i >= 0 && (p[ctl_i].revents & (POLLIN | POLLHUP))) {
             if (!control_service(NULL, 0, NULL)) {
                 pause();
             }
             /* A take/release/pointer packet can replace extra input fds.
              * Return to the caller to rebuild its set, not to stale poll data. */
-            free(p);
-            return control_shown() ? K_SHOWN : 0;
+            result = control_shown() ? K_SHOWN : 0;
+            break;
         }
         if (ptr_i >= 0 && (p[ptr_i].revents & POLLIN)) {
             pointer_dispatch(); /* the cursor moves now; events below */
@@ -1469,23 +1471,35 @@ int key_poll_many(struct pollfd *extra, size_t nextra, int timeout_ms)
             extra[i].revents = p[n + i].revents;
             ready |= extra[i].revents != 0;
         }
+        int done = 0;
         for (int i = 0; i < count; i++) {
             if (p[i].revents & (POLLERR | POLLHUP)) continue;
             int key = (p[i].revents & POLLIN) ? keys_event(keyboards[i]) : 0;
             if (key == K_VOL_UP || key == K_VOL_DOWN || key == K_VOL_MUTE || key == K_MIC_MUTE) {
                 base_audio_key(key, NULL, 0);
-                free(p); return 0;
+                result = 0;
+                done = 1;
+                break;
             }
             if (key == K_BRI_UP || key == K_BRI_DOWN) {
                 base_brightness_key(key, NULL, 0);
-                free(p); return 0;
+                result = 0;
+                done = 1;
+                break;
             }
-            if (key != 0) { free(p); return key; }
+            if (key != 0) {
+                result = key;
+                done = 1;
+                break;
+            }
         }
-        if (base_raw_pending && base_raw_pending()) { free(p); return K_RAW_KEY; }
-        if (pointer_next()) { free(p); return K_POINTER; }
-        if (ready) { free(p); return 0; }
+        if (done) break;
+        if (base_raw_pending && base_raw_pending()) { result = K_RAW_KEY; break; }
+        if (pointer_next()) { result = K_POINTER; break; }
+        if (ready) { result = 0; break; }
     }
+    if (p != stack_p) free(p);
+    return result;
 }
 
 int key_poll_timeout(int fd, int timeout_ms)

@@ -172,11 +172,17 @@ int screen_render_node(char *path, size_t size);
 /* Present a DRM PRIME dma-buf full-screen on the primary output without copying
  * pixels through CPU memory; -1 if unsupported or multi-output. Uses non-blocking
  * DRM page flip when available (caller polls screen_flip_fd() and calls
- * screen_flip_complete()), falling back to synchronous SETCRTC otherwise. */
+ * screen_flip_complete()), falling back to synchronous SETCRTC otherwise.
+ * When generation != 0 and slot < SCREEN_DMABUF_SLOTS, DRM FBs are cached per
+ * slot so subsequent frames on the same slot can pass num_planes == 0 with no
+ * PRIME fds; returns -1 with errno=ENOENT if the slot is not cached yet. */
 #define SCREEN_DMABUF_MAX_PLANES 4
+#define SCREEN_DMABUF_SLOTS 3
 struct screen_dmabuf_planes {
     uint32_t fourcc;
     uint32_t num_planes;
+    uint32_t slot;
+    uint32_t generation;
     uint32_t pitches[SCREEN_DMABUF_MAX_PLANES];
     uint32_t offsets[SCREEN_DMABUF_MAX_PLANES];
     uint64_t modifiers[SCREEN_DMABUF_MAX_PLANES];

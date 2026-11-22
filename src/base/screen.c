@@ -78,6 +78,10 @@ struct output {
     uint32_t pitch, fb_id, handle;
     uint32_t dmabuf_fb_id;           /* zero-copy DRM PRIME scanout FB, currently on screen */
     uint32_t dmabuf_pending_fb_id;   /* async PAGE_FLIP target FB, waiting for FLIP_COMPLETE */
+    uint32_t dmabuf_cache_fb[SCREEN_DMABUF_SLOTS]; /* cached DRM FBs indexed by worker VPP slot */
+    uint32_t dmabuf_cache_gen;       /* generation matching dmabuf_cache_fb[] */
+    int dmabuf_active_slot;          /* currently scanning cached slot, or -1 */
+    int dmabuf_pending_slot;         /* in-flight cached slot, or -1 */
     int dmabuf_flip_pending;         /* 1 while a DRM_IOCTL_MODE_PAGE_FLIP is in flight */
     int dmabuf_flip_broken;          /* 1 if driver refused PAGE_FLIP; fall back to SETCRTC */
     int soft_cursor;                 /* no cursor plane: drawn into the scanout */
@@ -550,28 +554,62 @@ static void *array(uint32_t count, size_t each)
     return calloc(count ? count : 1, each);
 }
 
-/* Release any active or in-flight dma-buf framebuffers on output o.
+static int is_cached_dmabuf_fb(const struct output *o, uint32_t id)
+{
+    if (id == 0) return 0;
+    for (int i = 0; i < SCREEN_DMABUF_SLOTS; i++) {
+        if (o->dmabuf_cache_fb[i] == id) return 1;
+    }
+    return 0;
+}
+
+static int has_any_dmabuf_fb(const struct output *o)
+{
+    if (o->dmabuf_fb_id != 0 || o->dmabuf_pending_fb_id != 0) return 1;
+    for (int i = 0; i < SCREEN_DMABUF_SLOTS; i++) {
+        if (o->dmabuf_cache_fb[i] != 0) return 1;
+    }
+    return 0;
+}
+
+/* Release any active, in-flight, or cached dma-buf framebuffers on output o.
  * restore_crtc != 0 restores the dumb framebuffer before RMFB. */
 static void clear_dmabuf_fbs(int fd, struct output *o, int restore_crtc)
 {
-    if (o->dmabuf_fb_id == 0 && o->dmabuf_pending_fb_id == 0) {
+    int had_scanout = o->dmabuf_fb_id != 0 || o->dmabuf_pending_fb_id != 0;
+    if (!has_any_dmabuf_fb(o)) {
+        o->dmabuf_cache_gen = 0;
+        o->dmabuf_active_slot = -1;
+        o->dmabuf_pending_slot = -1;
         o->dmabuf_flip_pending = 0;
         return;
     }
-    if (restore_crtc && o->fb_id != 0 && fd >= 0) {
+    if (restore_crtc && had_scanout && o->fb_id != 0 && fd >= 0) {
         struct drm_mode_crtc set = { .crtc_id = o->crtc_id, .fb_id = o->fb_id,
                                      .set_connectors_ptr = (uintptr_t)&o->conn_id,
                                      .count_connectors = 1, .mode = o->mode, .mode_valid = 1 };
         (void)ioctl(fd, DRM_IOCTL_MODE_SETCRTC, &set);
     }
-    if (o->dmabuf_pending_fb_id != 0) {
-        if (fd >= 0) ioctl(fd, DRM_IOCTL_MODE_RMFB, &o->dmabuf_pending_fb_id);
-        o->dmabuf_pending_fb_id = 0;
+    uint32_t ids[SCREEN_DMABUF_SLOTS + 2];
+    int nids = 0;
+    if (o->dmabuf_pending_fb_id != 0) ids[nids++] = o->dmabuf_pending_fb_id;
+    if (o->dmabuf_fb_id != 0) ids[nids++] = o->dmabuf_fb_id;
+    for (int i = 0; i < SCREEN_DMABUF_SLOTS; i++) {
+        if (o->dmabuf_cache_fb[i] != 0) ids[nids++] = o->dmabuf_cache_fb[i];
+        o->dmabuf_cache_fb[i] = 0;
     }
-    if (o->dmabuf_fb_id != 0) {
-        if (fd >= 0) ioctl(fd, DRM_IOCTL_MODE_RMFB, &o->dmabuf_fb_id);
-        o->dmabuf_fb_id = 0;
+    for (int i = 0; fd >= 0 && i < nids; i++) {
+        int dup = 0;
+        for (int k = 0; k < i; k++) {
+            if (ids[k] == ids[i]) { dup = 1; break; }
+        }
+        if (!dup) (void)ioctl(fd, DRM_IOCTL_MODE_RMFB, &ids[i]);
     }
+    o->dmabuf_pending_fb_id = 0;
+    o->dmabuf_fb_id = 0;
+    o->dmabuf_cache_gen = 0;
+    o->dmabuf_active_slot = -1;
+    o->dmabuf_pending_slot = -1;
     o->dmabuf_flip_pending = 0;
 }
 
@@ -681,7 +719,7 @@ static int read_output(int fd, uint32_t id, struct output *o)
             free(encs);
             continue;
         }
-        *o = (struct output){ .conn_id = id };
+        *o = (struct output){ .conn_id = id, .dmabuf_active_slot = -1, .dmabuf_pending_slot = -1 };
         snprintf(o->name, sizeof o->name, "%s-%u", c.connector_type < NCONNECTOR_TYPES ?
                  connector_types[c.connector_type] : "Unknown", c.connector_type_id);
         o->internal = monitor_internal(o->name);
@@ -1932,7 +1970,7 @@ void screen_flush(void)
         if (o->map == NULL) {
             continue;
         }
-        if (o->dmabuf_fb_id != 0 || o->dmabuf_pending_fb_id != 0) {
+        if (has_any_dmabuf_fb(o)) {
             clear_dmabuf_fbs(card, o, 1);
         }
         soft_cursor_flush(o, 0);
@@ -2246,9 +2284,14 @@ int screen_flip_complete(void)
             if (ev.length < sizeof ev || pos + ev.length > (size_t)n) break;
             if (ev.type == DRM_EVENT_FLIP_COMPLETE && ev.length >= sizeof(struct drm_event_vblank)) {
                 if (o->dmabuf_flip_pending) {
-                    if (o->dmabuf_fb_id != 0) ioctl(card, DRM_IOCTL_MODE_RMFB, &o->dmabuf_fb_id);
+                    if (o->dmabuf_fb_id != 0 && o->dmabuf_fb_id != o->dmabuf_pending_fb_id &&
+                        !is_cached_dmabuf_fb(o, o->dmabuf_fb_id)) {
+                        ioctl(card, DRM_IOCTL_MODE_RMFB, &o->dmabuf_fb_id);
+                    }
                     o->dmabuf_fb_id = o->dmabuf_pending_fb_id;
                     o->dmabuf_pending_fb_id = 0;
+                    o->dmabuf_active_slot = o->dmabuf_pending_slot;
+                    o->dmabuf_pending_slot = -1;
                     o->dmabuf_flip_pending = 0;
                     completed = 1;
                 }
@@ -2261,7 +2304,14 @@ int screen_flip_complete(void)
 
 int screen_present_dmabuf_planes(const struct screen_dmabuf_planes *p, uint32_t w, uint32_t h)
 {
-    if (!p || p->num_planes < 1 || p->num_planes > SCREEN_DMABUF_MAX_PLANES || window_mode || extended) {
+    if (!p || window_mode || extended) {
+        errno = EINVAL;
+        return -1;
+    }
+    int use_cache = p->generation != 0 && p->slot < SCREEN_DMABUF_SLOTS;
+    if (p->num_planes > SCREEN_DMABUF_MAX_PLANES ||
+        (p->num_planes == 0 && !use_cache) ||
+        (p->generation != 0 && p->slot >= SCREEN_DMABUF_SLOTS)) {
         errno = EINVAL;
         return -1;
     }
@@ -2272,74 +2322,114 @@ int screen_present_dmabuf_planes(const struct screen_dmabuf_planes *p, uint32_t 
         (void)screen_flip_complete();
         if (o->dmabuf_flip_pending) { errno = EBUSY; return -1; }
     }
-    struct drm_mode_fb_cmd2 fb = {
-        .width = w,
-        .height = h,
-        .pixel_format = p->fourcc,
-    };
-    uint32_t handles[SCREEN_DMABUF_MAX_PLANES] = { 0 };
-    uint32_t unique_handles[SCREEN_DMABUF_MAX_PLANES] = { 0 };
-    uint32_t nunique = 0;
-    int use_modifiers = 0;
-    for (uint32_t i = 0; i < p->num_planes; i++) {
-        if (p->fds[i] < 0) { errno = EINVAL; goto fail_handles; }
-        /* Deduplicate imports when multiple planes share the same dmabuf fd. */
-        uint32_t hnd = 0;
-        for (uint32_t k = 0; k < i; k++) {
-            if (p->fds[k] == p->fds[i]) { hnd = handles[k]; break; }
+    uint32_t fb_id = 0;
+    if (use_cache && p->num_planes == 0) {
+        if (o->dmabuf_cache_gen != p->generation || o->dmabuf_cache_fb[p->slot] == 0) {
+            errno = ENOENT;
+            return -1;
         }
-        if (hnd == 0) {
-            struct drm_prime_handle prime = { .fd = (uint32_t)p->fds[i] };
-            if (ioctl(card, DRM_IOCTL_PRIME_FD_TO_HANDLE, &prime) < 0) goto fail_handles;
-            hnd = prime.handle;
-            int seen = 0;
-            for (uint32_t u = 0; u < nunique; u++) {
-                if (unique_handles[u] == hnd) { seen = 1; break; }
+        fb_id = o->dmabuf_cache_fb[p->slot];
+    } else {
+        struct drm_mode_fb_cmd2 fb = {
+            .width = w,
+            .height = h,
+            .pixel_format = p->fourcc,
+        };
+        uint32_t handles[SCREEN_DMABUF_MAX_PLANES] = { 0 };
+        uint32_t unique_handles[SCREEN_DMABUF_MAX_PLANES] = { 0 };
+        uint32_t nunique = 0;
+        int use_modifiers = 0;
+        for (uint32_t i = 0; i < p->num_planes; i++) {
+            if (p->fds[i] < 0) { errno = EINVAL; goto fail_handles; }
+            /* Deduplicate imports when multiple planes share the same dmabuf fd. */
+            uint32_t hnd = 0;
+            for (uint32_t k = 0; k < i; k++) {
+                if (p->fds[k] == p->fds[i]) { hnd = handles[k]; break; }
             }
-            if (!seen) unique_handles[nunique++] = hnd;
+            if (hnd == 0) {
+                struct drm_prime_handle prime = { .fd = (uint32_t)p->fds[i] };
+                if (ioctl(card, DRM_IOCTL_PRIME_FD_TO_HANDLE, &prime) < 0) goto fail_handles;
+                hnd = prime.handle;
+                int seen = 0;
+                for (uint32_t u = 0; u < nunique; u++) {
+                    if (unique_handles[u] == hnd) { seen = 1; break; }
+                }
+                if (!seen) unique_handles[nunique++] = hnd;
+            }
+            handles[i] = hnd;
+            fb.handles[i] = hnd;
+            fb.pitches[i] = p->pitches[i];
+            fb.offsets[i] = p->offsets[i];
+            if (p->modifiers[i] != 0 && p->modifiers[i] != DRM_FORMAT_MOD_INVALID) use_modifiers = 1;
         }
-        handles[i] = hnd;
-        fb.handles[i] = hnd;
-        fb.pitches[i] = p->pitches[i];
-        fb.offsets[i] = p->offsets[i];
-        if (p->modifiers[i] != 0 && p->modifiers[i] != DRM_FORMAT_MOD_INVALID) use_modifiers = 1;
-    }
-    if (use_modifiers) {
-        fb.flags = DRM_MODE_FB_MODIFIERS;
-        for (uint32_t i = 0; i < p->num_planes; i++) fb.modifier[i] = p->modifiers[i];
-    }
-    int added = ioctl(card, DRM_IOCTL_MODE_ADDFB2, &fb);
-    int add_err = errno;
-    /* ADDFB2 keeps its own kernel reference on each GEM object; drop handles now. */
-    for (uint32_t u = 0; u < nunique; u++) {
-        struct drm_gem_close gc = { .handle = unique_handles[u] };
-        ioctl(card, DRM_IOCTL_GEM_CLOSE, &gc);
-    }
-    if (added < 0 || fb.fb_id == 0) { errno = add_err ? add_err : EINVAL; return -1; }
+        if (use_modifiers) {
+            fb.flags = DRM_MODE_FB_MODIFIERS;
+            for (uint32_t i = 0; i < p->num_planes; i++) fb.modifier[i] = p->modifiers[i];
+        }
+        int added = ioctl(card, DRM_IOCTL_MODE_ADDFB2, &fb);
+        int add_err = errno;
+        /* ADDFB2 keeps its own kernel reference on each GEM object; drop handles now. */
+        for (uint32_t u = 0; u < nunique; u++) {
+            struct drm_gem_close gc = { .handle = unique_handles[u] };
+            ioctl(card, DRM_IOCTL_GEM_CLOSE, &gc);
+        }
+        if (added < 0 || fb.fb_id == 0) { errno = add_err ? add_err : EINVAL; return -1; }
+        fb_id = fb.fb_id;
+        if (use_cache) {
+            if (o->dmabuf_cache_gen != p->generation) {
+                for (int k = 0; k < SCREEN_DMABUF_SLOTS; k++) {
+                    uint32_t old = o->dmabuf_cache_fb[k];
+                    o->dmabuf_cache_fb[k] = 0;
+                    if (old != 0 && old != o->dmabuf_fb_id && old != o->dmabuf_pending_fb_id) {
+                        (void)ioctl(card, DRM_IOCTL_MODE_RMFB, &old);
+                    }
+                }
+                o->dmabuf_cache_gen = p->generation;
+            }
+            uint32_t prev = o->dmabuf_cache_fb[p->slot];
+            o->dmabuf_cache_fb[p->slot] = fb_id;
+            if (prev != 0 && prev != fb_id && prev != o->dmabuf_fb_id && prev != o->dmabuf_pending_fb_id) {
+                (void)ioctl(card, DRM_IOCTL_MODE_RMFB, &prev);
+            }
+        }
+        goto flip_now;
 
+    fail_handles: {
+            int err = errno;
+            for (uint32_t u = 0; u < nunique; u++) {
+                struct drm_gem_close gc = { .handle = unique_handles[u] };
+                ioctl(card, DRM_IOCTL_GEM_CLOSE, &gc);
+            }
+            errno = err;
+            return -1;
+        }
+    }
+
+flip_now:
     /* Non-blocking DRM page flip avoids blocking the main loop on vblank; the
      * previous FB is retired when DRM_EVENT_FLIP_COMPLETE arrives. */
     if (!o->dmabuf_flip_broken) {
         struct drm_mode_crtc_page_flip flip = {
             .crtc_id = o->crtc_id,
-            .fb_id = fb.fb_id,
+            .fb_id = fb_id,
             .flags = DRM_MODE_PAGE_FLIP_EVENT,
-            .user_data = (uint64_t)fb.fb_id,
+            .user_data = (uint64_t)fb_id,
         };
         if (ioctl(card, DRM_IOCTL_MODE_PAGE_FLIP, &flip) == 0) {
-            o->dmabuf_pending_fb_id = fb.fb_id;
+            o->dmabuf_pending_fb_id = fb_id;
+            o->dmabuf_pending_slot = use_cache ? (int)p->slot : -1;
             o->dmabuf_flip_pending = 1;
             dirty.x2 = dirty.x1;
             return 1;
         }
         int flip_err = errno;
         if (flip_err == EBUSY) {
-            ioctl(card, DRM_IOCTL_MODE_RMFB, &fb.fb_id);
+            if (!is_cached_dmabuf_fb(o, fb_id)) ioctl(card, DRM_IOCTL_MODE_RMFB, &fb_id);
             errno = EBUSY;
             return -1;
         }
         if (flip_err == EACCES || flip_err == EPERM) {
-            ioctl(card, DRM_IOCTL_MODE_RMFB, &fb.fb_id);
+            if (!is_cached_dmabuf_fb(o, fb_id)) ioctl(card, DRM_IOCTL_MODE_RMFB, &fb_id);
             errno = flip_err;
             return -1;
         }
@@ -2355,7 +2445,7 @@ int screen_present_dmabuf_planes(const struct screen_dmabuf_planes *p, uint32_t 
     }
     struct drm_mode_crtc set = {
         .crtc_id = o->crtc_id,
-        .fb_id = fb.fb_id,
+        .fb_id = fb_id,
         .set_connectors_ptr = (uintptr_t)&o->conn_id,
         .count_connectors = 1,
         .mode = o->mode,
@@ -2363,24 +2453,23 @@ int screen_present_dmabuf_planes(const struct screen_dmabuf_planes *p, uint32_t 
     };
     if (ioctl(card, DRM_IOCTL_MODE_SETCRTC, &set) < 0) {
         int set_err = errno;
-        ioctl(card, DRM_IOCTL_MODE_RMFB, &fb.fb_id);
+        if (use_cache && o->dmabuf_cache_fb[p->slot] == fb_id) {
+            o->dmabuf_cache_fb[p->slot] = 0;
+        }
+        if (fb_id != o->dmabuf_fb_id && fb_id != o->dmabuf_pending_fb_id && !is_cached_dmabuf_fb(o, fb_id)) {
+            ioctl(card, DRM_IOCTL_MODE_RMFB, &fb_id);
+        }
         errno = set_err;
         return -1;
     }
-    if (o->dmabuf_fb_id != 0) ioctl(card, DRM_IOCTL_MODE_RMFB, &o->dmabuf_fb_id);
-    o->dmabuf_fb_id = fb.fb_id;
+    if (o->dmabuf_fb_id != 0 && o->dmabuf_fb_id != fb_id && !is_cached_dmabuf_fb(o, o->dmabuf_fb_id)) {
+        ioctl(card, DRM_IOCTL_MODE_RMFB, &o->dmabuf_fb_id);
+    }
+    o->dmabuf_fb_id = fb_id;
+    o->dmabuf_active_slot = use_cache ? (int)p->slot : -1;
+    o->dmabuf_pending_slot = -1;
     dirty.x2 = dirty.x1;
     return 0;
-
-fail_handles: {
-        int err = errno;
-        for (uint32_t u = 0; u < nunique; u++) {
-            struct drm_gem_close gc = { .handle = unique_handles[u] };
-            ioctl(card, DRM_IOCTL_GEM_CLOSE, &gc);
-        }
-        errno = err;
-        return -1;
-    }
 }
 
 int screen_present_dmabuf(int dmabuf_fd, uint32_t w, uint32_t h, uint32_t fourcc,

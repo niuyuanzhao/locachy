@@ -113,7 +113,7 @@ int extdisplay_ipc_recv_fds(int fd, struct extdisplay_ipc *m, int *fds, unsigned
     if (m->op == EXTDISPLAY_IPC_FRAME) {
         want_min = want_max = 1;
     } else if (m->op == EXTDISPLAY_IPC_DMABUF) {
-        want_min = 1;
+        want_min = 0;
         want_max = EXTDISPLAY_DMABUF_MAX_PLANES;
     }
     int dmabuf_bad = 0;
@@ -123,13 +123,22 @@ int extdisplay_ipc_recv_fds(int fd, struct extdisplay_ipc *m, int *fds, unsigned
         } else {
             struct extdisplay_dmabuf info;
             memcpy(&info, m->text, sizeof info);
-            if (info.num_planes < 1 || info.num_planes > EXTDISPLAY_DMABUF_MAX_PLANES ||
-                info.num_objects < 1 || info.num_objects > EXTDISPLAY_DMABUF_MAX_PLANES ||
-                info.num_objects != nfds) {
+            if (info.generation != 0 && info.slot >= EXTDISPLAY_DMABUF_SLOTS) {
                 dmabuf_bad = 1;
-            }
-            for (uint32_t i = 0; !dmabuf_bad && i < info.num_planes; i++) {
-                if (info.object_index[i] >= info.num_objects) dmabuf_bad = 1;
+            } else if (info.num_planes == 0 && info.num_objects == 0) {
+                /* Cached-slot fast path: requires valid slot/generation and zero fds. */
+                if (info.generation == 0 || info.slot >= EXTDISPLAY_DMABUF_SLOTS || nfds != 0) {
+                    dmabuf_bad = 1;
+                }
+            } else {
+                if (info.num_planes < 1 || info.num_planes > EXTDISPLAY_DMABUF_MAX_PLANES ||
+                    info.num_objects < 1 || info.num_objects > EXTDISPLAY_DMABUF_MAX_PLANES ||
+                    info.num_objects != nfds) {
+                    dmabuf_bad = 1;
+                }
+                for (uint32_t i = 0; !dmabuf_bad && i < info.num_planes; i++) {
+                    if (info.object_index[i] >= info.num_objects) dmabuf_bad = 1;
+                }
             }
         }
     }

@@ -229,6 +229,13 @@ static int decode(const char *codec, uint32_t w, uint32_t h, const char *path)
             if (step > 0) {
                 uint32_t rw = 0, rh = 0;
                 CHECK(extdisplay_decoder_size(d, &rw, &rh) == 1 && rw == w && rh == h);
+                /* Without VA-API initialized, 3-slot dmabuf helpers cleanly report software fallback. */
+                int dfds[EXTDISPLAY_DMABUF_MAX_PLANES] = { -1, -1, -1, -1 };
+                struct extdisplay_dmabuf dinfo = { 0 };
+                CHECK(extdisplay_decoder_prepare_dmabuf(d, 0) == 0);
+                CHECK(extdisplay_decoder_prepare_dmabuf(d, EXTDISPLAY_DMABUF_SLOTS) == 0);
+                CHECK(extdisplay_decoder_export_slot(d, 0, dfds, &dinfo) == 0);
+                CHECK(extdisplay_decoder_dmabuf_gen(d) == 0);
                 CHECK(extdisplay_decoder_render(d, direct) == 0);
                 CHECK(extdisplay_decoder_size(d, &rw, &rh) == 0);
                 got++;
@@ -345,9 +352,10 @@ static void ipc(void)
     /* A well-formed input message round-trips; then the socket is empty. */
     CHECK(extdisplay_ipc_send(sv[0], &input) == 0);
     CHECK(extdisplay_ipc_recv(sv[1], &r, &fd) == 0 && r.op == EXTDISPLAY_IPC_INPUT && r.length == 2 && fd < 0);
-    /* A dma-buf frame message round-trips with one or two descriptors and zero bytes. */
+    /* A dma-buf frame message round-trips with one or two descriptors and slot/generation metadata. */
+    CHECK(EXTDISPLAY_DMABUF_SLOTS == 3u && sizeof(struct extdisplay_dmabuf) <= EXTDISPLAY_IPC_TEXT);
     struct extdisplay_dmabuf info = {
-        .fourcc = 0x34325258u, .num_planes = 1, .num_objects = 1,
+        .fourcc = 0x34325258u, .num_planes = 1, .num_objects = 1, .slot = 1, .generation = 7,
         .object_index = { 0 }, .pitches = { 8704 }, .offsets = { 0 }, .modifiers = { 0 },
     };
     struct extdisplay_ipc dmabuf = { .magic = EXTDISPLAY_IPC_MAGIC, .op = EXTDISPLAY_IPC_DMABUF,
@@ -355,10 +363,15 @@ static void ipc(void)
     memcpy(dmabuf.text, &info, sizeof info);
     CHECK(send_raw(sv[0], &dmabuf, &sealed, 1) == 0);
     CHECK(extdisplay_ipc_recv(sv[1], &r, &fd) == 0 && r.op == EXTDISPLAY_IPC_DMABUF && fd >= 0);
-    if (fd >= 0) close(fd);
+    if (fd >= 0) {
+        struct extdisplay_dmabuf got_info;
+        memcpy(&got_info, r.text, sizeof got_info);
+        CHECK(got_info.slot == 1 && got_info.generation == 7 && got_info.num_planes == 1);
+        close(fd);
+    }
     /* Two-plane (e.g. CCS modifier) dma-buf with 2 objects round-trips via recv_fds. */
     struct extdisplay_dmabuf info2 = {
-        .fourcc = 0x34325258u, .num_planes = 2, .num_objects = 2,
+        .fourcc = 0x34325258u, .num_planes = 2, .num_objects = 2, .slot = 2, .generation = 7,
         .object_index = { 0, 1 }, .pitches = { 15360, 1024 }, .offsets = { 0, 0 },
         .modifiers = { 0x0100000000000004ULL, 0x0100000000000004ULL },
     };
@@ -369,13 +382,51 @@ static void ipc(void)
     CHECK(extdisplay_ipc_recv_fds(sv[1], &r, rfds, EXTDISPLAY_DMABUF_MAX_PLANES, &rnfds) == 0 &&
           r.op == EXTDISPLAY_IPC_DMABUF && rnfds == 2 && rfds[0] >= 0 && rfds[1] >= 0);
     for (unsigned i = 0; i < rnfds; i++) if (rfds[i] >= 0) close(rfds[i]);
-    /* Object count mismatch (claims 2 objects, sends 1 fd) is refused. */
+    /* Cached-slot fast path: zero planes/objects, valid slot & nonzero generation, zero fds. */
+    struct extdisplay_dmabuf cached = { .slot = 2, .generation = 7 };
+    memcpy(dmabuf.text, &cached, sizeof cached);
+    CHECK(send_raw(sv[0], &dmabuf, NULL, 0) == 0);
+    CHECK(extdisplay_ipc_recv_fds(sv[1], &r, rfds, EXTDISPLAY_DMABUF_MAX_PLANES, &rnfds) == 0 &&
+          r.op == EXTDISPLAY_IPC_DMABUF && rnfds == 0 && rfds[0] < 0);
+    {
+        struct extdisplay_dmabuf got_cached;
+        memcpy(&got_cached, r.text, sizeof got_cached);
+        CHECK(got_cached.num_planes == 0 && got_cached.num_objects == 0 &&
+              got_cached.slot == 2 && got_cached.generation == 7);
+    }
+    /* Cached-slot message with unexpected fd attached is refused. */
     CHECK(send_raw(sv[0], &dmabuf, &sealed, 1) == 0);
     CHECK(extdisplay_ipc_recv_fds(sv[1], &r, rfds, EXTDISPLAY_DMABUF_MAX_PLANES, &rnfds) < 0 && rnfds == 0);
-    /* A refresh request round-trips with zero descriptors and zero bytes. */
-    struct extdisplay_ipc refresh = { .op = EXTDISPLAY_IPC_REFRESH };
+    /* Cached-slot message with generation == 0 or out-of-range slot is refused. */
+    cached.generation = 0;
+    memcpy(dmabuf.text, &cached, sizeof cached);
+    CHECK(send_raw(sv[0], &dmabuf, NULL, 0) == 0);
+    CHECK(extdisplay_ipc_recv_fds(sv[1], &r, rfds, EXTDISPLAY_DMABUF_MAX_PLANES, &rnfds) < 0);
+    cached.generation = 7;
+    cached.slot = EXTDISPLAY_DMABUF_SLOTS;
+    memcpy(dmabuf.text, &cached, sizeof cached);
+    CHECK(send_raw(sv[0], &dmabuf, NULL, 0) == 0);
+    CHECK(extdisplay_ipc_recv_fds(sv[1], &r, rfds, EXTDISPLAY_DMABUF_MAX_PLANES, &rnfds) < 0);
+    /* Exported dma-buf message with out-of-range slot is refused. */
+    info.slot = EXTDISPLAY_DMABUF_SLOTS;
+    memcpy(dmabuf.text, &info, sizeof info);
+    CHECK(send_raw(sv[0], &dmabuf, &sealed, 1) == 0);
+    CHECK(extdisplay_ipc_recv_fds(sv[1], &r, rfds, EXTDISPLAY_DMABUF_MAX_PLANES, &rnfds) < 0 && rnfds == 0);
+    /* Object count mismatch (claims 2 objects, sends 1 fd) is refused. */
+    memcpy(dmabuf.text, &info2, sizeof info2);
+    CHECK(send_raw(sv[0], &dmabuf, &sealed, 1) == 0);
+    CHECK(extdisplay_ipc_recv_fds(sv[1], &r, rfds, EXTDISPLAY_DMABUF_MAX_PLANES, &rnfds) < 0 && rnfds == 0);
+    /* FRAME_ACK round-trips retired slot+1 (1..3) and 0. */
+    for (uint32_t retired = 0; retired <= EXTDISPLAY_DMABUF_SLOTS; retired++) {
+        struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK, .width = retired };
+        CHECK(extdisplay_ipc_send(sv[0], &ack) == 0);
+        CHECK(extdisplay_ipc_recv(sv[1], &r, &fd) == 0 && r.op == EXTDISPLAY_IPC_FRAME_ACK &&
+              r.width == retired && fd < 0);
+    }
+    /* A refresh request round-trips with zero descriptors and optional active slot+1. */
+    struct extdisplay_ipc refresh = { .op = EXTDISPLAY_IPC_REFRESH, .width = 2 };
     CHECK(extdisplay_ipc_send(sv[0], &refresh) == 0);
-    CHECK(extdisplay_ipc_recv(sv[1], &r, &fd) == 0 && r.op == EXTDISPLAY_IPC_REFRESH && fd < 0);
+    CHECK(extdisplay_ipc_recv(sv[1], &r, &fd) == 0 && r.op == EXTDISPLAY_IPC_REFRESH && r.width == 2 && fd < 0);
     /* Malformed dma-buf metadata (wrong length or nonzero bytes) is refused. */
     struct extdisplay_ipc bad_dma = dmabuf;
     bad_dma.length = 4;
