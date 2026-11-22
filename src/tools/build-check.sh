@@ -145,6 +145,10 @@ if command -v wayland-scanner >/dev/null 2>&1 && pkg-config --exists wayland-cli
     gcc -O2 -Wall -Wextra -Werror -I"$src/base/include" -I"$out" \
         "$src/progs/clipboard.c" "$src/base/clipboard.c" "$out/ext-data-control-v1-protocol.c" \
         -lwayland-client -o "$out/clipboard"
+    gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE "$src/progs/appearance-portal.c" \
+        $(pkg-config --cflags --libs gio-2.0) -o "$out/appearance-portal"
+    gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -I"$src/base/include" "$src/progs/locachy-foot.c" \
+        "$out/obj/base-theme.o" "$out/obj/base-rc.o" "$out/obj/base-say.o" -o "$out/locachy-foot"
     # The shared compositor's bar, window control, overview and screenshot tool, with the protocols they speak.
     wl="wlr-layer-shell-unstable-v1 virtual-keyboard-unstable-v1 xdg-shell wlr-foreign-toplevel-management-unstable-v1
         wlr-output-management-unstable-v1 wlr-output-power-management-unstable-v1 fractional-scale-v1 viewporter

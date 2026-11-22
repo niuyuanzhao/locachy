@@ -78,15 +78,18 @@
 #include "base.h"
 #include "clipboard.h"
 
-#define VEIL       0xB3202326u /* Spectacle's darkened veil outside selection */
-#define TEXT       0xFFFCFCFCu
-#define DIM_TEXT   0xFFA0A8B0u
-#define HIGHLIGHT  0xFF3DAEE9u /* KDE Breeze highlight blue */
-#define PANEL_DARK 0xE6202326u /* HUD bar background */
-#define BTN_BG     0xFF31363Bu /* HUD button background */
-#define BTN_HOVER  0xFF4D545Eu
-#define ANNO_RED   0xFFDA4453u /* Default annotation red/coral */
-#define ANNO_YEL   0x80FDBC4Bu /* Translucent highlighter yellow */
+#define TEXT       theme_argb(THEME_FG, 0xFFFCFCFCu)
+#define DIM_TEXT   theme_argb(THEME_DIM, 0xFFA0A8B0u)
+#define HIGHLIGHT  theme_argb(THEME_ACCENT, 0xFF3DAEE9u)
+#define HUD_BG     theme_argb(THEME_PANEL, 0xE6202326u)
+#define BTN_BG     theme_argb(THEME_CONTROL, 0xFF31363Bu)
+#define BTN_HOVER  theme_argb(THEME_SELECTION, 0xFF4D545Eu)
+
+/* The capture veil and the saved annotation pixels are not UI colors. */
+#define VEIL       0xB3202326u
+#define ANNO_RED   0xFFDA4453u
+#define ANNO_YEL   0x80FDBC4Bu
+#define ANNO_TEXT  0xFFFCFCFCu
 #define HANDLE_R   5
 #define MAX_ANNOS  256
 #define MAX_PTS    2048
@@ -514,7 +517,7 @@ static void render_annotations(uint32_t *px, int W, int H, const struct output *
             char num[16];
             snprintf(num, sizeof num, "%d", a->num);
             int tw = panel_text_width(num, bold);
-            text_over(px, W, H, x0 - tw / 2, y0 - ch / 2, num, TEXT, bold, ch);
+            text_over(px, W, H, x0 - tw / 2, y0 - ch / 2, num, ANNO_TEXT, bold, ch);
             break;
         }
         default:
@@ -1499,18 +1502,18 @@ static void draw_hud(struct output *o, uint32_t *px, int W, int H, const struct 
     o->hud_y = py0;
     o->hud_w = pw;
     o->hud_h = ph;
-    round_rect(px, W, H, px0, py0, pw, ph, ch / 3, 0, PANEL_DARK);
+    round_rect(px, W, H, px0, py0, pw, ph, ch / 3, 0, HUD_BG);
     round_rect(px, W, H, px0, py0, pw, ph, ch / 3, 1, HIGHLIGHT);
     for (int i = 0; i < n; i++) {
         int bx = px0 + pad + it[i].x, by = py0 + pad + it[i].y;
         const struct panel_font *f = it[i].strong ? bold : font;
         if (!it[i].id) {
-            uint32_t fg = it[i].label == status_msg ? ANNO_RED : DIM_TEXT;
+            uint32_t fg = it[i].label == status_msg ? theme_argb(THEME_ERROR, 0xFFDA4453u) : DIM_TEXT;
             text_clip(px, W, H, bx, by + ch / 4, it[i].label, fg, f, ch, it[i].w);
             continue;
         }
         uint32_t bg = it[i].active ? HIGHLIGHT : (o->hovered_hit == it[i].id ? BTN_HOVER : BTN_BG);
-        uint32_t fg = it[i].active ? 0xFF000000u : TEXT;
+        uint32_t fg = it[i].active ? theme_argb(THEME_ON_ACCENT, 0xFF000000u) : TEXT;
         round_rect(px, W, H, bx, by, it[i].w, item_h, ch / 4, 0, bg);
         text_clip(px, W, H, bx + pad, by + ch / 4, it[i].label, fg, f, ch, it[i].w - 2 * pad);
         if (o->nhits < MAX_HITS) {
@@ -1549,7 +1552,7 @@ static struct window *window_picker(struct output *o, int bx, int by, uint32_t *
             if (bx >= x && bx < x + cw && by >= y && by < y + rh) return w;
             continue;
         }
-        fill_rect(px, W, H, x, y, cw, rh, PANEL_DARK);
+        fill_rect(px, W, H, x, y, cw, rh, HUD_BG);
         double scale = fmin((double)cw / w->img.w, (double)(rh - ch) / w->img.h);
         int tw = (int)fmax(1, w->img.w * scale), th = (int)fmax(1, w->img.h * scale);
         int tx = x + (cw - tw) / 2, ty = y + (rh - ch - th) / 2;
@@ -1581,7 +1584,7 @@ static void draw_magnifier(uint32_t *px, int W, int H, const struct image *src, 
     if (lx < 4) lx = 4;
     if (ly < 4) ly = 4;
 
-    round_rect(px, W, H, lx - 2, ly - 2, box + 4, box + ch + 8, 4, 0, PANEL_DARK);
+    round_rect(px, W, H, lx - 2, ly - 2, box + 4, box + ch + 8, 4, 0, HUD_BG);
     for (int gy = 0; gy < cells; gy++) {
         for (int gx = 0; gx < cells; gx++) {
             int sx = cx + (gx - cells / 2), sy = cy + (gy - cells / 2);
@@ -1678,7 +1681,7 @@ static void draw(struct output *o)
         int hx[8], hy[8], hr = HANDLE_R * (s120 >= 180 ? 2 : 1);
         get_handles(sel_x, sel_y, sel_w, sel_h, hx, hy);
         for (int i = 0; i < 8; i++) {
-            draw_disc(px, W, H, hx[i], hy[i], hr + 1, 0xFFFFFFFFu);
+            draw_disc(px, W, H, hx[i], hy[i], hr + 1, theme_argb(THEME_BG, 0xFFFFFFFFu));
             draw_disc(px, W, H, hx[i], hy[i], hr, HIGHLIGHT);
         }
 
@@ -1692,7 +1695,7 @@ static void draw(struct output *o)
         if (by + bh > H - 4) by = sel_y + 4;
         if (bx + bw > W - 4) bx = W - bw - 4;
         if (bx < 4) bx = 4;
-        round_rect(px, W, H, bx, by, bw, bh, ch / 4, 0, PANEL_DARK);
+        round_rect(px, W, H, bx, by, bw, bh, ch / 4, 0, HUD_BG);
         text_over(px, W, H, bx + pad, by + ch / 6, badge, TEXT, bold, ch);
     }
 
@@ -2475,6 +2478,8 @@ int main(int argc, char **argv)
         sel_has = 0;
     }
 
+    int theme_fd = theme_watch_open && theme_watch_read ? theme_watch_open() : -1;
+    if (theme_reload && theme_reload()) dirty_all();
     while (!finished && !stopping) {
         wl_display_dispatch_pending(display);
         if (finished || stopping) break;
@@ -2482,14 +2487,23 @@ int main(int argc, char **argv)
             if (o->dirty && o->surf) draw(o);
         }
         wl_display_flush(display);
-        struct pollfd p = { .fd = wl_display_get_fd(display), .events = POLLIN };
-        if (poll(&p, 1, -1) < 0) {
+        enum { DISPLAY, THEME, N_POLL };
+        struct pollfd p[N_POLL] = {
+            [DISPLAY] = { .fd = wl_display_get_fd(display), .events = POLLIN },
+            [THEME] = { .fd = theme_fd, .events = POLLIN },
+        };
+        if (poll(p, N_POLL, -1) < 0) {
             if (errno == EINTR) continue;
             break;
         }
-        if ((p.revents & (POLLIN | POLLHUP | POLLERR)) && wl_display_dispatch(display) < 0) break;
+        if ((p[THEME].revents & POLLIN) && theme_watch_read && theme_watch_read(theme_fd)) dirty_all();
+        if (p[THEME].revents & (POLLHUP | POLLERR | POLLNVAL)) {
+            close(theme_fd);
+            theme_fd = -1;
+        }
+        if ((p[DISPLAY].revents & (POLLIN | POLLHUP | POLLERR)) && wl_display_dispatch(display) < 0) break;
     }
-
+    if (theme_fd >= 0) close(theme_fd);
     wl_display_roundtrip(display);
     wl_display_disconnect(display);
     return exit_code;

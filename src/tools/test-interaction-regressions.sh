@@ -19,6 +19,8 @@ link=("$src/base/key-action.c" "$src/base/help.c" -Wl,--gc-sections)
 "$out/home" "$out/home-fixtures"
 "${cc[@]}" "$src/tools/test-settings-monitors.c" "${link[@]}" -o "$out/settings"
 "$out/settings" "$out/settings-fixtures"
+"${cc[@]}" "$src/tools/test-theme.c" "$src/base/theme.c" -Wl,--gc-sections -lm -o "$out/theme"
+"$out/theme"
 "${cc[@]}" "$src/tools/test-settings-close.c" "${link[@]}" -o "$out/settings-close"
 "$out/settings-close"
 "${cc[@]}" "$src/tools/test-settings-optional.c" "${link[@]}" -o "$out/settings-optional"

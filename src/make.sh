@@ -339,6 +339,9 @@ if command -v wayland-scanner >/dev/null 2>&1 && pkg-config --exists wayland-cli
         "$b/proto-wlr-output-management-unstable-v1.o" "$b/proto-wlr-output-power-management-unstable-v1.o" \
         "$b/proto-ext-idle-notify-v1.o" "$b"/glibc-base-*.o \
         $FT_LIBS -lwayland-client -lm
+    $GCC -I"$b" -o "$lib/appearance-portal" "$src/progs/appearance-portal.c" $(pkg-config --cflags --libs gio-2.0)
+    $GCC -o "$lib/locachy-foot" "$src/progs/locachy-foot.c" \
+        "$b/glibc-base-theme.o" "$b/glibc-base-rc.o" "$b/glibc-base-say.o"
     $GCC $IME_CFLAGS -I"$b" -o /usr/local/bin/locachy-bar "$src/progs/bar.c" \
         "$b/proto-wlr-layer-shell-unstable-v1.o" "$b/proto-virtual-keyboard-unstable-v1.o" \
         "$b/proto-xdg-shell.o" "$b/proto-wlr-foreign-toplevel-management-unstable-v1.o" \
@@ -359,8 +362,8 @@ if command -v wayland-scanner >/dev/null 2>&1 && pkg-config --exists wayland-cli
         "$b/proto-xdg-shell.o" "$b"/glibc-base-*.o $FT_LIBS \
         -lwayland-client -lwayland-cursor -lxkbcommon -lpng -lm
 else
-    rm -f "$lib/clipboard" "$lib/labwc-control" /usr/local/bin/locachy-bar \
-        /usr/local/bin/locachy-overview /usr/local/bin/locachy-shot
+    rm -f "$lib/clipboard" "$lib/labwc-control" "$lib/appearance-portal" "$lib/locachy-foot" \
+        /usr/local/bin/locachy-bar /usr/local/bin/locachy-overview /usr/local/bin/locachy-shot
     echo "make: Wayland clients not built (desktop module not installed)" >&2
 fi
 if pkg-config --exists libcryptsetup json-c openssl; then
@@ -639,13 +642,13 @@ install -m 755 "$src/link/bus-client" "$lib/bus-client"
 install -D -m 644 "$src/link/90-locachy-network.rules" /usr/local/lib/udev/rules.d/90-locachy-network.rules
 install -D -m 644 "$src/link/91-locachy-cameras.rules" /usr/local/lib/udev/rules.d/91-locachy-cameras.rules
 # Screen sharing (locachy-app starts its backend) and choosing files in the
-# containers: which portal backend answers, with the desktop module's
-# xdg-desktop-portal-wlr and xdg-desktop-portal-gtk.
-if [ -x /usr/lib/xdg-desktop-portal-wlr ]; then
-    install -D -m 644 "$src/link/portals.conf" /etc/xdg/xdg-desktop-portal/portals.conf
-else
-    rm -f /etc/xdg/xdg-desktop-portal/portals.conf
-fi
+# containers: which portal backend answers. These files are projected only
+# into managed graphical launch namespaces, never installed host-wide.
+install -D -m 644 "$src/link/portals.conf" /usr/local/share/locachy/container-config/xdg-desktop-portal/portals.conf
+install -D -m 644 "$src/link/locachy.portal" /usr/local/share/locachy/container-data/xdg-desktop-portal/portals/locachy.portal
+install -D -m 644 "$src/link/org.freedesktop.impl.portal.desktop.locachy.service" \
+    /usr/local/share/dbus-1/services/org.freedesktop.impl.portal.desktop.locachy.service
+
 install -m 755 "$src/link/ntp-client" "$lib/ntp-client"
 install -m 755 "$src/link/timezone-client" "$lib/timezone-client"
 install -D -m 644 "$src/link/NetworkManager.conf" /etc/NetworkManager/conf.d/30-locachy-network.conf

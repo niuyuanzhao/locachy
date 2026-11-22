@@ -67,13 +67,13 @@
 #include "viewporter-client-protocol.h"
 #include "base.h"
 
-#define VEIL       0xB3202326u /* KDE: the theme's background at 0.7 over the blurred desktop */
-#define TEXT       0xFFFCFCFCu
-#define DIM_TEXT   0xFFA0A8B0u
-#define HIGHLIGHT  0xFF3DAEE9u /* KDE's highlight colour (Breeze) */
-#define LABEL_BG   0xFF202326u /* Breeze's window background, KDE's caption ground */
-#define FIELD_BG   0xFF141618u /* Breeze's view background, the search field's */
-#define CLOSE_RED  0xFFDA4453u /* Breeze's negative colour */
+#define VEIL       0xB3202326u /* Keep the tint over the blurred desktop capture unchanged. */
+#define TEXT       theme_argb(THEME_FG, 0xFFFCFCFCu)
+#define DIM_TEXT   theme_argb(THEME_DIM, 0xFFA0A8B0u)
+#define HIGHLIGHT  theme_argb(THEME_ACCENT, 0xFF3DAEE9u)
+#define LABEL_BG   theme_argb(THEME_PANEL, 0xFF202326u)
+#define FIELD_BG   theme_argb(THEME_BG, 0xFF141618u)
+#define CLOSE_BG   theme_argb(THEME_ERROR, 0xFFDA4453u)
 #define BLUR_DOWN  8           /* the background blurred at 1/8 of the screen's size */
 #define MAX_SCALE  1.0         /* ExpoLayout never enlarges a window */
 #define MAX_SHOWN  64
@@ -1016,16 +1016,12 @@ static void draw(struct output *o)
     const struct panel_font *font = panel_font(row, 0), *bold = panel_font(row, 1);
     panel_font_size(font, &cw, &ch);
 
-    /* The veiled background, made once for this size. */
-    if (!o->veiled.px || o->veiled.w != W || o->veiled.h != H) {
+    /* Tint the captured desktop once per size; an absent capture uses the
+     * desktop color instead of treating it as a black image. */
+    if (o->bg.px && (!o->veiled.px || o->veiled.w != W || o->veiled.h != H)) {
         free(o->veiled.px);
         o->veiled.px = NULL;
-        if (o->bg.px) {
-            smooth_image(&o->bg, &o->veiled, W, H);
-        } else if ((o->veiled.px = calloc((size_t)W * (size_t)H, 4)) != NULL) {
-            o->veiled.w = W;
-            o->veiled.h = H;
-        }
+        smooth_image(&o->bg, &o->veiled, W, H);
         for (size_t i = 0; o->veiled.px && i < (size_t)W * (size_t)H; i++) {
             o->veiled.px[i] = blend(o->veiled.px[i] | 0xFF000000u, VEIL);
         }
@@ -1039,6 +1035,7 @@ static void draw(struct output *o)
         return;
     }
     if (o->veiled.px) memcpy(px, o->veiled.px, size);
+    else panel_fill(px, W, H, W, 0, 0, W, H, theme_argb(THEME_DESKTOP, 0xFF16181Bu));
 
     /* The search field, at the top in the middle. */
     int margin = row, field_w = cw * 40 < W - 2 * margin ? cw * 40 : W - 2 * margin, field_h = row * 3 / 2;
@@ -1085,20 +1082,22 @@ static void draw(struct output *o)
             }
             const char *name = win_container(w)[0] ? win_container(w) : w->app_id[0] ? w->app_id : "?";
             int ly = w->y + w->h - ch / 2;
-            label(px, W, H, w->x + w->w / 2, ly, w->w + gap, name, bold, ch, 0xFF000000u, HIGHLIGHT);
+            label(px, W, H, w->x + w->w / 2, ly, w->w + gap, name, bold, ch,
+                  theme_argb(THEME_ON_ACCENT, 0xFF000000u), HIGHLIGHT);
             label(px, W, H, w->x + w->w / 2, ly + ch + ch / 2, w->w + gap, w->title[0] ? w->title : name, font, ch,
                   TEXT, LABEL_BG);
             if (i == o->hovered || touched) {
                 int cx, cy, r;
                 close_button(w, row, &cx, &cy, &r);
                 if (!r) continue;
-                round_rect(px, W, H, cx - r, cy - r, 2 * r, 2 * r, r, 0,
-                           i == o->hovered && o->hover_close ? CLOSE_RED : LABEL_BG);
+                int closing = i == o->hovered && o->hover_close;
+                uint32_t cross = closing ? theme_argb(THEME_BG, 0xFFFCFCFCu) : TEXT;
+                round_rect(px, W, H, cx - r, cy - r, 2 * r, 2 * r, r, 0, closing ? CLOSE_BG : LABEL_BG);
                 for (int t = -r / 2; t <= r / 2; t++) { /* its cross */
                     for (int k = -line / 2; k <= line / 2; k++) {
                         int ya = cy + t + k, yb = cy - t + k, x = cx + t;
-                        if (x >= 0 && x < W && ya >= 0 && ya < H) px[ya * W + x] = TEXT;
-                        if (x >= 0 && x < W && yb >= 0 && yb < H) px[yb * W + x] = TEXT;
+                        if (x >= 0 && x < W && ya >= 0 && ya < H) px[ya * W + x] = cross;
+                        if (x >= 0 && x < W && yb >= 0 && yb < H) px[yb * W + x] = cross;
                     }
                 }
             }
@@ -1107,7 +1106,11 @@ static void draw(struct output *o)
     }
     if (n == 0 && search[0]) {
         const char *none = _("No matching windows");
-        text_over(px, W, H, (W - panel_text_width(none, font)) / 2, ay + ah / 2 - ch / 2, none, DIM_TEXT, font, ch);
+        if (theme_is_light()) {
+            label(px, W, H, W / 2, ay + ah / 2 - ch / 2, aw, none, font, ch, DIM_TEXT, LABEL_BG);
+        } else {
+            text_over(px, W, H, (W - panel_text_width(none, font)) / 2, ay + ah / 2 - ch / 2, none, DIM_TEXT, font, ch);
+        }
     }
     munmap(px, size);
     struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, (int32_t)size);
@@ -1751,6 +1754,8 @@ int main(int argc, char **argv)
     for (struct output *o = outputs; o; o = o->next) {
         create_surface(o, focus ? o->wl == focus : o == outputs); /* the keys go to the focused screen's */
     }
+    int theme_fd = theme_watch_open && theme_watch_read ? theme_watch_open() : -1;
+    if (theme_reload && theme_reload()) dirty_all();
     while (!finished && !stopping) {
         wl_display_dispatch_pending(display);
         if (finished || stopping) break;
@@ -1758,21 +1763,31 @@ int main(int argc, char **argv)
             if (o->dirty && o->surf) draw(o);
         }
         wl_display_flush(display);
-        struct pollfd p[2] = { { .fd = wl_display_get_fd(display), .events = POLLIN }, { .fd = -1 } };
+        enum { DISPLAY, THEME, TOUCH, N_POLL };
+        struct pollfd p[N_POLL] = {
+            [DISPLAY] = { .fd = wl_display_get_fd(display), .events = POLLIN },
+            [THEME] = { .fd = theme_fd, .events = POLLIN },
+            [TOUCH] = { .fd = -1 },
+        };
 #ifdef OVERVIEW_TEST
         static int test_input = 1;
-        p[1].fd = test_input ? 0 : -1;
-        p[1].events = POLLIN;
+        p[TOUCH] = (struct pollfd){ .fd = test_input ? 0 : -1, .events = POLLIN };
 #endif
-        if (poll(p, 2, -1) < 0) {
+        if (poll(p, N_POLL, -1) < 0) {
             if (errno == EINTR) continue;
             break;
         }
+        if ((p[THEME].revents & POLLIN) && theme_watch_read && theme_watch_read(theme_fd)) dirty_all();
+        if (p[THEME].revents & (POLLHUP | POLLERR | POLLNVAL)) {
+            close(theme_fd);
+            theme_fd = -1;
+        }
 #ifdef OVERVIEW_TEST
-        if (p[1].revents & (POLLIN | POLLHUP)) test_input = test_touch();
+        if (p[TOUCH].revents & (POLLIN | POLLHUP)) test_input = test_touch();
 #endif
-        if ((p[0].revents & (POLLIN | POLLHUP | POLLERR)) && wl_display_dispatch(display) < 0) break;
+        if ((p[DISPLAY].revents & (POLLIN | POLLHUP | POLLERR)) && wl_display_dispatch(display) < 0) break;
     }
+    if (theme_fd >= 0) close(theme_fd);
     wl_display_roundtrip(display);
     unlink(pid_path);
     wl_display_disconnect(display);

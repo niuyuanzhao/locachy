@@ -14,6 +14,7 @@
 #include <stdint.h>
 
 #include "config.h"
+#include "theme.h"
 #include "session.h"
 #include "input-raw.h"
 
@@ -252,6 +253,7 @@ int panel_hits(struct panel_hit *out, int max);
 #define K_DEL   0x108 /* Delete */
 #define K_CTRL_SPACE 0x109 /* IME toggle */
 #define K_INS   0x10A /* Insert */
+#define K_REPAINT 0x10B /* The palette changed; redraw without handling a key or a resize. */
 #define K_F1    0x120 /* K_F1 + (0..11) for F1..F12 */
 #define K_CTRL_0     0x110 /* K_CTRL_0 + (0..9) for Ctrl+0..Ctrl+9 */
 #define K_VOL_UP     0x1F0

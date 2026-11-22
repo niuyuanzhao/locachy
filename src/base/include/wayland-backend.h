@@ -47,6 +47,7 @@ int wl_backend_flush(const uint32_t *pixels, int w, int h, int x0, int y0, int x
  * an extra fd is ready, 0 the time passed, -1 the window was closed or the
  * compositor has gone. */
 int wl_backend_wait(struct pollfd *extra, size_t count, int timeout_ms);
+int wl_backend_theme_changed(void); /* consume the pending repaint */
 /* The next key typed, as base.h's codes (0: none), with the text it typed
  * (K_TEXT's) and its keysym name; the modifiers held. */
 int wl_backend_next_key(void);

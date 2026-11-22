@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-16 10:30+0800\n"
+"POT-Creation-Date: 2026-11-21 08:23+0800\n"
 "PO-Revision-Date: 2026-11-09 14:16+0000\n"
 "Last-Translator: LOCachy\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -71,12 +71,13 @@ msgid "Find; next, previous match"
 msgstr "查找；下一个、上一个匹配"
 
 #: base/help.c
-msgid "Every program"
-msgstr "所有程序"
+#, fuzzy
+msgid "[Esc / F1: close]"
+msgstr "Esc、F1 或 q：关闭"
 
 #: base/help.c
-msgid "Esc, F1 or q: close"
-msgstr "Esc、F1 或 q：关闭"
+msgid "Every program"
+msgstr "所有程序"
 
 #: base/jobs.c
 msgid "The request is too long."
@@ -453,7 +454,8 @@ msgstr "归档管理"
 #. TRANSLATORS: Esc is the key; keep it.
 #. TRANSLATORS: Esc is the Esc key; keep it.
 #. TRANSLATORS: Esc is the key; keep it.
-#: progs/archive.c progs/files.c progs/rescue.c progs/settings.c progs/shot.c
+#: progs/archive.c progs/bar.c progs/files.c progs/rescue.c progs/settings.c
+#: progs/shot.c
 msgid "Esc: cancel"
 msgstr "Esc: 取消"
 
@@ -569,26 +571,57 @@ msgstr "输入行中：删除光标前的词、删到行首、删到行尾"
 msgid "Archive keys"
 msgstr "归档管理快捷键"
 
-#. TRANSLATORS: y and N are the keys answering; keep them.
+#. TRANSLATORS: Enter and Esc are keys; keep them.
 #: progs/archive.c
-#, c-format
-msgid "%s [y/N]"
-msgstr "%s [y/N]"
+#, fuzzy
+msgid "Enter: ok"
+msgstr "Enter: 打开"
+
+#. TRANSLATORS: N is the N key; keep "N: ".
+#: progs/archive.c progs/files.c progs/installer.c progs/packages.c
+msgid "N: no"
+msgstr "N: 否"
+
+#. TRANSLATORS: Y and N are keys; keep them.
+#. TRANSLATORS: Y, N and Esc are keys; keep them.
+#. TRANSLATORS: Y and N are the keys; keep "Y: " and "N: ".
+#. TRANSLATORS: Y is the Y key; keep "Y: ".
+#: progs/archive.c progs/files.c progs/installer.c progs/packages.c
+msgid "Y: yes"
+msgstr "Y: 是"
 
 #: progs/archive.c
 #, c-format
-msgid ""
-"%s is there and not a folder: o overwrite  O all  s skip  S all  Esc cancel"
-msgstr ""
-"%s 已存在且不是文件夹：o 覆盖  O 全部覆盖  s 跳过  S 全部跳过  Esc 取消"
+msgid "%s is there already."
+msgstr "%s 已存在。"
 
 #: progs/archive.c
-#, c-format
-msgid ""
-"%s is there already: o overwrite  O all  s skip  S all  r another name  Esc "
-"cancel"
+#, fuzzy, c-format
+msgid "%s is there and not a folder."
+msgstr "%s 已存在：未还原"
+
+#: progs/archive.c
+msgid "O: all"
 msgstr ""
-"%s 已存在：o 覆盖  O 全部覆盖  s 跳过  S 全部跳过  r 另起名称  Esc 取消"
+
+#: progs/archive.c
+#, fuzzy
+msgid "o: overwrite"
+msgstr "覆盖(&O)"
+
+#: progs/archive.c
+msgid "s: skip"
+msgstr ""
+
+#: progs/archive.c
+#, fuzzy
+msgid "S: all"
+msgstr "全选"
+
+#: progs/archive.c
+#, fuzzy
+msgid "r: rename"
+msgstr "F2：重命名"
 
 #: progs/archive.c
 msgid "Another name:"
@@ -742,13 +775,18 @@ msgstr "这里没有能预览 %s 的程序：o 用其应用程序打开。"
 
 #: progs/archive.c
 #, c-format
+msgid "Could not open %s on the shared display. See the log for the reason."
+msgstr ""
+
+#: progs/archive.c
+#, c-format
 msgid "Cannot ask home to open %s."
 msgstr "无法请 home 打开 %s。"
 
 #: progs/archive.c
-#, c-format
-msgid "Opened %s."
-msgstr "已打开 %s。"
+#, fuzzy, c-format
+msgid "Open request accepted for %s."
+msgstr "打开 %s：已接受"
 
 #: progs/archive.c progs/edit-filesearch-ui.inc progs/packages.c progs/shot.c
 msgid "Cancel"
@@ -878,11 +916,6 @@ msgstr ""
 #: progs/archive.c
 msgid "The archive needs a name (without /)."
 msgstr "归档需要名称（不含 /）。"
-
-#: progs/archive.c
-#, c-format
-msgid "%s is there already."
-msgstr "%s 已存在。"
 
 #: progs/archive.c
 msgid ""
@@ -1017,7 +1050,7 @@ msgstr "打开方式："
 msgid "Opened read-only:"
 msgstr "以只读打开："
 
-#: progs/archive.c progs/installer.c progs/packages.c
+#: progs/archive.c progs/installer.c progs/packages.c progs/settings.c
 msgid "no"
 msgstr "否"
 
@@ -1167,6 +1200,23 @@ msgid "RAM %s, %d frozen"
 msgid_plural "RAM %s, %d frozen"
 msgstr[0] "内存 %s，%d 已冻结"
 
+#: progs/bar.c progs/home.c
+msgid "Graphical Session"
+msgstr "图形会话"
+
+#: progs/bar.c
+msgid "Waiting for applications"
+msgstr "正在等待应用"
+
+#: progs/bar.c progs/edit-actions.inc progs/edit-documents.inc
+#: progs/edit-filesearch-ui.inc progs/view.c
+msgid "Close"
+msgstr "关闭"
+
+#: progs/bar.c
+msgid "Ctrl+Q: close"
+msgstr "Ctrl+Q：关闭"
+
 #: progs/bar.c
 msgid "Its tray item did not show a window."
 msgstr "其托盘项未显示窗口。"
@@ -1194,8 +1244,9 @@ msgstr "是否在无宿主防火墙保护下以自带的用户态 Tor 启动？"
 
 #. TRANSLATORS: Enter and Esc are keys; keep them.
 #: progs/bar.c
-msgid "Enter: start with own Tor   Esc: cancel"
-msgstr "Enter: 以自带 Tor 启动   Esc: 取消"
+#, fuzzy
+msgid "Enter: start with Tor"
+msgstr "Y / Enter: 以自带 Tor 启动"
 
 #. TRANSLATORS: %s is the container name.
 #: progs/bar.c
@@ -1213,8 +1264,9 @@ msgstr "窗口；其他程序则会启动第二个副本。"
 
 #. TRANSLATORS: Enter and Esc are keys; keep them.
 #: progs/bar.c
-msgid "Enter: start it again   Esc: leave it"
-msgstr "Enter: 再次启动   Esc: 保持原样"
+#, fuzzy
+msgid "Enter: start again"
+msgstr "（Enter: 重新生成）"
 
 #. TRANSLATORS: %s is a file name or URL.
 #: progs/bar.c
@@ -1226,10 +1278,17 @@ msgstr "打开 %s 的方式："
 msgid "Other container..."
 msgstr "其他容器..."
 
+#. TRANSLATORS: A is the key; keep it.
+#: progs/bar.c progs/files.c
+msgid "A: always use it"
+msgstr "A: 始终使用此项"
+
 #. TRANSLATORS: Enter, A and Esc are keys; keep them.
-#: progs/bar.c
-msgid "Enter: open   A: always use it   Esc: cancel"
-msgstr "Enter: 打开   A: 始终使用此项   Esc: 取消"
+#. TRANSLATORS: Enter is the key; keep it.
+#. TRANSLATORS: Enter, Space, R, F, K are key names; keep them.
+#: progs/bar.c progs/files.c progs/home.c
+msgid "Enter: open"
+msgstr "Enter: 打开"
 
 #. TRANSLATORS: Up, Down, Enter, F and Esc are keys; keep them.
 #: progs/bar.c
@@ -1275,18 +1334,6 @@ msgstr "全屏"
 #: progs/bar.c
 msgid "window"
 msgstr "窗口"
-
-#: progs/bar.c progs/home.c
-msgid "Graphical Session"
-msgstr "图形会话"
-
-#: progs/bar.c
-msgid "Waiting for applications"
-msgstr "正在等待应用"
-
-#: progs/bar.c
-msgid "Ctrl+Q: close"
-msgstr "Ctrl+Q：关闭"
 
 #: progs/drives.c
 #, c-format
@@ -1383,11 +1430,6 @@ msgstr "全部保存"
 #: progs/edit-actions.inc progs/edit-documents.inc progs/view.c
 msgid "Reload"
 msgstr "重新加载"
-
-#: progs/bar.c progs/edit-actions.inc progs/edit-documents.inc
-#: progs/edit-filesearch-ui.inc progs/view.c
-msgid "Close"
-msgstr "关闭"
 
 #: progs/edit-actions.inc
 msgid "Close All"
@@ -3928,6 +3970,10 @@ msgid "unmounted"
 msgstr "已卸载"
 
 #: progs/files.c
+msgid "Esc: stay"
+msgstr "Esc: 保留"
+
+#: progs/files.c
 #, c-format
 msgid "Copying %s: %s of %s. Esc: stop."
 msgstr "正在复制 %s：%s / %s。Esc：停止。"
@@ -3945,28 +3991,9 @@ msgid ""
 "done, Esc: stay."
 msgstr "复制尚未完成。y：立即停止并关闭，n：复制完成后关闭，Esc：保留窗口。"
 
-#. TRANSLATORS: y and N are keys; keep them.
 #: progs/files.c
 msgid "Stop copying? What is not copied yet is not kept. y/N"
 msgstr "停止复制？尚未复制的部分不会保留。y/N"
-
-#. TRANSLATORS: Y is the key; keep it.
-#. TRANSLATORS: Y and N are the keys; keep "Y: " and "N: ".
-#. TRANSLATORS: Y is the Y key; keep "Y: ".
-#: progs/files.c progs/installer.c progs/packages.c
-msgid "Y: yes"
-msgstr "Y: 是"
-
-#. TRANSLATORS: N is the key; keep it.
-#. TRANSLATORS: N is the N key; keep "N: ".
-#: progs/files.c progs/installer.c progs/packages.c
-msgid "N: no"
-msgstr "N: 否"
-
-#. TRANSLATORS: Esc is the key; keep it.
-#: progs/files.c
-msgid "Esc: stay"
-msgstr "Esc: 保留"
 
 #: progs/files.c
 msgid ""
@@ -4602,12 +4629,6 @@ msgstr "Ctrl+Z：撤销"
 msgid "i: properties"
 msgstr "i: 属性"
 
-#. TRANSLATORS: Enter is the key; keep it.
-#. TRANSLATORS: Enter, Space, R, F, K are key names; keep them.
-#: progs/files.c progs/home.c
-msgid "Enter: open"
-msgstr "Enter: 打开"
-
 #. TRANSLATORS: o is the key; keep it.
 #: progs/files.c
 msgid "o: open with"
@@ -4650,7 +4671,8 @@ msgstr "Ctrl+Shift+N: 新建文件夹"
 msgid "Ctrl+Q: quit"
 msgstr "Ctrl+Q: 退出"
 
-#: progs/files.c progs/home.c
+#. TRANSLATORS: Esc is the Esc key; keep it.
+#: progs/files.c progs/home.c progs/packages.c progs/settings.c
 msgid "Esc: back"
 msgstr "Esc：返回"
 
@@ -4855,11 +4877,6 @@ msgstr "没有可用于打开它的容器。"
 #, c-format
 msgid "Open %s (%s) with:"
 msgstr "打开 %s (%s) 的方式："
-
-#. TRANSLATORS: A is the key; keep it.
-#: progs/files.c
-msgid "A: always use it"
-msgstr "A: 始终使用此项"
 
 #: progs/files.c
 msgid "Not opened."
@@ -5338,7 +5355,7 @@ msgid "w makes an image the wallpaper; %s is not one."
 msgstr "按 w 可将图片设为壁纸；%s 不是图片。"
 
 #: progs/files.c progs/installer.c progs/packages.c progs/settings-power.inc
-#: progs/settings.c
+#: progs/settings-theme.inc progs/settings.c
 #, c-format
 msgid "Cannot write %s."
 msgstr "无法写入 %s。"
@@ -5840,10 +5857,6 @@ msgid "Container actions stay here; state refreshes every 500 ms."
 msgstr "容器操作在此进行；状态每 500 毫秒刷新一次。"
 
 #: progs/home.c
-msgid "Open the shared desktop"
-msgstr "打开共享桌面"
-
-#: progs/home.c
 msgid "opening"
 msgstr "正在打开"
 
@@ -6034,6 +6047,10 @@ msgid "state, RAM / swap MiB"
 msgstr "状态、内存 / 交换空间 MiB"
 
 #: progs/home.c
+msgid "Open the shared desktop"
+msgstr "打开共享桌面"
+
+#: progs/home.c
 msgid "home and the shared folders"
 msgstr "主目录与共享文件夹"
 
@@ -6144,11 +6161,6 @@ msgstr "冻结：已接受 %d 个，错误 %d 个；状态正从底层刷新。"
 #, c-format
 msgid "%s is part of home: nothing to close."
 msgstr "%s 属于主页的一部分：无需关闭。"
-
-#: progs/home.c
-#, c-format
-msgid "%s cannot be closed from home."
-msgstr "无法从主页关闭%s。"
 
 #. TRANSLATORS: K is the key name; keep it.
 #: progs/home.c
@@ -8129,9 +8141,9 @@ msgstr "（添加目录）"
 msgid "Enter: a folder of your home, chosen in files"
 msgstr "Enter: 在文件管理器中选择主目录下的文件夹"
 
-#. TRANSLATORS: Delete is the Delete key; keep it.
 #: progs/packages.c
-msgid "at the same path in it   Delete: remove"
+#, fuzzy
+msgid "at the same path in it"
 msgstr "在容器内挂载于相同路径   Delete: 移除"
 
 #: progs/packages.c
@@ -10028,6 +10040,75 @@ msgstr "电池读数已刷新。"
 msgid "Copied battery report to clipboard."
 msgstr "已将电池报告复制到剪贴板。"
 
+#: progs/settings-theme.inc
+msgid "LOCachy Dark"
+msgstr "LOCachy 深色"
+
+#: progs/settings-theme.inc
+msgid "LOCachy Light"
+msgstr "LOCachy 浅色"
+
+#: progs/settings-theme.inc progs/view-pdf-ui.inc
+msgid "Blue"
+msgstr "蓝色"
+
+#: progs/settings-theme.inc
+msgid "Teal"
+msgstr "青绿色"
+
+#: progs/settings-theme.inc progs/view-pdf-ui.inc
+msgid "Green"
+msgstr "绿色"
+
+#: progs/settings-theme.inc
+msgid "Amber"
+msgstr "琥珀色"
+
+#: progs/settings-theme.inc
+msgid "Violet"
+msgstr "紫罗兰色"
+
+#: progs/settings-theme.inc
+msgid "Rose"
+msgstr "玫瑰色"
+
+#: progs/settings-theme.inc
+msgid "Scheme default"
+msgstr "跟随配色方案"
+
+#: progs/settings-theme.inc
+msgid "Custom"
+msgstr "自定义"
+
+#: progs/settings-theme.inc
+msgid "Accent color"
+msgstr "重点色"
+
+#: progs/settings-theme.inc
+msgid "Color scheme"
+msgstr "配色方案"
+
+#: progs/settings-theme.inc
+msgid "Colors saved, but not all desktop settings could be applied."
+msgstr "颜色已保存，但部分桌面设置无法应用。"
+
+#: progs/settings-theme.inc
+msgid "Colors saved and applied. Reopen foot windows for the new colors."
+msgstr "颜色已保存并应用。重新打开 foot 窗口即可使用新颜色。"
+
+#. TRANSLATORS: Up/Down, Enter and Esc are key names; keep them.
+#: progs/settings-theme.inc
+msgid "Up/Down: choose   Enter: select   Esc: back"
+msgstr "上下键：选择   Enter：确定   Esc：返回"
+
+#: progs/settings-theme.inc
+msgid "Custom accent (#RRGGBB): "
+msgstr "自定义重点色（#RRGGBB）："
+
+#: progs/settings-theme.inc
+msgid "Enter a color as #RRGGBB, for example #3478D4. Nothing was changed."
+msgstr "请输入 #RRGGBB 格式的颜色，例如 #3478D4。未作任何更改。"
+
 #: progs/settings.c
 msgid "generic PC"
 msgstr "通用 PC"
@@ -11246,6 +11327,11 @@ msgid "Cloud Drives"
 msgstr "云盘"
 
 #: progs/settings.c
+#, fuzzy
+msgid "Colors"
+msgstr "颜色：%s"
+
+#: progs/settings.c
 msgid "Wallpaper"
 msgstr "壁纸"
 
@@ -11786,6 +11872,20 @@ msgstr[0] "%d 分钟"
 #: progs/settings.c
 msgid "Lock screen after"
 msgstr "空闲后锁屏"
+
+#: progs/settings.c
+msgid "Unlock without password within"
+msgstr "免密码解锁窗口"
+
+#: progs/settings.c
+msgid "no (high threat level)"
+msgstr "否（高威胁烈度）"
+
+#: progs/settings.c
+#, c-format
+msgid "%d s"
+msgid_plural "%d s"
+msgstr[0] "%d 秒"
 
 #: progs/settings.c
 msgid "Turn off display automatically"
@@ -12356,6 +12456,12 @@ msgstr "蓝牙服务已开启。"
 msgid "Enter: open Bluetooth devices in bluetui (the service must be on)."
 msgstr "Enter: 在 bluetui 中打开蓝牙设备（需先开启服务）。"
 
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+#, fuzzy
+msgid "Enter: choose a color"
+msgstr "Enter: 选择值"
+
 #. TRANSLATORS: Enter and Delete are key names; keep them.
 #: progs/settings.c
 msgid "Enter: choose a picture in the file manager   Delete: no wallpaper"
@@ -12381,13 +12487,6 @@ msgid "Enter: a new password for the user (it unlocks the screen, and sudo)."
 msgstr "Enter: 设置用户新密码（用于解锁屏幕及 sudo）。"
 
 #: progs/settings.c
-msgid ""
-"Not changed: the TPM opens the disk at power-on, so the lock at boot must "
-"stay. Unbind the TPM first."
-msgstr ""
-"未更改：TPM 在开机时就打开磁盘，所以开机锁屏必须保留。请先解除 TPM 绑定。"
-
-#: progs/settings.c
 msgid "Not changed: the high threat level requires automatic locking."
 msgstr "未更改：高威胁烈度必须启用自动锁屏。"
 
@@ -12401,6 +12500,13 @@ msgid "Auto-lock on: closing the lid, sleeping and idling lock the screen."
 msgstr "自动锁屏已开：合盖、睡眠与空闲时都会锁屏。"
 
 #: progs/settings.c
+msgid ""
+"Not changed: the TPM opens the disk at power-on, so the lock at boot must "
+"stay. Unbind the TPM first."
+msgstr ""
+"未更改：TPM 在开机时就打开磁盘，所以开机锁屏必须保留。请先解除 TPM 绑定。"
+
+#: progs/settings.c
 msgid "At boot: the lock screen first, the password to go on."
 msgstr "开机时：先显示锁屏，输入密码后继续。"
 
@@ -12412,12 +12518,10 @@ msgstr "开机时：直接进入主页（锁屏快捷键和自动锁屏仍会锁
 msgid "At boot: home at once."
 msgstr "开机时：直接进入主页。"
 
-#. TRANSLATORS: Enter and Delete are key names; keep them.
 #: progs/settings.c
 msgid "Enter: press a new lock key   Delete: none (auto-lock still locks)"
 msgstr "Enter: 按下新锁屏快捷键   Delete: 无（自动锁屏仍会锁屏）"
 
-#. TRANSLATORS: Enter and Delete are key names; keep them.
 #: progs/settings.c
 msgid "Enter: press a new lock key   Delete: none"
 msgstr "Enter: 按下新锁屏快捷键   Delete: 无"
@@ -12602,6 +12706,12 @@ msgstr "中文拼音：无法运行 locachy-pkg。"
 #: progs/settings.c
 msgid "Enter: bind LUKS2 auto-unlock to TPM (1.2 or 2.0)   Delete: unbind"
 msgstr "Enter: 将 LUKS2 自动解密绑定到 TPM（1.2 或 2.0）   Delete: 解除绑定"
+
+#: progs/settings.c
+msgid ""
+"Not changed: the high threat level keeps automatic locking. Turn Auto-lock "
+"on first."
+msgstr "未更改：高威胁烈度会保持自动锁屏。请先打开自动锁屏。"
 
 #: progs/settings.c
 msgid ""
@@ -12837,10 +12947,24 @@ msgid_plural "Mirrors are ranked again every %d days."
 msgstr[0] "每 %d 天重新为镜像排序一次。"
 
 #: progs/settings.c
+msgid "Not changed: at the high threat level every lock asks for the password."
+msgstr "未更改：高威胁烈度下每次锁屏都要求密码。"
+
+#: progs/settings.c
+#, c-format
 msgid ""
-"Not changed: the high threat level keeps automatic locking. Turn Auto-lock "
-"on first."
-msgstr "未更改：高威胁烈度会保持自动锁屏。请先打开自动锁屏。"
+"After an idle lock, a key or the pointer within %d second unlocks it without "
+"the password. The lock key, the lid and sleep always ask."
+msgid_plural ""
+"After an idle lock, a key or the pointer within %d seconds unlocks it "
+"without the password. The lock key, the lid and sleep always ask."
+msgstr[0] ""
+"空闲锁屏后，%d 秒内按键或移动指针可免密码解锁；锁屏键、合盖和睡眠始终要求密"
+"码。"
+
+#: progs/settings.c
+msgid "Every lock asks for the password at once."
+msgstr "每次锁屏都立即要求密码。"
 
 #: progs/settings.c
 #, c-format
@@ -12894,13 +13018,15 @@ msgstr "Enter: 在 nmtui 中配置 Wi-Fi 或有线连接。"
 msgid ""
 "Extended display uses GPU VA-API when supported and crisp 4:4:4; applies on "
 "next session."
-msgstr "扩展屏在硬件支持时使用 GPU VA-API 并保持 4:4:4 清晰文本；下次连接生效。"
+msgstr ""
+"扩展屏在硬件支持时使用 GPU VA-API 并保持 4:4:4 清晰文本；下次连接生效。"
 
 #: progs/settings.c
 msgid ""
 "Extended display prefers GPU hardware decoding (H.264 if GPU lacks 4:4:4 "
 "HEVC); applies on next session."
-msgstr "扩展屏优先使用 GPU 硬件解码（不支持 4:4:4 HEVC 时用 H.264）；下次连接生效。"
+msgstr ""
+"扩展屏优先使用 GPU 硬件解码（不支持 4:4:4 HEVC 时用 H.264）；下次连接生效。"
 
 #: progs/settings.c
 msgid ""
@@ -13068,12 +13194,12 @@ msgid "Fingerprints: %.100s."
 msgstr "指纹：%.100s。"
 
 #: progs/settings.c
-msgid "No lock key: auto-lock still locks."
-msgstr "已取消锁屏快捷键：自动锁屏仍会锁屏。"
-
-#: progs/settings.c
 msgid "No lock key."
 msgstr "已取消锁屏快捷键。"
+
+#: progs/settings.c
+msgid "No lock key: auto-lock still locks."
+msgstr "已取消锁屏快捷键：自动锁屏仍会锁屏。"
 
 #: progs/settings.c
 msgid "rclone is not installed: the Cloud drives installed line installs it."
@@ -13242,10 +13368,6 @@ msgid "Stamp"
 msgstr "图章"
 
 #: progs/view-pdf-ui.inc
-msgid "Green"
-msgstr "绿色"
-
-#: progs/view-pdf-ui.inc
 msgid "Orange"
 msgstr "橙色"
 
@@ -13256,10 +13378,6 @@ msgstr "红色"
 #: progs/view-pdf-ui.inc
 msgid "Yellow"
 msgstr "黄色"
-
-#: progs/view-pdf-ui.inc
-msgid "Blue"
-msgstr "蓝色"
 
 #: progs/view-pdf-ui.inc
 msgid "Cyan"
@@ -14792,6 +14910,41 @@ msgstr "显示较少详情"
 msgid "Show more details..."
 msgstr "显示更多详情..."
 
+#, c-format
+#~ msgid "%s [y/N]"
+#~ msgstr "%s [y/N]"
+
+#, c-format
+#~ msgid ""
+#~ "%s is there and not a folder: o overwrite  O all  s skip  S all  Esc "
+#~ "cancel"
+#~ msgstr ""
+#~ "%s 已存在且不是文件夹：o 覆盖  O 全部覆盖  s 跳过  S 全部跳过  Esc 取消"
+
+#, c-format
+#~ msgid ""
+#~ "%s is there already: o overwrite  O all  s skip  S all  r another name  "
+#~ "Esc cancel"
+#~ msgstr ""
+#~ "%s 已存在：o 覆盖  O 全部覆盖  s 跳过  S 全部跳过  r 另起名称  Esc 取消"
+
+#, c-format
+#~ msgid "Opened %s."
+#~ msgstr "已打开 %s。"
+
+#~ msgid "Enter: start with own Tor   Esc: cancel"
+#~ msgstr "Enter: 以自带 Tor 启动   Esc: 取消"
+
+#~ msgid "Enter: start it again   Esc: leave it"
+#~ msgstr "Enter: 再次启动   Esc: 保持原样"
+
+#~ msgid "Enter: open   A: always use it   Esc: cancel"
+#~ msgstr "Enter: 打开   A: 始终使用此项   Esc: 取消"
+
+#, c-format
+#~ msgid "%s cannot be closed from home."
+#~ msgstr "无法从主页关闭%s。"
+
 #~ msgid "Lock when idle"
 #~ msgstr "空闲后锁屏"
 
@@ -14831,31 +14984,3 @@ msgstr "显示更多详情..."
 #~ msgid ""
 #~ "Tor off, but its firewall is still there: nothing goes out (%s remove)."
 #~ msgstr "Tor 已关闭，但其防火墙仍在：所有外联已阻断（%s remove）。"
-
-#: progs/settings.c
-msgid "Unlock without password within"
-msgstr "免密码解锁窗口"
-
-#: progs/settings.c
-msgid "no (high threat level)"
-msgstr "否（高威胁烈度）"
-
-#: progs/settings.c
-#, c-format
-msgid "%d s"
-msgid_plural "%d s"
-msgstr[0] "%d 秒"
-
-#: progs/settings.c
-msgid "Not changed: at the high threat level every lock asks for the password."
-msgstr "未更改：高威胁烈度下每次锁屏都要求密码。"
-
-#: progs/settings.c
-#, c-format
-msgid "After an idle lock, a key or the pointer within %d second unlocks it without the password. The lock key, the lid and sleep always ask."
-msgid_plural "After an idle lock, a key or the pointer within %d seconds unlocks it without the password. The lock key, the lid and sleep always ask."
-msgstr[0] "空闲锁屏后，%d 秒内按键或移动指针可免密码解锁；锁屏键、合盖和睡眠始终要求密码。"
-
-#: progs/settings.c
-msgid "Every lock asks for the password at once."
-msgstr "每次锁屏都立即要求密码。"

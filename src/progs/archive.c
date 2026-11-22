@@ -57,13 +57,15 @@
 #define WORKER_PATH ARCHIVE_WORKER_PATH
 #endif
 
-#define FG     0xD0D0D0
-#define BG     0x101820
-#define ACCENT 0x80C0FF
-#define DIM    0x808890
-#define ERROR  0xFF9090
-#define MARK   0x2C4A68
-#define BAR_BG 0x1C2836
+#define FG           theme_rgb(THEME_FG, 0xD0D0D0)
+#define BG           theme_rgb(THEME_BG, 0x101820)
+#define ACCENT       theme_rgb(THEME_ACCENT, 0x80C0FF)
+#define ACCENT_TEXT  theme_rgb(THEME_ACCENT_TEXT, 0x80C0FF)
+#define ON_ACCENT    theme_rgb(THEME_ON_ACCENT, 0x101820)
+#define DIM          theme_rgb(THEME_DIM, 0x808890)
+#define ERROR        theme_rgb(THEME_ERROR, 0xFF9090)
+#define MARK         theme_rgb(THEME_SELECTION, 0x2C4A68)
+#define BAR_BG       theme_rgb(THEME_SURFACE, 0x1C2836)
 #define LIST_TOP 4      /* the first row of entries */
 #define HIT_ROW 0       /* + a shown row */
 #define HIT_FORM 500000 /* + a dialog's line */
@@ -462,7 +464,7 @@ static void draw_job(const struct job *j)
     screen_fill(0, 0, cols, screen_rows(), BG);
     ui_hits_clear();
     screen_bar(_("archive"), NULL);
-    screen_text(2, r, j->title, ACCENT, BG);
+    screen_text(2, r, j->title, ACCENT_TEXT, BG);
     if (arc.bytes > 0 && j->bytes > 0) {
         int pct = clampi((int)(j->bytes * 100 / arc.bytes), 0, 100), w = cols - 12;
         screen_fill(2, r + 1, w, 1, BAR_BG);
@@ -590,7 +592,7 @@ static int run_worker(struct job *j, const char *title, char *const args[], cons
         }
         struct pollfd p = { from, POLLIN, 0 };
         int key = key_poll_many(&p, 1, 200), mods = keys_modifiers();
-        if (!j->quiet && key == K_SHOWN) draw_job(j);
+        if (!j->quiet && (key == K_SHOWN || key == K_REPAINT)) draw_job(j);
         if (key == K_POINTER) {
             key = !j->quiet && button_key() == 27 ? 27 : 0;
             mods = 0;
@@ -680,7 +682,7 @@ static int any_key(void)
         break;
     }
     if (key_action(key, keys_modifiers()) == ACT_QUIT) quit = 1;
-    return key == K_SHOWN; /* the caller redraws its own screen */
+    return key == K_SHOWN || key == K_REPAINT; /* the caller redraws its own screen */
 }
 
 
@@ -798,18 +800,18 @@ static int edit_text(const char *label, char *text, size_t size, int masked)
         screen_fill(0, row, cols, 2, BG);
         if (all) { /* Ctrl+A: all of it selected */
             snprintf(line, sizeof line, "%s ", label);
-            screen_text(1, row, line, ACCENT, BG);
-            screen_text(1 + ui_cells(line), row, shown, BG, ACCENT);
+            screen_text(1, row, line, ACCENT_TEXT, BG);
+            screen_text(1 + ui_cells(line), row, shown, ON_ACCENT, ACCENT);
         } else {
             snprintf(line, sizeof line, "%s %.*s_%s", label, (int)pos, shown, shown + pos);
-            screen_text(1, row, line, ACCENT, BG);
+            screen_text(1, row, line, ACCENT_TEXT, BG);
         }
         /* TRANSLATORS: Enter and Esc are keys; keep them. */
         int c = ui_button(1, row + 1, _("Enter: ok"), HIT_KEY + '\n');
         ui_button(c, row + 1, _("Esc: cancel"), HIT_KEY + 27);
         screen_flush();
         int key = key_get(), mods = keys_modifiers();
-        if (key == K_SHOWN) continue;
+        if (key == K_SHOWN || key == K_REPAINT) continue;
         if (key == K_POINTER) {
             key = button_key();
             mods = 0;
@@ -842,12 +844,12 @@ static int yes(const char *question)
         fit(line, sizeof line, question, cols - ui_cells(yes_label) - ui_cells(no_label) - 7);
         ui_hits_clear();
         screen_fill(0, row, cols, 1, BG);
-        screen_text(1, row, line, ACCENT, BG);
+        screen_text(1, row, line, ACCENT_TEXT, BG);
         int c = ui_button(2 + ui_cells(line), row, yes_label, HIT_KEY + 'y');
         ui_button(c, row, no_label, HIT_KEY + 'n');
         screen_flush();
         int key = key_get(), mods = keys_modifiers();
-        if (key == K_SHOWN) continue;
+        if (key == K_SHOWN || key == K_REPAINT) continue;
         if (key == K_POINTER) {
             key = button_key();
             mods = 0;
@@ -878,7 +880,7 @@ static void ask_exists(const char *path, int dir, char *answer, size_t size)
         ui_hits_clear();
         screen_fill(0, bottom - 2, cols, 3, BG);
         fit(shown, sizeof shown, line, cols - 2);
-        screen_text(1, bottom - 2, shown, ACCENT, BG);
+        screen_text(1, bottom - 2, shown, ACCENT_TEXT, BG);
         for (size_t i = 0; i < sizeof choices / sizeof *choices; i++) {
             if (dir && choices[i].key == 'r') continue;
             const char *label = _(choices[i].label);
@@ -888,7 +890,7 @@ static void ask_exists(const char *path, int dir, char *answer, size_t size)
         }
         screen_flush();
         int key = key_get(), mods = keys_modifiers();
-        if (key == K_SHOWN) continue;
+        if (key == K_SHOWN || key == K_REPAINT) continue;
         if (key == K_POINTER) {
             key = button_key();
             mods = 0;
@@ -1053,7 +1055,7 @@ static void draw_row(int r, int i)
     const struct node *e = &nodes[rows[i]];
     int wn, ws, wm, wp, wo, on = i == sel;
     char cell[PATH_MAX], text[PATH_MAX], tm[32], perm[16];
-    uint32_t bg = on ? ACCENT : e->marked ? MARK : BG, fg = on ? BG : e->implicit ? DIM : FG;
+    uint32_t bg = on ? ACCENT : e->marked ? MARK : BG, fg = on ? ON_ACCENT : e->implicit ? DIM : FG;
     columns(&wn, &ws, &wm, &wp, &wo);
     screen_fill(0, r, screen_cols(), 1, bg);
     snprintf(text, sizeof text, "%*s%s%s%s", depth[i] * 2, "",
@@ -1142,10 +1144,10 @@ static void draw(void)
         snprintf(line, sizeof line, "%s", _("No archive: Ctrl+O opens one, Ctrl+N makes a new one."));
     }
     fit(name, sizeof name, line, cols - 2);
-    screen_text(1, 2, name, ACCENT, BG);
+    screen_text(1, 2, name, ACCENT_TEXT, BG);
     if (filter[0]) {
         snprintf(line, sizeof line, _("Find: %s"), filter);
-        screen_text(cols - ui_cells(line) - 1 > 0 ? cols - ui_cells(line) - 1 : 0, 2, line, BG, ACCENT);
+        screen_text(cols - ui_cells(line) - 1 > 0 ? cols - ui_cells(line) - 1 : 0, 2, line, ON_ACCENT, ACCENT);
     }
     columns(&wn, &ws, &wm, &wp, &wo);
     screen_fill(0, 3, cols, 1, BAR_BG);
@@ -1170,7 +1172,7 @@ static void draw(void)
     screen_text(1, rows_n - 2, name, FG, BAR_BG);
     if (msg[0]) {
         fit(name, sizeof name, msg, cols - 2);
-        screen_text(1, rows_n - 1, name, msg_error ? ERROR : ACCENT, BG);
+        screen_text(1, rows_n - 1, name, msg_error ? ERROR : ACCENT_TEXT, BG);
     } else {
         /* TRANSLATORS: key names (Enter, Ctrl+E, Alt+A, Del, Alt+T, Alt+Return, Ctrl+F, Ctrl+Q, F1); keep them. */
         fit(name, sizeof name, _("Enter preview  o open  Ctrl+E extract  Alt+A add  Del remove  "
@@ -1297,33 +1299,33 @@ static void draw_dialog(const char *title, const struct dialog_line *l, int n, i
     screen_fill(0, 0, cols, rows_n, BG);
     ui_hits_clear();
     screen_bar(_("archive"), NULL);
-    screen_text(1, 1, title, ACCENT, BG);
+    screen_text(1, 1, title, ACCENT_TEXT, BG);
     for (int i = 0; i < n; i++) {
         int r = 3 + i, on = i == cur;
         screen_fill(0, r, cols, 1, on ? ACCENT : BG);
         fit(text, sizeof text, l[i].label, vx - 3);
-        screen_text(2, r, text, on ? BG : DIM, on ? ACCENT : BG);
+        screen_text(2, r, text, on ? ON_ACCENT : DIM, on ? ACCENT : BG);
         ui_hit(0, r, cols, 1, HIT_FORM + i);
         if (i == level_row && cols - vx >= 14) {
             int x = ui_button(vx, r, "<", HIT_KEY + K_LEFT);
             fit(text, sizeof text, l[i].value, cols - x - 4);
-            screen_text(x, r, text, on ? BG : FG, on ? ACCENT : BG);
+            screen_text(x, r, text, on ? ON_ACCENT : FG, on ? ACCENT : BG);
             ui_button(cols - 4, r, ">", HIT_KEY + K_RIGHT);
         } else {
             fit(text, sizeof text, l[i].value, cols - vx - 1);
-            screen_text(vx, r, text, on ? BG : FG, on ? ACCENT : BG);
+            screen_text(vx, r, text, on ? ON_ACCENT : FG, on ? ACCENT : BG);
         }
     }
     int x = vx, r = 4 + n;
     for (int b = 0; buttons[b]; b++) {
         int lit = cur == n && b == button;
         snprintf(text, sizeof text, "[ %s ]", buttons[b]);
-        screen_text(x, r, text, lit ? BG : FG, lit ? ACCENT : BG);
+        screen_text(x, r, text, lit ? ON_ACCENT : FG, lit ? ACCENT : BG);
         ui_hit(x, r, ui_cells(text), 1, HIT_FORM + n + 1 + b);
         x += ui_cells(text) + 2;
     }
     screen_text(1, rows_n - 2, hint, DIM, BG);
-    if (msg[0]) screen_text(1, rows_n - 1, msg, msg_error ? ERROR : ACCENT, BG);
+    if (msg[0]) screen_text(1, rows_n - 1, msg, msg_error ? ERROR : ACCENT_TEXT, BG);
     screen_flush();
 }
 
@@ -1809,7 +1811,7 @@ static void properties(void)
         screen_fill(0, 0, cols, rows_n, BG);
         ui_hits_clear();
         screen_bar(_("archive"), NULL);
-        screen_text(1, 1, _("Properties"), ACCENT, BG);
+        screen_text(1, 1, _("Properties"), ACCENT_TEXT, BG);
         for (int i = 0; i < n && 3 + i < rows_n - 1; i++) {
             fit(cut, sizeof cut, lines[i], cols - 4);
             screen_text(2, 3 + i, cut, FG, BG);
@@ -2183,7 +2185,7 @@ int main(int argc, char **argv)
             draw();
             int key = key_get();
             if (key == K_POINTER) pointer();
-            else if (key != K_SHOWN) handle(key | MODS(keys_modifiers()));
+            else if (key != K_SHOWN && key != K_REPAINT) handle(key | MODS(keys_modifiers()));
         }
     }
     remove_previews();

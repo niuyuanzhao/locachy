@@ -93,16 +93,19 @@
 
 __attribute__((weak)) int screen_window_top(void);
 
-#define FG      0xD0D0D0
-#define BG      0x101820
-#define DESK    0x2E3238 /* around the pages */
+#define FG      theme_rgb(THEME_FG, 0xD0D0D0)
+#define BG      theme_rgb(THEME_BG, 0x101820)
+#define DESK    theme_rgb(THEME_DESKTOP, 0x2E3238) /* around the pages */
 #define PAPER   0xFFFFFF /* a page not drawn yet */
-#define ACCENT  0x80C0FF
-#define DIM     0x808890
-#define ERROR   0xFF9090
-#define TOAST   0x183860
-#define FIND_HIT   0xFFFF40 /* Okular's find bar: qRgb(255, 255, 64) */
-#define SELECTED   0x3DAEE9 /* Breeze's selection */
+#define ACCENT  theme_rgb(THEME_ACCENT, 0x80C0FF)
+#define LINK    theme_rgb(THEME_ACCENT_TEXT, 0x80C0FF)
+#define ON_ACCENT theme_rgb(THEME_ON_ACCENT, 0x101820)
+#define DIM     theme_rgb(THEME_DIM, 0x808890)
+#define ERROR   theme_rgb(THEME_ERROR, 0xFF9090)
+#define FIELD   theme_rgb(THEME_CONTROL, 0x202838)
+#define TOAST   theme_rgb(THEME_PANEL, 0x183860)
+#define FIND_HIT   0xFFFF40 /* Okular's yellow document search highlight */
+#define SELECTED   theme_rgb(THEME_ACCENT, 0x3DAEE9) /* Breeze's selection overlay */
 /* The rendered pages kept: 256 MiB is a dozen pages at fit width on a 1920
  * by 1080 screen (19 MiB each), the pages on the screen and those next to
  * them several times over, and a small part of the memory of the X230 (4 to
@@ -2991,7 +2994,7 @@ static void draw_sidebar(void)
             side_cols >= 20 ? (t == TAB_CONTENTS ? _("Contents") : _("Thumbs")) : (t == TAB_CONTENTS ? "C" : "T");
         snprintf(label, sizeof label, " %s ", name);
         int w = ui_cells(label), on = ui.tab == t;
-        screen_text(col, 2, label, on ? BG : FG, on ? ACCENT : BG);
+        screen_text(col, 2, label, on ? ON_ACCENT : FG, on ? ACCENT : BG);
         ui_hit(col, 2, w, 1, HIT_TAB + t);
         col += w + 1;
     }
@@ -2999,7 +3002,7 @@ static void draw_sidebar(void)
         /* Gwenview's sidebar's Information tab. */
         snprintf(label, sizeof label, " %s ", side_cols >= 50 ? _("Information") : "I");
         int w = ui_cells(label), on = ui.tab == TAB_INFO;
-        screen_text(col, 2, label, on ? BG : FG, on ? ACCENT : BG);
+        screen_text(col, 2, label, on ? ON_ACCENT : FG, on ? ACCENT : BG);
         ui_hit(col, 2, w, 1, HIT_TAB + TAB_INFO);
         col += w + 1;
     }
@@ -3020,7 +3023,7 @@ static void draw_sidebar(void)
         for (int i = 0; i < doc.pages && row <= last; i++) if (doc.bookmark[i]) {
             if (k++ < ui.bm_top) continue;
             int on = focus && k - 1 == ui.bm_sel;
-            uint32_t bg = on ? ACCENT : BG, fg = on ? BG : i == current_page() ? ACCENT : FG;
+            uint32_t bg = on ? ACCENT : BG, fg = on ? ON_ACCENT : i == current_page() ? LINK : FG;
             snprintf(line, sizeof line, "%d %s", i + 1, doc.bookmark[i]);
             fit(text, sizeof text, line, side_cols - 1);
             screen_fill(0, row, side_cols - 1, 1, bg);
@@ -3044,11 +3047,11 @@ static void draw_sidebar(void)
             int indent = 1 + 2 * clampi(o->level, 0, 6), room = side_cols - indent - (int)strlen(num) - 2;
             fit(text, sizeof text, o->title, room > 1 ? room : 1);
             int on = focus && k == ui.toc_sel;
-            uint32_t bg = on ? ACCENT : BG, fg = on ? BG : k == cur ? ACCENT : FG;
+            uint32_t bg = on ? ACCENT : BG, fg = on ? ON_ACCENT : k == cur ? LINK : FG;
             screen_fill(0, r, side_cols - 1, 1, bg);
             snprintf(line, sizeof line, "%*s%s", indent, "", text);
             screen_text(0, r, line, fg, bg);
-            screen_text(side_cols - 1 - (int)strlen(num), r, num, on ? BG : DIM, bg);
+            screen_text(side_cols - 1 - (int)strlen(num), r, num, on ? ON_ACCENT : DIM, bg);
             ui_hit(0, r, side_cols - 1, 1, HIT_TOC + k);
         }
         return;
@@ -3093,7 +3096,7 @@ static void draw_sidebar(void)
         int row = (y + h - top + ch - 1) / ch;
         snprintf(line, sizeof line, "%d", i + 1);
         if (row >= 3 && row <= last) {
-            screen_text((side_cols - (int)strlen(line)) / 2, row, line, i == cur ? ACCENT : FG, BG);
+            screen_text((side_cols - (int)strlen(line)) / 2, row, line, i == cur ? LINK : FG, BG);
         }
         int r0 = clampi((y - top) / ch, 3, last), r1 = clampi((y + e - 1 - top) / ch, 3, last);
         if (y + e > y0) ui_hit(0, r0, side_cols, r1 - r0 + 1, HIT_THUMB + i);
@@ -3138,7 +3141,7 @@ static void draw_menubar(void)
             char label[64];
             snprintf(label, sizeof label, " %s ", k ? C_("mode", "View") : _("Browse"));
             int on = k ? !gal.on : gal.on, w = ui_cells(label);
-            screen_text(col, 1, label, on ? BG : FG, on ? ACCENT : BG);
+            screen_text(col, 1, label, on ? ON_ACCENT : FG, on ? ACCENT : BG);
             ui_hit(col, 1, w, 1, HIT_MODE + k);
             col += w + 1;
         }
@@ -3215,11 +3218,11 @@ static void draw_bottom(void)
     if (prompt.kind != P_NONE) {
         char question[700];
         fit(question, sizeof question, prompt.question, prompt_typed() ? (ncols * 2 / 3 > 8 ? ncols * 2 / 3 : 8) : ncols - 2);
-        screen_text(1, row, question, ACCENT, BG);
+        screen_text(1, row, question, LINK, BG);
         if (!prompt_typed()) return;
         int col = 2 + utf_cells(question, 0, strlen(question)), width = ncols - col - 1 > 4 ? ncols - col - 1 : 4;
         prompt.in.masked = prompt.masked;
-        line_draw(&prompt.in, col, row, width, ui.focus == FOCUS_PROMPT, FG, 0x202838);
+        line_draw(&prompt.in, col, row, width, ui.focus == FOCUS_PROMPT, FG, FIELD);
         ui_hit(col, row, width, 1, HIT_PROMPT_INPUT);
         return;
     }
@@ -3228,7 +3231,8 @@ static void draw_bottom(void)
     screen_text(col, row, find_label, FG, BG);
     col += ui_cells(find_label) + 1;
     int width = clampi(ncols / 3, 1, ncols - col - 1 > 0 ? ncols - col - 1 : 1);
-    line_draw(&find.in, col, row, width, ui.focus == FOCUS_FIND, find.failed ? ERROR : FG, find.failed ? 0x402020 : 0x202838);
+    line_draw(&find.in, col, row, width, ui.focus == FOCUS_FIND, find.failed ? ERROR : FG,
+              find.failed ? theme_rgb(THEME_SURFACE, 0x402020) : FIELD);
     ui_hit(col, row, width, 1, HIT_FIND_INPUT);
     col += width + 1;
     col = ui_button(col, row, _("Next"), HIT_FIND + 0);
@@ -3243,7 +3247,7 @@ static void draw_list(void)
     int c0 = side_cols + 2, c1 = ncols - 2, r0 = 3, r1 = side_last() - 1;
     if (c1 - c0 < 10 || r1 - r0 < 4) return;
     screen_fill(c0, r0, c1 - c0, r1 - r0 + 1, BG);
-    screen_text(c0 + 1, r0, list.kind == L_INFO ? _("Properties") : _("Embedded Files"), ACCENT, BG);
+    screen_text(c0 + 1, r0, list.kind == L_INFO ? _("Properties") : _("Embedded Files"), LINK, BG);
     int rows = r1 - 1 - (r0 + 2);
     if (list.sel < list.top) list.top = list.sel;
     if (list.sel >= list.top + rows) list.top = list.sel - rows + 1;
@@ -3251,7 +3255,7 @@ static void draw_list(void)
         int k = list.top + r, on = k == list.sel;
         fit(text, sizeof text, list.line[k], c1 - c0 - 3);
         screen_fill(c0 + 1, r0 + 2 + r, c1 - c0 - 2, 1, on ? ACCENT : BG);
-        screen_text(c0 + 2, r0 + 2 + r, text, on ? BG : FG, on ? ACCENT : BG);
+        screen_text(c0 + 2, r0 + 2 + r, text, on ? ON_ACCENT : FG, on ? ACCENT : BG);
         ui_hit(c0 + 1, r0 + 2 + r, c1 - c0 - 2, 1, HIT_LINE + k);
     }
     int col = c0 + 1;
@@ -3270,7 +3274,7 @@ static void draw_document_tabs(void)
         int col = start + i * width, room = width < ncols - col ? width : ncols - col;
         char label[PATH_MAX];
         fit(label, sizeof label, base_name(tabs.path[i]), room > 3 ? room - 3 : 1);
-        uint32_t bg = i == tabs.current ? ACCENT : BG, fg = i == tabs.current ? BG : FG;
+        uint32_t bg = i == tabs.current ? ACCENT : BG, fg = i == tabs.current ? ON_ACCENT : FG;
         screen_fill(col, 2, room, 1, bg);
         screen_text(col, 2, label, fg, bg);
         ui_hit(col, 2, room, 1, HIT_DOCUMENT_TAB + i);
@@ -3328,7 +3332,8 @@ static void draw(void)
     if (ui.toast[0] && now() < ui.toast_until) {
         char text[300];
         snprintf(text, sizeof text, " %s ", ui.toast);
-        screen_text(side_cols + 1, 2, text, ui.toast_error ? 0xFFFFFF : FG, ui.toast_error ? 0x702828 : TOAST);
+        screen_text(side_cols + 1, 2, text, ui.toast_error ? theme_rgb(THEME_ERROR, 0xFFFFFF) : FG,
+                    ui.toast_error ? theme_rgb(THEME_PANEL, 0x702828) : TOAST);
     } else {
         ui.toast[0] = '\0';
     }
@@ -4263,7 +4268,7 @@ static void pres_draw_overlay(void)
             if (d <= r - 1 && d > inner) {
                 double a = atan2(dx, -dy) / (2 * M_PI); /* clockwise from the top */
                 if (a < 0) a += 1;
-                c = a < (pres.page + 1) / (double)doc.pages ? SELECTED : 0x404850;
+                c = a < (pres.page + 1) / (double)doc.pages ? SELECTED : theme_rgb(THEME_INACTIVE, 0x404850);
             } else if (d > r - 1) {
                 c = 0;
             }
@@ -4284,7 +4289,7 @@ static void pres_draw_bar(void)
     screen_fill_px(0, y_top, W, y_top ? ch : top + ch, BG);
     int col = ui_button(0, row, _("Previous Page"), HIT_PRES + 0);
     snprintf(page, sizeof page, " %d ", pres.page + 1);
-    screen_text(col, row, page, BG, ACCENT);
+    screen_text(col, row, page, ON_ACCENT, ACCENT);
     ui_hit(col, row, (int)strlen(page), 1, HIT_PRES + 1);
     col += (int)strlen(page);
     /* TRANSLATORS: follows the current page number in the presentation bar; %d is the total page count. */
@@ -5116,7 +5121,7 @@ static void line_draw(struct line *l, int col, int row, int width, int focused, 
         char selected[sizeof l->text];
         snprintf(selected, sizeof selected, "%.*s", (int)(hi - lo), t + lo);
         fit(shown, sizeof shown, selected, width - utf_cells(t, left, lo));
-        screen_text(col + utf_cells(t, left, lo), row, shown, BG, ACCENT);
+        screen_text(col + utf_cells(t, left, lo), row, shown, ON_ACCENT, ACCENT);
     }
 }
 
@@ -5376,7 +5381,8 @@ static int capture_area(int x0, int y0, int x1, int y1)
     capture.y0 = Y0;
     capture.w = X1 - X0;
     capture.h = Y1 - Y0;
-    for (size_t k = 0; k < (size_t)capture.w * (size_t)capture.h; k++) capture.px[k] = DESK;
+    /* Export padding outside pages is independent of the desktop color. */
+    for (size_t k = 0; k < (size_t)capture.w * (size_t)capture.h; k++) capture.px[k] = 0x2E3238;
     capture.on = 1;
     draw();
     capture.on = 0;
@@ -6440,6 +6446,10 @@ static const struct ui_help_line view_help[] = {
 
 static void handle(int key)
 {
+    if (key == K_REPAINT) {
+        ui.dirty = 1;
+        return;
+    }
     if (key == K_SHOWN) {
         refresh();
         return;
@@ -6510,8 +6520,8 @@ static void handle(int key)
 
 /* Gwenview's Browse mode (see gal): the grid, its keys and pointer, the
  * folder's items, and the switches between the modes. */
-#define FOLDER_RGB      0x3DAEE9 /* Breeze's folder icon */
-#define ARCHIVE_RGB     0xC8A050
+#define FOLDER_RGB      theme_rgb(THEME_ACCENT, 0x3DAEE9) /* Breeze's folder icon */
+#define ARCHIVE_RGB     theme_rgb(THEME_WARNING, 0xC8A050)
 
 /* KIO's order of names (KDirSortFilterProxyModel, Gwenview's): natural,
  * case-insensitive, then exact. */
@@ -6997,7 +7007,7 @@ static void draw_gallery(void)
             int cells = cell_w / cw - 1;
             fit(text, sizeof text, name, cells > 1 ? cells : 1);
             int col = X / cw + (cell_w / cw - ui_cells(text)) / 2;
-            screen_text(col, row, text, on ? BG : FG, on ? SELECTED : DESK);
+            screen_text(col, row, text, on ? ON_ACCENT : FG, on ? SELECTED : DESK);
         }
         int r0 = (cy0 - top) / ch, r1 = (cy1 - 1 - top) / ch;
         r0 = r0 > row0 ? r0 : row0;
@@ -7184,7 +7194,7 @@ static void draw_info(void)
     }
     if (row <= last) {
         fit(text, sizeof text, gal.info_more ? _("Show fewer details") : _("Show more details..."), side_cols - 1);
-        screen_text(0, row, text, ACCENT, BG);
+        screen_text(0, row, text, LINK, BG);
         ui_hit(0, row, ui_cells(text), 1, HIT_INFO_MORE);
     }
 }

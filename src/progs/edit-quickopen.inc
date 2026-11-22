@@ -348,7 +348,8 @@ static void qo_draw(const struct field *f)
             char one[8];
             one[text_put(one, cp)] = '\0';
             while (k < nm && m[k] < c) k++;
-            uint32_t fg = k < nm && m[k] == c ? (on ? 0xFFFFFF : C_FOCUS) : on ? C_WINDOW : e->doc ? C_WTEXT : 0xBDC3C7;
+            uint32_t fg = k < nm && m[k] == c ? (on ? C_ON_FOCUS(0xFFFFFF) : C_LINK) :
+                          on ? C_ON_FOCUS(0x2A2E32) : e->doc ? C_WTEXT : theme_rgb(THEME_DIM, 0xBDC3C7);
             put_text(x, row, b.x + b.w - 1, one, fg, bg);
             x += screen_char_cells(cp);
             p += n ? n : 1;
@@ -357,7 +358,7 @@ static void qo_draw(const struct field *f)
         snprintf(folder, sizeof folder, "%s", e->rel);
         size_t fl = strlen(folder), nl = strlen(e->name);
         if (fl > nl && folder[fl - nl - 1] == '/' && strcmp(folder + fl - nl, e->name) == 0) folder[fl - nl - 1] = '\0';
-        put_text(x + 1, row, b.x + b.w - 1, folder, on ? C_WINDOW : C_DIM, bg);
+        put_text(x + 1, row, b.x + b.w - 1, folder, on ? C_ON_FOCUS(0x2A2E32) : C_DIM, bg);
         ui_hit(b.x, row, b.w, 1, HIT_QUICKOPEN + i);
     }
     screen_flush();

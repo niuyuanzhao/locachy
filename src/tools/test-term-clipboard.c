@@ -24,6 +24,29 @@ const char *clipboard_error(int status) { (void)status; abort(); }
 int clipboard_get(int primary, int *fd, size_t *size) { (void)primary; (void)fd; (void)size; abort(); }
 double uptime(void) { abort(); }
 
+/* Standalone screen and shared-palette doubles. The screen records the RGB
+ * actually used, not the tagged values stored in the terminal. */
+static struct theme_palette test_theme = {
+    .rgb = { [THEME_FG] = 0x202934, [THEME_BG] = 0xF6F8FB, [THEME_SELECTION] = 0xBBCDE2 },
+    .ansi = { [1] = 0x912733, [4] = 0x245290, [9] = 0xA22943 },
+};
+const struct theme_palette *theme_get(void) { return &test_theme; }
+static struct cell painted[8][64];
+void screen_text(int col, int row, const char *s, uint32_t fg, uint32_t bg)
+{
+    assert(row >= 0 && row < 8 && fg <= 0xFFFFFF && bg <= 0xFFFFFF);
+    for (; *s && col < cols; s++, col++) if (col >= 0) painted[row][col] = (struct cell){ (uint8_t)*s, fg, bg };
+}
+void screen_fill(int col, int row, int width, int height, uint32_t rgb)
+{
+    for (int r = row; r < row + height; r++)
+        for (int c = col; c < col + width; c++) screen_text(c, r, " ", rgb, rgb);
+}
+void screen_bar(const char *title, const char *ime) { (void)title; (void)ime; }
+void screen_cursor(int cursor) { (void)cursor; }
+void screen_flush(void) {}
+int screen_char_cells(uint32_t cp) { return is_wide(cp) ? 2 : 1; }
+
 static void setup_grid(int width, int height)
 {
     free(grid); free(alt_grid); free(dirty); free(soft); free(alt_soft);
@@ -44,6 +67,48 @@ static void setup_grid(int width, int height)
 static void feed_text(const char *s)
 {
     while (*s) feed((uint8_t)*s++, -1);
+}
+
+static void color_is(int row, int col, int ch, uint32_t fg, uint32_t bg)
+{
+    assert(painted[row][col].ch == (uint32_t)ch && painted[row][col].fg == fg && painted[row][col].bg == bg);
+}
+
+static void test_theme_repaint(void)
+{
+    setup_grid(64, 3);
+    feed_text("d\033[1mb\033[0;31;44ma\033[1mA\033[0;38;2;204;68;68;48;2;16;24;32;1mr"
+              "\033[0;38;5;196;48;5;232me\033[39;49;7mv\033[0m\r\n"
+              "live\r\n\r\n\033[?25l");
+    assert(hist_len == 1);
+    scroll_view(1);
+    draw();
+    color_is(1, 0, 'd', 0xD0D0D0, 0x101820);
+    color_is(1, 1, 'b', 0xFFFFFF, 0x101820);
+    color_is(1, 2, 'a', 0xCC4444, 0x4488CC);
+    color_is(1, 3, 'A', 0xFF6666, 0x4488CC);
+    color_is(1, 4, 'r', 0xCC4444, 0x101820);
+    color_is(1, 5, 'e', 0xFF0000, 0x080808);
+    color_is(1, 6, 'v', 0x101820, 0xD0D0D0);
+
+    test_theme.config.scheme = THEME_LIGHT;
+    memset(dirty, 1, (size_t)rows); /* K_SHOWN's repaint */
+    draw();
+    color_is(1, 0, 'd', 0x202934, 0xF6F8FB);
+    color_is(1, 1, 'b', 0x202934, 0xF6F8FB);
+    color_is(1, 2, 'a', 0x912733, 0x245290);
+    color_is(1, 3, 'A', 0xA22943, 0x245290);
+    color_is(1, 4, 'r', 0xCC4444, 0x101820);
+    color_is(1, 5, 'e', 0xFF0000, 0x080808);
+    color_is(1, 6, 'v', 0xF6F8FB, 0x202934);
+    color_is(2, 0, 'l', 0x202934, 0xF6F8FB);
+    selection.active = 1;
+    selection.anchor = 2;
+    selection.end = 3;
+    draw();
+    color_is(1, 2, 'a', 0x202934, 0xBBCDE2);
+    test_theme.config.scheme = THEME_DARK;
+    puts("PASS theme repaint: live grid, scrollback, defaults, bold, indexed ANSI, exact RGB and selection");
 }
 
 /* A pointer event on cell (col, row) of the terminal (the bar is above). */
@@ -74,6 +139,7 @@ static void choose_text(int a, int b, const char *expected)
 
 int main(void)
 {
+    test_theme_repaint();
     setup_grid(120, 80);
     feed_text("To authenticate, visit:\r\nhttps://example.invalid/login\r\n"
               "  \xe2\x96\x88\xe2\x96\x88  \r\n"

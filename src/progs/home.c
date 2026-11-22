@@ -58,10 +58,12 @@
 void base_apps(char *buf, size_t size);
 int base_app_action(const char *action, const char *name, char *why, size_t size);
 
-#define FG     0xD0D0D0
-#define BG     0x101820
-#define ACCENT 0x80C0FF
-#define ERROR  0xFF9090
+#define FG           theme_rgb(THEME_FG, 0xD0D0D0)
+#define BG           theme_rgb(THEME_BG, 0x101820)
+#define ACCENT       theme_rgb(THEME_ACCENT, 0x80C0FF)
+#define ACCENT_TEXT  theme_rgb(THEME_ACCENT_TEXT, 0x80C0FF)
+#define ON_ACCENT    theme_rgb(THEME_ON_ACCENT, 0x101820)
+#define ERROR        theme_rgb(THEME_ERROR, 0xFF9090)
 #define MAX_ENTRIES 17 /* two built-ins and up to 15 configured programs */
 #define REFRESH_MS 500
 #define MIB 1048576ULL
@@ -465,7 +467,7 @@ static void draw_jobs(int footer)
         snprintf(line, sizeof line, "%5d  %-18s %-16s %-14s %.80s  [%s]", j->id, j->kind, jobs_state_label(j->state),
                  how, j->args, j->from);
         int row = 3 + i - first, on = i == job_selected;
-        uint32_t fg = on ? BG : strcmp(j->state, "failed") == 0 ? ERROR : FG;
+        uint32_t fg = on ? ON_ACCENT : strcmp(j->state, "failed") == 0 ? ERROR : FG;
         screen_fill(1, row, cols - 2, 1, on ? ACCENT : BG);
         text(1, row, line, fg, on ? ACCENT : BG);
         ui_hit(1, row, cols - 2, 1, HIT_JOB + i);
@@ -474,7 +476,7 @@ static void draw_jobs(int footer)
     const struct jobs_row *j = &jobs[job_selected];
     int top = 3 + (njobs - first < shown ? njobs - first : shown) + 1, rows = footer - top - 1;
     snprintf(line, sizeof line, _("Output of job %d, its last lines:"), j->id);
-    text(1, top, line, ACCENT, BG);
+    text(1, top, line, ACCENT_TEXT, BG);
     if (rows < 1 || jobs_log(j->id, tail, sizeof tail) < 0) return;
     char *lines[256];
     int n = 0;
@@ -865,7 +867,7 @@ static void draw_logs(int footer)
     snprintf(line, sizeof line, _("Log: %s  %s%sTab: %s  PgUp/PgDn: scroll  Ctrl+A, Ctrl+C: copy all  Esc: back"),
              target, where, where[0] ? "  " : "",
              log_system && log_name[0] ? _("container log") : _("system log"));
-    text(1, 2, line, ACCENT, BG);
+    text(1, 2, line, ACCENT_TEXT, BG);
     ui_hit(1, 3, cols - 2, body_rows, HIT_LOG);
     if (log_total == 0) {
         textsel_put(2, 3, log_system ? _("No LOCachy system log lines found.") :
@@ -955,7 +957,7 @@ static void draw_output(int ready)
     jobs_summary(summary, sizeof summary);
     snprintf(line, sizeof line, _("%d containers   %d marked (operation targets only)%s"),
              napps, marked_count(), summary);
-    text(1, 1, line, ACCENT, BG);
+    text(1, 1, line, ACCENT_TEXT, BG);
 
     if (confirming != CONF_NONE) {
         if (confirming == CONF_STOP) {
@@ -1028,7 +1030,7 @@ static void draw_output(int ready)
             int row = 2 + g.title[s] - scroll;
             if (g.title[s] < 0 || row < 2 || row >= footer) continue;
             const char *title = _(section_titles[s]);
-            text(1, row, title, ACCENT, BG);
+            text(1, row, title, ACCENT_TEXT, BG);
             if (s == SECTION_CONTAINERS) {
                 text(1 + ui_cells(title) + 3, row, _("state, RAM / swap MiB"), FG, BG);
             }
@@ -1038,7 +1040,7 @@ static void draw_output(int ready)
             int row = 2 + at - scroll, col = 1 + column * width;
             if (row < 2) continue;
             if (row + 1 >= footer) break;
-            uint32_t fg = pos == selected ? BG : FG, bg = pos == selected ? ACCENT : BG;
+            uint32_t fg = pos == selected ? ON_ACCENT : FG, bg = pos == selected ? ACCENT : BG;
             screen_fill(col, row, width - 1, 2, bg);
             if (pos < napps) {
                 if (pos != selected && strcmp(apps[pos].state, "failed") == 0) fg = ERROR;
@@ -1066,7 +1068,7 @@ static void draw_output(int ready)
         snprintf(failure, sizeof failure, "%s: %s [%.80s]", state_label(a->state),
                  a->error[0] ? a->error : _("No failure reason reported."), a->name);
     }
-    wrapped(footer, 1, last_customized ? last : _(last), ACCENT);
+    wrapped(footer, 1, last_customized ? last : _(last), ACCENT_TEXT);
     wrapped(footer + 1, 1, action_error[0] ? action_error : list_error[0] ? list_error : failure, ERROR);
     if (confirming != CONF_NONE) {
         /* TRANSLATORS: Y, Enter, N and Esc are confirmation keys; keep them. */
@@ -1101,7 +1103,7 @@ static void draw_output(int ready)
                             "right click: actions   Super+Esc: home"), FG, BG);
     }
     if (!screen_is_extended || !screen_is_extended() || home_output == screen_output_current()) {
-        textsel_draw(BG, ACCENT);
+        textsel_draw(ON_ACCENT, ACCENT);
     }
     screen_flush();
     if (ready) {

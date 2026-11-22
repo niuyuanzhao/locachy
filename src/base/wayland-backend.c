@@ -102,6 +102,7 @@ static struct {
     int mods, use_key_mods, keyboard_focused, repeat_fd, repeat_rate, repeat_delay;
     unsigned keyboard_focus_generation;
     uint32_t repeat_code, keyboard_serial, button_serial, press_serial, enter_serial;
+    int theme_fd, theme_dirty;  /* rc.conf replaced or edited; request a new picture */
 
     struct wl_cursor_theme *cursor_theme;
     int cursor_size, cursor_shape;
@@ -123,7 +124,7 @@ static struct {
         double v, h, v120, h120;
         int dv, dh, source, axes, value120_axes;
     } axis;
-} w = { .repeat_fd = -1, .integer_scale = 1, .cursor_shape = CURSOR_ARROW };
+} w = { .repeat_fd = -1, .theme_fd = -1, .integer_scale = 1, .cursor_shape = CURSOR_ARROW };
 
 static struct key keyq[KEYS], last_key;
 static int khead, klen;
@@ -137,6 +138,12 @@ uint32_t wl_backend_press_serial(void) { return w.press_serial; }
 int wl_backend_keyboard_focused(void) { return w.keyboard_focused; }
 unsigned wl_backend_keyboard_focus_generation(void) { return w.keyboard_focus_generation; }
 int wl_backend_active(void) { return w.display != NULL && w.configured; }
+int wl_backend_theme_changed(void)
+{
+    if (!w.theme_dirty) return 0;
+    w.theme_dirty = 0;
+    return 1;
+}
 int wl_backend_modifiers(void) { return w.use_key_mods ? last_key.mods : w.mods; }
 void wl_backend_live_modifiers(void) { w.use_key_mods = 0; }
 const char *wl_backend_text(void) { return last_key.text; }
@@ -1069,6 +1076,21 @@ static void open_compose(void)
     if (w.compose_table) w.compose = xkb_compose_state_new(w.compose_table, XKB_COMPOSE_STATE_NO_FLAGS);
 }
 
+static void watch_theme(void)
+{
+    if (!theme_watch_open || !theme_watch_read || !theme_reload) return;
+    w.theme_fd = theme_watch_open();
+    theme_reload(); /* arm first so a concurrent save cannot be missed */
+}
+
+static void theme_event(void)
+{
+    if (w.theme_fd >= 0 && theme_watch_read && theme_watch_read(w.theme_fd)) {
+        w.theme_dirty = 1;
+        w.events++;
+    }
+}
+
 int wl_backend_open(int (*resize)(int width, int height, double scale), void (*frame)(void))
 {
     const char *ready = getenv("LOCACHY_WINDOW_READY_FD");
@@ -1086,6 +1108,7 @@ int wl_backend_open(int (*resize)(int width, int height, double scale), void (*f
         return -1;
     }
     open_compose();
+    watch_theme();
     w.registry = wl_display_get_registry(w.display);
     wl_registry_add_listener(w.registry, &registry_listener, NULL);
     if (wl_display_roundtrip(w.display) < 0 || !w.compositor || !w.shm || !w.wm_base) {
@@ -1169,8 +1192,9 @@ int wl_backend_wait(struct pollfd *extra, size_t count, int timeout_ms)
         }
         out = POLLOUT;
     }
-    enum { DISPLAY, REPEAT, TOUCH, EXTRA };
+    enum { DISPLAY, REPEAT, TOUCH, THEME, EXTRA };
     struct pollfd p[EXTRA + 64 + DATA_FDS];
+    p[THEME] = (struct pollfd){ .fd = w.theme_fd, .events = POLLIN };
     p[DISPLAY] = (struct pollfd){ .fd = wl_display_get_fd(w.display), .events = POLLIN | out };
     p[REPEAT] = (struct pollfd){ .fd = w.repeat_fd, .events = POLLIN };
     p[TOUCH] = (struct pollfd){ .fd = pointer_window_touch_fd(), .events = POLLIN };
@@ -1209,6 +1233,11 @@ int wl_backend_wait(struct pollfd *extra, size_t count, int timeout_ms)
     }
     if (wl_display_dispatch_pending(w.display) < 0) return -1;
     if (p[TOUCH].revents & POLLIN) pointer_window_touch_timer();
+    if (p[THEME].revents & POLLIN) theme_event();
+    if (p[THEME].revents & (POLLHUP | POLLERR | POLLNVAL)) {
+        close(w.theme_fd);
+        w.theme_fd = -1;
+    }
     if (ndata > 0) wl_data_dispatch(p + EXTRA + count, (size_t)ndata);
     int ready = 0;
     for (size_t i = 0; i < count; i++) {
@@ -1261,6 +1290,7 @@ void wl_backend_close(void)
     if (w.registry) wl_registry_destroy(w.registry);
     if (w.display) wl_display_disconnect(w.display);
     if (w.repeat_fd >= 0) close(w.repeat_fd);
+    if (w.theme_fd >= 0) close(w.theme_fd);
     xkb_compose_state_unref(w.compose);
     xkb_compose_table_unref(w.compose_table);
     xkb_state_unref(w.state);
@@ -1268,6 +1298,7 @@ void wl_backend_close(void)
     xkb_context_unref(w.xkb);
     memset(&w, 0, sizeof w);
     w.repeat_fd = -1;
+    w.theme_fd = -1;
     w.integer_scale = 1;
     w.cursor_shape = CURSOR_ARROW;
     khead = klen = 0;

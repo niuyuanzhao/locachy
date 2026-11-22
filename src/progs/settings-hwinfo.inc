@@ -77,7 +77,7 @@ struct hw_row {
     int kind;
     char key[72];
     char val[160];
-    uint32_t val_col;
+    enum theme_role value_role;
     int bar_pct;    /* 0..100 for HWROW_BAR */
     int sensor_idx; /* >= 0 for HWROW_SENSOR */
 };
@@ -360,11 +360,10 @@ static void hw_add_section(const char *title)
     memset(r, 0, sizeof *r);
     r->kind = HWROW_SECTION;
     hw_scpy(r->key, sizeof r->key, title);
-    r->val_col = ACCENT;
     r->sensor_idx = -1;
 }
 
-static void hw_add_kv_col(const char *key, const char *val, uint32_t col)
+static void hw_add_kv_role(const char *key, const char *val, enum theme_role role)
 {
     if (nhw_rows >= HW_MAX_ROWS || !val || !val[0]) return;
     struct hw_row *r = &hw_rows[nhw_rows++];
@@ -372,13 +371,13 @@ static void hw_add_kv_col(const char *key, const char *val, uint32_t col)
     r->kind = HWROW_KV;
     hw_scpy(r->key, sizeof r->key, key);
     hw_scpy(r->val, sizeof r->val, val);
-    r->val_col = col;
+    r->value_role = role;
     r->sensor_idx = -1;
 }
 
 static void hw_add_kv(const char *key, const char *val)
 {
-    hw_add_kv_col(key, val, FG);
+    hw_add_kv_role(key, val, THEME_FG);
 }
 
 static void hw_add_note(const char *text)
@@ -388,7 +387,6 @@ static void hw_add_note(const char *text)
     memset(r, 0, sizeof *r);
     r->kind = HWROW_NOTE;
     hw_scpy(r->val, sizeof r->val, text);
-    r->val_col = DIM;
     r->sensor_idx = -1;
 }
 
@@ -401,7 +399,6 @@ static void hw_add_bar(const char *key, int pct, const char *val)
     hw_scpy(r->key, sizeof r->key, key);
     hw_scpy(r->val, sizeof r->val, val);
     r->bar_pct = pct < 0 ? 0 : (pct > 100 ? 100 : pct);
-    r->val_col = FG;
     r->sensor_idx = -1;
 }
 
@@ -504,7 +501,7 @@ static void hw_collect_cpu(void)
     hw_add_kv(_("Topology"), topo);
 
     if (flags[0]) {
-        hw_add_kv_col(_("x86-64 ISA level"), hw_x86_psabi_level(flags), POWER_GOOD_COL);
+        hw_add_kv_role(_("x86-64 ISA level"), hw_x86_psabi_level(flags), THEME_SUCCESS);
         static const char *const notable[] = {
             "aes", "vaes", "pclmulqdq", "sha_ni", "avx", "avx2", "fma",
             "avx512f", "avx_vnni", "bmi1", "bmi2", "popcnt", "rdrand", "rdseed",
@@ -593,9 +590,9 @@ static void hw_collect_cpu(void)
             snprintf(vp, sizeof vp, "%s/%s", path, e->d_name);
             if (hw_read_line(vp, status, sizeof status) != 0) continue;
             if (!sec_added) { hw_add_section(_("CPU Security Mitigations")); sec_added = 1; }
-            uint32_t col = strncasecmp(status, "Vulnerable", 10) == 0 ? POWER_LOW_COL :
-                           (strncasecmp(status, "Not affected", 12) == 0 ? POWER_GOOD_COL : FG);
-            hw_add_kv_col(e->d_name, status, col);
+            enum theme_role role = strncasecmp(status, "Vulnerable", 10) == 0 ? THEME_ERROR :
+                           (strncasecmp(status, "Not affected", 12) == 0 ? THEME_SUCCESS : THEME_FG);
+            hw_add_kv_role(e->d_name, status, role);
         }
         closedir(vd);
     }
@@ -715,7 +712,7 @@ static int hw_parse_smbios_memory(const uint8_t *buf, size_t len)
                 snprintf(slot_name, sizeof slot_name, _("Slot %d"), slots_found);
 
             if (mb == 0) {
-                hw_add_kv_col(slot_name, _("Empty"), DIM);
+                hw_add_kv_role(slot_name, _("Empty"), THEME_DIM);
             } else {
                 populated++;
                 const char *mtype = smbios_mem_type(buf[off + 0x12]);
@@ -815,7 +812,7 @@ static void hw_collect_memory(void)
             hw_add_kv(_("Zswap compressed"), v);
         }
     } else {
-        hw_add_kv_col(_("Swap"), _("Not configured"), DIM);
+        hw_add_kv_role(_("Swap"), _("Not configured"), THEME_DIM);
     }
 
     uint8_t dmi[65536];
@@ -1085,9 +1082,9 @@ static void hw_collect_storage(void)
                 char hv[128];
                 snprintf(hv, sizeof hv, _("%d%% remaining (%u%% endurance used, spare %u%%)"),
                          health, sm.pct_used, sm.avail_spare);
-                uint32_t hcol = (sm.critical_warning || health < 20) ? POWER_LOW_COL :
-                                (health < 60 ? POWER_WARN_COL : POWER_GOOD_COL);
-                hw_add_kv_col(_("SMART health"), hv, hcol);
+                enum theme_role role = (sm.critical_warning || health < 20) ? THEME_ERROR :
+                                (health < 60 ? THEME_WARNING : THEME_SUCCESS);
+                hw_add_kv_role(_("SMART health"), hv, role);
                 if (sm.temp_c > -100) {
                     snprintf(hv, sizeof hv, "%d °C", sm.temp_c);
                     hw_add_kv(_("Temperature"), hv);
@@ -1101,7 +1098,7 @@ static void hw_collect_storage(void)
                          sm.power_on_hours, sm.power_cycles, sm.unsafe_shutdowns);
                 hw_add_kv(_("Lifetime counters"), hv);
                 snprintf(hv, sizeof hv, "%llu", sm.media_errors);
-                hw_add_kv_col(_("Media / integrity errors"), hv, sm.media_errors ? POWER_LOW_COL : POWER_GOOD_COL);
+                hw_add_kv_role(_("Media / integrity errors"), hv, sm.media_errors ? THEME_ERROR : THEME_SUCCESS);
             }
         } else if (strncmp(nm, "sd", 2) == 0) {
             struct hw_ata_smart sm;
@@ -1109,8 +1106,8 @@ static void hw_collect_storage(void)
                 char hv[128];
                 if (sm.life_pct >= 0) {
                     snprintf(hv, sizeof hv, _("%d%% life remaining"), sm.life_pct);
-                    hw_add_kv_col(_("SMART SSD life"), hv,
-                                  sm.life_pct >= 50 ? POWER_GOOD_COL : POWER_WARN_COL);
+                    hw_add_kv_role(_("SMART SSD life"), hv,
+                                  sm.life_pct >= 50 ? THEME_SUCCESS : THEME_WARNING);
                 }
                 if (sm.temp_c > -100) {
                     snprintf(hv, sizeof hv, "%d °C", sm.temp_c);
@@ -1131,7 +1128,7 @@ static void hw_collect_storage(void)
                     snprintf(hv, sizeof hv, _("reallocated %lld, pending %lld"),
                              sm.realloc_sectors >= 0 ? sm.realloc_sectors : 0LL,
                              sm.pending_sectors >= 0 ? sm.pending_sectors : 0LL);
-                    hw_add_kv_col(_("Sector health"), hv, bad > 0 ? POWER_LOW_COL : POWER_GOOD_COL);
+                    hw_add_kv_role(_("Sector health"), hv, bad > 0 ? THEME_ERROR : THEME_SUCCESS);
                 }
             }
         }
@@ -1624,17 +1621,17 @@ static void hw_collect_sensors(void)
                 snprintf(r->val, sizeof r->val, _("%.1f °C   (crit %.0f °C)"), s->val, s->crit_v);
             else
                 snprintf(r->val, sizeof r->val, "%.1f °C", s->val);
-            r->val_col = (s->has_crit && s->val >= s->crit_v - 10.0) ? POWER_LOW_COL :
-                         (s->val >= 80.0 ? POWER_WARN_COL : FG);
+            r->value_role = (s->has_crit && s->val >= s->crit_v - 10.0) ? THEME_ERROR :
+                         (s->val >= 80.0 ? THEME_WARNING : THEME_FG);
         } else if (s->kind == 'F') {
             snprintf(r->val, sizeof r->val, "%.0f RPM", s->val);
-            r->val_col = FG;
+            r->value_role = THEME_FG;
         } else if (s->kind == 'P') {
             snprintf(r->val, sizeof r->val, "%.2f W", s->val);
-            r->val_col = POWER_GOOD_COL;
+            r->value_role = THEME_SUCCESS;
         } else {
             snprintf(r->val, sizeof r->val, "%.3f V", s->val);
-            r->val_col = FG;
+            r->value_role = THEME_FG;
         }
         r->sensor_idx = i;
     }
@@ -1856,8 +1853,8 @@ static void hw_scan_net_sysfs(const char *sys_net_dir, const char *ns_tag)
                  state[0] ? state : "unknown",
                  spd[0] ? ", " : "", spd,
                  drv[0] ? "  [driver: " : "", drv, drv[0] ? "]" : "");
-        hw_add_kv_col(_("Link & driver"), st_line,
-                      strcmp(state, "up") == 0 ? POWER_GOOD_COL : FG);
+        hw_add_kv_role(_("Link & driver"), st_line,
+                      strcmp(state, "up") == 0 ? THEME_SUCCESS : THEME_FG);
         hw_add_kv(_("MAC address"), mac);
         if (rx > 0 || tx > 0) {
             char rxs[48], txs[48], tr[120];
@@ -1929,7 +1926,7 @@ static void hw_collect_network(void)
                     size_t sp = (size_t)hw_scpy(st_line, sizeof st_line, st);
                     if (mbps > 0) sp += (size_t)snprintf(st_line + sp, sizeof st_line - sp, ", %lld Mbps", mbps);
                     if (strcmp(drv, "-") != 0) sp += (size_t)snprintf(st_line + sp, sizeof st_line - sp, "  [driver: %s]", drv);
-                    hw_add_kv_col(_("Link & driver"), st_line, strcmp(st, "up") == 0 ? POWER_GOOD_COL : FG);
+                    hw_add_kv_role(_("Link & driver"), st_line, strcmp(st, "up") == 0 ? THEME_SUCCESS : THEME_FG);
                     if (strcmp(mac, "-") != 0) hw_add_kv(_("MAC address"), mac);
                     if (rx > 0 || tx > 0) {
                         char rxs[48], txs[48], tr[120];
@@ -2170,6 +2167,17 @@ static int hw_spark_visible(int pw, int rows)
     return hw_cat == HWCAT_SENSORS && nhw_sensors > 0 && rows >= 22 && pw >= 30;
 }
 
+static uint32_t hw_value_color(enum theme_role role)
+{
+    switch (role) {
+    case THEME_DIM: return DIM;
+    case THEME_ERROR: return theme_rgb(role, POWER_LOW_COL);
+    case THEME_WARNING: return theme_rgb(role, POWER_WARN_COL);
+    case THEME_SUCCESS: return theme_rgb(role, POWER_GOOD_COL);
+    default: return FG;
+    }
+}
+
 static void hwinfo_draw(void)
 {
     int cols = screen_cols(), rows = screen_rows();
@@ -2180,11 +2188,11 @@ static void hwinfo_draw(void)
     if (sw > 0) {
         for (int c = 0; c < NHWCATS && PAGE_TOP + c < rows - 3; c++) {
             int on = (c == hw_cat);
-            uint32_t bg = on ? (hw_in_pane ? SIDE_BG : ACCENT) : BG;
+            uint32_t bg = on ? (hw_in_pane ? SELECTION : ACCENT) : BG;
             screen_fill(0, PAGE_TOP + c, sw, 1, bg);
-            screen_text(1, PAGE_TOP + c, _(hwcat_names[c]), on && !hw_in_pane ? BG : FG, bg);
+            screen_text(1, PAGE_TOP + c, _(hwcat_names[c]), on && !hw_in_pane ? ON_ACCENT : FG, bg);
         }
-        screen_fill(sw, PAGE_TOP, 1, rows - 3 - PAGE_TOP, SIDE_BG);
+        screen_fill(sw, PAGE_TOP, 1, rows - 3 - PAGE_TOP, BORDER);
     }
 
     int px = sw > 0 ? sw + 2 : 2;
@@ -2198,7 +2206,8 @@ static void hwinfo_draw(void)
             sidx = hw_rows[hw_sel_row].sensor_idx;
         const struct hw_sensor *s = &hw_sensors[sidx];
         int ch_rows = 5;
-        screen_fill(px, top, pw, ch_rows, POWER_CARD_BG);
+        uint32_t curve = theme_rgb(THEME_SUCCESS, POWER_CHG_COL);
+        screen_fill(px, top, pw, ch_rows, SURFACE);
 
         double mn = hw_spark_n ? hw_spark[0] : s->val;
         double mx = mn;
@@ -2210,7 +2219,7 @@ static void hwinfo_draw(void)
         char shdr[160];
         snprintf(shdr, sizeof shdr, _("Live curve: %.28s / %.36s = %.1f %s  (min %.1f, max %.1f %s)"),
                  s->chip, s->label, s->val, unit, mn, mx, unit);
-        screen_text(px + 1, top, shdr, ACCENT, POWER_CARD_BG);
+        screen_text(px + 1, top, shdr, ACCENT_TEXT, SURFACE);
 
         double lo = mn - (mx - mn) * 0.15 - 1.0;
         double hi = mx + (mx - mn) * 0.15 + 1.0;
@@ -2228,14 +2237,14 @@ static void hwinfo_draw(void)
             int gh = (ch_rows - 1) * ch - 4;
             if (gh < 6) gh = 6;
             int gy1 = gy0 + gh - 1;
-            screen_fill_px(gx0, gy0 + gh / 2, gw, 1, POWER_GRID_COL);
+            screen_fill_px(gx0, gy0 + gh / 2, gw, 1, theme_rgb(THEME_BORDER, POWER_GRID_COL));
             int prev_y = -1;
             for (int dx = 0; dx < gw; dx++) {
                 int idx = (dx * hw_spark_n) / gw;
                 if (idx >= hw_spark_n) idx = hw_spark_n - 1;
                 double v = hw_spark[idx];
                 int y = gy1 - (int)(((v - lo) / (hi - lo)) * (gh - 1) + 0.5);
-                px_vline_clamped(gx0 + dx, prev_y >= 0 ? prev_y : y, y, gy0, gy1, POWER_CHG_COL);
+                px_vline_clamped(gx0 + dx, prev_y >= 0 ? prev_y : y, y, gy0, gy1, curve);
                 prev_y = y;
             }
         } else if (hw_spark_n > 0 && plot_cols > 4) {
@@ -2244,7 +2253,7 @@ static void hwinfo_draw(void)
                                     hw_spark_n - 1 - (plot_cols - 1 - c) : 0];
                 int rr = top + 1 + (ch_rows - 2) - (int)(((v - lo) / (hi - lo)) * (ch_rows - 2) + 0.5);
                 if (rr >= top + 1 && rr < top + ch_rows)
-                    screen_text(px + 2 + c, rr, "*", POWER_CHG_COL, POWER_CARD_BG);
+                    screen_text(px + 2 + c, rr, "*", curve, SURFACE);
             }
         }
         top += ch_rows + 1;
@@ -2267,9 +2276,9 @@ static void hwinfo_draw(void)
         if (sel) screen_fill(px, y, pw, 1, ACCENT);
 
         if (row->kind == HWROW_SECTION) {
-            screen_text(px, y, row->key, sel ? BG : ACCENT, rbg);
+            screen_text(px, y, row->key, sel ? ON_ACCENT : ACCENT_TEXT, rbg);
         } else if (row->kind == HWROW_NOTE) {
-            screen_text(px + 2, y, row->val, sel ? BG : DIM, rbg);
+            screen_text(px + 2, y, row->val, sel ? ON_ACCENT : DIM, rbg);
         } else if (row->kind == HWROW_BAR) {
             char kpad[96], bar[32];
             ui_pad(kpad, sizeof kpad, row->key, key_w);
@@ -2279,14 +2288,14 @@ static void hwinfo_draw(void)
             bar[1 + bw] = ']';
             bar[2 + bw] = ' ';
             bar[3 + bw] = '\0';
-            screen_text(px + 2, y, kpad, sel ? BG : DIM, rbg);
-            screen_text(px + 2 + key_w + 1, y, bar, sel ? BG : POWER_DIS_COL, rbg);
-            screen_text(px + 2 + key_w + 1 + bw + 3, y, row->val, sel ? BG : FG, rbg);
+            screen_text(px + 2, y, kpad, sel ? ON_ACCENT : DIM, rbg);
+            screen_text(px + 2 + key_w + 1, y, bar, sel ? ON_ACCENT : theme_rgb(THEME_ACCENT_TEXT, POWER_DIS_COL), rbg);
+            screen_text(px + 2 + key_w + 1 + bw + 3, y, row->val, sel ? ON_ACCENT : FG, rbg);
         } else {
             char kpad[96];
             ui_pad(kpad, sizeof kpad, row->key, key_w);
-            screen_text(px + 2, y, kpad, sel ? BG : DIM, rbg);
-            screen_text(px + 2 + key_w + 1, y, row->val, sel ? BG : row->val_col, rbg);
+            screen_text(px + 2, y, kpad, sel ? ON_ACCENT : DIM, rbg);
+            screen_text(px + 2 + key_w + 1, y, row->val, sel ? ON_ACCENT : hw_value_color(row->value_role), rbg);
         }
     }
 
@@ -2294,7 +2303,7 @@ static void hwinfo_draw(void)
     screen_text(2, rows - 3, cols < 70 ? _("Up/Down: move  Tab: pane  r: refresh  Ctrl+C: copy  Esc: back") :
                 _("Up/Down: select   Tab / Left / Right: switch pane   r: refresh   Ctrl+C: copy page   Esc: back"),
                 DIM, BG);
-    screen_text(2, rows - 2, _(notice), ACCENT, BG);
+    screen_text(2, rows - 2, _(notice), ACCENT_TEXT, BG);
     ui_hits_clear();
     settings_back_button(rows - 1);
     screen_flush();
@@ -2335,8 +2344,9 @@ static void hwinfo_page(void)
     for (;;) {
         int timeout_ms = (hw_cat == HWCAT_SENSORS || hw_cat == HWCAT_CPU || hw_cat == HWCAT_MEMORY) ? 1000 : 5000;
         int key = key_poll_timeout(-1, timeout_ms);
-        if (key == 0 || key == K_SHOWN) {
-            if (hw_cat == HWCAT_SENSORS || hw_cat == HWCAT_CPU || hw_cat == HWCAT_MEMORY) {
+        if (key == 0 || key == K_SHOWN || key == K_REPAINT) {
+            if (key != K_REPAINT &&
+                (hw_cat == HWCAT_SENSORS || hw_cat == HWCAT_CPU || hw_cat == HWCAT_MEMORY)) {
                 hw_populate_category(hw_cat);
                 hw_update_sensor_spark();
             }

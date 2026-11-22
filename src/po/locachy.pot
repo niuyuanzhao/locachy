@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-16 10:30+0800\n"
+"POT-Creation-Date: 2026-11-21 08:23+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -76,11 +76,11 @@ msgid "Find; next, previous match"
 msgstr ""
 
 #: base/help.c
-msgid "Every program"
+msgid "[Esc / F1: close]"
 msgstr ""
 
 #: base/help.c
-msgid "Esc, F1 or q: close"
+msgid "Every program"
 msgstr ""
 
 #: base/jobs.c
@@ -460,7 +460,8 @@ msgstr ""
 #. TRANSLATORS: Esc is the key; keep it.
 #. TRANSLATORS: Esc is the Esc key; keep it.
 #. TRANSLATORS: Esc is the key; keep it.
-#: progs/archive.c progs/files.c progs/rescue.c progs/settings.c progs/shot.c
+#: progs/archive.c progs/bar.c progs/files.c progs/rescue.c progs/settings.c
+#: progs/shot.c
 msgid "Esc: cancel"
 msgstr ""
 
@@ -576,23 +577,52 @@ msgstr ""
 msgid "Archive keys"
 msgstr ""
 
-#. TRANSLATORS: y and N are the keys answering; keep them.
+#. TRANSLATORS: Enter and Esc are keys; keep them.
 #: progs/archive.c
-#, c-format
-msgid "%s [y/N]"
+msgid "Enter: ok"
+msgstr ""
+
+#. TRANSLATORS: N is the N key; keep "N: ".
+#: progs/archive.c progs/files.c progs/installer.c progs/packages.c
+msgid "N: no"
+msgstr ""
+
+#. TRANSLATORS: Y and N are keys; keep them.
+#. TRANSLATORS: Y, N and Esc are keys; keep them.
+#. TRANSLATORS: Y and N are the keys; keep "Y: " and "N: ".
+#. TRANSLATORS: Y is the Y key; keep "Y: ".
+#: progs/archive.c progs/files.c progs/installer.c progs/packages.c
+msgid "Y: yes"
 msgstr ""
 
 #: progs/archive.c
 #, c-format
-msgid ""
-"%s is there and not a folder: o overwrite  O all  s skip  S all  Esc cancel"
+msgid "%s is there already."
 msgstr ""
 
 #: progs/archive.c
 #, c-format
-msgid ""
-"%s is there already: o overwrite  O all  s skip  S all  r another name  Esc "
-"cancel"
+msgid "%s is there and not a folder."
+msgstr ""
+
+#: progs/archive.c
+msgid "O: all"
+msgstr ""
+
+#: progs/archive.c
+msgid "o: overwrite"
+msgstr ""
+
+#: progs/archive.c
+msgid "s: skip"
+msgstr ""
+
+#: progs/archive.c
+msgid "S: all"
+msgstr ""
+
+#: progs/archive.c
+msgid "r: rename"
 msgstr ""
 
 #: progs/archive.c
@@ -748,12 +778,17 @@ msgstr ""
 
 #: progs/archive.c
 #, c-format
+msgid "Could not open %s on the shared display. See the log for the reason."
+msgstr ""
+
+#: progs/archive.c
+#, c-format
 msgid "Cannot ask home to open %s."
 msgstr ""
 
 #: progs/archive.c
 #, c-format
-msgid "Opened %s."
+msgid "Open request accepted for %s."
 msgstr ""
 
 #: progs/archive.c progs/edit-filesearch-ui.inc progs/packages.c progs/shot.c
@@ -880,11 +915,6 @@ msgstr ""
 
 #: progs/archive.c
 msgid "The archive needs a name (without /)."
-msgstr ""
-
-#: progs/archive.c
-#, c-format
-msgid "%s is there already."
 msgstr ""
 
 #: progs/archive.c
@@ -1022,7 +1052,7 @@ msgstr ""
 msgid "Opened read-only:"
 msgstr ""
 
-#: progs/archive.c progs/installer.c progs/packages.c
+#: progs/archive.c progs/installer.c progs/packages.c progs/settings.c
 msgid "no"
 msgstr ""
 
@@ -1173,6 +1203,23 @@ msgid_plural "RAM %s, %d frozen"
 msgstr[0] ""
 msgstr[1] ""
 
+#: progs/bar.c progs/home.c
+msgid "Graphical Session"
+msgstr ""
+
+#: progs/bar.c
+msgid "Waiting for applications"
+msgstr ""
+
+#: progs/bar.c progs/edit-actions.inc progs/edit-documents.inc
+#: progs/edit-filesearch-ui.inc progs/view.c
+msgid "Close"
+msgstr ""
+
+#: progs/bar.c
+msgid "Ctrl+Q: close"
+msgstr ""
+
 #: progs/bar.c
 msgid "Its tray item did not show a window."
 msgstr ""
@@ -1200,7 +1247,7 @@ msgstr ""
 
 #. TRANSLATORS: Enter and Esc are keys; keep them.
 #: progs/bar.c
-msgid "Enter: start with own Tor   Esc: cancel"
+msgid "Enter: start with Tor"
 msgstr ""
 
 #. TRANSLATORS: %s is the container name.
@@ -1219,7 +1266,7 @@ msgstr ""
 
 #. TRANSLATORS: Enter and Esc are keys; keep them.
 #: progs/bar.c
-msgid "Enter: start it again   Esc: leave it"
+msgid "Enter: start again"
 msgstr ""
 
 #. TRANSLATORS: %s is a file name or URL.
@@ -1232,9 +1279,16 @@ msgstr ""
 msgid "Other container..."
 msgstr ""
 
+#. TRANSLATORS: A is the key; keep it.
+#: progs/bar.c progs/files.c
+msgid "A: always use it"
+msgstr ""
+
 #. TRANSLATORS: Enter, A and Esc are keys; keep them.
-#: progs/bar.c
-msgid "Enter: open   A: always use it   Esc: cancel"
+#. TRANSLATORS: Enter is the key; keep it.
+#. TRANSLATORS: Enter, Space, R, F, K are key names; keep them.
+#: progs/bar.c progs/files.c progs/home.c
+msgid "Enter: open"
 msgstr ""
 
 #. TRANSLATORS: Up, Down, Enter, F and Esc are keys; keep them.
@@ -1280,18 +1334,6 @@ msgstr ""
 
 #: progs/bar.c
 msgid "window"
-msgstr ""
-
-#: progs/bar.c progs/home.c
-msgid "Graphical Session"
-msgstr ""
-
-#: progs/bar.c
-msgid "Waiting for applications"
-msgstr ""
-
-#: progs/bar.c
-msgid "Ctrl+Q: close"
 msgstr ""
 
 #: progs/drives.c
@@ -1388,11 +1430,6 @@ msgstr ""
 
 #: progs/edit-actions.inc progs/edit-documents.inc progs/view.c
 msgid "Reload"
-msgstr ""
-
-#: progs/bar.c progs/edit-actions.inc progs/edit-documents.inc
-#: progs/edit-filesearch-ui.inc progs/view.c
-msgid "Close"
 msgstr ""
 
 #: progs/edit-actions.inc
@@ -3856,6 +3893,10 @@ msgid "unmounted"
 msgstr ""
 
 #: progs/files.c
+msgid "Esc: stay"
+msgstr ""
+
+#: progs/files.c
 #, c-format
 msgid "Copying %s: %s of %s. Esc: stop."
 msgstr ""
@@ -3873,27 +3914,8 @@ msgid ""
 "done, Esc: stay."
 msgstr ""
 
-#. TRANSLATORS: y and N are keys; keep them.
 #: progs/files.c
 msgid "Stop copying? What is not copied yet is not kept. y/N"
-msgstr ""
-
-#. TRANSLATORS: Y is the key; keep it.
-#. TRANSLATORS: Y and N are the keys; keep "Y: " and "N: ".
-#. TRANSLATORS: Y is the Y key; keep "Y: ".
-#: progs/files.c progs/installer.c progs/packages.c
-msgid "Y: yes"
-msgstr ""
-
-#. TRANSLATORS: N is the key; keep it.
-#. TRANSLATORS: N is the N key; keep "N: ".
-#: progs/files.c progs/installer.c progs/packages.c
-msgid "N: no"
-msgstr ""
-
-#. TRANSLATORS: Esc is the key; keep it.
-#: progs/files.c
-msgid "Esc: stay"
 msgstr ""
 
 #: progs/files.c
@@ -4555,12 +4577,6 @@ msgstr ""
 msgid "i: properties"
 msgstr ""
 
-#. TRANSLATORS: Enter is the key; keep it.
-#. TRANSLATORS: Enter, Space, R, F, K are key names; keep them.
-#: progs/files.c progs/home.c
-msgid "Enter: open"
-msgstr ""
-
 #. TRANSLATORS: o is the key; keep it.
 #: progs/files.c
 msgid "o: open with"
@@ -4603,7 +4619,8 @@ msgstr ""
 msgid "Ctrl+Q: quit"
 msgstr ""
 
-#: progs/files.c progs/home.c
+#. TRANSLATORS: Esc is the Esc key; keep it.
+#: progs/files.c progs/home.c progs/packages.c progs/settings.c
 msgid "Esc: back"
 msgstr ""
 
@@ -4809,11 +4826,6 @@ msgstr ""
 #: progs/files.c
 #, c-format
 msgid "Open %s (%s) with:"
-msgstr ""
-
-#. TRANSLATORS: A is the key; keep it.
-#: progs/files.c
-msgid "A: always use it"
 msgstr ""
 
 #: progs/files.c
@@ -5294,7 +5306,7 @@ msgid "w makes an image the wallpaper; %s is not one."
 msgstr ""
 
 #: progs/files.c progs/installer.c progs/packages.c progs/settings-power.inc
-#: progs/settings.c
+#: progs/settings-theme.inc progs/settings.c
 #, c-format
 msgid "Cannot write %s."
 msgstr ""
@@ -5794,10 +5806,6 @@ msgid "Container actions stay here; state refreshes every 500 ms."
 msgstr ""
 
 #: progs/home.c
-msgid "Open the shared desktop"
-msgstr ""
-
-#: progs/home.c
 msgid "opening"
 msgstr ""
 
@@ -5986,6 +5994,10 @@ msgid "state, RAM / swap MiB"
 msgstr ""
 
 #: progs/home.c
+msgid "Open the shared desktop"
+msgstr ""
+
+#: progs/home.c
 msgid "home and the shared folders"
 msgstr ""
 
@@ -6094,11 +6106,6 @@ msgstr ""
 #: progs/home.c
 #, c-format
 msgid "%s is part of home: nothing to close."
-msgstr ""
-
-#: progs/home.c
-#, c-format
-msgid "%s cannot be closed from home."
 msgstr ""
 
 #. TRANSLATORS: K is the key name; keep it.
@@ -8083,9 +8090,8 @@ msgstr ""
 msgid "Enter: a folder of your home, chosen in files"
 msgstr ""
 
-#. TRANSLATORS: Delete is the Delete key; keep it.
 #: progs/packages.c
-msgid "at the same path in it   Delete: remove"
+msgid "at the same path in it"
 msgstr ""
 
 #: progs/packages.c
@@ -9975,6 +9981,75 @@ msgstr ""
 msgid "Copied battery report to clipboard."
 msgstr ""
 
+#: progs/settings-theme.inc
+msgid "LOCachy Dark"
+msgstr ""
+
+#: progs/settings-theme.inc
+msgid "LOCachy Light"
+msgstr ""
+
+#: progs/settings-theme.inc progs/view-pdf-ui.inc
+msgid "Blue"
+msgstr ""
+
+#: progs/settings-theme.inc
+msgid "Teal"
+msgstr ""
+
+#: progs/settings-theme.inc progs/view-pdf-ui.inc
+msgid "Green"
+msgstr ""
+
+#: progs/settings-theme.inc
+msgid "Amber"
+msgstr ""
+
+#: progs/settings-theme.inc
+msgid "Violet"
+msgstr ""
+
+#: progs/settings-theme.inc
+msgid "Rose"
+msgstr ""
+
+#: progs/settings-theme.inc
+msgid "Scheme default"
+msgstr ""
+
+#: progs/settings-theme.inc
+msgid "Custom"
+msgstr ""
+
+#: progs/settings-theme.inc
+msgid "Accent color"
+msgstr ""
+
+#: progs/settings-theme.inc
+msgid "Color scheme"
+msgstr ""
+
+#: progs/settings-theme.inc
+msgid "Colors saved, but not all desktop settings could be applied."
+msgstr ""
+
+#: progs/settings-theme.inc
+msgid "Colors saved and applied. Reopen foot windows for the new colors."
+msgstr ""
+
+#. TRANSLATORS: Up/Down, Enter and Esc are key names; keep them.
+#: progs/settings-theme.inc
+msgid "Up/Down: choose   Enter: select   Esc: back"
+msgstr ""
+
+#: progs/settings-theme.inc
+msgid "Custom accent (#RRGGBB): "
+msgstr ""
+
+#: progs/settings-theme.inc
+msgid "Enter a color as #RRGGBB, for example #3478D4. Nothing was changed."
+msgstr ""
+
 #: progs/settings.c
 msgid "generic PC"
 msgstr ""
@@ -11188,6 +11263,10 @@ msgid "Cloud Drives"
 msgstr ""
 
 #: progs/settings.c
+msgid "Colors"
+msgstr ""
+
+#: progs/settings.c
 msgid "Wallpaper"
 msgstr ""
 
@@ -11729,6 +11808,21 @@ msgstr[1] ""
 #: progs/settings.c
 msgid "Lock screen after"
 msgstr ""
+
+#: progs/settings.c
+msgid "Unlock without password within"
+msgstr ""
+
+#: progs/settings.c
+msgid "no (high threat level)"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%d s"
+msgid_plural "%d s"
+msgstr[0] ""
+msgstr[1] ""
 
 #: progs/settings.c
 msgid "Turn off display automatically"
@@ -12293,6 +12387,11 @@ msgstr ""
 msgid "Enter: open Bluetooth devices in bluetui (the service must be on)."
 msgstr ""
 
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: choose a color"
+msgstr ""
+
 #. TRANSLATORS: Enter and Delete are key names; keep them.
 #: progs/settings.c
 msgid "Enter: choose a picture in the file manager   Delete: no wallpaper"
@@ -12318,12 +12417,6 @@ msgid "Enter: a new password for the user (it unlocks the screen, and sudo)."
 msgstr ""
 
 #: progs/settings.c
-msgid ""
-"Not changed: the TPM opens the disk at power-on, so the lock at boot must "
-"stay. Unbind the TPM first."
-msgstr ""
-
-#: progs/settings.c
 msgid "Not changed: the high threat level requires automatic locking."
 msgstr ""
 
@@ -12334,6 +12427,12 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Auto-lock on: closing the lid, sleeping and idling lock the screen."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Not changed: the TPM opens the disk at power-on, so the lock at boot must "
+"stay. Unbind the TPM first."
 msgstr ""
 
 #: progs/settings.c
@@ -12348,12 +12447,10 @@ msgstr ""
 msgid "At boot: home at once."
 msgstr ""
 
-#. TRANSLATORS: Enter and Delete are key names; keep them.
 #: progs/settings.c
 msgid "Enter: press a new lock key   Delete: none (auto-lock still locks)"
 msgstr ""
 
-#. TRANSLATORS: Enter and Delete are key names; keep them.
 #: progs/settings.c
 msgid "Enter: press a new lock key   Delete: none"
 msgstr ""
@@ -12528,6 +12625,12 @@ msgstr ""
 #. TRANSLATORS: Enter and Delete are key names; keep them.
 #: progs/settings.c
 msgid "Enter: bind LUKS2 auto-unlock to TPM (1.2 or 2.0)   Delete: unbind"
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Not changed: the high threat level keeps automatic locking. Turn Auto-lock "
+"on first."
 msgstr ""
 
 #: progs/settings.c
@@ -12756,9 +12859,22 @@ msgstr[0] ""
 msgstr[1] ""
 
 #: progs/settings.c
+msgid "Not changed: at the high threat level every lock asks for the password."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
 msgid ""
-"Not changed: the high threat level keeps automatic locking. Turn Auto-lock "
-"on first."
+"After an idle lock, a key or the pointer within %d second unlocks it without "
+"the password. The lock key, the lid and sleep always ask."
+msgid_plural ""
+"After an idle lock, a key or the pointer within %d seconds unlocks it "
+"without the password. The lock key, the lid and sleep always ask."
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/settings.c
+msgid "Every lock asks for the password at once."
 msgstr ""
 
 #: progs/settings.c
@@ -12989,11 +13105,11 @@ msgid "Fingerprints: %.100s."
 msgstr ""
 
 #: progs/settings.c
-msgid "No lock key: auto-lock still locks."
+msgid "No lock key."
 msgstr ""
 
 #: progs/settings.c
-msgid "No lock key."
+msgid "No lock key: auto-lock still locks."
 msgstr ""
 
 #: progs/settings.c
@@ -13163,10 +13279,6 @@ msgid "Stamp"
 msgstr ""
 
 #: progs/view-pdf-ui.inc
-msgid "Green"
-msgstr ""
-
-#: progs/view-pdf-ui.inc
 msgid "Orange"
 msgstr ""
 
@@ -13176,10 +13288,6 @@ msgstr ""
 
 #: progs/view-pdf-ui.inc
 msgid "Yellow"
-msgstr ""
-
-#: progs/view-pdf-ui.inc
-msgid "Blue"
 msgstr ""
 
 #: progs/view-pdf-ui.inc
@@ -14717,34 +14825,4 @@ msgstr ""
 
 #: progs/view.c
 msgid "Show more details..."
-msgstr ""
-
-#: progs/settings.c
-msgid "Unlock without password within"
-msgstr ""
-
-#: progs/settings.c
-msgid "no (high threat level)"
-msgstr ""
-
-#: progs/settings.c
-#, c-format
-msgid "%d s"
-msgid_plural "%d s"
-msgstr[0] ""
-msgstr[1] ""
-
-#: progs/settings.c
-msgid "Not changed: at the high threat level every lock asks for the password."
-msgstr ""
-
-#: progs/settings.c
-#, c-format
-msgid "After an idle lock, a key or the pointer within %d second unlocks it without the password. The lock key, the lid and sleep always ask."
-msgid_plural "After an idle lock, a key or the pointer within %d seconds unlocks it without the password. The lock key, the lid and sleep always ask."
-msgstr[0] ""
-msgstr[1] ""
-
-#: progs/settings.c
-msgid "Every lock asks for the password at once."
 msgstr ""

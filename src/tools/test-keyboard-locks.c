@@ -183,6 +183,8 @@ int base_brightness_key(int action, char *toast, size_t size) { (void)action; (v
 /* message() reaches these; the cases here never call them. */
 void apps_tick(void) { abort(); }
 void apps_display_ready(void) { abort(); }
+int apps_display_watch_open(void) { abort(); }
+int apps_display_watch_drain(int fd) { (void)fd; abort(); }
 void apps_list(char *buf, size_t size) { (void)buf; (void)size; abort(); }
 int apps_action(const char *action, const char *name, char *why, size_t size)
 { (void)action; (void)name; (void)why; (void)size; abort(); }

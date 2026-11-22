@@ -79,33 +79,32 @@
 #define SCROLL_PREVIEW    1 /* Scroll Bar Preview: the text of the hovered place */
 #define ICON_COLS     2     /* the icon border: the font's height wide (KateIconBorder::updateFont) */
 
-/* Kate's Breeze Dark theme (KSyntaxHighlighting's breeze-dark.theme). */
-#define C_BG        0x232629
-#define C_TEXT      COLOUR_NORMAL
-#define C_LINE      0x2A2E32 /* CurrentLine */
-#define C_SELECT    0x2D5C76 /* TextSelection */
-#define C_SEARCH    0x414857 /* SearchHighlight */
-#define C_REPLACE   0x808021 /* ReplaceHighlight */
-#define C_BRACKET   0x000000 /* BracketMatching */
-#define C_BORDER    0x31363B /* IconBorder */
-#define C_NUMBER    0x7A7C7D /* LineNumbers */
-#define C_NUMBER_ON 0xA5A6A8 /* CurrentLineNumber */
-#define C_BOOKMARK  0x0404BF /* MarkBookmark */
-#define C_MODIFIED  0xC04900 /* ModifiedLines */
-#define C_SAVED     0x1C8042 /* SavedLines */
-#define C_SEPARATOR 0x3F4347
-/* The window around it: Breeze Dark's. */
-#define C_WINDOW    0x2A2E32
-#define C_WTEXT     0xFCFCFC
-#define C_DIM       0xA1A9B1
-#define C_FOCUS     0x3DAEE9
-#define C_INFO_BG   0x1D3E52
-#define C_WARN_BG   0x4D3A1F
-#define C_ERROR_BG  0x4D1F24
-#define C_GOOD_BG   0x1F4D33
-#define C_BAD_FIELD 0x5C2328
-#define C_OK_FIELD  0x234D2E
-#define C_FIELD     0x1B1E20
+/* Kate's Breeze Dark colors are the default; use system roles for chrome
+ * and distinct, lightly tinted backgrounds for the editor's decorations. */
+#define C_BG        theme_rgb(THEME_BG, 0x232629)
+#define C_TEXT      theme_rgb(THEME_FG, COLOUR_NORMAL)
+#define C_LINE      theme_rgb(THEME_SURFACE, 0x2A2E32) /* CurrentLine */
+#define C_SELECT    theme_rgb(THEME_SELECTION, 0x2D5C76)
+#define C_SEARCH    theme_rgb(THEME_CONTROL, 0x414857)
+#define C_REPLACE   edit_tint(THEME_WARNING, 0x808021, 45)
+#define C_BRACKET   edit_tint(THEME_ACCENT, 0x000000, 43)
+#define C_BORDER    theme_rgb(THEME_PANEL, 0x31363B) /* IconBorder */
+#define C_NUMBER    theme_rgb(THEME_DIM, 0x7A7C7D)
+#define C_NUMBER_ON theme_rgb(THEME_FG, 0xA5A6A8)
+#define C_BOOKMARK  theme_rgb(THEME_ACCENT, 0x0404BF)
+#define C_MODIFIED  theme_rgb(THEME_WARNING, 0xC04900)
+#define C_SAVED     theme_rgb(THEME_SUCCESS, 0x1C8042)
+#define C_SEPARATOR theme_rgb(THEME_BORDER, 0x3F4347)
+#define C_WINDOW    theme_rgb(THEME_SURFACE, 0x2A2E32)
+#define C_WTEXT     theme_rgb(THEME_FG, 0xFCFCFC)
+#define C_DIM       theme_rgb(THEME_DIM, 0xA1A9B1)
+#define C_FOCUS     theme_rgb(THEME_ACCENT, 0x3DAEE9)
+#define C_LINK      theme_rgb(THEME_ACCENT_TEXT, 0x3DAEE9)
+#define C_ON_FOCUS(legacy) theme_rgb(THEME_ON_ACCENT, legacy)
+#define C_BUTTON    theme_rgb(THEME_CONTROL, 0x304860)
+#define C_BAD_FIELD edit_tint(THEME_ERROR, 0x5C2328, 37)
+#define C_OK_FIELD  edit_tint(THEME_SUCCESS, 0x234D2E, 37)
+#define C_FIELD     theme_rgb(THEME_CONTROL, 0x1B1E20)
 
 #define SIDE_DEFAULT 32
 #define SIDE_W sidebar_width /* the tool view splitter's current width */
@@ -345,6 +344,21 @@ static uint32_t colour_mix(uint32_t a, uint32_t b, int amount)
         out |= (uint32_t)((x * (255 - amount) + y * amount + 127) / 255) << shift;
     }
     return out;
+}
+
+static uint32_t edit_tint(enum theme_role role, uint32_t legacy, int amount)
+{
+    return theme_is_light() ? colour_mix(C_BG, theme_rgb(role, legacy), amount) : legacy;
+}
+
+static uint32_t note_bg(int kind)
+{
+    switch (kind) {
+    case NOTE_WARNING: return edit_tint(THEME_WARNING, 0x4D3A1F, 34);
+    case NOTE_ERROR: return edit_tint(THEME_ERROR, 0x4D1F24, 34);
+    case NOTE_POSITIVE: return edit_tint(THEME_SUCCESS, 0x1F4D33, 34);
+    default: return edit_tint(THEME_ACCENT, 0x1D3E52, 34);
+    }
 }
 
 static int has_sel(const struct tab *t)
@@ -1399,8 +1413,7 @@ static void draw_tabbar(int s)
  * drawn from (x, y), its buttons clickable as id + k. */
 static int note_layout(const struct note *n, int x, int y, int w, int draw, int id)
 {
-    static const uint32_t bgs[] = { C_INFO_BG, C_WARN_BG, C_ERROR_BG, C_GOOD_BG };
-    uint32_t bg = bgs[n->kind];
+    uint32_t bg = draw ? note_bg(n->kind) : 0;
     int col = 1, row = 0;
     if (draw) {
         screen_fill(x, y, w, 1, bg);
@@ -1647,6 +1660,8 @@ static void draw_text(int s)
     size_t style_length = n ? rows[n - 1].to - base : 0;
     uint8_t *styles = style_length ? calloc(style_length, 1) : NULL;
     if (styles && d->syntax) syntax_styles(d->syntax, &d->buf, base, base + style_length, styles);
+    int light = theme_is_light();
+    uint32_t normal = C_TEXT, selected = C_SELECT;
     painting_style = 0;
     screen_fill(x0, y0, w, h, C_BG);
     screen_fill(x0, y0, g, h, C_BORDER);
@@ -1668,7 +1683,7 @@ static void draw_text(int s)
             int marker = fold_marker(t, v->line);
             if (marker) {
                 char sign[2] = { (char)marker, 0 };
-                screen_text(x0 + ic, y, sign, C_FOCUS, C_BORDER);
+                screen_text(x0 + ic, y, sign, C_LINK, C_BORDER);
             }
             /* The icon border: the bookmark's mark on its line's first row. */
             if (ic && bookmarked(d, v->line)) screen_fill(x0, y, ic, 1, C_BOOKMARK);
@@ -1687,10 +1702,11 @@ static void draw_text(int s)
             int cw = 0;
             uint32_t cp = 0;
             size_t next = p < v->to ? cluster(d, p, v->to, rx, &cw, &cp) : p;
-            uint32_t fg = colour && p < v->to ? colour[p - base] : C_TEXT;
+            uint32_t fg = colour && p < v->to ? colour[p - base] : normal;
             uint32_t bg = row_bg;
             if (mc_selected(t, p)) {
-                bg = C_SELECT;
+                bg = selected;
+                if (light) fg = normal; /* contrast against arbitrary accent tints */
             } else if (u->nhl && in_highlight(u, p)) {
                 bg = u->hl_replace ? C_REPLACE : C_SEARCH;
             } else if (p == ba || p == bb) {
@@ -1749,7 +1765,7 @@ static void draw_text(int s)
         if (v->last && mc_selected(t, v->to) && v->to < doc_len(d)) {
             int from = x < 0 ? 0 : x;
             if (from < tw) {
-                screen_fill(x0 + g + from, y, tw - from, 1, C_SELECT);
+                screen_fill(x0 + g + from, y, tw - from, 1, selected);
             }
         }
     }
@@ -1784,9 +1800,9 @@ static void draw_text(int s)
         const struct note *nt = &u->notes[i];
         if (!nt->above) {
             int len = text_cells(nt->text) + 2, col = x0 + (w > len ? (w - len) / 2 : 0);
-            static const uint32_t bgs[] = { C_INFO_BG, C_WARN_BG, C_ERROR_BG, C_GOOD_BG };
-            screen_fill(col, y0 + h - 1 - k, len < w ? len : w, 1, bgs[nt->kind]);
-            put_text(col + 1, y0 + h - 1 - k, x0 + w, nt->text, C_WTEXT, bgs[nt->kind]);
+            uint32_t bg = note_bg(nt->kind);
+            screen_fill(col, y0 + h - 1 - k, len < w ? len : w, 1, bg);
+            put_text(col + 1, y0 + h - 1 - k, x0 + w, nt->text, C_WTEXT, bg);
             k++;
         }
     }
@@ -1851,7 +1867,7 @@ static void draw_status(int s)
             continue;
         }
         int n = text_cells(items[i]);
-        put_text(x + 1, row, x0 + w, items[i], i == 0 ? C_FOCUS : C_WTEXT, C_WINDOW);
+        put_text(x + 1, row, x0 + w, items[i], i == 0 ? C_LINK : C_WTEXT, C_WINDOW);
         if (i == 1 || i == 2) {
             ui_hit(x, row, n + 2, 1, HIT_STATUS + s * 10 + (i == 1 ? 0 : 1));
         }
@@ -1914,11 +1930,14 @@ static int bar_button(int col, int row, int max, const char *label, int item, in
     if (col + n > max) {
         return col;
     }
-    uint32_t bg = bar.focus == FOCUS_BAR && bar.item == item ? C_FOCUS : 0x304860;
+    int focused = bar.focus == FOCUS_BAR && bar.item == item;
+    uint32_t bg = focused ? C_FOCUS : C_BUTTON;
+    uint32_t fg = focused ? C_ON_FOCUS(0xFCFCFC) : C_WTEXT;
     screen_fill(col, row, n, 1, bg);
-    screen_text(col, row, "[", C_WTEXT, bg);
-    put_text(col + 1, row, col + n - 1, text, enabled ? C_WTEXT : C_DIM, bg);
-    screen_text(col + n - 1, row, "]", C_WTEXT, bg);
+    screen_text(col, row, "[", fg, bg);
+    put_text(col + 1, row, col + n - 1, text,
+             enabled ? fg : focused ? C_ON_FOCUS(0xA1A9B1) : C_DIM, bg);
+    screen_text(col + n - 1, row, "]", fg, bg);
     if (enabled) {
         ui_hit(col, row, n, 1, HIT_BAR + item);
     }
@@ -1934,9 +1953,10 @@ static int bar_toggle(int col, int row, int max, const char *label, int on, int 
     if (col + n > max) {
         return col;
     }
-    uint32_t bg = bar.focus == FOCUS_BAR && bar.item == item ? C_FOCUS : C_WINDOW;
+    int focused = bar.focus == FOCUS_BAR && bar.item == item;
+    uint32_t bg = focused ? C_FOCUS : C_WINDOW;
     screen_fill(col, row, n, 1, bg);
-    put_text(col, row, col + n, text, C_WTEXT, bg);
+    put_text(col, row, col + n, text, focused ? C_ON_FOCUS(0xFCFCFC) : C_WTEXT, bg);
     ui_hit(col, row, n, 1, HIT_BAR + item);
     return col + n + 1;
 }
@@ -1964,7 +1984,9 @@ static void draw_bar(void)
     space_cols(active, &x0, &w);
     end = x0 + w;
     screen_fill(x0, row, w, bar_rows(active), C_WINDOW);
-    uint32_t field_bg = bar.match == MATCH_MISMATCH || bar.match == MATCH_INVALID ? C_BAD_FIELD :
+    int invalid = bar.match == MATCH_MISMATCH || bar.match == MATCH_INVALID;
+    uint32_t match_fg = invalid ? theme_rgb(THEME_ERROR, 0xFF9090) : C_DIM;
+    uint32_t field_bg = invalid ? C_BAD_FIELD :
                         bar.match == MATCH_FOUND || bar.match == MATCH_WRAPPED_TOP ||
                         bar.match == MATCH_WRAPPED_BOTTOM ? C_OK_FIELD : C_FIELD;
     int fw = w / 4 > 12 ? w / 4 : 12, ok = pattern_ok(), c;
@@ -2005,8 +2027,7 @@ static void draw_bar(void)
         c = bar_toggle(c, row, end, _("Selection only"), bar.selection_only, ITEM_SELECTION);
     } else {
         c = bar_button(c, row, end, _("Replace..."), ITEM_POWER, 1);
-        put_text(c, row, end, match_text(), bar.match == MATCH_MISMATCH || bar.match == MATCH_INVALID ? 0xFF9090 : C_DIM,
-                 C_WINDOW);
+        put_text(c, row, end, match_text(), match_fg, C_WINDOW);
         return;
     }
     row++;
@@ -2018,8 +2039,7 @@ static void draw_bar(void)
     c = bar_button(c, row, end, _("&Replace"), ITEM_REPLACE_ONE, ok);
     c = bar_button(c, row, end, _("Replace &All"), ITEM_REPLACE_ALL, ok);
     c = bar_button(c, row, end, _("&Find All"), ITEM_FIND_ALL, ok);
-    put_text(c, row, end, match_text(), bar.match == MATCH_MISMATCH || bar.match == MATCH_INVALID ? 0xFF9090 : C_DIM,
-             C_WINDOW);
+    put_text(c, row, end, match_text(), match_fg, C_WINDOW);
 }
 
 static struct node *tree_nodes[8192];
@@ -2098,7 +2118,7 @@ static void draw_sidebar(void)
         snprintf(line, sizeof line, "%*s%s%s", 1 + 2 * tree_depth[i], "", nd->dir ? (nd->expanded ? "- " : "+ ") : "  ",
                  nd->name);
         screen_fill(0, 3 + i - tree_top, SIDE_W, 1, bg);
-        put_text(0, 3 + i - tree_top, SIDE_W, line, on && tree_focus ? C_WINDOW : nd->dir ? C_FOCUS : C_WTEXT, bg);
+        put_text(0, 3 + i - tree_top, SIDE_W, line, on && tree_focus ? C_ON_FOCUS(0x2A2E32) : nd->dir ? C_LINK : C_WTEXT, bg);
         ui_hit(0, 3 + i - tree_top, SIDE_W, 1, HIT_TREE + i);
     }
 }
@@ -2152,20 +2172,22 @@ static void draw(void)
     char row1[512], row2[512];
     int composing = ime_get_overlay(row1, row2, sizeof row1);
     if (composing) {
+        uint32_t bg = theme_rgb(THEME_PANEL, 0x182848), fg = theme_rgb(THEME_FG, 0xFFFFFF);
         if (row2[0] && rows >= 3) {
-            screen_fill(0, rows - 2, cols, 1, 0x182848);
-            screen_text(1, rows - 2, row1, 0xFFFFFF, 0x182848);
-            screen_fill(0, rows - 1, cols, 1, 0x182848);
-            screen_text(1, rows - 1, row2, 0xB8D8FF, 0x182848);
+            screen_fill(0, rows - 2, cols, 1, bg);
+            screen_text(1, rows - 2, row1, fg, bg);
+            screen_fill(0, rows - 1, cols, 1, bg);
+            screen_text(1, rows - 1, row2, theme_rgb(THEME_ACCENT_TEXT, 0xB8D8FF), bg);
         } else {
-            screen_fill(0, rows - 1, cols, 1, 0x182848);
-            screen_text(1, rows - 1, row1, 0xFFFFFF, 0x182848);
+            screen_fill(0, rows - 1, cols, 1, bg);
+            screen_text(1, rows - 1, row1, fg, bg);
         }
     }
     if (toast[0] && now() < toast_until) {
         int n = text_cells(toast), col = cols > n ? (cols - n) / 2 : 0;
-        screen_fill(col, rows - 4, n, 1, 0x183860);
-        screen_text(col, rows - 4, toast, 0xFFFFFF, 0x183860);
+        uint32_t bg = theme_rgb(THEME_PANEL, 0x183860);
+        screen_fill(col, rows - 4, n, 1, bg);
+        screen_text(col, rows - 4, toast, theme_rgb(THEME_FG, 0xFFFFFF), bg);
     }
     draw_menubar();
     switcher_draw();
@@ -4046,7 +4068,7 @@ static int ask(const char *title, const char *text, const char *const *buttons, 
         y = y < 1 ? 1 : y;
         screen_fill(x, y, w, h, C_WINDOW);
         screen_fill(x, y, w, 1, C_FOCUS);
-        put_text(x + 1, y, x + w, title, C_WINDOW, C_FOCUS);
+        put_text(x + 1, y, x + w, title, C_ON_FOCUS(0x2A2E32), C_FOCUS);
         for (int i = 0; i < nl; i++) {
             put_text(x + 2, y + 2 + i, x + w - 1, lines[i], C_WTEXT, C_WINDOW);
         }
@@ -4055,11 +4077,12 @@ static int ask(const char *title, const char *text, const char *const *buttons, 
             char label[64];
             label_text(buttons[i], label, sizeof label);
             int len = text_cells(label) + 2;
-            uint32_t bg = i == focus ? C_FOCUS : 0x304860;
+            uint32_t bg = i == focus ? C_FOCUS : C_BUTTON;
+            uint32_t fg = i == focus ? C_ON_FOCUS(0xFCFCFC) : C_WTEXT;
             screen_fill(c, y + h - 1, len, 1, bg);
-            screen_text(c, y + h - 1, "[", C_WTEXT, bg);
-            put_text(c + 1, y + h - 1, c + len - 1, label, i == focus ? C_WINDOW : C_WTEXT, bg);
-            screen_text(c + len - 1, y + h - 1, "]", C_WTEXT, bg);
+            screen_text(c, y + h - 1, "[", fg, bg);
+            put_text(c + 1, y + h - 1, c + len - 1, label, i == focus ? C_ON_FOCUS(0x2A2E32) : C_WTEXT, bg);
+            screen_text(c + len - 1, y + h - 1, "]", fg, bg);
             ui_hit(c, y + h - 1, len, 1, HIT_DIALOG + i);
             c += len + 1;
         }
@@ -4124,7 +4147,7 @@ static int prompt_line(const char *label, struct field *f)
             }
             continue;
         }
-        if (key == K_SHOWN || key == 0) continue;
+        if (key == K_SHOWN || key == K_REPAINT || key == 0) continue;
         const char *ime_notice;
         if (ime_action(key, &ime_notice)) {
             if (ime_notice) say_toast(ime_notice);
@@ -5818,8 +5841,8 @@ static void global_or_view_key(int key, int mods)
  * composition, then edit's. */
 static void key_event(int key)
 {
+    if (key == 0 || key == K_REPAINT) return;
     int mods = keys_modifiers();
-    if (key == 0) return;
     if (key == K_SHOWN) {
         preview_hide();
         return;

@@ -52,6 +52,7 @@
 #include "jobs.h"
 #include "monitor-layout.h"
 #include "monitor-profile.h"
+#include "theme.h"
 
 __attribute__((weak)) int base_brightness_get(int *cur, int *max_val);
 __attribute__((weak)) int base_brightness_set(int target, int max_ref);
@@ -72,10 +73,16 @@ static int power_thresh_count(void);
 static void apply_saved_battery_thresholds(void);
 extern int rc_bat_start, rc_bat_end;
 
-#define FG     0xD0D0D0
-#define BG     0x101820
-#define ACCENT 0x80C0FF
-#define DIM    0x808890
+#define FG          theme_rgb(THEME_FG, 0xD0D0D0)
+#define BG          theme_rgb(THEME_BG, 0x101820)
+#define ACCENT      theme_rgb(THEME_ACCENT, 0x80C0FF)
+#define ON_ACCENT   theme_rgb(THEME_ON_ACCENT, 0x101820)
+#define ACCENT_TEXT theme_rgb(THEME_ACCENT_TEXT, 0x80C0FF)
+#define DIM         theme_rgb(THEME_DIM, 0x808890)
+#define SURFACE     theme_rgb(THEME_SURFACE, 0x162230)
+#define CONTROL     theme_rgb(THEME_CONTROL, 0x304860)
+#define BORDER      theme_rgb(THEME_BORDER, 0x304860)
+#define SELECTION   theme_rgb(THEME_SELECTION, 0x304860)
 
 #define MAX_MONITORS  32
 #define MAX_MODES     8
@@ -3088,12 +3095,12 @@ static void enroll_finger(const char *finger)
             if (end > start) {
                 char line[160];
                 snprintf(line, sizeof line, "%.*s", (int)(end - start), start);
-                screen_text(4, r--, line, strstr(line, "enroll-completed") ? ACCENT : FG, BG);
+                screen_text(4, r--, line, strstr(line, "enroll-completed") ? theme_rgb(THEME_SUCCESS, 0x80C0FF) : FG, BG);
             }
             end = start > out ? start - 1 : out;
         }
         /* TRANSLATORS: Esc is the Esc key; keep it. */
-        screen_text(2, screen_rows() - 2, _("Esc: cancel"), ACCENT, BG);
+        screen_text(2, screen_rows() - 2, _("Esc: cancel"), ACCENT_TEXT, BG);
         screen_flush();
         if (ended) {
             break;
@@ -3175,9 +3182,19 @@ static int wp_index(void)
     return nw_index() + nnets + 1;
 }
 
-static int tk_index(void)
+static int scheme_index(void)
 {
     return wp_index() + 1;
+}
+
+static int accent_index(void)
+{
+    return scheme_index() + 1;
+}
+
+static int tk_index(void)
+{
+    return accent_index() + 1;
 }
 
 static int tz_index(void)
@@ -3580,7 +3597,7 @@ static void choose_key(const char *label, const char *rc_name, char *value, size
             key = 27;
             mods = 0;
         }
-        if (key == K_SHOWN) {
+        if (key == K_SHOWN || key == K_REPAINT) {
             draw();
             continue;
         }
@@ -3862,7 +3879,7 @@ static void pick_zone(void)
         screen_fill(0, 0, screen_cols(), screen_rows(), BG);
         screen_bar(_("settings"), NULL);
         /* TRANSLATORS: Up/Down/PgUp/PgDn, Enter and Esc are key names; keep them. */
-        screen_text(2, 2, _("Time zone: type to filter   Up/Down/PgUp/PgDn   Enter: choose   Esc: back"), ACCENT, BG);
+        screen_text(2, 2, _("Time zone: type to filter   Up/Down/PgUp/PgDn   Enter: choose   Esc: back"), ACCENT_TEXT, BG);
         snprintf(line, sizeof line, _("Filter: %s_"), filter);
         screen_text(2, 3, line, FG, BG);
         if (n == 0) {
@@ -3873,7 +3890,7 @@ static void pick_zone(void)
             int now = tz_auto ? i == 0 : strcmp(zones[i], current) == 0;
             snprintf(line, sizeof line, "%s%s", i == 0 ? automatic : zones[i], now ? _("   (now)") : "");
             screen_fill(0, list + k, screen_cols(), 1, on ? ACCENT : BG);
-            screen_text(4, list + k, line, on ? BG : FG, on ? ACCENT : BG);
+            screen_text(4, list + k, line, on ? ON_ACCENT : FG, on ? ACCENT : BG);
         }
         ui_hits_clear();
         settings_back_button(screen_rows() - 2);
@@ -4122,7 +4139,7 @@ static void pick_keymap(const struct keys_keyboard *kb)
         /* TRANSLATORS: %s is a keyboard's name; Up/Down/PgUp/PgDn, Enter and Esc are key names; keep them. */
         snprintf(line, sizeof line, _("Layout of %.60s: type to filter   Up/Down/PgUp/PgDn   Enter: choose   Esc: back"),
                  kb ? (kb->name[0] ? kb->name : kb->id) : _("System keyboard layout"));
-        screen_text(2, 2, line, ACCENT, BG);
+        screen_text(2, 2, line, ACCENT_TEXT, BG);
         snprintf(line, sizeof line, _("Filter: %s_"), filter);
         screen_text(2, 3, line, FG, BG);
         if (n == 0) {
@@ -4139,7 +4156,7 @@ static void pick_keymap(const struct keys_keyboard *kb)
             }
             snprintf(line, sizeof line, "%s%s", i < 0 ? item : keymap_names[i], now ? _("   (now)") : "");
             screen_fill(0, list + k, screen_cols(), 1, on ? ACCENT : BG);
-            screen_text(4, list + k, line, on ? BG : FG, on ? ACCENT : BG);
+            screen_text(4, list + k, line, on ? ON_ACCENT : FG, on ? ACCENT : BG);
         }
         ui_hits_clear();
         settings_back_button(screen_rows() - 2);
@@ -4340,14 +4357,15 @@ static int prompt_as(const char *label, char *text, size_t size, int hidden)
                  after > 0 ? after : 0, typed + cur);
         screen_fill(0, screen_rows() - 2, screen_cols(), 1, BG);
         if (all) { /* Ctrl+A: all of it selected */
-            screen_text(2, screen_rows() - 2, label, ACCENT, BG);
+            screen_text(2, screen_rows() - 2, label, ACCENT_TEXT, BG);
             snprintf(line, sizeof line, "%.*s", room, typed_len > room ? typed + typed_len - room : typed);
-            screen_text(2 + ui_cells(label), screen_rows() - 2, line, BG, ACCENT);
+            screen_text(2 + ui_cells(label), screen_rows() - 2, line, ON_ACCENT, ACCENT);
         } else {
-            screen_text(2, screen_rows() - 2, line, ACCENT, BG);
+            screen_text(2, screen_rows() - 2, line, ACCENT_TEXT, BG);
         }
         screen_flush();
         int key = key_get(), mods = mods_now(), act = key_action(key, mods);
+        if (key == K_REPAINT) continue;
         if (act == ACT_CANCEL || close_read(key)) {
             return 0;
         } else if (key == '\n' && act == ACT_NONE) {
@@ -4631,7 +4649,7 @@ static void arrangement_draw(void)
     narrangement_hits = 0;
     screen_fill(0, 0, cols, rows, BG);
     screen_bar(_("settings: screens"), NULL);
-    screen_text(1, 2, _("Arrange screens"), ACCENT, BG);
+    screen_text(1, 2, _("Arrange screens"), ACCENT_TEXT, BG);
     char line[160];
     if (arrangement_selected >= 0) {
         struct monitor *m = &monitors[arrangement_selected];
@@ -4689,7 +4707,7 @@ static void arrangement_draw(void)
             if (x + w > cols - 1) w = cols - 1 - x;
             if (y + h > 5 + preview_height) h = 5 + preview_height - y;
             if (w <= 0 || h <= 0) continue;
-            uint32_t color = indices[i] == arrangement_selected ? ACCENT : 0x304860;
+            uint32_t color = indices[i] == arrangement_selected ? ACCENT : CONTROL;
             screen_fill(x, y, w, h, color);
             snprintf(line, sizeof line, "%s%s", rects[i].name,
                      indices[i] == anchor ? _(" (origin)") : "");
@@ -4704,11 +4722,11 @@ static void arrangement_draw(void)
                 cells += cw;
                 pos += (int)strlen(ch);
             }
-            screen_text(x, y, line, indices[i] == arrangement_selected ? BG : FG, color);
+            screen_text(x, y, line, indices[i] == arrangement_selected ? ON_ACCENT : FG, color);
             if (h > 1) {
                 snprintf(line, sizeof line, "%dx%d", rects[i].width, rects[i].height);
                 if (w < (int)sizeof line) line[w] = '\0';
-                screen_text(x, y + 1, line, indices[i] == arrangement_selected ? BG : FG, color);
+                screen_text(x, y + 1, line, indices[i] == arrangement_selected ? ON_ACCENT : FG, color);
             }
             arrangement_hit(x, y, w, h, indices[i], -1);
         }
@@ -4718,15 +4736,15 @@ static void arrangement_draw(void)
         const char *btn = _(buttons[i]);
         int len = ui_cells(btn);
         if (button_x + len >= cols) { button_x = 1; button_row++; }
-        uint32_t color = i == arrangement_button ? ACCENT : 0x304860;
-        screen_text(button_x, button_row, btn, i == arrangement_button ? BG : FG, color);
+        uint32_t color = i == arrangement_button ? ACCENT : CONTROL;
+        screen_text(button_x, button_row, btn, i == arrangement_button ? ON_ACCENT : FG, color);
         if (arrangement_selected >= 0) arrangement_hit(button_x, button_row, len, 1, -1, i);
         button_x += len + 1;
     }
     /* TRANSLATORS: Enter and Esc are key names; keep them. */
     screen_text(1, rows - 3, cols < 44 ? _("Drag; p: X,Y; Esc: back") :
                 _("Drag: move  p: X,Y  Hold Shift and arrows: move  Enter: preset  Esc: back"), FG, BG);
-    screen_text(1, rows - 2, _(notice), ACCENT, BG);
+    screen_text(1, rows - 2, _(notice), ACCENT_TEXT, BG);
     ui_hits_clear();
     settings_back_button(rows - 1);
     screen_flush();
@@ -4968,8 +4986,9 @@ static char search[64]; /* what / found: the page has every category's settings 
 
 #define PAGE_TOP 2
 #define MAX_ENTRIES 384
-#define SIDE_BG 0x304860 /* the category or setting where the keys are not */
-#define EDIT_BG 0xE8B860 /* the setting open for Left/Right (page_key) */
+#define SIDE_BG CONTROL /* inactive choices in the hardware and battery panes */
+#define EDIT_BG theme_rgb(THEME_WARNING, 0xE8B860) /* setting open for Left/Right */
+#define EDIT_FG (theme_is_light() ? BG : 0x101820)
 #define E_TITLE (-1) /* a group's title */
 #define E_NOTE (-2)  /* a line to read, not a setting */
 #define E_GAP (-3)   /* the blank line before a title */
@@ -5004,6 +5023,7 @@ static void add_items(int first, int count)
 
 #include "settings-power.inc"
 #include "settings-hwinfo.inc"
+#include "settings-theme.inc"
 
 /* Category cat's groups and their settings, after the entries there are. */
 static void category_entries(int cat)
@@ -5055,6 +5075,8 @@ static void category_entries(int cat)
         add_items(tnet_index(), 1);
         break;
     case CAT_APPEARANCE:
+        add_title(_("Colors"));
+        add_items(scheme_index(), 2);
         add_title(_("Wallpaper"));
         add_items(wp_index(), 1);
         break;
@@ -5742,7 +5764,7 @@ static void pick_machine(void)
         screen_fill(0, 0, screen_cols(), screen_rows(), BG);
         screen_bar(_("settings"), NULL);
         ui_hits_clear();
-        screen_text(2, 2, _("Machine profile: arrows to select; Enter: apply; Esc: back"), ACCENT, BG);
+        screen_text(2, 2, _("Machine profile: arrows to select; Enter: apply; Esc: back"), ACCENT_TEXT, BG);
         snprintf(line, sizeof line, _("Filter: %s_"), filter);
         screen_text(2, 3, line, FG, BG);
         const char *brand = NULL;
@@ -5750,7 +5772,7 @@ static void pick_machine(void)
             struct machine_cell *c = &machine_cells[k];
             int row = 5 + c->row - top, i = c->index;
             if (!brand || strcmp(brand, machine_brands[i])) {
-                if (row - 1 >= 5 && row - 1 < 5 + height) screen_text(2, row - 1, machine_brands[i], ACCENT, BG);
+                if (row - 1 >= 5 && row - 1 < 5 + height) screen_text(2, row - 1, machine_brands[i], ACCENT_TEXT, BG);
                 brand = machine_brands[i];
             }
             if (row < 5 || row >= 5 + height) continue;
@@ -5758,7 +5780,7 @@ static void pick_machine(void)
             snprintf(line, sizeof line, "[%c] %.*s", current ? '*' : ' ', c->width > 6 ? c->width - 6 : 0,
                      i ? machine_profiles[i] : _("generic PC"));
             screen_fill(c->col, row, c->width - 1, 1, k == sel ? ACCENT : BG);
-            screen_text(c->col, row, line, k == sel ? BG : FG, k == sel ? ACCENT : BG);
+            screen_text(c->col, row, line, k == sel ? ON_ACCENT : FG, k == sel ? ACCENT : BG);
             ui_hit(c->col, row, c->width - 1, 1, k);
         }
         if (!n) screen_text(2, 5, _("No matching machine profile."), DIM, BG);
@@ -5810,7 +5832,7 @@ static void pick_machine(void)
 static int enter_row(int idx)
 {
     return idx == num_hw_items() || idx == cl_index() + 2 || idx == tr_index() + 2 || idx == bt_index() + 2 ||
-           idx == wp_index() || idx == tk_index() || idx == host_index() || idx == mach_index() ||
+           idx == wp_index() || theme_row(idx) || idx == tk_index() || idx == host_index() || idx == mach_index() ||
            (idx >= upd_index() && idx < upd_index() + 4) ||
            idx == boot_index() + 1 || idx == boot_index() + 2 || idx == boot_index() + 3 ||
            idx == cpu_opt_index() ||
@@ -5911,6 +5933,10 @@ static int settings_pointer(void)
         return '\n';
     }
     int hit = ui_hit_at(e->col, e->row), control = SETTINGS_HIT_CONTROL + 2 * idx;
+    if (theme_row(idx) && hit == control) {
+        editing = 0;
+        return '\n';
+    }
     if ((picker || (!action && !info_row(idx))) && (hit == control || hit == control + 1)) {
         editing = 1;
         return hit == control ? K_LEFT : K_RIGHT;
@@ -6099,6 +6125,10 @@ static void item_text(int idx, char *line, size_t size)
         snprintf(raw_label, sizeof raw_label, _("MAC on %.24s"), nets[i].name);
         snprintf(line, size, "%.95s < %s >", ui_pad(label, sizeof label, raw_label, 32),
                  _(mac_labels[nets[i].mac]));
+        return;
+    }
+    if (theme_row(idx)) {
+        theme_row_text(idx, line, size);
         return;
     }
     if (idx == wp_index()) {
@@ -6637,9 +6667,9 @@ static void draw_sidebar(int width)
 {
     for (int c = 0; c < NCATS && PAGE_TOP + c < screen_rows() - 2; c++) {
         int on = c == category && !search[0];
-        uint32_t bg = on ? (in_page ? SIDE_BG : ACCENT) : BG;
+        uint32_t bg = on ? (in_page ? SELECTION : ACCENT) : BG;
         screen_fill(0, PAGE_TOP + c, width, 1, bg);
-        screen_text(1, PAGE_TOP + c, _(cat_names[c]), on && !in_page ? BG : FG, bg);
+        screen_text(1, PAGE_TOP + c, _(cat_names[c]), on && !in_page ? ON_ACCENT : FG, bg);
     }
 }
 
@@ -6681,16 +6711,27 @@ static void draw_page(int px)
         const struct entry *e = &entries[page_scroll + r];
         int row = PAGE_TOP + r;
         if (e->idx == E_TITLE) {
-            screen_text(px + 1, row, e->text, ACCENT, BG);
+            screen_text(px + 1, row, e->text, ACCENT_TEXT, BG);
         } else if (e->idx == E_NOTE) {
             screen_text(x + 2, row, e->text, DIM, BG);
         } else if (e->idx >= 0) {
             int on = e->idx == selected;
-            uint32_t bg = on ? (in_page ? (editing ? EDIT_BG : ACCENT) : SIDE_BG) : BG;
+            uint32_t bg = on ? (in_page ? (editing ? EDIT_BG : ACCENT) : SELECTION) : BG;
+            uint32_t fg = on && in_page ? (editing ? EDIT_FG : ON_ACCENT) : FG;
             item_text(e->idx, line, sizeof line);
             screen_fill(px, row, screen_cols() - px, 1, bg);
-            screen_text(x, row, line, on && in_page ? BG : FG, bg);
-            hit_control(e->idx, x, row, line);
+            screen_text(x, row, line, fg, bg);
+            if (theme_row(e->idx)) {
+                int swatch_x = x + THEME_LABEL_CELLS;
+                int width = ui_cells(line) - THEME_LABEL_CELLS;
+                if (width > screen_cols() - swatch_x) width = screen_cols() - swatch_x;
+                uint32_t first = e->idx == scheme_index() ? BG : ACCENT;
+                uint32_t second = e->idx == scheme_index() ? FG : first;
+                theme_swatch(swatch_x, row, first, second, fg, bg);
+                ui_hit(swatch_x, row, width, 1, SETTINGS_HIT_CONTROL + 2 * e->idx);
+            } else {
+                hit_control(e->idx, x, row, line);
+            }
         }
     }
 }
@@ -6713,14 +6754,14 @@ static void draw(void)
     screen_bar(_("settings"), NULL);
     if (sw) {
         draw_sidebar(sw);
-        screen_fill(sw, PAGE_TOP, 1, rows - 2 - PAGE_TOP, SIDE_BG);
+        screen_fill(sw, PAGE_TOP, 1, rows - 2 - PAGE_TOP, BORDER);
         draw_page(sw + 1);
     } else if (in_page) {
         draw_page(0);
     } else {
         draw_sidebar(cols);
     }
-    screen_text(2, rows - 2, _(notice), ACCENT, BG);
+    screen_text(2, rows - 2, _(notice), ACCENT_TEXT, BG);
     int footer = in_page && !sw ? settings_back_button(rows - 1) : 2;
     if (pkg_job || repos_job || boot_job || tpm_job) {
         /* TRANSLATORS: settings and home are programs' names; keep them. */
@@ -6943,6 +6984,11 @@ static void adjust(int dir)
     }
     if (selected == nw_index() + nnets) {
         set_mac_default((mac_default + (dir < 0 ? NMAC_MODES - 1 : 1)) % NMAC_MODES);
+        return;
+    }
+    if (theme_row(selected)) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, "%s", _("Enter: choose a color"));
         return;
     }
     if (selected == wp_index()) {
@@ -7856,6 +7902,14 @@ static int page_key(int key)
     return 0;
 }
 
+/* The two appearance rows open a choice list on Enter or a pointer click. */
+static int colors_settings_key(int key)
+{
+    if (key != '\n' || !theme_row(selected)) return 0;
+    choose_colors(selected);
+    return 1;
+}
+
 /* A page by a stable English name (--page=NAME, or "page NAME" from the
  * window manager), so that a block of the top bar opens its own settings:
  * that category, keys on its page, at the setting the block shows. */
@@ -7995,15 +8049,18 @@ int main(int argc, char **argv)
     double ready = applying ? uptime() : 0;
     load_monitors();
     double monitors_ready = applying ? uptime() : 0;
+    int colors_status = applying ? theme_apply(0) : 0; /* apply_labwc below sends its usual reload */
     apply_all();
     if (applying && base_brightness_restore) {
         base_brightness_restore();
     }
     if (applying) {
+        signal_programs("locachy-bar", SIGHUP);
+        if (colors_status < 0) say("settings: cannot apply all desktop colors");
         say("settings: applied at %.3f s: input/config %.0f ms, monitors %.0f ms, devices %.0f ms",
             uptime(), (ready - t0) * 1000, (monitors_ready - ready) * 1000,
             (uptime() - monitors_ready) * 1000);
-        return 0;
+        return colors_status < 0;
     }
 
     screen_open(BASE_FONT);
@@ -8034,6 +8091,10 @@ int main(int argc, char **argv)
             return 0; /* the window's close, read in a question or list */
         }
         int key = key_poll_timeout(request_fd, pkg_job || repos_job || boot_job || tpm_job || security_job ? 500 : 2000);
+        if (key == K_REPAINT) {
+            draw();
+            continue;
+        }
         int mods = mods_now();
         requests();
         /* Delete twice in a row deletes them; home's key (process 1's) and the
@@ -8127,6 +8188,8 @@ int main(int argc, char **argv)
             if (in_page) row_hint();
             draw();
         } else if (page_key(key)) {
+            draw();
+        } else if (colors_settings_key(key)) {
             draw();
         } else if (network_settings_key(key)) {
             build_entries();

@@ -1192,6 +1192,7 @@ int screen_window_shown(void)
 
 int screen_open(const char *font_path)
 {
+    if (theme_reload) theme_reload();
     const char *why = NULL;
     snprintf(font_fallback, sizeof font_fallback, "%s", font_path);
 #ifdef CONFIG_FREETYPE
@@ -1823,6 +1824,7 @@ void screen_describe(void)
 int screen_rescale(void)
 {
     base_language_reload(); /* settings changed the language, or anything else */
+    if (theme_reload && theme_reload()) mark_all();
     if (shadow == NULL || noutputs == 0) {
         return 0;
     }
