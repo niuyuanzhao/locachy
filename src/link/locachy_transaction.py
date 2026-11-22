@@ -212,10 +212,40 @@ def test_source_hash(source):
     return h.hexdigest()
 
 
+PACKAGE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9@._+\-]*")
+AUR_SMOKE_GATE = "aur-coinstall-smoke-v1"
+
+
+def aur_entries(data):
+    aur = data.get("aur", {})
+    if not isinstance(aur, dict):
+        raise TransactionError("invalid AUR update metadata")
+    return aur
+
+
+def prepared_names(data):
+    """All packages built before the host transaction: local recipes plus AUR rebuilds."""
+    return sorted(set(data.get("recipes", {})) | set(aur_entries(data)))
+
+
+def repo_artifact_name(path, sha256):
+    """Give a validated artifact a hash-qualified filename inside the temporary
+    repository so pacman never reuses a stale same-version archive from the host
+    cache during a rebuild."""
+    name = Path(path).name
+    tag = f".locachy-{sha256[:12]}"
+    marker = ".pkg.tar."
+    if marker in name:
+        prefix, suffix = name.split(marker, 1)
+        return f"{prefix}{tag}{marker}{suffix}"
+    return f"{name}{tag}"
+
+
 def snapshot(state_dir, sync_dir, pacman_config, host_sha256, recipes, candidate_locks=None, test_source=None,
-             missing=None):
-    """recipes maps names to {baseline_dir, recipe_dir, candidate}. No recipe
-    is evaluated here; every input hash is rechecked before preparation.
+             missing=None, aur=None):
+    """recipes maps local names to {baseline_dir, recipe_dir, candidate}.
+    aur maps host AUR package names to {version, target_version, reason, provides, patch_path?}.
+    No recipe is evaluated here; every input hash is rechecked before preparation.
     missing: declared repository packages the host lacks, installed in the
     same transaction (and so in its build and contract roots)."""
     parent = Path(state_dir) / "transactions"
@@ -228,20 +258,48 @@ def snapshot(state_dir, sync_dir, pacman_config, host_sha256, recipes, candidate
         text = flatten_config(pacman_config)
         (directory / "pacman.conf").write_text(text, encoding="utf-8")
         missing = sorted(set(missing or []))
-        if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9@._+\-]*", name) for name in missing):
+        if any(not PACKAGE_NAME.fullmatch(name) for name in missing):
             raise TransactionError("invalid declared package name")
         pins = {}
         for name, entry in recipes.items():
-            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9@._+\-]*", name):
+            if not PACKAGE_NAME.fullmatch(name):
                 raise TransactionError(f"invalid local package name: {name}")
             baseline = Path(entry["baseline_dir"]).resolve()
             recipe = Path(entry.get("recipe_dir", baseline)).resolve()
             pins[name] = dict(entry, baseline_dir=str(baseline), recipe_dir=str(recipe),
                               baseline_sha256=tree_hash(baseline), recipe_sha256=tree_hash(recipe))
+        aur_pins = {}
+        for name, entry in sorted((aur or {}).items()):
+            if not PACKAGE_NAME.fullmatch(name):
+                raise TransactionError(f"invalid AUR package name: {name}")
+            if name in pins:
+                raise TransactionError(f"package cannot be both local and AUR: {name}")
+            if not isinstance(entry, dict):
+                raise TransactionError(f"{name}: invalid AUR entry")
+            provides = sorted({str(p) for p in entry.get("provides", ()) if p})
+            if any(not re.fullmatch(r"[A-Za-z0-9@._+:=\-]+", p) for p in provides):
+                raise TransactionError(f"{name}: invalid AUR provides entry")
+            pinned = {
+                "installed_version": str(entry.get("installed_version", "")),
+                "target_version": str(entry.get("target_version", "")),
+                "reason": str(entry.get("reason", "")),
+                "provides": provides,
+            }
+            patch_path = entry.get("patch_path")
+            if patch_path:
+                raw_patch = Path(patch_path)
+                if raw_patch.is_symlink():
+                    raise TransactionError(f"{name}: invalid AUR patch file: {patch_path}")
+                patch = raw_patch.resolve()
+                if patch.is_symlink() or not patch.is_file():
+                    raise TransactionError(f"{name}: invalid AUR patch file: {patch_path}")
+                pinned["patch_path"] = str(patch)
+                pinned["patch_sha256"] = file_hash(patch)
+            aur_pins[name] = pinned
         data = {"version": 1, "created": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "host_sha256": host_sha256, "sync_sha256": tree_hash(directory / "sync"),
                 "config_sha256": file_hash(directory / "pacman.conf"), "recipes": pins,
-                "candidate_locks": candidate_locks or {}, "missing": missing}
+                "aur": aur_pins, "candidate_locks": candidate_locks or {}, "missing": missing}
         if test_source is not None:
             source = Path(test_source).resolve()
             digest = test_source_hash(source)
@@ -285,6 +343,16 @@ def load_snapshot(reference, expected_host=None):
             raise TransactionError(f"{name}: local patch inputs changed; check again")
         if tree_hash(entry["recipe_dir"]) != entry.get("recipe_sha256"):
             raise TransactionError(f"{name}: effective recipe changed; check again")
+    for name, entry in aur_entries(data).items():
+        if not PACKAGE_NAME.fullmatch(name):
+            raise TransactionError(f"invalid AUR package name: {name}")
+        if name in data.get("recipes", {}):
+            raise TransactionError(f"package cannot be both local and AUR: {name}")
+        patch_path = entry.get("patch_path")
+        if patch_path:
+            patch = Path(patch_path)
+            if patch.is_symlink() or not patch.is_file() or file_hash(patch) != entry.get("patch_sha256"):
+                raise TransactionError(f"{name}: AUR patch input changed; check again")
     return directory, data
 
 
@@ -344,12 +412,42 @@ def prepared_result(directory, name, data):
             raise TransactionError(f"{name}: candidate target dependency manifest changed")
         package_versions(path.read_text())
     artifact = Path(result.get("artifact", ""))
-    prepared = Path(directory) / "prepared" / name
     if (not artifact.is_absolute() or artifact.is_symlink() or not artifact.is_file() or
             prepared.resolve() not in artifact.resolve().parents):
         raise TransactionError(f"{name}: candidate artifact is outside its prepared directory")
     if file_hash(artifact) != result.get("sha256"):
         raise TransactionError(f"{name}: candidate artifact hash changed")
+    aur = aur_entries(data)
+    if name in aur:
+        if result.get("kind") != "aur":
+            raise TransactionError(f"{name}: AUR result metadata is invalid")
+        if not result.get("version"):
+            raise TransactionError(f"{name}: AUR build version is missing")
+        if data.get("test_source") and tests.get("source_sha256") != data["test_source"]["sha256"]:
+            raise TransactionError(f"{name}: AUR tests used different trusted sources")
+        if (tests.get("id") != AUR_SMOKE_GATE or
+                tests.get("artifact_sha256") != result["sha256"] or
+                not re.fullmatch(r"[0-9a-f]{64}", tests.get("test_hash", "")) or
+                (data.get("test_source") and tests.get("test_hash") != data["test_source"]["sha256"])):
+            raise TransactionError(f"{name}: test proof does not match its required AUR gate")
+        expected_patch = aur[name].get("patch_sha256")
+        if expected_patch != result.get("patch_sha256"):
+            raise TransactionError(f"{name}: AUR patch hash differs from the pinned plan")
+        extras = result.get("extra_artifacts", [])
+        if not isinstance(extras, list):
+            raise TransactionError(f"{name}: invalid extra AUR artifacts metadata")
+        for extra in extras:
+            if not isinstance(extra, dict) or not PACKAGE_NAME.fullmatch(extra.get("name", "")):
+                raise TransactionError(f"{name}: invalid extra AUR artifact entry")
+            extra_path = Path(extra.get("artifact", ""))
+            if (not extra_path.is_absolute() or extra_path.is_symlink() or not extra_path.is_file() or
+                    prepared.resolve() not in extra_path.resolve().parents):
+                raise TransactionError(f"{name}: extra AUR artifact is outside its prepared directory")
+            if file_hash(extra_path) != extra.get("sha256") or not extra.get("version"):
+                raise TransactionError(f"{name}: extra AUR artifact hash or version is invalid")
+        return result
+    if name not in data.get("recipes", {}):
+        raise TransactionError(f"{name}: unknown prepared package")
     candidate = data["recipes"][name].get("candidate")
     if candidate and result.get("version") != candidate.get("package_version"):
         raise TransactionError(f"{name}: built version differs from the pinned candidate")
@@ -374,10 +472,11 @@ def reusable_results(directory, data):
     together (verify_combined_results); else None. A retried apply of the same
     plan, or results built for it on another machine at the same path, then need
     no second build."""
-    if not data.get("recipes"):
+    names = prepared_names(data)
+    if not names:
         return None
     try:
-        results = {name: prepared_result(directory, name, data) for name in sorted(data["recipes"])}
+        results = {name: prepared_result(directory, name, data) for name in names}
         verify_combined_results(results)
     except (TransactionError, OSError, ValueError, KeyError, TypeError):
         return None
@@ -527,6 +626,68 @@ def run_build_workers(names, slots, active_limit, fd, launch, cancelled, has_hea
                 return codes
 
 
+def order_aur_names(aur_names, local_db="/var/lib/pacman/local"):
+    """Order planned AUR rebuilds dependencies-first using the host local DB,
+    so a package like howdy-git reuses a freshly sealed python-dlib instead of
+    building it twice. Ties and cycles fall back to alphabetical order."""
+    names = sorted(set(aur_names))
+    if len(names) <= 1:
+        return names
+    target = set(names)
+    deps_of = {n: [] for n in names}
+    providers = {n: {n} for n in names}
+    local = Path(local_db)
+    if local.is_dir():
+        for desc in local.glob("*/desc"):
+            try:
+                lines = desc.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            pkg_name = None
+            section = None
+            raw_deps = []
+            raw_provs = []
+            for line in lines:
+                if line.startswith("%") and line.endswith("%"):
+                    section = line
+                    continue
+                if not line:
+                    section = None
+                    continue
+                if section == "%NAME%" and pkg_name is None:
+                    pkg_name = line.strip()
+                elif section == "%DEPENDS%":
+                    raw_deps.append(re.split(r"[<>=:]", line.strip(), maxsplit=1)[0])
+                elif section == "%PROVIDES%":
+                    raw_provs.append(re.split(r"[<>=]", line.strip(), maxsplit=1)[0])
+            if pkg_name in target:
+                deps_of[pkg_name] = raw_deps
+                for prov in raw_provs:
+                    providers.setdefault(prov, set()).add(pkg_name)
+    need = {n: set() for n in names}
+    dependents = {n: set() for n in names}
+    for n in names:
+        for dep in deps_of[n]:
+            for provider in providers.get(dep, ()):
+                if provider in target and provider != n:
+                    need[n].add(provider)
+                    dependents[provider].add(n)
+    ordered = []
+    ready = sorted(n for n in names if not need[n])
+    while ready:
+        current = ready.pop(0)
+        ordered.append(current)
+        for dep_by in sorted(dependents[current]):
+            need[dep_by].discard(current)
+            if not need[dep_by] and dep_by not in ordered and dep_by not in ready:
+                ready.append(dep_by)
+                ready.sort()
+    for n in names:
+        if n not in ordered:
+            ordered.append(n)
+    return ordered
+
+
 def build_batch(build_tool, directory, digest, workspace):
     """Entry point from the builder-lock holder; no operation installs on host."""
     def installed_hash():
@@ -536,7 +697,9 @@ def build_batch(build_tool, directory, digest, workspace):
     reference = {'directory': directory, 'sha256': digest}
     directory, data = load_snapshot(reference, installed_hash())
     workspace = Path(workspace).absolute()
-    names = sorted(data['recipes'], key=lambda name: (name != 'libmupdf', name))
+    local_names = sorted(data.get('recipes', {}), key=lambda name: (name != 'libmupdf', name))
+    aur_names = order_aur_names(aur_entries(data))
+    names = local_names + aur_names
     if not names:
         raise TransactionError('prepared update has no packages')
     override = os.environ.get('LOCACHY_BUILD_WORKERS')
@@ -566,16 +729,20 @@ def build_batch(build_tool, directory, digest, workspace):
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(child.pid, signal.SIGTERM)
 
-    def run_stage(name, params, jobserver=None):
+    def run_stage(name, params, jobserver=None, jobs=None, private_home=None):
         run = workspace / name
+        if private_home is None:
+            private_home = name != 'contracts'
         work = dict(os.environ, LOCACHY_BUILD_STAGE='batch-worker', LOCACHY_BUILD_RUN=str(run),
-                    LOCACHY_BUILD_PRIVATE_HOME='1' if name != 'contracts' else '',
+                    LOCACHY_BUILD_PRIVATE_HOME='1' if private_home else '',
                     LOCACHY_BUILD_REPO_ONLY='1' if jobserver is not None else '0')
         for key in ('LOCACHY_BUILD_CPUS', 'LOCACHY_BUILD_JOBSERVER', 'LOCACHY_BUILD_JOBS'):
             work.pop(key, None)
         if jobserver is not None:
             work['LOCACHY_BUILD_JOBSERVER'] = str(jobserver)
             work['LOCACHY_BUILD_JOBS'] = str(slots)
+        elif jobs is not None:
+            work['LOCACHY_BUILD_JOBS'] = str(jobs)
         log = logs / (name + '.log')
         started = time.monotonic()
         print(f'===> prepare: {name} start ({time.time():.3f}); log: {log}', flush=True)
@@ -605,6 +772,12 @@ def build_batch(build_tool, directory, digest, workspace):
     def build(name, jobserver=None):
         return run_stage('pkg-' + name, ['--prepare', str(directory), '--local', name],
                          jobserver=jobserver)
+
+    def build_aur(name, jobs=None):
+        # Serial by construction: the persistent builder home is shared with
+        # no other worker, so no private copy (and no lost cache writeback).
+        return run_stage('pkg-' + name, ['--prepare', str(directory), '--aur', name],
+                         jobs=jobs, private_home=False)
 
     def report_keys(failed):
         keys = set()
@@ -642,11 +815,13 @@ def build_batch(build_tool, directory, digest, workspace):
     with contextlib.ExitStack() as cleanup:
         for sig in (signal.SIGINT, signal.SIGTERM):
             cleanup.callback(signal.signal, sig, signal.signal(sig, stop))
-        with build_jobserver(workspace, slots) as (jobserver, jobserver_fd):
-            failed = run_build_workers(
-                names, slots, active_limit, jobserver_fd,
-                lambda name: build(name, jobserver),
-                lambda: cancelled, lambda: build_resource_headroom(workspace))
+        failed = {}
+        if local_names:
+            with build_jobserver(workspace, slots) as (jobserver, jobserver_fd):
+                failed = run_build_workers(
+                    local_names, slots, min(active_limit, len(local_names)), jobserver_fd,
+                    lambda name: build(name, jobserver),
+                    lambda: cancelled, lambda: build_resource_headroom(workspace))
         if cancelled:
             return 130
         if report_keys(failed):
@@ -655,12 +830,25 @@ def build_batch(build_tool, directory, digest, workspace):
             return 1
         # Only pre-compilation deferrals are retried, after shared workers
         # drain. Keep the recipe's normal job settings outside the jobserver.
-        for name in names:
+        for name in local_names:
             if name in failed:
                 print(f'===> prepare: {name} uses the serial build path', flush=True)
                 code = build(name)
                 if code or cancelled:
                     return 130 if cancelled else (3 if report_keys({name: code}) else 1)
+        for name in aur_names:
+            (directory / 'prepared' / name / 'build.json').unlink(missing_ok=True)
+        for name in aur_names:
+            # AUR builds run one at a time once the local pool has drained. They
+            # keep the persistent builder home (pikaur, Go, Cargo and git caches
+            # stay warm) and the whole job budget for make, cmake, meson and cargo.
+            # The FIFO pool is not used: no AUR build could join it anyway.
+            print(f'===> prepare: AUR {name} (serial, {slots} job slot(s), persistent builder home)', flush=True)
+            code = build_aur(name, jobs=slots)
+            if cancelled:
+                return 130
+            if code:
+                return 3 if report_keys({name: code}) else 1
         (workspace.parent / 'untrusted-keys').unlink(missing_ok=True)
         load_snapshot(reference, installed_hash())
         code = run_stage('contracts', ['--validate-prepared', str(directory)])
@@ -680,14 +868,15 @@ def prepare(reference, build_tool, host_hash, run=subprocess.run):
         print("===> prepare: " + ", ".join(sorted(reused)) + ": built, sealed and tested together for this "
               "snapshot already; not built again", flush=True)
         return directory, data, reused
-    for name in sorted(data["recipes"]):
+    names = prepared_names(data)
+    for name in names:
         # Old results that do not hold for this snapshot cannot survive a failed replacement build.
         result = directory / "prepared" / name / "result.json"
         if result.exists():
             result.unlink()
     _invoke(run, [build_tool, "--prepare-batch", str(directory), reference["sha256"]])
     load_snapshot(reference, host_hash())
-    results = {name: prepared_result(directory, name, data) for name in sorted(data["recipes"])}
+    results = {name: prepared_result(directory, name, data) for name in names}
     verify_combined_results(results)
     return directory, data, results
 
@@ -867,9 +1056,10 @@ def install(reference, directory, data, results, host_hash, db_path="/var/lib/pa
     exits; its alternate local DB is the real one bind-mounted, not a copy.
     The snapshot's databases are then the host's, and recorded as published
     (record_published; record is the record file, the system's when None)."""
+    expected = set(prepared_names(data))
     if not results:
         raise TransactionError("prepared update has no validated local packages")
-    if set(results) != set(data["recipes"]):
+    if set(results) != expected:
         raise TransactionError("package transaction omits a prepared local output")
     state = Path(directory)
     results = {name: prepared_result(directory, name, data) for name in results}
@@ -879,12 +1069,25 @@ def install(reference, directory, data, results, host_hash, db_path="/var/lib/pa
         repo = workspace / "repo"
         repo.mkdir()
         artifacts = []
+        seen_names = {}
+
+        def stage_artifact(pkg_name, source_path, digest):
+            if pkg_name in seen_names:
+                if seen_names[pkg_name] != digest:
+                    raise TransactionError(f"{pkg_name}: conflicting sealed artifact hashes")
+                return
+            seen_names[pkg_name] = digest
+            target = repo / repo_artifact_name(source_path, digest)
+            # Copy, not writable hardlinks into a previously validated artifact.
+            shutil.copyfile(source_path, target)
+            artifacts.append(str(target))
+
         for name in sorted(results):
             result = prepared_result(directory, name, data)
-            target = repo / Path(result["artifact"]).name
-            # Copy, not writable hardlinks into a previously validated artifact.
-            shutil.copyfile(result["artifact"], target)
-            artifacts.append(str(target))
+            stage_artifact(name, result["artifact"], result["sha256"])
+        for name in sorted(results):
+            for extra in results[name].get("extra_artifacts", ()):
+                stage_artifact(extra["name"], extra["artifact"], extra["sha256"])
         _invoke(run, ["repo-add", str(repo / "locachy-validated.db.tar.gz")] + artifacts)
         private_db = workspace / "db"
         private_db.mkdir()
@@ -898,7 +1101,7 @@ def install(reference, directory, data, results, host_hash, db_path="/var/lib/pa
         targets = ["locachy-validated/" + name + "=" + results[name]["version"] for name in sorted(results)]
         # Declared packages the host lacks: tested in the candidates' roots.
         targets += [name for name in data.get("missing", [])
-                    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9@._+\-]*", name)]
+                    if PACKAGE_NAME.fullmatch(name)]
         with real_database_lock(db_path):
             load_snapshot(reference, host_hash())
             checked = {name: prepared_result(directory, name, data) for name in results}

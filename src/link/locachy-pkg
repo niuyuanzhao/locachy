@@ -2034,6 +2034,83 @@ def source_setup_pending():
         return False
 
 
+def local_provides(name, db_path=LOCAL_DB):
+    """Exact %PROVIDES% entries recorded for an installed package."""
+    for desc in glob.glob(os.path.join(db_path, glob.escape(name) + "-*", "desc")):
+        with open(desc, encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+        if "%NAME%" not in lines or lines[lines.index("%NAME%") + 1:][:1] != [name]:
+            continue
+        if "%PROVIDES%" not in lines:
+            return []
+        start = lines.index("%PROVIDES%") + 1
+        out = []
+        for line in lines[start:]:
+            if not line or line.startswith("%"):
+                break
+            out.append(line.strip())
+        return out
+    return []
+
+
+def blocking_aur_packages(foreign, aur, local_owned, declared=()):
+    """Installed AUR packages whose current dependency set blocks upgrading to
+    MERGED_DB (for example an unchanged AUR package linked to an older library
+    soname such as libjxl.so=0.12-64). Runs read-only pacman -Sup against
+    MERGED_DB without touching host databases."""
+    if not foreign or not aur or not os.path.isdir(os.path.join(MERGED_DB, "sync")):
+        return {}
+    cmd = ["pacman", "--dbpath", MERGED_DB, "--config", PACMAN_CONFIG,
+           "-Sup", "--noconfirm", "--assume-installed", "initramfs"]
+    if local_owned:
+        cmd += ["--ignore", ",".join(sorted(local_owned))]
+    cmd += [n for n in declared if PACKAGE_NAME.fullmatch(n)]
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                           env=dict(os.environ, LC_ALL="C"))
+    except OSError:
+        return {}
+    if p.returncode == 0:
+        return {}
+    output = "\n".join(x for x in (p.stdout or "", p.stderr or "") if x)
+    blockers = {}
+    pattern = re.compile(
+        r"::\s+(?:installing|removing)\s+(\S+)(?:\s+\(([^)]+)\))?\s+breaks dependency\s+'([^']+)'\s+required by\s+(\S+)"
+    )
+    for line in output.splitlines():
+        m = pattern.search(line)
+        if not m:
+            continue
+        changed_pkg, _changed_ver, _dep, req_by = m.groups()
+        if req_by in foreign and req_by in aur:
+            blockers.setdefault(req_by, []).append(changed_pkg)
+    return {name: "rebuild for " + ", ".join(dict.fromkeys(pkgs)) for name, pkgs in blockers.items()}
+
+
+def aur_snapshot_entries(names, host, aur, blockers):
+    """Pinned AUR rebuild entries stored in the transaction snapshot."""
+    entries = {}
+    patches_dir = os.path.join(SRC, "aur-patches")
+    for name in sorted(names):
+        installed_version = host.get(name, "")
+        rpc_version = aur.get(name, installed_version)
+        if installed_version and rpc_version and vercmp(rpc_version, installed_version) < 0:
+            target_version = installed_version
+        else:
+            target_version = rpc_version or installed_version
+        entry = {
+            "installed_version": installed_version,
+            "target_version": target_version,
+            "reason": blockers.get(name, "AUR update"),
+            "provides": local_provides(name, LOCAL_DB),
+        }
+        patch = os.path.join(patches_dir, name + ".sed")
+        if os.path.isfile(patch) and not os.path.islink(patch):
+            entry["patch_path"] = patch
+        entries[name] = entry
+    return entries
+
+
 def plan(check_source=True, apps_commit=None):
     """The plan: (target, kind, what, old, new) rows. Phase two checks only
     the installed source: another remote commit is for the next Apply; its
@@ -2073,21 +2150,7 @@ def plan(check_source=True, apps_commit=None):
         else:
             recipes[name] = str(upstream.effective_recipe(name, baseline, LOCAL_RECORDS))
     local_owned = local_names(recipes)
-    if candidates:
-        transaction = helper_module("locachy_transaction")
-        prepared_recipes = dict(candidates)
-        for name in sorted(local_owned & set(host)):
-            if name not in recipes:
-                raise RuntimeError(f"{name}: local recipe is missing; update cannot be prepared")
-            prepared_recipes.setdefault(name, {"baseline_dir": baselines[name], "recipe_dir": recipes[name]})
-        # Tested by the installed source, whose recipes these are: with a
-        # LOCachy update applied, the updated updater checks again. Declared
-        # leaves the host lacks and the repositories have go into the same
-        # transaction, so into its build and contract roots too.
-        declared = [n for n in declared_missing(host) if n in newest and n not in local_owned]
-        _pending_plan_lock = transaction.snapshot(LOCAL_RECORDS, os.path.join(MERGED_DB, "sync"), PACMAN_CONFIG,
-                                                   transaction_host_hash(), prepared_recipes, candidate_locks,
-                                                   test_source=SRC, missing=declared)
+    declared = [n for n in declared_missing(host) if n in newest and n not in local_owned]
     foreign = {n: v for n, v in host.items() if n not in newest and n not in local_owned}
     owned = {}
     for name in containers():
@@ -2096,13 +2159,36 @@ def plan(check_source=True, apps_commit=None):
     for pkgs in owned.values():
         aur_names |= {n for n in pkgs if n not in newest and n not in local_owned}
     aur = aur_versions(aur_names) if aur_names else {}
+    aur_blockers = blocking_aur_packages(foreign, aur, local_owned, declared) if (updates or declared) else {}
 
+    host_aur_planned = []
     for n, old, new in updates:
         if n not in local_owned:
             rows.append(("host", "repo", n, old, new))
     for n, v in sorted(foreign.items()):
         if n in aur and vercmp(aur[n], v) > 0:
             rows.append(("host", "aur", n, v, aur[n]))
+            host_aur_planned.append(n)
+        elif n in aur_blockers:
+            rows.append(("host", "aur", n, v, f"{aur[n]} ({aur_blockers[n]})"))
+            host_aur_planned.append(n)
+
+    if candidates or host_aur_planned:
+        transaction = helper_module("locachy_transaction")
+        prepared_recipes = dict(candidates)
+        if candidates:
+            for name in sorted(local_owned & set(host)):
+                if name not in recipes:
+                    raise RuntimeError(f"{name}: local recipe is missing; update cannot be prepared")
+                prepared_recipes.setdefault(name, {"baseline_dir": baselines[name], "recipe_dir": recipes[name]})
+        prepared_aur = aur_snapshot_entries(host_aur_planned, host, aur, aur_blockers)
+        # Tested by the installed source, whose recipes these are: with a
+        # LOCachy update applied, the updated updater checks again. Declared
+        # leaves the host lacks and the repositories have go into the same
+        # transaction, so into its build and contract roots too.
+        _pending_plan_lock = transaction.snapshot(LOCAL_RECORDS, os.path.join(MERGED_DB, "sync"), PACMAN_CONFIG,
+                                                   transaction_host_hash(), prepared_recipes, candidate_locks,
+                                                   test_source=SRC, missing=declared, aur=prepared_aur)
     host_changes = any(r[0] == "host" for r in rows)
     for n in sorted(local_owned & set(host)):
         reason = local_rebuild_reason(n, recipes[n], host[n], recipes) if n in recipes else "local recipe is missing"
@@ -2297,32 +2383,47 @@ def run(cmd, net=False):
 
 def install_tracked(missing):
     """First installs use the same locked upstream and contracts as updates.
-    Include existing tracked packages so every local output sees one target."""
-    repo_updates()  # Refresh the private Check snapshot, not the live databases.
+    Include existing tracked packages and any blocking AUR packages so every
+    local output sees one target."""
+    checked = repo_updates()  # Refresh the private Check snapshot, not the live databases.
+    updates, newest = checked if isinstance(checked, tuple) and len(checked) == 2 else ([], {})
     baselines = baseline_recipes()
     installed = local_packages(LOCAL_DB)
     selected = set(installed) | set(missing)
     candidates, pins = checked_local_candidates(baselines, selected)
+    prepared_aur = {}
+    if updates:
+        local_owned = local_names(baselines)
+        foreign = {n: v for n, v in installed.items() if n not in newest and n not in local_owned}
+        aur = aur_versions(foreign) if foreign else {}
+        blockers = blocking_aur_packages(foreign, aur, local_owned)
+        if blockers:
+            prepared_aur = aur_snapshot_entries(sorted(blockers), installed, aur, blockers)
     transaction = helper_module("locachy_transaction")
+    kwargs = {"test_source": SRC}
+    if prepared_aur:
+        kwargs["aur"] = prepared_aur
     reference = transaction.snapshot(LOCAL_RECORDS, os.path.join(MERGED_DB, "sync"), PACMAN_CONFIG,
-                                     transaction_host_hash(), candidates, pins, test_source=SRC)
+                                     transaction_host_hash(), candidates, pins, **kwargs)
     return install_prepared_host(reference, baselines)
 
 
 def install_prepared_host(reference, recipes):
     """Prepare, install and promote the exact tested artifacts together."""
     transaction = helper_module("locachy_transaction")
-    upstream = helper_module("locachy_upstream")
+    upstream = helper_module("locachy_upstream") if recipes else None
     directory, data, results = transaction.prepare(reference, BUILD_TOOL, transaction_host_hash)
     for name, path in data.get("candidate_locks", {}).items():
         upstream.validate_candidate(path, name, recipes[name], LOCAL_RECORDS)
-    transaction.preserve_installed(results, LOCAL_RECORDS)
+    local_results = {name: result for name, result in results.items() if name in data.get("recipes", {})}
+    transaction.preserve_installed(local_results, LOCAL_RECORDS)
     transaction.install(reference, directory, data, results, transaction_host_hash,
                         db_path=os.path.dirname(LOCAL_DB), net=in_net)
     installed = local_packages(LOCAL_DB)
     for name, result in results.items():
         if installed.get(name) != result["version"]:
             raise RuntimeError(f"{name}: package transaction did not install the tested version")
+    for name, result in local_results.items():
         if name in data.get("candidate_locks", {}):
             result["record"]["upstream_candidate"] = data["recipes"][name]["candidate"]["candidate_id"]
         result["record"]["host"] = build_host_hash(data["recipes"][name]["recipe_dir"], recipes)
@@ -2330,20 +2431,16 @@ def install_prepared_host(reference, recipes):
         if name in data.get("candidate_locks", {}):
             upstream.promote_candidate(data["candidate_locks"][name], name, recipes[name], LOCAL_RECORDS,
                                        artifact_sha256=result["sha256"], gate=result["tests"])
-    transaction.publish_records(results, LOCAL_RECORDS, transaction_host_hash(), promote)
+    if local_results:
+        transaction.publish_records(local_results, LOCAL_RECORDS, transaction_host_hash(), promote)
     return True
 
 
 def apply_prepared_host(rows, recipes):
-    """No raw -Syu may run when a tracked local package exists."""
-    if not install_prepared_host(transaction_reference(), recipes):
-        return False
-    aur = [r[2] for r in rows if r[0] == "host" and r[1] == "aur"]
-    if aur:
-        # AUR updates are not part of pacman's repository transaction. Keep
-        # that distinction explicit; failure must stop dependent updates.
-        return run([BUILD_TOOL, "-i"] + aur)
-    return True
+    """No raw -Syu may run when a tracked local package or planned host AUR rebuild exists.
+    Every planned host AUR package is built against the pinned target root and installed
+    in the same pacman -Su transaction as repository updates and local packages."""
+    return install_prepared_host(transaction_reference(), recipes)
 
 
 def install_planned_missing(mine, tracked):
@@ -2396,7 +2493,8 @@ def apply_target(t, rows):
         installed = local_packages(LOCAL_DB)
         baselines = baseline_recipes()
         tracked = tracked_recipes(baselines)
-        if set(tracked) & set(installed):
+        host_aur = [r[2] for r in mine if r[1] == "aur"]
+        if (set(tracked) & set(installed)) or host_aur:
             try:
                 if not apply_prepared_host(rows, baselines):
                     return False
@@ -2414,12 +2512,11 @@ def apply_target(t, rows):
         except (OSError, RuntimeError, subprocess.SubprocessError) as e:
             print(f"locachy-pkg: repository databases not published: {e}", file=sys.stderr)
             return False
+        # Host AUR rows never reach here: they are built by the prepared
+        # transaction (apply_prepared_host) before any host change.
         ok = run(["pacman", "-Su", "--noconfirm"], net=True)
-        aur = [r[2] for r in mine if r[1] == "aur"]
-        if ok and aur:
-            ok = run([BUILD_TOOL, "-i"] + aur)
-        # Re-evaluate after pacman and AUR updates: the old plan may not know
-        # every library/toolchain package that the new transaction changed.
+        # Re-evaluate after pacman updates: the old plan may not know every
+        # library/toolchain package that the new transaction changed.
         recipes = local_recipes()
         installed = local_packages(LOCAL_DB)
         local = {r[2] for r in mine if r[1] == "local"}

@@ -76,4 +76,79 @@ entries=sorted(p.name for p in (root_db/'local').iterdir() if p.is_dir())
 assert entries==['fixture-compositor-2-1','fixture-lib-new-2-1','fixture-lib-old-1-1','fixture-tools-2-1'],entries
 assert not (root_db/'db.lck').exists()
 print('PASS real fixed-snapshot pacman recorded both validated local artifacts and their new runtime dependency together')
+
+# Second real-pacman case: same-version AUR package (python-dlib 20.1-1) linked
+# to libjxl.so=0.12-64 blocks libjxl 0.13.0-1.1 until rebuilt in the prepared
+# target root and installed in ONE transaction, even when the host cache still
+# holds the stale same-version archive and python-dlib is marked --asdeps.
+root2=out/'root2';cache2=out/'cache2';rebuilt_dir=out/'rebuilt'
+(root2/'var/lib/pacman/local').mkdir(parents=True);(root2/'var/lib/pacman/sync').mkdir();cache2.mkdir();rebuilt_dir.mkdir()
+(root2/'tmp').mkdir();(root2/'no-hooks').mkdir()
+db2=root2/'var/lib/pacman'
+conf2=out/'aur.conf'
+conf2.write_text('[options]\nArchitecture = x86_64\nSigLevel = Never\nLocalFileSigLevel = Never\n[extra]\nServer = '+cache2.as_uri()+'\n')
+def archive2(name,version,depend=(),provides=(),dst=cache2,body=None,bdate=1):
+    path=dst/(name+'-'+version+'-any.pkg.tar.gz')
+    text=f'pkgname = {name}\npkgver = {version}\npkgdesc = fixture\nurl = https://example.invalid\nbuilddate = {bdate}\npackager = test\nsize = 1\narch = any\nlicense = MIT\n'
+    for dep in depend:text+='depend = '+dep+'\n'
+    for prov in provides:text+='provides = '+prov+'\n'
+    content=(body or (name+' '+version+'\n')).encode()
+    mtree=(f'#mtree\n/set type=file uid=0 gid=0 mode=644\n'
+           f'./.PKGINFO size={len(text.encode())}\n'
+           f'./usr type=dir mode=755\n'
+           f'./usr/share type=dir mode=755\n'
+           f'./usr/share/locachy-fixture type=dir mode=755\n'
+           f'./usr/share/locachy-fixture/{name} size={len(content)}\n').encode()
+    with tarfile.open(path,'w:gz') as t:
+        data=text.encode();i=tarfile.TarInfo('.PKGINFO');i.size=len(data);t.addfile(i,io.BytesIO(data))
+        data=gzip.compress(mtree);i=tarfile.TarInfo('.MTREE');i.size=len(data);t.addfile(i,io.BytesIO(data))
+        i=tarfile.TarInfo('usr/share/locachy-fixture/'+name);i.size=len(content);i.mode=0o644;t.addfile(i,io.BytesIO(content))
+    return path
+jxl12=archive2('libjxl','0.12.0-1',provides=('libjxl.so=0.12-64',))
+dlib12=archive2('python-dlib','20.1-1',depend=('libjxl.so=0.12-64',))
+howdy=archive2('howdy-git','3.0-1',depend=('python-dlib',))
+jxl13=archive2('libjxl','0.13.0-1.1',provides=('libjxl.so=0.13-64',))
+dlib13=archive2('python-dlib','20.1-1',depend=('libjxl.so=0.13-64',),dst=rebuilt_dir,body='rebuilt 0.13\n',bdate=2)
+def pacman2(args):
+    return subprocess.run(['pacman','--root',str(root2),'--dbpath',str(db2),'--config',str(conf2),
+        '--cachedir',str(cache2),'--hookdir',str(root2/'no-hooks'),'--noconfirm']+args,check=True)
+pacman2(['-U',str(jxl12),str(dlib12),str(howdy)])
+pacman2(['-D','--asdeps','python-dlib'])
+subprocess.run(['repo-add',str(cache2/'extra.db.tar.gz'),str(jxl13)],check=True,stdout=subprocess.DEVNULL)
+shutil.copyfile(cache2/'extra.db.tar.gz',db2/'sync/extra.db')
+import importlib.machinery
+loader=importlib.machinery.SourceFileLoader('pkg_test',str(src/'link/locachy-pkg'))
+spec=importlib.util.spec_from_loader('pkg_test',loader);pkg_mod=importlib.util.module_from_spec(spec);loader.exec_module(pkg_mod)
+pkg_mod.MERGED_DB=str(db2);pkg_mod.PACMAN_CONFIG=str(conf2)
+blockers=pkg_mod.blocking_aur_packages({'python-dlib':'20.1-1','howdy-git':'3.0-1'},
+    {'python-dlib':'20.1-1','howdy-git':'3.0-1'},set())
+assert blockers=={'python-dlib':'rebuild for libjxl'},blockers
+ref2=tx.snapshot(out/'state2',db2/'sync',conf2,'fixture-host2',{},
+    aur={'python-dlib':{'installed_version':'20.1-1','target_version':'20.1-1','reason':blockers['python-dlib'],'provides':[]}})
+d2,data2=tx.load_snapshot(ref2,'fixture-host2')
+p_aur=d2/'prepared/python-dlib';p_aur.mkdir(parents=True)
+art_aur=p_aur/dlib13.name;shutil.copyfile(dlib13,art_aur)
+(p_aur/'target-base-packages.txt').write_text('howdy-git 3.0-1\nlibjxl 0.13.0-1.1\n')
+(p_aur/'target-packages.txt').write_text('howdy-git 3.0-1\nlibjxl 0.13.0-1.1\npython-dlib 20.1-1\n')
+h_aur=tx.file_hash(art_aur)
+res2={'python-dlib':{'name':'python-dlib','kind':'aur','version':'20.1-1','artifact':str(art_aur),'sha256':h_aur,
+    'source_host_sha256':'fixture-host2','patch_sha256':None,'extra_artifacts':[],
+    'target_base_sha256':tx.file_hash(p_aur/'target-base-packages.txt'),
+    'target_packages_sha256':tx.file_hash(p_aur/'target-packages.txt'),
+    'tests':{'passed':True,'id':tx.AUR_SMOKE_GATE,'artifact_sha256':h_aur,'artifacts':{'python-dlib':h_aur},'test_hash':'0'*64}}}
+tx.write_json(p_aur/'result.json',res2['python-dlib'])
+def run2(command,**kw):
+    if 'pacman' in command:
+        command=command+['--root',str(root2),'--dbpath',str(db2),'--cachedir',str(cache2),'--hookdir',str(root2/'no-hooks')]
+    return subprocess.run(command,**kw)
+tx.install(ref2,d2,data2,res2,lambda:'fixture-host2',str(db2),run2,record=str(out/'sync-published2.json'))
+qi=subprocess.run(['pacman','--root',str(root2),'--dbpath',str(db2),'-Qi','python-dlib','libjxl'],
+    check=True,capture_output=True,text=True).stdout
+assert 'Depends On      : libjxl.so=0.13-64' in qi,qi
+assert 'Install Reason  : Installed as a dependency for another package' in qi,qi
+assert 'Version         : 0.13.0-1.1' in qi,qi
+assert (root2/'usr/share/locachy-fixture/python-dlib').read_text()=='rebuilt 0.13\n'
+subprocess.run(['pacman','--root',str(root2),'--dbpath',str(db2),'-Dk'],check=True,stdout=subprocess.DEVNULL)
+assert not (db2/'db.lck').exists()
+print('PASS real pacman rebuilt same-version AUR blocker and upgraded libjxl in one transaction')
 PY

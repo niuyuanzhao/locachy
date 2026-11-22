@@ -597,7 +597,8 @@ class UpdateTransaction(unittest.TestCase):
                    "CONF_DIR": str(self.root / "no-containers"), "in_net": lambda command: command,
                    "publish_merged": lambda: seq.append("publish databases"), "transaction_reference": lambda: {},
                    "host_databases_mismatch": lambda: mismatch,
-                   "install_prepared_host": lambda reference, recipes: seq.append("prepared transaction") or True,
+                   "install_prepared_host": lambda reference, recipes: (seq.append("prepared transaction"),
+                                                                        build_status == 0)[1],
                    "install_source_first": lambda commit: seq.append("source") or source_ok,
                    "apply_apps": lambda mine: seq.append("apps") or True,
                    "rebuild_locachy": lambda force=False: seq.append("make.sh") or True,
@@ -693,19 +694,19 @@ class UpdateTransaction(unittest.TestCase):
     def test_trusted_aur_keys_let_the_transaction_go_on_and_the_build_still_checks(self):
         rows = [("host", "repo", "openssl", "3.6.5-1", "4.1.0-1"),
                 ("host", "aur", "lyrebird-proxy", "0.6.1-1", "0.6.2-1")]
-        check, build = [pkg.BUILD_TOOL, "--check-keys", "lyrebird-proxy"], [pkg.BUILD_TOOL, "-i", "lyrebird-proxy"]
-        status, seq, out = self.apply_with_keys(rows, 0, targets=["host"])
-        self.assertEqual(status, 0, out)
-        self.assertEqual(seq, [check, "publish databases", ["pacman", "-Su", "--noconfirm"], build, "save plan"])
-        self.assertIn("===> host: done", out)
-        status, seq, out = self.apply_with_keys(rows, 0, targets=["host"], tracked=True)
-        self.assertEqual(status, 0, out)
-        self.assertEqual(seq, [check, "prepared transaction", build, "save plan"])
-        # The second line of defence stays: a key the build stops for after
-        # the transaction (trust withdrawn meanwhile) is a failure after it.
+        check = [pkg.BUILD_TOOL, "--check-keys", "lyrebird-proxy"]
+        for tracked in (False, True):
+            status, seq, out = self.apply_with_keys(rows, 0, targets=["host"], tracked=tracked)
+            self.assertEqual(status, 0, out)
+            # Host AUR updates now go through the single prepared transaction
+            # rather than a separate post-transaction `locachy-build -i`.
+            self.assertEqual(seq, [check, "prepared transaction", "save plan"])
+            self.assertIn("===> host: done", out)
+        # The second line of defence stays: a build failure inside the prepared
+        # phase (e.g. key trust withdrawn meanwhile) stops before touching host.
         status, seq, out = self.apply_with_keys(rows, 0, targets=["host"], tracked=True, build_status=3)
         self.assertEqual(status, 1, out)
-        self.assertEqual(seq, [check, "prepared transaction", build])
+        self.assertEqual(seq, [check, "prepared transaction"])
         self.assertIn("===> host: not done", out)
         self.assertNotIn("refused before any change", out)
 
@@ -1073,6 +1074,164 @@ class CheckedDatabases(unittest.TestCase):
                 pkg.publish_merged()
         self.assertFalse((self.db / "sync").exists())
         self.assertEqual((self.db / "db.lck").read_text(), "a running pacman")
+
+
+class PreparedAurRebuild(unittest.TestCase):
+    """Host AUR updates and library-bump rebuilds share the prepared snapshot
+    and single host transaction with local recipes."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="prepared-aur-", dir=SCRATCH)
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.sync = self.root / "check/sync"
+        self.sync.mkdir(parents=True)
+        (self.sync / "extra.db").write_bytes(b"checked extra")
+        self.config = self.root / "pacman.conf"
+        self.config.write_text("[options]\nArchitecture = x86_64\n[extra]\nServer = https://mirror.example/$repo\n")
+        self.records = self.root / "records"
+        self.host = "host-before"
+        self.patch_file = self.root / "python-dlib.sed"
+        self.patch_file.write_text("s/^_build_cuda=1$/_build_cuda=0/\n")
+        self.recipe = self.root / "source/pkgbuilds/example"
+        self.recipe.mkdir(parents=True)
+        (self.recipe / "PKGBUILD").write_text("pkgname=example\n")
+        self.db = self.root / "real-db"
+        (self.db / "local").mkdir(parents=True)
+
+    def test_snapshot_pins_aur_patch_and_rejects_changes(self):
+        ref = tx.snapshot(
+            self.records, self.sync, self.config, self.host, {},
+            aur={"python-dlib": {
+                "installed_version": "20.1-1",
+                "target_version": "20.1-1",
+                "reason": "rebuilt for libjxl (0.13.0-1.1) (libjxl.so=0.12-64)",
+                "provides": ["python-dlib=20.1-1"],
+                "patch_path": str(self.patch_file),
+            }},
+        )
+        directory, data = tx.load_snapshot(ref, self.host)
+        self.assertEqual(tx.prepared_names(data), ["python-dlib"])
+        self.assertEqual(data["aur"]["python-dlib"]["patch_sha256"], tx.file_hash(self.patch_file))
+        self.patch_file.write_text("s/^_build_cuda=1$/_build_cuda=2/\n")
+        with self.assertRaisesRegex(tx.TransactionError, "AUR patch input changed"):
+            tx.load_snapshot(ref, self.host)
+
+    def test_aur_and_local_outputs_install_in_one_transaction_with_unique_repo_names(self):
+        ref = tx.snapshot(
+            self.records, self.sync, self.config, self.host,
+            {"example": {"baseline_dir": str(self.recipe), "recipe_dir": str(self.recipe)}},
+            aur={"python-dlib": {
+                "installed_version": "20.1-1",
+                "target_version": "20.1-1",
+                "reason": "rebuilt for libjxl (0.13.0-1.1) (libjxl.so=0.12-64)",
+                "provides": [],
+                "patch_path": str(self.patch_file),
+            }},
+        )
+        directory, data = tx.load_snapshot(ref, self.host)
+        base_text = "libjxl 0.13.0-1.1\n"
+        target_text = "example 2-1\nlibjxl 0.13.0-1.1\npython-dlib 20.1-1\n"
+        p_loc = directory / "prepared/example"
+        p_aur = directory / "prepared/python-dlib"
+        p_loc.mkdir(parents=True)
+        p_aur.mkdir(parents=True)
+        a_loc = p_loc / "example-2-1-x86_64.pkg.tar.zst"
+        a_aur = p_aur / "python-dlib-20.1-1-x86_64.pkg.tar.zst"
+        a_loc.write_bytes(b"local archive")
+        a_aur.write_bytes(b"rebuilt dlib archive against 0.13")
+        for p in (p_loc, p_aur):
+            (p / "target-base-packages.txt").write_text(base_text)
+            (p / "target-packages.txt").write_text(target_text)
+        artifacts = {"example": tx.file_hash(a_loc), "python-dlib": tx.file_hash(a_aur)}
+        r_loc = {
+            "name": "example", "version": "2-1", "artifact": str(a_loc), "sha256": artifacts["example"],
+            "source_host_sha256": self.host, "recipe_sha256": data["recipes"]["example"]["recipe_sha256"],
+            "target_base_sha256": tx.file_hash(p_loc / "target-base-packages.txt"),
+            "target_packages_sha256": tx.file_hash(p_loc / "target-packages.txt"),
+            "tests": {"passed": True, "artifacts": artifacts}, "record": {"recipe": "h"},
+        }
+        r_aur = {
+            "name": "python-dlib", "kind": "aur", "version": "20.1-1", "artifact": str(a_aur),
+            "sha256": artifacts["python-dlib"], "source_host_sha256": self.host,
+            "patch_sha256": data["aur"]["python-dlib"]["patch_sha256"], "extra_artifacts": [],
+            "target_base_sha256": tx.file_hash(p_aur / "target-base-packages.txt"),
+            "target_packages_sha256": tx.file_hash(p_aur / "target-packages.txt"),
+            "tests": {"passed": True, "id": tx.AUR_SMOKE_GATE, "artifact_sha256": artifacts["python-dlib"],
+                      "artifacts": artifacts, "test_hash": "a" * 64},
+        }
+        tx.write_json(p_loc / "result.json", r_loc)
+        tx.write_json(p_aur / "result.json", r_aur)
+        results = tx.reusable_results(directory, data)
+        self.assertEqual(set(results), {"example", "python-dlib"})
+
+        repo_added = []
+        pacman_calls = []
+
+        def run(command, **kwargs):
+            if command[0] == "repo-add":
+                Path(command[1]).write_bytes(b"db")
+                repo_added.extend(Path(x).name for x in command[2:])
+                return subprocess.CompletedProcess(command, 0)
+            inner = command[10:]
+            pacman_calls.append(inner)
+            if "-Sup" in inner:
+                return subprocess.CompletedProcess(
+                    command, 0,
+                    stdout="LOCACHY-PACKAGE libjxl 0.13.0-1.1\nLOCACHY-PACKAGE example 2-1\nLOCACHY-PACKAGE python-dlib 20.1-1\n",
+                )
+            for entry in ("libjxl-0.13.0-1.1", "example-2-1", "python-dlib-20.1-1"):
+                (self.db / "local" / entry).mkdir(exist_ok=True)
+                (self.db / "local" / entry / "desc").write_text("entry")
+                (self.db / "local" / entry / "files").write_text("entry")
+            return subprocess.CompletedProcess(command, 0)
+
+        self.assertTrue(tx.install(ref, directory, data, results, lambda: self.host, str(self.db), run,
+                                   record=str(self.root / "sync-published.json")))
+        self.assertEqual(len(repo_added), 2)
+        self.assertTrue(any(n.startswith("python-dlib-20.1-1-x86_64.locachy-") and n.endswith(".pkg.tar.zst")
+                            for n in repo_added), repo_added)
+        self.assertEqual(len(pacman_calls), 2)
+        for cmd in pacman_calls:
+            self.assertIn("locachy-validated/example=2-1", cmd)
+            self.assertIn("locachy-validated/python-dlib=20.1-1", cmd)
+
+    def test_blocking_aur_packages_parses_soname_and_removal_breaks(self):
+        merged = self.root / "merged"
+        (merged / "sync").mkdir(parents=True)
+        stdout = (
+            ":: installing libjxl (0.13.0-1.1) breaks dependency 'libjxl.so=0.12-64' required by python-dlib\n"
+            ":: installing libjxl (0.13.0-1.1) breaks dependency 'libjxl_threads.so=0.12-64' required by python-dlib\n"
+            ":: installing wlroots (0.20-1) breaks dependency 'wlroots.so=19-64' required by labwc-locachy\n"
+            ":: removing old-lib breaks dependency 'old-lib.so=1-64' required by other-aur\n"
+        )
+        fake = subprocess.CompletedProcess(["pacman"], 1, stdout=stdout, stderr="error: failed to prepare transaction\n")
+        with mock.patch.object(pkg, "MERGED_DB", str(merged)), \
+                mock.patch.object(pkg, "PACMAN_CONFIG", str(self.config)), \
+                mock.patch.object(pkg.subprocess, "run", return_value=fake):
+            found = pkg.blocking_aur_packages(
+                {"python-dlib": "20.1-1", "other-aur": "1-1", "non-aur": "1-1"},
+                {"python-dlib": "20.1-1", "other-aur": "1-1"},
+                {"labwc-locachy"},
+            )
+        self.assertEqual(found, {
+            "python-dlib": "rebuild for libjxl",
+            "other-aur": "rebuild for old-lib",
+        })
+
+    def test_order_aur_names_builds_dependencies_before_dependents(self):
+        local = self.root / "local-db"
+        (local / "howdy-git-3.0-1").mkdir(parents=True)
+        (local / "howdy-git-3.0-1/desc").write_text("%NAME%\nhowdy-git\n\n%DEPENDS%\npython-dlib>=20.0\n\n")
+        (local / "python-dlib-cuda-20.1-1").mkdir(parents=True)
+        (local / "python-dlib-cuda-20.1-1/desc").write_text(
+            "%NAME%\npython-dlib-cuda\n\n%PROVIDES%\npython-dlib=20.1-1\n\n"
+        )
+        (local / "unrelated-1-1").mkdir(parents=True)
+        (local / "unrelated-1-1/desc").write_text("%NAME%\nunrelated\n\n")
+        ordered = tx.order_aur_names(["howdy-git", "python-dlib-cuda", "unrelated"], local)
+        self.assertLess(ordered.index("python-dlib-cuda"), ordered.index("howdy-git"))
+        self.assertEqual(set(ordered), {"howdy-git", "python-dlib-cuda", "unrelated"})
 
 
 if __name__ == "__main__":
