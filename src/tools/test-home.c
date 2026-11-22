@@ -673,19 +673,58 @@ int main(int argc, char **argv)
     hit_cell(HIT_ROW + 0, &x0, &y0); assert(y0 == row_c + 1);
     hit_cell(HIT_ROW + napps, &x0, &y0); assert(y0 == row_p + 1 && x0 == 1);
     hit_cell(HIT_ROW + sys, &x0, &y0); assert(y0 == row_s + 1 && x0 == 1 && canvas_has("settings"));
-    /* Keys across titles (3 columns): Up/Down keep the column, Left/Right step. */
-    selected = napps + 2; /* term, column 3 */
-    move_selection(K_DOWN); assert(selected == napps + 3); /* next row only has edit */
-    move_selection(K_DOWN); assert(selected == sys); /* settings, column 1 */
+    /* Keys across titles (3 columns): Up/Down stay in the grid column, skipping
+     * shorter rows whose cell in that column is empty, and never drift sideways
+     * at the top or bottom row; Left/Right step sequentially across every item. */
+    selected = napps + 2; /* term, row 1 col 2 (3-item row, followed by 1-item row, then 3-item row) */
+    move_selection(K_DOWN); assert(selected == sys + 2); /* skips edit (col 0 only) -> network (col 2) */
+    move_selection(K_UP); assert(selected == napps + 2); /* skips edit -> back to term (col 2) */
+    /* Up into a shorter top row (only 2 containers) falls back to its last item
+     * while remembering col 2 so Down returns straight to term; Up at top row stays put. */
+    move_selection(K_UP); assert(selected == 1); /* beta (row 0, col 1), sticky col 2 */
+    move_selection(K_UP); assert(selected == 1); /* top row: never jumps sideways to col 0 */
+    move_selection(K_DOWN); assert(selected == napps + 2); /* sticky col 2 restores term */
+    /* Left/Right still visit short rows and clear sticky col. */
+    selected = napps + 3; /* edit (row 2, col 0) */
+    move_selection(K_DOWN); assert(selected == sys); /* settings, col 0 */
     move_selection(K_UP); assert(selected == napps + 3);
     move_selection(K_RIGHT); assert(selected == sys);
     move_selection(K_LEFT); assert(selected == napps + 3);
     selected = napps;
     move_selection(K_UP); assert(selected == 0);
-    selected = 1;
-    move_selection(K_DOWN); assert(selected == napps + 1);
-    move_selection(K_PGDN); assert(selected == last_pos);
-    move_selection(K_PGUP); assert(selected == 1); /* page back to the same column */
+    selected = 1; /* row 0, col 1 */
+    move_selection(K_DOWN); assert(selected == napps + 1); /* row 1, col 1 */
+    move_selection(K_PGDN); assert(selected == last_pos - 1); /* last row, still col 1 (reboot) */
+    move_selection(K_DOWN); assert(selected == last_pos - 1); /* bottom row: never jumps sideways */
+    move_selection(K_PGUP); assert(selected == 1); /* page back to row 0, col 1 */
+    /* Exact 3-item, 2-item, 3-item row test (add view so Programs has 5 entries = 3 + 2). */
+    {
+        static const char *const three_two_three[] = {
+            "program_term", "/usr/local/bin/term",
+            "program_view", "/usr/local/bin/view",
+            "program_edit", "/usr/local/bin/edit",
+            "program_settings", "/usr/local/bin/settings",
+            "program_packages", "/usr/local/bin/packages",
+            "program_network", "/usr/local/bin/term /usr/bin/nmtui",
+            NULL
+        };
+        rc_settings = three_two_three;
+        load();
+        int p0 = napps, s0 = napps + 5;
+        /* Programs: [desktop, files, term] (3), [view, edit] (2); System: [settings, packages, network] (3), [reboot, power off] (2). */
+        selected = p0 + 2; /* term: 3rd item of first 3-item row */
+        move_selection(K_DOWN); assert(selected == s0 + 2); /* network: directly to 3rd item of next 3-item row */
+        move_selection(K_UP); assert(selected == p0 + 2); /* back to term */
+        move_selection(K_DOWN); assert(selected == s0 + 2);
+        /* Down from network (col 2) into trailing 2-item row [reboot, power off] lands on power off, Up restores network. */
+        move_selection(K_DOWN); assert(selected == s0 + 4);
+        move_selection(K_UP); assert(selected == s0 + 2);
+        /* Bottom-left (reboot, col 0) pressing Down stays on reboot. */
+        selected = s0 + 3;
+        move_selection(K_DOWN); assert(selected == s0 + 3);
+        rc_settings = sectioned;
+        load();
+    }
     move_selection(K_EOL); assert(selected == last_pos);
     draw(0);
     hit_cell(HIT_ROW + last_pos, &x0, &y0);
@@ -750,16 +789,18 @@ int main(int argc, char **argv)
             selected = step == 0 ? last_pos : 0;
         }
         /* Down from the first position visits every tile row in turn, in the
-         * first column, then the last position. */
+         * first column, and stays on the bottom-left tile instead of drifting sideways. */
         struct grid g = grid_layout();
         selected = 0;
+        int bottom_left = 0;
         for (int r = 0; r < g.rows; r++) {
             int tile_row, column, at;
             grid_place(&g, selected, &tile_row, &column, &at);
             assert(tile_row == r && column == 0);
+            bottom_left = selected;
             move_selection(K_DOWN);
         }
-        assert(selected == last_pos);
+        assert(selected == bottom_left);
     }
     selected = sys; /* settings, a host program: K asks to close */
     confirm_stop();

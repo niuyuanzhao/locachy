@@ -104,6 +104,7 @@ enum confirmation { CONF_NONE, CONF_STOP, CONF_PROGRAM, CONF_REBOOT, CONF_POWERO
 
 static struct entry entries[MAX_ENTRIES];
 static int nentries, selected, scroll;
+static int sticky_col = -1, sticky_cols, sticky_pos = -1;
 static struct app *apps;
 static char *app_data;
 static int napps;
@@ -662,26 +663,84 @@ static int grid_place(const struct grid *g, int pos, int *row, int *column, int 
     return s;
 }
 
-/* The position rows tile rows below pos (above it: negative), in its column
- * or the last one that row fills; past the first or the last row, the first
- * or the last position. Titles are not positions: moving skips them. */
-static int grid_move(const struct grid *g, int pos, int rows)
+/* First list position and item count (1..g->columns) of tile row `row`. */
+static void grid_row_info(const struct grid *g, int row, int *start, int *len)
 {
-    int row, column, line;
-    grid_place(g, pos, &row, &column, &line);
-    int to = row + rows, last = g->start[SECTIONS - 1] + g->count[SECTIONS - 1] - 1;
-    if (to < 0) {
-        return 0;
-    }
-    if (to >= g->rows) {
-        return last;
-    }
     int s = SECTIONS - 1;
-    while (s > 0 && (to < g->first_row[s] || g->count[s] == 0)) {
+    while (s > 0 && (row < g->first_row[s] || g->count[s] == 0)) {
         s--;
     }
-    int k = (to - g->first_row[s]) * g->columns, n = g->count[s] - k;
-    return g->start[s] + k + (column < n ? column : n - 1);
+    int k = (row - g->first_row[s]) * g->columns;
+    int rem = g->count[s] - k;
+    *start = g->start[s] + k;
+    *len = rem < g->columns ? rem : g->columns;
+}
+
+/* Move vertically across the grid while staying in target_col whenever a row
+ * further in that direction fills target_col (skipping shorter rows whose
+ * target_col cell is empty). Only when no further row in that direction has
+ * target_col does a step land on the adjacent/target row's last item (the
+ * caller keeps target_col sticky so reversing returns to it); at the top or
+ * bottom row, stay put instead of drifting sideways. Titles are skipped. */
+static int grid_move_col(const struct grid *g, int pos, int rows, int target_col)
+{
+    if (rows == 0 || g->rows <= 0) {
+        return pos;
+    }
+    int row, column, line;
+    grid_place(g, pos, &row, &column, &line);
+    if (target_col < 0 || target_col >= g->columns) {
+        target_col = column;
+    }
+    int step = rows > 0 ? 1 : -1;
+    if (rows == 1 || rows == -1) {
+        for (int r = row + step; r >= 0 && r < g->rows; r += step) {
+            int rstart, rlen;
+            grid_row_info(g, r, &rstart, &rlen);
+            if (target_col < rlen) {
+                return rstart + target_col;
+            }
+        }
+        int adj = row + step;
+        if (adj < 0 || adj >= g->rows) {
+            return pos;
+        }
+        int rstart, rlen;
+        grid_row_info(g, adj, &rstart, &rlen);
+        return rstart + rlen - 1;
+    }
+    int to = row + rows;
+    if (to < 0) to = 0;
+    if (to >= g->rows) to = g->rows - 1;
+    if (to == row) {
+        return pos;
+    }
+    for (int r = to; r >= 0 && r < g->rows; r += step) {
+        int rstart, rlen;
+        grid_row_info(g, r, &rstart, &rlen);
+        if (target_col < rlen) {
+            return rstart + target_col;
+        }
+    }
+    int rstart, rlen;
+    grid_row_info(g, to, &rstart, &rlen);
+    return rstart + rlen - 1;
+}
+
+static void grid_step_vertical(int rows)
+{
+    struct grid g = grid_layout();
+    int last_item = napps + nentries + 1;
+    if (sticky_col < 0 || sticky_cols != g.columns || sticky_pos != selected) {
+        int tile_row, column, line;
+        grid_place(&g, selected, &tile_row, &column, &line);
+        sticky_col = column;
+        sticky_cols = g.columns;
+    }
+    selected = grid_move_col(&g, selected, rows, sticky_col);
+    if (selected < 0) selected = 0;
+    if (selected > last_item) selected = last_item;
+    sticky_pos = selected;
 }
 
 static void grid_text(int col, int row, const char *s, uint32_t fg, uint32_t bg)
@@ -706,17 +765,28 @@ static void grid_text(int col, int row, const char *s, uint32_t fg, uint32_t bg)
     text(col, row, out, fg, bg);
 }
 
-/* Left/Right: the previous/next position; Up/Down: a tile row, PgUp/PgDn:
- * the tile rows a list's height holds, across the section titles. */
+/* Left/Right: the previous/next position; Up/Down: keep the grid column across
+ * shorter rows and section titles; PgUp/PgDn: jump a page of tile rows. */
 static void move_selection(int key)
 {
-    struct grid g = grid_layout();
     int last_item = napps + nentries + 1, page = list_rows() / 3;
     int rows = key == K_PGUP || key == K_PGDN ? (page > 0 ? page : 1) : 1;
-    if (key == K_BOL) selected = 0;
-    else if (key == K_EOL) selected = last_item;
-    else if (key == K_LEFT || key == K_RIGHT) selected += key == K_LEFT ? -1 : 1;
-    else selected = grid_move(&g, selected, key == K_UP || key == K_PGUP ? -rows : rows);
+    if (key == K_BOL) {
+        selected = 0;
+        sticky_col = -1;
+        sticky_pos = -1;
+    } else if (key == K_EOL) {
+        selected = last_item;
+        sticky_col = -1;
+        sticky_pos = -1;
+    } else if (key == K_LEFT || key == K_RIGHT) {
+        selected += key == K_LEFT ? -1 : 1;
+        sticky_col = -1;
+        sticky_pos = -1;
+    } else {
+        grid_step_vertical(key == K_UP || key == K_PGUP ? -rows : rows);
+        return;
+    }
     if (selected < 0) selected = 0;
     if (selected > last_item) selected = last_item;
 }
@@ -1536,8 +1606,7 @@ static int pointer_key(void)
             scroll_log(3 * e->wheel, screen_rows() - footer_rows() - 3);
             return -1;
         }
-        struct grid g = grid_layout();
-        selected = grid_move(&g, selected, -e->wheel); /* a tile row a notch, as Up/Down */
+        grid_step_vertical(-e->wheel); /* a tile row a notch, as Up/Down */
         return -1;
     }
     int id = ui_hit_at(e->col, e->row);
@@ -1570,6 +1639,8 @@ static int pointer_key(void)
     }
     int pos = id - HIT_ROW;
     selected = pos;
+    sticky_col = -1;
+    sticky_pos = -1;
     if (e->button == BTN_RIGHT) {
         draw(0);
         return row_menu(e->col, e->row);
