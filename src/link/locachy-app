@@ -75,8 +75,9 @@
 # devices, the GPU render nodes, and with camera="1" the ordinary cameras
 # (nodes of its own /dev, the user's). A
 # container has a session bus of its own, none of the host; locachy-bar is
-# the tray watcher on it. At /run/user/UID/doc it has its own view of the
-# host's document portal (locachy-docs, tools/DOCUMENTS.md): the private
+# the tray watcher on it. Its Settings portal reads just the host appearance
+# snapshot from a dedicated read-only directory. At /run/user/UID/doc it has
+# its own view of the host's document portal (locachy-docs, tools/DOCUMENTS.md): the private
 # files dropped on it, nothing else; a host program (host="1") too.
 set -euo pipefail
 
@@ -97,6 +98,7 @@ APP_INIT="${LOCACHY_APP_INIT:-/usr/local/lib/locachy/app-init}"
 CLIPBOARD="${LOCACHY_CLIPBOARD_TOOL:-/usr/local/lib/locachy/clipboard}"
 TOR_ENFORCE="${LOCACHY_TOR_ENFORCE:-/usr/local/lib/locachy/tor-enforce}"
 RC_CONF="${LOCACHY_RC_CONF:-/etc/locachy/rc.conf}"
+FOOT_WRAPPER=/usr/local/lib/locachy/locachy-foot
 # The containers' sound: the directories of the restricted sockets of the
 # host's servers (audio-client; 50-locachy-sockets.conf, 50-locachy-pulse.conf).
 # A container gets the directories, not the sockets: servers started again
@@ -253,6 +255,13 @@ saved_command() {
        [ "${saved_cmd[5]}" = /usr/bin/tor-browser ]; then
         saved_cmd=(/usr/bin/env MOZ_APP_REMOTINGNAME=tor-browser /usr/bin/tor-browser "${saved_cmd[@]:6}")
     fi
+}
+
+# Old and new host recipes use the package executable. Add its palette at
+# launch, without changing the recipe or matching commands by basename.
+managed_foot_command() { # NAME EXECUTABLE
+    [ "$2" = /usr/bin/foot ] && [ -x "$FOOT_WRAPPER" ] && is_host "$1" &&
+        [ "$(conf_value "$1" command)" = /usr/bin/foot ]
 }
 
 # Only the known Tor Browser package/wrapper has a bundled tor. tor="1"
@@ -662,6 +671,9 @@ do_open_running() { # NAME TARGET COMMAND...
         esac
     done <"/proc/$pid/environ"
     [ -n "$uid" ] && [ -n "$gid" ] || die "cannot tell the user of $name"
+    if [ -z "$nnp" ] && managed_foot_command "$name" "${1:-}"; then
+        set -- "$FOOT_WRAPPER" "${@:2}"
+    fi
     (
         exec {APP_LOCK_FD}>&- # the program may outlive this command: not the lock
         printf '%s\n' "$BASHPID" >"$(cg_path "$name")/cgroup.procs"
@@ -1292,6 +1304,9 @@ if [ $# -eq 0 ]; then
     saved_command "$name"
     set -- "${saved_cmd[@]}"
 fi
+if managed_foot_command "$name" "${1:-}"; then
+    set -- "$FOOT_WRAPPER" "${@:2}"
+fi
 if [ "$tor_mode" = own ]; then
     tor_browser_launch "$@" || die "$name: --own-tor cannot run an alternative command; not started"
 fi
@@ -1436,6 +1451,17 @@ fi
         chmod 0666 "$host_runtime/$display"
         run=/run/user/$uid
         mount -t tmpfs -o "mode=0700,uid=$uid,gid=$gid,nosuid,nodev" runtime "$run"
+        # Host programs have their own /run mount namespace. Project the
+        # read-only appearance snapshot there too, so new processes and the
+        # private bus use the same path as isolated containers.
+        appearance=/run/locachy/appearance
+        [ ! -L "$appearance" ] || { printf "locachy-app: appearance directory is a link\n" >&2; exit 125; }
+        install -d -m 0755 "$appearance" /run/locachy-appearance
+        mount --bind -o ro,nosuid,nodev,noexec "$appearance" /run/locachy-appearance
+        mount --make-private /run/locachy-appearance
+        export LOCACHY_APPEARANCE_DIR=/run/locachy-appearance
+        export XDG_CONFIG_DIRS="/usr/local/share/locachy/container-config:${XDG_CONFIG_DIRS:-/etc/xdg}"
+        export XDG_DATA_DIRS="/usr/local/share/locachy/container-data:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
         touch "$run/$display"
         mount --bind "$host_runtime/$display" "$run/$display"
         unset DBUS_SESSION_BUS_ADDRESS
@@ -1496,10 +1522,20 @@ fi
             mount --bind -o ro "$xsocket" "$cbase/merged$xsocket"
         fi
         mount -t tmpfs run "$cbase/merged/run" -o mode=0755,nosuid,nodev
-        # The host runtime gives the container its display only: no session bus
-        # of root (it gets one of its own, below), no devices but the render
-        # nodes. Its sound is the restricted sockets of the servers, at the
-        # paths of a session of its own (pipewire-0, pulse/native).
+        # Bind the dedicated directory, not the file: the host replaces the
+        # snapshot atomically. Keep even later submounts out of this bind.
+        appearance=/run/locachy/appearance
+        [ ! -L "$appearance" ] || { printf "locachy-app: appearance directory is a link\n" >&2; exit 125; }
+        install -d -m 0755 "$appearance" "$cbase/merged/run/locachy-appearance"
+        mount --bind -o ro,nosuid,nodev,noexec "$appearance" "$cbase/merged/run/locachy-appearance"
+        mount --make-private "$cbase/merged/run/locachy-appearance"
+        # Containers read only the host appearance snapshot from this read-only directory.
+        export LOCACHY_APPEARANCE_DIR=/run/locachy-appearance
+        export XDG_CONFIG_DIRS="/usr/local/share/locachy/container-config:${XDG_CONFIG_DIRS:-/etc/xdg}"
+        export XDG_DATA_DIRS="/usr/local/share/locachy/container-data:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+        # No session bus of root (it gets one of its own, below). Its sound
+        # is the restricted sockets, at the paths of a session of its own
+        # (pipewire-0, pulse/native).
         run="$cbase/merged/run/user/$uid"
         mkdir -p -m 0700 "$run"
         touch "$run/$display"

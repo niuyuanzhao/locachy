@@ -21,16 +21,16 @@
 #define MINIMAP_CHARS  100  /* s_lineWidth */
 #define MINIMAP_SAMPLE 4    /* lines of a cell row read for its colours */
 #define REMOVE_SPACES  1    /* Remove Spaces: 0 never, 1 on modified lines (the default), 2 everywhere */
-#define C_GROOVE       0x31363B
-#define C_SLIDER       0x5A6068
+#define C_GROOVE       theme_rgb(THEME_SURFACE, 0x31363B)
+#define C_SLIDER       theme_rgb(THEME_DIM, 0x5A6068)
 enum { LINE_MODIFIED = 1, LINE_SAVED = 2 };
 
-/* The mini-map's colours, cached for a view until its document or size changes. */
+/* The mini-map's colours, cached for a view until its document, size, or scheme changes. */
 static struct minimap_cache {
     const struct doc *doc;
     unsigned long version;
     size_t total;
-    int rows, cols, h, width;
+    int rows, cols, h, width, light;
     uint64_t folds;
     uint32_t *cells;         /* rows x cols, the margin column's included */
     unsigned char *marks;    /* rows: LINE_* of its lines */
@@ -658,7 +658,8 @@ static void minimap_build(int s, struct tab *t, const struct scroll_geom *g, str
     }
     free(c->cells);
     free(c->marks);
-    *c = (struct minimap_cache){ d, u->version, g->total, rows, g->w, g->h, g->width, g->width ? scroll_index[s].folds : 0, out, marks };
+    *c = (struct minimap_cache){ d, u->version, g->total, rows, g->w, g->h, g->width,
+                                 theme_is_light(), g->width ? scroll_index[s].folds : 0, out, marks };
 }
 
 /* The rows of the marks (bookmarks; Find All's and Replace All's matches as
@@ -710,7 +711,7 @@ static void draw_scrollbar(int s, struct tab *t)
     }
     struct minimap_cache *c = &minimap_cache[s];
     if (c->doc != t->doc || c->version != ui_of(t->doc)->version || c->total != g.total || c->rows != g.doc_rows ||
-        c->cols != g.w || c->h != g.h || c->width != g.width ||
+        c->cols != g.w || c->h != g.h || c->width != g.width || c->light != theme_is_light() ||
         (g.width && c->folds != scroll_index[s].folds) || !c->cells) {
         minimap_build(s, t, &g, c);
     }

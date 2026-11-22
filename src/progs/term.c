@@ -31,8 +31,12 @@
 #include "ime.h"
 #include "clipboard.h"
 
-#define DEF_FG 0xD0D0D0u
-#define DEF_BG 0x101820u
+/* The high byte distinguishes default/indexed colors from literal RGB.
+ * Store these in the grid and history; only resolve them when drawing. */
+#define DEF_FG      0x80000000u
+#define DEF_BG      0x80000001u
+#define BOLD_DEF_FG 0x80000002u
+#define INDEXED     0x40000000u
 #define MAX_PARAMS 16
 
 static const uint32_t palette[16] = {
@@ -269,11 +273,8 @@ static void put_cp(uint32_t cp)
     }
 }
 
-static uint32_t color256(int n)
+static uint32_t extended_rgb(int n)
 {
-    if (n < 16) {
-        return palette[n & 15];
-    }
     if (n < 232) {
         int i = n - 16, r = i / 36, g = (i / 6) % 6, b = i % 6;
         uint32_t v[6] = { 0, 95, 135, 175, 215, 255 };
@@ -281,6 +282,20 @@ static uint32_t color256(int n)
     }
     uint32_t gray = (uint32_t)(8 + (n - 232) * 10) & 0xFF;
     return (gray << 16) | (gray << 8) | gray;
+}
+
+static uint32_t terminal_rgb(uint32_t color)
+{
+    switch (color) {
+    case DEF_FG: return theme_rgb(THEME_FG, 0xD0D0D0);
+    case DEF_BG: return theme_rgb(THEME_BG, 0x101820);
+    case BOLD_DEF_FG: return theme_rgb(THEME_FG, 0xFFFFFF);
+    }
+    if (color & INDEXED) {
+        unsigned n = color & 0xFF;
+        return n < 16 ? theme_ansi(n, palette[n]) : extended_rgb((int)n);
+    }
+    return color;
 }
 
 static void sgr(void)
@@ -296,11 +311,8 @@ static void sgr(void)
             bold = rev = 0;
         } else if (p == 1) {
             bold = 1;
-            for (int k = 0; k < 8; k++) {
-                if (cur_fg == palette[k]) {
-                    cur_fg = palette[k + 8];
-                }
-            }
+            if (cur_fg == DEF_FG) cur_fg = BOLD_DEF_FG;
+            else if (cur_fg >= INDEXED && cur_fg < INDEXED + 8) cur_fg += 8;
         } else if (p == 2 || p == 22) {
             bold = 0;
         } else if (p == 7) {
@@ -308,9 +320,9 @@ static void sgr(void)
         } else if (p == 27) {
             rev = 0;
         } else if (p >= 30 && p <= 37) {
-            cur_fg = palette[(p - 30) + (bold ? 8 : 0)];
+            cur_fg = INDEXED + (p - 30) + (bold ? 8 : 0);
         } else if (p == 38 && i + 2 < nparam && param[i + 1] == 5) {
-            cur_fg = color256(param[i + 2]);
+            cur_fg = INDEXED + clamp(param[i + 2], 0, 255);
             i += 2;
         } else if (p == 38 && i + 4 < nparam && param[i + 1] == 2) {
             cur_fg = ((uint32_t)(param[i + 2] & 0xFF) << 16) |
@@ -319,9 +331,9 @@ static void sgr(void)
         } else if (p == 39) {
             cur_fg = DEF_FG;
         } else if (p >= 40 && p <= 47) {
-            cur_bg = palette[p - 40];
+            cur_bg = INDEXED + (p - 40);
         } else if (p == 48 && i + 2 < nparam && param[i + 1] == 5) {
-            cur_bg = color256(param[i + 2]);
+            cur_bg = INDEXED + clamp(param[i + 2], 0, 255);
             i += 2;
         } else if (p == 48 && i + 4 < nparam && param[i + 1] == 2) {
             cur_bg = ((uint32_t)(param[i + 2] & 0xFF) << 16) |
@@ -330,9 +342,9 @@ static void sgr(void)
         } else if (p == 49) {
             cur_bg = DEF_BG;
         } else if (p >= 90 && p <= 97) {
-            cur_fg = palette[p - 90 + 8];
+            cur_fg = INDEXED + (p - 90) + 8;
         } else if (p >= 100 && p <= 107) {
-            cur_bg = palette[p - 100 + 8];
+            cur_bg = INDEXED + (p - 100) + 8;
         }
     }
 }
@@ -850,7 +862,7 @@ static void draw(void)
         const struct cell *line = shown_row(r);
         int c = 0, n = shown_cols(r);
         if (n < cols) {
-            screen_fill(n, r + 1, cols - n, 1, DEF_BG);
+            screen_fill(n, r + 1, cols - n, 1, terminal_rgb(DEF_BG));
         }
         while (c < n) {
             struct cell first = line[c];
@@ -867,45 +879,48 @@ static void draw(void)
                 c++;
             }
             buf[len] = '\0';
-            screen_text(start, r + 1, buf, first.fg, first.bg);
+            screen_text(start, r + 1, buf, terminal_rgb(first.fg), terminal_rgb(first.bg));
         }
     }
     if (selection.active) {
         int a = selection.anchor < selection.end ? selection.anchor : selection.end;
         int b = selection.anchor > selection.end ? selection.anchor : selection.end;
+        uint32_t fg = theme_rgb(THEME_FG, 0xFFFFFF), bg = theme_rgb(THEME_SELECTION, 0x305878);
         for (int i = a; i <= b; i++) {
             if (i % cols >= shown_cols(i / cols)) continue;
             struct cell cell = shown_row(i / cols)[i % cols];
             if (!cell.ch) continue;
             buf[put_utf8(buf, cell.ch)] = '\0';
-            screen_text(i % cols, i / cols + 1, buf, 0xFFFFFF, 0x305878);
+            screen_text(i % cols, i / cols + 1, buf, fg, bg);
             dirty[i / cols] = 1;
         }
     }
     if (cursor_vis && cy + view < rows) {
         struct cell cur = grid[cy * cols + cx];
         buf[put_utf8(buf, cur.ch ? cur.ch : ' ')] = '\0';
-        screen_text(cx, cy + view + 1, buf, cur.bg, cur.fg);
+        screen_text(cx, cy + view + 1, buf, terminal_rgb(cur.bg), terminal_rgb(cur.fg));
     }
     if (view > 0) {
         char note[64];
         snprintf(note, sizeof note, _(" %d/%d lines back "), view, hist_len);
-        screen_text(cols - str_cells(note), 1, note, DEF_BG, 0xB8D8FF);
+        screen_text(cols - str_cells(note), 1, note, theme_rgb(THEME_ON_ACCENT, 0x101820), theme_rgb(THEME_ACCENT, 0xB8D8FF));
         dirty[0] = 1;
     }
     if (toast_active) {
-        screen_fill(toast_col, toast_row + 1, toast_w, 1, 0x183860);
-        screen_text(toast_col, toast_row + 1, toast_msg, 0xFFFFFF, 0x183860);
+        uint32_t bg = theme_rgb(THEME_PANEL, 0x183860);
+        screen_fill(toast_col, toast_row + 1, toast_w, 1, bg);
+        screen_text(toast_col, toast_row + 1, toast_msg, theme_rgb(THEME_FG, 0xFFFFFF), bg);
     }
     if (active) {
+        uint32_t bg = theme_rgb(THEME_PANEL, 0x182848), fg = theme_rgb(THEME_FG, 0xFFFFFF);
         if (row2[0] != '\0' && rows >= 2) {
-            screen_fill(0, rows - 1, cols, 1, 0x182848);
-            screen_text(1, rows - 1, row1, 0xFFFFFF, 0x182848);
-            screen_fill(0, rows, cols, 1, 0x182848);
-            screen_text(1, rows, row2, 0xB8D8FF, 0x182848);
+            screen_fill(0, rows - 1, cols, 1, bg);
+            screen_text(1, rows - 1, row1, fg, bg);
+            screen_fill(0, rows, cols, 1, bg);
+            screen_text(1, rows, row2, theme_rgb(THEME_ACCENT_TEXT, 0xB8D8FF), bg);
         } else {
-            screen_fill(0, rows, cols, 1, 0x182848);
-            screen_text(1, rows, row1, 0xFFFFFF, 0x182848);
+            screen_fill(0, rows, cols, 1, bg);
+            screen_text(1, rows, row1, fg, bg);
         }
     }
     screen_flush();
@@ -1324,7 +1339,7 @@ int main(int argc, char **argv)
         dirty[prev_cy] = 1;
         const char *ime_notice = NULL;
         if (key > 0 && key != K_CTRL_SPACE && key != K_ACT_IME_CN && key != K_ACT_IME_RAW &&
-            key != K_ACT_IME_WIDTH && key != K_POINTER && toast_active) {
+            key != K_ACT_IME_WIDTH && key != K_POINTER && key != K_REPAINT && toast_active) {
             hide_toast();
         }
         if (key == K_CLOSE) {
@@ -1345,9 +1360,9 @@ int main(int argc, char **argv)
         } else if (key == K_SHOWN) {
             say("term: shown %d (pid %d)", ++shown, (int)getpid());
             resize(pty); /* the scale may have changed meanwhile */
-            for (int r = 0; r < rows; r++) {
-                dirty[r] = 1;
-            }
+            memset(dirty, 1, (size_t)rows);
+        } else if (key == K_REPAINT) {
+            memset(dirty, 1, (size_t)rows);
         } else if (ime_action(key, &ime_notice)) {
             const char *commit = ime_get_commit(); /* English mode's word, as typed */
             if (commit != NULL && commit[0] != '\0') {

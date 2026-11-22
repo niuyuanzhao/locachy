@@ -310,10 +310,12 @@ static int language_pick(const char *title, GPtrArray *labels)
         if (selected < top) top = selected;
         if (selected >= top + height) top = selected - height + 1;
         screen_fill(3, 3, width, height + 2, C_WINDOW); screen_fill(3, 3, width, 1, C_FOCUS);
-        put_text(4, 3, width + 2, title, C_WINDOW, C_FOCUS);
+        put_text(4, 3, width + 2, title, C_ON_FOCUS(0x2A2E32), C_FOCUS);
         for (int i = 0; i < height && top + i < (int)labels->len; i++) {
-            uint32_t bg = top + i == selected ? C_FOCUS : C_WINDOW;
-            screen_fill(3, 4 + i, width, 1, bg); put_text(4, 4 + i, width + 2, g_ptr_array_index(labels, top + i), C_WTEXT, bg);
+            int on = top + i == selected;
+            uint32_t bg = on ? C_FOCUS : C_WINDOW, fg = on ? C_ON_FOCUS(0xFCFCFC) : C_WTEXT;
+            screen_fill(3, 4 + i, width, 1, bg);
+            put_text(4, 4 + i, width + 2, g_ptr_array_index(labels, top + i), fg, bg);
         }
         /* TRANSLATORS: Keep key names (Enter, Esc, Up/Down/PgUp/PgDn) as is. */
         put_text(4, 4 + height, width + 2, language_pick_help ? language_pick_help : _("Enter: choose   Esc: cancel   Up/Down/PgUp/PgDn: select"), C_WTEXT, C_WINDOW); screen_flush();

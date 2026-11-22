@@ -351,7 +351,7 @@ static uint32_t docs_shade(struct doc *d, uint32_t base)
     if (!view && !edit) return base;
     /* The view shade tints with Breeze's VisitedText, the edit shade with
      * its ActiveText (KColorUtils::tint at 0.5, approximated by a blend). */
-    uint32_t shade = colour_mix(base, 0x9B59B6, 77), eshade = colour_mix(base, 0x3DAEE9, 77);
+    uint32_t shade = colour_mix(base, 0x9B59B6, 77), eshade = colour_mix(base, C_FOCUS, 77);
     if (edit > 0) {
         int v = hc - view, e = ec - edit + 1;
         e = e * e;
@@ -378,7 +378,7 @@ static void docs_draw(void)
             const char *btn = _(buttons[i]);
             int n = ui_cells(btn);
             if (x + n > SIDE_W - 1) break;
-            put_text(x, y, SIDE_W, btn, C_FOCUS, C_WINDOW);
+            put_text(x, y, SIDE_W, btn, C_LINK, C_WINDOW);
             ui_hit(x, y, n, 1, HIT_DOCBAR + i);
             x += n + 1;
         }
@@ -398,7 +398,7 @@ static void docs_draw(void)
         char line[400];
         snprintf(line, sizeof line, "%*s%s%s", 1 + 2 * r->depth, "", mark, r->name);
         screen_fill(0, row, SIDE_W, 1, bg);
-        put_text(0, row, SIDE_W, line, on ? 0xFFFFFF : !r->doc ? C_FOCUS : C_WTEXT, bg);
+        put_text(0, row, SIDE_W, line, on ? C_ON_FOCUS(0xFFFFFF) : !r->doc ? C_LINK : C_WTEXT, bg);
         ui_hit(0, row, SIDE_W, 1, HIT_DOCROW + i);
     }
 }
@@ -767,8 +767,8 @@ static void switcher_draw(void)
         switcher_texts(i, prefix, name, sizeof name, path, sizeof path);
         screen_fill(x, y + r, w, 1, bg);
         int pc = text_cells(path);
-        put_text(x + 1 + (pw > pc ? pw - pc : 0), y + r, x + 1 + pw, path, on ? C_WINDOW : C_DIM, bg); /* right-aligned */
-        put_text(x + 2 + pw, y + r, x + w - 1, name, on ? 0xFFFFFF : C_WTEXT, bg);
+        put_text(x + 1 + (pw > pc ? pw - pc : 0), y + r, x + 1 + pw, path, on ? C_ON_FOCUS(0x2A2E32) : C_DIM, bg); /* right-aligned */
+        put_text(x + 2 + pw, y + r, x + w - 1, name, on ? C_ON_FOCUS(0xFFFFFF) : C_WTEXT, bg);
         ui_hit(x, y + r, w, 1, HIT_SWITCHER + i);
     }
 }

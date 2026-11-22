@@ -62,13 +62,15 @@
 #define SECRET_MAX 4096
 #define LOG_MAX 512
 #define LINE_MAXIMUM 1024
-#define FG 0xD0D0D0
-#define BG 0x101820
-#define ACCENT 0x80C0FF
-#define DIM 0x808890
-#define ERROR 0xFF9090
-#define PANE 0x05080C
-#define BAR 0x304860
+#define FG           theme_rgb(THEME_FG, 0xD0D0D0)
+#define BG           theme_rgb(THEME_BG, 0x101820)
+#define ACCENT       theme_rgb(THEME_ACCENT, 0x80C0FF)
+#define ACCENT_TEXT  theme_rgb(THEME_ACCENT_TEXT, 0x80C0FF)
+#define ON_ACCENT    theme_rgb(THEME_ON_ACCENT, 0x101820)
+#define DIM          theme_rgb(THEME_DIM, 0x808890)
+#define ERROR        theme_rgb(THEME_ERROR, 0xFF9090)
+#define PANE         theme_rgb(THEME_OUTPUT, 0x05080C)
+#define BAR          theme_rgb(THEME_PANEL, 0x304860)
 #define HIT_ACTION 100
 #define HIT_KEY 1000
 #define HIT_STATUS 2000
@@ -861,7 +863,7 @@ static void draw_output(void)
     screen_fill(output_x, output_y, screen_cols() - output_x, 1, focus == F_OUTPUT ? ACCENT : BAR);
     snprintf(line, sizeof line, _("Output: %d-%d / %d%s"), total ? first + 1 : 0,
              first + body < total ? first + body : total, total, child.pid ? _(" (running)") : "");
-    textsel_put(output_x + 1, output_y, line, focus == F_OUTPUT ? BG : FG, focus == F_OUTPUT ? ACCENT : BAR);
+    textsel_put(output_x + 1, output_y, line, focus == F_OUTPUT ? ON_ACCENT : FG, focus == F_OUTPUT ? ACCENT : BAR);
     ui_hit(output_x, output_y, screen_cols() - output_x, output_h, HIT_OUTPUT);
     for (int r = 0; r < body && first + r < total; r++) {
         int k = first + r;
@@ -881,7 +883,7 @@ static void draw_modal(void)
         pick_sel = clamp(pick_sel, n - 1);
         if (pick_sel < pick_top) pick_top = pick_sel;
         if (pick_sel >= pick_top + height) pick_top = pick_sel - height + 1;
-        screen_text(2, 2, modal == M_DEVICE ? _("Choose the encrypted target (read-only unlock)") : _("Choose the dedicated wired debug interface"), ACCENT, BG);
+        screen_text(2, 2, modal == M_DEVICE ? _("Choose the encrypted target (read-only unlock)") : _("Choose the dedicated wired debug interface"), ACCENT_TEXT, BG);
         snprintf(line, sizeof line, _("Filter: %s_   %d matches"), filter, n);
         screen_text(2, 3, line, FG, BG);
         for (int i = 0; i < height && pick_top + i < n; i++) {
@@ -890,13 +892,13 @@ static void draw_modal(void)
             screen_fill(1, 5 + i, cols - 2, 1, on ? ACCENT : BG);
             size_t from = 0;
             for (int offset = 0; line[from] && offset < pick_offset; offset++) from = next_char(line, from);
-            screen_text(2, 5 + i, line + from, on ? BG : FG, on ?ACCENT : BG);
+            screen_text(2, 5 + i, line + from, on ? ON_ACCENT : FG, on ? ACCENT : BG);
             ui_hit(1, 5 + i, cols - 2, 1, HIT_PICK + k);
         }
         int x = ui_button(1, rows - 3, _("Enter: choose"), HIT_KEY + '\n');
         ui_button(x, rows - 3, _("Esc: cancel"), HIT_KEY + 27);
     } else if (modal == M_LAYOUT) {
-        screen_text(2, 2, _("Keyboard layout"), ACCENT, BG);
+        screen_text(2, 2, _("Keyboard layout"), ACCENT_TEXT, BG);
         screen_text(2, 4, _("Choose US or Japanese JIS, or type a standard console/XKB layout name."), FG, BG);
         snprintf(line, sizeof line, _("Layout: %s_"), filter);
         screen_text(2, 6, line, FG, BG);
@@ -916,7 +918,7 @@ static void draw_modal(void)
         const char *label = modal == M_UNLOCK ? _("Disk passphrase (read-only unlock)") : modal == M_REPAIR ?
                             _("Disk passphrase (confirmed write repair)") : modal == M_LINK ?
                             _("New debug-link password (at least 12 characters)") : _("Repeat the debug-link password");
-        screen_text(2, 2, label, ACCENT, BG);
+        screen_text(2, 2, label, ACCENT_TEXT, BG);
         screen_text(2, 3, modal == M_REPAIR ? state.device : pending, DIM, BG);
         snprintf(line, sizeof line, _("Keyboard: %s   F2 shows/hides the input so you can check the layout."), keyboard);
         screen_text(2, 4, line, DIM, BG);
@@ -939,7 +941,7 @@ static void draw_modal(void)
 static void draw_closed(void)
 {
     int cols = screen_cols(), rows = screen_rows();
-    screen_text(2, 2, _("Rescue session closed"), ACCENT, BG);
+    screen_text(2, 2, _("Rescue session closed"), ACCENT_TEXT, BG);
     screen_text(2, 4, _("The debug link is stopped and target filesystems are unmounted."), FG, BG);
     if (power_confirmation) {
         screen_text(2, 7, power_confirmation == 1 ? _("Reboot this computer?") : _("Power off this computer?"), ERROR, BG);
@@ -950,7 +952,7 @@ static void draw_closed(void)
         for (int i = 0; i < 3; i++) {
             int on = closed_selected == i;
             screen_fill(1, 7 + i * 2, cols > 2 ? cols - 2 : 0, 1, on ? BAR : BG);
-            screen_text(2, 7 + i * 2, items[i], on ? ACCENT : FG, on ? BAR : BG);
+            screen_text(2, 7 + i * 2, items[i], on ? ACCENT_TEXT : FG, on ? BAR : BG);
             ui_hit(1, 7 + i * 2, cols > 2 ? cols - 2 : 0, 1, HIT_ACTION + i);
         }
         screen_text(2, rows - 3, _("Up/Down: choose   Enter: open   r: new session   b: reboot   p: power off"), DIM, BG);
@@ -971,7 +973,7 @@ static void draw(void)
     } else {
         layout(); build_status(cols - 4);
         screen_fill(0, 1, cols, 1, focus == F_STATUS ? ACCENT : BAR);
-        screen_text(1, 1, _("Rescue status (Tab: change pane; arrows / wheel: scroll)"), focus == F_STATUS ? BG : FG,
+        screen_text(1, 1, _("Rescue status (Tab: change pane; arrows / wheel: scroll)"), focus == F_STATUS ? ON_ACCENT : FG,
                     focus == F_STATUS ? ACCENT : BAR);
         status_scroll = clamp(status_scroll, nstatus - status_h);
         ui_hit(0, 1, cols, status_h + 1, HIT_STATUS);
@@ -980,22 +982,22 @@ static void draw(void)
         if (selected < action_top) action_top = selected;
         if (selected >= action_top + list_h) action_top = selected - list_h + 1;
         screen_fill(0, list_y, action_w, 1, focus == F_ACTIONS ? ACCENT : BAR);
-        screen_text(1, list_y, _("Actions (Enter: run)"), focus == F_ACTIONS ? BG : FG, focus == F_ACTIONS ? ACCENT : BAR);
+        screen_text(1, list_y, _("Actions (Enter: run)"), focus == F_ACTIONS ? ON_ACCENT : FG, focus == F_ACTIONS ? ACCENT : BAR);
         char action_line[LINE_MAXIMUM];
         for (int i = 0; i < list_h && action_top + i < NACTIONS; i++) {
             int k = action_top + i, on = selected == k && focus == F_ACTIONS;
             screen_fill(0, list_y + 1 + i, action_w, 1, on ? BAR : BG);
             snprintf(action_line, sizeof action_line, "%s%s", _(actions[k]),
                      k == A_EXIT && (child.pid || exiting) ? _(" (cleanup required)") : "");
-            screen_text(1, list_y + 1 + i, action_line, on ? ACCENT : FG, on ? BAR : BG);
+            screen_text(1, list_y + 1 + i, action_line, on ? ACCENT_TEXT : FG, on ? BAR : BG);
             ui_hit(0, list_y + 1 + i, action_w, 1, HIT_ACTION + k);
         }
-        draw_output(); textsel_draw(BG, ACCENT);
+        draw_output(); textsel_draw(ON_ACCENT, ACCENT);
         /* TRANSLATORS: Tab, PgUp, PgDn, Ctrl+C, Ctrl+Q and F1 are key names; keep them. */
         screen_text(1, rows - 3, _("Tab: pane  PgUp/PgDn: output  Ctrl+C: copy  a: SSH  f: fingerprint  Ctrl+Q: exit  F1: help"),
                     DIM, BG);
     }
-    screen_text(1, rows - 1, notice, notice_error ? ERROR : ACCENT, BG);
+    screen_text(1, rows - 1, notice, notice_error ? ERROR : ACCENT_TEXT, BG);
     screen_bar(_("Rescue"), NULL);
     screen_flush();
 }

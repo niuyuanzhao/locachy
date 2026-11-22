@@ -4,11 +4,6 @@
 
 #include "base.h"
 
-/* The colours of ui.c's menus: the panel looks like them. */
-#define MENU_FG 0xD0D0D0
-#define MENU_BG 0x203048
-#define MENU_ON 0x80C0FF
-
 /* Weak, as in settings.c: a test that links this without keys.c reads no
  * modifiers and no pointer. One strong reference here would make the symbol
  * strong for every object it is linked with, also where settings.c asks
@@ -56,25 +51,28 @@ int ui_help(const char *title, const struct ui_help_line *lines)
         if (top < 0) top = 0;
         if (dirty || top != drawn_top || cols != drawn_cols || rows != drawn_rows) {
             if (cols > 0 && rows > 1) {
-                screen_fill(0, 1, cols, rows - 1, MENU_BG);
-                if (rows > 2) screen_text(1, 1, title, MENU_ON, MENU_BG);
+                uint32_t bg = theme_rgb(THEME_PANEL, 0x203048), fg = theme_rgb(THEME_FG, 0xD0D0D0);
+                uint32_t heading = theme_rgb(THEME_ACCENT_TEXT, 0x80C0FF);
+                screen_fill(0, 1, cols, rows - 1, bg);
+                if (rows > 2) screen_text(1, 1, title, heading, bg);
                 for (int r = 0; r < body && top + r < total; r++) {
                     int i = top + r;
                     const struct ui_help_line *l = NULL;
                     if (i < own) {
                         l = &lines[i];
                     } else if (i == own + gap) {
-                        screen_text(1, r + 2, _("Every program"), MENU_ON, MENU_BG);
+                        screen_text(1, r + 2, _("Every program"), heading, bg);
                     } else if (i > own + gap) {
                         l = &every_program[i - own - gap - 1];
                     }
                     if (l) {
                         char pad[256];
-                        screen_text(2, r + 2, ui_pad(pad, sizeof pad, l->keys, keyw), MENU_FG, MENU_BG);
-                        screen_text(4 + keyw, r + 2, _(l->what), MENU_FG, MENU_BG);
+                        screen_text(2, r + 2, ui_pad(pad, sizeof pad, l->keys, keyw), fg, bg);
+                        screen_text(4 + keyw, r + 2, _(l->what), fg, bg);
                     }
                 }
-                screen_text(close_col, rows - 1, close_label, MENU_BG, MENU_ON);
+                uint32_t on = theme_rgb(THEME_ON_ACCENT, 0x203048), accent = theme_rgb(THEME_ACCENT, 0x80C0FF);
+                screen_text(close_col, rows - 1, close_label, on, accent);
                 screen_flush();
             }
             drawn_top = top;
@@ -96,7 +94,7 @@ int ui_help(const char *title, const struct ui_help_line *lines)
             top = 0;
         } else if (key == K_EOL) {
             top = total;
-        } else if (key == K_SHOWN) {
+        } else if (key == K_SHOWN || key == K_REPAINT) {
             dirty = 1;
         } else if (key == K_POINTER) {
             const struct pointer_event *e = pointer_last ? pointer_last() : NULL;

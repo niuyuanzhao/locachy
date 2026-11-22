@@ -264,7 +264,7 @@ static int tool_button(int col, int row, const char *label, int id, int on, int 
 {
     int n = ui_cells(label) + 2;
     if (draw && col + n <= ncols) {
-        uint32_t bg = on ? ACCENT : 0x304860, fg = on ? BG : FG;
+        uint32_t bg = on ? ACCENT : theme_rgb(THEME_CONTROL, 0x304860), fg = on ? ON_ACCENT : FG;
         screen_fill(col, row, n, 1, bg);
         screen_text(col, row, "[", fg, bg);
         screen_text(col + 1, row, label, fg, bg);
@@ -657,8 +657,9 @@ static void pdf_overlays(int page)
         for (int k = 0; k < pg->nfield; k++) {
             const struct view_field *f = &pg->field[k];
             screen_box(page, f->x0, f->y0, f->x1, f->y1, &X0, &Y0, &X1, &Y1);
-            ovl_box(X0, Y0, X1, Y1, f->readonly ? 0x808080 : 0x80B0FF, 50);
-            if (f->required) ovl_frame(X0, Y0, X1, Y1, 1, 0xE04040, 256);
+            uint32_t hint = f->readonly ? theme_rgb(THEME_DIM, 0x808080) : theme_rgb(THEME_ACCENT, 0x80B0FF);
+            ovl_box(X0, Y0, X1, Y1, hint, 50);
+            if (f->required) ovl_frame(X0, Y0, X1, Y1, 1, theme_rgb(THEME_ERROR, 0xE04040), 256);
             if (page == fpage && k == findex) ovl_frame(X0, Y0, X1, Y1, 2, ACCENT, 256);
         }
     }
@@ -1051,12 +1052,12 @@ static int pdf_draw_bottom(int row)
     if (prompt.kind != P_PDF_TEXT) return 0;
     char question[200], counter[32] = "";
     fit(question, sizeof question, prompt.question, ncols / 3 > 8 ? ncols / 3 : 8);
-    screen_text(1, row, question, ACCENT, BG);
+    screen_text(1, row, question, LINK, BG);
     int col = 2 + utf_cells(question, 0, strlen(question));
     if (prompt.in.max) snprintf(counter, sizeof counter, "%d/%d", utf8_count(prompt.in.text), prompt.in.max);
     int width = ncols - col - (int)strlen(counter) - 2;
     if (width < 4) width = 4;
-    line_draw(&prompt.in, col, row, width, ui.focus == FOCUS_PROMPT, FG, 0x202838);
+    line_draw(&prompt.in, col, row, width, ui.focus == FOCUS_PROMPT, FG, FIELD);
     ui_hit(col, row, width, 1, HIT_PROMPT_INPUT);
     if (counter[0]) screen_text(col + width + 1, row, counter, DIM, BG);
     return 1;
@@ -2159,7 +2160,7 @@ static int pdf_sidebar_tabs(int col)
         int w = name == full ? fw : bw;
         if (!name) continue; /* also the forms bar's and Show Signatures Panel's */
         int on = ui.tab == t;
-        screen_text(col, 2, name, on ? BG : FG, on ? ACCENT : BG);
+        screen_text(col, 2, name, on ? ON_ACCENT : FG, on ? ACCENT : BG);
         ui_hit(col, 2, w, 1, HIT_TAB + t);
         col += w + 1;
     }
@@ -2223,7 +2224,7 @@ static int pdf_draw_sidebar(void)
             snprintf(line, sizeof line, "%s", slines[k].text);
         }
         int on = focus && k == *sel;
-        uint32_t bg = on ? ACCENT : BG, fg = on ? BG : mark ? ACCENT : FG;
+        uint32_t bg = on ? ACCENT : BG, fg = on ? ON_ACCENT : mark ? LINK : FG;
         fit(text, sizeof text, line, side_cols - 1);
         screen_fill(0, r, side_cols - 1, 1, bg);
         screen_text(0, r, text, fg, bg);

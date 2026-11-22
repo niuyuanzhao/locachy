@@ -34,6 +34,12 @@ static struct cell grid[ROWS][COLS];
 static int caret_x = -1, caret_y = -1, caret_w;
 static char bar_title[64];
 
+static struct theme_palette test_theme = {
+    .rgb = { [THEME_BG] = 0xF6F8FB, [THEME_FG] = 0x202934, [THEME_SURFACE] = 0xE9EEF5,
+             [THEME_PANEL] = 0xE4EBF4, [THEME_SELECTION] = 0xABC0D9, [THEME_ACCENT] = 0x3172C0 },
+};
+const struct theme_palette *theme_get(void) { return &test_theme; }
+
 void say(const char *fmt, ...)
 {
     (void)fmt;
@@ -761,6 +767,35 @@ static void test_brackets_comments(void)
     key('d', KEYS_CTRL);
     CHECK(text_is(t->doc, "--   x = 1\n")); /* Lua's mark: at the line's start */
     puts("PASS comments: Ctrl+D, Ctrl+Shift+D, Ctrl+/ toggle, a selection, each language's mark and place");
+}
+
+static void test_light_theme(void)
+{
+    reset();
+    struct tab *t = open_text("theme.c", "int a = 1;\nchar *s = \"hi\";\n");
+    struct doc *d = t->doc;
+    CHECK(d->syntax && syntax_parse(d->syntax, &d->buf, 0) == 1);
+    t->scrollbar = t->minimap = 1;
+    draw();
+    int y, h, x = gutter(t);
+    text_rows(0, &y, &h);
+    CHECK(grid[y][x].fg == 0x2980B9 && grid[y][x].bg == 0x2A2E32);
+    CHECK(minimap_cache[0].cells && minimap_cache[0].cells[0] == 0x232629);
+
+    test_theme.config.scheme = THEME_LIGHT;
+    draw();
+    CHECK(grid[y][x].fg == 0x165584 && grid[y][x].bg == 0xE9EEF5);
+    CHECK(grid[y][x + 4].fg == 0x202934 && grid[y + 1][x + 10].fg == 0x9F2929);
+    CHECK(minimap_cache[0].cells && minimap_cache[0].cells[0] == 0xF6F8FB);
+    t->anchor = 0;
+    t->cursor = 3;
+    draw();
+    CHECK(grid[y][x].fg == 0x202934 && grid[y][x].bg == 0xABC0D9);
+    test_theme.config.scheme = THEME_DARK;
+    draw();
+    CHECK(grid[y][x].fg == 0x2980B9 && grid[y][x].bg == 0x2D5C76);
+    CHECK(minimap_cache[0].cells && minimap_cache[0].cells[0] == 0x232629);
+    puts("PASS editor repaint: syntax, selection and minimap switch dark/light without reopening");
 }
 
 static void test_search_ui(void)
@@ -1630,12 +1665,14 @@ int main(int argc, char **argv)
     }
     ino = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
     if (argc == 3) {
-        test_correctness(argv[2]);
+        if (!strcmp(argv[2], "theme")) test_light_theme();
+        else test_correctness(argv[2]);
         return 0;
     }
     test_cursor();
     test_indent();
     test_brackets_comments();
+    test_light_theme();
     test_search_ui();
     test_view();
     test_tabs();

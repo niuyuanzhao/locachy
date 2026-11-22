@@ -23,12 +23,12 @@
 #include <time.h>
 #include <unistd.h>
 
-#define BG     0x101820
-#define PANEL  0x203048
-#define FG     0xD0D0D0
-#define ACCENT 0xD0E8FF
-#define DIM    0x90A8C0
-#define WARN   0xFFB080
+#define BG           theme_rgb(THEME_BG, 0x101820)
+#define PANEL        theme_rgb(THEME_PANEL, 0x203048)
+#define FG           theme_rgb(THEME_FG, 0xD0D0D0)
+#define ACCENT_TEXT  theme_rgb(THEME_ACCENT_TEXT, 0xD0E8FF)
+#define DIM          theme_rgb(THEME_DIM, 0x90A8C0)
+#define WARN         theme_rgb(THEME_WARNING, 0xFFB080)
 #define HANDSHAKE_S 8.0
 
 static volatile sig_atomic_t stop;
@@ -547,12 +547,12 @@ static void setup_draw(void)
     screen_bar(_("Extended display"), NULL);
     int rows = screen_rows(), cols = screen_cols();
     if (selected >= setup.count) selected = setup.count ? setup.count - 1 : 0;
-    screen_text(1, 2, _("Connect a Thunderbolt/USB4 link to the Mac."), ACCENT, BG);
+    screen_text(1, 2, _("Connect a Thunderbolt/USB4 link to the Mac."), ACCENT_TEXT, BG);
     if (setup.state == EXTDISPLAY_SETUP_LIST && setup.count > 0 && !diagnostics) {
         for (int i = 0; i < setup.count && i < 8; i++) {
             snprintf(text, sizeof text, "%s %s  %s", i == selected ? ">" : " ", setup.ifaces[i].name,
                      setup.ifaces[i].carrier ? _("link ready") : _("waiting for link"));
-            screen_text(1, 4 + i, text, i == selected ? ACCENT : FG, BG);
+            screen_text(1, 4 + i, text, i == selected ? ACCENT_TEXT : FG, BG);
         }
     }
     if (setup.count == 0) {
@@ -572,7 +572,7 @@ static void setup_draw(void)
     int top = rows - 8;
     screen_fill(0, top, cols, 3, PANEL);
     if (setup.state == EXTDISPLAY_SETUP_WAITING) {
-        screen_text(1, top, _("Waiting for the Mac service to connect automatically..."), ACCENT, PANEL);
+        screen_text(1, top, _("Waiting for the Mac service to connect automatically..."), ACCENT_TEXT, PANEL);
         if (diagnostics) {
             snprintf(text, sizeof text, _("Interface %s   Address %s   Port %s"), setup.pairing, setup.linklocal, setup.port);
             screen_text(1, top + 1, text, DIM, PANEL);
@@ -582,7 +582,7 @@ static void setup_draw(void)
     }
     screen_fill(0, rows - 3, cols, 3, PANEL);
     snprintf(text, sizeof text, _("Status: %s"), _(setup_state_text()));
-    screen_text(1, rows - 3, text, ACCENT, PANEL);
+    screen_text(1, rows - 3, text, ACCENT_TEXT, PANEL);
     if (setup.error[0]) {
         screen_text(1, rows - 2,
                     strcmp(setup.error, "busy") == 0 ? _("The broker is busy: a pairing is still active.") : setup.error,

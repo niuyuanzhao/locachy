@@ -27,6 +27,12 @@ static char grid[ROWS][COLS + 1];
 static int shape = -1, flushes;
 static int screen_w = SW, screen_h = SH, window_top;
 
+static struct theme_palette test_theme = {
+    .rgb = { [THEME_BG] = 0xF6F8FB, [THEME_FG] = 0x202934, [THEME_DESKTOP] = 0xD6DFE9,
+             [THEME_ACCENT] = 0x275C9F, [THEME_ON_ACCENT] = 0xFFFFFF },
+};
+const struct theme_palette *theme_get(void) { return &test_theme; }
+
 int screen_open(const char *font) { (void)font; return 1; }
 int screen_cols(void) { return COLS; }
 int screen_rows(void) { return ROWS; }
@@ -2778,10 +2784,37 @@ static void image_escaped(void)
     printf("PASS an image by itself: Esc browses its folder, it selected\n");
 }
 
+/* A view canvas with synthetic document pixels; no renderer or user setup
+ * is needed to distinguish them from the surrounding chrome. */
+static void test_theme_pixels(void)
+{
+    const uint32_t page[] = { 0xFFFFFF, 0xFE6032, 0x131E45 };
+    ncols = COLS; nrows = ROWS;
+    W = SW; H = SH; cw = CW; ch = CH; top = TOP;
+    ax = 0; ay = TOP + 2 * CH; aw = SW; ah = SH - ay;
+    scratch = realloc(scratch, sizeof page);
+    assert(scratch);
+    scratch_size = sizeof page / sizeof *page;
+    for (int light = 0; light <= 1; light++) {
+        test_theme.config.scheme = light ? THEME_LIGHT : THEME_DARK;
+        draw();
+        memcpy(scratch, page, sizeof page);
+        finish(8, ay + 8, 3, 1);
+        assert(pic[ay + 8][7] == (light ? 0xD6DFE9u : 0x2E3238u));
+        assert(!memcmp(&pic[ay + 8][8], page, sizeof page) && paper_rgb() == 0xFFFFFF);
+        assert(tools[T_HIGHLIGHT].rgb == 0xFFFF00 && tools[T_INK].rgb == 0x00FF00);
+        assert(colors[0].rgb == 0xFF0000);
+    }
+    test_theme.config.scheme = THEME_DARK;
+    puts("PASS viewer repaint: light chrome with unchanged document pixels, paper and annotation palette");
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 2 && !strcmp(argv[1], "--theme")) { test_theme_pixels(); return 0; }
     assert((argc == 3 || argc == 4) && geteuid() == 0);
     setvbuf(stdout, NULL, _IOLBF, 0);
+    test_theme_pixels();
     samples = argv[1];
     pdf_dir = argc == 4 ? argv[3] : NULL;
     struct passwd *pw = getpwuid(VIEW_USER);

@@ -50,14 +50,16 @@
 #include "internal.h"
 #include "textsel.h"
 
-#define FG     0xD0D0D0
-#define BG     0x101820
-#define ACCENT 0x80C0FF
-#define DIM    0x808890
-#define ERROR  0xFF9090
-#define WARN   0xE0C060
-#define PANE   0x05080C /* the output pane, as packages' */
-#define SIDE_BG 0x304860
+#define FG           theme_rgb(THEME_FG, 0xD0D0D0)
+#define BG           theme_rgb(THEME_BG, 0x101820)
+#define ACCENT       theme_rgb(THEME_ACCENT, 0x80C0FF)
+#define ACCENT_TEXT  theme_rgb(THEME_ACCENT_TEXT, 0x80C0FF)
+#define ON_ACCENT    theme_rgb(THEME_ON_ACCENT, 0x101820)
+#define DIM          theme_rgb(THEME_DIM, 0x808890)
+#define ERROR        theme_rgb(THEME_ERROR, 0xFF9090)
+#define WARN         theme_rgb(THEME_WARNING, 0xE0C060)
+#define PANE         theme_rgb(THEME_OUTPUT, 0x05080C) /* the output pane, as packages' */
+#define SIDE_BG      theme_rgb(THEME_INACTIVE, 0x304860)
 
 #ifndef INSTALL_CMD /* the places: another for each in tools/test-installer.c */
 #define INSTALL_CMD "/usr/local/bin/locachy-install"
@@ -1245,11 +1247,11 @@ static int prompt(const char *label, char *text, size_t size, int hidden)
         screen_fill(0, screen_rows() - 1, screen_cols(), 1, BG);
         if (all) { /* Ctrl+A: all of it selected */
             snprintf(line, sizeof line, "%s ", label);
-            screen_text(1, screen_rows() - 1, line, ACCENT, BG);
-            screen_text(1 + ui_cells(line), screen_rows() - 1, shown, BG, ACCENT);
+            screen_text(1, screen_rows() - 1, line, ACCENT_TEXT, BG);
+            screen_text(1 + ui_cells(line), screen_rows() - 1, shown, ON_ACCENT, ACCENT);
         } else {
             snprintf(line, sizeof line, "%s %.*s_%s", label, (int)pos, shown, shown + pos);
-            screen_text(1, screen_rows() - 1, line, ACCENT, BG);
+            screen_text(1, screen_rows() - 1, line, ACCENT_TEXT, BG);
         }
         screen_flush();
         int key = key_get(), mods = keys_modifiers(), act = key_action(key, mods);
@@ -1293,7 +1295,7 @@ static void screen_title(const char *title)
 {
     screen_fill(0, 0, screen_cols(), screen_rows(), BG);
     screen_bar(_("installer"), NULL);
-    screen_text(2, 2, title, ACCENT, BG);
+    screen_text(2, 2, title, ACCENT_TEXT, BG);
 }
 
 /* One of n items, filtered by what is typed (as settings' time zones):
@@ -1320,7 +1322,7 @@ static int pick(const char *title, const char *const *items, int n, int current)
         for (int k = 0; k < height && top + k < m; k++) {
             int on = top + k == sel;
             screen_fill(2, list + k, screen_cols() - 4, 1, on ? ACCENT : BG);
-            screen_text(4, list + k, items[match[top + k]], on ? BG : FG, on ? ACCENT : BG);
+            screen_text(4, list + k, items[match[top + k]], on ? ON_ACCENT : FG, on ? ACCENT : BG);
         }
         screen_flush();
         int key = key_get(), act = key_action(key, keys_modifiers());
@@ -1403,7 +1405,7 @@ static int yes(const char *question)
         if (redraw) {
             int row = screen_rows() - 1;
             screen_fill(0, row, screen_cols(), 1, BG);
-            screen_text(1, row, line, ACCENT, BG);
+            screen_text(1, row, line, ACCENT_TEXT, BG);
             /* TRANSLATORS: Y and N are the keys; keep "Y: " and "N: ". */
             int col = ui_button(2 + ui_cells(line), row, _("Y: yes"), 'y');
             ui_button(col, row, _("N: no"), 'n');
@@ -1736,7 +1738,7 @@ static int check_choices(void)
         return 0;
     }
     screen_fill(0, screen_rows() - 1, screen_cols(), 1, BG);
-    screen_text(1, screen_rows() - 1, _("Checking the choices with locachy-install --check..."), ACCENT, BG);
+    screen_text(1, screen_rows() - 1, _("Checking the choices with locachy-install --check..."), ACCENT_TEXT, BG);
     screen_flush();
     int status = capture(a.v, out, sizeof out, 1);
     if (status == 0) return 1;
@@ -1771,7 +1773,7 @@ static int confirm_install(void)
     add_wrapped(E_NOTE, _("This cannot be undone. Y erases and installs; N goes back to the summary."), width);
     screen_title("");
     for (int i = 0; i < nentries && 3 + i < screen_rows() - 2; i++) {
-        uint32_t fg = entries[i].id == E_TITLE ? ACCENT : entries[i].id == E_WARN ? ERROR : FG;
+        uint32_t fg = entries[i].id == E_TITLE ? ACCENT_TEXT : entries[i].id == E_WARN ? ERROR : FG;
         screen_text(3, 3 + i, entries[i].text, fg, BG);
     }
     return yes(_("Erase and install?"));
@@ -1947,7 +1949,7 @@ static void draw_entries(int px)
         const struct entry *e = &entries[scroll + r];
         int row = PAGE_TOP + r;
         if (e->id == E_TITLE) {
-            screen_text(px + 1, row, e->text, ACCENT, BG);
+            screen_text(px + 1, row, e->text, ACCENT_TEXT, BG);
         } else if (e->id == E_NOTE || e->id == E_GAP) {
             screen_text(px + 2, row, e->text, DIM, BG);
         } else if (e->id == E_WARN) {
@@ -1956,7 +1958,7 @@ static void draw_entries(int px)
             int on = e->id == selected && (in_page || mode == M_START);
             uint32_t fg = e->id >= R_PROBLEM ? ERROR : FG, bg = on ? ACCENT : BG;
             screen_fill(px, row, width, 1, bg);
-            screen_text(px + 2, row, e->text, on ? BG : fg, bg);
+            screen_text(px + 2, row, e->text, on ? ON_ACCENT : fg, bg);
             ui_hit(px, row, width, 1, e->id);
         }
     }
@@ -1970,10 +1972,10 @@ static void draw_sidebar(int width)
         uint32_t bg = on ? (in_page ? SIDE_BG : ACCENT) : BG;
         snprintf(line, sizeof line, "%c %s", bad ? '!' : ' ', _(step_names[s]));
         screen_fill(0, PAGE_TOP + s, width, 1, bg);
-        screen_text(1, PAGE_TOP + s, line, on && !in_page ? BG : bad ? ERROR : FG, bg);
+        screen_text(1, PAGE_TOP + s, line, on && !in_page ? ON_ACCENT : bad ? ERROR : FG, bg);
         ui_hit(0, PAGE_TOP + s, width, 1, HIT_STEP + s);
     }
-    screen_fill(width, PAGE_TOP, 1, screen_rows() - 2 - PAGE_TOP, SIDE_BG);
+    screen_fill(width, PAGE_TOP, 1, screen_rows() - 2 - PAGE_TOP, theme_rgb(THEME_BORDER, 0x304860));
 }
 
 static void elapsed(double seconds, char *out, size_t size)
@@ -2099,7 +2101,7 @@ static int select_pointer(const struct pointer_event *e, int on_button)
 
 static uint32_t log_color(const char *s)
 {
-    if (strncmp(s, "==", 2) == 0 || strncmp(s, "::", 2) == 0) return ACCENT;
+    if (strncmp(s, "==", 2) == 0 || strncmp(s, "::", 2) == 0) return ACCENT_TEXT;
     if (strcasestr(s, "error") || strcasestr(s, "failed") || strcasestr(s, "fatal")) return ERROR;
     return strcasestr(s, "warning") ? WARN : FG;
 }
@@ -2114,10 +2116,10 @@ static void draw_progress(void)
     elapsed(until - started, t, sizeof t);
     if (mode == M_RUN) {
         snprintf(line, sizeof line, resumed_run ? _("Continuing the installation   %s") : _("Installing LOCachy   %s"), t);
-        textsel_put(2, r, line, ACCENT, BG);
+        textsel_put(2, r, line, ACCENT_TEXT, BG);
     } else if (mode == M_DONE) {
         snprintf(line, sizeof line, _("LOCachy is installed (%s). Take the installation medium out, then reboot."), t);
-        textsel_put(2, r, line, ACCENT, BG);
+        textsel_put(2, r, line, ACCENT_TEXT, BG);
     } else if (nwanted) {
         /* Not a failure: a person's decision, which nothing makes by itself. */
         textsel_put(2, r, _("Waiting for you: source signing keys to trust. None is trusted by itself."), WARN, BG);
@@ -2127,7 +2129,7 @@ static void draw_progress(void)
             textsel_put(4, ++r, line, FG, BG);
         }
         textsel_put(2, ++r, _("Check each with its upstream project; then trust them in the terminal (t):"), FG, BG);
-        textsel_put(4, ++r, trust_command, ACCENT, BG);
+        textsel_put(4, ++r, trust_command, ACCENT_TEXT, BG);
         textsel_put(2, ++r, _("Ctrl+C copies the command; c then continues where the installation stopped."), DIM,
                     BG);
     } else {
@@ -2159,7 +2161,7 @@ static void draw_progress(void)
         } else {
             snprintf(line, sizeof line, "%s %8s", pad, t);
         }
-        textsel_put(4, r, line, skipped ? DIM : now_on ? ACCENT : stage == s && mode == M_FAILED ? ERROR : FG, BG);
+        textsel_put(4, r, line, skipped ? DIM : now_on ? ACCENT_TEXT : stage == s && mode == M_FAILED ? ERROR : FG, BG);
     }
     r++;
     int top = r, height = rows - 2 - top;
@@ -2169,12 +2171,13 @@ static void draw_progress(void)
     char where[64] = "";
     if (n) snprintf(where, sizeof where, _("lines %d-%d of %d"), total - log_from - n + 1, total - log_from, total);
     screen_fill(0, top, cols, height, PANE);
-    screen_fill(0, top, cols, 1, DIM);
+    uint32_t bg = theme_rgb(THEME_PANEL, 0x808890), fg = theme_rgb(THEME_FG, 0x101820);
+    screen_fill(0, top, cols, 1, bg);
     char logp[512];
     log_path(logp, sizeof logp);
     /* TRANSLATORS: PgUp/PgDn and Ctrl+A, Ctrl+C are key names; keep them. */
     snprintf(line, sizeof line, _("Output: %s   %s   Ctrl+A, Ctrl+C: copy all   PgUp/PgDn: scroll"), logp, where);
-    textsel_put(1, top, line, BG, DIM);
+    textsel_put(1, top, line, fg, bg);
     ui_hit(0, top, cols, height, HIT_PANE);
     for (int i = 0; i < n; i++) textsel_put(2, top + 1 + i, lines[i], log_color(lines[i]), PANE);
     if (log_from > total) log_from = total;
@@ -2230,10 +2233,10 @@ static void draw(void)
     } else {
         textsel_frame();
         draw_progress();
-        textsel_draw(BG, ACCENT);
+        textsel_draw(ON_ACCENT, ACCENT);
     }
     draw_buttons();
-    screen_text(1, screen_rows() - 1, notice, notice_error ? ERROR : ACCENT, BG);
+    screen_text(1, screen_rows() - 1, notice, notice_error ? ERROR : ACCENT_TEXT, BG);
     screen_flush();
 }
 

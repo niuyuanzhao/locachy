@@ -32,9 +32,6 @@
 #include "fontmatch.h"
 
 #define PSF2_MAGIC 0x864AB572u
-#define FG    0xFFD0D0D0u
-#define DIM   0xFF98A8C0u /* the second row */
-#define LINE  0xFF3A4C68u /* between blocks */
 
 struct panel_font {
     int size, bold, loaded, mag; /* w and h: drawn, each font pixel mag x mag */
@@ -374,7 +371,10 @@ void panel_draw(uint32_t *px, int w, int h, int stride, const char *title, const
 {
     const struct panel_font *row = panel_font(h / 2, 0), *big = panel_font(h * 2 / 3, 1);
     int gap = h * 5 / 9, inset = h / 9;
-    panel_fill(px, w, h, stride, 0, 0, w, h, PANEL_BG);
+    uint32_t bg = theme_argb(THEME_PANEL, PANEL_BG), fg = theme_argb(THEME_FG, 0xFFD0D0D0u);
+    uint32_t dim = theme_argb(THEME_DIM, 0xFF98A8C0u); /* the second row */
+    uint32_t line_color = theme_argb(THEME_BORDER, 0xFF3A4C68u); /* between blocks */
+    panel_fill(px, w, h, stride, 0, 0, w, h, bg);
     *mid_x0 = *mid_x1 = 0;
     nhits = 0;
     if (!big) {
@@ -382,7 +382,7 @@ void panel_draw(uint32_t *px, int w, int h, int stride, const char *title, const
     }
     int bw, bh;
     panel_font_size(big, &bw, &bh);
-    panel_text(px, w, h, stride, bw, (h - bh) / 2, "LOCachy", FG, PANEL_BG, big);
+    panel_text(px, w, h, stride, bw, (h - bh) / 2, "LOCachy", fg, bg, big);
     int lx = panel_text_width("LOCachy", big) + 2 * bw;
     hit(0, lx < w ? lx : w, PANEL_BLOCK_LOCACHY); /* with the space on each side of it */
     *mid_x0 = *mid_x1 = lx;
@@ -391,7 +391,7 @@ void panel_draw(uint32_t *px, int w, int h, int stride, const char *title, const
         base_status(ime, line, sizeof line);
         int x = w - panel_text_width(line, big) - 2 * bw;
         if (x > lx) {
-            panel_text(px, w, h, stride, x, (h - bh) / 2, line, FG, PANEL_BG, big);
+            panel_text(px, w, h, stride, x, (h - bh) / 2, line, fg, bg, big);
             *mid_x1 = x;
         }
         return;
@@ -427,11 +427,11 @@ void panel_draw(uint32_t *px, int w, int h, int stride, const char *title, const
             break;
         }
         hit(x, x + width, right[i].id);
-        panel_text(px, w, h, stride, x, y0, right[i].top, FG, PANEL_BG, row);
-        panel_text(px, w, h, stride, x, y0 + rh, right[i].bottom, DIM, PANEL_BG, row);
+        panel_text(px, w, h, stride, x, y0, right[i].top, fg, bg, row);
+        panel_text(px, w, h, stride, x, y0 + rh, right[i].bottom, dim, bg, row);
         *mid_x1 = x;
         x -= gap;
-        panel_fill(px, w, h, stride, x + gap / 2, inset, 1, h - 2 * inset, LINE);
+        panel_fill(px, w, h, stride, x + gap / 2, inset, 1, h - 2 * inset, line_color);
     }
     for (int i = 0; i < 3; i++) {
         int width = block_width(&left[i], row);
@@ -439,11 +439,11 @@ void panel_draw(uint32_t *px, int w, int h, int stride, const char *title, const
             break;
         }
         if (i > 0) {
-            panel_fill(px, w, h, stride, lx - gap / 2, inset, 1, h - 2 * inset, LINE);
+            panel_fill(px, w, h, stride, lx - gap / 2, inset, 1, h - 2 * inset, line_color);
         }
         hit(lx, lx + width, left[i].id);
-        panel_text(px, w, h, stride, lx, y0, left[i].top, FG, PANEL_BG, row);
-        panel_text(px, w, h, stride, lx, y0 + rh, left[i].bottom, DIM, PANEL_BG, row);
+        panel_text(px, w, h, stride, lx, y0, left[i].top, fg, bg, row);
+        panel_text(px, w, h, stride, lx, y0 + rh, left[i].bottom, dim, bg, row);
         lx += width + gap;
         *mid_x0 = lx;
     }

@@ -13,8 +13,8 @@
 
 #include "base.h"
 
-#define FG    0xE0D8C8
-#define BG    0x181410
+#define FG           theme_rgb(THEME_FG, 0xE0D8C8)
+#define BG           theme_rgb(THEME_BG, 0x181410)
 #define MAX_LINES 8
 
 static uint64_t *mem;

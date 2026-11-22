@@ -39,10 +39,10 @@
 #include "duress.h"
 #include "auth.h"
 
-#define FG     0xD0D0D0
-#define BG     0x101820
-#define ACCENT 0x80C0FF
-#define ERROR  0xFF9080
+#define FG           theme_rgb(THEME_FG, 0xD0D0D0)
+#define BG           theme_rgb(THEME_BG, 0x101820)
+#define ACCENT_TEXT  theme_rgb(THEME_ACCENT_TEXT, 0x80C0FF)
+#define ERROR        theme_rgb(THEME_ERROR, 0xFF9080)
 
 static struct way {
     const char *label, *service, *rc; /* rc: the rc.conf switch; NULL: always */
@@ -180,7 +180,7 @@ static void draw_output(void)
         centered(r++, when, FG);
     }
     if (spacious) r++;
-    if (show_user) centered(r++, user, ACCENT);
+    if (show_user) centered(r++, user, ACCENT_TEXT);
     if (spacious) r++;
     struct auth *p = &ways[0].a;
     const char *ask = p->asking ? p->prompt : setting ? _("New password:") : _("Password:");

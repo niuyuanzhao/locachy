@@ -123,14 +123,17 @@ static int seat_window(const char *program, const char *target, char *why, size_
 #define DRIVES_CONTROL "/run/locachy/drives/control" /* drives.c's */
 #endif
 
-#define FG     0xD0D0D0
-#define BG     0x101820
-#define ACCENT 0x80C0FF
-#define DIM    0x808890
-#define ERROR  0xFF9090
-#define MARK   0x2C4A68 /* a marked item's background */
-#define PANE_BG 0x141E28 /* the inactive pane's */
-#define BAR_BG 0x1C2836 /* the toolbar's, the headers', the tabs' */
+#define FG           theme_rgb(THEME_FG, 0xD0D0D0)
+#define BG           theme_rgb(THEME_BG, 0x101820)
+#define ACCENT       theme_rgb(THEME_ACCENT, 0x80C0FF)
+#define ACCENT_TEXT  theme_rgb(THEME_ACCENT_TEXT, 0x80C0FF)
+#define ON_ACCENT    theme_rgb(THEME_ON_ACCENT, 0x101820)
+#define DIM          theme_rgb(THEME_DIM, 0x808890)
+#define ERROR        theme_rgb(THEME_ERROR, 0xFF9090)
+#define BORDER       theme_rgb(THEME_BORDER, 0x80C0FF)
+#define MARK         theme_rgb(THEME_SELECTION, 0x2C4A68) /* a marked item's background */
+#define PANE_BG      theme_rgb(THEME_INACTIVE, 0x141E28) /* the inactive pane's */
+#define BAR_BG       theme_rgb(THEME_SURFACE, 0x1C2836) /* the toolbar's, the headers', the tabs' */
 #define SIDE   18 /* sidebar width, columns */
 #define MAX_FILES 100000
 #define MAX_PLACES 24
@@ -733,8 +736,8 @@ static void copy_ask(int closing)
         if (key == 0) {
             continue;
         }
-        if (key == K_SHOWN) {
-            output_ready();
+        if (key == K_SHOWN || key == K_REPAINT) {
+            if (key == K_SHOWN) output_ready();
             draw();
             continue;
         }
@@ -785,10 +788,12 @@ static int copy_tick(void)
             copying.stop = COPY_TERMINATED;
         } else if (key == 0) {
             break;
-        } else if (key == K_SHOWN) {
-            drag_stop();
-            pull.on = 0;
-            output_ready();
+        } else if (key == K_SHOWN || key == K_REPAINT) {
+            if (key == K_SHOWN) {
+                drag_stop();
+                pull.on = 0;
+                output_ready();
+            }
             copy_show();
         } else {
             int act = key_action(key, keys_modifiers());
@@ -3130,6 +3135,7 @@ static void frame_px(int x, int y, int w, int h, uint32_t rgb)
  * tab, or a page with its folded corner and a badge of its kind. */
 static void draw_icon(int col, int row, int cols, int rows_box, const struct file *f, uint32_t bg, int on)
 {
+    /* Keep the file-kind artwork distinct from the surrounding UI chrome. */
     static const uint32_t ink[] = {
         [KIND_FOLDER] = 0x58A8F0, [KIND_FILE] = 0x90A0B0,  [KIND_TEXT] = 0x78B890,
         [KIND_IMAGE] = 0x68C088,  [KIND_AUDIO] = 0xB088E8, [KIND_VIDEO] = 0xE088B8,
@@ -3170,9 +3176,9 @@ static void draw_icon(int col, int row, int cols, int rows_box, const struct fil
     }
     if (cols >= 6) {
         if (f->marked) {
-            screen_text(col, row, "*", on ? BG : ACCENT, bg);
+            screen_text(col, row, "*", on ? ON_ACCENT : ACCENT_TEXT, bg);
         } else if (f->link) {
-            screen_text(col + cols - 1, row + rows_box - 1, "@", on ? BG : ACCENT, bg);
+            screen_text(col + cols - 1, row + rows_box - 1, "@", on ? ON_ACCENT : ACCENT_TEXT, bg);
         }
     }
 }
@@ -3208,7 +3214,7 @@ static void draw_details_header(const struct pane *p, int which, int col, int ro
     screen_fill(col, row, cols, 1, BAR_BG);
     snprintf(label, sizeof label, "  %s%s", _("Name"), sk == SORT_NAME ? arrow : "");
     pad(buf, sizeof buf, label, dc->name_w + 3);
-    screen_text(col, row, buf, sk == SORT_NAME ? ACCENT : FG, BAR_BG);
+    screen_text(col, row, buf, sk == SORT_NAME ? ACCENT_TEXT : FG, BAR_BG);
     ui_hit(col, row, dc->name_w + 3, 1, base + SORT_NAME);
     int c = col + dc->name_w + 3;
     if (dc->size_w && c + dc->size_w <= col + cols) {
@@ -3216,7 +3222,7 @@ static void draw_details_header(const struct pane *p, int which, int col, int ro
         fit(cut, sizeof cut, label, 10);
         int pad_left = clampi(10 - ui_cells(cut), 0, 10);
         snprintf(buf, sizeof buf, "%*s%.40s  ", pad_left, "", cut);
-        screen_text(c, row, buf, sk == SORT_SIZE ? ACCENT : FG, BAR_BG);
+        screen_text(c, row, buf, sk == SORT_SIZE ? ACCENT_TEXT : FG, BAR_BG);
         ui_hit(c, row, dc->size_w, 1, base + SORT_SIZE);
         c += dc->size_w;
     }
@@ -3224,28 +3230,28 @@ static void draw_details_header(const struct pane *p, int which, int col, int ro
         int dkey = trash ? SORT_DELETED : SORT_MTIME;
         snprintf(label, sizeof label, "%s%s", trash ? _("Deleted") : _("Modified"), sk == dkey ? arrow : "");
         pad(buf, sizeof buf, label, dc->mtime_w);
-        screen_text(c, row, buf, sk == dkey ? ACCENT : FG, BAR_BG);
+        screen_text(c, row, buf, sk == dkey ? ACCENT_TEXT : FG, BAR_BG);
         ui_hit(c, row, dc->mtime_w, 1, base + SORT_MTIME);
         c += dc->mtime_w;
     }
     if (dc->ext_w && c + dc->ext_w <= col + cols) {
         snprintf(label, sizeof label, " %s%s", _("Ext"), sk == SORT_EXT ? arrow : "");
         pad(buf, sizeof buf, label, dc->ext_w);
-        screen_text(c, row, buf, sk == SORT_EXT ? ACCENT : FG, BAR_BG);
+        screen_text(c, row, buf, sk == SORT_EXT ? ACCENT_TEXT : FG, BAR_BG);
         ui_hit(c, row, dc->ext_w, 1, base + SORT_EXT);
         c += dc->ext_w;
     }
     if (dc->perm_w && c + dc->perm_w <= col + cols) {
         snprintf(label, sizeof label, " %s%s", _("Perms"), sk == SORT_PERM ? arrow : "");
         pad(buf, sizeof buf, label, dc->perm_w);
-        screen_text(c, row, buf, sk == SORT_PERM ? ACCENT : FG, BAR_BG);
+        screen_text(c, row, buf, sk == SORT_PERM ? ACCENT_TEXT : FG, BAR_BG);
         ui_hit(c, row, dc->perm_w, 1, base + SORT_PERM);
         c += dc->perm_w;
     }
     if (dc->owner_w && c + dc->owner_w <= col + cols) {
         snprintf(label, sizeof label, " %s%s", _("Owner"), sk == SORT_OWNER ? arrow : "");
         pad(buf, sizeof buf, label, dc->owner_w);
-        screen_text(c, row, buf, sk == SORT_OWNER ? ACCENT : FG, BAR_BG);
+        screen_text(c, row, buf, sk == SORT_OWNER ? ACCENT_TEXT : FG, BAR_BG);
         ui_hit(c, row, dc->owner_w, 1, base + SORT_OWNER);
         c += dc->owner_w;
     }
@@ -3254,7 +3260,7 @@ static void draw_details_header(const struct pane *p, int which, int col, int ro
         const char *tname = trash ? _("Original Location") : search ? _("Location") : _("Type");
         snprintf(label, sizeof label, "%s%s", tname, sk == tkey ? arrow : "");
         pad(buf, sizeof buf, label, dc->type_w);
-        screen_text(c + 2, row, buf, sk == tkey ? ACCENT : FG, BAR_BG);
+        screen_text(c + 2, row, buf, sk == tkey ? ACCENT_TEXT : FG, BAR_BG);
         ui_hit(c + 2, row, dc->type_w, 1, base + SORT_TYPE);
     }
 }
@@ -3375,7 +3381,7 @@ static void draw_pane(struct pane *p, int which)
         int scx = col + cx - sx_cells, scy = row + cy - sy_cells;
         int on = active && i == p->sel;
         uint32_t bg = on ? ACCENT : f->marked ? MARK : pane_bg;
-        uint32_t fg = on ? BG : f->dir ? ACCENT : f->exec ? 0x90E890 : FG;
+        uint32_t fg = on ? ON_ACCENT : f->dir ? ACCENT_TEXT : f->exec ? theme_rgb(THEME_SUCCESS, 0x90E890) : FG;
         char label[300], cut[300], line[1024];
         snprintf(label, sizeof label, "%s%s", shown_name(f), f->dir ? "/" : "");
 
@@ -3398,7 +3404,7 @@ static void draw_pane(struct pane *p, int which)
                 screen_text(scx + (cw - w2) / 2, scy + icon_rows + 1, cut, fg, bg);
             }
             if (!active && i == p->sel) {
-                frame_px(scx * cell_w, top_px + scy * cell_h, cw * cell_w, ch * cell_h, ACCENT);
+                frame_px(scx * cell_w, top_px + scy * cell_h, cw * cell_w, ch * cell_h, BORDER);
             }
         } else if (p->view == VIEW_COMPACT) {
             int max_lbl = tc > 6 ? tc - 5 : (tc > 3 ? tc - 3 : 1);
@@ -3412,10 +3418,10 @@ static void draw_pane(struct pane *p, int which)
                 char sub[32], scut[32];
                 compact_sub(p, i, sub, sizeof sub);
                 fit(scut, sizeof scut, sub, max_lbl);
-                screen_text(scx + 3, scy + 1, scut, on ? BG : DIM, bg);
+                screen_text(scx + 3, scy + 1, scut, on ? ON_ACCENT : DIM, bg);
             }
             if (!active && i == p->sel) {
-                frame_px(scx * cell_w, top_px + scy * cell_h, cw * cell_w, ch * cell_h, ACCENT);
+                frame_px(scx * cell_w, top_px + scy * cell_h, cw * cell_w, ch * cell_h, BORDER);
             }
         } else {
             screen_fill(ix, iy, cols, tr, bg);
@@ -3480,10 +3486,10 @@ static void draw_pane(struct pane *p, int which)
                 else if (is_search(p)) { relative_search_dir(p, f, rel, sizeof rel); sub = rel; }
                 else sub = item_type(p, i);
                 fit(cut, sizeof cut, sub, cols - 4);
-                screen_text(ix + 3, iy + 1, cut, on ? BG : DIM, bg);
+                screen_text(ix + 3, iy + 1, cut, on ? ON_ACCENT : DIM, bg);
             }
             if (!active && i == p->sel) {
-                frame_px(ix * cell_w, top_px + iy * cell_h, cols * cell_w, tr * cell_h, ACCENT);
+                frame_px(ix * cell_w, top_px + iy * cell_h, cols * cell_w, tr * cell_h, BORDER);
             }
         }
         ui_hit(scx, scy, cw, ch, hit_base + i);
@@ -3498,11 +3504,11 @@ static void draw_toolbar(void)
     int cols = screen_cols();
     screen_fill(0, 1, cols, 1, BAR_BG);
     int c = 1;
-    screen_text(c, 1, "<", P->nback ? ACCENT : DIM, BAR_BG);
+    screen_text(c, 1, "<", P->nback ? ACCENT_TEXT : DIM, BAR_BG);
     ui_hit(c, 1, 1, 1, HIT_KEY + MODS(KEYS_ALT) + K_LEFT);
-    screen_text(c + 2, 1, ">", P->nfwd ? ACCENT : DIM, BAR_BG);
+    screen_text(c + 2, 1, ">", P->nfwd ? ACCENT_TEXT : DIM, BAR_BG);
     ui_hit(c + 2, 1, 1, 1, HIT_KEY + MODS(KEYS_ALT) + K_RIGHT);
-    screen_text(c + 4, 1, "^", !is_trash(P) && strcmp(P->cwd, "/") != 0 ? ACCENT : DIM, BAR_BG);
+    screen_text(c + 4, 1, "^", !is_trash(P) && strcmp(P->cwd, "/") != 0 ? ACCENT_TEXT : DIM, BAR_BG);
     ui_hit(c + 4, 1, 1, 1, HIT_KEY + MODS(KEYS_ALT) + K_UP);
     c += 6;
 
@@ -3512,7 +3518,7 @@ static void draw_toolbar(void)
         int len = ui_cells(label) + 2, on = P->view == v;
         right -= len + 1;
         screen_fill(right, 1, len, 1, on ? ACCENT : BAR_BG);
-        screen_text(right + 1, 1, label, on ? BG : FG, on ? ACCENT : BAR_BG);
+        screen_text(right + 1, 1, label, on ? ON_ACCENT : FG, on ? ACCENT : BAR_BG);
         ui_hit(right, 1, len, 1, HIT_VIEW + v);
     }
     /* F5's button, where the path keeps its room: the views come first. */
@@ -3537,7 +3543,7 @@ static void draw_toolbar(void)
     snprintf(raw, sizeof raw, "%s%s%s%s%s", prefix, cwd, P->filter[0] ? _("   filter: ") : "", P->filter,
              nclip ? (clip_cut ? _("   (cut: Ctrl+V moves here)") : _("   (copied: Ctrl+V pastes here)")) : "");
     fit(line, sizeof line, raw, max_path);
-    screen_text(path_col, 1, line, ACCENT, BAR_BG);
+    screen_text(path_col, 1, line, ACCENT_TEXT, BAR_BG);
     if (cwd[0] == '/' && max_path > 0) {
         /* Only complete components of the path as drawn, not the ellipsis
          * or the status suffix. Hit IDs retain the actual path byte offset. */
@@ -3576,12 +3582,12 @@ static void draw_tabs(void)
         int w = utf_cells(tab, 0, strlen(tab)), on = t == cur_tab;
         if (c + w > cols) w = cols - c;
         screen_fill(c, 2, w, 1, on ? ACCENT : BAR_BG);
-        screen_text(c, 2, tab, on ? BG : FG, on ? ACCENT : BAR_BG);
+        screen_text(c, 2, tab, on ? ON_ACCENT : FG, on ? ACCENT : BAR_BG);
         ui_hit(c, 2, w, 1, HIT_TAB + t);
         c += w + 1;
     }
     if (c + 3 <= cols) {
-        screen_text(c, 2, "[+]", ACCENT, BAR_BG);
+        screen_text(c, 2, "[+]", ACCENT_TEXT, BAR_BG);
         ui_hit(c, 2, 3, 1, HIT_KEY + MODS(KEYS_CTRL) + ('t' & 0x1F));
     }
 }
@@ -3603,7 +3609,7 @@ static void draw_rubberband(void)
     if (ry < min_y) { rh -= min_y - ry; ry = min_y; }
     if (rx + rw > max_x) rw = max_x - rx;
     if (ry + rh > max_y) rh = max_y - ry;
-    frame_px(rx, ry, rw, rh, ACCENT);
+    frame_px(rx, ry, rw, rh, BORDER);
 }
 
 static void format_status_line(struct pane *p, char *out, size_t size)
@@ -3703,7 +3709,7 @@ static void draw_output(void)
             screen_fill(0, top_row + i, SIDE, 1, on ? ACCENT : BG);
             snprintf(cut, sizeof cut, "%.*s", (int)utf_fit(name, SIDE - 5), name);
             snprintf(line, sizeof line, " %c %s", here ? '>' : ' ', cut);
-            screen_text(0, top_row + i, line, on ? BG : here ? ACCENT : FG, on ? ACCENT : BG);
+            screen_text(0, top_row + i, line, on ? ON_ACCENT : here ? ACCENT_TEXT : FG, on ? ACCENT : BG);
             ui_hit(0, top_row + i, SIDE, 1, HIT_PLACE + i);
         }
     }
@@ -3712,7 +3718,8 @@ static void draw_output(void)
     if (tabs[cur_tab].split) {
         int col, w;
         pane_cols(0, &col, &w);
-        screen_fill_px((col + w) * cell_w + cell_w / 2, top_px + top_row * cell_h, 1, r * cell_h, DIM);
+        screen_fill_px((col + w) * cell_w + cell_w / 2, top_px + top_row * cell_h, 1, r * cell_h,
+                       theme_rgb(THEME_BORDER, 0x808890));
         draw_pane(&tabs[cur_tab].pane[1], 1);
     }
     if (output_current() == files_output && drag.mode == DRAG_BAND) {
@@ -3720,11 +3727,11 @@ static void draw_output(void)
     } else if (output_current() == files_output && drag.mode == DRAG_ITEMS) {
         char tag[64];
         snprintf(tag, sizeof tag, " %s ", drag.mods & KEYS_CTRL ? _("+ copy") : _("-> move"));
-        screen_text(drag.col + 1, drag.row, tag, BG, ACCENT);
+        screen_text(drag.col + 1, drag.row, tag, ON_ACCENT, ACCENT);
     }
 
     if (msg_sticky && msg[0]) {
-        screen_text(1, screen_rows() - 3, msg, error ? ERROR : ACCENT, BG);
+        screen_text(1, screen_rows() - 3, msg, error ? ERROR : ACCENT_TEXT, BG);
     } else {
         char sline[512];
         format_status_line(P, sline, sizeof sline);
@@ -3892,8 +3899,8 @@ static const char *prompt(const char *question, const char *initial, int select_
         char shown[PATH_MAX];
         snprintf(shown, sizeof shown, "%.*s", (int)utf_fit(text + left, room), text + left);
         screen_fill(0, row, cols, 1, BG);
-        screen_text(1, row, question, ACCENT, BG);
-        screen_text(tcol, row, shown, all ? BG : ACCENT, all ? ACCENT : BG);
+        screen_text(1, row, question, ACCENT_TEXT, BG);
+        screen_text(tcol, row, shown, all ? ON_ACCENT : ACCENT_TEXT, all ? ACCENT : BG);
         int ccol = tcol + utf_cells(text, left, cur);
         if (ccol < cols) {
             char ch[8] = "_";
@@ -3901,7 +3908,7 @@ static const char *prompt(const char *question, const char *initial, int select_
                 size_t next = utf_next(text, cur);
                 snprintf(ch, sizeof ch, "%.*s", (int)(next - cur), text + cur);
             }
-            screen_text(ccol, row, ch, BG, ACCENT);
+            screen_text(ccol, row, ch, ON_ACCENT, ACCENT);
         }
         screen_flush();
         int key = key_poll_timeout(-1, -1), mods = keys_modifiers(), act = key_action(key, mods);
@@ -3987,7 +3994,7 @@ static int yes(const char *question)
     question_draw(line, 0);
     for (;;) {
         int key = key_poll_timeout(-1, -1);
-        if (key == K_SHOWN) {
+        if (key == K_SHOWN || key == K_REPAINT) {
             draw();
             question_draw(line, 0);
             continue;
@@ -4101,7 +4108,7 @@ static void properties(int folder_self)
         int sw = side_width(), r0 = body_top();
         screen_fill(sw, r0, screen_cols() - sw, rows(), BG);
         ui_hits_clear();
-        screen_text(sw + 1, r0, is_dir && (folder_self || !f) ? _("Folder Properties") : _("Properties"), ACCENT, BG);
+        screen_text(sw + 1, r0, is_dir && (folder_self || !f) ? _("Folder Properties") : _("Properties"), ACCENT_TEXT, BG);
         int r = r0 + 2;
         snprintf(line, sizeof line, "%s%.500s", ui_pad(lbl, sizeof lbl, _("Name:"), 14), disp_name);
         screen_text(sw + 1, r++, line, FG, BG);
@@ -4161,9 +4168,11 @@ static void properties(int folder_self)
         screen_flush();
 
         int key = key_poll_timeout(-1, -1), mods = keys_modifiers();
-        if (key == K_SHOWN) {
-            drag_stop();
-            pull.on = 0;
+        if (key == K_SHOWN || key == K_REPAINT) {
+            if (key == K_SHOWN) {
+                drag_stop();
+                pull.on = 0;
+            }
             draw();
             continue;
         }
@@ -4323,7 +4332,7 @@ static int choose(const char *path, const char *type, char *name, size_t size)
         screen_fill(SIDE, r0, screen_cols() - SIDE, rows(), BG);
         /* TRANSLATORS: first %s is a file name or URL, second %s is its MIME type. */
         snprintf(line, sizeof line, _("Open %s (%s) with:"), slash ? slash + 1 : path, type);
-        screen_text(SIDE + 1, r0, line, ACCENT, BG);
+        screen_text(SIDE + 1, r0, line, ACCENT_TEXT, BG);
         for (int i = 0; i <= last; i++) {
             if (i < n) {
                 open_label(names[i], type, label, sizeof label);
@@ -4334,7 +4343,7 @@ static int choose(const char *path, const char *type, char *name, size_t size)
                 snprintf(line, sizeof line, "%2d  %s", i + 1, _("Other container..."));
             }
             screen_fill(SIDE, r0 + 2 + i, screen_cols() - SIDE, 1, i == at ? ACCENT : BG);
-            screen_text(SIDE + 1, r0 + 2 + i, line, i == at ? BG : FG, i == at ? ACCENT : BG);
+            screen_text(SIDE + 1, r0 + 2 + i, line, i == at ? ON_ACCENT : FG, i == at ? ACCENT : BG);
         }
         ui_hits_clear();
         for (int i = 0; i <= last; i++) ui_hit(SIDE, r0 + 2 + i, screen_cols() - SIDE, 1, HIT_FILE + i);
@@ -4346,9 +4355,11 @@ static int choose(const char *path, const char *type, char *name, size_t size)
         ui_button(c, r0 + 4 + last, _("Esc: cancel"), HIT_KEY + 27);
         screen_flush();
         int key = key_poll_timeout(-1, -1), mods = keys_modifiers();
-        if (key == K_SHOWN) {
-            drag_stop();
-            pull.on = 0;
+        if (key == K_SHOWN || key == K_REPAINT) {
+            if (key == K_SHOWN) {
+                drag_stop();
+                pull.on = 0;
+            }
             draw();
             continue;
         }
@@ -5868,6 +5879,7 @@ static int browse(char *out, size_t size)
         show = 1;
         /* The drives service's answer wakes it as a key does. */
         int key = key_poll_timeout(drive_job.fd, drag.mode == DRAG_BAND ? 40 : cloud_job.pid ? 100 : 2000);
+        if (key == K_REPAINT) continue;
         int mods = keys_modifiers();
         if (key_action(key, mods) == ACT_QUIT) {
             close_asked = 1; /* Ctrl+Q, Alt+F4, the window's close: inside home, back to its list */

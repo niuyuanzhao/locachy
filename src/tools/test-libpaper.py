@@ -58,7 +58,7 @@ pkgname = libpaper
             lock_path = u.prepare_candidate("libpaper", baseline, "extra", "2.2.8-1", state,
                                              stable_version="2.2.8-1", fetch=fetch)
             lock = u.validate_candidate(lock_path, "libpaper", baseline, state)
-            self.assertEqual(lock["gate"], "libpaper-lifecycle-v1")
+            self.assertEqual(lock["gate"], "libpaper-lifecycle-smoke-v1")
             self.assertEqual(lock["package_version"], "1:2.2.8-1")
             recipe = lock_path.parent / "recipe"
             self.assertEqual((recipe / ".locachy-upstream.PKGBUILD").read_bytes(), remote["PKGBUILD"])

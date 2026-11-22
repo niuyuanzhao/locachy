@@ -1384,8 +1384,8 @@ void key_close_kept(void)
 }
 
 #ifdef CONFIG_WAYLAND
-/* A window's input, with the same answers as the devices': K_SHOWN for a
- * new size, K_POINTER, keys (K_CLOSE when closing it is asked for), 0 when
+/* A window's input: K_SHOWN for a new size, K_REPAINT for colors alone,
+ * K_POINTER, keys (K_CLOSE when closing it is asked for), and 0 when
  * an extra fd is ready or the time has passed. The program ends here only
  * when closing is asked again within 3 s of an unanswered K_CLOSE, or when
  * the compositor has gone: nothing can show it any more. */
@@ -1396,7 +1396,9 @@ static int window_poll(struct pollfd *extra, size_t nextra, int timeout_ms)
     long long deadline = (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000 + (timeout_ms > 0 ? timeout_ms : 0);
     for (size_t i = 0; i < nextra; i++) extra[i].revents = 0;
     for (;;) {
-        if (screen_window_shown()) return K_SHOWN;
+        int shown = screen_window_shown(), recolor = wl_backend_theme_changed();
+        if (shown) return K_SHOWN;
+        if (recolor) return K_REPAINT;
         if (base_raw_pending && base_raw_pending()) return K_RAW_KEY;
         if (pointer_next()) return K_POINTER;
         int key = wl_backend_next_key();

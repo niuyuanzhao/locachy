@@ -16,11 +16,9 @@
  * links) are parsed with its inline grammar, each inline node shown on its
  * own.
  *
- * The colours are those of Kate's default styles in its Breeze Dark theme
- * (KSyntaxHighlighting's breeze-dark.theme). The framebuffer font has one
- * weight, so Keyword (bold text of the normal colour there) is white.
- * syntax_styles separately reports the real font attributes, without
- * changing the foreground API used by older renderers.
+ * Dark mode uses Kate's default Breeze Dark styles. Light mode keeps the
+ * same capture categories, using darker inks on the light canvas.
+ * syntax_styles separately reports font attributes.
  *
  * Folding uses the SAME completed tree, never a brace scan. Packaged
  * folds.scm takes precedence over the explicit per-grammar node rules.
@@ -42,6 +40,7 @@
 #include <pcre2.h>
 
 #include "edit-syntax.h"
+#include "theme.h"
 
 /* Larger texts are not highlighted: tree-sitter keeps a tree of all of the
  * text, up to some 60 times its size for dense code (measured: 7 MiB of C,
@@ -86,72 +85,72 @@ static const struct lang langs[] = {
 /* The theme: capture names as tree-sitter matches them, and their colour. */
 static const struct style {
     const char *name;
-    uint32_t colour;
+    uint32_t dark, light; /* light 0 uses the normal theme foreground */
     uint8_t flags;
 } theme[] = {
-    { "attribute", 0x2980B9, 0 },           /* Attribute */
-    { "boolean", 0x27AEAE, SYNTAX_STYLE_BOLD },             /* Constant */
-    { "character", 0x3DAEE9, 0 },           /* Char */
-    { "character.special", 0x3DAEE9, 0 },   /* SpecialChar */
-    { "comment", 0x7A7C7D, 0 },             /* Comment */
-    { "comment.documentation", 0xA43340, 0 }, /* Documentation */
-    { "comment.error", 0xDA4453, 0 },       /* Warning */
-    { "comment.warning", 0xDA4453, 0 },
-    { "comment.hint", 0xC45B00, 0 },        /* Information */
-    { "comment.note", 0xC45B00, 0 },
-    { "conditional", 0xFDBC4B, SYNTAX_STYLE_BOLD },         /* ControlFlow */
-    { "constant", 0x27AEAE, SYNTAX_STYLE_BOLD },            /* Constant */
-    { "constant.builtin", 0x27AEAE, SYNTAX_STYLE_BOLD },
-    { "constructor", 0x8E44AD, 0 },         /* Function */
-    { "delimiter", 0x3F8058, 0 },           /* Operator (Kate's symbols) */
-    { "embedded", COLOUR_NORMAL, 0 },
-    { "escape", 0x3DAEE9, 0 },              /* SpecialChar */
-    { "exception", 0xFDBC4B, SYNTAX_STYLE_BOLD },           /* ControlFlow */
-    { "field", COLOUR_NORMAL, 0 },
-    { "float", 0xF67400, 0 },               /* Float */
-    { "function", 0x8E44AD, 0 },            /* Function */
-    { "function.builtin", 0x609CA0, 0 },    /* BuiltIn */
-    { "function.macro", 0x27AE60, 0 },      /* Preprocessor */
-    { "function.special", 0x27AE60, 0 },
-    { "include", 0x27AE60, 0 },             /* Import */
-    { "keyword", 0xFFFFFF, SYNTAX_STYLE_BOLD },             /* Keyword: bold Normal in the theme */
-    { "keyword.conditional", 0xFDBC4B, SYNTAX_STYLE_BOLD }, /* ControlFlow */
-    { "keyword.repeat", 0xFDBC4B, SYNTAX_STYLE_BOLD },
-    { "keyword.return", 0xFDBC4B, SYNTAX_STYLE_BOLD },
-    { "keyword.exception", 0xFDBC4B, SYNTAX_STYLE_BOLD },
-    { "keyword.directive", 0x27AE60, 0 },   /* Preprocessor */
-    { "keyword.import", 0x27AE60, 0 },      /* Import */
-    { "label", 0x27AE60, 0 },               /* Others */
-    { "markup.heading", 0x8E44AD, SYNTAX_STYLE_BOLD },      /* Markdown's headers: Function */
-    { "markup.link", 0x27AE60, SYNTAX_STYLE_UNDERLINE },         /* Others */
-    { "markup.raw", 0xC45B00, 0 },          /* Markdown's code: Information */
-    { "markup.strong", 0xFFFFFF, SYNTAX_STYLE_BOLD },
-    { "module", COLOUR_NORMAL, 0 },
-    { "none", COLOUR_NORMAL, 0 },
-    { "number", 0xF67400, 0 },              /* DecVal */
-    { "operator", 0x3F8058, 0 },            /* Operator */
-    { "preproc", 0x27AE60, 0 },             /* Preprocessor */
-    { "property", COLOUR_NORMAL, 0 },
-    { "punctuation", 0x3F8058, 0 },         /* Operator */
-    { "punctuation.special", 0xDA4453, 0 }, /* Markdown's lists and markers: SpecialString */
-    { "repeat", 0xFDBC4B, SYNTAX_STYLE_BOLD },              /* ControlFlow */
-    { "string", 0xF44F4F, 0 },              /* String */
-    { "string.escape", 0x3DAEE9, 0 },       /* SpecialChar */
-    { "string.regexp", 0xDA4453, 0 },       /* SpecialString */
-    { "string.special", 0xDA4453, 0 },
-    { "string.special.url", 0x27AE60, SYNTAX_STYLE_UNDERLINE },  /* Others */
-    { "tag", 0xFFFFFF, SYNTAX_STYLE_BOLD },
-    { "text.emphasis", COLOUR_NORMAL, SYNTAX_STYLE_ITALIC },
-    { "text.literal", 0xC45B00, 0 },        /* Information */
-    { "text.reference", 0x27AE60, SYNTAX_STYLE_UNDERLINE },      /* Others */
-    { "text.strong", 0xFFFFFF, SYNTAX_STYLE_BOLD },
-    { "text.title", 0x8E44AD, SYNTAX_STYLE_BOLD },          /* Function */
-    { "text.uri", 0x27AE60, SYNTAX_STYLE_UNDERLINE },            /* Others */
-    { "type", 0x2980B9, 0 },                /* DataType */
-    { "type.builtin", 0x2980B9, 0 },
-    { "variable", COLOUR_NORMAL, 0 },
-    { "variable.builtin", 0x609CA0, 0 },    /* BuiltIn */
-    { "variable.parameter", COLOUR_NORMAL, 0 },
+    { "attribute", 0x2980B9, 0x165584, 0 },           /* Attribute */
+    { "boolean", 0x27AEAE, 0x006465, SYNTAX_STYLE_BOLD },             /* Constant */
+    { "character", 0x3DAEE9, 0x045880, 0 },           /* Char */
+    { "character.special", 0x3DAEE9, 0x045880, 0 },   /* SpecialChar */
+    { "comment", 0x7A7C7D, 0x484D53, 0 },             /* Comment */
+    { "comment.documentation", 0xA43340, 0x8F324B, 0 }, /* Documentation */
+    { "comment.error", 0xDA4453, 0x942939, 0 },       /* Warning */
+    { "comment.warning", 0xDA4453, 0x942939, 0 },
+    { "comment.hint", 0xC45B00, 0x874000, 0 },        /* Information */
+    { "comment.note", 0xC45B00, 0x874000, 0 },
+    { "conditional", 0xFDBC4B, 0x795000, SYNTAX_STYLE_BOLD },         /* ControlFlow */
+    { "constant", 0x27AEAE, 0x006465, SYNTAX_STYLE_BOLD },            /* Constant */
+    { "constant.builtin", 0x27AEAE, 0x006465, SYNTAX_STYLE_BOLD },
+    { "constructor", 0x8E44AD, 0x673585, 0 },         /* Function */
+    { "delimiter", 0x3F8058, 0x315A41, 0 },           /* Operator (Kate's symbols) */
+    { "embedded", COLOUR_NORMAL, 0, 0 },
+    { "escape", 0x3DAEE9, 0x045880, 0 },              /* SpecialChar */
+    { "exception", 0xFDBC4B, 0x795000, SYNTAX_STYLE_BOLD },           /* ControlFlow */
+    { "field", COLOUR_NORMAL, 0, 0 },
+    { "float", 0xF67400, 0x934700, 0 },               /* Float */
+    { "function", 0x8E44AD, 0x673585, 0 },            /* Function */
+    { "function.builtin", 0x609CA0, 0x315B63, 0 },    /* BuiltIn */
+    { "function.macro", 0x27AE60, 0x1A6038, 0 },      /* Preprocessor */
+    { "function.special", 0x27AE60, 0x1A6038, 0 },
+    { "include", 0x27AE60, 0x1A6038, 0 },             /* Import */
+    { "keyword", 0xFFFFFF, 0, SYNTAX_STYLE_BOLD },             /* Keyword: bold Normal in the theme */
+    { "keyword.conditional", 0xFDBC4B, 0x795000, SYNTAX_STYLE_BOLD }, /* ControlFlow */
+    { "keyword.repeat", 0xFDBC4B, 0x795000, SYNTAX_STYLE_BOLD },
+    { "keyword.return", 0xFDBC4B, 0x795000, SYNTAX_STYLE_BOLD },
+    { "keyword.exception", 0xFDBC4B, 0x795000, SYNTAX_STYLE_BOLD },
+    { "keyword.directive", 0x27AE60, 0x1A6038, 0 },   /* Preprocessor */
+    { "keyword.import", 0x27AE60, 0x1A6038, 0 },      /* Import */
+    { "label", 0x27AE60, 0x1A6038, 0 },               /* Others */
+    { "markup.heading", 0x8E44AD, 0x673585, SYNTAX_STYLE_BOLD },      /* Markdown's headers: Function */
+    { "markup.link", 0x27AE60, 0x1A6038, SYNTAX_STYLE_UNDERLINE },         /* Others */
+    { "markup.raw", 0xC45B00, 0x874000, 0 },          /* Markdown's code: Information */
+    { "markup.strong", 0xFFFFFF, 0, SYNTAX_STYLE_BOLD },
+    { "module", COLOUR_NORMAL, 0, 0 },
+    { "none", COLOUR_NORMAL, 0, 0 },
+    { "number", 0xF67400, 0x934700, 0 },              /* DecVal */
+    { "operator", 0x3F8058, 0x315A41, 0 },            /* Operator */
+    { "preproc", 0x27AE60, 0x1A6038, 0 },             /* Preprocessor */
+    { "property", COLOUR_NORMAL, 0, 0 },
+    { "punctuation", 0x3F8058, 0x315A41, 0 },         /* Operator */
+    { "punctuation.special", 0xDA4453, 0x942939, 0 }, /* Markdown's lists and markers: SpecialString */
+    { "repeat", 0xFDBC4B, 0x795000, SYNTAX_STYLE_BOLD },              /* ControlFlow */
+    { "string", 0xF44F4F, 0x9F2929, 0 },              /* String */
+    { "string.escape", 0x3DAEE9, 0x045880, 0 },       /* SpecialChar */
+    { "string.regexp", 0xDA4453, 0x942939, 0 },       /* SpecialString */
+    { "string.special", 0xDA4453, 0x942939, 0 },
+    { "string.special.url", 0x27AE60, 0x1A6038, SYNTAX_STYLE_UNDERLINE },  /* Others */
+    { "tag", 0xFFFFFF, 0, SYNTAX_STYLE_BOLD },
+    { "text.emphasis", COLOUR_NORMAL, 0, SYNTAX_STYLE_ITALIC },
+    { "text.literal", 0xC45B00, 0x874000, 0 },        /* Information */
+    { "text.reference", 0x27AE60, 0x1A6038, SYNTAX_STYLE_UNDERLINE },      /* Others */
+    { "text.strong", 0xFFFFFF, 0, SYNTAX_STYLE_BOLD },
+    { "text.title", 0x8E44AD, 0x673585, SYNTAX_STYLE_BOLD },          /* Function */
+    { "text.uri", 0x27AE60, 0x1A6038, SYNTAX_STYLE_UNDERLINE },            /* Others */
+    { "type", 0x2980B9, 0x165584, 0 },                /* DataType */
+    { "type.builtin", 0x2980B9, 0x165584, 0 },
+    { "variable", COLOUR_NORMAL, 0, 0 },
+    { "variable.builtin", 0x609CA0, 0x315B63, 0 },    /* BuiltIn */
+    { "variable.parameter", COLOUR_NORMAL, 0, 0 },
 };
 #define NTHEME ((int)(sizeof theme / sizeof theme[0]))
 
@@ -1257,21 +1256,25 @@ static struct span *spans_of(const struct loaded *l, TSNode root, struct buffer 
 static void paint(const struct span *spans, size_t n, size_t start, size_t end, uint32_t *colour,
                   uint8_t *styles, const char **names)
 {
+    int light = colour && theme_is_light();
+    uint32_t normal = light ? theme_rgb(THEME_FG, COLOUR_NORMAL) : COLOUR_NORMAL;
     for (size_t i = 0; i < n; i++) {
         if (spans[i].style < 0) {
             continue; /* a name the theme does not know: the outer colour stays */
         }
+        const struct style *style = &theme[spans[i].style];
+        uint32_t rgb = light ? (style->light ? style->light : normal) : style->dark;
         size_t a = spans[i].start > start ? spans[i].start : start;
         size_t z = spans[i].end < end ? spans[i].end : end;
         for (size_t k = a; k < z; k++) {
             if (colour) {
-                colour[k - start] = theme[spans[i].style].colour;
+                colour[k - start] = rgb;
             }
             if (styles) {
                 /* Markdown emphasis composes with a nested strong/link span;
                  * ordinary syntax captures replace, as their colour does. */
                 const char *name = spans[i].name;
-                uint8_t flags = theme[spans[i].style].flags;
+                uint8_t flags = style->flags;
                 if (strncmp(name, "text.", 5) == 0 || strncmp(name, "markup.", 7) == 0) {
                     styles[k - start] |= flags;
                 } else {
@@ -1327,9 +1330,10 @@ static void paint_inline(struct syntax *s, struct buffer *b, TSTreeCursor *walk,
 static void colours(struct syntax *s, struct buffer *b, size_t start, size_t end, uint32_t *colour,
                     uint8_t *styles, const char **names)
 {
+    uint32_t normal = colour ? theme_rgb(THEME_FG, COLOUR_NORMAL) : COLOUR_NORMAL;
     for (size_t i = start; i < end; i++) {
         if (colour) {
-            colour[i - start] = COLOUR_NORMAL;
+            colour[i - start] = normal;
         }
         if (styles) {
             styles[i - start] = 0;

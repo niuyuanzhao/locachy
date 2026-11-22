@@ -189,7 +189,7 @@ static int filesearch_result_menu(const char *const *items, int n, int *focus)
         for (int row = 0; row < visible && top + row < n; row++) {
             int index = top + row; uint32_t bg = index == *focus ? C_FOCUS : C_WINDOW;
             screen_fill(x, y + row, width, 1, bg);
-            put_text(x + 1, y + row, x + width - 1, items[index], index == *focus ? C_WINDOW : C_WTEXT, bg);
+            put_text(x + 1, y + row, x + width - 1, items[index], index == *focus ? C_ON_FOCUS(0x2A2E32) : C_WTEXT, bg);
             ui_hit(x, y + row, width, 1, HIT_DIALOG + index);
         }
         screen_flush();

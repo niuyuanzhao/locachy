@@ -37,12 +37,14 @@
 #include "files.h"
 #include "jobs.h"
 
-#define FG     0xD0D0D0
-#define BG     0x101820
-#define ACCENT 0x80C0FF
-#define DIM    0x808890
-#define ERROR  0xFF9090
-#define BAR_BG 0x1C2836
+#define FG           theme_rgb(THEME_FG, 0xD0D0D0)
+#define BG           theme_rgb(THEME_BG, 0x101820)
+#define ACCENT       theme_rgb(THEME_ACCENT, 0x80C0FF)
+#define ACCENT_TEXT  theme_rgb(THEME_ACCENT_TEXT, 0x80C0FF)
+#define ON_ACCENT    theme_rgb(THEME_ON_ACCENT, 0x101820)
+#define DIM          theme_rgb(THEME_DIM, 0x808890)
+#define ERROR        theme_rgb(THEME_ERROR, 0xFF9090)
+#define BAR_BG       theme_rgb(THEME_SURFACE, 0x1C2836)
 
 #ifndef FW_HELPER
 #define FW_HELPER     "/usr/local/bin/locachy-firmware"
@@ -480,14 +482,14 @@ static int prompt_text(const char *question, char *buf, size_t size)
         char line[512];
         snprintf(line, sizeof line, "%s ", question);
         screen_fill(0, row, cols, 1, BG);
-        screen_text(1, row, line, ACCENT, BG);
+        screen_text(1, row, line, ACCENT_TEXT, BG);
         int at = 1 + ui_cells(line);
         snprintf(line, sizeof line, "%.300s", buf);
-        screen_text(at, row, line, all ? BG : ACCENT, all ? ACCENT : BG);
-        screen_text(at + ui_cells(line), row, "_", ACCENT, BG);
+        screen_text(at, row, line, all ? ON_ACCENT : ACCENT_TEXT, all ? ACCENT : BG);
+        screen_text(at + ui_cells(line), row, "_", ACCENT_TEXT, BG);
         screen_flush();
         int key = key_poll_timeout(-1, -1), act = key_action(key, keys_modifiers());
-        if (key == K_POINTER) continue; /* the prompt has no pointer actions */
+        if (key == K_REPAINT || key == K_POINTER) continue; /* no input action here */
         size_t len = strlen(buf);
         if (act == ACT_QUIT) {
             quit_asked = 1;
@@ -527,7 +529,7 @@ static void draw_log_pane(int top_r, int h)
     } else {
         snprintf(hdr, sizeof hdr, _(" Output (%.200s) "), job_log[0] ? job_log : _("no job yet"));
     }
-    screen_text(1, top_r, hdr, ACCENT, BAR_BG);
+    screen_text(1, top_r, hdr, ACCENT_TEXT, BAR_BG);
     ui_hit(0, top_r, cols, h, HIT_LOG);
     if (h <= 1) return;
 
@@ -594,7 +596,7 @@ static void draw(void)
         snprintf(tbuf, sizeof tbuf, " %s ", _(tab_names[i]));
         int w = ui_cells(tbuf), on = page == i;
         screen_fill(tc, 1, w, 1, on ? ACCENT : BAR_BG);
-        screen_text(tc, 1, tbuf, on ? BG : FG, on ? ACCENT : BAR_BG);
+        screen_text(tc, 1, tbuf, on ? ON_ACCENT : FG, on ? ACCENT : BAR_BG);
         ui_hit(tc, 1, w, 1, HIT_TAB + i);
         tc += w + 1;
     }
@@ -623,7 +625,7 @@ static void draw(void)
                  ui_pad(c3, sizeof c3, _("Version"), 14),
                  _("Status"));
         screen_fill(0, 2, cols, 1, BAR_BG);
-        screen_text(0, 2, line, ACCENT, BAR_BG);
+        screen_text(0, 2, line, ACCENT_TEXT, BAR_BG);
         if (fwupd_missing) {
             /* TRANSLATORS: P is the key; keep it. */
             screen_text(2, 4, _("fwupd is not installed. Press P to install fwupd with locachy-pkg."), DIM, BG);
@@ -641,7 +643,7 @@ static void draw(void)
                          d->flags);
                 fit_cells(c4, sizeof c4, line, cols);
                 screen_fill(0, 3 + r, cols, 1, on ? ACCENT : BG);
-                screen_text(0, 3 + r, c4, on ? BG : FG, on ? ACCENT : BG);
+                screen_text(0, 3 + r, c4, on ? ON_ACCENT : FG, on ? ACCENT : BG);
                 ui_hit(0, 3 + r, cols, 1, HIT_ROW + i);
             }
         }
@@ -649,7 +651,7 @@ static void draw(void)
         snprintf(line, sizeof line, _(" Releases for %.50s (current %s) — Esc: back "),
                  devs[rel_dev_idx].name, devs[rel_dev_idx].version);
         screen_fill(0, 2, cols, 1, BAR_BG);
-        screen_text(0, 2, line, ACCENT, BAR_BG);
+        screen_text(0, 2, line, ACCENT_TEXT, BAR_BG);
         if (nrels == 0) {
             /* TRANSLATORS: r is the key; keep it. */
             screen_text(2, 4, _("No LVFS releases listed for this device (refresh metadata with r first)."), DIM, BG);
@@ -664,7 +666,7 @@ static void draw(void)
                          rel->notes);
                 fit_cells(c4, sizeof c4, line, cols);
                 screen_fill(0, 3 + r, cols, 1, on ? ACCENT : BG);
-                screen_text(0, 3 + r, c4, on ? BG : FG, on ? ACCENT : BG);
+                screen_text(0, 3 + r, c4, on ? ON_ACCENT : FG, on ? ACCENT : BG);
                 ui_hit(0, 3 + r, cols, 1, HIT_ROW + i);
             }
         }
@@ -674,7 +676,7 @@ static void draw(void)
                  ui_pad(c2, sizeof c2, _("Current Value"), 22),
                  _("Allowed Values"));
         screen_fill(0, 2, cols, 1, BAR_BG);
-        screen_text(0, 2, line, ACCENT, BAR_BG);
+        screen_text(0, 2, line, ACCENT_TEXT, BAR_BG);
         if (nbattrs == 0) {
             screen_text(2, 4, _("No kernel firmware-attributes exposed on this machine."), DIM, BG);
         } else {
@@ -689,14 +691,14 @@ static void draw(void)
                          a->possible);
                 fit_cells(c4, sizeof c4, line, cols);
                 screen_fill(0, 3 + r, cols, 1, on ? ACCENT : BG);
-                screen_text(0, 3 + r, c4, on ? BG : FG, on ? ACCENT : BG);
+                screen_text(0, 3 + r, c4, on ? ON_ACCENT : FG, on ? ACCENT : BG);
                 ui_hit(0, 3 + r, cols, 1, HIT_ROW + i);
             }
         }
     } else {
         screen_fill(0, 2, cols, 1, BAR_BG);
         screen_text(1, 2, _(" SPI Flash Programmer (flashrom) — always take a 3x verified backup before writing "),
-                    ACCENT, BAR_BG);
+                    ACCENT_TEXT, BAR_BG);
         if (flashrom_missing) {
             /* TRANSLATORS: P is the key; keep it. */
             screen_text(2, 3 + NSPI_ROWS + 1,
@@ -733,7 +735,7 @@ static void draw(void)
             snprintf(line, sizeof line, " %s %.240s", ui_pad(c1, sizeof c1, lbl, 24), val);
             fit_cells(c4, sizeof c4, line, cols);
             screen_fill(0, 3 + r, cols, 1, on ? ACCENT : BG);
-            screen_text(0, 3 + r, c4, on ? BG : FG, on ? ACCENT : BG);
+            screen_text(0, 3 + r, c4, on ? ON_ACCENT : FG, on ? ACCENT : BG);
             ui_hit(0, 3 + r, cols, 1, HIT_ROW + i);
             if (val[0] == '<') {
                 int x = 2 + ui_cells(c1), width = ui_cells(val), left = width / 2;
@@ -753,7 +755,7 @@ static void draw(void)
 
     /* Notice / confirmation row (rows - 3) and buttons (rows - 2, rows - 1) */
     screen_fill(0, rows - 3, cols, 3, BG);
-    screen_text(1, rows - 3, notice, confirming ? ERROR : (notice_err ? ERROR : ACCENT), BG);
+    screen_text(1, rows - 3, notice, confirming ? ERROR : (notice_err ? ERROR : ACCENT_TEXT), BG);
 
     int b2 = rows - 2, b1 = rows - 1, bc = 1;
     if (confirming != CONF_NONE) {
@@ -970,8 +972,8 @@ int main(void)
         int mods = keys_modifiers();
         check_job();
 
-        if (key == K_SHOWN) {
-            if (confirming == CONF_NONE) {
+        if (key == K_SHOWN || key == K_REPAINT) {
+            if (key == K_SHOWN && confirming == CONF_NONE) {
                 load_all(); /* a question stays, on what it was asked about */
             }
             draw();

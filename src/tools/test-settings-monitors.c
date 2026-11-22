@@ -68,6 +68,51 @@ static struct passwd *fixture_getpwuid(uid_t);
 #undef fopen
 #undef getpwuid
 
+/* Keep rc_read/rc_set doubles for other settings; appearance uses the real
+ * transaction and parser against the fixture's rc.conf. */
+#define rc_read fixture_unused_rc_read
+#define rc_set fixture_unused_rc_set
+#include "../base/rc.c"
+#undef rc_set
+#undef rc_read
+
+/* Read and resolve exactly the production palette; redirect publication to a
+ * double rather than touching /run. */
+static int theme_fixture, desktop_applies, portal_publishes, fail_desktop_theme, fail_portal_theme;
+static int fixture_theme_transaction(const char *, conf_transform, void *);
+static int fixture_theme_mkdir(const char *, mode_t);
+#define conf_transaction fixture_theme_transaction
+#define mkdir fixture_theme_mkdir
+#include "../base/theme.c"
+#undef mkdir
+#undef conf_transaction
+
+static int fixture_theme_transaction(const char *path, conf_transform transform, void *arg)
+{
+    (void)path;
+    char *out = NULL;
+    size_t size = 0;
+    if (fail_portal_theme) { errno = EACCES; return -1; }
+    int result = transform("", 0, 0, &out, &size, arg);
+    free(out);
+    if (result < 0) return result;
+    portal_publishes++;
+    return 0;
+}
+
+static int fixture_theme_mkdir(const char *path, mode_t mode)
+{
+    (void)path; (void)mode;
+    return 0;
+}
+
+int theme_apply_desktop(void)
+{
+    if (fail_desktop_theme) { errno = EACCES; return -1; }
+    desktop_applies++;
+    return 0;
+}
+
 static struct passwd *fixture_getpwuid(uid_t uid)
 {
     static struct passwd user = { .pw_name = "testuser", .pw_uid = 1000, .pw_gid = 1000, .pw_dir = "/home/testuser" };
@@ -378,6 +423,11 @@ static int network_set(const char *tor, const char *clash, char *why, size_t siz
 }
 int rc_read(void (*fn)(const char *, const char *, void *), void *arg)
 {
+    if (theme_fixture) {
+        char path[1400];
+        snprintf(path, sizeof path, "%s/rc.conf", root);
+        return conf_read(path, fn, arg);
+    }
     if (rc_internal[0]) fn("internal_screen", rc_internal, arg);
     for (int i = 0; rc_policy && rc_policy[i]; i += 2) fn(rc_policy[i], rc_policy[i + 1], arg);
     if (net_clash_on) {
@@ -418,6 +468,11 @@ int rc_set(const char *name, const char *value)
     if (!allow_rc) abort();
     event('R');
     if (fail_rc) return -1;
+    if (theme_fixture) {
+        char path[1400];
+        snprintf(path, sizeof path, "%s/rc.conf", root);
+        if (conf_set(path, name, value) < 0) return -1;
+    }
     size_t n = strlen(rc_log);
     snprintf(rc_log + n, sizeof rc_log - n, "%s=%s;", name, value ? value : "(none)");
     return 0;
@@ -2371,6 +2426,129 @@ static void test_time_zone(void)
          "carries the network, saying why and that one can be chosen");
 }
 
+/* At the page's real keyboard/pointer dispatch, play the modal picker events. */
+static void pick_color(int key)
+{
+    assert(!page_key(key) && colors_settings_key(key));
+    assert(keypos == nkeys);
+}
+
+static void test_colors(void)
+{
+    static const char kept[] = "# User settings\nwallpaper=\"/home/testuser/Lake.jpg\"\nextra=\"keep me\"\n";
+    char saved[512];
+    int page_before = settings_page;
+    int bar_before = bar_hups, labwc_before = labwc_hups, pid1_before = hups;
+    settings_page = theme_fixture = 1;
+    rc_log[0] = '\0';
+    file_text("rc.conf", kept);
+    rc_read(on_rc, NULL);
+    theme_reload();
+    draw();
+    mouse = (struct pointer_event){ .col = 1, .row = PAGE_TOP + CAT_APPEARANCE,
+                                    .button = BTN_LEFT, .pressed = 1, .clicks = 1 };
+    assert(settings_pointer() == -1);
+    draw();
+    assert(category == CAT_APPEARANCE && in_page && selected == scheme_index());
+    assert(canvas_has("Colors") && canvas_has("LOCachy Dark") && canvas_has("Scheme default #80C0FF") &&
+           canvas_has("Wallpaper") && canvas_has("Lake.jpg"));
+    int swatch = text_x() + THEME_LABEL_CELLS + 1;
+    assert(colors[item_row(scheme_index())][swatch] == BG && colors[item_row(scheme_index())][swatch + 1] == FG);
+    assert(colors[item_row(accent_index())][swatch] == ACCENT);
+    assert(page_key(K_RIGHT) && !rc_log[0]); /* selection is not a change */
+
+    nkeys = keypos = 0;
+    press(K_DOWN, 0, NULL);
+    press('\n', 0, NULL);
+    pick_color('\n');
+    draw();
+    assert(theme_get()->config.scheme == THEME_LIGHT && !theme_get()->config.custom_accent &&
+           canvas_has("LOCachy Light") && colors[0][0] == theme_get()->rgb[THEME_BG] &&
+           colors[item_row(accent_index())][swatch] == theme_get()->config.accent);
+    assert(!strcmp(rc_log, "color_scheme=light;") && strstr(notice, "Reopen foot"));
+
+    /* A click on the accent's swatch opens the chooser, a click on its
+     * Blue row applies exactly that preset. */
+    mouse.row = item_row(accent_index());
+    mouse.col = swatch;
+    int key = settings_pointer();
+    assert(key == '\n' && selected == accent_index());
+    mouse.row = 4;
+    mouse.col = 3;
+    nkeys = keypos = 0;
+    press(-2, 0, NULL);
+    pick_color(key);
+    assert(theme_get()->config.accent == 0x3478D4 && theme_get()->config.custom_accent);
+    draw();
+    assert(canvas_has("Blue #3478D4") && colors[item_row(accent_index())][swatch] == 0x3478D4);
+
+    type_answer("#ab12ef");
+    for (int i = nkeys - 1; i >= 0; i--) keys[i + 2] = keys[i];
+    keys[0] = K_EOL;
+    keys[1] = '\n';
+    nkeys += 2;
+    pick_color('\n');
+    draw();
+    assert(canvas_has("Custom #AB12EF") && colors[item_row(accent_index())][swatch] == 0xAB12EF);
+    assert(page_key(K_UP) && selected == scheme_index());
+    nkeys = keypos = 0;
+    press(K_UP, 0, NULL);
+    press('\n', 0, NULL);
+    pick_color('\n');
+    assert(theme_get()->config.scheme == THEME_DARK && theme_get()->config.accent == 0xAB12EF);
+    assert(!strcmp(rc_log, "color_scheme=light;accent_color=#3478D4;accent_color=#AB12EF;color_scheme=dark;"));
+    read_fixture("rc.conf", saved, sizeof saved);
+    assert(strstr(saved, kept) && strstr(saved, "color_scheme=\"dark\"\naccent_color=\"#AB12EF\"\n"));
+
+    /* Re-read after a separate startup, using the saved file, not a preview. */
+    loaded = 0;
+    draw();
+    assert(canvas_has("LOCachy Dark") && canvas_has("Custom #AB12EF") && canvas_has("Lake.jpg"));
+    assert(page_key(K_DOWN) && selected == accent_index());
+    rc_log[0] = '\0';
+    type_answer("#abc");
+    for (int i = nkeys - 1; i >= 0; i--) keys[i + 1] = keys[i];
+    keys[0] = '\n'; /* current custom option */
+    nkeys++;
+    pick_color('\n');
+    assert(!rc_log[0] && theme_get()->config.accent == 0xAB12EF && strstr(notice, "Nothing was changed"));
+    nkeys = keypos = 0;
+    press(K_UP, 0, NULL);
+    press(27, 0, NULL);
+    pick_color('\n');
+    assert(!rc_log[0] && theme_get()->config.accent == 0xAB12EF);
+
+    /* A failed rc transaction never signals or runs the derived writers. */
+    nkeys = keypos = 0;
+    press(K_BOL, 0, NULL);
+    press('\n', 0, NULL);
+    fail_rc = 1;
+    pick_color('\n');
+    fail_rc = 0;
+    assert(!rc_log[0] && theme_get()->config.accent == 0xAB12EF && strstr(notice, "Cannot write"));
+    assert(desktop_applies == 4 && portal_publishes == 4 && bar_hups == bar_before + 4 && labwc_hups == labwc_before + 4);
+
+    /* Partial apply keeps the saved preference and still updates local UI. */
+    fail_desktop_theme = 1;
+    keypos = 0; /* choose Scheme default again */
+    pick_color('\n');
+    fail_desktop_theme = 0;
+    assert(!theme_get()->config.custom_accent && theme_get()->config.accent == 0x80C0FF &&
+           strstr(notice, "Colors saved, but not all desktop settings could be applied"));
+    assert(desktop_applies == 4 && portal_publishes == 5 && bar_hups == bar_before + 5 && labwc_hups == labwc_before + 4);
+    assert(hups == pid1_before); /* no PID 1 or screen-lock signal */
+    fail_portal_theme = 1;
+    assert(theme_apply(0) < 0); /* boot/resume also returns failure */
+    fail_portal_theme = 0;
+    assert(theme_apply(0) == 0 && labwc_hups == labwc_before + 4);
+
+    theme_fixture = 0;
+    theme_reload();
+    settings_page = page_before;
+    puts("PASS Appearance colors: keyboard and pointer selection, named swatches, independent scheme and accent, "
+         "custom validation, saved re-read, wallpaper preserved, and visible partial apply failures");
+}
+
 /* The top bar's pages: --page names and the window manager's request pipe. */
 static void test_pages(void)
 {
@@ -3320,6 +3498,7 @@ int main(int argc, char **argv)
     test_keyboards();
     test_system_keymap();
     test_power_and_hwinfo();
+    test_colors();
     test_pages();
     /* Line editing in prompts: cursor movement, Delete and Ctrl+U; Ctrl+A
      * selects it all (what is typed replaces it), Home is the start. */

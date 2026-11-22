@@ -84,11 +84,11 @@
 #define SO_PEERPIDFD 77
 #endif
 
-#define FG_COLOR   0xFFD0D0D0u
-#define OVL_BG     0xFF182848u
-#define OVL_FG1    0xFFFFFFFFu
-#define OVL_FG2    0xFFB8D8FFu
-#define TOAST_BG   0xFF183860u
+#define OVL_BG     theme_argb(THEME_PANEL, 0xFF182848u)
+#define OVL_FG1    theme_argb(THEME_FG, 0xFFFFFFFFu)
+#define OVL_FG2    theme_argb(THEME_ACCENT_TEXT, 0xFFB8D8FFu)
+#define TOAST_BG   theme_argb(THEME_CONTROL, 0xFF183860u)
+#define OVL_SEL    theme_argb(THEME_SELECTION, 0xFF183860u)
 
 static struct wl_display *display;
 static struct wl_registry *registry;
@@ -929,11 +929,12 @@ static void human_bytes(unsigned long long n, char *out, size_t size)
     }
 }
 
-#define WIN_BG  0xFF2A3C5Cu /* a window's button */
-#define WIN_ON  0xFF46669Au /* the focused window's */
-#define WIN_FG  0xFFD0D0D0u
-#define WIN_DIM 0xFF8C98ACu /* a minimized window's title, and second rows */
-#define WIN_ATTN 0xFFB0702Au /* a program in a tray that asks for attention */
+#define WIN_BG    theme_argb(THEME_CONTROL, 0xFF2A3C5Cu)
+#define WIN_ON    theme_argb(THEME_ACCENT, 0xFF46669Au)
+#define WIN_ON_FG theme_argb(THEME_ON_ACCENT, 0xFFFFFFFFu)
+#define WIN_FG    theme_argb(THEME_FG, 0xFFD0D0D0u)
+#define WIN_DIM   theme_argb(THEME_DIM, 0xFF8C98ACu)
+#define WIN_ATTN  theme_argb(THEME_WARNING, 0xFFB0702Au)
 
 /* A window is in the list of each screen it is on; one on none (minimized,
  * or not yet shown), in the list of the screen it was last on, or of all. */
@@ -964,7 +965,7 @@ struct entry {
     struct tray *tray;
     const char *top, *bottom;
     char second[96];
-    uint32_t bg;
+    enum { ENTRY_NORMAL, ENTRY_FOCUSED, ENTRY_ATTENTION } style;
 };
 
 static int list_entries(const struct bar *b, struct entry *e, int max)
@@ -983,7 +984,7 @@ static int list_entries(const struct bar *b, struct entry *e, int max)
         snprintf(x->second, sizeof x->second, w->minimized ? _("%s, minimized") : "%s", owner);
         x->bottom = x->second;
         struct tray *t = container[0] ? tray_find(container) : NULL;
-        x->bg = w->activated && !w->minimized ? WIN_ON : t && t->notified ? WIN_ATTN : WIN_BG;
+        x->style = w->activated && !w->minimized ? ENTRY_FOCUSED : t && t->notified ? ENTRY_ATTENTION : ENTRY_NORMAL;
     }
     for (struct tray *t = trays; t && n < max; t = t->next) {
         int attention = t->notified;
@@ -1000,7 +1001,7 @@ static int list_entries(const struct bar *b, struct entry *e, int max)
         /* TRANSLATORS: %s is the container name; keep short: bar button. */
         snprintf(x->second, sizeof x->second, attention ? _("%s, needs attention") : _("%s, in the tray"), t->name);
         x->bottom = x->second;
-        x->bg = attention ? WIN_ATTN : WIN_BG;
+        x->style = attention ? ENTRY_ATTENTION : ENTRY_NORMAL;
     }
     return n;
 }
@@ -1067,10 +1068,17 @@ static void draw_windows(struct bar *b, uint32_t *px, int bw_px, int bh, int x0,
         char top[160], bottom[160];
         panel_text_fit(top, sizeof top, e[i].top, room, f);
         panel_text_fit(bottom, sizeof bottom, e[i].bottom, room, f);
-        panel_fill(px, bw_px, bh, bw_px, x, pad / 2, width - 2 * pad, bh - pad, e[i].bg);
-        panel_text(px, bw_px, bh, bw_px, x + cw / 2, y0, top,
-                   e[i].win && e[i].win->minimized ? WIN_DIM : WIN_FG, e[i].bg, f);
-        panel_text(px, bw_px, bh, bw_px, x + cw / 2, y0 + ch, bottom, WIN_DIM, e[i].bg, f);
+        uint32_t bg = e[i].style == ENTRY_FOCUSED ? WIN_ON :
+                      e[i].style == ENTRY_ATTENTION ? WIN_ATTN : WIN_BG;
+        uint32_t top_fg = e[i].win && e[i].win->minimized ? WIN_DIM : WIN_FG, bottom_fg = WIN_DIM;
+        if (e[i].style == ENTRY_FOCUSED) {
+            top_fg = bottom_fg = WIN_ON_FG;
+        } else if (e[i].style == ENTRY_ATTENTION) {
+            top_fg = bottom_fg = theme_argb(THEME_BG, 0xFF000000u);
+        }
+        panel_fill(px, bw_px, bh, bw_px, x, pad / 2, width - 2 * pad, bh - pad, bg);
+        panel_text(px, bw_px, bh, bw_px, x + cw / 2, y0, top, top_fg, bg, f);
+        panel_text(px, bw_px, bh, bw_px, x + cw / 2, y0 + ch, bottom, bottom_fg, bg, f);
         add_button(b, e[i].win, e[i].tray ? e[i].tray->name : NULL, 0, x, x + width - 2 * pad);
         x += width;
     }
@@ -2012,6 +2020,7 @@ static int kbd_layout[MAX_KBDS];
 static volatile sig_atomic_t sig_regrab, sig_release, sig_reload, active = 1;
 static void set_grab(int on);
 static void load_width_keys(void);
+static void overlays_follow(int redraw);
 
 /* Virtual keyboard + XKB keymap handling. A virtual keyboard for each
  * keyboard layout in use, the system's first: a keyboard with a keymap of its
@@ -3031,6 +3040,7 @@ static void keyboard_signals(void)
         if (bar_locks >= 0) layouts_take_locks(bar_locks); /* the new layouts keep the locks */
         if (active) restore_passthrough_keymap();
         if (resumed) desktop_wait_query();
+        if (hup && theme_reload && theme_reload()) overlays_follow(1);
         bars_dirty = 1;
         want_grab = grab_wanted();
         set_grab(want_grab);
@@ -3695,11 +3705,12 @@ static void question_buttons(struct overlay *o, const char *confirm, const char 
     for (int i = 0; i < 3; i++) {
         if (!labels[i]) continue;
         int col = i * (CH_COLS / 3) + 1;
-        uint32_t bg = question_hover_key == keys[i] ? WIN_ON : TOAST_BG;
+        int hovered = question_hover_key == keys[i];
+        uint32_t bg = hovered ? WIN_ON : TOAST_BG;
         char fit[160];
         panel_text_fit(fit, sizeof fit, labels[i], (CH_COLS / 3 - 4) * o->cw, o->font);
         ovl_fill(o, col, row, CH_COLS / 3 - 2, 1, bg);
-        ovl_text(o, col + 1, row, fit, OVL_FG1, bg);
+        ovl_text(o, col + 1, row, fit, hovered ? WIN_ON_FG : OVL_FG1, bg);
     }
 }
 
@@ -3744,15 +3755,16 @@ static void render_chooser(void)
     int r = CH_ROW_FIRST;
     for (int i = 0; i < choose.n; i++, r++) {
         chooser_line(o, i, line, sizeof line);
-        uint32_t bg = i == choose.sel ? TOAST_BG : OVL_BG;
+        uint32_t bg = i == choose.sel ? OVL_SEL : OVL_BG;
         ovl_fill(o, 0, r, 0, 1, bg);
         ovl_text(o, 0, r, line, OVL_FG1, bg);
     }
     if (!choose.all) {
-        uint32_t bg = choose.sel == choose.n ? TOAST_BG : OVL_BG;
+        int selected = choose.sel == choose.n;
+        uint32_t bg = selected ? OVL_SEL : OVL_BG;
         snprintf(line, sizeof line, " %2d  %s", choose.n + 1, _("Other container..."));
         ovl_fill(o, 0, r, 0, 1, bg);
-        ovl_text(o, 0, r, line, OVL_FG2, bg);
+        ovl_text(o, 0, r, line, selected ? OVL_FG1 : OVL_FG2, bg);
     }
     /* TRANSLATORS: Enter, A and Esc are keys; keep them. */
     question_buttons(o, _("Enter: open"), _("A: always use it"));
@@ -3776,8 +3788,8 @@ static void render_chooser(void)
 #define NOTE_ROWS 4
 #define NOTE_COLS 40
 #define NOTE_TIME 6000 /* ms */
-#define NOTE_TEXT  0xFFD0D0D0u
-#define NOTE_LINE  0xFF3A4C68u
+#define NOTE_TEXT  theme_argb(THEME_FG, 0xFFD0D0D0u)
+#define NOTE_LINE  theme_argb(THEME_BORDER, 0xFF3A4C68u)
 
 struct note {
     uint32_t id;
@@ -4400,7 +4412,7 @@ static void render_launcher(void)
         int i = launcher.scroll + r;
         const struct launch_item *it = &launcher.items[i];
         const char *detail = launch_detail(it);
-        uint32_t bg = i == launcher.sel ? TOAST_BG : OVL_BG;
+        uint32_t bg = i == launcher.sel ? OVL_SEL : OVL_BG;
         if (it->kind == LAUNCH_HEADER) {
             ovl_text(o, 1, r, launch_label(it), OVL_FG2, OVL_BG);
             continue;
@@ -4735,17 +4747,16 @@ static void launcher_wheel(double delta)
     }
 }
 
-/* An overlay on the screen goes with the focus to another screen; one
- * pinned to a screen stays there. */
-static void overlays_follow(void)
+/* Move live overlays with the focus. On a palette change, repaint even the
+ * surfaces that stay where they are, including the pinned waiting panel. */
+static void overlays_follow(int redraw)
 {
     struct wl_output *out = focused_output();
-    struct overlay *all[] = { &ime_bar, &question, &notes_ovl, &launcher_ovl };
+    struct overlay *all[] = { &ime_bar, &question, &notes_ovl, &launcher_ovl, &desktop_wait };
     for (size_t i = 0; i < sizeof all / sizeof *all; i++) {
-        struct wl_output *want = all[i]->pin ? all[i]->pin : out;
-        if (all[i]->surf && want && want != all[i]->output) {
-            all[i]->render();
-        }
+        struct overlay *o = all[i];
+        struct wl_output *want = o->pin ? o->pin : out;
+        if (o->surf && (redraw || (want && want != o->output))) o->render();
     }
 }
 
@@ -5498,6 +5509,7 @@ static void bar_exec(void)
  * bar draws nothing and wakes only for events. */
 static int wait_ms(void)
 {
+    if (bars_dirty) return 0;
     double now = uptime(), next = -1;
 #define DUE(t) do { double t_ = (t); if (next < 0 || t_ < next) next = t_; } while (0)
     if (toast_active) DUE(toast_expire);
@@ -5532,7 +5544,7 @@ int main(int argc, char **argv)
 {
     (void)argc;
     exe_record(argv);
-    for (int tries = 0; tries < 50; tries++) {
+    for (int tries = 0; tries < 100; tries++) {
         display = wl_display_connect(NULL);
         if (display) break;
         usleep(50000);
@@ -5667,7 +5679,7 @@ int main(int argc, char **argv)
             bars_dirty = 0;
             last_second = second;
             render_bars();
-            overlays_follow();
+            overlays_follow(0);
         }
     }
 

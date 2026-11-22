@@ -10,12 +10,6 @@
 __attribute__((weak)) void screen_cursor(int shape);
 __attribute__((weak)) void key_close_kept(void);
 
-#define BUTTON_FG 0xD0D0D0
-#define BUTTON_BG 0x304860
-#define MENU_FG   0xD0D0D0
-#define MENU_BG   0x203048
-#define MENU_ON   0x80C0FF
-
 struct hit {
     int col, row, ncols, nrows, id, output;
 };
@@ -92,10 +86,11 @@ int ui_button(int col, int row, const char *label, int id)
 {
     int n = ui_cells(label) + 2;
     if (col + n > screen_cols()) return col;
-    screen_fill(col, row, n, 1, BUTTON_BG);
-    screen_text(col, row, "[", BUTTON_FG, BUTTON_BG);
-    screen_text(col + 1, row, label, BUTTON_FG, BUTTON_BG);
-    screen_text(col + n - 1, row, "]", BUTTON_FG, BUTTON_BG);
+    uint32_t fg = theme_rgb(THEME_FG, 0xD0D0D0), bg = theme_rgb(THEME_CONTROL, 0x304860);
+    screen_fill(col, row, n, 1, bg);
+    screen_text(col, row, "[", fg, bg);
+    screen_text(col + 1, row, label, fg, bg);
+    screen_text(col + n - 1, row, "]", fg, bg);
     ui_hit(col, row, n, 1, id);
     return col + n + 1;
 }
@@ -129,7 +124,8 @@ int ui_menu(int col, int row, const char *const *items)
         if (drawn_top != top || drawn_sel != sel) {
             for (int i = 0; i < visible; i++) {
                 int selected = top + i == sel;
-                uint32_t bg = selected ? MENU_ON : MENU_BG, fg = selected ? MENU_BG : MENU_FG;
+                uint32_t bg = selected ? theme_rgb(THEME_ACCENT, 0x80C0FF) : theme_rgb(THEME_PANEL, 0x203048);
+                uint32_t fg = selected ? theme_rgb(THEME_ON_ACCENT, 0x203048) : theme_rgb(THEME_FG, 0xD0D0D0);
                 screen_fill(col, row + i, w, 1, bg);
                 screen_text(col + 1, row + i, items[top + i], fg, bg);
             }
@@ -138,7 +134,9 @@ int ui_menu(int col, int row, const char *const *items)
             drawn_sel = sel;
         }
         int key = key_poll_timeout(-1, -1);
-        if (key == K_UP || key == K_DOWN) {
+        if (key == K_REPAINT) {
+            drawn_top = -1;
+        } else if (key == K_UP || key == K_DOWN) {
             sel = (sel + (key == K_UP ? n - 1 : 1)) % n;
             if (sel < top) top = sel;
             if (sel >= top + visible) top = sel - visible + 1;
