@@ -468,12 +468,6 @@ def build_jobserver(workspace, slots):
 
 def run_build_workers(names, slots, active_limit, fd, launch, cancelled, has_headroom=lambda: True):
     """Reserve one global token per active package worker."""
-    def run(name, token):
-        try:
-            return launch(name)
-        finally:
-            os.write(fd, token)
-
     pending = iter(names)
     name = next(pending, None)
     codes = {}
@@ -484,10 +478,15 @@ def run_build_workers(names, slots, active_limit, fd, launch, cancelled, has_hea
         while True:
             for future in tuple(active):
                 if future.done():
-                    finished = active.pop(future)
-                    code = future.result()
-                    if code:
-                        codes[finished] = code
+                    finished, token = active.pop(future)
+                    try:
+                        code = future.result()
+                        if code:
+                            codes[finished] = code
+                    finally:
+                        # The coordinator observes the outcome before this slot
+                        # can be reused to dispatch a package.
+                        os.write(fd, token)
             if (name is not None and len(active) < workers and not cancelled() and
                     all(code == SERIAL_DEPS for code in codes.values()) and
                     (not active or has_headroom())):
@@ -503,17 +502,28 @@ def run_build_workers(names, slots, active_limit, fd, launch, cancelled, has_hea
                     if not token:
                         raise TransactionError('build jobserver closed while admitting a worker')
                     try:
-                        future = pool.submit(run, name, token)
+                        future = pool.submit(launch, name)
                     except BaseException:
                         os.write(fd, token)
                         raise
-                    active[future] = name
+                    active[future] = (name, token)
                     name = next(pending, None)
             elif active:
                 # Under resource pressure wait for a build to finish before
                 # admitting a new root; running clients still share the FIFO.
                 wait(active, return_when=FIRST_COMPLETED)
             else:
+                # No client remains to borrow or return slots. A missing or
+                # duplicate token means this batch cannot be trusted to have
+                # respected its shared budget.
+                if not cancelled():
+                    try:
+                        remaining = os.read(fd, slots + 1)
+                    except BlockingIOError:
+                        remaining = b''
+                    if remaining != b'+' * slots:
+                        raise TransactionError('build jobserver slot inventory changed')
+                    os.write(fd, remaining)
                 return codes
 
 

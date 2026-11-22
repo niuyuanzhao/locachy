@@ -222,6 +222,25 @@ class UpdateTransaction(unittest.TestCase):
                              {'a': 7, 'b': 7})
         self.assertCountEqual(finished, ['a', 'b'])
 
+    def test_pool_refuses_lost_or_extra_client_tokens(self):
+        fifo = self.root / 'jobserver'
+        os.mkfifo(fifo, 0o600)
+        fd = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
+        self.addCleanup(os.close, fd)
+        for missing in (True, False):
+            with self.subTest(missing=missing):
+                os.write(fd, b'++')
+
+                def launch(_):
+                    if missing:
+                        self.assertEqual(os.read(fd, 1), b'+')
+                    else:
+                        os.write(fd, b'+')
+                    return 0
+
+                with self.assertRaisesRegex(tx.TransactionError, 'slot inventory changed'):
+                    tx.run_build_workers(['one'], 2, 1, fd, launch, lambda: False)
+
     def test_worker_cancellation_stops_dispatch_and_returns_slot(self):
         cancelled = False
         calls = []
