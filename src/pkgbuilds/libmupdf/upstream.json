@@ -11,5 +11,5 @@
   "adapter": "adapter.sh",
   "inputs": ["bundled-cmark-gfm.patch"],
   "source_directory": "mupdf",
-  "gate": "libmupdf-markdown-v1"
+  "gate": "libmupdf-markdown-smoke-v1"
 }

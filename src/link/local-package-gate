@@ -3,11 +3,15 @@
 # the unprivileged build has ended. ROOT is the upgraded disposable root,
 # SOURCE our trusted sources (not the downloaded PKGBUILD), OUT a private
 # result directory. Never run tests against the live display or host labwc.
+# Only the separate development command selects --regression.
 set -euo pipefail
-name=${1:?usage: local-package-gate NAME ROOT SOURCE OUT}
-root=${2:?}
-source=${3:?}
-out=${4:?}
+usage='usage: local-package-gate NAME ROOT SOURCE OUT [--regression]'
+[ "$#" -eq 4 ] || { [ "$#" -eq 5 ] && [ "$5" = --regression ]; } || { echo "$usage" >&2; exit 2; }
+name=$1
+root=$2
+source=$3
+out=$4
+mode=${5:---update-smoke}
 case "$name" in
 labwc-locachy|libinput|libinput-tools|libmupdf|libpaper) ;;
 *) echo "local-package-gate: no test contract for $name" >&2; exit 1 ;;
@@ -15,21 +19,44 @@ esac
 for path in "$root" "$source" "$out"; do
     [[ "$path" = /* ]] && [ -d "$path" ] || exit 1
 done
-export root source out name
-# Contracts without cgroups: tools/test-NAME.sh in the target root.
-if [ "$name" != labwc-locachy ]; then
+export root source out name mode
+# Only the compositor regression suite needs a cgroup mount. All other
+# checks run in the same small target-root wrapper without a display.
+if [ "$name" != labwc-locachy ] || [ "$mode" = --update-smoke ]; then
     exec unshare --mount --propagation private --pid --fork --kill-child --mount-proc bash -euc '
         install -d "$root/run/locachy-gate-source" "$root/run/locachy-gate-results"
         mount --bind -o ro "$source" "$root/run/locachy-gate-source"
         mount --bind "$out" "$root/run/locachy-gate-results"
         mount -t proc proc "$root/proc" -o nosuid,noexec,nodev
-        chroot "$root" env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/bin HOME=/root LANG=C.UTF-8 \
-            bash "/run/locachy-gate-source/tools/test-$name.sh" /run/locachy-gate-results
+        printf "local-package-gate: %s: starting %s\n" "$name" "${mode#--}"
+        TIMEFORMAT="local-package-gate: $name: ${mode#--} elapsed %3R s"
+        flags=()
+        case "$name:$mode" in
+            libmupdf:--update-smoke|libpaper:--update-smoke) flags+=("$mode") ;;
+        esac
+        time chroot "$root" env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/bin HOME=/root LANG=C.UTF-8 \
+            bash "/run/locachy-gate-source/tools/test-$name.sh" /run/locachy-gate-results "${flags[@]}"
     '
 fi
-exec unshare --mount --propagation private --pid --fork --kill-child --mount-proc bash -euc '
-    # Sysfs stays recursively read-only. Only this trusted freezer contract
-    # receives a fresh cgroup2 view in the caller-provided cgroup namespace.
+run_labwc_regression() {
+# This mount lives only in the outer private mount namespace. The caller's
+# /sys may be a read-only bind even when the cgroup is delegated.
+mount -t cgroup2 -o nosuid,noexec,nodev cgroup2 /sys/fs/cgroup
+# Put just the regression subprocess in a private leaf before creating its
+# cgroup namespace. Unsharing by itself could still expose the host hierarchy.
+parent=$(awk -F: '$1 == 0 && $2 == "" { print $3 }' /proc/self/cgroup)
+[[ "$parent" = /* ]] || { echo 'local-package-gate: no cgroup v2 hierarchy' >&2; exit 1; }
+group=$(mktemp -d "/sys/fs/cgroup${parent%/}/locachy-regression.XXXXXXXX") || {
+    echo 'local-package-gate: labwc regression requires a writable cgroup v2 subtree' >&2
+    exit 1
+}
+# The waiting shell stays outside the subtree so it can remove the leaf.
+cleanup_group() { rmdir -- "$group"; }
+trap cleanup_group EXIT
+(
+    printf '0\n' >"$group/cgroup.procs"
+    exec unshare --cgroup --mount --propagation private --pid --fork --kill-child --mount-proc bash -euc '
+    # Only the new leaf is writable; the remaining sysfs view stays read-only.
     mount -t cgroup2 -o nosuid,noexec,nodev cgroup2 "$root/sys/fs/cgroup"
     mount -t proc proc "$root/proc" -o nosuid,noexec,nodev
     install -d "$root/run/locachy-gate-source" "$root/run/locachy-gate-results"
@@ -42,13 +69,22 @@ exec unshare --mount --propagation private --pid --fork --kill-child --mount-pro
         out=/var/tmp/locachy-gate-build
         name=labwc-locachy
         run_logged() {
-            local logfile=$1 status
+            local logfile=$1 status started=$SECONDS stage=${1%.log}
             shift
-            if "$@" >"$result/$logfile" 2>&1; then return 0; else status=$?; fi
-            printf "local-package-gate: %s failed (status %s); log: %s/%s\n" "$name" "$status" "$result" "$logfile" >&2
+            printf "local-package-gate: %s: starting %s\n" "$name" "$stage" >&2
+            if "$@" >"$result/$logfile" 2>&1; then
+                printf "local-package-gate: %s: %s done (%s s)\n" "$name" "$stage" "$((SECONDS - started))" >&2
+                return 0
+            else
+                status=$?
+            fi
+            printf "local-package-gate: %s: %s failed (status %s, %s s); log: %s/%s\n" \
+                "$name" "$stage" "$status" "$((SECONDS - started))" "$result" "$logfile" >&2
             tail -n 60 "$result/$logfile" >&2
             return "$status"
         }
+        stage_started=$SECONDS
+        printf "local-package-gate: %s: starting package contract setup\n" "$name" >&2
         mkdir -p "$out" /run/user /run/locachy /usr/local/lib/locachy \
             /etc/locachy/labwc /var/lib/locachy/rime /usr/local/share/locachy
         # A first root has no installed LOCachy runtime yet. Install only
@@ -59,21 +95,13 @@ exec unshare --mount --propagation private --pid --fork --kill-child --mount-pro
         printf '\''lock_after="0"\n'\'' >>/etc/locachy/rc.conf
         : >/etc/locachy/monitors.conf
         install -m 644 "$src/base/rime/mode-labels.conf" /usr/local/share/locachy/ime-mode-labels.conf
+        printf "local-package-gate: %s: package contract setup done (%s s)\n" "$name" "$((SECONDS - stage_started))" >&2
         # Rebuild our host clients against the target libraries, not the old
         # host ABI. Only our trusted sources are compiled as root here.
         run_logged host-clients-build.log sh "$src/tools/build-check.sh" "$out"
         test -x /usr/bin/labwc
-        for p in security-context-v1 wlr-foreign-toplevel-management-unstable-v1 wlr-output-management-unstable-v1 wlr-output-power-management-unstable-v1 ext-idle-notify-v1; do
-            wayland-scanner client-header "$src/base/protocols/$p.xml" "$out/$p-client-protocol.h"
-            wayland-scanner private-code "$src/base/protocols/$p.xml" "$out/$p-protocol.c"
-        done
-        ar rcs "$out/base.a" "$out"/obj/base-*.o
-        gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -DCONFIG_FREETYPE -DCONFIG_NETWORKMANAGER \
-            $(pkg-config --cflags freetype2 libnm) -I"$src/base/include" -I"$out" \
-            "$src/progs/labwc-control.c" "$out"/security-context-v1-protocol.c \
-            "$out"/wlr-foreign-toplevel-management-unstable-v1-protocol.c \
-            "$out"/wlr-output-management-unstable-v1-protocol.c "$out"/wlr-output-power-management-unstable-v1-protocol.c "$out"/ext-idle-notify-v1-protocol.c "$out/base.a" \
-            $(pkg-config --libs freetype2 libnm) -lwayland-client -lm -o "$out/labwc-control"
+        # The fixtures use the client just built against the upgraded target
+        # with the same base objects and Wayland protocols as the host build.
         install -m 755 "$out/labwc-control" /usr/local/lib/locachy/labwc-control
         # Each test uses its own mount/PID namespace, runtime sockets and
         # nested cgroup. No uinput or real input/display is exposed.
@@ -90,3 +118,7 @@ exec unshare --mount --propagation private --pid --fork --kill-child --mount-pro
         python3 -B -c "import json; json.dump({\"name\":\"labwc-locachy\",\"id\":\"labwc-clipboard-corner-drop-v4\",\"passed\":True,\"tests\":[\"clipboard\",\"restricted\",\"guard\",\"cgroup\",\"inner-edge\",\"corner-unit\",\"corner-edge\",\"drop-gate\"]},open(\"$result/gate.json\",\"w\"))"
         '\''
 '
+)
+}
+export -f run_labwc_regression
+exec unshare --mount --propagation private bash -euc run_labwc_regression

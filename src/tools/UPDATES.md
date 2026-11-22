@@ -230,17 +230,60 @@ The mirrors are also ranked again periodically:
 
 ## Package contracts
 
-Locally patched packages are built unprivileged in disposable roots against the
-pinned repository snapshot. Their exact sealed artifacts are installed together
-in another disposable root; trusted contracts run there, with no host display
-or input devices. The proof records the complete artifact set, target packages,
-source hash and required contract identifier. A mismatch stops the host update;
-it is not bypassed by a successful compiler exit.
+A prepared update is built and tested against one pinned host snapshot.
+`locachy-build --validate-prepared DIR` installs the sealed candidates together
+in a disposable target root and runs the trusted update smoke checks before
+any host package transaction. The proof binds the complete artifact set,
+target packages, source hash and required contract ID. Failed checks, missing
+proofs and mismatches stop the update before the host package transaction.
 
-A result from an earlier attempt is used again, without a build, when every check
-above still holds for this exact snapshot (its host, recipe, target set, trusted
-test sources and artifact hash) and the set was tested together. A retried apply
-of the same plan therefore builds nothing; any change to those inputs builds again.
+| Package | Retained in update smoke | Full checks run separately |
+| --- | --- | --- |
+| `labwc-locachy` | Installed headless startup, Wayland and clipboard-guard sockets | Target host-client rebuild; clipboard, restricted clipboard, guard policy and cgroup freezer; inner-edge snapping, bar-corner unit and corner snapping tests, and drop gate |
+| `libmupdf` | Standalone Markdown heading anchors without system `cmark-gfm` | PDF, EPUB and `view-render` |
+| `libpaper` | Repeated init/done, catalog cleanup and XDG ownership | ASan/UBSan with leak detection |
+| `libinput` | Raised epoch, `libinput.so` provides, Panasonic circular-pad quirks, link and context creation | Patched upstream circular-scroll litest and pointer VM tests remain separate release checks |
+| `libinput-tools` | CLI commands and helpers, no debug GUI, ELF/runtime dependencies and matching `libinput` release | No separate suite |
+
+For development only, run `locachy-build --regress-prepared DIR SHA256`
+against the same sealed candidates, normally on a disposable development host
+or root before Apply. Pass the trusted SHA-256 of the fixed `plan.json` emitted
+by the transaction snapshot/Check lock. Do not hash an untrusted plan after
+the fact to authorize it. The command verifies the pinned inputs and the
+original installed-package fingerprint before running any tests.
+
+The full labwc gate creates a dedicated cgroup subtree and namespace and fails
+without writable delegated cgroup v2. Logs go to `DIR/regression.*`; key-trust
+notifications, update proofs and host packages are unchanged. The two libinput
+packages use the same installed checks in both modes.
+
+Each independent package build has its own disposable root, package database,
+build home, keyring and writable cache. CPU affinity and quota, plus available
+memory and disk space at runtime, determine how many roots can run at once.
+`LOCACHY_BUILD_WORKERS` optionally caps that count.
+
+GNU Make and Ninja 1.13+ share CPU slots through a GNU Make FIFO jobserver.
+Each active root has one implicit slot; every additional job claims a slot
+from the shared pool. Workers are not pinned to a static CPU set, and explicit
+upstream `-j1` is preserved. Compression and tests that do not use the jobserver
+are limited per worker.
+
+Unsupported build tools or dependencies that require AUR use the original
+serial phase. Compilation and signature failures never trigger fallback.
+The per-package logs include actual `makepkg` start and end times. Final
+validation still installs all candidates together in a fresh disposable root
+before the single host transaction.
+
+The builder reuses identical file-manager objects within its trusted build
+check, and logs separate preparation, package, contract and host-transaction
+stages. This exposes the longest path instead of attributing the whole update
+to the last package named in the output. It does not skip a contract or a
+post-transaction rebuild.
+
+The output pane keeps the actual stage timings and any failed stage. The
+prepared update retains its plan and gate logs under
+`/var/lib/locachy/local-packages/transactions/`; a failed batch can be resumed
+there without silently reusing an unverified artifact.
 
 `tools/test-local-packages.py`, `test-update-transaction.py` and
 `test-prepared-builder.py` check this orchestration with doubles.

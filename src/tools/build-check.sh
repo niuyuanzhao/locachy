@@ -46,9 +46,12 @@ for name in installer rescue; do
         -I"$src/base/include" -I"$src/base" "$src/progs/$name.c" \
         "$out"/obj/base-*.o $libs $(pkg-config --libs json-c) -o "$out/$name"
 done
+# These direct clients compile the file manager with identical options.
+gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags \
+    -I"$src/base/include" -I"$src/base" -c "$src/progs/files.c" -o "$out/obj/files-direct.o"
 for name in home packages firmware archive; do
     gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags \
-        -I"$src/base/include" -I"$src/base" "$src/progs/$name.c" "$src/progs/files.c" \
+        -I"$src/base/include" -I"$src/base" "$src/progs/$name.c" "$out/obj/files-direct.o" \
         "$out"/obj/base-*.o $libs -o "$out/$name"
 done
 # The archive manager's worker: libarchive (pacman's) and OpenSSL's hashes.
@@ -76,7 +79,7 @@ if pkg-config --exists $view_pkgs && [ -f /usr/include/mupdf/fitz.h ] && [ -f /u
         $(pkg-config --cflags --libs $view_pkgs) -lmupdf -lchm -lm -o "$out/view-render"
     gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $ime_flags $flags \
         -I"$src/base/include" -I"$src/base" "$src/progs/view.c" "$src/progs/view-layout.c" \
-        "$src/progs/view-client.c" "$src/progs/files.c" "$out"/obj/base-*.o "$out/obj/ime.o" \
+        "$src/progs/view-client.c" "$out/obj/files-direct.o" "$out"/obj/base-*.o "$out/obj/ime.o" \
         $ime_libs $libs -o "$out/view"
 fi
 # The text editor, where tree-sitter and pcre2 are installed (make.sh).
@@ -85,7 +88,7 @@ if pkg-config --exists tree-sitter libpcre2-8 json-glib-1.0; then
         $(pkg-config --cflags json-glib-1.0) -I"$src/base/include" -I"$src/base" "$src/progs/edit.c" "$src/progs/edit-buffer.c" \
         "$src/progs/edit-doc.c" "$src/progs/edit-file.c" "$src/progs/edit-search.c" "$src/progs/edit-syntax.c" \
         "$src/progs/edit-tree.c" "$src/progs/edit-layout.c" "$src/progs/edit-lsp.c" \
-        "$src/progs/edit-session.c" "$src/progs/edit-filesearch.c" "$src/progs/files.c" "$out"/obj/base-*.o "$out/obj/ime.o" $ime_libs $libs \
+        "$src/progs/edit-session.c" "$src/progs/edit-filesearch.c" "$out/obj/files-direct.o" "$out"/obj/base-*.o "$out/obj/ime.o" $ime_libs $libs \
         -ltree-sitter -lpcre2-8 $(pkg-config --libs json-glib-1.0) -o "$out/edit"
 fi
 # The extended display's receiver on the direct screen and its sandboxed
@@ -117,7 +120,7 @@ if pkg-config --exists $extdisplay_pkgs openssl; then
         "$src/progs/extdisplay-broker-tls.c" "$src/progs/extdisplay-discovery.c" $(pkg-config --libs openssl)
 fi
 gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags \
-    -I"$src/base/include" -I"$src/base" "$src/progs/settings.c" "$src/progs/files.c" "$src/progs/auth.c" \
+    -I"$src/base/include" -I"$src/base" "$src/progs/settings.c" "$out/obj/files-direct.o" "$src/progs/auth.c" \
     "$out"/obj/base-*.o $libs -lpam -o "$out/settings"
 gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags \
     -I"$src/base/include" -I"$src/base" "$src/progs/lock.c" "$src/progs/auth.c" "$src/progs/duress-shadow.c" \
@@ -191,19 +194,19 @@ if command -v wayland-scanner >/dev/null 2>&1 && pkg-config --exists wayland-cli
     gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $ime_flags $flags -I"$src/base/include" -I"$out" \
         "$src/progs/term.c" "$out"/obj/win-*.o "$out/obj/ime.o" $win $ime_libs $libs -o "$out/term-window"
     gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags -I"$src/base/include" -I"$src/base" -I"$out" \
-        "$src/progs/settings.c" "$src/progs/files.c" "$src/progs/auth.c" "$out"/obj/win-*.o $win $libs -lpam \
+        "$src/progs/settings.c" "$out/obj/files-direct.o" "$src/progs/auth.c" "$out"/obj/win-*.o $win $libs -lpam \
         -o "$out/settings-window"
     gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags -I"$src/base/include" -I"$src/base" -I"$out" \
-        "$src/progs/files-main.c" "$src/progs/files.c" "$out"/obj/win-*.o $win $libs -o "$out/files"
+        "$src/progs/files-main.c" "$out/obj/files-direct.o" "$out"/obj/win-*.o $win $libs -o "$out/files"
     gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags -I"$src/base/include" -I"$src/base" -I"$out" \
-        "$src/progs/packages.c" "$src/progs/files.c" "$out"/obj/win-*.o $win $libs -o "$out/packages-window"
+        "$src/progs/packages.c" "$out/obj/files-direct.o" "$out"/obj/win-*.o $win $libs -o "$out/packages-window"
     gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags -I"$src/base/include" -I"$src/base" -I"$out" \
-        "$src/progs/firmware.c" "$src/progs/files.c" "$out"/obj/win-*.o $win $libs -o "$out/firmware-window"
+        "$src/progs/firmware.c" "$out/obj/files-direct.o" "$out"/obj/win-*.o $win $libs -o "$out/firmware-window"
     gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $flags -I"$src/base/include" -I"$src/base" -I"$out" \
-        "$src/progs/archive.c" "$src/progs/files.c" "$out"/obj/win-*.o $win $libs -o "$out/archive-window"
+        "$src/progs/archive.c" "$out/obj/files-direct.o" "$out"/obj/win-*.o $win $libs -o "$out/archive-window"
     if [ -e "$out/view" ]; then
         gcc -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $ime_flags $flags -I"$src/base/include" -I"$src/base" -I"$out" \
-            "$src/progs/view.c" "$src/progs/view-layout.c" "$src/progs/view-client.c" "$src/progs/files.c" \
+            "$src/progs/view.c" "$src/progs/view-layout.c" "$src/progs/view-client.c" "$out/obj/files-direct.o" \
             "$out"/obj/win-*.o "$out/obj/ime.o" $win $ime_libs $libs -o "$out/view-window"
     fi
     if [ -e "$out/edit" ]; then
@@ -212,7 +215,7 @@ if command -v wayland-scanner >/dev/null 2>&1 && pkg-config --exists wayland-cli
             "$src/progs/edit.c" "$src/progs/edit-buffer.c" "$src/progs/edit-doc.c" "$src/progs/edit-file.c" \
             "$src/progs/edit-search.c" "$src/progs/edit-syntax.c" "$src/progs/edit-tree.c" \
             "$src/progs/edit-layout.c" "$src/progs/edit-lsp.c" "$src/progs/edit-session.c" \
-            "$src/progs/edit-filesearch.c" "$src/progs/files.c" "$out"/obj/win-*.o "$out/obj/ime.o" \
+            "$src/progs/edit-filesearch.c" "$out/obj/files-direct.o" "$out"/obj/win-*.o "$out/obj/ime.o" \
             $win $ime_libs $libs -ltree-sitter -lpcre2-8 $(pkg-config --libs json-glib-1.0) -o "$out/edit-window"
     fi
 fi

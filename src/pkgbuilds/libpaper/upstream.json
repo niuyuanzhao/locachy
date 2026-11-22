@@ -9,5 +9,5 @@
   "adapter": "adapter.sh",
   "inputs": ["lifecycle.patch"],
   "source_directory": "libpaper",
-  "gate": "libpaper-lifecycle-v1"
+  "gate": "libpaper-lifecycle-smoke-v1"
 }

@@ -185,10 +185,10 @@ class StableUpstream(unittest.TestCase):
         with self.assertRaisesRegex(u.UpstreamError, "effective"):
             u.validate_candidate(lock, "labwc-locachy", self.baseline, self.state)
 
-    def promote(self, lock):
+    def promote(self, lock, gate_id="labwc-locachy-update-smoke-v1"):
         artifact = "b" * 64
         return u.promote_candidate(lock, "labwc-locachy", self.baseline, self.state,
-            artifact_sha256=artifact, gate={"id": "labwc-clipboard-corner-drop-v4", "passed": True,
+            artifact_sha256=artifact, gate={"id": gate_id, "passed": True,
                                            "artifact_sha256": artifact, "test_hash": "c" * 64})
 
     def test_promotion_requires_passed_matching_artifact_gate(self):
@@ -196,6 +196,8 @@ class StableUpstream(unittest.TestCase):
         with self.assertRaises(u.UpstreamError):
             u.promote_candidate(lock, "labwc-locachy", self.baseline, self.state,
                                 artifact_sha256="b" * 64, gate={"passed": True})
+        with self.assertRaisesRegex(u.UpstreamError, "matching artifact's passed contract gate"):
+            self.promote(lock, gate_id="labwc-clipboard-corner-drop-v4")
         self.assertEqual(u.effective_recipe("labwc-locachy", self.baseline, self.state), self.baseline)
         recipe = self.promote(lock)
         self.assertEqual(u.effective_recipe("labwc-locachy", self.baseline, self.state), recipe)
