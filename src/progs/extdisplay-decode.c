@@ -260,7 +260,48 @@ int extdisplay_decoder_size(const struct extdisplay_decoder *d, uint32_t *w, uin
     if (h) *h = d->height;
     return 1;
 }
-int extdisplay_decoder_export_dmabuf(struct extdisplay_decoder *d, int *fd, struct extdisplay_dmabuf *info)
+#ifdef CONFIG_EXTDISPLAY_VAAPI
+static int export_surface_prime(VASurfaceID dst, int *fds, struct extdisplay_dmabuf *info)
+{
+    VADRMPRIMESurfaceDescriptor prime;
+    memset(&prime, 0, sizeof prime);
+    if (vaExportSurfaceHandle(va_disp, dst, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+                              VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_COMPOSED_LAYERS, &prime) != VA_STATUS_SUCCESS) {
+        return 0;
+    }
+    int valid = prime.num_objects >= 1 && prime.num_objects <= EXTDISPLAY_DMABUF_MAX_PLANES &&
+                prime.num_layers == 1 &&
+                prime.layers[0].num_planes >= 1 && prime.layers[0].num_planes <= EXTDISPLAY_DMABUF_MAX_PLANES;
+    for (uint32_t i = 0; valid && i < prime.num_objects; i++) {
+        if (prime.objects[i].fd < 0) valid = 0;
+    }
+    for (uint32_t i = 0; valid && i < prime.layers[0].num_planes; i++) {
+        if (prime.layers[0].object_index[i] >= prime.num_objects) valid = 0;
+    }
+    if (!valid) {
+        for (uint32_t i = 0; i < prime.num_objects && i < 4; i++) {
+            if (prime.objects[i].fd >= 0) close(prime.objects[i].fd);
+        }
+        return 0;
+    }
+    memset(info, 0, sizeof *info);
+    info->fourcc = prime.layers[0].drm_format;
+    info->num_planes = prime.layers[0].num_planes;
+    info->num_objects = prime.num_objects;
+    for (uint32_t i = 0; i < EXTDISPLAY_DMABUF_MAX_PLANES; i++) fds[i] = -1;
+    for (uint32_t i = 0; i < prime.num_objects; i++) fds[i] = prime.objects[i].fd;
+    for (uint32_t i = 0; i < prime.layers[0].num_planes; i++) {
+        uint32_t oi = prime.layers[0].object_index[i];
+        info->object_index[i] = oi;
+        info->pitches[i] = prime.layers[0].pitch[i];
+        info->offsets[i] = prime.layers[0].offset[i];
+        info->modifiers[i] = prime.objects[oi].drm_format_modifier;
+    }
+    return 1;
+}
+#endif
+
+int extdisplay_decoder_export_dmabuf(struct extdisplay_decoder *d, int *fds, struct extdisplay_dmabuf *info)
 {
 #ifdef CONFIG_EXTDISPLAY_VAAPI
     if (!d || !d->has_ready || d->dmabuf_off || !va_vpp_ok || !va_disp ||
@@ -315,64 +356,28 @@ int extdisplay_decoder_export_dmabuf(struct extdisplay_decoder *d, int *fd, stru
         d->dmabuf_off = 1;
         return 0;
     }
-    VADRMPRIMESurfaceDescriptor prime;
-    memset(&prime, 0, sizeof prime);
-    if (vaExportSurfaceHandle(va_disp, dst, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
-                              VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_COMPOSED_LAYERS, &prime) != VA_STATUS_SUCCESS) {
+    if (!export_surface_prime(dst, fds, info)) {
         d->dmabuf_off = 1;
         return 0;
     }
-    if (prime.num_objects != 1 || prime.num_layers != 1 || prime.layers[0].num_planes != 1 || prime.objects[0].fd < 0) {
-        for (uint32_t i = 0; i < prime.num_objects && i < 4; i++) {
-            if (prime.objects[i].fd >= 0) close(prime.objects[i].fd);
-        }
-        d->dmabuf_off = 1;
-        return 0;
-    }
-    *fd = prime.objects[0].fd;
-    *info = (struct extdisplay_dmabuf){
-        .fourcc = prime.layers[0].drm_format,
-        .pitch = prime.layers[0].pitch[0],
-        .offset = prime.layers[0].offset[0],
-        .modifier = prime.objects[0].drm_format_modifier,
-    };
     d->vpp_idx = (d->vpp_idx + 1) % 3;
     d->vpp_has_last = 1;
     av_frame_unref(d->ready);
     d->has_ready = 0;
     return 1;
 #else
-    (void)d; (void)fd; (void)info;
+    (void)d; (void)fds; (void)info;
     return 0;
 #endif
 }
-int extdisplay_decoder_reexport_dmabuf(struct extdisplay_decoder *d, int *fd, struct extdisplay_dmabuf *info)
+int extdisplay_decoder_reexport_dmabuf(struct extdisplay_decoder *d, int *fds, struct extdisplay_dmabuf *info)
 {
 #ifdef CONFIG_EXTDISPLAY_VAAPI
     if (!d || d->dmabuf_off || !va_vpp_ok || !va_disp || !d->vpp_ready || !d->vpp_has_last) return 0;
     VASurfaceID dst = d->vpp_surf[(d->vpp_idx + 2) % 3];
-    VADRMPRIMESurfaceDescriptor prime;
-    memset(&prime, 0, sizeof prime);
-    if (vaExportSurfaceHandle(va_disp, dst, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
-                              VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_COMPOSED_LAYERS, &prime) != VA_STATUS_SUCCESS) {
-        return 0;
-    }
-    if (prime.num_objects != 1 || prime.num_layers != 1 || prime.layers[0].num_planes != 1 || prime.objects[0].fd < 0) {
-        for (uint32_t i = 0; i < prime.num_objects && i < 4; i++) {
-            if (prime.objects[i].fd >= 0) close(prime.objects[i].fd);
-        }
-        return 0;
-    }
-    *fd = prime.objects[0].fd;
-    *info = (struct extdisplay_dmabuf){
-        .fourcc = prime.layers[0].drm_format,
-        .pitch = prime.layers[0].pitch[0],
-        .offset = prime.layers[0].offset[0],
-        .modifier = prime.objects[0].drm_format_modifier,
-    };
-    return 1;
+    return export_surface_prime(dst, fds, info);
 #else
-    (void)d; (void)fd; (void)info;
+    (void)d; (void)fds; (void)info;
     return 0;
 #endif
 }
@@ -425,10 +430,10 @@ int extdisplay_decoder_step(struct extdisplay_decoder *d, const void *p, size_t 
 { (void)d; (void)p; (void)n; errno = ENOTSUP; return -1; }
 int extdisplay_decoder_size(const struct extdisplay_decoder *d, uint32_t *w, uint32_t *h)
 { (void)d; (void)w; (void)h; return 0; }
-int extdisplay_decoder_export_dmabuf(struct extdisplay_decoder *d, int *fd, struct extdisplay_dmabuf *info)
-{ (void)d; (void)fd; (void)info; return 0; }
-int extdisplay_decoder_reexport_dmabuf(struct extdisplay_decoder *d, int *fd, struct extdisplay_dmabuf *info)
-{ (void)d; (void)fd; (void)info; return 0; }
+int extdisplay_decoder_export_dmabuf(struct extdisplay_decoder *d, int *fds, struct extdisplay_dmabuf *info)
+{ (void)d; (void)fds; (void)info; return 0; }
+int extdisplay_decoder_reexport_dmabuf(struct extdisplay_decoder *d, int *fds, struct extdisplay_dmabuf *info)
+{ (void)d; (void)fds; (void)info; return 0; }
 int extdisplay_decoder_render(struct extdisplay_decoder *d, uint32_t *dst)
 { (void)d; (void)dst; errno = ENOTSUP; return -1; }
 void extdisplay_decoder_disable_dmabuf(struct extdisplay_decoder *d) { (void)d; }

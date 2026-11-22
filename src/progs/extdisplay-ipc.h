@@ -33,16 +33,22 @@ enum extdisplay_ipc_op {
     EXTDISPLAY_IPC_REFRESH,    /* re-export the last dma-buf frame after VT/lease restore */
     /* worker to frontend */
     EXTDISPLAY_IPC_READY = 16, /* width: decoders (1 H.264, 2 HEVC, 4 HW H.264, 8 HW HEVC420, 16 HW HEVC444) */
-    EXTDISPLAY_IPC_ACTIVE,     /* streamConfig accepted, decoder open */
+    EXTDISPLAY_IPC_ACTIVE,     /* streamConfig accepted, decoder open; width: negotiated EXTDISPLAY_INPUT_* */
     EXTDISPLAY_IPC_FRAME,      /* width, height, bytes; one memfd */
     EXTDISPLAY_IPC_UNAVAILABLE,
     EXTDISPLAY_IPC_FAILED,
     EXTDISPLAY_IPC_CANCELLED,  /* the cancel is in the transport */
-    EXTDISPLAY_IPC_DMABUF,     /* width, height, text=extdisplay_dmabuf; one dma-buf fd */
+    EXTDISPLAY_IPC_DMABUF,     /* width, height, text=extdisplay_dmabuf; 1..4 dma-buf fds */
 };
+#define EXTDISPLAY_DMABUF_MAX_PLANES 4u
 struct extdisplay_dmabuf {
-    uint32_t fourcc, pitch, offset, reserved;
-    uint64_t modifier;
+    uint32_t fourcc;
+    uint32_t num_planes;
+    uint32_t num_objects;
+    uint32_t object_index[EXTDISPLAY_DMABUF_MAX_PLANES];
+    uint32_t pitches[EXTDISPLAY_DMABUF_MAX_PLANES];
+    uint32_t offsets[EXTDISPLAY_DMABUF_MAX_PLANES];
+    uint64_t modifiers[EXTDISPLAY_DMABUF_MAX_PLANES];
 };
 struct extdisplay_ipc {
     uint32_t magic, op, width, height;
@@ -54,7 +60,9 @@ struct extdisplay_ipc {
 pid_t extdisplay_worker_spawn(int transport, int *ipc);
 pid_t extdisplay_worker_spawn_hw(int transport, int render_fd, int *ipc);
 int extdisplay_ipc_send(int fd, struct extdisplay_ipc *message);
-/* 0 and *pixels_fd (-1 unless FRAME), or -1 (errno EAGAIN: nothing there). */
+/* 0 and *pixels_fd (-1 unless FRAME/DMABUF), or -1 (errno EAGAIN: nothing there). */
 int extdisplay_ipc_recv(int fd, struct extdisplay_ipc *message, int *pixels_fd);
+/* Receive message with up to max_fds ancillary descriptors (*nfds set to count). */
+int extdisplay_ipc_recv_fds(int fd, struct extdisplay_ipc *message, int *fds, unsigned max_fds, unsigned *nfds);
 void *extdisplay_frame_map(int fd, const struct extdisplay_ipc *message);
 #endif

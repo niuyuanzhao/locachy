@@ -46,6 +46,7 @@ static struct {
     int hello, welcomed, active, frame_pending, dmabuf_off;
     uint32_t width, height;
     unsigned hw_caps;
+    uint32_t input_caps;
 } session;
 
 static double now(void)
@@ -62,6 +63,8 @@ static int status(uint32_t op)
         m.width = (extdisplay_decoder_available(EXTDISPLAY_CODEC_H264) ? 1u : 0u) |
                   (extdisplay_decoder_available(EXTDISPLAY_CODEC_HEVC) ? 2u : 0u) |
                   ((session.hw_caps & 7u) << 2);
+    } else if (op == EXTDISPLAY_IPC_ACTIVE) {
+        m.width = session.input_caps;
     }
     return send(EXTDISPLAY_IPC_FD, &m, sizeof m, MSG_NOSIGNAL | MSG_DONTWAIT) == (ssize_t)sizeof m ? 0 : -1;
 }
@@ -120,19 +123,25 @@ static int send_cancel(void)
     return enqueue(cancel, sizeof cancel - 1) == 0 && flush_all() == 0 ? 0 : -1;
 }
 
-static int send_fd_msg(struct extdisplay_ipc *m, int fd)
+static int send_fds_msg(struct extdisplay_ipc *m, const int *fds, unsigned nfds)
 {
     struct iovec iov = { m, sizeof *m };
-    union { struct cmsghdr align; char bytes[CMSG_SPACE(sizeof(int))]; } c;
+    union { struct cmsghdr align; char bytes[CMSG_SPACE(EXTDISPLAY_DMABUF_MAX_PLANES * sizeof(int))]; } c;
     memset(&c, 0, sizeof c);
-    struct msghdr msg = { .msg_iov = &iov, .msg_iovlen = 1, .msg_control = c.bytes, .msg_controllen = sizeof c.bytes };
+    if (!nfds || nfds > EXTDISPLAY_DMABUF_MAX_PLANES) return -1;
+    struct msghdr msg = {
+        .msg_iov = &iov, .msg_iovlen = 1,
+        .msg_control = c.bytes, .msg_controllen = CMSG_SPACE(nfds * sizeof(int)),
+    };
     struct cmsghdr *cm = CMSG_FIRSTHDR(&msg);
     cm->cmsg_level = SOL_SOCKET;
     cm->cmsg_type = SCM_RIGHTS;
-    cm->cmsg_len = CMSG_LEN(sizeof fd);
-    memcpy(CMSG_DATA(cm), &fd, sizeof fd);
+    cm->cmsg_len = CMSG_LEN(nfds * sizeof(int));
+    memcpy(CMSG_DATA(cm), fds, nfds * sizeof(int));
     ssize_t n = sendmsg(EXTDISPLAY_IPC_FD, &msg, MSG_NOSIGNAL | MSG_DONTWAIT);
-    close(fd);
+    for (unsigned i = 0; i < nfds; i++) {
+        if (fds[i] >= 0) close(fds[i]);
+    }
     if (n == (ssize_t)sizeof *m) {
         session.frame_pending = 1;
         return 0;
@@ -141,21 +150,27 @@ static int send_fd_msg(struct extdisplay_ipc *m, int fd)
     return n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
 }
 
+static int send_fd_msg(struct extdisplay_ipc *m, int fd)
+{
+    return send_fds_msg(m, &fd, 1);
+}
+
 static int send_latest(void)
 {
     uint32_t w, h;
     size_t size;
     if (session.frame_pending || !extdisplay_decoder_size(session.decoder, &w, &h)) return 0;
     if (!session.dmabuf_off) {
-        int dmabuf_fd = -1;
+        int dmabuf_fds[EXTDISPLAY_DMABUF_MAX_PLANES] = { -1, -1, -1, -1 };
         struct extdisplay_dmabuf info;
-        if (extdisplay_decoder_export_dmabuf(session.decoder, &dmabuf_fd, &info) > 0 && dmabuf_fd >= 0) {
+        if (extdisplay_decoder_export_dmabuf(session.decoder, dmabuf_fds, &info) > 0 &&
+            info.num_objects >= 1 && info.num_objects <= EXTDISPLAY_DMABUF_MAX_PLANES) {
             struct extdisplay_ipc m = {
                 .magic = EXTDISPLAY_IPC_MAGIC, .op = EXTDISPLAY_IPC_DMABUF,
                 .width = w, .height = h, .length = sizeof info,
             };
             memcpy(m.text, &info, sizeof info);
-            return send_fd_msg(&m, dmabuf_fd);
+            return send_fds_msg(&m, dmabuf_fds, info.num_objects);
         }
     }
     if (extdisplay_dimensions(w, h, &size) < 0) return -1;
@@ -189,6 +204,7 @@ static int receive(void *unused, const unsigned char *data, size_t n)
     case EXTDISPLAY_MSG_WELCOME:
         if (session.welcomed) return -1;
         session.welcomed = 1;
+        session.input_caps = c.input_caps;
         break;
     case EXTDISPLAY_MSG_CONFIG:
         if (!session.welcomed) return -1;
@@ -336,15 +352,16 @@ static int frontend(void)
             break;
         case EXTDISPLAY_IPC_REFRESH: {
             if (!session.active || session.frame_pending || session.dmabuf_off) break;
-            int dmabuf_fd = -1;
+            int dmabuf_fds[EXTDISPLAY_DMABUF_MAX_PLANES] = { -1, -1, -1, -1 };
             struct extdisplay_dmabuf info;
-            if (extdisplay_decoder_reexport_dmabuf(session.decoder, &dmabuf_fd, &info) > 0 && dmabuf_fd >= 0) {
+            if (extdisplay_decoder_reexport_dmabuf(session.decoder, dmabuf_fds, &info) > 0 &&
+                info.num_objects >= 1 && info.num_objects <= EXTDISPLAY_DMABUF_MAX_PLANES) {
                 struct extdisplay_ipc dm = {
                     .magic = EXTDISPLAY_IPC_MAGIC, .op = EXTDISPLAY_IPC_DMABUF,
                     .width = session.width, .height = session.height, .length = sizeof info,
                 };
                 memcpy(dm.text, &info, sizeof info);
-                if (send_fd_msg(&dm, dmabuf_fd) < 0) return -1;
+                if (send_fds_msg(&dm, dmabuf_fds, info.num_objects) < 0) return -1;
             }
             break;
         }
@@ -356,12 +373,10 @@ static int frontend(void)
         case EXTDISPLAY_IPC_INPUT:
             if (!m.length) return -1;
             if (!session.active) break;
-            /* Rate-shed pointer motion and scroll updates when the peer lags
-             * so a transient stall never overflows tx or ends the stream. */
+            /* Rate-shed pointer/tablet motion and move-only touch/scroll updates
+             * when the peer lags so a transient stall never overflows tx. */
             if (session.tx_end - session.tx_start > POINTER_SHED &&
-                ((m.length >= 17 && memcmp(m.text, "{\"type\":\"pointer\"", 17) == 0) ||
-                 (m.length >= 16 && memcmp(m.text, "{\"type\":\"scroll\"", 16) == 0 &&
-                  strstr(m.text, "\"phase\":2") != NULL))) {
+                extdisplay_input_droppable(m.text, m.length)) {
                 break;
             }
             if (enqueue(m.text, m.length) < 0) return -1;

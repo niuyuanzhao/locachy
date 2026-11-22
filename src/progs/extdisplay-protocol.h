@@ -37,6 +37,46 @@ enum { EXTDISPLAY_SOURCE_NONE, EXTDISPLAY_SOURCE_WHEEL, EXTDISPLAY_SOURCE_FINGER
 #define EXTDISPLAY_LOCK_CAPS 1u
 #define EXTDISPLAY_LOCK_NUM  2u
 
+/* Optional peer input capabilities negotiated in welcome.input. */
+#define EXTDISPLAY_CAP_TOUCH_NAME  "touch"
+#define EXTDISPLAY_CAP_TABLET_NAME "tablet"
+#define EXTDISPLAY_INPUT_TOUCH  (1u << 0)
+#define EXTDISPLAY_INPUT_TABLET (1u << 1)
+
+/* Touch point states on the wire (strings: "down", "move", "up", "cancel"). */
+enum extdisplay_touch_state {
+    EXTDISPLAY_TOUCH_DOWN,
+    EXTDISPLAY_TOUCH_MOVE,
+    EXTDISPLAY_TOUCH_UP,
+    EXTDISPLAY_TOUCH_CANCEL,
+};
+#define EXTDISPLAY_TOUCH_POINTS_MAX 10u /* max contacts in one touch frame */
+struct extdisplay_touch_point {
+    int32_t id;
+    enum extdisplay_touch_state state;
+    double x, y;     /* normalized [0, 1] */
+    double xmm, ymm; /* millimetres from device resolution */
+};
+struct extdisplay_touch_frame {
+    struct extdisplay_touch_point points[EXTDISPLAY_TOUCH_POINTS_MAX];
+    size_t count;
+};
+/* Append one contact change in order: 0, or -1 when the frame is full (send it first). */
+int extdisplay_touch_frame_add(struct extdisplay_touch_frame *f, int32_t id, enum extdisplay_touch_state state,
+                               double x, double y, double xmm, double ymm);
+
+/* Tablet tool types on the wire. */
+enum extdisplay_tablet_tool {
+    EXTDISPLAY_TOOL_OTHER,
+    EXTDISPLAY_TOOL_PEN,
+    EXTDISPLAY_TOOL_ERASER,
+    EXTDISPLAY_TOOL_BRUSH,
+    EXTDISPLAY_TOOL_PENCIL,
+    EXTDISPLAY_TOOL_AIRBRUSH,
+    EXTDISPLAY_TOOL_LENS,
+    EXTDISPLAY_TOOL_MOUSE,
+};
+
 enum extdisplay_codec { EXTDISPLAY_CODEC_NONE, EXTDISPLAY_CODEC_H264, EXTDISPLAY_CODEC_HEVC };
 enum extdisplay_message { EXTDISPLAY_MSG_UNKNOWN, EXTDISPLAY_MSG_WELCOME, EXTDISPLAY_MSG_CONFIG,
                    EXTDISPLAY_MSG_PING, EXTDISPLAY_MSG_PONG, EXTDISPLAY_MSG_CLOSING, EXTDISPLAY_MSG_VIDEO };
@@ -44,6 +84,7 @@ struct extdisplay_control {
     enum extdisplay_message type;
     enum extdisplay_codec codec;
     uint32_t width, height, fps;
+    uint32_t input_caps; /* EXTDISPLAY_MSG_WELCOME: EXTDISPLAY_INPUT_* bitmask */
     int64_t timestamp;
     size_t video_offset; /* EXTDISPLAY_MSG_VIDEO: the first start code, after any prefix */
 };
@@ -71,11 +112,29 @@ int extdisplay_annex_b(const unsigned char *data, size_t size);
  * a known type with invalid fields, or video that is not Annex-B is -1. */
 int extdisplay_control_parse(const unsigned char *data, size_t size, struct extdisplay_control *out);
 
+/* Video codec capability flags for hello.videoCaps.
+ * "h264" and "hevc" (which older senders treat as HEVC 4:4:4) keep legacy
+ * interoperability; "hevc420" and "hevc444" express exact chroma profiles so
+ * senders pick the highest hardware-decoded format on any GPU. */
+#define EXTDISPLAY_VCAP_H264    (1u << 0)
+#define EXTDISPLAY_VCAP_HEVC    (1u << 1)
+#define EXTDISPLAY_VCAP_HEVC420 (1u << 2)
+#define EXTDISPLAY_VCAP_HEVC444 (1u << 3)
+
+/* Derive hello videoCaps bitmask from worker READY flags (bit 0 sw H.264,
+ * bit 1 sw HEVC, bit 2 hw H.264, bit 3 hw HEVC 4:2:0, bit 4 hw HEVC 4:4:4)
+ * and decode_mode ("auto", "hw", "sw"). */
+uint32_t extdisplay_select_video_caps(uint32_t worker_caps, const char *decode_mode);
+
 /* The receiver's messages: their length, or -1 (invalid or does not fit). */
 int extdisplay_hello(char *out, size_t size, uint32_t width, uint32_t height, double scale,
               int h264, int hevc);
 int extdisplay_hello_named(char *out, size_t size, uint32_t width, uint32_t height, double scale,
                     int h264, int hevc, const char *host, const char *model);
+int extdisplay_hello_caps(char *out, size_t size, uint32_t width, uint32_t height, double scale,
+                    int h264, int hevc, const char *host, const char *model, uint32_t input_caps);
+int extdisplay_hello_full(char *out, size_t size, uint32_t width, uint32_t height, double scale,
+                    uint32_t video_caps, const char *host, const char *model, uint32_t input_caps);
 int extdisplay_key_json(char *out, size_t size, uint32_t device, uint32_t code,
                  uint32_t keysym, uint32_t mods, uint32_t locks, int state);
 int extdisplay_button_json(char *out, size_t size, uint32_t button, int pressed,
@@ -84,4 +143,26 @@ int extdisplay_pointer_json(char *out, size_t size, double x, double y);
 int extdisplay_pointer_delta_json(char *out, size_t size, double x, double y, double dx, double dy);
 int extdisplay_scroll_json(char *out, size_t size, double dx, double dy, int phase, int source);
 int extdisplay_cancel_json(char *out, size_t size);
+
+/* Additive tablet and multi-touch wire formatters (used only when the peer's
+ * welcome.input includes "tablet" or "touch"). Coordinates are normalized in
+ * [0, 1]. Returns message length or -1 on invalid input or insufficient buffer. */
+const char *extdisplay_tablet_tool_name(enum extdisplay_tablet_tool tool);
+int extdisplay_tablet_proximity_json(char *out, size_t size, int in, enum extdisplay_tablet_tool tool,
+                                     uint64_t id, uint32_t caps, double x, double y);
+int extdisplay_tablet_axis_json(char *out, size_t size, double x, double y, double pressure,
+                                double tilt_x, double tilt_y, double distance, double rotation,
+                                uint32_t buttons);
+int extdisplay_tablet_tip_json(char *out, size_t size, int down, double x, double y, double pressure,
+                               uint32_t buttons);
+int extdisplay_tablet_button_json(char *out, size_t size, uint32_t button, int state, double x, double y,
+                                  uint32_t buttons);
+int extdisplay_touch_frame_json(char *out, size_t size, const struct extdisplay_touch_point *points,
+                                size_t count);
+/* 1 if a touch frame contains only "move" points (may be shed under backpressure),
+ * 0 if it contains any down/up/cancel transition (never drop). */
+int extdisplay_touch_frame_droppable(const struct extdisplay_touch_point *points, size_t count);
+/* 1 if a serialized input message may be shed under backpressure (pointer motion,
+ * scroll update, tablet axis, or move-only touch frame); 0 otherwise. */
+int extdisplay_input_droppable(const char *json, size_t len);
 #endif

@@ -169,10 +169,30 @@ void screen_cells(int *w, int *h, int *top);
 void screen_flush(void);
 /* Path to the active DRM card's render node (/dev/dri/renderD*); -1 if none. */
 int screen_render_node(char *path, size_t size);
-/* Present a single-plane DRM PRIME dma-buf full-screen on the primary output
- * without copying pixels through CPU memory; -1 if unsupported or multi-output. */
+/* Present a DRM PRIME dma-buf full-screen on the primary output without copying
+ * pixels through CPU memory; -1 if unsupported or multi-output. Uses non-blocking
+ * DRM page flip when available (caller polls screen_flip_fd() and calls
+ * screen_flip_complete()), falling back to synchronous SETCRTC otherwise. */
+#define SCREEN_DMABUF_MAX_PLANES 4
+struct screen_dmabuf_planes {
+    uint32_t fourcc;
+    uint32_t num_planes;
+    uint32_t pitches[SCREEN_DMABUF_MAX_PLANES];
+    uint32_t offsets[SCREEN_DMABUF_MAX_PLANES];
+    uint64_t modifiers[SCREEN_DMABUF_MAX_PLANES];
+    int fds[SCREEN_DMABUF_MAX_PLANES];
+};
 int screen_present_dmabuf(int dmabuf_fd, uint32_t w, uint32_t h, uint32_t fourcc,
                           uint32_t pitch, uint32_t offset, uint64_t modifier);
+/* Multi-plane variant: returns 1 if an async page flip is in flight (wait on
+ * screen_flip_fd() and call screen_flip_complete()), 0 if already presented
+ * synchronously, or -1 on error (errno set). */
+int screen_present_dmabuf_planes(const struct screen_dmabuf_planes *p, uint32_t w, uint32_t h);
+/* DRM fd to poll for POLLIN while an async flip is pending; -1 if none pending. */
+int screen_flip_fd(void);
+/* Drain DRM flip completion events; returns 1 when a pending flip completed, 0
+ * if still pending, or -1 on error. */
+int screen_flip_complete(void);
 /* The status bar at the top, as on the shared display (panel.c), with title
  * (the program) and ime (its input method mode, or NULL). The cells start
  * half a row below the top, so that row 0 is within the bar:
@@ -452,7 +472,7 @@ struct pointer_event {
     double scroll_dx, scroll_dy; /* opt-in, fractional pixels: right/down; wheel step = 15 pixels */
     double dx, dy; /* relative motion delta in logical points (mouse, touchpad, TrackPoint) */
 };
-enum { GESTURE_NONE, GESTURE_PINCH, GESTURE_SCROLL };
+enum { GESTURE_NONE, GESTURE_PINCH, GESTURE_SCROLL, GESTURE_RAW };
 enum { SCROLL_NONE, SCROLL_WHEEL, SCROLL_FINGER, SCROLL_CONTINUOUS, SCROLL_TOUCH };
 enum { SCROLL_PHASE_NONE, SCROLL_BEGIN, SCROLL_UPDATE, SCROLL_END, SCROLL_CANCEL };
 /* Updates keep wheel/hwheel; touch scroll_fingers is exact, a touchpad's 0
@@ -462,6 +482,80 @@ enum { SCROLL_PHASE_NONE, SCROLL_BEGIN, SCROLL_UPDATE, SCROLL_END, SCROLL_CANCEL
 int pointer_scroll_events(int on);
 const struct pointer_event *pointer_last(void);
 int pointer_present(void); /* a pointer device is there */
+
+/* Opt-in structured touch and tablet tool events for direct-input consumers
+ * (extdisplay). pointer_raw_direct(mask) takes POINTER_RAW_TOUCH and/or
+ * POINTER_RAW_TABLET (0: off, the default, and then every TUI path is exactly
+ * as before). A flag on sends its device's events to pointer_raw_next() instead
+ * of the TUI's translations of them (touch taps and holds, pen as pointer and
+ * buttons), so nothing is reported twice. Returns the previous mask; turning a
+ * flag off or on resets its TUI state, and discards its queued events (send a
+ * cancel first). While any flag is on, pointer_next() also returns once with
+ * last.gesture == GESTURE_RAW per raw event burst, so a key_poll wakes for it.
+ * POINTER_RAW_TOUCH_CANCEL with slot -1 ends every contact: libinput's
+ * per-contact cancels carry their slot. POINTER_RAW_CANCEL ends every contact
+ * and tool state (device removed, ownership lost, queue overflow on
+ * transitions): the consumer releases what it sent. */
+#define POINTER_RAW_TOUCH  1
+#define POINTER_RAW_TABLET 2
+enum pointer_raw_kind {
+    POINTER_RAW_NONE,
+    POINTER_RAW_TOUCH_DOWN,
+    POINTER_RAW_TOUCH_MOVE,
+    POINTER_RAW_TOUCH_UP,
+    POINTER_RAW_TOUCH_CANCEL,
+    POINTER_RAW_TOUCH_FRAME,
+    POINTER_RAW_TABLET_PROXIMITY,
+    POINTER_RAW_TABLET_AXIS,
+    POINTER_RAW_TABLET_TIP,
+    POINTER_RAW_TABLET_BUTTON,
+    POINTER_RAW_CANCEL,
+};
+enum pointer_tablet_tool {
+    POINTER_TOOL_OTHER,
+    POINTER_TOOL_PEN,
+    POINTER_TOOL_ERASER,
+    POINTER_TOOL_BRUSH,
+    POINTER_TOOL_PENCIL,
+    POINTER_TOOL_AIRBRUSH,
+    POINTER_TOOL_LENS,
+    POINTER_TOOL_MOUSE,
+};
+#define POINTER_TABLET_CAP_PRESSURE  (1u << 0)
+#define POINTER_TABLET_CAP_DISTANCE  (1u << 1)
+#define POINTER_TABLET_CAP_TILT      (1u << 2)
+#define POINTER_TABLET_CAP_ROTATION  (1u << 3)
+#define POINTER_TABLET_CAP_SLIDER    (1u << 4)
+#define POINTER_TABLET_CAP_SIZE      (1u << 5)
+#define POINTER_TABLET_CAP_WHEEL     (1u << 6)
+#define POINTER_TABLET_CAP_STYLUS    (1u << 7)
+#define POINTER_TABLET_CAP_STYLUS2   (1u << 8)
+#define POINTER_TABLET_CAP_STYLUS3   (1u << 9)
+#define POINTER_TABLET_CAP_ERASER    (1u << 10)
+struct pointer_raw_event {
+    enum pointer_raw_kind kind;
+    int32_t slot;          /* touch seat slot, or -1 for frame/cancel */
+    double x, y;           /* sub-pixel coordinates in pixels of the picture */
+    double xmm, ymm;       /* touch position in millimetres from device resolution */
+    int area_x, area_y;    /* absolute target area in pixels when sampled */
+    int area_w, area_h;
+    enum pointer_tablet_tool tool;
+    uint64_t serial;
+    uint64_t tool_id;
+    uint32_t caps;         /* POINTER_TABLET_CAP_* bits */
+    int proximity_in;      /* 1 in, 0 out */
+    int tip_down;          /* 1 down, 0 up */
+    double pressure;       /* [0, 1] */
+    double tilt_x, tilt_y; /* degrees */
+    double distance;       /* [0, 1] */
+    double rotation;       /* degrees */
+    uint32_t button;       /* evdev button code (BTN_STYLUS, ...) */
+    int button_state;      /* 1 pressed, 0 released */
+    uint32_t buttons;      /* held tablet buttons mask (bit 0 tip, 1 stylus, 2 stylus2, 3 stylus3) */
+};
+int pointer_raw_direct(int on); /* returns previous setting; flushes raw queue */
+int pointer_raw_next(struct pointer_raw_event *out);
+int pointer_raw_pending(void);
 /* The cursor's shape: an arrow, a text beam (where text is selected), none. */
 enum { CURSOR_ARROW, CURSOR_TEXT, CURSOR_NONE };
 void screen_cursor(int shape);

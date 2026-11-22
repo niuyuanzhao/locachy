@@ -40,6 +40,7 @@
 #include "include/wayland-backend.h"
 
 #define QUEUE 64
+#define RAW_QUEUE 256
 #define CLICK_S 0.4        /* a second press within this is a double click */
 #define SCROLL_PIXELS 15.0 /* touchpad and TrackPoint scrolling per wheel step */
 #define TOUCHES 10
@@ -52,6 +53,16 @@
 static int bit(const unsigned long *bits, int n)
 {
     return (int)((bits[n / (8 * sizeof *bits)] >> (n % (8 * sizeof *bits))) & 1);
+}
+
+static int pointer_lend_match(const unsigned long *keys, const unsigned long *rel, const unsigned long *abs)
+{
+    int mouse = bit(keys, BTN_LEFT) && bit(rel, REL_X) && bit(rel, REL_Y);
+    int touch = (bit(keys, BTN_TOUCH) && bit(abs, ABS_X) && bit(abs, ABS_Y)) ||
+                (bit(abs, ABS_MT_POSITION_X) && bit(abs, ABS_MT_POSITION_Y));
+    int tablet = (bit(keys, BTN_TOOL_PEN) || bit(keys, BTN_STYLUS)) && bit(abs, ABS_X) && bit(abs, ABS_Y);
+    int keyboard = bit(keys, KEY_A) && bit(keys, KEY_ENTER); /* to pair with a touchpad */
+    return mouse || touch || tablet || keyboard;
 }
 
 int *pointer_lend(size_t *count, char paths[][POINTER_PATH], size_t max)
@@ -69,10 +80,7 @@ int *pointer_lend(size_t *count, char paths[][POINTER_PATH], size_t max)
         ioctl(fd, EVIOCGBIT(EV_KEY, sizeof keys), keys);
         ioctl(fd, EVIOCGBIT(EV_REL, sizeof rel), rel);
         ioctl(fd, EVIOCGBIT(EV_ABS, sizeof abs), abs);
-        int mouse = bit(keys, BTN_LEFT) && bit(rel, REL_X) && bit(rel, REL_Y);
-        int touch = bit(keys, BTN_TOUCH) && bit(abs, ABS_X) && bit(abs, ABS_Y);
-        int keyboard = bit(keys, KEY_A) && bit(keys, KEY_ENTER); /* to pair with a touchpad */
-        if (!mouse && !touch && !keyboard) { close(fd); continue; }
+        if (!pointer_lend_match(keys, rel, abs)) { close(fd); continue; }
         int *p = realloc(fds, (*count + 1) * sizeof *p);
         if (!p) { close(fd); pointer_take_back(fds, *count); *count = 0; return NULL; }
         fds = p;
@@ -112,6 +120,14 @@ static double click_at;
 static int click_button, click_count, click_x, click_y;
 static struct pointer_event queue[QUEUE], last;
 static int qhead, qlen;
+static int raw_direct, raw_wake;
+static struct pointer_raw_event raw_queue[RAW_QUEUE];
+static int raw_head, raw_len;
+static uint32_t raw_tablet_buttons;
+#ifdef CONFIG_LIBINPUT
+static double pen_out_at;            /* monotonic time of last stylus proximity out (palm grace) */
+#define PALM_GRACE_S 0.15
+#endif
 static int nmice, touch_hid, pen_near, timer_fd = -1;
 static int away;                     /* on another program's screen: not ours to move */
 static double touch_ppmm = 4.0;      /* pixels of the picture per millimetre of the touch screen */
@@ -234,6 +250,255 @@ int pointer_scroll_events(int on)
         qlen = kept;
     }
     return old;
+}
+
+static void touch_reset(void);
+
+static void raw_reset(int emit_cancel)
+{
+    raw_head = raw_len = 0;
+    raw_tablet_buttons = 0;
+    raw_wake = 0;
+    if (emit_cancel && raw_direct) {
+        /* All contacts and tool state ended: the consumer releases what it sent. */
+        raw_queue[0] = (struct pointer_raw_event){ .kind = POINTER_RAW_CANCEL, .slot = -1 };
+        raw_len = 1;
+        raw_wake = 1;
+    }
+}
+
+/* Drop the oldest move-only touch frame (only POINTER_RAW_TOUCH_MOVE entries
+ * up to and including its POINTER_RAW_TOUCH_FRAME) from raw_queue. Returns 1
+ * if space was freed, 0 otherwise. */
+static int raw_shed_move_touch_frame(void)
+{
+    int start = 0;
+    while (start < raw_len) {
+        int end = start, only_move = 0, has_other = 0;
+        while (end < raw_len) {
+            enum pointer_raw_kind k = raw_queue[(raw_head + end) % RAW_QUEUE].kind;
+            if (k == POINTER_RAW_TOUCH_FRAME) {
+                end++;
+                break;
+            }
+            if (k == POINTER_RAW_TOUCH_MOVE) only_move = 1;
+            else has_other = 1;
+            end++;
+        }
+        if (only_move && !has_other && end > start &&
+            raw_queue[(raw_head + end - 1) % RAW_QUEUE].kind == POINTER_RAW_TOUCH_FRAME) {
+            int count = end - start;
+            for (int i = start; i + count < raw_len; i++) {
+                raw_queue[(raw_head + i) % RAW_QUEUE] = raw_queue[(raw_head + i + count) % RAW_QUEUE];
+            }
+            raw_len -= count;
+            return 1;
+        }
+        start = end;
+    }
+    return 0;
+}
+
+static void raw_push(struct pointer_raw_event e)
+{
+    if (!raw_direct) return;
+    if (raw_len > 0 && e.kind == POINTER_RAW_TABLET_AXIS) {
+        struct pointer_raw_event *tail = &raw_queue[(raw_head + raw_len - 1) % RAW_QUEUE];
+        if (tail->kind == POINTER_RAW_TABLET_AXIS) {
+            *tail = e; /* axis samples coalesce while unread */
+            raw_wake = 1;
+            return;
+        }
+    }
+    if (raw_len == RAW_QUEUE) {
+        /* Shed droppable events first: oldest tablet axis, then oldest
+         * move-only touch frame. Never drop proximity/tip/button or touch
+         * down/up/cancel silently; if only non-droppable transitions remain,
+         * collapse to a cancel so the consumer can reset state cleanly. */
+        int drop = -1;
+        for (int i = 0; i < raw_len; i++) {
+            if (raw_queue[(raw_head + i) % RAW_QUEUE].kind == POINTER_RAW_TABLET_AXIS) {
+                drop = i;
+                break;
+            }
+        }
+        if (drop >= 0) {
+            for (int i = drop; i + 1 < raw_len; i++) {
+                raw_queue[(raw_head + i) % RAW_QUEUE] = raw_queue[(raw_head + i + 1) % RAW_QUEUE];
+            }
+            raw_len--;
+        } else if (!raw_shed_move_touch_frame()) {
+            raw_reset(1);
+            return;
+        }
+    }
+    raw_queue[(raw_head + raw_len++) % RAW_QUEUE] = e;
+    raw_wake = 1;
+}
+
+int pointer_raw_direct(int on)
+{
+    int old = raw_direct;
+    int next = on & (POINTER_RAW_TOUCH | POINTER_RAW_TABLET);
+    raw_direct = next;
+    raw_reset(0);
+    if ((old ^ next) & POINTER_RAW_TOUCH) touch_reset();
+    return old;
+}
+
+int pointer_raw_next(struct pointer_raw_event *out)
+{
+    if (!raw_direct || !raw_len || !out) return 0;
+    *out = raw_queue[raw_head];
+    raw_head = (raw_head + 1) % RAW_QUEUE;
+    raw_len--;
+    if (raw_len == 0) raw_wake = 0;
+    return 1;
+}
+
+int pointer_raw_pending(void)
+{
+    return raw_direct && raw_len > 0;
+}
+
+EVENTS static uint32_t raw_tablet_button_bit(uint32_t code)
+{
+    switch (code) {
+    case BTN_TOUCH:   return 1u << 0;
+    case BTN_STYLUS:  return 1u << 1;
+    case BTN_STYLUS2: return 1u << 2;
+    case BTN_STYLUS3: return 1u << 3;
+    default:          return 0;
+    }
+}
+
+EVENTS static void raw_touch_event(enum pointer_raw_kind kind, int32_t slot, double x, double y,
+                                   double xmm, double ymm, int ax, int ay, int w, int h)
+{
+    if (!(raw_direct & POINTER_RAW_TOUCH)) return;
+    raw_push((struct pointer_raw_event){
+        .kind = kind,
+        .slot = slot,
+        .x = x,
+        .y = y,
+        .xmm = xmm,
+        .ymm = ymm,
+        .area_x = ax,
+        .area_y = ay,
+        .area_w = w,
+        .area_h = h,
+    });
+}
+
+EVENTS static void raw_tablet_proximity(enum pointer_tablet_tool tool, uint64_t serial, uint64_t tool_id,
+                                        uint32_t caps, int in, double x, double y, int ax, int ay, int w, int h)
+{
+    if (!(raw_direct & POINTER_RAW_TABLET)) return;
+    if (!in) raw_tablet_buttons = 0;
+    raw_push((struct pointer_raw_event){
+        .kind = POINTER_RAW_TABLET_PROXIMITY,
+        .slot = -1,
+        .x = x,
+        .y = y,
+        .area_x = ax,
+        .area_y = ay,
+        .area_w = w,
+        .area_h = h,
+        .tool = tool,
+        .serial = serial,
+        .tool_id = tool_id,
+        .caps = caps,
+        .proximity_in = !!in,
+        .buttons = raw_tablet_buttons,
+    });
+}
+
+EVENTS static void raw_tablet_axis(enum pointer_tablet_tool tool, uint64_t serial, uint64_t tool_id,
+                                   uint32_t caps, double x, double y, double pressure,
+                                   double tilt_x, double tilt_y, double distance, double rotation,
+                                   int ax, int ay, int w, int h)
+{
+    if (!(raw_direct & POINTER_RAW_TABLET)) return;
+    raw_push((struct pointer_raw_event){
+        .kind = POINTER_RAW_TABLET_AXIS,
+        .slot = -1,
+        .x = x,
+        .y = y,
+        .area_x = ax,
+        .area_y = ay,
+        .area_w = w,
+        .area_h = h,
+        .tool = tool,
+        .serial = serial,
+        .tool_id = tool_id,
+        .caps = caps,
+        .pressure = pressure,
+        .tilt_x = tilt_x,
+        .tilt_y = tilt_y,
+        .distance = distance,
+        .rotation = rotation,
+        .buttons = raw_tablet_buttons,
+    });
+}
+
+EVENTS static void raw_tablet_tip(enum pointer_tablet_tool tool, uint64_t serial, uint64_t tool_id,
+                                  uint32_t caps, int down, double x, double y, double pressure,
+                                  double tilt_x, double tilt_y, double distance, double rotation,
+                                  int ax, int ay, int w, int h)
+{
+    if (!(raw_direct & POINTER_RAW_TABLET)) return;
+    if (down) raw_tablet_buttons |= 1u << 0;
+    else raw_tablet_buttons &= ~(1u << 0);
+    raw_push((struct pointer_raw_event){
+        .kind = POINTER_RAW_TABLET_TIP,
+        .slot = -1,
+        .x = x,
+        .y = y,
+        .area_x = ax,
+        .area_y = ay,
+        .area_w = w,
+        .area_h = h,
+        .tool = tool,
+        .serial = serial,
+        .tool_id = tool_id,
+        .caps = caps,
+        .tip_down = !!down,
+        .pressure = pressure,
+        .tilt_x = tilt_x,
+        .tilt_y = tilt_y,
+        .distance = distance,
+        .rotation = rotation,
+        .buttons = raw_tablet_buttons,
+    });
+}
+
+EVENTS static void raw_tablet_button(enum pointer_tablet_tool tool, uint64_t serial, uint64_t tool_id,
+                                     uint32_t caps, uint32_t code, int pressed, double x, double y,
+                                     int ax, int ay, int w, int h)
+{
+    if (!(raw_direct & POINTER_RAW_TABLET)) return;
+    uint32_t mask = raw_tablet_button_bit(code);
+    if (mask) {
+        if (pressed) raw_tablet_buttons |= mask;
+        else raw_tablet_buttons &= ~mask;
+    }
+    raw_push((struct pointer_raw_event){
+        .kind = POINTER_RAW_TABLET_BUTTON,
+        .slot = -1,
+        .x = x,
+        .y = y,
+        .area_x = ax,
+        .area_y = ay,
+        .area_w = w,
+        .area_h = h,
+        .tool = tool,
+        .serial = serial,
+        .tool_id = tool_id,
+        .caps = caps,
+        .button = code,
+        .button_state = !!pressed,
+        .buttons = raw_tablet_buttons,
+    });
 }
 
 /* The cursor is shown while a mouse is there or a pen near, but not after a
@@ -645,6 +910,39 @@ static void pen_moved(struct libinput_event_tablet_tool *pen, int x, int y, int 
     moved();
 }
 
+static enum pointer_tablet_tool tablet_tool_kind(struct libinput_tablet_tool *tool)
+{
+    if (!tool) return POINTER_TOOL_OTHER;
+    switch (libinput_tablet_tool_get_type(tool)) {
+    case LIBINPUT_TABLET_TOOL_TYPE_PEN:      return POINTER_TOOL_PEN;
+    case LIBINPUT_TABLET_TOOL_TYPE_ERASER:   return POINTER_TOOL_ERASER;
+    case LIBINPUT_TABLET_TOOL_TYPE_BRUSH:    return POINTER_TOOL_BRUSH;
+    case LIBINPUT_TABLET_TOOL_TYPE_PENCIL:   return POINTER_TOOL_PENCIL;
+    case LIBINPUT_TABLET_TOOL_TYPE_AIRBRUSH: return POINTER_TOOL_AIRBRUSH;
+    case LIBINPUT_TABLET_TOOL_TYPE_LENS:     return POINTER_TOOL_LENS;
+    case LIBINPUT_TABLET_TOOL_TYPE_MOUSE:    return POINTER_TOOL_MOUSE;
+    default:                                 return POINTER_TOOL_OTHER;
+    }
+}
+
+static uint32_t tablet_tool_caps(struct libinput_tablet_tool *tool)
+{
+    if (!tool) return 0;
+    uint32_t caps = 0;
+    if (libinput_tablet_tool_has_pressure(tool)) caps |= POINTER_TABLET_CAP_PRESSURE;
+    if (libinput_tablet_tool_has_distance(tool)) caps |= POINTER_TABLET_CAP_DISTANCE;
+    if (libinput_tablet_tool_has_tilt(tool)) caps |= POINTER_TABLET_CAP_TILT;
+    if (libinput_tablet_tool_has_rotation(tool)) caps |= POINTER_TABLET_CAP_ROTATION;
+    if (libinput_tablet_tool_has_slider(tool)) caps |= POINTER_TABLET_CAP_SLIDER;
+    if (libinput_tablet_tool_has_size(tool)) caps |= POINTER_TABLET_CAP_SIZE;
+    if (libinput_tablet_tool_has_wheel(tool)) caps |= POINTER_TABLET_CAP_WHEEL;
+    if (libinput_tablet_tool_has_button(tool, BTN_STYLUS)) caps |= POINTER_TABLET_CAP_STYLUS;
+    if (libinput_tablet_tool_has_button(tool, BTN_STYLUS2)) caps |= POINTER_TABLET_CAP_STYLUS2;
+    if (libinput_tablet_tool_has_button(tool, BTN_STYLUS3)) caps |= POINTER_TABLET_CAP_STYLUS3;
+    if (libinput_tablet_tool_get_type(tool) == LIBINPUT_TABLET_TOOL_TYPE_ERASER) caps |= POINTER_TABLET_CAP_ERASER;
+    return caps;
+}
+
 static void handle(struct libinput_event *ev)
 {
     enum libinput_event_type type = libinput_event_get_type(ev);
@@ -670,6 +968,10 @@ static void handle(struct libinput_event *ev)
         if (sign > 0) configure(d);
         if (sign < 0 && d == scroll_device) scroll_finish(SCROLL_CANCEL);
         if (sign < 0 && libinput_device_has_capability(d, LIBINPUT_DEVICE_CAP_TOUCH)) touch_reset();
+        if (sign < 0 && (((raw_direct & POINTER_RAW_TOUCH) && libinput_device_has_capability(d, LIBINPUT_DEVICE_CAP_TOUCH)) ||
+                         ((raw_direct & POINTER_RAW_TABLET) && libinput_device_has_capability(d, LIBINPUT_DEVICE_CAP_TABLET_TOOL)))) {
+            raw_reset(1); /* its contacts and tools are gone: the consumer cancels what it sent */
+        }
         if (sign > 0 && libinput_device_has_capability(d, LIBINPUT_DEVICE_CAP_TOUCH) &&
             libinput_device_get_size(d, &w_mm, &h_mm) == 0 && w_mm > 0) {
             touch_ppmm = w / w_mm;
@@ -711,17 +1013,59 @@ static void handle(struct libinput_event *ev)
         break;
     }
     case LIBINPUT_EVENT_TOUCH_DOWN:
-    case LIBINPUT_EVENT_TOUCH_MOTION:
-        (type == LIBINPUT_EVENT_TOUCH_DOWN ? touch_down : touch_motion)(
-            libinput_event_touch_get_seat_slot(t), ax + libinput_event_touch_get_x_transformed(t, (uint32_t)w),
-            ay + libinput_event_touch_get_y_transformed(t, (uint32_t)hgt), libinput_event_touch_get_x(t),
-            libinput_event_touch_get_y(t));
+    case LIBINPUT_EVENT_TOUCH_MOTION: {
+        int32_t slot = libinput_event_touch_get_seat_slot(t);
+        double tx = ax + libinput_event_touch_get_x_transformed(t, (uint32_t)w);
+        double ty = ay + libinput_event_touch_get_y_transformed(t, (uint32_t)hgt);
+        double xmm = libinput_event_touch_get_x(t);
+        double ymm = libinput_event_touch_get_y(t);
+        if (raw_direct & POINTER_RAW_TOUCH) {
+            /* Suppress palm touches while stylus is in proximity or just left. */
+            if (pen_near || (pen_out_at > 0 && now() - pen_out_at < PALM_GRACE_S)) break;
+            raw_touch_event(type == LIBINPUT_EVENT_TOUCH_DOWN ? POINTER_RAW_TOUCH_DOWN : POINTER_RAW_TOUCH_MOVE,
+                            slot, tx, ty, xmm, ymm, ax, ay, w, hgt);
+            if (slot >= 0 && slot < TOUCHES) touches[slot] = (struct touch){ 1, tx, ty, xmm, ymm };
+            if (!touch_hid) {
+                touch_hid = 1;
+                show_cursor();
+            }
+        } else {
+            (type == LIBINPUT_EVENT_TOUCH_DOWN ? touch_down : touch_motion)(slot, tx, ty, xmm, ymm);
+        }
         break;
-    case LIBINPUT_EVENT_TOUCH_UP:
-        touch_up(libinput_event_touch_get_seat_slot(t));
+    }
+    case LIBINPUT_EVENT_TOUCH_UP: {
+        /* libinput gives no position for a lift: the contact's last one. */
+        int32_t slot = libinput_event_touch_get_seat_slot(t);
+        if (raw_direct & POINTER_RAW_TOUCH) {
+            int known = slot >= 0 && slot < TOUCHES && touches[slot].down;
+            if (known) {
+                raw_touch_event(POINTER_RAW_TOUCH_UP, slot, touches[slot].x, touches[slot].y,
+                                touches[slot].xmm, touches[slot].ymm, ax, ay, w, hgt);
+                touches[slot].down = 0;
+            }
+        } else {
+            touch_up(slot);
+        }
         break;
+    }
     case LIBINPUT_EVENT_TOUCH_CANCEL:
-        touch_reset();
+        if (raw_direct & POINTER_RAW_TOUCH) {
+            int32_t slot = libinput_event_touch_get_seat_slot(t);
+            int known = slot >= 0 && slot < TOUCHES && touches[slot].down;
+            if (known) {
+                raw_touch_event(POINTER_RAW_TOUCH_CANCEL, slot, touches[slot].x, touches[slot].y,
+                                touches[slot].xmm, touches[slot].ymm, ax, ay, w, hgt);
+                touches[slot].down = 0;
+            }
+        } else {
+            touch_reset();
+        }
+        break;
+    case LIBINPUT_EVENT_TOUCH_FRAME:
+        if (raw_direct & POINTER_RAW_TOUCH) {
+            raw_touch_event(POINTER_RAW_TOUCH_FRAME, -1, 0, 0, 0, 0, ax, ay, w, hgt);
+        }
         break;
     case LIBINPUT_EVENT_GESTURE_PINCH_BEGIN:
         scroll_finish(SCROLL_CANCEL);
@@ -743,25 +1087,80 @@ static void handle(struct libinput_event *ev)
             swipe(libinput_event_gesture_get_finger_count(g), swipe_dx, swipe_dy);
         }
         break;
-    case LIBINPUT_EVENT_TABLET_TOOL_PROXIMITY:
-        pen_near = libinput_event_tablet_tool_get_proximity_state(pen) ==
-                   LIBINPUT_TABLET_TOOL_PROXIMITY_STATE_IN;
+    case LIBINPUT_EVENT_TABLET_TOOL_PROXIMITY: {
+        int in = libinput_event_tablet_tool_get_proximity_state(pen) == LIBINPUT_TABLET_TOOL_PROXIMITY_STATE_IN;
+        pen_near = in;
+        if (!in) pen_out_at = now();
+        else pen_out_at = 0;
+        /* Cancel any active palm touches when the pen enters proximity. */
+        if (in && (raw_direct & POINTER_RAW_TOUCH)) {
+            int had = 0;
+            for (int i = 0; i < TOUCHES; i++) {
+                if (!touches[i].down) continue;
+                raw_touch_event(POINTER_RAW_TOUCH_CANCEL, i, touches[i].x, touches[i].y,
+                                touches[i].xmm, touches[i].ymm, ax, ay, w, hgt);
+                touches[i].down = 0;
+                had = 1;
+            }
+            if (had) raw_touch_event(POINTER_RAW_TOUCH_FRAME, -1, 0, 0, 0, 0, ax, ay, w, hgt);
+        }
         touch_hid = 0;
         show_cursor();
-        pen_moved(pen, ax, ay, w, hgt);
-        break;
-    case LIBINPUT_EVENT_TABLET_TOOL_AXIS:
-    case LIBINPUT_EVENT_TABLET_TOOL_TIP:
-        pen_moved(pen, ax, ay, w, hgt);
-        if (type == LIBINPUT_EVENT_TABLET_TOOL_TIP) {
-            button(BTN_LEFT, libinput_event_tablet_tool_get_tip_state(pen) == LIBINPUT_TABLET_TOOL_TIP_DOWN);
+        if (raw_direct & POINTER_RAW_TABLET) {
+            double tx = ax + libinput_event_tablet_tool_get_x_transformed(pen, (uint32_t)w);
+            double ty = ay + libinput_event_tablet_tool_get_y_transformed(pen, (uint32_t)hgt);
+            struct libinput_tablet_tool *tt = libinput_event_tablet_tool_get_tool(pen);
+            raw_tablet_proximity(tablet_tool_kind(tt), tt ? libinput_tablet_tool_get_serial(tt) : 0,
+                                 tt ? libinput_tablet_tool_get_tool_id(tt) : 0, tablet_tool_caps(tt),
+                                 in, tx, ty, ax, ay, w, hgt);
+        } else {
+            pen_moved(pen, ax, ay, w, hgt);
         }
         break;
+    }
+    case LIBINPUT_EVENT_TABLET_TOOL_AXIS:
+    case LIBINPUT_EVENT_TABLET_TOOL_TIP: {
+        if (raw_direct & POINTER_RAW_TABLET) {
+            double tx = ax + libinput_event_tablet_tool_get_x_transformed(pen, (uint32_t)w);
+            double ty = ay + libinput_event_tablet_tool_get_y_transformed(pen, (uint32_t)hgt);
+            double pressure = libinput_event_tablet_tool_get_pressure(pen);
+            double tilt_x = libinput_event_tablet_tool_get_tilt_x(pen);
+            double tilt_y = libinput_event_tablet_tool_get_tilt_y(pen);
+            double distance = libinput_event_tablet_tool_get_distance(pen);
+            double rotation = libinput_event_tablet_tool_get_rotation(pen);
+            struct libinput_tablet_tool *tt = libinput_event_tablet_tool_get_tool(pen);
+            enum pointer_tablet_tool kind = tablet_tool_kind(tt);
+            uint64_t serial = tt ? libinput_tablet_tool_get_serial(tt) : 0;
+            uint64_t tool_id = tt ? libinput_tablet_tool_get_tool_id(tt) : 0;
+            uint32_t caps = tablet_tool_caps(tt);
+            if (type == LIBINPUT_EVENT_TABLET_TOOL_TIP) {
+                int down = libinput_event_tablet_tool_get_tip_state(pen) == LIBINPUT_TABLET_TOOL_TIP_DOWN;
+                raw_tablet_tip(kind, serial, tool_id, caps, down, tx, ty, pressure, tilt_x, tilt_y, distance, rotation,
+                               ax, ay, w, hgt);
+            } else {
+                raw_tablet_axis(kind, serial, tool_id, caps, tx, ty, pressure, tilt_x, tilt_y, distance, rotation,
+                                ax, ay, w, hgt);
+            }
+        } else {
+            pen_moved(pen, ax, ay, w, hgt);
+            if (type == LIBINPUT_EVENT_TABLET_TOOL_TIP) {
+                button(BTN_LEFT, libinput_event_tablet_tool_get_tip_state(pen) == LIBINPUT_TABLET_TOOL_TIP_DOWN);
+            }
+        }
+        break;
+    }
     case LIBINPUT_EVENT_TABLET_TOOL_BUTTON: {
         uint32_t code = libinput_event_tablet_tool_get_button(pen);
-        if (code == BTN_STYLUS || code == BTN_STYLUS2) {
-            button(code == BTN_STYLUS ? BTN_RIGHT : BTN_MIDDLE,
-                   libinput_event_tablet_tool_get_button_state(pen) == LIBINPUT_BUTTON_STATE_PRESSED);
+        int pressed = libinput_event_tablet_tool_get_button_state(pen) == LIBINPUT_BUTTON_STATE_PRESSED;
+        if (raw_direct & POINTER_RAW_TABLET) {
+            double tx = ax + libinput_event_tablet_tool_get_x_transformed(pen, (uint32_t)w);
+            double ty = ay + libinput_event_tablet_tool_get_y_transformed(pen, (uint32_t)hgt);
+            struct libinput_tablet_tool *tt = libinput_event_tablet_tool_get_tool(pen);
+            raw_tablet_button(tablet_tool_kind(tt), tt ? libinput_tablet_tool_get_serial(tt) : 0,
+                              tt ? libinput_tablet_tool_get_tool_id(tt) : 0, tablet_tool_caps(tt),
+                              code, pressed, tx, ty, ax, ay, w, hgt);
+        } else if (code == BTN_STYLUS || code == BTN_STYLUS2) {
+            button(code == BTN_STYLUS ? BTN_RIGHT : BTN_MIDDLE, pressed);
         }
         break;
     }
@@ -873,6 +1272,7 @@ void pointer_went(void)
     cancel_held();
     scroll_finish(SCROLL_CANCEL);
     touch_reset();
+    raw_reset(1);
     away = 1;
     show_cursor();
     if (screen_hover) screen_hover(-1);
@@ -882,6 +1282,7 @@ void pointer_release(void)
 {
     if (base_raw_cancel) base_raw_cancel();
     qlen = 0;
+    raw_reset(1);
     scroll_finish(SCROLL_CANCEL);
     away = 0;
 #ifdef CONFIG_LIBINPUT
@@ -960,7 +1361,14 @@ void pointer_dispatch(void)
 
 int pointer_next(void)
 {
-    if (qlen == 0) return 0;
+    if (qlen == 0) {
+        if (raw_direct && raw_wake) {
+            raw_wake = 0;
+            last = (struct pointer_event){ .gesture = GESTURE_RAW };
+            return 1;
+        }
+        return 0;
+    }
 #ifdef CONFIG_WAYLAND
     if (wl_backend_active()) wl_backend_live_modifiers();
 #endif

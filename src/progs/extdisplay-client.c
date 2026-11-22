@@ -82,13 +82,14 @@ int extdisplay_ipc_send(int fd, struct extdisplay_ipc *m)
     return n == (ssize_t)sizeof *m ? 0 : -1;
 }
 
-int extdisplay_ipc_recv(int fd, struct extdisplay_ipc *m, int *pixels)
+int extdisplay_ipc_recv_fds(int fd, struct extdisplay_ipc *m, int *fds, unsigned max_fds, unsigned *nfds_out)
 {
     union { struct cmsghdr align; char bytes[CMSG_SPACE(8 * sizeof(int))]; } c;
     struct iovec iov = { m, sizeof *m };
     struct msghdr msg = { .msg_iov = &iov, .msg_iovlen = 1, .msg_control = c.bytes, .msg_controllen = sizeof c.bytes };
     ssize_t n;
-    *pixels = -1;
+    for (unsigned i = 0; i < max_fds; i++) fds[i] = -1;
+    if (nfds_out) *nfds_out = 0;
     do n = recvmsg(fd, &msg, MSG_DONTWAIT | MSG_CMSG_CLOEXEC);
     while (n < 0 && errno == EINTR);
     if (n < 0) return -1;
@@ -103,21 +104,58 @@ int extdisplay_ipc_recv(int fd, struct extdisplay_ipc *m, int *pixels)
         for (size_t i = 0; i < count; i++) {
             int f;
             memcpy(&f, (char *)CMSG_DATA(h) + i * sizeof f, sizeof f);
-            if (!nfds++) *pixels = f;
+            if (nfds < max_fds) fds[nfds] = f;
             else close(f);
+            nfds++;
         }
     }
-    int has_fd = m->op == EXTDISPLAY_IPC_FRAME || m->op == EXTDISPLAY_IPC_DMABUF;
-    if (n != (ssize_t)sizeof *m || bad || nfds > 1 || (msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) ||
+    unsigned want_min = 0, want_max = 0;
+    if (m->op == EXTDISPLAY_IPC_FRAME) {
+        want_min = want_max = 1;
+    } else if (m->op == EXTDISPLAY_IPC_DMABUF) {
+        want_min = 1;
+        want_max = EXTDISPLAY_DMABUF_MAX_PLANES;
+    }
+    int dmabuf_bad = 0;
+    if (m->op == EXTDISPLAY_IPC_DMABUF) {
+        if (m->length != sizeof(struct extdisplay_dmabuf)) {
+            dmabuf_bad = 1;
+        } else {
+            struct extdisplay_dmabuf info;
+            memcpy(&info, m->text, sizeof info);
+            if (info.num_planes < 1 || info.num_planes > EXTDISPLAY_DMABUF_MAX_PLANES ||
+                info.num_objects < 1 || info.num_objects > EXTDISPLAY_DMABUF_MAX_PLANES ||
+                info.num_objects != nfds) {
+                dmabuf_bad = 1;
+            }
+            for (uint32_t i = 0; !dmabuf_bad && i < info.num_planes; i++) {
+                if (info.object_index[i] >= info.num_objects) dmabuf_bad = 1;
+            }
+        }
+    }
+    if (n != (ssize_t)sizeof *m || bad || nfds < want_min || nfds > want_max || nfds > max_fds ||
+        (msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) ||
         m->magic != EXTDISPLAY_IPC_MAGIC || m->reserved || m->length > EXTDISPLAY_IPC_TEXT ||
-        has_fd != (*pixels >= 0) || (m->op != EXTDISPLAY_IPC_FRAME && m->bytes) ||
-        (m->op == EXTDISPLAY_IPC_DMABUF && m->length != sizeof(struct extdisplay_dmabuf))) {
-        if (*pixels >= 0) close(*pixels);
-        *pixels = -1;
+        (m->op != EXTDISPLAY_IPC_FRAME && m->bytes) || dmabuf_bad) {
+        for (unsigned i = 0; i < max_fds && i < nfds; i++) {
+            if (fds[i] >= 0) close(fds[i]);
+            fds[i] = -1;
+        }
         errno = EPROTO;
         return -1;
     }
+    if (nfds_out) *nfds_out = nfds;
     return 0;
+}
+
+int extdisplay_ipc_recv(int fd, struct extdisplay_ipc *m, int *pixels)
+{
+    int fds[1] = { -1 };
+    unsigned nfds = 0;
+    int r = extdisplay_ipc_recv_fds(fd, m, fds, 1, &nfds);
+    if (pixels) *pixels = r == 0 && nfds >= 1 ? fds[0] : -1;
+    else if (r == 0 && nfds >= 1 && fds[0] >= 0) close(fds[0]);
+    return r;
 }
 
 void *extdisplay_frame_map(int fd, const struct extdisplay_ipc *m)

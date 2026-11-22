@@ -111,7 +111,7 @@ static int video(const unsigned char *s, size_t n, size_t *offset)
     return 0;
 }
 
-static int welcome(struct json_object *o)
+static int welcome(struct json_object *o, uint32_t *caps_out)
 {
     int64_t version;
     struct json_object *v;
@@ -121,6 +121,7 @@ static int welcome(struct json_object *o)
     if (!(v = field(o, "input", json_type_array)) || json_object_array_length(v) > 16) return -1;
     static const char *const needed[] = { "key", "button", "cancel", "pointer", "scroll" };
     unsigned mask = 0;
+    uint32_t extra = 0;
     for (size_t i = 0; i < json_object_array_length(v); i++) {
         struct json_object *cap = json_object_array_get_idx(v, i);
         if (!json_object_is_type(cap, json_type_string)) return -1;
@@ -129,8 +130,12 @@ static int welcome(struct json_object *o)
         for (unsigned k = 0; k < sizeof needed / sizeof needed[0]; k++) {
             if (strcmp(c, needed[k]) == 0) mask |= 1u << k;
         }
+        if (strcmp(c, EXTDISPLAY_CAP_TOUCH_NAME) == 0) extra |= EXTDISPLAY_INPUT_TOUCH;
+        else if (strcmp(c, EXTDISPLAY_CAP_TABLET_NAME) == 0) extra |= EXTDISPLAY_INPUT_TABLET;
     }
-    return mask == 31 ? 0 : -1;
+    if (mask != 31) return -1;
+    if (caps_out) *caps_out = extra;
+    return 0;
 }
 
 int extdisplay_control_parse(const unsigned char *s, size_t n, struct extdisplay_control *out)
@@ -160,7 +165,7 @@ int extdisplay_control_parse(const unsigned char *s, size_t n, struct extdisplay
     if (!t) {
         goto done;
     } else if (strcmp(t, "welcome") == 0) {
-        if (welcome(o) < 0) goto done;
+        if (welcome(o, &out->input_caps) < 0) goto done;
         out->type = EXTDISPLAY_MSG_WELCOME;
     } else if (strcmp(t, "streamConfig") == 0) {
         int64_t w, h, fps;
@@ -170,8 +175,10 @@ int extdisplay_control_parse(const unsigned char *s, size_t n, struct extdisplay
             goto done;
         }
         const char *codec = json_object_get_string(v);
-        out->codec = strcmp(codec, "h264") == 0 ? EXTDISPLAY_CODEC_H264 : strcmp(codec, "hevc") == 0 ? EXTDISPLAY_CODEC_HEVC
-                                                                                               : EXTDISPLAY_CODEC_NONE;
+        out->codec = strcmp(codec, "h264") == 0 ? EXTDISPLAY_CODEC_H264 :
+            (strcmp(codec, "hevc") == 0 || strcmp(codec, "hevc420") == 0 || strcmp(codec, "hevc444") == 0)
+                ? EXTDISPLAY_CODEC_HEVC
+                : EXTDISPLAY_CODEC_NONE;
         if (out->codec == EXTDISPLAY_CODEC_NONE) goto done;
         out->type = EXTDISPLAY_MSG_CONFIG;
         out->width = (uint32_t)w;
@@ -210,11 +217,52 @@ static void sanitize_label(const char *src, char *dst, size_t size)
     dst[used] = '\0';
 }
 
-int extdisplay_hello_named(char *s, size_t size, uint32_t w, uint32_t h, double scale,
-                    int h264, int hevc, const char *host, const char *model)
+uint32_t extdisplay_select_video_caps(uint32_t worker_caps, const char *decode_mode)
 {
-    if (extdisplay_dimensions(w, h, NULL) < 0 || !isfinite(scale) || scale < 0.5 || scale > 4 || (!h264 && !hevc)) return -1;
-    char safe_host[64], safe_model[64], extra[192] = "";
+    int sw_h264 = (worker_caps & 1u) != 0;
+    int sw_hevc = (worker_caps & 2u) != 0;
+    int hw_h264 = (worker_caps & 4u) != 0;
+    int hw_hevc420 = (worker_caps & 8u) != 0;
+    int hw_hevc444 = (worker_caps & 16u) != 0;
+    int any_hw = hw_h264 || hw_hevc420 || hw_hevc444;
+    uint32_t out = 0;
+
+    if (decode_mode && strcmp(decode_mode, "sw") == 0) {
+        if (sw_h264) out |= EXTDISPLAY_VCAP_H264;
+        if (sw_hevc) out |= EXTDISPLAY_VCAP_HEVC | EXTDISPLAY_VCAP_HEVC420 | EXTDISPLAY_VCAP_HEVC444;
+        return out;
+    }
+    if (any_hw) {
+        /* Hardware decode active: advertise exact hardware-decoded profiles so
+         * senders never send HEVC 4:4:4 to a GPU that only decodes 4:2:0.
+         * Legacy "hevc" (which older senders answer with HEVC 4:4:4) is only
+         * offered when VA-API actually decodes HEVC 4:4:4. */
+        if (hw_h264 || sw_h264) out |= EXTDISPLAY_VCAP_H264;
+        if (hw_hevc420 && sw_hevc) out |= EXTDISPLAY_VCAP_HEVC420;
+        if (hw_hevc444 && sw_hevc) out |= EXTDISPLAY_VCAP_HEVC444 | EXTDISPLAY_VCAP_HEVC;
+        return out;
+    }
+    if (decode_mode && strcmp(decode_mode, "hw") == 0) {
+        /* Explicit hw mode without VA-API: still keep H.264 available as last
+         * resort if FFmpeg has it, without claiming 4:4:4 HEVC. */
+        if (sw_h264) out |= EXTDISPLAY_VCAP_H264;
+        return out;
+    }
+    /* No VA-API available (e.g. VM or very old GPU): keep software H.264 and
+     * HEVC 4:2:0 available without triggering 4:4:4 on older senders. */
+    if (sw_h264) out |= EXTDISPLAY_VCAP_H264;
+    if (sw_hevc) out |= EXTDISPLAY_VCAP_HEVC420;
+    return out;
+}
+
+int extdisplay_hello_full(char *s, size_t size, uint32_t w, uint32_t h, double scale,
+                    uint32_t video_caps, const char *host, const char *model, uint32_t input_caps)
+{
+    if (extdisplay_dimensions(w, h, NULL) < 0 || !isfinite(scale) || scale < 0.5 || scale > 4 ||
+        !(video_caps & (EXTDISPLAY_VCAP_H264 | EXTDISPLAY_VCAP_HEVC | EXTDISPLAY_VCAP_HEVC420 | EXTDISPLAY_VCAP_HEVC444))) {
+        return -1;
+    }
+    char safe_host[64], safe_model[64], extra[192] = "", input[160] = "", vcaps[512] = "";
     sanitize_label(host, safe_host, sizeof safe_host);
     sanitize_label(model, safe_model, sizeof safe_model);
     if (safe_host[0] && safe_model[0]) {
@@ -224,22 +272,54 @@ int extdisplay_hello_named(char *s, size_t size, uint32_t w, uint32_t h, double 
     } else if (safe_model[0]) {
         snprintf(extra, sizeof extra, ",\"model\":\"%s\"", safe_model);
     }
+    static const struct { uint32_t bit; const char *name; } codecs[] = {
+        { EXTDISPLAY_VCAP_H264, "h264" },
+        { EXTDISPLAY_VCAP_HEVC, "hevc" },
+        { EXTDISPLAY_VCAP_HEVC420, "hevc420" },
+        { EXTDISPLAY_VCAP_HEVC444, "hevc444" },
+    };
+    size_t vpos = 0;
+    for (size_t i = 0; i < sizeof codecs / sizeof codecs[0]; i++) {
+        if (!(video_caps & codecs[i].bit)) continue;
+        int added = snprintf(vcaps + vpos, sizeof vcaps - vpos,
+                             "%s{\"codec\":\"%s\",\"maxWidth\":4096,\"maxHeight\":4096,\"maxFrameRate\":60}",
+                             vpos ? "," : "", codecs[i].name);
+        if (added < 0 || (size_t)added >= sizeof vcaps - vpos) return -1;
+        vpos += (size_t)added;
+    }
+    /* The five required inputs, then the optional ones this receiver can take. */
+    snprintf(input, sizeof input, ",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"%s%s",
+             "key", "button", "cancel", "pointer", "scroll",
+             input_caps & EXTDISPLAY_INPUT_TOUCH ? ",\"" EXTDISPLAY_CAP_TOUCH_NAME "\"" : "",
+             input_caps & EXTDISPLAY_INPUT_TABLET ? ",\"" EXTDISPLAY_CAP_TABLET_NAME "\"" : "");
     return fits(snprintf(s, size,
         "{\"type\":\"hello\",\"pv\":3,\"locachy\":%d,\"device\":\"LOCachy\",\"extendedOnly\":true%s,"
         "\"pixelsWide\":%u,\"pixelsHigh\":%u,\"scale\":%.3f,"
         "\"panel\":{\"pixelsWide\":%u,\"pixelsHigh\":%u,\"scale\":%.3f},"
         "\"displayMaxFrameRate\":%d,\"maxEncodeWide\":%u,\"maxEncodeHigh\":%u,"
-        "\"videoCaps\":[%s%s%s],\"input\":[\"key\",\"button\",\"cancel\",\"pointer\",\"scroll\"]}",
+        "\"videoCaps\":[%s],\"input\":[%s]}",
         EXTDISPLAY_SENDER_VERSION, extra, w, h, scale, w, h, scale, EXTDISPLAY_FPS_MAX, EXTDISPLAY_DIM_MAX, EXTDISPLAY_DIM_MAX,
-        h264 ? "{\"codec\":\"h264\",\"maxWidth\":4096,\"maxHeight\":4096,\"maxFrameRate\":60}" : "",
-        h264 && hevc ? "," : "",
-        hevc ? "{\"codec\":\"hevc\",\"maxWidth\":4096,\"maxHeight\":4096,\"maxFrameRate\":60}" : ""), size);
+        vcaps, input + 1), size);
+}
+
+int extdisplay_hello_caps(char *s, size_t size, uint32_t w, uint32_t h, double scale,
+                    int h264, int hevc, const char *host, const char *model, uint32_t input_caps)
+{
+    uint32_t vcaps = (h264 ? EXTDISPLAY_VCAP_H264 : 0u) | (hevc ? EXTDISPLAY_VCAP_HEVC : 0u);
+    return extdisplay_hello_full(s, size, w, h, scale, vcaps, host, model, input_caps);
+}
+
+int extdisplay_hello_named(char *s, size_t size, uint32_t w, uint32_t h, double scale,
+                    int h264, int hevc, const char *host, const char *model)
+{
+    return extdisplay_hello_caps(s, size, w, h, scale, h264, hevc, host, model, 0);
 }
 
 int extdisplay_hello(char *s, size_t size, uint32_t w, uint32_t h, double scale, int h264, int hevc)
 {
     return extdisplay_hello_named(s, size, w, h, scale, h264, hevc, NULL, NULL);
 }
+
 
 int extdisplay_key_json(char *s, size_t size, uint32_t device, uint32_t code, uint32_t sym, uint32_t mods,
                  uint32_t locks, int state)
@@ -283,3 +363,139 @@ int extdisplay_cancel_json(char *s, size_t size)
 {
     return fits(snprintf(s, size, "{\"type\":\"cancel\",\"scope\":\"all\"}"), size);
 }
+
+/* ---- tablet tools and multi-touch (peer capabilities "tablet" and "touch") ---- */
+
+static int finite_within(double v, double limit) { return isfinite(v) && v >= -limit && v <= limit; }
+
+static double clean_zero(double v) { return v == 0 ? 0.0 : v; }
+
+static int tablet_button(uint32_t button) { return button >= 0x100 && button <= 0x2ff; }
+
+const char *extdisplay_tablet_tool_name(enum extdisplay_tablet_tool tool)
+{
+    static const char *const names[] = { "other", "pen", "eraser", "brush", "pencil", "airbrush", "lens", "mouse" };
+    return (unsigned)tool < sizeof names / sizeof names[0] ? names[tool] : "other";
+}
+
+static const char *touch_state_name(enum extdisplay_touch_state state)
+{
+    static const char *const names[] = { "down", "move", "up", "cancel" };
+    return names[state];
+}
+
+int extdisplay_tablet_proximity_json(char *s, size_t size, int in, enum extdisplay_tablet_tool tool,
+                                     uint64_t id, uint32_t caps, double x, double y)
+{
+    if (!unit(x) || !unit(y) || (unsigned)tool > EXTDISPLAY_TOOL_MOUSE) return -1;
+    return fits(snprintf(s, size,
+        "{\"type\":\"tablet\",\"event\":\"proximity\",\"in\":%s,\"tool\":\"%s\",\"id\":%llu,\"caps\":%u,"
+        "\"x\":%.6f,\"y\":%.6f}",
+        in ? "true" : "false", extdisplay_tablet_tool_name(tool), (unsigned long long)id, caps,
+        clean_zero(x), clean_zero(y)), size);
+}
+
+int extdisplay_tablet_axis_json(char *s, size_t size, double x, double y, double pressure,
+                                double tilt_x, double tilt_y, double distance, double rotation,
+                                uint32_t buttons)
+{
+    if (!unit(x) || !unit(y) || !unit(pressure) || !unit(distance) || !finite_within(tilt_x, 90) ||
+        !finite_within(tilt_y, 90) || !finite_within(rotation, 360) || buttons > 0xffu) {
+        return -1;
+    }
+    return fits(snprintf(s, size,
+        "{\"type\":\"tablet\",\"event\":\"axis\",\"x\":%.6f,\"y\":%.6f,\"pressure\":%.4f,"
+        "\"tiltX\":%.1f,\"tiltY\":%.1f,\"distance\":%.4f,\"rotation\":%.1f,\"buttons\":%u}",
+        clean_zero(x), clean_zero(y), clean_zero(pressure), clean_zero(tilt_x), clean_zero(tilt_y),
+        clean_zero(distance), clean_zero(rotation), buttons), size);
+}
+
+int extdisplay_tablet_tip_json(char *s, size_t size, int down, double x, double y, double pressure,
+                               uint32_t buttons)
+{
+    if ((down != 0 && down != 1) || !unit(x) || !unit(y) || !unit(pressure) || buttons > 0xffu) return -1;
+    return fits(snprintf(s, size,
+        "{\"type\":\"tablet\",\"event\":\"tip\",\"down\":%s,\"x\":%.6f,\"y\":%.6f,\"pressure\":%.4f,\"buttons\":%u}",
+        down ? "true" : "false", clean_zero(x), clean_zero(y), clean_zero(pressure), buttons), size);
+}
+
+int extdisplay_tablet_button_json(char *s, size_t size, uint32_t button, int state, double x, double y,
+                                  uint32_t buttons)
+{
+    if (!tablet_button(button) || (state != 0 && state != 1) || !unit(x) || !unit(y) || buttons > 0xffu) return -1;
+    return fits(snprintf(s, size,
+        "{\"type\":\"tablet\",\"event\":\"button\",\"button\":%u,\"state\":%d,\"x\":%.6f,\"y\":%.6f,\"buttons\":%u}",
+        button, state, clean_zero(x), clean_zero(y), buttons), size);
+}
+
+int extdisplay_touch_frame_add(struct extdisplay_touch_frame *f, int32_t id, enum extdisplay_touch_state state,
+                               double x, double y, double xmm, double ymm)
+{
+    if (!f || f->count >= EXTDISPLAY_TOUCH_POINTS_MAX) return -1;
+    f->points[f->count++] = (struct extdisplay_touch_point){ .id = id, .state = state, .x = x, .y = y,
+                                                             .xmm = xmm, .ymm = ymm };
+    return 0;
+}
+
+int extdisplay_touch_frame_json(char *s, size_t size, const struct extdisplay_touch_point *points, size_t count)
+{
+    if (!points || !count || count > EXTDISPLAY_TOUCH_POINTS_MAX || !size) return -1;
+    int n = snprintf(s, size, "{\"type\":\"touch\",\"phase\":\"frame\",\"points\":[");
+    if (n < 0 || (size_t)n >= size) return -1;
+    size_t used = (size_t)n;
+    for (size_t i = 0; i < count; i++) {
+        const struct extdisplay_touch_point *p = &points[i];
+        if (p->id < 0 || p->id >= (int32_t)EXTDISPLAY_TOUCH_POINTS_MAX || (unsigned)p->state > EXTDISPLAY_TOUCH_CANCEL ||
+            !unit(p->x) || !unit(p->y) || !finite_within(p->xmm, 10000) || !finite_within(p->ymm, 10000)) {
+            return -1;
+        }
+        n = snprintf(s + used, size - used,
+            "%s{\"id\":%d,\"state\":\"%s\",\"x\":%.6f,\"y\":%.6f,\"xmm\":%.1f,\"ymm\":%.1f}",
+            i ? "," : "", (int)p->id, touch_state_name(p->state), clean_zero(p->x), clean_zero(p->y),
+            clean_zero(p->xmm), clean_zero(p->ymm));
+        if (n < 0 || (size_t)n >= size - used) return -1;
+        used += (size_t)n;
+    }
+    n = snprintf(s + used, size - used, "]}");
+    if (n < 0 || (size_t)n >= size - used) return -1;
+    return (int)(used + (size_t)n);
+}
+
+int extdisplay_touch_frame_droppable(const struct extdisplay_touch_point *points, size_t count)
+{
+    if (!points || !count) return 0;
+    for (size_t i = 0; i < count; i++) {
+        if (points[i].state != EXTDISPLAY_TOUCH_MOVE) return 0;
+    }
+    return 1;
+}
+
+/* Whether the n bytes at s contain the NUL-terminated needle. */
+static int contains(const char *s, size_t n, const char *needle)
+{
+    size_t m = strlen(needle);
+    for (size_t i = 0; m <= n && i <= n - m; i++) {
+        if (memcmp(s + i, needle, m) == 0) return 1;
+    }
+    return 0;
+}
+
+static int starts(const char *s, size_t n, const char *prefix)
+{
+    size_t m = strlen(prefix);
+    return n >= m && memcmp(s, prefix, m) == 0;
+}
+
+int extdisplay_input_droppable(const char *s, size_t n)
+{
+    if (!s) return 0;
+    if (starts(s, n, "{\"type\":\"pointer\"")) return 1;
+    if (starts(s, n, "{\"type\":\"scroll\"")) return contains(s, n, "\"phase\":2");
+    if (starts(s, n, "{\"type\":\"tablet\",\"event\":\"axis\"")) return 1;
+    if (starts(s, n, "{\"type\":\"touch\",\"phase\":\"frame\"")) {
+        return contains(s, n, "\"state\":\"move\"") && !contains(s, n, "\"state\":\"down\"") &&
+               !contains(s, n, "\"state\":\"up\"") && !contains(s, n, "\"state\":\"cancel\"");
+    }
+    return 0;
+}
+

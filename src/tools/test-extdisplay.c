@@ -41,6 +41,10 @@ static void protocol(void)
     CHECK(parse("{\"type\":\"streamConfig\",\"codec\":\"h264\",\"width\":1920,\"height\":1080,\"framesPerSecond\":60}", &c) == 0 &&
           c.type == EXTDISPLAY_MSG_CONFIG && c.codec == EXTDISPLAY_CODEC_H264 && c.width == 1920);
     CHECK(parse("{\"type\":\"streamConfig\",\"codec\":\"hevc\",\"width\":4096,\"height\":4096,\"framesPerSecond\":60}", &c) == 0);
+    CHECK(parse("{\"type\":\"streamConfig\",\"codec\":\"hevc420\",\"width\":3840,\"height\":2160,\"framesPerSecond\":60}", &c) == 0 &&
+          c.type == EXTDISPLAY_MSG_CONFIG && c.codec == EXTDISPLAY_CODEC_HEVC);
+    CHECK(parse("{\"type\":\"streamConfig\",\"codec\":\"hevc444\",\"width\":3840,\"height\":2160,\"framesPerSecond\":60}", &c) == 0 &&
+          c.type == EXTDISPLAY_MSG_CONFIG && c.codec == EXTDISPLAY_CODEC_HEVC);
     CHECK(parse("{\"type\":\"streamConfig\",\"codec\":\"h264\",\"width\":99999,\"height\":1,\"framesPerSecond\":60}", &c) < 0);
     CHECK(parse("{\"type\":\"streamConfig\",\"codec\":\"vp9\",\"width\":64,\"height\":64,\"framesPerSecond\":60}", &c) < 0);
     CHECK(parse("{\"type\":\"streamConfig\",\"codec\":\"h264\",\"width\":64.5,\"height\":64,\"framesPerSecond\":60}", &c) < 0);
@@ -66,6 +70,23 @@ static void protocol(void)
     CHECK(extdisplay_hello(s, sizeof s, 1920, 1080, 1.0, 1, 0) > 0 && !strstr(s, "hevc"));
     CHECK(extdisplay_hello(s, sizeof s, 0, 1080, 1.0, 1, 0) < 0 && extdisplay_hello(s, sizeof s, 64, 64, 1.0, 0, 0) < 0);
     CHECK(extdisplay_hello(s, 32, 1920, 1080, 1.0, 1, 0) < 0);
+    /* Hardware capability mapping: Comet Lake / Gen9.5 (hw H.264 + hw HEVC 4:2:0, no 4:4:4)
+     * advertises h264 + hevc420, never legacy "hevc" (which triggers 4:4:4 on older senders). */
+    uint32_t cml_caps = extdisplay_select_video_caps(1u | 2u | 4u | 8u, "auto");
+    CHECK(cml_caps == (EXTDISPLAY_VCAP_H264 | EXTDISPLAY_VCAP_HEVC420));
+    CHECK(extdisplay_hello_full(s, sizeof s, 3840, 2160, 2.0, cml_caps, "yoga", "X1 Yoga",
+                                EXTDISPLAY_INPUT_TOUCH | EXTDISPLAY_INPUT_TABLET) > 0 &&
+          strstr(s, "\"codec\":\"h264\"") && strstr(s, "\"codec\":\"hevc420\"") &&
+          !strstr(s, "\"codec\":\"hevc\"") && !strstr(s, "\"codec\":\"hevc444\"") &&
+          strstr(s, "\"touch\"") && strstr(s, "\"tablet\""));
+    /* Ice Lake / Gen11+ (hw H.264 + hw HEVC 4:2:0 + hw HEVC 4:4:4) advertises all three + legacy hevc. */
+    uint32_t icl_caps = extdisplay_select_video_caps(1u | 2u | 4u | 8u | 16u, "auto");
+    CHECK(icl_caps == (EXTDISPLAY_VCAP_H264 | EXTDISPLAY_VCAP_HEVC420 | EXTDISPLAY_VCAP_HEVC444 | EXTDISPLAY_VCAP_HEVC));
+    /* Software-only fallback (no VA-API) keeps h264 + hevc420 in auto mode, never legacy 4:4:4 hevc. */
+    CHECK(extdisplay_select_video_caps(1u | 2u, "auto") == (EXTDISPLAY_VCAP_H264 | EXTDISPLAY_VCAP_HEVC420));
+    /* Explicit sw mode keeps full software codecs including legacy hevc. */
+    CHECK(extdisplay_select_video_caps(1u | 2u, "sw") ==
+          (EXTDISPLAY_VCAP_H264 | EXTDISPLAY_VCAP_HEVC | EXTDISPLAY_VCAP_HEVC420 | EXTDISPLAY_VCAP_HEVC444));
     CHECK(extdisplay_key_json(s, sizeof s, 5, 30, 0x61, 2, 1, 1) > 0 && strstr(s, "\"code\":30") && strstr(s, "\"state\":1"));
     CHECK(extdisplay_key_json(s, sizeof s, 0, 30, 0x61, 0, 0, 1) < 0 && extdisplay_key_json(s, sizeof s, 1, 30, 0x61, 0, 0, 3) < 0);
     CHECK(extdisplay_button_json(s, sizeof s, 272, 1, 0.5, 1.0) > 0 && extdisplay_button_json(s, sizeof s, 275, 1, 0, 0) < 0);
@@ -324,14 +345,33 @@ static void ipc(void)
     /* A well-formed input message round-trips; then the socket is empty. */
     CHECK(extdisplay_ipc_send(sv[0], &input) == 0);
     CHECK(extdisplay_ipc_recv(sv[1], &r, &fd) == 0 && r.op == EXTDISPLAY_IPC_INPUT && r.length == 2 && fd < 0);
-    /* A dma-buf frame message round-trips with one descriptor and zero bytes. */
-    struct extdisplay_dmabuf info = { .fourcc = 0x34325258u, .pitch = 8704, .offset = 0, .modifier = 0 };
+    /* A dma-buf frame message round-trips with one or two descriptors and zero bytes. */
+    struct extdisplay_dmabuf info = {
+        .fourcc = 0x34325258u, .num_planes = 1, .num_objects = 1,
+        .object_index = { 0 }, .pitches = { 8704 }, .offsets = { 0 }, .modifiers = { 0 },
+    };
     struct extdisplay_ipc dmabuf = { .magic = EXTDISPLAY_IPC_MAGIC, .op = EXTDISPLAY_IPC_DMABUF,
                                      .width = 2160, .height = 1440, .length = sizeof info };
     memcpy(dmabuf.text, &info, sizeof info);
     CHECK(send_raw(sv[0], &dmabuf, &sealed, 1) == 0);
     CHECK(extdisplay_ipc_recv(sv[1], &r, &fd) == 0 && r.op == EXTDISPLAY_IPC_DMABUF && fd >= 0);
     if (fd >= 0) close(fd);
+    /* Two-plane (e.g. CCS modifier) dma-buf with 2 objects round-trips via recv_fds. */
+    struct extdisplay_dmabuf info2 = {
+        .fourcc = 0x34325258u, .num_planes = 2, .num_objects = 2,
+        .object_index = { 0, 1 }, .pitches = { 15360, 1024 }, .offsets = { 0, 0 },
+        .modifiers = { 0x0100000000000004ULL, 0x0100000000000004ULL },
+    };
+    memcpy(dmabuf.text, &info2, sizeof info2);
+    CHECK(send_raw(sv[0], &dmabuf, two, 2) == 0);
+    int rfds[EXTDISPLAY_DMABUF_MAX_PLANES] = { -1, -1, -1, -1 };
+    unsigned rnfds = 0;
+    CHECK(extdisplay_ipc_recv_fds(sv[1], &r, rfds, EXTDISPLAY_DMABUF_MAX_PLANES, &rnfds) == 0 &&
+          r.op == EXTDISPLAY_IPC_DMABUF && rnfds == 2 && rfds[0] >= 0 && rfds[1] >= 0);
+    for (unsigned i = 0; i < rnfds; i++) if (rfds[i] >= 0) close(rfds[i]);
+    /* Object count mismatch (claims 2 objects, sends 1 fd) is refused. */
+    CHECK(send_raw(sv[0], &dmabuf, &sealed, 1) == 0);
+    CHECK(extdisplay_ipc_recv_fds(sv[1], &r, rfds, EXTDISPLAY_DMABUF_MAX_PLANES, &rnfds) < 0 && rnfds == 0);
     /* A refresh request round-trips with zero descriptors and zero bytes. */
     struct extdisplay_ipc refresh = { .op = EXTDISPLAY_IPC_REFRESH };
     CHECK(extdisplay_ipc_send(sv[0], &refresh) == 0);
