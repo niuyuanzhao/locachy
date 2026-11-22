@@ -26,7 +26,8 @@ static void protocol(void)
     CHECK(frames == 2 && extdisplay_parser_eof(&p) == 0);
     CHECK(extdisplay_parser_feed(&p, two, 3, count, NULL) == 0 && extdisplay_parser_eof(&p) < 0); /* cut in the header */
     extdisplay_parser_clear(&p);
-    const unsigned char zero[] = { 0,0,0,0 }, huge[] = { 0x00,0x40,0x00,0x01 };
+    const unsigned char zero[] = { 0,0,0,0 }, huge[] = { 0x00,0x80,0x00,0x01 };
+    CHECK(EXTDISPLAY_WIRE_MAX == 8u * 1024u * 1024u);
     CHECK(extdisplay_parser_feed(&p, zero, 4, count, NULL) < 0);
     CHECK(extdisplay_parser_feed(&p, two, 4, count, NULL) < 0); /* poisoned */
     extdisplay_parser_clear(&p);
@@ -427,6 +428,14 @@ static void ipc(void)
     struct extdisplay_ipc refresh = { .op = EXTDISPLAY_IPC_REFRESH, .width = 2 };
     CHECK(extdisplay_ipc_send(sv[0], &refresh) == 0);
     CHECK(extdisplay_ipc_recv(sv[1], &r, &fd) == 0 && r.op == EXTDISPLAY_IPC_REFRESH && r.width == 2 && fd < 0);
+    /* EXTDISPLAY_IPC_FAILED carries an optional ASCII reason string through recv. */
+    struct extdisplay_ipc failed = { .op = EXTDISPLAY_IPC_FAILED };
+    const char *why = "video-decode-err";
+    failed.length = (uint32_t)strlen(why);
+    memcpy(failed.text, why, failed.length);
+    CHECK(extdisplay_ipc_send(sv[0], &failed) == 0);
+    CHECK(extdisplay_ipc_recv(sv[1], &r, &fd) == 0 && r.op == EXTDISPLAY_IPC_FAILED &&
+          r.length == strlen(why) && memcmp(r.text, why, r.length) == 0 && fd < 0);
     /* Malformed dma-buf metadata (wrong length or nonzero bytes) is refused. */
     struct extdisplay_ipc bad_dma = dmabuf;
     bad_dma.length = 4;

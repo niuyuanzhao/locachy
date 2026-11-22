@@ -216,7 +216,7 @@ struct extdisplay_decoder *extdisplay_decoder_open(enum extdisplay_codec codec, 
     d->context->max_pixels = EXTDISPLAY_PIXELS_MAX;
     d->context->thread_count = 1;
     d->context->flags |= AV_CODEC_FLAG_LOW_DELAY;
-    d->context->err_recognition = AV_EF_CAREFUL | AV_EF_EXPLODE;
+    d->context->err_recognition = AV_EF_CAREFUL;
 #ifdef CONFIG_EXTDISPLAY_VAAPI
     if (va_hwctx) {
         d->context->hw_device_ctx = av_buffer_ref(va_hwctx);

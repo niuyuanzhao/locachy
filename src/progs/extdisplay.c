@@ -70,19 +70,58 @@ static void ending(int sig) { (void)sig; stop = 1; }
 
 static void set_state(const char *s, const char *d) { state = s; detail = d; }
 
+static int ipc_send_reliable(struct extdisplay_ipc *m, int timeout_ms)
+{
+    if (ipc < 0) {
+        errno = EBADF;
+        return -1;
+    }
+    if (extdisplay_ipc_send(ipc, m) == 0) return 0;
+    if (errno != EAGAIN && errno != EWOULDBLOCK) return -1;
+    double deadline = uptime() + (double)timeout_ms / 1000.0;
+    for (;;) {
+        int left = (int)((deadline - uptime()) * 1000.0);
+        if (left <= 0) {
+            errno = EAGAIN;
+            return -1;
+        }
+        struct pollfd p = { ipc, POLLOUT, 0 };
+        int r = poll(&p, 1, left);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (r == 0) {
+            errno = EAGAIN;
+            return -1;
+        }
+        if (p.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+            errno = EPIPE;
+            return -1;
+        }
+        if (p.revents & POLLOUT) {
+            if (extdisplay_ipc_send(ipc, m) == 0) return 0;
+            if (errno != EAGAIN && errno != EWOULDBLOCK) return -1;
+        }
+    }
+}
+
 static int send_text(uint32_t op, const char *text, int n, int droppable)
 {
-    if (ipc < 0 || n < 0 || n > (int)EXTDISPLAY_IPC_TEXT) return -1;
+    if (ipc < 0 || n < 0 || n > (int)EXTDISPLAY_IPC_TEXT) {
+        errno = EINVAL;
+        return -1;
+    }
     struct extdisplay_ipc m = { .op = op, .length = (uint32_t)n };
     if (n) memcpy(m.text, text, (size_t)n);
-    if (extdisplay_ipc_send(ipc, &m) == 0) return 0;
-    if (errno != EAGAIN && errno != EWOULDBLOCK) return -1;
+    if (droppable) {
+        if (extdisplay_ipc_send(ipc, &m) == 0) return 0;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+        return -1;
+    }
     /* Only motion and scroll updates may be shed. Losing a transition would
      * leave the sender's input state out of sync until disconnect. */
-    if (droppable) return 0;
-    struct pollfd p = { ipc, POLLOUT, 0 };
-    if (poll(&p, 1, 50) > 0 && (p.revents & POLLOUT)) return extdisplay_ipc_send(ipc, &m);
-    return -1;
+    return ipc_send_reliable(&m, 250);
 }
 
 static int input_allowed(void)
@@ -423,6 +462,7 @@ static int release_remote(pid_t *worker, int *inhibited)
             }
         }
         if (!confirmed) {
+            say("extdisplay: remote input cancel timed out; closing stream");
             kill(*worker, SIGKILL);
             waitpid(*worker, NULL, 0);
             *worker = -1;
@@ -474,6 +514,7 @@ static int handle_worker(int *inhibited, double *started)
     unsigned nfds = 0;
     if (extdisplay_ipc_recv_fds(ipc, &m, fds, EXTDISPLAY_DMABUF_MAX_PLANES, &nfds) < 0) {
         if (errno == EAGAIN) return 0;
+        say("extdisplay: ipc recv failed (%s)", strerror(errno));
         set_state(N_("Disconnected"), N_("The decoder channel ended."));
         return -1;
     }
@@ -496,7 +537,10 @@ static int handle_worker(int *inhibited, double *started)
         int n = extdisplay_hello_full(hello, sizeof hello, (uint32_t)(w > 0 ? w : 1), (uint32_t)(h > 0 ? h : 1),
                           scale >= 0.5 && scale <= 4 ? scale : 1.0, vcaps, host, model,
                           EXTDISPLAY_INPUT_TOUCH | EXTDISPLAY_INPUT_TABLET);
-        if (send_text(EXTDISPLAY_IPC_HELLO, hello, n, 0) < 0) break;
+        if (send_text(EXTDISPLAY_IPC_HELLO, hello, n, 0) < 0) {
+            say("extdisplay: hello send failed (%s)", strerror(errno));
+            break;
+        }
         return 1;
     }
     case EXTDISPLAY_IPC_ACTIVE:
@@ -508,6 +552,7 @@ static int handle_worker(int *inhibited, double *started)
         (void)base_session_hold(1);
         if (base_session_fd() >= 0 && !*inhibited && base_session_input_allowed()) {
             if (base_sleep_inhibit(1) < 0) {
+                say("extdisplay: managed sleep inhibitor refused");
                 set_state(N_("Unavailable"), N_("The managed sleep inhibitor was not granted."));
                 return -1;
             }
@@ -520,6 +565,7 @@ static int handle_worker(int *inhibited, double *started)
         void *pixels = extdisplay_frame_map(fd, &m);
         close(fd);
         if (!pixels) {
+            say("extdisplay: worker sent invalid picture");
             set_state(N_("Disconnected"), N_("The decoder sent an invalid picture."));
             return -1;
         }
@@ -533,7 +579,12 @@ static int handle_worker(int *inhibited, double *started)
         frame_w = m.width;
         frame_h = m.height;
         struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK };
-        return extdisplay_ipc_send(ipc, &ack) < 0 ? -1 : 1;
+        if (ipc_send_reliable(&ack, 250) < 0) {
+            say("extdisplay: frame ack send failed (%s)", strerror(errno));
+            set_state(N_("Disconnected"), N_("The decoder channel ended."));
+            return -1;
+        }
+        return 1;
     }
     case EXTDISPLAY_IPC_DMABUF: {
         struct extdisplay_dmabuf info;
@@ -568,7 +619,12 @@ static int handle_worker(int *inhibited, double *started)
                 pending_slot = -1;
                 flip_ack_pending = 0;
                 struct extdisplay_ipc ref = { .op = EXTDISPLAY_IPC_REFRESH };
-                return extdisplay_ipc_send(ipc, &ref) < 0 ? -1 : 0;
+                if (ipc_send_reliable(&ref, 250) < 0) {
+                    say("extdisplay: refresh send failed (%s)", strerror(errno));
+                    set_state(N_("Disconnected"), N_("The decoder channel ended."));
+                    return -1;
+                }
+                return 0;
             }
             if (err != EAGAIN && err != EBUSY && err != EACCES && err != EPERM) {
                 say("extdisplay: dma-buf scanout disabled (%s, fourcc=0x%x, planes=%u, mod=0x%llx); falling back to CPU copy",
@@ -577,11 +633,16 @@ static int handle_worker(int *inhibited, double *started)
                 scanning_slot = -1;
                 pending_slot = -1;
                 struct extdisplay_ipc off = { .op = EXTDISPLAY_IPC_DMABUF_OFF };
-                (void)extdisplay_ipc_send(ipc, &off);
+                (void)ipc_send_reliable(&off, 250);
             }
             uint32_t released = slot_valid && (int)info.slot != scanning_slot ? info.slot + 1u : 0u;
             struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK, .width = released };
-            return extdisplay_ipc_send(ipc, &ack) < 0 ? -1 : 0;
+            if (ipc_send_reliable(&ack, 250) < 0) {
+                say("extdisplay: frame ack send failed (%s)", strerror(errno));
+                set_state(N_("Disconnected"), N_("The decoder channel ended."));
+                return -1;
+            }
+            return 0;
         }
         dmabuf_active = 1;
         frame_w = m.width;
@@ -603,14 +664,34 @@ static int handle_worker(int *inhibited, double *started)
         pending_slot = -1;
         uint32_t released = retired >= 0 && retired != scanning_slot ? (uint32_t)(retired + 1) : 0u;
         struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK, .width = released };
-        return extdisplay_ipc_send(ipc, &ack) < 0 ? -1 : 0;
+        if (ipc_send_reliable(&ack, 250) < 0) {
+            say("extdisplay: frame ack send failed (%s)", strerror(errno));
+            set_state(N_("Disconnected"), N_("The decoder channel ended."));
+            return -1;
+        }
+        return 0;
     }
     case EXTDISPLAY_IPC_UNAVAILABLE:
+        say("extdisplay: worker unavailable");
         set_state(N_("Unavailable"), N_("The decoder sandbox or FFmpeg is not available."));
         return -1;
+    case EXTDISPLAY_IPC_FAILED: {
+        char reason[64];
+        size_t len = 0;
+        uint32_t n = m.length <= EXTDISPLAY_IPC_TEXT ? m.length : EXTDISPLAY_IPC_TEXT;
+        for (uint32_t i = 0; i < n && len + 1 < sizeof reason; i++) {
+            unsigned char ch = (unsigned char)m.text[i];
+            if (ch >= 0x20 && ch <= 0x7e) reason[len++] = (char)ch;
+        }
+        reason[len] = '\0';
+        say("extdisplay: worker ended (%s)", reason[0] ? reason : "unknown");
+        set_state(N_("Disconnected"), N_("The sender handshake or the stream failed."));
+        return -1;
+    }
     case EXTDISPLAY_IPC_CANCELLED:
         return 0;
     default:
+        say("extdisplay: unexpected worker op %u", m.op);
         break;
     }
     for (unsigned i = 0; i < nfds; i++) if (fds[i] >= 0) close(fds[i]);
@@ -659,6 +740,21 @@ static void session_run(int transport)
     double started = uptime();
     while (!stop && !leaving) {
         int drm_fd = flip_ack_pending ? screen_flip_fd() : -1;
+        if (flip_ack_pending && drm_fd < 0) {
+            /* DRM flip completed or was cleared during a lease/flush transition:
+             * release worker frame_pending so it never deadlocks waiting for an ACK. */
+            flip_ack_pending = 0;
+            scanning_slot = -1;
+            pending_slot = -1;
+            if (ipc >= 0) {
+                struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK };
+                if (ipc_send_reliable(&ack, 250) < 0) {
+                    say("extdisplay: frame ack send failed (%s)", strerror(errno));
+                    set_state(N_("Disconnected"), N_("The decoder channel ended."));
+                    break;
+                }
+            }
+        }
         struct pollfd p[4] = { { ipc, POLLIN, 0 }, { owner, POLLIN, 0 }, { setup.fd, POLLIN, 0 }, { drm_fd, POLLIN, 0 } };
         int key = key_poll_many(p, drm_fd >= 0 ? 4 : 3, 100);
         if (ipc < 0 && (key == K_CLOSE || key == K_ACT_HOME || key == K_ACT_LOCK || key == 27)) break;
@@ -671,7 +767,8 @@ static void session_run(int transport)
                 flip_ack_pending = 0;
                 uint32_t released = retired >= 0 && retired != scanning_slot ? (uint32_t)(retired + 1) : 0u;
                 struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK, .width = released };
-                if (extdisplay_ipc_send(ipc, &ack) < 0) {
+                if (ipc_send_reliable(&ack, 250) < 0) {
+                    say("extdisplay: frame ack send failed (%s)", strerror(errno));
                     set_state(N_("Disconnected"), N_("The decoder channel ended."));
                     break;
                 }
@@ -680,6 +777,7 @@ static void session_run(int transport)
         if (setup.fd >= 0 && p[2].revents) {
             enum extdisplay_setup_event ev = extdisplay_setup_read(&setup);
             if (ev == EXTDISPLAY_SETUP_EV_ENDED || ev == EXTDISPLAY_SETUP_EV_BROKEN) {
+                say("extdisplay: broker ended (%s)", setup.reason[0] ? setup.reason : "broken");
                 if (ev == EXTDISPLAY_SETUP_EV_ENDED && strcmp(setup.reason, "carrier-lost") == 0) unplugged = 1;
                 set_state(N_("Disconnected"), extdisplay_setup_reason_text(setup.reason));
                 break;
@@ -690,12 +788,14 @@ static void session_run(int transport)
             if (policy < 0) {
                 owner = -1;
                 if (active) cancel();
+                say("extdisplay: session owner ended");
                 set_state(N_("Disconnected"), N_("The session owner has gone."));
                 break;
             }
             if (policy > 0) {
                 key = 0;
                 if (release_remote(&worker, &inhibited) < 0) {
+                    say("extdisplay: session owner rejected input release");
                     set_state(N_("Disconnected"), N_("The session owner did not accept the release."));
                     break;
                 }
@@ -706,7 +806,7 @@ static void session_run(int transport)
                         .op = EXTDISPLAY_IPC_REFRESH,
                         .width = scanning_slot >= 0 ? (uint32_t)(scanning_slot + 1) : 0u,
                     };
-                    (void)extdisplay_ipc_send(ipc, &ref);
+                    (void)ipc_send_reliable(&ref, 250);
                 }
             }
         }
@@ -716,15 +816,18 @@ static void session_run(int transport)
             redraw |= r > 0;
         }
         if (raw_input() < 0) {
+            say("extdisplay: input delivery failed (%s)", strerror(errno));
             set_state(N_("Disconnected"), N_("Remote input could not be delivered."));
             break;
         }
         if (pointer_drain_input(key == K_POINTER) < 0) {
+            say("extdisplay: input delivery failed (%s)", strerror(errno));
             set_state(N_("Disconnected"), N_("Remote input could not be delivered."));
             break;
         }
         if (key == K_SHOWN) {
             if (cancel() < 0) {
+                say("extdisplay: input delivery failed (%s)", strerror(errno));
                 set_state(N_("Disconnected"), N_("Remote input could not be delivered."));
                 break;
             }
@@ -733,12 +836,13 @@ static void session_run(int transport)
                 pending_slot = -1;
                 flip_ack_pending = 0;
                 struct extdisplay_ipc ref = { .op = EXTDISPLAY_IPC_REFRESH };
-                (void)extdisplay_ipc_send(ipc, &ref);
+                (void)ipc_send_reliable(&ref, 250);
             }
             redraw = 1;
         }
         if (redraw) draw();
         if (worker > 0 && !active && uptime() - started > HANDSHAKE_S) {
+            say("extdisplay: sender handshake timed out");
             set_state(N_("Unavailable"), N_("The sender handshake timed out."));
             break;
         }

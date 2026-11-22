@@ -31,8 +31,9 @@
 #include <time.h>
 #include <unistd.h>
 
-#define TX_MAX (64u * 1024u)
-#define POINTER_SHED (16u * 1024u) /* pending bytes above which pointer motion is dropped */
+#define TX_MAX (256u * 1024u)
+#define POINTER_SHED (32u * 1024u) /* pending bytes above which pointer motion is dropped */
+#define DECODE_ERRORS_MAX 5        /* consecutive recoverable decode errors before failing */
 #define TIMEOUT_S 8.0      /* nothing from the peer: it is gone */
 #define PING_S 2.0         /* OpenDisplay's cadence */
 #define FLUSH_MS 100       /* a cancel is written within this, or the stream closes */
@@ -44,6 +45,7 @@ static struct {
     size_t tx_start, tx_end;
     double last_rx, last_ping;
     int hello, welcomed, active, frame_pending, dmabuf_off;
+    int decode_errors;
     unsigned char slot_busy[EXTDISPLAY_DMABUF_SLOTS];
     unsigned char slot_exported[EXTDISPLAY_DMABUF_SLOTS];
     int ready_slot, last_sent_slot;
@@ -52,6 +54,14 @@ static struct {
     uint32_t input_caps;
 } session = { .ready_slot = -1, .last_sent_slot = -1 };
 
+static const char *fail_reason = "unknown";
+
+static int fail_with(const char *why)
+{
+    fail_reason = why;
+    return -1;
+}
+
 static double now(void)
 {
     struct timespec t;
@@ -59,7 +69,7 @@ static double now(void)
     return (double)t.tv_sec + (double)t.tv_nsec / 1e9;
 }
 
-static int status(uint32_t op)
+static int status_reason(uint32_t op, const char *reason)
 {
     struct extdisplay_ipc m = { .magic = EXTDISPLAY_IPC_MAGIC, .op = op };
     if (op == EXTDISPLAY_IPC_READY) {
@@ -68,19 +78,29 @@ static int status(uint32_t op)
                   ((session.hw_caps & 7u) << 2);
     } else if (op == EXTDISPLAY_IPC_ACTIVE) {
         m.width = session.input_caps;
+    } else if (op == EXTDISPLAY_IPC_FAILED && reason && reason[0]) {
+        size_t len = strlen(reason);
+        if (len > EXTDISPLAY_IPC_TEXT) len = EXTDISPLAY_IPC_TEXT;
+        memcpy(m.text, reason, len);
+        m.length = (uint32_t)len;
     }
     return send(EXTDISPLAY_IPC_FD, &m, sizeof m, MSG_NOSIGNAL | MSG_DONTWAIT) == (ssize_t)sizeof m ? 0 : -1;
 }
 
+static int status(uint32_t op)
+{
+    return status_reason(op, NULL);
+}
+
 static int enqueue(const void *data, size_t n)
 {
-    if (!n || n > EXTDISPLAY_CONTROL_MAX) return -1;
+    if (!n || n > EXTDISPLAY_CONTROL_MAX) return fail_with("tx-overflow");
     if (session.tx_start) {
         memmove(session.tx, session.tx + session.tx_start, session.tx_end - session.tx_start);
         session.tx_end -= session.tx_start;
         session.tx_start = 0;
     }
-    if (n + 4 > TX_MAX - session.tx_end) return -1; /* a peer that reads nothing */
+    if (n + 4 > TX_MAX - session.tx_end) return fail_with("tx-overflow"); /* a peer that reads nothing */
     unsigned char *d = session.tx + session.tx_end;
     d[0] = (unsigned char)(n >> 24);
     d[1] = (unsigned char)(n >> 16);
@@ -98,7 +118,7 @@ static int flush(void)
                          MSG_NOSIGNAL | MSG_DONTWAIT);
         if (n < 0 && errno == EINTR) continue;
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
-        if (n <= 0) return -1;
+        if (n <= 0) return fail_with("tx-write-err");
         session.tx_start += (size_t)n;
     }
     session.tx_start = session.tx_end = 0;
@@ -114,7 +134,7 @@ static int flush_all(void)
         if (session.tx_start == session.tx_end) break;
         int left = (int)((deadline - now()) * 1000);
         struct pollfd p = { EXTDISPLAY_TRANSPORT_FD, POLLOUT, 0 };
-        if (left <= 0 || (poll(&p, 1, left) < 0 && errno != EINTR)) return -1;
+        if (left <= 0 || (poll(&p, 1, left) < 0 && errno != EINTR)) return fail_with("tx-write-err");
     }
     return 0;
 }
@@ -281,47 +301,57 @@ static int receive(void *unused, const unsigned char *data, size_t n)
 {
     (void)unused;
     struct extdisplay_control c;
-    if (!session.hello || extdisplay_control_parse(data, n, &c) < 0) return -1;
+    if (!session.hello || extdisplay_control_parse(data, n, &c) < 0) return fail_with("parse-err");
     session.last_rx = now();
     switch (c.type) {
     case EXTDISPLAY_MSG_WELCOME:
-        if (session.welcomed) return -1;
+        if (session.welcomed) return fail_with("parse-err");
         session.welcomed = 1;
         session.input_caps = c.input_caps;
         break;
     case EXTDISPLAY_MSG_CONFIG:
-        if (!session.welcomed) return -1;
+        if (!session.welcomed) return fail_with("config-err");
         session.active = 0;
         session.frame_pending = 0;
+        session.decode_errors = 0;
         reset_dmabuf_slots();
         extdisplay_decoder_close(session.decoder);
-        if (!(session.decoder = extdisplay_decoder_open(c.codec, c.width, c.height))) return -1;
+        if (!(session.decoder = extdisplay_decoder_open(c.codec, c.width, c.height))) return fail_with("config-err");
         if (session.dmabuf_off) extdisplay_decoder_disable_dmabuf(session.decoder);
         session.width = c.width;
         session.height = c.height;
         session.active = 1;
-        return status(EXTDISPLAY_IPC_ACTIVE);
+        return status(EXTDISPLAY_IPC_ACTIVE) < 0 ? fail_with("frontend-err") : 0;
     case EXTDISPLAY_MSG_VIDEO: {
-        if (!session.active) return -1; /* video before streamConfig */
+        if (!session.active) return fail_with("parse-err"); /* video before streamConfig */
         int r = extdisplay_decoder_step(session.decoder, data + c.video_offset, n - c.video_offset);
-        if (r < 0) return -1;
+        if (r < 0) {
+            if (++session.decode_errors <= DECODE_ERRORS_MAX) {
+                static const char kf[] = "{\"type\":\"kf\"}";
+                if (enqueue(kf, sizeof kf - 1) < 0 || flush() < 0) return -1;
+                return 0;
+            }
+            return fail_with("video-decode-err");
+        }
         if (r > 0) {
+            session.decode_errors = 0;
             if (!session.dmabuf_off) {
                 int prep = prepare_dmabuf_slot();
-                if (prep > 0) return !session.frame_pending ? send_ready_slot() : 0;
+                if (prep > 0) return !session.frame_pending && send_ready_slot() < 0 ? fail_with("frontend-err") : 0;
                 if (prep < 0) return 0;
             }
-            return !session.frame_pending ? send_latest() : 0;
+            return !session.frame_pending && send_latest() < 0 ? fail_with("frontend-err") : 0;
         }
         return 0;
     }
     case EXTDISPLAY_MSG_PING: {
         char s[96];
         int len = snprintf(s, sizeof s, "{\"type\":\"pong\",\"t\":%lld}", (long long)c.timestamp);
-        return enqueue(s, (size_t)len);
+        if (enqueue(s, (size_t)len) < 0) return -1;
+        return flush();
     }
     case EXTDISPLAY_MSG_CLOSING:
-        return -1;
+        return fail_with("peer-closing");
     default:
         break; /* unknown types are ignored (OpenDisplay 6) */
     }
@@ -391,9 +421,10 @@ static int seccomp(void)
 
 static int sandbox(int hw)
 {
-    /* The FFmpeg decoder at 4096x4096 with its references, the picture and
-     * the sealed copy: well under 1.5 GiB. VA-API keeps DRM surface fds open. */
-    struct rlimit memory = { 1536ul << 20, 1536ul << 20 }, files = { hw ? 64 : 16, hw ? 64 : 16 },
+    /* The FFmpeg decoder at 4096x4096 with VA-API/FFmpeg surface pools, the
+     * picture and the sealed copy: 2.5 GiB virtual address headroom. VA-API
+     * keeps DRM surface fds open. */
+    struct rlimit memory = { 2560ul << 20, 2560ul << 20 }, files = { hw ? 64 : 16, hw ? 64 : 16 },
                   none = { 0, 0 }, frame = { 64ul << 20, 64ul << 20 };
     if (!getuid() || getuid() != geteuid() || getgid() != getegid() || getgroups(0, NULL) != 0 ||
         prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1 || prctl(PR_SET_DUMPABLE, 0) < 0 ||
@@ -425,15 +456,19 @@ static int frontend(void)
         ssize_t n = recv(EXTDISPLAY_IPC_FD, &m, sizeof m, MSG_TRUNC | MSG_DONTWAIT);
         if (n < 0 && errno == EINTR) continue;
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
-        if (n != (ssize_t)sizeof m || m.magic != EXTDISPLAY_IPC_MAGIC || m.reserved || m.length > EXTDISPLAY_IPC_TEXT || m.bytes) return -1;
+        if (n != (ssize_t)sizeof m || m.magic != EXTDISPLAY_IPC_MAGIC || m.reserved || m.length > EXTDISPLAY_IPC_TEXT || m.bytes) {
+            return fail_with("frontend-err");
+        }
         switch (m.op) {
         case EXTDISPLAY_IPC_STOP:
             send_cancel();
+            fail_reason = "frontend-stop";
             return 1;
         case EXTDISPLAY_IPC_CANCEL:
             /* Answered only once the cancel is in the stream; else the stream
              * ends here, which the peer treats as a release as well. */
-            if (send_cancel() != 0 || status(EXTDISPLAY_IPC_CANCELLED) != 0) return -1;
+            if (send_cancel() != 0) return -1;
+            if (status(EXTDISPLAY_IPC_CANCELLED) != 0) return fail_with("frontend-err");
             break;
         case EXTDISPLAY_IPC_FRAME_ACK:
             session.frame_pending = 0;
@@ -441,9 +476,9 @@ static int frontend(void)
                 session.slot_busy[m.width - 1] = 0;
             }
             if (session.ready_slot >= 0) {
-                if (send_ready_slot() < 0) return -1;
+                if (send_ready_slot() < 0) return fail_with("frontend-err");
             } else if (send_latest() < 0) {
-                return -1;
+                return fail_with("frontend-err");
             }
             break;
         case EXTDISPLAY_IPC_DMABUF_OFF:
@@ -456,22 +491,23 @@ static int frontend(void)
             int target = session.ready_slot >= 0 ? session.ready_slot : session.last_sent_slot;
             reset_dmabuf_slots();
             session.frame_pending = 0;
-            if (m.width >= 1 && m.width <= EXTDISPLAY_DMABUF_SLOTS) {
+            if (m.width >= 1 && m.width <= EXTDISPLAY_DMABUF_SLOTS && (int)(m.width - 1) != target) {
                 session.slot_busy[m.width - 1] = 1;
             }
             if (target >= 0) {
                 session.ready_slot = target;
-                if (send_ready_slot() < 0) return -1;
+                if (send_ready_slot() < 0) return fail_with("frontend-err");
             }
             break;
         }
         case EXTDISPLAY_IPC_HELLO:
-            if (session.hello || !m.length || enqueue(m.text, m.length) < 0) return -1;
+            if (session.hello || !m.length) return fail_with("frontend-err");
+            if (enqueue(m.text, m.length) < 0) return -1;
             session.hello = 1;
             session.last_rx = now();
             break;
         case EXTDISPLAY_IPC_INPUT:
-            if (!m.length) return -1;
+            if (!m.length) return fail_with("frontend-err");
             if (!session.active) break;
             /* Rate-shed pointer/tablet motion and move-only touch/scroll updates
              * when the peer lags so a transient stall never overflows tx. */
@@ -482,7 +518,7 @@ static int frontend(void)
             if (enqueue(m.text, m.length) < 0) return -1;
             break;
         default:
-            return -1;
+            return fail_with("frontend-err");
         }
     }
     return 0;
@@ -514,7 +550,9 @@ int main(void)
         };
         int r = poll(p, 2, 100);
         if (r < 0 && errno == EINTR) continue;
-        if (r < 0 || (p[0].revents & (POLLHUP | POLLERR | POLLNVAL)) || (p[1].revents & (POLLERR | POLLNVAL))) break;
+        if (r < 0) { fail_reason = "transport-poll-err"; break; }
+        if (p[0].revents & (POLLHUP | POLLERR | POLLNVAL)) { fail_reason = "ipc-poll-err"; break; }
+        if (p[1].revents & (POLLERR | POLLNVAL)) { fail_reason = "transport-poll-err"; break; }
         if ((p[0].revents & POLLIN) && (r = frontend()) != 0) break;
         /* Flush outbound input/control to the broker before spending time decoding inbound video. */
         if (session.tx_end > session.tx_start && flush() < 0) break;
@@ -523,14 +561,22 @@ int main(void)
             for (int reads = 0; reads < 8; reads++) {
                 unsigned char data[65536];
                 ssize_t n = recv(EXTDISPLAY_TRANSPORT_FD, data, sizeof data, MSG_DONTWAIT);
-                if (n == 0) { ended = 1; break; } /* the peer or the broker ended the stream */
+                if (n == 0) { fail_reason = "transport-eof"; ended = 1; break; } /* the peer or the broker ended the stream */
                 if (n < 0) {
                     if (errno == EINTR) continue;
                     if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                    fail_reason = "transport-read-err";
                     ended = 1;
                     break;
                 }
+                session.last_rx = now();
+                fail_reason = "parse-err";
                 if (extdisplay_parser_feed(&session.parser, data, (size_t)n, receive, NULL) < 0) {
+                    ended = 1;
+                    break;
+                }
+                fail_reason = "unknown";
+                if (session.tx_end > session.tx_start && flush() < 0) {
                     ended = 1;
                     break;
                 }
@@ -538,7 +584,7 @@ int main(void)
             if (ended) break;
         }
         double t = now();
-        if (t - session.last_rx > TIMEOUT_S) break;
+        if (t - session.last_rx > TIMEOUT_S) { fail_reason = "peer-timeout"; break; }
         if (session.hello && t - session.last_ping >= PING_S) {
             char ping[96];
             int n = snprintf(ping, sizeof ping, "{\"type\":\"ping\",\"t\":%lld}", (long long)(t * 1000));
@@ -547,7 +593,7 @@ int main(void)
         }
         if (flush() < 0) break;
     }
-    status(EXTDISPLAY_IPC_FAILED);
+    status_reason(EXTDISPLAY_IPC_FAILED, fail_reason);
     extdisplay_decoder_close(session.decoder);
     extdisplay_parser_clear(&session.parser);
     return 1;

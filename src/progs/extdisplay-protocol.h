@@ -15,7 +15,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define EXTDISPLAY_WIRE_MAX (4u * 1024u * 1024u) /* one payload */
+#define EXTDISPLAY_WIRE_MAX (8u * 1024u * 1024u) /* one payload */
 #define EXTDISPLAY_CONTROL_MAX 32767u            /* OpenDisplay's control demux limit */
 #define EXTDISPLAY_PREFIX_MAX 256u               /* a telemetry prefix before the first start code */
 #define EXTDISPLAY_DIM_MAX 4096u

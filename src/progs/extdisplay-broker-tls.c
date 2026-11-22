@@ -6,7 +6,9 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
+#include <stdarg.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -233,30 +235,67 @@ static int nonblocking(int fd)
     return flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0 ? -1 : 0;
 }
 
+static void __attribute__((format(printf, 3, 4))) detail_set(char *detail, size_t size, const char *fmt, ...)
+{
+    if (!detail || size == 0 || detail[0]) return;
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(detail, size, fmt, args);
+    va_end(args);
+    for (size_t i = 0; detail[i]; i++) {
+        unsigned char c = (unsigned char)detail[i];
+        if (c < 0x20 || c > 0x7e) detail[i] = ' ';
+    }
+}
+
+static void detail_ssl(char *detail, size_t size, const char *op, int ssl_err, int saved_errno)
+{
+    if (!detail || size == 0 || detail[0]) return;
+    if (ssl_err == SSL_ERROR_SYSCALL) {
+        if (saved_errno == 0) detail_set(detail, size, "%s-eof", op);
+        else detail_set(detail, size, "%s-syscall: %s", op, strerror(saved_errno));
+        return;
+    }
+    unsigned long code = ERR_get_error();
+    if (code) {
+        char buf[128];
+        ERR_error_string_n(code, buf, sizeof buf);
+        detail_set(detail, size, "%s: %s", op, buf);
+    } else {
+        detail_set(detail, size, "%s: err=%d", op, ssl_err);
+    }
+}
+
 /* Down: TLS to plaintext; up: plaintext to TLS. Each direction holds at most
  * one buffer; a side that does not take its bytes stops the other side from
  * being read (TCP and the socket buffers push back). */
-int extdisplay_broker_pump(SSL *ssl, int tcp, int plain, int stop)
+int extdisplay_broker_pump(SSL *ssl, int tcp, int plain, int stop, char *detail, size_t detail_size)
 {
     unsigned char *down = malloc(EXTDISPLAY_BROKER_PUMP_BUFFER), *up = malloc(EXTDISPLAY_BROKER_PUMP_BUFFER);
     size_t down_len = 0, down_off = 0, up_len = 0, up_off = 0;
     int tls_end = 0, plain_end = 0, status = 0;
     int read_wants_write = 0, write_wants_read = 0;
+    if (detail && detail_size > 0) detail[0] = 0;
     if (!down || !up || nonblocking(tcp) < 0 || nonblocking(plain) < 0) {
+        detail_set(detail, detail_size, "pump-init: %s", strerror(errno));
         status = -1;
         goto done;
     }
     for (;;) {
-        if (!tls_end && down_len == 0) {
+        int read_skipped = write_wants_read;
+        if (!tls_end && down_len == 0 && !write_wants_read) {
             size_t got = 0;
             ERR_clear_error();
+            errno = 0;
             int r = SSL_read_ex(ssl, down, EXTDISPLAY_BROKER_PUMP_BUFFER, &got);
             read_wants_write = 0;
             if (r == 1) {
                 down_len = got;
                 down_off = 0;
             } else {
-                switch (SSL_get_error(ssl, r)) {
+                int saved = errno;
+                int e = SSL_get_error(ssl, r);
+                switch (e) {
                 case SSL_ERROR_WANT_READ:
                     break;
                 case SSL_ERROR_WANT_WRITE:
@@ -264,11 +303,13 @@ int extdisplay_broker_pump(SSL *ssl, int tcp, int plain, int stop)
                     break;
                 case SSL_ERROR_ZERO_RETURN:
                     tls_end = 1;
+                    detail_set(detail, detail_size, "peer-eof");
                     break;
                 default: /* reset, unexpected EOF, a bad record */
+                    detail_ssl(detail, detail_size, "ssl-read", e, saved);
                     tls_end = 1;
                     status = -1;
-                    break;
+                    goto done;
                 }
             }
         }
@@ -281,6 +322,7 @@ int extdisplay_broker_pump(SSL *ssl, int tcp, int plain, int stop)
             } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
                 break;
             } else {
+                detail_set(detail, detail_size, "plain-write: %s", n < 0 ? strerror(errno) : "eof");
                 status = -1; /* the frontend closed its end */
                 goto done;
             }
@@ -292,48 +334,65 @@ int extdisplay_broker_pump(SSL *ssl, int tcp, int plain, int stop)
             if (n > 0) {
                 up_len = (size_t)n;
                 up_off = 0;
-            } else if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+            } else if (n == 0) {
+                detail_set(detail, detail_size, "worker-eof");
                 plain_end = 1;
+            } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+                detail_set(detail, detail_size, "plain-read: %s", strerror(errno));
+                plain_end = 1;
+                status = -1;
             }
         }
-        write_wants_read = 0;
-        while (up_off < up_len) {
-            size_t wrote = 0;
-            ERR_clear_error();
-            int r = SSL_write_ex(ssl, up + up_off, up_len - up_off, &wrote);
-            if (r == 1) {
-                up_off += wrote;
-                continue;
+        if (up_off < up_len && !read_wants_write) {
+            write_wants_read = 0;
+            while (up_off < up_len) {
+                size_t wrote = 0;
+                ERR_clear_error();
+                errno = 0;
+                int r = SSL_write_ex(ssl, up + up_off, up_len - up_off, &wrote);
+                if (r == 1) {
+                    up_off += wrote;
+                    continue;
+                }
+                int saved = errno;
+                int e = SSL_get_error(ssl, r);
+                if (e == SSL_ERROR_WANT_WRITE) break;
+                if (e == SSL_ERROR_WANT_READ) {
+                    write_wants_read = 1;
+                    break;
+                }
+                detail_ssl(detail, detail_size, "ssl-write", e, saved);
+                status = -1;
+                goto done;
             }
-            int e = SSL_get_error(ssl, r);
-            if (e == SSL_ERROR_WANT_WRITE) break;
-            if (e == SSL_ERROR_WANT_READ) {
-                write_wants_read = 1;
-                break;
-            }
-            status = -1;
-            goto done;
         }
         if (up_off == up_len) up_len = up_off = 0;
 
         if (tls_end && down_len == 0) {
             if (status == 0) {
+                detail_set(detail, detail_size, "peer-eof");
                 ERR_clear_error();
                 (void)SSL_shutdown(ssl); /* answer the peer's close_notify */
             }
             goto done;
         }
         if (plain_end && up_len == 0) {
+            detail_set(detail, detail_size, "worker-eof");
             ERR_clear_error();
             (void)SSL_shutdown(ssl); /* close_notify, best effort */
             goto done;
         }
-        /* Decrypted or undecrypted bytes inside OpenSSL never wake poll. */
-        if (!tls_end && down_len == 0 && SSL_has_pending(ssl)) continue;
+        /* Decrypted plaintext bytes buffered inside OpenSSL never wake poll.
+         * SSL_has_pending also returns 1 for partial undecrypted records,
+         * which would spin without waiting for more TCP bytes. */
+        if (!tls_end && down_len == 0 && !write_wants_read && !read_wants_write &&
+            (SSL_pending(ssl) > 0 || read_skipped)) {
+            continue;
+        }
 
         struct pollfd p[3] = { { tcp, 0, 0 }, { plain, 0, 0 }, { stop, POLLIN, 0 } };
-        if ((!tls_end && down_len == 0) || write_wants_read) p[0].events |= POLLIN;
-        if (up_len > 0 || read_wants_write) p[0].events |= POLLOUT;
+        if ((!tls_end && down_len == 0 && !read_wants_write) || write_wants_read) p[0].events |= POLLIN;
+        if ((up_len > 0 && !write_wants_read) || read_wants_write) p[0].events |= POLLOUT;
         if (down_len > 0) p[1].events |= POLLOUT;
         if (!plain_end && up_len == 0) p[1].events |= POLLIN;
         /* A side with nothing wanted is left out, so a hang-up there cannot
@@ -342,14 +401,17 @@ int extdisplay_broker_pump(SSL *ssl, int tcp, int plain, int stop)
         for (int i = 0; i < 2; i++)
             if (!p[i].events) p[i].fd = -1;
         if (poll(p, 3, -1) < 0 && errno != EINTR) {
+            detail_set(detail, detail_size, "poll-error: %s", strerror(errno));
             status = -1;
             goto done;
         }
         if ((p[0].revents | p[1].revents | p[2].revents) & POLLNVAL) {
+            detail_set(detail, detail_size, "poll-error");
             status = -1;
             goto done;
         }
         if (p[2].revents & (POLLIN | POLLHUP | POLLERR)) {
+            detail_set(detail, detail_size, "stopped");
             ERR_clear_error();
             (void)SSL_shutdown(ssl); /* asked to end: close_notify, best effort */
             goto done;

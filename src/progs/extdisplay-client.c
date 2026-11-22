@@ -56,6 +56,11 @@ pid_t extdisplay_worker_spawn_hw(int transport, int render_fd, int *ipc)
         return -1;
     }
     if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, sv) < 0) return -1;
+    int buf = 1024 * 1024;
+    for (int i = 0; i < 2; i++) {
+        (void)setsockopt(sv[i], SOL_SOCKET, SO_SNDBUF, &buf, sizeof buf);
+        (void)setsockopt(sv[i], SOL_SOCKET, SO_RCVBUF, &buf, sizeof buf);
+    }
     pid_t pid = fork();
     if (pid == 0) child(sv[1], transport, render_fd);
     close(sv[1]);

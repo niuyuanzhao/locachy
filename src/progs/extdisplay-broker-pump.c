@@ -317,7 +317,8 @@ void pump_main(struct pump_args *a)
     }
     status_send("paired");
     /* The broker shuts its end of the status socket down to stop the pump. */
-    int pumped = extdisplay_broker_pump(ssl, tcp, PUMP_PLAIN, PUMP_STATUS);
+    char detail[128] = "";
+    int pumped = extdisplay_broker_pump(ssl, tcp, PUMP_PLAIN, PUMP_STATUS, detail, sizeof detail);
     /* close_notify is queued: FIN after it, then up to 250 ms for the peer
      * to close too, so the reset of the abortive close cannot overtake it. */
     if (shutdown(tcp, SHUT_WR) == 0) {
@@ -330,6 +331,13 @@ void pump_main(struct pump_args *a)
             if (n == 0 || (n < 0 && errno != EINTR && errno != EAGAIN)) break;
         }
     }
-    status_send(pumped == 0 ? "closed" : "closed error");
+    for (size_t i = 0; detail[i]; i++) {
+        unsigned char c = (unsigned char)detail[i];
+        if (c < 0x20 || c > 0x7e) detail[i] = ' ';
+    }
+    char closed_msg[192];
+    if (detail[0]) snprintf(closed_msg, sizeof closed_msg, "closed %s", detail);
+    else snprintf(closed_msg, sizeof closed_msg, "%s", pumped == 0 ? "closed" : "closed error");
+    status_send(closed_msg);
     _exit(0);
 }

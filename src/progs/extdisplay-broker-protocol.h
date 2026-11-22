@@ -68,8 +68,10 @@ int extdisplay_broker_tls_accept(SSL *ssl, int fd, long long deadline_ms);
 int extdisplay_broker_tls_verify(SSL *ssl);
 /* Bytes both ways between the TLS session and the plaintext stream until
  * either side ends, or stop (-1: none) becomes readable or hangs up, which
- * sends close_notify; bounded buffers. 0 on an orderly end. */
-int extdisplay_broker_pump(SSL *ssl, int tcp, int plain, int stop);
+ * sends close_notify; bounded buffers. 0 on an orderly end.
+ * When detail is non-NULL and detail_size > 0, records a short ASCII reason
+ * describing why the pump ended. */
+int extdisplay_broker_pump(SSL *ssl, int tcp, int plain, int stop, char *detail, size_t detail_size);
 long long extdisplay_broker_now_ms(void);
 #endif
 

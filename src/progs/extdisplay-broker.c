@@ -828,6 +828,7 @@ static void handle_status(void)
         /* The peer closed, or the stream or TLS failed: extdisplay sees EOF on its
          * stream too; the attempt's one "ended" says so and the device goes
          * back now. The fixed reasons have no separate "closed". */
+        broker_log("session %s", line);
         end_attempt("error");
     } else if (!strncmp(line, "error ", 6)) {
         pump_report(line);
@@ -988,11 +989,22 @@ int main(int argc, char **argv)
                     const char *error = prepare_link();
                     if (error) fail_preparation(error);
                 }
-            } else {
+            } else if (L.state != IDLE) {
                 int lost = nl_carrier_event(L.nl_mon, L.sess_ifindex);
                 struct link_info info;
-                if (lost < 0) lost = nl_link_get(L.nl_sess, L.sess_ifindex, &info) < 0 || !(info.flags & IFF_LOWER_UP);
+                if (lost < 0) {
+                    lost = nl_link_get(L.nl_sess, L.sess_ifindex, &info) < 0 || !(info.flags & IFF_UP) ||
+                           !(info.flags & IFF_LOWER_UP);
+                } else if (lost > 0 && L.state == SESSION) {
+                    if (nl_link_get(L.nl_sess, L.sess_ifindex, &info) == 0 && (info.flags & IFF_UP) &&
+                        (info.flags & IFF_LOWER_UP)) {
+                        broker_log("transient carrier event on %s ignored (link is up)", L.name);
+                        lost = 0;
+                    }
+                }
                 if (lost) end_attempt("carrier-lost");
+            } else {
+                (void)nl_carrier_event(L.nl_mon, L.sess_ifindex);
             }
         }
         if (L.discovery.status >= 0 && p[5].fd == L.discovery.status &&
