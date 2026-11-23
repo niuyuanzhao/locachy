@@ -59,6 +59,7 @@ find "$out" -mindepth 1 -delete
 mkdir -p "$out/state" "$out/run" "$out/data" "$out/clash" "$out/network"
 chmod 755 "$out"
 mount -t tmpfs tmpfs /run
+ip link set lo up # unshare --net starts lo DOWN; host loopback checks need ECONNREFUSED, not ENETUNREACH
 mkdir -p /run/netns /run/tor-test
 # DIR where nobody and the tor user reach it (its parents may be private).
 mount --bind "$out" /run/tor-test

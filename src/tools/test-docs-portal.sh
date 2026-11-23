@@ -40,6 +40,7 @@ status=0
 unshare --map-auto --map-root-user --mount --propagation private --pid --fork --mount-proc bash -euo pipefail -c '
     t=/run/test-docs
     mount -t tmpfs -o mode=0755 tmpfs /run
+    run_id=$(awk '"'"'$5 == "/run" { id = $1 } END { print id }'"'"' /proc/self/mountinfo)
     mkdir -p $t/cgroup/locachy-docs $t/cgroup/app_edge $t/cgroup/app_other $t/cgroup/app_late /run/home /run/ctr /run/ctr2 /run/ctr3
     for f in cgroup.procs cgroup.kill; do : >$t/cgroup/locachy-docs/$f; done
     printf "populated 0\nfrozen 0\n" >$t/cgroup/locachy-docs/cgroup.events
@@ -91,7 +92,23 @@ unshare --map-auto --map-root-user --mount --propagation private --pid --fork --
     in_ctr() { nsenter -t "$ctr" -m -- setpriv --reuid=1000 --regid=1000 --clear-groups -- "$@"; }
 
     service 1
-    mounted() { grep -q " /run/user/1000/doc " /proc/self/mountinfo; }
+    # Check only mounts under the overmounted /run tmpfs (any host desktop
+    # /run/user/1000/doc FUSE mount remains in mountinfo under an older parent id).
+    mounted() {
+        awk -v r="$run_id" '"'"'
+            { parent[$1] = $2; if ($5 == "/run/user/1000/doc") target[++n] = $1 }
+            END {
+                for (i = 1; i <= n; i++) {
+                    id = target[i]
+                    for (d = 0; d < 16 && id != ""; d++) {
+                        if (id == r) exit 0
+                        id = parent[id]
+                    }
+                }
+                exit 1
+            }
+        '"'"' /proc/self/mountinfo
+    }
     check "grep -q serving \"\$out/service.log\" && mounted" \
         "the service starts the bus, the packaged portal (its FUSE mount at /run/user/1000/doc) and the server" \
         "$(tail -n 3 "$out/service.log" | tr "\n" " ")"

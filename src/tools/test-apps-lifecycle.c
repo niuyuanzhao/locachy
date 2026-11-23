@@ -271,7 +271,12 @@ static void app_exit(const char *name)
 {
     char path[512];
     snprintf(path, sizeof path, FX "/app-exit-%s", name);
-    int fd = open(path, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    /* The background app subshell opens the FIFO asynchronously after start;
+     * retry ENXIO briefly so an immediate exit request right after ready is not dropped. */
+    double until = uptime() + 2.0;
+    int fd;
+    while ((fd = open(path, O_WRONLY | O_NONBLOCK | O_CLOEXEC)) < 0 && errno == ENXIO && uptime() < until)
+        usleep(5000);
     if (fd >= 0) { (void)!write(fd, "\n", 1); close(fd); }
 }
 
@@ -462,12 +467,16 @@ static void stop_while_helper(const char *n, const char *how)
     check(ok, what);
     snprintf(what, sizeof what, "while it is %s: open and show are refused", freezing ? "freezing" : "opening");
     check(refused("open", n, busy) && refused("show", n, busy), what);
+    /* Gate the stop helper so reap_all() inside is_state("stopping") cannot race
+     * an ungated stop helper all the way to "closed" before the state check runs. */
+    gate(n, "stop");
     check(answered("stop", n, "stop accepted") && is_state(n, "stopping"), freezing ?
           "a stop while it freezes: accepted, stopping" : "a stop while it opens: accepted, stopping");
     snprintf(what, sizeof what, "the %s helper is killed (SIGKILL) and reaped", how);
     check(wait_reaped(job, 5000) == 128 + SIGKILL, what);
-    check(wait_event("stop", n, 1, 5000) != 0,
+    check(wait_event("stop", n, 1, 5000) != 0 && wait_event("gate-stop", n, 1, 5000) != 0,
           "then the stop helper runs, though the app's launcher still runs in app_NAME");
+    release(n, "stop");
     snprintf(what, sizeof what, "it ends closed without an error: neither the killed %s helper nor the launcher's end "
              "after the stop is a failure", how);
     check(closed_clean(n) && (!freezing || event_count("freeze-end", n) == 0), what);
@@ -483,9 +492,11 @@ static void stop_while_entered(void)
     int ok = act("start", n, why, sizeof why) == 0;
     pid_t launcher = wait_event("start", n, 1, 5000);
     ok = ok && launcher && wait_event("gate-ready", n, 1, 5000) && is_state(n, "starting");
+    gate(n, "stop");
     ok = ok && answered("stop", n, "stop accepted") && is_state(n, "stopping");
-    check(ok && wait_event("stop", n, 1, 5000),
+    check(ok && wait_event("stop", n, 1, 5000) && wait_event("gate-stop", n, 1, 5000),
           "a stop while it starts, its launcher already in app_NAME: stopped as a running app (the stop helper at once)");
+    release(n, "stop");
     wait_reaped(launcher, 5000);
     check(closed_clean(n), "it ends closed: the launcher's end in the middle of its start is no failure");
 }

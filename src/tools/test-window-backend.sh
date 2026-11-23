@@ -198,4 +198,39 @@ if [ "$status" = 0 ]; then
     pass 'a second close within 3 s of an unanswered K_CLOSE ends the program (status 0)'
 else fail "second close: status $status"; fi
 
+# Floating centered always-on-top overlay (LOCACHY_WINDOW_FLOATING=1, wlr-layer-shell):
+# centered on the output, no compositor title bar, immediate keyboard focus without a click.
+rm -f "$out/ready" "$out/window.log" "$out/window.err"
+mkfifo "$out/ready"
+exec 4<>"$out/ready"
+LOCACHY_BACKEND=wayland LOCACHY_WINDOW_FLOATING=1 LOCACHY_WINDOW_TITLE='Float test' \
+    LOCACHY_WINDOW_APP_ID=locachy-float LOCACHY_WINDOW_READY_FD=3 \
+    "$out/window" >"$out/window.log" 2>"$out/window.err" 3>"$out/ready" &
+client=$!
+byte=
+if read -r -t 10 -n 1 -u 4 byte && [ "$byte" = 1 ]; then
+    pass 'floating overlay: readiness byte after the first picture was shown'
+else fail "floating overlay: no readiness byte (got '$byte')"; fi
+sleep .3
+read -r _ fcw fch _ _ ftop fgh fdeco < <(grep '^SHOWN' "$out/window.log" | tail -n 1)
+fbar=$((ftop + fgh))
+fvh=$((fch - fbar))
+"$out/shot" "$out/float" >/dev/null
+read -r found fx0 fy0 fx1 fy1 fsw fsh _ < <(python3 "$out/box.py" "$out"/float-*.ppm "$fgh")
+ex0=$(((fsw - fcw) / 2))
+ey0=$(((fsh - fvh) / 2))
+dx=$((fx0 - ex0)); [ "$dx" -ge 0 ] || dx=$((-dx))
+dy=$((fy0 - ey0)); [ "$dy" -ge 0 ] || dy=$((-dy))
+if [ "$fcw" = 760 ] && [ "$fvh" = 480 ] && [ "$fdeco" = 0 ] && [ "$dx" -le 2 ] && [ "$dy" -le 2 ] && \
+   [ $((fx1 - fx0)) = "$fcw" ] && [ $((fy1 - fy0)) = "$fvh" ] && [ "$found" -ge $((fcw * fvh * 8 / 10)) ]; then
+    pass "floating overlay: ${fcw}x${fvh} centered at ${fx0},${fy0} on ${fsw}x${fsh} output, no title bar (deco=0)"
+else fail "floating overlay: size ${fcw}x${fvh} box ${fx0},${fy0}-${fx1},${fy1} (want centered ${ex0},${ey0}) deco=${fdeco} found=${found}"; fi
+"$out/keys" f Escape
+if logged '^KEY 102 0$' && logged '^KEY 27 0$'; then
+    pass 'floating overlay: immediate exclusive keyboard focus without clicking'
+else fail "floating overlay: keys not delivered ($(grep '^KEY' "$out/window.log" | tr '\n' ' '))"; fi
+kill "$client" 2>/dev/null || true
+wait "$client" 2>/dev/null || true
+client=
+
 if [ "$fails" = 0 ]; then printf 'PASS window backend: all checks\n'; else printf 'FAIL window backend: %d failed\n' "$fails"; exit 1; fi
