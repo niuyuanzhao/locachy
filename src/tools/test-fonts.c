@@ -11,6 +11,7 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -125,6 +126,8 @@ static int reload(void)
 
 int main(int argc, char **argv)
 {
+    /* Release fontconfig's process-wide config on exit so LeakSanitizer reports real leaks only. */
+    atexit(FcFini);
     if (argc != 2) {
         fprintf(stderr, "usage: test-fonts CASE\n");
         return 2;

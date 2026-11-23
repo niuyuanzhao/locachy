@@ -89,8 +89,11 @@ static int sorted(struct font_set *set)
     if (set->sorted) return set->fonts != NULL;
     set->sorted = 1;
     FcResult result;
-    initialised = 1;
-    if (!FcInit() || !FcConfigSubstitute(NULL, set->pattern, FcMatchPattern)) return 0;
+    if (!initialised) {
+        if (!FcInit()) return 0;
+        initialised = 1;
+    }
+    if (!FcConfigSubstitute(NULL, set->pattern, FcMatchPattern)) return 0;
     FcDefaultSubstitute(set->pattern);
     set->fonts = FcFontSort(NULL, set->pattern, FcTrue, NULL, &result);
     FcPatternDestroy(set->pattern);

@@ -1751,6 +1751,9 @@ static void draw_search(struct search_state *st)
 
     uint32_t backdrop = (!wayland && (cx > 0 || cy > 1))
                         ? theme_rgb(THEME_OUTPUT, 0x05080C) : BG;
+    int px_w = 0, px_h = 0;
+    screen_pixels(&px_w, &px_h);
+    if (px_w > 0 && px_h > 0) screen_fill_px(0, 0, px_w, px_h, backdrop);
     screen_fill(0, 0, cols, rows, backdrop);
     ui_hits_clear();
 

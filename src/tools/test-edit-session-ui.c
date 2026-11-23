@@ -222,14 +222,16 @@ static void test_live_actions(void)
     session_menu();
     CHECK(edit_session_load("alpha", &state) == ENOENT);
     /* Ctrl+Q asks when a document has unsaved changes, even with a session:
-     * Cancel stays open; Discard quits without recording a clean shutdown. */
+     * Cancel stays open; Discard drops the discarded edits and records a clean
+     * exit so the next startup does not ask to recover them. */
     push(27, 0, NULL);
     key('q', KEYS_CTRL);
     CHECK(!quitting);
     answer("d");
     key('q', KEYS_CTRL);
     CHECK(quitting);
-    read_saved("beta", &state, 1);
+    read_saved("beta", &state, 0);
+    CHECK(state.ndocuments == 0 && state.spaces[0].ntabs == 0);
     edit_session_free(&state);
     quitting = 0;
     puts("PASS actual File/Sessions actions and Ctrl+Q, create/save-as/switch/save/delete and periodic view/font checkpoint");
@@ -271,6 +273,34 @@ static void test_recovery_protection(void)
     puts("PASS actual recovery decline protects old unsaved data; Save As escapes safely; malformed switch preserves running editor");
 }
 
+/* Discarding edits to a named file writes a clean session that still reopens
+ * the file from disk without a recovery prompt or the discarded changes. */
+static void test_discard_named_file(void)
+{
+    fresh_session_ui();
+    snprintf(session_name, sizeof session_name, "discard-named");
+    session_enabled = 1;
+    CHECK(edit_session_select("discard-named") == 0);
+    struct tab *t = open_text("discard-me.txt", "clean disk\n");
+    type_text(active, t, "dropped ", 8);
+    CHECK(doc_modified(t->doc));
+    CHECK(session_checkpoint(0, 1) == 0); /* periodic dirty crash checkpoint */
+    answer("d");
+    key('q', KEYS_CTRL);
+    CHECK(quitting);
+    quitting = 0;
+    struct edit_session_state state = {0};
+    read_saved("discard-named", &state, 0);
+    CHECK(state.ndocuments == 1 && state.documents[0].path && !state.documents[0].modified && !state.documents[0].text);
+    edit_session_free(&state);
+    /* Next startup restores cleanly with no recovery prompt and disk bytes only. */
+    fresh_session_ui();
+    session_startup();
+    CHECK(!session_blocked && qhead == qtail && ndocs == 1 && !doc_modified(docs[0]) && text_is(docs[0], "clean disk\n"));
+    CHECK(edit_session_remove("discard-named") == 0);
+    puts("PASS Discard on named file drops unsaved edits and closes cleanly without triggering recovery");
+}
+
 int main(int argc, char **argv)
 {
     CHECK(argc == 2 && geteuid() == 0);
@@ -287,6 +317,7 @@ int main(int argc, char **argv)
     test_live_actions();
     test_recovery_protection();
     test_external_change();
+    test_discard_named_file();
     reset();
     close(ino);
     free(docs);

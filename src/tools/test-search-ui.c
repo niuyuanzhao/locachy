@@ -87,6 +87,11 @@ void screen_fill(int c, int r, int w, int h, uint32_t rgb)
 {
     (void)c; (void)r; (void)w; (void)h; (void)rgb;
 }
+void screen_pixels(int *w, int *h) { if (w) *w = g_cols * 10; if (h) *h = g_rows * 20; }
+void screen_fill_px(int x, int y, int w, int h, uint32_t rgb)
+{
+    (void)x; (void)y; (void)w; (void)h; (void)rgb;
+}
 void screen_text(int c, int r, const char *s, uint32_t fg, uint32_t bg)
 {
     (void)c; (void)r; (void)s; (void)fg; (void)bg;

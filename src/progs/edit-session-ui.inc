@@ -17,50 +17,75 @@ static void session_error(const char *operation, const char *fmt, int error)
     error_box(message);
 }
 
-static int session_capture(struct edit_session_state *out)
+static int session_capture(struct edit_session_state *out, int discard_modified)
 {
     memset(out, 0, sizeof *out);
     if (ndocs < 0 || (unsigned)ndocs > EDIT_SESSION_MAX_DOCUMENTS || nspaces < 1 ||
         (unsigned)nspaces > EDIT_SESSION_MAX_SPACES) return EFBIG;
+    int *doc_map = calloc(ndocs ? (size_t)ndocs : 1, sizeof *doc_map);
     out->documents = calloc(ndocs ? (size_t)ndocs : 1, sizeof *out->documents);
     out->spaces = calloc((size_t)nspaces, sizeof *out->spaces);
     out->layout = edit_layout_encode(&view_layout);
-    if (!out->documents || !out->spaces || !out->layout) goto memory;
-    out->ndocuments = (size_t)ndocs;
+    if (!doc_map || !out->documents || !out->spaces || !out->layout) goto memory;
     out->nspaces = (size_t)nspaces;
     out->active = active;
     out->sidebar = sidebar;
     out->sidebar_width = sidebar_width;
     for (int i = 0; i < ndocs; i++) {
         struct doc *d = docs[i];
-        struct edit_session_document *to = &out->documents[i];
-        to->length = doc_len(d);
+        int mod = doc_modified(d);
+        if (discard_modified && mod && (!d->path[0] || !d->st.st_ino || d->disk == DISK_DELETED)) {
+            doc_map[i] = -1;
+            continue;
+        }
+        int ni = (int)out->ndocuments++;
+        doc_map[i] = ni;
+        struct edit_session_document *to = &out->documents[ni];
         to->format = d->format;
-        to->modified = doc_modified(d);
         to->readonly = d->readonly;
         if (d->path[0] && !(to->path = strdup(d->path))) goto memory;
-        if (to->modified && d->path[0] && d->st.st_ino) file_digest_hex(d->digest, to->base);
-        if ((to->modified || !d->path[0]) && !(to->text = buffer_dup(&d->buf, 0, to->length))) goto memory;
+        if (discard_modified && mod) {
+            /* Keep the open file tab in the session without its discarded unsaved edits. */
+            to->modified = 0;
+            to->length = 0;
+        } else {
+            to->length = doc_len(d);
+            to->modified = mod;
+            if (to->modified && d->path[0] && d->st.st_ino) file_digest_hex(d->digest, to->base);
+            if ((to->modified || !d->path[0]) && !(to->text = buffer_dup(&d->buf, 0, to->length))) goto memory;
+        }
     }
     for (int s = 0; s < nspaces; s++) {
         struct edit_session_space *to = &out->spaces[s];
-        to->ntabs = (size_t)spaces[s].ntabs;
-        to->current = spaces[s].cur;
-        to->tabs = calloc(to->ntabs ? to->ntabs : 1, sizeof *to->tabs);
+        int raw = spaces[s].ntabs;
+        to->tabs = calloc(raw ? (size_t)raw : 1, sizeof *to->tabs);
         if (!to->tabs) goto memory;
-        for (int j = 0; j < spaces[s].ntabs; j++) {
+        int kept = 0, cur = -1;
+        for (int j = 0; j < raw; j++) {
             struct tab *t = &spaces[s].tabs[j];
             int document = -1;
-            for (int i = 0; i < ndocs; i++) if (docs[i] == t->doc) { document = i; break; }
-            if (document < 0) { edit_session_free(out); return EINVAL; }
-            to->tabs[j] = (struct edit_session_view){
-                .document = document, .cursor = t->cursor, .anchor = t->anchor, .top = t->top,
-                .left = t->left, .sub = t->sub, .wrap = t->wrap, .numbers = t->numbers, .font_px = t->font_px
+            for (int i = 0; i < ndocs; i++) if (docs[i] == t->doc) { document = doc_map[i]; break; }
+            if (document < 0) {
+                if (!discard_modified) { free(doc_map); edit_session_free(out); return EINVAL; }
+                continue;
+            }
+            if (j == spaces[s].cur) cur = kept;
+            size_t lim = out->documents[document].length;
+            to->tabs[kept++] = (struct edit_session_view){
+                .document = document, .cursor = min_z(t->cursor, lim), .anchor = min_z(t->anchor, lim),
+                .top = min_z(t->top, lim), .left = t->left, .sub = t->sub, .wrap = t->wrap,
+                .numbers = t->numbers, .font_px = t->font_px
             };
         }
+        to->ntabs = (size_t)kept;
+        if (kept == 0) to->current = -1;
+        else if (cur >= 0) to->current = cur;
+        else to->current = kept - 1;
     }
+    free(doc_map);
     return 0;
 memory:
+    free(doc_map);
     edit_session_free(out);
     return ENOMEM;
 }
@@ -259,7 +284,7 @@ static void session_fingerprint(char digest[65])
     g_checksum_free(sum);
 }
 
-static int session_checkpoint(int clean, int report)
+static int session_checkpoint_ex(int clean, int report, int discard_modified)
 {
     if (session_blocked) {
         if (report) session_error("save (recovery is protected)",
@@ -268,7 +293,7 @@ static int session_checkpoint(int clean, int report)
         return EBUSY;
     }
     struct edit_session_state state = {0};
-    int e = session_capture(&state);
+    int e = session_capture(&state, discard_modified);
     if (!e) e = edit_session_save(session_name, &state, clean);
     edit_session_free(&state);
     if (!e) { session_fingerprint(session_digest); session_last_error = 0; }
@@ -279,6 +304,11 @@ static int session_checkpoint(int clean, int report)
               "The existing checkpoint has been kept. Use another session name to continue without replacing it."), e);
     }
     return e;
+}
+
+static int session_checkpoint(int clean, int report)
+{
+    return session_checkpoint_ex(clean, report, 0);
 }
 
 /* Input resets the checkpoint's 2 s timer, so a checkpoint runs after 2 s of
@@ -389,12 +419,20 @@ static int any_modified(void)
 
 /* Ctrl+Q, Alt+F4 and the window's close: with a modified document, Kate's
  * Save Documents question first, also with a session (Save, Discard,
- * Cancel). Discarded changes are not kept as the session's recovery. */
+ * Cancel). Discarded changes are dropped from the clean exit session so the
+ * next launch does not offer to recover them; a crash still recovers from the
+ * last periodic checkpoint. */
 static int ask_quit(void)
 {
     if (any_modified()) {
         if (!query_quit()) return 0;
-        if (any_modified()) return 1; /* Discard */
+        if (any_modified()) {
+            /* Discard: keep protected crash recovery intact, else save a clean
+             * session with discarded unsaved buffers stripped. */
+            if (!session_enabled) return 1;
+            if (session_blocked) return session_quit();
+            return session_checkpoint_ex(1, 1, 1) == 0;
+        }
     }
     return session_quit();
 }
@@ -468,7 +506,7 @@ static void session_save_as(void)
     char name[EDIT_SESSION_MAX_NAME + 1];
     if (!session_unused_name(name)) return;
     struct edit_session_state state = {0};
-    int e = session_capture(&state);
+    int e = session_capture(&state, 0);
     if (!e) e = edit_session_create(name, &state, 0);
     edit_session_free(&state);
     if (e) {

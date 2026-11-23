@@ -3,6 +3,9 @@
  * DRM, input or a UI. test-content-font [cjk MONO | latin]: MONO is DejaVu
  * Sans Mono's file, the explicit path. */
 #include "../base/font.c"
+#ifdef CONFIG_FREETYPE
+#include <fontconfig/fontconfig.h>
+#endif
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -300,6 +303,10 @@ static void test_without_cjk(void)
 
 int main(int argc, char **argv)
 {
+#ifdef CONFIG_FREETYPE
+    /* Release fontconfig's process-wide config on exit so LeakSanitizer reports real leaks only. */
+    atexit(FcFini);
+#endif
     test_widths();
 #ifdef CONFIG_FREETYPE
     if (argc == 2 && strcmp(argv[1], "latin") == 0) {
