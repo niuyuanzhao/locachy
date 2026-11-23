@@ -221,9 +221,15 @@ static void test_live_actions(void)
     answer("d");
     session_menu();
     CHECK(edit_session_load("alpha", &state) == ENOENT);
+    /* Ctrl+Q asks when a document has unsaved changes, even with a session:
+     * Cancel stays open; Discard quits without recording a clean shutdown. */
+    push(27, 0, NULL);
+    key('q', KEYS_CTRL);
+    CHECK(!quitting);
+    answer("d");
     key('q', KEYS_CTRL);
     CHECK(quitting);
-    read_saved("beta", &state, 0);
+    read_saved("beta", &state, 1);
     edit_session_free(&state);
     quitting = 0;
     puts("PASS actual File/Sessions actions and Ctrl+Q, create/save-as/switch/save/delete and periodic view/font checkpoint");
