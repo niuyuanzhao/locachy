@@ -15,7 +15,13 @@ if [ ! -c /dev/net/tun ]; then
 fi
 modprobe tun 2>/dev/null || true
 
-# Ensure locachy-net namespace exists before starting tailscaled
+# Wait briefly at boot for network-client to create locachy-net instead of
+# exiting immediately into process 1's 5 s restart backoff.
+_i=0
+while [ ! -e /run/netns/locachy-net ] && [ "$_i" -lt 50 ]; do
+    sleep 0.1
+    _i=$((_i + 1))
+done
 if [ ! -e /run/netns/locachy-net ]; then
     exit 0
 fi

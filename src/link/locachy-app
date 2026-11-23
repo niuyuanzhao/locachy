@@ -136,16 +136,29 @@ export XDG_RUNTIME_DIR="$RUNTIME_DIR"
 umask 077
 
 # The value of KEY in NAME's configuration, "" if it has none.
+declare -A APP_CONF=()
+
 is_host() { # NAME: managed real-system access (host="1"), no private filesystem
     [ "$(conf_value "$1" host)" = 1 ]
 }
 
 conf_value() {
     if [ "${APP_CONFIG_NAME:-}" = "$1" ]; then
-        sed -n "s/^[[:space:]]*$2=\"\([^\"]*\)\".*/\1/p" <<<"$APP_CONFIG_SNAPSHOT" | tail -n 1
-    else
-        sed -n "s/^[[:space:]]*$2=\"\([^\"]*\)\".*/\1/p" "$CONT_CONF/$1.conf" 2>/dev/null | tail -n 1
+        [ -z "${APP_CONF[$2]:-}" ] || printf '%s\n' "${APP_CONF[$2]}"
+        return 0
     fi
+    local _line _val=
+    [ -r "$CONT_CONF/$1.conf" ] || return 0
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        _line=${_line#"${_line%%[![:space:]]*}"}
+        case $_line in
+        "$2=\""*\"*)
+            _val=${_line#"$2=\""}
+            _val=${_val%%\"*}
+            ;;
+        esac
+    done <"$CONT_CONF/$1.conf"
+    [ -z "$_val" ] || printf '%s\n' "$_val"
 }
 
 # Short configuration transactions run below control.lock. Every decision of
@@ -223,11 +236,84 @@ PY
 
 load_config_snapshot() {
     # No configuration: as before, every key is empty. One that is there is
-    # read whole, or the operation stops: never a key read from elsewhere.
+    # read whole under the shared configuration lock (same TARGET.lock as
+    # locachy_config.py / base/rc.c), then parsed once into APP_CONF.
     APP_CONFIG_NAME=$1
     APP_CONFIG_SNAPSHOT=
-    [ -e "$CONT_CONF/$1.conf" ] || return 0
-    APP_CONFIG_SNAPSHOT=$(config_action snapshot "$CONT_CONF/$1.conf") || die "$1: cannot read its configuration"
+    APP_CONF=()
+    local _parent _conf _lock _cfd _err _rc _line _trimmed
+    if [ ! -e "$CONT_CONF/$1.conf" ] && [ ! -L "$CONT_CONF/$1.conf" ]; then
+        return 0
+    fi
+    if [ -L "$CONT_CONF" ]; then
+        _parent=$(cd -P -- "$CONT_CONF" 2>/dev/null && pwd) || die "$1: cannot read its configuration"
+    else
+        _parent=$CONT_CONF
+    fi
+    _conf="$_parent/$1.conf"
+    _lock="$_conf.lock"
+    if command -v flock >/dev/null 2>&1 && [ ! -L "$_lock" ]; then
+        if [ -e "$_lock" ] && [ ! -f "$_lock" ]; then
+            APP_CONFIG_SNAPSHOT=$(config_action snapshot "$_conf") || die "$1: cannot read its configuration"
+        elif { exec {_err}>&2 2>/dev/null; exec {_cfd}>>"$_lock"; _rc=$?; exec 2>&"$_err" {_err}>&-; [ "$_rc" -eq 0 ]; }; then
+            flock -s "$_cfd"
+            if [ -L "$_conf" ]; then
+                exec {_cfd}>&-
+                die "$1: cannot read its configuration"
+            elif [ ! -e "$_conf" ]; then
+                exec {_cfd}>&-
+                return 0
+            elif [ ! -f "$_conf" ] || [ ! -r "$_conf" ]; then
+                exec {_cfd}>&-
+                die "$1: cannot read its configuration"
+            fi
+            # read -d '' succeeds only when it stops at a NUL byte; the end of
+            # the file returns 1. A NUL is refused, as locachy_config.py does:
+            # a truncated configuration must never drop keys such as tor="1".
+            if IFS= read -r -d '' APP_CONFIG_SNAPSHOT <"$_conf"; then
+                exec {_cfd}>&-
+                die "$1: cannot read its configuration"
+            fi
+            exec {_cfd}>&-
+        else
+            APP_CONFIG_SNAPSHOT=$(config_action snapshot "$_conf") || die "$1: cannot read its configuration"
+        fi
+    else
+        APP_CONFIG_SNAPSHOT=$(config_action snapshot "$_conf") || die "$1: cannot read its configuration"
+    fi
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        _trimmed=${_line#"${_line%%[![:space:]]*}"}
+        if [[ "$_trimmed" =~ ^([A-Za-z0-9_]+)=\"([^\"]*)\" ]]; then
+            APP_CONF[${BASH_REMATCH[1]}]=${BASH_REMATCH[2]}
+        fi
+    done <<<"$APP_CONFIG_SNAPSHOT"
+}
+
+rc_has_key() { # KEY
+    local _line
+    [ -r "$RC_CONF" ] || return 1
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        _line=${_line#"${_line%%[![:space:]]*}"}
+        case $_line in
+        "$1="*) return 0 ;;
+        esac
+    done <"$RC_CONF"
+    return 1
+}
+
+rc_key_value() { # KEY
+    local _line _val=
+    [ -r "$RC_CONF" ] || return 0
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        _line=${_line#"${_line%%[![:space:]]*}"}
+        case $_line in
+        "$1=\""*\"*)
+            _val=${_line#"$1=\""}
+            _val=${_val%%\"*}
+            ;;
+        esac
+    done <"$RC_CONF"
+    [ -z "$_val" ] || printf '%s\n' "$_val"
 }
 
 # KEY="VALUE" in NAME's configuration, in place of its line (VALUE: no quote,
@@ -627,8 +713,9 @@ do_stop() {
     rm -f "$APP_RUNTIME/$name/reaper.pid" "$APP_RUNTIME/$name/tor-mode" "$APP_RUNTIME/$name.ready"
     if [ "$(conf_value "$name" tor)" = 1 ]; then
         "$TOR_ENFORCE" app-remove "$name" || die "$name: cannot remove its Tor firewall"
-    elif [ -x "$TOR_ENFORCE" ]; then
-        "$TOR_ENFORCE" app-remove "$name" || true
+        rm -f "$APP_RUNTIME/$name/tor-firewall"
+    elif [ -e "$APP_RUNTIME/$name/tor-firewall" ] && [ -x "$TOR_ENFORCE" ]; then
+        "$TOR_ENFORCE" app-remove "$name" && rm -f "$APP_RUNTIME/$name/tor-firewall" || true
     fi
     # No host mounts to unmount: the private mount namespace dies with the
     # subtree. Leave upper, work and data untouched.
@@ -645,10 +732,10 @@ do_open_running() { # NAME TARGET COMMAND...
         local tor_mode=system
         [ ! -r "$APP_RUNTIME/$name/tor-mode" ] || IFS= read -r tor_mode <"$APP_RUNTIME/$name/tor-mode" || tor_mode=system
         if [ "$tor_mode" = own ]; then
-            ! grep -qE '^[[:space:]]*service_tor=' "$RC_CONF" 2>/dev/null && ! "$TOR_ENFORCE" loaded ||
+            ! rc_has_key service_tor && ! "$TOR_ENFORCE" loaded ||
                 die "$name is running with its own Tor while full-system Tor is on: stop $name first"
         else
-            grep -qE '^[[:space:]]*service_tor=' "$RC_CONF" 2>/dev/null ||
+            rc_has_key service_tor ||
                 die "$name requires full-system Tor: turn Tor on in settings first"
             "$TOR_ENFORCE" loaded ||
                 die "$name requires full-system Tor and its firewall is not loaded"
@@ -726,7 +813,7 @@ do_build() {
     generation_tool recover "$cbase" || die "$name: cannot recover its interrupted generation"
     [ ! -L "$cbase/data" ] || die "$name: $cbase/data is a symbolic link"
     mkdir -p "$cbase/data"
-    modprobe overlay 2>/dev/null || true
+    [ -d /sys/module/overlay ] || grep -qw overlay /proc/filesystems 2>/dev/null || modprobe overlay 2>/dev/null || true
 
     # AUR packages not built yet.
     local unbuilt=()
@@ -867,8 +954,9 @@ do_remove() {
     local name="$1" cbase="$CONT_BASE/$1"
     if [ "$(conf_value "$name" tor)" = 1 ]; then
         "$TOR_ENFORCE" app-remove "$name" || die "$name: cannot remove its Tor firewall"
-    elif [ -x "$TOR_ENFORCE" ]; then
-        "$TOR_ENFORCE" app-remove "$name" || true
+        rm -f "$APP_RUNTIME/$name/tor-firewall"
+    elif [ -e "$APP_RUNTIME/$name/tor-firewall" ] && [ -x "$TOR_ENFORCE" ]; then
+        "$TOR_ENFORCE" app-remove "$name" && rm -f "$APP_RUNTIME/$name/tor-firewall" || true
     fi
     [ ! -e "$CONT_CONF/$name.conf" ] && [ ! -L "$CONT_CONF/$name.conf" ] ||
         config_action remove "$CONT_CONF/$name.conf" ||
@@ -1257,7 +1345,7 @@ fi
 want_tor=0
 tor_mode=
 if { [ "$want_net" = 1 ] || [ "$(conf_value "$name" network)" = 1 ]; } && [ "$(conf_value "$name" tor)" = 1 ]; then
-    if grep -qE '^[[:space:]]*service_tor=' "$RC_CONF" 2>/dev/null; then
+    if rc_has_key service_tor; then
         [ "$want_own_tor" != 1 ] ||
             die "$name: full-system Tor is on; do not pass --own-tor (Tor over Tor); not started"
         "$TOR_ENFORCE" loaded ||
@@ -1303,24 +1391,57 @@ fi
 mkdir -p "$cg"
 chmod 0755 "$cg"
 [ -w "$cg/cgroup.freeze" ] && [ -w "$cg/cgroup.kill" ] || die 'a writable cgroup v2 freezer and cgroup.kill are required'
-modprobe overlay 2>/dev/null || true
+[ -d /sys/module/overlay ] || grep -qw overlay /proc/filesystems 2>/dev/null || modprobe overlay 2>/dev/null || true
 
 # Programs in containers run as the user (made by locachy-setup), whose home
 # holds the files shared by every container and the host.
-IFS=: read -r user _ uid gid _ uhome _ <<<"$(getent passwd "$APP_UID" || true)"
+passwd_entry=$(getent passwd "$APP_UID" || true)
+IFS=: read -r user _ uid gid _ uhome _ <<<"$passwd_entry"
 [ -n "${uid:-}" ] || die "there is no user with uid $APP_UID: create it with locachy-setup"
 case "$uhome" in
 /home/?*) ;;
 *) die "the home of $user is $uhome, not under /home: fix it (usermod -d /home/$user -m $user)" ;;
 esac
-install -d -o "$uid" -g "$gid" -m 0700 "$uhome"
+_need_home=0
+_need_udirs=()
+_check_dirs=()
+if [ -d "$uhome" ] && [ ! -L "$uhome" ]; then
+    _check_dirs+=("$uhome")
+else
+    _need_home=1
+fi
 for d in $USER_DIRS; do
-    install -d -o "$uid" -g "$gid" "$uhome/$d"
+    if [ -d "$uhome/$d" ] && [ ! -L "$uhome/$d" ]; then
+        _check_dirs+=("$uhome/$d")
+    else
+        _need_udirs+=("$uhome/$d")
+    fi
 done
+if [ "${#_check_dirs[@]}" -gt 0 ]; then
+    _stat_lines=()
+    mapfile -t _stat_lines < <(stat -c '%u:%g %a' "${_check_dirs[@]}" 2>/dev/null || true)
+    if [ "${#_stat_lines[@]}" -ne "${#_check_dirs[@]}" ]; then
+        _need_home=1
+        _need_udirs=()
+        for d in $USER_DIRS; do _need_udirs+=("$uhome/$d"); done
+    else
+        for _idx in "${!_check_dirs[@]}"; do
+            _path=${_check_dirs[$_idx]}
+            read -r _ug _mode <<<"${_stat_lines[$_idx]}"
+            if [ "$_path" = "$uhome" ]; then
+                [ "$_ug" = "$uid:$gid" ] && [ "$_mode" = 700 ] || _need_home=1
+            else
+                [ "$_ug" = "$uid:$gid" ] || _need_udirs+=("$_path")
+            fi
+        done
+    fi
+fi
+[ "$_need_home" = 0 ] || install -d -o "$uid" -g "$gid" -m 0700 "$uhome"
+[ "${#_need_udirs[@]}" -eq 0 ] || install -d -o "$uid" -g "$gid" "${_need_udirs[@]}"
 if [ "$host" = 1 ]; then
     # Mount points of its namespace, empty on the host.
     install -d -o "$uid" -g "$gid" -m 0700 "/run/user/$uid"
-    mkdir -p /run/locachy-bus
+    [ -d /run/locachy-bus ] || mkdir -p /run/locachy-bus
 fi
 
 if [ "$want_net" = 1 ] && [ -f "$CONT_CONF/$name.conf" ]; then
@@ -1354,8 +1475,8 @@ if [ "$want_net" = 1 ] && [ -e /run/netns/locachy-net ]; then
 fi
 # The Clash proxy with only its port (clash-client, clash_mode="proxy"): a
 # container on the network is told of it; its programs that honour these use it.
-if [ "$want_net" = 1 ] && [ -z "$tor_mode" ] && grep -q '^[[:space:]]*service_clash=' "$RC_CONF" 2>/dev/null &&
-    grep -q '^[[:space:]]*clash_mode="proxy"' "$RC_CONF"; then
+if [ "$want_net" = 1 ] && [ -z "$tor_mode" ] && rc_has_key service_clash &&
+    [ "$(rc_key_value clash_mode)" = proxy ]; then
     export http_proxy=http://127.0.0.1:7890 https_proxy=http://127.0.0.1:7890 all_proxy=socks5://127.0.0.1:7890
     export no_proxy=localhost,127.0.0.1,::1,.local,.ts.net
     export HTTP_PROXY=$http_proxy HTTPS_PROXY=$https_proxy ALL_PROXY=$all_proxy NO_PROXY=$no_proxy
@@ -1398,15 +1519,22 @@ docs_select "$name"
 # Move the launcher itself before ANY namespace child is forked. From here
 # every helper, unshare parent, PID 1 and descendant inherits app_NAME.
 # An empty cgroup can retain a previous freeze request after forced teardown.
-caller_cg="$CGROUP_BASE$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null)"
+caller_cg=$CGROUP_BASE
+while IFS= read -r _cg_line; do
+    case $_cg_line in 0::*) caller_cg="$CGROUP_BASE${_cg_line#0::}"; break ;; esac
+done </proc/self/cgroup 2>/dev/null || true
 printf '0\n' >"$cg/cgroup.freeze"
 printf '%s\n' "$$" >"$cg/cgroup.procs"
 if [ "$want_tor" = 1 ]; then
-    cg_relative=$(sed -n 's/^0:://p' /proc/self/cgroup)
+    cg_relative=
+    while IFS= read -r _cg_line; do
+        case $_cg_line in 0::*) cg_relative=${_cg_line#0::}; break ;; esac
+    done </proc/self/cgroup
     "$TOR_ENFORCE" app-load "$name" "$cg_relative" ||
         die "$name: cannot load its Tor-only firewall; not started"
-elif [ -x "$TOR_ENFORCE" ]; then
-    "$TOR_ENFORCE" app-remove "$name" || true
+    : >"$APP_RUNTIME/$name/tor-firewall"
+elif [ -e "$APP_RUNTIME/$name/tor-firewall" ] && [ -x "$TOR_ENFORCE" ]; then
+    "$TOR_ENFORCE" app-remove "$name" && rm -f "$APP_RUNTIME/$name/tor-firewall" || true
 fi
 if [ -n "$tor_mode" ]; then
     printf '%s\n' "$tor_mode" >"$APP_RUNTIME/$name/tor-mode"
@@ -1525,11 +1653,32 @@ fi
         mkdir -p "$cbase/merged"/{dev,proc,sys,tmp,run,etc}
         # The user as on the host: its passwd and group lines replace any with the
         # same name or id in the container (whose packages may have added other
-        # users). The host files are never written.
+        # users). Skip rewriting when the exact entry is already present with no
+        # conflicting id or name. The host files are never written.
         set_entry() { # FILE ID LINE
-            { [ ! -f "$1" ] || awk -F: -v id="$2" -v n="${3%%:*}" "\$3 != id && \$1 != n" "$1"
-              printf "%s\n" "$3"; } >"$1.new"
-            mv "$1.new" "$1"
+            local f=$1 id=$2 line=$3 name=${3%%:*} cur found=0 conflict=0 f1 f3 rest
+            if [ -f "$f" ]; then
+                while IFS= read -r cur || [ -n "$cur" ]; do
+                    if [ "$cur" = "$line" ]; then
+                        found=1
+                    else
+                        f1=${cur%%:*}
+                        rest=${cur#*:}
+                        rest=${rest#*:}
+                        f3=${rest%%:*}
+                        if [ "$f1" = "$name" ] || [ "$f3" = "$id" ]; then
+                            conflict=1
+                            break
+                        fi
+                    fi
+                done <"$f"
+                if [ "$found" = 1 ] && [ "$conflict" = 0 ]; then
+                    return 0
+                fi
+            fi
+            { [ ! -f "$f" ] || awk -F: -v id="$id" -v n="$name" "\$3 != id && \$1 != n" "$f"
+              printf "%s\n" "$line"; } >"$f.new"
+            mv "$f.new" "$f"
         }
         set_entry "$cbase/merged/etc/passwd" "$uid" "$(getent passwd "$uid")"
         set_entry "$cbase/merged/etc/group" "$gid" "$(getent group "$gid")"
@@ -1589,8 +1738,28 @@ fi
         # at the same paths, so that a path means the same file everywhere.
         mkdir -p "$cbase/merged$uhome"
         mount --bind "$cbase/data" "$cbase/merged$uhome"
+        _need_cd=()
+        _check_cd=()
         for d in $USER_DIRS; do
-            install -d -o "$uid" -g "$gid" "$cbase/data/$d"
+            if [ -d "$cbase/data/$d" ] && [ ! -L "$cbase/data/$d" ]; then
+                _check_cd+=("$cbase/data/$d")
+            else
+                _need_cd+=("$cbase/data/$d")
+            fi
+        done
+        if [ "${#_check_cd[@]}" -gt 0 ]; then
+            _stat_cd=()
+            mapfile -t _stat_cd < <(stat -c "%u:%g" "${_check_cd[@]}" 2>/dev/null || true)
+            if [ "${#_stat_cd[@]}" -ne "${#_check_cd[@]}" ]; then
+                _need_cd+=("${_check_cd[@]}")
+            else
+                for _idx in "${!_check_cd[@]}"; do
+                    [ "${_stat_cd[$_idx]}" = "$uid:$gid" ] || _need_cd+=("${_check_cd[$_idx]}")
+                done
+            fi
+        fi
+        [ "${#_need_cd[@]}" -eq 0 ] || install -d -o "$uid" -g "$gid" "${_need_cd[@]}"
+        for d in $USER_DIRS; do
             mount --bind "$uhome/$d" "$cbase/merged$uhome/$d"
         done
         # USB drives and memory cards, mounted by the drives service in its
@@ -1735,7 +1904,18 @@ fi
     export XDG_CONFIG_HOME="$uhome/.config"
     export XDG_CACHE_HOME="$uhome/.cache"
     export XDG_DATA_HOME="$uhome/.local/share"
-    sys_lang=$(sed -n '\''s/^[[:space:]]*language="\([^"]*\)".*/\1/p'\'' /etc/locachy/rc.conf 2>/dev/null | tail -n 1)
+    sys_lang=
+    if [ -r /etc/locachy/rc.conf ]; then
+        while IFS= read -r _rcline || [ -n "$_rcline" ]; do
+            _rcline=${_rcline#"${_rcline%%[![:space:]]*}"}
+            case $_rcline in
+            language=\"*\"*)
+                sys_lang=${_rcline#language=\"}
+                sys_lang=${sys_lang%%\"*}
+                ;;
+            esac
+        done </etc/locachy/rc.conf
+    fi
     if [ -n "$sys_lang" ]; then
         export LANG="$sys_lang"
         export LANGUAGE="${sys_lang%%.*}:en_US"
@@ -1757,22 +1937,23 @@ fi
         if [ -x "$documents" ]; then
             setpriv --reuid="$uid" --regid="$gid" --clear-groups ${nnp:-} -- \
                 "$documents" </dev/null >/dev/null 2>&1 &
-            for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-                dbus-send --session --print-reply=literal --dest=org.freedesktop.DBus /org/freedesktop/DBus \
-                    org.freedesktop.DBus.NameHasOwner string:org.freedesktop.portal.Documents 2>/dev/null |
-                    grep -q true && break
-                sleep 0.05
+            for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32; do
+                _own=$(dbus-send --session --print-reply=literal --dest=org.freedesktop.DBus /org/freedesktop/DBus \
+                    org.freedesktop.DBus.NameHasOwner string:org.freedesktop.portal.Documents 2>/dev/null || true)
+                [[ "$_own" == *true* ]] && break
+                if [ "$_i" -le 15 ]; then sleep 0.01; else sleep 0.05; fi
             done
         fi
-        # The tray watcher first (locachy-bar, up to 2 s), so that a program
-        # that lives on in a tray finds one when it starts.
-        for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-            [ "$tray_bar" = 1 ] || break
-            dbus-send --session --print-reply=literal --dest=org.freedesktop.DBus /org/freedesktop/DBus \
-                org.freedesktop.DBus.NameHasOwner string:org.kde.StatusNotifierWatcher 2>/dev/null |
-                grep -q true && break
-            sleep 0.1
-        done
+        # The tray watcher first (locachy-bar, up to 0.5 s when bar is running),
+        # so that a program that lives on in a tray finds one when it starts.
+        if [ "$tray_bar" = 1 ]; then
+            for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25; do
+                _own=$(dbus-send --session --print-reply=literal --dest=org.freedesktop.DBus /org/freedesktop/DBus \
+                    org.freedesktop.DBus.NameHasOwner string:org.kde.StatusNotifierWatcher 2>/dev/null || true)
+                [[ "$_own" == *true* ]] && break
+                sleep 0.02
+            done
+        fi
     fi
     exec "$app_init" "$@"
 ' bash "$cbase" "$want_net" "$shared_wayland" "$APP_INIT" "$READY_FD" "$RUNTIME_DIR" "$APP_RUNTIME/$name" \
@@ -1798,7 +1979,7 @@ if ! wait_ready "$READY_FD" "$launcher"; then
     printf '1\n' >"$cg/cgroup.kill"
     wait_event "$cg" populated 0 || true
     rm -f "$APP_RUNTIME/$name/tor-mode"
-    [ "$want_tor" != 1 ] || is_running "$name" || "$TOR_ENFORCE" app-remove "$name" || true
+    [ "$want_tor" != 1 ] || is_running "$name" || { "$TOR_ENFORCE" app-remove "$name" && rm -f "$APP_RUNTIME/$name/tor-firewall"; } || true
     exit 125
 fi
 exec {READY_FD}>&-
@@ -1809,5 +1990,5 @@ status=0
 wait "$launcher" || status=$?
 rm -f "$APP_RUNTIME/$name.ready" "$APP_RUNTIME/$name/reaper.pid" "$APP_RUNTIME/$name/tor-mode"
 [ ! -w "$caller_cg/cgroup.procs" ] || printf '%s\n' "$$" >"$caller_cg/cgroup.procs" 2>/dev/null || true
-[ "$want_tor" != 1 ] || is_running "$name" || "$TOR_ENFORCE" app-remove "$name" || true
+[ "$want_tor" != 1 ] || is_running "$name" || { "$TOR_ENFORCE" app-remove "$name" && rm -f "$APP_RUNTIME/$name/tor-firewall"; } || true
 exit "$status"

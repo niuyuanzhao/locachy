@@ -22,6 +22,7 @@
 set -eu
 
 mkdir -p /run/udev
+rm -f /run/udev/locachy-settled
 /usr/lib/systemd/systemd-udevd &
 udevd=$!
 until [ -S /run/udev/control ]; do
@@ -31,5 +32,6 @@ done
 udevadm trigger --type=subsystems --action=add --subsystem-nomatch=net
 udevadm trigger --type=devices --action=add
 udevadm settle --timeout=30 || true
+: >/run/udev/locachy-settled
 printf '<6>udev-client: devices described\n' >/dev/kmsg
 wait "$udevd"

@@ -36,12 +36,17 @@ fi
 # for them; their device files are root's and the audio group's (udev's
 # rules), the group the servers get. Containers get the servers' restricted
 # sockets, not the devices.
+udev_control=/run/udev/control
 for _ in $(seq 1 100); do
-    [ -S /run/udev/control ] && break
+    [ -S "$udev_control" ] && break
     sleep 0.1
 done
-if [ -S /run/udev/control ]; then
-    if ! timeout 30 udevadm trigger --action=add --subsystem-match=sound --settle 2>&3; then
+if [ -S "$udev_control" ]; then
+    if [ -f "${udev_control%/*}/locachy-settled" ]; then
+        if ! timeout 30 udevadm settle --timeout=5 2>&3; then
+            say 4 "sound-device enumeration did not finish"
+        fi
+    elif ! timeout 30 udevadm trigger --action=add --subsystem-match=sound --settle 2>&3; then
         say 4 "sound-device enumeration did not finish"
     fi
 else

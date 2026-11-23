@@ -39,6 +39,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/klog.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "base.h"
@@ -66,6 +67,7 @@ int base_app_action(const char *action, const char *name, char *why, size_t size
 #define ERROR        theme_rgb(THEME_ERROR, 0xFF9090)
 #define MAX_ENTRIES 17 /* two built-ins and up to 15 configured programs */
 #define REFRESH_MS 500
+#define REFRESH_IDLE_MS 5000
 #define MIB 1048576ULL
 #define HIT_ROW 0        /* + the list position */
 #define HIT_KEY 100000   /* + the key a button stands for */
@@ -114,6 +116,9 @@ static int last_customized;
 static char opening[64]; /* the container home last asked to open, until it is not starting */
 static char action_error[512], list_error[160];
 static double refresh_at;
+static int refresh_changed = 1;
+static uint64_t last_refresh_hash;
+static int last_refresh_valid;
 static enum confirmation confirming;
 static char **stop_names;
 static int nstop, stop_program, own_tor_open, own_tor_count;
@@ -121,6 +126,10 @@ static int nstop, stop_program, own_tor_open, own_tor_count;
  * selected; the one asked about (CONF_JOB), and whether it was running. */
 static struct jobs_row jobs[JOBS_ROWS_MAX];
 static int njobs, jobs_shown, job_selected, job_asked, job_asked_running;
+static int cached_job_id = -1;
+static char cached_job_tail[JOBS_LOG_TAIL + 64];
+static char *cached_job_lines[256];
+static int cached_job_nlines, cached_job_valid;
 /* A container's log (HOME_APP_RUN/NAME.log) or the system's (log_system:
  * LOCachy's lines in the kernel ring buffer), shown instead of the grid (L);
  * log_from: lines back from its end, log_total: how many lines it holds. */
@@ -128,9 +137,30 @@ static int njobs, jobs_shown, job_selected, job_asked, job_asked_running;
 static int log_shown, log_system, log_from, log_total;
 static int log_all_selected; /* Ctrl+A in the log: the next Ctrl+C copies all of it */
 static char log_name[64], log_buf[32768], *log_all[HOME_LOG_LINES];
+static int log_dirty = 1, log_cached_system = -1;
+static char log_cached_name[64];
 #define HOME_OUTPUTS 32
 static int home_output;
 static int output_scroll[HOME_OUTPUTS];
+struct home_grid_cache {
+    int valid;
+    int cols, rows, napps, nentries, selected, scroll;
+};
+static struct home_grid_cache grid_cache[HOME_OUTPUTS];
+static int full_redraw_needed = 1;
+static int textsel_cached_valid, textsel_cached_log, textsel_cached_cols, textsel_cached_rows, textsel_cached_out;
+static char textsel_cached_last[512], textsel_cached_err[1024];
+/* The footer text the last full draw showed on every output (the same for all). */
+static char footer_drawn_last[512], footer_drawn_err[1024];
+static int footer_drawn_valid;
+
+static void invalidate_grid_cache(void)
+{
+    for (int i = 0; i < HOME_OUTPUTS; i++) {
+        grid_cache[i].valid = 0;
+    }
+    full_redraw_needed = 1;
+}
 
 static int valid_name(const char *name);
 static void clear_confirmation(void);
@@ -214,6 +244,7 @@ static void load(void)
         rc_read(program, &s);
     }
     if (host < 0) {
+        invalidate_grid_cache();
         return;
     }
     selected = napps + (tail >= 0 ? nentries + tail : 0);
@@ -223,6 +254,7 @@ static void load(void)
             break;
         }
     }
+    invalidate_grid_cache();
 }
 
 static int valid_name(const char *name)
@@ -410,6 +442,89 @@ static void load_apps(void)
     }
 }
 
+static void refresh_job_tail(int id)
+{
+    cached_job_id = id;
+    cached_job_nlines = 0;
+    if (jobs_log(id, cached_job_tail, sizeof cached_job_tail) < 0) {
+        cached_job_valid = 0;
+        return;
+    }
+    cached_job_valid = 1;
+    int n = 0;
+    for (char *p = cached_job_tail; *p && n < 256;) {
+        char *end = strchr(p, '\n');
+        if (end) *end = '\0';
+        char *cr = strrchr(p, '\r'); /* a line rewritten with \r: its last form */
+        cached_job_lines[n++] = cr ? cr + 1 : p;
+        p = end ? end + 1 : p + strlen(p);
+    }
+    cached_job_nlines = n;
+}
+
+static int log_split(void);
+
+static uint64_t home_fnv_bytes(uint64_t h, const void *data, size_t len)
+{
+    const unsigned char *p = data;
+    for (size_t i = 0; i < len; i++) {
+        h ^= p[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static uint64_t home_fnv_str(uint64_t h, const char *s)
+{
+    if (!s) s = "";
+    return home_fnv_bytes(h, s, strlen(s) + 1);
+}
+
+static int home_busy(void)
+{
+    if (opening[0] || log_shown || jobs_shown) return 1;
+    for (int i = 0; i < napps; i++) {
+        const char *st = apps[i].state;
+        if (strcmp(st, "starting") == 0 || strcmp(st, "opening") == 0 ||
+            strcmp(st, "stopping") == 0 || strcmp(st, "freezing") == 0) {
+            return 1;
+        }
+    }
+    for (int i = 0; i < njobs; i++) {
+        if (!jobs_ended(&jobs[i])) return 1;
+    }
+    return 0;
+}
+
+static uint64_t home_snapshot_hash(void)
+{
+    uint64_t h = 14695981039346656037ULL;
+    /* The top bar's clock and CPU/memory figures refresh with this bucket:
+     * at most 5 s old even while idle, so the idle redraw rate is one in 5 s. */
+    time_t tick = time(NULL) / 5;
+    h = home_fnv_bytes(h, &tick, sizeof tick);
+    h = home_fnv_bytes(h, &napps, sizeof napps);
+    for (int i = 0; i < napps; i++) {
+        h = home_fnv_str(h, apps[i].name);
+        h = home_fnv_str(h, apps[i].state);
+        h = home_fnv_str(h, apps[i].error);
+        h = home_fnv_bytes(h, &apps[i].ram, sizeof apps[i].ram);
+        h = home_fnv_bytes(h, &apps[i].swap, sizeof apps[i].swap);
+    }
+    h = home_fnv_str(h, tasks);
+    h = home_fnv_bytes(h, &njobs, sizeof njobs);
+    for (int i = 0; i < njobs; i++) {
+        h = home_fnv_bytes(h, &jobs[i].id, sizeof jobs[i].id);
+        h = home_fnv_bytes(h, &jobs[i].status, sizeof jobs[i].status);
+        h = home_fnv_str(h, jobs[i].state);
+        h = home_fnv_str(h, jobs[i].kind);
+        h = home_fnv_str(h, jobs[i].last);
+    }
+    h = home_fnv_str(h, last);
+    h = home_fnv_str(h, list_error);
+    return h;
+}
+
 static void refresh(void)
 {
     char why[256];
@@ -422,7 +537,26 @@ static void refresh(void)
     if (job_selected >= njobs) {
         job_selected = njobs > 0 ? njobs - 1 : 0;
     }
-    refresh_at = uptime() + REFRESH_MS / 1000.0;
+    if (jobs_shown && njobs > 0) {
+        refresh_job_tail(jobs[job_selected].id);
+    } else {
+        cached_job_id = -1;
+        cached_job_valid = 0;
+    }
+    log_dirty = 1;
+    if (log_shown) {
+        log_total = log_split();
+    }
+    uint64_t hash = home_snapshot_hash();
+    if (!last_refresh_valid || hash != last_refresh_hash || log_shown || jobs_shown) {
+        last_refresh_hash = hash;
+        last_refresh_valid = 1;
+        refresh_changed = 1;
+        invalidate_grid_cache();
+    } else {
+        refresh_changed = 0;
+    }
+    refresh_at = uptime() + (home_busy() ? REFRESH_MS : REFRESH_IDLE_MS) / 1000.0;
 }
 
 static void text(int col, int row, const char *s, uint32_t fg, uint32_t bg);
@@ -473,23 +607,18 @@ static void draw_jobs(int footer)
         text(1, row, line, fg, on ? ACCENT : BG);
         ui_hit(1, row, cols - 2, 1, HIT_JOB + i);
     }
-    static char tail[JOBS_LOG_TAIL + 64];
     const struct jobs_row *j = &jobs[job_selected];
     int top = 3 + (njobs - first < shown ? njobs - first : shown) + 1, rows = footer - top - 1;
     snprintf(line, sizeof line, _("Output of job %d, its last lines:"), j->id);
     text(1, top, line, ACCENT_TEXT, BG);
-    if (rows < 1 || jobs_log(j->id, tail, sizeof tail) < 0) return;
-    char *lines[256];
-    int n = 0;
-    for (char *p = tail; *p && n < 256;) {
-        char *end = strchr(p, '\n');
-        if (end) *end = '\0';
-        char *cr = strrchr(p, '\r'); /* a line rewritten with \r: its last form */
-        lines[n++] = cr ? cr + 1 : p;
-        p = end ? end + 1 : p + strlen(p);
+    if (rows < 1) return;
+    if (cached_job_id != j->id || !cached_job_valid) {
+        refresh_job_tail(j->id);
     }
+    if (!cached_job_valid) return;
+    int n = cached_job_nlines;
     for (int i = n > rows ? n - rows : 0, row = top + 1; i < n; i++, row++) {
-        text(2, row, lines[i], FG, BG);
+        text(2, row, cached_job_lines[i], FG, BG);
     }
 }
 
@@ -880,14 +1009,20 @@ static int log_split(void)
         if (line && line[0]) log_all[count++] = line;
         p = end ? end + 1 : p + strlen(p);
     }
+    log_cached_system = log_system;
+    snprintf(log_cached_name, sizeof log_cached_name, "%s", log_name);
+    log_dirty = 0;
+    log_total = count;
     return count;
 }
+
 
 static void open_logs(void)
 {
     if (log_shown) {
         log_shown = 0;
         textsel_clear();
+        invalidate_grid_cache();
         return;
     }
     jobs_shown = 0;
@@ -903,6 +1038,9 @@ static void open_logs(void)
         log_name[0] = '\0';
         log_system = 1;
     }
+    log_dirty = 1;
+    log_total = log_split();
+    invalidate_grid_cache();
 }
 
 static void scroll_log(int delta, int page_rows)
@@ -919,7 +1057,10 @@ static void draw_logs(int footer)
     char line[1024], where[96] = "", target[384];
     int cols = screen_cols(), body_rows = footer - 3;
     if (body_rows < 1) body_rows = 1;
-    log_total = log_split();
+    if (log_dirty || log_cached_system != log_system ||
+        (!log_system && strcmp(log_cached_name, log_name) != 0)) {
+        log_total = log_split();
+    }
     int most = log_total > body_rows ? log_total - body_rows : 0;
     if (log_from < 0) log_from = 0;
     if (log_from > most) log_from = most;
@@ -973,6 +1114,7 @@ static void copy_log(int all)
         size_t size = 0;
         FILE *out = open_memstream(&text, &size);
         if (!out) return;
+        log_dirty = 1;
         int n = log_split();
         for (int i = 0; i < n; i++) fprintf(out, "%s\n", log_all[i]);
         fclose(out);
@@ -1009,18 +1151,116 @@ static void copy_log(int all)
     free(text);
 }
 
-/* ready also tells the log that home waits for keys (drive.py's prompt). */
-static void draw_output(int ready)
+static int grid_scroll_for(const struct grid *g, int cur_scroll, int height)
 {
-    char line[1024], state[200], failure[1024] = "";
+    int tile_row, column, at;
+    int s = grid_place(g, selected, &tile_row, &column, &at);
+    int top = tile_row == g->first_row[s] ? g->title[s] : at;
+    if (cur_scroll > top) cur_scroll = top;
+    if (at + 2 > cur_scroll + height) cur_scroll = at + 2 - height;
+    int max_scroll = g->lines > height ? g->lines - height : 0;
+    if (cur_scroll > max_scroll) cur_scroll = max_scroll;
+    if (cur_scroll < 0) cur_scroll = 0;
+    return cur_scroll;
+}
+
+static void draw_tile(const struct grid *g, int pos, int width, int footer, int add_hit)
+{
+    char line[1024], state[200];
+    int tile_row, column, at;
+    grid_place(g, pos, &tile_row, &column, &at);
+    int row = 2 + at - scroll, col = 1 + column * width;
+    if (row < 2 || row + 1 >= footer) return;
+    uint32_t fg = pos == selected ? ON_ACCENT : FG, bg = pos == selected ? ACCENT : BG;
+    screen_fill(col, row, width - 1, 2, bg);
+    if (pos < napps) {
+        if (pos != selected && strcmp(apps[pos].state, "failed") == 0) fg = ERROR;
+        snprintf(line, sizeof line, "[%c] %s", apps[pos].marked ? 'x' : ' ', apps[pos].name);
+        grid_text(col + 1, row, line, fg, bg);
+        snprintf(line, sizeof line, "%s  %llu/%llu MiB", state_label(apps[pos].state),
+                 apps[pos].ram / MIB, apps[pos].swap / MIB);
+    } else if (pos < napps + nentries) {
+        const struct entry *e = &entries[pos - napps];
+        grid_text(col + 1, row, entry_label(e), fg, bg);
+        snprintf(line, sizeof line, "%s", e->builtin == BUILTIN_DESKTOP ? _("Open the shared desktop") :
+                 e->builtin == BUILTIN_FILES ? _("home and the shared folders") :
+                 task_of(e->key, state, sizeof state));
+    } else {
+        grid_text(col + 1, row, pos == napps + nentries ? _("reboot") : _("power off"), fg, bg);
+        line[0] = '\0';
+    }
+    grid_text(col + 1, row + 1, line, fg, bg);
+    if (add_hit) ui_hit(col, row, width - 1, 2, HIT_ROW + pos);
+}
+
+/* ready also tells the log that home waits for keys (drive.py's prompt). */
+static void draw_output(int ready, int out_idx, int force_full)
+{
+    char line[1024], failure[1024] = "";
     int cols = screen_cols(), rows = screen_rows();
     int footer = rows - footer_rows(), visible = visible_rows();
+    const struct app *a = error_app();
+    if (a) {
+        snprintf(failure, sizeof failure, "%s: %s [%.80s]", state_label(a->state),
+                 a->error[0] ? a->error : _("No failure reason reported."), a->name);
+    }
+    const char *last_msg = last_customized ? last : _(last);
+    const char *err_msg = action_error[0] ? action_error : list_error[0] ? list_error : failure;
+
+    int grid_mode = confirming == CONF_NONE && !jobs_shown && !log_shown;
+    int is_active_output = !screen_is_extended || !screen_is_extended() || home_output == screen_output_current();
+
+    /* Fast path: when only the selected tile moved within the same grid layout
+     * and scroll position (and the footer, the text selection and the mode did
+     * not change), repaint only the previous and new selected tiles instead of
+     * wiping the entire screen. */
+    if (!force_full && !ready && grid_mode && out_idx >= 0 && out_idx < HOME_OUTPUTS) {
+        struct home_grid_cache *gc = &grid_cache[out_idx];
+        if (gc->valid && gc->cols == cols && gc->rows == rows &&
+            gc->napps == napps && gc->nentries == nentries &&
+            footer_drawn_valid && !textsel_active() &&
+            strcmp(footer_drawn_last, last_msg) == 0 && strcmp(footer_drawn_err, err_msg) == 0) {
+            struct grid g = grid_layout();
+            int new_scroll = grid_scroll_for(&g, scroll, list_rows());
+            if (new_scroll == gc->scroll && new_scroll == scroll) {
+                int old_sel = gc->selected;
+                if (old_sel != selected) {
+                    int width = grid_width();
+                    if (old_sel >= 0 && old_sel < napps + nentries + 2) {
+                        draw_tile(&g, old_sel, width, footer, 0);
+                    }
+                    if (selected >= 0 && selected < napps + nentries + 2) {
+                        draw_tile(&g, selected, width, footer, 0);
+                    }
+                    gc->selected = selected;
+                    screen_flush();
+                }
+                return;
+            }
+        }
+    }
+
     if (cols > 0 && rows > 0) {
         screen_fill(0, 0, cols, rows, BG);
     }
     ui_hits_clear();
-    if (!screen_is_extended || !screen_is_extended() || home_output == screen_output_current()) {
-        textsel_frame();
+    int need_textsel = 0;
+    if (is_active_output) {
+        need_textsel = log_shown || !textsel_cached_valid || textsel_cached_log != log_shown ||
+                       textsel_cached_cols != cols || textsel_cached_rows != rows ||
+                       textsel_cached_out != home_output ||
+                       strcmp(textsel_cached_last, last_msg) != 0 ||
+                       strcmp(textsel_cached_err, err_msg) != 0;
+        if (need_textsel) {
+            textsel_frame();
+            textsel_cached_valid = 1;
+            textsel_cached_log = log_shown;
+            textsel_cached_cols = cols;
+            textsel_cached_rows = rows;
+            textsel_cached_out = home_output;
+            snprintf(textsel_cached_last, sizeof textsel_cached_last, "%s", last_msg);
+            snprintf(textsel_cached_err, sizeof textsel_cached_err, "%s", err_msg);
+        }
     }
     screen_bar(_("home"), NULL);
     char summary[160];
@@ -1088,15 +1328,9 @@ static void draw_output(int ready)
         /* scroll: the grid's line at row 2. The selected tile stays in view,
          * with its section's title when it is in the section's first row. */
         struct grid g = grid_layout();
-        int width = grid_width(), height = list_rows(), tile_row, column, at;
-        int s = grid_place(&g, selected, &tile_row, &column, &at);
-        int top = tile_row == g.first_row[s] ? g.title[s] : at;
-        if (scroll > top) scroll = top;
-        if (at + 2 > scroll + height) scroll = at + 2 - height;
-        int max_scroll = g.lines > height ? g.lines - height : 0;
-        if (scroll > max_scroll) scroll = max_scroll;
-        if (scroll < 0) scroll = 0;
-        for (s = 0; s < SECTIONS; s++) {
+        int width = grid_width(), height = list_rows();
+        scroll = grid_scroll_for(&g, scroll, height);
+        for (int s = 0; s < SECTIONS; s++) {
             int row = 2 + g.title[s] - scroll;
             if (g.title[s] < 0 || row < 2 || row >= footer) continue;
             const char *title = _(section_titles[s]);
@@ -1106,40 +1340,12 @@ static void draw_output(int ready)
             }
         }
         for (int pos = 0; pos < napps + nentries + 2; pos++) {
-            grid_place(&g, pos, &tile_row, &column, &at);
-            int row = 2 + at - scroll, col = 1 + column * width;
-            if (row < 2) continue;
-            if (row + 1 >= footer) break;
-            uint32_t fg = pos == selected ? ON_ACCENT : FG, bg = pos == selected ? ACCENT : BG;
-            screen_fill(col, row, width - 1, 2, bg);
-            if (pos < napps) {
-                if (pos != selected && strcmp(apps[pos].state, "failed") == 0) fg = ERROR;
-                snprintf(line, sizeof line, "[%c] %s", apps[pos].marked ? 'x' : ' ', apps[pos].name);
-                grid_text(col + 1, row, line, fg, bg);
-                snprintf(line, sizeof line, "%s  %llu/%llu MiB", state_label(apps[pos].state),
-                         apps[pos].ram / MIB, apps[pos].swap / MIB);
-            } else if (pos < napps + nentries) {
-                const struct entry *e = &entries[pos - napps];
-                grid_text(col + 1, row, entry_label(e), fg, bg);
-                snprintf(line, sizeof line, "%s", e->builtin == BUILTIN_DESKTOP ? _("Open the shared desktop") :
-                         e->builtin == BUILTIN_FILES ? _("home and the shared folders") :
-                         task_of(e->key, state, sizeof state));
-            } else {
-                grid_text(col + 1, row, pos == napps + nentries ? _("reboot") : _("power off"), fg, bg);
-                line[0] = '\0';
-            }
-            grid_text(col + 1, row + 1, line, fg, bg);
-            ui_hit(col, row, width - 1, 2, HIT_ROW + pos);
+            draw_tile(&g, pos, width, footer, 1);
         }
     }
 
-    const struct app *a = error_app();
-    if (a) {
-        snprintf(failure, sizeof failure, "%s: %s [%.80s]", state_label(a->state),
-                 a->error[0] ? a->error : _("No failure reason reported."), a->name);
-    }
-    wrapped(footer, 1, last_customized ? last : _(last), ACCENT_TEXT);
-    wrapped(footer + 1, 1, action_error[0] ? action_error : list_error[0] ? list_error : failure, ERROR);
+    wrapped(footer, 1, last_msg, ACCENT_TEXT);
+    wrapped(footer + 1, 1, err_msg, ERROR);
     if (confirming != CONF_NONE) {
         /* TRANSLATORS: Y, Enter, N and Esc are confirmation keys; keep them. */
         int c = ui_button(1, rows - 2, confirming == CONF_OWN_TOR ? _("Y / Enter: start with own Tor") :
@@ -1172,8 +1378,19 @@ static void draw_output(int ready)
         text(1, rows - 1, _("Arrows/PgUp/PgDn or the wheel: move   double click: open   "
                             "right click: actions   Super+Esc: home"), FG, BG);
     }
-    if (!screen_is_extended || !screen_is_extended() || home_output == screen_output_current()) {
+    if (is_active_output) {
         textsel_draw(ON_ACCENT, ACCENT);
+    }
+    if (out_idx >= 0 && out_idx < HOME_OUTPUTS) {
+        if (grid_mode) {
+            grid_cache[out_idx] = (struct home_grid_cache){
+                .valid = 1, .cols = cols, .rows = rows,
+                .napps = napps, .nentries = nentries,
+                .selected = selected, .scroll = scroll
+            };
+        } else {
+            grid_cache[out_idx].valid = 0;
+        }
     }
     screen_flush();
     if (ready) {
@@ -1181,28 +1398,51 @@ static void draw_output(int ready)
     }
 }
 
-static void draw(int ready)
+static void draw_mode(int ready, int force_full)
 {
     int count = screen_is_extended && screen_is_extended() && screen_output_count ? screen_output_count() : 1;
+    char failure[1024] = "";
+    const struct app *a = error_app();
+    if (a) {
+        snprintf(failure, sizeof failure, "%s: %s [%.80s]", state_label(a->state),
+                 a->error[0] ? a->error : _("No failure reason reported."), a->name);
+    }
+    const char *last_msg = last_customized ? last : _(last);
+    const char *err_msg = action_error[0] ? action_error : list_error[0] ? list_error : failure;
+    int footer_changed = !footer_drawn_valid ||
+                         strcmp(footer_drawn_last, last_msg) != 0 ||
+                         strcmp(footer_drawn_err, err_msg) != 0;
+    int full = force_full || ready || full_redraw_needed || footer_changed;
+    full_redraw_needed = 0;
     if (count <= 1 || !screen_output_select) {
         home_output = 0;
-        draw_output(ready);
-        return;
+        draw_output(ready, 0, full);
+    } else {
+        if (count > HOME_OUTPUTS) count = HOME_OUTPUTS;
+        if (home_output < 0 || home_output >= count) home_output = 0;
+        output_scroll[home_output] = scroll;
+        /* Every output is a launcher, not a slice of one shared list. Drawing
+         * another output must not change where an activation came from. */
+        for (int i = 0; i < count; i++) {
+            screen_output_select(i);
+            scroll = output_scroll[i];
+            draw_output(0, i, full);
+            output_scroll[i] = scroll;
+        }
+        screen_output_select(home_output);
+        scroll = output_scroll[home_output];
+        if (ready) say("home> ");
     }
-    if (count > HOME_OUTPUTS) count = HOME_OUTPUTS;
-    if (home_output < 0 || home_output >= count) home_output = 0;
-    output_scroll[home_output] = scroll;
-    /* Every output is a launcher, not a slice of one shared list. Drawing
-     * another output must not change where an activation came from. */
-    for (int i = 0; i < count; i++) {
-        screen_output_select(i);
-        scroll = output_scroll[i];
-        draw_output(0);
-        output_scroll[i] = scroll;
+    if (full) {
+        snprintf(footer_drawn_last, sizeof footer_drawn_last, "%s", last_msg);
+        snprintf(footer_drawn_err, sizeof footer_drawn_err, "%s", err_msg);
+        footer_drawn_valid = 1;
     }
-    screen_output_select(home_output);
-    scroll = output_scroll[home_output];
-    if (ready) say("home> ");
+}
+
+static void draw(int ready)
+{
+    draw_mode(ready, 1);
 }
 
 static void open_entry(int host);
@@ -1273,6 +1513,10 @@ static int request(const char *action, const char *name)
     if (rc != 0 && !action_error[0]) {
         snprintf(action_error, sizeof action_error, "%s %s: %s", action, name,
                  why[0] ? why : _("Request failed without a reason."));
+    }
+    if (rc == 0) {
+        double soon = uptime() + REFRESH_MS / 1000.0;
+        if (refresh_at > soon) refresh_at = soon;
     }
     return rc == 0;
 }
@@ -1642,8 +1886,10 @@ static int pointer_key(void)
     sticky_col = -1;
     sticky_pos = -1;
     if (e->button == BTN_RIGHT) {
-        draw(0);
-        return row_menu(e->col, e->row);
+        draw_mode(0, 0);
+        int choice = row_menu(e->col, e->row);
+        invalidate_grid_cache(); /* menu overlay painted over grid */
+        return choice;
     }
     if (pos < napps) {
         struct grid g = grid_layout();
@@ -1694,8 +1940,9 @@ int main(void)
     draw(0);
 
     for (;;) {
+        int interval = home_busy() ? REFRESH_MS : REFRESH_IDLE_MS;
         double remaining = (refresh_at - uptime()) * 1000.0;
-        int timeout = remaining <= 0 ? 0 : remaining < REFRESH_MS ? (int)remaining + 1 : REFRESH_MS;
+        int timeout = remaining <= 0 ? 0 : remaining < interval ? (int)remaining + 1 : interval;
         int key = key_poll_timeout(-1, timeout);
         if (key == K_POINTER && pointer_last()->cancelled) {
             if (pointer_key() == -1) draw(0);
@@ -1707,7 +1954,9 @@ int main(void)
             }
             take_requests();
             load();
+            last_refresh_valid = 0;
             refresh();
+            textsel_cached_valid = 0;
             draw(1);
             continue;
         }
@@ -1715,15 +1964,23 @@ int main(void)
         if (redraw) {
             refresh();
             if (confirming == CONF_NONE && take_requests()) {
+                last_refresh_valid = 0;
                 refresh();
                 draw(0);
                 continue;
             }
+            redraw = refresh_changed;
         }
         if (key == K_POINTER) {
+            int sel_before = selected;
+            int out_before = home_output;
+            int had_textsel = textsel_active();
             key = pointer_key();
             if (key == -1) {
-                draw(0);
+                int simple_sel = !redraw && confirming == CONF_NONE && !jobs_shown && !log_shown &&
+                                 !had_textsel && !textsel_active() && out_before == home_output &&
+                                 sel_before != selected;
+                draw_mode(0, !simple_sel);
                 continue;
             }
         }
@@ -1734,14 +1991,18 @@ int main(void)
             continue;
         }
         int ka = key_action(key, keys_modifiers()); /* the key's meaning in every program */
+        int cleared_sel = 0;
         if (key > 0 && ka != ACT_COPY && ka != ACT_SELECT_ALL && key != K_ACT_HOME) {
+            cleared_sel = textsel_active();
             textsel_clear(); /* the home key changes nothing: the selection stays */
             log_all_selected = 0;
         }
+        int sel_only = 0;
         if (confirming != CONF_NONE) {
             confirm_key(key);
         } else if (ka == ACT_HELP) {
             ui_help(_("Home keys"), home_help); /* home does not quit: Ctrl+Q there is nothing */
+            invalidate_grid_cache();
         } else if (ka == ACT_COPY) {
             copy_log(log_shown && log_all_selected);
             log_all_selected = 0;
@@ -1764,6 +2025,8 @@ int main(void)
                 log_system = 1;
             }
             log_from = 0;
+            log_dirty = 1;
+            log_total = log_split();
         } else if (log_shown && (key == K_UP || key == K_DOWN || key == K_PGUP || key == K_PGDN ||
                                  key == K_BOL || key == K_EOL)) {
             int page_rows = screen_rows() - footer_rows() - 3;
@@ -1775,22 +2038,30 @@ int main(void)
             else scroll_log(key == K_PGUP ? page_rows : -page_rows, page_rows);
         } else if (log_shown && ka == ACT_CANCEL) {
             log_shown = 0;
+            invalidate_grid_cache();
         } else if (log_shown) {
             /* the containers' keys act on the grid only */
         } else if (jobs_shown && (key == K_UP || key == K_DOWN)) {
+            int prev_job = job_selected;
             job_selected += key == K_UP ? -1 : 1;
             job_selected = job_selected < 0 ? 0 : job_selected >= njobs ? (njobs > 0 ? njobs - 1 : 0) : job_selected;
+            if (job_selected != prev_job && njobs > 0) {
+                refresh_job_tail(jobs[job_selected].id);
+            }
         } else if (jobs_shown && (key == 'k' || key == 'K')) {
             confirm_job();
         } else if (jobs_shown && ka == ACT_CANCEL) {
             jobs_shown = 0;
+            invalidate_grid_cache();
         } else if (jobs_shown) {
             /* the containers' keys act on the grid only */
         } else if (key == K_UP || key == K_DOWN || key == K_LEFT || key == K_RIGHT ||
                    key == K_PGUP || key == K_PGDN || key == K_BOL || key == K_EOL) {
             move_selection(key);
+            sel_only = !redraw && !cleared_sel;
         } else if (key == ' ' && selected < napps) {
             apps[selected].marked = !apps[selected].marked;
+            invalidate_grid_cache();
         } else if (key == 'r' || key == 'R') {
             act("start");
         } else if (key == 'f' || key == 'F') {
@@ -1826,6 +2097,6 @@ int main(void)
         } else if (key == '\n') {
             open_entry(selected - napps);
         }
-        draw(0);
+        draw_mode(0, !sel_only);
     }
 }

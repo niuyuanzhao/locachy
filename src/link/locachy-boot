@@ -245,8 +245,13 @@ printf 'NAME="LOCachy initramfs"\n' >"$work/initrd-release"
 printf 'dir /etc 0755 0 0\nfile /etc/initrd-release %s 0644 0 0\n' "$work/initrd-release" >>"$work/initramfs.list"
 # Separate commands preserve the producer's failure status under POSIX sh.
 "$lib/gen_init_cpio" "$work/initramfs.list" >"$work/initramfs.cpio"
-gzip -9 <"$work/initramfs.cpio" >"$work/initramfs.img"
-gzip -t "$work/initramfs.img"
+if command -v zstd >/dev/null 2>&1; then
+    zstd -T0 -3 -q <"$work/initramfs.cpio" >"$work/initramfs.img"
+    zstd -tq "$work/initramfs.img"
+else
+    gzip -1 <"$work/initramfs.cpio" >"$work/initramfs.img"
+    gzip -t "$work/initramfs.img"
+fi
 rm -f "$work/initramfs.cpio"
 
 # The unified image, as the Arch Wiki's ukify section makes it: the microcode

@@ -23,7 +23,7 @@
 | 容器的视图 | 容器中的 `/run/user/UID/doc` | `/run/locachy/docs/views/NAME`，由 `link/locachy-app` 绑定进容器 |
 | `container-documents`（`progs/container-documents.c`） | 每个容器中，用户，在容器自己的总线上 | 照旧在那里持有 `org.freedesktop.portal.Documents`，并应答 `FileTransfer.RetrieveFiles` |
 | files（`progs/files.c`、`base/wayland-data.c`） | 宿主，root（原生窗口） | 拖放的来源 |
-| labwc 的放置闸门 | 宿主，root | `pkgbuilds/labwc-locachy` 的补丁（此处不描述） |
+| labwc 的拖放校验 | 宿主，root | `pkgbuilds/labwc-locachy` 的补丁（此处不描述） |
 
 门户以用户身份打开 `/dev/fuse`（打开失败时 libfuse 没有后备方案），所以服务先等待该节点
 变成 udevd 所设置的样子（0666，打包的规则）：开机时服务在 udevd 描述设备之前启动，于是它
@@ -184,5 +184,5 @@ xdg-desktop-portal-wlr 也算该容器）。原生窗口（`app_window-PROGRAM-N
 - `tools/test-files.sh`：files 一侧（见 [WAYLAND-DATA.zh.md](WAYLAND-DATA.zh.md)）。
 - `tools/test-container-documents.sh`：用 coreutils 的 base64 生成的密钥调用
   `RetrieveFiles`、错误的密钥、`StartTransfer`、`AddFiles`、`StopTransfer`。
-- `tools/test-drop-gate.sh`（labwc，在虚拟机的闸门中）：原生窗口作为拖放的来源和目标，以及
+- `tools/test-drop-gate.sh`（labwc，在虚拟机回归测试中）：原生窗口作为拖放的来源和目标，以及
   以容器名义出现的窗口。

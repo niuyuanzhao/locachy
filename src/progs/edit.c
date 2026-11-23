@@ -138,6 +138,7 @@ static void draw_menubar(void);
 static void language_changed(struct doc *d);
 static void language_closed(struct doc *d);
 static void language_saved(struct doc *d);
+static void language_opened(struct doc *d);
 static int language_before_save(struct doc *d);
 static int language_key(int key, int mods);
 static void language_tick(void);
@@ -147,6 +148,7 @@ static void language_menu(void);
 static void language_hover_at(struct doc *d, size_t at);
 static void language_hover_cancel(void);
 static int session_quit(void);
+static void session_bump_idle(int typing);
 static void filesearch_menu(void);
 /* edit-scrollbar.inc, edit-documents.inc, edit-quickopen.inc */
 struct tab;
@@ -218,6 +220,8 @@ struct docui {
     size_t ab_start, ab_end;
     int ab_char;              /* m_currentAutobraceClosingChar, or 0 */
     unsigned long version;    /* changed with each edit (the mini-map's cache) */
+    unsigned long hl_gen, bm_gen;
+    int shade_idx;
     long edited, raised;      /* when last edited, when last shown or created */
     char base[64];           /* KTextEditor's m_docName */
     int number;              /* m_docNameNumber */
@@ -272,6 +276,41 @@ static int sidebar_width = SIDE_DEFAULT, sidebar_drag;
 static struct content_font *editor_font;
 static long use_clock;
 static int quitting;
+static int ui_dirty = 1;
+
+static struct paint_cache {
+    const struct doc *doc;
+    const struct syntax *syntax;
+    int lang;
+    unsigned long version;
+    uint64_t syntax_epoch;
+    size_t base, len;
+    int light;
+    uint32_t normal_fg;
+    uint32_t *colour;
+    uint8_t *styles;
+    size_t cap;
+} paint_cache[MAX_SPACES];
+
+static struct {
+    const struct doc *doc;
+    const struct syntax *syntax;
+    int lang;
+    unsigned long version;
+    uint64_t syntax_epoch;
+    size_t cursor;
+    int overwrite, light;
+    int found;
+    size_t a, b;
+} bracket_cache;
+
+static void invalidate_syntax_caches(const struct doc *d)
+{
+    for (int s = 0; s < MAX_SPACES; s++) {
+        if (!d || paint_cache[s].doc == d) paint_cache[s].doc = NULL;
+    }
+    if (!d || bracket_cache.doc == d) bracket_cache.doc = NULL;
+}
 
 /* The sidebar: the Documents and Projects tool views, one shown at a time
  * (Kate's left sidebar), the one last shown first. At the first start (no
@@ -301,6 +340,7 @@ static double primary_since;
 /* A short notice of the input method's mode (as term's). */
 static char toast[128];
 static double toast_until;
+static int toast_shown;      /* the toast was drawn: it must be drawn again when it ends */
 
 static int ino = -1;         /* inotify */
 
@@ -483,6 +523,7 @@ static struct note *post(struct doc *d, int kind, int above, double seconds, con
     n->kind = kind;
     n->above = above;
     n->until = seconds > 0 ? now() + seconds : 0;
+    ui_dirty = 1;
     return n;
 }
 
@@ -695,6 +736,7 @@ static void moved(struct doc *d, size_t at, size_t removed, size_t inserted)
         free(u->hl); /* the highlights of Find All are of the text before */
         u->hl = NULL;
         u->nhl = 0;
+        u->hl_gen++;
     }
     language_changed(d);
 }
@@ -727,6 +769,10 @@ static void unwatch(struct doc *d);
 
 static void free_doc(struct doc *d)
 {
+    for (int s = 0; s < MAX_SPACES; s++) {
+        if (paint_cache[s].doc == d) paint_cache[s].doc = NULL;
+    }
+    if (bracket_cache.doc == d) bracket_cache.doc = NULL;
     language_closed(d);
     for (int s = 0; s < nspaces; s++) {
         for (int i = 0; i < spaces[s].ntabs; i++) if (spaces[s].tabs[i].doc == d) {
@@ -1317,11 +1363,11 @@ static const char *const mode_names[] = { N_("Plain text"), N_("Whole words"), N
 static void put_text(int col, int row, int max_col, const char *s, uint32_t fg, uint32_t bg)
 {
     char buf[1024];
-    size_t o = 0;
+    size_t o = 0, rem = strlen(s);
     int x = col;
-    for (const char *p = s; *p && x < max_col && o + 5 < sizeof buf;) {
+    for (const char *p = s; rem && x < max_col && o + 5 < sizeof buf;) {
         size_t k;
-        uint32_t cp = text_decode(p, strlen(p), &k);
+        uint32_t cp = text_decode(p, rem, &k);
         int w = screen_char_cells(cp);
         if (x + w > max_col) {
             break;
@@ -1329,6 +1375,7 @@ static void put_text(int col, int row, int max_col, const char *s, uint32_t fg, 
         memcpy(buf + o, p, k);
         o += k;
         p += k;
+        rem -= k;
         x += w;
     }
     buf[o] = '\0';
@@ -1338,11 +1385,13 @@ static void put_text(int col, int row, int max_col, const char *s, uint32_t fg, 
 static int text_cells(const char *s)
 {
     int n = 0;
-    for (const char *p = s; *p;) {
+    size_t rem = strlen(s);
+    for (const char *p = s; rem;) {
         size_t k;
-        uint32_t cp = text_decode(p, strlen(p), &k);
+        uint32_t cp = text_decode(p, rem, &k);
         n += screen_char_cells(cp);
         p += k;
+        rem -= k;
     }
     return n;
 }
@@ -1579,16 +1628,17 @@ static void content_text(int x, int y, const char *text, uint32_t fg, uint32_t b
 static void content_put_text(int x, int y, int max_x, const char *text, uint32_t fg, uint32_t bg)
 {
     char clipped[2048];
-    size_t used = 0;
+    size_t used = 0, rem = strlen(text);
     int col = x;
-    for (const char *p = text; *p && used + 5 < sizeof clipped;) {
+    for (const char *p = text; rem && used + 5 < sizeof clipped;) {
         size_t k;
-        uint32_t cp = text_decode(p, strlen(p), &k);
+        uint32_t cp = text_decode(p, rem, &k);
         int width = screen_char_cells(cp);
         if (col + width > max_x) break;
         memcpy(clipped + used, p, k);
         used += k;
         p += k;
+        rem -= k;
         col += width;
     }
     clipped[used] = '\0';
@@ -1618,6 +1668,65 @@ static void content_caret(int x, int y, int overwrite, const char *glyph, uint32
 #define screen_text content_text
 #define put_text content_put_text
 #define draw_caret content_caret
+/* The colours and styles of [from, from + len) as they are painted, kept per
+ * view space: no syntax query runs again while the text, its highlighting,
+ * the theme and the range stay the same (cursor movement, a hover, a caret
+ * blink). NULL where memory ran out: the caller paints the normal colour. */
+static void painted_text(int s, struct doc *d, size_t from, size_t len, const uint32_t **colour,
+                         const uint8_t **styles)
+{
+    struct paint_cache *c = &paint_cache[s];
+    uint64_t epoch = d->syntax ? syntax_epoch(d->syntax) : 0;
+    int light = theme_is_light();
+    uint32_t normal = C_TEXT;
+    *colour = NULL;
+    *styles = NULL;
+    if (!len) {
+        return;
+    }
+    if (c->doc == d && c->syntax == d->syntax && c->lang == d->lang &&
+        c->version == ui_of(d)->version && c->syntax_epoch == epoch &&
+        c->base == from && c->len == len && c->light == light && c->normal_fg == normal && c->colour && c->styles) {
+        *colour = c->colour;
+        *styles = c->styles;
+        return;
+    }
+    if (len > c->cap) {
+        uint32_t *more_colour = realloc(c->colour, len * sizeof *more_colour);
+        if (!more_colour) {
+            c->doc = NULL;
+            return;
+        }
+        c->colour = more_colour;
+        uint8_t *more_styles = realloc(c->styles, len);
+        if (!more_styles) {
+            c->doc = NULL;
+            return;
+        }
+        c->styles = more_styles;
+        c->cap = len;
+    }
+    if (d->syntax) {
+        syntax_paint(d->syntax, &d->buf, from, from + len, c->colour, c->styles);
+    } else {
+        for (size_t i = 0; i < len; i++) {
+            c->colour[i] = normal;
+            c->styles[i] = 0;
+        }
+    }
+    c->doc = d;
+    c->syntax = d->syntax;
+    c->lang = d->lang;
+    c->version = ui_of(d)->version;
+    c->syntax_epoch = epoch;
+    c->base = from;
+    c->len = len;
+    c->light = light;
+    c->normal_fg = normal;
+    *colour = c->colour;
+    *styles = c->styles;
+}
+
 static void draw_text(int s)
 {
     struct tab *t = tab_of(s);
@@ -1655,16 +1764,17 @@ static void draw_text(int s)
         line = fold_next(t, line);
         r = 0;
     }
-    uint32_t *colour = n ? colours_of(d, rows[0].from, rows[n - 1].to) : NULL;
     size_t base = n ? rows[0].from : 0;
     size_t style_length = n ? rows[n - 1].to - base : 0;
-    uint8_t *styles = style_length ? calloc(style_length, 1) : NULL;
-    if (styles && d->syntax) syntax_styles(d->syntax, &d->buf, base, base + style_length, styles);
+    const uint32_t *colour = NULL;
+    const uint8_t *styles = NULL;
+    painted_text(s, d, base, style_length, &colour, &styles);
     int light = theme_is_light();
     uint32_t normal = C_TEXT, selected = C_SELECT;
     painting_style = 0;
-    screen_fill(x0, y0, w, h, C_BG);
     screen_fill(x0, y0, g, h, C_BORDER);
+    /* The rows past the text: the background (the rows of text fill their own). */
+    if (n < h && tw > 0) screen_fill(x0 + g, y0 + n, tw, h - n, C_BG);
     for (int i = 0; i < n; i++) {
         struct shown *v = &rows[i];
         int y = y0 + i;
@@ -1791,8 +1901,6 @@ static void draw_text(int s)
         }
     }
     mc_draw_carets(s, t, x0 + g, y0, tw, h, focus);
-    free(styles);
-    free(colour);
     free(rows);
     /* Notes at the bottom of the view (Search wrapped, N replacements made). */
     int k = 0;
@@ -2188,6 +2296,9 @@ static void draw(void)
         uint32_t bg = theme_rgb(THEME_PANEL, 0x183860);
         screen_fill(col, rows - 4, n, 1, bg);
         screen_text(col, rows - 4, toast, theme_rgb(THEME_FG, 0xFFFFFF), bg);
+        toast_shown = 1;
+    } else {
+        toast_shown = 0;
     }
     draw_menubar();
     switcher_draw();
@@ -3119,7 +3230,7 @@ static int match_bracket(struct doc *d, size_t at, size_t *other)
     return 0;
 }
 
-static int bracket_pair(const struct tab *t, size_t *a, size_t *b)
+static int bracket_pair_uncached(const struct tab *t, size_t *a, size_t *b)
 {
     struct doc *d = t->doc;
     size_t le = line_end(d, line_of(d, t->cursor)), other;
@@ -3134,6 +3245,39 @@ static int bracket_pair(const struct tab *t, size_t *a, size_t *b)
         return 1;
     }
     return 0;
+}
+
+/* The matching pair for the cursor, kept while the text, its highlighting,
+ * the cursor, the overwrite mode and the theme stay the same: the search reads
+ * up to BRACKET_LINES lines of colours, and drawing asks on every frame. */
+static int bracket_pair(const struct tab *t, size_t *a, size_t *b)
+{
+    struct doc *d = t->doc;
+    uint64_t epoch = d->syntax ? syntax_epoch(d->syntax) : 0;
+    int light = theme_is_light();
+    if (bracket_cache.doc == d && bracket_cache.syntax == d->syntax && bracket_cache.lang == d->lang &&
+        bracket_cache.version == ui_of(d)->version &&
+        bracket_cache.syntax_epoch == epoch && bracket_cache.cursor == t->cursor &&
+        bracket_cache.overwrite == d->overwrite && bracket_cache.light == light) {
+        if (bracket_cache.found) {
+            *a = bracket_cache.a;
+            *b = bracket_cache.b;
+        }
+        return bracket_cache.found;
+    }
+    int found = bracket_pair_uncached(t, a, b);
+    bracket_cache.doc = d;
+    bracket_cache.syntax = d->syntax;
+    bracket_cache.lang = d->lang;
+    bracket_cache.version = ui_of(d)->version;
+    bracket_cache.syntax_epoch = epoch;
+    bracket_cache.cursor = t->cursor;
+    bracket_cache.overwrite = d->overwrite;
+    bracket_cache.light = light;
+    bracket_cache.found = found;
+    bracket_cache.a = found ? *a : 0;
+    bracket_cache.b = found ? *b : 0;
+    return found;
 }
 
 /* Ctrl+6, Ctrl+Shift+6 (KateViewInternal::cursorToMatchingBracket): to
@@ -3454,6 +3598,7 @@ static void clear_highlights(struct doc *d)
     free(u->hl);
     u->hl = NULL;
     u->nhl = 0;
+    u->hl_gen++;
 }
 
 static void close_bar(void)
@@ -3590,6 +3735,7 @@ static void find_or_replace(int s, int backwards, const char *replacement)
             u->hl[0] = after_a;
             u->hl[1] = after_b;
             u->nhl = 1;
+            u->hl_gen++;
             u->hl_replace = 1;
         }
     }
@@ -3642,6 +3788,7 @@ static void find_all(int s)
     struct docui *u = ui_of(d);
     u->hl = m;
     u->nhl = n < MAX_HIGHLIGHT ? n : MAX_HIGHLIGHT;
+    u->hl_gen++;
     u->hl_replace = 0;
     post(d, NOTE_POSITIVE, 0, 3.0, P_("%zu match found", "%zu matches found", n), n);
     bar.match = n ? MATCH_FOUND : MATCH_MISMATCH;
@@ -3695,6 +3842,7 @@ static size_t replace_all(int s)
         struct docui *u = ui_of(d);
         u->hl = hl;
         u->nhl = hl ? (done < MAX_HIGHLIGHT ? done : MAX_HIGHLIGHT) : 0;
+        u->hl_gen++;
         u->hl_replace = 1;
     } else {
         for (size_t i = 0; r && i < n; i++) {
@@ -4017,6 +4165,7 @@ static void say_toast(const char *msg)
 {
     snprintf(toast, sizeof toast, "%s", msg);
     toast_until = now() + 0.8;
+    ui_dirty = 1;
 }
 
 /* A question: title, text (\n breaks lines), buttons (& before a key);
@@ -4456,6 +4605,7 @@ static struct doc *open_file(const char *path)
         free_doc(replace);
         show_doc(active, d);
     }
+    language_opened(d);
     follow_project();
     return d;
 }
@@ -4590,18 +4740,22 @@ static int save_as(struct doc *d)
     snprintf(d->path, sizeof d->path, "%s", path);
     d->readonly = 0; /* Save As writes a chosen copy, even in read-only mode. */
     d->disk = DISK_NONE;
+    doc_detect_syntax(d);
+    invalidate_syntax_caches(d);
     if (save(d) < 0) {
         snprintf(d->path, sizeof d->path, "%s", old);
         d->readonly = readonly;
         d->disk = disk;
         d->disk_shown = disk_shown;
+        doc_detect_syntax(d);
+        invalidate_syntax_caches(d);
         watch(d);
         return -1;
     }
     d->readonly = readonly;
     update_name(d);
     watch(d);
-    doc_detect_syntax(d);
+    language_opened(d);
     ui_of(d)->project = NULL;
     follow_project();
     return 0;
@@ -5841,17 +5995,31 @@ static void global_or_view_key(int key, int mods)
  * composition, then edit's. */
 static void key_event(int key)
 {
-    if (key == 0 || key == K_REPAINT) return;
+    if (key == 0) return;
+    if (key == K_REPAINT) {
+        ui_dirty = 1; /* the palette changed */
+        return;
+    }
     int mods = keys_modifiers();
     if (key == K_SHOWN) {
         preview_hide();
+        ui_dirty = 1;
         return;
     }
     if (key == K_POINTER) {
-        pointer(pointer_last());
+        const struct pointer_event *e = pointer_last();
+        /* A plain motion, with nothing held, dragged or previewed, draws nothing. */
+        int still = !e->button && !e->wheel && !e->hwheel && !e->gesture && !e->cancelled && !drag.mode &&
+                    !split_drag && !sidebar_drag && !scroll_drag.on && !icon_press.on && preview.space < 0 &&
+                    !switcher_open();
+        if (!still) ui_dirty = 1;
+        if (e->wheel || e->hwheel) session_bump_idle(0);
+        pointer(e);
         auto_bracket_check();
         return;
     }
+    ui_dirty = 1;
+    session_bump_idle(1);
     preview_hide();
     language_hover_cancel();
     int act = key_action(key, mods); /* the raw key: Ctrl+Q is 17 */
@@ -5928,6 +6096,7 @@ static int expire(void)
         for (int k = u->nnotes - 1; k >= 0; k--) {
             if (u->notes[k].until > 0 && u->notes[k].until <= t) {
                 drop_note(docs[i], k);
+                ui_dirty = 1;
             } else if (u->notes[k].until > 0 && (next < 0 || u->notes[k].until < next)) {
                 next = u->notes[k].until;
             }
@@ -5947,21 +6116,36 @@ static int parse_shown(void)
     for (int s = 0; s < nspaces; s++) {
         struct tab *t = tab_of(s);
         if (t && t->doc->syntax && syntax_pending(t->doc->syntax)) {
-            more |= syntax_parse(t->doc->syntax, &t->doc->buf, 30) == 0;
+            int r = syntax_parse(t->doc->syntax, &t->doc->buf, 30);
+            if (r != 0) ui_dirty = 1; /* finished (or off): the colours changed */
+            more |= r == 0;
         }
     }
     return more;
 }
 
-/* One turn: drawn, then an event (or a timeout) handled. */
+/* One turn: drawn if anything changed, then an event (or a timeout) handled. */
 static void step(void)
 {
     language_tick();
+    if (language_tick_changed) ui_dirty = 1;
     session_tick();
-    filesearch_tick();
+    size_t fs_count = filesearch_ui.search ? edit_filesearch_count(filesearch_ui.search) : 0;
+    int fs_running = filesearch_active();
+    filesearch_tick(); /* completion calls say_toast, which marks ui_dirty */
+    if (fs_running != filesearch_active() ||
+        (filesearch_ui.search && edit_filesearch_count(filesearch_ui.search) != fs_count)) {
+        ui_dirty = 1; /* results or the search's state moved */
+    }
+    if (preview.due && now() >= preview.due) ui_dirty = 1;
+    if (toast_shown && now() >= toast_until) ui_dirty = 1;
     int more = parse_shown();
-    draw();
-    int timeout = session_timeout(expire());
+    int note_timeout = expire();
+    if (ui_dirty) {
+        draw();
+        ui_dirty = 0;
+    }
+    int timeout = session_timeout(note_timeout);
     if ((language_active() || filesearch_active()) && (timeout < 0 || timeout > 50)) timeout = 50;
     if (more) {
         timeout = 0;
@@ -5987,12 +6171,15 @@ static void step(void)
     int key = key_poll_many(p, 2, timeout);
     if ((p[0].revents | p[1].revents) & POLLIN) {
         disk_events();
+        ui_dirty = 1;
     }
     if (key) {
         key_event(key);
         return;
     }
+    int switcher_was = switcher_open();
     switcher_tick();
+    if (switcher_was != switcher_open()) ui_dirty = 1;
     if (primary_pending && now() - primary_since >= 0.5) {
         set_primary(cur_tab());
         primary_pending = 0;
@@ -6000,6 +6187,7 @@ static void step(void)
     struct tab *t = drag.mode ? tab_of(drag.space) : NULL;
     if (t && (drag.y < y0 || drag.y >= end)) {
         /* Dragged past the text: it scrolls a row each 50 ms. */
+        ui_dirty = 1;
         scroll_rows(drag.space, t, drag.y < y0 ? -1 : 1);
         struct pointer_event e = *pointer_last();
         int cw, ch, top;

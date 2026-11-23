@@ -294,6 +294,7 @@ int panel_hits(struct panel_hit *out, int max);
 #define K_NAMED      0x1F9 /* while keys_name_any: a key that types nothing, bound to nothing */
 #define K_TEXT       0x1FA /* a key typed text that is not one ASCII character (ä, €, a dead key's é): keys_text */
 #define K_ACT_LOCK   0x1FB /* key_lock: process 1 locks the screen */
+#define K_ACT_SEARCH 0x1EC /* key_search: global search (host framebuffer and Wayland) */
 /* A button standing for a key of the table: a click comes without the
  * modifiers, so the button gives these and key_action reads them as the
  * keys' actions. */

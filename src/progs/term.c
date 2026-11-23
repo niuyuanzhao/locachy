@@ -25,6 +25,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "base.h"
@@ -58,6 +59,7 @@ static struct cell *history;   /* a ring of HISTORY lines, hist_cols cells each 
 static uint8_t *history_soft;
 static int hist_cols, hist_len, hist_head, view; /* view: lines scrolled back */
 static struct { char *data; size_t offset, size; } output;
+static int pty_fd = -1; /* live non-blocking pty fd in main(); -1 in unit tests */
 #define OUTPUT_LIMIT (64u * 1024u * 1024u)
 
 static void selection_clear(void)
@@ -68,6 +70,23 @@ static void selection_clear(void)
 
 static int queue_output(const void *data, size_t size)
 {
+    const char *src = (const char *)data;
+    if (pty_fd >= 0 && output.offset == output.size && size > 0) {
+        while (size > 0) {
+            ssize_t n = write(pty_fd, src, size);
+            if (n > 0) {
+                src += (size_t)n;
+                size -= (size_t)n;
+            } else if (n < 0 && errno == EINTR) {
+                continue;
+            } else if (n < 0 && errno == EAGAIN) {
+                break;
+            } else {
+                return -1;
+            }
+        }
+        if (size == 0) return 0;
+    }
     size_t pending = output.size - output.offset;
     if (size > OUTPUT_LIMIT - pending) return -1;
     if (output.offset) memmove(output.data, output.data + output.offset, pending);
@@ -76,7 +95,7 @@ static int queue_output(const void *data, size_t size)
     char *p = realloc(output.data, pending + size);
     if (!p && size) return -1;
     output.data = p;
-    if (size) memcpy(p + pending, data, size);
+    if (size) memcpy(p + pending, src, size);
     output.size += size;
     return 0;
 }
@@ -831,11 +850,45 @@ static void scroll_view(int lines)
 }
 
 static int had_overlay;
+static char last_note[64];
+static int last_cx = -1, last_cy = -1, last_view = -1, last_cursor_vis = -1;
+static int last_mouse_tracking = -1;
+static int sel_drawn, sel_drawn_a, sel_drawn_b;
+static int dirty_rows_any(void)
+{
+    for (int r = 0; r < rows; r++) {
+        if (dirty[r]) return 1;
+    }
+    return 0;
+}
+
+static void dirty_row_range(int r0, int r1)
+{
+    if (r0 > r1) {
+        int tmp = r0;
+        r0 = r1;
+        r1 = tmp;
+    }
+    if (r0 < 0) r0 = 0;
+    if (r1 >= rows) r1 = rows - 1;
+    for (int r = r0; r <= r1; r++) {
+        dirty[r] = 1;
+    }
+}
 
 static void draw(void)
 {
     char buf[1024], row1[512], row2[512];
     int active = ime_get_overlay(row1, row2, sizeof row1);
+    char note[64] = "";
+    if (view > 0) {
+        snprintf(note, sizeof note, _(" %d/%d lines back "), view, hist_len);
+    }
+    if (strcmp(note, last_note) != 0) {
+        /* The scrollback note sits on row 0: repaint that row once when it changes. */
+        dirty[0] = 1;
+        snprintf(last_note, sizeof last_note, "%s", note);
+    }
 
     /* The status bar over screen row 0 */
     screen_bar("term", ime_mode_label());
@@ -851,9 +904,22 @@ static void draw(void)
         dirty[rows - 1] = 1;
     }
     had_overlay = active;
-    dirty[cy] = 1;
+    if (last_cy >= 0 && last_view >= 0 &&
+        (last_cx != cx || last_cy != cy || last_view != view || last_cursor_vis != cursor_vis)) {
+        int old_row = last_cy + last_view;
+        if (old_row >= 0 && old_row < rows) dirty[old_row] = 1;
+        int cur_row = cy + view;
+        if (cur_row >= 0 && cur_row < rows) dirty[cur_row] = 1;
+    }
+    if (sel_drawn && !selection.active) {
+        dirty_row_range(sel_drawn_a / cols, sel_drawn_b / cols);
+        sel_drawn = 0;
+    }
     /* A program that follows the mouse gets the arrow; text, the beam. */
-    screen_cursor(mouse_tracking ? CURSOR_ARROW : CURSOR_TEXT);
+    if (mouse_tracking != last_mouse_tracking) {
+        screen_cursor(mouse_tracking ? CURSOR_ARROW : CURSOR_TEXT);
+        last_mouse_tracking = mouse_tracking;
+    }
     for (int r = 0; r < rows; r++) {
         if (!dirty[r]) {
             continue;
@@ -892,19 +958,22 @@ static void draw(void)
             if (!cell.ch) continue;
             buf[put_utf8(buf, cell.ch)] = '\0';
             screen_text(i % cols, i / cols + 1, buf, fg, bg);
-            dirty[i / cols] = 1;
         }
+        sel_drawn = 1;
+        sel_drawn_a = a;
+        sel_drawn_b = b;
     }
     if (cursor_vis && cy + view < rows) {
         struct cell cur = grid[cy * cols + cx];
         buf[put_utf8(buf, cur.ch ? cur.ch : ' ')] = '\0';
         screen_text(cx, cy + view + 1, buf, terminal_rgb(cur.bg), terminal_rgb(cur.fg));
     }
+    last_cx = cx;
+    last_cy = cy;
+    last_view = view;
+    last_cursor_vis = cursor_vis;
     if (view > 0) {
-        char note[64];
-        snprintf(note, sizeof note, _(" %d/%d lines back "), view, hist_len);
         screen_text(cols - str_cells(note), 1, note, theme_rgb(THEME_ON_ACCENT, 0x101820), theme_rgb(THEME_ACCENT, 0xB8D8FF));
-        dirty[0] = 1;
     }
     if (toast_active) {
         uint32_t bg = theme_rgb(THEME_PANEL, 0x183860);
@@ -1023,17 +1092,18 @@ static int word_class(uint32_t cp)
            (cp | 0x20) <= 'z') || strchr("_-./~:@%+", (int)cp)) ? 1 : 2;
 }
 
-static void pointer_input(const struct pointer_event *event)
+/* Returns 1 if local display/selection/scroll state changed, 0 otherwise. */
+static int pointer_input(const struct pointer_event *event)
 {
     if (event->gesture || (event->hwheel && !event->wheel) ||
-        (!event->button && !event->buttons && !event->wheel && (event->x < 0 || event->y < 0))) return;
+        (!event->button && !event->buttons && !event->wheel && (event->x < 0 || event->y < 0))) return 0;
     int col = clamp(event->col, 0, cols - 1), row = clamp(event->row - 1, 0, rows - 1); /* row 0: the bar */
     if (mouse_tracking && !(keys_modifiers() & KEYS_SHIFT)) {
         char sequence[64];
         int button = event->button == BTN_LEFT ? 0 : event->button == BTN_MIDDLE ? 1 : 2;
         if (event->wheel) button = event->wheel > 0 ? 64 : 65;
         else if (!event->button) {
-            if (mouse_tracking != 1003 && !(mouse_tracking == 1002 && event->buttons)) return;
+            if (mouse_tracking != 1003 && !(mouse_tracking == 1002 && event->buttons)) return 0;
             button = event->buttons & 1 ? 32 : event->buttons & 4 ? 33 : event->buttons & 2 ? 34 : 35;
         }
         if (keys_modifiers() & KEYS_CTRL) button |= 16;
@@ -1049,29 +1119,35 @@ static void pointer_input(const struct pointer_event *event)
                 queue_output(report, sizeof report);
             }
         }
-        return;
+        return 0;
     }
     if (event->cancelled) {
         /* The PTY above needs a release to end a mouse grab. A local text
          * selection, on the other hand, must not publish a clipboard offer. */
         if (event->button == BTN_LEFT && selection.dragging) {
             selection.dragging = 0;
-            memset(dirty, 1, (size_t)rows);
+            dirty_row_range(selection.anchor / cols, selection.end / cols);
+            return 1;
         }
-        return;
+        return 0;
     }
     if (event->wheel) {
         if (in_alt) { /* a full-screen program: the wheel is the arrow keys */
             for (int i = 0; i < 3 * abs(event->wheel); i++) {
                 queue_output(event->wheel > 0 ? "\033[A" : "\033[B", 3);
             }
+            return 0;
         } else {
+            int prev_view = view;
             scroll_view(3 * event->wheel);
+            return view != prev_view;
         }
-        return;
     }
-    if (event->button == BTN_MIDDLE && event->pressed) { paste_clipboard(1); return; }
+    if (event->button == BTN_MIDDLE && event->pressed) { paste_clipboard(1); return toast_active; }
     if (event->button == BTN_LEFT && event->pressed) {
+        int was_active = selection.active;
+        int old_a = selection.anchor < selection.end ? selection.anchor : selection.end;
+        int old_b = selection.anchor > selection.end ? selection.anchor : selection.end;
         selection.active = 0;
         selection.dragging = 1;
         selection.anchor = selection.end = row * cols + col;
@@ -1100,20 +1176,34 @@ static void pointer_input(const struct pointer_event *event)
         }
         if (event->clicks >= 2) selection.dragging = 0;
         if (selection.active) copy_selection(1);
+        if (was_active) dirty_row_range(old_a / cols, old_b / cols);
+        if (selection.active) dirty_row_range(selection.anchor / cols, selection.end / cols);
+        return was_active || selection.active;
     } else if (selection.dragging && (!event->button || event->button == BTN_LEFT)) {
+        int old_end = selection.end;
+        int was_active = selection.active;
         int end = row * cols + col;
+        int changed = 0;
         if (end != selection.end) {
             selection.end = end;
             if (end != selection.anchor) selection.active = 1;
+            dirty_row_range(old_end / cols, end / cols);
+            changed = 1;
         }
         if (event->button == BTN_LEFT && !event->pressed) {
             selection.dragging = 0;
             if (selection.active) copy_selection(1);
-        } else if (!selection.active) return;
+            if (was_active || selection.active) {
+                dirty_row_range(selection.anchor / cols, selection.end / cols);
+                changed = 1;
+            }
+        } else if (!selection.active) {
+            return 0;
+        }
+        return changed;
     } else {
-        return; /* a motion: the screen's cursor moved by itself */
+        return 0; /* a motion: the screen's cursor moved by itself */
     }
-    memset(dirty, 1, (size_t)rows);
 }
 
 static void send_key(int pty, int key)
@@ -1326,21 +1416,32 @@ int main(int argc, char **argv)
     }
     close(s);
     fcntl(pty, F_SETFL, O_NONBLOCK);
+    pty_fd = pty;
     say("term: started %s (pid %d), %dx%d", cmd[0], (int)pid, cols, rows);
     ime_init(NULL, NULL);
 
     int shown = 0;
+    int pty_more = 0;
+    const char *backend = getenv("LOCACHY_BACKEND");
+    int is_wayland = backend && strcmp(backend, "wayland") == 0;
+    time_t last_bar_sec = time(NULL);
+    int prev_cx = cx, prev_cy = cy, prev_view = view, prev_cursor_vis = cursor_vis;
+    int prev_toast = toast_active;
+    int prev_ime_mode = ime_mode();
+    char prev_row1[512] = "", prev_row2[512] = "";
+    int prev_ime_overlay = 0;
+    draw();
     for (;;) {
-        int prev_cy = cy;
-        int timeout = toast_active ? 40 : 2000;
+        int need_draw = 0;
+        int timeout = pty_more ? 0 : (toast_active ? 40 : 2000);
         struct pollfd p = { .fd = pty, .events = POLLIN | (output.size > output.offset ? POLLOUT : 0) };
         int key = key_poll_many(&p, 1, timeout);
         if (p.revents & POLLOUT) flush_output(pty);
-        dirty[prev_cy] = 1;
         const char *ime_notice = NULL;
         if (key > 0 && key != K_CTRL_SPACE && key != K_ACT_IME_CN && key != K_ACT_IME_RAW &&
             key != K_ACT_IME_WIDTH && key != K_POINTER && key != K_REPAINT && toast_active) {
             hide_toast();
+            need_draw = 1;
         }
         if (key == K_CLOSE) {
             /* The window's close: as a terminal closing, the child's process
@@ -1349,6 +1450,7 @@ int main(int argc, char **argv)
             say("term: closed: hanging up %s (pid %d)", cmd[0], (int)pid);
             kill(-pid, SIGHUP);
             close(pty);
+            pty_fd = -1;
             for (int i = 0; i < 50 && waitpid(pid, NULL, WNOHANG) == 0; i++) {
                 usleep(10000);
             }
@@ -1356,13 +1458,19 @@ int main(int argc, char **argv)
             return 0;
         }
         if (key == K_POINTER) {
-            pointer_input(pointer_last());
+            if (pointer_input(pointer_last())) {
+                need_draw = 1;
+            }
         } else if (key == K_SHOWN) {
             say("term: shown %d (pid %d)", ++shown, (int)getpid());
             resize(pty); /* the scale may have changed meanwhile */
             memset(dirty, 1, (size_t)rows);
+            last_mouse_tracking = -1;
+            need_draw = 1;
         } else if (key == K_REPAINT) {
             memset(dirty, 1, (size_t)rows);
+            last_mouse_tracking = -1;
+            need_draw = 1;
         } else if (ime_action(key, &ime_notice)) {
             const char *commit = ime_get_commit(); /* English mode's word, as typed */
             if (commit != NULL && commit[0] != '\0') {
@@ -1372,15 +1480,19 @@ int main(int argc, char **argv)
                 show_toast(ime_notice);
             }
             say("term: ime mode %s", ime_mode_label());
+            need_draw = 1;
         } else if (ime_mode() == IME_MODE_CN && ime_width_key(key, keys_modifiers())) {
             const char *msg = ime_toggle_width(); /* Chinese mode's width */
             if (msg) {
                 show_toast(msg);
+                need_draw = 1;
             }
         } else if (key == 3 && keys_modifiers() == (KEYS_CTRL | KEYS_SHIFT)) {
             copy_selection(0);
+            need_draw = 1;
         } else if (key == 22 && keys_modifiers() == (KEYS_CTRL | KEYS_SHIFT)) {
             paste_clipboard(0);
+            if (toast_active) need_draw = 1;
         } else if (key > 0) {
             int taken = ime_process_key(key);
             const char *commit = ime_get_commit(); /* before the key, if it passes on */
@@ -1391,14 +1503,19 @@ int main(int argc, char **argv)
                 send_key(pty, key);
             }
         }
-        flush_output(pty);
+        if (output.offset < output.size) flush_output(pty);
+        pty_more = 0;
         uint8_t buf[4096];
-        for (;;) {
+        for (int reads = 0; reads < 16; reads++) {
             ssize_t n = read(pty, buf, sizeof buf);
             if (n > 0) {
                 if (view > 0) scroll_view(-view); /* new output shows the screen */
                 for (ssize_t i = 0; i < n; i++) {
                     feed(buf[i], pty);
+                }
+                need_draw = 1;
+                if (reads == 15 && n == (ssize_t)sizeof buf) {
+                    pty_more = 1;
                 }
                 continue;
             }
@@ -1409,9 +1526,52 @@ int main(int argc, char **argv)
             waitpid(pid, &status, 0);
             status = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
             say("term: %s (pid %d) exited with status %d", cmd[0], (int)pid, status);
+            pty_fd = -1;
             ime_done();
             return status;
         }
-        draw();
+        if (toast_active && uptime() >= toast_expire) {
+            hide_toast();
+            need_draw = 1;
+        }
+        if (cx != prev_cx || cy != prev_cy || view != prev_view || cursor_vis != prev_cursor_vis) {
+            if (prev_cy + prev_view >= 0 && prev_cy + prev_view < rows) dirty[prev_cy + prev_view] = 1;
+            if (cy + view >= 0 && cy + view < rows) dirty[cy + view] = 1;
+            need_draw = 1;
+        }
+        char cur_row1[512], cur_row2[512];
+        int cur_ime_overlay = ime_get_overlay(cur_row1, cur_row2, sizeof cur_row1);
+        int cur_ime_mode = ime_mode();
+        if (cur_ime_mode != prev_ime_mode || cur_ime_overlay != prev_ime_overlay ||
+            (cur_ime_overlay && (strcmp(cur_row1, prev_row1) != 0 || strcmp(cur_row2, prev_row2) != 0))) {
+            need_draw = 1;
+        }
+        if (toast_active != prev_toast || mouse_tracking != last_mouse_tracking) {
+            need_draw = 1;
+        }
+        if (!is_wayland && key == 0) {
+            time_t now_sec = time(NULL);
+            if (now_sec != last_bar_sec) {
+                last_bar_sec = now_sec;
+                need_draw = 1;
+            }
+        }
+        if (need_draw || dirty_rows_any()) {
+            draw();
+            prev_cx = cx;
+            prev_cy = cy;
+            prev_view = view;
+            prev_cursor_vis = cursor_vis;
+            prev_toast = toast_active;
+            prev_ime_mode = cur_ime_mode;
+            prev_ime_overlay = cur_ime_overlay;
+            if (cur_ime_overlay) {
+                snprintf(prev_row1, sizeof prev_row1, "%s", cur_row1);
+                snprintf(prev_row2, sizeof prev_row2, "%s", cur_row2);
+            } else {
+                prev_row1[0] = prev_row2[0] = '\0';
+            }
+            if (!is_wayland) last_bar_sec = time(NULL);
+        }
     }
 }

@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifdef CONFIG_FREETYPE
@@ -40,6 +41,8 @@ struct panel_font {
     uint32_t count, w, h, bytes, row_bytes;
     struct { uint32_t cp, g; } utab[2048];
     int nutab;
+    uint16_t ascii_glyph[128];
+    uint8_t ascii_valid[128];
 #ifdef CONFIG_FREETYPE
     int ft_px; /* wide characters' size; 0: none */
 #endif
@@ -90,6 +93,7 @@ static int load_psf(struct panel_font *f, const char *path)
     f->h = h[6];
     f->w = h[7];
     f->row_bytes = (f->w + 7) / 8;
+    memset(f->ascii_valid, 0, sizeof f->ascii_valid);
     if (h[3] & 1) {
         const uint8_t *u = f->glyphs + (uint64_t)f->count * f->bytes;
         const uint8_t *end = f->data + size;
@@ -103,9 +107,19 @@ static int load_psf(struct panel_font *f, const char *path)
                 if (f->nutab < (int)(sizeof f->utab / sizeof f->utab[0])) {
                     f->utab[f->nutab].cp = cp;
                     f->utab[f->nutab++].g = g;
+                    if (cp < 128 && !f->ascii_valid[cp] && g <= UINT16_MAX) {
+                        f->ascii_glyph[cp] = (uint16_t)g;
+                        f->ascii_valid[cp] = 1;
+                    }
                 }
             }
             if (u < end) u++;
+        }
+    }
+    for (uint32_t c = 0; c < 128; c++) {
+        if (!f->ascii_valid[c]) {
+            f->ascii_glyph[c] = (uint16_t)c;
+            f->ascii_valid[c] = 1;
         }
     }
     return 0;
@@ -176,6 +190,9 @@ static int is_wide(uint32_t cp)
 
 static uint32_t psf_glyph_of(const struct panel_font *f, uint32_t cp)
 {
+    if (cp < 128 && f->ascii_valid[cp]) {
+        return f->ascii_glyph[cp];
+    }
     for (int i = 0; i < f->nutab; i++) {
         if (f->utab[i].cp == cp) return f->utab[i].g;
     }
@@ -228,57 +245,107 @@ int panel_text_width(const char *s, const struct panel_font *f)
     return cells * (int)f->w;
 }
 
+#ifdef CONFIG_FREETYPE
+static inline uint32_t panel_div255(uint32_t c)
+{
+    uint32_t v = c + 128u;
+    return (v + (v >> 8)) >> 8;
+}
+#endif
+
 void panel_text(uint32_t *px, int w, int h, int stride, int x, int y, const char *s,
                 uint32_t fg, uint32_t bg, const struct panel_font *f)
 {
     const uint8_t *p = (const uint8_t *)s, *end = p + strlen(s);
     if (!f) return;
+    const uint32_t fw = f->w, fh = f->h, fbytes = f->bytes, frow = f->row_bytes;
+    const int fmag = f->mag > 0 ? f->mag : 1;
+    const uint8_t *fglyphs = f->glyphs;
     while (p < end && x < w) {
         uint32_t cp = decode_utf8(&p, end);
         int wide = is_wide(cp);
-        int cell_w = wide ? (int)f->w * 2 : (int)f->w;
-        if (x < 0) {
+        int cell_w = wide ? (int)fw * 2 : (int)fw;
+        if (x + cell_w <= 0) {
             x += cell_w;
             continue;
         }
-        panel_fill(px, w, h, stride, x, y, cell_w, (int)f->h, bg);
 #ifdef CONFIG_FREETYPE
-        FT_UInt index = 0;
-        FT_Face face = wide && f->ft_px > 0 ? font_set_face(ft_fonts, cp, f->ft_px, &index) : NULL;
-        if (face && FT_Load_Glyph(face, index, FT_LOAD_RENDER) == 0) {
-            FT_Bitmap *bm = &face->glyph->bitmap;
-            int x_off = x + (cell_w - (int)bm->width) / 2;
-            int y_off = y + (int)f->h - (int)f->h / 6 - face->glyph->bitmap_top;
-            uint32_t fg_r = (fg >> 16) & 0xFF, fg_g = (fg >> 8) & 0xFF, fg_b = fg & 0xFF;
-            uint32_t bg_r = (bg >> 16) & 0xFF, bg_g = (bg >> 8) & 0xFF, bg_b = bg & 0xFF;
-            for (int gy = 0; gy < (int)bm->rows; gy++) {
-                int py = y_off + gy;
-                if (py < 0 || py >= h) continue;
-                for (int gx = 0; gx < (int)bm->width; gx++) {
-                    int pxx = x_off + gx;
-                    uint8_t a = bm->buffer[gy * bm->pitch + gx];
-                    if (pxx < 0 || pxx >= w || a == 0) continue;
-                    uint32_t r = (fg_r * a + bg_r * (255 - a)) / 255;
-                    uint32_t g = (fg_g * a + bg_g * (255 - a)) / 255;
-                    uint32_t b = (fg_b * a + bg_b * (255 - a)) / 255;
-                    px[(size_t)py * (size_t)stride + (size_t)pxx] = 0xFF000000u | (r << 16) | (g << 8) | b;
+        const struct font_glyph *fglyph = wide && f->ft_px > 0 ? font_set_glyph(ft_fonts, cp, f->ft_px) : NULL;
+        if (fglyph) {
+            panel_fill(px, w, h, stride, x, y, cell_w, (int)fh, bg);
+            if (fglyph->alpha && fglyph->width > 0 && fglyph->rows > 0) {
+                int x_off = x + (cell_w - (int)fglyph->width) / 2;
+                int y_off = y + (int)fh - (int)fh / 6 - (int)fglyph->top;
+                int gy0 = y_off < 0 ? -y_off : 0;
+                int gy1 = y_off + (int)fglyph->rows > h ? h - y_off : (int)fglyph->rows;
+                int gx0 = x_off < 0 ? -x_off : 0;
+                int gx1 = x_off + (int)fglyph->width > w ? w - x_off : (int)fglyph->width;
+                uint32_t fg_r = (fg >> 16) & 0xFFu, fg_g = (fg >> 8) & 0xFFu, fg_b = fg & 0xFFu;
+                uint32_t bg_r = (bg >> 16) & 0xFFu, bg_g = (bg >> 8) & 0xFFu, bg_b = bg & 0xFFu;
+                uint32_t fg_opaque = 0xFF000000u | (fg & 0xFFFFFFu);
+                size_t gw = (size_t)fglyph->width;
+                for (int gy = gy0; gy < gy1; gy++) {
+                    const uint8_t *arow = fglyph->alpha + (size_t)gy * gw;
+                    uint32_t *drow = px + (size_t)(y_off + gy) * (size_t)stride + (size_t)x_off;
+                    for (int gx = gx0; gx < gx1; gx++) {
+                        uint32_t a = arow[gx];
+                        if (a == 0u) continue;
+                        if (a == 255u) {
+                            drow[gx] = fg_opaque;
+                        } else {
+                            uint32_t inv = 255u - a;
+                            uint32_t r = panel_div255(fg_r * a + bg_r * inv);
+                            uint32_t g = panel_div255(fg_g * a + bg_g * inv);
+                            uint32_t b = panel_div255(fg_b * a + bg_b * inv);
+                            drow[gx] = 0xFF000000u | (r << 16) | (g << 8) | b;
+                        }
+                    }
                 }
             }
             x += cell_w;
             continue;
         }
 #endif
-        const uint8_t *g = f->glyphs + (uint64_t)psf_glyph_of(f, wide ? '?' : cp) * f->bytes;
-        for (uint32_t gy = 0; gy < f->h && y + (int)gy < h; gy++) {
-            if (y + (int)gy < 0) continue;
-            const uint8_t *bits = g + (gy / (uint32_t)f->mag) * f->row_bytes;
-            for (uint32_t gx = 0; gx < f->w && x + (int)gx < w; gx++) {
-                uint32_t fx = gx / (uint32_t)f->mag;
-                px[(size_t)(y + (int)gy) * (size_t)stride + (size_t)(x + (int)gx)] =
-                    ((bits[fx / 8] >> (7 - fx % 8)) & 1) ? fg : bg;
+        if (x < 0) {
+            x += cell_w;
+            continue;
+        }
+        if (wide) {
+            /* The PSF loop below covers one cell; the second one is the bar's background. */
+            panel_fill(px, w, h, stride, x + (int)fw, y, (int)fw, (int)fh, bg);
+        }
+        const uint8_t *g = fglyphs + (uint64_t)psf_glyph_of(f, wide ? '?' : cp) * fbytes;
+        int gy0 = y < 0 ? -y : 0;
+        int gy1 = y + (int)fh > h ? h - y : (int)fh;
+        int gx1 = x + (int)fw > w ? w - x : (int)fw;
+        if (fmag == 1) {
+            for (int gy = gy0; gy < gy1; gy++) {
+                const uint8_t *bits = g + (uint32_t)gy * frow;
+                uint32_t *drow = px + (size_t)(y + gy) * (size_t)stride + (size_t)x;
+                for (int gx = 0; gx < gx1; gx++) {
+                    drow[gx] = ((bits[(uint32_t)gx >> 3] >> (7u - ((uint32_t)gx & 7u))) & 1u) ? fg : bg;
+                }
+            }
+        } else if (fmag == 2) {
+            for (int gy = gy0; gy < gy1; gy++) {
+                const uint8_t *bits = g + ((uint32_t)gy >> 1) * frow;
+                uint32_t *drow = px + (size_t)(y + gy) * (size_t)stride + (size_t)x;
+                for (int gx = 0; gx < gx1; gx++) {
+                    uint32_t fx = (uint32_t)gx >> 1;
+                    drow[gx] = ((bits[fx >> 3] >> (7u - (fx & 7u))) & 1u) ? fg : bg;
+                }
+            }
+        } else {
+            for (int gy = gy0; gy < gy1; gy++) {
+                const uint8_t *bits = g + ((uint32_t)gy / (uint32_t)fmag) * frow;
+                uint32_t *drow = px + (size_t)(y + gy) * (size_t)stride + (size_t)x;
+                for (int gx = 0; gx < gx1; gx++) {
+                    uint32_t fx = (uint32_t)gx / (uint32_t)fmag;
+                    drow[gx] = ((bits[fx >> 3] >> (7u - (fx & 7u))) & 1u) ? fg : bg;
+                }
             }
         }
-        x += (int)f->w; /* a wide character without FreeType: one '?' */
+        x += (int)fw; /* a wide character without FreeType: one '?' */
     }
 }
 
@@ -297,12 +364,32 @@ int panel_fonts_reload(void)
     return 0;
 }
 
+static double panel_now_s(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0.0;
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
 int panel_containers(const char *name, unsigned long long *ram)
 {
+    static double cached_at = -10.0;
+    static int cached_frozen;
+    static unsigned long long cached_ram;
+    static char cached_name[200];
+    static int cached_had_name;
+    double now = panel_now_s();
+    int want_name = name && name[0];
+    if (now - cached_at < 1.0 &&
+        ((!want_name && !cached_had_name) ||
+         (want_name && cached_had_name && strcmp(name, cached_name) == 0))) {
+        if (ram) *ram = cached_ram;
+        return cached_frozen;
+    }
     int frozen = 0;
     DIR *dir = opendir("/sys/fs/cgroup");
     struct dirent *e;
-    *ram = 0;
+    unsigned long long found_ram = 0;
     while (dir && (e = readdir(dir)) != NULL) {
         char path[320], text[128];
         if (strncmp(e->d_name, "app_", 4) != 0) {
@@ -314,16 +401,23 @@ int panel_containers(const char *name, unsigned long long *ram)
         if (in >= 0) close(in);
         text[n > 0 ? n : 0] = '\0';
         frozen += strstr(text, "populated 1") && strstr(text, "frozen 1");
-        if (name && name[0] && strcmp(e->d_name + 4, name) == 0) {
+        if (want_name && strcmp(e->d_name + 4, name) == 0) {
             snprintf(path, sizeof path, "/sys/fs/cgroup/%.200s/memory.current", e->d_name);
             in = open(path, O_RDONLY | O_CLOEXEC);
             n = in >= 0 ? read(in, text, sizeof text - 1) : -1;
             if (in >= 0) close(in);
             text[n > 0 ? n : 0] = '\0';
-            *ram = strtoull(text, NULL, 10);
+            found_ram = strtoull(text, NULL, 10);
         }
     }
     if (dir) closedir(dir);
+    cached_at = now;
+    cached_frozen = frozen;
+    cached_ram = found_ram;
+    cached_had_name = want_name;
+    if (want_name) snprintf(cached_name, sizeof cached_name, "%s", name);
+    else cached_name[0] = '\0';
+    if (ram) *ram = found_ram;
     return frozen;
 }
 

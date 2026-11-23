@@ -6,7 +6,7 @@
 
 static char session_name[EDIT_SESSION_MAX_NAME + 1] = "default";
 static int session_enabled, session_blocked, session_last_error;
-static double session_next;
+static double session_next, session_max_due;
 static char session_digest[65];
 
 static void session_error(const char *operation, const char *fmt, int error)
@@ -172,6 +172,7 @@ static int session_apply(const struct edit_session_state *state)
         struct doc *d = docs[i];
         update_name(d);
         watch(d);
+        language_opened(d);
         if (doc_modified(d))
             /* TRANSLATORS: %1$s is the document's path or "Untitled", %2$s is the session name. */
             post(d, NOTE_INFO, 1, 0, _("Unsaved changes to %s were restored from session '%s'."),
@@ -280,10 +281,27 @@ static int session_checkpoint(int clean, int report)
     return e;
 }
 
+/* Input resets the checkpoint's 2 s timer, so a checkpoint runs after 2 s of
+ * idle; typing also caps the wait at 30 s (continuous typing). Scrolling only
+ * defers it, so a scroll never runs the fingerprint and fsync mid-motion. */
+static void session_bump_idle(int typing)
+{
+    if (!session_enabled || session_blocked) return;
+    double t = now();
+    if (typing && session_max_due <= 0.0) {
+        session_max_due = t + 30.0;
+    }
+    double due = t + 2.0;
+    if (session_max_due > 0.0 && session_max_due < due) due = session_max_due;
+    session_next = due;
+}
+
 static void session_tick(void)
 {
     if (!session_enabled || session_blocked || now() < session_next) return;
-    session_next = now() + 2.0;
+    double t = now();
+    session_next = t + 2.0;
+    session_max_due = 0.0;
     char digest[65];
     session_fingerprint(digest);
     if (strcmp(digest, session_digest)) (void)session_checkpoint(0, 0);
@@ -314,6 +332,7 @@ static void session_startup(void)
     e = edit_session_load(session_name, &state);
     session_enabled = 1;
     session_next = now() + 2.0;
+    session_max_due = 0.0;
     if (e != 0 && e != ENOENT) {
         session_blocked = 1;
         session_error("load",
@@ -464,6 +483,7 @@ static void session_save_as(void)
     session_blocked = session_last_error = 0;
     session_fingerprint(session_digest);
     session_next = now() + 2.0;
+    session_max_due = 0.0;
     e = edit_session_select(session_name);
     if (e) session_error("remember selected",
         _("Could not remember selected session '%s': %s.\n"
@@ -495,6 +515,7 @@ static void session_new(void)
     snprintf(session_name, sizeof session_name, "%s", name);
     session_fingerprint(session_digest);
     session_next = now() + 2.0;
+    session_max_due = 0.0;
     e = edit_session_select(session_name);
     if (e) session_error("remember selected",
         _("Could not remember selected session '%s': %s.\n"
@@ -528,6 +549,7 @@ static void session_switch(void)
     else {
         snprintf(session_name, sizeof session_name, "%s", name);
         session_next = now() + 2.0;
+        session_max_due = 0.0;
         (void)session_checkpoint(0, 1);
         e = edit_session_select(session_name);
         if (e) session_error("remember selected",

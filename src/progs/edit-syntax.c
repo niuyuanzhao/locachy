@@ -833,7 +833,7 @@ int syntax_pending(const struct syntax *s)
 
 struct reading {
     struct syntax *s;
-    struct buffer *b;
+    const struct buffer *b;
 };
 
 /* The text for tree-sitter: up to the gap, or a copy across it where a
@@ -905,7 +905,7 @@ int syntax_parse(struct syntax *s, struct buffer *b, int budget_ms)
 }
 
 /* The text of node (at most size - 1 bytes of it). */
-static const char *node_text(struct buffer *b, TSNode node, char *out, size_t size, size_t *len)
+static const char *node_text(const struct buffer *b, TSNode node, char *out, size_t size, size_t *len)
 {
     size_t start = ts_node_start_byte(node), end = ts_node_end_byte(node), total = buffer_length(b);
     end = end > total ? total : end;
@@ -917,7 +917,7 @@ static const char *node_text(struct buffer *b, TSNode node, char *out, size_t si
     return out;
 }
 
-static int check_one(const struct loaded *l, struct buffer *b, const struct predicate *p, const TSQueryMatch *m,
+static int check_one(const struct loaded *l, const struct buffer *b, const struct predicate *p, const TSQueryMatch *m,
                      TSNode node)
 {
     char text[1024];
@@ -952,7 +952,7 @@ static int check_one(const struct loaded *l, struct buffer *b, const struct pred
 }
 
 /* The pattern of match m holds for its text. */
-static int holds(const struct loaded *l, struct buffer *b, const TSQueryMatch *m)
+static int holds(const struct loaded *l, const struct buffer *b, const TSQueryMatch *m)
 {
     if (!l->patterns) {
         return 0; /* a failed predicate allocation must not broaden matches */
@@ -1201,7 +1201,7 @@ static int by_place(const void *a, const void *b)
 
 /* The spans of query l over the tree's root in [start, end), node by node
  * the last pattern's, in the order to paint them. */
-static struct span *spans_of(const struct loaded *l, TSNode root, struct buffer *b, size_t start, size_t end,
+static struct span *spans_of(const struct loaded *l, TSNode root, const struct buffer *b, size_t start, size_t end,
                              size_t *count)
 {
     TSQueryCursor *cur = ts_query_cursor_new();
@@ -1290,7 +1290,7 @@ static void paint(const struct span *spans, size_t n, size_t start, size_t end, 
 
 /* Markdown's inline nodes under the cursor's node in [start, end), each
  * parsed with the inline grammar and painted with its query. */
-static void paint_inline(struct syntax *s, struct buffer *b, TSTreeCursor *walk, size_t start, size_t end,
+static void paint_inline(struct syntax *s, const struct buffer *b, TSTreeCursor *walk, size_t start, size_t end,
                          uint32_t *colour, uint8_t *styles, const char **names)
 {
     const struct loaded *in = &loaded[MARKDOWN_INLINE];
@@ -1327,7 +1327,7 @@ static void paint_inline(struct syntax *s, struct buffer *b, TSTreeCursor *walk,
     ts_tree_cursor_goto_parent(walk);
 }
 
-static void colours(struct syntax *s, struct buffer *b, size_t start, size_t end, uint32_t *colour,
+static void colours(struct syntax *s, const struct buffer *b, size_t start, size_t end, uint32_t *colour,
                     uint8_t *styles, const char **names)
 {
     uint32_t normal = colour ? theme_rgb(THEME_FG, COLOUR_NORMAL) : COLOUR_NORMAL;
@@ -1342,7 +1342,7 @@ static void colours(struct syntax *s, struct buffer *b, size_t start, size_t end
             names[i - start] = "";
         }
     }
-    if (!s || s->off || !s->tree) {
+    if (!s || s->off || !s->tree || !b || start >= end) {
         return;
     }
     size_t count;
@@ -1356,15 +1356,25 @@ static void colours(struct syntax *s, struct buffer *b, size_t start, size_t end
     }
 }
 
+int syntax_paint(struct syntax *s, const struct buffer *buf, size_t from, size_t to,
+                 uint32_t *colour, unsigned char *styles)
+{
+    if ((!colour && !styles) || from >= to) {
+        return 0;
+    }
+    colours(s, buf, from, to, colour, styles, NULL);
+    return s && !s->off && s->tree && buf ? 1 : 0;
+}
+
 void syntax_colours(struct syntax *s, struct buffer *b, size_t start, size_t end, uint32_t *colour)
 {
-    colours(s, b, start, end, colour, NULL, NULL);
+    syntax_paint(s, b, start, end, colour, NULL);
 }
 
 void syntax_styles(struct syntax *s, struct buffer *b, size_t start, size_t end, uint8_t *styles)
 {
     if (styles) {
-        colours(s, b, start, end, NULL, styles, NULL);
+        syntax_paint(s, b, start, end, NULL, styles);
     }
 }
 

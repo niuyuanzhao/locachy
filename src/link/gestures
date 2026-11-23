@@ -3,6 +3,9 @@
 Seat owns this process group: all children inherit it and end on release.
 pyudev watches completed input-device events, before enumerating devices.
 """
+import errno
+import os
+import select
 import shlex
 import shutil
 import signal
@@ -10,6 +13,7 @@ import subprocess
 
 OVERVIEW = "/usr/local/bin/locachy-overview"
 CONFIG = "/etc/locachy/libinput-gestures.conf"
+_wakeup_fd = None
 
 
 def stop_child(child):
@@ -88,24 +92,51 @@ class Gestures:
             self.touchpad = None
 
 
+def _drain_fd(fd):
+    while True:
+        try:
+            if not os.read(fd, 4096):
+                break
+        except BlockingIOError:
+            break
+        except OSError as exc:
+            if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EINTR):
+                break
+            raise
+
+
 def run(context, monitor, stopped, popen=subprocess.Popen, which=shutil.which):
     gestures = Gestures(popen, which)
     monitor.filter_by(subsystem="input")
     monitor.start()  # Subscribe before taking the initial snapshot.
+    mon_fd = monitor.fileno() if hasattr(monitor, "fileno") else None
     try:
         while not stopped():
             gestures.sync(context)
             if stopped():
                 break
-            monitor.poll(timeout=1)
-            # Events wake the loop; only current state decides what ends.
-            # A queued remove can belong to an older device at the same path.
-            # The timeout also reaps/restarts a tool that exited on its own.
+            if mon_fd is None:
+                monitor.poll(timeout=1)
+                continue
+            wait_fds = [mon_fd]
+            if _wakeup_fd is not None:
+                wait_fds.append(_wakeup_fd)
+            try:
+                ready, _, _ = select.select(wait_fds, [], [])
+            except InterruptedError:
+                continue
+            if _wakeup_fd is not None and _wakeup_fd in ready:
+                _drain_fd(_wakeup_fd)
+            if mon_fd in ready:
+                # Drain all queued udev events; only current state decides what runs.
+                while monitor.poll(timeout=0) is not None:
+                    pass
     finally:
         gestures.close()
 
 
 def main():
+    global _wakeup_fd
     import pyudev
     stopping = False
 
@@ -113,10 +144,22 @@ def main():
         nonlocal stopping
         stopping = True
 
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGINT, stop)
-    context = pyudev.Context()
-    run(context, pyudev.Monitor.from_netlink(context, source="udev"), lambda: stopping)
+    wakeup_r, wakeup_w = os.pipe()
+    os.set_blocking(wakeup_r, False)
+    os.set_blocking(wakeup_w, False)
+    prev_wakeup = signal.set_wakeup_fd(wakeup_w, warn_on_full_buffer=False)
+    _wakeup_fd = wakeup_r
+    try:
+        signal.signal(signal.SIGTERM, stop)
+        signal.signal(signal.SIGINT, stop)
+        signal.signal(signal.SIGCHLD, lambda *_: None)
+        context = pyudev.Context()
+        run(context, pyudev.Monitor.from_netlink(context, source="udev"), lambda: stopping)
+    finally:
+        _wakeup_fd = None
+        signal.set_wakeup_fd(prev_wakeup)
+        os.close(wakeup_r)
+        os.close(wakeup_w)
 
 
 if __name__ == "__main__":

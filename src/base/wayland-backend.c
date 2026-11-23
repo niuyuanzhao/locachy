@@ -41,10 +41,13 @@
 #include "fractional-scale-v1-client-protocol.h"
 #include "viewporter-client-protocol.h"
 #include "xdg-decoration-unstable-v1-client-protocol.h"
+#include "wlr-layer-shell-unstable-v1-client-protocol.h"
 
 #define MAX_SIDE 16384        /* pixels of a buffer's side, as a bound on its memory */
 #define DEFAULT_W 1100        /* the window's first logical size, when the compositor leaves it to us */
 #define DEFAULT_H 760
+#define FLOAT_W 760           /* centered floating overlay logical size (LOCACHY_WINDOW_FLOATING=1) */
+#define FLOAT_H 480
 #define KEYS 64               /* keys typed and not read yet */
 #define DATA_FDS 16           /* transfers of the data device polled at once */
 #define SCROLL_PIXELS 15.0    /* finger and continuous scrolling per wheel step (pointer.c's) */
@@ -62,10 +65,13 @@ struct buffer {
     uint32_t *pixels;
     size_t size;
     int width, height, busy;
+    int dirty_x0, dirty_y0, dirty_x1, dirty_y1;
 };
 
 struct key {
     int key, mods;
+    uint32_t code;
+    uint8_t is_repeat;
     char text[64], name[64];
 };
 
@@ -76,6 +82,7 @@ static struct {
     uint32_t compositor_version;
     struct wl_shm *shm;
     struct xdg_wm_base *wm_base;
+    struct zwlr_layer_shell_v1 *layer_shell;
     struct wp_fractional_scale_manager_v1 *fractional;
     struct wp_viewporter *viewporter;
     struct zxdg_decoration_manager_v1 *decorations;
@@ -84,8 +91,10 @@ static struct {
     struct wl_surface *surface;
     struct xdg_surface *xdg_surface;
     struct xdg_toplevel *toplevel;
+    struct zwlr_layer_surface_v1 *layer_surface;
     struct zxdg_toplevel_decoration_v1 *decoration;
     int decoration_mode;      /* the compositor's answer: 0 none yet, 1 client side, 2 server side */
+    int floating;             /* 1: centered always-on-top overlay (LOCACHY_WINDOW_FLOATING=1) */
     struct wp_viewport *viewport;
     struct wp_fractional_scale_v1 *scale_object;
     struct wl_callback *frame;
@@ -201,7 +210,7 @@ static void key_name(xkb_keysym_t sym, char *out, size_t size)
     else if (xkb_keysym_get_name(sym, out, size) < 0) out[0] = '\0';
 }
 
-static void put_key(int key, const char *text, xkb_keysym_t sym)
+static void put_key(int key, const char *text, xkb_keysym_t sym, uint32_t code, int is_repeat)
 {
     if (klen == KEYS) { /* the oldest goes, as a full evdev queue drops */
         khead = (khead + 1) % KEYS;
@@ -210,10 +219,23 @@ static void put_key(int key, const char *text, xkb_keysym_t sym)
     struct key *k = &keyq[(khead + klen++) % KEYS];
     k->key = key;
     k->mods = w.mods;
+    k->code = code;
+    k->is_repeat = is_repeat ? 1 : 0;
     snprintf(k->text, sizeof k->text, "%s", text ? text : "");
     if (sym != XKB_KEY_NoSymbol) key_name(sym, k->name, sizeof k->name);
     else k->name[0] = '\0';
     w.events++;
+}
+
+static void purge_repeats(uint32_t code)
+{
+    int kept = 0;
+    for (int i = 0; i < klen; i++) {
+        struct key item = keyq[(khead + i) % KEYS];
+        if (item.is_repeat && item.code == code) continue;
+        keyq[(khead + kept++) % KEYS] = item;
+    }
+    klen = kept;
 }
 
 /* The keys that are not text, as keys.c's translate gives them. */
@@ -255,7 +277,7 @@ static void raw_key(uint32_t code, xkb_keysym_t sym, uint32_t state, int local)
     base_raw_emit(BASE_RAW_WAYLAND_DEVICE, code, sym, mods, locks, state, local);
 }
 
-static void key_pressed(uint32_t code)
+static void key_pressed(uint32_t code, int is_repeat)
 {
     if (!w.state) return;
     xkb_keysym_t sym = xkb_state_key_get_one_sym(w.state, code + 8);
@@ -265,16 +287,16 @@ static void key_pressed(uint32_t code)
     int special = special_key(sym);
     if (special) {
         if (w.compose) xkb_compose_state_reset(w.compose);
-        put_key(special, "", sym);
+        put_key(special, "", sym, code, is_repeat);
         return;
     }
     if (ctrl && !alt && !shift && sym >= XKB_KEY_0 && sym <= XKB_KEY_9) {
-        put_key(K_CTRL_0 + (int)(sym - XKB_KEY_0), "", sym);
+        put_key(K_CTRL_0 + (int)(sym - XKB_KEY_0), "", sym, code, is_repeat);
         return;
     }
     uint32_t c = xkb_keysym_to_utf32(sym);
     if (ctrl && (((c | 0x20) >= 'a' && (c | 0x20) <= 'z') || (c >= '[' && c <= '_'))) {
-        put_key((int)(c & 0x1F), "", sym);
+        put_key((int)(c & 0x1F), "", sym, code, is_repeat);
         return;
     }
     char text[64] = "";
@@ -296,11 +318,11 @@ static void key_pressed(uint32_t code)
     if (!text[0]) xkb_state_key_get_utf8(w.state, code + 8, text, sizeof text);
     unsigned char first = (unsigned char)text[0];
     if (first >= 0x20 && first < 0x7F && text[1] == '\0') {
-        put_key(first, text, sym);
+        put_key(first, text, sym, code, is_repeat);
     } else if (first >= 0x80 && bare) {
-        put_key(K_TEXT, text, sym);
+        put_key(K_TEXT, text, sym, code, is_repeat);
     } else if (!first && w.name_keys && !modifier_sym(sym)) {
-        put_key(K_NAMED, "", sym);
+        put_key(K_NAMED, "", sym, code, is_repeat);
     }
 }
 
@@ -398,9 +420,10 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial, ui
     }
     if (pressed != WL_KEYBOARD_KEY_STATE_PRESSED) {
         if (code == w.repeat_code) stop_repeat();
+        purge_repeats(code);
         return;
     }
-    key_pressed(code);
+    key_pressed(code, 0);
     if (w.keymap && w.repeat_rate > 0 && xkb_keymap_key_repeats(w.keymap, code + 8) && w.repeat_fd >= 0) {
         long interval = 1000000000L / w.repeat_rate;
         struct itimerspec t = {
@@ -751,8 +774,10 @@ static void apply_size(void)
 {
     /* Left to us: the last size, else a default that fits the bounds the
      * compositor recommends (the output less its panels). */
-    int first_w = w.bounds_w > 0 && w.bounds_w < DEFAULT_W ? w.bounds_w : DEFAULT_W;
-    int first_h = w.bounds_h > 0 && w.bounds_h < DEFAULT_H ? w.bounds_h : DEFAULT_H;
+    int def_w = w.floating ? FLOAT_W : DEFAULT_W;
+    int def_h = w.floating ? FLOAT_H : DEFAULT_H;
+    int first_w = w.bounds_w > 0 && w.bounds_w < def_w ? w.bounds_w : def_w;
+    int first_h = w.bounds_h > 0 && w.bounds_h < def_h ? w.bounds_h : def_h;
     int lw = w.pending_w > 0 ? w.pending_w : w.logical_w > 0 ? w.logical_w : first_w;
     int lh = w.pending_h > 0 ? w.pending_h : w.logical_h > 0 ? w.logical_h : first_h;
     double s = w.viewport && w.fractional_scale > 0 ? w.fractional_scale : w.integer_scale;
@@ -802,7 +827,7 @@ static void toplevel_close(void *data, struct xdg_toplevel *toplevel)
         return;
     }
     w.close_state = CLOSE_QUEUED;
-    put_key(K_CLOSE, "", XKB_KEY_NoSymbol);
+    put_key(K_CLOSE, "", XKB_KEY_NoSymbol, 0, 0);
 }
 
 static void decoration_configure(void *data, struct zxdg_toplevel_decoration_v1 *decoration, uint32_t mode)
@@ -843,6 +868,29 @@ static void surface_configure(void *data, struct xdg_surface *surface, uint32_t 
 }
 
 static const struct xdg_surface_listener surface_listener = { .configure = surface_configure };
+
+static void layer_configure(void *data, struct zwlr_layer_surface_v1 *ls, uint32_t serial,
+                            uint32_t width, uint32_t height)
+{
+    (void)data;
+    zwlr_layer_surface_v1_ack_configure(ls, serial);
+    w.pending_w = (int)width;
+    w.pending_h = (int)height;
+    w.configured = 1;
+    apply_size();
+}
+
+static void layer_closed(void *data, struct zwlr_layer_surface_v1 *ls)
+{
+    (void)data; (void)ls;
+    w.closed = 1;
+    w.events++;
+}
+
+static const struct zwlr_layer_surface_v1_listener layer_surface_listener = {
+    .configure = layer_configure,
+    .closed = layer_closed,
+};
 
 static void wm_ping(void *data, struct xdg_wm_base *base, uint32_t serial)
 {
@@ -902,6 +950,8 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
     } else if (strcmp(interface, xdg_wm_base_interface.name) == 0 && !w.wm_base) {
         w.wm_base = wl_registry_bind(registry, name, &xdg_wm_base_interface, version < 5 ? version : 5);
         xdg_wm_base_add_listener(w.wm_base, &wm_listener, NULL);
+    } else if (strcmp(interface, zwlr_layer_shell_v1_interface.name) == 0 && !w.layer_shell) {
+        w.layer_shell = wl_registry_bind(registry, name, &zwlr_layer_shell_v1_interface, version < 4 ? version : 4);
     } else if (strcmp(interface, wp_fractional_scale_manager_v1_interface.name) == 0 && !w.fractional) {
         w.fractional = wl_registry_bind(registry, name, &wp_fractional_scale_manager_v1_interface, 1);
     } else if (strcmp(interface, zxdg_decoration_manager_v1_interface.name) == 0 && !w.decorations) {
@@ -971,6 +1021,10 @@ static int buffer_make(struct buffer *b, int width, int height)
     b->width = width;
     b->height = height;
     b->busy = 0;
+    b->dirty_x0 = 0;
+    b->dirty_y0 = 0;
+    b->dirty_x1 = width;
+    b->dirty_y1 = height;
     wl_buffer_add_listener(b->buffer, &buffer_listener, b);
     return 0;
 }
@@ -1023,15 +1077,6 @@ int wl_backend_flush(const uint32_t *pixels, int pw, int ph, int x0, int y0, int
         say("window: no %dx%d buffer: %s", pw, ph, strerror(errno));
         return -1;
     }
-    memcpy(b->pixels, pixels, (size_t)pw * (size_t)ph * 4);
-    b->busy = 1;
-    wl_surface_attach(w.surface, b->buffer, 0, 0);
-    if (w.viewport) {
-        wp_viewport_set_destination(w.viewport, w.logical_w, w.logical_h);
-    } else if (w.buffer_scale_set != w.integer_scale) {
-        wl_surface_set_buffer_scale(w.surface, w.integer_scale);
-        w.buffer_scale_set = w.integer_scale;
-    }
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
     if (x1 > pw) x1 = pw;
@@ -1040,6 +1085,56 @@ int wl_backend_flush(const uint32_t *pixels, int pw, int ph, int x0, int y0, int
         x0 = y0 = 0;
         x1 = pw;
         y1 = ph;
+    }
+    struct buffer *other = (b == &w.buffers[0]) ? &w.buffers[1] : &w.buffers[0];
+    if (other->buffer && other->width == pw && other->height == ph) {
+        if (other->dirty_x0 < other->dirty_x1 && other->dirty_y0 < other->dirty_y1) {
+            if (x0 < other->dirty_x0) other->dirty_x0 = x0;
+            if (y0 < other->dirty_y0) other->dirty_y0 = y0;
+            if (x1 > other->dirty_x1) other->dirty_x1 = x1;
+            if (y1 > other->dirty_y1) other->dirty_y1 = y1;
+        } else {
+            other->dirty_x0 = x0;
+            other->dirty_y0 = y0;
+            other->dirty_x1 = x1;
+            other->dirty_y1 = y1;
+        }
+    } else if (other->buffer) {
+        /* Another size now: its picture is copied in full if it is shown again at its own size. */
+        other->dirty_x0 = other->dirty_y0 = 0;
+        other->dirty_x1 = other->width;
+        other->dirty_y1 = other->height;
+    }
+    int cx0 = x0, cy0 = y0, cx1 = x1, cy1 = y1;
+    if (b->dirty_x0 < b->dirty_x1 && b->dirty_y0 < b->dirty_y1) {
+        if (b->dirty_x0 < cx0) cx0 = b->dirty_x0;
+        if (b->dirty_y0 < cy0) cy0 = b->dirty_y0;
+        if (b->dirty_x1 > cx1) cx1 = b->dirty_x1;
+        if (b->dirty_y1 > cy1) cy1 = b->dirty_y1;
+    }
+    if (cx0 < 0) cx0 = 0;
+    if (cy0 < 0) cy0 = 0;
+    if (cx1 > pw) cx1 = pw;
+    if (cy1 > ph) cy1 = ph;
+    if (cx0 == 0 && cx1 == pw) {
+        memcpy(b->pixels + (size_t)cy0 * (size_t)pw,
+               pixels + (size_t)cy0 * (size_t)pw,
+               (size_t)(cy1 - cy0) * (size_t)pw * 4);
+    } else {
+        size_t row_bytes = (size_t)(cx1 - cx0) * 4;
+        for (int y = cy0; y < cy1; y++) {
+            size_t off = (size_t)y * (size_t)pw + (size_t)cx0;
+            memcpy(b->pixels + off, pixels + off, row_bytes);
+        }
+    }
+    b->dirty_x0 = b->dirty_y0 = b->dirty_x1 = b->dirty_y1 = 0;
+    b->busy = 1;
+    wl_surface_attach(w.surface, b->buffer, 0, 0);
+    if (w.viewport) {
+        wp_viewport_set_destination(w.viewport, w.logical_w, w.logical_h);
+    } else if (w.buffer_scale_set != w.integer_scale) {
+        wl_surface_set_buffer_scale(w.surface, w.integer_scale);
+        w.buffer_scale_set = w.integer_scale;
     }
     wl_surface_damage_buffer(w.surface, x0, y0, x1 - x0, y1 - y0);
     w.frame = wl_surface_frame(w.surface);
@@ -1111,8 +1206,11 @@ int wl_backend_open(int (*resize)(int width, int height, double scale), void (*f
     watch_theme();
     w.registry = wl_display_get_registry(w.display);
     wl_registry_add_listener(w.registry, &registry_listener, NULL);
-    if (wl_display_roundtrip(w.display) < 0 || !w.compositor || !w.shm || !w.wm_base) {
-        say("window: the compositor lacks wl_compositor 4, wl_shm or xdg_wm_base");
+    const char *fl = getenv("LOCACHY_WINDOW_FLOATING");
+    w.floating = fl && strcmp(fl, "1") == 0;
+    if (wl_display_roundtrip(w.display) < 0 || !w.compositor || !w.shm ||
+        (!w.wm_base && !(w.floating && w.layer_shell))) {
+        say("window: the compositor lacks wl_compositor 4, wl_shm or shell");
         wl_backend_close();
         return -1;
     }
@@ -1123,22 +1221,38 @@ int wl_backend_open(int (*resize)(int width, int height, double scale), void (*f
         w.scale_object = wp_fractional_scale_manager_v1_get_fractional_scale(w.fractional, w.surface);
         wp_fractional_scale_v1_add_listener(w.scale_object, &fractional_listener, NULL);
     }
-    w.xdg_surface = xdg_wm_base_get_xdg_surface(w.wm_base, w.surface);
-    xdg_surface_add_listener(w.xdg_surface, &surface_listener, NULL);
-    w.toplevel = xdg_surface_get_toplevel(w.xdg_surface);
-    xdg_toplevel_add_listener(w.toplevel, &toplevel_listener, NULL);
-    /* The compositor's frame (title, close and maximize buttons): labwc draws
-     * none for an xdg window that does not ask for it. Asked before the
-     * first commit, so the first configure already has it. */
-    if (w.decorations) {
-        w.decoration = zxdg_decoration_manager_v1_get_toplevel_decoration(w.decorations, w.toplevel);
-        zxdg_toplevel_decoration_v1_add_listener(w.decoration, &decoration_listener, NULL);
-        zxdg_toplevel_decoration_v1_set_mode(w.decoration, ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
-    }
     const char *title = getenv("LOCACHY_WINDOW_TITLE"), *app_id = getenv("LOCACHY_WINDOW_APP_ID");
-    xdg_toplevel_set_title(w.toplevel, title && *title ? title : "LOCachy");
-    xdg_toplevel_set_app_id(w.toplevel, app_id && *app_id ? app_id : "locachy");
-    xdg_toplevel_set_min_size(w.toplevel, 320, 200);
+    if (w.floating && w.layer_shell) {
+        /* Centered always-on-top overlay on the focused output (anchor 0 = centered),
+         * with exclusive keyboard focus so typing starts immediately without a click. */
+        w.layer_surface = zwlr_layer_shell_v1_get_layer_surface(
+            w.layer_shell, w.surface, NULL, ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY,
+            app_id && *app_id ? app_id : "locachy");
+        zwlr_layer_surface_v1_set_size(w.layer_surface, FLOAT_W, FLOAT_H);
+        zwlr_layer_surface_v1_set_anchor(w.layer_surface, 0);
+        zwlr_layer_surface_v1_set_exclusive_zone(w.layer_surface, 0);
+        zwlr_layer_surface_v1_set_keyboard_interactivity(
+            w.layer_surface, ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE);
+        zwlr_layer_surface_v1_add_listener(w.layer_surface, &layer_surface_listener, NULL);
+    } else {
+        w.xdg_surface = xdg_wm_base_get_xdg_surface(w.wm_base, w.surface);
+        xdg_surface_add_listener(w.xdg_surface, &surface_listener, NULL);
+        w.toplevel = xdg_surface_get_toplevel(w.xdg_surface);
+        xdg_toplevel_add_listener(w.toplevel, &toplevel_listener, NULL);
+        /* The compositor's frame (title, close and maximize buttons): labwc draws
+         * none for an xdg window that does not ask for it. Asked before the
+         * first commit, so the first configure already has it. */
+        if (w.decorations) {
+            w.decoration = zxdg_decoration_manager_v1_get_toplevel_decoration(w.decorations, w.toplevel);
+            zxdg_toplevel_decoration_v1_add_listener(w.decoration, &decoration_listener, NULL);
+            zxdg_toplevel_decoration_v1_set_mode(
+                w.decoration, w.floating ? ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE
+                                         : ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+        }
+        xdg_toplevel_set_title(w.toplevel, title && *title ? title : "LOCachy");
+        xdg_toplevel_set_app_id(w.toplevel, app_id && *app_id ? app_id : "locachy");
+        xdg_toplevel_set_min_size(w.toplevel, 320, 200);
+    }
     if (w.seat) wl_data_init(w.display, w.seat, w.surface);
     wl_surface_commit(w.surface); /* no buffer: asks for the first configure */
     double deadline = monotonic() + 10.0;
@@ -1174,6 +1288,7 @@ int wl_backend_wait(struct pollfd *extra, size_t count, int timeout_ms)
     if (count > 64) count = 64;
     if (w.frame_due) {
         w.frame_due = 0;
+        w.held = 0;
         if (w.on_frame) w.on_frame();
     }
     unsigned before = w.events;
@@ -1221,17 +1336,15 @@ int wl_backend_wait(struct pollfd *extra, size_t count, int timeout_ms)
     } else {
         wl_display_cancel_read(w.display);
     }
+    if (wl_display_dispatch_pending(w.display) < 0) return -1;
     if (p[REPEAT].revents & POLLIN) {
         uint64_t expired = 0;
-        if (read(w.repeat_fd, &expired, sizeof expired) == (ssize_t)sizeof expired && w.repeat_code) {
-            for (uint64_t i = 0; i < expired && i < 4; i++) {
-                if (base_raw_emit && w.state)
-                    raw_key(w.repeat_code, xkb_state_key_get_one_sym(w.state, w.repeat_code + 8), 2, 0);
-                key_pressed(w.repeat_code);
-            }
+        if (read(w.repeat_fd, &expired, sizeof expired) == (ssize_t)sizeof expired && expired > 0 && w.repeat_code) {
+            if (base_raw_emit && w.state)
+                raw_key(w.repeat_code, xkb_state_key_get_one_sym(w.state, w.repeat_code + 8), 2, 0);
+            key_pressed(w.repeat_code, 1);
         }
     }
-    if (wl_display_dispatch_pending(w.display) < 0) return -1;
     if (p[TOUCH].revents & POLLIN) pointer_window_touch_timer();
     if (p[THEME].revents & POLLIN) theme_event();
     if (p[THEME].revents & (POLLHUP | POLLERR | POLLNVAL)) {
@@ -1247,6 +1360,7 @@ int wl_backend_wait(struct pollfd *extra, size_t count, int timeout_ms)
     if (w.closed) return -1;
     if (w.frame_due) {
         w.frame_due = 0;
+        w.held = 0;
         if (w.on_frame) w.on_frame();
     }
     if (w.events != before) return 1;
@@ -1274,6 +1388,7 @@ void wl_backend_close(void)
     }
     pointer_window_present(0);
     if (w.keyboard) wl_keyboard_release(w.keyboard);
+    if (w.layer_surface) zwlr_layer_surface_v1_destroy(w.layer_surface);
     if (w.decoration) zxdg_toplevel_decoration_v1_destroy(w.decoration); /* before its toplevel */
     if (w.toplevel) xdg_toplevel_destroy(w.toplevel);
     if (w.xdg_surface) xdg_surface_destroy(w.xdg_surface);
@@ -1284,6 +1399,11 @@ void wl_backend_close(void)
     if (w.fractional) wp_fractional_scale_manager_v1_destroy(w.fractional);
     if (w.viewporter) wp_viewporter_destroy(w.viewporter);
     if (w.decorations) zxdg_decoration_manager_v1_destroy(w.decorations);
+    if (w.layer_shell) {
+        if (zwlr_layer_shell_v1_get_version(w.layer_shell) >= ZWLR_LAYER_SHELL_V1_DESTROY_SINCE_VERSION)
+            zwlr_layer_shell_v1_destroy(w.layer_shell);
+        else wl_proxy_destroy((struct wl_proxy *)w.layer_shell);
+    }
     if (w.wm_base) xdg_wm_base_destroy(w.wm_base);
     if (w.shm) wl_shm_destroy(w.shm);
     if (w.compositor) wl_compositor_destroy(w.compositor);

@@ -181,6 +181,7 @@ void screen_release(void) {}
 int base_audio_key(int action, char *toast, size_t size) { (void)action; (void)toast; (void)size; return 0; }
 int base_brightness_key(int action, char *toast, size_t size) { (void)action; (void)toast; (void)size; return 0; }
 /* message() reaches these; the cases here never call them. */
+int apps_display_state(void) { abort(); }
 void apps_tick(void) { abort(); }
 void apps_display_ready(void) { abort(); }
 int apps_display_watch_open(void) { abort(); }

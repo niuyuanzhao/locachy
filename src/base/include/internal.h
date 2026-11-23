@@ -88,6 +88,7 @@ __attribute__((weak)) int screen_to_desk(int x, int y, int *gx, int *gy);
 __attribute__((weak)) int screen_from_desk(int gx, int gy, int *x, int *y);
 __attribute__((weak)) int screen_desk_foreign(int gx, int gy);
 __attribute__((weak)) void screen_hover(int output);
+__attribute__((weak)) int screen_output_cell_at(int output, int lx, int ly, int *col, int *row);
 
 /* The screen, process 1 side: lend outputs to a program as a DRM lease
  * (returns the lease fd, -1 on error): all those not lent (screen_lend), or

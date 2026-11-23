@@ -110,6 +110,10 @@
 #include "session.h"
 #include "jobs.h" /* JOBS_CGROUP, JOBS_DIR: where system jobs run; process 1 speaks none of their protocol */
 
+/* Declared in modload.c; keep weak so unit tests compiling init.c without
+ * modload.c continue to link cleanly. */
+__attribute__((weak)) int modules_input_changed(void);
+
 #define FG    0xD0D0D0
 #define BG    0x000000
 #define MAX_TASKS 8
@@ -129,6 +133,9 @@ struct frame {
     int ctl;                /* our end of its control socket */
     int reaped, status;     /* waited for already (by reap), and how it ended */
     int frozen;
+    int reclaim_pending;    /* memory.reclaim deferred until after destination frame is shown */
+    long long reclaim_bytes;
+    pid_t reclaim_pid;      /* background reclaim helper child, if any */
     int holding;            /* base_session_hold: live link, not frozen */
     int shared_display;     /* release display without freezing shared infrastructure */
     int display_ready, display_retained, display_bar_lost;
@@ -157,9 +164,11 @@ struct service {
     double restart_at;      /* when to start it again, ms (now_ms) */
     int retiring;           /* taken out of rc.conf while its tree runs: never started again */
     int wanted;             /* retiring, and wanted again: started once its tree has ended */
+    int restart_now;        /* restart immediately on exit without 5 s crash backoff */
 };
 
 static char *home_argv[] = { "/usr/local/bin/home", NULL };
+static char *search_argv[] = { "/usr/local/bin/search", NULL };
 static struct frame home;
 static char *lock_argv[] = { "/usr/local/bin/lock", NULL };
 static struct frame locker;        /* the lock screen, while locked */
@@ -180,8 +189,11 @@ static int lock_grace = 5;         /* rc.conf lock_grace (seconds): after an idl
                                     * this soon unlocks without the password (KDE's LockGrace) */
 static double lock_grace_until = -1; /* ms: the present idle lock's grace ends; -1: none */
 #define MAX_ACTIVITY 32
+enum { AFD_OFF = 0, AFD_COOLDOWN = 1, AFD_ARMED = 2 };
 static int *afd;                   /* the input devices, read only to see input */
 static size_t nafd;
+static double afd_rearm_at = -1;   /* ms: do not poll afd[] before this cooldown ends */
+static int afd_state = AFD_ARMED;  /* AFD_OFF, AFD_COOLDOWN, AFD_ARMED */
 static struct task tasks[MAX_TASKS];
 /* The screens (outputs, by connector name; one without a name, all of them,
  * while process 1 cannot tell them apart) and the task each shows, or home
@@ -198,6 +210,7 @@ struct place {
 static struct place places[MAX_SCREENS];
 static int nplaces, focus_place, hover_place;
 static struct task *display_front;
+static struct task *search_prev; /* task replaced by global search on focus_place */
 static int desktop_watch = -1; /* app cgroup changes, only while explicitly retained */
 static int stay_on_display;    /* ordinary launch/switch: don't yield at the first ready */
 static int display_sync_due;    /* reap or lost retention can require a display handoff */
@@ -221,6 +234,11 @@ static double lid_check_at = -1; /* ms: the lid's level is looked at once then (
 static double hibernate_at = -1; /* s (CLOCK_BOOTTIME): the lid-closed sleep hibernates then; -1: none */
 static int suspend_failures;     /* sleeps in a row the kernel refused (write "mem" failed) */
 static char mem_sleep[8];        /* rc.conf (a machine profile) mem_sleep; "": the kernel's mode */
+static char power_profile[16] = "auto"; /* rc.conf power_profile: auto, power, balanced, performance */
+static char power_profile_applied[16];  /* effective profile last written to sysfs */
+static int power_ac_applied = -1;       /* last AC/battery state applied (0: battery, 1: AC) */
+static int zram_enabled = 1;            /* rc.conf zram: "1" (default) on, "0" off */
+static int zram_active;                 /* 1 if /dev/zram0 swap is currently active */
 static int battery_critical = 5; /* percent: on battery at or below it, hibernate or power off (config) */
 static double battery_act_at = -1;   /* ms: the critical battery's action, unless power comes back */
 static double battery_check_at = -1; /* ms: look at batteries without a trip point again (fallback) */
@@ -1061,7 +1079,8 @@ static int check_disk_dev(const char *dev)
         }
     } else if (!root_data_dev[0] && has_signature(dev, 1080, "\x53\xEF") &&
                has_label(dev, 1144, "locachy-root") && (!luks_only || is_mapper(dev, "locachy-crypt"))) {
-        if (mount(dev, "/mnt", "ext4", 0, NULL) == 0) {
+        if (mount(dev, "/mnt", "ext4", MS_NOATIME, NULL) == 0 ||
+            mount(dev, "/mnt", "ext4", 0, NULL) == 0) {
             snprintf(root_data_dev, sizeof root_data_dev, "%s", dev);
         } else {
             say("init: mount %s: %s", dev, strerror(errno));
@@ -1201,6 +1220,183 @@ static void stdin_null(void)
     }
 }
 
+/* Wait for a helper child with a hard wall-clock bound, so process 1 never
+ * waits unboundedly for a stuck helper. Returns the child's exit status, or -1
+ * when it was killed for taking too long or could not be waited for. */
+static int wait_child_bounded(pid_t pid, int max_ms, const char *what)
+{
+    double deadline = now_ms() + max_ms;
+    for (;;) {
+        int status = 0;
+        pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid) {
+            return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        }
+        if (r < 0 && errno != EINTR) {
+            return -1;
+        }
+        if (now_ms() >= deadline) {
+            say("init: %s (pid %d) timed out after %d ms; killing", what, (int)pid, max_ms);
+            kill(pid, SIGKILL);
+            double kill_deadline = now_ms() + 500;
+            while (waitpid(pid, NULL, WNOHANG) == 0 && now_ms() < kill_deadline) {
+                usleep(10000);
+            }
+            return -1;
+        }
+        usleep(10000);
+    }
+}
+
+/* Optional high-priority zram0 swap above disk swap: keeps frozen containers
+ * and direct tasks in compressed RAM instead of writing through dm-crypt to
+ * the SSD, while leaving disk swap (resume_dev) intact for hibernation and
+ * overflow. Controlled by rc.conf zram ("1" default on, "0" off). */
+static void setup_zram_swap(void)
+{
+    if (!zram_enabled || zram_active) {
+        return;
+    }
+    if (access("/sys/block/zram0", F_OK) != 0) {
+        const char *modprobe = access("/usr/bin/modprobe", X_OK) == 0 ? "/usr/bin/modprobe" :
+                               access("/sbin/modprobe", X_OK) == 0 ? "/sbin/modprobe" : NULL;
+        if (modprobe != NULL) {
+            pid_t pid = fork();
+            if (pid == 0) {
+                sigprocmask(SIG_UNBLOCK, &handled, NULL);
+                stdin_null();
+                int null_fd = open("/dev/null", O_WRONLY);
+                if (null_fd >= 0) {
+                    dup2(null_fd, STDOUT_FILENO);
+                    dup2(null_fd, STDERR_FILENO);
+                    if (null_fd > 2) close(null_fd);
+                }
+                execl(modprobe, "modprobe", "-q", "zram", (char *)NULL);
+                _exit(127);
+            }
+            if (pid > 0) {
+                wait_child_bounded(pid, 5000, "modprobe zram");
+            }
+        }
+    }
+    if (access("/sys/block/zram0/disksize", W_OK) != 0) {
+        say("init: zram0 unavailable; skipping compressed swap");
+        return;
+    }
+    long long current_size = read_value("/sys/block/zram0/disksize", NULL);
+    if (current_size > 0) {
+        say("init: zram0 already sized (%lld bytes); leaving existing setup unchanged", current_size);
+        return;
+    }
+    long long mem_kib = read_value("/proc/meminfo", "MemTotal:");
+    if (mem_kib < 512LL * 1024LL) {
+        say("init: zram0 skipped (system memory below 512 MiB)");
+        return;
+    }
+    long long half_bytes = (mem_kib / 2) * 1024LL;
+    long long max_bytes = 8LL * 1024LL * 1024LL * 1024LL;
+    long long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) {
+        page_size = 4096;
+    }
+    long long disk_bytes = half_bytes < max_bytes ? half_bytes : max_bytes;
+    disk_bytes = (disk_bytes / page_size) * page_size;
+    if (disk_bytes < 2 * page_size) {
+        return;
+    }
+    const char *algo = "zstd";
+    if (write_file("/sys/block/zram0/comp_algorithm", "zstd") < 0) {
+        if (write_file("/sys/block/zram0/comp_algorithm", "lz4") == 0) {
+            algo = "lz4";
+        } else {
+            algo = "default";
+        }
+    }
+    char size_str[32];
+    snprintf(size_str, sizeof size_str, "%lld", disk_bytes);
+    if (write_file("/sys/block/zram0/disksize", size_str) < 0) {
+        say("init: zram0 disksize %s failed: %s", size_str, strerror(errno));
+        return;
+    }
+    struct stat st;
+    if (stat("/dev/zram0", &st) != 0) {
+        char devno[32];
+        int dfd = open("/sys/block/zram0/dev", O_RDONLY | O_CLOEXEC);
+        ssize_t dn = dfd >= 0 ? read(dfd, devno, sizeof devno - 1) : -1;
+        if (dfd >= 0) close(dfd);
+        unsigned maj = 0, min = 0;
+        if (dn > 0) {
+            devno[dn] = '\0';
+            if (sscanf(devno, "%u:%u", &maj, &min) == 2) {
+                mknod("/dev/zram0", S_IFBLK | 0600, makedev(maj, min));
+            }
+        }
+    }
+    int zfd = open("/dev/zram0", O_RDWR | O_CLOEXEC);
+    if (zfd < 0) {
+        say("init: open /dev/zram0 failed: %s", strerror(errno));
+        write_file("/sys/block/zram0/reset", "1");
+        return;
+    }
+    /* Write a minimal Linux swap v1 header directly (zero external binary needed). */
+    unsigned char *hdr = calloc(1, (size_t)page_size);
+    if (hdr == NULL) {
+        close(zfd);
+        write_file("/sys/block/zram0/reset", "1");
+        say("init: zram0 out of memory preparing swap header");
+        return;
+    }
+    uint32_t version = 1;
+    uint32_t last_page = (uint32_t)((disk_bytes / page_size) - 1);
+    uint32_t nr_badpages = 0;
+    memcpy(hdr + 1024, &version, sizeof version);
+    memcpy(hdr + 1028, &last_page, sizeof last_page);
+    memcpy(hdr + 1032, &nr_badpages, sizeof nr_badpages);
+    memcpy(hdr + page_size - 10, "SWAPSPACE2", 10);
+    ssize_t wr = pwrite(zfd, hdr, (size_t)page_size, 0);
+    int werr = errno;
+    free(hdr);
+    close(zfd);
+    if (wr != (ssize_t)page_size) {
+        say("init: zram0 swap header write failed: %s", strerror(werr));
+        write_file("/sys/block/zram0/reset", "1");
+        return;
+    }
+    int flags = SWAP_FLAG_PREFER | ((100 << SWAP_FLAG_PRIO_SHIFT) & SWAP_FLAG_PRIO_MASK);
+    if (swapon("/dev/zram0", flags) == 0) {
+        zram_active = 1;
+        write_file("/proc/sys/vm/page-cluster", "0");
+        say("init: zram0 swap active (%.0f MiB, %s, priority 100)", (double)disk_bytes / MIB, algo);
+    } else {
+        say("init: swapon /dev/zram0 failed: %s", strerror(errno));
+        write_file("/sys/block/zram0/reset", "1");
+    }
+}
+
+/* Disable zram0 swap (on rc.conf zram="0", and before hibernation so frozen
+ * pages go to disk swap rather than inflating the hibernation image). swapoff
+ * can take a long time, as it moves every page out, so it runs in a child with
+ * a bound: best-effort, and logged either way. */
+static void teardown_zram_swap(const char *reason)
+{
+    if (!zram_active) {
+        return;
+    }
+    pid_t pid = fork();
+    if (pid == 0) {
+        stdin_null();
+        _exit(swapoff("/dev/zram0") == 0 ? 0 : 1);
+    }
+    int status = pid > 0 ? wait_child_bounded(pid, 20000, "swapoff /dev/zram0") : -1;
+    if (status == 0) {
+        zram_active = 0;
+        write_file("/sys/block/zram0/reset", "1");
+        say("init: zram0 swap disabled (%s)", reason);
+    } else {
+        say("init: zram0 swap still active (%s): swapoff failed or timed out; going on", reason);
+    }
+}
+
 /* Start argv (argv[0] a full path) in frame f, in a cgroup of its own, with
  * a control socket at fd 3. */
 static int start(struct frame *f, char *const argv[])
@@ -1253,6 +1449,7 @@ static int start(struct frame *f, char *const argv[])
 /* The screens: what each shows, and handing them, the keyboard and the
  * pointer to the programs that should have them. */
 static int display_pending;
+static int display_dirty = 1; /* 1: outputs need screen_refresh() once no lease is active */
 static double display_refresh_at = -1;
 static double display_retry_until = -1;
 
@@ -1458,6 +1655,7 @@ static int lend(struct frame *f, uint32_t mask)
     fds[0] = n ? screen_lend_outputs(names, n, &f->lessee) : screen_lend(&f->lessee);
     if (fds[0] < 0) {
         f->lessee = 0;
+        display_dirty = 1;
         display_pending = 1;
         display_refresh_at = now_ms() + 200;
         display_retry_until = now_ms() + 2000;
@@ -1486,6 +1684,7 @@ static int lend(struct frame *f, uint32_t mask)
 static void tell_tasks(void);
 static void display_changed(void)
 {
+    display_dirty = 1;
     display_pending = 1;
     display_refresh_at = now_ms() + 100;
     display_retry_until = now_ms() + 2000;
@@ -1510,6 +1709,7 @@ static void reclaim(struct frame *f)
         display_changed();
     } else if (restored < 0) {
         say("init: cannot reclaim DRM master from %s", f->name);
+        display_dirty = 1;
         /* The shared display's compositor is master on a file of its own,
          * which no other file can make drop it (drm_auth.c: SET_MASTER is
          * EBUSY while another master exists): it has not let go, so it
@@ -1654,9 +1854,56 @@ static void take_back(struct frame *f)
     reclaim(f);
 }
 
+static void reclaim_cancel(struct frame *f)
+{
+    f->reclaim_pending = 0;
+    f->reclaim_bytes = 0;
+    if (f->reclaim_pid > 0) {
+        kill(f->reclaim_pid, SIGTERM);
+        f->reclaim_pid = 0;
+    }
+}
+
+/* Reclaim a frozen frame's memory in a detached worker child so swap I/O never
+ * stalls process 1 or the foreground task switch critical path. */
+static void reclaim_start(struct frame *f)
+{
+    if (!f->reclaim_pending || !f->frozen || f->reclaim_bytes <= 0) {
+        f->reclaim_pending = 0;
+        return;
+    }
+    long long bytes = f->reclaim_bytes;
+    f->reclaim_pending = 0;
+    char path[96], ev_path[96];
+    snprintf(path, sizeof path, "%s/memory.reclaim", f->cgroup);
+    if (access(path, W_OK) != 0) {
+        return;
+    }
+    if (f->reclaim_pid > 0) {
+        kill(f->reclaim_pid, SIGTERM);
+        f->reclaim_pid = 0;
+    }
+    snprintf(ev_path, sizeof ev_path, "%s/cgroup.events", f->cgroup);
+    pid_t pid = fork();
+    if (pid == 0) {
+        sigset_t empty;
+        sigemptyset(&empty);
+        sigprocmask(SIG_SETMASK, &empty, NULL);
+        if (read_value(ev_path, "frozen") == 1) {
+            char amount[32];
+            snprintf(amount, sizeof amount, "%lld", bytes);
+            write_file(path, amount); /* EAGAIN: kernel reclaimed less than asked */
+        }
+        _exit(0);
+    }
+    if (pid > 0) {
+        f->reclaim_pid = pid;
+    }
+}
+
 static void freeze(struct frame *f)
 {
-    char path[96], amount[32];
+    char path[96];
     double t0 = now_ms();
 
     /* A program holding a live link (extdisplay) keeps running without the
@@ -1664,20 +1911,42 @@ static void freeze(struct frame *f)
      * (the lock revokes it; without the screen it has no keys). */
     if (f->holding || (apps_session_holding && apps_session_holding(f->cgroup))) return;
     if (apps_sessions_revoke) apps_sessions_revoke(f->cgroup); /* its sessions ask again after a thaw */
+    reclaim_cancel(f);
     snprintf(path, sizeof path, "%s/cgroup.freeze", f->cgroup);
     write_file(path, "1");
     snprintf(path, sizeof path, "%s/cgroup.events", f->cgroup);
-    while (read_value(path, "frozen") != 1 && now_ms() - t0 < 2000) {
-        usleep(1000);
+    if (read_value(path, "frozen") != 1) {
+        int watch = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+        if (watch >= 0 && inotify_add_watch(watch, path, IN_MODIFY | IN_DELETE_SELF) < 0) {
+            close(watch);
+            watch = -1;
+        }
+        while (read_value(path, "frozen") != 1 && now_ms() - t0 < 2000) {
+            if (watch >= 0) {
+                int left = 2000 - (int)(now_ms() - t0);
+                if (left <= 0) break;
+                struct pollfd w = { .fd = watch, .events = POLLIN };
+                int r = poll(&w, 1, left > 50 ? 50 : left);
+                if (r > 0) {
+                    char buf[512];
+                    while (read(watch, buf, sizeof buf) > 0) {}
+                } else if (r < 0 && errno != EINTR) {
+                    close(watch);
+                    watch = -1;
+                }
+            } else {
+                usleep(1000);
+            }
+        }
+        if (watch >= 0) {
+            close(watch);
+        }
     }
     double frozen_ms = now_ms() - t0, before = cg_mib(f, "memory.current");
-    snprintf(path, sizeof path, "%s/memory.reclaim", f->cgroup);
-    snprintf(amount, sizeof amount, "%lld", (long long)(before * MIB));
-    write_file(path, amount); /* EAGAIN: it reclaimed less than asked */
     f->frozen = 1;
-    say("init: froze %s in %.1f ms; reclaim %.1f -> %.1f MiB in memory, %.1f MiB in swap, %.1f ms",
-        f->name, frozen_ms, before, cg_mib(f, "memory.current"), cg_mib(f, "memory.swap.current"),
-        now_ms() - t0 - frozen_ms);
+    f->reclaim_bytes = (long long)(before * MIB);
+    f->reclaim_pending = f->reclaim_bytes > 0;
+    say("init: froze %s in %.1f ms (%.1f MiB; reclaim deferred)", f->name, frozen_ms, before);
 }
 
 static void thaw(struct frame *f)
@@ -1685,6 +1954,7 @@ static void thaw(struct frame *f)
     char path[96];
     double t0 = now_ms();
 
+    reclaim_cancel(f);
     snprintf(path, sizeof path, "%s/cgroup.freeze", f->cgroup);
     write_file(path, "0");
     f->frozen = 0;
@@ -1833,9 +2103,10 @@ static void arrange(void)
     }
     int lent = 0;
     for (int k = 0; k < n; k++) lent |= all[k]->screens != 0;
-    if (!lent) {
-        screen_refresh();
+    if (!lent && (display_dirty || display_pending || nplaces == 0)) {
+        int r = screen_refresh();
         sync_places();
+        display_dirty = r > 0 ? 0 : 1;
     }
     for (int k = 0; k < n; k++) {
         struct frame *f = all[k];
@@ -1851,7 +2122,16 @@ static void arrange(void)
         send3(&home, "shown", home_waits, NULL);
         home_waits[0] = '\0';
     }
-    if (desktop_watch >= 0) display_sync_due = 1; /* a retained frame may have returned */
+    /* Start deferred memory.reclaim in background only after the destination
+     * frame already owns the screen and inputs. */
+    for (int k = 0; k < n; k++) {
+        if (all[k]->reclaim_pending) {
+            reclaim_start(all[k]);
+        }
+    }
+    if (desktop_watch >= 0) {
+        display_sync_due = 1; /* a retained frame may have returned */
+    }
 }
 
 /* Topology changes never freeze/restart a direct task. The shared display
@@ -1872,6 +2152,7 @@ static int refresh_display(void)
             take_back(all[k]);
         }
     }
+    display_dirty = 1;
     arrange();
     int lent = 0;
     for (int k = 0; k < n; k++) lent |= all[k]->screens != 0;
@@ -1880,12 +2161,14 @@ static int refresh_display(void)
         for (int k = 0; k < nhad; k++) {
             if (!had[k]->screens && !had[k]->shared_display && had[k]->pid > 0 && !had[k]->frozen) {
                 freeze(had[k]);
+                reclaim_start(had[k]);
             }
         }
         say("init: refreshed outputs: %d screen%s", nplaces, nplaces == 1 ? "" : "s");
     } else {
         /* Keep the tasks and their shadows. A subsequent DRM event retries
          * even when the same connector and mode return after a disconnect. */
+        display_dirty = 1;
         display_pending = 1;
         display_refresh_at = now_ms() < display_retry_until ? now_ms() + 200 : -1;
         say("init: outputs unavailable; waiting for a display change");
@@ -1955,12 +2238,12 @@ static int place_named(const char *name)
 static int home_place(void)
 {
     int internal = internal_place();
-    if (focus_place < nplaces && places[focus_place].task == NULL) return focus_place;
-    if (internal < nplaces && places[internal].task == NULL) return internal;
+    if (focus_place >= 0 && focus_place < nplaces && places[focus_place].task == NULL) return focus_place;
+    if (internal >= 0 && internal < nplaces && places[internal].task == NULL) return internal;
     for (int i = 0; i < nplaces; i++) {
         if (places[i].task == NULL) return i;
     }
-    return focus_place;
+    return focus_place >= 0 && focus_place < MAX_SCREENS ? focus_place : 0;
 }
 
 /* The task argv on screen at (-1: home_place's), thawed at its top or
@@ -1998,8 +2281,11 @@ static int do_open(int at, char *const argv[])
         for (int i = 0; i < nplaces; i++) {
             if (places[i].task == t) places[i].task = NULL;
         }
-        places[at >= 0 && at < nplaces ? at : home_place()].task = t;
-        if (places[focus_place].task != t) focus_place = place_of(t);
+        int dst = at >= 0 && at < nplaces ? at : home_place();
+        if (dst >= 0 && dst < MAX_SCREENS) {
+            places[dst].task = t;
+            if (focus_place < 0 || focus_place >= MAX_SCREENS || places[focus_place].task != t) focus_place = dst;
+        }
     }
     arrange();
     return 0;
@@ -2103,6 +2389,7 @@ static void do_kill(char *const argv[])
         for (int d = t->depth - 1; d >= 0; d--) {
             struct frame *f = &t->f[d];
             desktop_forget(f);
+            reclaim_cancel(f);
             if (f->frozen) {
                 thaw(f);
             }
@@ -2121,11 +2408,15 @@ static void do_kill(char *const argv[])
             rmdir(f->cgroup);
             f->pid = 0;
         }
+        if (search_prev == t) {
+            search_prev = NULL;
+        }
         unplace(t);
         if (strcmp(home_waits, key) == 0) home_waits[0] = '\0';
         t->depth = 0;
         send3(&home, "ended", key, "137");
         arrange();
+        display_sync_due = 1;
         return;
     }
     send3(&home, "ended", key, "0");
@@ -2144,6 +2435,9 @@ static void go_home(int at)
     if (t == NULL) {
         return;
     }
+    if (strcmp(t->key, search_argv[0]) == 0) {
+        search_prev = NULL;
+    }
     latch_lock_due(); /* the idle time may have run out on this live link, with no input since */
     unplace(t);
     answer_home(t, "back", NULL);
@@ -2151,6 +2445,7 @@ static void go_home(int at)
         lock(); /* due: home only past the lock (lock() clears lock_due) */
     }
     arrange(); /* locked: nothing changes until it unlocks */
+    display_sync_due = 1;
 }
 
 /* The next (dir 1) or previous (-1) of home and the running tasks not on
@@ -2171,6 +2466,9 @@ static void do_switch(int at, int dir)
     }
     struct task *to = ring[(k + dir + n) % n];
     if (n < 2 || dir == 0 || to == now) return;
+    if (now != NULL && strcmp(now->key, search_argv[0]) == 0) {
+        search_prev = NULL;
+    }
     if (to != NULL && to->f[0].shared_display) {
         if (to->f[0].display_retained && held_in_front()) return;
         display_front = to;
@@ -2184,6 +2482,48 @@ static void do_switch(int at, int dir)
         }
     }
     arrange();
+    display_sync_due = 1;
+}
+
+/* Open global search (/usr/local/bin/search) on the focused framebuffer screen.
+ * Opens search as a direct task on focus_place and remembers the replaced task
+ * so exiting search returns cleanly to that task (or to home). Ignored if
+ * search is already focused. */
+static void open_search(void)
+{
+    if (nplaces <= 0) {
+        return;
+    }
+    struct frame *cur = focused();
+    if (cur != NULL && strcmp(cur->name, "search") == 0) {
+        return;
+    }
+    /* If search is already open on another screen, focus that screen instead
+     * of migrating it and stranding its previous screen at home. */
+    for (int i = 0; i < MAX_TASKS; i++) {
+        if (tasks[i].depth > 0 && strcmp(tasks[i].key, search_argv[0]) == 0) {
+            int p = place_of(&tasks[i]);
+            if (p >= 0 && p < nplaces) {
+                focus_place = p;
+                keys_place();
+                return;
+            }
+        }
+    }
+    if (access(search_argv[0], X_OK) != 0) {
+        say("init: %s is not installed", search_argv[0]);
+        return;
+    }
+    int at = focus_place >= 0 && focus_place < nplaces ? focus_place : 0;
+    struct task *prev = at < nplaces ? places[at].task : NULL;
+    if (do_open(at, search_argv) == 0) {
+        if (prev != NULL && strcmp(prev->key, search_argv[0]) != 0) {
+            search_prev = prev;
+        } else {
+            search_prev = NULL;
+        }
+        display_sync_due = 1;
+    }
 }
 
 /* The lock screen on top of everything (lock_argv), on every screen: what
@@ -2303,6 +2643,7 @@ static void unlock(void)
     active_at = blank_active_at = now_ms();
     say("init: unlocked");
     arrange();
+    display_sync_due = 1;
 }
 
 /* Every keyboard, mouse, touchpad, touch screen and pen (pointer_lend's
@@ -2461,6 +2802,49 @@ static int grace_unlock(void)
     return 1;
 }
 
+/* Drain queued evdev packets from activity descriptors without blocking.
+ * Returns 1 if any event was read. */
+static int activity_drain(void)
+{
+    int saw = 0;
+    char events[64 * sizeof(struct input_event)];
+    for (size_t i = 0; i < nafd; i++) {
+        for (;;) {
+            ssize_t r = read(afd[i], events, sizeof events);
+            if (r > 0) {
+                saw = 1;
+            } else {
+                break;
+            }
+        }
+    }
+    return saw;
+}
+
+/* Arm a short cooldown on afd[] after direct-screen activity so high-rate mice
+ * and touchpads do not wake process 1 at 125-1000 Hz while still resetting the
+ * idle timer promptly. Never disarms while blanked or in lock grace. */
+static void activity_cooldown(void)
+{
+    if (direct_dark || shared_dark || (locked && lock_grace_until >= 0) || (!locked && display_front != NULL)) {
+        afd_rearm_at = -1;
+        return;
+    }
+    double now = now_ms();
+    double next_idle = -1;
+    double il = idle_lock_at(), ib = idle_blank_at();
+    if (il >= 0 && (next_idle < 0 || il < next_idle)) next_idle = il;
+    if (ib >= 0 && (next_idle < 0 || ib < next_idle)) next_idle = ib;
+    if (next_idle > now + 2500) {
+        double target = next_idle - 2000;
+        if (target > now + 5000) target = now + 5000;
+        afd_rearm_at = target;
+        afd_state = AFD_COOLDOWN;
+    } else {
+        afd_rearm_at = -1;
+    }
+}
+
 /* An input came: the idle time starts again, after a due lock is latched;
  * within an idle lock's grace, it unlocks. */
 static void input_seen(void)
@@ -2470,6 +2854,7 @@ static void input_seen(void)
     idle_power_wake();
     blank_tried = 0;
     active_at = blank_active_at = now_ms();
+    activity_cooldown();
 }
 
 /* The main loop once idle_lock_at has come: the lock, or with a live link
@@ -2506,6 +2891,7 @@ static void stop_display(struct task *t)
     struct frame *f = &t->f[0];
     if (display_front == t) go_home(-1);
     desktop_forget(f);
+    reclaim_cancel(f);
     if (f->frozen) {
         thaw(f);
     }
@@ -2561,6 +2947,7 @@ static int sync_display(int apps_changed)
         struct frame *f = &t->f[0];
         if (!f->frozen && !f->screens) {
             freeze(f);
+            reclaim_start(f);
             did = 1;
         }
         return did;
@@ -2637,6 +3024,7 @@ static void gone(struct frame *f)
     int retained = f->display_retained;
 
     desktop_forget(f);
+    reclaim_cancel(f);
     if (f->frozen) {
         thaw(f); /* a frozen process cannot finish exiting */
     }
@@ -2697,9 +3085,27 @@ static void gone(struct frame *f)
             arrange(); /* the one below has its screens again, if the task is on any */
             send3(top(t), "returned", name, code);
         } else {
+            int was_search = strcmp(t->key, search_argv[0]) == 0;
+            int restore_at = was_search ? place_of(t) : -1;
+            if (search_prev == t) {
+                search_prev = NULL;
+            }
             unplace(t);
+            /* Restore the displaced task only when search was cancelled (status 0).
+             * A non-zero exit (status 2 = launched a result) leaves home / the
+             * opened target in front instead of burying home behind search_prev. */
+            if (was_search && status == 0 && restore_at >= 0 && restore_at < nplaces &&
+                search_prev != NULL && search_prev->depth > 0 &&
+                !search_prev->f[0].shared_display && place_of(search_prev) < 0) {
+                places[restore_at].task = search_prev;
+                focus_place = restore_at;
+            }
+            if (was_search) {
+                search_prev = NULL;
+            }
             answer_home(t, "ended", code);
             arrange();
+            display_sync_due = 1;
         }
         return;
     }
@@ -3134,8 +3540,9 @@ struct settings_read {
     struct service *services;
     size_t count;
     int hibernate_after, login_skip, auto_lock, lock_high, lock_after, lock_grace, failed;
-    int auto_blank, blank_minutes, lid_holdoff, battery_critical;
+    int auto_blank, blank_minutes, lid_holdoff, battery_critical, zram;
     char mem_sleep[8];
+    char power_profile[16];
 };
 
 /* One setting of rc.conf (base.h) for process 1; the other settings belong
@@ -3180,6 +3587,24 @@ static void setting(const char *name, const char *value, void *arg)
             snprintf(next->mem_sleep, sizeof next->mem_sleep, "%s", value);
         } else {
             say("init: rc.conf: mem_sleep \"%s\" is none of deep, s2idle, shallow; left out", value);
+        }
+    } else if (strcmp(name, "power_profile") == 0) {
+        if (!value[0]) {
+            snprintf(next->power_profile, sizeof next->power_profile, "auto");
+        } else if (strcmp(value, "auto") == 0 || strcmp(value, "power") == 0 ||
+                   strcmp(value, "balanced") == 0 || strcmp(value, "performance") == 0) {
+            snprintf(next->power_profile, sizeof next->power_profile, "%s", value);
+        } else {
+            say("init: rc.conf: power_profile \"%s\" is none of auto, power, balanced, performance; left out", value);
+        }
+    } else if (strcmp(name, "zram") == 0) {
+        if (!value[0] || strcmp(value, "1") == 0) {
+            next->zram = 1;
+        } else if (strcmp(value, "0") == 0) {
+            next->zram = 0;
+        } else {
+            say("init: rc.conf: zram \"%s\" is none of 0, 1; defaulting to 1", value);
+            next->zram = 1;
         }
     } else if (strcmp(name, "login_skip") == 0) {
         next->login_skip = strcmp(value, "1") == 0;
@@ -3270,7 +3695,8 @@ static void read_settings(void)
 {
     apply_hostname();
     struct settings_read next = { .hibernate_after = hibernate_after, .auto_lock = 1, .lock_after = 600,
-                                  .lock_grace = 5, .blank_minutes = 5, .lid_holdoff = 30, .battery_critical = 5 };
+                                  .lock_grace = 5, .blank_minutes = 5, .lid_holdoff = 30, .battery_critical = 5,
+                                  .zram = 1, .power_profile = "auto" };
     int read = rc_read(setting, &next);
     if (read < 0 || next.failed) {
         say("init: cannot %s %s; services unchanged", read < 0 ? "read" : "allocate services for", RC_CONF);
@@ -3326,7 +3752,9 @@ static void read_settings(void)
     hibernate_after = next.hibernate_after;
     lid_holdoff = next.lid_holdoff;
     battery_critical = next.battery_critical;
+    zram_enabled = next.zram;
     snprintf(mem_sleep, sizeof mem_sleep, "%s", next.mem_sleep);
+    snprintf(power_profile, sizeof power_profile, "%s", next.power_profile[0] ? next.power_profile : "auto");
     login_skip = next.login_skip;
     auto_lock = next.lock_high ? 1 : next.auto_lock;
     lock_after = next.lock_after;
@@ -3342,11 +3770,12 @@ static void read_settings(void)
     if (!auto_lock || lock_after <= 0) {
         lock_due = 0; /* never locked for want of input now */
     }
-    keys_reload(); /* key_home, key_lock */
+    keys_reload(); /* key_home, key_lock, key_search */
     say("init: settings: hibernate_after %d s, lid_holdoff %d s, battery_critical %d %%, mem_sleep %s, "
-        "login_skip %d, auto_lock %d, lock_after %d s, lock_grace %d s, display-off after %d s, %zu services",
+        "power_profile %s, zram %d, login_skip %d, auto_lock %d, lock_after %d s, lock_grace %d s, "
+        "display-off after %d s, %zu services",
         hibernate_after, lid_holdoff, battery_critical, mem_sleep[0] ? mem_sleep : "(the kernel's)",
-        login_skip, auto_lock, lock_after, lock_grace, blank_after, nservices);
+        power_profile, zram_enabled, login_skip, auto_lock, lock_after, lock_grace, blank_after, nservices);
 }
 
 static void service_start(struct service *s)
@@ -3412,12 +3841,21 @@ static void reap(void)
             home.reaped = 1;
             home.status = status;
         }
+        if (home.reclaim_pid == pid) {
+            home.reclaim_pid = 0;
+        }
         if (locker.pid == pid) {
             locker.reaped = 1;
             locker.status = status;
         }
+        if (locker.reclaim_pid == pid) {
+            locker.reclaim_pid = 0;
+        }
         for (int i = 0; i < MAX_TASKS; i++) {
             for (int d = 0; d < tasks[i].depth; d++) {
+                if (tasks[i].f[d].reclaim_pid == pid) {
+                    tasks[i].f[d].reclaim_pid = 0;
+                }
                 if (tasks[i].f[d].pid == pid) {
                     tasks[i].f[d].reaped = 1;
                     tasks[i].f[d].status = status;
@@ -3432,9 +3870,11 @@ static void reap(void)
                 say("init: service ended (pid %d, status %d): %s", (int)pid,
                     WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status), services[i].command);
                 services[i].pid = 0;
-                services[i].restart_at = now_ms() + 5000;
-                if (services[i].retiring) {
-                    services[i].restart_at = 0; /* taken out of rc.conf: not started again */
+                if (services[i].retiring || services[i].restart_now) {
+                    services[i].restart_at = 0;
+                    services[i].restart_now = 0;
+                } else {
+                    services[i].restart_at = now_ms() + 5000;
                 }
             }
         }
@@ -3500,7 +3940,7 @@ static void message(struct frame *f)
     } else if (strcmp(fields[0], "app") == 0 &&
                ((f == &home &&
                  (n == 3 || (n == 4 && (strcmp(fields[1], "open") == 0 || strcmp(fields[1], "open-own-tor") == 0)))) ||
-                (f->shared_display && n == 3 &&
+                ((f->shared_display || strcmp(f->name, "search") == 0) && n == 3 &&
                  (strcmp(fields[1], "open") == 0 || strcmp(fields[1], "open-own-tor") == 0)))) {
         /* app ACTION NAME (from the shared display's launcher: open[-own-tor]
          * only), or app open[-own-tor] NAME TARGET (from home) */
@@ -3520,13 +3960,28 @@ static void message(struct frame *f)
         if (f->shared_display) {
             say("init: app %s %s: %s", fields[1], fields[2], why);
         }
-        if (result == 0 && open_view && f == &home) {
+        if (result == 0 && open_view && (f == &home || strcmp(f->name, "search") == 0)) {
+            int from_search = strcmp(f->name, "search") == 0;
+            if (from_search) {
+                search_prev = NULL;
+                for (int i = 0; i < MAX_TASKS; i++) {
+                    if (tasks[i].depth > 0 && strcmp(tasks[i].key, search_argv[0]) == 0) {
+                        unplace(&tasks[i]);
+                    }
+                }
+            }
+            const char *reply[] = { "app-result", "ok", fields[2], why, NULL };
+            control_send_fields(f->ctl, reply);
             stay_on_display = 1;
             do_open(-1, desktop_argv);
+            display_sync_due = 1;
+            desktop_app_changed();
+        } else {
+            display_sync_due = 1;
+            desktop_app_changed();
+            const char *reply[] = { "app-result", result == 0 ? "ok" : "error", fields[2], why, NULL };
+            control_send_fields(f->ctl, reply);
         }
-        desktop_app_changed();
-        const char *reply[] = { "app-result", result == 0 ? "ok" : "error", fields[2], why, NULL };
-        control_send_fields(f->ctl, reply);
     } else if (strcmp(fields[0], "window") == 0 && (n == 2 || n == 3) && (f->shared_display || f == &home)) {
         /* window PROGRAM [TARGET]: a host program as a managed window of its
          * own on the shared display (the top bar's status areas, a file
@@ -3543,6 +3998,7 @@ static void message(struct frame *f)
             stay_on_display = 1;
             do_open(-1, desktop_argv);
         }
+        display_sync_due = 1;
         desktop_app_changed();
         const char *reply[] = { "window-result", result == 0 ? "ok" : "error", fields[1], why, NULL };
         control_send_fields(f->ctl, reply);
@@ -3562,6 +4018,7 @@ static void message(struct frame *f)
         if (f->display_ready) return;
         f->display_ready = 1;
         apps_display_ready(); /* with or without the screens (the lock may have them) */
+        display_sync_due = 1;
         if (!f->screens || f->display_retained || stay_on_display) {
             if (f->screens) stay_on_display = 0;
             apps_tick();
@@ -3582,9 +4039,17 @@ static void message(struct frame *f)
         lock();
     } else if (n == 1 && f->shared_display && f->screens && display_front && f == top(display_front) &&
                strcmp(fields[0], "idle-lock") == 0) {
-        if (auto_lock && lock_after > 0 && !held_in_front()) idle_lock();
+        if (auto_lock && lock_after > 0 && !held_in_front()) {
+            if (afd_state == AFD_OFF) activity_drain();
+            idle_lock();
+            if (locked && lock_grace_until >= 0) {
+                afd_rearm_at = -1;
+                afd_state = AFD_ARMED;
+            }
+        }
     } else if (n == 1 && f->shared_display && f->screens && display_front && f == top(display_front) &&
                strcmp(fields[0], "idle-blanked") == 0) {
+        if (afd_state == AFD_OFF) activity_drain();
         shared_dark = 1;
         if (blank_after <= 0) idle_power_wake();
     } else if (n == 1 && f->shared_display && strcmp(fields[0], "idle-unblanked") == 0) {
@@ -4013,6 +4478,109 @@ static void battery_check(void)
     }
 }
 
+static int token_in_list(const char *list, const char *token)
+{
+    size_t tlen = strlen(token);
+    if (tlen == 0) {
+        return 0;
+    }
+    const char *p = list;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') {
+            p++;
+        }
+        const char *start = p;
+        while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') {
+            p++;
+        }
+        size_t len = (size_t)(p - start);
+        if (len >= 2 && start[0] == '[' && start[len - 1] == ']') {
+            start++;
+            len -= 2;
+        }
+        if (len == tlen && memcmp(start, token, tlen) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Native AC/battery laptop power-profile policy. Caches last applied AC state
+ * and effective profile so routine 1% battery uevents do not rewrite sysfs.
+ * Every write is best-effort: missing or read-only sysfs knobs are ignored. */
+static void apply_power_profile(int force)
+{
+    struct batteries b;
+    batteries_read(&b, 0);
+    int on_ac = b.count == 0 || (b.ac && !b.discharging);
+    const char *effective = strcmp(power_profile, "auto") == 0 ? (on_ac ? "balanced" : "power") : power_profile;
+
+    if (!force && power_ac_applied == on_ac && strcmp(power_profile_applied, effective) == 0) {
+        return;
+    }
+    power_ac_applied = on_ac;
+    snprintf(power_profile_applied, sizeof power_profile_applied, "%s", effective);
+
+    int applied = 0;
+
+    /* 1. CPU energy_performance_preference (intel_pstate / amd_pstate). */
+    DIR *d = opendir("/sys/devices/system/cpu");
+    if (d != NULL) {
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            if (strncmp(e->d_name, "cpu", 3) != 0 || !isdigit((unsigned char)e->d_name[3])) {
+                continue;
+            }
+            char path[384], avail[256];
+            snprintf(path, sizeof path, "/sys/devices/system/cpu/%s/cpufreq/energy_performance_available_preferences",
+                     e->d_name);
+            if (read_line(path, avail, sizeof avail) <= 0) {
+                continue;
+            }
+            const char *want = NULL;
+            if (strcmp(effective, "power") == 0) {
+                if (token_in_list(avail, "balance_power")) want = "balance_power";
+                else if (token_in_list(avail, "power")) want = "power";
+            } else if (strcmp(effective, "balanced") == 0) {
+                if (token_in_list(avail, "balance_performance")) want = "balance_performance";
+            } else if (strcmp(effective, "performance") == 0) {
+                if (token_in_list(avail, "performance")) want = "performance";
+            }
+            if (want != NULL) {
+                snprintf(path, sizeof path, "/sys/devices/system/cpu/%s/cpufreq/energy_performance_preference",
+                         e->d_name);
+                if (write_file(path, want) == 0) {
+                    applied = 1;
+                }
+            }
+        }
+        closedir(d);
+    }
+
+    /* 2. ACPI platform_profile (e.g. thinkpad_acpi). */
+    char choices[160];
+    if (read_line("/sys/firmware/acpi/platform_profile_choices", choices, sizeof choices) > 0) {
+        const char *want = strcmp(effective, "power") == 0 ? "low-power" :
+                           strcmp(effective, "performance") == 0 ? "performance" : "balanced";
+        if (token_in_list(choices, want) && write_file("/sys/firmware/acpi/platform_profile", want) == 0) {
+            applied = 1;
+        }
+    }
+
+    if (applied) {
+        say("init: power profile: %s (%s)", effective, on_ac ? "AC" : "battery");
+    }
+}
+
+static void flush_battery_history(void)
+{
+    for (size_t i = 0; i < nservices; i++) {
+        if (services[i].pid > 0 && strstr(services[i].command, "battery-history") != NULL) {
+            kill(services[i].pid, SIGUSR1);
+        }
+    }
+}
+
 /* Hibernate: the kernel writes everything in memory to the swap (resume_dev)
  * and powers the machine off. At the next start resume() brings it all back
  * and this returns 0, as if the machine had only slept; -1 if the image
@@ -4020,13 +4588,21 @@ static void battery_check(void)
 static int hibernate(void)
 {
     say("init: hibernating to %s", swap_dev);
+    flush_battery_history();
+    teardown_zram_swap("before hibernation");
     save_log();
     sync();
     if (write_file("/sys/power/state", "disk") < 0) {
         say("init: cannot hibernate: %s", strerror(errno));
+        if (zram_enabled) {
+            setup_zram_swap();
+        }
         return -1;
     }
     say("init: back from hibernation");
+    if (zram_enabled) {
+        setup_zram_swap();
+    }
     return 0;
 }
 
@@ -4140,14 +4716,16 @@ static void woke_up(double slept)
     idle_power_wake();
     blank_tried = 0;
     blank_active_at = now_ms();
+    apply_power_profile(1);
     if (fork() == 0) {
         execl("/usr/local/bin/settings", "settings", "--apply", (char *)NULL);
         _exit(0);
     }
     for (size_t i = 0; i < nservices; i++) {
         if (services[i].pid > 0 && strstr(services[i].command, "network-client") != NULL) {
+            services[i].restart_now = 1;
             kill(services[i].pid, SIGTERM);
-            /* reap() schedules the restart after the old service has exited. */
+            /* reap() restarts it immediately after the old service exits. */
         }
     }
     screen_flush();
@@ -4181,6 +4759,7 @@ static double suspend(int lid)
     double a = boottime();
     int slept = 0, refused = 0;
 
+    flush_battery_history();
     save_log();
     sync();
     if (mem_sleep[0] && write_file("/sys/power/mem_sleep", mem_sleep) < 0) {
@@ -4631,6 +5210,10 @@ int main(void)
         read_settings();
         modules_start("");
         say("init: drivers loaded at %.3f s", uptime());
+        if (zram_enabled) {
+            setup_zram_swap();
+        }
+        apply_power_profile(1);
         if (access("/usr/local/bin/settings", X_OK) == 0) {
             double t0 = uptime();
             say("init: applying settings at %.3f s", t0);
@@ -4714,8 +5297,9 @@ int main(void)
     }
 
     for (;;) {
-        /* signals, system inputs, keyboards, home, tasks, uevents, jobs, app cgroups */
-        struct pollfd p[1 + 8 + MAX_KBD + MAX_ACTIVITY + 3 + MAX_TASKS * MAX_DEPTH + 3];
+        /* signals, system inputs, keyboards, activity, home, lock, tasks,
+         * desktop watch, uevents, jobs, drain, app watches/ready_fd */
+        struct pollfd p[1 + 8 + MAX_KBD + MAX_ACTIVITY + 3 + MAX_TASKS * MAX_DEPTH + 4 + APPS_POLL_MAX];
         struct frame *who[sizeof p / sizeof p[0]];
         int n = 0;
         int signal_j = n; /* SIGCHLD, SIGHUP, SIGTERM, SIGINT, SIGUSR2, SIG_POWEROFF_NOW, SIG_REBOOT_NOW */
@@ -4730,10 +5314,47 @@ int main(void)
             who[n] = NULL;
             p[n++] = (struct pollfd){ .fd = kfd[i], .events = POLLIN };
         }
+        /* Poll afd[] only when idle-lock, idle-blank, or grace/wake requires it:
+         * never while the shared display owns the screen (unless blanked/grace),
+         * and never during the brief post-activity cooldown window. */
+        double loop_now = now_ms();
+        int grace_active = locked && lock_grace_until >= 0 && loop_now < lock_grace_until;
+        int afd_urgent = direct_dark || shared_dark || grace_active;
+        int afd_wanted = afd_urgent ||
+                         (!locked && display_front == NULL &&
+                          ((auto_lock && lock_after > 0) || blank_after > 0));
+        int afd_poll = 0;
+        if (!afd_wanted) {
+            afd_state = AFD_OFF;
+            afd_rearm_at = -1;
+        } else if (afd_urgent) {
+            if (afd_state == AFD_OFF) activity_drain();
+            afd_rearm_at = -1;
+            afd_state = AFD_ARMED;
+            afd_poll = 1;
+        } else if (afd_state == AFD_OFF) {
+            activity_drain();
+            afd_rearm_at = -1;
+            afd_state = AFD_ARMED;
+            afd_poll = 1;
+        } else if (afd_state == AFD_COOLDOWN) {
+            if (afd_rearm_at < 0 || loop_now >= afd_rearm_at) {
+                afd_rearm_at = -1;
+                afd_state = AFD_ARMED;
+                if (activity_drain()) {
+                    input_seen();
+                }
+                if (afd_state == AFD_ARMED) afd_poll = 1;
+            }
+        } else {
+            afd_poll = 1;
+        }
         int activity_j = n; /* [activity_j, activity_end): input, to see that there is some */
-        for (size_t i = 0; i < nafd; i++) {
-            who[n] = NULL;
-            p[n++] = (struct pollfd){ .fd = afd[i], .events = POLLIN };
+        if (afd_poll) {
+            for (size_t i = 0; i < nafd; i++) {
+                who[n] = NULL;
+                p[n++] = (struct pollfd){ .fd = afd[i], .events = POLLIN };
+            }
         }
         int activity_end = n;
         if (home.pid != 0) {
@@ -4774,10 +5395,16 @@ int main(void)
             who[n] = NULL;
             p[n++] = (struct pollfd){ .fd = drain_fd, .events = POLLIN };
         }
+        int apps_j = n, apps_n = 0;
+        if (apps_poll_fds) {
+            apps_n = apps_poll_fds(p + n, APPS_POLL_MAX);
+            for (int i = 0; i < apps_n; i++) who[n + i] = NULL;
+            n += apps_n;
+        }
         /* Wake up for the next timed thing: a service to start again, the
          * idle measurement, the debug reboot, the lid's second look, the
          * critical battery's action and its fallback look, a waiting
-         * shutdown's look. */
+         * shutdown's look, activity cooldown expiry, or an app deadline. */
         double next = -1;
         for (size_t i = 0; i < nservices; i++) {
             if (services[i].pid == 0 && !services[i].retiring && (next < 0 || services[i].restart_at < next)) {
@@ -4790,8 +5417,9 @@ int main(void)
         if (lock_start_at >= 0 && (next < 0 || lock_start_at < next)) {
             next = lock_start_at;
         }
-        double timers[4] = { lid_check_at, battery_act_at, battery_check_at, shutdown_at };
-        for (int i = 0; i < 4; i++) {
+        double timers[5] = { lid_check_at, battery_act_at, battery_check_at, shutdown_at,
+                             afd_state == AFD_COOLDOWN ? afd_rearm_at : -1 };
+        for (int i = 0; i < 5; i++) {
             if (timers[i] >= 0 && (next < 0 || timers[i] < next)) {
                 next = timers[i];
             }
@@ -4808,11 +5436,12 @@ int main(void)
             }
         }
         int timeout = next < 0 ? -1 : next > now_ms() ? (int)(next - now_ms()) + 1 : 0;
-        if (apps_display_state() == APPS_DISPLAY_ACTIVE && shared_display_task() == NULL &&
-            (timeout < 0 || timeout > 20)) {
-            timeout = 20;
-        }
-        if (apps_busy() && (timeout < 0 || timeout > 100)) {
+        if (apps_wait_ms) {
+            int aw = apps_wait_ms();
+            if (aw >= 0 && (timeout < 0 || aw < timeout)) {
+                timeout = aw;
+            }
+        } else if (apps_busy() && (timeout < 0 || timeout > 100)) {
             timeout = 100;
         }
         if (display_sync_due) timeout = 0;
@@ -4824,14 +5453,33 @@ int main(void)
         if (ready > 0 && desktop_j >= 0 && p[desktop_j].revents) {
             struct task *t = shared_display_task();
             if (t && t->f[0].display_retained) apps_changed = desktop_watch_refresh(&t->f[0]) > 0;
+            display_sync_due = 1;
         }
-        apps_tick();
-        /* What poll found ready may be stale after it (home's message read by
-         * take_back, then waited for again while home is frozen): poll again.
-         * A retained seat must hide its empty panel even while apps are busy. */
-        if (desktop_watch >= 0 || ready == 0 || !apps_busy()) {
+        int apps_fd_ready = 0;
+        if (ready > 0 && apps_n > 0) {
+            for (int i = 0; i < apps_n; i++) {
+                if (p[apps_j + i].revents) {
+                    apps_fd_ready = 1;
+                    break;
+                }
+            }
+        }
+        if (apps_fd_ready || apps_busy() || display_sync_due) {
+            int busy_before = apps_busy();
+            apps_tick();
+            if (apps_fd_ready || busy_before != apps_busy()) {
+                display_sync_due = 1;
+            }
+        }
+        /* Event-driven display sync: run when app/desktop/task state changed,
+         * and always clear display_sync_due so poll(timeout=0) can never spin
+         * while an app operation is still pending (apps_wait_ms() / ready_fd
+         * / SIGCHLD will wake us when it finishes). */
+        if (display_sync_due || apps_changed) {
             display_sync_due = 0;
-            if (sync_display(apps_changed)) continue;
+            if (desktop_watch >= 0 || ready == 0 || !apps_busy() || shared_display_task() == NULL) {
+                if (sync_display(apps_changed)) continue;
+            }
         }
         for (size_t i = 0; i < nservices; i++) {
             if (service_due(&services[i], now_ms())) {
@@ -4862,6 +5510,13 @@ int main(void)
         /* Drain ready input/control messages before acting on idle timeouts.
          * This includes compositor activity and an extended-display hold. */
         if (ready == 0) {
+            if (afd_state == AFD_COOLDOWN && afd_rearm_at >= 0 && now_ms() >= afd_rearm_at) {
+                afd_rearm_at = -1;
+                afd_state = AFD_ARMED;
+                if (activity_drain()) {
+                    input_seen();
+                }
+            }
             if (idle_lock_check()) continue;
             idle_blank_check();
         }
@@ -4895,7 +5550,13 @@ int main(void)
                     } else if (si.ssi_signo == SIGHUP) {
                         if (rooted) {
                             read_settings();
+                            if (zram_enabled && !zram_active) {
+                                setup_zram_swap();
+                            } else if (!zram_enabled && zram_active) {
+                                teardown_zram_swap("rc.conf zram=0");
+                            }
                             battery_check(); /* battery_critical: its trip points */
+                            apply_power_profile(1);
                         }
                     } else if (si.ssi_signo == SIGTERM) {
                         restart();
@@ -4911,6 +5572,7 @@ int main(void)
                 continue;
             }
             if (j == desktop_j) continue; /* already handled before control messages */
+            if (j >= apps_j && j < apps_j + apps_n) continue; /* already handled via apps_tick() */
             if (j == jobs_j) {
                 if (p[j].revents & POLLIN) {
                     shutdown_look();
@@ -4928,12 +5590,15 @@ int main(void)
             if (j == uevent_j) {
                 if (p[j].revents & POLLIN) {
                     int events = modules_event();
+                    int input_ev = modules_input_changed ? modules_input_changed() : 1;
                     if (events & MODULES_DISPLAY) display_changed();
-                    /* An input device may have come or gone; a charger's
-                     * uevent too reopens the activity devices. */
-                    if (input_refresh()) input_seen();
+                    /* Refresh input descriptors only on input or display uevents,
+                     * not on routine battery/network/block uevents. */
+                    if ((input_ev || (events & MODULES_DISPLAY)) && input_refresh()) {
+                        input_seen();
+                    }
                     int lid_again = 0;
-                    if (system_lost) {
+                    if (system_lost && (input_ev || (events & MODULES_DISPLAY))) {
                         for (int i = 0; i < npfd; i++) close(pfd[i]);
                         npfd = system_inputs(pfd, 8);
                         system_lost = npfd < npfd_boot;
@@ -4946,6 +5611,7 @@ int main(void)
                     }
                     if (events & MODULES_POWER) {
                         battery_check();
+                        apply_power_profile(0);
                     }
                     break;
                 }
@@ -5023,6 +5689,8 @@ int main(void)
                     restart_key(key); /* process 1's question has the keys */
                 } else if (key == K_HOME && !locked && !shared && !frame_holding(focused())) {
                     go_home(focus_place);
+                } else if (key == K_ACT_SEARCH && !locked && !shared && !frame_holding(focused())) {
+                    open_search();
                 } else if (key == K_ACT_LOCK && !shared) {
                     lock();
                 } else if (!locked && ctrl_alt_del(key)) {

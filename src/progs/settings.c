@@ -69,6 +69,16 @@ static int mods_now(void)
     return keys_modifiers ? keys_modifiers() : 0;
 }
 
+/* Seconds on the monotonic clock for UI throttles where tests stub uptime()
+ * to abort(). Network status throttles still use uptime() so fake-clock tests
+ * work. */
+static double settings_mono_sec(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0.0;
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
 static int power_thresh_count(void);
 static void apply_saved_battery_thresholds(void);
 extern int rc_bat_start, rc_bat_end;
@@ -243,6 +253,8 @@ static char terminal_key[128] = "Ctrl+Alt+T";
  * and lock_after (minutes without input; 0: never; 10 if not set). */
 static char lock_key[128] = "Super+L";
 static char home_key[256] = "Super+Esc Ctrl+Alt+Esc Ctrl+Alt+Super ThinkVantage";
+/* rc.conf's key_search ("": none): global search on host framebuffer and shared display. */
+static char search_key[128] = "Super+Space";
 /* rc.conf's keys for the input method (keys.c): the mode cycle, Chinese,
  * direct input, Chinese mode's punctuation width; "" for none. */
 #define NIME_KEYS 4
@@ -313,6 +325,18 @@ static const char *const extd_values[NEXTD] = { NULL, "hw", "sw" };
 static const char *const extd_labels[NEXTD] = { N_("auto (GPU if supported)"), N_("GPU hardware (prefer H.264)"), N_("CPU sandbox only") };
 static int extd_decode;
 static int cpu_opt_auto = -1; /* 1 auto native ISA, 0 baseline; -1 unset (read from /usr/local/lib/locachy/cpu) */
+/* rc.conf power_profile: CPU energy preference and ACPI platform profile. */
+enum { PPROF_AUTO, PPROF_POWER, PPROF_BALANCED, PPROF_PERF, NPPROFS };
+static const char *const power_profile_values[NPPROFS] = { "auto", "power", "balanced", "performance" };
+static const char *const power_profile_labels[NPPROFS] = {
+    N_("Auto (battery power-saving)"), N_("Power saver"), N_("Balanced"), N_("Performance"),
+};
+static int power_profile = PPROF_AUTO;
+/* rc.conf zram: compressed in-RAM swap (/dev/zram0), "1" on (default), "0" off. */
+static int zram_on = 1;
+/* rc.conf service_search and search_docs (Layer 2 document content indexing). */
+static int search_on;
+static int search_docs = 1;
 static char link_dev[32];     /* rc.conf's debug_link_interface: the port it reserves */
 static int clash_on;          /* rc.conf has service_clash */
 static int clash_proxy;       /* rc.conf's clash_mode is "proxy": its port only, no TUN */
@@ -374,6 +398,7 @@ static int nnets;
 #define TOR_PACKAGES "tor lyrebird-proxy" /* lyrebird (the AUR's lyrebird-proxy): obfs4, WebTunnel */
 #define NTP_SERVICE "/usr/local/lib/locachy/ntp-client"
 #define TIMEZONE_SERVICE "/usr/local/lib/locachy/timezone-client"
+#define SEARCH_SERVICE "/usr/local/lib/locachy/locachy-searchd"
 #define ZONEINFO "/usr/share/zoneinfo"
 #define SETUP "/usr/local/bin/locachy-setup"
 
@@ -403,6 +428,35 @@ static struct monitor monitors[MAX_MONITORS];
 static int nmonitors;
 
 static int selected;
+
+/* What draw() must redo: entries[] (the page's settings), the screen's rows
+ * (row_maps), the keyboards read again, and the whole screen painted. Each is
+ * set where its inputs change, not on every draw. */
+static int entries_dirty = 1, row_maps_dirty = 1, keyboards_dirty = 1, full_redraw = 1;
+static int static_text_dirty = 1, opt_cache_dirty = 1, rule_labels_dirty = 1;
+/* Set by main() once the page is shown: the rows then keep cached system text
+ * (refreshed where it changes); unit tests driving draw() directly read live. */
+static int in_ui_loop;
+/* Read on the poll tick, at K_SHOWN and where they change, not on every draw. */
+static int bri_ok, bri_cur, bri_max;
+static char clash_host_text[128], rclone_text[128], hostname_text[68], zone_text[128];
+static char boot_made_text[48], cpu_cur_text[48], cpu_lvl_text[48], apps_catalog_text[160];
+static int foot_installed;
+static char tailscale_line[160], clash_line[200], tor_line[200];
+static double ts_status_at = -10.0, cl_status_at = -10.0, tr_status_at = -10.0;
+static int net_due;                        /* network rows refresh once keys settle */
+static double net_refreshed_at = -100.0;   /* uptime() when network rows were last read */
+static int job_progress_id;
+static double job_progress_at = -100.0;
+static char job_progress_buf[112];
+static int tpm_lang_dirty, users_lang_dirty;
+static void refresh_brightness(void);
+static void refresh_opt_cache(void);
+static void refresh_rule_labels(void);
+static void refresh_boot_made(void);
+static void refresh_static_text(void);
+static void refresh_net_status(void);
+static void invalidate_translated_caches(void);
 
 /* Above the range of the pickers' item indices. */
 #define SETTINGS_HIT_BACK 10000
@@ -546,6 +600,8 @@ static int monitor_anchor(void)
 static void load_monitors(void)
 {
     nmonitors = 0;
+    row_maps_dirty = 1;
+    entries_dirty = 1;
     /* 1. Discover all hardware connectors from /sys/class/drm */
     DIR *dir = opendir("/sys/class/drm");
     struct dirent *e;
@@ -778,16 +834,18 @@ static void labwc_line(FILE *out, const char *line)
     const char *tap = strstr(line, "<tap>");
     const char *tap_end = tap ? strstr(tap, "</tap>") : NULL;
     const char *method = strstr(line, "<clickMethod></clickMethod>");
-    static const char *const markers[] = { "key=\"TERMINAL-KEY\"", "key=\"HOME-KEY\"", "key=\"LOCK-KEY\"",
-                                           "key=\"IME-KEY\"" };
+    static const char *const markers[] = {
+        "key=\"TERMINAL-KEY\"", "key=\"HOME-KEY\"", "key=\"LOCK-KEY\"",
+        "key=\"SEARCH-KEY\"", "key=\"IME-KEY\"",
+    };
     char ime_all[NIME_KEYS * (sizeof ime_keys[0] + 1)] = "";
     for (int i = 0; i < NIME_KEYS; i++) {
         strcat(ime_all, ime_keys[i]);
         strcat(ime_all, " ");
     }
-    const char *values[] = { terminal_key, home_key, lock_key, ime_all }, *term = NULL;
+    const char *values[] = { terminal_key, home_key, lock_key, search_key, ime_all }, *term = NULL;
     int marker = 0;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < (int)(sizeof markers / sizeof markers[0]); i++) {
         if ((term = strstr(line, markers[i])) != NULL) { marker = i; break; }
     }
     if (term) {
@@ -1196,6 +1254,19 @@ static void on_rc(const char *name, const char *value, void *arg)
         snprintf(lock_key, sizeof lock_key, "%s", value);
     } else if (strcmp(name, "key_home") == 0) {
         snprintf(home_key, sizeof home_key, "%s", value);
+    } else if (strcmp(name, "key_search") == 0) {
+        snprintf(search_key, sizeof search_key, "%s", value);
+    } else if (strcmp(name, "service_search") == 0) {
+        search_on = 1;
+    } else if (strcmp(name, "search_docs") == 0) {
+        search_docs = strcmp(value, "0") != 0;
+    } else if (strcmp(name, "power_profile") == 0) {
+        power_profile = PPROF_AUTO;
+        for (int i = 1; i < NPPROFS; i++) {
+            if (strcmp(value, power_profile_values[i]) == 0) power_profile = i;
+        }
+    } else if (strcmp(name, "zram") == 0) {
+        zram_on = strcmp(value, "0") != 0;
     } else if (strncmp(name, "key_ime", 7) == 0) {
         for (int i = 0; i < NIME_KEYS; i++) {
             if (strcmp(name, ime_key_names[i]) == 0) snprintf(ime_keys[i], sizeof ime_keys[i], "%s", value);
@@ -1618,6 +1689,8 @@ static void security_check(void)
     load_security_policy();
     load_tpm_status();
     load_duress_status();
+    entries_dirty = 1;
+    full_redraw = 1;
     if (r.status == 0) {
         snprintf(notice, sizeof notice, "%s", security_done ? security_done : _("Security settings applied."));
     } else {
@@ -1703,6 +1776,8 @@ struct face_cam {
     char stable[160]; /* its /dev/v4l link (the tool's stable_path), else path */
     int ir;
 };
+static struct face_cam face_cams[16]; /* capture cameras cached by load_face_camera / next_face_camera */
+static int nface_cams;
 
 /* Capability enumeration only: painting settings never starts streaming.
  * Lines "NODE<TAB>CANDIDATE<TAB>NAME<TAB>STABLE"; a tool from before
@@ -1759,12 +1834,24 @@ static void load_face_camera(void)
     if (f) {
         fclose(f);
     }
+    /* Probe capture cameras here, never on every redraw. */
+    nface_cams = face_cameras(face_cams, 16);
     if (!face_choice_loaded) {
-        struct face_cam cams[16];
         snprintf(face_choice, sizeof face_choice, "%s", face_camera);
-        int n = face_cameras(cams, 16);
-        if (face_camera_index(cams, n) < 0) face_choice[0] = '\0';
+        if (face_camera_index(face_cams, nface_cams) < 0) face_choice[0] = '\0';
         face_choice_loaded = 1;
+    }
+}
+
+/* The capture cameras for the Camera for faces row: probed when the page that
+ * holds the row (or Security) is entered, and by a face job or a camera test,
+ * never by K_SHOWN or a redraw. */
+static void refresh_face_cameras(void)
+{
+    if (face_choice_loaded) {
+        nface_cams = face_cameras(face_cams, 16);
+    } else {
+        load_face_camera();
     }
 }
 
@@ -1781,14 +1868,15 @@ static int face_camera_index(const struct face_cam *cams, int ncams)
     return -1;
 }
 
-/* What the camera row shows: the node, its name, infrared or not. */
+/* What the camera row shows: the node, its name, infrared or not. Reads the
+ * cached camera list without invoking the probe tool during draw(). */
 static void face_camera_label(char *out, size_t size)
 {
-    struct face_cam cams[16];
-    int ncams = face_cameras(cams, 16), i = face_camera_index(cams, ncams);
+    if (!face_choice_loaded && howdy_installed()) load_face_camera();
+    int i = face_camera_index(face_cams, nface_cams);
     if (i >= 0) {
         char label[256];
-        snprintf(label, sizeof label, "%s  %s%s", cams[i].path, cams[i].name, cams[i].ir ? _(" (infrared candidate)") : "");
+        snprintf(label, sizeof label, "%s  %s%s", face_cams[i].path, face_cams[i].name, face_cams[i].ir ? _(" (infrared candidate)") : "");
         snprintf(out, size, "%.*s", (int)(size ? size - 1 : 0), label);
     } else {
         snprintf(out, size, "%.*s", (int)(size ? size - 1 : 0), face_choice[0] ? face_choice : _("Automatic (infrared candidates)"));
@@ -1800,19 +1888,18 @@ static void face_camera_label(char *out, size_t size)
  * Enter is still the one tested and saved. */
 static int next_face_camera(int dir)
 {
-    struct face_cam cams[16];
-    int ncams = face_cameras(cams, 16);
-    if (ncams == 0) return -1;
-    int at = face_camera_index(cams, ncams) + 1;
-    int to = (at + dir + ncams + 1) % (ncams + 1);
-    snprintf(face_choice, sizeof face_choice, "%s", to ? cams[to - 1].stable : "");
+    nface_cams = face_cameras(face_cams, 16);
+    if (nface_cams == 0) return -1;
+    int at = face_camera_index(face_cams, nface_cams) + 1;
+    int to = (at + dir + nface_cams + 1) % (nface_cams + 1);
+    snprintf(face_choice, sizeof face_choice, "%s", to ? face_cams[to - 1].stable : "");
     return 0;
 }
 
 static char face_models[160]; /* howdy -U USER list: how many, or why none */
 static int face_delete_asked;
 
-static void load_faces(void)
+static void load_face_models(void)
 {
     const char *user = user_name();
     char buf[4096];
@@ -1833,7 +1920,14 @@ static void load_faces(void)
     } else {
         snprintf(face_models, sizeof face_models, "%s", _("none yet"));
     }
-    load_face_camera();
+}
+
+static void load_faces(void)
+{
+    load_face_models();
+    if (howdy_installed() && user_name()) {
+        load_face_camera();
+    }
 }
 
 static int in_term_wayland(char *const call[]);
@@ -2060,20 +2154,27 @@ static void start_pkg_job(const char *action, const char *package)
 }
 
 /* What job id does now: the last line of its output, or where it waits in
- * the queue. */
+ * the queue. Throttled to 0.5 s in the UI loop so redraws do not hammer IPC. */
 static void job_progress(int id, char *out, size_t size)
 {
     struct jobs_row r;
     char why[160];
-    out[0] = '\0';
-    if (id <= 0 || jobs_status(id, &r, why, sizeof why) < 0) {
+    double now = in_ui_loop ? settings_mono_sec() : 0.0;
+    if (in_ui_loop && id > 0 && id == job_progress_id && now - job_progress_at < 0.5) {
+        snprintf(out, size, "%s", job_progress_buf);
         return;
     }
-    if (strcmp(r.state, "queued") == 0) {
-        snprintf(out, size, _("queued (%d before it)"), r.position);
-    } else {
-        snprintf(out, size, "%.100s", r.last);
+    job_progress_id = id;
+    job_progress_at = now;
+    job_progress_buf[0] = '\0';
+    if (id > 0 && jobs_status(id, &r, why, sizeof why) >= 0) {
+        if (strcmp(r.state, "queued") == 0) {
+            snprintf(job_progress_buf, sizeof job_progress_buf, _("queued (%d before it)"), r.position);
+        } else {
+            snprintf(job_progress_buf, sizeof job_progress_buf, "%.100s", r.last);
+        }
     }
+    snprintf(out, size, "%s", job_progress_buf);
 }
 
 /* What the package job does now. */
@@ -2144,6 +2245,10 @@ static void pkg_check(void)
     pkg_job = 0;
     int ok = strcmp(r.state, "done") == 0;
     cjk_fonts = -1; /* fonts may have come or gone */
+    opt_cache_dirty = 1;
+    static_text_dirty = 1;
+    entries_dirty = 1;
+    full_redraw = 1;
     if (ime_job()) {
         signal_programs("locachy-bar", SIGHUP); /* it starts Rime again for Chinese Pinyin */
     }
@@ -2278,6 +2383,8 @@ static void repos_check(void)
     }
     repos_job = 0;
     load_repos();
+    entries_dirty = 1;
+    full_redraw = 1;
     int ok = strcmp(r.state, "done") == 0;
     if (strcmp(repos_what, "rank") == 0) {
         snprintf(notice, sizeof notice, ok ? _("Mirrors ranked.") : _("Some mirror lists were not ranked; see %s."),
@@ -2375,11 +2482,10 @@ static void tailscale_state(char *state, size_t ssize, char *ip, size_t isize)
     }
 }
 
-/* The Tailscale account row: refreshed every 2 s at most. */
+/* The Tailscale account row: refreshed every 2 s at most (using uptime()). */
 static const char *tailscale_status(void)
 {
     static char line[160];
-    static double at = -10;
     if (pkg_job && strcmp(pkg_name, "tailscale") == 0) {
         char progress[112];
         pkg_progress(progress, sizeof progress);
@@ -2393,10 +2499,10 @@ static const char *tailscale_status(void)
     if (!tailscale_enabled) {
         return _("off");
     }
-    if (uptime() - at < 2.0) {
+    if (uptime() - ts_status_at < 2.0) {
         return line;
     }
-    at = uptime();
+    ts_status_at = uptime();
     char state[32], ip[64];
     tailscale_state(state, sizeof state, ip, sizeof ip);
     if (strcmp(state, "Running") == 0) {
@@ -2441,11 +2547,10 @@ static void clash_host(char *out, size_t size)
 }
 
 /* The Clash status row: what mihomo's controller says (its unix socket),
- * refreshed every 2 s at most. */
+ * refreshed every 2 s at most (using uptime()). */
 static const char *clash_status(void)
 {
     static char line[200];
-    static double at = -10;
     char host[128], version[64] = "", secret[64], buf[512];
     if (pkg_job && strcmp(pkg_name, "mihomo") == 0) {
         char progress[112];
@@ -2460,15 +2565,16 @@ static const char *clash_status(void)
     if (!clash_on) {
         return _("off: the network goes direct");
     }
-    clash_host(host, sizeof host);
+    if (in_ui_loop) snprintf(host, sizeof host, "%s", clash_host_text);
+    else clash_host(host, sizeof host);
     if (!host[0]) {
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         return _("waiting for the subscription (Enter on the line above)");
     }
-    if (uptime() - at < 2.0) {
+    if (uptime() - cl_status_at < 2.0) {
         return line;
     }
-    at = uptime();
+    cl_status_at = uptime();
     static char *const argv[] = { "/usr/bin/curl", "--silent", "--max-time", "1", "--unix-socket",
                                   CLASH_STATE "/controller.sock", "http://localhost/version", NULL };
     command_output(argv, buf, sizeof buf);
@@ -2513,6 +2619,9 @@ static void clash_subscription(void)
         snprintf(notice, sizeof notice, _("Cannot write %s."), path);
         return;
     }
+    clash_host(clash_host_text, sizeof clash_host_text);
+    cl_status_at = -100.0;
+    clash_line[0] = '\0';
     snprintf(notice, sizeof notice, "%s", _("Subscription saved: Clash takes it within seconds."));
 }
 
@@ -2662,6 +2771,8 @@ static void tor_add_bridge(void)
         return;
     }
     load_bridges();
+    tr_status_at = -100.0;
+    tor_line[0] = '\0';
     snprintf(notice, sizeof notice, tor_choice() == 2 ?
              P_("Bridge added (%d now): Tor takes it within seconds.",
                 "Bridge added (%d now): Tor takes it within seconds.", tor_nbridges) :
@@ -2687,6 +2798,8 @@ static void tor_remove_bridges(void)
         return;
     }
     load_bridges();
+    tr_status_at = -100.0;
+    tor_line[0] = '\0';
     snprintf(notice, sizeof notice, "%s", _("Bridge lines removed."));
 }
 
@@ -2854,11 +2967,10 @@ static void tor_set(int choice)
              _("Tor through bridges: all the network goes through Tor, Tor through the bridges."));
 }
 
-/* The Tor status row: what tor-client says, refreshed every 2 s at most. */
+/* The Tor status row: what tor-client says, refreshed every 2 s at most (using uptime()). */
 static const char *tor_status(void)
 {
     static char line[200];
-    static double at = -10;
     if (pkg_job && tor_job()) {
         char progress[112];
         pkg_progress(progress, sizeof progress);
@@ -2872,10 +2984,10 @@ static const char *tor_status(void)
     if (!tor_on) {
         return _("off: the network goes direct");
     }
-    if (uptime() - at < 2.0) {
+    if (uptime() - tr_status_at < 2.0) {
         return line;
     }
-    at = uptime();
+    tr_status_at = uptime();
     static char *const argv[] = { TOR_SERVICE, "--status", NULL };
     command_output(argv, line, sizeof line);
     line[strcspn(line, "\n")] = '\0';
@@ -3395,9 +3507,38 @@ static int blank_index(void)
     return cpu_opt_index() + 1;
 }
 
-static int num_hw_items(void)
+/* Power profile (rc.conf power_profile: auto, power, balanced, performance). */
+static int power_profile_index(void)
 {
     return blank_index() + 2;
+}
+
+/* Compressed RAM swap (rc.conf zram: "1" on, "0" off). */
+static int zram_index(void)
+{
+    return power_profile_index() + 1;
+}
+
+/* Global search: shortcut key (key_search), index service (service_search),
+ * and Layer 2 document content indexing (search_docs). */
+static int search_key_index(void)
+{
+    return zram_index() + 1;
+}
+
+static int search_svc_index(void)
+{
+    return search_key_index() + 1;
+}
+
+static int search_docs_index(void)
+{
+    return search_svc_index() + 1;
+}
+
+static int num_hw_items(void)
+{
+    return search_docs_index() + 1;
 }
 
 /* The cloud service's status (rclone-client): name, path, state, last
@@ -3544,7 +3685,8 @@ static const char *const ime_key_labels[NIME_KEYS] = {
 static int rc_key_action(const char *rc_name)
 {
     static const struct { const char *name; int action; } actions[] = {
-        { "key_lock", K_ACT_LOCK }, { "key_ime", K_CTRL_SPACE }, { "key_ime_cn", K_ACT_IME_CN },
+        { "key_lock", K_ACT_LOCK }, { "key_search", K_ACT_SEARCH },
+        { "key_ime", K_CTRL_SPACE }, { "key_ime_cn", K_ACT_IME_CN },
         { "key_ime_raw", K_ACT_IME_RAW }, { "key_ime_width", K_ACT_IME_WIDTH },
     };
     for (size_t i = 0; i < sizeof actions / sizeof actions[0]; i++) {
@@ -3556,13 +3698,13 @@ static int rc_key_action(const char *rc_name)
 /* name is one of the keys of another of rc.conf's settings than rc_name. */
 static int key_taken(const char *rc_name, const char *name)
 {
-    const char *values[2 + NIME_KEYS] = { terminal_key, lock_key };
-    const char *names[2 + NIME_KEYS] = { "key_terminal", "key_lock" };
+    const char *values[3 + NIME_KEYS] = { terminal_key, lock_key, search_key };
+    const char *names[3 + NIME_KEYS] = { "key_terminal", "key_lock", "key_search" };
     for (int i = 0; i < NIME_KEYS; i++) {
-        values[2 + i] = ime_keys[i];
-        names[2 + i] = ime_key_names[i];
+        values[3 + i] = ime_keys[i];
+        names[3 + i] = ime_key_names[i];
     }
-    for (int i = 0; i < 2 + NIME_KEYS; i++) {
+    for (int i = 0; i < 3 + NIME_KEYS; i++) {
         char keys[128], *save = NULL;
         if (strcmp(names[i], rc_name) == 0) continue;
         snprintf(keys, sizeof keys, "%s", values[i]);
@@ -3611,8 +3753,9 @@ static void choose_key(const char *label, const char *rc_name, char *value, size
         int known = keys_last_name(name, sizeof name) == 0;
         int typeless = known && strchr(name, '+') == NULL && strlen(name) > 1 && strcmp(name, "Space") != 0 &&
                        strcmp(name, "Enter") != 0 && strcmp(name, "Tab") != 0; /* Henkan_Mode */
-        int action = key == K_ACT_HOME || key == K_ACT_LOCK || key == K_CTRL_SPACE || key == K_ACT_IME_CN ||
-                     key == K_ACT_IME_RAW || key == K_ACT_IME_WIDTH || (key >= K_VOL_UP && key <= K_BRI_DOWN);
+        int action = key == K_ACT_HOME || key == K_ACT_LOCK || key == K_ACT_SEARCH || key == K_CTRL_SPACE ||
+                     key == K_ACT_IME_CN || key == K_ACT_IME_RAW || key == K_ACT_IME_WIDTH ||
+                     (key >= K_VOL_UP && key <= K_BRI_DOWN);
         if ((action && key != own) || (known && key_taken(rc_name, name))) {
             /* TRANSLATORS: Esc is the Esc key; keep it. */
             snprintf(notice, sizeof notice, _("That key is another of rc.conf's; press another   Esc: keep %.40s"), now);
@@ -3722,6 +3865,7 @@ static void change_password(void)
  * shown, so a rule set to "no rule" stays a row until then. */
 #define MAX_RULES 32
 static char rule_types[MAX_RULES][OPEN_TYPE], rule_values[MAX_RULES][OPEN_NAME];
+static char rule_labels[MAX_RULES][160];
 static int nrules;
 
 static void rule_label(int i, char *out, size_t size)
@@ -3753,6 +3897,7 @@ static void cycle_rule(int i, int dir)
     }
     at = at < 0 ? 0 : (at + (dir > 0 ? 1 : n - 1)) % n;
     memcpy(rule_values[i], names[at], OPEN_NAME);
+    rule_label(i, rule_labels[i], sizeof rule_labels[i]);
     if (open_set_rule(rule_types[i], names[at][0] ? names[at] : NULL) == 0) {
         snprintf(notice, sizeof notice, _("Saved to %s."), OPEN_RULES);
     } else {
@@ -3851,6 +3996,7 @@ static void choose_zone(const char *zone)
         snprintf(notice, sizeof notice, _("Cannot write %s."), "/etc/localtime");
         return;
     }
+    current_zone(zone_text, sizeof zone_text);
     snprintf(notice, sizeof notice, _("Time zone %s: programs started from now on use it."), zone);
 }
 
@@ -4059,6 +4205,7 @@ static void set_system_keymap(const char *keymap)
         if (existed[i]) unlink(backup);
     }
     keys_reload();
+    keyboards_dirty = 1;
     kill(1, SIGHUP);
     signal_programs("locachy-bar", SIGHUP);
     apply_labwc();
@@ -4100,6 +4247,7 @@ static void set_keyboard_keymap(const struct keys_keyboard *kb, const char *keym
         return;
     }
     keys_reload();
+    keyboards_dirty = 1;
     kill(1, SIGHUP);
     signal_programs("locachy-bar", SIGHUP);
     if (keymap) {
@@ -4955,8 +5103,17 @@ static int nrow_maps;
 
 static void build_row_maps(void)
 {
-    /* The keyboards' rows come and go with them, as the screens' do. */
-    nkeyboards_seen = keys_keyboards(keyboards_seen, MAX_KEYBOARD_ROWS);
+    /* The keyboards' rows come and go with them, as the screens' do; reread
+     * them only when keyboards_dirty or row_maps_dirty is set. */
+    if (!keyboards_dirty && !row_maps_dirty) return;
+    if (keyboards_dirty) {
+        nkeyboards_seen = keys_keyboards(keyboards_seen, MAX_KEYBOARD_ROWS);
+        keyboards_dirty = 0;
+        entries_dirty = 1;
+    }
+    if (!row_maps_dirty) return;
+    row_maps_dirty = 0;
+    entries_dirty = 1;
     nrow_maps = 0;
     for (int i = 0; i < nmonitors; i++) {
         struct monitor *m = &monitors[i];
@@ -4980,6 +5137,7 @@ static const char *const cat_names[NCATS] = {
     N_("Apps & Windows"), N_("Security & Privacy"), N_("Language & Time"), N_("System"),
 };
 static int category, in_page, page_scroll;
+static int opt_cache[NOPT_MODULES];
 static int editing;            /* the selected setting is open: Left/Right change it (page_key) */
 static int remove_asked = -1;  /* the component's line Delete was pressed on once (page_key) */
 static char search[64]; /* what / found: the page has every category's settings with it */
@@ -5051,6 +5209,8 @@ static void category_entries(int cat)
     case CAT_POWER:
         add_title(_("Power Management"));
         add_items(tp_present ? 4 : 1, 3);
+        add_items(power_profile_index(), 1);
+        add_items(zram_index(), 1);
         add_items(bat_thresh_index(), power_thresh_count());
         add_title(_("Display"));
         add_items(blank_index(), 2);
@@ -5087,6 +5247,9 @@ static void category_entries(int cat)
         if (nrules == 0) add_entry(E_NOTE, _("None yet: A in an open-with chooser makes one."));
         add_title(_("Shortcuts"));
         add_items(tk_index(), 1);
+        add_items(search_key_index(), 1);
+        add_title(_("Global Search"));
+        add_items(search_svc_index(), 2);
         break;
     case CAT_SECURITY:
         add_title(_("Screen Locking"));
@@ -5149,6 +5312,7 @@ static void build_entries(void)
     nentries = 0;
     if (!search[0]) {
         category_entries(category);
+        entries_dirty = 0;
         return;
     }
     for (int c = 0; c < NCATS; c++) {
@@ -5172,6 +5336,7 @@ static void build_entries(void)
             add_entry(all[k].idx, NULL);
         }
     }
+    entries_dirty = 0;
 }
 
 static int entry_of(int idx)
@@ -5226,18 +5391,37 @@ static void page_move(int step)
 static void show_category(int c, int focus_page)
 {
     c = c < 0 ? 0 : c >= NCATS ? NCATS - 1 : c;
-    if (c == CAT_SECURITY && !hsi_loaded) {
-        load_hsi();
+    if (c == CAT_SECURITY) {
+        if (!hsi_loaded) load_hsi();
+        if (tpm_lang_dirty) {
+            tpm_lang_dirty = 0;
+            load_tpm_status();
+        }
+    }
+    if ((c == CAT_SECURITY || c == CAT_SYSTEM) && c != category && howdy_installed()) {
+        refresh_face_cameras();
+    }
+    if (c == CAT_SYSTEM && users_lang_dirty) {
+        users_lang_dirty = 0;
+        load_fingers();
+        load_face_models();
     }
     if (c == CAT_POWER) {
-        power_refresh_devices();
+        power_refresh_devices_if_stale();
     }
+    /* Network rows' statuses refresh once keys settle on CAT_NETWORK;
+     * browsing past the category probes none. */
+    net_due = c == CAT_NETWORK;
     if (c != category || search[0]) {
         category = c;
         search[0] = '\0';
         page_scroll = 0;
+        entries_dirty = 1;
+        full_redraw = 1;
         build_entries();
         selected = first_setting();
+    } else if (focus_page != in_page) {
+        full_redraw = 1;
     }
     in_page = focus_page;
     editing = 0;
@@ -5363,6 +5547,7 @@ static void change_hostname(void)
         return;
     }
     sethostname(text, strlen(text));
+    snprintf(hostname_text, sizeof hostname_text, "%s", text);
     kill(1, SIGHUP);
     snprintf(notice, sizeof notice, _("Hostname set to %s."), text);
 }
@@ -5521,6 +5706,9 @@ static void boot_check(void)
         return;
     }
     boot_job = 0;
+    refresh_boot_made();
+    entries_dirty = 1;
+    full_redraw = 1;
     if (strcmp(r.state, "done") == 0) {
         snprintf(notice, sizeof notice, "%s", _("Boot image made: the next start uses it."));
     } else {
@@ -5832,7 +6020,8 @@ static void pick_machine(void)
 static int enter_row(int idx)
 {
     return idx == num_hw_items() || idx == cl_index() + 2 || idx == tr_index() + 2 || idx == bt_index() + 2 ||
-           idx == wp_index() || theme_row(idx) || idx == tk_index() || idx == host_index() || idx == mach_index() ||
+           idx == wp_index() || theme_row(idx) || idx == tk_index() || idx == search_key_index() ||
+           idx == host_index() || idx == mach_index() ||
            (idx >= upd_index() && idx < upd_index() + 4) ||
            idx == boot_index() + 1 || idx == boot_index() + 2 || idx == boot_index() + 3 ||
            idx == cpu_opt_index() ||
@@ -5849,10 +6038,17 @@ static int enter_row(int idx)
  * installs it (what of it is missing), Delete pressed twice removes it, and
  * nothing else does either (page_key). *present: something of it is
  * installed, what Delete removes; *complete: nothing of it is left to
- * install. */
+ * install. Always probes live state when present/complete are requested
+ * (opt_cache is for drawing/hints only). */
 static int component_row(int idx, int *present, int *complete)
 {
-    int p = -1, c = -1;
+    int match = idx == ts_index() || idx == cl_index() || idx == tr_index() || idx == bt_index() ||
+                idx == fc_index() || idx == rclone_index() || idx == ime_index() || idx == ime_index() + 1 ||
+                idx == fp_index() || idx == boot_index() + 4 ||
+                (idx >= opt_index() && idx < opt_index() + NOPT_MODULES);
+    if (!match) return 0;
+    if (!present && !complete) return 1;
+    int p = 0, c = 0;
     if (idx == ts_index()) p = c = tailscale_installed();
     else if (idx == cl_index()) p = c = clash_installed();
     else if (idx == tr_index()) { p = tor_installed(); c = p && lyrebird_installed(); }
@@ -5863,8 +6059,7 @@ static int component_row(int idx, int *present, int *complete)
     else if (idx == ime_index() + 1) p = c = rime_zh_installed();
     else if (idx == fp_index()) p = c = fprintd_installed();
     else if (idx == boot_index() + 4) p = c = kernel_headers_declared;
-    else if (idx >= opt_index() && idx < opt_index() + NOPT_MODULES) p = c = opt_module_installed(idx - opt_index());
-    if (p < 0) return 0;
+    else p = c = opt_module_installed(idx - opt_index());
     if (present) *present = p;
     if (complete) *complete = c;
     return 1;
@@ -5985,6 +6180,136 @@ static void find_setting(void)
     snprintf(notice, sizeof notice, _("Settings with \"%.40s\"   Esc: back to the categories"), search);
 }
 
+/* Cached system-derived row texts: refreshed at startup, K_SHOWN, the poll
+ * tick, and where each setting changes, so draw() reads nothing itself. */
+static void refresh_brightness(void)
+{
+    bri_cur = bri_max = 0;
+    bri_ok = base_brightness_get && base_brightness_get(&bri_cur, &bri_max) == 0 && bri_max > 0;
+}
+
+static void refresh_apps_catalog(void)
+{
+    apps_catalog_summary(apps_catalog_text, sizeof apps_catalog_text);
+}
+
+static void refresh_opt_cache(void)
+{
+    for (int i = 0; i < NOPT_MODULES; i++) opt_cache[i] = opt_module_installed(i);
+}
+
+static void refresh_rule_labels(void)
+{
+    for (int i = 0; i < nrules; i++) rule_label(i, rule_labels[i], sizeof rule_labels[i]);
+}
+
+static void refresh_boot_made(void)
+{
+    struct stat st;
+    boot_made_text[0] = '\0';
+    if (stat(BOOT_IMAGE, &st) == 0) {
+        strftime(boot_made_text, sizeof boot_made_text, "%Y-%m-%d %H:%M", localtime(&st.st_mtime));
+    }
+}
+
+static void refresh_static_text(void)
+{
+    clash_host(clash_host_text, sizeof clash_host_text);
+    rclone_text[0] = '\0';
+    if (rclone_installed()) rclone_remotes_summary(rclone_text, sizeof rclone_text);
+    current_hostname(hostname_text, sizeof hostname_text);
+    current_zone(zone_text, sizeof zone_text);
+    foot_installed = open_host("foot");
+    read_one_line("/usr/local/lib/locachy/cpu", cpu_cur_text, sizeof cpu_cur_text);
+    read_one_line("/usr/local/lib/locachy/level", cpu_lvl_text, sizeof cpu_lvl_text);
+    refresh_boot_made();
+    refresh_apps_catalog();
+}
+
+/* Whether a status row needs to query a running daemon rather than returning
+ * an immediate flag-based state. */
+static int tailscale_asks(void)
+{
+    return !(pkg_job && strcmp(pkg_name, "tailscale") == 0) && tailscale_installed() && tailscale_enabled;
+}
+
+static int clash_asks(void)
+{
+    return !(pkg_job && strcmp(pkg_name, "mihomo") == 0) && clash_installed() && clash_on && clash_host_text[0];
+}
+
+static int tor_asks(void)
+{
+    return !(pkg_job && tor_job()) && tor_installed() && tor_on;
+}
+
+static const char *tailscale_row_text(void)
+{
+    if (!in_ui_loop || !tailscale_asks()) return tailscale_status();
+    return tailscale_line[0] ? tailscale_line : "...";
+}
+
+static const char *clash_row_text(void)
+{
+    if (!in_ui_loop || !clash_asks()) return clash_status();
+    return clash_line[0] ? clash_line : "...";
+}
+
+static const char *tor_row_text(void)
+{
+    if (!in_ui_loop || !tor_asks()) return tor_status();
+    return tor_line[0] ? tor_line : "...";
+}
+
+/* Refresh network status rows once keys settle or every 2.0 s (uptime()). */
+static void refresh_net_status(void)
+{
+    snprintf(tailscale_line, sizeof tailscale_line, "%s", tailscale_status());
+    snprintf(clash_line, sizeof clash_line, "%s", clash_status());
+    snprintf(tor_line, sizeof tor_line, "%s", tor_status());
+    net_refreshed_at = uptime();
+    net_due = 0;
+}
+
+/* Invalidate every cached translated string after a live language switch. */
+static void invalidate_translated_caches(void)
+{
+    entries_dirty = 1;
+    full_redraw = 1;
+    static_text_dirty = 1;
+    rule_labels_dirty = 1;
+    if (nmachines > 0) snprintf(machine_labels[0], sizeof machine_labels[0], "%s", _("generic PC"));
+    hw_forget_readings();
+    power_handoff_loaded = 0;
+    power_last_handoff[0] = '\0';
+    ts_status_at = cl_status_at = tr_status_at = -100.0;
+    tailscale_line[0] = clash_line[0] = tor_line[0] = '\0';
+    job_progress_id = 0;
+    job_progress_buf[0] = '\0';
+    hsi_loaded = 0;
+    tpm_lang_dirty = 1;
+    users_lang_dirty = 1;
+    if (category == CAT_NETWORK) net_due = 1;
+    else net_refreshed_at = -100.0;
+}
+
+static void flush_ui_caches(void)
+{
+    if (!in_ui_loop) return;
+    if (static_text_dirty) {
+        refresh_static_text();
+        static_text_dirty = 0;
+    }
+    if (opt_cache_dirty) {
+        refresh_opt_cache();
+        opt_cache_dirty = 0;
+    }
+    if (rule_labels_dirty) {
+        refresh_rule_labels();
+        rule_labels_dirty = 0;
+    }
+}
+
 /* Setting idx's line on the page: its label, padded to the column of the
  * values, then its value. */
 static void item_text(int idx, char *line, size_t size)
@@ -5992,6 +6317,21 @@ static void item_text(int idx, char *line, size_t size)
     char bar[32], label[96], vbuf[160];
     int hw = num_hw_items(), i;
     line[0] = '\0';
+    if (!in_ui_loop) {
+        /* Unit tests call item_text() without main(): read the row's own file. */
+        if (idx == cl_index() + 2 || idx == cl_index() + 3) clash_host(clash_host_text, sizeof clash_host_text);
+        else if (idx == rclone_index() + 2 && rclone_installed()) rclone_remotes_summary(rclone_text, sizeof rclone_text);
+        else if (idx == host_index()) current_hostname(hostname_text, sizeof hostname_text);
+        else if (idx == tz_index()) current_zone(zone_text, sizeof zone_text);
+        else if (idx == tk_index()) foot_installed = open_host("foot");
+        else if (idx == boot_index() + 2) refresh_boot_made();
+        else if (idx == upd_index() + 4) refresh_apps_catalog();
+        else if (idx == bri_index()) refresh_brightness();
+        else if (idx == cpu_opt_index()) {
+            read_one_line("/usr/local/lib/locachy/cpu", cpu_cur_text, sizeof cpu_cur_text);
+            read_one_line("/usr/local/lib/locachy/level", cpu_lvl_text, sizeof cpu_lvl_text);
+        }
+    }
     /* The pointer's rows (first TrackPoint's three, when there is one), then
      * the power management rows. */
     if (idx >= 0 && idx < (tp_present ? 7 : 4)) {
@@ -6037,13 +6377,12 @@ static void item_text(int idx, char *line, size_t size)
                      tor_on ? _("  (Tor is on: no way around it, its UDP is dropped)") : "");
         } else {
             snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _("Tailscale account"), 30),
-                     tailscale_status());
+                     tailscale_row_text());
         }
         return;
     }
     if ((i = idx - cl_index()) >= 0 && i < 4) {
-        char host[128];
-        clash_host(host, sizeof host);
+        const char *host = clash_host_text;
         if (i == 0) {
             snprintf(line, size, "%.95s [%s]", ui_pad(label, sizeof label, _("Clash (mihomo) installed"), 32),
                      clash_installed() ? _("YES") : _("NO "));
@@ -6059,7 +6398,7 @@ static void item_text(int idx, char *line, size_t size)
             snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _("Clash subscription"), 30),
                      host[0] ? host : _("not set (Enter)"));
         } else {
-            snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _("Clash status"), 30), clash_status());
+            snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _("Clash status"), 30), clash_row_text());
         }
         return;
     }
@@ -6090,7 +6429,7 @@ static void item_text(int idx, char *line, size_t size)
                      _("%s   Enter: add one   Delete: remove all") : _("%s   Enter: add one"), bridges);
             snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _("Tor bridges"), 30), vbuf);
         } else {
-            snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _("Tor status"), 30), tor_status());
+            snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _("Tor status"), 30), tor_row_text());
         }
         return;
     }
@@ -6166,20 +6505,19 @@ static void item_text(int idx, char *line, size_t size)
     }
     if (idx == tk_index()) {
         snprintf(line, size, "%.95s %s%s", ui_pad(label, sizeof label, _("Terminal key (shared display)"), 32),
-                 terminal_key[0] ? terminal_key : _("none"), open_host("foot") ? "" : _("  (foot is not installed)"));
+                 terminal_key[0] ? terminal_key : _("none"), foot_installed ? "" : _("  (foot is not installed)"));
         return;
     }
     if ((i = idx - tz_index()) >= 0 && i < 3) {
-        char zone[128], now[48];
+        char now[48];
         time_t t = time(NULL);
         struct tm tm;
         if (i == 0) {
-            current_zone(zone, sizeof zone);
             if (tz_auto && zone_paused()) {
                 /* TRANSLATORS: %s is a time zone (Europe/Berlin). */
-                snprintf(vbuf, sizeof vbuf, _("Automatic paused (Tor): %.60s"), zone);
+                snprintf(vbuf, sizeof vbuf, _("Automatic paused (Tor): %.60s"), zone_text);
             } else {
-                snprintf(vbuf, sizeof vbuf, tz_auto ? _("Automatic: %.60s") : "%.60s", zone);
+                snprintf(vbuf, sizeof vbuf, tz_auto ? _("Automatic: %.60s") : "%.60s", zone_text);
             }
             snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Time zone"), 32), vbuf);
         } else if (i == 1) {
@@ -6251,6 +6589,32 @@ static void item_text(int idx, char *line, size_t size)
     if (idx == blank_index() + 1) {
         snprintf(vbuf, sizeof vbuf, P_("%d min", "%d min", blank_after), blank_after);
         snprintf(line, size, "%.95s < %s >", ui_pad(label, sizeof label, _("Turn off display after"), 32), vbuf);
+        return;
+    }
+    if (idx == power_profile_index()) {
+        snprintf(line, size, "%.95s < %s >", ui_pad(label, sizeof label, _("Power profile"), 32),
+                 _(power_profile_labels[power_profile]));
+        return;
+    }
+    if (idx == zram_index()) {
+        snprintf(line, size, "%.95s [%s]", ui_pad(label, sizeof label, _("Compressed RAM swap (zram)"), 32),
+                 zram_on ? _("ON ") : _("OFF"));
+        return;
+    }
+    if (idx == search_key_index()) {
+        snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Global search key"), 32),
+                 search_key[0] ? search_key : _("none"));
+        return;
+    }
+    if (idx == search_svc_index()) {
+        snprintf(line, size, "%.95s [%s]", ui_pad(label, sizeof label, _("Search index service"), 32),
+                 search_on ? _("ON ") : _("OFF"));
+        return;
+    }
+    if (idx == search_docs_index()) {
+        snprintf(line, size, "  %.95s [%s]%s", ui_pad(label, sizeof label, _("Document content indexing"), 30),
+                 search_docs ? _("ON ") : _("OFF"),
+                 search_on ? "" : _("  (search service off)"));
         return;
     }
     if ((i = idx - fp_index()) >= 0 && i < 4) {
@@ -6347,9 +6711,8 @@ static void item_text(int idx, char *line, size_t size)
             snprintf(line, size, "  %.95s [%s]%s", ui_pad(label, sizeof label, _("Cloud drives (in ~/Drives)"), 30),
                      rclone_on ? _("ON ") : _("OFF"), installed ? "" : _("  (not installed)"));
         } else if (installed) {
-            char rem[128];
-            rclone_remotes_summary(rem, sizeof rem);
-            snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _("Cloud remotes (iCloud, Drive)"), 30), rem);
+            snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _("Cloud remotes (iCloud, Drive)"), 30),
+                     rclone_text);
         } else {
             snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _("Cloud remotes (iCloud, Drive)"), 30),
                      _("not installed"));
@@ -6363,11 +6726,9 @@ static void item_text(int idx, char *line, size_t size)
         return;
     }
     if (idx == host_index()) {
-        char hname[68];
-        current_hostname(hname, sizeof hname);
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(line, size, "%.95s %.63s   %s", ui_pad(label, sizeof label, _("Hostname"), 32),
-                 hname, _("(Enter: change)"));
+                 hostname_text, _("(Enter: change)"));
         return;
     }
     if ((i = idx - ime_index()) >= 0 && i < 2) {
@@ -6422,9 +6783,8 @@ static void item_text(int idx, char *line, size_t size)
         return;
     }
     if (idx == bri_index()) {
-        int bcur = 0, bmax = 0;
-        if (base_brightness_get && base_brightness_get(&bcur, &bmax) == 0 && bmax > 0) {
-            int pct = (bcur * 100 + bmax / 2) / bmax;
+        if (bri_ok) {
+            int pct = (bri_cur * 100 + bri_max / 2) / bri_max;
             snprintf(vbuf, sizeof vbuf, "< %d%% >", pct);
         } else {
             snprintf(vbuf, sizeof vbuf, "%s", _("not supported"));
@@ -6456,8 +6816,8 @@ static void item_text(int idx, char *line, size_t size)
             snprintf(line, size, "  %.95s %.100s   %s", ui_pad(label, sizeof label, _("App presets branch"), 30),
                      apps_branch[0] ? apps_branch : "main", apps_off ? _("(updates off)") : _("(Enter: change)"));
         } else {
-            apps_catalog_summary(vbuf, sizeof vbuf);
-            snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _("App presets installed"), 30), vbuf);
+            snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _("App presets installed"), 30),
+                     apps_catalog_text);
         }
         return;
     }
@@ -6474,18 +6834,13 @@ static void item_text(int idx, char *line, size_t size)
                      nkernel_choices ? kernel_choices[kernel_choice] : boot_kernel,
                      pkg_job && strcmp(pkg_action, "kernel") == 0 ? _("working...") : _("Enter: apply"));
         } else if (i == 4) {
-            load_kernel_state();
             snprintf(line, size, "%.95s [%s]  %s", ui_pad(label, sizeof label, _("Kernel headers"), 32),
                      kernel_headers_declared ? _("ON ") : _("OFF"),
                      pkg_job && strcmp(pkg_action, "kernel") == 0 ? _("working...") :
                      kernel_headers_installed ? _("installed") : kernel_headers_declared ? _("not installed") : "");
         } else {
-            struct stat st;
-            char made[48] = "";
-            if (stat(BOOT_IMAGE, &st) == 0) {
-                strftime(made, sizeof made, "%Y-%m-%d %H:%M", localtime(&st.st_mtime));
-            }
-            snprintf(vbuf, sizeof vbuf, made[0] ? _("made %s") : "%s", made[0] ? made : _("not made yet"));
+            snprintf(vbuf, sizeof vbuf, boot_made_text[0] ? _("made %s") : "%s",
+                     boot_made_text[0] ? boot_made_text : _("not made yet"));
             /* TRANSLATORS: Enter is the Enter key; keep it. */
             snprintf(line, size, "%.95s %s   %s", ui_pad(label, sizeof label, _("Boot image"), 32), vbuf,
                      _("(Enter: make it again)"));
@@ -6570,7 +6925,7 @@ static void item_text(int idx, char *line, size_t size)
             snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _(opt_modules[i].label), 32), vbuf);
         } else {
             snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _(opt_modules[i].label), 32),
-                     opt_module_installed(i) ? _("installed") : _("not installed"));
+                     (in_ui_loop ? opt_cache[i] : opt_module_installed(i)) ? _("installed") : _("not installed"));
         }
         return;
     }
@@ -6610,9 +6965,7 @@ static void item_text(int idx, char *line, size_t size)
         return;
     }
     if (idx == cpu_opt_index()) {
-        char cpu_cur[48] = "", cpu_lvl[48] = "";
-        read_one_line("/usr/local/lib/locachy/cpu", cpu_cur, sizeof cpu_cur);
-        read_one_line("/usr/local/lib/locachy/level", cpu_lvl, sizeof cpu_lvl);
+        const char *cpu_cur = cpu_cur_text, *cpu_lvl = cpu_lvl_text;
         int is_auto = cpu_opt_auto >= 0 ? cpu_opt_auto : (cpu_cur[0] && strcmp(cpu_cur, cpu_lvl) != 0);
         const char *shown = is_auto ? (cpu_cur[0] ? cpu_cur : "native") : (cpu_lvl[0] ? cpu_lvl : "baseline");
         snprintf(vbuf, sizeof vbuf, is_auto ? _("auto (%s)") : _("baseline (%s)"), shown);
@@ -6658,7 +7011,8 @@ static void item_text(int idx, char *line, size_t size)
     }
     if ((i = idx - hw - 1 - nrow_maps) >= 0 && i < nrules) {
         char rlabel[160];
-        rule_label(i, rlabel, sizeof rlabel);
+        if (in_ui_loop) snprintf(rlabel, sizeof rlabel, "%s", rule_labels[i]);
+        else rule_label(i, rlabel, sizeof rlabel);
         snprintf(line, size, "%-32.32s < %.60s >", rule_types[i], rlabel);
     }
 }
@@ -6701,10 +7055,32 @@ static void hit_control(int idx, int x, int row, char *line)
     }
 }
 
+/* One setting row on the page: painted and optionally its control hitboxes registered. */
+static void draw_setting_row(int px, int x, int row, int idx, int register_hits)
+{
+    char line[512];
+    int on = idx == selected;
+    uint32_t bg = on ? (in_page ? (editing ? EDIT_BG : ACCENT) : SELECTION) : BG;
+    uint32_t fg = on && in_page ? (editing ? EDIT_FG : ON_ACCENT) : FG;
+    item_text(idx, line, sizeof line);
+    screen_fill(px, row, screen_cols() - px, 1, bg);
+    screen_text(x, row, line, fg, bg);
+    if (theme_row(idx)) {
+        int swatch_x = x + THEME_LABEL_CELLS;
+        int width = ui_cells(line) - THEME_LABEL_CELLS;
+        if (width > screen_cols() - swatch_x) width = screen_cols() - swatch_x;
+        uint32_t first = idx == scheme_index() ? BG : ACCENT;
+        uint32_t second = idx == scheme_index() ? FG : first;
+        theme_swatch(swatch_x, row, first, second, fg, bg);
+        if (register_hits) ui_hit(swatch_x, row, width, 1, SETTINGS_HIT_CONTROL + 2 * idx);
+    } else if (register_hits) {
+        hit_control(idx, x, row, line);
+    }
+}
+
 /* The page from column px: its groups' titles, their settings, notes. */
 static void draw_page(int px)
 {
-    char line[512];
     int x = text_x();
     page_scroll_to_selected();
     for (int r = 0; r < page_rows() && page_scroll + r < nentries; r++) {
@@ -6715,40 +7091,65 @@ static void draw_page(int px)
         } else if (e->idx == E_NOTE) {
             screen_text(x + 2, row, e->text, DIM, BG);
         } else if (e->idx >= 0) {
-            int on = e->idx == selected;
-            uint32_t bg = on ? (in_page ? (editing ? EDIT_BG : ACCENT) : SELECTION) : BG;
-            uint32_t fg = on && in_page ? (editing ? EDIT_FG : ON_ACCENT) : FG;
-            item_text(e->idx, line, sizeof line);
-            screen_fill(px, row, screen_cols() - px, 1, bg);
-            screen_text(x, row, line, fg, bg);
-            if (theme_row(e->idx)) {
-                int swatch_x = x + THEME_LABEL_CELLS;
-                int width = ui_cells(line) - THEME_LABEL_CELLS;
-                if (width > screen_cols() - swatch_x) width = screen_cols() - swatch_x;
-                uint32_t first = e->idx == scheme_index() ? BG : ACCENT;
-                uint32_t second = e->idx == scheme_index() ? FG : first;
-                theme_swatch(swatch_x, row, first, second, fg, bg);
-                ui_hit(swatch_x, row, width, 1, SETTINGS_HIT_CONTROL + 2 * e->idx);
-            } else {
-                hit_control(e->idx, x, row, line);
-            }
+            draw_setting_row(px, x, row, e->idx, 1);
         }
     }
 }
 
 static void draw(void)
 {
+    static int last_cat = -1, last_in_page = -1, last_scroll = -1, last_sel = -1;
+    static int last_cols = -1, last_rows = -1, last_jobs = -1, last_sw = -1;
+    static char last_search[sizeof search];
+    static char last_notice[sizeof notice];
     int sw = sidebar_width(), cols = screen_cols(), rows = screen_rows();
-    build_row_maps();
-    build_entries();
+    int jobs_active = pkg_job || repos_job || boot_job || tpm_job;
+    flush_ui_caches();
+    if (!in_ui_loop) {
+        /* Tests set state directly before draw(): keep every map and paint fresh. */
+        keyboards_dirty = row_maps_dirty = entries_dirty = full_redraw = 1;
+    }
+    if (keyboards_dirty || row_maps_dirty) build_row_maps();
+    if (entries_dirty) {
+        build_entries();
+        full_redraw = 1;
+    }
     if (!search[0] && selected >= 0 && entry_of(selected) < 0) {
         int c = category_of(selected); /* chosen elsewhere: the page of its category */
         if (c >= 0) {
             category = c;
             build_entries();
+            full_redraw = 1;
         }
     }
     if (entry_of(selected) < 0) selected = first_setting();
+    page_scroll_to_selected();
+
+    /* Fast path: when only selection or notice changed on the same scrolled
+     * page, paint just the affected rows without clearing or re-registering
+     * hitboxes (the existing click targets for this scrolled view stay valid). */
+    if (!full_redraw && in_page && last_in_page && category == last_cat &&
+        page_scroll == last_scroll && cols == last_cols && rows == last_rows &&
+        sw == last_sw && jobs_active == last_jobs && strcmp(search, last_search) == 0) {
+        int px = sw ? sw + 1 : 0, x = text_x(), vis = page_rows();
+        int old_k = last_sel >= 0 ? entry_of(last_sel) : -1;
+        int new_k = selected >= 0 ? entry_of(selected) : -1;
+        if (old_k >= page_scroll && old_k < page_scroll + vis && last_sel != selected) {
+            draw_setting_row(px, x, PAGE_TOP + old_k - page_scroll, last_sel, 0);
+        }
+        if (new_k >= page_scroll && new_k < page_scroll + vis) {
+            draw_setting_row(px, x, PAGE_TOP + new_k - page_scroll, selected, 0);
+        }
+        if (strcmp(notice, last_notice) != 0) {
+            screen_fill(0, rows - 2, cols, 1, BG);
+            screen_text(2, rows - 2, _(notice), ACCENT_TEXT, BG);
+            snprintf(last_notice, sizeof last_notice, "%s", notice);
+        }
+        last_sel = selected;
+        screen_flush();
+        return;
+    }
+
     ui_hits_clear();
     screen_fill(0, 0, cols, rows, BG);
     screen_bar(_("settings"), NULL);
@@ -6763,11 +7164,22 @@ static void draw(void)
     }
     screen_text(2, rows - 2, _(notice), ACCENT_TEXT, BG);
     int footer = in_page && !sw ? settings_back_button(rows - 1) : 2;
-    if (pkg_job || repos_job || boot_job || tpm_job) {
+    if (jobs_active) {
         /* TRANSLATORS: settings and home are programs' names; keep them. */
         screen_text(footer, rows - 1, _("A system job of settings' runs or waits: it goes on if settings closes; "
                                    "home lists it."), FG, BG);
     }
+    full_redraw = 0;
+    last_cat = category;
+    last_in_page = in_page;
+    last_scroll = page_scroll;
+    last_sel = selected;
+    last_cols = cols;
+    last_rows = rows;
+    last_sw = sw;
+    last_jobs = jobs_active;
+    snprintf(last_search, sizeof last_search, "%s", search);
+    snprintf(last_notice, sizeof last_notice, "%s", notice);
     screen_flush();
 }
 
@@ -6834,6 +7246,8 @@ static void adjust(int dir)
         }
         tailscale_enabled = !tailscale_enabled;
         save_rc(); /* process 1 starts or ends the service */
+        ts_status_at = -100.0;
+        tailscale_line[0] = '\0';
         snprintf(notice, sizeof notice, "%s", tailscale_enabled ? _("Tailscale on.") : _("Tailscale off."));
         return;
     }
@@ -6842,6 +7256,8 @@ static void adjust(int dir)
         if (dir > 0 && (strcmp(state, _("logged out  (Enter: log in with a QR code)")) == 0 ||
                         strcmp(state, _("stopped  (Enter: connect)")) == 0)) {
             tailscale_login();
+            ts_status_at = -100.0;
+            tailscale_line[0] = '\0';
         } else {
             snprintf(notice, sizeof notice, _("Tailscale: %.140s."), state);
         }
@@ -6884,6 +7300,8 @@ static void adjust(int dir)
         if (network_change(NULL, modes[next]) < 0) {
             return;
         }
+        cl_status_at = -100.0;
+        clash_line[0] = '\0';
         snprintf(notice, sizeof notice, "%s", next == 0 ? (tor_on ? _("Clash off: the network goes through Tor alone.") :
                  _("Clash off: the network goes direct.")) :
                  next == 1 ? _("Clash TUN: every container on the network goes through it.") :
@@ -6931,6 +7349,8 @@ static void adjust(int dir)
             return;
         }
         tor_set(next);
+        tr_status_at = -100.0;
+        tor_line[0] = '\0';
         return;
     }
     if (selected == tr_index() + 2 || selected == tr_index() + 3) {
@@ -7173,6 +7593,7 @@ static void adjust(int dir)
         }
         rclone_on = !rclone_on;
         kill(1, SIGHUP);
+        static_text_dirty = 1;
         /* Mounting takes the network: its result is the remotes line's. */
         snprintf(notice, sizeof notice, "%s", rclone_on ?
                  _("Cloud drives are being mounted under ~/Drives/<remote>; their state is shown below.") :
@@ -7199,6 +7620,7 @@ static void adjust(int dir)
             write_atomic_file("/etc/locale.conf", "/etc/locale.conf.tmp", lconf);
         }
         base_language_reload(); /* this program at once; the others on process 1's SIGHUP */
+        invalidate_translated_caches();
         kill(1, SIGHUP);
         snprintf(notice, sizeof notice, _("Language: %s."), language_name(languages[next]));
         return;
@@ -7307,6 +7729,7 @@ static void adjust(int dir)
         if (next < floor) next = floor;
         if (next > bmax) next = bmax;
         if (base_brightness_set(next, bmax) == 0) {
+            refresh_brightness();
             snprintf(notice, sizeof notice, _("Screen brightness: %d%%."), (next * 100 + bmax / 2) / bmax);
         } else {
             snprintf(notice, sizeof notice, "%s", _("Cannot set screen brightness."));
@@ -7494,6 +7917,7 @@ static void adjust(int dir)
             if (m->rc_key || m->rc_key2) {
                 kill(1, SIGHUP);
             }
+            opt_cache_dirty = 1;
             start_pkg_job("remove", m->packages);
         } else {
             if ((m->rc_key && rc_set(m->rc_key, m->rc_val) < 0) ||
@@ -7505,6 +7929,7 @@ static void adjust(int dir)
             if (m->rc_key || m->rc_key2) {
                 kill(1, SIGHUP);
             }
+            opt_cache_dirty = 1;
         }
         snprintf(notice, sizeof notice, pkg_job ? (strcmp(pkg_action, "install") == 0 ?
                  _("%s: installing packages in background.") : _("%s: removing packages in background.")) :
@@ -7596,6 +8021,61 @@ static void adjust(int dir)
         auto_blank = !auto_blank;
         kill(1, SIGHUP);
         snprintf(notice, sizeof notice, _("Saved to %s."), RC_CONF);
+        return;
+    }
+    if (selected == power_profile_index()) {
+        int next = (power_profile + (dir < 0 ? NPPROFS - 1 : 1)) % NPPROFS;
+        if (rc_set("power_profile", power_profile_values[next]) < 0) {
+            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+            return;
+        }
+        power_profile = next;
+        kill(1, SIGHUP);
+        snprintf(notice, sizeof notice, _("Power profile: %s."), _(power_profile_labels[power_profile]));
+        return;
+    }
+    if (selected == zram_index()) {
+        int next = !zram_on;
+        if (rc_set("zram", next ? "1" : "0") < 0) {
+            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+            return;
+        }
+        zram_on = next;
+        kill(1, SIGHUP);
+        snprintf(notice, sizeof notice, "%s", zram_on ?
+                 _("Compressed RAM swap (zram) on.") :
+                 _("Compressed RAM swap (zram) off."));
+        return;
+    }
+    if (selected == search_key_index()) {
+        /* TRANSLATORS: Enter and Delete are key names; keep them. */
+        snprintf(notice, sizeof notice, "%s", _("Enter: press a new global search key   Delete: none"));
+        return;
+    }
+    if (selected == search_svc_index()) {
+        if (rc_set("service_search", search_on ? NULL : SEARCH_SERVICE) < 0) {
+            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+            return;
+        }
+        search_on = !search_on;
+        kill(1, SIGHUP);
+        snprintf(notice, sizeof notice, "%s", search_on ?
+                 _("Global search index service on.") :
+                 _("Global search index service off."));
+        return;
+    }
+    if (selected == search_docs_index()) {
+        int next = !search_docs;
+        if (rc_set("search_docs", next ? "1" : "0") < 0) {
+            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+            return;
+        }
+        search_docs = next;
+        kill(1, SIGHUP);
+        signal_programs("locachy-searchd", SIGHUP);
+        snprintf(notice, sizeof notice, "%s", search_docs ?
+                 _("Document content indexing on.") :
+                 _("Document content indexing off (file names only)."));
         return;
     }
     if (selected == sec_index() + 5) {
@@ -7774,10 +8254,152 @@ static void adjust(int dir)
  * selected, and for Right before it is open. The notes of the lines of
  * their own Enter and of those that only show something are adjust's, which
  * changes nothing on them (test_page_keys holds it to that). */
+/* Notice text for enter_row / info_row items without invoking adjust() or
+ * probing daemons while moving the cursor. */
+static void row_hint_text(int idx, char *out, size_t size)
+{
+    out[0] = '\0';
+    if (idx == ts_index() + 2) {
+        snprintf(out, size, _("Tailscale: %.140s."), tailscale_row_text());
+    } else if (idx == cl_index() + 2) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", _("Enter: type the subscription's URL"));
+    } else if (idx == cl_index() + 3) {
+        snprintf(out, size, "%s", _("The panel: open its address in Edge (on the network), with the secret shown."));
+    } else if (idx == tr_index() + 2) {
+        /* TRANSLATORS: Enter and Delete are key names; keep them. */
+        snprintf(out, size, "%s", _("Enter: add a bridge line (bridges.torproject.org)   Delete: remove them all"));
+    } else if (idx == tr_index() + 3) {
+        snprintf(out, size, "%s", _("Tor's state: tor-client --status"));
+    } else if (idx == bt_index() + 2) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", _("Enter: open Bluetooth devices in bluetui (the service must be on)."));
+    } else if (theme_row(idx)) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", _("Enter: choose a color"));
+    } else if (idx == wp_index()) {
+        /* TRANSLATORS: Enter and Delete are key names; keep them. */
+        snprintf(out, size, "%s", _("Enter: choose a picture in the file manager   Delete: no wallpaper"));
+    } else if (idx == tk_index()) {
+        /* TRANSLATORS: Enter and Delete are key names; keep them. */
+        snprintf(out, size, "%s", _("Enter: press a new key (a window of foot, the terminal)   Delete: none"));
+    } else if (idx == search_key_index()) {
+        /* TRANSLATORS: Enter and Delete are key names; keep them. */
+        snprintf(out, size, "%s", _("Enter: press a new global search key   Delete: none"));
+    } else if (idx == tz_index()) {
+        if (tz_auto && zone_paused()) {
+            /* TRANSLATORS: Enter is the Enter key; keep it. */
+            snprintf(out, size, "%s", _("Automatic paused: Tor carries the network, so ipinfo.io is not asked. "
+                                        "Enter: choose a zone."));
+        } else {
+            snprintf(out, size, "%s", _("Enter: choose the time zone."));
+        }
+    } else if (idx == tz_index() + 2) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", _("Enter: set the date and time."));
+    } else if (idx == host_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", _("Enter: set this computer's hostname (/etc/hostname)."));
+    } else if (idx == mach_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", _("Enter: choose a machine profile by brand."));
+    } else if (idx == upd_index() || idx == upd_index() + 1) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", idx == upd_index() ?
+                 _("Enter: the git repository LOCachy's source updates come from (or off).") :
+                 _("Enter: the branch of that repository to follow (main by default)."));
+    } else if (idx == upd_index() + 2 || idx == upd_index() + 3) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", idx == upd_index() + 2 ?
+                 _("Enter: the git repository the app presets come from (or off).") :
+                 _("Enter: the branch of the app presets' repository to follow (main by default)."));
+    } else if (idx == upd_index() + 4) {
+        /* TRANSLATORS: packages is the program's name, c the c key; keep them. */
+        snprintf(out, size, "%s", _("The app presets installed: c in packages checks for newer ones."));
+    } else if (idx == boot_index() + 1 || idx == boot_index() + 2) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", idx == boot_index() + 1 ?
+                 _("Enter: options added to the kernel's command line, made into the boot image.") :
+                 _("Enter: make the boot image again (locachy-boot), as pacman's hooks do after updates."));
+    } else if (idx == repo_index() + NREPO_SECTIONS) {
+        if (repos_job) snprintf(out, size, "%s", _("Wait: the repositories' job is still running."));
+        else if (pkg_job) snprintf(out, size, "%s", _("Wait: a package job is still running."));
+        else {
+            /* TRANSLATORS: Enter is the Enter key; keep it. */
+            snprintf(out, size, "%s", _("Enter: rank the mirrors from here again (reflector, rate-mirrors)."));
+        }
+    } else if (idx == sec_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", _("Enter: a new password for the user (it unlocks the screen, and sudo)."));
+    } else if (idx == sec_index() + 3) {
+        /* TRANSLATORS: Enter and Delete are key names; keep them. */
+        snprintf(out, size, "%s", auto_lock ?
+                 _("Enter: press a new lock key   Delete: none (auto-lock still locks)") :
+                 _("Enter: press a new lock key   Delete: none"));
+    } else if (idx == fp_index() + 2) {
+        /* TRANSLATORS: Delete is the Delete key; keep it. */
+        snprintf(out, size, "%s", _("Delete: delete these fingerprints (asks once more)."));
+    } else if (idx == fc_index() + 3) {
+        /* TRANSLATORS: Delete is the Delete key; keep it. */
+        snprintf(out, size, "%s", _("Delete: forget these faces (asks once more)."));
+    } else if (idx == fc_index() + 5 || idx == fc_index() + 6) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", idx == fc_index() + 5 ?
+                 _("Enter: record your face (howdy add).") :
+                 _("Enter: find and switch on the camera's infrared emitter (linux-enable-ir-emitter configure)."));
+    } else if (idx == rclone_index() + 2) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", _("Enter: open rclone config in a terminal (iCloud, Google Drive, OneDrive, WebDAV)."));
+    } else if (idx == tpm_index()) {
+        if (lock_high) {
+            snprintf(out, size, "%s", _("TPM disk auto-unlock is off at high threat level: the disk asks for "
+                                        "its passphrase at power-on."));
+        } else {
+            /* TRANSLATORS: Enter and Delete are key names; keep them. */
+            snprintf(out, size, "%s", _("Enter: bind LUKS2 auto-unlock to TPM (1.2 or 2.0)   Delete: unbind"));
+        }
+    } else if (idx == sb_index()) {
+        /* TRANSLATORS: Enter and M are key names; keep them. */
+        snprintf(out, size, "%s", _("Enter: this computer's own Secure Boot keys into the firmware (setup "
+                                    "mode)   M: Microsoft's too (Windows, Microsoft-signed boot media)"));
+    } else if (idx == hsi_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", _("Enter: fwupd's report (fwupdmgr security), with the fixes it offers"));
+    } else if (idx == duress_index()) {
+        /* TRANSLATORS: Enter and Delete are key names; keep them. */
+        snprintf(out, size, "%s", _("Enter: set the duress password (in a terminal)   Delete, twice: remove it"));
+    } else if (idx == hwinfo_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", _("Enter: open hardware, storage SMART and live sensor browser."));
+    } else if (idx == hwcopy_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", _("Enter: copy system and hardware summary to clipboard."));
+    } else if (idx == nmtui_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", _("Enter: set up Wi-Fi or wired connections in nmtui."));
+    } else if (idx == bat_page_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", _("Enter: open battery curves, health and handoff history."));
+    } else if (idx == num_hw_items()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", _("Enter: arrange the screens with the direction buttons."));
+    }
+}
+
 static void row_hint(void)
 {
-    int present = 0, complete = 0;
-    if (component_row(selected, &present, &complete)) {
+    int present = 0, complete = 0, is_comp = 0;
+    if (in_ui_loop && selected >= opt_index() && selected < opt_index() + NOPT_MODULES) {
+        if (opt_cache_dirty) {
+            present = complete = opt_module_installed(selected - opt_index());
+        } else {
+            present = complete = opt_cache[selected - opt_index()];
+        }
+        is_comp = 1;
+    } else {
+        is_comp = component_row(selected, &present, &complete);
+    }
+    if (is_comp) {
         /* TRANSLATORS: Enter and Delete are key names; keep them. */
         snprintf(notice, sizeof notice, "%s", complete ? _("Installed   Delete, twice: remove it") :
                  present ? _("Enter: install the rest   Delete, twice: remove it") : _("Enter: install it"));
@@ -7785,12 +8407,13 @@ static void row_hint(void)
         /* TRANSLATORS: Enter and Left/Right are key names; keep them. */
         snprintf(notice, sizeof notice, "%s", _("Enter, then Left/Right: choose   Enter again: do it"));
     } else if (enter_row(selected) || info_row(selected)) {
-        notice[0] = '\0';
-        adjust(-1); /* -1: never Tailscale's login, which is Enter's */
-        if (!notice[0]) {
+        char hint[512];
+        row_hint_text(selected, hint, sizeof hint);
+        if (!hint[0]) {
             /* TRANSLATORS: Enter is the Enter key; keep it. */
-            snprintf(notice, sizeof notice, "%s", _("Enter: open it"));
+            snprintf(hint, sizeof hint, "%s", _("Enter: open it"));
         }
+        snprintf(notice, sizeof notice, "%s", hint);
     } else {
         /* TRANSLATORS: Enter and Left/Right are key names; keep them. */
         snprintf(notice, sizeof notice, "%s", _("Enter, then Left/Right: change it   Enter again: done"));
@@ -7825,7 +8448,7 @@ static void picker_cancel(void)
  * own Enter and Delete have it. */
 static int page_key(int key)
 {
-    int present = 0, complete = 0, component = component_row(selected, &present, &complete);
+    int component = component_row(selected, NULL, NULL);
     if (editing) {
         if (key == K_LEFT || key == '-') {
             adjust(-1);
@@ -7859,6 +8482,9 @@ static int page_key(int key)
         return 1;
     }
     if (component && (key == '\n' || key == K_DEL)) {
+        /* Always probe live installed state before install/remove actions. */
+        int present = 0, complete = 0;
+        component_row(selected, &present, &complete);
         if (pkg_job || repos_job) {
             adjust(+1); /* what is still being done: nothing starts */
         } else if (key == '\n') {
@@ -7927,6 +8553,7 @@ static int open_page(const char *name)
         selected = pages[i].category == CAT_TIME ? tz_index() :
                    pages[i].category == CAT_SYSTEM ? hwinfo_index() : first_setting();
         editing = 0;
+        full_redraw = 1;
         return 1;
     }
     return 0;
@@ -8068,13 +8695,19 @@ int main(int argc, char **argv)
     nrules = open_rules(rule_types, rule_values, MAX_RULES);
     load_nets();
     load_fingers();
-    load_faces();
+    load_face_models();
     load_bridges();
     load_tpm_status();
     load_duress_status();
     load_repos();
     load_kernel_state();
     load_kernel_choices();
+    refresh_static_text();
+    refresh_brightness();
+    refresh_opt_cache();
+    refresh_rule_labels();
+    static_text_dirty = opt_cache_dirty = rule_labels_dirty = 0;
+    keyboards_dirty = row_maps_dirty = entries_dirty = 1;
     adopt_jobs();
     request_open();
     build_row_maps();
@@ -8084,18 +8717,29 @@ int main(int argc, char **argv)
             snprintf(notice, sizeof notice, _("No settings page is named %.40s."), argv[i] + 7);
         }
     }
+    in_ui_loop = 1;
     draw();
+    net_due = 1;
 
+    static double last_job_poll = -10.0;
     for (;;) {
         if (close_due()) {
             return 0; /* the window's close, read in a question or list */
         }
-        int key = key_poll_timeout(request_fd, pkg_job || repos_job || boot_job || tpm_job || security_job ? 500 : 2000);
+        int key = key_poll_timeout(request_fd, pkg_job || repos_job || boot_job || tpm_job || security_job ? 500 :
+                                   net_due ? 150 : 2000);
         if (key == K_REPAINT) {
+            full_redraw = 1;
             draw();
             continue;
         }
         int mods = mods_now();
+        int nav_key = key == K_UP || key == K_DOWN || key == K_PGUP || key == K_PGDN || key == K_BOL || key == K_EOL;
+        if (!nav_key) {
+            /* Only pure navigation keeps existing layout/entries intact. */
+            full_redraw = 1;
+            entries_dirty = 1;
+        }
         requests();
         /* Delete twice in a row deletes them; home's key (process 1's) and the
          * return from it change nothing. */
@@ -8105,21 +8749,32 @@ int main(int argc, char **argv)
         }
         close_read(key);
         build_row_maps();
-        if (!pkg_job || !repos_job || !boot_job || !tpm_job || !security_job) {
+        if (key == 0 || key == K_SHOWN || uptime() - last_job_poll >= 0.5) {
+            int jobs_before = (pkg_job != 0) | ((repos_job != 0) << 1) | ((boot_job != 0) << 2) |
+                              ((tpm_job != 0) << 3) | ((security_job != 0) << 4);
+            last_job_poll = uptime();
             adopt_jobs();
-        }
-        pkg_check();
-        repos_check();
-        boot_check();
-        security_check();
-        if (tpm_job) {
-            struct jobs_row r;
-            char log[96];
-            if (job_ended(tpm_job, &r, log, sizeof log)) {
-                tpm_job = 0;
-                load_tpm_status();
-                snprintf(notice, sizeof notice, r.status == 0 ? _("%s done.") : _("%s did not finish."),
-                         "TPM/Secure Boot");
+            pkg_check();
+            repos_check();
+            boot_check();
+            security_check();
+            if (tpm_job) {
+                struct jobs_row r;
+                char log[96];
+                if (job_ended(tpm_job, &r, log, sizeof log)) {
+                    tpm_job = 0;
+                    load_tpm_status();
+                    entries_dirty = 1;
+                    full_redraw = 1;
+                    snprintf(notice, sizeof notice, r.status == 0 ? _("%s done.") : _("%s did not finish."),
+                             "TPM/Secure Boot");
+                }
+            }
+            int jobs_after = (pkg_job != 0) | ((repos_job != 0) << 1) | ((boot_job != 0) << 2) |
+                             ((tpm_job != 0) << 3) | ((security_job != 0) << 4);
+            if (jobs_after != jobs_before) {
+                entries_dirty = 1;
+                full_redraw = 1;
             }
         }
         if (close_due()) {
@@ -8164,18 +8819,35 @@ int main(int argc, char **argv)
             continue; /* the table's other keys are nothing here; Alt+m is not m */
         }
         if (key == 0 || key == K_SHOWN) {
-            load_monitors();
-            if (key == K_SHOWN) {
-                nrules = open_rules(rule_types, rule_values, MAX_RULES);
-                load_nets();
+            int settled_only = key == 0 && net_due && !(pkg_job || repos_job || boot_job || tpm_job || security_job);
+            if (!settled_only) {
+                load_monitors();
+                keyboards_dirty = 1;
+                refresh_static_text();
+                static_text_dirty = 0;
+                refresh_brightness();
+                if (key == K_SHOWN) {
+                    nrules = open_rules(rule_types, rule_values, MAX_RULES);
+                    refresh_rule_labels();
+                    rule_labels_dirty = 0;
+                    load_nets();
+                    load_kernel_state();
+                    refresh_opt_cache();
+                    opt_cache_dirty = 0;
+                }
+            }
+            if (net_due || (category == CAT_NETWORK && uptime() - net_refreshed_at >= 2.0)) {
+                refresh_net_status();
             }
             build_row_maps();
             build_entries();
             if (entry_of(selected) < 0) {
                 selected = first_setting();
             }
+            full_redraw = 1;
             draw();
         } else if (key == '/') {
+            flush_ui_caches();
             find_setting();
             draw();
         } else if (key == 27 && search[0] && !editing) { /* back to the categories, at the setting found */
@@ -8184,9 +8856,27 @@ int main(int argc, char **argv)
             snprintf(notice, sizeof notice, "%s", _(default_notice));
             draw();
         } else if (!in_page) {
+            int cat0 = category, in_before = in_page;
+            char notice0[sizeof notice], search0[sizeof search];
+            snprintf(notice0, sizeof notice0, "%s", notice);
+            snprintf(search0, sizeof search0, "%s", search);
             sidebar_key(key);
-            if (in_page) row_hint();
-            draw();
+            if (in_page) {
+                row_hint();
+                if (category == CAT_NETWORK) net_due = 1;
+            }
+            if (full_redraw || in_page != in_before || category != cat0 ||
+                strcmp(search0, search) != 0 || strcmp(notice0, notice) != 0) {
+                draw();
+            }
+        } else if (nav_key) {
+            int sel0 = selected, edit0 = editing;
+            char notice0[sizeof notice];
+            snprintf(notice0, sizeof notice0, "%s", notice);
+            page_key(key);
+            if (full_redraw || selected != sel0 || editing != edit0 || strcmp(notice0, notice) != 0) {
+                draw();
+            }
         } else if (page_key(key)) {
             draw();
         } else if (colors_settings_key(key)) {
@@ -8225,6 +8915,18 @@ int main(int argc, char **argv)
                 terminal_key[0] = '\0';
                 apply_labwc();
                 snprintf(notice, sizeof notice, "%s", _("No terminal key: saved and applied."));
+            }
+            draw();
+        } else if (key == '\n' && selected == search_key_index()) {
+            choose_key(_("Global search key"), "key_search", search_key, sizeof search_key, 0, reread_keys);
+            draw();
+        } else if (key == K_DEL && selected == search_key_index()) {
+            if (rc_set("key_search", "") == 0) {
+                search_key[0] = '\0';
+                reread_keys();
+                snprintf(notice, sizeof notice, "%s", _("No global search key: saved and applied."));
+            } else {
+                snprintf(notice, sizeof notice, "%s", _("Cannot write rc.conf."));
             }
             draw();
         } else if (key == '\n' && selected >= imek_index() && selected < imek_index() + NIME_KEYS) {
@@ -8427,7 +9129,7 @@ int main(int argc, char **argv)
                 if (argv[2]) {
                     command_output(argv, buf, sizeof buf);
                 }
-                load_faces();
+                load_face_models();
                 snprintf(notice, sizeof notice, _("Faces: %.100s."), face_models);
             }
             draw();
@@ -8476,10 +9178,14 @@ int main(int argc, char **argv)
                 char *const config[] = { RCLONE_SERVICE, "--config", NULL };
                 char *const reconnect[] = { RCLONE_SERVICE, "--reconnect", relogin, NULL };
                 int status = in_term(relogin[0] ? reconnect : config);
+                if (rclone_installed()) rclone_remotes_summary(rclone_text, sizeof rclone_text);
                 snprintf(notice, sizeof notice, "%s", status == 0 ?
                          _("rclone config done.") : _("rclone config did not finish."));
             }
             draw();
+        }
+        if (!nav_key && key != 0 && key != K_SHOWN && category == CAT_NETWORK) {
+            net_due = 1;
         }
     }
 }

@@ -136,6 +136,7 @@ static int seat_window(const char *program, const char *target, char *why, size_
 #define BAR_BG       theme_rgb(THEME_SURFACE, 0x1C2836) /* the toolbar's, the headers', the tabs' */
 #define SIDE   18 /* sidebar width, columns */
 #define MAX_FILES 100000
+#define VFS_CACHE_TTL 1.0 /* draw bursts stat the filesystem at most once a second */
 #define MAX_PLACES 24
 #define MAX_CLIP 256
 #define MAX_TABS 12
@@ -201,6 +202,13 @@ struct pane {
     char filter[128];
     struct place_visit back[MAX_HISTORY], fwd[MAX_HISTORY];
     int nback, nfwd;
+    unsigned mark_gen, mark_cached_gen;
+    int mark_count;
+    long long mark_bytes;
+    char vfs_dir[PATH_MAX];
+    double vfs_time;
+    int vfs_valid, vfs_ok;
+    long long vfs_free;
 };
 
 struct tab {
@@ -212,6 +220,9 @@ static struct tab tabs[MAX_TABS];
 static int ntabs, cur_tab;
 static struct pane *P; /* the active pane of the shown tab */
 static int side, side_sel, side_hidden, hidden, error, msg_sticky;
+/* Bumped by report(), and by any change of a pane's list or marks: a frame
+ * drawn with other values is not redrawn only in part. */
+static unsigned msg_gen, list_epoch;
 static int cols_mask = COL_SIZE | COL_MTIME | COL_TYPE;
 static int mingle_dirs, sort_case;
 static char home[256], dirs[256], msg[512];
@@ -273,6 +284,10 @@ static struct { int on, pane, steps; } pull;
 static void cloud_cancel(void);
 static int cloud_begin(struct pane *p, int stage);
 static void cloud_tick(void);
+/* What cloud_tick and drive_tick changed on the screen, and whether
+ * pointer_key moved the input to another output: browse draws then. */
+static int cloud_dirty, drive_dirty, output_switched;
+static void draw_invalidate(void);
 
 /* The pointer's press, held: on an item (it may become a drag of the marked
  * items), or a rubberband from empty space. */
@@ -319,6 +334,52 @@ static int side_width(void)
     return side_hidden ? 0 : SIDE;
 }
 
+static void vfs_invalidate_pane(struct pane *p)
+{
+    p->vfs_valid = 0;
+}
+
+static void vfs_invalidate_all(void)
+{
+    for (int t = 0; t < ntabs; t++) {
+        tabs[t].pane[0].vfs_valid = 0;
+        tabs[t].pane[1].vfs_valid = 0;
+    }
+}
+
+static void mark_touch(struct pane *p)
+{
+    if (++p->mark_gen == 0) p->mark_gen = 1;
+    p->mark_cached_gen = 0;
+    list_epoch++;
+}
+
+static void mark_reset(struct pane *p)
+{
+    if (++p->mark_gen == 0) p->mark_gen = 1;
+    p->mark_cached_gen = p->mark_gen;
+    p->mark_count = 0;
+    p->mark_bytes = 0;
+    list_epoch++;
+}
+
+static void mark_sync(struct pane *p)
+{
+    if (p->mark_gen != 0 && p->mark_cached_gen == p->mark_gen) return;
+    int n = 0;
+    long long bytes = 0;
+    for (int i = 0; i < p->nlist; i++) {
+        if (p->list[i].marked) {
+            n++;
+            if (!p->list[i].dir) bytes += p->list[i].size;
+        }
+    }
+    if (p->mark_gen == 0) p->mark_gen = 1;
+    p->mark_count = n;
+    p->mark_bytes = bytes;
+    p->mark_cached_gen = p->mark_gen;
+}
+
 /* The line above the buttons: what the last key did. */
 __attribute__((format(printf, 2, 3)))
 static void report(int is_error, const char *fmt, ...)
@@ -329,6 +390,7 @@ static void report(int is_error, const char *fmt, ...)
     va_end(ap);
     error = is_error;
     msg_sticky = 1;
+    msg_gen++;
 }
 
 static int inside(const char *path, const char *dir)
@@ -373,6 +435,7 @@ static void parent_of(const char *path, char *out, size_t size)
 /* Root-owned metadata only: neither discovery nor drawing opens the remote. */
 static void cloud_discover(void)
 {
+    draw_invalidate();
     nclouds = 0;
     int fd = open(CLOUD_STATUS, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     struct stat st;
@@ -628,6 +691,7 @@ static int pointer_here(const struct pointer_event *e);
 
 static void question_draw(const char *line, int stay)
 {
+    draw_invalidate();
     int row = screen_rows() - 3, cols = screen_cols();
     /* TRANSLATORS: Y, N and Esc are keys; keep them. */
     const char *yes_label = _("Y: yes"), *no_label = _("N: no"), *stay_label = _("Esc: stay");
@@ -738,6 +802,7 @@ static void copy_ask(int closing)
         }
         if (key == K_SHOWN || key == K_REPAINT) {
             if (key == K_SHOWN) output_ready();
+            draw_invalidate();
             draw();
             continue;
         }
@@ -794,6 +859,7 @@ static int copy_tick(void)
                 pull.on = 0;
                 output_ready();
             }
+            draw_invalidate();
             copy_show();
         } else {
             int act = key_action(key, keys_modifiers());
@@ -1023,6 +1089,7 @@ static int copy_item(const char *from, const char *to)
         r = -1;
     }
     copying.temp[0] = '\0';
+    vfs_invalidate_all();
     return r;
 }
 
@@ -1038,6 +1105,7 @@ static int move_path(const char *from, const char *to)
         return -1;
     }
     if (rename_new(from, to) == 0) {
+        vfs_invalidate_all();
         return 0;
     }
     if (errno != EXDEV) {
@@ -1046,7 +1114,9 @@ static int move_path(const char *from, const char *to)
     if (copy_item(from, to) < 0) {
         return -1;
     }
-    return remove_tree(from);
+    int r = remove_tree(from);
+    vfs_invalidate_all();
+    return r;
 }
 
 /* path and the folders above it, made as needed (mode). */
@@ -1384,6 +1454,15 @@ static int dir_items(const struct pane *p, struct file *f, int idx)
     return count;
 }
 
+static void format_dir_items(int cnt, char *out, size_t size)
+{
+    if (cnt >= 0) {
+        snprintf(out, size, P_("%d item", "%d items", cnt), cnt);
+    } else {
+        snprintf(out, size, "%s", _("Folder"));
+    }
+}
+
 /* The type of item i (open_type, as the user sees it), looked up once. */
 static const char *item_type(struct pane *p, int i)
 {
@@ -1436,9 +1515,13 @@ static int shown(const char *name, const char *filter)
 static void stat_entry(struct file *f, const char *path)
 {
     struct stat st = { 0 }, lst = { 0 };
-    f->link = lstat(path, &lst) == 0 && S_ISLNK(lst.st_mode);
-    if (stat(path, &st) < 0) {
-        st = lst;
+    if (lstat(path, &lst) == 0) {
+        f->link = S_ISLNK(lst.st_mode);
+        if (!f->link || stat(path, &st) < 0) {
+            st = lst;
+        }
+    } else {
+        f->link = 0;
     }
     f->dir = S_ISDIR(st.st_mode);
     f->exec = S_ISREG(st.st_mode) && (st.st_mode & 0111);
@@ -1453,6 +1536,7 @@ static void stat_entry(struct file *f, const char *path)
 
 static void load_folder(struct pane *p)
 {
+    vfs_invalidate_pane(p);
     p->nhidden = 0;
     as_user(1);
     DIR *d = opendir(p->cwd);
@@ -1629,6 +1713,7 @@ static void sort_pane(struct pane *p, const char *keep)
         item_type(p, i);
     }
     qsort(p->list, (size_t)p->nlist, sizeof *p->list, compare);
+    list_epoch++;
     p->sel = 0;
     for (int i = 0; name[0] && i < p->nlist; i++) {
         if (strcmp(p->list[i].name, name) == 0) {
@@ -1643,6 +1728,7 @@ static void load_pane(struct pane *p, const char *keep)
 {
     char name[256];
     snprintf(name, sizeof name, "%s", keep ? keep : "");
+    vfs_invalidate_pane(p);
     if (!is_trash(p) && !is_search(p) && cloud_at(p->cwd)) {
         cloud_begin(p, CLOUD_READ);
         return;
@@ -1652,6 +1738,7 @@ static void load_pane(struct pane *p, const char *keep)
         free_entry(&p->list[i]);
     }
     p->nlist = p->nhidden = p->sel = 0;
+    mark_reset(p);
     if (is_trash(p)) {
         load_trash(p);
     } else if (is_search(p)) {
@@ -1770,6 +1857,7 @@ static void cloud_tick(void)
         if (cloud_now() < cloud_job.deadline) return;
         cloud_cancel();
         report(1, _("Cloud drive timed out; the previous list is kept."));
+        cloud_dirty = 1;
         return;
     }
     struct pane *p = cloud_pane();
@@ -1807,9 +1895,11 @@ static void cloud_tick(void)
             for (int i = 0; i < p->nlist; i++) free_entry(&p->list[i]);
             free(p->list);
             p->list = next.list; p->cap = next.cap; p->nlist = next.nlist; p->nhidden = next.nhidden;
+            mark_reset(p);
             sort_pane(p, keep);
             p->top = top;
             if (!quiet) report(0, _("Cloud drive list updated."));
+            cloud_dirty = 1;
         } else {
             for (int i = 0; i < next.nlist; i++) free_entry(&next.list[i]);
             free(next.list);
@@ -1817,14 +1907,19 @@ static void cloud_tick(void)
     } else if (stage == CLOUD_REFRESH && ok) {
         close(fd);
         cloud_begin(p, CLOUD_READ);
+        cloud_dirty = 1;
         return;
     } else if (stage == CLOUD_UNMOUNT && ok) {
         cloud_discover();
         report(0, _("Cloud drive unmounted."));
+        cloud_dirty = 1;
     }
     close(fd);
     memset(&cloud_job, 0, sizeof cloud_job);
-    if (!ok) report(1, _("Cloud drive operation failed; the previous list is kept. See Settings > Cloud drives."));
+    if (!ok) {
+        report(1, _("Cloud drive operation failed; the previous list is kept. See Settings > Cloud drives."));
+        cloud_dirty = 1;
+    }
 }
 
 /* Every pane of every tab read again, each keeping its selected item. A
@@ -1832,6 +1927,7 @@ static void cloud_tick(void)
  * the line (Copied..., Moved...), not "Cloud drive list updated.". */
 static void reload_all(void)
 {
+    vfs_invalidate_all();
     cloud_discover();
     if (++cloud_passes == 0) cloud_passes = 1;
     cloud_reloading = 1;
@@ -1914,6 +2010,8 @@ static int go_pane(struct pane *p, const char *dir, const char *keep, int record
     if (strcmp(p->cwd, real) && cloud_at(real)) {
         for (int i = 0; i < p->nlist; i++) free_entry(&p->list[i]);
         p->nlist = p->sel = p->nhidden = 0;
+        list_epoch++;
+        mark_reset(p);
     }
     snprintf(p->cwd, sizeof p->cwd, "%s", real);
     p->filter[0] = '\0';
@@ -2280,6 +2378,7 @@ static void paste(void)
         return;
     }
     transfer(clip, nclip, P->cwd, clip_cut);
+    vfs_invalidate_all();
     if (clip_cut) {
         for (int i = 0; i < nclip; i++) {
             free(clip[i]);
@@ -2399,6 +2498,7 @@ static void delete_targets(void)
         }
     }
     as_user(0);
+    vfs_invalidate_all();
     if (failed) {
         report(1, P_("Deleted %d item; some could not be deleted.",
                      "Deleted %d items; some could not be deleted.", n - failed), n - failed);
@@ -2683,6 +2783,7 @@ static void invert_selection(void)
         P->list[i].marked = !P->list[i].marked;
         count += P->list[i].marked;
     }
+    mark_touch(P);
     report(0, P_("Inverted selection: %d item marked.", "Inverted selection: %d items marked.", count), count);
 }
 
@@ -2702,6 +2803,7 @@ static void open_terminal_here(void)
         }
         return;
     }
+    draw_invalidate();
     base_open(argv, why, sizeof why);
     /* "shown": on one of several screens, home keeping the others. */
     if (!program_ran(why)) report(1, _("%s could not be started (%s)."), "term", why);
@@ -2784,6 +2886,7 @@ static void bookmarks_path(char *out, size_t size)
 
 static void rebuild_places(void)
 {
+    draw_invalidate();
     nplaces = 0;
     if (!home[0]) return;
     cloud_discover();
@@ -3143,7 +3246,6 @@ static void draw_icon(int col, int row, int cols, int rows_box, const struct fil
     };
     int kind = item_kind(f);
     uint32_t c = ink[kind];
-    screen_fill(col, row, cols, rows_box, bg);
     int bx = col * cell_w, by = top_px + row * cell_h, bw = cols * cell_w, bh = rows_box * cell_h;
     int h = bh - 4, w = h * 5 / 4;
     if (w > bw - 4) {
@@ -3286,9 +3388,7 @@ static void compact_sub(struct pane *p, int i, char *out, size_t size)
 {
     struct file *f = &p->list[i];
     if (f->dir) {
-        int cnt = dir_items(p, f, i);
-        if (cnt >= 0) snprintf(out, size, P_("%d item", "%d items", cnt), cnt);
-        else snprintf(out, size, "%s", _("Folder"));
+        format_dir_items(dir_items(p, f, i), out, size);
     } else {
         human(f->size, out, size);
     }
@@ -3297,10 +3397,11 @@ static void compact_sub(struct pane *p, int i, char *out, size_t size)
 /* Item i's tile origin (tx, ty) and active content box (cx, cy, cw, ch) in
  * pane p's document cell coordinates, leaving surrounding cells as HIT_AREA. */
 static void item_box(struct pane *p, int cols, int gc, int tc, int tr, int vr, const struct details_cols *dc,
-                     int i, int *tx, int *ty, int *cx, int *cy, int *cw, int *ch)
+                     int i, int *tx, int *ty, int *cx, int *cy, int *cw, int *ch, char *sub_out, size_t sub_size)
 {
     struct file *f = &p->list[i];
     char label[300], cut[300];
+    if (sub_out && sub_size > 0) sub_out[0] = '\0';
     snprintf(label, sizeof label, "%s%s", shown_name(f), f->dir ? "/" : "");
     if (p->view == VIEW_ICONS) {
         int r = i / gc, c = i % gc, pad_x = tc >= 6 ? 1 : 0;
@@ -3329,6 +3430,7 @@ static void item_box(struct pane *p, int cols, int gc, int tc, int tr, int vr, c
             fit(scut, sizeof scut, sub, max_lbl);
             int sw = utf_cells(scut, 0, strlen(scut));
             if (sw > w) w = sw;
+            if (sub_out && sub_size > 0) snprintf(sub_out, sub_size, "%s", scut);
         }
         int max_w = tc > 2 ? tc - 2 : tc;
         *cw = clampi(3 + w + 1, 4 < max_w ? 4 : max_w, max_w);
@@ -3341,6 +3443,129 @@ static void item_box(struct pane *p, int cols, int gc, int tc, int tr, int vr, c
         fit(cut, sizeof cut, label, dc->name_w);
         int w = utf_cells(cut, 0, strlen(cut));
         *cw = clampi(3 + w + 1, 4 < cols ? 4 : cols, cols);
+    }
+}
+
+static void draw_item(struct pane *p, int which, int i, int active, uint32_t pane_bg,
+                      int col, int row, int cols, int gc, int tc, int tr, int vr,
+                      int sx_cells, int sy_cells, const struct details_cols *dc, int reg_hit)
+{
+    struct file *f = &p->list[i];
+    int tx, ty, cx, cy, cw, ch;
+    char sub_fit[32] = "";
+    item_box(p, cols, gc, tc, tr, vr, dc, i, &tx, &ty, &cx, &cy, &cw, &ch, sub_fit, sizeof sub_fit);
+    int ix = col + tx - sx_cells, iy = row + ty - sy_cells;
+    int scx = col + cx - sx_cells, scy = row + cy - sy_cells;
+    int on = active && i == p->sel;
+    uint32_t bg = on ? ACCENT : f->marked ? MARK : pane_bg;
+    uint32_t fg = on ? ON_ACCENT : f->dir ? ACCENT_TEXT : f->exec ? theme_rgb(THEME_SUCCESS, 0x90E890) : FG;
+    char label[300], cut[300], line[1024];
+    snprintf(label, sizeof label, "%s%s", shown_name(f), f->dir ? "/" : "");
+
+    if (p->view == VIEW_ICONS) {
+        int icon_rows = tr > 3 ? tr - 3 : 1;
+        screen_fill(scx, scy, cw, ch, bg);
+        draw_icon(scx, scy, cw, icon_rows, f, bg, on);
+        size_t split = utf_fit(label, cw);
+        if (ch - icon_rows <= 1) {
+            fit(cut, sizeof cut, label, cw);
+            int w = utf_cells(cut, 0, strlen(cut));
+            screen_text(scx + (cw - w) / 2, scy + icon_rows, cut, fg, bg);
+        } else {
+            char first[300];
+            snprintf(first, sizeof first, "%.*s", (int)split, label);
+            int w1 = utf_cells(first, 0, strlen(first));
+            screen_text(scx + (cw - w1) / 2, scy + icon_rows, first, fg, bg);
+            fit(cut, sizeof cut, label + split, cw);
+            int w2 = utf_cells(cut, 0, strlen(cut));
+            screen_text(scx + (cw - w2) / 2, scy + icon_rows + 1, cut, fg, bg);
+        }
+        if (!active && i == p->sel) {
+            frame_px(scx * cell_w, top_px + scy * cell_h, cw * cell_w, ch * cell_h, BORDER);
+        }
+    } else if (p->view == VIEW_COMPACT) {
+        int max_lbl = tc > 6 ? tc - 5 : (tc > 3 ? tc - 3 : 1);
+        screen_fill(scx, scy, cw, ch, bg);
+        draw_icon(scx, scy, 2 < cw ? 2 : cw, tr, f, bg, on);
+        char mark = f->marked ? '*' : f->link ? '@' : ' ';
+        fit(cut, sizeof cut, label, max_lbl);
+        snprintf(line, sizeof line, "%c %s", mark, cut);
+        screen_text(scx + 2, scy, line, fg, bg);
+        if (tr > 1) {
+            screen_text(scx + 3, scy + 1, sub_fit, on ? ON_ACCENT : DIM, bg);
+        }
+        if (!active && i == p->sel) {
+            frame_px(scx * cell_w, top_px + scy * cell_h, cw * cell_w, ch * cell_h, BORDER);
+        }
+    } else {
+        screen_fill(ix, iy, cols, tr, bg);
+        pad(cut, sizeof cut, label, dc->name_w);
+        size_t len = (size_t)snprintf(line, sizeof line, "%c %s", f->marked ? '*' : ' ', cut);
+        if (dc->size_w) {
+            char size[32] = "", sfit[32];
+            if (f->dir) {
+                format_dir_items(dir_items(p, f, i), size, sizeof size);
+            } else {
+                human(f->size, size, sizeof size);
+            }
+            fit(sfit, sizeof sfit, size, 10);
+            int pl = clampi(10 - ui_cells(sfit), 0, 10);
+            len += (size_t)snprintf(line + len, sizeof line - len, " %*s%s ", pl, "", sfit);
+        }
+        if (dc->mtime_w) {
+            char date[24] = "", dpad[32];
+            time_t when = is_trash(p) && f->deleted ? f->deleted : f->mtime;
+            strftime(date, sizeof date, "%Y-%m-%d %H:%M", localtime(&when));
+            pad(dpad, sizeof dpad, date, dc->mtime_w);
+            len += (size_t)snprintf(line + len, sizeof line - len, "%s", dpad);
+        }
+        if (dc->ext_w) {
+            char epad[24];
+            pad(epad, sizeof epad, file_ext(f), dc->ext_w - 1);
+            len += (size_t)snprintf(line + len, sizeof line - len, " %s", epad);
+        }
+        if (dc->perm_w) {
+            char perm[16], ppad[24];
+            mode_string(f->mode, perm);
+            pad(ppad, sizeof ppad, perm, dc->perm_w - 1);
+            len += (size_t)snprintf(line + len, sizeof line - len, " %s", ppad);
+        }
+        if (dc->owner_w) {
+            char own[64], opad[32];
+            owner_string(f, own, sizeof own);
+            pad(opad, sizeof opad, own, dc->owner_w - 1);
+            len += (size_t)snprintf(line + len, sizeof line - len, " %s", opad);
+        }
+        if (dc->type_w > 0) {
+            char rel[PATH_MAX], tpad[256];
+            const char *t;
+            if (is_trash(p)) {
+                t = f->origin ? f->origin : "";
+            } else if (is_search(p)) {
+                relative_search_dir(p, f, rel, sizeof rel);
+                t = rel;
+            } else {
+                t = item_type(p, i);
+            }
+            pad(tpad, sizeof tpad, t, dc->type_w);
+            snprintf(line + len, sizeof line - len, "  %s", tpad);
+        }
+        screen_text(ix + 1, iy, line, fg, bg);
+        if (tr > 1) {
+            char rel[PATH_MAX];
+            const char *sub;
+            if (is_trash(p) && f->origin) sub = f->origin;
+            else if (is_search(p)) { relative_search_dir(p, f, rel, sizeof rel); sub = rel; }
+            else sub = item_type(p, i);
+            fit(cut, sizeof cut, sub, cols - 4);
+            screen_text(ix + 3, iy + 1, cut, on ? ON_ACCENT : DIM, bg);
+        }
+        if (!active && i == p->sel) {
+            frame_px(ix * cell_w, top_px + iy * cell_h, cols * cell_w, tr * cell_h, BORDER);
+        }
+    }
+    if (reg_hit) {
+        ui_hit(scx, scy, cw, ch, HIT_FILE + which * HIT_PANE + i);
     }
 }
 
@@ -3368,131 +3593,12 @@ static void draw_pane(struct pane *p, int which)
         return;
     }
 
-    int hit_base = HIT_FILE + which * HIT_PANE;
     int sx_cells = p->view == VIEW_COMPACT ? (p->top / vr) * tc : 0;
     int sy_cells = p->view == VIEW_COMPACT ? 0 : (p->top / gc) * tr;
     int limit = p->top + span * unit;
     if (limit > p->nlist) limit = p->nlist;
     for (int i = p->top; i < limit; i++) {
-        struct file *f = &p->list[i];
-        int tx, ty, cx, cy, cw, ch;
-        item_box(p, cols, gc, tc, tr, vr, &dc, i, &tx, &ty, &cx, &cy, &cw, &ch);
-        int ix = col + tx - sx_cells, iy = row + ty - sy_cells;
-        int scx = col + cx - sx_cells, scy = row + cy - sy_cells;
-        int on = active && i == p->sel;
-        uint32_t bg = on ? ACCENT : f->marked ? MARK : pane_bg;
-        uint32_t fg = on ? ON_ACCENT : f->dir ? ACCENT_TEXT : f->exec ? theme_rgb(THEME_SUCCESS, 0x90E890) : FG;
-        char label[300], cut[300], line[1024];
-        snprintf(label, sizeof label, "%s%s", shown_name(f), f->dir ? "/" : "");
-
-        if (p->view == VIEW_ICONS) {
-            int icon_rows = tr > 3 ? tr - 3 : 1;
-            screen_fill(scx, scy, cw, ch, bg);
-            draw_icon(scx, scy, cw, icon_rows, f, bg, on);
-            size_t split = utf_fit(label, cw);
-            if (ch - icon_rows <= 1) {
-                fit(cut, sizeof cut, label, cw);
-                int w = utf_cells(cut, 0, strlen(cut));
-                screen_text(scx + (cw - w) / 2, scy + icon_rows, cut, fg, bg);
-            } else {
-                char first[300];
-                snprintf(first, sizeof first, "%.*s", (int)split, label);
-                int w1 = utf_cells(first, 0, strlen(first));
-                screen_text(scx + (cw - w1) / 2, scy + icon_rows, first, fg, bg);
-                fit(cut, sizeof cut, label + split, cw);
-                int w2 = utf_cells(cut, 0, strlen(cut));
-                screen_text(scx + (cw - w2) / 2, scy + icon_rows + 1, cut, fg, bg);
-            }
-            if (!active && i == p->sel) {
-                frame_px(scx * cell_w, top_px + scy * cell_h, cw * cell_w, ch * cell_h, BORDER);
-            }
-        } else if (p->view == VIEW_COMPACT) {
-            int max_lbl = tc > 6 ? tc - 5 : (tc > 3 ? tc - 3 : 1);
-            screen_fill(scx, scy, cw, ch, bg);
-            draw_icon(scx, scy, 2 < cw ? 2 : cw, tr, f, bg, on);
-            char mark = f->marked ? '*' : f->link ? '@' : ' ';
-            fit(cut, sizeof cut, label, max_lbl);
-            snprintf(line, sizeof line, "%c %s", mark, cut);
-            screen_text(scx + 2, scy, line, fg, bg);
-            if (tr > 1) {
-                char sub[32], scut[32];
-                compact_sub(p, i, sub, sizeof sub);
-                fit(scut, sizeof scut, sub, max_lbl);
-                screen_text(scx + 3, scy + 1, scut, on ? ON_ACCENT : DIM, bg);
-            }
-            if (!active && i == p->sel) {
-                frame_px(scx * cell_w, top_px + scy * cell_h, cw * cell_w, ch * cell_h, BORDER);
-            }
-        } else {
-            screen_fill(ix, iy, cols, tr, bg);
-            pad(cut, sizeof cut, label, dc.name_w);
-            size_t len = (size_t)snprintf(line, sizeof line, "%c %s", f->marked ? '*' : ' ', cut);
-            if (dc.size_w) {
-                char size[32] = "", sfit[32];
-                if (f->dir) {
-                    int cnt = dir_items(p, f, i);
-                    if (cnt >= 0) snprintf(size, sizeof size, P_("%d item", "%d items", cnt), cnt);
-                    else snprintf(size, sizeof size, "%s", _("Folder"));
-                } else {
-                    human(f->size, size, sizeof size);
-                }
-                fit(sfit, sizeof sfit, size, 10);
-                int pl = clampi(10 - ui_cells(sfit), 0, 10);
-                len += (size_t)snprintf(line + len, sizeof line - len, " %*s%s ", pl, "", sfit);
-            }
-            if (dc.mtime_w) {
-                char date[24] = "", dpad[32];
-                time_t when = is_trash(p) && f->deleted ? f->deleted : f->mtime;
-                strftime(date, sizeof date, "%Y-%m-%d %H:%M", localtime(&when));
-                pad(dpad, sizeof dpad, date, dc.mtime_w);
-                len += (size_t)snprintf(line + len, sizeof line - len, "%s", dpad);
-            }
-            if (dc.ext_w) {
-                char epad[24];
-                pad(epad, sizeof epad, file_ext(f), dc.ext_w - 1);
-                len += (size_t)snprintf(line + len, sizeof line - len, " %s", epad);
-            }
-            if (dc.perm_w) {
-                char perm[16], ppad[24];
-                mode_string(f->mode, perm);
-                pad(ppad, sizeof ppad, perm, dc.perm_w - 1);
-                len += (size_t)snprintf(line + len, sizeof line - len, " %s", ppad);
-            }
-            if (dc.owner_w) {
-                char own[64], opad[32];
-                owner_string(f, own, sizeof own);
-                pad(opad, sizeof opad, own, dc.owner_w - 1);
-                len += (size_t)snprintf(line + len, sizeof line - len, " %s", opad);
-            }
-            if (dc.type_w > 0) {
-                char rel[PATH_MAX], tpad[256];
-                const char *t;
-                if (is_trash(p)) {
-                    t = f->origin ? f->origin : "";
-                } else if (is_search(p)) {
-                    relative_search_dir(p, f, rel, sizeof rel);
-                    t = rel;
-                } else {
-                    t = item_type(p, i);
-                }
-                pad(tpad, sizeof tpad, t, dc.type_w);
-                snprintf(line + len, sizeof line - len, "  %s", tpad);
-            }
-            screen_text(ix + 1, iy, line, fg, bg);
-            if (tr > 1) {
-                char rel[PATH_MAX];
-                const char *sub;
-                if (is_trash(p) && f->origin) sub = f->origin;
-                else if (is_search(p)) { relative_search_dir(p, f, rel, sizeof rel); sub = rel; }
-                else sub = item_type(p, i);
-                fit(cut, sizeof cut, sub, cols - 4);
-                screen_text(ix + 3, iy + 1, cut, on ? ON_ACCENT : DIM, bg);
-            }
-            if (!active && i == p->sel) {
-                frame_px(ix * cell_w, top_px + iy * cell_h, cols * cell_w, tr * cell_h, BORDER);
-            }
-        }
-        ui_hit(scx, scy, cw, ch, hit_base + i);
+        draw_item(p, which, i, active, pane_bg, col, row, cols, gc, tc, tr, vr, sx_cells, sy_cells, &dc, 1);
     }
 }
 
@@ -3612,17 +3718,33 @@ static void draw_rubberband(void)
     frame_px(rx, ry, rw, rh, BORDER);
 }
 
+/* The free space of P's filesystem, read again once VFS_CACHE_TTL has passed
+ * (cloud folders and empty roots have none). 1 when the figure the status
+ * line shows changed, so an idle timeout redraws only then. */
+static int vfs_update(struct pane *p)
+{
+    const char *fs_dir = is_search(p) ? p->search_root : is_trash(p) ? home : p->cwd;
+    char before[32] = "", after[32] = "";
+    int same = p->vfs_valid && strcmp(p->vfs_dir, fs_dir) == 0;
+    double now = copy_clock();
+    if (same && now >= p->vfs_time && now - p->vfs_time < VFS_CACHE_TTL) return 0;
+    if (p->vfs_valid && p->vfs_ok) human(p->vfs_free, before, sizeof before);
+    struct statvfs vfs = { 0 };
+    snprintf(p->vfs_dir, sizeof p->vfs_dir, "%s", fs_dir);
+    p->vfs_time = now;
+    p->vfs_valid = 1;
+    p->vfs_ok = fs_dir[0] && !cloud_at(fs_dir) && statvfs(fs_dir, &vfs) == 0 && vfs.f_blocks > 0;
+    p->vfs_free = p->vfs_ok ? (long long)vfs.f_bavail * (long long)vfs.f_frsize : 0;
+    if (p->vfs_ok) human(p->vfs_free, after, sizeof after);
+    return strcmp(before, after) != 0;
+}
+
 static void format_status_line(struct pane *p, char *out, size_t size)
 {
     char left[320] = "", right[160] = "", free_str[32] = "";
-    int nmark = 0;
-    long long mark_bytes = 0;
-    for (int i = 0; i < p->nlist; i++) {
-        if (p->list[i].marked) {
-            nmark++;
-            if (!p->list[i].dir) mark_bytes += p->list[i].size;
-        }
-    }
+    mark_sync(p);
+    int nmark = p->mark_count;
+    long long mark_bytes = p->mark_bytes;
     if (nmark > 0) {
         char mb[32];
         human(mark_bytes, mb, sizeof mb);
@@ -3631,9 +3753,7 @@ static void format_status_line(struct pane *p, char *out, size_t size)
         struct file *f = &p->list[p->sel];
         char sz[32], dt[24], perm[16];
         if (f->dir) {
-            int cnt = dir_items(p, f, p->sel);
-            if (cnt >= 0) snprintf(sz, sizeof sz, P_("%d item", "%d items", cnt), cnt);
-            else snprintf(sz, sizeof sz, "%s", _("Folder"));
+            format_dir_items(dir_items(p, f, p->sel), sz, sizeof sz);
         } else {
             human(f->size, sz, sizeof sz);
         }
@@ -3644,10 +3764,9 @@ static void format_status_line(struct pane *p, char *out, size_t size)
                  shown_name(f), sz, item_type(p, p->sel), dt, perm);
     }
 
-    const char *fs_dir = is_search(p) ? p->search_root : is_trash(p) ? home : p->cwd;
-    struct statvfs vfs;
-    if (fs_dir[0] && !cloud_at(fs_dir) && statvfs(fs_dir, &vfs) == 0 && vfs.f_blocks > 0) {
-        human((long long)vfs.f_bavail * (long long)vfs.f_frsize, free_str, sizeof free_str);
+    vfs_update(p);
+    if (p->vfs_ok) {
+        human(p->vfs_free, free_str, sizeof free_str);
     }
     if (p->nhidden > 0 && free_str[0]) {
         snprintf(right, sizeof right, P_("%d item (%d hidden) | %s free", "%d items (%d hidden) | %s free", p->nlist),
@@ -3679,12 +3798,158 @@ static int button_before(int col, int row, const char *label, int id, int keep)
     return col + ui_cells(label) + 2 + keep > screen_cols() ? col : ui_button(col, row, label, id);
 }
 
+static struct {
+    int valid;
+    int output, cols, rows, cell_w, cell_h, top_px;
+    int cur_tab, ntabs, split, active;
+    int side, side_sel, side_hidden, hidden, cols_mask;
+    int nclip, clip_cut, standalone, pick_on, pick_dir;
+    int drag_mode, msg_sticky, error;
+    unsigned msg_gen;
+    int nlist, nhidden, sel, top, view, zoom, sort, desc, nback, nfwd;
+    unsigned epoch;
+    uint32_t bg, fg, accent, bar_bg, dim, mark, pane_bg, border, accent_text, on_accent, error_col;
+    char cwd[PATH_MAX], filter[128];
+} last_frame;
+
+static void draw_invalidate(void)
+{
+    last_frame.valid = 0;
+}
+
+static void draw_status_row(void)
+{
+    int row = screen_rows() - 3, cols = screen_cols();
+    screen_fill(0, row, cols, 1, BG);
+    if (msg_sticky && msg[0]) {
+        screen_text(1, row, msg, error ? ERROR : ACCENT_TEXT, BG);
+    } else {
+        char sline[512];
+        format_status_line(P, sline, sizeof sline);
+        screen_text(1, row, sline, DIM, BG);
+    }
+}
+
+static void draw_record_frame(void)
+{
+    last_frame.valid = 1;
+    last_frame.output = output_current();
+    last_frame.cols = screen_cols();
+    last_frame.rows = screen_rows();
+    last_frame.cell_w = cell_w;
+    last_frame.cell_h = cell_h;
+    last_frame.top_px = top_px;
+    last_frame.cur_tab = cur_tab;
+    last_frame.ntabs = ntabs;
+    last_frame.split = tabs[cur_tab].split;
+    last_frame.active = tabs[cur_tab].active;
+    last_frame.side = side;
+    last_frame.side_sel = side_sel;
+    last_frame.side_hidden = side_hidden;
+    last_frame.hidden = hidden;
+    last_frame.cols_mask = cols_mask;
+    last_frame.nclip = nclip;
+    last_frame.clip_cut = clip_cut;
+    last_frame.standalone = standalone;
+    last_frame.pick_on = pick_type != NULL;
+    last_frame.pick_dir = picking_folder();
+    last_frame.drag_mode = drag.mode;
+    last_frame.msg_sticky = msg_sticky;
+    last_frame.error = error;
+    last_frame.msg_gen = msg_gen;
+    last_frame.nlist = P->nlist;
+    last_frame.nhidden = P->nhidden;
+    last_frame.sel = P->sel;
+    last_frame.top = P->top;
+    last_frame.view = P->view;
+    last_frame.zoom = P->zoom[P->view];
+    last_frame.sort = P->sort;
+    last_frame.desc = P->desc;
+    last_frame.nback = P->nback;
+    last_frame.nfwd = P->nfwd;
+    last_frame.epoch = list_epoch;
+    last_frame.bg = BG;
+    last_frame.fg = FG;
+    last_frame.accent = ACCENT;
+    last_frame.bar_bg = BAR_BG;
+    last_frame.dim = DIM;
+    last_frame.mark = MARK;
+    last_frame.pane_bg = PANE_BG;
+    last_frame.border = BORDER;
+    last_frame.accent_text = ACCENT_TEXT;
+    last_frame.on_accent = ON_ACCENT;
+    last_frame.error_col = ERROR;
+    snprintf(last_frame.cwd, sizeof last_frame.cwd, "%s", P->cwd);
+    snprintf(last_frame.filter, sizeof last_frame.filter, "%s", P->filter);
+}
+
+static int try_partial_sel_draw(void)
+{
+    if (!last_frame.valid || native_outputs()) return 0;
+    if (side || last_frame.side || drag.mode != DRAG_NONE || last_frame.drag_mode != DRAG_NONE) return 0;
+    if (output_current() != last_frame.output) return 0;
+    if (screen_cols() != last_frame.cols || screen_rows() != last_frame.rows) return 0;
+    if (cell_w != last_frame.cell_w || cell_h != last_frame.cell_h || top_px != last_frame.top_px) return 0;
+    if (cur_tab != last_frame.cur_tab || ntabs != last_frame.ntabs ||
+        tabs[cur_tab].split != last_frame.split || tabs[cur_tab].active != last_frame.active) return 0;
+    if (side_sel != last_frame.side_sel || side_hidden != last_frame.side_hidden ||
+        hidden != last_frame.hidden || cols_mask != last_frame.cols_mask) return 0;
+    if (nclip != last_frame.nclip || clip_cut != last_frame.clip_cut || standalone != last_frame.standalone ||
+        (pick_type != NULL) != last_frame.pick_on || picking_folder() != last_frame.pick_dir) return 0;
+    if (BG != last_frame.bg || FG != last_frame.fg || ACCENT != last_frame.accent ||
+        BAR_BG != last_frame.bar_bg || DIM != last_frame.dim || MARK != last_frame.mark ||
+        PANE_BG != last_frame.pane_bg || BORDER != last_frame.border ||
+        ACCENT_TEXT != last_frame.accent_text || ON_ACCENT != last_frame.on_accent ||
+        ERROR != last_frame.error_col) return 0;
+    if (P->nlist == 0 || P->nlist != last_frame.nlist || P->nhidden != last_frame.nhidden ||
+        P->view != last_frame.view || P->zoom[P->view] != last_frame.zoom ||
+        P->sort != last_frame.sort || P->desc != last_frame.desc ||
+        P->nback != last_frame.nback || P->nfwd != last_frame.nfwd ||
+        list_epoch != last_frame.epoch) return 0;
+    if (strcmp(P->cwd, last_frame.cwd) != 0 || strcmp(P->filter, last_frame.filter) != 0) return 0;
+
+    int which = tabs[cur_tab].active;
+    clamp_scroll(P, which);
+    if (P->top != last_frame.top) return 0;
+
+    int old_sel = last_frame.sel, new_sel = P->sel;
+    if (old_sel < 0 || old_sel >= P->nlist || new_sel < 0 || new_sel >= P->nlist) return 0;
+
+    int col, row, cols, nrows, gc, tc, tr, vr, unit, span;
+    pane_area(P, which, &col, &row, &cols, &nrows);
+    pane_grid(P, cols, nrows, &gc, &tc, &tr, &vr);
+    pane_units(P, gc, vr, &unit, &span);
+    int limit = P->top + span * unit;
+    if (limit > P->nlist) limit = P->nlist;
+    if (old_sel < P->top || old_sel >= limit || new_sel < P->top || new_sel >= limit) return 0;
+
+    if (old_sel != new_sel) {
+        struct details_cols dc;
+        compute_details_cols(cols, &dc);
+        int sx_cells = P->view == VIEW_COMPACT ? (P->top / vr) * tc : 0;
+        int sy_cells = P->view == VIEW_COMPACT ? 0 : (P->top / gc) * tr;
+        draw_item(P, which, old_sel, 1, BG, col, row, cols, gc, tc, tr, vr, sx_cells, sy_cells, &dc, 0);
+        draw_item(P, which, new_sel, 1, BG, col, row, cols, gc, tc, tr, vr, sx_cells, sy_cells, &dc, 0);
+    }
+    /* The status line follows the message, the selection and the free
+     * space (its own cache): always drawn again, as the bar is. */
+    draw_status_row();
+    screen_bar("files", NULL);
+    screen_flush();
+    last_frame.sel = new_sel;
+    last_frame.msg_sticky = msg_sticky;
+    last_frame.error = error;
+    last_frame.msg_gen = msg_gen;
+    return 1;
+}
+
 static void draw_output(void)
 {
     char line[256];
     int cols = screen_cols(), r = rows(), top_row = body_top();
     set_active();
     cell_metrics();
+    if (try_partial_sel_draw()) return;
     int width, height;
     screen_pixels(&width, &height);
     screen_fill_px(0, 0, width, height, BG);
@@ -3753,6 +4018,7 @@ static void draw_output(void)
         /* TRANSLATORS: Enter and Tab are keys; keep them. */
         screen_text(1, b1, picking_folder() ? _("Enter or a double click: go in   Tab: places") :
                     _("a double click: choose (a folder: go in)   Tab: places"), FG, BG);
+        draw_record_frame();
         screen_flush();
         return;
     }
@@ -3812,6 +4078,7 @@ static void draw_output(void)
     if (c + 10 < cols) {
         screen_text(c, b1, _("Space: mark  Tab: panes  Ctrl+1/2/3: view"), FG, BG);
     }
+    draw_record_frame();
     screen_flush();
 }
 
@@ -3823,6 +4090,7 @@ static void draw(void)
         draw_output();
         return;
     }
+    draw_invalidate();
     /* A browser has one folder/selection, not independent copies per screen.
      * Auxiliary reflow must not consume follow_sel or round the active
      * output's scroll position to another grid's columns. Paint the input
@@ -3839,6 +4107,23 @@ static void draw(void)
     a->follow_sel = follow[0]; b->follow_sel = follow[1];
     screen_output_select(files_output);
     draw_output();
+}
+
+/* Nothing else changed: only the top bar (its clock, the status), which
+ * screen_bar draws again only when what it shows changed. */
+static void bar_tick(void)
+{
+    int count = native_outputs() ? screen_output_count() : 1;
+    if (count <= 1) {
+        screen_bar("files", NULL);
+        screen_flush();
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        if (screen_output_select(i) >= 0) screen_bar("files", NULL);
+    }
+    screen_output_select(files_output);
+    screen_flush();
 }
 
 /* Modals stay on the screen that opened them. A click on another screen
@@ -3885,6 +4170,7 @@ static const char *prompt(const char *question, const char *initial, int select_
     static char text[PATH_MAX];
     size_t cur = 0;
     int all = 0;
+    draw_invalidate();
     text[0] = '\0';
     insert_text(text, sizeof text, &cur, &all, initial ? initial : "", initial ? strlen(initial) : 0);
     all = select_all && text[0] != '\0';
@@ -3979,9 +4265,12 @@ static const char *prompt(const char *question, const char *initial, int select_
         } else if (keys_typed(key) && !(mods & (KEYS_CTRL | KEYS_ALT))) {
             const char *typed = keys_typed(key);
             insert_text(text, sizeof text, &cur, &all, typed, strlen(typed));
-        } else if (key == K_SHOWN) {
-            drag_stop();
-            pull.on = 0;
+        } else if (key == K_SHOWN || key == K_REPAINT) {
+            if (key == K_SHOWN) {
+                drag_stop();
+                pull.on = 0;
+            }
+            draw_invalidate();
             draw();
         }
     }
@@ -3995,6 +4284,7 @@ static int yes(const char *question)
     for (;;) {
         int key = key_poll_timeout(-1, -1);
         if (key == K_SHOWN || key == K_REPAINT) {
+            draw_invalidate();
             draw();
             question_draw(line, 0);
             continue;
@@ -4106,6 +4396,7 @@ static void properties(int folder_self)
         mode_string(st.st_mode, perm);
 
         int sw = side_width(), r0 = body_top();
+        draw_invalidate();
         screen_fill(sw, r0, screen_cols() - sw, rows(), BG);
         ui_hits_clear();
         screen_text(sw + 1, r0, is_dir && (folder_self || !f) ? _("Folder Properties") : _("Properties"), ACCENT_TEXT, BG);
@@ -4270,6 +4561,7 @@ static void drive_tick(void)
         if (!strcmp(kind, "writing")) {
             /* GVfs: "Writing data to %s\nDevice should not be unplugged." */
             report(0, _("Writing data to %s. Don't unplug it yet."), name);
+            drive_dirty = 1;
             continue;
         }
         if (!strcmp(kind, "safe")) {
@@ -4293,6 +4585,7 @@ static void drive_tick(void)
         close(drive_job.fd);
         drive_job.fd = -1;
         reload_all();
+        drive_dirty = 1;
         return;
     }
     if (drive_job.fd >= 0) {
@@ -4301,6 +4594,7 @@ static void drive_tick(void)
         close(drive_job.fd);
         drive_job.fd = -1;
         reload_all();
+        drive_dirty = 1;
     }
 }
 
@@ -4329,6 +4623,7 @@ static int choose(const char *path, const char *type, char *name, size_t size)
         char line[512], label[160], padded[256];
         int last = n + !all - 1;
         const char *slash = path[0] == '/' ? strrchr(path, '/') : NULL;
+        draw_invalidate();
         screen_fill(SIDE, r0, screen_cols() - SIDE, rows(), BG);
         /* TRANSLATORS: first %s is a file name or URL, second %s is its MIME type. */
         snprintf(line, sizeof line, _("Open %s (%s) with:"), slash ? slash + 1 : path, type);
@@ -4580,6 +4875,7 @@ static void open_file(const char *path, int pick, const char *with)
             return;
         }
         say("home: open %s (%s) with %s", path, type, name);
+        draw_invalidate();
         base_open(argv, why, sizeof why);
         say("home: %s", why);
         if (program_ran(why)) {
@@ -4620,6 +4916,7 @@ static void open_file(const char *path, int pick, const char *with)
         own_tor = 1;
     }
     say("home: open %s (%s) in %s", path, type, name);
+    draw_invalidate();
     if ((own_tor ? base_app_open_own_tor(name, path, why, sizeof why) :
                    base_app_open(name, path, why, sizeof why)) == 0) {
         report(0, _("Opened in %s."), name);
@@ -4878,6 +5175,7 @@ static void sort_menu(int col, int row)
     items[9] = rows_buf[9];
     items[10] = NULL;
 
+    draw_invalidate();
     int choice = ui_menu(col, row, items);
     if (choice < 0) return;
     char keep[256];
@@ -4915,6 +5213,7 @@ static void columns_menu(int col, int row)
         items[i] = rows_buf[i];
     }
     items[6] = NULL;
+    draw_invalidate();
     int choice = ui_menu(col, row, items);
     if (choice >= 0 && choice < 6) {
         cols_mask ^= flags[choice];
@@ -4993,6 +5292,7 @@ static int archive_menu(int col, int row, int extract)
     if (!extract) ITEM(_("Compress to..."), KEY_COMPRESS_TO);
 #undef ITEM
     items[n] = NULL;
+    draw_invalidate();
     int got = ui_menu(col, row, items);
     return got < 0 ? -1 : codes[got];
 }
@@ -5052,6 +5352,7 @@ static void archive_action(int code)
     }
     argv[k] = NULL;
     status = k - first != n ? -1 : in_window() ? archive_batch_window(argv) : base_call(argv);
+    draw_invalidate();
     for (int i = first; i < k; i++) free(argv[i]);
     if (code == KEY_EXTRACT_TRASH && status == 0) {
         trash_items(P, idx, n);
@@ -5143,6 +5444,7 @@ static int file_menu(int col, int row, int on_file)
     ITEM(hidden ? _("Hide hidden files") : _("Show hidden files"), '.');
 #undef ITEM
     items[n] = NULL;
+    draw_invalidate();
     int choice = ui_menu(col + 1, row, items);
     if (choice >= 0 && (keys[choice] == KEY_EXTRACT_MENU || keys[choice] == KEY_COMPRESS_MENU)) {
         return archive_menu(col + 4, row + choice, keys[choice] == KEY_EXTRACT_MENU);
@@ -5176,6 +5478,7 @@ static void drag_cancel(void)
     if (drag.mode == DRAG_BAND) {
         struct pane *p = &tabs[cur_tab].pane[drag.pane];
         for (int i = 0; i < drag.nbase; i++) p->list[i].marked = drag.base[i];
+        mark_touch(p);
         p->sel = drag.base_sel;
     }
     drag_stop();
@@ -5200,7 +5503,7 @@ static void band_mark(void)
     int first = -1, last = -1;
     for (int i = 0; i < p->nlist; i++) {
         int tx, ty, cx, cy, cw, ch;
-        item_box(p, cols, gc, tc, tr, vr, &dc, i, &tx, &ty, &cx, &cy, &cw, &ch);
+        item_box(p, cols, gc, tc, tr, vr, &dc, i, &tx, &ty, &cx, &cy, &cw, &ch, NULL, 0);
         int ix0 = cx * cell_w, iy0 = cy * cell_h, iw = cw * cell_w, ih = ch * cell_h;
         int hit = ix0 <= x1 && ix0 + iw > x0 && iy0 <= y1 && iy0 + ih > y0;
         int was = i < drag.nbase ? drag.base[i] : 0;
@@ -5209,6 +5512,7 @@ static void band_mark(void)
         if (hit && first < 0) first = i;
         if (hit) last = i;
     }
+    mark_touch(p);
     if (last >= 0) {
         int fwd = p->view == VIEW_COMPACT ? (bx > drag.ax || (bx == drag.ax && by >= drag.ay)) : (by >= drag.ay);
         p->sel = fwd ? last : first;
@@ -5533,7 +5837,11 @@ static int pointer_key(int *out_mods)
             if (drag.mode == DRAG_BAND || drag.mode == DRAG_PENDING) drag_stop();
             pull.on = 0;
             select_output(e->output);
-            draw(); /* rebuild this output's cells and hit regions first */
+            /* Clamp scroll to the newly targeted output's grid so rubberband
+             * anchors and wheel scrolls align with the hits drawn for it. */
+            clamp_scroll(&tabs[cur_tab].pane[0], 0);
+            if (tabs[cur_tab].split) clamp_scroll(&tabs[cur_tab].pane[1], 1);
+            output_switched = 1;
         }
     }
     pointer_xy(e, &px, &py);
@@ -5647,6 +5955,7 @@ static int pointer_key(int *out_mods)
         drag_stop();
         if (mode == DRAG_PENDING && clear) {
             for (int k = 0; k < fp->nlist; k++) fp->list[k].marked = 0;
+            mark_touch(fp);
             return -1;
         }
         if (mode == DRAG_ITEMS && !pick_type) {
@@ -5749,6 +6058,7 @@ static int pointer_key(int *out_mods)
         if (e->button == BTN_RIGHT) {
             if (!P->list[i].marked && marked(P)) {
                 for (int k = 0; k < P->nlist; k++) P->list[k].marked = 0;
+                mark_touch(P);
             }
             P->sel = i;
             draw();
@@ -5760,10 +6070,13 @@ static int pointer_key(int *out_mods)
         int clear = 0;
         if (mods & KEYS_SHIFT) {
             for (int k = P->sel < i ? P->sel : i; k <= (P->sel < i ? i : P->sel); k++) P->list[k].marked = 1;
+            mark_touch(P);
         } else if (mods & KEYS_CTRL) {
             P->list[i].marked = !P->list[i].marked;
+            mark_touch(P);
         } else if (!P->list[i].marked && marked(P)) {
             for (int k = 0; k < P->nlist; k++) P->list[k].marked = 0;
+            mark_touch(P);
         } else if (P->list[i].marked && e->clicks != 2) {
             clear = 1; /* cleared on release if it was not a drag */
         }
@@ -5772,7 +6085,10 @@ static int pointer_key(int *out_mods)
         msg_sticky = 0;
         if (e->clicks == 2 && !(mods & (KEYS_SHIFT | KEYS_CTRL))) return '\n';
         if (pick_type) {
-            if (clear) for (int k = 0; k < P->nlist; k++) P->list[k].marked = 0;
+            if (clear) {
+                for (int k = 0; k < P->nlist; k++) P->list[k].marked = 0;
+                mark_touch(P);
+            }
             return -1;
         }
         drag.mode = DRAG_PENDING;
@@ -5867,19 +6183,26 @@ static const struct ui_help_line files_help[] = {
 static int browse(char *out, size_t size)
 {
     int show = 1;
+    draw_invalidate();
     for (;;) {
         /* Quitting, asked here or in a question, a menu or a copy. */
         if (close_asked) {
             return 0;
         }
         set_active();
+        unsigned seen_msg = msg_gen, seen_epoch = list_epoch;
         cloud_tick();
         drive_tick();
+        if (cloud_dirty || drive_dirty || msg_gen != seen_msg || list_epoch != seen_epoch) show = 1;
+        cloud_dirty = drive_dirty = 0;
         if (show) draw();
         show = 1;
         /* The drives service's answer wakes it as a key does. */
         int key = key_poll_timeout(drive_job.fd, drag.mode == DRAG_BAND ? 40 : cloud_job.pid ? 100 : 2000);
-        if (key == K_REPAINT) continue;
+        if (key == K_REPAINT) {
+            draw_invalidate();
+            continue;
+        }
         int mods = keys_modifiers();
         if (key_action(key, mods) == ACT_QUIT) {
             close_asked = 1; /* Ctrl+Q, Alt+F4, the window's close: inside home, back to its list */
@@ -5887,9 +6210,10 @@ static int browse(char *out, size_t size)
         }
         if (key == K_POINTER) {
             mods = 0;
+            output_switched = 0;
             key = pointer_key(&mods);
             if (key <= 0) {
-                show = key < 0;
+                show = key < 0 || output_switched;
                 continue;
             }
         }
@@ -5904,14 +6228,22 @@ static int browse(char *out, size_t size)
                 drag_stop();
                 pull.on = 0;
                 output_ready();
+                draw_invalidate();
             }
             char program[OPEN_NAME];
             if (!pick_type && files_program_request(program, sizeof program, 0)) {
                 return 0; /* a program for home to run: back to its list, which runs it */
             }
-            if ((pick_type || !take_request()) && key == K_SHOWN) {
+            unsigned said = msg_gen;
+            int took = pick_type ? 0 : take_request();
+            if (!took && key == K_SHOWN) {
                 reload_all();
             }
+            /* A timeout redraws only when something visible changed: a
+             * request shown or refused, what cloud_tick/drive_tick said
+             * (above), or the free space when the status line shows it. */
+            show = key == K_SHOWN || took || msg_gen != said || (!(msg_sticky && msg[0]) && vfs_update(P));
+            if (!show) bar_tick();
             continue;
         }
         int act = key_list_action(key, mods); /* a list: q is Esc */
@@ -5937,6 +6269,7 @@ static int browse(char *out, size_t size)
             }
             if (marked(P) > 0) {
                 for (int i = 0; i < P->nlist; i++) P->list[i].marked = 0;
+                mark_touch(P);
                 msg_sticky = 0;
                 continue;
             }
@@ -5958,6 +6291,7 @@ static int browse(char *out, size_t size)
         }
         drag_stop();
         if (act == ACT_HELP) {
+            draw_invalidate();
             if (ui_help(_("Files keys"), files_help) == ACT_QUIT) close_asked = 1;
             continue;
         }
@@ -6091,11 +6425,13 @@ static int browse(char *out, size_t size)
         }
         if (act == ACT_SELECT_ALL) {
             for (int i = 0; i < P->nlist; i++) P->list[i].marked = 1;
+            mark_touch(P);
             report(0, P_("Marked %d item.", "Marked all %d items.", P->nlist), P->nlist);
             continue;
         }
         if (act == ACT_DESELECT) {
             for (int i = 0; i < P->nlist; i++) P->list[i].marked = 0;
+            mark_touch(P);
             continue;
         }
         if (pick_type && ((key > 0 && key < 0x80 && strchr(picking_folder() ? "xcvNLVrweu " : "oxcvNLVrweu ", key)) ||
@@ -6156,6 +6492,7 @@ static int browse(char *out, size_t size)
                 for (int k = P->sel < next ? P->sel : next; k <= (P->sel < next ? next : P->sel); k++) {
                     P->list[k].marked = 1;
                 }
+                mark_touch(P);
             }
             P->sel = next;
             P->follow_sel = 1;
@@ -6188,6 +6525,7 @@ static int browse(char *out, size_t size)
             }
         } else if (key == ' ' && P->nlist > 0) {
             P->list[P->sel].marked = !P->list[P->sel].marked;
+            mark_touch(P);
             P->sel = P->sel < P->nlist - 1 ? P->sel + 1 : P->sel;
             P->follow_sel = 1;
         } else if ((act == ACT_COPY || act == ACT_CUT) && P->nlist > 0) {
@@ -6259,11 +6597,13 @@ static int files_screens_begin(int *previous)
     files_output_name[0] = '\0';
     select_output(*previous >= 0 ? *previous : 0);
     output_ready();
+    draw_invalidate();
     return was;
 }
 
 static void files_screens_end(int was, int previous)
 {
+    draw_invalidate();
     if (!was && screen_extended) screen_extended(0);
     else if (native_outputs() && screen_output_count() > 0) {
         screen_output_select(previous >= 0 && previous < screen_output_count() ? previous : 0);

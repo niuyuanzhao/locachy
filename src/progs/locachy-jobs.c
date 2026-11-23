@@ -46,6 +46,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <sys/vfs.h>
 #include <linux/magic.h>
@@ -596,6 +597,18 @@ static void stop_job(const struct job *j)
         others ? "" : " (its step itself)");
 }
 
+static int cgroup_populated(const char *path)
+{
+    char line[64];
+    int populated = 0;
+    FILE *in = fopen(path, "re");
+    while (in && fgets(line, sizeof line, in)) {
+        if (strncmp(line, "populated ", 10) == 0) populated = atoi(line + 10);
+    }
+    if (in) fclose(in);
+    return populated;
+}
+
 /* What an ended job left in its cgroup ends; the cgroup goes. */
 static void cgroup_end(const struct job *j)
 {
@@ -603,16 +616,42 @@ static void cgroup_end(const struct job *j)
     cgroup_path(j, "cgroup.kill", path, sizeof path);
     write_text(path, "1");
     cgroup_path(j, "cgroup.events", path, sizeof path);
-    for (int i = 0; i < 100; i++) {
-        char line[64];
-        int populated = 0;
-        FILE *in = fopen(path, "re");
-        while (in && fgets(line, sizeof line, in)) {
-            if (strncmp(line, "populated ", 10) == 0) populated = atoi(line + 10);
+    if (cgroup_populated(path)) {
+        int ifd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+        if (ifd >= 0 && inotify_add_watch(ifd, path, IN_MODIFY | IN_DELETE_SELF) < 0) {
+            close(ifd);
+            ifd = -1;
         }
-        if (in) fclose(in);
-        if (!populated) break;
-        usleep(10000);
+        double deadline = now_s() + 1.0;
+        while (cgroup_populated(path)) {
+            double left_s = deadline - now_s();
+            if (left_s <= 0.0) break;
+            int left_ms = (int)(left_s * 1000.0 + 0.999);
+            if (left_ms < 1) left_ms = 1;
+            if (left_ms > 1000) left_ms = 1000;
+            if (ifd >= 0) {
+                struct pollfd p = { .fd = ifd, .events = POLLIN };
+                int r = poll(&p, 1, left_ms);
+                if (r == 0) break;
+                if (r < 0) {
+                    if (errno == EINTR) continue;
+                    close(ifd);
+                    ifd = -1;
+                    continue;
+                }
+                if (p.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+                    close(ifd);
+                    ifd = -1;
+                    continue;
+                }
+                char buf[512];
+                while (read(ifd, buf, sizeof buf) > 0) {
+                }
+            } else {
+                poll(NULL, 0, left_ms < 5 ? left_ms : 5);
+            }
+        }
+        if (ifd >= 0) close(ifd);
     }
     cgroup_path(j, NULL, path, sizeof path);
     rmdir(path);

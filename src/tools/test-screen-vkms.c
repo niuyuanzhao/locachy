@@ -572,8 +572,14 @@ int main(void)
     CHECK(screen_output_get(1, &out) == 0);
     screen_cursor_move(out.x + out.width / 2, out.y + out.height / 2);
     screen_cursor_visible(1);
-    CHECK(outputs[0].cursor_at.x1 == outputs[0].cursor_at.x2 &&
-          outputs[1].cursor_at.x1 != outputs[1].cursor_at.x2);
+    CHECK(cursor_output == 1);
+    if (outputs[1].soft_cursor) {
+        CHECK(outputs[0].cursor_at.x1 == outputs[0].cursor_at.x2 &&
+              outputs[1].cursor_at.x1 != outputs[1].cursor_at.x2);
+    } else {
+        CHECK(!outputs[0].soft_cursor && outputs[0].cursor_at.x1 == outputs[0].cursor_at.x2 &&
+              outputs[1].cursor_at.x1 == outputs[1].cursor_at.x2);
+    }
     screen_cursor_visible(0);
     screen_release();
     CHECK(screen_refresh() == 1 && screen_output_count() == 2);

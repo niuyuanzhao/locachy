@@ -5,7 +5,8 @@
 # x86-64-v2, ...; LEVEL is the packages', for locachy-repos). make-root.sh runs it chrooted in a
 # new root; the system can run it again on itself (its sources are next to it).
 # Installs, into the root file system (takes effect when a program next starts):
-#   /usr/local/bin/home, term, settings, note  the programs
+#   /usr/local/bin/home, term, settings, note, search  the programs
+#   /usr/local/bin/locachy-docscan             sandboxed document text extractor for search
 #   /usr/local/bin/lock                        the lock screen (a PAM client)
 #   /etc/pam.d/locachy-lock                    its password: a local login
 #   /etc/pam.d/locachy-lock-fingerprint        its fingerprint (pam_fprintd)
@@ -28,8 +29,10 @@
 #   /usr/local/lib/locachy/locachy-docs        private files dragged into a container (a service)
 #   /usr/local/lib/locachy/locachy-jobs        the system jobs' queue: package transactions, the
 #                                              boot image, firmware, one at a time (a service)
+#   /usr/local/lib/locachy/locachy-searchd     global search index and query daemon (a service)
 #   /usr/local/lib/locachy/udev-client         the devices: systemd-udevd as packaged (a service)
 #   /usr/local/lib/udev/rules.d/               LOCachy's preset udev rules
+#   /usr/local/lib/modprobe.d/                 LOCachy's preset module power options
 #   /usr/local/lib/locachy/ntp-client          network time (a service)
 #   /usr/local/lib/locachy/timezone-client     the time zone from the network (a service)
 #   /usr/local/share/locachy/font.psf          the font when no other can be read (Terminus 16 bold)
@@ -106,13 +109,31 @@ mkdir -p /usr/local/bin "$lib" /usr/local/share/locachy
 echo "$level" >"$lib/level"
 echo "$cpu" >"$lib/cpu"
 
+SEC_CFLAGS="-ffunction-sections -fdata-sections"
+GC_LDFLAGS="-Wl,--gc-sections -Wl,--as-needed"
+LTO_FLAGS=""
+AR_BIN="ar"
+if command -v gcc-ar >/dev/null 2>&1; then
+    LTO_FLAGS="-flto=auto"
+    AR_BIN="gcc-ar"
+fi
+MUSL_LTO=""
+MUSL_AR="ar"
+if [ -n "$LTO_FLAGS" ] && printf 'int main(void){return 0;}\n' | \
+    musl-gcc -static -O2 -march="$cpu" $SEC_CFLAGS $LTO_FLAGS -Wl,--gc-sections -x c - \
+    -o "$b/musl-lto-probe" >/dev/null 2>&1; then
+    MUSL_LTO="$LTO_FLAGS"
+    MUSL_AR="$AR_BIN"
+fi
+rm -f "$b/musl-lto-probe"
+
 # The kernel's UAPI headers, as installed with the C library (linux-api-
 # headers), without the C library's own headers: musl brings its own.
 mkdir -p "$b/uapi"
 for d in linux asm asm-generic drm sound; do
     ln -s "/usr/include/$d" "$b/uapi/$d"
 done
-cc="musl-gcc -static -O2 -march=$cpu -Wall -Wextra -I$src/base/include -isystem $b/uapi"
+cc="musl-gcc -static -O2 -march=$cpu $SEC_CFLAGS $MUSL_LTO -Wall -Wextra -I$src/base/include -isystem $b/uapi"
 
 # Process 1 (the switcher) runs in our initramfs before the root partition is
 # mounted: linked statically (musl). It is only used through the initramfs.
@@ -124,7 +145,11 @@ if [ "$boot_mode" -eq 1 ]; then
         [ "$(basename "$f")" = "jobs.c" ] && continue
         $cc -I"$src/base" -c -o "$b/musl-base-$(basename "$f" .c).o" "$f"
     done
-    $cc -I"$src/base" -o "$lib/init" "$src/init/init.c" "$src/init/apps.c" "$b"/musl-base-*.o
+    "$MUSL_AR" rcs "$b/liblocachy-musl.a" "$b"/musl-base-*.o
+    $cc -Wl,--gc-sections -I"$src/base" -o "$lib/init" \
+        "$src/init/init.c" "$src/init/apps.c" \
+        -Wl,-u,theme_get -Wl,-u,theme_reload \
+        "$b/liblocachy-musl.a"
 fi
 
 # FreeType for the programs running in the glibc root: what Terminus lacks
@@ -142,8 +167,12 @@ NM_LIBS="$(pkg-config --libs libnm)"
 # The framebuffer programs' pointer: libinput, as the shared compositor has it.
 INPUT_CFLAGS="-DCONFIG_LIBINPUT $(pkg-config --cflags libinput)"
 INPUT_LIBS="$(pkg-config --libs libinput) -lm"
-FT_LIBS="$FT_LIBS $NM_LIBS $INPUT_LIBS"
-GCC="gcc -O2 -march=$cpu -Wall -Wextra -D_GNU_SOURCE -I$src/base/include -I$src/base $FT_CFLAGS $NM_CFLAGS $INPUT_CFLAGS"
+GIO_CFLAGS="$(pkg-config --cflags gio-2.0)"
+GIO_LIBS="$(pkg-config --libs gio-2.0)"
+UI_CFLAGS="$FT_CFLAGS $NM_CFLAGS $INPUT_CFLAGS"
+UI_LIBS="$FT_LIBS $NM_LIBS $INPUT_LIBS"
+GCC_CORE="gcc -O2 -march=$cpu $SEC_CFLAGS $LTO_FLAGS -Wall -Wextra -D_GNU_SOURCE -I$src/base/include -I$src/base"
+GCC="$GCC_CORE $UI_CFLAGS"
 IME_CFLAGS=""
 IME_LIBS=""
 rime_redeployed=0
@@ -208,80 +237,202 @@ if [ "${IME:-1}" != 0 ] && [ -f /usr/include/rime_api.h ] && [ -f /usr/lib/libri
     fi
 fi
 
-for f in "$src"/base/*.c; do
-    [ "$(basename "$f")" = "ime.c" ] && continue
-    $GCC -c -o "$b/glibc-base-$(basename "$f" .c).o" "$f"
+# Base library partitioned into isolated static archives with demand linking
+# (-ffunction-sections -fdata-sections -flto=auto, -Wl,--gc-sections --as-needed):
+#   liblocachy-core.a   zero external shared libraries
+#   liblocachy-ui.a     direct DRM + evdev + FreeType/Fontconfig + libinput
+#   liblocachy-win.a    UI compiled with CONFIG_WAYLAND + window transport
+#   liblocachy-status.a status bar (NetworkManager + BlueZ D-Bus)
+#   liblocachy-open.a   content-type rules and open-request spool (GIO)
+#   liblocachy-ime.a    input method (librime)
+CORE_MODS="rc say control duress jobs i18n key-action monitor-modes monitors backlight clipboard theme theme-desktop input-raw modload"
+UI_MODS="screen font fontmatch keys pointer ui help textsel panel"
+
+for m in $CORE_MODS; do
+    $GCC_CORE -c -o "$b/base-$m.o" "$src/base/$m.c"
 done
-$GCC $IME_CFLAGS -c -o "$b/glibc-ime.o" "$src/base/ime.c"
+for m in $UI_MODS wayland-data; do
+    $GCC -c -o "$b/base-$m.o" "$src/base/$m.c"
+done
+$GCC_CORE $NM_CFLAGS -c -o "$b/base-status.o" "$src/base/status.c"
+$GCC_CORE $GIO_CFLAGS -c -o "$b/base-open.o" "$src/base/open.c"
+$GCC_CORE $IME_CFLAGS -c -o "$b/base-ime.o" "$src/base/ime.c"
+
+"$AR_BIN" rcs "$b/liblocachy-core.a" \
+    "$b/base-rc.o" "$b/base-say.o" "$b/base-control.o" "$b/base-duress.o" \
+    "$b/base-jobs.o" "$b/base-i18n.o" "$b/base-key-action.o" \
+    "$b/base-monitor-modes.o" "$b/base-monitors.o" "$b/base-backlight.o" \
+    "$b/base-clipboard.o" "$b/base-theme.o" "$b/base-theme-desktop.o" \
+    "$b/base-input-raw.o" "$b/base-modload.o"
+"$AR_BIN" rcs "$b/liblocachy-ui.a" \
+    "$b/base-screen.o" "$b/base-font.o" "$b/base-fontmatch.o" \
+    "$b/base-keys.o" "$b/base-pointer.o" "$b/base-ui.o" \
+    "$b/base-help.o" "$b/base-textsel.o" "$b/base-panel.o" \
+    "$b/base-wayland-data.o"
+"$AR_BIN" rcs "$b/liblocachy-status.a" "$b/base-status.o"
+"$AR_BIN" rcs "$b/liblocachy-open.a" "$b/base-open.o"
+"$AR_BIN" rcs "$b/liblocachy-ime.a" "$b/base-ime.o"
+
+LIB_CORE="$b/liblocachy-core.a"
+LIB_UI="$b/liblocachy-ui.a"
+LIB_STATUS="$b/liblocachy-status.a"
+LIB_OPEN="$b/liblocachy-open.a"
+LIB_IME="$b/liblocachy-ime.a"
+
+# Weak hook anchors: GNU ld does not extract archive members for weak undefined
+# references alone, so binaries name the base hooks they expect while
+# --gc-sections discards unreferenced functions from those members.
+HOOK_THEME="-Wl,-u,theme_get -Wl,-u,theme_reload"
+HOOK_THEME_WATCH="$HOOK_THEME -Wl,-u,theme_watch_open -Wl,-u,theme_watch_read"
+HOOK_BAR="-Wl,-u,base_status_fields"
+HOOK_OPEN="-Wl,-u,open_request_publish"
+# Weak hooks of the base, resolved by pulling their archive members (see build-check.sh).
+HOOK_RAW="-Wl,-u,base_raw_cancel -Wl,-u,base_raw_emit -Wl,-u,base_raw_forward_home -Wl,-u,base_raw_pending"
+HOOK_DATA="-Wl,-u,wl_data_active -Wl,-u,wl_data_clipboard_get -Wl,-u,wl_data_clipboard_set -Wl,-u,wl_data_clipboard_clear -Wl,-u,wl_data_drag_active -Wl,-u,wl_data_drag_start -Wl,-u,wl_data_drag_start_key -Wl,-u,wl_data_press_serial"
+HOOK_BASE="$HOOK_RAW $HOOK_DATA"
+HOOK_WIN=""
+
 # The programs that also open as windows on the shared display (term, settings,
-# view, files; LOCACHY_BACKEND=wayland, set only by the trusted window
-# launcher) are linked with the base built with the window transport
-# (wayland-backend.c, wayland-data.c). Without the desktop module's Wayland
-# libraries they stay direct-only and refuse a window request.
-WIN=glibc-base
+# view, files, search; LOCACHY_BACKEND=wayland, set only by the trusted window
+# launcher) are linked with liblocachy-win.a (UI + wayland-backend.c,
+# wayland-data.c and Wayland protocols). Without the desktop module's Wayland
+# libraries they fall back to liblocachy-ui.a and refuse a window request.
+LIB_WIN="$LIB_UI"
 WIN_LIBS=""
+WIN_HOOK_THEME="$HOOK_THEME"
 if command -v wayland-scanner >/dev/null 2>&1 && pkg-config --exists wayland-client wayland-cursor xkbcommon; then
-    for p in xdg-shell fractional-scale-v1 viewporter primary-selection-unstable-v1 xdg-decoration-unstable-v1; do
+    WIN_PROTO_OBJS=""
+    for p in xdg-shell fractional-scale-v1 viewporter primary-selection-unstable-v1 xdg-decoration-unstable-v1 wlr-layer-shell-unstable-v1; do
         wayland-scanner client-header "$src/base/protocols/$p.xml" "$b/$p-client-protocol.h"
         wayland-scanner private-code "$src/base/protocols/$p.xml" "$b/$p-protocol.c"
-        gcc -O2 -march=$cpu -c -o "$b/proto-$p.o" "$b/$p-protocol.c"
+        gcc -O2 -march=$cpu $SEC_CFLAGS $LTO_FLAGS -c -o "$b/proto-$p.o" "$b/$p-protocol.c"
+        WIN_PROTO_OBJS="$WIN_PROTO_OBJS $b/proto-$p.o"
     done
-    for f in "$src"/base/*.c; do
-        [ "$(basename "$f")" = "ime.c" ] && continue
-        $GCC -DCONFIG_WAYLAND -I"$b" $(pkg-config --cflags wayland-client wayland-cursor xkbcommon) \
-            -c -o "$b/glibc-win-$(basename "$f" .c).o" "$f"
+    WL_CFLAGS="$(pkg-config --cflags wayland-client wayland-cursor xkbcommon)"
+    for m in $UI_MODS wayland-backend wayland-data; do
+        $GCC -DCONFIG_WAYLAND -I"$b" $WL_CFLAGS \
+            -c -o "$b/win-$m.o" "$src/base/$m.c"
     done
-    WIN=glibc-win
-    WIN_LIBS="$b/proto-xdg-shell.o $b/proto-fractional-scale-v1.o $b/proto-viewporter.o
-        $b/proto-primary-selection-unstable-v1.o $b/proto-xdg-decoration-unstable-v1.o
-        $(pkg-config --libs wayland-client wayland-cursor xkbcommon) -lm"
+    "$AR_BIN" rcs "$b/liblocachy-win.a" \
+        "$b/win-screen.o" "$b/win-font.o" "$b/win-fontmatch.o" \
+        "$b/win-keys.o" "$b/win-pointer.o" "$b/win-ui.o" \
+        "$b/win-help.o" "$b/win-textsel.o" "$b/win-panel.o" \
+        "$b/win-wayland-backend.o" "$b/win-wayland-data.o" $WIN_PROTO_OBJS
+    LIB_WIN="$b/liblocachy-win.a"
+    WIN_LIBS="$(pkg-config --libs wayland-client wayland-cursor xkbcommon) -lm"
+    HOOK_WIN="-Wl,-u,wl_data_init -Wl,-u,wl_data_active"
+    WIN_HOOK_THEME="$HOOK_THEME_WATCH"
 fi
 
-$GCC -o /usr/local/bin/home "$src/progs/home.c" "$src/progs/files.c" "$b"/glibc-base-*.o $FT_LIBS
-$GCC $IME_CFLAGS -o /usr/local/bin/term "$src/progs/term.c" "$b"/$WIN-*.o "$b/glibc-ime.o" $IME_LIBS $FT_LIBS \
-    $WIN_LIBS
-$GCC -o /usr/local/bin/settings "$src/progs/settings.c" "$src/progs/files.c" "$src/progs/auth.c" \
-    "$b"/$WIN-*.o $FT_LIBS -lpam $WIN_LIBS
+$GCC -c -o "$b/files-prog.o" "$src/progs/files.c"
+
+$GCC $GC_LDFLAGS -o /usr/local/bin/home "$src/progs/home.c" "$b/files-prog.o" \
+    $HOOK_THEME $HOOK_BASE $HOOK_BAR $HOOK_OPEN \
+    -Wl,--start-group "$LIB_CORE" "$LIB_UI" "$LIB_STATUS" "$LIB_OPEN" -Wl,--end-group \
+    $UI_LIBS $GIO_LIBS
+$GCC $GC_LDFLAGS $IME_CFLAGS -o /usr/local/bin/term "$src/progs/term.c" \
+    $WIN_HOOK_THEME $HOOK_BASE $HOOK_BAR $HOOK_WIN \
+    -Wl,--start-group "$LIB_WIN" "$LIB_CORE" "$LIB_STATUS" "$LIB_IME" -Wl,--end-group \
+    $IME_LIBS $UI_LIBS $WIN_LIBS
+$GCC $GC_LDFLAGS -o /usr/local/bin/settings "$src/progs/settings.c" "$b/files-prog.o" "$src/progs/auth.c" \
+    $WIN_HOOK_THEME $HOOK_BASE $HOOK_BAR $HOOK_OPEN $HOOK_WIN \
+    -Wl,--start-group "$LIB_WIN" "$LIB_CORE" "$LIB_STATUS" "$LIB_OPEN" -Wl,--end-group \
+    $UI_LIBS $GIO_LIBS -lpam $WIN_LIBS
 # The file manager on its own (home calls files_view itself), for a window.
-$GCC -o /usr/local/bin/files "$src/progs/files-main.c" "$src/progs/files.c" "$b"/$WIN-*.o $FT_LIBS $WIN_LIBS
-$GCC -o /usr/local/bin/lock "$src/progs/lock.c" "$src/progs/auth.c" "$src/progs/duress-shadow.c" "$b"/glibc-base-*.o $FT_LIBS -lpam -lcrypt
-$GCC -shared -fPIC -o /usr/lib/security/pam_locachy_any.so "$src/progs/pam_locachy_any.c" "$src/progs/auth.c" -lpam
+$GCC $GC_LDFLAGS -o /usr/local/bin/files "$src/progs/files-main.c" "$b/files-prog.o" \
+    $WIN_HOOK_THEME $HOOK_BASE $HOOK_BAR $HOOK_OPEN $HOOK_WIN \
+    -Wl,--start-group "$LIB_WIN" "$LIB_CORE" "$LIB_STATUS" "$LIB_OPEN" -Wl,--end-group \
+    $UI_LIBS $GIO_LIBS $WIN_LIBS
+$GCC $GC_LDFLAGS -o /usr/local/bin/lock "$src/progs/lock.c" "$src/progs/auth.c" "$src/progs/duress-shadow.c" \
+    $HOOK_THEME $HOOK_BASE $HOOK_BAR \
+    -Wl,--start-group "$LIB_CORE" "$LIB_UI" "$LIB_STATUS" -Wl,--end-group \
+    $UI_LIBS -lpam -lcrypt
+$GCC_CORE $GC_LDFLAGS -shared -fPIC -o /usr/lib/security/pam_locachy_any.so "$src/progs/pam_locachy_any.c" "$src/progs/auth.c" -lpam
 # The duress password (tools/DURESS.md): sudo's PAM module, the wipe and the
 # verifier (base/duress.c, position-independent for the module), locachy-duress.
-$GCC -fPIC -c -o "$b/pam-duress-base.o" "$src/base/duress.c"
-$GCC -shared -fPIC -o /usr/lib/security/pam_locachy_duress.so "$src/progs/pam_locachy_duress.c" "$src/progs/duress-shadow.c" "$b/pam-duress-base.o" -lpam -lcrypt
-$GCC -o /usr/local/bin/locachy-duress "$src/progs/locachy-duress.c" "$src/progs/duress-shadow.c" "$b"/glibc-base-duress.o -lcrypt
-$GCC -o /usr/local/bin/locachy-seat "$src/progs/seat.c" "$b"/glibc-base-*.o $FT_LIBS
-$GCC -o /usr/local/bin/note "$src/progs/note.c" "$b"/glibc-base-*.o $FT_LIBS
-$GCC -o /usr/local/bin/packages "$src/progs/packages.c" "$src/progs/files.c" "$b"/$WIN-*.o $FT_LIBS $WIN_LIBS
-$GCC -o /usr/local/bin/firmware "$src/progs/firmware.c" "$src/progs/files.c" "$b"/$WIN-*.o $FT_LIBS $WIN_LIBS
+$GCC_CORE -fPIC -c -o "$b/pam-duress-base.o" "$src/base/duress.c"
+$GCC_CORE $GC_LDFLAGS -shared -fPIC -o /usr/lib/security/pam_locachy_duress.so "$src/progs/pam_locachy_duress.c" "$src/progs/duress-shadow.c" "$b/pam-duress-base.o" -lpam -lcrypt
+$GCC_CORE $GC_LDFLAGS -o /usr/local/bin/locachy-duress "$src/progs/locachy-duress.c" "$src/progs/duress-shadow.c" "$LIB_CORE" -lcrypt
+$GCC_CORE $GC_LDFLAGS -o /usr/local/bin/locachy-seat "$src/progs/seat.c" \
+    -Wl,--start-group "$LIB_CORE" "$LIB_UI" "$LIB_STATUS" -Wl,--end-group
+$GCC $GC_LDFLAGS -o /usr/local/bin/note "$src/progs/note.c" \
+    $HOOK_THEME $HOOK_BASE $HOOK_BAR \
+    -Wl,--start-group "$LIB_CORE" "$LIB_UI" "$LIB_STATUS" -Wl,--end-group \
+    $UI_LIBS
+$GCC $GC_LDFLAGS -o /usr/local/bin/packages "$src/progs/packages.c" "$b/files-prog.o" \
+    $WIN_HOOK_THEME $HOOK_BASE $HOOK_BAR $HOOK_OPEN $HOOK_WIN \
+    -Wl,--start-group "$LIB_WIN" "$LIB_CORE" "$LIB_STATUS" "$LIB_OPEN" -Wl,--end-group \
+    $UI_LIBS $GIO_LIBS $WIN_LIBS
+$GCC $GC_LDFLAGS -o /usr/local/bin/firmware "$src/progs/firmware.c" "$b/files-prog.o" \
+    $WIN_HOOK_THEME $HOOK_BASE $HOOK_BAR $HOOK_OPEN $HOOK_WIN \
+    -Wl,--start-group "$LIB_WIN" "$LIB_CORE" "$LIB_STATUS" "$LIB_OPEN" -Wl,--end-group \
+    $UI_LIBS $GIO_LIBS $WIN_LIBS
 # The archive manager: archive on the screen, archive-worker reading and
 # writing the archives as the user in a sandbox (progs/archive-proto.h), with
 # libarchive and OpenSSL, which pacman itself needs.
-$GCC -o "$lib/archive-worker" "$src/progs/archive-worker.c" $(pkg-config --cflags --libs libarchive libcrypto)
-$GCC -o /usr/local/bin/archive "$src/progs/archive.c" "$src/progs/files.c" "$b"/$WIN-*.o $FT_LIBS $WIN_LIBS
-$GCC -o "$lib/drives" "$src/progs/drives.c" "$b"/glibc-base-*.o $FT_LIBS
-$GCC -o "$lib/battery-history" "$src/progs/battery-history.c"
+$GCC_CORE $GC_LDFLAGS -o "$lib/archive-worker" "$src/progs/archive-worker.c" $(pkg-config --cflags --libs libarchive libcrypto)
+$GCC $GC_LDFLAGS -o /usr/local/bin/archive "$src/progs/archive.c" "$b/files-prog.o" \
+    $WIN_HOOK_THEME $HOOK_BASE $HOOK_BAR $HOOK_OPEN $HOOK_WIN \
+    -Wl,--start-group "$LIB_WIN" "$LIB_CORE" "$LIB_STATUS" "$LIB_OPEN" -Wl,--end-group \
+    $UI_LIBS $GIO_LIBS $WIN_LIBS
+$GCC_CORE $GC_LDFLAGS -o "$lib/drives" "$src/progs/drives.c" "$LIB_CORE"
+$GCC_CORE $GC_LDFLAGS -o "$lib/battery-history" "$src/progs/battery-history.c"
 # The system jobs' queue (tools/JOBS.md): long root operations, one at a time.
-$GCC -o "$lib/locachy-jobs" "$src/progs/locachy-jobs.c"
+$GCC_CORE $GC_LDFLAGS -o "$lib/locachy-jobs" "$src/progs/locachy-jobs.c"
+# Global search (tools/SEARCH.md): SQLite/FTS5 daemon, sandboxed document text
+# extractor (PDF via libmupdf when installed, else libarchive-only for
+# DOCX/ODT/EPUB/text), and the search UI (framebuffer and Wayland window).
+if pkg-config --exists sqlite3; then
+    $GCC_CORE $GC_LDFLAGS $(pkg-config --cflags sqlite3) -o "$lib/locachy-searchd" \
+        "$src/progs/locachy-searchd.c" "$src/progs/search-index.c" \
+        $(pkg-config --libs sqlite3) -lm
+else
+    rm -f "$lib/locachy-searchd"
+    echo "make: locachy-searchd not built: sqlite3 is not installed" >&2
+fi
+if pkg-config --exists libarchive; then
+    DOCSCAN_MUPDF_CFLAGS=""
+    DOCSCAN_MUPDF_LIBS=""
+    if pkg-config --exists mupdf; then
+        DOCSCAN_MUPDF_CFLAGS=$(pkg-config --cflags mupdf)
+        DOCSCAN_MUPDF_LIBS="$(pkg-config --libs mupdf) -lm"
+    elif [ -f /usr/include/mupdf/fitz.h ]; then
+        DOCSCAN_MUPDF_LIBS="-lmupdf -lm"
+    else
+        DOCSCAN_MUPDF_CFLAGS="-DDOCSCAN_NO_MUPDF"
+    fi
+    $GCC_CORE $GC_LDFLAGS $(pkg-config --cflags libarchive) $DOCSCAN_MUPDF_CFLAGS -o /usr/local/bin/locachy-docscan \
+        "$src/progs/locachy-docscan.c" $(pkg-config --libs libarchive) $DOCSCAN_MUPDF_LIBS
+else
+    rm -f /usr/local/bin/locachy-docscan
+    echo "make: locachy-docscan not built: libarchive is not installed" >&2
+fi
+if [ -f "$src/progs/search.c" ]; then
+    $GCC $GC_LDFLAGS $IME_CFLAGS -o /usr/local/bin/search "$src/progs/search.c" \
+        $WIN_HOOK_THEME $HOOK_BASE $HOOK_BAR $HOOK_OPEN $HOOK_WIN -Wl,-u,clipboard_get \
+        -Wl,--start-group "$LIB_WIN" "$LIB_CORE" "$LIB_STATUS" "$LIB_OPEN" "$LIB_IME" -Wl,--end-group \
+        $IME_LIBS $UI_LIBS $GIO_LIBS $WIN_LIBS
+fi
 # Shared configuration writes from shell (base/include/config.h): rc.conf or one
 # container's configuration, under the same lock as the C and Python writers.
-$GCC -o "$lib/locachy-config" "$src/progs/locachy-config.c" "$b/glibc-base-rc.o" "$b/glibc-base-say.o"
+$GCC_CORE $GC_LDFLAGS -o "$lib/locachy-config" "$src/progs/locachy-config.c" "$LIB_CORE"
 # Cloud folders' metadata, read as the user so files never waits on the network.
-$GCC $(pkg-config --cflags gio-2.0) -o "$lib/files-cloud-list" "$src/progs/files-cloud-list.c" $(pkg-config --libs gio-2.0)
+$GCC_CORE $GC_LDFLAGS $GIO_CFLAGS -o "$lib/files-cloud-list" "$src/progs/files-cloud-list.c" $GIO_LIBS
 # Container session-bus document-portal owner so xdg-desktop-portal stays up without FUSE.
-$GCC $(pkg-config --cflags gio-2.0) -o "$lib/container-documents" "$src/progs/container-documents.c" $(pkg-config --libs gio-2.0)
+$GCC_CORE $GC_LDFLAGS $GIO_CFLAGS -o "$lib/container-documents" "$src/progs/container-documents.c" $GIO_LIBS
 # The host's document service: private files of the home dragged into one
 # container (tools/DOCUMENTS.md), with the desktop module's document portal.
-$GCC $(pkg-config --cflags gio-unix-2.0) -o "$lib/locachy-docs" "$src/progs/locachy-docs.c" $(pkg-config --libs gio-unix-2.0)
+$GCC_CORE $GC_LDFLAGS $(pkg-config --cflags gio-unix-2.0) -o "$lib/locachy-docs" "$src/progs/locachy-docs.c" $(pkg-config --libs gio-unix-2.0)
 # The document viewer: view on the screen, view-render reading the documents
 # as the user in a sandbox of its own (progs/view-proto.h). Their libraries
 # are the manifest's (a system from before it: locachy-pkg install them).
 VIEW_PKGS="libspectre libheif libjxl libwebp libwebpdemux libarchive ddjvuapi MagickWand libraw"
 if pkg-config --exists $VIEW_PKGS && [ -f /usr/include/mupdf/fitz.h ] && [ -f /usr/include/chm_lib.h ]; then
-    $GCC -o "$lib/view-render" "$src/progs/view-render.c" "$src/progs/view-image.c" $(pkg-config --cflags --libs $VIEW_PKGS) -lmupdf -lchm -lm
-    $GCC $IME_CFLAGS -o /usr/local/bin/view "$src/progs/view.c" "$src/progs/view-layout.c" "$src/progs/view-client.c" \
-        "$src/progs/files.c" "$b"/$WIN-*.o "$b/glibc-ime.o" $IME_LIBS $FT_LIBS $WIN_LIBS
+    $GCC_CORE $GC_LDFLAGS -o "$lib/view-render" "$src/progs/view-render.c" "$src/progs/view-image.c" $(pkg-config --cflags --libs $VIEW_PKGS) -lmupdf -lchm -lm
+    $GCC $GC_LDFLAGS $IME_CFLAGS -o /usr/local/bin/view "$src/progs/view.c" "$src/progs/view-layout.c" "$src/progs/view-client.c" \
+        "$b/files-prog.o" $WIN_HOOK_THEME $HOOK_BASE $HOOK_BAR $HOOK_OPEN $HOOK_WIN \
+        -Wl,--start-group "$LIB_WIN" "$LIB_CORE" "$LIB_STATUS" "$LIB_OPEN" "$LIB_IME" -Wl,--end-group \
+        $IME_LIBS $UI_LIBS $GIO_LIBS $WIN_LIBS
 else
     rm -f /usr/local/bin/view "$lib/view-render"
     echo "make: view not built: libmupdf, djvulibre, libspectre, libheif, libjxl, libwebp, imagemagick, libarchive, libraw, chmlib are not all installed" >&2
@@ -289,11 +440,12 @@ fi
 # The text editor, with tree-sitter's grammars (dlopen'ed) and the queries
 # the grammar packages leave out (edit/queries, their upstream files).
 if pkg-config --exists tree-sitter libpcre2-8 json-glib-1.0; then
-    $GCC $IME_CFLAGS $(pkg-config --cflags json-glib-1.0) -o /usr/local/bin/edit "$src/progs/edit.c" "$src/progs/edit-buffer.c" "$src/progs/edit-doc.c" \
+    $GCC $GC_LDFLAGS $IME_CFLAGS $(pkg-config --cflags json-glib-1.0) -o /usr/local/bin/edit "$src/progs/edit.c" "$src/progs/edit-buffer.c" "$src/progs/edit-doc.c" \
         "$src/progs/edit-file.c" "$src/progs/edit-search.c" "$src/progs/edit-syntax.c" "$src/progs/edit-tree.c" \
         "$src/progs/edit-layout.c" "$src/progs/edit-lsp.c" "$src/progs/edit-session.c" \
-        "$src/progs/edit-filesearch.c" "$src/progs/files.c" "$b"/$WIN-*.o "$b/glibc-ime.o" $IME_LIBS $FT_LIBS \
-        -ltree-sitter -lpcre2-8 $(pkg-config --libs json-glib-1.0) $WIN_LIBS
+        "$src/progs/edit-filesearch.c" "$b/files-prog.o" $WIN_HOOK_THEME $HOOK_BASE $HOOK_BAR $HOOK_OPEN $HOOK_WIN \
+        -Wl,--start-group "$LIB_WIN" "$LIB_CORE" "$LIB_STATUS" "$LIB_OPEN" "$LIB_IME" -Wl,--end-group \
+        $IME_LIBS $UI_LIBS $GIO_LIBS -ltree-sitter -lpcre2-8 $(pkg-config --libs json-glib-1.0) $WIN_LIBS
     rm -rf /usr/local/share/locachy/edit
     install -d /usr/local/share/locachy/edit/queries
     cp -R "$src/edit/queries/." /usr/local/share/locachy/edit/queries/
@@ -314,11 +466,14 @@ if pkg-config --exists $EXTDISPLAY_PKGS; then
         VA_CFLAGS="-DCONFIG_EXTDISPLAY_VAAPI $(pkg-config --cflags libva libva-drm)"
         VA_LIBS="$(pkg-config --libs libva libva-drm)"
     fi
-    $GCC -O3 -DCONFIG_EXTDISPLAY_FFMPEG $VA_CFLAGS $(pkg-config --cflags $EXTDISPLAY_PKGS) -c "$src/progs/extdisplay-decode.c" -o "$b/extdisplay-decode.o"
-    $GCC -DCONFIG_EXTDISPLAY_FFMPEG $VA_CFLAGS $(pkg-config --cflags $EXTDISPLAY_PKGS) -o "$lib/extdisplay-worker" "$src/progs/extdisplay-worker.c" \
+    $GCC_CORE -O3 -DCONFIG_EXTDISPLAY_FFMPEG $VA_CFLAGS $(pkg-config --cflags $EXTDISPLAY_PKGS) -c "$src/progs/extdisplay-decode.c" -o "$b/extdisplay-decode.o"
+    $GCC_CORE $GC_LDFLAGS -DCONFIG_EXTDISPLAY_FFMPEG $VA_CFLAGS $(pkg-config --cflags $EXTDISPLAY_PKGS) -o "$lib/extdisplay-worker" "$src/progs/extdisplay-worker.c" \
         "$src/progs/extdisplay-protocol.c" "$b/extdisplay-decode.o" $(pkg-config --libs $EXTDISPLAY_PKGS) $VA_LIBS -lm
-    $GCC $(pkg-config --cflags json-c) -o /usr/local/bin/extdisplay "$src/progs/extdisplay.c" "$src/progs/extdisplay-setup.c" \
-        "$src/progs/extdisplay-client.c" "$src/progs/extdisplay-protocol.c" "$b"/glibc-base-*.o $FT_LIBS $(pkg-config --libs json-c) -lm
+    $GCC $GC_LDFLAGS $(pkg-config --cflags json-c) -o /usr/local/bin/extdisplay "$src/progs/extdisplay.c" "$src/progs/extdisplay-setup.c" \
+        "$src/progs/extdisplay-client.c" "$src/progs/extdisplay-protocol.c" \
+        $HOOK_THEME $HOOK_BASE $HOOK_BAR -Wl,-u,base_raw_emit \
+        -Wl,--start-group "$LIB_CORE" "$LIB_UI" "$LIB_STATUS" -Wl,--end-group \
+        $UI_LIBS $(pkg-config --libs json-c) -lm
 else
     rm -f /usr/local/bin/extdisplay "$lib/extdisplay-worker"
     echo "make: extdisplay not built: json-c, Avahi and FFmpeg (libavcodec, libavutil, libswscale) are not all installed" >&2
@@ -327,18 +482,18 @@ fi
 # cable interface, runs the TLS pump and hands the paired stream to extdisplay, which
 # starts it from this path. Discovery is a separate keyless child, not a host service.
 if pkg-config --exists $EXTDISPLAY_PKGS openssl; then
-    $GCC $(pkg-config --cflags avahi-core) -o "$lib/extdisplay-advertise" "$src/progs/extdisplay-advertise.c" $(pkg-config --libs avahi-core)
-    $GCC $(pkg-config --cflags openssl) -o "$lib/extdisplay-broker" "$src/progs/extdisplay-broker.c" "$src/progs/extdisplay-broker-net.c" \
+    $GCC_CORE $GC_LDFLAGS $(pkg-config --cflags avahi-core) -o "$lib/extdisplay-advertise" "$src/progs/extdisplay-advertise.c" $(pkg-config --libs avahi-core)
+    $GCC_CORE $GC_LDFLAGS $(pkg-config --cflags openssl) -o "$lib/extdisplay-broker" "$src/progs/extdisplay-broker.c" "$src/progs/extdisplay-broker-net.c" \
         "$src/progs/extdisplay-broker-pump.c" "$src/progs/extdisplay-broker-tls.c" "$src/progs/extdisplay-discovery.c" $(pkg-config --libs openssl)
 else
     rm -f "$lib/extdisplay-broker" "$lib/extdisplay-advertise"
 fi
 if [ -f "$src/progs/app-init.c" ]; then
-    $GCC -o "$lib/app-init" "$src/progs/app-init.c"
+    $GCC_CORE $GC_LDFLAGS -o "$lib/app-init" "$src/progs/app-init.c"
 fi
 # Mounted into every container as /usr/local/bin/xdg-open: static, so that it
 # runs whatever the container's C library.
-$cc -o "$lib/xdg-open" "$src/progs/xdg-open.c"
+$cc -Wl,--gc-sections -o "$lib/xdg-open" "$src/progs/xdg-open.c"
 
 # The shared compositor's host clients: labwc-control (the containers'
 # display, window control, screens) and locachy-bar (status bar, input
@@ -352,37 +507,42 @@ if command -v wayland-scanner >/dev/null 2>&1 && pkg-config --exists wayland-cli
              ext-image-capture-source-v1 ext-image-copy-capture-v1; do
         wayland-scanner client-header "$src/base/protocols/$p.xml" "$b/$p-client-protocol.h"
         wayland-scanner private-code "$src/base/protocols/$p.xml" "$b/$p-protocol.c"
-        gcc -O2 -march=$cpu -c -o "$b/proto-$p.o" "$b/$p-protocol.c"
+        gcc -O2 -march=$cpu $SEC_CFLAGS $LTO_FLAGS -c -o "$b/proto-$p.o" "$b/$p-protocol.c"
     done
-    $GCC -I"$b" -o "$lib/clipboard" "$src/progs/clipboard.c" "$b/glibc-base-clipboard.o" \
-        "$b/proto-ext-data-control-v1.o" -lwayland-client
-    $GCC -I"$b" -o "$lib/labwc-control" "$src/progs/labwc-control.c" \
+    WL_CLIENT_LIBS="-lwayland-client -lwayland-cursor -lxkbcommon"
+    $GCC_CORE $GC_LDFLAGS -I"$b" -o "$lib/clipboard" "$src/progs/clipboard.c" \
+        "$b/proto-ext-data-control-v1.o" "$LIB_CORE" -lwayland-client
+    $GCC_CORE $GC_LDFLAGS -I"$b" -o "$lib/labwc-control" "$src/progs/labwc-control.c" \
         "$b/proto-security-context-v1.o" "$b/proto-wlr-foreign-toplevel-management-unstable-v1.o" \
         "$b/proto-wlr-output-management-unstable-v1.o" "$b/proto-wlr-output-power-management-unstable-v1.o" \
-        "$b/proto-ext-idle-notify-v1.o" "$b"/glibc-base-*.o \
-        $FT_LIBS -lwayland-client -lm
-    $GCC -I"$b" -o "$lib/appearance-portal" "$src/progs/appearance-portal.c" $(pkg-config --cflags --libs gio-2.0)
-    $GCC -o "$lib/locachy-foot" "$src/progs/locachy-foot.c" \
-        "$b/glibc-base-theme.o" "$b/glibc-base-rc.o" "$b/glibc-base-say.o"
-    $GCC $IME_CFLAGS -I"$b" -o /usr/local/bin/locachy-bar "$src/progs/bar.c" \
+        "$b/proto-ext-idle-notify-v1.o" \
+        -Wl,--start-group "$LIB_CORE" "$LIB_OPEN" -Wl,--end-group \
+        -lwayland-client -lm
+    $GCC_CORE $GC_LDFLAGS -I"$b" -o "$lib/appearance-portal" "$src/progs/appearance-portal.c" $GIO_CFLAGS $GIO_LIBS
+    $GCC_CORE $GC_LDFLAGS -o "$lib/locachy-foot" "$src/progs/locachy-foot.c" \
+        -Wl,-u,theme_get "$LIB_CORE"
+    $GCC $GC_LDFLAGS $IME_CFLAGS -I"$b" -o /usr/local/bin/locachy-bar "$src/progs/bar.c" \
         "$b/proto-wlr-layer-shell-unstable-v1.o" "$b/proto-virtual-keyboard-unstable-v1.o" \
         "$b/proto-xdg-shell.o" "$b/proto-wlr-foreign-toplevel-management-unstable-v1.o" \
         "$b/proto-fractional-scale-v1.o" "$b/proto-viewporter.o" "$b/proto-relative-pointer-unstable-v1.o" \
-        "$b"/glibc-base-*.o "$b/glibc-ime.o" $IME_LIBS $FT_LIBS \
-        -lwayland-client -lwayland-cursor -lxkbcommon
-    $GCC -I"$b" -o /usr/local/bin/locachy-overview "$src/progs/overview.c" \
+        $HOOK_THEME $HOOK_BASE $HOOK_BAR $HOOK_OPEN \
+        -Wl,--start-group "$LIB_CORE" "$LIB_UI" "$LIB_STATUS" "$LIB_OPEN" "$LIB_IME" -Wl,--end-group \
+        $IME_LIBS $FT_LIBS $NM_LIBS $GIO_LIBS $WL_CLIENT_LIBS -lm
+    $GCC_CORE $GC_LDFLAGS $FT_CFLAGS -I"$b" -o /usr/local/bin/locachy-overview "$src/progs/overview.c" \
         "$b/proto-wlr-layer-shell-unstable-v1.o" "$b/proto-wlr-foreign-toplevel-management-unstable-v1.o" \
         "$b/proto-ext-foreign-toplevel-list-v1.o" "$b/proto-ext-image-capture-source-v1.o" \
         "$b/proto-ext-image-copy-capture-v1.o" "$b/proto-fractional-scale-v1.o" "$b/proto-viewporter.o" \
-        "$b/proto-xdg-shell.o" "$b"/glibc-base-*.o $FT_LIBS \
-        -lwayland-client -lwayland-cursor -lxkbcommon -lm
-    $GCC -I"$b" -o /usr/local/bin/locachy-shot "$src/progs/shot.c" \
+        "$b/proto-xdg-shell.o" $HOOK_THEME_WATCH $HOOK_BASE \
+        -Wl,--start-group "$LIB_CORE" "$LIB_UI" "$LIB_STATUS" "$LIB_OPEN" -Wl,--end-group \
+        $FT_LIBS $WL_CLIENT_LIBS -lm
+    $GCC_CORE $GC_LDFLAGS $FT_CFLAGS -I"$b" -o /usr/local/bin/locachy-shot "$src/progs/shot.c" \
         "$b/proto-wlr-layer-shell-unstable-v1.o" "$b/proto-wlr-foreign-toplevel-management-unstable-v1.o" \
         "$b/proto-wlr-output-management-unstable-v1.o" "$b/proto-ext-foreign-toplevel-list-v1.o" \
         "$b/proto-ext-image-capture-source-v1.o" "$b/proto-ext-image-copy-capture-v1.o" \
         "$b/proto-fractional-scale-v1.o" "$b/proto-viewporter.o" \
-        "$b/proto-xdg-shell.o" "$b"/glibc-base-*.o $FT_LIBS \
-        -lwayland-client -lwayland-cursor -lxkbcommon -lpng -lm
+        "$b/proto-xdg-shell.o" $HOOK_THEME_WATCH $HOOK_BASE $HOOK_OPEN \
+        -Wl,--start-group "$LIB_CORE" "$LIB_UI" "$LIB_STATUS" "$LIB_OPEN" -Wl,--end-group \
+        $FT_LIBS $WL_CLIENT_LIBS -lpng -lm
 else
     rm -f "$lib/clipboard" "$lib/labwc-control" "$lib/appearance-portal" "$lib/locachy-foot" \
         /usr/local/bin/locachy-bar /usr/local/bin/locachy-overview /usr/local/bin/locachy-shot
@@ -390,7 +550,7 @@ else
 fi
 if pkg-config --exists libcryptsetup json-c openssl; then
     install -d -m 755 /usr/lib/cryptsetup
-    gcc -O2 -march="$cpu" -Wall -Wextra -D_GNU_SOURCE -shared -fPIC \
+    gcc -O2 -march="$cpu" $SEC_CFLAGS $LTO_FLAGS $GC_LDFLAGS -Wall -Wextra -D_GNU_SOURCE -shared -fPIC \
         $(pkg-config --cflags libcryptsetup json-c openssl) \
         "$src/progs/token-tpm12.c" \
         -Wl,--version-script="$src/progs/token-tpm12.sym" \
@@ -448,6 +608,29 @@ if ! grep -q '^[[:space:]]*service_jobs=' /etc/locachy/rc.conf; then
     printf 'service_jobs="/usr/local/lib/locachy/locachy-jobs"\n' >>/etc/locachy/rc.conf
     echo "make: rc.conf: service_jobs added"
     services_changed=1
+fi
+if [ -x "$lib/locachy-searchd" ] && ! grep -q '^[[:space:]]*service_search=' /etc/locachy/rc.conf; then
+    printf 'service_search="/usr/local/lib/locachy/locachy-searchd"\n' >>/etc/locachy/rc.conf
+    echo "make: rc.conf: service_search added"
+    services_changed=1
+fi
+# Settings written out so that rc.conf shows them, with their default values
+# (a setting already there is never changed).
+if ! grep -q '^[[:space:]]*search_docs=' /etc/locachy/rc.conf; then
+    printf 'search_docs="1"\n' >>/etc/locachy/rc.conf
+    echo "make: rc.conf: search_docs added"
+fi
+if ! grep -q '^[[:space:]]*key_search=' /etc/locachy/rc.conf; then
+    printf 'key_search="Super+Space"\n' >>/etc/locachy/rc.conf
+    echo "make: rc.conf: key_search added"
+fi
+if ! grep -q '^[[:space:]]*power_profile=' /etc/locachy/rc.conf; then
+    printf 'power_profile="auto"\n' >>/etc/locachy/rc.conf
+    echo "make: rc.conf: power_profile added"
+fi
+if ! grep -q '^[[:space:]]*zram=' /etc/locachy/rc.conf; then
+    printf 'zram="1"\n' >>/etc/locachy/rc.conf
+    echo "make: rc.conf: zram added"
 fi
 # Process 1 reads rc.conf's services again on SIGHUP. Only the running system's
 # own process 1: not when this runs in a chroot or a build root, whose / is not
@@ -657,6 +840,7 @@ install -D -m 644 "$src/link/50-locachy-sockets.conf" /etc/pipewire/pipewire.con
 install -D -m 644 "$src/link/50-locachy-pulse.conf" /etc/pipewire/pipewire-pulse.conf.d/50-locachy-pulse.conf
 install -D -m 644 "$src/link/locachy-audio.sysusers" /usr/local/lib/sysusers.d/locachy-audio.conf
 install -D -m 644 "$src/link/50-locachy-sysctl.conf" /usr/local/lib/sysctl.d/50-locachy.conf
+install -D -m 644 "$src/link/50-locachy-pm.conf" /usr/local/lib/modprobe.d/50-locachy-pm.conf
 install -m 755 "$src/link/tailscale-client" "$lib/tailscale-client"
 install -m 755 "$src/link/clash-client" "$lib/clash-client"
 install -m 755 "$src/link/tor-client" "$lib/tor-client"
@@ -671,6 +855,7 @@ install -m 755 "$src/link/reboot" /usr/local/bin/reboot
 install -m 755 "$src/link/poweroff" /usr/local/bin/poweroff
 install -m 755 "$src/link/udev-client" "$lib/udev-client"
 install -m 755 "$src/link/bus-client" "$lib/bus-client"
+install -D -m 644 "$src/link/85-locachy-pm.rules" /usr/local/lib/udev/rules.d/85-locachy-pm.rules
 install -D -m 644 "$src/link/90-locachy-network.rules" /usr/local/lib/udev/rules.d/90-locachy-network.rules
 install -D -m 644 "$src/link/91-locachy-cameras.rules" /usr/local/lib/udev/rules.d/91-locachy-cameras.rules
 # Screen sharing (locachy-app starts its backend) and choosing files in the
@@ -745,7 +930,7 @@ install -D -m 644 "$src/link/91-locachy-rebuild.hook" /etc/pacman.d/hooks/91-loc
 # AbortOnFail: refused while a LOCachy job holds it; held until pacman exits).
 install -m 755 "$src/link/locachy-pacman-guard" "$lib/locachy-pacman-guard"
 install -D -m 644 "$src/link/89-locachy-pacman-guard.hook" /etc/pacman.d/hooks/89-locachy-pacman-guard.hook
-gcc -O2 -o "$lib/gen_init_cpio" "$src/tools/gen_init_cpio.c" # the initramfs (locachy-boot)
+gcc -O2 -march="$cpu" $SEC_CFLAGS $LTO_FLAGS $GC_LDFLAGS -o "$lib/gen_init_cpio" "$src/tools/gen_init_cpio.c" # the initramfs (locachy-boot)
 # The shared compositor's configuration (locachy-seat sets XDG_CONFIG_HOME).
 # The shared display's gestures (libinput-gestures, lisgd), which locachy-seat
 # runs while it is on the screen.
@@ -759,7 +944,7 @@ install -D -m 644 "$src/link/container-bus.conf" /usr/local/share/locachy/contai
 # The host's documents bus (locachy-docs), the user's, in no container.
 install -D -m 644 "$src/link/docs-bus.conf" /usr/local/share/locachy/docs-bus.conf
 rm -f /etc/locachy/labwc/menu.xml
-gcc -O2 -Wall -Wextra -o "$lib/link-connect" "$src/link/link-connect.c"
+$GCC_CORE $GC_LDFLAGS -o "$lib/link-connect" "$src/link/link-connect.c"
 # The framebuffer programs' text is Terminus of the screen's scale (screen.c);
 # font.psf, the size at scale 1, is used when those cannot be read, as in the
 # initramfs (its copy there belongs to --boot).
@@ -779,7 +964,7 @@ rm -f /usr/local/share/locachy/font-small.psf /usr/local/share/locachy/font-bar.
 # locachy-seat gives the shared display. Its dead keys' sequences are the
 # compose table of the system's locale, as the shared display's programs
 # have them. A keymap it cannot read types US.
-$GCC -o "$lib/keytable" "$src/progs/keytable.c" $(pkg-config --cflags --libs xkbcommon)
+$GCC_CORE $GC_LDFLAGS -o "$lib/keytable" "$src/progs/keytable.c" $(pkg-config --cflags --libs xkbcommon)
 keymap=$(sed -n 's/^[[:space:]]*keymap="\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' /etc/locachy/rc.conf | tail -n 1)
 lang=$(sed -n 's/^LANG="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' /etc/locale.conf 2>/dev/null | tail -n 1)
 if ! LC_ALL=${lang:-C} "$lib/keytable" "${keymap:-us}" /usr/local/share/locachy/keymap.table; then

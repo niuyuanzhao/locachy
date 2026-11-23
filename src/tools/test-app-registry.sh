@@ -26,10 +26,10 @@ touch "$root/locachy-0" "$root/wayland-0" # the shared display sockets
 # Native windows: their programs (one double), the clipboard service, the
 # cgroups the kernel would make (named as the registry names them), documents.
 mkdir -p "$root/bin"
-for p in view edit archive packages firmware files settings term; do
+for p in view edit archive packages firmware files settings term search; do
     ln -s "$src/tools/test-native-window.sh" "$root/bin/$p"
 done
-for n in window-view-1 window-view-2 window-files-1 window-files-2 window-settings-1 window-mixer-1 window-bluetooth-1 window-network-1 window-term-1 window-term-2 window-edit-1 window-archive-1 window-packages-1 window-firmware-1; do
+for n in window-view-1 window-view-2 window-files-1 window-files-2 window-settings-1 window-mixer-1 window-bluetooth-1 window-network-1 window-term-1 window-term-2 window-edit-1 window-archive-1 window-packages-1 window-firmware-1 window-search-1; do
     cg=$root/cgroup/app_$n
     mkdir -p "$cg"
     printf "populated 0\nfrozen 0\n" >"$cg/cgroup.events"

@@ -10,14 +10,15 @@
 set -eu
 src=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 out=${1:?usage: test-fonts.sh OUT}
-mkdir -p "$out"
+mkdir -p "$out" "$out/home/.cache"
+# The user's own fontconfig files (50-user.conf) and personal font directories are not the fixtures'.
+export HOME="$out/home" XDG_CONFIG_HOME="$out/home/.config"
+export XDG_DATA_HOME="$out/home/.local/share" XDG_CACHE_HOME="$out/home/.cache"
+unset FC_LANG LC_ALL LC_CTYPE
 sh "$src/tools/font-fixtures.sh" "$out/fixtures"
 . "$out/fixtures/env"
 flags="-std=c11 -D_GNU_SOURCE -O2 -Wall -Wextra -Werror -DCONFIG_FREETYPE -I$src/base/include -I$src/base"
 ft="$(pkg-config --cflags --libs freetype2 fontconfig)"
-# The user's own fontconfig files (50-user.conf) are not the fixtures'.
-export HOME="$out/home" XDG_CONFIG_HOME="$out/home/.config"
-unset FC_LANG LC_ALL LC_CTYPE
 for kind in normal sanitize; do
     extra=
     [ "$kind" = normal ] || extra="-g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all"

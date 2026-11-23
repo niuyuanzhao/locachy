@@ -103,6 +103,13 @@ static struct zwp_virtual_keyboard_manager_v1 *vkbd_mgr;
  * screen to be on; it is asked for again a second later. */
 #define MAX_BUTTONS 64 /* drawn on a bar: arrows and windows */
 #define MAX_ENTRIES 256 /* in its window list, scrolled through */
+struct shm_buf {
+    struct wl_buffer *buf;
+    uint32_t *px;
+    size_t size;
+    int w, h, busy;
+};
+
 struct window;
 struct bar {
     uint32_t name;              /* the wl_output global */
@@ -119,6 +126,9 @@ struct bar {
     int configured, shown;      /* shown: labwc put it on a screen (wl_surface.enter) */
     double since;               /* asked for, or closed, at */
     int retries;
+    struct shm_buf bufs[2];
+    uint64_t last_hash;
+    int last_hash_valid;
     struct {
         struct window *win;     /* a window, or NULL: the container tray names, */
         char tray[OPEN_NAME];   /* or (both empty) a scroll arrow: step -1 or 1 */
@@ -142,6 +152,73 @@ static struct bar *bars;
 static struct wp_fractional_scale_manager_v1 *scale_mgr;
 static struct wp_viewporter *viewporter;
 static int bars_dirty; /* draw them now: a bar was configured, the windows changed */
+static int launcher_dirty, chooser_dirty, question_dirty;
+
+static void shm_buf_release(void *data, struct wl_buffer *wl_buffer)
+{
+    struct shm_buf *s = data;
+    (void)wl_buffer;
+    if (s) s->busy = 0;
+}
+
+static const struct wl_buffer_listener shm_buf_listener = { .release = shm_buf_release };
+
+static void shm_buf_free(struct shm_buf *s)
+{
+    if (s->buf) wl_buffer_destroy(s->buf);
+    if (s->px) munmap(s->px, s->size);
+    memset(s, 0, sizeof *s);
+}
+
+static void shm_buf_free_pair(struct shm_buf bufs[2])
+{
+    shm_buf_free(&bufs[0]);
+    shm_buf_free(&bufs[1]);
+}
+
+static struct shm_buf *shm_buf_acquire(struct shm_buf bufs[2], int w, int h)
+{
+    if (!shm || w < 1 || h < 1) return NULL;
+    struct shm_buf *s = NULL;
+    for (int i = 0; i < 2 && !s; i++) {
+        if (!bufs[i].busy && bufs[i].buf && bufs[i].w == w && bufs[i].h == h) s = &bufs[i];
+    }
+    for (int i = 0; i < 2 && !s; i++) {
+        if (!bufs[i].busy) s = &bufs[i];
+    }
+    if (!s) return NULL;
+    if (s->buf && s->w == w && s->h == h) return s;
+    shm_buf_free(s);
+    int stride = w * 4;
+    size_t size = (size_t)stride * (size_t)h;
+    int fd = memfd_create("locachy-bar-shm", MFD_CLOEXEC);
+    if (fd < 0) return NULL;
+    if (ftruncate(fd, (off_t)size) < 0) {
+        close(fd);
+        return NULL;
+    }
+    uint32_t *px = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (px == MAP_FAILED) {
+        close(fd);
+        return NULL;
+    }
+    struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, (int32_t)size);
+    struct wl_buffer *buffer = wl_shm_pool_create_buffer(pool, 0, w, h, stride, WL_SHM_FORMAT_ARGB8888);
+    wl_shm_pool_destroy(pool);
+    close(fd);
+    if (!buffer) {
+        munmap(px, size);
+        return NULL;
+    }
+    s->buf = buffer;
+    s->px = px;
+    s->size = size;
+    s->w = w;
+    s->h = h;
+    s->busy = 0;
+    wl_buffer_add_listener(s->buf, &shm_buf_listener, s);
+    return s;
+}
 
 static void buffer_release(void *data, struct wl_buffer *wl_buffer)
 {
@@ -222,18 +299,54 @@ static void win_title(void *data, struct zwlr_foreign_toplevel_handle_v1 *h, con
     snprintf(w->title, sizeof w->title, "%s", title);
 }
 
+/* Cache container -> window app_id table so opening windows doesn't rescan
+ * every container's .desktop directory on every event. Invalidated on SIGHUP
+ * or when open_containers() returns a different list. */
+static struct {
+    int valid, n;
+    char names[64][OPEN_NAME];
+    char ids[64][MAX_WINDOW_IDS][OPEN_WINDOW_ID];
+    int nids[64];
+} app_id_cache;
+
+static void app_id_cache_invalidate(void)
+{
+    app_id_cache.valid = 0;
+}
+
+static void app_id_cache_refresh(void)
+{
+    char names[64][OPEN_NAME];
+    int n = open_containers(names, 64);
+    if (app_id_cache.valid && n == app_id_cache.n) {
+        int same = 1;
+        for (int i = 0; i < n; i++) {
+            if (strcmp(app_id_cache.names[i], names[i]) != 0) {
+                same = 0;
+                break;
+            }
+        }
+        if (same) return;
+    }
+    app_id_cache.n = n;
+    for (int i = 0; i < n; i++) {
+        memcpy(app_id_cache.names[i], names[i], OPEN_NAME);
+        app_id_cache.nids[i] = open_window_ids(names[i], app_id_cache.ids[i], MAX_WINDOW_IDS);
+    }
+    app_id_cache.valid = 1;
+}
+
 static void win_app_id(void *data, struct zwlr_foreign_toplevel_handle_v1 *h, const char *id)
 {
     struct window *w = data;
-    char names[64][OPEN_NAME], ids[MAX_WINDOW_IDS][OPEN_WINDOW_ID];
     (void)h;
     snprintf(w->app_id, sizeof w->app_id, "%s", id);
     w->container[0] = '\0';
-    for (int i = open_containers(names, 64) - 1; i >= 0 && !w->container[0]; i--) {
-        int n = open_window_ids(names[i], ids, MAX_WINDOW_IDS);
-        for (int k = 0; k < n; k++) {
-            if (strcasecmp(id, ids[k]) == 0) {
-                memcpy(w->container, names[i], sizeof w->container);
+    app_id_cache_refresh();
+    for (int i = app_id_cache.n - 1; i >= 0 && !w->container[0]; i--) {
+        for (int k = 0; k < app_id_cache.nids[i]; k++) {
+            if (strcasecmp(id, app_id_cache.ids[i][k]) == 0) {
+                memcpy(w->container, app_id_cache.names[i], sizeof w->container);
                 break;
             }
         }
@@ -305,6 +418,7 @@ static void win_closed(void *data, struct zwlr_foreign_toplevel_handle_v1 *h)
     }
     for (struct bar *b = bars; b; b = b->next) {
         b->nbuttons = 0; /* drawn anew below, without it */
+        b->last_hash_valid = 0;
         if (b->focus_seen == w) {
             b->focus_seen = NULL;
         }
@@ -491,6 +605,7 @@ static void forget_buttons(void)
 {
     for (struct bar *b = bars; b; b = b->next) {
         b->nbuttons = 0;
+        b->last_hash_valid = 0;
     }
     bars_dirty = 1;
 }
@@ -770,7 +885,8 @@ static void tray_watch_add(const char *path, uint32_t mask)
 /* When tray_scan should look again (uptime), or -1: only at a change. */
 static double tray_due(void)
 {
-    if (!tray_watching || tray_changed) return tray_scanned + 0.25;
+    if (!tray_watching) return tray_scanned + 2.0;
+    if (tray_changed) return tray_scanned + 0.01;
     double due = -1;
     for (struct tray *t = trays; t; t = t->next) {
         if (!t->conn && !t->connecting && !t->frozen && (due < 0 || t->retry_at < due)) due = t->retry_at;
@@ -817,7 +933,7 @@ static void tray_scan(void)
         }
         struct tray *t = tray_find(e->d_name);
         if (!t && (t = calloc(1, sizeof *t)) != NULL) {
-            snprintf(t->name, sizeof t->name, "%s", e->d_name);
+            snprintf(t->name, sizeof t->name, "%.63s", e->d_name);
             t->nids = open_window_ids(t->name, t->ids, MAX_TRAY_IDS);
             t->next = trays;
             trays = t;
@@ -1094,23 +1210,103 @@ static void draw_windows(struct bar *b, uint32_t *px, int bw_px, int bh, int x0,
     }
 }
 
+static uint64_t fnv1a_bytes(uint64_t h, const void *data, size_t len)
+{
+    const uint8_t *p = data;
+    for (size_t i = 0; i < len; i++) {
+        h ^= p[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static uint64_t fnv1a_str(uint64_t h, const char *s)
+{
+    if (!s) s = "";
+    h = fnv1a_bytes(h, s, strlen(s) + 1);
+    return h;
+}
+
+static uint64_t bar_signature(const struct bar *b, int w, int h, const char *title, const char *sub,
+                              const char *ime, const struct status_fields *st, int has_status)
+{
+    static struct entry e[MAX_ENTRIES];
+    uint64_t hash = 14695981039346656037ULL;
+    hash = fnv1a_bytes(hash, &w, sizeof w);
+    hash = fnv1a_bytes(hash, &h, sizeof h);
+    hash = fnv1a_bytes(hash, &b->w, sizeof b->w);
+    hash = fnv1a_bytes(hash, &b->h, sizeof b->h);
+    hash = fnv1a_bytes(hash, &b->scale120, sizeof b->scale120);
+    hash = fnv1a_bytes(hash, &b->first, sizeof b->first);
+    hash = fnv1a_str(hash, title);
+    hash = fnv1a_str(hash, sub);
+    hash = fnv1a_str(hash, ime);
+    if (has_status) {
+        hash = fnv1a_str(hash, st->volume);
+        hash = fnv1a_str(hash, st->mic);
+        hash = fnv1a_str(hash, st->bluetooth);
+        hash = fnv1a_str(hash, st->bt_device);
+        hash = fnv1a_str(hash, st->network);
+        hash = fnv1a_str(hash, st->address);
+        hash = fnv1a_str(hash, st->battery);
+        hash = fnv1a_str(hash, st->power);
+        hash = fnv1a_str(hash, st->memory);
+        hash = fnv1a_str(hash, st->swap);
+        hash = fnv1a_str(hash, st->cpu);
+        hash = fnv1a_str(hash, st->temp);
+        hash = fnv1a_str(hash, st->time);
+        hash = fnv1a_str(hash, st->date);
+    }
+    int n = list_entries(b, e, MAX_ENTRIES);
+    hash = fnv1a_bytes(hash, &n, sizeof n);
+    for (int i = 0; i < n; i++) {
+        int st_style = (int)e[i].style;
+        int minimized = e[i].win ? e[i].win->minimized : 0;
+        int activated = e[i].win ? e[i].win->activated : 0;
+        hash = fnv1a_bytes(hash, &st_style, sizeof st_style);
+        hash = fnv1a_bytes(hash, &minimized, sizeof minimized);
+        hash = fnv1a_bytes(hash, &activated, sizeof activated);
+        hash = fnv1a_str(hash, e[i].top);
+        hash = fnv1a_str(hash, e[i].bottom);
+    }
+    uint32_t colors[] = {
+        theme_rgb(THEME_PANEL, PANEL_BG & 0xFFFFFFu),
+        theme_rgb(THEME_FG, 0xD0D0D0u),
+        theme_rgb(THEME_DIM, 0x98A8C0u),
+        theme_rgb(THEME_BORDER, 0x3A4C68u),
+        theme_rgb(THEME_BG, 0x000000u),
+        WIN_BG, WIN_ON, WIN_ON_FG, WIN_FG, WIN_DIM, WIN_ATTN,
+    };
+    hash = fnv1a_bytes(hash, colors, sizeof colors);
+    return hash;
+}
+
 /* Drawn at the screen's scale (wp_fractional_scale_v1), shown at its
  * logical size (wp_viewport): as sharp at 1.25 or 2 as at 1. */
-static void render_bar(struct bar *b, const char *title, const char *sub)
+static void render_bar(struct bar *b, const char *title, const char *sub,
+                       const struct status_fields *st, int has_status)
 {
     struct entry e[MAX_BUTTONS];
     if (!b->configured || !b->surf || !shm) return;
     uint32_t s120 = b->viewport ? b->scale120 : 120;
     int w = (int)((b->w * s120 + 60) / 120), h = (int)((b->h * s120 + 60) / 120), x0, x1, cw, ch;
+    const char *ime = ime_mode_label();
+    uint64_t sig = bar_signature(b, w, h, title, sub, ime, st, has_status);
+    if (b->last_hash_valid && b->last_hash == sig && has_status) return;
     panel_font_size(panel_font(h / 2, 0), &cw, &ch);
     int n = list_entries(b, e, 3); /* room for up to three, if the left blocks can give it */
-    uint32_t *px = NULL;
-    struct wl_buffer *buf = create_shm_buffer(w, h, &px);
+    struct shm_buf *sb = shm_buf_acquire(b->bufs, w, h);
+    uint32_t *px = sb ? sb->px : NULL;
+    struct wl_buffer *buf = sb ? sb->buf : create_shm_buffer(w, h, &px);
     if (!buf) return;
-    panel_draw(px, w, h, w, title, sub, ime_mode_label(), n ? n * 10 * cw + 2 * cw : 0, &x0, &x1);
+    panel_draw(px, w, h, w, title, sub, ime, n ? n * 10 * cw + 2 * cw : 0, &x0, &x1);
     b->nstatus = panel_hits(b->status, (int)(sizeof b->status / sizeof *b->status));
     draw_windows(b, px, w, h, x0, x1);
-    munmap(px, (size_t)w * (size_t)h * 4);
+    if (sb) sb->busy = 1;
+    else munmap(px, (size_t)w * (size_t)h * 4);
+    /* The signature of what is now drawn (draw_windows may have moved the list). */
+    b->last_hash = bar_signature(b, w, h, title, sub, ime, st, has_status);
+    b->last_hash_valid = has_status;
     wl_surface_attach(b->surf, buf, 0, 0);
     if (b->viewport) {
         wp_viewport_set_destination(b->viewport, (int32_t)b->w, (int32_t)b->h);
@@ -1119,12 +1315,22 @@ static void render_bar(struct bar *b, const char *title, const char *sub)
     wl_surface_commit(b->surf);
 }
 
+/* Weak reference so unit tests compiled without status.c still link cleanly. */
+extern void base_status_fields(struct status_fields *out) __attribute__((weak));
+
 /* Every screen's bar; the title block is the container of the focused window. */
 static void render_bars(void)
 {
     char title[64], sub[64] = "", size[24];
     const char *focus = "";
     unsigned long long ram;
+    struct status_fields st;
+    int has_status = 0;
+    memset(&st, 0, sizeof st);
+    if (base_status_fields) {
+        base_status_fields(&st);
+        has_status = 1;
+    }
     for (struct window *w = windows; w; w = w->next) {
         if (w->activated && !w->minimized && win_container(w)[0]) {
             focus = win_container(w);
@@ -1146,7 +1352,7 @@ static void render_bars(void)
         snprintf(sub, sizeof sub, P_("%d frozen", "%d frozen", frozen), frozen);
     }
     for (struct bar *b = bars; b; b = b->next) {
-        render_bar(b, title, sub);
+        render_bar(b, title, sub, &st, has_status);
     }
 }
 
@@ -1619,6 +1825,8 @@ static void bar_configure(void *data, struct zwlr_layer_surface_v1 *surface,
 
 static void destroy_bar_surface(struct bar *b)
 {
+    shm_buf_free_pair(b->bufs);
+    b->last_hash_valid = 0;
     if (b->scale) {
         wp_fractional_scale_v1_destroy(b->scale);
         b->scale = NULL;
@@ -1777,6 +1985,9 @@ struct overlay {
     uint32_t want_w, want_h;    /* logical pixels asked for, and configured: */
     uint32_t w, h;
     int configured;
+    /* Persistent double-buffered SHM slots, reallocated only on size change. */
+    struct shm_buf bufs[2];
+    struct shm_buf *cur;
     /* while it is drawn: the buffer, bw x bh, and the font at the scale */
     struct wl_buffer *buf;
     uint32_t *px;
@@ -1805,6 +2016,10 @@ static uint32_t output_scale(struct wl_output *output)
 
 static void overlay_destroy(struct overlay *o)
 {
+    shm_buf_free_pair(o->bufs);
+    o->cur = NULL;
+    o->buf = NULL;
+    o->px = NULL;
     if (o->scale) {
         wp_fractional_scale_v1_destroy(o->scale);
         o->scale = NULL;
@@ -1926,13 +2141,25 @@ static int overlay_begin(struct overlay *o, int cols, int rows)
     }
     o->bw = (int)((o->w * s120 + 60) / 120);
     o->bh = (int)((o->h * s120 + 60) / 120);
-    o->buf = create_shm_buffer(o->bw, o->bh, &o->px);
+    o->cur = shm_buf_acquire(o->bufs, o->bw, o->bh);
+    if (o->cur) {
+        o->buf = o->cur->buf;
+        o->px = o->cur->px;
+    } else {
+        o->buf = create_shm_buffer(o->bw, o->bh, &o->px);
+    }
     return o->buf != NULL;
 }
 
 static void overlay_end(struct overlay *o)
 {
-    munmap(o->px, (size_t)o->bw * (size_t)o->bh * 4);
+    if (o->cur) {
+        o->cur->busy = 1;
+        o->cur = NULL;
+    } else if (o->px) {
+        munmap(o->px, (size_t)o->bw * (size_t)o->bh * 4);
+        o->px = NULL;
+    }
     wl_surface_attach(o->surf, o->buf, 0, 0);
     if (o->viewport) {
         wp_viewport_set_destination(o->viewport, (int32_t)o->w, (int32_t)o->h);
@@ -1975,6 +2202,13 @@ static struct overlay ime_bar = {
     .anchor = ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM | ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT |
               ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT,
 };
+static int bot_ime_shown;
+
+static int ime_overlay_active(void)
+{
+    char row1[64], row2[64];
+    return ime_mode() != IME_MODE_RAW && ime_get_overlay(row1, row2, sizeof row1);
+}
 
 static void render_bot_bar(void)
 {
@@ -1986,6 +2220,7 @@ static void render_bot_bar(void)
     }
 
     if (!active && !toast_active) {
+        bot_ime_shown = 0;
         if (o->surf) {
             overlay_destroy(o);
             wl_display_flush(display);
@@ -1996,12 +2231,14 @@ static void render_bot_bar(void)
         return;
     }
     if (active) {
+        bot_ime_shown = 1;
         ovl_clear(o, OVL_BG);
         ovl_text(o, 1, 0, row1, OVL_FG1, OVL_BG);
         if (row2[0] != '\0') {
             ovl_text(o, 1, 1, row2, OVL_FG2, OVL_BG);
         }
     } else {
+        bot_ime_shown = 0;
         ovl_clear(o, 0x00000000u);
         int cols = o->bw / o->cw;
         int tw = panel_text_width(toast_msg, o->font) / o->cw;
@@ -2845,7 +3082,7 @@ static void report_activity(void)
 {
     static uint32_t last;
     uint32_t now = now_ms32();
-    if (keys_link < 0 || !active || !grabbed || (last && now - last < 500)) return;
+    if (keys_link < 0 || !active || !grabbed || (last && now - last < 2000)) return;
     last = now ? now : 1;
     control_send(keys_link, "activity", 8, NULL, 0);
 }
@@ -3025,11 +3262,18 @@ static void keyboard_signals(void)
         desktop_wait_set(0);
         sig_release = 0;
         reset_keyboard_state();
+        /* Acknowledge the release so locachy-seat stops waiting immediately
+         * instead of sleeping for a fixed timeout. */
+        if (!active) {
+            if (bar_locks >= 0) report_locks();
+            else if (keys_link >= 0) control_send(keys_link, "released", 8, NULL, 0);
+        }
     }
     if (sig_regrab || sig_reload) {
         int hup = sig_reload, resumed = sig_regrab;
         sig_regrab = sig_reload = 0;
         if (hup && exe_changed()) exec_wanted = 1; /* bar_exec, once nothing is shown */
+        if (hup) app_id_cache_invalidate();
         reset_keyboard_state();
         base_language_reload();
         ime_reload(); /* Chinese Pinyin installed or removed (settings) */
@@ -3041,6 +3285,7 @@ static void keyboard_signals(void)
         if (active) restore_passthrough_keymap();
         if (resumed) desktop_wait_query();
         if (hup && theme_reload && theme_reload()) overlays_follow(1);
+        for (struct bar *b = bars; b; b = b->next) b->last_hash_valid = 0;
         bars_dirty = 1;
         want_grab = grab_wanted();
         set_grab(want_grab);
@@ -3173,6 +3418,9 @@ static struct {
     int from_root, from_isolated, from_archive;
     char target[4096], type[128], from[OPEN_NAME];
     char names[CHOICES][OPEN_NAME];
+    char labels[CHOICES][160]; /* cached open_label() per item */
+    char rule[OPEN_NAME];      /* cached open_rule() for choose.type */
+    int has_rule;
     int n, sel, all;
 } choose = { .client = -1 };
 static void render_chooser(void);
@@ -3537,6 +3785,7 @@ static void close_again(void)
         overlay_destroy(&question);
         catchers(0);
     }
+    question_dirty = chooser_dirty = 0;
     again.pending = again.shown = again.own_tor = again.wait_release = 0;
     again.target[0] = '\0';
     want_grab = grab_wanted();
@@ -3674,14 +3923,21 @@ static void bar_request(void)
 }
 
 
+static void chooser_cache_labels(void)
+{
+    choose.rule[0] = '\0';
+    choose.has_rule = open_rule(choose.type, choose.rule, sizeof choose.rule) == OPEN_RULE_CONTAINER;
+    for (int i = 0; i < choose.n; i++) {
+        open_label(choose.names[i], choose.type, choose.labels[i], sizeof choose.labels[i]);
+    }
+}
+
 /* One line of the chooser: number, container and its program, the default. */
 static void chooser_line(const struct overlay *o, int i, char *out, size_t size)
 {
-    char rule[OPEN_NAME] = "", label[160], fit[160];
-    int is_default = open_rule(choose.type, rule, sizeof rule) == OPEN_RULE_CONTAINER &&
-                     strcmp(rule, choose.names[i]) == 0;
-    open_label(choose.names[i], choose.type, label, sizeof label);
-    panel_text_fit(fit, sizeof fit, label, 52 * o->cw, o->font);
+    char fit[160];
+    int is_default = choose.has_rule && strcmp(choose.rule, choose.names[i]) == 0;
+    panel_text_fit(fit, sizeof fit, choose.labels[i], 52 * o->cw, o->font);
     int pad = 52 - (o->cw > 0 ? panel_text_width(fit, o->font) / o->cw : 0);
     snprintf(out, size, " %2d  %s%*s %s ", i + 1, fit, pad > 0 ? pad : 0, "",
              is_default ? _("default") : "");
@@ -4580,6 +4836,7 @@ static void launcher_close(void)
         return;
     }
     launcher_shown = 0;
+    launcher_dirty = 0;
     launcher_ovl.pin = NULL;
     catchers(0);
     overlay_destroy(&launcher_ovl);
@@ -4670,7 +4927,7 @@ static void launcher_key(int code, xkb_keysym_t sym, int value)
             (launcher.sel < launcher.scroll || launcher.sel >= launcher.scroll + launcher.vis))) {
             launcher.sel = next;
             if (launcher.vis > 0) launcher_keep_visible(launcher.vis);
-            render_launcher();
+            launcher_dirty = 1;
         }
     } else if (code == KEY_PAGEUP || code == KEY_PAGEDOWN) {
         int next = launch_step_count(launcher.sel, code == KEY_PAGEUP ? -page : page);
@@ -4678,7 +4935,7 @@ static void launcher_key(int code, xkb_keysym_t sym, int value)
             (launcher.sel < launcher.scroll || launcher.sel >= launcher.scroll + launcher.vis))) {
             launcher.sel = next;
             if (launcher.vis > 0) launcher_keep_visible(launcher.vis);
-            render_launcher();
+            launcher_dirty = 1;
         }
     } else if (code == KEY_HOME || code == KEY_END) {
         int next = launch_step(code == KEY_HOME ? -1 : launcher.n, code == KEY_HOME ? 1 : -1);
@@ -4686,7 +4943,7 @@ static void launcher_key(int code, xkb_keysym_t sym, int value)
             (launcher.sel < launcher.scroll || launcher.sel >= launcher.scroll + launcher.vis)))) {
             launcher.sel = next;
             if (launcher.vis > 0) launcher_keep_visible(launcher.vis);
-            render_launcher();
+            launcher_dirty = 1;
         }
     } else if (value == 1 && (code == KEY_ENTER || code == KEY_KPENTER)) {
         launcher_run(launcher.sel, 0);
@@ -4713,7 +4970,7 @@ static void launcher_hover(double y)
     int i = launcher_row(y);
     if (i >= 0 && i != launcher.sel) {
         launcher.sel = i;
-        render_launcher();
+        launcher_dirty = 1;
     }
 }
 
@@ -4743,7 +5000,7 @@ static void launcher_wheel(double delta)
     next = next < 0 ? 0 : next > max_scroll ? max_scroll : next;
     if (next != launcher.scroll) {
         launcher.scroll = next;
-        render_launcher();
+        launcher_dirty = 1;
     }
 }
 
@@ -4763,6 +5020,7 @@ static void overlays_follow(int redraw)
 static void close_chooser(void)
 {
     choose.client = -1;
+    chooser_dirty = question_dirty = 0;
     overlay_destroy(&question);
     catchers(0);
     want_grab = grab_wanted();
@@ -4772,7 +5030,6 @@ static void close_chooser(void)
 
 static void open_chooser(int client, const char *prefer)
 {
-    char rule[OPEN_NAME] = "";
     if (!active) {
         answer(client, "error the shared display is not on the screen to choose the program%s", "");
         return;
@@ -4786,9 +5043,10 @@ static void open_chooser(int client, const char *prefer)
         choose.all = 1;
         choose.n = open_containers(choose.names, CHOICES);
     }
+    chooser_cache_labels();
     choose.sel = 0;
     const char *want = prefer && prefer[0] ? prefer :
-                       open_rule(choose.type, rule, sizeof rule) == OPEN_RULE_CONTAINER ? rule : NULL;
+                       choose.has_rule ? choose.rule : NULL;
     if (want) {
         for (int i = 0; i < choose.n; i++) {
             if (strcmp(choose.names[i], want) == 0) {
@@ -4798,6 +5056,7 @@ static void open_chooser(int client, const char *prefer)
     }
     want_grab = grab_wanted();
     if (keys_down == 0) set_grab(want_grab);
+    chooser_dirty = question_dirty = 0;
     render_chooser();
 }
 
@@ -4826,9 +5085,10 @@ static void chooser_key(int code)
         if (choose.sel == choose.n) { /* Other container... */
             choose.all = 1;
             choose.n = open_containers(choose.names, CHOICES);
+            chooser_cache_labels();
             choose.sel = 0;
             overlay_destroy(&question);
-            render_chooser();
+            chooser_dirty = 1;
             return;
         }
         if (code == KEY_A) {
@@ -4843,7 +5103,7 @@ static void chooser_key(int code)
     } else {
         return;
     }
-    render_chooser();
+    chooser_dirty = 1;
 }
 
 static struct wl_surface *question_surface(void)
@@ -4879,7 +5139,7 @@ static void question_hover(double x, double y)
         choose.sel = item;
         changed = 1;
     }
-    if (changed) render_chooser();
+    if (changed) question_dirty = 1;
 }
 
 static void question_clear_hover(int redraw)
@@ -4887,7 +5147,7 @@ static void question_clear_hover(int redraw)
     question_scroll = 0;
     if (question_hover_key) {
         question_hover_key = 0;
-        if (redraw && question.surf) render_chooser();
+        if (redraw && question.surf) question_dirty = 1;
     }
 }
 
@@ -4924,7 +5184,7 @@ static void question_wheel(double delta)
     next = next < 0 ? 0 : next > last ? last : next;
     if (last >= 0 && next != choose.sel) {
         choose.sel = next;
-        render_chooser();
+        chooser_dirty = 1;
     }
 }
 
@@ -5247,8 +5507,10 @@ static void handle_kbd_event(int fd)
             int epoch = input_epoch;
             ime_key_event(caps_key ? XKB_KEY_Caps_Lock : sym_before, mask_before);
             if (!drain_ime_commit(epoch)) continue;
-            render_bot_bar();
-            if (display) wl_display_flush(display);
+            if (bot_ime_shown || ime_overlay_active()) {
+                render_bot_bar();
+                if (display) wl_display_flush(display);
+            }
             continue;
         }
         /* Chinese mode's width: key_ime_width_cn (Ctrl+. and Shift+Space, as in
@@ -5307,7 +5569,9 @@ static void handle_kbd_event(int fd)
                 zwp_virtual_keyboard_v1_key(k, t, ev.code, WL_KEYBOARD_KEY_STATE_RELEASED);
                 zwp_virtual_keyboard_v1_key(k, t, ev.code, WL_KEYBOARD_KEY_STATE_PRESSED);
             }
-            render_bot_bar();
+            if (bot_ime_shown || ime_overlay_active()) {
+                render_bot_bar();
+            }
             wl_display_flush(display);
         }
     }
@@ -5509,7 +5773,7 @@ static void bar_exec(void)
  * bar draws nothing and wakes only for events. */
 static int wait_ms(void)
 {
-    if (bars_dirty) return 0;
+    if (bars_dirty || launcher_dirty || chooser_dirty || question_dirty) return 0;
     double now = uptime(), next = -1;
 #define DUE(t) do { double t_ = (t); if (next < 0 || t_ < next) next = t_; } while (0)
     if (toast_active) DUE(toast_expire);
@@ -5532,10 +5796,15 @@ static int wait_ms(void)
 #undef DUE
     int ms = next < 0 ? -1 : next <= now ? 0 : (int)((next - now) * 1000) + 1;
     if (active) {
+        /* Align to 5-second wall-clock boundaries (also exact minute boundaries):
+         * avoids 1 Hz wakeups and lets Intel eDP PSR stay engaged when status
+         * fields and the HH:MM clock are unchanged. */
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        int second = 1000 - (int)(ts.tv_nsec / 1000000);
-        if (ms < 0 || second < ms) ms = second;
+        int rem_s = 5 - (int)(ts.tv_sec % 5);
+        int step = rem_s * 1000 - (int)(ts.tv_nsec / 1000000);
+        if (step < 1) step = 5000;
+        if (ms < 0 || step < ms) ms = step;
     }
     return ms;
 }
@@ -5615,10 +5884,28 @@ int main(int argc, char **argv)
         }
         int polled = poll(p, (nfds_t)(chooser_poll + 1), timeout);
         char drain[4096];
-        if (polled > 0 && (p[nbase + ngfds].revents & POLLIN)) {
-            while (read(tray_watch, drain, sizeof drain) > 0) {
+        if (polled > 0 && tray_watch >= 0) {
+            if (p[nbase + ngfds].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+                close(tray_watch);
+                tray_watch = -1;
+                tray_watching = 0;
+                tray_changed = 1;
+            } else if (p[nbase + ngfds].revents & POLLIN) {
+                int watch_failed = 0;
+                for (;;) {
+                    ssize_t nr = read(tray_watch, drain, sizeof drain);
+                    if (nr > 0) continue;
+                    if (nr < 0 && errno == EINTR) continue;
+                    if (nr == 0 || (nr < 0 && errno != EAGAIN)) watch_failed = 1;
+                    break;
+                }
+                if (watch_failed) {
+                    close(tray_watch);
+                    tray_watch = -1;
+                    tray_watching = 0;
+                }
+                tray_changed = 1;
             }
-            tray_changed = 1;
         }
         while (polled > 0 && (p[nbase + ngfds + 1].revents & POLLIN) && read(wake_pipe[0], drain, sizeof drain) > 0) {
         }
@@ -5664,6 +5951,14 @@ int main(int argc, char **argv)
             close_chooser();
         }
         launcher_tick();
+        if (launcher_dirty) {
+            launcher_dirty = 0;
+            if (launcher_shown) render_launcher();
+        }
+        if (chooser_dirty || question_dirty) {
+            chooser_dirty = question_dirty = 0;
+            if (again.shown || choose.client >= 0) render_chooser();
+        }
         if (toast_active && uptime() >= toast_expire) {
             render_bot_bar();
         }
@@ -5672,12 +5967,13 @@ int main(int argc, char **argv)
         again_tick();
         notes_tick();
         check_bars();
-        /* The clock's second changed (only while on the screen), or a change
-         * to show. */
-        time_t second = time(NULL);
-        if (bars_dirty || (active && second != last_second)) {
+        /* Refresh status every 5 s (aligned with minute rollovers, only while
+         * on screen), or immediately on any event; bar_signature() skips
+         * drawing and surface commit when nothing visually changed. */
+        time_t tick = time(NULL) / 5;
+        if (bars_dirty || (active && tick != last_second)) {
             bars_dirty = 0;
-            last_second = second;
+            last_second = tick;
             render_bars();
             overlays_follow(0);
         }
@@ -5685,6 +5981,12 @@ int main(int argc, char **argv)
 
     set_grab(0);
     if (text_vkbd) zwp_virtual_keyboard_v1_destroy(text_vkbd);
+    for (struct bar *b = bars; b; b = b->next) destroy_bar_surface(b);
+    overlay_destroy(&ime_bar);
+    overlay_destroy(&question);
+    overlay_destroy(&notes_ovl);
+    overlay_destroy(&launcher_ovl);
+    overlay_destroy(&desktop_wait);
     keys_release();
     ime_done();
     if (open_fd >= 0) {

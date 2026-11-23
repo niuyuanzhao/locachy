@@ -1066,7 +1066,12 @@ static void seat_request(void)
         power_wake();
     } else if (n == 12 && memcmp(msg, "bar-activity", 12) == 0) {
         power_wake();
-        if (seat_active && idle_notifier && seat) {
+        /* Idle timers restart at most every 2 s: rapid activity never makes
+         * labwc destroy and create its notifications for each message. */
+        static double last_reset = -10.0;
+        double now = uptime();
+        if (seat_active && idle_notifier && seat && now - last_reset >= 2.0) {
+            last_reset = now;
             if (blank_minutes > 0) reset_idle(&blank_idle, blank_minutes, 0);
             if (idle_minutes > 0) {
                 int log_input = ext_idle_notifier_v1_get_version(idle_notifier) >= 2;

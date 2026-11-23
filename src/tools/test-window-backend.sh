@@ -13,7 +13,7 @@ out=${1:?usage: test-window-backend.sh NEW_ABSOLUTE_OUTPUT_DIRECTORY}
 mkdir -p "$out/gen" "$out/obj" "$out/run"
 chmod 0700 "$out/run"
 for p in xdg-shell fractional-scale-v1 viewporter primary-selection-unstable-v1 xdg-decoration-unstable-v1 \
-         virtual-keyboard-unstable-v1 wlr-virtual-pointer-unstable-v1 wlr-screencopy-unstable-v1; do
+         wlr-layer-shell-unstable-v1 virtual-keyboard-unstable-v1 wlr-virtual-pointer-unstable-v1 wlr-screencopy-unstable-v1; do
     wayland-scanner client-header "$src/base/protocols/$p.xml" "$out/gen/$p-client-protocol.h"
     wayland-scanner private-code "$src/base/protocols/$p.xml" "$out/gen/$p-protocol.c"
 done
@@ -28,7 +28,7 @@ for f in "$src"/base/*.c; do
 done
 proto() { for p in "$@"; do printf '%s ' "$out/gen/$p-protocol.c"; done; }
 read -r -a winproto <<<"$(proto xdg-shell fractional-scale-v1 viewporter primary-selection-unstable-v1 \
-    xdg-decoration-unstable-v1)"
+    xdg-decoration-unstable-v1 wlr-layer-shell-unstable-v1)"
 "${cc[@]}" "${deps[@]}" -DCONFIG_WAYLAND "$src/tools/test-window-backend.c" "$out"/obj/win-*.o "${winproto[@]}" \
     "${libs[@]}" -lwayland-client -lwayland-cursor -lxkbcommon -o "$out/window"
 "${cc[@]}" "${deps[@]}" "$src/tools/test-window-backend.c" "$out"/obj/direct-*.o "${libs[@]}" -o "$out/direct"

@@ -42,13 +42,44 @@ struct module {
     int state;    /* 0 not tried, 1 loading, 2 loaded (or built in), 3 failed */
 };
 
+struct mod_option {
+    char *name;   /* normalised ('-' -> '_') */
+    char *params; /* space-separated options passed to finit_module */
+};
+
+struct alias_bucket {
+    char prefix[32]; /* subsystem prefix before ':', or "" for wildcard/other */
+    int *indices;
+    int count, cap;
+};
+
 static char dir[256];
 static struct alias *aliases;
 static int naliases;
+static int aliases_indexed;
+static struct alias_bucket *buckets;
+static int nbuckets, capbuckets;
+static int *wild_aliases;
+static int nwild_aliases, capwild_aliases;
 static struct module *modules;
 static int nmodules;
+static int *mod_hash; /* open-addressing table: entry = module index + 1, 0 = empty */
+static int mod_hash_size;
+static struct mod_option *mod_options;
+static int nmod_options, capmod_options;
 static int uevents = -1;
+static int input_changed;
 static int loaded, unused, failed;
+
+static unsigned int hash_str(const char *s)
+{
+    unsigned int h = 2166136261u;
+    for (; *s; s++) {
+        h ^= (unsigned char)*s;
+        h *= 16777619u;
+    }
+    return h;
+}
 
 static char *read_file(const char *path)
 {
@@ -72,6 +103,60 @@ static char *read_file(const char *path)
     return buf;
 }
 
+/* Read a regular .conf file without blocking on FIFOs or device nodes.
+ * Logs unreadable regular files; skips symlinks to /dev/null quietly. */
+static char *read_conf_file(const char *path)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
+    if (fd < 0) {
+        say("modules: cannot open %s: %s", path, strerror(errno));
+        return NULL;
+    }
+    struct stat st;
+    if (fstat(fd, &st) < 0) {
+        say("modules: cannot stat %s: %s", path, strerror(errno));
+        close(fd);
+        return NULL;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        close(fd);
+        return NULL; /* e.g. /dev/null override or FIFO: never block boot */
+    }
+    if (st.st_size <= 0) {
+        close(fd);
+        return strdup("");
+    }
+    size_t want = (size_t)st.st_size;
+    if (want > 1024 * 1024) {
+        want = 1024 * 1024;
+    }
+    char *buf = malloc(want + 1);
+    if (buf == NULL) {
+        close(fd);
+        return NULL;
+    }
+    size_t total = 0;
+    while (total < want) {
+        ssize_t n = read(fd, buf + total, want - total);
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        if (n <= 0) {
+            if (n < 0) {
+                say("modules: cannot read %s: %s", path, strerror(errno));
+                free(buf);
+                close(fd);
+                return NULL;
+            }
+            break;
+        }
+        total += (size_t)n;
+    }
+    close(fd);
+    buf[total] = '\0';
+    return buf;
+}
+
 static void normalise(char *s)
 {
     for (; *s; s++) {
@@ -88,12 +173,29 @@ static char *name_of(const char *path)
     base = base ? base + 1 : path;
     size_t len = strcspn(base, ".");
     char *name = strndup(base, len);
-    normalise(name);
+    if (name != NULL) {
+        normalise(name);
+    }
     return name;
 }
 
 static struct module *find(const char *name)
 {
+    if (mod_hash != NULL && mod_hash_size > 0) {
+        unsigned int mask = (unsigned int)(mod_hash_size - 1);
+        unsigned int slot = hash_str(name) & mask;
+        for (int probes = 0; probes < mod_hash_size; probes++) {
+            int entry = mod_hash[slot];
+            if (entry == 0) {
+                return NULL;
+            }
+            if (strcmp(modules[entry - 1].name, name) == 0) {
+                return &modules[entry - 1];
+            }
+            slot = (slot + 1) & mask;
+        }
+        return NULL;
+    }
     for (int i = 0; i < nmodules; i++) {
         if (strcmp(modules[i].name, name) == 0) {
             return &modules[i];
@@ -102,15 +204,296 @@ static struct module *find(const char *name)
     return NULL;
 }
 
+static void build_module_index(void)
+{
+    int size = 64;
+    while (size < nmodules * 2) {
+        size *= 2;
+    }
+    int *table = calloc((size_t)size, sizeof *table);
+    if (table == NULL) {
+        return; /* fallback to linear scan in find() */
+    }
+    unsigned int mask = (unsigned int)(size - 1);
+    for (int i = 0; i < nmodules; i++) {
+        unsigned int slot = hash_str(modules[i].name) & mask;
+        while (table[slot] != 0) {
+            if (strcmp(modules[table[slot] - 1].name, modules[i].name) == 0) {
+                break;
+            }
+            slot = (slot + 1) & mask;
+        }
+        if (table[slot] == 0) {
+            table[slot] = i + 1;
+        }
+    }
+    free(mod_hash);
+    mod_hash = table;
+    mod_hash_size = size;
+}
+
+static int is_wild(const char *s, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] == '*' || s[i] == '?' || s[i] == '[') {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static struct alias_bucket *find_bucket(const char *prefix, size_t len)
+{
+    for (int i = 0; i < nbuckets; i++) {
+        if (strlen(buckets[i].prefix) == len && memcmp(buckets[i].prefix, prefix, len) == 0) {
+            return &buckets[i];
+        }
+    }
+    return NULL;
+}
+
+static int append_int(int **arr, int *n, int *cap, int value)
+{
+    if (*n == *cap) {
+        int next = *cap ? *cap * 2 : 32;
+        int *p = realloc(*arr, sizeof *p * (size_t)next);
+        if (p == NULL) {
+            return -1;
+        }
+        *arr = p;
+        *cap = next;
+    }
+    (*arr)[(*n)++] = value;
+    return 0;
+}
+
+static void build_alias_buckets(void)
+{
+    aliases_indexed = 0;
+    for (int i = 0; i < naliases; i++) {
+        const char *pat = aliases[i].pattern;
+        const char *colon = strchr(pat, ':');
+        size_t plen = colon != NULL ? (size_t)(colon - pat) : 0;
+        if (colon == NULL || plen == 0 || plen >= sizeof buckets[0].prefix || is_wild(pat, plen)) {
+            if (append_int(&wild_aliases, &nwild_aliases, &capwild_aliases, i) < 0) {
+                return;
+            }
+            continue;
+        }
+        struct alias_bucket *b = find_bucket(pat, plen);
+        if (b == NULL) {
+            if (nbuckets == capbuckets) {
+                int next = capbuckets ? capbuckets * 2 : 32;
+                struct alias_bucket *p = realloc(buckets, sizeof *p * (size_t)next);
+                if (p == NULL) {
+                    return;
+                }
+                buckets = p;
+                capbuckets = next;
+            }
+            b = &buckets[nbuckets++];
+            memset(b, 0, sizeof *b);
+            memcpy(b->prefix, pat, plen);
+            b->prefix[plen] = '\0';
+        }
+        if (append_int(&b->indices, &b->count, &b->cap, i) < 0) {
+            return;
+        }
+    }
+    aliases_indexed = 1;
+}
+
+static const char *options_for(const char *name)
+{
+    for (int i = 0; i < nmod_options; i++) {
+        if (strcmp(mod_options[i].name, name) == 0) {
+            return mod_options[i].params;
+        }
+    }
+    return "";
+}
+
+static void add_module_options(const char *raw_name, const char *params)
+{
+    while (*params == ' ' || *params == '\t') {
+        params++;
+    }
+    size_t plen = strlen(params);
+    while (plen > 0 && (params[plen - 1] == ' ' || params[plen - 1] == '\t' || params[plen - 1] == '\r')) {
+        plen--;
+    }
+    if (!raw_name[0] || plen == 0) {
+        return;
+    }
+    char *name = strdup(raw_name);
+    if (name == NULL) {
+        return;
+    }
+    normalise(name);
+    for (int i = 0; i < nmod_options; i++) {
+        if (strcmp(mod_options[i].name, name) == 0) {
+            size_t old_len = strlen(mod_options[i].params);
+            char *joined = realloc(mod_options[i].params, old_len + 1 + plen + 1);
+            if (joined != NULL) {
+                joined[old_len] = ' ';
+                memcpy(joined + old_len + 1, params, plen);
+                joined[old_len + 1 + plen] = '\0';
+                mod_options[i].params = joined;
+            }
+            free(name);
+            return;
+        }
+    }
+    if (nmod_options == capmod_options) {
+        int next = capmod_options ? capmod_options * 2 : 16;
+        struct mod_option *p = realloc(mod_options, sizeof *p * (size_t)next);
+        if (p == NULL) {
+            free(name);
+            return;
+        }
+        mod_options = p;
+        capmod_options = next;
+    }
+    char *copy = strndup(params, plen);
+    if (copy == NULL) {
+        free(name);
+        return;
+    }
+    mod_options[nmod_options++] = (struct mod_option){ .name = name, .params = copy };
+}
+
+struct modprobe_entry {
+    char *base;
+    char *path;
+};
+
+static int cmp_modprobe_entry(const void *a, const void *b)
+{
+    const struct modprobe_entry *x = a;
+    const struct modprobe_entry *y = b;
+    return strcmp(x->base, y->base);
+}
+
+static void parse_modprobe_file(const char *path)
+{
+    char *text = read_conf_file(path);
+    if (text == NULL) {
+        return;
+    }
+    for (char *line = text; *line;) {
+        char *nl = strchr(line, '\n');
+        if (nl != NULL) {
+            *nl = '\0';
+        }
+        char *s = line + strspn(line, " \t\r");
+        if (*s != '\0' && *s != '#') {
+            char *hash = strchr(s, '#');
+            if (hash != NULL) {
+                *hash = '\0';
+            }
+            if (strncmp(s, "options", 7) == 0 && (s[7] == ' ' || s[7] == '\t')) {
+                char *m = s + 7;
+                m += strspn(m, " \t");
+                size_t mlen = strcspn(m, " \t\r");
+                if (mlen > 0 && m[mlen] != '\0') {
+                    m[mlen] = '\0';
+                    add_module_options(m, m + mlen + 1);
+                }
+            }
+        }
+        if (nl == NULL) {
+            break;
+        }
+        line = nl + 1;
+    }
+    free(text);
+}
+
+/* Collect .conf entries from dirpath, skipping any basename already seen in a
+ * higher-priority directory (matching kmod/modprobe.d override precedence). */
+static void collect_modprobe_dir(const char *dirpath, struct modprobe_entry **entries, int *n, int *cap)
+{
+    DIR *d = opendir(dirpath);
+    if (d == NULL) {
+        return;
+    }
+    for (struct dirent *e; (e = readdir(d)) != NULL;) {
+        size_t len = strlen(e->d_name);
+        if (e->d_name[0] == '.' || len <= 5 || strcmp(e->d_name + len - 5, ".conf") != 0) {
+            continue;
+        }
+        int shadowed = 0;
+        for (int i = 0; i < *n; i++) {
+            if (strcmp((*entries)[i].base, e->d_name) == 0) {
+                shadowed = 1;
+                break;
+            }
+        }
+        if (shadowed) {
+            continue;
+        }
+        if (*n == *cap) {
+            int next = *cap ? *cap * 2 : 16;
+            struct modprobe_entry *p = realloc(*entries, sizeof *p * (size_t)next);
+            if (p == NULL) {
+                break;
+            }
+            *entries = p;
+            *cap = next;
+        }
+        char full[512];
+        if (snprintf(full, sizeof full, "%s/%s", dirpath, e->d_name) >= (int)sizeof full) {
+            continue;
+        }
+        char *base = strdup(e->d_name);
+        char *path = strdup(full);
+        if (base == NULL || path == NULL) {
+            free(base);
+            free(path);
+            continue;
+        }
+        (*entries)[(*n)++] = (struct modprobe_entry){ .base = base, .path = path };
+    }
+    closedir(d);
+}
+
+/* Load "options <module> <params...>" matching kmod/modprobe.d precedence:
+ * /etc/modprobe.d shadows matching basenames in /usr/local/lib/modprobe.d
+ * (so an empty file or /dev/null symlink in /etc/modprobe.d disables the
+ * preset), and surviving files are parsed in lexicographical basename order. */
+static void load_modprobe_options(const char *root)
+{
+    struct modprobe_entry *entries = NULL;
+    int n = 0, cap = 0;
+    char path[320];
+
+    snprintf(path, sizeof path, "%s/etc/modprobe.d", root);
+    collect_modprobe_dir(path, &entries, &n, &cap);
+    snprintf(path, sizeof path, "%s/usr/local/lib/modprobe.d", root);
+    collect_modprobe_dir(path, &entries, &n, &cap);
+    if (n > 1) {
+        qsort(entries, (size_t)n, sizeof *entries, cmp_modprobe_entry);
+    }
+    for (int i = 0; i < n; i++) {
+        parse_modprobe_file(entries[i].path);
+        free(entries[i].base);
+        free(entries[i].path);
+    }
+    free(entries);
+}
+
 static int load_tables(void)
 {
     char path[320];
+    int cap_modules = 0, cap_aliases = 0;
 
     snprintf(path, sizeof path, "%s/modules.dep", dir);
     char *dep = read_file(path);
     snprintf(path, sizeof path, "%s/modules.alias", dir);
     char *alias = read_file(path);
     if (dep == NULL || alias == NULL) {
+        free(dep);
+        free(alias);
         say("modules: cannot read %s/modules.dep or modules.alias", dir);
         return -1;
     }
@@ -120,15 +503,45 @@ static int load_tables(void)
             continue;
         }
         *colon = '\0';
-        modules = realloc(modules, sizeof *modules * (size_t)(nmodules + 1));
+        if (nmodules == cap_modules) {
+            int next = cap_modules ? cap_modules * 2 : 1024;
+            struct module *p = realloc(modules, sizeof *modules * (size_t)next);
+            if (p == NULL) {
+                say("modules: out of memory reading modules.dep");
+                return -1;
+            }
+            modules = p;
+            cap_modules = next;
+        }
         struct module *m = &modules[nmodules++];
         *m = (struct module){ .path = line, .name = name_of(line) };
+        if (m->name == NULL) {
+            nmodules--;
+            continue;
+        }
+        int cap_deps = 0;
         for (char *d = colon + 1; (d = d + strspn(d, " ")) && *d;) {
             size_t len = strcspn(d, " ");
             char *one = strndup(d, len);
-            m->deps = realloc(m->deps, sizeof *m->deps * (size_t)(m->ndeps + 1));
-            m->deps[m->ndeps++] = name_of(one);
+            if (one == NULL) {
+                break;
+            }
+            if (m->ndeps == cap_deps) {
+                int next = cap_deps ? cap_deps * 2 : 4;
+                char **dp = realloc(m->deps, sizeof *m->deps * (size_t)next);
+                if (dp == NULL) {
+                    free(one);
+                    break;
+                }
+                m->deps = dp;
+                cap_deps = next;
+            }
+            char *dname = name_of(one);
             free(one);
+            if (dname == NULL) {
+                break;
+            }
+            m->deps[m->ndeps++] = dname;
             d += len;
         }
     }
@@ -139,9 +552,20 @@ static int load_tables(void)
             continue;
         }
         normalise(name);
-        aliases = realloc(aliases, sizeof *aliases * (size_t)(naliases + 1));
+        if (naliases == cap_aliases) {
+            int next = cap_aliases ? cap_aliases * 2 : 4096;
+            struct alias *p = realloc(aliases, sizeof *aliases * (size_t)next);
+            if (p == NULL) {
+                say("modules: out of memory reading modules.alias");
+                return -1;
+            }
+            aliases = p;
+            cap_aliases = next;
+        }
         aliases[naliases++] = (struct alias){ pattern, name };
     }
+    build_module_index();
+    build_alias_buckets();
     return 0;
 }
 
@@ -167,8 +591,18 @@ static int load(struct module *m)
     snprintf(path, sizeof path, "%s/%s", dir, m->path);
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     int flags = strstr(m->path, ".ko.") ? MODULE_INIT_COMPRESSED_FILE : 0;
-    if (fd < 0 || (syscall(SYS_finit_module, fd, "", flags) < 0 && errno != EEXIST)) {
-        int err = errno;
+    const char *opts = options_for(m->name);
+    int rc = fd < 0 ? -1 : (int)syscall(SYS_finit_module, fd, opts, flags);
+    int err = errno;
+    if (fd >= 0 && rc < 0 && err != EEXIST && opts[0] != '\0') {
+        say("modules: %s with options \"%s\" failed (%s); retrying without options",
+            m->name, opts, strerror(err));
+        if (lseek(fd, 0, SEEK_SET) == 0) {
+            rc = (int)syscall(SYS_finit_module, fd, "", flags);
+            err = errno;
+        }
+    }
+    if (fd < 0 || (rc < 0 && err != EEXIST)) {
         if (fd >= 0) {
             close(fd);
         }
@@ -191,20 +625,49 @@ static int load(struct module *m)
     return 0;
 }
 
+static void match_alias(int idx, const char *modalias, size_t prefix)
+{
+    const char *p = aliases[idx].pattern;
+    if (strncmp(p, modalias, prefix) != 0 || fnmatch(p, modalias, 0) != 0) {
+        return;
+    }
+    struct module *m = find(aliases[idx].name);
+    if (m != NULL) {
+        load(m);
+    }
+}
+
 /* Load every module whose alias matches this modalias. */
 static void load_for(const char *modalias)
 {
     size_t prefix = strcspn(modalias, ":");
 
-    for (int i = 0; i < naliases; i++) {
-        const char *p = aliases[i].pattern;
-        if (strncmp(p, modalias, prefix) != 0 || fnmatch(p, modalias, 0) != 0) {
-            continue;
+    if (!aliases_indexed) {
+        for (int i = 0; i < naliases; i++) {
+            match_alias(i, modalias, prefix);
         }
-        struct module *m = find(aliases[i].name);
-        if (m != NULL) {
-            load(m);
+        return;
+    }
+    if (modalias[prefix] == ':' && prefix > 0 && prefix < sizeof buckets[0].prefix) {
+        struct alias_bucket *b = find_bucket(modalias, prefix);
+        if (b != NULL) {
+            for (int i = 0; i < b->count; i++) {
+                match_alias(b->indices[i], modalias, prefix);
+            }
         }
+    } else {
+        for (int bi = 0; bi < nbuckets; bi++) {
+            struct alias_bucket *b = &buckets[bi];
+            if (strncmp(b->prefix, modalias, prefix) != 0) {
+                continue;
+            }
+            for (int i = 0; i < b->count; i++) {
+                match_alias(b->indices[i], modalias, prefix);
+            }
+        }
+    }
+    for (int i = 0; i < nwild_aliases; i++) {
+        match_alias(wild_aliases[i], modalias, prefix);
     }
 }
 
@@ -241,23 +704,57 @@ static void coldplug(const char *path, int depth)
     closedir(d);
 }
 
+static int payload_has_field(const char *buf, size_t size, const char *field)
+{
+    size_t flen = strlen(field);
+    if (size < flen + 1) {
+        return 0;
+    }
+    const char *p = buf;
+    const char *end = buf + size;
+    while (p < end) {
+        const char *z = memchr(p, '\0', (size_t)(end - p));
+        if (z == NULL) {
+            break;
+        }
+        if ((size_t)(z - p) == flen && memcmp(p, field, flen) == 0) {
+            return 1;
+        }
+        p = z + 1;
+    }
+    return 0;
+}
+
 int modules_event(void)
 {
     char buf[8192];
     ssize_t n;
     int changed = 0;
 
+    input_changed = 0;
     while ((n = recv(uevents, buf, sizeof buf, MSG_DONTWAIT)) > 0) {
         /* Processed udev events wake init to retry input after rule tagging.
          * Their binary header is not a second kernel DRM/module event. */
-        if (n >= 8 && memcmp(buf, "libudev", 8) == 0) continue;
+        if (n >= 8 && memcmp(buf, "libudev", 8) == 0) {
+            if (payload_has_field(buf + 8, (size_t)(n - 8), "SUBSYSTEM=input")) {
+                input_changed = 1;
+            } else if (n >= 40) {
+                uint32_t off = 0;
+                memcpy(&off, buf + 16, sizeof off);
+                if (off >= 24 && (size_t)off < (size_t)n &&
+                    payload_has_field(buf + off, (size_t)n - off, "SUBSYSTEM=input")) {
+                    input_changed = 1;
+                }
+            }
+            continue;
+        }
         char *end = buf + n;
         char *next = memchr(buf, '\0', (size_t)n);
         if (next == NULL) {
             continue;
         }
         int add = next - buf >= 4 && memcmp(buf, "add@", 4) == 0;
-        int drm = 0, power = 0, action = 0, hotplug = 0, lease = 0, synthetic = 0;
+        int drm = 0, power = 0, input = 0, action = 0, hotplug = 0, lease = 0, synthetic = 0;
         for (char *k = next + 1; k < end; k = next + 1) {
             next = memchr(k, '\0', (size_t)(end - k));
             if (next == NULL) {
@@ -267,6 +764,8 @@ int modules_event(void)
                 drm = 1;
             } else if (strcmp(k, "SUBSYSTEM=power_supply") == 0) {
                 power = 1;
+            } else if (strcmp(k, "SUBSYSTEM=input") == 0) {
+                input = 1;
             } else if (strcmp(k, "ACTION=add") == 0 || strcmp(k, "ACTION=change") == 0 ||
                        strcmp(k, "ACTION=remove") == 0) {
                 action = 1;
@@ -280,6 +779,9 @@ int modules_event(void)
                 load_for(k + 9);
             }
         }
+        if (input) {
+            input_changed = 1;
+        }
         /* A lease made or ended (the screen lent, taken back) is no change
          * of displays: counting it would refresh, lend again, and loop. Nor
          * is a replay (udevadm trigger at boot): it takes the screen back
@@ -292,6 +794,11 @@ int modules_event(void)
         changed |= power && action ? MODULES_POWER : 0;
     }
     return changed;
+}
+
+int modules_input_changed(void)
+{
+    return input_changed;
 }
 
 int modules_fd(void)
@@ -308,6 +815,7 @@ int modules_start(const char *root)
 
     uname(&u);
     snprintf(dir, sizeof dir, "%s/lib/modules/%s", root, u.release);
+    load_modprobe_options(root);
     if (load_tables() < 0) {
         return -1;
     }
@@ -321,7 +829,9 @@ int modules_start(const char *root)
     coldplug("/sys/devices", 0);
     double t1 = uptime();
     /* Devices the new drivers made (USB devices, sound codecs, ...): until
-     * nothing new has come for half a second. */
+     * nothing new has come for half a second. Late lid and power devices are
+     * not rescanned here: process 1 rescans its system inputs only once one is
+     * lost, as it always has. */
     struct pollfd p = { .fd = uevents, .events = POLLIN };
     while (uevents >= 0 && poll(&p, 1, 500) > 0) {
         modules_event();

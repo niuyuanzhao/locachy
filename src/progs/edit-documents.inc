@@ -39,6 +39,21 @@ struct docrow {
 };
 static struct docrow docs_rows[DOCS_MAX_ROWS], docs_scratch[DOCS_MAX_ROWS];
 static int ndocs_rows;
+static unsigned long docs_open_dirs_gen;
+static int docs_rows_valid;
+static uint64_t docs_rows_hash;
+static int docs_rows_ndocs, docs_rows_list_mode, docs_rows_sort;
+static unsigned long docs_rows_dirs_gen;
+static struct doc *docs_rows_active;
+
+static struct {
+    int valid, ndocs, nspaces, shading;
+    uint32_t base, focus;
+    uint64_t hash;
+    struct doc **docs;
+    uint32_t *colors;
+    int cap;
+} docs_shade_cache;
 
 static int natural_cmp(const char *a, const char *b)
 {
@@ -105,6 +120,7 @@ static void docs_set_expanded(const char *path, int on)
             if (!on) {
                 free(docs_open_dirs[i]);
                 docs_open_dirs[i] = docs_open_dirs[--ndocs_open_dirs];
+                docs_open_dirs_gen++;
             }
             return;
         }
@@ -112,7 +128,10 @@ static void docs_set_expanded(const char *path, int on)
     char **more = on ? realloc(docs_open_dirs, (size_t)(ndocs_open_dirs + 1) * sizeof *more) : NULL;
     if (more) {
         docs_open_dirs = more;
-        if ((docs_open_dirs[ndocs_open_dirs] = strdup(path))) ndocs_open_dirs++;
+        if ((docs_open_dirs[ndocs_open_dirs] = strdup(path))) {
+            ndocs_open_dirs++;
+            docs_open_dirs_gen++;
+        }
     }
 }
 
@@ -300,9 +319,38 @@ static struct doc *active_doc(void)
     return t ? t->doc : NULL;
 }
 
+static uint64_t docs_hash_bytes(uint64_t h, const void *p, size_t n)
+{
+    const unsigned char *b = p;
+    for (size_t i = 0; i < n; i++) {
+        h = (h ^ b[i]) * UINT64_C(1099511628211);
+    }
+    return h;
+}
+
+static uint64_t docs_list_signature(void)
+{
+    uint64_t h = UINT64_C(14695981039346656037);
+    for (int i = 0; i < ndocs; i++) {
+        struct doc *d = docs[i];
+        struct docui *u = ui_of(d);
+        h = docs_hash_bytes(h, &d, sizeof d);
+        h = docs_hash_bytes(h, d->path, strlen(d->path) + 1);
+        h = docs_hash_bytes(h, u->base, strlen(u->base) + 1);
+        h = docs_hash_bytes(h, &u->number, sizeof u->number);
+    }
+    return h;
+}
+
 static void docs_refresh(void)
 {
     struct doc *a = active_doc();
+    uint64_t sig = docs_list_signature();
+    if (docs_rows_valid && docs_rows_ndocs == ndocs && docs_rows_list_mode == docs_list_mode &&
+        docs_rows_sort == docs_sort && docs_rows_dirs_gen == docs_open_dirs_gen &&
+        docs_rows_active == a && docs_rows_hash == sig) {
+        return;
+    }
     docs_rows_free(docs_rows, ndocs_rows);
     ndocs_rows = docs_build(docs_rows, DOCS_MAX_ROWS, 0, a != docs_shown_active ? a : NULL);
     if (a != docs_shown_active) {
@@ -315,6 +363,143 @@ static void docs_refresh(void)
             }
         }
     }
+    docs_rows_valid = 1;
+    docs_rows_ndocs = ndocs;
+    docs_rows_list_mode = docs_list_mode;
+    docs_rows_sort = docs_sort;
+    docs_rows_dirs_gen = docs_open_dirs_gen;
+    docs_rows_active = a;
+    docs_rows_hash = sig;
+}
+
+static int long_desc_cmp(const void *pa, const void *pb)
+{
+    long a = *(const long *)pa, b = *(const long *)pb;
+    return a < b ? 1 : a > b ? -1 : 0;
+}
+
+/* Number of elements in descending array arr[0..n) with value >= val. */
+static int rank_ge_desc(const long *arr, int n, long val)
+{
+    int lo = 0, hi = n;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (arr[mid] >= val) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+static void docs_shade_update(uint32_t base)
+{
+    uint32_t focus = C_FOCUS;
+    uint64_t h = UINT64_C(14695981039346656037);
+    for (int i = 0; i < ndocs; i++) {
+        struct doc *d = docs[i];
+        long ed = ui_of(d)->edited;
+        h = docs_hash_bytes(h, &d, sizeof d);
+        h = docs_hash_bytes(h, &ed, sizeof ed);
+    }
+    for (int s = 0; s < nspaces; s++) {
+        h = docs_hash_bytes(h, &spaces[s].ntabs, sizeof spaces[s].ntabs);
+        for (int k = 0; k < spaces[s].ntabs; k++) {
+            struct doc *d = spaces[s].tabs[k].doc;
+            long used = spaces[s].tabs[k].used;
+            h = docs_hash_bytes(h, &d, sizeof d);
+            h = docs_hash_bytes(h, &used, sizeof used);
+        }
+    }
+    if (docs_shade_cache.valid && docs_shade_cache.ndocs == ndocs && docs_shade_cache.nspaces == nspaces &&
+        docs_shade_cache.shading == docs_shading && docs_shade_cache.base == base &&
+        docs_shade_cache.focus == focus && docs_shade_cache.hash == h) {
+        return;
+    }
+    if (ndocs > docs_shade_cache.cap) {
+        int cap = docs_shade_cache.cap ? docs_shade_cache.cap : 32;
+        while (cap < ndocs) cap *= 2;
+        struct doc **nd = realloc(docs_shade_cache.docs, (size_t)cap * sizeof *nd);
+        uint32_t *nc = realloc(docs_shade_cache.colors, (size_t)cap * sizeof *nc);
+        if (!nd || !nc) {
+            if (nd) docs_shade_cache.docs = nd;
+            if (nc) docs_shade_cache.colors = nc;
+            docs_shade_cache.valid = 0;
+            return;
+        }
+        docs_shade_cache.docs = nd;
+        docs_shade_cache.colors = nc;
+        docs_shade_cache.cap = cap;
+    }
+    enum { HISTORY = 10 };
+    long *lv_all = ndocs ? calloc((size_t)ndocs, sizeof *lv_all) : NULL;
+    long *lv_sorted = ndocs ? malloc((size_t)ndocs * sizeof *lv_sorted) : NULL;
+    long *ed_sorted = ndocs ? malloc((size_t)ndocs * sizeof *ed_sorted) : NULL;
+    if (ndocs && (!lv_all || !lv_sorted || !ed_sorted)) {
+        free(lv_all);
+        free(lv_sorted);
+        free(ed_sorted);
+        docs_shade_cache.valid = 0;
+        return;
+    }
+    for (int i = 0; i < ndocs; i++) ui_of(docs[i])->shade_idx = i;
+    for (int s = 0; s < nspaces; s++) {
+        for (int k = 0; k < spaces[s].ntabs; k++) {
+            struct doc *td = spaces[s].tabs[k].doc;
+            int idx = ui_of(td)->shade_idx;
+            if (idx >= 0 && idx < ndocs && docs[idx] == td && spaces[s].tabs[k].used > lv_all[idx]) {
+                lv_all[idx] = spaces[s].tabs[k].used;
+            }
+        }
+    }
+    int n_lv = 0, n_ed = 0;
+    for (int i = 0; i < ndocs; i++) {
+        if (lv_all[i] > 0) lv_sorted[n_lv++] = lv_all[i];
+        if (ui_of(docs[i])->edited > 0) ed_sorted[n_ed++] = ui_of(docs[i])->edited;
+    }
+    if (n_lv > 1) qsort(lv_sorted, (size_t)n_lv, sizeof *lv_sorted, long_desc_cmp);
+    if (n_ed > 1) qsort(ed_sorted, (size_t)n_ed, sizeof *ed_sorted, long_desc_cmp);
+    int hc = n_lv < HISTORY ? n_lv : HISTORY;
+    int ec = n_ed < HISTORY ? n_ed : HISTORY;
+    uint32_t vshade = colour_mix(base, 0x9B59B6, 77), eshade = colour_mix(base, focus, 77);
+    for (int i = 0; i < ndocs; i++) {
+        docs_shade_cache.docs[i] = docs[i];
+        if (!docs_shading) {
+            docs_shade_cache.colors[i] = base;
+            continue;
+        }
+        long lv = lv_all[i], ed = ui_of(docs[i])->edited;
+        int view = lv > 0 ? rank_ge_desc(lv_sorted, n_lv, lv) : 0;
+        int edit = ed > 0 ? rank_ge_desc(ed_sorted, n_ed, ed) : 0;
+        if (!lv || view > HISTORY) view = 0;
+        if (!ed || edit > HISTORY) edit = 0;
+        if (!view && !edit) {
+            docs_shade_cache.colors[i] = base;
+            continue;
+        }
+        uint32_t shade = vshade;
+        if (edit > 0) {
+            int v = hc - view, e = ec - edit + 1;
+            e = e * e;
+            int nn = v + e > 1 ? v + e : 1;
+            uint32_t mixed = 0;
+            for (int shift = 0; shift <= 16; shift += 8) {
+                int sc = (int)(shade >> shift & 0xFF), ecc = (int)(eshade >> shift & 0xFF);
+                mixed |= (uint32_t)((sc * v + ecc * e) / nn) << shift;
+            }
+            shade = mixed;
+        }
+        double t = hc ? (double)(hc - view + 1) / hc : 1;
+        docs_shade_cache.colors[i] = colour_mix(base, shade, t >= 1 ? 255 : (int)(t * 255));
+    }
+    free(lv_all);
+    free(lv_sorted);
+    free(ed_sorted);
+    docs_shade_cache.valid = 1;
+    docs_shade_cache.ndocs = ndocs;
+    docs_shade_cache.nspaces = nspaces;
+    docs_shade_cache.shading = docs_shading;
+    docs_shade_cache.base = base;
+    docs_shade_cache.focus = focus;
+    docs_shade_cache.hash = h;
 }
 
 /* The shading of the history (KateFileTreeModel::updateBackgrounds): the
@@ -323,48 +508,16 @@ static void docs_refresh(void)
 static uint32_t docs_shade(struct doc *d, uint32_t base)
 {
     if (!docs_shading) return base;
-    enum { HISTORY = 10 };
-    int view = 0, edit = 0, hc = 0, ec = 0;
-    struct docui *u = ui_of(d);
-    long last_view = 0;
-    for (int s = 0; s < nspaces; s++) {
-        for (int i = 0; i < spaces[s].ntabs; i++) {
-            if (spaces[s].tabs[i].doc == d && spaces[s].tabs[i].used > last_view) last_view = spaces[s].tabs[i].used;
-        }
+    docs_shade_update(base);
+    if (!docs_shade_cache.valid) return base;
+    int idx = ui_of(d)->shade_idx;
+    if (idx >= 0 && idx < docs_shade_cache.ndocs && docs_shade_cache.docs[idx] == d) {
+        return docs_shade_cache.colors[idx];
     }
-    for (int i = 0; i < ndocs; i++) {
-        long lv = 0;
-        for (int s = 0; s < nspaces; s++) {
-            for (int k = 0; k < spaces[s].ntabs; k++) {
-                if (spaces[s].tabs[k].doc == docs[i] && spaces[s].tabs[k].used > lv) lv = spaces[s].tabs[k].used;
-            }
-        }
-        hc += lv > 0;
-        ec += ui_of(docs[i])->edited > 0;
-        view += lv > 0 && last_view > 0 && lv >= last_view;
-        edit += ui_of(docs[i])->edited > 0 && u->edited > 0 && ui_of(docs[i])->edited >= u->edited;
+    for (int i = 0; i < docs_shade_cache.ndocs; i++) {
+        if (docs_shade_cache.docs[i] == d) return docs_shade_cache.colors[i];
     }
-    hc = hc < HISTORY ? hc : HISTORY;
-    ec = ec < HISTORY ? ec : HISTORY;
-    if (!last_view || view > HISTORY) view = 0;
-    if (!u->edited || edit > HISTORY) edit = 0;
-    if (!view && !edit) return base;
-    /* The view shade tints with Breeze's VisitedText, the edit shade with
-     * its ActiveText (KColorUtils::tint at 0.5, approximated by a blend). */
-    uint32_t shade = colour_mix(base, 0x9B59B6, 77), eshade = colour_mix(base, C_FOCUS, 77);
-    if (edit > 0) {
-        int v = hc - view, e = ec - edit + 1;
-        e = e * e;
-        int nn = v + e > 1 ? v + e : 1;
-        uint32_t mixed = 0;
-        for (int shift = 0; shift <= 16; shift += 8) {
-            int sc = (int)(shade >> shift & 0xFF), ecc = (int)(eshade >> shift & 0xFF);
-            mixed |= (uint32_t)((sc * v + ecc * e) / nn) << shift;
-        }
-        shade = mixed;
-    }
-    double t = hc ? (double)(hc - view + 1) / hc : 1;
-    return colour_mix(base, shade, t >= 1 ? 255 : (int)(t * 255));
+    return base;
 }
 
 static void docs_draw(void)
@@ -406,6 +559,8 @@ static void docs_draw(void)
 static void docs_forget(struct doc *d)
 {
     if (docs_shown_active == d) docs_shown_active = NULL;
+    docs_rows_valid = 0;
+    docs_shade_cache.valid = 0;
 }
 
 static void docs_wheel(int steps)

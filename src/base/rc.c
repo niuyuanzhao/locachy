@@ -93,19 +93,190 @@ static void forward_machine_kv(const char *name, const char *value, void *arg)
     }
 }
 
+struct rc_kv {
+    char *name;
+    char *value;
+};
+
+struct rc_kv_list {
+    struct rc_kv *items;
+    size_t count;
+    size_t cap;
+    int oom;
+};
+
+static struct {
+    int valid;
+    int iterating;
+    int pending_invalidate;
+    struct stat rc_st;
+    int has_mach;
+    char mach_path[256];
+    struct stat mach_st;
+    struct rc_kv_list list;
+} rc_cache;
+
+static void rc_list_clear(struct rc_kv_list *list)
+{
+    for (size_t i = 0; i < list->count; i++) {
+        free(list->items[i].name);
+        free(list->items[i].value);
+    }
+    free(list->items);
+    list->items = NULL;
+    list->count = 0;
+    list->cap = 0;
+    list->oom = 0;
+}
+
+static void rc_cache_invalidate(void)
+{
+    if (rc_cache.iterating) {
+        rc_cache.valid = 0;
+        rc_cache.pending_invalidate = 1;
+        return;
+    }
+    rc_cache.valid = 0;
+    rc_cache.pending_invalidate = 0;
+    rc_cache.has_mach = 0;
+    rc_cache.mach_path[0] = '\0';
+    rc_list_clear(&rc_cache.list);
+}
+
+static void rc_cache_replay(void (*fn)(const char *name, const char *value, void *arg), void *arg)
+{
+    rc_cache.iterating++;
+    for (size_t i = 0; i < rc_cache.list.count; i++) {
+        fn(rc_cache.list.items[i].name, rc_cache.list.items[i].value, arg);
+    }
+    rc_cache.iterating--;
+    if (!rc_cache.iterating && rc_cache.pending_invalidate) {
+        rc_cache_invalidate();
+    }
+}
+
+static void rc_list_append(const char *name, const char *value, void *arg)
+{
+    struct rc_kv_list *list = arg;
+    if (list->oom) return;
+    if (list->count == list->cap) {
+        size_t ncap = list->cap ? list->cap * 2 : 64;
+        struct rc_kv *p = realloc(list->items, ncap * sizeof *p);
+        if (!p) { list->oom = 1; return; }
+        list->items = p;
+        list->cap = ncap;
+    }
+    char *kn = strdup(name), *kv = strdup(value);
+    if (!kn || !kv) {
+        free(kn);
+        free(kv);
+        list->oom = 1;
+        return;
+    }
+    list->items[list->count].name = kn;
+    list->items[list->count].value = kv;
+    list->count++;
+}
+
+static void rc_list_append_machine(const char *name, const char *value, void *arg)
+{
+    if (strcmp(name, "description") != 0 && strcmp(name, "machine") != 0) {
+        rc_list_append(name, value, arg);
+    }
+}
+
+static int stat_matches(const struct stat *a, const struct stat *b)
+{
+#ifdef __APPLE__
+    int times = a->st_mtimespec.tv_sec == b->st_mtimespec.tv_sec &&
+                a->st_mtimespec.tv_nsec == b->st_mtimespec.tv_nsec;
+#else
+    int times = a->st_mtim.tv_sec == b->st_mtim.tv_sec && a->st_mtim.tv_nsec == b->st_mtim.tv_nsec;
+#endif
+    return a->st_dev == b->st_dev && a->st_ino == b->st_ino && a->st_size == b->st_size && times;
+}
+
 int rc_read(void (*fn)(const char *name, const char *value, void *arg), void *arg)
 {
-    char mach[64] = "";
-    if (conf_read(RC_CONF, find_machine_key, mach) < 0) {
+    struct stat cur_rc;
+    if (stat(RC_CONF, &cur_rc) < 0) {
+        rc_cache_invalidate();
         return -1;
     }
-    if (mach[0] && strspn(mach, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-") == strlen(mach)) {
-        char mpath[256];
-        struct machine_pass mp = { fn, arg };
-        snprintf(mpath, sizeof mpath, "%s/%s.conf", MACHINES_DIR, mach);
-        conf_read(mpath, forward_machine_kv, &mp);
+    if (rc_cache.valid && stat_matches(&cur_rc, &rc_cache.rc_st)) {
+        int mach_ok = 1;
+        if (rc_cache.mach_path[0]) {
+            struct stat cur_mach;
+            int exists = stat(rc_cache.mach_path, &cur_mach) == 0;
+            if (exists != rc_cache.has_mach || (exists && !stat_matches(&cur_mach, &rc_cache.mach_st))) {
+                mach_ok = 0;
+            }
+        }
+        if (mach_ok) {
+            rc_cache_replay(fn, arg);
+            return 0;
+        }
     }
-    return conf_read(RC_CONF, fn, arg);
+
+    /* Single-pass parse of RC_CONF into memory, extract machine=, prepend machine conf, then RC_CONF. */
+    struct rc_kv_list rc_only = { 0 };
+    if (conf_read(RC_CONF, rc_list_append, &rc_only) < 0) {
+        rc_list_clear(&rc_only);
+        rc_cache_invalidate();
+        return -1;
+    }
+    if (rc_only.oom) {
+        rc_list_clear(&rc_only);
+        rc_cache_invalidate();
+        char mach[64] = "";
+        if (conf_read(RC_CONF, find_machine_key, mach) < 0) return -1;
+        if (mach[0] && strspn(mach, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-") == strlen(mach)) {
+            char mpath[256];
+            struct machine_pass mp = { fn, arg };
+            snprintf(mpath, sizeof mpath, "%s/%s.conf", MACHINES_DIR, mach);
+            conf_read(mpath, forward_machine_kv, &mp);
+        }
+        return conf_read(RC_CONF, fn, arg);
+    }
+
+    char mach[64] = "";
+    for (size_t i = 0; i < rc_only.count; i++) {
+        if (strcmp(rc_only.items[i].name, "machine") == 0) {
+            snprintf(mach, sizeof mach, "%s", rc_only.items[i].value);
+        }
+    }
+
+    struct rc_kv_list combined = { 0 };
+    char mpath[256] = "";
+    int has_mach = 0;
+    struct stat mst = { 0 };
+    if (mach[0] && strspn(mach, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-") == strlen(mach)) {
+        snprintf(mpath, sizeof mpath, "%s/%s.conf", MACHINES_DIR, mach);
+        if (stat(mpath, &mst) == 0 && conf_read(mpath, rc_list_append_machine, &combined) == 0) {
+            has_mach = 1;
+        }
+    }
+    for (size_t i = 0; i < rc_only.count; i++) {
+        rc_list_append(rc_only.items[i].name, rc_only.items[i].value, &combined);
+    }
+    rc_list_clear(&rc_only);
+
+    if (!combined.oom && !rc_cache.iterating) {
+        rc_cache_invalidate();
+        rc_cache.valid = 1;
+        rc_cache.rc_st = cur_rc;
+        rc_cache.has_mach = has_mach;
+        snprintf(rc_cache.mach_path, sizeof rc_cache.mach_path, "%s", mpath);
+        rc_cache.mach_st = mst;
+        rc_cache.list = combined;
+        rc_cache_replay(fn, arg);
+        return 0;
+    }
+    for (size_t i = 0; i < combined.count; i++) {
+        fn(combined.items[i].name, combined.items[i].value, arg);
+    }
+    rc_list_clear(&combined);
+    return 0;
 }
 
 struct path_info {
@@ -305,6 +476,7 @@ static int transaction_inner(const char *path, const char *expected, size_t expe
         errno = EINVAL;
         goto done;
     }
+    if (strcmp(path, RC_CONF) == 0) rc_cache_invalidate();
     result = write_published(&info, replacement ? replacement : "", replacement_length, exists, &before);
 done:
     free(original);

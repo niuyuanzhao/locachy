@@ -1,6 +1,9 @@
 /* System status: NetworkManager's active connection, battery, volume and
  * clock, as one line (base_status); as fields for a bar with two rows, with
  * also the microphone, memory and CPU (base_status_fields). */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #ifdef CONFIG_NETWORKMANAGER
 #include <NetworkManager.h>
 #endif
@@ -10,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -26,6 +30,10 @@ static struct status_fields fields = {
 };
 static int want_fields; /* the microphone, memory and CPU are read only for fields */
 static double last_poll = -10.0;
+static double last_bat_poll = -10.0;
+static double last_audio_poll = -10.0;
+static double last_bt_poll = -10.0;
+static int audio_dirty = 1;
 static char last_lang[32];
 
 static int read_first_line(const char *path, char *buf, size_t size)
@@ -224,14 +232,147 @@ static void update_battery(void)
     }
 }
 
-/* wpctl get-volume NODE: 0, the volume in percent and whether it is muted. */
-static int wpctl_volume(const char *node, int *pct, int *muted)
+static pid_t wp_pid = -1;
+static int wp_fd = -1;
+static int wp_which; /* 0: sink, 1: source */
+static char wp_buf[64];
+static size_t wp_len;
+
+static int wpctl_parse_line(const char *out, int *pct, int *muted)
+{
+    double v = 0;
+    if (sscanf(out, "Volume: %lf", &v) == 1) {
+        *pct = (int)(v * 100.0 + 0.5);
+        *muted = strstr(out, "[MUTED]") != NULL;
+        return 0;
+    }
+    return -1;
+}
+
+static void wpctl_apply(int which, const char *out)
+{
+    int pct = 0, muted = 0;
+    if (wpctl_parse_line(out, &pct, &muted) != 0) return;
+    if (which == 0) {
+        if (muted) {
+            /* TRANSLATORS: status bar: keep short. */
+            snprintf(cached_audio, sizeof cached_audio, _("Vol: MUTE(%d%%)"), pct);
+            snprintf(fields.volume, sizeof fields.volume, "%s", _("Vol muted"));
+        } else {
+            /* TRANSLATORS: status bar: keep short. */
+            snprintf(cached_audio, sizeof cached_audio, _("Vol: %d%%"), pct);
+            snprintf(fields.volume, sizeof fields.volume, _("Vol %d%%"), pct);
+        }
+    } else {
+        /* TRANSLATORS: status bar: keep short. */
+        snprintf(fields.mic, sizeof fields.mic, muted ? _("Mic muted") : _("Mic %d%%"), pct);
+    }
+}
+
+static int wpctl_async_start(int which)
+{
+    int p[2];
+    if (pipe2(p, O_CLOEXEC | O_NONBLOCK) < 0) return -1;
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(p[0]);
+        int flags = fcntl(p[1], F_GETFL);
+        if (flags >= 0) (void)fcntl(p[1], F_SETFL, flags & ~O_NONBLOCK);
+        dup2(p[1], STDOUT_FILENO);
+        close(p[1]);
+        const char *node = which == 0 ? "@DEFAULT_AUDIO_SINK@" : "@DEFAULT_AUDIO_SOURCE@";
+        execl("/usr/bin/wpctl", "wpctl", "get-volume", node, (char *)NULL);
+        _exit(127);
+    }
+    close(p[1]);
+    if (pid < 0) {
+        close(p[0]);
+        return -1;
+    }
+    wp_pid = pid;
+    wp_fd = p[0];
+    wp_which = which;
+    wp_len = 0;
+    wp_buf[0] = '\0';
+    return 0;
+}
+
+static void wpctl_async_step(double now)
+{
+    if (wp_pid > 0) {
+        int eof = 0;
+        if (wp_fd >= 0) for (;;) {
+            if (wp_len + 1 >= sizeof wp_buf) {
+                char discard[64];
+                ssize_t d = read(wp_fd, discard, sizeof discard);
+                if (d == 0) { eof = 1; break; }
+                if (d < 0) {
+                    if (errno == EINTR) continue;
+                    if (errno != EAGAIN && errno != EWOULDBLOCK) eof = 1;
+                    break;
+                }
+                continue;
+            }
+            ssize_t n = read(wp_fd, wp_buf + wp_len, sizeof wp_buf - 1 - wp_len);
+            if (n > 0) {
+                wp_len += (size_t)n;
+                wp_buf[wp_len] = '\0';
+            } else if (n == 0) {
+                eof = 1;
+                break;
+            } else {
+                if (errno == EINTR) continue;
+                if (errno != EAGAIN && errno != EWOULDBLOCK) eof = 1;
+                break;
+            }
+        }
+        if (eof && wp_fd >= 0) {
+            close(wp_fd);
+            wp_fd = -1;
+            if (wp_len > 0) wpctl_apply(wp_which, wp_buf);
+            wp_len = 0;
+            wp_buf[0] = '\0';
+        }
+        if (wp_fd < 0) {
+            /* Output read: reap the child once it has exited, never wait for it. */
+            int st = 0;
+            pid_t reaped = waitpid(wp_pid, &st, WNOHANG);
+            if (reaped == wp_pid || (reaped < 0 && errno == ECHILD)) {
+                int finished_which = wp_which;
+                wp_pid = -1;
+                if (finished_which == 0 && want_fields &&
+                    access("/run/user/0/pipewire-0", F_OK) == 0 &&
+                    access("/usr/bin/wpctl", X_OK) == 0) {
+                    (void)wpctl_async_start(1);
+                }
+            }
+        }
+        return;
+    }
+    if (access("/run/user/0/pipewire-0", F_OK) != 0) {
+        /* TRANSLATORS: status bar: keep short. */
+        snprintf(cached_audio, sizeof cached_audio, "%s", _("Vol: --"));
+        snprintf(fields.volume, sizeof fields.volume, "%s", _("Vol --"));
+        fields.mic[0] = '\0';
+        last_audio_poll = now;
+        audio_dirty = 0;
+        return;
+    }
+    if (!audio_dirty && now - last_audio_poll < 5.0) return;
+    last_audio_poll = now;
+    audio_dirty = 0;
+    if (access("/usr/bin/wpctl", X_OK) == 0) {
+        (void)wpctl_async_start(0);
+    }
+}
+
+/* Synchronous single-node query used only after an explicit volume key press
+ * so the immediate toast reflects the new level without blocking regular draws. */
+static int wpctl_volume_sync(const char *node, int *pct, int *muted)
 {
     char out[64] = "";
     int p[2], got = -1;
-    if (pipe(p) < 0) {
-        return -1;
-    }
+    if (pipe2(p, O_CLOEXEC) < 0) return -1;
     pid_t pid = fork();
     if (pid == 0) {
         close(p[0]);
@@ -243,46 +384,14 @@ static int wpctl_volume(const char *node, int *pct, int *muted)
     close(p[1]);
     if (pid > 0) {
         ssize_t n = read(p[0], out, sizeof out - 1);
-        double v = 0;
         if (n > 0) {
             out[n] = '\0';
-            if (sscanf(out, "Volume: %lf", &v) == 1) {
-                *pct = (int)(v * 100.0 + 0.5);
-                *muted = strstr(out, "[MUTED]") != NULL;
-                got = 0;
-            }
+            got = wpctl_parse_line(out, pct, muted);
         }
         waitpid(pid, NULL, 0);
     }
     close(p[0]);
     return got;
-}
-
-static void update_audio(void)
-{
-    int pct, muted;
-    if (access("/run/user/0/pipewire-0", F_OK) != 0) {
-        /* TRANSLATORS: status bar: keep short. */
-        snprintf(cached_audio, sizeof cached_audio, "%s", _("Vol: --"));
-        snprintf(fields.volume, sizeof fields.volume, "%s", _("Vol --"));
-        fields.mic[0] = '\0';
-        return;
-    }
-    if (wpctl_volume("@DEFAULT_AUDIO_SINK@", &pct, &muted) == 0) {
-        if (muted) {
-            /* TRANSLATORS: status bar: keep short. */
-            snprintf(cached_audio, sizeof cached_audio, _("Vol: MUTE(%d%%)"), pct);
-            snprintf(fields.volume, sizeof fields.volume, "%s", _("Vol muted"));
-        } else {
-            /* TRANSLATORS: status bar: keep short. */
-            snprintf(cached_audio, sizeof cached_audio, _("Vol: %d%%"), pct);
-            snprintf(fields.volume, sizeof fields.volume, _("Vol %d%%"), pct);
-        }
-    }
-    if (want_fields && wpctl_volume("@DEFAULT_AUDIO_SOURCE@", &pct, &muted) == 0) {
-        /* TRANSLATORS: status bar: keep short. */
-        snprintf(fields.mic, sizeof fields.mic, muted ? _("Mic muted") : _("Mic %d%%"), pct);
-    }
 }
 
 static void update_memory(void)
@@ -325,6 +434,7 @@ static void update_cpu(void)
 {
     static unsigned long long last_total, last_idle;
     static char zone[64];
+    static int zone_probed;
     unsigned long long v[8];
     FILE *in = fopen("/proc/stat", "re");
     if (in && fscanf(in, "cpu %llu %llu %llu %llu %llu %llu %llu %llu",
@@ -346,14 +456,17 @@ static void update_cpu(void)
     if (in) {
         fclose(in);
     }
-    for (int i = 0; !zone[0] && i < 16; i++) {
-        char path[64], type[32];
-        snprintf(path, sizeof path, "/sys/class/thermal/thermal_zone%d/type", i);
-        if (read_first_line(path, type, sizeof type) < 0) {
-            break;
-        }
-        if (strcmp(type, "x86_pkg_temp") == 0) {
-            snprintf(zone, sizeof zone, "/sys/class/thermal/thermal_zone%d/temp", i);
+    if (!zone_probed) {
+        zone_probed = 1;
+        for (int i = 0; !zone[0] && i < 16; i++) {
+            char path[64], type[32];
+            snprintf(path, sizeof path, "/sys/class/thermal/thermal_zone%d/type", i);
+            if (read_first_line(path, type, sizeof type) < 0) {
+                break;
+            }
+            if (strcmp(type, "x86_pkg_temp") == 0) {
+                snprintf(zone, sizeof zone, "/sys/class/thermal/thermal_zone%d/temp", i);
+            }
         }
     }
     char temp[16];
@@ -369,22 +482,20 @@ static void bt_rc(const char *name, const char *value, void *arg)
     }
 }
 
-static void update_bluetooth(void)
+#ifdef CONFIG_NETWORKMANAGER
+static GDBusConnection *bt_bus;
+static int bt_in_flight;
+static int bt_wanted; /* Bluetooth is on: a reply that comes after it was turned off is dropped */
+
+static void bt_objects_ready(GObject *source, GAsyncResult *res, gpointer user_data)
 {
-    int enabled = 0;
-    rc_read(bt_rc, &enabled);
-    if (!enabled || access("/usr/lib/bluetooth/bluetoothd", X_OK) != 0) {
-        cached_bt[0] = fields.bluetooth[0] = fields.bt_device[0] = '\0';
+    (void)user_data;
+    bt_in_flight = 0;
+    GVariant *reply = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), res, NULL);
+    if (!bt_wanted) {
+        if (reply) g_variant_unref(reply);
         return;
     }
-#ifdef CONFIG_NETWORKMANAGER
-    static GDBusConnection *sys_bus;
-    if (!sys_bus) {
-        sys_bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, NULL);
-    }
-    GVariant *reply = sys_bus ? g_dbus_connection_call_sync(sys_bus, "org.bluez", "/",
-        "org.freedesktop.DBus.ObjectManager", "GetManagedObjects", NULL,
-        G_VARIANT_TYPE("(a{oa{sa{sv}}})"), G_DBUS_CALL_FLAGS_NONE, 150, NULL, NULL) : NULL;
     if (!reply) {
         /* TRANSLATORS: status bar: keep short. */
         snprintf(fields.bluetooth, sizeof fields.bluetooth, "%s", _("BT off"));
@@ -457,7 +568,50 @@ static void update_bluetooth(void)
         snprintf(cached_bt, sizeof cached_bt, _("BT: %s"),
                  dev_name[0] ? dev_name : _("connected"));
     }
+}
+#endif
+
+static void update_bluetooth(double now)
+{
+    int enabled = 0;
+    rc_read(bt_rc, &enabled);
+    if (!enabled || access("/usr/lib/bluetooth/bluetoothd", X_OK) != 0) {
+#ifdef CONFIG_NETWORKMANAGER
+        bt_wanted = 0;
+#endif
+        cached_bt[0] = fields.bluetooth[0] = fields.bt_device[0] = '\0';
+        last_bt_poll = now;
+        return;
+    }
+#ifdef CONFIG_NETWORKMANAGER
+    while (g_main_context_pending(NULL)) {
+        g_main_context_iteration(NULL, FALSE);
+    }
+    if (bt_in_flight || (last_bt_poll >= 0.0 && now - last_bt_poll < 5.0)) {
+        return;
+    }
+    last_bt_poll = now;
+    bt_wanted = 1;
+    if (!bt_bus) {
+        bt_bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, NULL);
+    }
+    if (!bt_bus) {
+        /* TRANSLATORS: status bar: keep short. */
+        snprintf(fields.bluetooth, sizeof fields.bluetooth, "%s", _("BT off"));
+        snprintf(fields.bt_device, sizeof fields.bt_device, "%s", _("starting"));
+        snprintf(cached_bt, sizeof cached_bt, "%s", _("BT: off"));
+        return;
+    }
+    bt_in_flight = 1;
+    g_dbus_connection_call(bt_bus, "org.bluez", "/",
+        "org.freedesktop.DBus.ObjectManager", "GetManagedObjects", NULL,
+        G_VARIANT_TYPE("(a{oa{sa{sv}}})"), G_DBUS_CALL_FLAGS_NONE, 150, NULL,
+        bt_objects_ready, NULL);
+    while (g_main_context_pending(NULL)) {
+        g_main_context_iteration(NULL, FALSE);
+    }
 #else
+    last_bt_poll = now;
     /* TRANSLATORS: status bar: keep short. */
     snprintf(fields.bluetooth, sizeof fields.bluetooth, "%s", _("BT on"));
     snprintf(fields.bt_device, sizeof fields.bt_device, "%s", _("enabled"));
@@ -472,13 +626,28 @@ static void poll_status(void)
     if (strcmp(lang, last_lang) != 0) {
         snprintf(last_lang, sizeof last_lang, "%s", lang);
         last_poll = -10.0;
+        last_bat_poll = -10.0;
+        last_audio_poll = -10.0;
+        last_bt_poll = -10.0;
+        audio_dirty = 1;
     }
+    /* Always drain completed async wpctl/D-Bus replies without blocking. */
+    wpctl_async_step(now);
+#ifdef CONFIG_NETWORKMANAGER
+    if (bt_in_flight) {
+        while (g_main_context_pending(NULL)) {
+            g_main_context_iteration(NULL, FALSE);
+        }
+    }
+#endif
     if (now - last_poll >= 2.0) {
         last_poll = now;
         update_network();
-        update_bluetooth();
-        update_battery();
-        update_audio();
+        update_bluetooth(now);
+        if (last_bat_poll < 0.0 || now - last_bat_poll >= 10.0) {
+            last_bat_poll = now;
+            update_battery();
+        }
         if (want_fields) {
             update_memory();
             update_cpu();
@@ -528,21 +697,52 @@ int base_audio_key(int action_key, char *toast, size_t size)
     }
     if (pid > 0) {
         waitpid(pid, NULL, 0);
-        update_audio();
+        int pct = 0, muted = 0;
+        const char *node = action_key == K_MIC_MUTE ? "@DEFAULT_AUDIO_SOURCE@" : "@DEFAULT_AUDIO_SINK@";
+        if (wpctl_volume_sync(node, &pct, &muted) == 0) {
+            char line[64];
+            snprintf(line, sizeof line, "Volume: %.2f%s", pct / 100.0, muted ? " [MUTED]" : "");
+            wpctl_apply(action_key == K_MIC_MUTE ? 1 : 0, line);
+        }
+        audio_dirty = 1;
+        last_audio_poll = uptime();
     }
     if (toast && size) {
-        snprintf(toast, size, " [%s] ", cached_audio);
+        snprintf(toast, size, " [%s] ",
+                 action_key == K_MIC_MUTE && fields.mic[0] ? fields.mic : cached_audio);
     }
     return pid > 0 ? 0 : -1;
 }
 
 /* The local time, in the time zone of /etc/localtime as it is now: tzset
- * reads it again when it has changed (settings, or the automatic time zone),
- * which localtime_r alone does not. */
+ * reads it again when /etc/localtime changes (settings or automatic time zone),
+ * checked at most every 2 s rather than on every frame. */
 static struct tm *local_now(struct tm *buf)
 {
+    static int tz_init;
+    static double tz_checked = -10.0;
+    static dev_t tz_dev;
+    static ino_t tz_ino;
+    static struct timespec tz_mtim;
+    double now = uptime();
+    if (!tz_init || now - tz_checked >= 2.0) {
+        tz_checked = now;
+        struct stat st;
+        if (stat("/etc/localtime", &st) == 0) {
+            if (!tz_init || st.st_dev != tz_dev || st.st_ino != tz_ino ||
+                st.st_mtim.tv_sec != tz_mtim.tv_sec || st.st_mtim.tv_nsec != tz_mtim.tv_nsec) {
+                tz_dev = st.st_dev;
+                tz_ino = st.st_ino;
+                tz_mtim = st.st_mtim;
+                tz_init = 1;
+                tzset();
+            }
+        } else if (!tz_init) {
+            tz_init = 1;
+            tzset();
+        }
+    }
     time_t t = time(NULL);
-    tzset();
     return localtime_r(&t, buf);
 }
 
@@ -553,7 +753,7 @@ void base_status(const char *ime_tag, char *out, size_t size)
     struct tm *tm = local_now(&tm_buf);
     char clk[32] = "--:--";
     if (tm != NULL) {
-        strftime(clk, sizeof clk, "%Y-%m-%d %H:%M:%S", tm);
+        strftime(clk, sizeof clk, "%Y-%m-%d %H:%M", tm);
     }
 
     char bt_part[80] = "";
@@ -575,12 +775,13 @@ void base_status_fields(struct status_fields *out)
     if (!want_fields) {
         want_fields = 1;
         last_poll = -10.0; /* read the microphone, memory and CPU now */
+        audio_dirty = 1;
     }
     poll_status();
     struct tm tm_buf;
     struct tm *tm = local_now(&tm_buf);
     if (tm != NULL) {
-        strftime(fields.time, sizeof fields.time, "%H:%M:%S", tm);
+        strftime(fields.time, sizeof fields.time, "%H:%M", tm);
         strftime(fields.date, sizeof fields.date, "%a %Y-%m-%d", tm);
     }
     *out = fields;

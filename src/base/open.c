@@ -22,6 +22,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -146,6 +147,136 @@ static int is_url(const char *target)
     return *s == ':';
 }
 
+static double mono_now(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+struct dir_stamp {
+    int exists;
+    dev_t dev;
+    ino_t ino;
+    time_t mtime_sec;
+    long mtime_nsec;
+    time_t ctime_sec;
+    long ctime_nsec;
+};
+
+static struct dir_stamp read_stamp(const char *path)
+{
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        return (struct dir_stamp){ 0 };
+    }
+    return (struct dir_stamp){
+        1, st.st_dev, st.st_ino,
+        st.st_mtim.tv_sec, st.st_mtim.tv_nsec,
+        st.st_ctim.tv_sec, st.st_ctim.tv_nsec
+    };
+}
+
+static int stamp_same(const struct dir_stamp *a, const struct dir_stamp *b)
+{
+    if (a->exists != b->exists) return 0;
+    if (!a->exists) return 1;
+    return a->dev == b->dev && a->ino == b->ino &&
+           a->mtime_sec == b->mtime_sec && a->mtime_nsec == b->mtime_nsec &&
+           a->ctime_sec == b->ctime_sec && a->ctime_nsec == b->ctime_nsec;
+}
+
+/* A stamp taken within the last two seconds cannot show a later change made in
+ * the same clock tick (file times move in jiffies), so it keeps no answer. */
+static int stamp_racy(const struct dir_stamp *s)
+{
+    time_t now = time(NULL);
+    return s->exists && (s->mtime_sec >= now - 2 || s->ctime_sec >= now - 2);
+}
+
+/* Cached mount table for slow-mount detection, refreshed at most every 5 s or
+ * when /proc/self/mounts signals a mount-table change via POLLERR/POLLPRI. */
+struct mount_entry {
+    char *dir;
+    size_t len;
+    int slow;
+};
+static struct {
+    struct mount_entry *entries;
+    size_t n, cap;
+    double loaded_at;
+    int loaded;
+    int watch_fd;
+} mount_cache = { .watch_fd = -1 };
+
+static int mount_table_changed(void)
+{
+    if (mount_cache.watch_fd < 0) {
+        mount_cache.watch_fd = open("/proc/self/mounts", O_RDONLY | O_CLOEXEC);
+        return 0;
+    }
+    struct pollfd p = { .fd = mount_cache.watch_fd, .events = POLLPRI | POLLERR };
+    return poll(&p, 1, 0) > 0 && (p.revents & (POLLPRI | POLLERR)) != 0;
+}
+
+static void mount_cache_refresh(double now)
+{
+    if (mount_cache.watch_fd >= 0) {
+        /* Linux /proc/self/mounts POLLPRI|POLLERR stays latched until rewound/reopened. */
+        close(mount_cache.watch_fd);
+    }
+    mount_cache.watch_fd = open("/proc/self/mounts", O_RDONLY | O_CLOEXEC);
+    for (size_t i = 0; i < mount_cache.n; i++) {
+        free(mount_cache.entries[i].dir);
+    }
+    mount_cache.n = 0;
+    char buffer[8192];
+    FILE *mounts = setmntent("/proc/self/mounts", "re");
+    struct mntent entry, *mount;
+    static const char *const network[] = { "nfs", "nfs4", "cifs", "smb3", "smbfs", "ceph", "9p", "autofs" };
+    while (mounts && (mount = getmntent_r(mounts, &entry, buffer, sizeof buffer)) != NULL) {
+        int slow = strncmp(mount->mnt_type, "fuse.", 5) == 0 && strncmp(mount->mnt_fsname, "/dev/", 5) != 0;
+        for (size_t i = 0; !slow && i < sizeof network / sizeof network[0]; i++) {
+            slow = strcmp(mount->mnt_type, network[i]) == 0;
+        }
+        if (mount_cache.n == mount_cache.cap) {
+            size_t cap = mount_cache.cap ? mount_cache.cap * 2 : 32;
+            struct mount_entry *more = realloc(mount_cache.entries, cap * sizeof *more);
+            if (!more) break;
+            mount_cache.entries = more;
+            mount_cache.cap = cap;
+        }
+        char *dir = strdup(mount->mnt_dir);
+        if (!dir) break;
+        mount_cache.entries[mount_cache.n++] = (struct mount_entry){ dir, strlen(dir), slow };
+    }
+    if (mounts) endmntent(mounts);
+    mount_cache.loaded = 1;
+    mount_cache.loaded_at = now;
+}
+
+static int path_is_slow_mount(const char *path)
+{
+    double now = mono_now();
+    if (!mount_cache.loaded || now - mount_cache.loaded_at >= 5.0 || mount_table_changed()) {
+        mount_cache_refresh(now);
+    }
+    int slow = 0;
+    size_t longest = 0;
+    char resolved[PATH_MAX];
+    const char *target = realpath(path, resolved) ? resolved : path;
+    for (size_t i = 0; i < mount_cache.n; i++) {
+        const struct mount_entry *m = &mount_cache.entries[i];
+        if (m->len < longest || strncmp(target, m->dir, m->len) != 0 ||
+            (m->len != 1 && target[m->len] && target[m->len] != '/')) {
+            continue;
+        }
+        longest = m->len;
+        slow = m->slow;
+    }
+    return slow;
+}
+
 /* The type GIO gives a local file (g_file_query_info's content type): its
  * name's, by the globs, unless that is none or more than one; then its first
  * bytes', by the magic (shared-mime-info's "Recommended checking order"). */
@@ -158,31 +289,26 @@ static int file_type(const char *path, const struct stat *st, char *type, size_t
         snprintf(type, size, "%s", kind);
         return 0;
     }
+    /* Fast path: check filename globs first. When GIO is certain (the vast
+     * majority of files with extensions), skip mount checks and content reads. */
+    gboolean uncertain = TRUE;
+    gchar *guess = g_content_type_guess(path, NULL, 0, &uncertain);
+    if (!uncertain && guess && strchr(guess, '/')) {
+        int ok = snprintf(type, size, "%s", guess) < (int)size;
+        g_free(guess);
+        return ok ? 0 : -1;
+    }
+    g_free(guess);
     /* As KIO's slow mounts: drawing a type must not download every cloud
      * file. Match the actual enclosing mount, not a folder named Drives. */
-    int slow = 0;
-    size_t longest = 0;
-    char resolved[PATH_MAX], buffer[8192];
-    const char *target = realpath(path, resolved) ? resolved : path;
-    FILE *mounts = setmntent("/proc/self/mounts", "re");
-    struct mntent entry, *mount;
-    while (mounts && (mount = getmntent_r(mounts, &entry, buffer, sizeof buffer)) != NULL) {
-        size_t len = strlen(mount->mnt_dir);
-        if (len < longest || strncmp(target, mount->mnt_dir, len) != 0 ||
-            (len != 1 && target[len] && target[len] != '/')) continue;
-        longest = len;
-        slow = strncmp(mount->mnt_type, "fuse.", 5) == 0 && strncmp(mount->mnt_fsname, "/dev/", 5) != 0;
-        static const char *const network[] = { "nfs", "nfs4", "cifs", "smb3", "smbfs", "ceph", "9p", "autofs" };
-        for (size_t i = 0; i < sizeof network / sizeof network[0]; i++) slow |= strcmp(mount->mnt_type, network[i]) == 0;
-    }
-    if (mounts) endmntent(mounts);
+    int slow = path_is_slow_mount(path);
     guchar data[4096]; /* GIO's sniffing length for local files */
     int fd = slow ? -1 : open(path, O_RDONLY | O_CLOEXEC | O_NOCTTY | O_NONBLOCK);
     ssize_t n = fd >= 0 ? read(fd, data, sizeof data) : -1;
     if (fd >= 0) {
         close(fd);
     }
-    gchar *guess = g_content_type_guess(path, data, n > 0 ? (gsize)n : 0, NULL);
+    guess = g_content_type_guess(path, data, n > 0 ? (gsize)n : 0, NULL);
     int ok = guess && strchr(guess, '/') && snprintf(type, size, "%s", guess) < (int)size;
     g_free(guess);
     return ok ? 0 : -1;
@@ -337,12 +463,79 @@ static int desktop_files(const char *name, char paths[][512], int max)
     return n;
 }
 
-/* The Name of the first .desktop file of name that lists type (any .desktop
- * file if type is NULL); 1 if there is one. */
-static int desktop_entry(const char *name, const char *type, char *label, size_t size)
+/* In-memory cache for desktop_entry() and container listings: invalidated on
+ * open_rules(), after 5 s TTL, or whenever a watched directory/file stamp changes. */
+#define OPEN_LABEL_CACHE_SIZE 64
+#define OPEN_DEP_MAX 40 /* the paths one cached lookup depends on, at most */
+struct cache_dep {
+    char path[512];
+    struct dir_stamp st;
+};
+struct label_cache_entry {
+    int used, has_type, found;
+    char name[OPEN_NAME];
+    char type[OPEN_TYPE];
+    char label[128];
+    int ndeps;
+    struct cache_dep *deps; /* what the answer was read from, stamped */
+};
+static struct {
+    struct label_cache_entry entries[OPEN_LABEL_CACHE_SIZE];
+    unsigned next_slot;
+    double valid_since;
+    int valid;
+    struct dir_stamp conf_dir_stamp;
+    struct dir_stamp apps_dir_stamp;
+    struct dir_stamp prog_dir_stamp;
+    char (*containers)[OPEN_NAME];
+    int ncontainers;
+    int containers_valid;
+} open_cache;
+
+static void label_entry_drop(struct label_cache_entry *e)
 {
-    char paths[32][512];
+    free(e->deps);
+    e->deps = NULL;
+    e->ndeps = 0;
+    e->used = 0;
+}
+
+static void open_cache_invalidate(void)
+{
+    for (int i = 0; i < OPEN_LABEL_CACHE_SIZE; i++) {
+        label_entry_drop(&open_cache.entries[i]);
+    }
+    open_cache.next_slot = 0;
+    open_cache.valid = 0;
+    open_cache.containers_valid = 0;
+}
+
+static void open_cache_check(void)
+{
+    double now = mono_now();
+    struct dir_stamp conf_st = read_stamp(CONTAINERS_CONF);
+    struct dir_stamp apps_st = read_stamp("/usr/share/applications");
+    struct dir_stamp prog_st = read_stamp(OPEN_PROGRAM_DESKTOP);
+    if (!open_cache.valid || now - open_cache.valid_since >= 5.0 ||
+        !stamp_same(&conf_st, &open_cache.conf_dir_stamp) ||
+        !stamp_same(&apps_st, &open_cache.apps_dir_stamp) ||
+        !stamp_same(&prog_st, &open_cache.prog_dir_stamp)) {
+        open_cache_invalidate();
+        open_cache.conf_dir_stamp = conf_st;
+        open_cache.apps_dir_stamp = apps_st;
+        open_cache.prog_dir_stamp = prog_st;
+        open_cache.valid_since = now;
+        open_cache.valid = !(stamp_racy(&conf_st) || stamp_racy(&apps_st) || stamp_racy(&prog_st));
+    }
+}
+
+/* The Name of the first .desktop file of name that lists type (any .desktop
+ * file if type is NULL); 1 if there is one. paths: the files listed (npaths). */
+static int desktop_entry_uncached(const char *name, const char *type, char *label, size_t size,
+                                  char paths[][512], int *npaths)
+{
     int n = desktop_files(name, paths, 32), found = 0;
+    *npaths = n;
     for (int i = 0; i < n && !found; i++) {
         char line[2048], entry_name[128] = "";
         int in_entry = 0, matches = type == NULL;
@@ -368,20 +561,108 @@ static int desktop_entry(const char *name, const char *type, char *label, size_t
     return found;
 }
 
+static int open_label_cache_lookup(const char *name, const char *type, char *label, size_t size, int *out_found)
+{
+    open_cache_check();
+    int has_type = type != NULL;
+    if (strlen(name) >= OPEN_NAME || (has_type && strlen(type) >= OPEN_TYPE)) {
+        return 0;
+    }
+    for (int i = 0; i < OPEN_LABEL_CACHE_SIZE; i++) {
+        struct label_cache_entry *e = &open_cache.entries[i];
+        if (!e->used || e->has_type != has_type || strcmp(e->name, name) != 0) continue;
+        if (has_type && strcmp(e->type, type) != 0) continue;
+        /* Every path the answer came from must still have the stamp it had:
+         * a file added, removed or changed (a fresh fixture included) misses. */
+        for (int k = 0; k < e->ndeps; k++) {
+            struct dir_stamp cur = read_stamp(e->deps[k].path);
+            if (!stamp_same(&cur, &e->deps[k].st)) {
+                label_entry_drop(e);
+                return 0;
+            }
+        }
+        if (e->found) snprintf(label, size, "%s", e->label);
+        *out_found = e->found;
+        return 1;
+    }
+    return 0;
+}
+
+static void open_label_cache_store(const char *name, const char *type, int found, const char *label,
+                                   char paths[][512], int npaths)
+{
+    if (strlen(name) >= OPEN_NAME || (type && strlen(type) >= OPEN_TYPE) || 3 + npaths > OPEN_DEP_MAX) {
+        return;
+    }
+    struct cache_dep *deps = malloc((size_t)(3 + npaths) * sizeof *deps);
+    if (!deps) return;
+    int k = 0;
+    /* The containers' list, and for a container its own configuration (the
+     * host flag and its desktop= list) and the folder its packages add to. */
+    snprintf(deps[k++].path, sizeof deps[0].path, "%s", CONTAINERS_CONF);
+    if (program_name(name)) {
+        snprintf(deps[k++].path, sizeof deps[0].path, "%s", OPEN_PROGRAM_DESKTOP);
+    } else {
+        snprintf(deps[k++].path, sizeof deps[0].path, CONTAINERS_CONF "/%s.conf", name);
+        snprintf(deps[k++].path, sizeof deps[0].path, OPEN_CONTAINERS "/%s/upper/usr/share/applications", name);
+    }
+    for (int i = 0; i < npaths; i++) {
+        size_t plen = strlen(paths[i]);
+        if (plen >= sizeof deps[0].path) {
+            free(deps);
+            return;
+        }
+        memcpy(deps[k++].path, paths[i], plen + 1);
+    }
+    for (int i = 0; i < k; i++) {
+        deps[i].st = read_stamp(deps[i].path);
+        if (stamp_racy(&deps[i].st)) {
+            free(deps);
+            return;
+        }
+    }
+    struct label_cache_entry *slot = &open_cache.entries[open_cache.next_slot % OPEN_LABEL_CACHE_SIZE];
+    open_cache.next_slot++;
+    label_entry_drop(slot);
+    slot->deps = deps;
+    slot->ndeps = k;
+    slot->has_type = type != NULL;
+    snprintf(slot->name, sizeof slot->name, "%s", name);
+    snprintf(slot->type, sizeof slot->type, "%s", type ? type : "");
+    slot->found = found;
+    snprintf(slot->label, sizeof slot->label, "%s", found ? label : "");
+    slot->used = 1;
+}
+
+static int desktop_entry(const char *name, const char *type, char *label, size_t size)
+{
+    int cached_found = 0;
+    if (open_label_cache_lookup(name, type, label, size, &cached_found)) {
+        return cached_found;
+    }
+    char out[128] = "", paths[32][512];
+    int npaths = 0;
+    int found = desktop_entry_uncached(name, type, out, sizeof out, paths, &npaths);
+    if (found) snprintf(label, size, "%s", out);
+    open_label_cache_store(name, type, found, out, paths, npaths);
+    return found;
+}
+
 static int by_name(const void *a, const void *b)
 {
     return strcmp(a, b);
 }
 
-/* The containers there are (CONTAINERS_CONF/NAME.conf), those that open
- * type if it is not NULL. */
-static int each_container(const char *type, char names[][OPEN_NAME], int max)
+static void refresh_container_list(void)
 {
+    open_cache_check();
+    if (open_cache.containers_valid) return;
     DIR *dir = opendir(CONTAINERS_CONF);
     struct dirent *e;
-    int n = 0;
-    while (dir && (e = readdir(dir)) != NULL && n < max) {
-        char name[OPEN_NAME], label[128];
+    int n = 0, cap = 0;
+    char (*list)[OPEN_NAME] = NULL;
+    while (dir && (e = readdir(dir)) != NULL) {
+        char name[OPEN_NAME];
         size_t len = strlen(e->d_name);
         if (len <= 5 || len - 5 >= OPEN_NAME || strcmp(e->d_name + len - 5, ".conf") != 0) {
             continue;
@@ -390,15 +671,38 @@ static int each_container(const char *type, char names[][OPEN_NAME], int max)
         if (!valid_name(name)) {
             continue;
         }
-        if (type == NULL || desktop_entry(name, type, label, sizeof label)) {
-            memcpy(names[n++], name, OPEN_NAME);
+        if (n == cap) {
+            int ncap = cap ? cap * 2 : 16;
+            char (*more)[OPEN_NAME] = realloc(list, (size_t)ncap * sizeof *more);
+            if (!more) break;
+            list = more;
+            cap = ncap;
         }
+        memcpy(list[n++], name, OPEN_NAME);
     }
     if (dir) {
         closedir(dir);
     }
     /* A stable order: by name. */
-    qsort(names, (size_t)n, OPEN_NAME, by_name);
+    if (n > 1) qsort(list, (size_t)n, OPEN_NAME, by_name);
+    free(open_cache.containers);
+    open_cache.containers = list;
+    open_cache.ncontainers = n;
+    open_cache.containers_valid = !stamp_racy(&open_cache.conf_dir_stamp);
+}
+
+/* The containers there are (CONTAINERS_CONF/NAME.conf), those that open
+ * type if it is not NULL. */
+static int each_container(const char *type, char names[][OPEN_NAME], int max)
+{
+    refresh_container_list();
+    int n = 0;
+    for (int i = 0; i < open_cache.ncontainers && n < max; i++) {
+        char label[128];
+        if (type == NULL || desktop_entry(open_cache.containers[i], type, label, sizeof label)) {
+            memcpy(names[n++], open_cache.containers[i], OPEN_NAME);
+        }
+    }
     return n;
 }
 
@@ -640,6 +944,7 @@ int open_request_publish(const char *with, const char *target)
 
 int open_rules(char types[][OPEN_TYPE], char values[][OPEN_NAME], int max)
 {
+    open_cache_invalidate();
     FILE *in = fopen(OPEN_RULES, "re");
     char line[256];
     int n = 0;

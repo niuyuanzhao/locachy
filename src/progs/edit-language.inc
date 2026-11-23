@@ -47,10 +47,12 @@ static struct doc *language_hover_doc;
 static size_t language_hover_offset;
 static struct doc *language_trigger_doc;
 static char *language_trigger;
+static int language_tick_changed;
 static void language_tick(void);
 static void language_changed(struct doc *d);
 static void language_closed(struct doc *d);
 static void language_saved(struct doc *d);
+static void language_opened(struct doc *d);
 static void language_done(void);
 static int language_key(int key, int mods);
 static void language_menu(void);
@@ -184,6 +186,26 @@ static char *language_root(struct doc *d, JsonNode *config)
     if (*configured) { char *next = g_build_filename(root, configured, NULL); g_free(root); root = next; }
     return root;
 }
+static struct language_document *language_attach(struct doc *d, int explicit_request);
+static void language_sync_doc(struct doc *d)
+{
+    if (!d || !language_servers || !language_servers->len) return;
+    struct language_document *b = language_binding(d);
+    if (b) {
+        char *uri = g_filename_to_uri(d->path, NULL, NULL);
+        if (g_strcmp0(uri, b->uri)) {
+            language_closed(d);
+            b = NULL;
+        }
+        g_free(uri);
+    }
+    if (!b) language_attach(d, 0);
+}
+static void language_opened(struct doc *d)
+{
+    if (language_busy || !language_initialized || !language_servers || !language_servers->len) return;
+    language_sync_doc(d);
+}
 static struct language_document *language_attach(struct doc *d, int explicit_request)
 {
     language_init(); struct language_document *b = language_binding(d); if (b) return b;
@@ -226,6 +248,11 @@ static struct language_document *language_attach(struct doc *d, int explicit_req
             g_free(root_uri); g_free(settings); g_free(initialization); g_free(binary); g_free(home);
         } else if (explicit_request) post(d, NOTE_INFO, 0, 5, _("Language server '%s' is not installed."), argv[0]);
         g_ptr_array_add(language_servers, s);
+        if (s->client) {
+            for (int i = 0; i < ndocs; i++) {
+                if (docs[i] != d) language_sync_doc(docs[i]);
+            }
+        }
     }
     g_strfreev(argv); g_free(root); g_free(key);
     if (!s->client) { if (explicit_request) post(d, NOTE_INFO, 0, 5, _("Language server unavailable for %s. Configure a command or restart after installing it."), id); return NULL; }
@@ -509,7 +536,8 @@ static void language_close_now(struct doc *d)
 static void language_move_doc(struct doc *d, const char *path)
 {
     unwatch(d); snprintf(d->path, sizeof d->path, "%s", path);
-    update_name(d); watch(d); doc_detect_syntax(d); ui_of(d)->project = NULL;
+    update_name(d); watch(d); doc_detect_syntax(d); invalidate_syntax_caches(d); ui_of(d)->project = NULL;
+    language_sync_doc(d);
 }
 /* A TextDocumentEdit staged against its document's text: opened if it is not,
  * and must then exist; its version, when given, must be the one sent. */
@@ -902,7 +930,7 @@ static void language_result(struct language_server *s, EdLspEvent *e, struct lan
         break;
     }
     case ED_LSP_HIGHLIGHT: {
-        struct docui *u = ui_of(b->doc); free(u->hl); u->hl = calloc(r->items ? r->items->len * 2 : 0, sizeof *u->hl); u->nhl = 0;
+        struct docui *u = ui_of(b->doc); free(u->hl); u->hl = calloc(r->items ? r->items->len * 2 : 0, sizeof *u->hl); u->nhl = 0; u->hl_gen++;
         for (guint i = 0; u->hl && r->items && i < r->items->len; i++) { EdLspHighlight *h = g_ptr_array_index(r->items, i); size_t a, end; if (ed_lsp_position_utf8(b->snapshot, h->range.start, &a) && ed_lsp_position_utf8(b->snapshot, h->range.end, &end)) { u->hl[2 * u->nhl] = a; u->hl[2 * u->nhl++ + 1] = end; } } break;
     }
     case ED_LSP_SWITCH_SOURCE_HEADER: if (r->text && *r->text) language_open_uri(r->text); break;
@@ -920,21 +948,26 @@ static void language_diagnostics_menu(void)
 }
 static void language_tick(void)
 {
+    language_tick_changed = 0;
     if (language_busy) return;
-    language_init();
+    if (!language_initialized) {
+        if (!language_hover_doc) return;
+        language_init();
+    }
+    if (language_servers->len == 0 && !language_hover_doc) {
+        if (language_trigger) g_clear_pointer(&language_trigger, g_free);
+        language_trigger_doc = NULL;
+        return;
+    }
     if (language_presenting) {
         for (guint i = 0; i < language_servers->len; i++) { struct language_server *s = g_ptr_array_index(language_servers, i); if (s->client) ed_lsp_step(s->client, 0); }
         return;
-    }
-    for (int i = 0; i < ndocs; i++) {
-        struct language_document *b = language_binding(docs[i]);
-        if (b) { char *uri = g_filename_to_uri(docs[i]->path, NULL, NULL); if (g_strcmp0(uri, b->uri)) language_closed(docs[i]); g_free(uri); }
-        language_attach(docs[i], 0);
     }
     for (guint i = 0; i < language_servers->len; i++) {
         struct language_server *s = g_ptr_array_index(language_servers, i); if (!s->client) continue; ed_lsp_step(s->client, 0);
         EdLspEvent *e;
         while ((e = ed_lsp_next_event(s->client))) {
+            language_tick_changed = 1;
             if (e->kind == ED_LSP_EVENT_DIAGNOSTICS) {
                 struct language_document *b = language_by_uri(s, e->uri);
                 if (b) {
@@ -983,14 +1016,15 @@ static void language_tick(void)
         if (hover && t && t->doc == hover->doc && ed_lsp_state(hover->server->client) == ED_LSP_READY) {
             EdLspRequest r = {.method = ED_LSP_HOVER, .uri = hover->uri, .offset = language_hover_offset};
             uint64_t id = ed_lsp_request(hover->server->client, &r, NULL);
-            if (id) { struct language_request_ui *pending = g_new0(struct language_request_ui, 1); pending->server = hover->server; pending->id = id; pending->doc = hover->doc; pending->cursor = language_hover_offset; pending->automatic = pending->pointer_hover = 1; pending->method = ED_LSP_HOVER; g_ptr_array_add(language_requests, pending); }
+            if (id) { struct language_request_ui *pending = g_new0(struct language_request_ui, 1); pending->server = hover->server; pending->id = id; pending->doc = hover->doc; pending->cursor = language_hover_offset; pending->automatic = pending->pointer_hover = 1; pending->method = ED_LSP_HOVER; g_ptr_array_add(language_requests, pending); language_tick_changed = 1; }
         }
         language_hover_doc = NULL;
     }
 }
 static void language_hover_at(struct doc *d, size_t at)
 {
-    if (!language_auto_hover || (language_hover_doc == d && language_hover_offset == at)) return;
+    if (!language_auto_hover || !language_servers || !language_servers->len ||
+        (language_hover_doc == d && language_hover_offset == at)) return;
     language_hover_doc = d; language_hover_offset = at; language_hover_due = now() + 0.6;
 }
 static void language_hover_cancel(void)

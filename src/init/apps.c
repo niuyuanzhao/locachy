@@ -16,8 +16,13 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/vfs.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#ifndef CGROUP2_SUPER_MAGIC
+#define CGROUP2_SUPER_MAGIC 0x63677270
+#endif
 
 #include "base.h"
 #include "apps.h"
@@ -83,23 +88,25 @@ enum { TARGET_NONE, TARGET_FILE, TARGET_FOLDER, TARGET_PAGE };
 
 struct native_program {
     const char *program, *title, *binary, *argument; /* argument: fixed (the mixer's command) */
-    int single; /* one window: another request raises it (and changes its page) */
+    int single;   /* one window: another request raises it (and changes its page) */
     int target;
+    int floating; /* centered always-on-top overlay (wlr-layer-shell on Wayland); second request toggles closed */
 };
 
 static const struct native_program natives[] = {
-    { "view", "View", APP_NATIVE_DIR "/view", NULL, 0, TARGET_FILE },
-    { "edit", "Edit", APP_NATIVE_DIR "/edit", NULL, 0, TARGET_FILE },
-    { "archive", "Archive", APP_NATIVE_DIR "/archive", NULL, 0, TARGET_FILE },
-    { "files", "Files", APP_NATIVE_DIR "/files", NULL, 0, TARGET_FOLDER },
-    { "settings", "Settings", APP_NATIVE_DIR "/settings", NULL, 1, TARGET_PAGE },
-    { "packages", "Packages", APP_NATIVE_DIR "/packages", NULL, 1, TARGET_NONE },
-    { "firmware", "Firmware", APP_NATIVE_DIR "/firmware", NULL, 1, TARGET_NONE },
-    { "mixer", "Mixer", APP_NATIVE_DIR "/term", APP_MIXER_COMMAND, 1, TARGET_NONE },
-    { "bluetooth", "Bluetooth", APP_NATIVE_DIR "/term", APP_BLUETOOTH_COMMAND, 1, TARGET_NONE },
-    { "network", "Network", APP_NATIVE_DIR "/term", APP_NETWORK_COMMAND, 1, TARGET_NONE },
-    { "term", "Terminal", APP_NATIVE_DIR "/term", APP_TERM_COMMAND, 0, TARGET_NONE },
-    { "extdisplay", "Extended display", APP_NATIVE_DIR "/extdisplay", NULL, 1, TARGET_NONE },
+    { "view", "View", APP_NATIVE_DIR "/view", NULL, 0, TARGET_FILE, 0 },
+    { "edit", "Edit", APP_NATIVE_DIR "/edit", NULL, 0, TARGET_FILE, 0 },
+    { "archive", "Archive", APP_NATIVE_DIR "/archive", NULL, 0, TARGET_FILE, 0 },
+    { "files", "Files", APP_NATIVE_DIR "/files", NULL, 0, TARGET_FOLDER, 0 },
+    { "settings", "Settings", APP_NATIVE_DIR "/settings", NULL, 1, TARGET_PAGE, 0 },
+    { "packages", "Packages", APP_NATIVE_DIR "/packages", NULL, 1, TARGET_NONE, 0 },
+    { "firmware", "Firmware", APP_NATIVE_DIR "/firmware", NULL, 1, TARGET_NONE, 0 },
+    { "mixer", "Mixer", APP_NATIVE_DIR "/term", APP_MIXER_COMMAND, 1, TARGET_NONE, 0 },
+    { "bluetooth", "Bluetooth", APP_NATIVE_DIR "/term", APP_BLUETOOTH_COMMAND, 1, TARGET_NONE, 0 },
+    { "network", "Network", APP_NATIVE_DIR "/term", APP_NETWORK_COMMAND, 1, TARGET_NONE, 0 },
+    { "term", "Terminal", APP_NATIVE_DIR "/term", APP_TERM_COMMAND, 0, TARGET_NONE, 0 },
+    { "search", "Search", APP_NATIVE_DIR "/search", NULL, 1, TARGET_NONE, 1 },
+    { "extdisplay", "Extended display", APP_NATIVE_DIR "/extdisplay", NULL, 1, TARGET_NONE, 0 },
 };
 
 static const char *const settings_pages[] = { "network", "power", "devices", "date-time", "hardware" };
@@ -108,7 +115,7 @@ struct app {
     char name[64];
     pid_t launcher, job;
     unsigned long long generation, launcher_generation, job_generation;
-    int want_start, own_tor, cancelling;
+    int want_start, own_tor, cancelling, conf_missing;
     char pending[16], error[240];
     char target[1024]; /* to open when it has started (apps_open) */
     double deadline;
@@ -278,6 +285,7 @@ static void owner_read(int i)
 
 void apps_sessions_revoke(const char *cgroup)
 {
+    int pending = 0;
     for (int i = 0; i < MAX_OWNERS; i++) {
         struct session_owner *o = &owners[i];
         if (!o->used || (cgroup && strcmp(cgroup, o->cgroup))) continue;
@@ -285,11 +293,34 @@ void apps_sessions_revoke(const char *cgroup)
         o->revoking = 1;
         o->epoch++;
         owner_policy(o);
-        double until = uptime() + .25;
-        while (o->used && o->revoking && uptime() < until) {
-            struct pollfd p = { .fd = o->fd, .events = POLLIN };
-            if (poll(&p, 1, 10) > 0) owner_read(i);
+        pending = 1;
+    }
+    if (!pending) return;
+    double until = uptime() + .25;
+    for (;;) {
+        struct pollfd p[MAX_OWNERS];
+        int idx[MAX_OWNERS];
+        int n = 0;
+        for (int i = 0; i < MAX_OWNERS; i++) {
+            if (owners[i].used && owners[i].revoking) {
+                p[n] = (struct pollfd){ .fd = owners[i].fd, .events = POLLIN };
+                idx[n++] = i;
+            }
         }
+        if (n == 0) return;
+        double left_s = until - uptime();
+        if (left_s <= 0) break;
+        int ms = (int)(left_s * 1000.0) + 1;
+        if (ms > 250) ms = 250;
+        int r = poll(p, (nfds_t)n, ms);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) break;
+        for (int k = 0; k < n; k++) {
+            if (p[k].revents) owner_read(idx[k]);
+        }
+    }
+    for (int i = 0; i < MAX_OWNERS; i++) {
+        struct session_owner *o = &owners[i];
         if (o->used && o->revoking) {
             int kill = openat(o->directory, "cgroup.kill", O_WRONLY | O_CLOEXEC);
             if (kill >= 0) { (void)write(kill, "1", 1); close(kill); }
@@ -367,6 +398,111 @@ static struct app *lookup(const char *name)
 }
 
 static int populated(const struct app *app);
+static void app_cgroup_state(const struct app *app, int *is_populated, int *is_frozen);
+
+static int conf_watch_fd = -1;
+static int run_watch_fd = -1;
+static int conf_dirty = 1;
+static int conf_stat_valid;
+static ino_t conf_ino;
+static struct timespec conf_mtime, conf_ctime;
+static int cgroup2_real = -1;
+
+static int is_real_cgroup2(void)
+{
+    if (cgroup2_real < 0) {
+        struct statfs fs;
+        cgroup2_real = statfs(APP_CGROUP_ROOT, &fs) == 0 &&
+                       (unsigned long)fs.f_type == CGROUP2_SUPER_MAGIC;
+    }
+    return cgroup2_real;
+}
+
+static void conf_watch_arm(void)
+{
+    if (conf_watch_fd >= 0) {
+        close(conf_watch_fd);
+        conf_watch_fd = -1;
+    }
+    int fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    if (fd < 0) return;
+    if (inotify_add_watch(fd, APP_CONF, IN_ONLYDIR | IN_CREATE | IN_DELETE |
+                          IN_MOVED_FROM | IN_MOVED_TO | IN_CLOSE_WRITE | IN_ATTRIB |
+                          IN_DELETE_SELF | IN_MOVE_SELF) < 0) {
+        close(fd);
+        return;
+    }
+    conf_watch_fd = fd;
+}
+
+static void run_watch_arm(void)
+{
+    if (run_watch_fd >= 0) {
+        close(run_watch_fd);
+        run_watch_fd = -1;
+    }
+    int fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    if (fd < 0) return;
+    if (inotify_add_watch(fd, APP_RUN, IN_ONLYDIR | IN_CREATE | IN_DELETE |
+                          IN_MOVED_FROM | IN_MOVED_TO | IN_CLOSE_WRITE | IN_ATTRIB |
+                          IN_DELETE_SELF | IN_MOVE_SELF) < 0) {
+        close(fd);
+        return;
+    }
+    run_watch_fd = fd;
+}
+
+static void conf_watch_drain(void)
+{
+    if (conf_watch_fd < 0) return;
+    union { struct inotify_event align; char bytes[2048]; } buf;
+    int rearm = 0;
+    for (;;) {
+        ssize_t n = read(conf_watch_fd, buf.bytes, sizeof buf.bytes);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && errno == EAGAIN) break;
+        if (n <= 0) {
+            close(conf_watch_fd);
+            conf_watch_fd = -1;
+            conf_dirty = 1;
+            return;
+        }
+        conf_dirty = 1;
+        for (size_t i = 0; i < (size_t)n;) {
+            const struct inotify_event *e = (const void *)(buf.bytes + i);
+            if (e->mask & (IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED | IN_Q_OVERFLOW)) {
+                rearm = 1;
+            }
+            i += sizeof *e + e->len;
+        }
+    }
+    if (rearm) conf_watch_arm();
+}
+
+static void run_watch_drain(void)
+{
+    if (run_watch_fd < 0) return;
+    union { struct inotify_event align; char bytes[2048]; } buf;
+    int rearm = 0;
+    for (;;) {
+        ssize_t n = read(run_watch_fd, buf.bytes, sizeof buf.bytes);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && errno == EAGAIN) break;
+        if (n <= 0) {
+            close(run_watch_fd);
+            run_watch_fd = -1;
+            return;
+        }
+        for (size_t i = 0; i < (size_t)n;) {
+            const struct inotify_event *e = (const void *)(buf.bytes + i);
+            if (e->mask & (IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED | IN_Q_OVERFLOW)) {
+                rearm = 1;
+            }
+            i += sizeof *e + e->len;
+        }
+    }
+    if (rearm) run_watch_arm();
+}
 
 static void native_forget(struct app *app)
 {
@@ -383,12 +519,30 @@ static void native_forget(struct app *app)
 /* The containers there are: APP_CONF/NAME.conf. One whose configuration has
  * gone is forgotten once nothing of it runs. A native window has none: it is
  * forgotten once nothing of it runs, unless it failed (home shows why until
- * it is stopped). */
+ * it is stopped). Container config scans are cached via inotify + stat(). */
 static void discover(void)
 {
+    conf_watch_drain();
+    struct stat dir_st;
+    int has_dir = stat(APP_CONF, &dir_st) == 0 && S_ISDIR(dir_st.st_mode);
+    if (conf_watch_fd < 0) {
+        if (has_dir) {
+            conf_watch_arm();
+        }
+        /* Fallback when apps_init() was not called or inotify failed. */
+        if (!has_dir || !conf_stat_valid || dir_st.st_ino != conf_ino ||
+            dir_st.st_mtim.tv_sec != conf_mtime.tv_sec || dir_st.st_mtim.tv_nsec != conf_mtime.tv_nsec ||
+            dir_st.st_ctim.tv_sec != conf_ctime.tv_sec || dir_st.st_ctim.tv_nsec != conf_ctime.tv_nsec) {
+            conf_dirty = 1;
+        }
+    } else if (has_dir && (!conf_stat_valid || dir_st.st_ino != conf_ino)) {
+        conf_dirty = 1;
+        conf_watch_arm();
+    } else if (!has_dir && conf_stat_valid) {
+        conf_dirty = 1;
+    }
+
     for (int i = 0; i < count;) {
-        char path[256];
-        struct stat st;
         if (apps[i].native) {
             if (apps[i].launcher || apps[i].job || apps[i].want_start || apps[i].pending[0] ||
                 apps[i].error[0] || populated(&apps[i])) {
@@ -399,14 +553,38 @@ static void discover(void)
             }
             continue;
         }
+        if (!conf_dirty && !apps[i].conf_missing) {
+            i++;
+            continue;
+        }
+        char path[256];
+        struct stat st;
         snprintf(path, sizeof path, "%s/%s.conf", APP_CONF, apps[i].name);
-        if (stat(path, &st) == 0 || apps[i].launcher || apps[i].job || apps[i].want_start ||
+        if (stat(path, &st) == 0) {
+            apps[i].conf_missing = 0;
+            i++;
+            continue;
+        }
+        apps[i].conf_missing = 1;
+        if (apps[i].launcher || apps[i].job || apps[i].want_start ||
             apps[i].pending[0] || populated(&apps[i])) {
             i++;
             continue;
         }
         apps[i] = apps[--count];
     }
+    if (!conf_dirty) {
+        return;
+    }
+    if (has_dir) {
+        conf_ino = dir_st.st_ino;
+        conf_mtime = dir_st.st_mtim;
+        conf_ctime = dir_st.st_ctim;
+        conf_stat_valid = 1;
+    } else {
+        conf_stat_valid = 0;
+    }
+    conf_dirty = 0;
     DIR *dir = opendir(APP_CONF);
     struct dirent *entry;
     while (dir && (entry = readdir(dir)) != NULL) {
@@ -425,6 +603,8 @@ static void discover(void)
             continue;
         }
         memset(&apps[count], 0, sizeof apps[count]); /* a slot a forgotten entry left */
+        apps[count].ready_fd = apps[count].request_fd = -1;
+        apps[count].session_owner = -1;
         memcpy(apps[count++].name, name, sizeof name);
     }
     if (dir) {
@@ -434,36 +614,70 @@ static void discover(void)
 
 static long long number(const struct app *app, const char *file, const char *field)
 {
-    char path[192], line[128];
+    char path[192], buf[256];
     snprintf(path, sizeof path, APP_CGROUP_ROOT "/app_%.63s/%s", app->name, file);
-    FILE *in = fopen(path, "re");
-    if (!in) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
         return 0;
     }
-    long long result = 0;
-    while (fgets(line, sizeof line, in)) {
-        if (!field) {
-            result = atoll(line);
-            break;
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0) {
+        return 0;
+    }
+    buf[n] = '\0';
+    if (!field) {
+        return atoll(buf);
+    }
+    size_t flen = strlen(field);
+    for (char *line = buf; line && *line;) {
+        if (strncmp(line, field, flen) == 0 && line[flen] == ' ') {
+            return atoll(line + flen + 1);
         }
-        size_t n = strlen(field);
-        if (strncmp(line, field, n) == 0 && line[n] == ' ') {
-            result = atoll(line + n + 1);
-            break;
+        char *nl = strchr(line, '\n');
+        line = nl ? nl + 1 : NULL;
+    }
+    return 0;
+}
+
+static void app_cgroup_state(const struct app *app, int *is_populated, int *is_frozen)
+{
+    char path[192], buf[256];
+    int pop = 0, frz = 0;
+    snprintf(path, sizeof path, APP_CGROUP_ROOT "/app_%.63s/cgroup.events", app->name);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    ssize_t n = fd >= 0 ? read(fd, buf, sizeof buf - 1) : -1;
+    if (fd >= 0) {
+        close(fd);
+    }
+    if (n > 0) {
+        buf[n] = '\0';
+        for (char *line = buf; line && *line;) {
+            if (strncmp(line, "populated ", 10) == 0) {
+                pop = atoll(line + 10) != 0;
+            } else if (strncmp(line, "frozen ", 7) == 0) {
+                frz = atoll(line + 7) != 0;
+            }
+            char *nl = strchr(line, '\n');
+            line = nl ? nl + 1 : NULL;
         }
     }
-    fclose(in);
-    return result;
+    if (is_populated) *is_populated = pop;
+    if (is_frozen) *is_frozen = frz;
 }
 
 static int populated(const struct app *app)
 {
-    return number(app, "cgroup.events", "populated") != 0;
+    int pop = 0;
+    app_cgroup_state(app, &pop, NULL);
+    return pop;
 }
 
 static int frozen(const struct app *app)
 {
-    return number(app, "cgroup.events", "frozen") != 0;
+    int frz = 0;
+    app_cgroup_state(app, NULL, &frz);
+    return frz;
 }
 
 static int ready(const struct app *app)
@@ -558,6 +772,9 @@ void apps_init(void)
 {
     mkdir("/run/locachy", 0755);
     mkdir(APP_RUN, 0700);
+    conf_watch_arm();
+    run_watch_arm();
+    conf_dirty = 1;
     discover();
 }
 
@@ -569,6 +786,72 @@ static void write_value(const char *path, const char *value)
         }
         close(fd);
     }
+}
+
+/* Cancel any background memory.reclaim helper left by locachy-app freeze. */
+static void stop_app_reclaim(const struct app *app)
+{
+    char path[224], buf[32];
+    snprintf(path, sizeof path, APP_RUN "/%s/reclaim.pid", app->name);
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return;
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n > 0) {
+        buf[n] = '\0';
+        char *end = NULL;
+        long pid = strtol(buf, &end, 10);
+        if (pid > 1 && end != buf && (*end == '\0' || *end == '\n' || *end == '\r')) {
+            kill((pid_t)pid, SIGTERM);
+        }
+    }
+    unlink(path);
+}
+
+/* Thaw a frozen app cgroup directly without spawning locachy-app or busy-spinning.
+ * On real cgroup2, wait on inotify(cgroup.events) for the kernel's thaw event
+ * (usually <1 ms), bounded at 200 ms; on non-cgroup2 test fixtures, check once
+ * and return immediately without stalling. */
+static void app_thaw(const struct app *app)
+{
+    char path[200];
+    stop_app_reclaim(app);
+    int ev_watch = -1;
+    if (is_real_cgroup2()) {
+        ev_watch = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+        if (ev_watch >= 0) {
+            snprintf(path, sizeof path, APP_CGROUP_ROOT "/app_%.63s/cgroup.events", app->name);
+            if (inotify_add_watch(ev_watch, path, IN_MODIFY | IN_DELETE_SELF) < 0) {
+                close(ev_watch);
+                ev_watch = -1;
+            }
+        }
+    }
+    snprintf(path, sizeof path, APP_CGROUP_ROOT "/app_%.63s/cgroup.freeze", app->name);
+    write_value(path, "0");
+    if (!frozen(app) || !is_real_cgroup2()) {
+        if (ev_watch >= 0) close(ev_watch);
+        return;
+    }
+    double until = uptime() + 0.2;
+    while (frozen(app)) {
+        double left_s = until - uptime();
+        if (left_s <= 0) break;
+        int ms = (int)(left_s * 1000.0) + 1;
+        if (ev_watch >= 0) {
+            struct pollfd p = { .fd = ev_watch, .events = POLLIN };
+            int r = poll(&p, 1, ms > 50 ? 50 : ms);
+            if (r > 0) {
+                char buf[512];
+                while (read(ev_watch, buf, sizeof buf) > 0) {}
+            } else if (r < 0 && errno != EINTR) {
+                break;
+            }
+        } else {
+            usleep(1000);
+        }
+    }
+    if (ev_watch >= 0) close(ev_watch);
 }
 
 /* Everything left of a native window ends (cgroup.kill: also descendants in
@@ -657,6 +940,8 @@ static pid_t launch_native(struct app *app)
         setenv("WAYLAND_DISPLAY", APP_WAYLAND_SOCKET, 1);
         setenv("LOCACHY_WINDOW_TITLE", p->title, 1);
         setenv("LOCACHY_WINDOW_APP_ID", app->name, 1);
+        if (p->floating) setenv("LOCACHY_WINDOW_FLOATING", "1", 1);
+        else unsetenv("LOCACHY_WINDOW_FLOATING");
         setenv("LOCACHY_WINDOW_READY_FD", ready_number, 1);
         setenv("LOCACHY_REQUEST_FD", request_number, 1);
         char page[64];
@@ -701,7 +986,7 @@ static void native_tick(struct app *app)
     if (app->ready_fd >= 0) {
         char byte;
         ssize_t n = read(app->ready_fd, &byte, 1);
-        if (n >= 0) { /* the byte, or its end without one */
+        if (n >= 0 || (errno != EAGAIN && errno != EINTR)) { /* the byte, EOF, or fatal fd error */
             close(app->ready_fd);
             app->ready_fd = -1;
             if (n > 0) {
@@ -724,6 +1009,8 @@ static void native_tick(struct app *app)
 
 void apps_tick(void)
 {
+    conf_watch_drain();
+    run_watch_drain();
     for (int i = 0; i < count; i++) {
         struct app *app = &apps[i];
         if (app->cancelling) {
@@ -807,6 +1094,60 @@ int apps_busy(void)
         }
     }
     return 0;
+}
+
+int apps_poll_fds(struct pollfd *p, int max)
+{
+    int n = 0;
+    if (conf_watch_fd >= 0 && n < max) {
+        p[n++] = (struct pollfd){ .fd = conf_watch_fd, .events = POLLIN };
+    }
+    if (run_watch_fd >= 0 && n < max) {
+        p[n++] = (struct pollfd){ .fd = run_watch_fd, .events = POLLIN };
+    }
+    for (int i = 0; i < count && n < max; i++) {
+        if (apps[i].native && apps[i].ready_fd >= 0) {
+            p[n++] = (struct pollfd){ .fd = apps[i].ready_fd, .events = POLLIN };
+        }
+    }
+    return n;
+}
+
+/* Milliseconds until the next app deadline, or -1 if purely event-driven.
+ * When APP_RUN inotify is unavailable, falls back to 100 ms while a container
+ * is starting so NAME.ready is still observed promptly. */
+int apps_wait_ms(void)
+{
+    double soonest = -1;
+    int poll_fallback = 0;
+    for (int i = 0; i < count; i++) {
+        const struct app *app = &apps[i];
+        int busy = app->want_start || app->pending[0] || app->job > 0;
+        if (!busy) {
+            continue; /* a stale deadline of an idle app must never shorten the wait */
+        }
+        if (app->deadline > 0 && (soonest < 0 || app->deadline < soonest)) {
+            soonest = app->deadline;
+        }
+        if (!app->native && run_watch_fd < 0 && strcmp(app->pending, "starting") == 0) {
+            poll_fallback = 1;
+        }
+        if (strcmp(app->pending, "stopping") == 0 && app->job == 0 && app->launcher == 0) {
+            poll_fallback = 1;
+        }
+    }
+    int ms = -1;
+    if (soonest > 0) {
+        double left = (soonest - uptime()) * 1000.0;
+        /* A passed deadline that apps_tick has not cleared yet (a cancelling
+         * application waiting for its launcher, say) is looked at again in
+         * 100 ms, as before: never a zero timeout, which would spin. */
+        ms = left > 0 ? (int)left + 1 : 100;
+    }
+    if (poll_fallback && (ms < 0 || ms > 100)) {
+        ms = 100;
+    }
+    return ms;
 }
 
 static int app_cgroup_name(const char *name)
@@ -909,8 +1250,10 @@ int apps_display_state(void)
         if (app->want_start || app->job > 0 || app->pending[0]) {
             return APPS_DISPLAY_ACTIVE;
         }
-        if (populated(app)) {
-            if (!frozen(app)) {
+        int pop = 0, frz = 0;
+        app_cgroup_state(app, &pop, &frz);
+        if (pop) {
+            if (!frz) {
                 return APPS_DISPLAY_ACTIVE;
             }
             any_frozen = 1;
@@ -919,7 +1262,7 @@ int apps_display_state(void)
     return any_frozen ? APPS_DISPLAY_FROZEN : APPS_DISPLAY_STOPPED;
 }
 
-static const char *state(const struct app *app)
+static const char *state_of_flags(const struct app *app, int pop, int frz)
 {
     if (app->pending[0]) {
         return app->pending;
@@ -927,7 +1270,7 @@ static const char *state(const struct app *app)
     if (app->error[0]) {
         return "failed";
     }
-    return populated(app) ? (frozen(app) ? "frozen" : "running") : "closed";
+    return pop ? (frz ? "frozen" : "running") : "closed";
 }
 
 void apps_list(char *buf, size_t size)
@@ -941,10 +1284,13 @@ void apps_list(char *buf, size_t size)
     size_t used = 0;
     for (int i = 0; i < count; i++) {
         struct app *app = &apps[i];
+        int pop = 0, frz = 0;
+        app_cgroup_state(app, &pop, &frz);
+        long long mem = pop ? number(app, "memory.current", NULL) : 0;
+        long long swap = pop ? number(app, "memory.swap.current", NULL) : 0;
         char row[480];
         int n = snprintf(row, sizeof row, "%s\t%s\t%lld\t%lld\t%s\n",
-                         app->name, state(app), number(app, "memory.current", NULL),
-                         number(app, "memory.swap.current", NULL), app->error);
+                         app->name, state_of_flags(app, pop, frz), mem, swap, app->error);
         if (n < 0 || (size_t)n >= sizeof row || (size_t)n >= size - used) {
             break;
         }
@@ -1105,21 +1451,27 @@ static pid_t native_job(struct app *app, const char *action)
 static int native_action(struct app *app, const char *action, char *why, size_t size)
 {
     char path[192];
-    int exists = populated(app) || app->launcher;
+    int pop = 0, frz = 0;
+    app_cgroup_state(app, &pop, &frz);
+    int exists = pop || app->launcher;
     if (strcmp(action, "open") == 0 || strcmp(action, "show") == 0 || strcmp(action, "resume") == 0) {
         if (app->pending[0] || app->cancelling) {
             snprintf(why, size, "window operation still in progress");
             return -1;
         }
         if (exists) {
-            if (frozen(app)) {
-                snprintf(path, sizeof path, APP_CGROUP_ROOT "/app_%.63s/cgroup.freeze", app->name);
-                write_value(path, "0");
-                for (int i = 0; i < 200 && frozen(app); i++) {
-                    usleep(1000);
-                }
+            if (frz) {
+                app_thaw(app);
             }
             if (strcmp(action, "resume") == 0) {
+                if (is_real_cgroup2()) {
+                    int now_pop = 0, now_frz = 0;
+                    app_cgroup_state(app, &now_pop, &now_frz);
+                    if (now_frz || !now_pop) {
+                        snprintf(why, size, now_frz ? "window failed to thaw" : "window exited while resuming");
+                        return -1;
+                    }
+                }
                 snprintf(why, size, "resume accepted");
                 return 0;
             }
@@ -1292,6 +1644,14 @@ int apps_window_open(const char *program, const char *target, char *why, size_t 
         windows += apps[i].native != NULL;
     }
     if (app && p->single) {
+        if (p->floating) {
+            /* A centered overlay is already on top: a second shortcut toggles it closed. */
+            if (app->launcher != 0 && app->request_fd >= 0 && write(app->request_fd, "close\n", 6) == 6) {
+                snprintf(why, size, "%s closed", p->program);
+                return 0;
+            }
+            return native_action(app, "stop", why, size);
+        }
         if (target[0] && p->target == TARGET_PAGE) {
             if (app->launcher == 0 || app->request_fd < 0) {
                 snprintf(why, size, "%s is still starting", p->program);
@@ -1374,18 +1734,11 @@ int apps_action(const char *action, const char *name, char *why, size_t size)
             snprintf(why, size, "open accepted");
             return 0;
         }
-        if (populated(app)) {
-            if (frozen(app)) {
-                char fpath[192];
-                snprintf(fpath, sizeof fpath, APP_CGROUP_ROOT "/app_%.63s/cgroup.freeze", app->name);
-                int ffd = open(fpath, O_WRONLY | O_CLOEXEC);
-                if (ffd >= 0) {
-                    (void)write(ffd, "0\n", 2);
-                    close(ffd);
-                }
-                for (int i = 0; i < 200 && frozen(app); i++) {
-                    usleep(1000);
-                }
+        int pop = 0, frz = 0;
+        app_cgroup_state(app, &pop, &frz);
+        if (pop) {
+            if (frz) {
+                app_thaw(app);
             }
             /* The display comes to the front either way; say what happened. */
             if (show_window(app, why, size) != 0) {
@@ -1402,21 +1755,14 @@ int apps_action(const char *action, const char *name, char *why, size_t size)
         action = "start";
     }
     if (strcmp(action, "show") == 0) {
-        if (!populated(app)) {
+        int pop = 0, frz = 0;
+        app_cgroup_state(app, &pop, &frz);
+        if (!pop) {
             snprintf(why, size, "container is closed");
             return -1;
         }
-        if (frozen(app)) {
-            char fpath[192];
-            snprintf(fpath, sizeof fpath, APP_CGROUP_ROOT "/app_%.63s/cgroup.freeze", app->name);
-            int ffd = open(fpath, O_WRONLY | O_CLOEXEC);
-            if (ffd >= 0) {
-                (void)write(ffd, "0\n", 2);
-                close(ffd);
-            }
-            for (int i = 0; i < 200 && frozen(app); i++) {
-                usleep(1000);
-            }
+        if (frz) {
+            app_thaw(app);
         }
         return show_window(app, why, size);
     }
@@ -1425,7 +1771,9 @@ int apps_action(const char *action, const char *name, char *why, size_t size)
         snprintf(why, size, "unknown container action");
         return -1;
     }
-    int outside = launcher_outside(app);
+    int exists = 0, frz = 0;
+    app_cgroup_state(app, &exists, &frz);
+    int outside = app->launcher > 0 && !exists;
     if (strcmp(action, "stop") == 0 && (app->want_start || app->job || app->pending[0] || outside)) {
         if (strcmp(app->pending, "stopping") == 0) {
             snprintf(why, size, "stop already in progress");
@@ -1439,14 +1787,32 @@ int apps_action(const char *action, const char *name, char *why, size_t size)
         snprintf(why, size, "container operation still in progress");
         return -1;
     }
-    int exists = populated(app);
     if (strcmp(action, "start") == 0 && exists) {
         action = "resume";
         own_tor = 0;
     }
-    if (strcmp(action, "resume") == 0 && !exists) {
-        snprintf(why, size, "container is not running");
-        return -1;
+    if (strcmp(action, "resume") == 0) {
+        if (!exists) {
+            snprintf(why, size, "container is not running");
+            return -1;
+        }
+        /* Fast path on real cgroup2: thaw directly without spawning locachy-app,
+         * but report success only after verifying !frozen && populated. If that
+         * check fails (e.g. still frozen or exited), fall through to locachy-app
+         * resume so the asynchronous job reports the exact error. On non-cgroup2
+         * test fixtures, always delegate to APP_TOOL. */
+        if (is_real_cgroup2()) {
+            if (frz) {
+                app_thaw(app);
+            }
+            int now_pop = 0, now_frz = 0;
+            app_cgroup_state(app, &now_pop, &now_frz);
+            if (!now_frz && now_pop) {
+                app->error[0] = '\0';
+                snprintf(why, size, "resume accepted");
+                return 0;
+            }
+        }
     }
     if ((strcmp(action, "stop") == 0 || strcmp(action, "freeze") == 0) && !exists) {
         if (strcmp(action, "stop") == 0) {

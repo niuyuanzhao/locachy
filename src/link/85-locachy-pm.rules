@@ -1,0 +1,36 @@
+# LOCachy preset (/usr/local/lib/udev/rules.d): laptop runtime power management
+# and SATA link power management. Override with a file of the same name in
+# /etc/udev/rules.d, or disable with a symlink to /dev/null there.
+#
+# Conservative defaults: anything input, audio, video, wireless or printing
+# stays always on (see below). Verify on the machine after install:
+#   grep -r . /sys/bus/usb/devices/*/power/control
+
+# PCI runtime power management. Display controllers keep their driver's own
+# policy; communication controllers (Intel MEI, serial ports) are left alone,
+# because MEI misbehaves under runtime PM.
+ACTION=="add", SUBSYSTEM=="pci", TEST=="power/control", ATTR{class}!="0x03*", ATTR{class}!="0x07*", ATTR{power/control}="auto"
+
+# USB autosuspend for devices, then their interfaces decide. A device with an
+# interface of a class below is kept on (power/control "on" on the parent):
+#   03 HID: keyboards, pointers, touch, styluses
+#   01 audio, 0e video: no pops, no delayed camera start (face unlock)
+#   e0 wireless and Bluetooth, 02 and 0a CDC modems and network, 07 printers:
+#      the classes TLP excludes by default
+# udev does not order events of different devices, so the interface rules
+# also run on "bind": a driver attaching re-applies the parent's setting.
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", TEST=="power/control", ATTR{bDeviceClass}!="03", ATTR{bDeviceClass}!="e0", ATTR{power/control}="auto"
+ACTION=="add|bind", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTR{bInterfaceClass}=="03", TEST=="../power/control", ATTR{../power/control}="on"
+ACTION=="add|bind", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTR{bInterfaceClass}=="01", TEST=="../power/control", ATTR{../power/control}="on"
+ACTION=="add|bind", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTR{bInterfaceClass}=="0e", TEST=="../power/control", ATTR{../power/control}="on"
+ACTION=="add|bind", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTR{bInterfaceClass}=="e0", TEST=="../power/control", ATTR{../power/control}="on"
+ACTION=="add|bind", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTR{bInterfaceClass}=="02", TEST=="../power/control", ATTR{../power/control}="on"
+ACTION=="add|bind", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTR{bInterfaceClass}=="0a", TEST=="../power/control", ATTR{../power/control}="on"
+ACTION=="add|bind", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTR{bInterfaceClass}=="07", TEST=="../power/control", ATTR{../power/control}="on"
+ACTION=="add|bind", SUBSYSTEM=="hid", SUBSYSTEMS=="usb", ATTRS{bInterfaceClass}=="03", TEST=="../../power/control", ATTR{../../power/control}="on"
+
+# I2C devices are left alone: touch controllers and pens sit there.
+
+# SATA link power management: med_power only. The DIPM variant saves a little
+# more and is the usual source of I/O stalls on some SSDs, which felt as lag.
+ACTION=="add", SUBSYSTEM=="scsi_host", KERNEL=="host*", TEST=="link_power_management_policy", ATTR{link_power_management_policy}="med_power"

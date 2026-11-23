@@ -400,10 +400,26 @@ struct pix {
     int w, h;
     uint32_t *px;
     size_t size;
+    uint32_t *recol_px;       /* the picture with the colour mode applied, for recol_gen */
+    size_t recol_size;
+    uint64_t recol_gen;
 };
 static struct pix *cache;
 static int ncache;
+static uint64_t cache_used_bytes; /* the pictures' bytes, the recoloured copies too */
 static uint64_t ticks, frame_start;
+/* Bumped when a colour setting changes: the recoloured copies are made again. */
+static uint64_t color_gen = 1;
+static struct {
+    int valid, invert, render_mode, bw_threshold, bw_contrast;
+    uint32_t recolor_fg, recolor_bg;
+} color_sig;
+/* Prefix sums of the sidebar thumbnails' vertical offsets (pages + 1 entries). */
+static long long *thumb_y;
+static int thumb_y_cap, thumb_y_valid;
+static int thumb_y_pages, thumb_y_rotate, thumb_y_w, thumb_y_ch;
+static int *scaled_sx_lut;
+static int scaled_sx_cap;
 
 static struct {
     int active;               /* rects to show */
@@ -851,13 +867,19 @@ static int pix_find(int kind, int page, int rotate, float zoom, int tx, int ty)
 
 static void pix_drop(int i)
 {
-    if (cache[i].used && cache[i].px) munmap(cache[i].px, cache[i].size);
+    if (cache[i].used) {
+        if (cache[i].px) munmap(cache[i].px, cache[i].size);
+        free(cache[i].recol_px);
+        uint64_t bytes = (uint64_t)cache[i].size + (uint64_t)cache[i].recol_size;
+        cache_used_bytes = cache_used_bytes >= bytes ? cache_used_bytes - bytes : 0;
+    }
     memset(&cache[i], 0, sizeof cache[i]);
 }
 
 static void pix_flush(void)
 {
     for (int i = 0; i < ncache; i++) pix_drop(i);
+    cache_used_bytes = 0;
 }
 
 static uint64_t pix_bytes(int w, int h)
@@ -865,18 +887,35 @@ static uint64_t pix_bytes(int w, int h)
     return (uint64_t)w * (uint64_t)h * 4;
 }
 
+static void pix_drop_recolored_before(uint64_t keep)
+{
+    for (int i = 0; i < ncache; i++) {
+        if (!cache[i].used || !cache[i].recol_px || cache[i].used >= keep) continue;
+        free(cache[i].recol_px);
+        cache_used_bytes = cache_used_bytes >= cache[i].recol_size ? cache_used_bytes - cache[i].recol_size : 0;
+        cache[i].recol_px = NULL;
+        cache[i].recol_size = 0;
+        cache[i].recol_gen = 0;
+    }
+}
+
 /* Room for need bytes, dropping the least recently used, never what the
- * screen shows (or anything when keep is 0): 0, or -1 if there is none. */
+ * screen shows (or anything when keep is 0): 0, or -1 if there is none.
+ * The recoloured copies of what is not shown go first: they are made again
+ * without asking view-render. */
 static int pix_room(uint64_t need, uint64_t keep, int apply)
 {
+    if (need <= CACHE_LIMIT && cache_used_bytes <= CACHE_LIMIT - need) return 0;
     struct vl_lru *e = calloc((size_t)ncache + 1, sizeof *e);
     int *out = calloc((size_t)ncache + 1, sizeof *out);
     int n = -1;
     if (e && out) {
         for (int i = 0; i < ncache; i++) {
-            e[i] = (struct vl_lru){ cache[i].used ? cache[i].size : 0, cache[i].used };
+            uint64_t bytes = cache[i].size + (cache[i].used >= keep ? cache[i].recol_size : 0);
+            e[i] = (struct vl_lru){ cache[i].used ? bytes : 0, cache[i].used };
         }
         n = vl_evict(e, ncache, CACHE_LIMIT, need, keep, out);
+        if (apply && n >= 0) pix_drop_recolored_before(keep);
         for (int k = 0; apply && k < n; k++) pix_drop(out[k]);
     }
     free(e);
@@ -913,7 +952,9 @@ static int pix_add(int kind, int page, int rotate, float zoom, int tx, int ty, i
         slot = ncache;
         ncache += 16;
     }
-    cache[slot] = (struct pix){ ++ticks, kind, page, rotate, tx, ty, zoom, w, h, px, size };
+    cache[slot] = (struct pix){ .used = ++ticks, .kind = kind, .page = page, .rotate = rotate,
+        .tx = tx, .ty = ty, .zoom = zoom, .w = w, .h = h, .px = px, .size = size };
+    cache_used_bytes += size;
     return 0;
 }
 
@@ -1041,13 +1082,73 @@ static int thumbs_y0(void)
     return top + 3 * ch;
 }
 
+static void thumb_y_invalidate(void)
+{
+    thumb_y_valid = 0;
+}
+
+/* Rebuild the O(1) prefix-sum table of thumbnail offsets when doc/geometry/rotate changed. */
+static void thumb_y_ensure(void)
+{
+    int tw = thumb_width();
+    if (thumb_y_valid && thumb_y_pages == doc.pages && thumb_y_rotate == v.rotate &&
+        thumb_y_w == tw && thumb_y_ch == ch) {
+        return;
+    }
+    if (doc.pages + 1 > thumb_y_cap) {
+        int cap = doc.pages + 64;
+        long long *p = realloc(thumb_y, sizeof *p * (size_t)cap);
+        if (!p) {
+            thumb_y_valid = 0;
+            return;
+        }
+        thumb_y = p;
+        thumb_y_cap = cap;
+    }
+    thumb_y[0] = 0;
+    for (int i = 0; i < doc.pages; i++) {
+        thumb_y[i + 1] = thumb_y[i] + thumb_entry(i);
+    }
+    thumb_y_pages = doc.pages;
+    thumb_y_rotate = v.rotate;
+    thumb_y_w = tw;
+    thumb_y_ch = ch;
+    thumb_y_valid = 1;
+}
+
+/* First page whose thumbnail bottom is > top_y (binary search over thumb_y). */
+static int thumb_first_at(long long top_y)
+{
+    thumb_y_ensure();
+    if (!thumb_y_valid || doc.pages <= 0 || top_y <= 0) return 0;
+    int lo = 0, hi = doc.pages;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (thumb_y[mid + 1] <= top_y) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
 /* Is page i's thumbnail in sight: 1, and where (in the list's pixels). */
 static int thumb_seen(int i, int *y)
 {
-    int at = 0;
-    for (int k = 0; k < i; k++) at += thumb_entry(k);
-    *y = at;
-    return at + thumb_entry(i) > ui.thumb_top && at < ui.thumb_top + (H - thumbs_y0());
+    if (i < 0 || i >= doc.pages) {
+        *y = 0;
+        return 0;
+    }
+    thumb_y_ensure();
+    long long at, end;
+    if (thumb_y_valid) {
+        at = thumb_y[i];
+        end = thumb_y[i + 1];
+    } else {
+        at = 0;
+        for (int k = 0; k < i; k++) at += thumb_entry(k);
+        end = at + thumb_entry(i);
+    }
+    *y = at > INT_MAX ? INT_MAX : (int)at;
+    return end > ui.thumb_top && at < (long long)ui.thumb_top + (H - thumbs_y0());
 }
 
 static int thumbs_shown(void)
@@ -1237,25 +1338,34 @@ static int background(struct job *j)
     for (int k = nvis; k < nprio; k++) {
         if (need_piece(prio[k], 0, j)) return 1;
     }
-    for (int i = 0, y = 0, e = 0; thumbs_shown() && i < doc.pages; i++, y += e) {
-        e = thumb_entry(i);
-        if (y > ui.thumb_top + H) break;
-        if (y + e <= ui.thumb_top) continue;
-        struct page *pg = &doc.page[i];
-        if (!pg->known) {
-            if (pg->asked) continue;
-            *j = page_job(i);
+    if (thumbs_shown()) {
+        int i0 = thumb_first_at(ui.thumb_top);
+        thumb_y_ensure();
+        long long y = thumb_y_valid ? thumb_y[i0] : 0;
+        for (int i = i0; i < doc.pages; i++) {
+            int e = thumb_y_valid ? (int)(thumb_y[i + 1] - thumb_y[i]) : thumb_entry(i);
+            if (y > (long long)ui.thumb_top + H) break;
+            if (y + e <= ui.thumb_top) {
+                y += e;
+                continue;
+            }
+            struct page *pg = &doc.page[i];
+            if (!pg->known) {
+                if (pg->asked) { y += e; continue; }
+                *j = page_job(i);
+                return 1;
+            }
+            int w, h;
+            double z;
+            thumb_size(i, &w, &h, &z);
+            if (pg->failed || pix_find(1, i, v.rotate, (float)z, -1, -1) >= 0 ||
+                pix_room(pix_bytes(w, h), frame_start, 0) < 0) {
+                y += e;
+                continue;
+            }
+            render_job(j, J_THUMB, i, (float)z, -1, -1);
             return 1;
         }
-        int w, h;
-        double z;
-        thumb_size(i, &w, &h, &z);
-        if (pg->failed || pix_find(1, i, v.rotate, (float)z, -1, -1) >= 0 ||
-            pix_room(pix_bytes(w, h), frame_start, 0) < 0) {
-            continue;
-        }
-        render_job(j, J_THUMB, i, (float)z, -1, -1);
-        return 1;
     }
     /* The Information panel's page. */
     if (side_cols && ui.tab == TAB_INFO && gal_info_able() && !gal.info_asked && gal.info_page != current_page()) {
@@ -1687,6 +1797,7 @@ static void free_pages(void)
     doc.pw = doc.ph = NULL;
     doc.item = NULL;
     doc.pages = 0;
+    thumb_y_invalidate();
 }
 
 static int alloc_pages(int pages)
@@ -1711,6 +1822,7 @@ static int alloc_pages(int pages)
         doc.pw[i] = reflowed ? doc.lw : 612; /* US Letter until the first page's size comes */
         doc.ph[i] = reflowed ? doc.lh : 792;
     }
+    thumb_y_invalidate();
     return 0;
 }
 
@@ -2275,6 +2387,7 @@ static void page_size(const struct job *j, const struct view_reply *rep)
             doc.ph[i] = rep->ph;
         }
     }
+    thumb_y_invalidate();
     layout();
     anchor_keep(&a);
     compute_prio();
@@ -2749,6 +2862,67 @@ static int colors_changed(void)
     return settings.invert && settings.render_mode != CM_PAPER;
 }
 
+static uint64_t color_generation(void)
+{
+    if (!color_sig.valid ||
+        color_sig.invert != settings.invert ||
+        color_sig.render_mode != settings.render_mode ||
+        color_sig.bw_threshold != settings.bw_threshold ||
+        color_sig.bw_contrast != settings.bw_contrast ||
+        color_sig.recolor_fg != settings.recolor_fg ||
+        color_sig.recolor_bg != settings.recolor_bg) {
+        color_gen++;
+        color_sig.valid = 1;
+        color_sig.invert = settings.invert;
+        color_sig.render_mode = settings.render_mode;
+        color_sig.bw_threshold = settings.bw_threshold;
+        color_sig.bw_contrast = settings.bw_contrast;
+        color_sig.recolor_fg = settings.recolor_fg;
+        color_sig.recolor_bg = settings.recolor_bg;
+    }
+    return color_gen;
+}
+
+static void pix_drop_recolored(void)
+{
+    pix_drop_recolored_before(UINT64_MAX);
+}
+
+/* Return a cached recolored buffer for slot c under the current color_gen,
+ * computing it once per (slot, color_gen). Drawing never evicts: the copy is
+ * counted in cache_used_bytes and the next pix_room() drops copies that are
+ * no longer shown. Falls back to NULL on OOM. */
+static const uint32_t *pix_recolored(int slot)
+{
+    struct pix *c = &cache[slot];
+    uint64_t gen = color_generation();
+    if (c->recol_px && c->recol_gen == gen) {
+        return c->recol_px;
+    }
+    size_t npix = (size_t)c->w * (size_t)c->h;
+    size_t bytes = npix * sizeof(uint32_t);
+    if (!c->recol_px || c->recol_size < bytes) {
+        if (c->recol_px) {
+            free(c->recol_px);
+            cache_used_bytes = cache_used_bytes >= c->recol_size ? cache_used_bytes - c->recol_size : 0;
+            c->recol_px = NULL;
+            c->recol_size = 0;
+        }
+        uint32_t *buf = malloc(bytes);
+        if (!buf) return NULL;
+        c->recol_px = buf;
+        c->recol_size = bytes;
+        cache_used_bytes += bytes;
+    }
+    const uint32_t *src = c->px;
+    uint32_t *dst = c->recol_px;
+    for (size_t k = 0; k < npix; k++) {
+        dst[k] = recolor(src[k] & 0xFFFFFF);
+    }
+    c->recol_gen = gen;
+    return dst;
+}
+
 /* The paper a page is drawn on: Change Paper Color's, else white. */
 static uint32_t paper_rgb(void)
 {
@@ -2798,13 +2972,18 @@ static int clip_area(int *cx0, int *cy0, int *cx1, int *cy1)
 }
 
 /* Pixels src (sw by sh) with their top left at screen (X, Y), what of them
- * is inside the clip. */
+ * is inside the clip. When no colour pass, overlay, or capture is active, blit
+ * directly from src into the shadow buffer without copying through scratch. */
 static void put_pixels(const uint32_t *src, int sw, int sh, int X, int Y, int cx0, int cy0, int cx1, int cy1)
 {
     int x0 = X > cx0 ? X : cx0, y0 = Y > cy0 ? Y : cy0;
     int x1 = X + sw < cx1 ? X + sw : cx1, y1 = Y + sh < cy1 ? Y + sh : cy1;
     if (x0 >= x1 || y0 >= y1) return;
     int w = x1 - x0, h = y1 - y0;
+    if ((!colors_changed() || finish_plain) && novl == 0 && !capture.on) {
+        screen_blit(x0, y0, w, h, src + (size_t)(y0 - Y) * (size_t)sw + (size_t)(x0 - X), sw);
+        return;
+    }
     for (int r = 0; r < h; r++) {
         memcpy(scratch + (size_t)r * (size_t)w, src + (size_t)(y0 - Y + r) * (size_t)sw + (size_t)(x0 - X),
                sizeof *scratch * (size_t)w);
@@ -2812,11 +2991,34 @@ static void put_pixels(const uint32_t *src, int sw, int sh, int X, int Y, int cx
     finish(x0, y0, w, h);
 }
 
+/* Draw cached slot c directly: when colors_changed() is active, use the slot's
+ * cached recolored pixmap so recolor() runs once per color mode rather than on
+ * every scroll frame. */
+static void put_cached(int slot, int X, int Y, int cx0, int cy0, int cx1, int cy1)
+{
+    cache[slot].used = ++ticks;
+    if (colors_changed() && !finish_plain) {
+        const uint32_t *recol = pix_recolored(slot);
+        if (recol) {
+            finish_plain = 1;
+            put_pixels(recol, cache[slot].w, cache[slot].h, X, Y, cx0, cy0, cx1, cy1);
+            finish_plain = 0;
+            return;
+        }
+    }
+    put_pixels(cache[slot].px, cache[slot].w, cache[slot].h, X, Y, cx0, cy0, cx1, cy1);
+}
+
 static void put_paper(int cx0, int cy0, int cx1, int cy1)
 {
     int w = cx1 - cx0, h = cy1 - cy0;
     if (w <= 0 || h <= 0) return;
     uint32_t paper = paper_rgb();
+    if (novl == 0 && !capture.on) {
+        uint32_t fill = (colors_changed() && !finish_plain) ? recolor(paper & 0xFFFFFF) : paper;
+        screen_fill_px(cx0, cy0, w, h, fill);
+        return;
+    }
     for (size_t k = 0; k < (size_t)w * (size_t)h; k++) scratch[k] = paper;
     finish(cx0, cy0, w, h);
 }
@@ -2840,18 +3042,59 @@ static int put_scaled(int i, int X, int Y, int iw, int ih, int cx0, int cy0, int
     struct vl_crop crop = { 0, 0, 1, 1 };
     if (X >= ax && c->kind == 1) crop = doc.crop[i];
     int w = cx1 - cx0, h = cy1 - cy0;
-    for (int r = 0; r < h; r++) {
-        int sy = (int)((crop.y0 + (cy0 + r - Y) / (double)(ih > 0 ? ih : 1) * (crop.y1 - crop.y0)) * c->h);
-        sy = clampi(sy, 0, c->h - 1);
-        const uint32_t *src = c->px + (size_t)sy * (size_t)c->w;
-        uint32_t *dst = scratch + (size_t)r * (size_t)w;
-        for (int x = 0; x < w; x++) {
-            int sx = clampi((int)((crop.x0 + (cx0 + x - X) / (double)(iw > 0 ? iw : 1) * (crop.x1 - crop.x0)) * c->w), 0, c->w - 1);
-            dst[x] = src[sx];
+    int lut = w <= scaled_sx_cap;
+    if (!lut) {
+        int *p = realloc(scaled_sx_lut, sizeof *p * (size_t)w);
+        if (p) {
+            scaled_sx_lut = p;
+            scaled_sx_cap = w;
+            lut = 1;
         }
     }
+    int max_sx = c->w - 1, max_sy = c->h - 1;
+    double w_scale = (double)(iw > 0 ? iw : 1), h_scale = (double)(ih > 0 ? ih : 1);
+#define SCALED_SX(x) clampi((int)((crop.x0 + (cx0 + (x) - X) / w_scale * (crop.x1 - crop.x0)) * c->w), 0, max_sx)
+    for (int x = 0; lut && x < w; x++) scaled_sx_lut[x] = SCALED_SX(x);
+    const uint32_t *base_px = c->px;
+    int saved_plain = finish_plain;
+    if (colors_changed() && !finish_plain) {
+        const uint32_t *recol = pix_recolored(best);
+        if (recol) {
+            base_px = recol;
+            finish_plain = 1;
+        }
+    }
+    for (int r = 0; r < h; r++) {
+        int sy = clampi((int)((crop.y0 + (cy0 + r - Y) / h_scale * (crop.y1 - crop.y0)) * c->h), 0, max_sy);
+        const uint32_t *src = base_px + (size_t)sy * (size_t)c->w;
+        uint32_t *dst = scratch + (size_t)r * (size_t)w;
+        if (lut) {
+            for (int x = 0; x < w; x++) dst[x] = src[scaled_sx_lut[x]];
+        } else {
+            for (int x = 0; x < w; x++) dst[x] = src[SCALED_SX(x)];
+        }
+    }
+#undef SCALED_SX
     finish(cx0, cy0, w, h);
+    finish_plain = saved_plain;
     return 1;
+}
+
+/* If a cached raster is slightly smaller than its laid-out item box (e.g. a
+ * 1px rounding difference in fit-width), paint the uncovered right/bottom
+ * sliver with DESK so desk_fill_gaps() never leaves stale pixels there. */
+static void fill_short_edges(int X, int Y, int sw, int sh, int cx0, int cy0, int cx1, int cy1)
+{
+    int rx = X + sw, by = Y + sh;
+    if (rx < cx1) {
+        int x0 = rx > cx0 ? rx : cx0;
+        screen_fill_px(x0, cy0, cx1 - x0, cy1 - cy0, DESK);
+    }
+    if (by < cy1) {
+        int y0 = by > cy0 ? by : cy0;
+        int x1 = rx < cx1 ? rx : cx1;
+        if (x1 > cx0) screen_fill_px(cx0, y0, x1 - cx0, cy1 - y0, DESK);
+    }
 }
 
 static void draw_page(int i)
@@ -2873,8 +3116,8 @@ static void draw_page(int i)
     if (whole(i)) {
         int c = pix_find(0, i, v.rotate, z, -1, -1);
         if (c >= 0) {
-            cache[c].used = ++ticks;
-            put_pixels(cache[c].px, cache[c].w, cache[c].h, X, Y, cx0, cy0, cx1, cy1);
+            put_cached(c, X, Y, cx0, cy0, cx1, cy1);
+            fill_short_edges(X, Y, cache[c].w, cache[c].h, cx0, cy0, cx1, cy1);
         } else if (!put_scaled(i, X, Y, it->w, it->h, cx0, cy0, cx1, cy1)) {
             put_paper(cx0, cy0, cx1, cy1);
         }
@@ -2887,8 +3130,8 @@ static void draw_page(int i)
             int bx1 = tx0 + TILE < cx1 ? tx0 + TILE : cx1, by1 = ty0 + TILE < cy1 ? ty0 + TILE : cy1;
             int c = pix_find(0, i, v.rotate, z, tx, ty);
             if (c >= 0) {
-                cache[c].used = ++ticks;
-                put_pixels(cache[c].px, cache[c].w, cache[c].h, tx0, ty0, bx0, by0, bx1, by1);
+                put_cached(c, tx0, ty0, bx0, by0, bx1, by1);
+                fill_short_edges(tx0, ty0, cache[c].w, cache[c].h, bx0, by0, bx1, by1);
             } else if (!put_scaled(i, X, Y, it->w, it->h, bx0, by0, bx1, by1)) {
                 put_paper(bx0, by0, bx1, by1);
             }
@@ -2972,8 +3215,13 @@ static int thumb_bottom(void)
 
 static int thumb_max_top(void)
 {
+    thumb_y_ensure();
     long long height = 0;
-    for (int i = 0; i < doc.pages; i++) height += thumb_entry(i);
+    if (thumb_y_valid) {
+        height = thumb_y[doc.pages];
+    } else {
+        for (int i = 0; i < doc.pages; i++) height += thumb_entry(i);
+    }
     long long max = height - (thumb_bottom() - thumbs_y0());
     return max < 0 ? 0 : max > INT_MAX ? INT_MAX : (int)max;
 }
@@ -3067,10 +3315,15 @@ static void draw_sidebar(void)
     }
     if (ui.thumb_top > 0) ui.thumb_top = clampi(ui.thumb_top, 0, thumb_max_top());
     novl = 0;
-    for (int i = 0, y = y0 - ui.thumb_top; i < doc.pages && y < y1; i++) {
-        int e = thumb_entry(i);
+    int i0 = thumb_first_at(ui.thumb_top);
+    thumb_y_ensure();
+    long long y_off = thumb_y_valid ? thumb_y[i0] : 0;
+    for (int i = i0; i < doc.pages; i++) {
+        int y = (int)(y0 + y_off - ui.thumb_top);
+        if (y >= y1) break;
+        int e = thumb_y_valid ? (int)(thumb_y[i + 1] - thumb_y[i]) : thumb_entry(i);
         if (y + e <= y0) {
-            y += e;
+            y_off += e;
             continue;
         }
         int w, h;
@@ -3087,8 +3340,7 @@ static void draw_sidebar(void)
             if (doc.page[i].failed) {
                 put_paper(cx0, cy0, cx1, cy1);
             } else if (c >= 0) {
-                cache[c].used = ++ticks;
-                put_pixels(cache[c].px, cache[c].w, cache[c].h, X, y, cx0, cy0, cx1, cy1);
+                put_cached(c, X, y, cx0, cy0, cx1, cy1);
             } else if (!put_scaled(i, X, y, w, h, cx0, cy0, cx1, cy1)) {
                 put_paper(cx0, cy0, cx1, cy1);
             }
@@ -3100,7 +3352,7 @@ static void draw_sidebar(void)
         }
         int r0 = clampi((y - top) / ch, 3, last), r1 = clampi((y + e - 1 - top) / ch, 3, last);
         if (y + e > y0) ui_hit(0, r0, side_cols, r1 - r0 + 1, HIT_THUMB + i);
-        y += e;
+        y_off += e;
     }
 }
 
@@ -3292,6 +3544,107 @@ static int typing_line(void)
     return ui.focus == FOCUS_FIND || (ui.focus == FOCUS_PROMPT && prompt_typed() && !prompt.masked);
 }
 
+/* The desk over a gap, grown to whole text cells inside the document area:
+ * a cell partly over the gap is repainted by one fill, as the whole-area
+ * wipe did. The pages drawn next paint over the overlap. */
+static void desk_cells(int x0, int y0, int x1, int y1)
+{
+    if (cw > 0 && ch > 0) {
+        x0 = x0 / cw * cw;
+        x1 = (x1 + cw - 1) / cw * cw;
+        if (y0 >= top) y0 = top + (y0 - top) / ch * ch;
+        if (y1 >= top) y1 = top + (y1 - top + ch - 1) / ch * ch;
+    }
+    if (x0 < ax) x0 = ax;
+    if (y0 < ay) y0 = ay;
+    if (x1 > ax + aw) x1 = ax + aw;
+    if (y1 > ay + ah) y1 = ay + ah;
+    if (x0 < x1 && y0 < y1) screen_fill_px(x0, y0, x1 - x0, y1 - y0, DESK);
+}
+
+/* The desk colour where no visible page covers the document area. draw_page()
+ * paints each visible page's whole clipped rectangle, so only the gaps between
+ * the pages need the desk, and wiping under the pages first is pure waste.
+ * Tiled pages and pages that touch get the whole wipe: a text cell across a
+ * tile edge or a page join lies in no single page blit and no gap fill. No
+ * scratch means nothing is drawn, so the whole wipe too. */
+static void desk_fill_gaps(void)
+{
+    if (nvis <= 0 || nvis > 64 || !scratch) {
+        screen_fill_px(ax, ay, aw, ah, DESK);
+        return;
+    }
+    struct { int x0, y0, x1, y1; } cov[64];
+    int nc = 0;
+    for (int k = 0; k < nvis; k++) {
+        const struct vl_item *it = &doc.item[prio[k]];
+        int x0 = ax - v.sx + it->x, y0 = ay - v.sy + it->y, x1 = x0 + it->w, y1 = y0 + it->h;
+        if (x0 < ax) x0 = ax;
+        if (y0 < ay) y0 = ay;
+        if (x1 > ax + aw) x1 = ax + aw;
+        if (y1 > ay + ah) y1 = ay + ah;
+        if (x0 >= x1 || y0 >= y1) continue;
+        int touch = !whole(prio[k]);
+        for (int o = 0; o < nc && !touch; o++) {
+            touch = x0 <= cov[o].x1 && cov[o].x0 <= x1 && y0 <= cov[o].y1 && cov[o].y0 <= y1;
+        }
+        if (touch) {
+            screen_fill_px(ax, ay, aw, ah, DESK);
+            return;
+        }
+        cov[nc].x0 = x0;
+        cov[nc].y0 = y0;
+        cov[nc].x1 = x1;
+        cov[nc].y1 = y1;
+        nc++;
+    }
+    if (nc == 0) {
+        screen_fill_px(ax, ay, aw, ah, DESK);
+        return;
+    }
+    int ys[2 + 2 * 64], ny = 0;
+    ys[ny++] = ay;
+    ys[ny++] = ay + ah;
+    for (int k = 0; k < nc; k++) {
+        ys[ny++] = cov[k].y0;
+        ys[ny++] = cov[k].y1;
+    }
+    for (int i = 1; i < ny; i++) {
+        int v_ = ys[i], j = i;
+        while (j > 0 && ys[j - 1] > v_) {
+            ys[j] = ys[j - 1];
+            j--;
+        }
+        ys[j] = v_;
+    }
+    int m = 0;
+    for (int i = 0; i < ny; i++) {
+        if (m == 0 || ys[i] != ys[m - 1]) ys[m++] = ys[i];
+    }
+    for (int b = 0; b + 1 < m; b++) {
+        int by0 = ys[b], by1 = ys[b + 1];
+        int xs0[64], xs1[64], nx = 0;
+        for (int k = 0; k < nc; k++) {
+            if (cov[k].y0 > by0 || cov[k].y1 < by1) continue;
+            int at = nx;
+            while (at > 0 && xs0[at - 1] > cov[k].x0) {
+                xs0[at] = xs0[at - 1];
+                xs1[at] = xs1[at - 1];
+                at--;
+            }
+            xs0[at] = cov[k].x0;
+            xs1[at] = cov[k].x1;
+            nx++;
+        }
+        int cursor = ax;
+        for (int i = 0; i < nx; i++) {
+            if (xs0[i] > cursor) desk_cells(cursor, by0, xs0[i], by1);
+            if (xs1[i] > cursor) cursor = xs1[i];
+        }
+        if (cursor < ax + aw) desk_cells(cursor, by0, ax + aw, by1);
+    }
+}
+
 static void draw(void)
 {
     ui.dirty = 0;
@@ -3304,13 +3657,15 @@ static void draw(void)
         screen_flush();
         return;
     }
-    screen_fill_px(ax, ay, aw, ah, DESK);
     if (gal.on && (doc.open || gal.folder)) {
+        screen_fill_px(ax, ay, aw, ah, DESK);
         draw_gallery();
     } else if (doc.open) {
         compute_prio();
+        desk_fill_gaps();
         for (int k = 0; k < nvis; k++) draw_page(prio[k]);
     } else {
+        screen_fill_px(ax, ay, aw, ah, DESK);
         char text[400];
         /* TRANSLATORS: %.300s is the file name. */
         if (doc.opening) snprintf(text, sizeof text, _("Opening %.300s ..."), base_name(doc.path));
@@ -4315,8 +4670,7 @@ static void draw_presentation(void)
     else {
         int c = pix_find(2, i, v.rotate, z, -1, -1);
         if (c >= 0) {
-            cache[c].used = ++ticks;
-            put_pixels(cache[c].px, cache[c].w, cache[c].h, X, Y, 0, 0, W, H);
+            put_cached(c, X, Y, 0, 0, W, H);
         } else if (!put_scaled(i, X, Y, w, h, X > 0 ? X : 0, Y > 0 ? Y : 0, X + w < W ? X + w : W, Y + h < H ? Y + h : H)) {
             put_paper(X > 0 ? X : 0, Y > 0 ? Y : 0, X + w < W ? X + w : W, Y + h < H ? Y + h : H);
         }
@@ -4436,6 +4790,7 @@ static void color_mode(int mode)
         settings.invert = 1;
     }
     if (paper != (settings.invert && settings.render_mode == CM_PAPER ? settings.paper | VIEW_PAPER : 0)) pix_flush();
+    if (!colors_changed()) pix_drop_recolored();
     changed();
 }
 
@@ -4642,6 +4997,7 @@ static void do_action(int a)
         if (settings.invert && settings.render_mode == CM_PAPER) pix_flush();
         settings.invert = !settings.invert;
         if (settings.invert && settings.render_mode == CM_PAPER) pix_flush();
+        if (!colors_changed()) pix_drop_recolored();
         changed();
         break;
     case A_COLOR_NORMAL: color_mode(-1); break;
@@ -6992,8 +7348,7 @@ static void draw_gallery(void)
                     if (doc.page[i].failed) {
                         screen_fill_px(cx0, cy0, cx1 - cx0, cy1 - cy0, ERROR);
                     } else if (c >= 0) {
-                        cache[c].used = ++ticks;
-                        put_pixels(cache[c].px, cache[c].w, cache[c].h, tx, ty, cx0, cy0, cx1, cy1);
+                        put_cached(c, tx, ty, cx0, cy0, cx1, cy1);
                     } else if (!put_scaled(i, tx, ty, w, h, cx0, cy0, cx1, cy1)) {
                         put_paper(cx0, cy0, cx1, cy1);
                     }
@@ -7243,10 +7598,19 @@ static void forget(void)
     free(cache);
     free(scratch);
     free(ovl);
+    free(thumb_y);
+    free(scaled_sx_lut);
     cache = NULL;
     scratch = NULL;
     ovl = NULL;
+    thumb_y = NULL;
+    scaled_sx_lut = NULL;
     ncache = novl = ovl_size = 0;
+    cache_used_bytes = 0;
+    thumb_y_cap = thumb_y_valid = 0;
+    scaled_sx_cap = 0;
+    memset(&color_sig, 0, sizeof color_sig);
+    color_gen = 1;
     scratch_size = 0;
     nqueue = 0;
     memset(&fly, 0, sizeof fly);

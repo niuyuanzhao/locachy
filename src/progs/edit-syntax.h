@@ -65,6 +65,11 @@ enum syntax_style {
     SYNTAX_STYLE_UNDERLINE = 4,
 };
 void syntax_styles(struct syntax *s, struct buffer *b, size_t start, size_t end, uint8_t *styles);
+/* Paint both foreground colours and style flags in a single tree-sitter query
+ * pass; either colour or styles may be NULL. Returns 1 when highlighted from
+ * the syntax tree, 0 when only defaults were filled. */
+int syntax_paint(struct syntax *s, const struct buffer *buf, size_t from, size_t to,
+                 uint32_t *colour, unsigned char *styles);
 
 /* A fold's actual syntax-node bytes [start_byte, end_byte), and zero-based
  * occupied lines (end_line inclusive; an end at column zero belongs to the

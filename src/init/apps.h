@@ -29,6 +29,12 @@ __attribute__((weak)) int apps_session_holding(const char *cgroup);
 
 void apps_init(void);
 void apps_tick(void);
+/* Native readiness pipes and config/runtime watches for process 1's poll()
+ * loop, and ms until the next application deadline (-1: event-driven only).
+ * Weak: tests that link process 1 without apps.c leave them out. */
+#define APPS_POLL_MAX 32
+__attribute__((weak)) int apps_poll_fds(struct pollfd *p, int max);
+__attribute__((weak)) int apps_wait_ms(void);
 /* The shared display has said display-ready: programs start on it from now
  * on, and on a later session's display once that one says it too. */
 void apps_display_ready(void);
@@ -46,9 +52,9 @@ int apps_action(const char *action, const char *name, char *why, size_t size);
 int apps_open(const char *name, const char *target, char *why, size_t size);
 int apps_open_mode(const char *name, const char *target, int own_tor, char *why, size_t size);
 /* Open a whitelisted host tool as a managed Wayland window on the shared
- * display: view, files, settings, mixer, bluetooth, network, term. For an already running settings
- * window, updates its page via its request channel without spawning a second
- * instance. */
+ * display: view, files, settings, mixer, bluetooth, network, term, search. For
+ * an already running settings window, updates its page via its request channel
+ * without spawning a second instance. */
 int apps_window_open(const char *program, const char *target, char *why, size_t size);
 
 #endif

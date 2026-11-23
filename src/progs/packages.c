@@ -57,6 +57,7 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "base.h"
@@ -178,6 +179,7 @@ static long long installed = -1, foreign, installed_bytes;
 static int job;
 static int job_result = -1;
 static char job_label[160], job_log[512], job_state[16];
+static double last_job_check;
 /* Its kind and arguments (each followed by a NUL in job_args), to continue
  * it; job_kind "": it cannot be. */
 #define JOB_ARGV (MAX_TARGETS + 8)
@@ -187,11 +189,25 @@ static char job_kind[24], job_args[4096], *job_argv[JOB_ARGV + 1];
  * trusted: no longer in UNTRUSTED_KEYS. */
 #define MAX_KEYS 32
 struct wanted_key {
-    char name[64], fpr[72];
+    char name[64], fpr[72], origin[600];
     int trusted;
 };
 static struct wanted_key wanted[MAX_KEYS];
 static int nwanted;
+static int log_cache_valid, log_cache_total;
+static char log_cache_path[512];
+static ino_t log_cache_ino;
+static off_t log_cache_size;
+static struct timespec log_cache_mtim;
+
+static double pkg_now(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+        return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+    }
+    return 0.0;
+}
 
 static char said[512]; /* the notice to copy: the last one said, not what a copy says of itself */
 
@@ -701,6 +717,8 @@ static void submit_job(const char *label, const char *kind, char *const args[], 
     nwanted = 0;
     snprintf(job_label, sizeof job_label, "%s", label);
     jobs_log_path(id, job_log, sizeof job_log);
+    log_cache_valid = 0;
+    last_job_check = 0; /* a job just started or stopped: the next loop checks it */
     keep_args(kind, args);
     if (continued) {
         say_notice(0, _("%s: continuing; it goes on if you leave."), label);
@@ -730,6 +748,8 @@ static int valid_fpr(const char *s)
     return (n == 40 || n == 64) && s[n] == '\0';
 }
 
+static void key_source(const char *name, char *out, size_t size);
+
 /* The source signing keys the last job stopped for: locachy-build's "Source
  * key to trust: NAME FINGERPRINT" lines in its output; how many. */
 static int parse_keys(void)
@@ -751,6 +771,7 @@ static int parse_keys(void)
         if (!known && nwanted < MAX_KEYS) {
             memcpy(wanted[nwanted].name, name, sizeof name);
             memcpy(wanted[nwanted].fpr, fpr, sizeof fpr);
+            key_source(name, wanted[nwanted].origin, sizeof wanted[nwanted].origin);
             wanted[nwanted++].trusted = 0;
         }
     }
@@ -781,6 +802,17 @@ static void keys_refresh(void)
     if (f) {
         fclose(f);
     }
+}
+
+static int keys_refresh_changed(void)
+{
+    int prev[MAX_KEYS];
+    for (int i = 0; i < nwanted; i++) prev[i] = wanted[i].trusted;
+    keys_refresh();
+    for (int i = 0; i < nwanted; i++) {
+        if (prev[i] != wanted[i].trusted) return 1;
+    }
+    return 0;
 }
 
 static int by_text(const void *a, const void *b)
@@ -1000,17 +1032,26 @@ static void find_job(void)
         snprintf(job_state, sizeof job_state, "%s", r->state);
         say_notice(0, _("%s: %s; it goes on if you leave."), job_label, jobs_state_label(r->state));
     } else if (strcmp(r->state, "keys") == 0 && parse_keys()) {
+        keys_refresh();
         job_result = 1;
         show_log = 1;
         say_notice(1, _("%s: stopped for source signing keys to trust (below); none is trusted by itself."), job_label);
     }
+    log_cache_valid = 0;
+    last_job_check = pkg_now();
 }
 
-static void check_job(void)
+/* Returns 1 if job/key state changed and the screen should redraw. */
+static int check_job(void)
 {
     struct jobs_row r;
     char why[256];
+    last_job_check = pkg_now();
     if (!job) {
+        int changed = 0;
+        if (nwanted) {
+            changed = keys_refresh_changed();
+        }
         static struct jobs_row rows[JOBS_ROWS_MAX];
         int n = jobs_mine(rows, JOBS_ROWS_MAX);
         const struct jobs_row *active_row = pick_job_row(rows, n, 0);
@@ -1019,22 +1060,27 @@ static void check_job(void)
             job = active_row->id;
             job_result = -1;
             nwanted = 0;
+            log_cache_valid = 0;
             snprintf(job_state, sizeof job_state, "%s", active_row->state);
             say_notice(0, _("%s: %s; it goes on if you leave."), job_label, jobs_state_label(active_row->state));
+            return 1;
         }
-        return;
+        return changed;
     }
     if (jobs_status(job, &r, why, sizeof why) < 0) {
-        return;
+        return 0;
     }
     if (!jobs_ended(&r)) {
+        int changed = strcmp(job_state, r.state) != 0;
         snprintf(job_state, sizeof job_state, "%s", r.state); /* queued until the one before it ends */
-        return;
+        return changed;
     }
     int ok = strcmp(r.state, "done") == 0;
     job_result = ok ? 0 : strcmp(r.state, "cancelled") == 0 ? 2 : 1;
     job = 0;
+    log_cache_valid = 0;
     if (!ok && parse_keys()) {
+        keys_refresh();
         /* Not a failure: a person's decision, which nothing makes by itself. */
         say_notice(1, _("%s: stopped for source signing keys to trust (below); none is trusted by itself."), job_label);
     } else if (job_result == 2) {
@@ -1067,6 +1113,7 @@ static void check_job(void)
                        conts[i].name);
         }
     }
+    return 1;
 }
 
 /* The job's output as the pane has it: its last 32 KiB, read into log_buf,
@@ -1075,30 +1122,80 @@ static void check_job(void)
 #define LOG_LINES 2048
 static char log_buf[32768], *log_all[LOG_LINES];
 
+static int log_file_changed(void)
+{
+    if (!job_log[0]) {
+        return log_cache_valid && log_cache_total > 0;
+    }
+    struct stat st;
+    if (stat(job_log, &st) < 0) {
+        return log_cache_valid && log_cache_total > 0;
+    }
+    if (!log_cache_valid || strcmp(log_cache_path, job_log) != 0) {
+        return 1;
+    }
+    return log_cache_ino != st.st_ino ||
+           log_cache_size != st.st_size ||
+           log_cache_mtim.tv_sec != st.st_mtim.tv_sec ||
+           log_cache_mtim.tv_nsec != st.st_mtim.tv_nsec;
+}
+
 static int log_split(void)
 {
-    int fd = job_log[0] ? open(job_log, O_RDONLY | O_CLOEXEC) : -1;
-    if (fd < 0) {
+    if (!job_log[0]) {
+        log_cache_valid = 0;
+        log_cache_total = 0;
         return 0;
     }
-    off_t end = lseek(fd, 0, SEEK_END);
+    struct stat st;
+    if (stat(job_log, &st) < 0) {
+        log_cache_valid = 0;
+        log_cache_total = 0;
+        return 0;
+    }
+    if (log_cache_valid &&
+        strcmp(log_cache_path, job_log) == 0 &&
+        log_cache_ino == st.st_ino &&
+        log_cache_size == st.st_size &&
+        log_cache_mtim.tv_sec == st.st_mtim.tv_sec &&
+        log_cache_mtim.tv_nsec == st.st_mtim.tv_nsec) {
+        return log_cache_total;
+    }
+    int fd = open(job_log, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        log_cache_valid = 0;
+        log_cache_total = 0;
+        return 0;
+    }
+    if (fstat(fd, &st) < 0) {
+        close(fd);
+        log_cache_valid = 0;
+        log_cache_total = 0;
+        return 0;
+    }
+    off_t end = st.st_size;
     off_t start = end > (off_t)sizeof log_buf - 1 ? end - (off_t)sizeof log_buf + 1 : 0;
     ssize_t got = pread(fd, log_buf, sizeof log_buf - 1, start);
     close(fd);
-    if (got <= 0) {
-        return 0;
-    }
-    log_buf[got] = '\0';
     int count = 0;
-    char *save = NULL;
-    for (char *s = strtok_r(log_buf, "\n", &save); s && count < LOG_LINES; s = strtok_r(NULL, "\n", &save)) {
-        char *cr = strrchr(s, '\r');
-        while (cr && cr[1] == '\0' && cr > s) { /* a line ending in \r */
-            *cr = '\0';
-            cr = strrchr(s, '\r');
+    if (got > 0) {
+        log_buf[got] = '\0';
+        char *save = NULL;
+        for (char *s = strtok_r(log_buf, "\n", &save); s && count < LOG_LINES; s = strtok_r(NULL, "\n", &save)) {
+            char *cr = strrchr(s, '\r');
+            while (cr && cr[1] == '\0' && cr > s) { /* a line ending in \r */
+                *cr = '\0';
+                cr = strrchr(s, '\r');
+            }
+            log_all[count++] = cr ? cr + 1 : s;
         }
-        log_all[count++] = cr ? cr + 1 : s;
     }
+    snprintf(log_cache_path, sizeof log_cache_path, "%s", job_log);
+    log_cache_ino = st.st_ino;
+    log_cache_size = st.st_size;
+    log_cache_mtim = st.st_mtim;
+    log_cache_total = count;
+    log_cache_valid = 1;
     return count;
 }
 
@@ -1300,7 +1397,7 @@ static int key_lines(int i, char *line, size_t lsize, char *origin, size_t osize
     ui_pad(pad, sizeof pad, wanted[i].name, 24);
     snprintf(line, lsize, "%s %s%s%s", pad, fpr, wanted[i].trusted ? "   " : "",
              wanted[i].trusted ? _("trusted now") : "");
-    key_source(wanted[i].name, origin, osize);
+    snprintf(origin, osize, "%s", wanted[i].origin);
     return ui_cells(pad) + 1;
 }
 
@@ -1332,7 +1429,6 @@ static const char *keys_then(void)
 static int draw_keys(int r, int bottom)
 {
     char line[600], origin[600], command[COMMAND_MAX];
-    keys_refresh();
     trust_command(command, sizeof command);
     pane_put(&r, bottom, 2, keys_waiting(), WARN);
     int tail = command[0] ? command_rows(command) + 2 : 1;
@@ -1448,31 +1544,6 @@ static uint32_t update_line(const struct row *w, char *line, size_t size)
     return FG;
 }
 
-/* Line i of the lower pane when it does not show the job's output: on Host,
- * how the system stands to its manifest; else the selected row's details.
- * Into line: its colour, 0 past the last line. */
-static uint32_t pane_line(int i, char *line, size_t size)
-{
-    if (page == HOST && i < nothers) {
-        snprintf(line, size, "%s", others[i]);
-        return strncmp(others[i], "missing", 7) == 0 ? ERROR : FG;
-    } else if (page == HOST && i == 0) {
-        snprintf(line, size, "%s", _("The system is as the manifest says."));
-        return DIM;
-    } else if (page == UPDATES && sel[page] < ntargets) {
-        const struct target *t = &targets[sel[page]];
-        for (int k = 0; k < nrows; k++) {
-            const struct row *w = &rows[k];
-            if (strcmp(w->target, t->name) == 0 && strcmp(w->kind, "state") != 0 && i-- == 0) {
-                return update_line(w, line, size);
-            }
-        }
-    } else if (page == CONTAINERS && sel[page] < nconts && i < detail_lines(&conts[sel[page]])) {
-        return detail_line(&conts[sel[page]], i, line, size);
-    }
-    return 0;
-}
-
 /* The lower pane, on a background of its own under a title bar: the job's
  * output (while it runs, or l; stopped for source signing keys, those
  * first), else the selected row's details (on Host: how the system stands
@@ -1520,21 +1591,36 @@ static void draw_lower(int top, int height)
                                        "%s: %d declared, %s installed with what they need   l: output", nleaves),
                  MANIFEST, nleaves, closure[0] ? closure : "?");
         pane_title(top, line, 1);
-        uint32_t color;
-        for (int i = 0; r < bottom && (color = pane_line(i, line, sizeof line)) != 0; i++) {
-            pane_put(&r, bottom, 2, line, color);
+        if (nothers == 0) {
+            pane_put(&r, bottom, 2, _("The system is as the manifest says."), DIM);
+        } else {
+            for (int i = 0; i < nothers && r < bottom; i++) {
+                uint32_t color = strncmp(others[i], "missing", 7) == 0 ? ERROR : FG;
+                pane_put(&r, bottom, 2, others[i], color);
+            }
         }
         return;
     }
     if (page == UPDATES && sel[page] < ntargets) {
         struct target *t = &targets[sel[page]];
+        int first_match = -1;
+        for (int k = 0; k < nrows; k++) {
+            if (strcmp(rows[k].target, t->name) == 0 && strcmp(rows[k].kind, "state") != 0) {
+                first_match = k;
+                break;
+            }
+        }
         /* TRANSLATORS: l is the l key; keep it. */
-        char first[512];
         snprintf(line, sizeof line, _("Details: %s   l: output"), t->name);
-        pane_title(top, line, pane_line(0, first, sizeof first) != 0);
-        uint32_t color;
-        for (int i = 0; r < bottom && (color = pane_line(i, line, sizeof line)) != 0; i++) {
-            pane_put(&r, bottom, 2, line, color);
+        pane_title(top, line, first_match >= 0);
+        if (first_match >= 0) {
+            for (int k = first_match; k < nrows && r < bottom; k++) {
+                const struct row *w = &rows[k];
+                if (strcmp(w->target, t->name) == 0 && strcmp(w->kind, "state") != 0) {
+                    uint32_t color = update_line(w, line, sizeof line);
+                    pane_put(&r, bottom, 2, line, color);
+                }
+            }
         }
     } else if (page == CONTAINERS && sel[page] < nconts) {
         struct container *c = &conts[sel[page]];
@@ -1625,8 +1711,29 @@ static void copy_pane(void)
         for (int i = 0; i < n; i++) {
             fprintf(out, "%s%s", i ? "\n" : "", log_all[i]);
         }
-    } else {
-        for (int i = 0; pane_line(i, line, sizeof line); i++) {
+    } else if (page == HOST) {
+        if (nothers == 0) {
+            fprintf(out, "%s", _("The system is as the manifest says."));
+        } else {
+            for (int i = 0; i < nothers; i++) {
+                fprintf(out, "%s%s", i ? "\n" : "", others[i]);
+            }
+        }
+    } else if (page == UPDATES && sel[page] < ntargets) {
+        const struct target *t = &targets[sel[page]];
+        int emitted = 0;
+        for (int k = 0; k < nrows; k++) {
+            const struct row *w = &rows[k];
+            if (strcmp(w->target, t->name) == 0 && strcmp(w->kind, "state") != 0) {
+                update_line(w, line, sizeof line);
+                fprintf(out, "%s%s", emitted++ ? "\n" : "", line);
+            }
+        }
+    } else if (page == CONTAINERS && sel[page] < nconts) {
+        const struct container *c = &conts[sel[page]];
+        int n = detail_lines(c);
+        for (int i = 0; i < n; i++) {
+            detail_line(c, i, line, sizeof line);
             fprintf(out, "%s%s", i ? "\n" : "", line);
         }
     }
@@ -3159,7 +3266,14 @@ static void edit_container_with(const char *name, const struct form *seed)
         int pending = f.pending_hit, clicks = f.pending_clicks;
         f.pending_hit = -1;
         int key = pending >= 0 ? K_POINTER : key_poll_timeout(-1, job ? 500 : 2000), mods = mods_now();
-        check_job();
+        int job_changed = 0;
+        if (key == 0 || key == K_SHOWN || (pkg_now() - last_job_check) >= 0.5) {
+            job_changed = check_job();
+        }
+        if (key == 0) {
+            if (!job_changed) quiet = 1;
+            continue;
+        }
         if (key == K_POINTER) { /* a click picks a line (a double click: Enter), or a button */
             mods = 0;
             int id = pending;
@@ -3527,7 +3641,10 @@ int main(void)
             return 0; /* Ctrl+Q or the window's close, read in a question, a list or a form */
         }
         int key = key_poll_timeout(-1, job ? 500 : 2000), mods = mods_now();
-        check_job();
+        int job_changed = 0;
+        if (key == 0 || key == K_SHOWN || (pkg_now() - last_job_check) >= 0.5) {
+            job_changed = check_job();
+        }
         if (key == K_REPAINT) {
             draw();
             continue;
@@ -3535,9 +3652,19 @@ int main(void)
         int n = list_len();
         if (key == K_POINTER) {
             key = pointer_key(n, &mods);
-            if (key == 0) continue;
+            if (key == 0) {
+                if (job_changed) draw();
+                continue;
+            }
+        }
+        if (key == 0) {
+            if (job_changed || ((job || show_log) && log_file_changed())) {
+                draw();
+            }
+            continue;
         }
         if (key == K_ACT_HOME) {
+            if (job_changed) draw();
             continue; /* process 1's: a selection stays */
         }
         int act = key_list_action(key, mods);
@@ -3549,8 +3676,9 @@ int main(void)
             draw();
             continue;
         } else if (act == ACT_CANCEL) {
+            int had_sel = textsel_active();
             textsel_clear(); /* Esc, q: the selection goes; nothing else at the top */
-            draw();
+            if (had_sel || job_changed) draw();
             continue;
         }
         if (act == ACT_COPY) {
@@ -3566,10 +3694,13 @@ int main(void)
         } else if (key >= ' ' && key < 0x7F && (mods & (KEYS_ALT | KEYS_META))) {
             key = 0; /* a letter's command is the letter alone: Alt+y is not y */
         }
+        int cleared_sel = 0;
         if (key > 0 && key != K_ACT_COPY && key != K_ACT_SELECT_ALL) {
+            cleared_sel = textsel_active() || pane_all;
             textsel_clear(); /* what the pane shows may change */
             pane_all = 0;
         }
+        int dirty = job_changed || cleared_sel || key == -1;
         if (key == K_ACT_COPY) {
             if (pane_all) {
                 copy_pane();
@@ -3577,47 +3708,88 @@ int main(void)
                 copy_key();
             }
             pane_all = 0;
+            dirty = 1;
         } else if (key == K_ACT_SELECT_ALL) {
             textsel_clear();
             pane_all = 1;
             show_notice(0, _("The whole pane is selected: Ctrl+C copies it."));
+            dirty = 1;
         } else if (key == 'g' && !job && nwanted) {
             continue_job();
+            dirty = 1;
         } else if (act == ACT_NEXT_FIELD || act == ACT_PREV_FIELD) {
             page = (page + (act == ACT_PREV_FIELD ? PAGES - 1 : 1)) % PAGES;
-        } else if (key == K_UP && sel[page] > 0) {
-            sel[page]--;
-        } else if (key == K_DOWN && sel[page] < n - 1) {
-            sel[page]++;
+            dirty = 1;
+        } else if (key == K_UP) {
+            if (sel[page] > 0) {
+                sel[page]--;
+                dirty = 1;
+            }
+        } else if (key == K_DOWN) {
+            if (sel[page] < n - 1) {
+                sel[page]++;
+                dirty = 1;
+            }
         } else if ((key == K_PGUP || key == K_PGDN) && (job || show_log)) { /* the output pane scrolls */
             if (log_visible_rows > 0) {
+                int prev_from = log_from;
                 int step = log_visible_rows > 2 ? log_visible_rows - 2 : 1;
                 scroll_log(key == K_PGUP ? step : -step);
+                if (log_from != prev_from) dirty = 1;
             }
         } else if ((key == K_PGUP || key == K_PGDN) && page == CONTAINERS && n > 0 &&
                    details_total > details_rows) { /* its details, more than they fit, scroll */
+            int prev_from = details_from;
             int step = details_rows > 1 ? details_rows - 1 : 1;
             details_from += key == K_PGUP ? -step : step; /* draw_lower keeps it in range */
+            if (details_from != prev_from) dirty = 1;
         } else if ((key == K_PGUP || key == K_PGDN) && n > 0) {
+            int prev_sel = sel[page];
             int step = (screen_rows() - 6) / 2;
             step = step > 0 ? step : 1;
             sel[page] += key == K_PGUP ? -step : step;
             sel[page] = sel[page] < 0 ? 0 : sel[page] >= n ? n - 1 : sel[page];
+            if (sel[page] != prev_sel) dirty = 1;
         } else if (key == K_BOL) {
-            sel[page] = 0;
+            if (sel[page] != 0) {
+                sel[page] = 0;
+                dirty = 1;
+            }
         } else if (key == K_EOL && n > 0) {
-            sel[page] = n - 1;
+            if (sel[page] != n - 1) {
+                sel[page] = n - 1;
+                dirty = 1;
+            }
         } else if (key == 'l') {
             show_log = !show_log;
+            dirty = 1;
         } else if (key == K_SHOWN) {
             load_all();
+            if (nwanted) {
+                for (int i = 0; i < nwanted; i++) {
+                    key_source(wanted[i].name, wanted[i].origin, sizeof wanted[i].origin);
+                }
+                keys_refresh();
+            }
+            dirty = 1;
         } else if (key > 0 && page == UPDATES) {
-            updates_key(key);
+            if (key == 'c' || key == ' ' || key == '\n' || key == 'a' || key == 'u') {
+                updates_key(key);
+                dirty = 1;
+            }
         } else if (key > 0 && page == CONTAINERS) {
-            container_key(key);
+            if (key == '/' || key == 'n' || key == 'l' || key == '\n' || key == 'b' || key == 'r' || key == K_DEL) {
+                container_key(key);
+                dirty = 1;
+            }
         } else if (key > 0 && page == HOST) {
-            host_key(key);
+            if (key == '/' || key == 'i' || key == K_DEL || key == 's') {
+                host_key(key);
+                dirty = 1;
+            }
         }
-        draw();
+        if (dirty) {
+            draw();
+        }
     }
 }

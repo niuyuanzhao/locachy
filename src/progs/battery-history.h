@@ -269,6 +269,112 @@ static inline int bat_cmp_devices(const void *a, const void *b)
     return c != 0 ? c : strcmp(x->pack_id, y->pack_id);
 }
 
+/* Refresh only the dynamic attributes (status, voltage_now, energy/charge_now,
+ * power/current_now, capacity) of a live battery pack already discovered by
+ * bat_scan_live(); static identity, design and threshold fields are kept.
+ * Mirrors bat_scan_live()'s precedence. Returns 0, or -1 if the pack is no
+ * longer present. */
+static inline int bat_refresh_dynamic(struct bat_device *b, int64_t now_ts)
+{
+    const char *root = bat_supply_root();
+    char dir[512];
+    int dn = snprintf(dir, sizeof dir, "%s/%s", root, b->name);
+    if (dn <= 0 || (size_t)dn >= sizeof dir || access(dir, F_OK) != 0) return -1;
+
+    int pok = 0;
+    long long pres = bat_read_ll(root, b->name, "present", &pok);
+    if (pok && pres == 0) return -1;
+
+    char status[32] = "";
+    if (bat_read_line(root, b->name, "status", status, sizeof status) != 0)
+        snprintf(status, sizeof status, "Unknown");
+    snprintf(b->status, sizeof b->status, "%s", status);
+    b->present = 1;
+    b->last_seen_ts = now_ts;
+
+    int ok = 0;
+    long long uv = bat_read_ll(root, b->name, "voltage_now", &ok);
+    b->voltage_v = ok && uv > 0 ? (double)uv / 1e6 : -1.0;
+    double ref_v = b->voltage_design_v > 0 ? b->voltage_design_v : (b->voltage_v > 0 ? b->voltage_v : -1.0);
+
+    int eok = 0;
+    long long enow = bat_read_ll(root, b->name, "energy_now", &eok);
+    if (eok && enow >= 0) {
+        b->energy_now_wh = (double)enow / 1e6;
+    } else if (ref_v > 0) {
+        /* A pack that reports charge only: charge_now at its design voltage. */
+        int cok = 0;
+        long long cnow = bat_read_ll(root, b->name, "charge_now", &cok);
+        b->energy_now_wh = cok && cnow >= 0 ? ((double)cnow / 1e6) * ref_v : -1.0;
+    } else {
+        b->energy_now_wh = -1.0;
+    }
+
+    int pwok = 0;
+    long long uw = bat_read_ll(root, b->name, "power_now", &pwok);
+    if (pwok && uw >= 0) {
+        b->power_w = (double)uw / 1e6;
+    } else {
+        int iok = 0;
+        long long ua = bat_read_ll(root, b->name, "current_now", &iok);
+        if (iok && ua < 0) ua = -ua;
+        double v = b->voltage_v > 0 ? b->voltage_v : ref_v;
+        b->power_w = iok && ua >= 0 && v > 0 ? ((double)ua / 1e6) * v : -1.0;
+    }
+
+    if (b->energy_now_wh >= 0 && b->energy_full_wh > 0.01) {
+        double dp = (b->energy_now_wh / b->energy_full_wh) * 1000.0;
+        if (dp < 0) dp = 0;
+        if (dp > 1000) dp = 1000;
+        b->capacity_decipct = (int)(dp + 0.5);
+        b->capacity_pct = (b->capacity_decipct + 5) / 10;
+    } else {
+        int cap_ok = 0;
+        long long cap = bat_read_ll(root, b->name, "capacity", &cap_ok);
+        if (cap_ok && cap >= 0) {
+            if (cap > 100) cap = 100;
+            b->capacity_pct = (int)cap;
+            b->capacity_decipct = (int)cap * 10;
+        }
+    }
+    return 0;
+}
+
+/* The AC state only, for a routine tick: reads "type" and "online" of each
+ * non-Battery supply and nothing of the batteries. Fills any_adapter, online
+ * and name (as bat_scan_live does); voltage and current stay unknown. */
+static inline int bat_scan_ac_only(struct bat_ac_info *ac)
+{
+    const char *root = bat_supply_root();
+    memset(ac, 0, sizeof *ac);
+    ac->voltage_v = -1.0;
+    ac->current_a = -1.0;
+    DIR *d = opendir(root);
+    if (!d) return -1;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        const char *name = e->d_name;
+        char type[32] = "";
+        if (!bat_safe_name(name)) continue;
+        if (bat_read_line(root, name, "type", type, sizeof type) != 0) continue;
+        if (strcmp(type, "Battery") == 0) continue;
+        int ok = 0;
+        long long on = bat_read_ll(root, name, "online", &ok);
+        if (ok) {
+            ac->any_adapter = 1;
+            if (on > 0) {
+                ac->online = 1;
+                if (!ac->name[0]) snprintf(ac->name, sizeof ac->name, "%.47s", name);
+            } else if (!ac->name[0]) {
+                snprintf(ac->name, sizeof ac->name, "%.47s", name);
+            }
+        }
+    }
+    closedir(d);
+    return 0;
+}
+
+
 /* Scan live /sys/class/power_supply devices only. */
 static inline int bat_scan_live(struct bat_device *devs, int max, struct bat_ac_info *ac)
 {
@@ -640,6 +746,38 @@ static inline int bat_append_sample(const char *pack_id, const struct bat_sample
     long pos = ftell(f);
     if (fclose(f) != 0 || rc < 0) return -1;
     if (pos > BAT_COMPACT_BYTES) bat_compact_file(path, s->ts - BAT_KEEP_SECONDS);
+    return 0;
+}
+
+/* Append a batch of samples for pack_id in a single open/write/close. */
+static inline int bat_append_samples_batch(const char *pack_id, const struct bat_sample *samples, int count)
+{
+    if (!bat_safe_name(pack_id)) return -1;
+    if (count <= 0) return 0;
+    if (!samples) return -1;
+    const char *dir = bat_history_dir();
+    (void)mkdir(dir, 0755);
+    char path[560];
+    int n = snprintf(path, sizeof path, "%s/%s.tsv", dir, pack_id);
+    if (n <= 0 || (size_t)n >= sizeof path) return -1;
+    FILE *f = fopen(path, "a");
+    if (!f) return -1;
+    int64_t last_ts = 0;
+    int rc = 0;
+    for (int i = 0; i < count; i++) {
+        const struct bat_sample *s = &samples[i];
+        if (s->ts < 946684800LL) continue;
+        if (fprintf(f, "%lld\t%d\t%d\t%d\t%d\t%c\t%d\n",
+                    (long long)s->ts, s->decipct, s->power_mw,
+                    s->energy_mwh, s->voltage_mv, s->state, s->ac) < 0) {
+            rc = -1;
+            break;
+        }
+        last_ts = s->ts;
+    }
+    long pos = ftell(f);
+    if (fclose(f) != 0 || rc < 0) return -1;
+    if (last_ts >= 946684800LL && pos > BAT_COMPACT_BYTES) bat_compact_file(path, last_ts - BAT_KEEP_SECONDS);
     return 0;
 }
 

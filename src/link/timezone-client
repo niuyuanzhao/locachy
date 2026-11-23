@@ -15,31 +15,104 @@ ZONES=${LOCACHY_TIMEZONE_ZONES:-/usr/share/zoneinfo}
 LOCALTIME=${LOCACHY_TIMEZONE_LOCALTIME:-/etc/localtime}
 
 # Full-system Tor is on (service_tor in rc.conf): tor-enforce sends everything
-# through it.
+# through it. Parsed in pure bash to avoid forking grep on every check.
 tor_on() {
-    grep -qE '^[[:space:]]*service_tor=' "$RC" 2>/dev/null
+    local line
+    [ -r "$RC" ] || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+        line=${line#"${line%%[![:space:]]*}"}
+        case $line in
+        service_tor=*) return 0 ;;
+        esac
+    done <"$RC"
+    return 1
 }
 
+mon_pid=
+cleanup() {
+    [ -z "$mon_pid" ] || kill "$mon_pid" 2>/dev/null || true
+}
+trap cleanup EXIT
+trap 'exit 0' TERM INT
+
+# Wait briefly at boot for network-client to create the network namespace when
+# running on a real system (/run/netns exists), avoiding a 30 s initial delay.
+# The short waits use bash's read timeout on a private FIFO, not sleep(1).
+if [ -d /run/netns ] && [ ! -e "/run/netns/$NS" ]; then
+    _wait_dir=$(mktemp -d "${TMPDIR:-/tmp}/timezone-wait.XXXXXXXX") && {
+        mkfifo -m 0600 "$_wait_dir/fifo" && exec 4<>"$_wait_dir/fifo"
+        rm -rf "$_wait_dir"
+        _i=0
+        while [ ! -e "/run/netns/$NS" ] && [ "$_i" -lt 50 ]; do
+            IFS= read -r -t 0.1 -u 4 _ || true
+            _i=$((_i + 1))
+        done
+        exec 4<&-
+    }
+fi
+
 # last: the route the zone was asked through, or "tor" while Tor kept it
-# (when Tor goes, it is asked again).
+# (when Tor goes, it is asked again). pending: 1 when a lookup failed or no
+# route is up yet so the monitor retries periodically while still waking
+# immediately on route changes.
 last=
-while :; do
+pending=0
+check_timezone() {
+    local route zone
+    pending=0
     if tor_on; then
         [ "$last" = tor ] || echo "timezone-client: Tor carries the network: the zone is kept"
         last=tor
-    else
-        route=$(ip netns exec "$NS" ip route show default 2>/dev/null | head -n 1) || route=
-        if [ -n "$route" ] && [ "$route" != "$last" ]; then
-            zone=$(ip netns exec "$NS" curl -fsS --max-time 10 https://ipinfo.io/timezone 2>/dev/null) || zone=
-            # Not when Tor came while it was asked: the answer may be its exit's.
-            if [[ "$zone" =~ ^[A-Za-z]+(/[A-Za-z0-9_+-]+)*$ ]] && [ -f "$ZONES/$zone" ] && ! tor_on; then
-                if [ "$(readlink "$LOCALTIME" 2>/dev/null)" != "$ZONES/$zone" ]; then
-                    ln -sfn "$ZONES/$zone" "$LOCALTIME.new" && mv -fT "$LOCALTIME.new" "$LOCALTIME"
-                    echo "timezone-client: $zone"
-                fi
-                last=$route
+        return
+    fi
+    route=$(ip netns exec "$NS" ip route show default 2>/dev/null | head -n 1) || route=
+    if [ -z "$route" ]; then
+        pending=1
+        return
+    fi
+    if [ "$route" != "$last" ]; then
+        zone=$(ip netns exec "$NS" curl -fsS --max-time 10 https://ipinfo.io/timezone 2>/dev/null) || zone=
+        # Not when Tor came while it was asked: the answer may be its exit's.
+        if [[ "$zone" =~ ^[A-Za-z]+(/[A-Za-z0-9_+-]+)*$ ]] && [ -f "$ZONES/$zone" ] && ! tor_on; then
+            if [ "$(readlink "$LOCALTIME" 2>/dev/null)" != "$ZONES/$zone" ]; then
+                ln -sfn "$ZONES/$zone" "$LOCALTIME.new" && mv -fT "$LOCALTIME.new" "$LOCALTIME"
+                echo "timezone-client: $zone"
             fi
+            last=$route
+        elif ! tor_on; then
+            pending=1
         fi
+    fi
+}
+
+while :; do
+    check_timezone
+    if ! tor_on && [ -e "/run/netns/$NS" ]; then
+        # Block on NETLINK_ROUTE inside the network namespace (0 Hz idle) and
+        # react immediately when the default route appears or changes.
+        exec 3< <(ip netns exec "$NS" ip -o monitor route 2>/dev/null)
+        mon_pid=$!
+        while :; do
+            if [ "$pending" = 0 ] && [ -n "$last" ]; then
+                IFS= read -r -u 3 _ev || break
+            else
+                rc_read=0
+                IFS= read -r -t 30 -u 3 _ev || rc_read=$?
+                if [ "$rc_read" -gt 128 ]; then
+                    check_timezone
+                    tor_on && break
+                    continue
+                fi
+                [ "$rc_read" -eq 0 ] || break
+            fi
+            # Coalesce bursts of netlink route updates into one lookup.
+            while IFS= read -r -t 0.3 -u 3 _ev; do :; done
+            check_timezone
+            tor_on && break
+        done
+        exec 3<&-
+        [ -z "$mon_pid" ] || { kill "$mon_pid" 2>/dev/null || true; wait "$mon_pid" 2>/dev/null || true; }
+        mon_pid=
     fi
     sleep 30
 done

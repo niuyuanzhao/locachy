@@ -4,6 +4,7 @@
 The private RC sockets belong to rclone, not to applications. All backend and
 credential handling remains rclone's. The host control socket accepts root only.
 """
+import ctypes
 import errno
 import fcntl
 import hashlib
@@ -20,6 +21,7 @@ import stat
 import struct
 import subprocess
 import sys
+import threading
 import time
 
 sys.dont_write_bytecode = True
@@ -34,6 +36,15 @@ FUSE_CONF = Path("/etc/fuse.conf")
 LIMIT = 16384
 REFRESH_TIMEOUT = 30
 SHUTDOWN_WAIT = 60  # for open files and pending uploads before stopping anyway
+IN_MODIFY = 0x2
+IN_CLOSE_WRITE = 0x8
+IN_MOVED_FROM = 0x40
+IN_MOVED_TO = 0x80
+IN_CREATE = 0x100
+IN_DELETE = 0x200
+IN_DELETE_SELF = 0x400
+IN_MOVE_SELF = 0x800
+CONFIG_WATCH_MASK = IN_CLOSE_WRITE | IN_MOVED_FROM | IN_MOVED_TO | IN_CREATE | IN_DELETE | IN_DELETE_SELF | IN_MOVE_SELF
 
 
 class CloudError(Exception):
@@ -221,10 +232,109 @@ class Service:
         self.config = Path(self.user.pw_dir) / ".config/rclone/rclone.conf"
         self.remotes = {}
         self.selector = selectors.DefaultSelector()
-        self.stopping = False
+        self._stopping = False
+        self._wakeup_r = None
+        self._wakeup_w = None
+        self._prev_wakeup = None
+        self._libc = None
+        self.inotify_fd = None
+        self._config_wd = None
+        self._config_watch_path = None
+        self._log_wds = {}
+        self.discover_needed = True
+        self.discover_retry_at = 0
         self.next_discovery = 0
         self.next_jobs = 0
         self.config_changed = None
+        self.config_sig = None
+
+    @property
+    def stopping(self):
+        return self._stopping
+
+    @stopping.setter
+    def stopping(self, value):
+        self._stopping = bool(value)
+        if self._stopping:
+            self.wake()
+
+    def wake(self):
+        if self._wakeup_w is not None:
+            try:
+                os.write(self._wakeup_w, b"\x00")
+            except OSError:
+                pass
+
+    def _drain_fd(self, fd):
+        while True:
+            try:
+                if not os.read(fd, 65536):
+                    break
+            except BlockingIOError:
+                break
+            except OSError as exc:
+                if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EINTR):
+                    break
+                break
+
+    def _config_signature(self):
+        try:
+            st = self.config.stat()
+            return (st.st_mtime_ns, st.st_size, st.st_ino)
+        except OSError:
+            return None
+
+    def _init_inotify(self):
+        try:
+            libc = ctypes.CDLL(None, use_errno=True)
+            fd = libc.inotify_init1(os.O_CLOEXEC | os.O_NONBLOCK)
+        except (OSError, AttributeError):
+            return
+        if fd < 0:
+            return
+        self._libc = libc
+        self.inotify_fd = fd
+        self.selector.register(fd, selectors.EVENT_READ, "inotify")
+        self._update_config_watch()
+
+    def _update_config_watch(self):
+        if self.inotify_fd is None or self._libc is None:
+            return
+        # Watch the config directory when present, otherwise its nearest existing
+        # ancestor so creating ~/.config/rclone wakes the loop without polling.
+        target = self.config.parent
+        while not target.is_dir() and target != target.parent:
+            target = target.parent
+        if target == self._config_watch_path and self._config_wd is not None:
+            return
+        if self._config_wd is not None:
+            self._libc.inotify_rm_watch(self.inotify_fd, self._config_wd)
+            self._config_wd = None
+            self._config_watch_path = None
+        wd = self._libc.inotify_add_watch(self.inotify_fd, os.fsencode(target), CONFIG_WATCH_MASK)
+        if wd >= 0:
+            self._config_wd = wd
+            self._config_watch_path = target
+
+    def _watch_remote_log(self, remote):
+        if self.inotify_fd is None or self._libc is None or remote.name in self._log_wds:
+            return
+        wd = self._libc.inotify_add_watch(self.inotify_fd, os.fsencode(remote.directory), IN_MODIFY)
+        if wd >= 0:
+            self._log_wds[remote.name] = wd
+
+    def _unwatch_remote_log(self, name):
+        wd = self._log_wds.pop(name, None)
+        if wd is not None and self.inotify_fd is not None and self._libc is not None:
+            self._libc.inotify_rm_watch(self.inotify_fd, wd)
+
+    def _handle_inotify(self):
+        if self.inotify_fd is None:
+            return
+        self._drain_fd(self.inotify_fd)
+        self._update_config_watch()
+        if self._config_signature() != self.config_sig:
+            self.discover_needed = True
 
     def write_status(self):
         rows = [public_row(r) for r in sorted(self.remotes.values(), key=lambda r: r.name)]
@@ -292,7 +402,17 @@ class Service:
         os.chmod(CONTROL, 0o660)
         self.server.listen(8)
         self.server.setblocking(False)
-        self.selector.register(self.server, selectors.EVENT_READ, None)
+        self.selector.register(self.server, selectors.EVENT_READ, "server")
+        self._wakeup_r, self._wakeup_w = os.pipe()
+        os.set_blocking(self._wakeup_r, False)
+        os.set_blocking(self._wakeup_w, False)
+        self.selector.register(self._wakeup_r, selectors.EVENT_READ, "wakeup")
+        if threading.current_thread() is threading.main_thread():
+            try:
+                self._prev_wakeup = signal.set_wakeup_fd(self._wakeup_w, warn_on_full_buffer=False)
+            except ValueError:
+                self._prev_wakeup = None
+        self._init_inotify()
         self.write_status()
 
     def discover(self):
@@ -338,6 +458,7 @@ class Service:
             os.fchmod(fd, 0o600)
             remote.log = os.fdopen(fd, "a+b", buffering=0)
             remote.log_offset, remote.log_tail = os.fstat(fd).st_size, b""
+            self._watch_remote_log(remote)
             remote.process = subprocess.Popen(mount_command(self.user, remote.name, remote.point,
                                                              remote.rc_socket, self.config),
                                               stdin=subprocess.DEVNULL, stdout=remote.log, stderr=remote.log,
@@ -493,10 +614,20 @@ class Service:
 
     def tick(self):
         now = time.monotonic()
-        if now >= self.next_discovery:
+        sig = self._config_signature()
+        changed = sig[0] if sig is not None else 0
+        need_discover = self.discover_needed or sig != self.config_sig or changed != self.config_changed
+        if not need_discover and self.discover_retry_at and now >= self.discover_retry_at:
+            need_discover = True
+        if not need_discover and self.inotify_fd is None and now >= self.next_discovery:
+            need_discover = True
+        if need_discover:
+            self.discover_needed = False
             self.next_discovery = now + 3
             try:
                 wanted = set(self.discover())
+                self.discover_retry_at = 0
+                self.config_sig = sig
                 for name in wanted:
                     if name not in self.remotes:
                         tag = hashlib.sha256(name.encode()).hexdigest()[:24]
@@ -505,15 +636,13 @@ class Service:
                     if name not in wanted:
                         try:
                             self.stop(remote)
+                            self._unwatch_remote_log(name)
                             del self.remotes[name]
                         except CloudError:
                             pass
             except (OSError, ValueError, CloudError, subprocess.SubprocessError):
+                self.discover_retry_at = now + 10
                 print("rclone-client: cannot list remotes; keeping existing mounts", file=sys.stderr, flush=True)
-            try:
-                changed = self.config.stat().st_mtime_ns
-            except OSError:
-                changed = 0
             if changed != self.config_changed:
                 # After "rclone config reconnect", restart only mounts it can help,
                 # and only when idle: stop() refuses open files and pending uploads.
@@ -556,13 +685,49 @@ class Service:
             self.next_jobs = now + 0.2
             self.jobs()
 
+    def next_timeout(self):
+        """Idle sleep duration until the next scheduled transition, or None (0 Hz)."""
+        now = time.monotonic()
+        if self.discover_needed:
+            return 0.0
+        deadline = None
+
+        def clamp(when):
+            nonlocal deadline
+            if deadline is None or when < deadline:
+                deadline = when
+
+        if self.discover_retry_at:
+            clamp(self.discover_retry_at)
+        if self.inotify_fd is None:
+            clamp(self.next_discovery)
+        for remote in self.remotes.values():
+            if remote.job:
+                clamp(self.next_jobs)
+            if remote.process and remote.state == "mounting":
+                clamp(now + 0.2)
+            elif not remote.process and not remote.paused and remote.retry_at:
+                clamp(remote.retry_at)
+            if remote.state == "failed" and remote.reason in REASONS and remote.notified != remote.reason:
+                clamp(now + 10.0)
+        if deadline is None:
+            return None
+        return max(0.0, deadline - now)
+
     def serve(self):
         self.setup()
         try:
             while not self.stopping:
-                for _, _ in self.selector.select(0.2):
-                    self.request()
                 self.tick()
+                if self.stopping:
+                    break
+                for key, _ in self.selector.select(self.next_timeout()):
+                    if key.data == "server":
+                        self.request()
+                    elif key.data == "wakeup":
+                        self._drain_fd(self._wakeup_r)
+                    elif key.data == "inotify":
+                        self._handle_inotify()
         finally:
             for remote in self.remotes.values():
                 if remote.job:
@@ -588,6 +753,24 @@ class Service:
                         remote.process.kill()
             self.write_status()
             CONTROL.unlink(missing_ok=True)
+            if self._prev_wakeup is not None:
+                try:
+                    signal.set_wakeup_fd(self._prev_wakeup)
+                except ValueError:
+                    pass
+                self._prev_wakeup = None
+            for fd in (self.inotify_fd, self._wakeup_r, self._wakeup_w):
+                if fd is not None:
+                    try:
+                        self.selector.unregister(fd)
+                    except (KeyError, ValueError):
+                        pass
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+            self.inotify_fd = self._wakeup_r = self._wakeup_w = None
+            self.selector.close()
 
 
 def client(operation, path):
@@ -625,6 +808,8 @@ def main():
     service = Service()
     signal.signal(signal.SIGTERM, lambda *_: setattr(service, "stopping", True))
     signal.signal(signal.SIGINT, lambda *_: setattr(service, "stopping", True))
+    signal.signal(signal.SIGCHLD, lambda *_: None)
+    signal.signal(signal.SIGHUP, lambda *_: setattr(service, "discover_needed", True))
     service.serve()
     return 0
 

@@ -20,7 +20,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/inotify.h>
 #include <sys/mman.h>
+#include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -31,6 +33,9 @@
 #include "clipboard.h"
 #include "ext-data-control-v1-client-protocol.h"
 
+#define RETRY_FIRST_MS 200
+#define RETRY_EXISTS_MAX_MS 1000
+#define RETRY_MAX_MS 5000
 static size_t limit = 64 * 1024 * 1024;
 static int transfer_ms = 2000;
 static volatile sig_atomic_t stopping;
@@ -42,6 +47,9 @@ static struct wl_seat *seat;
 static struct ext_data_control_manager_v1 *manager;
 static struct ext_data_control_device_v1 *device;
 static int disconnected, want_flush;
+static int watch_fd = -1;
+static int retry_delay_ms = RETRY_FIRST_MS;
+static char watch_dir[PATH_MAX], watch_name[256];
 
 static int64_t now(void)
 {
@@ -434,6 +442,103 @@ static void global_remove(void *data, struct wl_registry *r, uint32_t name)
 { (void)data; (void)r; (void)name; }
 static const struct wl_registry_listener registry_listener = { global, global_remove };
 
+static void retry_wait(void)
+{
+    retry_at = -1;
+    retry_delay_ms = RETRY_FIRST_MS;
+}
+
+static void retry_soon(void)
+{
+    retry_at = 0;
+    retry_delay_ms = RETRY_FIRST_MS;
+}
+
+static void close_display_watch(void)
+{
+    if (watch_fd >= 0) close(watch_fd);
+    watch_fd = -1;
+    watch_dir[0] = watch_name[0] = '\0';
+}
+
+/* Resolve the Wayland socket path, plus the directory and filename to watch. */
+static int display_socket_path(char *sock, size_t sock_size,
+                               char *dir, size_t dir_size,
+                               char *base, size_t base_size)
+{
+    const char *runtime = getenv("XDG_RUNTIME_DIR"), *name = getenv("WAYLAND_DISPLAY");
+    if (!name || !name[0]) name = "wayland-0";
+    int n;
+    if (name[0] == '/') {
+        n = snprintf(sock, sock_size, "%s", name);
+    } else {
+        if (!runtime || !runtime[0]) return -1;
+        n = snprintf(sock, sock_size, "%s/%s", runtime, name);
+    }
+    if (n <= 0 || (size_t)n >= sock_size) return -1;
+    const char *slash = strrchr(sock, '/');
+    if (!slash || !slash[1]) return -1;
+    size_t dlen = slash == sock ? 1 : (size_t)(slash - sock);
+    if (dlen >= dir_size || strlen(slash + 1) >= base_size) return -1;
+    memcpy(dir, sock, dlen);
+    dir[dlen] = '\0';
+    strcpy(base, slash + 1);
+    return 0;
+}
+
+static void open_display_watch(void)
+{
+    char sock[PATH_MAX], dir[PATH_MAX], base[256];
+    if (display_socket_path(sock, sizeof sock, dir, sizeof dir, base, sizeof base) < 0) return;
+    if (watch_fd >= 0 && strcmp(watch_dir, dir) == 0) {
+        snprintf(watch_name, sizeof watch_name, "%s", base);
+        return;
+    }
+    close_display_watch();
+    int fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    if (fd < 0) return;
+    int wd = inotify_add_watch(fd, dir, IN_CREATE | IN_MOVED_TO | IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF);
+    if (wd < 0) {
+        close(fd);
+        return;
+    }
+    watch_fd = fd;
+    snprintf(watch_dir, sizeof watch_dir, "%s", dir);
+    snprintf(watch_name, sizeof watch_name, "%s", base);
+}
+
+static void drain_display_watch(void)
+{
+    if (watch_fd < 0) return;
+    char buf[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
+    int match = 0, dropped = 0;
+    for (;;) {
+        ssize_t len = read(watch_fd, buf, sizeof buf);
+        if (len <= 0) {
+            if (len < 0 && errno == EINTR) continue;
+            if (len < 0 && errno != EAGAIN) dropped = 1;
+            break;
+        }
+        for (ssize_t off = 0; off < len;) {
+            const struct inotify_event *ev = (const struct inotify_event *)(buf + off);
+            if (ev->mask & (IN_IGNORED | IN_DELETE_SELF | IN_MOVE_SELF)) {
+                dropped = 1;
+            } else if (ev->mask & IN_Q_OVERFLOW) {
+                match = 1;
+            } else if (ev->len > 0 && strcmp(ev->name, watch_name) == 0) {
+                match = 1;
+            }
+            off += (ssize_t)(sizeof *ev + ev->len);
+        }
+    }
+    if (dropped) {
+        close_display_watch();
+        retry_soon();
+    } else if (match) {
+        retry_soon();
+    }
+}
+
 static void drop_display(void)
 {
     for (struct client *c = clients; c; c = c->next) {
@@ -456,28 +561,71 @@ static void drop_display(void)
     if (display) wl_display_disconnect(display);
     display = NULL; registry = NULL; seat = NULL; manager = NULL; device = NULL;
     disconnected = want_flush = 0;
-    retry_at = now() + 200;
+    open_display_watch();
+    retry_delay_ms = RETRY_FIRST_MS;
+    retry_at = now() + retry_delay_ms;
 }
 
 static void connect_display(void)
 {
-    if (display || now() < retry_at) return;
-    retry_at = now() + 200;
-    const char *runtime = getenv("XDG_RUNTIME_DIR"), *name = getenv("WAYLAND_DISPLAY");
-    if (!runtime) return;
-    if (!name) name = "wayland-0";
+    if (display) return;
+    if (watch_fd < 0) open_display_watch();
+    if (retry_at < 0) return;
+    int64_t t = now();
+    if (t < retry_at) return;
+    char sock[PATH_MAX], dir[PATH_MAX], base[256];
+    if (display_socket_path(sock, sizeof sock, dir, sizeof dir, base, sizeof base) < 0) {
+        /* The environment does not change while the service runs: no timer. */
+        retry_at = -1;
+        return;
+    }
     struct sockaddr_un address = { .sun_family = AF_UNIX };
-    int n = name[0] == '/' ? snprintf(address.sun_path, sizeof address.sun_path, "%s", name) :
-        snprintf(address.sun_path, sizeof address.sun_path, "%s/%s", runtime, name);
-    if (n < 0 || n >= (int)sizeof address.sun_path) return;
+    if (strlen(sock) >= sizeof address.sun_path) {
+        retry_at = -1;
+        return;
+    }
+    memcpy(address.sun_path, sock, strlen(sock) + 1);
     int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
-    if (fd < 0) return;
-    if (connect(fd, (struct sockaddr *)&address, sizeof address) < 0) { close(fd); return; }
+    if (fd < 0) {
+        retry_at = t + 1000;
+        return;
+    }
+    if (connect(fd, (struct sockaddr *)&address, sizeof address) < 0) {
+        int err = errno;
+        close(fd);
+        if (watch_fd < 0) {
+            /* No watch: a plain capped timer (200 ms, 1 s, then every 5 s). */
+            retry_at = t + retry_delay_ms;
+            retry_delay_ms = retry_delay_ms < 1000 ? 1000 : RETRY_MAX_MS;
+        } else if (err == ENOENT) {
+            /* No socket yet: the watch reports its creation. */
+            retry_wait();
+        } else if (err == ECONNREFUSED || err == EAGAIN || err == EINPROGRESS) {
+            /* Socket file exists while compositor starts or recycles it: keep
+             * a bounded retry (capped at 1 s) since inotify won't see listen(). */
+            int delay = retry_delay_ms < RETRY_EXISTS_MAX_MS ? retry_delay_ms : RETRY_EXISTS_MAX_MS;
+            retry_at = t + delay;
+            retry_delay_ms = RETRY_EXISTS_MAX_MS;
+        } else if (retry_delay_ms < RETRY_MAX_MS) {
+            retry_at = t + retry_delay_ms;
+            retry_delay_ms = retry_delay_ms < 1000 ? 1000 : RETRY_MAX_MS;
+        } else {
+            retry_wait();
+        }
+        return;
+    }
     display = wl_display_connect_to_fd(fd);
-    if (!display) return;
+    if (!display) {
+        close(fd);
+        retry_at = t + RETRY_FIRST_MS;
+        return;
+    }
+    close_display_watch();
+    retry_wait();
     registry = wl_display_get_registry(display);
     wl_registry_add_listener(registry, &registry_listener, NULL);
 }
+
 
 static int pending(void)
 {
@@ -741,6 +889,8 @@ static void accept_client(int listener)
     if (!c) { close(fd); return; }
     c->fd = fd; c->until = now() + transfer_ms + 100;
     c->next = clients; clients = c;
+    /* A local client connected while disconnected: try reconnecting promptly. */
+    if (!display) retry_soon();
 }
 
 static void sweep(void)
@@ -788,6 +938,27 @@ static void sweep(void)
 
 static void stop(int sig) { (void)sig; stopping = 1; }
 
+static int poll_timeout_ms(void)
+{
+    int64_t next = -1;
+    if (!display && retry_at >= 0) next = retry_at;
+    if (holding && (next < 0 || held_until < next)) next = held_until;
+    for (int i = 0; i < CLIPBOARD_SELECTIONS; i++) {
+        struct offer *o = selections[i].offer;
+        if (o && (next < 0 || o->until < next)) next = o->until;
+    }
+    for (struct sending *s = sends; s; s = s->next) {
+        if (next < 0 || s->until < next) next = s->until;
+    }
+    for (struct client *c = clients; c; c = c->next) {
+        if (next < 0 || c->until < next) next = c->until;
+    }
+    if (next < 0) return -1;
+    int64_t left = next - now();
+    if (left <= 0) return 0;
+    return left > INT_MAX ? INT_MAX : (int)left;
+}
+
 static int daemon_main(void)
 {
     const char *path = getenv("LOCACHY_CLIPBOARD_SOCKET");
@@ -806,7 +977,25 @@ static int daemon_main(void)
         perror("clipboard: listen"); close(listener); return 1;
     }
     signal(SIGPIPE, SIG_IGN);
-    signal(SIGTERM, stop); signal(SIGINT, stop);
+    sigset_t sigmask, oldmask;
+    sigemptyset(&sigmask);
+    sigaddset(&sigmask, SIGTERM);
+    sigaddset(&sigmask, SIGINT);
+    int sigfd = -1;
+    if (sigprocmask(SIG_BLOCK, &sigmask, &oldmask) == 0) {
+        sigfd = signalfd(-1, &sigmask, SFD_NONBLOCK | SFD_CLOEXEC);
+        if (sigfd < 0) sigprocmask(SIG_SETMASK, &oldmask, NULL);
+    }
+    if (sigfd < 0) {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof sa);
+        sa.sa_handler = stop;
+        sigaction(SIGTERM, &sa, NULL);
+        sigaction(SIGINT, &sa, NULL);
+    }
+    struct pollfd stack_p[32];
+    struct pollfd *heap_p = NULL;
+    size_t heap_cap = 0;
     while (!stopping) {
         connect_display();
         if (display && (wl_display_dispatch_pending(display) < 0 || disconnected)) drop_display();
@@ -816,6 +1005,8 @@ static int daemon_main(void)
         if (display) {
             while (wl_display_prepare_read(display) != 0) {
                 if (wl_display_dispatch_pending(display) < 0 || disconnected) { drop_display(); break; }
+                service_barriers();
+                sweep();
             }
             if (display) {
                 prepared = 1;
@@ -828,25 +1019,37 @@ static int daemon_main(void)
                 }
             }
         }
-        size_t n = 4;
+        size_t n = 4 + CLIPBOARD_SELECTIONS;
         for (struct client *c = clients; c; c = c->next) n++;
         for (struct sending *s = sends; s; s = s->next) n++;
-        struct pollfd *p = calloc(n, sizeof *p);
-        if (!p) {
-            if (prepared) wl_display_cancel_read(display);
-            break;
+        struct pollfd *p = stack_p;
+        if (n > sizeof stack_p / sizeof stack_p[0]) {
+            if (n > heap_cap) {
+                struct pollfd *grown = realloc(heap_p, n * sizeof *grown);
+                if (!grown) {
+                    if (prepared) wl_display_cancel_read(display);
+                    break;
+                }
+                heap_p = grown;
+                heap_cap = n;
+            }
+            p = heap_p;
         }
         p[0] = (struct pollfd){ .fd = listener, .events = POLLIN };
         p[1] = (struct pollfd){ .fd = display ? wl_display_get_fd(display) : -1,
             .events = POLLIN | (want_flush ? POLLOUT : 0) };
+        p[2] = (struct pollfd){ .fd = !display ? watch_fd : -1, .events = POLLIN };
+        p[3] = (struct pollfd){ .fd = sigfd, .events = POLLIN };
         for (int i = 0; i < CLIPBOARD_SELECTIONS; i++) {
-            p[2 + i] = (struct pollfd){ .fd = selections[i].offer ? selections[i].offer->pipe : -1, .events = POLLIN };
+            p[4 + i] = (struct pollfd){ .fd = selections[i].offer ? selections[i].offer->pipe : -1, .events = POLLIN };
         }
-        size_t i = 4;
+        size_t i = 4 + CLIPBOARD_SELECTIONS;
         for (struct client *c = clients; c; c = c->next) p[i++] = (struct pollfd){ .fd = c->fd,
             .events = c->requested ? 0 : POLLIN };
         for (struct sending *s = sends; s; s = s->next) p[i++] = (struct pollfd){ .fd = s->fd, .events = POLLOUT };
-        int ready = poll(p, (nfds_t)n, 25);
+        int timeout = poll_timeout_ms();
+        if (sigfd < 0 && (timeout < 0 || timeout > 500)) timeout = 500;
+        int ready = poll(p, (nfds_t)n, timeout);
         if (prepared) {
             if (ready > 0 && (p[1].revents & POLLIN)) {
                 if (wl_display_read_events(display) < 0) drop_display();
@@ -856,19 +1059,53 @@ static int daemon_main(void)
                 if (ready > 0 && (p[1].revents & (POLLHUP | POLLERR))) drop_display();
             }
         }
+        if (ready > 0 && sigfd >= 0) {
+            if (p[3].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+                close(sigfd);
+                sigfd = -1;
+                struct sigaction sa;
+                memset(&sa, 0, sizeof sa);
+                sa.sa_handler = stop;
+                sigaction(SIGTERM, &sa, NULL);
+                sigaction(SIGINT, &sa, NULL);
+                sigprocmask(SIG_SETMASK, &oldmask, NULL);
+            } else if (p[3].revents & POLLIN) {
+                struct signalfd_siginfo si;
+                for (;;) {
+                    ssize_t nr = read(sigfd, &si, sizeof si);
+                    if (nr != (ssize_t)sizeof si) {
+                        if (nr < 0 && errno == EINTR) continue;
+                        break;
+                    }
+                    stopping = 1;
+                }
+            }
+        }
+        if (stopping) break;
         if (ready > 0) {
+            if (p[2].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+                close_display_watch();
+                retry_soon();
+            } else if (p[2].revents & POLLIN) {
+                drain_display_watch();
+            }
             /* Dispatch can replace offers: never apply old readiness to a
              * new pipe. Read pipes nonblocking only after dispatch. */
             for (int j = 0; j < CLIPBOARD_SELECTIONS; j++) read_offer(j);
-            i = 4;
+            i = 4 + CLIPBOARD_SELECTIONS;
             for (struct client *c = clients; c; c = c->next, i++) {
                 if (!c->requested && p[i].revents) serve_client(c);
             }
             if (p[0].revents & POLLIN) accept_client(listener);
         }
-        free(p);
     }
+    if (sigfd >= 0) {
+        close(sigfd);
+        sigprocmask(SIG_SETMASK, &oldmask, NULL);
+    }
+    free(heap_p);
     drop_display();
+    close_display_watch();
     while (clients) {
         struct client *c = clients; clients = c->next;
         if (c->fd >= 0) close(c->fd);

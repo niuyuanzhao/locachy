@@ -43,18 +43,55 @@ DNS=127.0.0.1:5353
 SOCKS=127.0.0.1:9050
 MIHOMO_TOR=127.0.0.1:7891
 
+read_rc_state() {
+    local line val
+    rc_tor_on=0
+    rc_clash_on=0
+    rc_tor_front=none
+    [ -r "$RC" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        line=${line#"${line%%[![:space:]]*}"}
+        case $line in
+        service_tor=*)
+            rc_tor_on=1
+            ;;
+        service_clash=*)
+            rc_clash_on=1
+            ;;
+        tor_front=\"*\"*)
+            val=${line#tor_front=\"}
+            val=${val%%\"*}
+            case $val in mihomo | bridges) rc_tor_front=$val ;; *) rc_tor_front=none ;; esac
+            ;;
+        esac
+    done <"$RC"
+}
+
 on() {
-    grep -qE '^[[:space:]]*service_tor=' "$RC" 2>/dev/null
+    local rc_tor_on rc_clash_on rc_tor_front
+    read_rc_state
+    [ "$rc_tor_on" = 1 ]
 }
 
 rc_value() {
-    sed -n "s/^[[:space:]]*$1=\"\([^\"]*\)\".*/\1/p" "$RC" 2>/dev/null | tail -n 1
+    local line val found=
+    [ -r "$RC" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        line=${line#"${line%%[![:space:]]*}"}
+        case $line in
+        "$1=\""*\"*)
+            val=${line#"$1=\""}
+            found=${val%%\"*}
+            ;;
+        esac
+    done <"$RC"
+    [ -z "$found" ] || printf '%s\n' "$found"
 }
 
 front() {
-    local f
-    f=$(rc_value tor_front)
-    case $f in mihomo | bridges) echo "$f" ;; *) echo none ;; esac
+    local rc_tor_on rc_clash_on rc_tor_front
+    read_rc_state
+    echo "$rc_tor_front"
 }
 
 # The bridge lines of FILE that Tor takes from us: obfs4 or WebTunnel ones
@@ -163,22 +200,71 @@ mkdir -p "$POLICY_STATE"
 exec 9>"$POLICY_STATE/tor.lifecycle.lock"
 flock -x 9
 TOKEN=$(policy daemon claim tor) || exit 1
-front=$(front)
+read_rc_state
+front=$rc_tor_front
 pid=
+route_mon_pid=
+route_mon_open=0
+idle_open=0
+bridges_stamp=
 on_exit() {
     [ -z "$pid" ] || { kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; }
+    [ -z "$route_mon_pid" ] || { kill "$route_mon_pid" 2>/dev/null; wait "$route_mon_pid" 2>/dev/null; }
+    [ "$route_mon_open" = 0 ] || exec 7<&-
+    [ "$idle_open" = 0 ] || exec 8<&-
+    [ -z "$bridges_stamp" ] || rm -f "$bridges_stamp"
     policy daemon release tor "$TOKEN"
 }
 trap on_exit EXIT
 trap 'exit 0' TERM INT
 
+idle_dir=$(mktemp -d "$POLICY_STATE/.tor-idle.XXXXXXXX")
+mkfifo -m 0600 "$idle_dir/fifo"
+exec 8<>"$idle_dir/fifo"
+idle_open=1
+rm -f "$idle_dir/fifo"
+rmdir "$idle_dir"
+
+idle_wait() {
+    IFS= read -r -t "$1" -u 8 _ || true
+}
+
+bridges_snapshot() {
+    bridges_present=0
+    bridges_body=
+    [ -z "$bridges_stamp" ] || rm -f "$bridges_stamp"
+    bridges_stamp=
+    if [ -r "$STATE/bridges" ]; then
+        bridges_present=1
+        IFS= read -r -d '' bridges_body <"$STATE/bridges" || true
+        bridges_stamp="$POLICY_STATE/tor-bridges.$$.stamp"
+        touch -r "$STATE/bridges" "$bridges_stamp" 2>/dev/null || bridges_stamp=
+    fi
+}
+
+bridges_changed() {
+    local cur_body=
+    if [ "$bridges_present" = 0 ]; then
+        [ -r "$STATE/bridges" ]
+        return
+    fi
+    [ -r "$STATE/bridges" ] || return 0
+    if [ -n "$bridges_stamp" ] && { [ "$STATE/bridges" -nt "$bridges_stamp" ] || [ "$STATE/bridges" -ot "$bridges_stamp" ]; }; then
+        return 0
+    fi
+    IFS= read -r -d '' cur_body <"$STATE/bridges" || true
+    [ "$cur_body" != "$bridges_body" ]
+}
+
 # What it waits for, saying so (RUN/state): tor, its front, locachy-net.
 ready() {
+    local rc_tor_on rc_clash_on rc_tor_front
+    read_rc_state
     if [ ! -x "$TOR" ] || ! id -u "$USER_" >/dev/null 2>&1; then
         echo "waiting for tor to be installed"
     elif [ "$front" = none ]; then
         echo "no front chosen (tor_front)"
-    elif [ "$front" = mihomo ] && ! grep -qE '^[[:space:]]*service_clash=' "$RC"; then
+    elif [ "$front" = mihomo ] && [ "$rc_clash_on" != 1 ]; then
         echo "waiting for Clash, its front"
     elif [ "$front" = bridges ] && [ -z "$(bridges "$STATE/bridges")" ]; then
         echo "waiting for a bridge line (obfs4 or WebTunnel)"
@@ -188,14 +274,12 @@ ready() {
         echo "waiting for the network ($NS)"
     fi
 }
-bridges_time() {
-    stat -c %Y "$STATE/bridges" 2>/dev/null || echo 0
-}
-sub_time=$(bridges_time)
+bridges_snapshot
 while why=$(ready) && [ -n "$why" ]; do
     state "$why"
-    sleep 2
-    if ! on || [ "$(front)" != "$front" ] || [ "$(bridges_time)" != "$sub_time" ]; then
+    idle_wait 2
+    read_rc_state
+    if [ "$rc_tor_on" != 1 ] || [ "$rc_tor_front" != "$front" ] || bridges_changed; then
         exit 0
     fi
 done
@@ -213,7 +297,7 @@ mv "$RUN/torrc.new" "$RUN/torrc"
 if ! ip netns exec "$NS" timeout 60 setpriv --reuid="$USER_" --regid="$USER_" --init-groups --no-new-privs \
     --inh-caps=-all --bounding-set=-all "$TOR" --verify-config -f "$RUN/torrc" >"$RUN/verify.log" 2>&1; then
     state "tor refuses its configuration (see $RUN/verify.log)"
-    sleep 30 # not every 5 s
+    idle_wait 30 # not every 5 s
     exit 1
 fi
 state "starting tor"
@@ -221,7 +305,7 @@ state "starting tor"
 # --pdeathsig: tor dies with this shell, even when it is SIGKILLed. It inherits
 # the lifecycle lock (fd 9), so no next generation starts while it lives.
 ip netns exec "$NS" setpriv --reuid="$USER_" --regid="$USER_" --init-groups --no-new-privs --inh-caps=-all \
-    --bounding-set=-all --pdeathsig KILL "$TOR" -f "$RUN/torrc" >/dev/null 2>&1 &
+    --bounding-set=-all --pdeathsig KILL "$TOR" -f "$RUN/torrc" 8<&- >/dev/null 2>&1 &
 pid=$!
 stop() {
     kill "$pid" 2>/dev/null
@@ -239,28 +323,58 @@ echo "tor-client: tor running in $NS through $front (pid $pid)"
 routes() {
     ip netns exec "$NS" ip -4 -o route show table main proto kernel scope link 2>/dev/null
 }
+# Event-driven IPv4 route monitor inside locachy-net: reacts immediately to LAN
+# subnet changes without polling `ip netns exec` every 5 s. Close fd 9 so the
+# monitor never holds tor.lifecycle.lock, and use --pdeathsig KILL so it exits
+# if this wrapper is SIGKILLed. The baseline is read after the monitor starts,
+# so a change between the two is never missed.
+exec 7< <(exec ip netns exec "$NS" setpriv --pdeathsig KILL -- ip -4 -o monitor route 9>&- 8<&- 2>/dev/null)
+route_mon_pid=$!
+route_mon_open=1
 seen=$(routes)
 while kill -0 "$pid" 2>/dev/null; do
-    sleep 5 & wait $!
+    route_event=0
+    if [ "$route_mon_open" = 1 ]; then
+        rc_read=0
+        IFS= read -r -t 5 -u 7 _ev || rc_read=$?
+        if [ "$rc_read" -eq 0 ]; then
+            route_event=1
+            while IFS= read -r -t 0.2 -u 7 _ev; do :; done
+        elif [ "$rc_read" -le 128 ]; then
+            exec 7<&-
+            route_mon_open=0
+            [ -z "$route_mon_pid" ] || { wait "$route_mon_pid" 2>/dev/null || true; route_mon_pid=; }
+        fi
+    else
+        idle_wait 5
+        route_event=1
+    fi
     changed=
-    on || changed="Tor (off)"
-    [ "$(front)" = "$front" ] || changed="its front"
-    [ "$(bridges_time)" = "$sub_time" ] || changed="the bridges"
+    read_rc_state
+    [ "$rc_tor_on" = 1 ] || changed="Tor (off)"
+    [ "$rc_tor_front" = "$front" ] || changed="its front"
+    bridges_changed && changed="the bridges"
     if [ -n "$changed" ]; then
         echo "tor-client: $changed changed: starting again"
         stop
         pid=
         exit 0
     fi
-    now=$(routes)
-    if [ "$now" != "$seen" ]; then
-        seen=$now
-        "$ENFORCE" lan
+    if [ "$route_event" = 1 ]; then
+        now=$(routes)
+        if [ "$now" != "$seen" ]; then
+            seen=$now
+            "$ENFORCE" lan
+        fi
     fi
 done
 wait "$pid"
 status=$?
 pid=
+[ -z "$route_mon_pid" ] || { kill "$route_mon_pid" 2>/dev/null; wait "$route_mon_pid" 2>/dev/null; route_mon_pid=; }
+[ "$route_mon_open" = 0 ] || { exec 7<&-; route_mon_open=0; }
+[ "$idle_open" = 0 ] || { exec 8<&-; idle_open=0; }
+[ -z "$bridges_stamp" ] || { rm -f "$bridges_stamp"; bridges_stamp=; }
 policy daemon release tor "$TOKEN" --failed "tor ended (status $status)"
 trap - EXIT
 rm -f "$RUN/tor.pid"

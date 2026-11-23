@@ -94,13 +94,20 @@ struct hw_sensor {
 #define HW_MAX_SENSORS 96
 #define HW_SPARK_LEN   120
 
-static struct hw_row hw_rows[HW_MAX_ROWS];
+struct hw_cat_cache {
+    struct hw_row rows[HW_MAX_ROWS];
+    int nrows;
+    int valid;
+};
+static struct hw_cat_cache hw_cache[NHWCATS];
+static struct hw_row *hw_rows = hw_cache[0].rows; /* the rows shown: the category's own */
 static int nhw_rows;
 static struct hw_sensor hw_sensors[HW_MAX_SENSORS];
 static int nhw_sensors;
 static double hw_spark[HW_SPARK_LEN];
 static int hw_spark_n;
 static char hw_spark_key[120];
+static int hw_full_redraw = 1;
 
 /* RAPL delta state for live CPU package power */
 static unsigned long long hw_rapl_prev_uj;
@@ -1161,15 +1168,49 @@ static void hw_trim_vendor(char *s)
     }
 }
 
-static void hw_resolve_pci_ids(struct hw_pci_entry *list, int n)
+static struct hw_pci_entry hw_pci_list[96];
+static int nhw_pci;
+static struct hw_pci_entry hw_gpu_list[8];
+static int nhw_gpus;
+static int hw_pci_cached;
+
+static int hw_hex_val(int c)
 {
-    if (n <= 0) return;
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static int hw_parse_hex(const char *s, int digits, unsigned int *out, const char **rest)
+{
+    unsigned int v = 0;
+    int i = 0;
+    while (i < digits) {
+        int d = hw_hex_val((unsigned char)s[i]);
+        if (d < 0) return 0;
+        v = (v << 4) | (unsigned int)d;
+        i++;
+    }
+    if (s[i] != ' ' && s[i] != '\t' && s[i] != '\0') return 0;
+    *out = v;
+    const char *p = s + i;
+    while (*p == ' ' || *p == '\t') p++;
+    *rest = p;
+    return 1;
+}
+
+static void hw_resolve_pci_ids_lists(struct hw_pci_entry *a, int na, struct hw_pci_entry *b, int nb)
+{
+    if (na <= 0 && nb <= 0) return;
     char path[256], line[320];
     snprintf(path, sizeof path, "%s/pci.ids", HW_HWDATA_DIR);
     FILE *f = fopen(path, "r");
     if (!f) return;
 
-    int in_classes = 0;
+    struct hw_pci_entry *lists[2] = { a, b };
+    int counts[2] = { na, nb };
+    int in_classes = 0, cur_v_wanted = 0, cur_c_wanted = 0;
     unsigned int cur_v = 0xFFFFFFFFu, cur_c = 0xFFFFFFFFu;
     while (fgets(line, sizeof line, f)) {
         if (line[0] == '#' || line[0] == '\r' || line[0] == '\n') continue;
@@ -1177,28 +1218,34 @@ static void hw_resolve_pci_ids(struct hw_pci_entry *list, int n)
         if (line[0] == 'C' && line[1] == ' ') {
             in_classes = 1;
             unsigned int cc = 0;
-            int off = 0;
-            if (sscanf(line + 2, "%2x %n", &cc, &off) >= 1 && off > 0) {
+            const char *nm = NULL;
+            cur_c_wanted = 0;
+            if (hw_parse_hex(line + 2, 2, &cc, &nm)) {
                 cur_c = cc;
-                const char *nm = line + 2 + off;
-                while (*nm == ' ') nm++;
-                for (int i = 0; i < n; i++) {
-                    if (((list[i].class_code >> 16) & 0xFFu) == cur_c && !list[i].class_name[0])
-                        hw_scpy(list[i].class_name, sizeof list[0].class_name, nm);
+                for (int l = 0; l < 2; l++) {
+                    for (int i = 0; i < counts[l]; i++) {
+                        if (((lists[l][i].class_code >> 16) & 0xFFu) == cur_c) {
+                            cur_c_wanted = 1;
+                            if (!lists[l][i].class_name[0])
+                                hw_scpy(lists[l][i].class_name, sizeof lists[0][0].class_name, nm);
+                        }
+                    }
                 }
+            } else {
+                cur_c = 0xFFFFFFFFu;
             }
             continue;
         }
         if (in_classes) {
-            if (line[0] == '\t' && line[1] != '\t' && cur_c != 0xFFFFFFFFu) {
+            if (cur_c_wanted && line[0] == '\t' && line[1] != '\t' && cur_c != 0xFFFFFFFFu) {
                 unsigned int sc = 0;
-                int off = 0;
-                if (sscanf(line + 1, "%2x %n", &sc, &off) >= 1 && off > 0) {
-                    const char *nm = line + 1 + off;
-                    while (*nm == ' ') nm++;
-                    for (int i = 0; i < n; i++) {
-                        if (((list[i].class_code >> 8) & 0xFFFFu) == ((cur_c << 8) | sc))
-                            hw_scpy(list[i].class_name, sizeof list[0].class_name, nm);
+                const char *nm = NULL;
+                if (hw_parse_hex(line + 1, 2, &sc, &nm)) {
+                    for (int l = 0; l < 2; l++) {
+                        for (int i = 0; i < counts[l]; i++) {
+                            if (((lists[l][i].class_code >> 8) & 0xFFFFu) == ((cur_c << 8) | sc))
+                                hw_scpy(lists[l][i].class_name, sizeof lists[0][0].class_name, nm);
+                        }
                     }
                 }
             }
@@ -1206,32 +1253,92 @@ static void hw_resolve_pci_ids(struct hw_pci_entry *list, int n)
         }
         if (isxdigit((unsigned char)line[0])) {
             unsigned int v = 0;
-            int off = 0;
-            if (sscanf(line, "%4x %n", &v, &off) >= 1 && off > 0) {
+            const char *nm = NULL;
+            cur_v_wanted = 0;
+            if (hw_parse_hex(line, 4, &v, &nm)) {
                 cur_v = v;
-                const char *nm = line + off;
-                while (*nm == ' ') nm++;
-                for (int i = 0; i < n; i++) {
-                    if (list[i].vendor == cur_v) {
-                        hw_scpy(list[i].vendor_name, sizeof list[0].vendor_name, nm);
-                        hw_trim_vendor(list[i].vendor_name);
+                for (int l = 0; l < 2; l++) {
+                    for (int i = 0; i < counts[l]; i++) {
+                        if (lists[l][i].vendor == cur_v) {
+                            cur_v_wanted = 1;
+                            hw_scpy(lists[l][i].vendor_name, sizeof lists[0][0].vendor_name, nm);
+                            hw_trim_vendor(lists[l][i].vendor_name);
+                        }
                     }
                 }
+            } else {
+                cur_v = 0xFFFFFFFFu;
             }
-        } else if (line[0] == '\t' && line[1] != '\t' && cur_v != 0xFFFFFFFFu) {
+        } else if (cur_v_wanted && line[0] == '\t' && line[1] != '\t' && cur_v != 0xFFFFFFFFu) {
             unsigned int dv = 0;
-            int off = 0;
-            if (sscanf(line + 1, "%4x %n", &dv, &off) >= 1 && off > 0) {
-                const char *nm = line + 1 + off;
-                while (*nm == ' ') nm++;
-                for (int i = 0; i < n; i++) {
-                    if (list[i].vendor == cur_v && list[i].device == dv)
-                        hw_scpy(list[i].device_name, sizeof list[0].device_name, nm);
+            const char *nm = NULL;
+            if (hw_parse_hex(line + 1, 4, &dv, &nm)) {
+                for (int l = 0; l < 2; l++) {
+                    for (int i = 0; i < counts[l]; i++) {
+                        if (lists[l][i].vendor == cur_v && lists[l][i].device == dv)
+                            hw_scpy(lists[l][i].device_name, sizeof lists[0][0].device_name, nm);
+                    }
                 }
             }
         }
     }
     fclose(f);
+}
+
+static int hw_cmp_pci(const void *a, const void *b);
+static void hw_read_link_basename(const char *path, char *out, size_t size);
+
+/* Scan /sys/bus/pci/devices once and resolve pci.ids once for both Graphics
+ * and PCI pages. GPU discovery is never capped at 96 PCI entries and keeps
+ * directory discovery order. */
+static void hw_ensure_pci_list(void)
+{
+    if (hw_pci_cached) return;
+    char pdir[128];
+    snprintf(pdir, sizeof pdir, "%s/bus/pci/devices", HW_SYS_ROOT);
+    DIR *d = opendir(pdir);
+    nhw_pci = 0;
+    nhw_gpus = 0;
+    struct dirent *e;
+    while (d && (e = readdir(d)) != NULL) {
+        if (e->d_name[0] == '.') continue;
+        if (nhw_pci >= 96 && nhw_gpus >= 8) break;
+        char p[1024];
+        int ok = 0;
+        snprintf(p, sizeof p, "%s/%s/class", pdir, e->d_name);
+        long long cc = hw_read_ll(p, &ok);
+        int take_gpu = ok && ((cc >> 16) & 0xFF) == 0x03 && nhw_gpus < 8;
+        int take_pci = nhw_pci < 96;
+        if (!take_gpu && !take_pci) continue;
+        struct hw_pci_entry item;
+        memset(&item, 0, sizeof item);
+        snprintf(item.bdf, sizeof item.bdf, "%.23s", e->d_name);
+        item.class_code = (unsigned int)cc;
+        snprintf(p, sizeof p, "%s/%s/vendor", pdir, e->d_name);
+        item.vendor = (unsigned int)hw_read_ll(p, &ok);
+        snprintf(p, sizeof p, "%s/%s/device", pdir, e->d_name);
+        item.device = (unsigned int)hw_read_ll(p, &ok);
+        snprintf(p, sizeof p, "%s/%s/driver", pdir, e->d_name);
+        hw_read_link_basename(p, item.driver, sizeof item.driver);
+        if (take_gpu) {
+            hw_gpu_list[nhw_gpus++] = item;
+        }
+        if (take_pci) {
+            snprintf(p, sizeof p, "%s/%s/current_link_speed", pdir, e->d_name);
+            hw_read_line(p, item.cur_speed, sizeof item.cur_speed);
+            snprintf(p, sizeof p, "%s/%s/current_link_width", pdir, e->d_name);
+            hw_read_line(p, item.cur_width, sizeof item.cur_width);
+            snprintf(p, sizeof p, "%s/%s/max_link_speed", pdir, e->d_name);
+            hw_read_line(p, item.max_speed, sizeof item.max_speed);
+            snprintf(p, sizeof p, "%s/%s/max_link_width", pdir, e->d_name);
+            hw_read_line(p, item.max_width, sizeof item.max_width);
+            hw_pci_list[nhw_pci++] = item;
+        }
+    }
+    if (d) closedir(d);
+    if (nhw_pci > 1) qsort(hw_pci_list, (size_t)nhw_pci, sizeof hw_pci_list[0], hw_cmp_pci);
+    hw_resolve_pci_ids_lists(hw_pci_list, nhw_pci, hw_gpu_list, nhw_gpus);
+    hw_pci_cached = 1;
 }
 
 static void hw_resolve_pnp_id(const char code[4], char *out, size_t size)
@@ -1344,52 +1451,31 @@ static void hw_read_link_basename(const char *path, char *out, size_t size)
 
 static void hw_collect_graphics(void)
 {
-    /* Collect VGA/3D/Display PCI controllers via class 0x03xxxx */
-    char pdir[128];
-    snprintf(pdir, sizeof pdir, "%s/bus/pci/devices", HW_SYS_ROOT);
-    DIR *pd = opendir(pdir);
-    struct hw_pci_entry gpus[8];
-    int ngpus = 0;
-    struct dirent *e;
-    while (pd && (e = readdir(pd)) != NULL && ngpus < 8) {
-        if (e->d_name[0] == '.') continue;
-        char p[1024];
-        int ok = 0;
-        snprintf(p, sizeof p, "%s/%s/class", pdir, e->d_name);
-        long long cc = hw_read_ll(p, &ok);
-        if (!ok || ((cc >> 16) & 0xFF) != 0x03) continue;
-        struct hw_pci_entry *g = &gpus[ngpus++];
-        memset(g, 0, sizeof *g);
-        snprintf(g->bdf, sizeof g->bdf, "%.23s", e->d_name);
-        g->class_code = (unsigned int)cc;
-        snprintf(p, sizeof p, "%s/%s/vendor", pdir, e->d_name);
-        g->vendor = (unsigned int)hw_read_ll(p, &ok);
-        snprintf(p, sizeof p, "%s/%s/device", pdir, e->d_name);
-        g->device = (unsigned int)hw_read_ll(p, &ok);
-        snprintf(p, sizeof p, "%s/%s/driver", pdir, e->d_name);
-        hw_read_link_basename(p, g->driver, sizeof g->driver);
-    }
-    if (pd) closedir(pd);
-    hw_resolve_pci_ids(gpus, ngpus);
+    /* Reuse cached full GPU scan so pci.ids is parsed at most once across
+     * Graphics and PCI without capping GPU discovery at 96 PCI entries. */
+    hw_ensure_pci_list();
 
     hw_add_section(_("Graphics Adapters"));
-    if (ngpus == 0) {
+    if (nhw_gpus == 0) {
         hw_add_note(_("No PCI display controller listed."));
     } else {
-        for (int i = 0; i < ngpus; i++) {
+        for (int i = 0; i < nhw_gpus; i++) {
+            const struct hw_pci_entry *g = &hw_gpu_list[i];
             char k[72], v[160];
-            snprintf(k, sizeof k, "GPU %d (%.23s)", i, gpus[i].bdf);
+            snprintf(k, sizeof k, "GPU %d (%.23s)", i, g->bdf);
             snprintf(v, sizeof v, "%.48s %.64s%s%.24s%s",
-                     gpus[i].vendor_name[0] ? gpus[i].vendor_name : "",
-                     gpus[i].device_name[0] ? gpus[i].device_name : _("Display controller"),
-                     gpus[i].driver[0] ? "  [driver: " : "",
-                     gpus[i].driver,
-                     gpus[i].driver[0] ? "]" : "");
+                     g->vendor_name[0] ? g->vendor_name : "",
+                     g->device_name[0] ? g->device_name : _("Display controller"),
+                     g->driver[0] ? "  [driver: " : "",
+                     g->driver,
+                     g->driver[0] ? "]" : "");
             hw_add_kv(k, v);
         }
     }
 
     /* DRM connectors & EDID monitors */
+    char pdir[128];
+    struct dirent *e;
     snprintf(pdir, sizeof pdir, "%s/class/drm", HW_SYS_ROOT);
     DIR *dd = opendir(pdir);
     int mon_shown = 0;
@@ -1647,52 +1733,19 @@ static int hw_cmp_pci(const void *a, const void *b)
 
 static void hw_collect_pci(void)
 {
-    char pdir[128];
-    snprintf(pdir, sizeof pdir, "%s/bus/pci/devices", HW_SYS_ROOT);
-    DIR *d = opendir(pdir);
-    struct hw_pci_entry list[96];
-    int n = 0;
-    struct dirent *e;
-    while (d && (e = readdir(d)) != NULL && n < 96) {
-        if (e->d_name[0] == '.') continue;
-        char p[1024];
-        int ok = 0;
-        struct hw_pci_entry *it = &list[n++];
-        memset(it, 0, sizeof *it);
-        snprintf(it->bdf, sizeof it->bdf, "%.23s", e->d_name);
-        snprintf(p, sizeof p, "%s/%s/vendor", pdir, e->d_name);
-        it->vendor = (unsigned int)hw_read_ll(p, &ok);
-        snprintf(p, sizeof p, "%s/%s/device", pdir, e->d_name);
-        it->device = (unsigned int)hw_read_ll(p, &ok);
-        snprintf(p, sizeof p, "%s/%s/class", pdir, e->d_name);
-        it->class_code = (unsigned int)hw_read_ll(p, &ok);
-        snprintf(p, sizeof p, "%s/%s/driver", pdir, e->d_name);
-        hw_read_link_basename(p, it->driver, sizeof it->driver);
-        snprintf(p, sizeof p, "%s/%s/current_link_speed", pdir, e->d_name);
-        hw_read_line(p, it->cur_speed, sizeof it->cur_speed);
-        snprintf(p, sizeof p, "%s/%s/current_link_width", pdir, e->d_name);
-        hw_read_line(p, it->cur_width, sizeof it->cur_width);
-        snprintf(p, sizeof p, "%s/%s/max_link_speed", pdir, e->d_name);
-        hw_read_line(p, it->max_speed, sizeof it->max_speed);
-        snprintf(p, sizeof p, "%s/%s/max_link_width", pdir, e->d_name);
-        hw_read_line(p, it->max_width, sizeof it->max_width);
-    }
-    if (d) closedir(d);
-
-    if (n == 0) {
+    hw_ensure_pci_list();
+    if (nhw_pci == 0) {
         hw_add_section(_("PCI Devices"));
         hw_add_note(_("No PCI devices reported in /sys/bus/pci/devices."));
         return;
     }
-    qsort(list, (size_t)n, sizeof list[0], hw_cmp_pci);
-    hw_resolve_pci_ids(list, n);
 
     char sec[96];
-    snprintf(sec, sizeof sec, _("PCI & PCIe Devices (%d total)"), n);
+    snprintf(sec, sizeof sec, _("PCI & PCIe Devices (%d total)"), nhw_pci);
     hw_add_section(sec);
 
-    for (int i = 0; i < n; i++) {
-        const struct hw_pci_entry *it = &list[i];
+    for (int i = 0; i < nhw_pci; i++) {
+        const struct hw_pci_entry *it = &hw_pci_list[i];
         const char *short_bdf = strncmp(it->bdf, "0000:", 5) == 0 ? it->bdf + 5 : it->bdf;
         char k[72], v[160];
         snprintf(k, sizeof k, "%.23s  %.22s", short_bdf,
@@ -1734,29 +1787,30 @@ static void hw_resolve_usb_ids(struct hw_usb_entry *list, int n)
     FILE *f = fopen(path, "r");
     if (!f) return;
     unsigned int cur_v = 0xFFFFFFFFu;
+    int cur_v_wanted = 0;
     while (fgets(line, sizeof line, f)) {
         if (line[0] == '#' || line[0] == '\r' || line[0] == '\n') continue;
         line[strcspn(line, "\r\n")] = '\0';
         if (isxdigit((unsigned char)line[0])) {
             unsigned int v = 0;
-            int off = 0;
-            if (sscanf(line, "%4x %n", &v, &off) >= 1 && off > 0) {
+            const char *nm = NULL;
+            cur_v_wanted = 0;
+            if (hw_parse_hex(line, 4, &v, &nm)) {
                 cur_v = v;
-                const char *nm = line + off;
-                while (*nm == ' ') nm++;
                 for (int i = 0; i < n; i++) {
-                    if (list[i].vid == cur_v && !list[i].mfg[0])
-                        hw_scpy(list[i].mfg, sizeof list[0].mfg, nm);
+                    if (list[i].vid == cur_v) {
+                        cur_v_wanted = 1;
+                        if (!list[i].mfg[0])
+                            hw_scpy(list[i].mfg, sizeof list[0].mfg, nm);
+                    }
                 }
             } else {
                 cur_v = 0xFFFFFFFFu;
             }
-        } else if (line[0] == '\t' && line[1] != '\t' && cur_v != 0xFFFFFFFFu) {
+        } else if (cur_v_wanted && line[0] == '\t' && line[1] != '\t' && cur_v != 0xFFFFFFFFu) {
             unsigned int p = 0;
-            int off = 0;
-            if (sscanf(line + 1, "%4x %n", &p, &off) >= 1 && off > 0) {
-                const char *nm = line + 1 + off;
-                while (*nm == ' ') nm++;
+            const char *nm = NULL;
+            if (hw_parse_hex(line + 1, 4, &p, &nm)) {
                 for (int i = 0; i < n; i++) {
                     if (list[i].vid == cur_v && list[i].pid == p && !list[i].prod[0])
                         hw_scpy(list[i].prod, sizeof list[0].prod, nm);
@@ -2072,8 +2126,29 @@ static void hw_collect_summary(void)
     }
 }
 
+/* Static categories are cached until 'r', a language change, or reopening the
+ * page. Summary, Processor, Memory & Slots, and live Sensors stay uncached so
+ * live MHz, RAM/swap bars, and sensors always refresh. */
+static int hw_static_category(int cat)
+{
+    return cat != HWCAT_SUMMARY && cat != HWCAT_CPU &&
+           cat != HWCAT_MEMORY && cat != HWCAT_SENSORS;
+}
+
+static int hw_live_category(int cat)
+{
+    return cat == HWCAT_SENSORS || cat == HWCAT_CPU || cat == HWCAT_MEMORY;
+}
+
 static void hw_populate_category(int cat)
 {
+    struct hw_cat_cache *c = &hw_cache[cat];
+    hw_rows = c->rows;
+    hw_full_redraw = 1;
+    if (c->valid) {
+        nhw_rows = c->nrows;
+        return;
+    }
     hw_clear_rows();
     switch (cat) {
     case HWCAT_SUMMARY:  hw_collect_summary();  break;
@@ -2087,6 +2162,16 @@ static void hw_populate_category(int cat)
     case HWCAT_NETWORK:  hw_collect_network();  break;
     case HWCAT_FIRMWARE: hw_collect_firmware(); break;
     }
+    c->nrows = nhw_rows;
+    c->valid = hw_static_category(cat);
+}
+
+/* 'r', reopening the page, or changing language: drop cached readings. */
+static void hw_forget_readings(void)
+{
+    for (int i = 0; i < NHWCATS; i++) hw_cache[i].valid = 0;
+    hw_pci_cached = 0;
+    hw_full_redraw = 1;
 }
 
 static void hw_build_summary_clipboard(char *buf, size_t size)
@@ -2129,6 +2214,7 @@ static int hw_cat;
 static int hw_in_pane; /* 0: left category tree, 1: right detail pane */
 static int hw_scroll;
 static int hw_sel_row;
+static int hw_pending;
 
 static void hw_update_sensor_spark(void)
 {
@@ -2178,10 +2264,69 @@ static uint32_t hw_value_color(enum theme_role role)
     }
 }
 
+static void hwinfo_draw_row(int px, int pw, int key_w, int y, int idx)
+{
+    const struct hw_row *row = &hw_rows[idx];
+    int sel = hw_in_pane && idx == hw_sel_row;
+    uint32_t rbg = sel ? ACCENT : BG;
+    screen_fill(px, y, pw, 1, rbg);
+    if (row->kind == HWROW_SECTION) {
+        screen_text(px, y, row->key, sel ? ON_ACCENT : ACCENT_TEXT, rbg);
+    } else if (row->kind == HWROW_NOTE) {
+        screen_text(px + 2, y, row->val, sel ? ON_ACCENT : DIM, rbg);
+    } else if (row->kind == HWROW_BAR) {
+        char kpad[96], bar[32];
+        ui_pad(kpad, sizeof kpad, row->key, key_w);
+        int bw = 16, filled = (row->bar_pct * bw + 50) / 100;
+        bar[0] = '[';
+        for (int b = 0; b < bw; b++) bar[1 + b] = b < filled ? '#' : '-';
+        bar[1 + bw] = ']';
+        bar[2 + bw] = ' ';
+        bar[3 + bw] = '\0';
+        screen_text(px + 2, y, kpad, sel ? ON_ACCENT : DIM, rbg);
+        screen_text(px + 2 + key_w + 1, y, bar, sel ? ON_ACCENT : theme_rgb(THEME_ACCENT_TEXT, POWER_DIS_COL), rbg);
+        screen_text(px + 2 + key_w + 1 + bw + 3, y, row->val, sel ? ON_ACCENT : FG, rbg);
+    } else {
+        char kpad[96];
+        ui_pad(kpad, sizeof kpad, row->key, key_w);
+        screen_text(px + 2, y, kpad, sel ? ON_ACCENT : DIM, rbg);
+        screen_text(px + 2 + key_w + 1, y, row->val, sel ? ON_ACCENT : hw_value_color(row->value_role), rbg);
+    }
+}
+
 static void hwinfo_draw(void)
 {
+    static int last_cat = -1, last_in_pane = -1, last_scroll = -1, last_sel = -1;
+    static int last_cols = -1, last_rows = -1, last_nrows = -1;
+    static char last_notice[sizeof notice];
     int cols = screen_cols(), rows = screen_rows();
     int sw = hw_sidebar_w(cols);
+    int px = sw > 0 ? sw + 2 : 2;
+    int pw = cols - px - 1;
+    int top = PAGE_TOP + (hw_spark_visible(pw, rows) ? 6 : 0);
+    int avail = rows - 3 - top;
+    int key_w = pw >= 100 ? 28 : 22;
+
+    if (hw_sel_row >= nhw_rows) hw_sel_row = nhw_rows > 0 ? nhw_rows - 1 : 0;
+    if (hw_sel_row < hw_scroll) hw_scroll = hw_sel_row;
+    if (hw_sel_row >= hw_scroll + avail) hw_scroll = hw_sel_row - avail + 1;
+    if (hw_scroll > nhw_rows - avail) hw_scroll = nhw_rows - avail;
+    if (hw_scroll < 0) hw_scroll = 0;
+
+    if (!hw_full_redraw && !hw_pending && hw_cat != HWCAT_SENSORS &&
+        hw_in_pane && last_in_pane && hw_cat == last_cat && hw_scroll == last_scroll &&
+        cols == last_cols && rows == last_rows && nhw_rows == last_nrows &&
+        strcmp(notice, last_notice) == 0) {
+        if (last_sel >= hw_scroll && last_sel < hw_scroll + avail && last_sel < nhw_rows)
+            hwinfo_draw_row(px, pw, key_w, top + (last_sel - hw_scroll), last_sel);
+        if (hw_sel_row >= hw_scroll && hw_sel_row < hw_scroll + avail && hw_sel_row < nhw_rows &&
+            hw_sel_row != last_sel)
+            hwinfo_draw_row(px, pw, key_w, top + (hw_sel_row - hw_scroll), hw_sel_row);
+        last_sel = hw_sel_row;
+        screen_flush();
+        return;
+    }
+
     screen_fill(0, 0, cols, rows, BG);
     screen_bar(_("settings — Hardware Information"), NULL);
 
@@ -2195,9 +2340,7 @@ static void hwinfo_draw(void)
         screen_fill(sw, PAGE_TOP, 1, rows - 3 - PAGE_TOP, BORDER);
     }
 
-    int px = sw > 0 ? sw + 2 : 2;
-    int pw = cols - px - 1;
-    int top = PAGE_TOP;
+    top = PAGE_TOP;
 
     /* Live rolling sparkline card at top of Sensors category */
     if (hw_spark_visible(pw, rows)) {
@@ -2259,44 +2402,8 @@ static void hwinfo_draw(void)
         top += ch_rows + 1;
     }
 
-    int avail = rows - 3 - top;
-    if (hw_sel_row >= nhw_rows) hw_sel_row = nhw_rows > 0 ? nhw_rows - 1 : 0;
-    if (hw_sel_row < hw_scroll) hw_scroll = hw_sel_row;
-    if (hw_sel_row >= hw_scroll + avail) hw_scroll = hw_sel_row - avail + 1;
-    if (hw_scroll > nhw_rows - avail) hw_scroll = nhw_rows - avail;
-    if (hw_scroll < 0) hw_scroll = 0;
-
-    int key_w = pw >= 100 ? 28 : 22;
     for (int r = 0; r < avail && hw_scroll + r < nhw_rows; r++) {
-        int idx = hw_scroll + r;
-        const struct hw_row *row = &hw_rows[idx];
-        int y = top + r;
-        int sel = hw_in_pane && idx == hw_sel_row;
-        uint32_t rbg = sel ? ACCENT : BG;
-        if (sel) screen_fill(px, y, pw, 1, ACCENT);
-
-        if (row->kind == HWROW_SECTION) {
-            screen_text(px, y, row->key, sel ? ON_ACCENT : ACCENT_TEXT, rbg);
-        } else if (row->kind == HWROW_NOTE) {
-            screen_text(px + 2, y, row->val, sel ? ON_ACCENT : DIM, rbg);
-        } else if (row->kind == HWROW_BAR) {
-            char kpad[96], bar[32];
-            ui_pad(kpad, sizeof kpad, row->key, key_w);
-            int bw = 16, filled = (row->bar_pct * bw + 50) / 100;
-            bar[0] = '[';
-            for (int b = 0; b < bw; b++) bar[1 + b] = b < filled ? '#' : '-';
-            bar[1 + bw] = ']';
-            bar[2 + bw] = ' ';
-            bar[3 + bw] = '\0';
-            screen_text(px + 2, y, kpad, sel ? ON_ACCENT : DIM, rbg);
-            screen_text(px + 2 + key_w + 1, y, bar, sel ? ON_ACCENT : theme_rgb(THEME_ACCENT_TEXT, POWER_DIS_COL), rbg);
-            screen_text(px + 2 + key_w + 1 + bw + 3, y, row->val, sel ? ON_ACCENT : FG, rbg);
-        } else {
-            char kpad[96];
-            ui_pad(kpad, sizeof kpad, row->key, key_w);
-            screen_text(px + 2, y, kpad, sel ? ON_ACCENT : DIM, rbg);
-            screen_text(px + 2 + key_w + 1, y, row->val, sel ? ON_ACCENT : hw_value_color(row->value_role), rbg);
-        }
+        hwinfo_draw_row(px, pw, key_w, top + r, hw_scroll + r);
     }
 
     /* TRANSLATORS: Tab, r, Ctrl+C and Esc are key names; keep them. */
@@ -2306,6 +2413,15 @@ static void hwinfo_draw(void)
     screen_text(2, rows - 2, _(notice), ACCENT_TEXT, BG);
     ui_hits_clear();
     settings_back_button(rows - 1);
+    hw_full_redraw = 0;
+    last_cat = hw_cat;
+    last_in_pane = hw_in_pane;
+    last_scroll = hw_scroll;
+    last_sel = hw_sel_row;
+    last_cols = cols;
+    last_rows = rows;
+    last_nrows = nhw_rows;
+    snprintf(last_notice, sizeof last_notice, "%s", notice);
     screen_flush();
 }
 
@@ -2328,6 +2444,31 @@ static void hw_copy_current_page(void)
         hw_scpy(notice, sizeof notice, _("Clipboard service is not running."));
 }
 
+/* Unread static categories wait for keys to settle (the idle tick, pane entry,
+ * or copy), so holding Up/Down skips over heavy probes until it stops. */
+static void hw_settle(void)
+{
+    if (!hw_pending) return;
+    hw_pending = 0;
+    hw_populate_category(hw_cat);
+    hw_update_sensor_spark();
+}
+
+static void hw_go_category(int cat)
+{
+    hw_cat = cat;
+    hw_scroll = hw_sel_row = 0;
+    hw_pending = hw_static_category(cat) && !hw_cache[cat].valid;
+    if (hw_pending) {
+        hw_rows = hw_cache[cat].rows;
+        nhw_rows = 0;
+        hw_full_redraw = 1;
+    } else {
+        hw_populate_category(cat);
+        hw_update_sensor_spark();
+    }
+}
+
 static void hwinfo_page(void)
 {
     hw_cat = HWCAT_SUMMARY;
@@ -2336,20 +2477,26 @@ static void hwinfo_page(void)
     hw_sel_row = 0;
     hw_spark_n = 0;
     hw_spark_key[0] = '\0';
+    hw_pending = 0;
     notice[0] = '\0';
 
+    hw_forget_readings();
     hw_populate_category(hw_cat);
     hwinfo_draw();
 
     for (;;) {
-        int timeout_ms = (hw_cat == HWCAT_SENSORS || hw_cat == HWCAT_CPU || hw_cat == HWCAT_MEMORY) ? 1000 : 5000;
+        int timeout_ms = hw_pending ? 150 : hw_live_category(hw_cat) ? 1000 : 5000;
         int key = key_poll_timeout(-1, timeout_ms);
         if (key == 0 || key == K_SHOWN || key == K_REPAINT) {
-            if (key != K_REPAINT &&
-                (hw_cat == HWCAT_SENSORS || hw_cat == HWCAT_CPU || hw_cat == HWCAT_MEMORY)) {
-                hw_populate_category(hw_cat);
-                hw_update_sensor_spark();
+            if (key != K_REPAINT) {
+                if (hw_pending) {
+                    hw_settle();
+                } else if (hw_live_category(hw_cat)) {
+                    hw_populate_category(hw_cat);
+                    hw_update_sensor_spark();
+                }
             }
+            hw_full_redraw = 1;
             hwinfo_draw();
             continue;
         }
@@ -2370,13 +2517,9 @@ static void hwinfo_page(void)
                     int nc = hw_cat - ev->wheel;
                     if (nc < 0) nc = 0;
                     if (nc >= NHWCATS) nc = NHWCATS - 1;
-                    if (nc != hw_cat) {
-                        hw_cat = nc;
-                        hw_scroll = hw_sel_row = 0;
-                        hw_populate_category(hw_cat);
-                        hw_update_sensor_spark();
-                    }
+                    if (nc != hw_cat) hw_go_category(nc);
                 } else {
+                    if (hw_pending) hw_settle();
                     if (ev->row < top || !nhw_rows) continue;
                     hw_in_pane = 1;
                     hw_sel_row -= ev->wheel * 2;
@@ -2391,14 +2534,13 @@ static void hwinfo_page(void)
                 if (on_side) {
                     int c = ev->row - PAGE_TOP;
                     if (c >= 0 && c < NHWCATS) {
-                        hw_cat = c;
+                        hw_go_category(c);
                         hw_in_pane = 1;
-                        hw_scroll = hw_sel_row = 0;
-                        hw_populate_category(hw_cat);
-                        hw_update_sensor_spark();
+                        hw_settle();
                         hwinfo_draw();
                     }
                 } else {
+                    if (hw_pending) hw_settle();
                     int r = ev->row - top;
                     if (r >= 0 && hw_scroll + r < nhw_rows) {
                         hw_in_pane = 1;
@@ -2423,10 +2565,12 @@ static void hwinfo_page(void)
         if (act == ACT_HELP) {
             help_screen();
             if (closing) return;
+            hw_full_redraw = 1;
             hwinfo_draw();
             continue;
         }
         if (act == ACT_COPY) {
+            hw_settle();
             hw_copy_current_page();
             hwinfo_draw();
             continue;
@@ -2437,38 +2581,45 @@ static void hwinfo_page(void)
         }
         if (key == '\t') {
             hw_in_pane = !hw_in_pane;
+            if (hw_in_pane) hw_settle();
         } else if (!hw_in_pane && key == K_RIGHT) {
             hw_in_pane = 1;
+            hw_settle();
         } else if (hw_in_pane && key == K_LEFT) {
             hw_in_pane = 0;
         } else if (!hw_in_pane && (key == K_UP || key == K_DOWN)) {
             int nc = hw_cat + (key == K_UP ? -1 : 1);
             if (nc < 0) nc = 0;
             if (nc >= NHWCATS) nc = NHWCATS - 1;
-            if (nc != hw_cat) {
-                hw_cat = nc;
-                hw_scroll = hw_sel_row = 0;
-                hw_populate_category(hw_cat);
-                hw_update_sensor_spark();
-            }
+            if (nc == hw_cat) continue;
+            hw_go_category(nc);
         } else if (!hw_in_pane && key == '\n') {
             hw_in_pane = 1;
+            hw_settle();
         } else if (hw_in_pane && (key == K_UP || key == K_DOWN)) {
-            hw_sel_row += (key == K_UP ? -1 : 1);
-            if (hw_sel_row < 0) hw_sel_row = 0;
-            if (hw_sel_row >= nhw_rows) hw_sel_row = nhw_rows > 0 ? nhw_rows - 1 : 0;
+            int next = hw_sel_row + (key == K_UP ? -1 : 1);
+            if (next < 0) next = 0;
+            if (next >= nhw_rows) next = nhw_rows > 0 ? nhw_rows - 1 : 0;
+            if (next == hw_sel_row) continue;
+            hw_sel_row = next;
             hw_update_sensor_spark();
         } else if (hw_in_pane && (key == K_PGUP || key == K_PGDN)) {
             int step = screen_rows() - 8;
             if (step < 4) step = 4;
-            hw_sel_row += (key == K_PGUP ? -step : step);
-            if (hw_sel_row < 0) hw_sel_row = 0;
-            if (hw_sel_row >= nhw_rows) hw_sel_row = nhw_rows > 0 ? nhw_rows - 1 : 0;
+            int next = hw_sel_row + (key == K_PGUP ? -step : step);
+            if (next < 0) next = 0;
+            if (next >= nhw_rows) next = nhw_rows > 0 ? nhw_rows - 1 : 0;
+            if (next == hw_sel_row) continue;
+            hw_sel_row = next;
             hw_update_sensor_spark();
         } else if (hw_in_pane && (key == K_BOL || key == K_EOL)) {
-            hw_sel_row = (key == K_BOL) ? 0 : (nhw_rows > 0 ? nhw_rows - 1 : 0);
+            int next = (key == K_BOL) ? 0 : (nhw_rows > 0 ? nhw_rows - 1 : 0);
+            if (next == hw_sel_row) continue;
+            hw_sel_row = next;
             hw_update_sensor_spark();
         } else if (key == 'r' || key == 'R') {
+            hw_forget_readings();
+            hw_pending = 0;
             hw_populate_category(hw_cat);
             hw_update_sensor_spark();
             hw_scpy(notice, sizeof notice, _("Hardware readings refreshed."));

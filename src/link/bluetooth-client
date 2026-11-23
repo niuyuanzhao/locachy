@@ -5,9 +5,10 @@
 set -eu
 
 for _ in $(seq 1 20); do
-    if timeout 2 dbus-send --system --print-reply --reply-timeout=1000 \
-        --dest=org.freedesktop.DBus /org/freedesktop/DBus \
-        org.freedesktop.DBus.ListNames >/dev/null 2>&1; then
+    if [ -S /run/dbus/system_bus_socket ] &&
+        timeout 2 dbus-send --system --print-reply --reply-timeout=1000 \
+            --dest=org.freedesktop.DBus /org/freedesktop/DBus \
+            org.freedesktop.DBus.ListNames >/dev/null 2>&1; then
         exec /usr/lib/bluetooth/bluetoothd -n
     fi
     sleep 0.1

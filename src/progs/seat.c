@@ -96,11 +96,21 @@ static void describe_devices(void)
     }
     if (access("/run/udev/control", F_OK) != 0) {
         say("seat: no udevd (service_udev): the compositor will find no keyboard or pointer");
+    } else if (access("/run/udev/locachy-settled", F_OK) == 0) {
+        /* udev-client already completed full coldplug trigger+settle at boot;
+         * wait only for any in-flight queue items instead of re-triggering. */
+        if (system("timeout 5 /usr/bin/udevadm settle") != 0) {
+            say("seat: udevadm settle failed");
+        }
     } else if (system("timeout 30 /usr/bin/udevadm trigger --action=add --subsystem-match=input "
                       "--subsystem-match=drm --settle") != 0) {
         say("seat: udevadm trigger failed");
     }
-    if (system("/usr/local/bin/settings --apply 2>/dev/null || true") < 0) {
+    /* init already ran settings --apply at boot; skip duplicating it when the
+     * generated labwc config is already in place. */
+    if (access(LABWC_RC, R_OK) != 0) {
+        if (system("/usr/local/bin/settings --apply 2>/dev/null || true") < 0) {
+        }
     }
 }
 
@@ -473,6 +483,8 @@ static void send_keyboards(int ctl)
     }
 }
 
+static int bar_locks_seen; /* a "locks" from the bar was read (its answer to a release) */
+
 /* The bar reports locks (its grab may hide them from process 1), activity,
  * and wait-panel actions. A query after self-exec only replays a panel that
  * still belongs to the active seat. */
@@ -489,6 +501,10 @@ static void bar_reports(int ctl)
             if (is_labwc && active_seat) seat_notify(window_requests, "bar-activity");
             continue;
         }
+        if (n == 1 && strcmp(fields[0], "released") == 0) {
+            bar_locks_seen = 1;
+            continue;
+        }
         if (len == sizeof "desktop-wait?" - 1 && strcmp(fields[0], "desktop-wait?") == 0) {
             desktop_wait_replay(ctl);
             continue;
@@ -503,6 +519,7 @@ static void bar_reports(int ctl)
         }
         long locks = n == 2 && strcmp(fields[0], "locks") == 0 ? strtol(fields[1], &end, 10) : -1;
         if (locks < 0 || locks > (KEYS_LOCK_CAPS | KEYS_LOCK_NUM) || *end) continue;
+        bar_locks_seen = 1;
         if (ctl >= 0) {
             const char *const report[] = { "locks", fields[1], NULL };
             control_send_fields(ctl, report);
@@ -567,14 +584,27 @@ static int stop_group(pid_t pid)
         return waitpid(pid, NULL, WNOHANG) == pid;
     }
     kill(-pid, SIGTERM);
+    int pidfd = (int)syscall(SYS_pidfd_open, pid, 0);
+    if (pidfd >= 0) fcntl(pidfd, F_SETFD, FD_CLOEXEC);
     double deadline = uptime() + 0.05;
     int reaped = 0;
     for (;;) {
         if (!reaped && waitpid(pid, NULL, WNOHANG) == pid) reaped = 1;
         if (kill(-pid, 0) < 0 && errno == ESRCH) break;
-        if (uptime() >= deadline) break;
-        usleep(1000);
+        double left = deadline - uptime();
+        if (left <= 0) break;
+        int ms = (int)(left * 1000) + 1;
+        if (pidfd >= 0 && !reaped) {
+            /* Readable when the leader exits: wake then, not on a timer. */
+            struct pollfd leader = { .fd = pidfd, .events = POLLIN };
+            poll(&leader, 1, ms);
+        } else {
+            /* Group members remain (the leader is reaped, so its pidfd is always
+             * readable): a short poll as the fallback, never a busy spin. */
+            poll(NULL, 0, ms < 2 ? ms : 2);
+        }
     }
+    if (pidfd >= 0) close(pidfd);
     /* A leader may have exited before its children. Do not let those input
      * readers outlive the seat release merely because waitpid found it. */
     kill(-pid, SIGKILL);
@@ -740,7 +770,8 @@ static int window_request_valid(const char *program, const char *target)
     }
     return (strcmp(program, "packages") == 0 || strcmp(program, "firmware") == 0 ||
             strcmp(program, "mixer") == 0 || strcmp(program, "bluetooth") == 0 ||
-            strcmp(program, "network") == 0 || strcmp(program, "term") == 0) && !len;
+            strcmp(program, "network") == 0 || strcmp(program, "term") == 0 ||
+            strcmp(program, "search") == 0) && !len;
 }
 
 static int app_request_valid(const char *name)
@@ -824,45 +855,48 @@ static int open_client(int argc, char **argv)
  * Keep the last reported state to clear it if the helper disconnects. */
 static int idle_blanked;
 
+/* Drain queued datagrams in a bounded non-blocking loop (-1: peer closed/error). */
 static int window_forward(int requests, int ctl)
 {
-    char msg[16 + 64 + WINDOW_TARGET_MAX + 1], *fields[4];
-    ssize_t len = recv(requests, msg, sizeof msg - 1, MSG_DONTWAIT | MSG_TRUNC);
-    if (len <= 0) return len < 0 && (errno == EAGAIN || errno == EINTR) ? 0 : -1;
-    if ((size_t)len >= sizeof msg) return 0;
-    msg[len] = '\0';
-    if ((size_t)len == strlen(msg)) {
-        if (strcmp(msg, "idle-blanked") == 0 || strcmp(msg, "idle-lock") == 0) {
-            if (!active_seat) return 0;
-            if (strcmp(msg, "idle-blanked") == 0) idle_blanked = 1;
-        } else if (strcmp(msg, "idle-unblanked") == 0) {
-            if (!idle_blanked) return 0;
-            idle_blanked = 0;
-        } else if (strcmp(msg, "idle-power-lost") == 0) {
-            if (!active_seat && !idle_blanked) return 0;
-            idle_blanked = 0;
-        } else {
-            return 0;
+    for (int count = 0; count < 64; count++) {
+        char msg[16 + 64 + WINDOW_TARGET_MAX + 1], *fields[4];
+        ssize_t len = recv(requests, msg, sizeof msg - 1, MSG_DONTWAIT | MSG_TRUNC);
+        if (len <= 0) return len < 0 && (errno == EAGAIN || errno == EINTR) ? 0 : -1;
+        if ((size_t)len >= sizeof msg) continue;
+        msg[len] = '\0';
+        if ((size_t)len == strlen(msg)) {
+            if (strcmp(msg, "idle-blanked") == 0 || strcmp(msg, "idle-lock") == 0) {
+                if (!active_seat) continue;
+                if (strcmp(msg, "idle-blanked") == 0) idle_blanked = 1;
+            } else if (strcmp(msg, "idle-unblanked") == 0) {
+                if (!idle_blanked) continue;
+                idle_blanked = 0;
+            } else if (strcmp(msg, "idle-power-lost") == 0) {
+                if (!active_seat && !idle_blanked) continue;
+                idle_blanked = 0;
+            } else {
+                continue;
+            }
+            if (ctl >= 0) control_send_fields(ctl, (const char *const[]){ msg, NULL });
+            continue;
         }
-        if (ctl >= 0) control_send_fields(ctl, (const char *const[]){ msg, NULL });
-        return 0;
-    }
-    int n = 0;
-    for (ssize_t i = 0; i < len && n < 4; i += (ssize_t)strlen(msg + i) + 1) {
-        fields[n++] = msg + i;
-    }
-    int ok = (n >= 2 && n <= 3 && strcmp(fields[0], "window") == 0 &&
-              window_request_valid(fields[1], n == 3 ? fields[2] : "")) ||
-             (n == 3 && strcmp(fields[0], "app") == 0 &&
-              (strcmp(fields[1], "open") == 0 || strcmp(fields[1], "open-own-tor") == 0) &&
-              app_request_valid(fields[2]));
-    if (!ok) {
-        say("seat: a malformed window request refused");
-        return 0;
-    }
-    fields[n] = NULL;
-    if (ctl >= 0) {
-        control_send_fields(ctl, (const char *const *)fields);
+        int n = 0;
+        for (ssize_t i = 0; i < len && n < 4; i += (ssize_t)strlen(msg + i) + 1) {
+            fields[n++] = msg + i;
+        }
+        int ok = (n >= 2 && n <= 3 && strcmp(fields[0], "window") == 0 &&
+                  window_request_valid(fields[1], n == 3 ? fields[2] : "")) ||
+                 (n == 3 && strcmp(fields[0], "app") == 0 &&
+                  (strcmp(fields[1], "open") == 0 || strcmp(fields[1], "open-own-tor") == 0) &&
+                  app_request_valid(fields[2]));
+        if (!ok) {
+            say("seat: a malformed window request refused");
+            continue;
+        }
+        fields[n] = NULL;
+        if (ctl >= 0) {
+            control_send_fields(ctl, (const char *const *)fields);
+        }
     }
     return 0;
 }
@@ -906,6 +940,8 @@ static const char *labwc_fallback_from(const char *template_path, const char *ou
             }
         } else if (strstr(line, "key=\"LOCK-KEY\"")) {
             emit_keybind(out, line, "LOCK-KEY", "W-l");
+        } else if (strstr(line, "key=\"SEARCH-KEY\"")) {
+            emit_keybind(out, line, "SEARCH-KEY", "W-space");
         } else if (strstr(line, "key=\"TERMINAL-KEY\"")) {
             emit_keybind(out, line, "TERMINAL-KEY", "C-A-t");
         } else {
@@ -1198,9 +1234,20 @@ int main(int argc, char **argv)
                 seat_release(ctl);
                 gestures(0);
                 double gestures_stopped = uptime();
+                bar_reports(ctl); /* what the bar sent before the release */
                 if (bar_pid > 0) {
+                    bar_locks_seen = 0;
                     kill(bar_pid, SIGUSR2);
-                    usleep(10000);
+                    /* Its answer to the release is its locks: read as they come,
+                     * at most 15 ms, and not after an unconditional delay. */
+                    double answer_until = uptime() + 0.015;
+                    while (bar_keys >= 0 && !bar_locks_seen) {
+                        double left = answer_until - uptime();
+                        if (left <= 0) break;
+                        struct pollfd bar_answer = { .fd = bar_keys, .events = POLLIN };
+                        if (poll(&bar_answer, 1, (int)(left * 1000) + 1) <= 0) break;
+                        bar_reports(ctl);
+                    }
                 }
                 bar_reports(ctl); /* its last locks, before "released" */
                 keyboards_lent(ctl, NULL, 0); /* process 1 revokes them after "released" */

@@ -44,6 +44,19 @@ FT_Face font_set_primary(struct font_set *set);
  * NULL and 0 when none has it. Which font has cp is remembered, also that
  * none has, so that drawing it again looks nothing up. */
 FT_Face font_set_face(struct font_set *set, uint32_t cp, int px, FT_UInt *glyph);
+
+struct font_glyph {
+    uint16_t width;
+    uint16_t rows;
+    int16_t left;
+    int16_t top;
+    int16_t advance_x;     /* rounded up to integer pixels */
+    uint8_t has_advance;   /* 1 if glyph slot advance.x != 0 */
+    const uint8_t *alpha;  /* width * rows bytes, normalized 0..255; NULL when width==0 || rows==0 */
+};
+
+const struct font_glyph *font_set_glyph(struct font_set *set, uint32_t cp, int px);
+const struct font_glyph *font_face_glyph(struct font_set *set, FT_Face face, FT_UInt glyph, int px);
 #endif
 
 #endif

@@ -710,7 +710,9 @@ static void test_circular(void)
            hwinfo_index() == bat_thresh_index() + power_thresh_count() && hwcopy_index() == hwinfo_index() + 1 &&
            nmtui_index() == hwcopy_index() + 1 && extd_index() == nmtui_index() + 1 &&
            cpu_opt_index() == extd_index() + 1 && blank_index() == cpu_opt_index() + 1 &&
-           num_hw_items() == blank_index() + 2);
+           power_profile_index() == blank_index() + 2 && zram_index() == power_profile_index() + 1 &&
+           search_key_index() == zram_index() + 1 && search_svc_index() == search_key_index() + 1 &&
+           search_docs_index() == search_svc_index() + 1 && num_hw_items() == search_docs_index() + 1);
     on_rc("touchpad_circular", "0", NULL);
     assert(circular == 0);
     on_rc("touchpad_circular", "yes", NULL);
@@ -1295,6 +1297,9 @@ static void test_power_and_hwinfo(void)
     }
 
     power_refresh_devices();
+    /* Handoffs stay unloaded during power_refresh_devices (used by --apply)
+     * and load lazily only when building the Power page notes. */
+    assert(!power_handoff_loaded && !power_last_handoff[0]);
     assert(npower_devs == 3 && power_thresh_count() == 2);
     assert(!strcmp(power_devs[0].pack_id, "LGC_45N1111_4102") && !power_devs[0].is_offline_pack);
     assert(!strcmp(power_devs[1].pack_id, "SANYO_45N1029_8899") && power_devs[1].is_offline_pack);
@@ -1302,6 +1307,7 @@ static void test_power_and_hwinfo(void)
 
     show_category(CAT_POWER, 1);
     draw();
+    assert(power_handoff_loaded && strstr(power_last_handoff, "Last handoff:"));
     assert(category == CAT_POWER && canvas_has("Power & Battery") && canvas_has("Battery curves & health"));
     assert(canvas_has("Charge start threshold") && canvas_has("Charge stop threshold"));
     assert(canvas_has("Lid Close Holdoff") && canvas_has("Critical Battery Level"));
@@ -1516,13 +1522,22 @@ static void test_power_and_hwinfo(void)
     copy_system_summary_action();
     assert(strstr(clip_buf, "CF-FV1RDAVS") && strstr(clip_buf, "i7-1185G7"));
 
+    /* Live categories (CPU, Memory, Sensors, Summary) stay uncached; static categories cache. */
+    assert(!hw_static_category(HWCAT_SUMMARY) && !hw_static_category(HWCAT_CPU) &&
+           !hw_static_category(HWCAT_MEMORY) && !hw_static_category(HWCAT_SENSORS));
+    assert(hw_live_category(HWCAT_CPU) && hw_live_category(HWCAT_MEMORY) && hw_live_category(HWCAT_SENSORS));
+    assert(hw_static_category(HWCAT_STORAGE) && hw_static_category(HWCAT_GRAPHICS) && hw_static_category(HWCAT_PCI));
+
     /* Step through all 10 categories in hwinfo_page and verify parsed values */
+    hw_forget_readings();
     hw_populate_category(HWCAT_CPU);
+    assert(!hw_cache[HWCAT_CPU].valid);
     hw_cat = HWCAT_CPU;
     hwinfo_draw();
     assert(canvas_has("x86-64-v4") && canvas_has("48K") && canvas_has("intel_pstate"));
 
     hw_populate_category(HWCAT_MEMORY);
+    assert(!hw_cache[HWCAT_MEMORY].valid);
     hw_cat = HWCAT_MEMORY;
     hwinfo_draw();
     assert(canvas_has("16 GiB LPDDR4-4267") && canvas_has("Samsung K4U6E3S4AA-MGCL") && canvas_has("Empty"));
@@ -1565,6 +1580,29 @@ static void test_power_and_hwinfo(void)
     keys[nkeys++] = 'q';    /* exit */
     hwinfo_page();
     assert(keypos == nkeys && strstr(clip_buf, "Samsung K4U6E3S4AA-MGCL"));
+
+    /* GPU discovery must not be capped at 96 PCI entries. */
+    for (int d = 0; d < 105; d++) {
+        char rel[96];
+        snprintf(rel, sizeof rel, "sys/bus/pci/devices/0000:01:%02x.0", d);
+        mkp(rel);
+        snprintf(rel, sizeof rel, "sys/bus/pci/devices/0000:01:%02x.0/class", d);
+        file_text(rel, "0x060400\n");
+        snprintf(rel, sizeof rel, "sys/bus/pci/devices/0000:01:%02x.0/vendor", d);
+        file_text(rel, "0x8086\n");
+        snprintf(rel, sizeof rel, "sys/bus/pci/devices/0000:01:%02x.0/device", d);
+        file_text(rel, "0x0001\n");
+    }
+    mkp("sys/bus/pci/devices/0000:ff:00.0");
+    file_text("sys/bus/pci/devices/0000:ff:00.0/class", "0x030200\n");
+    file_text("sys/bus/pci/devices/0000:ff:00.0/vendor", "0x8086\n");
+    file_text("sys/bus/pci/devices/0000:ff:00.0/device", "0x9a49\n");
+    hw_forget_readings();
+    hw_populate_category(HWCAT_GRAPHICS);
+    assert(nhw_gpus == 2);
+    hw_cat = HWCAT_GRAPHICS;
+    hwinfo_draw();
+    assert(canvas_has("0000:00:02.0") && canvas_has("0000:ff:00.0"));
 
     power_now_override = 0;
     test_cols = 100;
@@ -2595,6 +2633,221 @@ static void test_pages(void)
          "requests split across reads and drops a closed request pipe");
 }
 
+static void test_power_profile_zram_search(void)
+{
+    int page_before = settings_page, hups_before = hups;
+    char line[512], labwc_out[256];
+    settings_page = 1;
+
+    /* 1. Power profile: default auto, on_rc parsing, cycling auto -> power -> balanced -> performance -> auto,
+     *    always writing power_profile (including "auto") and signaling PID 1. */
+    assert(power_profile == PPROF_AUTO);
+    on_rc("power_profile", "performance", NULL);
+    assert(power_profile == PPROF_PERF);
+    on_rc("power_profile", "balanced", NULL);
+    assert(power_profile == PPROF_BALANCED);
+    on_rc("power_profile", "power", NULL);
+    assert(power_profile == PPROF_POWER);
+    on_rc("power_profile", "", NULL);
+    assert(power_profile == PPROF_AUTO);
+    on_rc("power_profile", "unknown-mode", NULL);
+    assert(power_profile == PPROF_AUTO);
+
+    show_category(CAT_POWER, 1);
+    selected = power_profile_index();
+    draw();
+    assert(category == CAT_POWER && !enter_row(power_profile_index()));
+    assert(canvas_has("Power profile") && canvas_has("< Auto (battery power-saving) >"));
+
+    static const char *const expected_rc[NPPROFS] = {
+        "power_profile=power;", "power_profile=balanced;",
+        "power_profile=performance;", "power_profile=auto;",
+    };
+    static const int expected_val[NPPROFS] = {
+        PPROF_POWER, PPROF_BALANCED, PPROF_PERF, PPROF_AUTO,
+    };
+    for (int i = 0; i < NPPROFS; i++) {
+        rc_log[0] = '\0';
+        adjust(+1);
+        hups_before++;
+        assert(power_profile == expected_val[i] && !strcmp(rc_log, expected_rc[i]) && hups == hups_before);
+    }
+    rc_log[0] = '\0';
+    adjust(-1);
+    hups_before++;
+    assert(power_profile == PPROF_PERF && !strcmp(rc_log, "power_profile=performance;") && hups == hups_before);
+    rc_log[0] = '\0';
+    fail_rc = 1;
+    adjust(+1);
+    fail_rc = 0;
+    assert(power_profile == PPROF_PERF && !rc_log[0] && hups == hups_before && strstr(notice, "Cannot write"));
+    rc_log[0] = '\0';
+    adjust(+1);
+    hups_before++;
+    assert(power_profile == PPROF_AUTO && !strcmp(rc_log, "power_profile=auto;") && hups == hups_before);
+
+    /* 2. Compressed RAM swap (zram): default on ("1"), toggle "0"/"1" + SIGHUP. */
+    assert(zram_on == 1);
+    on_rc("zram", "0", NULL);
+    assert(zram_on == 0);
+    on_rc("zram", "1", NULL);
+    assert(zram_on == 1);
+    selected = zram_index();
+    assert(!enter_row(zram_index()));
+    draw();
+    assert(canvas_has("Compressed RAM swap (zram)") && canvas_has("[ON ]"));
+    rc_log[0] = '\0';
+    adjust(+1);
+    hups_before++;
+    assert(zram_on == 0 && !strcmp(rc_log, "zram=0;") && hups == hups_before);
+    item_text(zram_index(), line, sizeof line);
+    assert(strstr(line, "Compressed RAM swap (zram)") && strstr(line, "[OFF]"));
+    rc_log[0] = '\0';
+    fail_rc = 1;
+    adjust(+1);
+    fail_rc = 0;
+    assert(zram_on == 0 && !rc_log[0] && hups == hups_before && strstr(notice, "Cannot write"));
+    rc_log[0] = '\0';
+    adjust(-1);
+    hups_before++;
+    assert(zram_on == 1 && !strcmp(rc_log, "zram=1;") && hups == hups_before);
+    puts("PASS Power profile and zram: on_rc parsing, cycling/toggling, rc.conf writes (including auto) and SIGHUP");
+
+    /* 3. Global search: key_search (rc.conf + labwc SEARCH-KEY + conflict checks),
+     *    service_search, and search_docs. */
+    static const char search_bind[] =
+        "    <keybind key=\"SEARCH-KEY\"><action name=\"Execute\" command=\"/usr/local/bin/locachy-seat --window search\" /></keybind>\n";
+    assert(!strcmp(search_key, "Super+Space") && enter_row(search_key_index()));
+    labwc_written(search_bind, labwc_out, sizeof labwc_out);
+    assert(strstr(labwc_out, "key=\"W-space\"") && !strstr(labwc_out, "SEARCH-KEY"));
+
+    on_rc("key_search", "Alt+Space", NULL);
+    assert(!strcmp(search_key, "Alt+Space"));
+    labwc_written(search_bind, labwc_out, sizeof labwc_out);
+    assert(strstr(labwc_out, "key=\"A-space\"") && !strstr(labwc_out, "SEARCH-KEY"));
+
+    show_category(CAT_APPS, 1);
+    selected = search_key_index();
+    draw();
+    assert(category == CAT_APPS && canvas_has("Shortcuts") && canvas_has("Global search key") &&
+           canvas_has("Alt+Space") && canvas_has("Global Search") &&
+           canvas_has("Search index service") && canvas_has("Document content indexing"));
+
+    /* Rebind key_search through choose_key: rejects taken lock key, accepts Ctrl+Alt+S. */
+    rc_log[0] = '\0';
+    nkeys = keypos = 0;
+    press(K_ACT_LOCK, KEYS_META, "Super+L");
+    press('s' & 0x1F, KEYS_CTRL | KEYS_ALT, "Ctrl+Alt+S");
+    choose_key(_("Global search key"), "key_search", search_key, sizeof search_key, 0, reread_keys);
+    hups_before++;
+    assert(keypos == nkeys && !strcmp(search_key, "Ctrl+Alt+S") &&
+           !strcmp(rc_log, "key_search=Ctrl+Alt+S;") && hups == hups_before);
+    assert(strstr(notices[1], "another of rc.conf's"));
+    assert(key_taken("key_lock", "Ctrl+Alt+S") && !key_taken("key_search", "Ctrl+Alt+S"));
+    labwc_written(search_bind, labwc_out, sizeof labwc_out);
+    assert(strstr(labwc_out, "key=\"C-A-s\"") && !strstr(labwc_out, "SEARCH-KEY"));
+
+    /* key_lock rejects the key already assigned to key_search. */
+    assert(rc_key_action("key_search") == K_ACT_SEARCH);
+    nkeys = keypos = 0;
+#if K_ACT_SEARCH != K_POINTER
+    press(K_ACT_SEARCH, KEYS_CTRL | KEYS_ALT, "Ctrl+Alt+S");
+#else
+    press('s' & 0x1F, KEYS_CTRL | KEYS_ALT, "Ctrl+Alt+S");
+#endif
+    press(27, 0, NULL);
+    choose_key(_("Lock key"), "key_lock", lock_key, sizeof lock_key, 0, reread_keys);
+    assert(keypos == nkeys && strstr(notices[1], "another of rc.conf's") && !strcmp(lock_key, "Super+L"));
+
+    /* Empty key_search omits the SEARCH-KEY binding line. */
+    search_key[0] = '\0';
+    labwc_written(search_bind, labwc_out, sizeof labwc_out);
+    assert(!labwc_out[0]);
+    snprintf(search_key, sizeof search_key, "Super+Space");
+
+    /* service_search toggle */
+    search_on = 0;
+    on_rc("service_search", SEARCH_SERVICE, NULL);
+    assert(search_on == 1);
+    selected = search_svc_index();
+    assert(!enter_row(search_svc_index()));
+    rc_log[0] = '\0';
+    adjust(+1);
+    hups_before++;
+    assert(search_on == 0 && !strcmp(rc_log, "service_search=(none);") && hups == hups_before);
+    item_text(search_docs_index(), line, sizeof line);
+    assert(strstr(line, "(search service off)"));
+    rc_log[0] = '\0';
+    fail_rc = 1;
+    adjust(+1);
+    fail_rc = 0;
+    assert(search_on == 0 && !rc_log[0] && hups == hups_before && strstr(notice, "Cannot write"));
+    rc_log[0] = '\0';
+    adjust(+1);
+    hups_before++;
+    assert(search_on == 1 && !strcmp(rc_log, "service_search=" SEARCH_SERVICE ";") && hups == hups_before);
+
+    /* search_docs toggle */
+    assert(search_docs == 1);
+    on_rc("search_docs", "0", NULL);
+    assert(search_docs == 0);
+    on_rc("search_docs", "1", NULL);
+    assert(search_docs == 1);
+    selected = search_docs_index();
+    assert(!enter_row(search_docs_index()));
+    rc_log[0] = '\0';
+    adjust(+1);
+    hups_before++;
+    assert(search_docs == 0 && !strcmp(rc_log, "search_docs=0;") && hups == hups_before);
+    item_text(search_docs_index(), line, sizeof line);
+    assert(strstr(line, "Document content indexing") && strstr(line, "[OFF]"));
+    rc_log[0] = '\0';
+    fail_rc = 1;
+    adjust(+1);
+    fail_rc = 0;
+    assert(search_docs == 0 && !rc_log[0] && hups == hups_before && strstr(notice, "Cannot write"));
+    rc_log[0] = '\0';
+    adjust(-1);
+    hups_before++;
+    assert(search_docs == 1 && !strcmp(rc_log, "search_docs=1;") && hups == hups_before);
+
+    search_on = 0;
+    key_at = -1;
+    nkeys = keypos = 0;
+
+    /* 4. Fast partial row repaint does not grow ui_hits (nhits stays constant),
+     *    and language cache invalidation resets cached translated state. */
+    show_category(CAT_POWER, 1);
+    in_ui_loop = 1;
+    static_text_dirty = opt_cache_dirty = rule_labels_dirty = 0;
+    keyboards_dirty = row_maps_dirty = entries_dirty = 0;
+    full_redraw = 1;
+    draw();
+    int hits_after_full = nhits;
+    assert(hits_after_full > 0);
+    for (int step = 0; step < 6; step++) {
+        page_move(step % 2 == 0 ? 1 : -1);
+        draw();
+        assert(nhits == hits_after_full);
+    }
+    in_ui_loop = 0;
+
+    hw_cache[HWCAT_PCI].valid = 1;
+    power_handoff_loaded = 1;
+    hsi_loaded = 1;
+    static_text_dirty = rule_labels_dirty = 0;
+    invalidate_translated_caches();
+    assert(!hw_cache[HWCAT_PCI].valid && !power_handoff_loaded && !hsi_loaded &&
+           static_text_dirty && rule_labels_dirty && entries_dirty && full_redraw);
+    tpm_lang_dirty = users_lang_dirty = 0;
+    static_text_dirty = opt_cache_dirty = rule_labels_dirty = 0;
+
+    in_page = 0;
+    settings_page = page_before;
+    puts("PASS Global search: key_search (rc.conf, labwc SEARCH-KEY, conflict checks), service_search and search_docs");
+    puts("PASS Perf invariants: fast partial repaint keeps ui_hits bounded, language switch invalidates cached strings");
+}
+
 int main(int argc, char **argv)
 {
     int generated = argc == 5 && strcmp(argv[1], "--fixture-dir") == 0 && strcmp(argv[3], "--place") == 0;
@@ -3105,16 +3358,18 @@ int main(int argc, char **argv)
     assert(written);
     labwc_line(written, "<keybind key=\"HOME-KEY\"><action name=\"Execute\" command=\"/usr/local/lib/locachy/labwc-control --action home\" /></keybind>\n");
     labwc_line(written, "<keybind key=\"LOCK-KEY\"><action name=\"Execute\" command=\"/usr/local/lib/locachy/labwc-control --action lock\" /></keybind>\n");
+    labwc_line(written, "<keybind key=\"SEARCH-KEY\"><action name=\"Execute\" command=\"/usr/local/bin/locachy-seat --window search\" /></keybind>\n");
     labwc_line(written, "<keybind key=\"IME-KEY\"><action name=\"Execute\" command=\"/usr/bin/true\" /></keybind>\n");
     assert(fclose(written) == 0);
     assert(strstr(text, "key=\"W-Escape\"") && strstr(text, "key=\"C-A-Escape\"") &&
-           strstr(text, "key=\"C-A-Super_L\"") && strstr(text, "key=\"W-l\""));
+           strstr(text, "key=\"C-A-Super_L\"") && strstr(text, "key=\"W-l\"") &&
+           strstr(text, "key=\"W-space\"><action name=\"Execute\" command=\"/usr/local/bin/locachy-seat --window search\""));
     assert(strstr(text, "key=\"C-space\"><action name=\"Execute\" command=\"/usr/bin/true\"") &&
            strstr(text, "key=\"Henkan_Mode\"") && strstr(text, "key=\"Muhenkan\"") &&
            strstr(text, "key=\"Zenkaku_Hankaku\""));
-    assert(!strstr(text, "HOME-KEY") && !strstr(text, "LOCK-KEY") && !strstr(text, "IME-KEY"));
+    assert(!strstr(text, "HOME-KEY") && !strstr(text, "LOCK-KEY") && !strstr(text, "SEARCH-KEY") && !strstr(text, "IME-KEY"));
     free(text);
-    puts("PASS compositor home, lock and every input method key are consuming bindings, not observer-only actions");
+    puts("PASS compositor home, lock, search and every input method key are consuming bindings, not observer-only actions");
     rc_internal = "";
     assert(!monitor_internal("DP-3") && monitor_internal("eDP-1") && monitor_internal("LVDS-1"));
     assert(monitor_internal("DSI-1") && !monitor_internal("HDMI-A-1"));
@@ -3405,7 +3660,9 @@ int main(int argc, char **argv)
            hwinfo_index() == bat_thresh_index() + power_thresh_count() && hwcopy_index() == hwinfo_index() + 1 &&
            nmtui_index() == hwcopy_index() + 1 && extd_index() == nmtui_index() + 1 &&
            cpu_opt_index() == extd_index() + 1 && blank_index() == cpu_opt_index() + 1 &&
-           num_hw_items() == blank_index() + 2);
+           power_profile_index() == blank_index() + 2 && zram_index() == power_profile_index() + 1 &&
+           search_key_index() == zram_index() + 1 && search_svc_index() == search_key_index() + 1 &&
+           search_docs_index() == search_svc_index() + 1 && num_hw_items() == search_docs_index() + 1);
     selected = extd_index();
     adjust(+1);
     assert(extd_decode == EXTD_HW);
@@ -3498,6 +3755,7 @@ int main(int argc, char **argv)
     test_keyboards();
     test_system_keymap();
     test_power_and_hwinfo();
+    test_power_profile_zram_search();
     test_colors();
     test_pages();
     /* Line editing in prompts: cursor movement, Delete and Ctrl+U; Ctrl+A

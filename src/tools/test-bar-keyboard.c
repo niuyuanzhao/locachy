@@ -1372,6 +1372,7 @@ int main(int argc, char **argv)
     assert(sig_release && !active && !grabbed);
     clear_virtual_keys();
     assert(!layouts[0].down[KEY_LEFTMETA]);
+    sig_release = 0; /* consumed before the handoff test below restores active = 1 */
     puts("PASS seat release schedules balanced virtual-key cleanup even after the physical grab ended");
 
     /* The keyboards seat passes on: the same device again keeps its queue

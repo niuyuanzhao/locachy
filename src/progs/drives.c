@@ -1,7 +1,8 @@
 /*
  * drives (/usr/local/lib/locachy/drives, service_drives): USB drives, eSATA
- * disks and memory cards for the user. Every 2 s it looks at the block
- * devices: each filesystem on such a drive is mounted at ~/Drives/LABEL (the
+ * disks and memory cards for the user. On block uevents (and a 2 s retry only
+ * when a card reader or unformatted disk needs one, or if netlink fails) it
+ * looks at the block devices: each filesystem on such a drive is mounted at
  * user, uid 1000, owns the files of FAT, exFAT and NTFS ones), and a drive
  * that has been pulled out, or whose medium was changed, is unmounted.
  * ~/Drives is root's and a shared mount point: containers have it with slave
@@ -34,6 +35,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <linux/netlink.h>
 #include <poll.h>
 #include <pwd.h>
 #include <scsi/sg.h>
@@ -42,8 +44,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
+#include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
@@ -111,6 +115,7 @@ static int ndisks;
 static char top[256]; /* ~/Drives */
 static int topfd = -1; /* ~/Drives, the shared mount's own root */
 static pid_t job;      /* the eject job, if one runs */
+static int retry_pending; /* a drive saw no filesystem yet: retry on timer */
 
 static int read_line(const char *path, char *out, size_t size)
 {
@@ -624,6 +629,10 @@ static void consider(const char *dev, const struct disk *k, int may_mount)
     if (may_mount && !d->dir[0] && !d->ejected && !adopt_mount(d)) {
         mount_drive(d);
     }
+    /* Still unmounted, with no decision made about it: a filesystem may be
+     * written onto it later without any kernel uevent (mkfs on a partition),
+     * so the service looks again on a timer (2 s) until it is decided. */
+    if (may_mount && !d->dir[0] && !d->ejected) retry_pending = 1;
 }
 
 /* A medium changed under its mounts (a card swapped in a reader). The kernel
@@ -680,6 +689,7 @@ static void scan(void)
     snprintf(path, sizeof path, "%s/sys/block", SYS_ROOT);
     DIR *block = opendir(path);
     struct dirent *e;
+    retry_pending = 0;
     for (int i = 0; i < ndrives; i++) {
         drives[i].seen = 0;
     }
@@ -704,7 +714,8 @@ static void scan(void)
         int held = disk_held(k->name, why, sizeof why);
         if (held && !k->said) say("drives: %s is the system's; not mounted here: %s", k->name, why);
         k->said = held;
-        int may_mount = !held && access(DRIVES_LOCKED, F_OK) != 0;
+        int locked_now = access(DRIVES_LOCKED, F_OK) == 0;
+        int may_mount = !held && !locked_now;
         int n = partitions(k->name, parts, MAX_BLOCKS);
         for (int i = 0; i < n; i++) {
             consider(parts[i], k, may_mount);
@@ -1163,7 +1174,12 @@ static void take_request(int control)
         reply(c, "error", leaf, "another");
     } else if ((pid = fork()) == 0) {
         close(control);
+        sigset_t empty;
+        sigemptyset(&empty);
+        sigprocmask(SIG_SETMASK, &empty, NULL);
         signal(SIGTERM, SIG_DFL);
+        signal(SIGINT, SIG_DFL);
+        signal(SIGCHLD, SIG_DFL);
         _exit(eject_job(c, d, leaf));
     } else if (pid < 0) {
         reply(c, "error", leaf, "fork");
@@ -1180,6 +1196,114 @@ static void on_term(int sig)
     (void)sig;
     stop = 1;
 }
+
+/* Only interrupts poll(): the eject job's end is then reaped at once. */
+static void on_chld(int sig)
+{
+    (void)sig;
+}
+
+static int open_uevent_socket(void)
+{
+    int fd = socket(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, NETLINK_KOBJECT_UEVENT);
+    if (fd < 0) return -1;
+    int rcv = 256 * 1024;
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVBUFFORCE, &rcv, sizeof rcv);
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, sizeof rcv);
+    struct sockaddr_nl sa;
+    memset(&sa, 0, sizeof sa);
+    sa.nl_family = AF_NETLINK;
+    sa.nl_groups = 1; /* the kernel's own uevents, before any udev processing */
+    if (bind(fd, (struct sockaddr *)&sa, sizeof sa) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+/* Reads every queued uevent. 1 when a block device changed (or the queue
+ * overflowed, so one may have been lost): a scan is due. */
+static int drain_uevents(int fd)
+{
+    char buf[4096];
+    int due = 0;
+    for (;;) {
+        ssize_t n = recv(fd, buf, sizeof buf - 1, 0);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) {
+            if (errno == ENOBUFS) due = 1;
+            break;
+        }
+        if (n == 0) break;
+        buf[n] = '\0';
+        for (ssize_t i = 0; i < n;) {
+            const char *s = buf + i;
+            if (strcmp(s, "SUBSYSTEM=block") == 0) due = 1;
+            i += (ssize_t)strlen(s) + 1;
+        }
+    }
+    return due;
+}
+
+/* An inotify watch on the folder of the lock marker (process 1 creates and
+ * removes it): a drive plugged in while locked is mounted at unlock without a
+ * timer. -1 if it cannot be watched; then the scan is timed. */
+static int open_lock_watch(void)
+{
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof dir, "%s", DRIVES_LOCKED);
+    char *slash = strrchr(dir, '/');
+    if (!slash) return -1;
+    if (slash == dir) slash[1] = '\0';
+    else *slash = '\0';
+    int fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    if (fd < 0) return -1;
+    if (inotify_add_watch(fd, dir, IN_CREATE | IN_DELETE | IN_MOVED_TO | IN_MOVED_FROM |
+                                   IN_DELETE_SELF | IN_MOVE_SELF) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+/* Reads the lock watch: 1 when the marker itself changed (or events were lost),
+ * 0 when nothing relevant arrived, or -1 if the watch ended or failed. */
+static int drain_lock_watch(int fd)
+{
+    const char *leaf = strrchr(DRIVES_LOCKED, '/');
+    leaf = leaf ? leaf + 1 : DRIVES_LOCKED;
+    char buf[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
+    int due = 0, dropped = 0;
+    for (;;) {
+        ssize_t n = read(fd, buf, sizeof buf);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            if (errno != EAGAIN) dropped = 1;
+            break;
+        }
+        if (n == 0) {
+            dropped = 1;
+            break;
+        }
+        for (ssize_t off = 0; off < n;) {
+            const struct inotify_event *ev = (const struct inotify_event *)(buf + off);
+            if (ev->mask & (IN_IGNORED | IN_DELETE_SELF | IN_MOVE_SELF)) dropped = 1;
+            else if (ev->mask & IN_Q_OVERFLOW) due = 1;
+            else if (ev->len > 0 && strcmp(ev->name, leaf) == 0) due = 1;
+            off += (ssize_t)(sizeof *ev + ev->len);
+        }
+    }
+    return dropped ? -1 : due;
+}
+
+static int any_disk_blocked(void)
+{
+    for (int i = 0; i < ndisks; i++) {
+        if (disks[i].blocked) return 1;
+    }
+    return 0;
+}
+
 
 /* ~/Drives: root's, 0755, and not a symbolic link; then a shared mount point
  * of its own (a bind of itself), keeping existing children when binding it,
@@ -1233,22 +1357,122 @@ int main(void)
     }
     int control = control_socket();
     if (control < 0) say("drives: no control socket %s: %m; drives cannot be ejected", DRIVES_CONTROL);
-    signal(SIGTERM, on_term);
-    signal(SIGINT, on_term);
+    int uevent = open_uevent_socket();
+    if (uevent < 0) say("drives: no uevent socket: %m; falling back to 2 s polling");
+    int lock_watch = open_lock_watch();
+    sigset_t sigmask, oldmask;
+    sigemptyset(&sigmask);
+    sigaddset(&sigmask, SIGTERM);
+    sigaddset(&sigmask, SIGINT);
+    sigaddset(&sigmask, SIGCHLD);
+    int sigfd = -1;
+    if (sigprocmask(SIG_BLOCK, &sigmask, &oldmask) == 0) {
+        sigfd = signalfd(-1, &sigmask, SFD_NONBLOCK | SFD_CLOEXEC);
+        if (sigfd < 0) sigprocmask(SIG_SETMASK, &oldmask, NULL);
+    }
+    if (sigfd < 0) {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof sa);
+        sa.sa_handler = on_term;
+        sigaction(SIGTERM, &sa, NULL);
+        sigaction(SIGINT, &sa, NULL);
+        sa.sa_handler = on_chld;
+        sa.sa_flags = SA_NOCLDSTOP;
+        sigaction(SIGCHLD, &sa, NULL);
+    }
     signal(SIGPIPE, SIG_IGN);
     say("drives: watching for USB drives, eSATA disks and memory cards; mounted in %s", top);
+    int need_scan = 1;
     while (!stop) {
-        scan();
-        struct pollfd p = { .fd = control, .events = POLLIN };
-        int ready = poll(&p, 1, 2000) > 0 && (p.revents & POLLIN);
-        /* A job that has ended does not hold up the next request. */
+        if (need_scan) {
+            scan();
+            need_scan = 0;
+        }
+        struct pollfd p[4] = {
+            { .fd = control, .events = POLLIN },
+            { .fd = uevent, .events = POLLIN },
+            { .fd = lock_watch, .events = POLLIN },
+            { .fd = sigfd, .events = POLLIN },
+        };
+        /* Sleep indefinitely when signalfd, netlink uevents and the lock watch
+         * are all active and nothing waits on a retry (a blocked card reader, a
+         * disk that has no filesystem yet); fall back to a 2 s timer otherwise. */
+        int timeout = (sigfd >= 0 && uevent >= 0 && lock_watch >= 0 && !any_disk_blocked() && !retry_pending) ? -1 : 2000;
+        int ready = poll(p, 4, timeout);
+        if (ready > 0 && sigfd >= 0) {
+            if (p[3].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+                close(sigfd);
+                sigfd = -1;
+                struct sigaction sa;
+                memset(&sa, 0, sizeof sa);
+                sa.sa_handler = on_term;
+                sigaction(SIGTERM, &sa, NULL);
+                sigaction(SIGINT, &sa, NULL);
+                sa.sa_handler = on_chld;
+                sa.sa_flags = SA_NOCLDSTOP;
+                sigaction(SIGCHLD, &sa, NULL);
+                sigprocmask(SIG_SETMASK, &oldmask, NULL);
+            } else if (p[3].revents & POLLIN) {
+                struct signalfd_siginfo si;
+                for (;;) {
+                    ssize_t nr = read(sigfd, &si, sizeof si);
+                    if (nr != (ssize_t)sizeof si) {
+                        if (nr < 0 && errno == EINTR) continue;
+                        break;
+                    }
+                    if (si.ssi_signo == SIGTERM || si.ssi_signo == SIGINT) stop = 1;
+                }
+            }
+        }
+        /* A job that has ended does not hold up the next request, and its
+         * unmount/eject state is picked up immediately by scan(). */
         if (job > 0 && waitpid(job, NULL, WNOHANG) == job) {
             job = 0;
+            need_scan = 1;
         }
-        if (ready) {
-            take_request(control);
+        if (stop) break;
+        if (ready == 0) {
+            need_scan = 1;
+        } else if (ready > 0) {
+            /* POLLERR is how a netlink queue overflow shows: drained, and a
+             * scan is due, rather than giving up the socket. */
+            if (uevent >= 0 && (p[1].revents & (POLLIN | POLLERR))) {
+                if (drain_uevents(uevent)) need_scan = 1;
+            } else if (uevent >= 0 && (p[1].revents & (POLLHUP | POLLNVAL))) {
+                close(uevent);
+                uevent = -1;
+                need_scan = 1;
+            }
+            if (lock_watch >= 0 && (p[2].revents & (POLLERR | POLLHUP | POLLNVAL))) {
+                close(lock_watch);
+                lock_watch = -1;
+                need_scan = 1;
+            } else if (lock_watch >= 0 && (p[2].revents & POLLIN)) {
+                int r = drain_lock_watch(lock_watch);
+                if (r < 0) {
+                    close(lock_watch);
+                    lock_watch = -1;
+                    need_scan = 1;
+                } else if (r > 0) {
+                    need_scan = 1;
+                }
+            }
+            if (control >= 0 && (p[0].revents & (POLLHUP | POLLERR | POLLNVAL))) {
+                close(control);
+                control = -1;
+                say("drives: the control socket failed; drives cannot be ejected");
+            } else if (control >= 0 && (p[0].revents & POLLIN)) {
+                take_request(control);
+            }
         }
     }
+    if (sigfd >= 0) {
+        close(sigfd);
+        sigprocmask(SIG_SETMASK, &oldmask, NULL);
+    }
+    if (lock_watch >= 0) close(lock_watch);
+    if (uevent >= 0) close(uevent);
+    if (control >= 0) close(control);
     for (int i = 0; i < ndrives; i++) {
         if (drives[i].owned && drives[i].dir[0] && mounted_device(&drives[i]) &&
             umount2(drives[i].dir, UMOUNT_NOFOLLOW) == 0) remove_dir(drives[i].dir);

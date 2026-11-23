@@ -30,7 +30,12 @@ static struct bat_device power_devs[BAT_MAX_DEVICES];
 static struct bat_ac_info power_ac;
 static int npower_devs;
 static int power_loaded;
+static double power_loaded_at = -100.0;
+static int power_handoff_loaded;
+static char power_last_handoff[128];
 int rc_bat_start = -1, rc_bat_end = -1;
+
+static void power_format_handoff(const struct bat_handoff_event *ev, char *out, size_t size);
 
 static int power_thresh_bat_index(void)
 {
@@ -47,6 +52,34 @@ static void power_refresh_devices(void)
 {
     npower_devs = bat_scan(power_devs, BAT_MAX_DEVICES, &power_ac);
     power_loaded = 1;
+    power_loaded_at = settings_mono_sec();
+    power_handoff_loaded = 0;
+    power_last_handoff[0] = '\0';
+    entries_dirty = 1;
+    full_redraw = 1;
+}
+
+static void power_refresh_devices_if_stale(void)
+{
+    if (!power_loaded || settings_mono_sec() - power_loaded_at >= 5.0) {
+        power_refresh_devices();
+    }
+}
+
+/* Load the most recent battery handoff lazily when the Power page is built,
+ * never during settings --apply at boot. */
+static void power_ensure_last_handoff(void)
+{
+    if (power_handoff_loaded) return;
+    power_handoff_loaded = 1;
+    power_last_handoff[0] = '\0';
+    struct bat_handoff_event evs[4];
+    int nev = bat_load_handoffs(0, evs, 4);
+    if (nev > 0) {
+        char htxt[256];
+        power_format_handoff(&evs[nev - 1], htxt, sizeof htxt);
+        snprintf(power_last_handoff, sizeof power_last_handoff, _("Last handoff: %.104s"), htxt);
+    }
 }
 
 static int power_thresh_count(void)
@@ -188,13 +221,9 @@ static void add_power_category_notes(void)
         }
         add_entry(E_NOTE, line);
     }
-    struct bat_handoff_event evs[4];
-    int nev = bat_load_handoffs(0, evs, 4);
-    if (nev > 0) {
-        char htxt[256];
-        power_format_handoff(&evs[nev - 1], htxt, sizeof htxt);
-        snprintf(line, sizeof line, _("Last handoff: %.104s"), htxt);
-        add_entry(E_NOTE, line);
+    power_ensure_last_handoff();
+    if (power_last_handoff[0]) {
+        add_entry(E_NOTE, power_last_handoff);
     }
     if (!any) {
         add_entry(E_NOTE, power_ac.online ?
@@ -1147,10 +1176,13 @@ static void power_curves_page(void)
         } else if (key == K_LEFT) {
             if (power_cursor < 0) power_cursor = plot_w - 1;
             else if (power_cursor > 0) power_cursor--;
+            else continue;
         } else if (key == K_RIGHT) {
             if (power_cursor < 0) power_cursor = 0;
             else if (power_cursor + 1 < plot_w) power_cursor++;
+            else continue;
         } else if (key == K_DEL || key == '0') {
+            if (power_cursor < 0) continue;
             power_cursor = -1;
         } else if (key == K_UP && power_detail_scroll > 0) {
             power_detail_scroll--;

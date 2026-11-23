@@ -53,12 +53,18 @@
 #include "include/monitor-profile.h"
 #include "include/wayland-backend.h"
 
+/* Optional in standalone screen unit tests that do not link status.c. */
+extern void base_status_fields(struct status_fields *out) __attribute__((weak));
+
 #define PSF1_MAGIC 0x0436u     /* bytes 36 04 */
 #define PSF2_MAGIC 0x864AB572u /* bytes 72 b5 4a 86 */
 
 struct output_surface;
 static uint32_t *shadow;             /* the current drawing target */
 static uint32_t width, height;
+static uint32_t *presented;          /* last flushed snapshot of shadow */
+static uint32_t presented_w, presented_h;
+static int presented_valid;
 static int extended, selected_output = -1;
 static struct output_surface *surfaces, *drawing_surface;
 static int card = -1;                /* the DRM fd the shadow is shown on */
@@ -107,16 +113,32 @@ static uint32_t glyph_count, glyph_w, glyph_h, glyph_bytes, row_bytes;
 static uint32_t glyph_mag = 1; /* each font pixel drawn as mag x mag (glyph_w, glyph_h: drawn) */
 static struct { uint32_t cp, g; } utab[1024];
 static int nutab;
+static uint16_t ascii_map[128];
+static uint8_t ascii_has[128];
 static int cols, rows;
 static uint32_t top;                 /* pixels above row 0: bar_h - glyph_h, row 0 within the bar */
 static uint32_t bar_h = PANEL_H;     /* the top bar: one and a half text rows */
 static double scale;                 /* the first output's; 0 until it is known */
 static char font_fallback[256];      /* when no Terminus of the size can be read */
 
+struct bar_cache {
+    int valid;
+    char title[128];
+    char ime[64];
+    struct status_fields fields;
+    int frozen;
+    uint32_t bar_w, bar_h;
+    uint32_t theme_bg, theme_fg, theme_accent;
+};
+static struct bar_cache active_bar;
+
 /* A connector keeps its canvas while its lease is released or it disconnects. */
 struct output_surface {
     char name[32];
     uint32_t *pixels, width, height;
+    uint32_t *presented;
+    uint32_t presented_w, presented_h;
+    int presented_valid;
     double scale;
     int redraw;
     struct drm_clip_rect dirty;
@@ -125,7 +147,10 @@ struct output_surface {
     uint32_t glyph_count, glyph_w, glyph_h, glyph_bytes, row_bytes, glyph_mag;
     struct { uint32_t cp, g; } utab[1024];
     int nutab, cols, rows;
+    uint16_t ascii_map[128];
+    uint8_t ascii_has[128];
     uint32_t top, bar_h;
+    struct bar_cache bar;
     struct output_surface *next;
 };
 static struct output_surface mirrored;
@@ -138,6 +163,7 @@ static const char *const connector_types[] = {
 #define NCONNECTOR_TYPES (sizeof connector_types / sizeof connector_types[0])
 
 static void touch(uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1);
+static int cell_index(int64_t px, uint32_t step);
 static void hover_frame(struct output *o);
 static double screen_time(void);
 static void cursor_put(int fd);
@@ -182,52 +208,65 @@ static int is_wide_cjk(uint32_t cp)
 
 static void draw_ft_glyph(int col, int row, uint32_t cp, int wide, uint32_t fg, uint32_t bg)
 {
-    FT_UInt index = 0;
-    FT_Face f = ft_ready && ft_px > 0 ? font_set_face(ft_fonts, cp, ft_px, &index) : NULL;
-    screen_fill(col, row, wide ? 2 : 1, 1, bg);
-    if (f == NULL || FT_Load_Glyph(f, index, FT_LOAD_RENDER) != 0) {
-        return;
-    }
-    FT_Bitmap *bm = &f->glyph->bitmap;
     int cell_w = wide ? (int)glyph_w * 2 : (int)glyph_w;
     int bx0 = col * (int)glyph_w;
     int by0 = (int)top + row * (int)glyph_h;
+    const struct font_glyph *g = ft_ready && ft_px > 0 ? font_set_glyph(ft_fonts, cp, ft_px) : NULL;
 
-    int x_off = bx0 + (wide ? (cell_w - (int)bm->width) / 2 : f->glyph->bitmap_left);
+    screen_fill_px(bx0, by0, cell_w, (int)glyph_h, bg);
+    if (g == NULL || g->alpha == NULL || g->width == 0 || g->rows == 0) {
+        return;
+    }
+
+    int x_off = bx0 + (wide ? (cell_w - (int)g->width) / 2 : (int)g->left);
     int baseline = by0 + (int)glyph_h - (int)glyph_h / 5;
-    int y_off = baseline - f->glyph->bitmap_top;
+    int y_off = baseline - (int)g->top;
     if (x_off < bx0) {
         x_off = bx0;
     }
 
-    uint32_t fg_r = (fg >> 16) & 0xFF, fg_g = (fg >> 8) & 0xFF, fg_b = fg & 0xFF;
-    uint32_t bg_r = (bg >> 16) & 0xFF, bg_g = (bg >> 8) & 0xFF, bg_b = bg & 0xFF;
+    int gy0 = y_off < 0 ? -y_off : 0;
+    int gy1 = y_off + (int)g->rows > (int)height ? (int)height - y_off : (int)g->rows;
+    int gx0 = x_off < 0 ? -x_off : 0;
+    int gx1 = x_off + (int)g->width > (int)width ? (int)width - x_off : (int)g->width;
+    if (gy0 >= gy1 || gx0 >= gx1) {
+        return;
+    }
 
-    for (int y = 0; y < (int)bm->rows; y++) {
-        int py = y_off + y;
-        if (py < 0 || py >= (int)height) {
-            continue;
-        }
-        for (int x = 0; x < (int)bm->width; x++) {
-            int px = x_off + x;
-            if (px < 0 || px >= (int)width) {
-                continue;
-            }
-            uint8_t a = bm->buffer[y * bm->pitch + x];
+    uint32_t fg_rgb = fg & 0xFFFFFFu;
+    uint32_t fg_r = (fg_rgb >> 16) & 0xFFu, fg_g = (fg_rgb >> 8) & 0xFFu, fg_b = fg_rgb & 0xFFu;
+    uint32_t bg_r = (bg >> 16) & 0xFFu, bg_g = (bg >> 8) & 0xFFu, bg_b = bg & 0xFFu;
+
+    for (int y = gy0; y < gy1; y++) {
+        const uint8_t *arow = g->alpha + (size_t)y * g->width;
+        uint32_t *drow = shadow + (uint64_t)(y_off + y) * width + (uint32_t)x_off;
+        for (int x = gx0; x < gx1; x++) {
+            uint32_t a = arow[x];
             if (a == 0) {
                 continue;
             }
             if (a == 255) {
-                shadow[(uint64_t)py * width + (uint32_t)px] = fg & 0xFFFFFF;
+                drow[x] = fg_rgb;
             } else {
-                uint32_t r = (fg_r * a + bg_r * (255 - a)) / 255;
-                uint32_t g = (fg_g * a + bg_g * (255 - a)) / 255;
-                uint32_t b = (fg_b * a + bg_b * (255 - a)) / 255;
-                shadow[(uint64_t)py * width + (uint32_t)px] = (r << 16) | (g << 8) | b;
+                uint32_t inv = 255u - a;
+                uint32_t vr = fg_r * a + bg_r * inv + 128u;
+                uint32_t vg = fg_g * a + bg_g * inv + 128u;
+                uint32_t vb = fg_b * a + bg_b * inv + 128u;
+                uint32_t r = (vr + (vr >> 8)) >> 8;
+                uint32_t gg = (vg + (vg >> 8)) >> 8;
+                uint32_t b = (vb + (vb >> 8)) >> 8;
+                drow[x] = (r << 16) | (gg << 8) | b;
             }
         }
     }
-    touch((uint32_t)bx0, (uint32_t)by0, (uint32_t)(bx0 + cell_w), (uint32_t)(by0 + glyph_h));
+    if (y_off + gy0 < (int)bar_h) {
+        active_bar.valid = 0;
+    }
+    if (x_off + gx0 < bx0 || x_off + gx1 > bx0 + cell_w ||
+        y_off + gy0 < by0 || y_off + gy1 > by0 + (int)glyph_h) {
+        touch((uint32_t)(x_off + gx0), (uint32_t)(y_off + gy0),
+              (uint32_t)(x_off + gx1), (uint32_t)(y_off + gy1));
+    }
 }
 #endif
 
@@ -307,6 +346,7 @@ static const char *load_font(const char *path)
     glyph_bytes = bytes;
     row_bytes = rb;
     nutab = 0;
+    memset(ascii_has, 0, sizeof ascii_has);
     if (psf2 && (h[3] & 1)) {
         const uint8_t *u = glyphs + (uint64_t)glyph_count * glyph_bytes, *end = font + size;
         for (uint32_t i = 0; i < glyph_count && u < end; i++) {
@@ -321,11 +361,21 @@ static const char *load_font(const char *path)
                 if (nutab < (int)(sizeof utab / sizeof utab[0])) {
                     utab[nutab].cp = cp;
                     utab[nutab++].g = i;
+                    if (cp < 128 && !ascii_has[cp] && i <= UINT16_MAX) {
+                        ascii_map[cp] = (uint16_t)i;
+                        ascii_has[cp] = 1;
+                    }
                 }
             }
             if (u < end) {
                 u++;
             }
+        }
+    }
+    if (nutab == 0) {
+        for (uint32_t c = 0; c < 128 && c < glyph_count; c++) {
+            ascii_map[c] = (uint16_t)c;
+            ascii_has[c] = 1;
         }
     }
     return NULL;
@@ -383,31 +433,51 @@ static void layout(void)
     top = bar_h > glyph_h ? bar_h - glyph_h : 0;
     cols = (int)(width / glyph_w);
     rows = height > top ? (int)((height - top) / glyph_h) : 0;
+    active_bar.valid = 0;
 #ifdef CONFIG_FREETYPE
     ft_size();
 #endif
+}
+
+static void drop_presented(uint32_t **buf, uint32_t *bw, uint32_t *bh, int *valid)
+{
+    free(*buf);
+    *buf = NULL;
+    *bw = 0;
+    *bh = 0;
+    *valid = 0;
 }
 
 static void save_surface(struct output_surface *s)
 {
     s->pixels = shadow;
     s->width = width; s->height = height; s->scale = scale; s->dirty = dirty;
+    s->presented = presented; s->presented_w = presented_w; s->presented_h = presented_h;
+    s->presented_valid = presented_valid;
     s->font = font; s->glyphs = glyphs;
     s->glyph_count = glyph_count; s->glyph_w = glyph_w; s->glyph_h = glyph_h;
     s->glyph_bytes = glyph_bytes; s->row_bytes = row_bytes; s->glyph_mag = glyph_mag;
     memcpy(s->utab, utab, sizeof utab);
+    memcpy(s->ascii_map, ascii_map, sizeof ascii_map);
+    memcpy(s->ascii_has, ascii_has, sizeof ascii_has);
     s->nutab = nutab; s->cols = cols; s->rows = rows; s->top = top; s->bar_h = bar_h;
+    s->bar = active_bar;
 }
 
 static void use_surface(struct output_surface *s)
 {
     shadow = s->pixels;
     width = s->width; height = s->height; scale = s->scale; dirty = s->dirty;
+    presented = s->presented; presented_w = s->presented_w; presented_h = s->presented_h;
+    presented_valid = s->presented_valid;
     font = s->font; glyphs = s->glyphs;
     glyph_count = s->glyph_count; glyph_w = s->glyph_w; glyph_h = s->glyph_h;
     glyph_bytes = s->glyph_bytes; row_bytes = s->row_bytes; glyph_mag = s->glyph_mag;
     memcpy(utab, s->utab, sizeof utab);
+    memcpy(ascii_map, s->ascii_map, sizeof ascii_map);
+    memcpy(ascii_has, s->ascii_has, sizeof ascii_has);
     nutab = s->nutab; cols = s->cols; rows = s->rows; top = s->top; bar_h = s->bar_h;
+    active_bar = s->bar;
 #ifdef CONFIG_FREETYPE
     ft_size();
 #endif
@@ -454,7 +524,7 @@ static const char *surface_for_output(struct output *o)
             memcpy(fresh.pixels + (size_t)y * fresh.width, surface->pixels + (size_t)y * surface->width,
                    (size_t)copy_w * sizeof *fresh.pixels);
         }
-        free(surface->pixels); free(surface->font);
+        free(surface->pixels); free(surface->presented); free(surface->font);
         fresh.next = surface->next;
         *surface = fresh;
     } else {
@@ -682,11 +752,27 @@ static const char *read_resources(int fd, struct drm_mode_card_res *res,
 }
 
 /* 1: usable connector, 0: disconnected/unavailable, -1: allocation failed.
- * On a lease, GETENCODER filters possible_crtcs to the visible CRTC list. */
+ * On a lease, GETENCODER filters possible_crtcs to the visible CRTC list.
+ * Passing count_modes > 0 first uses DRM's cached mode list (drmModeGetConnectorCurrent
+ * semantics), avoiding 100-600 ms synchronous DDC/EDID hardware probes on every
+ * task switch; probe=1 (initial open or hotplug refresh) forces a kernel probe
+ * when needed so newly attached monitors and EDID changes are discovered. */
+static int probe_connectors = 1;
+
 static int read_output(int fd, uint32_t id, struct output *o)
 {
     for (int retry = 0; retry < 4; retry++) {
+        struct drm_mode_modeinfo stack_modes[64];
+        uint32_t stack_encs[8];
         struct drm_mode_get_connector c = { .connector_id = id };
+        int used_stack = 0;
+        if (!probe_connectors) {
+            c.count_modes = 64;
+            c.modes_ptr = (uintptr_t)stack_modes;
+            c.count_encoders = 8;
+            c.encoders_ptr = (uintptr_t)stack_encs;
+            used_stack = 1;
+        }
         double t0 = screen_time();
         int got = ioctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &c);
         double elapsed = screen_time() - t0;
@@ -694,7 +780,19 @@ static int read_output(int fd, uint32_t id, struct output *o)
             say("screen: connector %u: initial query %.0f ms (result %d, state %u)",
                 id, elapsed * 1000, got, c.connection);
         }
-        if (got < 0 || c.connection != 1 || c.count_modes == 0) {
+        if (got < 0) {
+            return 0;
+        }
+        if (used_stack && (c.connection == 3 || (c.connection == 1 && c.count_modes == 0))) {
+            /* Unknown status or empty mode cache: fall back to a kernel probe. */
+            c = (struct drm_mode_get_connector){ .connector_id = id };
+            used_stack = 0;
+            got = ioctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &c);
+            if (got < 0) {
+                return 0;
+            }
+        }
+        if (c.connection != 1 || c.count_modes == 0) {
             return 0; /* 1 = connected */
         }
         uint32_t nm = c.count_modes, ne = c.count_encoders;
@@ -705,19 +803,24 @@ static int read_output(int fd, uint32_t id, struct output *o)
             free(encs);
             return -1;
         }
-        c.modes_ptr = (uintptr_t)modes;
-        c.encoders_ptr = (uintptr_t)encs;
-        c.count_props = 0;
-        int ok = ioctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &c);
-        if (ok < 0 || c.connection != 1 || c.count_modes == 0) {
-            free(modes);
-            free(encs);
-            return 0;
-        }
-        if (c.count_modes > nm || c.count_encoders > ne) {
-            free(modes);
-            free(encs);
-            continue;
+        if (used_stack && nm <= 64 && ne <= 8) {
+            memcpy(modes, stack_modes, nm * sizeof *modes);
+            if (ne > 0) memcpy(encs, stack_encs, ne * sizeof *encs);
+        } else {
+            c.modes_ptr = (uintptr_t)modes;
+            c.encoders_ptr = (uintptr_t)encs;
+            c.count_props = 0;
+            int ok = ioctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &c);
+            if (ok < 0 || c.connection != 1 || c.count_modes == 0) {
+                free(modes);
+                free(encs);
+                return 0;
+            }
+            if (c.count_modes > nm || c.count_encoders > ne) {
+                free(modes);
+                free(encs);
+                continue;
+            }
         }
         *o = (struct output){ .conn_id = id, .dmabuf_active_slot = -1, .dmabuf_pending_slot = -1 };
         snprintf(o->name, sizeof o->name, "%s-%u", c.connector_type < NCONNECTOR_TYPES ?
@@ -913,11 +1016,123 @@ static void describe_card(int fd, const char *path)
 static void mark_all(void)
 {
     dirty = (struct drm_clip_rect){ 0, 0, (unsigned short)width, (unsigned short)height };
+    presented_valid = 0;
+    active_bar.valid = 0;
     if (extended) {
         for (uint32_t i = 0; i < noutputs; i++) {
             struct output_surface *s = outputs[i].surface;
-            if (s) s->dirty = (struct drm_clip_rect){ 0, 0, (unsigned short)s->width, (unsigned short)s->height };
+            if (s) {
+                s->dirty = (struct drm_clip_rect){ 0, 0, (unsigned short)s->width, (unsigned short)s->height };
+                s->presented_valid = 0;
+                s->bar.valid = 0;
+            }
         }
+    }
+}
+
+/* Tighten logical damage against the last-flushed snapshot so full-screen
+ * redraws only upload rows and columns whose pixels actually changed. */
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((optimize("O3")))
+#endif
+static int present_diff(const uint32_t *src, uint32_t w, uint32_t h, struct drm_clip_rect clip,
+                        const uint32_t *snap, uint32_t snap_w, uint32_t snap_h, int valid,
+                        struct drm_clip_rect *out)
+{
+    uint32_t x0 = clip.x1 < w ? clip.x1 : w;
+    uint32_t y0 = clip.y1 < h ? clip.y1 : h;
+    uint32_t x1 = clip.x2 <= w ? clip.x2 : w;
+    uint32_t y1 = clip.y2 <= h ? clip.y2 : h;
+    if (x0 >= x1 || y0 >= y1) {
+        return 0;
+    }
+    if (!valid || snap == NULL || snap_w != w || snap_h != h) {
+        *out = (struct drm_clip_rect){ (unsigned short)x0, (unsigned short)y0,
+                                       (unsigned short)x1, (unsigned short)y1 };
+        return 1;
+    }
+    size_t row_bytes_n = (size_t)(x1 - x0) * sizeof *src;
+    uint32_t dy0 = y0;
+    while (dy0 < y1 &&
+           memcmp(src + (size_t)dy0 * w + x0, snap + (size_t)dy0 * w + x0, row_bytes_n) == 0) {
+        dy0++;
+    }
+    if (dy0 >= y1) {
+        return 0;
+    }
+    uint32_t dy1 = y1;
+    while (dy1 > dy0 + 1 &&
+           memcmp(src + (size_t)(dy1 - 1) * w + x0, snap + (size_t)(dy1 - 1) * w + x0, row_bytes_n) == 0) {
+        dy1--;
+    }
+    uint32_t dx0 = x1, dx1 = x0;
+    for (uint32_t y = dy0; y < dy1; y++) {
+        const uint32_t *a = src + (size_t)y * w;
+        const uint32_t *b = snap + (size_t)y * w;
+        if (dx0 > x0 && memcmp(a + x0, b + x0, (size_t)(dx0 - x0) * sizeof *src) != 0) {
+            uint32_t x = x0;
+            while (x < dx0 && a[x] == b[x]) x++;
+            dx0 = x;
+        }
+        uint32_t rlim = dx1 > dx0 ? dx1 : dx0;
+        if (rlim < x1 && memcmp(a + rlim, b + rlim, (size_t)(x1 - rlim) * sizeof *src) != 0) {
+            uint32_t x = x1;
+            while (x > rlim && a[x - 1] == b[x - 1]) x--;
+            if (x > dx1) dx1 = x;
+        } else if (dx1 <= dx0 && dx0 < x1) {
+            dx1 = dx0 + 1;
+        }
+        if (dx0 == x0 && dx1 == x1) {
+            break;
+        }
+    }
+    *out = (struct drm_clip_rect){ (unsigned short)dx0, (unsigned short)dy0,
+                                   (unsigned short)dx1, (unsigned short)dy1 };
+    return 1;
+}
+
+static void present_commit(const uint32_t *src, uint32_t w, uint32_t h, struct drm_clip_rect rect,
+                           uint32_t **snap, uint32_t *snap_w, uint32_t *snap_h, int *valid)
+{
+    uint64_t total = (uint64_t)w * h;
+    if (total == 0 || total > SIZE_MAX / sizeof *src) {
+        drop_presented(snap, snap_w, snap_h, valid);
+        return;
+    }
+    if (*snap == NULL || *snap_w != w || *snap_h != h) {
+        uint32_t *buf = malloc((size_t)total * sizeof *src);
+        if (buf == NULL) {
+            drop_presented(snap, snap_w, snap_h, valid);
+            return;
+        }
+        free(*snap);
+        *snap = buf;
+        *snap_w = w;
+        *snap_h = h;
+        memcpy(buf, src, (size_t)total * sizeof *src);
+        *valid = 1;
+        return;
+    }
+    if (!*valid) {
+        memcpy(*snap, src, (size_t)total * sizeof *src);
+        *valid = 1;
+        return;
+    }
+    uint32_t x0 = rect.x1 < w ? rect.x1 : w;
+    uint32_t y0 = rect.y1 < h ? rect.y1 : h;
+    uint32_t x1 = rect.x2 <= w ? rect.x2 : w;
+    uint32_t y1 = rect.y2 <= h ? rect.y2 : h;
+    if (x0 >= x1 || y0 >= y1) {
+        return;
+    }
+    if (x0 == 0 && x1 == w) {
+        memcpy(*snap + (size_t)y0 * w, src + (size_t)y0 * w,
+               (size_t)(y1 - y0) * w * sizeof *src);
+        return;
+    }
+    size_t span_bytes = (size_t)(x1 - x0) * sizeof *src;
+    for (uint32_t y = y0; y < y1; y++) {
+        memcpy(*snap + (size_t)y * w + x0, src + (size_t)y * w + x0, span_bytes);
     }
 }
 
@@ -945,8 +1160,8 @@ static struct drm_clip_rect fit_rect(uint32_t sw, uint32_t sh, uint32_t dw, uint
                                   (unsigned short)(x + w), (unsigned short)(y + h) };
 }
 
-/* Pure memory copy: identical sizes keep dirty rows; scaled outputs redraw
- * the entire frame, including borders, on any logical damage. Pitch is bytes. */
+/* Pure memory copy: identical sizes keep dirty rows; scaled outputs clip to
+ * the mapped destination sub-rect and stream through a cached row buffer. */
 #if defined(__GNUC__) && !defined(__clang__)
 __attribute__((optimize("O3")))
 #endif
@@ -963,17 +1178,73 @@ static struct drm_clip_rect copy_picture(uint8_t *dst, uint32_t pitch, uint32_t 
     }
     struct drm_clip_rect fit = fit_rect(sw, sh, dw, dh);
     uint32_t fw = fit.x2 - fit.x1, fh = fit.y2 - fit.y1;
-    for (uint32_t y = 0; y < dh; y++) {
-        uint32_t *line = (uint32_t *)(dst + (uint64_t)y * pitch);
-        memset(line, 0, (size_t)dw * 4);
-        if (y >= fit.y1 && y < fit.y2) {
-            const uint32_t *s = src + (uint64_t)((uint64_t)(y - fit.y1) * sh / fh) * sw;
-            for (uint32_t x = 0; x < fw; x++) {
-                line[fit.x1 + x] = s[(uint64_t)x * sw / fw];
-            }
+    int full = clip.x1 == 0 && clip.y1 == 0 && clip.x2 >= sw && clip.y2 >= sh;
+    uint32_t cx1 = clip.x1 < sw ? clip.x1 : sw;
+    uint32_t cx2 = clip.x2 < sw ? clip.x2 : sw;
+    uint32_t cy1 = clip.y1 < sh ? clip.y1 : sh;
+    uint32_t cy2 = clip.y2 < sh ? clip.y2 : sh;
+    uint32_t fx0 = full ? 0 : (uint32_t)(((uint64_t)cx1 * fw + sw - 1) / sw);
+    uint32_t fx1 = full ? fw : (uint32_t)(((uint64_t)cx2 * fw + sw - 1) / sw);
+    uint32_t fy0 = full ? 0 : (uint32_t)(((uint64_t)cy1 * fh + sh - 1) / sh);
+    uint32_t fy1 = full ? fh : (uint32_t)(((uint64_t)cy2 * fh + sh - 1) / sh);
+    if (fx1 > fw) fx1 = fw;
+    if (fy1 > fh) fy1 = fh;
+    uint32_t dx0 = fit.x1 + fx0, dx1 = fit.x1 + fx1;
+    uint32_t dy0 = fit.y1 + fy0, dy1 = fit.y1 + fy1;
+    uint32_t span = dx1 > dx0 ? dx1 - dx0 : 0;
+    if (!full && (span == 0 || dy0 >= dy1)) {
+        return (struct drm_clip_rect){ 0, 0, 0, 0 };
+    }
+
+    uint32_t stack_xmap[4096], stack_row[4096];
+    uint32_t row_need = full ? dw : span;
+    uint32_t *xmap = span <= 4096 ? stack_xmap : malloc((size_t)span * sizeof *xmap);
+    uint32_t *row_buf = row_need <= 4096 ? stack_row : malloc((size_t)row_need * sizeof *row_buf);
+    if (xmap != NULL) {
+        for (uint32_t i = 0; i < span; i++) {
+            xmap[i] = (uint32_t)((uint64_t)(fx0 + i) * sw / fw);
         }
     }
-    return (struct drm_clip_rect){ 0, 0, (unsigned short)dw, (unsigned short)dh };
+
+    if (full) {
+        for (uint32_t y = 0; y < fit.y1; y++) {
+            memset(dst + (uint64_t)y * pitch, 0, (size_t)dw * 4);
+        }
+        for (uint32_t y = fit.y1; y < fit.y2; y++) {
+            const uint32_t *s = src + (uint64_t)((uint64_t)(y - fit.y1) * sh / fh) * sw;
+            if (row_buf != NULL && xmap != NULL) {
+                if (fit.x1 > 0) memset(row_buf, 0, (size_t)fit.x1 * 4);
+                for (uint32_t i = 0; i < fw; i++) row_buf[fit.x1 + i] = s[xmap[i]];
+                if (fit.x2 < dw) memset(row_buf + fit.x2, 0, (size_t)(dw - fit.x2) * 4);
+                memcpy(dst + (uint64_t)y * pitch, row_buf, (size_t)dw * 4);
+            } else {
+                uint32_t *line = (uint32_t *)(dst + (uint64_t)y * pitch);
+                memset(line, 0, (size_t)dw * 4);
+                for (uint32_t x = 0; x < fw; x++) line[fit.x1 + x] = s[(uint64_t)x * sw / fw];
+            }
+        }
+        for (uint32_t y = fit.y2; y < dh; y++) {
+            memset(dst + (uint64_t)y * pitch, 0, (size_t)dw * 4);
+        }
+        if (xmap != stack_xmap) free(xmap);
+        if (row_buf != stack_row) free(row_buf);
+        return (struct drm_clip_rect){ 0, 0, (unsigned short)dw, (unsigned short)dh };
+    }
+
+    for (uint32_t y = dy0; y < dy1; y++) {
+        const uint32_t *s = src + (uint64_t)((uint64_t)(y - fit.y1) * sh / fh) * sw;
+        if (row_buf != NULL && xmap != NULL) {
+            for (uint32_t i = 0; i < span; i++) row_buf[i] = s[xmap[i]];
+            memcpy(dst + (uint64_t)y * pitch + (uint64_t)dx0 * 4u, row_buf, (size_t)span * 4);
+        } else {
+            uint32_t *line = (uint32_t *)(dst + (uint64_t)y * pitch);
+            for (uint32_t i = 0; i < span; i++) line[dx0 + i] = s[(uint64_t)(fx0 + i) * sw / fw];
+        }
+    }
+    if (xmap != stack_xmap) free(xmap);
+    if (row_buf != stack_row) free(row_buf);
+    return (struct drm_clip_rect){ (unsigned short)dx0, (unsigned short)dy0,
+                                  (unsigned short)dx1, (unsigned short)dy1 };
 }
 
 static const char *create_output(int fd, struct output *o)
@@ -1080,8 +1351,10 @@ static const char *enable_output(int fd, struct output *o)
 static const char *show(int fd)
 {
     const char *why = "no usable output buffers";
+    uint32_t orig_noutputs = noutputs;
     uint32_t used = 0;
     int resized_fallback = 0;
+    int any_mode_changed = 0;
     for (uint32_t i = 0; i < noutputs; i++) {
         struct output *o = &outputs[i];
         int old_w = o->mode.hdisplay, old_h = o->mode.vdisplay;
@@ -1094,7 +1367,10 @@ static const char *show(int fd)
             o->modes = NULL;
             continue;
         }
-        if (used == 0 && (old_w != o->mode.hdisplay || old_h != o->mode.vdisplay)) resized_fallback = 1;
+        if (old_w != o->mode.hdisplay || old_h != o->mode.vdisplay) {
+            any_mode_changed = 1;
+            if (used == 0) resized_fallback = 1;
+        }
         outputs[used++] = *o;
     }
     noutputs = used;
@@ -1114,14 +1390,17 @@ static const char *show(int fd)
                          (struct drm_clip_rect){ 0, 0, (unsigned short)width, (unsigned short)height });
             free(shadow);
             shadow = picture; width = w; height = h;
+            drop_presented(&presented, &presented_w, &presented_h, &presented_valid);
             layout();
         } else {
             say("screen: fallback canvas allocation failed; fitting the previous canvas");
         }
     }
     if (extended) {
-        const char *layout_error = extended_layout();
-        if (layout_error) say("screen: fallback layout: %s", layout_error);
+        if (any_mode_changed || used != orig_noutputs) {
+            const char *layout_error = extended_layout();
+            if (layout_error) say("screen: fallback layout: %s", layout_error);
+        }
         select_available_surface();
     }
     mark_all();
@@ -1179,6 +1458,7 @@ static const char *prepare(int fd)
         width = w;
         height = h;
         scale = s;
+        drop_presented(&presented, &presented_w, &presented_h, &presented_valid);
         layout();
     }
     return NULL;
@@ -1229,6 +1509,7 @@ static int window_resize(int w, int h, double s)
     height = (uint32_t)h + hidden;
     window_hidden = hidden;
     scale = s;
+    drop_presented(&presented, &presented_w, &presented_h, &presented_valid);
     layout();
     mark_all();
     window_new_size = 1;
@@ -1250,6 +1531,7 @@ int screen_window_shown(void)
 
 int screen_open(const char *font_path)
 {
+    active_bar.valid = 0;
     if (theme_reload) theme_reload();
     const char *why = NULL;
     snprintf(font_fallback, sizeof font_fallback, "%s", font_path);
@@ -1330,13 +1612,24 @@ int screen_open(const char *font_path)
 int screen_take(int lease)
 {
     screen_release();
+    active_bar.valid = 0;
+    probe_connectors = 0;
     const char *why = prepare(lease);
+    probe_connectors = 1;
 
 #ifdef CONFIG_FREETYPE
     ft_init();
 #endif
     if (why == NULL) {
-        screen_rescale();
+        if (extended) {
+            base_language_reload();
+            if (theme_reload && theme_reload()) mark_all();
+            for (uint32_t i = 0; i < noutputs; i++) {
+                if (outputs[i].surface) outputs[i].surface->redraw = 0;
+            }
+        } else {
+            screen_rescale();
+        }
         why = show(lease);
     }
     if (why != NULL) {
@@ -1501,6 +1794,11 @@ void screen_release(void)
     }
     lent = 0;
     active_lessee = 0;
+    presented_valid = 0;
+    mirrored.presented_valid = 0;
+    for (struct output_surface *s = surfaces; s; s = s->next) {
+        s->presented_valid = 0;
+    }
 }
 
 static int any_lent(void)
@@ -1678,7 +1976,12 @@ int screen_take_back(uint32_t lessee)
             say("screen: master restored; connector %u needs rescan: %m", outputs[i].conn_id);
             result = 1;
         }
+        if (extended && outputs[i].surface) {
+            outputs[i].surface->presented_valid = 0;
+            if (drawing_surface == outputs[i].surface) presented_valid = 0;
+        }
     }
+    if (!extended) presented_valid = 0;
     if (!lent) {
         mark_all();
         screen_flush();
@@ -1812,12 +2115,35 @@ int screen_output_select(int index)
     if (index < 0 || index >= screen_output_count()) return -1;
     int previous = extended ? selected_output : 0;
     if (extended) {
+        if (index == selected_output && drawing_surface == outputs[index].surface) {
+            return previous;
+        }
         save_drawing_surface();
         selected_output = index;
         drawing_surface = outputs[index].surface;
         use_surface(drawing_surface);
     }
     return previous;
+}
+
+int screen_output_cell_at(int output, int lx, int ly, int *col, int *row)
+{
+    if (!col || !row) return -1;
+    if (!extended) {
+        if (output != 0) return -1;
+        screen_cell_at(lx, ly, col, row);
+        return 0;
+    }
+    if (output < 0 || (uint32_t)output >= noutputs || !outputs[output].surface) return -1;
+    const struct output_surface *s = outputs[output].surface;
+    if (output == selected_output && drawing_surface == s) {
+        *col = cell_index(lx, glyph_w);
+        *row = cell_index((int64_t)ly - top, glyph_h);
+    } else {
+        *col = cell_index(lx, s->glyph_w);
+        *row = cell_index((int64_t)ly - s->top, s->glyph_h);
+    }
+    return 0;
 }
 
 int screen_output_at(int x, int y, int *local_x, int *local_y)
@@ -1879,6 +2205,12 @@ void screen_describe(void)
 int screen_rescale(void)
 {
     base_language_reload(); /* settings changed the language, or anything else */
+    active_bar.valid = 0;
+    if (extended) {
+        for (uint32_t i = 0; i < noutputs; i++) {
+            if (outputs[i].surface) outputs[i].surface->bar.valid = 0;
+        }
+    }
     if (theme_reload && theme_reload()) mark_all();
     if (shadow == NULL || noutputs == 0) {
         return 0;
@@ -1933,11 +2265,24 @@ void screen_flush(void)
          * from the canvas when it is done (window_frame), changes kept.
          * The window shows the canvas below the hidden bar's rows. */
         if (shadow == NULL || dirty.x1 == dirty.x2 || height <= window_hidden) return;
-        int y0 = dirty.y1 > window_hidden ? (int)(dirty.y1 - window_hidden) : 0;
-        int y1 = dirty.y2 > window_hidden ? (int)(dirty.y2 - window_hidden) : 0;
-        if (y1 <= y0 || wl_backend_flush(shadow + (size_t)window_hidden * width, (int)width,
-                                         (int)(height - window_hidden), dirty.x1, y0, dirty.x2, y1) == 0) {
-            dirty.x2 = dirty.x1; /* shown, or only the hidden rows changed */
+        uint32_t vh = height - window_hidden;
+        uint32_t wy0 = dirty.y1 > window_hidden ? dirty.y1 - window_hidden : 0;
+        uint32_t wy1 = dirty.y2 > window_hidden ? dirty.y2 - window_hidden : 0;
+        if (wy1 > vh) wy1 = vh;
+        if (wy1 <= wy0) {
+            dirty.x2 = dirty.x1; /* only the hidden rows changed */
+            return;
+        }
+        const uint32_t *vis = shadow + (size_t)window_hidden * width;
+        struct drm_clip_rect want = { dirty.x1, (unsigned short)wy0, dirty.x2, (unsigned short)wy1 };
+        struct drm_clip_rect diff;
+        if (!present_diff(vis, width, vh, want, presented, presented_w, presented_h, presented_valid, &diff)) {
+            dirty.x2 = dirty.x1;
+            return;
+        }
+        if (wl_backend_flush(vis, (int)width, (int)vh, diff.x1, diff.y1, diff.x2, diff.y2) == 0) {
+            present_commit(vis, width, vh, diff, &presented, &presented_w, &presented_h, &presented_valid);
+            dirty.x2 = dirty.x1;
         }
         return;
     }
@@ -1949,22 +2294,52 @@ void screen_flush(void)
             struct output *o = &outputs[i];
             struct output_surface *s = o->surface;
             if (!o->map || !s || s->dirty.x1 == s->dirty.x2) continue;
+            struct drm_clip_rect diff;
+            if (!present_diff(s->pixels, s->width, s->height, s->dirty,
+                              s->presented, s->presented_w, s->presented_h, s->presented_valid, &diff)) {
+                s->dirty.x2 = s->dirty.x1;
+                continue;
+            }
             soft_cursor_flush(o, 0);
             struct drm_clip_rect clip = copy_picture(o->map, o->pitch, o->mode.hdisplay,
-                o->mode.vdisplay, s->pixels, s->width, s->height, s->dirty);
-            struct drm_mode_fb_dirty_cmd cmd = { .fb_id = o->fb_id, .num_clips = 1,
-                .clips_ptr = (uintptr_t)&clip };
-            ioctl(card, DRM_IOCTL_MODE_DIRTYFB, &cmd);
+                o->mode.vdisplay, s->pixels, s->width, s->height, diff);
+            if (clip.x1 < clip.x2 && clip.y1 < clip.y2) {
+                struct drm_mode_fb_dirty_cmd cmd = { .fb_id = o->fb_id, .num_clips = 1,
+                    .clips_ptr = (uintptr_t)&clip };
+                ioctl(card, DRM_IOCTL_MODE_DIRTYFB, &cmd);
+            }
+            present_commit(s->pixels, s->width, s->height, diff,
+                           &s->presented, &s->presented_w, &s->presented_h, &s->presented_valid);
             s->dirty.x2 = s->dirty.x1;
-            hover_frame(o);
+            if (ndesk >= 2 && hover_output >= 0) hover_frame(o);
             soft_cursor_flush(o, 1);
         }
-        if (drawing_surface) dirty = drawing_surface->dirty;
+        if (drawing_surface) {
+            dirty = drawing_surface->dirty;
+            presented = drawing_surface->presented;
+            presented_w = drawing_surface->presented_w;
+            presented_h = drawing_surface->presented_h;
+            presented_valid = drawing_surface->presented_valid;
+        }
         return;
     }
     if (card < 0 || noutputs == 0 || shadow == NULL || lent || dirty.x1 == dirty.x2) {
         return;
     }
+    int dmabuf_active = 0;
+    for (uint32_t i = 0; i < noutputs; i++) {
+        if (has_any_dmabuf_fb(&outputs[i])) dmabuf_active = 1;
+    }
+    if (dmabuf_active) {
+        presented_valid = 0;
+    }
+    struct drm_clip_rect diff;
+    if (!present_diff(shadow, width, height, dirty,
+                      presented, presented_w, presented_h, presented_valid, &diff)) {
+        dirty.x2 = dirty.x1;
+        return;
+    }
+    int flushed_any = 0;
     for (uint32_t i = 0; i < noutputs; i++) {
         struct output *o = &outputs[i];
         if (o->map == NULL) {
@@ -1975,12 +2350,19 @@ void screen_flush(void)
         }
         soft_cursor_flush(o, 0);
         struct drm_clip_rect clip = copy_picture(o->map, o->pitch,
-            o->mode.hdisplay, o->mode.vdisplay, shadow, width, height, dirty);
-        struct drm_mode_fb_dirty_cmd cmd = { .fb_id = o->fb_id, .num_clips = 1,
-                                             .clips_ptr = (uintptr_t)&clip };
-        ioctl(card, DRM_IOCTL_MODE_DIRTYFB, &cmd);
-        hover_frame(o);
+            o->mode.hdisplay, o->mode.vdisplay, shadow, width, height, diff);
+        if (clip.x1 < clip.x2 && clip.y1 < clip.y2) {
+            struct drm_mode_fb_dirty_cmd cmd = { .fb_id = o->fb_id, .num_clips = 1,
+                                                 .clips_ptr = (uintptr_t)&clip };
+            ioctl(card, DRM_IOCTL_MODE_DIRTYFB, &cmd);
+        }
+        if (ndesk >= 2 && hover_output >= 0) hover_frame(o);
         soft_cursor_flush(o, 1);
+        flushed_any = 1;
+    }
+    if (flushed_any) {
+        present_commit(shadow, width, height, diff,
+                       &presented, &presented_w, &presented_h, &presented_valid);
     }
     dirty.x2 = dirty.x1;
 }
@@ -1989,16 +2371,22 @@ void screen_flush(void)
  * has more screens than one: drawn into its scanout over the picture, as the
  * cursor is, after every copy of the picture there. */
 #define HOVER_GREEN 0x30C850u
+static uint32_t hover_thickness(const struct output *o)
+{
+    double s = extended && o->surface ? o->surface->scale : scale > 0 ? scale : 1.0;
+    uint32_t w = o->mode.hdisplay, h = o->mode.vdisplay, t = (uint32_t)(3 * s + 0.5);
+    if (t < 2) t = 2;
+    return (2 * t < w && 2 * t < h) ? t : 0;
+}
+
 static void hover_frame(struct output *o)
 {
     if (ndesk < 2 || hover_output < 0 || (uint32_t)hover_output >= noutputs || o != &outputs[hover_output] ||
         o->map == NULL || lent) {
         return;
     }
-    double s = extended && o->surface ? o->surface->scale : scale > 0 ? scale : 1.0;
-    uint32_t w = o->mode.hdisplay, h = o->mode.vdisplay, t = (uint32_t)(3 * s + 0.5);
-    if (t < 2) t = 2;
-    if (2 * t >= w || 2 * t >= h) return;
+    uint32_t w = o->mode.hdisplay, h = o->mode.vdisplay, t = hover_thickness(o);
+    if (t == 0) return;
     for (uint32_t y = 0; y < h; y++) {
         uint32_t *line = (uint32_t *)(o->map + (uint64_t)y * o->pitch);
         if (y < t || y >= h - t) {
@@ -2017,13 +2405,51 @@ static void hover_frame(struct output *o)
     ioctl(card, DRM_IOCTL_MODE_DIRTYFB, &cmd);
 }
 
-/* Output i shown again from its picture (the frame taken off, or put on). */
-static void output_again(int i)
+/* Restore only the 4 thin border strips of output i from its shadow buffer. */
+static void hover_clear(int i)
 {
-    if (i < 0 || (uint32_t)i >= noutputs) return;
-    struct output_surface *s = extended ? outputs[i].surface : NULL;
-    if (s) s->dirty = (struct drm_clip_rect){ 0, 0, (unsigned short)s->width, (unsigned short)s->height };
-    else dirty = (struct drm_clip_rect){ 0, 0, (unsigned short)width, (unsigned short)height };
+    if (i < 0 || (uint32_t)i >= noutputs || card < 0 || lent) return;
+    struct output *o = &outputs[i];
+    if (o->map == NULL) return;
+    uint32_t w = o->mode.hdisplay, h = o->mode.vdisplay, t = hover_thickness(o);
+    if (t == 0) return;
+    struct output_surface *s = extended ? o->surface : NULL;
+    const uint32_t *src = s ? s->pixels : shadow;
+    uint32_t sw = s ? s->width : width, sh = s ? s->height : height;
+    if (src == NULL || sw == 0 || sh == 0) return;
+    soft_cursor_flush(o, 0);
+    struct drm_clip_rect clips[4] = {
+        { 0, 0, (unsigned short)w, (unsigned short)t },
+        { 0, (unsigned short)(h - t), (unsigned short)w, (unsigned short)h },
+        { 0, (unsigned short)t, (unsigned short)t, (unsigned short)(h - t) },
+        { (unsigned short)(w - t), (unsigned short)t, (unsigned short)w, (unsigned short)(h - t) },
+    };
+    if (w == sw && h == sh) {
+        for (int k = 0; k < 4; k++) {
+            copy_picture(o->map, o->pitch, w, h, src, sw, sh, clips[k]);
+        }
+        struct drm_mode_fb_dirty_cmd cmd = { .fb_id = o->fb_id, .num_clips = 4, .clips_ptr = (uintptr_t)clips };
+        ioctl(card, DRM_IOCTL_MODE_DIRTYFB, &cmd);
+    } else {
+        struct drm_clip_rect fit = fit_rect(sw, sh, w, h);
+        uint32_t fw = fit.x2 - fit.x1, fh = fit.y2 - fit.y1;
+        for (int k = 0; k < 4; k++) {
+            for (uint32_t y = clips[k].y1; y < clips[k].y2; y++) {
+                uint32_t *line = (uint32_t *)(o->map + (uint64_t)y * o->pitch);
+                if (y < fit.y1 || y >= fit.y2) {
+                    memset(line + clips[k].x1, 0, (size_t)(clips[k].x2 - clips[k].x1) * 4);
+                } else {
+                    const uint32_t *srow = src + (uint64_t)((uint64_t)(y - fit.y1) * sh / fh) * sw;
+                    for (uint32_t x = clips[k].x1; x < clips[k].x2; x++) {
+                        line[x] = (x >= fit.x1 && x < fit.x2) ? srow[(uint64_t)(x - fit.x1) * sw / fw] : 0;
+                    }
+                }
+            }
+        }
+        struct drm_mode_fb_dirty_cmd cmd = { .fb_id = o->fb_id, .num_clips = 4, .clips_ptr = (uintptr_t)clips };
+        ioctl(card, DRM_IOCTL_MODE_DIRTYFB, &cmd);
+    }
+    soft_cursor_flush(o, 1);
 }
 
 void screen_hover(int output)
@@ -2031,10 +2457,14 @@ void screen_hover(int output)
     if (output == hover_output) return;
     int was = hover_output;
     hover_output = output;
-    if (ndesk < 2) return;
-    output_again(was);
-    output_again(output);
-    screen_flush();
+    if (ndesk < 2 || card < 0 || lent) return;
+    if (was >= 0) hover_clear(was);
+    if (output >= 0 && (uint32_t)output < noutputs) {
+        struct output *o = &outputs[output];
+        soft_cursor_flush(o, 0);
+        hover_frame(o);
+        soft_cursor_flush(o, 1);
+    }
 }
 
 void screen_desk(char *const *fields, int n)
@@ -2109,7 +2539,7 @@ int screen_desk_foreign(int gx, int gy)
 
 void screen_fill(int col, int row, int ncols, int nrows, uint32_t rgb)
 {
-    if (shadow == NULL || col < 0 || row < 0 || col >= cols || row >= rows) {
+    if (shadow == NULL || col < 0 || row < 0 || col >= cols || row >= rows || ncols <= 0 || nrows <= 0) {
         return;
     }
     if (col + ncols > cols) {
@@ -2120,12 +2550,7 @@ void screen_fill(int col, int row, int ncols, int nrows, uint32_t rgb)
     }
     uint32_t x0 = (uint32_t)col * glyph_w, x1 = x0 + (uint32_t)ncols * glyph_w;
     uint32_t y0 = top + (uint32_t)row * glyph_h, y1 = y0 + (uint32_t)nrows * glyph_h;
-    touch(x0, y0, x1, y1);
-    for (uint32_t y = y0; y < y1; y++) {
-        for (uint32_t x = x0; x < x1; x++) {
-            shadow[(uint64_t)y * width + x] = rgb & 0xFFFFFF;
-        }
-    }
+    screen_fill_px((int)x0, (int)y0, (int)(x1 - x0), (int)(y1 - y0), rgb);
 }
 
 /* A rectangle of pixels clipped to the picture, *sx and *sy what was cut
@@ -2156,6 +2581,7 @@ void screen_blit(int x, int y, int w, int h, const uint32_t *px, int stride)
     if (px == NULL || stride < w || !clip_px(&x, &y, &w, &h, &sx, &sy)) {
         return;
     }
+    if (y < (int)bar_h) active_bar.valid = 0;
     touch((uint32_t)x, (uint32_t)y, (uint32_t)(x + w), (uint32_t)(y + h));
 #if defined(__AVX2__)
     const __m256i mask = _mm256_set1_epi32(0x00FFFFFF);
@@ -2192,6 +2618,7 @@ void screen_fill_px(int x, int y, int w, int h, uint32_t rgb)
     if (!clip_px(&x, &y, &w, &h, &sx, &sy)) {
         return;
     }
+    if (y < (int)bar_h) active_bar.valid = 0;
     touch((uint32_t)x, (uint32_t)y, (uint32_t)(x + w), (uint32_t)(y + h));
     rgb &= 0xFFFFFF;
 #if defined(__AVX2__)
@@ -2419,6 +2846,7 @@ flip_now:
             o->dmabuf_pending_fb_id = fb_id;
             o->dmabuf_pending_slot = use_cache ? (int)p->slot : -1;
             o->dmabuf_flip_pending = 1;
+            presented_valid = 0;
             dirty.x2 = dirty.x1;
             return 1;
         }
@@ -2468,6 +2896,7 @@ flip_now:
     o->dmabuf_fb_id = fb_id;
     o->dmabuf_active_slot = use_cache ? (int)p->slot : -1;
     o->dmabuf_pending_slot = -1;
+    presented_valid = 0;
     dirty.x2 = dirty.x1;
     return 0;
 }
@@ -2505,6 +2934,9 @@ static uint32_t glyph_of(uint32_t cp)
     } else if (cp == 0x00A0) {
         cp = ' ';
     }
+    if (cp < 128) {
+        return ascii_has[cp] ? (uint32_t)ascii_map[cp] : '?';
+    }
     for (int i = 0; i < nutab; i++) {
         if (utab[i].cp == cp) {
             return utab[i].g;
@@ -2513,20 +2945,48 @@ static uint32_t glyph_of(uint32_t cp)
     return nutab == 0 && cp < glyph_count ? cp : '?';
 }
 
-static void glyph(int col, int row, uint32_t cp, uint32_t fg, uint32_t bg)
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((optimize("O3")))
+#endif
+static void glyph_draw(int col, int row, uint32_t gi, uint32_t fg, uint32_t bg)
 {
-    const uint8_t *g = glyphs + (uint64_t)glyph_of(cp) * glyph_bytes;
+    const uint8_t *g = glyphs + (uint64_t)gi * glyph_bytes;
     uint32_t *line = shadow + ((uint64_t)top + (uint64_t)row * glyph_h) * width + (uint64_t)col * glyph_w;
 
-    touch((uint32_t)col * glyph_w, top + (uint32_t)row * glyph_h,
-          (uint32_t)(col + 1) * glyph_w, top + (uint32_t)(row + 1) * glyph_h);
-    for (uint32_t y = 0; y < glyph_h; y++, line += width) {
-        const uint8_t *bits = g + (y / glyph_mag) * row_bytes;
-        for (uint32_t x = 0; x < glyph_w; x++) {
-            uint32_t fx = x / glyph_mag;
-            line[x] = (bits[fx / 8] >> (7 - fx % 8)) & 1 ? fg : bg;
+    if (glyph_mag == 1) {
+        for (uint32_t y = 0; y < glyph_h; y++, line += width) {
+            const uint8_t *bits = g + y * row_bytes;
+            for (uint32_t x = 0; x < glyph_w; x++) {
+                line[x] = (bits[x >> 3] >> (7 - (x & 7))) & 1 ? fg : bg;
+            }
+        }
+    } else if (glyph_mag == 2) {
+        for (uint32_t y = 0; y < glyph_h; y++, line += width) {
+            const uint8_t *bits = g + (y >> 1) * row_bytes;
+            for (uint32_t x = 0; x < glyph_w; x++) {
+                uint32_t fx = x >> 1;
+                line[x] = (bits[fx >> 3] >> (7 - (fx & 7))) & 1 ? fg : bg;
+            }
+        }
+    } else {
+        for (uint32_t y = 0; y < glyph_h; y++, line += width) {
+            const uint8_t *bits = g + (y / glyph_mag) * row_bytes;
+            for (uint32_t x = 0; x < glyph_w; x++) {
+                uint32_t fx = x / glyph_mag;
+                line[x] = (bits[fx >> 3] >> (7 - (fx & 7))) & 1 ? fg : bg;
+            }
         }
     }
+}
+
+/* Kept for standalone unit tests (test-screen-mirror.c) that call glyph() directly. */
+__attribute__((unused))
+static void glyph(int col, int row, uint32_t cp, uint32_t fg, uint32_t bg)
+{
+    uint32_t y0 = top + (uint32_t)row * glyph_h;
+    if (y0 < bar_h) active_bar.valid = 0;
+    touch((uint32_t)col * glyph_w, y0, (uint32_t)(col + 1) * glyph_w, y0 + glyph_h);
+    glyph_draw(col, row, glyph_of(cp), fg, bg);
 }
 
 void screen_text(int col, int row, const char *s, uint32_t fg, uint32_t bg)
@@ -2534,7 +2994,9 @@ void screen_text(int col, int row, const char *s, uint32_t fg, uint32_t bg)
     if (shadow == NULL || row < 0 || row >= rows || s == NULL) {
         return;
     }
+    uint32_t fg_rgb = fg & 0xFFFFFFu, bg_rgb = bg & 0xFFFFFFu;
     const uint8_t *p = (const uint8_t *)s, *end = p + strlen(s);
+    int span_start = -1, span_end = -1;
     for (; p < end && col < cols; col++) {
         uint32_t cp = utf8(&p, end);
         if (col < 0) {
@@ -2544,22 +3006,33 @@ void screen_text(int col, int row, const char *s, uint32_t fg, uint32_t bg)
         if (is_wide_cjk(cp) || cp >= 0x2500) {
             int wide = is_wide_cjk(cp);
             if (!wide || col + 1 < cols) {
-                draw_ft_glyph(col, row, cp, wide, fg & 0xFFFFFF, bg & 0xFFFFFF);
+                if (span_start < 0) span_start = col;
+                draw_ft_glyph(col, row, cp, wide, fg_rgb, bg_rgb);
                 if (wide) {
                     col++;
                 }
+                span_end = col + 1;
             }
             continue;
         }
         uint32_t g = glyph_of(cp);
+        if (span_start < 0) span_start = col;
         if (g != '?' || cp == '?') {
-            glyph(col, row, cp, fg & 0xFFFFFF, bg & 0xFFFFFF);
+            glyph_draw(col, row, g, fg_rgb, bg_rgb);
         } else {
-            draw_ft_glyph(col, row, cp, 0, fg & 0xFFFFFF, bg & 0xFFFFFF);
+            draw_ft_glyph(col, row, cp, 0, fg_rgb, bg_rgb);
         }
+        span_end = col + 1;
 #else
-        glyph(col, row, cp, fg & 0xFFFFFF, bg & 0xFFFFFF);
+        if (span_start < 0) span_start = col;
+        glyph_draw(col, row, glyph_of(cp), fg_rgb, bg_rgb);
+        span_end = col + 1;
 #endif
+    }
+    if (span_start >= 0 && span_end > span_start) {
+        uint32_t y0 = top + (uint32_t)row * glyph_h;
+        if (y0 < bar_h) active_bar.valid = 0;
+        touch((uint32_t)span_start * glyph_w, y0, (uint32_t)span_end * glyph_w, y0 + glyph_h);
     }
 }
 
@@ -2600,12 +3073,48 @@ void screen_bar(const char *title, const char *ime)
         return; /* a window: the desktop's bar shows all this */
     }
     int frozen = panel_containers(NULL, &ram);
+    const char *tstr = title ? title : "";
+    const char *istr = ime ? ime : "";
+    struct status_fields sf;
+    memset(&sf, 0, sizeof sf);
+    int have_sf = 0;
+    if (base_status_fields) {
+        base_status_fields(&sf);
+        have_sf = 1;
+    }
+    uint32_t t_bg = theme_rgb(THEME_PANEL, PANEL_BG & 0xFFFFFFu);
+    uint32_t t_fg = theme_rgb(THEME_FG, 0xD0D0D0u);
+    uint32_t t_acc = theme_rgb(THEME_ACCENT, 0x3A4C68u);
+    if (active_bar.valid && have_sf &&
+        active_bar.bar_w == width && active_bar.bar_h == bar_h &&
+        active_bar.frozen == frozen &&
+        active_bar.theme_bg == t_bg && active_bar.theme_fg == t_fg &&
+        active_bar.theme_accent == t_acc &&
+        strcmp(active_bar.title, tstr) == 0 &&
+        strcmp(active_bar.ime, istr) == 0 &&
+        memcmp(&active_bar.fields, &sf, sizeof sf) == 0) {
+        return;
+    }
     if (frozen) {
         /* TRANSLATORS: status bar: keep short. */
         snprintf(sub, sizeof sub, P_("%d frozen", "%d frozen", frozen), frozen);
     }
     panel_draw(shadow, (int)width, (int)bar_h, (int)width, title, sub, ime, 0, &x0, &x1);
     touch(0, 0, width, bar_h);
+    if (have_sf && strlen(tstr) < sizeof active_bar.title && strlen(istr) < sizeof active_bar.ime) {
+        active_bar.valid = 1;
+        snprintf(active_bar.title, sizeof active_bar.title, "%s", tstr);
+        snprintf(active_bar.ime, sizeof active_bar.ime, "%s", istr);
+        active_bar.fields = sf;
+        active_bar.frozen = frozen;
+        active_bar.bar_w = width;
+        active_bar.bar_h = bar_h;
+        active_bar.theme_bg = t_bg;
+        active_bar.theme_fg = t_fg;
+        active_bar.theme_accent = t_acc;
+    } else {
+        active_bar.valid = 0;
+    }
 }
 
 double screen_scale(void)
@@ -2629,6 +3138,7 @@ static uint32_t cursor_handle, cursor_side;
 static uint32_t *cursor_map;
 static uint64_t cursor_map_size;
 static int cursor_put_on; /* on the outputs of card: to take off again */
+static int cursor_output = -1; /* extended mode: output currently holding the cursor */
 
 static const char *const arrow[] = {
     "X          ", "XX         ", "X.X        ", "X..X       ", "X...X      ", "X....X     ",
@@ -2750,18 +3260,24 @@ static void cursor_place(const struct output *o, int *x, int *y)
     *y = fit.y1 + (int)((int64_t)cursor_y * (fit.y2 - fit.y1) / (int64_t)height);
 }
 
-/* Draw (or only take away, draw 0) the cursor in o's scanout. */
+/* Draw (or only take away, draw 0) the cursor in o's scanout, reading
+ * background pixels from cached RAM (never WC VRAM) and writing sequentially. */
 static void soft_cursor_flush(struct output *o, int draw)
 {
     if (!o->soft_cursor || o->map == NULL) return;
     struct drm_clip_rect *r = &o->cursor_at;
     uint32_t dw = o->mode.hdisplay, dh = o->mode.vdisplay;
+    struct output_surface *surf = extended ? o->surface : NULL;
+    const uint32_t *src = surf ? surf->pixels : shadow;
+    uint32_t sw = surf ? surf->width : width, sh = surf ? surf->height : height;
     if (r->x1 != r->x2) {
-        struct output_surface *s = extended ? o->surface : NULL;
-        struct drm_clip_rect back = copy_picture(o->map, o->pitch, dw, dh,
-            s ? s->pixels : shadow, s ? s->width : width, s ? s->height : height, *r);
-        struct drm_mode_fb_dirty_cmd cmd = { .fb_id = o->fb_id, .num_clips = 1, .clips_ptr = (uintptr_t)&back };
-        ioctl(card, DRM_IOCTL_MODE_DIRTYFB, &cmd);
+        if (src != NULL && sw > 0 && sh > 0) {
+            struct drm_clip_rect back = copy_picture(o->map, o->pitch, dw, dh, src, sw, sh, *r);
+            if (back.x1 < back.x2 && back.y1 < back.y2) {
+                struct drm_mode_fb_dirty_cmd cmd = { .fb_id = o->fb_id, .num_clips = 1, .clips_ptr = (uintptr_t)&back };
+                ioctl(card, DRM_IOCTL_MODE_DIRTYFB, &cmd);
+            }
+        }
         *r = (struct drm_clip_rect){ 0 };
     }
     if (!draw || !cursor_on || lent) return;
@@ -2779,23 +3295,65 @@ static void soft_cursor_flush(struct output *o, int draw)
     int x2 = x0 + cursor_w > (int)dw ? (int)dw : x0 + cursor_w;
     int y2 = y0 + cursor_h > (int)dh ? (int)dh : y0 + cursor_h;
     if (x1 >= x2 || y1 >= y2) return;
+
+    int same_size = (dw == sw && dh == sh);
+    struct drm_clip_rect fit = same_size ? (struct drm_clip_rect){ 0, 0, (unsigned short)dw, (unsigned short)dh }
+                                         : (sw > 0 && sh > 0 ? fit_rect(sw, sh, dw, dh) : (struct drm_clip_rect){ 0 });
+    uint32_t fw = fit.x2 - fit.x1, fh = fit.y2 - fit.y1;
+    uint32_t hborder = (ndesk >= 2 && hover_output >= 0 && (uint32_t)hover_output < noutputs &&
+                        o == &outputs[hover_output]) ? hover_thickness(o) : 0;
+    uint32_t row_buf[CURSOR_MAX];
+    int span = x2 - x1;
     for (int y = y1; y < y2; y++) {
-        uint32_t *line = (uint32_t *)(o->map + (uint64_t)y * o->pitch);
-        for (int x = x1; x < x2; x++) {
-            uint32_t s = cursor_image[(y - y0) * cursor_w + (x - x0)], a = s >> 24, d = line[x];
-            if (a == 0) continue;
-            uint32_t out = 0;
-            for (int sh = 0; sh < 24; sh += 8) {
-                uint32_t v = ((s >> sh) & 0xFF) + ((d >> sh) & 0xFF) * (255 - a) / 255;
-                out |= (v > 255 ? 255 : v) << sh;
+        const uint32_t *srow = NULL;
+        if (src != NULL && sw > 0 && sh > 0) {
+            if (same_size) {
+                srow = src + (uint64_t)y * sw;
+            } else if ((uint32_t)y >= fit.y1 && (uint32_t)y < fit.y2 && fh > 0) {
+                srow = src + (uint64_t)((uint64_t)((uint32_t)y - fit.y1) * sh / fh) * sw;
             }
-            line[x] = out;
         }
+        int y_border = hborder > 0 && ((uint32_t)y < hborder || (uint32_t)y >= dh - hborder);
+        const uint32_t *crow = cursor_image + (y - y0) * cursor_w + (x1 - x0);
+        for (int i = 0; i < span; i++) {
+            int x = x1 + i;
+            uint32_t d;
+            if (y_border || (hborder > 0 && ((uint32_t)x < hborder || (uint32_t)x >= dw - hborder))) {
+                d = HOVER_GREEN;
+            } else if (srow == NULL) {
+                d = 0;
+            } else if (same_size) {
+                d = srow[x];
+            } else if ((uint32_t)x >= fit.x1 && (uint32_t)x < fit.x2 && fw > 0) {
+                d = srow[(uint64_t)((uint32_t)x - fit.x1) * sw / fw];
+            } else {
+                d = 0;
+            }
+            uint32_t sp = crow[i], a = sp >> 24;
+            if (a == 0) {
+                row_buf[i] = d;
+            } else if (a == 255) {
+                row_buf[i] = sp & 0xFFFFFFu;
+            } else {
+                uint32_t inv = 255u - a;
+                uint32_t dr = ((d >> 16) & 0xFFu) * inv + 128u;
+                uint32_t dg = ((d >> 8) & 0xFFu) * inv + 128u;
+                uint32_t db = (d & 0xFFu) * inv + 128u;
+                uint32_t r_ch = ((sp >> 16) & 0xFFu) + ((dr + (dr >> 8)) >> 8);
+                uint32_t g_ch = ((sp >> 8) & 0xFFu) + ((dg + (dg >> 8)) >> 8);
+                uint32_t b_ch = (sp & 0xFFu) + ((db + (db >> 8)) >> 8);
+                if (r_ch > 255u) r_ch = 255u;
+                if (g_ch > 255u) g_ch = 255u;
+                if (b_ch > 255u) b_ch = 255u;
+                row_buf[i] = (r_ch << 16) | (g_ch << 8) | b_ch;
+            }
+        }
+        memcpy(o->map + (uint64_t)y * o->pitch + (uint64_t)x1 * 4u, row_buf, (size_t)span * 4);
     }
-    /* Logical damage for the scaled copy is the whole frame anyway. */
-    *r = extended || (dw == width && dh == height) ? (struct drm_clip_rect){ (unsigned short)x1, (unsigned short)y1,
-                                                                (unsigned short)x2, (unsigned short)y2 }
-                                     : (struct drm_clip_rect){ 0, 0, (unsigned short)width, (unsigned short)height };
+    /* Logical damage for the scaled copy is the whole frame to preserve borders. */
+    *r = extended || same_size ? (struct drm_clip_rect){ (unsigned short)x1, (unsigned short)y1,
+                                                         (unsigned short)x2, (unsigned short)y2 }
+                               : (struct drm_clip_rect){ 0, 0, (unsigned short)width, (unsigned short)height };
     struct drm_clip_rect on = { (unsigned short)x1, (unsigned short)y1, (unsigned short)x2, (unsigned short)y2 };
     struct drm_mode_fb_dirty_cmd cmd = { .fb_id = o->fb_id, .num_clips = 1, .clips_ptr = (uintptr_t)&on };
     ioctl(card, DRM_IOCTL_MODE_DIRTYFB, &cmd);
@@ -2816,37 +3374,11 @@ static void cursor_drop(int fd)
     }
     cursor_handle = 0;
     cursor_put_on = 0;
+    cursor_output = -1;
 }
 
-/* The cursor as it should be on every output of fd: its image, or none. */
-static void cursor_put(int fd)
+static void cursor_prepare_bo(int fd)
 {
-    if (fd < 0 || lent || noutputs == 0) return;
-    if (extended) {
-        for (uint32_t i = 0; i < noutputs; i++) soft_cursor_flush(&outputs[i], 0);
-        cursor_drop(fd);
-        for (uint32_t i = 0; i < noutputs; i++) {
-            struct output *o = &outputs[i];
-            struct drm_mode_cursor2 c = { .flags = DRM_MODE_CURSOR_BO, .crtc_id = o->crtc_id };
-            ioctl(fd, DRM_IOCTL_MODE_CURSOR2, &c);
-            o->soft_cursor = 1;
-            soft_cursor_flush(o, cursor_on && cursor_shape != CURSOR_NONE);
-        }
-        cursor_put_on = cursor_on && cursor_shape != CURSOR_NONE;
-        return;
-    }
-    if (!cursor_on || cursor_shape == CURSOR_NONE) {
-        if (!cursor_put_on) return;
-        cursor_put_on = 0;
-        for (uint32_t i = 0; i < noutputs; i++) {
-            struct output *o = &outputs[i];
-            struct drm_mode_cursor2 c = { .flags = DRM_MODE_CURSOR_BO, .crtc_id = o->crtc_id };
-            if (!o->soft_cursor) ioctl(fd, DRM_IOCTL_MODE_CURSOR2, &c);
-            soft_cursor_flush(o, 0);
-        }
-        return;
-    }
-    load_cursor();
     uint32_t side = cursor_w > 64 || cursor_h > 64 ? CURSOR_MAX : 64;
     if (cursor_handle == 0 || side != cursor_side) {
         cursor_drop(fd);
@@ -2873,6 +3405,55 @@ static void cursor_put(int fd)
             memcpy(cursor_map + (size_t)y * cursor_side, cursor_image + y * cursor_w, (size_t)cursor_w * 4);
         }
     }
+}
+
+/* The cursor as it should be on every output of fd: its image, or none. */
+static void cursor_put(int fd)
+{
+    if (fd < 0 || lent || noutputs == 0) return;
+    if (!cursor_on || cursor_shape == CURSOR_NONE) {
+        if (!cursor_put_on) return;
+        cursor_put_on = 0;
+        cursor_output = -1;
+        for (uint32_t i = 0; i < noutputs; i++) {
+            struct output *o = &outputs[i];
+            struct drm_mode_cursor2 c = { .flags = DRM_MODE_CURSOR_BO, .crtc_id = o->crtc_id };
+            if (!o->soft_cursor) ioctl(fd, DRM_IOCTL_MODE_CURSOR2, &c);
+            soft_cursor_flush(o, 0);
+        }
+        return;
+    }
+    if (extended) {
+        int target = screen_output_at(cursor_x, cursor_y, NULL, NULL);
+        double saved_scale = scale;
+        if (target >= 0 && (uint32_t)target < noutputs && outputs[target].surface) {
+            scale = outputs[target].surface->scale;
+        }
+        load_cursor();
+        scale = saved_scale;
+        cursor_prepare_bo(fd);
+        for (uint32_t i = 0; i < noutputs; i++) {
+            struct output *o = &outputs[i];
+            soft_cursor_flush(o, 0);
+            if ((int)i == target) {
+                int x, y;
+                cursor_place(o, &x, &y);
+                struct drm_mode_cursor2 c = { .flags = DRM_MODE_CURSOR_BO | DRM_MODE_CURSOR_MOVE,
+                    .crtc_id = o->crtc_id, .x = x - hot_x, .y = y - hot_y, .width = cursor_side,
+                    .height = cursor_side, .handle = cursor_handle, .hot_x = hot_x, .hot_y = hot_y };
+                o->soft_cursor = cursor_map == NULL || ioctl(fd, DRM_IOCTL_MODE_CURSOR2, &c) < 0;
+                soft_cursor_flush(o, 1);
+            } else {
+                struct drm_mode_cursor2 c = { .flags = DRM_MODE_CURSOR_BO, .crtc_id = o->crtc_id };
+                o->soft_cursor = cursor_map == NULL || ioctl(fd, DRM_IOCTL_MODE_CURSOR2, &c) < 0;
+            }
+        }
+        cursor_output = target;
+        cursor_put_on = 1;
+        return;
+    }
+    load_cursor();
+    cursor_prepare_bo(fd);
     for (uint32_t i = 0; i < noutputs; i++) {
         struct output *o = &outputs[i];
         int x, y;
@@ -2891,6 +3472,26 @@ void screen_cursor_move(int x, int y)
     cursor_x = x;
     cursor_y = y;
     if (card < 0 || lent || !cursor_on || cursor_shape == CURSOR_NONE) return;
+    if (extended) {
+        int target = screen_output_at(cursor_x, cursor_y, NULL, NULL);
+        if (target != cursor_output) {
+            cursor_put(card);
+            return;
+        }
+        if (target >= 0 && (uint32_t)target < noutputs) {
+            struct output *o = &outputs[target];
+            if (o->soft_cursor) {
+                soft_cursor_flush(o, 1);
+            } else {
+                int ox, oy;
+                cursor_place(o, &ox, &oy);
+                struct drm_mode_cursor2 c = { .flags = DRM_MODE_CURSOR_MOVE, .crtc_id = o->crtc_id,
+                                              .x = ox - hot_x, .y = oy - hot_y };
+                ioctl(card, DRM_IOCTL_MODE_CURSOR2, &c);
+            }
+        }
+        return;
+    }
     for (uint32_t i = 0; i < noutputs; i++) {
         struct output *o = &outputs[i];
         if (o->soft_cursor) {

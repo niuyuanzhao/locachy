@@ -190,7 +190,8 @@ static void native_windows(void)
     const char *env = text_of(ROOT "/runtime/window-settings-1.env");
     assert(strstr(env, "program=settings\n") && strstr(env, "args=--page=network\n"));
     assert(strstr(env, "backend=wayland\n") && strstr(env, "display=" ROOT "/wayland-0\n"));
-    assert(strstr(env, "title=Settings\n") && strstr(env, "fds=3 4\n") && strstr(env, "control=none\n"));
+    assert(strstr(env, "title=Settings\n") && strstr(env, "fds=3 4\n") && strstr(env, "control=none\n") &&
+           strstr(env, "floating=0\n"));
     assert(apps_display_state() == APPS_DISPLAY_ACTIVE); /* no container runs */
     puts("PASS a settings window: own cgroup, wayland backend, page argument, keeps the display");
 
@@ -325,8 +326,19 @@ static void native_windows(void)
     assert(apps_action("stop", "window-firmware-1", why, sizeof why) == 0);
     tick_for(800);
     lacks("window-");
-    lacks("window-");
     puts("PASS the first window waits for display-ready; single mixer/bluetooth/network, multiple user-shell terms");
+
+    /* Floating centered search overlay: LOCACHY_WINDOW_FLOATING=1 and second request toggles it closed. */
+    assert(apps_window_open("search", "", why, sizeof why) == 0);
+    tick_for(300);
+    contains("window-search-1\trunning\t");
+    env = text_of(ROOT "/runtime/window-search-1.env");
+    assert(strstr(env, "program=search\n") && strstr(env, "floating=1\n"));
+    assert(apps_window_open("search", "", why, sizeof why) == 0);
+    tick_for(600);
+    assert(strstr(text_of(ROOT "/runtime/window-search-1.requests"), "close\n") != NULL);
+    lacks("window-search-1");
+    puts("PASS floating search overlay: LOCACHY_WINDOW_FLOATING=1 and second open toggles closed");
 
     /* A container may not be opened as a window, nor a window as one. */
     assert(apps_open("window-mixer-1", "/x", why, sizeof why) == -1);

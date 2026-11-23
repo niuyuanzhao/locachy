@@ -83,6 +83,13 @@ struct image {
     int w, h;
 };
 
+struct shm_buf {
+    struct wl_buffer *buf;
+    uint32_t *px;
+    size_t size;
+    int w, h, busy;
+};
+
 struct output {
     uint32_t name;
     struct wl_output *wl;
@@ -90,12 +97,17 @@ struct output {
     struct zwlr_layer_surface_v1 *layer;
     struct wp_fractional_scale_v1 *fscale;
     struct wp_viewport *viewport;
+    struct wl_callback *frame_cb;
     uint32_t scale120, w, h; /* logical size, from the configure */
-    int configured, dirty, keyboard;
-    struct image bg, veiled;  /* captured (then blurred, small), and veiled at the drawn size */
+    int configured, dirty, keyboard, frame_pending;
+    struct shm_buf bufs[2];
+    struct image bg, veiled;  /* captured (then blurred+veiled, small), and upscaled at drawn size */
     int field_x, field_y, field_w, field_h; /* search field, in buffer pixels */
     int heap_bottom;          /* the windows' area's bottom, in the screen's pixels */
     int selected, hovered, hover_close;
+    /* Cached filtered window list and layout geometry for this output. */
+    struct window *shown[MAX_SHOWN];
+    int nshown, layout_dirty;
     struct output *next;
 };
 
@@ -111,6 +123,7 @@ struct capture {
     int rank, done;    /* rank: format's (0: none read here); done: a first frame, or none to come */
     uint32_t pending, offered; /* the format of the constraints being sent; the last offered */
     int pending_rank;
+    double next_at;    /* earliest uptime to request next live capture frame; 0: none scheduled */
     struct image *into;
     struct window *win; /* a window's (kept up to date), or a screen's */
 };
@@ -197,6 +210,21 @@ static void dirty_all(void)
     }
 }
 
+static void invalidate_layouts(void)
+{
+    for (struct output *o = outputs; o; o = o->next) {
+        o->layout_dirty = 1;
+        o->dirty = 1;
+    }
+}
+
+static void image_free(struct image *im)
+{
+    free(im->px);
+    im->px = NULL;
+    im->w = im->h = 0;
+}
+
 /* Pixels */
 
 static uint32_t blend(uint32_t dst, uint32_t src)
@@ -219,22 +247,95 @@ static int corner(int x, int y, int rx, int ry, int rw, int rh, int r, int *dx, 
     return *dx && *dy;
 }
 
+static void put_span(uint32_t *px, int W, int H, int x0, int x1, int y, uint32_t argb, int opaque)
+{
+    if (y < 0 || y >= H) return;
+    if (x0 < 0) x0 = 0;
+    if (x1 > W) x1 = W;
+    if (x0 >= x1) return;
+    uint32_t *row = px + (size_t)y * (size_t)W;
+    if (opaque) {
+        for (int x = x0; x < x1; x++) row[x] = argb;
+    } else {
+        for (int x = x0; x < x1; x++) row[x] = blend(row[x], argb);
+    }
+}
+
 /* A rounded rectangle, filled, or (line > 0) only its border that wide. */
 static void round_rect(uint32_t *px, int W, int H, int x, int y, int w, int h, int r, int line, uint32_t argb)
 {
-    for (int yy = y < 0 ? 0 : y; yy < y + h && yy < H; yy++) {
-        for (int xx = x < 0 ? 0 : x; xx < x + w && xx < W; xx++) {
-            int dx, dy;
-            if (corner(xx, yy, x, y, w, h, r, &dx, &dy) && dx * dx + dy * dy > r * r) continue;
-            if (line > 0) {
-                int ir = r > line ? r - line : 0, idx, idy;
-                int inside = xx >= x + line && xx < x + w - line && yy >= y + line && yy < y + h - line;
-                if (inside && !(corner(xx, yy, x + line, y + line, w - 2 * line, h - 2 * line, ir, &idx, &idy) &&
-                                idx * idx + idy * idy > ir * ir)) {
-                    continue;
+    if (w <= 0 || h <= 0) return;
+    uint32_t alpha = argb >> 24;
+    if (alpha == 0) return;
+    int opaque = alpha == 255;
+    if (r < 0) r = 0;
+    if (r * 2 > w) r = w / 2;
+    if (r * 2 > h) r = h / 2;
+    if (line > 0 && (2 * line >= w || 2 * line >= h)) line = 0;
+
+    if (line > 0) {
+        int ir = r > line ? r - line : 0;
+        int c = r > line ? r : line;
+        int r2 = r * r, ir2 = ir * ir;
+        /* Straight top and bottom strips between corners. */
+        for (int yy = y; yy < y + line; yy++) {
+            put_span(px, W, H, x + c, x + w - c, yy, argb, opaque);
+        }
+        for (int yy = y + h - line; yy < y + h; yy++) {
+            put_span(px, W, H, x + c, x + w - c, yy, argb, opaque);
+        }
+        /* Straight left and right strips between corners. */
+        for (int yy = y + c; yy < y + h - c; yy++) {
+            put_span(px, W, H, x, x + line, yy, argb, opaque);
+            put_span(px, W, H, x + w - line, x + w, yy, argb, opaque);
+        }
+        /* Four c x c corner boxes, clipped cleanly to [x, x+w) x [y, y+h). */
+        int cxs[2] = { x, x + w - c };
+        int cys[2] = { y, y + h - c };
+        for (int cyi = 0; cyi < 2; cyi++) {
+            int y0 = cys[cyi];
+            int y1 = cys[cyi] + c;
+            if (cyi == 1 && y0 < y + c) y0 = y + c;
+            if (y0 < 0) y0 = 0;
+            if (y1 > H) y1 = H;
+            for (int cxi = 0; cxi < 2; cxi++) {
+                int x0 = cxs[cxi];
+                int x1 = cxs[cxi] + c;
+                if (cxi == 1 && x0 < x + c) x0 = x + c;
+                if (x0 < 0) x0 = 0;
+                if (x1 > W) x1 = W;
+                for (int yy = y0; yy < y1; yy++) {
+                    uint32_t *row = px + (size_t)yy * (size_t)W;
+                    for (int xx = x0; xx < x1; xx++) {
+                        int dx, dy;
+                        if (corner(xx, yy, x, y, w, h, r, &dx, &dy) && dx * dx + dy * dy > r2) continue;
+                        int inside = xx >= x + line && xx < x + w - line && yy >= y + line && yy < y + h - line;
+                        int idx, idy;
+                        if (inside && !(corner(xx, yy, x + line, y + line, w - 2 * line, h - 2 * line, ir, &idx, &idy) &&
+                                        idx * idx + idy * idy > ir2)) {
+                            continue;
+                        }
+                        row[xx] = opaque ? argb : blend(row[xx], argb);
+                    }
                 }
             }
-            px[yy * W + xx] = blend(px[yy * W + xx], argb);
+        }
+        return;
+    }
+
+    int y0 = y < 0 ? 0 : y, y1 = y + h < H ? y + h : H;
+    int x0 = x < 0 ? 0 : x, x1 = x + w < W ? x + w : W;
+    int r2 = r * r;
+    for (int yy = y0; yy < y1; yy++) {
+        if (yy >= y + r && yy < y + h - r) {
+            put_span(px, W, H, x0, x1, yy, argb, opaque);
+            continue;
+        }
+        uint32_t *row = px + (size_t)yy * (size_t)W;
+        for (int xx = x0; xx < x1; xx++) {
+            int dx, dy;
+            if (corner(xx, yy, x, y, w, h, r, &dx, &dy) && dx * dx + dy * dy > r2) continue;
+            row[xx] = opaque ? argb : blend(row[xx], argb);
         }
     }
 }
@@ -243,8 +344,7 @@ static void round_rect(uint32_t *px, int W, int H, int x, int y, int w, int h, i
 static int scale_image(const struct image *src, struct image *dst, int w, int h)
 {
     if (dst->px && dst->w == w && dst->h == h) return 0;
-    free(dst->px);
-    dst->px = NULL;
+    image_free(dst);
     if (w <= 0 || h <= 0 || !src->px || !(dst->px = malloc((size_t)w * (size_t)h * 4))) return -1;
     dst->w = w;
     dst->h = h;
@@ -271,33 +371,69 @@ static int scale_image(const struct image *src, struct image *dst, int w, int h)
     return 0;
 }
 
-/* src enlarged to w x h, each pixel between its four nearest (bilinear): the
- * blurred background, which scale_image would show in blocks. */
+/* src enlarged to w x h, each pixel between its four nearest (bilinear, 8-bit
+ * fixed-point): the blurred background, which scale_image would show in blocks. */
 static int smooth_image(const struct image *src, struct image *dst, int w, int h)
 {
-    free(dst->px);
-    dst->px = NULL;
+    image_free(dst);
     if (w <= 0 || h <= 0 || !src->px || !(dst->px = malloc((size_t)w * (size_t)h * 4))) return -1;
     dst->w = w;
     dst->h = h;
-    for (int y = 0; y < h; y++) {
-        double fy = fmax(0, (y + 0.5) * src->h / h - 0.5), ty;
-        int y0 = (int)fy, y1 = y0 + 1 < src->h ? y0 + 1 : y0;
-        ty = fy - y0;
-        for (int x = 0; x < w; x++) {
-            double fx = fmax(0, (x + 0.5) * src->w / w - 0.5), tx;
-            int x0 = (int)fx, x1 = x0 + 1 < src->w ? x0 + 1 : x0;
-            tx = fx - x0;
-            uint32_t a = src->px[y0 * src->w + x0], b = src->px[y0 * src->w + x1];
-            uint32_t c = src->px[y1 * src->w + x0], d = src->px[y1 * src->w + x1], out = 0xFF000000u;
-            for (int s = 0; s < 24; s += 8) {
-                double top = (a >> s & 255) * (1 - tx) + (b >> s & 255) * tx;
-                double bottom = (c >> s & 255) * (1 - tx) + (d >> s & 255) * tx;
-                out |= (uint32_t)(top * (1 - ty) + bottom * ty + 0.5) << s;
-            }
-            dst->px[y * w + x] = out;
+    int *x0s = malloc((size_t)w * sizeof *x0s);
+    int *x1s = malloc((size_t)w * sizeof *x1s);
+    uint32_t *txs = malloc((size_t)w * sizeof *txs);
+    if (!x0s || !x1s || !txs) {
+        free(x0s); free(x1s); free(txs);
+        image_free(dst);
+        return -1;
+    }
+    for (int x = 0; x < w; x++) {
+        /* ((2*x + 1)*src->w - w) / (2*w) in 8-bit fixed-point (<< 8). */
+        int64_t num = ((int64_t)(2 * x + 1) * src->w - w) * 256;
+        int64_t fx = num <= 0 ? 0 : num / (2 * w);
+        int x0 = (int)(fx >> 8);
+        if (x0 >= src->w - 1) {
+            x0s[x] = x1s[x] = src->w - 1;
+            txs[x] = 0;
+        } else {
+            x0s[x] = x0;
+            x1s[x] = x0 + 1;
+            txs[x] = (uint32_t)(fx & 255);
         }
     }
+    for (int y = 0; y < h; y++) {
+        int64_t num = ((int64_t)(2 * y + 1) * src->h - h) * 256;
+        int64_t fy = num <= 0 ? 0 : num / (2 * h);
+        int y0 = (int)(fy >> 8);
+        int y1;
+        uint32_t ty;
+        if (y0 >= src->h - 1) {
+            y0 = y1 = src->h - 1;
+            ty = 0;
+        } else {
+            y1 = y0 + 1;
+            ty = (uint32_t)(fy & 255);
+        }
+        uint32_t ity = 256 - ty;
+        const uint32_t *row0 = src->px + (size_t)y0 * (size_t)src->w;
+        const uint32_t *row1 = src->px + (size_t)y1 * (size_t)src->w;
+        uint32_t *out_row = dst->px + (size_t)y * (size_t)w;
+        for (int x = 0; x < w; x++) {
+            int x0 = x0s[x], x1 = x1s[x];
+            uint32_t tx = txs[x], itx = 256 - tx;
+            uint32_t a = row0[x0], b = row0[x1], c = row1[x0], d = row1[x1];
+            uint32_t top_rb = ((a & 0x00FF00FFu) * itx + (b & 0x00FF00FFu) * tx) >> 8;
+            uint32_t bot_rb = ((c & 0x00FF00FFu) * itx + (d & 0x00FF00FFu) * tx) >> 8;
+            uint32_t rb = (((top_rb & 0x00FF00FFu) * ity + (bot_rb & 0x00FF00FFu) * ty + 0x00800080u) >> 8) & 0x00FF00FFu;
+            uint32_t top_g = (((a >> 8) & 255u) * itx + ((b >> 8) & 255u) * tx) >> 8;
+            uint32_t bot_g = (((c >> 8) & 255u) * itx + ((d >> 8) & 255u) * tx) >> 8;
+            uint32_t g = (top_g * ity + bot_g * ty + 128u) >> 8;
+            out_row[x] = 0xFF000000u | rb | (g << 8);
+        }
+    }
+    free(x0s);
+    free(x1s);
+    free(txs);
     return 0;
 }
 
@@ -318,19 +454,24 @@ static void text_over(uint32_t *px, int W, int H, int x, int y, const char *s, u
     uint32_t *mask = tw > 0 && ch > 0 ? calloc((size_t)tw * (size_t)ch, 4) : NULL;
     if (!mask) return;
     panel_text(mask, tw, ch, tw, 0, 0, s, 0xFFFFFFFFu, 0xFF000000u, f);
-    for (int yy = 0; yy < ch; yy++) {
-        for (int xx = 0; xx < tw; xx++) {
-            if (x + xx >= 0 && x + xx < W && y + yy >= 0 && y + yy < H) {
-                uint32_t *p = &px[(y + yy) * W + x + xx];
-                *p = blend(*p, (mask[yy * tw + xx] >> 8 & 255) << 24 | (fg & 0xFFFFFFu));
-            }
+    uint32_t rgb = fg & 0xFFFFFFu;
+    int y0 = y < 0 ? -y : 0, y1 = y + ch > H ? H - y : ch;
+    int x0 = x < 0 ? -x : 0, x1 = x + tw > W ? W - x : tw;
+    for (int yy = y0; yy < y1; yy++) {
+        uint32_t *dst_row = px + (size_t)(y + yy) * (size_t)W;
+        const uint32_t *m_row = mask + (size_t)yy * (size_t)tw;
+        for (int xx = x0; xx < x1; xx++) {
+            uint32_t cov = (m_row[xx] >> 8) & 255u;
+            if (!cov) continue;
+            dst_row[x + xx] = cov == 255u ? (0xFF000000u | rgb) : blend(dst_row[x + xx], (cov << 24) | rgb);
         }
     }
     free(mask);
 }
 
 /* The screen's picture as KDE shows the desktop under the overview: made
- * smaller and blurred (a box blur, three passes each way). */
+ * smaller, blurred (a box blur, three passes each way), and tinted with VEIL
+ * before upscaling (64x fewer pixels than tinting at native resolution). */
 static void blur(struct image *im)
 {
     struct image small = { 0 };
@@ -364,8 +505,11 @@ static void blur(struct image *im)
             memcpy(small.px, tmp, (size_t)small.w * (size_t)small.h * 4);
         }
     }
+    for (size_t i = 0; i < (size_t)small.w * (size_t)small.h; i++) {
+        small.px[i] = blend(small.px[i] | 0xFF000000u, VEIL);
+    }
     free(tmp);
-    free(im->px);
+    image_free(im);
     *im = small;
 }
 
@@ -401,10 +545,13 @@ static void frame_time(void *data, struct ext_image_copy_capture_frame_v1 *f, ui
 static void next_frame(struct capture *c);
 
 /* The screens to draw again: a window's, or all for a screen's picture. */
-static void captured(struct capture *c)
+static void captured(struct capture *c, int resized)
 {
     for (struct output *o = outputs; o; o = o->next) {
-        if (!c->win || window_on(c->win, o)) o->dirty = 1;
+        if (!c->win || window_on(c->win, o)) {
+            if (resized) o->layout_dirty = 1;
+            o->dirty = 1;
+        }
     }
 }
 
@@ -412,30 +559,39 @@ static void frame_ready(void *data, struct ext_image_copy_capture_frame_v1 *f)
 {
     struct capture *c = data;
     struct image *im = c->into;
-    if (!im->px || im->w != c->bw || im->h != c->bh) {
+    int resized = im->w != c->bw || im->h != c->bh;
+    /* Copied out of the SHM at once: the compositor may write the next frame
+     * into it as soon as that is requested (no borrowing of live memory). */
+    if (!im->px || resized) {
         free(im->px);
         im->px = malloc((size_t)c->bw * (size_t)c->bh * 4);
     }
     if (im->px) {
         im->w = c->bw;
         im->h = c->bh;
-        int swap = c->bformat == WL_SHM_FORMAT_XBGR8888 || c->bformat == WL_SHM_FORMAT_ABGR8888;
-        for (size_t i = 0; i < (size_t)c->bw * (size_t)c->bh; i++) {
-            uint32_t p = c->px[i];
-            if (swap) p = (p & 0x0000FF00u) | (p & 0xFFu) << 16 | (p >> 16 & 0xFFu); /* R and B, to XRGB */
-            im->px[i] = p | 0xFF000000u; /* drawn opaque */
+        size_t count = (size_t)c->bw * (size_t)c->bh;
+        if (c->bformat == WL_SHM_FORMAT_XBGR8888 || c->bformat == WL_SHM_FORMAT_ABGR8888) {
+            for (size_t i = 0; i < count; i++) {
+                uint32_t p = c->px[i];
+                im->px[i] = 0xFF000000u | (p & 0x0000FF00u) | ((p & 0xFFu) << 16) | ((p >> 16) & 0xFFu);
+            }
+        } else {
+            for (size_t i = 0; i < count; i++) im->px[i] = c->px[i] | 0xFF000000u;
         }
     }
     if (c->win) { /* scaled again when drawn */
-        free(c->win->scaled.px);
-        c->win->scaled.px = NULL;
+        image_free(&c->win->scaled);
     }
     ext_image_copy_capture_frame_v1_destroy(f);
     c->frame = NULL;
     c->done = 1;
-    captured(c);
-    if (c->win) next_frame(c);
-    else cap_free(c);
+    captured(c, resized);
+    if (c->win) {
+        /* Pace live thumbnail captures (~15 Hz) after the immediate first frame. */
+        c->next_at = uptime() + 0.066;
+    } else {
+        cap_free(c);
+    }
 }
 
 static void frame_failed(void *data, struct ext_image_copy_capture_frame_v1 *f, uint32_t reason)
@@ -444,6 +600,7 @@ static void frame_failed(void *data, struct ext_image_copy_capture_frame_v1 *f, 
     ext_image_copy_capture_frame_v1_destroy(f);
     c->frame = NULL;
     if (c->win && reason == EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_BUFFER_CONSTRAINTS) {
+        c->next_at = 0;
         next_frame(c); /* the window's size changed: a buffer of the new size */
         return;
     }
@@ -451,8 +608,9 @@ static void frame_failed(void *data, struct ext_image_copy_capture_frame_v1 *f, 
         say("locachy-overview: a capture failed (%u)", reason);
     }
     c->done = 1;
+    c->next_at = 0;
     cap_free(c);
-    captured(c);
+    captured(c, 1);
 }
 
 static const struct ext_image_copy_capture_frame_v1_listener frame_listener = {
@@ -636,7 +794,7 @@ static void win_done(void *data, struct zwlr_foreign_toplevel_handle_v1 *h)
 {
     (void)data;
     (void)h;
-    dirty_all();
+    invalidate_layouts();
 }
 
 static void win_closed(void *data, struct zwlr_foreign_toplevel_handle_v1 *h)
@@ -656,14 +814,14 @@ static void win_closed(void *data, struct zwlr_foreign_toplevel_handle_v1 *h)
     if (pressed.win == w) pressed.button = 0, pressed.win = NULL;
     if (touching.win == w) touching.id = -1, touching.win = NULL;
     cap_free(&w->cap);
-    free(w->thumb.px);
-    free(w->scaled.px);
+    image_free(&w->thumb);
+    image_free(&w->scaled);
     zwlr_foreign_toplevel_handle_v1_destroy(h);
     free(w);
     for (struct output *o = outputs; o; o = o->next) {
         o->selected = o->hovered = -1;
     }
-    dirty_all();
+    invalidate_layouts();
 }
 
 static void win_parent(void *data, struct zwlr_foreign_toplevel_handle_v1 *h,
@@ -711,6 +869,7 @@ static void new_window(void *data, struct zwlr_foreign_toplevel_manager_v1 *m,
     while (*tail) tail = &(*tail)->next;
     *tail = w;
     zwlr_foreign_toplevel_handle_v1_add_listener(h, &win_listener, w);
+    invalidate_layouts();
 }
 
 static void toplevels_finished(void *data, struct zwlr_foreign_toplevel_manager_v1 *m)
@@ -804,6 +963,7 @@ static void layer_configure(void *data, struct zwlr_layer_surface_v1 *l, uint32_
 {
     struct output *o = data;
     zwlr_layer_surface_v1_ack_configure(l, serial);
+    if (o->w != w || o->h != h) o->layout_dirty = 1;
     o->w = w;
     o->h = h;
     o->configured = o->dirty = 1;
@@ -831,6 +991,7 @@ static void output_scale(void *data, struct wp_fractional_scale_v1 *s, uint32_t 
     (void)s;
     if (o->scale120 != scale120) {
         o->scale120 = scale120;
+        o->layout_dirty = 1;
         o->dirty = 1;
     }
 }
@@ -843,6 +1004,7 @@ static void create_surface(struct output *o, int keyboard_here)
     o->scale120 = 120;
     o->selected = o->hovered = -1;
     o->keyboard = keyboard_here;
+    o->layout_dirty = 1;
     if (scale_mgr && viewporter) {
         o->fscale = wp_fractional_scale_manager_v1_get_fractional_scale(scale_mgr, o->surf);
         wp_fractional_scale_v1_add_listener(o->fscale, &scale_listener, o);
@@ -889,11 +1051,29 @@ static int split_rows(struct window **list, int n, int rows, double gap, double 
     return made;
 }
 
-static void layout(struct output *o, int ax, int ay, int aw, int ah, int gap, int under)
+static void ensure_layout(struct output *o)
 {
-    double sc = (o->viewport ? o->scale120 : 120) / 120.0;
-    struct window *list[MAX_SHOWN];
-    int n = shown_windows(o, list), starts[MAX_SHOWN + 1], best_rows = 1;
+    if (!o->layout_dirty) return;
+    o->nshown = shown_windows(o, o->shown);
+    if (!o->configured || !o->w || !o->h) return;
+    o->layout_dirty = 0;
+    uint32_t s120 = o->viewport ? o->scale120 : 120;
+    int W = (int)((o->w * s120 + 60) / 120), H = (int)((o->h * s120 + 60) / 120);
+    int row = text_px(s120 / 120.0), cw = row / 2, ch = row;
+    const struct panel_font *font = panel_font(row, 0);
+    panel_font_size(font, &cw, &ch);
+    int margin = row, field_w = cw * 40 < W - 2 * margin ? cw * 40 : W - 2 * margin, field_h = row * 3 / 2;
+    int fx = (W - field_w) / 2, fy = margin;
+    o->field_x = fx;
+    o->field_y = fy;
+    o->field_w = field_w;
+    o->field_h = field_h;
+    int under = ch * 2 + ch / 2, gap = row;
+    int ax = 2 * margin, ay = fy + field_h + 2 * margin, aw = W - 4 * margin, ah = H - ay - 2 * margin;
+    o->heap_bottom = ay + ah;
+    double sc = s120 / 120.0;
+    struct window **list = o->shown;
+    int n = o->nshown, starts[MAX_SHOWN + 1], best_rows = 1;
     double best = 0;
     if (n == 0) return;
     for (int rows = 1; rows <= n; rows++) {
@@ -947,13 +1127,82 @@ static void layout(struct output *o, int ax, int ay, int aw, int ah, int gap, in
 
 /* Drawing */
 
-static void buffer_release(void *data, struct wl_buffer *b)
+static void shm_buf_release(void *data, struct wl_buffer *b)
 {
-    (void)data;
-    wl_buffer_destroy(b);
+    struct shm_buf *s = data;
+    (void)b;
+    if (s) s->busy = 0;
 }
 
-static const struct wl_buffer_listener buffer_listener = { buffer_release };
+static const struct wl_buffer_listener shm_buf_listener = { shm_buf_release };
+
+static void shm_buf_free(struct shm_buf *s)
+{
+    if (s->buf) wl_buffer_destroy(s->buf);
+    if (s->px) munmap(s->px, s->size);
+    memset(s, 0, sizeof *s);
+}
+
+static void output_free_buffers(struct output *o)
+{
+    if (o->frame_cb) {
+        wl_callback_destroy(o->frame_cb);
+        o->frame_cb = NULL;
+    }
+    o->frame_pending = 0;
+    shm_buf_free(&o->bufs[0]);
+    shm_buf_free(&o->bufs[1]);
+}
+
+static struct shm_buf *shm_buf_acquire(struct output *o, int W, int H)
+{
+    if (!shm || W < 1 || H < 1) return NULL;
+    struct shm_buf *s = NULL;
+    for (int i = 0; i < 2 && !s; i++) {
+        if (!o->bufs[i].busy && o->bufs[i].buf && o->bufs[i].w == W && o->bufs[i].h == H) s = &o->bufs[i];
+    }
+    for (int i = 0; i < 2 && !s; i++) {
+        if (!o->bufs[i].busy) s = &o->bufs[i];
+    }
+    if (!s) return NULL;
+    if (s->buf && s->w == W && s->h == H) return s;
+    shm_buf_free(s);
+    size_t size = (size_t)W * (size_t)H * 4;
+    int fd = memfd_create("locachy-overview", MFD_CLOEXEC);
+    uint32_t *px = MAP_FAILED;
+    if (fd < 0 || ftruncate(fd, (off_t)size) < 0 ||
+        (px = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)) == MAP_FAILED) {
+        if (fd >= 0) close(fd);
+        return NULL;
+    }
+    struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, (int32_t)size);
+    struct wl_buffer *buffer = wl_shm_pool_create_buffer(pool, 0, W, H, W * 4, WL_SHM_FORMAT_XRGB8888);
+    wl_shm_pool_destroy(pool);
+    close(fd);
+    if (!buffer) {
+        munmap(px, size);
+        return NULL;
+    }
+    s->buf = buffer;
+    s->px = px;
+    s->size = size;
+    s->w = W;
+    s->h = H;
+    s->busy = 0;
+    wl_buffer_add_listener(s->buf, &shm_buf_listener, s);
+    return s;
+}
+
+static void surface_frame_done(void *data, struct wl_callback *cb, uint32_t time)
+{
+    struct output *o = data;
+    (void)time;
+    wl_callback_destroy(cb);
+    if (o->frame_cb == cb) o->frame_cb = NULL;
+    o->frame_pending = 0;
+}
+
+static const struct wl_callback_listener surface_frame_listener = { surface_frame_done };
 
 static void close_button(const struct window *w, int row, int *cx, int *cy, int *r)
 {
@@ -968,7 +1217,7 @@ static void close_button(const struct window *w, int row, int *cx, int *cy, int 
     *cy = w->y + *r + inset;
 }
 
-/* A label on a rounded ground, centred on cx, its top at y. */
+/* A label on a rounded opaque ground, centred on cx, its top at y. */
 static void label(uint32_t *px, int W, int H, int cx, int y, int width, const char *s, const struct panel_font *f,
                   int ch, uint32_t fg, uint32_t bg)
 {
@@ -977,7 +1226,11 @@ static void label(uint32_t *px, int W, int H, int cx, int y, int width, const ch
     panel_text_fit(fit, sizeof fit, s, width - 2 * pad, f);
     int tw = panel_text_width(fit, f) + 2 * pad;
     round_rect(px, W, H, cx - tw / 2, y, tw, ch + ch / 4, ch / 3, 0, bg);
-    text_over(px, W, H, cx - tw / 2 + pad, y + ch / 8, fit, fg, f, ch);
+    if ((bg >> 24) == 255) {
+        panel_text(px, W, H, W, cx - tw / 2 + pad, y + ch / 8, fit, fg, bg, f);
+    } else {
+        text_over(px, W, H, cx - tw / 2 + pad, y + ch / 8, fit, fg, f, ch);
+    }
 }
 
 /* An image at (x, y), clipped to the buffer, at alpha (1: as it is). */
@@ -1008,57 +1261,45 @@ static double down_progress(void)
 
 static void draw(struct output *o)
 {
-    if (!o->configured || !o->w || !o->h) return;
-    o->dirty = 0;
+    if (!o->configured || !o->w || !o->h || o->frame_pending) return;
     uint32_t s120 = o->viewport ? o->scale120 : 120;
     int W = (int)((o->w * s120 + 60) / 120), H = (int)((o->h * s120 + 60) / 120);
+    struct shm_buf *sb = shm_buf_acquire(o, W, H);
+    if (!sb) {
+        if (!o->bufs[0].busy || !o->bufs[1].busy) o->dirty = 0;
+        return;
+    }
+    o->dirty = 0;
     int row = text_px(s120 / 120.0), cw = row / 2, ch = row;
     const struct panel_font *font = panel_font(row, 0), *bold = panel_font(row, 1);
     panel_font_size(font, &cw, &ch);
 
-    /* Tint the captured desktop once per size; an absent capture uses the
-     * desktop color instead of treating it as a black image. */
+    /* Upscale the already-blurred, already-veiled 1/8 desktop capture once per size;
+     * an absent capture uses the desktop color instead of treating it as a black image. */
     if (o->bg.px && (!o->veiled.px || o->veiled.w != W || o->veiled.h != H)) {
-        free(o->veiled.px);
-        o->veiled.px = NULL;
         smooth_image(&o->bg, &o->veiled, W, H);
-        for (size_t i = 0; o->veiled.px && i < (size_t)W * (size_t)H; i++) {
-            o->veiled.px[i] = blend(o->veiled.px[i] | 0xFF000000u, VEIL);
-        }
     }
-    size_t size = (size_t)W * (size_t)H * 4;
-    int fd = memfd_create("locachy-overview", MFD_CLOEXEC);
-    uint32_t *px = MAP_FAILED;
-    if (fd < 0 || ftruncate(fd, (off_t)size) < 0 ||
-        (px = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)) == MAP_FAILED) {
-        if (fd >= 0) close(fd);
-        return;
-    }
-    if (o->veiled.px) memcpy(px, o->veiled.px, size);
+    uint32_t *px = sb->px;
+    if (o->veiled.px) memcpy(px, o->veiled.px, sb->size);
     else panel_fill(px, W, H, W, 0, 0, W, H, theme_argb(THEME_DESKTOP, 0xFF16181Bu));
 
     /* The search field, at the top in the middle. */
-    int margin = row, field_w = cw * 40 < W - 2 * margin ? cw * 40 : W - 2 * margin, field_h = row * 3 / 2;
-    int fx = (W - field_w) / 2, fy = margin, line = s120 >= 180 ? 3 : 2;
-    o->field_x = fx;
-    o->field_y = fy;
-    o->field_w = field_w;
-    o->field_h = field_h;
+    ensure_layout(o);
+    int margin = row, field_w = o->field_w, field_h = o->field_h;
+    int fx = o->field_x, fy = o->field_y, line = s120 >= 180 ? 3 : 2;
     round_rect(px, W, H, fx, fy, field_w, field_h, row / 3, 0, FIELD_BG);
     if (o->keyboard) round_rect(px, W, H, fx, fy, field_w, field_h, row / 3, line / 2 + 1, HIGHLIGHT);
     char text[192];
     panel_text_fit(text, sizeof text, search[0] ? search : _("Search..."), field_w - 2 * cw, font);
-    text_over(px, W, H, fx + cw, fy + (field_h - ch) / 2, text, search[0] ? TEXT : DIM_TEXT, font, ch);
+    panel_text(px, W, H, W, fx + cw, fy + (field_h - ch) / 2, text, search[0] ? TEXT : DIM_TEXT, FIELD_BG, font);
 
     /* The windows below it, each with its label (where KDE puts the icon)
      * over its bottom edge and its title under that. */
-    int under = ch * 2 + ch / 2, gap = row;
-    int ax = 2 * margin, ay = fy + field_h + 2 * margin, aw = W - 4 * margin, ah = H - ay - 2 * margin;
-    layout(o, ax, ay, aw, ah, gap, under);
-    o->heap_bottom = ay + ah;
+    int gap = row;
+    int ay = fy + field_h + 2 * margin, aw = W - 4 * margin, ah = H - ay - 2 * margin;
     double sc = s120 / 120.0;
-    struct window *list[MAX_SHOWN];
-    int n = shown_windows(o, list);
+    struct window **list = o->shown;
+    int n = o->nshown;
     for (int pass = 0; pass < 2; pass++) { /* the window dragged over the others */
         for (int i = 0; i < n; i++) {
             struct window *w = list[i];
@@ -1112,15 +1353,15 @@ static void draw(struct output *o)
             text_over(px, W, H, (W - panel_text_width(none, font)) / 2, ay + ah / 2 - ch / 2, none, DIM_TEXT, font, ch);
         }
     }
-    munmap(px, size);
-    struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, (int32_t)size);
-    struct wl_buffer *buffer = wl_shm_pool_create_buffer(pool, 0, W, H, W * 4, WL_SHM_FORMAT_XRGB8888);
-    wl_shm_pool_destroy(pool);
-    close(fd);
-    wl_buffer_add_listener(buffer, &buffer_listener, NULL);
-    wl_surface_attach(o->surf, buffer, 0, 0);
+    sb->busy = 1;
+    wl_surface_attach(o->surf, sb->buf, 0, 0);
     if (o->viewport) wp_viewport_set_destination(o->viewport, (int32_t)o->w, (int32_t)o->h);
     wl_surface_damage_buffer(o->surf, 0, 0, W, H);
+    o->frame_cb = wl_surface_frame(o->surf);
+    if (o->frame_cb) {
+        wl_callback_add_listener(o->frame_cb, &surface_frame_listener, o);
+        o->frame_pending = 1;
+    }
     wl_surface_commit(o->surf);
 }
 
@@ -1135,14 +1376,14 @@ static int search_at(const struct output *o, double lx, double ly)
 
 static int window_at(struct output *o, double lx, double ly, int *on_close)
 {
-    struct window *list[MAX_SHOWN];
+    ensure_layout(o);
     uint32_t s120 = o->viewport ? o->scale120 : 120;
     double x = lx * s120 / 120.0, y = ly * s120 / 120.0;
-    int n = shown_windows(o, list), row = text_px(s120 / 120.0);
+    int n = o->nshown, row = text_px(s120 / 120.0);
     int under = row * 2 + row / 2;
     *on_close = 0;
     for (int i = 0; i < n; i++) {
-        struct window *w = list[i];
+        struct window *w = o->shown[i];
         if (x >= w->x && x < w->x + w->w && y >= w->y && y < w->y + w->h + under) {
             int cx, cy, r;
             close_button(w, row, &cx, &cy, &r);
@@ -1159,6 +1400,7 @@ static void activate(struct window *w)
     /* Unmap the exclusive overlay surfaces first so labwc clears
      * seat->focused_layer before handling request_activate. */
     for (struct output *o = outputs; o; o = o->next) {
+        output_free_buffers(o);
         if (o->layer) zwlr_layer_surface_v1_destroy(o->layer);
         if (o->surf) wl_surface_destroy(o->surf);
         o->layer = NULL;
@@ -1173,9 +1415,8 @@ static void activate(struct window *w)
 
 static struct window *nth_shown(struct output *o, int i)
 {
-    struct window *list[MAX_SHOWN];
-    int n = shown_windows(o, list);
-    return i >= 0 && i < n ? list[i] : NULL;
+    ensure_layout(o);
+    return i >= 0 && i < o->nshown ? o->shown[i] : NULL;
 }
 
 static void pointer_hover(void)
@@ -1452,8 +1693,9 @@ static int test_touch(void)
  * across it. None selected: the first. */
 static int select_toward(struct output *o, int dx, int dy)
 {
-    struct window *list[MAX_SHOWN];
-    int n = shown_windows(o, list), pick;
+    ensure_layout(o);
+    struct window **list = o->shown;
+    int n = o->nshown, pick;
     if (n == 0) return -1;
     if (o->selected < 0 || o->selected >= n) return 0;
     struct window *from = list[o->selected];
@@ -1472,46 +1714,58 @@ static int select_toward(struct output *o, int dx, int dy)
 
 static void key_pressed(struct output *o, xkb_keysym_t sym, const char *utf8)
 {
-    struct window *list[MAX_SHOWN];
-    int n = shown_windows(o, list);
+    ensure_layout(o);
+    struct window **list = o->shown;
+    int n = o->nshown;
+    int sel = o->selected;
     switch (sym) {
     case XKB_KEY_Escape:
-        if (search[0]) search[0] = '\0';
-        else finished = 1;
-        break;
+        if (search[0]) {
+            search[0] = '\0';
+            invalidate_layouts();
+        } else {
+            finished = 1;
+        }
+        return;
     case XKB_KEY_space:
         if (search[0]) goto text; /* a space in the search */
         /* KDE: Space activates while the windows, not the search, have the keys */
         if (o->selected >= 0 && o->selected < n) activate(list[o->selected]);
         else if (n == 1) activate(list[0]);
-        break;
+        return;
     case XKB_KEY_Return:
     case XKB_KEY_KP_Enter:
         if (o->selected >= 0 && o->selected < n) activate(list[o->selected]);
         else if (n == 1) activate(list[0]);
-        break;
-    case XKB_KEY_Left: o->selected = select_toward(o, -1, 0); break;
-    case XKB_KEY_Right: o->selected = select_toward(o, 1, 0); break;
-    case XKB_KEY_Up: o->selected = select_toward(o, 0, -1); break;
-    case XKB_KEY_Down: o->selected = select_toward(o, 0, 1); break;
-    case XKB_KEY_Home: o->selected = n ? 0 : -1; break;
-    case XKB_KEY_End: o->selected = n - 1; break;
+        return;
+    case XKB_KEY_Left: sel = select_toward(o, -1, 0); break;
+    case XKB_KEY_Right: sel = select_toward(o, 1, 0); break;
+    case XKB_KEY_Up: sel = select_toward(o, 0, -1); break;
+    case XKB_KEY_Down: sel = select_toward(o, 0, 1); break;
+    case XKB_KEY_Home: sel = n ? 0 : -1; break;
+    case XKB_KEY_End: sel = n - 1; break;
     case XKB_KEY_BackSpace:
         if (search[0]) {
             size_t len = strlen(search);
             while (len > 1 && (search[len - 1] & 0xC0) == 0x80) len--; /* a whole character */
             search[len - 1] = '\0';
             o->selected = -1;
+            invalidate_layouts();
         }
-        break;
+        return;
     default:
     text:
         if ((unsigned char)utf8[0] >= 0x20 && utf8[0] != 0x7F && strlen(search) + strlen(utf8) < sizeof search) {
             strcat(search, utf8);
             o->selected = -1;
+            invalidate_layouts();
         }
+        return;
     }
-    dirty_all();
+    if (sel != o->selected) {
+        o->selected = sel;
+        o->dirty = 1;
+    }
 }
 
 static void kb_keymap(void *data, struct wl_keyboard *k, uint32_t format, int32_t fd, uint32_t size)
@@ -1735,13 +1989,30 @@ int main(int argc, char **argv)
         capture(&bg_caps[nbg++], copier && output_sources ?
                 ext_output_image_capture_source_manager_v1_create_source(output_sources, o->wl) : NULL, &o->bg, NULL);
     }
-    for (int tries = 0; tries < 50; tries++) { /* at most half a second for them and the windows */
+    /* Wait for initial screen and window captures via poll() with a bounded
+     * 500 ms deadline so overview opens as soon as they arrive. */
+    double wait_deadline = uptime() + 0.5;
+    for (;;) {
+        if (wl_display_dispatch_pending(display) < 0) break;
         int pending = 0;
         for (int i = 0; i < nbg; i++) pending |= !bg_caps[i].done;
         for (struct window *w = windows; w; w = w->next) pending |= !w->cap.done;
         if (!pending) break;
-        wl_display_roundtrip(display);
-        nanosleep(&(struct timespec){ 0, 10000000 }, NULL);
+        double left = wait_deadline - uptime();
+        if (left <= 0) break;
+        int timeout_ms = (int)(left * 1000) + 1;
+        struct pollfd wp = { .fd = wl_display_get_fd(display), .events = POLLIN };
+        if (wl_display_flush(display) < 0) {
+            if (errno == EAGAIN) wp.events |= POLLOUT;
+            else break;
+        }
+        int r = poll(&wp, 1, timeout_ms);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (r == 0) break;
+        if ((wp.revents & (POLLIN | POLLHUP | POLLERR)) && wl_display_dispatch(display) < 0) break;
     }
     for (int i = 0; i < nbg; i++) cap_free(&bg_caps[i]); /* one too late would picture the overview */
     for (struct output *o = outputs; o; o = o->next) {
@@ -1759,21 +2030,47 @@ int main(int argc, char **argv)
     while (!finished && !stopping) {
         wl_display_dispatch_pending(display);
         if (finished || stopping) break;
-        for (struct output *o = outputs; o; o = o->next) {
-            if (o->dirty && o->surf) draw(o);
+        double now = uptime(), next_cap = -1;
+        for (struct window *w = windows; w; w = w->next) {
+            struct capture *c = &w->cap;
+            if (!c->session || c->frame || c->next_at <= 0) continue;
+            if (now >= c->next_at) {
+                /* Wait until the window's output has presented its previous frame. */
+                int busy = 0;
+                for (struct output *o = outputs; o; o = o->next) {
+                    if (window_on(w, o) && o->frame_pending) busy = 1;
+                }
+                if (!busy) {
+                    c->next_at = 0;
+                    next_frame(c);
+                }
+            } else if (next_cap < 0 || c->next_at < next_cap) {
+                next_cap = c->next_at;
+            }
         }
-        wl_display_flush(display);
+        for (struct output *o = outputs; o; o = o->next) {
+            if (o->dirty && o->surf && !o->frame_pending) draw(o);
+        }
+        int timeout_ms = -1;
+        if (next_cap > 0) {
+            double left = next_cap - uptime();
+            timeout_ms = left > 0 ? (int)(left * 1000) + 1 : 0;
+        }
         enum { DISPLAY, THEME, TOUCH, N_POLL };
         struct pollfd p[N_POLL] = {
             [DISPLAY] = { .fd = wl_display_get_fd(display), .events = POLLIN },
             [THEME] = { .fd = theme_fd, .events = POLLIN },
             [TOUCH] = { .fd = -1 },
         };
+        if (wl_display_flush(display) < 0) {
+            if (errno == EAGAIN) p[DISPLAY].events |= POLLOUT;
+            else break;
+        }
 #ifdef OVERVIEW_TEST
         static int test_input = 1;
         p[TOUCH] = (struct pollfd){ .fd = test_input ? 0 : -1, .events = POLLIN };
 #endif
-        if (poll(p, N_POLL, -1) < 0) {
+        if (poll(p, N_POLL, timeout_ms) < 0) {
             if (errno == EINTR) continue;
             break;
         }
@@ -1787,6 +2084,7 @@ int main(int argc, char **argv)
 #endif
         if ((p[DISPLAY].revents & (POLLIN | POLLHUP | POLLERR)) && wl_display_dispatch(display) < 0) break;
     }
+    for (struct output *o = outputs; o; o = o->next) output_free_buffers(o);
     if (theme_fd >= 0) close(theme_fd);
     wl_display_roundtrip(display);
     unlink(pid_path);

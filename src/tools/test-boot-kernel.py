@@ -139,6 +139,23 @@ elif tool == "gen_init_cpio":
     sys.stdout.buffer.write(role.encode() * 65536)
     if os.environ.get("TEST_FAILURE") == "producer":
         sys.exit(42)
+elif tool == "zstd":
+    if args and args[0] in ("-t", "-tq"):
+        with (root / "checks").open("a") as f:
+            f.write(args[-1] + "\\n")
+        data = Path(args[-1]).read_bytes()
+        if os.environ.get("TEST_FAILURE") == "trailing":
+            sys.exit(2 if data.endswith(b"garbage") else 0)
+        if not data.startswith(b"\\x28\\xb5\\x2f\\xfd"):
+            sys.exit(1)
+        gzip.decompress(data[4:])
+    else:
+        data = b"\\x28\\xb5\\x2f\\xfd" + gzip.compress(sys.stdin.buffer.read(), mtime=0)
+        if os.environ.get("TEST_FAILURE") == "zstd":
+            data = b"invalid zstd"
+        elif os.environ.get("TEST_FAILURE") == "trailing":
+            data += b"garbage"
+        sys.stdout.buffer.write(data)
 elif tool == "gzip":
     if args[0] == "-t":
         with (root / "checks").open("a") as f:
@@ -196,7 +213,12 @@ else:
                 self.fail("barrier timeout: " + name)
             time.sleep(0.01)
 
-    def test_producer_failure_cannot_publish_a_valid_gzip_of_partial_cpio(self):
+    def decompress_initramfs(self, data):
+        if data.startswith(b"\x28\xb5\x2f\xfd"):
+            return subprocess.run(["zstd", "-dc"], input=data, capture_output=True, check=True, timeout=10).stdout
+        return gzip.decompress(data)
+
+    def test_producer_failure_cannot_publish_a_valid_initramfs_of_partial_cpio(self):
         result = self.run_boot(TEST_FAILURE="producer")
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.root / "ukify-called").exists())
@@ -205,9 +227,9 @@ else:
             self.assertEqual(path.read_bytes(), data)
         self.assertEqual(list(self.boot.glob(".work.*")), [])
 
-    def test_invalid_or_trailing_gzip_cannot_reach_ukify_or_publication(self):
-        self.write_double("gzip")
-        for failure in ("gzip", "trailing"):
+    def test_invalid_or_trailing_zstd_cannot_reach_ukify_or_publication(self):
+        self.write_double("zstd")
+        for failure in ("zstd", "trailing"):
             with self.subTest(failure=failure):
                 result = self.run_boot(TEST_FAILURE=failure)
                 self.assertNotEqual(result.returncode, 0)
@@ -244,12 +266,12 @@ else:
             (self.root / "A.producer-resume").touch()
             self.wait_for("A.efi")
             self.assertFalse((self.root / "B.producer").exists())
-            self.assertEqual(gzip.decompress(self.current.read_bytes()), b"A" * 65536)
+            self.assertEqual(self.decompress_initramfs(self.current.read_bytes()), b"A" * 65536)
             (self.root / "A.efi-resume").touch()
             self.wait_for("B.producer")
             (self.root / "B.producer-resume").touch()
             self.wait_for("B.efi")
-            self.assertEqual(gzip.decompress(self.previous.read_bytes()), b"A" * 65536)
+            self.assertEqual(self.decompress_initramfs(self.previous.read_bytes()), b"A" * 65536)
             (self.root / "B.efi-resume").touch()
             for process, (out, err) in zip(processes, output):
                 self.assertEqual(process.wait(timeout=10), 0, out.read_text() + err.read_text())
@@ -259,7 +281,7 @@ else:
             self.assertNotEqual(stages[0], stages[1])
             self.assertTrue(all(p.parent == self.boot for p in stages))
             for path in (self.boot / "initramfs.img", self.boot / "locachy.efi", self.current, self.fallback):
-                self.assertEqual(gzip.decompress(path.read_bytes()), b"B" * 65536)
+                self.assertEqual(self.decompress_initramfs(path.read_bytes()), b"B" * 65536)
             self.assertEqual(list(self.boot.glob(".work.*")), [])
         finally:
             for process in processes:

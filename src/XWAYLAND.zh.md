@@ -77,8 +77,8 @@ Wayland 客户端无法触及的。容器的文件系统隔离不会改变这一
 - 宿主剪贴板仍在读取一个慢速 X11 复制时发起的 `locachy-app freeze` 会先等待传输完成
   （它的同步步骤），再冻结。
 
-**冻结窗口。** labwc-locachy 的冻结屏障（`clipboard freeze` 捕获内容到写入冻结之间的
-控制组闸门）会拒绝正被冻结的控制组的 Wayland 复制（`tools/test-clipboard-guard.sh`）。
+**冻结窗口。** labwc-locachy 在 `clipboard freeze` 捕获内容到写入冻结之间按控制组拦截
+写入，会拒绝正被冻结的控制组的 Wayland 复制（`tools/test-clipboard-guard.sh`）。
 它看不到 X11 复制：xwm 通过它自己的 X 连接转发 X11 复制（剪贴板用不带 Wayland 客户端
 的 `wlr_seat_request_set_selection`，主选区直接用 `wlr_seat_set_primary_selection`）。
 这个窗口由宿主剪贴板自己兜住，用的就是它本来就保存的那份内容：每次同步后，它都保留

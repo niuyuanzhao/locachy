@@ -97,9 +97,31 @@ static const char *const layout_fields[5] = { "console", "layout", "model", "var
 static int table_read;
 
 static int keyboards[MAX_KEYBOARDS];
+static uint32_t kbd_rdev[MAX_KEYBOARDS]; /* cached raw device id: st_rdev + 1 or fd + 1 */
 static char paths[MAX_KEYBOARDS][32]; /* process 1: to open them again */
 static signed char device_table[MAX_KEYBOARDS]; /* each one's table; -1: not looked up yet */
 static int count;
+
+#define KQ_CAP 64
+struct kq_item {
+    int key;
+    uint16_t code;
+    uint8_t repeat;
+    int mods;
+    struct table *tb;
+    char text[4 * MAX_RESULT + 1];
+};
+static struct kq_item kq[KQ_CAP];
+static int kq_head, kq_len;
+static int kq_has_mods;
+static int kq_mods;
+
+static uint32_t fd_raw_id(int fd)
+{
+    struct stat identity;
+    return fstat(fd, &identity) == 0 && S_ISCHR(identity.st_mode) ?
+           (uint32_t)identity.st_rdev + 1u : (uint32_t)fd + 1u;
+}
 /* The tables of keyboards this process reads that are not among those
  * (the shared display's bar reads the ones process 1 lends it), by id. */
 static struct {
@@ -593,6 +615,7 @@ static void parse_binding_spec(struct table *tb, const char *spec, int action)
 struct key_cfg {
     char home[256];
     char lock[128];
+    char search[128];
     char ime[128];
     char ime_cn[128];
     char ime_raw[128];
@@ -610,6 +633,7 @@ static void on_key_rc(const char *name, const char *value, void *arg)
     struct key_cfg *cfg = arg;
     if (strcmp(name, "key_home") == 0) snprintf(cfg->home, sizeof cfg->home, "%s", value);
     else if (strcmp(name, "key_lock") == 0) snprintf(cfg->lock, sizeof cfg->lock, "%s", value);
+    else if (strcmp(name, "key_search") == 0) snprintf(cfg->search, sizeof cfg->search, "%s", value);
     else if (strcmp(name, "key_ime") == 0) snprintf(cfg->ime, sizeof cfg->ime, "%s", value);
     else if (strcmp(name, "key_ime_cn") == 0) snprintf(cfg->ime_cn, sizeof cfg->ime_cn, "%s", value);
     else if (strcmp(name, "key_ime_raw") == 0) snprintf(cfg->ime_raw, sizeof cfg->ime_raw, "%s", value);
@@ -642,6 +666,7 @@ static void load_keybindings(struct table *tb)
         key_cfg = (struct key_cfg){
             .home = "Super+Esc Ctrl+Alt+Esc Ctrl+Alt+Super ThinkVantage",
             .lock = "Super+L",
+            .search = "Super+Space",
             .ime = "Ctrl+Space",
             .ime_cn = "Henkan_Mode",
             .ime_raw = "Muhenkan",
@@ -659,6 +684,7 @@ static void load_keybindings(struct table *tb)
     tb->nbindings = 0;
     parse_binding_spec(tb, key_cfg.home, K_ACT_HOME);
     parse_binding_spec(tb, key_cfg.lock, K_ACT_LOCK);
+    parse_binding_spec(tb, key_cfg.search, K_ACT_SEARCH);
     parse_binding_spec(tb, key_cfg.ime, K_CTRL_SPACE);
     parse_binding_spec(tb, key_cfg.ime_cn, K_ACT_IME_CN);
     parse_binding_spec(tb, key_cfg.ime_raw, K_ACT_IME_RAW);
@@ -770,6 +796,7 @@ void keys_refresh(void)
         memset(dropping, 0, sizeof dropping);
         count--;
         memmove(keyboards + i, keyboards + i + 1, (size_t)(count - i) * sizeof *keyboards);
+        memmove(kbd_rdev + i, kbd_rdev + i + 1, (size_t)(count - i) * sizeof *kbd_rdev);
         memmove(paths + i, paths + i + 1, (size_t)(count - i) * sizeof *paths);
         memmove(modifiers + i, modifiers + i + 1, (size_t)(count - i) * sizeof *modifiers);
         memmove(device_table + i, device_table + i + 1, (size_t)(count - i) * sizeof *device_table);
@@ -802,6 +829,7 @@ void keys_refresh(void)
             snprintf(paths[count], sizeof paths[count], "%s", path);
             memset(modifiers[count], 0, sizeof modifiers[count]);
             device_table[count] = -1;
+            kbd_rdev[count] = fd_raw_id(fd);
             keyboards[count++] = fd;
             found = 1;
         } else {
@@ -819,6 +847,7 @@ void keys_take(const int *fds, int n)
     for (int i = 0; i < n; i++) {
         if (count < MAX_KEYBOARDS) {
             device_table[count] = -1;
+            kbd_rdev[count] = fd_raw_id(fds[i]);
             keyboards[count++] = fds[i];
         } else {
             close(fds[i]);
@@ -835,9 +864,11 @@ void keys_take(const int *fds, int n)
 void keys_update(const int *fds, int n)
 {
     int old[MAX_KEYBOARDS], used[MAX_KEYBOARDS] = { 0 }, old_count = count;
+    uint32_t old_rdev[MAX_KEYBOARDS];
     unsigned char old_modifiers[MAX_KEYBOARDS][256];
     signed char old_tables[MAX_KEYBOARDS];
     memcpy(old, keyboards, (size_t)old_count * sizeof *old);
+    memcpy(old_rdev, kbd_rdev, (size_t)old_count * sizeof *old_rdev);
     memcpy(old_modifiers, modifiers, (size_t)old_count * sizeof *modifiers);
     memcpy(old_tables, device_table, (size_t)old_count * sizeof *device_table);
     count = 0;
@@ -849,12 +880,14 @@ void keys_update(const int *fds, int n)
         }
         if (k < old_count) {
             keyboards[count] = old[k];
+            kbd_rdev[count] = old_rdev[k];
             device_table[count] = old_tables[k];
             memcpy(modifiers[count++], old_modifiers[k], sizeof modifiers[0]);
             used[k] = 1;
             close(fds[i]);
         } else {
             keyboards[count] = fds[i];
+            kbd_rdev[count] = fd_raw_id(fds[i]);
             device_table[count] = -1;
             memset(modifiers[count++], 0, sizeof modifiers[0]);
         }
@@ -874,11 +907,14 @@ void keys_release(void)
         close(keyboards[i]);
     }
     count = 0;
+    memset(kbd_rdev, 0, sizeof kbd_rdev);
     memset(modifiers, 0, sizeof modifiers);
     memset(unowned_modifiers, 0, sizeof unowned_modifiers);
     memset(dropping, 0, sizeof dropping);
     shift = ctrl = alt = meta = altgr = 0;
     npending = 0;
+    kq_head = kq_len = 0;
+    kq_has_mods = 0;
 }
 
 int keys_sync(int *fds, int *n, int max)
@@ -1112,7 +1148,7 @@ static int translate(struct table *tb, int code, int repeat)
 {
     int act = match_action(tb, code, ctrl, alt, shift, meta);
     if (act != 0) {
-        if ((act == K_ACT_HOME || act == K_ACT_LOCK || act == K_CTRL_SPACE || act == K_ACT_IME_CN ||
+        if ((act == K_ACT_HOME || act == K_ACT_LOCK || act == K_ACT_SEARCH || act == K_CTRL_SPACE || act == K_ACT_IME_CN ||
              act == K_ACT_IME_RAW || act == K_ACT_IME_WIDTH || act == K_VOL_MUTE || act == K_MIC_MUTE) && repeat) {
             return 0;
         }
@@ -1201,6 +1237,11 @@ void keys_name_any(int on)
 #endif
 }
 
+static int live_modifiers(void)
+{
+    return (shift ? KEYS_SHIFT : 0) | (ctrl ? KEYS_CTRL : 0) | (alt ? KEYS_ALT : 0) | (meta ? KEYS_META : 0);
+}
+
 int keys_last_name(char *out, size_t size)
 {
     char key[32];
@@ -1227,8 +1268,9 @@ int keys_last_name(char *out, size_t size)
     } else {
         return -1;
     }
-    snprintf(out, size, "%s%s%s%s%s", ctrl ? "Ctrl+" : "", alt ? "Alt+" : "", shift ? "Shift+" : "",
-             meta ? "Super+" : "", key);
+    int held = kq_has_mods ? kq_mods : live_modifiers();
+    snprintf(out, size, "%s%s%s%s%s", (held & KEYS_CTRL) ? "Ctrl+" : "", (held & KEYS_ALT) ? "Alt+" : "",
+             (held & KEYS_SHIFT) ? "Shift+" : "", (held & KEYS_META) ? "Super+" : "", key);
     return 0;
 }
 
@@ -1239,7 +1281,7 @@ int keys_modifiers(void)
         return wl_backend_modifiers();
 #endif
     }
-    return (shift ? KEYS_SHIFT : 0) | (ctrl ? KEYS_CTRL : 0) | (alt ? KEYS_ALT : 0) | (meta ? KEYS_META : 0);
+    return kq_has_mods ? kq_mods : live_modifiers();
 }
 
 /* After a SYN_DROPPED: the device's keys as the kernel has them now
@@ -1262,54 +1304,45 @@ static void resync(int device)
     update_modifiers();
 }
 
-int keys_event(int fd)
+static int process_input_event(int fd, int device, const struct input_event *ev)
 {
-    struct input_event ev;
-
-    if (read(fd, &ev, sizeof ev) != sizeof ev) {
-        return 0;
-    }
-    int device = -1;
-    for (int i = 0; i < count; i++) {
-        if (keyboards[i] == fd) { device = i; break; }
-    }
     /* The queue overflowed (SYN_DROPPED): what follows up to the next
      * SYN_REPORT is dropped, then the keys are read again (event-codes.rst,
      * "SYN_DROPPED"). */
-    if (ev.type == EV_SYN && ev.code == SYN_DROPPED) {
+    if (ev->type == EV_SYN && ev->code == SYN_DROPPED) {
         if (device >= 0) dropping[device] = 1;
         if (base_raw_cancel) base_raw_cancel();
         return 0;
     }
     if (device >= 0 && dropping[device]) {
-        if (ev.type == EV_SYN && ev.code == SYN_REPORT) {
+        if (ev->type == EV_SYN && ev->code == SYN_REPORT) {
             dropping[device] = 0;
             resync(device);
         }
         return 0;
     }
-    if (ev.type != EV_KEY || ev.value < 0 || ev.value > 2) {
+    if (ev->type != EV_KEY || ev->value < 0 || ev->value > 2) {
         return 0;
     }
     read_table();
     struct table *tb = device >= 0 ? device_table_of(device) : &tables[0];
-    int role = ev.code > 0 && ev.code < 256 ? tb->modifier_role[ev.code] : 0;
-    if (!role && ev.code > 0 && ev.code < 256 && ev.value == 1 && tb->syms[shift ? 1 : 0][ev.code] == 0xffe5) {
-        caps_code = ev.code; /* Caps_Lock at this level: the lock, as xkb has it */
+    int role = ev->code > 0 && ev->code < 256 ? tb->modifier_role[ev->code] : 0;
+    if (!role && ev->code > 0 && ev->code < 256 && ev->value == 1 && tb->syms[shift ? 1 : 0][ev->code] == 0xffe5) {
+        caps_code = ev->code; /* Caps_Lock at this level: the lock, as xkb has it */
     }
-    if (!role && ev.code == caps_code && caps_code) {
+    if (!role && ev->code == caps_code && caps_code) {
         role = KEYS_CAPS;
-        if (ev.value == 0) caps_code = 0;
+        if (ev->value == 0) caps_code = 0;
     }
-    if (base_raw_emit && !(ev.value == 2 && role)) {
+    if (base_raw_emit && !(ev->value == 2 && role)) {
         int st = (shift ? 1 : 0) | (caps ? 2 : 0) | (altgr ? 4 : 0) | (num ? 8 : 0);
-        uint32_t sym = ev.code < 256 ? tb->syms[st][ev.code] : 0;
-        if (!sym && ev.code < 256) {
+        uint32_t sym = ev->code < 256 ? tb->syms[st][ev->code] : 0;
+        if (!sym && ev->code < 256) {
             /* The built-in US fallback has chars but no generated keysyms. */
-            uint32_t c = tb->chars[st][ev.code];
+            uint32_t c = tb->chars[st][ev->code];
             sym = c >= 0x20 ? c : c == 27 ? 0xff1b : c == '\n' ? 0xff0d :
                   c == '\t' ? 0xff09 : c == '\b' ? 0xff08 : 0;
-            if (!sym) switch (ev.code) {
+            if (!sym) switch (ev->code) {
             case KEY_LEFTSHIFT: sym = 0xffe1; break; case KEY_RIGHTSHIFT: sym = 0xffe2; break;
             case KEY_LEFTCTRL: sym = 0xffe3; break; case KEY_RIGHTCTRL: sym = 0xffe4; break;
             case KEY_LEFTALT: sym = 0xffe9; break; case KEY_RIGHTALT: sym = 0xffea; break;
@@ -1322,28 +1355,27 @@ int keys_event(int fd)
             case KEY_INSERT: sym = 0xff63; break; case KEY_DELETE: sym = 0xffff; break;
             case KEY_KPENTER: sym = 0xff8d; break;
             default:
-                if (ev.code >= KEY_F1 && ev.code <= KEY_F10) sym = 0xffbe + ev.code - KEY_F1;
-                if (ev.code == KEY_F11 || ev.code == KEY_F12) sym = 0xffc8 + ev.code - KEY_F11;
+                if (ev->code >= KEY_F1 && ev->code <= KEY_F10) sym = 0xffbe + ev->code - KEY_F1;
+                if (ev->code == KEY_F11 || ev->code == KEY_F12) sym = 0xffc8 + ev->code - KEY_F11;
                 break;
             }
         }
-        struct stat identity;
-        uint32_t id = fstat(fd, &identity) == 0 && S_ISCHR(identity.st_mode) ?
-                      (uint32_t)identity.st_rdev + 1 : (uint32_t)fd + 1;
-        int pressed_role = ev.value != 0 ? role : 0;
-        int action = match_action(tb, ev.code, ctrl || (pressed_role & KEYS_CTRL),
+        uint32_t id = device >= 0 ? kbd_rdev[device] : fd_raw_id(fd);
+        int pressed_role = ev->value != 0 ? role : 0;
+        int action = match_action(tb, ev->code, ctrl || (pressed_role & KEYS_CTRL),
                                   alt || (pressed_role & KEYS_ALT), shift || (pressed_role & KEYS_SHIFT),
                                   meta || (pressed_role & KEYS_META));
         int local = (action == K_ACT_HOME && !(base_raw_forward_home && base_raw_forward_home())) ||
-                    action == K_ACT_LOCK || (action >= K_VOL_UP && action <= K_BRI_DOWN);
+                    action == K_ACT_LOCK || action == K_ACT_SEARCH ||
+                    (action >= K_VOL_UP && action <= K_BRI_DOWN);
         uint32_t raw_mods = (shift ? KEYS_SHIFT : 0) | (ctrl ? KEYS_CTRL : 0) | (alt ? KEYS_ALT : 0) |
                             (meta ? KEYS_META : 0) | (altgr ? KEYS_ALTGR : 0) |
                             (caps ? KEYS_CAPS : 0) | (num ? 64u : 0);
-        base_raw_emit(id, ev.code, sym, raw_mods,
-            (caps ? 1u : 0u) | (num ? 2u : 0u), (uint32_t)ev.value, local);
+        base_raw_emit(id, ev->code, sym, raw_mods,
+            (caps ? 1u : 0u) | (num ? 2u : 0u), (uint32_t)ev->value, local);
     }
     if (role == ROLE_NUM) {
-        if (ev.value == 1) {
+        if (ev->value == 1) {
             num = !num;
             show_locks();
         }
@@ -1351,15 +1383,15 @@ int keys_event(int fd)
     }
     if (role && role != KEYS_CAPS) {
         unsigned char *held = device >= 0 ? modifiers[device] : unowned_modifiers;
-        held[ev.code] = ev.value != 0;
+        held[ev->code] = ev->value != 0;
         update_modifiers();
-        return ev.value == 1 ? match_action(tb, ev.code, ctrl, alt, shift, meta) : 0;
+        return ev->value == 1 ? match_action(tb, ev->code, ctrl, alt, shift, meta) : 0;
     }
     if (role == KEYS_CAPS) { /* locks at a press, unlocks at the next */
-        if (ev.value != 2 && ime_caps_key) {
-            ime_caps_key(ev.value == 1, caps);
+        if (ev->value != 2 && ime_caps_key) {
+            ime_caps_key(ev->value == 1, caps);
         }
-        if (ev.value == 1) {
+        if (ev->value == 1) {
             caps = !caps;
             if (ime_set_caps) {
                 ime_set_caps(caps);
@@ -1368,12 +1400,118 @@ int keys_event(int fd)
         }
         return 0;
     }
-    if (ev.value != 0) { /* 1 press, 2 repeat, 0 release */
-        last_code = ev.code;
+    if (ev->value != 0) { /* 1 press, 2 repeat, 0 release */
+        last_code = ev->code;
         last_table = tb;
-        return translate(tb, ev.code, ev.value == 2);
+        return translate(tb, ev->code, ev->value == 2);
     }
     return 0;
+}
+
+int keys_event(int fd)
+{
+    struct input_event ev;
+
+    if (read(fd, &ev, sizeof ev) != sizeof ev) {
+        return 0;
+    }
+    kq_has_mods = 0;
+    int device = -1;
+    for (int i = 0; i < count; i++) {
+        if (keyboards[i] == fd) { device = i; break; }
+    }
+    return process_input_event(fd, device, &ev);
+}
+
+static int kq_coalesceable_repeat(int key)
+{
+    switch (key) {
+    case K_UP: case K_DOWN: case K_LEFT: case K_RIGHT:
+    case K_PGUP: case K_PGDN:
+    case K_VOL_UP: case K_VOL_DOWN: case K_VOL_MUTE: case K_MIC_MUTE:
+    case K_BRI_UP: case K_BRI_DOWN:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static void kq_purge_repeats(uint16_t code)
+{
+    int kept = 0;
+    for (int i = 0; i < kq_len; i++) {
+        struct kq_item item = kq[(kq_head + i) % KQ_CAP];
+        if (item.repeat && item.code == code) continue;
+        kq[(kq_head + kept++) % KQ_CAP] = item;
+    }
+    kq_len = kept;
+}
+
+static void kq_push(int key, uint16_t code, uint8_t repeat)
+{
+    if (repeat && kq_coalesceable_repeat(key)) {
+        for (int i = 0; i < kq_len; i++) {
+            const struct kq_item *it = &kq[(kq_head + i) % KQ_CAP];
+            if (it->repeat && it->key == key && it->code == code) {
+                return;
+            }
+        }
+    }
+    if (kq_len == KQ_CAP) {
+        kq_head = (kq_head + 1) % KQ_CAP;
+        kq_len--;
+    }
+    struct kq_item *slot = &kq[(kq_head + kq_len++) % KQ_CAP];
+    slot->key = key;
+    slot->code = code;
+    slot->repeat = repeat;
+    slot->mods = live_modifiers();
+    slot->tb = last_table;
+    if (key == K_TEXT) {
+        memcpy(slot->text, typed_text, sizeof slot->text);
+    } else {
+        slot->text[0] = '\0';
+    }
+}
+
+static int kq_pop(void)
+{
+    if (kq_len == 0) return 0;
+    struct kq_item item = kq[kq_head];
+    kq_head = (kq_head + 1) % KQ_CAP;
+    kq_len--;
+    kq_has_mods = 1;
+    kq_mods = item.mods;
+    last_code = item.code;
+    last_table = item.tb ? item.tb : &tables[0];
+    if (item.key == K_TEXT) {
+        memcpy(typed_text, item.text, sizeof typed_text);
+    }
+    return item.key;
+}
+
+static void keys_drain(int fd)
+{
+    struct input_event evs[64];
+    int device = -1;
+    for (int i = 0; i < count; i++) {
+        if (keyboards[i] == fd) { device = i; break; }
+    }
+    for (int batch = 0; batch < 16; batch++) {
+        ssize_t n = read(fd, evs, sizeof evs);
+        if (n < (ssize_t)sizeof evs[0]) break;
+        int nev = (int)((size_t)n / sizeof evs[0]);
+        for (int i = 0; i < nev; i++) {
+            const struct input_event *ev = &evs[i];
+            int key = process_input_event(fd, device, ev);
+            if (ev->type == EV_KEY && ev->value == 0) {
+                kq_purge_repeats(ev->code);
+            } else if (key != 0) {
+                kq_push(key, ev->code, ev->value == 2 ? 1 : 0);
+            }
+        }
+        if ((size_t)n < sizeof evs) break;
+    }
 }
 
 void key_close_kept(void)
@@ -1423,6 +1561,30 @@ static int window_poll(struct pollfd *extra, size_t nextra, int timeout_ms)
 }
 #endif
 
+static long long keys_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static int kq_take_key(int *handled)
+{
+    *handled = 0;
+    int key = kq_pop();
+    if (key == 0) return 0;
+    *handled = 1;
+    if (key == K_VOL_UP || key == K_VOL_DOWN || key == K_VOL_MUTE || key == K_MIC_MUTE) {
+        base_audio_key(key, NULL, 0);
+        return 0;
+    }
+    if (key == K_BRI_UP || key == K_BRI_DOWN) {
+        base_brightness_key(key, NULL, 0);
+        return 0;
+    }
+    return key;
+}
+
 int key_poll_many(struct pollfd *extra, size_t nextra, int timeout_ms)
 {
 #ifdef CONFIG_WAYLAND
@@ -1433,11 +1595,16 @@ int key_poll_many(struct pollfd *extra, size_t nextra, int timeout_ms)
     struct pollfd *p = size <= 64 ? stack_p : calloc(size, sizeof *p);
     if (!p) return 0;
     int result = 0;
+    long long deadline = timeout_ms > 0 ? keys_now_ms() + timeout_ms : 0;
     for (size_t i = 0; i < nextra; i++) extra[i].revents = 0;
+    kq_has_mods = 0;
     for (;;) {
         if (control_shown()) { result = K_SHOWN; break; }
         if (base_raw_pending && base_raw_pending()) { result = K_RAW_KEY; break; }
         if (pointer_next()) { result = K_POINTER; break; }
+        int handled = 0;
+        int queued = kq_take_key(&handled);
+        if (handled) { result = queued; break; }
         int n = 0, ctl = control_fd(), ctl_i = -1, ptr = pointer_fd(), ptr_i = -1;
         for (int i = 0; i < count; i++) {
             p[n++] = (struct pollfd){ .fd = keyboards[i], .events = POLLIN };
@@ -1451,7 +1618,12 @@ int key_poll_many(struct pollfd *extra, size_t nextra, int timeout_ms)
             p[n++] = (struct pollfd){ .fd = ptr, .events = POLLIN };
         }
         for (size_t i = 0; i < nextra; i++) p[n + i] = extra[i];
-        int r = poll(p, (nfds_t)((size_t)n + nextra), timeout_ms);
+        int wait_ms = timeout_ms;
+        if (timeout_ms > 0) {
+            long long left = deadline - keys_now_ms();
+            wait_ms = left > 0 ? (int)left : 0;
+        }
+        int r = poll(p, (nfds_t)((size_t)n + nextra), wait_ms);
         if (r < 0 && errno == EINTR) continue;
         if (r <= 0) { result = 0; break; }
         if (ctl_i >= 0 && (p[ctl_i].revents & (POLLIN | POLLHUP))) {
@@ -1471,32 +1643,16 @@ int key_poll_many(struct pollfd *extra, size_t nextra, int timeout_ms)
             extra[i].revents = p[n + i].revents;
             ready |= extra[i].revents != 0;
         }
-        int done = 0;
         for (int i = 0; i < count; i++) {
             if (p[i].revents & (POLLERR | POLLHUP)) continue;
-            int key = (p[i].revents & POLLIN) ? keys_event(keyboards[i]) : 0;
-            if (key == K_VOL_UP || key == K_VOL_DOWN || key == K_VOL_MUTE || key == K_MIC_MUTE) {
-                base_audio_key(key, NULL, 0);
-                result = 0;
-                done = 1;
-                break;
-            }
-            if (key == K_BRI_UP || key == K_BRI_DOWN) {
-                base_brightness_key(key, NULL, 0);
-                result = 0;
-                done = 1;
-                break;
-            }
-            if (key != 0) {
-                result = key;
-                done = 1;
-                break;
-            }
+            if (p[i].revents & POLLIN) keys_drain(keyboards[i]);
         }
-        if (done) break;
+        queued = kq_take_key(&handled);
+        if (handled) { result = queued; break; }
         if (base_raw_pending && base_raw_pending()) { result = K_RAW_KEY; break; }
         if (pointer_next()) { result = K_POINTER; break; }
         if (ready) { result = 0; break; }
+        if (timeout_ms > 0 && keys_now_ms() >= deadline) { result = 0; break; }
     }
     if (p != stack_p) free(p);
     return result;

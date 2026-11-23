@@ -60,18 +60,44 @@ FIRST_RULES="PROCESS-NAME,tailscaled,DIRECT
 DOMAIN,ipinfo.io,DIRECT
 DST-PORT,123,DIRECT"
 
+read_rc_state() {
+    local line val
+    rc_clash_mode=tun
+    rc_tor_on=0
+    rc_tor_front=none
+    [ -r "$RC" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        line=${line#"${line%%[![:space:]]*}"}
+        case $line in
+        service_tor=*)
+            rc_tor_on=1
+            ;;
+        clash_mode=\"*\"*)
+            val=${line#clash_mode=\"}
+            val=${val%%\"*}
+            [ "$val" = proxy ] && rc_clash_mode=proxy || rc_clash_mode=tun
+            ;;
+        tor_front=\"*\"*)
+            val=${line#tor_front=\"}
+            val=${val%%\"*}
+            case $val in mihomo | bridges) rc_tor_front=$val ;; *) rc_tor_front=none ;; esac
+            ;;
+        esac
+    done <"$RC"
+    [ "$rc_tor_on" = 1 ] || rc_tor_front=none
+}
+
 mode() {
-    local m
-    m=$(sed -n 's/^[[:space:]]*clash_mode="\([^"]*\)".*/\1/p' "$RC" 2>/dev/null | tail -n 1)
-    [ "$m" = proxy ] && echo proxy || echo tun
+    local rc_clash_mode rc_tor_on rc_tor_front
+    read_rc_state
+    echo "$rc_clash_mode"
 }
 
 # Tor's arrangement: none (Tor off), mihomo (its front) or bridges (below it).
 tor() {
-    local f
-    grep -qE '^[[:space:]]*service_tor=' "$RC" 2>/dev/null || { echo none; return; }
-    f=$(sed -n 's/^[[:space:]]*tor_front="\([^"]*\)".*/\1/p' "$RC" 2>/dev/null | tail -n 1)
-    case $f in mihomo | bridges) echo "$f" ;; *) echo none ;; esac
+    local rc_clash_mode rc_tor_on rc_tor_front
+    read_rc_state
+    echo "$rc_tor_front"
 }
 
 # The configuration from what the subscription gave (FILE): a Clash
@@ -253,36 +279,67 @@ fetch() {
 }
 
 pid=
+sub_stamp=
+idle_open=0
 on_exit() {
     [ -z "$pid" ] || { kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; }
+    [ -z "$sub_stamp" ] || rm -f "$sub_stamp"
+    [ "$idle_open" = 0 ] || exec 8<&-
     release
 }
 trap on_exit EXIT
 trap 'exit 0' TERM INT
 
+idle_dir=$(mktemp -d "$POLICY_STATE/.clash-idle.XXXXXXXX")
+mkfifo -m 0600 "$idle_dir/fifo"
+exec 8<>"$idle_dir/fifo"
+idle_open=1
+rm -f "$idle_dir/fifo"
+rmdir "$idle_dir"
+
+idle_wait() {
+    IFS= read -r -t "$1" -u 8 _ || true
+}
+
+epoch_now() {
+    if ! printf -v "$1" '%(%s)T' -1 2>/dev/null; then
+        printf -v "$1" '%s' "$(date +%s)"
+    fi
+}
+
 until [ -e "/run/netns/$NS" ]; do
-    sleep 1 & wait $!
+    idle_wait 1
 done
 sync_enforce || exit 1
+read_rc_state
+wait_policy="$rc_clash_mode:$rc_tor_front"
 
 until [ -x "$MIHOMO" ] && [ -s "$STATE/subscription" ]; do
-    sync_enforce || exit 1
-    sleep 2 & wait $!
+    read_rc_state
+    if [ "$rc_clash_mode:$rc_tor_front" != "$wait_policy" ]; then
+        sync_enforce || exit 1
+        wait_policy="$rc_clash_mode:$rc_tor_front"
+    fi
+    idle_wait 2
 done
 umask 077
 mkdir -p "$STATE"
 [ -s "$STATE/secret" ] || od -An -tx1 -N16 /dev/urandom | tr -d ' \n' >"$STATE/secret"
 while :; do
     sync_enforce || exit 1
-    mode=$(mode)
-    tor=$(tor)
-    sub_time=$(stat -c %Y "$STATE/subscription")
+    read_rc_state
+    mode=$rc_clash_mode
+    tor=$rc_tor_front
+    sub_body=
+    IFS= read -r -d '' sub_body <"$STATE/subscription" || true
+    sub_stamp="$POLICY_STATE/clash-sub.$$.stamp"
+    touch -r "$STATE/subscription" "$sub_stamp" 2>/dev/null || sub_stamp=
     # As Tor's front, a fetch now would wait for Tor, which waits for mihomo.
     if [ "$tor" = mihomo ] && [ -s "$STATE/subscription.yaml" ]; then
         :
     elif ! fetch && [ ! -s "$STATE/subscription.yaml" ]; then
         echo "clash-client: the subscription gave nothing; again in a while" >&2
-        sleep 5 & wait $!
+        idle_wait 5
         continue
     fi
     make_config "$STATE/subscription.yaml" "$mode" "$(cat "$STATE/secret")" "$tor" >"$STATE/config.yaml.new"
@@ -290,7 +347,7 @@ while :; do
         "$MIHOMO" -t -d "$STATE" -f "$STATE/config.yaml.new" >"$STATE/test.log" 2>&1; then
         echo "clash-client: mihomo refuses the configuration (see $STATE/test.log); the last one is kept" >&2
         if [ ! -s "$STATE/config.yaml" ]; then
-            sleep 5 & wait $!
+            idle_wait 5
             continue
         fi
     else
@@ -309,21 +366,33 @@ fi
 # inherits the lifecycle lock (fd 9), so no next generation starts while it lives.
 ip netns exec "$NS" setpriv --regid="$CLASH_GID" --clear-groups --no-new-privs --pdeathsig KILL \
     --bounding-set=-mknod,-sys_rawio,-sys_module,-sys_boot -- \
-    "$MIHOMO" -d "$STATE" -f "$STATE/config.yaml" &
+    "$MIHOMO" -d "$STATE" -f "$STATE/config.yaml" 8<&- &
 pid=$!
 echo "clash-client: mihomo running ($mode) in $NS (pid $pid)"
 
-fetched=$(date +%s)
+epoch_now fetched
 while kill -0 "$pid" 2>/dev/null; do
-    sleep 5 & wait $!
+    idle_wait 5
     changed=
-    [ "$(mode)" = "$mode" ] || changed="the mode"
-    [ "$(tor)" = "$tor" ] || changed="Tor's arrangement"
-    [ "$(stat -c %Y "$STATE/subscription" 2>/dev/null)" = "$sub_time" ] || changed="the subscription"
-    if [ -z "$changed" ] && [ $(($(date +%s) - fetched)) -ge 86400 ]; then
-        fetched=$(date +%s)
-        old=$(sha256sum <"$STATE/subscription.yaml")
-        fetch && [ "$(sha256sum <"$STATE/subscription.yaml")" != "$old" ] && changed="what the subscription gives"
+    read_rc_state
+    [ "$rc_clash_mode" = "$mode" ] || changed="the mode"
+    [ "$rc_tor_front" = "$tor" ] || changed="Tor's arrangement"
+    if [ ! -r "$STATE/subscription" ]; then
+        changed="the subscription"
+    elif [ -n "$sub_stamp" ] && { [ "$STATE/subscription" -nt "$sub_stamp" ] || [ "$STATE/subscription" -ot "$sub_stamp" ]; }; then
+        changed="the subscription"
+    else
+        cur_sub=
+        IFS= read -r -d '' cur_sub <"$STATE/subscription" || true
+        [ "$cur_sub" = "$sub_body" ] || changed="the subscription"
+    fi
+    if [ -z "$changed" ]; then
+        epoch_now now_ts
+        if [ $((now_ts - fetched)) -ge 86400 ]; then
+            fetched=$now_ts
+            old=$(sha256sum <"$STATE/subscription.yaml")
+            fetch && [ "$(sha256sum <"$STATE/subscription.yaml")" != "$old" ] && changed="what the subscription gives"
+        fi
     fi
     if [ -n "$changed" ]; then
         echo "clash-client: $changed changed: starting again"
@@ -337,6 +406,8 @@ done
 wait "$pid"
 status=$?
 pid=
+[ -z "$sub_stamp" ] || rm -f "$sub_stamp"
+[ "$idle_open" = 0 ] || exec 8<&-
 release --failed "mihomo ended (status $status)"
 trap - EXIT
 echo "clash-client: mihomo ended (status $status)" >&2

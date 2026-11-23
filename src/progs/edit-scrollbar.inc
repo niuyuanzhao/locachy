@@ -36,6 +36,18 @@ static struct minimap_cache {
     unsigned char *marks;    /* rows: LINE_* of its lines */
 } minimap_cache[MAX_SPACES];
 
+static struct scroll_marks_cache {
+    const struct doc *doc;
+    unsigned long version, hl_gen, bm_gen;
+    const size_t *hl_ptr;
+    size_t nhl, nbookmarks, total;
+    uint64_t folds;
+    int rows, h, width;
+    uint32_t c_text, c_bookmark;
+    uint32_t *marks;
+    int cap;
+} scroll_marks_cache[MAX_SPACES];
+
 /* Anchors: line starts in order, each with flags. */
 static size_t anchors_find(const struct anchors *a, size_t at)
 {
@@ -287,15 +299,18 @@ static int bookmarked(struct doc *d, size_t line)
 
 static void bookmark_set(struct doc *d, size_t line, int on)
 {
-    struct anchors *a = &ui_of(d)->bookmarks;
+    struct docui *u = ui_of(d);
+    struct anchors *a = &u->bookmarks;
     size_t at = line_start(d, line), i = anchors_find(a, at);
     int there = i < a->n && a->at[i] == at;
     if (on && !there) {
         anchors_mark(d, a, line, line, 1);
+        u->bm_gen++;
     } else if (!on && there) {
         memmove(a->at + i, a->at + i + 1, (a->n - i - 1) * sizeof *a->at);
         memmove(a->flag + i, a->flag + i + 1, a->n - i - 1);
         a->n--;
+        u->bm_gen++;
     }
 }
 
@@ -307,7 +322,11 @@ static void bookmark_toggle(struct tab *t)
 
 static void bookmarks_clear(struct doc *d)
 {
-    anchors_clear(&ui_of(d)->bookmarks);
+    struct docui *u = ui_of(d);
+    if (u->bookmarks.n) {
+        anchors_clear(&u->bookmarks);
+        u->bm_gen++;
+    }
 }
 
 static void bookmark_go(int s, struct tab *t, size_t line)
@@ -409,9 +428,14 @@ static struct {
 
 static void scroll_forget(const struct doc *d)
 {
-    for (int s = 0; s < MAX_SPACES; s++) if (scroll_index[s].doc == d) {
-        free(scroll_index[s].at);
-        memset(&scroll_index[s], 0, sizeof scroll_index[s]);
+    for (int s = 0; s < MAX_SPACES; s++) {
+        if (scroll_index[s].doc == d) {
+            free(scroll_index[s].at);
+            memset(&scroll_index[s], 0, sizeof scroll_index[s]);
+        }
+        if (scroll_marks_cache[s].doc == d) {
+            scroll_marks_cache[s].doc = NULL;
+        }
     }
 }
 
@@ -662,6 +686,18 @@ static void minimap_build(int s, struct tab *t, const struct scroll_geom *g, str
                                  theme_is_light(), g->width ? scroll_index[s].folds : 0, out, marks };
 }
 
+static uint64_t scroll_fold_hash(const struct tab *t)
+{
+    const struct edit_folding *f = fold_sync(t);
+    size_t hidden = f && f->live ? f->nhidden : 0;
+    uint64_t folds = 0;
+    for (size_t i = 0; i < hidden; i++) {
+        folds = (folds ^ f->hidden[i].first) * UINT64_C(1099511628211);
+        folds = (folds ^ f->hidden[i].last) * UINT64_C(1099511628211);
+    }
+    return folds;
+}
+
 /* The rows of the marks (bookmarks; Find All's and Replace All's matches as
  * SearchMatch marks, in the normal text colour) over rows cells. */
 static void scroll_marks(struct tab *t, const struct scroll_geom *g, int rows, uint32_t *mark)
@@ -685,14 +721,51 @@ static void scroll_marks(struct tab *t, const struct scroll_geom *g, int rows, u
     }
 }
 
+static const uint32_t *scroll_marks_cached(int s, struct tab *t, const struct scroll_geom *g, int rows)
+{
+    if (rows <= 0) return NULL;
+    struct scroll_marks_cache *mc = &scroll_marks_cache[s];
+    struct doc *d = t->doc;
+    struct docui *u = ui_of(d);
+    uint64_t folds = g->width ? scroll_index[s].folds : scroll_fold_hash(t);
+    uint32_t c_text = C_TEXT, c_bm = C_BOOKMARK;
+    if (mc->doc == d && mc->version == u->version && mc->hl_gen == u->hl_gen && mc->bm_gen == u->bm_gen &&
+        mc->hl_ptr == u->hl && mc->nhl == u->nhl && mc->nbookmarks == u->bookmarks.n &&
+        mc->total == g->total && mc->folds == folds && mc->rows == rows && mc->h == g->h &&
+        mc->width == g->width && mc->c_text == c_text && mc->c_bookmark == c_bm && mc->marks) {
+        return mc->marks;
+    }
+    if (rows > mc->cap) {
+        uint32_t *buf = realloc(mc->marks, (size_t)rows * sizeof *buf);
+        if (!buf) return NULL;
+        mc->marks = buf;
+        mc->cap = rows;
+    }
+    scroll_marks(t, g, rows, mc->marks);
+    mc->doc = d;
+    mc->version = u->version;
+    mc->hl_gen = u->hl_gen;
+    mc->bm_gen = u->bm_gen;
+    mc->hl_ptr = u->hl;
+    mc->nhl = u->nhl;
+    mc->nbookmarks = u->bookmarks.n;
+    mc->total = g->total;
+    mc->folds = folds;
+    mc->rows = rows;
+    mc->h = g->h;
+    mc->width = g->width;
+    mc->c_text = c_text;
+    mc->c_bookmark = c_bm;
+    return mc->marks;
+}
+
 static void draw_scrollbar(int s, struct tab *t)
 {
     if (!scroll_cols(s, t)) return;
     struct scroll_geom g;
     scroll_geometry(s, t, &g);
-    uint32_t *mark = t->marks ? calloc((size_t)g.h, sizeof *mark) : NULL;
     if (!t->minimap) {
-        if (mark) scroll_marks(t, &g, g.h, mark);
+        const uint32_t *mark = t->marks ? scroll_marks_cached(s, t, &g, g.h) : NULL;
         for (int r = 0; r < g.h; r++) {
             int on = r >= g.slider_a && r < g.slider_b;
             uint32_t bg = on ? C_SLIDER : C_GROOVE;
@@ -705,7 +778,6 @@ static void draw_scrollbar(int s, struct tab *t)
                 screen_fill(g.x, g.y + r, 1, 1, bg);
             }
         }
-        free(mark);
         ui_hit(g.x, g.y, g.w, g.h, HIT_SCROLL + s);
         return;
     }
@@ -715,7 +787,7 @@ static void draw_scrollbar(int s, struct tab *t)
         (g.width && c->folds != scroll_index[s].folds) || !c->cells) {
         minimap_build(s, t, &g, c);
     }
-    if (mark) scroll_marks(t, &g, g.doc_rows, mark);
+    const uint32_t *mark = t->marks ? scroll_marks_cached(s, t, &g, g.doc_rows) : NULL;
     uint32_t slider = colour_mix(C_BG, C_FOCUS, 50); /* the slider: the highlight colour, alpha 50 */
     for (int r = 0; r < g.h; r++) {
         int on = r >= g.slider_a && r < g.slider_b, in_doc = r < g.doc_rows && c->cells;
@@ -734,7 +806,6 @@ static void draw_scrollbar(int s, struct tab *t)
             screen_fill(g.x + k, g.y + r, 1, 1, bg);
         }
     }
-    free(mark);
     ui_hit(g.x, g.y, g.w, g.h, HIT_SCROLL + s);
 }
 

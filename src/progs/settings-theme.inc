@@ -76,6 +76,7 @@ static void save_theme_value(const char *key, const char *value)
         return;
     }
     int changed = theme_reload();
+    full_redraw = 1;
     int status = theme_apply(1);
     if (changed > 0) signal_programs("locachy-bar", SIGHUP);
     snprintf(notice, sizeof notice, "%s", status < 0 ?

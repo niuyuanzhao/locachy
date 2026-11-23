@@ -16,6 +16,7 @@ cg=$root/cgroup/app_$name
     printf 'title=%s\n' "${LOCACHY_WINDOW_TITLE:-}"
     printf 'fds=%s %s\n' "${LOCACHY_WINDOW_READY_FD:-}" "${LOCACHY_REQUEST_FD:-}"
     printf 'control=%s\n' "${LOCACHY_CONTROL:-none}"
+    printf 'floating=%s\n' "${LOCACHY_WINDOW_FLOATING:-0}"
 } >"$root/runtime/$name.env"
 case "${1:-}" in
 *fail-doc) echo "view: cannot open $1" >&2; exit 9 ;;
@@ -28,7 +29,8 @@ quit() {
     exit 0
 }
 trap quit TERM
-( exec 3>&-; while IFS= read -r line; do printf '%s\n' "$line" >>"$root/runtime/$name.requests"; done ) <&4 &
+parent=$$
+( exec 3>&-; while IFS= read -r line; do printf '%s\n' "$line" >>"$root/runtime/$name.requests"; [ "$line" != close ] || kill -TERM "$parent"; done ) <&4 &
 exec 4<&-
 printf r >&3
 exec 3>&-

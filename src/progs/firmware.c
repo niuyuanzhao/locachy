@@ -31,6 +31,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "base.h"
@@ -127,11 +128,28 @@ static int show_log = 1, log_scroll, log_max_scroll;
 static int job_id;              /* the job asked for (the queue's id), until it has ended; 0: none */
 static char job_label[128], job_kind[24];
 static char job_log[512];       /* its output: the job shown last */
+static double last_job_check;
+static int log_cache_valid;
+static char log_cache_path[512];
+static ino_t log_cache_ino;
+static off_t log_cache_size;
+static struct timespec log_cache_mtim;
+static char log_cache_lines[256][256];
+static int log_cache_nlines;
 static int confirming;
 static char pending_path[PATH_MAX];
 static char notice[320];
 static int notice_err;
 static int quit_asked; /* Ctrl+Q or the window's close, read in a question or the file chooser */
+
+static double fw_now(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+        return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+    }
+    return 0.0;
+}
 
 /* F1's own keys (ui_help; every program's follow them). */
 static const struct ui_help_line firmware_keys[] = {
@@ -392,6 +410,8 @@ static void start_job(const char *label, char *const argv[])
     snprintf(job_kind, sizeof job_kind, "%s", kind);
     snprintf(job_label, sizeof job_label, "%s", label);
     jobs_log_path(id, job_log, sizeof job_log);
+    log_cache_valid = 0;
+    last_job_check = fw_now();
     show_log = 1;
     log_scroll = 0;
     /* TRANSLATORS: home is the program's name; keep it. */
@@ -451,12 +471,14 @@ static void check_job(void)
 {
     struct jobs_row r;
     char why[256];
+    last_job_check = fw_now();
     if (job_id <= 0) {
         find_job();
         return;
     }
     if (jobs_status(job_id, &r, why, sizeof why) < 0 || !jobs_ended(&r)) return;
     job_id = 0;
+    log_cache_valid = 0;
     if (strcmp(job_kind, "spi-probe") == 0) {
         parse_probe_log();
     }
@@ -517,6 +539,51 @@ static int prompt_text(const char *question, char *buf, size_t size)
     }
 }
 
+static void refresh_log_cache(void)
+{
+    if (!job_log[0]) {
+        log_cache_valid = 0;
+        log_cache_nlines = 0;
+        return;
+    }
+    struct stat st;
+    if (stat(job_log, &st) < 0) {
+        log_cache_valid = 0;
+        log_cache_nlines = 0;
+        return;
+    }
+    if (log_cache_valid &&
+        strcmp(log_cache_path, job_log) == 0 &&
+        log_cache_ino == st.st_ino &&
+        log_cache_size == st.st_size &&
+        log_cache_mtim.tv_sec == st.st_mtim.tv_sec &&
+        log_cache_mtim.tv_nsec == st.st_mtim.tv_nsec) {
+        return;
+    }
+    int nlines = 0;
+    FILE *f = fopen(job_log, "re");
+    if (f) {
+        off_t start = st.st_size > 65536 ? st.st_size - 65536 : 0;
+        if (start > 0 && fseeko(f, start, SEEK_SET) == 0) {
+            int ch;
+            while ((ch = fgetc(f)) != EOF && ch != '\n') {
+                /* Skip the partial line at the seek boundary. */
+            }
+        }
+        while (fgets(log_cache_lines[nlines % 256], sizeof log_cache_lines[0], f)) {
+            log_cache_lines[nlines % 256][strcspn(log_cache_lines[nlines % 256], "\r\n")] = '\0';
+            nlines++;
+        }
+        fclose(f);
+    }
+    snprintf(log_cache_path, sizeof log_cache_path, "%s", job_log);
+    log_cache_ino = st.st_ino;
+    log_cache_size = st.st_size;
+    log_cache_mtim = st.st_mtim;
+    log_cache_nlines = nlines;
+    log_cache_valid = 1;
+}
+
 static void draw_log_pane(int top_r, int h)
 {
     int cols = screen_cols();
@@ -540,14 +607,8 @@ static void draw_log_pane(int top_r, int h)
         return;
     }
 
-    static char lines[256][256];
-    int nlines = 0;
-    FILE *f = job_log[0] ? fopen(job_log, "re") : NULL;
-    while (f && fgets(lines[nlines % 256], sizeof lines[0], f)) {
-        lines[nlines % 256][strcspn(lines[nlines % 256], "\r\n")] = '\0';
-        nlines++;
-    }
-    if (f) fclose(f);
+    refresh_log_cache();
+    int nlines = log_cache_nlines;
     int total = nlines < 256 ? nlines : 256;
     int base = nlines < 256 ? 0 : nlines % 256;
     int body = h - 1;
@@ -555,7 +616,7 @@ static void draw_log_pane(int top_r, int h)
     if (log_scroll > log_max_scroll) log_scroll = log_max_scroll;
     int start = log_max_scroll - log_scroll;
     for (int i = 0; i < body && start + i < total; i++) {
-        const char *ln = lines[(base + start + i) % 256];
+        const char *ln = log_cache_lines[(base + start + i) % 256];
         char cut[256];
         fit_cells(cut, sizeof cut, ln, cols - 2);
         screen_text(1, top_r + 1 + i, cut, DIM, BG);
@@ -961,6 +1022,7 @@ int main(void)
     keys_open();
     say_notice(0, "%s", _("Tab switches between fwupd Devices, BIOS Settings and SPI Flash (flashrom)."));
     find_job();
+    last_job_check = fw_now();
     draw();
 
     for (;;) {
@@ -970,7 +1032,12 @@ int main(void)
         int timeout = job_id > 0 ? 300 : -1;
         int key = key_poll_timeout(-1, timeout);
         int mods = keys_modifiers();
-        check_job();
+        int job_changed = 0;
+        if (key == 0 || key == K_SHOWN || (fw_now() - last_job_check) >= 0.3) {
+            int had_job = job_id;
+            check_job();
+            job_changed = (had_job != job_id);
+        }
 
         if (key == K_SHOWN || key == K_REPAINT) {
             if (key == K_SHOWN && confirming == CONF_NONE) {
@@ -982,12 +1049,12 @@ int main(void)
         if (key == K_POINTER) {
             key = pointer_to_key(&mods);
             if (key <= 0) {
-                if (key < 0 || job_id > 0) draw();
+                if (key < 0 || job_changed) draw();
                 continue;
             }
         }
         if (key == 0) {
-            if (job_id > 0) draw();
+            if (job_id > 0 || job_changed) draw();
             continue;
         }
 
@@ -1005,6 +1072,8 @@ int main(void)
             if (yes >= 0) {
                 confirm_action(yes);
                 draw();
+            } else if (job_changed) {
+                draw();
             }
             continue;
         }
@@ -1016,11 +1085,14 @@ int main(void)
             continue;
         }
         if (act == ACT_CANCEL || act == ACT_UP || act == ACT_BACK || key == '\b') {
-            in_releases = 0; /* from the releases back to the devices; elsewhere nothing */
-            draw();
+            if (in_releases || job_changed) {
+                in_releases = 0; /* from the releases back to the devices; elsewhere nothing */
+                draw();
+            }
             continue;
         }
         if (mods & (KEYS_ALT | KEYS_META)) {
+            if (job_changed) draw();
             continue; /* a key's command is the key's alone, not with Alt or Super */
         }
         if (key == 'l') {
@@ -1032,26 +1104,31 @@ int main(void)
         int *cur_sel = (page == PAGE_FWUPD && in_releases) ? &sel_rel : &sel[page];
         int cnt = list_count();
         if (key == K_UP || key == K_DOWN || key == K_PGUP || key == K_PGDN || key == K_BOL || key == K_EOL) {
+            int prev_sel = *cur_sel;
             int step = (key == K_PGUP || key == K_PGDN) ? 8 : 1;
             if (key == K_BOL) *cur_sel = 0;
             else if (key == K_EOL) *cur_sel = cnt > 0 ? cnt - 1 : 0;
             else *cur_sel += (key == K_UP || key == K_PGUP) ? -step : step;
             if (*cur_sel < 0) *cur_sel = 0;
             if (*cur_sel >= cnt) *cur_sel = cnt > 0 ? cnt - 1 : 0;
-            draw();
+            if (*cur_sel != prev_sel || job_changed) draw();
             continue;
         }
 
+        int handled = 0;
         if (page == PAGE_FWUPD) {
             if (key == 'P' && fwupd_missing) {
                 char *const argv[] = { PKG_HELPER, "install", "fwupd", NULL };
                 start_job(_("Install fwupd"), argv);
+                handled = 1;
             } else if (!fwupd_missing && key == 'r') {
                 char *const argv[] = { FW_HELPER, "fwupd-action", "refresh", NULL };
                 start_job(_("Refresh LVFS metadata"), argv);
+                handled = 1;
             } else if (!fwupd_missing && !in_releases && key == 'u') {
                 confirming = CONF_UPDATE_ALL;
                 say_notice(1, "%s", _("Y/N: Apply all pending LVFS firmware updates?"));
+                handled = 1;
             } else if (!fwupd_missing && !in_releases && key == 'i') {
                 char hm[256] = "", drs[256] = "", chosen[PATH_MAX] = "";
                 open_user_dirs(hm, sizeof hm, drs, sizeof drs);
@@ -1063,37 +1140,46 @@ int main(void)
                 } else if (files_close_asked()) {
                     quit_asked = 1;
                 }
+                handled = 1;
             } else if (!fwupd_missing && !in_releases && key == 'v' && ndevs > 0) {
                 char *const argv[] = { FW_HELPER, "fwupd-action", "verify", devs[*cur_sel].id, NULL };
                 start_job(_("fwupd verify"), argv);
+                handled = 1;
             } else if (!fwupd_missing && !in_releases && key == 'k' && ndevs > 0) {
                 confirming = CONF_UNLOCK_DEV;
                 say_notice(1, _("Y/N: Unlock device %.80s for firmware updates?"), devs[*cur_sel].name);
+                handled = 1;
             } else if (!fwupd_missing && !in_releases && key == '\n' && ndevs > 0) {
                 rel_dev_idx = *cur_sel;
                 load_releases(rel_dev_idx);
                 in_releases = 1;
+                handled = 1;
             } else if (!fwupd_missing && in_releases && key == '\n' && nrels > 0) {
                 confirming = CONF_INSTALL_REL;
                 say_notice(1, _("Y/N: %s %.60s to version %s?"),
                            rels[sel_rel].kind, devs[rel_dev_idx].name, rels[sel_rel].version);
+                handled = 1;
             }
         } else if (page == PAGE_BIOS) {
             if (key == 'r') {
                 load_bios();
                 say_notice(0, "%s", _("BIOS settings reloaded."));
+                handled = 1;
             } else if (nbattrs > 0 && (key == '\n' || key == K_LEFT || key == K_RIGHT)) {
                 change_bios_attr(*cur_sel, key == K_LEFT ? -1 : key == K_RIGHT ? 1 : 0);
+                handled = 1;
             }
         } else if (page == PAGE_SPI) {
             if (key == 'P' && flashrom_missing) {
                 char *const argv[] = { PKG_HELPER, "install", "flashrom", NULL };
                 start_job(_("Install flashrom"), argv);
+                handled = 1;
             } else if ((key == K_LEFT || key == K_RIGHT || key == '\n') && *cur_sel == SPI_ROW_PROG) {
                 int step = key == K_LEFT ? nprogs - 1 : 1;
                 cur_prog = (cur_prog + step) % nprogs;
                 detected_chip[0] = detected_ifd[0] = '\0';
                 detected_bytes = 0;
+                handled = 1;
             } else if (key == 'c' || (key == '\n' && *cur_sel == SPI_ROW_PROG && mods & KEYS_CTRL)) {
                 char spec[96];
                 snprintf(spec, sizeof spec, "%s", progs[cur_prog].spec);
@@ -1101,11 +1187,14 @@ int main(void)
                     snprintf(progs[cur_prog].spec, sizeof progs[cur_prog].spec, "%s", spec);
                     snprintf(progs[cur_prog].label, sizeof progs[cur_prog].label, "custom");
                 }
+                handled = 1;
             } else if (key == '\n' && *cur_sel == SPI_ROW_CHIP) {
                 prompt_text(_("Chip name (-c, empty for auto):"), spi_chip, sizeof spi_chip);
+                handled = 1;
             } else if ((key == K_LEFT || key == K_RIGHT || key == '\n') && *cur_sel == SPI_ROW_REGIONS) {
                 int step = key == K_LEFT ? NREGION_PRESETS - 1 : 1;
                 cur_region_preset = (cur_region_preset + step) % NREGION_PRESETS;
+                handled = 1;
             } else if (key == '\n' && *cur_sel == SPI_ROW_BACKUP_DIR) {
                 char chosen[PATH_MAX] = "";
                 if (files_pick(backup_dir, NULL, "inode/directory",
@@ -1114,6 +1203,7 @@ int main(void)
                 } else if (files_close_asked()) {
                     quit_asked = 1;
                 }
+                handled = 1;
             } else if (!flashrom_missing && key == 'p') {
                 char *argv[8];
                 int n = 0;
@@ -1123,6 +1213,7 @@ int main(void)
                 if (spi_chip[0]) { argv[n++] = "--chip"; argv[n++] = spi_chip; }
                 argv[n] = NULL;
                 start_job(_("SPI probe"), argv);
+                handled = 1;
             } else if (!flashrom_missing && key == 'b') {
                 const char *regs = region_presets[cur_region_preset];
                 char *argv[10];
@@ -1135,6 +1226,7 @@ int main(void)
                 if (regs[0])     { argv[n++] = "--regions"; argv[n++] = (char *)regs; }
                 argv[n] = NULL;
                 start_job(_("SPI 3x verified backup"), argv);
+                handled = 1;
             } else if (!flashrom_missing && (key == 'v' || key == 'w')) {
                 char chosen[PATH_MAX] = "";
                 if (files_pick(backup_dir, NULL, "", _("Choose ROM/BIN image (Enter):"), chosen, sizeof chosen)) {
@@ -1169,8 +1261,11 @@ int main(void)
                 } else if (files_close_asked()) {
                     quit_asked = 1;
                 }
+                handled = 1;
             }
         }
-        draw();
+        if (handled || job_changed) {
+            draw();
+        }
     }
 }

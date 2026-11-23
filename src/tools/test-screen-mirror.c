@@ -214,7 +214,7 @@ static int mock_ioctl(int fd, unsigned long request, ...)
         sets++;
     } else if (request == DRM_IOCTL_MODE_DIRTYFB) {
         struct drm_mode_fb_dirty_cmd *d = arg;
-        assert(d->num_clips == 1);
+        assert(d->num_clips >= 1);
         clips[dirties++ % 2] = *(struct drm_clip_rect *)(uintptr_t)d->clips_ptr;
     } else if (request == DRM_IOCTL_MODE_CREATE_LEASE) {
         struct drm_mode_create_lease *l = arg;
@@ -288,21 +288,24 @@ static void test_copy(void)
                         dw, dh, src, sw, sh, damage);
                     struct drm_clip_rect fit = fit_rect(sw, sh, dw, dh);
                     assert(fit.x1 < fit.x2 && fit.x2 <= dw && fit.y1 < fit.y2 && fit.y2 <= dh);
+                    uint32_t fw = fit.x2 - fit.x1, fh = fit.y2 - fit.y1;
                     if (sw == dw && sh == dh) {
                         assert(memcmp(&c, &damage, sizeof c) == 0);
-                    } else {
+                    } else if (sw == 1 && sh == 1) {
                         assert(c.x1 == 0 && c.y1 == 0 && c.x2 == dw && c.y2 == dh);
+                    } else {
+                        uint32_t ex1 = fit.x1 + (fw + sw - 1) / sw;
+                        uint32_t ey1 = fit.y1 + (fh + sh - 1) / sh;
+                        assert(c.x1 == fit.x1 && c.y1 == fit.y1 && c.x2 == ex1 && c.y2 == ey1);
                     }
                     for (uint32_t y = 0; y < dh; y++) {
                         for (uint32_t x = 0; x < dw + 2; x++) {
                             uint32_t expected = UINT32_MAX;
-                            if (x < dw && sw == dw && sh == dh) {
-                                if (x == 0 && y == 0) expected = src[0];
-                            } else if (x < dw) {
+                            if (x < dw && x >= c.x1 && x < c.x2 && y >= c.y1 && y < c.y2) {
                                 expected = 0;
                                 if (x >= fit.x1 && x < fit.x2 && y >= fit.y1 && y < fit.y2) {
-                                    uint32_t sx = (x - fit.x1) * sw / (fit.x2 - fit.x1);
-                                    uint32_t sy = (y - fit.y1) * sh / (fit.y2 - fit.y1);
+                                    uint32_t sx = (x - fit.x1) * sw / fw;
+                                    uint32_t sy = (y - fit.y1) * sh / fh;
                                     expected = src[sy * sw + sx];
                                 }
                             }
@@ -310,6 +313,23 @@ static void test_copy(void)
                         }
                     }
                     assert(dst[0] == UINT32_MAX && dst[1 + dh * (dw + 2)] == UINT32_MAX);
+                    /* A full-frame clip still clears the letterbox borders and copies every pixel. */
+                    for (unsigned i = 0; i < 120; i++) dst[i] = UINT32_MAX;
+                    struct drm_clip_rect full_damage = { 0, 0, (unsigned short)sw, (unsigned short)sh };
+                    struct drm_clip_rect cf = copy_picture((uint8_t *)(dst + 1), (dw + 2) * 4,
+                        dw, dh, src, sw, sh, full_damage);
+                    assert(cf.x1 == 0 && cf.y1 == 0 && cf.x2 == dw && cf.y2 == dh);
+                    for (uint32_t y = 0; y < dh; y++) {
+                        for (uint32_t x = 0; x < dw; x++) {
+                            uint32_t expected = 0;
+                            if (x >= fit.x1 && x < fit.x2 && y >= fit.y1 && y < fit.y2) {
+                                uint32_t sx = (x - fit.x1) * sw / fw;
+                                uint32_t sy = (y - fit.y1) * sh / fh;
+                                expected = src[sy * sw + sx];
+                            }
+                            assert(dst[1 + y * (dw + 2) + x] == expected);
+                        }
+                    }
                 }
             }
         }
@@ -387,10 +407,12 @@ static void test_lifecycle(void)
     assert(show(7) == NULL && sets == 2 && frames == 2 && mappings == 2);
     assert(*(uint32_t *)outputs[0].map == 0x123456);
     dirties = 0;
+    shadow[1 * width + 1] = 0x654321;
     touch(1, 1, 2, 2);
     screen_flush();
+    /* Scaled output 1 (8x6 -> 12x10, fit 12x9 at y=0..9) clips DIRTYFB to the mapped sub-rect. */
     assert(dirties == 2 && clips[0].x1 == 1 && clips[0].x2 == 2);
-    assert(clips[1].x1 == 0 && clips[1].x2 == 12 && clips[1].y2 == 10);
+    assert(clips[1].x1 == 2 && clips[1].x2 == 3 && clips[1].y1 == 2 && clips[1].y2 == 3);
     uint32_t lessee;
     assert(screen_lend(&lessee) == 9 && lessee == 42 && lease_counts[0] == 4);
     dirties = 0;
@@ -595,6 +617,16 @@ static void test_lifecycle(void)
     assert(screen_rescale() == 1);
     puts("PASS extended outputs have distinct native canvases, per-output scale and gap-safe signed coordinates");
     uint32_t *first_pixels = outputs[0].surface->pixels, *second_pixels = outputs[1].surface->pixels;
+    /* Extended mode prefers hardware cursor planes per output and falls back to software when unavailable. */
+    screen_cursor_move(1, 1);
+    screen_cursor_visible(1);
+    assert(!outputs[0].soft_cursor && !outputs[1].soft_cursor && cursor_output == 0);
+    assert(outputs[0].cursor_at.x1 == outputs[0].cursor_at.x2 && outputs[1].cursor_at.x1 == outputs[1].cursor_at.x2);
+    screen_cursor_move(9, 1);
+    assert(cursor_output == 1 && !outputs[1].soft_cursor);
+    screen_cursor_visible(0);
+    assert(cursor_output == -1);
+    no_cursor_plane = 1;
     screen_cursor_move(1, 1);
     screen_cursor_visible(1);
     assert(outputs[0].soft_cursor && outputs[0].cursor_at.x1 != outputs[0].cursor_at.x2);
@@ -605,6 +637,7 @@ static void test_lifecycle(void)
     assert(*(uint32_t *)outputs[0].map == 0x123456);
     screen_cursor_visible(0);
     assert(outputs[1].cursor_at.x1 == outputs[1].cursor_at.x2);
+    no_cursor_plane = 0;
     screen_release();
     assert(screen_take(8) && noutputs == 2 && outputs[0].surface->pixels == first_pixels &&
            outputs[1].surface->pixels == second_pixels);
@@ -650,13 +683,134 @@ static void test_lifecycle(void)
     extended_conf = 0;
     while (surfaces) {
         struct output_surface *next = surfaces->next;
-        free(surfaces->pixels); free(surfaces->font); free(surfaces);
+        free(surfaces->pixels); free(surfaces->presented); free(surfaces->font); free(surfaces);
         surfaces = next;
     }
     puts("PASS extended cursor belongs to one output and canvases survive lease release and hotplug");
     free(shadow);
     shadow = NULL;
+    drop_presented(&presented, &presented_w, &presented_h, &presented_valid);
+    mirrored.presented = NULL;
     unlink(test_font);
+}
+
+static void test_present_diff(void)
+{
+    snprintf(test_font, sizeof test_font, "%s", "/tmp/test-screen-font-XXXXXX");
+    write_test_font();
+    assert(screen_take(8) && noutputs == 2 && width == 8 && height == 6);
+    /* Initial full draw populates presented snapshot. */
+    dirties = 0;
+    screen_fill_px(0, 0, 8, 6, 0x101820);
+    screen_flush();
+    assert(dirties == 2 && clips[0].x1 == 0 && clips[0].y1 == 0 && clips[0].x2 == 8 && clips[0].y2 == 6);
+    assert(presented_valid && presented != NULL);
+
+    /* Identical full-frame redraw skips copy and DIRTYFB completely. */
+    dirties = 0;
+    screen_fill_px(0, 0, 8, 6, 0x101820);
+    screen_flush();
+    assert(dirties == 0 && dirty.x1 == dirty.x2);
+
+    /* Full-frame fill + single-row / single-cell change tightens clip in both Y and X. */
+    dirties = 0;
+    screen_fill_px(0, 0, 8, 6, 0x101820);
+    screen_text(2, 1, "A", 0xFFFFFF, 0x101820); /* cell col=2 (x=4..6), row=1 (y=top+2=3..5) */
+    screen_flush();
+    assert(dirties == 2);
+    /* 'A' sets (4,3) and (5,4) to 0xFFFFFF while other pixels stay 0x101820.
+     * Output 1 scales 8x6 -> 12x9 (fit y=0..9) and clips DIRTYFB to the mapped sub-rect. */
+    assert(clips[0].x1 == 4 && clips[0].y1 == 3 && clips[0].x2 == 6 && clips[0].y2 == 5);
+    assert(clips[1].x1 == 6 && clips[1].y1 == 5 && clips[1].x2 == 9 && clips[1].y2 == 8);
+    assert(*(uint32_t *)(outputs[0].map + 3 * outputs[0].pitch + 4 * 4) == 0xFFFFFF);
+    assert(*(uint32_t *)(outputs[0].map + 4 * outputs[0].pitch + 5 * 4) == 0xFFFFFF);
+
+    /* Identical full redraw of the new content again emits zero DIRTYFBs. */
+    dirties = 0;
+    screen_fill_px(0, 0, 8, 6, 0x101820);
+    screen_text(2, 1, "A", 0xFFFFFF, 0x101820);
+    screen_flush();
+    assert(dirties == 0);
+
+    /* Reverting the pixel updates scanout and tightens to the changed pixel only. */
+    dirties = 0;
+    screen_fill_px(0, 0, 8, 6, 0x101820);
+    screen_flush();
+    assert(dirties == 2 && clips[0].x1 == 4 && clips[0].y1 == 3 && clips[0].x2 == 6 && clips[0].y2 == 5);
+    assert(*(uint32_t *)(outputs[0].map + 3 * outputs[0].pitch + 4 * 4) == 0x101820);
+
+    /* Reclaiming from a lease or refreshing invalidates the snapshot and flushes. */
+    uint32_t lessee = 0;
+    lease_calls = 0;
+    reject_multi = 0;
+    assert(screen_lend(&lessee) == 9);
+    dirties = 0;
+    assert(screen_take_back(lessee) == 0 && dirties == 2);
+    assert(clips[0].x1 == 0 && clips[0].y1 == 0 && clips[0].x2 == 8 && clips[0].y2 == 6);
+
+    /* Returning from a dmabuf scanout forces a full flush even when shadow pixels match. */
+    outputs[0].dmabuf_fb_id = 9999;
+    frames++; /* mock RMFB decrements frames */
+    dirties = 0;
+    screen_fill_px(0, 0, 8, 6, 0x101820);
+    screen_flush();
+    assert(outputs[0].dmabuf_fb_id == 0 && dirties == 2);
+    assert(clips[0].x1 == 0 && clips[0].y1 == 0 && clips[0].x2 == 8 && clips[0].y2 == 6);
+
+    /* Hover frame transition forces scanout repaint even with unchanged shadow pixels. */
+    char *desk_fields[] = { "eDP-1", "0", "0", "8", "6", "HDMI-A-0", "8", "0", "12", "10" };
+    screen_desk(desk_fields, 10);
+    dirties = 0;
+    screen_hover(1);
+    assert(dirties == 1 && *(uint32_t *)outputs[1].map == HOVER_GREEN);
+    dirties = 0;
+    screen_hover(-1);
+    assert(dirties == 1 && *(uint32_t *)outputs[1].map == 0x101820);
+    ndesk = 0;
+
+    /* Extended mode keeps independent per-output snapshots. */
+    assert(screen_extended(1) == 1);
+    assert(screen_output_select(0) >= 0);
+    screen_fill_px(0, 0, 8, 6, 0x111111);
+    assert(screen_output_select(1) == 0);
+    screen_fill_px(0, 0, 12, 10, 0x222222);
+    dirties = 0;
+    screen_flush();
+    assert(dirties == 2);
+
+    /* Identical redraw on both extended outputs emits zero DIRTYFBs. */
+    assert(screen_output_select(0) == 1);
+    screen_fill_px(0, 0, 8, 6, 0x111111);
+    assert(screen_output_select(1) == 0);
+    screen_fill_px(0, 0, 12, 10, 0x222222);
+    dirties = 0;
+    screen_flush();
+    assert(dirties == 0);
+
+    /* Full redraw on both where only one pixel on output 1 changed flushes only output 1 tightly. */
+    assert(screen_output_select(0) == 1);
+    screen_fill_px(0, 0, 8, 6, 0x111111);
+    assert(screen_output_select(1) == 0);
+    screen_fill_px(0, 0, 12, 10, 0x222222);
+    screen_fill_px(7, 4, 2, 1, 0xABCDEF);
+    dirties = 0;
+    screen_flush();
+    assert(dirties == 1 && clips[0].x1 == 7 && clips[0].y1 == 4 && clips[0].x2 == 9 && clips[0].y2 == 5);
+    assert(*(uint32_t *)(outputs[1].map + 4 * outputs[1].pitch + 7 * 4) == 0xABCDEF);
+
+    screen_release();
+    assert(screen_extended(0) == 1);
+    while (surfaces) {
+        struct output_surface *next = surfaces->next;
+        free(surfaces->pixels); free(surfaces->presented); free(surfaces->font); free(surfaces);
+        surfaces = next;
+    }
+    free(shadow);
+    shadow = NULL;
+    drop_presented(&presented, &presented_w, &presented_h, &presented_valid);
+    mirrored.presented = NULL;
+    unlink(test_font);
+    puts("PASS row-wise present diff skips identical frames and tightens dirty rects in mirrored and extended modes");
 }
 
 int main(void)
@@ -664,6 +818,7 @@ int main(void)
     test_copy();
     test_matching();
     test_lifecycle();
+    test_present_diff();
     /* A reduced-bandwidth link refuses 60 Hz but advertised 30 Hz works. */
     snprintf(test_font, sizeof test_font, "%s", "/tmp/test-screen-font-XXXXXX");
     write_test_font();
@@ -700,12 +855,14 @@ int main(void)
     assert(screen_extended(0));
     while (surfaces) {
         struct output_surface *next = surfaces->next;
-        free(surfaces->pixels); free(surfaces->font); free(surfaces); surfaces = next;
+        free(surfaces->pixels); free(surfaces->presented); free(surfaces->font); free(surfaces); surfaces = next;
     }
     puts("PASS extended fallback rebuilds the native per-output canvas before scanout");
     request_refresh = single_output = bandwidth_limit = lower_resolution = 0;
     unlink(test_font);
     free(shadow); shadow = NULL;
+    drop_presented(&presented, &presented_w, &presented_h, &presented_valid);
+    mirrored.presented = NULL;
     puts("PASS refused 60 Hz falls back to advertised 30 Hz; desired 60 Hz stays and a later take retries it");
     snprintf(test_font, sizeof test_font, "%s", "/tmp/test-screen-font-XXXXXX");
     write_test_font();
@@ -716,6 +873,8 @@ int main(void)
     assert(screen_refresh() == 1);
     screen_release();
     unlink(test_font); free(shadow); shadow = NULL;
+    drop_presented(&presented, &presented_w, &presented_h, &presented_valid);
+    mirrored.presented = NULL;
     puts("PASS master reclaimed with stale scanout returns rescan, distinct from master acquisition failure");
     puts("screen mirror: copy/fit, maximum CRTC matching, lease fallback and cleanup passed");
     return 0;

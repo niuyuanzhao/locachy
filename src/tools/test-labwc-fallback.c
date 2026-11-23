@@ -38,6 +38,7 @@ int main(int argc, char **argv)
     fputs("<keyboard>\n"
           "  <keybind key=\"HOME-KEY\"><action name=\"Execute\" command=\"/usr/local/lib/locachy/labwc-control --action home\" /></keybind>\n"
           "  <keybind key=\"LOCK-KEY\"><action name=\"Execute\" command=\"/usr/local/lib/locachy/labwc-control --action lock\" /></keybind>\n"
+          "  <keybind key=\"SEARCH-KEY\"><action name=\"Execute\" command=\"/usr/local/bin/locachy-seat --window search\" /></keybind>\n"
           "  <keybind key=\"TERMINAL-KEY\"><action name=\"Execute\" command=\"foot\" /></keybind>\n"
           "  <keybind key=\"IME-KEY\"><action name=\"Execute\" command=\"ime\" /></keybind>\n"
           "</keyboard>\n", t);
@@ -50,10 +51,12 @@ int main(int argc, char **argv)
     check(has_line(out_path, "key=\"C-A-Super_L\""), "Ctrl+Alt+Super is bound");
     check(has_line(out_path, "key=\"XF86Launch1\""), "ThinkVantage is bound");
     check(has_line(out_path, "key=\"W-l\""), "the lock key is Super+l");
+    check(has_line(out_path, "key=\"W-space\""), "the search key is Super+Space");
     check(has_line(out_path, "key=\"C-A-t\""), "the terminal key is Ctrl+Alt+t");
     check(has_line(out_path, "labwc-control --action home") && has_line(out_path, "--action lock"),
           "each key keeps its own action");
-    check(!has_line(out_path, "HOME-KEY") && !has_line(out_path, "LOCK-KEY") && !has_line(out_path, "TERMINAL-KEY"),
+    check(!has_line(out_path, "HOME-KEY") && !has_line(out_path, "LOCK-KEY") &&
+          !has_line(out_path, "SEARCH-KEY") && !has_line(out_path, "TERMINAL-KEY"),
           "no placeholder is left");
     check(!has_line(out_path, "IME-KEY"), "the input method placeholders are the bar's, left out");
     const char *missing = "/nonexistent/template.xml";

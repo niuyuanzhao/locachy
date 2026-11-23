@@ -189,6 +189,7 @@ static int in_ranges(uint32_t cp, const struct unicode_range *ranges, size_t cou
 
 int content_font_char_cells(uint32_t cp)
 {
+    if (cp < 0xAD) return 1;
     if (in_ranges(cp, zero_width, sizeof zero_width / sizeof *zero_width)) return 0;
     return in_ranges(cp, double_width, sizeof double_width / sizeof *double_width) ? 2 : 1;
 }
@@ -417,15 +418,24 @@ static FT_Face glyph_face(const struct content_font *font, FT_Face selected,
     return selected;                   /* glyph 0 is its real .notdef */
 }
 
+static inline unsigned div255_round(unsigned c)
+{
+    unsigned v = c + 128u;
+    return (v + (v >> 8)) >> 8;
+}
+
 static uint32_t blend(uint32_t fg, uint32_t bg, unsigned alpha)
 {
-    unsigned inv = 255 - alpha;
-    unsigned r = (((fg >> 16) & 255) * alpha + ((bg >> 16) & 255) * inv + 127) / 255;
-    unsigned g = (((fg >> 8) & 255) * alpha + ((bg >> 8) & 255) * inv + 127) / 255;
-    unsigned b = ((fg & 255) * alpha + (bg & 255) * inv + 127) / 255;
+    if (alpha == 255u) return fg & 0xFFFFFFu;
+    if (alpha == 0u) return bg & 0xFFFFFFu;
+    unsigned inv = 255u - alpha;
+    unsigned r = div255_round(((fg >> 16) & 255u) * alpha + ((bg >> 16) & 255u) * inv);
+    unsigned g = div255_round(((fg >> 8) & 255u) * alpha + ((bg >> 8) & 255u) * inv);
+    unsigned b = div255_round((fg & 255u) * alpha + (bg & 255u) * inv);
     return (r << 16) | (g << 8) | b;
 }
 
+__attribute__((unused))
 static unsigned coverage(const FT_Bitmap *bitmap, unsigned x, unsigned y)
 {
     /* A negative pitch means the first stored row is the bottom row. */
@@ -456,6 +466,7 @@ void content_font_draw(struct content_font *font, int x, int y, const char *utf8
     int64_t bottom = min64(min64((int64_t)y + font->cell_h, (int64_t)clip_y + clip_h), screen_h);
     if (right <= left || bottom <= top) return;
     int width = (int)(right - left), height = (int)(bottom - top);
+    /* One fill per draw, as test-content-font.c counts it; the blit below covers the same rectangle. */
     screen_fill_px((int)left, (int)top, width, height, bg);
     if ((size_t)width > SIZE_MAX / sizeof *font->pixels / (size_t)height) return;
     size_t count = (size_t)width * (size_t)height;
@@ -465,7 +476,9 @@ void content_font_draw(struct content_font *font, int x, int y, const char *utf8
         font->pixels = pixels;
         font->capacity = count;
     }
-    for (size_t i = 0; i < count; i++) font->pixels[i] = bg & 0xFFFFFF;
+    uint32_t bg_rgb = bg & 0xFFFFFFu;
+    uint32_t fg_rgb = fg & 0xFFFFFFu;
+    for (size_t i = 0; i < count; i++) font->pixels[i] = bg_rgb;
     FT_Face selected = style_face(font, style);
     int64_t pen = x, previous = x;
     int previous_cells = 1, have_previous = 0;
@@ -487,25 +500,28 @@ void content_font_draw(struct content_font *font, int x, int y, const char *utf8
         FT_UInt glyph;
         FT_Face face = glyph_face(font, selected, cp, style, &glyph);
         if (!advance && !glyph) continue; /* format/missing marks are not tofu */
-        if (FT_Load_Glyph(face, glyph, FT_LOAD_DEFAULT) ||
-            FT_Render_Glyph(face->glyph, FT_RENDER_MODE_NORMAL)) continue;
-        FT_GlyphSlot slot = face->glyph;
-        FT_Bitmap *bitmap = &slot->bitmap;
-        int64_t gx = origin + slot->bitmap_left;
+        const struct font_glyph *g = font_face_glyph(font->sets[0], face, glyph, font->size_px);
+        if (!g || !g->alpha) continue;
+        int64_t gx = origin + g->left;
         /* FreeType's zero-advance accents have an origin after their base. */
-        if (!advance && !slot->advance.x) gx += (int64_t)previous_cells * font->cell_w;
+        if (!advance && !g->has_advance) gx += (int64_t)previous_cells * font->cell_w;
         if (advance == 2) {
-            int64_t delta = ((int64_t)2 * font->cell_w - pixels_up(slot->advance.x)) / 2;
+            int64_t delta = ((int64_t)2 * font->cell_w - g->advance_x) / 2;
             gx += delta;
         }
-        int64_t gy = (int64_t)y + font->baseline - slot->bitmap_top;
+        int64_t gy = (int64_t)y + font->baseline - g->top;
         int64_t bx0 = max64(left, gx), by0 = max64(top, gy);
-        int64_t bx1 = min64(right, gx + bitmap->width), by1 = min64(bottom, gy + bitmap->rows);
+        int64_t bx1 = min64(right, gx + g->width), by1 = min64(bottom, gy + g->rows);
+        if (bx0 >= bx1 || by0 >= by1) continue;
+        size_t gw = (size_t)g->width;
         for (int64_t py = by0; py < by1; py++) {
-            for (int64_t px = bx0; px < bx1; px++) {
-                unsigned alpha = coverage(bitmap, (unsigned)(px - gx), (unsigned)(py - gy));
-                size_t at = (size_t)(py - top) * (size_t)width + (size_t)(px - left);
-                if (alpha) font->pixels[at] = blend(fg, font->pixels[at], alpha);
+            const uint8_t *arow = g->alpha + (size_t)(py - gy) * gw + (size_t)(bx0 - gx);
+            uint32_t *dst = font->pixels + (size_t)(py - top) * (size_t)width + (size_t)(bx0 - left);
+            size_t span = (size_t)(bx1 - bx0);
+            for (size_t i = 0; i < span; i++) {
+                unsigned alpha = arow[i];
+                if (alpha == 255u) dst[i] = fg_rgb;
+                else if (alpha) dst[i] = blend(fg_rgb, dst[i], alpha);
             }
         }
     }
@@ -517,7 +533,7 @@ void content_font_draw(struct content_font *font, int x, int y, const char *utf8
         int64_t uy0 = max64(top, uy), uy1 = min64(bottom, uy + thickness);
         for (int64_t py = uy0; py < uy1; py++)
             for (int px = 0; px < width; px++)
-                font->pixels[(size_t)(py - top) * (size_t)width + (size_t)px] = fg & 0xFFFFFF;
+                font->pixels[(size_t)(py - top) * (size_t)width + (size_t)px] = fg_rgb;
     }
     screen_blit((int)left, (int)top, width, height, font->pixels, width);
 }

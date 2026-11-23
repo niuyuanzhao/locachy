@@ -30,6 +30,7 @@
     <!-- Consuming compositor bindings; settings writes rc.conf keys here. -->
     <keybind key="HOME-KEY"><action name="Execute" command="/usr/local/lib/locachy/labwc-control --action home" /></keybind>
     <keybind key="LOCK-KEY"><action name="Execute" command="/usr/local/lib/locachy/labwc-control --action lock" /></keybind>
+    <keybind key="SEARCH-KEY"><action name="Execute" command="/usr/local/bin/locachy-seat --window search" /></keybind>
     <!-- locachy-bar handles the input method keys of rc.conf itself; labwc
          only consumes them, so the focused application never gets them. -->
     <keybind key="IME-KEY"><action name="Execute" command="/usr/bin/true" /></keybind>
