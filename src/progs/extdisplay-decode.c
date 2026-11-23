@@ -30,6 +30,7 @@ struct extdisplay_decoder {
     uint32_t *pixels;
 #ifdef CONFIG_EXTDISPLAY_VAAPI
     VASurfaceID vpp_surf[EXTDISPLAY_DMABUF_SLOTS];
+    AVFrame *vpp_src[EXTDISPLAY_DMABUF_SLOTS]; /* holds DPB decode surface ref until slot is reused */
     VAConfigID vpp_cfg;
     VAContextID vpp_ctx;
     uint32_t vpp_gen;
@@ -172,12 +173,21 @@ static int render_frame(struct extdisplay_decoder *d, const AVFrame *f, uint32_t
 int extdisplay_decoder_available(enum extdisplay_codec codec) { return codec_for(codec) != NULL; }
 void extdisplay_decoder_disable_dmabuf(struct extdisplay_decoder *d)
 {
-    if (d) d->dmabuf_off = 1;
+    if (!d) return;
+    d->dmabuf_off = 1;
+#ifdef CONFIG_EXTDISPLAY_VAAPI
+    for (uint32_t i = 0; i < EXTDISPLAY_DMABUF_SLOTS; i++) {
+        if (d->vpp_src[i]) av_frame_unref(d->vpp_src[i]);
+    }
+#endif
 }
 void extdisplay_decoder_close(struct extdisplay_decoder *d)
 {
     if (!d) return;
 #ifdef CONFIG_EXTDISPLAY_VAAPI
+    for (uint32_t i = 0; i < EXTDISPLAY_DMABUF_SLOTS; i++) {
+        av_frame_free(&d->vpp_src[i]);
+    }
     if (va_disp) {
         if (d->vpp_ctx != VA_INVALID_ID) vaDestroyContext(va_disp, d->vpp_ctx);
         if (d->vpp_cfg != VA_INVALID_ID) vaDestroyConfig(va_disp, d->vpp_cfg);
@@ -366,7 +376,13 @@ int extdisplay_decoder_prepare_dmabuf(struct extdisplay_decoder *d, uint32_t slo
     }
     d->vpp_last_slot = (int)slot;
     d->vpp_has_last = 1;
-    av_frame_unref(d->ready);
+    if (!d->vpp_src[slot]) d->vpp_src[slot] = av_frame_alloc();
+    if (d->vpp_src[slot]) {
+        av_frame_unref(d->vpp_src[slot]);
+        av_frame_move_ref(d->vpp_src[slot], d->ready);
+    } else {
+        av_frame_unref(d->ready);
+    }
     d->has_ready = 0;
     return 1;
 #else

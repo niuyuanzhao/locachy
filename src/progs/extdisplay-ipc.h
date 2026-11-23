@@ -27,7 +27,7 @@ enum extdisplay_ipc_op {
     EXTDISPLAY_IPC_HELLO = 1,  /* text: the hello JSON */
     EXTDISPLAY_IPC_INPUT,      /* text: one input JSON; dropped unless the stream is active */
     EXTDISPLAY_IPC_STOP,       /* cancel to the peer, then exit */
-    EXTDISPLAY_IPC_FRAME_ACK,  /* frame done; width: retired dma-buf slot + 1 (1..3), or 0 */
+    EXTDISPLAY_IPC_FRAME_ACK,  /* frame done; width: retired slot + 1 (1..3), 0, or EXTDISPLAY_DMABUF_RELEASE_ALL */
     EXTDISPLAY_IPC_CANCEL,     /* cancel to the peer now, answered by CANCELLED once written */
     EXTDISPLAY_IPC_DMABUF_OFF, /* frontend cannot import dma-bufs: send sealed memfd */
     EXTDISPLAY_IPC_REFRESH,    /* re-export the last dma-buf frame after VT/lease restore */
@@ -42,6 +42,7 @@ enum extdisplay_ipc_op {
 };
 #define EXTDISPLAY_DMABUF_MAX_PLANES 4u
 #define EXTDISPLAY_DMABUF_SLOTS 3u
+#define EXTDISPLAY_DMABUF_RELEASE_ALL 0xFFFFFFFFu
 struct extdisplay_dmabuf {
     uint32_t fourcc;
     uint32_t num_planes;

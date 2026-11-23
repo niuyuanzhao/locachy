@@ -472,7 +472,9 @@ static int frontend(void)
             break;
         case EXTDISPLAY_IPC_FRAME_ACK:
             session.frame_pending = 0;
-            if (m.width >= 1 && m.width <= EXTDISPLAY_DMABUF_SLOTS) {
+            if (m.width == EXTDISPLAY_DMABUF_RELEASE_ALL) {
+                memset(session.slot_busy, 0, sizeof session.slot_busy);
+            } else if (m.width >= 1 && m.width <= EXTDISPLAY_DMABUF_SLOTS) {
                 session.slot_busy[m.width - 1] = 0;
             }
             if (session.ready_slot >= 0) {
@@ -544,8 +546,11 @@ int main(void)
     if (status(EXTDISPLAY_IPC_READY) < 0) return 1;
     session.last_rx = session.last_ping = now();
     for (;;) {
+        int ipc_want_out = !session.frame_pending && session.active &&
+                           (session.ready_slot >= 0 ||
+                            (session.dmabuf_off && extdisplay_decoder_size(session.decoder, NULL, NULL)));
         struct pollfd p[2] = {
-            { EXTDISPLAY_IPC_FD, POLLIN, 0 },
+            { EXTDISPLAY_IPC_FD, (short)(POLLIN | (ipc_want_out ? POLLOUT : 0)), 0 },
             { EXTDISPLAY_TRANSPORT_FD, POLLIN | (session.tx_end > session.tx_start ? POLLOUT : 0), 0 },
         };
         int r = poll(p, 2, 100);
@@ -554,6 +559,14 @@ int main(void)
         if (p[0].revents & (POLLHUP | POLLERR | POLLNVAL)) { fail_reason = "ipc-poll-err"; break; }
         if (p[1].revents & (POLLERR | POLLNVAL)) { fail_reason = "transport-poll-err"; break; }
         if ((p[0].revents & POLLIN) && (r = frontend()) != 0) break;
+        if ((p[0].revents & POLLOUT) && !session.frame_pending && session.active) {
+            if (session.ready_slot >= 0) {
+                if (send_ready_slot() < 0) { fail_reason = "frontend-err"; break; }
+            } else if (session.dmabuf_off && send_latest() < 0) {
+                fail_reason = "frontend-err";
+                break;
+            }
+        }
         /* Flush outbound input/control to the broker before spending time decoding inbound video. */
         if (session.tx_end > session.tx_start && flush() < 0) break;
         if (p[1].revents & (POLLIN | POLLHUP)) {
