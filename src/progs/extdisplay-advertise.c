@@ -43,8 +43,19 @@
 static AvahiSimplePoll *loop;
 static AvahiSEntryGroup *group;
 static int interface_index, failed, established, sandboxed, stopping;
-static char service_name[40], host_name[48], code_txt[48];
+static char service_name[40], host_name[48], code_txt[48], hostid_txt[48];
+static int has_code, has_hostid, paired_only;
 static AvahiAddress endpoint;
+
+static int valid_host_id(const char *s, size_t n)
+{
+    if (n < 16 || n > 32) return 0;
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+    }
+    return 1;
+}
 
 static int valid_code(const char *s, size_t n)
 {
@@ -89,13 +100,24 @@ static void server_event(AvahiServer *s, AvahiServerState state, void *userdata)
     if (state == AVAHI_SERVER_FAILURE || state == AVAHI_SERVER_COLLISION) {
         stop_error();
     } else if (state == AVAHI_SERVER_RUNNING && !group) {
+        AvahiStringList *txt = NULL;
+        txt = avahi_string_list_add(txt, "pv=3");
+        txt = avahi_string_list_add(txt, "extended=1");
+        txt = avahi_string_list_add(txt, "pair=psk128");
+        if (has_code) txt = avahi_string_list_add(txt, code_txt);
+        if (has_hostid) txt = avahi_string_list_add(txt, hostid_txt);
+        if (paired_only) txt = avahi_string_list_add(txt, "paired=1");
         group = avahi_s_entry_group_new(s, group_event, NULL);
-        if (!group || avahi_server_add_address(s, group, interface_index, AVAHI_PROTO_INET6, 0,
+        if (!group || !txt || avahi_server_add_address(s, group, interface_index, AVAHI_PROTO_INET6, 0,
                                                host_name, &endpoint) < 0 ||
-            avahi_server_add_service(s, group, interface_index, AVAHI_PROTO_INET6, 0,
-                                    service_name, SERVICE, "local", host_name, PORT,
-                                    "pv=3", "extended=1", "pair=psk128", code_txt, NULL) < 0 ||
-            avahi_s_entry_group_commit(group) < 0) stop_error();
+            avahi_server_add_service_strlst(s, group, interface_index, AVAHI_PROTO_INET6, 0,
+                                            service_name, SERVICE, "local", host_name, PORT, txt) < 0 ||
+            avahi_s_entry_group_commit(group) < 0) {
+            avahi_string_list_free(txt);
+            stop_error();
+            return;
+        }
+        avahi_string_list_free(txt);
     }
 }
 
@@ -221,14 +243,30 @@ int main(int argc, char **argv)
     unsigned char token[8];
     int type, domain;
     socklen_t size = sizeof type;
-    if (argc != 7 || strcmp(argv[1], "--status-fd") || strcmp(argv[2], "3") ||
-        (interface_index = (int)number(argv[3])) <= 0 || strlen(argv[4]) >= IFNAMSIZ ||
-        if_nametoindex(argv[4]) != (unsigned)interface_index ||
-        inet_pton(AF_INET6, argv[5], &ip) != 1 || !IN6_IS_ADDR_LINKLOCAL(&ip) ||
-        number(argv[6]) != getppid() || geteuid() != 0 ||
+    int arg_idx = 1;
+    while (arg_idx < argc) {
+        if (!strcmp(argv[arg_idx], "--host-id") && arg_idx + 1 < argc) {
+            const char *hid = argv[arg_idx + 1];
+            if (!valid_host_id(hid, strlen(hid))) return 78;
+            snprintf(hostid_txt, sizeof hostid_txt, "hostid=%s", hid);
+            has_hostid = 1;
+            arg_idx += 2;
+        } else if (!strcmp(argv[arg_idx], "--paired-only")) {
+            paired_only = 1;
+            arg_idx += 1;
+        } else {
+            break;
+        }
+    }
+    if (argc - arg_idx != 6 || strcmp(argv[arg_idx], "--status-fd") || strcmp(argv[arg_idx + 1], "3") ||
+        (interface_index = (int)number(argv[arg_idx + 2])) <= 0 || strlen(argv[arg_idx + 3]) >= IFNAMSIZ ||
+        if_nametoindex(argv[arg_idx + 3]) != (unsigned)interface_index ||
+        inet_pton(AF_INET6, argv[arg_idx + 4], &ip) != 1 || !IN6_IS_ADDR_LINKLOCAL(&ip) ||
+        number(argv[arg_idx + 5]) != getppid() || geteuid() != 0 ||
         getsockopt(STATUS, SOL_SOCKET, SO_TYPE, &type, &size) < 0 || type != SOCK_SEQPACKET ||
         getsockopt(STATUS, SOL_SOCKET, SO_DOMAIN, &domain, &size) < 0 || domain != AF_UNIX ||
         !(user = getpwnam("nobody"))) return 78;
+    const char *ifname = argv[arg_idx + 3];
     uid_t uid = user->pw_uid;
     gid_t gid = user->pw_gid;
     pid_t parent = getppid();
@@ -236,10 +274,16 @@ int main(int argc, char **argv)
     ssize_t code_len;
     if (syscall(SYS_close_range, 4, ~0U, 0) < 0 ||
         (code_len = recv(STATUS, code, sizeof code - 1, MSG_TRUNC)) <= 0 ||
-        !valid_code(code, (size_t)code_len) ||
         getrandom(token, sizeof token, 0) != sizeof token) return 78;
     code[code_len] = 0;
-    snprintf(code_txt, sizeof code_txt, "code=%s", code);
+    if (paired_only && !strcmp(code, "PAIRED-ONLY")) {
+        has_code = 0;
+    } else if (valid_code(code, (size_t)code_len)) {
+        snprintf(code_txt, sizeof code_txt, "code=%s", code);
+        has_code = 1;
+    } else {
+        return 78;
+    }
     volatile char *wipe = code;
     for (size_t i = 0; i < sizeof code; i++) wipe[i] = 0;
     snprintf(service_name, sizeof service_name, "LOCachy-%02x%02x%02x%02x%02x%02x%02x%02x",
@@ -262,7 +306,7 @@ int main(int argc, char **argv)
     config.host_name = avahi_strdup(service_name);
     config.use_ipv4 = 0;
     config.use_ipv6 = 1;
-    config.allow_interfaces = avahi_string_list_new(argv[4], NULL);
+    config.allow_interfaces = avahi_string_list_new(ifname, NULL);
     config.publish_addresses = config.publish_hinfo = config.publish_workstation = config.publish_domain = 0;
     config.enable_reflector = config.enable_wide_area = 0;
     config.publish_a_on_ipv6 = config.publish_aaaa_on_ipv4 = 0;

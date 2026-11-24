@@ -35,6 +35,22 @@
 #else
 #define BROKER_STATE_DIR "/run/locachy/extdisplay-broker"
 #endif
+#ifdef EXTDISPLAY_BROKER_TEST_PEERS_DIR
+#define BROKER_PEERS_DIR EXTDISPLAY_BROKER_TEST_PEERS_DIR
+#elif defined(EXTDISPLAY_BROKER_TEST_DRIVER)
+/* Test builds never read the host's paired devices. */
+#define BROKER_PEERS_DIR "/nonexistent/locachy-test-peers"
+#else
+#define BROKER_PEERS_DIR "/etc/locachy/peers"
+#endif
+#ifdef EXTDISPLAY_BROKER_TEST_RC_CONF
+#define BROKER_RC_CONF EXTDISPLAY_BROKER_TEST_RC_CONF
+#elif defined(EXTDISPLAY_BROKER_TEST_DRIVER)
+/* Test builds never read the host's configuration (shared-link mode). */
+#define BROKER_RC_CONF "/nonexistent/locachy-test-rc.conf"
+#else
+#define BROKER_RC_CONF "/etc/locachy/rc.conf"
+#endif
 #define BROKER_PUMP_USER "nobody"
 
 #define HWADDR_MAX 32

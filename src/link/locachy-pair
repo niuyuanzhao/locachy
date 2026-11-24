@@ -1,0 +1,316 @@
+#!/usr/bin/env python3
+"""locachy-pair: manage once-forever paired devices for extdisplay and compute.
+
+Default is OFF (no paired devices, no open pairing window). Pairing requires
+explicit user action and saves credentials under /etc/locachy/peers/ (0700 dir,
+0600 files). Paired devices remain trusted until explicitly revoked.
+
+Subcommands:
+  init
+      Initialize host identity and host TLS certificate under /etc/locachy/peers.
+  status [--json]
+      Show host identity and paired peer count.
+  list [--scope extdisplay|compute] [--machine] [--json]
+      List paired devices (never prints private keys or PSK secrets).
+  add --name NAME [--scope extdisplay,compute] [--cert-file PATH]
+      [--psk-hex HEX] [--no-client-cert] [--out-dir DIR] [--token] [--json]
+      Create a once-forever paired peer and print/save the one-time client bundle.
+  revoke PEER_ID_OR_NAME
+      Remove a paired device immediately (aliases: remove, rm).
+  show PEER_ID_OR_NAME [--json]
+      Show non-secret metadata for one paired peer.
+  export-client --bundle-token TOKEN --out-dir DIR
+      Unpack a one-time pairing token on a client machine (writes 0600 files).
+"""
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import os
+from pathlib import Path
+import sys
+
+sys.dont_write_bytecode = True
+
+
+def _load_peers_module():
+    here = Path(__file__).resolve().parent
+    for directory in (here, Path("/usr/local/lib/locachy")):
+        candidate = directory / "locachy_peers.py"
+        if candidate.is_file():
+            spec = importlib.util.spec_from_file_location("locachy_peers", candidate)
+            if spec and spec.loader:
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                return mod
+    sys.exit("locachy-pair: locachy_peers.py is not installed")
+
+
+peers = _load_peers_module()
+
+
+def _write_client_dir(bundle: dict, out_dir: Path) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(out_dir, 0o700)
+
+    def write_secret(name: str, text: str) -> None:
+        path = out_dir / name
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+
+    if bundle.get("host_cert_pem"):
+        write_secret("host-cert.pem", bundle["host_cert_pem"])
+    if bundle.get("client_cert_pem"):
+        write_secret("client-cert.pem", bundle["client_cert_pem"])
+    if bundle.get("client_key_pem"):
+        write_secret("client-key.pem", bundle["client_key_pem"])
+    meta = {
+        "version": 1,
+        "host_id": bundle["host_id"],
+        "host_cert_sha256": bundle["host_cert_sha256"],
+        "peer_id": bundle["peer_id"],
+        "name": bundle["name"],
+        "scopes": bundle["scopes"],
+        "extdisplay_identity": bundle["extdisplay_identity"],
+        "extdisplay_psk_hex": bundle["extdisplay_psk_hex"],
+        "extdisplay_code": bundle["extdisplay_code"],
+        "client_cert_sha256": bundle.get("client_cert_sha256", ""),
+    }
+    write_secret("peer.json", json.dumps(meta, indent=2, sort_keys=True) + "\n")
+
+
+def _public_record(rec: dict) -> dict:
+    return {
+        "peer_id": rec["peer_id"],
+        "name": rec["name"],
+        "created_at": rec.get("created_at", ""),
+        "scopes": rec["scopes"],
+        "extdisplay_identity": rec.get("extdisplay_identity", ""),
+        "client_cert_sha256": rec.get("client_cert_sha256", ""),
+    }
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    host = peers.init_host(args.dir)
+    if args.json:
+        print(json.dumps(host, indent=2, sort_keys=True))
+    else:
+        print(f"host_id={host['host_id']}")
+        print(f"host_cert_sha256={host['host_cert_sha256']}")
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    host = peers.load_host(args.dir)
+    items = peers.list_peers(args.dir)
+    info = {
+        "initialized": host is not None,
+        "host_id": host["host_id"] if host else "",
+        "host_cert_sha256": host["host_cert_sha256"] if host else "",
+        "peer_count": len(items),
+        "extdisplay_peers": sum(1 for p in items if "extdisplay" in p["scopes"]),
+        "compute_peers": sum(1 for p in items if "compute" in p["scopes"]),
+    }
+    if args.json:
+        print(json.dumps(info, indent=2, sort_keys=True))
+    else:
+        print(f"initialized\t{1 if info['initialized'] else 0}")
+        print(f"host_id\t{info['host_id']}")
+        print(f"host_cert_sha256\t{info['host_cert_sha256']}")
+        print(f"peers\t{info['peer_count']}")
+    return 0
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    items = [_public_record(r) for r in peers.list_peers(args.dir, scope=args.scope)]
+    if args.json:
+        print(json.dumps(items, indent=2, sort_keys=True))
+        return 0
+    if args.machine:
+        for item in items:
+            scopes = ",".join(item["scopes"])
+            print(f"{item['peer_id']}\t{item['name']}\t{scopes}\t{item['created_at']}\t{item['client_cert_sha256'][:16]}")
+        return 0
+    if not items:
+        print("No paired devices.")
+        return 0
+    for item in items:
+        scopes = ",".join(item["scopes"])
+        fp = item["client_cert_sha256"][:16] or "-"
+        print(f"{item['peer_id']}  {item['name']}  [{scopes}]  cert={fp}  created={item['created_at']}")
+    return 0
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    rec = peers.get_peer(args.peer, args.dir)
+    if rec is None:
+        print(f"locachy-pair: peer not found: {args.peer}", file=sys.stderr)
+        return 1
+    pub = _public_record(rec)
+    if args.json:
+        print(json.dumps(pub, indent=2, sort_keys=True))
+    else:
+        for k, v in pub.items():
+            val = ",".join(v) if isinstance(v, list) else v
+            print(f"{k}={val}")
+    return 0
+
+
+def cmd_add(args: argparse.Namespace) -> int:
+    # Pairing trusts the device until it is revoked, so it needs one explicit
+    # confirmation: a terminal question, or --yes from a script or the Settings
+    # page that already asked the user.
+    scope_text = ",".join(args.scope)
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print("locachy-pair: refusing to pair without --yes (not an interactive terminal)", file=sys.stderr)
+            return 1
+        answer = input(
+            f"Pair '{args.name}' with scopes [{scope_text}]? It stays trusted until revoked. [y/N] "
+        )
+        if answer.strip().lower() not in ("y", "yes"):
+            print("Not paired.", file=sys.stderr)
+            return 1
+    cert_pem = None
+    if args.cert_file:
+        cert_pem = Path(args.cert_file).read_text(encoding="utf-8")
+    rec, bundle = peers.add_peer(
+        name=args.name,
+        scopes=args.scope,
+        peer_id=args.peer_id,
+        extdisplay_psk_hex=args.psk_hex,
+        client_cert_pem=cert_pem,
+        generate_client_cert=not args.no_client_cert,
+        base=args.dir,
+    )
+    if args.out_dir:
+        _write_client_dir(bundle, Path(args.out_dir))
+    if args.json:
+        out = dict(bundle)
+        out["token"] = peers.encode_bundle_token(bundle)
+        if "extdisplay" in rec.get("scopes", []):
+            out["extdisplay_uri"] = peers.encode_extdisplay_uri(bundle)
+        print(json.dumps(out, indent=2, sort_keys=True))
+    elif args.uri:
+        print(peers.encode_extdisplay_uri(bundle))
+    elif args.token:
+        print(peers.encode_bundle_token(bundle))
+    else:
+        print(f"Paired device: {rec['name']} ({rec['peer_id']})")
+        print(f"Scopes:        {','.join(rec['scopes'])}")
+        print(f"Host ID:       {bundle['host_id']}")
+        print(f"Identity:      {bundle['extdisplay_identity']}")
+        print(f"Extdisplay:    {bundle['extdisplay_code']}")
+        if "extdisplay" in rec.get("scopes", []):
+            print(f"Mac URI:       {peers.encode_extdisplay_uri(bundle)}")
+        if bundle.get("client_cert_sha256"):
+            print(f"Client cert:   {bundle['client_cert_sha256']}")
+        if args.out_dir:
+            print(f"Client bundle: {args.out_dir}")
+        else:
+            print("One-time token (copy to client once; private key is not kept on host):")
+            print(peers.encode_bundle_token(bundle))
+    return 0
+
+
+def cmd_revoke(args: argparse.Namespace) -> int:
+    rec = peers.revoke_peer(args.peer, args.dir)
+    if args.json:
+        print(json.dumps({"revoked": _public_record(rec)}, indent=2, sort_keys=True))
+    else:
+        print(f"Revoked peer: {rec['name']} ({rec['peer_id']})")
+    return 0
+
+
+def cmd_export_client(args: argparse.Namespace) -> int:
+    token = args.token
+    if token == "-":
+        token = sys.stdin.read()
+    bundle = peers.decode_bundle_token(token)
+    out = Path(args.out_dir)
+    _write_client_dir(bundle, out)
+    print(f"Saved client credentials for host {bundle['host_id']} to {out}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="locachy-pair", description="Manage LOCachy once-forever paired peers.")
+    p.add_argument("--dir", default=None, help="Override peer store directory (default /etc/locachy/peers)")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sp = sub.add_parser("init", help="Initialize host identity and TLS certificate")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_init)
+
+    sp = sub.add_parser("status", help="Show host identity and peer counts")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_status)
+
+    sp = sub.add_parser("list", help="List paired peers")
+    sp.add_argument("--scope", choices=peers.VALID_SCOPES, default=None)
+    sp.add_argument("--machine", action="store_true")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_list)
+
+    sp = sub.add_parser("show", help="Show non-secret metadata for one peer")
+    sp.add_argument("peer")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_show)
+
+    sp = sub.add_parser("add", help="Add a once-forever paired peer")
+    sp.add_argument("--name", required=True, help="Human-readable device label")
+    sp.add_argument("--scope", action="append", default=[], help="Scope(s): extdisplay, compute (default: both)")
+    sp.add_argument("--peer-id", default=None, help="Explicit 16..32 hex peer ID")
+    sp.add_argument("--psk-hex", default=None, help="Explicit 32-hex-char extdisplay PSK")
+    sp.add_argument("--cert-file", default=None, help="Existing client X.509 PEM certificate to pin")
+    sp.add_argument("--no-client-cert", action="store_true", help="Do not generate a client mTLS certificate")
+    sp.add_argument("--out-dir", default=None, help="Write unpacked client credentials (0600) to DIR")
+    sp.add_argument("--token", action="store_true", help="Print only the one-time locachy-pair-v1 token")
+    sp.add_argument("--uri", action="store_true", help="Print only the compact locachy-pair://v1 URI for extdisplay")
+    sp.add_argument("--json", action="store_true", help="Print full JSON bundle")
+    sp.add_argument("--yes", action="store_true", help="Confirm pairing without the terminal question")
+    sp.set_defaults(func=cmd_add)
+
+    for alias in ("revoke", "remove", "rm"):
+        sp = sub.add_parser(alias, help="Revoke and remove a paired peer")
+        sp.add_argument("peer")
+        sp.add_argument("--json", action="store_true")
+        sp.set_defaults(func=cmd_revoke)
+
+    sp = sub.add_parser("export-client", help="Unpack a pairing token into a client credential directory")
+    sp.add_argument("--token", required=True, help="locachy-pair-v1:... token (or '-' for stdin)")
+    sp.add_argument("--out-dir", required=True, help="Output directory for client credentials")
+    sp.set_defaults(func=cmd_export_client)
+
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.cmd == "add" and not args.scope:
+        args.scope = list(peers.VALID_SCOPES)
+    try:
+        return args.func(args)
+    except peers.PeerStoreError as exc:
+        print(f"locachy-pair: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"locachy-pair: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -21,13 +21,15 @@
 #define EXTDISPLAY_DISCOVERY_PATH "/usr/local/lib/locachy/extdisplay-advertise"
 #endif
 
-int extdisplay_discovery_start(struct extdisplay_discovery *d, int netns, int ifindex,
-                               const char *name, const struct in6_addr *address, const char *code)
+int extdisplay_discovery_start_ex(struct extdisplay_discovery *d, int netns, int ifindex,
+                                  const char *name, const struct in6_addr *address,
+                                  const char *code, const char *host_id, int paired_only)
 {
     int pair[2];
     char index[16], ip[INET6_ADDRSTRLEN], parent[24];
+    const char *wire_code = paired_only ? "PAIRED-ONLY" : code;
     if (!d || d->pid > 0 || netns < 0 || ifindex <= 0 || !name || !*name ||
-        !address || !IN6_IS_ADDR_LINKLOCAL(address) || !code || !*code ||
+        !address || !IN6_IS_ADDR_LINKLOCAL(address) || !wire_code || !*wire_code ||
         !inet_ntop(AF_INET6, address, ip, sizeof ip)) return -1;
     d->pid = -1;
     d->status = -1;
@@ -40,7 +42,23 @@ int extdisplay_discovery_start(struct extdisplay_discovery *d, int netns, int if
         if (prctl(PR_SET_PDEATHSIG, SIGKILL) < 0 || getppid() != owner ||
             setns(netns, CLONE_NEWNET) < 0 || dup2(pair[1], 3) < 0) _exit(78);
         if (fcntl(3, F_SETFD, 0) < 0 || syscall(SYS_close_range, 4, ~0U, 0) < 0) _exit(78);
-        char *const args[] = { EXTDISPLAY_DISCOVERY_PATH, "--status-fd", "3", index, (char *)name, ip, parent, NULL };
+        char *args[12];
+        int n = 0;
+        args[n++] = EXTDISPLAY_DISCOVERY_PATH;
+        if (host_id && *host_id) {
+            args[n++] = "--host-id";
+            args[n++] = (char *)host_id;
+        }
+        if (paired_only) {
+            args[n++] = "--paired-only";
+        }
+        args[n++] = "--status-fd";
+        args[n++] = "3";
+        args[n++] = index;
+        args[n++] = (char *)name;
+        args[n++] = ip;
+        args[n++] = parent;
+        args[n] = NULL;
         char *const env[] = { "PATH=/usr/bin", "LC_ALL=C", NULL };
         execve(args[0], args, env);
         _exit(78);
@@ -50,8 +68,8 @@ int extdisplay_discovery_start(struct extdisplay_discovery *d, int netns, int if
         close(pair[0]);
         return -1;
     }
-    size_t code_len = strlen(code);
-    if (send(pair[0], code, code_len, MSG_NOSIGNAL) != (ssize_t)code_len ||
+    size_t code_len = strlen(wire_code);
+    if (send(pair[0], wire_code, code_len, MSG_NOSIGNAL) != (ssize_t)code_len ||
         fcntl(pair[0], F_SETFL, O_NONBLOCK) < 0) {
         close(pair[0]);
         kill(child, SIGKILL);
@@ -61,6 +79,12 @@ int extdisplay_discovery_start(struct extdisplay_discovery *d, int netns, int if
     d->pid = child;
     d->status = pair[0];
     return 0;
+}
+
+int extdisplay_discovery_start(struct extdisplay_discovery *d, int netns, int ifindex,
+                               const char *name, const struct in6_addr *address, const char *code)
+{
+    return extdisplay_discovery_start_ex(d, netns, ifindex, name, address, code, NULL, 0);
 }
 
 int extdisplay_discovery_status(struct extdisplay_discovery *d)

@@ -49,6 +49,77 @@ debug_port() {
         [ "$(perm_address "$1")" = "$debug_mac" ]
 }
 
+# Thunderbolt/USB4 host-to-host sharing (tools/COMPUTE.md): when shared mode
+# is enabled (extdisplay_tb_shared="1", or service_compute with
+# compute_bind_tb="1"), verified thunderbolt-net interfaces stay in locachy-net
+# and receive narrow link-local IPv6 inbound rules for extdisplay and/or
+# compute. Non-TB interfaces (Wi-Fi, Ethernet) are never added to @tb_ifaces.
+tb_shared_enabled() {
+    local exp_shared compute_tb
+    exp_shared=$(rc_value extdisplay_tb_shared)
+    [ "$exp_shared" = 1 ] && return 0
+    [ "$exp_shared" = 0 ] && return 1
+    compute_tb=$(rc_value compute_bind_tb)
+    grep -qE '^[[:space:]]*service_compute=' "$RC" 2>/dev/null && [ "$compute_tb" = 1 ]
+}
+
+tb_compute_enabled() {
+    grep -qE '^[[:space:]]*service_compute=' "$RC" 2>/dev/null &&
+        [ "$(rc_value compute_bind_tb)" = 1 ]
+}
+
+sync_tb_filter() {
+    [ -e /run/netns/"$NS" ] || return 0
+    local want_ext=0 want_comp=0
+    if tb_shared_enabled; then want_ext=1; fi
+    if tb_compute_enabled; then want_comp=1; fi
+    ip netns exec "$NS" bash -euc '
+        want_ext=$1; want_comp=$2
+        nft list table inet locachy-filter >/dev/null 2>&1 || exit 0
+        ifaces=()
+        for p in /sys/class/net/*; do
+            dev=${p##*/}
+            [ "$dev" != lo ] || continue
+            drv=$(readlink -f "$p/device/driver" 2>/dev/null || true)
+            [ "${drv##*/}" = thunderbolt-net ] || continue
+            ifaces+=("$dev")
+            if [ "$want_ext" = 1 ] || [ "$want_comp" = 1 ]; then
+                for key in accept_ra autoconf forwarding accept_redirects; do
+                    [ -w "/proc/sys/net/ipv6/conf/$dev/$key" ] &&
+                        printf "0\n" >"/proc/sys/net/ipv6/conf/$dev/$key" 2>/dev/null || true
+                done
+                ip link set dev "$dev" up 2>/dev/null || true
+            fi
+        done
+        tcp_ports=()
+        udp_ports=()
+        if [ "$want_ext" = 1 ]; then
+            tcp_ports+=(27183)
+            udp_ports+=(5353)
+        fi
+        if [ "$want_comp" = 1 ]; then
+            tcp_ports+=(27184)
+        fi
+        {
+            echo "flush set inet locachy-filter tb_ifaces"
+            echo "flush set inet locachy-filter tb_tcp_ports"
+            echo "flush set inet locachy-filter tb_udp_ports"
+            if [ "${#ifaces[@]}" -gt 0 ]; then
+                elems=$(printf "\"%s\", " "${ifaces[@]}")
+                echo "add element inet locachy-filter tb_ifaces { ${elems%, } }"
+            fi
+            if [ "${#tcp_ports[@]}" -gt 0 ]; then
+                elems=$(printf "%s, " "${tcp_ports[@]}")
+                echo "add element inet locachy-filter tb_tcp_ports { ${elems%, } }"
+            fi
+            if [ "${#udp_ports[@]}" -gt 0 ]; then
+                elems=$(printf "%s, " "${udp_ports[@]}")
+                echo "add element inet locachy-filter tb_udp_ports { ${elems%, } }"
+            fi
+        } | nft -f -
+    ' bash "$want_ext" "$want_comp" 2>/dev/null || :
+}
+
 # Interface dev of the host to locachy-net: a wireless one with its phy
 # (cfg80211 renames it wlan%d there when its name is taken there:
 # net/wireless/core.c, cfg80211_switch_netns), any other of a device
@@ -85,7 +156,10 @@ move_interface() {
             err=$(ip link set dev "$dev" netns "$NS" name "$pattern" 2>&1) || :
     fi
     # Moved, or gone (a move of it by another of these, or unplugged).
-    [ "$(ifindex "$dev")" = "$index" ] || return 0
+    if [ "$(ifindex "$dev")" != "$index" ]; then
+        sync_tb_filter
+        return 0
+    fi
     ip link set dev "$dev" down 2>/dev/null || :
     printf '<3>network-client: %s stays on the host, down: it cannot go to %s (%s)\n' \
         "$dev" "$NS" "${err//$'\n'/ }" >/dev/kmsg
@@ -170,6 +244,10 @@ case "${1:-}" in
     done
     exit 1
     ;;
+--sync-tb-filter) # refresh Thunderbolt link-local inbound sets in locachy-net
+    sync_tb_filter
+    exit 0
+    ;;
 --udevd) # the udevd of locachy-net, in a mount namespace of its own (below)
     # Only there, over the /run/udev of locachy-net: never the host's.
     [ "$(stat -L -c %i /proc/self/ns/net)" = "$(stat -L -c %i /run/netns/"$NS")" ] &&
@@ -224,11 +302,21 @@ touch /etc/netns/"$NS"/resolv.conf
 ip netns exec "$NS" resolvconf -u
 ip netns exec "$NS" ip link set lo up
 # Inbound filter: unsolicited traffic from local networks is dropped; loopback,
-# Tailscale, replies to our own connections, ICMP and DHCP client replies pass.
+# Tailscale, replies to our own connections, ICMP, DHCP client replies, and
+# configured link-local services on verified thunderbolt-net interfaces pass.
 ip netns exec "$NS" nft -f - <<'EOF'
 table inet locachy-filter
 delete table inet locachy-filter
 table inet locachy-filter {
+    set tb_ifaces {
+        type ifname
+    }
+    set tb_tcp_ports {
+        type inet_service
+    }
+    set tb_udp_ports {
+        type inet_service
+    }
     chain input {
         type filter hook input priority filter; policy drop;
         iif "lo" accept
@@ -238,12 +326,15 @@ table inet locachy-filter {
         meta l4proto { icmp, ipv6-icmp } accept
         udp sport 67 udp dport 68 accept
         ip6 daddr fe80::/10 udp sport 547 udp dport 546 accept
+        iifname @tb_ifaces ip6 saddr fe80::/10 ip6 daddr fe80::/10 tcp dport @tb_tcp_ports accept
+        iifname @tb_ifaces ip6 saddr fe80::/10 ip6 daddr { fe80::/10, ff02::fb } udp dport @tb_udp_ports accept
     }
     chain forward {
         type filter hook forward priority filter; policy drop;
     }
 }
 EOF
+sync_tb_filter
 # Full-system network policy is reconciled by the common helper before any
 # interface is exposed. The helper installs its transition block first and
 # leaves it in place on failure; no service is allowed to go direct.
@@ -258,6 +349,7 @@ done
 
 # One that stays (said) does not keep NetworkManager from the others.
 move_interfaces || :
+sync_tb_filter
 
 # The system bus, service_system_bus's (bus-client): NetworkManager and
 # wpa_supplicant cannot do without it; until it is there, process 1 starts

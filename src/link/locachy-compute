@@ -1,0 +1,2043 @@
+#!/usr/bin/env python3
+"""locachy-compute: daemonless headless compute node for LOCachy.
+
+Manages:
+  - Read-only base rootfs images (tarball, directory, or OCI/Docker image tar)
+  - Native Linux compute containers using OverlayFS + unshare + pivot_root +
+    app-init + cgroup v2 (/sys/fs/cgroup/locachy-compute/job-<id>), with zero
+    Wayland/compositor dependency and instant upperdir wipe reset
+  - Optional GPU device & host NVIDIA driver library passthrough and host data
+    bind-mounts (including secondary NVMe / /mnt / /data paths)
+  - Optional KVM micro-VMs (qemu-system-x86_64 + qcow2 CoW overlay + 9p share)
+    isolated under /sys/fs/cgroup/locachy-compute/vm-<name>
+  - Authenticated mTLS HTTPS control plane (port 27184) bound strictly to
+    tailscale0 and (when compute_bind_tb="1") thunderbolt-net link-local IPv6,
+    trusting only once-forever paired peers in /etc/locachy/peers (scope compute)
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import http.client
+from http.server import BaseHTTPRequestHandler
+import importlib.util
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import signal
+import socket
+import socketserver
+import ssl
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+import threading
+import time
+import urllib.parse
+import uuid
+
+sys.dont_write_bytecode = True
+
+DEFAULT_PORT = 27184
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+MEM_RE = re.compile(r"^(max|[0-9]+[KMGkmg]?)$")
+CPU_RE = re.compile(r"^(max|[0-9]+)\s+[0-9]+$")
+
+FORBIDDEN_HOST_MOUNT_ROOTS = (
+    "/etc/locachy/peers",
+    "/var/lib/locachy/compute",
+    "/var/lib/locachy/containers",
+    "/run/locachy/extdisplay-broker",
+    "/proc",
+    "/sys",
+    "/dev",
+)
+
+NVIDIA_LIB_PATTERNS = (
+    "libcuda.so*",
+    "libnvidia-*.so*",
+    "libnvcuvid.so*",
+    "libnvoptix.so*",
+    "libcudadebugger.so*",
+)
+
+
+def _load_peers_module():
+    here = Path(__file__).resolve().parent
+    for directory in (here, Path("/usr/local/lib/locachy")):
+        candidate = directory / "locachy_peers.py"
+        if candidate.is_file():
+            spec = importlib.util.spec_from_file_location("locachy_peers", candidate)
+            if spec and spec.loader:
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                return mod
+    sys.exit("locachy-compute: locachy_peers.py is not installed")
+
+
+peers_mod = _load_peers_module()
+
+
+class ComputeError(RuntimeError):
+    """Raised on invalid compute state, policy violation, or runtime failure."""
+
+
+def _abs_env(name: str, default: str) -> Path:
+    val = os.environ.get(name, default)
+    if not val or not os.path.isabs(val):
+        raise ComputeError(f"{name} must be an absolute path: {val!r}")
+    return Path(val)
+
+
+def compute_base() -> Path:
+    return _abs_env("LOCACHY_COMPUTE_BASE", "/var/lib/locachy/compute")
+
+
+def compute_run() -> Path:
+    return _abs_env("LOCACHY_COMPUTE_RUN", "/run/locachy/compute")
+
+
+def cgroup_root() -> Path:
+    return _abs_env("LOCACHY_COMPUTE_CGROUP", "/sys/fs/cgroup/locachy-compute")
+
+
+def rc_conf_path() -> Path:
+    return _abs_env("LOCACHY_COMPUTE_RC", "/etc/locachy/rc.conf")
+
+
+def app_init_path() -> Path:
+    return _abs_env("LOCACHY_COMPUTE_APP_INIT", "/usr/local/lib/locachy/app-init")
+
+
+def peers_dir() -> Path:
+    return peers_mod.peers_dir_path()
+
+
+def read_rc_conf() -> dict[str, str]:
+    path = rc_conf_path()
+    if not path.is_file():
+        return {}
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return dict(re.findall(r'^[ \t]*([A-Za-z0-9_]+)="([^"\n]*)"', text, re.MULTILINE))
+
+
+def validate_name(name: str, kind: str = "name") -> str:
+    if not NAME_RE.match(name) or name in (".", ".."):
+        raise ComputeError(f"invalid {kind}: {name!r}")
+    return name
+
+
+def _utc_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _atomic_write_json(path: Path, obj: dict, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(obj, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        tmp = ""
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def parse_mount_spec(spec: str) -> dict[str, str]:
+    """Parse HOST:CONTAINER[:ro|:rw] and enforce host-path safety policy.
+
+    Allows secondary NVMe / data directories outside /home/USER (e.g. /mnt/...,
+    /data/..., /var/lib/locachy/compute/data/...) while refusing host '/' and
+    sensitive LOCachy control/peer directories.
+    """
+    parts = spec.split(":")
+    if len(parts) not in (2, 3):
+        raise ComputeError(f"invalid mount spec {spec!r}; expected HOST:CONTAINER[:ro|:rw]")
+    host_raw, cont_raw = parts[0], parts[1]
+    mode = parts[2] if len(parts) == 3 else "rw"
+    if mode not in ("ro", "rw"):
+        raise ComputeError(f"invalid mount mode {mode!r}; expected ro or rw")
+    if not os.path.isabs(host_raw) or not os.path.isabs(cont_raw):
+        raise ComputeError(f"mount paths must be absolute: {spec!r}")
+    host_real = os.path.realpath(host_raw)
+    cont_norm = os.path.normpath(cont_raw)
+    if host_real == "/" or cont_norm == "/":
+        raise ComputeError(f"refusing to mount root filesystem: {spec!r}")
+    if ".." in cont_norm.split("/"):
+        raise ComputeError(f"invalid container mount target: {cont_raw!r}")
+    for forbidden in (*FORBIDDEN_HOST_MOUNT_ROOTS, str(peers_dir()), str(compute_base()), str(compute_run())):
+        freal = os.path.realpath(forbidden)
+        if host_real == freal or host_real.startswith(freal + "/"):
+            # Exception: <compute base>/data/... is the explicit data area of the node.
+            allowed_data = os.path.realpath(str(compute_base() / "data"))
+            if host_real == allowed_data or host_real.startswith(allowed_data + "/"):
+                continue
+            raise ComputeError(f"refusing sensitive host mount path: {host_real}")
+    if not os.path.exists(host_real):
+        raise ComputeError(f"host mount path does not exist: {host_real}")
+    return {"host": host_real, "target": cont_norm, "mode": mode}
+
+
+def discover_gpu_resources() -> dict[str, list[str]]:
+    """Detect host GPU device nodes and host NVIDIA user-space driver libs."""
+    devices: list[str] = []
+    for pattern in (
+        "/dev/nvidiactl",
+        "/dev/nvidia-modeset",
+        "/dev/nvidia-uvm",
+        "/dev/nvidia-uvm-tools",
+    ):
+        if os.path.exists(pattern):
+            devices.append(pattern)
+    dev_dir = Path("/dev")
+    if dev_dir.is_dir():
+        for entry in sorted(dev_dir.iterdir()):
+            if re.match(r"^nvidia[0-9]+$", entry.name):
+                devices.append(str(entry))
+    caps_dir = Path("/dev/nvidia-caps")
+    if caps_dir.is_dir():
+        for entry in sorted(caps_dir.iterdir()):
+            devices.append(str(entry))
+    dri_dir = Path("/dev/dri")
+    if dri_dir.is_dir():
+        for entry in sorted(dri_dir.iterdir()):
+            if entry.name.startswith("renderD"):
+                devices.append(str(entry))
+
+    libs: list[str] = []
+    seen_names: set[str] = set()
+    for libdir in (Path("/usr/lib"), Path("/usr/lib64"), Path("/usr/lib/x86_64-linux-gnu")):
+        if not libdir.is_dir():
+            continue
+        for pat in NVIDIA_LIB_PATTERNS:
+            for item in sorted(libdir.glob(pat)):
+                if item.name in seen_names:
+                    continue
+                if item.is_file() or item.is_symlink():
+                    seen_names.add(item.name)
+                    libs.append(str(item))
+    return {"devices": devices, "nvidia_libs": libs}
+
+
+def _safe_extract_tar(tf: tarfile.TarFile, dest: Path) -> None:
+    dest_real = os.path.realpath(dest)
+    for member in tf.getmembers():
+        name = member.name.lstrip("/")
+        if not name or name in (".", "./"):
+            continue
+        norm = os.path.normpath(name)
+        if norm.startswith("..") or os.path.isabs(norm):
+            raise ComputeError(f"unsafe path in tarball: {member.name!r}")
+        base = os.path.basename(norm)
+        parent = Path(dest_real) / os.path.dirname(norm)
+        if base == ".wh..wh..opq":
+            if parent.is_dir():
+                for child in list(parent.iterdir()):
+                    if child.is_dir() and not child.is_symlink():
+                        shutil.rmtree(child)
+                    else:
+                        child.unlink(missing_ok=True)
+            continue
+        if base.startswith(".wh."):
+            victim = parent / base[4:]
+            if victim.is_dir() and not victim.is_symlink():
+                shutil.rmtree(victim)
+            else:
+                victim.unlink(missing_ok=True)
+            continue
+        target = Path(dest_real) / norm
+        if member.issym():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists() or target.is_symlink():
+                if target.is_dir() and not target.is_symlink():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink()
+            os.symlink(member.linkname, target)
+            continue
+        if member.islnk():
+            link_norm = os.path.normpath(member.linkname.lstrip("/"))
+            if link_norm.startswith(".."):
+                raise ComputeError(f"unsafe hardlink in tarball: {member.linkname!r}")
+            src = Path(dest_real) / link_norm
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists() or target.is_symlink():
+                target.unlink()
+            if src.exists():
+                os.link(src, target)
+            continue
+        if member.isdev():
+            # Never materialize device nodes from untrusted tarballs; runtime builds /dev.
+            continue
+        if member.isdir():
+            target.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(target, member.mode & 0o7777)
+            except OSError:
+                pass
+            continue
+        if member.isfile():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists() or target.is_symlink():
+                if target.is_dir() and not target.is_symlink():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink()
+            src_fh = tf.extractfile(member)
+            if src_fh is not None:
+                with src_fh, open(target, "wb") as out_fh:
+                    shutil.copyfileobj(src_fh, out_fh)
+                try:
+                    os.chmod(target, member.mode & 0o7777)
+                except OSError:
+                    pass
+
+
+def _extract_tar_path(tar_path: Path, dest: Path) -> None:
+    name = tar_path.name.lower()
+    if name.endswith(".tar.zst") or name.endswith(".zst"):
+        zstd = shutil.which("zstd") or shutil.which("unzstd")
+        if not zstd:
+            raise ComputeError("zstd is required to extract .tar.zst images")
+        proc = subprocess.Popen([zstd, "-dc", str(tar_path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert proc.stdout is not None
+        try:
+            with tarfile.open(fileobj=proc.stdout, mode="r|*") as tf:
+                _safe_extract_tar(tf, dest)
+        finally:
+            _, err = proc.communicate()
+            if proc.returncode != 0:
+                raise ComputeError(f"zstd extract failed: {err.decode('utf-8', 'replace').strip()}")
+        return
+    with tarfile.open(tar_path, mode="r:*") as tf:
+        names = tf.getnames()
+        if "manifest.json" in names and any(n.endswith(".tar") or "/layer.tar" in n for n in names):
+            # Docker/OCI save tarball: unpack layers in manifest order
+            with tempfile.TemporaryDirectory(prefix="locachy-oci-") as tmp:
+                tf.extractall(tmp, filter="data")
+                manifest = json.loads((Path(tmp) / "manifest.json").read_text(encoding="utf-8"))
+                if not isinstance(manifest, list) or not manifest:
+                    raise ComputeError("empty OCI/Docker manifest.json")
+                for layer in manifest[0].get("Layers", []):
+                    layer_path = Path(tmp) / layer
+                    if not layer_path.is_file():
+                        raise ComputeError(f"missing image layer: {layer}")
+                    with tarfile.open(layer_path, mode="r:*") as ltf:
+                        _safe_extract_tar(ltf, dest)
+            return
+        _safe_extract_tar(tf, dest)
+
+
+def image_import(name: str, source: str) -> dict:
+    validate_name(name, "image name")
+    src = Path(source)
+    if not src.exists():
+        raise ComputeError(f"image source does not exist: {source}")
+    img_dir = compute_base() / "images" / name
+    if img_dir.exists():
+        raise ComputeError(f"image already exists: {name}")
+    img_dir.parent.mkdir(parents=True, exist_ok=True)
+    stage: Path | None = Path(tempfile.mkdtemp(prefix=f".img-{name}-", dir=img_dir.parent))
+    assert stage is not None
+    rootfs = stage / "rootfs"
+    rootfs.mkdir(mode=0o755)
+    try:
+        if src.is_dir():
+            shutil.copytree(src, rootfs, symlinks=True, dirs_exist_ok=True)
+        else:
+            _extract_tar_path(src, rootfs)
+        meta = {
+            "version": 1,
+            "name": name,
+            "source": str(src.resolve()),
+            "imported_at": _utc_now(),
+        }
+        _atomic_write_json(stage / "image.json", meta, 0o644)
+        os.rename(stage, img_dir)
+        stage = None
+        return meta
+    finally:
+        # Only the failed staging directory is removed (never a path derived
+        # from a moved or empty value).
+        if stage is not None and stage.exists():
+            shutil.rmtree(stage, ignore_errors=True)
+
+
+def image_list() -> list[dict]:
+    idir = compute_base() / "images"
+    if not idir.is_dir():
+        return []
+    out = []
+    for entry in sorted(idir.iterdir()):
+        meta_path = entry / "image.json"
+        if meta_path.is_file():
+            try:
+                out.append(json.loads(meta_path.read_text(encoding="utf-8")))
+            except (OSError, ValueError):
+                pass
+    return out
+
+
+def image_remove(name: str) -> None:
+    validate_name(name, "image name")
+    for env in env_list():
+        if env.get("image") == name:
+            raise ComputeError(f"image {name} is still used by env {env['name']}")
+    img_dir = compute_base() / "images" / name
+    if not img_dir.is_dir():
+        raise ComputeError(f"image not found: {name}")
+    shutil.rmtree(img_dir)
+
+
+def _env_dir(name: str) -> Path:
+    validate_name(name, "env name")
+    return compute_base() / "envs" / name
+
+
+def env_load(name: str) -> dict:
+    path = _env_dir(name) / "env.json"
+    if not path.is_file():
+        raise ComputeError(f"compute env not found: {name}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def env_list() -> list[dict]:
+    edir = compute_base() / "envs"
+    if not edir.is_dir():
+        return []
+    out = []
+    for entry in sorted(edir.iterdir()):
+        meta = entry / "env.json"
+        if meta.is_file():
+            try:
+                out.append(json.loads(meta.read_text(encoding="utf-8")))
+            except (OSError, ValueError):
+                pass
+    return out
+
+
+def env_create(
+    name: str,
+    image: str,
+    *,
+    gpu: bool = False,
+    net: str = "locachy-net",
+    mounts: list[str] | None = None,
+    memory_max: str = "",
+    cpu_max: str = "",
+    workdir: str = "/",
+    env_vars: list[str] | None = None,
+) -> dict:
+    validate_name(name, "env name")
+    validate_name(image, "image name")
+    if net not in ("locachy-net", "none"):
+        raise ComputeError(f"invalid network mode: {net!r}")
+    if memory_max and not MEM_RE.match(memory_max):
+        raise ComputeError(f"invalid memory limit: {memory_max!r}")
+    if cpu_max and not CPU_RE.match(cpu_max):
+        raise ComputeError(f"invalid cpu limit: {cpu_max!r}")
+    img_rootfs = compute_base() / "images" / image / "rootfs"
+    if not img_rootfs.is_dir():
+        raise ComputeError(f"base image not found: {image}")
+    parsed_mounts = [parse_mount_spec(m) for m in (mounts or [])]
+    env_map: dict[str, str] = {}
+    for item in env_vars or []:
+        if "=" not in item:
+            raise ComputeError(f"invalid --env entry {item!r}; expected KEY=VALUE")
+        k, v = item.split("=", 1)
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", k):
+            raise ComputeError(f"invalid env key: {k!r}")
+        env_map[k] = v
+
+    edir = _env_dir(name)
+    if edir.exists():
+        raise ComputeError(f"compute env already exists: {name}")
+    for sub in ("upper", "work", "merged"):
+        (edir / sub).mkdir(parents=True, mode=0o755)
+    meta = {
+        "version": 1,
+        "name": name,
+        "image": image,
+        "created_at": _utc_now(),
+        "reset_at": _utc_now(),
+        "gpu": bool(gpu),
+        "net": net,
+        "mounts": parsed_mounts,
+        "memory_max": memory_max,
+        "cpu_max": cpu_max,
+        "workdir": workdir if os.path.isabs(workdir) else "/",
+        "env": env_map,
+    }
+    _atomic_write_json(edir / "env.json", meta, 0o644)
+    return meta
+
+
+def _cgroup_prepare(group_name: str, memory_max: str = "", cpu_max: str = "") -> Path | None:
+    """Create /sys/fs/cgroup/locachy-compute/<group_name> when cgroup v2 is writable.
+    On a real root host this is always required; inside unprivileged test
+    namespaces without a delegated cgroup, set LOCACHY_COMPUTE_ALLOW_NO_CGROUP=1
+    to allow fallback."""
+    root = cgroup_root()
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        cg = root / group_name
+        cg.mkdir(exist_ok=True)
+        if memory_max and (cg / "memory.max").exists():
+            (cg / "memory.max").write_text(memory_max + "\n", encoding="utf-8")
+        if cpu_max and (cg / "cpu.max").exists():
+            (cg / "cpu.max").write_text(cpu_max + "\n", encoding="utf-8")
+        return cg
+    except OSError as exc:
+        if os.environ.get("LOCACHY_COMPUTE_ALLOW_NO_CGROUP") == "1":
+            return None
+        raise ComputeError(f"cannot create cgroup {root / group_name}: {exc}") from exc
+
+
+
+def _cgroup_kill_and_remove(group_name: str) -> None:
+    cg = cgroup_root() / group_name
+    if not cg.is_dir():
+        return
+    kill_file = cg / "cgroup.kill"
+    if kill_file.exists():
+        try:
+            kill_file.write_text("1\n", encoding="utf-8")
+        except OSError:
+            pass
+    procs_file = cg / "cgroup.procs"
+    if procs_file.exists():
+        try:
+            for line in procs_file.read_text(encoding="utf-8").splitlines():
+                if line.strip().isdigit():
+                    try:
+                        os.kill(int(line.strip()), signal.SIGKILL)
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+    for _ in range(20):
+        try:
+            cg.rmdir()
+            return
+        except OSError:
+            time.sleep(0.05)
+
+
+def _job_file(job_id: str) -> Path:
+    validate_name(job_id, "job id")
+    return compute_base() / "jobs" / f"{job_id}.json"
+
+
+def _job_log_file(job_id: str) -> Path:
+    validate_name(job_id, "job id")
+    return compute_base() / "jobs" / f"{job_id}.log"
+
+
+def job_list() -> list[dict]:
+    jdir = compute_base() / "jobs"
+    if not jdir.is_dir():
+        return []
+    items = []
+    for entry in sorted(jdir.glob("*.json")):
+        try:
+            rec = json.loads(entry.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if rec.get("state") == "running" and rec.get("pid"):
+            try:
+                os.kill(int(rec["pid"]), 0)
+            except OSError:
+                rec["state"] = "exited"
+                _atomic_write_json(entry, rec, 0o600)
+        items.append(rec)
+    return items
+
+
+def job_load(job_id: str) -> dict:
+    path = _job_file(job_id)
+    if not path.is_file():
+        raise ComputeError(f"job not found: {job_id}")
+    rec = json.loads(path.read_text(encoding="utf-8"))
+    if rec.get("state") == "running" and rec.get("pid"):
+        try:
+            os.kill(int(rec["pid"]), 0)
+        except OSError:
+            rec["state"] = "exited"
+            _atomic_write_json(path, rec, 0o600)
+    return rec
+
+
+def job_stop(job_id: str) -> dict:
+    rec = job_load(job_id)
+    pid = int(rec.get("pid") or 0)
+    if pid > 0:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+                time.sleep(0.05)
+            except OSError:
+                break
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    _cgroup_kill_and_remove(f"job-{job_id}")
+    rec["state"] = "stopped"
+    rec["ended_at"] = _utc_now()
+    _atomic_write_json(_job_file(job_id), rec, 0o600)
+    return rec
+
+
+def env_reset(name: str) -> dict:
+    """Instantly wipe OverlayFS upper/work while keeping base rootfs & host data intact."""
+    meta = env_load(name)
+    for job in job_list():
+        if job.get("env") == name and job.get("state") == "running":
+            job_stop(job["job_id"])
+    edir = _env_dir(name)
+    for sub in ("upper", "work"):
+        target = edir / sub
+        if target.exists():
+            shutil.rmtree(target)
+        target.mkdir(mode=0o755)
+    (edir / "merged").mkdir(exist_ok=True, mode=0o755)
+    meta["reset_at"] = _utc_now()
+    _atomic_write_json(edir / "env.json", meta, 0o644)
+    return meta
+
+
+def env_remove(name: str) -> None:
+    env_load(name)
+    for job in job_list():
+        if job.get("env") == name and job.get("state") == "running":
+            job_stop(job["job_id"])
+    shutil.rmtree(_env_dir(name))
+
+
+CONTAINER_INNER_SCRIPT = r"""
+set -eu
+lower=$1; upper=$2; work=$3; merged=$4; workdir=$5; want_net=$6; want_gpu=$7; init_bin=$8; mounts_json=$9
+shift 9
+
+# Try native overlay first, fall back to userxattr for rootless user namespaces.
+if ! mount -t overlay overlay -o "lowerdir=$lower,upperdir=$upper,workdir=$work,nosuid,nodev" "$merged" 2>/dev/null; then
+    mount -t overlay overlay -o "lowerdir=$lower,upperdir=$upper,workdir=$work,userxattr,nosuid,nodev" "$merged"
+fi
+
+mkdir -p "$merged"/{proc,sys,dev,tmp,run,etc}
+mount -t proc proc "$merged/proc" -o nosuid,noexec,nodev
+if ! mount -t sysfs sys "$merged/sys" -o nosuid,noexec,nodev,ro 2>/dev/null; then
+    mount --rbind /sys "$merged/sys" 2>/dev/null || true
+    mount -o remount,bind,ro "$merged/sys" 2>/dev/null || true
+fi
+mount -t tmpfs tmp "$merged/tmp" -o mode=1777,nosuid,nodev
+mount -t tmpfs run "$merged/run" -o mode=0755,nosuid,nodev
+mount -t tmpfs dev "$merged/dev" -o mode=0755,nosuid
+for d in null zero full random urandom tty; do
+    [ -e "/dev/$d" ] || continue
+    touch "$merged/dev/$d"
+    mount --bind "/dev/$d" "$merged/dev/$d"
+done
+mkdir -p "$merged/dev/pts" "$merged/dev/shm"
+mount -t devpts devpts "$merged/dev/pts" -o mode=0620,ptmxmode=0666 2>/dev/null || true
+mount -t tmpfs shm "$merged/dev/shm" -o mode=1777,nosuid,nodev
+ln -sf pts/ptmx "$merged/dev/ptmx"
+ln -sf /proc/self/fd "$merged/dev/fd"
+ln -sf /proc/self/fd/0 "$merged/dev/stdin"
+ln -sf /proc/self/fd/1 "$merged/dev/stdout"
+ln -sf /proc/self/fd/2 "$merged/dev/stderr"
+
+if [ "$want_net" = 1 ]; then
+    ip link set lo up 2>/dev/null || true
+    if [ -f /etc/netns/locachy-net/resolv.conf ]; then
+        rm -f "$merged/etc/resolv.conf"
+        touch "$merged/etc/resolv.conf"
+        mount --bind -o ro /etc/netns/locachy-net/resolv.conf "$merged/etc/resolv.conf"
+    fi
+else
+    ip link set lo up 2>/dev/null || true
+fi
+
+if [ "$want_gpu" = 1 ]; then
+    mkdir -p "$merged/dev/dri"
+    for node in /dev/nvidiactl /dev/nvidia-modeset /dev/nvidia-uvm /dev/nvidia-uvm-tools /dev/nvidia[0-9]*; do
+        [ -c "$node" ] || continue
+        touch "$merged$node"
+        mount --bind "$node" "$merged$node"
+    done
+    if [ -d /dev/nvidia-caps ]; then
+        mkdir -p "$merged/dev/nvidia-caps"
+        for node in /dev/nvidia-caps/*; do
+            [ -c "$node" ] || continue
+            touch "$merged$node"
+            mount --bind "$node" "$merged$node"
+        done
+    fi
+    for node in /dev/dri/renderD*; do
+        [ -c "$node" ] || continue
+        touch "$merged/dev/dri/${node##*/}"
+        mount --bind "$node" "$merged/dev/dri/${node##*/}"
+    done
+    gpu_lib_dir="$merged/usr/local/lib/locachy-gpu"
+    have_nv_libs=0
+    for ldir in /usr/lib /usr/lib64 /usr/lib/x86_64-linux-gnu; do
+        [ -d "$ldir" ] || continue
+        for lib in "$ldir"/libcuda.so* "$ldir"/libnvidia-*.so* "$ldir"/libnvcuvid.so* "$ldir"/libnvoptix.so*; do
+            [ -e "$lib" ] || continue
+            mkdir -p "$gpu_lib_dir"
+            base=${lib##*/}
+            [ ! -e "$gpu_lib_dir/$base" ] || continue
+            touch "$gpu_lib_dir/$base"
+            mount --bind -o ro "$lib" "$gpu_lib_dir/$base" 2>/dev/null || rm -f "$gpu_lib_dir/$base"
+            have_nv_libs=1
+        done
+    done
+    if [ "$have_nv_libs" = 1 ]; then
+        mkdir -p "$merged/etc/ld.so.conf.d"
+        printf '/usr/local/lib/locachy-gpu\n' >"$merged/etc/ld.so.conf.d/locachy-gpu.conf"
+        export LD_LIBRARY_PATH="/usr/local/lib/locachy-gpu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    fi
+fi
+
+# Bind-mount explicit host data directories.
+if [ -n "$mounts_json" ] && [ "$mounts_json" != "[]" ]; then
+    while IFS=$'\t' read -r m_host m_target m_mode; do
+        [ -n "$m_host" ] || continue
+        dst="$merged$m_target"
+        if [ -d "$m_host" ]; then
+            mkdir -p "$dst"
+        else
+            mkdir -p "${dst%/*}"
+            touch "$dst"
+        fi
+        mount --bind "$m_host" "$dst"
+        if [ "$m_mode" = ro ]; then
+            mount -o remount,bind,ro "$dst"
+        fi
+    done <<<"$mounts_json"
+fi
+
+# Never expose Wayland/X11/seatd/session bus inside compute containers.
+unset WAYLAND_DISPLAY WAYLAND_SOCKET DISPLAY XAUTHORITY SEATD_SOCK DBUS_SESSION_BUS_ADDRESS PULSE_SERVER XDG_RUNTIME_DIR
+
+use_init=0
+if [ -n "$init_bin" ] && [ -x "$init_bin" ]; then
+    touch "$merged/run/locachy-app-init"
+    mount --bind -o ro "$init_bin" "$merged/run/locachy-app-init"
+    use_init=1
+fi
+
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export HOME="${HOME:-/root}"
+if [ "$use_init" = 1 ]; then
+    export LOCACHY_APP_NO_NEW_PRIVS=1
+fi
+
+# Perform pivot_root(".", ".") + umount2(".", MNT_DETACH) + PID-1 exec in-process
+# so arbitrary distro rootfs images (Ubuntu, Debian, Alpine, scratch) need neither
+# host-matching glibc nor guest umount/rmdir binaries.
+exec python3 -c '
+import ctypes, errno, os, signal, struct, sys
+
+merged, workdir, use_init = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+cmd = sys.argv[4:]
+libc = ctypes.CDLL(None, use_errno=True)
+sys_pivot = 155 if os.uname().machine in ("x86_64", "amd64") else 41
+MNT_DETACH = 2
+PR_SET_NO_NEW_PRIVS = 38
+
+
+def is_static_elf(path: str) -> bool:
+    # A static ELF has no PT_INTERP and runs inside any guest distro rootfs.
+    try:
+        with open(path, "rb") as fh:
+            ehdr = fh.read(64)
+            if len(ehdr) < 64 or ehdr[:4] != b"\x7fELF" or ehdr[4] != 2:
+                return False
+            e_phoff = struct.unpack_from("<Q", ehdr, 32)[0]
+            e_phentsize, e_phnum = struct.unpack_from("<HH", ehdr, 54)
+            fh.seek(e_phoff)
+            for _ in range(e_phnum):
+                phdr = fh.read(e_phentsize)
+                if len(phdr) < 4:
+                    break
+                if struct.unpack_from("<I", phdr, 0)[0] == 3:  # PT_INTERP
+                    return False
+            return True
+    except OSError:
+        return False
+
+
+exec_app_init = False
+if use_init:
+    exec_app_init = is_static_elf(os.path.join(merged, "run/locachy-app-init"))
+
+os.chdir(merged)
+if libc.syscall(ctypes.c_long(sys_pivot), ctypes.c_char_p(b"."), ctypes.c_char_p(b".")) != 0:
+    e = ctypes.get_errno()
+    raise OSError(e, f"pivot_root failed: {os.strerror(e)}")
+if libc.umount2(ctypes.c_char_p(b"."), MNT_DETACH) != 0:
+    e = ctypes.get_errno()
+    raise OSError(e, f"umount2 old root failed: {os.strerror(e)}")
+os.chdir("/")
+if os.path.isdir(workdir):
+    os.chdir(workdir)
+
+if exec_app_init:
+    os.execvp("/run/locachy-app-init", ["/run/locachy-app-init", *cmd])
+
+# Fallback PID-1 reaper for foreign distro rootfs when app-init is not static:
+# enforces PR_SET_NO_NEW_PRIVS on child, forwards termination signals, reaps all zombies.
+pid = os.fork()
+if pid == 0:
+    libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+    os.execvp(cmd[0], cmd)
+
+def _fwd(signum, _frame):
+    try:
+        os.kill(pid, signum)
+    except OSError:
+        pass
+
+for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT):
+    signal.signal(sig, _fwd)
+
+rc = 125
+while True:
+    try:
+        wpid, status = os.waitpid(-1, 0)
+    except ChildProcessError:
+        break
+    except InterruptedError:
+        continue
+    if wpid == pid:
+        if os.WIFEXITED(status):
+            rc = os.WEXITSTATUS(status)
+        elif os.WIFSIGNALED(status):
+            rc = 128 + os.WTERMSIG(status)
+        try:
+            os.kill(-1, signal.SIGTERM)
+        except OSError:
+            pass
+sys.exit(rc)
+' "$merged" "$workdir" "$use_init" "$@"
+"""
+
+
+def run_container(
+    env_name: str,
+    command: list[str],
+    *,
+    gpu_override: bool | None = None,
+    net_override: str | None = None,
+    extra_mounts: list[str] | None = None,
+    workdir_override: str | None = None,
+    extra_env: list[str] | None = None,
+    memory_override: str | None = None,
+    cpu_override: str | None = None,
+    job_id: str | None = None,
+    detach: bool = False,
+) -> dict:
+    if not command:
+        raise ComputeError("a command is required to run inside the compute container")
+    meta = env_load(env_name)
+    edir = _env_dir(env_name)
+    lower = compute_base() / "images" / meta["image"] / "rootfs"
+    if not lower.is_dir():
+        raise ComputeError(f"base image rootfs missing: {lower}")
+
+    rc_vals = read_rc_conf()
+    want_gpu = meta.get("gpu", False) if gpu_override is None else gpu_override
+    if rc_vals.get("compute_gpu") == "0":
+        want_gpu = False
+    net_mode = meta.get("net", "locachy-net") if net_override is None else net_override
+    if net_mode not in ("locachy-net", "none"):
+        raise ComputeError(f"invalid network mode: {net_mode!r}")
+
+    mounts = list(meta.get("mounts", []))
+    for spec in extra_mounts or []:
+        mounts.append(parse_mount_spec(spec))
+    # Re-validate persisted mounts on every launch.
+    mounts = [parse_mount_spec(f"{m['host']}:{m['target']}:{m['mode']}") for m in mounts]
+    mounts_tsv = "\n".join(f"{m['host']}\t{m['target']}\t{m['mode']}" for m in mounts)
+
+    memory_max = memory_override if memory_override is not None else meta.get("memory_max", "")
+    cpu_max = cpu_override if cpu_override is not None else meta.get("cpu_max", "")
+    workdir = workdir_override if workdir_override is not None else meta.get("workdir", "/")
+    if not os.path.isabs(workdir):
+        raise ComputeError(f"workdir must be absolute: {workdir!r}")
+
+    run_env = {"PATH": os.environ.get("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")}
+    for k, v in meta.get("env", {}).items():
+        run_env[k] = v
+    for item in extra_env or []:
+        if "=" not in item:
+            raise ComputeError(f"invalid --env entry: {item!r}")
+        k, v = item.split("=", 1)
+        run_env[k] = v
+
+    jid = validate_name(job_id, "job id") if job_id else f"j{int(time.time())}-{uuid.uuid4().hex[:8]}"
+    (edir / "upper").mkdir(parents=True, exist_ok=True)
+    (edir / "work").mkdir(parents=True, exist_ok=True)
+    (edir / "merged").mkdir(parents=True, exist_ok=True)
+
+    cg = _cgroup_prepare(f"job-{jid}", memory_max=memory_max, cpu_max=cpu_max)
+    unshare_cmd = ["unshare", "--mount", "--pid", "--fork", "--kill-child", "--propagation", "slave"]
+    net_prefix: list[str] = []
+    if net_mode == "none":
+        unshare_cmd.append("--net")
+    elif net_mode == "locachy-net":
+        # A job started from outside locachy-net (the CLI on the host) enters it;
+        # the service already runs there (compute-client) and inherits it.
+        ns_path = Path("/run/netns/locachy-net")
+        if ns_path.exists() and os.stat(ns_path).st_ino != os.stat("/proc/self/ns/net").st_ino:
+            net_prefix = ["nsenter", f"--net={ns_path}", "--"]
+
+    init_bin = str(app_init_path()) if app_init_path().is_file() and os.access(app_init_path(), os.X_OK) else ""
+    full_cmd = [
+        *net_prefix,
+        *unshare_cmd,
+        "bash",
+        "-c",
+        CONTAINER_INNER_SCRIPT,
+        "locachy-compute-inner",
+        str(lower),
+        str(edir / "upper"),
+        str(edir / "work"),
+        str(edir / "merged"),
+        workdir,
+        "1" if net_mode != "none" else "0",
+        "1" if want_gpu else "0",
+        init_bin,
+        mounts_tsv if mounts_tsv else "[]",
+        *command,
+    ]
+
+    log_path = _job_log_file(jid)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _enter_cgroup() -> None:
+        if cg is not None and (cg / "cgroup.procs").exists():
+            try:
+                (cg / "cgroup.procs").write_text(f"{os.getpid()}\n", encoding="utf-8")
+            except OSError:
+                pass
+
+    job_rec: dict = {
+        "version": 1,
+        "job_id": jid,
+        "env": env_name,
+        "image": meta["image"],
+        "command": list(command),
+        "gpu": bool(want_gpu),
+        "net": net_mode,
+        "cgroup": str(cg) if cg else "",
+        "log": str(log_path),
+        "state": "running",
+        "started_at": _utc_now(),
+        "ended_at": "",
+        "exit_code": None,
+        "pid": 0,
+    }
+
+    if detach:
+        with open(log_path, "wb") as log_fh:
+            proc = subprocess.Popen(
+                full_cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                env=run_env,
+                preexec_fn=_enter_cgroup,
+                start_new_session=True,
+            )
+        job_rec["pid"] = proc.pid
+        _atomic_write_json(_job_file(jid), job_rec, 0o600)
+
+        def _reaper(p: subprocess.Popen, rec_copy: dict) -> None:
+            rc = p.wait()
+            latest = rec_copy
+            try:
+                latest = json.loads(_job_file(jid).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
+            if latest.get("state") == "running":
+                latest["state"] = "succeeded" if rc == 0 else "failed"
+            latest["exit_code"] = rc
+            latest["ended_at"] = _utc_now()
+            _atomic_write_json(_job_file(jid), latest, 0o600)
+            _cgroup_kill_and_remove(f"job-{jid}")
+
+        threading.Thread(target=_reaper, args=(proc, dict(job_rec)), daemon=True).start()
+        return job_rec
+
+    with open(log_path, "wb") as log_fh:
+        proc = subprocess.Popen(
+            full_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=run_env,
+            preexec_fn=_enter_cgroup,
+        )
+        job_rec["pid"] = proc.pid
+        _atomic_write_json(_job_file(jid), job_rec, 0o600)
+        assert proc.stdout is not None
+        while True:
+            chunk = proc.stdout.read(4096)
+            if not chunk:
+                break
+            log_fh.write(chunk)
+            log_fh.flush()
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+        rc = proc.wait()
+
+    job_rec["exit_code"] = rc
+    job_rec["state"] = "succeeded" if rc == 0 else "failed"
+    job_rec["ended_at"] = _utc_now()
+    _atomic_write_json(_job_file(jid), job_rec, 0o600)
+    _cgroup_kill_and_remove(f"job-{jid}")
+    return job_rec
+
+
+# ---- KVM micro-VM backend ----
+
+def _vm_dir(name: str) -> Path:
+    validate_name(name, "vm name")
+    return compute_base() / "vms" / name
+
+
+def _vm_run_dir(name: str) -> Path:
+    validate_name(name, "vm name")
+    return compute_run() / f"vm-{name}"
+
+
+def vm_load(name: str) -> dict:
+    path = _vm_dir(name) / "vm.json"
+    if not path.is_file():
+        raise ComputeError(f"compute VM not found: {name}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def vm_list() -> list[dict]:
+    vdir = compute_base() / "vms"
+    if not vdir.is_dir():
+        return []
+    out = []
+    for entry in sorted(vdir.iterdir()):
+        meta_path = entry / "vm.json"
+        if not meta_path.is_file():
+            continue
+        try:
+            rec = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        rec["running"] = _vm_is_running(rec["name"])
+        out.append(rec)
+    return out
+
+
+def _vm_pid_path(name: str) -> Path:
+    return _vm_run_dir(name) / "qemu.pid"
+
+
+def _vm_is_running(name: str) -> bool:
+    pfile = _vm_pid_path(name)
+    if not pfile.is_file():
+        return False
+    try:
+        pid = int(pfile.read_text(encoding="utf-8").strip())
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _create_qcow2_overlay(base_disk: Path, overlay_path: Path) -> None:
+    qemu_img = shutil.which("qemu-img")
+    if not qemu_img:
+        raise ComputeError("qemu-img is required for KVM micro-VM overlays")
+    if overlay_path.exists():
+        overlay_path.unlink()
+    proc = subprocess.run(
+        [qemu_img, "create", "-f", "qcow2", "-b", str(base_disk), "-F", "qcow2", str(overlay_path)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise ComputeError(f"qemu-img overlay creation failed: {proc.stderr.strip()}")
+
+
+def vm_create(
+    name: str,
+    base_disk: str,
+    *,
+    memory_mb: int = 2048,
+    cpus: int = 2,
+    shares: list[str] | None = None,
+    cloud_init: str = "",
+    net: str = "user",
+) -> dict:
+    validate_name(name, "vm name")
+    if memory_mb < 256 or memory_mb > 1048576:
+        raise ComputeError("memory_mb must be between 256 and 1048576")
+    if cpus < 1 or cpus > 256:
+        raise ComputeError("cpus must be between 1 and 256")
+    if net not in ("user", "none"):
+        raise ComputeError("vm network must be 'user' or 'none'")
+    base_path = Path(base_disk)
+    if not base_path.is_file():
+        raise ComputeError(f"base qcow2 disk does not exist: {base_disk}")
+    base_real = base_path.resolve()
+
+    parsed_shares: list[dict[str, str]] = []
+    for raw in shares or []:
+        if ":" not in raw:
+            raise ComputeError(f"invalid --share {raw!r}; expected HOST_DIR:TAG")
+        hdir, tag = raw.split(":", 1)
+        m = parse_mount_spec(f"{hdir}:/share/{tag}:rw")
+        validate_name(tag, "share tag")
+        if not os.path.isdir(m["host"]):
+            raise ComputeError(f"share path must be a directory: {m['host']}")
+        parsed_shares.append({"host": m["host"], "tag": tag})
+
+    ci_real = ""
+    if cloud_init:
+        ci_p = Path(cloud_init)
+        if not ci_p.is_file():
+            raise ComputeError(f"cloud-init image not found: {cloud_init}")
+        ci_real = str(ci_p.resolve())
+
+    vdir = _vm_dir(name)
+    if vdir.exists():
+        raise ComputeError(f"compute VM already exists: {name}")
+    vdir.mkdir(parents=True, mode=0o700)
+    overlay = vdir / "overlay.qcow2"
+    _create_qcow2_overlay(base_real, overlay)
+    meta = {
+        "version": 1,
+        "name": name,
+        "base_disk": str(base_real),
+        "overlay_disk": str(overlay),
+        "memory_mb": int(memory_mb),
+        "cpus": int(cpus),
+        "shares": parsed_shares,
+        "cloud_init": ci_real,
+        "net": net,
+        "created_at": _utc_now(),
+        "reset_at": _utc_now(),
+    }
+    _atomic_write_json(vdir / "vm.json", meta, 0o600)
+    return meta
+
+
+def vm_build_argv(meta: dict, *, kvm: bool | None = None) -> list[str]:
+    qemu = shutil.which("qemu-system-x86_64") or "/usr/bin/qemu-system-x86_64"
+    use_kvm = os.path.exists("/dev/kvm") if kvm is None else kvm
+    rdir = _vm_run_dir(meta["name"])
+    argv = [
+        qemu,
+        "-name",
+        f"locachy-compute-{meta['name']}",
+        *(["-enable-kvm"] if use_kvm else []),
+        "-machine",
+        "q35" + (",accel=kvm" if use_kvm else ",accel=tcg"),
+        "-cpu",
+        "host" if use_kvm else "max",
+        "-smp",
+        str(meta["cpus"]),
+        "-m",
+        str(meta["memory_mb"]),
+        "-display",
+        "none",
+        "-serial",
+        f"unix:{rdir / 'serial.sock'},server=on,wait=off",
+        "-monitor",
+        f"unix:{rdir / 'monitor.sock'},server=on,wait=off",
+        "-pidfile",
+        str(rdir / "qemu.pid"),
+        "-drive",
+        f"file={meta['overlay_disk']},format=qcow2,if=virtio,discard=unmap",
+    ]
+    if meta.get("cloud_init"):
+        argv.extend(["-drive", f"file={meta['cloud_init']},format=raw,media=cdrom,readonly=on"])
+    if meta.get("net") == "user":
+        argv.extend(["-nic", "user,model=virtio-net-pci"])
+    else:
+        argv.extend(["-nic", "none"])
+    for idx, share in enumerate(meta.get("shares", [])):
+        argv.extend(
+            [
+                "-fsdev",
+                f"local,id=fsdev{idx},path={share['host']},security_model=mapped-xattr",
+                "-device",
+                f"virtio-9p-pci,fsdev=fsdev{idx},mount_tag={share['tag']}",
+            ]
+        )
+    return argv
+
+
+def vm_start(name: str) -> dict:
+    meta = vm_load(name)
+    if _vm_is_running(name):
+        raise ComputeError(f"VM {name} is already running")
+    if not shutil.which("qemu-system-x86_64"):
+        raise ComputeError("qemu-system-x86_64 is not installed")
+    rdir = _vm_run_dir(name)
+    rdir.mkdir(parents=True, exist_ok=True)
+    os.chmod(rdir, 0o700)
+    cg = _cgroup_prepare(f"vm-{name}")
+    argv = vm_build_argv(meta)
+
+    def _enter_cg() -> None:
+        if cg is not None and (cg / "cgroup.procs").exists():
+            try:
+                (cg / "cgroup.procs").write_text(f"{os.getpid()}\n", encoding="utf-8")
+            except OSError:
+                pass
+
+    log_path = rdir / "qemu.log"
+    with open(log_path, "wb") as log_fh:
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            preexec_fn=_enter_cg,
+            start_new_session=True,
+        )
+    time.sleep(0.2)
+    if proc.poll() is not None:
+        err = log_path.read_text(encoding="utf-8", errors="replace").strip()
+        raise ComputeError(f"VM {name} exited immediately ({proc.returncode}): {err}")
+    return {"name": name, "pid": proc.pid, "serial_sock": str(rdir / "serial.sock"), "cgroup": str(cg or "")}
+
+
+def vm_stop(name: str) -> dict:
+    vm_load(name)
+    pfile = _vm_pid_path(name)
+    if pfile.is_file():
+        try:
+            pid = int(pfile.read_text(encoding="utf-8").strip())
+            os.kill(pid, signal.SIGTERM)
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                    time.sleep(0.05)
+                except OSError:
+                    break
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        except (OSError, ValueError):
+            pass
+        pfile.unlink(missing_ok=True)
+    _cgroup_kill_and_remove(f"vm-{name}")
+    return {"name": name, "running": False}
+
+
+def vm_reset(name: str) -> dict:
+    meta = vm_load(name)
+    if _vm_is_running(name):
+        vm_stop(name)
+    _create_qcow2_overlay(Path(meta["base_disk"]), Path(meta["overlay_disk"]))
+    meta["reset_at"] = _utc_now()
+    _atomic_write_json(_vm_dir(name) / "vm.json", meta, 0o600)
+    return meta
+
+
+def vm_remove(name: str) -> None:
+    vm_load(name)
+    if _vm_is_running(name):
+        vm_stop(name)
+    shutil.rmtree(_vm_dir(name))
+    rdir = _vm_run_dir(name)
+    if rdir.exists():
+        shutil.rmtree(rdir, ignore_errors=True)
+
+
+# ---- mTLS HTTPS Control Plane ----
+
+class _PeerSSLContextCache:
+    """Rebuilds the TLS 1.3 mTLS server SSLContext whenever paired peers change."""
+
+    def __init__(self, base: Path):
+        self.base = base
+        self._lock = threading.Lock()
+        self._stamp: tuple | None = None
+        self._ctx: ssl.SSLContext | None = None
+
+    def _compute_stamp(self) -> tuple:
+        host_cert = self.base / "host-cert.pem"
+        host_key = self.base / "host-key.pem"
+        pdir = self.base / "peers"
+        entries = []
+        if pdir.is_dir():
+            for entry in sorted(pdir.glob("*.json")):
+                try:
+                    st = entry.stat()
+                    entries.append((entry.name, st.st_mtime_ns, st.st_size))
+                except OSError:
+                    pass
+        try:
+            hc = host_cert.stat().st_mtime_ns
+            hk = host_key.stat().st_mtime_ns
+        except OSError:
+            hc = hk = 0
+        return (hc, hk, tuple(entries))
+
+    def get_context(self) -> ssl.SSLContext | None:
+        with self._lock:
+            stamp = self._compute_stamp()
+            if self._ctx is not None and stamp == self._stamp:
+                return self._ctx
+            host = peers_mod.load_host(self.base)
+            if not host:
+                self._ctx = None
+                self._stamp = stamp
+                return None
+            compute_peers = peers_mod.list_peers(self.base, scope="compute")
+            cadata_parts = [p["client_cert_pem"].strip() for p in compute_peers if p.get("client_cert_pem")]
+            if not cadata_parts:
+                # Fail closed: 0 paired compute peers -> refuse every TLS handshake.
+                self._ctx = None
+                self._stamp = stamp
+                return None
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+            ctx.load_cert_chain(certfile=host["host_cert"], keyfile=host["host_key"])
+            ctx.verify_mode = ssl.CERT_REQUIRED
+            # Self-signed leaf peer certificates are pinned directly in the trust store.
+            ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
+            ctx.load_verify_locations(cadata="\n".join(cadata_parts) + "\n")
+            self._ctx = ctx
+            self._stamp = stamp
+            return ctx
+
+
+class _ComputeHTTPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, bind_addr: tuple, family: int, ssl_cache: _PeerSSLContextCache, peers_base: Path):
+        self.address_family = family
+        self.ssl_cache = ssl_cache
+        self.peers_base = peers_base
+        self.server_name = str(bind_addr[0])
+        self.server_port = int(bind_addr[1])
+        super().__init__(bind_addr, _ComputeHandler, bind_and_activate=False)
+        if family == socket.AF_INET6:
+            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        self.server_bind()
+        self.server_activate()
+
+    def get_request(self):
+        newsock, fromaddr = self.socket.accept()
+        ctx = self.ssl_cache.get_context()
+        if ctx is None:
+            newsock.close()
+            raise ssl.SSLError("no paired compute peers configured")
+        newsock.settimeout(15.0)
+        try:
+            tls_sock = ctx.wrap_socket(newsock, server_side=True)
+        except Exception:
+            newsock.close()
+            raise
+        tls_sock.settimeout(30.0)
+        return tls_sock, fromaddr
+
+
+def _node_health(peers_base: Path) -> dict:
+    host = peers_mod.load_host(peers_base) or {}
+    gpus = discover_gpu_resources()
+    mem_kb = 0
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("MemTotal:"):
+                mem_kb = int(line.split()[1])
+                break
+    except OSError:
+        pass
+    jobs = job_list()
+    return {
+        "hostname": socket.gethostname(),
+        "host_id": host.get("host_id", ""),
+        "cpus": os.cpu_count() or 1,
+        "memory_kb": mem_kb,
+        "gpu_devices": gpus["devices"],
+        "gpu_nvidia_libs": len(gpus["nvidia_libs"]),
+        "active_jobs": sum(1 for j in jobs if j.get("state") == "running"),
+        "envs": len(env_list()),
+        "vms": len(vm_list()),
+    }
+
+
+class _ComputeHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, format: str, *args) -> None:
+        return
+
+    def _send_json(self, status: int, payload: dict | list) -> None:
+        body = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _authenticate(self) -> dict | None:
+        if not isinstance(self.connection, ssl.SSLSocket):
+            self._send_json(403, {"error": "TLS required"})
+            return None
+        cert_der = self.connection.getpeercert(binary_form=True)
+        peer = peers_mod.verify_compute_peer_cert(cert_der or b"", self.server.peers_base)
+        if peer is None:
+            self._send_json(403, {"error": "peer not paired or revoked"})
+            return None
+        return peer
+
+    def _read_json_body(self) -> dict:
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length == 0:
+            return {}
+        if length < 0 or length > 1024 * 1024:
+            raise ComputeError("request body too large")
+        raw = self.rfile.read(length)
+        data = json.loads(raw.decode("utf-8"))
+        if not isinstance(data, dict):
+            raise ComputeError("JSON object expected")
+        return data
+
+    def do_GET(self) -> None:
+        peer = self._authenticate()
+        if peer is None:
+            return
+        parsed = urllib.parse.urlparse(self.path)
+        parts = [p for p in parsed.path.split("/") if p]
+        try:
+            if parts == ["v1", "health"]:
+                info = _node_health(self.server.peers_base)
+                info["peer_id"] = peer["peer_id"]
+                info["peer_name"] = peer["name"]
+                self._send_json(200, info)
+            elif parts == ["v1", "envs"]:
+                self._send_json(200, {"envs": env_list()})
+            elif parts == ["v1", "jobs"]:
+                self._send_json(200, {"jobs": job_list()})
+            elif len(parts) == 3 and parts[:2] == ["v1", "jobs"]:
+                self._send_json(200, job_load(parts[2]))
+            elif len(parts) == 4 and parts[:2] == ["v1", "jobs"] and parts[3] == "log":
+                job_load(parts[2])
+                lpath = _job_log_file(parts[2])
+                text = lpath.read_text(encoding="utf-8", errors="replace") if lpath.is_file() else ""
+                self._send_json(200, {"job_id": parts[2], "log": text})
+            elif parts == ["v1", "vms"]:
+                self._send_json(200, {"vms": vm_list()})
+            else:
+                self._send_json(404, {"error": "not found"})
+        except ComputeError as exc:
+            self._send_json(400, {"error": str(exc)})
+
+    def do_POST(self) -> None:
+        peer = self._authenticate()
+        if peer is None:
+            return
+        parsed = urllib.parse.urlparse(self.path)
+        parts = [p for p in parsed.path.split("/") if p]
+        try:
+            body = self._read_json_body()
+            if len(parts) == 4 and parts[:2] == ["v1", "envs"] and parts[3] == "reset":
+                self._send_json(200, env_reset(parts[2]))
+            elif parts == ["v1", "jobs"]:
+                env_name = str(body.get("env", ""))
+                cmd = body.get("command")
+                if not isinstance(cmd, list) or not cmd or not all(isinstance(x, str) for x in cmd):
+                    raise ComputeError("'command' must be a non-empty string list")
+                # Host mounts are the node operator's (locachy-compute env create),
+                # never a remote peer's choice: a paired peer runs inside an env.
+                if body.get("mounts"):
+                    raise ComputeError("mounts are set on the env by the node operator, not per job")
+                rec = run_container(
+                    env_name,
+                    cmd,
+                    gpu_override=body.get("gpu"),
+                    net_override=body.get("net"),
+                    workdir_override=body.get("workdir"),
+                    extra_env=body.get("env_vars"),
+                    memory_override=body.get("memory_max"),
+                    cpu_override=body.get("cpu_max"),
+                    detach=True,
+                )
+                self._send_json(202, rec)
+            elif len(parts) == 4 and parts[:2] == ["v1", "jobs"] and parts[3] == "stop":
+                self._send_json(200, job_stop(parts[2]))
+            elif len(parts) == 4 and parts[:2] == ["v1", "vms"] and parts[3] == "start":
+                self._send_json(200, vm_start(parts[2]))
+            elif len(parts) == 4 and parts[:2] == ["v1", "vms"] and parts[3] == "stop":
+                self._send_json(200, vm_stop(parts[2]))
+            elif len(parts) == 4 and parts[:2] == ["v1", "vms"] and parts[3] == "reset":
+                self._send_json(200, vm_reset(parts[2]))
+            else:
+                self._send_json(404, {"error": "not found"})
+        except (ComputeError, ValueError) as exc:
+            self._send_json(400, {"error": str(exc)})
+
+
+def _iface_driver(ifname: str) -> str:
+    drv = Path(f"/sys/class/net/{ifname}/device/driver")
+    try:
+        return os.path.basename(os.path.realpath(drv)) if drv.exists() else ""
+    except OSError:
+        return ""
+
+
+def discover_bind_endpoints(port: int, bind_tb: bool, tb_ifaces_override: list[str] | None = None) -> list[tuple[int, tuple]]:
+    """Return strictly scoped (family, sockaddr) bind endpoints:
+    tailscale0 addresses + optional thunderbolt-net fe80::%scope link-local.
+    Never returns 0.0.0.0 or ::.
+    """
+    proc = subprocess.run(["ip", "-j", "addr", "show"], capture_output=True, text=True, timeout=10, check=False)
+    if proc.returncode != 0:
+        return []
+    try:
+        links = json.loads(proc.stdout)
+    except ValueError:
+        return []
+    endpoints: list[tuple[int, tuple]] = []
+    tb_allow = set(tb_ifaces_override or [])
+    for link in links:
+        ifname = link.get("ifname", "")
+        ifindex = int(link.get("ifindex", 0) or 0)
+        is_ts = ifname == "tailscale0"
+        is_tb = bind_tb and (ifname in tb_allow or _iface_driver(ifname) == "thunderbolt-net")
+        if not is_ts and not is_tb:
+            continue
+        for addr in link.get("addr_info", []):
+            fam = addr.get("family")
+            local = addr.get("local", "")
+            if not local or addr.get("tentative"):
+                continue
+            if is_ts:
+                if fam == "inet":
+                    endpoints.append((socket.AF_INET, (local, port)))
+                elif fam == "inet6" and not local.startswith("fe80:"):
+                    endpoints.append((socket.AF_INET6, (local, port, 0, 0)))
+            elif is_tb and fam == "inet6":
+                try:
+                    ip_obj = ipaddress.IPv6Address(local)
+                except ValueError:
+                    continue
+                if ip_obj.is_link_local and ifindex > 0:
+                    endpoints.append((socket.AF_INET6, (local, port, 0, ifindex)))
+    return endpoints
+
+
+def _parse_explicit_bind(spec: str, port: int, allow_loopback: bool) -> tuple[int, tuple]:
+    if spec in ("0.0.0.0", "::", "*"):
+        raise ComputeError("refusing wildcard bind address (0.0.0.0 / ::)")
+    if "%" in spec:
+        ip_part, zone = spec.split("%", 1)
+        ip_obj = ipaddress.IPv6Address(ip_part)
+        scope_id = int(zone) if zone.isdigit() else socket.if_nametoindex(zone)
+        return (socket.AF_INET6, (str(ip_obj), port, 0, scope_id))
+    ip_obj = ipaddress.ip_address(spec)
+    if ip_obj.is_loopback and not allow_loopback:
+        raise ComputeError("loopback bind requires --allow-loopback-test")
+    if isinstance(ip_obj, ipaddress.IPv6Address):
+        return (socket.AF_INET6, (str(ip_obj), port, 0, 0))
+    return (socket.AF_INET, (str(ip_obj), port))
+
+
+def serve_daemon(
+    *,
+    port: int = DEFAULT_PORT,
+    explicit_binds: list[str] | None = None,
+    bind_tb: bool = False,
+    allow_loopback: bool = False,
+    tb_ifaces_override: list[str] | None = None,
+    ready_file: str | None = None,
+) -> int:
+    pbase = peers_dir()
+    peers_mod.init_host(pbase)
+    cg = _cgroup_prepare("service")
+    if cg is not None and (cg / "cgroup.procs").exists():
+        try:
+            (cg / "cgroup.procs").write_text(f"{os.getpid()}\n", encoding="utf-8")
+        except OSError:
+            pass
+
+    cache = _PeerSSLContextCache(pbase)
+    stop_event = threading.Event()
+
+    def _on_signal(_signum, _frame) -> None:
+        stop_event.set()
+
+    signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGINT, _on_signal)
+
+    servers: dict[tuple, tuple[_ComputeHTTPServer, threading.Thread]] = {}
+
+    def sync_listeners() -> None:
+        if explicit_binds:
+            desired = [_parse_explicit_bind(b, port, allow_loopback) for b in explicit_binds]
+        else:
+            desired = discover_bind_endpoints(port, bind_tb=bind_tb, tb_ifaces_override=tb_ifaces_override)
+        desired_keys = set(desired)
+        for key in list(servers.keys()):
+            if key not in desired_keys:
+                srv, _ = servers.pop(key)
+                try:
+                    srv.shutdown()
+                    srv.server_close()
+                except OSError:
+                    pass
+        for key in desired:
+            if key in servers:
+                continue
+            fam, addr = key
+            try:
+                srv = _ComputeHTTPServer(addr, fam, cache, pbase)
+            except OSError as exc:
+                print(f"locachy-compute: cannot bind {addr}: {exc}", file=sys.stderr, flush=True)
+                continue
+            th = threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.25}, daemon=True)
+            th.start()
+            servers[key] = (srv, th)
+
+    sync_listeners()
+    if ready_file:
+        bound_info = [{"family": fam, "address": list(addr)} for fam, addr in servers.keys()]
+        _atomic_write_json(Path(ready_file), {"pid": os.getpid(), "bound": bound_info}, 0o600)
+
+    try:
+        while not stop_event.is_set():
+            stop_event.wait(2.0)
+            if not stop_event.is_set() and not explicit_binds:
+                sync_listeners()
+    finally:
+        for srv, _ in servers.values():
+            try:
+                srv.shutdown()
+                srv.server_close()
+            except OSError:
+                pass
+    return 0
+
+
+# ---- mTLS Remote Client ----
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, host: str, port: int, *, context: ssl.SSLContext, expected_sha256: str, scope_id: int = 0, timeout: float = 15.0):
+        super().__init__(host, port=port, timeout=timeout, context=context)
+        self._expected_sha256 = expected_sha256
+        self._scope_id = scope_id
+
+    def connect(self) -> None:
+        if self._scope_id:
+            raw = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+            raw.settimeout(self.timeout)
+            raw.connect((self.host, self.port, 0, self._scope_id))
+        else:
+            raw = socket.create_connection((self.host, self.port), self.timeout)
+        self.sock = self._context.wrap_socket(raw, server_hostname=None)
+        der = self.sock.getpeercert(binary_form=True)
+        if not der:
+            self.sock.close()
+            raise ComputeError("server provided no TLS certificate")
+        actual = hashlib.sha256(der).hexdigest()
+        if actual != self._expected_sha256:
+            self.sock.close()
+            raise ComputeError(f"host certificate fingerprint mismatch: {actual} != {self._expected_sha256}")
+
+
+def remote_request(creds_dir: Path, host: str, port: int, method: str, path: str, body: dict | None = None, scope_iface: str = "") -> tuple[int, dict]:
+    meta = json.loads((creds_dir / "peer.json").read_text(encoding="utf-8"))
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
+    ctx.load_verify_locations(cafile=str(creds_dir / "host-cert.pem"))
+    ctx.load_cert_chain(certfile=str(creds_dir / "client-cert.pem"), keyfile=str(creds_dir / "client-key.pem"))
+
+    scope_id = 0
+    connect_host = host
+    if "%" in host:
+        connect_host, zone = host.split("%", 1)
+        scope_id = int(zone) if zone.isdigit() else socket.if_nametoindex(zone)
+    elif scope_iface:
+        scope_id = int(scope_iface) if scope_iface.isdigit() else socket.if_nametoindex(scope_iface)
+
+    conn = _PinnedHTTPSConnection(
+        connect_host,
+        port,
+        context=ctx,
+        expected_sha256=meta["host_cert_sha256"],
+        scope_id=scope_id,
+    )
+    try:
+        headers = {}
+        payload = None
+        if body is not None:
+            payload = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+            headers["Content-Length"] = str(len(payload))
+        conn.request(method, path, body=payload, headers=headers)
+        resp = conn.getresponse()
+        raw = resp.read().decode("utf-8", errors="replace")
+        try:
+            parsed = json.loads(raw) if raw.strip() else {}
+        except ValueError:
+            parsed = {"raw": raw}
+        return resp.status, parsed
+    finally:
+        conn.close()
+
+
+# ---- CLI ----
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="locachy-compute", description="LOCachy headless compute node CLI.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    # image
+    p_img = sub.add_parser("image", help="Manage read-only base rootfs images")
+    sub_img = p_img.add_subparsers(dest="img_cmd", required=True)
+    sp = sub_img.add_parser("import", help="Import rootfs directory, tarball, or OCI/Docker save tar")
+    sp.add_argument("name")
+    sp.add_argument("source")
+    sp = sub_img.add_parser("list", help="List imported images")
+    sp.add_argument("--json", action="store_true")
+    sp = sub_img.add_parser("remove", help="Remove an unused image")
+    sp.add_argument("name")
+
+    # env
+    p_env = sub.add_parser("env", help="Manage OverlayFS compute environments")
+    sub_env = p_env.add_subparsers(dest="env_cmd", required=True)
+    sp = sub_env.add_parser("create", help="Create a compute environment over a base image")
+    sp.add_argument("name")
+    sp.add_argument("--image", required=True)
+    sp.add_argument("--gpu", action="store_true")
+    sp.add_argument("--net", choices=("locachy-net", "none"), default="locachy-net")
+    sp.add_argument("--mount", action="append", default=[])
+    sp.add_argument("--memory", default="")
+    sp.add_argument("--cpu", default="")
+    sp.add_argument("--workdir", default="/")
+    sp.add_argument("--env", action="append", default=[])
+    sp = sub_env.add_parser("list", help="List compute environments")
+    sp.add_argument("--json", action="store_true")
+    sp = sub_env.add_parser("reset", help="Wipe OverlayFS upper/work while preserving base rootfs & data")
+    sp.add_argument("name")
+    sp = sub_env.add_parser("remove", help="Remove a compute environment")
+    sp.add_argument("name")
+
+    # run
+    sp = sub.add_parser("run", help="Run a command in a native compute container")
+    sp.add_argument("env_name")
+    sp.add_argument("--gpu", dest="gpu", action="store_true", default=None)
+    sp.add_argument("--no-gpu", dest="gpu", action="store_false")
+    sp.add_argument("--net", choices=("locachy-net", "none"), default=None)
+    sp.add_argument("--mount", action="append", default=[])
+    sp.add_argument("--workdir", default=None)
+    sp.add_argument("--env", action="append", default=[])
+    sp.add_argument("--memory", default=None)
+    sp.add_argument("--cpu", default=None)
+    sp.add_argument("--job-id", default=None)
+    sp.add_argument("--detach", action="store_true")
+    sp.add_argument("command", nargs=argparse.REMAINDER)
+
+    # job
+    p_job = sub.add_parser("job", help="Inspect or stop compute jobs")
+    sub_job = p_job.add_subparsers(dest="job_cmd", required=True)
+    sp = sub_job.add_parser("list")
+    sp.add_argument("--json", action="store_true")
+    sp = sub_job.add_parser("status")
+    sp.add_argument("job_id")
+    sp.add_argument("--json", action="store_true")
+    sp = sub_job.add_parser("log")
+    sp.add_argument("job_id")
+    sp = sub_job.add_parser("stop")
+    sp.add_argument("job_id")
+
+    # vm
+    p_vm = sub.add_parser("vm", help="Manage optional KVM micro-VMs")
+    sub_vm = p_vm.add_subparsers(dest="vm_cmd", required=True)
+    sp = sub_vm.add_parser("create")
+    sp.add_argument("name")
+    sp.add_argument("--disk", required=True, help="Read-only base qcow2 image")
+    sp.add_argument("--memory-mb", type=int, default=2048)
+    sp.add_argument("--cpus", type=int, default=2)
+    sp.add_argument("--share", action="append", default=[], help="HOST_DIR:TAG 9p share")
+    sp.add_argument("--cloud-init", default="")
+    sp.add_argument("--net", choices=("user", "none"), default="user")
+    sp = sub_vm.add_parser("cmd", help="Print the QEMU argv for a VM")
+    sp.add_argument("name")
+    sp.add_argument("--json", action="store_true")
+    sp = sub_vm.add_parser("list")
+    sp.add_argument("--json", action="store_true")
+    sp = sub_vm.add_parser("start")
+    sp.add_argument("name")
+    sp = sub_vm.add_parser("stop")
+    sp.add_argument("name")
+    sp = sub_vm.add_parser("reset")
+    sp.add_argument("name")
+    sp = sub_vm.add_parser("remove")
+    sp.add_argument("name")
+
+    # gpu
+    sp = sub.add_parser("gpu-probe", help="Show detected GPU devices and NVIDIA libraries")
+    sp.add_argument("--json", action="store_true")
+
+    # serve
+    sp = sub.add_parser("serve", help="Run mTLS HTTPS compute control plane")
+    sp.add_argument("--port", type=int, default=DEFAULT_PORT)
+    sp.add_argument("--bind", action="append", default=[], help="Explicit bind address (no wildcards)")
+    sp.add_argument("--bind-tb", action="store_true", help="Also bind thunderbolt-net fe80:: link-local")
+    sp.add_argument("--tb-iface", action="append", default=[], help="Explicit interface treated as TB (testing)")
+    sp.add_argument("--allow-loopback-test", action="store_true", help="Allow 127.0.0.1/::1 bind for tests")
+    sp.add_argument("--ready-file", default=None, help="Write JSON readiness marker once bound")
+
+    # remote
+    p_rem = sub.add_parser("remote", help="Talk to a remote LOCachy compute node via mTLS")
+    p_rem.add_argument("--creds-dir", required=True)
+    p_rem.add_argument("--host", required=True)
+    p_rem.add_argument("--port", type=int, default=DEFAULT_PORT)
+    p_rem.add_argument("--scope-iface", default="")
+    sub_rem = p_rem.add_subparsers(dest="rem_cmd", required=True)
+    sub_rem.add_parser("health")
+    sub_rem.add_parser("envs")
+    sp = sub_rem.add_parser("reset")
+    sp.add_argument("env_name")
+    sub_rem.add_parser("jobs")
+    sp = sub_rem.add_parser("run")
+    sp.add_argument("env_name")
+    sp.add_argument("command", nargs=argparse.REMAINDER)
+    sp = sub_rem.add_parser("job-status")
+    sp.add_argument("job_id")
+    sp = sub_rem.add_parser("job-log")
+    sp.add_argument("job_id")
+    sp = sub_rem.add_parser("job-stop")
+    sp.add_argument("job_id")
+    sub_rem.add_parser("vms")
+    sp = sub_rem.add_parser("vm-start")
+    sp.add_argument("vm_name")
+    sp = sub_rem.add_parser("vm-stop")
+    sp.add_argument("vm_name")
+
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        if args.cmd == "image":
+            if args.img_cmd == "import":
+                meta = image_import(args.name, args.source)
+                print(json.dumps(meta, sort_keys=True))
+            elif args.img_cmd == "list":
+                items = image_list()
+                if args.json:
+                    print(json.dumps(items, indent=2, sort_keys=True))
+                else:
+                    for it in items:
+                        print(f"{it['name']}\t{it.get('imported_at', '')}\t{it.get('source', '')}")
+            elif args.img_cmd == "remove":
+                image_remove(args.name)
+            return 0
+
+        if args.cmd == "env":
+            if args.env_cmd == "create":
+                meta = env_create(
+                    args.name,
+                    args.image,
+                    gpu=args.gpu,
+                    net=args.net,
+                    mounts=args.mount,
+                    memory_max=args.memory,
+                    cpu_max=args.cpu,
+                    workdir=args.workdir,
+                    env_vars=args.env,
+                )
+                print(json.dumps(meta, sort_keys=True))
+            elif args.env_cmd == "list":
+                items = env_list()
+                if args.json:
+                    print(json.dumps(items, indent=2, sort_keys=True))
+                else:
+                    for it in items:
+                        print(f"{it['name']}\t{it['image']}\tgpu={int(it['gpu'])}\tnet={it['net']}")
+            elif args.env_cmd == "reset":
+                meta = env_reset(args.name)
+                print(json.dumps(meta, sort_keys=True))
+            elif args.env_cmd == "remove":
+                env_remove(args.name)
+            return 0
+
+        if args.cmd == "run":
+            cmd = list(args.command)
+            if cmd and cmd[0] == "--":
+                cmd = cmd[1:]
+            rec = run_container(
+                args.env_name,
+                cmd,
+                gpu_override=args.gpu,
+                net_override=args.net,
+                extra_mounts=args.mount,
+                workdir_override=args.workdir,
+                extra_env=args.env,
+                memory_override=args.memory,
+                cpu_override=args.cpu,
+                job_id=args.job_id,
+                detach=args.detach,
+            )
+            if args.detach:
+                print(json.dumps(rec, sort_keys=True))
+                return 0
+            return int(rec["exit_code"] or 0)
+
+        if args.cmd == "job":
+            if args.job_cmd == "list":
+                items = job_list()
+                if args.json:
+                    print(json.dumps(items, indent=2, sort_keys=True))
+                else:
+                    for it in items:
+                        print(f"{it['job_id']}\t{it['env']}\t{it['state']}\texit={it.get('exit_code')}")
+            elif args.job_cmd == "status":
+                rec = job_load(args.job_id)
+                print(json.dumps(rec, indent=2 if args.json else None, sort_keys=True))
+            elif args.job_cmd == "log":
+                job_load(args.job_id)
+                lpath = _job_log_file(args.job_id)
+                if lpath.is_file():
+                    sys.stdout.write(lpath.read_text(encoding="utf-8", errors="replace"))
+            elif args.job_cmd == "stop":
+                print(json.dumps(job_stop(args.job_id), sort_keys=True))
+            return 0
+
+        if args.cmd == "vm":
+            if args.vm_cmd == "create":
+                meta = vm_create(
+                    args.name,
+                    args.disk,
+                    memory_mb=args.memory_mb,
+                    cpus=args.cpus,
+                    shares=args.share,
+                    cloud_init=args.cloud_init,
+                    net=args.net,
+                )
+                print(json.dumps(meta, sort_keys=True))
+            elif args.vm_cmd == "cmd":
+                argv_out = vm_build_argv(vm_load(args.name))
+                if args.json:
+                    print(json.dumps(argv_out))
+                else:
+                    print(" ".join(shlex.quote(a) for a in argv_out))
+            elif args.vm_cmd == "list":
+                items = vm_list()
+                if args.json:
+                    print(json.dumps(items, indent=2, sort_keys=True))
+                else:
+                    for it in items:
+                        print(f"{it['name']}\t{'running' if it['running'] else 'stopped'}\t{it['memory_mb']}M\t{it['cpus']}cpu")
+            elif args.vm_cmd == "start":
+                print(json.dumps(vm_start(args.name), sort_keys=True))
+            elif args.vm_cmd == "stop":
+                print(json.dumps(vm_stop(args.name), sort_keys=True))
+            elif args.vm_cmd == "reset":
+                print(json.dumps(vm_reset(args.name), sort_keys=True))
+            elif args.vm_cmd == "remove":
+                vm_remove(args.name)
+            return 0
+
+        if args.cmd == "gpu-probe":
+            info = discover_gpu_resources()
+            if args.json:
+                print(json.dumps(info, indent=2, sort_keys=True))
+            else:
+                print(f"devices={len(info['devices'])} nvidia_libs={len(info['nvidia_libs'])}")
+                for d in info["devices"]:
+                    print(f"  dev {d}")
+            return 0
+
+        if args.cmd == "serve":
+            rc_vals = read_rc_conf()
+            tb = args.bind_tb or rc_vals.get("compute_bind_tb") == "1"
+            return serve_daemon(
+                port=args.port,
+                explicit_binds=args.bind or None,
+                bind_tb=tb,
+                allow_loopback=args.allow_loopback_test,
+                tb_ifaces_override=args.tb_iface or None,
+                ready_file=args.ready_file,
+            )
+
+        if args.cmd == "remote":
+            cdir = Path(args.creds_dir)
+            if args.rem_cmd == "health":
+                st, data = remote_request(cdir, args.host, args.port, "GET", "/v1/health", scope_iface=args.scope_iface)
+            elif args.rem_cmd == "envs":
+                st, data = remote_request(cdir, args.host, args.port, "GET", "/v1/envs", scope_iface=args.scope_iface)
+            elif args.rem_cmd == "reset":
+                st, data = remote_request(cdir, args.host, args.port, "POST", f"/v1/envs/{args.env_name}/reset", {}, scope_iface=args.scope_iface)
+            elif args.rem_cmd == "jobs":
+                st, data = remote_request(cdir, args.host, args.port, "GET", "/v1/jobs", scope_iface=args.scope_iface)
+            elif args.rem_cmd == "run":
+                cmd = list(args.command)
+                if cmd and cmd[0] == "--":
+                    cmd = cmd[1:]
+                st, data = remote_request(
+                    cdir, args.host, args.port, "POST", "/v1/jobs",
+                    {"env": args.env_name, "command": cmd}, scope_iface=args.scope_iface,
+                )
+            elif args.rem_cmd == "job-status":
+                st, data = remote_request(cdir, args.host, args.port, "GET", f"/v1/jobs/{args.job_id}", scope_iface=args.scope_iface)
+            elif args.rem_cmd == "job-log":
+                st, data = remote_request(cdir, args.host, args.port, "GET", f"/v1/jobs/{args.job_id}/log", scope_iface=args.scope_iface)
+            elif args.rem_cmd == "job-stop":
+                st, data = remote_request(cdir, args.host, args.port, "POST", f"/v1/jobs/{args.job_id}/stop", {}, scope_iface=args.scope_iface)
+            elif args.rem_cmd == "vms":
+                st, data = remote_request(cdir, args.host, args.port, "GET", "/v1/vms", scope_iface=args.scope_iface)
+            elif args.rem_cmd == "vm-start":
+                st, data = remote_request(cdir, args.host, args.port, "POST", f"/v1/vms/{args.vm_name}/start", {}, scope_iface=args.scope_iface)
+            elif args.rem_cmd == "vm-stop":
+                st, data = remote_request(cdir, args.host, args.port, "POST", f"/v1/vms/{args.vm_name}/stop", {}, scope_iface=args.scope_iface)
+            else:
+                raise ComputeError(f"unknown remote command: {args.rem_cmd}")
+            print(json.dumps(data, indent=2, sort_keys=True))
+            return 0 if 200 <= st < 300 else 1
+
+    except (ComputeError, peers_mod.PeerStoreError, ssl.SSLError, OSError) as exc:
+        print(f"locachy-compute: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

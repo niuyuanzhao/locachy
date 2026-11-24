@@ -1,0 +1,54 @@
+#!/bin/bash
+# compute-client: headless compute node service (service_compute, tools/COMPUTE.md).
+#
+# Runs locachy-compute serve inside the locachy-net network namespace using
+# nsenter --net (NEVER ip netns exec, which mounts a fresh /sys and hides host
+# /sys/fs/cgroup!). That gives the compute daemon BOTH Tailscale/Thunderbolt
+# sockets inside locachy-net AND full access to host /sys/fs/cgroup/locachy-compute
+# and /var/lib/locachy/compute.
+set -eu
+
+NS=${LOCACHY_COMPUTE_NETNS:-locachy-net}
+RC=${LOCACHY_COMPUTE_RC:-/etc/locachy/rc.conf}
+BASE=${LOCACHY_COMPUTE_BASE:-/var/lib/locachy/compute}
+RUN=${LOCACHY_COMPUTE_RUN:-/run/locachy/compute}
+COMPUTE_BIN=${LOCACHY_COMPUTE_BIN:-/usr/local/bin/locachy-compute}
+NETWORK_CLIENT=${LOCACHY_NETWORK_CLIENT:-/usr/local/lib/locachy/network-client}
+
+if [ ! -x "$COMPUTE_BIN" ]; then
+    SELF_DIR=$(cd "$(dirname "$0")" && pwd)
+    [ -x "$SELF_DIR/locachy-compute" ] && COMPUTE_BIN="$SELF_DIR/locachy-compute"
+fi
+
+rc_value() {
+    [ -r "$RC" ] || return 0
+    sed -n "s/^[[:space:]]*$1=\"\([^\"]*\)\".*/\1/p" "$RC" | tail -n 1
+}
+
+mkdir -p "$BASE"/{images,envs,vms,jobs,data} "$RUN"
+chmod 0700 "$RUN"
+
+# Wait briefly at boot for network-client to create locachy-net instead of
+# hitting process 1's 5 s restart backoff immediately.
+_i=0
+while [ ! -e "/run/netns/$NS" ] && [ "$_i" -lt 50 ]; do
+    sleep 0.1
+    _i=$((_i + 1))
+done
+if [ ! -e "/run/netns/$NS" ]; then
+    exit 0
+fi
+
+# Refresh Thunderbolt link-local nftables sets if TB binding is enabled.
+port=$(rc_value compute_port)
+port=${port:-27184}
+bind_tb=$(rc_value compute_bind_tb)
+args=(serve --port "$port")
+if [ "$bind_tb" = 1 ]; then
+    args+=(--bind-tb)
+    if [ -x "$NETWORK_CLIENT" ]; then
+        "$NETWORK_CLIENT" --sync-tb-filter 2>/dev/null || :
+    fi
+fi
+
+exec nsenter --net="/run/netns/$NS" -- "$COMPUTE_BIN" "${args[@]}"

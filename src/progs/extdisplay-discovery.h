@@ -20,6 +20,11 @@ struct extdisplay_discovery {
  * the child dies. */
 int extdisplay_discovery_start(struct extdisplay_discovery *d, int netns, int ifindex,
                                const char *name, const struct in6_addr *address, const char *code);
+/* Extended variant that also attaches an optional stable host_id and/or
+ * paired-only flag (when paired_only != 0, code is omitted from mDNS TXT). */
+int extdisplay_discovery_start_ex(struct extdisplay_discovery *d, int netns, int ifindex,
+                                  const char *name, const struct in6_addr *address,
+                                  const char *code, const char *host_id, int paired_only);
 /* 1: advertisement established, 0: still starting, -1: failed or gone. */
 int extdisplay_discovery_status(struct extdisplay_discovery *d);
 void extdisplay_discovery_stop(struct extdisplay_discovery *d);

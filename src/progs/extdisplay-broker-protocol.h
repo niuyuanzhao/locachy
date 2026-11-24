@@ -28,6 +28,11 @@
 #define EXTDISPLAY_BROKER_CODE_GROUP 4
 #define EXTDISPLAY_BROKER_CODE_TEXT 33 /* 26 symbols, 6 '-', NUL */
 
+/* Long-term paired peers loaded from /etc/locachy/peers/peers/ JSON files. */
+#define EXTDISPLAY_BROKER_MAX_PEERS 32
+#define EXTDISPLAY_BROKER_PEER_ID_MAX 48 /* "locachy-peer-" + up to 32 hex + NUL */
+#define EXTDISPLAY_BROKER_HOST_ID_MAX 33 /* up to 32 hex + NUL */
+
 /* Waiting for the sender: from the code on screen to a finished handshake. */
 #ifdef EXTDISPLAY_BROKER_TEST_ATTEMPT_SECONDS
 #define EXTDISPLAY_BROKER_ATTEMPT_SECONDS EXTDISPLAY_BROKER_TEST_ATTEMPT_SECONDS
@@ -49,10 +54,19 @@ int extdisplay_broker_code_decode(const char *text, size_t length, unsigned char
 #ifndef EXTDISPLAY_BROKER_NO_OPENSSL
 #include <openssl/ssl.h>
 
-/* The key of the current attempt, held by the server context (app data). */
+/* One persistent paired peer's PSK identity and 128-bit key. */
+struct extdisplay_broker_peer_key {
+    char identity[EXTDISPLAY_BROKER_PEER_ID_MAX];
+    unsigned char key[EXTDISPLAY_BROKER_KEY_BYTES];
+};
+
+/* The key of the current attempt (plus any long-term paired peers), held by
+ * the server context (app data). Zero-initialized structs remain valid. */
 struct extdisplay_broker_key {
     unsigned char key[EXTDISPLAY_BROKER_KEY_BYTES];
     int set;
+    struct extdisplay_broker_peer_key peers[EXTDISPLAY_BROKER_MAX_PEERS];
+    int peer_count;
 };
 
 /* Library setup without the system openssl.cnf, so the profile is exactly

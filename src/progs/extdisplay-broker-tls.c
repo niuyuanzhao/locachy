@@ -103,16 +103,37 @@ int extdisplay_broker_tls_init(void)
 
 /* The identity is checked here and only here: OpenSSL itself does not
  * compare it with anything. Anything else gets no key, which fails the
- * handshake. */
+ * handshake. Accepts the ephemeral attempt key (EXTDISPLAY_BROKER_IDENTITY)
+ * when set, and any persistent once-forever paired peer identity loaded from
+ * /etc/locachy/peers. */
+static int find_peer_psk(const struct extdisplay_broker_key *key, const char *identity, unsigned char *psk)
+{
+    int count = key->peer_count;
+    if (count < 0) return 0;
+    if (count > EXTDISPLAY_BROKER_MAX_PEERS) count = EXTDISPLAY_BROKER_MAX_PEERS;
+    for (int i = 0; i < count; i++) {
+        if (key->peers[i].identity[0] && strcmp(identity, key->peers[i].identity) == 0) {
+            if (psk) memcpy(psk, key->peers[i].key, EXTDISPLAY_BROKER_KEY_BYTES);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static unsigned int psk_server(SSL *ssl, const char *identity, unsigned char *psk, unsigned int max)
 {
     struct extdisplay_broker_key *key = SSL_CTX_get_app_data(SSL_get_SSL_CTX(ssl));
-    if (!key || !key->set || !identity || strcmp(identity, EXTDISPLAY_BROKER_IDENTITY) != 0 ||
-        max < EXTDISPLAY_BROKER_KEY_BYTES) {
+    if (!key || !identity || max < EXTDISPLAY_BROKER_KEY_BYTES) {
         return 0;
     }
-    memcpy(psk, key->key, EXTDISPLAY_BROKER_KEY_BYTES);
-    return EXTDISPLAY_BROKER_KEY_BYTES;
+    if (key->set && strcmp(identity, EXTDISPLAY_BROKER_IDENTITY) == 0) {
+        memcpy(psk, key->key, EXTDISPLAY_BROKER_KEY_BYTES);
+        return EXTDISPLAY_BROKER_KEY_BYTES;
+    }
+    if (find_peer_psk(key, identity, psk)) {
+        return EXTDISPLAY_BROKER_KEY_BYTES;
+    }
+    return 0;
 }
 
 /* A ClientHello without ALPN never reaches the select callback below, so
@@ -186,11 +207,17 @@ int extdisplay_broker_tls_verify(SSL *ssl)
     const unsigned char *alpn = NULL;
     unsigned int length = 0;
     const char *identity = SSL_get_psk_identity(ssl);
+    const struct extdisplay_broker_key *key = SSL_CTX_get_app_data(SSL_get_SSL_CTX(ssl));
+    int id_ok = 0;
     SSL_get0_alpn_selected(ssl, &alpn, &length);
+    if (identity && key) {
+        if (key->set && strcmp(identity, EXTDISPLAY_BROKER_IDENTITY) == 0) id_ok = 1;
+        else if (find_peer_psk(key, identity, NULL)) id_ok = 1;
+    }
     if (SSL_version(ssl) != TLS1_2_VERSION || !cipher ||
         SSL_CIPHER_get_protocol_id(cipher) != EXTDISPLAY_BROKER_CIPHER_ID || SSL_session_reused(ssl) ||
         length != strlen(EXTDISPLAY_BROKER_ALPN) || !alpn || memcmp(alpn, EXTDISPLAY_BROKER_ALPN, length) != 0 ||
-        !identity || strcmp(identity, EXTDISPLAY_BROKER_IDENTITY) != 0) {
+        !id_ok) {
         return -1;
     }
     return 0;

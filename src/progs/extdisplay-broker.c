@@ -55,7 +55,8 @@
 enum attempt_state { IDLE, WAIT_CARRIER, WAIT_ADDRESS, DISCOVERY, STARTING, ATTEMPT, SESSION };
 
 static int control = -1, home_ns = -1, nl_home = -1, home_monitor = -1, lock_fd = -1, signals = -1, log_fd = 2;
-static int watching;
+static int watching, shared_netns_mode, paired_only_mode;
+static char host_id[EXTDISPLAY_BROKER_HOST_ID_MAX];
 static void candidate_baseline(void);
 static uid_t pump_uid;
 static gid_t pump_gid;
@@ -66,7 +67,7 @@ static struct lease {
     char name[IFNAMSIZ];
     int ifindex;
     struct identity id;
-    int recorded, moved;
+    int recorded, moved, shared;
     int sess_ns, nl_sess, nl_mon, sess_ifindex;
     struct in6_addr linklocal;
     pid_t pump;
@@ -390,7 +391,13 @@ static void lease_release(void)
     int returned = 0;
     stop_attempt();
     close_fd(&L.nl_mon);
-    if (L.moved && L.nl_sess >= 0) {
+    if (L.shared) {
+        /* Shared-link mode left the device in locachy-net: never move or close
+         * home_ns / nl_home, only detach our lease handle. */
+        L.nl_sess = -1;
+        L.sess_ns = -1;
+        returned = 1;
+    } else if (L.moved && L.nl_sess >= 0) {
         if (!same_device(L.nl_sess, L.sess_ifindex, &L.id)) {
             /* Never move a device that is not the one leased. */
             broker_log("not returning %s: it is not the leased device any more", L.name);
@@ -415,8 +422,10 @@ static void lease_release(void)
             }
         }
     }
-    close_fd(&L.nl_sess);
-    close_fd(&L.sess_ns); /* the last reference: the session namespace ends */
+    if (!L.shared) {
+        close_fd(&L.nl_sess);
+        close_fd(&L.sess_ns); /* the last reference: the session namespace ends */
+    }
     /* The record goes when the device is back in locachy-net, or never left.
      * Otherwise it stays, and the device cannot be leased again until it is. */
     if (L.recorded && (returned || !L.moved)) record_remove(L.id.address);
@@ -458,6 +467,157 @@ static int random_bytes(unsigned char *out, size_t length)
     return 0;
 }
 
+static int hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static int parse_hex_bytes(const char *hex, unsigned char *out, size_t nbytes)
+{
+    if (strlen(hex) != nbytes * 2) return -1;
+    for (size_t i = 0; i < nbytes; i++) {
+        int hi = hex_nibble(hex[2 * i]), lo = hex_nibble(hex[2 * i + 1]);
+        if (hi < 0 || lo < 0) return -1;
+        out[i] = (unsigned char)((hi << 4) | lo);
+    }
+    return 0;
+}
+
+/* Minimal JSON string-field extractor for root-only peer files under
+ * BROKER_PEERS_DIR: avoids adding json-c to the privileged broker binary. */
+static int json_get_string(const char *buf, const char *key, char *out, size_t out_size)
+{
+    char pat[80];
+    int n = snprintf(pat, sizeof pat, "\"%s\"", key);
+    if (n <= 0 || (size_t)n >= sizeof pat) return -1;
+    const char *p = strstr(buf, pat);
+    if (!p) return -1;
+    p += n;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    if (*p != ':') return -1;
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    if (*p != '"') return -1;
+    p++;
+    size_t used = 0;
+    while (*p && *p != '"') {
+        if (*p == '\\') return -1; /* peer IDs/keys never need escapes */
+        if (used + 1 >= out_size) return -1;
+        out[used++] = *p++;
+    }
+    if (*p != '"') return -1;
+    out[used] = 0;
+    return 0;
+}
+
+static int json_has_scope(const char *buf, const char *scope)
+{
+    const char *p = strstr(buf, "\"scopes\"");
+    if (!p) return 0;
+    p = strchr(p, '[');
+    if (!p) return 0;
+    const char *end = strchr(p, ']');
+    if (!end) return 0;
+    char needle[40];
+    int n = snprintf(needle, sizeof needle, "\"%s\"", scope);
+    if (n <= 0 || (size_t)n >= sizeof needle) return 0;
+    const char *hit = strstr(p, needle);
+    return hit && hit < end;
+}
+
+/* Reads /etc/locachy/rc.conf (or BROKER_RC_CONF) for optional settings:
+ *   extdisplay_tb_shared="1"       leave thunderbolt-net in locachy-net
+ *   extdisplay_paired_only="1"     do not accept/advertise cleartext ephemeral code
+ *                                  when at least one paired peer is loaded
+ *   service_compute=... + compute_bind_tb="1"  automatically enables shared mode */
+static void load_rc_options(void)
+{
+    FILE *f = fopen(BROKER_RC_CONF, "re");
+    if (!f) return;
+    char line[512];
+    int has_compute = 0, compute_tb = 0, explicit_shared = -1;
+    while (fgets(line, sizeof line, f)) {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '#' || *p == '\n' || *p == 0) continue;
+        if (!strncmp(p, "extdisplay_tb_shared=\"1\"", 24)) explicit_shared = 1;
+        else if (!strncmp(p, "extdisplay_tb_shared=\"0\"", 24)) explicit_shared = 0;
+        else if (!strncmp(p, "extdisplay_paired_only=\"1\"", 26)) paired_only_mode = 1;
+        else if (!strncmp(p, "service_compute=\"", 17)) has_compute = 1;
+        else if (!strncmp(p, "compute_bind_tb=\"1\"", 19)) compute_tb = 1;
+    }
+    fclose(f);
+    if (explicit_shared == 1) shared_netns_mode = 1;
+    else if (explicit_shared == 0) shared_netns_mode = 0;
+    else if (has_compute && compute_tb) shared_netns_mode = 1;
+}
+
+/* Loads host_id from BROKER_PEERS_DIR/host.json (if present) and persistent
+ * extdisplay peer PSKs from BROKER_PEERS_DIR/peers/ JSON files. Every directory
+ * and file must be owned by this uid with no group/other permissions. */
+static void load_peer_keys(struct extdisplay_broker_key *dst)
+{
+    char path[PATH_MAX], buf[16384];
+    struct stat st;
+    dst->peer_count = 0;
+    host_id[0] = 0;
+    if (lstat(BROKER_PEERS_DIR, &st) < 0 || !S_ISDIR(st.st_mode) || st.st_uid != geteuid() || (st.st_mode & 077))
+        return;
+
+    snprintf(path, sizeof path, "%s/host.json", BROKER_PEERS_DIR);
+    int hfd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (hfd >= 0) {
+        if (fstat(hfd, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == geteuid() && !(st.st_mode & 077) &&
+            st.st_size > 0 && st.st_size < (off_t)sizeof buf) {
+            ssize_t r = read(hfd, buf, (size_t)st.st_size);
+            if (r > 0) {
+                buf[r] = 0;
+                char hid[EXTDISPLAY_BROKER_HOST_ID_MAX];
+                if (json_get_string(buf, "host_id", hid, sizeof hid) == 0 && strlen(hid) >= 16) {
+                    memcpy(host_id, hid, strlen(hid) + 1);
+                }
+            }
+        }
+        close(hfd);
+    }
+
+    snprintf(path, sizeof path, "%s/peers", BROKER_PEERS_DIR);
+    if (lstat(path, &st) < 0 || !S_ISDIR(st.st_mode) || st.st_uid != geteuid() || (st.st_mode & 077)) return;
+    DIR *dir = opendir(path);
+    if (!dir) return;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) && dst->peer_count < EXTDISPLAY_BROKER_MAX_PEERS) {
+        size_t len = strlen(entry->d_name);
+        if (entry->d_name[0] == '.' || len < 6 || strcmp(entry->d_name + len - 5, ".json") != 0) continue;
+        char fpath[PATH_MAX];
+        if ((size_t)snprintf(fpath, sizeof fpath, "%s/%s", path, entry->d_name) >= sizeof fpath) continue;
+        int fd = open(fpath, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (fd < 0) continue;
+        if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == geteuid() && !(st.st_mode & 077) &&
+            st.st_size > 0 && st.st_size < (off_t)sizeof buf) {
+            ssize_t r = read(fd, buf, (size_t)st.st_size);
+            if (r > 0) {
+                buf[r] = 0;
+                char ident[EXTDISPLAY_BROKER_PEER_ID_MAX], psk_hex[40];
+                if (json_has_scope(buf, "extdisplay") &&
+                    json_get_string(buf, "extdisplay_identity", ident, sizeof ident) == 0 &&
+                    strncmp(ident, "locachy-peer-", 13) == 0 &&
+                    json_get_string(buf, "extdisplay_psk_hex", psk_hex, sizeof psk_hex) == 0 &&
+                    parse_hex_bytes(psk_hex, dst->peers[dst->peer_count].key, EXTDISPLAY_BROKER_KEY_BYTES) == 0) {
+                    memcpy(dst->peers[dst->peer_count].identity, ident, strlen(ident) + 1);
+                    dst->peer_count++;
+                }
+            }
+        }
+        OPENSSL_cleanse(buf, sizeof buf);
+        close(fd);
+    }
+    closedir(dir);
+}
+
 static void pump_report(const char *line)
 {
 #ifdef EXTDISPLAY_BROKER_TEST_PROBES
@@ -479,11 +639,14 @@ static const char *start_attempt(void)
     char code[EXTDISPLAY_BROKER_CODE_TEXT];
     const char *error = NULL;
     memset(&a, 0, sizeof a);
+    load_peer_keys(&a.key);
     if (random_bytes(a.key.key, sizeof a.key.key) < 0) {
         OPENSSL_cleanse(&a, sizeof a);
         return "no random bytes";
     }
-    a.key.set = 1;
+    /* When paired-only mode is active and at least one persistent extdisplay
+     * peer is configured, disable the ephemeral cleartext-code identity. */
+    a.key.set = (paired_only_mode && a.key.peer_count > 0) ? 0 : 1;
     if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, plain) < 0 ||
         socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, status) < 0) {
         error = "cannot create the stream";
@@ -514,6 +677,11 @@ static const char *start_attempt(void)
         error = "cannot format the pairing";
         goto out;
     }
+    /* Paired-only: no cleartext code is accepted or advertised; send an
+     * all-zero Base32 placeholder on the frontend control channel so
+     * extdisplay-setup stays wire-compatible while psk_server refuses the
+     * ephemeral identity. */
+    if (!a.key.set) snprintf(code, sizeof code, "AAAA-AAAA-AAAA-AAAA-AAAA-AAAA-AA");
     memcpy(L.code, code, sizeof L.code);
     L.state = STARTING;
     L.deadline = extdisplay_broker_now_ms() + 5000;
@@ -574,7 +742,8 @@ static const char *prepare_link(void)
     }
     int found = nl_linklocal(L.nl_sess, L.sess_ifindex, &L.linklocal, &other);
     if (found < 0) return "cannot read the interface addresses";
-    if (other || nl_default_route(L.nl_sess) != 0) return "the session namespace is not link-local only";
+    if (!L.shared && (other || nl_default_route(L.nl_sess) != 0))
+        return "the session namespace is not link-local only";
     if (!found) return NULL;
     preparing("listener");
     return start_attempt();
@@ -606,6 +775,25 @@ static const char *lease_start(const char *name, int expected_index, const char 
     stale_check();
     if (stale_record_for(&L.id)) {
         return "the previous lease of this device did not end cleanly; it is not back in locachy-net yet";
+    }
+    if (shared_netns_mode) {
+        /* Shared-link mode (Thunderbolt decoupling): leave the thunderbolt-net
+         * interface in locachy-net so service_compute and other host-to-host
+         * links continue using it concurrently. The TLS pump still binds
+         * strictly to fe80::%ifindex + SO_BINDTOIFINDEX inside its sandbox. */
+        L.shared = 1;
+        L.sess_ns = home_ns;
+        L.nl_sess = nl_home;
+        L.sess_ifindex = L.ifindex;
+        L.nl_mon = nl_open(RTMGRP_LINK | RTMGRP_IPV6_IFADDR);
+        if (L.nl_mon < 0) return "cannot monitor the link";
+        if (device_settings(L.name) < 0) return "cannot set the interface's IPv6 settings";
+        if (nl_link_up(L.nl_sess, L.sess_ifindex) < 0) return "cannot bring the interface up";
+        (void)nl_prepare_event(L.nl_mon, L.sess_ifindex);
+        L.state = WAIT_CARRIER;
+        L.deadline = 0;
+        preparing("carrier");
+        return prepare_link();
     }
     if (record_write() < 0) return "cannot record the lease";
     L.recorded = 1;
@@ -792,7 +980,16 @@ static void handle_status(void)
     }
     line[n] = 0;
     if (!strcmp(line, "listening") && L.state == STARTING) {
-        if (extdisplay_discovery_start(&L.discovery, L.sess_ns, L.sess_ifindex, L.name, &L.linklocal, L.code) < 0) {
+        int po = 0;
+        if (paired_only_mode) {
+            struct extdisplay_broker_key check;
+            memset(&check, 0, sizeof check);
+            load_peer_keys(&check);
+            po = check.peer_count > 0;
+            OPENSSL_cleanse(&check, sizeof check);
+        }
+        if (extdisplay_discovery_start_ex(&L.discovery, L.sess_ns, L.sess_ifindex, L.name, &L.linklocal,
+                                          L.code, host_id[0] ? host_id : NULL, po) < 0) {
             fail_preparation("cannot start cable discovery");
             return;
         }
@@ -906,8 +1103,22 @@ int main(int argc, char **argv)
     sigset_t set;
     struct passwd *pw;
     char path_boot[] = "/proc/sys/kernel/random/boot_id";
-    if (argc != 3 || strcmp(argv[1], "--control-fd") != 0 || (control = take_control(argv[2])) < 0) {
-        fprintf(stderr, "usage: extdisplay-broker --control-fd N (a SOCK_SEQPACKET socket from extdisplay)\n");
+    int ctl_arg = -1;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--control-fd") && i + 1 < argc && ctl_arg < 0) {
+            ctl_arg = i + 1;
+            i++;
+        } else if (!strcmp(argv[i], "--shared-netns")) {
+            shared_netns_mode = 1;
+        } else if (!strcmp(argv[i], "--paired-only")) {
+            paired_only_mode = 1;
+        } else {
+            fprintf(stderr, "usage: extdisplay-broker [--shared-netns] [--paired-only] --control-fd N\n");
+            return 2;
+        }
+    }
+    if (ctl_arg < 0 || (control = take_control(argv[ctl_arg])) < 0) {
+        fprintf(stderr, "usage: extdisplay-broker [--shared-netns] [--paired-only] --control-fd N (a SOCK_SEQPACKET socket from extdisplay)\n");
         return 2;
     }
     /* Only the control socket and the standard descriptors stay. */
@@ -940,6 +1151,10 @@ int main(int argc, char **argv)
     fclose(f);
     boot_id[strcspn(boot_id, "\n")] = 0;
     if (state_dir() < 0) startup_fail("another broker is running, or its state directory is unusable");
+    int cli_shared = shared_netns_mode, cli_paired_only = paired_only_mode;
+    load_rc_options();
+    if (cli_shared) shared_netns_mode = 1;
+    if (cli_paired_only) paired_only_mode = 1;
     if (enter_home() < 0) startup_fail("cannot enter the network namespace of the network");
     /* Subscribe before the first snapshot, using a separate socket from
      * synchronous netlink requests so those cannot consume our events. */
