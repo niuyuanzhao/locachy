@@ -25,6 +25,8 @@ link=("$src/base/key-action.c" "$src/base/help.c" -Wl,--gc-sections)
 "$out/settings-close"
 "${cc[@]}" "$src/tools/test-settings-optional.c" "${link[@]}" -o "$out/settings-optional"
 "$out/settings-optional"
+"${cc[@]}" "$src/tools/test-settings-features.c" "${link[@]}" -o "$out/settings-features"
+"$out/settings-features"
 "${cc[@]}" "$src/tools/test-term-close.c" "${link[@]}" -o "$out/term-close"
 timeout 30 "$out/term-close" "$out/term-close-fixtures"
 "${cc[@]}" "$src/tools/test-monitor-layout.c" "${link[@]}" -o "$out/monitor-layout"
@@ -51,6 +53,14 @@ for test in key-actions keys-name keyboard-devices term-clipboard screen-mirror 
     "${cc[@]}" "$src/tools/test-$test.c" "${link[@]}" -o "$out/$test"
     "$out/$test"
 done
+# modload: modprobe.d precedence/options/blacklist, /proc/cmdline blacklist, softdep pre/post, modules-load.d.
+"${cc[@]}" "$src/tools/test-modload.c" "${link[@]}" -o "$out/modload"
+"$out/modload" "$out/modload-fixtures"
+"${cc[@]}" -fsanitize=address,undefined "$src/tools/test-modload.c" -o "$out/modload-san"
+"$out/modload-san" "$out/modload-san-fixtures"
+# DRM card selection and pure-sysfs enumeration (never wakes discrete GPUs).
+"${cc[@]}" "$src/tools/test-drm-card.c" "${link[@]}" -o "$out/drm-card"
+"$out/drm-card"
 # Quit and the clipboard come from key_action in every program, never from raw key values.
 # seat's fallback labwc configuration: Super+Esc stays a home key without the generated one.
 "${cc[@]}" "$src/tools/test-labwc-fallback.c" "${link[@]}" -o "$out/labwc-fallback"
@@ -149,5 +159,8 @@ sh "$src/tools/test-extdisplay.sh"
 # The broker: the pairing code, the cable TLS profile, and the lease in user and network namespaces.
 sh "$src/tools/test-extdisplay-broker.sh" "$out/extdisplay-broker"
 sh "$src/tools/test-extdisplay-discovery.sh" "$out/extdisplay-discovery"
+bash "$src/tools/test-peers.sh" "$out/peers"
+bash "$src/tools/test-compute.sh" "$out/compute"
+bash "$src/tools/test-winmaint.sh"
 sh "$src/tools/test-screen-power.sh" "$out/screen-power"
 printf '%s\n' 'PASS device-free interaction regressions; real KMS/libinput/IME hardware acceptance remains separate.'

@@ -14933,6 +14933,300 @@ msgstr "显示较少详情"
 msgid "Show more details..."
 msgstr "显示更多详情..."
 
+#: progs/settings.c
+msgid "Paired Devices"
+msgstr "已配对设备"
+
+#: progs/settings.c
+msgid "Compute Node"
+msgstr "计算节点"
+
+#: progs/settings.c
+msgid "Maintenance Windows"
+msgstr "维护用 Windows"
+
+#: progs/settings.c
+#, c-format
+msgid "%s: no DRM cards found; keeping auto."
+msgstr "%s：未找到 DRM 显卡，保持自动。"
+
+#: progs/settings.c
+#, c-format
+msgid "%s: %s (takes effect on next start)."
+msgstr "%s：%s（下次启动生效）。"
+
+#: progs/settings.c
+#, c-format
+msgid "Saved, but could not refresh Thunderbolt filter: %s"
+msgstr "已保存，但未能刷新雷电接口防火墙规则：%s"
+
+#: progs/settings.c
+msgid "Thunderbolt filter updated."
+msgstr "雷电接口防火墙规则已更新。"
+
+#: progs/settings.c
+#, c-format
+msgid "Thunderbolt filter update failed: %s"
+msgstr "雷电接口防火墙规则更新失败：%s"
+
+#: progs/settings.c
+msgid "Paired devices closed."
+msgstr "已配对设备管理已关闭。"
+
+#: progs/settings.c
+msgid "Paired devices did not finish."
+msgstr "已配对设备管理未能完成。"
+
+#: progs/settings.c
+msgid "Wait: a Maintenance Windows job is still running."
+msgstr "请稍候：维护用 Windows 任务仍在运行。"
+
+#: progs/settings.c
+#, c-format
+msgid "Could not create Maintenance Windows: %s"
+msgstr "无法创建维护用 Windows：%s"
+
+#: progs/settings.c
+#, c-format
+msgid "Creating Maintenance Windows partition (%d GiB)..."
+msgstr "正在创建维护用 Windows 分区（%d GiB）..."
+
+#: progs/settings.c
+msgid "Enter again: reclaim the Windows partition (the second Enter removes it)"
+msgstr "再按一次 Enter：回收 Windows 分区（第二次 Enter 将移除它）"
+
+#: progs/settings.c
+#, c-format
+msgid "Could not reclaim Maintenance Windows: %s"
+msgstr "无法回收维护用 Windows：%s"
+
+#: progs/settings.c
+msgid "Reclaiming Maintenance Windows partition..."
+msgstr "正在回收维护用 Windows 分区..."
+
+#: progs/settings.c
+msgid "Maintenance Windows is not created yet."
+msgstr "维护用 Windows 尚未创建。"
+
+#: progs/settings.c
+msgid "Enter again: arm one-shot bare-metal Windows boot (LOCachy stays default)."
+msgstr "再按一次 Enter：设置下次裸机单次启动 Windows（LOCachy 仍为默认）。"
+
+#: progs/settings.c
+#, c-format
+msgid "Could not arm one-shot Windows boot: %s"
+msgstr "无法设置单次启动 Windows：%s"
+
+#: progs/settings.c
+msgid "Arming one-shot Windows boot..."
+msgstr "正在设置单次启动 Windows..."
+
+#: progs/settings.c
+#, c-format
+msgid "Could not heal UEFI boot order: %s"
+msgstr "无法修复 UEFI 启动顺序：%s"
+
+#: progs/settings.c
+msgid "Restoring LOCachy first in UEFI boot order..."
+msgstr "正在将 LOCachy 恢复到 UEFI 启动顺序首位..."
+
+#: progs/settings.c
+msgid "Windows virtual machine closed."
+msgstr "Windows 虚拟机已关闭。"
+
+#: progs/settings.c
+msgid "Windows virtual machine did not finish."
+msgstr "Windows 虚拟机未能正常结束。"
+
+#: progs/settings.c
+msgid "Maintenance Windows partition created."
+msgstr "维护用 Windows 分区已创建。"
+
+#: progs/settings.c
+msgid "Maintenance Windows shrink plan armed; reboot to finish creation."
+msgstr "维护用 Windows 缩容计划已就绪；重启后完成创建。"
+
+#: progs/settings.c
+msgid "Maintenance Windows partition reclaimed."
+msgstr "维护用 Windows 分区已回收。"
+
+#: progs/settings.c
+msgid "One-shot Windows boot armed; LOCachy stays default on the following restart."
+msgstr "已设置单次启动 Windows；之后再次重启将自动回到 LOCachy。"
+
+#: progs/settings.c
+msgid "UEFI boot order healed; LOCachy is first."
+msgstr "UEFI 启动顺序已修复，LOCachy 位于首位。"
+
+#: progs/settings.c
+msgid "Maintenance Windows job finished."
+msgstr "维护用 Windows 任务已完成。"
+
+#: progs/settings.c
+#, c-format
+msgid "Maintenance Windows job failed: %s"
+msgstr "维护用 Windows 任务失败：%s"
+
+#: progs/settings.c
+msgid "Display GPU"
+msgstr "显示显卡"
+
+#: progs/settings.c
+msgid "Extended display GPU"
+msgstr "扩展屏显卡"
+
+#: progs/settings.c
+msgid "Thunderbolt shared link"
+msgstr "雷电共享链路"
+
+#: progs/settings.c
+msgid "Extended display paired only"
+msgstr "扩展屏仅允许已配对设备"
+
+#: progs/settings.c
+#, c-format
+msgid "%d paired  (Enter: manage)"
+msgid_plural "%d paired  (Enter: manage)"
+msgstr[0] "已配对 %d 台  （Enter：管理）"
+
+#: progs/settings.c
+msgid "none  (Enter: manage)"
+msgstr "无  （Enter：管理）"
+
+#: progs/settings.c
+msgid "Manage  (Enter)"
+msgstr "管理  （Enter）"
+
+#: progs/settings.c
+msgid "Paired devices"
+msgstr "已配对设备"
+
+#: progs/settings.c
+msgid "Compute node service"
+msgstr "计算节点服务"
+
+#: progs/settings.c
+msgid "Bind compute on Thunderbolt"
+msgstr "在雷电接口上监听计算服务"
+
+#: progs/settings.c
+msgid "Compute GPU passthrough"
+msgstr "计算容器直通 GPU"
+
+#: progs/settings.c
+msgid "Windows partition size"
+msgstr "Windows 分区大小"
+
+#: progs/settings.c
+msgid "not created"
+msgstr "未创建"
+
+#: progs/settings.c
+#, c-format
+msgid "created, %d GiB"
+msgstr "已创建，%d GiB"
+
+#: progs/settings.c
+msgid "created"
+msgstr "已创建"
+
+#: progs/settings.c
+msgid "Boot Windows once (bare metal)"
+msgstr "单次启动 Windows（裸机）"
+
+#: progs/settings.c
+msgid "Enter: arm next boot"
+msgstr "Enter：设置下次启动"
+
+#: progs/settings.c
+msgid "Heal boot order"
+msgstr "修复启动顺序"
+
+#: progs/settings.c
+msgid "Enter: keep LOCachy first"
+msgstr "Enter：保持 LOCachy 优先"
+
+#: progs/settings.c
+msgid "Windows virtual machine"
+msgstr "Windows 虚拟机"
+
+#: progs/settings.c
+msgid "Enter: launch in terminal"
+msgstr "Enter：在终端中启动"
+
+#: progs/settings.c
+msgid "Thunderbolt link shared inside locachy-net; updating firewall..."
+msgstr "雷电链路在 locachy-net 内共享；正在更新防火墙..."
+
+#: progs/settings.c
+msgid "Thunderbolt link kept private to extended display; updating firewall..."
+msgstr "雷电链路保留为扩展屏专用；正在更新防火墙..."
+
+#: progs/settings.c
+msgid "Thunderbolt sharing set to auto; updating firewall..."
+msgstr "雷电共享已设为自动；正在更新防火墙..."
+
+#: progs/settings.c
+msgid "Extended display accepts paired devices only; applies on next session."
+msgstr "扩展屏仅接受已配对设备；下次会话生效。"
+
+#: progs/settings.c
+msgid "Extended display allows one-time pairing codes; applies on next session."
+msgstr "扩展屏允许一次性配对码；下次会话生效。"
+
+#: progs/settings.c
+msgid "Enter: list paired devices in a terminal (pair or revoke with locachy-pair)."
+msgstr "Enter：在终端中列出已配对设备（可用 locachy-pair 配对或撤销）。"
+
+#: progs/settings.c
+msgid "Compute node service on."
+msgstr "计算节点服务已开启。"
+
+#: progs/settings.c
+msgid "Compute node service off."
+msgstr "计算节点服务已关闭。"
+
+#: progs/settings.c
+msgid "Compute binds on Thunderbolt too; updating firewall..."
+msgstr "计算服务同时监听雷电接口；正在更新防火墙..."
+
+#: progs/settings.c
+msgid "Compute listens on Tailscale only; updating firewall..."
+msgstr "计算服务仅监听 Tailscale；正在更新防火墙..."
+
+#: progs/settings.c
+msgid "Compute GPU passthrough on; applies to new compute jobs."
+msgstr "计算 GPU 直通已开启；对新提交的计算任务生效。"
+
+#: progs/settings.c
+msgid "Compute GPU passthrough off; applies to new compute jobs."
+msgstr "计算 GPU 直通已关闭；对新提交的计算任务生效。"
+
+#: progs/settings.c
+#, c-format
+msgid "Windows partition size set to %d GiB (used when creating)."
+msgstr "Windows 分区大小已设为 %d GiB（创建时生效）。"
+
+#: progs/settings.c
+msgid "Enter, twice: reclaim the Windows partition and return its space."
+msgstr "连续按两次 Enter：回收 Windows 分区并归还空间。"
+
+#: progs/settings.c
+msgid "Enter: create the Maintenance Windows partition with the size above."
+msgstr "Enter：按上方大小创建维护用 Windows 分区。"
+
+#: progs/settings.c
+msgid "Enter, twice: arm one-shot bare-metal Windows boot (LOCachy stays default)."
+msgstr "连续按两次 Enter：设置下次裸机单次启动 Windows（LOCachy 仍为默认）。"
+
+#: progs/settings.c
+msgid "Enter: restore LOCachy first in UEFI boot order."
+msgstr "Enter：将 LOCachy 恢复为 UEFI 首选启动项。"
+
+#: progs/settings.c
+msgid "Enter: launch QEMU/KVM in a terminal (needs a graphical session for display, or VNC)."
+msgstr "Enter：在终端中启动 QEMU/KVM（显示画面需要图形会话或 VNC）。"
+
 #, c-format
 #~ msgid "%s [y/N]"
 #~ msgstr "%s [y/N]"

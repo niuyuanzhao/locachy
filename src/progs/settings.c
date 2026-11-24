@@ -62,6 +62,7 @@ __attribute__((weak)) void screen_fill_px(int x, int y, int w, int h, uint32_t r
 __attribute__((weak)) int clipboard_set(int primary, const void *text, size_t size);
 __attribute__((weak)) int key_poll_many(struct pollfd *extra, size_t count, int timeout_ms);
 __attribute__((weak)) int keys_modifiers(void);
+__attribute__((weak)) int screen_list_cards(struct screen_card_info *out, int max);
 
 /* The modifiers held at the last key read (none in tests without keys.c). */
 static int mods_now(void)
@@ -324,6 +325,41 @@ enum { EXTD_AUTO, EXTD_HW, EXTD_SW, NEXTD };
 static const char *const extd_values[NEXTD] = { NULL, "hw", "sw" };
 static const char *const extd_labels[NEXTD] = { N_("auto (GPU if supported)"), N_("GPU hardware (prefer H.264)"), N_("CPU sandbox only") };
 static int extd_decode;
+/* Display and extended-display DRM card selectors (display_card, extdisplay_card),
+ * Thunderbolt shared link (extdisplay_tb_shared: -1 auto, 1 on, 0 off), and
+ * paired-only mode (extdisplay_paired_only). */
+static char display_card_cfg[64] = "auto";
+static char extdisplay_card_cfg[64] = "auto";
+static struct screen_card_info drm_cards[8];
+static int ndrm_cards;
+static int extd_tb_shared = -1;
+static int extd_paired_only;
+/* Headless compute node: service_compute, compute_bind_tb, compute_gpu. */
+#define COMPUTE_SERVICE "/usr/local/lib/locachy/compute-client"
+static int compute_on;
+static int compute_bind_tb;
+static int compute_gpu = 1;
+/* Paired devices (locachy-pair): count cached from locachy-pair list --machine (-1 unknown). */
+#ifndef LOCACHY_PAIR
+#define LOCACHY_PAIR "/usr/local/bin/locachy-pair"
+#endif
+static int paired_peers_count = -1;
+/* Maintenance Windows (locachy-winmaint): preferred size, state.json summary,
+ * two-step Enter confirmations, and active job tracking. */
+#ifndef LOCACHY_WINMAINT
+#define LOCACHY_WINMAINT "/usr/local/bin/locachy-winmaint"
+#endif
+#ifndef WINMAINT_STATE_FILE
+#define WINMAINT_STATE_FILE "/var/lib/locachy/winmaint/state.json"
+#endif
+static const int winmaint_sizes[] = { 40, 48, 64, 96, 128 };
+#define NWINMAINT_SIZES ((int)(sizeof winmaint_sizes / sizeof winmaint_sizes[0]))
+static int winmaint_size_gib = 48;
+static int winmaint_created, winmaint_created_gib;
+static int winmaint_reclaim_asked, winmaint_boot_once_asked;
+static int winmaint_job;
+static char winmaint_what[24];
+static int tb_sync_job;
 static int cpu_opt_auto = -1; /* 1 auto native ISA, 0 baseline; -1 unset (read from /usr/local/lib/locachy/cpu) */
 /* rc.conf power_profile: CPU energy preference and ACPI platform profile. */
 enum { PPROF_AUTO, PPROF_POWER, PPROF_BALANCED, PPROF_PERF, NPPROFS };
@@ -1305,6 +1341,24 @@ static void on_rc(const char *name, const char *value, void *arg)
         for (int i = 1; i < NEXTD; i++) {
             if (strcmp(value, extd_values[i]) == 0) extd_decode = i;
         }
+    } else if (strcmp(name, "display_card") == 0) {
+        snprintf(display_card_cfg, sizeof display_card_cfg, "%s", value[0] ? value : "auto");
+    } else if (strcmp(name, "extdisplay_card") == 0) {
+        snprintf(extdisplay_card_cfg, sizeof extdisplay_card_cfg, "%s", value[0] ? value : "auto");
+    } else if (strcmp(name, "extdisplay_tb_shared") == 0) {
+        extd_tb_shared = strcmp(value, "1") == 0 ? 1 : strcmp(value, "0") == 0 ? 0 : -1;
+    } else if (strcmp(name, "extdisplay_paired_only") == 0) {
+        extd_paired_only = strcmp(value, "1") == 0;
+    } else if (strcmp(name, "service_compute") == 0) {
+        compute_on = value[0] != '\0';
+    } else if (strcmp(name, "compute_bind_tb") == 0) {
+        compute_bind_tb = strcmp(value, "1") == 0;
+    } else if (strcmp(name, "compute_gpu") == 0) {
+        compute_gpu = strcmp(value, "0") != 0;
+    } else if (strcmp(name, "winmaint_size_gib") == 0 && value[0]) {
+        size_t digits = strspn(value, "0123456789");
+        int v = digits > 0 && digits <= 4 && value[digits] == '\0' ? atoi(value) : 0;
+        if (v >= 40 && v <= 4096) winmaint_size_gib = v;
     } else if (strcmp(name, "cpu_opt") == 0) {
         cpu_opt_auto = strcmp(value, "auto") == 0 ? 1 : strcmp(value, "baseline") == 0 ? 0 : -1;
     } else if (strcmp(name, "face_dlib") == 0) {
@@ -3314,9 +3368,49 @@ static int tz_index(void)
     return tk_index() + 1;
 }
 
-static int link_index(void)
+/* Display GPU and extended display cards/links: display_card, extdisplay_card,
+ * extdisplay_tb_shared, extdisplay_paired_only. */
+static int display_card_index(void)
 {
     return tz_index() + 3;
+}
+
+static int extd_card_index(void)
+{
+    return display_card_index() + 1;
+}
+
+static int extd_tb_shared_index(void)
+{
+    return extd_card_index() + 1;
+}
+
+static int extd_paired_only_index(void)
+{
+    return extd_tb_shared_index() + 1;
+}
+
+/* Paired devices (extdisplay and compute, locachy-pair). */
+static int paired_devices_index(void)
+{
+    return extd_paired_only_index() + 1;
+}
+
+/* Headless compute node: service_compute, compute_bind_tb, compute_gpu. */
+static int compute_index(void)
+{
+    return paired_devices_index() + 1;
+}
+
+/* Maintenance Windows: size, status (create/reclaim), boot once, heal boot, VM. */
+static int winmaint_index(void)
+{
+    return compute_index() + 3;
+}
+
+static int link_index(void)
+{
+    return winmaint_index() + 5;
 }
 
 /* The password, automatic locking, whether the screen is locked at boot, the
@@ -5201,10 +5295,13 @@ static void category_entries(int cat)
         add_items(bri_index(), 1);
         add_items(hw, 1 + nrow_maps);
         add_items(extd_index(), 1);
+        add_items(display_card_index(), 4);
         break;
     case CAT_DEVICES:
         add_title(_("Bluetooth"));
         add_items(bt_index(), 3);
+        add_title(_("Paired Devices"));
+        add_items(paired_devices_index(), 1);
         break;
     case CAT_POWER:
         add_title(_("Power Management"));
@@ -5233,6 +5330,8 @@ static void category_entries(int cat)
         add_items(rclone_index(), 3);
         add_title(_("Terminal"));
         add_items(tnet_index(), 1);
+        add_title(_("Compute Node"));
+        add_items(compute_index(), 3);
         break;
     case CAT_APPEARANCE:
         add_title(_("Colors"));
@@ -5300,6 +5399,8 @@ static void category_entries(int cat)
         add_items(opt_index(), NOPT_MODULES);
         add_title(_("Debug Cable"));
         add_items(link_index(), 1);
+        add_title(_("Maintenance Windows"));
+        add_items(winmaint_index(), 5);
         break;
     }
 }
@@ -5796,6 +5897,346 @@ static void duress_clear_row(void)
     security_submit(NULL, NULL, NULL, _("Duress password removed; duress is off."));
 }
 
+/* Pure-sysfs DRM card enumeration (never opens /dev/dri/card*, so suspended
+ * discrete GPUs stay asleep). */
+static void load_drm_cards(void)
+{
+    ndrm_cards = screen_list_cards ? screen_list_cards(drm_cards, (int)(sizeof drm_cards / sizeof drm_cards[0])) : 0;
+    if (ndrm_cards < 0) ndrm_cards = 0;
+}
+
+static int drm_card_match_index(const char *selector)
+{
+    if (!selector || !selector[0] || strcmp(selector, "auto") == 0) return -1;
+    for (int i = 0; i < ndrm_cards; i++) {
+        if (strcmp(selector, drm_cards[i].name) == 0 ||
+            (drm_cards[i].driver[0] && strcmp(selector, drm_cards[i].driver) == 0) ||
+            (drm_cards[i].pci[0] && strcmp(selector, drm_cards[i].pci) == 0)) {
+            return i;
+        }
+    }
+    return -2;
+}
+
+static void drm_card_label(const char *selector, char *out, size_t size)
+{
+    if (!selector || !selector[0] || strcmp(selector, "auto") == 0) {
+        snprintf(out, size, "%s", _("auto"));
+        return;
+    }
+    int idx = drm_card_match_index(selector);
+    if (idx >= 0) {
+        if (strcmp(selector, drm_cards[idx].name) == 0 && drm_cards[idx].driver[0]) {
+            snprintf(out, size, "%.16s (%.32s)", drm_cards[idx].name, drm_cards[idx].driver);
+        } else if (strcmp(selector, drm_cards[idx].name) != 0) {
+            snprintf(out, size, "%.63s (%.16s)", selector, drm_cards[idx].name);
+        } else {
+            snprintf(out, size, "%.16s", drm_cards[idx].name);
+        }
+    } else {
+        snprintf(out, size, "%.63s", selector);
+    }
+}
+
+static void cycle_drm_card(const char *rc_key, char *cfg, size_t cfg_size, int dir, const char *label)
+{
+    load_drm_cards();
+    int match = drm_card_match_index(cfg);
+    int n = 1 + ndrm_cards;
+    if (ndrm_cards == 0 && match == -1) {
+        snprintf(notice, sizeof notice, _("%s: no DRM cards found; keeping auto."), label);
+        return;
+    }
+    int cur = match == -1 ? 0 : match >= 0 ? match + 1 : -1;
+    int next = cur < 0 ? (dir > 0 ? 0 : n - 1) : (cur + (dir > 0 ? 1 : n - 1)) % n;
+    const char *val = next == 0 ? "auto" : drm_cards[next - 1].name;
+    if (rc_set(rc_key, val) < 0) {
+        snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+        return;
+    }
+    snprintf(cfg, cfg_size, "%s", val);
+    char shown[128];
+    drm_card_label(cfg, shown, sizeof shown);
+    snprintf(notice, sizeof notice, _("%s: %s (takes effect on next start)."), label, shown);
+}
+
+/* Refresh Thunderbolt link-local firewall sets through the job queue. */
+static int submit_tb_sync(void)
+{
+    char why[160] = "";
+    int id = 0, pos = 0;
+    if (jobs_submit("tb-sync", NULL, &id, &pos, why, sizeof why) < 0) {
+        snprintf(notice, sizeof notice, _("Saved, but could not refresh Thunderbolt filter: %s"), why);
+        return 0;
+    }
+    tb_sync_job = id;
+    return 1;
+}
+
+static void tb_sync_check(void)
+{
+    struct jobs_row r;
+    char log[96];
+    if (!tb_sync_job || !job_ended(tb_sync_job, &r, log, sizeof log)) {
+        return;
+    }
+    tb_sync_job = 0;
+    entries_dirty = 1;
+    full_redraw = 1;
+    if (strcmp(r.state, "done") == 0) {
+        snprintf(notice, sizeof notice, "%s", _("Thunderbolt filter updated."));
+    } else {
+        snprintf(notice, sizeof notice, _("Thunderbolt filter update failed: %s"), r.last[0] ? r.last : log);
+    }
+}
+
+/* Paired devices count (extdisplay & compute, /etc/locachy/peers). Never
+ * reads or displays private keys or PSK material. */
+static void load_paired_peers(void)
+{
+    char buf[8192];
+    paired_peers_count = -1;
+    if (access(LOCACHY_PAIR, X_OK) != 0) {
+        return;
+    }
+    char *const argv[] = { LOCACHY_PAIR, "list", "--machine", NULL };
+    command_output(argv, buf, sizeof buf);
+    int count = 0;
+    char *save = NULL;
+    for (char *line = strtok_r(buf, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        if (strchr(line, '\t') != NULL) count++;
+    }
+    paired_peers_count = count;
+}
+
+static void manage_paired_devices(void)
+{
+    if (access(LOCACHY_PAIR, X_OK) != 0) {
+        snprintf(notice, sizeof notice, _("%s is not installed."), "locachy-pair");
+        return;
+    }
+    char *const cmd[] = {
+        "/bin/sh", "-c",
+        "/usr/bin/sudo " LOCACHY_PAIR " list; s=$?; "
+        "printf '\\nPair: sudo " LOCACHY_PAIR " add --name NAME   Revoke: sudo " LOCACHY_PAIR " revoke NAME\\n"
+        "Enter: back to settings. '; read -r _; exit $s",
+        NULL
+    };
+    int status = in_term(cmd);
+    load_paired_peers();
+    snprintf(notice, sizeof notice, "%s", status == 0 ?
+             _("Paired devices closed.") : _("Paired devices did not finish."));
+}
+
+/* Maintenance Windows state (/var/lib/locachy/winmaint/state.json): reads only
+ * whether the partition triplet exists and its C: size in GiB (never key material). */
+static int parse_winmaint_state(const char *text, int *size_gib)
+{
+    *size_gib = 0;
+    if (!text || !strchr(text, '{')) return 0;
+    const char *p = strstr(text, "\"partitions\"");
+    if (p) {
+        const char *c = strstr(p, "\"c\"");
+        const char *brace = c ? strchr(c, '{') : NULL;
+        const char *end = brace ? strchr(brace, '}') : NULL;
+        const char *sec = brace ? strstr(brace, "\"sectors\"") : NULL;
+        if (sec && end && sec < end) {
+            const char *col = strchr(sec + 9, ':');
+            if (col && col < end) {
+                char *tail = NULL;
+                unsigned long long sectors = strtoull(col + 1, &tail, 10);
+                if (tail && tail != col + 1 && sectors > 0) {
+                    unsigned long long gib = (sectors + 1048576ULL) / 2097152ULL;
+                    if (gib > 0 && gib <= 1048576ULL) *size_gib = (int)gib;
+                }
+            }
+        }
+    }
+    if (*size_gib == 0) {
+        const char *g = strstr(text, "\"win_c_gib\"");
+        if (!g) g = strstr(text, "\"size_gib\"");
+        if (g) {
+            const char *col = strchr(g, ':');
+            if (col) {
+                char *tail = NULL;
+                long v = strtol(col + 1, &tail, 10);
+                if (tail && tail != col + 1 && v > 0 && v <= 1048576L) *size_gib = (int)v;
+            }
+        }
+    }
+    return 1;
+}
+
+static void load_winmaint_status(void)
+{
+    char buf[8192];
+    winmaint_created = 0;
+    winmaint_created_gib = 0;
+    int fd = open(WINMAINT_STATE_FILE, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    size_t len = 0;
+    while (len < sizeof buf - 1) {
+        ssize_t n = read(fd, buf + len, sizeof buf - 1 - len);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        len += (size_t)n;
+    }
+    close(fd);
+    buf[len] = '\0';
+    winmaint_created = parse_winmaint_state(buf, &winmaint_created_gib);
+}
+
+static void winmaint_status_row(void)
+{
+    char why[160] = "";
+    int id = 0, pos = 0;
+    winmaint_boot_once_asked = 0;
+    if (winmaint_job) {
+        snprintf(notice, sizeof notice, "%s", _("Wait: a Maintenance Windows job is still running."));
+        return;
+    }
+    load_winmaint_status();
+    if (!winmaint_created) {
+        char sz[16];
+        snprintf(sz, sizeof sz, "%d", winmaint_size_gib);
+        const char *args[] = { "--size-gib", sz, NULL };
+        winmaint_reclaim_asked = 0;
+        if (jobs_submit("winmaint-create", args, &id, &pos, why, sizeof why) < 0) {
+            snprintf(notice, sizeof notice, _("Could not create Maintenance Windows: %s"), why);
+            return;
+        }
+        winmaint_job = id;
+        snprintf(winmaint_what, sizeof winmaint_what, "create");
+        snprintf(notice, sizeof notice, _("Creating Maintenance Windows partition (%d GiB)..."), winmaint_size_gib);
+        return;
+    }
+    if (!winmaint_reclaim_asked) {
+        winmaint_reclaim_asked = 1;
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, "%s",
+                 _("Enter again: reclaim the Windows partition (the second Enter removes it)"));
+        return;
+    }
+    winmaint_reclaim_asked = 0;
+    if (jobs_submit("winmaint-reclaim", NULL, &id, &pos, why, sizeof why) < 0) {
+        snprintf(notice, sizeof notice, _("Could not reclaim Maintenance Windows: %s"), why);
+        return;
+    }
+    winmaint_job = id;
+    snprintf(winmaint_what, sizeof winmaint_what, "reclaim");
+    snprintf(notice, sizeof notice, "%s", _("Reclaiming Maintenance Windows partition..."));
+}
+
+static void winmaint_boot_once_row(void)
+{
+    char why[160] = "";
+    int id = 0, pos = 0;
+    winmaint_reclaim_asked = 0;
+    if (winmaint_job) {
+        snprintf(notice, sizeof notice, "%s", _("Wait: a Maintenance Windows job is still running."));
+        return;
+    }
+    load_winmaint_status();
+    if (!winmaint_created) {
+        winmaint_boot_once_asked = 0;
+        snprintf(notice, sizeof notice, "%s", _("Maintenance Windows is not created yet."));
+        return;
+    }
+    if (!winmaint_boot_once_asked) {
+        winmaint_boot_once_asked = 1;
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, "%s",
+                 _("Enter again: arm one-shot bare-metal Windows boot (LOCachy stays default)."));
+        return;
+    }
+    winmaint_boot_once_asked = 0;
+    if (jobs_submit("winmaint-boot-once", NULL, &id, &pos, why, sizeof why) < 0) {
+        snprintf(notice, sizeof notice, _("Could not arm one-shot Windows boot: %s"), why);
+        return;
+    }
+    winmaint_job = id;
+    snprintf(winmaint_what, sizeof winmaint_what, "boot-once");
+    snprintf(notice, sizeof notice, "%s", _("Arming one-shot Windows boot..."));
+}
+
+static void winmaint_heal_boot_row(void)
+{
+    char why[160] = "";
+    int id = 0, pos = 0;
+    winmaint_reclaim_asked = winmaint_boot_once_asked = 0;
+    if (winmaint_job) {
+        snprintf(notice, sizeof notice, "%s", _("Wait: a Maintenance Windows job is still running."));
+        return;
+    }
+    if (jobs_submit("winmaint-heal-boot", NULL, &id, &pos, why, sizeof why) < 0) {
+        snprintf(notice, sizeof notice, _("Could not heal UEFI boot order: %s"), why);
+        return;
+    }
+    winmaint_job = id;
+    snprintf(winmaint_what, sizeof winmaint_what, "heal-boot");
+    snprintf(notice, sizeof notice, "%s", _("Restoring LOCachy first in UEFI boot order..."));
+}
+
+static void winmaint_vm_row(void)
+{
+    winmaint_reclaim_asked = winmaint_boot_once_asked = 0;
+    if (winmaint_job) {
+        snprintf(notice, sizeof notice, "%s", _("Wait: a Maintenance Windows job is still running."));
+        return;
+    }
+    if (access(LOCACHY_WINMAINT, X_OK) != 0) {
+        snprintf(notice, sizeof notice, _("%s is not installed."), "locachy-winmaint");
+        return;
+    }
+    load_winmaint_status();
+    if (!winmaint_created) {
+        snprintf(notice, sizeof notice, "%s", _("Maintenance Windows is not created yet."));
+        return;
+    }
+    char *const cmd[] = {
+        "/bin/sh", "-c",
+        "/usr/bin/sudo " LOCACHY_WINMAINT " vm; s=$?; "
+        "if [ $s -ne 0 ]; then printf '\\nEnter: back to settings. '; read -r _; fi; exit $s",
+        NULL
+    };
+    int status = in_term(cmd);
+    load_winmaint_status();
+    snprintf(notice, sizeof notice, "%s", status == 0 ?
+             _("Windows virtual machine closed.") : _("Windows virtual machine did not finish."));
+}
+
+static void winmaint_check(void)
+{
+    struct jobs_row r;
+    char log[96];
+    if (!winmaint_job || !job_ended(winmaint_job, &r, log, sizeof log)) {
+        return;
+    }
+    winmaint_job = 0;
+    load_winmaint_status();
+    entries_dirty = 1;
+    full_redraw = 1;
+    if (strcmp(r.state, "done") == 0) {
+        if (strcmp(winmaint_what, "create") == 0) {
+            snprintf(notice, sizeof notice, "%s",
+                     winmaint_created ? _("Maintenance Windows partition created.") :
+                     _("Maintenance Windows shrink plan armed; reboot to finish creation."));
+        } else if (strcmp(winmaint_what, "reclaim") == 0) {
+            snprintf(notice, sizeof notice, "%s", _("Maintenance Windows partition reclaimed."));
+        } else if (strcmp(winmaint_what, "boot-once") == 0) {
+            snprintf(notice, sizeof notice, "%s",
+                     _("One-shot Windows boot armed; LOCachy stays default on the following restart."));
+        } else if (strcmp(winmaint_what, "heal-boot") == 0) {
+            snprintf(notice, sizeof notice, "%s", _("UEFI boot order healed; LOCachy is first."));
+        } else {
+            snprintf(notice, sizeof notice, "%s", _("Maintenance Windows job finished."));
+        }
+    } else {
+        snprintf(notice, sizeof notice, _("Maintenance Windows job failed: %s"), r.last[0] ? r.last : log);
+    }
+    winmaint_what[0] = '\0';
+}
+
 /* Reopened or polled: the active system jobs (including ones started from
  * packages or firmware, or another settings window), followed while they run
  * or wait. A slot already tracking a job keeps it; otherwise a running job
@@ -5805,7 +6246,7 @@ static void adopt_jobs(void)
     static struct jobs_row rows[JOBS_ROWS_MAX];
     int n = jobs_mine(rows, JOBS_ROWS_MAX);
     int have_repos = repos_job != 0, have_boot = boot_job != 0, have_pkg = pkg_job != 0, have_tpm = tpm_job != 0;
-    int have_security = security_job != 0;
+    int have_security = security_job != 0, have_winmaint = winmaint_job != 0, have_tb = tb_sync_job != 0;
     for (int pass = 0; pass < 2; pass++) {
         for (int i = 0; i < n; i++) {
             const struct jobs_row *r = &rows[i];
@@ -5826,6 +6267,13 @@ static void adopt_jobs(void)
             } else if (!have_security && strcmp(r->kind, "security-policy") == 0) {
                 security_job = r->id;
                 have_security = 1;
+            } else if (!have_winmaint && strncmp(r->kind, "winmaint-", 9) == 0) {
+                winmaint_job = r->id;
+                have_winmaint = 1;
+                snprintf(winmaint_what, sizeof winmaint_what, "%s", r->kind + 9);
+            } else if (!have_tb && strcmp(r->kind, "tb-sync") == 0) {
+                tb_sync_job = r->id;
+                have_tb = 1;
             } else if (!have_pkg && strncmp(r->kind, "kernel-", 7) == 0) {
                 pkg_job = r->id;
                 have_pkg = 1;
@@ -6030,6 +6478,8 @@ static int enter_row(int idx)
            idx == fc_index() + 6 || idx == rclone_index() + 2 || idx == tpm_index() || idx == sb_index() || idx == hsi_index() ||
            idx == duress_index() ||
            idx == tz_index() || idx == tz_index() + 2 || (idx >= imek_index() && idx < imek_index() + NIME_KEYS) ||
+           idx == paired_devices_index() ||
+           (idx >= winmaint_index() + 1 && idx < winmaint_index() + 5) ||
            (idx >= system_keymap_index() && idx < kb_index() + nkeyboards_seen) ||
            idx == bat_page_index() || idx == hwinfo_index() || idx == hwcopy_index() || idx == nmtui_index() || idx == ts_index() + 2;
 }
@@ -6330,6 +6780,10 @@ static void item_text(int idx, char *line, size_t size)
         else if (idx == cpu_opt_index()) {
             read_one_line("/usr/local/lib/locachy/cpu", cpu_cur_text, sizeof cpu_cur_text);
             read_one_line("/usr/local/lib/locachy/level", cpu_lvl_text, sizeof cpu_lvl_text);
+        } else if (idx == display_card_index() || idx == extd_card_index()) {
+            load_drm_cards();
+        } else if (idx >= winmaint_index() + 1 && idx < winmaint_index() + 5) {
+            load_winmaint_status();
         }
     }
     /* The pointer's rows (first TrackPoint's three, when there is one), then
@@ -6538,6 +6992,93 @@ static void item_text(int idx, char *line, size_t size)
             snprintf(vbuf, sizeof vbuf, "[%s]", _("OFF"));
         }
         snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Debug cable link"), 32), vbuf);
+        return;
+    }
+    if (idx == display_card_index()) {
+        drm_card_label(display_card_cfg, vbuf, sizeof vbuf);
+        snprintf(line, size, "%.95s < %s >", ui_pad(label, sizeof label, _("Display GPU"), 32), vbuf);
+        return;
+    }
+    if (idx == extd_card_index()) {
+        drm_card_label(extdisplay_card_cfg, vbuf, sizeof vbuf);
+        snprintf(line, size, "%.95s < %s >", ui_pad(label, sizeof label, _("Extended display GPU"), 32), vbuf);
+        return;
+    }
+    if (idx == extd_tb_shared_index()) {
+        const char *mode = extd_tb_shared > 0 ? _("on") : extd_tb_shared == 0 ? _("off") : _("auto");
+        snprintf(line, size, "%.95s < %s >%s%s", ui_pad(label, sizeof label, _("Thunderbolt shared link"), 32),
+                 mode, tb_sync_job ? "  " : "", tb_sync_job ? _("working...") : "");
+        return;
+    }
+    if (idx == extd_paired_only_index()) {
+        snprintf(line, size, "%.95s [%s]", ui_pad(label, sizeof label, _("Extended display paired only"), 32),
+                 extd_paired_only ? _("ON ") : _("OFF"));
+        return;
+    }
+    if (idx == paired_devices_index()) {
+        if (paired_peers_count > 0) {
+            /* TRANSLATORS: Enter is the Enter key; keep it. */
+            snprintf(vbuf, sizeof vbuf, P_("%d paired  (Enter: manage)", "%d paired  (Enter: manage)",
+                                           paired_peers_count), paired_peers_count);
+        } else if (paired_peers_count == 0) {
+            /* TRANSLATORS: Enter is the Enter key; keep it. */
+            snprintf(vbuf, sizeof vbuf, "%s", _("none  (Enter: manage)"));
+        } else {
+            /* TRANSLATORS: Enter is the Enter key; keep it. */
+            snprintf(vbuf, sizeof vbuf, "%s", _("Manage  (Enter)"));
+        }
+        snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Paired devices"), 32), vbuf);
+        return;
+    }
+    if ((i = idx - compute_index()) >= 0 && i < 3) {
+        if (i == 0) {
+            snprintf(line, size, "%.95s [%s]", ui_pad(label, sizeof label, _("Compute node service"), 32),
+                     compute_on ? _("ON ") : _("OFF"));
+        } else if (i == 1) {
+            snprintf(line, size, "  %.95s [%s]%s%s",
+                     ui_pad(label, sizeof label, _("Bind compute on Thunderbolt"), 30),
+                     compute_bind_tb ? _("ON ") : _("OFF"),
+                     tb_sync_job ? "  " : "", tb_sync_job ? _("working...") : "");
+        } else {
+            snprintf(line, size, "  %.95s [%s]",
+                     ui_pad(label, sizeof label, _("Compute GPU passthrough"), 30),
+                     compute_gpu ? _("ON ") : _("OFF"));
+        }
+        return;
+    }
+    if ((i = idx - winmaint_index()) >= 0 && i < 5) {
+        if (i == 0) {
+            snprintf(line, size, "%.95s < %d GiB >",
+                     ui_pad(label, sizeof label, _("Windows partition size"), 32), winmaint_size_gib);
+        } else if (i == 1) {
+            if (winmaint_job) {
+                snprintf(vbuf, sizeof vbuf, "%s", _("working..."));
+            } else if (!winmaint_created) {
+                snprintf(vbuf, sizeof vbuf, "%s", _("not created"));
+            } else if (winmaint_created_gib > 0) {
+                snprintf(vbuf, sizeof vbuf, _("created, %d GiB"), winmaint_created_gib);
+            } else {
+                snprintf(vbuf, sizeof vbuf, "%s", _("created"));
+            }
+            snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Maintenance Windows"), 32), vbuf);
+        } else if (i == 2) {
+            /* TRANSLATORS: Enter is the Enter key; keep it. */
+            snprintf(line, size, "%.95s %s",
+                     ui_pad(label, sizeof label, _("Boot Windows once (bare metal)"), 32),
+                     winmaint_job && strcmp(winmaint_what, "boot-once") == 0 ? _("working...") :
+                     !winmaint_created ? _("not created") : _("Enter: arm next boot"));
+        } else if (i == 3) {
+            /* TRANSLATORS: Enter is the Enter key; keep it. */
+            snprintf(line, size, "%.95s %s",
+                     ui_pad(label, sizeof label, _("Heal boot order"), 32),
+                     winmaint_job && strcmp(winmaint_what, "heal-boot") == 0 ? _("working...") :
+                     _("Enter: keep LOCachy first"));
+        } else {
+            /* TRANSLATORS: Enter is the Enter key; keep it. */
+            snprintf(line, size, "%.95s %s",
+                     ui_pad(label, sizeof label, _("Windows virtual machine"), 32),
+                     !winmaint_created ? _("not created") : _("Enter: launch in terminal"));
+        }
         return;
     }
     if ((i = idx - sec_index()) >= 0 && i < 6) {
@@ -7103,7 +7644,7 @@ static void draw(void)
     static char last_search[sizeof search];
     static char last_notice[sizeof notice];
     int sw = sidebar_width(), cols = screen_cols(), rows = screen_rows();
-    int jobs_active = pkg_job || repos_job || boot_job || tpm_job;
+    int jobs_active = pkg_job || repos_job || boot_job || tpm_job || security_job || winmaint_job || tb_sync_job;
     flush_ui_caches();
     if (!in_ui_loop) {
         /* Tests set state directly before draw(): keep every map and paint fresh. */
@@ -7435,6 +7976,132 @@ static void adjust(int dir)
     }
     if (selected == link_index()) {
         switch_link();
+        return;
+    }
+    if (selected == display_card_index()) {
+        cycle_drm_card("display_card", display_card_cfg, sizeof display_card_cfg, dir, _("Display GPU"));
+        return;
+    }
+    if (selected == extd_card_index()) {
+        cycle_drm_card("extdisplay_card", extdisplay_card_cfg, sizeof extdisplay_card_cfg, dir,
+                       _("Extended display GPU"));
+        return;
+    }
+    if (selected == extd_tb_shared_index()) {
+        int next = dir < 0 ? (extd_tb_shared == -1 ? 0 : extd_tb_shared == 0 ? 1 : -1) :
+                             (extd_tb_shared == -1 ? 1 : extd_tb_shared == 1 ? 0 : -1);
+        if (rc_set("extdisplay_tb_shared", next < 0 ? NULL : next ? "1" : "0") < 0) {
+            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+            return;
+        }
+        extd_tb_shared = next;
+        if (submit_tb_sync()) {
+            snprintf(notice, sizeof notice, "%s", next > 0 ?
+                     _("Thunderbolt link shared inside locachy-net; updating firewall...") :
+                     next == 0 ?
+                     _("Thunderbolt link kept private to extended display; updating firewall...") :
+                     _("Thunderbolt sharing set to auto; updating firewall..."));
+        }
+        return;
+    }
+    if (selected == extd_paired_only_index()) {
+        int next = !extd_paired_only;
+        if (rc_set("extdisplay_paired_only", next ? "1" : "0") < 0) {
+            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+            return;
+        }
+        extd_paired_only = next;
+        snprintf(notice, sizeof notice, "%s", extd_paired_only ?
+                 _("Extended display accepts paired devices only; applies on next session.") :
+                 _("Extended display allows one-time pairing codes; applies on next session."));
+        return;
+    }
+    if (selected == paired_devices_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, "%s",
+                 _("Enter: list paired devices in a terminal (pair or revoke with locachy-pair)."));
+        return;
+    }
+    if (selected == compute_index()) {
+        int next = !compute_on;
+        if (rc_set("service_compute", next ? COMPUTE_SERVICE : NULL) < 0) {
+            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+            return;
+        }
+        compute_on = next;
+        kill(1, SIGHUP);
+        snprintf(notice, sizeof notice, "%s", compute_on ?
+                 _("Compute node service on.") : _("Compute node service off."));
+        return;
+    }
+    if (selected == compute_index() + 1) {
+        int next = !compute_bind_tb;
+        if (rc_set("compute_bind_tb", next ? "1" : "0") < 0) {
+            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+            return;
+        }
+        compute_bind_tb = next;
+        if (submit_tb_sync()) {
+            snprintf(notice, sizeof notice, "%s", compute_bind_tb ?
+                     _("Compute binds on Thunderbolt too; updating firewall...") :
+                     _("Compute listens on Tailscale only; updating firewall..."));
+        }
+        return;
+    }
+    if (selected == compute_index() + 2) {
+        int next = !compute_gpu;
+        if (rc_set("compute_gpu", next ? "1" : "0") < 0) {
+            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+            return;
+        }
+        compute_gpu = next;
+        snprintf(notice, sizeof notice, "%s", compute_gpu ?
+                 _("Compute GPU passthrough on; applies to new compute jobs.") :
+                 _("Compute GPU passthrough off; applies to new compute jobs."));
+        return;
+    }
+    if (selected == winmaint_index()) {
+        int i = dir > 0 ? 0 : NWINMAINT_SIZES - 1;
+        while (i >= 0 && i < NWINMAINT_SIZES &&
+               (dir > 0 ? winmaint_sizes[i] <= winmaint_size_gib : winmaint_sizes[i] >= winmaint_size_gib)) {
+            i += dir;
+        }
+        if (i >= NWINMAINT_SIZES) i = 0;
+        if (i < 0) i = NWINMAINT_SIZES - 1;
+        char value[16];
+        snprintf(value, sizeof value, "%d", winmaint_sizes[i]);
+        if (rc_set("winmaint_size_gib", value) < 0) {
+            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+            return;
+        }
+        winmaint_size_gib = winmaint_sizes[i];
+        snprintf(notice, sizeof notice, _("Windows partition size set to %d GiB (used when creating)."),
+                 winmaint_size_gib);
+        return;
+    }
+    if (selected == winmaint_index() + 1) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, "%s", winmaint_created ?
+                 _("Enter, twice: reclaim the Windows partition and return its space.") :
+                 _("Enter: create the Maintenance Windows partition with the size above."));
+        return;
+    }
+    if (selected == winmaint_index() + 2) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, "%s",
+                 _("Enter, twice: arm one-shot bare-metal Windows boot (LOCachy stays default)."));
+        return;
+    }
+    if (selected == winmaint_index() + 3) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, "%s",
+                 _("Enter: restore LOCachy first in UEFI boot order."));
+        return;
+    }
+    if (selected == winmaint_index() + 4) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, "%s",
+                 _("Enter: launch QEMU/KVM in a terminal (needs a graphical session for display, or VNC)."));
         return;
     }
     if (selected == sec_index()) {
@@ -8380,6 +9047,26 @@ static void row_hint_text(int idx, char *out, size_t size)
     } else if (idx == bat_page_index()) {
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(out, size, "%s", _("Enter: open battery curves, health and handoff history."));
+    } else if (idx == paired_devices_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s",
+                 _("Enter: list paired devices in a terminal (pair or revoke with locachy-pair)."));
+    } else if (idx == winmaint_index() + 1) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", winmaint_created ?
+                 _("Enter, twice: reclaim the Windows partition and return its space.") :
+                 _("Enter: create the Maintenance Windows partition with the size above."));
+    } else if (idx == winmaint_index() + 2) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s",
+                 _("Enter, twice: arm one-shot bare-metal Windows boot (LOCachy stays default)."));
+    } else if (idx == winmaint_index() + 3) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", _("Enter: restore LOCachy first in UEFI boot order."));
+    } else if (idx == winmaint_index() + 4) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s",
+                 _("Enter: launch QEMU/KVM in a terminal (needs a graphical session for display, or VNC)."));
     } else if (idx == num_hw_items()) {
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(out, size, "%s", _("Enter: arrange the screens with the direction buttons."));
@@ -8702,6 +9389,9 @@ int main(int argc, char **argv)
     load_repos();
     load_kernel_state();
     load_kernel_choices();
+    load_drm_cards();
+    load_paired_peers();
+    load_winmaint_status();
     refresh_static_text();
     refresh_brightness();
     refresh_opt_cache();
@@ -8726,8 +9416,9 @@ int main(int argc, char **argv)
         if (close_due()) {
             return 0; /* the window's close, read in a question or list */
         }
-        int key = key_poll_timeout(request_fd, pkg_job || repos_job || boot_job || tpm_job || security_job ? 500 :
-                                   net_due ? 150 : 2000);
+        int key = key_poll_timeout(request_fd,
+                                   pkg_job || repos_job || boot_job || tpm_job || security_job ||
+                                   winmaint_job || tb_sync_job ? 500 : net_due ? 150 : 2000);
         if (key == K_REPAINT) {
             full_redraw = 1;
             draw();
@@ -8751,13 +9442,16 @@ int main(int argc, char **argv)
         build_row_maps();
         if (key == 0 || key == K_SHOWN || uptime() - last_job_poll >= 0.5) {
             int jobs_before = (pkg_job != 0) | ((repos_job != 0) << 1) | ((boot_job != 0) << 2) |
-                              ((tpm_job != 0) << 3) | ((security_job != 0) << 4);
+                              ((tpm_job != 0) << 3) | ((security_job != 0) << 4) |
+                              ((winmaint_job != 0) << 5) | ((tb_sync_job != 0) << 6);
             last_job_poll = uptime();
             adopt_jobs();
             pkg_check();
             repos_check();
             boot_check();
             security_check();
+            winmaint_check();
+            tb_sync_check();
             if (tpm_job) {
                 struct jobs_row r;
                 char log[96];
@@ -8771,7 +9465,8 @@ int main(int argc, char **argv)
                 }
             }
             int jobs_after = (pkg_job != 0) | ((repos_job != 0) << 1) | ((boot_job != 0) << 2) |
-                             ((tpm_job != 0) << 3) | ((security_job != 0) << 4);
+                             ((tpm_job != 0) << 3) | ((security_job != 0) << 4) |
+                             ((winmaint_job != 0) << 5) | ((tb_sync_job != 0) << 6);
             if (jobs_after != jobs_before) {
                 entries_dirty = 1;
                 full_redraw = 1;
@@ -8781,13 +9476,21 @@ int main(int argc, char **argv)
             return 0; /* Ctrl+Q, Alt+F4, the window's close: its jobs go on (locachy-jobs) */
         }
         if (key == K_POINTER) {
+            int prev_sel = selected;
             key = settings_pointer();
             mods = 0;
+            if (selected != prev_sel) winmaint_reclaim_asked = winmaint_boot_once_asked = 0;
             if (key == 0) continue;
             if (key == -1) {
                 draw();
                 continue;
             }
+        }
+        if (key != 0 && key != '\n' && key != K_ACT_HOME && key != K_SHOWN) {
+            winmaint_reclaim_asked = winmaint_boot_once_asked = 0;
+        } else if (key == '\n') {
+            if (selected != winmaint_index() + 1) winmaint_reclaim_asked = 0;
+            if (selected != winmaint_index() + 2) winmaint_boot_once_asked = 0;
         }
         if (key == K_ACT_HOME) {
             continue; /* process 1's: an open setting stays open */
@@ -8819,7 +9522,8 @@ int main(int argc, char **argv)
             continue; /* the table's other keys are nothing here; Alt+m is not m */
         }
         if (key == 0 || key == K_SHOWN) {
-            int settled_only = key == 0 && net_due && !(pkg_job || repos_job || boot_job || tpm_job || security_job);
+            int settled_only = key == 0 && net_due && !(pkg_job || repos_job || boot_job || tpm_job || security_job ||
+                                                        winmaint_job || tb_sync_job);
             if (!settled_only) {
                 load_monitors();
                 keyboards_dirty = 1;
@@ -8832,6 +9536,9 @@ int main(int argc, char **argv)
                     rule_labels_dirty = 0;
                     load_nets();
                     load_kernel_state();
+                    load_drm_cards();
+                    load_paired_peers();
+                    load_winmaint_status();
                     refresh_opt_cache();
                     opt_cache_dirty = 0;
                 }
@@ -9182,6 +9889,21 @@ int main(int argc, char **argv)
                 snprintf(notice, sizeof notice, "%s", status == 0 ?
                          _("rclone config done.") : _("rclone config did not finish."));
             }
+            draw();
+        } else if (key == '\n' && selected == paired_devices_index()) {
+            manage_paired_devices();
+            draw();
+        } else if (key == '\n' && selected == winmaint_index() + 1) {
+            winmaint_status_row();
+            draw();
+        } else if (key == '\n' && selected == winmaint_index() + 2) {
+            winmaint_boot_once_row();
+            draw();
+        } else if (key == '\n' && selected == winmaint_index() + 3) {
+            winmaint_heal_boot_row();
+            draw();
+        } else if (key == '\n' && selected == winmaint_index() + 4) {
+            winmaint_vm_row();
             draw();
         }
         if (!nav_key && key != 0 && key != K_SHOWN && category == CAT_NETWORK) {

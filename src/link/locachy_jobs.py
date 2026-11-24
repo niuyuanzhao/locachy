@@ -152,8 +152,8 @@ def pacman_ancestor():
 
 
 def boot_route(args):
-    if args not in ([], ["--luks"], ["--register-only"]):
-        raise RuntimeError("boot accepts only --luks or --register-only")
+    if args not in ([], ["--luks"], ["--register-only"], ["--winmaint-shrink"]):
+        raise RuntimeError("boot accepts only --luks, --register-only or --winmaint-shrink")
     mode = execution_mode()
     if mode != "queue":
         if mode == "offline":

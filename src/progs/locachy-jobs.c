@@ -71,6 +71,9 @@
 #ifndef JOBS_BIN
 #define JOBS_BIN "/usr/local/bin" /* the programs the jobs run */
 #endif
+#ifndef JOBS_LIB
+#define JOBS_LIB "/usr/local/lib/locachy" /* internal helpers the jobs run */
+#endif
 #ifndef JOBS_UNTRUSTED_KEYS
 #define JOBS_UNTRUSTED_KEYS "/var/lib/locachy/builder/untrusted-keys" /* locachy-build's */
 #endif
@@ -123,10 +126,11 @@ enum check {
     C_NONE, C_PACKAGES, C_SWAP, C_KERNEL, C_ONOFF, C_SECTION, C_TARGETS, C_CONTAINER, C_CONTAINER_DATA,
     C_DEVICE, C_RELEASE, C_FILE, C_SPI_PROBE, C_SPI_BACKUP, C_SPI_VERIFY, C_SPI_WRITE,
     C_TPM, C_TPM_ENROLL, C_SECURE_BOOT, C_BOOT, C_REBUILD, C_BIOS_SET, C_SECURITY,
+    C_WINMAINT_CREATE,
 };
 
 struct kind {
-    const char *name, *tool;  /* tool: JOBS_BIN/tool */
+    const char *name, *tool;  /* tool: JOBS_BIN/tool, or an absolute path */
     const char *fixed[3];     /* its arguments before the job's */
     int check;
 };
@@ -167,6 +171,11 @@ static const struct kind kinds[] = {
     { "spi-backup", "locachy-firmware", { "spi-backup" }, C_SPI_BACKUP },
     { "spi-verify", "locachy-firmware", { "spi-verify" }, C_SPI_VERIFY },
     { "spi-write", "locachy-firmware", { "spi-write" }, C_SPI_WRITE },
+    { "tb-sync", JOBS_LIB "/network-client", { "--sync-tb-filter" }, C_NONE },
+    { "winmaint-create", "locachy-winmaint", { "create" }, C_WINMAINT_CREATE },
+    { "winmaint-reclaim", "locachy-winmaint", { "reclaim" }, C_NONE },
+    { "winmaint-boot-once", "locachy-winmaint", { "boot-once" }, C_NONE },
+    { "winmaint-heal-boot", "locachy-winmaint", { "heal-boot" }, C_NONE },
 };
 #define NKINDS ((int)(sizeof kinds / sizeof kinds[0]))
 
@@ -283,7 +292,17 @@ static int check_args(const struct kind *k, char **a, int n, char *why, size_t s
         ok = n == 1 && path_of(a[0], 0);
         break;
     case C_BOOT:
-        ok = n == 0 || (n == 1 && (strcmp(a[0], "--luks") == 0 || strcmp(a[0], "--register-only") == 0));
+        ok = n == 0 || (n == 1 && (strcmp(a[0], "--luks") == 0 || strcmp(a[0], "--register-only") == 0 ||
+                                   strcmp(a[0], "--winmaint-shrink") == 0));
+        break;
+    case C_WINMAINT_CREATE:
+        if (n == 2 && strcmp(a[0], "--size-gib") == 0) {
+            size_t len = strlen(a[1]);
+            if (len >= 2 && len <= 4 && a[1][0] != '0' && strspn(a[1], "0123456789") == len) {
+                int gib = atoi(a[1]);
+                ok = gib >= 40 && gib <= 4096;
+            }
+        }
         break;
     case C_BIOS_SET:
         /* ATTR: letters, digits, _ . : - (from a letter or digit, 1..96 bytes);
@@ -750,6 +769,7 @@ static int in_pkg_domain(const struct job *j)
         "kernel-select", "kernel-headers", "repos-rank", "repos-rank-due", "repos-set",
         "locachy-rebuild", "locachy-source", "boot",
         "secure-boot", "security-policy",
+        "winmaint-create", "winmaint-reclaim", /* may rebuild the boot image for offline shrink */
         "app-host-build", /* a host program's build: packages on the host (app-build stays out) */
         NULL,
     };
@@ -774,7 +794,8 @@ static char **step_argv(const struct job *j, int step)
     const char *a[JOBS_ARGS_MAX + 1];
     job_args(j, a);
     int n = 0;
-    snprintf(tool, sizeof tool, "%s/%s", JOBS_BIN, k->tool);
+    if (k->tool[0] == '/') snprintf(tool, sizeof tool, "%s", k->tool);
+    else snprintf(tool, sizeof tool, "%s/%s", JOBS_BIN, k->tool);
     argv[n++] = tool;
     if (k->check == C_SWAP) {
         argv[n++] = step == 0 ? "remove" : "install";

@@ -82,6 +82,7 @@ class Routing(unittest.TestCase):
     def test_boot_inside_job_is_inline_and_external_hook_never_waits(self):
         with mock.patch.object(jobs, "execution_mode", return_value="job"), mock.patch.object(jobs, "submit") as submit:
             self.assertEqual(jobs.boot_route(["--luks"]), 100)
+            self.assertEqual(jobs.boot_route(["--winmaint-shrink"]), 100)
             submit.assert_not_called()
         with mock.patch.object(jobs, "execution_mode", return_value="queue"), \
              mock.patch.object(jobs, "pacman_ancestor", return_value=True), mock.patch.object(jobs, "ask") as ask, \
@@ -89,6 +90,12 @@ class Routing(unittest.TestCase):
             self.assertEqual(jobs.boot_route([]), 0)
             ask.assert_called_once_with(["submit", "boot"])
             submit.assert_not_called()
+        with mock.patch.object(jobs, "execution_mode", return_value="queue"), \
+             mock.patch.object(jobs, "pacman_ancestor", return_value=False), \
+             mock.patch.object(jobs, "submit", return_value=0) as submit:
+            self.assertEqual(jobs.boot_route(["--winmaint-shrink"]), 0)
+            submit.assert_called_once_with("boot", ["--winmaint-shrink"])
+        self.assertRaises(RuntimeError, jobs.boot_route, ["--unknown"])
 
     def test_missing_service_does_not_build_inline(self):
         with mock.patch.object(jobs, "execution_mode", return_value="queue"), \

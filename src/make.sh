@@ -489,7 +489,8 @@ else
     rm -f "$lib/extdisplay-broker" "$lib/extdisplay-advertise"
 fi
 if [ -f "$src/progs/app-init.c" ]; then
-    $GCC_CORE $GC_LDFLAGS -o "$lib/app-init" "$src/progs/app-init.c"
+    # Static so foreign distro rootfs (compute containers) can run it as PID 1 too.
+    $cc -Wl,--gc-sections -o "$lib/app-init" "$src/progs/app-init.c"
 fi
 # Mounted into every container as /usr/local/bin/xdg-open: static, so that it
 # runs whatever the container's C library.
@@ -921,6 +922,11 @@ install -m 755 "$src/link/locachy-net" /usr/local/bin/locachy-net
 install -m 755 "$src/link/locachy-setup" /usr/local/bin/locachy-setup
 install -m 755 "$src/link/locachy-boot" /usr/local/bin/locachy-boot
 install -m 755 "$src/link/locachy-efi" /usr/local/bin/locachy-efi
+install -m 644 "$src/link/locachy_peers.py" "$lib/locachy_peers.py"
+install -m 755 "$src/link/locachy-pair" /usr/local/bin/locachy-pair
+install -m 755 "$src/link/locachy-compute" /usr/local/bin/locachy-compute
+install -m 755 "$src/link/compute-client" "$lib/compute-client"
+install -m 755 "$src/link/locachy-winmaint" /usr/local/bin/locachy-winmaint
 install -D -m 644 "$src/link/90-locachy-boot.hook" /etc/pacman.d/hooks/90-locachy-boot.hook
 install -D -m 644 "$src/link/pam.d/locachy-lock" /etc/pam.d/locachy-lock
 install -D -m 644 "$src/link/pam.d/locachy-lock-fingerprint" /etc/pam.d/locachy-lock-fingerprint

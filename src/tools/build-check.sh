@@ -272,7 +272,8 @@ gcc $core_cflags $gc_ldflags $ime_flags $ui_cflags -I"$src/base/include" \
     $ime_libs $ui_libs -o "$out/term"
 printf '%s\n' "$ime_libs" >"$out/ime-libs"
 if [ -f "$src/progs/app-init.c" ]; then
-    gcc $core_cflags $gc_ldflags "$src/progs/app-init.c" -o "$out/app-init"
+    musl-gcc -static -O2 $sec_flags $musl_lto -Wl,--gc-sections -Wall -Wextra -Werror \
+        "$src/progs/app-init.c" -o "$out/app-init"
 fi
 if command -v wayland-scanner >/dev/null 2>&1 && pkg-config --exists wayland-client wayland-cursor xkbcommon libpng; then
     wayland-scanner client-header "$src/base/protocols/ext-data-control-v1.xml" "$out/ext-data-control-v1-client-protocol.h"

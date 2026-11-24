@@ -21,8 +21,8 @@ src=$(cd "$(dirname "$0")/.." && pwd)
 run=/run/test-jobs
 t=$run/t
 defs=(-DJOBS_DIR="\"$t/jobs\"" -DJOBS_CGROUP="\"$t/cgroup\"" -DJOBS_PROC="\"$t/proc\"" -DJOBS_BIN="\"$t/bin\""
-      -DJOBS_UNTRUSTED_KEYS="\"$t/untrusted-keys\"" -DJOBS_STOP_GRACE=2 -DJOBS_PKG_LOCK="\"$t/pkg.lock\""
-      -DJOBS_CONTAINERS="\"$t/containers\"" -DJOBS_TEST_DRAIN_ANY)
+      -DJOBS_LIB="\"$t/lib\"" -DJOBS_UNTRUSTED_KEYS="\"$t/untrusted-keys\"" -DJOBS_STOP_GRACE=2
+      -DJOBS_PKG_LOCK="\"$t/pkg.lock\"" -DJOBS_CONTAINERS="\"$t/containers\"" -DJOBS_TEST_DRAIN_ANY)
 cc=(gcc -O2 -g -Wall -Wextra -Werror -D_GNU_SOURCE -I"$src/base/include" -I"$src/tools" "${defs[@]}")
 "${cc[@]}" "$src/progs/locachy-jobs.c" -o "$out/locachy-jobs" || exit 1
 "${cc[@]}" -fsanitize=address,undefined -fno-omit-frame-pointer "$src/progs/locachy-jobs.c" \
@@ -33,7 +33,7 @@ inner='
 set -u
 src=$1 run=$2 t=$3 server=$4 client=$5
 mount -t tmpfs -o mode=0755 tmpfs /run || exit 9
-mkdir -p "$t/cgroup/service" "$t/proc" "$t/bin" "$t/files" "$t/containers"
+mkdir -p "$t/cgroup/service" "$t/proc" "$t/bin" "$t/lib" "$t/files" "$t/containers"
 echo "package=\"x\"" >"$t/containers/alpha.conf"
 echo "host=\"1\"" >>"$t/containers/alpha.conf"
 echo "package=\"x\"" >"$t/containers/beta.conf"
@@ -45,7 +45,8 @@ for i in $(seq 1 120); do
     echo "populated 0" >"$t/cgroup/job-$i/cgroup.events"
 done
 install -m 755 "$src/tools/test-jobs-tool.sh" "$run/tool"
-for p in locachy-pkg locachy-repos locachy-boot locachy-tpm locachy-app locachy-firmware locachy-security; do ln -s "$run/tool" "$t/bin/$p"; done
+for p in locachy-pkg locachy-repos locachy-boot locachy-tpm locachy-app locachy-firmware locachy-security locachy-winmaint; do ln -s "$run/tool" "$t/bin/$p"; done
+ln -s "$run/tool" "$t/lib/network-client"
 install -m 755 "$server" "$run/locachy-jobs"
 install -m 755 "$client" "$run/test-jobs"
 export TEST_JOBS=$t
@@ -161,6 +162,18 @@ want_input=$(printf queue-input-probe | sha256sum)
 check "the queued TPM worker receives the exact pipe bytes" test "$(cat "$t/input-$input_id.sha256")" = "$want_input"
 check "fixed boot --luks is accepted" accept boot --luks
 check "fixed boot registration is accepted" accept boot --register-only
+check "fixed boot --winmaint-shrink is accepted" accept boot --winmaint-shrink
+check "tb-sync takes no arguments" refuse tb-sync --extra
+check "tb-sync is accepted" accept tb-sync
+check "winmaint-create rejects out-of-range size" refuse winmaint-create --size-gib 20
+check "winmaint-create rejects size over ceiling" refuse winmaint-create --size-gib 5000
+check "winmaint-create rejects leading zero" refuse winmaint-create --size-gib 048
+check "winmaint-create rejects extra flag" refuse winmaint-create --disk /dev/sda
+check "winmaint-create accepts valid size" accept winmaint-create --size-gib 64
+check "winmaint-reclaim rejects extra arg" refuse winmaint-reclaim --now
+check "winmaint-reclaim is accepted" accept winmaint-reclaim
+check "winmaint-boot-once is accepted" accept winmaint-boot-once
+check "winmaint-heal-boot is accepted" accept winmaint-heal-boot
 check "the rebuild is a fixed queued kind" accept locachy-rebuild
 check "the rebuild permits only its fixed flag" refuse locachy-rebuild --anything
 check "the LOCachy source update is a fixed queued kind" accept locachy-source
@@ -168,6 +181,12 @@ check "the LOCachy source update takes no argument" refuse locachy-source --anyt
 check "TPM pending is accepted without input" accept tpm-pending
 check "TPM clear is accepted without input" accept tpm-clear
 check "new fixed kinds finish" idle
+check "tb-sync ran network-client --sync-tb-filter" grep -q "network-client --sync-tb-filter \[1\]" "$t/calls"
+check "boot --winmaint-shrink ran locachy-boot --winmaint-shrink" grep -q "locachy-boot --winmaint-shrink \[1\]" "$t/calls"
+check "winmaint-create ran locachy-winmaint create --size-gib 64" grep -q "locachy-winmaint create --size-gib 64 \[3\]" "$t/calls"
+check "winmaint-reclaim ran locachy-winmaint reclaim" grep -q "locachy-winmaint reclaim \[1\]" "$t/calls"
+check "winmaint-boot-once ran locachy-winmaint boot-once" grep -q "locachy-winmaint boot-once \[1\]" "$t/calls"
+check "winmaint-heal-boot ran locachy-winmaint heal-boot" grep -q "locachy-winmaint heal-boot \[1\]" "$t/calls"
 # The service keeps its own files to root (umask 077); the files a step
 # writes (mirror lists, pacman.conf, rc.conf) are read by others too.
 check "every step runs with umask 022, not the umask of the service" \

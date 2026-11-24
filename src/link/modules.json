@@ -247,5 +247,27 @@
     "choice": "ime",
     "default_standalone": false,
     "default_wizard": false
+  },
+  "winmaint": {
+    "description": "Maintenance Windows tail partition and in-OS QEMU/KVM runner (qemu-desktop, edk2-ovmf, swtpm, mtools, dosfstools)",
+    "packages": [
+      "qemu-desktop",
+      "edk2-ovmf",
+      "swtpm",
+      "mtools",
+      "dosfstools"
+    ],
+    "rc": {},
+    "default_standalone": false,
+    "default_wizard": false
+  },
+  "compute": {
+    "description": "Headless compute node micro-VM support (qemu-base)",
+    "packages": [
+      "qemu-base"
+    ],
+    "rc": {},
+    "default_standalone": false,
+    "default_wizard": false
   }
 }
