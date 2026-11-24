@@ -55,16 +55,32 @@ static uint32_t peer_input;
 static struct extdisplay_touch_frame touch_frame;
 static int vx, vy, vw, vh, panel_w, panel_h;
 static char decode_mode[16] = "auto";
+static char extdisplay_card_cfg[64];
+static char display_card_cfg[64];
 static const char *state = N_("Unavailable");
 static const char *detail = N_("Waiting for the sender.");
 
-static void on_rc_decode(const char *name, const char *value, void *arg)
+static void on_rc_config(const char *name, const char *value, void *arg)
 {
     (void)arg;
+    if (!value) return;
     if (strcmp(name, "extdisplay_decode") == 0 &&
         (strcmp(value, "auto") == 0 || strcmp(value, "hw") == 0 || strcmp(value, "sw") == 0)) {
         snprintf(decode_mode, sizeof decode_mode, "%s", value);
+    } else if (strcmp(name, "extdisplay_card") == 0) {
+        snprintf(extdisplay_card_cfg, sizeof extdisplay_card_cfg, "%s", value);
+    } else if (strcmp(name, "display_card") == 0) {
+        snprintf(display_card_cfg, sizeof display_card_cfg, "%s", value);
     }
+}
+
+static const char *effective_card_selector(void)
+{
+    const char *env = getenv("LOCACHY_DRM_CARD");
+    if (env && *env) return env;
+    if (extdisplay_card_cfg[0] && strcmp(extdisplay_card_cfg, "auto") != 0) return extdisplay_card_cfg;
+    if (display_card_cfg[0] && strcmp(display_card_cfg, "auto") != 0) return display_card_cfg;
+    return "auto";
 }
 
 static void ending(int sig) { (void)sig; stop = 1; }
@@ -717,11 +733,14 @@ static void session_run(int transport)
 {
     pid_t worker = -1;
     int owner = base_session_fd(), inhibited = 0, session_started = 0, render_fd = -1;
-    char render_path[64];
+    char render_path[64] = "";
     snprintf(decode_mode, sizeof decode_mode, "auto");
-    rc_read(on_rc_decode, NULL);
+    extdisplay_card_cfg[0] = '\0';
+    display_card_cfg[0] = '\0';
+    rc_read(on_rc_config, NULL);
+    const char *card_sel = effective_card_selector();
     if (strcmp(decode_mode, "sw") != 0 && screen_output_count() == 1 &&
-        screen_render_node(render_path, sizeof render_path) == 0) {
+        screen_render_node_for(card_sel, render_path, sizeof render_path) == 0) {
         render_fd = open(render_path, O_RDWR | O_CLOEXEC);
     }
     set_state(N_("Unavailable"), N_("Waiting for the sender."));
@@ -1151,7 +1170,20 @@ int main(int argc, char **argv)
     signal(SIGINT, ending);
     signal(SIGHUP, ending);
     signal(SIGPIPE, SIG_IGN);
-    if (!screen_open(BASE_FONT)) return 1;
+    const char *env_card = getenv("LOCACHY_DRM_CARD");
+    int temp_card_env = 0;
+    extdisplay_card_cfg[0] = '\0';
+    display_card_cfg[0] = '\0';
+    rc_read(on_rc_config, NULL);
+    if (control_fd() < 0 && (!env_card || !*env_card) &&
+        extdisplay_card_cfg[0] && strcmp(extdisplay_card_cfg, "auto") != 0) {
+        if (setenv("LOCACHY_DRM_CARD", extdisplay_card_cfg, 1) == 0) {
+            temp_card_env = 1;
+        }
+    }
+    int opened = screen_open(BASE_FONT);
+    if (temp_card_env) unsetenv("LOCACHY_DRM_CARD");
+    if (!opened) return 1;
     keys_open();
     base_raw_enable(1);
     pointer_scroll_events(1);

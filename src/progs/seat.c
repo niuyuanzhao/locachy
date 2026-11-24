@@ -85,6 +85,43 @@ static struct seat_dev devs[64];
 static int ndevs, next_dev_id = 1;
 static int active_seat = 1;
 static int disable_ack_received;
+static char seat_display_card[64];
+
+static void on_rc_display_card(const char *name, const char *value, void *arg)
+{
+    if (strcmp(name, "display_card") == 0 && value) {
+        snprintf((char *)arg, sizeof seat_display_card, "%s", value);
+    }
+}
+
+static void seat_load_display_card(void)
+{
+    seat_display_card[0] = '\0';
+    const char *env = getenv("LOCACHY_DRM_CARD");
+    if (env && *env) {
+        snprintf(seat_display_card, sizeof seat_display_card, "%s", env);
+        return;
+    }
+    rc_read(on_rc_display_card, seat_display_card);
+}
+
+static int seat_drm_allowed(const char *path)
+{
+    if (!seat_display_card[0] || strcmp(seat_display_card, "auto") == 0) {
+        return 1;
+    }
+    if (screen_card_matches(path, seat_display_card)) {
+        return 1;
+    }
+    /* Block non-matching DRM cards only when at least one matching card exists
+     * on the system, so a stale display_card setting cannot leave a black screen. */
+    char matched[64];
+    if (screen_select_card_path(seat_display_card, matched, sizeof matched) == 0 &&
+        access(matched, F_OK) == 0) {
+        return 0;
+    }
+    return 1;
+}
 
 /* The input and display devices described by udevd (udev-client) before the
  * compositor looks for them: libinput takes only the devices udevd has
@@ -283,6 +320,12 @@ static void handle_client_msg(int cfd)
             send_err(cfd, ENOENT);
             break;
         }
+        int is_drm = (strstr(path, "/dri/card") != NULL);
+        if (is_drm && !seat_drm_allowed(path)) {
+            say("seat: skipping %s (display_card=%s)", path, seat_display_card);
+            send_err(cfd, EACCES);
+            break;
+        }
         int dev_fd = open(path, O_RDWR | O_NONBLOCK | O_NOCTTY | O_NOFOLLOW | O_CLOEXEC);
         struct stat st;
         if (dev_fd >= 0 && (fstat(dev_fd, &st) < 0 || !S_ISCHR(st.st_mode))) {
@@ -293,7 +336,6 @@ static void handle_client_msg(int cfd)
         if (dev_fd < 0) {
             send_err(cfd, errno);
         } else {
-            int is_drm = (strstr(path, "/dri/card") != NULL);
             if (is_drm && active_seat && ioctl(dev_fd, DRM_IOCTL_SET_MASTER, 0) < 0) {
                 int error = errno;
                 close(dev_fd);
@@ -1000,6 +1042,17 @@ int main(int argc, char **argv)
     }
 
     describe_devices();
+    seat_load_display_card();
+    char selected_drm[64] = "";
+    if (seat_display_card[0] && strcmp(seat_display_card, "auto") != 0) {
+        if (screen_select_card_path(seat_display_card, selected_drm, sizeof selected_drm) == 0 &&
+            access(selected_drm, F_OK) == 0) {
+            say("seat: display_card=%s selected %s", seat_display_card, selected_drm);
+        } else {
+            say("seat: display_card=%s matched no DRM card; falling back to auto", seat_display_card);
+            selected_drm[0] = '\0';
+        }
+    }
 
     /* In the runtime directory process 1 made (XDG_RUNTIME_DIR). */
     const char *sock_path = "/run/user/0/seatd.sock";
@@ -1044,6 +1097,9 @@ int main(int argc, char **argv)
         }
         setenv("LIBSEAT_BACKEND", "seatd", 1);
         setenv("SEATD_SOCK", sock_path, 1);
+        if (selected_drm[0]) {
+            setenv("WLR_DRM_DEVICES", selected_drm, 1);
+        }
         if (is_labwc) {
             /* Its Xwayland's display is labwc's to choose (DISPLAY), none other. */
             unsetenv("DISPLAY");

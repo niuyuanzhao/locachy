@@ -169,6 +169,29 @@ void screen_cells(int *w, int *h, int *top);
 void screen_flush(void);
 /* Path to the active DRM card's render node (/dev/dri/renderD*); -1 if none. */
 int screen_render_node(char *path, size_t size);
+/* Path to a DRM render node (/dev/dri/renderD*) for decoding on the selected
+ * card: selector is "auto" (or empty/NULL), "cardN", a driver name, or a PCI
+ * slot. With a scanout card open, only that card's own node is returned (a
+ * PRIME dma-buf imports only on the device it scans out from); -1 when the
+ * selected card is another one, or its driver is not on the VA-API allowlist. */
+int screen_render_node_for(const char *selector, char *path, size_t size);
+/* DRM card selection and pure-sysfs enumeration (never opens /dev/dri/card*
+ * so suspended discrete GPUs stay asleep). Selectors are "auto" (or empty/NULL),
+ * "cardN", driver name (e.g. "i915", "xe", "amdgpu"), or PCI slot ("0000:00:02.0"). */
+struct screen_card_info {
+    char name[16];     /* "card0" */
+    char driver[32];   /* "i915", "xe", "amdgpu", "nvidia", ... */
+    char pci[32];      /* "0000:00:02.0" or "" */
+    int connected_outputs;
+};
+int screen_list_cards(struct screen_card_info *out, int max);
+int screen_list_cards_from(const char *sysfs_drm_dir, struct screen_card_info *out, int max);
+int screen_card_matches(const char *card_name_or_path, const char *selector);
+int screen_card_matches_from(const char *sysfs_drm_dir, const char *card_name_or_path, const char *selector);
+int screen_select_card_path(const char *selector, char *out, size_t size);
+int screen_select_card_path_from(const char *sysfs_drm_dir, const char *selector, char *out, size_t size);
+int screen_render_node_for_from(const char *sysfs_drm_dir, const char *dev_dri_dir,
+                                const char *selector, char *path, size_t size);
 /* Present a DRM PRIME dma-buf full-screen on the primary output without copying
  * pixels through CPU memory; -1 if unsupported or multi-output. Uses non-blocking
  * DRM page flip when available (caller polls screen_flip_fd() and calls

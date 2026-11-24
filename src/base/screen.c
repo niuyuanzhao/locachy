@@ -53,8 +53,9 @@
 #include "include/monitor-profile.h"
 #include "include/wayland-backend.h"
 
-/* Optional in standalone screen unit tests that do not link status.c. */
+/* Optional in standalone screen unit tests that do not link status.c or rc.c. */
 extern void base_status_fields(struct status_fields *out) __attribute__((weak));
+extern int rc_read(void (*fn)(const char *name, const char *value, void *arg), void *arg) __attribute__((weak));
 
 #define PSF1_MAGIC 0x0436u     /* bytes 36 04 */
 #define PSF2_MAGIC 0x864AB572u /* bytes 72 b5 4a 86 */
@@ -1529,6 +1530,271 @@ int screen_window_shown(void)
 }
 #endif
 
+/* Pure-sysfs DRM card enumeration and selection helpers. None of these ever
+ * open /dev/dri/card* so a discrete GPU kept suspended for compute workloads
+ * is never woken during discovery or matching. */
+static const char *drm_basename(const char *path)
+{
+    const char *slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
+
+static int drm_valid_card_name(const char *name)
+{
+    if (!name || strncmp(name, "card", 4) != 0) return 0;
+    const char *p = name + 4;
+    if (*p < '0' || *p > '9') return 0;
+    while (*p >= '0' && *p <= '9') p++;
+    return *p == '\0' && (size_t)(p - name) < 16;
+}
+
+static int drm_extract_card_name(const char *name_or_path, char *out, size_t size)
+{
+    if (!name_or_path || !*name_or_path || !out || size < 6) return 0;
+    const char *card_name = name_or_path;
+    if (strncmp(name_or_path, "/dev/dri/", 9) == 0) {
+        card_name = name_or_path + 9;
+    } else if (strchr(name_or_path, '/') != NULL) {
+        return 0;
+    }
+    if (!drm_valid_card_name(card_name)) return 0;
+    int n = snprintf(out, size, "%s", card_name);
+    return n > 0 && (size_t)n < size;
+}
+
+static int drm_selector_is_auto(const char *selector)
+{
+    return !selector || !*selector || strcmp(selector, "auto") == 0;
+}
+
+static int drm_selector_valid(const char *selector)
+{
+    if (drm_selector_is_auto(selector)) return 1;
+    size_t len = strlen(selector);
+    if (len >= 64) return 0;
+    if (strcmp(selector, ".") == 0 || strcmp(selector, "..") == 0) return 0;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)selector[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == '-' || c == ':' || c == '.')) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int drm_readlink_base(const char *path, char *out, size_t size)
+{
+    char target[PATH_MAX];
+    ssize_t n = readlink(path, target, sizeof target - 1);
+    if (n <= 0) {
+        out[0] = '\0';
+        return 0;
+    }
+    target[n] = '\0';
+    while (n > 1 && target[n - 1] == '/') target[--n] = '\0';
+    const char *base = drm_basename(target);
+    if (!*base || strcmp(base, ".") == 0 || strcmp(base, "..") == 0) {
+        out[0] = '\0';
+        return 0;
+    }
+    int w = snprintf(out, size, "%s", base);
+    if (w < 0 || (size_t)w >= size) {
+        out[0] = '\0';
+        return 0;
+    }
+    return 1;
+}
+
+static int drm_read_card_info(const char *sysfs_drm_dir, const char *card_name, struct screen_card_info *out)
+{
+    if (!sysfs_drm_dir || !*sysfs_drm_dir || !drm_valid_card_name(card_name) || !out) return 0;
+    char card_dir[PATH_MAX];
+    int n = snprintf(card_dir, sizeof card_dir, "%s/%s", sysfs_drm_dir, card_name);
+    if (n <= 0 || (size_t)n >= sizeof card_dir) return 0;
+    struct stat st;
+    if (stat(card_dir, &st) < 0 || !S_ISDIR(st.st_mode)) return 0;
+
+    memset(out, 0, sizeof *out);
+    snprintf(out->name, sizeof out->name, "%s", card_name);
+
+    char link_path[PATH_MAX];
+    if (snprintf(link_path, sizeof link_path, "%s/device/driver", card_dir) < (int)sizeof link_path) {
+        drm_readlink_base(link_path, out->driver, sizeof out->driver);
+    }
+    if (snprintf(link_path, sizeof link_path, "%s/device", card_dir) < (int)sizeof link_path) {
+        char resolved[PATH_MAX];
+        if (realpath(link_path, resolved) != NULL) {
+            const char *base = drm_basename(resolved);
+            size_t blen = strlen(base);
+            if (blen > 0 && blen < sizeof out->pci && strcmp(base, "device") != 0) {
+                memcpy(out->pci, base, blen + 1);
+            }
+        }
+        if (!out->pci[0]) {
+            drm_readlink_base(link_path, out->pci, sizeof out->pci);
+        }
+    }
+
+    DIR *d = opendir(sysfs_drm_dir);
+    if (d) {
+        char prefix[24];
+        int plen = snprintf(prefix, sizeof prefix, "%s-", card_name);
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            if (plen <= 0 || strncmp(e->d_name, prefix, (size_t)plen) != 0) continue;
+            char status_path[PATH_MAX];
+            if (snprintf(status_path, sizeof status_path, "%s/%s/status", sysfs_drm_dir, e->d_name) >=
+                (int)sizeof status_path) {
+                continue;
+            }
+            FILE *f = fopen(status_path, "r");
+            if (!f) continue;
+            char line[32] = "";
+            if (fgets(line, sizeof line, f)) {
+                line[strcspn(line, "\r\n")] = '\0';
+                if (strcmp(line, "connected") == 0) out->connected_outputs++;
+            }
+            fclose(f);
+        }
+        closedir(d);
+    }
+    return 1;
+}
+
+int screen_list_cards_from(const char *sysfs_drm_dir, struct screen_card_info *out, int max)
+{
+    if (!sysfs_drm_dir || !*sysfs_drm_dir || !out || max <= 0) return 0;
+    int count = 0;
+    for (int n = 0; n < 8 && count < max; n++) {
+        char name[16];
+        snprintf(name, sizeof name, "card%d", n);
+        if (drm_read_card_info(sysfs_drm_dir, name, &out[count])) {
+            count++;
+        }
+    }
+    return count;
+}
+
+int screen_list_cards(struct screen_card_info *out, int max)
+{
+    return screen_list_cards_from("/sys/class/drm", out, max);
+}
+
+int screen_card_matches_from(const char *sysfs_drm_dir, const char *card_name_or_path, const char *selector)
+{
+    char card_name[16];
+    if (!drm_extract_card_name(card_name_or_path, card_name, sizeof card_name)) return 0;
+    if (drm_selector_is_auto(selector)) return 1;
+    if (!drm_selector_valid(selector)) return 0;
+    if (strcmp(card_name, selector) == 0) return 1;
+    struct screen_card_info info;
+    if (!drm_read_card_info(sysfs_drm_dir, card_name, &info)) return 0;
+    if (info.driver[0] && strcmp(info.driver, selector) == 0) return 1;
+    if (info.pci[0] && strcmp(info.pci, selector) == 0) return 1;
+    return 0;
+}
+
+int screen_card_matches(const char *card_name_or_path, const char *selector)
+{
+    return screen_card_matches_from("/sys/class/drm", card_name_or_path, selector);
+}
+
+int screen_select_card_path_from(const char *sysfs_drm_dir, const char *selector, char *out, size_t size)
+{
+    if (!out || size == 0 || drm_selector_is_auto(selector) || !drm_selector_valid(selector)) return -1;
+    struct screen_card_info cards[8];
+    int count = screen_list_cards_from(sysfs_drm_dir, cards, 8);
+    int best = -1;
+    for (int i = 0; i < count; i++) {
+        int matched = strcmp(cards[i].name, selector) == 0 ||
+                      (cards[i].driver[0] && strcmp(cards[i].driver, selector) == 0) ||
+                      (cards[i].pci[0] && strcmp(cards[i].pci, selector) == 0);
+        if (!matched) continue;
+        if (best < 0 || (cards[best].connected_outputs == 0 && cards[i].connected_outputs > 0)) {
+            best = i;
+        }
+    }
+    if (best < 0) return -1;
+    int n = snprintf(out, size, "/dev/dri/%s", cards[best].name);
+    return (n > 0 && (size_t)n < size) ? 0 : -1;
+}
+
+int screen_select_card_path(const char *selector, char *out, size_t size)
+{
+    return screen_select_card_path_from("/sys/class/drm", selector, out, size);
+}
+
+static void on_rc_display_card(const char *name, const char *value, void *arg)
+{
+    if (strcmp(name, "display_card") == 0 && value) {
+        snprintf((char *)arg, 64, "%s", value);
+    }
+}
+
+static void read_display_card_selector(char *out, size_t size)
+{
+    out[0] = '\0';
+    const char *env = getenv("LOCACHY_DRM_CARD");
+    if (env && *env) {
+        snprintf(out, size, "%s", env);
+        return;
+    }
+    char rc_val[64] = "";
+    if (rc_read) {
+        rc_read(on_rc_display_card, rc_val);
+    }
+    if (rc_val[0]) {
+        snprintf(out, size, "%s", rc_val);
+    }
+}
+
+static int drm_render_driver_allowed(const char *driver)
+{
+    return driver && (strcmp(driver, "i915") == 0 || strcmp(driver, "xe") == 0 ||
+                      strcmp(driver, "amdgpu") == 0 || strcmp(driver, "radeon") == 0);
+}
+
+static int drm_render_node_in_dir(const char *drm_dir, const char *dev_dri_dir, char *path, size_t size)
+{
+    DIR *d = opendir(drm_dir);
+    if (!d) return -1;
+    int found = -1;
+    char best[32] = "";
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, "renderD", 7) != 0 || strlen(e->d_name) >= sizeof best) continue;
+        char cand[PATH_MAX];
+        int n = snprintf(cand, sizeof cand, "%s/%s", dev_dri_dir, e->d_name);
+        if (n <= 0 || (size_t)n >= sizeof cand || access(cand, R_OK | W_OK) != 0) continue;
+        if (!best[0] || strcmp(e->d_name, best) < 0) {
+            snprintf(best, sizeof best, "%s", e->d_name);
+        }
+    }
+    closedir(d);
+    if (best[0]) {
+        int n = snprintf(path, size, "%s/%s", dev_dri_dir, best);
+        if (n > 0 && (size_t)n < size) found = 0;
+    }
+    return found;
+}
+
+static int drm_open_card_fd(const char *path, int want_master)
+{
+    double opened_at = screen_time();
+    int fd = open(path, O_RDWR | O_CLOEXEC);
+    double opening = screen_time() - opened_at;
+    if (opening >= 0.1) {
+        say("screen: %s: open %.0f ms (fd %d)", path, opening * 1000, fd);
+    }
+    if (fd < 0) return -1;
+    if (want_master && ioctl(fd, DRM_IOCTL_SET_MASTER, 0) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
 int screen_open(const char *font_path)
 {
     active_bar.valid = 0;
@@ -1565,16 +1831,27 @@ int screen_open(const char *font_path)
         control_wait_take(); /* screen_take does the rest */
         return shadow != NULL;
     }
+    char selector[64] = "";
+    read_display_card_selector(selector, sizeof selector);
+    int explicit_card = !drm_selector_is_auto(selector);
+    if (explicit_card && !drm_selector_valid(selector)) {
+        say("screen: invalid display_card=%s; using auto", selector);
+        explicit_card = 0;
+    }
+    int fallback_logged = 0;
     for (int attempt = 0; why == NULL && attempt <= 50; attempt++) {
+        int strict = explicit_card && attempt < 20;
+        if (explicit_card && !strict && !fallback_logged) {
+            say("screen: display_card=%s matched no connected output; falling back to auto", selector);
+            fallback_logged = 1;
+        }
         for (int n = 0; why == NULL && n < 8; n++) {
             char path[32];
             snprintf(path, sizeof path, "/dev/dri/card%d", n);
-            double opened_at = screen_time();
-            int fd = open(path, O_RDWR | O_CLOEXEC);
-            double opening = screen_time() - opened_at;
-            if (opening >= 0.1) {
-                say("screen: %s: open %.0f ms (fd %d)", path, opening * 1000, fd);
+            if (strict && !screen_card_matches(path, selector)) {
+                continue;
             }
+            int fd = drm_open_card_fd(path, 0);
             if (fd < 0) {
                 continue;
             }
@@ -2000,19 +2277,34 @@ int screen_refresh(void)
     if (card < 0) {
         /* Booting without a connected monitor is recoverable: no earlier
          * scanout fd exists, so probe cards again on the hotplug event. */
-        for (int n = 0; n < 8; n++) {
-            char path[32];
-            snprintf(path, sizeof path, "/dev/dri/card%d", n);
-            int fd = open(path, O_RDWR | O_CLOEXEC);
-            if (fd < 0) continue;
-            if (ioctl(fd, DRM_IOCTL_SET_MASTER, 0) == 0 && prepare(fd) == NULL) {
-                const char *why = show(fd);
-                if (why == NULL) return 1;
-                say("screen: cannot enable reconnected %s: %s", path, why);
+        char selector[64] = "";
+        read_display_card_selector(selector, sizeof selector);
+        int explicit_card = !drm_selector_is_auto(selector);
+        if (explicit_card && !drm_selector_valid(selector)) {
+            say("screen: invalid display_card=%s; using auto", selector);
+            explicit_card = 0;
+        }
+        int passes = explicit_card ? 2 : 1;
+        for (int pass = 0; pass < passes; pass++) {
+            int strict = explicit_card && pass == 0;
+            if (explicit_card && pass == 1) {
+                say("screen: display_card=%s matched no connected output; falling back to auto", selector);
             }
-            clear_outputs(fd);
-            close(fd);
-            card = -1;
+            for (int n = 0; n < 8; n++) {
+                char path[32];
+                snprintf(path, sizeof path, "/dev/dri/card%d", n);
+                if (strict && !screen_card_matches(path, selector)) continue;
+                int fd = drm_open_card_fd(path, 1);
+                if (fd < 0) continue;
+                if (prepare(fd) == NULL) {
+                    const char *why = show(fd);
+                    if (why == NULL) return 1;
+                    say("screen: cannot enable reconnected %s: %s", path, why);
+                }
+                clear_outputs(fd);
+                close(fd);
+                card = -1;
+            }
         }
         return 0;
     }
@@ -2648,38 +2940,92 @@ int screen_render_node(char *path, size_t size)
 {
     struct stat st;
     if (!path || size == 0 || window_mode || card < 0 || fstat(card, &st) < 0) return -1;
-    char drvlink[128], drv[256];
+    char drvlink[128], drv[64];
     snprintf(drvlink, sizeof drvlink, "/sys/dev/char/%u:%u/device/driver",
              (unsigned)major(st.st_rdev), (unsigned)minor(st.st_rdev));
-    ssize_t dn = readlink(drvlink, drv, sizeof drv - 1);
-    if (dn <= 0) return -1;
-    drv[dn] = '\0';
-    const char *base = strrchr(drv, '/');
-    base = base ? base + 1 : drv;
+    if (!drm_readlink_base(drvlink, drv, sizeof drv)) return -1;
     /* Only expose VA-API + DRM PRIME scanout on drivers verified to export
      * direct BGRX scanout surfaces cleanly; skip nouveau/nvidia-drm/simpledrm. */
-    if (strcmp(base, "i915") != 0 && strcmp(base, "xe") != 0 &&
-        strcmp(base, "amdgpu") != 0 && strcmp(base, "radeon") != 0) {
-        return -1;
-    }
+    if (!drm_render_driver_allowed(drv)) return -1;
     char dir[128];
     snprintf(dir, sizeof dir, "/sys/dev/char/%u:%u/device/drm",
              (unsigned)major(st.st_rdev), (unsigned)minor(st.st_rdev));
-    DIR *d = opendir(dir);
-    if (!d) return -1;
-    int found = -1;
-    struct dirent *e;
-    while ((e = readdir(d)) != NULL) {
-        if (strncmp(e->d_name, "renderD", 7) == 0 && strlen(e->d_name) < 32) {
-            int n = snprintf(path, size, "/dev/dri/%s", e->d_name);
-            if (n > 0 && (size_t)n < size && access(path, R_OK | W_OK) == 0) {
-                found = 0;
-                break;
-            }
-        }
+    return drm_render_node_in_dir(dir, "/dev/dri", path, size);
+}
+
+int screen_render_node_for_from(const char *sysfs_drm_dir, const char *dev_dri_dir,
+                                const char *selector, char *path, size_t size)
+{
+    if (!sysfs_drm_dir || !*sysfs_drm_dir || !dev_dri_dir || !*dev_dri_dir || !path || size == 0) {
+        return -1;
     }
-    closedir(d);
-    return found;
+    if (!drm_selector_valid(selector)) return -1;
+    struct screen_card_info cards[8];
+    int count = screen_list_cards_from(sysfs_drm_dir, cards, 8);
+    int is_auto = drm_selector_is_auto(selector);
+    int best_connected = -1, best_any = -1;
+    for (int i = 0; i < count; i++) {
+        if (!is_auto) {
+            int matched = strcmp(cards[i].name, selector) == 0 ||
+                          (cards[i].driver[0] && strcmp(cards[i].driver, selector) == 0) ||
+                          (cards[i].pci[0] && strcmp(cards[i].pci, selector) == 0);
+            if (!matched) continue;
+        }
+        if (!drm_render_driver_allowed(cards[i].driver)) continue;
+        char drm_dir[PATH_MAX], cand[PATH_MAX];
+        if (snprintf(drm_dir, sizeof drm_dir, "%s/%s/device/drm", sysfs_drm_dir, cards[i].name) >=
+            (int)sizeof drm_dir) {
+            continue;
+        }
+        if (drm_render_node_in_dir(drm_dir, dev_dri_dir, cand, sizeof cand) != 0) continue;
+        if (cards[i].connected_outputs > 0 && best_connected < 0) best_connected = i;
+        if (best_any < 0) best_any = i;
+    }
+    int pick = best_connected >= 0 ? best_connected : best_any;
+    if (pick < 0) return -1;
+    char drm_dir[PATH_MAX];
+    if (snprintf(drm_dir, sizeof drm_dir, "%s/%s/device/drm", sysfs_drm_dir, cards[pick].name) >=
+        (int)sizeof drm_dir) {
+        return -1;
+    }
+    return drm_render_node_in_dir(drm_dir, dev_dri_dir, path, size);
+}
+
+/* The open scanout card's name ("card0"), from its device number. */
+static int open_card_name(char *out, size_t size)
+{
+    struct stat st;
+    if (card < 0 || fstat(card, &st) < 0) return 0;
+    char link[128];
+    snprintf(link, sizeof link, "/sys/dev/char/%u:%u",
+             (unsigned)major(st.st_rdev), (unsigned)minor(st.st_rdev));
+    return drm_readlink_base(link, out, size);
+}
+
+int screen_render_node_for(const char *selector, char *path, size_t size)
+{
+    if (!path || size == 0 || window_mode) return -1;
+    if (card >= 0) {
+        /* A PRIME dma-buf imports only on the device it scans out from: with a
+         * scanout card open, its own render node is the only one used. Another
+         * selected card gives -1 (software decode), never a cross-device import. */
+        char name[16];
+        if (drm_selector_is_auto(selector) || (open_card_name(name, sizeof name) &&
+                                               screen_card_matches(name, selector))) {
+            return screen_render_node(path, size);
+        }
+        char matched[64];
+        if (drm_selector_valid(selector) && screen_select_card_path(selector, matched, sizeof matched) != 0) {
+            say("screen: %s matched no DRM card; using the scanout's render node", selector);
+            return screen_render_node(path, size);
+        }
+        return -1;
+    }
+    if (drm_selector_is_auto(selector)) {
+        return screen_render_node_for_from("/sys/class/drm", "/dev/dri", NULL, path, size);
+    }
+    if (!drm_selector_valid(selector)) return -1;
+    return screen_render_node_for_from("/sys/class/drm", "/dev/dri", selector, path, size);
 }
 
 int screen_flip_fd(void)
