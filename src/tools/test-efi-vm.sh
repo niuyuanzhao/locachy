@@ -62,6 +62,8 @@ printf 'MZ test image\n' >/efi/EFI/locachy/locachy.efi
 cp /efi/EFI/locachy/locachy.efi /efi/EFI/BOOT/BOOTX64.EFI
 install -m755 /source/link/locachy-efi /usr/local/bin/locachy-efi
 install -m755 /source/link/locachy-boot /usr/local/bin/locachy-boot
+install -d -m755 /usr/local/lib/locachy
+install -m644 /source/link/locachy_jobs.py /usr/local/lib/locachy/locachy_jobs.py
 python3 - <<'PY'
 import importlib.machinery, importlib.util, subprocess, json
 loader=importlib.machinery.SourceFileLoader('efi','/usr/local/bin/locachy-efi')

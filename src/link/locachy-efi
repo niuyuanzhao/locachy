@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """Maintain LOCachy's UEFI entry with efibootmgr, never raw variable writes.
 
-locachy-efi [--esp /efi] [--first]
+locachy-efi [--esp /efi] [--first] [--ensure-first]
+locachy-efi --bootnext-entry --disk DEV --part N --partuuid UUID
+            --label NAME --loader PATH [--esp /efi]
+locachy-efi --remove-entry --label NAME [--partuuid UUID]
+
 --first is the installer's: put this entry first, preserving other entries.
+--ensure-first heals BootOrder so LOCachy is first and strips Maintenance
+Windows entries from BootOrder (Layer 4 protection).
 Normal boot-image updates keep the existing order (append if missing).
 """
 import argparse
@@ -22,6 +28,8 @@ LABEL = "LOCachy"
 LOADER = r"\EFI\locachy\locachy.efi"
 PREV_LABEL = "LOCachy (Previous)"
 PREV_LOADER = r"\EFI\locachy\locachy-prev.efi"
+WINMAINT_LABEL = "LOCachy Maintenance Windows"
+WINMAINT_LOADER = r"\EFI\Microsoft\Boot\bootmgfw.efi"
 ESP_TYPE = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 
 
@@ -103,8 +111,10 @@ def esp_target(path):
     return parent, number, guid
 
 
-def entries(text):
+def parse_entries(text, labels=None):
+    """Parse BootOrder, BootNext and HD(...,GPT,...) entries from efibootmgr -v."""
     order = []
+    bootnext = None
     found = []
     for line in text.splitlines():
         if line.startswith("BootOrder:"):
@@ -112,18 +122,47 @@ def entries(text):
             if value and not re.fullmatch(r"[0-9a-fA-F]{4}(?:,[0-9a-fA-F]{4})*", value):
                 raise RuntimeError("efibootmgr returned an invalid BootOrder")
             order = [n.upper() for n in value.split(",")] if value else []
-        match = re.match(r"^Boot([0-9A-Fa-f]{4})(\*)?\s+(LOCachy \(Previous\)|LOCachy)\s+(.+)$", line)
-        if not match or not re.match(r"(?:HD|PciRoot|Pci|VenHw|Acpi|AcpiEx)\(", match[4], re.I):
             continue
-        device = re.search(r"HD\((\d+),GPT,([0-9A-Fa-f-]+),[^)]*\)", match[4], re.I)
-        file = re.search(r"File\(([^)]*)\)", match[4], re.I)
+        if line.startswith("BootNext:"):
+            value = line.partition(":")[2].strip()
+            if re.fullmatch(r"[0-9a-fA-F]{4}", value):
+                bootnext = value.upper()
+            continue
+        match = re.match(r"^Boot([0-9A-Fa-f]{4})(\*)?\s+(.+?)\t(.+)$", line)
+        if not match:
+            match = re.match(r"^Boot([0-9A-Fa-f]{4})(\*)?\s+(.+?)\s+((?:HD|PciRoot|Pci|VenHw|Acpi|AcpiEx)\(.+)$",
+                             line, re.I)
+        if not match:
+            continue
+        label = match[3].strip()
+        if labels is not None and label not in labels:
+            continue
+        devpath = match[4]
+        if not re.match(r"(?:HD|PciRoot|Pci|VenHw|Acpi|AcpiEx)\(", devpath, re.I):
+            continue
+        device = re.search(r"HD\((\d+),GPT,([0-9A-Fa-f-]+),[^)]*\)", devpath, re.I)
+        file = re.search(r"File\(([^)]*)\)", devpath, re.I)
         # efibootmgr/libefivar versions print either File(PATH) or /\\PATH.
-        path = file[1] if file else match[4][device.end() + 1:].strip() if device else ""
+        path = file[1] if file else devpath[device.end() + 1:].strip() if device else ""
         if device and path.startswith(("\\", "/")):
-            found.append({"number": match[1].upper(), "active": bool(match[2]), "label": match[3],
+            found.append({"number": match[1].upper(), "active": bool(match[2]), "label": label,
                           "part": int(device[1]), "guid": device[2].lower(),
                           "loader": path.replace("/", "\\").lower()})
+    return order, bootnext, found
+
+
+def entries(text):
+    order, _, found = parse_entries(text, labels=(LABEL, PREV_LABEL))
     return order, found
+
+
+def require_writable_efivars():
+    if not EFI.is_dir():
+        raise RuntimeError("not booted in UEFI mode")
+    variables = variables_mount()
+    if variables.get("fstype") != "efivarfs" or "rw" not in variables.get("options", "").split(",") or \
+            not os.access(EFIVARS, os.W_OK):
+        raise RuntimeError("EFI variables are unavailable or read-only")
 
 
 # Every registration's read-modify-write of NVRAM under one lock. Fixed: a test
@@ -148,19 +187,14 @@ def register(esp, first=False):
         os.close(lock)
 
 
-def _register(esp, first=False):
+def _register(esp, first=False, strip_winmaint=False, winmaint_guid=None):
     esp_path = Path(os.path.abspath(esp))
     disk, partition, guid = esp_target(esp_path)
     prev_file = esp_path / "EFI/locachy/locachy-prev.efi"
     if prev_file.is_symlink():
         raise RuntimeError(f"{prev_file}: linked boot image is not accepted")
     want_prev = prev_file.is_file() and prev_file.resolve() == prev_file
-    if not EFI.is_dir():
-        raise RuntimeError("not booted in UEFI mode")
-    variables = variables_mount()
-    if variables.get("fstype") != "efivarfs" or "rw" not in variables.get("options", "").split(",") or \
-            not os.access(EFIVARS, os.W_OK):
-        raise RuntimeError("EFI variables are unavailable or read-only")
+    require_writable_efivars()
 
     def matches(item, label=LABEL, loader=LOADER):
         return (item.get("label", LABEL) == label and item["part"] == partition and
@@ -182,17 +216,27 @@ def _register(esp, first=False):
             command(["efibootmgr", "--bootnum", item["number"], "--active"])
         return item["number"], current_entries
 
-    order, all_entries = entries(command(["efibootmgr", "--verbose"]))
+    raw = command(["efibootmgr", "--verbose"])
+    order, _, every_entry = parse_entries(raw)
+    all_entries = [i for i in every_entry if i["label"] in (LABEL, PREV_LABEL)]
     number, all_entries = ensure_entry(LABEL, LOADER, order, all_entries)
     prev_number = None
     if want_prev:
         prev_number, all_entries = ensure_entry(PREV_LABEL, PREV_LOADER, order, all_entries)
 
+    drop = set()
+    if strip_winmaint:
+        wguid = winmaint_guid.lower() if winmaint_guid else None
+        for item in every_entry:
+            if item["label"] == WINMAINT_LABEL or (wguid and item["guid"] == wguid):
+                if item["number"] not in (number, prev_number):
+                    drop.add(item["number"])
+
     if first:
         head = [number] + ([prev_number] if prev_number else [])
-        wanted = head + [n for n in order if n not in head]
+        wanted = head + [n for n in order if n not in head and n not in drop]
     else:
-        wanted = list(order)
+        wanted = [n for n in order if n not in drop]
         if number not in wanted:
             wanted.append(number)
         if prev_number and prev_number not in wanted:
@@ -211,14 +255,135 @@ def _register(esp, first=False):
     return 0
 
 
+def ensure_first(esp="/efi", winmaint_guid=None):
+    """Layer-4 heal: keep LOCachy first in BootOrder and strip Maintenance
+    Windows entries (and any Windows entry on winmaint_guid) from BootOrder."""
+    lock = efi_lock()
+    try:
+        return _register(esp, first=True, strip_winmaint=True, winmaint_guid=winmaint_guid)
+    finally:
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        os.close(lock)
+
+
+def set_bootnext_entry(disk, partition, partuuid, label=WINMAINT_LABEL, loader=WINMAINT_LOADER, esp=None):
+    """Register or reuse a Boot#### entry without placing it in BootOrder,
+    verify LOCachy stays first (when esp is given), and set BootNext once."""
+    if not disk.startswith("/dev/"):
+        raise RuntimeError(f"{disk}: disk device path must start with /dev/")
+    partition = int(partition)
+    if partition < 1:
+        raise RuntimeError(f"{partition}: partition number must be >= 1")
+    guid = str(uuid.UUID(partuuid)).lower()
+    if not loader.startswith("\\"):
+        raise RuntimeError(f"{loader}: UEFI loader path must start with backslash")
+    lock = efi_lock()
+    try:
+        require_writable_efivars()
+        if esp is not None:
+            _register(esp, first=True, strip_winmaint=True, winmaint_guid=guid)
+        raw = command(["efibootmgr", "--verbose"])
+        order, _, every = parse_entries(raw)
+
+        def matches(item):
+            return (item["label"] == label and item["part"] == partition and
+                    item["guid"] == guid and item["loader"] == loader.lower())
+
+        exact = [item for item in every if matches(item)]
+        if not exact:
+            command(["efibootmgr", "--create-only", "--disk", disk, "--part", str(partition),
+                     "--label", label, "--loader", loader])
+            order, _, every = parse_entries(command(["efibootmgr", "--verbose"]))
+            exact = [item for item in every if matches(item)]
+            if not exact:
+                raise RuntimeError(f"firmware did not retain the new {label} entry")
+        item = exact[0]
+        number = item["number"]
+        if not item["active"]:
+            command(["efibootmgr", "--bootnum", number, "--active"])
+        if number in order:
+            cleaned = [n for n in order if n != number]
+            if cleaned:
+                command(["efibootmgr", "--bootorder", ",".join(cleaned)])
+        command(["efibootmgr", "--bootnext", number])
+        after_order, after_next, _ = parse_entries(command(["efibootmgr", "--verbose"]))
+        if after_next != number:
+            raise RuntimeError(f"firmware did not retain BootNext={number}")
+        if number in after_order:
+            raise RuntimeError(f"entry Boot{number} must not remain in BootOrder")
+        print(f"locachy-efi: BootNext={number} ({label}, {disk} partition {partition} {loader}); BootOrder unchanged")
+        return number
+    finally:
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        os.close(lock)
+
+
+def remove_entry(label=WINMAINT_LABEL, partuuid=None):
+    """Remove matching UEFI entries from BootOrder, BootNext and NVRAM."""
+    wguid = str(uuid.UUID(partuuid)).lower() if partuuid else None
+    lock = efi_lock()
+    try:
+        require_writable_efivars()
+        order, bootnext, every = parse_entries(command(["efibootmgr", "--verbose"]))
+        targets = []
+        for item in every:
+            if item["label"] in (LABEL, PREV_LABEL):
+                continue
+            if item["label"] == label and (wguid is None or item["guid"] == wguid):
+                targets.append(item["number"])
+            elif wguid is not None and item["guid"] == wguid:
+                targets.append(item["number"])
+        targets = list(dict.fromkeys(targets))
+        if not targets:
+            return 0
+        if bootnext in targets:
+            command(["efibootmgr", "--delete-bootnext"])
+        new_order = [n for n in order if n not in targets]
+        if new_order != order and new_order:
+            command(["efibootmgr", "--bootorder", ",".join(new_order)])
+        for num in targets:
+            command(["efibootmgr", "--bootnum", num, "--delete-bootnum"])
+        print(f"locachy-efi: removed entries {', '.join('Boot' + n for n in targets)}")
+        return 0
+    finally:
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        os.close(lock)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--esp", default="/efi")
     parser.add_argument("--first", action="store_true")
+    parser.add_argument("--ensure-first", action="store_true",
+                        help="put LOCachy first in BootOrder and strip Maintenance Windows entries from BootOrder")
+    parser.add_argument("--winmaint-guid", default=None,
+                        help="optional Maintenance Windows ESP PARTUUID to strip from BootOrder or delete")
+    parser.add_argument("--bootnext-entry", action="store_true",
+                        help="create/reuse a BootNext-only entry without adding it to BootOrder")
+    parser.add_argument("--remove-entry", action="store_true",
+                        help="delete Maintenance Windows UEFI entries by label/PARTUUID")
+    parser.add_argument("--disk", default=None)
+    parser.add_argument("--part", type=int, default=None)
+    parser.add_argument("--partuuid", default=None)
+    parser.add_argument("--label", default=WINMAINT_LABEL)
+    parser.add_argument("--loader", default=WINMAINT_LOADER)
+    parser.add_argument("--no-esp-check", action="store_true",
+                        help="with --bootnext-entry, skip re-checking LOCachy /efi entry")
     args = parser.parse_args()
     try:
         if os.geteuid() != 0:
             raise RuntimeError("must run as root")
+        if args.bootnext_entry:
+            if not args.disk or args.part is None or not args.partuuid:
+                raise RuntimeError("--bootnext-entry requires --disk, --part and --partuuid")
+            set_bootnext_entry(args.disk, args.part, args.partuuid,
+                               label=args.label, loader=args.loader,
+                               esp=None if args.no_esp_check else args.esp)
+            return 0
+        if args.remove_entry:
+            return remove_entry(label=args.label, partuuid=args.partuuid or args.winmaint_guid)
+        if args.ensure_first:
+            return ensure_first(args.esp, winmaint_guid=args.winmaint_guid)
         return register(args.esp, args.first)
     except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as e:
         print(f"locachy-efi: boot entry not ready: {e}; fallback EFI/BOOT/BOOTX64.EFI is retained", file=sys.stderr)

@@ -1,0 +1,1703 @@
+#!/usr/bin/env python3
+"""locachy-winmaint: Maintenance Windows tail partition manager.
+
+Manages an isolated, reclaimable tail GPT partition triplet:
+  p4 (LOCACHY_WIN_ESP, 128 MiB FAT32, never keeps \\EFI\\BOOT\\BOOTX64.EFI)
+  p5 (LOCACHY_WIN_MSR, 16 MiB Microsoft Reserved)
+  p6 (LOCACHY_WIN_C, 40..4096 GiB NTFS, default 48 GiB)
+
+Subcommands:
+  status [--json]
+  create --size-gib N [--disk /dev/...] [--image FILE] [--no-boot-rebuild]
+  finalize-create [--no-boot-rebuild]
+  reclaim [--disk /dev/...] [--image FILE] [--force-no-efi]
+  vm [--iso FILE] [--memory MIB] [--cpus N] [--display SPEC | --vnc ADDR]
+     [--no-tpm] [--dry-run]
+  boot-once [--reboot] [--esp /efi]
+  sanitize-esp [--part DEV | --image FILE --offset-sectors N]
+  heal-boot [--esp /efi]
+  boot-guard [--esp /efi]
+  build-seed --output FILE
+  build-virtual-gpt --disk PATH --head-out FILE --tail-out FILE
+"""
+import argparse
+import contextlib
+import errno
+import fcntl
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import stat
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+import xml.etree.ElementTree as ET
+import zlib
+
+sys.dont_write_bytecode = True
+
+STATE_DIR = Path("/var/lib/locachy/winmaint")
+STATE_FILE = STATE_DIR / "state.json"
+SHRINK_PLAN_FILE = STATE_DIR / "shrink-plan.conf"
+SHRINK_STATUS_RUN = Path("/run/winmaint-shrink.status")
+SHRINK_STATUS_VAR = STATE_DIR / "shrink-last.status"
+OVMF_VARS_STATE = STATE_DIR / "ovmf-vars.fd"
+SWTPM_STATE_DIR = STATE_DIR / "swtpm"
+RUN_DIR = Path("/run/locachy/winmaint")
+LOCK_PATH = Path("/run/locachy/winmaint.lock")
+DM_NAME = "locachy-winmaint-disk"
+
+SECTOR_SIZE = 512
+ALIGN_SECTORS = 2048  # 1 MiB
+HEAD_SECTORS = 2048   # 1 MiB virtual disk head (PMBR + primary GPT)
+TAIL_SECTORS = 2048   # 1 MiB virtual disk tail (backup GPT)
+GPT_ENTRIES_COUNT = 128
+GPT_ENTRY_SIZE = 128
+
+WIN_ESP_MIB = 128
+WIN_MSR_MIB = 16
+MIN_WIN_C_GIB = 40
+DEFAULT_WIN_C_GIB = 48
+MAX_WIN_C_GIB = 4096
+MIN_ROOT_FREE_GIB = 8
+MIN_ROOT_TOTAL_GIB = 4
+LUKS2_MIN_OVERHEAD_SECTORS = 65536  # 32 MiB minimum safety margin
+
+RC_CONF_PATH = Path(os.environ.get("LOCACHY_RC_CONF", "/etc/locachy/rc.conf"))
+
+
+def read_rc_int(key, default, lo, hi):
+    try:
+        text = RC_CONF_PATH.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return default
+    val = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        if k.strip() != key:
+            continue
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
+            v = v[1:-1]
+        if v.isdigit():
+            n = int(v)
+            if lo <= n <= hi:
+                val = n
+    return default if val is None else val
+
+GPT_TYPE_ESP = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+GPT_TYPE_MSR = "e3c9e316-0b5c-4db8-817d-f92df00215ae"
+GPT_TYPE_BASIC = "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7"
+
+LABEL_ESP = "LOCACHY_WIN_ESP"
+LABEL_MSR = "LOCACHY_WIN_MSR"
+LABEL_C = "LOCACHY_WIN_C"
+FAT_LABEL_ESP = "WINMAINT_EP"
+WIN_EFI_LABEL = "LOCachy Maintenance Windows"
+WIN_EFI_LOADER = r"\EFI\Microsoft\Boot\bootmgfw.efi"
+
+OVMF_CODE_CANDIDATES = (
+    "/usr/share/edk2/x64/OVMF_CODE.secboot.4m.fd",
+    "/usr/share/edk2/x64/OVMF_CODE.4m.fd",
+    "/usr/share/OVMF/x64/OVMF_CODE.secboot.4m.fd",
+    "/usr/share/OVMF/x64/OVMF_CODE.4m.fd",
+)
+OVMF_VARS_CANDIDATES = (
+    "/usr/share/edk2/x64/OVMF_VARS.4m.fd",
+    "/usr/share/OVMF/x64/OVMF_VARS.4m.fd",
+)
+
+
+def run_cmd(args, input_text=None, check=True, timeout=120):
+    env = dict(os.environ, LC_ALL="C")
+    res = subprocess.run(
+        args,
+        input=input_text,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
+    )
+    if check and res.returncode != 0:
+        msg = res.stderr.strip() or res.stdout.strip() or f"exit {res.returncode}"
+        raise RuntimeError(f"{' '.join(str(a) for a in args)}: {msg}")
+    return res
+
+
+def atomic_write_text(path, text, mode=0o600):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def partition_child(disk, number):
+    sep = "p" if re.search(r"[0-9]$", disk) else ""
+    return f"{disk}{sep}{int(number)}"
+
+
+def efi_helper_path():
+    sib = Path(__file__).with_name("locachy-efi")
+    if sib.is_file():
+        return sib
+    return Path("/usr/local/bin/locachy-efi")
+
+
+def boot_helper_path():
+    sib = Path(__file__).with_name("locachy-boot")
+    if sib.is_file():
+        return sib
+    return Path("/usr/local/bin/locachy-boot")
+
+
+# ---------------------------------------------------------------------------
+# Exclusive locking (blocks boot-once/reclaim while VM or mutation is active)
+# ---------------------------------------------------------------------------
+
+class WinmaintLock:
+    def __init__(self, path=None, nonblocking=True):
+        self.path = Path(path) if path is not None else LOCK_PATH
+        self.nonblocking = nonblocking
+        self.fd = None
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(str(self.path), flags, 0o600)
+        op = fcntl.LOCK_EX | (fcntl.LOCK_NB if self.nonblocking else 0)
+        try:
+            fcntl.flock(fd, op)
+        except OSError as e:
+            os.close(fd)
+            if e.errno in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK):
+                raise RuntimeError("Maintenance Windows lock is busy (VM or disk operation active)") from None
+            raise
+        self.fd = fd
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.fd is not None:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_UN)
+            finally:
+                os.close(self.fd)
+                self.fd = None
+
+
+def is_lock_held(path=None):
+    p = Path(path) if path is not None else LOCK_PATH
+    if not p.exists():
+        return False
+    try:
+        fd = os.open(str(p), os.O_RDWR | os.O_CLOEXEC)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    except OSError as e:
+        return e.errno in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK)
+    finally:
+        os.close(fd)
+
+
+# ---------------------------------------------------------------------------
+# Pure-Python GPT parser and virtual dm-linear GPT builder
+# ---------------------------------------------------------------------------
+
+def guid_to_le(guid_str):
+    return uuid.UUID(str(guid_str)).bytes_le
+
+
+def le_to_guid(raw16):
+    return str(uuid.UUID(bytes_le=bytes(raw16))).lower()
+
+
+def _device_size_bytes(fd):
+    st = os.fstat(fd)
+    if stat.S_ISBLK(st.st_mode):
+        # Linux BLKGETSIZE64 = 0x80081272
+        buf = bytearray(8)
+        fcntl.ioctl(fd, 0x80081272, buf)
+        return struct.unpack("<Q", buf)[0]
+    return st.st_size
+
+
+def parse_gpt_disk(path):
+    """Read and validate a GPT disk or raw disk image without requiring root."""
+    with open(path, "rb") as f:
+        size_bytes = _device_size_bytes(f.fileno())
+        if size_bytes < 68 * SECTOR_SIZE:
+            raise RuntimeError(f"{path}: disk too small for GPT ({size_bytes} bytes)")
+        total_sectors = size_bytes // SECTOR_SIZE
+        f.seek(SECTOR_SIZE)
+        hdr = f.read(SECTOR_SIZE)
+        if len(hdr) < 92 or hdr[:8] != b"EFI PART":
+            raise RuntimeError(f"{path}: missing primary GPT header")
+        (sig, rev, hdr_size, hdr_crc, reserved, my_lba, alt_lba,
+         first_lba, last_lba, disk_guid_raw, part_lba, num_entries,
+         entry_size, entries_crc) = struct.unpack("<8sIIIIQQQQ16sQIII", hdr[:92])
+        if hdr_size < 92 or hdr_size > SECTOR_SIZE:
+            raise RuntimeError(f"{path}: invalid GPT header size {hdr_size}")
+        hdr_check = bytearray(hdr[:hdr_size])
+        hdr_check[16:20] = b"\x00\x00\x00\x00"
+        if (zlib.crc32(hdr_check) & 0xFFFFFFFF) != hdr_crc:
+            raise RuntimeError(f"{path}: primary GPT header CRC mismatch")
+        if entry_size < 128 or num_entries == 0 or num_entries > 4096:
+            raise RuntimeError(f"{path}: unsupported GPT entry table ({num_entries}x{entry_size})")
+        f.seek(part_lba * SECTOR_SIZE)
+        table = f.read(num_entries * entry_size)
+        if (zlib.crc32(table) & 0xFFFFFFFF) != entries_crc:
+            raise RuntimeError(f"{path}: primary GPT partition array CRC mismatch")
+        parts = []
+        zero_guid = b"\x00" * 16
+        for idx in range(num_entries):
+            ent = table[idx * entry_size:(idx + 1) * entry_size]
+            type_raw, part_raw, start_lba, end_lba, attrs = struct.unpack("<16s16sQQQ", ent[:56])
+            if type_raw == zero_guid:
+                continue
+            name_raw = ent[56:128]
+            name = name_raw.decode("utf-16le", errors="ignore").split("\x00", 1)[0]
+            parts.append({
+                "partn": idx + 1,
+                "type_guid": le_to_guid(type_raw),
+                "part_guid": le_to_guid(part_raw),
+                "start_lba": start_lba,
+                "end_lba": end_lba,
+                "sectors": end_lba - start_lba + 1,
+                "attributes": attrs,
+                "name": name,
+            })
+        return {
+            "path": str(path),
+            "size_bytes": size_bytes,
+            "total_sectors": total_sectors,
+            "disk_guid": le_to_guid(disk_guid_raw),
+            "my_lba": my_lba,
+            "alt_lba": alt_lba,
+            "first_lba": first_lba,
+            "last_lba": last_lba,
+            "partitions": parts,
+        }
+
+
+def find_winmaint_triplet(gpt):
+    """Locate and validate the (ESP, MSR, C) triplet in a parsed GPT dict."""
+    by_name = {p["name"]: p for p in gpt["partitions"]}
+    esp = by_name.get(LABEL_ESP)
+    msr = by_name.get(LABEL_MSR)
+    winc = by_name.get(LABEL_C)
+    if not (esp and msr and winc):
+        return None
+    if esp["type_guid"] != GPT_TYPE_ESP:
+        raise RuntimeError(f"{LABEL_ESP} has wrong GPT type {esp['type_guid']}")
+    if msr["type_guid"] != GPT_TYPE_MSR:
+        raise RuntimeError(f"{LABEL_MSR} has wrong GPT type {msr['type_guid']}")
+    if winc["type_guid"] != GPT_TYPE_BASIC:
+        raise RuntimeError(f"{LABEL_C} has wrong GPT type {winc['type_guid']}")
+    return {"esp": esp, "msr": msr, "c": winc}
+
+
+def _pack_pmbr(total_sectors):
+    mbr = bytearray(SECTOR_SIZE)
+    lba_size = min(total_sectors - 1, 0xFFFFFFFF)
+    # Protective MBR entry: boot=0, start CHS=0/2/0, type=0xEE, end CHS=FF/FF/FF, start LBA=1, size=lba_size
+    mbr[446:462] = struct.pack("<BBBBBBBBII", 0x00, 0x00, 0x02, 0x00, 0xEE, 0xFF, 0xFF, 0xFF, 1, lba_size)
+    mbr[510:512] = b"\x55\xAA"
+    return bytes(mbr)
+
+
+def _pack_gpt_header(my_lba, alt_lba, first_lba, last_lba, disk_guid, part_lba, entries_crc):
+    hdr = bytearray(92)
+    struct.pack_into(
+        "<8sIIIIQQQQ16sQIII",
+        hdr,
+        0,
+        b"EFI PART",
+        0x00010000,
+        92,
+        0,
+        0,
+        my_lba,
+        alt_lba,
+        first_lba,
+        last_lba,
+        guid_to_le(disk_guid),
+        part_lba,
+        GPT_ENTRIES_COUNT,
+        GPT_ENTRY_SIZE,
+        entries_crc,
+    )
+    crc = zlib.crc32(hdr) & 0xFFFFFFFF
+    struct.pack_into("<I", hdr, 16, crc)
+    return bytes(hdr) + b"\x00" * (SECTOR_SIZE - 92)
+
+
+def _pack_gpt_entries(entries):
+    buf = bytearray(GPT_ENTRIES_COUNT * GPT_ENTRY_SIZE)
+    for idx, ent in enumerate(entries):
+        if idx >= GPT_ENTRIES_COUNT:
+            raise ValueError("too many GPT entries")
+        name_u16 = ent["name"].encode("utf-16le")[:72]
+        name_u16 = name_u16.ljust(72, b"\x00")
+        offset = idx * GPT_ENTRY_SIZE
+        struct.pack_into(
+            "<16s16sQQQ",
+            buf,
+            offset,
+            guid_to_le(ent["type_guid"]),
+            guid_to_le(ent["part_guid"]),
+            int(ent["start_lba"]),
+            int(ent["end_lba"]),
+            int(ent.get("attributes", 0)),
+        )
+        buf[offset + 56:offset + 128] = name_u16
+    return bytes(buf)
+
+
+def build_virtual_gpt_blobs(disk_guid, triplet):
+    """Build (head_bytes, tail_bytes, layout) for a dm-linear virtual disk.
+
+    Virtual layout:
+      [0 .. 2047]                   head_bytes (PMBR + primary GPT)
+      [2048 .. +esp_sectors)        real p4 (LOCACHY_WIN_ESP)
+      [+esp .. +msr_sectors)        real p5 (LOCACHY_WIN_MSR)
+      [+msr .. +c_sectors)          real p6 (LOCACHY_WIN_C)
+      [tail_start .. +2048)         tail_bytes (backup GPT at end of disk)
+
+    Preserves the EXACT physical DiskGUID and PartitionGUIDs so Windows BCD
+    written inside QEMU matches bare-metal GPT headers 1-to-1, while exposing
+    ZERO sectors of LOCachy's p1/p2/p3 partitions.
+    """
+    esp_sec = int(triplet["esp"]["sectors"])
+    msr_sec = int(triplet["msr"]["sectors"])
+    c_sec = int(triplet["c"]["sectors"])
+    if esp_sec <= 0 or msr_sec <= 0 or c_sec <= 0:
+        raise ValueError("partition sector counts must be positive")
+
+    esp_start = HEAD_SECTORS
+    esp_end = esp_start + esp_sec - 1
+    msr_start = esp_end + 1
+    msr_end = msr_start + msr_sec - 1
+    c_start = msr_end + 1
+    c_end = c_start + c_sec - 1
+    tail_start = c_end + 1
+    total_sectors = tail_start + TAIL_SECTORS
+
+    first_usable = 34
+    last_usable = total_sectors - 34
+
+    virt_entries = [
+        {
+            "type_guid": triplet["esp"]["type_guid"],
+            "part_guid": triplet["esp"]["part_guid"],
+            "start_lba": esp_start,
+            "end_lba": esp_end,
+            "attributes": triplet["esp"].get("attributes", 0),
+            "name": LABEL_ESP,
+        },
+        {
+            "type_guid": triplet["msr"]["type_guid"],
+            "part_guid": triplet["msr"]["part_guid"],
+            "start_lba": msr_start,
+            "end_lba": msr_end,
+            "attributes": triplet["msr"].get("attributes", 0),
+            "name": LABEL_MSR,
+        },
+        {
+            "type_guid": triplet["c"]["type_guid"],
+            "part_guid": triplet["c"]["part_guid"],
+            "start_lba": c_start,
+            "end_lba": c_end,
+            "attributes": triplet["c"].get("attributes", 0),
+            "name": LABEL_C,
+        },
+    ]
+    entries_blob = _pack_gpt_entries(virt_entries)
+    entries_crc = zlib.crc32(entries_blob) & 0xFFFFFFFF
+
+    primary_hdr = _pack_gpt_header(
+        my_lba=1,
+        alt_lba=total_sectors - 1,
+        first_lba=first_usable,
+        last_lba=last_usable,
+        disk_guid=disk_guid,
+        part_lba=2,
+        entries_crc=entries_crc,
+    )
+    backup_hdr = _pack_gpt_header(
+        my_lba=total_sectors - 1,
+        alt_lba=1,
+        first_lba=first_usable,
+        last_lba=last_usable,
+        disk_guid=disk_guid,
+        part_lba=total_sectors - 33,
+        entries_crc=entries_crc,
+    )
+
+    head = bytearray(HEAD_SECTORS * SECTOR_SIZE)
+    head[0:SECTOR_SIZE] = _pack_pmbr(total_sectors)
+    head[SECTOR_SIZE:2 * SECTOR_SIZE] = primary_hdr
+    head[2 * SECTOR_SIZE:2 * SECTOR_SIZE + len(entries_blob)] = entries_blob
+
+    tail = bytearray(TAIL_SECTORS * SECTOR_SIZE)
+    backup_entries_off = (TAIL_SECTORS - 33) * SECTOR_SIZE
+    tail[backup_entries_off:backup_entries_off + len(entries_blob)] = entries_blob
+    tail[(TAIL_SECTORS - 1) * SECTOR_SIZE:TAIL_SECTORS * SECTOR_SIZE] = backup_hdr
+
+    layout = {
+        "disk_guid": str(uuid.UUID(disk_guid)).lower(),
+        "total_sectors": total_sectors,
+        "head_sectors": HEAD_SECTORS,
+        "tail_sectors": TAIL_SECTORS,
+        "tail_start": tail_start,
+        "esp": {"start_lba": esp_start, "end_lba": esp_end, "sectors": esp_sec, "part_guid": triplet["esp"]["part_guid"]},
+        "msr": {"start_lba": msr_start, "end_lba": msr_end, "sectors": msr_sec, "part_guid": triplet["msr"]["part_guid"]},
+        "c": {"start_lba": c_start, "end_lba": c_end, "sectors": c_sec, "part_guid": triplet["c"]["part_guid"]},
+    }
+    return bytes(head), bytes(tail), layout
+
+
+def dm_linear_table(loop_head, esp_dev, msr_dev, c_dev, loop_tail, layout):
+    """Build the 5-segment dm-linear table string for dmsetup create."""
+    lines = [
+        f"0 {layout['head_sectors']} linear {loop_head} 0",
+        f"{layout['esp']['start_lba']} {layout['esp']['sectors']} linear {esp_dev} 0",
+        f"{layout['msr']['start_lba']} {layout['msr']['sectors']} linear {msr_dev} 0",
+        f"{layout['c']['start_lba']} {layout['c']['sectors']} linear {c_dev} 0",
+        f"{layout['tail_start']} {layout['tail_sectors']} linear {loop_tail} 0",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Shrink planning & state management
+# ---------------------------------------------------------------------------
+
+def compute_shrink_plan(
+    root_part_uuid,
+    root_luks,
+    cur_part_sectors,
+    fs_total_bytes,
+    fs_used_bytes,
+    fs_min_bytes,
+    win_c_gib,
+    luks_payload_offset_sectors=32768,
+    win_esp_mib=WIN_ESP_MIB,
+    win_msr_mib=WIN_MSR_MIB,
+):
+    """Validate free space and compute exact 1-MiB-aligned offline shrink targets."""
+    if not (MIN_WIN_C_GIB <= int(win_c_gib) <= MAX_WIN_C_GIB):
+        raise ValueError(f"Windows C: size must be between {MIN_WIN_C_GIB} and {MAX_WIN_C_GIB} GiB")
+    win_c_mib = int(win_c_gib) * 1024
+    need_tail_mib = int(win_esp_mib) + int(win_msr_mib) + win_c_mib
+    need_tail_sectors = need_tail_mib * 2048
+    if cur_part_sectors <= need_tail_sectors + MIN_ROOT_TOTAL_GIB * 1024 * 2048:
+        raise RuntimeError("Root partition is too small to carve out the requested Windows partitions")
+
+    part_target_sectors = ((cur_part_sectors - need_tail_sectors) // ALIGN_SECTORS) * ALIGN_SECTORS
+    if root_luks:
+        overhead = max(int(luks_payload_offset_sectors) + 32768, LUKS2_MIN_OVERHEAD_SECTORS)
+        if part_target_sectors <= overhead + MIN_ROOT_TOTAL_GIB * 1024 * 2048:
+            raise RuntimeError("Insufficient room left for LUKS2 root after shrink")
+        luks_target_sectors = ((part_target_sectors - overhead) // ALIGN_SECTORS) * ALIGN_SECTORS
+        # Keep ext4 8 MiB inside the LUKS2 payload boundary.
+        fs_target_sectors = ((luks_target_sectors - 16384) // ALIGN_SECTORS) * ALIGN_SECTORS
+    else:
+        luks_target_sectors = 0
+        fs_target_sectors = ((part_target_sectors - 16384) // ALIGN_SECTORS) * ALIGN_SECTORS
+
+    fs_target_kib = fs_target_sectors // 2
+    fs_target_bytes = fs_target_kib * 1024
+
+    min_required_free = fs_used_bytes + MIN_ROOT_FREE_GIB * (1024 ** 3)
+    min_required_resize = fs_min_bytes + 4 * (1024 ** 3)
+    min_required = max(min_required_free, min_required_resize, MIN_ROOT_TOTAL_GIB * (1024 ** 3))
+    if fs_target_bytes < min_required:
+        avail_gib = max(0.0, (fs_total_bytes - min_required) / (1024 ** 3))
+        raise RuntimeError(
+            f"Not enough free space on LOCachy root (must keep at least {MIN_ROOT_FREE_GIB} GiB free; "
+            f"maximum reclaimable is ~{avail_gib:.1f} GiB)"
+        )
+    if fs_target_bytes >= fs_total_bytes:
+        raise RuntimeError("Computed target filesystem size is not smaller than current root filesystem")
+
+    return {
+        "version": 1,
+        "action": "shrink-create",
+        "root_part_uuid": str(uuid.UUID(root_part_uuid)).lower(),
+        "root_luks": 1 if root_luks else 0,
+        "fs_target_kib": int(fs_target_kib),
+        "luks_target_sectors": int(luks_target_sectors),
+        "part_target_sectors": int(part_target_sectors),
+        "win_esp_mib": int(win_esp_mib),
+        "win_msr_mib": int(win_msr_mib),
+        "win_c_mib": int(win_c_mib),
+    }
+
+
+def format_shrink_plan(plan):
+    keys = (
+        "version",
+        "action",
+        "root_part_uuid",
+        "root_luks",
+        "fs_target_kib",
+        "luks_target_sectors",
+        "part_target_sectors",
+        "win_esp_mib",
+        "win_msr_mib",
+        "win_c_mib",
+    )
+    return "".join(f"{k}={plan[k]}\n" for k in keys)
+
+
+def parse_kv_file(path):
+    out = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        out[k.strip()] = v.strip()
+    return out
+
+
+def state_from_gpt(gpt, disk_path, on_root_disk=False, root_part_uuid=""):
+    triplet = find_winmaint_triplet(gpt)
+    if not triplet:
+        raise RuntimeError(f"{disk_path}: Maintenance Windows tail triplet not found in GPT")
+    return {
+        "schema": 1,
+        "disk": str(disk_path),
+        "disk_guid": gpt["disk_guid"],
+        "on_root_disk": bool(on_root_disk),
+        "root_part_uuid": root_part_uuid.lower() if root_part_uuid else "",
+        "partitions": {
+            "esp": {
+                "partn": triplet["esp"]["partn"],
+                "part_guid": triplet["esp"]["part_guid"],
+                "type_guid": triplet["esp"]["type_guid"],
+                "start_lba": triplet["esp"]["start_lba"],
+                "sectors": triplet["esp"]["sectors"],
+                "name": LABEL_ESP,
+            },
+            "msr": {
+                "partn": triplet["msr"]["partn"],
+                "part_guid": triplet["msr"]["part_guid"],
+                "type_guid": triplet["msr"]["type_guid"],
+                "start_lba": triplet["msr"]["start_lba"],
+                "sectors": triplet["msr"]["sectors"],
+                "name": LABEL_MSR,
+            },
+            "c": {
+                "partn": triplet["c"]["partn"],
+                "part_guid": triplet["c"]["part_guid"],
+                "type_guid": triplet["c"]["type_guid"],
+                "start_lba": triplet["c"]["start_lba"],
+                "sectors": triplet["c"]["sectors"],
+                "name": LABEL_C,
+            },
+        },
+    }
+
+
+def load_state(path=None):
+    p = Path(path) if path is not None else STATE_FILE
+    if not p.is_file():
+        return None
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+def save_state(state, path=None):
+    p = Path(path) if path is not None else STATE_FILE
+    atomic_write_text(p, json.dumps(state, indent=2, sort_keys=True) + "\n", mode=0o600)
+
+
+def verify_state_against_gpt(state, gpt):
+    """Confirm disk GUID and all 3 partition GUIDs/types/names match state.json."""
+    if gpt["disk_guid"].lower() != state["disk_guid"].lower():
+        raise RuntimeError(
+            f"Disk GUID mismatch: GPT has {gpt['disk_guid']}, state expects {state['disk_guid']}"
+        )
+    triplet = find_winmaint_triplet(gpt)
+    if not triplet:
+        raise RuntimeError("Maintenance Windows partitions missing from GPT")
+    for key in ("esp", "msr", "c"):
+        rec = state["partitions"][key]
+        live = triplet[key]
+        if live["part_guid"].lower() != rec["part_guid"].lower():
+            raise RuntimeError(f"Partition {key} GUID mismatch: {live['part_guid']} != {rec['part_guid']}")
+        if live["type_guid"].lower() != rec["type_guid"].lower():
+            raise RuntimeError(f"Partition {key} type mismatch: {live['type_guid']} != {rec['type_guid']}")
+    return triplet
+
+
+# ---------------------------------------------------------------------------
+# System inspection helpers
+# ---------------------------------------------------------------------------
+
+def detect_root_layout():
+    """Inspect active LOCachy root filesystem, LUKS2 status, and underlying disk/partition."""
+    fm = json.loads(run_cmd(["findmnt", "--json", "--mountpoint", "/", "--output", "SOURCE,FSTYPE"]).stdout)
+    root_fs_dev = os.path.realpath(fm["filesystems"][0]["source"])
+    is_luks = False
+    phys_part = root_fs_dev
+    luks_payload_offset = 32768
+
+    blk = json.loads(run_cmd(["lsblk", "--json", "--paths", "--inverse", "--output",
+                              "PATH,TYPE,PKNAME,PARTN,PARTUUID,PTTYPE", root_fs_dev]).stdout)
+    node = blk["blockdevices"][0]
+    if node.get("type") == "crypt":
+        is_luks = True
+        children = node.get("children") or []
+        if not children:
+            raise RuntimeError(f"Cannot resolve underlying partition for LUKS device {root_fs_dev}")
+        phys_part = children[0]["path"]
+        dump = run_cmd(["cryptsetup", "luksDump", phys_part]).stdout
+        m = re.search(r"offset:\s*(\d+)\s*\[bytes\]", dump)
+        if m:
+            luks_payload_offset = int(m.group(1)) // SECTOR_SIZE
+
+    part_info = json.loads(run_cmd(["lsblk", "--json", "--nodeps", "--paths", "--properties-by", "blkid",
+                                    "--output", "PATH,TYPE,PKNAME,PARTN,PARTUUID,PTTYPE", phys_part]).stdout)
+    p = part_info["blockdevices"][0]
+    if p.get("type") != "part" or p.get("pttype") != "gpt":
+        raise RuntimeError(f"Root device {phys_part} is not a GPT partition")
+    disk = p["pkname"]
+    partn = int(p["partn"])
+    partuuid = str(uuid.UUID(p["partuuid"])).lower()
+
+    gpt = parse_gpt_disk(disk)
+    cur_part = next((x for x in gpt["partitions"] if x["partn"] == partn), None)
+    if not cur_part:
+        raise RuntimeError(f"Root partition {partn} not found in GPT of {disk}")
+
+    return {
+        "root_fs_dev": root_fs_dev,
+        "phys_part": phys_part,
+        "disk": disk,
+        "partn": partn,
+        "part_uuid": partuuid,
+        "is_luks": is_luks,
+        "luks_payload_offset_sectors": luks_payload_offset,
+        "part_start_lba": cur_part["start_lba"],
+        "part_end_lba": cur_part["end_lba"],
+        "part_sectors": cur_part["sectors"],
+        "gpt": gpt,
+    }
+
+
+def measure_ext4_usage(dev):
+    """Return (total_bytes, used_bytes, min_bytes) for an ext4 device."""
+    dump = run_cmd(["dumpe2fs", "-h", dev]).stdout
+    def grab(pattern):
+        m = re.search(pattern, dump)
+        if not m:
+            raise RuntimeError(f"dumpe2fs missing {pattern} on {dev}")
+        return int(m.group(1))
+
+    block_size = grab(r"Block size:\s*(\d+)")
+    block_count = grab(r"Block count:\s*(\d+)")
+    free_blocks = grab(r"Free blocks:\s*(\d+)")
+    total_bytes = block_count * block_size
+    used_bytes = max(0, (block_count - free_blocks) * block_size)
+
+    r = run_cmd(["resize2fs", "-P", dev], check=False)
+    min_bytes = used_bytes
+    m = re.search(r"Estimated minimum size of the filesystem:\s*(\d+)", r.stdout + "\n" + r.stderr)
+    if m:
+        min_bytes = int(m.group(1)) * block_size
+    return total_bytes, used_bytes, min_bytes
+
+
+def free_tail_sectors(gpt):
+    """Contiguous unallocated sectors after the last partition up to last_lba."""
+    if not gpt["partitions"]:
+        start = max(ALIGN_SECTORS, gpt["first_lba"])
+    else:
+        last_end = max(p["end_lba"] for p in gpt["partitions"])
+        start = ((last_end + ALIGN_SECTORS) // ALIGN_SECTORS) * ALIGN_SECTORS
+    if start > gpt["last_lba"]:
+        return 0, start
+    return gpt["last_lba"] - start + 1, start
+
+
+# ---------------------------------------------------------------------------
+# Online GPT creation, formatting, sanitization, and online reclaim
+# ---------------------------------------------------------------------------
+
+def append_tail_triplet_sfdisk(disk_path, win_c_gib, win_esp_mib=WIN_ESP_MIB,
+                               win_msr_mib=WIN_MSR_MIB, is_image=False):
+    """Create the 3 tail partitions in unallocated tail space via sfdisk."""
+    gpt = parse_gpt_disk(disk_path)
+    if find_winmaint_triplet(gpt):
+        raise RuntimeError(f"{disk_path}: Maintenance Windows partitions already exist")
+    win_c_mib = int(win_c_gib) * 1024
+    need_sectors = (int(win_esp_mib) + int(win_msr_mib) + win_c_mib) * 2048
+    avail, _ = free_tail_sectors(gpt)
+    if avail < need_sectors:
+        raise RuntimeError(
+            f"{disk_path}: need {need_sectors // 2048} MiB free tail space, only {avail // 2048} MiB available"
+        )
+    script = (
+        f"size={int(win_esp_mib)}M,type={GPT_TYPE_ESP.upper()},name={LABEL_ESP}\n"
+        f"size={int(win_msr_mib)}M,type={GPT_TYPE_MSR.upper()},name={LABEL_MSR}\n"
+        f"size={win_c_mib}M,type={GPT_TYPE_BASIC.upper()},name={LABEL_C}\n"
+    )
+    cmd = ["sfdisk", "--no-reread", "--append", str(disk_path)]
+    run_cmd(cmd, input_text=script)
+    if not is_image:
+        run_cmd(["partx", "-u", str(disk_path)], check=False)
+        if shutil.which("udevadm"):
+            run_cmd(["udevadm", "settle"], check=False)
+    new_gpt = parse_gpt_disk(disk_path)
+    triplet = find_winmaint_triplet(new_gpt)
+    if not triplet:
+        raise RuntimeError(f"{disk_path}: failed to verify newly created tail triplet")
+    return new_gpt, triplet
+
+
+def format_winmaint_esp_and_msr(disk_path, triplet, is_image=False):
+    esp = triplet["esp"]
+    msr = triplet["msr"]
+    if is_image:
+        esp_kib = (esp["sectors"] * SECTOR_SIZE) // 1024
+        run_cmd([
+            "mkfs.fat", "-F", "32", "-n", FAT_LABEL_ESP,
+            "--offset", str(esp["start_lba"]),
+            str(disk_path), str(esp_kib),
+        ])
+        with open(disk_path, "r+b") as f:
+            f.seek(msr["start_lba"] * SECTOR_SIZE)
+            zero_chunk = b"\x00" * (1024 * 1024)
+            rem = msr["sectors"] * SECTOR_SIZE
+            while rem > 0:
+                n = min(rem, len(zero_chunk))
+                f.write(zero_chunk[:n])
+                rem -= n
+            f.flush()
+    else:
+        esp_dev = partition_child(disk_path, esp["partn"])
+        msr_dev = partition_child(disk_path, msr["partn"])
+        run_cmd(["mkfs.fat", "-F", "32", "-n", FAT_LABEL_ESP, esp_dev])
+        with open(msr_dev, "wb") as f:
+            zero_chunk = b"\x00" * (1024 * 1024)
+            rem = msr["sectors"] * SECTOR_SIZE
+            while rem > 0:
+                n = min(rem, len(zero_chunk))
+                f.write(zero_chunk[:n])
+                rem -= n
+            f.flush()
+
+
+def sanitize_esp_blockdev(esp_dev):
+    """Layer-1 defense on a real FAT32 partition: strip \\EFI\\BOOT\\BOOTX64.EFI."""
+    removed = []
+    bootmgfw_present = False
+    with tempfile.TemporaryDirectory(prefix="winmaint-esp-") as mnt:
+        run_cmd(["mount", "-t", "vfat", "-o", "nosuid,nodev,noexec", esp_dev, mnt])
+        try:
+            root = Path(mnt)
+            for dirpath, _dirnames, filenames in os.walk(root):
+                rel_dir = Path(dirpath).relative_to(root).as_posix().lower()
+                for fn in filenames:
+                    fn_l = fn.lower()
+                    if rel_dir == "efi/boot" and fn_l == "bootx64.efi":
+                        p = Path(dirpath) / fn
+                        p.unlink()
+                        removed.append(str(p.relative_to(root)))
+                    elif rel_dir == "efi/microsoft/boot" and fn_l == "bootmgfw.efi":
+                        bootmgfw_present = True
+            os.sync()
+        finally:
+            run_cmd(["umount", mnt], check=False)
+    return {"removed": removed, "bootmgfw_present": bootmgfw_present}
+
+
+def sanitize_esp_image(image_path, offset_sectors):
+    """Layer-1 defense on a raw disk image via mtools (rootless)."""
+    spec = f"{image_path}@@{int(offset_sectors) * SECTOR_SIZE}"
+    removed = []
+    bootmgfw_present = False
+
+    r_boot = run_cmd(["mdir", "-b", "-i", spec, "::/EFI/BOOT"], check=False)
+    if r_boot.returncode == 0:
+        for line in r_boot.stdout.splitlines():
+            item = line.strip()
+            if item.lower().endswith("/bootx64.efi"):
+                run_cmd(["mdel", "-i", spec, item])
+                removed.append(item)
+
+    r_ms = run_cmd(["mdir", "-b", "-i", spec, "::/EFI/Microsoft/Boot"], check=False)
+    if r_ms.returncode == 0:
+        for line in r_ms.stdout.splitlines():
+            if line.strip().lower().endswith("/bootmgfw.efi"):
+                bootmgfw_present = True
+    return {"removed": removed, "bootmgfw_present": bootmgfw_present}
+
+
+def is_triplet_at_tail(gpt, triplet):
+    """Ensure no non-managed partition lies after the Maintenance Windows triplet."""
+    managed = {triplet["esp"]["partn"], triplet["msr"]["partn"], triplet["c"]["partn"]}
+    min_start = min(triplet[k]["start_lba"] for k in ("esp", "msr", "c"))
+    for p in gpt["partitions"]:
+        if p["partn"] in managed:
+            continue
+        if p["start_lba"] >= min_start or p["end_lba"] >= min_start:
+            return False
+    return True
+
+
+def reclaim_tail_triplet(disk_path, state, is_image=False, grow_root=True, root_info=None):
+    """Delete the verified tail triplet and optionally grow the preceding root partition online."""
+    gpt = parse_gpt_disk(disk_path)
+    triplet = verify_state_against_gpt(state, gpt)
+    if not is_triplet_at_tail(gpt, triplet):
+        raise RuntimeError(f"{disk_path}: Maintenance Windows partitions are not at the tail of the disk")
+
+    esp_n = triplet["esp"]["partn"]
+    msr_n = triplet["msr"]["partn"]
+    c_n = triplet["c"]["partn"]
+    esp_start = triplet["esp"]["start_lba"]
+
+    if not is_image:
+        if Path(f"/dev/mapper/{DM_NAME}").exists():
+            raise RuntimeError(f"/dev/mapper/{DM_NAME} is still active; stop the VM first")
+        for n in (esp_n, msr_n, c_n):
+            pdev = partition_child(disk_path, n)
+            fm = run_cmd(["findmnt", "--noheadings", "--source", pdev], check=False)
+            if fm.returncode == 0 and fm.stdout.strip():
+                raise RuntimeError(f"{pdev} is currently mounted; unmount it before reclaiming")
+
+    run_cmd(["sfdisk", "--no-reread", "--delete", str(disk_path), str(esp_n), str(msr_n), str(c_n)])
+
+    grew_root = False
+    if grow_root and state.get("on_root_disk"):
+        root_partn = None
+        root_uuid = (state.get("root_part_uuid") or "").lower()
+        for p in gpt["partitions"]:
+            if p["partn"] in (esp_n, msr_n, c_n):
+                continue
+            if root_uuid and p["part_guid"].lower() == root_uuid:
+                root_partn = p["partn"]
+                break
+        if root_partn is None and root_info is not None and root_info["disk"] == str(disk_path):
+            root_partn = root_info["partn"]
+        if root_partn is not None:
+            rpart = next((p for p in gpt["partitions"] if p["partn"] == root_partn), None)
+            if rpart and rpart["end_lba"] < esp_start and (esp_start - rpart["end_lba"]) <= 2 * ALIGN_SECTORS:
+                run_cmd(["sfdisk", "--no-reread", "-N", str(root_partn), str(disk_path)], input_text=",+\n")
+                grew_root = True
+
+    if not is_image:
+        run_cmd(["partx", "-u", str(disk_path)], check=False)
+        if shutil.which("udevadm"):
+            run_cmd(["udevadm", "settle"], check=False)
+        if grew_root and root_info is not None:
+            if root_info["is_luks"]:
+                run_cmd(["cryptsetup", "resize", "locachy-crypt"])
+            run_cmd(["resize2fs", root_info["root_fs_dev"]])
+
+    return {"deleted": [esp_n, msr_n, c_n], "grew_root": grew_root}
+
+
+# ---------------------------------------------------------------------------
+# Windows unattended seed generator (autounattend.xml + Layer-4 shutdown hook)
+# ---------------------------------------------------------------------------
+
+AUTOUNATTEND_XML = """<?xml version="1.0" encoding="utf-8"?>
+<unattend xmlns="urn:schemas-microsoft-com:unattend"
+          xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+  <settings pass="windowsPE">
+    <component name="Microsoft-Windows-Setup"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <UserData>
+        <AcceptEula>true</AcceptEula>
+        <ProductKey>
+          <WillShowUI>OnError</WillShowUI>
+        </ProductKey>
+      </UserData>
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Path>reg add HKLM\\SYSTEM\\Setup\\LabConfig /v BypassTPMCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>2</Order>
+          <Path>reg add HKLM\\SYSTEM\\Setup\\LabConfig /v BypassSecureBootCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>3</Order>
+          <Path>reg add HKLM\\SYSTEM\\Setup\\LabConfig /v BypassRAMCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+    </component>
+  </settings>
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Deployment"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Path>reg add HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\OOBE /v BypassNRO /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>2</Order>
+          <Path>reg add HKLM\\SYSTEM\\CurrentControlSet\\Control\\BitLocker /v PreventDeviceEncryption /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>3</Order>
+          <Path>reg add "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power" /v HiberbootEnabled /t REG_DWORD /d 0 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>4</Order>
+          <Path>reg add HKLM\\SYSTEM\\CurrentControlSet\\Control\\TimeZoneInformation /v RealTimeIsUniversal /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+    </component>
+  </settings>
+  <settings pass="oobeSystem">
+    <component name="Microsoft-Windows-Shell-Setup"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <OOBE>
+        <HideEULAPage>true</HideEULAPage>
+        <HideLocalAccountScreen>false</HideLocalAccountScreen>
+        <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <ProtectYourPC>3</ProtectYourPC>
+      </OOBE>
+      <FirstLogonCommands>
+        <SynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Description>LOCachy maintenance Windows hardening and Layer-4 boot order hook</Description>
+          <CommandLine>cmd /c "for %d in (D E F G H I J K L M N O P Q R S T U V W X Y Z) do if exist %d:\\locachy-postinstall.cmd call %d:\\locachy-postinstall.cmd %d:"</CommandLine>
+          <RequiresUserInput>false</RequiresUserInput>
+        </SynchronousCommand>
+      </FirstLogonCommands>
+    </component>
+  </settings>
+</unattend>
+"""
+
+POSTINSTALL_CMD = r"""@echo off
+setlocal
+set "SEED=%~1"
+if "%SEED%"=="" set "SEED=%~d0"
+
+rem Disable hibernation (no hiberfil.sys), Fast Startup, BitLocker auto-encryption,
+rem and switch RTC to UTC so LOCachy time stays accurate.
+powercfg /h off
+powercfg /change standby-timeout-ac 0
+powercfg /change standby-timeout-dc 0
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power" /v HiberbootEnabled /t REG_DWORD /d 0 /f
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\TimeZoneInformation" /v RealTimeIsUniversal /t REG_DWORD /d 1 /f
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\BitLocker" /v PreventDeviceEncryption /t REG_DWORD /d 1 /f
+
+rem Install Layer-4 shutdown script to keep LOCachy first in UEFI BootOrder.
+if not exist "C:\ProgramData\LOCachy" mkdir "C:\ProgramData\LOCachy"
+copy /Y "%SEED%\locachy-win-shutdown.ps1" "C:\ProgramData\LOCachy\locachy-win-shutdown.ps1" >nul
+
+rem Register Local Group Policy shutdown script and Event 1074 scheduled task.
+set "GPKEY=HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Shutdown\0"
+reg add "%GPKEY%" /v GPO-ID /t REG_SZ /d LocalGPO /f
+reg add "%GPKEY%" /v SOM-ID /t REG_SZ /d Local /f
+reg add "%GPKEY%" /v FileSysPath /t REG_SZ /d "C:\Windows\System32\GroupPolicy\Machine" /f
+reg add "%GPKEY%" /v DisplayName /t REG_SZ /d "Local Group Policy" /f
+reg add "%GPKEY%\0" /v Script /t REG_SZ /d "powershell.exe" /f
+reg add "%GPKEY%\0" /v Parameters /t REG_SZ /d "-NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\LOCachy\locachy-win-shutdown.ps1" /f
+reg add "%GPKEY%\0" /v IsPowershell /t REG_DWORD /d 0 /f
+reg add "%GPKEY%\0" /v ExecTime /t REG_QWORD /d 0 /f
+
+schtasks /Create /F /RU SYSTEM /TN "LOCachyKeepBootOrder" ^
+  /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\LOCachy\locachy-win-shutdown.ps1" ^
+  /SC ONEVENT /EC System /MO "*[System[(EventID=1074)]]" >nul 2>&1
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\ProgramData\LOCachy\locachy-win-shutdown.ps1"
+endlocal
+"""
+
+SHUTDOWN_PS1 = r"""# Layer-4 Windows-side boot order protection: keep LOCachy first in {fwbootmgr}.
+$ErrorActionPreference = 'SilentlyContinue'
+$lines = bcdedit /enum firmware
+if (-not $lines) { exit 0 }
+
+$currentId = $null
+$locachyId = $null
+$winMaintIds = @()
+
+foreach ($line in $lines) {
+    if ($line -match '^\s*identifier\s+(\{[0-9a-fA-F-]+\})\s*$') {
+        $currentId = $Matches[1]
+    } elseif ($currentId -and $line -match '^\s*description\s+(.+?)\s*$') {
+        $desc = $Matches[1].Trim()
+        if ($desc -eq 'LOCachy') {
+            $locachyId = $currentId
+        } elseif ($desc -eq 'LOCachy Maintenance Windows') {
+            $winMaintIds += $currentId
+        }
+    }
+}
+
+foreach ($wid in $winMaintIds) {
+    bcdedit /set '{fwbootmgr}' displayorder $wid /remove | Out-Null
+}
+if ($locachyId) {
+    bcdedit /set '{fwbootmgr}' displayorder $locachyId /addfirst | Out-Null
+}
+"""
+
+
+def build_seed_image(output_path):
+    """Build a 4 MiB FAT12 seed image carrying autounattend.xml and hardening scripts."""
+    ET.fromstring(AUTOUNATTEND_XML)  # self-validate XML
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="winmaint-seed-") as td:
+        td_path = Path(td)
+        img = td_path / "seed.img"
+        with open(img, "wb") as f:
+            f.truncate(4 * 1024 * 1024)
+        run_cmd(["mkfs.fat", "-F", "12", "-n", "WINSEED", str(img)])
+        files = {
+            "autounattend.xml": AUTOUNATTEND_XML,
+            "locachy-postinstall.cmd": POSTINSTALL_CMD.replace("\n", "\r\n"),
+            "locachy-win-shutdown.ps1": SHUTDOWN_PS1.replace("\n", "\r\n"),
+            "LOCACHY_WINSEED_MARKER": "locachy-winmaint\n",
+        }
+        for name, content in files.items():
+            src = td_path / name
+            src.write_text(content, encoding="utf-8")
+            run_cmd(["mcopy", "-o", "-i", str(img), str(src), f"::/{name}"])
+        shutil.copyfile(img, out)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# QEMU / KVM in-OS runner (NVMe over dm-linear + private OVMF + swtpm)
+# ---------------------------------------------------------------------------
+
+def pick_first_existing(paths):
+    for p in paths:
+        if Path(p).is_file():
+            return p
+    return None
+
+
+def build_qemu_argv(
+    dm_dev,
+    ovmf_code,
+    ovmf_vars,
+    memory_mib=4096,
+    cpus=4,
+    iso_path=None,
+    seed_path=None,
+    tpm_sock=None,
+    display_spec=None,
+    vnc_addr=None,
+):
+    argv = [
+        "qemu-system-x86_64",
+        "-enable-kvm",
+        "-machine", "q35,smm=on",
+        "-cpu", "host,hv_relaxed,hv_spinlocks=0x1fff,hv_vapic,hv_time",
+        "-smp", str(int(cpus)),
+        "-m", str(int(memory_mib)),
+        "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={ovmf_code}",
+        "-drive", f"if=pflash,format=raw,unit=1,file={ovmf_vars}",
+        "-drive", f"file={dm_dev},format=raw,if=none,id=nvme0,cache=none,aio=native",
+        "-device", "nvme,drive=nvme0,serial=locachy-winmaint",
+        "-device", "qemu-xhci,id=xhci",
+        "-device", "usb-tablet,bus=xhci.0",
+        "-netdev", "user,id=net0",
+        "-device", "e1000e,netdev=net0",
+    ]
+    if tpm_sock:
+        argv += [
+            "-chardev", f"socket,id=chrtpm,path={tpm_sock}",
+            "-tpmdev", "emulator,id=tpm0,chardev=chrtpm",
+            "-device", "tpm-tis,tpmdev=tpm0",
+        ]
+    if iso_path:
+        argv += [
+            "-drive", f"file={iso_path},media=cdrom,readonly=on,if=none,id=cd0",
+            "-device", "ide-cd,drive=cd0,bootindex=1",
+        ]
+    if seed_path:
+        argv += [
+            "-drive", f"file={seed_path},format=raw,readonly=on,if=none,id=seed0",
+            "-device", "usb-storage,drive=seed0,bus=xhci.0",
+        ]
+    if vnc_addr:
+        argv += ["-display", "none", "-vnc", vnc_addr]
+    elif display_spec:
+        argv += ["-display", display_spec]
+    elif os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY"):
+        argv += ["-display", "gtk"]
+    else:
+        argv += ["-display", "none", "-vnc", "127.0.0.1:0"]
+    return argv
+
+
+def cmd_vm(args):
+    if os.geteuid() != 0 and not args.dry_run:
+        raise RuntimeError("locachy-winmaint vm must run as root")
+    state = load_state()
+    if not state:
+        raise RuntimeError("Maintenance Windows is not configured (run 'locachy-winmaint create' first)")
+    disk = state["disk"]
+    gpt = parse_gpt_disk(disk)
+    triplet = verify_state_against_gpt(state, gpt)
+    esp_dev = partition_child(disk, triplet["esp"]["partn"])
+    msr_dev = partition_child(disk, triplet["msr"]["partn"])
+    c_dev = partition_child(disk, triplet["c"]["partn"])
+
+    ovmf_code = pick_first_existing(OVMF_CODE_CANDIDATES)
+    ovmf_vars_tpl = pick_first_existing(OVMF_VARS_CANDIDATES)
+    if not ovmf_code or not ovmf_vars_tpl:
+        raise RuntimeError("OVMF firmware images not found under /usr/share/edk2/x64")
+
+    if args.iso and not Path(args.iso).is_file():
+        raise RuntimeError(f"ISO not found: {args.iso}")
+
+    with WinmaintLock():
+        for pdev in (esp_dev, msr_dev, c_dev):
+            fm = run_cmd(["findmnt", "--noheadings", "--source", pdev], check=False)
+            if fm.returncode == 0 and fm.stdout.strip():
+                raise RuntimeError(f"{pdev} is mounted; unmount it before launching VM")
+
+        head_bytes, tail_bytes, layout = build_virtual_gpt_blobs(state["disk_guid"], triplet)
+        if args.dry_run:
+            table = dm_linear_table("/dev/loopX", esp_dev, msr_dev, c_dev, "/dev/loopY", layout)
+            argv = build_qemu_argv(
+                f"/dev/mapper/{DM_NAME}",
+                ovmf_code,
+                str(OVMF_VARS_STATE),
+                memory_mib=args.memory,
+                cpus=args.cpus,
+                iso_path=args.iso,
+                seed_path=str(RUN_DIR / "seed.img") if (args.iso or args.seed) else None,
+                tpm_sock=None if args.no_tpm else str(RUN_DIR / "swtpm.sock"),
+                display_spec=args.display,
+                vnc_addr=args.vnc,
+            )
+            print(json.dumps({"dm_table": table.splitlines(), "qemu_argv": argv}, indent=2))
+            return 0
+
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        RUN_DIR.mkdir(parents=True, exist_ok=True)
+        if not OVMF_VARS_STATE.is_file():
+            shutil.copyfile(ovmf_vars_tpl, OVMF_VARS_STATE)
+            os.chmod(OVMF_VARS_STATE, 0o600)
+
+        head_path = RUN_DIR / "gpt-head.img"
+        tail_path = RUN_DIR / "gpt-tail.img"
+        seed_path = RUN_DIR / "seed.img"
+        tpm_sock = RUN_DIR / "swtpm.sock"
+
+        head_path.write_bytes(head_bytes)
+        tail_path.write_bytes(tail_bytes)
+        use_seed = None
+        if args.iso or args.seed:
+            build_seed_image(seed_path)
+            use_seed = str(seed_path)
+
+        loop_head = None
+        loop_tail = None
+        dm_created = False
+        swtpm_proc = None
+        try:
+            loop_head = run_cmd(["losetup", "--find", "--show", str(head_path)]).stdout.strip()
+            loop_tail = run_cmd(["losetup", "--find", "--show", str(tail_path)]).stdout.strip()
+            table = dm_linear_table(loop_head, esp_dev, msr_dev, c_dev, loop_tail, layout)
+            run_cmd(["dmsetup", "create", DM_NAME], input_text=table)
+            dm_created = True
+
+            use_tpm = None
+            if not args.no_tpm:
+                if not shutil.which("swtpm"):
+                    raise RuntimeError("swtpm is not installed (install swtpm or pass --no-tpm)")
+                SWTPM_STATE_DIR.mkdir(parents=True, exist_ok=True)
+                os.chmod(SWTPM_STATE_DIR, 0o700)
+                tpm_sock.unlink(missing_ok=True)
+                swtpm_proc = subprocess.Popen([
+                    "swtpm", "socket", "--tpm2",
+                    "--tpmstate", f"dir={SWTPM_STATE_DIR}",
+                    "--ctrl", f"type=unixio,path={tpm_sock}",
+                ])
+                deadline = time.monotonic() + 5.0
+                while not tpm_sock.exists() and time.monotonic() < deadline:
+                    if swtpm_proc.poll() is not None:
+                        raise RuntimeError(f"swtpm exited early ({swtpm_proc.returncode})")
+                    time.sleep(0.05)
+                if not tpm_sock.exists():
+                    raise RuntimeError("swtpm control socket did not appear")
+                use_tpm = str(tpm_sock)
+
+            argv = build_qemu_argv(
+                f"/dev/mapper/{DM_NAME}",
+                ovmf_code,
+                str(OVMF_VARS_STATE),
+                memory_mib=args.memory,
+                cpus=args.cpus,
+                iso_path=args.iso,
+                seed_path=use_seed,
+                tpm_sock=use_tpm,
+                display_spec=args.display,
+                vnc_addr=args.vnc,
+            )
+            res = subprocess.run(argv)
+            return res.returncode
+        finally:
+            if swtpm_proc is not None and swtpm_proc.poll() is None:
+                swtpm_proc.terminate()
+                try:
+                    swtpm_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    swtpm_proc.kill()
+                    swtpm_proc.wait(timeout=5)
+            tpm_sock.unlink(missing_ok=True)
+            if dm_created:
+                run_cmd(["dmsetup", "remove", DM_NAME], check=False)
+            if loop_head:
+                run_cmd(["losetup", "-d", loop_head], check=False)
+            if loop_tail:
+                run_cmd(["losetup", "-d", loop_tail], check=False)
+            for p in (head_path, tail_path, seed_path):
+                p.unlink(missing_ok=True)
+            # Layer-1 defense: strip \EFI\BOOT\BOOTX64.EFI if Windows created it.
+            try:
+                info = sanitize_esp_blockdev(esp_dev)
+                if info["removed"]:
+                    print(f"locachy-winmaint: stripped fallback from {esp_dev}: {', '.join(info['removed'])}")
+            except Exception as e:
+                print(f"locachy-winmaint: warning: post-VM ESP sanitize failed: {e}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Subcommand handlers
+# ---------------------------------------------------------------------------
+
+def cmd_status(args):
+    state = load_state()
+    plan_armed = SHRINK_PLAN_FILE.is_file()
+    locked = is_lock_held()
+    last_status = parse_kv_file(SHRINK_STATUS_VAR) if SHRINK_STATUS_VAR.is_file() else {}
+    info = {
+        "configured": state is not None,
+        "shrink_plan_armed": plan_armed,
+        "lock_held": locked,
+        "last_shrink": last_status,
+        "state": state,
+    }
+    if state:
+        try:
+            gpt = parse_gpt_disk(state["disk"])
+            triplet = verify_state_against_gpt(state, gpt)
+            info["gpt_verified"] = True
+            info["esp_dev"] = partition_child(state["disk"], triplet["esp"]["partn"])
+            info["msr_dev"] = partition_child(state["disk"], triplet["msr"]["partn"])
+            info["c_dev"] = partition_child(state["disk"], triplet["c"]["partn"])
+            info["win_c_gib"] = round((triplet["c"]["sectors"] * SECTOR_SIZE) / (1024 ** 3), 2)
+        except Exception as e:
+            info["gpt_verified"] = False
+            info["gpt_error"] = str(e)
+    if args.json:
+        print(json.dumps(info, indent=2, sort_keys=True))
+    else:
+        if state:
+            print(f"Maintenance Windows: configured on {state['disk']} (disk GUID {state['disk_guid']})")
+            print(f"  ESP: part {state['partitions']['esp']['partn']} ({state['partitions']['esp']['part_guid']})")
+            print(f"  MSR: part {state['partitions']['msr']['partn']} ({state['partitions']['msr']['part_guid']})")
+            print(f"  C:   part {state['partitions']['c']['partn']} ({state['partitions']['c']['part_guid']})")
+            print(f"  VM/op lock active: {'yes' if locked else 'no'}")
+        elif plan_armed:
+            print("Maintenance Windows: one-shot offline shrink plan armed (reboot to create partitions)")
+        else:
+            print("Maintenance Windows: not configured")
+    return 0
+
+
+def cmd_create(args):
+    size_gib = int(args.size_gib)
+    if not (MIN_WIN_C_GIB <= size_gib <= MAX_WIN_C_GIB):
+        raise RuntimeError(f"--size-gib must be between {MIN_WIN_C_GIB} and {MAX_WIN_C_GIB}")
+    is_image = bool(args.image)
+    if not is_image and os.geteuid() != 0:
+        raise RuntimeError("locachy-winmaint create must run as root")
+
+    lock_ctx = contextlib.nullcontext() if is_image else WinmaintLock()
+    with lock_ctx:
+        if not is_image and STATE_FILE.is_file():
+            raise RuntimeError("Maintenance Windows is already configured (reclaim it first)")
+
+        if is_image:
+            target = args.image
+            new_gpt, triplet = append_tail_triplet_sfdisk(target, size_gib, is_image=True)
+            format_winmaint_esp_and_msr(target, triplet, is_image=True)
+            state = state_from_gpt(new_gpt, target, on_root_disk=False)
+            if args.state_file:
+                save_state(state, args.state_file)
+            print(json.dumps(state, indent=2, sort_keys=True))
+            return 0
+
+        root = detect_root_layout()
+        target_disk = args.disk or root["disk"]
+        on_root = os.path.realpath(target_disk) == os.path.realpath(root["disk"])
+        gpt = root["gpt"] if on_root else parse_gpt_disk(target_disk)
+
+        need_sectors = (WIN_ESP_MIB + WIN_MSR_MIB + size_gib * 1024) * 2048
+        avail_sectors, _ = free_tail_sectors(gpt)
+
+        # Case A: Online zero-reboot creation if free tail space suffices.
+        if avail_sectors >= need_sectors:
+            new_gpt, triplet = append_tail_triplet_sfdisk(target_disk, size_gib, is_image=False)
+            format_winmaint_esp_and_msr(target_disk, triplet, is_image=False)
+            state = state_from_gpt(new_gpt, target_disk, on_root_disk=on_root,
+                                   root_part_uuid=root["part_uuid"] if on_root else "")
+            save_state(state)
+            print(f"locachy-winmaint: created tail triplet online on {target_disk} (no reboot required)")
+            return 0
+
+        if not on_root:
+            raise RuntimeError(
+                f"{target_disk}: only {avail_sectors // 2048} MiB unallocated tail space, "
+                f"need {need_sectors // 2048} MiB"
+            )
+
+        # Case B: One-shot offline root shrink plan in initramfs.
+        total_b, used_b, min_b = measure_ext4_usage(root["root_fs_dev"])
+        plan = compute_shrink_plan(
+            root_part_uuid=root["part_uuid"],
+            root_luks=root["is_luks"],
+            cur_part_sectors=root["part_sectors"],
+            fs_total_bytes=total_b,
+            fs_used_bytes=used_b,
+            fs_min_bytes=min_b,
+            win_c_gib=size_gib,
+            luks_payload_offset_sectors=root["luks_payload_offset_sectors"],
+        )
+        atomic_write_text(SHRINK_PLAN_FILE, format_shrink_plan(plan), mode=0o600)
+        if not args.no_boot_rebuild:
+            run_cmd([str(boot_helper_path())])
+        print(f"locachy-winmaint: armed one-shot offline shrink plan for {size_gib} GiB Windows C:; reboot to apply")
+        return 0
+
+
+def cmd_finalize_create(args):
+    if os.geteuid() != 0:
+        raise RuntimeError("locachy-winmaint finalize-create must run as root")
+    status_file = SHRINK_STATUS_RUN if SHRINK_STATUS_RUN.is_file() else SHRINK_STATUS_VAR
+    if not status_file.is_file():
+        return 0
+    kv = parse_kv_file(status_file)
+    try:
+        if kv.get("status") == "ok":
+            disk = kv.get("disk")
+            if not disk:
+                raise RuntimeError("shrink status missing disk path")
+            root = detect_root_layout()
+            gpt = parse_gpt_disk(disk)
+            triplet = find_winmaint_triplet(gpt)
+            if not triplet:
+                raise RuntimeError(f"tail triplet missing on {disk} after shrink")
+            format_winmaint_esp_and_msr(disk, triplet, is_image=False)
+            state = state_from_gpt(gpt, disk, on_root_disk=(os.path.realpath(disk) == os.path.realpath(root["disk"])),
+                                   root_part_uuid=root["part_uuid"])
+            save_state(state)
+            sanitize_esp_blockdev(partition_child(disk, triplet["esp"]["partn"]))
+            print(f"locachy-winmaint: finalized tail triplet on {disk}")
+        else:
+            print(f"locachy-winmaint: offline shrink reported failure: {kv.get('reason', 'unknown')}", file=sys.stderr)
+    finally:
+        SHRINK_PLAN_FILE.unlink(missing_ok=True)
+        SHRINK_STATUS_RUN.unlink(missing_ok=True)
+        if not args.no_boot_rebuild and boot_helper_path().is_file():
+            run_cmd([str(boot_helper_path())], check=False)
+    return 0 if kv.get("status") == "ok" else 1
+
+
+def cmd_reclaim(args):
+    is_image = bool(args.image)
+    if not is_image and os.geteuid() != 0:
+        raise RuntimeError("locachy-winmaint reclaim must run as root")
+
+    lock_ctx = contextlib.nullcontext() if is_image else WinmaintLock()
+    with lock_ctx:
+        if is_image:
+            state = load_state(args.state_file)
+            if not state:
+                raise RuntimeError("--state-file is required with --image")
+            res = reclaim_tail_triplet(args.image, state, is_image=True, grow_root=True)
+            print(json.dumps(res, indent=2, sort_keys=True))
+            return 0
+
+        if SHRINK_PLAN_FILE.is_file() and not STATE_FILE.is_file():
+            SHRINK_PLAN_FILE.unlink(missing_ok=True)
+            if boot_helper_path().is_file():
+                run_cmd([str(boot_helper_path())], check=False)
+            print("locachy-winmaint: cancelled armed shrink plan")
+            return 0
+
+        state = load_state()
+        if not state:
+            raise RuntimeError("Maintenance Windows is not configured")
+
+        if not args.force_no_efi and Path("/sys/firmware/efi").is_dir():
+            run_cmd([
+                str(efi_helper_path()),
+                "--remove-entry",
+                "--label", WIN_EFI_LABEL,
+                "--partuuid", state["partitions"]["esp"]["part_guid"],
+            ], check=False)
+
+        root = detect_root_layout()
+        res = reclaim_tail_triplet(state["disk"], state, is_image=False, grow_root=True, root_info=root)
+        STATE_FILE.unlink(missing_ok=True)
+        OVMF_VARS_STATE.unlink(missing_ok=True)
+        SHRINK_PLAN_FILE.unlink(missing_ok=True)
+        if Path("/sys/firmware/efi").is_dir() and Path("/efi/EFI/locachy/locachy.efi").is_file():
+            run_cmd([str(efi_helper_path()), "--ensure-first", "--esp", "/efi"], check=False)
+        print(f"locachy-winmaint: reclaimed partitions {res['deleted']} online (grew_root={res['grew_root']})")
+        return 0
+
+
+def cmd_sanitize_esp(args):
+    if args.image:
+        if args.offset_sectors is None:
+            gpt = parse_gpt_disk(args.image)
+            triplet = find_winmaint_triplet(gpt)
+            if not triplet:
+                raise RuntimeError("No LOCACHY_WIN_ESP found in image")
+            offset = triplet["esp"]["start_lba"]
+        else:
+            offset = args.offset_sectors
+        info = sanitize_esp_image(args.image, offset)
+        print(json.dumps(info, indent=2, sort_keys=True))
+        return 0
+
+    if os.geteuid() != 0:
+        raise RuntimeError("locachy-winmaint sanitize-esp must run as root on block devices")
+    part = args.part
+    if not part:
+        state = load_state()
+        if not state:
+            return 0
+        gpt = parse_gpt_disk(state["disk"])
+        triplet = verify_state_against_gpt(state, gpt)
+        part = partition_child(state["disk"], triplet["esp"]["partn"])
+    info = sanitize_esp_blockdev(part)
+    if info["removed"]:
+        print(f"locachy-winmaint: removed {', '.join(info['removed'])} from {part}")
+    return 0
+
+
+def cmd_heal_boot(args):
+    if os.geteuid() != 0:
+        raise RuntimeError("locachy-winmaint heal-boot must run as root")
+    state = load_state()
+    cmd = [str(efi_helper_path()), "--ensure-first", "--esp", args.esp]
+    if state:
+        cmd += ["--winmaint-guid", state["partitions"]["esp"]["part_guid"]]
+    run_cmd(cmd)
+    return 0
+
+
+def cmd_boot_guard(args):
+    if os.geteuid() != 0:
+        raise RuntimeError("locachy-winmaint boot-guard must run as root")
+    state = load_state()
+    if not state:
+        return 0
+    with WinmaintLock():
+        gpt = parse_gpt_disk(state["disk"])
+        triplet = verify_state_against_gpt(state, gpt)
+        esp_dev = partition_child(state["disk"], triplet["esp"]["partn"])
+        try:
+            sanitize_esp_blockdev(esp_dev)
+        except Exception as e:
+            print(f"locachy-winmaint: boot-guard sanitize warning: {e}", file=sys.stderr)
+        if Path("/sys/firmware/efi").is_dir() and Path(args.esp, "EFI/locachy/locachy.efi").is_file():
+            run_cmd([
+                str(efi_helper_path()), "--ensure-first", "--esp", args.esp,
+                "--winmaint-guid", triplet["esp"]["part_guid"],
+            ], check=False)
+    return 0
+
+
+def cmd_boot_once(args):
+    if os.geteuid() != 0 and not args.allow_unprivileged_test:
+        raise RuntimeError("locachy-winmaint boot-once must run as root")
+    with WinmaintLock():
+        state = load_state(args.state_file)
+        if not state:
+            raise RuntimeError("Maintenance Windows is not configured")
+        gpt = parse_gpt_disk(state["disk"])
+        triplet = verify_state_against_gpt(state, gpt)
+        esp_part = triplet["esp"]
+        esp_dev = partition_child(state["disk"], esp_part["partn"])
+
+        # Layer-1 check + verify Windows Boot Manager exists before arming BootNext.
+        if not args.skip_esp_check:
+            info = sanitize_esp_blockdev(esp_dev)
+            if not info["bootmgfw_present"]:
+                raise RuntimeError(
+                    f"{esp_dev}: \\EFI\\Microsoft\\Boot\\bootmgfw.efi not found; install Windows in VM first"
+                )
+
+        # Layer-3 + Layer-4: keep LOCachy first in BootOrder, never add WinMaint
+        # to BootOrder, arm one-shot BootNext.
+        run_cmd([
+            str(efi_helper_path()),
+            "--bootnext-entry",
+            "--disk", state["disk"],
+            "--part", str(esp_part["partn"]),
+            "--partuuid", esp_part["part_guid"],
+            "--label", WIN_EFI_LABEL,
+            "--loader", WIN_EFI_LOADER,
+            "--esp", args.esp,
+        ])
+        print("locachy-winmaint: one-shot BootNext armed for Maintenance Windows; BootOrder keeps LOCachy first")
+        if args.reboot:
+            reboot_bin = Path("/usr/local/bin/reboot")
+            if reboot_bin.is_file():
+                run_cmd([str(reboot_bin)])
+            else:
+                os.kill(1, signal.SIGTERM)
+    return 0
+
+
+def cmd_build_seed(args):
+    out = build_seed_image(args.output)
+    print(f"locachy-winmaint: wrote seed image {out}")
+    return 0
+
+
+def cmd_build_virtual_gpt(args):
+    gpt = parse_gpt_disk(args.disk)
+    triplet = find_winmaint_triplet(gpt)
+    if not triplet:
+        raise RuntimeError(f"{args.disk}: Maintenance Windows tail triplet not found")
+    head, tail, layout = build_virtual_gpt_blobs(gpt["disk_guid"], triplet)
+    Path(args.head_out).write_bytes(head)
+    Path(args.tail_out).write_bytes(tail)
+    print(json.dumps(layout, indent=2, sort_keys=True))
+    return 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="locachy-winmaint", description=__doc__.splitlines()[0])
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("status", help="show Maintenance Windows partition and lock state")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("create", help="create tail partitions online or arm one-shot initramfs shrink")
+    p.add_argument("--size-gib", type=int,
+                   default=read_rc_int("winmaint_size_gib", DEFAULT_WIN_C_GIB, MIN_WIN_C_GIB, MAX_WIN_C_GIB))
+    p.add_argument("--disk", default=None, help="target disk (defaults to root disk)")
+    p.add_argument("--image", default=None, help="raw disk image for offline/test creation")
+    p.add_argument("--state-file", default=None)
+    p.add_argument("--no-boot-rebuild", action="store_true")
+    p.set_defaults(func=cmd_create)
+
+    p = sub.add_parser("finalize-create", help="post-boot format/record after offline initramfs shrink")
+    p.add_argument("--no-boot-rebuild", action="store_true")
+    p.set_defaults(func=cmd_finalize_create)
+
+    p = sub.add_parser("reclaim", help="delete tail partitions and grow root online with zero reboot")
+    p.add_argument("--image", default=None)
+    p.add_argument("--state-file", default=None)
+    p.add_argument("--force-no-efi", action="store_true")
+    p.set_defaults(func=cmd_reclaim)
+
+    p = sub.add_parser("vm", help="launch Windows inside QEMU/KVM over dm-linear NVMe wrapper")
+    p.add_argument("--iso", default=None, help="Windows installation ISO")
+    p.add_argument("--seed", action="store_true", help="attach autounattend/hardening seed image")
+    p.add_argument("--memory", type=int, default=4096)
+    p.add_argument("--cpus", type=int, default=4)
+    p.add_argument("--display", default=None)
+    p.add_argument("--vnc", default=None)
+    p.add_argument("--no-tpm", action="store_true")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_vm)
+
+    p = sub.add_parser("boot-once", help="arm one-shot UEFI BootNext for bare-metal Maintenance Windows")
+    p.add_argument("--reboot", action="store_true")
+    p.add_argument("--esp", default="/efi")
+    p.add_argument("--state-file", default=None)
+    p.add_argument("--skip-esp-check", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--allow-unprivileged-test", action="store_true", help=argparse.SUPPRESS)
+    p.set_defaults(func=cmd_boot_once)
+
+    p = sub.add_parser("sanitize-esp", help="strip \\EFI\\BOOT\\BOOTX64.EFI from Maintenance Windows ESP")
+    p.add_argument("--part", default=None)
+    p.add_argument("--image", default=None)
+    p.add_argument("--offset-sectors", type=int, default=None)
+    p.set_defaults(func=cmd_sanitize_esp)
+
+    p = sub.add_parser("heal-boot", help="ensure LOCachy stays first in UEFI BootOrder")
+    p.add_argument("--esp", default="/efi")
+    p.set_defaults(func=cmd_heal_boot)
+
+    p = sub.add_parser("boot-guard", help="post-boot Layer-1 + Layer-4 protection check")
+    p.add_argument("--esp", default="/efi")
+    p.set_defaults(func=cmd_boot_guard)
+
+    p = sub.add_parser("build-seed", help="build the FAT seed image with autounattend.xml and scripts")
+    p.add_argument("--output", required=True)
+    p.set_defaults(func=cmd_build_seed)
+
+    p = sub.add_parser("build-virtual-gpt", help="build virtual dm-linear GPT head/tail blobs for a disk")
+    p.add_argument("--disk", required=True)
+    p.add_argument("--head-out", required=True)
+    p.add_argument("--tail-out", required=True)
+    p.set_defaults(func=cmd_build_virtual_gpt)
+
+    args = parser.parse_args(argv)
+    try:
+        return args.func(args)
+    except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as e:
+        print(f"locachy-winmaint: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

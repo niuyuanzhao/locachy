@@ -116,6 +116,11 @@ if [ -x /usr/bin/cryptsetup ] && { [ "${1:-}" = "--luks" ] || [ -f /etc/locachy/
     want_luks=1
 fi
 
+want_winmaint_shrink=0
+if [ "${1:-}" = "--winmaint-shrink" ] || [ -f /var/lib/locachy/winmaint/shrink-plan.conf ]; then
+    want_winmaint_shrink=1
+fi
+
 if [ -x /usr/bin/kmod ] && [ -d "/usr/lib/modules/$version" ]; then
     cat >>"$work/initramfs.list" <<EOF
 dir /sbin 0755 0 0
@@ -163,6 +168,16 @@ EOF
                 >>"$work/initramfs.list"
             bins="$bins /usr/lib/systemd/systemd-pcrextend"
         fi
+    fi
+    # One-shot offline root shrink for Maintenance Windows tail partition:
+    # packed only while shrink-plan.conf is armed or --winmaint-shrink is asked.
+    if [ "$want_winmaint_shrink" = 1 ]; then
+        for tool in e2fsck resize2fs sfdisk partx; do
+            tool_src="/usr/bin/$tool"
+            [ -x "$tool_src" ] || { echo "locachy-boot: missing $tool_src for winmaint shrink" >&2; exit 1; }
+            printf 'file /sbin/%s %s 0755 0 0\n' "$tool" "$(realpath "$tool_src")" >>"$work/initramfs.list"
+            bins="$bins $tool_src"
+        done
     fi
     ldd $bins 2>/dev/null | sed -n 's/.*=> \([^ ]*\) (.*/\1/p; s/^[[:space:]]*\(\/[^ ]*\) (.*/\1/p' | sort -u |
     while read -r so; do

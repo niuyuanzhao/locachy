@@ -222,6 +222,10 @@ static char *desktop_argv[] = {
     "/usr/local/bin/locachy-seat", "/usr/bin/labwc", NULL
 };
 static char swap_dev[64], esp_dev[64];
+#define MAX_ESP_CANDS 8
+static char esp_cands[MAX_ESP_CANDS][64];
+static int nesp_cands;
+static char winmaint_shrink_status[256];
 static char resume_dev[16];       /* the swap as MAJOR:MINOR, where hibernation goes */
 static int luks_passphrase_entered; /* 1 when passphrase was entered at boot (0 if TPM auto-unlocked) */
 static int boot_duress_enabled;     /* the duress verifier is in the initramfs (duress.h) */
@@ -1052,19 +1056,430 @@ static void resume(void)
     each_block_dev(check_resume_dev);
 }
 
+/* One-shot offline root shrink for the Maintenance Windows tail partition
+ * triplet (LOCACHY_WIN_ESP, LOCACHY_WIN_MSR, LOCACHY_WIN_C).
+ * The plan file lives inside locachy-root (encrypted under LUKS2 when enabled),
+ * never on unencrypted /efi, and this hook activates only when locachy-boot
+ * packed e2fsck/resize2fs/sfdisk into this boot's initramfs. */
+struct winmaint_shrink_plan {
+    int version;
+    int root_luks;
+    char root_part_uuid[48];
+    unsigned long long fs_target_kib;
+    unsigned long long luks_target_sectors;
+    unsigned long long part_target_sectors;
+    unsigned long long win_esp_mib;
+    unsigned long long win_msr_mib;
+    unsigned long long win_c_mib;
+};
+
+static int winmaint_parse_u64(const char *val, unsigned long long *out)
+{
+    if (!val || !isdigit((unsigned char)val[0])) {
+        return 0;
+    }
+    char *end = NULL;
+    errno = 0;
+    unsigned long long v = strtoull(val, &end, 10);
+    if (errno != 0 || end == val || *end != '\0') {
+        return 0;
+    }
+    *out = v;
+    return 1;
+}
+
+static int winmaint_parse_uuid_str(const char *s)
+{
+    if (!s || strlen(s) != 36) {
+        return 0;
+    }
+    for (int i = 0; i < 36; i++) {
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (s[i] != '-') return 0;
+        } else if (!isxdigit((unsigned char)s[i])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int winmaint_uuid_equal(const char *a, const char *b)
+{
+    if (!a || !b) return 0;
+    for (size_t i = 0; ; i++) {
+        int ca = tolower((unsigned char)a[i]);
+        int cb = tolower((unsigned char)b[i]);
+        if (ca != cb) return 0;
+        if (ca == '\0') return 1;
+    }
+}
+
+static int winmaint_parse_shrink_plan(const char *text, struct winmaint_shrink_plan *plan)
+{
+    if (!text || !plan) return 0;
+    memset(plan, 0, sizeof *plan);
+    int action_ok = 0;
+    const char *p = text;
+    while (*p) {
+        const char *eol = strchr(p, '\n');
+        size_t len = eol ? (size_t)(eol - p) : strlen(p);
+        while (len > 0 && (p[len - 1] == '\r' || p[len - 1] == ' ' || p[len - 1] == '\t')) len--;
+        if (len > 0 && len < 160 && p[0] != '#') {
+            char line[160];
+            memcpy(line, p, len);
+            line[len] = '\0';
+            char *eq = strchr(line, '=');
+            if (eq) {
+                *eq = '\0';
+                const char *k = line;
+                const char *v = eq + 1;
+                unsigned long long num = 0;
+                if (strcmp(k, "version") == 0) {
+                    if (!winmaint_parse_u64(v, &num) || num != 1) return 0;
+                    plan->version = 1;
+                } else if (strcmp(k, "action") == 0) {
+                    action_ok = strcmp(v, "shrink-create") == 0;
+                    if (!action_ok) return 0;
+                } else if (strcmp(k, "root_part_uuid") == 0) {
+                    if (!winmaint_parse_uuid_str(v)) return 0;
+                    snprintf(plan->root_part_uuid, sizeof plan->root_part_uuid, "%s", v);
+                } else if (strcmp(k, "root_luks") == 0) {
+                    if (!winmaint_parse_u64(v, &num) || num > 1) return 0;
+                    plan->root_luks = (int)num;
+                } else if (strcmp(k, "fs_target_kib") == 0) {
+                    if (!winmaint_parse_u64(v, &plan->fs_target_kib)) return 0;
+                } else if (strcmp(k, "luks_target_sectors") == 0) {
+                    if (!winmaint_parse_u64(v, &plan->luks_target_sectors)) return 0;
+                } else if (strcmp(k, "part_target_sectors") == 0) {
+                    if (!winmaint_parse_u64(v, &plan->part_target_sectors)) return 0;
+                } else if (strcmp(k, "win_esp_mib") == 0) {
+                    if (!winmaint_parse_u64(v, &plan->win_esp_mib)) return 0;
+                } else if (strcmp(k, "win_msr_mib") == 0) {
+                    if (!winmaint_parse_u64(v, &plan->win_msr_mib)) return 0;
+                } else if (strcmp(k, "win_c_mib") == 0) {
+                    if (!winmaint_parse_u64(v, &plan->win_c_mib)) return 0;
+                }
+            }
+        }
+        p = eol ? eol + 1 : p + len;
+    }
+    if (plan->version != 1 || !action_ok || !plan->root_part_uuid[0]) return 0;
+    if (plan->fs_target_kib < 4ULL * 1024ULL * 1024ULL) return 0; /* >= 4 GiB root */
+    if (plan->part_target_sectors < plan->fs_target_kib * 2ULL) return 0;
+    if (plan->root_luks) {
+        if (plan->luks_target_sectors < plan->fs_target_kib * 2ULL) return 0;
+        /* Leave at least 32 MiB LUKS2 header/keyslot area between payload and partition end. */
+        if (plan->part_target_sectors < plan->luks_target_sectors + 65536ULL) return 0;
+    }
+    if (plan->win_esp_mib < 100ULL || plan->win_esp_mib > 1024ULL) return 0;
+    if (plan->win_msr_mib < 16ULL || plan->win_msr_mib > 128ULL) return 0;
+    if (plan->win_c_mib < 40ULL * 1024ULL || plan->win_c_mib > 4096ULL * 1024ULL) return 0;
+    return 1;
+}
+
+static int winmaint_run_cmd(const char *const argv[], const char *stdin_data)
+{
+    int p[2] = { -1, -1 };
+    if (stdin_data && pipe(p) < 0) return -1;
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (stdin_data) {
+            close(p[1]);
+            dup2(p[0], STDIN_FILENO);
+            close(p[0]);
+        } else {
+            int null_fd = open("/dev/null", O_RDONLY);
+            if (null_fd >= 0) {
+                dup2(null_fd, STDIN_FILENO);
+                if (null_fd > 2) close(null_fd);
+            }
+        }
+        execv(argv[0], (char *const *)argv);
+        _exit(127);
+    }
+    if (stdin_data) {
+        close(p[0]);
+        if (pid > 0) {
+            size_t len = strlen(stdin_data);
+            size_t off = 0;
+            while (off < len) {
+                ssize_t w = write(p[1], stdin_data + off, len - off);
+                if (w <= 0) break;
+                off += (size_t)w;
+            }
+        }
+        close(p[1]);
+    }
+    if (pid < 0) return -1;
+    int status = -1;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+static int winmaint_read_sysfs_key(const char *path, const char *key, char *out, size_t size)
+{
+    char buf[1024];
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    ssize_t n = fd >= 0 ? read(fd, buf, sizeof buf - 1) : -1;
+    if (fd >= 0) close(fd);
+    if (n <= 0) return 0;
+    buf[n] = '\0';
+    size_t klen = strlen(key);
+    for (char *line = buf; line && *line; ) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+        if (strncmp(line, key, klen) == 0 && line[klen] == '=') {
+            snprintf(out, size, "%s", line + klen + 1);
+            return 1;
+        }
+        line = nl ? nl + 1 : NULL;
+    }
+    return 0;
+}
+
+static int winmaint_find_part_info(const char *part_dev, char *parent_disk, size_t pd_sz,
+                                   int *part_num, char *part_uuid, size_t pu_sz,
+                                   unsigned long long *part_sectors)
+{
+    if (strncmp(part_dev, "/dev/", 5) != 0) return 0;
+    const char *name = part_dev + 5;
+    char sys[192], buf[64];
+    snprintf(sys, sizeof sys, "/sys/class/block/%s/uevent", name);
+    if (!winmaint_read_sysfs_key(sys, "PARTUUID", part_uuid, pu_sz)) return 0;
+    if (!winmaint_read_sysfs_key(sys, "PARTN", buf, sizeof buf)) return 0;
+    int pn = atoi(buf);
+    if (pn <= 0) return 0;
+    *part_num = pn;
+    snprintf(sys, sizeof sys, "/sys/class/block/%s/size", name);
+    long long sz = read_value(sys, NULL);
+    if (sz <= 0) return 0;
+    *part_sectors = (unsigned long long)sz;
+    snprintf(sys, sizeof sys, "/sys/class/block/%s", name);
+    char linkbuf[256];
+    ssize_t ln = readlink(sys, linkbuf, sizeof linkbuf - 1);
+    if (ln <= 0) return 0;
+    linkbuf[ln] = '\0';
+    char *slash = strrchr(linkbuf, '/');
+    if (!slash) return 0;
+    *slash = '\0';
+    char *parent = strrchr(linkbuf, '/');
+    if (!parent || !parent[1]) return 0;
+    snprintf(parent_disk, pd_sz, "/dev/%s", parent + 1);
+    return access(parent_disk, F_OK) == 0;
+}
+
+static char winmaint_probe_root[64];
+
+static int winmaint_check_root_dev(const char *dev)
+{
+    if (!winmaint_probe_root[0] && has_signature(dev, 1080, "\x53\xEF") &&
+        has_label(dev, 1144, "locachy-root") && (!luks_only || is_mapper(dev, "locachy-crypt"))) {
+        snprintf(winmaint_probe_root, sizeof winmaint_probe_root, "%s", dev);
+        return 1;
+    }
+    return 0;
+}
+
+static void winmaint_try_shrink(void)
+{
+    if (resume_image) return;
+    if (access("/sbin/e2fsck", X_OK) != 0 || access("/sbin/resize2fs", X_OK) != 0 ||
+        access("/sbin/sfdisk", X_OK) != 0) {
+        return;
+    }
+    winmaint_probe_root[0] = '\0';
+    each_block_dev(winmaint_check_root_dev);
+    if (!winmaint_probe_root[0]) return;
+
+    if (mount(winmaint_probe_root, "/mnt", "ext4", MS_RDONLY, NULL) != 0) {
+        say("init: winmaint: could not inspect root %s: %s", winmaint_probe_root, strerror(errno));
+        return;
+    }
+    char raw[1024];
+    int fd = open("/mnt/var/lib/locachy/winmaint/shrink-plan.conf", O_RDONLY | O_CLOEXEC);
+    ssize_t n = fd >= 0 ? read(fd, raw, sizeof raw - 1) : -1;
+    if (fd >= 0) close(fd);
+    umount("/mnt");
+    if (n <= 0) return;
+    raw[n] = '\0';
+
+    struct winmaint_shrink_plan plan;
+    if (!winmaint_parse_shrink_plan(raw, &plan)) {
+        snprintf(winmaint_shrink_status, sizeof winmaint_shrink_status,
+                 "status=error\nreason=invalid_shrink_plan\n");
+        say("init: winmaint: invalid shrink-plan.conf; skipping offline shrink");
+        return;
+    }
+    if (plan.root_luks != luks_only) {
+        snprintf(winmaint_shrink_status, sizeof winmaint_shrink_status,
+                 "status=error\nreason=luks_mode_mismatch\n");
+        say("init: winmaint: shrink plan LUKS mode (%d) != runtime (%d); skipping", plan.root_luks, luks_only);
+        return;
+    }
+    const char *phys_part = luks_only ? luks_root_dev : winmaint_probe_root;
+    char parent_disk[64] = "", actual_uuid[48] = "";
+    int part_num = 0;
+    unsigned long long cur_part_sectors = 0;
+    if (!winmaint_find_part_info(phys_part, parent_disk, sizeof parent_disk,
+                                 &part_num, actual_uuid, sizeof actual_uuid, &cur_part_sectors)) {
+        snprintf(winmaint_shrink_status, sizeof winmaint_shrink_status,
+                 "status=error\nreason=root_partition_lookup_failed\n");
+        say("init: winmaint: cannot resolve parent disk for %s", phys_part);
+        return;
+    }
+    if (!winmaint_uuid_equal(actual_uuid, plan.root_part_uuid)) {
+        snprintf(winmaint_shrink_status, sizeof winmaint_shrink_status,
+                 "status=error\nreason=root_partuuid_mismatch\n");
+        say("init: winmaint: root PARTUUID %s != plan %s; skipping", actual_uuid, plan.root_part_uuid);
+        return;
+    }
+    if (plan.part_target_sectors >= cur_part_sectors) {
+        snprintf(winmaint_shrink_status, sizeof winmaint_shrink_status,
+                 "status=error\nreason=target_not_smaller_than_current\n");
+        say("init: winmaint: target sectors %llu >= current %llu; skipping",
+            plan.part_target_sectors, cur_part_sectors);
+        return;
+    }
+    unsigned long long freed_sectors = cur_part_sectors - plan.part_target_sectors;
+    unsigned long long need_sectors = (plan.win_esp_mib + plan.win_msr_mib + plan.win_c_mib) * 2048ULL;
+    if (freed_sectors < need_sectors) {
+        snprintf(winmaint_shrink_status, sizeof winmaint_shrink_status,
+                 "status=error\nreason=insufficient_freed_space\n");
+        say("init: winmaint: freed %llu sectors < needed %llu; skipping", freed_sectors, need_sectors);
+        return;
+    }
+
+    say("init: winmaint: starting one-shot offline shrink on %s (%s part %d)",
+        winmaint_probe_root, parent_disk, part_num);
+
+    const char *fsck_argv[] = { "/sbin/e2fsck", "-f", "-p", winmaint_probe_root, NULL };
+    int rc = winmaint_run_cmd(fsck_argv, NULL);
+    /* e2fsck returns 0 (clean) or 1 (errors corrected); >= 2 requires abort. */
+    if (rc < 0 || rc > 1) {
+        snprintf(winmaint_shrink_status, sizeof winmaint_shrink_status,
+                 "status=error\nreason=e2fsck_failed_%d\n", rc);
+        say("init: winmaint: e2fsck failed (exit %d); aborting without modifying disk", rc);
+        return;
+    }
+
+    char fs_arg[32];
+    snprintf(fs_arg, sizeof fs_arg, "%lluK", plan.fs_target_kib);
+    const char *r2fs_argv[] = { "/sbin/resize2fs", winmaint_probe_root, fs_arg, NULL };
+    rc = winmaint_run_cmd(r2fs_argv, NULL);
+    if (rc != 0) {
+        snprintf(winmaint_shrink_status, sizeof winmaint_shrink_status,
+                 "status=error\nreason=resize2fs_failed_%d\n", rc);
+        say("init: winmaint: resize2fs %s failed (exit %d); GPT left untouched", fs_arg, rc);
+        return;
+    }
+
+    if (luks_only) {
+        if (!cryptsetup_path) {
+            snprintf(winmaint_shrink_status, sizeof winmaint_shrink_status,
+                     "status=error\nreason=no_cryptsetup\n");
+            say("init: winmaint: cryptsetup unavailable for resize; GPT left untouched");
+            return;
+        }
+        char luks_sz[32];
+        snprintf(luks_sz, sizeof luks_sz, "%llu", plan.luks_target_sectors);
+        const char *cs_argv[] = { cryptsetup_path, "resize", "--size", luks_sz, "locachy-crypt", NULL };
+        rc = winmaint_run_cmd(cs_argv, NULL);
+        if (rc != 0) {
+            snprintf(winmaint_shrink_status, sizeof winmaint_shrink_status,
+                     "status=error\nreason=cryptsetup_resize_failed_%d\n", rc);
+            say("init: winmaint: cryptsetup resize %s failed (exit %d); GPT left untouched", luks_sz, rc);
+            return;
+        }
+    }
+
+    char pnum_str[16], shrink_script[64];
+    snprintf(pnum_str, sizeof pnum_str, "%d", part_num);
+    snprintf(shrink_script, sizeof shrink_script, "size=%llu\n", plan.part_target_sectors);
+    const char *sf_shrink[] = { "/sbin/sfdisk", "--no-reread", "-N", pnum_str, parent_disk, NULL };
+    rc = winmaint_run_cmd(sf_shrink, shrink_script);
+    if (rc != 0) {
+        snprintf(winmaint_shrink_status, sizeof winmaint_shrink_status,
+                 "status=error\nreason=sfdisk_shrink_failed_%d\n", rc);
+        say("init: winmaint: sfdisk shrink part %d failed (exit %d)", part_num, rc);
+        return;
+    }
+
+    char append_script[512];
+    snprintf(append_script, sizeof append_script,
+             "size=%lluM,type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B,name=LOCACHY_WIN_ESP\n"
+             "size=%lluM,type=E3C9E316-0B5C-4DB8-817D-F92DF00215AE,name=LOCACHY_WIN_MSR\n"
+             "size=%lluM,type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7,name=LOCACHY_WIN_C\n",
+             plan.win_esp_mib, plan.win_msr_mib, plan.win_c_mib);
+    const char *sf_append[] = { "/sbin/sfdisk", "--no-reread", "--append", parent_disk, NULL };
+    rc = winmaint_run_cmd(sf_append, append_script);
+    if (rc != 0) {
+        snprintf(winmaint_shrink_status, sizeof winmaint_shrink_status,
+                 "status=error\nreason=sfdisk_append_failed_%d\n", rc);
+        say("init: winmaint: sfdisk append tail partitions failed (exit %d)", rc);
+        return;
+    }
+
+    if (access("/sbin/partx", X_OK) == 0) {
+        const char *px_argv[] = { "/sbin/partx", "-u", parent_disk, NULL };
+        winmaint_run_cmd(px_argv, NULL);
+    }
+
+    snprintf(winmaint_shrink_status, sizeof winmaint_shrink_status,
+             "status=ok\ndisk=%s\nroot_part=%d\n", parent_disk, part_num);
+    say("init: winmaint: offline shrink and tail triplet creation succeeded on %s", parent_disk);
+}
+
+static void winmaint_record_post_boot(void)
+{
+    if (!winmaint_shrink_status[0]) return;
+    mkdir("/run/locachy", 0755);
+    int rfd = open("/run/winmaint-shrink.status", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (rfd >= 0) {
+        ssize_t w = write(rfd, winmaint_shrink_status, strlen(winmaint_shrink_status));
+        (void)w;
+        close(rfd);
+    }
+    mkdir("/var/lib/locachy", 0755);
+    mkdir("/var/lib/locachy/winmaint", 0700);
+    int vfd = open("/var/lib/locachy/winmaint/shrink-last.status",
+                   O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (vfd >= 0) {
+        ssize_t w = write(vfd, winmaint_shrink_status, strlen(winmaint_shrink_status));
+        (void)w;
+        close(vfd);
+    }
+    /* Strictly one-shot: consume shrink-plan.conf regardless of outcome. */
+    unlink("/var/lib/locachy/winmaint/shrink-plan.conf");
+}
+
 /* Our partitions are found by their labels, so nothing else on the machine
  * is touched: the swap labelled locachy-swap (mkswap -L, swaplabel), turned on,
  * and the ext4 file system labelled locachy-root, mounted read-write at /mnt.
- * The first FAT32 file system is noted as the ESP (mounted later, if it has
- * an EFI directory). */
+ * FAT32 partitions are collected as ESP candidates and disambiguated once vfat
+ * is mounted (preferring LOCACHY_EFI and /efi/EFI/locachy/locachy.efi over any
+ * secondary ESP such as Maintenance Windows' p4). */
 static char root_data_dev[64];
 
 static int check_disk_dev(const char *dev)
 {
     /* swap header: label at 1052, signature at the end of the first page;
-     * ext4: magic at 1080, label at 1144; FAT32: its type at 82 */
-    if (!esp_dev[0] && has_signature(dev, 82, "FAT32   ")) {
-        snprintf(esp_dev, sizeof esp_dev, "%s", dev);
+     * ext4: magic at 1080, label at 1144; FAT32: its type at 82, label at 71 (11 bytes) */
+    if (has_signature(dev, 82, "FAT32   ")) {
+        int is_locachy_label = has_signature(dev, 71, "LOCACHY_EFI");
+        if (nesp_cands < MAX_ESP_CANDS) {
+            if (is_locachy_label && nesp_cands > 0) {
+                memmove(esp_cands[1], esp_cands[0], (size_t)nesp_cands * sizeof esp_cands[0]);
+                snprintf(esp_cands[0], sizeof esp_cands[0], "%s", dev);
+            } else {
+                snprintf(esp_cands[nesp_cands], sizeof esp_cands[0], "%s", dev);
+            }
+            nesp_cands++;
+        } else if (is_locachy_label) {
+            snprintf(esp_cands[0], sizeof esp_cands[0], "%s", dev);
+        }
+        if (!esp_dev[0] || is_locachy_label) {
+            snprintf(esp_dev, sizeof esp_dev, "%s", dev);
+        }
         return 0;
     }
     if (!swap_dev[0] && has_signature(dev, 4096 - 10, "SWAPSPACE2") &&
@@ -1092,6 +1507,8 @@ static int check_disk_dev(const char *dev)
 static const char *disks(void)
 {
     root_data_dev[0] = '\0';
+    esp_dev[0] = '\0';
+    nesp_cands = 0;
     each_block_dev(check_disk_dev);
     return root_data_dev[0] ? root_data_dev : NULL;
 }
@@ -1154,17 +1571,44 @@ static int switch_root(void)
     return 0;
 }
 
-/* The ESP at /efi, once the drivers (vfat) are there. */
+/* The ESP at /efi, once the drivers (vfat) are there. When multiple FAT32
+ * partitions exist (e.g. Maintenance Windows p4 alongside LOCachy p1), prefer
+ * the candidate holding /efi/EFI/locachy/locachy.efi, then /efi/EFI/locachy,
+ * and only fall back to any /efi/EFI when none carries LOCachy. */
 static void esp_mount(void)
 {
-    if (esp_dev[0]) {
-        mkdir("/efi", 0755);
-        if (mount(esp_dev, "/efi", "vfat", MS_NOSUID | MS_NODEV, "umask=0077") < 0 || access("/efi/EFI", F_OK) < 0) {
-            say("init: %s is not an ESP", esp_dev);
-            umount("/efi");
-            esp_dev[0] = '\0';
-        }
+    if (nesp_cands == 0 && esp_dev[0]) {
+        memcpy(esp_cands[0], esp_dev, sizeof esp_cands[0]);
+        esp_cands[0][sizeof esp_cands[0] - 1] = '\0';
+        nesp_cands = 1;
     }
+    esp_dev[0] = '\0';
+    if (nesp_cands == 0) return;
+
+    mkdir("/efi", 0755);
+    int fallback_idx = -1;
+    for (int i = 0; i < nesp_cands; i++) {
+        if (mount(esp_cands[i], "/efi", "vfat", MS_NOSUID | MS_NODEV, "umask=0077") < 0) {
+            continue;
+        }
+        if (access("/efi/EFI/locachy/locachy.efi", F_OK) == 0 ||
+            access("/efi/EFI/locachy", F_OK) == 0) {
+            memcpy(esp_dev, esp_cands[i], sizeof esp_dev);
+            esp_dev[sizeof esp_dev - 1] = '\0';
+            return;
+        }
+        if (fallback_idx < 0 && access("/efi/EFI", F_OK) == 0) {
+            fallback_idx = i;
+        }
+        umount("/efi");
+    }
+    if (fallback_idx >= 0 &&
+        mount(esp_cands[fallback_idx], "/efi", "vfat", MS_NOSUID | MS_NODEV, "umask=0077") == 0) {
+        memcpy(esp_dev, esp_cands[fallback_idx], sizeof esp_dev);
+        esp_dev[sizeof esp_dev - 1] = '\0';
+        return;
+    }
+    say("init: none of %d FAT32 candidate(s) is an ESP", nesp_cands);
 }
 
 /* Keep the kernel's log (ours included: say writes there) as
@@ -5186,11 +5630,13 @@ int main(void)
         unlock_after_failed_resume();
     }
     measure_phase("leave-initrd");
+    winmaint_try_shrink();
     /* The disks first (their drivers and ext4 are built into the kernel):
      * the other drivers are modules in the root. */
     const char *data = disks();
     int rooted = data != NULL && switch_root() == 0;
     if (rooted) {
+        winmaint_record_post_boot();
         /* XDG_RUNTIME_DIR, made here only: 0711, so that a container reaches
          * the sockets it is given (its display, sound) and nothing else. */
         mkdir("/run/user", 0755);
@@ -5293,6 +5739,36 @@ int main(void)
                 _exit(127);
             }
             say("init: a TPM binding waits: locachy-tpm enroll --pending (pid %d)", (int)tpid);
+        }
+        /* Post-boot Maintenance Windows hooks: finalize an offline shrink
+         * (format p4, record state.json, rebuild lean initramfs) and enforce
+         * Layer-1/Layer-4 boot protection (strip p4 BOOTX64.EFI and keep
+         * LOCachy first in BootOrder) when a maintenance partition is present. */
+        if (access("/usr/local/bin/locachy-winmaint", X_OK) == 0 &&
+            (access("/run/winmaint-shrink.status", F_OK) == 0 ||
+             access("/var/lib/locachy/winmaint/state.json", F_OK) == 0)) {
+            pid_t wpid = fork();
+            if (wpid == 0) {
+                setsid();
+                sigprocmask(SIG_UNBLOCK, &handled, NULL);
+                stdin_null();
+                int log = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+                if (log >= 0) {
+                    dup2(log, STDOUT_FILENO);
+                    dup2(log, STDERR_FILENO);
+                    if (log > 2) close(log);
+                }
+                setenv("PYTHONUNBUFFERED", "1", 1);
+                if (access("/run/winmaint-shrink.status", F_OK) == 0) {
+                    execl("/usr/local/bin/locachy-winmaint", "locachy-winmaint", "finalize-create", (char *)NULL);
+                } else {
+                    execl("/usr/local/bin/locachy-winmaint", "locachy-winmaint", "boot-guard", (char *)NULL);
+                }
+                _exit(127);
+            }
+            if (wpid > 0) {
+                say("init: winmaint post-boot check started (pid %d)", (int)wpid);
+            }
         }
     }
 
