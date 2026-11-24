@@ -34,7 +34,7 @@ int settings_kill(pid_t pid, int sig);
 static int reloads, fail_rc;
 static char rc_name[32][64], rc_value[32][256];
 static int rc_count;
-static int fake_pair_installed, fake_winmaint_installed;
+static int fake_pair_installed, fake_winmaint_installed, fake_gpu_unlock_installed;
 static const char *fake_pair_output = "";
 static int term_calls, term_status;
 static char term_last[512];
@@ -110,6 +110,11 @@ int settings_access(const char *path, int mode)
     }
     if (strcmp(path, LOCACHY_WINMAINT) == 0) {
         if (fake_winmaint_installed) return 0;
+        errno = ENOENT;
+        return -1;
+    }
+    if (strcmp(path, GPU_UNLOCK_DOC) == 0) {
+        if (fake_gpu_unlock_installed) return 0;
         errno = ENOENT;
         return -1;
     }
@@ -408,19 +413,122 @@ int main(void)
     assert(strstr(hint, "graphical session"));
     puts("PASS Maintenance Windows size, state.json, create, two-step reclaim/boot-once, heal-boot, and VM");
 
-    /* 7. Job adoption for winmaint-* and tb-sync. */
-    winmaint_job = tb_sync_job = 0;
+    /* 7. Job adoption for winmaint-*, tb-sync, gpu-unlock-*, and gpu-power*. */
+    winmaint_job = tb_sync_job = gpu_unlock_job = gpu_power_job = 0;
     winmaint_what[0] = '\0';
     jobs_double_mine[0] = (struct jobs_row){ .id = 7201, .kind = "winmaint-create", .state = "running", .position = 0 };
     jobs_double_mine[1] = (struct jobs_row){ .id = 7202, .kind = "tb-sync", .state = "queued", .position = 1 };
-    jobs_double_nmine = 2;
+    jobs_double_mine[2] = (struct jobs_row){ .id = 7203, .kind = "gpu-unlock-install", .state = "queued", .position = 2 };
+    jobs_double_mine[3] = (struct jobs_row){ .id = 7204, .kind = "gpu-power-apply", .state = "queued", .position = 3 };
+    jobs_double_nmine = 4;
     adopt_jobs();
-    assert(winmaint_job == 7201 && !strcmp(winmaint_what, "create") && tb_sync_job == 7202);
+    assert(winmaint_job == 7201 && !strcmp(winmaint_what, "create") && tb_sync_job == 7202 &&
+           gpu_unlock_job == 7203 && gpu_power_job == 7204);
     item_text(winmaint_index() + 1, line, sizeof line);
     assert(strstr(line, "working..."));
     item_text(extd_tb_shared_index(), line, sizeof line);
     assert(strstr(line, "working..."));
-    puts("PASS adopt_jobs follows winmaint-* and tb-sync jobs");
+    item_text(gpu_unlock_index(), line, sizeof line);
+    assert(strstr(line, "working..."));
+    item_text(gpu_power_index(), line, sizeof line);
+    assert(strstr(line, "working..."));
+    gpu_unlock_job = gpu_power_job = 0;
+    puts("PASS adopt_jobs follows winmaint-*, tb-sync, gpu-unlock-*, and gpu-power* jobs");
+
+    /* 8. NVIDIA GPU unlock (one-keypress GitHub fetch/toggle/double-Delete remove)
+     * and machine GPU power mode + Dynamic Boost (nvidia-powerd). */
+    fake_gpu_unlock_installed = 0;
+    snprintf(gpu_unlock_cfg, sizeof gpu_unlock_cfg, "off");
+    item_text(gpu_unlock_index(), line, sizeof line);
+    assert(strstr(line, "NVIDIA GPU unlock") && strstr(line, "not installed"));
+    jobs_double_ended = 0;
+    jobs_double_last[0] = '\0';
+    gpu_unlock_action();
+    assert(gpu_unlock_job != 0 && !strcmp(jobs_double_last, "gpu-unlock-install all"));
+    fake_gpu_unlock_installed = 1;
+    assert(rc_set("gpu_unlock_targets", "all") == 0);
+    jobs_double_ended = 1;
+    gpu_unlock_check();
+    assert(gpu_unlock_job == 0 && !strcmp(gpu_unlock_cfg, "all"));
+    item_text(gpu_unlock_index(), line, sizeof line);
+    assert(strstr(line, "[ON]"));
+    /* Toggle off once installed. */
+    jobs_double_ended = 0;
+    jobs_double_last[0] = '\0';
+    gpu_unlock_action();
+    assert(gpu_unlock_job != 0 && !strcmp(jobs_double_last, "gpu-unlock-set off"));
+    assert(rc_set("gpu_unlock_targets", NULL) == 0);
+    jobs_double_ended = 1;
+    gpu_unlock_check();
+    assert(gpu_unlock_job == 0 && !strcmp(gpu_unlock_cfg, "off"));
+    item_text(gpu_unlock_index(), line, sizeof line);
+    assert(strstr(line, "[OFF]"));
+    /* Custom PCI BDF displays explicitly. */
+    on_rc("gpu_unlock_targets", "0000:01:00.0", NULL);
+    item_text(gpu_unlock_index(), line, sizeof line);
+    assert(strstr(line, "ON: 0000:01:00.0"));
+    /* Double-Delete confirmation before gpu-unlock-remove. */
+    jobs_double_last[0] = '\0';
+    gpu_unlock_remove_row();
+    assert(gpu_unlock_remove_asked == 1 && gpu_unlock_job == 0 && jobs_double_last[0] == '\0');
+    jobs_double_ended = 0;
+    gpu_unlock_remove_row();
+    assert(gpu_unlock_remove_asked == 0 && gpu_unlock_job != 0 && !strcmp(jobs_double_last, "gpu-unlock-remove"));
+    fake_gpu_unlock_installed = 0;
+    jobs_double_ended = 1;
+    gpu_unlock_check();
+    assert(gpu_unlock_job == 0);
+
+    /* GPU power mode: disabled when machine has no method, cycles when method is present. */
+    gpu_power_method[0] = '\0';
+    gpu_power_mode = GPUPWR_AUTO;
+    selected = gpu_power_index();
+    item_text(gpu_power_index(), line, sizeof line);
+    assert(strstr(line, "not on this machine"));
+    jobs_double_last[0] = '\0';
+    adjust(+1);
+    assert(gpu_power_job == 0 && jobs_double_last[0] == '\0');
+
+    on_rc("gpu_power_method", "hp-omen-wmi", NULL);
+    on_rc("gpu_power_mode", "auto", NULL);
+    item_text(gpu_power_index(), line, sizeof line);
+    assert(strstr(line, "Auto (follow power profile)"));
+    jobs_double_ended = 0;
+    adjust(+1);
+    assert(gpu_power_job != 0 && !strcmp(jobs_double_last, "gpu-power-apply full"));
+    assert(rc_set("gpu_power_mode", "full") == 0);
+    jobs_double_ended = 1;
+    gpu_power_check();
+    assert(gpu_power_job == 0 && gpu_power_mode == GPUPWR_FULL);
+    item_text(gpu_power_index(), line, sizeof line);
+    assert(strstr(line, "Full (cTGP + Dynamic Boost)"));
+
+    /* nvidia-powerd toggle queues gpu-powerd on/off. */
+    selected = nvidia_powerd_index();
+    nvidia_powerd_on = 0;
+    jobs_double_ended = 0;
+    jobs_double_last[0] = '\0';
+    adjust(+1);
+    assert(gpu_power_job != 0 && !strcmp(jobs_double_last, "gpu-powerd on"));
+    assert(rc_set("nvidia_powerd", "1") == 0);
+    jobs_double_ended = 1;
+    gpu_power_check();
+    assert(gpu_power_job == 0 && nvidia_powerd_on == 1);
+    item_text(nvidia_powerd_index(), line, sizeof line);
+    assert(strstr(line, "[ON ]"));
+
+    /* Changing power_profile when gpu_power_mode is auto triggers gpu-power-apply. */
+    assert(rc_set("gpu_power_mode", "auto") == 0);
+    gpu_power_mode = GPUPWR_AUTO;
+    selected = power_profile_index();
+    jobs_double_ended = 0;
+    jobs_double_last[0] = '\0';
+    adjust(+1);
+    assert(gpu_power_job != 0 && !strcmp(jobs_double_last, "gpu-power-apply"));
+    jobs_double_ended = 1;
+    gpu_power_check();
+    assert(gpu_power_job == 0);
+    puts("PASS NVIDIA GPU unlock, machine GPU power mode, and nvidia-powerd settings rows");
 
     unlink(fake_winmaint_state);
     rmdir(tmpdir);

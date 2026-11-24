@@ -20,7 +20,7 @@
 #include "base.h"
 #include "config.h"
 
-#define RC_LINE 512
+#define RC_LINE 1024
 
 int conf_read(const char *path, void (*fn)(const char *name, const char *value, void *arg), void *arg)
 {

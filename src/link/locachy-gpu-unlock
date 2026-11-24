@@ -1,0 +1,572 @@
+#!/usr/bin/env python3
+"""locachy-gpu-unlock: fetch, build, integrate, and manage Zagitta/gpu-unlock.
+
+Tracks upstream https://github.com/Zagitta/gpu-unlock (with minimal idempotent
+PCI ID overlays from gpu-unlock-upstream.json), builds gpu-unlock-dkms and
+gpu-unlock-firmware as the isolated build user, installs and registers them in
+/etc/locachy/packages, wires LOCachy's native /etc/modules-load.d and
+/etc/modprobe.d rules (so gpu_unlock runs in modules_start() before coldplug()
+loads nvidia, with RTD3 dynamic power management disabled so speed selectors
+stay latched), updates gpu_unlock_targets in /etc/locachy/rc.conf, and rebuilds
+the unified kernel image via locachy-boot.
+
+Commands:
+  locachy-gpu-unlock status [--json]
+  locachy-gpu-unlock install [--target all|PCI_BDF[,...]] [--repo URL] [--branch NAME]
+  locachy-gpu-unlock set off|all|PCI_BDF[,...]
+  locachy-gpu-unlock remove
+"""
+import argparse
+import fcntl
+import glob
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+
+sys.dont_write_bytecode = True
+
+PCI_BDF_RE = re.compile(r"^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$")
+REPO_URL_RE = re.compile(r"^https://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=-]+$")
+BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,128}$")
+MACHINE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
+
+MODLOAD_NAME = "50-locachy-gpu-unlock.conf"
+MODPROBE_NAME = "50-locachy-gpu-unlock.conf"
+MODLOAD_TEXT = (
+    "# Managed by locachy-gpu-unlock: load gpu_unlock in modules_start()\n"
+    "# ahead of PCI coldplug binding nvidia.\n"
+    "gpu_unlock\n"
+)
+MODPROBE_TEXT = (
+    "# Managed by locachy-gpu-unlock: ensure gpu_unlock runs before nvidia\n"
+    "# and keep dGPU powered (RTD3 power-off resets unlocked speed selectors).\n"
+    "softdep nvidia pre: gpu_unlock\n"
+    "options nvidia NVreg_DynamicPowerManagement=0x00\n"
+)
+
+DEFAULT_PACKAGES = ("gpu-unlock-dkms", "gpu-unlock-firmware")
+
+
+def env_path(var, default):
+    val = os.environ.get(var, "").strip()
+    return Path(val) if val else Path(default)
+
+
+def root_path():
+    return env_path("LOCACHY_GPU_UNLOCK_ROOT", "/")
+
+
+def rc_path():
+    return env_path("LOCACHY_GPU_UNLOCK_RC", root_path() / "etc/locachy/rc.conf")
+
+
+def machines_dir():
+    return env_path("LOCACHY_MACHINES_DIR", root_path() / "usr/local/share/locachy/machines")
+
+
+def manifest_path():
+    return env_path("LOCACHY_GPU_UNLOCK_MANIFEST", root_path() / "etc/locachy/packages")
+
+
+def local_db_path():
+    return env_path("LOCACHY_GPU_UNLOCK_LOCAL_DB", root_path() / "var/lib/pacman/local")
+
+
+def sys_pci_path():
+    return env_path("LOCACHY_GPU_UNLOCK_SYS_PCI", "/sys/bus/pci/devices")
+
+
+def sys_module_path():
+    return env_path("LOCACHY_GPU_UNLOCK_SYS_MODULE", "/sys/module/gpu_unlock")
+
+
+def upstream_meta_path():
+    default = Path(__file__).resolve().parent / "gpu-unlock-upstream.json"
+    installed = Path("/usr/local/share/locachy/gpu-unlock/upstream.json")
+    return env_path("LOCACHY_GPU_UNLOCK_META", installed if installed.is_file() else default)
+
+
+def boot_cmd_path():
+    return os.environ.get("LOCACHY_GPU_UNLOCK_BOOT", "/usr/local/bin/locachy-boot")
+
+
+def pkg_cmd_path():
+    return os.environ.get("LOCACHY_GPU_UNLOCK_PKG", "/usr/local/bin/locachy-pkg")
+
+
+def load_upstream_meta():
+    p = upstream_meta_path()
+    if p.is_file():
+        return json.loads(p.read_text(encoding="utf-8"))
+    return {
+        "schema": 1,
+        "name": "gpu-unlock",
+        "provider": "github",
+        "repository": "https://github.com/Zagitta/gpu-unlock.git",
+        "branch": "main",
+        "pkgbuild": "packaging/arch/PKGBUILD",
+        "packages": list(DEFAULT_PACKAGES),
+        "extra_pci_ids": [
+            {
+                "family_macro": "GA103",
+                "device_id": "0x2460",
+                "anchor": "GA103(0x2414),",
+                "comment": "GA103M RTX 3080 Ti Laptop",
+            }
+        ],
+    }
+
+
+def valid_target(raw):
+    val = (raw or "").strip()
+    if val in ("", "off", "0"):
+        return "off"
+    if val == "all":
+        return "all"
+    parts = val.split(",")
+    if not parts or any(not PCI_BDF_RE.fullmatch(p) for p in parts):
+        raise ValueError(f"invalid gpu_unlock target: {raw!r} (expected off, all, or PCI BDF list)")
+    return ",".join(p.lower() for p in parts)
+
+
+def read_rc_file_value(path, key):
+    if not path.is_file():
+        return ""
+    found = ""
+    pat = re.compile(rf"^\s*{re.escape(key)}=\"([^\"]*)\"\s*(?:#.*)?$")
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        m = pat.match(line)
+        if m:
+            found = m.group(1)
+    return found
+
+
+def read_rc_layered(key):
+    rc = rc_path()
+    direct = read_rc_file_value(rc, key)
+    if direct != "":
+        return direct
+    mach = read_rc_file_value(rc, "machine")
+    if mach and MACHINE_RE.fullmatch(mach):
+        return read_rc_file_value(machines_dir() / f"{mach}.conf", key)
+    return ""
+
+
+def write_rc_key(key, value):
+    """Update or remove KEY=\"VALUE\" in rc.conf atomically."""
+    rc = rc_path()
+    rc.parent.mkdir(parents=True, exist_ok=True)
+    lines = rc.read_text(encoding="utf-8", errors="replace").splitlines() if rc.is_file() else []
+    pat = re.compile(rf"^\s*{re.escape(key)}=")
+    out = []
+    replaced = False
+    for line in lines:
+        if pat.match(line):
+            if value is not None and not replaced:
+                out.append(f'{key}="{value}"')
+                replaced = True
+            continue
+        out.append(line)
+    if value is not None and not replaced:
+        out.append(f'{key}="{value}"')
+    tmp = rc.with_name(rc.name + f".tmp.{os.getpid()}")
+    tmp.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, rc)
+
+
+def detect_nvidia_gpus():
+    """Return sorted list of NVIDIA display/3D PCI devices from sysfs."""
+    gpus = []
+    pci = sys_pci_path()
+    if not pci.is_dir():
+        return gpus
+    for dev in sorted(pci.iterdir()):
+        bdf = dev.name.lower()
+        if not PCI_BDF_RE.fullmatch(bdf):
+            continue
+        try:
+            vendor = (dev / "vendor").read_text(encoding="utf-8").strip().lower()
+            device = (dev / "device").read_text(encoding="utf-8").strip().lower()
+            cls = (dev / "class").read_text(encoding="utf-8").strip().lower()
+        except OSError:
+            continue
+        if vendor != "0x10de":
+            continue
+        # PCI display controller class 0x03xxxx (0x0300 VGA, 0x0302 3D).
+        if not cls.startswith("0x03"):
+            continue
+        driver = ""
+        drv_link = dev / "driver"
+        if drv_link.is_symlink():
+            driver = os.path.basename(os.readlink(drv_link))
+        gpus.append({"bdf": bdf, "vendor": vendor, "device": device, "class": cls, "driver": driver})
+    return gpus
+
+
+def installed_pkg_version(name):
+    db = local_db_path()
+    if not db.is_dir():
+        return ""
+    for desc in db.glob(f"{name}-*/desc"):
+        lines = desc.read_text(encoding="utf-8", errors="replace").splitlines()
+        pkg_name = ""
+        pkg_ver = ""
+        for i, line in enumerate(lines):
+            if line == "%NAME%" and i + 1 < len(lines):
+                pkg_name = lines[i + 1].strip()
+            elif line == "%VERSION%" and i + 1 < len(lines):
+                pkg_ver = lines[i + 1].strip()
+        if pkg_name == name:
+            return pkg_ver
+    return ""
+
+
+def active_runtime_targets():
+    p = sys_module_path() / "parameters/targets"
+    if not p.is_file():
+        return None
+    try:
+        return p.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+
+
+def write_dropins(enable):
+    root = root_path()
+    ml = root / "etc/modules-load.d" / MODLOAD_NAME
+    mp = root / "etc/modprobe.d" / MODPROBE_NAME
+    if enable:
+        ml.parent.mkdir(parents=True, exist_ok=True)
+        mp.parent.mkdir(parents=True, exist_ok=True)
+        ml.write_text(MODLOAD_TEXT, encoding="utf-8")
+        mp.write_text(MODPROBE_TEXT, encoding="utf-8")
+        os.chmod(ml, 0o644)
+        os.chmod(mp, 0o644)
+    else:
+        for f in (ml, mp):
+            try:
+                f.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def update_manifest(add=(), remove=()):
+    mf = manifest_path()
+    if not mf.is_file() and not add:
+        return
+    mf.parent.mkdir(parents=True, exist_ok=True)
+    lines = mf.read_text(encoding="utf-8", errors="replace").splitlines() if mf.is_file() else []
+    remove_set = set(remove)
+    existing = set()
+    kept = []
+    for line in lines:
+        code = line.split("#", 1)[0].strip()
+        if not code:
+            kept.append(line)
+            continue
+        words = [w for w in code.split() if w not in remove_set]
+        if not words:
+            continue
+        if len(words) == len(code.split()):
+            kept.append(line)
+        else:
+            kept.append(" ".join(words))
+        existing.update(words)
+    missing = [p for p in add if p not in existing]
+    if missing:
+        kept.append("# NVIDIA pre-driver GPU unlock (locachy-gpu-unlock)")
+        kept.extend(missing)
+    tmp = mf.with_name(mf.name + f".tmp.{os.getpid()}")
+    tmp.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, mf)
+
+
+def apply_extra_pci_ids(repo_dir, meta):
+    """Idempotently ensure extra PCI IDs from meta exist in recipes.c or main.c."""
+    applied = []
+    extras = meta.get("extra_pci_ids") or []
+    if not extras:
+        return applied
+    recipes = Path(repo_dir) / "kernel/gpu_unlock/recipes.c"
+    legacy_main = Path(repo_dir) / "kernel/gpu_unlock/main.c"
+    if recipes.is_file():
+        text = recipes.read_text(encoding="utf-8")
+        changed = False
+        for item in extras:
+            dev_id = item["device_id"].lower()
+            macro = item["family_macro"]
+            anchor = item["anchor"]
+            if re.search(rf"\b{re.escape(dev_id)}\b", text, re.I):
+                continue
+            if anchor not in text:
+                raise RuntimeError(f"anchor {anchor!r} not found in {recipes}")
+            entry = f"{anchor}\n\t{macro}({dev_id}),"
+            text = text.replace(anchor, entry, 1)
+            changed = True
+            applied.append(f"{macro}({dev_id})")
+        if changed:
+            recipes.write_text(text, encoding="utf-8")
+        return applied
+    if legacy_main.is_file():
+        text = legacy_main.read_text(encoding="utf-8")
+        changed = False
+        for item in extras:
+            dev_id = item["device_id"].lower()
+            if re.search(rf"\b{re.escape(dev_id)}\b", text, re.I):
+                continue
+            m = re.search(r"(0x2414\s*,)", text, re.I)
+            if not m:
+                raise RuntimeError(f"0x2414 anchor not found in {legacy_main}")
+            text = text[:m.end()] + f"\n\t{dev_id}," + text[m.end():]
+            changed = True
+            applied.append(dev_id)
+        if changed:
+            legacy_main.write_text(text, encoding="utf-8")
+    return applied
+
+
+def netns_prefix():
+    if os.environ.get("LOCACHY_GPU_UNLOCK_NO_NETNS") == "1":
+        return []
+    if os.path.exists("/run/netns/locachy-net"):
+        return ["ip", "netns", "exec", "locachy-net"]
+    return []
+
+
+DOMAIN_LOCK_PATH = "/run/locachy/pkg.lock"
+
+
+def inherited_domain_fds():
+    """Return any non-CLOEXEC inherited fd referring to LOCachy's package domain lock."""
+    try:
+        want = os.stat(DOMAIN_LOCK_PATH)
+    except OSError:
+        return ()
+    found = []
+    try:
+        names = os.listdir("/proc/self/fd")
+    except OSError:
+        return ()
+    for name in names:
+        try:
+            fd = int(name)
+            if fd <= 2 or fcntl.fcntl(fd, fcntl.F_GETFD) & fcntl.FD_CLOEXEC:
+                continue
+            got = os.fstat(fd)
+        except (OSError, ValueError):
+            continue
+        if stat.S_ISREG(got.st_mode) and (got.st_dev, got.st_ino) == (want.st_dev, want.st_ino):
+            found.append(fd)
+    return tuple(found)
+
+
+def run_cmd(cmd, **kwargs):
+    print("+", " ".join(str(c) for c in cmd), flush=True)
+    return subprocess.run(cmd, check=True, **kwargs)
+
+
+def run_domain_cmd(cmd, **kwargs):
+    fds = inherited_domain_fds()
+    if fds:
+        kwargs["pass_fds"] = fds
+    return run_cmd(cmd, **kwargs)
+
+
+def resolve_build_user():
+    for candidate in (os.environ.get("LOCACHY_BUILD_USER", ""), "locachy-build", "builder", "nobody"):
+        if not candidate:
+            continue
+        try:
+            pw = pwd.getpwnam(candidate)
+            return pw.pw_name, pw.pw_uid, pw.pw_gid
+        except KeyError:
+            continue
+    return None, 0, 0
+
+
+def ensure_build_deps():
+    pkg = pkg_cmd_path()
+    if os.path.exists(pkg):
+        run_domain_cmd([pkg, "kernel", "headers", "on"])
+        needed = ["dkms", "git", "python", "zstd", "openssl"]
+        missing = [p for p in needed if not installed_pkg_version(p)]
+        if missing:
+            run_domain_cmd([pkg, "install", *missing])
+
+
+def run_boot_rebuild():
+    boot = boot_cmd_path()
+    if boot and os.path.exists(boot):
+        run_domain_cmd([boot])
+
+
+def cmd_status(args):
+    gpus = detect_nvidia_gpus()
+    dkms_ver = installed_pkg_version("gpu-unlock-dkms")
+    fw_ver = installed_pkg_version("gpu-unlock-firmware")
+    cfg_target = read_rc_layered("gpu_unlock_targets") or "off"
+    rt_targets = active_runtime_targets()
+    root = root_path()
+    modload_on = (root / "etc/modules-load.d" / MODLOAD_NAME).is_file()
+    modprobe_on = (root / "etc/modprobe.d" / MODPROBE_NAME).is_file()
+    data = {
+        "installed": bool(dkms_ver and fw_ver),
+        "dkms_version": dkms_ver,
+        "firmware_version": fw_ver,
+        "configured_targets": cfg_target,
+        "runtime_loaded": rt_targets is not None,
+        "runtime_targets": rt_targets or "",
+        "modload_configured": modload_on,
+        "modprobe_configured": modprobe_on,
+        "nvidia_gpus": gpus,
+    }
+    if args.json:
+        print(json.dumps(data, indent=2, sort_keys=True))
+        return 0
+    print(f"installed: {'yes' if data['installed'] else 'no'}"
+          + (f" ({dkms_ver})" if dkms_ver else ""))
+    print(f"configured_targets: {cfg_target}")
+    print(f"runtime_loaded: {'yes' if data['runtime_loaded'] else 'no'}"
+          + (f" (targets={data['runtime_targets']})" if data["runtime_targets"] else ""))
+    print(f"nvidia_gpus: {', '.join(g['bdf'] + '(' + g['device'] + ')' for g in gpus) or 'none'}")
+    return 0
+
+
+def cmd_install(args):
+    meta = load_upstream_meta()
+    repo = args.repo or meta["repository"]
+    branch = args.branch or meta.get("branch", "main")
+    if not REPO_URL_RE.fullmatch(repo):
+        raise ValueError(f"unsupported repository URL: {repo!r}")
+    if not BRANCH_RE.fullmatch(branch) or ".." in branch:
+        raise ValueError(f"invalid branch name: {branch!r}")
+    target = valid_target(args.target or "all")
+    if target == "off":
+        raise ValueError("install target must be 'all' or PCI BDF list, not 'off'")
+
+    ensure_build_deps()
+
+    build_user, uid, gid = resolve_build_user()
+    if os.geteuid() == 0 and not build_user:
+        raise RuntimeError("no unprivileged build user available for makepkg")
+
+    stage = Path(tempfile.mkdtemp(prefix="locachy-gpu-unlock-"))
+    try:
+        os.chmod(stage, 0o755)
+        repo_dir = stage / "gpu-unlock"
+        net = netns_prefix()
+        run_cmd([*net, "git", "clone", "--depth", "1", "--branch", branch, repo, str(repo_dir)])
+        added_ids = apply_extra_pci_ids(repo_dir, meta)
+        if added_ids:
+            print(f"locachy-gpu-unlock: applied local PCI ID overlay: {', '.join(added_ids)}", flush=True)
+
+        pkgbuild_rel = meta.get("pkgbuild", "packaging/arch/PKGBUILD")
+        build_dir = (repo_dir / pkgbuild_rel).parent
+        if not (build_dir / "PKGBUILD").is_file():
+            raise RuntimeError(f"upstream PKGBUILD missing at {build_dir}")
+
+        if os.geteuid() == 0:
+            for root_d, dirs, files in os.walk(stage):
+                os.chown(root_d, uid, gid)
+                for n in dirs:
+                    os.chown(os.path.join(root_d, n), uid, gid)
+                for n in files:
+                    os.chown(os.path.join(root_d, n), uid, gid)
+            # Run makepkg as the isolated build user inside locachy-net so upstream's
+            # official download.nvidia.com URLs and SHA-256 verification execute cleanly.
+            home_dir = stage / "home"
+            home_dir.mkdir(exist_ok=True)
+            os.chown(home_dir, uid, gid)
+            run_cmd([
+                *net, "su", "-s", "/bin/sh", build_user, "-c",
+                'HOME="$1"; export HOME; cd "$2" && exec makepkg -f --noconfirm',
+                "sh", str(home_dir), str(build_dir),
+            ])
+        else:
+            run_cmd([*net, "makepkg", "-f", "--noconfirm"], cwd=str(build_dir))
+
+        pkgs = sorted(glob.glob(str(build_dir / "gpu-unlock-*.pkg.tar.*")))
+        pkgs = [p for p in pkgs if not p.endswith(".sig")]
+        if len(pkgs) < 2:
+            raise RuntimeError(f"expected gpu-unlock-dkms and gpu-unlock-firmware packages, found: {pkgs}")
+
+        run_cmd(["pacman", "-U", "--noconfirm", *pkgs])
+        update_manifest(add=meta.get("packages") or DEFAULT_PACKAGES)
+        write_dropins(True)
+        write_rc_key("gpu_unlock_targets", target)
+        run_boot_rebuild()
+        print(f"locachy-gpu-unlock: installed and enabled for targets={target}", flush=True)
+        return 0
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
+def cmd_set(args):
+    target = valid_target(args.target)
+    if target == "off":
+        write_dropins(False)
+        write_rc_key("gpu_unlock_targets", None)
+        run_boot_rebuild()
+        print("locachy-gpu-unlock: disabled (boot image rebuilt)", flush=True)
+        return 0
+    if not (installed_pkg_version("gpu-unlock-dkms") and installed_pkg_version("gpu-unlock-firmware")):
+        raise RuntimeError("gpu-unlock packages are not installed yet; run 'locachy-gpu-unlock install' first")
+    write_dropins(True)
+    write_rc_key("gpu_unlock_targets", target)
+    run_boot_rebuild()
+    print(f"locachy-gpu-unlock: enabled for targets={target} (boot image rebuilt)", flush=True)
+    return 0
+
+
+def cmd_remove(_args):
+    write_dropins(False)
+    write_rc_key("gpu_unlock_targets", None)
+    update_manifest(remove=DEFAULT_PACKAGES)
+    present = [p for p in DEFAULT_PACKAGES if installed_pkg_version(p)]
+    if present:
+        run_cmd(["pacman", "-Rns", "--noconfirm", *present])
+    run_boot_rebuild()
+    print("locachy-gpu-unlock: removed and boot image rebuilt", flush=True)
+    return 0
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="locachy-gpu-unlock")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p_st = sub.add_parser("status", help="show installation, configuration, and NVIDIA PCI state")
+    p_st.add_argument("--json", action="store_true")
+    p_st.set_defaults(func=cmd_status)
+
+    p_in = sub.add_parser("install", help="fetch from GitHub, build, install, and enable")
+    p_in.add_argument("--target", default="all", help="all or comma-separated PCI BDFs (e.g. 0000:01:00.0)")
+    p_in.add_argument("--repo", default="", help="override upstream GitHub HTTPS URL")
+    p_in.add_argument("--branch", default="", help="override upstream branch")
+    p_in.set_defaults(func=cmd_install)
+
+    p_set = sub.add_parser("set", help="set gpu_unlock_targets (off, all, or PCI BDF list)")
+    p_set.add_argument("target")
+    p_set.set_defaults(func=cmd_set)
+
+    p_rm = sub.add_parser("remove", help="uninstall gpu-unlock and restore clean boot image")
+    p_rm.set_defaults(func=cmd_remove)
+
+    args = ap.parse_args(argv)
+    try:
+        return args.func(args)
+    except Exception as exc:
+        print(f"locachy-gpu-unlock: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

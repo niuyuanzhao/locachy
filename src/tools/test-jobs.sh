@@ -45,7 +45,7 @@ for i in $(seq 1 120); do
     echo "populated 0" >"$t/cgroup/job-$i/cgroup.events"
 done
 install -m 755 "$src/tools/test-jobs-tool.sh" "$run/tool"
-for p in locachy-pkg locachy-repos locachy-boot locachy-tpm locachy-app locachy-firmware locachy-security locachy-winmaint; do ln -s "$run/tool" "$t/bin/$p"; done
+for p in locachy-pkg locachy-repos locachy-boot locachy-tpm locachy-app locachy-firmware locachy-security locachy-winmaint locachy-gpu-unlock locachy-gpu-power; do ln -s "$run/tool" "$t/bin/$p"; done
 ln -s "$run/tool" "$t/lib/network-client"
 install -m 755 "$server" "$run/locachy-jobs"
 install -m 755 "$client" "$run/test-jobs"
@@ -174,6 +174,18 @@ check "winmaint-reclaim rejects extra arg" refuse winmaint-reclaim --now
 check "winmaint-reclaim is accepted" accept winmaint-reclaim
 check "winmaint-boot-once is accepted" accept winmaint-boot-once
 check "winmaint-heal-boot is accepted" accept winmaint-heal-boot
+check "gpu-unlock-install refuses off" refuse gpu-unlock-install off
+check "gpu-unlock-install refuses shell injection" refuse gpu-unlock-install "all;id"
+check "gpu-unlock-install accepts all" accept gpu-unlock-install all
+check "gpu-unlock-set accepts BDF and off" accept gpu-unlock-set 0000:01:00.0
+check "gpu-unlock-set accepts off" accept gpu-unlock-set off
+check "gpu-unlock-remove refuses extra arg" refuse gpu-unlock-remove now
+check "gpu-unlock-remove is accepted" accept gpu-unlock-remove
+check "gpu-power-apply refuses unknown mode" refuse gpu-power-apply turbo
+check "gpu-power-apply accepts no arg and valid modes" accept gpu-power-apply
+check "gpu-power-apply accepts full" accept gpu-power-apply full
+check "gpu-powerd refuses invalid value" refuse gpu-powerd auto
+check "gpu-powerd accepts on" accept gpu-powerd on
 check "the rebuild is a fixed queued kind" accept locachy-rebuild
 check "the rebuild permits only its fixed flag" refuse locachy-rebuild --anything
 check "the LOCachy source update is a fixed queued kind" accept locachy-source
@@ -187,6 +199,11 @@ check "winmaint-create ran locachy-winmaint create --size-gib 64" grep -q "locac
 check "winmaint-reclaim ran locachy-winmaint reclaim" grep -q "locachy-winmaint reclaim \[1\]" "$t/calls"
 check "winmaint-boot-once ran locachy-winmaint boot-once" grep -q "locachy-winmaint boot-once \[1\]" "$t/calls"
 check "winmaint-heal-boot ran locachy-winmaint heal-boot" grep -q "locachy-winmaint heal-boot \[1\]" "$t/calls"
+check "gpu-unlock-install ran locachy-gpu-unlock install --target all" grep -q "locachy-gpu-unlock install --target all \[3\]" "$t/calls"
+check "gpu-unlock-set ran locachy-gpu-unlock set 0000:01:00.0" grep -q "locachy-gpu-unlock set 0000:01:00.0 \[2\]" "$t/calls"
+check "gpu-unlock-remove ran locachy-gpu-unlock remove" grep -q "locachy-gpu-unlock remove \[1\]" "$t/calls"
+check "gpu-power-apply ran locachy-gpu-power apply full" grep -q "locachy-gpu-power apply full \[2\]" "$t/calls"
+check "gpu-powerd ran locachy-gpu-power nvidia-powerd on" grep -q "locachy-gpu-power nvidia-powerd on \[2\]" "$t/calls"
 # The service keeps its own files to root (umask 077); the files a step
 # writes (mirror lists, pacman.conf, rc.conf) are read by others too.
 check "every step runs with umask 022, not the umask of the service" \

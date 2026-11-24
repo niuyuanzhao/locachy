@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-21 08:23+0800\n"
+"POT-Creation-Date: 2026-11-23 23:13-0500\n"
 "PO-Revision-Date: 2026-11-09 14:16+0000\n"
 "Last-Translator: LOCachy\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -71,9 +71,8 @@ msgid "Find; next, previous match"
 msgstr "查找；下一个、上一个匹配"
 
 #: base/help.c
-#, fuzzy
 msgid "[Esc / F1: close]"
-msgstr "Esc、F1 或 q：关闭"
+msgstr "[Esc / F1：关闭]"
 
 #: base/help.c
 msgid "Every program"
@@ -159,7 +158,8 @@ msgstr "音量: --"
 msgid "Bat --"
 msgstr "电池 --"
 
-#: base/status.c progs/installer.c progs/packages.c progs/settings.c
+#: base/status.c progs/installer.c progs/packages.c progs/search.c
+#: progs/settings.c
 msgid "Network"
 msgstr "网络"
 
@@ -573,9 +573,8 @@ msgstr "归档管理快捷键"
 
 #. TRANSLATORS: Enter and Esc are keys; keep them.
 #: progs/archive.c
-#, fuzzy
 msgid "Enter: ok"
-msgstr "Enter: 打开"
+msgstr "Enter：确定"
 
 #. TRANSLATORS: N is the N key; keep "N: ".
 #: progs/archive.c progs/files.c progs/installer.c progs/packages.c
@@ -596,32 +595,29 @@ msgid "%s is there already."
 msgstr "%s 已存在。"
 
 #: progs/archive.c
-#, fuzzy, c-format
+#, c-format
 msgid "%s is there and not a folder."
-msgstr "%s 已存在：未还原"
+msgstr "%s 已存在，且不是文件夹。"
 
 #: progs/archive.c
 msgid "O: all"
-msgstr ""
+msgstr "O：全部"
 
 #: progs/archive.c
-#, fuzzy
 msgid "o: overwrite"
-msgstr "覆盖(&O)"
+msgstr "o：覆盖"
 
 #: progs/archive.c
 msgid "s: skip"
-msgstr ""
+msgstr "s：跳过"
 
 #: progs/archive.c
-#, fuzzy
 msgid "S: all"
-msgstr "全选"
+msgstr "S：全部"
 
 #: progs/archive.c
-#, fuzzy
 msgid "r: rename"
-msgstr "F2：重命名"
+msgstr "r：重命名"
 
 #: progs/archive.c
 msgid "Another name:"
@@ -776,7 +772,7 @@ msgstr "这里没有能预览 %s 的程序：o 用其应用程序打开。"
 #: progs/archive.c
 #, c-format
 msgid "Could not open %s on the shared display. See the log for the reason."
-msgstr ""
+msgstr "无法在共享显示上打开 %s，原因见日志。"
 
 #: progs/archive.c
 #, c-format
@@ -784,9 +780,9 @@ msgid "Cannot ask home to open %s."
 msgstr "无法请 home 打开 %s。"
 
 #: progs/archive.c
-#, fuzzy, c-format
+#, c-format
 msgid "Open request accepted for %s."
-msgstr "打开 %s：已接受"
+msgstr "已接受打开 %s 的请求。"
 
 #: progs/archive.c progs/edit-filesearch-ui.inc progs/packages.c progs/shot.c
 msgid "Cancel"
@@ -963,7 +959,7 @@ msgstr "添加：o 选择选中的文件夹。"
 msgid "Add: Enter chooses the selected file."
 msgstr "添加：Enter 选择选中的文件。"
 
-#: progs/archive.c progs/files.c
+#: progs/archive.c progs/files.c progs/search.c
 msgid "Archive"
 msgstr "归档"
 
@@ -1244,9 +1240,8 @@ msgstr "是否在无宿主防火墙保护下以自带的用户态 Tor 启动？"
 
 #. TRANSLATORS: Enter and Esc are keys; keep them.
 #: progs/bar.c
-#, fuzzy
 msgid "Enter: start with Tor"
-msgstr "Y / Enter: 以自带 Tor 启动"
+msgstr "Enter：使用自带 Tor 启动"
 
 #. TRANSLATORS: %s is the container name.
 #: progs/bar.c
@@ -1264,9 +1259,8 @@ msgstr "窗口；其他程序则会启动第二个副本。"
 
 #. TRANSLATORS: Enter and Esc are keys; keep them.
 #: progs/bar.c
-#, fuzzy
 msgid "Enter: start again"
-msgstr "（Enter: 重新生成）"
+msgstr "Enter：重新启动"
 
 #. TRANSLATORS: %s is a file name or URL.
 #: progs/bar.c
@@ -1380,7 +1374,7 @@ msgstr "现在可以移除该设备了。"
 msgid "File"
 msgstr "文件"
 
-#: progs/edit-actions.inc progs/view.c
+#: progs/edit-actions.inc progs/search.c progs/view.c
 msgid "Edit"
 msgstr "编辑"
 
@@ -1871,10 +1865,7 @@ msgid_plural ""
 "Open documents become unsaved undoable edits. Other files are saved "
 "atomically, preserving encoding and line endings. Changed snapshots are "
 "refused."
-msgstr[0] ""
-"替换 %zu 处勾选的匹配项？\n"
-"已打开的文档将变为未保存的可撤销编辑。其他文件将以原子方式保存，并保留编码和"
-"行尾格式。已更改的快照将被拒绝。"
+msgstr[0] "替换 %zu 处已勾选的匹配？\n已打开的文档会变为未保存的可撤销编辑。其他文件将原子保存，保留编码和换行符。查找后内容已变化的文件会被拒绝。"
 
 #: progs/edit-filesearch-ui.inc progs/edit-language.inc
 #: progs/edit-session-ui.inc progs/edit.c
@@ -1914,7 +1905,7 @@ msgstr "请先启动“在文件中查找”搜索。"
 msgid "Results"
 msgstr "结果"
 
-#: progs/edit-filesearch-ui.inc progs/view.c
+#: progs/edit-filesearch-ui.inc progs/search.c progs/view.c
 msgid "Searching..."
 msgstr "正在查找..."
 
@@ -5968,6 +5959,18 @@ msgid ""
 msgstr "没有选中内容：用鼠标拖过文字，或双击选一个词、三击选一行。"
 
 #: progs/home.c
+msgid "Open the shared desktop"
+msgstr "打开共享桌面"
+
+#: progs/home.c
+msgid "home and the shared folders"
+msgstr "主目录与共享文件夹"
+
+#: progs/home.c
+msgid "No failure reason reported."
+msgstr "未报告失败原因。"
+
+#: progs/home.c
 #, c-format
 msgid "%d containers   %d marked (operation targets only)%s"
 msgstr "%d 个容器   %d 个已标记（仅作为操作目标）%s"
@@ -6021,8 +6024,7 @@ msgid ""
 msgid_plural ""
 "Full-system Tor is off: %d containers will run their own Tor without the "
 "host Tor firewall."
-msgstr[0] ""
-"全局 Tor 未开启：%d 个容器将在无宿主 Tor 防火墙保护下运行自带的 Tor。"
+msgstr[0] "整机 Tor 已关闭：%d 个容器将使用自己的 Tor，不经过宿主 Tor 防火墙。"
 
 #. TRANSLATORS: Y and N are the confirmation keys; keep them.
 #: progs/home.c
@@ -6045,18 +6047,6 @@ msgstr[0] "……另有 %d 个容器"
 #: progs/home.c
 msgid "state, RAM / swap MiB"
 msgstr "状态、内存 / 交换空间 MiB"
-
-#: progs/home.c
-msgid "Open the shared desktop"
-msgstr "打开共享桌面"
-
-#: progs/home.c
-msgid "home and the shared folders"
-msgstr "主目录与共享文件夹"
-
-#: progs/home.c
-msgid "No failure reason reported."
-msgstr "未报告失败原因。"
 
 #. TRANSLATORS: Y, Enter, N and Esc are confirmation keys; keep them.
 #: progs/home.c
@@ -6191,9 +6181,7 @@ msgid ""
 msgid_plural ""
 "%s refused: %d system jobs run or wait (job %d, %s). Wait for them, or stop "
 "them in the system jobs (J)."
-msgstr[0] ""
-"已拒绝%s：有 %d 个系统任务正在运行或排队（任务 %d，%s）。请等待它们结束，或在"
-"系统任务（J）中停止它们。"
+msgstr[0] "%s 已拒绝：%d 个系统任务正在运行或等待（任务 %d，%s）。请等待，或在系统任务（J）中停止它。"
 
 #: progs/home.c
 msgid "Move the selection"
@@ -7453,9 +7441,7 @@ msgid ""
 msgid_plural ""
 "Installed: %lld packages, %s   %d declared, %s with what they need, %lld "
 "foreign (AUR, LOCachy)   drift %d, missing %d"
-msgstr[0] ""
-"已安装：%lld 个包，%s   声明 %d 个，连同依赖 %s 个，外来（AUR、LOCachy）%lld "
-"个   漂移 %d 个，缺失 %d 个"
+msgstr[0] "已安装：%lld 个软件包，%s   声明 %d 个，连同依赖共 %s，外来包 %lld 个（AUR、LOCachy）   偏离 %d 个，缺失 %d 个"
 
 #: progs/packages.c
 #, c-format
@@ -7563,16 +7549,25 @@ msgstr "%s：因有源码签名密钥待信任而暂停（见下方）；不会�
 msgid "%s: stopped from home; its output is below."
 msgstr "%s：已在 home 中被停止；输出见下方。"
 
-#: progs/packages.c
-#, c-format
-msgid "%s: done."
-msgstr "%s：已完成。"
-
 #. TRANSLATORS: c is the c key; keep it.
 #: progs/packages.c
 #, c-format
 msgid "%s: done; c checks updates."
 msgstr "%s：已完成；按 c 检查更新。"
+
+#: progs/packages.c
+#, c-format
+msgid "%s: done."
+msgstr "%s：已完成。"
+
+#. TRANSLATORS: u is the u key; keep it.
+#: progs/packages.c
+#, c-format
+msgid ""
+"%s: failed; u updates LOCachy's source and updater alone. Output below (and "
+"in %s)."
+msgstr ""
+"%s：失败；按 u 可只更新 LOCachy 源码与更新器。输出见下方（亦保存于 %s）。"
 
 #: progs/packages.c
 #, c-format
@@ -7818,10 +7813,6 @@ msgid "%s follows its new preset: %s"
 msgstr "%s 跟随新的预设模板：%s"
 
 #: progs/packages.c
-msgid "The system is as the manifest says."
-msgstr "当前系统与软件清单一致。"
-
-#: progs/packages.c
 msgid "stopped"
 msgstr "已暂停"
 
@@ -7854,6 +7845,10 @@ msgid "%s: %d declared, %s installed with what they need   l: output"
 msgid_plural "%s: %d declared, %s installed with what they need   l: output"
 msgstr[0] "%s：已声明 %d 个，连同依赖共已安装 %s 个   l: 输出"
 
+#: progs/packages.c
+msgid "The system is as the manifest says."
+msgstr "当前系统与软件清单一致。"
+
 #. TRANSLATORS: l is the l key; keep it.
 #: progs/packages.c
 #, c-format
@@ -7880,11 +7875,6 @@ msgstr "c: 检查更新"
 #: progs/packages.c
 msgid "a: apply the marked"
 msgstr "a: 应用所选更新"
-
-#: progs/packages.c
-#, c-format
-msgid "%s: failed; u updates LOCachy's source and updater alone. Output below (and in %s)."
-msgstr "%s：失败；按 u 可只更新 LOCachy 源码与更新器。输出见下方（亦保存于 %s）。"
 
 #: progs/packages.c
 msgid "l: output/details"
@@ -7951,7 +7941,9 @@ msgid "Updates: check again (on the network); apply the marked rows"
 msgstr "更新：重新检查（需联网）；应用已标记的行"
 
 #: progs/packages.c
-msgid "Updates: update LOCachy source and updater alone (without checking repositories)"
+msgid ""
+"Updates: update LOCachy source and updater alone (without checking "
+"repositories)"
 msgstr "更新：单独更新 LOCachy 源码与更新器（不检查软件源）"
 
 #: progs/packages.c
@@ -8161,9 +8153,8 @@ msgid "Enter: a folder of your home, chosen in files"
 msgstr "Enter: 在文件管理器中选择主目录下的文件夹"
 
 #: progs/packages.c
-#, fuzzy
 msgid "at the same path in it"
-msgstr "在容器内挂载于相同路径   Delete: 移除"
+msgstr "在容器内的相同路径下"
 
 #: progs/packages.c
 msgid "isolated filesystem"
@@ -8505,14 +8496,14 @@ msgstr "从宿主卸载 %s（及其独占依赖）？"
 msgid "Install what the manifest names and remove what it does not?"
 msgstr "安装软件清单中列出的软件包，并卸载未列出的软件包？"
 
-#: progs/packages.c
-msgid "Update LOCachy source and updater now (without host packages)?"
-msgstr "现在更新 LOCachy 源码和更新器（不改动宿主软件包）？"
-
 #. TRANSLATORS: Space is the Space key; keep it.
 #: progs/packages.c
 msgid "Nothing is marked (Space marks)."
 msgstr "未勾选任何项目（按 Space 勾选）。"
+
+#: progs/packages.c
+msgid "Update LOCachy source and updater now (without host packages)?"
+msgstr "现在更新 LOCachy 源码和更新器（不改动宿主软件包）？"
 
 #: progs/packages.c
 msgid "Not checked yet: c checks."
@@ -9002,6 +8993,236 @@ msgstr "请输入标准 console 或 XKB 布局名。"
 msgid "desktop window layout"
 msgstr "桌面窗口布局"
 
+#: progs/search.c
+msgid "Search apps, file names, and document contents"
+msgstr "搜索应用、文件名和文档内容"
+
+#: progs/search.c
+msgid "Move selection in the results list"
+msgstr "在结果列表中移动选择"
+
+#: progs/search.c
+msgid "Open the selected app, file, or folder"
+msgstr "打开选中的应用、文件或文件夹"
+
+#: progs/search.c
+msgid "Open the selected result's parent folder in files"
+msgstr "在文件管理器中打开选中结果所在的文件夹"
+
+#: progs/search.c
+msgid "Switch filter: All, Apps, Files, Content"
+msgstr "切换筛选：全部、应用、文件、内容"
+
+#: progs/search.c
+msgid "Move the cursor in the search box"
+msgstr "在搜索框中移动光标"
+
+#: progs/search.c
+msgid "Delete to start, to end, or previous word"
+msgstr "删除到开头、到末尾或前一个词"
+
+#: progs/search.c
+msgid "Select all, copy, or paste in the search box"
+msgstr "在搜索框中全选、复制或粘贴"
+
+#: progs/search.c
+msgid "Clear the query, or close search when empty"
+msgstr "清空查询；查询为空时关闭搜索"
+
+#: progs/search.c
+msgid "Close search"
+msgstr "关闭搜索"
+
+#: progs/search.c
+msgid "Files"
+msgstr "文件"
+
+#: progs/search.c progs/view.c
+msgid "Settings"
+msgstr "设置"
+
+#: progs/search.c
+msgid "Packages"
+msgstr "软件包"
+
+#: progs/search.c progs/settings-hwinfo.inc
+msgid "Firmware"
+msgstr "固件版本"
+
+#: progs/search.c
+msgid "Term"
+msgstr "终端"
+
+#: progs/search.c
+msgid "View"
+msgstr "查看器"
+
+#: progs/search.c
+msgid "Mixer"
+msgstr "混音器"
+
+#: progs/search.c progs/settings.c
+msgid "Bluetooth"
+msgstr "蓝牙"
+
+#: progs/search.c
+msgid "Container app"
+msgstr "容器应用"
+
+#: progs/search.c
+msgid "Host program"
+msgstr "宿主程序"
+
+#: progs/search.c
+#, c-format
+msgid "Cannot open container %s."
+msgstr "无法打开容器 %s。"
+
+#: progs/search.c
+#, c-format
+msgid "Cannot open %s window."
+msgstr "无法打开 %s 窗口。"
+
+#: progs/search.c
+#, c-format
+msgid "Cannot launch %s."
+msgstr "无法启动 %s。"
+
+#: progs/search.c
+#, c-format
+msgid "Cannot open folder %s."
+msgstr "无法打开文件夹 %s。"
+
+#: progs/search.c
+msgid "Applications do not have a parent folder."
+msgstr "应用没有上级文件夹。"
+
+#: progs/search.c
+#, c-format
+msgid "Cannot open %s."
+msgstr "无法打开 %s。"
+
+#: progs/search.c
+msgid "[App]"
+msgstr "[应用]"
+
+#: progs/search.c
+msgid "[Doc]"
+msgstr "[文档]"
+
+#: progs/search.c
+msgid "[Text]"
+msgstr "[文本]"
+
+#: progs/search.c
+msgid "[Match]"
+msgstr "[匹配]"
+
+#: progs/search.c
+msgid "[Dir]"
+msgstr "[目录]"
+
+#: progs/search.c
+msgid "[Img]"
+msgstr "[图片]"
+
+#: progs/search.c
+msgid "[Media]"
+msgstr "[媒体]"
+
+#: progs/search.c
+msgid "[Arc]"
+msgstr "[压缩包]"
+
+#: progs/search.c
+msgid "[File]"
+msgstr "[文件]"
+
+#: progs/search.c
+msgid "search"
+msgstr "搜索"
+
+#: progs/search.c
+msgid " Search "
+msgstr " 搜索 "
+
+#: progs/search.c
+msgid "Search: "
+msgstr "搜索： "
+
+#: progs/search.c
+msgid "[x]"
+msgstr "[x]"
+
+#: progs/search.c
+msgid "Type to search apps, files, and documents..."
+msgstr "输入以搜索应用、文件和文档……"
+
+#: progs/search.c
+msgid "All"
+msgstr "全部"
+
+#: progs/search.c
+msgid "Apps"
+msgstr "应用"
+
+#: progs/search.c
+msgid "Content"
+msgstr "内容"
+
+#: progs/search.c
+#, c-format
+msgid "%zu result (searching...)"
+msgid_plural "%zu results (searching...)"
+msgstr[0] "%zu 项结果（搜索中……）"
+
+#: progs/search.c
+#, c-format
+msgid "%zu result"
+msgid_plural "%zu results"
+msgstr[0] "%zu 项结果"
+
+#: progs/search.c
+msgid "Search index unavailable — showing programs only"
+msgstr "搜索索引不可用，仅显示程序"
+
+#: progs/search.c
+msgid "No matching apps, files, or documents."
+msgstr "没有匹配的应用、文件或文档。"
+
+#: progs/search.c
+msgid "Start typing to search apps, files, and document contents."
+msgstr "输入即可搜索应用、文件和文档内容。"
+
+#: progs/search.c
+#, c-format
+msgid "%s files · %s docs · indexing..."
+msgstr "%s 个文件 · %s 个文档 · 正在建立索引……"
+
+#: progs/search.c
+#, c-format
+msgid "%s files · %s docs indexed"
+msgstr "%s 个文件 · %s 个文档已建立索引"
+
+#: progs/search.c
+#, c-format
+msgid "%zu program available"
+msgid_plural "%zu programs available"
+msgstr[0] "%zu 个程序可用"
+
+#: progs/search.c
+#, c-format
+msgid "Ready · %zu programs · file & document index active"
+msgstr "就绪 · %zu 个程序 · 文件与文档索引已启用"
+
+#: progs/search.c
+msgid "Enter: open  Ctrl+O: folder  Tab: filter  F1: help  Esc: close"
+msgstr "Enter：打开  Ctrl+O：文件夹  Tab：筛选  F1：帮助  Esc：关闭"
+
+#: progs/search.c
+msgid "Search keys"
+msgstr "搜索快捷键"
+
 #: progs/settings-hwinfo.inc
 msgid "Processor"
 msgstr "处理器"
@@ -9231,10 +9452,6 @@ msgstr "/sys/block 中未发现块设备。"
 #: progs/settings-hwinfo.inc
 msgid "Capacity"
 msgstr "容量"
-
-#: progs/settings-hwinfo.inc
-msgid "Firmware"
-msgstr "固件版本"
 
 #: progs/settings-hwinfo.inc
 #, c-format
@@ -9619,6 +9836,11 @@ msgid "Hardware readings refreshed."
 msgstr "硬件读数已刷新。"
 
 #: progs/settings-power.inc
+#, c-format
+msgid "Last handoff: %.104s"
+msgstr "最近切换：%.104s"
+
+#: progs/settings-power.inc
 msgid "Charging"
 msgstr "充电中"
 
@@ -9722,11 +9944,6 @@ msgstr "%s [%s]：健康度 %.1f%%（%.1f / %.1f Wh）"
 #, c-format
 msgid "%s [%s]: %d%%, %s"
 msgstr "%s [%s]：%d%%，%s"
-
-#: progs/settings-power.inc
-#, c-format
-msgid "Last handoff: %.104s"
-msgstr "最近切换：%.104s"
 
 #: progs/settings-power.inc
 msgid ""
@@ -10159,6 +10376,42 @@ msgstr "GPU 硬件解码（优先 H.264）"
 #: progs/settings.c
 msgid "auto (GPU if supported)"
 msgstr "自动（支持时用 GPU）"
+
+#: progs/settings.c
+msgid "Auto (battery power-saving)"
+msgstr "自动（电池节能）"
+
+#: progs/settings.c
+msgid "Balanced"
+msgstr "平衡"
+
+#: progs/settings.c
+msgid "Performance"
+msgstr "性能"
+
+#: progs/settings.c
+msgid "Power saver"
+msgstr "省电"
+
+#: progs/settings.c
+msgid "Auto (follow power profile)"
+msgstr "自动（跟随电源模式）"
+
+#: progs/settings.c
+msgid "Full (cTGP + Dynamic Boost)"
+msgstr "全功耗（cTGP + Dynamic Boost）"
+
+#: progs/settings.c
+msgid "Eco (reduced D-state)"
+msgstr "节能（降低 D-state）"
+
+#: progs/settings.c
+msgid "Stock (factory TGP)"
+msgstr "出厂功耗（TGP）"
+
+#: progs/settings.c
+msgid "cTGP (extended TGP)"
+msgstr "扩展 TGP（cTGP）"
 
 #: progs/settings.c
 msgid "a new one each time"
@@ -11314,12 +11567,20 @@ msgid "Display & Monitor"
 msgstr "显示和监视器"
 
 #: progs/settings.c
-msgid "Bluetooth"
-msgstr "蓝牙"
+msgid "NVIDIA GPU"
+msgstr "NVIDIA 独显"
+
+#: progs/settings.c
+msgid "Paired Devices"
+msgstr "已配对设备"
 
 #: progs/settings.c
 msgid "Power Management"
 msgstr "电源管理"
+
+#: progs/settings.c
+msgid "NVIDIA GPU power"
+msgstr "NVIDIA 独显功耗"
 
 #: progs/settings.c
 msgid "Display"
@@ -11350,9 +11611,12 @@ msgid "Cloud Drives"
 msgstr "云盘"
 
 #: progs/settings.c
-#, fuzzy
+msgid "Compute Node"
+msgstr "计算节点"
+
+#: progs/settings.c
 msgid "Colors"
-msgstr "颜色：%s"
+msgstr "颜色"
 
 #: progs/settings.c
 msgid "Wallpaper"
@@ -11370,6 +11634,10 @@ msgstr "尚无规则：在“打开方式”选择器中按 A 可设为默认。
 #: progs/settings.c
 msgid "Shortcuts"
 msgstr "快捷键"
+
+#: progs/settings.c
+msgid "Global Search"
+msgstr "全局搜索"
 
 #: progs/settings.c
 msgid "Screen Locking"
@@ -11443,6 +11711,10 @@ msgstr "可选组件"
 #: progs/settings.c
 msgid "Debug Cable"
 msgstr "调试线缆"
+
+#: progs/settings.c
+msgid "Maintenance Windows"
+msgstr "维护用 Windows"
 
 #: progs/settings.c
 msgid "Hostname (letters, digits, hyphens): "
@@ -11595,6 +11867,192 @@ msgstr "再按一次 Delete：删除胁迫密码（胁迫同时关闭）。"
 msgid "Duress password removed; duress is off."
 msgstr "已删除胁迫密码，胁迫已关闭。"
 
+#: progs/settings.c progs/view.c
+msgid "auto"
+msgstr "自动"
+
+#: progs/settings.c
+#, c-format
+msgid "%s: no DRM cards found; keeping auto."
+msgstr "%s：未找到 DRM 显卡，保持自动。"
+
+#: progs/settings.c
+#, c-format
+msgid "%s: %s (takes effect on next start)."
+msgstr "%s：%s（下次启动生效）。"
+
+#: progs/settings.c
+#, c-format
+msgid "Saved, but could not refresh Thunderbolt filter: %s"
+msgstr "已保存，但未能刷新雷电接口防火墙规则：%s"
+
+#: progs/settings.c
+msgid "Thunderbolt filter updated."
+msgstr "雷电接口防火墙规则已更新。"
+
+#: progs/settings.c
+#, c-format
+msgid "Thunderbolt filter update failed: %s"
+msgstr "雷电接口防火墙规则更新失败：%s"
+
+#: progs/settings.c
+msgid "Paired devices closed."
+msgstr "已配对设备管理已关闭。"
+
+#: progs/settings.c
+msgid "Paired devices did not finish."
+msgstr "已配对设备管理未能完成。"
+
+#: progs/settings.c
+msgid "Wait: a Maintenance Windows job is still running."
+msgstr "请稍候：维护用 Windows 任务仍在运行。"
+
+#: progs/settings.c
+#, c-format
+msgid "Could not create Maintenance Windows: %s"
+msgstr "无法创建维护用 Windows：%s"
+
+#: progs/settings.c
+#, c-format
+msgid "Creating Maintenance Windows partition (%d GiB)..."
+msgstr "正在创建维护用 Windows 分区（%d GiB）..."
+
+#: progs/settings.c
+msgid ""
+"Enter again: reclaim the Windows partition (the second Enter removes it)"
+msgstr "再按一次 Enter：回收 Windows 分区（第二次 Enter 将移除它）"
+
+#: progs/settings.c
+#, c-format
+msgid "Could not reclaim Maintenance Windows: %s"
+msgstr "无法回收维护用 Windows：%s"
+
+#: progs/settings.c
+msgid "Reclaiming Maintenance Windows partition..."
+msgstr "正在回收维护用 Windows 分区..."
+
+#: progs/settings.c
+msgid "Maintenance Windows is not created yet."
+msgstr "维护用 Windows 尚未创建。"
+
+#: progs/settings.c
+msgid ""
+"Enter again: arm one-shot bare-metal Windows boot (LOCachy stays default)."
+msgstr "再按一次 Enter：设置下次裸机单次启动 Windows（LOCachy 仍为默认）。"
+
+#: progs/settings.c
+#, c-format
+msgid "Could not arm one-shot Windows boot: %s"
+msgstr "无法设置单次启动 Windows：%s"
+
+#: progs/settings.c
+msgid "Arming one-shot Windows boot..."
+msgstr "正在设置单次启动 Windows..."
+
+#: progs/settings.c
+#, c-format
+msgid "Could not heal UEFI boot order: %s"
+msgstr "无法修复 UEFI 启动顺序：%s"
+
+#: progs/settings.c
+msgid "Restoring LOCachy first in UEFI boot order..."
+msgstr "正在将 LOCachy 恢复到 UEFI 启动顺序首位..."
+
+#: progs/settings.c
+msgid "Windows virtual machine closed."
+msgstr "Windows 虚拟机已关闭。"
+
+#: progs/settings.c
+msgid "Windows virtual machine did not finish."
+msgstr "Windows 虚拟机未能正常结束。"
+
+#: progs/settings.c
+msgid "Maintenance Windows partition created."
+msgstr "维护用 Windows 分区已创建。"
+
+#: progs/settings.c
+msgid "Maintenance Windows shrink plan armed; reboot to finish creation."
+msgstr "维护用 Windows 缩容计划已就绪；重启后完成创建。"
+
+#: progs/settings.c
+msgid "Maintenance Windows partition reclaimed."
+msgstr "维护用 Windows 分区已回收。"
+
+#: progs/settings.c
+msgid ""
+"One-shot Windows boot armed; LOCachy stays default on the following restart."
+msgstr "已设置单次启动 Windows；之后再次重启将自动回到 LOCachy。"
+
+#: progs/settings.c
+msgid "UEFI boot order healed; LOCachy is first."
+msgstr "UEFI 启动顺序已修复，LOCachy 位于首位。"
+
+#: progs/settings.c
+msgid "Maintenance Windows job finished."
+msgstr "维护用 Windows 任务已完成。"
+
+#: progs/settings.c
+#, c-format
+msgid "Maintenance Windows job failed: %s"
+msgstr "维护用 Windows 任务失败：%s"
+
+#: progs/settings.c
+msgid "NVIDIA GPU unlock updated; the boot image was rebuilt."
+msgstr "NVIDIA 独显解锁已更新，启动镜像已重建。"
+
+#: progs/settings.c
+#, c-format
+msgid "NVIDIA GPU unlock failed: %s"
+msgstr "NVIDIA 独显解锁失败：%s"
+
+#: progs/settings.c
+msgid "GPU power setting applied."
+msgstr "独显功耗设置已应用。"
+
+#: progs/settings.c
+#, c-format
+msgid "GPU power change failed: %s"
+msgstr "独显功耗修改失败：%s"
+
+#: progs/settings.c
+msgid "Wait: the NVIDIA GPU unlock job is still running."
+msgstr "请稍候：NVIDIA 独显解锁任务仍在运行。"
+
+#: progs/settings.c
+#, c-format
+msgid "Could not start the NVIDIA GPU unlock: %s"
+msgstr "无法启动 NVIDIA 独显解锁：%s"
+
+#: progs/settings.c
+msgid "Fetching gpu-unlock from GitHub and building it; this takes a while..."
+msgstr "正在从 GitHub 拉取并构建 gpu-unlock，可能需要一些时间……"
+
+#: progs/settings.c
+msgid "Turning the NVIDIA GPU unlock off..."
+msgstr "正在关闭 NVIDIA 独显解锁……"
+
+#: progs/settings.c
+msgid "Turning the NVIDIA GPU unlock on..."
+msgstr "正在开启 NVIDIA 独显解锁……"
+
+#: progs/settings.c
+msgid "NVIDIA GPU unlock is not installed."
+msgstr "尚未安装 NVIDIA 独显解锁。"
+
+#. TRANSLATORS: Delete is the Delete key; keep it.
+#: progs/settings.c
+msgid "Press Delete again to remove gpu-unlock and rebuild the boot image."
+msgstr "再按一次 Delete 卸载 gpu-unlock 并重建启动镜像。"
+
+#: progs/settings.c
+#, c-format
+msgid "Could not remove NVIDIA GPU unlock: %s"
+msgstr "无法卸载 NVIDIA 独显解锁：%s"
+
+#: progs/settings.c
+msgid "Removing NVIDIA GPU unlock and rebuilding the boot image..."
+msgstr "正在卸载 NVIDIA 独显解锁并重建启动镜像……"
+
 #: progs/settings.c
 msgid "Kernel options (added to the command line; empty: none): "
 msgstr "内核参数（追加到命令行；留空：无）："
@@ -11604,8 +12062,23 @@ msgid "Kernel options unchanged."
 msgstr "内核参数未更改。"
 
 #: progs/settings.c
-msgid "Kernel options: letters, digits, spaces and . , : = / + - _ @ only."
-msgstr "内核参数只能包含字母、数字、空格和 . , : = / + - _ @。"
+msgid "Kernel options: letters, digits, spaces and . , : = / + - _ @ ! only."
+msgstr "内核参数只能包含字母、数字、空格和 . , : = / + - _ @ !。"
+
+#: progs/settings.c
+#, c-format
+msgid "Machine profile: %s (applying GPU power and rebuilding boot image...)."
+msgstr "机型配置：%s（正在应用独显功耗并重建启动镜像……）。"
+
+#: progs/settings.c
+#, c-format
+msgid "Machine profile: %s (applying GPU power...)."
+msgstr "机型配置：%s（正在应用独显功耗……）。"
+
+#: progs/settings.c
+#, c-format
+msgid "Machine profile: %s (rebuilding boot image...)."
+msgstr "机型配置：%s（正在重建启动镜像……）。"
 
 #: progs/settings.c
 #, c-format
@@ -11867,6 +12340,104 @@ msgid "Debug cable link"
 msgstr "调试线连接"
 
 #: progs/settings.c
+msgid "Display GPU"
+msgstr "显示显卡"
+
+#: progs/settings.c
+msgid "Extended display GPU"
+msgstr "扩展屏显卡"
+
+#: progs/settings.c
+msgid "on"
+msgstr "开"
+
+#: progs/settings.c
+msgid "Thunderbolt shared link"
+msgstr "雷电共享链路"
+
+#: progs/settings.c
+msgid "working..."
+msgstr "正在处理…"
+
+#: progs/settings.c
+msgid "Extended display paired only"
+msgstr "扩展屏仅允许已配对设备"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "%d paired  (Enter: manage)"
+msgid_plural "%d paired  (Enter: manage)"
+msgstr[0] "已配对 %d 台  （Enter：管理）"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "none  (Enter: manage)"
+msgstr "无  （Enter：管理）"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Manage  (Enter)"
+msgstr "管理  （Enter）"
+
+#: progs/settings.c
+msgid "Paired devices"
+msgstr "已配对设备"
+
+#: progs/settings.c
+msgid "Compute node service"
+msgstr "计算节点服务"
+
+#: progs/settings.c
+msgid "Bind compute on Thunderbolt"
+msgstr "在雷电接口上监听计算服务"
+
+#: progs/settings.c
+msgid "Compute GPU passthrough"
+msgstr "计算容器直通 GPU"
+
+#: progs/settings.c
+msgid "Windows partition size"
+msgstr "Windows 分区大小"
+
+#: progs/settings.c
+msgid "not created"
+msgstr "未创建"
+
+#: progs/settings.c
+#, c-format
+msgid "created, %d GiB"
+msgstr "已创建，%d GiB"
+
+#: progs/settings.c
+msgid "created"
+msgstr "已创建"
+
+#: progs/settings.c
+msgid "Boot Windows once (bare metal)"
+msgstr "单次启动 Windows（裸机）"
+
+#: progs/settings.c
+msgid "Enter: arm next boot"
+msgstr "Enter：设置下次启动"
+
+#: progs/settings.c
+msgid "Heal boot order"
+msgstr "修复启动顺序"
+
+#: progs/settings.c
+msgid "Enter: keep LOCachy first"
+msgstr "Enter：保持 LOCachy 优先"
+
+#: progs/settings.c
+msgid "Windows virtual machine"
+msgstr "Windows 虚拟机"
+
+#: progs/settings.c
+msgid "Enter: launch in terminal"
+msgstr "Enter：在终端中启动"
+
+#: progs/settings.c
 msgid "[Enter: change]"
 msgstr "[Enter: 修改]"
 
@@ -11917,6 +12488,50 @@ msgstr "自动关闭显示屏"
 #: progs/settings.c
 msgid "Turn off display after"
 msgstr "空闲后关闭显示屏"
+
+#: progs/settings.c
+msgid "Power profile"
+msgstr "电源模式"
+
+#: progs/settings.c
+msgid "Compressed RAM swap (zram)"
+msgstr "内存压缩交换（zram）"
+
+#: progs/settings.c
+msgid "Global search key"
+msgstr "全局搜索快捷键"
+
+#: progs/settings.c
+msgid "Search index service"
+msgstr "搜索索引服务"
+
+#: progs/settings.c
+msgid "Document content indexing"
+msgstr "文档内容索引"
+
+#: progs/settings.c
+msgid "  (search service off)"
+msgstr "  （搜索服务已关闭）"
+
+#: progs/settings.c
+msgid "ON"
+msgstr "开"
+
+#: progs/settings.c
+msgid "NVIDIA GPU unlock (gpu-unlock)"
+msgstr "NVIDIA 独显解锁（gpu-unlock）"
+
+#: progs/settings.c
+msgid "GPU power mode"
+msgstr "独显功耗模式"
+
+#: progs/settings.c
+msgid "not on this machine"
+msgstr "此机型不支持"
+
+#: progs/settings.c
+msgid "NVIDIA Dynamic Boost (nvidia-powerd)"
+msgstr "NVIDIA Dynamic Boost（nvidia-powerd）"
 
 #: progs/settings.c
 msgid "Unlock with a fingerprint"
@@ -12108,10 +12723,6 @@ msgid "Boot kernel"
 msgstr "启动内核"
 
 #: progs/settings.c
-msgid "working..."
-msgstr "正在处理…"
-
-#: progs/settings.c
 msgid "Kernel headers"
 msgstr "内核头文件"
 
@@ -12140,10 +12751,6 @@ msgstr "（Enter: 重新生成）"
 #: progs/settings.c
 msgid "Network in the terminal"
 msgstr "终端联网"
-
-#: progs/settings.c
-msgid "on"
-msgstr "开"
 
 #: progs/settings.c
 msgid "Touchpad Clicks"
@@ -12439,6 +13046,7 @@ msgstr ""
 "Tor 从不直连出网：请先开启 Clash，或在已安装 lyrebird 时添加网桥行（obfs4 或 "
 "WebTunnel）。"
 
+#. TRANSLATORS: Enter and Delete are key names; keep them.
 #: progs/settings.c
 msgid ""
 "Enter: add a bridge line (bridges.torproject.org)   Delete: remove them all"
@@ -12481,9 +13089,8 @@ msgstr "Enter: 在 bluetui 中打开蓝牙设备（需先开启服务）。"
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
-#, fuzzy
 msgid "Enter: choose a color"
-msgstr "Enter: 选择值"
+msgstr "Enter：选择颜色"
 
 #. TRANSLATORS: Enter and Delete are key names; keep them.
 #: progs/settings.c
@@ -12503,6 +13110,85 @@ msgstr "网络对时已开启：系统时钟将从网络同步。"
 #: progs/settings.c
 msgid "Network time off: Enter on Date and time sets the clock."
 msgstr "网络对时已关闭：在“日期与时间”行按 Enter 可手动设置时间。"
+
+#: progs/settings.c
+msgid "Thunderbolt link shared inside locachy-net; updating firewall..."
+msgstr "雷电链路在 locachy-net 内共享；正在更新防火墙..."
+
+#: progs/settings.c
+msgid "Thunderbolt link kept private to extended display; updating firewall..."
+msgstr "雷电链路保留为扩展屏专用；正在更新防火墙..."
+
+#: progs/settings.c
+msgid "Thunderbolt sharing set to auto; updating firewall..."
+msgstr "雷电共享已设为自动；正在更新防火墙..."
+
+#: progs/settings.c
+msgid "Extended display accepts paired devices only; applies on next session."
+msgstr "扩展屏仅接受已配对设备；下次会话生效。"
+
+#: progs/settings.c
+msgid ""
+"Extended display allows one-time pairing codes; applies on next session."
+msgstr "扩展屏允许一次性配对码；下次会话生效。"
+
+#: progs/settings.c
+msgid ""
+"Enter: list paired devices in a terminal (pair or revoke with locachy-pair)."
+msgstr "Enter：在终端中列出已配对设备（可用 locachy-pair 配对或撤销）。"
+
+#: progs/settings.c
+msgid "Compute node service off."
+msgstr "计算节点服务已关闭。"
+
+#: progs/settings.c
+msgid "Compute node service on."
+msgstr "计算节点服务已开启。"
+
+#: progs/settings.c
+msgid "Compute binds on Thunderbolt too; updating firewall..."
+msgstr "计算服务同时监听雷电接口；正在更新防火墙..."
+
+#: progs/settings.c
+msgid "Compute listens on Tailscale only; updating firewall..."
+msgstr "计算服务仅监听 Tailscale；正在更新防火墙..."
+
+#: progs/settings.c
+msgid "Compute GPU passthrough on; applies to new compute jobs."
+msgstr "计算 GPU 直通已开启；对新提交的计算任务生效。"
+
+#: progs/settings.c
+msgid "Compute GPU passthrough off; applies to new compute jobs."
+msgstr "计算 GPU 直通已关闭；对新提交的计算任务生效。"
+
+#: progs/settings.c
+#, c-format
+msgid "Windows partition size set to %d GiB (used when creating)."
+msgstr "Windows 分区大小已设为 %d GiB（创建时生效）。"
+
+#: progs/settings.c
+msgid "Enter, twice: reclaim the Windows partition and return its space."
+msgstr "连续按两次 Enter：回收 Windows 分区并归还空间。"
+
+#: progs/settings.c
+msgid "Enter: create the Maintenance Windows partition with the size above."
+msgstr "Enter：按上方大小创建维护用 Windows 分区。"
+
+#: progs/settings.c
+msgid ""
+"Enter, twice: arm one-shot bare-metal Windows boot (LOCachy stays default)."
+msgstr "连续按两次 Enter：设置下次裸机单次启动 Windows（LOCachy 仍为默认）。"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: restore LOCachy first in UEFI boot order."
+msgstr "Enter：将 LOCachy 恢复为 UEFI 首选启动项。"
+
+#: progs/settings.c
+msgid ""
+"Enter: launch QEMU/KVM in a terminal (needs a graphical session for display, "
+"or VNC)."
+msgstr "Enter：在终端中启动 QEMU/KVM（显示画面需要图形会话或 VNC）。"
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
@@ -12801,6 +13487,7 @@ msgstr "屏幕亮度：%d%%。"
 msgid "Cannot set screen brightness."
 msgstr "无法调节屏幕亮度。"
 
+#. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
 msgid "Enter: choose a machine profile by brand."
 msgstr "Enter: 按品牌选择机型配置。"
@@ -12970,6 +13657,67 @@ msgid_plural "Mirrors are ranked again every %d days."
 msgstr[0] "每 %d 天重新为镜像排序一次。"
 
 #: progs/settings.c
+msgid "This machine has no GPU power control (its machine profile has none)."
+msgstr "此机型没有独显功耗控制（机型配置中未定义）。"
+
+#: progs/settings.c
+msgid "Wait: the GPU power job is still running."
+msgstr "请稍候：独显功耗任务仍在运行。"
+
+#: progs/settings.c
+#, c-format
+msgid "Could not change the GPU power mode: %s"
+msgstr "无法更改独显功耗模式：%s"
+
+#: progs/settings.c
+#, c-format
+msgid "Applying GPU power mode: %s..."
+msgstr "正在应用独显功耗模式：%s……"
+
+#: progs/settings.c
+#, c-format
+msgid "Could not change the Dynamic Boost setting: %s"
+msgstr "无法更改 Dynamic Boost 设置：%s"
+
+#: progs/settings.c
+msgid "Saving the NVIDIA Dynamic Boost setting..."
+msgstr "正在保存 NVIDIA Dynamic Boost 设置……"
+
+#: progs/settings.c
+#, c-format
+msgid "Power profile: %s."
+msgstr "电源模式：%s。"
+
+#: progs/settings.c
+msgid "Compressed RAM swap (zram) on."
+msgstr "内存压缩交换（zram）已开启。"
+
+#: progs/settings.c
+msgid "Compressed RAM swap (zram) off."
+msgstr "内存压缩交换（zram）已关闭。"
+
+#. TRANSLATORS: Enter and Delete are key names; keep them.
+#: progs/settings.c
+msgid "Enter: press a new global search key   Delete: none"
+msgstr "Enter：按下新的全局搜索快捷键   Delete：无"
+
+#: progs/settings.c
+msgid "Global search index service on."
+msgstr "搜索索引服务已开启。"
+
+#: progs/settings.c
+msgid "Global search index service off."
+msgstr "搜索索引服务已关闭。"
+
+#: progs/settings.c
+msgid "Document content indexing on."
+msgstr "文档内容索引已开启。"
+
+#: progs/settings.c
+msgid "Document content indexing off (file names only)."
+msgstr "文档内容索引已关闭（仅索引文件名）。"
+
+#: progs/settings.c
 msgid "Not changed: at the high threat level every lock asks for the password."
 msgstr "未更改：高威胁烈度下每次锁屏都要求密码。"
 
@@ -12981,9 +13729,7 @@ msgid ""
 msgid_plural ""
 "After an idle lock, a key or the pointer within %d seconds unlocks it "
 "without the password. The lock key, the lid and sleep always ask."
-msgstr[0] ""
-"空闲锁屏后，%d 秒内按键或移动指针可免密码解锁；锁屏键、合盖和睡眠始终要求密"
-"码。"
+msgstr[0] "空闲锁屏后，%d 秒内按任意键或移动指针可无需密码解锁。锁屏键、合盖和休眠始终需要密码。"
 
 #: progs/settings.c
 msgid "Every lock asks for the password at once."
@@ -13018,6 +13764,7 @@ msgstr "空闲时从不自动锁屏（锁屏快捷键与合盖仍会锁屏）。
 msgid "Enter: choose the time zone."
 msgstr "Enter: 选择时区。"
 
+#. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
 msgid "Enter: set the date and time."
 msgstr "Enter: 设置日期与时间。"
@@ -13079,6 +13826,12 @@ msgstr "Enter: 使用方向按钮排列显示器。"
 msgid "Saved to %s and applied."
 msgstr "已保存至 %s 并生效。"
 
+#: progs/settings.c
+msgid ""
+"Enter: fetch gpu-unlock from GitHub and build it, or turn it on or off   "
+"Delete: remove"
+msgstr "Enter：从 GitHub 拉取并构建 gpu-unlock，或切换开关   Delete：卸载"
+
 #. TRANSLATORS: Enter and Delete are key names; keep them.
 #: progs/settings.c
 msgid "Installed   Delete, twice: remove it"
@@ -13138,6 +13891,14 @@ msgstr "已取消壁纸；共享桌面下次显示时生效。"
 #: progs/settings.c
 msgid "No terminal key: saved and applied."
 msgstr "已取消终端快捷键：已保存并生效。"
+
+#: progs/settings.c
+msgid "No global search key: saved and applied."
+msgstr "未设置全局搜索快捷键：已保存并生效。"
+
+#: progs/settings.c
+msgid "Cannot write rc.conf."
+msgstr "无法写入 rc.conf。"
 
 #: progs/settings.c
 #, c-format
@@ -14172,10 +14933,6 @@ msgid "No bookmarks"
 msgstr "无书签"
 
 #: progs/view.c
-msgid "Settings"
-msgstr "设置"
-
-#: progs/view.c
 msgid "Hide Sidebar"
 msgstr "隐藏侧边栏"
 
@@ -14906,10 +15663,6 @@ msgid "No flash"
 msgstr "未闪光"
 
 #: progs/view.c
-msgid "auto"
-msgstr "自动"
-
-#: progs/view.c
 msgid "compulsory"
 msgstr "强制"
 
@@ -14932,300 +15685,6 @@ msgstr "显示较少详情"
 #: progs/view.c
 msgid "Show more details..."
 msgstr "显示更多详情..."
-
-#: progs/settings.c
-msgid "Paired Devices"
-msgstr "已配对设备"
-
-#: progs/settings.c
-msgid "Compute Node"
-msgstr "计算节点"
-
-#: progs/settings.c
-msgid "Maintenance Windows"
-msgstr "维护用 Windows"
-
-#: progs/settings.c
-#, c-format
-msgid "%s: no DRM cards found; keeping auto."
-msgstr "%s：未找到 DRM 显卡，保持自动。"
-
-#: progs/settings.c
-#, c-format
-msgid "%s: %s (takes effect on next start)."
-msgstr "%s：%s（下次启动生效）。"
-
-#: progs/settings.c
-#, c-format
-msgid "Saved, but could not refresh Thunderbolt filter: %s"
-msgstr "已保存，但未能刷新雷电接口防火墙规则：%s"
-
-#: progs/settings.c
-msgid "Thunderbolt filter updated."
-msgstr "雷电接口防火墙规则已更新。"
-
-#: progs/settings.c
-#, c-format
-msgid "Thunderbolt filter update failed: %s"
-msgstr "雷电接口防火墙规则更新失败：%s"
-
-#: progs/settings.c
-msgid "Paired devices closed."
-msgstr "已配对设备管理已关闭。"
-
-#: progs/settings.c
-msgid "Paired devices did not finish."
-msgstr "已配对设备管理未能完成。"
-
-#: progs/settings.c
-msgid "Wait: a Maintenance Windows job is still running."
-msgstr "请稍候：维护用 Windows 任务仍在运行。"
-
-#: progs/settings.c
-#, c-format
-msgid "Could not create Maintenance Windows: %s"
-msgstr "无法创建维护用 Windows：%s"
-
-#: progs/settings.c
-#, c-format
-msgid "Creating Maintenance Windows partition (%d GiB)..."
-msgstr "正在创建维护用 Windows 分区（%d GiB）..."
-
-#: progs/settings.c
-msgid "Enter again: reclaim the Windows partition (the second Enter removes it)"
-msgstr "再按一次 Enter：回收 Windows 分区（第二次 Enter 将移除它）"
-
-#: progs/settings.c
-#, c-format
-msgid "Could not reclaim Maintenance Windows: %s"
-msgstr "无法回收维护用 Windows：%s"
-
-#: progs/settings.c
-msgid "Reclaiming Maintenance Windows partition..."
-msgstr "正在回收维护用 Windows 分区..."
-
-#: progs/settings.c
-msgid "Maintenance Windows is not created yet."
-msgstr "维护用 Windows 尚未创建。"
-
-#: progs/settings.c
-msgid "Enter again: arm one-shot bare-metal Windows boot (LOCachy stays default)."
-msgstr "再按一次 Enter：设置下次裸机单次启动 Windows（LOCachy 仍为默认）。"
-
-#: progs/settings.c
-#, c-format
-msgid "Could not arm one-shot Windows boot: %s"
-msgstr "无法设置单次启动 Windows：%s"
-
-#: progs/settings.c
-msgid "Arming one-shot Windows boot..."
-msgstr "正在设置单次启动 Windows..."
-
-#: progs/settings.c
-#, c-format
-msgid "Could not heal UEFI boot order: %s"
-msgstr "无法修复 UEFI 启动顺序：%s"
-
-#: progs/settings.c
-msgid "Restoring LOCachy first in UEFI boot order..."
-msgstr "正在将 LOCachy 恢复到 UEFI 启动顺序首位..."
-
-#: progs/settings.c
-msgid "Windows virtual machine closed."
-msgstr "Windows 虚拟机已关闭。"
-
-#: progs/settings.c
-msgid "Windows virtual machine did not finish."
-msgstr "Windows 虚拟机未能正常结束。"
-
-#: progs/settings.c
-msgid "Maintenance Windows partition created."
-msgstr "维护用 Windows 分区已创建。"
-
-#: progs/settings.c
-msgid "Maintenance Windows shrink plan armed; reboot to finish creation."
-msgstr "维护用 Windows 缩容计划已就绪；重启后完成创建。"
-
-#: progs/settings.c
-msgid "Maintenance Windows partition reclaimed."
-msgstr "维护用 Windows 分区已回收。"
-
-#: progs/settings.c
-msgid "One-shot Windows boot armed; LOCachy stays default on the following restart."
-msgstr "已设置单次启动 Windows；之后再次重启将自动回到 LOCachy。"
-
-#: progs/settings.c
-msgid "UEFI boot order healed; LOCachy is first."
-msgstr "UEFI 启动顺序已修复，LOCachy 位于首位。"
-
-#: progs/settings.c
-msgid "Maintenance Windows job finished."
-msgstr "维护用 Windows 任务已完成。"
-
-#: progs/settings.c
-#, c-format
-msgid "Maintenance Windows job failed: %s"
-msgstr "维护用 Windows 任务失败：%s"
-
-#: progs/settings.c
-msgid "Display GPU"
-msgstr "显示显卡"
-
-#: progs/settings.c
-msgid "Extended display GPU"
-msgstr "扩展屏显卡"
-
-#: progs/settings.c
-msgid "Thunderbolt shared link"
-msgstr "雷电共享链路"
-
-#: progs/settings.c
-msgid "Extended display paired only"
-msgstr "扩展屏仅允许已配对设备"
-
-#: progs/settings.c
-#, c-format
-msgid "%d paired  (Enter: manage)"
-msgid_plural "%d paired  (Enter: manage)"
-msgstr[0] "已配对 %d 台  （Enter：管理）"
-
-#: progs/settings.c
-msgid "none  (Enter: manage)"
-msgstr "无  （Enter：管理）"
-
-#: progs/settings.c
-msgid "Manage  (Enter)"
-msgstr "管理  （Enter）"
-
-#: progs/settings.c
-msgid "Paired devices"
-msgstr "已配对设备"
-
-#: progs/settings.c
-msgid "Compute node service"
-msgstr "计算节点服务"
-
-#: progs/settings.c
-msgid "Bind compute on Thunderbolt"
-msgstr "在雷电接口上监听计算服务"
-
-#: progs/settings.c
-msgid "Compute GPU passthrough"
-msgstr "计算容器直通 GPU"
-
-#: progs/settings.c
-msgid "Windows partition size"
-msgstr "Windows 分区大小"
-
-#: progs/settings.c
-msgid "not created"
-msgstr "未创建"
-
-#: progs/settings.c
-#, c-format
-msgid "created, %d GiB"
-msgstr "已创建，%d GiB"
-
-#: progs/settings.c
-msgid "created"
-msgstr "已创建"
-
-#: progs/settings.c
-msgid "Boot Windows once (bare metal)"
-msgstr "单次启动 Windows（裸机）"
-
-#: progs/settings.c
-msgid "Enter: arm next boot"
-msgstr "Enter：设置下次启动"
-
-#: progs/settings.c
-msgid "Heal boot order"
-msgstr "修复启动顺序"
-
-#: progs/settings.c
-msgid "Enter: keep LOCachy first"
-msgstr "Enter：保持 LOCachy 优先"
-
-#: progs/settings.c
-msgid "Windows virtual machine"
-msgstr "Windows 虚拟机"
-
-#: progs/settings.c
-msgid "Enter: launch in terminal"
-msgstr "Enter：在终端中启动"
-
-#: progs/settings.c
-msgid "Thunderbolt link shared inside locachy-net; updating firewall..."
-msgstr "雷电链路在 locachy-net 内共享；正在更新防火墙..."
-
-#: progs/settings.c
-msgid "Thunderbolt link kept private to extended display; updating firewall..."
-msgstr "雷电链路保留为扩展屏专用；正在更新防火墙..."
-
-#: progs/settings.c
-msgid "Thunderbolt sharing set to auto; updating firewall..."
-msgstr "雷电共享已设为自动；正在更新防火墙..."
-
-#: progs/settings.c
-msgid "Extended display accepts paired devices only; applies on next session."
-msgstr "扩展屏仅接受已配对设备；下次会话生效。"
-
-#: progs/settings.c
-msgid "Extended display allows one-time pairing codes; applies on next session."
-msgstr "扩展屏允许一次性配对码；下次会话生效。"
-
-#: progs/settings.c
-msgid "Enter: list paired devices in a terminal (pair or revoke with locachy-pair)."
-msgstr "Enter：在终端中列出已配对设备（可用 locachy-pair 配对或撤销）。"
-
-#: progs/settings.c
-msgid "Compute node service on."
-msgstr "计算节点服务已开启。"
-
-#: progs/settings.c
-msgid "Compute node service off."
-msgstr "计算节点服务已关闭。"
-
-#: progs/settings.c
-msgid "Compute binds on Thunderbolt too; updating firewall..."
-msgstr "计算服务同时监听雷电接口；正在更新防火墙..."
-
-#: progs/settings.c
-msgid "Compute listens on Tailscale only; updating firewall..."
-msgstr "计算服务仅监听 Tailscale；正在更新防火墙..."
-
-#: progs/settings.c
-msgid "Compute GPU passthrough on; applies to new compute jobs."
-msgstr "计算 GPU 直通已开启；对新提交的计算任务生效。"
-
-#: progs/settings.c
-msgid "Compute GPU passthrough off; applies to new compute jobs."
-msgstr "计算 GPU 直通已关闭；对新提交的计算任务生效。"
-
-#: progs/settings.c
-#, c-format
-msgid "Windows partition size set to %d GiB (used when creating)."
-msgstr "Windows 分区大小已设为 %d GiB（创建时生效）。"
-
-#: progs/settings.c
-msgid "Enter, twice: reclaim the Windows partition and return its space."
-msgstr "连续按两次 Enter：回收 Windows 分区并归还空间。"
-
-#: progs/settings.c
-msgid "Enter: create the Maintenance Windows partition with the size above."
-msgstr "Enter：按上方大小创建维护用 Windows 分区。"
-
-#: progs/settings.c
-msgid "Enter, twice: arm one-shot bare-metal Windows boot (LOCachy stays default)."
-msgstr "连续按两次 Enter：设置下次裸机单次启动 Windows（LOCachy 仍为默认）。"
-
-#: progs/settings.c
-msgid "Enter: restore LOCachy first in UEFI boot order."
-msgstr "Enter：将 LOCachy 恢复为 UEFI 首选启动项。"
-
-#: progs/settings.c
-msgid "Enter: launch QEMU/KVM in a terminal (needs a graphical session for display, or VNC)."
-msgstr "Enter：在终端中启动 QEMU/KVM（显示画面需要图形会话或 VNC）。"
 
 #, c-format
 #~ msgid "%s [y/N]"

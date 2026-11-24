@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "name": "gpu-unlock",
+  "provider": "github",
+  "repository": "https://github.com/Zagitta/gpu-unlock.git",
+  "branch": "main",
+  "pkgbuild": "packaging/arch/PKGBUILD",
+  "packages": [
+    "gpu-unlock-dkms",
+    "gpu-unlock-firmware"
+  ],
+  "extra_pci_ids": [
+    {
+      "family_macro": "GA103",
+      "device_id": "0x2460",
+      "anchor": "GA103(0x2414),",
+      "comment": "GA103M RTX 3080 Ti Laptop"
+    }
+  ]
+}

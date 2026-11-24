@@ -126,7 +126,7 @@ enum check {
     C_NONE, C_PACKAGES, C_SWAP, C_KERNEL, C_ONOFF, C_SECTION, C_TARGETS, C_CONTAINER, C_CONTAINER_DATA,
     C_DEVICE, C_RELEASE, C_FILE, C_SPI_PROBE, C_SPI_BACKUP, C_SPI_VERIFY, C_SPI_WRITE,
     C_TPM, C_TPM_ENROLL, C_SECURE_BOOT, C_BOOT, C_REBUILD, C_BIOS_SET, C_SECURITY,
-    C_WINMAINT_CREATE,
+    C_WINMAINT_CREATE, C_GPU_TARGET, C_GPU_MODE,
 };
 
 struct kind {
@@ -176,6 +176,11 @@ static const struct kind kinds[] = {
     { "winmaint-reclaim", "locachy-winmaint", { "reclaim" }, C_NONE },
     { "winmaint-boot-once", "locachy-winmaint", { "boot-once" }, C_NONE },
     { "winmaint-heal-boot", "locachy-winmaint", { "heal-boot" }, C_NONE },
+    { "gpu-unlock-install", "locachy-gpu-unlock", { "install", "--target" }, C_GPU_TARGET },
+    { "gpu-unlock-set", "locachy-gpu-unlock", { "set" }, C_GPU_TARGET },
+    { "gpu-unlock-remove", "locachy-gpu-unlock", { "remove" }, C_NONE },
+    { "gpu-power-apply", "locachy-gpu-power", { "apply" }, C_GPU_MODE },
+    { "gpu-powerd", "locachy-gpu-power", { "nvidia-powerd" }, C_ONOFF },
 };
 #define NKINDS ((int)(sizeof kinds / sizeof kinds[0]))
 
@@ -294,6 +299,19 @@ static int check_args(const struct kind *k, char **a, int n, char *why, size_t s
     case C_BOOT:
         ok = n == 0 || (n == 1 && (strcmp(a[0], "--luks") == 0 || strcmp(a[0], "--register-only") == 0 ||
                                    strcmp(a[0], "--winmaint-shrink") == 0));
+        break;
+    case C_GPU_TARGET: {
+        /* all, off (gpu-unlock-set only), or a PCI BDF list; locachy-gpu-unlock checks exact form. */
+        size_t len = n == 1 ? strlen(a[0]) : 0;
+        int allow_off = strcmp(k->name, "gpu-unlock-set") == 0;
+        ok = n == 1 && len > 0 && len < 96 &&
+             (strcmp(a[0], "all") == 0 || (allow_off && strcmp(a[0], "off") == 0) ||
+              (isxdigit((unsigned char)a[0][0]) && strspn(a[0], "0123456789abcdefABCDEF:.,") == len));
+        break;
+    }
+    case C_GPU_MODE:
+        ok = n == 0 || (n == 1 && (strcmp(a[0], "auto") == 0 || strcmp(a[0], "full") == 0 || strcmp(a[0], "ctgp") == 0 ||
+                                   strcmp(a[0], "stock") == 0 || strcmp(a[0], "eco") == 0));
         break;
     case C_WINMAINT_CREATE:
         if (n == 2 && strcmp(a[0], "--size-gib") == 0) {
@@ -770,6 +788,8 @@ static int in_pkg_domain(const struct job *j)
         "locachy-rebuild", "locachy-source", "boot",
         "secure-boot", "security-policy",
         "winmaint-create", "winmaint-reclaim", /* may rebuild the boot image for offline shrink */
+        "gpu-unlock-install", "gpu-unlock-set", "gpu-unlock-remove", /* packages and the boot image */
+        "gpu-power-apply", /* the hp_omen_gpu module, its DKMS build, and the boot image */
         "app-host-build", /* a host program's build: packages on the host (app-build stays out) */
         NULL,
     };

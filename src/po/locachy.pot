@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-21 08:23+0800\n"
+"POT-Creation-Date: 2026-11-23 23:36-0500\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -164,7 +164,8 @@ msgstr ""
 msgid "Bat --"
 msgstr ""
 
-#: base/status.c progs/installer.c progs/packages.c progs/settings.c
+#: base/status.c progs/installer.c progs/packages.c progs/search.c
+#: progs/settings.c
 msgid "Network"
 msgstr ""
 
@@ -963,7 +964,7 @@ msgstr ""
 msgid "Add: Enter chooses the selected file."
 msgstr ""
 
-#: progs/archive.c progs/files.c
+#: progs/archive.c progs/files.c progs/search.c
 msgid "Archive"
 msgstr ""
 
@@ -1381,7 +1382,7 @@ msgstr ""
 msgid "File"
 msgstr ""
 
-#: progs/edit-actions.inc progs/view.c
+#: progs/edit-actions.inc progs/search.c progs/view.c
 msgid "Edit"
 msgstr ""
 
@@ -1915,7 +1916,7 @@ msgstr ""
 msgid "Results"
 msgstr ""
 
-#: progs/edit-filesearch-ui.inc progs/view.c
+#: progs/edit-filesearch-ui.inc progs/search.c progs/view.c
 msgid "Searching..."
 msgstr ""
 
@@ -5915,6 +5916,18 @@ msgid ""
 msgstr ""
 
 #: progs/home.c
+msgid "Open the shared desktop"
+msgstr ""
+
+#: progs/home.c
+msgid "home and the shared folders"
+msgstr ""
+
+#: progs/home.c
+msgid "No failure reason reported."
+msgstr ""
+
+#: progs/home.c
 #, c-format
 msgid "%d containers   %d marked (operation targets only)%s"
 msgstr ""
@@ -5991,18 +6004,6 @@ msgstr[1] ""
 
 #: progs/home.c
 msgid "state, RAM / swap MiB"
-msgstr ""
-
-#: progs/home.c
-msgid "Open the shared desktop"
-msgstr ""
-
-#: progs/home.c
-msgid "home and the shared folders"
-msgstr ""
-
-#: progs/home.c
-msgid "No failure reason reported."
 msgstr ""
 
 #. TRANSLATORS: Y, Enter, N and Esc are confirmation keys; keep them.
@@ -7505,15 +7506,23 @@ msgstr ""
 msgid "%s: stopped from home; its output is below."
 msgstr ""
 
+#. TRANSLATORS: c is the c key; keep it.
+#: progs/packages.c
+#, c-format
+msgid "%s: done; c checks updates."
+msgstr ""
+
 #: progs/packages.c
 #, c-format
 msgid "%s: done."
 msgstr ""
 
-#. TRANSLATORS: c is the c key; keep it.
+#. TRANSLATORS: u is the u key; keep it.
 #: progs/packages.c
 #, c-format
-msgid "%s: done; c checks updates."
+msgid ""
+"%s: failed; u updates LOCachy's source and updater alone. Output below (and "
+"in %s)."
 msgstr ""
 
 #: progs/packages.c
@@ -7766,10 +7775,6 @@ msgid "%s follows its new preset: %s"
 msgstr ""
 
 #: progs/packages.c
-msgid "The system is as the manifest says."
-msgstr ""
-
-#: progs/packages.c
 msgid "stopped"
 msgstr ""
 
@@ -7803,6 +7808,10 @@ msgid_plural "%s: %d declared, %s installed with what they need   l: output"
 msgstr[0] ""
 msgstr[1] ""
 
+#: progs/packages.c
+msgid "The system is as the manifest says."
+msgstr ""
+
 #. TRANSLATORS: l is the l key; keep it.
 #: progs/packages.c
 #, c-format
@@ -7828,11 +7837,6 @@ msgstr ""
 
 #: progs/packages.c
 msgid "a: apply the marked"
-msgstr ""
-
-#: progs/packages.c
-#, c-format
-msgid "%s: failed; u updates LOCachy's source and updater alone. Output below (and in %s)."
 msgstr ""
 
 #: progs/packages.c
@@ -7900,7 +7904,9 @@ msgid "Updates: check again (on the network); apply the marked rows"
 msgstr ""
 
 #: progs/packages.c
-msgid "Updates: update LOCachy source and updater alone (without checking repositories)"
+msgid ""
+"Updates: update LOCachy source and updater alone (without checking "
+"repositories)"
 msgstr ""
 
 #: progs/packages.c
@@ -8452,13 +8458,13 @@ msgstr ""
 msgid "Install what the manifest names and remove what it does not?"
 msgstr ""
 
-#: progs/packages.c
-msgid "Update LOCachy source and updater now (without host packages)?"
-msgstr ""
-
 #. TRANSLATORS: Space is the Space key; keep it.
 #: progs/packages.c
 msgid "Nothing is marked (Space marks)."
+msgstr ""
+
+#: progs/packages.c
+msgid "Update LOCachy source and updater now (without host packages)?"
 msgstr ""
 
 #: progs/packages.c
@@ -8946,6 +8952,239 @@ msgstr ""
 msgid "desktop window layout"
 msgstr ""
 
+#: progs/search.c
+msgid "Search apps, file names, and document contents"
+msgstr ""
+
+#: progs/search.c
+msgid "Move selection in the results list"
+msgstr ""
+
+#: progs/search.c
+msgid "Open the selected app, file, or folder"
+msgstr ""
+
+#: progs/search.c
+msgid "Open the selected result's parent folder in files"
+msgstr ""
+
+#: progs/search.c
+msgid "Switch filter: All, Apps, Files, Content"
+msgstr ""
+
+#: progs/search.c
+msgid "Move the cursor in the search box"
+msgstr ""
+
+#: progs/search.c
+msgid "Delete to start, to end, or previous word"
+msgstr ""
+
+#: progs/search.c
+msgid "Select all, copy, or paste in the search box"
+msgstr ""
+
+#: progs/search.c
+msgid "Clear the query, or close search when empty"
+msgstr ""
+
+#: progs/search.c
+msgid "Close search"
+msgstr ""
+
+#: progs/search.c
+msgid "Files"
+msgstr ""
+
+#: progs/search.c progs/view.c
+msgid "Settings"
+msgstr ""
+
+#: progs/search.c
+msgid "Packages"
+msgstr ""
+
+#: progs/search.c progs/settings-hwinfo.inc
+msgid "Firmware"
+msgstr ""
+
+#: progs/search.c
+msgid "Term"
+msgstr ""
+
+#: progs/search.c
+msgid "View"
+msgstr ""
+
+#: progs/search.c
+msgid "Mixer"
+msgstr ""
+
+#: progs/search.c progs/settings.c
+msgid "Bluetooth"
+msgstr ""
+
+#: progs/search.c
+msgid "Container app"
+msgstr ""
+
+#: progs/search.c
+msgid "Host program"
+msgstr ""
+
+#: progs/search.c
+#, c-format
+msgid "Cannot open container %s."
+msgstr ""
+
+#: progs/search.c
+#, c-format
+msgid "Cannot open %s window."
+msgstr ""
+
+#: progs/search.c
+#, c-format
+msgid "Cannot launch %s."
+msgstr ""
+
+#: progs/search.c
+#, c-format
+msgid "Cannot open folder %s."
+msgstr ""
+
+#: progs/search.c
+msgid "Applications do not have a parent folder."
+msgstr ""
+
+#: progs/search.c
+#, c-format
+msgid "Cannot open %s."
+msgstr ""
+
+#: progs/search.c
+msgid "[App]"
+msgstr ""
+
+#: progs/search.c
+msgid "[Doc]"
+msgstr ""
+
+#: progs/search.c
+msgid "[Text]"
+msgstr ""
+
+#: progs/search.c
+msgid "[Match]"
+msgstr ""
+
+#: progs/search.c
+msgid "[Dir]"
+msgstr ""
+
+#: progs/search.c
+msgid "[Img]"
+msgstr ""
+
+#: progs/search.c
+msgid "[Media]"
+msgstr ""
+
+#: progs/search.c
+msgid "[Arc]"
+msgstr ""
+
+#: progs/search.c
+msgid "[File]"
+msgstr ""
+
+#: progs/search.c
+msgid "search"
+msgstr ""
+
+#: progs/search.c
+msgid " Search "
+msgstr ""
+
+#: progs/search.c
+msgid "Search: "
+msgstr ""
+
+#: progs/search.c
+msgid "[x]"
+msgstr ""
+
+#: progs/search.c
+msgid "Type to search apps, files, and documents..."
+msgstr ""
+
+#: progs/search.c
+msgid "All"
+msgstr ""
+
+#: progs/search.c
+msgid "Apps"
+msgstr ""
+
+#: progs/search.c
+msgid "Content"
+msgstr ""
+
+#: progs/search.c
+#, c-format
+msgid "%zu result (searching...)"
+msgid_plural "%zu results (searching...)"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/search.c
+#, c-format
+msgid "%zu result"
+msgid_plural "%zu results"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/search.c
+msgid "Search index unavailable — showing programs only"
+msgstr ""
+
+#: progs/search.c
+msgid "No matching apps, files, or documents."
+msgstr ""
+
+#: progs/search.c
+msgid "Start typing to search apps, files, and document contents."
+msgstr ""
+
+#: progs/search.c
+#, c-format
+msgid "%s files · %s docs · indexing..."
+msgstr ""
+
+#: progs/search.c
+#, c-format
+msgid "%s files · %s docs indexed"
+msgstr ""
+
+#: progs/search.c
+#, c-format
+msgid "%zu program available"
+msgid_plural "%zu programs available"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/search.c
+#, c-format
+msgid "Ready · %zu programs · file & document index active"
+msgstr ""
+
+#: progs/search.c
+msgid "Enter: open  Ctrl+O: folder  Tab: filter  F1: help  Esc: close"
+msgstr ""
+
+#: progs/search.c
+msgid "Search keys"
+msgstr ""
+
 #: progs/settings-hwinfo.inc
 msgid "Processor"
 msgstr ""
@@ -9174,10 +9413,6 @@ msgstr ""
 
 #: progs/settings-hwinfo.inc
 msgid "Capacity"
-msgstr ""
-
-#: progs/settings-hwinfo.inc
-msgid "Firmware"
 msgstr ""
 
 #: progs/settings-hwinfo.inc
@@ -9562,6 +9797,11 @@ msgid "Hardware readings refreshed."
 msgstr ""
 
 #: progs/settings-power.inc
+#, c-format
+msgid "Last handoff: %.104s"
+msgstr ""
+
+#: progs/settings-power.inc
 msgid "Charging"
 msgstr ""
 
@@ -9664,11 +9904,6 @@ msgstr ""
 #: progs/settings-power.inc
 #, c-format
 msgid "%s [%s]: %d%%, %s"
-msgstr ""
-
-#: progs/settings-power.inc
-#, c-format
-msgid "Last handoff: %.104s"
 msgstr ""
 
 #: progs/settings-power.inc
@@ -10099,6 +10334,42 @@ msgstr ""
 
 #: progs/settings.c
 msgid "auto (GPU if supported)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Auto (battery power-saving)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Balanced"
+msgstr ""
+
+#: progs/settings.c
+msgid "Performance"
+msgstr ""
+
+#: progs/settings.c
+msgid "Power saver"
+msgstr ""
+
+#: progs/settings.c
+msgid "Auto (follow power profile)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Full (cTGP + Dynamic Boost)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Eco (reduced D-state)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Stock (factory TGP)"
+msgstr ""
+
+#: progs/settings.c
+msgid "cTGP (extended TGP)"
 msgstr ""
 
 #: progs/settings.c
@@ -11250,11 +11521,19 @@ msgid "Display & Monitor"
 msgstr ""
 
 #: progs/settings.c
-msgid "Bluetooth"
+msgid "NVIDIA GPU"
+msgstr ""
+
+#: progs/settings.c
+msgid "Paired Devices"
 msgstr ""
 
 #: progs/settings.c
 msgid "Power Management"
+msgstr ""
+
+#: progs/settings.c
+msgid "NVIDIA GPU power"
 msgstr ""
 
 #: progs/settings.c
@@ -11286,6 +11565,10 @@ msgid "Cloud Drives"
 msgstr ""
 
 #: progs/settings.c
+msgid "Compute Node"
+msgstr ""
+
+#: progs/settings.c
 msgid "Colors"
 msgstr ""
 
@@ -11304,6 +11587,10 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Shortcuts"
+msgstr ""
+
+#: progs/settings.c
+msgid "Global Search"
 msgstr ""
 
 #: progs/settings.c
@@ -11377,6 +11664,10 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Debug Cable"
+msgstr ""
+
+#: progs/settings.c
+msgid "Maintenance Windows"
 msgstr ""
 
 #: progs/settings.c
@@ -11530,6 +11821,192 @@ msgstr ""
 msgid "Duress password removed; duress is off."
 msgstr ""
 
+#: progs/settings.c progs/view.c
+msgid "auto"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%s: no DRM cards found; keeping auto."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%s: %s (takes effect on next start)."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Saved, but could not refresh Thunderbolt filter: %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "Thunderbolt filter updated."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Thunderbolt filter update failed: %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "Paired devices closed."
+msgstr ""
+
+#: progs/settings.c
+msgid "Paired devices did not finish."
+msgstr ""
+
+#: progs/settings.c
+msgid "Wait: a Maintenance Windows job is still running."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Could not create Maintenance Windows: %s"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Creating Maintenance Windows partition (%d GiB)..."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Enter again: reclaim the Windows partition (the second Enter removes it)"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Could not reclaim Maintenance Windows: %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "Reclaiming Maintenance Windows partition..."
+msgstr ""
+
+#: progs/settings.c
+msgid "Maintenance Windows is not created yet."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Enter again: arm one-shot bare-metal Windows boot (LOCachy stays default)."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Could not arm one-shot Windows boot: %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "Arming one-shot Windows boot..."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Could not heal UEFI boot order: %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "Restoring LOCachy first in UEFI boot order..."
+msgstr ""
+
+#: progs/settings.c
+msgid "Windows virtual machine closed."
+msgstr ""
+
+#: progs/settings.c
+msgid "Windows virtual machine did not finish."
+msgstr ""
+
+#: progs/settings.c
+msgid "Maintenance Windows partition created."
+msgstr ""
+
+#: progs/settings.c
+msgid "Maintenance Windows shrink plan armed; reboot to finish creation."
+msgstr ""
+
+#: progs/settings.c
+msgid "Maintenance Windows partition reclaimed."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"One-shot Windows boot armed; LOCachy stays default on the following restart."
+msgstr ""
+
+#: progs/settings.c
+msgid "UEFI boot order healed; LOCachy is first."
+msgstr ""
+
+#: progs/settings.c
+msgid "Maintenance Windows job finished."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Maintenance Windows job failed: %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "NVIDIA GPU unlock updated; the boot image was rebuilt."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "NVIDIA GPU unlock failed: %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "GPU power setting applied."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "GPU power change failed: %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "Wait: the NVIDIA GPU unlock job is still running."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Could not start the NVIDIA GPU unlock: %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "Fetching gpu-unlock from GitHub and building it; this takes a while..."
+msgstr ""
+
+#: progs/settings.c
+msgid "Turning the NVIDIA GPU unlock off..."
+msgstr ""
+
+#: progs/settings.c
+msgid "Turning the NVIDIA GPU unlock on..."
+msgstr ""
+
+#: progs/settings.c
+msgid "NVIDIA GPU unlock is not installed."
+msgstr ""
+
+#. TRANSLATORS: Delete is the Delete key; keep it.
+#: progs/settings.c
+msgid "Press Delete again to remove gpu-unlock and rebuild the boot image."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Could not remove NVIDIA GPU unlock: %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "Removing NVIDIA GPU unlock and rebuilding the boot image..."
+msgstr ""
+
 #: progs/settings.c
 msgid "Kernel options (added to the command line; empty: none): "
 msgstr ""
@@ -11539,7 +12016,22 @@ msgid "Kernel options unchanged."
 msgstr ""
 
 #: progs/settings.c
-msgid "Kernel options: letters, digits, spaces and . , : = / + - _ @ only."
+msgid "Kernel options: letters, digits, spaces and . , : = / + - _ @ ! only."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Machine profile: %s (applying GPU power and rebuilding boot image...)."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Machine profile: %s (applying GPU power...)."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Machine profile: %s (rebuilding boot image...)."
 msgstr ""
 
 #: progs/settings.c
@@ -11802,6 +12294,105 @@ msgid "Debug cable link"
 msgstr ""
 
 #: progs/settings.c
+msgid "Display GPU"
+msgstr ""
+
+#: progs/settings.c
+msgid "Extended display GPU"
+msgstr ""
+
+#: progs/settings.c
+msgid "on"
+msgstr ""
+
+#: progs/settings.c
+msgid "Thunderbolt shared link"
+msgstr ""
+
+#: progs/settings.c
+msgid "working..."
+msgstr ""
+
+#: progs/settings.c
+msgid "Extended display paired only"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "%d paired  (Enter: manage)"
+msgid_plural "%d paired  (Enter: manage)"
+msgstr[0] ""
+msgstr[1] ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "none  (Enter: manage)"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Manage  (Enter)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Paired devices"
+msgstr ""
+
+#: progs/settings.c
+msgid "Compute node service"
+msgstr ""
+
+#: progs/settings.c
+msgid "Bind compute on Thunderbolt"
+msgstr ""
+
+#: progs/settings.c
+msgid "Compute GPU passthrough"
+msgstr ""
+
+#: progs/settings.c
+msgid "Windows partition size"
+msgstr ""
+
+#: progs/settings.c
+msgid "not created"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "created, %d GiB"
+msgstr ""
+
+#: progs/settings.c
+msgid "created"
+msgstr ""
+
+#: progs/settings.c
+msgid "Boot Windows once (bare metal)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter: arm next boot"
+msgstr ""
+
+#: progs/settings.c
+msgid "Heal boot order"
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter: keep LOCachy first"
+msgstr ""
+
+#: progs/settings.c
+msgid "Windows virtual machine"
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter: launch in terminal"
+msgstr ""
+
+#: progs/settings.c
 msgid "[Enter: change]"
 msgstr ""
 
@@ -11853,6 +12444,50 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Turn off display after"
+msgstr ""
+
+#: progs/settings.c
+msgid "Power profile"
+msgstr ""
+
+#: progs/settings.c
+msgid "Compressed RAM swap (zram)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Global search key"
+msgstr ""
+
+#: progs/settings.c
+msgid "Search index service"
+msgstr ""
+
+#: progs/settings.c
+msgid "Document content indexing"
+msgstr ""
+
+#: progs/settings.c
+msgid "  (search service off)"
+msgstr ""
+
+#: progs/settings.c
+msgid "ON"
+msgstr ""
+
+#: progs/settings.c
+msgid "NVIDIA GPU unlock (gpu-unlock)"
+msgstr ""
+
+#: progs/settings.c
+msgid "GPU power mode"
+msgstr ""
+
+#: progs/settings.c
+msgid "not on this machine"
+msgstr ""
+
+#: progs/settings.c
+msgid "NVIDIA Dynamic Boost (nvidia-powerd)"
 msgstr ""
 
 #: progs/settings.c
@@ -12045,10 +12680,6 @@ msgid "Boot kernel"
 msgstr ""
 
 #: progs/settings.c
-msgid "working..."
-msgstr ""
-
-#: progs/settings.c
 msgid "Kernel headers"
 msgstr ""
 
@@ -12076,10 +12707,6 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Network in the terminal"
-msgstr ""
-
-#: progs/settings.c
-msgid "on"
 msgstr ""
 
 #: progs/settings.c
@@ -12370,6 +12997,7 @@ msgid ""
 "WebTunnel) with lyrebird installed."
 msgstr ""
 
+#. TRANSLATORS: Enter and Delete are key names; keep them.
 #: progs/settings.c
 msgid ""
 "Enter: add a bridge line (bridges.torproject.org)   Delete: remove them all"
@@ -12432,6 +13060,85 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Network time off: Enter on Date and time sets the clock."
+msgstr ""
+
+#: progs/settings.c
+msgid "Thunderbolt link shared inside locachy-net; updating firewall..."
+msgstr ""
+
+#: progs/settings.c
+msgid "Thunderbolt link kept private to extended display; updating firewall..."
+msgstr ""
+
+#: progs/settings.c
+msgid "Thunderbolt sharing set to auto; updating firewall..."
+msgstr ""
+
+#: progs/settings.c
+msgid "Extended display accepts paired devices only; applies on next session."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Extended display allows one-time pairing codes; applies on next session."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Enter: list paired devices in a terminal (pair or revoke with locachy-pair)."
+msgstr ""
+
+#: progs/settings.c
+msgid "Compute node service off."
+msgstr ""
+
+#: progs/settings.c
+msgid "Compute node service on."
+msgstr ""
+
+#: progs/settings.c
+msgid "Compute binds on Thunderbolt too; updating firewall..."
+msgstr ""
+
+#: progs/settings.c
+msgid "Compute listens on Tailscale only; updating firewall..."
+msgstr ""
+
+#: progs/settings.c
+msgid "Compute GPU passthrough on; applies to new compute jobs."
+msgstr ""
+
+#: progs/settings.c
+msgid "Compute GPU passthrough off; applies to new compute jobs."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Windows partition size set to %d GiB (used when creating)."
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter, twice: reclaim the Windows partition and return its space."
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter: create the Maintenance Windows partition with the size above."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Enter, twice: arm one-shot bare-metal Windows boot (LOCachy stays default)."
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: restore LOCachy first in UEFI boot order."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Enter: launch QEMU/KVM in a terminal (needs a graphical session for display, "
+"or VNC)."
 msgstr ""
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
@@ -12713,6 +13420,7 @@ msgstr ""
 msgid "Cannot set screen brightness."
 msgstr ""
 
+#. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
 msgid "Enter: choose a machine profile by brand."
 msgstr ""
@@ -12882,6 +13590,67 @@ msgstr[0] ""
 msgstr[1] ""
 
 #: progs/settings.c
+msgid "This machine has no GPU power control (its machine profile has none)."
+msgstr ""
+
+#: progs/settings.c
+msgid "Wait: the GPU power job is still running."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Could not change the GPU power mode: %s"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Applying GPU power mode: %s..."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Could not change the Dynamic Boost setting: %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "Saving the NVIDIA Dynamic Boost setting..."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Power profile: %s."
+msgstr ""
+
+#: progs/settings.c
+msgid "Compressed RAM swap (zram) on."
+msgstr ""
+
+#: progs/settings.c
+msgid "Compressed RAM swap (zram) off."
+msgstr ""
+
+#. TRANSLATORS: Enter and Delete are key names; keep them.
+#: progs/settings.c
+msgid "Enter: press a new global search key   Delete: none"
+msgstr ""
+
+#: progs/settings.c
+msgid "Global search index service on."
+msgstr ""
+
+#: progs/settings.c
+msgid "Global search index service off."
+msgstr ""
+
+#: progs/settings.c
+msgid "Document content indexing on."
+msgstr ""
+
+#: progs/settings.c
+msgid "Document content indexing off (file names only)."
+msgstr ""
+
+#: progs/settings.c
 msgid "Not changed: at the high threat level every lock asks for the password."
 msgstr ""
 
@@ -12931,6 +13700,7 @@ msgstr ""
 msgid "Enter: choose the time zone."
 msgstr ""
 
+#. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
 msgid "Enter: set the date and time."
 msgstr ""
@@ -12988,6 +13758,12 @@ msgstr ""
 #: progs/settings.c
 #, c-format
 msgid "Saved to %s and applied."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Enter: fetch gpu-unlock from GitHub and build it, or turn it on or off   "
+"Delete: remove"
 msgstr ""
 
 #. TRANSLATORS: Enter and Delete are key names; keep them.
@@ -13048,6 +13824,14 @@ msgstr ""
 
 #: progs/settings.c
 msgid "No terminal key: saved and applied."
+msgstr ""
+
+#: progs/settings.c
+msgid "No global search key: saved and applied."
+msgstr ""
+
+#: progs/settings.c
+msgid "Cannot write rc.conf."
 msgstr ""
 
 #: progs/settings.c
@@ -14086,10 +14870,6 @@ msgid "No bookmarks"
 msgstr ""
 
 #: progs/view.c
-msgid "Settings"
-msgstr ""
-
-#: progs/view.c
 msgid "Hide Sidebar"
 msgstr ""
 
@@ -14820,10 +15600,6 @@ msgstr ""
 
 #: progs/view.c
 msgid "No flash"
-msgstr ""
-
-#: progs/view.c
-msgid "auto"
 msgstr ""
 
 #: progs/view.c

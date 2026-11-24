@@ -140,7 +140,7 @@ static char apps_repo[256], apps_branch[128];
  * (boot_cmdline). */
 #define BOOT_IMAGE "/usr/local/lib/locachy/boot/locachy.efi"
 static int boot_verbose;
-static char boot_cmdline[256];
+static char boot_cmdline[1024];
 static char boot_kernel[64] = "linux-cachyos-bore";
 #ifndef KERNEL_MANIFEST
 #define KERNEL_MANIFEST "/etc/locachy/packages"
@@ -368,6 +368,20 @@ static const char *const power_profile_labels[NPPROFS] = {
     N_("Auto (battery power-saving)"), N_("Power saver"), N_("Balanced"), N_("Performance"),
 };
 static int power_profile = PPROF_AUTO;
+/* NVIDIA pre-driver GPU unlock (gpu_unlock_targets) and machine GPU power
+ * control (gpu_power_method, gpu_power_mode, nvidia_powerd). */
+static char gpu_unlock_cfg[96] = "off";
+static int gpu_unlock_job;
+static char gpu_power_method[32];
+enum { GPUPWR_AUTO, GPUPWR_FULL, GPUPWR_CTGP, GPUPWR_STOCK, GPUPWR_ECO, NGPUPWRS };
+static const char *const gpu_power_values[NGPUPWRS] = { "auto", "full", "ctgp", "stock", "eco" };
+static const char *const gpu_power_labels[NGPUPWRS] = {
+    N_("Auto (follow power profile)"), N_("Full (cTGP + Dynamic Boost)"),
+    N_("cTGP (extended TGP)"), N_("Stock (factory TGP)"), N_("Eco (reduced D-state)"),
+};
+static int gpu_power_mode = GPUPWR_AUTO;
+static int nvidia_powerd_on;
+static int gpu_power_job;
 /* rc.conf zram: compressed in-RAM swap (/dev/zram0), "1" on (default), "0" off. */
 static int zram_on = 1;
 /* rc.conf service_search and search_docs (Layer 2 document content indexing). */
@@ -1359,6 +1373,18 @@ static void on_rc(const char *name, const char *value, void *arg)
         size_t digits = strspn(value, "0123456789");
         int v = digits > 0 && digits <= 4 && value[digits] == '\0' ? atoi(value) : 0;
         if (v >= 40 && v <= 4096) winmaint_size_gib = v;
+    } else if (strcmp(name, "gpu_unlock_targets") == 0) {
+        const char *v = value[0] && strcmp(value, "0") != 0 ? value : "off";
+        snprintf(gpu_unlock_cfg, sizeof gpu_unlock_cfg, "%s", v);
+    } else if (strcmp(name, "gpu_power_method") == 0) {
+        snprintf(gpu_power_method, sizeof gpu_power_method, "%s", value);
+    } else if (strcmp(name, "gpu_power_mode") == 0) {
+        gpu_power_mode = GPUPWR_AUTO;
+        for (int i = 1; i < NGPUPWRS; i++) {
+            if (strcmp(value, gpu_power_values[i]) == 0) gpu_power_mode = i;
+        }
+    } else if (strcmp(name, "nvidia_powerd") == 0) {
+        nvidia_powerd_on = strcmp(value, "1") == 0;
     } else if (strcmp(name, "cpu_opt") == 0) {
         cpu_opt_auto = strcmp(value, "auto") == 0 ? 1 : strcmp(value, "baseline") == 0 ? 0 : -1;
     } else if (strcmp(name, "face_dlib") == 0) {
@@ -3630,9 +3656,26 @@ static int search_docs_index(void)
     return search_svc_index() + 1;
 }
 
-static int num_hw_items(void)
+/* NVIDIA GPU rows: the pre-driver unlock (gpu_unlock_targets), the machine's
+ * power mode (gpu_power_method, gpu_power_mode), and nvidia_powerd. */
+static int gpu_unlock_index(void)
 {
     return search_docs_index() + 1;
+}
+
+static int gpu_power_index(void)
+{
+    return gpu_unlock_index() + 1;
+}
+
+static int nvidia_powerd_index(void)
+{
+    return gpu_power_index() + 1;
+}
+
+static int num_hw_items(void)
+{
+    return nvidia_powerd_index() + 1;
 }
 
 /* The cloud service's status (rclone-client): name, path, state, last
@@ -5296,6 +5339,8 @@ static void category_entries(int cat)
         add_items(hw, 1 + nrow_maps);
         add_items(extd_index(), 1);
         add_items(display_card_index(), 4);
+        add_title(_("NVIDIA GPU"));
+        add_items(gpu_unlock_index(), 1);
         break;
     case CAT_DEVICES:
         add_title(_("Bluetooth"));
@@ -5308,6 +5353,8 @@ static void category_entries(int cat)
         add_items(tp_present ? 4 : 1, 3);
         add_items(power_profile_index(), 1);
         add_items(zram_index(), 1);
+        add_title(_("NVIDIA GPU power"));
+        add_items(gpu_power_index(), 2);
         add_items(bat_thresh_index(), power_thresh_count());
         add_title(_("Display"));
         add_items(blank_index(), 2);
@@ -6237,6 +6284,120 @@ static void winmaint_check(void)
     winmaint_what[0] = '\0';
 }
 
+/* NVIDIA GPU: the pre-driver unlock (gpu-unlock, fetched from GitHub by
+ * locachy-gpu-unlock) and the machine's power mode run as system jobs that
+ * rewrite rc.conf; settings reads it back when they end. */
+#ifndef GPU_UNLOCK_DOC
+#define GPU_UNLOCK_DOC "/usr/share/doc/gpu-unlock/README.md"
+#endif
+
+static int gpu_unlock_remove_asked;
+
+static int gpu_unlock_present(void)
+{
+    return access(GPU_UNLOCK_DOC, R_OK) == 0;
+}
+
+static void gpu_unlock_check(void)
+{
+    struct jobs_row r;
+    char log[96];
+    if (!gpu_unlock_job || !job_ended(gpu_unlock_job, &r, log, sizeof log)) {
+        return;
+    }
+    gpu_unlock_job = 0;
+    gpu_unlock_remove_asked = 0;
+    snprintf(gpu_unlock_cfg, sizeof gpu_unlock_cfg, "off");
+    rc_read(on_rc, NULL);
+    entries_dirty = 1;
+    full_redraw = 1;
+    if (strcmp(r.state, "done") == 0) {
+        snprintf(notice, sizeof notice, "%s", _("NVIDIA GPU unlock updated; the boot image was rebuilt."));
+    } else {
+        snprintf(notice, sizeof notice, _("NVIDIA GPU unlock failed: %s"), r.last[0] ? r.last : log);
+    }
+}
+
+static void gpu_power_check(void)
+{
+    struct jobs_row r;
+    char log[96];
+    if (!gpu_power_job || !job_ended(gpu_power_job, &r, log, sizeof log)) {
+        return;
+    }
+    gpu_power_job = 0;
+    gpu_power_mode = GPUPWR_AUTO;
+    nvidia_powerd_on = 0;
+    rc_read(on_rc, NULL);
+    entries_dirty = 1;
+    full_redraw = 1;
+    if (strcmp(r.state, "done") == 0) {
+        snprintf(notice, sizeof notice, "%s", _("GPU power setting applied."));
+    } else {
+        snprintf(notice, sizeof notice, _("GPU power change failed: %s"), r.last[0] ? r.last : log);
+    }
+}
+
+/* Enter on the unlock row: fetch and build it when it is not installed (from
+ * GitHub, through locachy-net), else turn it on or off. */
+static void gpu_unlock_action(void)
+{
+    char why[160] = "";
+    int id = 0, pos = 0;
+    const char *kind = "gpu-unlock-set", *value = "off";
+    gpu_unlock_remove_asked = 0;
+    if (gpu_unlock_job) {
+        snprintf(notice, sizeof notice, "%s", _("Wait: the NVIDIA GPU unlock job is still running."));
+        return;
+    }
+    if (!gpu_unlock_present()) {
+        kind = "gpu-unlock-install";
+        value = "all";
+    } else if (strcmp(gpu_unlock_cfg, "off") == 0) {
+        value = "all";
+    }
+    const char *args[] = { value, NULL };
+    if (jobs_submit(kind, args, &id, &pos, why, sizeof why) < 0) {
+        snprintf(notice, sizeof notice, _("Could not start the NVIDIA GPU unlock: %s"), why);
+        return;
+    }
+    gpu_unlock_job = id;
+    if (strcmp(kind, "gpu-unlock-install") == 0) {
+        snprintf(notice, sizeof notice, "%s", _("Fetching gpu-unlock from GitHub and building it; this takes a while..."));
+    } else {
+        snprintf(notice, sizeof notice, "%s", strcmp(value, "all") == 0 ?
+                 _("Turning the NVIDIA GPU unlock on...") : _("Turning the NVIDIA GPU unlock off..."));
+    }
+}
+
+static void gpu_unlock_remove_row(void)
+{
+    char why[160] = "";
+    int id = 0, pos = 0;
+    if (gpu_unlock_job) {
+        snprintf(notice, sizeof notice, "%s", _("Wait: the NVIDIA GPU unlock job is still running."));
+        return;
+    }
+    if (!gpu_unlock_present()) {
+        gpu_unlock_remove_asked = 0;
+        snprintf(notice, sizeof notice, "%s", _("NVIDIA GPU unlock is not installed."));
+        return;
+    }
+    if (!gpu_unlock_remove_asked) {
+        gpu_unlock_remove_asked = 1;
+        /* TRANSLATORS: Delete is the Delete key; keep it. */
+        snprintf(notice, sizeof notice, "%s", _("Press Delete again to remove gpu-unlock and rebuild the boot image."));
+        return;
+    }
+    gpu_unlock_remove_asked = 0;
+    if (jobs_submit("gpu-unlock-remove", NULL, &id, &pos, why, sizeof why) < 0) {
+        snprintf(notice, sizeof notice, _("Could not remove NVIDIA GPU unlock: %s"), why);
+        return;
+    }
+    gpu_unlock_job = id;
+    snprintf(notice, sizeof notice, "%s", _("Removing NVIDIA GPU unlock and rebuilding the boot image..."));
+}
+
 /* Reopened or polled: the active system jobs (including ones started from
  * packages or firmware, or another settings window), followed while they run
  * or wait. A slot already tracking a job keeps it; otherwise a running job
@@ -6247,6 +6408,7 @@ static void adopt_jobs(void)
     int n = jobs_mine(rows, JOBS_ROWS_MAX);
     int have_repos = repos_job != 0, have_boot = boot_job != 0, have_pkg = pkg_job != 0, have_tpm = tpm_job != 0;
     int have_security = security_job != 0, have_winmaint = winmaint_job != 0, have_tb = tb_sync_job != 0;
+    int have_gpu_unlock = gpu_unlock_job != 0, have_gpu_power = gpu_power_job != 0;
     for (int pass = 0; pass < 2; pass++) {
         for (int i = 0; i < n; i++) {
             const struct jobs_row *r = &rows[i];
@@ -6274,6 +6436,12 @@ static void adopt_jobs(void)
             } else if (!have_tb && strcmp(r->kind, "tb-sync") == 0) {
                 tb_sync_job = r->id;
                 have_tb = 1;
+            } else if (!have_gpu_unlock && strncmp(r->kind, "gpu-unlock-", 11) == 0) {
+                gpu_unlock_job = r->id;
+                have_gpu_unlock = 1;
+            } else if (!have_gpu_power && strncmp(r->kind, "gpu-power", 9) == 0) {
+                gpu_power_job = r->id;
+                have_gpu_power = 1;
             } else if (!have_pkg && strncmp(r->kind, "kernel-", 7) == 0) {
                 pkg_job = r->id;
                 have_pkg = 1;
@@ -6290,11 +6458,11 @@ static void adopt_jobs(void)
     }
 }
 
-/* As locachy-boot takes them: letters, digits, spaces and . , : = / + - _ @. */
+/* As locachy-boot takes them: letters, digits, spaces and . , : = / + - _ @ !. */
 static int valid_boot_cmdline(const char *s)
 {
     return strlen(s) < sizeof boot_cmdline &&
-           strspn(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,:=/+-_@ ") == strlen(s);
+           strspn(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,:=/+-_@! ") == strlen(s);
 }
 
 static void change_boot_cmdline(void)
@@ -6307,7 +6475,7 @@ static void change_boot_cmdline(void)
         return;
     }
     if (!valid_boot_cmdline(text)) {
-        snprintf(notice, sizeof notice, "%s", _("Kernel options: letters, digits, spaces and . , : = / + - _ @ only."));
+        snprintf(notice, sizeof notice, "%s", _("Kernel options: letters, digits, spaces and . , : = / + - _ @ ! only."));
         return;
     }
     if (rc_set("boot_cmdline", text[0] ? text : NULL) < 0) {
@@ -6365,16 +6533,51 @@ static int machine_next(int at, int key)
 static void choose_machine(int i)
 {
     const char *value = machine_profiles[i][0] ? machine_profiles[i] : NULL;
+    char old_cmdline[sizeof boot_cmdline];
+    snprintf(old_cmdline, sizeof old_cmdline, "%s", boot_cmdline);
     if (rc_set("machine", value) < 0) {
         snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
         return;
     }
     snprintf(active_machine, sizeof active_machine, "%s", value ? value : "");
+    boot_cmdline[0] = '\0';
+    snprintf(display_card_cfg, sizeof display_card_cfg, "auto");
+    snprintf(extdisplay_card_cfg, sizeof extdisplay_card_cfg, "auto");
+    gpu_power_method[0] = '\0';
+    gpu_power_mode = GPUPWR_AUTO;
+    nvidia_powerd_on = 0;
+    snprintf(gpu_unlock_cfg, sizeof gpu_unlock_cfg, "off");
     rc_read(on_rc, NULL);
     load_monitors();
     apply_all();
     kill(1, SIGHUP);
-    snprintf(notice, sizeof notice, _("Machine profile: %s."), machine_labels[i]);
+    int queued_gpu = 0, queued_boot = 0;
+    if (gpu_power_method[0] && !gpu_power_job) {
+        char why[160] = "";
+        int id = 0, pos = 0;
+        if (jobs_submit("gpu-power-apply", NULL, &id, &pos, why, sizeof why) == 0) {
+            gpu_power_job = id;
+            queued_gpu = 1;
+        }
+    }
+    if (strcmp(old_cmdline, boot_cmdline) != 0 && !boot_job) {
+        char why[160] = "";
+        int id = 0, pos = 0;
+        if (jobs_submit("boot", NULL, &id, &pos, why, sizeof why) == 0) {
+            boot_job = id;
+            queued_boot = 1;
+        }
+    }
+    if (queued_gpu && queued_boot) {
+        snprintf(notice, sizeof notice, _("Machine profile: %s (applying GPU power and rebuilding boot image...)."),
+                 machine_labels[i]);
+    } else if (queued_gpu) {
+        snprintf(notice, sizeof notice, _("Machine profile: %s (applying GPU power...)."), machine_labels[i]);
+    } else if (queued_boot) {
+        snprintf(notice, sizeof notice, _("Machine profile: %s (rebuilding boot image...)."), machine_labels[i]);
+    } else {
+        snprintf(notice, sizeof notice, _("Machine profile: %s."), machine_labels[i]);
+    }
 }
 
 static void pick_machine(void)
@@ -6481,7 +6684,8 @@ static int enter_row(int idx)
            idx == paired_devices_index() ||
            (idx >= winmaint_index() + 1 && idx < winmaint_index() + 5) ||
            (idx >= system_keymap_index() && idx < kb_index() + nkeyboards_seen) ||
-           idx == bat_page_index() || idx == hwinfo_index() || idx == hwcopy_index() || idx == nmtui_index() || idx == ts_index() + 2;
+           idx == bat_page_index() || idx == hwinfo_index() || idx == hwcopy_index() || idx == nmtui_index() || idx == ts_index() + 2 ||
+           idx == gpu_unlock_index();
 }
 
 /* An optional component's line, its packages installed or not: Enter
@@ -7158,6 +7362,32 @@ static void item_text(int idx, char *line, size_t size)
                  search_on ? "" : _("  (search service off)"));
         return;
     }
+    if (idx == gpu_unlock_index()) {
+        if (gpu_unlock_job) {
+            snprintf(vbuf, sizeof vbuf, "%s", _("working..."));
+        } else if (!gpu_unlock_present()) {
+            snprintf(vbuf, sizeof vbuf, "%s", _("not installed"));
+        } else if (strcmp(gpu_unlock_cfg, "off") == 0) {
+            snprintf(vbuf, sizeof vbuf, "%s", _("OFF"));
+        } else if (strcmp(gpu_unlock_cfg, "all") == 0) {
+            snprintf(vbuf, sizeof vbuf, "%s", _("ON"));
+        } else {
+            snprintf(vbuf, sizeof vbuf, "%s: %s", _("ON"), gpu_unlock_cfg);
+        }
+        snprintf(line, size, "%.95s [%s]", ui_pad(label, sizeof label, _("NVIDIA GPU unlock (gpu-unlock)"), 32), vbuf);
+        return;
+    }
+    if (idx == gpu_power_index()) {
+        snprintf(line, size, "%.95s < %s >", ui_pad(label, sizeof label, _("GPU power mode"), 32),
+                 gpu_power_job ? _("working...") :
+                 gpu_power_method[0] ? _(gpu_power_labels[gpu_power_mode]) : _("not on this machine"));
+        return;
+    }
+    if (idx == nvidia_powerd_index()) {
+        snprintf(line, size, "%.95s [%s]", ui_pad(label, sizeof label, _("NVIDIA Dynamic Boost (nvidia-powerd)"), 32),
+                 gpu_power_job ? _("working...") : nvidia_powerd_on ? _("ON ") : _("OFF"));
+        return;
+    }
     if ((i = idx - fp_index()) >= 0 && i < 4) {
         int installed = fprintd_installed();
         if (i == 0 && pkg_job && strcmp(pkg_name, "fprintd") == 0) {
@@ -7644,7 +7874,8 @@ static void draw(void)
     static char last_search[sizeof search];
     static char last_notice[sizeof notice];
     int sw = sidebar_width(), cols = screen_cols(), rows = screen_rows();
-    int jobs_active = pkg_job || repos_job || boot_job || tpm_job || security_job || winmaint_job || tb_sync_job;
+    int jobs_active = pkg_job || repos_job || boot_job || tpm_job || security_job || winmaint_job || tb_sync_job ||
+                      gpu_unlock_job || gpu_power_job;
     flush_ui_caches();
     if (!in_ui_loop) {
         /* Tests set state directly before draw(): keep every map and paint fresh. */
@@ -7659,6 +7890,7 @@ static void draw(void)
         int c = category_of(selected); /* chosen elsewhere: the page of its category */
         if (c >= 0) {
             category = c;
+            page_scroll = 0;
             build_entries();
             full_redraw = 1;
         }
@@ -8690,6 +8922,43 @@ static void adjust(int dir)
         snprintf(notice, sizeof notice, _("Saved to %s."), RC_CONF);
         return;
     }
+    if (selected == gpu_power_index()) {
+        if (!gpu_power_method[0]) {
+            snprintf(notice, sizeof notice, "%s", _("This machine has no GPU power control (its machine profile has none)."));
+            return;
+        }
+        if (gpu_power_job) {
+            snprintf(notice, sizeof notice, "%s", _("Wait: the GPU power job is still running."));
+            return;
+        }
+        int next = (gpu_power_mode + (dir < 0 ? NGPUPWRS - 1 : 1)) % NGPUPWRS;
+        char why[160] = "";
+        int id = 0, pos = 0;
+        const char *args[] = { gpu_power_values[next], NULL };
+        if (jobs_submit("gpu-power-apply", args, &id, &pos, why, sizeof why) < 0) {
+            snprintf(notice, sizeof notice, _("Could not change the GPU power mode: %s"), why);
+            return;
+        }
+        gpu_power_job = id;
+        snprintf(notice, sizeof notice, _("Applying GPU power mode: %s..."), _(gpu_power_labels[next]));
+        return;
+    }
+    if (selected == nvidia_powerd_index()) {
+        if (gpu_power_job) {
+            snprintf(notice, sizeof notice, "%s", _("Wait: the GPU power job is still running."));
+            return;
+        }
+        char why[160] = "";
+        int id = 0, pos = 0;
+        const char *args[] = { nvidia_powerd_on ? "off" : "on", NULL };
+        if (jobs_submit("gpu-powerd", args, &id, &pos, why, sizeof why) < 0) {
+            snprintf(notice, sizeof notice, _("Could not change the Dynamic Boost setting: %s"), why);
+            return;
+        }
+        gpu_power_job = id;
+        snprintf(notice, sizeof notice, "%s", _("Saving the NVIDIA Dynamic Boost setting..."));
+        return;
+    }
     if (selected == power_profile_index()) {
         int next = (power_profile + (dir < 0 ? NPPROFS - 1 : 1)) % NPPROFS;
         if (rc_set("power_profile", power_profile_values[next]) < 0) {
@@ -8698,6 +8967,13 @@ static void adjust(int dir)
         }
         power_profile = next;
         kill(1, SIGHUP);
+        if (gpu_power_method[0] && gpu_power_mode == GPUPWR_AUTO && !gpu_power_job) {
+            char why[160] = "";
+            int id = 0, pos = 0;
+            if (jobs_submit("gpu-power-apply", NULL, &id, &pos, why, sizeof why) == 0) {
+                gpu_power_job = id;
+            }
+        }
         snprintf(notice, sizeof notice, _("Power profile: %s."), _(power_profile_labels[power_profile]));
         return;
     }
@@ -8941,6 +9217,10 @@ static void row_hint_text(int idx, char *out, size_t size)
     } else if (idx == bt_index() + 2) {
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(out, size, "%s", _("Enter: open Bluetooth devices in bluetui (the service must be on)."));
+    } else if (idx == gpu_unlock_index()) {
+        /* TRANSLATORS: Enter and Delete are key names; keep them. */
+        snprintf(out, size, "%s",
+                 _("Enter: fetch gpu-unlock from GitHub and build it, or turn it on or off   Delete: remove"));
     } else if (theme_row(idx)) {
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(out, size, "%s", _("Enter: choose a color"));
@@ -9451,6 +9731,8 @@ int main(int argc, char **argv)
             boot_check();
             security_check();
             winmaint_check();
+            gpu_unlock_check();
+            gpu_power_check();
             tb_sync_check();
             if (tpm_job) {
                 struct jobs_row r;
@@ -9479,7 +9761,10 @@ int main(int argc, char **argv)
             int prev_sel = selected;
             key = settings_pointer();
             mods = 0;
-            if (selected != prev_sel) winmaint_reclaim_asked = winmaint_boot_once_asked = 0;
+            if (selected != prev_sel) {
+                winmaint_reclaim_asked = winmaint_boot_once_asked = 0;
+                gpu_unlock_remove_asked = 0;
+            }
             if (key == 0) continue;
             if (key == -1) {
                 draw();
@@ -9491,6 +9776,11 @@ int main(int argc, char **argv)
         } else if (key == '\n') {
             if (selected != winmaint_index() + 1) winmaint_reclaim_asked = 0;
             if (selected != winmaint_index() + 2) winmaint_boot_once_asked = 0;
+        }
+        if (key != 0 && key != K_DEL && key != K_ACT_HOME && key != K_SHOWN) {
+            gpu_unlock_remove_asked = 0;
+        } else if (key == K_DEL && selected != gpu_unlock_index()) {
+            gpu_unlock_remove_asked = 0;
         }
         if (key == K_ACT_HOME) {
             continue; /* process 1's: an open setting stays open */
@@ -9892,6 +10182,12 @@ int main(int argc, char **argv)
             draw();
         } else if (key == '\n' && selected == paired_devices_index()) {
             manage_paired_devices();
+            draw();
+        } else if (key == '\n' && selected == gpu_unlock_index()) {
+            gpu_unlock_action();
+            draw();
+        } else if (key == K_DEL && selected == gpu_unlock_index()) {
+            gpu_unlock_remove_row();
             draw();
         } else if (key == '\n' && selected == winmaint_index() + 1) {
             winmaint_status_row();

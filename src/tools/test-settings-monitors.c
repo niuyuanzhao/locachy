@@ -712,7 +712,9 @@ static void test_circular(void)
            cpu_opt_index() == extd_index() + 1 && blank_index() == cpu_opt_index() + 1 &&
            power_profile_index() == blank_index() + 2 && zram_index() == power_profile_index() + 1 &&
            search_key_index() == zram_index() + 1 && search_svc_index() == search_key_index() + 1 &&
-           search_docs_index() == search_svc_index() + 1 && num_hw_items() == search_docs_index() + 1);
+           search_docs_index() == search_svc_index() + 1 &&
+           gpu_unlock_index() == search_docs_index() + 1 && gpu_power_index() == gpu_unlock_index() + 1 &&
+           nvidia_powerd_index() == gpu_power_index() + 1 && num_hw_items() == nvidia_powerd_index() + 1);
     on_rc("touchpad_circular", "0", NULL);
     assert(circular == 0);
     on_rc("touchpad_circular", "yes", NULL);
@@ -2295,7 +2297,8 @@ static void test_bluetooth(void)
     /* Boot: the kernel's messages and options in rc.conf, and the image made
      * at once (locachy-boot), as pacman's hooks make it after updates. */
     assert(boot_index() == upd_index() + 5 && opt_index() == boot_index() + 5);
-    assert(valid_boot_cmdline("i915.enable_psr=0 mitigations=off") && valid_boot_cmdline(""));
+    assert(valid_boot_cmdline("i915.enable_psr=0 mitigations=off") &&
+           valid_boot_cmdline("i915.force_probe=!4688 xe.force_probe=4688") && valid_boot_cmdline(""));
     assert(!valid_boot_cmdline("a\"b") && !valid_boot_cmdline("$(id)") && !valid_boot_cmdline("a;b") &&
            !valid_boot_cmdline("a\nb") && !valid_boot_cmdline("a\\b"));
     boot_verbose = 0;
@@ -3662,7 +3665,9 @@ int main(int argc, char **argv)
            cpu_opt_index() == extd_index() + 1 && blank_index() == cpu_opt_index() + 1 &&
            power_profile_index() == blank_index() + 2 && zram_index() == power_profile_index() + 1 &&
            search_key_index() == zram_index() + 1 && search_svc_index() == search_key_index() + 1 &&
-           search_docs_index() == search_svc_index() + 1 && num_hw_items() == search_docs_index() + 1);
+           search_docs_index() == search_svc_index() + 1 &&
+           gpu_unlock_index() == search_docs_index() + 1 && gpu_power_index() == gpu_unlock_index() + 1 &&
+           nvidia_powerd_index() == gpu_power_index() + 1 && num_hw_items() == nvidia_powerd_index() + 1);
     selected = extd_index();
     adjust(+1);
     assert(extd_decode == EXTD_HW);

@@ -720,6 +720,10 @@ if [ -d "$src/machines" ]; then
     rm -rf /usr/local/share/locachy/machines
     install -d /usr/local/share/locachy/machines
     install -m 644 "$src"/machines/*.conf /usr/local/share/locachy/machines/
+    if [ -d "$src/machines/hp-omen-gpu" ]; then
+        install -d /usr/local/share/locachy/machines/hp-omen-gpu
+        install -m 644 "$src"/machines/hp-omen-gpu/* /usr/local/share/locachy/machines/hp-omen-gpu/
+    fi
 fi
 # Host programs (host="1"): their packages are the host's (the manifest), so
 # their configurations come with the system once the package is there, unless
@@ -927,6 +931,9 @@ install -m 755 "$src/link/locachy-pair" /usr/local/bin/locachy-pair
 install -m 755 "$src/link/locachy-compute" /usr/local/bin/locachy-compute
 install -m 755 "$src/link/compute-client" "$lib/compute-client"
 install -m 755 "$src/link/locachy-winmaint" /usr/local/bin/locachy-winmaint
+install -m 755 "$src/link/locachy-gpu-unlock" /usr/local/bin/locachy-gpu-unlock
+install -m 755 "$src/link/locachy-gpu-power" /usr/local/bin/locachy-gpu-power
+install -D -m 644 "$src/link/gpu-unlock-upstream.json" /usr/local/share/locachy/gpu-unlock/upstream.json
 install -D -m 644 "$src/link/90-locachy-boot.hook" /etc/pacman.d/hooks/90-locachy-boot.hook
 install -D -m 644 "$src/link/pam.d/locachy-lock" /etc/pam.d/locachy-lock
 install -D -m 644 "$src/link/pam.d/locachy-lock-fingerprint" /etc/pam.d/locachy-lock-fingerprint

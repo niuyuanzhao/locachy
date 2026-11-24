@@ -3,6 +3,7 @@
   python3 -B tools/test-root-boot-unit.py SCRATCH_PARENT
 """
 import importlib.util
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -46,13 +47,20 @@ class RootBoot(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="boot-cmdline-", dir=SCRATCH) as temp:
             rc = Path(temp) / "rc.conf"
 
-            def cmdline(text):
+            def cmdline(text, machines=None):
                 if text is None:
                     rc.unlink(missing_ok=True)
                 else:
                     rc.write_text(text)
+                mdir = Path(temp) / "machines"
+                if machines is not None:
+                    mdir.mkdir(exist_ok=True)
+                    for name, content in machines.items():
+                        (mdir / name).write_text(content)
+                env = dict(os.environ)
+                env["LOCACHY_MACHINES_DIR"] = str(mdir)
                 run = subprocess.run(["sh", "-euc", 'rc="$1"\n' + block + 'printf "%s\\n" "$cmdline"', "sh", str(rc)],
-                                     capture_output=True, text=True)
+                                     capture_output=True, text=True, env=env)
                 self.assertEqual(run.returncode, 0, run.stderr)
                 return run.stdout.strip(), run.stderr
 
@@ -62,7 +70,26 @@ class RootBoot(unittest.TestCase):
             self.assertEqual(cmdline('boot_verbose="1"\n')[0], "loglevel=7 printk.devkmsg=on net.ifnames=0 intel_iommu=on")
             self.assertEqual(cmdline('boot_cmdline="i915.enable_psr=0 mitigations=off"\n')[0],
                              quiet + " i915.enable_psr=0 mitigations=off")
+            self.assertEqual(cmdline('boot_cmdline="i915.force_probe=!4688 xe.force_probe=4688"\n')[0],
+                             quiet + " i915.force_probe=!4688 xe.force_probe=4688")
             self.assertEqual(cmdline('boot_cmdline="a"\nboot_cmdline="b=1"\n')[0], quiet + " b=1")
+            self.assertEqual(
+                cmdline('machine="hp-omen-17-ck1"\n',
+                        machines={"hp-omen-17-ck1.conf": 'boot_cmdline="nouveau.modeset=0 i915.force_probe=!4688 xe.force_probe=4688"\n'})[0],
+                quiet + " nouveau.modeset=0 i915.force_probe=!4688 xe.force_probe=4688",
+            )
+            self.assertEqual(
+                cmdline('machine="hp-omen-17-ck1"\nboot_cmdline="override=1"\n',
+                        machines={"hp-omen-17-ck1.conf": 'boot_cmdline="from_machine=1"\n'})[0],
+                quiet + " override=1",
+            )
+            self.assertEqual(cmdline('gpu_unlock_targets="all"\n')[0], quiet + " gpu_unlock.targets=all")
+            self.assertEqual(cmdline('gpu_unlock_targets="0000:01:00.0"\n')[0],
+                             quiet + " gpu_unlock.targets=0000:01:00.0")
+            self.assertEqual(cmdline('gpu_unlock_targets="off"\n')[0], quiet)
+            line, err = cmdline('gpu_unlock_targets="bad;target"\n')
+            self.assertEqual(line, quiet)
+            self.assertIn("left out", err)
             line, err = cmdline('boot_cmdline="x; rm -rf /"\n')
             self.assertEqual(line, quiet)
             self.assertIn("left out", err)

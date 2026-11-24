@@ -1,0 +1,376 @@
+#!/usr/bin/env python3
+"""locachy-gpu-power: machine-profile dGPU power control and nvidia-powerd wiring.
+
+Applies machine-specific GPU power control declared by the active machine
+profile (e.g. gpu_power_method="hp-omen-wmi" on HP OMEN 17-ck1xxx board 8A1A)
+and manages NVIDIA Dynamic Boost (service_nvidia_powerd) cleanly under LOCachy's
+process 1 without resident polling daemons.
+
+Commands:
+  locachy-gpu-power status [--json]
+  locachy-gpu-power apply [auto|full|ctgp|stock|eco]
+  locachy-gpu-power nvidia-powerd on|off
+  locachy-gpu-power remove
+"""
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+
+sys.dont_write_bytecode = True
+
+MODES = ("auto", "full", "ctgp", "stock", "eco")
+MACHINE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
+
+OMEN_MODLOAD_NAME = "50-locachy-hp-omen-gpu.conf"
+OMEN_MODPROBE_NAME = "50-locachy-hp-omen-gpu.conf"
+OMEN_DKMS_NAME = "hp-omen-gpu"
+OMEN_DKMS_VER = "1.0"
+NVIDIA_POWERD_BIN = "/usr/bin/nvidia-powerd"
+
+# (ctgp, ppab, dstate) tuples matching hp_omen_gpu.c module parameters.
+OMEN_MODE_PARAMS = {
+    "full": (1, 1, 1),   # cTGP 150 W + PPAB Dynamic Boost (+25 W -> 175 W), D1 100%
+    "ctgp": (1, 0, 1),   # cTGP 150 W fixed, D1 100%
+    "stock": (0, 0, 1),  # Factory 115 W, D1 100%
+    "eco": (0, 0, 2),    # Factory TGP, D2 50%
+}
+
+
+def env_path(var, default):
+    val = os.environ.get(var, "").strip()
+    return Path(val) if val else Path(default)
+
+
+def root_path():
+    return env_path("LOCACHY_GPU_POWER_ROOT", "/")
+
+
+def rc_path():
+    return env_path("LOCACHY_GPU_POWER_RC", root_path() / "etc/locachy/rc.conf")
+
+
+def machines_dir():
+    return env_path("LOCACHY_MACHINES_DIR", root_path() / "usr/local/share/locachy/machines")
+
+
+def driver_source_dir():
+    default = machines_dir() / "hp-omen-gpu"
+    return env_path("LOCACHY_HP_OMEN_DRIVER_SRC", default)
+
+
+def pkg_cmd_path():
+    return os.environ.get("LOCACHY_GPU_POWER_PKG", "/usr/local/bin/locachy-pkg")
+
+
+def read_rc_file_value(path, key):
+    if not path.is_file():
+        return ""
+    found = ""
+    pat = re.compile(rf"^\s*{re.escape(key)}=\"([^\"]*)\"\s*(?:#.*)?$")
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        m = pat.match(line)
+        if m:
+            found = m.group(1)
+    return found
+
+
+def read_rc_layered(key):
+    rc = rc_path()
+    direct = read_rc_file_value(rc, key)
+    if direct != "":
+        return direct
+    mach = read_rc_file_value(rc, "machine")
+    if mach and MACHINE_RE.fullmatch(mach):
+        return read_rc_file_value(machines_dir() / f"{mach}.conf", key)
+    return ""
+
+
+def write_rc_key(key, value):
+    rc = rc_path()
+    rc.parent.mkdir(parents=True, exist_ok=True)
+    lines = rc.read_text(encoding="utf-8", errors="replace").splitlines() if rc.is_file() else []
+    pat = re.compile(rf"^\s*{re.escape(key)}=")
+    out = []
+    replaced = False
+    for line in lines:
+        if pat.match(line):
+            if value is not None and not replaced:
+                out.append(f'{key}="{value}"')
+                replaced = True
+            continue
+        out.append(line)
+    if value is not None and not replaced:
+        out.append(f'{key}="{value}"')
+    tmp = rc.with_name(rc.name + f".tmp.{os.getpid()}")
+    tmp.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, rc)
+
+
+def on_ac_power():
+    ps_dir = env_path("LOCACHY_GPU_POWER_SYS_PS", "/sys/class/power_supply")
+    if not ps_dir.is_dir():
+        return True
+    saw_mains = False
+    for entry in sorted(ps_dir.iterdir()):
+        try:
+            kind = (entry / "type").read_text(encoding="utf-8").strip()
+            if kind == "Mains":
+                saw_mains = True
+                if (entry / "online").read_text(encoding="utf-8").strip() == "1":
+                    return True
+        except OSError:
+            continue
+    return not saw_mains
+
+
+def resolve_effective_mode(mode, power_profile=None, ac=None):
+    if mode not in MODES:
+        raise ValueError(f"invalid gpu_power_mode: {mode!r} (expected one of {', '.join(MODES)})")
+    if mode != "auto":
+        return mode
+    prof = power_profile if power_profile is not None else (read_rc_layered("power_profile") or "auto")
+    if prof == "performance":
+        return "full"
+    if prof == "balanced":
+        return "ctgp"
+    if prof == "power":
+        return "eco"
+    is_ac = on_ac_power() if ac is None else bool(ac)
+    return "ctgp" if is_ac else "stock"
+
+
+def sync_nvidia_powerd_service(enable):
+    bin_path = root_path() / NVIDIA_POWERD_BIN.lstrip("/")
+    available = bin_path.is_file()
+    write_rc_key("nvidia_powerd", "1" if enable else "0")
+    if enable and available:
+        write_rc_key("service_nvidia_powerd", NVIDIA_POWERD_BIN)
+    else:
+        write_rc_key("service_nvidia_powerd", None)
+    if os.environ.get("LOCACHY_GPU_POWER_NO_SIGNAL") != "1":
+        try:
+            if os.geteuid() == 0:
+                os.kill(1, signal.SIGHUP)
+        except OSError:
+            pass
+    return available
+
+
+DOMAIN_LOCK_PATH = "/run/locachy/pkg.lock"
+
+
+def inherited_domain_fds():
+    """Return any non-CLOEXEC inherited fd referring to LOCachy's package domain lock."""
+    try:
+        want = os.stat(DOMAIN_LOCK_PATH)
+    except OSError:
+        return ()
+    found = []
+    try:
+        names = os.listdir("/proc/self/fd")
+    except OSError:
+        return ()
+    for name in names:
+        try:
+            fd = int(name)
+            if fd <= 2 or fcntl.fcntl(fd, fcntl.F_GETFD) & fcntl.FD_CLOEXEC:
+                continue
+            got = os.fstat(fd)
+        except (OSError, ValueError):
+            continue
+        if stat.S_ISREG(got.st_mode) and (got.st_dev, got.st_ino) == (want.st_dev, want.st_ino):
+            found.append(fd)
+    return tuple(found)
+
+
+def run_cmd(cmd, check=True, **kwargs):
+    print("+", " ".join(str(c) for c in cmd), flush=True)
+    return subprocess.run(cmd, check=check, **kwargs)
+
+
+def run_domain_cmd(cmd, check=True):
+    fds = inherited_domain_fds()
+    if fds:
+        return run_cmd(cmd, check=check, pass_fds=fds)
+    return run_cmd(cmd, check=check)
+
+
+def ensure_omen_dkms():
+    src = driver_source_dir()
+    if not (src / "hp_omen_gpu.c").is_file():
+        raise RuntimeError(f"hp-omen-gpu driver source missing at {src}")
+    dst = root_path() / f"usr/src/{OMEN_DKMS_NAME}-{OMEN_DKMS_VER}"
+    dst.mkdir(parents=True, exist_ok=True)
+    for name in ("hp_omen_gpu.c", "Makefile", "dkms.conf"):
+        shutil.copyfile(src / name, dst / name)
+        os.chmod(dst / name, 0o644)
+    if os.environ.get("LOCACHY_GPU_POWER_DRY_RUN") == "1":
+        return
+    pkg = pkg_cmd_path()
+    if os.path.exists(pkg):
+        run_domain_cmd([pkg, "kernel", "headers", "on"])
+        if shutil.which("dkms") is None:
+            run_domain_cmd([pkg, "install", "dkms"])
+    kver = os.uname().release
+    st = subprocess.run(["dkms", "status", f"{OMEN_DKMS_NAME}/{OMEN_DKMS_VER}", "-k", kver],
+                        capture_output=True, text=True)
+    if "installed" not in (st.stdout or ""):
+        run_cmd(["dkms", "add", f"{OMEN_DKMS_NAME}/{OMEN_DKMS_VER}"], check=False)
+        run_cmd(["dkms", "build", f"{OMEN_DKMS_NAME}/{OMEN_DKMS_VER}", "-k", kver])
+        run_cmd(["dkms", "install", f"{OMEN_DKMS_NAME}/{OMEN_DKMS_VER}", "-k", kver])
+
+
+def write_omen_dropins(ctgp, ppab, dstate):
+    root = root_path()
+    ml = root / "etc/modules-load.d" / OMEN_MODLOAD_NAME
+    mp = root / "etc/modprobe.d" / OMEN_MODPROBE_NAME
+    ml.parent.mkdir(parents=True, exist_ok=True)
+    mp.parent.mkdir(parents=True, exist_ok=True)
+    ml.write_text("# Managed by locachy-gpu-power\nhp_omen_gpu\n", encoding="utf-8")
+    mp.write_text(
+        "# Managed by locachy-gpu-power: HP OMEN BIOS dGPU power modes\n"
+        f"options hp_omen_gpu ctgp={ctgp} ppab={ppab} dstate={dstate}\n",
+        encoding="utf-8",
+    )
+    os.chmod(ml, 0o644)
+    os.chmod(mp, 0o644)
+
+
+def remove_omen_dropins():
+    root = root_path()
+    for p in (root / "etc/modules-load.d" / OMEN_MODLOAD_NAME,
+              root / "etc/modprobe.d" / OMEN_MODPROBE_NAME):
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def apply_omen_live(ctgp, ppab, dstate):
+    if os.environ.get("LOCACHY_GPU_POWER_DRY_RUN") == "1":
+        return
+    run_cmd(["modprobe", "-r", "hp_omen_gpu"], check=False)
+    run_cmd(["modprobe", "hp_omen_gpu", f"ctgp={ctgp}", f"ppab={ppab}", f"dstate={dstate}"])
+
+
+def cmd_status(args):
+    method = read_rc_layered("gpu_power_method")
+    mode = read_rc_layered("gpu_power_mode") or "auto"
+    if mode not in MODES:
+        mode = "auto"
+    eff = resolve_effective_mode(mode)
+    ctgp, ppab, dstate = OMEN_MODE_PARAMS[eff]
+    root = root_path()
+    powerd_cfg = read_rc_layered("nvidia_powerd") == "1"
+    powerd_svc = bool(read_rc_file_value(rc_path(), "service_nvidia_powerd"))
+    powerd_bin = (root / NVIDIA_POWERD_BIN.lstrip("/")).is_file()
+    mod_loaded = env_path("LOCACHY_GPU_POWER_SYS_MOD", "/sys/module/hp_omen_gpu").is_dir()
+    data = {
+        "method": method or "none",
+        "mode": mode,
+        "effective_mode": eff,
+        "ctgp": ctgp,
+        "ppab": ppab,
+        "dstate": dstate,
+        "module_loaded": mod_loaded,
+        "modprobe_configured": (root / "etc/modprobe.d" / OMEN_MODPROBE_NAME).is_file(),
+        "nvidia_powerd": powerd_cfg,
+        "nvidia_powerd_service": powerd_svc,
+        "nvidia_powerd_available": powerd_bin,
+    }
+    if args.json:
+        print(json.dumps(data, indent=2, sort_keys=True))
+        return 0
+    print(f"method: {data['method']}")
+    print(f"mode: {mode} (effective={eff}: ctgp={ctgp} ppab={ppab} dstate={dstate})")
+    print(f"nvidia_powerd: {'on' if powerd_cfg else 'off'} (available={'yes' if powerd_bin else 'no'})")
+    return 0
+
+
+def cmd_apply(args):
+    method = read_rc_layered("gpu_power_method")
+    mode = args.mode if args.mode else (read_rc_layered("gpu_power_mode") or "auto")
+    eff = resolve_effective_mode(mode)
+    if args.mode:
+        write_rc_key("gpu_power_mode", mode)
+
+    if method == "hp-omen-wmi":
+        ctgp, ppab, dstate = OMEN_MODE_PARAMS[eff]
+        ensure_omen_dkms()
+        write_omen_dropins(ctgp, ppab, dstate)
+        apply_omen_live(ctgp, ppab, dstate)
+        sync_nvidia_powerd_service(read_rc_layered("nvidia_powerd") == "1")
+        print(f"locachy-gpu-power: applied hp-omen-wmi mode={mode} ({eff}: ctgp={ctgp} ppab={ppab} dstate={dstate})",
+              flush=True)
+        return 0
+
+    # Generic machine: sync nvidia_powerd service state if configured.
+    want_powerd = read_rc_layered("nvidia_powerd") == "1"
+    sync_nvidia_powerd_service(want_powerd)
+    print(f"locachy-gpu-power: no machine gpu_power_method (nvidia_powerd={'on' if want_powerd else 'off'})",
+          flush=True)
+    return 0
+
+
+def cmd_nvidia_powerd(args):
+    enable = args.state == "on"
+    avail = sync_nvidia_powerd_service(enable)
+    if enable and not avail:
+        print("locachy-gpu-power: nvidia_powerd=1 saved, but /usr/bin/nvidia-powerd is not installed", flush=True)
+    else:
+        print(f"locachy-gpu-power: nvidia_powerd={'on' if enable else 'off'}", flush=True)
+    return 0
+
+
+def cmd_remove(_args):
+    remove_omen_dropins()
+    if os.environ.get("LOCACHY_GPU_POWER_DRY_RUN") != "1":
+        run_cmd(["modprobe", "-r", "hp_omen_gpu"], check=False)
+        if shutil.which("dkms"):
+            run_cmd(["dkms", "remove", f"{OMEN_DKMS_NAME}/{OMEN_DKMS_VER}", "--all"], check=False)
+    dst = root_path() / f"usr/src/{OMEN_DKMS_NAME}-{OMEN_DKMS_VER}"
+    shutil.rmtree(dst, ignore_errors=True)
+    write_rc_key("service_nvidia_powerd", None)
+    write_rc_key("nvidia_powerd", "0")
+    print("locachy-gpu-power: removed hp-omen-gpu configuration and disabled service_nvidia_powerd", flush=True)
+    return 0
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="locachy-gpu-power")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p_st = sub.add_parser("status", help="show machine GPU power mode and nvidia-powerd status")
+    p_st.add_argument("--json", action="store_true")
+    p_st.set_defaults(func=cmd_status)
+
+    p_ap = sub.add_parser("apply", help="apply machine GPU power mode")
+    p_ap.add_argument("mode", nargs="?", choices=MODES, default=None)
+    p_ap.set_defaults(func=cmd_apply)
+
+    p_np = sub.add_parser("nvidia-powerd", help="enable or disable nvidia-powerd service")
+    p_np.add_argument("state", choices=("on", "off"))
+    p_np.set_defaults(func=cmd_nvidia_powerd)
+
+    p_rm = sub.add_parser("remove", help="remove hp-omen-gpu DKMS/config and disable nvidia-powerd")
+    p_rm.set_defaults(func=cmd_remove)
+
+    args = ap.parse_args(argv)
+    try:
+        return args.func(args)
+    except Exception as exc:
+        print(f"locachy-gpu-power: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

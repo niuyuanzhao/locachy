@@ -50,14 +50,28 @@ boot=$lib/boot
 esp=/efi/EFI
 rc=/etc/locachy/rc.conf
 
-# The command line, from rc.conf (settings' Boot rows) each time the image is
-# made: boot_verbose="1" shows the kernel's messages (else quiet), and
-# boot_cmdline="..." is added as it is; a value with anything but letters,
-# digits and . , : = / + - _ @ and spaces is left out (and said).
-rc_value() {
-    if [ -f "$rc" ]; then
-        sed -n "s/^$1=\"\(.*\)\"\$/\1/p" "$rc" | tail -n 1
+# The command line, from rc.conf (with the active machine profile under it,
+# matching rc.c) each time the image is made: boot_verbose="1" shows the
+# kernel's messages (else quiet), boot_cmdline="..." is added as it is (letters,
+# digits, spaces and . , : = / + - _ @ ! only), and gpu_unlock_targets="..."
+# appends gpu_unlock.targets=... when set to "all" or PCI BDF address(es).
+machines_dir=${LOCACHY_MACHINES_DIR:-/usr/local/share/locachy/machines}
+rc_file_value() {
+    if [ -f "$1" ]; then
+        sed -n "s/^$2=\"\(.*\)\"\$/\1/p" "$1" | tail -n 1
     fi
+}
+rc_value() {
+    _val=$(rc_file_value "$rc" "$1")
+    if [ -n "$_val" ]; then
+        printf '%s\n' "$_val"
+        return 0
+    fi
+    _mach=$(rc_file_value "$rc" machine)
+    case "$_mach" in
+    ""|*[!A-Za-z0-9._-]*|*..*) return 0 ;;
+    esac
+    rc_file_value "$machines_dir/$_mach.conf" "$1"
 }
 # intel_iommu=on: devices reach only the memory given to them (DMA through
 # ExpressCard or PCIe), when the firmware has VT-d on (AMD: on by default).
@@ -69,9 +83,37 @@ else
 fi
 extra=$(rc_value boot_cmdline)
 case "$extra" in
-*[!A-Za-z0-9.,:=/+_@\ -]*) echo "locachy-boot: boot_cmdline in $rc has other characters; left out" >&2 ;;
+*[!A-Za-z0-9.,:=/+_@!\ -]*) echo "locachy-boot: boot_cmdline in $rc has other characters; left out" >&2 ;;
 ?*) cmdline="$cmdline $extra" ;;
 esac
+gu_targets=$(rc_value gpu_unlock_targets)
+if [ -n "$gu_targets" ] && [ "$gu_targets" != off ] && [ "$gu_targets" != 0 ]; then
+    case " $cmdline " in
+    *" gpu_unlock.targets="*) ;;
+    *)
+        if [ "$gu_targets" = all ]; then
+            cmdline="$cmdline gpu_unlock.targets=all"
+        else
+            _gu_ok=1
+            _gu_old_ifs=$IFS
+            IFS=,
+            for _bdf in $gu_targets; do
+                case "$_bdf" in
+                [0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f].[0-7]) ;;
+                *) _gu_ok=0 ;;
+                esac
+            done
+            IFS=$_gu_old_ifs
+            case "$gu_targets" in ,*|*,|*,,*) _gu_ok=0 ;; esac
+            if [ "$_gu_ok" = 1 ]; then
+                cmdline="$cmdline gpu_unlock.targets=$gu_targets"
+            else
+                echo "locachy-boot: gpu_unlock_targets in $rc is not 'all' or PCI BDF list; left out" >&2
+            fi
+        fi
+        ;;
+    esac
+fi
 mkdir -p "$boot"
 work=$(mktemp -d "${boot}/.work.XXXXXXXX")
 trap 'rm -rf "$work"' EXIT

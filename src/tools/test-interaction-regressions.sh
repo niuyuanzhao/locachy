@@ -162,5 +162,6 @@ sh "$src/tools/test-extdisplay-discovery.sh" "$out/extdisplay-discovery"
 bash "$src/tools/test-peers.sh" "$out/peers"
 bash "$src/tools/test-compute.sh" "$out/compute"
 bash "$src/tools/test-winmaint.sh"
+bash "$src/tools/test-gpu-hardware.sh" "$out/gpu-hardware"
 sh "$src/tools/test-screen-power.sh" "$out/screen-power"
 printf '%s\n' 'PASS device-free interaction regressions; real KMS/libinput/IME hardware acceptance remains separate.'
