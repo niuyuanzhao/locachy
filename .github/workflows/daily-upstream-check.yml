@@ -52,7 +52,7 @@ jobs:
       - name: Run recipe and builder unit tests
         if: always()
         run: |
-          mkdir -p /tmp/recipe-tests
+          mkdir -p -m 0700 "$HOME/recipe-tests"
           for suite in \
             test-libinput.py \
             test-libinput-tools.py \
@@ -63,7 +63,7 @@ jobs:
             test-pkg-sync.py \
             test-prepared-builder.py; do
             echo "=== $suite ==="
-            python3 -B "src/tools/$suite" /tmp/recipe-tests
+            python3 -B "src/tools/$suite" "$HOME/recipe-tests"
           done
 
       - name: Upload audit report
@@ -100,7 +100,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           mkdir -p /tmp/build-out
-          docker run --rm --cap-add=SYS_PTRACE \
+          docker run --rm --cap-add=SYS_PTRACE --cap-add=SYS_NICE \
             -e TARGET="$TARGET" \
             -v "$GITHUB_WORKSPACE:/repo:ro" \
             -v /tmp/build-out:/out \
