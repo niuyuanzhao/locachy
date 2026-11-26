@@ -1,0 +1,201 @@
+name: Daily Upstream Patch & Build Check
+
+on:
+  schedule:
+    # 12:00 UTC = 07:00 EST / 08:00 EDT
+    - cron: '0 12 * * *'
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/pkgbuilds/**'
+      - 'src/aur-patches/**'
+      - 'src/installer/archiso-readonly-seed.patch'
+      - 'src/link/locachy_upstream.py'
+      - 'src/tools/check-upstream-patches.py'
+      - '.github/workflows/daily-upstream-check.yml'
+  pull_request:
+    paths:
+      - 'src/pkgbuilds/**'
+      - 'src/aur-patches/**'
+      - 'src/installer/archiso-readonly-seed.patch'
+      - 'src/link/locachy_upstream.py'
+      - 'src/tools/check-upstream-patches.py'
+      - '.github/workflows/daily-upstream-check.yml'
+
+concurrency:
+  group: daily-upstream-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  patch-audit:
+    name: Patch, Adapter & AUR Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Audit all carried patches against live Arch and AUR
+        id: audit
+        run: |
+          mkdir -p /tmp/ci-reports
+          python3 -B src/tools/check-upstream-patches.py \
+            --audit \
+            --summary "$GITHUB_STEP_SUMMARY" \
+            --report /tmp/ci-reports/patch-audit.md
+
+      - name: Run recipe and builder unit tests
+        if: always()
+        run: |
+          mkdir -p /tmp/recipe-tests
+          for suite in \
+            test-libinput.py \
+            test-libinput-tools.py \
+            test-libpaper.py \
+            test-upstream.py \
+            test-gate-errors.py \
+            test-local-build.py \
+            test-pkg-sync.py \
+            test-prepared-builder.py; do
+            echo "=== $suite ==="
+            python3 -B "src/tools/$suite" /tmp/recipe-tests
+          done
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-patch-audit
+          path: /tmp/ci-reports/patch-audit.md
+          if-no-files-found: ignore
+          retention-days: 7
+
+  build-pkgbuilds:
+    name: Build & Smoke (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - libinput-pair
+          - labwc-locachy
+          - libmupdf
+          - libpaper
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Free runner disk space
+        if: matrix.target == 'libmupdf'
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+
+      - name: Build and smoke-test in Arch Linux container
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p /tmp/build-out
+          docker run --rm --cap-add=SYS_PTRACE \
+            -e TARGET="$TARGET" \
+            -v "$GITHUB_WORKSPACE:/repo:ro" \
+            -v /tmp/build-out:/out \
+            archlinux:latest bash -euc '
+              pacman-key --init
+              pacman-key --populate archlinux
+              pacman -Syu --noconfirm base-devel git python
+              python3 -B /repo/src/tools/check-upstream-patches.py \
+                --build-package "$TARGET" \
+                --out-dir /out \
+                --report /out/build-report.md
+            '
+
+      - name: Publish job summary
+        if: always()
+        run: |
+          if [ -f /tmp/build-out/build-report.md ]; then
+            cat /tmp/build-out/build-report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload build report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-build-${{ matrix.target }}
+          path: /tmp/build-out/build-report.md
+          if-no-files-found: ignore
+          retention-days: 7
+
+  report-issue:
+    name: Update Upstream Drift Issue
+    runs-on: ubuntu-latest
+    needs:
+      - patch-audit
+      - build-pkgbuilds
+    if: >-
+      always() &&
+      (github.event_name == 'schedule' ||
+       github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+    permissions:
+      issues: write
+    steps:
+      - name: Download reports
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          path: /tmp/all-reports
+          pattern: report-*
+
+      - name: Open, update, or close tracking issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          AUDIT_RESULT: ${{ needs.patch-audit.result }}
+          BUILD_RESULT: ${{ needs.build-pkgbuilds.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COMMIT_SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          LABEL="upstream-drift"
+          gh label create "$LABEL" \
+            --description "Live upstream Arch/AUR drift broke a carried patch or build" \
+            --color "d93f0b" --force >/dev/null
+
+          EXISTING=$(gh issue list --label "$LABEL" --state open --json number --jq '.[0].number // empty')
+
+          if [ "$AUDIT_RESULT" = "success" ] && [ "$BUILD_RESULT" = "success" ]; then
+            if [ -n "$EXISTING" ]; then
+              printf 'Daily upstream patch & build check passed again on commit `%s` (%s). Closing automatically.\n\nRun: %s\n' \
+                "${COMMIT_SHA:0:7}" "$EVENT_NAME" "$RUN_URL" > /tmp/close-body.md
+              gh issue comment "$EXISTING" --body-file /tmp/close-body.md
+              gh issue close "$EXISTING" --reason completed
+            fi
+            exit 0
+          fi
+
+          {
+            printf 'Daily upstream check failed (`%s`, commit `%s`).\n\n' "$EVENT_NAME" "${COMMIT_SHA:0:7}"
+            printf -- '- **patch-audit**: `%s`\n' "$AUDIT_RESULT"
+            printf -- '- **build-pkgbuilds**: `%s`\n' "$BUILD_RESULT"
+            printf -- '- **Workflow run**: %s\n\n' "$RUN_URL"
+            for f in $(find /tmp/all-reports -type f -name '*.md' 2>/dev/null | sort); do
+              cat "$f"
+              printf '\n'
+            done
+          } > /tmp/issue-body.md
+
+          if [ -n "$EXISTING" ]; then
+            gh issue edit "$EXISTING" --body-file /tmp/issue-body.md
+            gh issue comment "$EXISTING" --body "Still failing in ${RUN_URL} (\`patch-audit=${AUDIT_RESULT}\`, \`build-pkgbuilds=${BUILD_RESULT}\`). Issue body updated with the latest summary."
+          else
+            gh issue create \
+              --title "Upstream drift detected in daily patch & build check" \
+              --label "$LABEL" \
+              --body-file /tmp/issue-body.md
+          fi
