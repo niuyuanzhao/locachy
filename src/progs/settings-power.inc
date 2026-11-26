@@ -12,6 +12,7 @@
 #include <sys/inotify.h>
 
 #include "battery-history.h"
+#include "battery-model-pins.h"
 
 #define POWER_CARD_BG   0x162230u
 #define POWER_GRID_COL  0x24364Au
@@ -37,6 +38,9 @@ static int power_handoff_loaded;
 static char power_last_handoff[128];
 static struct bat_charge_status power_charge;
 static int power_charge_known, power_full_pending;
+static int bat_model_job;
+static char bat_model_what[16];
+static int bat_model_remove_asked;
 int rc_bat_start = -1, rc_bat_end = -1;
 
 static void power_format_handoff(const struct bat_handoff_event *ev, char *out, size_t size);
@@ -79,6 +83,9 @@ static const char *power_charge_state_label(const char *state)
     if (!strcmp(state, "hold")) return _("Holding charge");
     if (!strcmp(state, "top-up")) return _("Topping up before unplugging");
     if (!strcmp(state, "full")) return _("Full charge override active");
+    if (!strcmp(state, "model-missing")) return _("Model not downloaded");
+    if (!strcmp(state, "model-invalid")) return _("Model verification failed");
+    if (!strcmp(state, "inactive")) return _("Adaptive standby");
     if (!strcmp(state, "unsupported")) return _("Charging control unsupported");
     if (!strcmp(state, "error")) return _("Could not apply charging limits");
     return _("Charging status unavailable");
@@ -231,6 +238,10 @@ static void power_charge_notes(void)
             snprintf(line, sizeof line, "%s: %s", b->name, state);
         }
         add_entry(E_NOTE, line);
+        if (!strcmp(s->state, "model-missing") || !strcmp(s->state, "model-invalid")) {
+            /* TRANSLATORS: r is the r key; keep it. */
+            add_entry(E_NOTE, _("Press r on Adaptive Charging to download the model."));
+        }
         power_charge_release_note(s);
     }
     if (!nslots && power_can_manage_charge()) add_entry(E_NOTE, _("Charging status unavailable"));
@@ -380,6 +391,150 @@ static int power_charge_reload(void)
     return -1;
 }
 
+static int power_model_dir(char *out, size_t size)
+{
+    int n = snprintf(out, size, "%s/model", bat_history_dir());
+    return n > 0 && (size_t)n < size ? 0 : -1;
+}
+
+static int power_model_file_ok(const char *dir, const char *name, size_t expected_size)
+{
+    char path[640];
+    int n = snprintf(path, sizeof path, "%s/%s", dir, name);
+    if (n <= 0 || (size_t)n >= sizeof path) return 0;
+    struct stat st;
+    if (lstat(path, &st) != 0) return 0;
+    return S_ISREG(st.st_mode) && st.st_size >= 0 && (size_t)st.st_size == expected_size;
+}
+
+/* Fast local presence/size check (daemon performs full SHA-512 verification). */
+static int power_model_files_present(void)
+{
+    char dir[560];
+    if (power_model_dir(dir, sizeof dir) != 0) return 0;
+    struct stat dst;
+    if (lstat(dir, &dst) != 0 || !S_ISDIR(dst.st_mode)) return 0;
+    return power_model_file_ok(dir, BAT_MODEL_TFLITE_NAME, BAT_MODEL_TFLITE_SIZE) &&
+           power_model_file_ok(dir, BAT_MODEL_PREPROC_NAME, BAT_MODEL_PREPROC_SIZE);
+}
+
+static int power_model_any_present(void)
+{
+    char dir[560], path[640];
+    if (power_model_dir(dir, sizeof dir) != 0) return 0;
+    struct stat st;
+    if (lstat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) return 0;
+    static const char *const names[] = {
+        BAT_MODEL_TFLITE_NAME,
+        BAT_MODEL_PREPROC_NAME,
+        "manifest.installed.json",
+    };
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
+        int n = snprintf(path, sizeof path, "%s/%s", dir, names[i]);
+        if (n > 0 && (size_t)n < sizeof path && lstat(path, &st) == 0) return 1;
+    }
+    return 0;
+}
+
+static int power_charge_needs_model(void)
+{
+    if (!power_charge_known) return 0;
+    for (int i = 0; i < npower_devs; i++) {
+        const struct bat_device *b = &power_devs[i];
+        if (b->is_peripheral || b->is_offline_pack) continue;
+        int si = power_charge_slot_for(b);
+        if (si >= 0 && (!strcmp(power_charge.slots[si].state, "model-missing") ||
+                        !strcmp(power_charge.slots[si].state, "model-invalid"))) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void bat_model_check(void)
+{
+    struct jobs_row r;
+    char log[96];
+    if (!bat_model_job || !job_ended(bat_model_job, &r, log, sizeof log)) return;
+    int removing = strcmp(bat_model_what, "remove") == 0;
+    bat_model_job = 0;
+    bat_model_what[0] = '\0';
+    bat_model_remove_asked = 0;
+    power_refresh_devices();
+    entries_dirty = 1;
+    full_redraw = 1;
+    if (strcmp(r.state, "done") == 0) {
+        snprintf(notice, sizeof notice, "%s", removing ?
+                 _("Adaptive charging model removed.") :
+                 _("Adaptive charging model downloaded and verified."));
+    } else if (removing) {
+        snprintf(notice, sizeof notice, _("Could not remove adaptive charging model: %s"),
+                 r.last[0] ? r.last : log);
+    } else {
+        snprintf(notice, sizeof notice, _("Could not download adaptive charging model: %s"),
+                 r.last[0] ? r.last : log);
+    }
+}
+
+static void power_model_fetch_row(void)
+{
+    power_refresh_devices();
+    if (!power_can_manage_charge()) {
+        snprintf(notice, sizeof notice, "%s", _("Charging control unsupported"));
+        return;
+    }
+    if (!rc_bat_adaptive) {
+        snprintf(notice, sizeof notice, "%s", _("Turn Adaptive Charging on first to download the model."));
+        return;
+    }
+    if (bat_model_job) {
+        snprintf(notice, sizeof notice, "%s", _("Wait: an adaptive charging model job is still running."));
+        return;
+    }
+    if (power_model_files_present() && !power_charge_needs_model()) {
+        snprintf(notice, sizeof notice, "%s", _("Adaptive charging model is already installed."));
+        return;
+    }
+    char why[160] = "";
+    int id = 0, pos = 0;
+    if (jobs_submit("battery-model-fetch", NULL, &id, &pos, why, sizeof why) < 0) {
+        snprintf(notice, sizeof notice, _("Could not start model download: %s"), why);
+        return;
+    }
+    bat_model_job = id;
+    snprintf(bat_model_what, sizeof bat_model_what, "fetch");
+    snprintf(notice, sizeof notice, "%s", _("Downloading adaptive charging model in background."));
+}
+
+static void power_model_remove_row(void)
+{
+    if (bat_model_job) {
+        snprintf(notice, sizeof notice, "%s", _("Wait: an adaptive charging model job is still running."));
+        return;
+    }
+    if (!power_model_any_present()) {
+        bat_model_remove_asked = 0;
+        snprintf(notice, sizeof notice, "%s", _("Adaptive charging model is not installed."));
+        return;
+    }
+    if (!bat_model_remove_asked) {
+        bat_model_remove_asked = 1;
+        /* TRANSLATORS: Delete is the Delete key; keep it. */
+        snprintf(notice, sizeof notice, "%s", _("Delete again: remove the downloaded adaptive charging model."));
+        return;
+    }
+    bat_model_remove_asked = 0;
+    char why[160] = "";
+    int id = 0, pos = 0;
+    if (jobs_submit("battery-model-remove", NULL, &id, &pos, why, sizeof why) < 0) {
+        snprintf(notice, sizeof notice, _("Could not remove adaptive charging model: %s"), why);
+        return;
+    }
+    bat_model_job = id;
+    snprintf(bat_model_what, sizeof bat_model_what, "remove");
+    snprintf(notice, sizeof notice, "%s", _("Removing adaptive charging model in background."));
+}
+
 static void adjust_adaptive_charging(void)
 {
     power_refresh_devices();
@@ -393,7 +548,22 @@ static void adjust_adaptive_charging(void)
         return;
     }
     rc_bat_adaptive = next;
-    if (power_charge_reload() == 0) {
+    int reloaded = power_charge_reload() == 0;
+    if (next == 1 && !power_model_files_present()) {
+        char why[160] = "";
+        int id = 0, pos = 0;
+        if (bat_model_job && strcmp(bat_model_what, "fetch") == 0) {
+            snprintf(notice, sizeof notice, "%s", _("Adaptive charging enabled; downloading model in background."));
+        } else if (jobs_submit("battery-model-fetch", NULL, &id, &pos, why, sizeof why) == 0) {
+            bat_model_job = id;
+            snprintf(bat_model_what, sizeof bat_model_what, "fetch");
+            snprintf(notice, sizeof notice, "%s", _("Adaptive charging enabled; downloading model in background."));
+        } else {
+            snprintf(notice, sizeof notice, _("Adaptive charging enabled; model download unavailable: %s"), why);
+        }
+        return;
+    }
+    if (reloaded) {
         snprintf(notice, sizeof notice, "%s", _("Adaptive charging setting saved."));
     }
 }

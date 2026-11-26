@@ -191,6 +191,27 @@ void keys_set_locks(int locks)
     show_locks();
 }
 
+/* Caps Lock owned by a negotiated link (keys_caps_owner): its state is set
+ * with keys_set_caps, which never touches Num Lock, and a Caps key here changes
+ * nothing, so the LEDs follow the owner alone. Process 1 and the link's frontend
+ * each hold their own copy; only the owner's answer is authoritative. */
+static int caps_owned;
+
+void keys_caps_owner(int on)
+{
+    caps_owned = !!on;
+}
+
+void keys_set_caps(int on)
+{
+    int was = caps;
+    caps = !!on;
+    if (caps != was && ime_set_caps) {
+        ime_set_caps(caps);
+    }
+    show_locks();
+}
+
 void keys_leds(int on)
 {
     open_mode = O_RDWR;
@@ -1334,6 +1355,7 @@ static int process_input_event(int fd, int device, const struct input_event *ev)
         role = KEYS_CAPS;
         if (ev->value == 0) caps_code = 0;
     }
+    int exclusive = base_raw_exclusive && base_raw_exclusive();
     if (base_raw_emit && !(ev->value == 2 && role)) {
         int st = (shift ? 1 : 0) | (caps ? 2 : 0) | (altgr ? 4 : 0) | (num ? 8 : 0);
         uint32_t sym = ev->code < 256 ? tb->syms[st][ev->code] : 0;
@@ -1361,13 +1383,14 @@ static int process_input_event(int fd, int device, const struct input_event *ev)
             }
         }
         uint32_t id = device >= 0 ? kbd_rdev[device] : fd_raw_id(fd);
-        int pressed_role = ev->value != 0 ? role : 0;
-        int action = match_action(tb, ev->code, ctrl || (pressed_role & KEYS_CTRL),
-                                  alt || (pressed_role & KEYS_ALT), shift || (pressed_role & KEYS_SHIFT),
-                                  meta || (pressed_role & KEYS_META));
-        int local = (action == K_ACT_HOME && !(base_raw_forward_home && base_raw_forward_home())) ||
-                    action == K_ACT_LOCK || action == K_ACT_SEARCH ||
+        int local = 0;
+        if (!exclusive && ev->value == 1) {
+            int action = match_action(tb, ev->code, ctrl || (role & KEYS_CTRL),
+                                      alt || (role & KEYS_ALT), shift || (role & KEYS_SHIFT),
+                                      meta || (role & KEYS_META));
+            local = action == K_ACT_HOME || action == K_ACT_LOCK || action == K_ACT_SEARCH ||
                     (action >= K_VOL_UP && action <= K_BRI_DOWN);
+        }
         uint32_t raw_mods = (shift ? KEYS_SHIFT : 0) | (ctrl ? KEYS_CTRL : 0) | (alt ? KEYS_ALT : 0) |
                             (meta ? KEYS_META : 0) | (altgr ? KEYS_ALTGR : 0) |
                             (caps ? KEYS_CAPS : 0) | (num ? 64u : 0);
@@ -1385,22 +1408,23 @@ static int process_input_event(int fd, int device, const struct input_event *ev)
         unsigned char *held = device >= 0 ? modifiers[device] : unowned_modifiers;
         held[ev->code] = ev->value != 0;
         update_modifiers();
-        return ev->value == 1 ? match_action(tb, ev->code, ctrl, alt, shift, meta) : 0;
+        return !exclusive && ev->value == 1 ? match_action(tb, ev->code, ctrl, alt, shift, meta) : 0;
     }
     if (role == KEYS_CAPS) { /* locks at a press, unlocks at the next */
-        if (ev->value != 2 && ime_caps_key) {
+        if (caps_owned) return 0; /* the link's state: keys_caps_owner */
+        if (!exclusive && ev->value != 2 && ime_caps_key) {
             ime_caps_key(ev->value == 1, caps);
         }
         if (ev->value == 1) {
             caps = !caps;
-            if (ime_set_caps) {
+            if (!exclusive && ime_set_caps) {
                 ime_set_caps(caps);
             }
             show_locks();
         }
         return 0;
     }
-    if (ev->value != 0) { /* 1 press, 2 repeat, 0 release */
+    if (!exclusive && ev->value != 0) { /* 1 press, 2 repeat, 0 release */
         last_code = ev->code;
         last_table = tb;
         return translate(tb, ev->code, ev->value == 2);
@@ -1571,6 +1595,11 @@ static long long keys_now_ms(void)
 static int kq_take_key(int *handled)
 {
     *handled = 0;
+    if (base_raw_exclusive && base_raw_exclusive()) {
+        /* Do not dispatch translated keys left over from before capture. */
+        kq_head = kq_len = 0;
+        return 0;
+    }
     int key = kq_pop();
     if (key == 0) return 0;
     *handled = 1;
@@ -1623,8 +1652,14 @@ int key_poll_many(struct pollfd *extra, size_t nextra, int timeout_ms)
             long long left = deadline - keys_now_ms();
             wait_ms = left > 0 ? (int)left : 0;
         }
+        errno = 0;
         int r = poll(p, (nfds_t)((size_t)n + nextra), wait_ms);
-        if (r < 0 && errno == EINTR) continue;
+        /* A signal ends the wait with no key and errno EINTR, so a program
+         * whose loop must see SIGTERM (ui_help during a lid close) can leave. */
+        if (r < 0 && errno == EINTR) {
+            result = 0;
+            break;
+        }
         if (r <= 0) { result = 0; break; }
         if (ctl_i >= 0 && (p[ctl_i].revents & (POLLIN | POLLHUP))) {
             if (!control_service(NULL, 0, NULL)) {
@@ -1654,7 +1689,9 @@ int key_poll_many(struct pollfd *extra, size_t nextra, int timeout_ms)
         if (ready) { result = 0; break; }
         if (timeout_ms > 0 && keys_now_ms() >= deadline) { result = 0; break; }
     }
+    int saved_errno = errno;
     if (p != stack_p) free(p);
+    if (saved_errno == EINTR) errno = EINTR;
     return result;
 }
 

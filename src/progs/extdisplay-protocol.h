@@ -37,11 +37,14 @@ enum { EXTDISPLAY_SOURCE_NONE, EXTDISPLAY_SOURCE_WHEEL, EXTDISPLAY_SOURCE_FINGER
 #define EXTDISPLAY_LOCK_CAPS 1u
 #define EXTDISPLAY_LOCK_NUM  2u
 
-/* Optional peer input capabilities negotiated in welcome.input. */
+/* Optional capabilities negotiated in hello.input and welcome.input. */
 #define EXTDISPLAY_CAP_TOUCH_NAME  "touch"
 #define EXTDISPLAY_CAP_TABLET_NAME "tablet"
-#define EXTDISPLAY_INPUT_TOUCH  (1u << 0)
-#define EXTDISPLAY_INPUT_TABLET (1u << 1)
+#define EXTDISPLAY_CAP_CAPS_LOCK_NAME "capsLock"
+#define EXTDISPLAY_INPUT_TOUCH     (1u << 0)
+#define EXTDISPLAY_INPUT_TABLET    (1u << 1)
+#define EXTDISPLAY_INPUT_CAPS_LOCK (1u << 2)
+#define EXTDISPLAY_INPUT_ALL (EXTDISPLAY_INPUT_TOUCH | EXTDISPLAY_INPUT_TABLET | EXTDISPLAY_INPUT_CAPS_LOCK)
 
 /* Touch point states on the wire (strings: "down", "move", "up", "cancel"). */
 enum extdisplay_touch_state {
@@ -79,12 +82,14 @@ enum extdisplay_tablet_tool {
 
 enum extdisplay_codec { EXTDISPLAY_CODEC_NONE, EXTDISPLAY_CODEC_H264, EXTDISPLAY_CODEC_HEVC };
 enum extdisplay_message { EXTDISPLAY_MSG_UNKNOWN, EXTDISPLAY_MSG_WELCOME, EXTDISPLAY_MSG_CONFIG,
-                   EXTDISPLAY_MSG_PING, EXTDISPLAY_MSG_PONG, EXTDISPLAY_MSG_CLOSING, EXTDISPLAY_MSG_VIDEO };
+                   EXTDISPLAY_MSG_PING, EXTDISPLAY_MSG_PONG, EXTDISPLAY_MSG_CLOSING, EXTDISPLAY_MSG_VIDEO,
+                   EXTDISPLAY_MSG_CAPS_LOCK_STATE, EXTDISPLAY_MSG_CAPS_LOCK_TOGGLE };
 struct extdisplay_control {
     enum extdisplay_message type;
     enum extdisplay_codec codec;
     uint32_t width, height, fps;
-    uint32_t input_caps; /* EXTDISPLAY_MSG_WELCOME: EXTDISPLAY_INPUT_* bitmask */
+    uint32_t input_caps; /* welcome and hello: EXTDISPLAY_INPUT_* bitmask */
+    int caps_lock;      /* EXTDISPLAY_MSG_CAPS_LOCK_STATE: 0 or 1 */
     int64_t timestamp;
     size_t video_offset; /* EXTDISPLAY_MSG_VIDEO: the first start code, after any prefix */
 };
@@ -111,6 +116,8 @@ int extdisplay_annex_b(const unsigned char *data, size_t size);
 /* Unknown control types are EXTDISPLAY_MSG_UNKNOWN (ignored); a malformed control,
  * a known type with invalid fields, or video that is not Annex-B is -1. */
 int extdisplay_control_parse(const unsigned char *data, size_t size, struct extdisplay_control *out);
+/* Derive the offer from the actual hello the worker will send to the peer. */
+int extdisplay_hello_input_caps(const char *data, size_t size, uint32_t *caps);
 
 /* Video codec capability flags for hello.videoCaps.
  * "h264" and "hevc" (which older senders treat as HEVC 4:4:4) keep legacy
@@ -143,6 +150,11 @@ int extdisplay_pointer_json(char *out, size_t size, double x, double y);
 int extdisplay_pointer_delta_json(char *out, size_t size, double x, double y, double dx, double dy);
 int extdisplay_scroll_json(char *out, size_t size, double dx, double dy, int phase, int source);
 int extdisplay_cancel_json(char *out, size_t size);
+/* With capsLock negotiated, the Mac sends absolute capsLockState (after welcome,
+ * before streamConfig, then on each change) and the receiver sends only
+ * capsLockToggle. Neither is ever dropped under backpressure. */
+int extdisplay_caps_lock_state_json(char *out, size_t size, int state);
+int extdisplay_caps_lock_toggle_json(char *out, size_t size);
 
 /* Additive tablet and multi-touch wire formatters (used only when the peer's
  * welcome.input includes "tablet" or "touch"). Coordinates are normalized in

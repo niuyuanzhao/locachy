@@ -45,14 +45,15 @@ static struct {
     size_t tx_start, tx_end;
     double last_rx, last_ping;
     int hello, welcomed, active, frame_pending, dmabuf_off;
+    int seen_caps, pending_caps; /* seen_caps: peer sent initial capsLockState; pending_caps: -1/0/1 queued for frontend */
     int decode_errors;
     unsigned char slot_busy[EXTDISPLAY_DMABUF_SLOTS];
     unsigned char slot_exported[EXTDISPLAY_DMABUF_SLOTS];
     int ready_slot, last_sent_slot;
     uint32_t width, height;
     unsigned hw_caps;
-    uint32_t input_caps;
-} session = { .ready_slot = -1, .last_sent_slot = -1 };
+    uint32_t offer_caps, input_caps;
+} session = { .pending_caps = -1, .ready_slot = -1, .last_sent_slot = -1 };
 
 static const char *fail_reason = "unknown";
 
@@ -90,6 +91,24 @@ static int status_reason(uint32_t op, const char *reason)
 static int status(uint32_t op)
 {
     return status_reason(op, NULL);
+}
+
+/* The Mac's latest absolute Caps Lock state, for the frontend. Only the newest
+ * value is kept: every message is absolute, so a later state replaces an unsent
+ * one and the frontend ends on the Mac's final state. strict: it must go now
+ * (before ACTIVE), or the stream fails, as ACTIVE itself must. */
+static int flush_pending_caps(int strict)
+{
+    if (session.pending_caps < 0) return 0;
+    struct extdisplay_ipc m = { .magic = EXTDISPLAY_IPC_MAGIC, .op = EXTDISPLAY_IPC_CAPS_LOCK_STATE,
+                                .width = (uint32_t)session.pending_caps };
+    ssize_t n = send(EXTDISPLAY_IPC_FD, &m, sizeof m, MSG_NOSIGNAL | MSG_DONTWAIT);
+    if (n == (ssize_t)sizeof m) {
+        session.pending_caps = -1;
+        return 0;
+    }
+    if (!strict && n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) return 0;
+    return fail_with("frontend-err");
 }
 
 static int enqueue(const void *data, size_t n)
@@ -307,10 +326,18 @@ static int receive(void *unused, const unsigned char *data, size_t n)
     case EXTDISPLAY_MSG_WELCOME:
         if (session.welcomed) return fail_with("parse-err");
         session.welcomed = 1;
-        session.input_caps = c.input_caps;
+        session.input_caps = session.offer_caps & c.input_caps;
         break;
+    case EXTDISPLAY_MSG_CAPS_LOCK_STATE:
+        if (!session.welcomed || !(session.input_caps & EXTDISPLAY_INPUT_CAPS_LOCK)) return fail_with("parse-err");
+        session.seen_caps = 1;
+        session.pending_caps = c.caps_lock ? 1 : 0;
+        return session.active ? flush_pending_caps(0) : 0;
+    case EXTDISPLAY_MSG_CAPS_LOCK_TOGGLE:
+        return fail_with("parse-err"); /* receiver-to-sender only */
     case EXTDISPLAY_MSG_CONFIG:
         if (!session.welcomed) return fail_with("config-err");
+        if ((session.input_caps & EXTDISPLAY_INPUT_CAPS_LOCK) && !session.seen_caps) return fail_with("config-err");
         session.active = 0;
         session.frame_pending = 0;
         session.decode_errors = 0;
@@ -320,8 +347,11 @@ static int receive(void *unused, const unsigned char *data, size_t n)
         if (session.dmabuf_off) extdisplay_decoder_disable_dmabuf(session.decoder);
         session.width = c.width;
         session.height = c.height;
+        /* The Mac's state is with the frontend before ACTIVE opens its input. */
+        if (flush_pending_caps(1) < 0) return -1;
         session.active = 1;
-        return status(EXTDISPLAY_IPC_ACTIVE) < 0 ? fail_with("frontend-err") : 0;
+        if (status(EXTDISPLAY_IPC_ACTIVE) < 0) return fail_with("frontend-err");
+        return 0;
     case EXTDISPLAY_MSG_VIDEO: {
         if (!session.active) return fail_with("parse-err"); /* video before streamConfig */
         int r = extdisplay_decoder_step(session.decoder, data + c.video_offset, n - c.video_offset);
@@ -358,6 +388,7 @@ static int receive(void *unused, const unsigned char *data, size_t n)
     return 0;
 }
 
+#ifndef EXTDISPLAY_WORKER_TEST_NO_SANDBOX
 static int landlock(void)
 {
     struct landlock_ruleset_attr rules = { .handled_access_fs =
@@ -418,9 +449,14 @@ static int seccomp(void)
     struct sock_fprog program = { .len = sizeof filter / sizeof filter[0], .filter = filter };
     return prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program);
 }
+#endif
 
 static int sandbox(int hw)
 {
+#ifdef EXTDISPLAY_WORKER_TEST_NO_SANDBOX
+    (void)hw; /* tests only: unprivileged test runner cannot drop supplementary groups */
+    return 0;
+#else
     /* The FFmpeg decoder at 4096x4096 with VA-API/FFmpeg surface pools, the
      * picture and the sealed copy: 2.5 GiB virtual address headroom. VA-API
      * keeps DRM surface fds open. */
@@ -434,6 +470,7 @@ static int sandbox(int hw)
         return -1;
     }
     return landlock() == 0 && seccomp() == 0 ? 0 : -1;
+#endif
 }
 
 static int channel(int fd, int expected)
@@ -477,6 +514,7 @@ static int frontend(void)
             } else if (m.width >= 1 && m.width <= EXTDISPLAY_DMABUF_SLOTS) {
                 session.slot_busy[m.width - 1] = 0;
             }
+            if (session.active && flush_pending_caps(0) < 0) return -1;
             if (session.ready_slot >= 0) {
                 if (send_ready_slot() < 0) return fail_with("frontend-err");
             } else if (send_latest() < 0) {
@@ -503,11 +541,20 @@ static int frontend(void)
             break;
         }
         case EXTDISPLAY_IPC_HELLO:
-            if (session.hello || !m.length) return fail_with("frontend-err");
+            if (session.hello || extdisplay_hello_input_caps(m.text, m.length, &session.offer_caps) < 0)
+                return fail_with("frontend-err");
             if (enqueue(m.text, m.length) < 0) return -1;
             session.hello = 1;
             session.last_rx = now();
             break;
+        case EXTDISPLAY_IPC_CAPS_LOCK_TOGGLE: {
+            if (m.length || m.height || m.width ||
+                !session.active || !(session.input_caps & EXTDISPLAY_INPUT_CAPS_LOCK)) return fail_with("frontend-err");
+            char text[64];
+            int len = extdisplay_caps_lock_toggle_json(text, sizeof text);
+            if (len < 0 || enqueue(text, (size_t)len) < 0) return -1;
+            break;
+        }
         case EXTDISPLAY_IPC_INPUT:
             if (!m.length) return fail_with("frontend-err");
             if (!session.active) break;
@@ -546,9 +593,11 @@ int main(void)
     if (status(EXTDISPLAY_IPC_READY) < 0) return 1;
     session.last_rx = session.last_ping = now();
     for (;;) {
-        int ipc_want_out = !session.frame_pending && session.active &&
-                           (session.ready_slot >= 0 ||
-                            (session.dmabuf_off && extdisplay_decoder_size(session.decoder, NULL, NULL)));
+        int ipc_want_out = session.active &&
+                           (session.pending_caps >= 0 ||
+                            (!session.frame_pending &&
+                             (session.ready_slot >= 0 ||
+                              (session.dmabuf_off && extdisplay_decoder_size(session.decoder, NULL, NULL)))));
         struct pollfd p[2] = {
             { EXTDISPLAY_IPC_FD, (short)(POLLIN | (ipc_want_out ? POLLOUT : 0)), 0 },
             { EXTDISPLAY_TRANSPORT_FD, POLLIN | (session.tx_end > session.tx_start ? POLLOUT : 0), 0 },
@@ -559,12 +608,15 @@ int main(void)
         if (p[0].revents & (POLLHUP | POLLERR | POLLNVAL)) { fail_reason = "ipc-poll-err"; break; }
         if (p[1].revents & (POLLERR | POLLNVAL)) { fail_reason = "transport-poll-err"; break; }
         if ((p[0].revents & POLLIN) && (r = frontend()) != 0) break;
-        if ((p[0].revents & POLLOUT) && !session.frame_pending && session.active) {
-            if (session.ready_slot >= 0) {
-                if (send_ready_slot() < 0) { fail_reason = "frontend-err"; break; }
-            } else if (session.dmabuf_off && send_latest() < 0) {
-                fail_reason = "frontend-err";
-                break;
+        if ((p[0].revents & POLLOUT) && session.active) {
+            if (flush_pending_caps(0) < 0) break;
+            if (!session.frame_pending) {
+                if (session.ready_slot >= 0) {
+                    if (send_ready_slot() < 0) { fail_reason = "frontend-err"; break; }
+                } else if (session.dmabuf_off && send_latest() < 0) {
+                    fail_reason = "frontend-err";
+                    break;
+                }
             }
         }
         /* Flush outbound input/control to the broker before spending time decoding inbound video. */

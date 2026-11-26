@@ -15,6 +15,7 @@ import re
 import select
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -157,6 +158,60 @@ def network():
     # Lay down the tailnet path's route, but add no Tailscale address on the
     # server yet. Non-tailnet global addresses on this interface cannot bind.
     in_ip("address", "add", "203.0.113.1/24", "dev", "tailscale0")
+
+
+def check_local_forward(addr):
+    helper = (
+        "import socket; "
+        "s = socket.socket(); "
+        "s.bind(('127.0.0.1', 0)); "
+        "s.listen(1); "
+        "print(s.getsockname()[1], flush=True); "
+        "s.settimeout(5); "
+        "c, _ = s.accept(); "
+        "c.sendall(b'local-forward-ok\\n'); "
+        "c.close(); s.close()"
+    )
+    target = subprocess.Popen(("nsenter", f"--net={NET}", "--", sys.executable, "-I", "-c", helper),
+                              stdout=subprocess.PIPE, text=True)
+    forward = None
+    try:
+        check(bool(select.select([target.stdout], [], [], 5)[0]), "local forward target starts in locachy-net")
+        target_port = int(target.stdout.readline().strip())
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            local_port = probe.getsockname()[1]
+        forward = subprocess.Popen(
+            (*ssh_args(addr, "sshfixture", "allowed", "-o", "ExitOnForwardFailure=yes",
+                       "-L", f"127.0.0.1:{local_port}:127.0.0.1:{target_port}"),
+             "echo READY; read _ || true"),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        banner = b""
+        if select.select([forward.stdout], [], [], 5)[0] and forward.stdout.readline().strip() == "READY":
+            with socket.create_connection(("127.0.0.1", local_port), timeout=5) as conn:
+                conn.settimeout(5)
+                chunks = []
+                while True:
+                    chunk = conn.recv(64)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                banner = b"".join(chunks)
+        forward.stdin.close()
+        check(banner == b"local-forward-ok\n", "local forwarding (-L) is allowed")
+    finally:
+        if forward is not None:
+            if forward.stdin and not forward.stdin.closed:
+                forward.stdin.close()
+            if forward.poll() is None:
+                try:
+                    forward.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    forward.terminate()
+                    forward.wait(timeout=5)
+        if target.poll() is None:
+            target.terminate()
+        target.wait(timeout=5)
 
 
 def ssh_detached(addr):
@@ -303,6 +358,7 @@ def exercise():
               "blocks same tailnet address via local loopback ingress")
         check(refused(("nsenter", f"--net={NET}", "--", *ssh_args("127.0.0.1"), "true"), "refused"),
               "does not listen on loopback address")
+        check_local_forward(SERVER4)
         check(refused((*ssh_args(SERVER4, "sshfixture", "allowed", "-o", "ExitOnForwardFailure=yes", "-R",
                                  "12345:127.0.0.1:12345"), "true"), "forwarding failed"), "remote forwarding is disabled")
 

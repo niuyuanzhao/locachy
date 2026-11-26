@@ -19,6 +19,10 @@ int base_display_power(int on);
  * the link stays up; remote input still follows the policy. 0 drops it. A
  * report, not a request: no answer is awaited. */
 int base_session_hold(int on);
+/* Authoritative Caps Lock sync for a negotiated link (extdisplay): desired
+ * 0/1 sets Caps Lock without touching Num Lock; -1 queries availability and
+ * current Caps Lock state (0/1), or -1 when unavailable/refused. */
+int base_session_caps(int desired);
 /* Implemented by the display backend. Missing/unsupported is an error. */
 int base_screen_power(int on) __attribute__((weak));
 

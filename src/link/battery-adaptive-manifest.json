@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "model_id": "ADAPTIVE_CHARGING_20230314",
+  "source": "ChromiumOS platform2 powerd / ml-service (chromeos-base/ml)",
+  "artifacts": {
+    "model": {
+      "filename": "mlservice-model-adaptive_charging-20230314.tflite",
+      "url": "https://storage.googleapis.com/chromeos-localmirror/distfiles/mlservice-model-adaptive_charging-20230314.tflite",
+      "size": 124324,
+      "sha512": "84c1ad16e06787c2c309380ed7a206be23aa9f4597d6492d52778b3347cf7032d8097112aa88af60d9025f588023b5092fa0618cde1f860bf67265207f93b688"
+    },
+    "preprocessor": {
+      "filename": "mlservice-model-adaptive_charging-20230314-preprocessor.pb",
+      "url": "https://storage.googleapis.com/chromeos-localmirror/distfiles/mlservice-model-adaptive_charging-20230314-preprocessor.pb",
+      "size": 31082,
+      "sha512": "e2e19b1d6fb5ae7f5223d5874968c1dc70035d2a77373e6a790127a6c88d29e26d79df72f15857cbbfb22e597c7894859751ae9ab1e193f384a62a28b0be7eff"
+    }
+  }
+}

@@ -26,6 +26,16 @@ __attribute__((weak)) void apps_sessions_dispatch(const struct pollfd *p, int n)
 __attribute__((weak)) int apps_sleep_inhibited(void);
 /* The cgroup's owner holds a live link (base_session_hold): not frozen. */
 __attribute__((weak)) int apps_session_holding(const char *cgroup);
+/* Process 1 hook for authoritative Caps Lock (desired -1 queries 0/1, desired
+ * 0/1 sets Caps without touching Num Lock and syncs the shared display seat).
+ * Weak so standalone apps.c tests link without init.c. */
+__attribute__((weak)) int init_session_caps(int desired);
+/* The managed owner that held Caps Lock has released it (hold ended or closed). */
+__attribute__((weak)) void init_session_caps_release(void);
+/* Lid close: stop every managed native extdisplay window (and cancel pending
+ * starts). Returns 1 while any native extdisplay cgroup or stop job remains. */
+__attribute__((weak)) int apps_stop_program(const char *program);
+__attribute__((weak)) int apps_program_active(const char *program);
 
 void apps_init(void);
 void apps_tick(void);
@@ -48,7 +58,9 @@ int apps_display_state(void);
 int apps_display_watch_open(void);
 int apps_display_watch_drain(int fd);
 void apps_list(char *buf, size_t size);
-int apps_action(const char *action, const char *name, char *why, size_t size);
+/* Process 1 may stop a native window on a power/lid boundary. Weak so the
+ * focused init tests can link without the application manager. */
+__attribute__((weak)) int apps_action(const char *action, const char *name, char *why, size_t size);
 int apps_open(const char *name, const char *target, char *why, size_t size);
 int apps_open_mode(const char *name, const char *target, int own_tor, char *why, size_t size);
 /* Open a whitelisted host tool as a managed Wayland window on the shared

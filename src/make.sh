@@ -288,7 +288,7 @@ HOOK_THEME_WATCH="$HOOK_THEME -Wl,-u,theme_watch_open -Wl,-u,theme_watch_read"
 HOOK_BAR="-Wl,-u,base_status_fields"
 HOOK_OPEN="-Wl,-u,open_request_publish"
 # Weak hooks of the base, resolved by pulling their archive members (see build-check.sh).
-HOOK_RAW="-Wl,-u,base_raw_cancel -Wl,-u,base_raw_emit -Wl,-u,base_raw_forward_home -Wl,-u,base_raw_pending"
+HOOK_RAW="-Wl,-u,base_raw_cancel -Wl,-u,base_raw_emit -Wl,-u,base_raw_exclusive -Wl,-u,base_raw_pending"
 HOOK_DATA="-Wl,-u,wl_data_active -Wl,-u,wl_data_clipboard_get -Wl,-u,wl_data_clipboard_set -Wl,-u,wl_data_clipboard_clear -Wl,-u,wl_data_drag_active -Wl,-u,wl_data_drag_start -Wl,-u,wl_data_drag_start_key -Wl,-u,wl_data_press_serial"
 HOOK_BASE="$HOOK_RAW $HOOK_DATA"
 HOOK_WIN=""
@@ -377,7 +377,7 @@ $GCC $GC_LDFLAGS -o /usr/local/bin/archive "$src/progs/archive.c" "$b/files-prog
     -Wl,--start-group "$LIB_WIN" "$LIB_CORE" "$LIB_STATUS" "$LIB_OPEN" -Wl,--end-group \
     $UI_LIBS $GIO_LIBS $WIN_LIBS
 $GCC_CORE $GC_LDFLAGS -o "$lib/drives" "$src/progs/drives.c" "$LIB_CORE"
-$GCC_CORE $GC_LDFLAGS -o "$lib/battery-history" "$src/progs/battery-history.c"
+$GCC_CORE $GC_LDFLAGS -o "$lib/battery-history" "$src/progs/battery-history.c" "$src/progs/battery-controller.c" "$src/progs/battery-tflite.c" -lcrypto -lm
 # The system jobs' queue (tools/JOBS.md): long root operations, one at a time.
 $GCC_CORE $GC_LDFLAGS -o "$lib/locachy-jobs" "$src/progs/locachy-jobs.c"
 # Global search (tools/SEARCH.md): SQLite/FTS5 daemon, sandboxed document text
@@ -884,6 +884,10 @@ install -D -m 644 "$src/link/64-locachy-cjk-prefer.conf" /etc/fonts/conf.d/64-lo
 # this directory at its top level, so the file applies to every ssh client.
 install -D -m 644 "$src/link/50-locachy-foot-term.conf" /etc/ssh/ssh_config.d/50-locachy-foot-term.conf
 sh "$src/link/install-pkg-tools" "$src"
+# Record the default without replacing an existing graphics policy.
+if ! grep -q '^[[:space:]]*gpu_graphics_policy=' /etc/locachy/rc.conf; then
+    printf 'gpu_graphics_policy="auto"\n' >>/etc/locachy/rc.conf
+fi
 # The mirrors ranked again every repos_rank_days days (settings: Software
 # Sources, "Rank mirrors automatically"; 0: only by hand): the value written
 # out, so that rc.conf shows it; and its service (locachy-repos rank-timer,
@@ -942,7 +946,12 @@ install -m 755 "$src/link/locachy-winmaint" /usr/local/bin/locachy-winmaint
 install -m 755 "$src/link/locachy-winiso" /usr/local/bin/locachy-winiso
 install -m 755 "$src/link/locachy-gpu-unlock" /usr/local/bin/locachy-gpu-unlock
 install -m 755 "$src/link/locachy-gpu-power" /usr/local/bin/locachy-gpu-power
+install -m 755 "$src/link/locachy-gpu-graphics" /usr/local/bin/locachy-gpu-graphics
 install -D -m 644 "$src/link/gpu-unlock-upstream.json" /usr/local/share/locachy/gpu-unlock/upstream.json
+# Adaptive charging model (tools/BATTERY-CHARGING.md): the downloader is run only
+# on the user's explicit opt-in; its pinned manifest is the ChromiumOS artifacts' SHA-512.
+install -m 755 "$src/link/locachy-battery-model" /usr/local/bin/locachy-battery-model
+install -D -m 644 "$src/link/battery-adaptive-manifest.json" /usr/local/share/locachy/battery/manifest.json
 install -D -m 644 "$src/link/90-locachy-boot.hook" /etc/pacman.d/hooks/90-locachy-boot.hook
 install -D -m 644 "$src/link/pam.d/locachy-lock" /etc/pam.d/locachy-lock
 install -D -m 644 "$src/link/pam.d/locachy-lock-fingerprint" /etc/pam.d/locachy-lock-fingerprint

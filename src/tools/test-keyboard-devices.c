@@ -292,6 +292,22 @@ int main(void)
     assert(caps && led[LED_CAPSL]);
     puts("PASS process 1 shows the shared display's reported locks, its own state again over another writer's");
 
+    /* Authoritative link Caps Lock (keys_caps_owner / keys_set_caps): local
+     * Caps presses never flip caps or flicker LEDs, and Num Lock is untouched. */
+    keys_caps_owner(1);
+    int w_before = led_writes;
+    assert(key(0, KEY_CAPSLOCK, 1) == 0 && caps && num && led[LED_CAPSL] && led[LED_NUML] && led_writes == w_before);
+    assert(key(0, KEY_CAPSLOCK, 0) == 0 && caps && num && led_writes == w_before);
+    keys_set_caps(0);
+    assert(!caps && num && !led[LED_CAPSL] && led[LED_NUML] && ime_caps == 0);
+    keys_set_caps(1);
+    assert(caps && num && led[LED_CAPSL] && led[LED_NUML] && ime_caps == 1);
+    keys_caps_owner(0);
+    assert(key(0, KEY_CAPSLOCK, 1) == 0 && !caps && num && !led[LED_CAPSL] && led[LED_NUML]);
+    assert(key(0, KEY_CAPSLOCK, 0) == 0 && key(0, KEY_CAPSLOCK, 1) == 0 && caps && num);
+    assert(key(0, KEY_CAPSLOCK, 0) == 0);
+    puts("PASS keys_caps_owner suppresses local Caps flips and keys_set_caps preserves Num Lock");
+
     present[0] = 0;
     keys_refresh();
     led[LED_CAPSL] = 0; /* a keyboard connected again starts as the console's (kbd_start) */

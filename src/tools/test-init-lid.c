@@ -96,6 +96,8 @@ static char root[1024], supply_root[1200];
 
 static double boot_s, mono_s;
 static int lid_shut, sleeps, disk_writes, poweroffs, refuse_errno, open_on_sleep = 1, polls;
+static int sigterm_count, sigkill_count, caps_owner_state, caps_set_state = -1;
+static pid_t last_killed_pid;
 static char log_text[32768];
 
 void say(const char *fmt, ...)
@@ -122,6 +124,8 @@ int screen_drop_master(uint32_t lessee) { (void)lessee; return 0; }
 void keys_leds(int on) { (void)on; }
 int keys_locks(void) { return 0; }
 void keys_set_locks(int locks) { (void)locks; }
+void keys_caps_owner(int on) { caps_owner_state = !!on; }
+void keys_set_caps(int on) { caps_set_state = !!on; }
 int keys_sync(int *fds, int *n, int max) { (void)fds; (void)max; *n = 0; return 0; }
 int keys_lend(int *fds, int max) { (void)fds; (void)max; return 0; }
 void keys_take_back(const int *fds, int n) { (void)fds; (void)n; }
@@ -175,6 +179,10 @@ static int fixture_open(const char *path, int flags, ...)
     if (!strncmp(path, "/sys/class/drm/", 15)) {
         snprintf(mapped, sizeof mapped, "%s/drm/%s", root, path + 15);
         return open(mapped, flags);
+    }
+    if (!strncmp(path, "/sys/fs/cgroup/", 15)) {
+        snprintf(mapped, sizeof mapped, "%s/%s", root, path + 15);
+        return open(mapped, flags & ~O_CREAT);
     }
     if (!strncmp(path, root, strlen(root))) return open(path, flags & ~O_CREAT);
     errno = ENOENT;
@@ -238,7 +246,13 @@ static int fixture_klogctl(int action, char *buf, int size) { (void)action; (voi
 static void fixture_sync(void) {}
 static pid_t fixture_fork(void) { return -1; }
 static int fixture_mkdir(const char *path, mode_t mode) { (void)path; (void)mode; errno = EACCES; return -1; }
-static int fixture_kill(pid_t pid, int sig) { (void)pid; (void)sig; return 0; }
+static int fixture_kill(pid_t pid, int sig)
+{
+    last_killed_pid = pid;
+    if (sig == SIGTERM) sigterm_count++;
+    else if (sig == SIGKILL) sigkill_count++;
+    return 0;
+}
 static int fixture_reboot(int how) { assert(how == RB_POWER_OFF); poweroffs++; return 0; }
 static int fixture_swapoff(const char *path) { (void)path; errno = EINVAL; return -1; }
 static int fixture_mount(const char *a, const char *b, const char *c, unsigned long d, const void *e)
@@ -248,12 +262,22 @@ static int logged(const char *text) { return strstr(log_text, text) != NULL; }
 static void reset_case(void)
 {
     sleeps = disk_writes = poweroffs = refuse_errno = polls = suspend_failures = 0;
+    sigterm_count = sigkill_count = 0;
+    last_killed_pid = 0;
+    caps_owner_state = 0;
+    caps_set_state = -1;
+    memset(tasks, 0, sizeof tasks);
+    memset(places, 0, sizeof places);
+    nplaces = 0;
+    focus_place = 0;
+    lock_due = 0;
     open_on_sleep = 1;
     boot_s = 1000;
     mono_s = 100; /* past the boot holdoff */
     lid_holdoff = 30;
     lid_holdoff_until = 30 * 1e3;
     lid_check_at = hibernate_at = battery_act_at = battery_check_at = -1;
+    lid_ext_deadline = 0;
     hibernate_after = 1800;
     battery_critical = 5;
     snprintf(resume_dev, sizeof resume_dev, "8:3");
@@ -438,6 +462,133 @@ int main(int argc, char **argv)
     assert(!next.mem_sleep[0]);
     puts("PASS settings: lid_holdoff, battery_critical (at most 50), mem_sleep (deep, s2idle, shallow, or the "
          "kernel's); bad values left out");
+
+    /* Lid close force-exits extdisplay (SIGTERM, never frozen mid-exit, waits
+     * for exit before suspend, bounded cgroup.kill if hung) and locks by the
+     * union of lid-close and unplug/live-link-exit lock rules. */
+    {
+        char cg[1400], cg_kill[1450], cg_freeze[1450];
+        const char *cg_virtual = "/sys/fs/cgroup/extcg";
+        snprintf(cg, sizeof cg, "%s/extcg", root);
+        assert(mkdir(cg, 0700) == 0);
+        snprintf(cg_kill, sizeof cg_kill, "%s/cgroup.kill", cg);
+        snprintf(cg_freeze, sizeof cg_freeze, "%s/cgroup.freeze", cg);
+        file_text("extcg/cgroup.kill", "0\n");
+        file_text("extcg/cgroup.freeze", "0\n");
+
+        /* 1. Normal lid close with live extdisplay: SIGTERM, unlocked -> locked,
+         *    does not freeze extdisplay, waits for exit, then suspends. */
+        reset_case();
+        lid_shut = 1;
+        nplaces = 1;
+        places[0].task = &tasks[0];
+        tasks[0].depth = 1;
+        struct frame *ext = &tasks[0].f[0];
+        snprintf(ext->name, sizeof ext->name, "extdisplay");
+        snprintf(ext->cgroup, sizeof ext->cgroup, "%s", cg_virtual);
+        ext->pid = 7777;
+        ext->holding = 1;
+        ext->caps_owned = 1;
+        ext->screens = 1;
+        caps_owner_state = 1;
+        lid_changed(1);
+        assert(sigterm_count == 1 && last_killed_pid == 7777 && sigkill_count == 0);
+        assert(!ext->holding && !ext->caps_owned && !caps_owner_state && ext->stop_deadline > now_ms());
+        assert(locked && sleeps == 0 && lid_check_at > now_ms());
+        freeze(ext); /* must not freeze while stopping on lid close */
+        assert(!ext->frozen && file_number("extcg/cgroup.freeze") == 0);
+        /* Once extdisplay exits, the next lid check suspends cleanly. */
+        ext->pid = 0;
+        tasks[0].depth = 0;
+        places[0].task = NULL;
+        lid_changed(0);
+        assert(sleeps == 1 && !lid_shut);
+
+        /* 2. Hung extdisplay ignoring SIGTERM escalates once to cgroup.kill + SIGKILL. */
+        reset_case();
+        file_text("extcg/cgroup.kill", "0\n");
+        lid_shut = 1;
+        tasks[0].depth = 1;
+        ext = &tasks[0].f[0];
+        snprintf(ext->name, sizeof ext->name, "extdisplay");
+        snprintf(ext->cgroup, sizeof ext->cgroup, "%s", cg_virtual);
+        ext->pid = 7778;
+        ext->holding = 1;
+        lid_changed(1);
+        assert(sigterm_count == 1 && sigkill_count == 0 && file_number("extcg/cgroup.kill") == 0);
+        mono_s += (EXTDISPLAY_LID_STOP_MS / 1e3) + 0.1;
+        lid_changed(0);
+        assert(sigkill_count == 1 && last_killed_pid == 7778 && file_number("extcg/cgroup.kill") == 1);
+        lid_changed(0);
+        assert(sigkill_count == 1); /* escalated once, no spam */
+
+        /* 3. Docked and within holdoff: lid close still force-stops extdisplay without sleeping. */
+        reset_case();
+        file_text("drm/card0-HDMI-A-1/status", "connected\n");
+        lid_shut = 1;
+        tasks[0].depth = 1;
+        ext = &tasks[0].f[0];
+        snprintf(ext->name, sizeof ext->name, "extdisplay");
+        snprintf(ext->cgroup, sizeof ext->cgroup, "%s", cg_virtual);
+        ext->pid = 7779;
+        ext->holding = 1;
+        lid_changed(1);
+        assert(sigterm_count == 1 && locked && sleeps == 0 && lid_check_at > now_ms());
+        file_text("drm/card0-HDMI-A-1/status", "disconnected\n");
+
+        reset_case();
+        lid_holdoff_until = now_ms() + 10000;
+        lid_shut = 1;
+        tasks[0].depth = 1;
+        ext = &tasks[0].f[0];
+        snprintf(ext->name, sizeof ext->name, "extdisplay");
+        snprintf(ext->cgroup, sizeof ext->cgroup, "%s", cg_virtual);
+        ext->pid = 7780;
+        ext->holding = 1;
+        lid_changed(1);
+        assert(sigterm_count == 1 && locked && sleeps == 0 && lid_check_at <= now_ms() + 100);
+
+        /* 4. Union of lock rules:
+         *    - auto_lock=0: extdisplay still stops, screen stays unlocked;
+         *    - edge=0 with live-link idle lock due: latches lock_due before stopping and locks. */
+        reset_case();
+        auto_lock = 0;
+        lid_shut = 1;
+        tasks[0].depth = 1;
+        ext = &tasks[0].f[0];
+        snprintf(ext->name, sizeof ext->name, "extdisplay");
+        snprintf(ext->cgroup, sizeof ext->cgroup, "%s", cg_virtual);
+        ext->pid = 7781;
+        ext->holding = 1;
+        lid_changed(1);
+        assert(sigterm_count == 1 && !locked && sleeps == 0);
+        ext->pid = 0;
+        tasks[0].depth = 0;
+        lid_changed(0);
+        assert(!locked && sleeps == 1);
+
+        reset_case();
+        auto_lock = 1;
+        lock_after = 5;
+        active_at = now_ms() - 10000;
+        file_text("drm/card0-HDMI-A-1/status", "connected\n");
+        lid_shut = 1;
+        nplaces = 1;
+        places[0].task = &tasks[0];
+        tasks[0].depth = 1;
+        ext = &tasks[0].f[0];
+        snprintf(ext->name, sizeof ext->name, "extdisplay");
+        snprintf(ext->cgroup, sizeof ext->cgroup, "%s", cg_virtual);
+        ext->pid = 7782;
+        ext->holding = 1;
+        ext->screens = 1;
+        lid_changed(0); /* non-edge recheck: latches lock_due before stopping extdisplay */
+        assert(sigterm_count == 1 && locked && sleeps == 0);
+        file_text("drm/card0-HDMI-A-1/status", "disconnected\n");
+
+        assert(unlink(cg_kill) == 0 && unlink(cg_freeze) == 0 && rmdir(cg) == 0);
+        puts("PASS lid close force-stops extdisplay (graceful SIGTERM, bounded cgroup.kill, never frozen) and locks by union");
+    }
 
     char path[1400];
     const char *files[] = { "drm/card0-HDMI-A-1/status", "power/BAT0/type", "power/BAT0/energy_full",

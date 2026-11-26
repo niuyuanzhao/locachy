@@ -61,6 +61,13 @@ static void note(int fd, const char *text)
     snprintf(log_ + n, sizeof log_ - n, "%s:%s\n", who(fd), text);
 }
 
+void screen_fill(int col, int row, int ncols, int nrows, uint32_t rgb)
+{ (void)col; (void)row; (void)ncols; (void)nrows; (void)rgb; }
+void screen_text(int col, int row, const char *s, uint32_t fg, uint32_t bg)
+{ (void)col; (void)row; (void)s; (void)fg; (void)bg; }
+int screen_cols(void) { return 170; }
+int screen_rows(void) { return 48; }
+void screen_flush(void) {}
 int screen_refresh(void) { refreshed++; step('R'); return available; }
 static int power_offs, power_ons, power_fail;
 int screen_idle_power(int on)
@@ -126,8 +133,12 @@ void keys_take_back(const int *fds, int n)
     step('K');
 }
 void keys_leds(int on) { (void)on; }
-int keys_locks(void) { return 0; }
+static int test_mods, test_caps_owner, test_caps_val = -1, test_caps_calls;
+int keys_modifiers(void) { return test_mods; }
+int keys_locks(void) { return test_caps_val > 0 ? KEYS_LOCK_CAPS : 0; }
 void keys_set_locks(int locks) { (void)locks; }
+void keys_caps_owner(int on) { test_caps_owner = !!on; }
+void keys_set_caps(int on) { test_caps_val = !!on; test_caps_calls++; }
 /* ndev pointer devices: files of their own in the scratch directory, as
  * distinct inodes as event nodes are. */
 int *pointer_lend(size_t *count, char paths[][POINTER_PATH], size_t max)
@@ -744,9 +755,20 @@ static void idle_link(void)
     assert(do_open(-1, argv) == 0);
     home_wait(argv);
     assert(places[0].task == &tasks[0]);
-    /* A holding frame ignores "home" and "switch" control messages (swipe / Super+Esc)
-     * until the live link ends. */
+    /* While focused on a live link, process 1's keyboard observer suppresses
+     * all local actions (Home, Search, Lock, Ctrl+Alt+Del); only releasing
+     * the live link restores them. */
     assert(frame_holding(ext) && focused() == ext);
+    said[0] = 0;
+    test_mods = 0;
+    keyboard_action(K_HOME);
+    keyboard_action(K_ACT_SEARCH);
+    keyboard_action(K_ACT_LOCK);
+    test_mods = KEYS_CTRL | KEYS_ALT;
+    keyboard_action(K_DEL);
+    test_mods = 0;
+    assert(places[0].task == &tasks[0] && !locked && !restart_asked && !strstr(said, "not installed") &&
+           !strstr(said, "not locking"));
     assert(send(peer[ext->ctl], "home", 4, 0) == 4);
     message(ext);
     assert(places[0].task == &tasks[0]);
@@ -755,10 +777,12 @@ static void idle_link(void)
     message(ext);
     assert(places[0].task == &tasks[0]);
     holding = NULL;
-    assert(send(peer[ext->ctl], "home", 4, 0) == 4);
-    message(ext);
+    keyboard_action(K_ACT_LOCK);
+    assert(strstr(said, "not locking"));
+    said[0] = 0;
+    keyboard_action(K_HOME);
     assert(places[0].task == NULL);
-    puts("PASS live link ignores home/switch while held and exits once the link ends");
+    puts("PASS live link suppresses init Home/Search/Lock/Ctrl+Alt+Del while held and restores them after release");
 
     assert(do_open(-1, argv) == 0);
     home_wait(argv);
@@ -1070,6 +1094,64 @@ static void desktop_session(void)
     puts("PASS cold desktop start waits for readiness, and exec/watch failure returns Home without a pin");
 }
 
+static void extdisplay_caps_owner_test(void)
+{
+    reset(2, 0, 0);
+    test_caps_owner = 0;
+    test_caps_val = -1;
+    test_caps_calls = 0;
+    struct frame *ext = task(0, "extdisplay");
+    char *argv[] = { "extdisplay", NULL };
+    assert(do_open(0, argv) == 0);
+    assert(ext->screens && focused() == ext && !test_caps_owner);
+
+    /* A live link taking Caps Lock ownership updates PID 1's Caps state and
+     * suppresses local Caps toggles while focused. */
+    tell(ext, (const char *const[]){ "hold", "1", NULL });
+    tell(ext, (const char *const[]){ "caps", "1", NULL });
+    assert(ext->holding && ext->caps_owned && test_caps_val == 1 && test_caps_calls == 1 && test_caps_owner == 1);
+    tell(ext, (const char *const[]){ "caps", "0", NULL });
+    assert(ext->caps_owned && test_caps_val == 0 && test_caps_calls == 2 && test_caps_owner == 1);
+
+    /* Moving focus to the other screen restores local Caps Lock there; moving
+     * focus back re-engages link Caps ownership. */
+    pressed(&home, 1);
+    assert(focused() == &home && test_caps_owner == 0);
+    pressed(ext, 0);
+    assert(focused() == ext && test_caps_owner == 1);
+
+    /* Dropping the live link clears Caps ownership immediately. */
+    tell(ext, (const char *const[]){ "hold", "0", NULL });
+    assert(!ext->holding && !ext->caps_owned && test_caps_owner == 0);
+
+    /* Non-extdisplay frames cannot claim authoritative Caps Lock. */
+    struct frame *other = task(1, "term");
+    tell(other, (const char *const[]){ "caps", "1", NULL });
+    assert(!other->caps_owned && test_caps_calls == 2 && test_caps_owner == 0);
+
+    /* Managed Wayland extdisplay path (init_session_caps): updates PID 1 Caps
+     * Lock and forwards "caps" to the shared display seat when it holds keys. */
+    reset(1, 0, 0);
+    test_caps_val = 0;
+    test_caps_calls = 0;
+    struct frame *seat = desktop_fixture(0);
+    seat->screens = 1;
+    seat->nkbd = 1;
+    display_front = &tasks[0];
+    log_[0] = '\0';
+    assert(init_session_caps(-1) == 0 && test_caps_calls == 0);
+    assert(init_session_caps(1) == 1 && test_caps_val == 1 && test_caps_calls == 1);
+    assert(strstr(log_, "locachy-seat:caps 1") != NULL);
+    log_[0] = '\0';
+    assert(init_session_caps(0) == 0 && test_caps_val == 0 && test_caps_calls == 2);
+    assert(strstr(log_, "locachy-seat:caps 0") != NULL);
+    assert(test_caps_owner == 1);
+    init_session_caps_release();
+    assert(test_caps_owner == 0);
+    assert(init_session_caps(2) == -1);
+    puts("PASS PID 1 tracks authoritative extdisplay Caps Lock ownership and syncs shared seat");
+}
+
 int main(int argc, char **argv)
 {
     if (strcmp(argv[0], "/proc/self/exe") == 0) {
@@ -1088,6 +1170,7 @@ int main(int argc, char **argv)
     idle_link();
     idle_power();
     desktop_session();
+    extdisplay_caps_owner_test();
     puts("ALL PASSED");
     return 0;
 }

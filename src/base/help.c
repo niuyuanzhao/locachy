@@ -1,5 +1,6 @@
 /* F1's help panel (base.h ui_help): the program's own keys, then the keys every
  * program has. The table is key-action.c's, so a program that shows this links it. */
+#include <errno.h>
 #include <linux/input-event-codes.h>
 
 #include "base.h"
@@ -80,7 +81,9 @@ int ui_help(const char *title, const struct ui_help_line *lines)
             drawn_rows = rows;
             dirty = 0;
         }
+        errno = 0;
         int key = key_poll_timeout(-1, -1);
+        if (key == 0 && errno == EINTR) return ACT_NONE;
         int mods = keys_modifiers ? keys_modifiers() : 0;
         if (key == K_UP) {
             top--;

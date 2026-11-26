@@ -271,7 +271,8 @@ static const char describe[] =
     " \"module_defaults\": {\"en_US.UTF-8\": [\"desktop\"], \"zh_CN.UTF-8\": [\"cjk-fonts\", \"desktop\"]},"
     " \"containers\": [{\"name\": \"firefox\", \"host\": false}, {\"name\": \"foot\", \"host\": true}],"
     " \"container_defaults\": [\"foot\"],"
-    " \"machines\": [{\"name\": \"generic\", \"description\": \"Generic PC\"}, {\"name\": \"x230-agan\", \"description\": \"X230\"}],"
+    " \"machines\": [{\"name\": \"generic\", \"description\": \"Generic PC\"},"
+    " {\"name\": \"hp-omen-17-ck1\", \"description\": \"HP OMEN 17-ck1xxx (board 8A1A)\"}],"
     " \"repo_sections\": [\"core\", \"extra\", \"multilib\"], \"keymaps\": [\"de\", \"us\"], \"timezones\": [\"UTC\", \"Asia/Shanghai\"],"
     " \"tpm\": {\"usable\": false, \"advice\": \"TPM 1.2 off in the firmware: a passphrase\"},"
     " \"source\": {\"text\": \"this medium's own, 0123456789ab; could not fetch\", \"not_newest\": true},"
@@ -1166,8 +1167,8 @@ int main(int argc, char **argv)
     run("no setup mode: no Secure Boot rows");
     assert(snapped("Encrypt the disk") && !snapped("Secure Boot with this computer's own keys"));
 
-    /* The app presets' rows on the System page, under the source's: off and
-     * another branch go to locachy-install; the summary says so. */
+    /* The System page and summary show the machine model and app settings;
+     * locachy-install still receives the stable machine ID. */
     k('\n');                    /* Install LOCachy */
     k(K_EOL); k('\n');          /* Network: Next */
     k(K_DOWN); k('\n');         /* Disk: the first disk */
@@ -1177,6 +1178,7 @@ int main(int argc, char **argv)
     k('\n'); k(21); type("boot-test"); k('\n');
     k(K_DOWN); k(K_DOWN); k('\n'); type("Locachy123"); k('\n'); type("Locachy123"); k('\n');
     for (int s = S_USER; s < S_SYSTEM; s++) { k(K_EOL); k('\n'); }
+    k(K_BOL); k(K_RIGHT); k(SNAP); /* choose the OMEN profile by model */
     k(K_EOL); k(K_UP); k(K_UP); k(K_UP);                     /* above Next and Hibernate after */
     k('\n'); k(21); type("off"); k('\n');
     k(K_DOWN); k('\n'); k(21); type("next"); k('\n');
@@ -1184,7 +1186,9 @@ int main(int argc, char **argv)
     k(K_EOL); k('\n');          /* System: Next */
     k(SNAP);
     k(K_EOL); k('\n'); k('n');  /* Install: --check, then no */
-    run("app presets off, another branch");
+    run("OMEN model and app presets on the System page and summary");
+    assert(snapped("< HP OMEN 17-ck1xxx (board 8A1A) >"));
+    assert(snapped("HP OMEN 17-ck1xxx (board 8A1A); packages for"));
     char row[160];
     snprintf(row, sizeof row, "%-30s %s", "Branch", "main");
     assert(snapped(row));
@@ -1200,6 +1204,7 @@ int main(int argc, char **argv)
     assert(snapped(row));
     calls = slurp(D("calls"));
     assert(strstr(calls, "--check ") && strstr(calls, " --update-branch=main --apps-repo=off --apps-branch=next"));
+    assert(strstr(calls, " --machine=hp-omen-17-ck1 "));
 
     test_multi_disk_storage_and_winmaint();
     test_session_handoff();

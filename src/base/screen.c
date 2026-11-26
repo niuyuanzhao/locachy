@@ -8,7 +8,7 @@
  * independent native canvas, text scale and desktop rectangle. A program keeps
  * its pictures while it does not have the screen.
  *
- * Process 1 opens the first card with a connected output itself (it is the
+ * Process 1 opens a card with a connected output itself (it is the
  * DRM master) and lends connectors and CRTCs in DRM leases (which bring
  * their primary planes along): all of them in one, or, with several
  * screens, each program the screens it shows, the leases side by side. A
@@ -755,9 +755,9 @@ static const char *read_resources(int fd, struct drm_mode_card_res *res,
 /* 1: usable connector, 0: disconnected/unavailable, -1: allocation failed.
  * On a lease, GETENCODER filters possible_crtcs to the visible CRTC list.
  * Passing count_modes > 0 first uses DRM's cached mode list (drmModeGetConnectorCurrent
- * semantics), avoiding 100-600 ms synchronous DDC/EDID hardware probes on every
- * task switch; probe=1 (initial open or hotplug refresh) forces a kernel probe
- * when needed so newly attached monitors and EDID changes are discovered. */
+ * semantics), avoiding synchronous DDC/EDID probes on every task switch.
+ * Positive probes immediately (legacy discovery and refresh), zero may fall
+ * back to probing (leases), negative uses only cached state (hybrid try). */
 static int probe_connectors = 1;
 
 static int read_output(int fd, uint32_t id, struct output *o)
@@ -767,7 +767,7 @@ static int read_output(int fd, uint32_t id, struct output *o)
         uint32_t stack_encs[8];
         struct drm_mode_get_connector c = { .connector_id = id };
         int used_stack = 0;
-        if (!probe_connectors) {
+        if (probe_connectors <= 0) {
             c.count_modes = 64;
             c.modes_ptr = (uintptr_t)stack_modes;
             c.count_encoders = 8;
@@ -785,7 +785,9 @@ static int read_output(int fd, uint32_t id, struct output *o)
             return 0;
         }
         if (used_stack && (c.connection == 3 || (c.connection == 1 && c.count_modes == 0))) {
-            /* Unknown status or empty mode cache: fall back to a kernel probe. */
+            /* A hybrid preference is speculative; leave unknown connectors
+             * to the existing fallback. On a lease, keep the old probe. */
+            if (probe_connectors < 0) return 0;
             c = (struct drm_mode_get_connector){ .connector_id = id };
             used_stack = 0;
             got = ioctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &c);
@@ -1749,6 +1751,224 @@ static void read_display_card_selector(char *out, size_t size)
     }
 }
 
+/* Only cached sysfs fields: PCI vendor/device/class are cached in pci_dev;
+ * connector status_show in drm_sysfs.c reports connector->status. */
+static int drm_read_attr(const char *dir, const char *attr, char *out, size_t size)
+{
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof path, "%s/%s", dir, attr);
+    if (n < 0 || (size_t)n >= sizeof path) return 0;
+    FILE *f = fopen(path, "re");
+    if (!f) return 0;
+    int ok = fgets(out, size, f) != NULL;
+    fclose(f);
+    if (ok) out[strcspn(out, "\n")] = '\0';
+    return ok;
+}
+
+static int drm_pci_number(const char *dir, const char *attr, int base)
+{
+    char buf[24], *end;
+    if (!drm_read_attr(dir, attr, buf, sizeof buf)) return -1;
+    long n = strtol(buf, &end, base);
+    return end != buf && !*end && n >= 0 && n <= INT_MAX ? (int)n : -1;
+}
+
+static int drm_amd_apu(const char *pci)
+{
+    /* PCI IDs flagged AMD_IS_APU in amdgpu_drv.c, for older chips which
+     * may not publish IP discovery. Unknown IDs need positive GC evidence. */
+    int id = drm_pci_number(pci, "device", 16);
+    switch (id) {
+    case 0x15dd: case 0x15d8: /* Raven, Picasso */
+    case 0x15e7: case 0x1636: case 0x1638: case 0x164c: /* Renoir, Lucienne */
+    case 0x164d: case 0x1681: /* Rembrandt */
+        return 1;
+    }
+    /* Only GC versions marked unconditionally AMD_IS_APU by upstream
+     * amdgpu_discovery.c. These sysfs show handlers read cached metadata. */
+    static const unsigned int apu_gc[] = {
+        0x090100, 0x090202, 0x090300, 0x0a0103, 0x0a0104, 0x0a0301,
+        0x0a0303, 0x0a0306, 0x0a0307, 0x0b0001, 0x0b0004, 0x0b0500,
+        0x0b0501, 0x0b0502, 0x0b0503, 0x0b0504, 0x0b0506, 0x0b0700, 0x0b0701,
+    };
+    int major_v = drm_pci_number(pci, "ip_discovery/die/0/GC/0/major", 10);
+    int minor_v = drm_pci_number(pci, "ip_discovery/die/0/GC/0/minor", 10);
+    int rev = drm_pci_number(pci, "ip_discovery/die/0/GC/0/revision", 10);
+    if (major_v < 0 || major_v > 255 || minor_v < 0 || minor_v > 255 || rev < 0 || rev > 255) return 0;
+    for (size_t i = 0; i < sizeof apu_gc / sizeof *apu_gc; i++) {
+        if ((unsigned int)((major_v << 16) | (minor_v << 8) | rev) == apu_gc[i]) return 1;
+    }
+    return 0;
+}
+
+/* The canonical PCI device path contains a host-bridge component, e.g.
+ * .../pci0000:00/0000:00:01.0/0000:01:00.0. */
+static int drm_hex_field(const char *s, size_t len)
+{
+    return strspn(s, "0123456789abcdef") >= len;
+}
+
+static size_t drm_pci_root_len(const char *pci)
+{
+    const char *slot = drm_basename(pci);
+    if (strlen(slot) != 12 || !drm_hex_field(slot, 4) || slot[4] != ':' ||
+        !drm_hex_field(slot + 5, 2) || slot[7] != ':' || !drm_hex_field(slot + 8, 2) ||
+        slot[10] != '.' || slot[11] < '0' || slot[11] > '7') return 0;
+    for (const char *p = pci, *end; (end = strchr(p, '/')) != NULL; p = end + 1) {
+        if (end - p == 10 && strncmp(p, "pci", 3) == 0 && drm_hex_field(p + 3, 4) &&
+            p[7] == ':' && drm_hex_field(p + 8, 2) && memcmp(p + 3, slot, 4) == 0) {
+            return (size_t)(end - pci);
+        }
+    }
+    return 0;
+}
+
+static int drm_fixed_pci(const char *pci, size_t root_len)
+{
+    /* Linux does not mark every internal PCI dev fixed. In that case
+     * require the endpoint itself to be described by platform firmware
+     * (ACPI _ADR, as exported by pci-acpi.c and ACPI glue), not merely an
+     * upstream bridge. Reject removable or ejectable ancestors as well. */
+    char path[PATH_MAX], value[24];
+    snprintf(path, sizeof path, "%s", pci);
+    int fixed = drm_read_attr(path, "removable", value, sizeof value) && strcmp(value, "fixed") == 0;
+    if (!fixed) {
+        struct stat st;
+        int n = snprintf(path, sizeof path, "%s/firmware_node/adr", pci);
+        if (n < 0 || (size_t)n >= sizeof path || stat(path, &st) < 0) return 0;
+        snprintf(path, sizeof path, "%s", pci);
+    }
+    while (strlen(path) > root_len) {
+        if (drm_read_attr(path, "removable", value, sizeof value) && strcmp(value, "removable") == 0) return 0;
+        char eject[PATH_MAX];
+        int n = snprintf(eject, sizeof eject, "%s/firmware_node/eject", path);
+        if (n < 0 || (size_t)n >= sizeof eject || access(eject, F_OK) == 0) return 0;
+        *strrchr(path, '/') = '\0';
+    }
+    return 1;
+}
+
+static int drm_integrated_pci(const char *pci, size_t root_len, int vendor, const char *driver)
+{
+    const char *slot = drm_basename(pci);
+    /* Intel integrated display is the host-bus IGD function, not an Arc
+     * endpoint behind a PCIe bridge (the driver name alone is shared). */
+    if (vendor == 0x8086 && (strcmp(driver, "i915") == 0 || strcmp(driver, "xe") == 0)) {
+        return slot == pci + root_len + 1 && strcmp(slot + 5, "00:02.0") == 0;
+    }
+    return vendor == 0x1002 && strcmp(driver, "amdgpu") == 0 && drm_amd_apu(pci);
+}
+
+static int drm_panel_connected(const char *sysfs, const char *card_name)
+{
+    DIR *dir = opendir(sysfs);
+    if (!dir) return 0;
+    size_t len = strlen(card_name);
+    int found = 0;
+    struct dirent *e;
+    while (!found && (e = readdir(dir)) != NULL) {
+        if (strncmp(e->d_name, card_name, len) != 0 || e->d_name[len] != '-') continue;
+        const char *conn = e->d_name + len + 1;
+        if (strncmp(conn, "eDP-", 4) && strncmp(conn, "LVDS-", 5) && strncmp(conn, "DSI-", 4)) continue;
+        char path[PATH_MAX], value[24];
+        int n = snprintf(path, sizeof path, "%s/%s", sysfs, e->d_name);
+        found = n > 0 && (size_t)n < sizeof path &&
+                drm_read_attr(path, "status", value, sizeof value) && strcmp(value, "connected") == 0;
+    }
+    closedir(dir);
+    return found;
+}
+
+/* Match the current character node to the sysfs object without opening it. */
+static int drm_route_devnode(const char *sys_card, const char *dev_dri, const char *name,
+                             char *out, size_t size)
+{
+    int n = snprintf(out, size, "%s/%s", dev_dri, name);
+    struct stat st;
+    char info[32], tail;
+    unsigned int maj, min;
+    return n > 0 && (size_t)n < size && lstat(out, &st) == 0 && S_ISCHR(st.st_mode) &&
+           access(out, R_OK | W_OK) == 0 && drm_read_attr(sys_card, "dev", info, sizeof info) &&
+           sscanf(info, "%u:%u%c", &maj, &min, &tail) == 2 && maj == 226 &&
+           major(st.st_rdev) == maj && minor(st.st_rdev) == min;
+}
+
+int screen_hybrid_route_from(const char *sysfs_drm_dir, const char *dev_dri_dir,
+                             struct screen_hybrid_route *out)
+{
+    if (!out) return 0;
+    *out = (struct screen_hybrid_route){ 0 };
+    if (!sysfs_drm_dir || !*sysfs_drm_dir || !dev_dri_dir || !*dev_dri_dir) return 0;
+    DIR *dir = opendir(sysfs_drm_dir);
+    if (!dir) return 0;
+    struct screen_hybrid_route route = { 0 };
+    char pci_panel[PATH_MAX] = "", pci_nvidia[PATH_MAX] = "";
+    struct dirent *e;
+    int count = 0;
+    while ((e = readdir(dir)) != NULL) {
+        const char *name = e->d_name;
+        if (!drm_valid_card_name(name)) continue;
+        /* An extra GPU must not disappear from Wayland's fixed list. */
+        if (++count > 2) break;
+        char sys_card[PATH_MAX], attr[PATH_MAX], pci[PATH_MAX], driver[32], bus[16];
+        int n = snprintf(sys_card, sizeof sys_card, "%s/%s", sysfs_drm_dir, name);
+        if (n < 0 || (size_t)n >= sizeof sys_card) break;
+        n = snprintf(attr, sizeof attr, "%s/device", sys_card);
+        if (n < 0 || (size_t)n >= sizeof attr || !realpath(attr, pci)) break;
+        size_t root_len = drm_pci_root_len(pci);
+        n = snprintf(attr, sizeof attr, "%s/subsystem", pci);
+        if (!root_len || n < 0 || (size_t)n >= sizeof attr ||
+            !drm_readlink_base(attr, bus, sizeof bus) || strcmp(bus, "pci") != 0) break;
+        n = snprintf(attr, sizeof attr, "%s/driver", pci);
+        if (n < 0 || (size_t)n >= sizeof attr || !drm_readlink_base(attr, driver, sizeof driver)) break;
+        int vendor = drm_pci_number(pci, "vendor", 16);
+        int class = drm_pci_number(pci, "class", 16);
+        if (class < 0 || class >> 16 != 0x03) break;
+        if (vendor == 0x10de && (strcmp(driver, "nvidia") == 0 || strcmp(driver, "nouveau") == 0) &&
+            !pci_nvidia[0] && drm_fixed_pci(pci, root_len) &&
+            drm_route_devnode(sys_card, dev_dri_dir, name, route.nvidia_card, sizeof route.nvidia_card)) {
+            strcpy(pci_nvidia, pci);
+        } else if (!pci_panel[0] && drm_integrated_pci(pci, root_len, vendor, driver) &&
+                   drm_panel_connected(sysfs_drm_dir, name) &&
+                   drm_route_devnode(sys_card, dev_dri_dir, name, route.panel_card, sizeof route.panel_card)) {
+            strcpy(pci_panel, pci);
+        } else {
+            break;
+        }
+    }
+    closedir(dir);
+    size_t root_len = drm_pci_root_len(pci_panel);
+    if (count != 2 || !root_len || !pci_nvidia[0] || root_len != drm_pci_root_len(pci_nvidia) ||
+        strncmp(pci_panel, pci_nvidia, root_len) != 0 || strcmp(pci_panel, pci_nvidia) == 0) return 0;
+    *out = route;
+    return 1;
+}
+
+static void on_rc_gpu_graphics_policy(const char *name, const char *value, void *arg)
+{
+    if (strcmp(name, "gpu_graphics_policy") == 0) {
+        /* off (and any unknown value) leaves the old selection in place. */
+        *(int *)arg = value && strcmp(value, "auto") == 0;
+    }
+}
+
+int screen_hybrid_route(struct screen_hybrid_route *out)
+{
+    if (!out) return 0;
+    *out = (struct screen_hybrid_route){ 0 };
+    /* make.sh writes this only to the installed root. The same screen.c
+     * is linked into PID 1 (before and after switch_root) and live tools. */
+    struct stat st;
+    if (stat("/usr/local/lib/locachy/level", &st) < 0 || !S_ISREG(st.st_mode) || !rc_read) return 0;
+    char selector[64];
+    read_display_card_selector(selector, sizeof selector);
+    if (!drm_selector_is_auto(selector)) return 0;
+    int enabled = 1;
+    rc_read(on_rc_gpu_graphics_policy, &enabled);
+    return enabled && screen_hybrid_route_from("/sys/class/drm", "/dev/dri", out);
+}
+
 static int drm_render_driver_allowed(const char *driver)
 {
     return driver && (strcmp(driver, "i915") == 0 || strcmp(driver, "xe") == 0 ||
@@ -1795,6 +2015,32 @@ static int drm_open_card_fd(const char *path, int want_master)
     return fd;
 }
 
+/* One try using cached connector state. A failed preference must not stop
+ * the existing probe (nor turn it into a retry loop of its own). */
+static int screen_try_hybrid_panel(const struct screen_hybrid_route *route, int want_master)
+{
+    int fd = drm_open_card_fd(route->panel_card, want_master);
+    if (fd >= 0) {
+        probe_connectors = -1;
+        const char *error = prepare(fd);
+        probe_connectors = 1;
+        if (!error) error = show(fd);
+        if (!error) {
+            for (uint32_t i = 0; i < noutputs; i++) {
+                if (outputs[i].internal) {
+                    say("screen: on %s (hybrid graphics)", route->panel_card);
+                    return 1;
+                }
+            }
+        }
+        clear_outputs(fd);
+        card = -1;
+        close(fd);
+    }
+    say("screen: hybrid panel unavailable, using legacy card search");
+    return 0;
+}
+
 int screen_open(const char *font_path)
 {
     active_bar.valid = 0;
@@ -1837,6 +2083,12 @@ int screen_open(const char *font_path)
     if (explicit_card && !drm_selector_valid(selector)) {
         say("screen: invalid display_card=%s; using auto", selector);
         explicit_card = 0;
+    }
+    /* Only an initial preference, not a replacement for the bounded legacy
+     * search: cached panel state may be stale or this card may fail to show. */
+    struct screen_hybrid_route route;
+    if (drm_selector_is_auto(selector) && screen_hybrid_route(&route) && screen_try_hybrid_panel(&route, 0)) {
+        return 1;
     }
     int fallback_logged = 0;
     for (int attempt = 0; why == NULL && attempt <= 50; attempt++) {
@@ -2283,6 +2535,10 @@ int screen_refresh(void)
         if (explicit_card && !drm_selector_valid(selector)) {
             say("screen: invalid display_card=%s; using auto", selector);
             explicit_card = 0;
+        }
+        struct screen_hybrid_route route;
+        if (drm_selector_is_auto(selector) && screen_hybrid_route(&route) && screen_try_hybrid_panel(&route, 1)) {
+            return 1;
         }
         int passes = explicit_card ? 2 : 1;
         for (int pass = 0; pass < passes; pass++) {

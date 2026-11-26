@@ -35,7 +35,7 @@ ar rcs "$b/liblocachy-live.a" "$b"/base-*.o
 # Weak hooks of the base resolved from the archive (as make.sh's HOOK_THEME/HOOK_BASE/HOOK_BAR).
 hook_theme="-Wl,-u,theme_get -Wl,-u,theme_reload"
 hook_bar="-Wl,-u,base_status_fields"
-hook_raw="-Wl,-u,base_raw_cancel -Wl,-u,base_raw_emit -Wl,-u,base_raw_forward_home -Wl,-u,base_raw_pending"
+hook_raw="-Wl,-u,base_raw_cancel -Wl,-u,base_raw_emit -Wl,-u,base_raw_exclusive -Wl,-u,base_raw_pending"
 hook_data="-Wl,-u,wl_data_active -Wl,-u,wl_data_clipboard_get -Wl,-u,wl_data_clipboard_set -Wl,-u,wl_data_clipboard_clear -Wl,-u,wl_data_drag_active -Wl,-u,wl_data_drag_start -Wl,-u,wl_data_drag_start_key -Wl,-u,wl_data_press_serial"
 live_hooks="$hook_theme $hook_raw $hook_data $hook_bar"
 mkdir -p "$root/usr/local/bin" "$root/usr/local/share/locachy/terminus"

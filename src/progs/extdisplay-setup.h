@@ -41,6 +41,7 @@ enum extdisplay_setup_event {
     EXTDISPLAY_SETUP_EV_CHANGED, /* subscribed candidates changed; rescan when idle */
     EXTDISPLAY_SETUP_EV_PROGRESS,/* carrier/address/discovery preparation changed */
     EXTDISPLAY_SETUP_EV_CODE,    /* lease and code are there to show */
+    EXTDISPLAY_SETUP_EV_SCAN_ERROR, /* the scan/watch was refused: error[] */
     EXTDISPLAY_SETUP_EV_ERROR,   /* the pair was refused: error[] */
     EXTDISPLAY_SETUP_EV_PAIRED,  /* stream is the plaintext stream, now the caller's */
     EXTDISPLAY_SETUP_EV_ENDED,   /* reason[] */
@@ -58,7 +59,8 @@ struct extdisplay_setup {
     int fd;
     enum extdisplay_setup_state state;
     struct extdisplay_iface ifaces[EXTDISPLAY_SETUP_IFACES];
-    int count, scanned, scanning, watching, changed;
+    int count, scanned, scanning, watching, watch_pending, changed;
+    int scan_error; /* clear this diagnostic when a later snapshot succeeds */
     char progress[16]; /* carrier, address, discovery or listener */
     char pairing[EXTDISPLAY_SETUP_NAME];  /* the interface asked for */
     char linklocal[65], port[8], code[65]; /* shown while waiting; wiped after */
@@ -67,7 +69,8 @@ struct extdisplay_setup {
 };
 
 void extdisplay_setup_init(struct extdisplay_setup *s, int fd);
-/* 0, or -1 when not allowed in this state or not sent. */
+/* Request a snapshot, repeating a refused initial watch if needed.
+ * Returns 0, or -1 when not allowed in this state or not sent. */
 int extdisplay_setup_scan(struct extdisplay_setup *s);
 /* Subscribe before taking the first snapshot; changes are coalesced until
  * the caller asks for another scan. Does not auto-pair by itself. */
@@ -87,24 +90,29 @@ void extdisplay_setup_forget(struct extdisplay_setup *s);
 /* "carrier lost" and the like, for the status line; NULL if unknown. */
 const char *extdisplay_setup_reason_text(const char *reason);
 
-/* Frontend auto-pair and hot-plug policy layered over extdisplay_setup:
- * remembers user selection and manual suppression (Esc/F5/error), and re-arms
- * automatic pairing after a session ends or carrier is lost so replugging the
- * cable reconnects without user input while ambiguity still waits for a choice. */
+/* Frontend auto-pair and hot-plug policy layered over extdisplay_setup. */
 struct extdisplay_auto {
     int enabled;
     int suppressed;
     int selected;
     struct extdisplay_iface selection;
     struct extdisplay_iface suppressed_iface;
+    int automatic_attempt, recovering;
+    unsigned scan_retries, preparation_retries;
+    double retry_at;
 };
 
 void extdisplay_auto_init(struct extdisplay_auto *a);
-void extdisplay_auto_on_event(struct extdisplay_auto *a, struct extdisplay_setup *s, enum extdisplay_setup_event ev);
+/* Stop pending automatic work. If suppress is set, wait for the selected
+ * link to change before auto-pairing it again. */
+void extdisplay_auto_pause(struct extdisplay_auto *a, int suppress);
+/* now is monotonic time in seconds. */
+void extdisplay_auto_on_event(struct extdisplay_auto *a, struct extdisplay_setup *s,
+                             enum extdisplay_setup_event ev, double now);
 void extdisplay_auto_after_session(struct extdisplay_auto *a, struct extdisplay_setup *s);
-/* Advances pending rescan or automatic pair when s is in EXTDISPLAY_SETUP_LIST.
- * Returns 1 if a scan or pair was started, 0 otherwise. */
-int extdisplay_auto_step(struct extdisplay_auto *a, struct extdisplay_setup *s);
+/* Advances a pending rescan or automatic pair. Returns 1 if it attempted to
+ * send either command, 0 otherwise. */
+int extdisplay_auto_step(struct extdisplay_auto *a, struct extdisplay_setup *s, double now);
 
 /* The broker is a child of extdisplay: "extdisplay-broker --control-fd 3", with stdio on
  * /dev/null and nothing else open (the session owner's descriptor included).

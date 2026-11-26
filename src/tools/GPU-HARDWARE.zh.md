@@ -2,6 +2,16 @@
 
 LOCachy 将独立 NVIDIA GPU 的底层硬件能力直接并入系统的原生分层：`/usr/local/share/locachy/machines/` 机型配置、`rc.conf` 分层覆盖、`/etc/modules-load.d/` 与 `/etc/modprobe.d/`（由 `src/base/modload.c` 加载）、`locachy-boot` 统一内核镜像（UKI），以及由「设置」驱动的 `locachy-jobs` 系统任务。
 
+## 显示路由与独显开关
+
+**设置 → 输入与输出 → NVIDIA GPU** 下有三项独立控制：
+
+- **混合显卡策略**对应 `gpu_graphics_policy="auto"`（默认）或 `"off"`。能确认是内置 NVIDIA 混合显卡、且内屏接在核显上时，原生界面优先使用内屏所在的卡，labwc 优先用核显渲染，同时保留两张卡的输出。不能确认拓扑、手动指定显示卡或关闭策略时，保留原有选择。此项不装驱动，不强制应用使用 NVIDIA，不改固件，也不影响 CUDA。下次启动图形界面时生效。
+- **固件显示路由**在内核 `asus-armoury` 驱动确实暴露 MUX 控制时，可选混合或 NVIDIA 独显直连。等待重启时显示的是固件里已设定的值，不是当前生效的路由；系统不会自动重启。
+- **NVIDIA 独显**使用 `asus-armoury` 的独立硬件开关。禁用后独显端口和 CUDA 都不可用，直到重新启用。只有能确认当前是混合模式、没有待重启的固件设置、且核显有已连接内屏时，才能请求禁用；独显正在使用时，驱动还可以拒绝。普通运行时省电和 `gpu-unlock` 的 RTD3 设置不变。
+
+固件设置需再次按 Enter 确认。`locachy-gpu-graphics status --json` 可读回固件配置；`set-mux hybrid|discrete` 和 `set-dgpu on|off` 走特权系统任务。未暴露、不可读或冲突的控制不会猜测写入。若机型只能从 BIOS 设置切换，就在 BIOS 中操作；启动旧的 UKI 不能撤销已写入的固件设置。
+
 ## 1. 驱动前 NVIDIA GPU 解锁（`locachy-gpu-unlock`）
 
 部分 NVIDIA GPU 在驱动初始化前会应用固件中的速度选择器。`locachy-gpu-unlock` 将上游 [Zagitta/gpu-unlock](https://github.com/Zagitta/gpu-unlock) 直接集成进 LOCachy。上游内核模块为其 recipe 表中的 PCI ID 解除该限制，具体效果与范围见上游 README。在「设置」中进入 `Input & Output -> NVIDIA GPU -> NVIDIA GPU unlock (gpu-unlock)` 按 `Enter` 即可一键从 GitHub 拉取、构建并启用，也支持命令行操作：

@@ -153,6 +153,8 @@ static void released(void)
     extdisplay_setup_read(&s);
     CHECK(extdisplay_setup_release(&s) == 0 && s.state == EXTDISPLAY_SETUP_RELEASING);
     CHECK(strcmp(request(sv[1]), "release") == 0);
+    reply(sv[1], "ended carrier-lost");
+    CHECK(extdisplay_setup_read(&s) == EXTDISPLAY_SETUP_EV_NONE && s.state == EXTDISPLAY_SETUP_RELEASING);
     reply(sv[1], "ended released");
     CHECK(extdisplay_setup_read(&s) == EXTDISPLAY_SETUP_EV_ENDED && s.state == EXTDISPLAY_SETUP_RELEASED);
     CHECK(extdisplay_setup_release(&s) == -1);
@@ -200,7 +202,7 @@ static void crossing(void)
     /* A scan refused while a lease is active: an error shown, not a broken channel. */
     extdisplay_setup_init(&s, -1);
     s.state = EXTDISPLAY_SETUP_SCANNING;
-    CHECK(extdisplay_setup_line(&s, "error busy", NULL, 0) == EXTDISPLAY_SETUP_EV_ERROR && s.state == EXTDISPLAY_SETUP_LIST);
+    CHECK(extdisplay_setup_line(&s, "error busy", NULL, 0) == EXTDISPLAY_SETUP_EV_SCAN_ERROR && s.state == EXTDISPLAY_SETUP_LIST);
     CHECK(strcmp(s.error, "busy") == 0 && s.count == 0);
     /* A lease with another name, while cancelling, is still a broken channel. */
     extdisplay_setup_init(&s, -1);
@@ -496,6 +498,201 @@ static void automatic_flow(void)
     CHECK(extdisplay_setup_line(&s, "preparing cable1 carrier", NULL, 0) == EXTDISPLAY_SETUP_EV_BROKEN);
 }
 
+static void auto_reply(struct extdisplay_auto *a, struct extdisplay_setup *s, const char *line,
+                       enum extdisplay_setup_event expected, double now)
+{
+    enum extdisplay_setup_event ev = extdisplay_setup_line(s, line, NULL, 0);
+    CHECK(ev == expected);
+    extdisplay_auto_on_event(a, s, ev, now);
+}
+
+static void auto_list(struct extdisplay_auto *a, struct extdisplay_setup *s, const char *iface, double now)
+{
+    if (iface) auto_reply(a, s, iface, EXTDISPLAY_SETUP_EV_NONE, now);
+    auto_reply(a, s, "end", EXTDISPLAY_SETUP_EV_LIST, now);
+}
+
+static void auto_request(struct extdisplay_auto *a, struct extdisplay_setup *s, int broker, double now,
+                         const char *expected)
+{
+    CHECK(extdisplay_auto_step(a, s, now) == (*expected != '\0'));
+    CHECK(strcmp(request(broker), expected) == 0);
+}
+
+static const char tb_up[] = "iface tb0 thunderbolt-net up 8 02:00:00:00:00:01";
+static const char tb_down[] = "iface tb0 thunderbolt-net down 8 02:00:00:00:00:01";
+static const char tb_pair[] = "pair tb0 8 02:00:00:00:00:01";
+static const char prep_address[] = "error the cable has carrier but no usable IPv6 link-local address";
+
+static void scan_recovery(void)
+{
+    int sv[2];
+    CHECK(channel(sv) == 0);
+    if (failures) return;
+    struct extdisplay_setup s;
+    struct extdisplay_auto a;
+    extdisplay_setup_init(&s, sv[0]);
+    extdisplay_auto_init(&a);
+    CHECK(extdisplay_setup_watch(&s) == 0);
+    CHECK(!strcmp(request(sv[1]), "watch"));
+
+    /* Scan errors never immediately scan again or suppress a future pair.
+     * A refused initial watch did not subscribe on the broker side. */
+    auto_reply(&a, &s, "error busy", EXTDISPLAY_SETUP_EV_SCAN_ERROR, 10.0);
+    auto_request(&a, &s, sv[1], 10.0, "");
+    auto_request(&a, &s, sv[1], 10.49, "");
+    auto_request(&a, &s, sv[1], 10.5, "watch");
+    auto_reply(&a, &s, "error busy", EXTDISPLAY_SETUP_EV_SCAN_ERROR, 10.5);
+    auto_request(&a, &s, sv[1], 11.49, "");
+    auto_request(&a, &s, sv[1], 11.5, "watch");
+    auto_reply(&a, &s, "error busy", EXTDISPLAY_SETUP_EV_SCAN_ERROR, 11.5);
+    auto_request(&a, &s, sv[1], 13.49, "");
+    auto_request(&a, &s, sv[1], 13.5, "watch");
+    auto_reply(&a, &s, "error busy", EXTDISPLAY_SETUP_EV_SCAN_ERROR, 13.5);
+    auto_request(&a, &s, sv[1], 1000.0, "");
+    CHECK(s.count == 0 && !s.watching && !a.suppressed && !strcmp(s.error, "busy"));
+
+    /* F5 can retry the initial subscription after the bounded burst ends. */
+    extdisplay_auto_pause(&a, 1);
+    CHECK(extdisplay_setup_scan(&s) == 0);
+    CHECK(!strcmp(request(sv[1]), "watch"));
+    auto_list(&a, &s, NULL, 1001.0);
+    CHECK(s.watching && !s.watch_pending && !s.error[0]);
+    auto_request(&a, &s, sv[1], 2000.0, "");
+    auto_reply(&a, &s, "changed", EXTDISPLAY_SETUP_EV_CHANGED, 2000.0);
+    auto_request(&a, &s, sv[1], 2000.0, "scan");
+    auto_reply(&a, &s, "error busy", EXTDISPLAY_SETUP_EV_SCAN_ERROR, 2000.0);
+    auto_request(&a, &s, sv[1], 2000.49, "");
+    auto_request(&a, &s, sv[1], 2000.5, "scan");
+    auto_list(&a, &s, tb_up, 2000.5);
+    auto_request(&a, &s, sv[1], 2000.5, tb_pair);
+
+    /* A timeout waiting for a sender is not an authentication failure: keep
+     * the established long-running availability on the same connected link. */
+    auto_reply(&a, &s, "lease tb0 fe80::1 27183", EXTDISPLAY_SETUP_EV_NONE, 2001.0);
+    auto_reply(&a, &s, "code ABCD-EFGH", EXTDISPLAY_SETUP_EV_CODE, 2001.0);
+    auto_reply(&a, &s, "ended timeout", EXTDISPLAY_SETUP_EV_ENDED, 2301.0);
+    CHECK(!strcmp(request(sv[1]), "scan"));
+    auto_list(&a, &s, tb_up, 2301.0);
+    auto_request(&a, &s, sv[1], 2301.0, tb_pair);
+    close(sv[0]);
+    close(sv[1]);
+}
+
+static void preparation_recovery(void)
+{
+    int sv[2];
+    CHECK(channel(sv) == 0);
+    if (failures) return;
+    struct extdisplay_setup s;
+    struct extdisplay_auto a;
+    extdisplay_setup_init(&s, sv[0]);
+    extdisplay_auto_init(&a);
+    CHECK(extdisplay_setup_watch(&s) == 0);
+    CHECK(!strcmp(request(sv[1]), "watch"));
+    auto_list(&a, &s, tb_up, 0.0);
+    auto_request(&a, &s, sv[1], 0.0, tb_pair);
+
+    /* A stale lease and two empty snapshots, without any netlink event.
+     * The original name, identity and carrier are unchanged on return. */
+    auto_reply(&a, &s, "error the previous lease of this device did not end cleanly; it is not back in locachy-net yet",
+               EXTDISPLAY_SETUP_EV_ERROR, 20.0);
+    auto_request(&a, &s, sv[1], 20.49, "");
+    auto_request(&a, &s, sv[1], 20.5, "scan");
+    auto_list(&a, &s, NULL, 20.5);
+    CHECK(s.error[0] && s.count == 0);
+    auto_request(&a, &s, sv[1], 21.49, "");
+    auto_request(&a, &s, sv[1], 21.5, "scan");
+    auto_list(&a, &s, NULL, 21.5);
+    auto_request(&a, &s, sv[1], 23.49, "");
+    auto_request(&a, &s, sv[1], 23.5, "scan");
+    auto_list(&a, &s, tb_up, 23.5);
+    auto_request(&a, &s, sv[1], 23.5, tb_pair);
+
+    /* A repeated preparation failure exhausts rather than renewing the
+     * budget just because the same interface is present. */
+    auto_reply(&a, &s, "preparing tb0 address", EXTDISPLAY_SETUP_EV_PROGRESS, 23.5);
+    auto_reply(&a, &s, prep_address, EXTDISPLAY_SETUP_EV_ERROR, 33.5);
+    CHECK(!strcmp(request(sv[1]), "scan"));
+    CHECK(a.suppressed && !strcmp(s.error, prep_address + 6));
+    auto_list(&a, &s, tb_up, 1000.0);
+    auto_request(&a, &s, sv[1], 1000.0, "");
+    CHECK(s.count == 1 && a.suppressed);
+    auto_reply(&a, &s, "changed", EXTDISPLAY_SETUP_EV_CHANGED, 1001.0);
+    auto_request(&a, &s, sv[1], 1001.0, "scan");
+    auto_list(&a, &s, tb_up, 1001.0);
+    auto_request(&a, &s, sv[1], 1001.0, "");
+    auto_reply(&a, &s, "changed", EXTDISPLAY_SETUP_EV_CHANGED, 1002.0);
+    auto_request(&a, &s, sv[1], 1002.0, "scan");
+    auto_list(&a, &s, tb_down, 1002.0);
+    auto_request(&a, &s, sv[1], 1002.0, "");
+    auto_reply(&a, &s, "changed", EXTDISPLAY_SETUP_EV_CHANGED, 1003.0);
+    auto_request(&a, &s, sv[1], 1003.0, "scan");
+    auto_list(&a, &s, tb_up, 1003.0);
+    auto_request(&a, &s, sv[1], 1003.0, tb_pair);
+
+    /* The first post-retry snapshot may already find the same restored link. */
+    auto_reply(&a, &s, "error the cable interface disappeared", EXTDISPLAY_SETUP_EV_ERROR, 1004.0);
+    auto_request(&a, &s, sv[1], 1004.0, "");
+    auto_request(&a, &s, sv[1], 1004.5, "scan");
+    auto_list(&a, &s, tb_up, 1004.5);
+    auto_request(&a, &s, sv[1], 1004.5, tb_pair);
+    auto_reply(&a, &s, "lease tb0 fe80::1 27183", EXTDISPLAY_SETUP_EV_NONE, 1004.5);
+    auto_reply(&a, &s, "code ABCD-EFGH", EXTDISPLAY_SETUP_EV_CODE, 1004.5);
+    CHECK(s.state == EXTDISPLAY_SETUP_WAITING);
+    close(sv[0]);
+    close(sv[1]);
+}
+
+static void manual_and_auth_refusals(void)
+{
+    static const struct {
+        const char *line;
+        enum extdisplay_setup_event ev;
+        int manual, cancel;
+    } cases[] = {
+        { "error the selected interface changed; choose it again", EXTDISPLAY_SETUP_EV_ERROR, 0, 0 },
+        { "error the session namespace is not link-local only", EXTDISPLAY_SETUP_EV_ERROR, 0, 0 },
+        { "ended handshake-failed", EXTDISPLAY_SETUP_EV_ENDED, 0, 0 },
+        { "ended error", EXTDISPLAY_SETUP_EV_ENDED, 0, 0 },
+        { "ended carrier-lost", EXTDISPLAY_SETUP_EV_ENDED, 0, 1 }, /* old result crossed Esc */
+        { prep_address, EXTDISPLAY_SETUP_EV_ERROR, 1, 0 },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        int sv[2];
+        CHECK(channel(sv) == 0);
+        if (failures) return;
+        struct extdisplay_setup s;
+        struct extdisplay_auto a;
+        extdisplay_setup_init(&s, sv[0]);
+        extdisplay_auto_init(&a);
+        CHECK(extdisplay_setup_watch(&s) == 0);
+        CHECK(!strcmp(request(sv[1]), "watch"));
+        auto_list(&a, &s, tb_up, 0.0);
+        if (cases[i].manual) {
+            extdisplay_auto_pause(&a, 0);
+            a.selection = s.ifaces[0];
+            CHECK(extdisplay_setup_pair(&s, a.selection.name) == 0);
+            CHECK(!strcmp(request(sv[1]), tb_pair));
+        } else {
+            auto_request(&a, &s, sv[1], 0.0, tb_pair);
+        }
+        if (cases[i].cancel) {
+            extdisplay_auto_pause(&a, 1);
+            CHECK(extdisplay_setup_cancel(&s) == 0);
+            CHECK(!strcmp(request(sv[1]), "cancel"));
+        }
+        auto_reply(&a, &s, cases[i].line, cases[i].ev, 1.0);
+        if (cases[i].cancel) CHECK(!strcmp(s.reason, "cancelled"));
+        CHECK(!strcmp(request(sv[1]), "scan"));
+        auto_list(&a, &s, tb_up, 1.0);
+        auto_request(&a, &s, sv[1], 1000.0, "");
+        CHECK(a.suppressed && s.count == 1);
+        close(sv[0]);
+        close(sv[1]);
+    }
+}
+
 static void carrier_lost_hotplug(void)
 {
     int sv[2];
@@ -511,8 +708,8 @@ static void carrier_lost_hotplug(void)
     CHECK(strcmp(request(sv[1]), "watch") == 0);
     CHECK(extdisplay_setup_line(&s, "iface tb0 thunderbolt-net up 8 02:00:00:00:00:01", NULL, 0) == EXTDISPLAY_SETUP_EV_NONE);
     CHECK(extdisplay_setup_line(&s, "end", NULL, 0) == EXTDISPLAY_SETUP_EV_LIST);
-    extdisplay_auto_on_event(&a, &s, EXTDISPLAY_SETUP_EV_LIST);
-    CHECK(extdisplay_auto_step(&a, &s) == 1 && s.state == EXTDISPLAY_SETUP_PAIRING);
+    extdisplay_auto_on_event(&a, &s, EXTDISPLAY_SETUP_EV_LIST, 0.0);
+    CHECK(extdisplay_auto_step(&a, &s, 0.0) == 1 && s.state == EXTDISPLAY_SETUP_PAIRING);
     CHECK(strcmp(request(sv[1]), "pair tb0 8 02:00:00:00:00:01") == 0);
     CHECK(extdisplay_setup_line(&s, "lease tb0 fe80::1 27183", NULL, 0) == EXTDISPLAY_SETUP_EV_NONE);
     CHECK(extdisplay_setup_line(&s, "code ABCD-EFGH-IJKL-MNOP-QRST-UVWX-YQ", NULL, 0) == EXTDISPLAY_SETUP_EV_CODE);
@@ -532,31 +729,31 @@ static void carrier_lost_hotplug(void)
     CHECK(strcmp(request(sv[1]), "scan") == 0);
     /* Empty scan while cable is out: stays waiting, does not close or pair. */
     CHECK(extdisplay_setup_line(&s, "end", NULL, 0) == EXTDISPLAY_SETUP_EV_LIST);
-    extdisplay_auto_on_event(&a, &s, EXTDISPLAY_SETUP_EV_LIST);
-    CHECK(extdisplay_auto_step(&a, &s) == 0 && s.state == EXTDISPLAY_SETUP_LIST && s.count == 0);
+    extdisplay_auto_on_event(&a, &s, EXTDISPLAY_SETUP_EV_LIST, 0.0);
+    CHECK(extdisplay_auto_step(&a, &s, 0.0) == 0 && s.state == EXTDISPLAY_SETUP_LIST && s.count == 0);
 
     /* Cable replugged: broker announces changed -> rescan -> auto-pairs new interface. */
     CHECK(extdisplay_setup_line(&s, "changed", NULL, 0) == EXTDISPLAY_SETUP_EV_CHANGED);
-    extdisplay_auto_on_event(&a, &s, EXTDISPLAY_SETUP_EV_CHANGED);
-    CHECK(extdisplay_auto_step(&a, &s) == 1 && s.state == EXTDISPLAY_SETUP_SCANNING);
+    extdisplay_auto_on_event(&a, &s, EXTDISPLAY_SETUP_EV_CHANGED, 0.0);
+    CHECK(extdisplay_auto_step(&a, &s, 0.0) == 1 && s.state == EXTDISPLAY_SETUP_SCANNING);
     CHECK(strcmp(request(sv[1]), "scan") == 0);
     CHECK(extdisplay_setup_line(&s, "iface tb1 thunderbolt-net up 11 02:00:00:00:00:01", NULL, 0) == EXTDISPLAY_SETUP_EV_NONE);
     CHECK(extdisplay_setup_line(&s, "end", NULL, 0) == EXTDISPLAY_SETUP_EV_LIST);
-    extdisplay_auto_on_event(&a, &s, EXTDISPLAY_SETUP_EV_LIST);
-    CHECK(extdisplay_auto_step(&a, &s) == 1 && s.state == EXTDISPLAY_SETUP_PAIRING);
+    extdisplay_auto_on_event(&a, &s, EXTDISPLAY_SETUP_EV_LIST, 0.0);
+    CHECK(extdisplay_auto_step(&a, &s, 0.0) == 1 && s.state == EXTDISPLAY_SETUP_PAIRING);
     CHECK(strcmp(request(sv[1]), "pair tb1 11 02:00:00:00:00:01") == 0);
 
     /* Carrier-lost during waiting also returns to waiting and auto-pairs on return,
      * while ambiguity (two live candidates) still waits for user choice. */
     CHECK(extdisplay_setup_line(&s, "ended carrier-lost", NULL, 0) == EXTDISPLAY_SETUP_EV_ENDED);
-    extdisplay_auto_on_event(&a, &s, EXTDISPLAY_SETUP_EV_ENDED);
+    extdisplay_auto_on_event(&a, &s, EXTDISPLAY_SETUP_EV_ENDED, 0.0);
     CHECK(a.enabled == 1 && a.suppressed == 0 && s.state == EXTDISPLAY_SETUP_SCANNING);
     CHECK(strcmp(request(sv[1]), "scan") == 0);
     CHECK(extdisplay_setup_line(&s, "iface tb1 thunderbolt-net up 12 02:00:00:00:00:01", NULL, 0) == EXTDISPLAY_SETUP_EV_NONE);
     CHECK(extdisplay_setup_line(&s, "iface tb2 thunderbolt-net up 13 02:00:00:00:00:02", NULL, 0) == EXTDISPLAY_SETUP_EV_NONE);
     CHECK(extdisplay_setup_line(&s, "end", NULL, 0) == EXTDISPLAY_SETUP_EV_LIST);
-    extdisplay_auto_on_event(&a, &s, EXTDISPLAY_SETUP_EV_LIST);
-    CHECK(extdisplay_auto_step(&a, &s) == 0 && s.state == EXTDISPLAY_SETUP_LIST);
+    extdisplay_auto_on_event(&a, &s, EXTDISPLAY_SETUP_EV_LIST, 0.0);
+    CHECK(extdisplay_auto_step(&a, &s, 0.0) == 0 && s.state == EXTDISPLAY_SETUP_LIST);
 
     close(sv[0]);
     close(sv[1]);
@@ -567,6 +764,9 @@ int main(int argc, char **argv)
     if (argc == 3 && strcmp(argv[1], "--control-fd") == 0 && strcmp(argv[2], "3") == 0) return stub();
     flow();
     automatic_flow();
+    scan_recovery();
+    preparation_recovery();
+    manual_and_auth_refusals();
     carrier_lost_hotplug();
     cancelled();
     released();

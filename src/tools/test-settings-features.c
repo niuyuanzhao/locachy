@@ -18,13 +18,17 @@
 static char fake_winmaint_state[256] = "/tmp/nonexistent-winmaint-state.json";
 #define WINMAINT_STATE_FILE fake_winmaint_state
 #define SETTINGS_COMMAND_OUTPUT
+#define SETTINGS_SSH_ADMIN
 int settings_access(const char *path, int mode);
 int settings_kill(pid_t pid, int sig);
+struct passwd *settings_getpwuid(uid_t uid);
 #define access settings_access
 #define kill settings_kill
+#define getpwuid settings_getpwuid
 #define main settings_main
 #include "../progs/settings.c"
 #undef main
+#undef getpwuid
 #undef kill
 #undef access
 #include "../base/fontmatch.c"
@@ -45,16 +49,119 @@ static int reloads, fail_rc;
 static char rc_name[32][64], rc_value[32][256];
 static int rc_count;
 static int fake_pair_installed, fake_winmaint_installed, fake_gpu_unlock_installed;
+static int fake_ssh_installed = 1;
+static int ssh_reload_calls, ssh_regen_calls, ssh_keys_add_calls, ssh_keys_remove_calls;
+static int ssh_admin_fail_next;
+static char ssh_last_user[64], ssh_last_added[256], ssh_last_removed[16];
+static char fake_ssh_keys_list[2048];
+static char fake_ssh_host_fp[128];
 static const char *fake_pair_output = "";
 static const char *fake_winmaint_status = "";
+static const char *fake_graphics_status = "";
 static int term_calls, term_status;
 static char term_last[512];
 static struct screen_card_info fake_cards[4];
 static int nfake_cards;
+static int fake_keys[256];
+static int nfake_keys, fake_key_pos;
+
+static void push_keys_str(const char *s, int trailing_key)
+{
+    nfake_keys = fake_key_pos = 0;
+    for (size_t i = 0; s && s[i] && nfake_keys < 255; i++) {
+        fake_keys[nfake_keys++] = (unsigned char)s[i];
+    }
+    if (trailing_key && nfake_keys < 256) {
+        fake_keys[nfake_keys++] = trailing_key;
+    }
+}
 
 void key_close_kept(void) {}
-int key_get(void) { abort(); }
+int key_get(void)
+{
+    assert(fake_key_pos < nfake_keys);
+    return fake_keys[fake_key_pos++];
+}
 void say(const char *fmt, ...) { (void)fmt; }
+
+struct passwd *settings_getpwuid(uid_t uid)
+{
+    static struct passwd pw = { .pw_name = "testuser", .pw_uid = 1000, .pw_gid = 1000 };
+    return uid == 1000 ? &pw : NULL;
+}
+
+static int ssh_admin_run(char *const argv[], const char *stdin_text, char *out, size_t out_size)
+{
+    if (out && out_size > 0) out[0] = '\0';
+    assert(argv[0] && strcmp(argv[0], SSH_ADMIN_CMD) == 0 && argv[1]);
+    if (ssh_admin_fail_next) {
+        ssh_admin_fail_next = 0;
+        if (out && out_size > 0) snprintf(out, out_size, "simulated ssh admin error");
+        return 1;
+    }
+    if (strcmp(argv[1], "--reload") == 0) {
+        ssh_reload_calls++;
+        return 0;
+    }
+    if (strcmp(argv[1], "--keys-list") == 0) {
+        assert(argv[2]);
+        snprintf(ssh_last_user, sizeof ssh_last_user, "%s", argv[2]);
+        if (out && out_size > 0) snprintf(out, out_size, "%s", fake_ssh_keys_list);
+        return 0;
+    }
+    if (strcmp(argv[1], "--keys-add") == 0) {
+        assert(argv[2] && stdin_text);
+        ssh_keys_add_calls++;
+        snprintf(ssh_last_user, sizeof ssh_last_user, "%s", argv[2]);
+        snprintf(ssh_last_added, sizeof ssh_last_added, "%s", stdin_text);
+        if (strstr(stdin_text, "ssh-ed25519") == NULL && strstr(stdin_text, "ssh-rsa") == NULL) {
+            if (out && out_size > 0) snprintf(out, out_size, "expected a valid SSH public key");
+            return 1;
+        }
+        size_t cur = strlen(fake_ssh_keys_list);
+        int next_idx = 1;
+        for (const char *p = fake_ssh_keys_list; *p; p++) {
+            if (*p == '\n') next_idx++;
+        }
+        snprintf(fake_ssh_keys_list + cur, sizeof fake_ssh_keys_list - cur,
+                 "%d\tssh-ed25519\tSHA256:addedkey%d\tuser@host\n", next_idx, next_idx);
+        if (out && out_size > 0) snprintf(out, out_size, "SHA256:addedkey%d", next_idx);
+        return 0;
+    }
+    if (strcmp(argv[1], "--keys-remove") == 0) {
+        assert(argv[2] && argv[3]);
+        ssh_keys_remove_calls++;
+        snprintf(ssh_last_user, sizeof ssh_last_user, "%s", argv[2]);
+        snprintf(ssh_last_removed, sizeof ssh_last_removed, "%s", argv[3]);
+        char kept[sizeof fake_ssh_keys_list] = "";
+        int target = atoi(argv[3]);
+        char copy[sizeof fake_ssh_keys_list];
+        snprintf(copy, sizeof copy, "%s", fake_ssh_keys_list);
+        char *save = NULL;
+        int new_idx = 1;
+        for (char *ln = strtok_r(copy, "\n", &save); ln; ln = strtok_r(NULL, "\n", &save)) {
+            int cur_idx = atoi(ln);
+            if (cur_idx == target) continue;
+            char *tab = strchr(ln, '\t');
+            if (!tab) continue;
+            size_t klen = strlen(kept);
+            snprintf(kept + klen, sizeof kept - klen, "%d%s\n", new_idx++, tab);
+        }
+        snprintf(fake_ssh_keys_list, sizeof fake_ssh_keys_list, "%s", kept);
+        return 0;
+    }
+    if (strcmp(argv[1], "--host-key-fingerprint") == 0) {
+        if (out && out_size > 0) snprintf(out, out_size, "%s", fake_ssh_host_fp);
+        return 0;
+    }
+    if (strcmp(argv[1], "--host-key-regen") == 0) {
+        ssh_regen_calls++;
+        snprintf(fake_ssh_host_fp, sizeof fake_ssh_host_fp, "SHA256:regenfp%d", ssh_regen_calls);
+        if (out && out_size > 0) snprintf(out, out_size, "%s", fake_ssh_host_fp);
+        return 0;
+    }
+    return 1;
+}
 
 int screen_list_cards(struct screen_card_info *out, int max)
 {
@@ -73,6 +180,10 @@ static void command_output(char *const argv[], char *buf, size_t size)
     if (argv[0] && strcmp(argv[0], LOCACHY_WINMAINT) == 0 && argv[1] && strcmp(argv[1], "status") == 0 &&
         argv[2] && strcmp(argv[2], "--json") == 0 && argv[3] == NULL) {
         snprintf(buf, size, "%s", fake_winmaint_status);
+    }
+    if (argv[0] && strcmp(argv[0], GPU_GRAPHICS_HELPER) == 0 && argv[1] && strcmp(argv[1], "status") == 0 &&
+        argv[2] && strcmp(argv[2], "--tsv") == 0 && argv[3] == NULL) {
+        snprintf(buf, size, "%s", fake_graphics_status);
     }
 }
 
@@ -133,6 +244,11 @@ int settings_access(const char *path, int mode)
         errno = ENOENT;
         return -1;
     }
+    if (strcmp(path, SSH_ADMIN_CMD) == 0) {
+        if (fake_ssh_installed) return 0;
+        errno = ENOENT;
+        return -1;
+    }
     return access(path, mode);
 }
 
@@ -175,7 +291,13 @@ void screen_fill(int x, int y, int w, int h, uint32_t color) { (void)x; (void)y;
 void screen_text(int x, int y, const char *text, uint32_t fg, uint32_t bg)
 { (void)x; (void)y; (void)text; (void)fg; (void)bg; }
 void screen_flush(void) {}
-void screen_bar(const char *title, const char *ime) { (void)title; (void)ime; abort(); }
+void screen_bar(const char *title, const char *ime) { (void)title; (void)ime; }
+void ui_hits_clear(void) {}
+void ui_hit(int col, int row, int ncols, int nrows, int id)
+{ (void)col; (void)row; (void)ncols; (void)nrows; (void)id; }
+int ui_hit_at(int col, int row) { (void)col; (void)row; return -1; }
+int ui_button(int col, int row, const char *label, int id)
+{ (void)col; (void)row; (void)label; (void)id; return 0; }
 int key_poll_timeout(int fd, int timeout) { (void)fd; (void)timeout; abort(); }
 int key_poll_many(struct pollfd *extra, size_t count, int timeout) { (void)extra; (void)count; (void)timeout; abort(); }
 int screen_rescale(void) { abort(); }
@@ -309,32 +431,204 @@ int main(void)
     assert(!strstr(term_last, "psk") && !strstr(notice, "psk"));
     puts("PASS paired devices parses list --machine count and opens terminal with sudo locachy-pair list");
 
-    /* SSH is opt-in, independent of the compute API and the Tailscale switch. */
-    selected = ts_index() + 3;
-    reloads = 0;
+    /* 4b. Dedicated 5-row SSH Server (sshd) section under CAT_NETWORK, cleanly
+     * separated from Tailscale (3 rows). */
+    assert(cl_index() == ts_index() + 3);
+    assert(category_of(ssh_index()) == CAT_NETWORK);
+    assert(category_of(ssh_index() + 4) == CAT_NETWORK);
+    nentries = 0;
+    category_entries(CAT_NETWORK);
+    int ts_title_k = -1, ssh_title_k = -1, ts_rows = 0, ssh_rows = 0;
+    for (int k = 0; k < nentries; k++) {
+        if (entries[k].idx == E_TITLE && strcmp(entries[k].text, "Tailscale") == 0) ts_title_k = k;
+        if (entries[k].idx == E_TITLE && strcmp(entries[k].text, "SSH Server (sshd)") == 0) ssh_title_k = k;
+        if (entries[k].idx >= ts_index() && entries[k].idx < ts_index() + 3) ts_rows++;
+        if (entries[k].idx >= ssh_index() && entries[k].idx < ssh_index() + 5) ssh_rows++;
+    }
+    assert(ts_title_k >= 0 && entries[ts_title_k + 4].idx == E_GAP &&
+           ssh_title_k == ts_title_k + 5 && ts_rows == 3 && ssh_rows == 5);
+    assert(!enter_row(ssh_index()) && enter_row(ssh_index() + 1) && !enter_row(ssh_index() + 2) &&
+           enter_row(ssh_index() + 3) && enter_row(ssh_index() + 4));
+
+    /* Row 0: SSH server (sshd) mode cycling: Off -> Tailscale only -> LAN & Tailscale -> Off. */
+    selected = ssh_index();
+    reloads = ssh_reload_calls = 0;
     tailscale_enabled = 0;
+    tor_on = 0;
+    ssh_service_on = ssh_listen_lan = 0;
     item_text(selected, line, sizeof line);
-    assert(strstr(line, "SSH over Tailscale") && strstr(line, "[OFF]"));
-    adjust(+1);
-    assert(!tailnet_ssh_on && !test_rc("service_tailnet_ssh") && reloads == 0);
-    tailscale_enabled = 1;
+    assert(strstr(line, "SSH server (sshd)") && strstr(line, "< Off >"));
+
     fail_rc = 1;
     adjust(+1);
-    assert(!tailnet_ssh_on && !test_rc("service_tailnet_ssh") && reloads == 0);
+    assert(!ssh_service_on && !test_rc("service_tailnet_ssh") && reloads == 0 && ssh_reload_calls == 0);
     fail_rc = 0;
-    adjust(+1);
-    assert(tailnet_ssh_on && !strcmp(test_rc("service_tailnet_ssh"), TAILNET_SSH_SERVICE));
-    assert(!test_rc("service_compute") && reloads == 1);
-    tailscale_enabled = 0;
+
+    adjust(+1); /* Off -> Tailscale only (even while Tailscale is off: fail-closed note shown) */
+    assert(ssh_service_on == 1 && ssh_listen_lan == 0 && ssh_mode_value() == 1);
+    assert(!strcmp(test_rc("service_tailnet_ssh"), TAILNET_SSH_SERVICE));
+    assert(!strcmp(test_rc("ssh_listen"), "tailscale"));
+    assert(!test_rc("service_compute") && reloads == 1 && ssh_reload_calls == 1);
+    assert(strstr(notice, "Tailscale is off"));
     item_text(selected, line, sizeof line);
-    assert(strstr(line, "[ON ") && strstr(line, "Tailscale is off"));
-    adjust(-1);
-    assert(!tailnet_ssh_on && !test_rc("service_tailnet_ssh") && reloads == 2);
+    assert(strstr(line, "< Tailscale only >") && strstr(line, "(Tailscale is off)"));
+
+    tor_on = 1;
+    tailscale_enabled = 1;
+    item_text(selected, line, sizeof line);
+    assert(strstr(line, "< Tailscale only >") && !strstr(line, "(Tailscale is off)") &&
+           strstr(line, "(blocked while Tor is on)"));
+
+    adjust(+1); /* Tailscale only -> LAN & Tailscale */
+    assert(ssh_service_on == 1 && ssh_listen_lan == 1 && ssh_mode_value() == 2);
+    assert(!strcmp(test_rc("service_tailnet_ssh"), TAILNET_SSH_SERVICE));
+    assert(!strcmp(test_rc("ssh_listen"), "lan"));
+    assert(reloads == 2 && ssh_reload_calls == 2 && strstr(notice, "blocked while Tor is on"));
+    item_text(selected, line, sizeof line);
+    assert(strstr(line, "< LAN & Tailscale >") && strstr(line, "(blocked while Tor is on)"));
+    tor_on = 0;
+    item_text(selected, line, sizeof line);
+    assert(strstr(line, "< LAN & Tailscale >") && !strstr(line, "blocked while Tor"));
+
+    adjust(+1); /* LAN & Tailscale -> Off */
+    assert(ssh_service_on == 0 && ssh_mode_value() == 0 && !test_rc("service_tailnet_ssh"));
+    assert(reloads == 3 && ssh_reload_calls == 3);
+    adjust(-1); /* Off -> LAN & Tailscale via Left */
+    assert(ssh_service_on == 1 && ssh_listen_lan == 1 && ssh_mode_value() == 2);
+    adjust(-1); /* LAN & Tailscale -> Tailscale only */
+    assert(ssh_service_on == 1 && ssh_listen_lan == 0 && ssh_mode_value() == 1);
+    adjust(-1); /* Tailscale only -> Off */
+    assert(ssh_service_on == 0 && ssh_mode_value() == 0);
     on_rc("service_tailnet_ssh", TAILNET_SSH_SERVICE, NULL);
-    assert(tailnet_ssh_on);
+    on_rc("ssh_listen", "lan", NULL);
+    assert(ssh_service_on == 1 && ssh_listen_lan == 1 && ssh_mode_value() == 2);
+    on_rc("ssh_listen", "tailscale", NULL);
+    assert(ssh_listen_lan == 0 && ssh_mode_value() == 1);
     on_rc("service_tailnet_ssh", "", NULL);
-    assert(!tailnet_ssh_on);
-    puts("PASS tailnet SSH is opt-in and does not enable the compute API");
+    assert(ssh_service_on == 0 && ssh_mode_value() == 0);
+
+    /* Row 1: sshd port validation and persistence. */
+    selected = ssh_index() + 1;
+    assert(ssh_port == 22);
+    item_text(selected, line, sizeof line);
+    assert(strstr(line, "sshd port") && strstr(line, "22   (Enter)"));
+    int reloads_before_port = ssh_reload_calls;
+    push_keys_str("\x15" "0", '\n'); /* Ctrl+U then "0" -> rejected */
+    ssh_edit_port_row();
+    assert(ssh_port == 22 && !test_rc("ssh_port") && strstr(notice, "Invalid sshd port") &&
+           ssh_reload_calls == reloads_before_port);
+    push_keys_str("\x15" "70000", '\n');
+    ssh_edit_port_row();
+    assert(ssh_port == 22 && !test_rc("ssh_port") && strstr(notice, "Invalid sshd port"));
+    push_keys_str("\x15" "abc", '\n');
+    ssh_edit_port_row();
+    assert(ssh_port == 22 && !test_rc("ssh_port") && strstr(notice, "Invalid sshd port"));
+    push_keys_str("\x15" "2222", '\n');
+    ssh_edit_port_row();
+    assert(ssh_port == 2222 && test_rc("ssh_port") && !strcmp(test_rc("ssh_port"), "2222") &&
+           ssh_reload_calls == reloads_before_port + 1);
+    item_text(selected, line, sizeof line);
+    assert(strstr(line, "2222   (Enter)"));
+    on_rc("ssh_port", "22", NULL);
+    assert(ssh_port == 22);
+    on_rc("ssh_port", "99999", NULL);
+    assert(ssh_port == 22);
+
+    /* Row 2: sshd password login toggle. */
+    selected = ssh_index() + 2;
+    assert(ssh_password == 0);
+    item_text(selected, line, sizeof line);
+    assert(strstr(line, "sshd password login") && strstr(line, "[OFF]"));
+    int reloads_before_pw = ssh_reload_calls;
+    adjust(+1);
+    assert(ssh_password == 1 && !strcmp(test_rc("ssh_password"), "1") &&
+           ssh_reload_calls == reloads_before_pw + 1 && strstr(notice, "root login stays disabled"));
+    item_text(selected, line, sizeof line);
+    assert(strstr(line, "[ON ]"));
+    adjust(+1);
+    assert(ssh_password == 0 && !strcmp(test_rc("ssh_password"), "0") &&
+           ssh_reload_calls == reloads_before_pw + 2 && strstr(notice, "public key only"));
+    on_rc("ssh_password", "1", NULL);
+    assert(ssh_password == 1);
+    on_rc("ssh_password", "0", NULL);
+    assert(ssh_password == 0);
+
+    /* Row 3: sshd AuthorizedKeys count, modal add, and double-Delete remove. */
+    fake_ssh_installed = 1;
+    fake_ssh_keys_list[0] = '\0';
+    nssh_keys = -1;
+    item_text(ssh_index() + 3, line, sizeof line);
+    assert(nssh_keys == 0 && strstr(line, "sshd AuthorizedKeys") && strstr(line, "0 keys   (Enter)"));
+    /* Open modal, press Enter on "[ + Add public key ]", paste an ed25519 key, then Esc back. */
+    nfake_keys = fake_key_pos = 0;
+    fake_keys[nfake_keys++] = '\n';
+    const char *sample_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockKeyData user@host";
+    for (size_t i = 0; sample_key[i]; i++) fake_keys[nfake_keys++] = (unsigned char)sample_key[i];
+    fake_keys[nfake_keys++] = '\n';
+    fake_keys[nfake_keys++] = 27; /* Esc back */
+    manage_ssh_authorized_keys();
+    assert(fake_key_pos == nfake_keys);
+    assert(ssh_keys_add_calls == 1 && !strcmp(ssh_last_user, "testuser") && strstr(ssh_last_added, "ssh-ed25519"));
+    assert(nssh_keys == 1 && !strcmp(ssh_keys[0].type, "ssh-ed25519") &&
+           !strcmp(ssh_keys[0].fingerprint, "SHA256:addedkey1"));
+    item_text(ssh_index() + 3, line, sizeof line);
+    assert(strstr(line, "1 key   (Enter)"));
+    /* Open modal, move down to key 1, press Delete twice to remove, then q (cancel) back. */
+    nfake_keys = fake_key_pos = 0;
+    fake_keys[nfake_keys++] = K_DOWN;
+    fake_keys[nfake_keys++] = K_DEL;
+    fake_keys[nfake_keys++] = K_DEL;
+    fake_keys[nfake_keys++] = 'q';
+    manage_ssh_authorized_keys();
+    assert(fake_key_pos == nfake_keys);
+    assert(ssh_keys_remove_calls == 1 && !strcmp(ssh_last_removed, "1") && nssh_keys == 0);
+    item_text(ssh_index() + 3, line, sizeof line);
+    assert(strstr(line, "0 keys   (Enter)"));
+
+    /* Row 4: sshd host key fingerprint display + two-Enter regen + reset on cursor move. */
+    fake_ssh_host_fp[0] = '\0';
+    ssh_host_fp_loaded = 0;
+    ssh_hostkey_regen_asked = 0;
+    item_text(ssh_index() + 4, line, sizeof line);
+    assert(strstr(line, "sshd host key") && strstr(line, "not generated yet   (Enter: generate)"));
+    snprintf(fake_ssh_host_fp, sizeof fake_ssh_host_fp, "SHA256:initialhostfp");
+    load_ssh_host_fp();
+    item_text(ssh_index() + 4, line, sizeof line);
+    assert(strstr(line, "SHA256:initialhostfp   (Enter: regenerate)"));
+    /* First Enter asks confirmation; cursor move clears confirmation. */
+    selected = ssh_index() + 4;
+    ssh_regen_calls = 0;
+    ssh_regen_host_key_row();
+    assert(ssh_hostkey_regen_asked == 1 && ssh_regen_calls == 0 && strstr(notice, "Enter again"));
+    nentries = 0;
+    category_entries(CAT_NETWORK);
+    page_move(-1);
+    assert(selected == ssh_index() + 3 && ssh_hostkey_regen_asked == 0);
+    /* A failed regeneration keeps the fingerprint and clears the confirmation. */
+    selected = ssh_index() + 4;
+    ssh_regen_host_key_row();
+    ssh_admin_fail_next = 1;
+    ssh_regen_host_key_row();
+    assert(ssh_regen_calls == 0 && ssh_hostkey_regen_asked == 0 && strstr(notice, "Cannot regenerate sshd host key"));
+    assert(!strcmp(ssh_host_fp, "SHA256:initialhostfp"));
+    /* Two consecutive Enters regenerate and update cached fingerprint. */
+    selected = ssh_index() + 4;
+    ssh_regen_host_key_row();
+    assert(ssh_hostkey_regen_asked == 1 && ssh_regen_calls == 0);
+    ssh_regen_host_key_row();
+    assert(ssh_hostkey_regen_asked == 0 && ssh_regen_calls == 1 &&
+           !strcmp(ssh_host_fp, "SHA256:regenfp1") && strstr(notice, "known_hosts"));
+    item_text(ssh_index() + 4, line, sizeof line);
+    assert(strstr(line, "SHA256:regenfp1   (Enter: regenerate)"));
+    /* Verify sshd row hints are non-empty and match actions. */
+    char ssh_hint[256];
+    row_hint_text(ssh_index() + 1, ssh_hint, sizeof ssh_hint);
+    assert(strstr(ssh_hint, "port"));
+    row_hint_text(ssh_index() + 3, ssh_hint, sizeof ssh_hint);
+    assert(strstr(ssh_hint, "AuthorizedKeys"));
+    row_hint_text(ssh_index() + 4, ssh_hint, sizeof ssh_hint);
+    assert(strstr(ssh_hint, "host key"));
+    puts("PASS dedicated 5-row SSH Server (sshd) section: mode, port, password, AuthorizedKeys, host key");
 
     /* 5. Compute node rows: service_compute (SIGHUP), compute_bind_tb (tb-sync), compute_gpu. */
     reloads = 0;
@@ -694,6 +988,48 @@ int main(void)
     gpu_power_check();
     assert(gpu_power_job == 0);
     puts("PASS NVIDIA GPU unlock, machine GPU power mode, and nvidia-powerd settings rows");
+
+    int graphics = gpu_graphics_index();
+    assert(category_of(graphics) == CAT_INPUT && enter_row(graphics + 1) && enter_row(graphics + 2));
+    selected = graphics;
+    gpu_graphics_auto = 1;
+    fail_rc = 1;
+    adjust(1);
+    assert(gpu_graphics_auto);
+    fail_rc = 0;
+    adjust(1);
+    assert(!gpu_graphics_auto);
+    item_text(graphics, line, sizeof line);
+    assert(strstr(line, "leave unchanged"));
+
+    jobs_double_last[0] = '\0';
+    fake_graphics_status = "mux\tunsupported\ndgpu\tunsupported\nreboot\tunknown\n";
+    gpu_graphics_action(graphics + 1);
+    assert(gpu_graphics_asked == -1 && !jobs_double_last[0]);
+    item_text(graphics + 1, line, sizeof line);
+    assert(strstr(line, "not supported"));
+
+    fake_graphics_status = "mux\thybrid\ndgpu\ton\nreboot\t0\n";
+    jobs_double_ended = 0;
+    gpu_graphics_action(graphics + 1);
+    assert(gpu_graphics_asked == graphics + 1 && !jobs_double_last[0]);
+    gpu_graphics_action(graphics + 1);
+    assert(gpu_graphics_job && !strcmp(jobs_double_last, "gpu-graphics-mux discrete"));
+    fake_graphics_status = "mux\tdiscrete\ndgpu\ton\nreboot\t1\n";
+    jobs_double_ended = 1;
+    gpu_graphics_check();
+    item_text(graphics + 1, line, sizeof line);
+    assert(!gpu_graphics_job && strstr(line, "direct NVIDIA") && strstr(line, "pending restart"));
+    jobs_double_last[0] = '\0';
+    gpu_graphics_action(graphics + 2);
+    assert(gpu_graphics_asked == -1 && !jobs_double_last[0]);
+
+    fake_graphics_status = "mux\thybrid\ndgpu\ton\nreboot\t0\n";
+    gpu_graphics_action(graphics + 2);
+    assert(gpu_graphics_asked == graphics + 2 && !jobs_double_last[0] && strstr(notice, "CUDA"));
+    gpu_graphics_action(graphics + 2);
+    assert(gpu_graphics_job && !strcmp(jobs_double_last, "gpu-graphics-dgpu off"));
+    puts("PASS hybrid policy and separate firmware MUX/dGPU choices with confirmation and reboot state");
 
     unlink(fake_winmaint_state);
     rmdir(tmpdir);

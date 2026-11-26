@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-24 10:40-0500\n"
+"POT-Creation-Date: 2026-11-26 06:45-0500\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -121,7 +121,7 @@ msgstr ""
 msgid "stopping"
 msgstr ""
 
-#: base/jobs.c progs/packages.c
+#: base/jobs.c progs/packages.c progs/settings.c
 msgid "done"
 msgstr ""
 
@@ -3655,6 +3655,10 @@ msgid "The decoder channel ended."
 msgstr ""
 
 #: progs/extdisplay.c
+msgid "The authoritative Caps Lock state could not be updated."
+msgstr ""
+
+#: progs/extdisplay.c
 msgid "The managed sleep inhibitor was not granted."
 msgstr ""
 
@@ -3716,6 +3720,14 @@ msgstr ""
 
 #: progs/extdisplay.c
 msgid "Scanning"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Retrying cable setup"
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "Thunderbolt/USB4 scan failed"
 msgstr ""
 
 #: progs/extdisplay.c
@@ -3789,6 +3801,10 @@ msgstr ""
 
 #: progs/extdisplay.c
 msgid "Looking for a Thunderbolt/USB4 network..."
+msgstr ""
+
+#: progs/extdisplay.c
+msgid "No result from the scan. F5: scan again."
 msgstr ""
 
 #: progs/extdisplay.c
@@ -9034,7 +9050,7 @@ msgstr ""
 msgid "Target: %s%s"
 msgstr ""
 
-#: progs/rescue.c
+#: progs/rescue.c progs/settings.c
 msgid "unknown"
 msgstr ""
 
@@ -10146,8 +10162,88 @@ msgid "Hardware readings refreshed."
 msgstr ""
 
 #: progs/settings-power.inc
+msgid "Manual charging"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Running on battery"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Learning usage"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Mostly plugged in"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Ready for portable use"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Holding charge"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Topping up before unplugging"
+msgstr ""
+
+#: progs/settings-power.inc progs/settings.c
+msgid "Full charge override active"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Model not downloaded"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Model verification failed"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Adaptive standby"
+msgstr ""
+
+#: progs/settings-power.inc progs/settings.c
+msgid "Charging control unsupported"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Could not apply charging limits"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Charging status unavailable"
+msgstr ""
+
+#: progs/settings-power.inc
 #, c-format
 msgid "Last handoff: %.104s"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Plug in AC power first"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Expected to resume charging to full at %s"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s: %s (limit %d%%, requested %d%%)"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s: %s (limit %d%%)"
+msgstr ""
+
+#. TRANSLATORS: r is the r key; keep it.
+#: progs/settings-power.inc
+msgid "Press r on Adaptive Charging to download the model."
 msgstr ""
 
 #: progs/settings-power.inc
@@ -10266,70 +10362,68 @@ msgid "No system battery is reported in /sys/class/power_supply."
 msgstr ""
 
 #: progs/settings-power.inc
-msgid "Manual charging"
-msgstr ""
-
-#: progs/settings-power.inc
-msgid "Running on battery"
-msgstr ""
-
-#: progs/settings-power.inc
-msgid "Learning usage"
-msgstr ""
-
-#: progs/settings-power.inc
-msgid "Mostly plugged in"
-msgstr ""
-
-#: progs/settings-power.inc
-msgid "Ready for portable use"
-msgstr ""
-
-#: progs/settings-power.inc
-msgid "Holding charge"
-msgstr ""
-
-#: progs/settings-power.inc
-msgid "Topping up before unplugging"
-msgstr ""
-
-#: progs/settings-power.inc progs/settings.c
-msgid "Full charge override active"
-msgstr ""
-
-#: progs/settings-power.inc progs/settings.c
-msgid "Charging control unsupported"
-msgstr ""
-
-#: progs/settings-power.inc
-msgid "Could not apply charging limits"
-msgstr ""
-
-#: progs/settings-power.inc
-msgid "Charging status unavailable"
-msgstr ""
-
-#: progs/settings-power.inc
-#, c-format
-msgid "Expected to resume charging to full at %s"
-msgstr ""
-
-#: progs/settings-power.inc
-msgid "Plug in AC power first"
-msgstr ""
-
-#: progs/settings-power.inc
-#, c-format
-msgid "%s: %s (limit %d%%, requested %d%%)"
-msgstr ""
-
-#: progs/settings-power.inc
-#, c-format
-msgid "%s: %s (limit %d%%)"
-msgstr ""
-
-#: progs/settings-power.inc
 msgid "Saved, but could not notify the battery service."
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Adaptive charging model removed."
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Adaptive charging model downloaded and verified."
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Could not remove adaptive charging model: %s"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Could not download adaptive charging model: %s"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Turn Adaptive Charging on first to download the model."
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Wait: an adaptive charging model job is still running."
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Adaptive charging model is already installed."
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Could not start model download: %s"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Downloading adaptive charging model in background."
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Adaptive charging model is not installed."
+msgstr ""
+
+#. TRANSLATORS: Delete is the Delete key; keep it.
+#: progs/settings-power.inc
+msgid "Delete again: remove the downloaded adaptive charging model."
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Removing adaptive charging model in background."
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Adaptive charging enabled; downloading model in background."
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Adaptive charging enabled; model download unavailable: %s"
 msgstr ""
 
 #: progs/settings-power.inc
@@ -10344,25 +10438,8 @@ msgstr ""
 msgid "Manual thresholds are saved but not applied while charging is managed."
 msgstr ""
 
-#: progs/settings-power.inc
-#, c-format
-msgid "Cannot write charge start threshold for %s."
-msgstr ""
-
-#: progs/settings-power.inc
-#, c-format
-msgid ""
-"Charge start threshold: %d%% (re-applied automatically on battery swap)."
-msgstr ""
-
-#: progs/settings-power.inc
-#, c-format
-msgid "Cannot write charge stop threshold for %s."
-msgstr ""
-
-#: progs/settings-power.inc
-#, c-format
-msgid "Charge stop threshold: %d%% (re-applied automatically on battery swap)."
+#: progs/settings-power.inc progs/settings.c
+msgid "Waiting for battery service"
 msgstr ""
 
 #: progs/settings-power.inc
@@ -11986,6 +12063,10 @@ msgid "Tailscale"
 msgstr ""
 
 #: progs/settings.c
+msgid "SSH Server (sshd)"
+msgstr ""
+
+#: progs/settings.c
 msgid "Clash"
 msgstr ""
 
@@ -12299,6 +12380,119 @@ msgstr ""
 msgid "Paired devices did not finish."
 msgstr ""
 
+#. TRANSLATORS: Enter and Esc are key names; keep them.
+#: progs/settings.c
+msgid "sshd port (1-65535): "
+msgstr ""
+
+#: progs/settings.c
+msgid "sshd port unchanged."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Invalid sshd port: %.32s (use 1-65535)."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "sshd port set to %d."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Enter again: regenerate sshd host key (clients must remove the old "
+"known_hosts entry)."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Cannot regenerate sshd host key: %.120s"
+msgstr ""
+
+#: progs/settings.c
+msgid "command failed"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "sshd host key regenerated (%.48s); update clients' known_hosts."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Cannot add SSH public key: %.120s"
+msgstr ""
+
+#: progs/settings.c
+msgid "invalid key"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Added SSH public key (%.48s)."
+msgstr ""
+
+#: progs/settings.c
+msgid "ok"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Cannot remove SSH public key: %.120s"
+msgstr ""
+
+#: progs/settings.c
+msgid "SSH public key removed."
+msgstr ""
+
+#: progs/settings.c
+msgid "No regular local user (uid 1000) found."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "sshd AuthorizedKeys (%.40s)"
+msgstr ""
+
+#. TRANSLATORS: a, Enter, Delete and Esc are key names; keep them.
+#: progs/settings.c
+msgid "a / Enter: add public key   Delete: remove selected   Esc: back"
+msgstr ""
+
+#: progs/settings.c
+msgid "[ + Add public key ]"
+msgstr ""
+
+#: progs/settings.c
+msgid "No authorized public keys yet."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "sshd AuthorizedKeys: %d key."
+msgid_plural "sshd AuthorizedKeys: %d keys."
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/settings.c
+msgid "Paste SSH public key (ssh-ed25519 / ssh-rsa ...): "
+msgstr ""
+
+#: progs/settings.c
+msgid "No key added."
+msgstr ""
+
+#: progs/settings.c
+msgid "Select a key below to remove it."
+msgstr ""
+
+#. TRANSLATORS: Delete is the Delete key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "Delete again: remove key #%d (%.48s)."
+msgstr ""
+
 #: progs/settings.c
 msgid "Wait: a Maintenance Windows job is still running."
 msgstr ""
@@ -12482,6 +12676,60 @@ msgstr ""
 #: progs/settings.c
 #, c-format
 msgid "GPU power change failed: %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "Graphics setting saved in firmware. Restart to apply it."
+msgstr ""
+
+#: progs/settings.c
+msgid "Graphics setting updated."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Graphics change failed: %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "Wait for the current graphics job."
+msgstr ""
+
+#: progs/settings.c
+msgid "Restart before changing graphics firmware again."
+msgstr ""
+
+#: progs/settings.c
+msgid "This graphics switch is not exposed by this machine's firmware."
+msgstr ""
+
+#: progs/settings.c
+msgid "The current graphics firmware state could not be verified."
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter again: switch to direct NVIDIA display after restart."
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter again: switch to hybrid display after restart."
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter again: disable NVIDIA, its display ports and CUDA."
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter again: enable the NVIDIA GPU."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Could not start the graphics change: %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "Changing graphics firmware setting..."
 msgstr ""
 
 #: progs/settings.c
@@ -12796,14 +13044,6 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Tailscale account"
-msgstr ""
-
-#: progs/settings.c
-msgid "SSH over Tailscale"
-msgstr ""
-
-#: progs/settings.c
-msgid "  (Tailscale is off)"
 msgstr ""
 
 #: progs/settings.c
@@ -13181,6 +13421,46 @@ msgid "  (search service off)"
 msgstr ""
 
 #: progs/settings.c
+msgid "Hybrid graphics policy"
+msgstr ""
+
+#: progs/settings.c
+msgid "automatic"
+msgstr ""
+
+#: progs/settings.c
+msgid "leave unchanged"
+msgstr ""
+
+#: progs/settings.c
+msgid " (manual display GPU selected)"
+msgstr ""
+
+#: progs/settings.c
+msgid "not supported"
+msgstr ""
+
+#: progs/settings.c
+msgid "direct NVIDIA"
+msgstr ""
+
+#: progs/settings.c
+msgid "hybrid"
+msgstr ""
+
+#: progs/settings.c
+msgid "Firmware display routing"
+msgstr ""
+
+#: progs/settings.c
+msgid "NVIDIA discrete GPU"
+msgstr ""
+
+#: progs/settings.c
+msgid " (firmware change pending restart)"
+msgstr ""
+
+#: progs/settings.c
 msgid "ON"
 msgstr ""
 
@@ -13233,6 +13513,71 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Unmanaged disks"
+msgstr ""
+
+#: progs/settings.c
+msgid "LAN & Tailscale"
+msgstr ""
+
+#: progs/settings.c
+msgid "Off"
+msgstr ""
+
+#: progs/settings.c
+msgid "Tailscale only"
+msgstr ""
+
+#: progs/settings.c
+msgid "SSH server (sshd)"
+msgstr ""
+
+#: progs/settings.c
+msgid "  (Tailscale is off)"
+msgstr ""
+
+#: progs/settings.c
+msgid "  (blocked while Tor is on)"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "%d   (Enter)"
+msgstr ""
+
+#: progs/settings.c
+msgid "sshd port"
+msgstr ""
+
+#: progs/settings.c
+msgid "sshd password login"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "%d key   (Enter)"
+msgid_plural "%d keys   (Enter)"
+msgstr[0] ""
+msgstr[1] ""
+
+#: progs/settings.c
+msgid "sshd AuthorizedKeys"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "%.64s   (Enter: regenerate)"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "not generated yet   (Enter: generate)"
+msgstr ""
+
+#: progs/settings.c
+msgid "sshd host key"
 msgstr ""
 
 #: progs/settings.c
@@ -13376,10 +13721,6 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Host security (fwupd)"
-msgstr ""
-
-#: progs/settings.c
-msgid "not supported"
 msgstr ""
 
 #: progs/settings.c
@@ -13536,11 +13877,15 @@ msgid "Battery curves & health"
 msgstr ""
 
 #: progs/settings.c
-msgid "Adaptive Charging"
+msgid "Downloading model..."
 msgstr ""
 
 #: progs/settings.c
-msgid "Waiting for battery service"
+msgid "Removing model..."
+msgstr ""
+
+#: progs/settings.c
+msgid "Adaptive Charging"
 msgstr ""
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
@@ -13553,25 +13898,20 @@ msgid "Enter: request full charge"
 msgstr ""
 
 #: progs/settings.c
+msgid "Charge start threshold"
+msgstr ""
+
+#: progs/settings.c
+msgid "Charge stop threshold"
+msgstr ""
+
+#: progs/settings.c
 msgid "not set for manual charging"
 msgstr ""
 
 #: progs/settings.c
 #, c-format
 msgid "%d%% saved for manual charging"
-msgstr ""
-
-#. TRANSLATORS: Enter is the Enter key; keep it.
-#: progs/settings.c
-msgid "Enter: allow a full charge until unplugged or for up to 24 hours."
-msgstr ""
-
-#: progs/settings.c
-msgid "Charge start threshold"
-msgstr ""
-
-#: progs/settings.c
-msgid "Charge stop threshold"
 msgstr ""
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
@@ -13695,18 +14035,6 @@ msgstr ""
 #: progs/settings.c
 #, c-format
 msgid "Tailscale: %.140s."
-msgstr ""
-
-#: progs/settings.c
-msgid "Turn on Tailscale before enabling SSH over it."
-msgstr ""
-
-#: progs/settings.c
-msgid "SSH over Tailscale enabled; login requires an authorized public key."
-msgstr ""
-
-#: progs/settings.c
-msgid "SSH over Tailscale disabled."
 msgstr ""
 
 #: progs/settings.c
@@ -14377,6 +14705,10 @@ msgstr[0] ""
 msgstr[1] ""
 
 #: progs/settings.c
+msgid "Graphics policy saved. Applies when graphics next starts."
+msgstr ""
+
+#: progs/settings.c
 msgid "This machine has no GPU power control (its machine profile has none)."
 msgstr ""
 
@@ -14407,6 +14739,55 @@ msgstr ""
 msgid ""
 "Enter: open storage manager in a terminal (attach, format, or create btrfs "
 "array)."
+msgstr ""
+
+#: progs/settings.c
+msgid "SSH server (sshd) disabled."
+msgstr ""
+
+#: progs/settings.c
+msgid "SSH server (sshd) set to LAN & Tailscale (blocked while Tor is on)."
+msgstr ""
+
+#: progs/settings.c
+msgid "SSH server (sshd) enabled on LAN & Tailscale."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"SSH server (sshd) set to Tailscale only (Tailscale is off: waiting for "
+"tailscale0)."
+msgstr ""
+
+#: progs/settings.c
+msgid "SSH server (sshd) set to Tailscale only (blocked while Tor is on)."
+msgstr ""
+
+#: progs/settings.c
+msgid "SSH server (sshd) enabled on Tailscale only."
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: set sshd port (1-65535)."
+msgstr ""
+
+#: progs/settings.c
+msgid "sshd password login enabled (root login stays disabled)."
+msgstr ""
+
+#: progs/settings.c
+msgid "sshd password login disabled (public key only)."
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: manage sshd AuthorizedKeys (add or remove public keys)."
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter, twice: regenerate sshd host key."
 msgstr ""
 
 #: progs/settings.c
@@ -14554,9 +14935,33 @@ msgid "Saved to %s and applied."
 msgstr ""
 
 #: progs/settings.c
+msgid "automatic; keeps explicit display-card choices"
+msgstr ""
+
+#: progs/settings.c
+msgid "off; leaves existing routing unchanged"
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Enter twice: change firmware MUX routing; restart is required and no "
+"automatic restart occurs."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Enter twice: enable or disable the dGPU only when firmware confirms it is "
+"safe."
+msgstr ""
+
+#: progs/settings.c
 msgid ""
 "Enter: fetch gpu-unlock from GitHub and build it, or turn it on or off   "
 "Delete: remove"
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter: allow a full charge until unplugged or for up to 24 hours."
 msgstr ""
 
 #. TRANSLATORS: Enter and Delete are key names; keep them.
@@ -14575,6 +14980,11 @@ msgstr ""
 #. TRANSLATORS: Enter and Left/Right are key names; keep them.
 #: progs/settings.c
 msgid "Enter, then Left/Right: choose   Enter again: do it"
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Enter+Left/Right: on/off   r: download model   Delete, twice: remove model"
 msgstr ""
 
 #: progs/settings.c

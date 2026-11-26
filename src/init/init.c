@@ -137,6 +137,9 @@ struct frame {
     long long reclaim_bytes;
     pid_t reclaim_pid;      /* background reclaim helper child, if any */
     int holding;            /* base_session_hold: live link, not frozen */
+    int caps_owned;         /* negotiated Caps Lock owned by this live link */
+    double stop_deadline;   /* ms: lid close stopping this frame; 0: not stopping */
+    int stop_killed;        /* escalated to cgroup.kill after stop_deadline */
     int shared_display;     /* release display without freezing shared infrastructure */
     int display_ready, display_retained, display_bar_lost;
     uint64_t desktop_wait;  /* visible empty-panel generation, or zero */
@@ -1950,12 +1953,21 @@ static struct frame *focused(void)
 
 /* A screen shows a program holding a live link (extdisplay,
  * base_session_hold): what it shows is the other computer's session, so
- * the idle lock waits until no screen does (idle_lock_at), and Super+Esc /
- * swipe switches stay blocked while that session is focused. */
+ * the idle lock waits until no screen does (idle_lock_at), and local
+ * keyboard actions and swipe switches are blocked while it is focused. */
 static int frame_holding(const struct frame *f)
 {
-    return f != NULL && f != &locker &&
+    return f != NULL && f != &locker && f->stop_deadline <= 0 &&
            (f->holding || (apps_session_holding && apps_session_holding(f->cgroup)));
+}
+
+static int session_caps_owned;
+static double lid_ext_deadline;
+
+static void update_caps_owner(void)
+{
+    struct frame *f = focused();
+    keys_caps_owner((frame_holding(f) && f->caps_owned) || (session_caps_owned && !locked));
 }
 
 static int held_in_front(void)
@@ -2352,8 +2364,9 @@ static void freeze(struct frame *f)
 
     /* A program holding a live link (extdisplay) keeps running without the
      * screen: frozen, the link would end. Its remote input stops all the same
-     * (the lock revokes it; without the screen it has no keys). */
-    if (f->holding || (apps_session_holding && apps_session_holding(f->cgroup))) return;
+     * (the lock revokes it; without the screen it has no keys). A frame being
+     * stopped on lid close also stays thawed so it can release its lease. */
+    if (f->holding || f->stop_deadline > 0 || (apps_session_holding && apps_session_holding(f->cgroup))) return;
     if (apps_sessions_revoke) apps_sessions_revoke(f->cgroup); /* its sessions ask again after a thaw */
     reclaim_cancel(f);
     snprintf(path, sizeof path, "%s/cgroup.freeze", f->cgroup);
@@ -2508,6 +2521,7 @@ static void keys_place(void)
         to->nkbd = keys_lend(to->kbd, MAX_KBD);
         if (to->nkbd > 0) send_with_locks(to, "keys", to->kbd, to->nkbd);
     }
+    update_caps_owner();
 }
 
 /* The task home waits for in base_open, left without a screen; "" if none. */
@@ -2663,6 +2677,28 @@ static struct task *shared_display_task(void)
         }
     }
     return NULL;
+}
+
+int init_session_caps(int desired)
+{
+    if (desired < -1 || desired > 1) return -1;
+    if (desired >= 0) {
+        session_caps_owned = 1;
+        keys_set_caps(desired);
+        update_caps_owner();
+        struct task *sh = shared_display_task();
+        if (sh && sh->f[0].pid > 0 && sh->f[0].nkbd > 0) {
+            const char *fields[] = { "caps", desired ? "1" : "0", NULL };
+            (void)control_send_fields(sh->f[0].ctl, fields);
+        }
+    }
+    return !!(keys_locks() & KEYS_LOCK_CAPS);
+}
+
+void init_session_caps_release(void)
+{
+    session_caps_owned = 0;
+    update_caps_owner();
 }
 
 /* The screen named (a connector); -1 if there is none. */
@@ -3494,7 +3530,16 @@ static void gone(struct frame *f)
     rmdir(f->cgroup);
     char name[32];
     snprintf(name, sizeof name, "%s", f->name);
+    int was_lid_stopping = f->stop_deadline > 0;
+    f->holding = 0;
+    f->caps_owned = 0;
+    f->stop_deadline = 0;
+    f->stop_killed = 0;
     f->pid = 0;
+    update_caps_owner();
+    if (was_lid_stopping && lid_check_at >= 0) {
+        lid_check_at = now_ms();
+    }
 
     if (f == &locker) {
         if (status == 0) {
@@ -4031,6 +4076,33 @@ static void person_asked(int how)
     }
     say(how == RB_AUTOBOOT ? "init: Ctrl+Alt+Del" : "init: power button");
     shutdown_request(how, shutdown_how >= 0, -1);
+}
+
+/* Process 1 also reads the lent keyboards. While a foreground session
+ * holds them for remote input, observe activity but do not dispatch local
+ * actions. The separate power/lid devices still follow their own path. */
+static void keyboard_action(int key)
+{
+    /* The compositor consumes its own global keybinds before notifying
+     * us; acting on this observer would race delivery. */
+    int shared = display_front != NULL;
+    int held = frame_holding(focused());
+    if (restart_asked) {
+        restart_key(key);
+    } else if (!held) {
+        if (key == K_HOME && !locked && !shared) {
+            go_home(focus_place);
+        } else if (key == K_ACT_SEARCH && !locked && !shared) {
+            open_search();
+        } else if (key == K_ACT_LOCK && !shared) {
+            lock();
+        } else if (!locked && ctrl_alt_del(key)) {
+            person_asked(RB_AUTOBOOT);
+        }
+    }
+    if (key != 0 && (key != K_ACT_LOCK || held) && !restart_asked) {
+        input_seen();
+    }
 }
 
 static void power_off(void)
@@ -4589,8 +4661,23 @@ static void message(struct frame *f)
         do_switch(display_front != NULL ? focus_place : place_of_frame(f),
                   strcmp(fields[1], "next") == 0 ? 1 : strcmp(fields[1], "prev") == 0 ? -1 : 0);
     } else if (strcmp(fields[0], "hold") == 0 && n == 2 && strcmp(f->name, "extdisplay") == 0) {
-        f->holding = atoi(fields[1]) != 0;
-        if (f->screens && f->holding) idle_power_wake();
+        if (f->stop_deadline <= 0) {
+            f->holding = atoi(fields[1]) != 0;
+            if (!f->holding) f->caps_owned = 0;
+            if (f->screens && f->holding) idle_power_wake();
+            update_caps_owner();
+        }
+    } else if (strcmp(fields[0], "caps") == 0 && n == 2 && strcmp(f->name, "extdisplay") == 0) {
+        if (f->stop_deadline <= 0) {
+            if (strcmp(fields[1], "off") == 0) {
+                f->caps_owned = 0;
+                update_caps_owner();
+            } else if (strcmp(fields[1], "0") == 0 || strcmp(fields[1], "1") == 0) {
+                f->caps_owned = 1;
+                keys_set_caps(fields[1][0] == '1');
+                update_caps_owner();
+            }
+        }
     } else if (strcmp(fields[0], "reboot") == 0) {
         restart();
     } else if (strcmp(fields[0], "poweroff") == 0) {
@@ -5394,6 +5481,45 @@ static double suspend(int lid)
  * disk). While a power off or reboot waits for a system job, the lid does
  * nothing (logind's manager_handle_action: an action under way, another is
  * ignored; a job's sleep inhibitor, as PackageKit takes one, holds the lid). */
+/* Closing the lid always tears down extended-display sessions (never relying on
+ * auto-reconnect across sleep): SIGTERM lets extdisplay stop its worker and
+ * return the Thunderbolt lease; a bounded deadline escalates to cgroup.kill so
+ * a stuck session cannot block sleep. Returns 1 while any session still runs. */
+#define EXTDISPLAY_LID_STOP_MS 5000.0
+static int lid_stop_extdisplay(void)
+{
+    int active = 0;
+    double now = now_ms();
+    for (int i = 0; i < MAX_TASKS; i++) {
+        for (int d = 0; d < tasks[i].depth; d++) {
+            struct frame *f = &tasks[i].f[d];
+            if (f->pid <= 0 || strcmp(f->name, "extdisplay") != 0) continue;
+            f->holding = 0;
+            f->caps_owned = 0;
+            if (f->frozen) thaw(f);
+            if (f->stop_deadline <= 0) {
+                f->stop_deadline = now + EXTDISPLAY_LID_STOP_MS;
+                f->stop_killed = 0;
+                say("init: lid closed: stopping %s (pid %d)", f->name, (int)f->pid);
+                kill(f->pid, SIGTERM);
+            } else if (!f->reaped && !f->stop_killed && now >= f->stop_deadline) {
+                char kill_path[96];
+                f->stop_killed = 1;
+                say("init: lid closed: %s (pid %d) did not exit in time; killing cgroup", f->name, (int)f->pid);
+                snprintf(kill_path, sizeof kill_path, "%s/cgroup.kill", f->cgroup);
+                write_file(kill_path, "1");
+                kill(f->pid, SIGKILL);
+            }
+            active = 1;
+        }
+    }
+    update_caps_owner();
+    if (apps_stop_program && apps_stop_program("extdisplay")) {
+        active = 1;
+    }
+    return active;
+}
+
 static void lid_changed(int edge)
 {
     if (shutdown_how >= 0) {
@@ -5404,18 +5530,41 @@ static void lid_changed(int edge)
             say("init: the lid is open");
         }
         lid_check_at = -1;
+        lid_ext_deadline = 0;
         hibernate_at = -1;
         suspend_failures = 0;
         return;
+    }
+    /* Union of the unplug/live-link exit lock rule and the lid-close lock rule:
+     * latch any idle lock due on the live link before tearing extdisplay down. */
+    latch_lock_due();
+    int ext_stopping = lid_stop_extdisplay();
+    if (!ext_stopping) {
+        lid_ext_deadline = 0;
+    } else if (lid_ext_deadline <= 0) {
+        lid_ext_deadline = now_ms() + EXTDISPLAY_LID_STOP_MS + 1000.0;
+    } else if (now_ms() >= lid_ext_deadline) {
+        say("init: lid closed: extdisplay still present after deadline; continuing");
+        ext_stopping = 0;
     }
     if (edge) {
         say("init: lid closed");
         lid_lock(); /* closed: locked, whether it sleeps or not */
     }
+    if (lock_due && !locked) {
+        lid_lock();
+    }
     if (now_ms() < lid_holdoff_until) {
-        lid_check_at = lid_holdoff_until;
-        say("init: the lid is closed within the holdoff; looking again in %.0f s",
-            (lid_holdoff_until - now_ms()) / 1e3);
+        double at = lid_holdoff_until;
+        if (ext_stopping) {
+            double poll_at = now_ms() + 100;
+            if (poll_at < at) at = poll_at;
+        }
+        lid_check_at = at;
+        if (edge) {
+            say("init: the lid is closed within the holdoff; looking again in %.0f s",
+                (lid_holdoff_until - now_ms()) / 1e3);
+        }
         return;
     }
     lid_check_at = -1;
@@ -5424,12 +5573,19 @@ static void lid_changed(int edge)
             say("init: lid closed, another screen connected: not sleeping");
         }
         hibernate_at = -1; /* in use: an old deadline must not hibernate it once undocked */
+        if (ext_stopping) {
+            lid_check_at = now_ms() + 100;
+        }
         return;
     }
-    if (!edge) {
+    if (!edge && !ext_stopping) {
         say("init: the lid is closed, no other screen");
     }
     lock_wait();
+    if (ext_stopping) {
+        lid_check_at = now_ms() + 100;
+        return;
+    }
     /* A session that keeps the machine awake (apps.c) holds a closed lid's
      * sleep, not its lock: looked at again, as the session may end. */
     if (apps_sleep_inhibited && apps_sleep_inhibited()) {
@@ -6239,24 +6395,7 @@ int main(void)
                 break;
             }
             if (who[j] == NULL && (p[j].revents & POLLIN)) {
-                int key = keys_event(p[j].fd);
-                /* The compositor consumes its own global keybinds before
-                 * notifying us; acting on this observer would race delivery. */
-                int shared = display_front != NULL;
-                if (restart_asked) {
-                    restart_key(key); /* process 1's question has the keys */
-                } else if (key == K_HOME && !locked && !shared && !frame_holding(focused())) {
-                    go_home(focus_place);
-                } else if (key == K_ACT_SEARCH && !locked && !shared && !frame_holding(focused())) {
-                    open_search();
-                } else if (key == K_ACT_LOCK && !shared) {
-                    lock();
-                } else if (!locked && ctrl_alt_del(key)) {
-                    person_asked(RB_AUTOBOOT); /* "init: Ctrl+Alt+Del" */
-                }
-                if (key != 0 && key != K_ACT_LOCK && !restart_asked) {
-                    input_seen();
-                }
+                keyboard_action(keys_event(p[j].fd));
                 break;
             }
         }

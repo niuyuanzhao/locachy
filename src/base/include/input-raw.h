@@ -16,12 +16,18 @@ struct base_raw_key {
     uint32_t state;  /* 0 release, 1 press, 2 repeat, 3 cancel-all */
     uint32_t flags;  /* BASE_RAW_LOCAL: binding belongs to the local system */
 };
-/* Enabling/disabling flushes old events and held mappings. Enable before
- * polling, drain with base_raw_next on K_RAW_KEY (also after every ordinary key).
+enum base_raw_mode {
+    BASE_RAW_OFF,
+    BASE_RAW_SHARED,    /* Keep normal key handling and mark local bindings. */
+    BASE_RAW_EXCLUSIVE, /* Route keyboard events only to the raw queue. */
+};
+/* Setting the mode returns the previous mode and flushes raw events and held
+ * mappings. Cancel the remote keys before giving up an active raw session.
+ * Drain with base_raw_next on K_RAW_KEY (also after every ordinary key).
  * Cancellation invalidates every held key; never infer missing releases.
  * Direct device loss/SYN_DROPPED, Wayland leave/keymap loss, queue overflow and
  * input revocation emit a cancel. Wayland reports the seat, not physical IDs. */
-int base_raw_enable(int on);
+enum base_raw_mode base_raw_enable(enum base_raw_mode mode);
 int base_raw_next(struct base_raw_key *out);
 /* Fractional scroll samples in pointer_last(), independently opt-in from the
  * existing pointer_scroll_events boundary API. Returns the previous setting. */
@@ -29,7 +35,7 @@ int pointer_scroll_precision(int on);
 /* Backend hooks are weak so existing standalone keyboard tests need not link
  * this optional consumer. Programs use the strong API above. */
 __attribute__((weak)) int base_raw_pending(void);
-__attribute__((weak)) int base_raw_forward_home(void);
+__attribute__((weak)) int base_raw_exclusive(void);
 __attribute__((weak)) void base_raw_emit(uint32_t device, uint32_t code, uint32_t keysym,
                                         uint32_t mods, uint32_t locks, uint32_t state, int local);
 __attribute__((weak)) void base_raw_cancel(void);

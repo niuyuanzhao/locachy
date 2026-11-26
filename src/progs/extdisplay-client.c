@@ -150,7 +150,9 @@ int extdisplay_ipc_recv_fds(int fd, struct extdisplay_ipc *m, int *fds, unsigned
     if (n != (ssize_t)sizeof *m || bad || nfds < want_min || nfds > want_max || nfds > max_fds ||
         (msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) ||
         m->magic != EXTDISPLAY_IPC_MAGIC || m->reserved || m->length > EXTDISPLAY_IPC_TEXT ||
-        (m->op != EXTDISPLAY_IPC_FRAME && m->bytes) || dmabuf_bad) {
+        (m->op != EXTDISPLAY_IPC_FRAME && m->bytes) || dmabuf_bad ||
+        (m->op == EXTDISPLAY_IPC_CAPS_LOCK_STATE && (m->width > 1 || m->height || m->length)) ||
+        (m->op == EXTDISPLAY_IPC_CAPS_LOCK_TOGGLE && (m->width || m->height || m->length))) {
         for (unsigned i = 0; i < max_fds && i < nfds; i++) {
             if (fds[i] >= 0) close(fds[i]);
             fds[i] = -1;

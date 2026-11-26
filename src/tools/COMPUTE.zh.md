@@ -11,26 +11,21 @@
 1. 让节点和客户端加入预期的 tailnet。在 [网络访问策略](https://tailscale.com/kb/1324/grants)
    中只允许指定操作者或设备访问节点的 `tcp:22`，并检查是否有更宽泛的规则也放行了这个端口。
    节点不要启用 Tailscale SSH：这里用的是普通 OpenSSH，tailnet 的 `ssh` 规则不能代替用户公钥登记。
-2. 先启用 Tailscale，再在设置中打开 **SSH over Tailscale**。`service_tailnet_ssh` 在
-   `tailscale0` 所在的 `locachy-net` 中运行 OpenSSH，只监听当前的 tailnet 地址。nftables
-   会丢弃从其他接口（包括局域网、Thunderbolt 和回环接口）到达的 SSH。服务只接受公钥认证，
-   禁止 root 登录、密码登录、键盘交互认证、转发、隧道和用户自定义环境，并启用内置 SFTP
-   （当前 `scp` 也使用它）。
-3. 在节点控制台上，以管理员身份为已有的本地账号登记操作者的**公钥**。将 `USER` 和源文件名替换为实际值：
+2. 在设置中进入 **网络 → SSH 服务器（sshd）**，选择 **仅 Tailscale**（需要局域网访问时选 **局域网与 Tailscale**）。可选的 `service_tailnet_ssh` 在 `locachy-net` 中、独立 cgroup（`locachy-tailnet-ssh`）里运行 OpenSSH，跟随 `tailscale0` 的地址（`lan` 模式下还包括活动的非 `lo`、非 `mihomo`、非 `thunderbolt-net` 接口的全局地址）。按接口划分的 nftables 规则会丢弃从其他接口（包括回环接口）到达的流量；`lan` 模式下，`locachy-filter` 只放行精确绑定的 `(接口, 地址, 端口)` 三元组。默认监听 22 端口（`ssh_port`），只接受公钥认证；密码登录可选（`ssh_password="1"`，默认关闭），root 登录和空密码始终禁止。本地 TCP 转发（`AllowTcpForwarding local`）开放，用于 `ProxyJump` 和 `-L` 隧道；远程转发（`-R`）、代理转发、X11、隧道和用户环境保持禁用，内置 SFTP（当前 `scp` 也使用它）启用。
+3. 操作者的**公钥**可以在设置（**网络 → SSH 服务器（sshd）→ sshd 授权公钥**）中登记，也可以由管理员在节点控制台上登记（将 `USER` 和源文件名替换为实际值）：
 
    ```sh
+   sudo /usr/local/lib/locachy/tailnet-ssh-client --keys-add USER < /path/to/operator.pub
+   # 或直接整体替换文件：
    sudo install -o root -g root -m 0644 /path/to/operator.pub \
      /etc/locachy/tailnet-ssh/authorized_keys/USER
    ```
 
-   此命令会替换该账号的登记文件。如果要允许多个公钥，应将全部获准公钥写入同一个文件，
-   每行一个。这个文件只能由 root 写入，服务用非特权账号读取。删除文件或对应行即可禁止
-   之后的登录。服务不会读取用户的 `~/.ssh/authorized_keys`；私钥留在客户端。
-4. 服务首次启动时会生成持久的 Ed25519 主机密钥；不会替换已有密钥。在节点控制台上查看
-   SHA-256 指纹，在客户端核对后再接受它并写入 `known_hosts`：
+   只有 root 能写入 `/etc/locachy/tailnet-ssh/authorized_keys/USER`；非特权的公钥查询需要读取它。删除密钥可以在设置中进行，也可以使用 `--keys-remove USER 序号`（或删除文件），之后即禁止登录。服务不会读取用户的 `~/.ssh/authorized_keys`；私钥留在客户端。
+4. 服务首次启动时会生成持久的 Ed25519 主机密钥；已有密钥不会被替换，除非你在设置（**sshd 主机密钥**）中或使用 `--host-key-regen` 明确重新生成（此时客户端需删除 `known_hosts` 中的旧条目）。在客户端接受前，先核对 SHA-256 指纹：
 
    ```sh
-   sudo ssh-keygen -y -f /etc/locachy/tailnet-ssh/ssh_host_ed25519_key | ssh-keygen -l -E sha256 -f -
+   sudo /usr/local/lib/locachy/tailnet-ssh-client --host-key-fingerprint
    ```
 
    tailnet 访问权限、SSH 用户公钥、SSH 主机密钥、mTLS 凭据和扩展显示 PSK 彼此独立。
@@ -114,7 +109,7 @@ scp locachy-gpu:/srv/storage/experiments/work/probe-001/out/probe.txt .
 | 文件 | 作用 |
 |---|---|
 | `link/locachy-compute` | 命令行工具和守护进程：镜像、环境、原生容器、作业、KVM 微型虚拟机、`serve`，以及作为客户端的 `remote`。 |
-| `link/tailnet-ssh-client` | 按需在 `locachy-net` 中启动 OpenSSH，只监听当前 Tailscale 地址。 |
+| `link/tailnet-ssh-client` | 受管 OpenSSH 服务（`sshd`），运行在 `locachy-net` 中：仅 Tailscale 或局域网与 Tailscale、可配置端口、可选密码认证、受管 `authorized_keys`，以及主机密钥生命周期。 |
 | `link/compute-client` | 可选的 `service_compute` 启动脚本。用 `nsenter --net` 进入 `locachy-net`，再运行 `locachy-compute serve`。 |
 | `link/locachy-pair` | 一次配对、永久信任：添加、列出、查看、撤销已配对设备，并导出令牌。 |
 | `link/locachy_peers.py` | 共享的对端存储（`/etc/locachy/peers`），由 `locachy-pair`、`locachy-compute` 和 `extdisplay-broker` 共用。 |
@@ -133,6 +128,14 @@ scp locachy-gpu:/srv/storage/experiments/work/probe-001/out/probe.txt .
 6. 如果存在静态的 `/usr/local/lib/locachy/app-init`，它作为 1 号进程，负责回收子进程并转发信号；否则由内置的回收逻辑完成同样的工作，且不依赖客人系统的任何文件。
 
 容器中的 Wayland、X11、DBus 和席位变量全部清除，相应的套接字也从不挂载。
+
+## 交互式 shell 与自动 ProxyJump SSH
+
+要像使用普通机器一样进入容器或微型虚拟机：
+
+- `sudo locachy-compute shell 名称 [-- 命令...]`：对计算容器（`--kind env`）直接附加交互式 TTY；对运行中的微型虚拟机（`--kind vm`）通过其回环 SSH 端口连接。`--console` 则附加到 QEMU 串口套接字，按 `Ctrl+]` 脱离。
+- 在 `--net user` 下，`vm create` 会自动分配仅绑定回环的 SSH 转发（`hostfwd=tcp:127.0.0.1:<端口>-:22`，在 `2222..2999` 中自动选取，或使用 `--ssh-port` 指定，`--ssh-port 0` 则禁用；可选 `--ssh-user`）。它从不绑定 `0.0.0.0`。
+- `locachy-compute ssh-config [--host IP] [--user 用户] [--port 端口] [--prefix 前缀] [--no-sudo] [--json]` 输出可直接粘贴到客户端 `~/.ssh/config` 的配置片段：包括跳板主机条目、计算容器的 `RemoteCommand sudo locachy-compute shell 环境名` 条目，以及带 SSH 转发的虚拟机的 `ProxyJump` 条目。
 
 ## 重置与数据
 
@@ -287,7 +290,10 @@ LOCachy 通过真实 Tailscale 和 Thunderbolt 的完整工作流仍未验收。
 
 | 键 | 含义 |
 |---|---|
-| `service_tailnet_ssh="/usr/local/lib/locachy/tailnet-ssh-client"` | 通过 Tailscale 启用普通 OpenSSH，默认关闭。 |
+| `service_tailnet_ssh="/usr/local/lib/locachy/tailnet-ssh-client"` | 启用受管 OpenSSH（`sshd`），默认关闭。 |
+| `ssh_listen="tailscale"` 或 `"lan"` | `sshd` 只绑定 `tailscale0`（默认），或同时绑定活动的局域网接口与 `tailscale0`。 |
+| `ssh_port="22"` | `sshd` 监听端口（`1..65535`，默认 `22`）。 |
+| `ssh_password="0"` 或 `"1"` | 允许普通账号使用 PAM 密码登录（默认 `0`，只允许公钥；root 与空密码始终禁用）。 |
 | `service_compute="/usr/local/lib/locachy/compute-client"` | 启用可选的 HTTPS API。 |
 | `compute_port="27184"` | 控制接口端口（默认 27184）。 |
 | `compute_bind_tb="1"` | 同时监听雷电链路本地地址。 |

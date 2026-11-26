@@ -39,6 +39,23 @@ static void protocol(void)
     CHECK(parse("{\"type\":\"welcome\",\"locachy\":1,\"extended\":true,\"input\":[\"key\",\"button\",\"pointer\",\"scroll\"]}", &c) < 0);
     CHECK(parse("{\"type\":\"welcome\",\"locachy\":1,\"extended\":false,\"input\":[\"key\",\"button\",\"cancel\",\"pointer\",\"scroll\"]}", &c) < 0);
     CHECK(parse("{\"type\":\"welcome\",\"pv\":3}", &c) < 0); /* plain OpenDisplay: no session */
+    /* capsLock: welcome.input carries it only when accepted; the Mac's state is exactly {"type","caps"}. */
+    CHECK(parse("{\"type\":\"welcome\",\"locachy\":1,\"extended\":true,\"input\":[\"key\",\"button\",\"cancel\",\"pointer\",\"scroll\",\"capsLock\"]}", &c) == 0 &&
+          c.type == EXTDISPLAY_MSG_WELCOME && c.input_caps == EXTDISPLAY_INPUT_CAPS_LOCK);
+    CHECK(parse("{\"type\":\"welcome\",\"locachy\":1,\"extended\":true,\"input\":[\"key\",\"button\",\"cancel\",\"pointer\",\"scroll\",\"touch\",\"tablet\"]}", &c) == 0 &&
+          c.input_caps == (EXTDISPLAY_INPUT_TOUCH | EXTDISPLAY_INPUT_TABLET));
+    CHECK(parse("{\"type\":\"welcome\",\"locachy\":1,\"extended\":true,\"input\":[\"key\",\"button\",\"cancel\",\"pointer\",\"scroll\"]}", &c) == 0 && c.input_caps == 0);
+    CHECK(parse("{\"type\":\"welcome\",\"locachy\":1,\"extended\":true,\"input\":[\"key\",\"button\",\"cancel\",\"pointer\",\"scroll\",\"capsLock\"]}", &c) == 0 &&
+          (c.input_caps & EXTDISPLAY_INPUT_CAPS_LOCK) != 0);
+    CHECK(parse("{\"type\":\"capsLockState\",\"caps\":true}", &c) == 0 && c.type == EXTDISPLAY_MSG_CAPS_LOCK_STATE && c.caps_lock == 1);
+    CHECK(parse("{\"type\":\"capsLockState\",\"caps\":false}", &c) == 0 && c.type == EXTDISPLAY_MSG_CAPS_LOCK_STATE && c.caps_lock == 0);
+    CHECK(parse("{\"type\":\"capsLockState\",\"state\":true}", &c) < 0);
+    CHECK(parse("{\"type\":\"capsLockState\",\"caps\":1}", &c) < 0);
+    CHECK(parse("{\"type\":\"capsLockState\",\"caps\":\"true\"}", &c) < 0);
+    CHECK(parse("{\"type\":\"capsLockState\",\"caps\":true,\"state\":true}", &c) < 0);
+    CHECK(parse("{\"type\":\"capsLockState\"}", &c) < 0);
+    CHECK(parse("{\"type\":\"capsLockToggle\"}", &c) == 0 && c.type == EXTDISPLAY_MSG_CAPS_LOCK_TOGGLE);
+    CHECK(parse("{\"type\":\"capsLockToggle\",\"caps\":true}", &c) < 0);
     CHECK(parse("{\"type\":\"streamConfig\",\"codec\":\"h264\",\"width\":1920,\"height\":1080,\"framesPerSecond\":60}", &c) == 0 &&
           c.type == EXTDISPLAY_MSG_CONFIG && c.codec == EXTDISPLAY_CODEC_H264 && c.width == 1920);
     CHECK(parse("{\"type\":\"streamConfig\",\"codec\":\"hevc\",\"width\":4096,\"height\":4096,\"framesPerSecond\":60}", &c) == 0);
@@ -96,6 +113,27 @@ static void protocol(void)
     CHECK(extdisplay_scroll_json(s, sizeof s, -7.5, 0.25, EXTDISPLAY_PHASE_UPDATE, EXTDISPLAY_SOURCE_FINGER) > 0 && strstr(s, "\"dx\":-7.5000"));
     CHECK(extdisplay_scroll_json(s, sizeof s, 0, 0, 5, 1) < 0 && extdisplay_scroll_json(s, sizeof s, 1e9, 0, 2, 1) < 0);
     CHECK(extdisplay_cancel_json(s, sizeof s) > 0 && strcmp(s, "{\"type\":\"cancel\",\"scope\":\"all\"}") == 0);
+    /* capsLock is offered in hello.input (and only then), and the offer reads back exactly. */
+    uint32_t offered = 0;
+    CHECK(extdisplay_hello_full(s, sizeof s, 1920, 1080, 1.0, EXTDISPLAY_VCAP_H264, "h", "m",
+                                EXTDISPLAY_INPUT_CAPS_LOCK) > 0 &&
+          strstr(s, "\"scroll\",\"capsLock\"]}") && extdisplay_hello_input_caps(s, strlen(s), &offered) == 0 &&
+          offered == EXTDISPLAY_INPUT_CAPS_LOCK);
+    CHECK(extdisplay_hello_full(s, sizeof s, 1920, 1080, 1.0, EXTDISPLAY_VCAP_H264, "h", "m", 0) > 0 &&
+          !strstr(s, "capsLock") && extdisplay_hello_input_caps(s, strlen(s), &offered) == 0 && offered == 0);
+    CHECK(extdisplay_hello_input_caps("{\"type\":\"welcome\",\"input\":[\"key\"]}",
+                                      sizeof "{\"type\":\"welcome\",\"input\":[\"key\"]}" - 1, &offered) < 0);
+    CHECK(extdisplay_hello_input_caps("{\"type\":\"hello\",\"input\":[\"key\",\"button\",\"cancel\",\"pointer\"]}",
+                                      sizeof "{\"type\":\"hello\",\"input\":[\"key\",\"button\",\"cancel\",\"pointer\"]}" - 1,
+                                      &offered) < 0);
+    CHECK(extdisplay_caps_lock_state_json(s, sizeof s, 1) > 0 && strcmp(s, "{\"type\":\"capsLockState\",\"caps\":true}") == 0);
+    CHECK(extdisplay_caps_lock_state_json(s, sizeof s, 0) > 0 && strcmp(s, "{\"type\":\"capsLockState\",\"caps\":false}") == 0);
+    CHECK(extdisplay_caps_lock_state_json(s, sizeof s, 2) < 0 && extdisplay_caps_lock_state_json(s, 8, 1) < 0);
+    CHECK(extdisplay_caps_lock_toggle_json(s, sizeof s) > 0 && strcmp(s, "{\"type\":\"capsLockToggle\"}") == 0);
+    CHECK(extdisplay_caps_lock_toggle_json(s, 8) < 0);
+    CHECK(extdisplay_input_droppable("{\"type\":\"capsLockState\",\"caps\":true}",
+                                     sizeof "{\"type\":\"capsLockState\",\"caps\":true}" - 1) == 0);
+    CHECK(extdisplay_input_droppable("{\"type\":\"capsLockToggle\"}", sizeof "{\"type\":\"capsLockToggle\"}" - 1) == 0);
     CHECK(extdisplay_dimensions(4096, 4096, NULL) == 0 && extdisplay_dimensions(4097, 1, NULL) < 0);
 }
 
@@ -436,6 +474,26 @@ static void ipc(void)
     CHECK(extdisplay_ipc_send(sv[0], &failed) == 0);
     CHECK(extdisplay_ipc_recv(sv[1], &r, &fd) == 0 && r.op == EXTDISPLAY_IPC_FAILED &&
           r.length == strlen(why) && memcmp(r.text, why, r.length) == 0 && fd < 0);
+    /* capsLock: the worker's state is one absolute boolean without a descriptor, and the
+     * frontend's toggle has no payload; anything else is refused. */
+    struct extdisplay_ipc caps = { .op = EXTDISPLAY_IPC_CAPS_LOCK_STATE, .width = 1 };
+    CHECK(extdisplay_ipc_send(sv[0], &caps) == 0);
+    CHECK(extdisplay_ipc_recv(sv[1], &r, &fd) == 0 && r.op == EXTDISPLAY_IPC_CAPS_LOCK_STATE && r.width == 1 && fd < 0);
+    caps.width = 0;
+    CHECK(extdisplay_ipc_send(sv[0], &caps) == 0);
+    CHECK(extdisplay_ipc_recv(sv[1], &r, &fd) == 0 && r.op == EXTDISPLAY_IPC_CAPS_LOCK_STATE && r.width == 0 && fd < 0);
+    caps.width = 2;
+    CHECK(extdisplay_ipc_send(sv[0], &caps) == 0);
+    CHECK(extdisplay_ipc_recv(sv[1], &r, &fd) < 0 && fd < 0);
+    caps.width = 1;
+    CHECK(send_raw(sv[0], &caps, &sealed, 1) == 0);
+    CHECK(extdisplay_ipc_recv(sv[1], &r, &fd) < 0 && fd < 0);
+    struct extdisplay_ipc toggle = { .op = EXTDISPLAY_IPC_CAPS_LOCK_TOGGLE };
+    CHECK(extdisplay_ipc_send(sv[0], &toggle) == 0);
+    CHECK(extdisplay_ipc_recv(sv[1], &r, &fd) == 0 && r.op == EXTDISPLAY_IPC_CAPS_LOCK_TOGGLE && fd < 0);
+    toggle.width = 1;
+    CHECK(extdisplay_ipc_send(sv[0], &toggle) == 0);
+    CHECK(extdisplay_ipc_recv(sv[1], &r, &fd) < 0 && fd < 0);
     /* Malformed dma-buf metadata (wrong length or nonzero bytes) is refused. */
     struct extdisplay_ipc bad_dma = dmabuf;
     bad_dma.length = 4;
@@ -449,10 +507,251 @@ static void ipc(void)
 }
 #endif
 
+#ifdef __linux__
+#include <poll.h>
+#include <signal.h>
+#include <sys/wait.h>
+
+/* The real extdisplay-worker, built with EXTDISPLAY_WORKER_TEST_NO_SANDBOX so an
+ * unprivileged runner can start it: its fd 3 is our end of a SEQPACKET channel,
+ * its fd 4 our end of a stream that stands for the paired peer. */
+struct rig { pid_t pid; int ipc, peer; };
+
+static int wait_readable(int fd)
+{
+    struct pollfd p = { fd, POLLIN, 0 };
+    return poll(&p, 1, 5000) == 1 && (p.revents & POLLIN) ? 0 : -1;
+}
+
+static int rig_start(const char *path, struct rig *w)
+{
+    int sv[2], st[2];
+    w->pid = -1;
+    w->ipc = w->peer = -1;
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sv) < 0) return -1;
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, st) < 0) {
+        close(sv[0]);
+        close(sv[1]);
+        return -1;
+    }
+    fflush(stdout);
+    pid_t pid = fork();
+    if (pid == 0) {
+        int a = fcntl(sv[1], F_DUPFD, 10), b = fcntl(st[1], F_DUPFD, 10);
+        if (a < 0 || b < 0 || dup2(a, EXTDISPLAY_IPC_FD) < 0 || dup2(b, EXTDISPLAY_TRANSPORT_FD) < 0) _exit(127);
+        for (int fd = EXTDISPLAY_RENDER_FD; fd < 1024; fd++) close(fd);
+        execl(path, "extdisplay-worker", (char *)NULL);
+        _exit(127);
+    }
+    close(sv[1]);
+    close(st[1]);
+    if (pid < 0) {
+        close(sv[0]);
+        close(st[0]);
+        return -1;
+    }
+    w->pid = pid;
+    w->ipc = sv[0];
+    w->peer = st[0];
+    return 0;
+}
+
+static void rig_stop(struct rig *w)
+{
+    if (w->pid > 0) {
+        kill(w->pid, SIGKILL);
+        waitpid(w->pid, NULL, 0);
+    }
+    if (w->ipc >= 0) close(w->ipc);
+    if (w->peer >= 0) close(w->peer);
+    w->pid = -1;
+    w->ipc = w->peer = -1;
+}
+
+static int ipc_send_op(struct rig *w, uint32_t op, const char *text, uint32_t width)
+{
+    struct extdisplay_ipc m = { .op = op, .width = width };
+    size_t n = text ? strlen(text) : 0;
+    if (n > EXTDISPLAY_IPC_TEXT) return -1;
+    m.length = (uint32_t)n;
+    if (n) memcpy(m.text, text, n);
+    return extdisplay_ipc_send(w->ipc, &m);
+}
+
+static int ipc_next(struct rig *w, struct extdisplay_ipc *m)
+{
+    int fd = -1;
+    if (wait_readable(w->ipc) < 0) return -1;
+    return extdisplay_ipc_recv(w->ipc, m, &fd) == 0 && fd < 0 ? 0 : -1;
+}
+
+static int ipc_expect(struct rig *w, uint32_t op, struct extdisplay_ipc *m)
+{
+    return ipc_next(w, m) == 0 && m->op == op ? 0 : -1;
+}
+
+/* The worker's FAILED with exactly this reason, after any messages it sent first. */
+static int ipc_expect_failed(struct rig *w, const char *reason)
+{
+    struct extdisplay_ipc m;
+    for (int i = 0; i < 8; i++) {
+        if (ipc_next(w, &m) < 0) return -1;
+        if (m.op == EXTDISPLAY_IPC_FAILED) {
+            return m.length == strlen(reason) && memcmp(m.text, reason, m.length) == 0 ? 0 : -1;
+        }
+    }
+    return -1;
+}
+
+static int peer_send(struct rig *w, const char *json)
+{
+    size_t n = strlen(json);
+    unsigned char frame[4 + 1024];
+    if (n == 0 || n > 1024) return -1;
+    frame[0] = (unsigned char)(n >> 24);
+    frame[1] = (unsigned char)(n >> 16);
+    frame[2] = (unsigned char)(n >> 8);
+    frame[3] = (unsigned char)n;
+    memcpy(frame + 4, json, n);
+    return send(w->peer, frame, n + 4, MSG_NOSIGNAL) == (ssize_t)(n + 4) ? 0 : -1;
+}
+
+static int read_full(int fd, unsigned char *buf, size_t n)
+{
+    size_t got = 0;
+    while (got < n) {
+        if (wait_readable(fd) < 0) return -1;
+        ssize_t r = recv(fd, buf + got, n - got, MSG_DONTWAIT);
+        if (r < 0 && (errno == EAGAIN || errno == EINTR)) continue;
+        if (r <= 0) return -1;
+        got += (size_t)r;
+    }
+    return 0;
+}
+
+/* The worker's next message toward the peer, skipping its keepalive pings:
+ * its length, or -1. */
+static ssize_t peer_next(struct rig *w, char *text, size_t size)
+{
+    for (int i = 0; i < 8; i++) {
+        unsigned char head[4];
+        if (read_full(w->peer, head, 4) < 0) return -1;
+        size_t n = (size_t)head[0] << 24 | (size_t)head[1] << 16 | (size_t)head[2] << 8 | head[3];
+        if (n == 0 || n >= size || read_full(w->peer, (unsigned char *)text, n) < 0) return -1;
+        text[n] = '\0';
+        if (strncmp(text, "{\"type\":\"ping\"", 14) != 0) return (ssize_t)n;
+    }
+    return -1;
+}
+
+static int rig_hello(const char *path, struct rig *w, uint32_t offer_caps, const char **codec_out)
+{
+    struct extdisplay_ipc m;
+    char hello[EXTDISPLAY_IPC_TEXT], peer_buf[EXTDISPLAY_IPC_TEXT];
+    if (rig_start(path, w) < 0 || ipc_expect(w, EXTDISPLAY_IPC_READY, &m) < 0) return -1;
+    uint32_t vcaps = (m.width & 1u) ? EXTDISPLAY_VCAP_H264 : (m.width & 2u) ? EXTDISPLAY_VCAP_HEVC : 0u;
+    if (!vcaps) return -1;
+    if (codec_out) *codec_out = (vcaps & EXTDISPLAY_VCAP_H264) ? "h264" : "hevc";
+    if (extdisplay_hello_full(hello, sizeof hello, 320, 240, 1.0, vcaps, "host", "model", offer_caps) < 0) return -1;
+    if (ipc_send_op(w, EXTDISPLAY_IPC_HELLO, hello, 0) < 0) return -1;
+    return peer_next(w, peer_buf, sizeof peer_buf) > 0 && strcmp(peer_buf, hello) == 0 ? 0 : -1;
+}
+
+static void worker_caps(const char *path)
+{
+    const char *codec = "h264";
+    char cfg[192], peer_buf[256];
+    struct extdisplay_ipc m;
+    struct rig w = { .pid = -1, .ipc = -1, .peer = -1 };
+
+    /* 1. Negotiated Caps Lock: initial state arrives before ACTIVE, later changes follow,
+     * and the frontend's toggle reaches the peer verbatim. */
+    CHECK(rig_hello(path, &w, EXTDISPLAY_INPUT_CAPS_LOCK, &codec) == 0);
+    snprintf(cfg, sizeof cfg,
+             "{\"type\":\"streamConfig\",\"codec\":\"%s\",\"width\":320,\"height\":240,\"framesPerSecond\":30}", codec);
+    CHECK(peer_send(&w, "{\"type\":\"welcome\",\"locachy\":1,\"extended\":true,"
+                        "\"input\":[\"key\",\"button\",\"cancel\",\"pointer\",\"scroll\",\"capsLock\"]}") == 0);
+    CHECK(peer_send(&w, "{\"type\":\"capsLockState\",\"caps\":true}") == 0);
+    CHECK(peer_send(&w, cfg) == 0);
+    CHECK(ipc_expect(&w, EXTDISPLAY_IPC_CAPS_LOCK_STATE, &m) == 0 && m.width == 1);
+    CHECK(ipc_expect(&w, EXTDISPLAY_IPC_ACTIVE, &m) == 0 && m.width == EXTDISPLAY_INPUT_CAPS_LOCK);
+    CHECK(peer_send(&w, "{\"type\":\"capsLockState\",\"caps\":false}") == 0);
+    CHECK(ipc_expect(&w, EXTDISPLAY_IPC_CAPS_LOCK_STATE, &m) == 0 && m.width == 0);
+    CHECK(ipc_send_op(&w, EXTDISPLAY_IPC_CAPS_LOCK_TOGGLE, NULL, 0) == 0);
+    CHECK(peer_next(&w, peer_buf, sizeof peer_buf) > 0 && strcmp(peer_buf, "{\"type\":\"capsLockToggle\"}") == 0);
+    /* Frontend sending CAPS_LOCK_STATE toward worker is refused (Mac is sole authority). */
+    CHECK(ipc_send_op(&w, EXTDISPLAY_IPC_CAPS_LOCK_STATE, NULL, 1) == 0);
+    CHECK(ipc_expect_failed(&w, "frontend-err") == 0);
+    rig_stop(&w);
+
+    /* 2. Reconnect: a fresh session receives the latest pre-streamConfig state before ACTIVE. */
+    CHECK(rig_hello(path, &w, EXTDISPLAY_INPUT_CAPS_LOCK, &codec) == 0);
+    snprintf(cfg, sizeof cfg,
+             "{\"type\":\"streamConfig\",\"codec\":\"%s\",\"width\":320,\"height\":240,\"framesPerSecond\":30}", codec);
+    CHECK(peer_send(&w, "{\"type\":\"welcome\",\"locachy\":1,\"extended\":true,"
+                        "\"input\":[\"key\",\"button\",\"cancel\",\"pointer\",\"scroll\",\"capsLock\"]}") == 0);
+    CHECK(peer_send(&w, "{\"type\":\"capsLockState\",\"caps\":true}") == 0);
+    CHECK(peer_send(&w, "{\"type\":\"capsLockState\",\"caps\":false}") == 0);
+    CHECK(peer_send(&w, cfg) == 0);
+    CHECK(ipc_expect(&w, EXTDISPLAY_IPC_CAPS_LOCK_STATE, &m) == 0 && m.width == 0);
+    CHECK(ipc_expect(&w, EXTDISPLAY_IPC_ACTIVE, &m) == 0 && m.width == EXTDISPLAY_INPUT_CAPS_LOCK);
+    rig_stop(&w);
+
+    /* 3. Negotiated peer skipping initial capsLockState before streamConfig fails config-err. */
+    CHECK(rig_hello(path, &w, EXTDISPLAY_INPUT_CAPS_LOCK, &codec) == 0);
+    CHECK(peer_send(&w, "{\"type\":\"welcome\",\"locachy\":1,\"extended\":true,"
+                        "\"input\":[\"key\",\"button\",\"cancel\",\"pointer\",\"scroll\",\"capsLock\"]}") == 0);
+    CHECK(peer_send(&w, cfg) == 0);
+    CHECK(ipc_expect_failed(&w, "config-err") == 0);
+    rig_stop(&w);
+
+    /* 4. Peer sending capsLockState before welcome fails parse-err. */
+    CHECK(rig_hello(path, &w, EXTDISPLAY_INPUT_CAPS_LOCK, &codec) == 0);
+    CHECK(peer_send(&w, "{\"type\":\"capsLockState\",\"caps\":true}") == 0);
+    CHECK(ipc_expect_failed(&w, "parse-err") == 0);
+    rig_stop(&w);
+
+    /* 5. Peer sending receiver-only capsLockToggle fails parse-err. */
+    CHECK(rig_hello(path, &w, EXTDISPLAY_INPUT_CAPS_LOCK, &codec) == 0);
+    CHECK(peer_send(&w, "{\"type\":\"welcome\",\"locachy\":1,\"extended\":true,"
+                        "\"input\":[\"key\",\"button\",\"cancel\",\"pointer\",\"scroll\",\"capsLock\"]}") == 0);
+    CHECK(peer_send(&w, "{\"type\":\"capsLockToggle\"}") == 0);
+    CHECK(ipc_expect_failed(&w, "parse-err") == 0);
+    rig_stop(&w);
+
+    /* 6. Legacy peer (welcome omits capsLock): streamConfig works with no capsLockState,
+     * ACTIVE clears EXTDISPLAY_INPUT_CAPS_LOCK, and unsolicited capsLockState fails parse-err. */
+    CHECK(rig_hello(path, &w, EXTDISPLAY_INPUT_CAPS_LOCK, &codec) == 0);
+    CHECK(peer_send(&w, "{\"type\":\"welcome\",\"locachy\":1,\"extended\":true,"
+                        "\"input\":[\"key\",\"button\",\"cancel\",\"pointer\",\"scroll\"]}") == 0);
+    CHECK(peer_send(&w, cfg) == 0);
+    CHECK(ipc_expect(&w, EXTDISPLAY_IPC_ACTIVE, &m) == 0 && m.width == 0);
+    CHECK(peer_send(&w, "{\"type\":\"capsLockState\",\"caps\":true}") == 0);
+    CHECK(ipc_expect_failed(&w, "parse-err") == 0);
+    rig_stop(&w);
+
+    /* 7. Asymmetric offer (receiver omits capsLock, peer lists it): intersection clears
+     * capsLock; streamConfig succeeds without capsLockState; frontend toggle fails frontend-err. */
+    CHECK(rig_hello(path, &w, 0, &codec) == 0);
+    CHECK(peer_send(&w, "{\"type\":\"welcome\",\"locachy\":1,\"extended\":true,"
+                        "\"input\":[\"key\",\"button\",\"cancel\",\"pointer\",\"scroll\",\"capsLock\"]}") == 0);
+    CHECK(peer_send(&w, cfg) == 0);
+    CHECK(ipc_expect(&w, EXTDISPLAY_IPC_ACTIVE, &m) == 0 && m.width == 0);
+    CHECK(ipc_send_op(&w, EXTDISPLAY_IPC_CAPS_LOCK_TOGGLE, NULL, 0) == 0);
+    CHECK(ipc_expect_failed(&w, "frontend-err") == 0);
+    rig_stop(&w);
+}
+#endif
+
 int main(int argc, char **argv)
 {
     if (argc == 5) {
         if (decode(argv[1], (uint32_t)atoi(argv[2]), (uint32_t)atoi(argv[3]), argv[4]) != 0) failures++;
+#ifdef __linux__
+    } else if (argc == 3 && strcmp(argv[1], "worker") == 0) {
+        worker_caps(argv[2]);
+        printf("%s: extdisplay worker Caps Lock cases\n", failures ? "FAIL" : "PASS");
+#endif
     } else {
         protocol();
         printf("%s: extdisplay protocol cases\n", failures ? "FAIL" : "PASS");

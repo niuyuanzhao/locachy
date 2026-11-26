@@ -162,10 +162,16 @@ void wl_backend_name_keys(int on) { w.name_keys = !!on; }
 int wl_backend_next_key(void)
 {
     if (klen == 0) return 0;
-    last_key = keyq[khead];
+    while (klen) {
+        last_key = keyq[khead];
+        khead = (khead + 1) % KEYS;
+        klen--;
+        /* K_CLOSE is a window request, not a keyboard event. */
+        if (last_key.key == K_CLOSE || !base_raw_exclusive || !base_raw_exclusive()) break;
+        last_key.key = 0;
+    }
+    if (!last_key.key) return 0;
     w.use_key_mods = 1;
-    khead = (khead + 1) % KEYS;
-    klen--;
     if (last_key.key == K_CLOSE) {
         w.close_state = CLOSE_READ;
         w.close_read_at = monotonic();
@@ -279,7 +285,7 @@ static void raw_key(uint32_t code, xkb_keysym_t sym, uint32_t state, int local)
 
 static void key_pressed(uint32_t code, int is_repeat)
 {
-    if (!w.state) return;
+    if (!w.state || (base_raw_exclusive && base_raw_exclusive())) return;
     xkb_keysym_t sym = xkb_state_key_get_one_sym(w.state, code + 8);
     if (sym == XKB_KEY_NoSymbol) return;
     int ctrl = w.mods & KEYS_CTRL, alt = w.mods & KEYS_ALT, meta = w.mods & KEYS_META, shift = w.mods & KEYS_SHIFT;
@@ -408,13 +414,16 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial, ui
     if (base_raw_emit && w.state) {
         xkb_keysym_t sym = xkb_state_key_get_one_sym(w.state, code + 8);
         int down = pressed == WL_KEYBOARD_KEY_STATE_PRESSED;
-        /* The compositor sends the new modifier mask after the key. Include
-         * the pressed key's role for local modifier-only bindings. */
-        int held = w.mods | (down ? modifier_role(sym) : 0);
-        int action = keys_match_action((int)code, !!(held & KEYS_CTRL), !!(held & KEYS_ALT),
-                                       !!(held & KEYS_SHIFT), !!(held & KEYS_META));
-        int local = (action == K_ACT_HOME && !(base_raw_forward_home && base_raw_forward_home())) ||
-                    action == K_ACT_LOCK || (action >= K_VOL_UP && action <= K_BRI_DOWN);
+        int local = 0;
+        if (down && !(base_raw_exclusive && base_raw_exclusive())) {
+            /* Modifiers arrive after the key; include the pressed key's
+             * modifier role for local modifier-only bindings. */
+            int held = w.mods | modifier_role(sym);
+            int action = keys_match_action((int)code, !!(held & KEYS_CTRL), !!(held & KEYS_ALT),
+                                           !!(held & KEYS_SHIFT), !!(held & KEYS_META));
+            local = action == K_ACT_HOME || action == K_ACT_LOCK || action == K_ACT_SEARCH ||
+                    (action >= K_VOL_UP && action <= K_BRI_DOWN);
+        }
         raw_key(code, sym, (uint32_t)down, local);
         w.events++;
     }
@@ -1329,7 +1338,11 @@ int wl_backend_wait(struct pollfd *extra, size_t count, int timeout_ms)
     if (r < 0) {
         int error = errno;
         wl_display_cancel_read(w.display);
-        return error == EINTR ? 1 : -1;
+        if (error == EINTR) {
+            errno = EINTR;
+            return 2;
+        }
+        return -1;
     }
     if (p[DISPLAY].revents & (POLLIN | POLLERR | POLLHUP)) {
         if (wl_display_read_events(w.display) < 0) return -1;

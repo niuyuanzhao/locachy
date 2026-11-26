@@ -26,6 +26,7 @@ static DIR *fixture_opendir(const char *);
 static int fixture_rename(const char *, const char *);
 static int fixture_unlink(const char *);
 static int fixture_link(const char *, const char *);
+static int fixture_lstat(const char *, struct stat *);
 static int fixture_fclose(FILE *);
 static int make_keymap_table_at(const char *, const char *);
 static int fixture_kill(pid_t, int);
@@ -37,6 +38,7 @@ static struct passwd *fixture_getpwuid(uid_t);
 #define rename fixture_rename
 #define unlink fixture_unlink
 #define link fixture_link
+#define lstat fixture_lstat
 #define fclose fixture_fclose
 #define kill fixture_kill
 #define sethostname fixture_sethostname
@@ -84,6 +86,7 @@ int base_app_action(const char *action, const char *name, char *why, size_t size
 #undef sethostname
 #undef kill
 #undef fclose
+#undef lstat
 #undef unlink
 #undef link
 #undef rename
@@ -209,7 +212,9 @@ static const char *map_path(const char *path, char *out, size_t size)
     size_t root_len = strlen(root);
     if (root_len && strncmp(path, root, root_len) == 0 &&
         (strcmp(path + root_len, "/sys/class/power_supply") == 0 ||
-         strncmp(path + root_len, "/sys/class/power_supply/", sizeof "/sys/class/power_supply/" - 1) == 0))
+         strncmp(path + root_len, "/sys/class/power_supply/", sizeof "/sys/class/power_supply/" - 1) == 0 ||
+         strcmp(path + root_len, "/battery") == 0 ||
+         strncmp(path + root_len, "/battery/", sizeof "/battery/" - 1) == 0))
         snprintf(out, size, "%s", path); /* open() also uses this fixture root */
     else if (strcmp(path, "/sys/class/drm") == 0)
         snprintf(out, size, "%s/drm", root);
@@ -326,6 +331,12 @@ static int fixture_unlink(const char *path)
     return unlink(map_path(path, mapped, sizeof mapped));
 }
 
+static int fixture_lstat(const char *path, struct stat *st)
+{
+    char mapped[1400];
+    return lstat(map_path(path, mapped, sizeof mapped), st);
+}
+
 static int fixture_fclose(FILE *f)
 {
     int output = f == writing;
@@ -390,6 +401,7 @@ static int fixture_access(const char *path, int mode)
     if (!strcmp(path, "/usr/local/bin/locachy-tpm")) return fake_tpm_status ? 0 : -1;
     if (!strcmp(path, LOCACHY_DURESS)) return fake_duress_status ? 0 : -1;
     if (!strcmp(path, LOCACHY_STORAGE)) return fake_storage_status ? 0 : -1;
+    if (!strcmp(path, SSH_ADMIN_CMD)) return -1;
     if (!strcmp(path, FWUPDMGR)) return fake_fwupd ? 0 : -1;
     if (!strcmp(path, NVIDIA_DRIVER)) return fake_nvidia ? 0 : -1;
     if (!strcmp(path, "/etc/libinput")) return 0; /* its file is the fixture's */
@@ -405,10 +417,11 @@ static int fixture_access(const char *path, int mode)
 }
 
 /* A system job asked for (jobs-double.h): counted as a fork was. */
+static int fail_jobs_submit;
 static int submit_hook(void)
 {
     event('F');
-    if (!allow_rc) return -1;
+    if (!allow_rc || fail_jobs_submit) return -1;
     forks++;
     return 0;
 }
@@ -749,10 +762,12 @@ static void test_circular(void)
            search_docs_index() == search_svc_index() + 1 &&
            gpu_unlock_index() == search_docs_index() + 1 && gpu_power_index() == gpu_unlock_index() + 1 &&
            nvidia_powerd_index() == gpu_power_index() + 1 &&
-           storage_compute_index() == nvidia_powerd_index() + 1 &&
+           gpu_graphics_index() == nvidia_powerd_index() + 1 &&
+           storage_compute_index() == gpu_graphics_index() + 3 &&
            storage_vols_index() == storage_compute_index() + 1 &&
            storage_disks_index() == storage_vols_index() + nstorage_vols &&
-           num_hw_items() == storage_disks_index() + 1);
+           ssh_index() == storage_disks_index() + 1 &&
+           num_hw_items() == ssh_index() + 5);
     on_rc("touchpad_circular", "0", NULL);
     assert(circular == 0);
     on_rc("touchpad_circular", "yes", NULL);
@@ -1198,6 +1213,14 @@ static void file_bytes(const char *rel, const void *data, size_t n)
     snprintf(path, sizeof path, "%s/%s", root, rel);
     FILE *f = fopen(path, "wb");
     assert(f && fwrite(data, 1, n, f) == n && fclose(f) == 0);
+}
+
+static void file_sized(const char *rel, size_t n)
+{
+    char path[1400];
+    snprintf(path, sizeof path, "%s/%s", root, rel);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    assert(fd >= 0 && ftruncate(fd, (off_t)n) == 0 && close(fd) == 0);
 }
 
 static void test_display_off(void)
@@ -1679,10 +1702,21 @@ static void test_adaptive_charging(void)
     power_refresh_devices();
     selected = bat_adaptive_index();
     rc_log[0] = '\0';
-    assert(page_key(K_RIGHT) && !rc_log[0] && hups == hup_before);
+    int jobs_before = jobs_double_count;
+    jobs_double_last[0] = '\0';
+    jobs_double_ended = 0;
+    assert(page_key(K_RIGHT) && !rc_log[0] && hups == hup_before && jobs_double_count == jobs_before);
     assert(page_key('\n') && editing && page_key(K_RIGHT));
     assert(rc_bat_adaptive && !strcmp(rc_log, "battery_charge_adaptive=1;") && hups == hup_before + 1);
+    assert(bat_model_job != 0 && jobs_double_count == jobs_before + 1 &&
+           !strcmp(jobs_double_last, "battery-model-fetch") &&
+           strstr(notice, "downloading model in background"));
+    item_text(bat_adaptive_index(), line, sizeof line);
+    assert(strstr(line, "Downloading model..."));
     assert(page_key('\n') && !editing);
+    jobs_double_ended = 1;
+    bat_model_check();
+    assert(!bat_model_job && strstr(notice, "downloaded and verified"));
     assert(rc_bat_start == 80 && rc_bat_end == 85);
     read_fixture(end_path, line, sizeof line);
     assert(atoi(line) == 85);
@@ -1750,9 +1784,30 @@ static void test_adaptive_charging(void)
     assert(!canvas_has(forecast));
     file_text("sys/class/power_supply/AC/online", "1\n");
 
+    /* Daemon model-gate and standby states render their expected labels. */
+    file_text("battery/charge-status", "1 0 1\nBAT0 LGC_45N1111_4102 model-missing 85 85 0\n");
+    power_refresh_devices();
+    draw();
+    assert(canvas_has("Model not downloaded") &&
+           canvas_has("Press r on Adaptive Charging to download the model."));
+    file_text("battery/charge-status", "1 0 1\nBAT0 LGC_45N1111_4102 model-invalid 85 85 0\n");
+    power_refresh_devices();
+    draw();
+    assert(canvas_has("Model verification failed") &&
+           canvas_has("Press r on Adaptive Charging to download the model."));
+    file_text("battery/charge-status", "1 0 1\nBAT0 LGC_45N1111_4102 inactive 85 85 0\n");
+    power_refresh_devices();
+    draw();
+    assert(canvas_has("Adaptive standby") && !canvas_has("Press r on Adaptive Charging"));
+    file_text("battery/charge-status", hold);
+    power_refresh_devices();
+
     selected = bat_adaptive_index();
+    jobs_before = jobs_double_count;
+    jobs_double_last[0] = '\0';
     adjust(-1);
     assert(!rc_bat_adaptive && !strcmp(rc_log, "battery_charge_adaptive=0;") && hups == hup_before + 2);
+    assert(jobs_double_count == jobs_before && !jobs_double_last[0] && !bat_model_job);
     draw();
     assert(!canvas_has(forecast));
     assert(unsetenv("LOCACHY_NOW_TS") == 0);
@@ -1796,8 +1851,118 @@ static void test_adaptive_charging(void)
     assert(fixture_unlink("/var/lib/locachy/battery/charge-status") == 0);
     rc_bat_full_until = 0;
     power_refresh_devices();
+
+    /* Manual retry while off refuses to download; queue failure on opt-in keeps
+     * adaptive enabled without rolling back. */
+    selected = bat_adaptive_index();
+    jobs_before = jobs_double_count;
+    jobs_double_last[0] = '\0';
+    power_model_fetch_row();
+    assert(jobs_double_count == jobs_before && !jobs_double_last[0] && !bat_model_job &&
+           strstr(notice, "Turn Adaptive Charging on first"));
+
+    rc_log[0] = '\0';
+    fail_jobs_submit = 1;
+    adjust(+1);
+    fail_jobs_submit = 0;
+    assert(rc_bat_adaptive && !strcmp(rc_log, "battery_charge_adaptive=1;") &&
+           !bat_model_job && strstr(notice, "model download unavailable"));
+    rc_log[0] = '\0';
+    jobs_before = jobs_double_count;
+    jobs_double_last[0] = '\0';
+    adjust(-1);
+    assert(!rc_bat_adaptive && !strcmp(rc_log, "battery_charge_adaptive=0;") &&
+           jobs_double_count == jobs_before && !jobs_double_last[0]);
+
+    /* Valid-sized regular model files already on disk: enabling skips download. */
+    mkp("battery/model");
+    file_sized("battery/model/" BAT_MODEL_TFLITE_NAME, BAT_MODEL_TFLITE_SIZE);
+    file_sized("battery/model/" BAT_MODEL_PREPROC_NAME, BAT_MODEL_PREPROC_SIZE);
+    assert(power_model_files_present());
+    rc_log[0] = '\0';
+    jobs_before = jobs_double_count;
+    jobs_double_last[0] = '\0';
+    adjust(+1);
+    assert(rc_bat_adaptive && !strcmp(rc_log, "battery_charge_adaptive=1;") &&
+           jobs_double_count == jobs_before && !jobs_double_last[0] && !bat_model_job &&
+           !strcmp(notice, "Adaptive charging setting saved."));
+
+    /* Retry fetch: skipped when healthy, allowed when daemon reports model-invalid. */
+    file_text("battery/charge-status", "1 0 1\nBAT0 LGC_45N1111_4102 inactive 85 85 0\n");
+    jobs_before = jobs_double_count;
+    jobs_double_last[0] = '\0';
+    power_model_fetch_row();
+    assert(jobs_double_count == jobs_before && !bat_model_job && strstr(notice, "already installed"));
+
+    file_text("battery/charge-status", "1 0 1\nBAT0 LGC_45N1111_4102 model-invalid 85 85 0\n");
+    jobs_double_ended = 0;
+    power_model_fetch_row();
+    assert(bat_model_job != 0 && jobs_double_count == jobs_before + 1 &&
+           !strcmp(jobs_double_last, "battery-model-fetch"));
+    jobs_double_ended = 1;
+    bat_model_check();
+    assert(!bat_model_job);
+
+    /* Symlink is rejected by power_model_files_present() (lstat regular-file check). */
+    char tfl_real[1400], tfl_link[1400], pb_path[1400], mdir_path[1400];
+    snprintf(tfl_real, sizeof tfl_real, "%s/battery/model/real.tflite", root);
+    snprintf(tfl_link, sizeof tfl_link, "%s/battery/model/" BAT_MODEL_TFLITE_NAME, root);
+    snprintf(pb_path, sizeof pb_path, "%s/battery/model/" BAT_MODEL_PREPROC_NAME, root);
+    snprintf(mdir_path, sizeof mdir_path, "%s/battery/model", root);
+    assert(rename(tfl_link, tfl_real) == 0);
+    assert(symlink(tfl_real, tfl_link) == 0);
+    assert(!power_model_files_present());
+    assert(unlink(tfl_link) == 0 && rename(tfl_real, tfl_link) == 0);
+    assert(power_model_files_present());
+
+    /* Delete twice submits battery-model-remove and refreshes on completion. */
+    file_text("battery/charge-status", "1 0 1\nBAT0 LGC_45N1111_4102 inactive 85 85 0\n");
+    power_refresh_devices();
+    bat_model_remove_asked = 0;
+    jobs_before = jobs_double_count;
+    jobs_double_last[0] = '\0';
+    power_model_remove_row();
+    assert(bat_model_remove_asked == 1 && !bat_model_job && jobs_double_count == jobs_before &&
+           strstr(notice, "Delete again"));
+    jobs_double_ended = 0;
+    power_model_remove_row();
+    assert(bat_model_remove_asked == 0 && bat_model_job != 0 && jobs_double_count == jobs_before + 1 &&
+           !strcmp(jobs_double_last, "battery-model-remove") &&
+           strstr(notice, "Removing adaptive charging model"));
+    item_text(bat_adaptive_index(), line, sizeof line);
+    assert(strstr(line, "Removing model..."));
+    jobs_double_ended = 1;
+    bat_model_check();
+    assert(!bat_model_job && strstr(notice, "Adaptive charging model removed."));
+
+    /* adopt_jobs tracks active battery-model-fetch and battery-model-remove jobs. */
+    jobs_double_mine[0] = (struct jobs_row){ .id = 7401, .kind = "battery-model-fetch", .state = "running", .position = 0 };
+    jobs_double_nmine = 1;
+    adopt_jobs();
+    assert(bat_model_job == 7401 && !strcmp(bat_model_what, "fetch"));
+    bat_model_job = 0;
+    bat_model_what[0] = '\0';
+    jobs_double_mine[0] = (struct jobs_row){ .id = 7402, .kind = "battery-model-remove", .state = "queued", .position = 1 };
+    adopt_jobs();
+    assert(bat_model_job == 7402 && !strcmp(bat_model_what, "remove"));
+    bat_model_job = 0;
+    bat_model_what[0] = '\0';
+    jobs_double_nmine = 0;
+
+    /* Remove when absent submits nothing; clean up fixture state. */
+    assert(unlink(tfl_link) == 0 && unlink(pb_path) == 0 && rmdir(mdir_path) == 0);
+    assert(!power_model_files_present() && !power_model_any_present());
+    jobs_before = jobs_double_count;
+    jobs_double_last[0] = '\0';
+    power_model_remove_row();
+    assert(!bat_model_job && jobs_double_count == jobs_before && !jobs_double_last[0] &&
+           strstr(notice, "not installed"));
+    assert(fixture_unlink("/var/lib/locachy/battery/charge-status") == 0);
+    rc_bat_adaptive = 0;
+    rc_bat_full_until = 0;
+    power_refresh_devices();
     settings_page = page_before;
-    puts("PASS Adaptive Charging: configured and applied states, manual limits preserved, full charge request and unsupported hardware");
+    puts("PASS Adaptive Charging: configured and applied states, model states and fetch/remove jobs, manual limits preserved, full charge request and unsupported hardware");
 }
 
 static void test_system_keymap(void)
@@ -2558,30 +2723,38 @@ static void test_bluetooth(void)
     assert(mkdir(machine_dir, 0700) == 0 || errno == EEXIST);
     file_text("machines/lenovo-test.conf", "# Brand: Lenovo\ndescription=\"ThinkPad fixture\"\n");
     file_text("machines/panasonic-test.conf", "# Brand: Panasonic\ndescription=\"Let us note fixture\"\n");
+    file_text("machines/hp-omen-17-ck1.conf", "# Brand: HP\ndescription=\"HP OMEN 17-ck1xxx (8A1A)\"\n");
     find_machines();
-    assert(nmachines == 3 && !machine_profiles[0][0] && !strcmp(machine_brands[0], "Generic"));
-    assert(!strcmp(machine_brands[1], "Lenovo") && !strcmp(machine_labels[1], "ThinkPad fixture"));
+    assert(nmachines == 4 && !machine_profiles[0][0] && !strcmp(machine_brands[0], "Generic"));
+    assert(!strcmp(machine_brands[1], "HP") && !strcmp(machine_labels[1], "HP OMEN 17-ck1xxx (8A1A)"));
+    assert(!strcmp(machine_brands[2], "Lenovo") && !strcmp(machine_labels[2], "ThinkPad fixture"));
     selected = mach_index(); rc_log[0] = '\0';
     adjust(+1);
     assert(!rc_log[0] && enter_row(selected));
     int matches[] = { 0, 1, 2 };
     test_cols = 160; machine_grid(matches, 3); assert(machine_columns() == 5);
     assert(machine_cells[0].row < machine_cells[1].row && machine_cells[1].row < machine_cells[2].row);
-    test_cols = 110; assert(machine_columns() == 4);
+    test_cols = 110; assert(machine_columns() == 3);
     test_cols = 24; assert(machine_columns() == 1);
     test_cols = 100;
     nkeys = keypos = 0; keys[nkeys++] = 'P'; keys[nkeys++] = 27; keys[nkeys++] = 27; /* the filter, then the list */
     pick_machine();
     assert(keypos == nkeys);
-    assert(!rc_log[0] && canvas_has("Panasonic") && !canvas_has("ThinkPad fixture"));
+    assert(!rc_log[0] && canvas_has("Panasonic") && canvas_has("ThinkPad fixture"));
     nkeys = keypos = 0; keys[nkeys++] = 27;
     pick_machine();
-    assert(canvas_has("generic PC") && canvas_has("[*]"));
+    assert(canvas_has("generic PC") && canvas_has("[*]") && canvas_has("HP OMEN 17-ck1xxx"));
+    assert(!canvas_has("hp-omen-17-ck1"));
+    snprintf(active_machine, sizeof active_machine, "%s", "hp-omen-17-ck1");
+    char profile_line[512];
+    item_text(mach_index(), profile_line, sizeof profile_line);
+    assert(strstr(profile_line, "HP OMEN 17-ck1xxx (8A1A)"));
+    active_machine[0] = '\0';
     nkeys = keypos = 0; keys[nkeys++] = 'P'; keys[nkeys++] = 'a'; keys[nkeys++] = 'n'; keys[nkeys++] = '\n';
     pick_machine();
     assert(!strcmp(active_machine, "panasonic-test") && strstr(rc_log, "machine=panasonic-test;"));
     active_machine[0] = rc_log[0] = '\0';
-    mouse = (struct pointer_event){ .col = 4, .row = 8, .button = BTN_LEFT, .pressed = 1, .clicks = 2 };
+    mouse = (struct pointer_event){ .col = 4, .row = 10, .button = BTN_LEFT, .pressed = 1, .clicks = 2 };
     nkeys = keypos = 0; keys[nkeys++] = -2;
     pick_machine();
     assert(!strcmp(active_machine, "lenovo-test") && strstr(rc_log, "machine=lenovo-test;"));
@@ -3857,10 +4030,12 @@ int main(int argc, char **argv)
            search_docs_index() == search_svc_index() + 1 &&
            gpu_unlock_index() == search_docs_index() + 1 && gpu_power_index() == gpu_unlock_index() + 1 &&
            nvidia_powerd_index() == gpu_power_index() + 1 &&
-           storage_compute_index() == nvidia_powerd_index() + 1 &&
+           gpu_graphics_index() == nvidia_powerd_index() + 1 &&
+           storage_compute_index() == gpu_graphics_index() + 3 &&
            storage_vols_index() == storage_compute_index() + 1 &&
            storage_disks_index() == storage_vols_index() + nstorage_vols &&
-           num_hw_items() == storage_disks_index() + 1);
+           ssh_index() == storage_disks_index() + 1 &&
+           num_hw_items() == ssh_index() + 5);
     selected = extd_index();
     adjust(+1);
     assert(extd_decode == EXTD_HW);

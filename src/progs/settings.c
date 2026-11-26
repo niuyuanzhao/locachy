@@ -109,8 +109,28 @@ static int hib_after = 30;      /* 10..600 s */
 static int rc_lid_holdoff = 30; /* 0..120 s */
 static int rc_battery_critical = 5; /* 0..50 % */
 static int tailscale_enabled; /* rc.conf has service_tailscale */
+#ifndef TAILNET_SSH_SERVICE
 #define TAILNET_SSH_SERVICE "/usr/local/lib/locachy/tailnet-ssh-client"
-static int tailnet_ssh_on;    /* rc.conf has service_tailnet_ssh */
+#endif
+#ifndef SSH_ADMIN_CMD
+#define SSH_ADMIN_CMD TAILNET_SSH_SERVICE
+#endif
+static int ssh_service_on;    /* rc.conf has service_tailnet_ssh */
+static int ssh_listen_lan;    /* rc.conf ssh_listen == "lan" */
+static int ssh_port = 22;     /* rc.conf ssh_port (1..65535) */
+static int ssh_password;      /* rc.conf ssh_password == "1" */
+#define MAX_SSH_KEYS 64
+struct ssh_key_entry {
+    int index;
+    char type[48];
+    char fingerprint[96];
+    char comment[128];
+};
+static struct ssh_key_entry ssh_keys[MAX_SSH_KEYS];
+static int nssh_keys = -1;            /* -1 = not loaded yet */
+static char ssh_host_fp[128];         /* cached SHA256:... or empty */
+static int ssh_host_fp_loaded;        /* 0 = not loaded yet */
+static int ssh_hostkey_regen_asked;   /* Enter pressed once on sshd host key */
 static int bluetooth_on;      /* rc.conf has service_bluetooth */
 static int rclone_on;         /* rc.conf has service_rclone */
 /* The interface's languages: English (what the programs are written in) and
@@ -437,6 +457,12 @@ static const char *const gpu_power_labels[NGPUPWRS] = {
 static int gpu_power_mode = GPUPWR_AUTO;
 static int nvidia_powerd_on;
 static int gpu_power_job;
+#define GPU_GRAPHICS_HELPER "/usr/local/bin/locachy-gpu-graphics"
+enum { GPU_UNKNOWN, GPU_UNSUPPORTED, GPU_FIRST, GPU_SECOND };
+static int gpu_graphics_auto = 1;
+static int gpu_mux, gpu_dgpu, gpu_graphics_reboot = -1, gpu_graphics_job;
+static int gpu_graphics_asked = -1, gpu_graphics_requested;
+static void load_gpu_graphics(void);
 /* rc.conf zram: compressed in-RAM swap (/dev/zram0), "1" on (default), "0" off. */
 static int zram_on = 1;
 /* rc.conf service_search and search_docs (Layer 2 document content indexing). */
@@ -1300,7 +1326,19 @@ static void on_rc(const char *name, const char *value, void *arg)
     } else if (strcmp(name, "service_tailscale") == 0) {
         tailscale_enabled = 1;
     } else if (strcmp(name, "service_tailnet_ssh") == 0) {
-        tailnet_ssh_on = value[0] != '\0';
+        ssh_service_on = value[0] != '\0';
+    } else if (strcmp(name, "ssh_listen") == 0) {
+        ssh_listen_lan = strcmp(value, "lan") == 0;
+    } else if (strcmp(name, "ssh_port") == 0) {
+        if (!value[0]) {
+            ssh_port = 22;
+        } else {
+            char *end = NULL;
+            long v = strtol(value, &end, 10);
+            if (end && end != value && !*end && v >= 1 && v <= 65535) ssh_port = (int)v;
+        }
+    } else if (strcmp(name, "ssh_password") == 0) {
+        ssh_password = strcmp(value, "1") == 0;
     } else if (strcmp(name, "service_bluetooth") == 0) {
         bluetooth_on = 1;
     } else if (strcmp(name, "service_rclone") == 0) {
@@ -1432,6 +1470,8 @@ static void on_rc(const char *name, const char *value, void *arg)
         size_t digits = strspn(value, "0123456789");
         int v = digits > 0 && digits <= 4 && value[digits] == '\0' ? atoi(value) : 0;
         if (v >= 40 && v <= 4096) winmaint_size_gib = v;
+    } else if (strcmp(name, "gpu_graphics_policy") == 0) {
+        gpu_graphics_auto = strcmp(value, "auto") == 0;
     } else if (strcmp(name, "gpu_unlock_targets") == 0) {
         const char *v = value[0] && strcmp(value, "0") != 0 ? value : "off";
         snprintf(gpu_unlock_cfg, sizeof gpu_unlock_cfg, "%s", v);
@@ -1490,7 +1530,7 @@ static void save_rc(void)
         { "lid_holdoff", holdoff }, { "battery_critical", crit },
         { "tailscale_enabled", NULL }, /* superseded by the service line */
         { "service_tailscale", tailscale_enabled ? TAILSCALE_SERVICE : NULL },
-        { "service_tailnet_ssh", tailnet_ssh_on ? TAILNET_SSH_SERVICE : NULL },
+        { "service_tailnet_ssh", ssh_service_on ? TAILNET_SSH_SERVICE : NULL },
         { "trackpoint_sensitivity", sens }, { "trackpoint_speed", speed },
         { "trackpoint_press_to_select", pts },
     };
@@ -3405,7 +3445,7 @@ static void format_bar(char *out, size_t size, int val, int min, int max)
 }
 
 /* The rows above the screens: the pointer and battery ones, then Tailscale
- * (installed, on, its account, SSH), Clash (installed, its mode, subscription,
+ * (installed, on, its account), Clash (installed, its mode, subscription,
  * status), Tor (installed, its front, bridges, status), Bluetooth (tools
  * installed, service, devices), each saved network's
  * MAC address, the wallpaper, the terminal key, the time zone, network time
@@ -3417,7 +3457,7 @@ static int ts_index(void)
 
 static int cl_index(void)
 {
-    return ts_index() + 4;
+    return ts_index() + 3;
 }
 
 static int tr_index(void)
@@ -3757,11 +3797,16 @@ static int nvidia_powerd_index(void)
     return gpu_power_index() + 1;
 }
 
+static int gpu_graphics_index(void)
+{
+    return nvidia_powerd_index() + 1;
+}
+
 /* Storage Volumes (System > Storage Volumes): compute default storage,
  * dynamic managed volumes (nstorage_vols), and unmanaged internal disks row. */
 static int storage_compute_index(void)
 {
-    return nvidia_powerd_index() + 1;
+    return gpu_graphics_index() + 3;
 }
 
 static int storage_vols_index(void)
@@ -3774,9 +3819,15 @@ static int storage_disks_index(void)
     return storage_vols_index() + nstorage_vols;
 }
 
-static int num_hw_items(void)
+/* SSH Server (sshd): mode, port, password login, AuthorizedKeys, host key. */
+static int ssh_index(void)
 {
     return storage_disks_index() + 1;
+}
+
+static int num_hw_items(void)
+{
+    return ssh_index() + 5;
 }
 
 /* The cloud service's status (rclone-client): name, path, state, last
@@ -5442,6 +5493,7 @@ static void category_entries(int cat)
         add_items(extd_index(), 1);
         add_items(display_card_index(), 4);
         add_title(_("NVIDIA GPU"));
+        add_items(gpu_graphics_index(), 3);
         add_items(gpu_unlock_index(), 1);
         break;
     case CAT_DEVICES:
@@ -5472,7 +5524,9 @@ static void category_entries(int cat)
         add_items(nw_index(), nnets + 1);
         if (nnets == 0) add_entry(E_NOTE, _("No saved network yet."));
         add_title(_("Tailscale"));
-        add_items(ts_index(), 4);
+        add_items(ts_index(), 3);
+        add_title(_("SSH Server (sshd)"));
+        add_items(ssh_index(), 5);
         add_title(_("Clash"));
         add_items(cl_index(), 4);
         add_title(_("Tor"));
@@ -5638,6 +5692,7 @@ static int category_of(int idx)
 static void page_move(int step)
 {
     int k = entry_of(selected), dir = step > 0 ? 1 : -1;
+    int before = selected;
     if (k < 0) {
         selected = first_setting();
         return;
@@ -5649,6 +5704,7 @@ static void page_move(int step)
         k = j;
     }
     selected = entries[k].idx;
+    if (selected != before) ssh_hostkey_regen_asked = 0; /* a cursor move asks again */
 }
 
 /* Category c's page, its first setting selected; keys to it (focus_page)
@@ -6193,6 +6249,391 @@ static void manage_paired_devices(void)
              _("Paired devices closed.") : _("Paired devices did not finish."));
 }
 
+/* SSH Server (sshd) administration helpers via SSH_ADMIN_CMD
+ * (/usr/local/lib/locachy/tailnet-ssh-client). ssh_admin_run is the one
+ * place a command runs; a test may supply its own (SETTINGS_SSH_ADMIN). */
+static int ssh_admin_run(char *const argv[], const char *stdin_text, char *out, size_t out_size);
+#ifndef SETTINGS_SSH_ADMIN
+#define SETTINGS_SSH_ADMIN
+static int ssh_admin_run(char *const argv[], const char *stdin_text, char *out, size_t out_size)
+{
+    int in_p[2] = { -1, -1 }, out_p[2] = { -1, -1 };
+    size_t len = 0;
+    int status = -1;
+    if (out && out_size > 0) out[0] = '\0';
+    if (pipe2(out_p, O_CLOEXEC) < 0) return -1;
+    if (stdin_text && pipe2(in_p, O_CLOEXEC) < 0) {
+        close(out_p[0]);
+        close(out_p[1]);
+        return -1;
+    }
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (stdin_text) {
+            dup2(in_p[0], STDIN_FILENO);
+        } else {
+            int null = open("/dev/null", O_RDONLY);
+            if (null >= 0) dup2(null, STDIN_FILENO);
+        }
+        dup2(out_p[1], STDOUT_FILENO);
+        dup2(out_p[1], STDERR_FILENO);
+        execv(argv[0], argv);
+        _exit(127);
+    }
+    close(out_p[1]);
+    if (stdin_text) {
+        close(in_p[0]);
+        size_t slen = strlen(stdin_text), off = 0;
+        while (pid > 0 && off < slen) {
+            ssize_t w = write(in_p[1], stdin_text + off, slen - off);
+            if (w < 0 && errno == EINTR) continue;
+            if (w <= 0) break;
+            off += (size_t)w;
+        }
+        close(in_p[1]);
+    }
+    if (pid < 0) {
+        close(out_p[0]);
+        return -1;
+    }
+    struct pollfd wait = { .fd = out_p[0], .events = POLLIN };
+    int timed_out = 0;
+    for (;;) {
+        int pr = poll(&wait, 1, 5000);
+        if (pr < 0 && errno == EINTR) continue;
+        if (pr == 0) {
+            timed_out = 1;
+            break;
+        }
+        if (pr < 0) break;
+        char discard[256];
+        char *dst = (out && out_size > 1 && len < out_size - 1) ? out + len : discard;
+        size_t cap = (out && out_size > 1 && len < out_size - 1) ? out_size - 1 - len : sizeof discard;
+        ssize_t n = read(out_p[0], dst, cap);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        if (dst != discard) len += (size_t)n;
+    }
+    close(out_p[0]);
+    if (out && out_size > 0) {
+        out[len] = '\0';
+        while (len > 0 && (out[len - 1] == '\n' || out[len - 1] == '\r')) out[--len] = '\0';
+    }
+    if (timed_out) {
+        kill(pid, SIGKILL);
+    }
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) return -1;
+    }
+    return (!timed_out && WIFEXITED(status)) ? WEXITSTATUS(status) : -1;
+}
+#endif
+
+static int ssh_mode_value(void)
+{
+    return !ssh_service_on ? 0 : ssh_listen_lan ? 2 : 1;
+}
+
+static void ssh_reload_service(void)
+{
+    if (access(SSH_ADMIN_CMD, X_OK) != 0) return;
+    char *const argv[] = { SSH_ADMIN_CMD, "--reload", NULL };
+    char out[256];
+    ssh_admin_run(argv, NULL, out, sizeof out);
+}
+
+static void load_ssh_keys(void)
+{
+    const char *user = user_name();
+    nssh_keys = 0;
+    if (!user || access(SSH_ADMIN_CMD, X_OK) != 0) return;
+    char buf[8192];
+    char *const argv[] = { SSH_ADMIN_CMD, "--keys-list", (char *)user, NULL };
+    if (ssh_admin_run(argv, NULL, buf, sizeof buf) != 0) return;
+    char *save = NULL;
+    for (char *line = strtok_r(buf, "\n", &save); line && nssh_keys < MAX_SSH_KEYS;
+         line = strtok_r(NULL, "\n", &save)) {
+        char *t1 = strchr(line, '\t');
+        if (!t1) continue;
+        *t1++ = '\0';
+        char *t2 = strchr(t1, '\t');
+        if (!t2) continue;
+        *t2++ = '\0';
+        char *t3 = strchr(t2, '\t');
+        if (t3) *t3++ = '\0';
+        char *end = NULL;
+        long idx = strtol(line, &end, 10);
+        if (!end || end == line || *end || idx < 1) continue;
+        struct ssh_key_entry *e = &ssh_keys[nssh_keys++];
+        e->index = (int)idx;
+        snprintf(e->type, sizeof e->type, "%.47s", t1);
+        snprintf(e->fingerprint, sizeof e->fingerprint, "%.95s", t2);
+        snprintf(e->comment, sizeof e->comment, "%.127s", t3 ? t3 : "");
+    }
+}
+
+static void load_ssh_host_fp(void)
+{
+    ssh_host_fp[0] = '\0';
+    ssh_host_fp_loaded = 1;
+    if (access(SSH_ADMIN_CMD, X_OK) != 0) return;
+    char buf[256];
+    char *const argv[] = { SSH_ADMIN_CMD, "--host-key-fingerprint", NULL };
+    if (ssh_admin_run(argv, NULL, buf, sizeof buf) == 0 && strncmp(buf, "SHA256:", 7) == 0) {
+        buf[strcspn(buf, " \t\r\n")] = '\0';
+        snprintf(ssh_host_fp, sizeof ssh_host_fp, "%.127s", buf);
+    }
+}
+
+static void load_ssh_status(void)
+{
+    load_ssh_keys();
+    load_ssh_host_fp();
+}
+
+static void ssh_edit_port_row(void)
+{
+    char text[16];
+    snprintf(text, sizeof text, "%d", ssh_port);
+    /* TRANSLATORS: Enter and Esc are key names; keep them. */
+    if (!prompt(_("sshd port (1-65535): "), text, sizeof text)) {
+        snprintf(notice, sizeof notice, "%s", _("sshd port unchanged."));
+        return;
+    }
+    char *end = NULL;
+    errno = 0;
+    long port = strtol(text, &end, 10);
+    if (errno || !text[0] || !end || *end || port < 1 || port > 65535 ||
+        strspn(text, "0123456789") != strlen(text)) {
+        snprintf(notice, sizeof notice, _("Invalid sshd port: %.32s (use 1-65535)."), text);
+        return;
+    }
+    char value[16];
+    snprintf(value, sizeof value, "%d", (int)port);
+    if (rc_set("ssh_port", value) < 0) {
+        snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+        return;
+    }
+    ssh_port = (int)port;
+    ssh_reload_service();
+    snprintf(notice, sizeof notice, _("sshd port set to %d."), ssh_port);
+}
+
+static void ssh_regen_host_key_row(void)
+{
+    if (access(SSH_ADMIN_CMD, X_OK) != 0) {
+        ssh_hostkey_regen_asked = 0;
+        snprintf(notice, sizeof notice, _("%s is not installed."), "tailnet-ssh-client");
+        return;
+    }
+    if (!ssh_hostkey_regen_asked) {
+        ssh_hostkey_regen_asked = 1;
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, "%s",
+                 _("Enter again: regenerate sshd host key (clients must remove the old known_hosts entry)."));
+        return;
+    }
+    ssh_hostkey_regen_asked = 0;
+    char out[256];
+    char *const argv[] = { SSH_ADMIN_CMD, "--host-key-regen", NULL };
+    int rc = ssh_admin_run(argv, NULL, out, sizeof out);
+    if (rc != 0) {
+        const char *last = strrchr(out, '\n');
+        const char *msg = last ? last + 1 : out;
+        snprintf(notice, sizeof notice, _("Cannot regenerate sshd host key: %.120s"),
+                 msg[0] ? msg : _("command failed"));
+        return;
+    }
+    out[strcspn(out, " \t\r\n")] = '\0';
+    if (strncmp(out, "SHA256:", 7) == 0) {
+        snprintf(ssh_host_fp, sizeof ssh_host_fp, "%.127s", out);
+        ssh_host_fp_loaded = 1;
+    } else {
+        load_ssh_host_fp();
+    }
+    snprintf(notice, sizeof notice,
+             _("sshd host key regenerated (%.48s); update clients' known_hosts."),
+             ssh_host_fp[0] ? ssh_host_fp : _("done"));
+}
+
+static int ssh_add_key_line(const char *user, const char *key_line)
+{
+    char payload[4096], out[256];
+    if (!user || !key_line || !key_line[0]) return -1;
+    snprintf(payload, sizeof payload, "%.4094s\n", key_line);
+    char *const argv[] = { SSH_ADMIN_CMD, "--keys-add", (char *)user, NULL };
+    int rc = ssh_admin_run(argv, payload, out, sizeof out);
+    if (rc != 0) {
+        const char *last = strrchr(out, '\n');
+        const char *msg = last ? last + 1 : out;
+        snprintf(notice, sizeof notice, _("Cannot add SSH public key: %.120s"),
+                 msg[0] ? msg : _("invalid key"));
+        return -1;
+    }
+    out[strcspn(out, " \t\r\n")] = '\0';
+    load_ssh_keys();
+    snprintf(notice, sizeof notice, _("Added SSH public key (%.48s)."), out[0] ? out : _("ok"));
+    return 0;
+}
+
+static int ssh_remove_key_index(const char *user, int key_idx)
+{
+    char idx_s[16], out[256];
+    snprintf(idx_s, sizeof idx_s, "%d", key_idx);
+    char *const argv[] = { SSH_ADMIN_CMD, "--keys-remove", (char *)user, idx_s, NULL };
+    int rc = ssh_admin_run(argv, NULL, out, sizeof out);
+    if (rc != 0) {
+        const char *last = strrchr(out, '\n');
+        const char *msg = last ? last + 1 : out;
+        snprintf(notice, sizeof notice, _("Cannot remove SSH public key: %.120s"),
+                 msg[0] ? msg : _("command failed"));
+        return -1;
+    }
+    load_ssh_keys();
+    snprintf(notice, sizeof notice, "%s", _("SSH public key removed."));
+    return 0;
+}
+
+static void manage_ssh_authorized_keys(void)
+{
+    const char *user = user_name();
+    if (!user) {
+        snprintf(notice, sizeof notice, "%s", _("No regular local user (uid 1000) found."));
+        return;
+    }
+    if (access(SSH_ADMIN_CMD, X_OK) != 0) {
+        snprintf(notice, sizeof notice, _("%s is not installed."), "tailnet-ssh-client");
+        return;
+    }
+    load_ssh_keys();
+    int sel = 0, top = 0, delete_asked = -1;
+    char title[128], line[320];
+    snprintf(title, sizeof title, _("sshd AuthorizedKeys (%.40s)"), user);
+    notice[0] = '\0';
+    for (;;) {
+        int total = 1 + nssh_keys;
+        int list_y = 4;
+        int height = screen_rows() - list_y - 4;
+        if (height < 1) height = 1;
+        if (sel >= total) sel = total - 1;
+        if (sel < 0) sel = 0;
+        if (sel < top) top = sel;
+        if (sel >= top + height) top = sel - height + 1;
+        screen_fill(0, 0, screen_cols(), screen_rows(), BG);
+        screen_bar(title, NULL);
+        ui_hits_clear();
+        /* TRANSLATORS: a, Enter, Delete and Esc are key names; keep them. */
+        screen_text(2, screen_rows() - 3, _("a / Enter: add public key   Delete: remove selected   Esc: back"), ACCENT_TEXT, BG);
+        for (int r = 0; r < height && top + r < total; r++) {
+            int row_i = top + r, y = list_y + r, on = row_i == sel;
+            if (row_i == 0) {
+                snprintf(line, sizeof line, "%s", _("[ + Add public key ]"));
+            } else {
+                const struct ssh_key_entry *e = &ssh_keys[row_i - 1];
+                if (e->comment[0]) {
+                    snprintf(line, sizeof line, "%2d. %-16.16s  %.50s  %.80s",
+                             e->index, e->type, e->fingerprint, e->comment);
+                } else {
+                    snprintf(line, sizeof line, "%2d. %-16.16s  %.50s",
+                             e->index, e->type, e->fingerprint);
+                }
+            }
+            screen_fill(0, y, screen_cols(), 1, on ? ACCENT : BG);
+            screen_text(4, y, line, on ? ON_ACCENT : FG, on ? ACCENT : BG);
+            ui_hit(0, y, screen_cols(), 1, row_i);
+        }
+        if (nssh_keys == 0 && height > 1) {
+            screen_text(4, list_y + 1, _("No authorized public keys yet."), DIM, BG);
+        }
+        if (notice[0]) {
+            screen_text(2, screen_rows() - 4, notice, ACCENT_TEXT, BG);
+        }
+        settings_back_button(screen_rows() - 2);
+        screen_flush();
+        int key = key_get(), mods = mods_now(), act = key_list_action(key, mods);
+        if (close_read(key)) return;
+        if (key == K_REPAINT || key == K_SHOWN) continue;
+        if (key == K_POINTER) {
+            const struct pointer_event *e = pointer_last();
+            if (settings_back_clicked(e)) return;
+            if (e->wheel) {
+                sel -= e->wheel;
+                if (sel < 0) sel = 0;
+                if (sel >= total) sel = total - 1;
+                delete_asked = -1;
+                continue;
+            }
+            if (e->button == BTN_LEFT && e->pressed) {
+                int hit = ui_hit_at(e->col, e->row);
+                if (hit >= 0 && hit < total) {
+                    if (hit != sel) delete_asked = -1;
+                    sel = hit;
+                    if (e->clicks == 2 && sel == 0) key = '\n';
+                    else continue;
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+        }
+        if (act == ACT_HELP) {
+            help_screen();
+            if (close_due()) return;
+            continue;
+        }
+        if (act == ACT_CANCEL) {
+            snprintf(notice, sizeof notice, P_("sshd AuthorizedKeys: %d key.",
+                                               "sshd AuthorizedKeys: %d keys.", nssh_keys), nssh_keys);
+            return;
+        }
+        if (act == ACT_DELETE || act == ACT_DELETE_PERMANENT) {
+            key = K_DEL;
+            act = ACT_NONE;
+        }
+        if (act != ACT_NONE || (key >= ' ' && key < 0x7F && (mods & (KEYS_ALT | KEYS_META)))) {
+            continue;
+        }
+        if (key != K_DEL) delete_asked = -1;
+        if (key == K_UP && sel > 0) {
+            sel--;
+        } else if (key == K_DOWN && sel + 1 < total) {
+            sel++;
+        } else if (key == K_PGUP) {
+            sel = sel > height ? sel - height : 0;
+        } else if (key == K_PGDN) {
+            sel = sel + height < total ? sel + height : total - 1;
+        } else if (key == K_BOL) {
+            sel = 0;
+        } else if (key == K_EOL) {
+            sel = total - 1;
+        } else if ((key == 'a' || key == 'A') || (key == '\n' && sel == 0)) {
+            char key_text[2048] = "";
+            if (!prompt(_("Paste SSH public key (ssh-ed25519 / ssh-rsa ...): "), key_text, sizeof key_text)) {
+                if (close_due()) return;
+                snprintf(notice, sizeof notice, "%s", _("No key added."));
+            } else if (!key_text[0]) {
+                snprintf(notice, sizeof notice, "%s", _("No key added."));
+            } else {
+                ssh_add_key_line(user, key_text);
+            }
+        } else if (key == K_DEL) {
+            if (sel == 0) {
+                snprintf(notice, sizeof notice, "%s", _("Select a key below to remove it."));
+            } else if (delete_asked != sel) {
+                delete_asked = sel;
+                /* TRANSLATORS: Delete is the Delete key; keep it. */
+                snprintf(notice, sizeof notice, _("Delete again: remove key #%d (%.48s)."),
+                         ssh_keys[sel - 1].index, ssh_keys[sel - 1].fingerprint);
+            } else {
+                int target = ssh_keys[sel - 1].index;
+                delete_asked = -1;
+                ssh_remove_key_index(user, target);
+            }
+        }
+    }
+}
+
 /* Maintenance Windows state (/var/lib/locachy/winmaint/state.json): reads only
  * whether the partition triplet exists and its C: size in GiB (never key material). */
 static int parse_winmaint_state(const char *text, int *size_gib)
@@ -6566,6 +7007,79 @@ static void gpu_power_check(void)
     } else {
         snprintf(notice, sizeof notice, _("GPU power change failed: %s"), r.last[0] ? r.last : log);
     }
+}
+
+static void load_gpu_graphics(void)
+{
+    char out[256], *save = NULL;
+    char *const argv[] = { GPU_GRAPHICS_HELPER, "status", "--tsv", NULL };
+    command_output(argv, out, sizeof out);
+    gpu_mux = gpu_dgpu = GPU_UNKNOWN;
+    gpu_graphics_reboot = -1;
+    for (char *line = strtok_r(out, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        if (!strcmp(line, "mux\thybrid")) gpu_mux = GPU_FIRST;
+        else if (!strcmp(line, "mux\tdiscrete")) gpu_mux = GPU_SECOND;
+        else if (!strcmp(line, "mux\tunsupported")) gpu_mux = GPU_UNSUPPORTED;
+        else if (!strcmp(line, "dgpu\ton")) gpu_dgpu = GPU_FIRST;
+        else if (!strcmp(line, "dgpu\toff")) gpu_dgpu = GPU_SECOND;
+        else if (!strcmp(line, "dgpu\tunsupported")) gpu_dgpu = GPU_UNSUPPORTED;
+        else if (!strcmp(line, "reboot\t0")) gpu_graphics_reboot = 0;
+        else if (!strcmp(line, "reboot\t1")) gpu_graphics_reboot = 1;
+    }
+}
+
+static void gpu_graphics_check(void)
+{
+    struct jobs_row r;
+    char log[96];
+    if (!gpu_graphics_job || !job_ended(gpu_graphics_job, &r, log, sizeof log)) return;
+    gpu_graphics_job = 0;
+    load_gpu_graphics();
+    full_redraw = 1;
+    if (!strcmp(r.state, "done")) {
+        snprintf(notice, sizeof notice, "%s", gpu_graphics_reboot == 1 ?
+                 _("Graphics setting saved in firmware. Restart to apply it.") : _("Graphics setting updated."));
+    } else {
+        snprintf(notice, sizeof notice, _("Graphics change failed: %s"), r.last[0] ? r.last : log);
+    }
+}
+
+static void gpu_graphics_action(int idx)
+{
+    int mux = idx == gpu_graphics_index() + 1;
+    load_gpu_graphics();
+    int current = mux ? gpu_mux : gpu_dgpu;
+    if (gpu_graphics_job || gpu_graphics_reboot != 0 || current < GPU_FIRST) {
+        gpu_graphics_asked = -1;
+        snprintf(notice, sizeof notice, "%s", gpu_graphics_job ? _("Wait for the current graphics job.") :
+                 gpu_graphics_reboot == 1 ? _("Restart before changing graphics firmware again.") :
+                 current == GPU_UNSUPPORTED ? _("This graphics switch is not exposed by this machine's firmware.") :
+                 _("The current graphics firmware state could not be verified."));
+        return;
+    }
+    int change_to_second = current == GPU_FIRST;
+    if (gpu_graphics_asked != idx || gpu_graphics_requested != change_to_second) {
+        gpu_graphics_asked = idx;
+        gpu_graphics_requested = change_to_second;
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, "%s", mux ?
+                 (change_to_second ? _("Enter again: switch to direct NVIDIA display after restart.") :
+                                     _("Enter again: switch to hybrid display after restart.")) :
+                 (change_to_second ? _("Enter again: disable NVIDIA, its display ports and CUDA.") :
+                                     _("Enter again: enable the NVIDIA GPU.")));
+        return;
+    }
+    gpu_graphics_asked = -1;
+    const char *args[] = { mux ? (change_to_second ? "discrete" : "hybrid") :
+                                 (change_to_second ? "off" : "on"), NULL };
+    char why[160] = "";
+    int id, position;
+    if (jobs_submit(mux ? "gpu-graphics-mux" : "gpu-graphics-dgpu", args, &id, &position, why, sizeof why) < 0) {
+        snprintf(notice, sizeof notice, _("Could not start the graphics change: %s"), why);
+        return;
+    }
+    gpu_graphics_job = id;
+    snprintf(notice, sizeof notice, "%s", _("Changing graphics firmware setting..."));
 }
 
 /* Enter on the unlock row: fetch and build it when it is not installed (from
@@ -7349,6 +7863,7 @@ static void adopt_jobs(void)
     int have_repos = repos_job != 0, have_boot = boot_job != 0, have_pkg = pkg_job != 0, have_tpm = tpm_job != 0;
     int have_security = security_job != 0, have_winmaint = winmaint_job != 0, have_tb = tb_sync_job != 0;
     int have_gpu_unlock = gpu_unlock_job != 0, have_gpu_power = gpu_power_job != 0, have_storage = storage_job != 0;
+    int have_gpu_graphics = gpu_graphics_job != 0, have_bat_model = bat_model_job != 0;
     for (int pass = 0; pass < 2; pass++) {
         for (int i = 0; i < n; i++) {
             const struct jobs_row *r = &rows[i];
@@ -7382,10 +7897,17 @@ static void adopt_jobs(void)
             } else if (!have_gpu_power && strncmp(r->kind, "gpu-power", 9) == 0) {
                 gpu_power_job = r->id;
                 have_gpu_power = 1;
+            } else if (!have_gpu_graphics && (strcmp(r->kind, "gpu-graphics-mux") == 0 || strcmp(r->kind, "gpu-graphics-dgpu") == 0)) {
+                gpu_graphics_job = r->id;
+                have_gpu_graphics = 1;
             } else if (!have_storage && strncmp(r->kind, "storage-", 8) == 0) {
                 storage_job = r->id;
                 have_storage = 1;
                 snprintf(storage_what, sizeof storage_what, "%s", r->kind + 8);
+            } else if (!have_bat_model && strncmp(r->kind, "battery-model-", 14) == 0) {
+                bat_model_job = r->id;
+                have_bat_model = 1;
+                snprintf(bat_model_what, sizeof bat_model_what, "%s", r->kind + 14);
             } else if (!have_pkg && strncmp(r->kind, "kernel-", 7) == 0) {
                 pkg_job = r->id;
                 have_pkg = 1;
@@ -7436,7 +7958,8 @@ static int nmachine_cells;
 
 static int machine_columns(void)
 {
-    int n = (screen_cols() - 4) / 26;
+    /* Leave room for the model, not just the short configuration ID. */
+    int n = (screen_cols() - 4) / 30;
     return n < 1 ? 1 : n > 5 ? 5 : n;
 }
 
@@ -7561,7 +8084,7 @@ static void pick_machine(void)
             if (row < 5 || row >= 5 + height) continue;
             int current = strcmp(active_machine, machine_profiles[i]) == 0;
             snprintf(line, sizeof line, "[%c] %.*s", current ? '*' : ' ', c->width > 6 ? c->width - 6 : 0,
-                     i ? machine_profiles[i] : _("generic PC"));
+                     machine_labels[i]);
             screen_fill(c->col, row, c->width - 1, 1, k == sel ? ACCENT : BG);
             screen_text(c->col, row, line, k == sel ? ON_ACCENT : FG, k == sel ? ACCENT : BG);
             ui_hit(c->col, row, c->width - 1, 1, k);
@@ -7631,7 +8154,9 @@ static int enter_row(int idx)
            (idx >= system_keymap_index() && idx < kb_index() + nkeyboards_seen) ||
            idx == bat_page_index() || idx == bat_full_index() ||
            idx == hwinfo_index() || idx == hwcopy_index() || idx == nmtui_index() || idx == ts_index() + 2 ||
-           idx == gpu_unlock_index() || idx == storage_disks_index();
+           idx == gpu_unlock_index() || idx == gpu_graphics_index() + 1 || idx == gpu_graphics_index() + 2 ||
+           idx == storage_disks_index() ||
+           idx == ssh_index() + 1 || idx == ssh_index() + 3 || idx == ssh_index() + 4;
 }
 
 /* An optional component's line, its packages installed or not: Enter
@@ -7936,6 +8461,10 @@ static void item_text(int idx, char *line, size_t size)
         } else if ((idx >= winmaint_index() + 1 && idx < winmaint_index() + 5) ||
                    idx == winmaint_mode_index() || idx == winmaint_mode_index() + 1) {
             load_winmaint_status();
+        } else if (idx == ssh_index() + 3 && nssh_keys < 0) {
+            load_ssh_keys();
+        } else if (idx == ssh_index() + 4 && !ssh_host_fp_loaded) {
+            load_ssh_host_fp();
         }
     }
     /* The pointer's rows (first TrackPoint's three, when there is one), then
@@ -7972,7 +8501,7 @@ static void item_text(int idx, char *line, size_t size)
         }
         return;
     }
-    if ((i = idx - ts_index()) >= 0 && i < 4) {
+    if ((i = idx - ts_index()) >= 0 && i < 3) {
         if (i == 0) {
             snprintf(line, size, "%.95s [%s]", ui_pad(label, sizeof label, _("Tailscale installed"), 32),
                      tailscale_installed() ? _("YES") : _("NO "));
@@ -7981,13 +8510,9 @@ static void item_text(int idx, char *line, size_t size)
                      tailscale_enabled ? _("ON ") : _("OFF"),
                      !tailscale_installed() ? _("  (not installed)") :
                      tor_on ? _("  (Tor is on: no way around it, its UDP is dropped)") : "");
-        } else if (i == 2) {
+        } else {
             snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _("Tailscale account"), 30),
                      tailscale_row_text());
-        } else {
-            snprintf(line, size, "  %.95s [%s]%s", ui_pad(label, sizeof label, _("SSH over Tailscale"), 30),
-                     tailnet_ssh_on ? _("ON ") : _("OFF"),
-                     tailnet_ssh_on && !tailscale_enabled ? _("  (Tailscale is off)") : "");
         }
         return;
     }
@@ -8341,6 +8866,22 @@ static void item_text(int idx, char *line, size_t size)
                  search_on ? "" : _("  (search service off)"));
         return;
     }
+    if (idx == gpu_graphics_index()) {
+        snprintf(line, size, "%.95s < %s >%s", ui_pad(label, sizeof label, _("Hybrid graphics policy"), 32),
+                 gpu_graphics_auto ? _("automatic") : _("leave unchanged"),
+                 gpu_graphics_auto && strcmp(display_card_cfg, "auto") ? _(" (manual display GPU selected)") : "");
+        return;
+    }
+    if (idx == gpu_graphics_index() + 1 || idx == gpu_graphics_index() + 2) {
+        int mux = idx == gpu_graphics_index() + 1, state = mux ? gpu_mux : gpu_dgpu;
+        const char *value = state == GPU_UNKNOWN ? _("unknown") : state == GPU_UNSUPPORTED ? _("not supported") :
+            mux ? (state == GPU_FIRST ? _("hybrid") : _("direct NVIDIA")) : (state == GPU_FIRST ? _("on") : _("off"));
+        snprintf(line, size, "%.95s %s%s", ui_pad(label, sizeof label,
+                 mux ? _("Firmware display routing") : _("NVIDIA discrete GPU"), 32),
+                 gpu_graphics_job ? _("working...") : value,
+                 state >= GPU_FIRST && gpu_graphics_reboot == 1 ? _(" (firmware change pending restart)") : "");
+        return;
+    }
     if (idx == gpu_unlock_index()) {
         if (gpu_unlock_job) {
             snprintf(vbuf, sizeof vbuf, "%s", _("working..."));
@@ -8426,6 +8967,39 @@ static void item_text(int idx, char *line, size_t size)
             }
         }
         snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Unmanaged disks"), 32), vbuf);
+        return;
+    }
+    if ((i = idx - ssh_index()) >= 0 && i < 5) {
+        if (i == 0) {
+            static const char *const modes[] = { N_("Off"), N_("Tailscale only"), N_("LAN & Tailscale") };
+            int mode = ssh_mode_value();
+            snprintf(line, size, "%.95s < %s >%s%s",
+                     ui_pad(label, sizeof label, _("SSH server (sshd)"), 32),
+                     _(modes[mode]),
+                     ssh_service_on && !ssh_listen_lan && !tailscale_enabled ? _("  (Tailscale is off)") : "",
+                     ssh_service_on && tor_on ? _("  (blocked while Tor is on)") : "");
+        } else if (i == 1) {
+            /* TRANSLATORS: Enter is the Enter key; keep it. */
+            snprintf(vbuf, sizeof vbuf, _("%d   (Enter)"), ssh_port);
+            snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _("sshd port"), 30), vbuf);
+        } else if (i == 2) {
+            snprintf(line, size, "  %.95s [%s]", ui_pad(label, sizeof label, _("sshd password login"), 30),
+                     ssh_password ? _("ON ") : _("OFF"));
+        } else if (i == 3) {
+            int cnt = nssh_keys >= 0 ? nssh_keys : 0;
+            /* TRANSLATORS: Enter is the Enter key; keep it. */
+            snprintf(vbuf, sizeof vbuf, P_("%d key   (Enter)", "%d keys   (Enter)", cnt), cnt);
+            snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _("sshd AuthorizedKeys"), 30), vbuf);
+        } else {
+            if (ssh_host_fp[0]) {
+                /* TRANSLATORS: Enter is the Enter key; keep it. */
+                snprintf(vbuf, sizeof vbuf, _("%.64s   (Enter: regenerate)"), ssh_host_fp);
+            } else {
+                /* TRANSLATORS: Enter is the Enter key; keep it. */
+                snprintf(vbuf, sizeof vbuf, "%s", _("not generated yet   (Enter: generate)"));
+            }
+            snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _("sshd host key"), 30), vbuf);
+        }
         return;
     }
     if ((i = idx - fp_index()) >= 0 && i < 4) {
@@ -8606,7 +9180,7 @@ static void item_text(int idx, char *line, size_t size)
     if (idx == mach_index()) {
         if (!nmachines) find_machines();
         int mi = current_machine_index();
-        const char *mval = mi > 0 ? machine_profiles[mi] : (active_machine[0] ? active_machine : _("generic PC"));
+        const char *mval = mi > 0 ? machine_labels[mi] : (active_machine[0] ? active_machine : _("generic PC"));
         snprintf(line, size, "%.95s %.60s  %s", ui_pad(label, sizeof label, _("Machine profile"), 32), mval,
                  _("Enter: choose"));
         return;
@@ -8747,7 +9321,9 @@ static void item_text(int idx, char *line, size_t size)
     }
     if (idx == bat_adaptive_index()) {
         const char *state = !power_can_manage_charge() ? _("Charging control unsupported") :
-                            power_charge_known && power_charge.adaptive != rc_bat_adaptive ? _("Waiting for battery service") : "";
+                            power_charge_known && power_charge.adaptive != rc_bat_adaptive ? _("Waiting for battery service") :
+                            bat_model_job ? (strcmp(bat_model_what, "remove") == 0 ?
+                                             _("Removing model...") : _("Downloading model...")) : "";
         snprintf(line, size, "%.95s < %s > %s", ui_pad(label, sizeof label, _("Adaptive Charging"), 32),
                  rc_bat_adaptive ? _("on") : _("off"), state);
         return;
@@ -8933,7 +9509,7 @@ static void draw(void)
     static char last_notice[sizeof notice];
     int sw = sidebar_width(), cols = screen_cols(), rows = screen_rows();
     int jobs_active = pkg_job || repos_job || boot_job || tpm_job || security_job || winmaint_job || tb_sync_job ||
-                      gpu_unlock_job || gpu_power_job || storage_job;
+                      gpu_unlock_job || gpu_power_job || gpu_graphics_job || storage_job || bat_model_job;
     flush_ui_caches();
     if (!in_ui_loop) {
         /* Tests set state directly before draw(): keep every map and paint fresh. */
@@ -9092,24 +9668,6 @@ static void adjust(int dir)
         } else {
             snprintf(notice, sizeof notice, _("Tailscale: %.140s."), state);
         }
-        return;
-    }
-
-    if (selected == ts_idx + 3) {
-        int next = !tailnet_ssh_on;
-        if (next && !tailscale_enabled) {
-            snprintf(notice, sizeof notice, "%s", _("Turn on Tailscale before enabling SSH over it."));
-            return;
-        }
-        if (rc_set("service_tailnet_ssh", next ? TAILNET_SSH_SERVICE : NULL) < 0) {
-            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
-            return;
-        }
-        tailnet_ssh_on = next;
-        kill(1, SIGHUP);
-        snprintf(notice, sizeof notice, "%s", next ?
-                 _("SSH over Tailscale enabled; login requires an authorized public key.") :
-                 _("SSH over Tailscale disabled."));
         return;
     }
 
@@ -10006,6 +10564,16 @@ static void adjust(int dir)
         snprintf(notice, sizeof notice, _("Saved to %s."), RC_CONF);
         return;
     }
+    if (selected == gpu_graphics_index()) {
+        int next = !gpu_graphics_auto;
+        if (rc_set("gpu_graphics_policy", next ? "auto" : "off") < 0) {
+            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+            return;
+        }
+        gpu_graphics_auto = next;
+        snprintf(notice, sizeof notice, "%s", _("Graphics policy saved. Applies when graphics next starts."));
+        return;
+    }
     if (selected == gpu_power_index()) {
         if (!gpu_power_method[0]) {
             snprintf(notice, sizeof notice, "%s", _("This machine has no GPU power control (its machine profile has none)."));
@@ -10055,6 +10623,67 @@ static void adjust(int dir)
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(notice, sizeof notice, "%s",
                  _("Enter: open storage manager in a terminal (attach, format, or create btrfs array)."));
+        return;
+    }
+    if (selected == ssh_index()) {
+        int now = ssh_mode_value(), next = (now + (dir > 0 ? 1 : 2)) % 3;
+        int next_on = next != 0, next_lan = next == 2;
+        if (next_on) {
+            if (rc_set("ssh_listen", next_lan ? "lan" : "tailscale") < 0 ||
+                rc_set("service_tailnet_ssh", TAILNET_SSH_SERVICE) < 0) {
+                snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+                return;
+            }
+        } else if (rc_set("service_tailnet_ssh", NULL) < 0) {
+            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+            return;
+        }
+        ssh_service_on = next_on;
+        if (next_on) ssh_listen_lan = next_lan;
+        kill(1, SIGHUP);
+        ssh_reload_service();
+        if (!next_on) {
+            snprintf(notice, sizeof notice, "%s", _("SSH server (sshd) disabled."));
+        } else if (next_lan) {
+            snprintf(notice, sizeof notice, "%s", tor_on ?
+                     _("SSH server (sshd) set to LAN & Tailscale (blocked while Tor is on).") :
+                     _("SSH server (sshd) enabled on LAN & Tailscale."));
+        } else if (!tailscale_enabled) {
+            snprintf(notice, sizeof notice, "%s",
+                     _("SSH server (sshd) set to Tailscale only (Tailscale is off: waiting for tailscale0)."));
+        } else {
+            snprintf(notice, sizeof notice, "%s", tor_on ?
+                     _("SSH server (sshd) set to Tailscale only (blocked while Tor is on).") :
+                     _("SSH server (sshd) enabled on Tailscale only."));
+        }
+        return;
+    }
+    if (selected == ssh_index() + 1) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, "%s", _("Enter: set sshd port (1-65535)."));
+        return;
+    }
+    if (selected == ssh_index() + 2) {
+        int next = !ssh_password;
+        if (rc_set("ssh_password", next ? "1" : "0") < 0) {
+            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+            return;
+        }
+        ssh_password = next;
+        ssh_reload_service();
+        snprintf(notice, sizeof notice, "%s", next ?
+                 _("sshd password login enabled (root login stays disabled).") :
+                 _("sshd password login disabled (public key only)."));
+        return;
+    }
+    if (selected == ssh_index() + 3) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, "%s", _("Enter: manage sshd AuthorizedKeys (add or remove public keys)."));
+        return;
+    }
+    if (selected == ssh_index() + 4) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, "%s", _("Enter, twice: regenerate sshd host key."));
         return;
     }
     if (selected == power_profile_index()) {
@@ -10319,6 +10948,12 @@ static void row_hint_text(int idx, char *out, size_t size)
     } else if (idx == bt_index() + 2) {
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(out, size, "%s", _("Enter: open Bluetooth devices in bluetui (the service must be on)."));
+    } else if (idx == gpu_graphics_index()) {
+        snprintf(out, size, "%s", gpu_graphics_auto ? _("automatic; keeps explicit display-card choices") : _("off; leaves existing routing unchanged"));
+    } else if (idx == gpu_graphics_index() + 1) {
+        snprintf(out, size, "%s", _("Enter twice: change firmware MUX routing; restart is required and no automatic restart occurs."));
+    } else if (idx == gpu_graphics_index() + 2) {
+        snprintf(out, size, "%s", _("Enter twice: enable or disable the dGPU only when firmware confirms it is safe."));
     } else if (idx == gpu_unlock_index()) {
         /* TRANSLATORS: Enter and Delete are key names; keep them. */
         snprintf(out, size, "%s",
@@ -10462,6 +11097,15 @@ static void row_hint_text(int idx, char *out, size_t size)
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(out, size, "%s",
                  _("Enter: open storage manager in a terminal (attach, format, or create btrfs array)."));
+    } else if (idx == ssh_index() + 1) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", _("Enter: set sshd port (1-65535)."));
+    } else if (idx == ssh_index() + 3) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", _("Enter: manage sshd AuthorizedKeys (add or remove public keys)."));
+    } else if (idx == ssh_index() + 4) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", _("Enter, twice: regenerate sshd host key."));
     } else if (idx == num_hw_items()) {
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(out, size, "%s", _("Enter: arrange the screens with the direction buttons."));
@@ -10496,6 +11140,10 @@ static void row_hint(void)
             snprintf(hint, sizeof hint, "%s", _("Enter: open it"));
         }
         snprintf(notice, sizeof notice, "%s", hint);
+    } else if (selected == bat_adaptive_index()) {
+        /* TRANSLATORS: Enter, Left/Right, r and Delete are key names; keep them. */
+        snprintf(notice, sizeof notice, "%s",
+                 _("Enter+Left/Right: on/off   r: download model   Delete, twice: remove model"));
     } else if (selected >= storage_vols_index() && selected < storage_vols_index() + nstorage_vols) {
         /* TRANSLATORS: Enter, Left/Right, m, a and Delete are key names; keep them. */
         snprintf(notice, sizeof notice, "%s",
@@ -10789,7 +11437,9 @@ int main(int argc, char **argv)
     load_kernel_state();
     load_kernel_choices();
     load_drm_cards();
+    load_gpu_graphics();
     load_paired_peers();
+    load_ssh_status();
     load_winmaint_status();
     winmaint_load_targets();
     load_storage_status();
@@ -10819,8 +11469,8 @@ int main(int argc, char **argv)
             return 0; /* the window's close, read in a question or list */
         }
         int timeout = pkg_job || repos_job || boot_job || tpm_job || security_job ||
-                      winmaint_job || tb_sync_job || gpu_unlock_job || gpu_power_job ||
-                      storage_job ? 500 : net_due ? 150 : 2000;
+                      winmaint_job || tb_sync_job || gpu_unlock_job || gpu_power_job || gpu_graphics_job ||
+                      storage_job || bat_model_job ? 500 : net_due ? 150 : 2000;
         int key;
         if (charge_watch >= 0) {
             struct pollfd extra[] = { { .fd = request_fd, .events = POLLIN },
@@ -10857,7 +11507,8 @@ int main(int argc, char **argv)
                               ((tpm_job != 0) << 3) | ((security_job != 0) << 4) |
                               ((winmaint_job != 0) << 5) | ((tb_sync_job != 0) << 6) |
                               ((gpu_unlock_job != 0) << 7) | ((gpu_power_job != 0) << 8) |
-                              ((storage_job != 0) << 9);
+                              ((gpu_graphics_job != 0) << 10) | ((storage_job != 0) << 9) |
+                              ((bat_model_job != 0) << 11);
             last_job_poll = uptime();
             adopt_jobs();
             pkg_check();
@@ -10865,10 +11516,12 @@ int main(int argc, char **argv)
             boot_check();
             security_check();
             winmaint_check();
+            gpu_graphics_check();
             gpu_unlock_check();
             gpu_power_check();
             storage_check();
             tb_sync_check();
+            bat_model_check();
             if (tpm_job) {
                 struct jobs_row r;
                 char log[96];
@@ -10885,7 +11538,8 @@ int main(int argc, char **argv)
                              ((tpm_job != 0) << 3) | ((security_job != 0) << 4) |
                              ((winmaint_job != 0) << 5) | ((tb_sync_job != 0) << 6) |
                              ((gpu_unlock_job != 0) << 7) | ((gpu_power_job != 0) << 8) |
-                             ((storage_job != 0) << 9);
+                             ((gpu_graphics_job != 0) << 10) | ((storage_job != 0) << 9) |
+                             ((bat_model_job != 0) << 11);
             if (jobs_after != jobs_before) {
                 entries_dirty = 1;
                 full_redraw = 1;
@@ -10899,8 +11553,11 @@ int main(int argc, char **argv)
             key = settings_pointer();
             mods = 0;
             if (selected != prev_sel) {
+                gpu_graphics_asked = -1;
                 winmaint_reclaim_asked = winmaint_boot_once_asked = winmaint_default_asked = winmaint_reboot_asked = 0;
+                ssh_hostkey_regen_asked = 0;
                 gpu_unlock_remove_asked = 0;
+                bat_model_remove_asked = 0;
                 storage_remove_asked = -1;
             }
             if (key == 0) continue;
@@ -10909,19 +11566,25 @@ int main(int argc, char **argv)
                 continue;
             }
         }
+        if (key != 0 && key != K_REPAINT && (key != '\n' || selected != gpu_graphics_asked))
+            gpu_graphics_asked = -1;
         if (key != 0 && key != '\n' && key != K_ACT_HOME && key != K_SHOWN) {
             winmaint_reclaim_asked = winmaint_boot_once_asked = winmaint_default_asked = winmaint_reboot_asked = 0;
+            ssh_hostkey_regen_asked = 0;
         } else if (key == '\n') {
             if (selected != winmaint_index() + 1) winmaint_reclaim_asked = 0;
             if (selected != winmaint_index() + 2) winmaint_boot_once_asked = 0;
             if (selected != winmaint_mode_index()) winmaint_default_asked = 0;
             if (selected != winmaint_mode_index() + 1) winmaint_reboot_asked = 0;
+            if (selected != ssh_index() + 4) ssh_hostkey_regen_asked = 0;
         }
         if (key != 0 && key != K_DEL && key != K_ACT_HOME && key != K_SHOWN) {
             gpu_unlock_remove_asked = 0;
+            bat_model_remove_asked = 0;
             storage_remove_asked = -1;
         } else if (key == K_DEL) {
             if (selected != gpu_unlock_index()) gpu_unlock_remove_asked = 0;
+            if (selected != bat_adaptive_index()) bat_model_remove_asked = 0;
             if (selected < storage_vols_index() || selected >= storage_vols_index() + nstorage_vols ||
                 selected - storage_vols_index() != storage_remove_asked) {
                 storage_remove_asked = -1;
@@ -10959,7 +11622,7 @@ int main(int argc, char **argv)
         if (key == 0 || key == K_SHOWN) {
             int settled_only = key == 0 && net_due && !(pkg_job || repos_job || boot_job || tpm_job || security_job ||
                                                         winmaint_job || tb_sync_job || gpu_unlock_job ||
-                                                        gpu_power_job || storage_job);
+                                                        gpu_power_job || storage_job || bat_model_job);
             if (!settled_only) {
                 load_monitors();
                 keyboards_dirty = 1;
@@ -10975,6 +11638,7 @@ int main(int argc, char **argv)
                     load_kernel_state();
                     load_drm_cards();
                     load_paired_peers();
+                    load_ssh_status();
                     load_winmaint_status();
                     winmaint_load_targets();
                     load_storage_status();
@@ -11104,6 +11768,12 @@ int main(int argc, char **argv)
             draw();
         } else if (key == '\n' && selected == host_index()) {
             change_hostname();
+            draw();
+        } else if (key == K_DEL && selected == bat_adaptive_index()) {
+            power_model_remove_row();
+            draw();
+        } else if ((key == 'r' || key == 'R') && selected == bat_adaptive_index()) {
+            power_model_fetch_row();
             draw();
         } else if (key == '\n' && selected == bat_full_index()) {
             charge_to_full_now();
@@ -11341,6 +12011,9 @@ int main(int argc, char **argv)
         } else if (key == K_DEL && selected == gpu_unlock_index()) {
             gpu_unlock_remove_row();
             draw();
+        } else if (key == '\n' && (selected == gpu_graphics_index() + 1 || selected == gpu_graphics_index() + 2)) {
+            gpu_graphics_action(selected);
+            draw();
         } else if (key == '\n' && selected == winmaint_index() + 1) {
             winmaint_status_row();
             draw();
@@ -11361,6 +12034,15 @@ int main(int argc, char **argv)
             draw();
         } else if (key == '\n' && selected == storage_disks_index()) {
             storage_manage_disks_row();
+            draw();
+        } else if (key == '\n' && selected == ssh_index() + 1) {
+            ssh_edit_port_row();
+            draw();
+        } else if (key == '\n' && selected == ssh_index() + 3) {
+            manage_ssh_authorized_keys();
+            draw();
+        } else if (key == '\n' && selected == ssh_index() + 4) {
+            ssh_regen_host_key_row();
             draw();
         } else if ((key == 'm' || key == 'M') &&
                    selected >= storage_vols_index() && selected < storage_vols_index() + nstorage_vols) {

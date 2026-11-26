@@ -36,6 +36,8 @@ int keys_lend(int *fds, int max) { (void)fds; (void)max; return 0; }
 void keys_leds(int on) { (void)on; }
 int keys_locks(void) { return 0; }
 void keys_set_locks(int locks) { (void)locks; }
+void keys_caps_owner(int on) { (void)on; }
+void keys_set_caps(int on) { (void)on; }
 void keys_take_back(const int *fds, int n) { (void)fds; assert(n == 0); }
 int *pointer_lend(size_t *n, char (*paths)[POINTER_PATH], size_t max) { (void)paths; (void)max; *n = 0; return NULL; }
 void pointer_take_back(int *fds, size_t n) { assert(!fds && n == 0); }

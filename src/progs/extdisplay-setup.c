@@ -155,16 +155,14 @@ int extdisplay_setup_scan(struct extdisplay_setup *s)
     s->changed = 0;
     s->scanning = 1;
     s->state = EXTDISPLAY_SETUP_SCANNING;
-    return send_line(s, "scan");
+    return send_line(s, s->watch_pending ? "watch" : "scan");
 }
 
 int extdisplay_setup_watch(struct extdisplay_setup *s)
 {
-    if (s->state != EXTDISPLAY_SETUP_IDLE || s->watching) return -1;
-    s->watching = 1;
-    s->scanning = 1;
-    s->state = EXTDISPLAY_SETUP_SCANNING;
-    return send_line(s, "watch");
+    if (s->state != EXTDISPLAY_SETUP_IDLE || s->watching || s->watch_pending) return -1;
+    s->watch_pending = 1;
+    return extdisplay_setup_scan(s);
 }
 
 int extdisplay_setup_automatic(const struct extdisplay_setup *s)
@@ -230,9 +228,13 @@ enum extdisplay_setup_event extdisplay_setup_line(struct extdisplay_setup *s, co
              s->state != EXTDISPLAY_SETUP_SCANNING && s->state != EXTDISPLAY_SETUP_RELEASING) || nfds || n == 6) {
             return broken(s, fds, nfds);
         }
-        /* A scan refused ("error busy" while a lease is active): shown, and
-         * the (empty) list stays, for F5 later. */
-        if (s->state == EXTDISPLAY_SETUP_SCANNING) s->scanned = 1;
+        /* A refused scan has no usable snapshot, even if an iface line arrived. */
+        s->scan_error = s->state == EXTDISPLAY_SETUP_SCANNING;
+        if (s->scan_error) {
+            s->scanned = 1;
+            s->count = 0;
+            s->changed = 0;
+        }
         s->scanning = 0;
         extdisplay_setup_forget(s);
         s->reason[0] = '\0';
@@ -247,7 +249,7 @@ enum extdisplay_setup_event extdisplay_setup_line(struct extdisplay_setup *s, co
         snprintf(s->error, sizeof s->error, "%.*s", REPLY_TEXT, text + 6);
         if (s->state == EXTDISPLAY_SETUP_RELEASING) return EXTDISPLAY_SETUP_EV_NONE;
         s->state = s->scanned ? EXTDISPLAY_SETUP_LIST : EXTDISPLAY_SETUP_IDLE;
-        return EXTDISPLAY_SETUP_EV_ERROR;
+        return s->scan_error ? EXTDISPLAY_SETUP_EV_SCAN_ERROR : EXTDISPLAY_SETUP_EV_ERROR;
     }
     memcpy(line, text, n + 1);
     int ntok = split(line, tok, 8);
@@ -278,7 +280,7 @@ enum extdisplay_setup_event extdisplay_setup_line(struct extdisplay_setup *s, co
     if (nfds) return broken(s, fds, nfds);
 
     if (strcmp(tok[0], "changed") == 0) {
-        if (ntok != 1 || !s->watching) return broken(s, fds, nfds);
+        if (ntok != 1 || (!s->watching && !s->watch_pending)) return broken(s, fds, nfds);
         s->changed = 1;
         return EXTDISPLAY_SETUP_EV_CHANGED;
     }
@@ -293,13 +295,14 @@ enum extdisplay_setup_event extdisplay_setup_line(struct extdisplay_setup *s, co
     }
     if (strcmp(tok[0], "iface") == 0) {
         int releasing = s->state == EXTDISPLAY_SETUP_RELEASING && s->scanning;
-        if ((s->state != EXTDISPLAY_SETUP_SCANNING && !releasing) || ntok != (s->watching ? 6 : 4)) return broken(s, fds, nfds);
+        int identified = s->watching || s->watch_pending;
+        if ((s->state != EXTDISPLAY_SETUP_SCANNING && !releasing) || ntok != (identified ? 6 : 4)) return broken(s, fds, nfds);
         size_t driver = strlen(tok[2]);
         if (!ifname_ok(tok[1], strlen(tok[1])) || driver < 1 || driver > 32) return broken(s, fds, nfds);
         int up = strcmp(tok[3], "up") == 0, down = strcmp(tok[3], "down") == 0;
         if (!up && !down) return broken(s, fds, nfds);
         int ifindex = 0;
-        if (s->watching) {
+        if (identified) {
             char *end;
             long value = strtol(tok[4], &end, 10);
             size_t length = strlen(tok[5]);
@@ -319,7 +322,7 @@ enum extdisplay_setup_event extdisplay_setup_line(struct extdisplay_setup *s, co
             snprintf(i->driver, sizeof i->driver, "%s", tok[2]);
             i->carrier = up;
             i->ifindex = ifindex;
-            if (s->watching) snprintf(i->address, sizeof i->address, "%s", tok[5]);
+            if (identified) snprintf(i->address, sizeof i->address, "%s", tok[5]);
         }
         return EXTDISPLAY_SETUP_EV_NONE;
     }
@@ -328,6 +331,14 @@ enum extdisplay_setup_event extdisplay_setup_line(struct extdisplay_setup *s, co
         if ((s->state != EXTDISPLAY_SETUP_SCANNING && !releasing) || ntok != 1) return broken(s, fds, nfds);
         s->scanned = 1;
         s->scanning = 0;
+        if (s->scan_error) {
+            s->scan_error = 0;
+            s->error[0] = '\0';
+        }
+        if (s->watch_pending) {
+            s->watching = 1;
+            s->watch_pending = 0;
+        }
         if (s->state != EXTDISPLAY_SETUP_RELEASING) s->state = EXTDISPLAY_SETUP_LIST;
         return releasing ? EXTDISPLAY_SETUP_EV_NONE : EXTDISPLAY_SETUP_EV_LIST;
     }
@@ -365,11 +376,17 @@ enum extdisplay_setup_event extdisplay_setup_line(struct extdisplay_setup *s, co
         }
         if (!known) return broken(s, fds, nfds);
         /* A late answer to a cancel crossing an unsolicited end: the scan
-         * that followed goes on. */
-        if (s->state == EXTDISPLAY_SETUP_SCANNING && strcmp(tok[1], "released") != 0) return EXTDISPLAY_SETUP_EV_NONE;
-        snprintf(s->reason, sizeof s->reason, "%s", tok[1]);
+         * that followed goes on. Likewise, only "released" completes release. */
+        int released = strcmp(tok[1], "released") == 0;
+        if (!released && (s->state == EXTDISPLAY_SETUP_SCANNING || s->state == EXTDISPLAY_SETUP_RELEASING))
+            return EXTDISPLAY_SETUP_EV_NONE;
+        /* An unsolicited end may cross our cancel. Keep the cancellation
+         * policy instead of treating it as a failed automatic attempt. */
+        snprintf(s->reason, sizeof s->reason, "%s",
+                 s->state == EXTDISPLAY_SETUP_CANCELLING && !released ? "cancelled" : tok[1]);
+        s->error[0] = '\0';
         extdisplay_setup_forget(s);
-        if (strcmp(tok[1], "released") == 0) {
+        if (released) {
             s->state = EXTDISPLAY_SETUP_RELEASED; /* the broker exits; its end of the channel closes */
         } else {
             s->state = s->scanned ? EXTDISPLAY_SETUP_LIST : EXTDISPLAY_SETUP_IDLE;
@@ -437,7 +454,38 @@ const char *extdisplay_setup_reason_text(const char *reason)
 
 static int same_iface(const struct extdisplay_iface *a, const struct extdisplay_iface *b)
 {
-    return a->ifindex == b->ifindex && strcmp(a->address, b->address) == 0;
+    return a->ifindex == b->ifindex && strcmp(a->address, b->address) == 0 &&
+           (a->ifindex > 0 || strcmp(a->name, b->name) == 0);
+}
+
+/* Retry only known temporary replies from the broker, never identity,
+ * isolation or configuration refusals, and never unknown error text. */
+static int transient_preparation(const char *error)
+{
+    static const char *const replies[] = {
+        "busy",
+        "the previous lease of this device did not end cleanly; it is not back in locachy-net yet",
+        "the cable interface disappeared",
+        "the cable link went down while preparing",
+        "cannot read the interface addresses",
+        "the cable has carrier but no usable IPv6 link-local address",
+        "the TLS listener did not become ready",
+        "cable discovery did not become ready",
+        "cable discovery could not publish; retry the connection",
+    };
+    for (size_t i = 0; i < sizeof replies / sizeof replies[0]; i++)
+        if (strcmp(error, replies[i]) == 0) return 1;
+    return 0;
+}
+
+/* Only finite bursts: never poll an idle, empty watch indefinitely. */
+static const double retry_delays[] = { 0.5, 1.0, 2.0 };
+
+static int defer_scan(struct extdisplay_auto *a, unsigned *retries, double now)
+{
+    if (*retries >= sizeof retry_delays / sizeof retry_delays[0]) return 0;
+    a->retry_at = now + retry_delays[(*retries)++];
+    return 1;
 }
 
 void extdisplay_auto_init(struct extdisplay_auto *a)
@@ -446,56 +494,101 @@ void extdisplay_auto_init(struct extdisplay_auto *a)
     a->enabled = 1;
 }
 
-void extdisplay_auto_on_event(struct extdisplay_auto *a, struct extdisplay_setup *s, enum extdisplay_setup_event ev)
+void extdisplay_auto_pause(struct extdisplay_auto *a, int suppress)
+{
+    a->enabled = 0;
+    a->suppressed = suppress;
+    a->suppressed_iface = a->selection;
+    a->automatic_attempt = a->recovering = 0;
+    a->scan_retries = a->preparation_retries = 0;
+    a->retry_at = 0;
+}
+
+void extdisplay_auto_on_event(struct extdisplay_auto *a, struct extdisplay_setup *s,
+                             enum extdisplay_setup_event ev, double now)
 {
     switch (ev) {
     case EXTDISPLAY_SETUP_EV_CHANGED:
-        if (s->state == EXTDISPLAY_SETUP_LIST || s->state == EXTDISPLAY_SETUP_SCANNING) a->enabled = 1;
+        /* An actual link notification can wake a failed scan after its burst
+         * stops, but cannot bypass an active delay or renew that burst. */
+        if (s->state == EXTDISPLAY_SETUP_LIST || s->state == EXTDISPLAY_SETUP_SCANNING)
+            a->enabled = 1;
         break;
     case EXTDISPLAY_SETUP_EV_LIST: {
-        int blocked_present = 0;
+        a->scan_retries = 0;
+        int selected = -1, blocked = -1;
         for (int i = 0; i < s->count; i++) {
-            if (same_iface(&a->selection, &s->ifaces[i])) a->selected = i;
-            if (same_iface(&a->suppressed_iface, &s->ifaces[i])) {
-                blocked_present = 1;
-                if (s->ifaces[i].carrier != a->suppressed_iface.carrier) {
-                    a->suppressed_iface.carrier = s->ifaces[i].carrier;
-                    if (a->suppressed_iface.carrier) a->suppressed = 0;
-                }
-            }
+            if (same_iface(&a->selection, &s->ifaces[i])) selected = i;
+            if (same_iface(&a->suppressed_iface, &s->ifaces[i])) blocked = i;
         }
-        if (!blocked_present) a->suppressed = 0;
+        if (selected >= 0) a->selected = selected;
+        if (a->suppressed) {
+            if (blocked < 0 || (s->ifaces[blocked].carrier && !a->suppressed_iface.carrier)) a->suppressed = 0;
+            else a->suppressed_iface.carrier = s->ifaces[blocked].carrier;
+        }
+        /* A failed lease can hide the interface briefly without a distinct
+         * link notification. Keep looking only within the same retry budget. */
+        if (!s->count && a->recovering && !s->changed &&
+            !defer_scan(a, &a->preparation_retries, now)) a->recovering = 0;
+        if (s->count && !s->changed) a->recovering = 0;
         break;
     }
+    case EXTDISPLAY_SETUP_EV_SCAN_ERROR:
+        if (strcmp(s->error, "busy") != 0 || !defer_scan(a, &a->scan_retries, now)) a->recovering = 0;
+        break;
     case EXTDISPLAY_SETUP_EV_ERROR:
-        a->enabled = 0;
-        a->suppressed = 1;
-        a->suppressed_iface = a->selection;
-        if (s->state == EXTDISPLAY_SETUP_LIST) extdisplay_setup_scan(s);
+        if (a->automatic_attempt && transient_preparation(s->error)) {
+            a->automatic_attempt = 0;
+            if (defer_scan(a, &a->preparation_retries, now)) {
+                a->recovering = 1;
+                a->enabled = 1;
+            } else {
+                extdisplay_auto_pause(a, 1);
+                /* The broker may already have consumed the link change while
+                 * preparing. Refresh the list once even without a notification. */
+                extdisplay_setup_scan(s);
+            }
+        } else {
+            extdisplay_auto_pause(a, 1);
+            extdisplay_setup_scan(s);
+        }
         break;
     case EXTDISPLAY_SETUP_EV_ENDED:
-        if (strcmp(s->reason, "cancelled") != 0) a->suppressed = 0;
-        a->enabled = !a->suppressed;
-        a->suppressed_iface = a->selection;
-        if (s->state == EXTDISPLAY_SETUP_IDLE || s->state == EXTDISPLAY_SETUP_LIST) extdisplay_setup_scan(s);
+        if (s->state != EXTDISPLAY_SETUP_IDLE && s->state != EXTDISPLAY_SETUP_LIST) break;
+        if (strcmp(s->reason, "carrier-lost") == 0 || strcmp(s->reason, "timeout") == 0 ||
+            (strcmp(s->reason, "cancelled") == 0 && a->enabled && !a->suppressed)) {
+            /* A finished stream can send cancel after re-arming; a local Esc
+             * instead disables automatic listening before sending cancel. */
+            extdisplay_auto_after_session(a, s);
+        } else {
+            /* Local cancel, authentication failure, or an opaque broker
+             * failure: do not run another attempt on this same link. */
+            extdisplay_auto_pause(a, 1);
+            extdisplay_setup_scan(s);
+        }
         break;
     default:
         break;
     }
-    if (s->state == EXTDISPLAY_SETUP_LIST && s->count && a->selected >= s->count) a->selected = 0;
+    if (s->state == EXTDISPLAY_SETUP_LIST && a->selected >= s->count) a->selected = 0;
 }
 
 void extdisplay_auto_after_session(struct extdisplay_auto *a, struct extdisplay_setup *s)
 {
+    extdisplay_auto_pause(a, 0);
     a->enabled = 1;
-    a->suppressed = 0;
-    a->suppressed_iface = a->selection;
     if (s->state == EXTDISPLAY_SETUP_IDLE || s->state == EXTDISPLAY_SETUP_LIST) extdisplay_setup_scan(s);
 }
 
-int extdisplay_auto_step(struct extdisplay_auto *a, struct extdisplay_setup *s)
+int extdisplay_auto_step(struct extdisplay_auto *a, struct extdisplay_setup *s, double now)
 {
     if (s->state != EXTDISPLAY_SETUP_LIST) return 0;
+    if (a->retry_at) {
+        if (now < a->retry_at) return 0;
+        a->retry_at = 0;
+        extdisplay_setup_scan(s);
+        return 1;
+    }
     if (s->changed) {
         extdisplay_setup_scan(s);
         return 1;
@@ -503,10 +596,13 @@ int extdisplay_auto_step(struct extdisplay_auto *a, struct extdisplay_setup *s)
     if (a->enabled && !a->suppressed) {
         int choice = extdisplay_setup_automatic(s);
         if (choice >= 0) {
+            if (!same_iface(&a->selection, &s->ifaces[choice])) a->preparation_retries = 0;
             a->selected = choice;
             a->selection = s->ifaces[choice];
             s->error[0] = s->reason[0] = '\0';
             a->enabled = 0;
+            a->automatic_attempt = 1;
+            a->recovering = 0;
             extdisplay_setup_pair(s, a->selection.name);
             return 1;
         }

@@ -74,6 +74,9 @@
 #ifndef JOBS_LIB
 #define JOBS_LIB "/usr/local/lib/locachy" /* internal helpers the jobs run */
 #endif
+#ifndef BATTERY_MODEL_CMD
+#define BATTERY_MODEL_CMD "/usr/local/bin/locachy-battery-model" /* the adaptive charging model, opt-in */
+#endif
 #ifndef JOBS_UNTRUSTED_KEYS
 #define JOBS_UNTRUSTED_KEYS "/var/lib/locachy/builder/untrusted-keys" /* locachy-build's */
 #endif
@@ -126,7 +129,7 @@ enum check {
     C_NONE, C_PACKAGES, C_SWAP, C_KERNEL, C_ONOFF, C_SECTION, C_TARGETS, C_CONTAINER, C_CONTAINER_DATA,
     C_DEVICE, C_RELEASE, C_FILE, C_SPI_PROBE, C_SPI_BACKUP, C_SPI_VERIFY, C_SPI_WRITE,
     C_TPM, C_TPM_ENROLL, C_SECURE_BOOT, C_BOOT, C_REBUILD, C_BIOS_SET, C_SECURITY,
-    C_WINMAINT_CREATE, C_WINMAINT_BOOT_DEFAULT, C_WINISO_FETCH, C_GPU_TARGET, C_GPU_MODE,
+    C_WINMAINT_CREATE, C_WINMAINT_BOOT_DEFAULT, C_WINISO_FETCH, C_GPU_TARGET, C_GPU_MODE, C_GPU_MUX,
     C_STORAGE_NAME, C_STORAGE_ROLE, C_STORAGE_AUTO, C_STORAGE_COMPUTE,
     C_STORAGE_ATTACH, C_STORAGE_FORMAT, C_STORAGE_ARRAY,
 };
@@ -185,6 +188,8 @@ static const struct kind kinds[] = {
     { "gpu-unlock-remove", "locachy-gpu-unlock", { "remove" }, C_NONE },
     { "gpu-power-apply", "locachy-gpu-power", { "apply" }, C_GPU_MODE },
     { "gpu-powerd", "locachy-gpu-power", { "nvidia-powerd" }, C_ONOFF },
+    { "gpu-graphics-mux", "locachy-gpu-graphics", { "set-mux" }, C_GPU_MUX },
+    { "gpu-graphics-dgpu", "locachy-gpu-graphics", { "set-dgpu" }, C_ONOFF },
     { "storage-mount", "locachy-storage", { "mount" }, C_STORAGE_NAME },
     { "storage-umount", "locachy-storage", { "umount" }, C_STORAGE_NAME },
     { "storage-set-role", "locachy-storage", { "set-role" }, C_STORAGE_ROLE },
@@ -194,6 +199,8 @@ static const struct kind kinds[] = {
     { "storage-attach", "locachy-storage", { "create", "--mode", "attach" }, C_STORAGE_ATTACH },
     { "storage-format", "locachy-storage", { "create", "--mode", "format" }, C_STORAGE_FORMAT },
     { "storage-array", "locachy-storage", { "create", "--mode", "array" }, C_STORAGE_ARRAY },
+    { "battery-model-fetch", BATTERY_MODEL_CMD, { "fetch" }, C_NONE },
+    { "battery-model-remove", BATTERY_MODEL_CMD, { "remove" }, C_NONE },
 };
 #define NKINDS ((int)(sizeof kinds / sizeof kinds[0]))
 
@@ -413,6 +420,9 @@ static int check_args(const struct kind *k, char **a, int n, char *why, size_t s
     case C_GPU_MODE:
         ok = n == 0 || (n == 1 && (strcmp(a[0], "auto") == 0 || strcmp(a[0], "full") == 0 || strcmp(a[0], "ctgp") == 0 ||
                                    strcmp(a[0], "stock") == 0 || strcmp(a[0], "eco") == 0));
+        break;
+    case C_GPU_MUX:
+        ok = n == 1 && (strcmp(a[0], "hybrid") == 0 || strcmp(a[0], "discrete") == 0);
         break;
     case C_WINMAINT_CREATE:
         /* --size-gib N, and optionally --disk /dev/NAME (the disk it goes on; the system disk by default). */

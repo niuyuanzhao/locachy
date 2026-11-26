@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-24 22:24+0800\n"
+"POT-Creation-Date: 2026-11-26 06:45-0500\n"
 "PO-Revision-Date: 2026-11-09 14:16+0000\n"
 "Last-Translator: LOCachy\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -116,7 +116,7 @@ msgstr "运行中"
 msgid "stopping"
 msgstr "正在停止"
 
-#: base/jobs.c progs/packages.c
+#: base/jobs.c progs/packages.c progs/settings.c
 msgid "done"
 msgstr "已完成"
 
@@ -3725,6 +3725,10 @@ msgid "The decoder channel ended."
 msgstr "解码通道已结束。"
 
 #: progs/extdisplay.c
+msgid "The authoritative Caps Lock state could not be updated."
+msgstr "无法更新权威大写锁定状态。"
+
+#: progs/extdisplay.c
 msgid "The managed sleep inhibitor was not granted."
 msgstr "未能获得受管的防睡眠许可。"
 
@@ -3787,6 +3791,14 @@ msgstr "空闲"
 #: progs/extdisplay.c
 msgid "Scanning"
 msgstr "正在扫描"
+
+#: progs/extdisplay.c
+msgid "Retrying cable setup"
+msgstr "正在重试线缆连接"
+
+#: progs/extdisplay.c
+msgid "Thunderbolt/USB4 scan failed"
+msgstr "雷电／USB4 网络扫描失败"
 
 #: progs/extdisplay.c
 msgid "Ready to connect"
@@ -3860,6 +3872,10 @@ msgstr "等待链路"
 #: progs/extdisplay.c
 msgid "Looking for a Thunderbolt/USB4 network..."
 msgstr "正在查找雷电／USB4 网络……"
+
+#: progs/extdisplay.c
+msgid "No result from the scan. F5: scan again."
+msgstr "未能取得扫描结果。按 F5 重扫。"
 
 #: progs/extdisplay.c
 msgid "Waiting for a Thunderbolt/USB4 network."
@@ -6526,7 +6542,9 @@ msgstr "无法测出 %s 末尾的未分配空间。"
 msgid ""
 "%s needs at least %s unallocated after its last partition for Maintenance "
 "Windows (%s there)."
-msgstr "%s 在最后一个分区之后至少需要 %s 未分配空间才能放下维护用 Windows（当前有 %s）。"
+msgstr ""
+"%s 在最后一个分区之后至少需要 %s 未分配空间才能放下维护用 Windows（当前有 "
+"%s）。"
 
 #: progs/installer.c
 msgid "Choose the disk to install on."
@@ -9080,7 +9098,7 @@ msgstr "（未经验证）"
 msgid "Target: %s%s"
 msgstr "目标系统：%s%s"
 
-#: progs/rescue.c
+#: progs/rescue.c progs/settings.c
 msgid "unknown"
 msgstr "未知"
 
@@ -10192,9 +10210,89 @@ msgid "Hardware readings refreshed."
 msgstr "硬件读数已刷新。"
 
 #: progs/settings-power.inc
+msgid "Manual charging"
+msgstr "手动充电"
+
+#: progs/settings-power.inc
+msgid "Running on battery"
+msgstr "正在使用电池供电"
+
+#: progs/settings-power.inc
+msgid "Learning usage"
+msgstr "正在学习使用习惯"
+
+#: progs/settings-power.inc
+msgid "Mostly plugged in"
+msgstr "长时间接电"
+
+#: progs/settings-power.inc
+msgid "Ready for portable use"
+msgstr "为移动使用充电"
+
+#: progs/settings-power.inc
+msgid "Holding charge"
+msgstr "暂缓充满"
+
+#: progs/settings-power.inc
+msgid "Topping up before unplugging"
+msgstr "在预计拔掉电源前充满"
+
+#: progs/settings-power.inc progs/settings.c
+msgid "Full charge override active"
+msgstr "临时充满模式已生效"
+
+#: progs/settings-power.inc
+msgid "Model not downloaded"
+msgstr "尚未下载模型"
+
+#: progs/settings-power.inc
+msgid "Model verification failed"
+msgstr "模型校验失败"
+
+#: progs/settings-power.inc
+msgid "Adaptive standby"
+msgstr "自适应充电待命"
+
+#: progs/settings-power.inc progs/settings.c
+msgid "Charging control unsupported"
+msgstr "设备不支持充电控制"
+
+#: progs/settings-power.inc
+msgid "Could not apply charging limits"
+msgstr "无法应用充电限制"
+
+#: progs/settings-power.inc
+msgid "Charging status unavailable"
+msgstr "无法获取充电控制状态"
+
+#: progs/settings-power.inc
 #, c-format
 msgid "Last handoff: %.104s"
 msgstr "最近切换：%.104s"
+
+#: progs/settings-power.inc
+msgid "Plug in AC power first"
+msgstr "请先接上电源"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Expected to resume charging to full at %s"
+msgstr "预计于 %s 恢复充电至满电"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s: %s (limit %d%%, requested %d%%)"
+msgstr "%s：%s（当前上限 %d%%，目标 %d%%）"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s: %s (limit %d%%)"
+msgstr "%s：%s（上限 %d%%）"
+
+#. TRANSLATORS: r is the r key; keep it.
+#: progs/settings-power.inc
+msgid "Press r on Adaptive Charging to download the model."
+msgstr "在“自适应充电”行按 r 下载模型。"
 
 #: progs/settings-power.inc
 msgid "Charging"
@@ -10312,71 +10410,69 @@ msgid "No system battery is reported in /sys/class/power_supply."
 msgstr "/sys/class/power_supply 中未报告系统电池。"
 
 #: progs/settings-power.inc
-msgid "Manual charging"
-msgstr "手动充电"
-
-#: progs/settings-power.inc
-msgid "Running on battery"
-msgstr "正在使用电池供电"
-
-#: progs/settings-power.inc
-msgid "Learning usage"
-msgstr "正在学习使用习惯"
-
-#: progs/settings-power.inc
-msgid "Mostly plugged in"
-msgstr "长时间接电"
-
-#: progs/settings-power.inc
-msgid "Ready for portable use"
-msgstr "为移动使用充电"
-
-#: progs/settings-power.inc
-msgid "Holding charge"
-msgstr "暂缓充满"
-
-#: progs/settings-power.inc
-msgid "Topping up before unplugging"
-msgstr "在预计拔掉电源前充满"
-
-#: progs/settings-power.inc progs/settings.c
-msgid "Full charge override active"
-msgstr "临时充满模式已生效"
-
-#: progs/settings-power.inc progs/settings.c
-msgid "Charging control unsupported"
-msgstr "设备不支持充电控制"
-
-#: progs/settings-power.inc
-msgid "Could not apply charging limits"
-msgstr "无法应用充电限制"
-
-#: progs/settings-power.inc
-msgid "Charging status unavailable"
-msgstr "无法获取充电控制状态"
-
-#: progs/settings-power.inc
-#, c-format
-msgid "Expected to resume charging to full at %s"
-msgstr "预计于 %s 恢复充电至满电"
-
-#: progs/settings-power.inc
-msgid "Plug in AC power first"
-msgstr "请先接上电源"
-
-#: progs/settings-power.inc
-#, c-format
-msgid "%s: %s (limit %d%%, requested %d%%)"
-msgstr "%s：%s（当前上限 %d%%，目标 %d%%）"
-
-#: progs/settings-power.inc
-#, c-format
-msgid "%s: %s (limit %d%%)"
-msgstr "%s：%s（上限 %d%%）"
-
-#: progs/settings-power.inc
 msgid "Saved, but could not notify the battery service."
 msgstr "已保存，但无法通知电池服务。"
+
+#: progs/settings-power.inc
+msgid "Adaptive charging model removed."
+msgstr "已删除自适应充电模型。"
+
+#: progs/settings-power.inc
+msgid "Adaptive charging model downloaded and verified."
+msgstr "自适应充电模型已下载并校验通过。"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Could not remove adaptive charging model: %s"
+msgstr "无法删除自适应充电模型：%s"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Could not download adaptive charging model: %s"
+msgstr "无法下载自适应充电模型：%s"
+
+#: progs/settings-power.inc
+msgid "Turn Adaptive Charging on first to download the model."
+msgstr "请先开启自适应充电再下载模型。"
+
+#: progs/settings-power.inc
+msgid "Wait: an adaptive charging model job is still running."
+msgstr "请稍候：自适应充电模型任务仍在运行。"
+
+#: progs/settings-power.inc
+msgid "Adaptive charging model is already installed."
+msgstr "自适应充电模型已安装。"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Could not start model download: %s"
+msgstr "无法启动模型下载：%s"
+
+#: progs/settings-power.inc
+msgid "Downloading adaptive charging model in background."
+msgstr "正在后台下载自适应充电模型。"
+
+#: progs/settings-power.inc
+msgid "Adaptive charging model is not installed."
+msgstr "尚未安装自适应充电模型。"
+
+#. TRANSLATORS: Delete is the Delete key; keep it.
+#: progs/settings-power.inc
+msgid "Delete again: remove the downloaded adaptive charging model."
+msgstr "再次按 Delete：删除已下载的自适应充电模型。"
+
+#: progs/settings-power.inc
+msgid "Removing adaptive charging model in background."
+msgstr "正在后台删除自适应充电模型。"
+
+#: progs/settings-power.inc
+msgid "Adaptive charging enabled; downloading model in background."
+msgstr "已开启自适应充电，正在后台下载模型。"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Adaptive charging enabled; model download unavailable: %s"
+msgstr "已开启自适应充电，但无法下载模型：%s"
 
 #: progs/settings-power.inc
 msgid "Adaptive charging setting saved."
@@ -10390,26 +10486,9 @@ msgstr "已请求临时充满，拔掉电源或 24 小时后结束。"
 msgid "Manual thresholds are saved but not applied while charging is managed."
 msgstr "手动阈值仍保留，自动控制充电时不使用。"
 
-#: progs/settings-power.inc
-#, c-format
-msgid "Cannot write charge start threshold for %s."
-msgstr "无法写入 %s 的充电起始阈值。"
-
-#: progs/settings-power.inc
-#, c-format
-msgid ""
-"Charge start threshold: %d%% (re-applied automatically on battery swap)."
-msgstr "充电起始阈值：%d%%（更换电池时自动重新应用）。"
-
-#: progs/settings-power.inc
-#, c-format
-msgid "Cannot write charge stop threshold for %s."
-msgstr "无法写入 %s 的充电停止阈值。"
-
-#: progs/settings-power.inc
-#, c-format
-msgid "Charge stop threshold: %d%% (re-applied automatically on battery swap)."
-msgstr "充电停止阈值：%d%%（更换电池时自动重新应用）。"
+#: progs/settings-power.inc progs/settings.c
+msgid "Waiting for battery service"
+msgstr "等待电池服务处理"
 
 #: progs/settings-power.inc
 msgid "12h"
@@ -12039,6 +12118,10 @@ msgid "Tailscale"
 msgstr "Tailscale"
 
 #: progs/settings.c
+msgid "SSH Server (sshd)"
+msgstr "SSH 服务器（sshd）"
+
+#: progs/settings.c
 msgid "Clash"
 msgstr "Clash"
 
@@ -12352,6 +12435,118 @@ msgstr "已配对设备管理已关闭。"
 msgid "Paired devices did not finish."
 msgstr "已配对设备管理未能完成。"
 
+#. TRANSLATORS: Enter and Esc are key names; keep them.
+#: progs/settings.c
+msgid "sshd port (1-65535): "
+msgstr "sshd 端口（1-65535）："
+
+#: progs/settings.c
+msgid "sshd port unchanged."
+msgstr "sshd 端口未修改。"
+
+#: progs/settings.c
+#, c-format
+msgid "Invalid sshd port: %.32s (use 1-65535)."
+msgstr "无效的 sshd 端口：%.32s（请使用 1-65535）。"
+
+#: progs/settings.c
+#, c-format
+msgid "sshd port set to %d."
+msgstr "sshd 端口已设为 %d。"
+
+#: progs/settings.c
+msgid ""
+"Enter again: regenerate sshd host key (clients must remove the old "
+"known_hosts entry)."
+msgstr "再次按 Enter：重新生成 sshd 主机密钥（客户端需移除旧的 known_hosts 记录）。"
+
+#: progs/settings.c
+#, c-format
+msgid "Cannot regenerate sshd host key: %.120s"
+msgstr "无法重新生成 sshd 主机密钥：%.120s"
+
+#: progs/settings.c
+msgid "command failed"
+msgstr "命令执行失败"
+
+#: progs/settings.c
+#, c-format
+msgid "sshd host key regenerated (%.48s); update clients' known_hosts."
+msgstr "已重新生成 sshd 主机密钥（%.48s）；请更新客户端的 known_hosts。"
+
+#: progs/settings.c
+#, c-format
+msgid "Cannot add SSH public key: %.120s"
+msgstr "无法添加 SSH 公钥：%.120s"
+
+#: progs/settings.c
+msgid "invalid key"
+msgstr "无效公钥"
+
+#: progs/settings.c
+#, c-format
+msgid "Added SSH public key (%.48s)."
+msgstr "已添加 SSH 公钥（%.48s）。"
+
+#: progs/settings.c
+msgid "ok"
+msgstr "确定"
+
+#: progs/settings.c
+#, c-format
+msgid "Cannot remove SSH public key: %.120s"
+msgstr "无法删除 SSH 公钥：%.120s"
+
+#: progs/settings.c
+msgid "SSH public key removed."
+msgstr "已删除 SSH 公钥。"
+
+#: progs/settings.c
+msgid "No regular local user (uid 1000) found."
+msgstr "未找到普通本地用户（uid 1000）。"
+
+#: progs/settings.c
+#, c-format
+msgid "sshd AuthorizedKeys (%.40s)"
+msgstr "sshd 授权公钥（%.40s）"
+
+#. TRANSLATORS: a, Enter, Delete and Esc are key names; keep them.
+#: progs/settings.c
+msgid "a / Enter: add public key   Delete: remove selected   Esc: back"
+msgstr "a / Enter: 添加公钥   Delete: 删除选中项   Esc: 返回"
+
+#: progs/settings.c
+msgid "[ + Add public key ]"
+msgstr "[ + 添加公钥 ]"
+
+#: progs/settings.c
+msgid "No authorized public keys yet."
+msgstr "尚未添加授权公钥。"
+
+#: progs/settings.c
+#, c-format
+msgid "sshd AuthorizedKeys: %d key."
+msgid_plural "sshd AuthorizedKeys: %d keys."
+msgstr[0] "sshd 授权公钥：%d 条。"
+
+#: progs/settings.c
+msgid "Paste SSH public key (ssh-ed25519 / ssh-rsa ...): "
+msgstr "粘贴 SSH 公钥（ssh-ed25519 / ssh-rsa ...）："
+
+#: progs/settings.c
+msgid "No key added."
+msgstr "未添加公钥。"
+
+#: progs/settings.c
+msgid "Select a key below to remove it."
+msgstr "请选择下方的公钥以删除。"
+
+#. TRANSLATORS: Delete is the Delete key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "Delete again: remove key #%d (%.48s)."
+msgstr "再次按 Delete：删除第 %d 条公钥（%.48s）。"
+
 #: progs/settings.c
 msgid "Wait: a Maintenance Windows job is still running."
 msgstr "请稍候：维护用 Windows 任务仍在运行。"
@@ -12402,7 +12597,8 @@ msgstr "正在设置单次启动 Windows..."
 msgid ""
 "Enter again: Windows starts first on every restart until switched back "
 "(LOCachy stays second)."
-msgstr "再按一次 Enter：在切回之前每次重启都优先启动 Windows（LOCachy 排在第二）。"
+msgstr ""
+"再按一次 Enter：在切回之前每次重启都优先启动 Windows（LOCachy 排在第二）。"
 
 #: progs/settings.c
 #, c-format
@@ -12426,7 +12622,8 @@ msgstr "Enter：让 LOCachy 重新优先启动（Windows 仍保留在固件启�
 msgid ""
 "Enter, twice: Windows starts first on every restart until switched back "
 "(LOCachy stays second)."
-msgstr "连续按两次 Enter：在切回之前每次重启都优先启动 Windows（LOCachy 排在第二）。"
+msgstr ""
+"连续按两次 Enter：在切回之前每次重启都优先启动 Windows（LOCachy 排在第二）。"
 
 #: progs/settings.c
 msgid ""
@@ -12536,6 +12733,60 @@ msgstr "独显功耗设置已应用。"
 #, c-format
 msgid "GPU power change failed: %s"
 msgstr "独显功耗修改失败：%s"
+
+#: progs/settings.c
+msgid "Graphics setting saved in firmware. Restart to apply it."
+msgstr "显卡设置已写入固件，重启后生效。"
+
+#: progs/settings.c
+msgid "Graphics setting updated."
+msgstr "显卡设置已更新。"
+
+#: progs/settings.c
+#, c-format
+msgid "Graphics change failed: %s"
+msgstr "显卡设置修改失败：%s"
+
+#: progs/settings.c
+msgid "Wait for the current graphics job."
+msgstr "请等待当前的显卡设置任务结束。"
+
+#: progs/settings.c
+msgid "Restart before changing graphics firmware again."
+msgstr "请重启后再修改显卡固件设置。"
+
+#: progs/settings.c
+msgid "This graphics switch is not exposed by this machine's firmware."
+msgstr "本机固件没有向系统提供此显卡开关。"
+
+#: progs/settings.c
+msgid "The current graphics firmware state could not be verified."
+msgstr "无法确认当前的显卡固件设置。"
+
+#: progs/settings.c
+msgid "Enter again: switch to direct NVIDIA display after restart."
+msgstr "再按 Enter：重启后切换到 NVIDIA 独显直连。"
+
+#: progs/settings.c
+msgid "Enter again: switch to hybrid display after restart."
+msgstr "再按 Enter：重启后切换到混合显示。"
+
+#: progs/settings.c
+msgid "Enter again: disable NVIDIA, its display ports and CUDA."
+msgstr "再按 Enter：禁用 NVIDIA 独显、其显示端口及 CUDA。"
+
+#: progs/settings.c
+msgid "Enter again: enable the NVIDIA GPU."
+msgstr "再按 Enter：启用 NVIDIA 独显。"
+
+#: progs/settings.c
+#, c-format
+msgid "Could not start the graphics change: %s"
+msgstr "无法启动显卡设置任务：%s"
+
+#: progs/settings.c
+msgid "Changing graphics firmware setting..."
+msgstr "正在修改显卡固件设置…"
 
 #: progs/settings.c
 msgid "Wait: the NVIDIA GPU unlock job is still running."
@@ -12851,14 +13102,6 @@ msgstr "  （Tor 已开启：无法绕过，其 UDP 已丢弃）"
 #: progs/settings.c
 msgid "Tailscale account"
 msgstr "Tailscale 账号"
-
-#: progs/settings.c
-msgid "SSH over Tailscale"
-msgstr "通过 Tailscale 使用 SSH"
-
-#: progs/settings.c
-msgid "  (Tailscale is off)"
-msgstr "  （Tailscale 已关闭）"
 
 #: progs/settings.c
 msgid "Clash (mihomo) installed"
@@ -13232,6 +13475,46 @@ msgid "  (search service off)"
 msgstr "  （搜索服务已关闭）"
 
 #: progs/settings.c
+msgid "Hybrid graphics policy"
+msgstr "混合显卡策略"
+
+#: progs/settings.c
+msgid "automatic"
+msgstr "自动"
+
+#: progs/settings.c
+msgid "leave unchanged"
+msgstr "不接管"
+
+#: progs/settings.c
+msgid " (manual display GPU selected)"
+msgstr "（已手动指定显示显卡）"
+
+#: progs/settings.c
+msgid "not supported"
+msgstr "不支持"
+
+#: progs/settings.c
+msgid "direct NVIDIA"
+msgstr "NVIDIA 独显直连"
+
+#: progs/settings.c
+msgid "hybrid"
+msgstr "混合"
+
+#: progs/settings.c
+msgid "Firmware display routing"
+msgstr "固件显示路由"
+
+#: progs/settings.c
+msgid "NVIDIA discrete GPU"
+msgstr "NVIDIA 独显"
+
+#: progs/settings.c
+msgid " (firmware change pending restart)"
+msgstr "（固件设置待重启生效）"
+
+#: progs/settings.c
 msgid "ON"
 msgstr "开"
 
@@ -13285,6 +13568,70 @@ msgstr "%d 块未管理的磁盘：%.32s（%s）等  （Enter：管理）"
 #: progs/settings.c
 msgid "Unmanaged disks"
 msgstr "未管理的磁盘"
+
+#: progs/settings.c
+msgid "LAN & Tailscale"
+msgstr "局域网与 Tailscale"
+
+#: progs/settings.c
+msgid "Off"
+msgstr "关闭"
+
+#: progs/settings.c
+msgid "Tailscale only"
+msgstr "仅 Tailscale"
+
+#: progs/settings.c
+msgid "SSH server (sshd)"
+msgstr "SSH 服务器（sshd）"
+
+#: progs/settings.c
+msgid "  (Tailscale is off)"
+msgstr "  （Tailscale 已关闭）"
+
+#: progs/settings.c
+msgid "  (blocked while Tor is on)"
+msgstr "  （开启 Tor 时不可用）"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "%d   (Enter)"
+msgstr "%d   （Enter）"
+
+#: progs/settings.c
+msgid "sshd port"
+msgstr "sshd 端口"
+
+#: progs/settings.c
+msgid "sshd password login"
+msgstr "sshd 密码登录"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "%d key   (Enter)"
+msgid_plural "%d keys   (Enter)"
+msgstr[0] "%d 条   （Enter）"
+
+#: progs/settings.c
+msgid "sshd AuthorizedKeys"
+msgstr "sshd 授权公钥"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "%.64s   (Enter: regenerate)"
+msgstr "%.64s   （Enter: 重新生成）"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "not generated yet   (Enter: generate)"
+msgstr "尚未生成   （Enter: 生成）"
+
+#: progs/settings.c
+msgid "sshd host key"
+msgstr "sshd 主机密钥"
 
 #: progs/settings.c
 msgid "Unlock with a fingerprint"
@@ -13428,10 +13775,6 @@ msgstr "胁迫时擦除磁盘"
 #: progs/settings.c
 msgid "Host security (fwupd)"
 msgstr "主机安全（fwupd）"
-
-#: progs/settings.c
-msgid "not supported"
-msgstr "不支持"
 
 #: progs/settings.c
 msgid "Screen brightness"
@@ -13586,12 +13929,16 @@ msgid "Battery curves & health"
 msgstr "电池曲线与健康度"
 
 #: progs/settings.c
-msgid "Adaptive Charging"
-msgstr "自适应充电"
+msgid "Downloading model..."
+msgstr "正在下载模型…"
 
 #: progs/settings.c
-msgid "Waiting for battery service"
-msgstr "等待电池服务处理"
+msgid "Removing model..."
+msgstr "正在删除模型…"
+
+#: progs/settings.c
+msgid "Adaptive Charging"
+msgstr "自适应充电"
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
@@ -13603,6 +13950,14 @@ msgid "Enter: request full charge"
 msgstr "Enter：请求临时充满"
 
 #: progs/settings.c
+msgid "Charge start threshold"
+msgstr "充电起始阈值"
+
+#: progs/settings.c
+msgid "Charge stop threshold"
+msgstr "充电停止阈值"
+
+#: progs/settings.c
 msgid "not set for manual charging"
 msgstr "未设置手动充电阈值"
 
@@ -13610,19 +13965,6 @@ msgstr "未设置手动充电阈值"
 #, c-format
 msgid "%d%% saved for manual charging"
 msgstr "已保存手动充电阈值 %d%%"
-
-#. TRANSLATORS: Enter is the Enter key; keep it.
-#: progs/settings.c
-msgid "Enter: allow a full charge until unplugged or for up to 24 hours."
-msgstr "Enter：临时允许充满，拔掉电源或 24 小时后结束。"
-
-#: progs/settings.c
-msgid "Charge start threshold"
-msgstr "充电起始阈值"
-
-#: progs/settings.c
-msgid "Charge stop threshold"
-msgstr "充电停止阈值"
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
@@ -13748,18 +14090,6 @@ msgstr "Tailscale 已开启。"
 #, c-format
 msgid "Tailscale: %.140s."
 msgstr "Tailscale：%.140s。"
-
-#: progs/settings.c
-msgid "Turn on Tailscale before enabling SSH over it."
-msgstr "请先开启 Tailscale，再启用 SSH。"
-
-#: progs/settings.c
-msgid "SSH over Tailscale enabled; login requires an authorized public key."
-msgstr "已启用通过 Tailscale 的 SSH 访问；登录需要已授权的公钥。"
-
-#: progs/settings.c
-msgid "SSH over Tailscale disabled."
-msgstr "已关闭通过 Tailscale 的 SSH 访问。"
 
 #: progs/settings.c
 msgid "Clash is Tor's front: put Tor through bridges or off first."
@@ -14452,6 +14782,10 @@ msgid_plural "Mirrors are ranked again every %d days."
 msgstr[0] "每 %d 天重新为镜像排序一次。"
 
 #: progs/settings.c
+msgid "Graphics policy saved. Applies when graphics next starts."
+msgstr "显卡策略已保存，下次启动图形界面时生效。"
+
+#: progs/settings.c
 msgid "This machine has no GPU power control (its machine profile has none)."
 msgstr "此机型没有独显功耗控制（机型配置中未定义）。"
 
@@ -14483,6 +14817,55 @@ msgid ""
 "Enter: open storage manager in a terminal (attach, format, or create btrfs "
 "array)."
 msgstr "Enter：在终端中打开存储管理器（附加、格式化或创建 Btrfs 阵列）。"
+
+#: progs/settings.c
+msgid "SSH server (sshd) disabled."
+msgstr "已关闭 SSH 服务器（sshd）。"
+
+#: progs/settings.c
+msgid "SSH server (sshd) set to LAN & Tailscale (blocked while Tor is on)."
+msgstr "SSH 服务器（sshd）已设为局域网与 Tailscale（开启 Tor 时不可用）。"
+
+#: progs/settings.c
+msgid "SSH server (sshd) enabled on LAN & Tailscale."
+msgstr "已在局域网与 Tailscale 上启用 SSH 服务器（sshd）。"
+
+#: progs/settings.c
+msgid ""
+"SSH server (sshd) set to Tailscale only (Tailscale is off: waiting for "
+"tailscale0)."
+msgstr "SSH 服务器（sshd）已设为仅 Tailscale（Tailscale 未开启：正在等待 tailscale0）。"
+
+#: progs/settings.c
+msgid "SSH server (sshd) set to Tailscale only (blocked while Tor is on)."
+msgstr "SSH 服务器（sshd）已设为仅 Tailscale（开启 Tor 时不可用）。"
+
+#: progs/settings.c
+msgid "SSH server (sshd) enabled on Tailscale only."
+msgstr "已仅在 Tailscale 上启用 SSH 服务器（sshd）。"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: set sshd port (1-65535)."
+msgstr "Enter: 设置 sshd 端口（1-65535）。"
+
+#: progs/settings.c
+msgid "sshd password login enabled (root login stays disabled)."
+msgstr "已开启 sshd 密码登录（root 登录保持禁用）。"
+
+#: progs/settings.c
+msgid "sshd password login disabled (public key only)."
+msgstr "已关闭 sshd 密码登录（仅限公钥认证）。"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: manage sshd AuthorizedKeys (add or remove public keys)."
+msgstr "Enter: 管理 sshd 授权公钥（添加或删除公钥）。"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter, twice: regenerate sshd host key."
+msgstr "连续按两次 Enter：重新生成 sshd 主机密钥。"
 
 #: progs/settings.c
 #, c-format
@@ -14630,10 +15013,34 @@ msgid "Saved to %s and applied."
 msgstr "已保存至 %s 并生效。"
 
 #: progs/settings.c
+msgid "automatic; keeps explicit display-card choices"
+msgstr "自动；保留手动指定的显示显卡。"
+
+#: progs/settings.c
+msgid "off; leaves existing routing unchanged"
+msgstr "不接管；保留原有显示路由。"
+
+#: progs/settings.c
+msgid ""
+"Enter twice: change firmware MUX routing; restart is required and no "
+"automatic restart occurs."
+msgstr "连续按两次 Enter 修改固件显示路由；需要重启，不会自动重启。"
+
+#: progs/settings.c
+msgid ""
+"Enter twice: enable or disable the dGPU only when firmware confirms it is "
+"safe."
+msgstr "连续按两次 Enter 启用或禁用独显；仅在固件允许时执行。"
+
+#: progs/settings.c
 msgid ""
 "Enter: fetch gpu-unlock from GitHub and build it, or turn it on or off   "
 "Delete: remove"
 msgstr "Enter：从 GitHub 拉取并构建 gpu-unlock，或切换开关   Delete：卸载"
+
+#: progs/settings.c
+msgid "Enter: allow a full charge until unplugged or for up to 24 hours."
+msgstr "Enter：临时允许充满，拔掉电源或 24 小时后结束。"
 
 #. TRANSLATORS: Enter and Delete are key names; keep them.
 #: progs/settings.c
@@ -14652,6 +15059,11 @@ msgstr "Enter: 安装缺少的部分   连按两次 Delete: 卸载"
 #: progs/settings.c
 msgid "Enter, then Left/Right: choose   Enter again: do it"
 msgstr "Enter 后用 Left/Right 选择   再按 Enter: 执行"
+
+#: progs/settings.c
+msgid ""
+"Enter+Left/Right: on/off   r: download model   Delete, twice: remove model"
+msgstr "Enter+Left/Right: 开关   r: 下载模型   连按两次 Delete: 删除模型"
 
 #: progs/settings.c
 msgid ""
@@ -16495,6 +16907,33 @@ msgstr "显示较少详情"
 #: progs/view.c
 msgid "Show more details..."
 msgstr "显示更多详情..."
+
+#~ msgid "SSH over Tailscale"
+#~ msgstr "通过 Tailscale 使用 SSH"
+
+#~ msgid "Turn on Tailscale before enabling SSH over it."
+#~ msgstr "请先开启 Tailscale，再启用 SSH。"
+
+#~ msgid "SSH over Tailscale enabled; login requires an authorized public key."
+#~ msgstr "已启用通过 Tailscale 的 SSH 访问；登录需要已授权的公钥。"
+
+#, c-format
+#~ msgid "Cannot write charge start threshold for %s."
+#~ msgstr "无法写入 %s 的充电起始阈值。"
+
+#, c-format
+#~ msgid ""
+#~ "Charge start threshold: %d%% (re-applied automatically on battery swap)."
+#~ msgstr "充电起始阈值：%d%%（更换电池时自动重新应用）。"
+
+#, c-format
+#~ msgid "Cannot write charge stop threshold for %s."
+#~ msgstr "无法写入 %s 的充电停止阈值。"
+
+#, c-format
+#~ msgid ""
+#~ "Charge stop threshold: %d%% (re-applied automatically on battery swap)."
+#~ msgstr "充电停止阈值：%d%%（更换电池时自动重新应用）。"
 
 #~ msgid "The cable link went down."
 #~ msgstr "线缆链路已断开。"

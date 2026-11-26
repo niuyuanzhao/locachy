@@ -118,7 +118,7 @@ hook_open="-Wl,-u,open_request_publish"
 hook_win="-Wl,-u,wl_data_init -Wl,-u,wl_data_active"
 # Weak hooks of the base, resolved by pulling their archive members: input-raw.o
 # (keys.c, pointer.c, the window transport) and the data device (clipboard.c, files.c).
-hook_raw="-Wl,-u,base_raw_cancel -Wl,-u,base_raw_emit -Wl,-u,base_raw_forward_home -Wl,-u,base_raw_pending"
+hook_raw="-Wl,-u,base_raw_cancel -Wl,-u,base_raw_emit -Wl,-u,base_raw_exclusive -Wl,-u,base_raw_pending"
 hook_data="-Wl,-u,wl_data_active -Wl,-u,wl_data_clipboard_get -Wl,-u,wl_data_clipboard_set -Wl,-u,wl_data_clipboard_clear -Wl,-u,wl_data_drag_active -Wl,-u,wl_data_drag_start -Wl,-u,wl_data_drag_start_key -Wl,-u,wl_data_press_serial"
 hook_base="$hook_raw $hook_data"
 
@@ -160,8 +160,8 @@ gcc $core_cflags $gc_ldflags "$src/progs/container-documents.c" \
     $gio_cflags $gio_libs -o "$out/container-documents"
 gcc $core_cflags $gc_ldflags "$src/progs/locachy-docs.c" \
     $(pkg-config --cflags --libs gio-unix-2.0) -o "$out/locachy-docs"
-gcc $core_cflags $gc_ldflags "$src/progs/battery-history.c" \
-    -o "$out/battery-history"
+gcc $core_cflags $gc_ldflags "$src/progs/battery-history.c" "$src/progs/battery-controller.c" \
+    "$src/progs/battery-tflite.c" -lcrypto -lm -o "$out/battery-history"
 gcc $core_cflags $gc_ldflags -I"$src/base/include" "$src/progs/locachy-jobs.c" \
     -o "$out/locachy-jobs"
 # Global search daemon and sandboxed document text extractor (tools/SEARCH.md).

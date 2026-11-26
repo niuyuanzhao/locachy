@@ -25,6 +25,7 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import select
 import selectors
@@ -39,8 +40,10 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import termios
 import threading
 import time
+import tty
 import urllib.parse
 import uuid
 
@@ -48,8 +51,11 @@ sys.dont_write_bytecode = True
 
 DEFAULT_PORT = 27184
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+SSH_USER_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._-]{0,63}$")
 MEM_RE = re.compile(r"^(max|[0-9]+[KMGkmg]?)$")
 CPU_RE = re.compile(r"^(max|[0-9]+)\s+[0-9]+$")
+VM_SSH_PORT_MIN = 2222
+VM_SSH_PORT_MAX = 2999
 
 FORBIDDEN_HOST_MOUNT_ROOTS = (
     "/etc/locachy/peers",
@@ -174,6 +180,14 @@ def validate_name(name: str, kind: str = "name") -> str:
     if not NAME_RE.match(name) or name in (".", ".."):
         raise ComputeError(f"invalid {kind}: {name!r}")
     return name
+
+
+def validate_ssh_user(user: str) -> str:
+    if not user:
+        return ""
+    if not SSH_USER_RE.match(user) or user in (".", "..") or user.startswith("-"):
+        raise ComputeError(f"invalid SSH user: {user!r}")
+    return user
 
 
 def _utc_now() -> str:
@@ -1252,9 +1266,8 @@ def _job_supervisor_main() -> int:
     return 0
 
 
-def run_container(
+def _prepare_container_launch(
     env_name: str,
-    command: list[str],
     *,
     gpu_override: bool | None = None,
     net_override: str | None = None,
@@ -1264,11 +1277,8 @@ def run_container(
     extra_env: list[str] | None = None,
     memory_override: str | None = None,
     cpu_override: str | None = None,
-    job_id: str | None = None,
-    detach: bool = False,
+    preserve_term: bool = False,
 ) -> dict:
-    if not command:
-        raise ComputeError("a command is required to run inside the compute container")
     meta = env_load(env_name)
     edir = _env_dir(env_name)
     lower = compute_base() / "images" / meta["image"] / "rootfs"
@@ -1299,11 +1309,17 @@ def run_container(
 
     memory_max = memory_override if memory_override is not None else meta.get("memory_max", "")
     cpu_max = cpu_override if cpu_override is not None else meta.get("cpu_max", "")
+    if memory_max and not MEM_RE.match(memory_max):
+        raise ComputeError(f"invalid memory limit: {memory_max!r}")
+    if cpu_max and not CPU_RE.match(cpu_max):
+        raise ComputeError(f"invalid cpu limit: {cpu_max!r}")
     workdir = workdir_override if workdir_override is not None else meta.get("workdir", "/")
     if not os.path.isabs(workdir):
         raise ComputeError(f"workdir must be absolute: {workdir!r}")
 
     run_env = {"PATH": os.environ.get("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")}
+    if preserve_term:
+        run_env["TERM"] = os.environ.get("TERM") or "xterm-256color"
     for k, v in meta.get("env", {}).items():
         run_env[k] = v
     for item in extra_env or []:
@@ -1312,7 +1328,6 @@ def run_container(
         k, v = item.split("=", 1)
         run_env[k] = v
 
-    jid = validate_name(job_id, "job id") if job_id else f"j{int(time.time())}-{uuid.uuid4().hex}"
     unshare_cmd = ["unshare", "--mount", "--pid", "--fork", "--kill-child", "--forward-signals", "--propagation", "slave"]
     net_prefix: list[str] = []
     if net_mode == "none":
@@ -1342,6 +1357,49 @@ def run_container(
         init_bin,
         mounts_tsv if mounts_tsv else "[]",
     ]
+    return {
+        "meta": meta,
+        "env_dir": edir,
+        "want_gpu": bool(want_gpu),
+        "net_mode": net_mode,
+        "memory_max": memory_max,
+        "cpu_max": cpu_max,
+        "argv": full_cmd,
+        "env": run_env,
+    }
+
+
+def run_container(
+    env_name: str,
+    command: list[str],
+    *,
+    gpu_override: bool | None = None,
+    net_override: str | None = None,
+    extra_mounts: list[str] | None = None,
+    extra_volumes: list[str] | None = None,
+    workdir_override: str | None = None,
+    extra_env: list[str] | None = None,
+    memory_override: str | None = None,
+    cpu_override: str | None = None,
+    job_id: str | None = None,
+    detach: bool = False,
+) -> dict:
+    if not command:
+        raise ComputeError("a command is required to run inside the compute container")
+    launch = _prepare_container_launch(
+        env_name,
+        gpu_override=gpu_override,
+        net_override=net_override,
+        extra_mounts=extra_mounts,
+        extra_volumes=extra_volumes,
+        workdir_override=workdir_override,
+        extra_env=extra_env,
+        memory_override=memory_override,
+        cpu_override=cpu_override,
+        preserve_term=False,
+    )
+    meta = launch["meta"]
+    jid = validate_name(job_id, "job id") if job_id else f"j{int(time.time())}-{uuid.uuid4().hex}"
     spec = {
         "record": {
             "version": 1,
@@ -1349,8 +1407,8 @@ def run_container(
             "env": env_name,
             "image": meta["image"],
             "command": command,
-            "gpu": bool(want_gpu),
-            "net": net_mode,
+            "gpu": launch["want_gpu"],
+            "net": launch["net_mode"],
             "cgroup": "",
             "log": str(_job_log_file(jid)),
             "state": "starting",
@@ -1361,11 +1419,11 @@ def run_container(
         },
         "path": str(_job_file(jid)),
         "cgroup": str(cgroup_root() / f"job-{jid}"),
-        "memory": memory_max,
-        "cpu": cpu_max,
-        "env_dir": str(edir),
-        "argv": full_cmd,
-        "env": run_env,
+        "memory": launch["memory_max"],
+        "cpu": launch["cpu_max"],
+        "env_dir": str(launch["env_dir"]),
+        "argv": launch["argv"],
+        "env": launch["env"],
     }
 
     if detach:
@@ -1397,6 +1455,137 @@ def run_container(
         return result
 
     return _supervise_job(spec)
+
+
+def shell_container(
+    env_name: str,
+    command: list[str] | None = None,
+    *,
+    gpu_override: bool | None = None,
+    net_override: str | None = None,
+    extra_mounts: list[str] | None = None,
+    extra_volumes: list[str] | None = None,
+    workdir_override: str | None = None,
+    extra_env: list[str] | None = None,
+    memory_override: str | None = None,
+    cpu_override: str | None = None,
+) -> int:
+    """Attach an interactive shell (or command) directly to the caller's TTY inside a compute container."""
+    launch = _prepare_container_launch(
+        env_name,
+        gpu_override=gpu_override,
+        net_override=net_override,
+        extra_mounts=extra_mounts,
+        extra_volumes=extra_volumes,
+        workdir_override=workdir_override,
+        extra_env=extra_env,
+        memory_override=memory_override,
+        cpu_override=cpu_override,
+        preserve_term=True,
+    )
+    shell_cmd = (
+        list(command)
+        if command
+        else ["/bin/sh", "-c", "if [ -x /bin/bash ]; then exec /bin/bash; else exec /bin/sh; fi"]
+    )
+    edir: Path = launch["env_dir"]
+    for sub in ("upper", "work", "merged"):
+        (edir / sub).mkdir(exist_ok=True)
+
+    sid = f"s{int(time.time())}-{uuid.uuid4().hex[:12]}"
+    cg_spec = {"memory": launch["memory_max"], "cpu": launch["cpu_max"]}
+    cg: Path | None = None
+    proc: subprocess.Popen | None = None
+    previous: dict[int, object] = {}
+    ready_r = -1
+    ready_w = -1
+
+    def enter_cgroup() -> None:
+        if cg is None:
+            return
+        try:
+            (cg / "cgroup.procs").write_text(f"{os.getpid()}\n", encoding="utf-8")
+        except OSError as exc:
+            os.write(2, f"locachy-compute: cannot enter shell cgroup {cg}: {exc}\n".encode())
+            raise
+
+    def _forward(signum, _frame) -> None:
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.send_signal(signum)
+            except OSError:
+                pass
+
+    def _ignore_sig(_signum, _frame) -> None:
+        return
+
+    try:
+        cg = _job_cgroup_create(cgroup_root() / f"shell-{sid}", cg_spec)
+        ready_r, ready_w = os.pipe()
+        is_tty = sys.stdin.isatty()
+        forwarded_sigs = [signal.SIGTERM, signal.SIGHUP, signal.SIGWINCH]
+        if not is_tty:
+            forwarded_sigs.append(signal.SIGINT)
+        previous = {sig: signal.signal(sig, _forward) for sig in forwarded_sigs}
+        if is_tty:
+            # Use a Python no-op handler instead of SIG_IGN so children always
+            # reset SIGINT to SIG_DFL across execve.
+            previous[signal.SIGINT] = signal.signal(signal.SIGINT, _ignore_sig)
+        try:
+            proc = subprocess.Popen(
+                [*launch["argv"], str(ready_w), *shell_cmd],
+                stdin=None,
+                stdout=None,
+                stderr=None,
+                env=launch["env"],
+                pass_fds=(ready_w,),
+                preexec_fn=enter_cgroup if cg is not None else None,
+            )
+        finally:
+            os.close(ready_w)
+            ready_w = -1
+
+        # Wait for the container readiness handshake without disturbing TTY fds.
+        with selectors.DefaultSelector() as sel:
+            sel.register(ready_r, selectors.EVENT_READ)
+            deadline = time.monotonic() + _JOB_START_TIMEOUT
+            chunk = b""
+            while True:
+                remaining = max(0.0, deadline - time.monotonic())
+                events = sel.select(remaining)
+                if not events:
+                    raise ComputeError("timed out before the container shell started")
+                data = os.read(ready_r, 64)
+                if not data:
+                    break
+                chunk += data
+                if chunk == b"ready\n" or not b"ready\n".startswith(chunk):
+                    break
+        os.close(ready_r)
+        ready_r = -1
+
+        rc = proc.wait()
+        if chunk != b"ready\n" and rc == 0:
+            raise ComputeError("container shell did not report startup")
+        return rc if rc >= 0 else 128 - rc
+    finally:
+        if ready_w >= 0:
+            os.close(ready_w)
+        if ready_r >= 0:
+            os.close(ready_r)
+        for sig, old in previous.items():
+            signal.signal(sig, old)
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+                proc.wait(timeout=5)
+            except (OSError, subprocess.SubprocessError):
+                pass
+        if cg is not None:
+            try:
+                _job_cgroup_cleanup(cg)
+            except OSError:
+                pass
 
 
 # ---- KVM micro-VM backend ----
@@ -1560,6 +1749,44 @@ def _vm_qmp_path(path: str) -> str:
     return _vm_sock_path(path, "QMP socket")
 
 
+def _vm_used_ssh_ports() -> dict[int, str]:
+    used: dict[int, str] = {}
+    for vm in vm_list():
+        try:
+            port = int(vm.get("ssh_port") or 0)
+        except (TypeError, ValueError):
+            port = 0
+        if port > 0:
+            used[port] = vm["name"]
+    return used
+
+
+def _vm_resolve_ssh_port(net: str, ssh_port: int | None) -> int:
+    if ssh_port is None:
+        if net != "user":
+            return 0
+        used = _vm_used_ssh_ports()
+        for candidate in range(VM_SSH_PORT_MIN, VM_SSH_PORT_MAX + 1):
+            if candidate not in used:
+                return candidate
+        raise ComputeError(
+            f"no free VM SSH port left in {VM_SSH_PORT_MIN}..{VM_SSH_PORT_MAX}; pass --ssh-port explicitly"
+        )
+    port = int(ssh_port)
+    if port == 0:
+        return 0
+    if port < 0:
+        raise ComputeError("--ssh-port must be 0 or between 1024 and 65535")
+    if net != "user":
+        raise ComputeError("--ssh-port requires --net user")
+    if port < 1024 or port > 65535:
+        raise ComputeError("--ssh-port must be 0 or between 1024 and 65535")
+    used = _vm_used_ssh_ports()
+    if port in used:
+        raise ComputeError(f"SSH port {port} is already assigned to VM {used[port]!r}")
+    return port
+
+
 def vm_create(
     name: str,
     base_disk: str,
@@ -1570,6 +1797,8 @@ def vm_create(
     volumes: list[str] | None = None,
     cloud_init: str = "",
     net: str = "user",
+    ssh_port: int | None = None,
+    ssh_user: str = "",
 ) -> dict:
     validate_name(name, "vm name")
     if memory_mb < 256 or memory_mb > 1048576:
@@ -1578,6 +1807,8 @@ def vm_create(
         raise ComputeError("cpus must be between 1 and 256")
     if net not in ("user", "none"):
         raise ComputeError("vm network must be 'user' or 'none'")
+    ssh_user_clean = validate_ssh_user(ssh_user)
+    resolved_ssh_port = _vm_resolve_ssh_port(net, ssh_port)
     base_path = Path(base_disk)
     if not base_path.is_file():
         raise ComputeError(f"base qcow2 disk does not exist: {base_disk}")
@@ -1624,6 +1855,8 @@ def vm_create(
         "volumes": parsed_volumes,
         "cloud_init": ci_real,
         "net": net,
+        "ssh_port": resolved_ssh_port,
+        "ssh_user": ssh_user_clean,
         "created_at": _utc_now(),
         "reset_at": _utc_now(),
     }
@@ -1727,7 +1960,13 @@ def vm_build_argv(
     if meta.get("cloud_init"):
         argv.extend(["-drive", f"file={meta['cloud_init']},format=raw,media=cdrom,readonly=on"])
     if meta.get("net") == "user":
-        argv.extend(["-nic", "user,model=virtio-net-pci"])
+        ssh_port = int(meta.get("ssh_port") or 0)
+        if ssh_port > 0:
+            if ssh_port < 1024 or ssh_port > 65535:
+                raise ComputeError(f"invalid VM ssh_port: {ssh_port}")
+            argv.extend(["-nic", f"user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:{ssh_port}-:22"])
+        else:
+            argv.extend(["-nic", "user,model=virtio-net-pci"])
     else:
         argv.extend(["-nic", "none"])
     for idx, share in enumerate(all_shares):
@@ -2091,6 +2330,327 @@ def vm_remove(name: str) -> None:
     rdir = _vm_run_dir(name)
     if rdir.exists():
         shutil.rmtree(rdir, ignore_errors=True)
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        view = view[written:]
+
+
+def _vm_console_attach(name: str) -> int:
+    sock_path = _vm_run_dir(name) / "serial.sock"
+    if not sock_path.exists():
+        raise ComputeError(f"VM {name!r} serial console socket not found: {sock_path}")
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.connect(str(sock_path))
+    except OSError as exc:
+        sock.close()
+        raise ComputeError(f"cannot connect to VM {name!r} serial console ({sock_path}): {exc}") from exc
+
+    stdin_fd = sys.stdin.fileno()
+    stdout_fd = sys.stdout.fileno()
+    is_tty = sys.stdin.isatty()
+    old_tty = None
+    print(f"Connected to VM '{name}' serial console (press Ctrl+] to detach).", file=sys.stderr, flush=True)
+    try:
+        if is_tty:
+            old_tty = termios.tcgetattr(stdin_fd)
+            tty.setraw(stdin_fd)
+        sock_fd = sock.fileno()
+        while True:
+            readable, _, _ = select.select([stdin_fd, sock_fd], [], [])
+            if stdin_fd in readable:
+                data = os.read(stdin_fd, 4096)
+                if not data:
+                    break
+                detach_idx = data.find(b"\x1d")
+                payload = data[:detach_idx] if detach_idx >= 0 else data
+                if payload:
+                    try:
+                        sock.sendall(payload)
+                    except (BrokenPipeError, ConnectionResetError):
+                        break
+                if detach_idx >= 0:
+                    break
+            if sock_fd in readable:
+                try:
+                    data = sock.recv(4096)
+                except ConnectionResetError:
+                    break
+                if not data:
+                    break
+                _write_all(stdout_fd, data)
+    finally:
+        if old_tty is not None:
+            termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_tty)
+            print("", file=sys.stderr, flush=True)
+        sock.close()
+    return 0
+
+
+def shell_vm(
+    name: str,
+    command: list[str] | None = None,
+    *,
+    console: bool = False,
+    user: str = "",
+    identity: str = "",
+) -> int:
+    """Connect interactively to a running micro-VM via SSH over loopback or serial console."""
+    meta = vm_load(name)
+    if not _vm_is_running(name):
+        raise ComputeError(f"VM {name!r} is not running; start it with 'locachy-compute vm start {name}'")
+    if console:
+        if command:
+            raise ComputeError("cannot pass a command with --console; serial console is interactive")
+        return _vm_console_attach(name)
+    ssh_port = int(meta.get("ssh_port") or 0)
+    if meta.get("net") != "user" or ssh_port <= 0:
+        raise ComputeError(
+            f"VM {name!r} has no SSH port forwarding (net={meta.get('net')!r}, ssh_port={ssh_port}); "
+            "use --console or recreate the VM with --net user --ssh-port <port>"
+        )
+    ssh_bin = shutil.which("ssh")
+    if not ssh_bin:
+        raise ComputeError("ssh client is not installed")
+    ssh_user = validate_ssh_user(user) if user else validate_ssh_user(str(meta.get("ssh_user") or ""))
+    argv = [ssh_bin, "-p", str(ssh_port)]
+    if ssh_user:
+        argv.extend(["-l", ssh_user])
+    if identity:
+        argv.extend(["-i", identity])
+    argv.append("127.0.0.1")
+    if command:
+        argv.extend(command)
+    proc = subprocess.run(argv, check=False)
+    return proc.returncode
+
+
+def resolve_shell_kind(name: str, kind: str = "auto") -> str:
+    validate_name(name, "target name")
+    if kind not in ("auto", "env", "vm"):
+        raise ComputeError(f"invalid shell target kind: {kind!r}")
+    has_env = (_env_dir(name) / "env.json").is_file()
+    has_vm = (_vm_dir(name) / "vm.json").is_file()
+    if kind == "env":
+        if not has_env:
+            raise ComputeError(f"compute env not found: {name}")
+        return "env"
+    if kind == "vm":
+        if not has_vm:
+            raise ComputeError(f"compute VM not found: {name}")
+        return "vm"
+    if has_env and has_vm:
+        raise ComputeError(f"{name!r} matches both a compute env and a VM; specify --kind env or --kind vm")
+    if has_env:
+        return "env"
+    if has_vm:
+        return "vm"
+    raise ComputeError(f"no compute env or VM found named {name!r}")
+
+
+# ---- OpenSSH ProxyJump Config Generator ----
+
+def _ip4_addrs_from_cmd(argv: list[str]) -> tuple[str, str]:
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=10, check=False)
+    except OSError:
+        return "", ""
+    if proc.returncode != 0:
+        return "", ""
+    try:
+        links = json.loads(proc.stdout)
+    except ValueError:
+        return "", ""
+    ts_ip = ""
+    lan_ip = ""
+    for link in links:
+        ifname = link.get("ifname", "")
+        if ifname == "lo":
+            continue
+        for addr in link.get("addr_info", []):
+            if addr.get("family") != "inet" or addr.get("tentative"):
+                continue
+            local = addr.get("local", "")
+            if not local:
+                continue
+            try:
+                ip_obj = ipaddress.IPv4Address(local)
+            except ValueError:
+                continue
+            if ip_obj.is_loopback or ip_obj.is_link_local or ip_obj.is_unspecified:
+                continue
+            if addr.get("scope") not in (None, "", "global"):
+                continue
+            if ifname == "tailscale0":
+                if not ts_ip:
+                    ts_ip = local
+            elif not lan_ip:
+                lan_ip = local
+    return ts_ip, lan_ip
+
+
+def _detect_ssh_host() -> str:
+    ts_ip, lan_ip = _ip4_addrs_from_cmd(["ip", "-j", "-4", "addr", "show"])
+    if ts_ip:
+        return ts_ip
+    ns_path = Path("/run/netns/locachy-net")
+    try:
+        if ns_path.exists() and os.stat(ns_path).st_ino != os.stat("/proc/self/ns/net").st_ino:
+            ns_ts, ns_lan = _ip4_addrs_from_cmd(["nsenter", f"--net={ns_path}", "--", "ip", "-j", "-4", "addr", "show"])
+            if ns_ts:
+                return ns_ts
+            if not lan_ip and ns_lan:
+                lan_ip = ns_lan
+    except OSError:
+        pass
+    return lan_ip or "<node-ip>"
+
+
+def _detect_ssh_user() -> str:
+    sudo_user = os.environ.get("SUDO_USER", "").strip()
+    if sudo_user:
+        try:
+            return validate_ssh_user(sudo_user)
+        except ComputeError:
+            pass
+    try:
+        pw = pwd.getpwuid(_app_uid())
+        if pw.pw_name:
+            return validate_ssh_user(pw.pw_name)
+    except (KeyError, ComputeError):
+        pass
+    env_user = os.environ.get("USER", "").strip()
+    if env_user:
+        try:
+            return validate_ssh_user(env_user)
+        except ComputeError:
+            pass
+    return "user"
+
+
+def _detect_ssh_port() -> int:
+    raw = read_rc_conf().get("ssh_port", "").strip()
+    if raw.isdigit():
+        port = int(raw)
+        if 1 <= port <= 65535:
+            return port
+    return 22
+
+
+def _detect_ssh_prefix() -> str:
+    raw = socket.gethostname().split(".", 1)[0]
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", raw).strip(".-")[:64]
+    if cleaned and NAME_RE.match(cleaned) and cleaned not in (".", ".."):
+        return cleaned
+    return "locachy"
+
+
+def ssh_config_generate(
+    *,
+    host: str = "",
+    user: str = "",
+    port: int | None = None,
+    prefix: str = "",
+    no_sudo: bool = False,
+) -> dict:
+    resolved_host = host.strip() if host else _detect_ssh_host()
+    if resolved_host != "<node-ip>" and not re.fullmatch(r"[A-Za-z0-9._:\[\]%-]+", resolved_host):
+        raise ComputeError(f"invalid --host value: {resolved_host!r}")
+    resolved_user = validate_ssh_user(user.strip()) if user else _detect_ssh_user()
+    if not resolved_user:
+        resolved_user = "user"
+    resolved_port = _detect_ssh_port() if port is None else int(port)
+    if resolved_port < 1 or resolved_port > 65535:
+        raise ComputeError(f"invalid SSH port: {resolved_port}")
+    resolved_prefix = validate_name(prefix.strip(), "ssh-config prefix") if prefix else _detect_ssh_prefix()
+
+    blocks: list[str] = [
+        "# Generated by locachy-compute ssh-config",
+        f"# Append to ~/.ssh/config or save under ~/.ssh/config.d/locachy-{resolved_prefix}.conf",
+        "",
+        "\n".join([
+            f"Host {resolved_prefix}",
+            f"    HostName {resolved_host}",
+            f"    User {resolved_user}",
+            f"    Port {resolved_port}",
+        ]),
+    ]
+
+    envs_out: list[dict] = []
+    for env_rec in env_list():
+        ename = env_rec["name"]
+        alias = f"{resolved_prefix}-{ename}"
+        shell_part = f"locachy-compute shell {shlex.quote(ename)}"
+        remote_cmd = shell_part if no_sudo else f"sudo {shell_part}"
+        blocks.append(
+            "\n".join([
+                f"Host {alias}",
+                f"    HostName {resolved_host}",
+                f"    User {resolved_user}",
+                f"    Port {resolved_port}",
+                "    RequestTTY yes",
+                f"    RemoteCommand {remote_cmd}",
+            ])
+        )
+        envs_out.append({
+            "name": ename,
+            "host_alias": alias,
+            "hostname": resolved_host,
+            "user": resolved_user,
+            "port": resolved_port,
+            "remote_command": remote_cmd,
+        })
+
+    vms_out: list[dict] = []
+    for vm_rec in vm_list():
+        try:
+            vm_port = int(vm_rec.get("ssh_port") or 0)
+        except (TypeError, ValueError):
+            vm_port = 0
+        if vm_port <= 0:
+            continue
+        vname = vm_rec["name"]
+        alias = f"{resolved_prefix}-{vname}"
+        vm_user = validate_ssh_user(str(vm_rec.get("ssh_user") or ""))
+        lines = [
+            f"Host {alias}",
+            "    HostName 127.0.0.1",
+            f"    Port {vm_port}",
+        ]
+        if vm_user:
+            lines.append(f"    User {vm_user}")
+        lines.append(f"    ProxyJump {resolved_prefix}")
+        blocks.append("\n".join(lines))
+        entry = {
+            "name": vname,
+            "host_alias": alias,
+            "hostname": "127.0.0.1",
+            "port": vm_port,
+            "proxy_jump": resolved_prefix,
+        }
+        if vm_user:
+            entry["user"] = vm_user
+        vms_out.append(entry)
+
+    header = "\n".join(blocks[:3])
+    body = "\n\n".join(blocks[3:])
+    config_text = f"{header}\n{body}\n"
+    return {
+        "prefix": resolved_prefix,
+        "jump": {
+            "host_alias": resolved_prefix,
+            "hostname": resolved_host,
+            "user": resolved_user,
+            "port": resolved_port,
+        },
+        "envs": envs_out,
+        "vms": vms_out,
+        "config": config_text,
+    }
 
 
 # ---- mTLS HTTPS Control Plane ----
@@ -2589,6 +3149,33 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--detach", action="store_true")
     sp.add_argument("command", nargs="*")
 
+    # shell
+    sp = sub.add_parser("shell", help="Open an interactive shell in a compute container or micro-VM")
+    sp.add_argument("name")
+    sp.add_argument("--kind", choices=("auto", "env", "vm"), default="auto")
+    sp.add_argument("--gpu", dest="gpu", action="store_true", default=None)
+    sp.add_argument("--no-gpu", dest="gpu", action="store_false")
+    sp.add_argument("--net", choices=("locachy-net", "none"), default=None)
+    sp.add_argument("--mount", action="append", default=[])
+    sp.add_argument("--volume", action="append", default=[], help="Storage volume NAME[:CONTAINER_PATH[:ro|rw]]")
+    sp.add_argument("--workdir", default=None)
+    sp.add_argument("--env", action="append", default=[])
+    sp.add_argument("--memory", default=None)
+    sp.add_argument("--cpu", default=None)
+    sp.add_argument("--console", action="store_true", help="Attach to VM serial Unix socket instead of SSH")
+    sp.add_argument("-u", "--user", default="", help="SSH user override for VM shell")
+    sp.add_argument("-i", "--identity", default="", help="SSH identity key path override for VM shell")
+    sp.add_argument("command", nargs="*")
+
+    # ssh-config
+    sp = sub.add_parser("ssh-config", help="Generate OpenSSH ProxyJump config for this node, containers, and VMs")
+    sp.add_argument("--host", default="", help="Host address or DNS name (default: tailscale0 or LAN IPv4)")
+    sp.add_argument("--user", default="", help="SSH login user on the compute host")
+    sp.add_argument("--port", type=int, default=None, help="SSH port on the compute host (default: rc.conf ssh_port or 22)")
+    sp.add_argument("--prefix", default="", help="Host alias prefix (default: local hostname)")
+    sp.add_argument("--no-sudo", action="store_true", help="Omit sudo from container RemoteCommand")
+    sp.add_argument("--json", action="store_true")
+
     # job
     p_job = sub.add_parser("job", help="Inspect or stop compute jobs")
     sub_job = p_job.add_subparsers(dest="job_cmd", required=True)
@@ -2614,6 +3201,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--volume", action="append", default=[], help="Storage volume NAME[:TAG[:ro|rw]] (role shared or compute)")
     sp.add_argument("--cloud-init", default="")
     sp.add_argument("--net", choices=("user", "none"), default="user")
+    sp.add_argument(
+        "--ssh-port",
+        type=int,
+        default=None,
+        help="Loopback TCP port forwarded to guest :22 (0 disables; default auto-allocates 2222..2999 for --net user)",
+    )
+    sp.add_argument("--ssh-user", default="", help="Default SSH login username for this VM")
     sp = sub_vm.add_parser("cmd", help="Print the QEMU argv for a VM")
     sp.add_argument("name")
     sp.add_argument("--display", default="none", choices=VM_DISPLAYS)
@@ -2688,13 +3282,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _parse_cli(parser: argparse.ArgumentParser, argv: list[str] | None) -> argparse.Namespace:
-    """`run ENV [options] -- COMMAND`: the command is everything after the first '--'.
+    """`run ENV [options] -- COMMAND` and `shell TARGET [options] -- COMMAND`:
+    everything after the first '--' is the command to execute.
 
-    argparse's REMAINDER positional would take the options that follow ENV, so
-    the split happens before parsing.
+    argparse's REMAINDER positional would take the options that follow the
+    target name, so the split happens before parsing.
     """
     tokens = list(sys.argv[1:] if argv is None else argv)
-    if tokens[:1] == ["run"] and "--" in tokens[1:]:
+    if tokens[:1] in (["run"], ["shell"]) and "--" in tokens[1:]:
         cut = tokens.index("--", 1)
         args = parser.parse_args(tokens[:cut])
         args.command = tokens[cut + 1 :]
@@ -2784,6 +3379,51 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             return rc if rc >= 0 else 128 - rc
 
+        if args.cmd == "shell":
+            cmd = list(args.command)
+            if cmd and cmd[0] == "--":
+                cmd = cmd[1:]
+            kind = resolve_shell_kind(args.name, args.kind)
+            if kind == "env":
+                if args.console or args.user or args.identity:
+                    raise ComputeError("--console, --user and --identity apply to VM shells only")
+                return shell_container(
+                    args.name,
+                    cmd or None,
+                    gpu_override=args.gpu,
+                    net_override=args.net,
+                    extra_mounts=args.mount,
+                    extra_volumes=args.volume,
+                    workdir_override=args.workdir,
+                    extra_env=args.env,
+                    memory_override=args.memory,
+                    cpu_override=args.cpu,
+                )
+            if args.gpu is not None or args.net is not None or args.mount or args.volume or args.workdir is not None \
+                    or args.env or args.memory is not None or args.cpu is not None:
+                raise ComputeError("container options (--gpu, --net, --mount, --volume, --workdir, --env, --memory, --cpu) apply to env shells only")
+            return shell_vm(
+                args.name,
+                cmd or None,
+                console=args.console,
+                user=args.user,
+                identity=args.identity,
+            )
+
+        if args.cmd == "ssh-config":
+            cfg = ssh_config_generate(
+                host=args.host,
+                user=args.user,
+                port=args.port,
+                prefix=args.prefix,
+                no_sudo=args.no_sudo,
+            )
+            if args.json:
+                print(json.dumps(cfg, indent=2, sort_keys=True))
+            else:
+                sys.stdout.write(cfg["config"])
+            return 0
+
         if args.cmd == "job":
             if args.job_cmd == "list":
                 items = job_list()
@@ -2815,6 +3455,8 @@ def main(argv: list[str] | None = None) -> int:
                     volumes=args.volume,
                     cloud_init=args.cloud_init,
                     net=args.net,
+                    ssh_port=args.ssh_port,
+                    ssh_user=args.ssh_user,
                 )
                 print(json.dumps(meta, sort_keys=True))
             elif args.vm_cmd == "cmd":
@@ -2842,7 +3484,9 @@ def main(argv: list[str] | None = None) -> int:
                     print(json.dumps(items, indent=2, sort_keys=True))
                 else:
                     for it in items:
-                        print(f"{it['name']}\t{'running' if it['running'] else 'stopped'}\t{it['memory_mb']}M\t{it['cpus']}cpu")
+                        ssh_port = int(it.get("ssh_port") or 0)
+                        ssh_suffix = f"\tssh=127.0.0.1:{ssh_port}" if ssh_port > 0 else ""
+                        print(f"{it['name']}\t{'running' if it['running'] else 'stopped'}\t{it['memory_mb']}M\t{it['cpus']}cpu{ssh_suffix}")
             elif args.vm_cmd == "start":
                 print(json.dumps(vm_start(args.name), sort_keys=True))
             elif args.vm_cmd == "stop":

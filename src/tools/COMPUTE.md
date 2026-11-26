@@ -19,33 +19,45 @@ not required for NVIDIA experiments.
    operators/devices `tcp:22` to the node and check that no broader existing rule
    allows it. Keep Tailscale SSH disabled on the node: this is ordinary OpenSSH,
    and a Tailscale `ssh` rule does not enroll an OpenSSH user key.
-2. In Settings, turn on **SSH over Tailscale** after Tailscale is enabled. The
-   opt-in `service_tailnet_ssh` runs OpenSSH inside `locachy-net`, where
-   `tailscale0` lives, and follows its current addresses. It only listens on
-   those addresses, and its nftables guard drops traffic arriving via other
-   interfaces (including LAN, Thunderbolt and loopback). It requires public-key
-   authentication, disallows root login and password/keyboard-interactive
-   login, disables forwarding, tunnels and user environment, and enables
-   internal SFTP (also used by current `scp`).
-3. On the node console, as an administrator, enroll the operator's **public**
-   key for the existing local account (replace `USER` and the source filename):
+2. In Settings (**Network → SSH Server (sshd)**), choose **Tailscale only**
+   (or **LAN & Tailscale** when LAN access is wanted). The opt-in
+   `service_tailnet_ssh` runs OpenSSH inside `locachy-net` in its own cgroup
+   (`locachy-tailnet-ssh`), following the addresses of `tailscale0` (and, in
+   `lan` mode, global addresses of active non-`lo`, non-`mihomo`,
+   non-`thunderbolt-net` interfaces). Per-interface nftables rules drop traffic
+   arriving on any other interface (including loopback), and in `lan` mode only
+   the exact bound `(interface, address, port)` tuples are opened in
+   `locachy-filter`. By default it listens on port 22 (`ssh_port`) and requires
+   public-key authentication; password login is optional (`ssh_password="1"`,
+   off by default), while root login and empty passwords are always forbidden.
+   Local TCP forwarding (`AllowTcpForwarding local`) is enabled for `ProxyJump`
+   and `-L` tunnels; remote forwarding (`-R`), agent forwarding, X11, tunnels,
+   and user environments stay disabled, and internal SFTP (also used by current
+   `scp`) is enabled.
+3. Enroll operator **public** keys for the local account either in Settings
+   (**Network → SSH Server (sshd) → sshd AuthorizedKeys**) or on the node
+   console as an administrator (replace `USER` and the source filename):
 
    ```sh
+   sudo /usr/local/lib/locachy/tailnet-ssh-client --keys-add USER < /path/to/operator.pub
+   # or replace the whole file directly:
    sudo install -o root -g root -m 0644 /path/to/operator.pub \
      /etc/locachy/tailnet-ssh/authorized_keys/USER
    ```
 
-   This replaces the account's enrollment file; to allow several keys, install
-   a file containing all approved public keys, one per line. Only root may
-   write it; the unprivileged key lookup needs to read it. Remove the file or
-   the relevant line to deny future logins. The service never reads the user's
-   `~/.ssh/authorized_keys`. Keep the private key on the client.
+   Only root may write `/etc/locachy/tailnet-ssh/authorized_keys/USER`; the
+   unprivileged key lookup needs to read it. Remove keys via Settings or
+   `--keys-remove USER INDEX` (or delete the file) to deny future logins. The
+   service never reads the user's `~/.ssh/authorized_keys`. Keep the private
+   key on the client.
 4. First start creates the node's persistent Ed25519 host key if absent. It
-   does not replace an existing key. On the node console, print the SHA-256
-   fingerprint and verify it on the client before accepting it in `known_hosts`:
+   does not replace an existing key unless you explicitly regenerate it in
+   Settings (**sshd host key**) or with `--host-key-regen` (in which case
+   clients must remove the old entry from `known_hosts`). Verify the SHA-256
+   fingerprint before accepting it on the client:
 
    ```sh
-   sudo ssh-keygen -y -f /etc/locachy/tailnet-ssh/ssh_host_ed25519_key | ssh-keygen -l -E sha256 -f -
+   sudo /usr/local/lib/locachy/tailnet-ssh-client --host-key-fingerprint
    ```
 
    Tailnet access, an enrolled SSH user key, the node's SSH host key, mTLS
@@ -154,7 +166,7 @@ scp locachy-gpu:/srv/storage/experiments/work/probe-001/out/probe.txt .
 | File | Role |
 |---|---|
 | `link/locachy-compute` | CLI and daemon: images, environments, native containers, jobs, KVM micro-VMs, `serve`, and `remote` (the client). |
-| `link/tailnet-ssh-client` | Opt-in OpenSSH listener on the current Tailscale addresses in `locachy-net`. |
+| `link/tailnet-ssh-client` | Managed OpenSSH server (`sshd`) in `locachy-net`: Tailscale-only or LAN & Tailscale, configurable port, optional password auth, managed `authorized_keys`, and host key lifecycle. |
 | `link/compute-client` | Optional `service_compute` launcher. Runs `locachy-compute serve` with `nsenter --net` into `locachy-net`. |
 | `link/locachy-pair` | Once-forever pairing: add, list, show, revoke, and token export for paired devices. |
 | `link/locachy_peers.py` | The shared peer store (`/etc/locachy/peers`), used by `locachy-pair`, `locachy-compute`, and `extdisplay-broker`. |
@@ -173,6 +185,14 @@ scp locachy-gpu:/srv/storage/experiments/work/probe-001/out/probe.txt .
 6. PID 1 is the static `/usr/local/lib/locachy/app-init` when it exists (it reaps children and forwards signals). Otherwise a built-in reaper does the same job without anything from the guest.
 
 Wayland, X11, DBus, and seat variables are cleared, and the sockets are never mounted.
+
+## Interactive shell and automatic ProxyJump SSH
+
+To work inside a container or micro-VM like an ordinary machine:
+
+- `sudo locachy-compute shell NAME [-- COMMAND...]` attaches an interactive TTY directly to a compute container (`--kind env`) or connects to a running micro-VM (`--kind vm`) over its loopback SSH port (`--console` attaches to the QEMU serial socket with `Ctrl+]` to detach).
+- Under `--net user`, `vm create` automatically assigns a loopback-only SSH forward (`hostfwd=tcp:127.0.0.1:<port>-:22`, auto-allocated in `2222..2999`, or explicit `--ssh-port`, or `--ssh-port 0` to disable; optional `--ssh-user`). It never binds `0.0.0.0`.
+- `locachy-compute ssh-config [--host IP] [--user USER] [--port PORT] [--prefix NAME] [--no-sudo] [--json]` prints a ready-to-paste client `~/.ssh/config` snippet with a jump host entry, `RemoteCommand sudo locachy-compute shell ENV` entries for compute containers, and `ProxyJump` entries for VMs with SSH forwarding.
 
 ## Reset and data
 
@@ -334,7 +354,10 @@ LOCachy workflows over real Tailscale and Thunderbolt remain unverified.
 
 | Key | Meaning |
 |---|---|
-| `service_tailnet_ssh="/usr/local/lib/locachy/tailnet-ssh-client"` | Enables ordinary OpenSSH over Tailscale; disabled by default. |
+| `service_tailnet_ssh="/usr/local/lib/locachy/tailnet-ssh-client"` | Enables managed OpenSSH (`sshd`); disabled by default. |
+| `ssh_listen="tailscale"` or `"lan"` | Bind `sshd` to `tailscale0` only (default) or to active LAN interfaces plus `tailscale0`. |
+| `ssh_port="22"` | `sshd` listening port (`1..65535`, default `22`). |
+| `ssh_password="0"` or `"1"` | Allow PAM password login for regular accounts (`0` default: public key only; root and empty passwords remain disabled). |
 | `service_compute="/usr/local/lib/locachy/compute-client"` | Enables the optional HTTPS API. |
 | `compute_port="27184"` | Control-plane port (default 27184). |
 | `compute_bind_tb="1"` | Also listen on Thunderbolt link-local addresses. |

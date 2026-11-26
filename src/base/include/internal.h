@@ -124,6 +124,10 @@ void keys_update(const int *fds, int n);
 #define KEYS_LOCK_NUM  2
 int keys_locks(void);
 void keys_set_locks(int locks);
+/* Caps Lock owned by a negotiated link: while owned, a Caps key changes
+ * nothing here and keys_set_caps (Caps only, never Num Lock) sets it. */
+void keys_caps_owner(int on);
+void keys_set_caps(int on);
 void keys_release(void);
 void keys_refresh(void); /* process 1: rescan, preserving live queues */
 int keys_sync(int *fds, int *n, int max); /* reconcile leases; nonzero if changed */

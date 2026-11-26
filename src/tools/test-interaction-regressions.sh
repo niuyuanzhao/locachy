@@ -67,6 +67,8 @@ done
 # DRM card selection and pure-sysfs enumeration (never wakes discrete GPUs).
 "${cc[@]}" "$src/tools/test-drm-card.c" "${link[@]}" -o "$out/drm-card"
 "$out/drm-card"
+"${cc[@]}" "$src/tools/test-gpu-routing.c" -Wl,--gc-sections -o "$out/gpu-routing"
+"$out/gpu-routing"
 # Quit and the clipboard come from key_action in every program, never from raw key values.
 # seat's fallback labwc configuration: Super+Esc stays a home key without the generated one.
 "${cc[@]}" "$src/tools/test-labwc-fallback.c" "${link[@]}" -o "$out/labwc-fallback"
@@ -82,14 +84,45 @@ for test in pointer input-hotplug keyboard-locks; do
 done
 # init-shutdown: a power off waiting for a system job; link/poweroff and reboot in user and PID namespaces.
 # init-services: process 1's rc.conf reload (SIGHUP), its growth, restarts and a failed reload.
-for test in rtc-alarm suspend-hibernate init-lid init-shutdown init-services status-battery battery-handoff; do
+for test in rtc-alarm suspend-hibernate init-lid init-shutdown init-services status-battery; do
     "${cc[@]}" "$src/tools/test-$test.c" "${link[@]}" -o "$out/$test"
     "$out/$test" "$out/$test-fixtures"
 done
-"${cc[@]}" "$src/tools/test-battery-adaptive.c" -o "$out/battery-adaptive"
-"$out/battery-adaptive"
-"${cc[@]}" -fsanitize=address,undefined "$src/tools/test-battery-handoff.c" -o "$out/battery-handoff-san"
+# Adaptive charging and battery handoff: the controller, the TFLite engine, and the handoff and adaptive suites
+# (normal + ASan/UBSan); the TFLite run needs LOCACHY_BATTERY_ARTIFACTS (the ChromiumOS model and preprocessor).
+"${cc[@]}" -I"$src/progs" "$src/tools/test-battery-controller.c" "$src/progs/battery-controller.c" -lm \
+    -o "$out/battery-controller"
+"$out/battery-controller"
+"${cc[@]}" -fsanitize=address,undefined -I"$src/progs" "$src/tools/test-battery-controller.c" \
+    "$src/progs/battery-controller.c" -lm -o "$out/battery-controller-san"
+"$out/battery-controller-san"
+"${cc[@]}" -I"$src/progs" "$src/tools/test-battery-tflite.c" "$src/progs/battery-tflite.c" -lm \
+    -o "$out/battery-tflite"
+"${cc[@]}" -fsanitize=address,undefined -I"$src/progs" "$src/tools/test-battery-tflite.c" \
+    "$src/progs/battery-tflite.c" -lm -o "$out/battery-tflite-san"
+if [[ -n "${LOCACHY_BATTERY_ARTIFACTS:-}" ]]; then
+    "$out/battery-tflite" "$LOCACHY_BATTERY_ARTIFACTS"
+    "$out/battery-tflite-san" "$LOCACHY_BATTERY_ARTIFACTS"
+else
+    printf '%s\n' 'SKIP battery-tflite: LOCACHY_BATTERY_ARTIFACTS unset (compiled normal + ASan/UBSan)'
+fi
+"${cc[@]}" $(pkg-config --cflags libcrypto) -I"$src/progs" "$src/tools/test-battery-handoff.c" \
+    "$src/progs/battery-controller.c" "$src/progs/battery-tflite.c" $(pkg-config --libs libcrypto) -lm \
+    -o "$out/battery-handoff"
+"$out/battery-handoff" "$out/battery-handoff-fixtures"
+"${cc[@]}" -fsanitize=address,undefined $(pkg-config --cflags libcrypto) -I"$src/progs" \
+    "$src/tools/test-battery-handoff.c" "$src/progs/battery-controller.c" "$src/progs/battery-tflite.c" \
+    $(pkg-config --libs libcrypto) -lm -o "$out/battery-handoff-san"
 "$out/battery-handoff-san" "$out/battery-handoff-san-fixtures"
+"${cc[@]}" $(pkg-config --cflags libcrypto) -I"$src/progs" "$src/tools/test-battery-adaptive.c" \
+    "$src/progs/battery-controller.c" "$src/progs/battery-tflite.c" $(pkg-config --libs libcrypto) -lm \
+    -o "$out/battery-adaptive"
+"$out/battery-adaptive"
+"${cc[@]}" -fsanitize=address,undefined $(pkg-config --cflags libcrypto) -I"$src/progs" \
+    "$src/tools/test-battery-adaptive.c" "$src/progs/battery-controller.c" "$src/progs/battery-tflite.c" \
+    $(pkg-config --libs libcrypto) -lm -o "$out/battery-adaptive-san"
+"$out/battery-adaptive-san"
+python3 -I "$src/tools/test-battery-model.py" "$out/battery-model"
 "${cc[@]}" "$src/tools/test-init-screen.c" "${link[@]}" -o "$out/init-screen"
 # frame.cgroup models the short production cgroup path, not a long result path.
 (cd "$out" && ./init-screen init-fixtures)
@@ -169,7 +202,9 @@ sh "$src/tools/test-extdisplay-broker.sh" "$out/extdisplay-broker"
 sh "$src/tools/test-extdisplay-discovery.sh" "$out/extdisplay-discovery"
 bash "$src/tools/test-peers.sh" "$out/peers"
 bash "$src/tools/test-compute.sh" "$out/compute"
+python3 -B "$src/tools/test-sshd-config.py" "$out/sshd-config"
 bash "$src/tools/test-winmaint.sh"
 bash "$src/tools/test-gpu-hardware.sh" "$out/gpu-hardware"
+python3 -B "$src/tools/test-gpu-graphics.py"
 sh "$src/tools/test-screen-power.sh" "$out/screen-power"
 printf '%s\n' 'PASS device-free interaction regressions; real KMS/libinput/IME hardware acceptance remains separate.'

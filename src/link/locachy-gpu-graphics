@@ -1,0 +1,256 @@
+#!/usr/bin/python3 -I
+"""Read and change ASUS Armoury firmware graphics settings, not live routing."""
+import argparse
+import fcntl
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import sys
+
+sys.dont_write_bytecode = True
+
+FIRMWARE_CLASS = Path("/sys/class/firmware-attributes")
+DRM_CLASS = Path("/sys/class/drm")
+JOBS_HELPER = Path("/usr/local/lib/locachy/locachy_jobs.py")
+FIRMWARE_LOCK = Path("/run/locachy/firmware.lock")  # Shared with locachy-firmware.
+
+# Linux drivers/platform/x86/asus-armoury.{c,h}: asus_fw_attr_add() uses
+# DRIVER_NAME verbatim. gpu_mux_mode and dgpu_disable are independent controls.
+CONTROLS = {
+    "mux": ("gpu_mux_mode", {"0": "discrete", "1": "hybrid"}, "gpu-graphics-mux"),
+    "dgpu": ("dgpu_disable", {"0": "on", "1": "off"}, "gpu-graphics-dgpu"),
+}
+ABSENT = object()
+INTERNAL_CONNECTOR = re.compile(r"(card[0-9]+)-(?:eDP|LVDS|DSI)-[0-9]+")
+PCI_DISPLAY_CLASS = re.compile(r"0x03[0-9a-f]{4}")
+PCI_DEVICE_ID = re.compile(r"0x[0-9a-f]{4}")
+# Known APU graphics device IDs (amdgpu's APU families and PCI ID repository).
+# AMD's vendor ID alone would also match Radeon discrete GPUs.
+AMD_APU_IDS = frozenset({
+    "0x15d8", "0x15dd", "0x15e7", "0x1636", "0x1638", "0x164c", "0x164d",
+    "0x1681", "0x1506", "0x150e", "0x15bf", "0x15c8", "0x164e", "0x13c0",
+    "0x1900", "0x1114", "0x1586",
+})
+
+
+def read_value(path):
+    try:
+        with path.open(encoding="ascii") as stream:
+            try:
+                return stream.read().strip()
+            except (OSError, UnicodeError):
+                return None
+    except FileNotFoundError:
+        return ABSENT
+    except OSError:
+        return None
+
+
+def integrated_gpu(device):
+    pci_class = read_value(device / "class")
+    if isinstance(pci_class, str):
+        pci_class = pci_class.lower()
+    if not isinstance(pci_class, str) or not PCI_DISPLAY_CLASS.fullmatch(pci_class):
+        return False
+    vendor = read_value(device / "vendor")
+    device_id = read_value(device / "device")
+    if isinstance(vendor, str):
+        vendor = vendor.lower()
+    if isinstance(device_id, str):
+        device_id = device_id.lower()
+    if vendor == "0x1002":
+        return device_id in AMD_APU_IDS
+    if vendor == "0x8086" and isinstance(device_id, str) and PCI_DEVICE_ID.fullmatch(device_id):
+        # Intel integrated graphics on x86 is on the root bus at 00:02.0;
+        # Intel discrete graphics are downstream of a bridge.
+        try:
+            return device.resolve(strict=True).parts[-2:] == ("pci0000:00", "0000:00:02.0")
+        except (OSError, RuntimeError):
+            return False
+    return False
+
+
+def connected_integrated_panel(drm_class):
+    # PCI IDs/class and DRM connector status are cached in the kernel. Do
+    # not read PCI config space, open DRM nodes, or trigger connector detect.
+    try:
+        connectors = list(drm_class.iterdir())
+    except OSError:
+        return False
+    for connector in connectors:
+        match = INTERNAL_CONNECTOR.fullmatch(connector.name)
+        if not match or read_value(connector / "status") != "connected":
+            continue
+        card = drm_class / match[1]
+        try:
+            # drm_sysfs_connector_add() parents a connector to its card.
+            # Do not associate a stale connector with a reused card number.
+            if connector.resolve(strict=True).parent != card.resolve(strict=True):
+                continue
+        except (OSError, RuntimeError):
+            continue
+        if integrated_gpu(card / "device"):
+            return True
+    return False
+
+
+def write_value(path, value):
+    data = (value + "\n").encode("ascii")
+    fd = os.open(path, os.O_WRONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        if os.write(fd, data) != len(data):
+            raise OSError("incomplete sysfs write")
+    finally:
+        os.close(fd)
+
+
+class Graphics:
+    def __init__(self, firmware_class=None, drm_class=None):
+        if firmware_class is None:
+            firmware_class = FIRMWARE_CLASS
+        if drm_class is None:
+            drm_class = DRM_CLASS
+        self.attrs = Path(firmware_class) / "asus-armoury" / "attributes"
+        self.drm_class = Path(drm_class)
+
+    def current_path(self, attribute):
+        return self.attrs / attribute / "current_value"
+
+    def attribute(self, name):
+        value = read_value(self.current_path(name))
+        if value is ABSENT and (self.attrs / name).is_dir():
+            return None  # Present but without a readable current value.
+        return value
+
+    def control(self, name):
+        attribute, values, _ = CONTROLS[name]
+        value = self.attribute(attribute)
+        return "unsupported" if value is ABSENT else values.get(value, "unknown")
+
+    def reboot(self):
+        value = read_value(self.attrs / "pending_reboot")
+        return value if value in ("0", "1") else "unknown"
+
+    def status(self):
+        return {"mux": self.control("mux"), "dgpu": self.control("dgpu"), "reboot": self.reboot()}
+
+    def check_egpu(self):
+        # The Armoury enum uses 0 for disabled and 1–3 for active requests.
+        # Merely connecting an eGPU is not the same as enabling it.
+        state = self.attribute("egpu_enable")
+        if state in ("1", "2", "3"):
+            raise RuntimeError("the ASUS eGPU is enabled; disable it before changing this setting")
+        if state not in ("0", ABSENT):
+            raise RuntimeError("cannot confirm the ASUS eGPU is disabled")
+
+    def change(self, name, wanted):
+        attribute, values, _ = CONTROLS[name]
+        value = next(raw for raw, meaning in values.items() if meaning == wanted)
+        current = self.control(name)
+        if current == wanted:
+            print(f"{name} is already configured as {wanted}; nothing changed")
+            return 0
+        if current == "unsupported":
+            raise RuntimeError(f"{name} is not supported by the ASUS Armoury firmware interface")
+        if current == "unknown":
+            raise RuntimeError(f"cannot read the configured {name} setting")
+
+        pending = self.reboot()
+        if pending == "1":
+            raise RuntimeError("a firmware change is pending reboot; nothing changed")
+        if pending != "0":
+            raise RuntimeError("cannot confirm there is no firmware change pending reboot")
+
+        if name == "mux" and wanted == "discrete":
+            dgpu = self.control("dgpu")
+            if dgpu == "off":
+                raise RuntimeError("cannot select discrete MUX mode while the dGPU is disabled")
+            if dgpu == "unknown":
+                raise RuntimeError("cannot confirm the dGPU is enabled")
+            # The kernel is authoritative on models without a dGPU control.
+            self.check_egpu()
+        if name == "dgpu":
+            self.check_egpu()
+            if wanted == "off":
+                if self.control("mux") != "hybrid":
+                    raise RuntimeError("cannot disable the dGPU without confirmed hybrid MUX mode")
+                if not connected_integrated_panel(self.drm_class):
+                    raise RuntimeError("cannot confirm a connected internal display on the integrated GPU")
+                power = self.attribute("dgpu_power_state")
+                if power == "1":
+                    raise RuntimeError("the dGPU is active; it cannot be disabled while in use")
+                if power not in ("0", ABSENT):
+                    raise RuntimeError("cannot confirm the dGPU is idle")
+
+        try:
+            write_value(self.current_path(attribute), value)
+        except OSError as e:
+            raise RuntimeError(f"could not set {name} to {wanted}: {e}") from e
+        if self.control(name) != wanted:
+            raise RuntimeError(f"cannot verify {name} readback after the write; check status")
+        if name == "mux":
+            if self.reboot() != "1":
+                raise RuntimeError("MUX readback matched but pending reboot was not confirmed; check status")
+            print(f"mux configured as {wanted}; reboot required to apply")
+        else:
+            print(f"dgpu configured as {wanted}")
+        return 0
+
+
+def jobs_helper():
+    spec = importlib.util.spec_from_file_location("locachy_jobs", JOBS_HELPER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def run_mutation(name, wanted):
+    jobs = jobs_helper()
+    mode = jobs.execution_mode()
+    if mode == "queue":
+        return jobs.submit(CONTROLS[name][2], [wanted], wait=True)
+    if mode not in ("job", "offline"):
+        raise RuntimeError("could not determine system job execution mode")
+
+    FIRMWARE_LOCK.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    fd = os.open(FIRMWARE_LOCK, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return Graphics().change(name, wanted)
+    finally:
+        os.close(fd)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    status = sub.add_parser("status", help="show configured settings and pending reboot")
+    output = status.add_mutually_exclusive_group()
+    output.add_argument("--tsv", action="store_true", help="field and value, one per line (default)")
+    output.add_argument("--json", action="store_true", help="JSON object of the same fields")
+    for name, (_, values, _) in CONTROLS.items():
+        cmd = sub.add_parser("set-" + name)
+        cmd.add_argument("value", choices=tuple(values.values()))
+    args = parser.parse_args(argv)
+    if args.command == "status":
+        data = Graphics().status()
+        if args.json:
+            print(json.dumps(data))
+        else:
+            for key, value in data.items():
+                print(f"{key}\t{value}")
+        return 0
+    if os.geteuid() != 0:
+        print("locachy-gpu-graphics: changing firmware settings requires root", file=sys.stderr)
+        return 1
+    try:
+        return run_mutation(args.command.removeprefix("set-"), args.value)
+    except (OSError, RuntimeError, ValueError, ImportError) as e:
+        print(f"locachy-gpu-graphics: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

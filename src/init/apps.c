@@ -147,6 +147,14 @@ struct session_owner {
     char cgroup[192];
 };
 static struct session_owner owners[MAX_OWNERS];
+/* The owner whose holding session owns authoritative Caps Lock ("caps" in
+ * owner_read): released when it stops holding or closes. -1: nobody. */
+static int caps_owner = -1;
+static void release_caps_owner(void)
+{
+    caps_owner = -1;
+    if (init_session_caps_release) init_session_caps_release();
+}
 static int sessions_locked;
 
 static int owner_frozen(const struct session_owner *o)
@@ -172,6 +180,7 @@ static void owner_policy(struct session_owner *o)
 void apps_session_close(int owner)
 {
     if (owner < 0 || owner >= MAX_OWNERS || !owners[owner].used) return;
+    if (caps_owner == owner) release_caps_owner();
     struct session_owner *o = &owners[owner];
     close(o->fd);
     close(o->directory);
@@ -266,15 +275,27 @@ static void owner_read(int i)
     int held, held_end = 0;
     if (sscanf(text, "hold %d%n", &held, &held_end) == 1 && !text[held_end] && (held == 0 || held == 1)) {
         o->holding = held && owner_may_hold(o); /* a report from the authenticated owner: no answer */
+        if (!o->holding && caps_owner == i) release_caps_owner();
         return;
     }
     unsigned long long id, epoch;
     char verb[24]; int value, end = 0, ok = 0;
-    if (sscanf(text, "%23s %llu %llu %d%n", verb, &id, &epoch, &value, &end) != 4 || text[end] ||
-        (value != 0 && value != 1)) return;
+    if (sscanf(text, "%23s %llu %llu %d%n", verb, &id, &epoch, &value, &end) != 4 || text[end]) return;
     int allowed = !sessions_locked && !owner_frozen(o) && !o->revoking;
     if (allowed != o->allowed) { o->allowed = allowed; o->inhibited = o->cancelled = 0; o->epoch++; owner_policy(o); }
-    if (epoch == o->epoch) {
+    if (!strcmp(verb, "caps")) {
+        if (value < -1 || value > 1) return;
+        if (epoch == o->epoch && owner_may_hold(o) && init_session_caps &&
+            (value < 0 || (o->allowed && o->cancelled))) {
+            int st = init_session_caps(value);
+            if (st == 0 || st == 1) {
+                ok = st + 1;
+                if (value >= 0) caps_owner = i;
+            }
+        }
+    } else if (value != 0 && value != 1) {
+        return;
+    } else if (epoch == o->epoch) {
         if (!strcmp(verb, "cancelled")) { o->cancelled = 1; o->revoking = 0; ok = 1; }
         else if (!strcmp(verb, "inhibit") && (!value || (o->allowed && o->cancelled))) { o->inhibited = value; ok = 1; }
         else if (!strcmp(verb, "display") && (value || (o->allowed && o->cancelled))) ok = 1;
@@ -1697,6 +1718,41 @@ int apps_window_open(const char *program, const char *target, char *why, size_t 
         return -1; /* forgotten at the next look: nothing of it runs */
     }
     snprintf(why, size, "%s window %s accepted", p->program, app->name);
+    return 0;
+}
+
+int apps_stop_program(const char *program)
+{
+    if (!program || !program[0]) return 0;
+    discover();
+    int active = 0;
+    for (int i = 0; i < count; i++) {
+        struct app *app = &apps[i];
+        if (!app->native || strcmp(app->native->program, program) != 0) continue;
+        char why[160];
+        if (native_action(app, "stop", why, sizeof why) < 0) {
+            say("apps: stop %s (%s) deferred: %s", program, app->name, why);
+        } else if (strcmp(why, "already closed") != 0 && strcmp(why, "stop already in progress") != 0) {
+            say("apps: stop %s (%s): %s", program, app->name, why);
+        }
+        if (app->want_start || app->launcher || app->job || app->pending[0] || populated(app)) {
+            active = 1;
+        }
+    }
+    return active;
+}
+
+int apps_program_active(const char *program)
+{
+    if (!program || !program[0]) return 0;
+    discover();
+    for (int i = 0; i < count; i++) {
+        struct app *app = &apps[i];
+        if (!app->native || strcmp(app->native->program, program) != 0) continue;
+        if (app->want_start || app->launcher || app->job || app->pending[0] || populated(app)) {
+            return 1;
+        }
+    }
     return 0;
 }
 

@@ -3034,6 +3034,11 @@ static void keyboards_message(void)
     } else {
         if (n == 0 && strcmp(msg, "desktop-wait") == 0) {
             desktop_wait_message(msg + sizeof "desktop-wait", len - (int)sizeof "desktop-wait");
+        } else if (n == 0 && strcmp(msg, "caps") == 0 && len == (int)sizeof "caps" + 1 &&
+                   (msg[sizeof "caps"] == '0' || msg[sizeof "caps"] == '1')) {
+            int on = msg[sizeof "caps"] == '1';
+            int next = ((bar_locks >= 0 ? bar_locks : 0) & KEYS_LOCK_NUM) | (on ? KEYS_LOCK_CAPS : 0);
+            take_given_locks(next);
         }
         for (int i = 0; i < n; i++) close(fds[i]);
     }

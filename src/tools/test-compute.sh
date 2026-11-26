@@ -996,6 +996,228 @@ if shutil.which("qemu-img"):
 else:
     print("SKIP: qemu-img not installed; skipping vm --volume and export-app tests", flush=True)
 
+# 11. Interactive shell, VM loopback SSH forwarding, and OpenSSH ProxyJump config generator
+shell_env = dict(env, TERM="screen-256color")
+r_sh_cmd = subprocess.run(
+    ["python3", COMPUTE, "shell", "train0", "--", "/bin/sh", "-c",
+     "echo hello-shell; env; exit 7"],
+    env=shell_env, capture_output=True, text=True, timeout=60,
+)
+check("shell: container command passes stdout, preserves TERM, strips desktop vars, and returns exit 7",
+      r_sh_cmd.returncode == 7
+      and "hello-shell" in r_sh_cmd.stdout
+      and "TERM=screen-256color" in r_sh_cmd.stdout
+      and "EXP_NAME=run42" in r_sh_cmd.stdout
+      and "WAYLAND_DISPLAY=" not in r_sh_cmd.stdout
+      and "DISPLAY=" not in r_sh_cmd.stdout
+      and "DBUS_SESSION_BUS_ADDRESS=" not in r_sh_cmd.stdout,
+      f"rc={r_sh_cmd.returncode} out={r_sh_cmd.stdout!r} err={r_sh_cmd.stderr!r}")
+
+r_sh_default = subprocess.run(
+    ["python3", COMPUTE, "shell", "train0"],
+    env=shell_env, input="echo stdin-shell-ok; cat /etc/base-marker\nexit 0\n",
+    capture_output=True, text=True, timeout=60,
+)
+check("shell: container default shell without explicit command reads stdin and exits cleanly",
+      r_sh_default.returncode == 0
+      and "stdin-shell-ok" in r_sh_default.stdout
+      and "immutable-base-v1" in r_sh_default.stdout,
+      f"rc={r_sh_default.returncode} out={r_sh_default.stdout!r} err={r_sh_default.stderr!r}")
+
+r_sh_missing = run_cli(COMPUTE, "shell", "no-such-target")
+check("shell: unknown target fails clearly", r_sh_missing.returncode != 0, r_sh_missing.stdout + r_sh_missing.stderr)
+
+if shutil.which("qemu-img"):
+    # Note: expvm (created earlier with --net user) already took auto port 2222.
+    expvm_meta = json.loads((Path(env["LOCACHY_COMPUTE_BASE"]) / "vms" / "expvm" / "vm.json").read_text(encoding="utf-8"))
+    check("vm-ssh: first --net user VM auto-allocates loopback SSH port 2222",
+          expvm_meta.get("ssh_port") == 2222, repr(expvm_meta))
+
+    r_vm2 = run_cli(COMPUTE, "vm", "create", "sshvm2", "--disk", str(base_qcow), "--memory-mb", "512", "--cpus", "1",
+                    "--net", "user", "--ssh-user", "ubuntu")
+    vm2_meta = json.loads(r_vm2.stdout) if r_vm2.returncode == 0 else {}
+    check("vm-ssh: second --net user VM auto-allocates 2223 and persists --ssh-user",
+          r_vm2.returncode == 0 and vm2_meta.get("ssh_port") == 2223 and vm2_meta.get("ssh_user") == "ubuntu",
+          r_vm2.stdout + r_vm2.stderr)
+
+    r_vm3 = run_cli(COMPUTE, "vm", "create", "sshvm3", "--disk", str(base_qcow), "--memory-mb", "512", "--cpus", "1",
+                    "--net", "user", "--ssh-port", "2350", "--ssh-user", "admin")
+    vm3_meta = json.loads(r_vm3.stdout) if r_vm3.returncode == 0 else {}
+    check("vm-ssh: explicit --ssh-port 2350 succeeds",
+          r_vm3.returncode == 0 and vm3_meta.get("ssh_port") == 2350 and vm3_meta.get("ssh_user") == "admin",
+          r_vm3.stdout + r_vm3.stderr)
+
+    r_vm_dup = run_cli(COMPUTE, "vm", "create", "sshvm-dup", "--disk", str(base_qcow), "--net", "user", "--ssh-port", "2350")
+    check("vm-ssh: duplicate --ssh-port is rejected",
+          r_vm_dup.returncode != 0 and "already assigned" in r_vm_dup.stderr, r_vm_dup.stdout + r_vm_dup.stderr)
+
+    r_vm_none_port = run_cli(COMPUTE, "vm", "create", "sshvm-nonebad", "--disk", str(base_qcow), "--net", "none", "--ssh-port", "2250")
+    check("vm-ssh: --net none with explicit --ssh-port is rejected",
+          r_vm_none_port.returncode != 0 and "--net user" in r_vm_none_port.stderr, r_vm_none_port.stdout + r_vm_none_port.stderr)
+
+    r_vm_zero = run_cli(COMPUTE, "vm", "create", "sshvm-off", "--disk", str(base_qcow), "--net", "user", "--ssh-port", "0")
+    r_vm_zero_cmd = run_cli(COMPUTE, "vm", "cmd", "sshvm-off", "--json")
+    zero_argv = json.loads(r_vm_zero_cmd.stdout) if r_vm_zero_cmd.returncode == 0 else []
+    check("vm-ssh: --ssh-port 0 disables hostfwd while keeping user net",
+          r_vm_zero.returncode == 0 and "user,model=virtio-net-pci" in zero_argv
+          and not any("hostfwd=" in a for a in zero_argv),
+          f"create={r_vm_zero.stderr} argv={zero_argv}")
+
+    r_vm2_cmd = run_cli(COMPUTE, "vm", "cmd", "sshvm2", "--json")
+    vm2_argv = json.loads(r_vm2_cmd.stdout) if r_vm2_cmd.returncode == 0 else []
+    nic_val = after_flag(vm2_argv, "-nic") if "-nic" in vm2_argv else ""
+    check("vm-ssh: vm cmd emits loopback-only hostfwd=tcp:127.0.0.1:2223-:22 (never 0.0.0.0 or bare :port)",
+          nic_val == "user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:2223-:22"
+          and "0.0.0.0" not in " ".join(vm2_argv)
+          and "hostfwd=tcp::" not in " ".join(vm2_argv),
+          f"nic={nic_val!r} argv={vm2_argv}")
+
+    r_vmlist = run_cli(COMPUTE, "vm", "list")
+    check("vm-ssh: vm list prints ssh=127.0.0.1:<port> for VMs with SSH forwarding",
+          r_vmlist.returncode == 0
+          and "sshvm2" in r_vmlist.stdout and "\tssh=127.0.0.1:2223" in r_vmlist.stdout
+          and "\tssh=127.0.0.1:2350" in r_vmlist.stdout,
+          r_vmlist.stdout + r_vmlist.stderr)
+
+    # ssh-config: rc.conf ssh_port integration, plain text + JSON structure
+    rc_ssh = OUT / "ssh-rc.conf"
+    rc_ssh.write_text('ssh_port="22022"\n', encoding="utf-8")
+    ssh_cfg_env = dict(env, LOCACHY_COMPUTE_RC=str(rc_ssh))
+
+    r_cfg_txt = subprocess.run(
+        ["python3", COMPUTE, "ssh-config", "--prefix", "gpu01", "--user", "alice"],
+        env=ssh_cfg_env, capture_output=True, text=True, timeout=30,
+    )
+    cfg_txt = r_cfg_txt.stdout
+    check("ssh-config: plain text emits jump host (auto tailscale0 + rc.conf ssh_port), container RemoteCommand, and VM ProxyJump",
+          r_cfg_txt.returncode == 0
+          and "Host gpu01\n    HostName 100.64.0.1\n    User alice\n    Port 22022" in cfg_txt
+          and "Host gpu01-train0\n    HostName 100.64.0.1\n    User alice\n    Port 22022\n    RequestTTY yes\n    RemoteCommand sudo locachy-compute shell train0" in cfg_txt
+          and "Host gpu01-expvm\n    HostName 127.0.0.1\n    Port 2222\n    ProxyJump gpu01" in cfg_txt
+          and "Host gpu01-sshvm2\n    HostName 127.0.0.1\n    Port 2223\n    User ubuntu\n    ProxyJump gpu01" in cfg_txt
+          and "Host gpu01-sshvm3\n    HostName 127.0.0.1\n    Port 2350\n    User admin\n    ProxyJump gpu01" in cfg_txt
+          and "Host gpu01-sshvm-off" not in cfg_txt,
+          cfg_txt + r_cfg_txt.stderr)
+
+    # shell into a VM: stopped VM rejected, running VM invokes ssh to 127.0.0.1:<port>, --console proxies and detaches on Ctrl+]
+    r_vmsh_stopped = run_cli(COMPUTE, "shell", "sshvm2")
+    check("shell: stopped VM fails clearly",
+          r_vmsh_stopped.returncode != 0 and "not running" in r_vmsh_stopped.stderr,
+          r_vmsh_stopped.stdout + r_vmsh_stopped.stderr)
+
+    vmsh_rdir = Path(env["LOCACHY_COMPUTE_RUN"]) / "vm-sshvm2"
+    vmsh_rdir.mkdir(parents=True, exist_ok=True)
+    ssh_stub_dir = OUT / "ssh-stub"
+    ssh_stub_dir.mkdir(exist_ok=True)
+    (ssh_stub_dir / "ssh").write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\nexit 5\n", encoding="utf-8")
+    os.chmod(ssh_stub_dir / "ssh", 0o755)
+    vm_sentinel = subprocess.Popen(["sleep", "30"])
+    try:
+        (vmsh_rdir / "qemu.pid").write_text(f"{vm_sentinel.pid}\n", encoding="utf-8")
+        r_vmsh_ssh = subprocess.run(
+            ["python3", COMPUTE, "shell", "sshvm2", "-i", "/tmp/test-key", "--", "uname", "-a"],
+            env=dict(env, PATH=f"{ssh_stub_dir}:{env.get('PATH', '')}"),
+            capture_output=True, text=True, timeout=30,
+        )
+        check("shell: VM SSH mode invokes ssh -p 2223 -l ubuntu -i /tmp/test-key 127.0.0.1 <cmd> and returns exit code",
+              r_vmsh_ssh.returncode == 5
+              and r_vmsh_ssh.stdout.splitlines() == ["-p", "2223", "-l", "ubuntu", "-i", "/tmp/test-key", "127.0.0.1", "uname", "-a"],
+              f"rc={r_vmsh_ssh.returncode} out={r_vmsh_ssh.stdout!r} err={r_vmsh_ssh.stderr!r}")
+
+        # --console over Unix serial socket: echoes payload and detaches cleanly on Ctrl+] (0x1d)
+        import threading
+        ser_sock = vmsh_rdir / "serial.sock"
+        ser_sock.unlink(missing_ok=True)
+        ser_srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        ser_srv.bind(str(ser_sock))
+        ser_srv.listen(1)
+        received_box = []
+        stop_ser = threading.Event()
+
+        def _serial_echo():
+            try:
+                conn, _ = ser_srv.accept()
+                with conn:
+                    conn.settimeout(5.0)
+                    conn.sendall(b"welcome-serial\n")
+                    data = conn.recv(1024)
+                    received_box.append(data)
+                    conn.sendall(b"echo:" + data + b"\n")
+                    # Keep socket open until the client detaches on Ctrl+].
+                    stop_ser.wait(5.0)
+            except OSError:
+                pass
+
+        ser_th = threading.Thread(target=_serial_echo, daemon=True)
+        ser_th.start()
+        p_con = subprocess.Popen(
+            ["python3", COMPUTE, "shell", "sshvm2", "--console"],
+            env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        try:
+            assert p_con.stdin is not None and p_con.stdout is not None and p_con.stderr is not None
+            line1 = p_con.stdout.readline()
+            p_con.stdin.write(b"hi-vm")
+            p_con.stdin.flush()
+            line2 = p_con.stdout.readline()
+            p_con.stdin.write(b"\x1dignored-after-detach")
+            p_con.stdin.flush()
+            rc_con = p_con.wait(timeout=10)
+            con_err = p_con.stderr.read()
+        finally:
+            stop_ser.set()
+            if p_con.poll() is None:
+                p_con.kill()
+                p_con.wait(timeout=5)
+            ser_srv.close()
+            ser_th.join(timeout=2)
+            ser_sock.unlink(missing_ok=True)
+        check("shell: VM --console connects to serial.sock, proxies bidirectionally, and detaches cleanly on Ctrl+]",
+              rc_con == 0
+              and line1 == b"welcome-serial\n"
+              and line2 == b"echo:hi-vm\n"
+              and b"Ctrl+]" in con_err
+              and received_box == [b"hi-vm"],
+              f"rc={rc_con} line1={line1!r} line2={line2!r} err={con_err!r} recv={received_box!r}")
+    finally:
+        (vmsh_rdir / "qemu.pid").unlink(missing_ok=True)
+        vm_sentinel.terminate()
+        vm_sentinel.wait(timeout=5)
+
+    r_cfg_json = subprocess.run(
+        ["python3", COMPUTE, "ssh-config", "--host", "100.64.9.9", "--user", "bob", "--port", "2222",
+         "--prefix", "node9", "--no-sudo", "--json"],
+        env=ssh_cfg_env, capture_output=True, text=True, timeout=30,
+    )
+    cfg_data = json.loads(r_cfg_json.stdout) if r_cfg_json.returncode == 0 else {}
+    vm_entries = {v["name"]: v for v in cfg_data.get("vms", [])}
+    env_entries = {e["name"]: e for e in cfg_data.get("envs", [])}
+    check("ssh-config: --json returns jump, envs, vms, config text and respects --port/--no-sudo",
+          r_cfg_json.returncode == 0
+          and cfg_data.get("jump") == {"host_alias": "node9", "hostname": "100.64.9.9", "user": "bob", "port": 2222}
+          and env_entries.get("train0", {}).get("remote_command") == "locachy-compute shell train0"
+          and vm_entries.get("sshvm2", {}).get("hostname") == "127.0.0.1"
+          and vm_entries.get("sshvm2", {}).get("port") == 2223
+          and vm_entries.get("sshvm2", {}).get("user") == "ubuntu"
+          and vm_entries.get("sshvm2", {}).get("proxy_jump") == "node9"
+          and "RemoteCommand locachy-compute shell train0" in cfg_data.get("config", ""),
+          r_cfg_json.stdout + r_cfg_json.stderr)
+else:
+    # Still validate ssh-config when qemu-img is absent
+    rc_ssh = OUT / "ssh-rc.conf"
+    rc_ssh.write_text('ssh_port="22022"\n', encoding="utf-8")
+    ssh_cfg_env = dict(env, LOCACHY_COMPUTE_RC=str(rc_ssh))
+    r_cfg_json = subprocess.run(
+        ["python3", COMPUTE, "ssh-config", "--prefix", "gpu01", "--user", "alice", "--json"],
+        env=ssh_cfg_env, capture_output=True, text=True, timeout=30,
+    )
+    cfg_data = json.loads(r_cfg_json.stdout) if r_cfg_json.returncode == 0 else {}
+    check("ssh-config: generates jump and container entries with rc.conf ssh_port",
+          r_cfg_json.returncode == 0
+          and cfg_data.get("jump", {}).get("port") == 22022
+          and any(e.get("name") == "train0" for e in cfg_data.get("envs", [])),
+          r_cfg_json.stdout + r_cfg_json.stderr)
+
 print("DRIVER-DONE", flush=True)
 sys.exit(0 if fails == 0 else 1)
 PYEOF

@@ -2,6 +2,16 @@
 
 LOCachy integrates discrete NVIDIA GPU configuration through the same native layers used for the rest of the system: machine profiles in `/usr/local/share/locachy/machines/`, `rc.conf` layering, `/etc/modules-load.d/` and `/etc/modprobe.d/` (loaded by `src/base/modload.c`), `locachy-boot` unified kernel images, and `locachy-jobs` system jobs driven from Settings.
 
+## Graphics routing and GPU enablement
+
+Under **Settings → Input & Output → NVIDIA GPU**, three controls do different jobs:
+
+- **Hybrid graphics policy** follows `gpu_graphics_policy="auto"` (the default) or `"off"`. When the installed system can positively identify a built-in NVIDIA hybrid with the internal panel on the integrated GPU, it prefers that panel for the native display and puts the integrated DRM card first for labwc while retaining both cards' outputs. Unclear topology, an explicit Display GPU, or opting out preserves the existing selection. This does not install drivers, force an application onto NVIDIA, change firmware, or affect CUDA. It applies the next time graphics starts.
+- **Firmware display routing** changes the physical MUX between hybrid and direct NVIDIA display on machines exposing the supported Linux `asus-armoury` firmware control. It shows the configured mode, not the active mode when a restart is pending. The system does not restart automatically.
+- **NVIDIA discrete GPU** enables or disables the hardware via a separate `asus-armoury` control. Disabling it removes its outputs and CUDA until it is enabled again. It is refused unless hybrid routing is confirmed, no restart is pending and an integrated GPU has a connected internal panel; the driver may refuse a GPU that is in use. Ordinary driver-managed idle power and `gpu-unlock`'s RTD3 policy are unchanged.
+
+Confirm firmware changes with a second Enter. `locachy-gpu-graphics status --json` reads back the configured values. `set-mux hybrid|discrete` and `set-dgpu on|off` are privileged system jobs. Unsupported, unreadable or conflicting firmware controls are not guessed. If the machine exposes a different switch only in BIOS Setup, use BIOS Setup; an older UKI does not undo an already written firmware setting.
+
 ## 1. Pre-driver NVIDIA GPU Unlock (`locachy-gpu-unlock`)
 
 Some NVIDIA GPUs carry firmware speed selectors that are applied before the driver initializes. `locachy-gpu-unlock` integrates upstream [Zagitta/gpu-unlock](https://github.com/Zagitta/gpu-unlock) directly into LOCachy. Upstream's kernel module lifts that limit for the PCI IDs in its recipe table; its README states the exact effect and scope. LOCachy adds one action in Settings (`Input & Output -> NVIDIA GPU -> NVIDIA GPU unlock (gpu-unlock)` -> `Enter`) or the CLI:

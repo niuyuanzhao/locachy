@@ -190,6 +190,18 @@ int screen_card_matches(const char *card_name_or_path, const char *selector);
 int screen_card_matches_from(const char *sysfs_drm_dir, const char *card_name_or_path, const char *selector);
 int screen_select_card_path(const char *selector, char *out, size_t size);
 int screen_select_card_path_from(const char *sysfs_drm_dir, const char *selector, char *out, size_t size);
+/* A startup snapshot, not an open or a lease. Returns 1 with both card
+ * paths for an unambiguous built-in hybrid, or 0 with empty paths. The
+ * runtime entry point also requires an installed root, layered policy auto
+ * (the default) and no explicit card override. The _from variant only
+ * checks topology and device node metadata, for a supplied sysfs/dev tree. */
+struct screen_hybrid_route {
+    char panel_card[64];
+    char nvidia_card[64];
+};
+int screen_hybrid_route(struct screen_hybrid_route *out);
+int screen_hybrid_route_from(const char *sysfs_drm_dir, const char *dev_dri_dir,
+                             struct screen_hybrid_route *out);
 int screen_render_node_for_from(const char *sysfs_drm_dir, const char *dev_dri_dir,
                                 const char *selector, char *path, size_t size);
 /* Present a DRM PRIME dma-buf full-screen on the primary output without copying

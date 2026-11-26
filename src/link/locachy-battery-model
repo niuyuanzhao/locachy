@@ -1,0 +1,814 @@
+#!/usr/bin/python3 -I
+"""Opt-in ChromiumOS Adaptive Charging model downloader and verifier.
+
+Downloads and verifies the pinned ChromiumOS adaptive charging TFLite model
+and preprocessor artifacts from a local JSON manifest into
+/var/lib/locachy/battery/model using isolated HTTPS requests.
+
+Commands:
+  locachy-battery-model status [--json]
+  locachy-battery-model verify
+  locachy-battery-model fetch
+  locachy-battery-model remove
+
+Exit status:
+  0  success (status always exits 0 on a valid manifest)
+  1  verification, manifest, filesystem, or download failure
+  2  invalid command-line usage
+"""
+import argparse
+import errno
+import fcntl
+import hashlib
+import hmac
+import json
+import os
+from pathlib import Path
+import re
+import selectors
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+from urllib.parse import urlsplit
+
+sys.dont_write_bytecode = True
+
+DEFAULT_MANIFEST = Path("/usr/local/share/locachy/battery/manifest.json")
+DEFAULT_HISTORY_DIR = Path("/var/lib/locachy/battery")
+DEFAULT_NETNS = "locachy-net"
+INSTALLED_META_NAME = "manifest.installed.json"
+REQUIRED_ARTIFACTS = ("model", "preprocessor")
+
+NOBODY_UID = 65534
+NOBODY_GID = 65534
+MAX_ARTIFACT_SIZE = 64 * 1024 * 1024
+READ_CHUNK = 65536
+STDERR_LIMIT = 8192
+DOWNLOAD_WALL_TIMEOUT = 150.0
+
+MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+SHA512_RE = re.compile(r"^[0-9a-f]{128}$")
+NETNS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+class Failure(Exception):
+    def __init__(self, message, status=1):
+        super().__init__(message)
+        self.status = status
+
+
+def manifest_path():
+    override = os.environ.get("LOCACHY_BATTERY_MANIFEST", "").strip()
+    if override:
+        return Path(override)
+    if DEFAULT_MANIFEST.is_file():
+        return DEFAULT_MANIFEST
+    sibling = Path(__file__).resolve().parent / "battery-adaptive-manifest.json"
+    if sibling.is_file():
+        return sibling
+    return DEFAULT_MANIFEST
+
+
+def history_dir():
+    override = os.environ.get("LOCACHY_BATTERY_HISTORY_DIR", "").strip()
+    return Path(override) if override else DEFAULT_HISTORY_DIR
+
+
+def model_dir():
+    return history_dir() / "model"
+
+
+def configured_netns():
+    if "LOCACHY_BATTERY_NETNS" in os.environ:
+        return os.environ["LOCACHY_BATTERY_NETNS"].strip()
+    return DEFAULT_NETNS
+
+
+def configured_drop_privs():
+    return os.environ.get("LOCACHY_BATTERY_DROP_PRIVS", "1").strip() != "0"
+
+
+def configured_curl():
+    override = os.environ.get("LOCACHY_BATTERY_CURL", "").strip()
+    return override if override else "curl"
+
+
+def allow_file_urls():
+    return os.environ.get("LOCACHY_BATTERY_ALLOW_FILE_URL", "0").strip() == "1"
+
+
+def reload_disabled():
+    return os.environ.get("LOCACHY_BATTERY_NO_RELOAD", "0").strip() == "1"
+
+
+def validate_url(key, url, *, allow_file_url=False):
+    if not isinstance(url, str) or not url or len(url) > 2048:
+        raise Failure(f"manifest artifact {key!r} has an invalid url")
+    if any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in url):
+        raise Failure(f"manifest artifact {key!r} url contains invalid characters")
+    parsed = urlsplit(url)
+    if parsed.scheme == "https":
+        if not parsed.netloc:
+            raise Failure(f"manifest artifact {key!r} https url is missing a host")
+        return url
+    if allow_file_url and parsed.scheme == "file":
+        if not parsed.path.startswith("/"):
+            raise Failure(f"manifest artifact {key!r} file url must use an absolute path")
+        return url
+    raise Failure(f"manifest artifact {key!r} url must use https:// (got {url!r})")
+
+
+def validate_manifest(data, *, allow_file_url=False):
+    if not isinstance(data, dict):
+        raise Failure("manifest root must be a JSON object")
+    if type(data.get("schema_version")) is not int or data["schema_version"] != 1:
+        raise Failure("manifest schema_version must be integer 1")
+    model_id = data.get("model_id")
+    if not isinstance(model_id, str) or not MODEL_ID_RE.fullmatch(model_id):
+        raise Failure("manifest model_id is missing or invalid")
+    source = data.get("source", "")
+    if not isinstance(source, str):
+        raise Failure("manifest source must be a string")
+    raw_artifacts = data.get("artifacts")
+    if not isinstance(raw_artifacts, dict):
+        raise Failure("manifest artifacts must be a JSON object")
+    if set(raw_artifacts.keys()) != set(REQUIRED_ARTIFACTS):
+        raise Failure(
+            f"manifest artifacts must contain exactly {', '.join(REQUIRED_ARTIFACTS)}"
+        )
+
+    artifacts = {}
+    seen_filenames = set()
+    for key in REQUIRED_ARTIFACTS:
+        item = raw_artifacts.get(key)
+        if not isinstance(item, dict):
+            raise Failure(f"manifest artifact {key!r} must be a JSON object")
+        filename = item.get("filename")
+        if (
+            not isinstance(filename, str)
+            or not FILENAME_RE.fullmatch(filename)
+            or ".." in filename
+            or "/" in filename
+            or "\\" in filename
+            or filename.startswith(".")
+        ):
+            raise Failure(f"manifest artifact {key!r} has an unsafe filename: {filename!r}")
+        if filename in seen_filenames:
+            raise Failure(f"manifest has duplicate artifact filename: {filename!r}")
+        seen_filenames.add(filename)
+
+        size = item.get("size")
+        if type(size) is not int or size <= 0 or size > MAX_ARTIFACT_SIZE:
+            raise Failure(f"manifest artifact {key!r} has an invalid size: {size!r}")
+
+        sha512 = item.get("sha512")
+        if not isinstance(sha512, str) or not SHA512_RE.fullmatch(sha512):
+            raise Failure(f"manifest artifact {key!r} sha512 must be 128 lowercase hex characters")
+
+        url = validate_url(key, item.get("url"), allow_file_url=allow_file_url)
+        artifacts[key] = {
+            "filename": filename,
+            "url": url,
+            "size": size,
+            "sha512": sha512,
+        }
+
+    return {
+        "schema_version": 1,
+        "model_id": model_id,
+        "source": source,
+        "artifacts": artifacts,
+    }
+
+
+def load_manifest(path=None, *, allow_file_url=None):
+    target = Path(path) if path is not None else manifest_path()
+    if allow_file_url is None:
+        allow_file_url = allow_file_urls()
+    try:
+        raw = target.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise Failure(f"cannot read manifest {target}: {exc}") from None
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise Failure(f"manifest {target} is not valid JSON: {exc}") from None
+    return validate_manifest(data, allow_file_url=allow_file_url)
+
+
+def inspect_artifact(dir_fd, mdir, spec):
+    filename = spec["filename"]
+    expected_size = spec["size"]
+    expected_sha512 = spec["sha512"]
+    entry = {
+        "filename": filename,
+        "path": str(mdir / filename),
+        "state": "missing",
+        "expected_size": expected_size,
+        "size": None,
+        "sha512": None,
+        "reason": "",
+    }
+    try:
+        # O_NONBLOCK: a FIFO planted under the artifact name must not block the open.
+        fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+    except FileNotFoundError:
+        entry["state"] = "missing"
+        entry["reason"] = "file missing"
+        return entry
+    except OSError as exc:
+        entry["state"] = "invalid"
+        if exc.errno == errno.ELOOP:
+            entry["reason"] = "symlink refused"
+        elif exc.errno == errno.EISDIR:
+            entry["reason"] = "not a regular file"
+        else:
+            entry["reason"] = exc.strerror or str(exc)
+        return entry
+
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            entry["state"] = "invalid"
+            entry["reason"] = "not a regular file"
+            return entry
+        entry["size"] = st.st_size
+        if st.st_size != expected_size:
+            entry["state"] = "invalid"
+            entry["reason"] = f"size mismatch (got {st.st_size}, expected {expected_size})"
+            return entry
+        hasher = hashlib.sha512()
+        total = 0
+        while True:
+            chunk = os.read(fd, READ_CHUNK)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > expected_size:
+                entry["size"] = total
+                entry["state"] = "invalid"
+                entry["reason"] = f"size mismatch (exceeded {expected_size} bytes while reading)"
+                return entry
+            hasher.update(chunk)
+        entry["size"] = total
+        if total != expected_size:
+            entry["state"] = "invalid"
+            entry["reason"] = f"size mismatch (got {total}, expected {expected_size})"
+            return entry
+        digest = hasher.hexdigest()
+        entry["sha512"] = digest
+        if not hmac.compare_digest(digest, expected_sha512):
+            entry["state"] = "invalid"
+            entry["reason"] = "sha512 mismatch"
+            return entry
+        entry["state"] = "ready"
+        entry["reason"] = ""
+        return entry
+    except OSError as exc:
+        entry["state"] = "invalid"
+        entry["reason"] = exc.strerror or str(exc)
+        return entry
+    finally:
+        os.close(fd)
+
+
+def inspect_installation(manifest, mdir=None):
+    target_dir = Path(mdir) if mdir is not None else model_dir()
+    artifacts_status = {}
+    try:
+        dir_fd = os.open(target_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        for key in REQUIRED_ARTIFACTS:
+            spec = manifest["artifacts"][key]
+            artifacts_status[key] = {
+                "filename": spec["filename"],
+                "path": str(target_dir / spec["filename"]),
+                "state": "missing",
+                "expected_size": spec["size"],
+                "size": None,
+                "sha512": None,
+                "reason": "file missing",
+            }
+        return {
+            "state": "missing",
+            "model_id": manifest["model_id"],
+            "dir": str(target_dir),
+            "artifacts": artifacts_status,
+        }
+    except OSError as exc:
+        if os.path.islink(target_dir) or exc.errno == errno.ELOOP:
+            reason = "model directory is a symlink"
+        elif exc.errno == errno.ENOTDIR:
+            reason = "model directory path is not a directory"
+        else:
+            reason = exc.strerror or str(exc)
+        for key in REQUIRED_ARTIFACTS:
+            spec = manifest["artifacts"][key]
+            artifacts_status[key] = {
+                "filename": spec["filename"],
+                "path": str(target_dir / spec["filename"]),
+                "state": "invalid",
+                "expected_size": spec["size"],
+                "size": None,
+                "sha512": None,
+                "reason": reason,
+            }
+        return {
+            "state": "invalid",
+            "model_id": manifest["model_id"],
+            "dir": str(target_dir),
+            "artifacts": artifacts_status,
+        }
+
+    try:
+        for key in REQUIRED_ARTIFACTS:
+            artifacts_status[key] = inspect_artifact(dir_fd, target_dir, manifest["artifacts"][key])
+    finally:
+        os.close(dir_fd)
+
+    states = [artifacts_status[k]["state"] for k in REQUIRED_ARTIFACTS]
+    if any(s == "invalid" for s in states):
+        overall = "invalid"
+    elif all(s == "ready" for s in states):
+        overall = "ready"
+    elif all(s == "missing" for s in states):
+        overall = "missing"
+    else:
+        overall = "incomplete"
+
+    return {
+        "state": overall,
+        "model_id": manifest["model_id"],
+        "dir": str(target_dir),
+        "artifacts": artifacts_status,
+    }
+
+
+def in_target_netns(ns):
+    try:
+        a = os.stat(f"/run/netns/{ns}")
+        b = os.stat("/proc/self/ns/net")
+        return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+    except OSError:
+        return False
+
+
+def build_download_argv(
+    url,
+    expected_size,
+    *,
+    curl_bin=None,
+    netns=None,
+    drop_privs=None,
+    allow_file_url=None,
+    euid=None,
+    already_in_netns=None,
+):
+    if curl_bin is None:
+        curl_bin = configured_curl()
+    if netns is None:
+        netns = configured_netns()
+    if drop_privs is None:
+        drop_privs = configured_drop_privs()
+    if allow_file_url is None:
+        allow_file_url = allow_file_urls()
+    if euid is None:
+        euid = os.geteuid()
+
+    proto = "=file" if (allow_file_url and url.startswith("file://")) else "=https"
+    cmd = [
+        curl_bin,
+        "--disable",
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--location",
+        "--max-redirs",
+        "5",
+        "--proto",
+        proto,
+        "--proto-redir",
+        "=https",
+        "--tlsv1.2",
+        "--connect-timeout",
+        "20",
+        "--max-time",
+        "120",
+        "--max-filesize",
+        str(expected_size),
+        "-o",
+        "-",
+        "--",
+        url,
+    ]
+    if drop_privs and euid == 0:
+        cmd = [
+            "setpriv",
+            f"--reuid={NOBODY_UID}",
+            f"--regid={NOBODY_GID}",
+            "--clear-groups",
+            "--no-new-privs",
+            "--",
+            *cmd,
+        ]
+    if netns:
+        if not NETNS_RE.fullmatch(netns):
+            raise Failure(f"invalid network namespace name: {netns!r}")
+        in_ns = in_target_netns(netns) if already_in_netns is None else bool(already_in_netns)
+        if not in_ns:
+            cmd = ["ip", "netns", "exec", netns, *cmd]
+    return cmd
+
+
+def write_all(fd, data):
+    view = memoryview(data)
+    while view:
+        try:
+            written = os.write(fd, view)
+        except InterruptedError:
+            continue
+        if written <= 0:
+            raise Failure("short write while staging downloaded artifact")
+        view = view[written:]
+
+
+def download_to_temp(key, spec, mdir, *, allow_file_url=False):
+    expected_size = spec["size"]
+    expected_sha512 = spec["sha512"]
+    url = spec["url"]
+    argv = build_download_argv(url, expected_size, allow_file_url=allow_file_url)
+
+    fd, tmp_name = tempfile.mkstemp(prefix=f".fetch-{key}-", suffix=".tmp", dir=str(mdir))
+    tmp_path = Path(tmp_name)
+    proc = None
+    sel = selectors.DefaultSelector()
+    try:
+        try:
+            proc = subprocess.Popen(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd="/",
+            )
+        except OSError as exc:
+            raise Failure(f"{key}: cannot execute {argv[0]}: {exc}") from None
+
+        os.set_blocking(proc.stdout.fileno(), False)
+        os.set_blocking(proc.stderr.fileno(), False)
+        sel.register(proc.stdout, selectors.EVENT_READ, "stdout")
+        sel.register(proc.stderr, selectors.EVENT_READ, "stderr")
+
+        hasher = hashlib.sha512()
+        total = 0
+        stderr_chunks = bytearray()
+        deadline = time.monotonic() + DOWNLOAD_WALL_TIMEOUT
+
+        while sel.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                proc.kill()
+                raise Failure(f"{key}: download timed out after {int(DOWNLOAD_WALL_TIMEOUT)} s")
+            try:
+                events = sel.select(timeout=min(1.0, remaining))
+            except InterruptedError:
+                continue
+            for key_obj, _mask in events:
+                stream = key_obj.fileobj
+                tag = key_obj.data
+                try:
+                    chunk = os.read(stream.fileno(), READ_CHUNK if tag == "stdout" else 4096)
+                except BlockingIOError:
+                    continue
+                except InterruptedError:
+                    continue
+                if not chunk:
+                    sel.unregister(stream)
+                    stream.close()
+                    continue
+                if tag == "stdout":
+                    total += len(chunk)
+                    if total > expected_size:
+                        proc.kill()
+                        raise Failure(
+                            f"{key}: download exceeded expected size ({expected_size} bytes)"
+                        )
+                    hasher.update(chunk)
+                    write_all(fd, chunk)
+                else:
+                    if len(stderr_chunks) < STDERR_LIMIT:
+                        room = STDERR_LIMIT - len(stderr_chunks)
+                        stderr_chunks.extend(chunk[:room])
+
+        try:
+            rc = proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            raise Failure(f"{key}: download process did not exit cleanly") from None
+
+        if rc != 0:
+            err_lines = stderr_chunks.decode("utf-8", errors="replace").strip().splitlines()
+            detail = err_lines[-1] if err_lines else f"exit status {rc}"
+            raise Failure(f"{key}: download failed ({detail})")
+
+        if total != expected_size:
+            raise Failure(f"{key}: size mismatch (got {total}, expected {expected_size})")
+
+        digest = hasher.hexdigest()
+        if not hmac.compare_digest(digest, expected_sha512):
+            raise Failure(
+                f"{key}: sha512 mismatch (got {digest}, expected {expected_sha512})"
+            )
+
+        os.fchmod(fd, 0o644)
+        os.fsync(fd)
+        os.close(fd)
+        fd = -1
+        return tmp_path
+    except BaseException:
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        if fd >= 0:
+            os.close(fd)
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+    finally:
+        for key_obj in list(sel.get_map().values()):
+            try:
+                sel.unregister(key_obj.fileobj)
+            except KeyError:
+                pass
+            try:
+                key_obj.fileobj.close()
+            except OSError:
+                pass
+        sel.close()
+
+
+def ensure_model_dir():
+    hdir = history_dir()
+    if os.path.islink(hdir):
+        raise Failure(f"history directory {hdir} is a symlink, refused")
+    hdir.mkdir(mode=0o755, parents=True, exist_ok=True)
+    hfd = os.open(hdir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        try:
+            os.fchmod(hfd, 0o755)
+        except PermissionError:
+            pass
+    finally:
+        os.close(hfd)
+
+    mdir = model_dir()
+    if os.path.islink(mdir):
+        raise Failure(f"model directory {mdir} is a symlink, refused")
+    try:
+        os.mkdir(mdir, 0o755)
+    except FileExistsError:
+        pass
+    try:
+        dfd = os.open(mdir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        raise Failure(f"model directory {mdir} is not a real directory: {exc}") from None
+    try:
+        os.fchmod(dfd, 0o755)
+    except PermissionError:
+        pass
+    return mdir, dfd
+
+
+def write_installed_meta(mdir, manifest):
+    payload = {
+        "schema_version": manifest["schema_version"],
+        "model_id": manifest["model_id"],
+        "source": manifest["source"],
+        "installed_at": int(time.time()),
+        "artifacts": {
+            key: {
+                "filename": manifest["artifacts"][key]["filename"],
+                "size": manifest["artifacts"][key]["size"],
+                "sha512": manifest["artifacts"][key]["sha512"],
+            }
+            for key in REQUIRED_ARTIFACTS
+        },
+    }
+    text = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    fd, tmp_name = tempfile.mkstemp(prefix=".fetch-meta-", suffix=".tmp", dir=str(mdir))
+    tmp_path = Path(tmp_name)
+    try:
+        write_all(fd, text)
+        os.fchmod(fd, 0o644)
+        os.fsync(fd)
+        os.close(fd)
+        fd = -1
+        os.replace(tmp_path, mdir / INSTALLED_META_NAME)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+
+
+def notify_reload():
+    if reload_disabled():
+        return
+    if os.geteuid() != 0:
+        return
+    try:
+        os.kill(1, signal.SIGHUP)
+    except OSError as exc:
+        if exc.errno not in (errno.ESRCH, errno.EPERM):
+            raise
+
+
+def format_status_line(info):
+    base = f"{info['state']}: {info['model_id']} ({info['dir']})"
+    if info["state"] in ("ready", "missing"):
+        return base
+    details = []
+    for key in REQUIRED_ARTIFACTS:
+        art = info["artifacts"][key]
+        if art["state"] != "ready":
+            why = art["reason"] or art["state"]
+            details.append(f"{key}: {why}")
+    return f"{base} [{'; '.join(details)}]" if details else base
+
+
+def cmd_status(args):
+    manifest = load_manifest()
+    info = inspect_installation(manifest)
+    if args.json:
+        print(json.dumps(info, indent=2, sort_keys=True))
+    else:
+        print(format_status_line(info))
+    return 0
+
+
+def cmd_verify(_args):
+    manifest = load_manifest()
+    info = inspect_installation(manifest)
+    if info["state"] == "ready":
+        print(f"verified: {info['model_id']} ({info['dir']})")
+        return 0
+    reasons = []
+    for key in REQUIRED_ARTIFACTS:
+        art = info["artifacts"][key]
+        if art["state"] != "ready":
+            reasons.append(f"{key}: {art['reason'] or art['state']}")
+    detail = "; ".join(reasons) or info["state"]
+    print(f"locachy-battery-model: verification failed ({info['state']}): {detail}", file=sys.stderr)
+    return 1
+
+
+def cmd_fetch(_args):
+    allow_file = allow_file_urls()
+    manifest = load_manifest(allow_file_url=allow_file)
+    before = inspect_installation(manifest)
+    if before["state"] == "ready":
+        print("Adaptive charging model already installed and verified.", flush=True)
+        return 0
+
+    mdir, dfd = ensure_model_dir()
+    staged = []
+    try:
+        fcntl.flock(dfd, fcntl.LOCK_EX)
+        current = inspect_installation(manifest, mdir)
+        if current["state"] == "ready":
+            print("Adaptive charging model already installed and verified.", flush=True)
+            return 0
+
+        needed = [
+            key for key in REQUIRED_ARTIFACTS
+            if current["artifacts"][key]["state"] != "ready"
+        ]
+        for key in needed:
+            final_path = mdir / manifest["artifacts"][key]["filename"]
+            try:
+                if stat.S_ISDIR(os.lstat(final_path).st_mode):
+                    raise Failure(f"refusing to overwrite directory at {final_path}")
+            except FileNotFoundError:
+                pass
+        for key in needed:
+            spec = manifest["artifacts"][key]
+            tmp_path = download_to_temp(key, spec, mdir, allow_file_url=allow_file)
+            staged.append((tmp_path, mdir / spec["filename"]))
+
+        for idx, (tmp_path, final_path) in enumerate(staged):
+            os.replace(tmp_path, final_path)
+            staged[idx] = (None, final_path)
+
+        write_installed_meta(mdir, manifest)
+        os.fsync(dfd)
+    finally:
+        for tmp_path, _final in staged:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+        os.close(dfd)
+
+    notify_reload()
+    print(f"Adaptive charging model {manifest['model_id']} installed and verified.", flush=True)
+    return 0
+
+
+def cmd_remove(_args):
+    manifest = load_manifest()
+    mdir = model_dir()
+    try:
+        dfd = os.open(mdir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        notify_reload()
+        print("Adaptive charging model is not installed.", flush=True)
+        return 0
+    except OSError as exc:
+        raise Failure(f"model directory {mdir} is not a real directory: {exc}") from None
+
+    try:
+        fcntl.flock(dfd, fcntl.LOCK_EX)
+        targets = [manifest["artifacts"][k]["filename"] for k in REQUIRED_ARTIFACTS]
+        targets.append(INSTALLED_META_NAME)
+        try:
+            entries = os.listdir(dfd)
+        except OSError:
+            entries = []
+        for name in entries:
+            if name.startswith(".fetch-") and name not in targets:
+                try:
+                    st = os.lstat(name, dir_fd=dfd)
+                except OSError:
+                    continue
+                if not stat.S_ISDIR(st.st_mode):
+                    targets.append(name)
+        for name in targets:
+            try:
+                os.unlink(name, dir_fd=dfd)
+            except FileNotFoundError:
+                pass
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+    try:
+        os.rmdir(mdir)
+    except OSError:
+        pass
+
+    notify_reload()
+    print("Adaptive charging model removed.", flush=True)
+    return 0
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="locachy-battery-model",
+        description="Manage the opt-in ChromiumOS Adaptive Charging model artifacts.",
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_status = sub.add_parser("status", help="report installation and verification status")
+    p_status.add_argument("--json", action="store_true", help="output status as JSON")
+    p_status.set_defaults(func=cmd_status)
+
+    p_verify = sub.add_parser("verify", help="strictly verify installed model artifacts")
+    p_verify.set_defaults(func=cmd_verify)
+
+    p_fetch = sub.add_parser("fetch", help="download and verify model artifacts over isolated HTTPS")
+    p_fetch.set_defaults(func=cmd_fetch)
+
+    p_remove = sub.add_parser("remove", help="remove installed model artifacts")
+    p_remove.set_defaults(func=cmd_remove)
+
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return args.func(args)
+    except Failure as exc:
+        print(f"locachy-battery-model: {exc}", file=sys.stderr, flush=True)
+        return exc.status
+    except OSError as exc:
+        print(f"locachy-battery-model: {exc}", file=sys.stderr, flush=True)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

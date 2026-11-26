@@ -47,9 +47,11 @@ When `extdisplay` is opened on LOCachy:
 
 While the link is active:
 
-- All keyboard input (including `Super+Esc`, `Ctrl+Q`, `Esc`, `q`, and `Ctrl+Alt+F12`), trackpad gestures, and mouse movements are forwarded to the sender.
+- All keyboard input (including `Super+Space`, `Super+Esc`, `Super+L`, `Ctrl+Alt+Del`, `Ctrl+Q`, `Esc`, `q`, volume/brightness, and `Ctrl+Alt+F12`), trackpad gestures, and mouse movements are forwarded to the sender via exclusive raw keyboard routing (`BASE_RAW_EXCLUSIVE`), with no local keyboard exceptions.
+- When `"capsLock"` is negotiated, macOS is the sole Caps Lock authority: `capsLockState` broadcasts Mac's real Caps Lock state to all connected receivers (updating local keyboard state and LEDs without touching Num Lock), and pressing Caps Lock on a receiver sends `capsLockToggle` without flipping local state ahead of Mac's confirmation.
 - When the sender accepts `"touch"` and `"tablet"`, direct touchscreen multi-touch frames (1-finger tap/drag/long-press right-click, 2-finger pan/scroll, 2-finger pinch zoom) and active stylus pen events (proximity in/out, pen/eraser switching, sub-pixel position, pressure, X/Y tilt, hover distance, rotation, barrel buttons, with stylus-proximity palm rejection) map strictly onto the extended display's bounds while relative mice/touchpads continue roaming across all displays.
-- `Super+Esc` (Home) and three-finger home/switch swipes do not switch away from the live extended display; `Super+L` (Lock) still locks locally while keeping the link alive (`base_session_hold`).
+- Local keyboard actions (Home, Search, Lock, Ctrl+Alt+Del) and three-finger home/switch swipes are suppressed while the live extended display is focused (`base_session_hold`); the physical power button and lid switch remain handled out of band by process 1.
+- Closing the lid force-exits `extdisplay` (stopping the worker and returning the Thunderbolt interface lease before sleep, without auto-reconnecting) and applies the union of the lid-close and cable-unplug lock rules.
 - Idle auto-lock is deferred while the live extended display is shown, and takes effect immediately once the cable is unplugged or the session closes.
 - When the cable is unplugged or the sender restarts, the session ends and `extdisplay` returns to the waiting state, reconnecting automatically when a cable link returns without rebooting or relaunching. While waiting, `Esc` cancels pairing, `Super+Esc` goes home, and `Ctrl+Q` quits.
 

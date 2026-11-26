@@ -2,7 +2,7 @@
 #include <string.h>
 #define RAW_QUEUE 256u
 #define RAW_MOD_MASK (KEYS_SHIFT | KEYS_CTRL | KEYS_ALT | KEYS_META | KEYS_ALTGR)
-static int enabled;
+static enum base_raw_mode mode;
 static struct base_raw_key queue[RAW_QUEUE];
 static unsigned head, length;
 static unsigned mod_count[5]; /* the momentary KEYS_* bits, in bit order */
@@ -18,28 +18,28 @@ static void clear_held(void)
     memset(mod_count, 0, sizeof mod_count);
 }
 
-int base_raw_enable(int on)
+enum base_raw_mode base_raw_enable(enum base_raw_mode next)
 {
-    int old = enabled;
-    enabled = on > 1 ? 2 : !!on;
+    enum base_raw_mode old = mode;
+    mode = next;
     head = length = 0;
     clear_held();
     return old;
 }
 
-int base_raw_forward_home(void) { return enabled == 2; }
-int base_raw_pending(void) { return enabled && length != 0; }
+int base_raw_exclusive(void) { return mode == BASE_RAW_EXCLUSIVE; }
+int base_raw_pending(void) { return mode != BASE_RAW_OFF && length != 0; }
 
 int base_raw_next(struct base_raw_key *out)
 {
-    if (!enabled || !length || !out) return 0;
+    if (!base_raw_pending() || !out) return 0;
     *out = queue[head]; head = (head + 1) % RAW_QUEUE; length--;
     return 1;
 }
 
 void base_raw_cancel(void)
 {
-    if (!enabled) return;
+    if (mode == BASE_RAW_OFF) return;
     clear_held();
     head = 0; length = 1;
     queue[0] = (struct base_raw_key){ .state = 3 };
@@ -61,7 +61,7 @@ static unsigned char sym_modifier(uint32_t sym)
 void base_raw_emit(uint32_t device, uint32_t code, uint32_t sym, uint32_t mods,
                    uint32_t locks, uint32_t state, int local)
 {
-    if (!enabled || !device || code >= BASE_RAW_CODES || state > 2) return;
+    if (mode == BASE_RAW_OFF || !device || code >= BASE_RAW_CODES || state > 2) return;
     if (length == RAW_QUEUE) { base_raw_cancel(); return; }
     unsigned i;
     for (i = 0; i < BASE_RAW_DEVICES; i++) if (held[i].device == device) break;
@@ -78,7 +78,8 @@ void base_raw_emit(uint32_t device, uint32_t code, uint32_t sym, uint32_t mods,
     }
     if (state == 1) {
         if (held[i].down[code]) { base_raw_cancel(); return; }
-        held[i].down[code] = 1; held[i].symbols[code] = sym; held[i].local[code] = !!local;
+        local = mode == BASE_RAW_SHARED && local;
+        held[i].down[code] = 1; held[i].symbols[code] = sym; held[i].local[code] = (unsigned char)local;
         unsigned char modifier = sym_modifier(sym);
         for (unsigned bit = 0; bit < 5; bit++) {
             if (modifier & (1u << bit)) mod_count[bit]++;

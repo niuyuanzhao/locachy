@@ -147,6 +147,52 @@ int base_session_hold(int on)
     return -1;
 }
 
+int base_session_caps(int desired)
+{
+    if (desired < -1 || desired > 1) return -1;
+    int fd = base_session_fd();
+    if (fd >= 0) {
+        if (desired >= 0 && !base_session_input_allowed()) return -1;
+        base_session_service();
+        if (session < 0) return -1;
+        unsigned long long id = ++session_request, epoch = session_epoch;
+        char text[160];
+        int len = snprintf(text, sizeof text, "caps %llu %llu %d", id, epoch, desired);
+        if (send(fd, text, (size_t)len, MSG_NOSIGNAL | MSG_DONTWAIT) != len) return -1;
+        struct timespec start, current;
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        for (;;) {
+            clock_gettime(CLOCK_MONOTONIC, &current);
+            long left = 1000 - (current.tv_sec - start.tv_sec) * 1000 -
+                        (current.tv_nsec - start.tv_nsec) / 1000000;
+            if (left <= 0) return -1;
+            struct pollfd p = { .fd = fd, .events = POLLIN };
+            if (poll(&p, 1, (int)left) < 0 && errno == EINTR) continue;
+            if (!(p.revents & POLLIN)) return -1;
+            ssize_t n = recv(fd, text, sizeof text - 1, MSG_DONTWAIT);
+            if (n <= 0) return -1;
+            text[n] = 0;
+            if (strncmp(text, "policy ", 7) == 0) { session_policy(text); continue; }
+            unsigned long long got, got_epoch;
+            int ok, end = 0;
+            if (sscanf(text, "result %llu %llu %d%n", &got, &got_epoch, &ok, &end) == 3 &&
+                !text[end] && got == id) {
+                if (got_epoch != epoch || session_epoch != epoch) return -1;
+                return ok == 1 ? 0 : ok == 2 ? 1 : -1;
+            }
+        }
+    }
+    if (control_fd() >= 0) {
+        if (desired >= 0) {
+            keys_set_caps(desired);
+            const char *fields[] = { "caps", desired ? "1" : "0", NULL };
+            if (control_send_fields(control_fd(), fields) < 0) return -1;
+        }
+        return !!(keys_locks() & KEYS_LOCK_CAPS);
+    }
+    return -1;
+}
+
 static int ctl = -2; /* -2: $LOCACHY_CONTROL not read yet */
 static int shown;    /* a "take" arrived that key_get has not reported */
 

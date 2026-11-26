@@ -7,6 +7,7 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import re
 import select
 import shutil
 import signal
@@ -21,19 +22,29 @@ CLIENT = "/usr/local/lib/locachy/tailnet-ssh-client"
 SSHD = "/usr/bin/sshd"
 NS = Path("/run/netns/locachy-net")
 RESOLVER = Path("/etc/netns/locachy-net/resolv.conf")
-BASE = Path("/etc/locachy/tailnet-ssh")
+RC = Path(os.environ.get("LOCACHY_SSH_RC") or "/etc/locachy/rc.conf")
+BASE = Path(os.environ.get("LOCACHY_SSH_BASE") or "/etc/locachy/tailnet-ssh")
 KEYS = BASE / "authorized_keys"
 HOST_KEY = BASE / "ssh_host_ed25519_key"
 HOST_PUBLIC_KEY = Path(str(HOST_KEY) + ".pub")
-RUN = Path("/run/locachy/tailnet-ssh")
+RUN = Path(os.environ.get("LOCACHY_SSH_RUN") or "/run/locachy/tailnet-ssh")
 CONFIG = RUN / "sshd_config"
+PIDFILE = RUN / "supervisor.pid"
 GROUP = Path("/sys/fs/cgroup/locachy-tailnet-ssh")
 TABLE = "locachy-tailnet-ssh"
+FILTER_TABLE = "locachy-filter"
 DEVICE = "tailscale0"
 PORT = 22
 PREFIXES = tuple(map(ipaddress.ip_network, ("100.64.0.0/10", "fd7a:115c:a1e0::/48")))
 # linux/rtnetlink.h: RTMGRP_LINK | RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR.
 ADDR_EVENTS = 0x1 | 0x10 | 0x100
+USER_RE = re.compile(r"^[a-z_][a-z0-9_-]*[$]?$")
+IFNAME_RE = re.compile(r"^[A-Za-z0-9._:+-]{1,15}$")
+KEY_TYPE_PREFIXES = ("ssh-", "ecdsa-sha2-", "sk-ssh-", "sk-ecdsa-sha2-")
+KEY_TYPE_RE = re.compile(r"^[a-z0-9@._-]+$")
+KEY_BODY_RE = re.compile(r"^[A-Za-z0-9+/=]+$")
+RC_LINE_RE = re.compile(r'^[ \t]*([A-Za-z0-9_]+)="([^"\n]*)"[ \t]*(?:#.*)?$')
+EXCLUDED_LAN_IFACES = frozenset(("lo", DEVICE, "mihomo"))
 
 
 def log(message):
@@ -49,7 +60,43 @@ def trusted_dir(path):
     return owned(path.lstat(), stat.S_ISDIR, 0o022)
 
 
-def ensure_host_key():
+def valid_user(user):
+    return (bool(user) and len(user) <= 32 and not user.startswith(".")
+            and "/" not in user and user != "root"
+            and USER_RE.fullmatch(user) is not None)
+
+
+def read_rc(path=None):
+    rc_path = RC if path is None else Path(path)
+    values = {}
+    try:
+        text = rc_path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        text = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        match = RC_LINE_RE.match(line)
+        if match:
+            values[match.group(1)] = match.group(2)
+
+    listen = values.get("ssh_listen", "tailscale")
+    if listen not in ("tailscale", "lan"):
+        listen = "tailscale"
+
+    port = PORT
+    raw_port = values.get("ssh_port", "")
+    if raw_port.isascii() and raw_port.isdecimal():
+        parsed = int(raw_port)
+        if 1 <= parsed <= 65535:
+            port = parsed
+
+    password_auth = values.get("ssh_password") == "1"
+    return listen, port, password_auth
+
+
+def ensure_dirs():
     if not trusted_dir(BASE.parent):
         raise RuntimeError(f"unsafe SSH configuration parent: {BASE.parent}")
     # The unprivileged key lookup must be able to traverse both directories.
@@ -62,6 +109,10 @@ def ensure_host_key():
             directory.chmod(0o755)
         if not trusted_dir(directory):
             raise RuntimeError(f"unsafe SSH configuration directory: {directory}")
+
+
+def ensure_host_key():
+    ensure_dirs()
     try:
         info = HOST_KEY.lstat()
     except FileNotFoundError:
@@ -81,11 +132,225 @@ def ensure_host_key():
         raise RuntimeError(f"unsafe SSH host key: {HOST_KEY}")
 
 
+def _fingerprint_pubkey(pubkey_line):
+    proc = checked("ssh-keygen", "-l", "-E", "sha256", "-f", "-",
+                   input=pubkey_line + "\n", stdout=subprocess.PIPE,
+                   stderr=subprocess.PIPE, text=True)
+    lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    if len(lines) != 1:
+        raise ValueError("expected a single public key")
+    parts = lines[0].split()
+    if len(parts) < 3 or not parts[1].startswith("SHA256:"):
+        raise ValueError("unrecognized ssh-keygen fingerprint output")
+    return parts[1]
+
+
+def _parse_pubkey_line(line, allow_tab=False):
+    for ch in line:
+        code = ord(ch)
+        if code == 0x7f or (code < 0x20 and not (allow_tab and ch == "\t")):
+            raise ValueError("SSH public key contains control characters")
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        raise ValueError("empty SSH public key")
+    tokens = stripped.split(None, 2)
+    if len(tokens) < 2:
+        raise ValueError("malformed SSH public key")
+    key_type, key_body = tokens[0], tokens[1]
+    if (not key_type.startswith(KEY_TYPE_PREFIXES)
+            or KEY_TYPE_RE.fullmatch(key_type) is None
+            or KEY_BODY_RE.fullmatch(key_body) is None):
+        raise ValueError("unsupported or malformed SSH public key")
+    fingerprint = _fingerprint_pubkey(stripped)
+    comment = tokens[2].replace("\t", " ") if len(tokens) > 2 else ""
+    return {
+        "line": stripped,
+        "type": key_type,
+        "body": key_body,
+        "fingerprint": fingerprint,
+        "comment": comment,
+    }
+
+
+def _read_user_keys_raw(user):
+    if not valid_user(user):
+        raise ValueError(f"invalid SSH user: {user!r}")
+    try:
+        if not all(map(trusted_dir, (BASE.parent, BASE, KEYS))):
+            raise RuntimeError(f"unsafe SSH key directories under {BASE}")
+    except FileNotFoundError:
+        return None
+    try:
+        fd = os.open(KEYS / user, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(fd, "rb") as source:
+        if not owned(os.fstat(fd), stat.S_ISREG, 0o022):
+            raise RuntimeError(f"unsafe SSH authorized_keys file: {KEYS / user}")
+        return source.read().decode("utf-8", errors="replace")
+
+
+def _write_user_keys_atomic(user, lines):
+    target = KEYS / user
+    if os.path.lexists(target):
+        info = target.lstat()
+        if not owned(info, stat.S_ISREG, 0o022):
+            raise RuntimeError(f"unsafe SSH authorized_keys file: {target}")
+    if not lines:
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{user}.", dir=KEYS)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            payload = "".join(line + "\n" for line in lines).encode("utf-8")
+            out.write(payload)
+            out.flush()
+            os.fsync(out.fileno())
+        os.chmod(tmp_name, 0o644)
+        os.replace(tmp_name, target)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def keys_list(user):
+    raw = _read_user_keys_raw(user)
+    if raw is None:
+        return []
+    entries = []
+    for raw_line in raw.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        try:
+            parsed = _parse_pubkey_line(stripped, allow_tab=True)
+        except (ValueError, subprocess.SubprocessError):
+            continue
+        entries.append(parsed)
+    return entries
+
+
+def keys_add(user, raw_input):
+    if not valid_user(user):
+        raise ValueError(f"invalid SSH user: {user!r}")
+    if raw_input.endswith("\r\n"):
+        raw_input = raw_input[:-2]
+    elif raw_input.endswith(("\n", "\r")):
+        raw_input = raw_input[:-1]
+    if "\n" in raw_input or "\r" in raw_input:
+        raise ValueError("multiple lines are not allowed when adding an SSH key")
+    parsed = _parse_pubkey_line(raw_input)
+    ensure_dirs()
+    existing = keys_list(user)
+    for entry in existing:
+        if entry["type"] == parsed["type"] and entry["body"] == parsed["body"]:
+            return entry["fingerprint"]
+    lines = [entry["line"] for entry in existing]
+    lines.append(parsed["line"])
+    _write_user_keys_atomic(user, lines)
+    return parsed["fingerprint"]
+
+
+def keys_remove(user, index):
+    if not valid_user(user):
+        raise ValueError(f"invalid SSH user: {user!r}")
+    if not isinstance(index, int) or index < 1:
+        raise ValueError("SSH key index must be a positive integer")
+    ensure_dirs()
+    existing = keys_list(user)
+    if index > len(existing):
+        raise ValueError(f"SSH key index out of range: {index}")
+    remaining = [entry["line"] for i, entry in enumerate(existing, start=1) if i != index]
+    _write_user_keys_atomic(user, remaining)
+
+
+def host_key_fingerprint():
+    try:
+        if not all(map(trusted_dir, (BASE.parent, BASE))):
+            raise RuntimeError(f"unsafe SSH configuration directories under {BASE}")
+        info = HOST_KEY.lstat()
+    except FileNotFoundError:
+        return ""
+    if not owned(info, stat.S_ISREG, 0o177):
+        raise RuntimeError(f"unsafe SSH host key: {HOST_KEY}")
+    pub = checked("ssh-keygen", "-y", "-f", str(HOST_KEY),
+                  stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE, text=True).stdout.strip()
+    return _fingerprint_pubkey(pub)
+
+
+def host_key_regen(notify=True):
+    ensure_dirs()
+    if os.path.lexists(HOST_KEY) and not stat.S_ISREG(HOST_KEY.lstat().st_mode):
+        raise RuntimeError(f"unsafe SSH host key path: {HOST_KEY}")
+    with tempfile.TemporaryDirectory(prefix=".key-", dir=BASE) as staging:
+        private = Path(staging) / HOST_KEY.name
+        checked("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(private),
+                stdin=subprocess.DEVNULL)
+        os.chmod(private, 0o600)
+        info = private.lstat()
+        if not owned(info, stat.S_ISREG, 0o177):
+            raise RuntimeError(f"ssh-keygen created an unsafe host key: {private}")
+        os.replace(private, HOST_KEY)
+    try:
+        HOST_PUBLIC_KEY.unlink()
+    except FileNotFoundError:
+        pass
+    fp = host_key_fingerprint()
+    if notify:
+        signal_reload()
+    return fp
+
+
+def _pid_is_supervisor(pid):
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return False
+    args = [part.decode("utf-8", errors="replace") for part in cmdline.split(b"\0") if part]
+    if not args:
+        return False
+    return (any(os.path.basename(arg) == os.path.basename(CLIENT) for arg in args)
+            and "--serve" in args)
+
+
+def signal_reload():
+    try:
+        if not owned(RUN.lstat(), stat.S_ISDIR, 0o077):
+            return False
+        fd = os.open(PIDFILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return False
+    try:
+        with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as f:
+            if not owned(os.fstat(f.fileno()), stat.S_ISREG, 0o177):
+                return False
+            raw = f.read().strip()
+    except OSError:
+        return False
+    if not (raw.isascii() and raw.isdecimal()):
+        return False
+    pid = int(raw)
+    if pid <= 1 or not _pid_is_supervisor(pid):
+        return False
+    try:
+        os.kill(pid, signal.SIGHUP)
+        return True
+    except ProcessLookupError:
+        return False
+
+
 def authorized_keys(user, uid):
     # OpenSSH runs this as nobody. Only regular local accounts, and only the
     # explicitly enrolled file; never fall back to a user's own authorized_keys.
-    if (not user or user.startswith(".") or "/" in user or user == "root"
-            or not uid.isdecimal() or not 1000 <= int(uid) <= 60000):
+    if (not valid_user(user) or not (uid.isascii() and uid.isdecimal())
+            or not 1000 <= int(uid) <= 60000):
         return
     try:
         if not all(map(trusted_dir, (BASE.parent, BASE, KEYS))):
@@ -102,63 +367,155 @@ def checked(*argv, **kwargs):
     return subprocess.run(argv, check=True, timeout=5, **kwargs)
 
 
-def addresses():
+def iface_driver(ifname):
+    drv = Path(f"/sys/class/net/{ifname}/device/driver")
+    try:
+        return os.path.basename(os.path.realpath(drv)) if drv.exists() else ""
+    except OSError:
+        return ""
+
+
+def addresses(listen_mode="tailscale"):
     # Dump all links so a normal missing device is not confused with an ip
     # failure. Do not infer our addresses from the host routing table or DNS.
     links = json.loads(checked("ip", "-j", "address", "show", stdout=subprocess.PIPE).stdout)
     result = set()
     for link in links:
-        if link["ifname"] != DEVICE or "UP" not in link["flags"]:
+        ifname = link.get("ifname", "")
+        if not ifname or IFNAME_RE.fullmatch(ifname) is None or "UP" not in link.get("flags", ()):
             continue
+        is_tailscale = ifname == DEVICE
+        if not is_tailscale:
+            if listen_mode != "lan":
+                continue
+            if ifname in EXCLUDED_LAN_IFACES or iface_driver(ifname) == "thunderbolt-net":
+                continue
         for info in link.get("addr_info", ()):
             if info.get("scope") != "global" or any(
                 info.get(flag) or flag in info.get("flags", ())
                 for flag in ("tentative", "dadfailed")
             ):
                 continue
-            addr = ipaddress.ip_address(info["local"])
-            if any(addr in prefix for prefix in PREFIXES):
-                result.add(addr)
-    return tuple(sorted(result, key=lambda addr: (addr.version, int(addr))))
+            try:
+                addr = ipaddress.ip_address(info["local"])
+            except (KeyError, ValueError):
+                continue
+            if is_tailscale:
+                if any(addr in prefix for prefix in PREFIXES):
+                    result.add((ifname, addr))
+            else:
+                if (not addr.is_loopback and not addr.is_multicast
+                        and not addr.is_link_local and not addr.is_unspecified):
+                    result.add((ifname, addr))
+    return tuple(sorted(result, key=lambda item: (item[0], item[1].version, int(item[1]))))
 
 
-def firewall(bound=()):
+def _check_port(port):
+    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+        raise ValueError(f"invalid SSH port: {port!r}")
+
+
+def firewall_rules(bound=(), port=PORT):
+    _check_port(port)
     # Linux is a weak host: even an exact ListenAddress can be reached via
     # another interface. Reject there (including lo) before sshd starts. A
     # separate table survives network-client's atomic rebuild of its own table.
     text = f"destroy table inet {TABLE}\n"
     if bound:
         rules = []
-        for addr in bound:
+        for ifname, addr in bound:
+            if IFNAME_RE.fullmatch(ifname) is None:
+                raise ValueError(f"unsafe interface name: {ifname!r}")
             family = "ip" if addr.version == 4 else "ip6"
-            rules.append(f'  iifname != "{DEVICE}" {family} daddr {addr} tcp dport {PORT} drop\n')
+            rules.append(f'  iifname != "{ifname}" {family} daddr {addr} tcp dport {port} drop\n')
         text += (f"table inet {TABLE} {{\n chain input {{\n"
                  "  type filter hook input priority filter; policy accept;\n"
                  + "".join(rules) + " }\n}\n")
-    checked("nft", "-f", "-", input=text, text=True)
+    return text
 
 
-def ssh_config(bound):
+def filter_sync_rules(bound=(), port=PORT):
+    _check_port(port)
+    lines = [
+        f"flush set inet {FILTER_TABLE} ssh_lan_v4\n",
+        f"flush set inet {FILTER_TABLE} ssh_lan_v6\n",
+    ]
+    v4 = []
+    v6 = []
+    for ifname, addr in bound:
+        if ifname == DEVICE:
+            continue
+        if IFNAME_RE.fullmatch(ifname) is None:
+            raise ValueError(f"unsafe interface name: {ifname!r}")
+        elem = f'"{ifname}" . {addr} . {port}'
+        if addr.version == 4:
+            v4.append(elem)
+        else:
+            v6.append(elem)
+    if v4:
+        lines.append(f"add element inet {FILTER_TABLE} ssh_lan_v4 {{ {', '.join(v4)} }}\n")
+    if v6:
+        lines.append(f"add element inet {FILTER_TABLE} ssh_lan_v6 {{ {', '.join(v6)} }}\n")
+    return "".join(lines)
+
+
+def _filter_sets_exist():
+    for name in ("ssh_lan_v4", "ssh_lan_v6"):
+        proc = subprocess.run(("nft", "list", "set", "inet", FILTER_TABLE, name),
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              timeout=5, check=False)
+        if proc.returncode != 0:
+            return False
+    return True
+
+
+def firewall(bound=(), port=PORT):
+    checked("nft", "-f", "-", input=firewall_rules(bound, port), text=True)
+    if _filter_sets_exist():
+        checked("nft", "-f", "-", input=filter_sync_rules(bound, port), text=True)
+
+
+def ssh_config(bound, port=PORT, password_auth=False):
     if not bound:
-        raise ValueError("refusing to configure OpenSSH without a tailnet address")
-    lines = "".join(f"ListenAddress {a if a.version == 4 else f'[{a}]'}:{PORT}\n" for a in bound)
-    return lines + f"""Port {PORT}
+        raise ValueError("refusing to configure OpenSSH without a listen address")
+    _check_port(port)
+    seen = set()
+    listen_lines = []
+    for _ifname, addr in bound:
+        if addr in seen:
+            continue
+        seen.add(addr)
+        host = str(addr) if addr.version == 4 else f"[{addr}]"
+        listen_lines.append(f"ListenAddress {host}:{port}\n")
+    if password_auth:
+        auth_block = (
+            "UsePAM yes\n"
+            "PasswordAuthentication yes\n"
+        )
+    else:
+        auth_block = (
+            "UsePAM no\n"
+            "PasswordAuthentication no\n"
+            "AuthenticationMethods publickey\n"
+        )
+    return "".join(listen_lines) + f"""Port {port}
 HostKey {HOST_KEY}
 PidFile none
-UsePAM no
 PermitRootLogin no
-PasswordAuthentication no
-KbdInteractiveAuthentication no
+{auth_block}KbdInteractiveAuthentication no
 PermitEmptyPasswords no
 PubkeyAuthentication yes
-AuthenticationMethods publickey
 HostbasedAuthentication no
 GSSAPIAuthentication no
 AuthorizedKeysFile none
 AuthorizedKeysCommand {CLIENT} --authorized-keys %u %U
 AuthorizedKeysCommandUser nobody
 StrictModes yes
-DisableForwarding yes
+AllowTcpForwarding local
+AllowStreamLocalForwarding no
+AllowAgentForwarding no
+GatewayPorts no
+X11Forwarding no
 PermitTunnel no
 PermitUserRC no
 PermitUserEnvironment no
@@ -196,6 +553,39 @@ def identity(path):
         return None
 
 
+def _file_sig(path):
+    try:
+        info = path.stat()
+        return info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size
+    except FileNotFoundError:
+        return None
+
+
+def _write_pidfile():
+    fd, tmp_name = tempfile.mkstemp(prefix=".pid.", dir=RUN)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            os.fchmod(out.fileno(), 0o600)
+            out.write(f"{os.getpid()}\n")
+        os.replace(tmp_name, PIDFILE)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _drain_pipe(fd):
+    while True:
+        try:
+            data = os.read(fd, 4096)
+            if not data:
+                return
+        except BlockingIOError:
+            return
+
+
 def serve():
     net_id = identity(NS)
     resolv_id = identity(RESOLVER)
@@ -216,45 +606,66 @@ def serve():
 
 
 def supervise(net_id, resolv_id):
+    global reloading
     GROUP.mkdir(exist_ok=True)
     drain(None)  # An interrupted supervisor may have left old sessions behind.
     firewall()
     server = None
     pidfd = None
+    _write_pidfile()
     try:
         ensure_host_key()
         # This mount namespace has inherited the real host cgroup filesystem;
         # unlike ip netns exec, we never remount sysfs. The resolver bind does
         # not propagate to the host and follows openresolv's in-place writes.
         checked("mount", "--bind", str(RESOLVER), "/etc/resolv.conf")
-        bound = ()
+        active = None
+        last_rc_sig = None
+        last_host_key_id = None
+        sync_fw = False
         with open_netlink() as events:
             # Subscribe before the first snapshot, to avoid missing late addresses.
             pending = True
-            log(f"waiting for tailnet addresses on {DEVICE}")
+            log(f"waiting for listen addresses ({DEVICE})")
             while not stopping and net_id == identity(NS) and resolv_id == identity(RESOLVER):
                 if pending:
-                    current = addresses()
-                    if current != bound:
+                    reloading = False
+                    last_rc_sig = _file_sig(RC)
+                    listen_mode, port, password_auth = read_rc()
+                    current_bound = addresses(listen_mode)
+                    last_host_key_id = identity(HOST_KEY)
+                    desired = (current_bound, port, password_auth, last_host_key_id)
+                    if desired != active:
                         if server is not None:
                             drain(server)
                             os.close(pidfd)
                             pidfd = server = None
-                        firewall(current)
-                        bound = current
-                        if bound and not stopping:
-                            CONFIG.write_text(ssh_config(bound))
+                        firewall(current_bound, port)
+                        active = desired
+                        if current_bound and not stopping:
+                            ensure_host_key()
+                            last_host_key_id = identity(HOST_KEY)
+                            active = (current_bound, port, password_auth, last_host_key_id)
+                            CONFIG.write_text(ssh_config(current_bound, port=port, password_auth=password_auth))
                             checked(SSHD, "-t", "-f", str(CONFIG))
                             server = subprocess.Popen((SSHD, "-D", "-e", "-f", str(CONFIG)),
                                                       preexec_fn=attach)
                             pidfd = os.pidfd_open(server.pid)
                         else:
                             CONFIG.unlink(missing_ok=True)
+                    elif sync_fw:
+                        firewall(current_bound, port)
                     pending = False
+                    sync_fw = False
                 ready, _, _ = select.select([wake_read, events] + ([] if pidfd is None else [pidfd]),
                                              [], [], 10)
                 if wake_read in ready:
-                    break
+                    _drain_pipe(wake_read)
+                    if stopping:
+                        break
+                    if reloading:
+                        pending = True
+                        sync_fw = True
                 if pidfd is not None and pidfd in ready:
                     raise RuntimeError(f"OpenSSH listener exited ({server.wait()})")
                 if events in ready:
@@ -264,12 +675,17 @@ def supervise(net_id, resolv_id):
                         if exc.errno != errno.ENOBUFS:
                             raise
                     pending = True  # Reconcile after a notification or queue overflow.
+                if not ready:
+                    # Reconcile rc.conf and host key changes periodically without idle spawns.
+                    if _file_sig(RC) != last_rc_sig or identity(HOST_KEY) != last_host_key_id:
+                        pending = True
     finally:
         if pidfd is not None:
             os.close(pidfd)
         drain(server)
         firewall()
         CONFIG.unlink(missing_ok=True)
+        PIDFILE.unlink(missing_ok=True)
         GROUP.rmdir()
 
 
@@ -280,6 +696,7 @@ def open_netlink():
 
 
 stopping = False
+reloading = False
 
 
 def stop(_signum, _frame):
@@ -287,13 +704,47 @@ def stop(_signum, _frame):
     stopping = True
 
 
+def reload_handler(_signum, _frame):
+    global reloading
+    reloading = True
+
+
 def main(argv):
     if len(argv) == 3 and argv[0] == "--authorized-keys":
         authorized_keys(argv[1], argv[2])
         return 0
-    if os.geteuid() != 0 or argv not in ([], ["--serve"]):
-        raise RuntimeError("run as root from process 1's service_tailnet_ssh")
+    if len(argv) == 2 and argv[0] == "--keys-list":
+        for idx, entry in enumerate(keys_list(argv[1]), start=1):
+            print(f"{idx}\t{entry['type']}\t{entry['fingerprint']}\t{entry['comment']}")
+        return 0
+    if len(argv) == 1 and argv[0] == "--host-key-fingerprint":
+        fp = host_key_fingerprint()
+        if fp:
+            print(fp)
+        return 0
+    if os.geteuid() != 0:
+        raise RuntimeError("this operation requires root privileges")
     os.umask(0o077)
+    if len(argv) == 2 and argv[0] == "--keys-add":
+        raw_key = sys.stdin.read(65537)
+        if len(raw_key) > 65536:
+            raise ValueError("SSH public key input is too large")
+        fp = keys_add(argv[1], raw_key)
+        print(fp)
+        return 0
+    if len(argv) == 3 and argv[0] == "--keys-remove":
+        if not (argv[2].isascii() and argv[2].isdecimal()):
+            raise ValueError(f"invalid SSH key index: {argv[2]!r}")
+        keys_remove(argv[1], int(argv[2]))
+        return 0
+    if len(argv) == 1 and argv[0] == "--host-key-regen":
+        print(host_key_regen())
+        return 0
+    if len(argv) == 1 and argv[0] == "--reload":
+        signal_reload()
+        return 0
+    if argv not in ([], ["--serve"]):
+        raise RuntimeError("run as root from process 1's service_tailnet_ssh")
     if not argv:
         # Do not start anything on the host while the network service is late.
         while not NS.exists() or not RESOLVER.is_file():
@@ -305,6 +756,7 @@ def main(argv):
     signal.set_wakeup_fd(wake_write)
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, stop)
+    signal.signal(signal.SIGHUP, reload_handler)
     serve()
     return 0
 

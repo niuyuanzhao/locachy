@@ -40,7 +40,7 @@ static void test_raw_keyboard(xkb_mod_mask_t shift)
     const uint32_t press = WL_KEYBOARD_KEY_STATE_PRESSED, release = WL_KEYBOARD_KEY_STATE_RELEASED;
     keyboard_enter(NULL, NULL, 40, NULL, NULL);
     keyboard_modifiers(NULL, NULL, 41, 0, 0, 0, 0);
-    base_raw_enable(1);
+    base_raw_enable(BASE_RAW_SHARED);
 
     keyboard_key(NULL, NULL, 42, 0, KEY_LEFTSHIFT, press);
     assert(keys_modifiers() == 0);
@@ -99,8 +99,60 @@ static void test_raw_keyboard(xkb_mod_mask_t shift)
     assert(wl_backend_next_key() == 'A' && keys_modifiers() == 0);
     keyboard_leave(NULL, NULL, 64, NULL);
     assert(next_raw().state == 3);
-    base_raw_enable(0);
     puts("PASS raw lock bits follow compositor masks without changing local modifiers");
+
+    /* Shared mode marks Super+Space as BASE_RAW_LOCAL; exclusive mode forwards
+     * Super+Space and every other global binding without BASE_RAW_LOCAL or
+     * translated local actions. */
+    xkb_mod_index_t logo = xkb_keymap_mod_get_index(w.keymap, XKB_MOD_NAME_LOGO);
+    assert(logo < 32);
+    keyboard_enter(NULL, NULL, 65, NULL, NULL);
+    keyboard_modifiers(NULL, NULL, 66, 0, 0, 0, 0);
+    base_raw_enable(BASE_RAW_SHARED);
+    keyboard_key(NULL, NULL, 67, 0, KEY_LEFTMETA, press);
+    assert(!next_raw().flags);
+    keyboard_modifiers(NULL, NULL, 68, 1u << logo, 0, 0, 0);
+    keyboard_key(NULL, NULL, 69, 0, KEY_SPACE, press);
+    struct base_raw_key space = next_raw();
+    assert(space.code == KEY_SPACE && space.state == 1 && (space.flags & BASE_RAW_LOCAL));
+    assert(wl_backend_next_key() == ' ');
+    keyboard_key(NULL, NULL, 70, 0, KEY_SPACE, release);
+    assert(next_raw().flags & BASE_RAW_LOCAL);
+    keyboard_key(NULL, NULL, 71, 0, KEY_LEFTMETA, release);
+    assert(!next_raw().flags);
+    keyboard_modifiers(NULL, NULL, 72, 0, 0, 0, 0);
+
+    base_raw_enable(BASE_RAW_EXCLUSIVE);
+    keyboard_key(NULL, NULL, 73, 0, KEY_LEFTMETA, press);
+    assert(!next_raw().flags);
+    keyboard_modifiers(NULL, NULL, 74, 1u << logo, 0, 0, 0);
+    keyboard_key(NULL, NULL, 75, 0, KEY_SPACE, press);
+    space = next_raw();
+    assert(space.code == KEY_SPACE && space.state == 1 && space.keysym == XKB_KEY_space &&
+           space.modifiers == KEYS_META && !(space.flags & BASE_RAW_LOCAL));
+    assert(wl_backend_next_key() == 0);
+    keyboard_key(NULL, NULL, 76, 0, KEY_SPACE, release);
+    space = next_raw();
+    assert(space.code == KEY_SPACE && space.state == 0 && !(space.flags & BASE_RAW_LOCAL));
+    keyboard_key(NULL, NULL, 77, 0, KEY_L, press);
+    struct base_raw_key lockk = next_raw();
+    assert(lockk.code == KEY_L && lockk.state == 1 && lockk.modifiers == KEYS_META && !(lockk.flags & BASE_RAW_LOCAL));
+    assert(wl_backend_next_key() == 0);
+    keyboard_key(NULL, NULL, 78, 0, KEY_L, release);
+    assert(next_raw().code == KEY_L);
+    keyboard_key(NULL, NULL, 79, 0, KEY_LEFTMETA, release);
+    assert(next_raw().code == KEY_LEFTMETA);
+    keyboard_modifiers(NULL, NULL, 80, 0, 0, 0, 0);
+    keyboard_key(NULL, NULL, 81, 0, KEY_VOLUMEUP, press);
+    struct base_raw_key vol = next_raw();
+    assert(vol.code == KEY_VOLUMEUP && vol.state == 1 && !(vol.flags & BASE_RAW_LOCAL));
+    keyboard_key(NULL, NULL, 82, 0, KEY_VOLUMEUP, release);
+    assert(next_raw().code == KEY_VOLUMEUP);
+    assert(wl_backend_next_key() == 0 && !base_raw_pending());
+    keyboard_leave(NULL, NULL, 83, NULL);
+    assert(next_raw().state == 3);
+    base_raw_enable(BASE_RAW_OFF);
+    puts("PASS exclusive Wayland raw mode forwards Super+Space, Lock and media keys without BASE_RAW_LOCAL");
 }
 
 int main(void)

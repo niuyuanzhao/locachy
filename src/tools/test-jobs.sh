@@ -21,7 +21,8 @@ src=$(cd "$(dirname "$0")/.." && pwd)
 run=/run/test-jobs
 t=$run/t
 defs=(-DJOBS_DIR="\"$t/jobs\"" -DJOBS_CGROUP="\"$t/cgroup\"" -DJOBS_PROC="\"$t/proc\"" -DJOBS_BIN="\"$t/bin\""
-      -DJOBS_LIB="\"$t/lib\"" -DJOBS_UNTRUSTED_KEYS="\"$t/untrusted-keys\"" -DJOBS_STOP_GRACE=2
+      -DJOBS_LIB="\"$t/lib\"" -DBATTERY_MODEL_CMD="\"$t/bin/locachy-battery-model\""
+      -DJOBS_UNTRUSTED_KEYS="\"$t/untrusted-keys\"" -DJOBS_STOP_GRACE=2
       -DJOBS_PKG_LOCK="\"$t/pkg.lock\"" -DJOBS_CONTAINERS="\"$t/containers\"" -DJOBS_TEST_DRAIN_ANY)
 cc=(gcc -O2 -g -Wall -Wextra -Werror -D_GNU_SOURCE -I"$src/base/include" -I"$src/tools" "${defs[@]}")
 "${cc[@]}" "$src/progs/locachy-jobs.c" -o "$out/locachy-jobs" || exit 1
@@ -45,7 +46,7 @@ for i in $(seq 1 150); do
     echo "populated 0" >"$t/cgroup/job-$i/cgroup.events"
 done
 install -m 755 "$src/tools/test-jobs-tool.sh" "$run/tool"
-for p in locachy-pkg locachy-repos locachy-boot locachy-tpm locachy-app locachy-firmware locachy-security locachy-winmaint locachy-winiso locachy-gpu-unlock locachy-gpu-power locachy-storage; do ln -s "$run/tool" "$t/bin/$p"; done
+for p in locachy-pkg locachy-repos locachy-boot locachy-tpm locachy-app locachy-firmware locachy-security locachy-winmaint locachy-winiso locachy-gpu-unlock locachy-gpu-power locachy-storage locachy-battery-model; do ln -s "$run/tool" "$t/bin/$p"; done
 ln -s "$run/tool" "$t/lib/network-client"
 install -m 755 "$server" "$run/locachy-jobs"
 install -m 755 "$client" "$run/test-jobs"
@@ -115,6 +116,9 @@ check "65 arguments are refused" refuse pkg-apply $(seq -f c%g 65)
 check "a BIOS attribute that starts with - is refused" refuse bios-set -Boot 1
 check "a BIOS attribute with a space is refused" refuse bios-set "Boot Order" 1
 check "a BIOS value with a newline is refused" refuse bios-set Boot.Order "$(printf "a\nb")"
+check "graphics MUX rejects unknown modes" refuse gpu-graphics-mux auto
+check "graphics MUX rejects extra arguments" refuse gpu-graphics-mux hybrid --force
+check "discrete GPU rejects a PCI path" refuse gpu-graphics-dgpu /sys/bus/pci/devices
 check "a security switch takes on or off" refuse security-policy set login-skip maybe
 check "a security lock mode takes low or high" refuse security-policy set lock-mode on
 check "an unknown security key is refused" refuse security-policy set root on
@@ -133,6 +137,8 @@ check "an SPI write with every option is taken" accept spi-write ch341a_spi "$ro
 check "an SPI backup into a folder is taken" accept spi-backup "linux_spi:dev=/dev/spidev0.0" "$t/files"
 check "the boot image is taken" accept boot
 check "a BIOS setting is taken, its value may start with -" accept bios-set Boot.Order -1
+check "direct NVIDIA MUX is taken" accept gpu-graphics-mux discrete
+check "discrete GPU disable is taken" accept gpu-graphics-dgpu off
 check "a security switch is taken" accept security-policy set login-skip off
 check "the auto-lock security switch is taken" accept security-policy set auto-lock off
 check "a security lock mode is taken" accept security-policy set lock-mode high
@@ -278,6 +284,19 @@ check "storage-remove ran locachy-storage remove" grep -q "locachy-storage remov
 check "storage-attach ran locachy-storage create --mode attach" grep -q "locachy-storage create --mode attach --name bulk --dev /dev/nvme1n1p1 --role shared \[9\]" "$t/calls"
 check "storage-format ran locachy-storage create --mode format" grep -q "locachy-storage create --mode format --name scratch --dev /dev/nvme2n1 --fs btrfs --role compute --encrypt luks \[13\]" "$t/calls"
 check "storage-array ran locachy-storage create --mode array" grep -q "locachy-storage create --mode array --name pool0 --devs /dev/nvme1n1,/dev/nvme2n1 --raid raid1 --role shared --encrypt none \[13\]" "$t/calls"
+# Adaptive charging model kinds: no arguments, outside pkg.lock.
+check "battery-model-fetch refuses unexpected arguments" refuse battery-model-fetch extra
+check "battery-model-fetch refuses options" refuse battery-model-fetch --force
+check "battery-model-remove refuses unexpected arguments" refuse battery-model-remove extra
+bmf=$(id_of "$(J submit battery-model-fetch)")
+check "battery-model-fetch is accepted" test -n "$bmf"
+check "battery-model-fetch finishes" wait_state "$bmf" done
+bmr=$(id_of "$(J submit battery-model-remove)")
+check "battery-model-remove is accepted" test -n "$bmr"
+check "battery-model-remove finishes" wait_state "$bmr" done
+check "battery-model-fetch ran locachy-battery-model fetch" grep -q "locachy-battery-model fetch \[1\]" "$t/calls"
+check "battery-model-remove ran locachy-battery-model remove" grep -q "locachy-battery-model remove \[1\]" "$t/calls"
+check "battery-model jobs do not hold the package domain" sh -c "[ -f \"$t/domains\" ] && ! grep -qx \"$bmf\" \"$t/domains\" && ! grep -qx \"$bmr\" \"$t/domains\""
 # The service keeps its own files to root (umask 077); the files a step
 # writes (mirror lists, pacman.conf, rc.conf) are read by others too.
 check "every step runs with umask 022, not the umask of the service" \

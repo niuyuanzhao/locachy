@@ -30,15 +30,17 @@ enum extdisplay_ipc_op {
     EXTDISPLAY_IPC_FRAME_ACK,  /* frame done; width: retired slot + 1 (1..3), 0, or EXTDISPLAY_DMABUF_RELEASE_ALL */
     EXTDISPLAY_IPC_CANCEL,     /* cancel to the peer now, answered by CANCELLED once written */
     EXTDISPLAY_IPC_DMABUF_OFF, /* frontend cannot import dma-bufs: send sealed memfd */
-    EXTDISPLAY_IPC_REFRESH,    /* re-export the last dma-buf frame after VT/lease restore */
+    EXTDISPLAY_IPC_REFRESH,          /* re-export the last dma-buf frame after VT/lease restore */
+    EXTDISPLAY_IPC_CAPS_LOCK_TOGGLE, /* frontend to worker; no payload */
     /* worker to frontend */
-    EXTDISPLAY_IPC_READY = 16, /* width: decoders (1 H.264, 2 HEVC, 4 HW H.264, 8 HW HEVC420, 16 HW HEVC444) */
-    EXTDISPLAY_IPC_ACTIVE,     /* streamConfig accepted, decoder open; width: negotiated EXTDISPLAY_INPUT_* */
-    EXTDISPLAY_IPC_FRAME,      /* width, height, bytes; one memfd */
+    EXTDISPLAY_IPC_READY = 16,       /* width: decoders (1 H.264, 2 HEVC, 4 HW H.264, 8 HW HEVC420, 16 HW HEVC444) */
+    EXTDISPLAY_IPC_ACTIVE,           /* streamConfig accepted, decoder open; width: negotiated EXTDISPLAY_INPUT_* */
+    EXTDISPLAY_IPC_FRAME,            /* width, height, bytes; one memfd */
     EXTDISPLAY_IPC_UNAVAILABLE,
     EXTDISPLAY_IPC_FAILED,
-    EXTDISPLAY_IPC_CANCELLED,  /* the cancel is in the transport */
-    EXTDISPLAY_IPC_DMABUF,     /* width, height, text=extdisplay_dmabuf; 1..4 fds, or 0 fds for cached slot */
+    EXTDISPLAY_IPC_CANCELLED,        /* the cancel is in the transport */
+    EXTDISPLAY_IPC_DMABUF,           /* width, height, text=extdisplay_dmabuf; 1..4 fds, or 0 fds for cached slot */
+    EXTDISPLAY_IPC_CAPS_LOCK_STATE,  /* worker to frontend; width: absolute boolean (0 or 1), no fd */
 };
 #define EXTDISPLAY_DMABUF_MAX_PLANES 4u
 #define EXTDISPLAY_DMABUF_SLOTS 3u

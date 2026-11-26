@@ -593,7 +593,20 @@ static void seat_control_message(int ctl, char *msg, int len, int *fds, int n, i
         return;
     }
     for (int i = 0; i < n; i++) close(fds[i]);
-    if (n || len >= CONTROL_MAX - 1 || msg[len - 1] == '\0' || strcmp(msg, "desktop-wait") != 0) return;
+    if (n || len >= CONTROL_MAX - 1 || msg[len - 1] == '\0') return;
+    if (strcmp(msg, "caps") == 0) {
+        char *fields[3];
+        if (control_fields(msg, len, fields, 3) != 2 ||
+            (strcmp(fields[1], "0") != 0 && strcmp(fields[1], "1") != 0)) return;
+        int on = fields[1][0] == '1';
+        lent_locks = (lent_locks & KEYS_LOCK_NUM) | (on ? KEYS_LOCK_CAPS : 0);
+        if (bar_keys >= 0) {
+            const char *const fwd[] = { "caps", fields[1], NULL };
+            if (control_send_fields(bar_keys, fwd) < 0) bar_link_lost(ctl);
+        }
+        return;
+    }
+    if (strcmp(msg, "desktop-wait") != 0) return;
 
     char *fields[3];
     uint64_t generation;
@@ -1003,6 +1016,67 @@ static const char *labwc_fallback_rc(void)
     return labwc_fallback_from("/etc/locachy/labwc/rc.xml", "/run/locachy/labwc-rc.fallback.xml");
 }
 
+static pid_t start_compositor(char **argv, const char *sock_path, const char *drm_devices)
+{
+    pid_t pid = fork();
+    if (pid != 0) return pid;
+
+    /* Use the same key table as the direct programs, or the rc.conf layout. */
+    static const char *const xkb[][2] = { { "layout", "XKB_DEFAULT_LAYOUT" }, { "model", "XKB_DEFAULT_MODEL" },
+                                          { "variant", "XKB_DEFAULT_VARIANT" }, { "options", "XKB_DEFAULT_OPTIONS" } };
+    if (keys_layout_name("layout")) {
+        for (size_t i = 0; i < sizeof xkb / sizeof xkb[0]; i++) {
+            const char *value = keys_layout_name(xkb[i][0]);
+            if (value) setenv(xkb[i][1], value, 1);
+        }
+    } else {
+        char kmap[32] = "";
+        rc_read(on_rc_keymap, kmap);
+        if (kmap[0]) setenv("XKB_DEFAULT_LAYOUT", kmap, 1);
+    }
+    setenv("LIBSEAT_BACKEND", "seatd", 1);
+    setenv("SEATD_SOCK", sock_path, 1);
+    if (drm_devices[0]) setenv("WLR_DRM_DEVICES", drm_devices, 1);
+    if (is_labwc) {
+        /* Its Xwayland's display is labwc's to choose (DISPLAY), none other. */
+        unsetenv("DISPLAY");
+        unsetenv("XAUTHORITY");
+        const char *rc = access(LABWC_RC, R_OK) == 0 ? LABWC_RC : labwc_fallback_rc();
+        execl(argv[0], argv[0], "-C", "/etc/locachy/labwc", "-c", rc, (char *)NULL);
+    } else {
+        execvp(argv[0], argv);
+    }
+    dprintf(2, "seat: cannot run %s: %s\n", argv[0], strerror(errno));
+    _exit(127);
+}
+
+static void start_labwc_clients(int ctl, pid_t *bar_pid, pid_t *control_pid)
+{
+    int pair[2] = { -1, -1 }, requests[2] = { -1, -1 };
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, pair) < 0) {
+        say("seat: no keyboard socket for locachy-bar: %s", strerror(errno));
+    }
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, requests) < 0) {
+        say("seat: no window request socket for labwc-control: %s", strerror(errno));
+    }
+    *control_pid = start_client("/usr/local/lib/locachy/labwc-control", requests[1], "LOCACHY_SEAT_REQUESTS");
+    if (requests[1] >= 0) close(requests[1]);
+    window_requests = requests[0];
+    *bar_pid = start_client("/usr/local/bin/locachy-bar", pair[1], "LOCACHY_BAR_KEYS");
+    if (pair[1] >= 0) close(pair[1]);
+    bar_keys = pair[0];
+    if (*bar_pid < 0 || bar_keys < 0) bar_link_lost(ctl);
+    send_keyboards(ctl); /* those of the first take */
+    desktop_wait_replay(ctl);
+}
+
+static int compositor_pidfd(pid_t pid)
+{
+    int fd = (int)syscall(SYS_pidfd_open, pid, 0);
+    if (fd >= 0) fcntl(fd, F_SETFD, FD_CLOEXEC);
+    return fd;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -1043,7 +1117,9 @@ int main(int argc, char **argv)
 
     describe_devices();
     seat_load_display_card();
-    char selected_drm[64] = "";
+    char selected_drm[128] = "";
+    int hybrid = 0;
+    is_labwc = strcmp(argv[1], "/usr/bin/labwc") == 0;
     if (seat_display_card[0] && strcmp(seat_display_card, "auto") != 0) {
         if (screen_select_card_path(seat_display_card, selected_drm, sizeof selected_drm) == 0 &&
             access(selected_drm, F_OK) == 0) {
@@ -1051,6 +1127,16 @@ int main(int argc, char **argv)
         } else {
             say("seat: display_card=%s matched no DRM card; falling back to auto", seat_display_card);
             selected_drm[0] = '\0';
+        }
+    } else if (is_labwc && !getenv("WLR_DRM_DEVICES") && !getenv("WLR_RENDER_DRM_DEVICE") && !getenv("WLR_BACKENDS")) {
+        struct screen_hybrid_route route;
+        if (screen_hybrid_route(&route)) {
+            /* wlroots 0.20: first usable backend becomes primary and its
+             * device is the renderer default. Keep both KMS devices, never
+             * filter the seat and never force an independent render node. */
+            snprintf(selected_drm, sizeof selected_drm, "%s:%s", route.panel_card, route.nvidia_card);
+            hybrid = 1;
+            say("seat: hybrid DRM order %s", selected_drm);
         }
     }
 
@@ -1067,7 +1153,6 @@ int main(int argc, char **argv)
     }
     chmod(sock_path, 0600);
 
-    is_labwc = strcmp(argv[1], "/usr/bin/labwc") == 0;
     if (is_labwc) {
         /* Left over when the last session was killed: never offer them. */
         unlink("/run/user/0/locachy-0");
@@ -1076,65 +1161,21 @@ int main(int argc, char **argv)
         unlink(X11_RECORD);
     }
 
-    pid_t comp_pid = fork();
-    if (comp_pid == 0) {
-        /* The layout of the key table (keytable: rc.conf's keymap, through
-         * systemd's kbd-model-map, as localectl pairs them), as the direct
-         * programs type; without a table, rc.conf's keymap as a layout name. */
-        static const char *const xkb[][2] = { { "layout", "XKB_DEFAULT_LAYOUT" }, { "model", "XKB_DEFAULT_MODEL" },
-                                              { "variant", "XKB_DEFAULT_VARIANT" }, { "options", "XKB_DEFAULT_OPTIONS" } };
-        if (keys_layout_name("layout")) {
-            for (size_t i = 0; i < sizeof xkb / sizeof xkb[0]; i++) {
-                const char *value = keys_layout_name(xkb[i][0]);
-                if (value) setenv(xkb[i][1], value, 1);
-            }
-        } else {
-            char kmap[32] = "";
-            rc_read(on_rc_keymap, kmap);
-            if (kmap[0]) {
-                setenv("XKB_DEFAULT_LAYOUT", kmap, 1);
-            }
-        }
-        setenv("LIBSEAT_BACKEND", "seatd", 1);
-        setenv("SEATD_SOCK", sock_path, 1);
-        if (selected_drm[0]) {
-            setenv("WLR_DRM_DEVICES", selected_drm, 1);
-        }
-        if (is_labwc) {
-            /* Its Xwayland's display is labwc's to choose (DISPLAY), none other. */
-            unsetenv("DISPLAY");
-            unsetenv("XAUTHORITY");
-            /* settings --apply (above) wrote the configuration with rc.conf's values. */
-            const char *rc = access(LABWC_RC, R_OK) == 0 ? LABWC_RC : labwc_fallback_rc();
-            execl(argv[1], argv[1], "-C", "/etc/locachy/labwc", "-c", rc, (char *)NULL);
-        } else {
-            execvp(argv[1], argv + 1);
-        }
-        dprintf(2, "seat: cannot run %s: %s\n", argv[1], strerror(errno));
-        _exit(127);
+    pid_t comp_pid = start_compositor(argv + 1, sock_path, selected_drm);
+    if (comp_pid < 0) {
+        say("seat: cannot start %s: %m", argv[1]);
+        close(lfd);
+        unlink(sock_path);
+        return 1;
     }
 
-    int display_ready_sent = 0;
+    int display_ready_sent = 0, clients_started = 0;
     double display_started = uptime();
     pid_t bar_pid = -1, control_pid = -1;
     window_requests = -1; /* private link to labwc-control */
-    if (is_labwc) {
-        int pair[2] = { -1, -1 }, requests[2] = { -1, -1 };
-        if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, pair) < 0) {
-            say("seat: no keyboard socket for locachy-bar: %s", strerror(errno));
-        }
-        if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, requests) < 0) {
-            say("seat: no window request socket for labwc-control: %s", strerror(errno));
-        }
-        control_pid = start_client("/usr/local/lib/locachy/labwc-control", requests[1], "LOCACHY_SEAT_REQUESTS");
-        if (requests[1] >= 0) close(requests[1]);
-        window_requests = requests[0];
-        bar_pid = start_client("/usr/local/bin/locachy-bar", pair[1], "LOCACHY_BAR_KEYS");
-        if (pair[1] >= 0) close(pair[1]);
-        bar_keys = pair[0];
-        if (bar_pid < 0 || bar_keys < 0) bar_link_lost(ctl);
-        send_keyboards(ctl); /* those of the first take */
-        desktop_wait_replay(ctl);
+    if (is_labwc && !hybrid) {
+        start_labwc_clients(ctl, &bar_pid, &control_pid);
+        clients_started = 1;
     }
 
     int cfd = -1;
@@ -1142,8 +1183,7 @@ int main(int argc, char **argv)
     /* The compositor's end wakes the loop (pidfd_open(2): readable once it
      * has exited); so do the files display-ready waits for, appearing in
      * the runtime directory (inotify(7)), until it is sent. */
-    int comp_fd = comp_pid > 0 ? (int)syscall(SYS_pidfd_open, comp_pid, 0) : -1;
-    if (comp_fd >= 0) fcntl(comp_fd, F_SETFD, FD_CLOEXEC);
+    int comp_fd = compositor_pidfd(comp_pid);
     int ready_fd = -1;
     if (is_labwc) {
         ready_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
@@ -1154,6 +1194,10 @@ int main(int argc, char **argv)
     }
 
     for (;;) {
+        if (is_labwc && !clients_started && access("/run/user/0/wayland-0", F_OK) == 0) {
+            start_labwc_clients(ctl, &bar_pid, &control_pid);
+            clients_started = 1;
+        }
         if (is_labwc && !display_ready_sent && ctl >= 0 &&
             access("/run/user/0/wayland-0", F_OK) == 0 &&
             access("/run/user/0/locachy-0", F_OK) == 0 &&
@@ -1367,6 +1411,28 @@ int main(int argc, char **argv)
         if (died > 0) {
             st = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
             say("seat: %s (pid %d) exited with status %d", argv[1], (int)died, st);
+            /* Backend/renderer/allocator creation can fail even with valid
+             * device paths. Retry once with discovery before publishing the
+             * display or giving any clients a connection to the first one. */
+            if (hybrid && st != 0 && !clients_started && active_seat) {
+                hybrid = 0;
+                if (cfd >= 0) close(cfd);
+                cfd = -1;
+                for (int i = 0; i < ndevs; i++) close(devs[i].fd);
+                ndevs = 0;
+                if (comp_fd >= 0) close(comp_fd);
+                comp_fd = -1;
+                unlink("/run/user/0/wayland-0");
+                unlink("/run/user/0/wayland-0.lock");
+                say("seat: hybrid startup failed; retrying with wlroots discovery");
+                comp_pid = start_compositor(argv + 1, sock_path, "");
+                if (comp_pid > 0) {
+                    comp_fd = compositor_pidfd(comp_pid);
+                    display_started = uptime();
+                    continue;
+                }
+                say("seat: cannot retry %s: %m", argv[1]);
+            }
             break;
         }
     }

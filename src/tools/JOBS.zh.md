@@ -61,6 +61,8 @@
 | `gpu-unlock-remove` | `locachy-gpu-unlock remove` | 无 |
 | `gpu-power-apply` | `locachy-gpu-power apply` | 无，或 `auto`、`full`、`ctgp`、`stock`、`eco` 之一 |
 | `gpu-powerd` | `locachy-gpu-power nvidia-powerd` | `on` 或 `off` |
+| `gpu-graphics-mux` | `locachy-gpu-graphics set-mux` | `hybrid` 或 `discrete` |
+| `gpu-graphics-dgpu` | `locachy-gpu-graphics set-dgpu` | `on` 或 `off` |
 | `storage-mount`、`storage-umount`、`storage-remove` | `locachy-storage mount` / `umount` / `remove` | 一个卷名（`^[a-z0-9][a-z0-9._-]{0,31}$`） |
 | `storage-set-role` | `locachy-storage set-role` | 一个卷名与一个角色（`data`、`shared` 或 `compute`） |
 | `storage-set-auto` | `locachy-storage set-auto` | 一个卷名与 `on` 或 `off` |
@@ -68,8 +70,12 @@
 | `storage-attach` | `locachy-storage create --mode attach` | `--name NAME --dev /dev/DEV --role data\|shared\|compute`（参数顺序固定；`DEV` 为 1–64 字符 `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`） |
 | `storage-format` | `locachy-storage create --mode format` | `--name NAME --dev /dev/DEV --fs ext4\|btrfs --role data\|shared\|compute --encrypt none\|luks`（参数顺序固定） |
 | `storage-array` | `locachy-storage create --mode array` | `--name NAME --devs /dev/D1,/dev/D2,... --raid single\|raid0\|raid1\|raid10 --role data\|shared\|compute --encrypt none\|luks`（参数顺序固定；2–16 个逗号分隔的 `/dev/DEV` 路径） |
+| `battery-model-fetch` | `locachy-battery-model fetch` | 无 |
+| `battery-model-remove` | `locachy-battery-model remove` | 无 |
 
-**软件包域。** 软件包（`pkg-*`）、内核（`kernel-*`）、软件源（`repos-*`）类任务、`locachy-source`，以及所有会改动宿主软件包、内核模块或启动镜像的类型（`boot`、`locachy-rebuild`、`tpm-*`、`secure-boot`、`security-policy`、`winmaint-create`、`winmaint-reclaim`、`gpu-unlock-install`、`gpu-unlock-set`、`gpu-unlock-remove`、`gpu-power-apply` 与 `app-host-build`），都像 `locachy-pkg` 一样持有 `/run/locachy/pkg.lock`：任务的 runner 在任务 cgroup 内、第一个步骤之前取得它（`flock` 等待：外部 pacman 的 guard 持有它时，先等 pacman 完成），每个步骤都继承这个描述符，因此工具能发现域已被持有，不会再次打开。工具自己的锁都在域之内取得（先域，再安全锁，再配置）；工具自己从不取 `pkg.lock`。固件类任务不持有它（`locachy-firmware` 持有 `firmware.lock`），`tb-sync`、`winmaint-boot-once`、`winmaint-boot-default`、`winmaint-heal-boot`、`winiso-fetch`、`gpu-powerd`、所有 `storage-*` 类型，以及非宿主容器类任务（`app-build`、`app-rollback`、`app-remove`：`app-build` 不在宿主上安装任何软件包）也不持有它。`app-host-build` 持有它，因为 `host="1"` 的应用会把其软件包安装到宿主上，这是宿主软件包事务。任务种类由应用自身的 host 设置决定，由服务在受理时读取并检查（不符则拒绝：“the app's host setting changed; open it again”，即应用的 host 设置已改变，请重新打开）；任何客户端参数都不能决定它。路径是固定的：没有任何运行时设置能改变它，runner 会从每个步骤的环境中移除 `LOCACHY_PKG_LOCK`（测试构建只在编译时改动路径）。
+**软件包域。** 软件包（`pkg-*`）、内核（`kernel-*`）、软件源（`repos-*`）类任务、`locachy-source`，以及所有会改动宿主软件包、内核模块或启动镜像的类型（`boot`、`locachy-rebuild`、`tpm-*`、`secure-boot`、`security-policy`、`winmaint-create`、`winmaint-reclaim`、`gpu-unlock-install`、`gpu-unlock-set`、`gpu-unlock-remove`、`gpu-power-apply` 与 `app-host-build`），都像 `locachy-pkg` 一样持有 `/run/locachy/pkg.lock`：任务的 runner 在任务 cgroup 内、第一个步骤之前取得它（`flock` 等待：外部 pacman 的 guard 持有它时，先等 pacman 完成），每个步骤都继承这个描述符，因此工具能发现域已被持有，不会再次打开。工具自己的锁都在域之内取得（先域，再安全锁，再配置）；工具自己从不取 `pkg.lock`。固件类任务不持有它（`locachy-firmware` 持有 `firmware.lock`），`tb-sync`、`winmaint-boot-once`、`winmaint-boot-default`、`winmaint-heal-boot`、`winiso-fetch`、`gpu-powerd`、所有 `storage-*` 类型、`battery-model-fetch`、`battery-model-remove`，以及非宿主容器类任务（`app-build`、`app-rollback`、`app-remove`：`app-build` 不在宿主上安装任何软件包）也不持有它。`app-host-build` 持有它，因为 `host="1"` 的应用会把其软件包安装到宿主上，这是宿主软件包事务。任务种类由应用自身的 host 设置决定，由服务在受理时读取并检查（不符则拒绝：“the app's host setting changed; open it again”，即应用的 host 设置已改变，请重新打开）；任何客户端参数都不能决定它。路径是固定的：没有任何运行时设置能改变它，runner 会从每个步骤的环境中移除 `LOCACHY_PKG_LOCK`（测试构建只在编译时改动路径）。
+
+**自适应充电模型。** `battery-model-fetch` 与 `battery-model-remove` 不接受参数（任何参数都会被拒绝），也不持有软件包域。`battery-model-fetch` 以 root 运行 `/usr/local/bin/locachy-battery-model fetch`：该工具在 `locachy-net` 网络命名空间内，以 `nobody` 身份（uid 与 gid 均为 65534，清除附加组，设置 `no_new_privs`）通过 HTTPS 用 `curl` 下载两个固定文件；只有当每个文件的字节数与 SHA-512 都与固定清单一致后，才把它安装到 `/var/lib/locachy/battery/model/`。`battery-model-remove` 以 root 运行 `/usr/local/bin/locachy-battery-model remove`，不建立任何网络连接。
 
 **镜像。** 参数是镜像文件的类型（`fw-local-install`、`spi-verify`、`spi-write`）会在任务被接受时复制该文件，而不是在运行时：不跟随链接打开，必须是最多 64 MiB 的普通文件，复制到 `/run/locachy/jobs/ID.input`（root 所有，0600），其大小和 SHA-256 记录在 `ID.state` 中；任务参数随后改为指向这份副本。无法复制时请求被拒绝。runner 在第一个步骤之前按记录的大小和摘要核对副本，副本被改动的任务不会运行。任务结束或从队列移除时副本被删除。运行的内容就是接受时所指定的内容，无论之后用户的文件如何变化。
 

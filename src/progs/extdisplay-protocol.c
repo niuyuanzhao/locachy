@@ -111,14 +111,11 @@ static int video(const unsigned char *s, size_t n, size_t *offset)
     return 0;
 }
 
-static int welcome(struct json_object *o, uint32_t *caps_out)
+static int input_capabilities(struct json_object *o, uint32_t *caps_out)
 {
-    int64_t version;
-    struct json_object *v;
-    if (integer(o, "locachy", EXTDISPLAY_SENDER_VERSION, EXTDISPLAY_SENDER_VERSION, &version) < 0 ||
-        !(v = field(o, "extended", json_type_boolean)) || !json_object_get_boolean(v)) return -1;
     /* The whole input set, or no session: no mirror or touch-only fallback. */
-    if (!(v = field(o, "input", json_type_array)) || json_object_array_length(v) > 16) return -1;
+    struct json_object *v = field(o, "input", json_type_array);
+    if (!v || json_object_array_length(v) > 16) return -1;
     static const char *const needed[] = { "key", "button", "cancel", "pointer", "scroll" };
     unsigned mask = 0;
     uint32_t extra = 0;
@@ -132,10 +129,45 @@ static int welcome(struct json_object *o, uint32_t *caps_out)
         }
         if (strcmp(c, EXTDISPLAY_CAP_TOUCH_NAME) == 0) extra |= EXTDISPLAY_INPUT_TOUCH;
         else if (strcmp(c, EXTDISPLAY_CAP_TABLET_NAME) == 0) extra |= EXTDISPLAY_INPUT_TABLET;
+        else if (strcmp(c, EXTDISPLAY_CAP_CAPS_LOCK_NAME) == 0) extra |= EXTDISPLAY_INPUT_CAPS_LOCK;
     }
     if (mask != 31) return -1;
-    if (caps_out) *caps_out = extra;
+    *caps_out = extra;
     return 0;
+}
+
+static int welcome(struct json_object *o, uint32_t *caps_out)
+{
+    int64_t version;
+    struct json_object *v;
+    if (integer(o, "locachy", EXTDISPLAY_SENDER_VERSION, EXTDISPLAY_SENDER_VERSION, &version) < 0 ||
+        !(v = field(o, "extended", json_type_boolean)) || !json_object_get_boolean(v)) return -1;
+    return input_capabilities(o, caps_out);
+}
+
+static struct json_object *parse_json(const char *s, size_t n)
+{
+    struct json_tokener *tok = json_tokener_new_ex(16);
+    if (!tok) return NULL;
+    json_tokener_set_flags(tok, JSON_TOKENER_STRICT | JSON_TOKENER_VALIDATE_UTF8);
+    struct json_object *o = json_tokener_parse_ex(tok, s, (int)n);
+    int ok = o && json_tokener_get_error(tok) == json_tokener_success &&
+             json_tokener_get_parse_end(tok) == n && json_object_is_type(o, json_type_object);
+    json_tokener_free(tok);
+    if (ok) return o;
+    json_object_put(o);
+    return NULL;
+}
+
+int extdisplay_hello_input_caps(const char *s, size_t n, uint32_t *caps)
+{
+    if (!s || !n || n > EXTDISPLAY_CONTROL_MAX || s[0] != '{' || memchr(s, 0, n)) return -1;
+    struct json_object *o = parse_json(s, n);
+    if (!o) return -1;
+    struct json_object *type = field(o, "type", json_type_string);
+    int r = type && strcmp(json_object_get_string(type), "hello") == 0 ? input_capabilities(o, caps) : -1;
+    json_object_put(o);
+    return r;
 }
 
 int extdisplay_control_parse(const unsigned char *s, size_t n, struct extdisplay_control *out)
@@ -148,17 +180,8 @@ int extdisplay_control_parse(const unsigned char *s, size_t n, struct extdisplay
         out->type = EXTDISPLAY_MSG_VIDEO;
         return 0;
     }
-    struct json_tokener *tok = json_tokener_new_ex(16);
-    if (!tok) return -1;
-    json_tokener_set_flags(tok, JSON_TOKENER_STRICT | JSON_TOKENER_VALIDATE_UTF8);
-    struct json_object *o = json_tokener_parse_ex(tok, (const char *)s, (int)n);
-    int ok = o && json_tokener_get_error(tok) == json_tokener_success &&
-             json_tokener_get_parse_end(tok) == n && json_object_is_type(o, json_type_object);
-    json_tokener_free(tok);
-    if (!ok) {
-        json_object_put(o);
-        return -1;
-    }
+    struct json_object *o = parse_json((const char *)s, n);
+    if (!o) return -1;
     int r = -1;
     struct json_object *v = field(o, "type", json_type_string);
     const char *t = v ? json_object_get_string(v) : NULL;
@@ -187,6 +210,13 @@ int extdisplay_control_parse(const unsigned char *s, size_t n, struct extdisplay
     } else if (strcmp(t, "ping") == 0 || strcmp(t, "pong") == 0) {
         out->type = strcmp(t, "ping") == 0 ? EXTDISPLAY_MSG_PING : EXTDISPLAY_MSG_PONG;
         if (json_object_object_get_ex(o, "t", NULL) && integer(o, "t", 0, INT64_MAX, &out->timestamp) < 0) goto done;
+    } else if (strcmp(t, "capsLockState") == 0) {
+        if (!(v = field(o, "caps", json_type_boolean)) || json_object_object_length(o) != 2) goto done;
+        out->caps_lock = json_object_get_boolean(v);
+        out->type = EXTDISPLAY_MSG_CAPS_LOCK_STATE;
+    } else if (strcmp(t, "capsLockToggle") == 0) {
+        if (json_object_object_length(o) != 1) goto done;
+        out->type = EXTDISPLAY_MSG_CAPS_LOCK_TOGGLE;
     } else if (strcmp(t, "closing") == 0) {
         out->type = EXTDISPLAY_MSG_CLOSING;
     }
@@ -288,10 +318,11 @@ int extdisplay_hello_full(char *s, size_t size, uint32_t w, uint32_t h, double s
         vpos += (size_t)added;
     }
     /* The five required inputs, then the optional ones this receiver can take. */
-    snprintf(input, sizeof input, ",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"%s%s",
+    snprintf(input, sizeof input, ",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"%s%s%s",
              "key", "button", "cancel", "pointer", "scroll",
              input_caps & EXTDISPLAY_INPUT_TOUCH ? ",\"" EXTDISPLAY_CAP_TOUCH_NAME "\"" : "",
-             input_caps & EXTDISPLAY_INPUT_TABLET ? ",\"" EXTDISPLAY_CAP_TABLET_NAME "\"" : "");
+             input_caps & EXTDISPLAY_INPUT_TABLET ? ",\"" EXTDISPLAY_CAP_TABLET_NAME "\"" : "",
+             input_caps & EXTDISPLAY_INPUT_CAPS_LOCK ? ",\"" EXTDISPLAY_CAP_CAPS_LOCK_NAME "\"" : "");
     return fits(snprintf(s, size,
         "{\"type\":\"hello\",\"pv\":3,\"locachy\":%d,\"device\":\"LOCachy\",\"extendedOnly\":true%s,"
         "\"pixelsWide\":%u,\"pixelsHigh\":%u,\"scale\":%.3f,"
@@ -320,6 +351,17 @@ int extdisplay_hello(char *s, size_t size, uint32_t w, uint32_t h, double scale,
     return extdisplay_hello_named(s, size, w, h, scale, h264, hevc, NULL, NULL);
 }
 
+
+int extdisplay_caps_lock_state_json(char *s, size_t size, int state)
+{
+    if (state != 0 && state != 1) return -1;
+    return fits(snprintf(s, size, "{\"type\":\"capsLockState\",\"caps\":%s}", state ? "true" : "false"), size);
+}
+
+int extdisplay_caps_lock_toggle_json(char *s, size_t size)
+{
+    return fits(snprintf(s, size, "{\"type\":\"capsLockToggle\"}"), size);
+}
 
 int extdisplay_key_json(char *s, size_t size, uint32_t device, uint32_t code, uint32_t sym, uint32_t mods,
                  uint32_t locks, int state)

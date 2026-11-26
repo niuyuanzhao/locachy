@@ -36,7 +36,7 @@ static int ipc = -1, active, outside_cancelled;
 static struct extdisplay_setup setup = { .fd = -1, .stream = -1 };
 static pid_t broker = -1;
 static int leaving, diagnostics;
-static struct extdisplay_auto auto_state = { .enabled = 1 };
+static struct extdisplay_auto auto_state;
 static uint32_t *frame;
 static size_t frame_bytes;
 static uint32_t frame_w, frame_h;
@@ -45,6 +45,7 @@ static int flip_ack_pending;
 static double flip_sent_at;
 static int scanning_slot = -1, pending_slot = -1;
 static uint32_t peer_input;
+static int caps_offered, caps_remote_state = -1;
 static struct extdisplay_touch_frame touch_frame;
 static int vx, vy, vw, vh, panel_w, panel_h;
 static char decode_mode[16] = "auto";
@@ -137,6 +138,32 @@ static int send_text(uint32_t op, const char *text, int n, int droppable)
 static int input_allowed(void)
 {
     return base_session_fd() >= 0 ? base_session_input_allowed() : control_fd() >= 0;
+}
+
+/* Process 1's lock state is authoritative. Managed sessions use the owner
+ * channel and direct-screen sessions use LOCACHY_CONTROL, both through
+ * base_session_caps(). Unmanaged sessions fail closed and omit capsLock. */
+static int caps_sync_available(void)
+{
+    return base_session_caps(-1) >= 0;
+}
+
+static int caps_authoritative(int desired)
+{
+    return base_session_caps(desired);
+}
+
+static int caps_toggle_ipc(void)
+{
+    struct extdisplay_ipc m = { .op = EXTDISPLAY_IPC_CAPS_LOCK_TOGGLE };
+    return ipc_send_reliable(&m, 250);
+}
+
+static int caps_reapply(void)
+{
+    if (caps_remote_state < 0 || !input_allowed()) return 0;
+    if (!(peer_input & EXTDISPLAY_INPUT_CAPS_LOCK) && !caps_offered) return 0;
+    return caps_authoritative(caps_remote_state) < 0 ? -1 : 0;
 }
 
 static int send_input(const char *text, int n, int droppable)
@@ -357,9 +384,8 @@ static int pointer_drain_input(int have_first)
     return 0;
 }
 
-/* Every key goes to the sender while the link is up, Super+Esc and Ctrl+Alt+F12
- * included: no key switches away or ends the program; the cable coming out
- * does. Only lock, volume, and brightness bindings stay local. */
+/* The live session captures the keyboard exclusively. All raw keys go to
+ * the sender; no local keyboard binding switches away or ends the link. */
 static int raw_input(void)
 {
     struct base_raw_key e;
@@ -368,13 +394,36 @@ static int raw_input(void)
             if (cancel() < 0) return -1;
             continue;
         }
+        /* Exclusive capture never sets BASE_RAW_LOCAL. A local binding here means
+         * the keyboard is not in remote mode, so it is not sent. */
         if (e.flags & BASE_RAW_LOCAL) {
             if (e.state == 1 && cancel() < 0) return -1;
             continue;
         }
-        if (!active) continue;
+        /* Once stop is set (SIGTERM from the lid path), nothing new is sent; the
+         * cancel at the end of session_run releases what the sender holds. */
+        if (!active || stop) continue;
+        /* In the negotiated mode Caps is a semantic lock owned by the peer.
+         * Suppress the physical press/release (and any stale local lock bits).
+         * A repeat never generates another toggle. */
+        if (e.keysym == 0xffe5 &&
+            (peer_input & EXTDISPLAY_INPUT_CAPS_LOCK)) {
+            if (!input_allowed()) continue;
+            if (e.state == 1) {
+                /* Keep local state on Mac's confirmed value until Mac replies. */
+                if (caps_remote_state >= 0) (void)caps_authoritative(caps_remote_state);
+                if (caps_toggle_ipc() < 0) return -1;
+            }
+            continue;
+        }
+        uint32_t mods = e.modifiers;
+        uint32_t locks = e.locks;
+        if (peer_input & EXTDISPLAY_INPUT_CAPS_LOCK) {
+            mods &= ~EXTDISPLAY_MOD_CAPS;
+            locks &= ~EXTDISPLAY_LOCK_CAPS;
+        }
         char text[256];
-        int n = extdisplay_key_json(text, sizeof text, e.device, e.code, e.keysym, e.modifiers, e.locks, (int)e.state);
+        int n = extdisplay_key_json(text, sizeof text, e.device, e.code, e.keysym, mods, locks, (int)e.state);
         if (n >= 0 && send_input(text, n, 0) < 0) return -1;
     }
     return 0;
@@ -413,8 +462,8 @@ static int release_remote(pid_t *worker, int *inhibited)
 {
     if (*inhibited) base_sleep_inhibit(0);
     *inhibited = 0;
-    base_raw_enable(0);
-    base_raw_enable(1);
+    /* Flush held keys and leave exclusive capture until input is allowed again. */
+    base_raw_enable(BASE_RAW_SHARED);
     while (pointer_next()) { }
     {
         struct pointer_raw_event discard;
@@ -456,6 +505,10 @@ static int release_remote(pid_t *worker, int *inhibited)
                 for (unsigned i = 0; i < nfds; i++) {
                     if (fds[i] >= 0) close(fds[i]);
                 }
+                if (m.op == EXTDISPLAY_IPC_CAPS_LOCK_STATE && m.width <= 1 &&
+                    (caps_offered || (peer_input & EXTDISPLAY_INPUT_CAPS_LOCK))) {
+                    caps_remote_state = (int)m.width;
+                }
                 if (m.op == EXTDISPLAY_IPC_FRAME || m.op == EXTDISPLAY_IPC_DMABUF) {
                     struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK };
                     if (m.op == EXTDISPLAY_IPC_DMABUF && m.length == sizeof(struct extdisplay_dmabuf)) {
@@ -485,8 +538,7 @@ static int release_remote(pid_t *worker, int *inhibited)
     outside_cancelled = 1;
     if (base_session_input_cancelled() != 0) return -1;
     if (base_session_input_allowed()) {
-        base_raw_enable(0);
-        base_raw_enable(2);
+        base_raw_enable(BASE_RAW_EXCLUSIVE);
         if (active && base_sleep_inhibit(1) == 0) *inhibited = 1;
     }
     return 0;
@@ -544,9 +596,12 @@ static int handle_worker(int *inhibited, double *started)
             vcaps & EXTDISPLAY_VCAP_HEVC420 ? " hevc420" : "",
             vcaps & EXTDISPLAY_VCAP_HEVC444 ? " hevc444" : "",
             vcaps & EXTDISPLAY_VCAP_HEVC ? " hevc" : "");
+        caps_offered = caps_sync_available();
+        caps_remote_state = -1;
+        uint32_t offer_input = EXTDISPLAY_INPUT_TOUCH | EXTDISPLAY_INPUT_TABLET |
+                               (caps_offered ? EXTDISPLAY_INPUT_CAPS_LOCK : 0u);
         int n = extdisplay_hello_full(hello, sizeof hello, (uint32_t)(w > 0 ? w : 1), (uint32_t)(h > 0 ? h : 1),
-                          scale >= 0.5 && scale <= 4 ? scale : 1.0, vcaps, host, model,
-                          EXTDISPLAY_INPUT_TOUCH | EXTDISPLAY_INPUT_TABLET);
+                          scale >= 0.5 && scale <= 4 ? scale : 1.0, vcaps, host, model, offer_input);
         if (send_text(EXTDISPLAY_IPC_HELLO, hello, n, 0) < 0) {
             say("extdisplay: hello send failed (%s)", strerror(errno));
             break;
@@ -555,7 +610,19 @@ static int handle_worker(int *inhibited, double *started)
     }
     case EXTDISPLAY_IPC_ACTIVE:
         active = 1;
-        peer_input = (uint32_t)m.width & (EXTDISPLAY_INPUT_TOUCH | EXTDISPLAY_INPUT_TABLET);
+        peer_input = (uint32_t)m.width & EXTDISPLAY_INPUT_ALL;
+        if (!(peer_input & EXTDISPLAY_INPUT_CAPS_LOCK)) {
+            caps_remote_state = -1;
+            keys_caps_owner(0);
+        } else {
+            keys_caps_owner(1);
+            if (caps_reapply() < 0) {
+                keys_caps_owner(0);
+                say("extdisplay: authoritative Caps Lock update refused");
+                set_state(N_("Disconnected"), N_("The authoritative Caps Lock state could not be updated."));
+                return -1;
+            }
+        }
         pointer_raw_direct(((peer_input & EXTDISPLAY_INPUT_TOUCH) ? POINTER_RAW_TOUCH : 0) |
                            ((peer_input & EXTDISPLAY_INPUT_TABLET) ? POINTER_RAW_TABLET : 0));
         screen_cursor(CURSOR_NONE);
@@ -571,6 +638,15 @@ static int handle_worker(int *inhibited, double *started)
         *started = uptime();
         set_state(N_("Active"), "");
         return 1;
+    case EXTDISPLAY_IPC_CAPS_LOCK_STATE:
+        if (m.width > 1 || (!caps_offered && !(peer_input & EXTDISPLAY_INPUT_CAPS_LOCK))) break;
+        caps_remote_state = (int)m.width;
+        if (caps_reapply() < 0) {
+            say("extdisplay: authoritative Caps Lock update refused");
+            set_state(N_("Disconnected"), N_("The authoritative Caps Lock state could not be updated."));
+            return -1;
+        }
+        return 0;
     case EXTDISPLAY_IPC_FRAME: {
         void *pixels = extdisplay_frame_map(fd, &m);
         close(fd);
@@ -759,7 +835,9 @@ static void session_run(int transport)
         return;
     }
     screen_cursor(CURSOR_NONE);
-    base_raw_enable(2);
+    /* Remote mode needs input allowed: a managed session that starts locked or
+     * frozen stays in shared mode until its owner releases it (release_remote). */
+    base_raw_enable(owner < 0 || base_session_input_allowed() ? BASE_RAW_EXCLUSIVE : BASE_RAW_SHARED);
     (void)base_session_hold(1);
     draw();
 
@@ -840,6 +918,11 @@ static void session_run(int transport)
                     break;
                 }
                 if (session_started && worker < 0) break;
+                if (base_session_input_allowed() && caps_reapply() < 0) {
+                    say("extdisplay: authoritative Caps Lock update refused");
+                    set_state(N_("Disconnected"), N_("The authoritative Caps Lock state could not be updated."));
+                    break;
+                }
                 if (!dmabuf_active) redraw = 1;
                 else if (base_session_input_allowed() && !flip_ack_pending && ipc >= 0) {
                     struct extdisplay_ipc ref = {
@@ -866,7 +949,7 @@ static void session_run(int transport)
             break;
         }
         if (key == K_SHOWN) {
-            if (cancel() < 0) {
+            if (cancel() < 0 || caps_reapply() < 0) {
                 say("extdisplay: input delivery failed (%s)", strerror(errno));
                 set_state(N_("Disconnected"), N_("Remote input could not be delivered."));
                 break;
@@ -891,12 +974,15 @@ static void session_run(int transport)
     active = 0;
     pointer_raw_direct(0);
     touch_frame.count = 0;
+    caps_offered = 0;
+    caps_remote_state = -1;
     peer_input = 0;
+    keys_caps_owner(0);
     flip_ack_pending = 0;
     scanning_slot = -1;
     pending_slot = -1;
     screen_cursor(CURSOR_ARROW);
-    base_raw_enable(1);
+    base_raw_enable(BASE_RAW_SHARED);
     (void)base_session_hold(0);
     if (inhibited) base_sleep_inhibit(0);
     end_worker(worker);
@@ -904,7 +990,7 @@ static void session_run(int transport)
     frame = NULL;
     frame_w = frame_h = 0;
     dmabuf_active = 0;
-    if (setup.state == EXTDISPLAY_SETUP_PAIRED) extdisplay_setup_cancel(&setup);
+    if (setup.state == EXTDISPLAY_SETUP_PAIRED && !stop && !leaving) extdisplay_setup_cancel(&setup);
 }
 
 static const char *setup_state_text(void)
@@ -912,7 +998,10 @@ static const char *setup_state_text(void)
     switch (setup.state) {
     case EXTDISPLAY_SETUP_IDLE: return N_("Idle");
     case EXTDISPLAY_SETUP_SCANNING: return N_("Scanning");
-    case EXTDISPLAY_SETUP_LIST: return setup.count ? N_("Ready to connect") : N_("Waiting for a Thunderbolt/USB4 network");
+    case EXTDISPLAY_SETUP_LIST:
+        if (auto_state.retry_at) return N_("Retrying cable setup");
+        if (setup.scan_error) return N_("Thunderbolt/USB4 scan failed");
+        return setup.count ? N_("Ready to connect") : N_("Waiting for a Thunderbolt/USB4 network");
     case EXTDISPLAY_SETUP_PAIRING:
         if (!strcmp(setup.progress, "carrier")) return N_("Waiting for the cable link");
         if (!strcmp(setup.progress, "address")) return N_("Preparing the link-local address");
@@ -945,9 +1034,11 @@ static void setup_draw(void)
         }
     }
     if (setup.count == 0) {
-        screen_text(1, 4, setup.state == EXTDISPLAY_SETUP_SCANNING ? _("Looking for a Thunderbolt/USB4 network...")
-                                                            : _("Waiting for a Thunderbolt/USB4 network."),
-                    DIM, BG);
+        const char *hint = setup.state == EXTDISPLAY_SETUP_SCANNING ? _("Looking for a Thunderbolt/USB4 network...") :
+                           auto_state.retry_at ? _("Retrying cable setup") :
+                           setup.scan_error ? _("No result from the scan. F5: scan again.") :
+                           _("Waiting for a Thunderbolt/USB4 network.");
+        screen_text(1, 4, hint, DIM, BG);
     }
     if (diagnostics && setup.count) {
         for (int i = 0; i < setup.count && i < 8; i++) {
@@ -1013,12 +1104,13 @@ static void setup_loop(void)
                 int stream = setup.stream;
                 setup.stream = -1;
                 session_run(stream);
+                if (stop || leaving) break;
                 /* After a session ends (sender restart or cable unplug), return
                  * to waiting and re-arm automatic pairing for the next link. */
                 extdisplay_auto_after_session(&auto_state, &setup);
                 redraw = 1;
             } else if (ev != EXTDISPLAY_SETUP_EV_NONE) {
-                extdisplay_auto_on_event(&auto_state, &setup, ev);
+                extdisplay_auto_on_event(&auto_state, &setup, ev, uptime());
                 redraw = 1;
             }
         }
@@ -1037,41 +1129,38 @@ static void setup_loop(void)
         } else if (key == K_F1 + 1) {
             diagnostics = !diagnostics;
             redraw = 1;
-        } else if (key == K_UP && auto_state.selected > 0) {
-            auto_state.enabled = 0;
-            auto_state.suppressed = 0;
+        } else if (key == K_UP && setup.state == EXTDISPLAY_SETUP_LIST && auto_state.selected > 0) {
+            extdisplay_auto_pause(&auto_state, 0);
             auto_state.selected--;
             auto_state.selection = setup.ifaces[auto_state.selected];
             redraw = 1;
-        } else if (key == K_DOWN && auto_state.selected + 1 < setup.count) {
-            auto_state.enabled = 0;
-            auto_state.suppressed = 0;
+        } else if (key == K_DOWN && setup.state == EXTDISPLAY_SETUP_LIST && auto_state.selected + 1 < setup.count) {
+            extdisplay_auto_pause(&auto_state, 0);
             auto_state.selected++;
             auto_state.selection = setup.ifaces[auto_state.selected];
             redraw = 1;
-        } else if (key == '\n' && setup.state == EXTDISPLAY_SETUP_LIST && setup.count > 0) {
+        } else if (key == '\n' && setup.state == EXTDISPLAY_SETUP_LIST && setup.count > 0 && !setup.changed) {
             setup.error[0] = setup.reason[0] = '\0';
-            auto_state.enabled = 0;
+            extdisplay_auto_pause(&auto_state, 0);
             auto_state.selection = setup.ifaces[auto_state.selected];
-            extdisplay_setup_pair(&setup, setup.ifaces[auto_state.selected].name);
+            extdisplay_setup_pair(&setup, auto_state.selection.name);
             redraw = 1;
         } else if (key == 27 && (setup.state == EXTDISPLAY_SETUP_PAIRING || setup.state == EXTDISPLAY_SETUP_WAITING)) {
-            auto_state.enabled = 0;
-            auto_state.suppressed = 1;
-            auto_state.suppressed_iface = auto_state.selection;
+            extdisplay_auto_pause(&auto_state, 1);
             extdisplay_setup_cancel(&setup);
             redraw = 1;
+        } else if (key == 27 && setup.state == EXTDISPLAY_SETUP_LIST && auto_state.retry_at) {
+            extdisplay_auto_pause(&auto_state, 1);
+            redraw = 1;
         } else if (key == K_F1 + 4 && (setup.state == EXTDISPLAY_SETUP_LIST || setup.state == EXTDISPLAY_SETUP_IDLE)) {
-            auto_state.enabled = 0;
-            auto_state.suppressed = 1;
-            auto_state.suppressed_iface = auto_state.selection;
+            extdisplay_auto_pause(&auto_state, 1);
             extdisplay_setup_scan(&setup);
             redraw = 1;
         }
-        if (!leaving && extdisplay_auto_step(&auto_state, &setup)) redraw = 1;
+        if (!leaving && extdisplay_auto_step(&auto_state, &setup, uptime())) redraw = 1;
         if (redraw) setup_draw();
     }
-    if (setup.state == EXTDISPLAY_SETUP_BROKEN) {
+    if (!stop && setup.state == EXTDISPLAY_SETUP_BROKEN) {
         setup_draw();
         for (;;) {
             int key = key_poll_timeout(-1, 250);
@@ -1109,7 +1198,7 @@ int main(int argc, char **argv)
     if (temp_card_env) unsetenv("LOCACHY_DRM_CARD");
     if (!opened) return 1;
     keys_open();
-    base_raw_enable(1);
+    base_raw_enable(BASE_RAW_SHARED);
     pointer_scroll_events(1);
     pointer_scroll_precision(1);
     base_session_fd();
@@ -1125,7 +1214,7 @@ int main(int argc, char **argv)
     setup_loop();
     if (setup.fd >= 0) close(setup.fd);
     extdisplay_setup_reap_broker(broker);
-    base_raw_enable(0);
+    base_raw_enable(BASE_RAW_OFF);
     pointer_scroll_events(0);
     pointer_scroll_precision(0);
     return 0;

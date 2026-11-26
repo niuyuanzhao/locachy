@@ -1315,12 +1315,17 @@ static void build_software(void)
     add_next(S_SOFTWARE);
 }
 
+static const char *machine_label(void)
+{
+    if (!nmachines) return "-";
+    return machines[c.machine].text[0] ? machines[c.machine].text : machines[c.machine].name;
+}
+
 static void build_system(void)
 {
     char line[160];
     add(E_TITLE, "%s", _("System"));
-    snprintf(line, sizeof line, "%s (%s)", machines[c.machine].name, machines[c.machine].text);
-    add_item(R_MACHINE, _("Machine profile"), choice(nmachines ? line : "-"));
+    add_item(R_MACHINE, _("Machine profile"), choice(machine_label()));
     add_item(R_LEVEL, _("Packages' CPU level"), choice(level_label(c.level)));
     add_item(R_CPU, _("Own builds for the CPU"), cpu_label());
     for (int i = 0; i < nrepos; i++) {
@@ -1470,7 +1475,7 @@ static void build_summary(int width)
     add_item(E_NOTE, _("Modules"), list);
     list_chosen(list, sizeof list, containers, c.container_on, ncontainers);
     add_item(E_NOTE, _("Programs"), list);
-    snprintf(line, sizeof line, _("%s; packages for %s; own builds for %s"), nmachines ? machines[c.machine].name : "-",
+    snprintf(line, sizeof line, _("%s; packages for %s; own builds for %s"), machine_label(),
              level_label(c.level), cpu_label());
     add_item(E_NOTE, _("System"), line);
     list[0] = '\0';
